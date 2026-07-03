@@ -10,6 +10,8 @@ import { buildFeed, FeedItem } from "./feed/renderers";
 
 interface Props {
   file: FileEntry | null;
+  files: FileEntry[];
+  onSelect: (file: FileEntry) => void;
   showSvc: boolean;
   lineFilter: string;
   onStatus: (status: string) => void;
@@ -18,11 +20,14 @@ interface Props {
   setFollow: (follow: boolean) => void;
 }
 
-export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, setFollow }: Props) {
+export function LogFeed({ file, files, onSelect, showSvc, lineFilter, onStatus, paused, follow, setFollow }: Props) {
   const tail = useLogTail(file, paused);
   const scroller = useRef<HTMLDivElement | null>(null);
 
-  const items = useMemo(() => (file ? buildFeed(file, tail.lines, showSvc, lineFilter.toLowerCase()) : []), [file, tail.lines, showSvc, lineFilter]);
+  const feed = useMemo(
+    () => (file ? buildFeed(file, tail.lines, showSvc, lineFilter.toLowerCase()) : { items: [], hiddenServiceCount: 0 }),
+    [file, tail.lines, showSvc, lineFilter],
+  );
 
   useEffect(() => {
     const time = tail.tickTime?.toLocaleTimeString("uk", { hour12: false }) ?? "";
@@ -33,7 +38,7 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
 
   useEffect(() => {
     if (follow && scroller.current) scroller.current.scrollTop = scroller.current.scrollHeight;
-  }, [items.length, follow]);
+  }, [feed.items.length, follow]);
 
   return (
     <div
@@ -50,12 +55,18 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
           <div className="mt-[20vh] text-center text-dim">Вибери лог зліва — стрічка оновлюється сама</div>
         ) : (
           <>
-            <TaskHeader file={file} />
-            {items.length ? (
-              items.slice(-2500).map((item, idx) => <FeedItem key={idx} item={item} />)
+            <TaskHeader file={file} files={files} onSelect={onSelect} />
+            {feed.items.length ? (
+              feed.items.slice(-2500).map((item, idx) => <FeedItem key={idx} item={item} />)
             ) : (
               <div className="mt-[20vh] text-center text-dim">
-                {tail.loading ? "Завантаження…" : tail.size === 0 ? "Ще без виводу — файл поки порожній" : "Порожньо (немає рядків для показу)"}
+                {tail.loading
+                  ? "Завантаження…"
+                  : tail.size === 0
+                    ? "Ще без виводу — файл поки порожній"
+                    : feed.hiddenServiceCount
+                      ? `Видимих повідомлень нема — лише службові записи (${feed.hiddenServiceCount}). Натисни «Службові»`
+                      : "Порожньо (немає рядків для показу)"}
               </div>
             )}
           </>

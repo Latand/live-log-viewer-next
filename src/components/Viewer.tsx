@@ -132,6 +132,8 @@ export function Viewer() {
         </div>
         <LogFeed
           file={selected}
+          files={files}
+          onSelect={selectFile}
           showSvc={showSvc}
           lineFilter={lineFilter}
           onStatus={setStatus}

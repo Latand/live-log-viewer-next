@@ -11,6 +11,7 @@ type Item =
   | { kind: "prose"; ts: unknown; text: string; engine: "codex" | "claude" }
   | { kind: "user"; ts: unknown; text: string }
   | { kind: "svc"; text: string }
+  | { kind: "note"; text: string }
   | { kind: "cmd"; id: string; call: Call }
   | { kind: "edit"; files: string }
   | { kind: "raw"; text: string; err: boolean };
@@ -64,6 +65,7 @@ function attach(call: Call | undefined, output: string, errFlag?: boolean) {
 export function buildFeed(file: FileEntry, lines: string[], showSvc: boolean, lineFilter: string) {
   const calls = new Map<string, Call>();
   const items: Item[] = [];
+  let hiddenServiceCount = 0;
   let lastProse = "";
   const addProse = (ts: unknown, text: string) => {
     if (!text.trim() || text === lastProse) return;
@@ -84,13 +86,22 @@ export function buildFeed(file: FileEntry, lines: string[], showSvc: boolean, li
   };
   const addSvc = (text: string) => {
     if (showSvc) items.push({ kind: "svc", text: text.slice(0, 300) });
+    else hiddenServiceCount += 1;
+  };
+  const addNote = (text: string) => {
+    items.push({ kind: "note", text });
   };
   const renderCodex = (obj: Record<string, unknown>) => {
     const p = rec(obj.payload);
     const ts = obj.timestamp;
+    if (obj.type === "session_meta") {
+      return addNote(`Сесія Codex створена · ${textPart(p.model)} · ${textPart(p.cwd)}`);
+    }
     if (obj.type === "event_msg") {
       if (p.type === "agent_message" && p.message) return addProse(ts, textPart(p.message));
       if (p.type === "user_message" && p.message) return items.push({ kind: "user", ts, text: textPart(p.message) });
+      if (p.type === "task_started") return addNote("Задача стартувала" + (ts ? " · " + hhmm(ts) : ""));
+      if (p.type === "task_complete") return addNote("Задачу завершено" + (ts ? " · " + hhmm(ts) : ""));
       return addSvc(textPart(p.type) || "event");
     }
     if (obj.type === "response_item") {
@@ -186,7 +197,7 @@ export function buildFeed(file: FileEntry, lines: string[], showSvc: boolean, li
       }
     } else renderPlain(line);
   }
-  return items;
+  return { items, hiddenServiceCount };
 }
 
 export function FeedItem({ item }: { item: Item }) {
@@ -240,5 +251,6 @@ export function FeedItem({ item }: { item: Item }) {
     );
   }
   if (item.kind === "svc") return <div className="my-1 text-[11.5px] text-dim">{item.text}</div>;
+  if (item.kind === "note") return <div className="my-2 text-[12.5px] text-dim">{item.text}</div>;
   return <div className={`my-0.5 text-[12.5px] ${item.err ? "text-err" : "text-[#555]"}`}>{item.text}</div>;
 }

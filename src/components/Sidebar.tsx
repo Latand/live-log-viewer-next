@@ -6,16 +6,15 @@ import type { ReactNode } from "react";
 import type { FileEntry } from "@/lib/types";
 
 import { FileRow } from "./FileRow";
+import {
+  buildFlatFiles,
+  buildTreeGroups,
+  type SidebarFilter,
+  type TechnicalGroup,
+  type TreeNode,
+} from "./sidebarModel";
 
 type OpenMap = Record<string, boolean>;
-
-interface Node {
-  file: FileEntry;
-  kids: Node[];
-  smt: number;
-  live: boolean;
-  count: number;
-}
 
 interface Props {
   files: FileEntry[];
@@ -36,14 +35,14 @@ function writeMap(key: string, value: OpenMap) {
   localStorage.setItem(key, JSON.stringify(value));
 }
 
-function containsPath(node: Node, pathname: string | null): boolean {
+function containsPath(node: TreeNode, pathname: string | null): boolean {
   return Boolean(pathname && (node.file.path === pathname || node.kids.some((kid) => containsPath(kid, pathname))));
 }
 
-function hiddenStats(node: Node): { count: number; live: boolean } {
+function hiddenStats(node: TreeNode): { count: number; live: boolean } {
   let count = 0;
   let live = false;
-  const walk = (cur: Node) => {
+  const walk = (cur: TreeNode) => {
     for (const kid of cur.kids) {
       count += 1;
       if (kid.live) live = true;
@@ -56,55 +55,33 @@ function hiddenStats(node: Node): { count: number; live: boolean } {
 
 export function Sidebar({ files, selected, onSelect }: Props) {
   const [query, setQuery] = useState("");
+  const [filter, setFilter] = useState<SidebarFilter>(() => {
+    if (typeof window === "undefined") return "all";
+    const raw = localStorage.getItem("llvFilter");
+    return raw === "conversations" || raw === "active" ? raw : "all";
+  });
   const [tree, setTree] = useState(() => (typeof window === "undefined" ? true : localStorage.getItem("llvTree") !== "0"));
   const [projOpen, setProjOpen] = useState<OpenMap>(() => readMap("llvProjOpen"));
   const [nodeOpen, setNodeOpenState] = useState<OpenMap>(() => readMap("llvNodeOpen"));
 
   const q = query.toLowerCase();
-  const shown = useMemo(
-    () =>
-      files.filter((file) =>
-        q ? (file.path + file.title + file.project + (file.model ?? "")).toLowerCase().includes(q) : true,
-      ),
-    [files, q],
-  );
-
-  const treeData = useMemo(() => {
-    const byPath = new Map<string, Node>();
-    for (const file of shown) byPath.set(file.path, { file, kids: [], smt: file.mtime, live: file.activity === "live", count: 1 });
-    const roots: Node[] = [];
-    for (const node of byPath.values()) {
-      const parent = node.file.parent ? byPath.get(node.file.parent) : null;
-      if (parent && parent !== node) parent.kids.push(node);
-      else roots.push(node);
-    }
-    const finish = (node: Node): Node => {
-      node.kids = node.kids.map(finish).sort((a, b) => b.smt - a.smt);
-      node.smt = Math.max(node.file.mtime, ...node.kids.map((kid) => kid.smt));
-      node.live = node.file.activity === "live" || node.kids.some((kid) => kid.live);
-      node.count = 1 + node.kids.reduce((sum, kid) => sum + kid.count, 0);
-      return node;
-    };
-    const groups = new Map<string, Node[]>();
-    for (const root of roots.map(finish)) {
-      const key = root.file.project || "інше";
-      groups.set(key, (groups.get(key) ?? []).concat(root));
-    }
-    return [...groups.entries()]
-      .map(([project, nodes]) => [project, nodes.sort((a, b) => b.smt - a.smt)] as const)
-      .sort((a, b) => a[0].localeCompare(b[0], "uk"));
-  }, [shown]);
+  const treeData = useMemo(() => buildTreeGroups(files, filter, q), [files, filter, q]);
+  const flat = useMemo(() => buildFlatFiles(files, filter, q), [files, filter, q]);
 
   const selectedPath = selected?.path ?? null;
   const activeSearch = q.length > 0;
 
-  const projectDefaultOpen = (nodes: Node[]) =>
-    activeSearch || nodes.some((node) => node.live || containsPath(node, selectedPath));
-  const projectIsOpen = (project: string, nodes: Node[]) =>
-    Object.hasOwn(projOpen, project) ? projOpen[project] : projectDefaultOpen(nodes);
-  const nodeDefaultOpen = (node: Node) => activeSearch || node.live || containsPath(node, selectedPath);
-  const nodeIsOpen = (node: Node) =>
+  const projectDefaultOpen = (nodes: TreeNode[], technical: TechnicalGroup | null) =>
+    activeSearch ||
+    nodes.some((node) => node.live || containsPath(node, selectedPath)) ||
+    Boolean(technical?.nodes.some((node) => node.live || containsPath(node, selectedPath)));
+  const projectIsOpen = (project: string, nodes: TreeNode[], technical: TechnicalGroup | null) =>
+    Object.hasOwn(projOpen, project) ? projOpen[project] : projectDefaultOpen(nodes, technical);
+  const nodeDefaultOpen = (node: TreeNode) => activeSearch || node.live || containsPath(node, selectedPath);
+  const nodeIsOpen = (node: TreeNode) =>
     Object.hasOwn(nodeOpen, node.file.path) ? nodeOpen[node.file.path] : nodeDefaultOpen(node);
+  const techIsOpen = (tech: TechnicalGroup) =>
+    Object.hasOwn(nodeOpen, tech.key) ? nodeOpen[tech.key] : activeSearch || tech.live || tech.nodes.some((node) => containsPath(node, selectedPath));
 
   const setProjectOpen = (project: string, open: boolean) => {
     setProjOpen((prev) => {
@@ -121,7 +98,12 @@ export function Sidebar({ files, selected, onSelect }: Props) {
     });
   };
 
-  const renderNode = (node: Node, depth: number): ReactNode[] => {
+  const setFilterChoice = (next: SidebarFilter) => {
+    setFilter(next);
+    localStorage.setItem("llvFilter", next);
+  };
+
+  const renderNode = (node: TreeNode, depth: number): ReactNode[] => {
     const hasChildren = node.kids.length > 0;
     const open = hasChildren ? nodeIsOpen(node) : false;
     const hidden = hasChildren && !open ? hiddenStats(node) : { count: 0, live: false };
@@ -143,8 +125,6 @@ export function Sidebar({ files, selected, onSelect }: Props) {
     return rows;
   };
 
-  const flat = shown.slice().sort((a, b) => b.mtime - a.mtime);
-
   return (
     <aside className="flex w-[340px] min-w-[270px] flex-col border-r border-line bg-panel">
       <header className="flex items-center gap-2.5 border-b border-line px-4 py-3 text-[15px] font-bold">
@@ -161,6 +141,21 @@ export function Sidebar({ files, selected, onSelect }: Props) {
           {tree ? "Дерево" : "Стрічка"}
         </button>
       </header>
+      <div className="mx-3 mt-3 flex overflow-hidden rounded-[10px] border border-line bg-bg p-0.5 text-[12px]">
+        {[
+          ["all", "Все"],
+          ["conversations", "Розмови"],
+          ["active", "Активні"],
+        ].map(([key, label]) => (
+          <button
+            key={key}
+            className={`flex-1 rounded-lg px-2 py-1 ${filter === key ? "bg-panel font-semibold text-accent shadow-card" : "text-dim"}`}
+            onClick={() => setFilterChoice(key as SidebarFilter)}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
       <input
         className="m-3 rounded-[10px] border border-line bg-bg px-3 py-2 text-[13px] outline-none"
         placeholder="Пошук…"
@@ -172,25 +167,36 @@ export function Sidebar({ files, selected, onSelect }: Props) {
           ? flat.map((file) => (
               <FileRow key={file.path} file={file} active={selected?.path === file.path} flat onSelect={onSelect} />
             ))
-          : treeData.map(([project, nodes]) => {
-              const open = projectIsOpen(project, nodes);
-              const total = nodes.reduce((sum, node) => sum + node.count, 0);
-              const live = nodes.reduce((sum, node) => sum + (node.live ? 1 : 0), 0);
+          : treeData.map((group) => {
+              const open = projectIsOpen(group.project, group.nodes, group.technical);
               return (
-                <section key={project}>
+                <section key={group.project}>
                   <button
                     className="flex w-full select-none items-center gap-1.5 rounded-lg px-2.5 pb-1 pt-3.5 text-left text-[11px] font-bold uppercase tracking-[.5px] text-dim hover:text-ink"
-                    onClick={() => setProjectOpen(project, !open)}
+                    onClick={() => setProjectOpen(group.project, !open)}
                   >
                     <span className="w-2.5 text-[9px]">{open ? "▼" : "▶"}</span>
-                    <span className="truncate">{project}</span>
+                    <span className="truncate">{group.project}</span>
                     <span className="ml-auto text-[10.5px] font-semibold normal-case tracking-normal">
-                      {live ? <span className="font-bold text-ok">{live} live</span> : null}
-                      {live ? " · " : ""}
-                      {open ? total : `+${total}`}
+                      {group.live ? <span className="font-bold text-ok">{group.live} live</span> : null}
+                      {group.live ? " · " : ""}
+                      {open ? group.total : `+${group.total}`}
                     </span>
                   </button>
-                  {open ? nodes.flatMap((node) => renderNode(node, 0)) : null}
+                  {open ? group.nodes.flatMap((node) => renderNode(node, 0)) : null}
+                  {open && group.technical ? (
+                    <section>
+                      <button
+                        className="mb-0.5 mt-1 flex w-full items-center gap-2 rounded-xl px-2.5 py-1.5 text-left text-[12px] font-semibold text-dim hover:bg-bg hover:text-ink"
+                        onClick={() => persistNodeOpen(group.technical!.key, !techIsOpen(group.technical!))}
+                      >
+                        <span className="w-2.5 text-[9px]">{techIsOpen(group.technical) ? "▼" : "▶"}</span>
+                        <span>⚙ Технічне ({group.technical.count})</span>
+                        <span className="ml-auto text-[10.5px]">{group.technical.live ? "● live" : ""}</span>
+                      </button>
+                      {techIsOpen(group.technical) ? group.technical.nodes.flatMap((node) => renderNode(node, 0)) : null}
+                    </section>
+                  ) : null}
                 </section>
               );
             })}
