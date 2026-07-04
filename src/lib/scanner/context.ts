@@ -5,9 +5,10 @@ import { numberValue, recordValue, stringValue } from "./json";
 
 const ctxCache = globalCache<[number, CtxUsage | null]>("ctx");
 
-/** Claude context windows. The map is deliberately tiny: Claude Code appends
-    "[1m]" to the model id when the session runs the 1M-token beta window,
-    every other model ships the standard 200k. */
+/** Claude context windows. The map is deliberately tiny: "[1m]"-suffixed
+    model ids and Fable run the 1M-token window, everything else ships the
+    standard 200k. Transcripts do not record the window, so a usage total that
+    exceeds the assumed window proves the session runs the larger one. */
 const CLAUDE_WINDOW = 200_000;
 const CLAUDE_WINDOW_1M = 1_000_000;
 
@@ -43,7 +44,9 @@ function claudeCtx(obj: Record<string, unknown>): CtxUsage | null {
     (numberValue(usage.input_tokens) ?? 0) +
     (numberValue(usage.cache_read_input_tokens) ?? 0) +
     (numberValue(usage.cache_creation_input_tokens) ?? 0);
-  return buildCtx(used, model?.includes("[1m]") ? CLAUDE_WINDOW_1M : CLAUDE_WINDOW);
+  let window = model?.includes("[1m]") || model?.includes("fable") ? CLAUDE_WINDOW_1M : CLAUDE_WINDOW;
+  if (used > window) window = CLAUDE_WINDOW_1M;
+  return buildCtx(used, window);
 }
 
 /**
