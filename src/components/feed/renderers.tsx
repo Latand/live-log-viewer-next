@@ -5,10 +5,25 @@ import type { ReactNode } from "react";
 
 import type { FileEntry } from "@/lib/types";
 
+import {
+  Ban,
+  Brain,
+  Check,
+  ChevronUp,
+  CircleCheck,
+  Command,
+  type GlyphName,
+  GlyphIcon,
+  Loader2,
+  Mail,
+  MessageCircle,
+  Sparkle,
+  X,
+} from "../icons";
 import { hhmm, ukPlural } from "../utils";
 import { Lightbox } from "./Lightbox";
 
-type Call = { cmd: string; display: string; output: string; status: "run" | "ok" | "err"; label: string; icon: string; open: boolean };
+type Call = { cmd: string; display: string; output: string; status: "run" | "ok" | "err"; label: string; icon: GlyphName; open: boolean };
 type ReviewSeverity = "Critical" | "High" | "Medium" | "Low" | "Info" | "P0" | "P1" | "P2" | "P3";
 type ReviewFinding = {
   severity: ReviewSeverity;
@@ -446,7 +461,7 @@ function displayCmd(cmd: string): string {
   return (prefix + body).slice(0, 160);
 }
 
-function newCmd(cmd: string, icon = "❯"): Call {
+function newCmd(cmd: string, icon: GlyphName = "shell"): Call {
   const redacted = redactSecrets(cmd);
   return { cmd: redacted, display: displayCmd(redacted), icon, output: "", status: "run", label: "виконується…", open: false };
 }
@@ -461,7 +476,7 @@ function attach(call: Call | undefined, output: string, errFlag?: boolean) {
     .trim();
   const isErr = errFlag === true || (code !== undefined && code !== "0");
   call.status = isErr ? "err" : "ok";
-  call.label = isErr ? "✗ " + (code && code !== "0" ? "exit " + code : "помилка") : "✓ ok";
+  call.label = isErr ? (code && code !== "0" ? "exit " + code : "помилка") : "ok";
   call.open ||= isErr;
   if (body) {
     const limit = isErr ? 60_000 : 12_000;
@@ -619,7 +634,7 @@ export function buildFeed(file: FileEntry, lines: string[], showSvc: boolean, li
     if (pushStructured(ts, text, (segment) => items.push({ kind: "prose", ts, text: segment, engine }))) return;
     items.push({ kind: "prose", ts, text, engine });
   };
-  const addCmd = (ts: unknown, cmd: string, callId?: string, icon?: string) => {
+  const addCmd = (ts: unknown, cmd: string, callId?: string, icon?: GlyphName) => {
     const id = callId || "plain-" + items.length + "-" + String(ts ?? "");
     const call = newCmd(cmd, icon);
     calls.set(id, call);
@@ -723,7 +738,7 @@ export function buildFeed(file: FileEntry, lines: string[], showSvc: boolean, li
           return;
         }
         if (name === "write_stdin") return addSvc("stdin → сесія " + String(args.session_id ?? ""));
-        return addCmd(ts, name + " " + JSON.stringify(args).slice(0, 120), textPart(p.call_id), "🔧");
+        return addCmd(ts, name + " " + JSON.stringify(args).slice(0, 120), textPart(p.call_id), "tool");
       }
       if (p.type === "function_call_output") return addOutput(textPart(p.call_id), typeof p.output === "string" ? p.output : JSON.stringify(p.output ?? ""));
       /* Fresh rollouts wrap apply_patch as a "custom_tool_call": `input` is the
@@ -794,7 +809,7 @@ export function buildFeed(file: FileEntry, lines: string[], showSvc: boolean, li
         } else if (part.type === "tool_use") {
           const input = rec(part.input);
           const cmd = String(input.command ?? input.file_path ?? input.prompt ?? JSON.stringify(input));
-          addCmd(ts, textPart(part.name) + ": " + cmd.slice(0, 160), textPart(part.id), "🔧");
+          addCmd(ts, textPart(part.name) + ": " + cmd.slice(0, 160), textPart(part.id), "tool");
         }
       }
       return;
@@ -882,7 +897,9 @@ export function ImageCard({ media, data, w, h, bytes }: { media: string; data: s
         onClick={() => setView("thumb")}
         className="my-2 ml-9 flex items-center gap-2 rounded-[14px] border border-line bg-panel px-3.5 py-2 text-[13px] shadow-card"
       >
-        <span className="flex h-6.5 w-6.5 items-center justify-center rounded-lg bg-chip">🖼</span>
+        <span className="flex h-6.5 w-6.5 items-center justify-center rounded-lg bg-chip">
+          <GlyphIcon name="image" className="h-4 w-4" />
+        </span>
         <span className="font-semibold">{dims}</span>
         <span className="text-dim">· {kb} КБ</span>
         <span className="ml-1 text-[12px] font-semibold text-accent">показати</span>
@@ -916,7 +933,9 @@ export function SysMsgCard({ label, text }: { label: string; text: string }) {
   return (
     <details className="group my-1.5 ml-9">
       <summary className="flex cursor-pointer list-none items-center gap-1.5 text-[11px] font-semibold text-dim hover:text-ink [&::-webkit-details-marker]:hidden">
-        <span className="flex h-4.5 w-4.5 items-center justify-center rounded-md bg-chip text-[10px]">⚙</span>
+        <span className="flex h-4.5 w-4.5 items-center justify-center rounded-md bg-chip">
+          <GlyphIcon name="cmd-group" className="h-3 w-3" />
+        </span>
         <span className="rounded-full bg-chip px-1.5 py-0.5 font-mono text-[9.5px]">{label}</span>
         <span>системне · {kb}</span>
         <span className="text-accent group-open:hidden">показати</span>
@@ -939,7 +958,9 @@ export function BlobCard({ bytes, text }: { bytes: number; text: string }) {
         onClick={() => setOpen(true)}
         className="my-2 ml-9 flex items-center gap-2 rounded-[14px] border border-line bg-panel px-3.5 py-2 text-[13px] shadow-card"
       >
-        <span className="flex h-6.5 w-6.5 items-center justify-center rounded-lg bg-chip">🧱</span>
+        <span className="flex h-6.5 w-6.5 items-center justify-center rounded-lg bg-chip">
+          <GlyphIcon name="blob" className="h-4 w-4" />
+        </span>
         <span className="font-semibold">даних {kb} КБ</span>
         <span className="ml-1 text-[12px] font-semibold text-accent">показати</span>
       </button>
@@ -970,10 +991,23 @@ function verdictClass(verdict: ReviewCardItem["verdict"]): string {
   return "bg-chip text-[#555] border-line";
 }
 
-function verdictLabel(verdict: ReviewCardItem["verdict"]): string {
-  if (verdict === "REQUEST_CHANGES") return "⛔ REQUEST_CHANGES";
-  if (verdict === "APPROVE") return "✅ APPROVE";
-  return "💬 COMMENT";
+function VerdictLabel({ verdict }: { verdict: ReviewCardItem["verdict"] }) {
+  const Icon = verdict === "REQUEST_CHANGES" ? Ban : verdict === "APPROVE" ? CircleCheck : MessageCircle;
+  const text = verdict === "REQUEST_CHANGES" ? "REQUEST_CHANGES" : verdict === "APPROVE" ? "APPROVE" : "COMMENT";
+  return (
+    <span className="inline-flex items-center gap-1">
+      <Icon className="h-3.5 w-3.5" aria-hidden />
+      {text}
+    </span>
+  );
+}
+
+/** Run/ok/err status shown as an icon so the cmd rows read at a glance. */
+function StatusIcon({ status, className }: { status: Call["status"]; className?: string }) {
+  const cls = className ?? "h-3.5 w-3.5";
+  if (status === "ok") return <Check className={cls} aria-hidden />;
+  if (status === "err") return <X className={cls} aria-hidden />;
+  return <Loader2 className={`${cls} animate-spin`} aria-hidden />;
 }
 
 function FileRef({ file, line }: { file: string; line?: number }) {
@@ -1006,11 +1040,22 @@ function CmdGroupCard({ item }: { item: CmdGroupItem }) {
       open={item.hasErr}
     >
       <summary className="flex cursor-pointer list-none items-center gap-2.5 px-3.5 py-2">
-        <span className="flex h-6.5 w-6.5 shrink-0 items-center justify-center rounded-lg bg-chip text-[13px]">⚙</span>
-        <span className="min-w-0 flex-1 truncate text-[12.5px]">
+        <span className="flex h-6.5 w-6.5 shrink-0 items-center justify-center rounded-lg bg-chip">
+          <GlyphIcon name="cmd-group" className="h-4 w-4" />
+        </span>
+        <span className="flex min-w-0 flex-1 items-center gap-1 truncate text-[12.5px]">
           {item.calls.length} {ukPlural(item.calls.length, "команда", "команди", "команд")}
-          {tools ? " · " + tools : ""} · <span className="text-ok">✓ {item.okCount}</span>
-          {item.errCount ? <span className="text-err"> ✗ {item.errCount}</span> : null}
+          {tools ? " · " + tools : ""} ·
+          <span className="inline-flex items-center gap-0.5 text-ok">
+            <Check className="h-3.5 w-3.5" aria-hidden />
+            {item.okCount}
+          </span>
+          {item.errCount ? (
+            <span className="inline-flex items-center gap-0.5 text-err">
+              <X className="h-3.5 w-3.5" aria-hidden />
+              {item.errCount}
+            </span>
+          ) : null}
         </span>
         {range ? <span className="ml-auto shrink-0 text-[11px] text-dim">{range}</span> : null}
       </summary>
@@ -1020,11 +1065,16 @@ function CmdGroupCard({ item }: { item: CmdGroupItem }) {
           return (
             <details key={item.ids[idx]} className="overflow-hidden rounded-[10px] border border-line bg-panel" open={call.open}>
               <summary className="flex h-6 cursor-pointer list-none items-center gap-2 px-2.5 text-[11.5px]">
-                <span className="flex h-4.5 w-4.5 shrink-0 items-center justify-center rounded-md bg-chip text-[10.5px]">{call.icon}</span>
+                <span className="flex h-4.5 w-4.5 shrink-0 items-center justify-center rounded-md bg-chip">
+                  <GlyphIcon name={call.icon} className="h-3 w-3" />
+                </span>
                 <code className="min-w-0 flex-1 overflow-hidden text-ellipsis whitespace-nowrap rounded-md bg-chip px-1.5 py-0.5 font-mono text-[11px]">
                   {call.display}
                 </code>
-                <span className={`ml-auto shrink-0 text-[10.5px] font-semibold ${statusCls}`}>{call.label}</span>
+                <span className={`ml-auto inline-flex shrink-0 items-center gap-1 text-[10.5px] font-semibold ${statusCls}`}>
+                  <StatusIcon status={call.status} className="h-3 w-3" />
+                  {call.label}
+                </span>
               </summary>
               <pre className="max-h-[280px] overflow-auto whitespace-pre-wrap border-t border-line bg-[#fafafc] px-3 py-2 font-mono text-[11.5px]">
                 {"$ " + call.cmd + (call.output ? "\n" + call.output : "")}
@@ -1043,10 +1093,14 @@ function ReviewCard({ item }: { item: ReviewCardItem }) {
   return (
     <div className="my-3.5 ml-9 overflow-hidden rounded-[14px] border border-codex/20 bg-panel shadow-card">
       <div className="flex flex-wrap items-center gap-2 border-b border-line px-3.5 py-2.5">
-        <span className="flex h-6.5 w-6.5 shrink-0 items-center justify-center rounded-lg bg-codex-soft text-[13px] font-extrabold text-codex">⌘</span>
+        <span className="flex h-6.5 w-6.5 shrink-0 items-center justify-center rounded-lg bg-codex-soft text-codex">
+          <Command className="h-4 w-4" aria-hidden />
+        </span>
         <span className="text-[13.5px] font-bold">Codex review</span>
         {item.verdict ? (
-          <span className={`rounded-full border px-2.5 py-0.5 text-[11.5px] font-extrabold ${verdictClass(item.verdict)}`}>{verdictLabel(item.verdict)}</span>
+          <span className={`rounded-full border px-2.5 py-0.5 text-[11.5px] font-extrabold ${verdictClass(item.verdict)}`}>
+            <VerdictLabel verdict={item.verdict} />
+          </span>
         ) : null}
         <span className="text-[11px] text-dim">
           {findingCount ? `${findingCount} finding${findingCount === 1 ? "" : "s"}` : "без findings"}
@@ -1098,7 +1152,9 @@ function MemCitationCard({ item }: { item: MemCitationItem }) {
   return (
     <details className="group my-2 ml-9 overflow-hidden rounded-[14px] border border-line bg-panel text-[12px] shadow-card">
       <summary className="flex cursor-pointer list-none items-center gap-2 px-3.5 py-2">
-        <span className="flex h-6.5 w-6.5 shrink-0 items-center justify-center rounded-lg bg-chip text-[13px]">📎</span>
+        <span className="flex h-6.5 w-6.5 shrink-0 items-center justify-center rounded-lg bg-chip">
+          <GlyphIcon name="citation" className="h-4 w-4" />
+        </span>
         <span className="text-[13px] font-semibold">цитати пам&apos;яті ({item.entries.length})</span>
         <span className="ml-auto text-[11px] font-semibold text-accent group-open:hidden">показати</span>
         <span className="ml-auto hidden text-[11px] font-semibold text-accent group-open:inline">згорнути</span>
@@ -1145,11 +1201,11 @@ function MemCitationCard({ item }: { item: MemCitationItem }) {
 
 type ProtocolPayload = Record<string, unknown>;
 
-const PROTOCOL_TYPE_META: Record<string, { icon: string; label: string; tone: "amber" | "accent" }> = {
-  shutdown_request: { icon: "⏻", label: "запит на завершення", tone: "amber" },
-  shutdown_response: { icon: "⏻", label: "відповідь на завершення", tone: "amber" },
-  plan_approval_request: { icon: "📋", label: "запит на затвердження плану", tone: "accent" },
-  plan_approval_response: { icon: "📋", label: "вердикт по плану", tone: "accent" },
+const PROTOCOL_TYPE_META: Record<string, { icon: GlyphName; label: string; tone: "amber" | "accent" }> = {
+  shutdown_request: { icon: "shutdown", label: "запит на завершення", tone: "amber" },
+  shutdown_response: { icon: "shutdown", label: "відповідь на завершення", tone: "amber" },
+  plan_approval_request: { icon: "plan", label: "запит на затвердження плану", tone: "accent" },
+  plan_approval_response: { icon: "plan", label: "вердикт по плану", tone: "accent" },
 };
 
 function protocolToneClass(tone: "amber" | "accent"): string {
@@ -1225,8 +1281,9 @@ function ProtocolMessageBody({ payload }: { payload: ProtocolPayload }) {
   return (
     <div className="text-[13px]">
       <div className="flex flex-wrap items-center gap-2">
-        <span className={`rounded-full border px-2.5 py-0.5 text-[11.5px] font-bold ${protocolToneClass(meta.tone)}`}>
-          {meta.icon} {meta.label}
+        <span className={`inline-flex items-center gap-1 rounded-full border px-2.5 py-0.5 text-[11.5px] font-bold ${protocolToneClass(meta.tone)}`}>
+          <GlyphIcon name={meta.icon} className="h-3.5 w-3.5" />
+          {meta.label}
         </span>
         {approve !== undefined ? <ApproveChip approve={approve} /> : null}
       </div>
@@ -1244,10 +1301,12 @@ export function FeedItem({ item }: { item: Item }) {
   if (item.kind === "mem-citation") return <MemCitationCard item={item} />;
   if (item.kind === "prose") {
     const cls = item.engine === "codex" ? "bg-codex" : "bg-claude";
-    const icon = item.engine === "codex" ? "⌘" : "✳";
+    const AvatarIcon = item.engine === "codex" ? Command : Sparkle;
     return (
       <div className="my-3.5 flex gap-2.5">
-        <div className={`mt-1 flex h-6.5 w-6.5 shrink-0 items-center justify-center rounded-full text-xs font-extrabold text-white ${cls}`}>{icon}</div>
+        <div className={`mt-1 flex h-6.5 w-6.5 shrink-0 items-center justify-center rounded-full text-white ${cls}`}>
+          <AvatarIcon className="h-3.5 w-3.5" aria-hidden />
+        </div>
         <div className="min-w-0 flex-1 whitespace-pre-wrap break-words">
           {hhmm(item.ts) ? <div className="mb-0.5 text-[11px] text-dim">{hhmm(item.ts)}</div> : null}
           {mdBlocks(item.text)}
@@ -1266,7 +1325,9 @@ export function FeedItem({ item }: { item: Item }) {
                 <span className="group-open/usr:hidden">
                   {item.text.slice(0, 180)}… <span className="font-semibold text-accent">({item.text.length} симв.)</span>
                 </span>
-                <span className="hidden text-[11px] font-semibold text-dim group-open/usr:inline">згорнути ↥</span>
+                <span className="hidden items-center gap-1 text-[11px] font-semibold text-dim group-open/usr:inline-flex">
+                  згорнути <ChevronUp className="h-3 w-3" aria-hidden />
+                </span>
               </summary>
               {mdBlocks(item.text)}
             </details>
@@ -1282,9 +1343,14 @@ export function FeedItem({ item }: { item: Item }) {
     return (
       <details className="my-2.5 ml-9 overflow-hidden rounded-[14px] border border-line bg-panel shadow-card" open={item.call.open}>
         <summary className="flex cursor-pointer list-none items-center gap-2.5 px-3.5 py-2">
-          <span className="flex h-6.5 w-6.5 shrink-0 items-center justify-center rounded-lg bg-chip text-[13px]">{item.call.icon}</span>
+          <span className="flex h-6.5 w-6.5 shrink-0 items-center justify-center rounded-lg bg-chip">
+            <GlyphIcon name={item.call.icon} className="h-4 w-4" />
+          </span>
           <code className="max-w-[70%] overflow-hidden text-ellipsis whitespace-nowrap rounded-md bg-chip px-2 py-0.5 font-mono text-[12.5px]">{item.call.display}</code>
-          <span className={`ml-auto shrink-0 text-xs font-semibold ${statusCls}`}>{item.call.label}</span>
+          <span className={`ml-auto inline-flex shrink-0 items-center gap-1 text-xs font-semibold ${statusCls}`}>
+            <StatusIcon status={item.call.status} />
+            {item.call.label}
+          </span>
         </summary>
         <pre className="max-h-[340px] overflow-auto whitespace-pre-wrap border-t border-line bg-[#fafafc] px-3.5 py-2.5 font-mono text-[12.5px]">
           {"$ " + item.call.cmd + (item.call.output ? "\n" + item.call.output : "\n(вивід у цьому лог-файлі відсутній — повний є в rollout-сесії Codex)")}
@@ -1296,7 +1362,9 @@ export function FeedItem({ item }: { item: Item }) {
   if (item.kind === "edit") {
     return (
       <div className="my-2.5 ml-9 flex items-center gap-3 rounded-[14px] border border-line bg-panel px-3.5 py-2.5 shadow-card">
-        <span className="flex h-7.5 w-7.5 items-center justify-center rounded-lg bg-chip">📝</span>
+        <span className="flex h-7.5 w-7.5 items-center justify-center rounded-lg bg-chip">
+          <GlyphIcon name="note" className="h-4 w-4" />
+        </span>
         <div>
           <div className="text-[13.5px] font-semibold">{item.files}</div>
           <div className="text-xs text-dim">файли змінені</div>
@@ -1310,15 +1378,18 @@ export function FeedItem({ item }: { item: Item }) {
     return (
       <div className="my-2.5 ml-9 overflow-hidden rounded-[14px] border border-accent/25 bg-[#f8f8fd] shadow-card">
         <div className="flex items-center gap-2 px-3.5 pt-2">
-          <span className="flex h-6.5 w-6.5 shrink-0 items-center justify-center rounded-lg bg-[#ecebfb] text-[13px]">✉</span>
+          <span className="flex h-6.5 w-6.5 shrink-0 items-center justify-center rounded-lg bg-[#ecebfb] text-accent">
+            <Mail className="h-3.5 w-3.5" aria-hidden />
+          </span>
           <span className="text-[11px] font-semibold text-dim">{item.dir === "out" ? "до" : "від"}</span>
           <span className="rounded-full bg-accent/10 px-2 py-0.5 text-[11px] font-bold text-accent">{item.peer}</span>
           {item.delivery ? (
             <span
-              className={`shrink-0 text-[10.5px] font-semibold ${item.delivery === "ok" ? "text-ok" : "text-err"}`}
+              className={`inline-flex shrink-0 items-center gap-1 text-[10.5px] font-semibold ${item.delivery === "ok" ? "text-ok" : "text-err"}`}
               title={item.msgId ? `msg_id: ${item.msgId}` : undefined}
             >
-              {item.delivery === "ok" ? "✓ доставлено" : "✗ не доставлено"}
+              {item.delivery === "ok" ? <Check className="h-3 w-3" aria-hidden /> : <X className="h-3 w-3" aria-hidden />}
+              {item.delivery === "ok" ? "доставлено" : "не доставлено"}
             </span>
           ) : null}
           {hhmm(item.ts) ? <span className="ml-auto shrink-0 text-[11px] text-dim">{hhmm(item.ts)}</span> : null}
@@ -1335,7 +1406,9 @@ export function FeedItem({ item }: { item: Item }) {
                     <span className="group-open/tmsg:hidden">
                       {item.text.slice(0, 260).trimEnd()}… <span className="font-semibold text-accent">показати все</span>
                     </span>
-                    <span className="hidden text-[11px] font-semibold text-dim group-open/tmsg:inline">згорнути ↥</span>
+                    <span className="hidden items-center gap-1 text-[11px] font-semibold text-dim group-open/tmsg:inline-flex">
+                      згорнути <ChevronUp className="h-3 w-3" aria-hidden />
+                    </span>
                   </summary>
                   {mdBlocks(item.text)}
                 </details>
@@ -1351,7 +1424,7 @@ export function FeedItem({ item }: { item: Item }) {
   if (item.kind === "tnote") {
     return (
       <div className="my-1 ml-9 flex items-center gap-1.5 text-[11.5px] text-dim">
-        <span aria-hidden>✉</span>
+        <Mail className="h-3 w-3 shrink-0" aria-hidden />
         {item.text}
       </div>
     );
@@ -1360,9 +1433,12 @@ export function FeedItem({ item }: { item: Item }) {
     const long = item.text.length > 150;
     return (
       <details className="my-1 ml-9 text-[11.5px] italic text-dim">
-        <summary className={`list-none truncate ${long ? "cursor-pointer" : ""}`} title="міркування агента">
-          🤔 {item.text.slice(0, 150)}
-          {long ? "…" : ""}
+        <summary className={`flex list-none items-center gap-1.5 truncate ${long ? "cursor-pointer" : ""}`} title="міркування агента">
+          <Brain className="h-3.5 w-3.5 shrink-0" aria-hidden />
+          <span className="truncate">
+            {item.text.slice(0, 150)}
+            {long ? "…" : ""}
+          </span>
         </summary>
         {long ? <div className="whitespace-pre-wrap break-words pt-1 not-italic">{mdBlocks(item.text)}</div> : null}
       </details>

@@ -1,6 +1,9 @@
 "use client";
 
+import { Minus, Plus } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+
+import { X } from "@/components/icons";
 
 interface Props {
   src: string;
@@ -67,11 +70,11 @@ export function Lightbox({ src, alt, caption, onClose }: Props) {
         <span className="min-w-0 truncate text-[12.5px] font-semibold text-white/85">{caption ?? alt}</span>
         <span className="ml-auto flex items-center gap-1.5">
           <button
-            className="rounded-lg border border-white/25 bg-white/10 px-2.5 py-1 text-[13px] font-bold text-white hover:bg-white/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/60"
+            className="inline-flex items-center rounded-lg border border-white/25 bg-white/10 px-2.5 py-1 text-white hover:bg-white/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/60"
             aria-label="Зменшити"
             onClick={() => zoomBy(1 / 1.4)}
           >
-            −
+            <Minus className="h-4 w-4" aria-hidden />
           </button>
           <button
             className="rounded-lg border border-white/25 bg-white/10 px-2 py-1 text-[11.5px] font-semibold text-white hover:bg-white/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/60"
@@ -81,18 +84,18 @@ export function Lightbox({ src, alt, caption, onClose }: Props) {
             {Math.round(scale * 100)}%
           </button>
           <button
-            className="rounded-lg border border-white/25 bg-white/10 px-2.5 py-1 text-[13px] font-bold text-white hover:bg-white/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/60"
+            className="inline-flex items-center rounded-lg border border-white/25 bg-white/10 px-2.5 py-1 text-white hover:bg-white/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/60"
             aria-label="Збільшити"
             onClick={() => zoomBy(1.4)}
           >
-            +
+            <Plus className="h-4 w-4" aria-hidden />
           </button>
           <button
-            className="ml-1 rounded-lg border border-white/25 bg-white/10 px-2.5 py-1 text-[13px] font-bold text-white hover:bg-white/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/60"
+            className="ml-1 inline-flex items-center rounded-lg border border-white/25 bg-white/10 px-2.5 py-1 text-white hover:bg-white/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/60"
             aria-label="Закрити"
             onClick={onClose}
           >
-            ✕
+            <X className="h-4 w-4" aria-hidden />
           </button>
         </span>
       </div>

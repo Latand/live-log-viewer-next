@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 
+import { X } from "@/components/icons";
 import { useArchivedPaths } from "@/hooks/useArchivedPaths";
 import { useTimeline } from "@/hooks/useTimeline";
 import { useSwitchboardData, type SwitchboardItem } from "@/hooks/useSwitchboardData";
@@ -136,11 +137,11 @@ export function Switchboard({ files, project, onOpenFile }: Props) {
               />
               {timeline.loading ? <span className="text-[11px] font-semibold text-dim">оновлення…</span> : null}
               <button
-                className="h-8 w-8 rounded-[8px] border border-line bg-bg text-[15px] font-bold text-dim hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                className="inline-flex h-8 w-8 items-center justify-center rounded-[8px] border border-line bg-bg text-dim hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
                 aria-label="Закрити пульт"
                 onClick={() => setOpen(false)}
               >
-                ✕
+                <X className="h-4 w-4" aria-hidden />
               </button>
             </header>
             <div className="min-h-0 flex-1 space-y-5 overflow-y-auto px-4 py-4">

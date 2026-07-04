@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 
+import { Command, Play } from "@/components/icons";
 import type { FileEntry } from "@/lib/types";
 
 function activityText(file: FileEntry): string {
@@ -15,7 +16,7 @@ export function ProcessStatusChip({ file }: { file: FileEntry }) {
   if (file.proc === "running") {
     return (
       <span className="inline-flex items-center gap-1 rounded-full bg-[#e5f6ea] px-2 py-0.5 text-[11px] font-bold text-ok">
-        ▶ PID {file.pid}
+        <Play className="h-3 w-3" aria-hidden /> PID {file.pid}
       </span>
     );
   }
@@ -134,10 +135,10 @@ export function TaskHeader({
               Це короткий джоб-лог (лише службові події). Реальна робота Codex — у повній сесії:
             </div>
             <button
-              className="rounded-[10px] border border-line bg-bg px-3 py-1.5 text-[13px] font-semibold text-codex hover:bg-codex-soft"
+              className="inline-flex items-center gap-1.5 rounded-[10px] border border-line bg-bg px-3 py-1.5 text-[13px] font-semibold text-codex hover:bg-codex-soft"
               onClick={() => onSelect(rollout)}
             >
-              ⌘ Відкрити сесію Codex ({(rollout.size / 1024).toFixed(0)} kB{activityText(rollout)})
+              <Command className="h-3.5 w-3.5" aria-hidden /> Відкрити сесію Codex ({(rollout.size / 1024).toFixed(0)} kB{activityText(rollout)})
             </button>
           </>
         ) : (

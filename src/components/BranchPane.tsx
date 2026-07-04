@@ -1,7 +1,9 @@
 "use client";
 
+import { CornerDownRight } from "lucide-react";
 import { useState } from "react";
 
+import { ChevronRight, X } from "@/components/icons";
 import type { FileEntry } from "@/lib/types";
 
 import { FlipRow } from "./FlipRow";
@@ -58,8 +60,8 @@ export function BranchPane({ file, files, tasks, onSelect, isRoot, onClose, drag
           </span>
         ) : null}
         {isRoot ? null : (
-          <span className="shrink-0 text-[10px] text-dim" title="гілка цієї розмови">
-            ⤷ {file.kind}
+          <span className="inline-flex shrink-0 items-center gap-0.5 text-[10px] text-dim" title="гілка цієї розмови">
+            <CornerDownRight className="h-3 w-3" aria-hidden /> {file.kind}
           </span>
         )}
         <span className="min-w-0 flex-1 truncate text-[12px] font-semibold" title={cleanTitle(file.title)}>
@@ -68,11 +70,11 @@ export function BranchPane({ file, files, tasks, onSelect, isRoot, onClose, drag
         <ProcessStatusControls file={file} compact />
         {onClose ? (
           <button
-            className="shrink-0 rounded-[8px] border border-line bg-bg px-1.5 py-0.5 text-[10.5px] font-semibold text-dim hover:border-err/40 hover:text-err focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            className="inline-flex shrink-0 items-center rounded-[8px] border border-line bg-bg px-1.5 py-0.5 text-dim hover:border-err/40 hover:text-err focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
             aria-label={`Прибрати колонку ${cleanTitle(file.title, 60)}`}
             onClick={onClose}
           >
-            ✕
+            <X className="h-3 w-3" aria-hidden />
           </button>
         ) : null}
       </header>
@@ -115,7 +117,7 @@ export function TaskStrip({ file, files, onSelect }: { file: FileEntry; files: F
           aria-label={`${open ? "Згорнути" : "Розгорнути"} фонову задачу ${title}`}
           onClick={() => setOpen((value) => !value)}
         >
-          <span className={`shrink-0 font-mono text-[10px] text-dim transition-transform ${open ? "rotate-90" : ""}`}>❯</span>
+          <ChevronRight className={`h-3.5 w-3.5 shrink-0 text-dim transition-transform ${open ? "rotate-90" : ""}`} aria-hidden />
           <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${activityDot(file.activity)}`} />
           <span className="min-w-0 flex-1 truncate text-[11.5px] font-semibold" title={cleanTitle(file.title)}>
             {title}

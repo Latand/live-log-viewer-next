@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
 import type { FileEntry } from "../types";
@@ -223,6 +224,47 @@ const COMPANION_TRANSCRIPT_ENV = "CODEX_COMPANION_TRANSCRIPT_PATH";
 const ANCESTRY_MAX_DEPTH = 15;
 
 /**
+ * Spawn parentage of a codex rollout is a permanent fact, but it can only be
+ * proven from /proc while the process is alive. Once the process exits its pid
+ * is gone and the ancestry walk finds nothing, so the rollout would fall back
+ * to a top-level orphan and visually detach from the thread that started it.
+ * The link observed while live is remembered — in-process for the session and
+ * on disk so it also survives a server restart.
+ */
+const LINEAGE_FILE = path.join(os.homedir(), ".claude", "viewer-state", "codex-lineage.json");
+const lineageCache = globalCache<string>("codex-lineage");
+let lineageLoaded = false;
+let lineageDirty = false;
+
+function loadLineage(): void {
+  if (lineageLoaded) return;
+  lineageLoaded = true;
+  const data = readJson(LINEAGE_FILE);
+  if (data && typeof data === "object" && !Array.isArray(data)) {
+    for (const [child, parent] of Object.entries(data)) {
+      if (typeof parent === "string" && !lineageCache.has(child)) lineageCache.set(child, parent);
+    }
+  }
+}
+
+function rememberLineage(child: string, parent: string): void {
+  if (lineageCache.get(child) === parent) return;
+  lineageCache.set(child, parent);
+  lineageDirty = true;
+}
+
+function persistLineage(): void {
+  if (!lineageDirty) return;
+  lineageDirty = false;
+  try {
+    fs.mkdirSync(path.dirname(LINEAGE_FILE), { recursive: true });
+    fs.writeFileSync(LINEAGE_FILE, JSON.stringify(Object.fromEntries(lineageCache)));
+  } catch {
+    /* best-effort: a missing cache only costs a re-resolve while live */
+  }
+}
+
+/**
  * Live rollouts without a job-state link still prove their spawner through
  * /proc. The codex plugin hook exports the Claude transcript path into every
  * Bash environment, and children keep it across exec — including the
@@ -233,13 +275,15 @@ const ANCESTRY_MAX_DEPTH = 15;
  * heuristics participate.
  */
 function attachLiveCodexParents(entries: FileEntry[]): void {
-  const rollouts = entries.filter((entry) => entry.root === "codex-sessions" && !entry.parent && entry.pid !== null);
-  if (rollouts.length === 0) return;
+  loadLineage();
+  const orphans = entries.filter((entry) => entry.root === "codex-sessions" && !entry.parent);
+  if (orphans.length === 0) return;
   const claudeByPid = new Map<number, string>();
   for (const entry of entries) {
     if (entry.root === "claude-projects" && entry.pid !== null) claudeByPid.set(entry.pid, entry.path);
   }
-  for (const rollout of rollouts) {
+  for (const rollout of orphans) {
+    let resolved: string | null = null;
     const seen = new Set<number>();
     for (let pid: number | null = rollout.pid; pid !== null && !seen.has(pid); pid = readPpid(pid)) {
       seen.add(pid);
@@ -250,11 +294,20 @@ function attachLiveCodexParents(entries: FileEntry[]): void {
       const owner = claudeByPid.get(pid);
       const transcript = owner ?? readEnvVar(pid, COMPANION_TRANSCRIPT_ENV);
       if (transcript) {
-        rollout.parent = transcript;
+        resolved = transcript;
         break;
       }
     }
+    if (resolved) {
+      rollout.parent = resolved;
+      rememberLineage(rollout.path, resolved);
+    } else {
+      // pid is gone or ancestry dead-ended: reuse the parent proven while live.
+      const remembered = lineageCache.get(rollout.path);
+      if (remembered) rollout.parent = remembered;
+    }
   }
+  persistLineage();
 }
 
 export function linkEntries(entries: FileEntry[]): void {

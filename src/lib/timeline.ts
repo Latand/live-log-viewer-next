@@ -54,7 +54,7 @@ function claudeEvents(entry: FileEntry, actor: string): ActionEvent[] {
       if (text.includes("<teammate-message")) {
         const summary = text.match(TMSG_SUMMARY)?.[1];
         /* Wrappers without a summary are service noise (idle notifications). */
-        if (summary) out.push({ ts, file: entry.path, actor, kind: "msg", label: "✉ від тімейта: " + label(summary) });
+        if (summary) out.push({ ts, file: entry.path, actor, kind: "msg", label: "від тімейта: " + label(summary) });
         continue;
       }
       if (!text.startsWith("<") && !text.startsWith("[")) {
@@ -75,7 +75,7 @@ function claudeEvents(entry: FileEntry, actor: string): ActionEvent[] {
               file: entry.path,
               actor,
               kind: "spawn",
-              label: "⤷ запустив агента: " + label(str(input.description) || str(input.prompt), 56),
+              label: "запустив агента: " + label(str(input.description) || str(input.prompt), 56),
             });
           } else if (name === "SendMessage" && typeof input.message === "string") {
             out.push({
@@ -83,7 +83,7 @@ function claudeEvents(entry: FileEntry, actor: string): ActionEvent[] {
               file: entry.path,
               actor,
               kind: "msg",
-              label: `✉ до ${str(input.to)}: ` + label(str(input.summary), 56),
+              label: `до ${str(input.to)}: ` + label(str(input.summary), 56),
             });
           }
         }

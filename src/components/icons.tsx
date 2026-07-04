@@ -1,0 +1,92 @@
+import {
+  ArrowDown,
+  ArrowRight,
+  ArrowUpToLine,
+  Ban,
+  Binary,
+  Brain,
+  Check,
+  ChevronRight,
+  ChevronUp,
+  CircleCheck,
+  ClipboardList,
+  Command,
+  Image as ImageIcon,
+  type LucideIcon,
+  Mail,
+  MessageCircle,
+  Mic,
+  Paperclip,
+  PencilLine,
+  Play,
+  Power,
+  Sparkle,
+  SquareTerminal,
+  Terminal,
+  Wrench,
+  X,
+} from "lucide-react";
+
+export {
+  ArrowDown,
+  ArrowRight,
+  ArrowUpToLine,
+  Ban,
+  Brain,
+  Check,
+  ChevronRight,
+  ChevronUp,
+  CircleCheck,
+  Command,
+  ImageIcon,
+  Mail,
+  MessageCircle,
+  Mic,
+  Play,
+  Power,
+  Sparkle,
+  SquareTerminal,
+  X,
+};
+
+/** Loader kept as its own export so callers add `animate-spin` at the call site. */
+export { Loader2 } from "lucide-react";
+
+/**
+ * Semantic keys the feed model carries in place of an emoji glyph. Keeping the
+ * data layer on keys (not React nodes) lets buildFeed stay serialisable and
+ * moves every icon choice into this one map.
+ */
+export type GlyphName =
+  | "shell"
+  | "tool"
+  | "cmd-group"
+  | "codex"
+  | "claude"
+  | "image"
+  | "blob"
+  | "note"
+  | "citation"
+  | "message"
+  | "shutdown"
+  | "plan";
+
+const GLYPHS: Record<GlyphName, LucideIcon> = {
+  shell: ChevronRight,
+  tool: Wrench,
+  "cmd-group": Terminal,
+  codex: Command,
+  claude: Sparkle,
+  image: ImageIcon,
+  blob: Binary,
+  note: PencilLine,
+  citation: Paperclip,
+  message: Mail,
+  shutdown: Power,
+  plan: ClipboardList,
+};
+
+export function GlyphIcon({ name, className }: { name: GlyphName; className?: string }) {
+  const Icon = GLYPHS[name];
+  return <Icon className={className ?? "h-3.5 w-3.5"} aria-hidden />;
+}

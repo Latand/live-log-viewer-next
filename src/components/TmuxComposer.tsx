@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 
+import { ArrowRight, ArrowUpToLine, ImageIcon, Loader2, Play, SquareTerminal, X } from "@/components/icons";
 import { useTmuxTarget } from "@/hooks/useTmuxTarget";
 import type { FileEntry } from "@/lib/types";
 
@@ -165,7 +166,7 @@ export function TmuxComposer({ file }: { file: FileEntry }) {
       const imgCount = images.length;
       const entry: SentEntry = {
         id: Date.now(),
-        text: text.trim() || (imgCount ? `🖼 ${imgCount} ${imgCount === 1 ? "картинка" : "картинки"}` : ""),
+        text: text.trim() || (imgCount ? `${imgCount} ${imgCount === 1 ? "картинка" : "картинки"}` : ""),
         at: Date.now(),
         via: json.spawned ? "spawn" : "pane",
       };
@@ -211,17 +212,17 @@ export function TmuxComposer({ file }: { file: FileEntry }) {
               >
                 {entry.text}
               </span>
-              <span className="shrink-0 text-[9.5px] text-dim">
-                {entry.via === "spawn" ? "▶ " : "→ "}
+              <span className="inline-flex shrink-0 items-center gap-0.5 text-[9.5px] text-dim">
+                {entry.via === "spawn" ? <Play className="h-2.5 w-2.5" aria-hidden /> : <ArrowRight className="h-2.5 w-2.5" aria-hidden />}
                 {hhmm(entry.at)}
               </span>
               <button
                 type="button"
                 aria-label="Прибрати з черги"
-                className="shrink-0 rounded px-0.5 text-[10px] text-dim hover:text-err focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                className="inline-flex shrink-0 items-center rounded px-0.5 text-dim hover:text-err focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
                 onClick={() => persistSent(sent.filter((item) => item.id !== entry.id))}
               >
-                ✕
+                <X className="h-3 w-3" aria-hidden />
               </button>
             </div>
           ))}
@@ -229,10 +230,22 @@ export function TmuxComposer({ file }: { file: FileEntry }) {
       ) : null}
       <div className="flex items-center gap-1.5">
         <span
-          className="shrink-0 rounded-full bg-chip px-1.5 py-0.5 font-mono text-[9.5px] font-semibold text-[#555]"
+          className="inline-flex shrink-0 items-center gap-1 rounded-full bg-chip px-1.5 py-0.5 font-mono text-[9.5px] font-semibold text-[#555]"
           title={relayMode ? "передасться через кореневу сесію гілки" : spawnMode ? "нове tmux-вікно з відновленим агентом" : `tmux ${target}`}
         >
-          {relayMode ? "⇡ корінь" : spawnMode ? "▶ resume" : `▤ ${target}`}
+          {relayMode ? (
+            <>
+              <ArrowUpToLine className="h-3 w-3" aria-hidden /> корінь
+            </>
+          ) : spawnMode ? (
+            <>
+              <Play className="h-3 w-3" aria-hidden /> resume
+            </>
+          ) : (
+            <>
+              <SquareTerminal className="h-3 w-3" aria-hidden /> {target}
+            </>
+          )}
         </span>
         <input
           ref={inputRef}
@@ -267,17 +280,17 @@ export function TmuxComposer({ file }: { file: FileEntry }) {
           type="button"
           aria-label="Додати картинки"
           onClick={() => fileRef.current?.click()}
-          className="shrink-0 rounded-[8px] border border-line bg-panel px-2 py-1 text-[12px] text-dim hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+          className="inline-flex shrink-0 items-center rounded-[8px] border border-line bg-panel px-2 py-1 text-dim hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
         >
-          🖼
+          <ImageIcon className="h-4 w-4" aria-hidden />
         </button>
         <button
           type="submit"
           disabled={!canSend}
           aria-label={spawnMode ? "Запустити агента" : "Надіслати агенту"}
-          className="shrink-0 rounded-[8px] border border-line bg-accent px-2.5 py-1 text-[11px] font-bold text-white hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 disabled:opacity-40"
+          className="inline-flex shrink-0 items-center rounded-[8px] border border-line bg-accent px-2.5 py-1 text-white hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 disabled:opacity-40"
         >
-          {sending ? "…" : "▸"}
+          {sending ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : <Play className="h-4 w-4" aria-hidden />}
         </button>
       </div>
       {images.length ? (
@@ -290,14 +303,14 @@ export function TmuxComposer({ file }: { file: FileEntry }) {
                 type="button"
                 onClick={() => setImages((prev) => prev.filter((_, i) => i !== idx))}
                 aria-label={`Прибрати картинку ${idx + 1}`}
-                className="absolute -right-1 -top-1 hidden h-4 w-4 items-center justify-center rounded-full border border-line bg-panel text-[9px] font-bold text-dim shadow-card hover:text-err group-hover/img:flex focus-visible:flex focus-visible:outline-none"
+                className="absolute -right-1 -top-1 hidden h-4 w-4 items-center justify-center rounded-full border border-line bg-panel text-dim shadow-card hover:text-err group-hover/img:flex focus-visible:flex focus-visible:outline-none"
               >
-                ✕
+                <X className="h-2.5 w-2.5" aria-hidden />
               </button>
             </div>
           ))}
-          <span className="text-[10.5px] font-semibold text-dim">
-            {images.length} {images.length === 1 ? "картинка" : "картинки"} → шляхами до файлів
+          <span className="inline-flex items-center gap-1 text-[10.5px] font-semibold text-dim">
+            {images.length} {images.length === 1 ? "картинка" : "картинки"} <ArrowRight className="h-3 w-3" aria-hidden /> шляхами до файлів
           </span>
         </div>
       ) : null}

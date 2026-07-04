@@ -2,6 +2,8 @@
 
 import { useEffect, useRef, useState } from "react";
 
+import { Loader2, Mic, X } from "@/components/icons";
+
 type Phase = "idle" | "rec" | "busy";
 
 const MAX_SECONDS = 120;
@@ -130,9 +132,9 @@ export function MicButton({ onText, onError }: { onText: (text: string) => void;
           type="button"
           aria-label="Скасувати запис"
           onClick={handleDiscard}
-          className="rounded-[8px] border border-line bg-panel px-1.5 py-1 text-[11px] text-dim hover:text-err focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+          className="inline-flex items-center rounded-[8px] border border-line bg-panel px-1.5 py-1 text-dim hover:text-err focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
         >
-          ✕
+          <X className="h-3.5 w-3.5" aria-hidden />
         </button>
       </span>
     );
@@ -145,9 +147,9 @@ export function MicButton({ onText, onError }: { onText: (text: string) => void;
       title={phase === "busy" ? "розпізнаю…" : "надиктувати (до 2 хв)"}
       disabled={phase === "busy"}
       onClick={handleMain}
-      className="shrink-0 rounded-[8px] border border-line bg-panel px-2 py-1 text-[12px] text-dim hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60"
+      className="inline-flex shrink-0 items-center rounded-[8px] border border-line bg-panel px-2 py-1 text-dim hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60"
     >
-      {phase === "busy" ? <span className="inline-block animate-spin">◌</span> : "🎤"}
+      {phase === "busy" ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : <Mic className="h-4 w-4" aria-hidden />}
     </button>
   );
 }

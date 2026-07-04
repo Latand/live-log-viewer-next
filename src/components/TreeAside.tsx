@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 
+import { ChevronRight } from "@/components/icons";
 import type { FileEntry } from "@/lib/types";
 
 import { FlipRow } from "./FlipRow";
@@ -17,7 +18,7 @@ export function ResidualStrip({ items, onSelect }: { items: FileEntry[]; onSelec
         aria-expanded={open}
         onClick={() => setOpen((value) => !value)}
       >
-        <span className={`font-mono text-[10px] transition-transform ${open ? "rotate-90" : ""}`}>❯</span>
+        <ChevronRight className={`h-3.5 w-3.5 transition-transform ${open ? "rotate-90" : ""}`} aria-hidden />
         Тихі розмови й задачі
         <span className="font-semibold normal-case tracking-normal">{items.length}</span>
       </button>

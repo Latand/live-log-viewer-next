@@ -21,14 +21,6 @@ export function hhmm(ts: unknown): string {
   return Number.isNaN(d.getTime()) ? "" : d.toLocaleTimeString("uk", { hour12: false });
 }
 
-export function typeInfo(file: FileEntry) {
-  if (file.engine === "shell") return { glyph: "❯", cls: "bg-[#f1f1f4] border border-line text-[#777]", aux: true, tip: "фонова команда" };
-  if (file.root === "codex-jobs") return { glyph: "⚙", cls: "bg-white border border-dashed border-[#a9c7ee] text-codex", aux: true, tip: "джоба Codex" };
-  if (file.engine === "codex") return { glyph: "⌘", cls: "bg-codex-soft text-codex", aux: false, tip: "сесія Codex" };
-  if (file.kind === "субагент") return { glyph: "⤷", cls: "bg-white border border-[#f3d9cd] text-claude", aux: false, tip: "субагент Claude" };
-  return { glyph: "✳", cls: "bg-claude-soft text-claude", aux: false, tip: "сесія Claude" };
-}
-
 /** Ukrainian plural form: ukPlural(n, "гілка", "гілки", "гілок"). */
 export function ukPlural(n: number, one: string, few: string, many: string): string {
   const mod10 = n % 10;

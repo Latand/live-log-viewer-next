@@ -1,7 +1,9 @@
 "use client";
 
+import { ArrowDownToLine, CornerDownRight, type LucideIcon, Wrench } from "lucide-react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
+import { ArrowDown, ChevronUp, Sparkle } from "@/components/icons";
 import { useLogTail } from "@/hooks/useLogTail";
 import type { FileEntry } from "@/lib/types";
 
@@ -15,7 +17,7 @@ import { TaskHeader } from "./TaskHeader";
 const RENDER_STEP = 1500;
 
 /** Animated presence row: the agent of a live transcript is mid-turn right now. */
-function WorkingRow({ label }: { label: string }) {
+function WorkingRow({ icon: Icon, label }: { icon: LucideIcon; label: string }) {
   return (
     <div className="mt-2 flex items-center gap-2 text-[12px] font-semibold text-ok">
       <span className="flex items-center gap-0.5" aria-hidden>
@@ -23,6 +25,7 @@ function WorkingRow({ label }: { label: string }) {
         <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-ok [animation-delay:150ms]" />
         <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-ok [animation-delay:300ms]" />
       </span>
+      <Icon className="h-3.5 w-3.5" aria-hidden />
       {label}
     </div>
   );
@@ -136,12 +139,12 @@ export function LogFeed({ file, files, onSelect, showSvc, lineFilter, onStatus, 
   const canRevealOlder = hiddenLocal > 0 || tail.hasMore;
 
   const lastItem = feed.items.at(-1);
-  const workingLabel =
+  const working: { icon: LucideIcon; label: string } =
     lastItem?.kind === "cmd" && lastItem.call.status === "run"
-      ? `🔧 виконує ${lastItem.call.cmd.split(/[\s:]/, 1)[0] || "інструмент"}…`
+      ? { icon: Wrench, label: `виконує ${lastItem.call.cmd.split(/[\s:]/, 1)[0] || "інструмент"}…` }
       : lastItem?.kind === "think"
-        ? "✳ думає…"
-        : "✳ працює…";
+        ? { icon: Sparkle, label: "думає…" }
+        : { icon: Sparkle, label: "працює…" };
 
   const jumpToTail = () => {
     const el = scroller.current;
@@ -155,20 +158,20 @@ export function LogFeed({ file, files, onSelect, showSvc, lineFilter, onStatus, 
         magnet ? (
           file.activity === "live" ? (
             <div
-              className={`pointer-events-none absolute bottom-2 right-3 z-10 rounded-full bg-ok px-2 py-0.5 text-[10px] font-bold text-white shadow-card transition-transform duration-200 ${
+              className={`pointer-events-none absolute bottom-2 right-3 z-10 inline-flex items-center gap-1 rounded-full bg-ok px-2 py-0.5 text-[10px] font-bold text-white shadow-card transition-transform duration-200 ${
                 pulse ? "scale-125" : "scale-100"
               }`}
             >
-              ⤓ живий хвіст
+              <ArrowDownToLine className="h-3 w-3" aria-hidden /> живий хвіст
             </div>
           ) : null
         ) : (
           <button
-            className="absolute bottom-2 right-3 z-10 rounded-full border border-line bg-panel px-2.5 py-1 text-[11px] font-semibold text-ink shadow-card hover:border-accent/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            className="absolute bottom-2 right-3 z-10 inline-flex items-center gap-1 rounded-full border border-line bg-panel px-2.5 py-1 text-[11px] font-semibold text-ink shadow-card hover:border-accent/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
             aria-label="Повернутись до живого хвоста"
             onClick={jumpToTail}
           >
-            ↓ {newCount ? `${newCount} нових` : "вниз"}
+            <ArrowDown className="h-3.5 w-3.5" aria-hidden /> {newCount ? `${newCount} нових` : "вниз"}
           </button>
         )
       ) : null}
@@ -194,7 +197,13 @@ export function LogFeed({ file, files, onSelect, showSvc, lineFilter, onStatus, 
                 disabled={tail.loadingOlder}
                 onClick={revealOlder}
               >
-                {tail.loadingOlder ? "завантаження…" : "⤴ показати раніше"}
+                {tail.loadingOlder ? (
+                  "завантаження…"
+                ) : (
+                  <>
+                    <ChevronUp className="h-3.5 w-3.5" aria-hidden /> показати раніше
+                  </>
+                )}
               </button>
             ) : null}
             {!compact && canRevealOlder && feed.items.length ? (
@@ -219,11 +228,13 @@ export function LogFeed({ file, files, onSelect, showSvc, lineFilter, onStatus, 
                 {visibleItems.map((item, idx) => (
                   <FeedItem key={idx + feed.items.length - visibleItems.length} item={item} />
                 ))}
-                {file.activity === "live" ? <WorkingRow label={workingLabel} /> : null}
+                {file.activity === "live" ? <WorkingRow icon={working.icon} label={working.label} /> : null}
                 {file.activity === "recent" && isAwaitingUser(file) ? (
                   <div className="mt-2 text-[11.5px] font-semibold text-[#b8860b]">закінчив хід — чекає відповіді</div>
                 ) : file.activity === "recent" && isSubagent(file) && file.proc !== "running" ? (
-                  <div className="mt-2 text-[11.5px] font-semibold text-dim">⤷ повернувся з результатом</div>
+                  <div className="mt-2 flex items-center gap-1 text-[11.5px] font-semibold text-dim">
+                    <CornerDownRight className="h-3.5 w-3.5" aria-hidden /> повернувся з результатом
+                  </div>
                 ) : null}
               </>
             ) : (

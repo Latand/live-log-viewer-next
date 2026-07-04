@@ -1,5 +1,8 @@
 "use client";
 
+import { CornerDownRight } from "lucide-react";
+
+import { X } from "@/components/icons";
 import type { FileEntry } from "@/lib/types";
 
 import { ProcessStatusControls } from "./TaskHeader";
@@ -45,7 +48,7 @@ export function SwitchCard({ file, title, project, currentProject, descendants, 
       {file.activity === "live" ? null : (
         <button
           type="button"
-          className="absolute right-1.5 top-1.5 z-10 hidden h-5 w-5 items-center justify-center rounded-full border border-line bg-bg text-[10px] font-bold text-dim hover:border-err/50 hover:text-err focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 group-hover:flex group-focus-within:flex"
+          className="absolute right-1.5 top-1.5 z-10 hidden h-5 w-5 items-center justify-center rounded-full border border-line bg-bg text-dim hover:border-err/50 hover:text-err focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 group-hover:flex group-focus-within:flex"
           aria-label="Прибрати з пульта"
           onClick={(event) => {
             event.stopPropagation();
@@ -53,7 +56,7 @@ export function SwitchCard({ file, title, project, currentProject, descendants, 
           }}
           onKeyDown={(event) => event.stopPropagation()}
         >
-          ✕
+          <X className="h-3 w-3" aria-hidden />
         </button>
       )}
       <div className="relative flex min-w-0 items-center gap-1.5">
@@ -81,7 +84,11 @@ export function SwitchCard({ file, title, project, currentProject, descendants, 
       </div>
       <div className="relative mt-auto flex min-w-0 items-center gap-2 text-[10.5px] font-semibold text-dim">
         <span className="shrink-0">{fmtAge(file.mtime)}</span>
-        {descendants ? <span className="shrink-0">⤷ {descendants}</span> : null}
+        {descendants ? (
+          <span className="inline-flex shrink-0 items-center gap-0.5">
+            <CornerDownRight className="h-3 w-3" aria-hidden /> {descendants}
+          </span>
+        ) : null}
       </div>
       {statusLine ? (
         <div className={`relative mt-1 min-w-0 truncate ${large ? "text-[11.5px]" : "text-[10.5px]"} font-semibold text-ink/75`}>
