@@ -248,7 +248,7 @@ export function DraftAgentPane({
   return (
     <section
       data-pan-ignore
-      className="relative flex h-full min-h-0 min-w-0 flex-col overflow-hidden rounded-[10px] border border-t-4 border-line bg-panel shadow-card"
+      className="relative flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-[10px] border border-t-4 border-line bg-panel shadow-card"
       style={{ borderTopColor: tint.color }}
       aria-label="Чернетка нової розмови з агентом"
     >
