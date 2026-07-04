@@ -131,7 +131,9 @@ export function useLogTail(file: FileEntry | null, pausedInput = false, cap = 25
         offsetRef.current = chunk.offset;
         setSize(chunk.size);
         setError(null);
-        setTickTime(new Date());
+        /* Idle polls must not re-render every pane every 1.2s: the tick time
+           moves only when bytes actually arrived (status reads "last data"). */
+        if (chunk.data) setTickTime(new Date());
         setLoading(false);
       } catch {
         if (alive && gen === genRef.current) {

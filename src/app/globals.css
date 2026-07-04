@@ -70,6 +70,22 @@ body {
   }
 }
 
+/* While the canvas is being dragged, decorative animations (orbiting borders,
+   pulsing dots) pause so the compositor moves one static layer instead of
+   repainting animated cards mid-pan. */
+.scheme-panning *,
+.scheme-panning *::before,
+.scheme-panning *::after {
+  animation-play-state: paused !important;
+}
+
+/* Feed rows inside compact scheme panes: off-screen messages skip layout and
+   paint entirely; the placeholder height keeps scroll geometry sane. */
+.feed-cv {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 44px;
+}
+
 /* A node entering the scheme canvas fades in instead of popping. */
 @keyframes scheme-in {
   from {

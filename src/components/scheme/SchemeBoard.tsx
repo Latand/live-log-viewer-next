@@ -547,16 +547,38 @@ export function SchemeBoard({ project, groups, manual, files, flows, drafts, foc
     [layout.width, layout.height, vp],
   );
 
+  /* High-rate gestures (wheel, pointermove, pinch) coalesce into one camera
+     update per frame: updater functions queue up and compose inside a single
+     rAF, so deltas are never lost but React renders at most once per frame. */
+  const camQueue = useRef<((c: Camera) => Camera)[]>([]);
+  const camRaf = useRef<number | null>(null);
+  const queueCam = useCallback((fn: (c: Camera) => Camera) => {
+    camQueue.current.push(fn);
+    if (camRaf.current != null) return;
+    camRaf.current = requestAnimationFrame(() => {
+      camRaf.current = null;
+      const fns = camQueue.current;
+      camQueue.current = [];
+      setCam((c) => fns.reduce((acc, apply) => apply(acc), c));
+    });
+  }, []);
+  useEffect(
+    () => () => {
+      if (camRaf.current != null) cancelAnimationFrame(camRaf.current);
+    },
+    [],
+  );
+
   const applyZoom = useCallback(
     (cx: number, cy: number, factor: number) => {
-      setCam((c) => {
+      queueCam((c) => {
         const z = Math.min(MAX_Z, Math.max(MIN_Z, c.z * factor));
         if (z === c.z) return c;
         const k = z / c.z;
         return clampCam({ z, x: cx - (cx - c.x) * k, y: cy - (cy - c.y) * k });
       });
     },
-    [clampCam],
+    [clampCam, queueCam],
   );
 
   const zoomCenter = useCallback(
@@ -651,9 +673,12 @@ export function SchemeBoard({ project, groups, manual, files, flows, drafts, foc
     }
   }, [project, layout, fitCam]);
 
+  /* Debounced: a pan produces hundreds of camera frames, storage needs only
+     the resting position. */
   useEffect(() => {
     if (initedFor.current !== project) return;
-    sessionStorage.setItem("llvCam:" + project, JSON.stringify(cam));
+    const t = window.setTimeout(() => sessionStorage.setItem("llvCam:" + project, JSON.stringify(cam)), 300);
+    return () => window.clearTimeout(t);
   }, [cam, project]);
 
   /* An opened conversation glides into view once its node exists in the layout. */
@@ -694,11 +719,11 @@ export function SchemeBoard({ project, groups, manual, files, flows, drafts, foc
       event.preventDefault();
       const dx = event.shiftKey && !event.deltaX ? event.deltaY : event.deltaX;
       const dy = event.shiftKey && !event.deltaX ? 0 : event.deltaY;
-      setCam((c) => clampCam({ ...c, x: c.x - dx, y: c.y - dy }));
+      queueCam((c) => clampCam({ ...c, x: c.x - dx, y: c.y - dy }));
     };
     el.addEventListener("wheel", onWheel, { passive: false });
     return () => el.removeEventListener("wheel", onWheel);
-  }, [applyZoom, clampCam]);
+  }, [applyZoom, clampCam, queueCam]);
 
   /* Keyboard: H/V tools, Space-hold temporary hand, +/−/1 zoom, 0 fit,
      arrows pan, Esc drops the selection. */
@@ -800,7 +825,7 @@ export function SchemeBoard({ project, groups, manual, files, flows, drafts, foc
         const cx = (a!.x + b!.x) / 2;
         const cy = (a!.y + b!.y) / 2;
         const factor = pinch.d > 0 ? d / pinch.d : 1;
-        setCam((c) => {
+        queueCam((c) => {
           const z = Math.min(MAX_Z, Math.max(MIN_Z, c.z * factor));
           const k = z / c.z;
           return clampCam({ z, x: cx - (pinch.cx - c.x) * k, y: cy - (pinch.cy - c.y) * k });
@@ -813,7 +838,7 @@ export function SchemeBoard({ project, groups, manual, files, flows, drafts, foc
     if (!pan) return;
     const dx = event.clientX - pan.sx;
     const dy = event.clientY - pan.sy;
-    setCam((c) => clampCam({ ...c, x: pan.cx + dx, y: pan.cy + dy }));
+    queueCam((c) => clampCam({ ...c, x: pan.cx + dx, y: pan.cy + dy }));
   };
 
   /* Gestures end on window-level listeners: a pointerup outside the viewport
@@ -855,24 +880,35 @@ export function SchemeBoard({ project, groups, manual, files, flows, drafts, foc
     [vp, clampCam],
   );
 
+  const tile = 24 * cam.z;
+
   return (
     <div
       ref={viewportRef}
       className={`relative min-h-0 flex-1 overflow-hidden ${
         panning ? "cursor-grabbing select-none" : handLike ? "cursor-grab" : ""
       } ${handLike ? "touch-none" : ""}`}
-      style={{
-        backgroundImage: "radial-gradient(rgba(28,28,34,0.09) 1px, transparent 1px)",
-        backgroundSize: `${24 * cam.z}px ${24 * cam.z}px`,
-        backgroundPosition: `${cam.x}px ${cam.y}px`,
-      }}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onDoubleClick={onDoubleClick}
     >
+      {/* Dot grid on its own composited layer: panning moves it with a
+          transform (modulo one tile) instead of repainting the viewport
+          background every frame. */}
+      <div
+        aria-hidden
+        className="pointer-events-none absolute"
+        style={{
+          inset: -tile,
+          backgroundImage: "radial-gradient(rgba(28,28,34,0.09) 1px, transparent 1px)",
+          backgroundSize: `${tile}px ${tile}px`,
+          transform: `translate(${((cam.x % tile) + tile) % tile}px, ${((cam.y % tile) + tile) % tile}px)`,
+          willChange: "transform",
+        }}
+      />
       <div
         key={project}
-        className="absolute left-0 top-0"
+        className={`absolute left-0 top-0 ${panning ? "scheme-panning" : ""}`}
         style={
           {
             width: layout.width,

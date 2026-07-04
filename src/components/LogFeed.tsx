@@ -16,6 +16,11 @@ import { TaskHeader } from "./TaskHeader";
 
 /** Items rendered initially and added per «показати раніше» step. */
 const RENDER_STEP = 1500;
+/** Compact scheme panes keep the DOM small — five agents on the canvas must
+    not mount thousands of message nodes each; «показати раніше» still walks
+    the full history in steps. */
+const COMPACT_INITIAL = 300;
+const COMPACT_STEP = 500;
 
 /** Animated presence row: the agent of a live transcript is mid-turn right now. */
 function WorkingRow({ icon: Icon, label }: { icon: LucideIcon; label: string }) {
@@ -53,8 +58,11 @@ export function LogFeed({ file, files, onSelect, showSvc, lineFilter, onStatus, 
      applies only while the magnet holds the bottom in view anyway. */
   const tail = useLogTail(file, paused, magnet && compact ? 2500 : 0);
   const scroller = useRef<HTMLDivElement | null>(null);
+  const content = useRef<HTMLDivElement | null>(null);
   const anchorRef = useRef<{ top: number; height: number } | null>(null);
-  const [visibleCount, setVisibleCount] = useState(RENDER_STEP);
+  const initialCount = compact ? COMPACT_INITIAL : RENDER_STEP;
+  const revealStep = compact ? COMPACT_STEP : RENDER_STEP;
+  const [visibleCount, setVisibleCount] = useState(initialCount);
   const [newCount, setNewCount] = useState(0);
   const [pulse, setPulse] = useState(false);
   const [endedQuestion, setEndedQuestion] = useState<string | null>(null);
@@ -77,7 +85,7 @@ export function LogFeed({ file, files, onSelect, showSvc, lineFilter, onStatus, 
   };
 
   // eslint-disable-next-line react-hooks/set-state-in-effect
-  useEffect(() => setVisibleCount(RENDER_STEP), [file?.path]);
+  useEffect(() => setVisibleCount(initialCount), [file?.path, initialCount]);
   /* External Follow toggle (focus header) drives the same magnet. */
   useEffect(() => {
     if (follow !== magnetRef.current) {
@@ -111,9 +119,13 @@ export function LogFeed({ file, files, onSelect, showSvc, lineFilter, onStatus, 
     }
   }, [file?.pendingQuestion?.toolUseId, file?.proc, file]);
 
+  /* buildFeed reads only engine/fmt/activity off the file: depending on those
+     fields (not the object identity, which changes every /api/files poll)
+     keeps item identities stable, so memoized FeedItems skip re-rendering. */
   const feed = useMemo(
     () => (file ? buildFeed(file, tail.lines, showSvc, lineFilter.toLowerCase()) : { items: [], hiddenServiceCount: 0 }),
-    [file, tail.lines, showSvc, lineFilter],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [file?.path, file?.engine, file?.fmt, file?.activity, tail.lines, showSvc, lineFilter],
   );
   const hiddenLocal = Math.max(0, feed.items.length - visibleCount);
   const visibleItems = hiddenLocal ? feed.items.slice(-visibleCount) : feed.items;
@@ -125,21 +137,6 @@ export function LogFeed({ file, files, onSelect, showSvc, lineFilter, onStatus, 
     else onStatus("");
   }, [tail.error, tail.size, tail.tickTime, file, onStatus]);
 
-  /* Glued: keep the bottom in view. Released: count what arrived meanwhile
-     (prepended history is old content, so it stays out of the counter). */
-  useEffect(() => {
-    const len = feed.items.length;
-    const prepended = tail.prependGen !== lastPrependRef.current;
-    lastPrependRef.current = tail.prependGen;
-    const delta = len - lastLenRef.current;
-    lastLenRef.current = len;
-    if (magnet) {
-      if (scroller.current) scroller.current.scrollTop = scroller.current.scrollHeight;
-    } else if (!prepended && delta > 0) {
-      setNewCount((count) => count + delta);
-    }
-  }, [feed.items.length, magnet, tail.prependGen]);
-
   /* Older history grows the content above the viewport; keep what the user
      was reading in place by compensating the scroll offset. */
   useLayoutEffect(() => {
@@ -150,11 +147,44 @@ export function LogFeed({ file, files, onSelect, showSvc, lineFilter, onStatus, 
     el.scrollTop = anchor.top + (el.scrollHeight - anchor.height);
   }, [tail.prependGen, visibleCount]);
 
+  /* Glued: keep the bottom in view. Keyed by item-list identity, not length —
+     at the tail cap every poll trims above and appends below with the count
+     unchanged, and a length key would skip the re-glue, letting the viewport
+     drift up until it drops out of follow. Pre-paint so the trimmed frame is
+     never shown off-bottom. Released: count what arrived meanwhile (prepended
+     history is old content, so it stays out of the counter). */
+  useLayoutEffect(() => {
+    const len = feed.items.length;
+    const prepended = tail.prependGen !== lastPrependRef.current;
+    lastPrependRef.current = tail.prependGen;
+    const delta = len - lastLenRef.current;
+    lastLenRef.current = len;
+    if (magnet) {
+      if (scroller.current) scroller.current.scrollTop = scroller.current.scrollHeight;
+    } else if (!prepended && delta > 0) {
+      setNewCount((count) => count + delta);
+    }
+  }, [feed.items, magnet, tail.prependGen]);
+
+  /* Height also changes without the item list changing — images decode, the
+     working/question rows toggle. Re-glue on any content resize while glued. */
+  useEffect(() => {
+    const el = scroller.current;
+    const inner = content.current;
+    if (!el || !inner) return;
+    const observer = new ResizeObserver(() => {
+      if (magnetRef.current) el.scrollTop = el.scrollHeight;
+    });
+    observer.observe(inner);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+
   const revealOlder = () => {
     const el = scroller.current;
     if (el) anchorRef.current = { top: el.scrollTop, height: el.scrollHeight };
-    if (hiddenLocal) setVisibleCount((value) => value + RENDER_STEP);
-    else if (tail.hasMore) void tail.loadOlder().then(() => setVisibleCount((value) => value + RENDER_STEP));
+    if (hiddenLocal) setVisibleCount((value) => value + revealStep);
+    else if (tail.hasMore) void tail.loadOlder().then(() => setVisibleCount((value) => value + revealStep));
   };
   const canRevealOlder = hiddenLocal > 0 || tail.hasMore;
 
@@ -206,7 +236,7 @@ export function LogFeed({ file, files, onSelect, showSvc, lineFilter, onStatus, 
           if (el.scrollTop < 120 && canRevealOlder && !tail.loadingOlder && !tail.loading) revealOlder();
         }}
       >
-      <div className={compact ? "px-3 pb-4 text-[13px]" : "mx-auto w-full max-w-[1060px] px-6 pb-16"}>
+      <div ref={content} className={compact ? "px-3 pb-4 text-[13px]" : "mx-auto w-full max-w-[1060px] px-6 pb-16"}>
         {!file ? (
           <div className="mt-[20vh] text-center text-dim">Вибери лог зліва — стрічка оновлюється сама</div>
         ) : (
@@ -245,9 +275,18 @@ export function LogFeed({ file, files, onSelect, showSvc, lineFilter, onStatus, 
             {compact ? null : <TaskHeader file={file} files={files} onSelect={onSelect} />}
             {feed.items.length ? (
               <>
-                {visibleItems.map((item, idx) => (
-                  <FeedItem key={idx + feed.items.length - visibleItems.length} item={item} />
-                ))}
+                {visibleItems.map((item, idx) => {
+                  const key = idx + feed.items.length - visibleItems.length;
+                  /* Compact panes live on the zoomable canvas: off-screen rows
+                     skip layout/paint entirely via content-visibility. */
+                  return compact ? (
+                    <div key={key} className="feed-cv">
+                      <FeedItem item={item} />
+                    </div>
+                  ) : (
+                    <FeedItem key={key} item={item} />
+                  );
+                })}
                 {file.pendingQuestion || file.waitingInput ? <QuestionCard key={file.pendingQuestion?.toolUseId ?? "waiting"} file={file} /> : null}
                 {!file.pendingQuestion && !file.waitingInput && endedQuestion ? (
                   <div className="my-4 rounded-[8px] border border-line bg-chip px-4 py-3 text-[13px] font-semibold text-dim">{endedQuestion}</div>
