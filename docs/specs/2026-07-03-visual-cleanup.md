@@ -6,7 +6,7 @@ Problems seen on a real screen (wide desktop, focus mode on a Claude session):
 ## 1. Raw log text used as titles
 
 Sidebar rows and the focus top bar show raw last-message text, including markdown
-syntax: «Готово. Handoff створений і перевірений: [2026-07-03-…md](/home/latand/…)».
+syntax: «Готово. Handoff створений і перевірений: [2026-07-03-…md](/home/user/…)».
 A second row shows a full agent prompt («Read .tmux-multi-agent/… You are a
 read-only research worker…») wrapped over 5 lines.
 
