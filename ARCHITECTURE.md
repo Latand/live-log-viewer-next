@@ -115,6 +115,30 @@ Keep components small and prop-driven; server logic stays in `src/lib/scanner`
 
 ## Server side (Node runtime, App Router route handlers)
 
+### Agent questions and notifications
+
+Live Claude transcripts are checked for a pending `AskUserQuestion` or
+`ExitPlanMode` only at the tail: the scanner considers the latest assistant
+message and ignores older unanswered tool calls once the assistant has moved
+on. `src/lib/scanner/questions.ts` normalizes the structured payload into
+`FileEntry.pendingQuestion`; `src/lib/scanner/waitingInput.ts` supplies the
+scrape fallback for non-structured TUI prompts after a stable screen and a
+prompt-like tail.
+
+Answers go through `src/app/api/answer/route.ts`. The route trusts only scanner
+known live transcripts, resolves the tmux pane from the scanner pid, verifies a
+short normalized fragment of the question on screen, navigates with arrows, and
+checks the highlighted option label before pressing `Enter` or `Space`.
+Confirmation polls the single transcript for the matching `tool_result`.
+
+Question visibility rides on the normal `/api/files` poll. Feed cards live in
+`src/components/feed/QuestionCard.tsx`; overview promotion is handled by the
+switchboard/project rail state. In-app notifications use the page title, a
+dismissible toast, and the question chime. Closed-tab notifications use the
+Push API: VAPID keys and subscriptions live under `~/.claude/viewer-state`,
+payloads are encrypted with `aes128gcm`, and the service worker opens the
+deep link for the waiting session.
+
 `src/app/api/files/route.ts` — GET, returns the shortlisted file entries
 (same JSON shape as the prototype `/files`: path, root, name, project, title,
 engine, kind, fmt, parent, mtime, size, activity, model, cmd, cmdDesc).

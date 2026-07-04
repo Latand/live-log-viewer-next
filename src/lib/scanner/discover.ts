@@ -80,6 +80,8 @@ export function discoverFiles(): FileEntry[] {
       proc: null,
       pid: null,
       model: null,
+      pendingQuestion: null,
+      waitingInput: null,
     };
   });
 }

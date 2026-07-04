@@ -1,11 +1,15 @@
 import type { FileEntry } from "../types";
+import { notifyQuestion } from "../push";
+import { resolveTarget } from "../tmux";
 import { activity } from "./activity";
 import { discoverFiles } from "./discover";
 import { numberValue, readJson } from "./json";
 import { linkEntries } from "./links";
 import { entryModel } from "./model";
 import { outputHolders, pidAlive } from "./process";
+import { pendingQuestionFor } from "./questions";
 import { assignTranscriptPids } from "./transcripts";
+import { waitingInputFor } from "./waitingInput";
 
 function applyProcessState(entry: FileEntry, holders: Map<string, number>, job: Record<string, unknown> | null) {
   if (entry.root === "codex-jobs") {
@@ -71,6 +75,14 @@ export async function listFiles(): Promise<FileEntry[]> {
     applyProcessState(entry, holders, jobs.get(entry.path) ?? null);
   }
   assignTranscriptPids(entries);
+  await Promise.all(entries.map(async (entry) => {
+    const pending = pendingQuestionFor(entry);
+    entry.pendingQuestion = pending && entry.pid !== null ? { ...pending, paneTarget: await resolveTarget(entry.pid) } : pending;
+    entry.waitingInput = await waitingInputFor(entry);
+  }));
+  for (const entry of entries) {
+    if (entry.pendingQuestion || entry.waitingInput) void notifyQuestion(entry);
+  }
   linkEntries(entries);
   return entries;
 }

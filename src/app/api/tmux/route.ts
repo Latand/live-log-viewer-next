@@ -122,6 +122,22 @@ export async function POST(req: NextRequest): Promise<NextResponse<SendResponse 
     }
   }
 
+  if (body.action === "resume") {
+    if (!filePath || !pathAllowed(filePath)) {
+      return NextResponse.json({ error: "для відкриття потрібен path розмови" }, { status: 400 });
+    }
+    const entry = (await listFiles()).find((item) => item.path === filePath);
+    if (!entry) return NextResponse.json({ error: "файл невідомий переглядачу" }, { status: 403 });
+    const spec = resumeSpecFor(entry.root, entry.path);
+    if (!spec) return NextResponse.json({ error: "цю розмову неможливо відновити" }, { status: 409 });
+    try {
+      const sent = await sendToResumedAgent(entry.path, spec, "");
+      return NextResponse.json({ ok: true, target: sent.target, spawned: sent.spawned });
+    } catch (error) {
+      return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 500 });
+    }
+  }
+
   const text = typeof body.text === "string" ? body.text : "";
   const { images, error: imageError } = collectImagePayloads(body);
   if (imageError) {

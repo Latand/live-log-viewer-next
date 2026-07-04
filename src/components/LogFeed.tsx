@@ -10,6 +10,7 @@ import type { FileEntry } from "@/lib/types";
 import { isAwaitingUser } from "@/hooks/useSwitchboardData";
 
 import { buildFeed, FeedItem } from "./feed/renderers";
+import { QuestionCard } from "./feed/QuestionCard";
 import { isSubagent } from "./projectModel";
 import { TaskHeader } from "./TaskHeader";
 
@@ -56,6 +57,8 @@ export function LogFeed({ file, files, onSelect, showSvc, lineFilter, onStatus, 
   const [visibleCount, setVisibleCount] = useState(RENDER_STEP);
   const [newCount, setNewCount] = useState(0);
   const [pulse, setPulse] = useState(false);
+  const [endedQuestion, setEndedQuestion] = useState<string | null>(null);
+  const hadQuestionRef = useRef(false);
   const magnetRef = useRef(magnet);
   const lastLenRef = useRef(0);
   const lastPrependRef = useRef(0);
@@ -90,6 +93,23 @@ export function LogFeed({ file, files, onSelect, showSvc, lineFilter, onStatus, 
     },
     [],
   );
+  useEffect(() => {
+    hadQuestionRef.current = false;
+    queueMicrotask(() => setEndedQuestion(null));
+  }, [file?.path]);
+
+  useEffect(() => {
+    if (!file) return;
+    if (file.pendingQuestion) {
+      hadQuestionRef.current = true;
+      queueMicrotask(() => setEndedQuestion(null));
+      return;
+    }
+    if (hadQuestionRef.current && file.proc && file.proc !== "running") {
+      queueMicrotask(() => setEndedQuestion("агент завершився"));
+      hadQuestionRef.current = false;
+    }
+  }, [file?.pendingQuestion?.toolUseId, file?.proc, file]);
 
   const feed = useMemo(
     () => (file ? buildFeed(file, tail.lines, showSvc, lineFilter.toLowerCase()) : { items: [], hiddenServiceCount: 0 }),
@@ -228,6 +248,10 @@ export function LogFeed({ file, files, onSelect, showSvc, lineFilter, onStatus, 
                 {visibleItems.map((item, idx) => (
                   <FeedItem key={idx + feed.items.length - visibleItems.length} item={item} />
                 ))}
+                {file.pendingQuestion || file.waitingInput ? <QuestionCard key={file.pendingQuestion?.toolUseId ?? "waiting"} file={file} /> : null}
+                {!file.pendingQuestion && !file.waitingInput && endedQuestion ? (
+                  <div className="my-4 rounded-[8px] border border-line bg-chip px-4 py-3 text-[13px] font-semibold text-dim">{endedQuestion}</div>
+                ) : null}
                 {file.activity === "live" ? <WorkingRow icon={working.icon} label={working.label} /> : null}
                 {file.activity === "recent" && isAwaitingUser(file) ? (
                   <div className="mt-2 flex items-center gap-1.5 text-[11.5px] font-semibold text-[#b8860b]">
@@ -260,6 +284,7 @@ export function LogFeed({ file, files, onSelect, showSvc, lineFilter, onStatus, 
                 ) : null}
               </div>
             )}
+            {feed.items.length ? null : file.pendingQuestion || file.waitingInput ? <QuestionCard key={file.pendingQuestion?.toolUseId ?? "waiting"} file={file} /> : null}
           </>
         )}
         </div>

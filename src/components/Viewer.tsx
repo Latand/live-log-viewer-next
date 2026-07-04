@@ -1,6 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { X } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { useAgentChimes } from "@/hooks/useAgentChimes";
 import { useFiles } from "@/hooks/useFiles";
@@ -16,10 +17,11 @@ const PROJECT_KEY = "llvProject";
 function readHash(): { filePath: string | null; project: string | null } {
   const fileMatch = location.hash.match(/^#f=(.+)$/);
   if (fileMatch) {
+    const raw = (fileMatch[1] ?? "").replace(/#question$/, "");
     try {
-      return { filePath: decodeURIComponent(fileMatch[1]), project: null };
+      return { filePath: decodeURIComponent(raw), project: null };
     } catch {
-      return { filePath: fileMatch[1], project: null };
+      return { filePath: raw, project: null };
     }
   }
   const projectMatch = location.hash.match(/^#p=(.+)$/);
@@ -46,6 +48,8 @@ export function Viewer() {
   useAgentChimes(files);
   const [project, setProject] = useState<string>(OVERVIEW);
   const [pendingPath, setPendingPath] = useState<string | null>(null);
+  const [toastPath, setToastPath] = useState<string | null>(null);
+  const seenQuestionsRef = useRef<Set<string> | null>(null);
   /* Reopening a file whose project is already selected does not change
      `project`, so ProjectDashboard would never remount or re-read prefs.
      Bumping this on every same-project open gives it an explicit signal. */
@@ -96,10 +100,54 @@ export function Viewer() {
   }, [pendingPath, files, openFile]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
+  useEffect(() => {
+    const count = files.filter((file) => file.pendingQuestion || file.waitingInput).length;
+    document.title = count ? `(${count}) Agent Log Viewer` : "Agent Log Viewer";
+  }, [files]);
+
+  useEffect(() => {
+    const ids = files
+      .map((file) => ({
+        file,
+        id: file.pendingQuestion?.toolUseId ?? (file.waitingInput ? `${file.path}:waiting:${Math.floor(file.waitingInput.since)}` : null),
+      }))
+      .filter((item): item is { file: FileEntry; id: string } => item.id !== null);
+    if (seenQuestionsRef.current === null) {
+      seenQuestionsRef.current = new Set(ids.map((item) => item.id));
+      return;
+    }
+    const next = ids.find((item) => !seenQuestionsRef.current!.has(item.id));
+    for (const item of ids) seenQuestionsRef.current.add(item.id);
+    if (next) queueMicrotask(() => setToastPath(next.file.path));
+  }, [files]);
+
+  const toastFile = toastPath ? files.find((file) => file.path === toastPath) : null;
+
   return (
     <div className="flex h-full">
       <ProjectRail files={files} selected={project} onSelect={selectProject} />
       <main className="flex min-w-0 flex-1 flex-col">
+        {toastFile ? (
+          <div className="fixed right-4 top-4 z-50 flex max-w-[360px] gap-2 rounded-[8px] border border-[#e0ae45]/45 bg-[#fff9ed] px-4 py-3 text-[13px] font-semibold text-ink shadow-card">
+            <button
+              className="min-w-0 flex-1 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+              onClick={() => {
+                openFile(toastFile);
+                setToastPath(null);
+              }}
+            >
+              <span className="block text-[11px] font-bold text-[#8a5a00]">Агент чекає відповіді</span>
+              <span className="line-clamp-2">{toastFile.title}</span>
+            </button>
+            <button
+              className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full border border-line bg-bg text-dim hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+              aria-label="Закрити сповіщення"
+              onClick={() => setToastPath(null)}
+            >
+              <X className="h-3.5 w-3.5" aria-hidden />
+            </button>
+          </div>
+        ) : null}
         {project === OVERVIEW ? (
           <OverviewBoard files={files} onSelectProject={selectProject} onSelectFile={openFile} />
         ) : (

@@ -53,6 +53,7 @@ export interface ProjectSummary {
   project: string;
   /** Live entries anywhere in the project (branches running right now). */
   liveCount: number;
+  attentionCount: number;
   /** Root conversations in the project. */
   conversations: number;
   smt: number;
@@ -64,17 +65,19 @@ export function buildProjectSummaries(files: FileEntry[]): ProjectSummary[] {
     const key = projectKey(file);
     let summary = map.get(key);
     if (!summary) {
-      summary = { project: key, liveCount: 0, conversations: 0, smt: 0 };
+      summary = { project: key, liveCount: 0, attentionCount: 0, conversations: 0, smt: 0 };
       map.set(key, summary);
     }
     if (file.activity === "live") summary.liveCount += 1;
+    if (file.pendingQuestion || file.waitingInput) summary.attentionCount += 1;
     if (isConversation(file)) summary.conversations += 1;
     summary.smt = Math.max(summary.smt, file.mtime);
   }
   return [...map.values()].sort((a, b) => {
-    const al = a.liveCount > 0;
-    const bl = b.liveCount > 0;
+    const al = a.attentionCount > 0;
+    const bl = b.attentionCount > 0;
     if (al !== bl) return al ? -1 : 1;
+    if (a.liveCount !== b.liveCount) return b.liveCount - a.liveCount;
     return tick5(b.smt) - tick5(a.smt) || a.project.localeCompare(b.project);
   });
 }

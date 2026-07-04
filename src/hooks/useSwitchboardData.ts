@@ -55,6 +55,8 @@ function recentBucketSort(a: SwitchboardItem, b: SwitchboardItem): number {
 }
 
 function timelineLabel(file: FileEntry, latestByFile: ReadonlyMap<string, ActionEvent>): string {
+  if (file.pendingQuestion) return file.pendingQuestion.kind === "plan" ? "чекає затвердження плану" : "чекає відповіді на питання";
+  if (file.waitingInput) return "чекає на відповідь у терміналі";
   const event = latestByFile.get(file.path);
   if (event) return `${event.label} · ${fmtAge(event.ts)}`;
   if (file.activity === "live") return "працює…";
@@ -74,6 +76,7 @@ function isReturnedSubagent(file: FileEntry): boolean {
 const WAITING_TTL = 2 * 3600;
 
 export function isAwaitingUser(file: FileEntry, now = Date.now() / 1000): boolean {
+  if (file.pendingQuestion || file.waitingInput) return true;
   if (file.activity === "stalled") return !isReturnedSubagent(file) && now - file.mtime <= WAITING_TTL;
   return file.activity === "recent" && (file.engine === "claude" || file.engine === "codex") && isConversation(file) && !isSubagent(file);
 }
@@ -107,7 +110,9 @@ export function useSwitchboardData(
         const title = cleanTitle(file.title);
         const age = now - file.mtime;
         const kind: SwitchboardCardKind =
-          file.activity === "live"
+          file.pendingQuestion || file.waitingInput
+            ? "waiting"
+            : file.activity === "live"
             ? "working"
             : isAwaitingUser(file, now)
               ? "waiting"

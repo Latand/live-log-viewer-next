@@ -115,6 +115,8 @@ export function syntheticFile(pathname: string): FileEntry {
     proc: null,
     pid: null,
     model: null,
+    pendingQuestion: null,
+    waitingInput: null,
     parent: null,
     name: pathname,
   };

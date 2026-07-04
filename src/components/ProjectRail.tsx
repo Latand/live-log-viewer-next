@@ -8,6 +8,7 @@ import { AccessQrButton } from "./AccessQrButton";
 import { FlipRow } from "./FlipRow";
 import { LimitsFooter } from "./LimitsFooter";
 import { buildProjectSummaries, OVERVIEW } from "./projectModel";
+import { PushBell } from "./PushBell";
 import { fmtAge } from "./utils";
 
 interface Props {
@@ -24,6 +25,7 @@ export function ProjectRail({ files, selected, onSelect }: Props) {
     return q ? summaries.filter((summary) => summary.project.toLowerCase().includes(q)) : summaries;
   }, [summaries, query]);
   const totalLive = useMemo(() => summaries.reduce((sum, s) => sum + s.liveCount, 0), [summaries]);
+  const totalAttention = useMemo(() => summaries.reduce((sum, s) => sum + s.attentionCount, 0), [summaries]);
 
   return (
     <aside className="flex w-[248px] shrink-0 flex-col border-r border-line bg-panel">
@@ -35,7 +37,13 @@ export function ProjectRail({ files, selected, onSelect }: Props) {
             {totalLive}
           </span>
         ) : null}
+        {totalAttention ? (
+          <span className="inline-flex items-center gap-1 rounded-full bg-[#fff1ca] px-2 py-0.5 text-[10.5px] font-bold text-[#8a5a00]">
+            ⏸ {totalAttention}
+          </span>
+        ) : null}
         <AccessQrButton />
+        <PushBell />
       </header>
       <div className="px-2.5 pb-1 pt-2.5">
         <input
@@ -49,6 +57,7 @@ export function ProjectRail({ files, selected, onSelect }: Props) {
         <RailRow
           label="Огляд"
           live={0}
+          attention={0}
           total={null}
           age=""
           active={selected === OVERVIEW}
@@ -62,6 +71,7 @@ export function ProjectRail({ files, selected, onSelect }: Props) {
               <RailRow
                 label={summary.project}
                 live={summary.liveCount}
+                attention={summary.attentionCount}
                 total={summary.conversations}
                 age={fmtAge(summary.smt)}
                 active={selected === summary.project}
@@ -81,6 +91,7 @@ export function ProjectRail({ files, selected, onSelect }: Props) {
 function RailRow({
   label,
   live,
+  attention,
   total,
   age,
   active,
@@ -89,6 +100,7 @@ function RailRow({
 }: {
   label: string;
   live: number;
+  attention: number;
   total: number | null;
   age: string;
   active: boolean;
@@ -116,6 +128,9 @@ function RailRow({
       </span>
       {live > 0 ? (
         <span className="shrink-0 rounded-full bg-[#e5f6ea] px-1.5 py-0.5 text-[10.5px] font-bold text-ok">{live}</span>
+      ) : null}
+      {attention > 0 ? (
+        <span className="shrink-0 rounded-full bg-[#fff1ca] px-1.5 py-0.5 text-[10.5px] font-bold text-[#8a5a00]">⏸ {attention}</span>
       ) : null}
       {total !== null ? <span className="shrink-0 text-[11px] font-semibold text-dim">{total}</span> : null}
     </button>

@@ -16,6 +16,7 @@ import { isChildConversation } from "./projectModel";
 export type PaneState = "live" | "waiting" | "returned" | "stalled" | "done";
 
 export function paneState(file: FileEntry, now = Date.now() / 1000): PaneState {
+  if (file.pendingQuestion || file.waitingInput) return "waiting";
   if (file.activity === "live") return "live";
   if (file.activity === "recent" && isChildConversation(file) && file.proc !== "running") return "returned";
   if (isAwaitingUser(file, now)) return file.activity === "stalled" ? "stalled" : "waiting";

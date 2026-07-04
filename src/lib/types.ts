@@ -30,10 +30,44 @@ export interface FileEntry {
   pid: number | null;
   /** Short model name (fable-5, gpt-5.5, sonnet…) or null when unknown. */
   model: string | null;
+  /** Structured Claude prompt that is currently blocking the live agent. */
+  pendingQuestion: PendingQuestion | null;
+  /** Best-effort TUI scrape fallback for prompts without a transcript protocol. */
+  waitingInput: WaitingInput | null;
   /** claude-tasks only: recovered originating Bash command ("" if not found). */
   cmd?: string;
   /** claude-tasks only: the Bash tool `description` field. */
   cmdDesc?: string;
+}
+
+export interface PendingQuestionOption {
+  label: string;
+  description: string;
+  recommended: boolean;
+}
+
+export interface PendingQuestionItem {
+  question: string;
+  header: string;
+  multiSelect: boolean;
+  options: PendingQuestionOption[];
+}
+
+export interface PendingQuestion {
+  kind: "question" | "plan";
+  toolUseId: string;
+  transcriptPath: string;
+  pid: number;
+  paneTarget: string | null;
+  askedAt: string;
+  questions?: PendingQuestionItem[];
+  plan?: string;
+}
+
+export interface WaitingInput {
+  since: number;
+  screenTail: string;
+  target: string;
 }
 
 /** Response of GET /api/log (forward tail polling and `before` history reads). */

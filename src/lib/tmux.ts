@@ -422,11 +422,21 @@ const SPAWN_POLL_MS = 1_000;
 const SPAWN_STABLE_ROUNDS = 3;
 const SHELL_COMMANDS = new Set(["zsh", "bash", "fish", "sh", "dash"]);
 /* Bottom-bar hints both CLIs draw once their composer accepts input. */
-const READY_MARKERS = /\? for shortcuts|bypass permissions on|Press up to edit|⏎ send/;
+export const READY_MARKERS = /\? for shortcuts|bypass permissions on|Press up to edit|⏎ send/;
 const CLAUDE_RESUME_PICKER = /Resume from summary/;
 /* First launch of an agent in an untrusted directory asks to trust the folder;
    the safe default is highlighted, so Enter confirms it. */
-const TRUST_FOLDER_PROMPT = /trust (?:the files in )?this folder|Do you trust the files/i;
+export const TRUST_FOLDER_PROMPT = /trust (?:the files in )?this folder|Do you trust the files/i;
+/* Blocking prompts an agent CLI draws when it needs a human decision; the
+   waiting-input scrape fallback treats a stable screen matching one of these
+   as «агент чекає на відповідь». */
+export const WAITING_INPUT_PROMPTS = [
+  /Allow command\?/i,
+  /\by\/n\b/i,
+  /Press enter to approve/i,
+  TRUST_FOLDER_PROMPT,
+  /^\s*[❯›].*\d\.\s/m,
+];
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -437,13 +447,19 @@ async function paneCommand(target: TmuxTarget): Promise<string | null> {
   return res && res.code === 0 ? res.stdout.trim() : null;
 }
 
-async function paneScreen(target: TmuxTarget): Promise<string> {
+export async function paneScreen(target: TmuxTarget): Promise<string> {
   const res = await runTmux(["capture-pane", "-p", "-t", target]).catch(() => null);
   return res && res.code === 0 ? res.stdout : "";
 }
 
-function screenTail(screen: string): string {
+export function screenTail(screen: string): string {
   return screen.split("\n").filter((line) => line.trim()).slice(-3).join(" | ").slice(0, 300);
+}
+
+export async function sendKeys(target: TmuxTarget, keys: string[]): Promise<void> {
+  if (!keys.length) return;
+  const res = await runTmux(["send-keys", "-t", target, ...keys]);
+  if (res.code !== 0) throw new Error(res.stderr.trim() || "не вдалося надіслати клавіші");
 }
 
 /**

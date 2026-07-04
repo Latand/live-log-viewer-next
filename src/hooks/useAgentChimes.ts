@@ -39,7 +39,8 @@ export function useAgentChimes(files: FileEntry[]) {
     if (!prev) return;
     let voice = 0;
     for (const [path, state] of next) {
-      const kind = CHIME_OF[state];
+      const file = files.find((item) => item.path === path);
+      const kind = file?.pendingQuestion || file?.waitingInput ? "question" : CHIME_OF[state];
       if (!kind) continue;
       const was = prev.get(path);
       if (was === "live" || was === undefined) chime(kind, panForPane(path), voice++ * STAGGER_MS);
