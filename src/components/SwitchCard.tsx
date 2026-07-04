@@ -62,16 +62,19 @@ export function SwitchCard({ file, title, project, currentProject, descendants, 
       )}
       <div className="relative flex min-w-0 items-center gap-1.5">
         <span className={`h-2 w-2 shrink-0 rounded-full ${activityDot(file.activity)}`} />
-        <span className="shrink-0 rounded-full px-1.5 py-0.5 text-[9.5px] font-bold" style={badge.style}>{badge.label}</span>
+        {/* One identity chip: the model when known (engine lives in the tint
+            and the tooltip), the engine label as fallback. */}
         {file.model ? (
           <span
             className="min-w-0 truncate rounded-full px-1.5 py-0.5 font-mono text-[9px] font-semibold"
             style={{ backgroundColor: effortTint(file).soft, color: effortTint(file).color }}
-            title={effortTitle(file)}
+            title={[badge.label, effortTitle(file)].filter(Boolean).join(" · ")}
           >
             {file.model}
           </span>
-        ) : null}
+        ) : (
+          <span className="shrink-0 rounded-full px-1.5 py-0.5 text-[9.5px] font-bold" style={badge.style}>{badge.label}</span>
+        )}
         <span
           className={`ml-auto min-w-0 truncate rounded-full border border-line bg-bg px-1.5 py-0.5 text-[9.5px] font-semibold ${
             project === currentProject ? "text-dim" : "text-ink"

@@ -1,6 +1,6 @@
 "use client";
 
-import { CornerDownRight } from "lucide-react";
+import { CornerDownRight, GitBranch } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
 import { ChevronRight, X } from "@/components/icons";
@@ -90,22 +90,28 @@ export function BranchPane({ file, files, tasks, onSelect, isRoot, onClose, drag
         {...dragHandle}
       >
         <span className={`h-2 w-2 shrink-0 rounded-full ${activityDot(file.activity)}`} title={DOT_TITLES[state]} />
-        <span className="inline-flex shrink-0 items-center rounded-full px-2 py-0.5 text-[10px] font-bold" style={badge.style}>
-          {badge.label}
-        </span>
+        {/* One identity chip: the model when known (engine lives in the tint
+            and the tooltip), the engine label as fallback. */}
         {file.model ? (
           <span
             className="shrink-0 rounded-full px-1.5 py-0.5 font-mono text-[9.5px] font-semibold"
             style={{ backgroundColor: effortTint(file).soft, color: effortTint(file).color }}
-            title={effortTitle(file)}
+            title={[badge.label, effortTitle(file)].filter(Boolean).join(" · ")}
           >
             {file.model}
           </span>
-        ) : null}
+        ) : (
+          <span className="inline-flex shrink-0 items-center rounded-full px-2 py-0.5 text-[10px] font-bold" style={badge.style}>
+            {badge.label}
+          </span>
+        )}
         {file.ctx ? <CtxChip ctx={file.ctx} /> : null}
         {file.worktree ? (
-          <span className="shrink-0 rounded-full border border-line/80 px-1.5 py-0.5 font-mono text-[9.5px] text-dim" title={`Ворк-дерево ${file.worktree}`}>
-            wt {file.worktree}
+          <span
+            className="inline-flex shrink-0 items-center gap-0.5 rounded-full border border-line/80 px-1.5 py-0.5 font-mono text-[9.5px] text-dim"
+            title={`Ворк-дерево ${file.worktree}`}
+          >
+            <GitBranch className="h-2.5 w-2.5" aria-hidden /> {file.worktree}
           </span>
         ) : null}
         {file.plan ? <PlanChip plan={file.plan} /> : null}
