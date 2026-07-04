@@ -42,3 +42,7 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 prod.log
+
+# local agent-session artifacts
+/.claude/
+/.tmux-multi-agent/

@@ -16,6 +16,8 @@ const eslintConfig = defineConfig([
     "dist/**",
     // Agent worktrees created by Claude Code sessions; each lints itself.
     ".claude/**",
+    // Research artifacts dropped by tmux-multi-agent sessions; third-party code.
+    ".tmux-multi-agent/**",
   ]),
 ]);
 
