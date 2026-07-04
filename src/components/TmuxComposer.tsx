@@ -67,7 +67,7 @@ const hhmm = (at: number) => new Date(at).toLocaleTimeString("uk", { hour12: fal
  * Sent messages stay visible as a queue above the input until dismissed.
  */
 export function TmuxComposer({ file }: { file: FileEntry }) {
-  const target = useTmuxTarget(file.pid);
+  const target = useTmuxTarget(file.pid, canMessageWithoutPane(file) ? file.path : undefined);
   /* Column reshuffles can remount the composer mid-typing; the draft lives in
      sessionStorage so the text survives the remount. */
   const [text, setTextState] = useState(() => {

@@ -5,19 +5,23 @@ import { useEffect, useState } from "react";
 const POLL_MS = 5_000;
 
 /**
- * Polls /api/tmux for the tmux pane that `pid` runs in. Returns the
- * `session:window.pane` target string, or null when the process is outside
- * tmux, unknown to the scanner, or no pid was supplied.
+ * Polls /api/tmux for the tmux pane behind a conversation: the pane its `pid`
+ * runs in, or — for a finished conversation — the resume window previously
+ * spawned for its transcript `path`. Returns the `session:window.pane` target
+ * string, or null when neither yields a live pane.
  */
-export function useTmuxTarget(pid: number | null): string | null {
+export function useTmuxTarget(pid: number | null, path?: string): string | null {
   const [target, setTarget] = useState<string | null>(null);
 
   useEffect(() => {
-    if (pid === null) return;
+    if (pid === null && !path) return;
     let alive = true;
     const load = async () => {
       try {
-        const res = await fetch(`/api/tmux?pid=${pid}`);
+        const query = new URLSearchParams();
+        if (pid !== null) query.set("pid", String(pid));
+        if (path) query.set("path", path);
+        const res = await fetch(`/api/tmux?${query.toString()}`);
         if (!res.ok) return;
         const body = (await res.json()) as { target?: string | null };
         if (alive) setTarget(body.target ?? null);
@@ -31,7 +35,7 @@ export function useTmuxTarget(pid: number | null): string | null {
       alive = false;
       clearInterval(timer);
     };
-  }, [pid]);
+  }, [pid, path]);
 
-  return pid === null ? null : target;
+  return pid === null && !path ? null : target;
 }
