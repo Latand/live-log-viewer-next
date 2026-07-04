@@ -10,6 +10,7 @@ import {
   pidAlive,
   pidWritesPath,
   readArgv,
+  readCwd,
   writingHolders,
   type AgentEngine,
   type AgentProcess,
@@ -213,12 +214,8 @@ export function verifyTranscriptPid(pathname: string, pid: number): boolean {
   const sid = sessionIdFromPath(pathname);
   if (sid !== null && argvSessionId(argv) === sid) return true;
 
-  let cwd: string;
-  try {
-    cwd = fs.readlinkSync(path.join("/proc", String(pid), "cwd"));
-  } catch {
-    return false;
-  }
+  const cwd = readCwd(pid);
+  if (cwd === null) return false;
   if (engine === "claude") return slugifyCwd(cwd) === claudeSlug(pathname);
   const sessionCwd = codexSessionCwd(pathname);
   return sessionCwd !== "" && sessionCwd === cwd;

@@ -1,13 +1,15 @@
 import fs from "node:fs";
 import path from "node:path";
 
-const PROC = "/proc";
+import { procBackend } from "@/lib/proc";
+import { ROOTS } from "./roots";
+
 const HOLDERS_TTL_MS = 5_000;
 const MAX_PATH_HOLDER_CANDIDATES = 256;
 
 export type AgentEngine = "claude" | "codex";
 
-/** A live claude/codex process observed in /proc. `tty` is 0 without a terminal. */
+/** A live claude/codex process observed via the proc backend. `tty` is 0 without a terminal. */
 export interface AgentProcess {
   pid: number;
   engine: AgentEngine;
@@ -21,53 +23,29 @@ let pathMemo: { at: number; key: string; map: Map<string, number> } | null = nul
 let agentMemo: { at: number; list: AgentProcess[] } | null = null;
 
 export function pidAlive(pid: number): boolean {
-  return Number.isInteger(pid) && pid > 0 && fs.existsSync(path.join(PROC, String(pid)));
-}
-
-function scanFdTargets(visit: (target: string, pid: number, fdPath: string) => void): void {
-  let procEntries: fs.Dirent[];
-  try {
-    procEntries = fs.readdirSync(PROC, { withFileTypes: true });
-  } catch {
-    return;
-  }
-
-  for (const procEntry of procEntries) {
-    if (!procEntry.isDirectory() || !/^\d+$/.test(procEntry.name)) continue;
-    const pid = Number(procEntry.name);
-    const fdDir = path.join(PROC, procEntry.name, "fd");
-    let fds: fs.Dirent[];
-    try {
-      fds = fs.readdirSync(fdDir, { withFileTypes: true });
-    } catch {
-      continue;
-    }
-    for (const fd of fds) {
-      const fdPath = path.join(fdDir, fd.name);
-      let target: string;
-      try {
-        target = fs.readlinkSync(fdPath);
-      } catch {
-        continue;
-      }
-      visit(target, pid, fdPath);
-    }
-  }
+  return Number.isInteger(pid) && pid > 0 && procBackend.pidAlive(pid);
 }
 
 /**
- * The permission bits of a /proc fd symlink encode the open mode (`l-wx…` for
- * a writer, `lr-x…` for a reader). Transcript attribution must follow the
- * writer: a monitoring agent that tails another agent's transcript holds a
- * read fd, and pinning its pid would aim send-keys and kill at the wrong
- * process.
+ * All fds anywhere on the system whose target ends in ".output", mapped to
+ * one holding pid each (first found wins; read vs. write mode is not
+ * distinguished — a background task's own output file only ever has one
+ * holder in practice). Scoped to the claude-tasks root: on Linux that scope
+ * is free (the backend already walks all of /proc), on the portable backend
+ * it bounds an `lsof +D` search to a small directory tree instead of the
+ * whole machine.
  */
-function fdWritable(fdPath: string): boolean {
-  try {
-    return (fs.lstatSync(fdPath).mode & 0o200) !== 0;
-  } catch {
-    return false;
-  }
+export function outputHolders(fresh = false): Map<string, number> {
+  const now = Date.now();
+  if (!fresh && outputMemo && now - outputMemo.at < HOLDERS_TTL_MS) return outputMemo.map;
+
+  const holders = new Map<string, number>();
+  procBackend.scanFdTargetsUnder(ROOTS["claude-tasks"], (target, pid) => {
+    if (target.endsWith(".output") && !holders.has(target)) holders.set(target, pid);
+  });
+
+  outputMemo = { at: now, map: holders };
+  return holders;
 }
 
 function realpathSafe(pathname: string): string | null {
@@ -76,19 +54,6 @@ function realpathSafe(pathname: string): string | null {
   } catch {
     return null;
   }
-}
-
-export function outputHolders(fresh = false): Map<string, number> {
-  const now = Date.now();
-  if (!fresh && outputMemo && now - outputMemo.at < HOLDERS_TTL_MS) return outputMemo.map;
-
-  const holders = new Map<string, number>();
-  scanFdTargets((target, pid) => {
-    if (target.endsWith(".output") && !holders.has(target)) holders.set(target, pid);
-  });
-
-  outputMemo = { at: now, map: holders };
-  return holders;
 }
 
 /** Maps each of `paths` to a pid holding it open for writing, when one exists. */
@@ -108,9 +73,11 @@ export function writingHolders(paths: Iterable<string>, fresh = false): Map<stri
 
   const holders = new Map<string, number>();
   if (aliasToPath.size > 0) {
-    scanFdTargets((target, pid, fdPath) => {
+    procBackend.scanFdTargetsFor([...aliasToPath.keys()], (target, pid, writable) => {
+      // writable() goes last: it is the only per-fd probe with a real cost
+      // (an lstat on Linux), so only alias-matched fds ever pay for it.
       const pathname = aliasToPath.get(target);
-      if (pathname && !holders.has(pathname) && fdWritable(fdPath)) holders.set(pathname, pid);
+      if (pathname && !holders.has(pathname) && writable()) holders.set(pathname, pid);
     });
   }
 
@@ -120,36 +87,27 @@ export function writingHolders(paths: Iterable<string>, fresh = false): Map<stri
 
 /** True when `pid` currently keeps `pathname` open for writing. */
 export function pidWritesPath(pid: number, pathname: string): boolean {
-  const real = realpathSafe(pathname);
-  const fdDir = path.join(PROC, String(pid), "fd");
-  let fds: fs.Dirent[];
-  try {
-    fds = fs.readdirSync(fdDir, { withFileTypes: true });
-  } catch {
-    return false;
-  }
-  for (const fd of fds) {
-    const fdPath = path.join(fdDir, fd.name);
-    let target: string;
-    try {
-      target = fs.readlinkSync(fdPath);
-    } catch {
-      continue;
-    }
-    if ((target === pathname || target === real) && fdWritable(fdPath)) return true;
-  }
-  return false;
+  return procBackend.pidWritesPath(pid, pathname);
+}
+
+/** True when `pid` currently keeps `pathname` open in any mode. */
+export function pidHoldsPath(pid: number, pathname: string): boolean {
+  return procBackend.pidHoldsPath(pid, pathname);
 }
 
 export function readArgv(pid: number): string[] {
-  try {
-    return fs
-      .readFileSync(path.join(PROC, String(pid), "cmdline"), "utf8")
-      .split("\0")
-      .filter(Boolean);
-  } catch {
-    return [];
-  }
+  return procBackend.readArgv(pid);
+}
+
+/** Working directory of `pid`, or null when it cannot be determined. */
+export function readCwd(pid: number): string | null {
+  return procBackend.readCwd(pid);
+}
+
+/** Textual argv, space-joined — only used for a substring check, so the loss
+    of exact token boundaries versus readArgv() does not matter to callers. */
+export function readCmdlineText(pid: number): string {
+  return procBackend.readArgv(pid).join(" ");
 }
 
 /**
@@ -176,58 +134,18 @@ export function isHelperArgv(argv: string[]): boolean {
   return argv.some((token) => HELPER_ARGS.has(token));
 }
 
-function readCwd(pid: number): string | null {
-  try {
-    return fs.readlinkSync(path.join(PROC, String(pid), "cwd"));
-  } catch {
-    return null;
-  }
-}
-
-/** tty_nr from /proc/<pid>/stat; 0 means no controlling terminal. */
-function readTty(pid: number): number {
-  let stat: string;
-  try {
-    stat = fs.readFileSync(path.join(PROC, String(pid), "stat"), "utf8");
-  } catch {
-    return 0;
-  }
-  const afterComm = stat.slice(stat.lastIndexOf(")") + 2).trim().split(/\s+/);
-  const tty = Number(afterComm[4]);
-  return Number.isInteger(tty) && tty > 0 ? tty : 0;
-}
-
-/** ppid from /proc/<pid>/stat; null when the process is gone or is pid 1. */
+/** ppid of `pid`; null when the process is gone or its parent is pid 1. */
 export function readPpid(pid: number): number | null {
-  let stat: string;
-  try {
-    stat = fs.readFileSync(path.join(PROC, String(pid), "stat"), "utf8");
-  } catch {
-    return null;
-  }
-  const afterComm = stat.slice(stat.lastIndexOf(")") + 2).trim().split(/\s+/);
-  const ppid = Number(afterComm[1]);
-  return Number.isInteger(ppid) && ppid > 1 ? ppid : null;
+  return procBackend.readPpid(pid);
 }
 
 /**
- * Value of `name` in /proc/<pid>/environ. The environ array can carry the
- * variable more than once when wrapper shells re-export it; the last
- * occurrence is what child processes inherit.
+ * Value of `name` in `pid`'s environment. On the portable backend this is
+ * always null — see proc/portable.ts's readEnvVar for why — so callers must
+ * already tolerate a missing value (they do: it is one signal among several).
  */
 export function readEnvVar(pid: number, name: string): string | null {
-  let environ: string;
-  try {
-    environ = fs.readFileSync(path.join(PROC, String(pid), "environ"), "utf8");
-  } catch {
-    return null;
-  }
-  const prefix = name + "=";
-  let value: string | null = null;
-  for (const pair of environ.split("\0")) {
-    if (pair.startsWith(prefix)) value = pair.slice(prefix.length);
-  }
-  return value;
+  return procBackend.readEnvVar(pid, name);
 }
 
 /** All non-helper claude/codex processes currently alive, memoised briefly. */
@@ -236,22 +154,11 @@ export function agentProcesses(fresh = false): AgentProcess[] {
   if (!fresh && agentMemo && now - agentMemo.at < HOLDERS_TTL_MS) return agentMemo.list;
 
   const list: AgentProcess[] = [];
-  let procEntries: fs.Dirent[];
-  try {
-    procEntries = fs.readdirSync(PROC, { withFileTypes: true });
-  } catch {
-    agentMemo = { at: now, list };
-    return list;
-  }
-  for (const procEntry of procEntries) {
-    if (!procEntry.isDirectory() || !/^\d+$/.test(procEntry.name)) continue;
-    const pid = Number(procEntry.name);
-    const argv = readArgv(pid);
-    const engine = argvEngine(argv);
-    if (engine === null || isHelperArgv(argv)) continue;
-    const cwd = readCwd(pid);
-    if (cwd === null) continue;
-    list.push({ pid, engine, argv, cwd, tty: readTty(pid) });
+  for (const proc of procBackend.listProcesses()) {
+    const engine = argvEngine(proc.argv);
+    if (engine === null || isHelperArgv(proc.argv)) continue;
+    if (proc.cwd === null) continue;
+    list.push({ pid: proc.pid, engine, argv: proc.argv, cwd: proc.cwd, tty: proc.tty });
   }
   agentMemo = { at: now, list };
   return list;

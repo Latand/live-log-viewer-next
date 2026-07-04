@@ -6,12 +6,31 @@ import type { RootKey } from "../types";
 
 const HOME = os.homedir();
 
+/**
+ * Claude Code writes background-task output under a per-uid "claude-<uid>"
+ * directory inside the OS temp dir. On Linux `os.tmpdir()` is normally "/tmp"
+ * itself, so both candidates below coincide. On macOS `os.tmpdir()` resolves
+ * to a per-session path under $TMPDIR (e.g. /var/folders/xx/yyyy/T), which is
+ * where the CLI actually creates it — "/tmp/claude-<uid>" would never exist
+ * there. Whichever candidate already exists wins; with neither existing yet
+ * (fresh install, no background task run so far) the tmpdir-based one is kept
+ * since that is what the current platform's CLI would create.
+ */
+function claudeTasksRoot(): string {
+  const uid = process.getuid?.() ?? 1000;
+  const tmpdirCandidate = path.join(os.tmpdir(), "claude-" + uid);
+  const legacyCandidate = "/tmp/claude-" + uid;
+  if (tmpdirCandidate === legacyCandidate) return tmpdirCandidate;
+  if (fs.existsSync(tmpdirCandidate)) return tmpdirCandidate;
+  if (fs.existsSync(legacyCandidate)) return legacyCandidate;
+  return tmpdirCandidate;
+}
+
 export const ROOTS: Record<RootKey, string> = {
   "codex-jobs": path.join(HOME, ".claude/plugins/data/codex-openai-codex/state"),
   "codex-sessions": path.join(HOME, ".codex/sessions"),
   "claude-projects": path.join(HOME, ".claude/projects"),
-  // Claude Code writes background-task output under /tmp/claude-<uid>.
-  "claude-tasks": "/tmp/claude-" + (process.getuid?.() ?? 1000),
+  "claude-tasks": claudeTasksRoot(),
 };
 
 export const EXTS = [".log", ".jsonl", ".output", ".txt"] as const;

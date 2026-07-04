@@ -1,4 +1,3 @@
-import fs from "node:fs";
 import path from "node:path";
 
 import { NextRequest, NextResponse } from "next/server";
@@ -6,7 +5,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
 import { listFiles } from "@/lib/scanner";
 import { numberValue, readJson } from "@/lib/scanner/json";
-import { outputHolders, pidAlive } from "@/lib/scanner/process";
+import { outputHolders, pidAlive, pidHoldsPath, readCmdlineText } from "@/lib/scanner/process";
 import { pathAllowed, ROOTS } from "@/lib/scanner/roots";
 import { transcriptEngine, verifyTranscriptPid } from "@/lib/scanner/transcripts";
 import type { ApiError } from "@/lib/types";
@@ -24,42 +23,17 @@ function isUnder(pathname: string, root: string): boolean {
   return Boolean(rel) && !rel.startsWith("..") && !path.isAbsolute(rel);
 }
 
-function readCmdline(pid: number): string {
-  try {
-    return fs.readFileSync(path.join("/proc", String(pid), "cmdline"), "utf8").replaceAll("\0", " ");
-  } catch {
-    return "";
-  }
-}
-
-function pidStillHoldsPath(pid: number, pathname: string): boolean {
-  let fds: fs.Dirent[];
-  try {
-    fds = fs.readdirSync(path.join("/proc", String(pid), "fd"), { withFileTypes: true });
-  } catch {
-    return false;
-  }
-  for (const fd of fds) {
-    try {
-      if (fs.readlinkSync(path.join("/proc", String(pid), "fd", fd.name)) === pathname) return true;
-    } catch {
-      continue;
-    }
-  }
-  return false;
-}
-
 async function derivePid(pathname: string): Promise<number | null | "invalid" | "stale"> {
   if (isUnder(pathname, ROOTS["codex-jobs"]) && pathname.endsWith(".log")) {
     const job = readJson(pathname.replace(/\.log$/, ".json"));
     const pid = numberValue(job?.pid);
     if (pid === null || !pidAlive(pid)) return null;
-    return readCmdline(pid).includes("codex") ? pid : null;
+    return readCmdlineText(pid).includes("codex") ? pid : null;
   }
   if (isUnder(pathname, ROOTS["claude-tasks"]) && pathname.endsWith(".output")) {
     const pid = outputHolders(true).get(pathname) ?? null;
     if (pid === null || !pidAlive(pid)) return null;
-    return pidStillHoldsPath(pid, pathname) ? pid : "stale";
+    return pidHoldsPath(pid, pathname) ? pid : "stale";
   }
   if (transcriptEngine(pathname) !== null) {
     // The pid always comes from the scanner's own attribution; client-supplied

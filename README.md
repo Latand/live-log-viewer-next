@@ -14,9 +14,10 @@ tree, and tails the selected one in real time.
   cards, patches and service events.
 - **Codex companion jobs** (`~/.claude/plugins/data/codex-openai-codex/state`)
   with a one-click jump to the full rollout session behind each job.
-- **Background shell tasks** (`/tmp/claude-<uid>/**/tasks/*.output`) — the
-  originating Bash command is recovered from the session transcript and shown
-  above the terminal output.
+- **Background shell tasks** (`claude-<uid>/**/tasks/*.output` under the OS
+  temp dir — `/tmp` on Linux, `$TMPDIR` on macOS) — the originating Bash
+  command is recovered from the session transcript and shown above the
+  terminal output.
 
 ## Highlights
 
@@ -35,7 +36,9 @@ tree, and tails the selected one in real time.
 
 ## Run
 
-Requires [bun](https://bun.sh) (or npm/pnpm) and Node 18+.
+Requires [bun](https://bun.sh) (or npm/pnpm), Node 18+, and
+[tmux](https://github.com/tmux/tmux) for the composer/spawn features (`brew
+install tmux` on macOS, or your distro's package on Linux).
 
 ```bash
 bun install
@@ -45,6 +48,19 @@ bun start --port 8898 --hostname 127.0.0.1
 ```
 
 `bun dev` works too (needs a high OS file-watch limit for large homedirs).
+
+## Platform support
+
+Linux is the native target: process discovery reads `/proc` directly. macOS
+is supported through a portable backend that shells out to `ps` and `lsof`
+instead — same live-process detection, tmux composer targeting, agent
+spawn/kill and background-task discovery, just a bit more subprocess
+overhead per scan. The backend is chosen automatically by `process.platform`
+(see `src/lib/proc/`); `VIEWER_PROC_BACKEND=portable` forces the portable
+path on Linux too, for testing.
+
+Without tmux installed, log viewing still works; the composer, agent spawn
+and resume-into-pane features are unavailable.
 
 ## Security model
 

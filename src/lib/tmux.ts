@@ -6,10 +6,9 @@ import path from "node:path";
 
 import { inboxImageExt, MAX_INBOX_IMAGE_BYTES } from "@/lib/imagePolicy";
 import { listFiles } from "@/lib/scanner";
-import { isHelperArgv, pidAlive, readArgv } from "@/lib/scanner/process";
+import { isHelperArgv, pidAlive, readArgv, readPpid } from "@/lib/scanner/process";
 
 const TMUX = "tmux";
-const PROC = "/proc";
 const PANE_MAP_TTL_MS = 5_000;
 const MAX_ANCESTRY_HOPS = 64;
 const INBOX_DIR = path.join(os.homedir(), ".claude", "viewer-inbox");
@@ -85,19 +84,6 @@ function runTmux(args: string[], input?: Buffer | string): Promise<RunResult> {
   });
 }
 
-/** Parent pid of `pid` from /proc/<pid>/stat, tolerant of parens in comm. */
-function parentPid(pid: number): number | null {
-  let stat: string;
-  try {
-    stat = fs.readFileSync(path.join(PROC, String(pid), "stat"), "utf8");
-  } catch {
-    return null;
-  }
-  const afterComm = stat.slice(stat.lastIndexOf(")") + 2).trim().split(/\s+/);
-  const ppid = Number(afterComm[1]);
-  return Number.isInteger(ppid) && ppid > 0 ? ppid : null;
-}
-
 /** pane_pid → target map from `tmux list-panes -a`, memoised for a few seconds. */
 async function panePidMap(): Promise<Map<number, TmuxTarget>> {
   const now = Date.now();
@@ -149,7 +135,7 @@ export async function resolveTarget(pid: number): Promise<TmuxTarget | null> {
     if (hit) return hit;
     if (seen.has(cursor) || isHelperArgv(readArgv(cursor))) break;
     seen.add(cursor);
-    cursor = parentPid(cursor);
+    cursor = readPpid(cursor);
   }
   return null;
 }
