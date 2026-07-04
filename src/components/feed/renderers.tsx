@@ -1,6 +1,6 @@
 "use client";
 
-import { Fragment, useState } from "react";
+import { Fragment, memo, useState } from "react";
 import type { ReactNode } from "react";
 
 import {
@@ -1202,7 +1202,10 @@ function ProtocolMessageBody({ payload }: { payload: ProtocolPayload }) {
   );
 }
 
-export function FeedItem({ item }: { item: Item }) {
+/* Memoized: feed items are immutable after buildFeed, so a pane re-render
+   (poll tick, camera state, files refresh) skips re-parsing markdown for
+   every message that did not change. */
+export const FeedItem = memo(function FeedItem({ item }: { item: Item }) {
   if (item.kind === "image") return <ImageCard media={item.media} data={item.data} w={item.w} h={item.h} bytes={item.bytes} />;
   if (item.kind === "inbox-image") return <InboxImageCard name={item.name} path={item.path} />;
   if (item.kind === "blob") return <BlobCard bytes={item.bytes} text={item.text} />;
@@ -1357,4 +1360,4 @@ export function FeedItem({ item }: { item: Item }) {
   if (item.kind === "svc") return <div className="my-1 break-words text-[11.5px] text-dim">{item.text}</div>;
   if (item.kind === "note") return <div className="my-2 break-words text-[12.5px] text-dim">{md(item.text)}</div>;
   return <div className={`my-0.5 break-words text-[12.5px] ${item.err ? "text-err" : "text-[#555]"}`}>{item.text}</div>;
-}
+});
