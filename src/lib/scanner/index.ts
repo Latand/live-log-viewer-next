@@ -5,6 +5,7 @@ import { activityVerdict } from "./activity";
 import { tickFlows } from "../flows/engine";
 import { ctxFor } from "./context";
 import { discoverFiles } from "./discover";
+import { entryEffort } from "./effort";
 import { numberValue, readJson } from "./json";
 import { linkEntries } from "./links";
 import { entryModel } from "./model";
@@ -87,6 +88,8 @@ export async function listFiles(): Promise<FileEntry[]> {
     applyProcessState(entry, holders, jobs.get(entry.path) ?? null);
   }
   assignTranscriptPids(entries);
+  // After pid assignment: the claude effort source is the live process argv.
+  for (const entry of entries) entry.effort = entryEffort(entry);
   await Promise.all(entries.map(async (entry) => {
     const pending = pendingQuestionFor(entry);
     entry.pendingQuestion = pending && entry.pid !== null ? { ...pending, paneTarget: await resolveTarget(entry.pid) } : pending;

@@ -38,6 +38,9 @@ export interface FileEntry {
   handoff?: boolean;
   /** Short model name (fable-5, gpt-5.5, sonnet…) or null when unknown. */
   model: string | null;
+  /** Reasoning-effort tier (minimal|low|medium|high|xhigh|max) or null when
+      no reliable source exists (claude transcripts carry none). */
+  effort?: string | null;
   /** Structured Claude prompt that is currently blocking the live agent. */
   pendingQuestion: PendingQuestion | null;
   /** Newest TodoWrite/update_plan state — the agent's plan and current goal. */

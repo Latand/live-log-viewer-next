@@ -7,7 +7,7 @@ import type { FileEntry } from "@/lib/types";
 
 import { CtxChip } from "./PlanChip";
 import { ProcessStatusControls } from "./TaskHeader";
-import { activityDot, cleanTitle, engineBadge, fmtAge, modelTint } from "./utils";
+import { activityDot, cleanTitle, effortTint, effortTitle, engineBadge, fmtAge } from "./utils";
 
 export type SwitchCardSize = "large" | "small";
 export type SwitchCardTone = "waiting" | "stalled" | "working" | "quiet";
@@ -66,7 +66,8 @@ export function SwitchCard({ file, title, project, currentProject, descendants, 
         {file.model ? (
           <span
             className="min-w-0 truncate rounded-full px-1.5 py-0.5 font-mono text-[9px] font-semibold"
-            style={{ backgroundColor: modelTint(file).soft, color: modelTint(file).color }}
+            style={{ backgroundColor: effortTint(file).soft, color: effortTint(file).color }}
+            title={effortTitle(file)}
           >
             {file.model}
           </span>

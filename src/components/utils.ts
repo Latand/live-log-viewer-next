@@ -70,6 +70,58 @@ export function modelTint(file: FileEntry): ModelTint {
   return base;
 }
 
+/* Reasoning-effort ramp: lightness/saturation deltas applied on top of the
+   model tint. Brightness carries the signal (hue never changes, so the scale
+   stays color-blind safe): washed out for minimal/low, base for medium,
+   deeper and more saturated toward xhigh/max. Covers both CLI scales. */
+const EFFORT_RAMP: Record<string, { dl: number; ds: number }> = {
+  minimal: { dl: 20, ds: -32 },
+  low: { dl: 12, ds: -20 },
+  medium: { dl: 0, ds: 0 },
+  high: { dl: -8, ds: 12 },
+  xhigh: { dl: -14, ds: 22 },
+  max: { dl: -19, ds: 30 },
+};
+
+function hexToHsl(hex: string): [number, number, number] {
+  const n = parseInt(hex.slice(1), 16);
+  const r = ((n >> 16) & 255) / 255;
+  const g = ((n >> 8) & 255) / 255;
+  const b = (n & 255) / 255;
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  const l = (max + min) / 2;
+  const d = max - min;
+  if (d === 0) return [0, 0, l * 100];
+  const s = d / (1 - Math.abs(2 * l - 1));
+  const h = max === r ? ((g - b) / d + 6) % 6 : max === g ? (b - r) / d + 2 : (r - g) / d + 4;
+  return [h * 60, s * 100, l * 100];
+}
+
+function shiftTone(hex: string, dl: number, ds: number): string {
+  const [h, s, l] = hexToHsl(hex);
+  const clamp = (v: number) => Math.min(100, Math.max(0, v));
+  return `hsl(${Math.round(h)} ${Math.round(clamp(s + ds))}% ${Math.round(clamp(l + dl))}%)`;
+}
+
+/** Model tint dimmed or deepened by the entry's reasoning-effort tier.
+    Unknown/absent effort returns the plain model tint — renders as today. */
+export function effortTint(file: FileEntry): ModelTint {
+  const base = modelTint(file);
+  const ramp = EFFORT_RAMP[file.effort ?? ""];
+  if (!ramp) return base;
+  return {
+    color: shiftTone(base.color, ramp.dl, ramp.ds),
+    // The pale chip background moves a third as far so text stays readable.
+    soft: shiftTone(base.soft, Math.round(ramp.dl / 3), Math.round(ramp.ds / 2)),
+  };
+}
+
+/** Chip tooltip carrying the raw effort value; empty keeps the chip as-is. */
+export function effortTitle(file: FileEntry): string | undefined {
+  return file.effort ? `Зусилля міркування: ${file.effort}` : undefined;
+}
+
 /** Engine base tint for UI that has no FileEntry yet (e.g. the spawn dialog). */
 export function engineTintOf(engine: string): ModelTint {
   return ENGINE_TINTS[engine] ?? NEUTRAL_TINT;

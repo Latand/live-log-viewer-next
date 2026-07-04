@@ -16,7 +16,7 @@ import { paneState, type PaneState } from "./paneState";
 import { CtxChip, GoalChip, PlanChip } from "./PlanChip";
 import { ProcessStatusControls } from "./TaskHeader";
 import { TmuxComposer } from "./TmuxComposer";
-import { activityDot, cleanTitle, engineBadge, engineEdge, modelTint } from "./utils";
+import { activityDot, cleanTitle, effortTint, effortTitle, engineBadge, engineEdge } from "./utils";
 
 const noop = () => undefined;
 
@@ -96,7 +96,8 @@ export function BranchPane({ file, files, tasks, onSelect, isRoot, onClose, drag
         {file.model ? (
           <span
             className="shrink-0 rounded-full px-1.5 py-0.5 font-mono text-[9.5px] font-semibold"
-            style={{ backgroundColor: modelTint(file).soft, color: modelTint(file).color }}
+            style={{ backgroundColor: effortTint(file).soft, color: effortTint(file).color }}
+            title={effortTitle(file)}
           >
             {file.model}
           </span>
