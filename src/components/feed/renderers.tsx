@@ -3,6 +3,15 @@
 import { Fragment, useState } from "react";
 import type { ReactNode } from "react";
 
+import {
+  debugRaw,
+  parseReview,
+  redactSecrets,
+  splitTargetLine,
+  VERDICT_LINE_RE,
+  type ReviewCardItem,
+  type ReviewSeverity,
+} from "@/lib/review";
 import type { FileEntry } from "@/lib/types";
 
 import {
@@ -21,25 +30,10 @@ import {
   X,
 } from "../icons";
 import { hhmm, ukPlural } from "../utils";
+import { InboxImageCard } from "./InboxImage";
 import { Lightbox } from "./Lightbox";
 
 type Call = { cmd: string; display: string; output: string; status: "run" | "ok" | "err"; label: string; icon: GlyphName; open: boolean };
-type ReviewSeverity = "Critical" | "High" | "Medium" | "Low" | "Info" | "P0" | "P1" | "P2" | "P3";
-type ReviewFinding = {
-  severity: ReviewSeverity;
-  file?: string;
-  line?: number;
-  title: string;
-  body: string;
-};
-type ReviewCardItem = {
-  kind: "review";
-  ts: unknown;
-  verdict?: "REQUEST_CHANGES" | "APPROVE" | "COMMENT";
-  findings: ReviewFinding[];
-  summary: string[];
-  raw: string;
-};
 type CitationEntry = {
   target: string;
   line?: string;
@@ -89,30 +83,17 @@ type Item =
   | { kind: "tnote"; text: string }
   | { kind: "think"; text: string }
   | { kind: "image"; media: string; data: string; w?: number; h?: number; bytes?: number }
+  | { kind: "inbox-image"; name: string; path: string }
   | { kind: "blob"; bytes: number; text: string }
   | { kind: "sysmsg"; label: string; text: string }
   | { kind: "raw"; text: string; err: boolean };
 
 const BLOB_MIN = 20_000;
 const BLOB_KEEP = 200_000;
-const RAW_DEBUG_KEEP = 24_000;
 const MEM_CITATION_RE = /<oai-mem-citation>\s*<citation_entries>([\s\S]*?)<\/citation_entries>\s*<rollout_ids>([\s\S]*?)<\/rollout_ids>\s*<\/oai-mem-citation>/g;
-const VERDICT_LINE_RE = /^\s*(REQUEST_CHANGES|APPROVE|COMMENT)\b/m;
 /* Paths that live under a viewer transcript root can deep-link to that file;
    source-tree paths in a finding stay plain code chips. Mirrors ROOTS. */
 const TRANSCRIPT_PATH_RE = /(?:\/\.codex\/sessions\/|\/\.claude\/projects\/|\/\.claude\/plugins\/data\/codex-openai-codex\/state\/|^\/tmp\/claude-\d+\/)/;
-/* Codex findings are a numbered list; the severity sits inline after the file
-   ref (e.g. "1. [file](path:line) - Medium - …" or "1. `path:line` - Critical. …"),
-   not at the start of the line, so match the item marker and scan for severity. */
-const FINDING_ITEM_RE = /^\s*(\d+)[.)]\s+(.*)$/;
-const SEVERITY_RE = /(?:\[(P[0-3])\]|\b(Critical|High|Medium|Low|Info|P[0-3])\b)/i;
-const PATH_RE =
-  /((?:\.{1,2}\/|\/|~\/)?[\w@.+-][\w@.+\-/]*\.(?:tsx?|jsx?|mjs|cjs|mts|cts|py|go|rs|md|json|ya?ml|toml|css|scss|html|sql|sh|env|ftl|txt))(?::(\d+))?/i;
-const MARKDOWN_LINK_RE = /\[([^\]]+)\]\(([^)\s]+)\)/;
-/* The optional [\w.-]* prefix catches env-style names (DB_PASSWORD, GITHUB_TOKEN);
-   the trailing \b keeps non-secret counters like max_tokens untouched. */
-const SECRET_VALUE_RE =
-  /([\w.-]*(?:api[_-]?key|access[_-]?token|refresh[_-]?token|authorization|bearer|secret|password|passwd|pwd|token))\b(\s*[:=]\s*)(["']?)[^\s"',}]+/gi;
 
 /* A near-whitespace-free run this large is base64/binary:
    render it as a compact chip to keep the feed readable. */
@@ -129,6 +110,37 @@ function num(value: unknown): number | undefined {
 /* Both inter-agent envelopes card-ify the same way: <teammate-message …> and
    <agent-message from="…"> carry the sender in different attribute names. */
 const TMSG_RE = /<(teammate-message|agent-message)\b([^>]*)>([\s\S]*?)<\/\1>/g;
+
+/* Inbox image paths the composer appends to a delivered message, one per line
+   after the text (src/lib/tmux.ts buildImagePayload). The captured basename is
+   what /api/inbox accepts. */
+const INBOX_PATH_RE = /\S*\/\.claude\/viewer-inbox\/([A-Za-z0-9._-]+\.(?:png|jpe?g|gif|webp))/gi;
+
+interface InboxImageRef {
+  name: string;
+  path: string;
+}
+
+/* A line that is only inbox path(s) folds away entirely — its card replaces
+   it; a path mentioned mid-sentence keeps its line verbatim and still gets a
+   card, so prose around it never garbles. */
+function extractInboxImages(text: string): { cleaned: string; images: InboxImageRef[] } {
+  if (!text.includes("/.claude/viewer-inbox/")) return { cleaned: text, images: [] };
+  const images: InboxImageRef[] = [];
+  const seen = new Set<string>();
+  const kept: string[] = [];
+  for (const line of text.split("\n")) {
+    const rest = line.replace(INBOX_PATH_RE, (whole, name: string) => {
+      if (!seen.has(whole)) {
+        seen.add(whole);
+        images.push({ name, path: whole });
+      }
+      return "";
+    });
+    if (rest.trim()) kept.push(line);
+  }
+  return { cleaned: kept.join("\n").trim(), images };
+}
 
 /* Harness-injected turns (system prompts, reminders, command wrappers, hook
    output) arrive as "user" records but the user never typed them; they fold
@@ -301,119 +313,6 @@ function mdBlocks(text: string): ReactNode {
     if (i < lines.length) out.push("\n");
   }
   return out;
-}
-
-/* Applied to tool output, command lines, blobs, and raw log rows before render.
-   Message prose stays unredacted: false positives in narration are costly for
-   readability, and secrets do not appear in prose. */
-function redactSecrets(text: string): string {
-  return text.replace(SECRET_VALUE_RE, (_whole, key: string, sep: string, quote: string) => `${key}${sep}${quote}[redacted]`);
-}
-
-function debugRaw(text: string): { raw: string; truncated: boolean } {
-  const redacted = redactSecrets(text);
-  return { raw: redacted.slice(0, RAW_DEBUG_KEEP), truncated: redacted.length > RAW_DEBUG_KEEP };
-}
-
-function normalizeSeverity(value: string): ReviewSeverity {
-  const upper = value.toUpperCase();
-  if (upper === "P0" || upper === "P1" || upper === "P2" || upper === "P3") return upper;
-  const lower = value.toLowerCase();
-  if (lower === "critical") return "Critical";
-  if (lower === "high") return "High";
-  if (lower === "medium") return "Medium";
-  if (lower === "low") return "Low";
-  return "Info";
-}
-
-function splitTargetLine(target: string): { target: string; line?: string } {
-  const match = target.match(/^(.*?):(\d+(?:-\d+)?)$/);
-  if (!match) return { target };
-  return { target: match[1] ?? target, line: match[2] };
-}
-
-function parseLinkedTarget(text: string): { file?: string; line?: number } {
-  const markdown = text.match(MARKDOWN_LINK_RE);
-  if (markdown) {
-    const target = splitTargetLine((markdown[2] ?? "").replace(/^file:\/\//, ""));
-    const line = target.line ? Number(target.line.split("-", 1)[0]) : undefined;
-    return { file: target.target || markdown[1], line: Number.isFinite(line) ? line : undefined };
-  }
-  const plain = text.match(PATH_RE);
-  if (!plain) return {};
-  const line = plain[2] ? Number(plain[2]) : undefined;
-  return { file: plain[1], line: Number.isFinite(line) ? line : undefined };
-}
-
-/* Drop the file refs and the leading severity marker, keeping the human sentence
-   as a compact title. The full text stays available in the finding body. */
-function findingTitle(body: string): string {
-  let text = body;
-  const sev = text.match(SEVERITY_RE);
-  if (sev && sev.index !== undefined) {
-    const after = text.slice(sev.index + sev[0].length).replace(/^[\s.:–—-]+/, "");
-    if (after) text = after;
-  }
-  return text
-    .replace(MARKDOWN_LINK_RE, "$1")
-    .replace(/`([^`]*)`/g, "$1")
-    .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, 200);
-}
-
-function makeFinding(body: string): ReviewFinding {
-  const severity = normalizeSeverity(body.match(SEVERITY_RE)?.[1] ?? body.match(SEVERITY_RE)?.[2] ?? "Info");
-  const target = parseLinkedTarget(body);
-  const title = findingTitle(body) || body.slice(0, 200) || "Finding";
-  return { severity, file: target.file, line: target.line, title, body: debugRaw(body).raw };
-}
-
-function parseReview(text: string, ts: unknown): ReviewCardItem | null {
-  const verdict = text.match(VERDICT_LINE_RE)?.[1] as ReviewCardItem["verdict"] | undefined;
-  /* A review card requires an explicit verdict line: numbered lists that merely
-     mention P1/P2 (spec item ids, work summaries) stay plain prose. */
-  if (!verdict) return null;
-  const findings: ReviewFinding[] = [];
-  const summary: string[] = [];
-  let buffer: string | null = null;
-  const flush = () => {
-    const body = buffer?.trim();
-    if (body) findings.push(makeFinding(body));
-    buffer = null;
-  };
-
-  for (const rawLine of text.split("\n")) {
-    const line = rawLine.trimEnd();
-    const item = line.match(FINDING_ITEM_RE);
-    if (item) {
-      flush();
-      buffer = item[2] ?? "";
-      continue;
-    }
-    const trimmed = line.trim();
-    if (buffer !== null) {
-      if (trimmed) buffer = `${buffer}\n${trimmed}`;
-      else flush();
-      continue;
-    }
-    if (!trimmed || VERDICT_LINE_RE.test(line) || /^(findings?|summary|open questions?|tests?|residual risk)\s*:?\s*$/i.test(trimmed)) {
-      continue;
-    }
-    if (findings.length === 0 && summary.length < 3 && trimmed.length <= 240) summary.push(trimmed);
-  }
-  flush();
-
-  /* Require real severity markers so a plain numbered list in chat text does not
-     masquerade as a review card. */
-  const severe = findings.filter((finding) => SEVERITY_RE.test(finding.body)).length;
-  const reviewish =
-    Boolean(verdict) ||
-    /^findings?\s*:?$/im.test(text) ||
-    severe >= 2 ||
-    (severe >= 1 && /\b(review|request_changes|approve|comment)\b/i.test(text));
-  if (!reviewish) return null;
-  return { kind: "review", ts, verdict, findings, summary, raw: debugRaw(text).raw };
 }
 
 function parseMemCitation(matchText: string, entriesText: string, idsText: string): MemCitationItem {
@@ -683,7 +582,7 @@ export function buildFeed(file: FileEntry, lines: string[], showSvc: boolean, li
       /* A body that opens with the verdict IS a review: keep the envelope and
          render the content as a review card. The strict start anchor keeps task
          briefs that merely mention APPROVE/REQUEST_CHANGES as plain text. */
-      const review = /^(REQUEST_CHANGES|APPROVE|COMMENT)\b/.test(cleaned) ? parseReview(cleaned, ts) : null;
+      const review = VERDICT_LINE_RE.test(cleaned) ? parseReview(cleaned, ts) : null;
       items.push({ kind: "tmsg", ts, dir: "in", peer, summary, text: review ? "" : cleaned });
       if (review) items.push(review);
       for (const cite of cites) items.push(cite);
@@ -692,8 +591,18 @@ export function buildFeed(file: FileEntry, lines: string[], showSvc: boolean, li
     const leftover = rest.replace(/Another Claude session sent a message:\s*/g, "").trim();
     if (!leftover || pushBlobIfHuge(leftover)) return;
     if (SYS_MSG_RE.test(leftover)) return void items.push({ kind: "sysmsg", label: sysMsgLabel(leftover), text: leftover });
-    if (pushStructured(ts, leftover, (segment) => items.push({ kind: "user", ts, text: segment }))) return;
-    items.push({ kind: "user", ts, text: leftover });
+    const { cleaned, images } = extractInboxImages(leftover);
+    if (cleaned && !pushStructured(ts, cleaned, (segment) => items.push({ kind: "user", ts, text: segment }))) {
+      items.push({ kind: "user", ts, text: cleaned });
+    }
+    for (const image of images) items.push({ kind: "inbox-image", name: image.name, path: image.path });
+  };
+  /* Codex user turns carry no envelopes to unwrap: the bubble text plus a card
+     per attached inbox image. */
+  const addPlainUser = (ts: unknown, text: string) => {
+    const { cleaned, images } = extractInboxImages(text);
+    if (cleaned) items.push({ kind: "user", ts, text: cleaned });
+    for (const image of images) items.push({ kind: "inbox-image", name: image.name, path: image.path });
   };
   const renderCodex = (obj: Record<string, unknown>) => {
     const p = rec(obj.payload);
@@ -706,7 +615,7 @@ export function buildFeed(file: FileEntry, lines: string[], showSvc: boolean, li
       if (p.type === "user_message" && p.message) {
         const text = textPart(p.message);
         if (SYS_MSG_RE.test(text)) return items.push({ kind: "sysmsg", label: sysMsgLabel(text), text });
-        return items.push({ kind: "user", ts, text });
+        return addPlainUser(ts, text);
       }
       if (p.type === "task_started") return addNote("Задача стартувала" + (ts ? " · " + hhmm(ts) : ""));
       if (p.type === "task_complete") return addNote("Задачу завершено" + (ts ? " · " + hhmm(ts) : ""));
@@ -718,7 +627,7 @@ export function buildFeed(file: FileEntry, lines: string[], showSvc: boolean, li
         if (!text) return addSvc("message " + textPart(p.role));
         if (p.role !== "user") return addProse(ts, text);
         if (SYS_MSG_RE.test(text)) return items.push({ kind: "sysmsg", label: sysMsgLabel(text), text });
-        return items.push({ kind: "user", ts, text });
+        return addPlainUser(ts, text);
       }
       if (p.type === "function_call") {
         let args: Record<string, unknown> = {};
@@ -790,7 +699,7 @@ export function buildFeed(file: FileEntry, lines: string[], showSvc: boolean, li
           const message = input.message;
           if (typeof message === "string") {
             const { cleaned, cites } = splitCitations(message);
-            const review = /^(REQUEST_CHANGES|APPROVE|COMMENT)\b/.test(cleaned) ? parseReview(cleaned, ts) : null;
+            const review = VERDICT_LINE_RE.test(cleaned) ? parseReview(cleaned, ts) : null;
             const item: Tmsg = {
               kind: "tmsg",
               ts,
@@ -1295,6 +1204,7 @@ function ProtocolMessageBody({ payload }: { payload: ProtocolPayload }) {
 
 export function FeedItem({ item }: { item: Item }) {
   if (item.kind === "image") return <ImageCard media={item.media} data={item.data} w={item.w} h={item.h} bytes={item.bytes} />;
+  if (item.kind === "inbox-image") return <InboxImageCard name={item.name} path={item.path} />;
   if (item.kind === "blob") return <BlobCard bytes={item.bytes} text={item.text} />;
   if (item.kind === "sysmsg") return <SysMsgCard label={item.label} text={item.text} />;
   if (item.kind === "review") return <ReviewCard item={item} />;

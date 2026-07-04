@@ -7,10 +7,13 @@ import { ChevronRight, X } from "@/components/icons";
 import { registerPane } from "@/lib/chime";
 import type { FileEntry } from "@/lib/types";
 
+import { registerLinkTarget } from "./AgentLink";
+import { DeleteFileButton } from "./DeleteFileButton";
 import { FlipRow } from "./FlipRow";
 import { canHandoff, HandoffHandle } from "./HandoffHandle";
 import { LogFeed } from "./LogFeed";
 import { paneState, type PaneState } from "./paneState";
+import { GoalChip, PlanChip } from "./PlanChip";
 import { ProcessStatusControls } from "./TaskHeader";
 import { TmuxComposer } from "./TmuxComposer";
 import { activityDot, cleanTitle, engineBadge, engineEdge, modelTint } from "./utils";
@@ -46,9 +49,13 @@ interface Props {
   onClose?: () => void;
   /** Native DnD attributes on the header: drag a column by its head to reorder siblings. */
   dragHandle?: React.HTMLAttributes<HTMLElement>;
+  /** Hides the tmux composer: headless runs and finished review rounds take no input. */
+  noComposer?: boolean;
+  /** Slim context bar pinned under the header (e.g. «Раунд 2 · ✖ REQUEST_CHANGES»). */
+  banner?: React.ReactNode;
 }
 
-export function BranchPane({ file, files, tasks, onSelect, isRoot, onClose, dragHandle }: Props) {
+export function BranchPane({ file, files, tasks, onSelect, isRoot, onClose, dragHandle, noComposer, banner }: Props) {
   const paneRef = useRef<HTMLElement | null>(null);
   const badge = engineBadge(file);
   const state = paneState(file);
@@ -57,12 +64,17 @@ export function BranchPane({ file, files, tasks, onSelect, isRoot, onClose, drag
   useEffect(() => {
     if (paneRef.current) return registerPane(file.path, paneRef.current);
   }, [file.path]);
+  /* Link-arrow drop target; re-registers each poll so the pid stays current. */
+  useEffect(() => {
+    if (paneRef.current) return registerLinkTarget(file, paneRef.current);
+  }, [file]);
   return (
     <section
       ref={paneRef}
       /* Text inside the column must stay selectable: the canvas drag-pan skips
          presses that start here (wheel pan still covers scrolling). */
       data-pan-ignore
+      data-link-path={file.path}
       className={`relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-[10px] border bg-panel shadow-card ${
         isRoot ? "border-t-4" : "border-t-2"
       } ${tone.section} ${tone.glow ? "pane-attention" : ""}`}
@@ -89,15 +101,21 @@ export function BranchPane({ file, files, tasks, onSelect, isRoot, onClose, drag
             {file.model}
           </span>
         ) : null}
+        {file.plan ? <PlanChip plan={file.plan} /> : null}
+        {file.goal ? <GoalChip goal={file.goal} /> : null}
         {isRoot ? null : (
-          <span className="inline-flex shrink-0 items-center gap-0.5 text-[10px] text-dim" title="гілка цієї розмови">
-            <CornerDownRight className="h-3 w-3" aria-hidden /> {file.kind}
+          <span
+            className="inline-flex shrink-0 items-center gap-0.5 text-[10px] text-dim"
+            title={file.handoff ? "агент, породжений хендоффом цієї розмови" : "гілка цієї розмови"}
+          >
+            <CornerDownRight className="h-3 w-3" aria-hidden /> {file.handoff ? "хендофф" : file.kind}
           </span>
         )}
         <span className="min-w-0 flex-1 truncate text-[12px] font-semibold" title={cleanTitle(file.title)}>
           {cleanTitle(file.title, 90)}
         </span>
         <ProcessStatusControls file={file} compact />
+        <DeleteFileButton file={file} onDeleted={onClose} />
         {onClose ? (
           <button
             className="inline-flex shrink-0 items-center rounded-[8px] border border-line bg-bg px-1.5 py-0.5 text-dim hover:border-err/40 hover:text-err focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
@@ -108,6 +126,7 @@ export function BranchPane({ file, files, tasks, onSelect, isRoot, onClose, drag
           </button>
         ) : null}
       </header>
+      {banner ?? null}
       {tasks.length ? (
         <FlipRow className="shrink-0 border-b border-line bg-[#fbfbfd]" enter="fade">
           {tasks.map((task) => (
@@ -129,7 +148,7 @@ export function BranchPane({ file, files, tasks, onSelect, isRoot, onClose, drag
         setFollow={noop}
         compact
       />
-      <TmuxComposer file={file} />
+      {noComposer ? null : <TmuxComposer file={file} />}
       {canHandoff(file) ? <HandoffHandle file={file} paneRef={paneRef} /> : null}
     </section>
   );

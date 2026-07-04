@@ -4,6 +4,7 @@ import path from "node:path";
 
 import { NextRequest, NextResponse } from "next/server";
 
+import { persistHandoffLineage, rememberHandoffChild, rememberHandoffPane } from "@/lib/handoffLineage";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
 import { listFiles } from "@/lib/scanner";
 import { ROOTS } from "@/lib/scanner/roots";
@@ -111,9 +112,9 @@ export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse
   const rejection = rejectCrossOrigin(req);
   if (rejection) return rejection;
 
-  let body: { engine?: unknown; cwd?: unknown; prompt?: unknown; images?: unknown };
+  let body: { engine?: unknown; cwd?: unknown; prompt?: unknown; images?: unknown; src?: unknown };
   try {
-    body = (await req.json()) as { engine?: unknown; cwd?: unknown; prompt?: unknown; images?: unknown };
+    body = (await req.json()) as { engine?: unknown; cwd?: unknown; prompt?: unknown; images?: unknown; src?: unknown };
   } catch {
     return NextResponse.json({ error: "некоректний JSON" }, { status: 400 });
   }
@@ -148,7 +149,18 @@ export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse
        appended to its first prompt — the same contract the pane composer uses. */
     const bundle = buildImagePayload(prompt, images);
     imagePaths = bundle.imagePaths;
-    const pane = await spawnAgentWithPrompt(freshSpecFor(engine, cwd), bundle.payload);
+    const spec = freshSpecFor(engine, cwd);
+    const pane = await spawnAgentWithPrompt(spec, bundle.payload);
+    /* Handoff spawn: remember which conversation the new agent descends from,
+       so the scanner links its transcript into the source's tree. A claude
+       spec knows its transcript path up front; a codex rollout is matched
+       later through the pane pid in its /proc ancestry. */
+    const src = typeof body.src === "string" ? body.src : "";
+    if (src && transcriptAllowed(src)) {
+      if (spec.transcript) rememberHandoffChild(spec.transcript, src);
+      if (pane.panePid) rememberHandoffPane(pane.panePid, src);
+      persistHandoffLineage();
+    }
     return NextResponse.json({ ok: true, target: pane.display });
   } catch (error) {
     deleteInboxImages(imagePaths);

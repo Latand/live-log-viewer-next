@@ -6,6 +6,7 @@ import { useEffect, useId, useRef, useState } from "react";
 import { Check, X } from "@/components/icons";
 import type { FileEntry } from "@/lib/types";
 
+import { useAgentLink } from "./AgentLink";
 import { ProcessStatusChip } from "./TaskHeader";
 import { cleanTitle, engineBadge, engineTintOf, modelTint } from "./utils";
 
@@ -78,6 +79,17 @@ export function HandoffHandle({ file, paneRef }: Props) {
   const [status, setStatus] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
   const [copied, setCopied] = useState(false);
   const dirsListId = useId();
+  /* Pulling the pill past the click threshold links this conversation to an
+     existing pane instead of spawning a fresh agent; the hover card yields. */
+  const link = useAgentLink(file, () => {
+    if (hoverTimer.current) window.clearTimeout(hoverTimer.current);
+    hoverTimer.current = null;
+    /* Inlined setOpenBoth: it is declared below and the compiler lint forbids
+       the early reference. */
+    openRef.current = false;
+    setOpen(false);
+  });
+  const { draggingRef: linkDragRef } = link;
 
   useEffect(() => {
     const mq = window.matchMedia("(hover: hover) and (pointer: fine)");
@@ -112,7 +124,8 @@ export function HandoffHandle({ file, paneRef }: Props) {
       pos.raf = requestAnimationFrame(step);
     };
     const onMove = (event: PointerEvent) => {
-      if (openRef.current) return;
+      /* A link drag freezes the pill: the arrow anchor must not chase the cursor. */
+      if (openRef.current || linkDragRef.current) return;
       const rect = pane.getBoundingClientRect();
       /* The wrapper renders right after TmuxComposer, so the previous sibling
          is the composer whose top caps the pill's travel. */
@@ -133,7 +146,7 @@ export function HandoffHandle({ file, paneRef }: Props) {
       pos.current = REST_Y;
       wrap.style.transform = `translate3d(0, ${REST_Y}px, 0)`;
     };
-  }, [paneRef, hoverFine]);
+  }, [paneRef, hoverFine, linkDragRef]);
 
   useEffect(
     () => () => {
@@ -222,14 +235,16 @@ export function HandoffHandle({ file, paneRef }: Props) {
       const res = await fetch("/api/spawn", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ engine, cwd: cwd.trim(), prompt }),
+        /* src ties the fresh agent to this conversation: the scanner links its
+           transcript as a handoff branch, so its pane lands next to this one. */
+        body: JSON.stringify({ engine, cwd: cwd.trim(), prompt, src: file.path }),
       });
       const json = (await res.json()) as { ok?: boolean; target?: string; error?: string };
       if (!res.ok || !json.ok) {
         setStatus({ kind: "err", text: json.error ?? "не вдалося запустити" });
         return;
       }
-      setStatus({ kind: "ok", text: `запущено в tmux ${json.target ?? ""} — скоро з'явиться в списку` });
+      setStatus({ kind: "ok", text: `запущено в tmux ${json.target ?? ""} — з'явиться гілкою поруч із цією колонкою` });
     } catch {
       setStatus({ kind: "err", text: "сервер недоступний" });
     } finally {
@@ -247,8 +262,9 @@ export function HandoffHandle({ file, paneRef }: Props) {
       <button
         type="button"
         aria-expanded={open}
-        aria-label="Перекинути розмову іншому агенту"
-        title="перекинути розмову іншому агенту"
+        aria-label="Перекинути розмову іншому агенту або потягнути стрілку на його панель"
+        title="клік — перекинути новому агенту · потягни стрілку — звʼязати з наявним"
+        onPointerDown={link.onPillPointerDown}
         onPointerEnter={() => {
           if (!hoverFine || openRef.current) return;
           if (hoverTimer.current) window.clearTimeout(hoverTimer.current);
@@ -259,11 +275,12 @@ export function HandoffHandle({ file, paneRef }: Props) {
           hoverTimer.current = null;
         }}
         onClick={() => {
+          if (link.consumeClick()) return;
           if (hoverTimer.current) window.clearTimeout(hoverTimer.current);
           if (openRef.current) setOpenBoth(false);
           else openCard();
         }}
-        className={`pointer-events-auto absolute left-0 top-0 flex h-9 w-6 -translate-y-1/2 items-center justify-center rounded-full border bg-panel shadow-card transition-[opacity,border-color,color] duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+        className={`pointer-events-auto absolute left-0 top-0 flex h-9 w-6 -translate-y-1/2 touch-none items-center justify-center rounded-full border bg-panel shadow-card transition-[opacity,border-color,color] duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
           open ? "border-accent/50 text-accent opacity-100" : "border-line text-dim opacity-60 hover:border-accent/45 hover:text-accent hover:opacity-100"
         }`}
       >
@@ -388,6 +405,7 @@ export function HandoffHandle({ file, paneRef }: Props) {
           ) : null}
         </div>
       ) : null}
+      {link.overlay}
     </div>
   );
 }

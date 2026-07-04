@@ -24,6 +24,7 @@ import {
   Square,
   SquareTerminal,
   Terminal,
+  Trash2,
   Wrench,
   X,
 } from "lucide-react";
@@ -48,6 +49,7 @@ export {
   Sparkle,
   Square,
   SquareTerminal,
+  Trash2,
   X,
 };
 

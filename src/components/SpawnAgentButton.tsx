@@ -113,7 +113,15 @@ export function SpawnAgentButton({ project }: { project: string }) {
         <span className="text-[13px] leading-none text-accent">+</span> Агент
       </button>
       {open ? (
-        <div className="absolute right-0 top-full z-50 mt-1.5 flex w-[360px] flex-col gap-2.5 rounded-[12px] border border-line bg-panel p-3 shadow-[0_8px_28px_rgba(20,20,30,0.14)]">
+        <div
+          className="absolute right-0 top-full z-50 mt-1.5 flex w-[360px] flex-col gap-2.5 rounded-[12px] border border-line bg-panel p-3 shadow-[0_8px_28px_rgba(20,20,30,0.14)]"
+          onKeyDown={(event) => {
+            if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+              event.preventDefault();
+              void spawn();
+            }
+          }}
+        >
           <div className="flex items-center gap-1.5" role="radiogroup" aria-label="Двигун агента">
             {ENGINES.map(({ key, label }) => (
               <button
@@ -155,7 +163,7 @@ export function SpawnAgentButton({ project }: { project: string }) {
               onChange={(event) => setPrompt(event.target.value)}
               onPaste={attachments.handlePaste}
               rows={3}
-              placeholder="що зробити…"
+              placeholder="що зробити… (Ctrl+Enter — запустити)"
               aria-label="Перший промпт для агента"
               className="resize-y rounded-[8px] border border-line bg-bg px-2 py-1.5 text-[12px] font-normal text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
             />

@@ -69,3 +69,69 @@ body {
     animation: none;
   }
 }
+
+/* A node entering the scheme canvas fades in instead of popping. */
+@keyframes scheme-in {
+  from {
+    opacity: 0;
+  }
+}
+
+.scheme-enter {
+  animation: scheme-in 0.3s ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .scheme-enter {
+    animation: none;
+  }
+}
+
+/* Review-round deck: the front card sits on a shallow 3D stage, past rounds
+   peek from under it as card spines receding into the perspective. */
+.deck-3d {
+  perspective: 1200px;
+  perspective-origin: 50% 0%;
+}
+
+.deck-tab {
+  transform-style: preserve-3d;
+  transition:
+    transform 0.38s cubic-bezier(0.22, 0.8, 0.36, 1),
+    bottom 0.38s cubic-bezier(0.22, 0.8, 0.36, 1),
+    opacity 0.25s;
+}
+
+.deck-tab:hover {
+  transform: translateY(-3px) !important;
+}
+
+/* The live round breathing behind an older card pulled to the front. */
+@keyframes deck-live {
+  50% {
+    box-shadow: 0 0 0 3px rgb(26 138 62 / 0.25);
+  }
+}
+
+.deck-tab-live {
+  animation: deck-live 1.6s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .deck-tab {
+    transition: none;
+  }
+  .deck-tab-live {
+    animation: none;
+  }
+}
+
+/* Pane currently under an agent-link arrow (drag off the handoff pill): its
+   border switches to the gesture's own teal, overriding whatever lifecycle
+   tone the pane wears — hence the !important against the utility classes. */
+[data-link-hover] {
+  border-color: #0d9488 !important;
+  box-shadow:
+    0 0 0 3px rgb(13 148 136 / 0.25),
+    0 1px 2px rgb(20 20 30 / 0.05) !important;
+}

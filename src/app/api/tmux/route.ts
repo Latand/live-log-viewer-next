@@ -7,6 +7,8 @@ import {
   buildImagePayload,
   collectImagePayloads,
   deleteInboxImages,
+  forgetResumePane,
+  killPane,
   knownLivePids,
   liveResumePane,
   resolveTarget,
@@ -45,13 +47,13 @@ async function targetForKnownPid(pid: number): Promise<string | null | "unknown"
 }
 
 /**
- * Live pane for an interrupt. The pid comes from the scanner's own entry for
- * the path — a client-supplied pid is ignored (like /api/proc), since
- * resolving it directly would let any same-origin caller Escape an unrelated
- * agent's pane. Never boots a fresh agent window: interrupting only makes
- * sense against a pane that already exists.
+ * Live pane of a conversation, for an interrupt or a kill. The pid comes from
+ * the scanner's own entry for the path — a client-supplied pid is ignored
+ * (like /api/proc), since resolving it directly would let any same-origin
+ * caller reach an unrelated agent's pane. Never boots a fresh agent window:
+ * both actions only make sense against a pane that already exists.
  */
-async function interruptTarget(filePath: string): Promise<string | null> {
+async function livePaneTarget(filePath: string): Promise<string | null> {
   const entry = (await listFiles()).find((item) => item.path === filePath);
   if (entry && entry.pid !== null) {
     const target = await resolveTarget(entry.pid);
@@ -110,7 +112,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<SendResponse 
     if (!filePath || !pathAllowed(filePath)) {
       return NextResponse.json({ error: "для переривання потрібен path розмови" }, { status: 400 });
     }
-    const target = await interruptTarget(filePath);
+    const target = await livePaneTarget(filePath);
     if (target === null) {
       return NextResponse.json({ error: "немає активного пейна агента для переривання" }, { status: 409 });
     }
@@ -133,6 +135,33 @@ export async function POST(req: NextRequest): Promise<NextResponse<SendResponse 
     try {
       const sent = await sendToResumedAgent(entry.path, spec, "");
       return NextResponse.json({ ok: true, target: sent.target, spawned: sent.spawned });
+    } catch (error) {
+      return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 500 });
+    }
+  }
+
+  /* Closing a chat card also puts out its tmux pane. A missing pane is fine —
+     the conversation may have never had one or it died already; the close is
+     then a pure UI removal and still succeeds. */
+  if (body.action === "kill") {
+    if (!filePath || !pathAllowed(filePath)) {
+      return NextResponse.json({ error: "для закриття потрібен path розмови" }, { status: 400 });
+    }
+    const entry = (await listFiles()).find((item) => item.path === filePath);
+    /* A branch column shares the root conversation's pane: killing it from a
+       branch close would take the whole agent down along with the root card
+       that is still on screen. Only a root conversation may kill a pane. */
+    if (entry && entry.parent) {
+      return NextResponse.json({ ok: true, target: "" });
+    }
+    const target = await livePaneTarget(filePath);
+    if (target === null) {
+      return NextResponse.json({ ok: true, target: "" });
+    }
+    try {
+      await killPane(target);
+      forgetResumePane(filePath);
+      return NextResponse.json({ ok: true, target });
     } catch (error) {
       return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 500 });
     }

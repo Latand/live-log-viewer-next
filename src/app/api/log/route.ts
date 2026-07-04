@@ -1,8 +1,11 @@
 import fs from "node:fs/promises";
+import path from "node:path";
 
 import { NextRequest, NextResponse } from "next/server";
 
-import { MAX_CHUNK, pathAllowed } from "@/lib/scanner/roots";
+import { rejectCrossOrigin } from "@/lib/sameOrigin";
+import { listFiles } from "@/lib/scanner";
+import { MAX_CHUNK, pathAllowed, ROOTS } from "@/lib/scanner/roots";
 import type { ApiError, LogChunk } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -70,4 +73,77 @@ export async function GET(
   } finally {
     await fh.close();
   }
+}
+
+/**
+ * A claude root session `<projects>/<slug>/<sid>.jsonl` owns a sibling
+ * directory `<projects>/<slug>/<sid>/` (subagent transcripts, tool-results).
+ * Left behind, those subagent files would keep the deleted conversation in
+ * the list as orphan branches.
+ */
+function companionDir(filePath: string): string | null {
+  const rel = path.relative(ROOTS["claude-projects"], filePath);
+  if (rel.startsWith("..") || path.isAbsolute(rel)) return null;
+  const parts = rel.split(path.sep);
+  if (parts.length !== 2 || !filePath.endsWith(".jsonl")) return null;
+  return filePath.slice(0, -".jsonl".length);
+}
+
+/**
+ * Removes now-empty ancestor directories of a deleted file, stopping at the
+ * owning root. Deleting a project's last transcript otherwise leaves an empty
+ * `<projects>/<slug>/` (or codex `sessions/YYYY/MM/DD/`) shell behind — the
+ * on-disk clutter the delete feature exists to remove. `rmdir` refuses
+ * non-empty directories, so a sibling that appeared mid-walk just stops it.
+ */
+async function pruneEmptyDirs(filePath: string): Promise<void> {
+  const root = Object.values(ROOTS).find((candidate) => filePath.startsWith(candidate + path.sep));
+  if (!root) return;
+  let dir = path.dirname(filePath);
+  while (dir !== root && dir.startsWith(root + path.sep)) {
+    try {
+      await fs.rmdir(dir);
+    } catch {
+      return;
+    }
+    dir = path.dirname(dir);
+  }
+}
+
+/**
+ * Deletes a transcript/log file from disk. The client confirms before calling.
+ * Only whitelisted-root paths qualify (same gate as GET), and a conversation
+ * whose agent process is still running is refused — kill it first, otherwise
+ * the CLI keeps writing into an unlinked inode and the entry resurrects in a
+ * confusing half-alive state.
+ */
+export async function DELETE(req: NextRequest): Promise<NextResponse<{ ok: true } | ApiError>> {
+  const rejection = rejectCrossOrigin(req);
+  if (rejection) return rejection;
+  const target = req.nextUrl.searchParams.get("path") ?? "";
+
+  let stat;
+  try {
+    stat = await fs.stat(target);
+  } catch {
+    stat = null;
+  }
+  if (!target || !stat?.isFile() || !pathAllowed(target)) {
+    return NextResponse.json({ error: "path not allowed" }, { status: 403 });
+  }
+  const entry = (await listFiles()).find((item) => item.path === target);
+  if (entry?.proc === "running") {
+    return NextResponse.json({ error: "агент ще працює — спочатку зупини процес" }, { status: 409 });
+  }
+  try {
+    await fs.unlink(target);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      return NextResponse.json({ error: "не вдалося видалити файл" }, { status: 500 });
+    }
+  }
+  const dir = companionDir(target);
+  if (dir) await fs.rm(dir, { recursive: true, force: true }).catch(() => undefined);
+  await pruneEmptyDirs(target);
+  return NextResponse.json({ ok: true });
 }
