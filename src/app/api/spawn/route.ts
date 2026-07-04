@@ -6,6 +6,7 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
 import { listFiles } from "@/lib/scanner";
+import { ROOTS } from "@/lib/scanner/roots";
 import {
   buildImagePayload,
   collectImagePayloads,
@@ -25,6 +26,8 @@ const HEAD_BYTES = 8192;
 
 interface SuggestResponse {
   dirs: string[];
+  /** Working directory of the `src` transcript when one was requested. */
+  cwd: string | null;
 }
 
 interface SpawnResponse {
@@ -32,15 +35,40 @@ interface SpawnResponse {
   target: string;
 }
 
+/** Security gate for `?src=`: the resolved real path must be a regular .jsonl
+    transcript inside one of the two conversation roots — the server-side
+    mirror of the client's canHandoff gate. */
+function transcriptAllowed(candidate: string): boolean {
+  let real: string;
+  let stat: fs.Stats;
+  try {
+    real = fs.realpathSync(candidate);
+    stat = fs.statSync(real);
+  } catch {
+    return false;
+  }
+  if (!stat.isFile() || !real.endsWith(".jsonl")) return false;
+  return (["claude-projects", "codex-sessions"] as const).some((key) => {
+    try {
+      return real.startsWith(fs.realpathSync(ROOTS[key]) + path.sep);
+    } catch {
+      return false;
+    }
+  });
+}
+
 /** Working directory from the head of a transcript, without reading the whole file. */
 function headCwd(pathname: string): string | null {
   let head: string;
   try {
     const fd = fs.openSync(pathname, "r");
-    const buf = Buffer.alloc(HEAD_BYTES);
-    const n = fs.readSync(fd, buf, 0, HEAD_BYTES, 0);
-    fs.closeSync(fd);
-    head = buf.subarray(0, n).toString("utf8");
+    try {
+      const buf = Buffer.alloc(HEAD_BYTES);
+      const n = fs.readSync(fd, buf, 0, HEAD_BYTES, 0);
+      head = buf.subarray(0, n).toString("utf8");
+    } finally {
+      fs.closeSync(fd);
+    }
   } catch {
     return null;
   }
@@ -57,23 +85,26 @@ function headCwd(pathname: string): string | null {
 }
 
 /** Recent real working directories to prefill the spawn dialog; the current
-    project's transcripts rank first so its directory lands on top. */
+    project's transcripts rank first so its directory lands on top. `src` names
+    a transcript whose own cwd must win — the handoff card inherits it. */
 export async function GET(req: NextRequest): Promise<NextResponse<SuggestResponse>> {
   const project = req.nextUrl.searchParams.get("project") ?? "";
+  const src = req.nextUrl.searchParams.get("src");
+  const srcCwd = src && transcriptAllowed(src) ? headCwd(src) : null;
   const conversations = (await listFiles())
     .filter((entry) => entry.path.endsWith(".jsonl") && (entry.root === "claude-projects" || entry.root === "codex-sessions"))
     .filter((entry) => !entry.path.includes(path.sep + "subagents" + path.sep))
     .sort((a, b) => Number(b.project === project) - Number(a.project === project) || b.mtime - a.mtime)
     .slice(0, SUGGEST_SCAN_LIMIT);
 
-  const dirs: string[] = [];
+  const dirs: string[] = srcCwd ? [srcCwd] : [];
   for (const entry of conversations) {
     if (dirs.length >= SUGGEST_MAX) break;
     const cwd = headCwd(entry.path);
     if (cwd && !dirs.includes(cwd)) dirs.push(cwd);
   }
   if (!dirs.length) dirs.push(os.homedir());
-  return NextResponse.json({ dirs });
+  return NextResponse.json({ dirs, cwd: srcCwd });
 }
 
 export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse | ApiError>> {

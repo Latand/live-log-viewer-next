@@ -1,12 +1,13 @@
 "use client";
 
 import { CornerDownRight } from "lucide-react";
-import { useState } from "react";
+import { useRef, useState } from "react";
 
 import { ChevronRight, X } from "@/components/icons";
 import type { FileEntry } from "@/lib/types";
 
 import { FlipRow } from "./FlipRow";
+import { canHandoff, HandoffHandle } from "./HandoffHandle";
 import { LogFeed } from "./LogFeed";
 import { ProcessStatusControls } from "./TaskHeader";
 import { TmuxComposer } from "./TmuxComposer";
@@ -29,14 +30,16 @@ interface Props {
 }
 
 export function BranchPane({ file, files, tasks, onSelect, isRoot, onClose, dragHandle }: Props) {
+  const paneRef = useRef<HTMLElement | null>(null);
   const badge = engineBadge(file);
   const live = file.activity === "live";
   return (
     <section
+      ref={paneRef}
       /* Text inside the column must stay selectable: the canvas drag-pan skips
          presses that start here (wheel pan still covers scrolling). */
       data-pan-ignore
-      className={`flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-[10px] border bg-panel shadow-card ${
+      className={`relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-[10px] border bg-panel shadow-card ${
         isRoot ? "border-t-4" : "border-t-2"
       } ${live ? "border-ok/60 shadow-[0_0_0_3px_rgba(47,158,68,0.16)]" : "border-line"}`}
       style={engineEdge(file)}
@@ -103,6 +106,7 @@ export function BranchPane({ file, files, tasks, onSelect, isRoot, onClose, drag
         compact
       />
       <TmuxComposer file={file} />
+      {canHandoff(file) ? <HandoffHandle file={file} paneRef={paneRef} /> : null}
     </section>
   );
 }
