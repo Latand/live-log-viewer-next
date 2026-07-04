@@ -57,3 +57,18 @@ UI maps tiers to a brightness/saturation ramp of the engine color
 (dim → vivid as effort rises) plus a tooltip with the raw value, so the
 encoding works for both engines and stays legible for color-blind users
 (brightness, not hue alone).
+
+## 4. Worktree sessions must group under their parent project
+
+Symptom (screenshot 2026-07-05): every git worktree cwd
+(`<repo>/.claude/worktrees/<name>`) becomes its own project in the rail —
+truncated slugs like «-agents-tools-live-lo…» and «limits-sticky» sit next
+to «live-log-viewer-next» instead of inside it.
+
+Direction: collapse the worktree segment in the DISPLAY project derivation
+(`src/lib/scanner/describe.ts` — both the claude slug path and the codex
+head-cwd path): a cwd containing `/.claude/worktrees/<name>` maps to the
+parent repo's project; keep the worktree name visible on the entry itself
+(small chip/suffix, e.g. «wt: limits-sticky»). Do NOT touch pid-attribution
+keys in `src/lib/scanner/transcripts.ts` — those must keep matching the real
+cwd, only the grouping label changes.
