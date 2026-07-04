@@ -14,6 +14,8 @@ const eslintConfig = defineConfig([
     "next-env.d.ts",
     // Publish artifact assembled by scripts/prepack.mjs; gitignored.
     "dist/**",
+    // Agent worktrees created by Claude Code sessions; each lints itself.
+    ".claude/**",
   ]),
 ]);
 
