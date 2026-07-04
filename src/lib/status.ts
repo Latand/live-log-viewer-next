@@ -79,8 +79,10 @@ export function detectBlockingGate(screen: string): BlockingGate | null {
 
 /* Prompt shapes of the waiting-input scrape fallback: a numbered option menu
    under a highlight cursor is how both CLIs draw questions the viewer has no
-   structured record for. */
-export const NUMBERED_MENU = /❯?\s*\d\.\s+\S/;
+   structured record for. Anchored to the line start — menu options always
+   open their row, while prose in a response ("…віддає 200. Онови…") puts
+   digit-dot mid-line and must not read as a menu. */
+export const NUMBERED_MENU = /^\s*❯?\s*\d+\.\s+\S/m;
 
 /**
  * Screen-level judgement for a live pane whose transcript went quiet. Used by
@@ -90,5 +92,9 @@ export function screenWaitsForInput(screen: string): boolean {
   if (detectBlockingGate(screen) !== null) return true;
   if (TRUST_FOLDER_PROMPT.test(screen)) return true;
   const tail = screen.split("\n").slice(-14).join("\n");
-  return NUMBERED_MENU.test(tail) && !READY_MARKERS.test(composerLine(screen));
+  /* Ready hints live on the status bar under the composer box, never on the
+     composer line itself, so the veto reads the whole tail: an idle pane
+     showing «bypass permissions on» / «? for shortcuts» is not a menu, even
+     when the response above ends with a numbered list. */
+  return NUMBERED_MENU.test(tail) && !READY_MARKERS.test(tail);
 }
