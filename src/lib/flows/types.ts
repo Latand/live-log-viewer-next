@@ -33,6 +33,10 @@ export type ReviewVerdict = "APPROVE" | "REQUEST_CHANGES" | "COMMENT";
 export type Round = {
   n: number; // 1-based
   reviewerPath: string | null; // reviewer run's transcript path once known
+  /** Reviewer session/thread id, persisted as soon as it is known: claude
+      pre-chooses it at spawn, codex reports it in the first `--json` event.
+      Survives viewer restarts so the transcript claim stays deterministic. */
+  sessionId?: string | null;
   findingsPath: string | null; // round artifact file once written
   triggeredBy: "marker" | "button";
   readyNote: string | null; // text after REVIEW_READY:

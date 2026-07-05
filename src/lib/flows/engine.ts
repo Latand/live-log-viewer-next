@@ -94,6 +94,12 @@ function lastAssistantMessage(entry: FileEntry): { text: string; ts: number } | 
 }
 
 function detectReadyMarker(flow: Flow, entry: FileEntry): string | null {
+  /* Only a finished turn counts. Both CLIs emit interim narration mid-turn,
+     and the marker line can appear there while the implementer is still
+     committing — reviewing that snapshot would cover a half-done diff. */
+  if (entry.activity === "live" || entry.activityReason === "jsonl_turn_open" || entry.activityReason === "jsonl_turn_stalled") {
+    return null;
+  }
   const message = lastAssistantMessage(entry);
   if (!message) return null;
   const lastStarted = Math.max(...flow.rounds.map((round) => unixMs(round.startedAt)), unixMs(flow.createdAt));
@@ -134,6 +140,7 @@ function newRound(flow: Flow, triggeredBy: Round["triggeredBy"], readyNote: stri
   return {
     n: flow.rounds.length + 1,
     reviewerPath: null,
+    sessionId: null,
     findingsPath: null,
     triggeredBy,
     readyNote,
@@ -275,6 +282,7 @@ async function launchReviewer(flow: Flow, round: Round): Promise<void> {
     return;
   }
   const launched = startHeadlessReview(flow.id, round.n, flow.roles.reviewer, flow.cwd, prompt);
+  if (launched.sessionId) round.sessionId = launched.sessionId;
   if (launched.reviewerPath) round.reviewerPath = launched.reviewerPath;
 }
 
@@ -352,8 +360,16 @@ async function tickFlow(
     }
     if (flow.reviewerMode === "headless") {
       const status = headlessReviewStatus(flow.id, round.n);
-      maybeClaimReviewerPathBySession(entries, round, sessionIdFromHeadlessStdout(status?.stdout ?? ""));
-      if (!round.reviewerPath) maybeClaimReviewerPathByHeuristic(flow, entries, round);
+      /* Persist the id the moment any source yields it (the JSON.stringify
+         diff in tickFlow flushes it to flows.json): after that the transcript
+         claim is deterministic and survives restarts. The banner parse stays
+         as a backstop for --json format drift; the cwd+mtime heuristic runs
+         only while no id is known at all. */
+      if (!round.sessionId) {
+        round.sessionId = status?.sessionId ?? sessionIdFromHeadlessStdout(status?.stdout ?? "");
+      }
+      maybeClaimReviewerPathBySession(entries, round, round.sessionId ?? null);
+      if (!round.reviewerPath && !round.sessionId) maybeClaimReviewerPathByHeuristic(flow, entries, round);
       if (status?.status === "running") return JSON.stringify(flow) !== before;
       if (status) {
         forgetHeadlessReview(flow.id, round.n);
@@ -630,6 +646,7 @@ export function patchFlow(id: string, req: PatchFlowRequest): { flow?: Flow; err
     forgetHeadlessReview(flow.id, round.n);
     Object.assign(round, {
       reviewerPath: null,
+      sessionId: null,
       findingsPath: null,
       verdict: null,
       findingsCount: null,

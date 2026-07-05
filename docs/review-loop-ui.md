@@ -291,7 +291,13 @@ mechanics) rather than process exit.
 | engine | command core | model flag | effort flag |
 | --- | --- | --- | --- |
 | `claude` | `claude -p <prompt>` | `--model <model>` | none in v1 — the field is hidden for claude roles |
-| `codex` | `codex exec <prompt> --output-last-message <tmpfile>` | `-m <model>` | `-c model_reasoning_effort=<low\|medium\|high\|xhigh>` |
+| `codex` | `codex exec <prompt> --json --output-last-message <tmpfile>` | `-m <model>` | `-c model_reasoning_effort=<low\|medium\|high\|xhigh>` |
+
+`--json` turns codex stdout into a JSONL event stream; the engine reads the
+session/thread id from the first events and persists it on the Round, so the
+reviewer-transcript claim is deterministic and survives restarts (`claude -p`
+gets the same guarantee via a pre-chosen `--session-id`). The cwd+mtime
+heuristic remains only as a last resort while no id is known.
 
 Exact flag sets are finalized at implementation time against the installed
 CLI versions. Unknown model strings pass through to the CLI untouched — the

@@ -12,6 +12,11 @@ const FLOW_ARTIFACT_DIR = path.join(STATE_DIR, "flows");
 
 const SEEDED_PRESETS: FlowPreset[] = [
   {
+    name: "Codex high → Fable",
+    implementer: { engine: "codex", model: null, effort: "high" },
+    reviewer: { engine: "claude", model: "fable", effort: null },
+  },
+  {
     name: "Fable → Codex xhigh",
     implementer: { engine: "claude", model: "fable", effort: null },
     reviewer: { engine: "codex", model: null, effort: "xhigh" },
@@ -22,8 +27,8 @@ const SEEDED_PRESETS: FlowPreset[] = [
     reviewer: { engine: "codex", model: null, effort: "xhigh" },
   },
   {
-    name: "Codex low → Codex xhigh",
-    implementer: { engine: "codex", model: null, effort: "low" },
+    name: "Codex high → Codex xhigh",
+    implementer: { engine: "codex", model: null, effort: "high" },
     reviewer: { engine: "codex", model: null, effort: "xhigh" },
   },
 ];
@@ -80,6 +85,7 @@ export function loadFlows(): Flow[] {
     pausedState: flow.pausedState ?? null,
     rounds: flow.rounds.map((round) => ({
       ...round,
+      sessionId: round.sessionId ?? null,
       spawnStartedAt: round.spawnStartedAt ?? null,
       relayStartedAt: round.relayStartedAt ?? null,
       error: round.error ?? null,
