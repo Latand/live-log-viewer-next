@@ -35,7 +35,7 @@ export function registerLinkTarget(file: FileEntry, el: HTMLElement): () => void
   };
 }
 
-function targetAt(x: number, y: number, excludePath: string): LinkTarget | null {
+function targetAt(x: number, y: number, excludePath: string | null): LinkTarget | null {
   const el = document.elementFromPoint(x, y)?.closest<HTMLElement>("[data-link-path]");
   const path = el?.getAttribute("data-link-path");
   if (!el || !path || path === excludePath) return null;
@@ -66,24 +66,39 @@ interface DragState {
 }
 
 interface DropState {
-  file: FileEntry;
+  label: string;
   from: { x: number; y: number };
   to: { x: number; y: number };
 }
 
+export interface LinkDragSpec {
+  /** Path never offered as a target — the arrow's own source pane. */
+  exclude?: string;
+  /** Pane drop: deliver and return the confirmation-chip text (null skips the flash). */
+  onDrop: (hit: { file: FileEntry }, point: { x: number; y: number }) => string | null;
+  /** Drop on empty space, after the arrow cleans up. */
+  onMiss?: (point: { x: number; y: number }) => void;
+  onDragStart?: () => void;
+}
+
 /**
- * Drag-to-link gesture off the handoff pill: pull an arrow onto another
- * agent's pane (its border lights up in the link color while hovered) and the
- * drop itself makes the connection — the handoff context (this conversation's
- * title and transcript path) lands straight in the target pane's composer,
- * focused and ready for the ask. No intermediate card.
+ * Drag-to-link gesture off a pill: pull an arrow onto another agent's pane
+ * (its border lights up in the link color while hovered) and the drop itself
+ * delivers — what exactly lands there is the caller's `onDrop`. No
+ * intermediate card.
  *
  * The arrow follows the cursor via direct `d` writes on the SVG path — no
  * React state per move — matching how the pill itself tracks the pointer.
  */
-export function useAgentLink(source: FileEntry, onDragStart?: () => void) {
-  const { t } = useLocale();
+export function useLinkDrag(spec: LinkDragSpec) {
   const [dragging, setDragging] = useState(false);
+  /* The window listeners attach once per gesture; the ref keeps them reading
+     the freshest closures (deliveryBlocked and friends move every render).
+     Synced in an effect — effects settle before any pointer event fires. */
+  const specRef = useRef(spec);
+  useEffect(() => {
+    specRef.current = spec;
+  }, [spec]);
   const [anchor, setAnchor] = useState<{ x: number; y: number } | null>(null);
   const [drop, setDrop] = useState<DropState | null>(null);
   const stateRef = useRef<DragState | null>(null);
@@ -124,10 +139,10 @@ export function useAgentLink(source: FileEntry, onDragStart?: () => void) {
         setDrop(null);
         setAnchor({ x: st.anchorX, y: st.anchorY });
         setDragging(true);
-        onDragStart?.();
+        specRef.current.onDragStart?.();
       }
       pathRef.current?.setAttribute("d", arrowD(st.anchorX, st.anchorY, ev.clientX, ev.clientY));
-      const hit = targetAt(ev.clientX, ev.clientY, source.path);
+      const hit = targetAt(ev.clientX, ev.clientY, specRef.current.exclude ?? null);
       if (hit?.el !== st.hover?.el) {
         st.hover?.el.removeAttribute("data-link-hover");
         hit?.el.setAttribute("data-link-hover", "1");
@@ -144,20 +159,21 @@ export function useAgentLink(source: FileEntry, onDragStart?: () => void) {
       if (!st?.active) return;
       setDragging(false);
       if (st.hover) {
-        /* The drop is the delivery: the handoff context goes into the target
-           pane's composer draft right away, focused for the ask. The arrow
-           and the target highlight linger through the confirmation flash. */
-        appendComposerDraft(
-          st.hover.file.path,
-          t("link.handoffContext", { title: cleanTitle(source.title, 80), path: source.path, ask: "" }).trimEnd() + "\n\n",
-        );
-        setDrop({
-          file: st.hover.file,
-          from: { x: st.anchorX, y: st.anchorY },
-          to: { x: ev.clientX, y: ev.clientY },
-        });
+        /* The drop is the delivery. The arrow and the target highlight
+           linger through the confirmation flash. */
+        const label = specRef.current.onDrop(st.hover, { x: ev.clientX, y: ev.clientY });
+        if (label !== null) {
+          setDrop({
+            label,
+            from: { x: st.anchorX, y: st.anchorY },
+            to: { x: ev.clientX, y: ev.clientY },
+          });
+        } else {
+          clearHighlight();
+        }
       } else {
         clearHighlight();
+        specRef.current.onMiss?.({ x: ev.clientX, y: ev.clientY });
       }
     };
 
@@ -236,12 +252,31 @@ export function useAgentLink(source: FileEntry, onDragStart?: () => void) {
 }
 
 /**
- * The confirmation chip at the drop point: the context is already sitting in
- * the target's composer, so this only says where it landed before the overlay
- * fades on the hook's timer.
+ * The handoff flavor of the link drag: the drop puts the handoff context
+ * (this conversation's title and transcript path) straight into the target
+ * pane's composer, focused and ready for the ask.
+ */
+export function useAgentLink(source: FileEntry, onDragStart?: () => void) {
+  const { t } = useLocale();
+  return useLinkDrag({
+    exclude: source.path,
+    onDragStart,
+    onDrop: (hit) => {
+      appendComposerDraft(
+        hit.file.path,
+        t("link.handoffContext", { title: cleanTitle(source.title, 80), path: source.path, ask: "" }).trimEnd() + "\n\n",
+      );
+      return t("link.dropped", { title: cleanTitle(hit.file.title, 48) });
+    },
+  });
+}
+
+/**
+ * The confirmation chip at the drop point: the delivery already happened on
+ * the drop, so this only says what landed where before the overlay fades on
+ * the hook's timer.
  */
 function DropFlash({ drop }: { drop: DropState }) {
-  const { t } = useLocale();
   const left = Math.max(8, Math.min(drop.to.x + 14, window.innerWidth - 288));
   const top = Math.max(8, Math.min(drop.to.y + 12, window.innerHeight - 44));
   return (
@@ -250,7 +285,7 @@ function DropFlash({ drop }: { drop: DropState }) {
       style={{ left, top, backgroundColor: LINK_COLOR }}
     >
       <Link2 className="h-3.5 w-3.5 shrink-0" aria-hidden />
-      <span className="truncate">{t("link.dropped", { title: cleanTitle(drop.file.title, 48) })}</span>
+      <span className="truncate">{drop.label}</span>
     </div>
   );
 }

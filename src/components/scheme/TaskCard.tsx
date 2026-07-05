@@ -7,6 +7,7 @@ import { useLocale } from "@/lib/i18n";
 import type { BoardTask } from "@/lib/tasks/types";
 import type { FileEntry } from "@/lib/types";
 
+import { useLinkDrag } from "@/components/AgentLink";
 import { TargetChecklist } from "@/components/tasks/TargetChecklist";
 import { pushTaskToast } from "@/components/tasks/taskToast";
 import { nextTaskStatus, TASK_TONES, taskTitle } from "@/components/tasks/taskModel";
@@ -394,6 +395,18 @@ export const TaskCard = memo(function TaskCard({
   const byPath = new Map(files.map((file) => [file.path, file]));
   const lifted = editing || drag !== null || pop !== null;
 
+  /* The handoff gesture, task-flavored: pull the arrow off the «надіслати»
+     pill onto a pane to deliver the task there; a drop on empty canvas means
+     «нікого підходящого» — it opens the spawn popover for a fresh agent. */
+  const link = useLinkDrag({
+    onDrop: (hit) => {
+      if (deliveryBlocked()) return null;
+      handlers.send(task, [hit.file.path]);
+      return t("tasks.linkSent", { title: cleanTitle(hit.file.title, 48) });
+    },
+    onMiss: () => setPop("spawn"),
+  });
+
   return (
     <div
       data-scheme-task={task.id}
@@ -460,11 +473,16 @@ export const TaskCard = memo(function TaskCard({
           lifted ? "" : "pointer-events-none opacity-0 group-hover:pointer-events-auto group-hover:opacity-100"
         } transition-opacity`}
       >
+        {/* One pill for both deliveries: drag the arrow onto a pane to send
+            the task there, drop it on empty canvas to spawn a fresh agent.
+            A plain click keeps the checklist fallback (multi-send / no aim). */}
         <button
           type="button"
-          className="inline-flex h-7 items-center gap-1 rounded-full border border-line bg-panel px-2 text-[10.5px] font-semibold text-dim shadow-card hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+          className="inline-flex h-7 touch-none items-center gap-1 rounded-full border border-line bg-panel px-2 text-[10.5px] font-semibold text-dim shadow-card hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
           title={t("tasks.sendTitle")}
+          onPointerDown={link.onPillPointerDown}
           onClick={() => {
+            if (link.consumeClick()) return;
             const selection = handlers.selectionPaths();
             if (selection.length) {
               guardedSend(task, selection);
@@ -474,14 +492,6 @@ export const TaskCard = memo(function TaskCard({
           }}
         >
           <Send className="h-3 w-3" aria-hidden /> {t("tasks.send")}
-        </button>
-        <button
-          type="button"
-          className="inline-flex h-7 items-center gap-1 rounded-full border border-line bg-panel px-2 text-[10.5px] font-semibold text-dim shadow-card hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
-          title={t("tasks.spawnTitle")}
-          onClick={() => setPop((prev) => (prev === "spawn" ? null : "spawn"))}
-        >
-          <Zap className="h-3 w-3" aria-hidden /> {t("tasks.spawn")}
         </button>
         <button
           type="button"
@@ -517,6 +527,7 @@ export const TaskCard = memo(function TaskCard({
         <SendPicker task={task} files={files} project={task.project} onSend={guardedSend} onClose={() => setPop(null)} />
       ) : null}
       {pop === "spawn" ? <SpawnPopover task={task} onSpawn={guardedSpawn} onClose={() => setPop(null)} /> : null}
+      {link.overlay}
     </div>
   );
 });
