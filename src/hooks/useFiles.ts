@@ -3,8 +3,10 @@
 import { useEffect, useState } from "react";
 
 import { FLOWS_CHANGED_EVENT } from "@/components/flows/flowModel";
+import { TASKS_CHANGED_EVENT } from "@/components/tasks/taskApi";
 import { WORKFLOWS_CHANGED_EVENT } from "@/components/workflows/workflowModel";
 import type { Flow } from "@/lib/flows/types";
+import type { BoardTask } from "@/lib/tasks/types";
 import type { FileEntry, FilesResponse } from "@/lib/types";
 import type { Workflow } from "@/lib/workflows/types";
 
@@ -14,9 +16,10 @@ export interface FilesData {
   files: FileEntry[];
   flows: Flow[];
   workflows: Workflow[];
+  tasks: BoardTask[];
 }
 
-const EMPTY: FilesData = { files: [], flows: [], workflows: [] };
+const EMPTY: FilesData = { files: [], flows: [], workflows: [], tasks: [] };
 
 /** Polls /api/files. Keeps the last good list on transient fetch errors. */
 export function useFiles(): FilesData {
@@ -34,24 +37,33 @@ export function useFiles(): FilesData {
         /* The flows rollout changes the payload from a bare array to
            {files, flows}; accept both so client and server can deploy in
            either order. */
-        if (Array.isArray(parsed)) setData({ files: parsed, flows: [], workflows: [] });
-        else setData({ files: parsed.files ?? [], flows: parsed.flows ?? [], workflows: parsed.workflows ?? [] });
+        if (Array.isArray(parsed)) setData({ files: parsed, flows: [], workflows: [], tasks: [] });
+        else {
+          setData({
+            files: parsed.files ?? [],
+            flows: parsed.flows ?? [],
+            workflows: parsed.workflows ?? [],
+            tasks: parsed.tasks ?? [],
+          });
+        }
       } catch {
         /* keep previous list */
       }
     };
     void load();
     const t = setInterval(load, POLL_MS);
-    /* Flow mutations (close, advance, …) refresh out of band: the strip must
-       not sit on stale state for up to a full poll interval. */
-    const onFlowsChanged = () => void load();
-    window.addEventListener(FLOWS_CHANGED_EVENT, onFlowsChanged);
-    window.addEventListener(WORKFLOWS_CHANGED_EVENT, onFlowsChanged);
+    /* Flow, workflow and task mutations refresh out of band: strips and
+       cards must not sit on stale state for up to a full poll interval. */
+    const onChanged = () => void load();
+    window.addEventListener(FLOWS_CHANGED_EVENT, onChanged);
+    window.addEventListener(WORKFLOWS_CHANGED_EVENT, onChanged);
+    window.addEventListener(TASKS_CHANGED_EVENT, onChanged);
     return () => {
       alive = false;
       clearInterval(t);
-      window.removeEventListener(FLOWS_CHANGED_EVENT, onFlowsChanged);
-      window.removeEventListener(WORKFLOWS_CHANGED_EVENT, onFlowsChanged);
+      window.removeEventListener(FLOWS_CHANGED_EVENT, onChanged);
+      window.removeEventListener(WORKFLOWS_CHANGED_EVENT, onChanged);
+      window.removeEventListener(TASKS_CHANGED_EVENT, onChanged);
     };
   }, []);
   return data;

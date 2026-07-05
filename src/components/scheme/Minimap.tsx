@@ -2,10 +2,13 @@
 
 import { useRef } from "react";
 
+import { TASK_TONES } from "@/components/tasks/taskModel";
 import { engineColor } from "@/components/utils";
 import { useLocale } from "@/lib/i18n";
+import type { BoardTask } from "@/lib/tasks/types";
 
 import type { SchemeLayout } from "./layout";
+import { TASK_W, taskCardHeight } from "./taskGeometry";
 
 export interface Camera {
   x: number;
@@ -22,11 +25,14 @@ const MAP_H = 148;
  */
 export function Minimap({
   layout,
+  tasks = [],
   cam,
   vp,
   onJump,
 }: {
   layout: SchemeLayout;
+  /** Tasks render as 3 px status-colored dots; their edges never show here. */
+  tasks?: BoardTask[];
   cam: Camera;
   vp: { w: number; h: number };
   onJump: (wx: number, wy: number) => void;
@@ -97,6 +103,16 @@ export function Minimap({
               rx={18}
               fill={engineColor(node.file)}
               opacity={node.file.activity === "live" ? 0.85 : 0.35}
+            />
+          ))}
+          {tasks.map((task) => (
+            <circle
+              key={task.id}
+              cx={task.pos.x + TASK_W / 2}
+              cy={task.pos.y + taskCardHeight(task) / 2}
+              r={3 / scale}
+              fill={TASK_TONES[task.status].color}
+              opacity={task.status === "done" ? 0.5 : 0.95}
             />
           ))}
           <rect

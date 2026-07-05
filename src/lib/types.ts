@@ -1,4 +1,5 @@
 import type { Flow, FlowAnnotation } from "@/lib/flows/types";
+import type { BoardTask } from "@/lib/tasks/types";
 import type { Workflow } from "@/lib/workflows/types";
 
 export type RootKey =
@@ -64,6 +65,7 @@ export interface FilesResponse {
   files: FileEntry[];
   flows: Flow[];
   workflows: Workflow[];
+  tasks: BoardTask[];
 }
 
 export type PlanStepStatus = "pending" | "in_progress" | "completed";

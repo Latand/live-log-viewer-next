@@ -369,6 +369,8 @@ export function buildSchemeLayout(
     byPath: new Map<string, SchemeRect>([
       ...nodes.map((node) => [node.file.path, node] as const),
       ...drafts.map((draft) => [draft.key, draft] as const),
+      ...stacks.map((stack) => [stack.key, stack] as const),
+      ...decks.map((deck) => [deck.key, deck] as const),
     ]),
     width: Math.max(cursor - GROUP_GAP + PAD, PAD * 2 + NODE_W),
     /* Extra room under the last generation for decks and expanded panels. */

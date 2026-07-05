@@ -1,13 +1,13 @@
 "use client";
 
-import { Menu } from "lucide-react";
+import { ListTodo, Menu } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { useIsMobile } from "@/hooks/useIsMobile";
 import type { Flow } from "@/lib/flows/types";
 import { useLocale } from "@/lib/i18n";
+import type { BoardTask } from "@/lib/tasks/types";
 import type { FileEntry } from "@/lib/types";
-
 import type { Workflow } from "@/lib/workflows/types";
 
 import { TaskStrip } from "./BranchPane";
@@ -16,6 +16,8 @@ import { claimedReviewerPaths } from "./flows/flowModel";
 import { clearWorkflowDraftStorage } from "./workflows/WorkflowDraftPane";
 import { WorkflowStrip } from "./workflows/WorkflowStrip";
 import { isWorkflowDraftId, workflowsForProject } from "./workflows/workflowModel";
+import { TaskPanel } from "./tasks/TaskPanel";
+import { TaskToastHost } from "./tasks/taskToast";
 import { MobileFocusView } from "./mobile/MobileFocusView";
 import { SchemeBoard } from "./scheme/SchemeBoard";
 import { Switchboard } from "./Switchboard";
@@ -32,6 +34,7 @@ interface Props {
   files: FileEntry[];
   flows: Flow[];
   workflows: Workflow[];
+  tasks: BoardTask[];
   project: string;
   /** Bumped by Viewer on every openFile so a same-project open re-reads prefs
       even though `project` itself did not change. */
@@ -97,6 +100,7 @@ export function ProjectDashboard({
   files,
   flows,
   workflows,
+  tasks,
   project,
   openNonce,
   focusRequest,
@@ -113,6 +117,7 @@ export function ProjectDashboard({
   const [prefs, setPrefs] = useState<ColumnPrefs>({ manual: [], hidden: [] });
   const [drafts, setDrafts] = useState<string[]>([]);
   const [highlight, setHighlight] = useState<string | null>(null);
+  const [taskPanelOpen, setTaskPanelOpen] = useState(false);
   /* Jump targets the scheme would otherwise skip (a stalled root builds no
      automatic group; a stalled branch hides inside a mini stack) materialize
      as ephemeral nodes: React state only, never written to prefs, gone on
@@ -132,6 +137,16 @@ export function ProjectDashboard({
     setDrafts(loadDrafts(project));
     /* eslint-enable react-hooks/set-state-in-effect */
   }, [project, openNonce]);
+  useEffect(() => {
+    /* eslint-disable-next-line react-hooks/set-state-in-effect */
+    setTaskPanelOpen(localStorage.getItem("llvTaskPanel") === "1");
+  }, []);
+  const toggleTaskPanel = () => {
+    setTaskPanelOpen((open) => {
+      localStorage.setItem("llvTaskPanel", open ? "0" : "1");
+      return !open;
+    });
+  };
   useEffect(
     () => () => {
       if (highlightTimer.current) window.clearTimeout(highlightTimer.current);
@@ -161,6 +176,7 @@ export function ProjectDashboard({
     [groups],
   );
   const hiddenSet = useMemo(() => new Set(prefs.hidden), [prefs.hidden]);
+  const projectTasks = useMemo(() => tasks.filter((task) => task.project === project), [tasks, project]);
   const manualNodes = useMemo(() => {
     const byPath = new Map(groupFiles.map((file) => [file.path, file]));
     return prefs.manual
@@ -236,6 +252,25 @@ export function ProjectDashboard({
     pendingFocusRef.current = null;
     flashNode(pending);
   });
+
+  /* A task-panel row from another project switches the dashboard first; the
+     glide target waits in sessionStorage until this project has the task. */
+  useEffect(() => {
+    const pending = sessionStorage.getItem("llvTaskFocus");
+    if (!pending || !projectTasks.some((task) => task.id === pending)) return;
+    sessionStorage.removeItem("llvTaskFocus");
+    /* eslint-disable-next-line react-hooks/set-state-in-effect */
+    flashNode("task::" + pending);
+  });
+
+  const openTask = (task: BoardTask) => {
+    if (task.project !== project) {
+      sessionStorage.setItem("llvTaskFocus", task.id);
+      gotoProject(task.project);
+      return;
+    }
+    flashNode("task::" + task.id);
+  };
 
   const persistDrafts = (next: string[]) => {
     setDrafts(next);
@@ -362,7 +397,7 @@ export function ProjectDashboard({
      canvas instead of hanging as lone stub nodes in the middle of it. */
   const dockedTasks = visibleGroups.filter((group) => group.orphanTask).map((group) => group.columns[0]!.file);
   const schemeGroups = visibleGroups.filter((group) => !group.orphanTask);
-  const hasNodes = schemeGroups.length > 0 || schemeManual.length > 0 || drafts.length > 0;
+  const hasNodes = schemeGroups.length > 0 || schemeManual.length > 0 || drafts.length > 0 || projectTasks.length > 0;
   /* Everything the project has on disk, freshest first. Powers the
      delete-project button and the fallback list of an empty scheme —
      transcripts whose tree lives elsewhere (scratchpad one-offs) build no
@@ -401,25 +436,40 @@ export function ProjectDashboard({
         )}
         <DeleteProjectButton files={projectFiles} />
         {isMobile ? (
-          <>
-            <button
-              type="button"
-              onClick={addDraft}
-              aria-label={t("dash.newConvo")}
-              className="ml-auto flex shrink-0 items-center gap-1 rounded-[8px] border border-line bg-panel px-2.5 py-1 text-[11.5px] font-bold text-ink shadow-card hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
-            >
-              <span className="text-[13px] leading-none text-accent">+</span> {t("dash.agent")}
-            </button>
-            <button
-              type="button"
-              onClick={addWorkflowDraft}
-              aria-label={t("dash.newWorkflow")}
-              className="flex shrink-0 items-center gap-1 rounded-[8px] border border-line bg-panel px-2.5 py-1 text-[11.5px] font-bold text-ink shadow-card hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
-            >
-              <span className="text-[13px] leading-none text-accent">+</span> {t("dash.workflow")}
-            </button>
-          </>
-        ) : null}
+          <button
+            type="button"
+            onClick={addDraft}
+            aria-label={t("dash.newConvo")}
+            className="ml-auto flex shrink-0 items-center gap-1 rounded-[8px] border border-line bg-panel px-2.5 py-1 text-[11.5px] font-bold text-ink shadow-card hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+          >
+            <span className="text-[13px] leading-none text-accent">+</span> {t("dash.agent")}
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={toggleTaskPanel}
+            aria-pressed={taskPanelOpen}
+            aria-label={t("tasks.panelToggleAria")}
+            className={`ml-auto flex shrink-0 items-center gap-1 rounded-[8px] border px-2.5 py-1 text-[11.5px] font-bold shadow-card focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+              taskPanelOpen ? "border-accent/45 bg-accent/10 text-accent" : "border-line bg-panel text-ink hover:border-accent/45 hover:text-accent"
+            }`}
+          >
+            <ListTodo className="h-3.5 w-3.5" aria-hidden /> {t("tasks.panelTitle")}
+            {projectTasks.filter((task) => task.status !== "done").length ? (
+              <span className="rounded-full bg-accent/10 px-1.5 text-[10px] font-bold text-accent">
+                {projectTasks.filter((task) => task.status !== "done").length}
+              </span>
+            ) : null}
+          </button>
+        )}
+        <button
+          type="button"
+          onClick={addWorkflowDraft}
+          aria-label={t("dash.newWorkflow")}
+          className="flex shrink-0 items-center gap-1 rounded-[8px] border border-line bg-panel px-2.5 py-1 text-[11.5px] font-bold text-ink shadow-card hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+        >
+          <span className="text-[13px] leading-none text-accent">+</span> {t("dash.workflow")}
+        </button>
       </div>
 
       {projectWorkflows.length ? (
@@ -443,40 +493,23 @@ export function ProjectDashboard({
         </div>
       ) : null}
 
-      <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
-        {hasNodes ? (
-          isMobile ? (
-            <MobileFocusView
-              project={project}
-              groups={schemeGroups}
-              manual={schemeManual}
-              files={files}
-              flows={flows}
-              drafts={drafts}
-              focus={highlight}
-              onSelect={openSwitchboardFile}
-              onClose={closeNode}
-              onDraftClose={removeDraft}
-              onDraftSpawned={draftSpawned}
-              onHandoff={addHandoffDraft}
-            />
-          ) : (
-            <SchemeBoard
-              project={project}
-              groups={schemeGroups}
-              manual={schemeManual}
-              files={files}
-              flows={flows}
-              drafts={drafts}
-              focus={highlight}
-              attentionPaths={attentionPaths}
-              onSelect={openSwitchboardFile}
-              onClose={closeNode}
-              onDraftClose={removeDraft}
-              onDraftSpawned={draftSpawned}
-              onHandoff={addHandoffDraft}
-            />
-          )
+      {isMobile ? (
+        hasNodes ? (
+          <MobileFocusView
+            project={project}
+            groups={schemeGroups}
+            manual={schemeManual}
+            files={files}
+            flows={flows}
+            tasks={projectTasks}
+            drafts={drafts}
+            focus={highlight}
+            onSelect={openSwitchboardFile}
+            onClose={closeNode}
+            onDraftClose={removeDraft}
+            onDraftSpawned={draftSpawned}
+            onHandoff={addHandoffDraft}
+          />
         ) : projectFiles.length ? (
           <QuietFileList files={projectFiles} onOpen={openSwitchboardFile} />
         ) : (
@@ -486,37 +519,62 @@ export function ProjectDashboard({
               <div className="mt-0.5 text-[12px] text-dim">{t("dash.emptyHint")}</div>
             </div>
           </div>
-        )}
-        {/* The create cluster floats in the bottom-left corner of the board —
-            away from the fixed attention pill in the top-right, above the
-            residual strip. On the phone the header keeps these buttons. */}
-        {isMobile ? null : (
-          <div className="pointer-events-none absolute bottom-4 left-4 z-30 flex items-center gap-2">
-            <button
-              type="button"
-              onClick={addDraft}
-              aria-label={t("dash.newConvo")}
-              className="pointer-events-auto flex shrink-0 items-center gap-1 rounded-[8px] border border-line bg-panel px-3 py-1.5 text-[11.5px] font-bold text-ink shadow-card hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
-            >
-              <span className="text-[13px] leading-none text-accent">+</span> {t("dash.agent")}
-            </button>
-            <button
-              type="button"
-              onClick={addWorkflowDraft}
-              aria-label={t("dash.newWorkflow")}
-              className="pointer-events-auto flex shrink-0 items-center gap-1 rounded-[8px] border border-line bg-panel px-3 py-1.5 text-[11.5px] font-bold text-ink shadow-card hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
-            >
-              <span className="text-[13px] leading-none text-accent">+</span> {t("dash.workflow")}
-            </button>
+        )
+      ) : (
+        <div className="flex min-h-0 min-w-0 flex-1">
+          <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
+            {hasNodes ? (
+              <SchemeBoard
+                project={project}
+                groups={schemeGroups}
+                manual={schemeManual}
+                files={files}
+                flows={flows}
+                tasks={projectTasks}
+                drafts={drafts}
+                focus={highlight}
+                attentionPaths={attentionPaths}
+                onSelect={openSwitchboardFile}
+                onClose={closeNode}
+                onDraftClose={removeDraft}
+                onDraftSpawned={draftSpawned}
+                onHandoff={addHandoffDraft}
+              />
+            ) : projectFiles.length ? (
+              <QuietFileList files={projectFiles} onOpen={openSwitchboardFile} />
+            ) : (
+              <div className="flex flex-1 items-center justify-center px-4 py-5 text-center">
+                <div>
+                  <div className="text-[13.5px] font-semibold text-dim">{t("dash.emptyTitle")}</div>
+                  <div className="mt-0.5 text-[12px] text-dim">{t("dash.emptyHint")}</div>
+                </div>
+              </div>
+            )}
+            {/* The create button floats in the bottom-left corner of the board —
+                away from the fixed attention pill in the top-right, above the
+                residual strip. On the phone the header keeps this button. */}
+            <div className="pointer-events-none absolute bottom-4 left-4 z-30 flex items-center gap-2">
+              <button
+                type="button"
+                onClick={addDraft}
+                aria-label={t("dash.newConvo")}
+                className="pointer-events-auto flex shrink-0 items-center gap-1 rounded-[8px] border border-line bg-panel px-3 py-1.5 text-[11.5px] font-bold text-ink shadow-card hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+              >
+                <span className="text-[13px] leading-none text-accent">+</span> {t("dash.agent")}
+              </button>
+            </div>
           </div>
-        )}
-      </div>
+          {taskPanelOpen ? <TaskPanel tasks={tasks} project={project} onOpenTask={openTask} onClose={toggleTaskPanel} /> : null}
+        </div>
+      )}
 
       {/* The corner pill would sit on the focused pane's composer; on the
           phone the strip, the map and the toast cover its job. */}
       {isMobile ? null : <Switchboard files={files} flows={flows} project={project} onOpenFile={openSwitchboardFile} />}
 
       {residual.length ? <ResidualStrip items={residual} onSelect={openSwitchboardFile} /> : null}
+
+      <TaskToastHost />
     </div>
   );
 }

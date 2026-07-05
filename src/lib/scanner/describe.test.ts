@@ -1,3 +1,5 @@
+import os from "node:os";
+
 import { expect, test } from "bun:test";
 
 import { parseWorktreeGitdir, projectFromSlug } from "./describe";
@@ -26,7 +28,6 @@ test("parseWorktreeGitdir rejects gitdirs that are not linked worktrees", () => 
 });
 
 test("a worktree's main repo slugifies to the same project name its own sessions use", () => {
-  const os = require("node:os") as typeof import("node:os");
   const repo = `${os.homedir()}/.agents/tools/live-log-viewer-next`;
   const slugOfRepo = repo.replace(/[^a-zA-Z0-9]/g, "-");
   const slugFromClaudeDir = "-" + os.homedir().split("/").filter(Boolean).join("-") + "--agents-tools-live-log-viewer-next";
