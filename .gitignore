@@ -43,6 +43,7 @@ yarn-error.log*
 next-env.d.ts
 prod.log
 
-# local agent-session artifacts
-/.claude/
+# local agent-session artifacts (but ship project skills with the repo)
+/.claude/*
+!/.claude/skills/
 /.tmux-multi-agent/

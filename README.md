@@ -148,6 +148,19 @@ name to `~/.config/agent-log-viewer/transcribe-backend`; local is the default.
 See [docs/transcription.md](docs/transcription.md) for setup, key locations,
 and troubleshooting.
 
+## Review loops
+
+The viewer orchestrates implement→review cycles: a long-lived implementer
+agent in tmux, a fresh read-only reviewer per round over the full diff,
+automatic relay of findings, and a verdict deck in the scheme view. Start one
+from the **Flow** chip above a conversation pane; presets pair engines and
+reasoning efforts per role (e.g. `Codex high → Fable`).
+
+See [docs/review-loop.md](docs/review-loop.md) for the round protocol,
+presets, the HTTP automation API, and troubleshooting. A Claude Code skill
+for driving flows from an agent ships in `.claude/skills/review-loop/` —
+agents working in a clone pick it up automatically.
+
 ## Tailscale access
 
 ```bash
