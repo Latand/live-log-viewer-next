@@ -8,7 +8,7 @@ import { applyAssignmentPatches, createTask, deleteTask, mergeAssignments, patch
 import { firstLineTitle } from "./helpers";
 import { reconcileTasks } from "./reconcile";
 import { assembleSendResults } from "./send";
-import { isTask, loadTasks, saveTasks } from "./store";
+import { isTask, loadTasks, mutateTasks, saveTasks } from "./store";
 import type { BoardTask } from "./types";
 import type { DeliveryOutcome } from "@/lib/delivery";
 import type { FileEntry } from "@/lib/types";
@@ -76,6 +76,48 @@ describe("task store", () => {
     fs.writeFileSync(filePath, JSON.stringify({ tasks: [valid, { ...valid, id: 3 }, { ...valid, pos: { x: Number.NaN, y: 0 } }] }));
     expect(loadTasks(filePath)).toEqual([valid]);
     expect(isTask(valid)).toBe(true);
+  });
+
+  test("mutateTasks transforms the freshest snapshot and persists the result", () => {
+    const filePath = tmpFile();
+    saveTasks([task()], filePath);
+    const result = mutateTasks((tasks) => {
+      const outcome = patchTask(tasks, "task-1", { text: "edited" }, "2026-07-05T11:00:00.000Z");
+      return { tasks: outcome.ok ? outcome.tasks : undefined, result: outcome };
+    }, filePath);
+    expect(result.ok).toBe(true);
+    expect(loadTasks(filePath)[0]!.text).toBe("edited");
+  });
+
+  test("mutateTasks skips the write when the mutation returns no tasks", () => {
+    const filePath = tmpFile();
+    saveTasks([task()], filePath);
+    const before = fs.statSync(filePath).mtimeMs;
+    const result = mutateTasks((tasks) => ({ tasks: undefined, result: tasks.length }), filePath);
+    expect(result).toBe(1);
+    expect(fs.statSync(filePath).mtimeMs).toBe(before);
+  });
+
+  test("a mutation between another mutation's slow work and its write is preserved", () => {
+    /* The reviewer scenario: reconciliation computed against an old snapshot
+       must not overwrite an edit that landed meanwhile. Each mutateTasks call
+       re-loads, so the second writer folds into the first writer's output. */
+    const filePath = tmpFile();
+    saveTasks([task(), task({ id: "task-2", text: "other" })], filePath);
+    /* Handler A does slow async work here (file scan, delivery)… meanwhile
+       handler B edits task-2 through the store. */
+    mutateTasks((tasks) => {
+      const outcome = patchTask(tasks, "task-2", { text: "edited by B" }, "2026-07-05T11:00:00.000Z");
+      return { tasks: outcome.ok ? outcome.tasks : undefined, result: outcome };
+    }, filePath);
+    /* …then handler A applies its own outcome; the fresh load sees B's edit. */
+    mutateTasks((tasks) => {
+      const outcome = patchTask(tasks, "task-1", { status: "done" }, "2026-07-05T11:00:01.000Z");
+      return { tasks: outcome.ok ? outcome.tasks : undefined, result: outcome };
+    }, filePath);
+    const final = loadTasks(filePath);
+    expect(final.find((item) => item.id === "task-1")!.status).toBe("done");
+    expect(final.find((item) => item.id === "task-2")!.text).toBe("edited by B");
   });
 });
 

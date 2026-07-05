@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import { deleteTask, patchTask, type PatchTaskInput } from "@/lib/tasks/commands";
-import { loadTasks, saveTasks } from "@/lib/tasks/store";
+import { mutateTasks } from "@/lib/tasks/store";
 import type { BoardTask } from "@/lib/tasks/types";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
 import type { ApiError } from "@/lib/types";
@@ -28,9 +28,11 @@ export async function PATCH(
   }
 
   const { id } = await ctx.params;
-  const result = patchTask(loadTasks(), id, body);
+  const result = mutateTasks((tasks) => {
+    const outcome = patchTask(tasks, id, body);
+    return { tasks: outcome.ok ? outcome.tasks : undefined, result: outcome };
+  });
   if (!result.ok) return NextResponse.json({ error: result.error }, { status: result.status });
-  saveTasks(result.tasks);
   return NextResponse.json({ ok: true, task: result.task });
 }
 
@@ -39,8 +41,10 @@ export async function DELETE(_req: NextRequest, ctx: TaskRouteContext): Promise<
   if (rejection) return rejection;
 
   const { id } = await ctx.params;
-  const result = deleteTask(loadTasks(), id);
+  const result = mutateTasks((tasks) => {
+    const outcome = deleteTask(tasks, id);
+    return { tasks: outcome.ok ? outcome.tasks : undefined, result: outcome };
+  });
   if (!result.ok) return NextResponse.json({ error: result.error }, { status: result.status });
-  saveTasks(result.tasks);
   return NextResponse.json({ ok: true });
 }

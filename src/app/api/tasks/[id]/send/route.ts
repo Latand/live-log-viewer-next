@@ -6,7 +6,7 @@ import { listFiles } from "@/lib/scanner";
 import { applyAssignmentPatches } from "@/lib/tasks/commands";
 import { isoNow, taskDeliveryText } from "@/lib/tasks/helpers";
 import { assembleSendResults, type TaskSendTargetOutcome } from "@/lib/tasks/send";
-import { loadTasks, saveTasks } from "@/lib/tasks/store";
+import { loadTasks, mutateTasks } from "@/lib/tasks/store";
 import type { BoardTask } from "@/lib/tasks/types";
 import type { ApiError } from "@/lib/types";
 
@@ -61,9 +61,14 @@ export async function POST(req: NextRequest, ctx: TaskRouteContext): Promise<Nex
 
   const at = isoNow();
   const assembled = assembleSendResults(task, paths, outcomes, at);
-  const result = applyAssignmentPatches(loadTasks(), id, assembled.patches, at);
+  /* The deliveries above already happened; the serialized read-modify-write
+     folds their outcome into the freshest snapshot (DELETE mid-send wins:
+     the task is gone from that snapshot and nothing is resurrected). */
+  const result = mutateTasks((tasks) => {
+    const outcome = applyAssignmentPatches(tasks, id, assembled.patches, at);
+    return { tasks: outcome.ok ? outcome.tasks : undefined, result: outcome };
+  });
   if (!result.ok) return NextResponse.json({ error: result.error }, { status: result.status });
-  saveTasks(result.tasks);
   return NextResponse.json({
     ok: true,
     task: result.task,

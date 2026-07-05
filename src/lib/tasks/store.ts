@@ -76,3 +76,24 @@ export function loadTasks(filePath = TASKS_FILE): BoardTask[] {
 export function saveTasks(tasks: BoardTask[], filePath = TASKS_FILE): void {
   atomicWriteJson(filePath, { tasks });
 }
+
+/**
+ * Serialized read-modify-write over the tasks file — the only sanctioned way
+ * to persist a mutation. The whole load→transform→save runs in one
+ * synchronous block, and Node yields to other request handlers only at await
+ * points, so a handler can never save a snapshot that predates another
+ * handler's write. Whole-file saves built on separate `loadTasks()` calls
+ * could: files-route reconciliation racing a PATCH would resurrect the old
+ * task list. The callback must stay synchronous — do the slow async work
+ * (message delivery, agent spawn, fs scans) first, then fold its outcome
+ * into the fresh snapshot here. Return `tasks: undefined` to skip the write
+ * (validation failures, clean reconciles).
+ */
+export function mutateTasks<R>(
+  mutate: (tasks: BoardTask[]) => { tasks: BoardTask[] | undefined; result: R },
+  filePath = TASKS_FILE,
+): R {
+  const outcome = mutate(loadTasks(filePath));
+  if (outcome.tasks) saveTasks(outcome.tasks, filePath);
+  return outcome.result;
+}

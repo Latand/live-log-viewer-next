@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import { createTask, type CreateTaskInput } from "@/lib/tasks/commands";
-import { loadTasks, saveTasks } from "@/lib/tasks/store";
+import { mutateTasks } from "@/lib/tasks/store";
 import type { BoardTask } from "@/lib/tasks/types";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
 import type { ApiError } from "@/lib/types";
@@ -20,8 +20,10 @@ export async function POST(req: NextRequest): Promise<NextResponse<{ ok: true; t
     return NextResponse.json({ error: "некоректний JSON" }, { status: 400 });
   }
 
-  const result = createTask(loadTasks(), body);
+  const result = mutateTasks((tasks) => {
+    const outcome = createTask(tasks, body);
+    return { tasks: outcome.ok ? outcome.tasks : undefined, result: outcome };
+  });
   if (!result.ok) return NextResponse.json({ error: result.error }, { status: result.status });
-  saveTasks(result.tasks);
   return NextResponse.json({ ok: true, task: result.task });
 }

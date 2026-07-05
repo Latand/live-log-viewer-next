@@ -8,7 +8,7 @@ import { freshSpecFor, type AgentEngine } from "@/lib/agent/cli";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
 import { applyAssignmentPatches, type AssignmentPatch } from "@/lib/tasks/commands";
 import { isoNow } from "@/lib/tasks/helpers";
-import { loadTasks, saveTasks } from "@/lib/tasks/store";
+import { loadTasks, mutateTasks } from "@/lib/tasks/store";
 import type { BoardTask } from "@/lib/tasks/types";
 import { spawnAgentWithPrompt } from "@/lib/tmux";
 import type { ApiError } from "@/lib/types";
@@ -74,9 +74,11 @@ export async function POST(req: NextRequest, ctx: TaskRouteContext): Promise<Nex
     } else {
       patch = { path: null, panePid: null, state: "failed", error: "tmux не повернув pid пейна", at };
     }
-    const result = applyAssignmentPatches(loadTasks(), id, [patch], at);
+    const result = mutateTasks((tasks) => {
+      const outcome = applyAssignmentPatches(tasks, id, [patch], at);
+      return { tasks: outcome.ok ? outcome.tasks : undefined, result: outcome };
+    });
     if (!result.ok) return NextResponse.json({ error: result.error }, { status: result.status });
-    saveTasks(result.tasks);
     return NextResponse.json({
       ok: true,
       task: result.task,
