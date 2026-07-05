@@ -84,6 +84,11 @@ From an agent:
 
 ## Recovering stuck rounds
 
+- Restarting the viewer service (`systemctl --user restart agent-log-viewer`)
+  kills in-flight headless reviewers too — they live in the unit's cgroup.
+  Cancel the round first or let it finish; after an unavoidable restart the
+  artifact stays empty and the only path is `retry-round`.
+
 - `needs_decision: "reviewer process is missing after server restart"` — a
   dev-server reload killed or orphaned the headless reviewer. Check
   `pgrep -af "codex exec"` first: if the reviewer still runs, wait for it to
