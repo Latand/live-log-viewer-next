@@ -125,7 +125,7 @@ export function BranchPane({ file, files, tasks, onSelect, isRoot, onClose, drag
         style={state === "done" ? { borderTopColor: "#c9c9d1" } : engineEdge(file)}
       >
         <header
-          className={`flex h-10 shrink-0 items-center gap-1.5 border-b border-line px-2.5 ${tone.header} ${
+          className={`flex min-h-10 shrink-0 flex-wrap items-center gap-x-1.5 gap-y-1 border-b border-line px-2.5 py-1 ${tone.header} ${
             dragHandle ? "cursor-grab active:cursor-grabbing" : ""
           }`}
           {...dragHandle}
@@ -166,7 +166,7 @@ export function BranchPane({ file, files, tasks, onSelect, isRoot, onClose, drag
               <CornerDownRight className="h-3 w-3" aria-hidden /> {file.handoff ? t("kind.handoff") : kindLabel(t, file.kind)}
             </span>
           )}
-          <span className="min-w-0 flex-1 truncate text-[12px] font-semibold" title={cleanTitle(file.title)}>
+          <span className="min-w-24 flex-1 truncate text-[12px] font-semibold" title={cleanTitle(file.title)}>
             {cleanTitle(file.title, 90)}
           </span>
           <ProcessStatusControls file={file} compact />
@@ -226,9 +226,9 @@ export function TaskStrip({ file, files, onSelect }: { file: FileEntry; files: F
   const title = cleanTitle(file.cmdDesc || file.title, 80);
   return (
     <div className="border-t border-line first:border-t-0">
-      <div className="flex h-7 items-center gap-1.5 pl-2 pr-2.5">
+      <div className="flex min-h-7 flex-wrap items-center gap-1.5 pl-2 pr-2.5">
         <button
-          className="flex h-full min-w-0 flex-1 items-center gap-1.5 rounded-[6px] text-left hover:bg-bg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+          className="flex min-h-7 min-w-0 flex-1 items-center gap-1.5 rounded-[6px] text-left hover:bg-bg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
           aria-expanded={open}
           aria-label={t("branch.toggleBackground", { action: open ? t("branch.collapse") : t("branch.expand"), title })}
           onClick={() => setOpen((value) => !value)}

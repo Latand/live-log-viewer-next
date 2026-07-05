@@ -17,7 +17,7 @@ export function ProcessStatusChip({ file }: { file: FileEntry }) {
   const { t } = useLocale();
   if (file.proc === "running") {
     return (
-      <span className="inline-flex items-center gap-1 rounded-full bg-[#e5f6ea] px-2 py-0.5 text-[11px] font-bold text-ok">
+      <span className="inline-flex items-center gap-1 whitespace-nowrap rounded-full bg-[#e5f6ea] px-2 py-0.5 text-[11px] font-bold tabular-nums text-ok">
         <Play className="h-3 w-3" aria-hidden /> PID {file.pid}
       </span>
     );
@@ -88,14 +88,14 @@ export function ProcessStatusControls({ file, compact = false }: { file: FileEnt
               <span className="truncate px-1 text-[11px] font-semibold text-err">{t("task.confirmKill", { pid: file.pid ?? "" })}</span>
             )}
             <button
-              className="rounded-lg bg-err px-2 py-0.5 text-[11px] font-bold text-white disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-err/50"
+              className="whitespace-nowrap rounded-lg bg-err px-2 py-0.5 text-[11px] font-bold tabular-nums text-white disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-err/50"
               disabled={killing}
               onClick={kill}
             >
               {forceNext ? "SIGKILL" : compact ? t("task.killPid", { pid: file.pid ?? "" }) : t("task.confirmKillYes")}
             </button>
             <button
-              className="rounded-lg border border-line bg-panel px-2 py-0.5 text-[11px] font-semibold text-dim focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+              className="whitespace-nowrap rounded-lg border border-line bg-panel px-2 py-0.5 text-[11px] font-semibold text-dim focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
               onClick={() => setConfirming(false)}
             >
               {compact ? t("common.no") : t("common.cancel")}
@@ -103,7 +103,7 @@ export function ProcessStatusControls({ file, compact = false }: { file: FileEnt
           </span>
         ) : (
           <button
-            className="rounded-full border border-line bg-panel px-2 py-0.5 text-[11px] font-semibold text-dim hover:border-err/40 hover:text-err focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            className="whitespace-nowrap rounded-full border border-line bg-panel px-2 py-0.5 text-[11px] font-semibold text-dim hover:border-err/40 hover:text-err focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
             aria-label={t("task.stopAria", { pid: file.pid ?? "" })}
             onClick={() => setConfirming(true)}
           >
