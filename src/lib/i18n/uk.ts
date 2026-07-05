@@ -459,6 +459,8 @@ export const uk: Record<keyof typeof en, Message> = {
   "branch.toggleBackground": "{action} фонову задачу {title}",
   "branch.collapse": "Згорнути",
   "branch.expand": "Розгорнути",
+  "branch.expandFull": "Розгорнути розмову {title} на все вікно",
+  "branch.collapseFull": "Повернутися до полотна (Esc)",
 
   "tree.quiet": "Тихі розмови й задачі",
 
@@ -486,6 +488,12 @@ export const uk: Record<keyof typeof en, Message> = {
   "viewer.closeProjects": "Закрити список проєктів",
   "viewer.agentWaiting": "Агент чекає відповіді",
   "viewer.closeNotification": "Закрити сповіщення",
+
+  "attention.badge": { one: "{count} чекає", few: "{count} чекають", many: "{count} чекають", other: "{count} чекають" },
+  "attention.openQueue": "Черга уваги — хто заблокований на тобі (N — наступний)",
+  "attention.popoverTitle": "Чекають на тебе",
+  "attention.filterOn": "Показати лише тих, хто чекає на тебе (F)",
+  "attention.filterOff": "Показати всі вузли (F)",
 
   "mobile.noConvos": "Розмов поки нема",
   "mobile.map": "Карта",

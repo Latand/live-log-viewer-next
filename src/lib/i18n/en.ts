@@ -492,6 +492,8 @@ export const en = {
   "branch.toggleBackground": "{action} background task {title}",
   "branch.collapse": "Collapse",
   "branch.expand": "Expand",
+  "branch.expandFull": "Expand conversation {title} to the full window",
+  "branch.collapseFull": "Back to the canvas (Esc)",
 
   // TreeAside
   "tree.quiet": "Quiet conversations and tasks",
@@ -523,6 +525,13 @@ export const en = {
   "viewer.closeProjects": "Close the project list",
   "viewer.agentWaiting": "Agent is waiting for a reply",
   "viewer.closeNotification": "Close the notification",
+
+  // Viewer attention queue
+  "attention.badge": { one: "{count} waiting", other: "{count} waiting" },
+  "attention.openQueue": "Attention queue — who is blocked on you (N — next)",
+  "attention.popoverTitle": "Waiting on you",
+  "attention.filterOn": "Show only those waiting on you (F)",
+  "attention.filterOff": "Show all nodes (F)",
 
   // MobileFocusView
   "mobile.noConvos": "No conversations yet",

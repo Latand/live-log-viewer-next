@@ -30,6 +30,12 @@ interface Props {
   /** Bumped by Viewer on every openFile so a same-project open re-reads prefs
       even though `project` itself did not change. */
   openNonce: number;
+  /** Attention-queue jump: glide the board to this node and ring it. The nonce
+      re-flashes repeated jumps to the same path; prefs stay untouched — a
+      read-only jump must not mutate manual column state. */
+  focusRequest?: { path: string; nonce: number } | null;
+  /** «Show only needs me»: non-null dims every scheme node not in the set. */
+  attentionPaths?: ReadonlySet<string> | null;
   /** The project is shelved: hidden from the rail and the overview. */
   archived: boolean;
   onArchive: (project: string) => void;
@@ -81,7 +87,18 @@ function gotoProject(project: string) {
   location.hash = "#p=" + encodeURIComponent(project);
 }
 
-export function ProjectDashboard({ files, flows, project, openNonce, archived, onArchive, onUnarchive, onMenu }: Props) {
+export function ProjectDashboard({
+  files,
+  flows,
+  project,
+  openNonce,
+  focusRequest,
+  attentionPaths,
+  archived,
+  onArchive,
+  onUnarchive,
+  onMenu,
+}: Props) {
   const { t } = useLocale();
   const isMobile = useIsMobile();
   const highlightTimer = useRef<number | null>(null);
@@ -89,6 +106,12 @@ export function ProjectDashboard({ files, flows, project, openNonce, archived, o
   const [prefs, setPrefs] = useState<ColumnPrefs>({ manual: [], hidden: [] });
   const [drafts, setDrafts] = useState<string[]>([]);
   const [highlight, setHighlight] = useState<string | null>(null);
+  /* Jump targets the scheme would otherwise skip (a stalled root builds no
+     automatic group; a stalled branch hides inside a mini stack) materialize
+     as ephemeral nodes: React state only, never written to prefs, gone on
+     reload — the queue can route to its quietest members while the manual
+     column state stays untouched. */
+  const [ephemeral, setEphemeral] = useState<string[]>([]);
   /* Mirrors `prefs` synchronously so the missing-nodes effect below can read
      the value the project-switch load just set, even within the same commit
      (state updates from sibling effects are not visible via closure yet). */
@@ -139,6 +162,24 @@ export function ProjectDashboard({ files, flows, project, openNonce, archived, o
           file !== undefined && projectKey(file) === project && !autoPaths.has(file.path) && !hiddenSet.has(file.path),
       );
   }, [prefs.manual, groupFiles, project, autoPaths, hiddenSet]);
+  /* Ephemeral jump targets render exactly like manual nodes; paths the scheme
+     already draws (auto columns, manual entries) filter out. */
+  const schemeManual = useMemo(() => {
+    const byPath = new Map(groupFiles.map((file) => [file.path, file]));
+    const manualPaths = new Set(manualNodes.map((file) => file.path));
+    /* A hidden column's file still materializes: the user closed the column
+       earlier, but a jump must land somewhere visible. */
+    const extra = ephemeral
+      .map((path) => byPath.get(path))
+      .filter(
+        (file): file is FileEntry =>
+          file !== undefined &&
+          projectKey(file) === project &&
+          !manualPaths.has(file.path) &&
+          (!autoPaths.has(file.path) || hiddenSet.has(file.path)),
+      );
+    return extra.length ? [...manualNodes, ...extra] : manualNodes;
+  }, [ephemeral, groupFiles, project, autoPaths, hiddenSet, manualNodes]);
   const liveCount = useMemo(
     () =>
       groups.reduce(
@@ -163,6 +204,21 @@ export function ProjectDashboard({ files, flows, project, openNonce, archived, o
     if (highlightTimer.current) window.clearTimeout(highlightTimer.current);
     highlightTimer.current = window.setTimeout(() => setHighlight(null), HIGHLIGHT_MS);
   };
+
+  /* eslint-disable react-hooks/set-state-in-effect */
+  useEffect(() => {
+    setEphemeral([]);
+  }, [project]);
+
+  /* An attention jump rides the same channel as switchboard opens: the ref is
+     set here and the every-render effect below flashes it, whether the node is
+     already in the layout or enters it on this render. */
+  useEffect(() => {
+    if (!focusRequest) return;
+    pendingFocusRef.current = focusRequest.path;
+    setEphemeral((prev) => (prev.includes(focusRequest.path) ? prev : [...prev, focusRequest.path]));
+  }, [focusRequest]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   /* A node added from the switchboard enters the layout on the next render;
      flash it then so the camera has something to glide to. */
@@ -232,6 +288,7 @@ export function ProjectDashboard({ files, flows, project, openNonce, archived, o
     const manual = prefs.manual.filter((item) => item !== path);
     const hidden = autoPaths.has(path) ? [...new Set([...prefs.hidden, path])] : prefs.hidden;
     persistPrefs({ manual, hidden });
+    setEphemeral((prev) => (prev.includes(path) ? prev.filter((item) => item !== path) : prev));
   };
 
   /* A node never vanishes on its own: every auto node is recorded as a
@@ -288,7 +345,7 @@ export function ProjectDashboard({ files, flows, project, openNonce, archived, o
      canvas instead of hanging as lone stub nodes in the middle of it. */
   const dockedTasks = visibleGroups.filter((group) => group.orphanTask).map((group) => group.columns[0]!.file);
   const schemeGroups = visibleGroups.filter((group) => !group.orphanTask);
-  const hasNodes = schemeGroups.length > 0 || manualNodes.length > 0 || drafts.length > 0;
+  const hasNodes = schemeGroups.length > 0 || schemeManual.length > 0 || drafts.length > 0;
   /* Everything the project has on disk, freshest first. Powers the
      delete-project button and the fallback list of an empty scheme —
      transcripts whose tree lives elsewhere (scratchpad one-offs) build no
@@ -354,7 +411,7 @@ export function ProjectDashboard({ files, flows, project, openNonce, archived, o
           <MobileFocusView
             project={project}
             groups={schemeGroups}
-            manual={manualNodes}
+            manual={schemeManual}
             files={files}
             flows={flows}
             drafts={drafts}
@@ -369,11 +426,12 @@ export function ProjectDashboard({ files, flows, project, openNonce, archived, o
           <SchemeBoard
             project={project}
             groups={schemeGroups}
-            manual={manualNodes}
+            manual={schemeManual}
             files={files}
             flows={flows}
             drafts={drafts}
             focus={highlight}
+            attentionPaths={attentionPaths}
             onSelect={openSwitchboardFile}
             onClose={closeNode}
             onDraftClose={removeDraft}
