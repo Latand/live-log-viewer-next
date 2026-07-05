@@ -237,5 +237,5 @@ committable.
 - Mobile hotkeys (badge + popover fully work on mobile; N/F are
   desktop-only).
 - Review-ready / errored-process detection beyond the existing `stalled`
-  activity (the research's "review-ready" tier maps to the flows feature,
-  not this queue).
+  activity (the research's "review-ready" tier belongs to the flows
+  feature).
