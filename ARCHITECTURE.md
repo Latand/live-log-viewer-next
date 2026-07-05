@@ -131,6 +131,10 @@ src/components/scheme/useSchemeCamera.ts pan/zoom/pinch/glide engine + tool
 src/components/scheme/nodes.tsx        memoized node/edge shells
 src/components/scheme/SchemeBoard.tsx  composition and wiring
 src/components/scheme/Minimap.tsx      corner minimap with draggable viewport
+src/components/scheme/lasso.ts         pure marquee geometry + selection pruning
+src/components/scheme/useLasso.ts      marquee gesture on the select-mode background
+src/components/scheme/bulkActions.ts   sequential fan-out runner + eligibility
+src/components/scheme/BulkActionBar.tsx selection-session bar: broadcast, bulk ops
 ```
 
 `ProjectDashboard` renders a project exclusively as the scheme (the column
@@ -153,6 +157,19 @@ pinch zoom at the cursor, arrows nudge, 0 fits, 1 is 100%, double-click on
 the background fits, double-click on a node in hand mode zooms into it. The
 camera persists per project in `llvCam:<project>` (sessionStorage) and is
 clamped so a strip of the world always stays on screen.
+
+Multi-select is an ephemeral **selection session** (design:
+`docs/design/lasso-bulk-actions.md`) — no stored group entity ever exists. A
+mouse drag on the select-mode background draws a marquee (panning stays on
+the hand/Space/middle button/wheel); intersected conversation cards commit
+into a path-keyed set that survives the 10s poll relayout and is pruned in
+state on every layout change. While the session is active panes go click-through, clicks
+toggle membership through the world hit-test, members carry checkmarks and
+the rest dims via one CSS class; a screen-space bottom bar fans actions out
+over `/api/tmux` and `/api/flows` strictly sequentially (a delivery can boot
+a resume window — never in parallel) with per-node results, failed-only
+retry, and inline confirms on the two killing actions. The toolbar's third
+tool arms the same session for touch, where the marquee gesture stays off.
 
 Rendering quality rules: camera state must never re-render panes (edges and
 nodes layers are memoized, handlers passed into them stay identity-stable);

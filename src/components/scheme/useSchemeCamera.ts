@@ -25,8 +25,16 @@ interface CameraOptions {
   focus: string | null;
   /** Map-mode node pick handler; a stationary tap resolves to a node key. */
   onNodePick?: (key: string) => void;
-  /** Selection setter owned by SchemeBoard, driven by pointer/keyboard here. */
-  setSelected: (value: string | null) => void;
+  /** Selection setter owned by SchemeBoard, driven by pointer/keyboard here.
+      `additive` marks a Shift+click on a node — add/toggle instead of replace. */
+  setSelected: (value: string | null, additive?: boolean) => void;
+  /** First claim on a select-mode background press. Returning true means the
+      caller owns the gesture (marquee on mouse); for touch a true only skips
+      the press-time selection clear — panning and the stationary tap remain. */
+  onBackgroundDown?: (event: React.PointerEvent<HTMLDivElement>) => boolean;
+  /** Stationary background tap in world coords (the selection session's
+      toggle/exit). Runs before the map-mode pick; true consumes the tap. */
+  onWorldTap?: (wx: number, wy: number) => boolean;
 }
 
 export interface SchemeCamera {
@@ -46,6 +54,8 @@ export interface SchemeCamera {
   zoomCenter: (factor: number) => void;
   zoomTo: (targetZ: number) => void;
   fit: () => void;
+  /** Glide to fit a world rect (the "show selection" bulk action). */
+  fitRect: (rect: SchemeRect) => void;
   jump: (wx: number, wy: number) => void;
 }
 
@@ -58,7 +68,16 @@ export interface SchemeCamera {
  * persists per project in sessionStorage. Selection lives in the caller; this
  * hook drives it through `setSelected` from the pointer and keyboard handlers.
  */
-export function useSchemeCamera({ project, layout, mapMode, focus, onNodePick, setSelected }: CameraOptions): SchemeCamera {
+export function useSchemeCamera({
+  project,
+  layout,
+  mapMode,
+  focus,
+  onNodePick,
+  setSelected,
+  onBackgroundDown,
+  onWorldTap,
+}: CameraOptions): SchemeCamera {
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const tapRef = useRef<{ x: number; y: number } | null>(null);
   const [cam, setCam] = useState<Camera>({ x: 0, y: 0, z: 0.5 });
@@ -206,6 +225,16 @@ export function useSchemeCamera({ project, layout, mapMode, focus, onNodePick, s
     const c = fitCam();
     if (c) glideTo(c);
   }, [fitCam, glideTo]);
+
+  const fitRect = useCallback(
+    (r: SchemeRect) => {
+      const rect = viewportRef.current?.getBoundingClientRect();
+      if (!rect || r.w <= 0 || r.h <= 0) return;
+      const z = Math.min(MAX_Z, Math.max(MIN_Z, Math.min((rect.width - 48) / r.w, (rect.height - 48) / r.h, 1)));
+      glideTo(clampCam({ z, x: (rect.width - r.w * z) / 2 - r.x * z, y: (rect.height - r.h * z) / 2 - r.y * z }));
+    },
+    [glideTo, clampCam],
+  );
 
   /* Glide a node into view: centered horizontally, its head near the top so
      a tall pane starts readable instead of vertically split. */
@@ -389,11 +418,21 @@ export function useSchemeCamera({ project, layout, mapMode, focus, onNodePick, s
     if (!handLike) {
       const nodeEl = target.closest("[data-scheme-node]");
       if (nodeEl) {
-        setSelected(nodeEl.getAttribute("data-scheme-node"));
+        setSelected(nodeEl.getAttribute("data-scheme-node"), event.shiftKey);
         return;
       }
-      setSelected(null);
-      if (target.closest("button, a, input, textarea, select")) return;
+      /* Background press: the stationary tap resolves through onClick below,
+         so the session's toggle/exit and the map pick share one path. */
+      if (onWorldTap && event.isPrimary) tapRef.current = { x: event.clientX, y: event.clientY };
+      const claimed = onBackgroundDown?.(event) ?? false;
+      /* Mouse/pen claim hands the whole gesture to the marquee; a touch claim
+         only spares the selection from the press-time clear — the finger keeps
+         panning and a stationary tap still lands in onWorldTap. */
+      if (claimed && event.pointerType !== "touch") return;
+      if (!claimed) {
+        setSelected(null);
+        if (target.closest("button, a, input, textarea, select")) return;
+      }
     }
     startPan(event);
   };
@@ -476,14 +515,18 @@ export function useSchemeCamera({ project, layout, mapMode, focus, onNodePick, s
   };
 
   const onClick = (event: React.MouseEvent<HTMLDivElement>) => {
-    if (!onNodePick) return;
+    if (!onNodePick && !onWorldTap) return;
     const start = tapRef.current;
     tapRef.current = null;
     if (!start || Math.hypot(event.clientX - start.x, event.clientY - start.y) > 9) return;
     if ((event.target as HTMLElement).closest("[data-scheme-ui]")) return;
     const rect = viewportRef.current?.getBoundingClientRect();
     if (!rect) return;
-    const key = pickAt((event.clientX - rect.left - cam.x) / cam.z, (event.clientY - rect.top - cam.y) / cam.z);
+    const wx = (event.clientX - rect.left - cam.x) / cam.z;
+    const wy = (event.clientY - rect.top - cam.y) / cam.z;
+    if (onWorldTap?.(wx, wy)) return;
+    if (!onNodePick) return;
+    const key = pickAt(wx, wy);
     if (key) onNodePick(key);
   };
 
@@ -508,6 +551,7 @@ export function useSchemeCamera({ project, layout, mapMode, focus, onNodePick, s
     zoomCenter,
     zoomTo,
     fit,
+    fitRect,
     jump,
   };
 }

@@ -1,6 +1,6 @@
 "use client";
 
-import { Hand, Maximize2, Minus, MousePointer2, Plus } from "lucide-react";
+import { BoxSelect, Hand, Maximize2, Minus, MousePointer2, Plus } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { Flow } from "@/lib/flows/types";
@@ -10,13 +10,18 @@ import type { FileEntry } from "@/lib/types";
 import { flowByImplementer } from "@/components/flows/flowModel";
 import type { BranchGroup } from "@/components/projectModel";
 
+import { BulkActionBar } from "./BulkActionBar";
+import { nodesInRect, pruneSelection, selectionBBox } from "./lasso";
 import { buildSchemeLayout } from "./layout";
 import { Minimap } from "./Minimap";
 import { EdgesLayer, LoopsLayer, MOVE_EASE, NodesLayer, type DeckFocus } from "./nodes";
+import { useLasso } from "./useLasso";
 import { useSchemeCamera } from "./useSchemeCamera";
 
 /* Below this zoom the big node labels fade in over the unreadable panes. */
 const LABEL_Z = 0.45;
+
+const EMPTY_PATHS: ReadonlySet<string> = new Set();
 
 interface Props {
   project: string;
@@ -97,8 +102,68 @@ export function SchemeBoard({
   const { t } = useLocale();
   const mapMode = Boolean(onNodePick);
   const [selected, setSelected] = useState<string | null>(null);
+  /* The ephemeral selection session: a set of node paths plus an "armed"
+     latch for the toolbar button. Session ⇔ armed or non-empty — a plain
+     single-click ring never enters it. */
+  const [multi, setMulti] = useState<ReadonlySet<string>>(EMPTY_PATHS);
+  const [armed, setArmed] = useState(false);
 
   const layout = useMemo(() => buildSchemeLayout(groups, manual, files, flows, drafts), [groups, manual, files, flows, drafts]);
+
+  /* Selection keys are transcript paths, so the 10s poll relayout keeps the
+     set for free; nodes that left the board are pruned out of the state
+     itself — a path returning later must not resurrect an old selection.
+     pruneSelection returns the same reference when nothing changed, so the
+     write below bails out instead of cascading. */
+  useEffect(() => {
+    /* eslint-disable-next-line react-hooks/set-state-in-effect */
+    setMulti((prev) => pruneSelection(prev, layout.nodes));
+  }, [layout]);
+  const session = !mapMode && (armed || multi.size > 0);
+
+  const clearSession = useCallback(() => {
+    setMulti(EMPTY_PATHS);
+    setArmed(false);
+  }, []);
+  const toggleMember = useCallback((path: string) => {
+    setMulti((prev) => {
+      const next = new Set(prev);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
+  }, []);
+
+  const selectedRef = useRef(selected);
+  useEffect(() => {
+    selectedRef.current = selected;
+  }, [selected]);
+
+  /* Camera-facing selection setter: null clears everything (Esc, background),
+     additive is a Shift+click that lifts the click into the session. */
+  const setSelectedFromCamera = useCallback(
+    (value: string | null, additive?: boolean) => {
+      if (value === null) {
+        setSelected(null);
+        clearSession();
+        return;
+      }
+      if (additive && layout.byPath.has(value) && layout.nodes.some((node) => node.file.path === value)) {
+        setSelected(null);
+        setMulti((prev) => {
+          const next = new Set(prev);
+          const ringed = selectedRef.current;
+          if (ringed && ringed !== value && layout.nodes.some((node) => node.file.path === ringed)) next.add(ringed);
+          if (next.has(value)) next.delete(value);
+          else next.add(value);
+          return next;
+        });
+        return;
+      }
+      setSelected(value);
+    },
+    [layout, clearSession],
+  );
   const flowsByImpl = useMemo(() => flowByImplementer(flows), [flows]);
   const [deckFocus, setDeckFocus] = useState<DeckFocus | null>(null);
   const focusRound = useCallback((flowId: string, round: number) => {
@@ -137,6 +202,41 @@ export function SchemeBoard({
   /* The handle renders only when the opener wired a handler (not in map mode). */
   const handoffForNodes = onHandoff ? stableHandoff : undefined;
 
+  /* A stationary background tap: inside the session it toggles the node under
+     the cursor (panes are click-through, so the DOM can't answer) or exits on
+     empty ground; outside it, it drops the single ring — the job the press
+     itself did before the marquee claimed background presses. */
+  const sessionRef = useRef(session);
+  useEffect(() => {
+    sessionRef.current = session;
+  }, [session]);
+  /* The click that lands right after a marquee commit must be swallowed: the
+     marquee arms from 4px of travel while the camera's tap threshold is 9px,
+     so a short drag would otherwise commit AND then toggle/clear through
+     onWorldTap. Armed at commit, disarmed on the very next press. */
+  const marqueeClickGuard = useRef(false);
+  const onWorldTap = useCallback(
+    (wx: number, wy: number) => {
+      if (marqueeClickGuard.current) {
+        marqueeClickGuard.current = false;
+        return true;
+      }
+      if (!sessionRef.current) {
+        setSelected(null);
+        return true;
+      }
+      const hit = nodesInRect(layout.nodes, { x: wx, y: wy, w: 0, h: 0 });
+      if (hit.length) toggleMember(hit[0]!);
+      else clearSession();
+      return true;
+    },
+    [layout, toggleMember, clearSession],
+  );
+
+  /* The camera consults the lasso on every background press; the ref breaks
+     the camera↔lasso creation cycle (the lasso needs the camera's viewport). */
+  const lassoDownRef = useRef<(event: React.PointerEvent<HTMLDivElement>) => boolean>(() => false);
+
   const {
     cam,
     vp,
@@ -152,8 +252,57 @@ export function SchemeBoard({
     zoomCenter,
     zoomTo,
     fit,
+    fitRect,
     jump,
-  } = useSchemeCamera({ project, layout, mapMode, focus, onNodePick, setSelected });
+  } = useSchemeCamera({
+    project,
+    layout,
+    mapMode,
+    focus,
+    onNodePick,
+    setSelected: setSelectedFromCamera,
+    onBackgroundDown: mapMode
+      ? undefined
+      : (event) => {
+          marqueeClickGuard.current = false;
+          return lassoDownRef.current(event);
+        },
+    onWorldTap: mapMode ? undefined : onWorldTap,
+  });
+
+  const commitMarquee = useCallback((paths: string[], additive: boolean) => {
+    marqueeClickGuard.current = true;
+    setSelected(null);
+    setMulti((prev) => {
+      if (!additive) return paths.length ? new Set(paths) : EMPTY_PATHS;
+      if (!paths.length) return prev;
+      const next = new Set(prev);
+      for (const path of paths) next.add(path);
+      return next;
+    });
+  }, []);
+  const { marquee, onBackgroundDown } = useLasso({
+    viewportRef,
+    cam,
+    layout,
+    enabled: !mapMode,
+    session,
+    onCommit: commitMarquee,
+  });
+  useEffect(() => {
+    lassoDownRef.current = onBackgroundDown;
+  }, [onBackgroundDown]);
+
+  const selectedNodes = useMemo(() => layout.nodes.filter((node) => multi.has(node.file.path)), [layout, multi]);
+  const bbox = useMemo(() => selectionBBox(layout.nodes, multi), [layout, multi]);
+  /* Stable fit handler: the memoized bar must not re-render on bbox moves. */
+  const bboxRef = useRef(bbox);
+  useEffect(() => {
+    bboxRef.current = bbox;
+  }, [bbox]);
+  const fitSelection = useCallback(() => {
+    if (bboxRef.current) fitRect(bboxRef.current);
+  }, [fitRect]);
 
   const tile = 24 * cam.z;
 
@@ -204,9 +353,11 @@ export function SchemeBoard({
           layout={layout}
           project={project}
           files={files}
-          interactive={!handLike}
+          interactive={!handLike && !session}
           lite={mapMode}
           selected={selected}
+          multi={multi}
+          session={session}
           focus={visualFocus}
           flowsByImpl={flowsByImpl}
           deckFocus={deckFocus}
@@ -217,7 +368,49 @@ export function SchemeBoard({
           onDraftSpawned={stableDraftSpawned}
           onHandoff={handoffForNodes}
         />
+        {/* Session bbox lives inside the transformed world div: the camera
+            moves it through the container transform, never a re-render. */}
+        {session && bbox ? (
+          <div
+            aria-hidden
+            className="pointer-events-none absolute z-[6] rounded-[14px] border-2 border-dashed border-accent/60"
+            style={{ left: bbox.x - 14, top: bbox.y - 14, width: bbox.w + 28, height: bbox.h + 28 }}
+          >
+            <span
+              className="absolute -top-3 left-4 rounded-full border border-accent/50 bg-panel px-2 py-0.5 font-bold text-accent"
+              style={{ fontSize: "calc(11px * min(var(--inv-z, 1), 2.6))" }}
+            >
+              {t("bulk.selectedCount", { count: multi.size })}
+            </span>
+          </div>
+        ) : null}
       </div>
+
+      {/* Screen-space marquee: only this small subtree changes per drag frame. */}
+      {marquee ? (
+        <div aria-hidden className="pointer-events-none absolute inset-0 z-30">
+          <div
+            className="absolute rounded-[4px] border border-accent/70 bg-accent/10"
+            style={{ left: marquee.rect.x, top: marquee.rect.y, width: marquee.rect.w, height: marquee.rect.h }}
+          />
+          {marquee.candidates.map((path) => {
+            const node = layout.byPath.get(path);
+            if (!node) return null;
+            return (
+              <div
+                key={path}
+                className="absolute rounded-[10px] border-2 border-accent/70"
+                style={{
+                  left: node.x * cam.z + cam.x,
+                  top: node.y * cam.z + cam.y,
+                  width: node.w * cam.z,
+                  height: node.h * cam.z,
+                }}
+              />
+            );
+          })}
+        </div>
+      ) : null}
 
       <div data-scheme-ui className="absolute left-3 top-3 z-40 flex items-center gap-1 rounded-[10px] border border-line bg-panel/95 p-1 shadow-card">
         {mapMode ? null : (
@@ -225,8 +418,22 @@ export function SchemeBoard({
             <ToolButton active={handLike} title={t("scheme.handTool")} onClick={() => setMode("hand")}>
               <Hand className="h-4 w-4" aria-hidden />
             </ToolButton>
-            <ToolButton active={!handLike} title={t("scheme.selectTool")} onClick={() => setMode("select")}>
+            <ToolButton active={!handLike && !session} title={t("scheme.selectTool")} onClick={() => setMode("select")}>
               <MousePointer2 className="h-4 w-4" aria-hidden />
+            </ToolButton>
+            <ToolButton
+              active={session}
+              title={t("scheme.lassoTool")}
+              onClick={() => {
+                if (session) {
+                  clearSession();
+                } else {
+                  setMode("select");
+                  setArmed(true);
+                }
+              }}
+            >
+              <BoxSelect className="h-4 w-4" aria-hidden />
             </ToolButton>
             <div className="mx-0.5 h-5 w-px bg-line" aria-hidden />
           </>
@@ -248,6 +455,16 @@ export function SchemeBoard({
           <Maximize2 className="h-4 w-4" aria-hidden />
         </ToolButton>
       </div>
+
+      {session ? (
+        <BulkActionBar
+          nodes={selectedNodes}
+          flowsByImpl={flowsByImpl}
+          onRemove={stableClose}
+          onFit={fitSelection}
+          onExit={clearSession}
+        />
+      ) : null}
 
       <Minimap layout={layout} cam={cam} vp={vp} onJump={jump} />
     </div>

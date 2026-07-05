@@ -1,6 +1,6 @@
 "use client";
 
-import { Layers } from "lucide-react";
+import { Check, Layers } from "lucide-react";
 import { memo, useState } from "react";
 
 import { ChevronRight } from "@/components/icons";
@@ -404,6 +404,7 @@ function NodeShell({
   node,
   files,
   ringed,
+  marked,
   flow,
   canFlow,
   onSelect,
@@ -414,6 +415,8 @@ function NodeShell({
   node: SchemeNode;
   files: FileEntry[];
   ringed: boolean;
+  /** Member of the selection session: checkmark badge + exempt from dimming. */
+  marked: boolean;
   /** Active review-loop flow attached to this conversation, if any. */
   flow: Flow | null;
   /** This node may host a new flow (root claude/codex conversation without one). */
@@ -429,9 +432,19 @@ function NodeShell({
   return (
     <div
       data-scheme-node={node.file.path}
+      data-lasso-selected={marked ? "true" : undefined}
       className={`scheme-enter absolute ${underOpen || flowOpen ? "z-20" : ""}`}
       style={{ transform: `translate(${node.x}px, ${node.y}px)`, width: node.w, height: node.h, transition: MOVE_TRANSITION }}
     >
+      {marked ? (
+        <>
+          <span className="absolute -right-2.5 -top-2.5 z-[5] flex h-6 w-6 items-center justify-center rounded-full border-2 border-bg bg-accent text-white shadow-card">
+            <Check className="h-3.5 w-3.5" aria-hidden />
+          </span>
+          {/* The promised member tint: readable at far zoom, panes stay legible. */}
+          <div aria-hidden className="pointer-events-none absolute inset-0 z-[4] rounded-[10px] bg-accent/[0.06]" />
+        </>
+      ) : null}
       {/* The loop's shared header hovers above the implementer↔reviewer pair. */}
       {flow ? (
         <div className="absolute -top-[60px] left-0 z-[4]" style={{ width: PAIR_W }}>
@@ -568,6 +581,8 @@ export const NodesLayer = memo(function NodesLayer({
   interactive,
   lite,
   selected,
+  multi,
+  session,
   focus,
   flowsByImpl,
   deckFocus,
@@ -585,6 +600,10 @@ export const NodesLayer = memo(function NodesLayer({
   /** Map mode: identity cards instead of live panes (no feeds, no polling). */
   lite: boolean;
   selected: string | null;
+  /** Selection-session member paths; visuals only change on commit. */
+  multi: ReadonlySet<string>;
+  /** Session active: members carry checkmarks, everything else dims via CSS. */
+  session: boolean;
   focus: string | null;
   flowsByImpl: Map<string, Flow>;
   deckFocus: DeckFocus | null;
@@ -596,7 +615,9 @@ export const NodesLayer = memo(function NodesLayer({
   onHandoff?: (file: FileEntry) => void;
 }) {
   return (
-    <div className={interactive ? undefined : "pointer-events-none select-none"}>
+    <div
+      className={`${interactive ? "" : "pointer-events-none select-none"} ${session ? "scheme-session" : ""}`.trim() || undefined}
+    >
       {layout.stacks.map((stack) => (
         <MiniStackShell key={stack.key} stack={stack} onSelect={onSelect} />
       ))}
@@ -635,7 +656,8 @@ export const NodesLayer = memo(function NodesLayer({
             key={node.file.path}
             node={node}
             files={files}
-            ringed={selected === node.file.path || focus === node.file.path}
+            ringed={session ? multi.has(node.file.path) : selected === node.file.path || focus === node.file.path}
+            marked={session && multi.has(node.file.path)}
             flow={flowsByImpl.get(node.file.path) ?? null}
             canFlow={canStartFlow(node.file, flowsByImpl)}
             onSelect={onSelect}

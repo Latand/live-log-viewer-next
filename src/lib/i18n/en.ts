@@ -399,6 +399,25 @@ export const en = {
   "scheme.roleReviewer": "Reviewer",
   "scheme.roleWorking": "working",
   "scheme.roleWaiting": "waiting",
+  "scheme.lassoTool": "Multi-select — draw a box around agents, click cards to toggle",
+
+  // scheme/BulkActionBar (selection session)
+  "bulk.selectedCount": { one: "{count} selected", other: "{count} selected" },
+  "bulk.placeholder": "one message to every selected agent…",
+  "bulk.textAria": "Broadcast text for the selected agents",
+  "bulk.sendAll": "Send to {count} agents",
+  "bulk.interrupt": "Interrupt",
+  "bulk.stop": "Stop",
+  "bulk.stopConfirm": "Stop {count} agents?",
+  "bulk.remove": "Clear from board",
+  "bulk.removeConfirm": "Close {count} cards?",
+  "bulk.flow": "Flow",
+  "bulk.fit": "Show selection",
+  "bulk.exit": "Exit selection (Esc)",
+  "bulk.retryFailed": "Retry failed ({count})",
+  "bulk.nodeGone": "node left the board",
+  "bulk.flowTitle": "Start a review flow on {count} agents",
+  "bulk.flowStart": "Start {count} flows",
 
   // scheme/Minimap
   "minimap.title": "Minimap — click or drag to navigate",
