@@ -1,21 +1,22 @@
 "use client";
 
 import { X } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { useAgentChimes } from "@/hooks/useAgentChimes";
 import { useArchivedProjects } from "@/hooks/useArchivedProjects";
 import { useEffectiveFlows } from "@/components/flows/flowModel";
 import { useFiles } from "@/hooks/useFiles";
 import { useIsMobile } from "@/hooks/useIsMobile";
-import { useLocale } from "@/lib/i18n";
+import { type TFunction, useLocale } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
 
-import { attentionId } from "./attention";
+import { attentionId, buildAttentionQueue, type AttentionItem } from "./attention";
 import { OverviewBoard } from "./OverviewBoard";
 import { ProjectDashboard, queueColumnOpen } from "./ProjectDashboard";
 import { OVERVIEW, projectKey } from "./projectModel";
 import { ProjectRail } from "./ProjectRail";
+import { cleanTitle, fmtAge } from "./utils";
 
 const PROJECT_KEY = "llvProject";
 
@@ -46,6 +47,19 @@ function writeHash(project: string) {
     return;
   }
   history.replaceState(null, "", location.pathname);
+}
+
+/** One-line reason a queue item waits: question header, screen tail, or the stalled wording. */
+function attentionSnippet(t: TFunction, item: AttentionItem): string {
+  const q = item.file.pendingQuestion;
+  if (q) {
+    if (q.kind === "plan") return t("status.awaitingPlan");
+    const first = q.questions?.[0];
+    return first?.header || first?.question.split("\n")[0] || t("status.awaitingAnswer");
+  }
+  const w = item.file.waitingInput;
+  if (w) return w.menu?.question.split("\n")[0] || w.screenTail || t("status.awaitingTerminal");
+  return t("status.stalled");
 }
 
 export function Viewer() {
@@ -122,10 +136,47 @@ export function Viewer() {
   }, [pendingPath, files, openFile]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
+  /* The one queue every counter shows: badge, popover and the tab title all
+     read the same list, stalled tail included (D10). */
+  const queue = useMemo(() => buildAttentionQueue(files), [files]);
+  const [queueOpen, setQueueOpen] = useState(false);
+  const queueRef = useRef<HTMLDivElement | null>(null);
+
   useEffect(() => {
-    const count = files.filter((file) => file.pendingQuestion || file.waitingInput).length;
-    document.title = count ? `(${count}) Agent Log Viewer` : "Agent Log Viewer";
-  }, [files]);
+    document.title = queue.length ? `(${queue.length}) Agent Log Viewer` : "Agent Log Viewer";
+  }, [queue.length]);
+
+  useEffect(() => {
+    if (!queueOpen) return;
+    const onDown = (event: PointerEvent) => {
+      if (!queueRef.current?.contains(event.target as Node)) setQueueOpen(false);
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setQueueOpen(false);
+    };
+    window.addEventListener("pointerdown", onDown);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("pointerdown", onDown);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [queueOpen]);
+
+  /* eslint-disable react-hooks/set-state-in-effect */
+  useEffect(() => {
+    if (!queue.length) setQueueOpen(false);
+  }, [queue.length]);
+  /* eslint-enable react-hooks/set-state-in-effect */
+
+  /* A popover click is a deliberate act, so unlike the N hotkey it may switch
+     the project; the focus hand-off glides the board to the node. */
+  const jumpToItem = useCallback(
+    (item: AttentionItem) => {
+      setQueueOpen(false);
+      if (item.project !== project) selectProject(item.project);
+    },
+    [project, selectProject],
+  );
 
   useEffect(() => {
     /* Toast fires on hard-blocked signals only — a stalled id must never enter
@@ -164,8 +215,52 @@ export function Viewer() {
         </div>
       ) : null}
       <main className="flex min-w-0 flex-1 flex-col">
-        {toastFile ? (
-          <div className="fixed right-4 top-4 z-50 flex max-w-[360px] gap-2 rounded-[8px] border border-[#e0ae45]/45 bg-[#fff9ed] px-4 py-3 text-[13px] font-semibold text-ink shadow-card">
+        {/* The corner attention anchor: the badge pill sits where the toast
+            appears, so a new toast visually docks into it (D7). */}
+        <div className="pointer-events-none fixed right-4 top-4 z-50 flex flex-col items-end gap-2">
+          {queue.length ? (
+            <div ref={queueRef} className="pointer-events-auto relative">
+              <button
+                type="button"
+                className="rounded-full border border-[#e0ae45]/45 bg-[#fff9ed] px-3 py-1 text-[12px] font-bold text-[#8a5a00] shadow-card hover:border-[#e0ae45]/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                aria-expanded={queueOpen}
+                title={t("attention.openQueue")}
+                onClick={() => setQueueOpen((value) => !value)}
+              >
+                {t("attention.badge", { count: queue.length })}
+              </button>
+              {queueOpen ? (
+                <div className="absolute right-0 top-[calc(100%+6px)] max-h-[60vh] w-[340px] overflow-y-auto rounded-[10px] border border-line bg-panel p-1.5 shadow-card">
+                  <div className="px-2.5 pb-1 pt-1.5 text-[10.5px] font-bold uppercase tracking-wide text-dim">
+                    {t("attention.popoverTitle")}
+                  </div>
+                  {queue.map((item) => (
+                    <button
+                      key={item.id}
+                      type="button"
+                      className="flex w-full min-w-0 flex-col gap-0.5 rounded-[8px] px-2.5 py-2 text-left hover:bg-bg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                      onClick={() => jumpToItem(item)}
+                    >
+                      <span className="flex w-full min-w-0 items-center gap-1.5">
+                        <span className="min-w-0 flex-1 truncate text-[12px] font-semibold text-ink">
+                          {cleanTitle(item.file.title, 90)}
+                        </span>
+                        <span className="shrink-0 rounded-full border border-line bg-bg px-1.5 text-[10px] font-semibold text-dim">
+                          {item.project}
+                        </span>
+                        <span className="shrink-0 text-[10.5px] text-dim">{fmtAge(item.since)}</span>
+                      </span>
+                      <span className={`w-full truncate text-[11px] ${item.tier === "stalled" ? "text-[#b8860b]" : "text-dim"}`}>
+                        {attentionSnippet(t, item)}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+          {toastFile ? (
+          <div className="pointer-events-auto flex max-w-[360px] gap-2 rounded-[8px] border border-[#e0ae45]/45 bg-[#fff9ed] px-4 py-3 text-[13px] font-semibold text-ink shadow-card">
             <button
               className="min-w-0 flex-1 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
               onClick={() => {
@@ -184,7 +279,8 @@ export function Viewer() {
               <X className="h-3.5 w-3.5" aria-hidden />
             </button>
           </div>
-        ) : null}
+          ) : null}
+        </div>
         {project === OVERVIEW ? (
           <OverviewBoard
             files={files}

@@ -503,6 +503,13 @@ export const en = {
   "viewer.agentWaiting": "Agent is waiting for a reply",
   "viewer.closeNotification": "Close the notification",
 
+  // Viewer attention queue
+  "attention.badge": { one: "{count} waiting", other: "{count} waiting" },
+  "attention.openQueue": "Attention queue — who is blocked on you (N — next)",
+  "attention.popoverTitle": "Waiting on you",
+  "attention.filterOn": "Show only those waiting on you (F)",
+  "attention.filterOff": "Show all nodes (F)",
+
   // MobileFocusView
   "mobile.noConvos": "No conversations yet",
   "mobile.map": "Map",
