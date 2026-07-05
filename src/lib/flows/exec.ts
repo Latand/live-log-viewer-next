@@ -1,8 +1,10 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
+
+import { resolveBinary } from "@/lib/agent/cli";
+import { claudeTranscriptPath } from "@/lib/agent/transcript";
 
 import type { RoleConfig } from "./types";
 import { atomicWriteText, outputPathFor, stderrPathFor } from "./store";
@@ -113,30 +115,6 @@ function scanEvents(run: RunningReview): void {
       /* partial or non-JSON line — ignore */
     }
   }
-}
-
-function resolveBinary(name: string): string {
-  const home = os.homedir();
-  for (const candidate of [
-    path.join(home, ".bun", "bin", name),
-    path.join(home, ".npm-global", "bin", name),
-    path.join(home, ".local", "bin", name),
-    path.join(home, "go", "bin", name),
-    "/usr/local/bin/" + name,
-    "/usr/bin/" + name,
-  ]) {
-    try {
-      fs.accessSync(candidate, fs.constants.X_OK);
-      return candidate;
-    } catch {
-      /* try the next candidate */
-    }
-  }
-  return name;
-}
-
-function claudeTranscriptPath(cwd: string, sessionId: string): string {
-  return path.join(os.homedir(), ".claude", "projects", cwd.replace(/[^A-Za-z0-9]/g, "-"), sessionId + ".jsonl");
 }
 
 export function reviewerCommand(

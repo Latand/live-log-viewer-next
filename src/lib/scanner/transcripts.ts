@@ -1,5 +1,6 @@
-import fs from "node:fs";
 import path from "node:path";
+
+import { headCwd, slugifyCwd } from "@/lib/agent/transcript";
 
 import type { FileEntry } from "../types";
 import { globalCache } from "./caches";
@@ -71,11 +72,6 @@ function argvSessionId(argv: string[]): string | null {
   return value ? value.toLowerCase() : null;
 }
 
-/** Claude project slugs encode the session cwd with every non-alphanumeric as "-". */
-function slugifyCwd(cwd: string): string {
-  return cwd.replace(/[^A-Za-z0-9]/g, "-");
-}
-
 function claudeSlug(pathname: string): string {
   return path.relative(ROOTS["claude-projects"], pathname).split(path.sep)[0] ?? "";
 }
@@ -83,26 +79,7 @@ function claudeSlug(pathname: string): string {
 function codexSessionCwd(pathname: string): string {
   const cached = codexCwdCache.get(pathname);
   if (cached !== undefined && cached !== "") return cached;
-  let head = "";
-  try {
-    const fd = fs.openSync(pathname, "r");
-    try {
-      const buf = Buffer.alloc(8192);
-      const read = fs.readSync(fd, buf, 0, buf.length, 0);
-      head = buf.toString("utf8", 0, read);
-    } finally {
-      fs.closeSync(fd);
-    }
-  } catch {
-    return "";
-  }
-  let cwd = "";
-  try {
-    const first = JSON.parse(head.split("\n")[0] ?? "{}") as { payload?: { cwd?: unknown } };
-    cwd = typeof first.payload?.cwd === "string" ? first.payload.cwd : "";
-  } catch {
-    cwd = "";
-  }
+  const cwd = headCwd(pathname, { bytes: 8192 }) ?? "";
   codexCwdCache.set(pathname, cwd);
   return cwd;
 }

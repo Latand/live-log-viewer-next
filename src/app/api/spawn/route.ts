@@ -4,18 +4,13 @@ import path from "node:path";
 
 import { NextRequest, NextResponse } from "next/server";
 
+import { freshSpecFor, type AgentEngine } from "@/lib/agent/cli";
+import { headCwd } from "@/lib/agent/transcript";
 import { persistHandoffLineage, rememberHandoffChild, rememberHandoffPane } from "@/lib/handoffLineage";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
 import { listFiles } from "@/lib/scanner";
 import { ROOTS } from "@/lib/scanner/roots";
-import {
-  buildImagePayload,
-  collectImagePayloads,
-  deleteInboxImages,
-  freshSpecFor,
-  spawnAgentWithPrompt,
-  type AgentEngine,
-} from "@/lib/tmux";
+import { buildImagePayload, collectImagePayloads, deleteInboxImages, spawnAgentWithPrompt } from "@/lib/tmux";
 import type { ApiError } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -23,7 +18,6 @@ export const dynamic = "force-dynamic";
 
 const SUGGEST_SCAN_LIMIT = 80;
 const SUGGEST_MAX = 10;
-const HEAD_BYTES = 8192;
 
 interface SuggestResponse {
   dirs: string[];
@@ -61,40 +55,13 @@ function transcriptAllowed(candidate: string): boolean {
   });
 }
 
-/** Working directory from the head of a transcript, without reading the whole file. */
-function headCwd(pathname: string): string | null {
-  let head: string;
-  try {
-    const fd = fs.openSync(pathname, "r");
-    try {
-      const buf = Buffer.alloc(HEAD_BYTES);
-      const n = fs.readSync(fd, buf, 0, HEAD_BYTES, 0);
-      head = buf.subarray(0, n).toString("utf8");
-    } finally {
-      fs.closeSync(fd);
-    }
-  } catch {
-    return null;
-  }
-  for (const line of head.split("\n").slice(0, 20)) {
-    try {
-      const obj = JSON.parse(line) as { cwd?: unknown; payload?: { cwd?: unknown } };
-      const cwd = typeof obj.cwd === "string" ? obj.cwd : typeof obj.payload?.cwd === "string" ? obj.payload.cwd : null;
-      if (cwd && fs.existsSync(cwd)) return cwd;
-    } catch {
-      /* partial or non-JSON head row */
-    }
-  }
-  return null;
-}
-
 /** Recent real working directories to prefill the spawn dialog; the current
     project's transcripts rank first so its directory lands on top. `src` names
     a transcript whose own cwd must win — the handoff card inherits it. */
 export async function GET(req: NextRequest): Promise<NextResponse<SuggestResponse>> {
   const project = req.nextUrl.searchParams.get("project") ?? "";
   const src = req.nextUrl.searchParams.get("src");
-  const srcCwd = src && transcriptAllowed(src) ? headCwd(src) : null;
+  const srcCwd = src && transcriptAllowed(src) ? headCwd(src, { requireDir: true }) : null;
   const conversations = (await listFiles())
     .filter((entry) => entry.path.endsWith(".jsonl") && (entry.root === "claude-projects" || entry.root === "codex-sessions"))
     .filter((entry) => !entry.path.includes(path.sep + "subagents" + path.sep))
@@ -104,7 +71,7 @@ export async function GET(req: NextRequest): Promise<NextResponse<SuggestRespons
   const dirs: string[] = srcCwd ? [srcCwd] : [];
   for (const entry of conversations) {
     if (dirs.length >= SUGGEST_MAX) break;
-    const cwd = headCwd(entry.path);
+    const cwd = headCwd(entry.path, { requireDir: true });
     if (cwd && !dirs.includes(cwd)) dirs.push(cwd);
   }
   if (!dirs.length) dirs.push(os.homedir());

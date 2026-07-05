@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 
-import { patchFlow } from "@/lib/flows/engine";
+import { patchFlow } from "@/lib/flows/commands";
 import type { Flow, PatchFlowRequest } from "@/lib/flows/types";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
 import type { ApiError } from "@/lib/types";

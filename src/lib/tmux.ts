@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import type { ResumeSpec } from "@/lib/agent/cli";
 import { logEvent } from "@/lib/events";
 import { inboxImageExt, MAX_INBOX_IMAGE_BYTES } from "@/lib/imagePolicy";
 import { INBOX_DIR } from "@/lib/inbox";
@@ -338,126 +339,6 @@ export async function activeTmuxSession(): Promise<string> {
     throw new Error(created.stderr.trim() || "не вдалося створити tmux-сесію");
   }
   return "agents";
-}
-
-/** Absolute path of an agent CLI when we can find one; bare name otherwise. */
-function resolveBinary(name: string): string {
-  const home = os.homedir();
-  /* ~/.bun/bin goes first: on this machine the system-wide /usr/bin/claude is
-     an npm install that crashes under the current Node, while the bun shim is
-     the CLI the user actually runs. */
-  for (const candidate of [
-    path.join(home, ".bun", "bin", name),
-    path.join(home, ".npm-global", "bin", name),
-    path.join(home, ".local", "bin", name),
-    path.join(home, "go", "bin", name),
-    "/usr/local/bin/" + name,
-    "/usr/bin/" + name,
-  ]) {
-    try {
-      fs.accessSync(candidate, fs.constants.X_OK);
-      return candidate;
-    } catch {
-      /* keep looking */
-    }
-  }
-  return name;
-}
-
-/** Scans the head of a transcript for the session working directory. */
-function transcriptCwd(pathname: string): string {
-  try {
-    const lines = fs.readFileSync(pathname, "utf8").split("\n").slice(0, 30);
-    for (const line of lines) {
-      try {
-        const obj = JSON.parse(line) as Record<string, unknown>;
-        const direct = typeof obj.cwd === "string" ? obj.cwd : null;
-        const payload = obj.payload && typeof obj.payload === "object" ? (obj.payload as Record<string, unknown>) : null;
-        const nested = payload && typeof payload.cwd === "string" ? (payload.cwd as string) : null;
-        const cwd = direct ?? nested;
-        if (cwd && fs.existsSync(cwd)) return cwd;
-      } catch {
-        /* skip malformed head rows */
-      }
-    }
-  } catch {
-    /* unreadable transcript */
-  }
-  return os.homedir();
-}
-
-export interface ResumeSpec {
-  command: string;
-  cwd: string;
-  windowName: string;
-  /** Transcript path the session will write, when knowable at spawn time —
-      a fresh claude session launched with a pre-chosen --session-id. */
-  transcript?: string;
-}
-
-/**
- * Shell command that reopens a finished conversation interactively so a new
- * prompt can be typed into it. Claude subagent transcripts have no resumable
- * session of their own, so only root session files qualify.
- */
-export function resumeSpecFor(root: string, pathname: string): ResumeSpec | null {
-  const base = path.basename(pathname);
-  if (root === "claude-projects" && base.endsWith(".jsonl") && !pathname.includes(path.sep + "subagents" + path.sep)) {
-    const sid = base.slice(0, -".jsonl".length);
-    if (!/^[0-9a-f-]{36}$/.test(sid)) return null;
-    return {
-      command: `${resolveBinary("claude")} --dangerously-skip-permissions --resume ${sid}`,
-      cwd: transcriptCwd(pathname),
-      windowName: "claude-resume",
-    };
-  }
-  if (root === "codex-sessions" && base.endsWith(".jsonl")) {
-    const id = base.match(/([0-9a-f-]{36})\.jsonl$/)?.[1];
-    if (!id) return null;
-    return {
-      command: `${resolveBinary("codex")} resume ${id}`,
-      cwd: transcriptCwd(pathname),
-      windowName: "codex-resume",
-    };
-  }
-  return null;
-}
-
-export type AgentEngine = "claude" | "codex";
-
-export interface FreshSpecOptions {
-  model?: string | null;
-  effort?: string | null;
-  readOnly?: boolean;
-}
-
-function shellQuote(value: string): string {
-  return "'" + value.replace(/'/g, "'\\''") + "'";
-}
-
-/** Boot spec for a brand-new agent (no prior conversation) in a chosen directory. */
-export function freshSpecFor(engine: AgentEngine, cwd: string, options: FreshSpecOptions = {}): ResumeSpec {
-  if (engine === "claude") {
-    /* A pre-chosen session id makes the transcript path knowable right at
-       spawn time (handoff lineage links it before the file exists) and lets
-       the scanner pid-match the session by argv, where the cwd fallback would
-       stay ambiguous with several agents in one directory. */
-    const sid = crypto.randomUUID();
-    const args = [resolveBinary("claude"), "--dangerously-skip-permissions", "--session-id", sid];
-    if (options.model) args.push("--model", options.model);
-    if (options.readOnly) args.push("--disallowedTools", "Edit,Write,NotebookEdit");
-    return {
-      command: args.map(shellQuote).join(" "),
-      cwd,
-      windowName: "claude-new",
-      transcript: path.join(os.homedir(), ".claude", "projects", cwd.replace(/[^A-Za-z0-9]/g, "-"), sid + ".jsonl"),
-    };
-  }
-  const args = [resolveBinary("codex")];
-  if (options.model) args.push("-m", options.model);
-  if (options.effort) args.push("-c", `model_reasoning_effort=${options.effort}`);
-  if (options.readOnly) args.push("--sandbox", "read-only");
-  return { command: args.map(shellQuote).join(" "), cwd, windowName: "codex-new" };
 }
 
 /**
