@@ -3,48 +3,15 @@
 import { memo, useState } from "react";
 
 import { ComposerBar } from "@/components/ComposerBar";
-import { cleanTitle } from "@/components/utils";
 import { useComposer } from "@/hooks/useComposer";
-import { getLocale, translate, useLocale } from "@/lib/i18n";
+import { useLocale } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
 
+import { broadcastSummary, tmuxSend } from "./broadcast";
 import { createTask, sendTask } from "./taskApi";
 import { pushTaskToast, sendSummary } from "./taskToast";
 
 const draftKey = (project: string) => "llvSelDraft:" + project;
-
-interface BroadcastImage {
-  base64: string;
-  mime: string;
-}
-
-/** One `/api/tmux` delivery; returns null on success, the error otherwise. */
-async function tmuxSend(file: FileEntry, text: string, images: BroadcastImage[]): Promise<string | null> {
-  try {
-    const res = await fetch("/api/tmux", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ pid: file.pid ?? undefined, path: file.path, text, images }),
-    });
-    const json = (await res.json().catch(() => null)) as { ok?: boolean; error?: string } | null;
-    if (!res.ok || !json?.ok) return json?.error ?? translate(getLocale(), "common.failedSend");
-    return null;
-  } catch {
-    return translate(getLocale(), "common.serverUnavailable");
-  }
-}
-
-function broadcastSummary(targets: FileEntry[], errors: (string | null)[]): { kind: "ok" | "err"; text: string } {
-  const locale = getLocale();
-  const delivered = errors.filter((error) => error === null).length;
-  const head = translate(locale, "tasks.sendOk", { delivered, total: targets.length });
-  if (delivered === targets.length) return { kind: "ok", text: head };
-  const failures = targets
-    .map((file, index) => ({ file, error: errors[index] }))
-    .filter((item) => item.error)
-    .map((item) => translate(locale, "tasks.sendFailPart", { title: cleanTitle(item.file.title, 40), error: item.error ?? "" }));
-  return { kind: "err", text: `${head}; ${failures.join("; ")}` };
-}
 
 /**
  * Docked composer over the board while conversation nodes are selected: the
@@ -106,15 +73,17 @@ export const SelectionComposer = memo(function SelectionComposer({
         } else {
           const summary = sendSummary(sent, selection);
           pushTaskToast(summary.kind, summary.text);
-        }
-        /* Images never live inside a task body — they ride the plain message
-           route to the same targets, exactly like the pane composer sends. */
-        if (images.length) {
-          const errors: (string | null)[] = [];
-          for (const file of selection) errors.push(await tmuxSend(file, "", images));
-          if (errors.some((error) => error !== null)) {
-            const summary = broadcastSummary(selection, errors);
-            pushTaskToast(summary.kind, summary.text);
+          /* Images never live inside a task body — they ride the plain
+             message route to the same targets, exactly like the pane
+             composer sends. A top-level send failure skips them: nothing
+             says the panes are reachable. */
+          if (images.length) {
+            const errors: (string | null)[] = [];
+            for (const file of selection) errors.push(await tmuxSend(file, "", images));
+            if (errors.some((error) => error !== null)) {
+              const imageSummary = broadcastSummary(selection, errors);
+              pushTaskToast(imageSummary.kind, imageSummary.text);
+            }
           }
         }
       } else {

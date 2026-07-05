@@ -344,7 +344,11 @@ export const TaskCard = memo(function TaskCard({
       };
       setDrag(null);
       setLocalPos({ ...dropped, seen: task.updatedAt });
-      void handlers.patch(task.id, { pos: dropped });
+      /* A failed save snaps the card back to its persisted coordinates —
+         the board must never show a position the server does not hold. */
+      void handlers.patch(task.id, { pos: dropped }).then((error) => {
+        if (error) setLocalPos(null);
+      });
       return;
     }
     /* A stationary press on the text is the inline-edit gesture. */

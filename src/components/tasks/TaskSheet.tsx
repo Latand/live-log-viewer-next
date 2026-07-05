@@ -6,13 +6,14 @@ import { useEffect, useMemo, useState } from "react";
 import { ComposerBar } from "@/components/ComposerBar";
 import { X } from "@/components/icons";
 import { MicButtonView } from "@/components/MicButton";
-import { activityDot, cleanTitle, engineBadge, fmtAge } from "@/components/utils";
+import { activityDot, cleanTitle, engineBadge, fmtAge, syntheticFile } from "@/components/utils";
 import { useComposer } from "@/hooks/useComposer";
 import { useDictation } from "@/hooks/useDictation";
 import { getLocale, translate, useLocale } from "@/lib/i18n";
 import type { BoardTask, TaskStatus } from "@/lib/tasks/types";
 import type { FileEntry } from "@/lib/types";
 
+import { broadcastSummary, tmuxSend } from "./broadcast";
 import { createTask, deleteTask, sendTask, updateTask } from "./taskApi";
 import { TASK_STATUS_CYCLE, TASK_TONES, taskTitle } from "./taskModel";
 import { TargetChecklist } from "./TargetChecklist";
@@ -21,22 +22,6 @@ import { pushTaskToast, sendSummary } from "./taskToast";
 export type TaskSheetView = "list" | "new" | { taskId: string };
 
 const sheetDraftKey = (project: string) => "llvTaskSheetDraft:" + project;
-
-/** One `/api/tmux` images-only delivery for the sheet's create flow. */
-async function tmuxImages(file: FileEntry, images: { base64: string; mime: string }[]): Promise<string | null> {
-  try {
-    const res = await fetch("/api/tmux", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ pid: file.pid ?? undefined, path: file.path, text: "", images }),
-    });
-    const json = (await res.json().catch(() => null)) as { ok?: boolean; error?: string } | null;
-    if (!res.ok || !json?.ok) return json?.error ?? translate(getLocale(), "common.failedSend");
-    return null;
-  } catch {
-    return translate(getLocale(), "common.serverUnavailable");
-  }
-}
 
 function StatusRow({ value, onPick }: { value: TaskStatus; onPick: (status: TaskStatus) => void }) {
   const { t } = useLocale();
@@ -106,17 +91,29 @@ function NewTaskView({
       const targets = [...checked];
       if (targets.length) {
         const sent = await sendTask(created.task.id, targets);
-        if ("error" in sent) pushTaskToast("err", sent.error);
-        else {
+        if ("error" in sent) {
+          /* Nothing was delivered — keep the images out of unreachable panes. */
+          pushTaskToast("err", sent.error);
+        } else {
           const summary = sendSummary(sent, files);
           pushTaskToast(summary.kind, summary.text);
-        }
-        const images = attachments.images.map((image) => ({ base64: image.base64, mime: image.mime }));
-        if (images.length) {
-          const byPath = new Map(files.map((file) => [file.path, file]));
-          for (const path of targets) {
-            const file = byPath.get(path);
-            if (file) await tmuxImages(file, images);
+          const images = attachments.images.map((image) => ({ base64: image.base64, mime: image.mime }));
+          if (images.length) {
+            /* Images ride the plain message route per target; failures get
+               the same «Доставлено N з M» breakdown before the attachments
+               are cleared, so a lost image is never silent. */
+            const byPath = new Map(files.map((file) => [file.path, file]));
+            const targetEntries = targets.map((path) => byPath.get(path) ?? syntheticFile(path));
+            const errors: (string | null)[] = [];
+            for (const entry of targetEntries) {
+              errors.push(
+                byPath.has(entry.path) ? await tmuxSend(entry, "", images) : translate(getLocale(), "common.failedSend"),
+              );
+            }
+            if (errors.some((error) => error !== null)) {
+              const imageSummary = broadcastSummary(targetEntries, errors);
+              pushTaskToast(imageSummary.kind, imageSummary.text);
+            }
           }
         }
       }

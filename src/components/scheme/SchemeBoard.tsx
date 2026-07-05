@@ -163,14 +163,26 @@ export function SchemeBoard({
   const handoffForNodes = onHandoff ? stableHandoff : undefined;
 
   /* Tasks created this session but not yet echoed by the poll: overlaid so a
-     fresh card never blinks out between the POST and the refetch. */
+     fresh card never blinks out between the POST and the refetch. Entries
+     leave the cache the moment the server echoes them (or on local delete),
+     so a later server-side removal can never be shadowed by a stale copy;
+     the project filter keeps a card created here off other projects' boards. */
   const [localTasks, setLocalTasks] = useState<BoardTask[]>([]);
   const [pendingTask, setPendingTask] = useState<{ x: number; y: number } | null>(null);
+  useEffect(() => {
+    const have = new Set(tasks.map((task) => task.id));
+    /* eslint-disable-next-line react-hooks/set-state-in-effect -- prune-only:
+       returns the same reference unless an entry was echoed or reprojected */
+    setLocalTasks((prev) => {
+      const next = prev.filter((task) => !have.has(task.id) && task.project === project);
+      return next.length === prev.length ? prev : next;
+    });
+  }, [tasks, project]);
   const mergedTasks = useMemo(() => {
     const have = new Set(tasks.map((task) => task.id));
-    const fresh = localTasks.filter((task) => !have.has(task.id));
+    const fresh = localTasks.filter((task) => !have.has(task.id) && task.project === project);
     return fresh.length ? [...tasks, ...fresh] : tasks;
-  }, [tasks, localTasks]);
+  }, [tasks, localTasks, project]);
   /* Camera-facing rects: focus glides and map taps resolve task keys. */
   const taskRects = useMemo(
     () => new Map(mergedTasks.map((task) => ["task::" + task.id, taskRect(task)] as const)),
@@ -246,6 +258,9 @@ export function SchemeBoard({
         return error;
       },
       remove: (id) => {
+        /* Drop the optimistic copy too, or a delete before the first poll
+           echo would leave the card resurrected from the local cache. */
+        setLocalTasks((prev) => (prev.some((task) => task.id === id) ? prev.filter((task) => task.id !== id) : prev));
         void deleteTask(id).then((error) => {
           if (error) pushTaskToast("err", error);
         });
