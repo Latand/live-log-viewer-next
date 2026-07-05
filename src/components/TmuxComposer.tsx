@@ -105,7 +105,7 @@ export function TmuxComposer({ file }: { file: FileEntry }) {
     };
     window.addEventListener(COMPOSE_EVENT, onCompose);
     return () => window.removeEventListener(COMPOSE_EVENT, onCompose);
-  }, [file.path]);
+  }, [file.path, inputRef, setTextState, textRef]);
 
   /* The queue drains itself: a pane message is delivered once the transcript
      grew after the send moment; a spawn prompt lands in a fresh window whose

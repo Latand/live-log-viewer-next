@@ -91,34 +91,46 @@ src/app/page.tsx               renders <Viewer/>
 src/hooks/useFiles.ts          10 s polling hook (complete)
 ```
 
-To implement (stubs with contracts exist where noted):
+Scanner pipeline (`src/lib/scanner/*`): `discover` (walk + filter + cap),
+`describe` (titles/kind/engine/fmt/project), `activity` (tail records + turn
+state), `model`, `needle` (incremental byte scanner), `links` (parentage + bg
+command recovery), behind `listFiles()` in `index.ts`.
+
+Deep server seams (each owns its knowledge; callers never re-derive it):
 
 ```
-src/lib/scanner/discover.ts    walk + filter + cap                (new)
-src/lib/scanner/describe.ts    titles/kind/engine/fmt/project     (new)
-src/lib/scanner/activity.ts    tail records + turn state          (new)
-src/lib/scanner/model.ts       model extraction                   (new)
-src/lib/scanner/needle.ts      incremental byte scanner           (new)
-src/lib/scanner/links.ts       parentage + bg command recovery    (new)
-src/lib/scanner/index.ts       listFiles() pipeline               (stub)
-src/hooks/useLogTail.ts        1.2 s tail polling                 (stub, contract in file)
-src/components/Viewer.tsx      app shell                          (stub)
-src/components/Sidebar.tsx     search, mode toggle, groups, tree  (new)
-src/components/FileRow.tsx     icon + title + chips row           (new)
-src/components/LogFeed.tsx     feed container + follow logic      (new)
-src/components/TaskHeader.tsx  pinned bg-task command card        (new)
-src/components/feed/*.tsx      renderClaude/renderCodex/renderPlain (new)
+src/lib/agent/cli.ts         agent CLI binaries + boot/resume command specs
+src/lib/agent/transcript.ts  project slug, transcript paths, headCwd() reader
+src/lib/delivery.ts          conversation delivery ladder (pane → resume →
+                             root relay) + per-action guards; /api/tmux is a
+                             thin adapter over it
+src/lib/answer/menu.ts       pure screen→options parser for TUI dialogs
+src/lib/answer/driver.ts     dialog navigation over an injected PaneIo port
+src/lib/transcribe/*.ts      the three STT backends beside their selector
+src/lib/flows/…              engine (poller state machine), commands (user
+                             PATCH/create), prompts, findings, git
 ```
 
-Keep components small and prop-driven; server logic stays in `src/lib/scanner`
-(pure functions + caches, no Next imports) so it is unit-testable.
+Client feed (`src/components/feed/`): `parse.ts` is the pure `lines[] →
+Item[]` parser (no JSX; the `Item` union is the contract), `markdown.tsx`
+renders prose, `cards/*` render one card each, `FeedItem.tsx` dispatches.
+
+Composers share `src/hooks/useComposer.ts` + `src/components/ComposerBar.tsx`;
+`TmuxComposer` and `DraftAgentPane` keep only their own concerns.
+
+Keep components small and prop-driven; server logic stays in `src/lib`
+(pure functions + caches, no Next imports) so it is unit-testable — run the
+suite with `bun test`.
 
 ### Scheme canvas — the only project view
 
 ```
-src/components/scheme/layout.ts      pure world layout: tree of nodes + edges
-src/components/scheme/SchemeBoard.tsx pannable/zoomable canvas, modes, toolbar
-src/components/scheme/Minimap.tsx    corner minimap with draggable viewport
+src/components/scheme/layout.ts        pure world layout: tree of nodes + edges
+src/components/scheme/useSchemeCamera.ts pan/zoom/pinch/glide engine + tool
+                                       modes + per-project camera persistence
+src/components/scheme/nodes.tsx        memoized node/edge shells
+src/components/scheme/SchemeBoard.tsx  composition and wiring
+src/components/scheme/Minimap.tsx      corner minimap with draggable viewport
 ```
 
 `ProjectDashboard` renders a project exclusively as the scheme (the column
