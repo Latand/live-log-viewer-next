@@ -16,7 +16,7 @@ import { paneState, type PaneState } from "./paneState";
 import { CtxChip, GoalChip, PlanChip } from "./PlanChip";
 import { ProcessStatusControls } from "./TaskHeader";
 import { TmuxComposer } from "./TmuxComposer";
-import { activityDot, cleanTitle, effortTint, effortTitle, engineBadge, engineEdge } from "./utils";
+import { activityDot, cleanTitle, effortTint, effortTitle, engineBadge, engineEdge, fmtAge } from "./utils";
 
 const noop = () => undefined;
 
@@ -36,6 +36,30 @@ export function kindLabel(t: TFunction, kind: string): string {
   if (kind === "джоба") return t("kind.job");
   if (kind === "фон") return t("kind.background");
   return kind;
+}
+
+/** Ticking "time since the transcript last grew" — the last sign of life.
+    Self-re-rendering leaf on its own interval, so the surrounding memoized
+    pane tree never re-renders just to refresh a relative timestamp. */
+function LastActivity({ file }: { file: FileEntry }) {
+  const { t } = useLocale();
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 10_000);
+    return () => clearInterval(id);
+  }, []);
+  const age = now / 1000 - file.mtime;
+  /* The case the chip exists for: a pane that looks busy while its transcript
+     has been silent for minutes — surface the silence instead of the badge. */
+  const quiet = (file.activity === "live" || file.activity === "recent") && age > 180;
+  return (
+    <span
+      className={`shrink-0 font-mono text-[9.5px] tabular-nums ${quiet ? "font-semibold text-[#b3831d]" : "text-dim"}`}
+      title={t(quiet ? "branch.lastActivityQuiet" : "branch.lastActivity", { age: fmtAge(file.mtime) })}
+    >
+      {fmtAge(file.mtime)}
+    </span>
+  );
 }
 
 interface Props {
@@ -97,6 +121,7 @@ export function BranchPane({ file, files, tasks, onSelect, isRoot, onClose, drag
           {...dragHandle}
         >
           <span className={`h-2 w-2 shrink-0 rounded-full ${activityDot(file.activity)}`} title={t(`branch.${state}`)} />
+          <LastActivity file={file} />
           {/* One identity chip: the model when known (engine lives in the tint
               and the tooltip), the engine label as fallback. */}
           {file.model ? (

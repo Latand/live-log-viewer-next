@@ -433,6 +433,8 @@ export const uk: Record<keyof typeof en, Message> = {
   "branch.stalled": "перервано або чекає дозволу",
   "branch.done": "завершено — можна прибрати",
   "branch.worktree": "Ворк-дерево {name}",
+  "branch.lastActivity": "Остання активність: {age}",
+  "branch.lastActivityQuiet": "Позначений активним, але транскрипт мовчить: остання активність {age}",
   "branch.handoffTitle": "агент, породжений хендоффом цієї розмови",
   "branch.branchTitle": "гілка цієї розмови",
   "branch.removeColumn": "Прибрати колонку {title}",

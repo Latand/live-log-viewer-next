@@ -173,6 +173,7 @@ async function launchReviewer(flow: Flow, round: Round): Promise<void> {
     return;
   }
   const launched = startHeadlessReview(flow.id, round.n, flow.roles.reviewer, flow.cwd, prompt);
+  if (launched.pid) round.reviewerPid = launched.pid;
   if (launched.sessionId) round.sessionId = launched.sessionId;
   if (launched.reviewerPath) round.reviewerPath = launched.reviewerPath;
 }
@@ -227,7 +228,15 @@ async function tickFlow(
   if (!round) return JSON.stringify(flow) !== before;
 
   if (flow.state === "spawning") {
-    const status = headlessReviewStatus(flow.id, round.n);
+    const status = headlessReviewStatus(flow.id, round.n, round, flow.roles.reviewer.engine);
+    /* A restart can land here with the round already launched (state was
+       persisted before launchReviewer finished). The detached reviewer is
+       still out there — adopt it instead of spawning a duplicate. */
+    if (round.spawnStartedAt && flow.reviewerMode === "headless" && status) {
+      flow.state = "reviewing";
+      flow.stateDetail = null;
+      return JSON.stringify(flow) !== before;
+    }
     if (round.spawnStartedAt && !status && round.reviewerPath === null) {
       markNeedsDecision(flow, "reviewer spawn was interrupted by a restart");
       return JSON.stringify(flow) !== before;
@@ -250,7 +259,7 @@ async function tickFlow(
       return JSON.stringify(flow) !== before;
     }
     if (flow.reviewerMode === "headless") {
-      const status = headlessReviewStatus(flow.id, round.n);
+      const status = headlessReviewStatus(flow.id, round.n, round, flow.roles.reviewer.engine);
       /* Persist the id the moment any source yields it (the JSON.stringify
          diff in tickFlow flushes it to flows.json): after that the transcript
          claim is deterministic and survives restarts. The banner parse stays
@@ -263,7 +272,7 @@ async function tickFlow(
       if (!round.reviewerPath && !round.sessionId) maybeClaimReviewerPathByHeuristic(flow, entries, round);
       if (status?.status === "running") return JSON.stringify(flow) !== before;
       if (status) {
-        forgetHeadlessReview(flow.id, round.n);
+        forgetHeadlessReview(flow.id, round.n, round.reviewerPid ?? null);
         const parsed = parseFindings(status.finalOutput);
         if (parsed) {
           applyVerdict(flow, round, parsed);

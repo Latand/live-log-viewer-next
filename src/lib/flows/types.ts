@@ -37,6 +37,11 @@ export type Round = {
       pre-chooses it at spawn, codex reports it in the first `--json` event.
       Survives viewer restarts so the transcript claim stays deterministic. */
   sessionId?: string | null;
+  /** Headless reviewers: OS pid of the detached reviewer process, persisted
+      at spawn. The process outlives the viewer (detached + file-backed
+      stdio), so after a restart the engine re-attaches through this pid and
+      the on-disk stdout/last-message artifacts instead of giving up. */
+  reviewerPid?: number | null;
   /** Pane-mode reviewers: the tmux pane the round booted, captured at spawn
       so cancel-round can stop it even before the scanner attributes the
       transcript. The window name guards against pane-id reuse. */

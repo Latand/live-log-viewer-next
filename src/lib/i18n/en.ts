@@ -465,6 +465,8 @@ export const en = {
   "branch.stalled": "interrupted or awaiting permission",
   "branch.done": "done — safe to remove",
   "branch.worktree": "Worktree {name}",
+  "branch.lastActivity": "Last activity: {age}",
+  "branch.lastActivityQuiet": "Marked active, but the transcript is quiet: last activity {age}",
   "branch.handoffTitle": "agent spawned by this conversation's handoff",
   "branch.branchTitle": "branch of this conversation",
   "branch.removeColumn": "Remove column {title}",
