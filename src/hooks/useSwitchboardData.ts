@@ -7,6 +7,7 @@ import { translate, type TFunction, useLocale } from "@/lib/i18n";
 import type { ActionEvent, FileEntry } from "@/lib/types";
 import { cleanTitle } from "@/lib/title";
 
+import { attentionId } from "@/components/attention";
 import { ATTENTION_STATES, claimedReviewerPaths, flowByImplementer, stateLabel } from "@/components/flows/flowModel";
 import { descendantCounts, isAuxTask, isConversation, isSubagent, projectKey } from "@/components/projectModel";
 import { fmtAge } from "@/components/utils";
@@ -59,14 +60,13 @@ function isReturnedSubagent(file: FileEntry): boolean {
   return isSubagent(file) && file.proc !== "running";
 }
 
-/* An interrupted session stops being "yours to answer" after a while: a
-   permission prompt from two days ago is dead context, so old stalled entries
-   sink into the recency buckets instead of inflating the waiting counter. */
-const WAITING_TTL = 2 * 3600;
-
 export function isAwaitingUser(file: FileEntry, now = Date.now() / 1000): boolean {
   if (file.pendingQuestion || file.waitingInput) return true;
-  if (file.activity === "stalled") return !isReturnedSubagent(file) && now - file.mtime <= WAITING_TTL;
+  /* An interrupted session stops being "yours to answer" after a while: a
+     permission prompt from two days ago is dead context, so old stalled
+     entries sink into the recency buckets instead of inflating the waiting
+     counter. The attention queue owns that TTL judgement. */
+  if (file.activity === "stalled") return attentionId(file, now) !== null;
   return file.activity === "recent" && (file.engine === "claude" || file.engine === "codex") && isConversation(file) && !isSubagent(file);
 }
 

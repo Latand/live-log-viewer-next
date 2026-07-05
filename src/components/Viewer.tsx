@@ -11,6 +11,7 @@ import { useIsMobile } from "@/hooks/useIsMobile";
 import { useLocale } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
 
+import { attentionId } from "./attention";
 import { OverviewBoard } from "./OverviewBoard";
 import { ProjectDashboard, queueColumnOpen } from "./ProjectDashboard";
 import { OVERVIEW, projectKey } from "./projectModel";
@@ -127,10 +128,12 @@ export function Viewer() {
   }, [files]);
 
   useEffect(() => {
+    /* Toast fires on hard-blocked signals only — a stalled id must never enter
+       this seen-set, so the guard narrows before the shared derivation. */
     const ids = files
       .map((file) => ({
         file,
-        id: file.pendingQuestion?.toolUseId ?? (file.waitingInput ? `${file.path}:waiting:${Math.floor(file.waitingInput.since)}` : null),
+        id: file.pendingQuestion || file.waitingInput ? attentionId(file) : null,
       }))
       .filter((item): item is { file: FileEntry; id: string } => item.id !== null);
     if (seenQuestionsRef.current === null) {
