@@ -290,7 +290,7 @@ function LiteNodeShell({ node, ringed, flow }: { node: SchemeNode; ringed: boole
       style={{ transform: `translate(${node.x}px, ${node.y}px)`, width: node.w, height: node.h, transition: MOVE_TRANSITION }}
     >
       {flow ? (
-        <div className="absolute inset-x-0 -top-12 z-[4] flex justify-center">
+        <div className="absolute -top-[60px] left-0 z-[4]" style={{ width: PAIR_W }}>
           <FlowStrip flow={flow} onFocusRound={liteNoop} />
         </div>
       ) : null}
@@ -472,9 +472,9 @@ function NodeShell({
       className={`scheme-enter absolute ${underOpen || flowOpen ? "z-20" : ""}`}
       style={{ transform: `translate(${node.x}px, ${node.y}px)`, width: node.w, height: node.h, transition: MOVE_TRANSITION }}
     >
-      {/* The loop strip hovers above its implementer's card. */}
+      {/* The loop's shared header hovers above the implementer↔reviewer pair. */}
       {flow ? (
-        <div className="absolute inset-x-0 -top-12 z-[4] flex justify-center">
+        <div className="absolute -top-[60px] left-0 z-[4]" style={{ width: PAIR_W }}>
           <FlowStrip flow={flow} onFocusRound={(round) => onFocusRound(flow.id, round)} />
         </div>
       ) : canFlow ? (
