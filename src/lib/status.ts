@@ -216,3 +216,8 @@ export function screenWaitsForInput(screen: string): boolean {
      when the response above ends with a numbered list. */
   return NUMBERED_MENU.test(tail) && !READY_MARKERS.test(tail);
 }
+
+/** Short readable tail of a captured screen, for error messages and logs. */
+export function screenTail(screen: string): string {
+  return screen.split("\n").filter((line) => line.trim()).slice(-3).join(" | ").slice(0, 300);
+}

@@ -17,9 +17,10 @@ import {
   isShellCommand,
   parseScreenMenu,
   READY_MARKERS,
+  screenTail,
 } from "@/lib/status";
 
-export { READY_MARKERS } from "@/lib/status";
+export { READY_MARKERS, screenTail } from "@/lib/status";
 
 const TMUX = "tmux";
 const PANE_MAP_TTL_MS = 5_000;
@@ -483,10 +484,6 @@ async function paneCommand(target: TmuxTarget): Promise<string | null> {
 export async function paneScreen(target: TmuxTarget): Promise<string> {
   const res = await runTmux(["capture-pane", "-p", "-t", target]).catch(() => null);
   return res && res.code === 0 ? res.stdout : "";
-}
-
-export function screenTail(screen: string): string {
-  return screen.split("\n").filter((line) => line.trim()).slice(-3).join(" | ").slice(0, 300);
 }
 
 export async function sendKeys(target: TmuxTarget, keys: string[]): Promise<void> {
