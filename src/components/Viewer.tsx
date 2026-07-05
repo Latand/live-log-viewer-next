@@ -178,9 +178,15 @@ export function Viewer() {
 
   /* «Show only needs me» filter: React-only state that auto-disables when the
      queue empties — a filter surviving reload would silently gray the whole
-     board (D6). The popover follows the same emptiness rule. */
+     board (D6). The popover follows the same emptiness rule. Desktop-only,
+     like the F key: the mobile strip and map render without the dimming
+     channel, so the funnel stays hidden there and the state clears if the
+     viewport shrinks into the phone layout mid-session. */
   const [attentionFilter, setAttentionFilter] = useState(false);
   /* eslint-disable react-hooks/set-state-in-effect */
+  useEffect(() => {
+    if (isMobile) setAttentionFilter(false);
+  }, [isMobile]);
   useEffect(() => {
     if (queue.length) return;
     setQueueOpen(false);
@@ -277,11 +283,11 @@ export function Viewer() {
   return (
     <div className="flex h-full">
       {isMobile ? null : (
-        <ProjectRail files={files} archivedProjects={archivedProjects} selected={project} onSelect={selectProject} />
+        <ProjectRail files={files} archivedProjects={archivedProjects} selected={project} now={clock} onSelect={selectProject} />
       )}
       {isMobile && drawerOpen ? (
         <div className="fixed inset-0 z-50 flex">
-          <ProjectRail files={files} archivedProjects={archivedProjects} selected={project} onSelect={selectProject} />
+          <ProjectRail files={files} archivedProjects={archivedProjects} selected={project} now={clock} onSelect={selectProject} />
           <button
             type="button"
             className="min-w-0 flex-1 bg-ink/35"
@@ -306,19 +312,23 @@ export function Viewer() {
                 >
                   {t("attention.badge", { count: queue.length })}
                 </button>
-                <div className="h-4 w-px shrink-0 bg-[#e0ae45]/45" aria-hidden />
-                <button
-                  type="button"
-                  className={`px-2 py-1.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent/40 ${
-                    attentionFilter ? "bg-[#e0ae45]/30 text-[#8a5a00]" : "text-[#b8860b]/70 hover:bg-[#e0ae45]/15 hover:text-[#8a5a00]"
-                  }`}
-                  aria-pressed={attentionFilter}
-                  title={attentionFilter ? t("attention.filterOff") : t("attention.filterOn")}
-                  aria-label={attentionFilter ? t("attention.filterOff") : t("attention.filterOn")}
-                  onClick={() => setAttentionFilter((value) => !value)}
-                >
-                  <Filter className="h-3.5 w-3.5" aria-hidden />
-                </button>
+                {isMobile ? null : (
+                  <>
+                    <div className="h-4 w-px shrink-0 bg-[#e0ae45]/45" aria-hidden />
+                    <button
+                      type="button"
+                      className={`px-2 py-1.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent/40 ${
+                        attentionFilter ? "bg-[#e0ae45]/30 text-[#8a5a00]" : "text-[#b8860b]/70 hover:bg-[#e0ae45]/15 hover:text-[#8a5a00]"
+                      }`}
+                      aria-pressed={attentionFilter}
+                      title={attentionFilter ? t("attention.filterOff") : t("attention.filterOn")}
+                      aria-label={attentionFilter ? t("attention.filterOff") : t("attention.filterOn")}
+                      onClick={() => setAttentionFilter((value) => !value)}
+                    >
+                      <Filter className="h-3.5 w-3.5" aria-hidden />
+                    </button>
+                  </>
+                )}
               </div>
               {queueOpen ? (
                 <div className="absolute right-0 top-[calc(100%+6px)] max-h-[60vh] w-[340px] overflow-y-auto rounded-[10px] border border-line bg-panel p-1.5 shadow-card">
@@ -376,6 +386,7 @@ export function Viewer() {
           <OverviewBoard
             files={files}
             archivedProjects={archivedProjects}
+            now={clock}
             onSelectProject={selectProject}
             onSelectFile={openFile}
             onMenu={isMobile ? () => setDrawerOpen(true) : undefined}

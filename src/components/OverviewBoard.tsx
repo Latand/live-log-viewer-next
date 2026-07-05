@@ -14,16 +14,18 @@ interface Props {
   files: FileEntry[];
   /** Shelved projects: their cards stay off the board until unarchived or live again. */
   archivedProjects: ReadonlySet<string>;
+  /** Attention clock owned by Viewer — keeps summary badges in step with the queue. */
+  now: number;
   onSelectProject: (project: string) => void;
   onSelectFile: (file: FileEntry) => void;
   /** Mobile shell: the rail hides behind a drawer, this opens it. */
   onMenu?: () => void;
 }
 
-export function OverviewBoard({ files, archivedProjects, onSelectProject, onSelectFile, onMenu }: Props) {
+export function OverviewBoard({ files, archivedProjects, now, onSelectProject, onSelectFile, onMenu }: Props) {
   const { t } = useLocale();
   const cols = useColumns();
-  const allSummaries = useMemo(() => buildProjectSummaries(files), [files]);
+  const allSummaries = useMemo(() => buildProjectSummaries(files, now), [files, now]);
   const summaries = useMemo(
     () => allSummaries.filter((summary) => !archivedProjects.has(summary.project)),
     [allSummaries, archivedProjects],

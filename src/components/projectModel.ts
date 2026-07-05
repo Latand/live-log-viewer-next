@@ -1,5 +1,7 @@
 import type { FileEntry } from "@/lib/types";
 
+import { attentionId } from "./attention";
+
 export type ActivityBand = 0 | 1 | 2 | 3;
 
 export const OVERVIEW = "__overview__";
@@ -62,7 +64,7 @@ export interface ProjectSummary {
   smt: number;
 }
 
-export function buildProjectSummaries(files: FileEntry[]): ProjectSummary[] {
+export function buildProjectSummaries(files: FileEntry[], now: number = Date.now() / 1000): ProjectSummary[] {
   const map = new Map<string, ProjectSummary>();
   for (const file of files) {
     const key = projectKey(file);
@@ -72,7 +74,9 @@ export function buildProjectSummaries(files: FileEntry[]): ProjectSummary[] {
       map.set(key, summary);
     }
     if (file.activity === "live") summary.liveCount += 1;
-    if (file.pendingQuestion || file.waitingInput) summary.attentionCount += 1;
+    /* Same membership the attention queue counts (hard-blocked plus in-TTL
+       stalled), so the rail badge, the global badge and the title agree. */
+    if (attentionId(file, now) !== null) summary.attentionCount += 1;
     if (isConversation(file)) summary.conversations += 1;
     summary.smt = Math.max(summary.smt, file.mtime);
   }

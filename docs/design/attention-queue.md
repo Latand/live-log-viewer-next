@@ -102,8 +102,8 @@ localStorage is a cheap v1.1.
 drives the existing highlight channel (`flashNode(path)` → `focus` prop →
 `centerOn(node, 0.55)` glide + ring) and selects the node. Keyboard focus
 stays on the document so the next N keeps working. *Why:* half the queue
-(questions, plans, menus) is answered by clicking options in QuestionCard,
-not by typing; autofocus would make the second N type "n" into a composer and
+(questions, plans, menus) is answered by clicking options in QuestionCard;
+autofocus would make the second N type "n" into a composer and
 kill the feature's core gesture.
 
 **D10 — One counter everywhere.** Tab title, badge and popover all show
