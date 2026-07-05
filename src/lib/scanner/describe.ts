@@ -25,6 +25,9 @@ const metaCache = globalCache<[number, Meta]>("meta");
 // open so growth can still yield one.
 const titleCache = globalCache<[number, string | null]>("title");
 const codexProjectCache = globalCache<{ project: string; worktree?: string }>("codex-project");
+/* The cwd sits in the immutable head, so it follows the title-cache rule:
+   keyed by path, re-read only while unresolved and the head still short. */
+const cwdCache = globalCache<[number, string | null]>("claude-cwd");
 
 const HEAD_BYTES = 131_072;
 
@@ -67,11 +70,53 @@ function worktreeFromPath(cwd: string): { repo: string; worktree: string } | nul
   return { repo: cwd.slice(0, index), worktree };
 }
 
+/** Main-repo root + worktree name from a linked checkout's `.git` file
+    content (`gitdir: <main>/.git/worktrees/<name>`). Pure for testability. */
+export function parseWorktreeGitdir(cwd: string, gitFileText: string): { repo: string; worktree: string } | null {
+  const target = /^gitdir:\s*(.+?)\s*$/m.exec(gitFileText)?.[1];
+  if (!target) return null;
+  const parts = path.resolve(cwd, target).split(path.sep);
+  const index = parts.lastIndexOf("worktrees");
+  const worktree = index >= 0 ? parts[index + 1] : undefined;
+  if (!worktree || parts[index - 1] !== ".git") return null;
+  return { repo: parts.slice(0, index - 1).join(path.sep) || path.sep, worktree };
+}
+
+/* A cwd's worktree resolution is one lstat + tiny read, but it runs on every
+   meta recompute of a live file — cache per cwd, with a short TTL so a
+   checkout that just became (or stopped being) a worktree is noticed. */
+const worktreeGitCache = globalCache<[number, { repo: string; worktree: string } | null]>("worktree-git");
+const WORKTREE_TTL_MS = 60_000;
+
+/** Linked git worktrees created anywhere (`git worktree add ../foo`), not
+    only under `.claude/worktrees/`: such a checkout has a `.git` FILE whose
+    gitdir points into the main repo — the session belongs to that project. */
+function worktreeFromGitFile(cwd: string): { repo: string; worktree: string } | null {
+  const cached = worktreeGitCache.get(cwd);
+  if (cached && cached[0] > Date.now()) return cached[1];
+  let info: { repo: string; worktree: string } | null = null;
+  try {
+    const gitPath = path.join(cwd, ".git");
+    if (fs.lstatSync(gitPath).isFile()) {
+      info = parseWorktreeGitdir(cwd, fs.readFileSync(gitPath, "utf8"));
+    }
+  } catch {
+    /* no .git or cwd gone — a plain (or vanished) project dir */
+  }
+  worktreeGitCache.set(cwd, [Date.now() + WORKTREE_TTL_MS, info]);
+  return info;
+}
+
+/** Project identity for a real cwd, shared by both engines: resolve a
+    worktree checkout to its main repo, then name the project the way Claude
+    slugs name it (`projectFromSlug` of the dashed path). One naming scheme
+    means a codex session, a claude session, and any worktree of the same repo
+    all land in the SAME sidebar group instead of lookalike neighbors. */
 function projectInfoFromCwd(cwd: string): { project: string; worktree?: string } | null {
-  const worktree = worktreeFromPath(cwd);
-  if (worktree) return { project: path.basename(worktree.repo), worktree: worktree.worktree };
-  const project = path.basename(cwd);
-  return project ? { project } : null;
+  const worktree = worktreeFromPath(cwd) ?? worktreeFromGitFile(cwd);
+  const root = worktree ? worktree.repo : cwd;
+  const project = projectFromSlug(root.replace(/[^a-zA-Z0-9]/g, "-"));
+  return project ? { project, worktree: worktree?.worktree } : null;
 }
 
 function worktreeFromSlug(slug: string): { project: string; worktree: string } | null {
@@ -157,6 +202,16 @@ function titleFromLines(lines: string[], wantCodex: boolean): string | null {
   return null;
 }
 
+function transcriptCwd(pathname: string, size: number): string | null {
+  const cached = cwdCache.get(pathname);
+  if (cached && (cached[1] !== null || cached[0] >= HEAD_BYTES)) return cached[1];
+  const head = readHead(pathname, size);
+  if (!head) return cached?.[1] ?? null;
+  const cwd = cwdFromLines(head.text.split("\n").slice(0, 25));
+  cwdCache.set(pathname, [head.read, cwd]);
+  return cwd;
+}
+
 function scanJsonlTitle(pathname: string, size: number, wantCodex: boolean): string | null {
   const cached = titleCache.get(pathname);
   if (cached && (cached[1] !== null || cached[0] >= HEAD_BYTES)) return cached[1];
@@ -223,12 +278,14 @@ export function describe(rootName: RootKey, root: string, pathname: string, st: 
     const worktreeInfo = worktreeFromSlug(slug);
     project = worktreeInfo?.project ?? projectFromSlug(slug);
     worktree = worktreeInfo?.worktree;
-    if (worktreeInfo) {
-      const head = readHead(pathname, st.size);
-      const cwd = head ? cwdFromLines(head.text.split("\n").slice(0, 25)) : null;
-      const info = cwd ? projectInfoFromCwd(cwd) : null;
-      project = info?.project ?? project;
-      worktree = info?.worktree ?? worktree;
+    /* The slug alone cannot tell a sibling worktree checkout from a real
+       standalone project — only the cwd's git metadata can. When it proves a
+       worktree, the session regroups under its main repo's project name. */
+    const cwd = transcriptCwd(pathname, st.size);
+    const info = cwd ? projectInfoFromCwd(cwd) : null;
+    if (info && (worktreeInfo || info.worktree)) {
+      project = info.project;
+      worktree = info.worktree ?? worktree;
     }
     fmt = "claude";
     if (fn.startsWith("agent-")) {

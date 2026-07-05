@@ -1,6 +1,6 @@
 "use client";
 
-import { CornerDownRight, GitBranch } from "lucide-react";
+import { CornerDownRight, GitBranch, Maximize2, Minimize2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
 import { ChevronRight, X } from "@/components/icons";
@@ -16,7 +16,7 @@ import { paneState, type PaneState } from "./paneState";
 import { CtxChip, GoalChip, PlanChip } from "./PlanChip";
 import { ProcessStatusControls } from "./TaskHeader";
 import { TmuxComposer } from "./TmuxComposer";
-import { activityDot, cleanTitle, effortTint, effortTitle, engineBadge, engineEdge } from "./utils";
+import { activityDot, cleanTitle, effortTint, effortTitle, engineBadge, engineEdge, fmtAge } from "./utils";
 
 const noop = () => undefined;
 
@@ -38,6 +38,30 @@ export function kindLabel(t: TFunction, kind: string): string {
   return kind;
 }
 
+/** Ticking "time since the transcript last grew" — the last sign of life.
+    Self-re-rendering leaf on its own interval, so the surrounding memoized
+    pane tree never re-renders just to refresh a relative timestamp. */
+function LastActivity({ file }: { file: FileEntry }) {
+  const { t } = useLocale();
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 10_000);
+    return () => clearInterval(id);
+  }, []);
+  const age = now / 1000 - file.mtime;
+  /* The case the chip exists for: a pane that looks busy while its transcript
+     has been silent for minutes — surface the silence instead of the badge. */
+  const quiet = (file.activity === "live" || file.activity === "recent") && age > 180;
+  return (
+    <span
+      className={`shrink-0 font-mono text-[9.5px] tabular-nums ${quiet ? "font-semibold text-[#b3831d]" : "text-dim"}`}
+      title={t(quiet ? "branch.lastActivityQuiet" : "branch.lastActivity", { age: fmtAge(file.mtime) })}
+    >
+      {fmtAge(file.mtime)}
+    </span>
+  );
+}
+
 interface Props {
   file: FileEntry;
   files: FileEntry[];
@@ -54,23 +78,33 @@ interface Props {
   noComposer?: boolean;
   /** Slim context bar pinned under the header (e.g. «Раунд 2 · ✖ REQUEST_CHANGES»). */
   banner?: React.ReactNode;
+  /** Header control that opens this conversation full-window; the same control
+      collapses it back when the pane already is the overlay (`expanded`). */
+  onToggleExpand?: () => void;
+  /** The pane is the full-window overlay's content: the control flips to
+      collapse, and pane registries (chime, link arrows) stay with the board
+      pane underneath. */
+  expanded?: boolean;
 }
 
-export function BranchPane({ file, files, tasks, onSelect, isRoot, onClose, dragHandle, noComposer, banner }: Props) {
+export function BranchPane({ file, files, tasks, onSelect, isRoot, onClose, dragHandle, noComposer, banner, onToggleExpand, expanded }: Props) {
   const { t } = useLocale();
   const paneRef = useRef<HTMLElement | null>(null);
   const badge = engineBadge(file);
   const state = paneState(file);
   const tone = PANE_TONES[state];
-  /* The chime of this conversation pans to wherever this pane sits on screen. */
+  /* The chime of this conversation pans to wherever this pane sits on screen.
+     The overlay pane never registers: the board pane of the same path keeps
+     owning both registries, so collapsing leaves them intact. */
   useEffect(() => {
+    if (expanded) return;
     if (paneRef.current) return registerPane(file.path, paneRef.current);
-  }, [file.path]);
+  }, [file.path, expanded]);
   /* Link-arrow drop target; re-registers each poll so the pid stays current. */
   useEffect(() => {
-    if (noComposer) return;
+    if (noComposer || expanded) return;
     if (paneRef.current) return registerLinkTarget(file, paneRef.current);
-  }, [file, noComposer]);
+  }, [file, noComposer, expanded]);
   return (
     /* The attention comets orbit outside the card frame, so they live on an
        unclipped wrapper — inside the section they would stack against the
@@ -97,6 +131,7 @@ export function BranchPane({ file, files, tasks, onSelect, isRoot, onClose, drag
           {...dragHandle}
         >
           <span className={`h-2 w-2 shrink-0 rounded-full ${activityDot(file.activity)}`} title={t(`branch.${state}`)} />
+          <LastActivity file={file} />
           {/* One identity chip: the model when known (engine lives in the tint
               and the tooltip), the engine label as fallback. */}
           {file.model ? (
@@ -135,6 +170,16 @@ export function BranchPane({ file, files, tasks, onSelect, isRoot, onClose, drag
             {cleanTitle(file.title, 90)}
           </span>
           <ProcessStatusControls file={file} compact />
+          {onToggleExpand ? (
+            <button
+              className="inline-flex shrink-0 items-center rounded-[8px] border border-line bg-bg px-1.5 py-0.5 text-dim hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+              aria-label={expanded ? t("branch.collapseFull") : t("branch.expandFull", { title: cleanTitle(file.title, 60) })}
+              title={expanded ? t("branch.collapseFull") : t("branch.expandFull", { title: cleanTitle(file.title, 60) })}
+              onClick={onToggleExpand}
+            >
+              {expanded ? <Minimize2 className="h-3 w-3" aria-hidden /> : <Maximize2 className="h-3 w-3" aria-hidden />}
+            </button>
+          ) : null}
           <DeleteFileButton file={file} onDeleted={onClose} />
           {onClose ? (
             <button

@@ -19,14 +19,17 @@ interface Props {
   /** Shelved projects: pulled out of the main list into the archive section. */
   archivedProjects: ReadonlySet<string>;
   selected: string;
+  /** Attention clock owned by Viewer — advances when a stalled entry crosses
+      its TTL, so the rail badges expire together with the queue. */
+  now: number;
   onSelect: (project: string) => void;
 }
 
-export function ProjectRail({ files, archivedProjects, selected, onSelect }: Props) {
+export function ProjectRail({ files, archivedProjects, selected, now, onSelect }: Props) {
   const { t } = useLocale();
   const [query, setQuery] = useState("");
   const [archiveOpen, setArchiveOpen] = useState(false);
-  const summaries = useMemo(() => buildProjectSummaries(files), [files]);
+  const summaries = useMemo(() => buildProjectSummaries(files, now), [files, now]);
   const visible = useMemo(() => {
     const q = query.trim().toLowerCase();
     return q ? summaries.filter((summary) => summary.project.toLowerCase().includes(q)) : summaries;

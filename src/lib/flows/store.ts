@@ -5,7 +5,7 @@ import path from "node:path";
 
 import type { Flow, FlowPreset, ReviewVerdict } from "./types";
 
-const STATE_DIR = path.join(os.homedir(), ".claude", "viewer-state");
+const STATE_DIR = process.env.LLV_STATE_DIR || path.join(os.homedir(), ".claude", "viewer-state");
 const FLOWS_FILE = path.join(STATE_DIR, "flows.json");
 const PRESETS_FILE = path.join(STATE_DIR, "review-loop-presets.json");
 const FLOW_ARTIFACT_DIR = path.join(STATE_DIR, "flows");
@@ -86,6 +86,7 @@ export function loadFlows(): Flow[] {
     rounds: flow.rounds.map((round) => ({
       ...round,
       sessionId: round.sessionId ?? null,
+      reviewerPid: round.reviewerPid ?? null,
       spawnStartedAt: round.spawnStartedAt ?? null,
       relayStartedAt: round.relayStartedAt ?? null,
       error: round.error ?? null,
@@ -123,6 +124,10 @@ export function outputPathFor(flowId: string, round: number): string {
 
 export function stderrPathFor(flowId: string, round: number): string {
   return path.join(flowArtifactsDir(flowId), `round-${round}-stderr.txt`);
+}
+
+export function stdoutPathFor(flowId: string, round: number): string {
+  return path.join(flowArtifactsDir(flowId), `round-${round}-stdout.log`);
 }
 
 export function normalizeFindings(verdict: ReviewVerdict, markdown: string): string {

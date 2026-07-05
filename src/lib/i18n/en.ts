@@ -399,6 +399,25 @@ export const en = {
   "scheme.roleReviewer": "Reviewer",
   "scheme.roleWorking": "working",
   "scheme.roleWaiting": "waiting",
+  "scheme.lassoTool": "Multi-select — draw a box around agents, click cards to toggle",
+
+  // scheme/BulkActionBar (selection session)
+  "bulk.selectedCount": { one: "{count} selected", other: "{count} selected" },
+  "bulk.placeholder": "one message to every selected agent…",
+  "bulk.textAria": "Broadcast text for the selected agents",
+  "bulk.sendAll": "Send to {count} agents",
+  "bulk.interrupt": "Interrupt",
+  "bulk.stop": "Stop",
+  "bulk.stopConfirm": "Stop {count} agents?",
+  "bulk.remove": "Clear from board",
+  "bulk.removeConfirm": "Close {count} cards?",
+  "bulk.flow": "Flow",
+  "bulk.fit": "Show selection",
+  "bulk.exit": "Exit selection (Esc)",
+  "bulk.retryFailed": "Retry failed ({count})",
+  "bulk.nodeGone": "node left the board",
+  "bulk.flowTitle": "Start a review flow on {count} agents",
+  "bulk.flowStart": "Start {count} flows",
 
   // scheme/Minimap
   "minimap.title": "Minimap — click or drag to navigate",
@@ -465,12 +484,16 @@ export const en = {
   "branch.stalled": "interrupted or awaiting permission",
   "branch.done": "done — safe to remove",
   "branch.worktree": "Worktree {name}",
+  "branch.lastActivity": "Last activity: {age}",
+  "branch.lastActivityQuiet": "Marked active, but the transcript is quiet: last activity {age}",
   "branch.handoffTitle": "agent spawned by this conversation's handoff",
   "branch.branchTitle": "branch of this conversation",
   "branch.removeColumn": "Remove column {title}",
   "branch.toggleBackground": "{action} background task {title}",
   "branch.collapse": "Collapse",
   "branch.expand": "Expand",
+  "branch.expandFull": "Expand conversation {title} to the full window",
+  "branch.collapseFull": "Back to the canvas (Esc)",
 
   // TreeAside
   "tree.quiet": "Quiet conversations and tasks",
@@ -503,6 +526,13 @@ export const en = {
   "viewer.agentWaiting": "Agent is waiting for a reply",
   "viewer.closeNotification": "Close the notification",
 
+  // Viewer attention queue
+  "attention.badge": { one: "{count} waiting", other: "{count} waiting" },
+  "attention.openQueue": "Attention queue — who is blocked on you (N — next)",
+  "attention.popoverTitle": "Waiting on you",
+  "attention.filterOn": "Show only those waiting on you (F)",
+  "attention.filterOff": "Show all nodes (F)",
+
   // MobileFocusView
   "mobile.noConvos": "No conversations yet",
   "mobile.map": "Map",
@@ -513,7 +543,7 @@ export const en = {
 
   // Board tasks
   "tasks.failed": "failed ({status})",
-  "tasks.tool": "Task — the next click drops a card on the canvas (N)",
+  "tasks.tool": "Task — the next click drops a card on the canvas (T)",
   "tasks.untitled": "untitled",
   "tasks.newPlaceholder": "task text… (the first line is the title)",
   "tasks.editAria": "Task text",
@@ -541,9 +571,6 @@ export const en = {
   "tasks.sendOk": "Delivered {delivered} of {total}",
   "tasks.sendFailPart": "✗ “{title}”: {error}",
   "tasks.spawnOk": "agent started in tmux {target}",
-  "tasks.composerAria": "Composer for the selected conversations",
-  "tasks.composerPlaceholder": "message the selected agents…",
-  "tasks.composerCount": { one: "{count} conversation", other: "{count} conversations" },
   "tasks.composerToggle": "create a task",
   "tasks.composerToggleTitle": "On — the text becomes a tracked task card assigned to the selection; off — a plain broadcast with no trace",
   "tasks.composerNeedsText": "a task needs text",
@@ -551,7 +578,7 @@ export const en = {
   "tasks.panelToggleAria": "Toggle the task panel",
   "tasks.panelThisProject": "this project",
   "tasks.panelAll": "all",
-  "tasks.panelEmpty": "no tasks yet — drop one with the board's task tool (N)",
+  "tasks.panelEmpty": "no tasks yet — drop one with the board's task tool (T)",
   "tasks.panelClose": "Close the task panel",
   "tasks.sheetNew": "new task",
   "tasks.sheetCreate": "Create the task",

@@ -1,6 +1,6 @@
 "use client";
 
-import { Layers } from "lucide-react";
+import { Check, Layers } from "lucide-react";
 import { memo, useState } from "react";
 
 import { ChevronRight } from "@/components/icons";
@@ -231,6 +231,11 @@ function FarLabel({ file }: { file: FileEntry }) {
 
 const liteNoop = () => undefined;
 
+/* «Show only needs me» dimming: opacity only — geometry, edges and hit areas
+   stay exactly where they were, so toggling the filter never reshuffles the
+   board (D6). */
+const dimClass = (dimmed: boolean) => (dimmed ? " opacity-35" : "");
+
 /* The flow strip is the loop's shared header: it spans the whole
    implementer↔reviewer pair. */
 const PAIR_W = NODE_W * 2 + LOOP_GAP;
@@ -240,13 +245,13 @@ const PAIR_W = NODE_W * 2 + LOOP_GAP;
    hold thousands of transcript lines each — multiplied across the project it
    exceeds the mobile tab's memory budget and iOS kills the renderer. The card
    carries what a pick decision needs; the transcript opens after the pick. */
-function LiteNodeShell({ node, ringed, flow }: { node: SchemeNode; ringed: boolean; flow: Flow | null }) {
+function LiteNodeShell({ node, ringed, dimmed, flow }: { node: SchemeNode; ringed: boolean; dimmed: boolean; flow: Flow | null }) {
   const { t } = useLocale();
   const badge = engineBadge(node.file);
   return (
     <div
       data-scheme-node={node.file.path}
-      className="scheme-enter absolute"
+      className={`scheme-enter absolute${dimClass(dimmed)}`}
       style={{ transform: `translate(${node.x}px, ${node.y}px)`, width: node.w, height: node.h, transition: MOVE_TRANSITION }}
     >
       {flow ? (
@@ -290,12 +295,12 @@ function LiteNodeShell({ node, ringed, flow }: { node: SchemeNode; ringed: boole
 }
 
 /** Draft placeholder on the map: a pick jumps back to the focused draft pane. */
-function LiteDraftShell({ draft, ringed }: { draft: DraftNode; ringed: boolean }) {
+function LiteDraftShell({ draft, ringed, dimmed }: { draft: DraftNode; ringed: boolean; dimmed: boolean }) {
   const { t } = useLocale();
   return (
     <div
       data-scheme-node={draft.key}
-      className="scheme-enter absolute"
+      className={`scheme-enter absolute${dimClass(dimmed)}`}
       style={{ transform: `translate(${draft.x}px, ${draft.y}px)`, width: draft.w, height: draft.h, transition: MOVE_TRANSITION }}
     >
       <div
@@ -312,7 +317,7 @@ function LiteDraftShell({ draft, ringed }: { draft: DraftNode; ringed: boolean }
 }
 
 /** Review deck on the map: the latest round's state without mounting its feed. */
-function LiteDeckShell({ deck }: { deck: DeckNode }) {
+function LiteDeckShell({ deck, dimmed }: { deck: DeckNode; dimmed: boolean }) {
   const { t } = useLocale();
   const latest = deck.rounds.at(-1) ?? null;
   const round = latest?.round ?? null;
@@ -320,7 +325,7 @@ function LiteDeckShell({ deck }: { deck: DeckNode }) {
   return (
     <div
       data-scheme-node={deck.key}
-      className="scheme-enter absolute"
+      className={`scheme-enter absolute${dimClass(dimmed)}`}
       style={{ transform: `translate(${deck.x}px, ${deck.y}px)`, width: deck.w, height: deck.h, transition: MOVE_TRANSITION }}
     >
       <div className="flex h-full flex-col overflow-hidden rounded-[10px] border border-line bg-panel shadow-card">
@@ -362,12 +367,12 @@ function LiteDeckShell({ deck }: { deck: DeckNode }) {
  * stays readable on the diagram even when nothing in it runs. A click opens
  * the branch as a full node.
  */
-function MiniStackShell({ stack, onSelect }: { stack: MiniStack; onSelect: (file: FileEntry) => void }) {
+function MiniStackShell({ stack, dimmed, onSelect }: { stack: MiniStack; dimmed: boolean; onSelect: (file: FileEntry) => void }) {
   const { t } = useLocale();
   return (
     <div
       data-scheme-node={stack.key}
-      className="scheme-enter absolute"
+      className={`scheme-enter absolute${dimClass(dimmed)}`}
       style={{ transform: `translate(${stack.x}px, ${stack.y}px)`, width: stack.w, height: stack.h, transition: MOVE_TRANSITION }}
     >
       <div className="flex h-full flex-col gap-1.5 overflow-y-auto rounded-[10px] border border-dashed border-[#c9c9d1] bg-panel/60 p-2">
@@ -404,16 +409,23 @@ function NodeShell({
   node,
   files,
   ringed,
+  marked,
+  dimmed,
   flow,
   canFlow,
   onSelect,
   onClose,
   onFocusRound,
   onHandoff,
+  onExpand,
 }: {
   node: SchemeNode;
   files: FileEntry[];
   ringed: boolean;
+  /** Member of the selection session: checkmark badge + exempt from dimming. */
+  marked: boolean;
+  /** «Show only needs me» attention filter dim. */
+  dimmed: boolean;
   /** Active review-loop flow attached to this conversation, if any. */
   flow: Flow | null;
   /** This node may host a new flow (root claude/codex conversation without one). */
@@ -422,6 +434,8 @@ function NodeShell({
   onClose: (path: string) => void;
   onFocusRound: (flowId: string, round: number) => void;
   onHandoff?: (file: FileEntry) => void;
+  /** Header control: open this conversation as the full-window overlay. */
+  onExpand: (path: string) => void;
 }) {
   const { t } = useLocale();
   const [underOpen, setUnderOpen] = useState(false);
@@ -429,9 +443,19 @@ function NodeShell({
   return (
     <div
       data-scheme-node={node.file.path}
-      className={`scheme-enter absolute ${underOpen || flowOpen ? "z-20" : ""}`}
+      data-lasso-selected={marked ? "true" : undefined}
+      className={`scheme-enter absolute ${underOpen || flowOpen ? "z-20" : ""}${dimClass(dimmed)}`}
       style={{ transform: `translate(${node.x}px, ${node.y}px)`, width: node.w, height: node.h, transition: MOVE_TRANSITION }}
     >
+      {marked ? (
+        <>
+          <span className="absolute -right-2.5 -top-2.5 z-[5] flex h-6 w-6 items-center justify-center rounded-full border-2 border-bg bg-accent text-white shadow-card">
+            <Check className="h-3.5 w-3.5" aria-hidden />
+          </span>
+          {/* The promised member tint: readable at far zoom, panes stay legible. */}
+          <div aria-hidden className="pointer-events-none absolute inset-0 z-[4] rounded-[10px] bg-accent/[0.06]" />
+        </>
+      ) : null}
       {/* The loop's shared header hovers above the implementer↔reviewer pair. */}
       {flow ? (
         <div className="absolute -top-[60px] left-0 z-[4]" style={{ width: PAIR_W }}>
@@ -471,6 +495,7 @@ function NodeShell({
           onSelect={onSelect}
           isRoot={node.isRoot}
           onClose={() => onClose(node.file.path)}
+          onToggleExpand={() => onExpand(node.file.path)}
         />
       </div>
       {flow ? <RoleTag role="implementer" active={activeLoopRole(flow) === "implementer"} /> : null}
@@ -507,6 +532,7 @@ function DraftShell({
   project,
   files,
   ringed,
+  dimmed,
   onDraftClose,
   onDraftSpawned,
 }: {
@@ -514,13 +540,14 @@ function DraftShell({
   project: string;
   files: FileEntry[];
   ringed: boolean;
+  dimmed: boolean;
   onDraftClose: (id: string) => void;
   onDraftSpawned: (id: string, file: FileEntry) => void;
 }) {
   return (
     <div
       data-scheme-node={draft.key}
-      className="scheme-enter absolute"
+      className={`scheme-enter absolute${dimClass(dimmed)}`}
       style={{ transform: `translate(${draft.x}px, ${draft.y}px)`, width: draft.w, height: draft.h, transition: MOVE_TRANSITION }}
     >
       <div className={`flex h-full ${ringed ? "rounded-[10px] ring-2 ring-accent/60 ring-offset-2 ring-offset-bg" : ""}`}>
@@ -541,18 +568,20 @@ function DeckShell({
   deck,
   files,
   focus,
+  dimmed,
   onSelect,
 }: {
   deck: DeckNode;
   files: FileEntry[];
   focus: DeckFocus | null;
+  dimmed: boolean;
   onSelect: (file: FileEntry) => void;
 }) {
   const focusRound = focus && focus.flowId === deck.flow.id ? focus.round + focus.nonce / 1000 : null;
   return (
     <div
       data-scheme-node={deck.key}
-      className="scheme-enter absolute"
+      className={`scheme-enter absolute${dimClass(dimmed)}`}
       style={{ transform: `translate(${deck.x}px, ${deck.y}px)`, width: deck.w, height: deck.h, transition: MOVE_TRANSITION }}
     >
       <RoundDeck flow={deck.flow} rounds={deck.rounds} files={files} onSelect={onSelect} focusRound={focusRound} />
@@ -568,7 +597,10 @@ export const NodesLayer = memo(function NodesLayer({
   interactive,
   lite,
   selected,
+  multi,
+  session,
   focus,
+  attentionPaths,
   flowsByImpl,
   deckFocus,
   onSelect,
@@ -577,6 +609,7 @@ export const NodesLayer = memo(function NodesLayer({
   onDraftClose,
   onDraftSpawned,
   onHandoff,
+  onExpand,
 }: {
   layout: SchemeLayout;
   project: string;
@@ -584,8 +617,15 @@ export const NodesLayer = memo(function NodesLayer({
   interactive: boolean;
   /** Map mode: identity cards instead of live panes (no feeds, no polling). */
   lite: boolean;
-  selected: ReadonlySet<string>;
+  selected: string | null;
+  /** Selection-session member paths; visuals only change on commit. */
+  multi: ReadonlySet<string>;
+  /** Session active: members carry checkmarks, everything else dims via CSS. */
+  session: boolean;
   focus: string | null;
+  /** «Show only needs me»: non-null dims every shell without a queue member.
+      Identity is stable while membership is, so camera frames never see it move. */
+  attentionPaths: ReadonlySet<string> | null;
   flowsByImpl: Map<string, Flow>;
   deckFocus: DeckFocus | null;
   onSelect: (file: FileEntry) => void;
@@ -594,29 +634,46 @@ export const NodesLayer = memo(function NodesLayer({
   onDraftClose: (id: string) => void;
   onDraftSpawned: (id: string, file: FileEntry) => void;
   onHandoff?: (file: FileEntry) => void;
+  /** Opens a conversation as the full-window overlay (desktop panes only). */
+  onExpand: (path: string) => void;
 }) {
+  /* A stack or deck stays lit when any conversation inside it is in the
+     queue — a stalled branch may live in a mini stack, and a blocked
+     reviewer inside a round deck. */
+  const stackDimmed = (stack: MiniStack) =>
+    attentionPaths !== null && !stack.items.some((item) => attentionPaths.has(item.file.path));
+  const deckDimmed = (deck: DeckNode) =>
+    attentionPaths !== null && !deck.rounds.some((round) => round.file && attentionPaths.has(round.file.path));
   return (
-    <div className={interactive ? undefined : "pointer-events-none select-none"}>
+    <div
+      className={`${interactive ? "" : "pointer-events-none select-none"} ${session ? "scheme-session" : ""}`.trim() || undefined}
+    >
       {layout.stacks.map((stack) => (
-        <MiniStackShell key={stack.key} stack={stack} onSelect={onSelect} />
+        <MiniStackShell key={stack.key} stack={stack} dimmed={stackDimmed(stack)} onSelect={onSelect} />
       ))}
       {layout.decks.map((deck) =>
         lite ? (
-          <LiteDeckShell key={deck.key} deck={deck} />
+          <LiteDeckShell key={deck.key} deck={deck} dimmed={deckDimmed(deck)} />
         ) : (
-          <DeckShell key={deck.key} deck={deck} files={files} focus={deckFocus} onSelect={onSelect} />
+          <DeckShell key={deck.key} deck={deck} files={files} focus={deckFocus} dimmed={deckDimmed(deck)} onSelect={onSelect} />
         ),
       )}
       {layout.drafts.map((draft) =>
         lite ? (
-          <LiteDraftShell key={draft.key} draft={draft} ringed={selected.has(draft.key) || focus === draft.key} />
+          <LiteDraftShell
+            key={draft.key}
+            draft={draft}
+            ringed={selected === draft.key || focus === draft.key}
+            dimmed={attentionPaths !== null}
+          />
         ) : (
           <DraftShell
             key={draft.key}
             draft={draft}
             project={project}
             files={files}
-            ringed={selected.has(draft.key) || focus === draft.key}
+            ringed={selected === draft.key || focus === draft.key}
+            dimmed={attentionPaths !== null}
             onDraftClose={onDraftClose}
             onDraftSpawned={onDraftSpawned}
           />
@@ -627,7 +684,8 @@ export const NodesLayer = memo(function NodesLayer({
           <LiteNodeShell
             key={node.file.path}
             node={node}
-            ringed={selected.has(node.file.path) || focus === node.file.path}
+            ringed={selected === node.file.path || focus === node.file.path}
+            dimmed={attentionPaths !== null && !attentionPaths.has(node.file.path)}
             flow={flowsByImpl.get(node.file.path) ?? null}
           />
         ) : (
@@ -635,13 +693,16 @@ export const NodesLayer = memo(function NodesLayer({
             key={node.file.path}
             node={node}
             files={files}
-            ringed={selected.has(node.file.path) || focus === node.file.path}
+            ringed={session ? multi.has(node.file.path) : selected === node.file.path || focus === node.file.path}
+            marked={session && multi.has(node.file.path)}
+            dimmed={attentionPaths !== null && !attentionPaths.has(node.file.path)}
             flow={flowsByImpl.get(node.file.path) ?? null}
             canFlow={canStartFlow(node.file, flowsByImpl)}
             onSelect={onSelect}
             onClose={onClose}
             onFocusRound={onFocusRound}
             onHandoff={onHandoff}
+            onExpand={onExpand}
           />
         ),
       )}

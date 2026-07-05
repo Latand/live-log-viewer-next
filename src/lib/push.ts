@@ -3,6 +3,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { attentionId } from "@/components/attention";
+
 import type { FileEntry } from "./types";
 
 const STATE_DIR = path.join(os.homedir(), ".claude", "viewer-state");
@@ -181,7 +183,10 @@ function payloadFor(entry: FileEntry): PushPayload {
 
 async function notifyQuestionNow(entry: FileEntry): Promise<void> {
   if (entry.waitingInput && Date.now() / 1000 - entry.waitingInput.since < WAITING_PUSH_DEBOUNCE_SECONDS) return;
-  const id = entry.pendingQuestion?.toolUseId ?? (entry.waitingInput ? `${entry.path}:waiting:${Math.floor(entry.waitingInput.since)}` : null);
+  /* Push is deliberately narrower than the attention queue: hard-blocked
+     events only, never stalled — the guard precedes the shared derivation. */
+  if (!entry.pendingQuestion && !entry.waitingInput) return;
+  const id = attentionId(entry);
   if (!id) return;
   const sent = new Set(readJson<string[]>(SENT_FILE, []));
   if (sent.has(id)) return;

@@ -1,6 +1,6 @@
 "use client";
 
-import { Hand, Maximize2, Minus, MousePointer2, Plus, StickyNote } from "lucide-react";
+import { BoxSelect, Hand, Maximize2, Minus, MousePointer2, Plus, StickyNote } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { Flow } from "@/lib/flows/types";
@@ -8,12 +8,15 @@ import { getLocale, translate, useLocale } from "@/lib/i18n";
 import type { BoardTask } from "@/lib/tasks/types";
 import type { FileEntry } from "@/lib/types";
 
+import { BranchPane } from "@/components/BranchPane";
 import { flowByImplementer } from "@/components/flows/flowModel";
 import type { BranchGroup } from "@/components/projectModel";
-import { SelectionComposer } from "@/components/tasks/SelectionComposer";
 import { createTask, deleteTask, sendTask, spawnTaskAgent, updateTask } from "@/components/tasks/taskApi";
 import { pushTaskToast, sendSummary } from "@/components/tasks/taskToast";
+import { cleanTitle } from "@/components/utils";
 
+import { BulkActionBar } from "./BulkActionBar";
+import { nodesInRect, pruneSelection, selectionBBox } from "./lasso";
 import { buildSchemeLayout } from "./layout";
 import { Minimap } from "./Minimap";
 import { EdgesLayer, LoopsLayer, MOVE_EASE, NodesLayer, type DeckFocus } from "./nodes";
@@ -21,10 +24,13 @@ import type { TaskCardHandlers } from "./TaskCard";
 import { TaskEdgesLayer } from "./TaskEdgesLayer";
 import { TasksLayer } from "./TasksLayer";
 import { buildTaskEdges, buildTaskTargetIndex, TASK_W, taskRect, type SchemeRect } from "./taskGeometry";
+import { useLasso } from "./useLasso";
 import { useSchemeCamera } from "./useSchemeCamera";
 
 /* Below this zoom the big node labels fade in over the unreadable panes. */
 const LABEL_Z = 0.45;
+
+const EMPTY_PATHS: ReadonlySet<string> = new Set();
 
 interface Props {
   project: string;
@@ -40,6 +46,8 @@ interface Props {
   focus: string | null;
   /** Path to ring without moving the camera, used by the mobile full-map overlay. */
   ring?: string | null;
+  /** «Show only needs me» filter: non-null dims every shell without a queue member. */
+  attentionPaths?: ReadonlySet<string> | null;
   onSelect: (file: FileEntry) => void;
   /** Optional map-mode node pick handler; receives the selected node key. */
   onNodePick?: (key: string) => void;
@@ -98,6 +106,7 @@ export function SchemeBoard({
   drafts,
   focus,
   ring,
+  attentionPaths,
   onSelect,
   onNodePick,
   onClose,
@@ -107,24 +116,108 @@ export function SchemeBoard({
 }: Props) {
   const { t } = useLocale();
   const mapMode = Boolean(onNodePick);
-  /* Multi-select: plain click replaces, Shift/Ctrl+click toggles, Esc clears. */
-  const [selected, setSelectedState] = useState<ReadonlySet<string>>(() => new Set<string>());
-  const setSelected = useCallback((key: string | null, toggle = false) => {
-    setSelectedState((prev) => {
-      if (key === null) return prev.size ? new Set<string>() : prev;
-      if (toggle) {
-        const next = new Set(prev);
-        if (next.has(key)) next.delete(key);
-        else next.add(key);
-        return next;
-      }
-      if (prev.size === 1 && prev.has(key)) return prev;
-      return new Set([key]);
+  const [selected, setSelected] = useState<string | null>(null);
+  /* The ephemeral selection session: a set of node paths plus an "armed"
+     latch for the toolbar button. Session ⇔ armed or non-empty — a plain
+     single-click ring never enters it. */
+  const [multi, setMulti] = useState<ReadonlySet<string>>(EMPTY_PATHS);
+  const [armed, setArmed] = useState(false);
+
+  /* A focus jump also selects its node (D9): the selection ring stays after
+     the 1.8 s highlight expires, marking where the camera landed. */
+  /* eslint-disable react-hooks/set-state-in-effect */
+  useEffect(() => {
+    if (focus) setSelected(focus);
+  }, [focus]);
+  /* eslint-enable react-hooks/set-state-in-effect */
+
+  const layout = useMemo(() => buildSchemeLayout(groups, manual, files, flows, drafts), [groups, manual, files, flows, drafts]);
+
+  /* Selection keys are transcript paths, so the 10s poll relayout keeps the
+     set for free; nodes that left the board are pruned out of the state
+     itself — a path returning later must not resurrect an old selection.
+     pruneSelection returns the same reference when nothing changed, so the
+     write below bails out instead of cascading. */
+  useEffect(() => {
+    /* eslint-disable-next-line react-hooks/set-state-in-effect */
+    setMulti((prev) => pruneSelection(prev, layout.nodes));
+  }, [layout]);
+  const session = !mapMode && (armed || multi.size > 0);
+
+  const clearSession = useCallback(() => {
+    setMulti(EMPTY_PATHS);
+    setArmed(false);
+  }, []);
+  const toggleMember = useCallback((path: string) => {
+    setMulti((prev) => {
+      const next = new Set(prev);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
     });
   }, []);
 
-  const layout = useMemo(() => buildSchemeLayout(groups, manual, files, flows, drafts), [groups, manual, files, flows, drafts]);
+  const selectedRef = useRef(selected);
+  useEffect(() => {
+    selectedRef.current = selected;
+  }, [selected]);
+
+  /* Camera-facing selection setter: null clears everything (Esc, background),
+     additive is a Shift+click that lifts the click into the session. */
+  const setSelectedFromCamera = useCallback(
+    (value: string | null, additive?: boolean) => {
+      if (value === null) {
+        setSelected(null);
+        clearSession();
+        return;
+      }
+      if (additive && layout.byPath.has(value) && layout.nodes.some((node) => node.file.path === value)) {
+        setSelected(null);
+        setMulti((prev) => {
+          const next = new Set(prev);
+          const ringed = selectedRef.current;
+          if (ringed && ringed !== value && layout.nodes.some((node) => node.file.path === ringed)) next.add(ringed);
+          if (next.has(value)) next.delete(value);
+          else next.add(value);
+          return next;
+        });
+        return;
+      }
+      setSelected(value);
+    },
+    [layout, clearSession],
+  );
   const flowsByImpl = useMemo(() => flowByImplementer(flows), [flows]);
+
+  /* One conversation expanded full-window at a time. React state only — never
+     persisted, gone on reload; the board underneath stays mounted, so camera,
+     selection and column prefs survive the round trip untouched. */
+  const [expanded, setExpanded] = useState<string | null>(null);
+  /* eslint-disable react-hooks/set-state-in-effect */
+  useEffect(() => {
+    setExpanded(null);
+  }, [project]);
+  /* eslint-enable react-hooks/set-state-in-effect */
+  /* The overlay pane re-derives from the layout each poll, so its feed stays
+     live; a node that left the layout (closed, deleted) drops the overlay. */
+  const expandedNode = expanded ? (layout.nodes.find((node) => node.file.path === expanded) ?? null) : null;
+  const overlayOpen = expandedNode !== null;
+  /* Esc collapses the overlay. Capture phase, so the camera's own Escape
+     handler never sees the press and the board selection stays. Presses
+     inside text fields keep their meaning for the field. */
+  useEffect(() => {
+    if (!overlayOpen) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      const el = event.target as HTMLElement | null;
+      if (el && (["INPUT", "TEXTAREA", "SELECT"].includes(el.tagName) || el.isContentEditable)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      setExpanded(null);
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [overlayOpen]);
   const [deckFocus, setDeckFocus] = useState<DeckFocus | null>(null);
   const focusRound = useCallback((flowId: string, round: number) => {
     setDeckFocus((prev) => ({ flowId, round, nonce: (prev?.nonce ?? 0) + 1 }));
@@ -161,6 +254,48 @@ export function SchemeBoard({
   const stableHandoff = useCallback((file: FileEntry) => handoffRef.current?.(file), []);
   /* The handle renders only when the opener wired a handler (not in map mode). */
   const handoffForNodes = onHandoff ? stableHandoff : undefined;
+  const stableExpand = useCallback((path: string) => setExpanded(path), []);
+  /* Opening another conversation from inside the overlay (agent links,
+     subagent chips) collapses it first, so the board jump stays visible. */
+  const overlaySelect = useCallback((file: FileEntry) => {
+    setExpanded(null);
+    selectRef.current(file);
+  }, []);
+
+  /* A stationary background tap: inside the session it toggles the node under
+     the cursor (panes are click-through, so the DOM can't answer) or exits on
+     empty ground; outside it, it drops the single ring — the job the press
+     itself did before the marquee claimed background presses. */
+  const sessionRef = useRef(session);
+  useEffect(() => {
+    sessionRef.current = session;
+  }, [session]);
+  /* The click that lands right after a marquee commit must be swallowed: the
+     marquee arms from 4px of travel while the camera's tap threshold is 9px,
+     so a short drag would otherwise commit AND then toggle/clear through
+     onWorldTap. Armed at commit, disarmed on the very next press. */
+  const marqueeClickGuard = useRef(false);
+  const onWorldTap = useCallback(
+    (wx: number, wy: number) => {
+      if (marqueeClickGuard.current) {
+        marqueeClickGuard.current = false;
+        return true;
+      }
+      if (!sessionRef.current) {
+        setSelected(null);
+        return true;
+      }
+      const hit = nodesInRect(layout.nodes, { x: wx, y: wy, w: 0, h: 0 });
+      if (hit.length) toggleMember(hit[0]!);
+      else clearSession();
+      return true;
+    },
+    [layout, toggleMember, clearSession],
+  );
+
+  /* The camera consults the lasso on every background press; the ref breaks
+     the camera↔lasso creation cycle (the lasso needs the camera's viewport). */
+  const lassoDownRef = useRef<(event: React.PointerEvent<HTMLDivElement>) => boolean>(() => false);
 
   /* Tasks created this session but not yet echoed by the poll: overlaid so a
      fresh card never blinks out between the POST and the refetch. Entries
@@ -212,6 +347,7 @@ export function SchemeBoard({
     zoomCenter,
     zoomTo,
     fit,
+    fitRect,
     jump,
   } = useSchemeCamera({
     project,
@@ -219,10 +355,51 @@ export function SchemeBoard({
     mapMode,
     focus,
     onNodePick,
-    setSelected,
+    setSelected: setSelectedFromCamera,
+    onBackgroundDown: mapMode
+      ? undefined
+      : (event) => {
+          marqueeClickGuard.current = false;
+          return lassoDownRef.current(event);
+        },
+    onWorldTap: mapMode ? undefined : onWorldTap,
     taskRects,
     onPlaceTask: mapMode ? undefined : onPlaceTask,
   });
+
+  const commitMarquee = useCallback((paths: string[], additive: boolean) => {
+    marqueeClickGuard.current = true;
+    setSelected(null);
+    setMulti((prev) => {
+      if (!additive) return paths.length ? new Set(paths) : EMPTY_PATHS;
+      if (!paths.length) return prev;
+      const next = new Set(prev);
+      for (const path of paths) next.add(path);
+      return next;
+    });
+  }, []);
+  const { marquee, onBackgroundDown } = useLasso({
+    viewportRef,
+    cam,
+    layout,
+    enabled: !mapMode,
+    session,
+    onCommit: commitMarquee,
+  });
+  useEffect(() => {
+    lassoDownRef.current = onBackgroundDown;
+  }, [onBackgroundDown]);
+
+  const selectedNodes = useMemo(() => layout.nodes.filter((node) => multi.has(node.file.path)), [layout, multi]);
+  const bbox = useMemo(() => selectionBBox(layout.nodes, multi), [layout, multi]);
+  /* Stable fit handler: the memoized bar must not re-render on bbox moves. */
+  const bboxRef = useRef(bbox);
+  useEffect(() => {
+    bboxRef.current = bbox;
+  }, [bbox]);
+  const fitSelection = useCallback(() => {
+    if (bboxRef.current) fitRect(bboxRef.current);
+  }, [fitRect]);
 
   /* Latest camera behind a stable ref: card drags divide pointer deltas by
      cam.z without subscribing the memoized task layer to camera frames. */
@@ -231,11 +408,11 @@ export function SchemeBoard({
     camRef.current = cam;
   }, [cam]);
   const filesRef = useRef(files);
-  const selectedRef = useRef(selected);
+  const multiRef = useRef(multi);
   const layoutRef = useRef(layout);
   useEffect(() => {
     filesRef.current = files;
-    selectedRef.current = selected;
+    multiRef.current = multi;
     layoutRef.current = layout;
   });
 
@@ -273,11 +450,14 @@ export function SchemeBoard({
         return null;
       },
       center: (rect: SchemeRect) => centerOn(rect, 0.75),
-      /* Conversation nodes only: stacks, decks and drafts in the selection
-         are not send targets. */
+      /* Conversation nodes only: the session's members first, else the
+         single selection ring when it sits on a conversation node. */
       selectionPaths: () => {
         const nodePaths = new Set(layoutRef.current.nodes.map((node) => node.file.path));
-        return [...selectedRef.current].filter((key) => nodePaths.has(key));
+        const members = [...multiRef.current].filter((key) => nodePaths.has(key));
+        if (members.length) return members;
+        const ring = selectedRef.current;
+        return ring && nodePaths.has(ring) ? [ring] : [];
       },
     }),
     [handleSendById, centerOn],
@@ -300,24 +480,10 @@ export function SchemeBoard({
   );
   const cancelCreate = useCallback(() => setPendingTask(null), []);
 
-  /* The docked selection composer targets the selected conversation nodes;
-     a new task card lands near their centroid. */
-  const selectedNodes = useMemo(() => layout.nodes.filter((node) => selected.has(node.file.path)), [layout, selected]);
-  const selectionFiles = useMemo(() => selectedNodes.map((node) => node.file), [selectedNodes]);
-  const selectionCentroid = useMemo(() => {
-    if (!selectedNodes.length) return { x: 0, y: 0 };
-    let cx = 0;
-    let cy = 0;
-    for (const node of selectedNodes) {
-      cx += node.x + node.w / 2;
-      cy += node.y + node.h / 2;
-    }
-    return { x: cx / selectedNodes.length - TASK_W / 2, y: cy / selectedNodes.length - 60 };
-  }, [selectedNodes]);
-
   const tile = 24 * cam.z;
 
   return (
+    <>
     <div
       ref={viewportRef}
       className={`relative min-h-0 flex-1 overflow-hidden ${
@@ -364,10 +530,13 @@ export function SchemeBoard({
           layout={layout}
           project={project}
           files={files}
-          interactive={!handLike}
+          interactive={!handLike && !session}
           lite={mapMode}
           selected={selected}
+          multi={multi}
+          session={session}
           focus={visualFocus}
+          attentionPaths={attentionPaths ?? null}
           flowsByImpl={flowsByImpl}
           deckFocus={deckFocus}
           onSelect={stableSelect}
@@ -376,12 +545,13 @@ export function SchemeBoard({
           onDraftClose={stableDraftClose}
           onDraftSpawned={stableDraftSpawned}
           onHandoff={handoffForNodes}
+          onExpand={stableExpand}
         />
         <TaskEdgesLayer edges={taskEdges} width={layout.width} height={layout.height} onRetry={retryEdge} />
         <TasksLayer
           tasks={mergedTasks}
           files={files}
-          interactive={!handLike}
+          interactive={!handLike && !session}
           lite={mapMode}
           camRef={camRef}
           handlers={taskHandlers}
@@ -389,7 +559,49 @@ export function SchemeBoard({
           onCreate={handleCreate}
           onCreateCancel={cancelCreate}
         />
+        {/* Session bbox lives inside the transformed world div: the camera
+            moves it through the container transform, never a re-render. */}
+        {session && bbox ? (
+          <div
+            aria-hidden
+            className="pointer-events-none absolute z-[6] rounded-[14px] border-2 border-dashed border-accent/60"
+            style={{ left: bbox.x - 14, top: bbox.y - 14, width: bbox.w + 28, height: bbox.h + 28 }}
+          >
+            <span
+              className="absolute -top-3 left-4 rounded-full border border-accent/50 bg-panel px-2 py-0.5 font-bold text-accent"
+              style={{ fontSize: "calc(11px * min(var(--inv-z, 1), 2.6))" }}
+            >
+              {t("bulk.selectedCount", { count: multi.size })}
+            </span>
+          </div>
+        ) : null}
       </div>
+
+      {/* Screen-space marquee: only this small subtree changes per drag frame. */}
+      {marquee ? (
+        <div aria-hidden className="pointer-events-none absolute inset-0 z-30">
+          <div
+            className="absolute rounded-[4px] border border-accent/70 bg-accent/10"
+            style={{ left: marquee.rect.x, top: marquee.rect.y, width: marquee.rect.w, height: marquee.rect.h }}
+          />
+          {marquee.candidates.map((path) => {
+            const node = layout.byPath.get(path);
+            if (!node) return null;
+            return (
+              <div
+                key={path}
+                className="absolute rounded-[10px] border-2 border-accent/70"
+                style={{
+                  left: node.x * cam.z + cam.x,
+                  top: node.y * cam.z + cam.y,
+                  width: node.w * cam.z,
+                  height: node.h * cam.z,
+                }}
+              />
+            );
+          })}
+        </div>
+      ) : null}
 
       <div data-scheme-ui className="absolute left-3 top-3 z-40 flex items-center gap-1 rounded-[10px] border border-line bg-panel/95 p-1 shadow-card">
         {mapMode ? null : (
@@ -397,8 +609,26 @@ export function SchemeBoard({
             <ToolButton active={handLike && !taskTool} title={t("scheme.handTool")} onClick={() => setMode("hand")}>
               <Hand className="h-4 w-4" aria-hidden />
             </ToolButton>
-            <ToolButton active={!handLike && !taskTool} title={t("scheme.selectTool")} onClick={() => setMode("select")}>
+            <ToolButton
+              active={!handLike && !session && !taskTool}
+              title={t("scheme.selectTool")}
+              onClick={() => setMode("select")}
+            >
               <MousePointer2 className="h-4 w-4" aria-hidden />
+            </ToolButton>
+            <ToolButton
+              active={session}
+              title={t("scheme.lassoTool")}
+              onClick={() => {
+                if (session) {
+                  clearSession();
+                } else {
+                  setMode("select");
+                  setArmed(true);
+                }
+              }}
+            >
+              <BoxSelect className="h-4 w-4" aria-hidden />
             </ToolButton>
             <ToolButton active={taskTool} title={t("tasks.tool")} onClick={() => setTaskTool(!taskTool)}>
               <StickyNote className="h-4 w-4" aria-hidden />
@@ -424,11 +654,41 @@ export function SchemeBoard({
         </ToolButton>
       </div>
 
-      <Minimap layout={layout} tasks={mergedTasks} cam={cam} vp={vp} onJump={jump} />
-
-      {!mapMode && selectionFiles.length ? (
-        <SelectionComposer project={project} selection={selectionFiles} centroid={selectionCentroid} />
+      {session ? (
+        <BulkActionBar
+          project={project}
+          nodes={selectedNodes}
+          flowsByImpl={flowsByImpl}
+          onRemove={stableClose}
+          onFit={fitSelection}
+          onExit={clearSession}
+        />
       ) : null}
+
+      <Minimap layout={layout} tasks={mergedTasks} cam={cam} vp={vp} onJump={jump} />
     </div>
+    {/* The full-window conversation: the same pane component over the whole
+        viewport, with the live feed and the composer of exactly this
+        conversation. Sibling of the viewport, so its clicks never reach the
+        canvas pan/select handlers. */}
+    {expandedNode ? (
+      <div
+        className="fixed inset-0 z-40 flex flex-col bg-bg p-3"
+        role="dialog"
+        aria-modal="true"
+        aria-label={cleanTitle(expandedNode.file.title, 90)}
+      >
+        <BranchPane
+          file={expandedNode.file}
+          files={files}
+          tasks={expandedNode.tasks}
+          onSelect={overlaySelect}
+          isRoot={expandedNode.isRoot}
+          expanded
+          onToggleExpand={() => setExpanded(null)}
+        />
+      </div>
+    ) : null}
+    </>
   );
 }

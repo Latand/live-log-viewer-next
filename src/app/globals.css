@@ -125,6 +125,19 @@ body {
   }
 }
 
+/* Selection session on the scheme: everything outside the picked set recedes
+   so the ephemeral "group" reads at a glance. Driven by one class on the
+   nodes-layer root plus a data attribute on selected shells — no per-shell
+   prop threading, one NodesLayer render per selection change. */
+.scheme-session [data-scheme-node]:not([data-lasso-selected="true"]) {
+  opacity: 0.35;
+  filter: grayscale(0.7);
+  transition: opacity 0.2s, filter 0.2s;
+}
+.scheme-session [data-lasso-selected="true"] {
+  transition: opacity 0.2s, filter 0.2s;
+}
+
 /* Review-round deck: the front card sits on a shallow 3D stage, past rounds
    peek from under it as card spines receding into the perspective. */
 .deck-3d {
