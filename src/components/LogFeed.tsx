@@ -10,7 +10,8 @@ import type { FileEntry } from "@/lib/types";
 
 import { isAwaitingUser } from "@/hooks/useSwitchboardData";
 
-import { buildFeed, FeedItem } from "./feed/renderers";
+import { buildFeed } from "./feed/parse";
+import { FeedItem } from "./feed/FeedItem";
 import { QuestionCard } from "./feed/QuestionCard";
 import { isSubagent } from "./projectModel";
 import { TaskHeader } from "./TaskHeader";
