@@ -16,8 +16,50 @@ const READINESS_INTERVAL_MS = 200;
 const cliPath = fileURLToPath(import.meta.url);
 const cliDir = dirname(cliPath);
 
-function usage() {
-  return `Використання: agent-log-viewer [опції]
+/* Dependency-free CLI localization: English by default, Ukrainian when
+   LLV_LANG=uk or the locale (LC_ALL/LANG) is a uk_* / uk.* variant. */
+function detectLang() {
+  const explicit = (process.env.LLV_LANG || "").toLowerCase();
+  if (explicit === "uk" || explicit === "en") return explicit;
+  const loc = (process.env.LC_ALL || process.env.LANG || "").toLowerCase();
+  return loc === "uk" || loc.startsWith("uk_") || loc.startsWith("uk.") ? "uk" : "en";
+}
+
+const LANG = detectLang();
+
+const MESSAGES = {
+  en: {
+    usage: () => `Usage: agent-log-viewer [options]
+
+Options:
+  -p, --port <n>       Port for the local server (default ${DEFAULT_PORT})
+  -H, --hostname <h>   Bind address (default ${DEFAULT_HOSTNAME})
+      --tailscale      Access over Tailscale
+      --no-open        Don't open the browser
+      --new-token      Create a new access key
+  -v, --version        Show the version
+  -h, --help           Show this help`,
+    badPort: (value) => `Invalid port: ${value}`,
+    flagNeedsValue: (flag) => `Option ${flag} requires a value.`,
+    hostnameNeedsValue: () => "Option --hostname requires a value.",
+    unknownOption: (arg) => `Unknown option: ${arg}`,
+    noPackageJson: () => "Couldn't find package.json for agent-log-viewer.",
+    readPackageJsonErr: (detail) => `Couldn't read package.json: ${detail}`,
+    readPackageJsonErrGeneric: () => "Couldn't read package.json.",
+    noServer: () => "No standalone server.js or local next found.",
+    portBusy: (port) => `Port ${port} is busy. Try: bunx agent-log-viewer --port ${port + 1}`,
+    serverStartFail: (detail) => `Couldn't start the server: ${detail}`,
+    serverTimeout: (seconds) => `The server didn't respond within ${seconds} seconds.`,
+    bannerOpened: (url) => `  Opened:    ${url}`,
+    bannerReads: () => "  Reads logs from ~/.claude/projects, ~/.codex/sessions.",
+    bannerStop: () => "  Ctrl+C — stop.  --tailscale — access from your phone.",
+    tsLinkWarn: () => "  The link contains an access key — don't forward it to others.",
+    tsCookie: () => "  After the first open the key is stored in a cookie for 30 days.",
+    nonLocalWarn: () => "Warning: a non-local address exposes the viewer to the network, so access-key mode is forced on.",
+    serverNotReady: () => "Server not ready.",
+  },
+  uk: {
+    usage: () => `Використання: agent-log-viewer [опції]
 
 Опції:
   -p, --port <n>       Порт для локального сервера (типово ${DEFAULT_PORT})
@@ -26,7 +68,32 @@ function usage() {
       --no-open        Не відкривати браузер
       --new-token      Створити новий ключ доступу
   -v, --version        Показати версію
-  -h, --help           Показати довідку`;
+  -h, --help           Показати довідку`,
+    badPort: (value) => `Некоректний порт: ${value}`,
+    flagNeedsValue: (flag) => `Опція ${flag} потребує значення.`,
+    hostnameNeedsValue: () => "Опція --hostname потребує значення.",
+    unknownOption: (arg) => `Невідома опція: ${arg}`,
+    noPackageJson: () => "Не вдалося знайти package.json для agent-log-viewer.",
+    readPackageJsonErr: (detail) => `Не вдалося прочитати package.json: ${detail}`,
+    readPackageJsonErrGeneric: () => "Не вдалося прочитати package.json.",
+    noServer: () => "Не знайдено standalone server.js або локальний next.",
+    portBusy: (port) => `Порт ${port} зайнятий. Спробуйте: bunx agent-log-viewer --port ${port + 1}`,
+    serverStartFail: (detail) => `Не вдалося запустити сервер: ${detail}`,
+    serverTimeout: (seconds) => `Сервер не відповів за ${seconds} секунд.`,
+    bannerOpened: (url) => `  Відкрито:  ${url}`,
+    bannerReads: () => "  Читає логи з ~/.claude/projects, ~/.codex/sessions.",
+    bannerStop: () => "  Ctrl+C — зупинити.  --tailscale — доступ з телефона.",
+    tsLinkWarn: () => "  Посилання містить ключ доступу — не пересилайте його стороннім.",
+    tsCookie: () => "  Після першого відкриття ключ зберігається у cookie на 30 днів.",
+    nonLocalWarn: () => "Увага: нелокальна адреса відкриває viewer для мережі, тому режим ключа доступу увімкнено примусово.",
+    serverNotReady: () => "Сервер не готовий.",
+  },
+};
+
+const m = MESSAGES[LANG];
+
+function usage() {
+  return m.usage();
 }
 
 function fail(message) {
@@ -37,7 +104,7 @@ function fail(message) {
 function parsePort(value) {
   const port = Number(value);
   if (!Number.isInteger(port) || port < 1 || port > 65_535) {
-    fail(`Некоректний порт: ${value}`);
+    fail(m.badPort(value));
   }
   return port;
 }
@@ -45,7 +112,7 @@ function parsePort(value) {
 function requireValue(args, index, flag) {
   const value = args[index + 1];
   if (!value || value.startsWith("-")) {
-    fail(`Опція ${flag} потребує значення.`);
+    fail(m.flagNeedsValue(flag));
   }
   return value;
 }
@@ -76,7 +143,7 @@ function parseArgs(args) {
     } else if (arg.startsWith("--hostname=")) {
       const value = arg.slice("--hostname=".length);
       if (!value) {
-        fail("Опція --hostname потребує значення.");
+        fail(m.hostnameNeedsValue());
       }
       options.hostname = value;
     } else if (arg === "--tailscale") {
@@ -90,7 +157,7 @@ function parseArgs(args) {
     } else if (arg === "-h" || arg === "--help") {
       options.help = true;
     } else {
-      fail(`Невідома опція: ${arg}`);
+      fail(m.unknownOption(arg));
     }
   }
 
@@ -112,7 +179,7 @@ function findPackageRoot(startDir) {
 
     const parentDir = dirname(currentDir);
     if (parentDir === currentDir) {
-      fail("Не вдалося знайти package.json для agent-log-viewer.");
+      fail(m.noPackageJson());
     }
     currentDir = parentDir;
   }
@@ -125,8 +192,8 @@ function readPackageJson(packageRoot) {
   } catch (error) {
     fail(
       error instanceof Error
-        ? `Не вдалося прочитати package.json: ${error.message}`
-        : "Не вдалося прочитати package.json.",
+        ? m.readPackageJsonErr(error.message)
+        : m.readPackageJsonErrGeneric(),
     );
   }
 }
@@ -154,7 +221,7 @@ function resolveServer(packageRoot) {
 
   const nextBin = join(packageRoot, "node_modules", ".bin", "next");
   if (!existsSync(nextBin)) {
-    fail("Не знайдено standalone server.js або локальний next.");
+    fail(m.noServer());
   }
 
   return {
@@ -204,7 +271,7 @@ function startServer(server, options, runtime, tailscaleProcessRef) {
     const text = chunk.toString("utf8");
     if (text.includes("EADDRINUSE")) {
       state.sawAddressInUse = true;
-      console.error(`Порт ${options.port} зайнятий. Спробуйте: bunx agent-log-viewer --port ${options.port + 1}`);
+      console.error(m.portBusy(options.port));
       if (!child.killed) {
         child.kill("SIGTERM");
       }
@@ -215,7 +282,7 @@ function startServer(server, options, runtime, tailscaleProcessRef) {
   });
 
   child.on("error", (error) => {
-    fail(`Не вдалося запустити сервер: ${error.message}`);
+    fail(m.serverStartFail(error.message));
   });
 
   child.on("exit", async (code, signal) => {
@@ -285,7 +352,7 @@ async function waitForReadiness(port) {
     await wait(READINESS_INTERVAL_MS);
   }
 
-  throw new Error(`Сервер не відповів за ${READINESS_TIMEOUT_MS / 1000} секунд.`);
+  throw new Error(m.serverTimeout(READINESS_TIMEOUT_MS / 1000));
 }
 
 function localUrl(options) {
@@ -295,9 +362,9 @@ function localUrl(options) {
 
 function printBanner(version, options) {
   console.log(`  ✳ Live Log Viewer v${version}`);
-  console.log(`  Відкрито:  ${localUrl(options)}`);
-  console.log("  Читає логи з ~/.claude/projects, ~/.codex/sessions.");
-  console.log("  Ctrl+C — зупинити.  --tailscale — доступ з телефона.");
+  console.log(m.bannerOpened(localUrl(options)));
+  console.log(m.bannerReads());
+  console.log(m.bannerStop());
 }
 
 async function printTailscaleBanner(runtime) {
@@ -314,8 +381,8 @@ async function printTailscaleBanner(runtime) {
       resolve();
     });
   });
-  console.log("  Посилання містить ключ доступу — не пересилайте його стороннім.");
-  console.log("  Після першого відкриття ключ зберігається у cookie на 30 днів.");
+  console.log(m.tsLinkWarn());
+  console.log(m.tsCookie());
 }
 
 function openBrowser(url) {
@@ -386,7 +453,7 @@ async function prepareRuntime(options) {
 
   const nonLoopbackBind = !isLoopbackHostname(options.hostname);
   if (nonLoopbackBind) {
-    console.error("Увага: нелокальна адреса відкриває viewer для мережі, тому режим ключа доступу увімкнено примусово.");
+    console.error(m.nonLocalWarn());
   }
 
   if (options.tailscale) {
@@ -436,7 +503,7 @@ async function main() {
   }
 
   if (await portAlreadyResponds(options.port)) {
-    console.error(`Порт ${options.port} зайнятий. Спробуйте: bunx agent-log-viewer --port ${options.port + 1}`);
+    console.error(m.portBusy(options.port));
     process.exit(1);
   }
 
@@ -453,7 +520,7 @@ async function main() {
     await waitForReadiness(options.port);
   } catch (error) {
     await stopAll(serverProcess, tailscaleProcessRef.current);
-    fail(error instanceof Error ? error.message : "Сервер не готовий.");
+    fail(error instanceof Error ? error.message : m.serverNotReady());
   }
 
   if (
