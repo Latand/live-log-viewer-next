@@ -547,4 +547,10 @@ export const en = {
   "tasks.composerToggle": "create a task",
   "tasks.composerToggleTitle": "On — the text becomes a tracked task card assigned to the selection; off — a plain broadcast with no trace",
   "tasks.composerNeedsText": "a task needs text",
+  "tasks.panelTitle": "Tasks",
+  "tasks.panelToggleAria": "Toggle the task panel",
+  "tasks.panelThisProject": "this project",
+  "tasks.panelAll": "all",
+  "tasks.panelEmpty": "no tasks yet — drop one with the board's task tool (N)",
+  "tasks.panelClose": "Close the task panel",
 } satisfies Dictionary;

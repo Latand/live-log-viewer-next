@@ -509,4 +509,10 @@ export const uk: Record<keyof typeof en, Message> = {
   "tasks.composerToggle": "створити задачу",
   "tasks.composerToggleTitle": "Увімкнено — текст стає задачею-карткою з призначеннями на вибір; вимкнено — проста розсилка без сліду",
   "tasks.composerNeedsText": "для задачі потрібен текст",
+  "tasks.panelTitle": "Задачі",
+  "tasks.panelToggleAria": "Показати або сховати панель задач",
+  "tasks.panelThisProject": "цей проєкт",
+  "tasks.panelAll": "всі",
+  "tasks.panelEmpty": "задач поки нема — кинь картку інструментом «задача» (N)",
+  "tasks.panelClose": "Закрити панель задач",
 };

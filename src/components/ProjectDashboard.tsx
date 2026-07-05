@@ -1,6 +1,6 @@
 "use client";
 
-import { Menu } from "lucide-react";
+import { ListTodo, Menu } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { useIsMobile } from "@/hooks/useIsMobile";
@@ -12,6 +12,7 @@ import type { FileEntry } from "@/lib/types";
 import { TaskStrip } from "./BranchPane";
 import { clearDraftStorage, draftSrc, setDraftSrc } from "./DraftAgentPane";
 import { claimedReviewerPaths } from "./flows/flowModel";
+import { TaskPanel } from "./tasks/TaskPanel";
 import { TaskToastHost } from "./tasks/taskToast";
 import { MobileFocusView } from "./mobile/MobileFocusView";
 import { SchemeBoard } from "./scheme/SchemeBoard";
@@ -92,6 +93,7 @@ export function ProjectDashboard({ files, flows, tasks, project, openNonce, arch
   const [prefs, setPrefs] = useState<ColumnPrefs>({ manual: [], hidden: [] });
   const [drafts, setDrafts] = useState<string[]>([]);
   const [highlight, setHighlight] = useState<string | null>(null);
+  const [taskPanelOpen, setTaskPanelOpen] = useState(false);
   /* Mirrors `prefs` synchronously so the missing-nodes effect below can read
      the value the project-switch load just set, even within the same commit
      (state updates from sibling effects are not visible via closure yet). */
@@ -105,6 +107,16 @@ export function ProjectDashboard({ files, flows, tasks, project, openNonce, arch
     setDrafts(loadDrafts(project));
     /* eslint-enable react-hooks/set-state-in-effect */
   }, [project, openNonce]);
+  useEffect(() => {
+    /* eslint-disable-next-line react-hooks/set-state-in-effect */
+    setTaskPanelOpen(localStorage.getItem("llvTaskPanel") === "1");
+  }, []);
+  const toggleTaskPanel = () => {
+    setTaskPanelOpen((open) => {
+      localStorage.setItem("llvTaskPanel", open ? "0" : "1");
+      return !open;
+    });
+  };
   useEffect(
     () => () => {
       if (highlightTimer.current) window.clearTimeout(highlightTimer.current);
@@ -176,6 +188,24 @@ export function ProjectDashboard({ files, flows, tasks, project, openNonce, arch
     pendingFocusRef.current = null;
     flashNode(pending);
   });
+
+  /* A task-panel row from another project switches the dashboard first; the
+     glide target waits in sessionStorage until this project has the task. */
+  useEffect(() => {
+    const pending = sessionStorage.getItem("llvTaskFocus");
+    if (!pending || !projectTasks.some((task) => task.id === pending)) return;
+    sessionStorage.removeItem("llvTaskFocus");
+    flashNode("task::" + pending);
+  });
+
+  const openTask = (task: BoardTask) => {
+    if (task.project !== project) {
+      sessionStorage.setItem("llvTaskFocus", task.id);
+      gotoProject(task.project);
+      return;
+    }
+    flashNode("task::" + task.id);
+  };
 
   const persistDrafts = (next: string[]) => {
     setDrafts(next);
@@ -338,6 +368,24 @@ export function ProjectDashboard({ files, flows, tasks, project, openNonce, arch
         >
           <span className="text-[13px] leading-none text-accent">+</span> {t("dash.agent")}
         </button>
+        {isMobile ? null : (
+          <button
+            type="button"
+            onClick={toggleTaskPanel}
+            aria-pressed={taskPanelOpen}
+            aria-label={t("tasks.panelToggleAria")}
+            className={`flex shrink-0 items-center gap-1 rounded-[8px] border px-2.5 py-1 text-[11.5px] font-bold shadow-card focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+              taskPanelOpen ? "border-accent/45 bg-accent/10 text-accent" : "border-line bg-panel text-ink hover:border-accent/45 hover:text-accent"
+            }`}
+          >
+            <ListTodo className="h-3.5 w-3.5" aria-hidden /> {t("tasks.panelTitle")}
+            {projectTasks.filter((task) => task.status !== "done").length ? (
+              <span className="rounded-full bg-accent/10 px-1.5 text-[10px] font-bold text-accent">
+                {projectTasks.filter((task) => task.status !== "done").length}
+              </span>
+            ) : null}
+          </button>
+        )}
       </div>
 
       {dockedTasks.length ? (
@@ -353,8 +401,8 @@ export function ProjectDashboard({ files, flows, tasks, project, openNonce, arch
         </div>
       ) : null}
 
-      {hasNodes ? (
-        isMobile ? (
+      {isMobile ? (
+        hasNodes ? (
           <MobileFocusView
             project={project}
             groups={schemeGroups}
@@ -370,31 +418,47 @@ export function ProjectDashboard({ files, flows, tasks, project, openNonce, arch
             onDraftSpawned={draftSpawned}
             onHandoff={addHandoffDraft}
           />
+        ) : projectFiles.length ? (
+          <QuietFileList files={projectFiles} onOpen={openSwitchboardFile} />
         ) : (
-          <SchemeBoard
-            project={project}
-            groups={schemeGroups}
-            manual={manualNodes}
-            files={files}
-            flows={flows}
-            tasks={projectTasks}
-            drafts={drafts}
-            focus={highlight}
-            onSelect={openSwitchboardFile}
-            onClose={closeNode}
-            onDraftClose={removeDraft}
-            onDraftSpawned={draftSpawned}
-            onHandoff={addHandoffDraft}
-          />
-        )
-      ) : projectFiles.length ? (
-        <QuietFileList files={projectFiles} onOpen={openSwitchboardFile} />
-      ) : (
-        <div className="flex flex-1 items-center justify-center px-4 py-5 text-center">
-          <div>
-            <div className="text-[13.5px] font-semibold text-dim">{t("dash.emptyTitle")}</div>
-            <div className="mt-0.5 text-[12px] text-dim">{t("dash.emptyHint")}</div>
+          <div className="flex flex-1 items-center justify-center px-4 py-5 text-center">
+            <div>
+              <div className="text-[13.5px] font-semibold text-dim">{t("dash.emptyTitle")}</div>
+              <div className="mt-0.5 text-[12px] text-dim">{t("dash.emptyHint")}</div>
+            </div>
           </div>
+        )
+      ) : (
+        <div className="flex min-h-0 min-w-0 flex-1">
+          <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
+            {hasNodes ? (
+              <SchemeBoard
+                project={project}
+                groups={schemeGroups}
+                manual={manualNodes}
+                files={files}
+                flows={flows}
+                tasks={projectTasks}
+                drafts={drafts}
+                focus={highlight}
+                onSelect={openSwitchboardFile}
+                onClose={closeNode}
+                onDraftClose={removeDraft}
+                onDraftSpawned={draftSpawned}
+                onHandoff={addHandoffDraft}
+              />
+            ) : projectFiles.length ? (
+              <QuietFileList files={projectFiles} onOpen={openSwitchboardFile} />
+            ) : (
+              <div className="flex flex-1 items-center justify-center px-4 py-5 text-center">
+                <div>
+                  <div className="text-[13.5px] font-semibold text-dim">{t("dash.emptyTitle")}</div>
+                  <div className="mt-0.5 text-[12px] text-dim">{t("dash.emptyHint")}</div>
+                </div>
+              </div>
+            )}
+          </div>
+          {taskPanelOpen ? <TaskPanel tasks={tasks} project={project} onOpenTask={openTask} onClose={toggleTaskPanel} /> : null}
         </div>
       )}
 
