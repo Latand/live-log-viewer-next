@@ -584,7 +584,7 @@ export const NodesLayer = memo(function NodesLayer({
   interactive: boolean;
   /** Map mode: identity cards instead of live panes (no feeds, no polling). */
   lite: boolean;
-  selected: string | null;
+  selected: ReadonlySet<string>;
   focus: string | null;
   flowsByImpl: Map<string, Flow>;
   deckFocus: DeckFocus | null;
@@ -609,14 +609,14 @@ export const NodesLayer = memo(function NodesLayer({
       )}
       {layout.drafts.map((draft) =>
         lite ? (
-          <LiteDraftShell key={draft.key} draft={draft} ringed={selected === draft.key || focus === draft.key} />
+          <LiteDraftShell key={draft.key} draft={draft} ringed={selected.has(draft.key) || focus === draft.key} />
         ) : (
           <DraftShell
             key={draft.key}
             draft={draft}
             project={project}
             files={files}
-            ringed={selected === draft.key || focus === draft.key}
+            ringed={selected.has(draft.key) || focus === draft.key}
             onDraftClose={onDraftClose}
             onDraftSpawned={onDraftSpawned}
           />
@@ -627,7 +627,7 @@ export const NodesLayer = memo(function NodesLayer({
           <LiteNodeShell
             key={node.file.path}
             node={node}
-            ringed={selected === node.file.path || focus === node.file.path}
+            ringed={selected.has(node.file.path) || focus === node.file.path}
             flow={flowsByImpl.get(node.file.path) ?? null}
           />
         ) : (
@@ -635,7 +635,7 @@ export const NodesLayer = memo(function NodesLayer({
             key={node.file.path}
             node={node}
             files={files}
-            ringed={selected === node.file.path || focus === node.file.path}
+            ringed={selected.has(node.file.path) || focus === node.file.path}
             flow={flowsByImpl.get(node.file.path) ?? null}
             canFlow={canStartFlow(node.file, flowsByImpl)}
             onSelect={onSelect}

@@ -2,6 +2,8 @@ import type { BoardTask, TaskStatus } from "@/lib/tasks/types";
 
 import type { SchemeRect } from "./layout";
 
+export type { SchemeRect } from "./layout";
+
 /* Task card geometry in world pixels (docs/design/sticky-notes.md). */
 export const TASK_W = 260;
 /** Body height cap; past it the card body scrolls internally. */

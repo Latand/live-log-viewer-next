@@ -1,18 +1,25 @@
 "use client";
 
-import { Hand, Maximize2, Minus, MousePointer2, Plus } from "lucide-react";
+import { Hand, Maximize2, Minus, MousePointer2, Plus, StickyNote } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { Flow } from "@/lib/flows/types";
-import { useLocale } from "@/lib/i18n";
+import { getLocale, translate, useLocale } from "@/lib/i18n";
+import type { BoardTask } from "@/lib/tasks/types";
 import type { FileEntry } from "@/lib/types";
 
 import { flowByImplementer } from "@/components/flows/flowModel";
 import type { BranchGroup } from "@/components/projectModel";
+import { createTask, deleteTask, sendTask, spawnTaskAgent, updateTask } from "@/components/tasks/taskApi";
+import { pushTaskToast, sendSummary } from "@/components/tasks/taskToast";
 
 import { buildSchemeLayout } from "./layout";
 import { Minimap } from "./Minimap";
 import { EdgesLayer, LoopsLayer, MOVE_EASE, NodesLayer, type DeckFocus } from "./nodes";
+import type { TaskCardHandlers } from "./TaskCard";
+import { TaskEdgesLayer } from "./TaskEdgesLayer";
+import { TasksLayer } from "./TasksLayer";
+import { buildTaskEdges, buildTaskTargetIndex, TASK_W, taskRect, type SchemeRect } from "./taskGeometry";
 import { useSchemeCamera } from "./useSchemeCamera";
 
 /* Below this zoom the big node labels fade in over the unreadable panes. */
@@ -24,6 +31,8 @@ interface Props {
   manual: FileEntry[];
   files: FileEntry[];
   flows: Flow[];
+  /** This project's board tasks — sticky cards over the panes. */
+  tasks: BoardTask[];
   /** Ids of not-yet-spawned conversation drafts drawn as full panes. */
   drafts: string[];
   /** Path to glide the camera to and ring briefly (set by openers). */
@@ -84,6 +93,7 @@ export function SchemeBoard({
   manual,
   files,
   flows,
+  tasks,
   drafts,
   focus,
   ring,
@@ -96,7 +106,21 @@ export function SchemeBoard({
 }: Props) {
   const { t } = useLocale();
   const mapMode = Boolean(onNodePick);
-  const [selected, setSelected] = useState<string | null>(null);
+  /* Multi-select: plain click replaces, Shift/Ctrl+click toggles, Esc clears. */
+  const [selected, setSelectedState] = useState<ReadonlySet<string>>(() => new Set<string>());
+  const setSelected = useCallback((key: string | null, toggle = false) => {
+    setSelectedState((prev) => {
+      if (key === null) return prev.size ? new Set<string>() : prev;
+      if (toggle) {
+        const next = new Set(prev);
+        if (next.has(key)) next.delete(key);
+        else next.add(key);
+        return next;
+      }
+      if (prev.size === 1 && prev.has(key)) return prev;
+      return new Set([key]);
+    });
+  }, []);
 
   const layout = useMemo(() => buildSchemeLayout(groups, manual, files, flows, drafts), [groups, manual, files, flows, drafts]);
   const flowsByImpl = useMemo(() => flowByImplementer(flows), [flows]);
@@ -137,11 +161,34 @@ export function SchemeBoard({
   /* The handle renders only when the opener wired a handler (not in map mode). */
   const handoffForNodes = onHandoff ? stableHandoff : undefined;
 
+  /* Tasks created this session but not yet echoed by the poll: overlaid so a
+     fresh card never blinks out between the POST and the refetch. */
+  const [localTasks, setLocalTasks] = useState<BoardTask[]>([]);
+  const [pendingTask, setPendingTask] = useState<{ x: number; y: number } | null>(null);
+  const mergedTasks = useMemo(() => {
+    const have = new Set(tasks.map((task) => task.id));
+    const fresh = localTasks.filter((task) => !have.has(task.id));
+    return fresh.length ? [...tasks, ...fresh] : tasks;
+  }, [tasks, localTasks]);
+  /* Camera-facing rects: focus glides and map taps resolve task keys. */
+  const taskRects = useMemo(
+    () => new Map(mergedTasks.map((task) => ["task::" + task.id, taskRect(task)] as const)),
+    [mergedTasks],
+  );
+  const taskEdges = useMemo(() => buildTaskEdges(mergedTasks, buildTaskTargetIndex(layout)), [mergedTasks, layout]);
+
+  const onPlaceTask = useCallback((wx: number, wy: number) => {
+    setPendingTask({ x: Math.round(wx - TASK_W / 2), y: Math.round(wy - 14) });
+  }, []);
+
   const {
     cam,
     vp,
     viewportRef,
     handLike,
+    taskTool,
+    setTaskTool,
+    centerOn,
     panning,
     glide,
     setMode,
@@ -153,7 +200,89 @@ export function SchemeBoard({
     zoomTo,
     fit,
     jump,
-  } = useSchemeCamera({ project, layout, mapMode, focus, onNodePick, setSelected });
+  } = useSchemeCamera({
+    project,
+    layout,
+    mapMode,
+    focus,
+    onNodePick,
+    setSelected,
+    taskRects,
+    onPlaceTask: mapMode ? undefined : onPlaceTask,
+  });
+
+  /* Latest camera behind a stable ref: card drags divide pointer deltas by
+     cam.z without subscribing the memoized task layer to camera frames. */
+  const camRef = useRef(cam);
+  useEffect(() => {
+    camRef.current = cam;
+  }, [cam]);
+  const filesRef = useRef(files);
+  const selectedRef = useRef(selected);
+  const layoutRef = useRef(layout);
+  useEffect(() => {
+    filesRef.current = files;
+    selectedRef.current = selected;
+    layoutRef.current = layout;
+  });
+
+  const handleSendById = useCallback(async (taskId: string, paths: string[]) => {
+    const res = await sendTask(taskId, paths);
+    if ("error" in res) {
+      pushTaskToast("err", res.error);
+      return;
+    }
+    const summary = sendSummary(res, filesRef.current);
+    pushTaskToast(summary.kind, summary.text);
+  }, []);
+  const retryEdge = useCallback((taskId: string, path: string) => void handleSendById(taskId, [path]), [handleSendById]);
+
+  const taskHandlers = useMemo<TaskCardHandlers>(
+    () => ({
+      patch: async (id, patch) => {
+        const error = await updateTask(id, patch);
+        if (error) pushTaskToast("err", error);
+        return error;
+      },
+      remove: (id) => {
+        void deleteTask(id).then((error) => {
+          if (error) pushTaskToast("err", error);
+        });
+      },
+      send: (task, paths) => void handleSendById(task.id, paths),
+      spawn: async (task, engine, cwd) => {
+        const res = await spawnTaskAgent(task.id, { engine, cwd });
+        if ("error" in res) return res.error;
+        pushTaskToast("ok", translate(getLocale(), "tasks.spawnOk", { target: res.target }));
+        return null;
+      },
+      center: (rect: SchemeRect) => centerOn(rect, 0.75),
+      /* Conversation nodes only: stacks, decks and drafts in the selection
+         are not send targets. */
+      selectionPaths: () => {
+        const nodePaths = new Set(layoutRef.current.nodes.map((node) => node.file.path));
+        return [...selectedRef.current].filter((key) => nodePaths.has(key));
+      },
+    }),
+    [handleSendById, centerOn],
+  );
+
+  const handleCreate = useCallback(
+    (text: string) => {
+      const pos = pendingTask;
+      if (!pos) return;
+      void createTask({ project, text, pos }).then((res) => {
+        if ("error" in res) {
+          pushTaskToast("err", res.error);
+          return;
+        }
+        setLocalTasks((prev) => [...prev, res.task]);
+        setPendingTask(null);
+      });
+    },
+    [project, pendingTask],
+  );
+  const cancelCreate = useCallback(() => setPendingTask(null), []);
 
   const tile = 24 * cam.z;
 
@@ -161,7 +290,7 @@ export function SchemeBoard({
     <div
       ref={viewportRef}
       className={`relative min-h-0 flex-1 overflow-hidden ${
-        panning ? "cursor-grabbing select-none" : handLike ? "cursor-grab" : ""
+        panning ? "cursor-grabbing select-none" : taskTool ? "cursor-crosshair" : handLike ? "cursor-grab" : ""
       } ${handLike ? "touch-none" : ""}`}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
@@ -217,16 +346,31 @@ export function SchemeBoard({
           onDraftSpawned={stableDraftSpawned}
           onHandoff={handoffForNodes}
         />
+        <TaskEdgesLayer edges={taskEdges} width={layout.width} height={layout.height} onRetry={retryEdge} />
+        <TasksLayer
+          tasks={mergedTasks}
+          files={files}
+          interactive={!handLike}
+          lite={mapMode}
+          camRef={camRef}
+          handlers={taskHandlers}
+          pending={pendingTask}
+          onCreate={handleCreate}
+          onCreateCancel={cancelCreate}
+        />
       </div>
 
       <div data-scheme-ui className="absolute left-3 top-3 z-40 flex items-center gap-1 rounded-[10px] border border-line bg-panel/95 p-1 shadow-card">
         {mapMode ? null : (
           <>
-            <ToolButton active={handLike} title={t("scheme.handTool")} onClick={() => setMode("hand")}>
+            <ToolButton active={handLike && !taskTool} title={t("scheme.handTool")} onClick={() => setMode("hand")}>
               <Hand className="h-4 w-4" aria-hidden />
             </ToolButton>
-            <ToolButton active={!handLike} title={t("scheme.selectTool")} onClick={() => setMode("select")}>
+            <ToolButton active={!handLike && !taskTool} title={t("scheme.selectTool")} onClick={() => setMode("select")}>
               <MousePointer2 className="h-4 w-4" aria-hidden />
+            </ToolButton>
+            <ToolButton active={taskTool} title={t("tasks.tool")} onClick={() => setTaskTool(!taskTool)}>
+              <StickyNote className="h-4 w-4" aria-hidden />
             </ToolButton>
             <div className="mx-0.5 h-5 w-px bg-line" aria-hidden />
           </>

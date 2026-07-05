@@ -5,6 +5,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { X } from "@/components/icons";
 import type { Flow } from "@/lib/flows/types";
 import { useLocale } from "@/lib/i18n";
+import type { BoardTask } from "@/lib/tasks/types";
 import type { FileEntry } from "@/lib/types";
 
 import { BranchPane } from "@/components/BranchPane";
@@ -40,6 +41,8 @@ interface Props {
   manual: FileEntry[];
   files: FileEntry[];
   flows: Flow[];
+  /** This project's board tasks: mini-cards on the map, editable in the sheet. */
+  tasks: BoardTask[];
   /** Ids of not-yet-spawned conversation drafts, focusable like nodes. */
   drafts: string[];
   /** Path an opener wants on screen (same signal the scheme camera gets). */
@@ -58,7 +61,7 @@ interface Props {
  * data the scheme draws — nothing on the diagram is unreachable, it is just
  * shown one pane at a time.
  */
-export function MobileFocusView({ project, groups, manual, files, flows, drafts, focus, onSelect, onClose, onDraftClose, onDraftSpawned, onHandoff }: Props) {
+export function MobileFocusView({ project, groups, manual, files, flows, tasks, drafts, focus, onSelect, onClose, onDraftClose, onDraftSpawned, onHandoff }: Props) {
   const { t } = useLocale();
   const [focusPath, setFocusPath] = useState<string | null>(null);
   const [mapOpen, setMapOpen] = useState(false);
@@ -240,6 +243,7 @@ export function MobileFocusView({ project, groups, manual, files, flows, drafts,
             manual={manual}
             files={files}
             flows={flows}
+            tasks={tasks}
             drafts={drafts}
             focus={null}
             ring={resolvedKey}

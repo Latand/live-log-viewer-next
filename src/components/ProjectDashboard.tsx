@@ -6,11 +6,13 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import type { Flow } from "@/lib/flows/types";
 import { useLocale } from "@/lib/i18n";
+import type { BoardTask } from "@/lib/tasks/types";
 import type { FileEntry } from "@/lib/types";
 
 import { TaskStrip } from "./BranchPane";
 import { clearDraftStorage, draftSrc, setDraftSrc } from "./DraftAgentPane";
 import { claimedReviewerPaths } from "./flows/flowModel";
+import { TaskToastHost } from "./tasks/taskToast";
 import { MobileFocusView } from "./mobile/MobileFocusView";
 import { SchemeBoard } from "./scheme/SchemeBoard";
 import { Switchboard } from "./Switchboard";
@@ -26,6 +28,7 @@ const HIGHLIGHT_MS = 1800;
 interface Props {
   files: FileEntry[];
   flows: Flow[];
+  tasks: BoardTask[];
   project: string;
   /** Bumped by Viewer on every openFile so a same-project open re-reads prefs
       even though `project` itself did not change. */
@@ -81,7 +84,7 @@ function gotoProject(project: string) {
   location.hash = "#p=" + encodeURIComponent(project);
 }
 
-export function ProjectDashboard({ files, flows, project, openNonce, archived, onArchive, onUnarchive, onMenu }: Props) {
+export function ProjectDashboard({ files, flows, tasks, project, openNonce, archived, onArchive, onUnarchive, onMenu }: Props) {
   const { t } = useLocale();
   const isMobile = useIsMobile();
   const highlightTimer = useRef<number | null>(null);
@@ -130,6 +133,7 @@ export function ProjectDashboard({ files, flows, project, openNonce, archived, o
     [groups],
   );
   const hiddenSet = useMemo(() => new Set(prefs.hidden), [prefs.hidden]);
+  const projectTasks = useMemo(() => tasks.filter((task) => task.project === project), [tasks, project]);
   const manualNodes = useMemo(() => {
     const byPath = new Map(groupFiles.map((file) => [file.path, file]));
     return prefs.manual
@@ -288,7 +292,7 @@ export function ProjectDashboard({ files, flows, project, openNonce, archived, o
      canvas instead of hanging as lone stub nodes in the middle of it. */
   const dockedTasks = visibleGroups.filter((group) => group.orphanTask).map((group) => group.columns[0]!.file);
   const schemeGroups = visibleGroups.filter((group) => !group.orphanTask);
-  const hasNodes = schemeGroups.length > 0 || manualNodes.length > 0 || drafts.length > 0;
+  const hasNodes = schemeGroups.length > 0 || manualNodes.length > 0 || drafts.length > 0 || projectTasks.length > 0;
   /* Everything the project has on disk, freshest first. Powers the
      delete-project button and the fallback list of an empty scheme —
      transcripts whose tree lives elsewhere (scratchpad one-offs) build no
@@ -357,6 +361,7 @@ export function ProjectDashboard({ files, flows, project, openNonce, archived, o
             manual={manualNodes}
             files={files}
             flows={flows}
+            tasks={projectTasks}
             drafts={drafts}
             focus={highlight}
             onSelect={openSwitchboardFile}
@@ -372,6 +377,7 @@ export function ProjectDashboard({ files, flows, project, openNonce, archived, o
             manual={manualNodes}
             files={files}
             flows={flows}
+            tasks={projectTasks}
             drafts={drafts}
             focus={highlight}
             onSelect={openSwitchboardFile}
@@ -397,6 +403,8 @@ export function ProjectDashboard({ files, flows, project, openNonce, archived, o
       {isMobile ? null : <Switchboard files={files} flows={flows} project={project} onOpenFile={openSwitchboardFile} />}
 
       {residual.length ? <ResidualStrip items={residual} onSelect={openSwitchboardFile} /> : null}
+
+      <TaskToastHost />
     </div>
   );
 }
