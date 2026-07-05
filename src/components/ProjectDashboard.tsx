@@ -195,6 +195,7 @@ export function ProjectDashboard({ files, flows, tasks, project, openNonce, arch
     const pending = sessionStorage.getItem("llvTaskFocus");
     if (!pending || !projectTasks.some((task) => task.id === pending)) return;
     sessionStorage.removeItem("llvTaskFocus");
+    /* eslint-disable-next-line react-hooks/set-state-in-effect */
     flashNode("task::" + pending);
   });
 

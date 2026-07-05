@@ -273,8 +273,6 @@ export const TaskCard = memo(function TaskCard({
   const [pop, setPop] = useState<"send" | "spawn" | null>(null);
   const [armDelete, setArmDelete] = useState(false);
   const editRef = useRef<HTMLTextAreaElement | null>(null);
-  const draftRef = useRef(draft);
-  draftRef.current = draft;
 
   useEffect(() => {
     if (!armDelete) return;
@@ -282,20 +280,19 @@ export const TaskCard = memo(function TaskCard({
     return () => window.clearTimeout(timer);
   }, [armDelete]);
 
-  /* Autosave while typing; blur/Esc commit instantly. */
+  /* Autosave while typing; blur/Esc commit instantly. The effect closes over
+     the latest draft because it re-arms on every draft change. */
   useEffect(() => {
     if (!editing) return;
     const timer = window.setTimeout(() => {
-      const value = draftRef.current;
-      if (value.trim() && value !== task.text) void handlers.patch(task.id, { text: value });
+      if (draft.trim() && draft !== task.text) void handlers.patch(task.id, { text: draft });
     }, AUTOSAVE_MS);
     return () => window.clearTimeout(timer);
   }, [editing, draft, task.id, task.text, handlers]);
 
   const commitEdit = () => {
-    const value = draftRef.current;
     setEditing(false);
-    if (value.trim() && value !== task.text) void handlers.patch(task.id, { text: value });
+    if (draft.trim() && draft !== task.text) void handlers.patch(task.id, { text: draft });
   };
 
   const beginEdit = () => {

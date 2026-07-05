@@ -1,7 +1,7 @@
 "use client";
 
 import { ChevronLeft, Loader2, Send, Trash2 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import { ComposerBar } from "@/components/ComposerBar";
 import { X } from "@/components/icons";
@@ -175,8 +175,6 @@ function TaskDetailView({
   const [checked, setChecked] = useState<ReadonlySet<string>>(() => new Set());
   const [sending, setSending] = useState(false);
   const [armDelete, setArmDelete] = useState(false);
-  const draftRef = useRef(draft);
-  draftRef.current = draft;
 
   useEffect(() => {
     if (!armDelete) return;
@@ -190,10 +188,10 @@ function TaskDetailView({
     onLiveCommit: (spoken) => setDraft((prev) => (prev ? prev.trimEnd() + " " + spoken : spoken)),
   });
 
+  /* Re-created each render, so blur/send always commit the latest draft. */
   const commitText = () => {
-    const value = draftRef.current;
-    if (value.trim() && value !== task.text) {
-      void updateTask(task.id, { text: value }).then((error) => {
+    if (draft.trim() && draft !== task.text) {
+      void updateTask(task.id, { text: draft }).then((error) => {
         if (error) pushTaskToast("err", error);
       });
     }
