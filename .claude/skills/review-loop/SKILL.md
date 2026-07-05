@@ -73,8 +73,11 @@ From an agent:
 - `PATCH /api/flows/<id>` with `{"action": ...}`:
   `pause`, `resume`, `set-mode`, `advance` (manual-mode transitions or force a
   round from `waiting_ready`), `retry-round` (re-run the current round from
-  `needs_decision`), `extend` (+N rounds at the limit), `another-round`,
-  `close`.
+  `needs_decision`), `cancel-round` (stop a running reviewer mid-round; the
+  flow lands in `needs_decision`), `extend` (+N rounds at the limit),
+  `another-round`, `close`. `advance` and `retry-round` take an optional
+  `note` string delivered to the next reviewer as the round's ready note —
+  use it to steer a re-review after cancelling.
 - Round artifacts: `~/.claude/viewer-state/flows/<flowId>/round-<n>-review.md`
   — first line `VERDICT: APPROVE | REQUEST_CHANGES | COMMENT`, findings below.
 

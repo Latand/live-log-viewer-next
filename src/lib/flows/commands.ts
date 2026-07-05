@@ -1,6 +1,8 @@
 import crypto from "node:crypto";
 
 import { headCwd } from "@/lib/agent/transcript";
+import { livePaneTarget } from "@/lib/delivery";
+import { killPane } from "@/lib/tmux";
 import type { FileEntry } from "@/lib/types";
 
 import { isoNow, lastRound, newRound, sendToImplementer } from "./engine";
@@ -88,6 +90,43 @@ export async function createFlowFromRequest(req: CreateFlowRequest, entries: Fil
   return { flow };
 }
 
+/** Trimmed user note from a PATCH body, or null when absent/blank. */
+function noteFromRequest(req: PatchFlowRequest): string | null {
+  return typeof req.note === "string" && req.note.trim() ? req.note.trim().slice(0, 2000) : null;
+}
+
+/**
+ * Stops the round's reviewer mid-run: the headless child gets killed through
+ * its run registry, a pane reviewer loses its tmux pane. The flow lands in
+ * needs_decision, where retry-round (optionally with a user note for the
+ * next reviewer) or extend/close already exist.
+ */
+export async function cancelRound(id: string): Promise<{ flow?: Flow; error?: string; status?: number }> {
+  const flows = loadFlows();
+  const flow = flows.find((item) => item.id === id);
+  if (!flow) return { error: "flow not found", status: 404 };
+  const round = lastRound(flow);
+  if (flow.state !== "reviewing" || !round) {
+    return { error: "no reviewer is running for this flow", status: 409 };
+  }
+  forgetHeadlessReview(flow.id, round.n);
+  if (flow.reviewerMode === "pane" && round.reviewerPath) {
+    /* Best-effort: the pane may already be gone, or the scanner may not have
+       attributed a pid yet — the cancel still stands either way. */
+    try {
+      const target = await livePaneTarget(round.reviewerPath);
+      if (target !== null) await killPane(target);
+    } catch {
+      /* pane already closed */
+    }
+  }
+  round.error = "cancelled by user";
+  flow.state = "needs_decision";
+  flow.stateDetail = "round cancelled by user";
+  saveFlows(flows);
+  return { flow };
+}
+
 export function patchFlow(id: string, req: PatchFlowRequest): { flow?: Flow; error?: string; status?: number } {
   const flows = loadFlows();
   const flow = flows.find((item) => item.id === id);
@@ -110,7 +149,7 @@ export function patchFlow(id: string, req: PatchFlowRequest): { flow?: Flow; err
     flow.mode = req.mode;
   } else if (req.action === "advance") {
     if (flow.state === "waiting_ready") {
-      flow.rounds.push(newRound(flow, "button", null));
+      flow.rounds.push(newRound(flow, "button", noteFromRequest(req)));
       flow.state = flow.mode === "manual" ? "spawn_pending" : "spawning";
     } else if (flow.state === "spawn_pending") {
       flow.state = "spawning";
@@ -129,6 +168,8 @@ export function patchFlow(id: string, req: PatchFlowRequest): { flow?: Flow; err
       findingsPath: null,
       verdict: null,
       findingsCount: null,
+      /* A user note travels to the fresh reviewer as the round's ready note. */
+      readyNote: noteFromRequest(req) ?? round.readyNote,
       startedAt: isoNow(),
       spawnStartedAt: null,
       relayStartedAt: null,

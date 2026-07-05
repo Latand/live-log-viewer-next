@@ -90,7 +90,7 @@ export function verdictTone(verdict: ReviewVerdict | null): { color: string; sof
 
 export async function patchFlow(
   id: string,
-  body: { action: FlowAction; mode?: "auto" | "manual"; rounds?: number },
+  body: { action: FlowAction; mode?: "auto" | "manual"; rounds?: number; note?: string },
 ): Promise<string | null> {
   try {
     const res = await fetch(`/api/flows/${encodeURIComponent(id)}`, {

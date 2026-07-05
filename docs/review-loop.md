@@ -52,7 +52,12 @@ Everything the UI does is plain HTTP against the local server:
 - `POST /api/flows` — create: `{implementerPath, preset?, roles?, baseMode,
   mode, reviewerMode, roundLimit}`.
 - `PATCH /api/flows/<id>` — `{action: pause | resume | set-mode | advance |
-  retry-round | extend | another-round | close}`.
+  retry-round | cancel-round | extend | another-round | close}`. `advance`
+  and `retry-round` accept an optional `note` the next reviewer sees as the
+  round's ready note; `cancel-round` stops a running reviewer (kills the
+  headless process or the reviewer pane) and parks the round in
+  `needs_decision`. In the UI these are the «Стоп» button and the note field
+  on the flow strip.
 
 A ready-made Claude Code skill for driving flows agent-side ships with the
 repo at `.claude/skills/review-loop/` — agents working in a clone pick it up

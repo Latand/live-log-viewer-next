@@ -93,6 +93,7 @@ export type FlowAction =
   | "set-mode"
   | "advance"
   | "retry-round"
+  | "cancel-round"
   | "extend"
   | "another-round"
   | "close";
@@ -103,6 +104,9 @@ export type PatchFlowRequest = {
   mode?: "auto" | "manual";
   /** for extend: how many rounds to add (default 1) */
   rounds?: number;
+  /** for advance/retry-round: a user note the next reviewer sees as the
+      round's ready note */
+  note?: string;
 };
 
 /** Per-transcript annotation piggybacked on /api/files entries. */

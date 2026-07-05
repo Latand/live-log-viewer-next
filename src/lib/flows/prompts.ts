@@ -28,7 +28,9 @@ export function reviewerPrompt(flow: Flow, round: Round): string {
     "",
     `Working directory: ${flow.cwd}`,
     `Review scope: git diff ${flow.baseRef}...HEAD plus uncommitted changes in the same working tree.`,
-    round.readyNote ? `Implementer ready note: ${round.readyNote}` : "Implementer ready note: none provided.",
+    /* The note comes from the implementer's REVIEW_READY line or, on a
+       user-triggered round, from the user directly. */
+    round.readyNote ? `Ready note: ${round.readyNote}` : "Ready note: none provided.",
     "",
     "Read-only requirement: inspect files and commands as needed, but do not edit files, write notebooks, commit, stage, or mutate the working tree.",
     "",

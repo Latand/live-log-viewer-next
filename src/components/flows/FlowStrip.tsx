@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 
-import { Pause, Play, RefreshCw, X } from "lucide-react";
+import { Pause, Play, RefreshCw, Square, X } from "lucide-react";
 
 import { type MessageKey, useLocale } from "@/lib/i18n";
 import type { Flow, FlowAction } from "@/lib/flows/types";
@@ -38,19 +38,23 @@ export function FlowStrip({ flow, onFocusRound }: { flow: Flow; onFocusRound?: (
   const { t } = useLocale();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [note, setNote] = useState("");
 
-  const run = async (action: FlowAction, extra?: { mode?: "auto" | "manual"; rounds?: number }) => {
+  const run = async (action: FlowAction, extra?: { mode?: "auto" | "manual"; rounds?: number; note?: string }) => {
     if (busy) return;
     setBusy(true);
     setError(null);
     const fail = await patchFlow(flow.id, { action, ...extra });
     if (fail) setError(fail);
+    else if (extra?.note !== undefined) setNote("");
     setBusy(false);
   };
 
   const pending = PENDING_ACTIONS[flow.state];
   const attention = ATTENTION_STATES.has(flow.state);
   const closed = flow.state === "closed" || flow.state === "approved";
+  /* The note rides along with the action that starts the next round. */
+  const noteTakingAction = flow.state === "waiting_ready" || flow.state === "needs_decision";
 
   return (
     <div
@@ -118,11 +122,33 @@ export function FlowStrip({ flow, onFocusRound }: { flow: Flow; onFocusRound?: (
           </span>
         ) : null}
         {busy ? <RefreshCw className="h-3.5 w-3.5 shrink-0 animate-spin text-dim" aria-hidden /> : null}
+        {noteTakingAction ? (
+          <input
+            className="w-40 shrink-0 rounded-full border border-line bg-bg px-2.5 py-1 text-[10.5px] font-medium text-ink placeholder:text-dim/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            value={note}
+            placeholder={t("flowStrip.notePlaceholder")}
+            title={t("flowStrip.noteTitle")}
+            onChange={(event) => setNote(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && pending) void run(pending.action, { note });
+            }}
+          />
+        ) : null}
+        {flow.state === "reviewing" ? (
+          <button
+            className="inline-flex h-6 shrink-0 items-center gap-1 rounded-full border border-err/40 bg-[#fbeaea] px-2.5 text-[10.5px] font-bold text-err hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40"
+            disabled={busy}
+            title={t("flowStrip.stopReviewerTitle")}
+            onClick={() => void run("cancel-round")}
+          >
+            <Square className="h-3 w-3" aria-hidden /> {t("flowStrip.stopReviewer")}
+          </button>
+        ) : null}
         {pending ? (
           <button
             className="shrink-0 rounded-full border border-accent bg-accent px-3 py-1 text-[11px] font-bold text-white hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 disabled:opacity-40"
             disabled={busy}
-            onClick={() => void run(pending.action)}
+            onClick={() => void run(pending.action, noteTakingAction ? { note } : undefined)}
           >
             {t(pending.labelKey)}
           </button>
