@@ -6,6 +6,8 @@
  * was judged ready, gated or blocked instead of a bare boolean.
  */
 
+import type { WaitingMenu, WaitingMenuOption, WaitingMenuTab } from "./types";
+
 /** Composer prompt characters of the two CLIs (claude «❯», codex «›»). */
 export const COMPOSER_PROMPT = /^\s*[❯›]/;
 
@@ -109,6 +111,96 @@ export function detectBlockingGate(screen: string): BlockingGate | null {
    open their row, while prose in a response ("…віддає 200. Онови…") puts
    digit-dot mid-line and must not read as a menu. */
 export const NUMBERED_MENU = /^\s*❯?\s*\d+\.\s+\S/m;
+
+const MENU_HINT = /Enter to (select|confirm|submit)/;
+const MENU_SEPARATOR = /^\s*[─━—]{6,}\s*$/;
+const MENU_TAB_ROW = /[☐☑✔☒]/;
+const MENU_OPTION = /^\s*(❯\s*)?(\d{1,2})\.\s+(\S.*)$/;
+const RECOMMENDED_SUFFIX = /\s*\(Recommended\)\s*$/i;
+
+/**
+ * Structured read of a live select dialog (AskUserQuestion, plan approval and
+ * friends): a question paragraph, numbered options with indented description
+ * lines and an «Enter to select» hint. While the dialog is open the transcript
+ * holds nothing — newer Claude Code flushes the assistant tool_use record only
+ * after the tool resolves — so the screen is the only source the viewer can
+ * build answer buttons from.
+ */
+export function parseScreenMenu(screen: string): WaitingMenu | null {
+  const lines = screen.split("\n").map((line) => line.replace(/\s+$/, ""));
+  let hintIdx = -1;
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    if (MENU_HINT.test(lines[i] ?? "")) {
+      hintIdx = i;
+      break;
+    }
+  }
+  if (hintIdx === -1) return null;
+
+  /* First option row: the last «1.» line above the hint. Only the block
+     between the two is read — the reply above often ends with its own
+     numbered list and must never leak into the menu. */
+  let firstIdx = -1;
+  for (let i = hintIdx - 1; i >= Math.max(0, hintIdx - 40); i -= 1) {
+    const match = MENU_OPTION.exec(lines[i] ?? "");
+    if (match && Number(match[2]) === 1) {
+      firstIdx = i;
+      break;
+    }
+  }
+  if (firstIdx === -1) return null;
+
+  const options: WaitingMenuOption[] = [];
+  for (let i = firstIdx; i < hintIdx; i += 1) {
+    const line = lines[i] ?? "";
+    if (!line.trim() || MENU_SEPARATOR.test(line)) continue;
+    const match = MENU_OPTION.exec(line);
+    if (match) {
+      const raw = match[3].trim();
+      const label = raw.replace(RECOMMENDED_SUFFIX, "").trim();
+      options.push({
+        value: Number(match[2]),
+        label: label || raw,
+        description: "",
+        recommended: RECOMMENDED_SUFFIX.test(raw),
+      });
+      continue;
+    }
+    const last = options[options.length - 1];
+    if (last && /^\s{2,}\S/.test(line)) {
+      last.description = last.description ? `${last.description} ${line.trim()}` : line.trim();
+    }
+  }
+  /* Digits answer these menus, so the numbering must be exactly 1..N — a
+     misread here would press the wrong key into a live agent. */
+  if (options.length < 2 || options.some((option, index) => option.value !== index + 1)) return null;
+
+  /* Question paragraph: contiguous non-blank lines right above option 1. */
+  const questionLines: string[] = [];
+  let qEnd = firstIdx - 1;
+  while (qEnd >= 0 && !(lines[qEnd] ?? "").trim()) qEnd -= 1;
+  for (let i = qEnd; i >= 0 && questionLines.length < 8; i -= 1) {
+    const line = lines[i] ?? "";
+    if (!line.trim() || MENU_SEPARATOR.test(line) || MENU_TAB_ROW.test(line) || MENU_OPTION.test(line)) break;
+    questionLines.unshift(line.trim());
+  }
+  const question = questionLines.join(" ").trim();
+  if (!question) return null;
+
+  /* Tab strip of a multi-question dialog: «←  ☐ Build error  ✔ Submit  →». */
+  const tabs: WaitingMenuTab[] = [];
+  let tabIdx = qEnd - questionLines.length;
+  while (tabIdx >= 0 && !(lines[tabIdx] ?? "").trim()) tabIdx -= 1;
+  const tabLine = tabIdx >= 0 ? (lines[tabIdx] ?? "") : "";
+  if (MENU_TAB_ROW.test(tabLine)) {
+    for (const cell of tabLine.replace(/[←→]/g, " ").split(/\s{2,}/)) {
+      const label = cell.replace(/[☐☑✔☒]/g, "").trim();
+      if (label) tabs.push({ label, done: /[☑✔]/.test(cell) });
+    }
+  }
+
+  return { question, tabs, options };
+}
 
 /**
  * Screen-level judgement for a live pane whose transcript went quiet. Used by

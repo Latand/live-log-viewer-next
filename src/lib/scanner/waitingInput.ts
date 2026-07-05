@@ -1,5 +1,5 @@
-import { screenWaitsForInput } from "@/lib/status";
-import { paneScreen, resolveTarget, screenTail } from "@/lib/tmux";
+import { parseScreenMenu, screenWaitsForInput } from "@/lib/status";
+import { paneScreen, resolveTarget } from "@/lib/tmux";
 
 import type { FileEntry, WaitingInput } from "../types";
 
@@ -17,6 +17,13 @@ const probes = new Map<string, ProbeState>();
 
 function looksPromptLike(screen: string): boolean {
   return screenWaitsForInput(screen);
+}
+
+/* Raw fallback body of the card when the dialog didn't parse: the last screen
+   lines with their line breaks kept, instead of a three-line « | » mash. */
+function screenBlock(screen: string): string {
+  const lines = screen.split("\n").map((line) => line.replace(/\s+$/, "")).filter((line) => line.trim());
+  return lines.slice(-10).join("\n").slice(-1200);
 }
 
 export async function waitingInputFor(entry: FileEntry): Promise<WaitingInput | null> {
@@ -43,5 +50,5 @@ export async function waitingInputFor(entry: FileEntry): Promise<WaitingInput | 
   }
   probes.set(entry.path, { ...previous, at: now });
   if (now / 1000 - previous.since < STABLE_MS / 1000) return null;
-  return { since: previous.since, screenTail: screenTail(screen), target };
+  return { since: previous.since, screenTail: screenBlock(screen), target, menu: parseScreenMenu(screen) };
 }

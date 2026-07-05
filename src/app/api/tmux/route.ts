@@ -3,6 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
 import { listFiles } from "@/lib/scanner";
 import { pathAllowed } from "@/lib/scanner/roots";
+import { parseScreenMenu, screenWaitsForInput } from "@/lib/status";
 import {
   buildImagePayload,
   collectImagePayloads,
@@ -11,9 +12,11 @@ import {
   killPane,
   knownLivePids,
   liveResumePane,
+  paneScreen,
   resolveTarget,
   resumeSpecFor,
   sendInterrupt,
+  sendKeys,
   sendText,
   sendToResumedAgent,
 } from "@/lib/tmux";
@@ -87,7 +90,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<SendResponse 
   const rejection = rejectCrossOrigin(req);
   if (rejection) return rejection;
 
-  let body: { pid?: unknown; path?: unknown; text?: unknown; image?: unknown; images?: unknown; action?: unknown };
+  let body: { pid?: unknown; path?: unknown; text?: unknown; image?: unknown; images?: unknown; action?: unknown; key?: unknown; label?: unknown };
   try {
     body = (await req.json()) as {
       pid?: unknown;
@@ -96,6 +99,8 @@ export async function POST(req: NextRequest): Promise<NextResponse<SendResponse 
       image?: unknown;
       images?: unknown;
       action?: unknown;
+      key?: unknown;
+      label?: unknown;
     };
   } catch {
     return NextResponse.json({ error: "некоректний JSON" }, { status: 400 });
@@ -118,6 +123,40 @@ export async function POST(req: NextRequest): Promise<NextResponse<SendResponse 
     }
     try {
       await sendInterrupt(target);
+      return NextResponse.json({ ok: true, target });
+    } catch (error) {
+      return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 500 });
+    }
+  }
+
+  /* A key press into a live dialog the scrape fallback surfaced: the digit of
+     a menu option, or Tab/Enter/Escape for screens the parser cannot read.
+     The pane is re-read right before sending — a dialog that advanced or
+     closed since the client rendered must swallow nothing. */
+  if (body.action === "dialog-key") {
+    if (!filePath || !pathAllowed(filePath)) {
+      return NextResponse.json({ error: "для відповіді потрібен path розмови" }, { status: 400 });
+    }
+    const key = typeof body.key === "string" ? body.key : "";
+    if (!/^([1-9]|Tab|Enter|Escape)$/.test(key)) {
+      return NextResponse.json({ error: "некоректна клавіша" }, { status: 400 });
+    }
+    const target = await livePaneTarget(filePath);
+    if (target === null) {
+      return NextResponse.json({ error: "немає активного пейна агента" }, { status: 409 });
+    }
+    try {
+      const screen = await paneScreen(target);
+      if (!screenWaitsForInput(screen)) {
+        return NextResponse.json({ error: "пейн уже не чекає на відповідь" }, { status: 409 });
+      }
+      if (/^[1-9]$/.test(key)) {
+        const option = parseScreenMenu(screen)?.options.find((item) => String(item.value) === key);
+        if (!option || (typeof body.label === "string" && body.label !== option.label)) {
+          return NextResponse.json({ error: "меню на екрані вже змінилось" }, { status: 409 });
+        }
+      }
+      await sendKeys(target, [key]);
       return NextResponse.json({ ok: true, target });
     } catch (error) {
       return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 500 });

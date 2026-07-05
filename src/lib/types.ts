@@ -125,10 +125,33 @@ export interface PendingQuestion {
   plan?: string;
 }
 
+export interface WaitingMenuOption {
+  /** Digit the TUI expects for this option. */
+  value: number;
+  label: string;
+  description: string;
+  recommended: boolean;
+}
+
+/** One question of a multi-question dialog strip («☐ Build error … ✔ Submit»). */
+export interface WaitingMenuTab {
+  label: string;
+  done: boolean;
+}
+
+/** Select dialog parsed straight off the pane screen — see parseScreenMenu. */
+export interface WaitingMenu {
+  question: string;
+  tabs: WaitingMenuTab[];
+  options: WaitingMenuOption[];
+}
+
 export interface WaitingInput {
   since: number;
   screenTail: string;
   target: string;
+  /** Structured dialog when the screen parsed as one; null keeps the raw tail. */
+  menu: WaitingMenu | null;
 }
 
 /** Response of GET /api/log (forward tail polling and `before` history reads). */

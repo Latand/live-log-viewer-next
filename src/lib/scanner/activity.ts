@@ -40,6 +40,10 @@ export function tailRecords(pathname: string, size: number, nbytes = 131_072) {
 }
 
 function jsonlTurnState(pathname: string, size: number, codex: boolean) {
+  /* Codex rollouts without task lifecycle events (≤ May 2026) fall back to
+     the newest record kind: a final answer newer than all tool activity means
+     the turn is over; tool activity newer than any message means it is open. */
+  let codexFallback: "done" | "busy" | null = null;
   for (const obj of tailRecords(pathname, size).reverse()) {
     if (codex) {
       const payload = recordValue(obj.payload) ?? {};
@@ -47,15 +51,33 @@ function jsonlTurnState(pathname: string, size: number, codex: boolean) {
       if (obj.type === "session_meta" || pt === "token_count" || pt === "reasoning" || pt === null) {
         continue;
       }
-      if (pt === "agent_message" || pt === "task_complete" || pt === "turn_complete") return "done";
-      if (pt === "message") return payload.role === "assistant" ? "done" : "busy";
-      return "busy";
+      /* Turn lifecycle events are the authoritative signal. Codex narrates
+         with interim agent_message records mid-turn (dozens per long turn),
+         so a message alone must never be read as «turn over» — that misread
+         showed working agents as «закінчив хід — чекає відповіді». */
+      if (pt === "task_complete" || pt === "turn_complete" || pt === "turn_aborted") return "done";
+      if (pt === "task_started" || pt === "turn_started" || pt === "user_message") return "busy";
+      if (pt === "agent_message" || (pt === "message" && payload.role === "assistant")) {
+        codexFallback ??= "done";
+        continue;
+      }
+      if (pt === "message") return "busy";
+      /* Function calls, outputs, patch applications: mid-turn work. Only a
+         provisional verdict — an even newer lifecycle event still wins. */
+      codexFallback ??= "busy";
+      continue;
     }
     const t = obj.type;
     if (t === "assistant") {
-      const parts = recordsValue(recordValue(obj.message)?.content);
-      const kinds = parts.map((part) => part.type);
-      if (kinds.includes("tool_use")) return "busy";
+      const message = recordValue(obj.message) ?? {};
+      /* stop_reason is definitive when present: interim narration inside a
+         turn carries "tool_use" even on text-only chunks, and only the real
+         final message ends with end_turn/stop_sequence. */
+      const stop = stringValue(message.stop_reason);
+      if (stop === "end_turn" || stop === "stop_sequence") return "done";
+      if (stop) return "busy";
+      const parts = recordsValue(message.content);
+      if (parts.some((part) => part.type === "tool_use")) return "busy";
       if (parts.some((part) => part.type === "text" && (stringValue(part.text) ?? "").trim())) {
         return "done";
       }
@@ -63,7 +85,7 @@ function jsonlTurnState(pathname: string, size: number, codex: boolean) {
     }
     if (t === "user") return "busy";
   }
-  return null;
+  return codexFallback;
 }
 
 /** Activity plus the machine-readable reason behind the judgement — surfaced

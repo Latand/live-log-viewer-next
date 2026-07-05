@@ -169,7 +169,9 @@ function payloadFor(entry: FileEntry): PushPayload {
   const header =
     entry.pendingQuestion?.kind === "plan"
       ? "план на затвердження"
-      : entry.pendingQuestion?.questions?.[0]?.header || (entry.waitingInput ? "чекає на відповідь" : "питання");
+      : entry.pendingQuestion?.questions?.[0]?.header ||
+        entry.waitingInput?.menu?.question.slice(0, 120) ||
+        (entry.waitingInput ? "чекає на відповідь" : "питання");
   return {
     title: `${entry.title || "Агент"} · ${entry.engine}`,
     body: header,
