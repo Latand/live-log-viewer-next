@@ -6,12 +6,15 @@ import { useMemo } from "react";
 import { useColumns } from "@/hooks/useColumns";
 import { useLocale } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
+import type { Workflow } from "@/lib/workflows/types";
 
 import { buildBranchGroups, buildProjectSummaries, projectKey } from "./projectModel";
 import { activityDot, cleanTitle, engineBadge, fmtAge } from "./utils";
 
 interface Props {
   files: FileEntry[];
+  /** Active workflows: their stamped projects get a card even without files. */
+  workflows: Workflow[];
   /** Shelved projects: their cards stay off the board until unarchived or live again. */
   archivedProjects: ReadonlySet<string>;
   /** Attention clock owned by Viewer — keeps summary badges in step with the queue. */
@@ -22,10 +25,10 @@ interface Props {
   onMenu?: () => void;
 }
 
-export function OverviewBoard({ files, archivedProjects, now, onSelectProject, onSelectFile, onMenu }: Props) {
+export function OverviewBoard({ files, workflows, archivedProjects, now, onSelectProject, onSelectFile, onMenu }: Props) {
   const { t } = useLocale();
   const cols = useColumns();
-  const allSummaries = useMemo(() => buildProjectSummaries(files, now), [files, now]);
+  const allSummaries = useMemo(() => buildProjectSummaries(files, now, workflows), [files, now, workflows]);
   const summaries = useMemo(
     () => allSummaries.filter((summary) => !archivedProjects.has(summary.project)),
     [allSummaries, archivedProjects],

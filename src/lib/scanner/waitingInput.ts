@@ -1,4 +1,4 @@
-import { parseScreenMenu, screenWaitsForInput } from "@/lib/status";
+import { parseScreenMenu, screenAtIdleComposer, screenWaitsForInput } from "@/lib/status";
 import { paneScreen, resolveTarget } from "@/lib/tmux";
 
 import type { FileEntry, WaitingInput } from "../types";
@@ -51,7 +51,11 @@ export async function waitingInputProbe(entry: FileEntry): Promise<WaitingProbe>
   const screen = await paneScreen(target);
   if (!looksPromptLike(screen)) {
     probes.delete(entry.path);
-    return { waiting: null, atComposer: true };
+    /* Only a positively idle composer counts: a quiet busy screen (long
+       command, streamed output, no menu) must keep its stalled verdict, or
+       the turn-open guard downstream (activity, STAGE_DONE detection) loses
+       its meaning. */
+    return { waiting: null, atComposer: screenAtIdleComposer(screen) };
   }
   const previous = probes.get(entry.path);
   if (!previous || previous.screen !== screen) {

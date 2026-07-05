@@ -1,4 +1,5 @@
 import type { FileEntry } from "@/lib/types";
+import type { Workflow } from "@/lib/workflows/types";
 
 import { attentionId } from "./attention";
 
@@ -64,21 +65,42 @@ export interface ProjectSummary {
   smt: number;
 }
 
-export function buildProjectSummaries(files: FileEntry[], now: number = Date.now() / 1000): ProjectSummary[] {
+/* Workflow states whose strip is actively doing work: they light the rail
+   dot the way a live transcript does. */
+const WF_BUSY = new Set<Workflow["state"]>(["provisioning", "implementing", "reviewing", "finishing"]);
+
+export function buildProjectSummaries(
+  files: FileEntry[],
+  now: number = Date.now() / 1000,
+  workflows: Workflow[] = [],
+): ProjectSummary[] {
   const map = new Map<string, ProjectSummary>();
-  for (const file of files) {
-    const key = projectKey(file);
+  const summaryFor = (key: string): ProjectSummary => {
     let summary = map.get(key);
     if (!summary) {
       summary = { project: key, liveCount: 0, attentionCount: 0, conversations: 0, smt: 0 };
       map.set(key, summary);
     }
+    return summary;
+  };
+  for (const file of files) {
+    const summary = summaryFor(projectKey(file));
     if (file.activity === "live") summary.liveCount += 1;
     /* Same membership the attention queue counts (hard-blocked plus in-TTL
        stalled), so the rail badge, the global badge and the title agree. */
     if (attentionId(file, now) !== null) summary.attentionCount += 1;
     if (isConversation(file)) summary.conversations += 1;
     summary.smt = Math.max(summary.smt, file.mtime);
+  }
+  /* Workflows keep their stamped project reachable even before any transcript
+     exists (provisioning, a parked setup): the row must be there for the
+     strip's retry/close controls to be reachable at all. */
+  for (const wf of workflows) {
+    if (wf.state === "closed" || !wf.project) continue;
+    const summary = summaryFor(wf.project);
+    if (WF_BUSY.has(wf.state)) summary.liveCount += 1;
+    if (wf.state === "needs_decision" || wf.state === "paused") summary.attentionCount += 1;
+    summary.smt = Math.max(summary.smt, (Date.parse(wf.createdAt) || 0) / 1000);
   }
   return [...map.values()].sort((a, b) => {
     const al = a.attentionCount > 0;

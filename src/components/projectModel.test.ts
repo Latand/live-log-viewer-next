@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import type { FileEntry } from "@/lib/types";
 
-import { buildBranchGroups, descendantCounts, isConversation, kidsIndex, subtree } from "./projectModel";
+import { buildBranchGroups, buildProjectSummaries, descendantCounts, isConversation, kidsIndex, subtree } from "./projectModel";
 
 function entry(overrides: Partial<FileEntry> & { path: string }): FileEntry {
   return {
@@ -80,5 +80,54 @@ describe("buildBranchGroups", () => {
   test("a compaction-chain predecessor is no conversation root", () => {
     expect(isConversation(entry({ path: "/root" }))).toBe(true);
     expect(isConversation(entry({ path: "/root", parent: "/older" }))).toBe(false);
+  });
+});
+
+describe("buildProjectSummaries with workflows", () => {
+  const wf = (overrides: Partial<import("@/lib/workflows/types").Workflow>) =>
+    ({
+      id: "wf1",
+      name: "demo",
+      task: "t",
+      project: "wf-only-project",
+      repoDir: "/repo",
+      worktreeDir: "/repo-wf-wf1",
+      branch: "wf/t-wf1",
+      baseBranch: "",
+      baseRef: "",
+      template: { name: "demo", stages: [], finish: "pr" },
+      stageRuns: [],
+      stageIndex: 0,
+      flowId: null,
+      fixerPath: null,
+      state: "provisioning",
+      pausedState: null,
+      stateDetail: null,
+      mode: "auto",
+      setupPid: null,
+      srcPath: null,
+      prUrl: null,
+      createdAt: "2026-07-05T00:00:00.000Z",
+      closedAt: null,
+      ...overrides,
+    }) as import("@/lib/workflows/types").Workflow;
+
+  test("a workflow-only project gets a rail row before any transcript exists", () => {
+    const summaries = buildProjectSummaries(TREE, 2_000, [wf({})]);
+    const row = summaries.find((summary) => summary.project === "wf-only-project");
+    expect(row).toBeDefined();
+    /* Provisioning counts as running work; the project sorts like a live one. */
+    expect(row!.liveCount).toBe(1);
+    expect(row!.smt).toBeGreaterThan(0);
+  });
+
+  test("a parked workflow lights the attention badge on its project", () => {
+    const summaries = buildProjectSummaries([], 2_000, [wf({ state: "needs_decision" })]);
+    expect(summaries[0]!.attentionCount).toBe(1);
+    expect(summaries[0]!.liveCount).toBe(0);
+  });
+
+  test("closed workflows leave navigation alone", () => {
+    expect(buildProjectSummaries([], 2_000, [wf({ state: "closed" })])).toHaveLength(0);
   });
 });

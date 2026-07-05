@@ -4,6 +4,7 @@ import { useMemo, useState } from "react";
 
 import { useLocale } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
+import type { Workflow } from "@/lib/workflows/types";
 
 import { AccessQrButton } from "./AccessQrButton";
 import { FlipRow } from "./FlipRow";
@@ -16,6 +17,9 @@ import { fmtAge } from "./utils";
 
 interface Props {
   files: FileEntry[];
+  /** Active workflows: their stamped projects stay listed even while no
+      transcript of theirs exists yet. */
+  workflows: Workflow[];
   /** Shelved projects: pulled out of the main list into the archive section. */
   archivedProjects: ReadonlySet<string>;
   selected: string;
@@ -25,11 +29,11 @@ interface Props {
   onSelect: (project: string) => void;
 }
 
-export function ProjectRail({ files, archivedProjects, selected, now, onSelect }: Props) {
+export function ProjectRail({ files, workflows, archivedProjects, selected, now, onSelect }: Props) {
   const { t } = useLocale();
   const [query, setQuery] = useState("");
   const [archiveOpen, setArchiveOpen] = useState(false);
-  const summaries = useMemo(() => buildProjectSummaries(files, now), [files, now]);
+  const summaries = useMemo(() => buildProjectSummaries(files, now, workflows), [files, now, workflows]);
   const visible = useMemo(() => {
     const q = query.trim().toLowerCase();
     return q ? summaries.filter((summary) => summary.project.toLowerCase().includes(q)) : summaries;

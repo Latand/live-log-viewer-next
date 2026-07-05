@@ -287,11 +287,11 @@ export function Viewer() {
   return (
     <div className="flex h-full">
       {isMobile ? null : (
-        <ProjectRail files={files} archivedProjects={archivedProjects} selected={project} now={clock} onSelect={selectProject} />
+        <ProjectRail files={files} workflows={workflows} archivedProjects={archivedProjects} selected={project} now={clock} onSelect={selectProject} />
       )}
       {isMobile && drawerOpen ? (
         <div className="fixed inset-0 z-50 flex">
-          <ProjectRail files={files} archivedProjects={archivedProjects} selected={project} now={clock} onSelect={selectProject} />
+          <ProjectRail files={files} workflows={workflows} archivedProjects={archivedProjects} selected={project} now={clock} onSelect={selectProject} />
           <button
             type="button"
             className="min-w-0 flex-1 bg-ink/35"
@@ -389,6 +389,7 @@ export function Viewer() {
         {project === OVERVIEW ? (
           <OverviewBoard
             files={files}
+            workflows={workflows}
             archivedProjects={archivedProjects}
             now={clock}
             onSelectProject={selectProject}

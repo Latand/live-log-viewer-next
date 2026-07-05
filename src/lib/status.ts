@@ -217,6 +217,23 @@ export function screenWaitsForInput(screen: string): boolean {
   return NUMBERED_MENU.test(tail) && !READY_MARKERS.test(tail);
 }
 
+/* A running turn keeps the interrupt hint on the status region in both CLIs;
+   its absence is what separates an idle composer from a busy agent whose
+   screen merely lacks a menu. */
+export const BUSY_MARKERS = /esc to interrupt|ctrl\+c to (?:stop|cancel)|Interrupting/i;
+
+/**
+ * Positive idle-composer detection: the composer prompt is drawn, the ready
+ * hints are on the status bar, and no busy/interrupt hint remains. A quiet
+ * screen that merely lacks a menu (a long-running command, streamed output)
+ * matches none of this and must never read as "parked at the prompt".
+ */
+export function screenAtIdleComposer(screen: string): boolean {
+  if (screenWaitsForInput(screen)) return false;
+  const tail = screen.split("\n").slice(-14).join("\n");
+  return composerLine(screen) !== "" && READY_MARKERS.test(tail) && !BUSY_MARKERS.test(tail);
+}
+
 /** Short readable tail of a captured screen, for error messages and logs. */
 export function screenTail(screen: string): string {
   return screen.split("\n").filter((line) => line.trim()).slice(-3).join(" | ").slice(0, 300);
