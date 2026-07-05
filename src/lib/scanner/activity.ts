@@ -2,7 +2,7 @@ import fs from "node:fs";
 
 import type { Activity, RootKey } from "../types";
 import { globalCache } from "./caches";
-import { numberValue, readJson, recordValue, recordsValue, stringValue } from "./json";
+import { numberValue, readJson, recordValue, stringValue } from "./json";
 import { outputHolders, pidAlive } from "./process";
 
 const turnCache = globalCache<[number, string | null]>("turn");
@@ -40,11 +40,15 @@ export function tailRecords(pathname: string, size: number, nbytes = 131_072) {
 }
 
 function jsonlTurnState(pathname: string, size: number, codex: boolean) {
+  return turnStateFromRecords(tailRecords(pathname, size), codex);
+}
+
+export function turnStateFromRecords(records: Record<string, unknown>[], codex: boolean) {
   /* Codex rollouts without task lifecycle events (≤ May 2026) fall back to
      the newest record kind: a final answer newer than all tool activity means
      the turn is over; tool activity newer than any message means it is open. */
   let codexFallback: "done" | "busy" | null = null;
-  for (const obj of tailRecords(pathname, size).reverse()) {
+  for (const obj of [...records].reverse()) {
     if (codex) {
       const payload = recordValue(obj.payload) ?? {};
       const pt = stringValue(payload.type);
@@ -69,19 +73,12 @@ function jsonlTurnState(pathname: string, size: number, codex: boolean) {
     }
     const t = obj.type;
     if (t === "assistant") {
-      const message = recordValue(obj.message) ?? {};
-      /* stop_reason is definitive when present: interim narration inside a
-         turn carries "tool_use" even on text-only chunks, and only the real
-         final message ends with end_turn/stop_sequence. */
-      const stop = stringValue(message.stop_reason);
-      if (stop === "end_turn" || stop === "stop_sequence") return "done";
-      if (stop) return "busy";
-      const parts = recordsValue(message.content);
-      if (parts.some((part) => part.type === "tool_use")) return "busy";
-      if (parts.some((part) => part.type === "text" && (stringValue(part.text) ?? "").trim())) {
-        return "done";
-      }
-      return "busy";
+      /* Only stop_reason ends a Claude turn. Mid-turn narration lands as a
+         text-only record with stop_reason null moments before its tool_use
+         record — reading that window as «done» stamped working subagents
+         with «повернувся з результатом» while they were still writing files. */
+      const stop = stringValue((recordValue(obj.message) ?? {}).stop_reason);
+      return stop === "end_turn" || stop === "stop_sequence" ? "done" : "busy";
     }
     if (t === "user") return "busy";
   }
