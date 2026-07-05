@@ -188,27 +188,32 @@ function TaskDetailView({
     onLiveCommit: (spoken) => setDraft((prev) => (prev ? prev.trimEnd() + " " + spoken : spoken)),
   });
 
-  /* Re-created each render, so blur/send always commit the latest draft. */
-  const commitText = () => {
-    if (draft.trim() && draft !== task.text) {
-      void updateTask(task.id, { text: draft }).then((error) => {
-        if (error) pushTaskToast("err", error);
-      });
-    }
+  /* Re-created each render, so blur/send always commit the latest draft.
+     Returns the PATCH error: deliveries read the persisted text server-side,
+     so they must wait for the save and abort when it fails, or a quick send
+     after editing would deliver the previous body. */
+  const commitText = async (): Promise<string | null> => {
+    if (!draft.trim() || draft === task.text) return null;
+    const error = await updateTask(task.id, { text: draft });
+    if (error) pushTaskToast("err", error);
+    return error;
   };
 
   const send = async () => {
     const targets = [...checked];
     if (!targets.length || sending) return;
     setSending(true);
-    commitText();
-    const sent = await sendTask(task.id, targets);
-    setSending(false);
-    if ("error" in sent) pushTaskToast("err", sent.error);
-    else {
-      const summary = sendSummary(sent, files);
-      pushTaskToast(summary.kind, summary.text);
-      setChecked(new Set());
+    try {
+      if ((await commitText()) !== null) return;
+      const sent = await sendTask(task.id, targets);
+      if ("error" in sent) pushTaskToast("err", sent.error);
+      else {
+        const summary = sendSummary(sent, files);
+        pushTaskToast(summary.kind, summary.text);
+        setChecked(new Set());
+      }
+    } finally {
+      setSending(false);
     }
   };
 
@@ -220,7 +225,7 @@ function TaskDetailView({
           value={dictation.liveText ? (draft ? draft.trimEnd() + " " : "") + dictation.liveText : draft}
           readOnly={Boolean(dictation.liveText)}
           onChange={(event) => setDraft(event.target.value)}
-          onBlur={commitText}
+          onBlur={() => void commitText()}
           rows={Math.min(14, Math.max(4, draft.split("\n").length + 1))}
           aria-label={t("tasks.editAria")}
           maxLength={6000}
@@ -273,13 +278,15 @@ function TaskDetailView({
                     type="button"
                     className="shrink-0 rounded px-1 text-[10px] font-bold text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
                     onClick={() => {
-                      void sendTask(task.id, [assignment.path!]).then((sent) => {
+                      void (async () => {
+                        if ((await commitText()) !== null) return;
+                        const sent = await sendTask(task.id, [assignment.path!]);
                         if ("error" in sent) pushTaskToast("err", sent.error);
                         else {
                           const summary = sendSummary(sent, files);
                           pushTaskToast(summary.kind, summary.text);
                         }
-                      });
+                      })();
                     }}
                   >
                     {t("tasks.retry")}

@@ -560,4 +560,5 @@ export const en = {
   "tasks.sheetAssignments": "assignments",
   "tasks.sheetEmpty": "no tasks yet",
   "tasks.sheetGone": "the task is gone",
+  "tasks.textNotSaved": "the text didn't save — delivery aborted, try again",
 } satisfies Dictionary;

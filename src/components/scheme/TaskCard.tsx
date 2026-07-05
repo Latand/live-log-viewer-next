@@ -281,7 +281,9 @@ export const TaskCard = memo(function TaskCard({
   }, [armDelete]);
 
   /* Autosave while typing; blur/Esc commit instantly. The effect closes over
-     the latest draft because it re-arms on every draft change. */
+     the latest draft because it re-arms on every draft change. Deliveries
+     never race these saves: taskApi tracks in-flight text PATCHes per task
+     and sendTask/spawnTaskAgent wait them out (aborting on failure). */
   useEffect(() => {
     if (!editing) return;
     const timer = window.setTimeout(() => {
