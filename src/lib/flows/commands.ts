@@ -54,7 +54,10 @@ export async function createFlowFromRequest(req: CreateFlowRequest, entries: Fil
   const baseMode = req.baseMode === "merge-base" ? "merge-base" : "head";
   const cwd = headCwd(entry.path);
   if (!cwd) return { error: "не вдалося визначити робочу директорію сесії", status: 409 };
-  const base = resolveBaseRef(cwd, baseMode);
+  const base =
+    typeof req.baseRef === "string" && req.baseRef.trim()
+      ? { ok: true as const, sha: req.baseRef.trim() }
+      : resolveBaseRef(cwd, baseMode);
   if (!base.ok) return { error: base.error, status: 409 };
   const flows = loadFlows();
   const existing = flows.find((flow) => flow.implementerPath === entry.path && flow.closedAt === null && flow.state !== "closed");

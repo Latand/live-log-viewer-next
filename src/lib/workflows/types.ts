@@ -72,6 +72,9 @@ export type Workflow = {
   mode: "auto" | "manual";
   /** OS pid of the detached setup command, persisted across restarts. */
   setupPid?: number | null;
+  /** Transcript of the conversation that launched the workflow, when known;
+      stage 0 gets linked under it as a handoff branch. */
+  srcPath?: string | null;
   prUrl: string | null; // finish=pr result
   createdAt: string;
   closedAt: string | null;

@@ -91,6 +91,10 @@ export type CreateFlowRequest = {
   preset?: string; // preset name; mutually exclusive with roles
   roles?: Record<FlowRoleKey, RoleConfig>;
   baseMode: "head" | "merge-base";
+  /** Explicit review base (a resolved sha). The workflow engine passes the
+      workflow branch start here so every round reviews the whole workflow
+      diff; when absent the base resolves from baseMode in the session cwd. */
+  baseRef?: string;
   mode: "auto" | "manual";
   reviewerMode: "headless" | "pane";
   roundLimit: number;

@@ -92,9 +92,9 @@ function reviewStageOf(value: Partial<ReviewStage>): ReviewStage | null {
 
 export function normalizeStage(value: unknown): WorkflowStage | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  const stage = value as Partial<ImplementStage & ReviewStage>;
-  if (stage.kind === "implement") return implementStageOf(stage);
-  if (stage.kind === "review-loop") return reviewStageOf(stage);
+  const kind = (value as { kind?: unknown }).kind;
+  if (kind === "implement") return implementStageOf(value as Partial<ImplementStage>);
+  if (kind === "review-loop") return reviewStageOf(value as Partial<ReviewStage>);
   return null;
 }
 
@@ -158,6 +158,7 @@ export function loadWorkflows(): Workflow[] {
     ...wf,
     pausedState: wf.pausedState ?? null,
     setupPid: wf.setupPid ?? null,
+    srcPath: wf.srcPath ?? null,
     flowId: wf.flowId ?? null,
     fixerPath: wf.fixerPath ?? null,
     prUrl: wf.prUrl ?? null,
@@ -233,6 +234,7 @@ export function buildWorkflow(input: {
     stateDetail: null,
     mode: input.mode,
     setupPid: null,
+    srcPath: null,
     prUrl: null,
     createdAt: input.now,
     closedAt: null,
