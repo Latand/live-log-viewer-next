@@ -28,6 +28,23 @@ const COMPACT_STEP = 500;
     window shrinks there; «показати раніше» still walks the full history. */
 const TAIL_CAP = typeof window !== "undefined" && window.matchMedia("(pointer: coarse)").matches ? 500 : 2500;
 
+/** How long after a programmatic glue a not-at-bottom scroll event is treated
+    as layout settling (content-visibility estimates, pane resizes) and glued
+    again. User releases are real scrolls that arrive outside this window. */
+const GLUE_SETTLE_MS = 300;
+
+/* Scroll state per transcript, surviving pane remounts: layout reshuffles can
+   unmount a pane (a conversation moves between shell kinds), and a fresh
+   instance used to start at the top as if unread. Glued panes re-glue, and
+   released panes return to the same distance from the tail. */
+const scrollMemory = new Map<string, { magnet: boolean; fromBottom: number }>();
+const SCROLL_MEMORY_CAP = 300;
+
+function rememberScroll(path: string, magnet: boolean, fromBottom: number): void {
+  if (scrollMemory.size > SCROLL_MEMORY_CAP && !scrollMemory.has(path)) scrollMemory.clear();
+  scrollMemory.set(path, { magnet, fromBottom });
+}
+
 /** Animated presence row: the agent of a live transcript is mid-turn right now. */
 function WorkingRow({ icon: Icon, label }: { icon: LucideIcon; label: string }) {
   return (
@@ -59,8 +76,9 @@ interface Props {
 export function LogFeed({ file, files, onSelect, showSvc, lineFilter, onStatus, paused, follow, setFollow, compact = false }: Props) {
   const { locale, t } = useLocale();
   /* The scroll magnet lives per feed instance, so each column remembers its
-     own state across polls: glued to the live tail, or released by the user. */
-  const [magnet, setMagnetState] = useState(follow);
+     own state across polls: glued to the live tail, or released by the user.
+     A remount inherits the transcript's remembered state. */
+  const [magnet, setMagnetState] = useState(() => (file ? (scrollMemory.get(file.path)?.magnet ?? follow) : follow));
   /* Released reader must never lose lines above the viewport: the tail cap
      applies only while the magnet holds the bottom in view anyway. */
   const tail = useLogTail(file, paused, magnet && compact ? TAIL_CAP : 0);
@@ -78,12 +96,15 @@ export function LogFeed({ file, files, onSelect, showSvc, lineFilter, onStatus, 
   const lastLenRef = useRef(0);
   const lastPrependRef = useRef(0);
   const pulseTimer = useRef<number | null>(null);
+  const glueAtRef = useRef(0);
+  const restoredPathRef = useRef<string | null>(null);
 
   const setMagnet = (value: boolean, withPulse = false) => {
     magnetRef.current = value;
     setMagnetState(value);
     setFollow(value);
     if (value) setNewCount(0);
+    if (file) rememberScroll(file.path, value, scrollMemory.get(file.path)?.fromBottom ?? 0);
     if (withPulse) {
       setPulse(true);
       if (pulseTimer.current) window.clearTimeout(pulseTimer.current);
@@ -91,8 +112,28 @@ export function LogFeed({ file, files, onSelect, showSvc, lineFilter, onStatus, 
     }
   };
 
+  /* Programmatic glue: the scroll event it triggers must never read as the
+     user releasing the magnet, so the moment is stamped and the handler
+     treats near-in-time off-bottom positions as layout still settling. */
+  const glue = () => {
+    const el = scroller.current;
+    if (!el) return;
+    glueAtRef.current = Date.now();
+    el.scrollTop = el.scrollHeight;
+  };
+
   // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => setVisibleCount(initialCount), [file?.path, initialCount]);
+  /* Same instance, new transcript: pick up that transcript's remembered state. */
+  useEffect(() => {
+    if (!file) return;
+    const remembered = scrollMemory.get(file.path)?.magnet ?? true;
+    if (remembered !== magnetRef.current) {
+      magnetRef.current = remembered;
+       
+      setMagnetState(remembered);
+    }
+  }, [file?.path]); // eslint-disable-line react-hooks/exhaustive-deps
   /* External Follow toggle (focus header) drives the same magnet. */
   useEffect(() => {
     if (follow !== magnetRef.current) {
@@ -166,12 +207,24 @@ export function LogFeed({ file, files, onSelect, showSvc, lineFilter, onStatus, 
     lastPrependRef.current = tail.prependGen;
     const delta = len - lastLenRef.current;
     lastLenRef.current = len;
+    /* First non-empty render of a released pane after a remount: return to
+       the remembered distance from the tail rather than the top. */
+    if (file && len && restoredPathRef.current !== file.path) {
+      restoredPathRef.current = file.path;
+      const remembered = scrollMemory.get(file.path);
+      if (!magnet && remembered && remembered.fromBottom > 0 && scroller.current) {
+        const el = scroller.current;
+        glueAtRef.current = Date.now();
+        el.scrollTop = Math.max(0, el.scrollHeight - el.clientHeight - remembered.fromBottom);
+        return;
+      }
+    }
     if (magnet) {
-      if (scroller.current) scroller.current.scrollTop = scroller.current.scrollHeight;
+      glue();
     } else if (!prepended && delta > 0) {
       setNewCount((count) => count + delta);
     }
-  }, [feed.items, magnet, tail.prependGen]);
+  }, [feed.items, magnet, tail.prependGen]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /* Height also changes without the item list changing — images decode, the
      working/question rows toggle. Re-glue on any content resize while glued. */
@@ -180,7 +233,7 @@ export function LogFeed({ file, files, onSelect, showSvc, lineFilter, onStatus, 
     const inner = content.current;
     if (!el || !inner) return;
     const observer = new ResizeObserver(() => {
-      if (magnetRef.current) el.scrollTop = el.scrollHeight;
+      if (magnetRef.current) glue();
     });
     observer.observe(inner);
     observer.observe(el);
@@ -204,8 +257,7 @@ export function LogFeed({ file, files, onSelect, showSvc, lineFilter, onStatus, 
         : { icon: Sparkle, label: t("feed.working") };
 
   const jumpToTail = () => {
-    const el = scroller.current;
-    if (el) el.scrollTop = el.scrollHeight;
+    glue();
     setMagnet(true, true);
   };
 
@@ -243,8 +295,19 @@ export function LogFeed({ file, files, onSelect, showSvc, lineFilter, onStatus, 
         onScroll={(event) => {
           const el = event.currentTarget;
           const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 50;
+          const settling = Date.now() - glueAtRef.current < GLUE_SETTLE_MS;
           if (atBottom && !magnetRef.current) setMagnet(true, true);
-          else if (!atBottom && magnetRef.current) setMagnet(false);
+          else if (!atBottom && magnetRef.current) {
+            /* Off-bottom right after a programmatic glue is layout settling
+               (content-visibility estimates, pane resizes during a scheme
+               reshuffle) — hold the magnet and glue again. Real user releases
+               arrive outside the settle window. */
+            if (settling) glue();
+            else setMagnet(false);
+          }
+          if (file && !settling) {
+            rememberScroll(file.path, magnetRef.current, Math.max(0, el.scrollHeight - el.clientHeight - el.scrollTop));
+          }
           if (el.scrollTop < 120 && canRevealOlder && !tail.loadingOlder && !tail.loading) revealOlder();
         }}
       >
