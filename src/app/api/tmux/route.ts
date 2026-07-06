@@ -7,13 +7,11 @@ import {
   interruptConversation,
   killConversation,
   resumeConversation,
-  targetForKnownPid,
   type DeliveryOutcome,
 } from "@/lib/delivery";
 import { allowedKillTarget, consumeKillTarget } from "@/lib/resources";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
-import { pathAllowed } from "@/lib/scanner/roots";
-import { collectImagePayloads, killPane, liveResumePane, panePidOf } from "@/lib/tmux";
+import { collectImagePayloads, killPane, panePidOf, resolveRequestedTmuxTarget } from "@/lib/tmux";
 import type { ApiError } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -44,16 +42,7 @@ export async function GET(req: NextRequest): Promise<NextResponse<TargetResponse
   if (!hasPid && !filePath) {
     return NextResponse.json({ error: "потрібен pid або path" }, { status: 400 });
   }
-  if (hasPid) {
-    const target = await targetForKnownPid(pid);
-    if (target !== "unknown" && target !== null) return NextResponse.json({ target });
-  }
-  /* A finished conversation has no pid, but its resume window may still run. */
-  if (filePath && pathAllowed(filePath)) {
-    const pane = await liveResumePane(filePath);
-    if (pane) return NextResponse.json({ target: pane.display });
-  }
-  return NextResponse.json({ target: null });
+  return NextResponse.json({ target: await resolveRequestedTmuxTarget(hasPid ? pid : null, filePath) });
 }
 
 export async function POST(req: NextRequest): Promise<NextResponse<SendResponse | ApiError>> {
