@@ -2,7 +2,15 @@ import { describe, expect, test } from "bun:test";
 
 import type { FileEntry } from "@/lib/types";
 
-import { buildBranchGroups, buildProjectSummaries, descendantCounts, isConversation, kidsIndex, subtree } from "./projectModel";
+import {
+  buildArchiveBranchGroups,
+  buildBranchGroups,
+  buildProjectSummaries,
+  descendantCounts,
+  isConversation,
+  kidsIndex,
+  subtree,
+} from "./projectModel";
 
 function entry(overrides: Partial<FileEntry> & { path: string }): FileEntry {
   return {
@@ -80,6 +88,26 @@ describe("buildBranchGroups", () => {
   test("a compaction-chain predecessor is no conversation root", () => {
     expect(isConversation(entry({ path: "/root" }))).toBe(true);
     expect(isConversation(entry({ path: "/root", parent: "/older" }))).toBe(false);
+  });
+});
+
+describe("buildArchiveBranchGroups", () => {
+  test("keeps ancestors for a fresh child so the scheme can draw the edge", () => {
+    const oldRoot = entry({ path: "/old-root", mtime: 10 });
+    const freshChild = entry({ path: "/old-root/fresh", parent: "/old-root", kind: "subagent", mtime: 200 });
+    const groups = buildArchiveBranchGroups([oldRoot, freshChild, entry({ path: "/other", mtime: 20 })], "demo", 1);
+
+    expect(groups).toHaveLength(1);
+    expect(groups[0]!.columns.map((column) => column.file.path)).toEqual(["/old-root", "/old-root/fresh"]);
+  });
+
+  test("caps by recent project rows before adding parent closure", () => {
+    const rows = Array.from({ length: 105 }, (_, i) => entry({ path: `/root-${i}`, mtime: i }));
+    const groups = buildArchiveBranchGroups(rows, "demo", 100);
+
+    expect(groups).toHaveLength(100);
+    expect(groups.some((group) => group.key === "/root-0")).toBe(false);
+    expect(groups.some((group) => group.key === "/root-104")).toBe(true);
   });
 });
 
