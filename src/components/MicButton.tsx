@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 
 import { Check, Copy, Loader2, Mic, X } from "@/components/icons";
 import { fmtElapsed, METER_HEIGHT, METER_WIDTH, type UseDictationResult } from "@/hooks/useDictation";
-import { useLocale } from "@/lib/i18n";
+import { translate, useLocale } from "@/lib/i18n";
 
 export interface MicButtonViewProps extends UseDictationResult {
   onText: (text: string) => void;
@@ -27,7 +27,7 @@ interface BackendInfo {
  * is missing opens a key panel with the exact path to drop it into, copyable.
  */
 function BackendMenu({ onClose }: { onClose: () => void }) {
-  const { t } = useLocale();
+  const { locale, t } = useLocale();
   const [info, setInfo] = useState<BackendInfo | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [keyFor, setKeyFor] = useState<BackendId | null>(null);
@@ -43,12 +43,12 @@ function BackendMenu({ onClose }: { onClose: () => void }) {
         if (!cancelled && Array.isArray(json.options)) setInfo(json);
       })
       .catch(() => {
-        if (!cancelled) setError(t("common.serverUnavailable"));
+        if (!cancelled) setError(translate(locale, "common.serverUnavailable"));
       });
     return () => {
       cancelled = true;
     };
-  }, [t]);
+  }, [locale]);
 
   /* Click-away and Escape both dismiss; the menu never outlives the composer. */
   useEffect(() => {
