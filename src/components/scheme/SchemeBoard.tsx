@@ -29,6 +29,11 @@ import { useSchemeCamera } from "./useSchemeCamera";
 
 /* Below this zoom the big node labels fade in over the unreadable panes. */
 const LABEL_Z = 0.45;
+/* Feed-sleep hysteresis around LABEL_Z: panes go dormant a notch below the
+   label threshold and wake a notch above it, so pinching around the boundary
+   never flaps every pane's polling on and off. */
+const DORMANT_ENTER_Z = LABEL_Z * 0.95;
+const DORMANT_EXIT_Z = LABEL_Z * 1.1;
 
 const EMPTY_PATHS: ReadonlySet<string> = new Set();
 
@@ -480,6 +485,17 @@ export function SchemeBoard({
   );
   const cancelCreate = useCallback(() => setPendingTask(null), []);
 
+  /* Far-zoom feed sleep: behind the identity labels the pane content is
+     unreadable, so the live feeds stop polling until zoom comes back. One
+     boolean flip re-renders the memoized nodes layer once per crossing —
+     never per camera frame. */
+  const [dormant, setDormant] = useState(false);
+  useEffect(() => {
+    /* eslint-disable-next-line react-hooks/set-state-in-effect -- hysteresis
+       over a per-frame camera value; same-value writes bail out in React */
+    setDormant((prev) => (prev ? cam.z < DORMANT_EXIT_Z : cam.z < DORMANT_ENTER_Z));
+  }, [cam.z]);
+
   const tile = 24 * cam.z;
 
   return (
@@ -532,6 +548,7 @@ export function SchemeBoard({
           files={files}
           interactive={!handLike && !session}
           lite={mapMode}
+          dormant={dormant}
           selected={selected}
           multi={multi}
           session={session}

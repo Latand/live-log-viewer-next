@@ -85,14 +85,33 @@ interface Props {
       collapse, and pane registries (chime, link arrows) stay with the board
       pane underneath. */
   expanded?: boolean;
+  /** Far-zoom board state: pane content is unreadable behind the identity
+      labels, so feeds and composer polling go to sleep until zoom returns. */
+  dormant?: boolean;
 }
 
-export function BranchPane({ file, files, tasks, onSelect, isRoot, onClose, dragHandle, noComposer, banner, onToggleExpand, expanded }: Props) {
+export function BranchPane({ file, files, tasks, onSelect, isRoot, onClose, dragHandle, noComposer, banner, onToggleExpand, expanded, dormant }: Props) {
   const { t } = useLocale();
   const paneRef = useRef<HTMLElement | null>(null);
   const badge = engineBadge(file);
   const state = paneState(file);
   const tone = PANE_TONES[state];
+  /* Panes outside the viewport stop polling and parsing: the board can hold
+     dozens of live conversations while only a handful fit on screen. The
+     margin pre-wakes panes just beyond the edge so panning never shows a
+     stale card; ancestor overflow clipping is part of the intersection, so
+     a pane translated out of the board viewport counts as off screen. */
+  const [offscreen, setOffscreen] = useState(() => typeof IntersectionObserver !== "undefined");
+  useEffect(() => {
+    const el = paneRef.current;
+    if (!el || typeof IntersectionObserver === "undefined") return;
+    const observer = new IntersectionObserver((entries) => setOffscreen(!entries.some((entry) => entry.isIntersecting)), {
+      rootMargin: "256px",
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+  const feedPaused = Boolean(dormant) || offscreen;
   /* The chime of this conversation pans to wherever this pane sits on screen.
      The overlay pane never registers: the board pane of the same path keeps
      owning both registries, so collapsing leaves them intact. */
@@ -202,7 +221,7 @@ export function BranchPane({ file, files, tasks, onSelect, isRoot, onClose, drag
           <FlipRow className="shrink-0 border-b border-line bg-[#fbfbfd]" enter="fade">
             {tasks.map((task) => (
               <div key={task.path} data-flip-key={task.path}>
-                <TaskStrip file={task} files={files} onSelect={onSelect} />
+                <TaskStrip file={task} files={files} onSelect={onSelect} paused={feedPaused} />
               </div>
             ))}
           </FlipRow>
@@ -214,19 +233,29 @@ export function BranchPane({ file, files, tasks, onSelect, isRoot, onClose, drag
           showSvc={false}
           lineFilter=""
           onStatus={noop}
-          paused={false}
+          paused={feedPaused}
           follow
           setFollow={noop}
           compact
         />
-        {noComposer ? null : <TmuxComposer file={file} />}
+        {noComposer ? null : <TmuxComposer file={file} pollPaused={feedPaused} />}
       </section>
     </div>
   );
 }
 
 /** Collapsed background-task row: glyph, title, PID chip, kill; click expands an inline mini feed. */
-export function TaskStrip({ file, files, onSelect }: { file: FileEntry; files: FileEntry[]; onSelect: (file: FileEntry) => void }) {
+export function TaskStrip({
+  file,
+  files,
+  onSelect,
+  paused = false,
+}: {
+  file: FileEntry;
+  files: FileEntry[];
+  onSelect: (file: FileEntry) => void;
+  paused?: boolean;
+}) {
   const { t } = useLocale();
   const [open, setOpen] = useState(false);
   const title = cleanTitle(file.cmdDesc || file.title, 80);
@@ -256,7 +285,7 @@ export function TaskStrip({ file, files, onSelect }: { file: FileEntry; files: F
             showSvc={false}
             lineFilter=""
             onStatus={noop}
-            paused={false}
+            paused={paused}
             follow
             setFollow={noop}
             compact

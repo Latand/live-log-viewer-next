@@ -83,6 +83,7 @@ export function RoundDeck({
   files,
   onSelect,
   focusRound,
+  dormant = false,
 }: {
   flow: Flow;
   rounds: DeckRound[];
@@ -90,6 +91,8 @@ export function RoundDeck({
   onSelect: (file: FileEntry) => void;
   /** Round chip clicked on the strip; nonce-encoded as `n + fraction` changes. */
   focusRound: number | null;
+  /** Far zoom on the board: the front pane's feed sleeps behind the labels. */
+  dormant?: boolean;
 }) {
   const { t } = useLocale();
   const latest = rounds.length ? rounds[rounds.length - 1]! : null;
@@ -143,6 +146,7 @@ export function RoundDeck({
             tasks={[]}
             onSelect={onSelect}
             isRoot={false}
+            dormant={dormant}
             noComposer={flow.reviewerMode === "headless" || finished}
             banner={
               <div

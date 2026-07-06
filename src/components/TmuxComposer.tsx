@@ -68,9 +68,11 @@ const hhmm = (at: number) =>
  * agent window in the current tmux session with the text as the first prompt.
  * Sent messages stay visible as a queue above the input until dismissed.
  */
-export function TmuxComposer({ file }: { file: FileEntry }) {
+export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; pollPaused?: boolean }) {
   const { t } = useLocale();
-  const target = useTmuxTarget(file.pid, canMessageWithoutPane(file) ? file.path : undefined);
+  /* An off-screen or far-zoom pane skips the pane-resolution poll; the last
+     known target keeps the composer usable the moment it comes back. */
+  const target = useTmuxTarget(file.pid, canMessageWithoutPane(file) ? file.path : undefined, !pollPaused);
   /* Column reshuffles can remount the composer mid-typing; the draft lives in
      sessionStorage so the text survives the remount. */
   const composer = useComposer({

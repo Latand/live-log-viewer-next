@@ -10,11 +10,11 @@ const POLL_MS = 5_000;
  * spawned for its transcript `path`. Returns the `session:window.pane` target
  * string, or null when neither yields a live pane.
  */
-export function useTmuxTarget(pid: number | null, path?: string): string | null {
+export function useTmuxTarget(pid: number | null, path?: string, enabled = true): string | null {
   const [target, setTarget] = useState<string | null>(null);
 
   useEffect(() => {
-    if (pid === null && !path) return;
+    if (!enabled || (pid === null && !path)) return;
     let alive = true;
     const load = async () => {
       try {
@@ -35,7 +35,7 @@ export function useTmuxTarget(pid: number | null, path?: string): string | null 
       alive = false;
       clearInterval(timer);
     };
-  }, [pid, path]);
+  }, [pid, path, enabled]);
 
   return pid === null && !path ? null : target;
 }

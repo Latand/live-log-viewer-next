@@ -413,6 +413,7 @@ function NodeShell({
   ringed,
   marked,
   dimmed,
+  dormant,
   flow,
   canFlow,
   onSelect,
@@ -428,6 +429,8 @@ function NodeShell({
   marked: boolean;
   /** «Show only needs me» attention filter dim. */
   dimmed: boolean;
+  /** Far zoom: pane feeds sleep behind the identity labels. */
+  dormant: boolean;
   /** Active review-loop flow attached to this conversation, if any. */
   flow: Flow | null;
   /** This node may host a new flow (root claude/codex conversation without one). */
@@ -496,6 +499,7 @@ function NodeShell({
           files={files}
           onSelect={onSelect}
           isRoot={node.isRoot}
+          dormant={dormant}
           onClose={() => onClose(node.file.path)}
           onToggleExpand={() => onExpand(node.file.path)}
         />
@@ -580,12 +584,14 @@ function DeckShell({
   files,
   focus,
   dimmed,
+  dormant,
   onSelect,
 }: {
   deck: DeckNode;
   files: FileEntry[];
   focus: DeckFocus | null;
   dimmed: boolean;
+  dormant: boolean;
   onSelect: (file: FileEntry) => void;
 }) {
   const focusRound = focus && focus.flowId === deck.flow.id ? focus.round + focus.nonce / 1000 : null;
@@ -595,7 +601,7 @@ function DeckShell({
       className={`scheme-enter absolute${dimClass(dimmed)}`}
       style={{ transform: `translate(${deck.x}px, ${deck.y}px)`, width: deck.w, height: deck.h, transition: MOVE_TRANSITION }}
     >
-      <RoundDeck flow={deck.flow} rounds={deck.rounds} files={files} onSelect={onSelect} focusRound={focusRound} />
+      <RoundDeck flow={deck.flow} rounds={deck.rounds} files={files} onSelect={onSelect} focusRound={focusRound} dormant={dormant} />
       <RoleTag role="reviewer" active={activeLoopRole(deck.flow) === "reviewer"} />
     </div>
   );
@@ -607,6 +613,7 @@ export const NodesLayer = memo(function NodesLayer({
   files,
   interactive,
   lite,
+  dormant,
   selected,
   multi,
   session,
@@ -628,6 +635,8 @@ export const NodesLayer = memo(function NodesLayer({
   interactive: boolean;
   /** Map mode: identity cards instead of live panes (no feeds, no polling). */
   lite: boolean;
+  /** Far zoom: live panes keep their DOM but stop polling behind the labels. */
+  dormant: boolean;
   selected: string | null;
   /** Selection-session member paths; visuals only change on commit. */
   multi: ReadonlySet<string>;
@@ -666,7 +675,15 @@ export const NodesLayer = memo(function NodesLayer({
         lite ? (
           <LiteDeckShell key={deck.key} deck={deck} dimmed={deckDimmed(deck)} />
         ) : (
-          <DeckShell key={deck.key} deck={deck} files={files} focus={deckFocus} dimmed={deckDimmed(deck)} onSelect={onSelect} />
+          <DeckShell
+            key={deck.key}
+            deck={deck}
+            files={files}
+            focus={deckFocus}
+            dimmed={deckDimmed(deck)}
+            dormant={dormant}
+            onSelect={onSelect}
+          />
         ),
       )}
       {layout.drafts.map((draft) =>
@@ -707,6 +724,7 @@ export const NodesLayer = memo(function NodesLayer({
             ringed={session ? multi.has(node.file.path) : selected === node.file.path || focus === node.file.path}
             marked={session && multi.has(node.file.path)}
             dimmed={attentionPaths !== null && !attentionPaths.has(node.file.path)}
+            dormant={dormant}
             flow={flowsByImpl.get(node.file.path) ?? null}
             canFlow={canStartFlow(node.file, flowsByImpl)}
             onSelect={onSelect}
