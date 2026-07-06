@@ -12,6 +12,12 @@ const DEFAULT_PORT = 8898;
 const DEFAULT_HOSTNAME = "127.0.0.1";
 const READINESS_TIMEOUT_MS = 15_000;
 const READINESS_INTERVAL_MS = 200;
+// Socket timeout for a single readiness probe. The probe hits /api/files,
+// which scans every log under ~/.claude and ~/.codex; with a few hundred
+// conversations that scan takes 250-600ms, well past the 200ms poll cadence.
+// Reusing READINESS_INTERVAL_MS here made every probe abort before the healthy
+// server could answer, so startup always "timed out" and killed its own server.
+const READINESS_PROBE_TIMEOUT_MS = 5_000;
 
 const cliPath = fileURLToPath(import.meta.url);
 const cliDir = dirname(cliPath);
@@ -329,7 +335,7 @@ function probe(url) {
       resolve(false);
     });
 
-    request.setTimeout(READINESS_INTERVAL_MS, () => {
+    request.setTimeout(READINESS_PROBE_TIMEOUT_MS, () => {
       request.destroy();
       resolve(false);
     });
