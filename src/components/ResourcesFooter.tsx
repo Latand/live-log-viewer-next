@@ -50,18 +50,29 @@ function MemoryRow({ label, usedPercent, color, note }: { label: string; usedPer
   );
 }
 
-/** A poll that failed or came back empty keeps the previous numbers on screen
-    (same sticky pattern as LimitsFooter); the caller marks them stale. */
-function stickyResources(previous: ResourcesPayload | null, next: ResourcesPayload): ResourcesPayload {
-  return { system: next.system ?? previous?.system ?? null, sessions: next.sessions };
+/** A poll that failed or lost its system probe keeps the previous numbers on
+    screen (same sticky pattern as LimitsFooter), marked stale from the first
+    poll that had to lean on them. */
+interface ResourcesSnap {
+  data: ResourcesPayload;
+  at: number;
+  staleSince: number | null;
+}
+
+function stickySnap(prev: ResourcesSnap | null, next: ResourcesPayload, at: number): ResourcesSnap {
+  const carriedSystem = next.system === null && (prev?.data.system ?? null) !== null;
+  return {
+    data: { system: next.system ?? prev?.data.system ?? null, sessions: next.sessions },
+    at,
+    staleSince: carriedSystem ? (prev?.staleSince ?? at) : null,
+  };
 }
 
 /** Rail block above LimitsFooter: RAM/swap pressure bars; clicking it opens
     the per-session cleanup list. */
 export function ResourcesFooter() {
   const { t } = useLocale();
-  const [snap, setSnap] = useState<{ data: ResourcesPayload; at: number } | null>(null);
-  const [staleSince, setStaleSince] = useState<number | null>(null);
+  const [snap, setSnap] = useState<ResourcesSnap | null>(null);
   const [open, setOpen] = useState(false);
   const panelRef = useRef<HTMLDivElement>(null);
 
@@ -71,15 +82,15 @@ export function ResourcesFooter() {
   useEffect(() => {
     let alive = true;
     const load = async (fresh = false) => {
+      const at = Date.now() / 1000;
       try {
         const res = await fetch("/api/resources" + (fresh ? "?fresh=1" : ""));
         if (!res.ok) throw new Error(String(res.status));
         const json = (await res.json()) as ResourcesPayload;
         if (!alive) return;
-        setSnap((prev) => ({ data: stickyResources(prev?.data ?? null, json), at: Date.now() / 1000 }));
-        setStaleSince(null);
+        setSnap((prev) => stickySnap(prev, json, at));
       } catch {
-        if (alive) setStaleSince((prev) => prev ?? Date.now() / 1000);
+        if (alive) setSnap((prev) => (prev ? { ...prev, staleSince: prev.staleSince ?? at } : prev));
       }
     };
     loadRef.current = load;
@@ -125,10 +136,10 @@ export function ResourcesFooter() {
         onClick={() => setOpen((value) => !value)}
         className="block w-full px-3.5 pb-2.5 pt-2 text-left hover:bg-bg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
       >
-        {staleSince ? (
+        {snap.staleSince ? (
           <span
             className="absolute right-2 top-2 h-1.5 w-1.5 rounded-full bg-[#d29a2f]"
-            title={t("resources.stale", { stale: fmtAge(staleSince) })}
+            title={t("resources.stale", { stale: fmtAge(snap.staleSince) })}
           />
         ) : null}
         {system ? (
