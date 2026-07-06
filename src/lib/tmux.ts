@@ -23,7 +23,9 @@ import {
 export { READY_MARKERS, screenTail } from "@/lib/status";
 
 const TMUX = "tmux";
-const PANE_MAP_TTL_MS = 5_000;
+/* Outlives the 10 s /api/files poll so the pane map is not rebuilt every
+   request; a post-kill rebuild passes fresh=true to bypass the memo. */
+const PANE_MAP_TTL_MS = 12_000;
 const MAX_ANCESTRY_HOPS = 64;
 
 export interface InboxImagePayload {

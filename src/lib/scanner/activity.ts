@@ -7,7 +7,31 @@ import { outputHolders, pidAlive } from "./process";
 
 const turnCache = globalCache<[number, string | null]>("turn");
 
+/** Shared tail read+parse, keyed by path → [size, nbytes, records]. Within one
+    /api/files scan the per-entry derivations (turn state, model, context, plan,
+    effort, questions) all ask for the same (path, size) tail, so the first pays
+    the 128 KB read and JSON parse and the rest reuse it. Replaced when the file
+    grows. Unlike its siblings this cache holds whole parsed record arrays, so
+    it is bounded: only actively-growing transcripts benefit from it anyway
+    (idle files resolve through the small derived caches and never come back). */
+const tailCache = globalCache<[number, number, Record<string, unknown>[]]>("tail");
+const TAIL_CACHE_CAP = 64;
+
 export function tailRecords(pathname: string, size: number, nbytes = 131_072) {
+  const cached = tailCache.get(pathname);
+  if (cached && cached[0] === size && cached[1] === nbytes) return cached[2].slice();
+  const records = readTail(pathname, size, nbytes);
+  if (tailCache.size >= TAIL_CACHE_CAP && !tailCache.has(pathname)) {
+    const oldest = tailCache.keys().next().value;
+    if (oldest !== undefined) tailCache.delete(oldest);
+  }
+  tailCache.set(pathname, [size, nbytes, records]);
+  /* Hand out a fresh copy every call: consumers reverse() the result in place,
+     which must never reorder the shared cached array under the next consumer. */
+  return records.slice();
+}
+
+function readTail(pathname: string, size: number, nbytes: number): Record<string, unknown>[] {
   let data: string;
   let seek = 0;
   try {

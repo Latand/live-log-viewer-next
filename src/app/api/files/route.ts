@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import { NextResponse } from "next/server";
 
 import { listFiles } from "@/lib/scanner";
@@ -11,7 +13,7 @@ import type { FilesResponse } from "@/lib/types";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-export async function GET(): Promise<NextResponse<FilesResponse>> {
+export async function GET(request: Request): Promise<NextResponse> {
   const files = await listFiles();
   /* Reconciliation runs inside the serialized read-modify-write: the file
      scan above is the slow part, so a task edit landing during it is picked
@@ -23,5 +25,17 @@ export async function GET(): Promise<NextResponse<FilesResponse>> {
     });
     return { tasks: reconciled.dirty ? reconciled.tasks : undefined, result: reconciled.tasks };
   });
-  return NextResponse.json({ files, flows: loadFlows(), workflows: loadWorkflows(), tasks });
+  const body = JSON.stringify({ files, flows: loadFlows(), workflows: loadWorkflows(), tasks } satisfies FilesResponse);
+  /* The client re-polls every 10 s and this ~410 KB payload is usually
+     identical between polls; a strong ETag over the exact bytes lets an
+     unchanged response come back as a bodyless 304. force-dynamic still holds
+     — the body is recomputed every request, only its transfer is skipped. */
+  const etag = `"${createHash("sha1").update(body).digest("hex")}"`;
+  if (request.headers.get("if-none-match") === etag) {
+    return new NextResponse(null, { status: 304, headers: { ETag: etag } });
+  }
+  return new NextResponse(body, {
+    status: 200,
+    headers: { "content-type": "application/json", ETag: etag },
+  });
 }

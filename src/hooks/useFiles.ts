@@ -27,12 +27,18 @@ export function useFiles(): FilesData {
   useEffect(() => {
     let alive = true;
     let lastBody = "";
+    let lastEtag = "";
     const load = async () => {
       try {
-        const res = await fetch("/api/files");
+        const res = await fetch("/api/files", lastEtag ? { headers: { "If-None-Match": lastEtag } } : undefined);
+        /* 304: the server confirms the payload is byte-identical to the last
+           one, so there is nothing to read or re-parse. */
+        if (res.status === 304) return;
+        const etag = res.headers.get("ETag");
         const body = await res.text();
         if (!alive || body === lastBody) return;
         lastBody = body;
+        if (etag) lastEtag = etag;
         const parsed = JSON.parse(body) as FilesResponse | FileEntry[];
         /* The flows rollout changes the payload from a bare array to
            {files, flows}; accept both so client and server can deploy in

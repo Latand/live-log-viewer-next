@@ -4,7 +4,10 @@ import path from "node:path";
 import { procBackend } from "@/lib/proc";
 import { ROOTS } from "./roots";
 
-const HOLDERS_TTL_MS = 5_000;
+/* Outlives the client's 10 s /api/files poll so these memos survive a full
+   poll instead of rebuilding every request; freshness-critical callers (a
+   rebuild right after a kill) pass fresh=true to bypass the memo. */
+const HOLDERS_TTL_MS = 12_000;
 const MAX_PATH_HOLDER_CANDIDATES = 256;
 
 export type AgentEngine = "claude" | "codex";
