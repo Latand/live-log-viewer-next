@@ -21,7 +21,7 @@ import { TaskToastHost } from "./tasks/taskToast";
 import { MobileFocusView } from "./mobile/MobileFocusView";
 import { SchemeBoard } from "./scheme/SchemeBoard";
 import { Switchboard } from "./Switchboard";
-import { buildBranchGroups, collapsedTrees, projectKey, residualItems } from "./projectModel";
+import { buildArchiveBranchGroups, buildBranchGroups, collapsedTrees, projectKey, residualItems } from "./projectModel";
 import { ArchiveRestore } from "./icons";
 import { ArchiveProjectButton, DeleteProjectButton, QuietFileList } from "./ProjectTrash";
 import { SoundToggle } from "./SoundToggle";
@@ -412,6 +412,11 @@ export function ProjectDashboard({
     () => files.filter((file) => projectKey(file) === project).sort((a, b) => b.mtime - a.mtime),
     [files, project],
   );
+  const archiveGroups = useMemo(
+    () => (hasNodes ? [] : buildArchiveBranchGroups(groupFiles.filter((file) => !hiddenSet.has(file.path)), project, 100)),
+    [hasNodes, groupFiles, hiddenSet, project],
+  );
+  const hasArchiveNodes = archiveGroups.length > 0;
 
   return (
     <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
@@ -508,15 +513,15 @@ export function ProjectDashboard({
       ) : null}
 
       {isMobile ? (
-        hasNodes ? (
+        hasNodes || hasArchiveNodes ? (
           <MobileFocusView
             project={project}
-            groups={schemeGroups}
-            manual={schemeManual}
+            groups={hasNodes ? schemeGroups : archiveGroups}
+            manual={hasNodes ? schemeManual : []}
             files={files}
             flows={flows}
-            tasks={projectTasks}
-            drafts={drafts}
+            tasks={hasNodes ? projectTasks : []}
+            drafts={hasNodes ? drafts : []}
             loaded={loaded}
             focus={highlight}
             onSelect={openSwitchboardFile}
@@ -538,15 +543,15 @@ export function ProjectDashboard({
       ) : (
         <div className="flex min-h-0 min-w-0 flex-1">
           <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
-            {hasNodes ? (
+            {hasNodes || hasArchiveNodes ? (
               <SchemeBoard
                 project={project}
-                groups={schemeGroups}
-                manual={schemeManual}
+                groups={hasNodes ? schemeGroups : archiveGroups}
+                manual={hasNodes ? schemeManual : []}
                 files={files}
                 flows={flows}
-                tasks={projectTasks}
-                drafts={drafts}
+                tasks={hasNodes ? projectTasks : []}
+                drafts={hasNodes ? drafts : []}
                 focus={highlight}
                 attentionPaths={attentionPaths}
                 onSelect={openSwitchboardFile}
@@ -587,7 +592,7 @@ export function ProjectDashboard({
           phone the strip, the map and the toast cover its job. */}
       {isMobile ? null : <Switchboard files={files} flows={flows} project={project} loaded={loaded} onOpenFile={openSwitchboardFile} />}
 
-      {residual.length ? <ResidualStrip items={residual} onSelect={openSwitchboardFile} /> : null}
+      {!hasArchiveNodes && residual.length ? <ResidualStrip items={residual} onSelect={openSwitchboardFile} /> : null}
 
       <TaskToastHost />
     </div>

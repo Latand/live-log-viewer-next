@@ -272,6 +272,67 @@ export function buildBranchGroups(files: FileEntry[], project: string): BranchGr
   });
 }
 
+/**
+ * Quiet project history for the canvas fallback: latest project rows plus
+ * ancestor nodes needed to keep their parent arrows intact.
+ */
+export function buildArchiveBranchGroups(files: FileEntry[], project: string, limit = 100): BranchGroup[] {
+  const byPath = new Map(files.map((file) => [file.path, file]));
+  const kids = kidsIndex(files);
+  const selected = new Set(
+    files
+      .filter((file) => projectKey(file) === project)
+      .sort((a, b) => b.mtime - a.mtime || a.path.localeCompare(b.path))
+      .slice(0, limit)
+      .map((file) => file.path),
+  );
+  const keep = new Set<string>();
+  for (const path of selected) {
+    let cur = byPath.get(path) ?? null;
+    const seen = new Set<string>();
+    while (cur && projectKey(cur) === project && !seen.has(cur.path)) {
+      seen.add(cur.path);
+      keep.add(cur.path);
+      cur = cur.parent ? (byPath.get(cur.parent) ?? null) : null;
+    }
+  }
+
+  const roots = new Map<string, FileEntry>();
+  const orphanTasks = new Map<string, FileEntry>();
+  for (const path of keep) {
+    const file = byPath.get(path);
+    if (!file) continue;
+    const root = rootOf(file, byPath);
+    if (projectKey(root) !== project) continue;
+    if (isAuxTask(root)) orphanTasks.set(root.path, root);
+    else roots.set(root.path, root);
+  }
+
+  const groups: BranchGroup[] = [];
+  for (const root of roots.values()) {
+    const descendants = subtree(root, kids)
+      .filter((file) => keep.has(file.path) && projectKey(file) === project)
+      .sort((a, b) => activityBand(a) - activityBand(b) || b.mtime - a.mtime || a.path.localeCompare(b.path));
+    const fullNodes = descendants.filter((file) => !isAuxTask(file) && isChildConversation(file));
+    const fullPaths = new Set([root.path, ...fullNodes.map((file) => file.path)]);
+    const columns: BranchColumn[] = [root, ...fullNodes].map((file) => ({ file, tasks: [] }));
+    const finished = descendants.filter((file) => !fullPaths.has(file.path));
+    const smt = Math.max(root.mtime, ...descendants.map((file) => file.mtime));
+    groups.push({ key: root.path, columns, returnable: [], finished, smt, orphanTask: false });
+  }
+  for (const task of orphanTasks.values()) {
+    groups.push({
+      key: task.path,
+      columns: [{ file: task, tasks: [] }],
+      returnable: [],
+      finished: [],
+      smt: task.mtime,
+      orphanTask: true,
+    });
+  }
+  return groups.sort((a, b) => tick5(b.smt) - tick5(a.smt) || a.key.localeCompare(b.key));
+}
+
 export interface TreeCard {
   root: FileEntry;
   /** All descendants of the root, any activity. */
