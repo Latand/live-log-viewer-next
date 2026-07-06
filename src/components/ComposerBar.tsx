@@ -2,6 +2,7 @@
 
 import { Loader2, Play } from "@/components/icons";
 import type { UseComposerReturn } from "@/hooks/useComposer";
+import { prewarmLiveToken } from "@/hooks/useDictation";
 
 import { Hint } from "./Hint";
 import { ImagePickerButton, ImagePreviewStrip } from "./imageAttachments";
@@ -69,6 +70,9 @@ export function ComposerBar({
         rows={1}
         readOnly={Boolean(dictation.liveText)}
         onChange={(event) => setText(event.target.value)}
+        /* Focusing the composer often precedes a dictation; minting the live
+           token here hides its round-trip from the eventual mic press. */
+        onFocus={prewarmLiveToken}
         onPaste={attachments.handlePaste}
         onKeyDown={(event) => {
           /* Enter sends like the old single-line input; Shift+Enter makes a

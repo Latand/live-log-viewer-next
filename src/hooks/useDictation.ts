@@ -31,6 +31,64 @@ const LIVE_SAMPLE_RATE = 16_000;
 const LIVE_VAD_SILENCE_SECS = "1.2";
 const LIVE_WS_URL = "wss://api.elevenlabs.io/v1/speech-to-text/realtime";
 
+/* Single-use realtime tokens are minted for free, so one can be requested
+   the moment a recording looks likely (composer focus, mic hover) and spent
+   on the actual press — the mint round-trip leaves the tap-to-record path.
+   Module-level on purpose: every composer's hook instance draws from the one
+   pool, and whichever mic is pressed first consumes the warm token. */
+const TOKEN_FRESH_MS = 45_000;
+/* A null mint means "no live mode" (other backend / no key); remembering it
+   briefly keeps hover-driven prewarms from re-asking the server every time. */
+const TOKEN_NULL_MS = 15_000;
+
+let tokenCache: { token: string | null; expiresAt: number } | null = null;
+let tokenInflight: Promise<string | null> | null = null;
+
+/* A non-200 from the token route means live mode is off (other backend, no
+   key) — the caller falls back to batch without surfacing anything. */
+const mintLiveToken = async (): Promise<string | null> => {
+  try {
+    const res = await fetch("/api/transcribe/token", { method: "POST" });
+    if (!res.ok) return null;
+    const json = (await res.json()) as { token?: string };
+    return typeof json.token === "string" && json.token ? json.token : null;
+  } catch {
+    return null;
+  }
+};
+
+/** Mint a live token ahead of the mic press so the press itself only waits
+    for the microphone. Free (auth-only, no audio billed); no-op while a
+    fresh token or an in-flight mint is already there. */
+export function prewarmLiveToken(): void {
+  if (tokenInflight) return;
+  if (tokenCache && tokenCache.expiresAt > Date.now()) return;
+  tokenInflight = mintLiveToken().then((token) => {
+    tokenInflight = null;
+    tokenCache = { token, expiresAt: Date.now() + (token ? TOKEN_FRESH_MS : TOKEN_NULL_MS) };
+    return token;
+  });
+}
+
+/* Consume the prewarmed token (they are single-use, so a real one leaves the
+   cache with its taker); a cached null is left in place — "no live mode" is
+   an answer, not a spendable resource. Cold cache mints inline. */
+const takeLiveToken = async (): Promise<string | null> => {
+  const inflight = tokenInflight;
+  if (inflight) {
+    const token = await inflight;
+    if (token) tokenCache = null;
+    return token;
+  }
+  const cached = tokenCache;
+  if (cached && cached.expiresAt > Date.now()) {
+    if (cached.token) tokenCache = null;
+    return cached.token;
+  }
+  tokenCache = null;
+  return mintLiveToken();
+};
+
 interface LiveSession {
   ws: WebSocket;
   ctx: AudioContext;
@@ -239,19 +297,6 @@ export function useDictation({ onError, onUnclaimedText, onLiveCommit }: UseDict
     }
   };
 
-  /* A non-200 from the token route means live mode is off (other backend, no
-     key) — the caller falls back to batch without surfacing anything. */
-  const fetchLiveToken = async (): Promise<string | null> => {
-    try {
-      const res = await fetch("/api/transcribe/token", { method: "POST" });
-      if (!res.ok) return null;
-      const json = (await res.json()) as { token?: string };
-      return typeof json.token === "string" && json.token ? json.token : null;
-    } catch {
-      return null;
-    }
-  };
-
   const startLive = (stream: MediaStream, token: string): boolean => {
     let ctx: AudioContext;
     try {
@@ -338,16 +383,20 @@ export function useDictation({ onError, onUnclaimedText, onLiveCommit }: UseDict
     if (startingRef.current || recRef.current || liveRef.current) return;
     startingRef.current = true;
     setPhase("starting");
+    discardRef.current = false;
     let stream: MediaStream | null = null;
     let streamOwned = true;
     try {
-      stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1 } });
-      if (!mountedRef.current) return;
-      discardRef.current = false;
-      setLiveText("");
-
-      const token = await fetchLiveToken();
+      /* The token mint needs no stream, so both round-trips overlap and the
+         press only waits for the slower one (usually the mic itself). A
+         prewarmed token makes takeLiveToken resolve instantly. */
+      const [mediaStream, token] = await Promise.all([
+        navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1 } }),
+        takeLiveToken(),
+      ]);
+      stream = mediaStream;
       if (!mountedRef.current || discardRef.current) return;
+      setLiveText("");
 
       const liveStarted = token !== null && startLive(stream, token);
       if (!liveStarted) {

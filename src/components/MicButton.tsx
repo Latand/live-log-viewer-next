@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import { Check, Copy, Loader2, Mic, X } from "@/components/icons";
-import { fmtElapsed, METER_HEIGHT, METER_WIDTH, type UseDictationResult } from "@/hooks/useDictation";
+import { fmtElapsed, METER_HEIGHT, METER_WIDTH, prewarmLiveToken, type UseDictationResult } from "@/hooks/useDictation";
 import { translate, useLocale } from "@/lib/i18n";
 
 export interface MicButtonViewProps extends UseDictationResult {
@@ -245,6 +245,10 @@ export function MicButtonView({ phase, elapsed, canvasRef, start, stop, discard,
         title={phase === "busy" ? t("mic.recognizing") : phase === "starting" ? t("mic.connecting") : t("mic.dictateHint")}
         disabled={phase !== "idle" || busy}
         onClick={handleMain}
+        /* Hover/focus telegraphs an imminent press — mint the live token now
+           so the press itself only waits for the microphone. */
+        onPointerEnter={prewarmLiveToken}
+        onFocus={prewarmLiveToken}
         onContextMenu={(event) => {
           event.preventDefault();
           setMenuOpen((open) => !open);
