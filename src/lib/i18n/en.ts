@@ -496,6 +496,32 @@ export const en = {
   "limits.5h": "5h",
   "limits.week": "Week",
 
+  // ResourcesFooter
+  "resources.ram": "RAM",
+  "resources.swap": "Swap",
+  "resources.free": "{amount} free",
+  "resources.used": "{amount} used",
+  "resources.stale": "resource data is stale: {stale}",
+  "resources.openAria": "Agent sessions and memory",
+  "resources.title": "Agent sessions",
+  "resources.total": "Σ {amount}",
+  "resources.empty": "no agent sessions in tmux",
+  "resources.orphan": "orphan pane",
+  "resources.procs": {
+    one: "{count} process",
+    other: "{count} processes",
+  },
+  "resources.swapShare": "+ {amount} swap",
+  "resources.kill": "Kill",
+  "resources.confirm": "Sure?",
+  "resources.killLiveHint": "the agent is working right now — click to unlock, then confirm",
+  "resources.killHint": "kill the tmux pane with its whole process tree",
+  "resources.bulkLabel": "idle longer than",
+  "resources.bulkKill": "Kill idle",
+  "resources.bulkNone": "nothing has been idle that long",
+  "resources.hoursN": "{n} h",
+  "resources.close": "Close",
+
   // useSwitchboardData / status lines
   "status.awaitingPlan": "awaiting plan approval",
   "status.awaitingAnswer": "awaiting an answer to a question",

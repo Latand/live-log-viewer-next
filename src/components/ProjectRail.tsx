@@ -13,6 +13,7 @@ import { LanguageToggle } from "./LanguageToggle";
 import { LimitsFooter } from "./LimitsFooter";
 import { buildProjectSummaries, OVERVIEW } from "./projectModel";
 import { PushBell } from "./PushBell";
+import { ResourcesFooter } from "./ResourcesFooter";
 import { fmtAge } from "./utils";
 
 interface Props {
@@ -133,6 +134,7 @@ export function ProjectRail({ files, workflows, archivedProjects, selected, now,
           <div className="px-3 py-4 text-center text-[12px] text-dim">{t("common.nothingFound")}</div>
         ) : null}
       </nav>
+      <ResourcesFooter />
       <LimitsFooter />
     </aside>
   );
