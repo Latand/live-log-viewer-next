@@ -51,6 +51,9 @@ interface Props {
   onUnarchive: (project: string) => void;
   /** Mobile shell: the rail hides behind a drawer, this opens it. */
   onMenu?: () => void;
+  /** Mobile shell: the attention badge lives in the header row instead of the
+      fixed corner, so it never covers the header's own controls. */
+  attention?: React.ReactNode;
 }
 
 /** Manual additions and removals of scheme nodes, persisted per project. */
@@ -109,6 +112,7 @@ export function ProjectDashboard({
   onArchive,
   onUnarchive,
   onMenu,
+  attention,
 }: Props) {
   const { t } = useLocale();
   const isMobile = useIsMobile();
@@ -421,7 +425,11 @@ export function ProjectDashboard({
           </button>
         ) : null}
         <h1 className="truncate text-[13.5px] font-bold">{project}</h1>
-        <span className="truncate text-[11.5px] text-dim">{statusBits.length ? statusBits.join(" · ") : t("common.nothingRunning")}</span>
+        {/* The phone header hosts the create buttons and the attention badge;
+            the status summary is the first thing to give up its room. */}
+        {isMobile ? null : (
+          <span className="truncate text-[11.5px] text-dim">{statusBits.length ? statusBits.join(" · ") : t("common.nothingRunning")}</span>
+        )}
         <SoundToggle />
         {archived ? (
           <button
@@ -432,18 +440,22 @@ export function ProjectDashboard({
             <ArchiveRestore className="h-3 w-3" aria-hidden /> {t("dash.unarchive")}
           </button>
         ) : (
-          <ArchiveProjectButton files={projectFiles} onArchive={() => onArchive(project)} />
+          <ArchiveProjectButton files={projectFiles} onArchive={() => onArchive(project)} compact={isMobile} />
         )}
         <DeleteProjectButton files={projectFiles} />
         {isMobile ? (
-          <button
-            type="button"
-            onClick={addDraft}
-            aria-label={t("dash.newConvo")}
-            className="ml-auto flex shrink-0 items-center gap-1 rounded-[8px] border border-line bg-panel px-2.5 py-1 text-[11.5px] font-bold text-ink shadow-card hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
-          >
-            <span className="text-[13px] leading-none text-accent">+</span> {t("dash.agent")}
-          </button>
+          <>
+            <span className="ml-auto" aria-hidden />
+            {attention}
+            <button
+              type="button"
+              onClick={addDraft}
+              aria-label={t("dash.newConvo")}
+              className="flex shrink-0 items-center gap-1 rounded-[8px] border border-line bg-panel px-2.5 py-1 text-[11.5px] font-bold text-ink shadow-card hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            >
+              <span className="text-[13px] leading-none text-accent">+</span> {t("dash.agent")}
+            </button>
+          </>
         ) : (
           <button
             type="button"

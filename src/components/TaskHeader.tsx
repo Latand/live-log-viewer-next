@@ -39,7 +39,17 @@ export function ProcessStatusChip({ file }: { file: FileEntry }) {
   return null;
 }
 
-export function ProcessStatusControls({ file, compact = false }: { file: FileEntry; compact?: boolean }) {
+export function ProcessStatusControls({
+  file,
+  compact = false,
+  hideChip = false,
+}: {
+  file: FileEntry;
+  compact?: boolean;
+  /** Drops the informational PID/status chip and keeps only the kill action —
+      the phone pane header has no room for read-only chips. */
+  hideChip?: boolean;
+}) {
   const { t } = useLocale();
   const [confirming, setConfirming] = useState(false);
   const [killing, setKilling] = useState(false);
@@ -80,7 +90,7 @@ export function ProcessStatusControls({ file, compact = false }: { file: FileEnt
 
   return (
     <span className={`inline-flex min-w-0 flex-wrap items-center gap-1.5 ${compact ? "text-[10.5px]" : "text-xs"}`}>
-      {chip}
+      {hideChip ? null : chip}
       {file.proc === "running" ? (
         confirming ? (
           <span className="inline-flex max-w-full items-center gap-1 rounded-[10px] border border-err/30 bg-[#fff5f5] px-1.5 py-0.5">

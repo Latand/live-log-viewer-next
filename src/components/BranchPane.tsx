@@ -4,6 +4,7 @@ import { CornerDownRight, GitBranch, Maximize2, Minimize2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
 import { ChevronRight, X } from "@/components/icons";
+import { useIsMobile } from "@/hooks/useIsMobile";
 import { registerPane } from "@/lib/chime";
 import { type TFunction, useLocale } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
@@ -92,6 +93,7 @@ interface Props {
 
 export function BranchPane({ file, files, tasks, onSelect, isRoot, onClose, dragHandle, noComposer, banner, onToggleExpand, expanded, dormant }: Props) {
   const { t } = useLocale();
+  const isMobile = useIsMobile();
   const paneRef = useRef<HTMLElement | null>(null);
   const badge = engineBadge(file);
   const state = paneState(file);
@@ -158,7 +160,7 @@ export function BranchPane({ file, files, tasks, onSelect, isRoot, onClose, drag
             <span className="min-w-0 flex-1 truncate text-[12px] font-semibold" title={cleanTitle(file.title)}>
               {cleanTitle(file.title, 90)}
             </span>
-            <ProcessStatusControls file={file} compact />
+            <ProcessStatusControls file={file} compact hideChip={isMobile} />
             {onToggleExpand ? (
               <button
                 className="inline-flex shrink-0 items-center rounded-[8px] border border-line bg-bg px-1.5 py-0.5 text-dim hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
@@ -197,8 +199,11 @@ export function BranchPane({ file, files, tasks, onSelect, isRoot, onClose, drag
                 {badge.label}
               </span>
             )}
-            {file.ctx ? <CtxChip ctx={file.ctx} /> : null}
-            {file.worktree ? (
+            {/* The phone header keeps only actionable or alarming chips: ctx
+                appears once it nears the limit, the worktree name and the
+                branch-kind label yield their room to the rest of the row. */}
+            {file.ctx && (!isMobile || file.ctx.pct >= 70) ? <CtxChip ctx={file.ctx} /> : null}
+            {file.worktree && !isMobile ? (
               <span
                 className="inline-flex shrink-0 items-center gap-0.5 rounded-full border border-line/80 px-1.5 py-0.5 font-mono text-[9.5px] text-dim"
                 title={t("branch.worktree", { name: file.worktree })}
@@ -208,7 +213,7 @@ export function BranchPane({ file, files, tasks, onSelect, isRoot, onClose, drag
             ) : null}
             {file.plan ? <PlanChip plan={file.plan} /> : null}
             {file.goal ? <GoalChip goal={file.goal} /> : null}
-            {isRoot ? null : (
+            {isRoot || isMobile ? null : (
               <span
                 className="inline-flex shrink-0 items-center gap-0.5 text-[10px] text-dim"
                 title={file.handoff ? t("branch.handoffTitle") : t("branch.branchTitle")}

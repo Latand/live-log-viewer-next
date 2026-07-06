@@ -25,6 +25,9 @@ export interface ComposerBarProps {
       the accent classes, the draft with an inline engine tint. */
   sendIdleClassName: string;
   sendIdleStyle?: React.CSSProperties;
+  /** The phone composer moves the image picker behind the leftSlot toggle;
+      this hides the inline one so the picker exists only once. */
+  showImage?: boolean;
 }
 
 /**
@@ -44,6 +47,7 @@ export function ComposerBar({
   sendTitleRecording,
   sendIdleClassName,
   sendIdleStyle,
+  showImage = true,
 }: ComposerBarProps) {
   const {
     displayText,
@@ -94,13 +98,15 @@ export function ComposerBar({
         {leftSlot}
         <div className="flex shrink-0 items-center gap-1.5">
           <MicButtonView {...dictation} busy={voiceSending} onText={insertSpoken} />
-          <Hint label={imageAriaLabel}>
-            <ImagePickerButton
-              ariaLabel={imageAriaLabel}
-              className="inline-flex shrink-0 items-center justify-center rounded-[8px] border border-line bg-panel p-2 text-dim hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
-              onFiles={attachments.addFiles}
-            />
-          </Hint>
+          {showImage ? (
+            <Hint label={imageAriaLabel}>
+              <ImagePickerButton
+                ariaLabel={imageAriaLabel}
+                className="inline-flex shrink-0 items-center justify-center rounded-[8px] border border-line bg-panel p-2 text-dim hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                onFiles={attachments.addFiles}
+              />
+            </Hint>
+          ) : null}
           <Hint label={dictationRecording ? (sendTitleRecording ?? sendLabelRecording) : sendLabelIdle}>
             <button
               type={dictationRecording ? "button" : "submit"}

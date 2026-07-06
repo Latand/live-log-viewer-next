@@ -1,6 +1,6 @@
 "use client";
 
-import { Filter, X } from "lucide-react";
+import { Filter, TriangleAlert, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { useAgentChimes } from "@/hooks/useAgentChimes";
@@ -284,6 +284,82 @@ export function Viewer() {
 
   const toastFile = toastPath ? files.find((file) => file.path === toastPath) : null;
 
+  /* Desktop keeps the badge in the fixed top-right anchor; the phone embeds
+     this same node into the board header row, where it cannot cover the
+     header's own buttons. The queue popover then drops as a full-width sheet
+     under the header instead of hanging off the pill. */
+  const attentionBadge = queue.length ? (
+    <div ref={queueRef} className="pointer-events-auto relative">
+      <div className="flex items-center overflow-hidden rounded-full border border-[#e0ae45]/45 bg-[#fff9ed] shadow-card">
+        <button
+          type="button"
+          className="px-3 py-1 text-[12px] font-bold text-[#8a5a00] hover:bg-[#e0ae45]/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent/40"
+          aria-expanded={queueOpen}
+          aria-label={t("attention.badge", { count: queue.length })}
+          title={t("attention.openQueue")}
+          onClick={() => setQueueOpen((value) => !value)}
+        >
+          {isMobile ? (
+            <span className="inline-flex items-center gap-1">
+              <TriangleAlert className="h-3 w-3" aria-hidden /> {queue.length}
+            </span>
+          ) : (
+            t("attention.badge", { count: queue.length })
+          )}
+        </button>
+        {isMobile ? null : (
+          <>
+            <div className="h-4 w-px shrink-0 bg-[#e0ae45]/45" aria-hidden />
+            <button
+              type="button"
+              className={`px-2 py-1.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent/40 ${
+                attentionFilter ? "bg-[#e0ae45]/30 text-[#8a5a00]" : "text-[#b8860b]/70 hover:bg-[#e0ae45]/15 hover:text-[#8a5a00]"
+              }`}
+              aria-pressed={attentionFilter}
+              title={attentionFilter ? t("attention.filterOff") : t("attention.filterOn")}
+              aria-label={attentionFilter ? t("attention.filterOff") : t("attention.filterOn")}
+              onClick={() => setAttentionFilter((value) => !value)}
+            >
+              <Filter className="h-3.5 w-3.5" aria-hidden />
+            </button>
+          </>
+        )}
+      </div>
+      {queueOpen ? (
+        <div
+          className={`${
+            isMobile ? "fixed inset-x-3 top-12" : "absolute right-0 top-[calc(100%+6px)] w-[340px] max-w-[calc(100vw-2rem)]"
+          } z-50 max-h-[60vh] overflow-y-auto rounded-[10px] border border-line bg-panel p-1.5 shadow-card`}
+        >
+          <div className="px-2.5 pb-1 pt-1.5 text-[10.5px] font-bold uppercase tracking-wide text-dim">
+            {t("attention.popoverTitle")}
+          </div>
+          {queue.map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              className="flex w-full min-w-0 flex-col gap-0.5 rounded-[8px] px-2.5 py-2 text-left hover:bg-bg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+              onClick={() => jumpToItem(item)}
+            >
+              <span className="flex w-full min-w-0 items-center gap-1.5">
+                <span className="min-w-0 flex-1 truncate text-[12px] font-semibold text-ink">
+                  {cleanTitle(item.file.title, 90)}
+                </span>
+                <span className="shrink-0 rounded-full border border-line bg-bg px-1.5 text-[10px] font-semibold text-dim">
+                  {item.project}
+                </span>
+                <span className="shrink-0 text-[10.5px] text-dim">{fmtAge(item.since)}</span>
+              </span>
+              <span className={`w-full truncate text-[11px] ${item.tier === "stalled" ? "text-[#b8860b]" : "text-dim"}`}>
+                {attentionSnippet(t, item)}
+              </span>
+            </button>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  ) : null;
+
   return (
     <div className="flex h-full">
       {isMobile ? null : (
@@ -304,66 +380,7 @@ export function Viewer() {
         {/* The corner attention anchor: the badge pill sits where the toast
             appears, so a new toast visually docks into it (D7). */}
         <div className="pointer-events-none fixed right-4 top-4 z-50 flex flex-col items-end gap-2">
-          {queue.length ? (
-            <div ref={queueRef} className="pointer-events-auto relative">
-              <div className="flex items-center overflow-hidden rounded-full border border-[#e0ae45]/45 bg-[#fff9ed] shadow-card">
-                <button
-                  type="button"
-                  className="px-3 py-1 text-[12px] font-bold text-[#8a5a00] hover:bg-[#e0ae45]/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent/40"
-                  aria-expanded={queueOpen}
-                  title={t("attention.openQueue")}
-                  onClick={() => setQueueOpen((value) => !value)}
-                >
-                  {t("attention.badge", { count: queue.length })}
-                </button>
-                {isMobile ? null : (
-                  <>
-                    <div className="h-4 w-px shrink-0 bg-[#e0ae45]/45" aria-hidden />
-                    <button
-                      type="button"
-                      className={`px-2 py-1.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent/40 ${
-                        attentionFilter ? "bg-[#e0ae45]/30 text-[#8a5a00]" : "text-[#b8860b]/70 hover:bg-[#e0ae45]/15 hover:text-[#8a5a00]"
-                      }`}
-                      aria-pressed={attentionFilter}
-                      title={attentionFilter ? t("attention.filterOff") : t("attention.filterOn")}
-                      aria-label={attentionFilter ? t("attention.filterOff") : t("attention.filterOn")}
-                      onClick={() => setAttentionFilter((value) => !value)}
-                    >
-                      <Filter className="h-3.5 w-3.5" aria-hidden />
-                    </button>
-                  </>
-                )}
-              </div>
-              {queueOpen ? (
-                <div className="absolute right-0 top-[calc(100%+6px)] max-h-[60vh] w-[340px] max-w-[calc(100vw-2rem)] overflow-y-auto rounded-[10px] border border-line bg-panel p-1.5 shadow-card">
-                  <div className="px-2.5 pb-1 pt-1.5 text-[10.5px] font-bold uppercase tracking-wide text-dim">
-                    {t("attention.popoverTitle")}
-                  </div>
-                  {queue.map((item) => (
-                    <button
-                      key={item.id}
-                      type="button"
-                      className="flex w-full min-w-0 flex-col gap-0.5 rounded-[8px] px-2.5 py-2 text-left hover:bg-bg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
-                      onClick={() => jumpToItem(item)}
-                    >
-                      <span className="flex w-full min-w-0 items-center gap-1.5">
-                        <span className="min-w-0 flex-1 truncate text-[12px] font-semibold text-ink">
-                          {cleanTitle(item.file.title, 90)}
-                        </span>
-                        <span className="shrink-0 rounded-full border border-line bg-bg px-1.5 text-[10px] font-semibold text-dim">
-                          {item.project}
-                        </span>
-                        <span className="shrink-0 text-[10.5px] text-dim">{fmtAge(item.since)}</span>
-                      </span>
-                      <span className={`w-full truncate text-[11px] ${item.tier === "stalled" ? "text-[#b8860b]" : "text-dim"}`}>
-                        {attentionSnippet(t, item)}
-                      </span>
-                    </button>
-                  ))}
-                </div>
-              ) : null}
-            </div>
-          ) : null}
+          {isMobile ? null : attentionBadge}
           {toastFile ? (
           <div className="pointer-events-auto flex max-w-[360px] gap-2 rounded-[8px] border border-[#e0ae45]/45 bg-[#fff9ed] px-4 py-3 text-[13px] font-semibold text-ink shadow-card">
             <button
@@ -395,6 +412,7 @@ export function Viewer() {
             onSelectProject={selectProject}
             onSelectFile={openFile}
             onMenu={isMobile ? () => setDrawerOpen(true) : undefined}
+            attention={isMobile ? attentionBadge : undefined}
           />
         ) : (
           <ProjectDashboard
@@ -410,6 +428,7 @@ export function Viewer() {
             onArchive={archiveProject}
             onUnarchive={unarchiveProject}
             onMenu={isMobile ? () => setDrawerOpen(true) : undefined}
+            attention={isMobile ? attentionBadge : undefined}
           />
         )}
       </main>

@@ -277,9 +277,8 @@ export function LogFeed({ file, files, onSelect, showSvc, lineFilter, onStatus, 
     setMagnet(true, true);
   };
 
-  /* Compact panes center the floating pill: on the phone the bottom-right
-     corner belongs to the minimap chip, and a right-anchored pill merges
-     into it. */
+  /* Compact panes center the floating pill: on the phone a right-anchored
+     pill would sit over the tool rows' status column. */
   const pillPos = compact ? "left-1/2 -translate-x-1/2" : "right-3";
 
   return (

@@ -122,6 +122,7 @@ export const en = {
   "composer.compactSent": "compaction started — the band will appear in the feed once it's done",
   "composer.failedCompact": "couldn't start compaction",
   "composer.addImages": "Add images",
+  "composer.moreTools": "More actions",
   "composer.stopAndSend": "Stop recording and send",
   "composer.launchAgent": "Launch the agent",
   "composer.sendToAgent": "Send to the agent",

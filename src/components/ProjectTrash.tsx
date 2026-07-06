@@ -86,19 +86,23 @@ function QuietFileRow({ file, onOpen }: { file: FileEntry; onOpen: (file: FileEn
  * stays available next to it for the rare case the transcripts must go.
  * Reversible (rail archive section / new activity), so no confirmation.
  */
-export function ArchiveProjectButton({ files, onArchive }: { files: FileEntry[]; onArchive: () => void }) {
+export function ArchiveProjectButton({ files, onArchive, compact = false }: { files: FileEntry[]; onArchive: () => void; compact?: boolean }) {
   const { t } = useLocale();
   if (!files.length || files.some((file) => file.proc === "running" || file.activity === "live")) return null;
   return (
     <button
       type="button"
-      className="inline-flex shrink-0 items-center gap-1 rounded-full border border-line bg-bg px-2 py-0.5 text-[11px] font-semibold text-dim hover:border-accent/40 hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+      className={`inline-flex shrink-0 items-center gap-1 rounded-full border border-line bg-bg text-[11px] font-semibold text-dim hover:border-accent/40 hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+        compact ? "p-1" : "px-2 py-0.5"
+      }`}
+      aria-label={t("trash.toArchive")}
+      title={t("trash.toArchive")}
       onClick={() => {
         onArchive();
         gotoOverview();
       }}
     >
-      <Archive className="h-3 w-3" aria-hidden /> {t("trash.toArchive")}
+      <Archive className="h-3 w-3" aria-hidden /> {compact ? null : t("trash.toArchive")}
     </button>
   );
 }

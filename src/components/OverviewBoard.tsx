@@ -23,9 +23,12 @@ interface Props {
   onSelectFile: (file: FileEntry) => void;
   /** Mobile shell: the rail hides behind a drawer, this opens it. */
   onMenu?: () => void;
+  /** Mobile shell: the attention badge lives in the header row instead of the
+      fixed corner, so it never covers the header's own controls. */
+  attention?: React.ReactNode;
 }
 
-export function OverviewBoard({ files, workflows, archivedProjects, now, onSelectProject, onSelectFile, onMenu }: Props) {
+export function OverviewBoard({ files, workflows, archivedProjects, now, onSelectProject, onSelectFile, onMenu, attention }: Props) {
   const { t } = useLocale();
   const cols = useColumns();
   const allSummaries = useMemo(() => buildProjectSummaries(files, now, workflows), [files, now, workflows]);
@@ -72,6 +75,7 @@ export function OverviewBoard({ files, workflows, archivedProjects, now, onSelec
             : t("common.nothingRunning")}
           {archivedCount ? ` ${t("overview.archived", { count: archivedCount })}` : ""}
         </span>
+        {attention ? <span className="ml-auto flex shrink-0 items-center">{attention}</span> : null}
       </div>
       <div
         className="grid flex-1 auto-rows-min gap-2.5 overflow-y-auto p-3"

@@ -114,6 +114,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "composer.compactSent": "стискання почалось — позначка з'явиться у стрічці, щойно завершиться",
   "composer.failedCompact": "не вдалося запустити стискання",
   "composer.addImages": "Додати картинки",
+  "composer.moreTools": "Додаткові дії",
   "composer.stopAndSend": "Зупинити запис і надіслати",
   "composer.launchAgent": "Запустити агента",
   "composer.sendToAgent": "Надіслати агенту",
