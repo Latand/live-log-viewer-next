@@ -16,7 +16,10 @@ import { useLocale } from "@/lib/i18n";
    these through the hook module after the pure helpers moved to lib/audio. */
 export { drawMeter, fmtElapsed, METER_BARS, METER_HEIGHT, METER_WIDTH };
 
-export type DictationPhase = "idle" | "rec" | "busy";
+/** "starting" covers the getUserMedia/permission/live-token window between the
+    mic tap and the first recorded frame — the button shows it and stays inert
+    so a second tap can't pile a recorder on top. */
+export type DictationPhase = "idle" | "starting" | "rec" | "busy";
 
 const MAX_SECONDS = 120;
 /* Sub-2KB blobs are a misclick, not speech — dropped without a server call. */
@@ -334,6 +337,7 @@ export function useDictation({ onError, onUnclaimedText, onLiveCommit }: UseDict
        wait would spin up a second recorder over the first and leak its stream. */
     if (startingRef.current || recRef.current || liveRef.current) return;
     startingRef.current = true;
+    setPhase("starting");
     let stream: MediaStream | null = null;
     let streamOwned = true;
     try {
@@ -382,6 +386,9 @@ export function useDictation({ onError, onUnclaimedText, onLiveCommit }: UseDict
     } finally {
       if (streamOwned) stopStream(stream);
       startingRef.current = false;
+      /* Success flipped the phase to "rec" already; any bail-out (denied
+         permission, discard mid-start, unmount race) returns to idle. */
+      if (mountedRef.current) setPhase((prev) => (prev === "starting" ? "idle" : prev));
     }
   };
 

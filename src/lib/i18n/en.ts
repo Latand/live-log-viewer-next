@@ -196,6 +196,7 @@ export const en = {
   "mic.recognizing": "Transcribing…",
   "mic.dictate": "Dictate",
   "mic.dictateHint": "dictate (up to 2 min) · right-click: transcription method",
+  "mic.connecting": "Connecting the microphone — a moment…",
   "mic.menuTitle": "Transcription method",
   "mic.menuLoading": "checking what's available…",
   "mic.menuLocked": "Locked by the LLV_TRANSCRIBE_BACKEND environment variable",

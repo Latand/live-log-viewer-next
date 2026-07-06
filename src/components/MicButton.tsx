@@ -241,17 +241,25 @@ export function MicButtonView({ phase, elapsed, canvasRef, start, stop, discard,
     <span className="relative inline-flex shrink-0">
       <button
         type="button"
-        aria-label={phase === "busy" ? t("mic.recognizing") : t("mic.dictate")}
-        title={phase === "busy" ? t("mic.recognizing") : t("mic.dictateHint")}
-        disabled={phase === "busy" || busy}
+        aria-label={phase === "busy" ? t("mic.recognizing") : phase === "starting" ? t("mic.connecting") : t("mic.dictate")}
+        title={phase === "busy" ? t("mic.recognizing") : phase === "starting" ? t("mic.connecting") : t("mic.dictateHint")}
+        disabled={phase !== "idle" || busy}
         onClick={handleMain}
         onContextMenu={(event) => {
           event.preventDefault();
           setMenuOpen((open) => !open);
         }}
-        className="inline-flex shrink-0 items-center justify-center rounded-[8px] border border-line bg-panel p-2 text-dim hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60"
+        className={`inline-flex shrink-0 items-center justify-center rounded-[8px] border p-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60 ${
+          phase === "starting" ? "border-accent/40 bg-accent/10 text-accent" : "border-line bg-panel text-dim hover:text-accent"
+        }`}
       >
-        {phase === "busy" ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : <Mic className="h-4 w-4" aria-hidden />}
+        {phase === "busy" ? (
+          <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
+        ) : phase === "starting" ? (
+          <Mic className="h-4 w-4 animate-pulse" aria-hidden />
+        ) : (
+          <Mic className="h-4 w-4" aria-hidden />
+        )}
       </button>
       {menuOpen ? <BackendMenu onClose={() => setMenuOpen(false)} /> : null}
     </span>

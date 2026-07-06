@@ -181,6 +181,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "mic.recognizing": "Розпізнаю…",
   "mic.dictate": "Надиктувати",
   "mic.dictateHint": "надиктувати (до 2 хв) · правий клік: спосіб розпізнавання",
+  "mic.connecting": "Під'єдную мікрофон — секунду…",
   "mic.menuTitle": "Спосіб розпізнавання",
   "mic.menuLoading": "перевіряю, що доступно…",
   "mic.menuLocked": "Заблоковано змінною середовища LLV_TRANSCRIBE_BACKEND",
