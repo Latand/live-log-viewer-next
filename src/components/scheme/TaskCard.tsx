@@ -454,11 +454,12 @@ export const TaskCard = memo(function TaskCard({
       onPointerUp={onPointerUp}
     >
       <div
-        className={`flex flex-col overflow-hidden rounded-[8px] border border-line border-t-4 shadow-card ${
+        className={`flex flex-col overflow-hidden rounded-[8px] border border-line shadow-card ${
           task.status === "done" ? "opacity-60 saturate-50" : ""
         } ${editing ? "ring-2 ring-accent/50" : ""}`}
-        style={{ borderTopColor: tone.color, backgroundColor: tone.soft }}
+        style={{ backgroundColor: tone.soft }}
       >
+        <div aria-hidden className="h-1 w-full shrink-0" style={{ backgroundColor: tone.color }} />
         {editing ? (
           <textarea
             ref={editRef}
@@ -596,9 +597,10 @@ export function NewTaskCard({
       style={{ transform: `translate(${pos.x}px, ${pos.y}px)`, width: TASK_W }}
     >
       <div
-        className="flex flex-col overflow-hidden rounded-[8px] border border-line border-t-4 shadow-card ring-2 ring-accent/50"
-        style={{ borderTopColor: TASK_TONES.inbox.color, backgroundColor: TASK_TONES.inbox.soft }}
+        className="flex flex-col overflow-hidden rounded-[8px] border border-line shadow-card ring-2 ring-accent/50"
+        style={{ backgroundColor: TASK_TONES.inbox.soft }}
       >
+        <div aria-hidden className="h-1 w-full shrink-0" style={{ backgroundColor: TASK_TONES.inbox.color }} />
         <textarea
           ref={ref}
           value={text}

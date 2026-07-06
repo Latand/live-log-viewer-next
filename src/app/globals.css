@@ -56,11 +56,11 @@ body {
   content: "";
   pointer-events: none;
   position: absolute;
-  /* The comets ride the card's soft glow ring, outside the frame — inside
-     they would stack against the colored engine marker on the top edge. */
-  inset: -3px;
+  /* The comets hug the card frame from outside: the ring's inner edge sits
+     exactly on the 1px border (no white gap), the stroke extends 2px out. */
+  inset: -2px;
   z-index: 1;
-  border-radius: 13px;
+  border-radius: 12px;
   padding: 2px;
   background: conic-gradient(
     from var(--pane-angle),

@@ -138,11 +138,13 @@ export function BranchPane({ file, files, tasks, onSelect, isRoot, onClose, drag
            presses that start here (wheel pan still covers scrolling). */
         data-pan-ignore
         data-link-path={file.path}
-        className={`relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-[10px] border bg-panel shadow-card ${
-          isRoot ? "border-t-4" : "border-t-2"
-        } ${tone.section}`}
-        style={state === "done" ? { borderTopColor: "#c9c9d1" } : engineEdge(file)}
+        className={`relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-[10px] border bg-panel shadow-card ${tone.section}`}
       >
+        <span
+          aria-hidden
+          className={`w-full shrink-0 ${isRoot ? "h-1" : "h-0.5"}`}
+          style={state === "done" ? { backgroundColor: "#c9c9d1" } : engineEdge(file)}
+        />
         {/* Two deliberate rows: identity + actions on top (the close X pinned
             to the corner at every width), the metadata chips below. */}
         <header

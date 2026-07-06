@@ -144,9 +144,10 @@ export function WorkflowDraftPane({
   return (
     <section
       data-pan-ignore
-      className="relative flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-[10px] border border-t-4 border-line border-t-accent bg-panel shadow-card"
+      className="relative flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-[10px] border border-line bg-panel shadow-card"
       aria-label={t("wfDraft.paneAria")}
     >
+      <span aria-hidden className="h-1 w-full shrink-0 bg-accent" />
       <header className="flex h-10 shrink-0 items-center gap-2 border-b border-line bg-[#ecebfb] px-2.5">
         <span className="h-2 w-2 shrink-0 rounded-full bg-[#c9c9d1]" title={t("wfDraft.notStarted")} />
         <span className="shrink-0 text-[10.5px] font-bold tracking-[0.08em] text-accent">{t("wfStrip.workflow")}</span>

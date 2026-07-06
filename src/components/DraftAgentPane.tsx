@@ -250,10 +250,10 @@ export function DraftAgentPane({
   return (
     <section
       data-pan-ignore
-      className="relative flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-[10px] border border-t-4 border-line bg-panel shadow-card"
-      style={{ borderTopColor: tint.color }}
+      className="relative flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-[10px] border border-line bg-panel shadow-card"
       aria-label={t("draft.paneAria")}
     >
+      <span aria-hidden className="h-1 w-full shrink-0" style={{ backgroundColor: tint.color }} />
       <header className="flex h-10 shrink-0 items-center gap-1.5 border-b border-line px-2.5" style={{ backgroundColor: tint.soft }}>
         <span className="h-2 w-2 shrink-0 rounded-full bg-[#c9c9d1]" title={t("draft.notStarted")} />
         <div className="flex shrink-0 items-center gap-1" role="radiogroup" aria-label={t("draft.engineAria")}>

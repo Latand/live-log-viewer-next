@@ -126,9 +126,12 @@ export function engineColor(file: FileEntry): string {
   return modelTint(file).color;
 }
 
-/** Model-tinted top border for columns; inline style so arbitrary tints work. */
-export function engineEdge(file: FileEntry): { borderTopColor: string } {
-  return { borderTopColor: modelTint(file).color };
+/** Model-tinted accent strip along a card's top edge; inline style so
+    arbitrary tints work. Rendered as an inner element clipped by the card's
+    overflow-hidden radius — a thick border-top would miter into the thin
+    side borders at the rounded corners and leave unmerged ends. */
+export function engineEdge(file: FileEntry): { backgroundColor: string } {
+  return { backgroundColor: modelTint(file).color };
 }
 
 export function engineBadge(file: FileEntry) {

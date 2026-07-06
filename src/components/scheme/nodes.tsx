@@ -268,11 +268,11 @@ function LiteNodeShell({ node, ringed, dimmed, flow }: { node: SchemeNode; ringe
         </>
       ) : null}
       <div
-        className={`relative z-[1] flex h-full min-w-0 flex-col overflow-hidden rounded-[10px] border border-t-4 bg-panel shadow-card ${
+        className={`relative z-[1] flex h-full min-w-0 flex-col overflow-hidden rounded-[10px] border border-line bg-panel shadow-card ${
           ringed ? "ring-2 ring-accent/60 ring-offset-2 ring-offset-bg" : ""
         }`}
-        style={engineEdge(node.file)}
       >
+        <span aria-hidden className="h-1 w-full shrink-0" style={engineEdge(node.file)} />
         <div className="flex shrink-0 items-center gap-2 border-b border-line px-3 py-2.5">
           <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${activityDot(node.file.activity)}`} />
           <span className="shrink-0 rounded-full px-2 py-0.5 text-[11px] font-bold" style={badge.style}>

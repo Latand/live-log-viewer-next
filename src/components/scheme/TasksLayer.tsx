@@ -20,17 +20,17 @@ function LiteTaskCard({ task }: { task: BoardTask }) {
   return (
     <div
       data-scheme-task={task.id}
-      className={`absolute overflow-hidden rounded-[8px] border border-line border-t-4 shadow-card ${
+      className={`absolute overflow-hidden rounded-[8px] border border-line shadow-card ${
         task.status === "done" ? "opacity-60 saturate-50" : ""
       }`}
       style={{
         transform: `translate(${task.pos.x}px, ${task.pos.y}px)`,
         width: TASK_W,
         height: taskCardHeight(task),
-        borderTopColor: tone.color,
         backgroundColor: tone.soft,
       }}
     >
+      <div aria-hidden className="h-1 w-full" style={{ backgroundColor: tone.color }} />
       <div className="px-3 py-2 text-[12.5px] font-bold leading-[17px] text-[#26262c]">
         <span className="line-clamp-4 whitespace-pre-wrap break-words">{taskTitle(task.text) || t("tasks.untitled")}</span>
       </div>
