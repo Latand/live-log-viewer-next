@@ -10,6 +10,7 @@ import { inboxImageExt, MAX_INBOX_IMAGE_BYTES } from "@/lib/imagePolicy";
 import { INBOX_DIR } from "@/lib/inbox";
 import { listFiles } from "@/lib/scanner";
 import { isHelperArgv, pidAlive, readArgv, readPpid } from "@/lib/scanner/process";
+import { pathAllowed } from "@/lib/scanner/roots";
 import {
   composerLine,
   detectBlockingGate,
@@ -176,6 +177,25 @@ export async function knownLivePids(): Promise<Set<number>> {
     if (entry.pid !== null && entry.proc === "running" && pidAlive(entry.pid)) pids.add(entry.pid);
   }
   return pids;
+}
+
+/** Resolves and revalidates a request pid against the scanner's live set. */
+export async function targetForKnownPid(pid: number): Promise<TmuxTarget | null | "unknown"> {
+  const live = await knownLivePids();
+  if (!live.has(pid)) return "unknown";
+  return resolveTarget(pid);
+}
+
+export async function resolveRequestedTmuxTarget(pid: number | null, filePath: string): Promise<TmuxTarget | null> {
+  if (pid !== null) {
+    const target = await targetForKnownPid(pid);
+    if (target !== "unknown" && target !== null) return target;
+  }
+  if (filePath && pathAllowed(filePath)) {
+    const pane = await liveResumePane(filePath);
+    if (pane) return pane.display;
+  }
+  return null;
 }
 
 const PASTE_SETTLE_MS = 250;
