@@ -159,29 +159,21 @@ export function ResourcesFooter() {
   );
 }
 
-/** Sends the kill for one session: transcript-backed rows reuse the regular
-    conversation kill (pane resolved server-side from the path); orphans go by
-    tmux target through the snapshot-allowlisted kill-target action. */
+/** Kills one session through the kill-target action — for transcript-backed
+    rows too, not just orphans. The server resolves the target to the stable
+    pane id recorded in the resources snapshot and verifies the pane pid
+    before killing; the transcript-path kill would instead re-resolve display
+    coordinates at kill time, which mid-bulk (after earlier kills renumbered
+    windows) can name a different pane. Returns the error text, if any. */
 async function killSession(session: ResourceSession): Promise<string | null> {
-  const post = async (body: Record<string, string>) => {
-    const res = await fetch("/api/tmux", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    const json = (await res.json().catch(() => ({}))) as { target?: string; error?: string };
-    if (!res.ok) return { ok: false as const, error: json.error ?? String(res.status) };
-    return { ok: true as const, target: json.target ?? "" };
-  };
-  if (session.path) {
-    const result = await post({ action: "kill", path: session.path });
-    if (!result.ok) return result.error;
-    /* Empty target: the path resolved to no live pane (e.g. attribution went
-       stale). The pane still burns memory, so fall through to kill-target. */
-    if (result.target !== "") return null;
-  }
-  const result = await post({ action: "kill-target", target: session.target });
-  return result.ok ? null : result.error;
+  const res = await fetch("/api/tmux", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ action: "kill-target", target: session.target }),
+  });
+  if (res.ok) return null;
+  const json = (await res.json().catch(() => ({}))) as { error?: string };
+  return json.error ?? String(res.status);
 }
 
 function CleanupPanel({

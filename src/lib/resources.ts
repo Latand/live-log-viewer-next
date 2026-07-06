@@ -16,27 +16,34 @@ import type { FileEntry, ResourceSession, ResourcesPayload } from "./types";
 
 const CACHE_MS = 10_000;
 
+/** What the kill path needs to take a snapshot session down safely: the
+    stable `%N` pane id to address, and the pane pid to verify it against. */
+export interface KillTargetRef {
+  panePid: number;
+  paneId: string;
+}
+
 const globalStore = globalThis as unknown as {
   __llvResourcesCache?: { at: number; data: ResourcesPayload } | null;
-  __llvResourceTargets?: Map<string, number>;
+  __llvResourceTargets?: Map<string, KillTargetRef>;
 };
 
 /**
  * Server-held allowlist for the kill-target action: only pane targets present
  * in the last resources snapshot may be killed, never a client-supplied
  * arbitrary target (which could name the user's own work pane). Each target
- * keeps the pane pid it had in the snapshot so the kill path can verify the
- * coordinates still name the same pane — tmux renumbers `session:window.pane`
- * as windows close.
+ * keeps the stable pane id and pane pid it had in the snapshot: display
+ * coordinates renumber as windows close (`renumber-windows on`), so the kill
+ * must address the pane by id and verify the pid still matches.
  */
-export function noteSessionTargets(sessions: Iterable<{ target: string; panePid: number }>): void {
-  const map = new Map<string, number>();
-  for (const { target, panePid } of sessions) map.set(target, panePid);
+export function noteSessionTargets(sessions: Iterable<{ target: string; ref: KillTargetRef }>): void {
+  const map = new Map<string, KillTargetRef>();
+  for (const { target, ref } of sessions) map.set(target, ref);
   globalStore.__llvResourceTargets = map;
 }
 
-/** Snapshot pane pid recorded for `target`, or null when it was never listed. */
-export function allowedKillTargetPid(target: string): number | null {
+/** Snapshot pane ref recorded for `target`, or null when it was never listed. */
+export function allowedKillTarget(target: string): KillTargetRef | null {
   if (target === "") return null;
   return globalStore.__llvResourceTargets?.get(target) ?? null;
 }
@@ -80,18 +87,19 @@ async function buildResources(): Promise<ResourcesPayload> {
 
     /* Trees first, memory second: one processMemory() batch over the union
        keeps the portable backend at a single `ps` spawn for all panes. */
-    const paneTrees: Array<{ target: string; panePid: number; tree: number[]; agentPids: number[] }> = [];
+    const paneTrees: Array<{ target: string; paneId: string; panePid: number; tree: number[]; agentPids: number[] }> = [];
     const treePids = new Set<number>();
-    for (const [panePid, target] of panes) {
+    for (const [panePid, pane] of panes) {
       const tree = descendantPids(panePid, ppids);
       const agentPids = tree.filter((pid) => agentEngine.has(pid));
       if (agentPids.length === 0) continue; // plain shell / editor / dev-server pane
-      paneTrees.push({ target, panePid, tree, agentPids });
+      paneTrees.push({ target: pane.target, paneId: pane.paneId, panePid, tree, agentPids });
       for (const pid of tree) treePids.add(pid);
     }
     const memory = procBackend.processMemory(treePids);
 
-    for (const { target, panePid, tree, agentPids } of paneTrees) {
+    const killRefs: Array<{ target: string; ref: KillTargetRef }> = [];
+    for (const { target, paneId, panePid, tree, agentPids } of paneTrees) {
       let rssBytes = 0;
       let swapBytes = 0;
       for (const pid of tree) {
@@ -114,11 +122,14 @@ async function buildResources(): Promise<ResourcesPayload> {
         swapBytes,
         procCount: tree.length,
       });
+      killRefs.push({ target, ref: { panePid, paneId } });
     }
     sessions.sort((a, b) => b.rssBytes + b.swapBytes - (a.rssBytes + a.swapBytes));
+    noteSessionTargets(killRefs);
+  } else {
+    noteSessionTargets([]);
   }
 
-  noteSessionTargets(sessions);
   return {
     system: system ? { ...system, capturedAt } : null,
     sessions,

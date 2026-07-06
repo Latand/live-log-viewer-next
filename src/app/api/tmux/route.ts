@@ -10,7 +10,7 @@ import {
   targetForKnownPid,
   type DeliveryOutcome,
 } from "@/lib/delivery";
-import { allowedKillTargetPid, consumeKillTarget } from "@/lib/resources";
+import { allowedKillTarget, consumeKillTarget } from "@/lib/resources";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
 import { pathAllowed } from "@/lib/scanner/roots";
 import { collectImagePayloads, killPane, liveResumePane, panePidOf } from "@/lib/tmux";
@@ -78,26 +78,27 @@ export async function POST(req: NextRequest): Promise<NextResponse<SendResponse 
     return NextResponse.json({ error: "некоректний JSON" }, { status: 400 });
   }
 
-  /* Orphan-session cleanup: kills a pane by tmux target instead of a
-     transcript path. Only targets from the last /api/resources snapshot are
-     accepted (server-held allowlist) — an arbitrary client-named pane, e.g.
-     the user's own work shell, is refused. The coordinates are additionally
-     re-verified against the snapshot's pane pid right before the kill, and
-     consumed afterwards: tmux renumbers `session:window.pane` targets as
-     windows close, so stale coordinates (or a repeated POST) could otherwise
-     kill a different pane than the one the panel showed. */
+  /* Resource-panel cleanup: kills an agent session's pane. Only targets from
+     the last /api/resources snapshot are accepted (server-held allowlist) —
+     an arbitrary client-named pane, e.g. the user's own work shell, is
+     refused. The kill itself never trusts the display coordinates: it
+     addresses the stable `%N` pane id recorded in the snapshot, verifies the
+     pane still runs the snapshot's pane pid right before killing, and
+     consumes the target afterwards. Display coordinates renumber as windows
+     close (`renumber-windows on`), so a stale or repeated POST could
+     otherwise take down a different pane than the one the panel showed. */
   if (body.action === "kill-target") {
     const target = typeof body.target === "string" ? body.target : "";
-    const snapshotPid = allowedKillTargetPid(target);
-    if (snapshotPid === null) {
+    const ref = allowedKillTarget(target);
+    if (ref === null) {
       return NextResponse.json({ error: "невідома ціль — онови список ресурсів" }, { status: 400 });
     }
-    if ((await panePidOf(target)) !== snapshotPid) {
+    if ((await panePidOf(ref.paneId)) !== ref.panePid) {
       consumeKillTarget(target);
       return NextResponse.json({ error: "пейн уже змінився — онови список ресурсів" }, { status: 409 });
     }
     try {
-      await killPane(target);
+      await killPane(ref.paneId);
       consumeKillTarget(target);
       return NextResponse.json({ ok: true, target });
     } catch (error) {
