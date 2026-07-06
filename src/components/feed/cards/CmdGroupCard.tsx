@@ -39,7 +39,9 @@ export function CmdGroupCard({ item }: { item: CmdGroupItem }) {
         {item.calls.map((call, idx) => {
           const statusCls = call.status === "ok" ? "text-ok" : call.status === "err" ? "text-err" : "text-dim";
           return (
-            <details key={item.ids[idx]} className="overflow-hidden rounded-[10px] border border-line bg-panel" open={call.open}>
+            /* A transcript can carry the same tool id twice (a resume re-emits
+               the tool_use), so the id alone is not a unique key. */
+            <details key={`${item.ids[idx]}:${idx}`} className="overflow-hidden rounded-[10px] border border-line bg-panel" open={call.open}>
               <summary className="flex h-6 cursor-pointer list-none items-center gap-2 px-2.5 text-[11.5px]">
                 <span className="flex h-4.5 w-4.5 shrink-0 items-center justify-center rounded-md bg-chip">
                   <GlyphIcon name={call.icon} className="h-3 w-3" />
