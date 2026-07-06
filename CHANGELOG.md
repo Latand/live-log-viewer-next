@@ -6,6 +6,15 @@ versions follow [SemVer](https://semver.org/) (0.x — the API may still move).
 
 ## [Unreleased]
 
+## [0.9.1] — 2026-07-06
+
+### Changed
+- The codebase is English by default: hardcoded Ukrainian strings (API error
+  responses, display labels, transcribe messages) and internal `kind`/`project`
+  values are now English. The Ukrainian UI locale (`src/lib/i18n/uk.ts`) and the
+  CLI's Ukrainian messages are unchanged, so a uk locale still gets a Ukrainian
+  UI; only the default and the non-localized internals moved to English.
+
 ## [0.9.0] — 2026-07-06
 
 ### Fixed
