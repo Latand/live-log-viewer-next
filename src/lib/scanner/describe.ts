@@ -2,6 +2,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { stateDir } from "@/lib/configDir";
+
 import type { Engine, Fmt, RootKey } from "../types";
 import { cleanTitle } from "../title";
 import { globalCache } from "./caches";
@@ -16,7 +18,7 @@ interface Meta {
   fmt: Fmt;
 }
 
-const metaCache = globalCache<[number, Meta]>("meta");
+const metaCache = globalCache<[number, Meta]>("meta-v2");
 // Title and codex project live in the immutable head of a growing transcript,
 // so both are keyed by path and kept for good once resolved. A live file grows
 // on every poll, so a size-keyed meta cache would re-read the whole file each
@@ -24,7 +26,7 @@ const metaCache = globalCache<[number, Meta]>("meta");
 // fixed. A head that has not yet produced a title (empty/short file) is left
 // open so growth can still yield one.
 const titleCache = globalCache<[number, string | null]>("title");
-const codexProjectCache = globalCache<{ project: string; worktree?: string }>("codex-project");
+const codexProjectCache = globalCache<{ project: string; worktree?: string }>("codex-project-v2");
 /* The cwd sits in the immutable head, so it follows the title-cache rule:
    keyed by path, re-read only while unresolved and the head still short. */
 const cwdCache = globalCache<[number, string | null]>("claude-cwd");
@@ -87,6 +89,12 @@ export function parseWorktreeGitdir(cwd: string, gitFileText: string): { repo: s
    checkout that just became (or stopped being) a worktree is noticed. */
 const worktreeGitCache = globalCache<[number, { repo: string; worktree: string } | null]>("worktree-git");
 const WORKTREE_TTL_MS = 60_000;
+const persistedProjectCache = globalCache<[number, string, {
+  byCwd: Map<string, { project: string; worktree?: string }>;
+  byPath: Map<string, { project: string; worktree?: string }>;
+  bySlug: Map<string, { project: string; worktree?: string }>;
+}]>("persisted-project");
+const PERSISTED_PROJECT_TTL_MS = 10_000;
 
 /** Linked git worktrees created anywhere (`git worktree add ../foo`), not
     only under `.claude/worktrees/`: such a checkout has a `.git` FILE whose
@@ -107,6 +115,86 @@ function worktreeFromGitFile(cwd: string): { repo: string; worktree: string } | 
   return info;
 }
 
+function hasGitMarker(cwd: string): boolean {
+  try {
+    fs.lstatSync(path.join(cwd, ".git"));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function readStateJson(name: string): unknown {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(stateDir(), name), "utf8")) as unknown;
+  } catch {
+    return null;
+  }
+}
+
+function projectOverride(project: unknown, cwd: unknown, forceWorktree = false): { project: string; worktree?: string } | null {
+  if (typeof project !== "string" || !project.trim() || typeof cwd !== "string" || !cwd.trim()) return null;
+  const cwdProject = projectFromSlug(cwd.replace(/[^a-zA-Z0-9]/g, "-"));
+  const worktree = forceWorktree || cwdProject !== project ? path.basename(cwd) : undefined;
+  return { project, worktree };
+}
+
+function persistedProjects(): {
+  byCwd: Map<string, { project: string; worktree?: string }>;
+  byPath: Map<string, { project: string; worktree?: string }>;
+  bySlug: Map<string, { project: string; worktree?: string }>;
+} {
+  const dir = stateDir();
+  const cached = persistedProjectCache.get("state");
+  if (cached && cached[0] > Date.now() && cached[1] === dir) return cached[2];
+  const byCwd = new Map<string, { project: string; worktree?: string }>();
+  const byPath = new Map<string, { project: string; worktree?: string }>();
+  const bySlug = new Map<string, { project: string; worktree?: string }>();
+  const rememberSlug = (value: unknown, info: { project: string; worktree?: string } | null) => {
+    if (!info || typeof value !== "string" || !value.endsWith(".jsonl")) return;
+    const slug = path.basename(path.dirname(value));
+    if (slug.startsWith("-")) bySlug.set(slug, info);
+  };
+  const rememberPath = (value: unknown, info: { project: string; worktree?: string } | null) => {
+    if (info && typeof value === "string" && value.trim()) byPath.set(value, info);
+    rememberSlug(value, info);
+  };
+  const flowsFile = readStateJson("flows.json") as { flows?: unknown } | null;
+  const flows = Array.isArray(flowsFile?.flows) ? flowsFile.flows : [];
+  for (const value of flows) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+    const flow = value as Record<string, unknown>;
+    const info = projectOverride(flow.project, flow.cwd);
+    if (!info || typeof flow.cwd !== "string") continue;
+    byCwd.set(flow.cwd, info);
+    rememberPath(flow.implementerPath, info);
+    const rounds = Array.isArray(flow.rounds) ? flow.rounds : [];
+    for (const round of rounds) {
+      if (!round || typeof round !== "object" || Array.isArray(round)) continue;
+      rememberPath((round as Record<string, unknown>).reviewerPath, info);
+    }
+  }
+  const workflowsFile = readStateJson("workflows.json") as { workflows?: unknown } | null;
+  const workflows = Array.isArray(workflowsFile?.workflows) ? workflowsFile.workflows : [];
+  for (const value of workflows) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+    const workflow = value as Record<string, unknown>;
+    const repoInfo = projectOverride(workflow.project, workflow.repoDir);
+    if (repoInfo && typeof workflow.repoDir === "string") byCwd.set(workflow.repoDir, repoInfo);
+    const worktreeInfo = projectOverride(workflow.project, workflow.worktreeDir, true);
+    if (worktreeInfo && typeof workflow.worktreeDir === "string") byCwd.set(workflow.worktreeDir, worktreeInfo);
+    const stageRuns = Array.isArray(workflow.stageRuns) ? workflow.stageRuns : [];
+    for (const run of stageRuns) {
+      if (!run || typeof run !== "object" || Array.isArray(run)) continue;
+      rememberPath((run as Record<string, unknown>).agentPath, worktreeInfo ?? repoInfo);
+    }
+    rememberPath(workflow.fixerPath, worktreeInfo ?? repoInfo);
+  }
+  const maps = { byCwd, byPath, bySlug };
+  persistedProjectCache.set("state", [Date.now() + PERSISTED_PROJECT_TTL_MS, dir, maps]);
+  return maps;
+}
+
 /** Project identity for a real cwd, shared by both engines: resolve a
     worktree checkout to its main repo, then name the project the way Claude
     slugs name it (`projectFromSlug` of the dashed path). One naming scheme
@@ -114,6 +202,10 @@ function worktreeFromGitFile(cwd: string): { repo: string; worktree: string } | 
     all land in the SAME sidebar group instead of lookalike neighbors. */
 function projectInfoFromCwd(cwd: string): { project: string; worktree?: string } | null {
   const worktree = worktreeFromPath(cwd) ?? worktreeFromGitFile(cwd);
+  if (!worktree && !hasGitMarker(cwd)) {
+    const persisted = persistedProjects().byCwd.get(cwd);
+    if (persisted) return persisted;
+  }
   const root = worktree ? worktree.repo : cwd;
   const project = projectFromSlug(root.replace(/[^a-zA-Z0-9]/g, "-"));
   return project ? { project, worktree: worktree?.worktree } : null;
@@ -219,6 +311,14 @@ function transcriptCwd(pathname: string, size: number): string | null {
   return cwd;
 }
 
+function projectInfoFromTranscript(pathname: string): { project: string; worktree?: string } | null {
+  return persistedProjects().byPath.get(pathname) ?? null;
+}
+
+function projectInfoFromSlug(slug: string): { project: string; worktree?: string } | null {
+  return persistedProjects().bySlug.get(slug) ?? null;
+}
+
 function scanJsonlTitle(pathname: string, size: number, wantCodex: boolean): string | null {
   const cached = titleCache.get(pathname);
   if (cached && (cached[1] !== null || cached[0] >= HEAD_BYTES)) return cached[1];
@@ -273,6 +373,11 @@ export function describe(rootName: RootKey, root: string, pathname: string, st: 
           project = "";
         }
       }
+      if (!project) {
+        const info = projectInfoFromTranscript(pathname);
+        project = info?.project ?? "";
+        worktree = info?.worktree;
+      }
       if (project) codexProjectCache.set(pathname, { project, worktree });
     }
     if (!project) project = "codex";
@@ -289,8 +394,9 @@ export function describe(rootName: RootKey, root: string, pathname: string, st: 
        standalone project — only the cwd's git metadata can. When it proves a
        worktree, the session regroups under its main repo's project name. */
     const cwd = transcriptCwd(pathname, st.size);
-    const info = cwd ? projectInfoFromCwd(cwd) : null;
-    if (info && (worktreeInfo || info.worktree)) {
+    const info = cwd ? projectInfoFromCwd(cwd) : projectInfoFromTranscript(pathname);
+    const persistedInfo = projectInfoFromTranscript(pathname);
+    if (info && (worktreeInfo || info.worktree || persistedInfo)) {
       project = info.project;
       worktree = info.worktree ?? worktree;
     }
@@ -308,7 +414,9 @@ export function describe(rootName: RootKey, root: string, pathname: string, st: 
     }
   } else if (rootName === "claude-tasks") {
     const slug = rel.split(path.sep)[0] ?? "";
-    project = projectFromSlug(slug);
+    const info = projectInfoFromSlug(slug);
+    project = info?.project ?? projectFromSlug(slug);
+    worktree = info?.worktree;
     engine = "shell";
     kind = "background";
     title = "Background task " + fn.split(".")[0];
