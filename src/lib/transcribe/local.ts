@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import fs from "node:fs";
 import path from "node:path";
 
 import { cacheEntryPath } from "@/lib/configDir";
@@ -15,6 +16,16 @@ const WHISPER_TIMEOUT_MS = 120_000;
    and the legacy cache dir is honored when only the old venv exists. */
 function whisperVenv(): string {
   return process.env.LLV_WHISPER_VENV || cacheEntryPath("whisper-venv");
+}
+
+/** Interpreter the local path would run — shown in setup hints. */
+export function whisperPythonPath(): string {
+  return path.join(whisperVenv(), "bin", "python");
+}
+
+/** Whether the faster-whisper venv is installed on this machine. */
+export function localWhisperReady(): boolean {
+  return fs.existsSync(whisperPythonPath());
 }
 
 export function localTranscribe(audioPath: string, language: string): Promise<TranscribeResponse> {
