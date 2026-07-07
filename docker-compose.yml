@@ -1,0 +1,65 @@
+name: agent-log-viewer
+
+x-viewer-common: &viewer-common
+  build:
+    context: .
+    dockerfile: Dockerfile
+  image: agent-log-viewer:node22
+  network_mode: host
+  pid: host
+  privileged: true
+  user: "${LLV_UID:-1000}:${LLV_GID:-1000}"
+  working_dir: /app
+  env_file:
+    - ${LLV_ENV_FILE:-/home/latand/.config/agent-log-viewer/service.env}
+  environment:
+    HOME: /home/latand
+    HOSTNAME: 127.0.0.1
+    PATH: /usr/local/bin:/home/latand/.bun/bin:/home/latand/.npm-global/bin:/home/latand/.local/bin:/usr/bin:/bin
+    XDG_CONFIG_HOME: /home/latand/.config
+    XDG_CACHE_HOME: /home/latand/.cache
+    TMUX_TMPDIR: /tmp
+    HF_HOME: /home/latand/.cache/huggingface
+    LLV_WHISPER_VENV: /opt/llv-whisper-venv
+    LLV_TRANSCRIBE_BACKEND: ${LLV_TRANSCRIBE_BACKEND:-}
+    LLV_DOCKER_NSENTER_SHIMS: "1"
+    GIT_SSH_COMMAND: ssh -F /home/latand/.ssh/config -o UserKnownHostsFile=/home/latand/.ssh/known_hosts -o IdentityFile=/home/latand/.ssh/id_ed25519
+  volumes:
+    - /home/latand:/home/latand
+    - /tmp/tmux-${LLV_UID:-1000}:/tmp/tmux-${LLV_UID:-1000}
+    - /tmp/claude-${LLV_UID:-1000}:/tmp/claude-${LLV_UID:-1000}
+
+services:
+  viewer:
+    <<: *viewer-common
+    environment:
+      HOME: /home/latand
+      HOSTNAME: 127.0.0.1
+      PORT: 8898
+      PATH: /usr/local/bin:/home/latand/.bun/bin:/home/latand/.npm-global/bin:/home/latand/.local/bin:/usr/bin:/bin
+      XDG_CONFIG_HOME: /home/latand/.config
+      XDG_CACHE_HOME: /home/latand/.cache
+      TMUX_TMPDIR: /tmp
+      HF_HOME: /home/latand/.cache/huggingface
+      LLV_WHISPER_VENV: /opt/llv-whisper-venv
+      LLV_TRANSCRIBE_BACKEND: ${LLV_TRANSCRIBE_BACKEND:-}
+      LLV_DOCKER_NSENTER_SHIMS: "1"
+      GIT_SSH_COMMAND: ssh -F /home/latand/.ssh/config -o UserKnownHostsFile=/home/latand/.ssh/known_hosts -o IdentityFile=/home/latand/.ssh/id_ed25519
+
+  viewer-test:
+    <<: *viewer-common
+    profiles:
+      - test
+    environment:
+      HOME: /home/latand
+      HOSTNAME: 127.0.0.1
+      PORT: ${LLV_TEST_PORT:-8901}
+      PATH: /usr/local/bin:/home/latand/.bun/bin:/home/latand/.npm-global/bin:/home/latand/.local/bin:/usr/bin:/bin
+      XDG_CONFIG_HOME: /home/latand/.config
+      XDG_CACHE_HOME: /home/latand/.cache
+      TMUX_TMPDIR: /tmp
+      HF_HOME: /home/latand/.cache/huggingface
+      LLV_WHISPER_VENV: /opt/llv-whisper-venv
+      LLV_TRANSCRIBE_BACKEND: ${LLV_TRANSCRIBE_BACKEND:-}
+      LLV_DOCKER_NSENTER_SHIMS: "1"
+      GIT_SSH_COMMAND: ssh -F /home/latand/.ssh/config -o UserKnownHostsFile=/home/latand/.ssh/known_hosts -o IdentityFile=/home/latand/.ssh/id_ed25519

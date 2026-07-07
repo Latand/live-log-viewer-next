@@ -19,6 +19,15 @@ export type AgentEngine = "claude" | "codex";
 /** Absolute path of an agent CLI when we can find one; bare name otherwise. */
 export function resolveBinary(name: string): string {
   const home = os.homedir();
+  if (process.env.LLV_DOCKER_NSENTER_SHIMS === "1" && (name === "claude" || name === "codex")) {
+    const shim = "/usr/local/bin/" + name;
+    try {
+      fs.accessSync(shim, fs.constants.X_OK);
+      return shim;
+    } catch {
+      /* keep looking */
+    }
+  }
   /* ~/.bun/bin goes first: on this machine the system-wide /usr/bin/claude is
      an npm install that crashes under the current Node, while the bun shim is
      the CLI the user actually runs. */
