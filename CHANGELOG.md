@@ -6,6 +6,29 @@ versions follow [SemVer](https://semver.org/) (0.x — the API may still move).
 
 ## [Unreleased]
 
+## [0.9.3] — 2026-07-07
+
+### Changed
+- Task cards hand off instead of firing. Dropping a task's arrow onto a live
+  agent (or clicking a routed target) now seeds that pane's composer with the
+  task text and never auto-sends; a removable link records where it was routed,
+  and a "detach" action unlinks an assignment. Quiet projects render on the
+  canvas with a scheme/list view toggle. Message-feed images referenced by a
+  local path embed inline instead of showing as bare links.
+- Resumed sessions are matched to their running process. Transcript→pid
+  attribution now recognizes `--resume <id>` and `codex resume <id>`, so a
+  resumed pane is correctly identified in the viewer.
+
+### Fixed
+- Handoff assignments persist. The task store validator accepts the `handoff`
+  state, so a task routed to a pane is no longer dropped on the next load.
+
+### Security
+- The local image proxy (`/api/image`) is hardened: it rejects cross-origin and
+  DNS-rebind requests (same Host/Origin gate as the mutating routes), resolves
+  symlinks and re-checks home containment before reading, and no longer serves
+  SVG inline (which could run same-origin script).
+
 ## [0.9.1] — 2026-07-06
 
 ### Changed
