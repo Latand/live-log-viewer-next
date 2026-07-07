@@ -35,9 +35,9 @@ export interface UseArchivedProjects {
 /**
  * Projects the user shelved without deleting their transcripts from disk.
  * Same contract as archived switchboard cards: persisted to localStorage,
- * but real activity always wins — a project where any entry goes live is
- * dropped from the set on the next files update, so a new agent run brings
- * the project back to the rail by itself.
+ * but real activity always wins — a project where any entry goes live or
+ * still has a running process is dropped from the set on the next files
+ * update, so a new agent run brings the project back to the rail by itself.
  */
 export function useArchivedProjects(files: FileEntry[]): UseArchivedProjects {
   const [archivedProjects, setArchivedProjects] = useState<Set<string>>(() => new Set());
@@ -58,7 +58,10 @@ export function useArchivedProjects(files: FileEntry[]): UseArchivedProjects {
     if (!prev.size) return;
     const next = new Set(prev);
     for (const file of files) {
-      if (file.activity === "live") next.delete(projectKey(file));
+      /* A running process counts as activity even when its last turn already
+         finished (activity "recent", not "live") — an idle-but-alive agent in
+         an archived project must still pull the project back to the rail. */
+      if (file.activity === "live" || file.proc === "running") next.delete(projectKey(file));
     }
     if (next.size === prev.size) return;
     archivedRef.current = next;

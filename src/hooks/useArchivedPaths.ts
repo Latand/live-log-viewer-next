@@ -34,7 +34,8 @@ export interface UseArchivedPaths {
 /**
  * Switchboard cards the user chose to hide. Persisted to localStorage so the
  * choice survives reloads, but real activity always wins: a path that goes
- * live again is dropped from the set on the next files update.
+ * live again, or whose process is still running, is dropped from the set on
+ * the next files update.
  */
 export function useArchivedPaths(files: FileEntry[]): UseArchivedPaths {
   const [archivedPaths, setArchivedPaths] = useState<Set<string>>(() => new Set());
@@ -56,7 +57,9 @@ export function useArchivedPaths(files: FileEntry[]): UseArchivedPaths {
     if (!prev.size) return;
     const next = new Set(prev);
     for (const file of files) {
-      if (file.activity === "live") next.delete(file.path);
+      /* A running process counts as activity even after its last turn ends
+         (activity "recent", not "live"), so an idle-but-alive card unhides. */
+      if (file.activity === "live" || file.proc === "running") next.delete(file.path);
     }
     if (next.size === prev.size) return;
     archivedRef.current = next;
