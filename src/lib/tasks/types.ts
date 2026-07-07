@@ -1,6 +1,6 @@
 export type TaskStatus = "inbox" | "assigned" | "blocked" | "done";
 
-export type AssignmentState = "delivered" | "failed" | "spawning";
+export type AssignmentState = "delivered" | "failed" | "spawning" | "handoff";
 
 export interface TaskAssignment {
   /** Transcript path; null while a codex spawn awaits scanner attribution. */

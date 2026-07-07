@@ -4,16 +4,18 @@ import { BoxSelect, Hand, Maximize2, Minus, MousePointer2, Plus, StickyNote } fr
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { Flow } from "@/lib/flows/types";
-import { getLocale, translate, useLocale } from "@/lib/i18n";
+import { useLocale } from "@/lib/i18n";
 import type { BoardTask } from "@/lib/tasks/types";
 import type { FileEntry } from "@/lib/types";
 
+import { appendComposerDraft } from "@/components/TmuxComposer";
 import { BranchPane } from "@/components/BranchPane";
 import { flowByImplementer } from "@/components/flows/flowModel";
 import type { BranchGroup } from "@/components/projectModel";
-import { createTask, deleteTask, sendTask, spawnTaskAgent, updateTask } from "@/components/tasks/taskApi";
-import { pushTaskToast, sendSummary } from "@/components/tasks/taskToast";
+import { createTask, deleteTask, handoffTask, unassignTask, updateTask } from "@/components/tasks/taskApi";
+import { pushTaskToast } from "@/components/tasks/taskToast";
 import { cleanTitle } from "@/components/utils";
+import { taskDeliveryText } from "@/lib/tasks/helpers";
 
 import { BulkActionBar } from "./BulkActionBar";
 import { nodesInRect, pruneSelection, selectionBBox } from "./lasso";
@@ -63,6 +65,9 @@ interface Props {
   /** The handoff handle under a pane: drop a draft that continues this
       conversation. Absent in map mode — the handle stays hidden there. */
   onHandoff?: (file: FileEntry) => void;
+  /** «Send» on a task card with no aimed agent: seed a fresh draft conversation
+      with the task text. Absent in map mode. */
+  onTaskDraft?: (task: BoardTask) => void;
 }
 
 function ToolButton({
@@ -118,6 +123,7 @@ export function SchemeBoard({
   onDraftClose,
   onDraftSpawned,
   onHandoff,
+  onTaskDraft,
 }: Props) {
   const { t } = useLocale();
   const mapMode = Boolean(onNodePick);
@@ -237,6 +243,7 @@ export function SchemeBoard({
   const draftCloseRef = useRef(onDraftClose);
   const draftSpawnedRef = useRef(onDraftSpawned);
   const handoffRef = useRef(onHandoff);
+  const taskDraftRef = useRef(onTaskDraft);
   useEffect(() => {
     selectRef.current = onSelect;
     nodePickRef.current = onNodePick;
@@ -244,6 +251,7 @@ export function SchemeBoard({
     draftCloseRef.current = onDraftClose;
     draftSpawnedRef.current = onDraftSpawned;
     handoffRef.current = onHandoff;
+    taskDraftRef.current = onTaskDraft;
   });
   const stableSelect = useCallback((file: FileEntry) => {
     const nodePick = nodePickRef.current;
@@ -412,25 +420,10 @@ export function SchemeBoard({
   useEffect(() => {
     camRef.current = cam;
   }, [cam]);
-  const filesRef = useRef(files);
-  const multiRef = useRef(multi);
-  const layoutRef = useRef(layout);
-  useEffect(() => {
-    filesRef.current = files;
-    multiRef.current = multi;
-    layoutRef.current = layout;
-  });
 
-  const handleSendById = useCallback(async (taskId: string, paths: string[]) => {
-    const res = await sendTask(taskId, paths);
-    if ("error" in res) {
-      pushTaskToast("err", res.error);
-      return;
-    }
-    const summary = sendSummary(res, filesRef.current);
-    pushTaskToast(summary.kind, summary.text);
-  }, []);
-  const retryEdge = useCallback((taskId: string, path: string) => void handleSendById(taskId, [path]), [handleSendById]);
+  /* A wrong-target legacy edge (a failed delivery from an older build) is
+     cleaned up by a click — nothing is ever re-delivered from the board. */
+  const retryEdge = useCallback((taskId: string, path: string) => void unassignTask(taskId, path), []);
 
   const taskHandlers = useMemo<TaskCardHandlers>(
     () => ({
@@ -447,25 +440,28 @@ export function SchemeBoard({
           if (error) pushTaskToast("err", error);
         });
       },
-      send: (task, paths) => void handleSendById(task.id, paths),
-      spawn: async (task, input) => {
-        const res = await spawnTaskAgent(task.id, input);
-        if ("error" in res) return res.error;
-        pushTaskToast("ok", translate(getLocale(), "tasks.spawnOk", { target: res.target }));
+      /* Handoff into a running agent: the task text lands in that pane's
+         composer (never auto-sent) and a removable link is recorded so the
+         card shows where it was routed. */
+      handoff: async (task, file) => {
+        appendComposerDraft(file.path, taskDeliveryText(task.id, task.text));
+        const res = await handoffTask(task.id, file.path);
+        if ("error" in res) {
+          pushTaskToast("err", res.error);
+          return res.error;
+        }
         return null;
       },
-      center: (rect: SchemeRect) => centerOn(rect, 0.75),
-      /* Conversation nodes only: the session's members first, else the
-         single selection ring when it sits on a conversation node. */
-      selectionPaths: () => {
-        const nodePaths = new Set(layoutRef.current.nodes.map((node) => node.file.path));
-        const members = [...multiRef.current].filter((key) => nodePaths.has(key));
-        if (members.length) return members;
-        const ring = selectedRef.current;
-        return ring && nodePaths.has(ring) ? [ring] : [];
+      /* No aimed agent: seed a fresh draft conversation with the task text —
+         launches nothing until the user picks an engine and hits send. */
+      draft: (task) => taskDraftRef.current?.(task),
+      unassign: async (task, path) => {
+        const error = await unassignTask(task.id, path);
+        if (error) pushTaskToast("err", error);
       },
+      center: (rect: SchemeRect) => centerOn(rect, 0.75),
     }),
-    [handleSendById, centerOn],
+    [centerOn],
   );
 
   const handleCreate = useCallback(

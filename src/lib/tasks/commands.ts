@@ -118,6 +118,23 @@ export function deleteTask(existing: BoardTask[], id: string): { ok: true; tasks
   return { ok: true, tasks };
 }
 
+/**
+ * Detaches one assignment from a task by its target path — the undo for a
+ * wrong handoff. Idempotent: a path that is not assigned leaves the task
+ * untouched but still succeeds, so a double-click never 404s.
+ */
+export function removeAssignment(existing: BoardTask[], id: string, path: string, now = isoNow()): TaskCommandResult {
+  const index = existing.findIndex((task) => task.id === id);
+  if (index < 0) return { ok: false, error: "task not found", status: 404 };
+  const task = existing[index]!;
+  const assignments = task.assignments.filter((assignment) => assignment.path !== path);
+  if (assignments.length === task.assignments.length) return { ok: true, tasks: existing, task };
+  const updated: BoardTask = { ...task, assignments, updatedAt: now };
+  const tasks = existing.slice();
+  tasks[index] = updated;
+  return { ok: true, tasks, task: updated };
+}
+
 export interface AssignmentPatch {
   path: string | null;
   panePid: number | null;
@@ -158,7 +175,11 @@ export function applyAssignmentPatches(
   const index = existing.findIndex((task) => task.id === id);
   if (index < 0) return { ok: false, error: "task not found", status: 404 };
   const task = existing[index]!;
-  const hasSuccess = patches.some((patch) => patch.state === "delivered" || patch.state === "spawning");
+  /* A handoff routes the task into an agent's composer without delivering, but
+     it still moves the card off «inbox» — the task now belongs to that agent. */
+  const hasSuccess = patches.some(
+    (patch) => patch.state === "delivered" || patch.state === "spawning" || patch.state === "handoff",
+  );
   const updated: BoardTask = {
     ...task,
     status: task.status === "inbox" && hasSuccess ? "assigned" : task.status,
