@@ -444,12 +444,16 @@ export function SchemeBoard({
          composer (never auto-sent) and a removable link is recorded so the
          card shows where it was routed. */
       handoff: async (task, file) => {
-        appendComposerDraft(file.path, taskDeliveryText(task.id, task.text));
+        /* Persist any pending text edit and record the link first; only then
+           seed the composer, and with the canonical saved text — appending
+           before the save could inject stale text or leave text behind on a
+           failed handoff. */
         const res = await handoffTask(task.id, file.path);
         if ("error" in res) {
           pushTaskToast("err", res.error);
           return res.error;
         }
+        appendComposerDraft(file.path, taskDeliveryText(res.task.id, res.task.text));
         return null;
       },
       /* No aimed agent: seed a fresh draft conversation with the task text —

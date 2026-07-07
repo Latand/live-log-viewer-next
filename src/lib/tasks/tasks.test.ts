@@ -63,6 +63,13 @@ describe("task store", () => {
     expect(loadTasks(filePath)).toEqual(tasks);
   });
 
+  test("round-trips a handoff assignment (state survives load)", () => {
+    const filePath = tmpFile();
+    const tasks = [task({ assignments: [{ path: "/pane.jsonl", panePid: null, state: "handoff", error: null, at: "now" }] })];
+    saveTasks(tasks, filePath);
+    expect(loadTasks(filePath)).toEqual(tasks);
+  });
+
   test("corrupt or missing files load as an empty list", () => {
     const filePath = tmpFile();
     expect(loadTasks(filePath)).toEqual([]);

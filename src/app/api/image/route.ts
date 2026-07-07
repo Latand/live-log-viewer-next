@@ -4,11 +4,14 @@ import path from "node:path";
 
 import { NextRequest, NextResponse } from "next/server";
 
+import { rejectCrossOrigin } from "@/lib/sameOrigin";
 import type { ApiError } from "@/lib/types";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+/* SVG is deliberately excluded: served inline from the app origin it would run
+   embedded same-origin script. Only inert raster formats are embeddable. */
 const MIME: Record<string, string> = {
   ".png": "image/png",
   ".jpg": "image/jpeg",
@@ -17,7 +20,6 @@ const MIME: Record<string, string> = {
   ".webp": "image/webp",
   ".avif": "image/avif",
   ".bmp": "image/bmp",
-  ".svg": "image/svg+xml",
 };
 
 function resolveLocal(raw: string): string {
@@ -33,12 +35,18 @@ function resolveLocal(raw: string): string {
  * localhost-only tool, but there is no reason to hand out arbitrary files.
  */
 export async function GET(req: NextRequest): Promise<NextResponse<ApiError> | NextResponse> {
+  // Same gate as the mutating routes: a drive-by page or DNS-rebind must not
+  // pull local image bytes off this loopback service.
+  const rejection = rejectCrossOrigin(req);
+  if (rejection) return rejection;
+
   const raw = req.nextUrl.searchParams.get("path") ?? "";
   if (!raw) return NextResponse.json({ error: "path is required" }, { status: 400 });
   const abs = resolveLocal(raw);
 
   const home = path.resolve(os.homedir());
-  if (abs !== home && !abs.startsWith(home + path.sep)) {
+  const underHome = (p: string): boolean => p === home || p.startsWith(home + path.sep);
+  if (!underHome(abs)) {
     return NextResponse.json({ error: "path not allowed" }, { status: 403 });
   }
   const mime = MIME[path.extname(abs).toLowerCase()];
@@ -46,9 +54,15 @@ export async function GET(req: NextRequest): Promise<NextResponse<ApiError> | Ne
 
   let data: Buffer;
   try {
-    const stat = await fs.stat(abs);
+    // Resolve symlinks and re-check containment: a symlink under home with an
+    // image extension must not read a file outside home (e.g. ~/x.png → /etc/shadow).
+    const real = await fs.realpath(abs);
+    if (!underHome(real)) {
+      return NextResponse.json({ error: "path not allowed" }, { status: 403 });
+    }
+    const stat = await fs.stat(real);
     if (!stat.isFile()) return NextResponse.json({ error: "not a file" }, { status: 404 });
-    data = await fs.readFile(abs);
+    data = await fs.readFile(real);
   } catch {
     return NextResponse.json({ error: "file not found" }, { status: 404 });
   }

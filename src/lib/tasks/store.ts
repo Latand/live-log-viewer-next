@@ -30,7 +30,7 @@ function isTaskStatus(value: unknown): value is TaskStatus {
 }
 
 function isAssignmentState(value: unknown): value is AssignmentState {
-  return value === "delivered" || value === "failed" || value === "spawning";
+  return value === "delivered" || value === "failed" || value === "spawning" || value === "handoff";
 }
 
 function isFinitePos(value: unknown): value is BoardTask["pos"] {
