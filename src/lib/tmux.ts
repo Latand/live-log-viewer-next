@@ -8,6 +8,7 @@ import { statePath } from "@/lib/configDir";
 import { logEvent } from "@/lib/events";
 import { inboxImageExt, MAX_INBOX_IMAGE_BYTES } from "@/lib/imagePolicy";
 import { INBOX_DIR } from "@/lib/inbox";
+import { normalizeResumePanesFile, type ResumePaneRecord, type ResumePanesFile } from "@/lib/resumePanesFile";
 import { listFiles } from "@/lib/scanner";
 import { isHelperArgv, pidAlive, readArgv, readPpid } from "@/lib/scanner/process";
 import { pathAllowed } from "@/lib/scanner/roots";
@@ -392,23 +393,31 @@ export async function activeTmuxSession(): Promise<string> {
  * resumed agent writes its new turns into a fresh transcript file, so the
  * conversation the user keeps typing into never gets a live pid of its own —
  * without this registry every follow-up message would boot yet another
- * resume window. Persisted like codex lineage so it survives a server restart.
+ * resume window.
+ *
+ * The records store a `%N` pane id, and pane ids are only unique within one
+ * tmux server lifetime: when the server restarts, tmux hands the same `%N` out
+ * to an unrelated pane. So the file is stamped with the server pid it was
+ * written under — a lookup against a different live server discards every
+ * record wholesale rather than pasting a message into whatever agent now
+ * occupies a reused pane id. The window-name check alone cannot catch this:
+ * every resumed pane of an engine shares one constant name (`claude-resume` /
+ * `codex-resume`), so a reused id passes it and the message is misrouted.
  */
 const RESUME_PANES_FILE = statePath("resume-panes.json");
 
-interface ResumePaneRecord {
-  paneId: string;
-  windowName: string;
-}
-
 let resumePanes: Map<string, ResumePaneRecord> | null = null;
+/** Server pid the in-memory map is scoped to, mirrored from/to disk. */
+let resumePanesServerPid: number | null = null;
 
 function loadResumePanes(): Map<string, ResumePaneRecord> {
   if (resumePanes) return resumePanes;
   resumePanes = new Map();
+  resumePanesServerPid = null;
   try {
-    const data = JSON.parse(fs.readFileSync(RESUME_PANES_FILE, "utf8")) as Record<string, ResumePaneRecord>;
-    for (const [key, value] of Object.entries(data)) {
+    const file = normalizeResumePanesFile(JSON.parse(fs.readFileSync(RESUME_PANES_FILE, "utf8")));
+    resumePanesServerPid = file.serverPid;
+    for (const [key, value] of Object.entries(file.panes)) {
       if (value && typeof value.paneId === "string" && typeof value.windowName === "string") {
         resumePanes.set(key, value);
       }
@@ -423,10 +432,37 @@ function persistResumePanes(): void {
   if (!resumePanes) return;
   try {
     fs.mkdirSync(path.dirname(RESUME_PANES_FILE), { recursive: true });
-    fs.writeFileSync(RESUME_PANES_FILE, JSON.stringify(Object.fromEntries(resumePanes)));
+    const file: ResumePanesFile = { serverPid: resumePanesServerPid, panes: Object.fromEntries(resumePanes) };
+    fs.writeFileSync(RESUME_PANES_FILE, JSON.stringify(file));
   } catch {
     /* best-effort: a lost cache only costs one extra resume window */
   }
+}
+
+/**
+ * Pid of the running tmux server, or null when no server (hence no session)
+ * exists. The `%N` pane-id namespace is scoped to this pid; a changed pid means
+ * every stored id belongs to a dead server and must not be trusted.
+ */
+export async function tmuxServerPid(): Promise<number | null> {
+  const res = await runTmux(["display-message", "-p", "#{pid}"]).catch(() => null);
+  const pid = res && res.code === 0 ? Number(res.stdout.trim()) : NaN;
+  return Number.isInteger(pid) && pid > 0 ? pid : null;
+}
+
+/**
+ * The resume-pane map scoped to the live server: when the current server pid
+ * differs from the one the records were written under, they belong to a
+ * restarted server (pane ids reused) and are dropped before any is trusted.
+ */
+function resumePanesForServer(serverPid: number): Map<string, ResumePaneRecord> {
+  const map = loadResumePanes();
+  if (resumePanesServerPid !== serverPid) {
+    map.clear();
+    resumePanesServerPid = serverPid;
+    persistResumePanes();
+  }
+  return map;
 }
 
 export interface SpawnedPane {
@@ -461,16 +497,20 @@ export async function paneInfo(paneId: string): Promise<PaneInfo | null> {
 
 /**
  * The pane previously opened for this transcript when it still runs the agent.
- * Pane ids restart when the tmux server restarts, so the pane is trusted only
- * while the window keeps its resume name and a non-shell foreground process;
- * anything else drops the stale record.
+ * Records from a prior tmux server are dropped first (`resumePanesForServer`),
+ * since a restarted server reuses `%N` ids for unrelated panes. Within the live
+ * server the pane is trusted only while the window keeps its resume name and a
+ * non-shell foreground process; anything else drops the stale record.
  */
 export async function liveResumePane(transcriptPath: string): Promise<SpawnedPane | null> {
-  const record = loadResumePanes().get(transcriptPath);
+  const serverPid = await tmuxServerPid();
+  if (serverPid === null) return null;
+  const map = resumePanesForServer(serverPid);
+  const record = map.get(transcriptPath);
   if (!record) return null;
   const info = await paneInfo(record.paneId);
   if (!info || info.windowName !== record.windowName || isShellCommand(info.command)) {
-    loadResumePanes().delete(transcriptPath);
+    map.delete(transcriptPath);
     persistResumePanes();
     return null;
   }
@@ -509,8 +549,14 @@ export async function sendToResumedAgent(
   resumeInFlight.set(transcriptPath, boot);
   try {
     const pane = await boot;
-    loadResumePanes().set(transcriptPath, { paneId: pane.paneId, windowName: spec.windowName });
-    persistResumePanes();
+    /* Scope the record to the server that just hosted the new window: a pid we
+       cannot read means no stable namespace to key against, so skip the record
+       and let the next message respawn rather than persist an unscoped id. */
+    const serverPid = await tmuxServerPid();
+    if (serverPid !== null) {
+      resumePanesForServer(serverPid).set(transcriptPath, { paneId: pane.paneId, windowName: spec.windowName });
+      persistResumePanes();
+    }
     logEvent("resume", { target: pane.display, path: transcriptPath, cwd: spec.cwd, result: "ok" });
     return { target: pane.display, spawned: true };
   } catch (error) {
