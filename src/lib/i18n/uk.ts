@@ -66,6 +66,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "trash.hint": "Клік по рядку відкриває розмову нодою; смітник видаляє її файл з диска назавжди.",
   "trash.deletedFromDisk": "· видалено з диска",
   "trash.open": "Відкрити {title}",
+  "trash.activeSubtree": "має активні гілки",
   "trash.toArchive": "В архів",
   "trash.notDeleted": "не видалено {failed} з {total}",
   "trash.confirmDelete": {

@@ -21,7 +21,14 @@ import { TaskToastHost } from "./tasks/taskToast";
 import { MobileFocusView } from "./mobile/MobileFocusView";
 import { SchemeBoard } from "./scheme/SchemeBoard";
 import { Switchboard } from "./Switchboard";
-import { buildArchiveBranchGroups, buildBranchGroups, collapsedTrees, projectKey, residualItems } from "./projectModel";
+import {
+  buildArchiveBranchGroups,
+  buildBranchGroups,
+  collapsedTrees,
+  projectKey,
+  quietRootsWithActiveDescendants,
+  residualItems,
+} from "./projectModel";
 import { ArchiveRestore } from "./icons";
 import { ArchiveProjectButton, DeleteProjectButton, QuietFileList } from "./ProjectTrash";
 import { SoundToggle } from "./SoundToggle";
@@ -182,7 +189,14 @@ export function ProjectDashboard({
   const groups = useMemo(() => buildBranchGroups(groupFiles, project), [groupFiles, project]);
   const activeRoots = useMemo(() => new Set(groups.map((group) => group.key)), [groups]);
   const cards = useMemo(() => collapsedTrees(groupFiles, project, activeRoots), [groupFiles, project, activeRoots]);
-  const residual = useMemo(() => residualItems(groupFiles, project, activeRoots), [groupFiles, project, activeRoots]);
+  const quietActiveRoots = useMemo(
+    () => quietRootsWithActiveDescendants(groupFiles, project, activeRoots),
+    [groupFiles, project, activeRoots],
+  );
+  const residual = useMemo(
+    () => residualItems(groupFiles, project, activeRoots, quietActiveRoots),
+    [groupFiles, project, activeRoots, quietActiveRoots],
+  );
   const autoPaths = useMemo(
     () => new Set(groups.flatMap((group) => group.columns.map((column) => column.file.path))),
     [groups],
@@ -557,7 +571,7 @@ export function ProjectDashboard({
             onHandoff={addHandoffDraft}
           />
         ) : projectFiles.length ? (
-          <QuietFileList files={projectFiles} onOpen={openSwitchboardFile} />
+          <QuietFileList files={projectFiles} activeRootPaths={quietActiveRoots} onOpen={openSwitchboardFile} />
         ) : (
           <div className="flex flex-1 items-center justify-center px-4 py-5 text-center">
             <div>
@@ -588,7 +602,7 @@ export function ProjectDashboard({
                 onTaskDraft={openTaskDraft}
               />
             ) : projectFiles.length ? (
-              <QuietFileList files={projectFiles} onOpen={openSwitchboardFile} />
+              <QuietFileList files={projectFiles} activeRootPaths={quietActiveRoots} onOpen={openSwitchboardFile} />
             ) : (
               <div className="flex flex-1 items-center justify-center px-4 py-5 text-center">
                 <div>
@@ -639,7 +653,9 @@ export function ProjectDashboard({
           phone the strip, the map and the toast cover its job. */}
       {isMobile ? null : <Switchboard files={files} flows={flows} project={project} loaded={loaded} onOpenFile={openSwitchboardFile} />}
 
-      {!hasArchiveNodes && residual.length ? <ResidualStrip items={residual} onSelect={openSwitchboardFile} /> : null}
+      {!hasArchiveNodes && residual.length ? (
+        <ResidualStrip items={residual} activeRootPaths={quietActiveRoots} onSelect={openSwitchboardFile} />
+      ) : null}
 
       <TaskToastHost />
     </div>

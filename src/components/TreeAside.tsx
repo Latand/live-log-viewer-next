@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 
-import { ChevronRight } from "@/components/icons";
+import { ChevronRight, GitBranch } from "@/components/icons";
 import { useLocale } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
 
@@ -10,7 +10,15 @@ import { FlipRow } from "./FlipRow";
 import { activityDot, cleanTitle, engineBadge, fmtAge } from "./utils";
 
 /** Dense collapsed strip of quiet childless conversations and finished loose tasks. */
-export function ResidualStrip({ items, onSelect }: { items: FileEntry[]; onSelect: (file: FileEntry) => void }) {
+export function ResidualStrip({
+  items,
+  activeRootPaths,
+  onSelect,
+}: {
+  items: FileEntry[];
+  activeRootPaths?: ReadonlySet<string>;
+  onSelect: (file: FileEntry) => void;
+}) {
   const { t } = useLocale();
   const [open, setOpen] = useState(false);
   return (
@@ -29,6 +37,7 @@ export function ResidualStrip({ items, onSelect }: { items: FileEntry[]; onSelec
           {items.map((file) => {
             const badge = engineBadge(file);
             const title = cleanTitle(file.cmdDesc || file.title, 70);
+            const activeSubtree = activeRootPaths?.has(file.path) ?? false;
             return (
               <button
                 key={file.path}
@@ -40,6 +49,15 @@ export function ResidualStrip({ items, onSelect }: { items: FileEntry[]; onSelec
                 <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${activityDot(file.activity)}`} />
                 <span className="shrink-0 rounded-full px-1.5 text-[9px]" style={badge.style}>{badge.label}</span>
                 <span className="truncate">{title}</span>
+                {activeSubtree ? (
+                  <span
+                    className="inline-flex shrink-0 items-center gap-1 rounded-full bg-accent/10 px-1.5 text-[9px] font-bold text-accent"
+                    title={t("trash.activeSubtree")}
+                  >
+                    <GitBranch className="h-2.5 w-2.5" aria-hidden />
+                    {t("trash.activeSubtree")}
+                  </span>
+                ) : null}
                 <span className="shrink-0 font-normal text-dim">{fmtAge(file.mtime)}</span>
               </button>
             );

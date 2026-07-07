@@ -178,7 +178,11 @@ export function descendantCounts(files: FileEntry[]): Map<string, number> {
 
 /** Descendants that deserve a full transcript column next to the root. */
 function columnWorthy(file: FileEntry): boolean {
-  return !isAuxTask(file) && (file.activity === "live" || (file.activity === "recent" && isChildConversation(file)));
+  return !isAuxTask(file) && (file.activity === "live" || file.proc === "running" || (file.activity === "recent" && isChildConversation(file)));
+}
+
+function activeWork(file: FileEntry): boolean {
+  return columnWorthy(file) || (isAuxTask(file) && (file.activity === "live" || file.proc === "running"));
 }
 
 /**
@@ -246,7 +250,7 @@ export function buildBranchGroups(files: FileEntry[], project: string): BranchGr
   const orphanTasks = new Map<string, FileEntry>();
   for (const file of files) {
     if (projectKey(file) !== project) continue;
-    if (file.activity === "live" || (file.activity === "recent" && isChildConversation(file))) {
+    if (file.activity === "live" || file.proc === "running" || (file.activity === "recent" && isChildConversation(file))) {
       const root = rootOf(file, byPath);
       if (isAuxTask(root)) orphanTasks.set(root.path, root);
       else roots.set(root.path, root);
@@ -365,15 +369,35 @@ export function collapsedTrees(files: FileEntry[], project: string, activeRoots:
   return cards.sort((a, b) => a.band - b.band || b.smt - a.smt);
 }
 
+/** Idle root conversations whose descendants still make an active dashboard group. */
+export function quietRootsWithActiveDescendants(files: FileEntry[], project: string, activeRoots: ReadonlySet<string>): Set<string> {
+  const kids = kidsIndex(files);
+  const roots = new Set<string>();
+  for (const file of files) {
+    if (projectKey(file) !== project || !isConversation(file) || !activeRoots.has(file.path) || file.activity !== "idle") continue;
+    if (subtree(file, kids).some(activeWork)) {
+      roots.add(file.path);
+    }
+  }
+  return roots;
+}
+
 /**
  * Leftovers without a tree of their own: childless quiet conversations and
  * parentless finished tasks/jobs. Rendered as one dense collapsed strip.
  */
-export function residualItems(files: FileEntry[], project: string, activeRoots: ReadonlySet<string>): FileEntry[] {
+export function residualItems(
+  files: FileEntry[],
+  project: string,
+  activeRoots: ReadonlySet<string>,
+  quietActiveRoots: ReadonlySet<string> = new Set(),
+): FileEntry[] {
   const kids = kidsIndex(files);
   return files
     .filter((file) => {
-      if (projectKey(file) !== project || file.parent || activeRoots.has(file.path)) return false;
+      if (projectKey(file) !== project || file.parent) return false;
+      if (quietActiveRoots.has(file.path)) return true;
+      if (activeRoots.has(file.path)) return false;
       if (kids.get(file.path)?.length) return false;
       return file.activity !== "live";
     })

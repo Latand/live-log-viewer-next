@@ -9,6 +9,8 @@ import {
   descendantCounts,
   isConversation,
   kidsIndex,
+  quietRootsWithActiveDescendants,
+  residualItems,
   subtree,
 } from "./projectModel";
 
@@ -88,6 +90,25 @@ describe("buildBranchGroups", () => {
   test("a compaction-chain predecessor is no conversation root", () => {
     expect(isConversation(entry({ path: "/root" }))).toBe(true);
     expect(isConversation(entry({ path: "/root", parent: "/older" }))).toBe(false);
+  });
+
+  test("idle roots with active descendants are marked for quiet history", () => {
+    const files = [
+      entry({ path: "/idle-root", activity: "idle", mtime: 10 }),
+      entry({ path: "/idle-root/live-child", parent: "/idle-root", kind: "subagent", activity: "live", mtime: 20 }),
+      entry({ path: "/idle-root/running-child", parent: "/idle-root", root: "codex-sessions", engine: "codex", proc: "running", mtime: 25 }),
+      entry({ path: "/plain-quiet", activity: "idle", mtime: 30 }),
+      entry({ path: "/active-child-only", parent: "/plain-quiet", kind: "subagent", activity: "idle", mtime: 40 }),
+    ];
+    const groups = buildBranchGroups(files, "demo");
+    const activeRoots = new Set(groups.map((group) => group.key));
+
+    expect(activeRoots.has("/idle-root")).toBe(true);
+    expect(groups[0]!.columns.map((column) => column.file.path)).toContain("/idle-root/running-child");
+    const quietActiveRoots = quietRootsWithActiveDescendants(files, "demo", activeRoots);
+    expect(quietActiveRoots).toEqual(new Set(["/idle-root"]));
+    expect(residualItems(files, "demo", activeRoots, quietActiveRoots).map((file) => file.path)).toContain("/idle-root");
+    expect(residualItems(files, "demo", activeRoots).map((file) => file.path)).not.toContain("/idle-root");
   });
 });
 

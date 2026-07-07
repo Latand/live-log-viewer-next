@@ -73,6 +73,7 @@ export const en = {
   "trash.hint": "Clicking a row opens the conversation as a node; the trash icon deletes its file from disk permanently.",
   "trash.deletedFromDisk": "· deleted from disk",
   "trash.open": "Open {title}",
+  "trash.activeSubtree": "active branches",
   "trash.toArchive": "Archive",
   "trash.notDeleted": "{failed} of {total} not deleted",
   "trash.confirmDelete": {

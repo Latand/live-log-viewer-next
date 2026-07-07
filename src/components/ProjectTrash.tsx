@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 
-import { Archive, Trash2 } from "@/components/icons";
+import { Archive, GitBranch, Trash2 } from "@/components/icons";
 import { useLocale } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
 
@@ -25,7 +25,15 @@ function gotoOverview() {
  * project. Typical case: one-off agents spawned in a scratchpad cwd. Each row
  * opens as a node or deletes the file from disk.
  */
-export function QuietFileList({ files, onOpen }: { files: FileEntry[]; onOpen: (file: FileEntry) => void }) {
+export function QuietFileList({
+  files,
+  activeRootPaths,
+  onOpen,
+}: {
+  files: FileEntry[];
+  activeRootPaths?: ReadonlySet<string>;
+  onOpen: (file: FileEntry) => void;
+}) {
   const { t } = useLocale();
   return (
     <div className="min-h-0 flex-1 overflow-y-auto px-4 py-5">
@@ -36,7 +44,12 @@ export function QuietFileList({ files, onOpen }: { files: FileEntry[]; onOpen: (
         </div>
         <div className="space-y-1.5">
           {files.map((file) => (
-            <QuietFileRow key={file.path} file={file} onOpen={onOpen} />
+            <QuietFileRow
+              key={file.path}
+              file={file}
+              activeSubtree={activeRootPaths?.has(file.path) ?? false}
+              onOpen={onOpen}
+            />
           ))}
         </div>
       </div>
@@ -44,7 +57,15 @@ export function QuietFileList({ files, onOpen }: { files: FileEntry[]; onOpen: (
   );
 }
 
-function QuietFileRow({ file, onOpen }: { file: FileEntry; onOpen: (file: FileEntry) => void }) {
+function QuietFileRow({
+  file,
+  activeSubtree,
+  onOpen,
+}: {
+  file: FileEntry;
+  activeSubtree: boolean;
+  onOpen: (file: FileEntry) => void;
+}) {
   const { t } = useLocale();
   const [gone, setGone] = useState(false);
   const badge = engineBadge(file);
@@ -72,6 +93,15 @@ function QuietFileRow({ file, onOpen }: { file: FileEntry; onOpen: (file: FileEn
         <span className="min-w-0 flex-1 truncate text-[12.5px] font-semibold" title={file.path}>
           {cleanTitle(file.title, 90)}
         </span>
+        {activeSubtree ? (
+          <span
+            className="inline-flex shrink-0 items-center gap-1 rounded-full border border-accent/25 bg-accent/10 px-1.5 py-0.5 text-[10px] font-bold text-accent"
+            title={t("trash.activeSubtree")}
+          >
+            <GitBranch className="h-3 w-3" aria-hidden />
+            {t("trash.activeSubtree")}
+          </span>
+        ) : null}
         <span className="shrink-0 text-[10.5px] font-semibold text-dim">{fmtAge(file.mtime)}</span>
         <span className="shrink-0 text-[10.5px] text-dim">{(file.size / 1024).toFixed(0)} {t("common.kb")}</span>
       </button>
