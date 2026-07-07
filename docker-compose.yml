@@ -32,6 +32,7 @@ x-viewer-common: &viewer-common
 services:
   viewer:
     <<: *viewer-common
+    restart: unless-stopped
     environment:
       HOME: /home/latand
       HOSTNAME: 127.0.0.1
