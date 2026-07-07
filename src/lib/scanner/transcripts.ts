@@ -53,12 +53,15 @@ export function transcriptEngine(pathname: string): AgentEngine | null {
  * the composer at that pid would type into the parent REPL, so only top-level
  * sessions participate.
  */
-function isTranscriptCandidate(entry: FileEntry): boolean {
-  if (entry.activity === "idle" || entry.pid !== null) return false;
+function isTopLevelTranscript(entry: FileEntry): boolean {
   if (entry.root === "codex-sessions") return entry.path.endsWith(".jsonl");
   if (entry.root !== "claude-projects" || !entry.path.endsWith(".jsonl")) return false;
   const base = path.basename(entry.path);
   return !base.startsWith("agent-") && !entry.path.includes(path.sep + "subagents" + path.sep);
+}
+
+function isTranscriptCandidate(entry: FileEntry): boolean {
+  return entry.activity !== "idle" && entry.pid === null && isTopLevelTranscript(entry);
 }
 
 function sessionIdFromPath(pathname: string): string | null {
@@ -66,10 +69,21 @@ function sessionIdFromPath(pathname: string): string | null {
   return matches?.at(-1)?.toLowerCase() ?? null;
 }
 
+function sessionIdFromToken(token: string | undefined): string | null {
+  if (!token) return null;
+  const matches = token.match(UUID_RE);
+  return matches?.at(-1)?.toLowerCase() ?? null;
+}
+
 function argvSessionId(argv: string[]): string | null {
   const flag = argv.indexOf("--session-id");
-  const value = flag >= 0 ? argv[flag + 1] : undefined;
-  return value ? value.toLowerCase() : null;
+  const value = sessionIdFromToken(flag >= 0 ? argv[flag + 1] : undefined);
+  if (value) return value;
+  const resumeFlag = argv.indexOf("--resume");
+  const resumeValue = sessionIdFromToken(resumeFlag >= 0 ? argv[resumeFlag + 1] : undefined);
+  if (resumeValue) return resumeValue;
+  const resumeCommand = argv.indexOf("resume");
+  return sessionIdFromToken(resumeCommand >= 0 ? argv[resumeCommand + 1] : undefined);
 }
 
 function claudeSlug(pathname: string): string {
@@ -109,13 +123,14 @@ function markRunning(entry: FileEntry, pid: number): void {
  * cap and the per-project fallback slot.
  */
 export function assignTranscriptPids(entries: FileEntry[]): void {
-  const candidates = entries.filter(isTranscriptCandidate).slice(0, MAX_TRANSCRIPT_CANDIDATES);
-  if (candidates.length === 0) return;
+  const exactCandidates = entries.filter((entry) => entry.pid === null && isTopLevelTranscript(entry));
+  const candidates = exactCandidates.filter(isTranscriptCandidate).slice(0, MAX_TRANSCRIPT_CANDIDATES);
+  if (exactCandidates.length === 0 && candidates.length === 0) return;
 
-  const holders = writingHolders(candidates.map((entry) => entry.path));
+  const holders = writingHolders(exactCandidates.map((entry) => entry.path));
   const claimed = new Set<number>();
   const unheld: FileEntry[] = [];
-  for (const entry of candidates) {
+  for (const entry of exactCandidates) {
     const holder = holders.get(entry.path) ?? null;
     if (holder !== null && pidAlive(holder)) {
       markRunning(entry, holder);
@@ -145,7 +160,7 @@ export function assignTranscriptPids(entries: FileEntry[]): void {
     if (owners.length === 1) {
       markRunning(entry, owners[0].pid);
       claimed.add(owners[0].pid);
-    } else {
+    } else if (candidates.includes(entry)) {
       unmatched.push(entry);
     }
   }
@@ -157,6 +172,7 @@ export function assignTranscriptPids(entries: FileEntry[]): void {
   const byProject = new Map<string, AgentProcess[]>();
   for (const proc of procs) {
     if (proc.tty === 0 || claimed.has(proc.pid)) continue;
+    if (argvSessionId(proc.argv) !== null) continue;
     const key = processKey(proc);
     const list = byProject.get(key);
     if (list) list.push(proc);
