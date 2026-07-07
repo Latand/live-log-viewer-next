@@ -66,7 +66,10 @@ function reconcileAssignment(assignment: TaskAssignment, files: FileEntry[], env
   if (assignment.path) {
     const successor = terminalSuccessor(assignment.path, files, env.successorForPath);
     if (successor && successor !== assignment.path) {
-      return { assignment: { ...assignment, path: successor, state: "delivered", error: null, at }, dirty: true };
+      /* A handoff that follows its agent into a resumed transcript stays a
+         handoff — the routing moved, but nothing was ever auto-delivered. */
+      const state = assignment.state === "handoff" ? "handoff" : "delivered";
+      return { assignment: { ...assignment, path: successor, state, error: null, at }, dirty: true };
     }
     return { assignment, dirty: false };
   }

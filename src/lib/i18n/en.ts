@@ -65,6 +65,8 @@ export const en = {
   "dash.workflow": "Workflow",
   "dash.emptyTitle": "The scheme is empty for now",
   "dash.emptyHint": "Open the switchboard in the bottom-right corner and click a conversation — it will appear here",
+  "dash.viewScheme": "scheme",
+  "dash.viewList": "list",
 
   // ProjectTrash
   "trash.title": "The scheme is empty, but the project has records",
@@ -651,8 +653,12 @@ export const en = {
   "tasks.deadChip": "the conversation is gone from the list",
   "tasks.retry": "retry delivery",
   "tasks.chipFailedTitle": "not delivered: {error}",
+  "tasks.handoffChip": "routed into this agent's prompt — not sent yet",
+  "tasks.detach": "detach",
+  "tasks.detachAria": "Detach {title} from this task",
   "tasks.send": "send",
-  "tasks.sendTitle": "Pull the arrow onto an agent's pane to deliver the task there; drop it on empty canvas to spawn a fresh agent. A click opens the list",
+  "tasks.sendTitle": "Pull the arrow onto an agent's pane to drop the task into its prompt (nothing is sent); click to seed a fresh draft conversation",
+  "tasks.linkHanded": "routed into “{title}” — review and send it there",
   "tasks.linkSent": "task sent → “{title}”",
   "tasks.spawn": "agent",
   "tasks.spawnTitle": "Spawn a fresh agent with this task as the brief",

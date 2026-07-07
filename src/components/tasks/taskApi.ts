@@ -120,6 +120,27 @@ export async function deleteTask(id: string): Promise<string | null> {
   return res.ok ? null : res.error;
 }
 
+/** Records a handoff link (task routed into an agent's composer, nothing
+    delivered). Waits out an in-flight text save so the marker matches the
+    body that landed in the composer. */
+export async function handoffTask(id: string, path: string): Promise<{ task: BoardTask } | { error: string }> {
+  const textError = await pendingTextError(id);
+  if (textError) return { error: textError };
+  const res = await request<{ task: BoardTask }>(`/api/tasks/${encodeURIComponent(id)}/assignment`, "POST", { path });
+  return res.ok ? { task: res.data.task } : { error: res.error };
+}
+
+/** Detaches one assignment (the undo for a wrong handoff). A 404 means the
+    task is already gone — treated as success, the refetch drops the card. */
+export async function unassignTask(id: string, path: string): Promise<string | null> {
+  const res = await request<{ task: BoardTask }>(`/api/tasks/${encodeURIComponent(id)}/assignment`, "DELETE", { path });
+  if (!res.ok && res.status === 404) {
+    fireTasksChanged();
+    return null;
+  }
+  return res.ok ? null : res.error;
+}
+
 /** Delivers the task to each target; returns the per-target breakdown.
     Waits out any in-flight text save first — a failed save aborts the
     delivery so stale content is never reported as sent. */

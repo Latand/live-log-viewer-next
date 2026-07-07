@@ -4,9 +4,13 @@ import { Fragment, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 
 import { CopyButton, copyText } from "./CopyButton";
+import { Lightbox } from "./Lightbox";
 import { tr } from "./parse";
 
-const MD_INLINE_RE = /(`[^`]+`|\*\*[^*]+\*\*|\[[^\]]+\]\([^)\s]+\)|https?:\/\/[^\s<>"')\]]+)/g;
+/* Image markdown wins over the link pattern, so `![alt](url)` embeds instead
+   of leaking a literal «!» and a link. */
+const MD_INLINE_RE = /(!\[[^\]]*\]\([^)\s]+\)|`[^`]+`|\*\*[^*]+\*\*|\[[^\]]+\]\([^)\s]+\)|https?:\/\/[^\s<>"')\]]+)/g;
+const IMAGE_LINE_RE = /^\s*!\[([^\]]*)\]\(([^)\s]+)\)\s*$/;
 
 /* Inline monospace chip that copies itself on click. A span, not a button:
    it keeps text flow and selection intact, and inside a <summary> a button
@@ -78,6 +82,51 @@ function Anchor({ href, label }: { href: string; label: string }) {
   );
 }
 
+/* Where an image's bytes come from: http(s)/data URIs load straight; a local
+   path (or file:// URL, as agents emit) streams through /api/image. */
+function imageSrc(raw: string): string {
+  const url = raw.replace(/\\([()])/g, "$1");
+  if (/^(?:https?:)?\/\//.test(url) || url.startsWith("data:")) return url;
+  const local = url.replace(/^file:\/\//, "");
+  return `/api/image?path=${encodeURIComponent(local)}`;
+}
+
+/* Inline embedded image: a capped thumbnail that opens the full-size lightbox
+   on click, and quietly degrades to a plain link if the bytes never load. */
+function MdImage({ alt, src }: { alt: string; src: string }) {
+  const [full, setFull] = useState(false);
+  const [failed, setFailed] = useState(false);
+  const resolved = imageSrc(src);
+  if (failed) return <Anchor href={linkHref(src)} label={alt || src} />;
+  return (
+    <>
+      {/* eslint-disable-next-line @next/next/no-img-element -- arbitrary local/remote src, next/image cannot serve it */}
+      <img
+        src={resolved}
+        alt={alt}
+        title={alt || undefined}
+        loading="lazy"
+        onClick={() => setFull(true)}
+        onError={() => setFailed(true)}
+        className="my-1 max-h-[240px] max-w-full cursor-zoom-in rounded-[10px] border border-line align-top"
+      />
+      {full ? <Lightbox src={resolved} alt={alt} caption={alt || undefined} onClose={() => setFull(false)} /> : null}
+    </>
+  );
+}
+
+/* A run of image-only lines flows as a wrapping thumbnail row (a contact sheet
+   of screenshots reads far better side by side than stacked). */
+function MdImageRow({ images }: { images: { alt: string; src: string }[] }) {
+  return (
+    <div className="my-1.5 flex flex-wrap items-start gap-2">
+      {images.map((image, i) => (
+        <MdImage key={i} alt={image.alt} src={image.src} />
+      ))}
+    </div>
+  );
+}
+
 export function md(text: string): ReactNode {
   const parts = text.split(MD_INLINE_RE);
   return parts.map((part, i) => {
@@ -86,6 +135,8 @@ export function md(text: string): ReactNode {
       return <InlineCode key={i} text={part.slice(1, -1)} />;
     }
     if (part.startsWith("**") && part.endsWith("**")) return <b key={i}>{part.slice(2, -2)}</b>;
+    const image = part.match(/^!\[([^\]]*)\]\(([^)\s]+)\)$/);
+    if (image) return <MdImage key={i} alt={image[1]} src={image[2]} />;
     const linked = part.match(/^\[([^\]]+)\]\(([^)\s]+)\)$/);
     if (linked) {
       return <Anchor key={i} href={linkHref(linked[2])} label={linked[1]} />;
@@ -175,6 +226,20 @@ export function mdBlocks(text: string): ReactNode {
       /* The table div is a block element: the pending newline would add an empty row. */
       if (out[out.length - 1] === "\n") out.pop();
       out.push(<MdTable key={`t${start}`} rows={lines.slice(start, i)} />);
+      continue;
+    }
+    if (IMAGE_LINE_RE.test(lines[i])) {
+      const start = i;
+      const images: { alt: string; src: string }[] = [];
+      while (i < lines.length) {
+        const m = lines[i].match(IMAGE_LINE_RE);
+        if (!m) break;
+        images.push({ alt: m[1], src: m[2] });
+        i++;
+      }
+      /* The row is a block element: drop the pending newline before it. */
+      if (out[out.length - 1] === "\n") out.pop();
+      out.push(<MdImageRow key={`i${start}`} images={images} />);
       continue;
     }
     const line = lines[i];

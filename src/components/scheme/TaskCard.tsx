@@ -1,6 +1,6 @@
 "use client";
 
-import { Loader2, Send, Trash2, Zap } from "lucide-react";
+import { Link2, Loader2, Send, Trash2, X } from "lucide-react";
 import { memo, useEffect, useRef, useState } from "react";
 
 import { useLocale } from "@/lib/i18n";
@@ -8,9 +8,6 @@ import type { BoardTask } from "@/lib/tasks/types";
 import type { FileEntry } from "@/lib/types";
 
 import { useLinkDrag } from "@/components/AgentLink";
-import { ReasoningControls, type SpeedChoice } from "@/components/ReasoningControls";
-import { TargetChecklist } from "@/components/tasks/TargetChecklist";
-import type { SpawnAgentInput } from "@/components/tasks/taskApi";
 import { pushTaskToast } from "@/components/tasks/taskToast";
 import { nextTaskStatus, TASK_TONES, taskTitle } from "@/components/tasks/taskModel";
 import { activityDot, cleanTitle, engineBadge } from "@/components/utils";
@@ -39,23 +36,27 @@ function commitUnlessWindowBlur(el: HTMLTextAreaElement | null, commit: () => vo
 export interface TaskCardHandlers {
   patch: (id: string, patch: { text?: string; status?: BoardTask["status"]; pos?: { x: number; y: number } }) => Promise<string | null>;
   remove: (id: string) => void;
-  send: (task: BoardTask, paths: string[]) => void;
-  spawn: (task: BoardTask, input: SpawnAgentInput) => Promise<string | null>;
+  /** Handoff into a running agent: drops the task text into that pane's
+      composer (never auto-sent) and records a removable link. */
+  handoff: (task: BoardTask, file: FileEntry) => Promise<string | null>;
+  /** Route the task to a brand-new agent: seed a draft conversation, launch
+      nothing. */
+  draft: (task: BoardTask) => void;
+  /** Detach one assignment — the undo for a wrong handoff. */
+  unassign: (task: BoardTask, path: string) => void;
   center: (rect: SchemeRect) => void;
-  /** Currently selected conversation paths — «send» targets them directly. */
-  selectionPaths: () => string[];
 }
 
 function AssignmentChip({
   task,
   assignment,
   file,
-  onRetry,
+  onDetach,
 }: {
   task: BoardTask;
   assignment: BoardTask["assignments"][number];
   file: FileEntry | null;
-  onRetry: (task: BoardTask, path: string) => void;
+  onDetach: (task: BoardTask, path: string) => void;
 }) {
   const { t } = useLocale();
   if (!assignment.path) {
@@ -68,10 +69,26 @@ function AssignmentChip({
   }
   const dead = !file;
   const failed = assignment.state === "failed";
+  const handoff = assignment.state === "handoff";
   const badge = file ? engineBadge(file) : null;
   const title = file ? cleanTitle(file.title, 40) : (assignment.path.split("/").pop() ?? assignment.path);
-  const chip = (
-    <>
+  const wrapTitle = failed
+    ? t("tasks.chipFailedTitle", { error: assignment.error ?? "" })
+    : dead
+      ? t("tasks.deadChip")
+      : handoff
+        ? t("tasks.handoffChip")
+        : file
+          ? cleanTitle(file.title)
+          : undefined;
+  return (
+    <span
+      className={`flex h-6 w-full min-w-0 items-center gap-1.5 rounded-[6px] px-1.5 ${
+        failed ? "bg-[#faeee9] text-[#a04a2e]" : dead ? "bg-white/45 text-dim opacity-70" : "bg-white/55"
+      }`}
+      title={wrapTitle}
+    >
+      {handoff ? <Link2 className="h-3 w-3 shrink-0 text-[#0d9488]" aria-hidden /> : null}
       {file ? <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${activityDot(file.activity)}`} /> : null}
       {badge ? (
         <span className="shrink-0 rounded-full px-1.5 text-[9px] font-bold" style={badge.style}>
@@ -80,201 +97,16 @@ function AssignmentChip({
       ) : null}
       <span className="min-w-0 flex-1 truncate text-[10.5px] font-semibold">{title}</span>
       {failed ? <span aria-hidden>⚠</span> : null}
-    </>
-  );
-  if (failed || dead) {
-    return (
       <button
         type="button"
-        className={`flex h-6 w-full min-w-0 items-center gap-1.5 rounded-[6px] px-1.5 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
-          failed ? "bg-[#faeee9] text-[#a04a2e] hover:bg-[#f6ded2]" : "bg-white/45 text-dim opacity-70 hover:opacity-100"
-        }`}
-        title={
-          failed
-            ? t("tasks.chipFailedTitle", { error: assignment.error ?? "" })
-            : `${t("tasks.deadChip")} · ${t("tasks.retry")}`
-        }
-        onClick={() => onRetry(task, assignment.path!)}
+        className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-dim hover:bg-black/5 hover:text-err focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+        aria-label={t("tasks.detachAria", { title })}
+        title={t("tasks.detach")}
+        onClick={() => onDetach(task, assignment.path!)}
       >
-        {chip}
+        <X className="h-3 w-3" aria-hidden />
       </button>
-    );
-  }
-  return (
-    <span
-      className="flex h-6 w-full min-w-0 items-center gap-1.5 rounded-[6px] bg-white/55 px-1.5"
-      title={file ? cleanTitle(file.title) : undefined}
-    >
-      {chip}
     </span>
-  );
-}
-
-/** Checkbox picker over the project's conversations + «⤷ all children». */
-function SendPicker({
-  task,
-  files,
-  project,
-  onSend,
-  onClose,
-}: {
-  task: BoardTask;
-  files: FileEntry[];
-  project: string;
-  onSend: (task: BoardTask, paths: string[]) => void;
-  onClose: () => void;
-}) {
-  const { t } = useLocale();
-  const [checked, setChecked] = useState<ReadonlySet<string>>(() => new Set());
-
-  return (
-    <div
-      data-task-pop
-      className="absolute left-0 top-full z-30 mt-1 flex w-[280px] flex-col rounded-[10px] border border-line bg-panel p-1.5 shadow-[0_10px_36px_rgb(20_20_30/0.18)]"
-    >
-      <div className="px-1 pb-1 text-[10.5px] font-bold text-dim">{t("tasks.pickerTitle")}</div>
-      <TargetChecklist files={files} project={project} checked={checked} onChange={setChecked} />
-      <div className="mt-1 flex items-center justify-end gap-1 border-t border-line pt-1.5">
-        <button
-          type="button"
-          className="rounded-[8px] px-2 py-1 text-[11px] font-semibold text-dim hover:bg-bg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
-          onClick={onClose}
-        >
-          {t("common.cancel")}
-        </button>
-        <button
-          type="button"
-          disabled={!checked.size}
-          className="rounded-[8px] border border-accent bg-accent px-2.5 py-1 text-[11px] font-bold text-white hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 disabled:opacity-40"
-          onClick={() => {
-            onSend(task, [...checked]);
-            onClose();
-          }}
-        >
-          {t("tasks.pickerSend", { count: checked.size })}
-        </button>
-      </div>
-    </div>
-  );
-}
-
-/** Engine+cwd mini-popover; prefilled from the spawn GET suggest. */
-function SpawnPopover({
-  task,
-  onSpawn,
-  onClose,
-}: {
-  task: BoardTask;
-  onSpawn: (task: BoardTask, input: SpawnAgentInput) => Promise<string | null>;
-  onClose: () => void;
-}) {
-  const { t } = useLocale();
-  const [engine, setEngineState] = useState<"claude" | "codex">("claude");
-  const [cwd, setCwd] = useState("");
-  const [effort, setEffort] = useState("");
-  const [speed, setSpeed] = useState<SpeedChoice>("");
-  const [dirs, setDirs] = useState<string[]>([]);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const setEngine = (value: "claude" | "codex") => {
-    setEngineState(value);
-    /* Tier lists differ per engine — a carried-over invalid tier would 400. */
-    setEffort("");
-  };
-
-  /* First assignee's cwd ranks top in the suggestions. */
-  useEffect(() => {
-    let cancelled = false;
-    const src = task.assignments.find((assignment) => assignment.path)?.path;
-    fetch("/api/spawn?project=" + encodeURIComponent(task.project) + (src ? "&src=" + encodeURIComponent(src) : ""))
-      .then((res) => res.json() as Promise<{ dirs?: string[]; cwd?: string | null }>)
-      .then((json) => {
-        if (cancelled) return;
-        if (Array.isArray(json.dirs)) setDirs(json.dirs);
-        setCwd((prev) => prev || (typeof json.cwd === "string" ? json.cwd : "") || json.dirs?.[0] || "");
-      })
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-    };
-  }, [task.project, task.assignments]);
-
-  const go = async () => {
-    if (busy || !cwd.trim()) return;
-    setBusy(true);
-    setError(null);
-    const failure = await onSpawn(task, {
-      engine,
-      cwd: cwd.trim(),
-      ...(effort ? { effort } : {}),
-      ...(engine === "codex" && speed ? { fast: speed === "fast" } : {}),
-    });
-    setBusy(false);
-    if (failure) setError(failure);
-    else onClose();
-  };
-
-  const listId = "task-spawn-dirs-" + task.id;
-  return (
-    <div
-      data-task-pop
-      className="absolute left-0 top-full z-30 mt-1 flex w-[280px] flex-col gap-1.5 rounded-[10px] border border-line bg-panel p-2 shadow-[0_10px_36px_rgb(20_20_30/0.18)]"
-    >
-      <div className="flex items-center gap-1" role="radiogroup" aria-label={t("draft.engineAria")}>
-        {(["claude", "codex"] as const).map((key) => (
-          <button
-            key={key}
-            type="button"
-            role="radio"
-            aria-checked={engine === key}
-            disabled={busy}
-            onClick={() => setEngine(key)}
-            className={`rounded-full border px-2 py-0.5 text-[10.5px] font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60 ${
-              engine === key ? "border-accent bg-accent/10 text-accent" : "border-transparent text-dim hover:text-ink"
-            }`}
-          >
-            {key === "claude" ? "Claude" : "Codex"}
-          </button>
-        ))}
-      </div>
-      <input
-        value={cwd}
-        disabled={busy}
-        onChange={(event) => setCwd(event.target.value)}
-        list={listId}
-        placeholder="/home/…/Projects/…"
-        aria-label={t("draft.dirAria")}
-        className="min-w-0 rounded-[6px] border border-line bg-panel px-2 py-1 font-mono text-[11px] text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60"
-      />
-      <datalist id={listId}>
-        {dirs.map((dir) => (
-          <option key={dir} value={dir} />
-        ))}
-      </datalist>
-      <div className="flex flex-wrap items-center gap-1.5">
-        <ReasoningControls engine={engine} effort={effort} speed={speed} disabled={busy} onEffort={setEffort} onSpeed={setSpeed} />
-      </div>
-      {error ? <span className="text-[10.5px] font-semibold text-err">{error}</span> : null}
-      <div className="flex items-center justify-end gap-1">
-        <button
-          type="button"
-          className="rounded-[8px] px-2 py-1 text-[11px] font-semibold text-dim hover:bg-bg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
-          onClick={onClose}
-        >
-          {t("common.cancel")}
-        </button>
-        <button
-          type="button"
-          disabled={busy || !cwd.trim()}
-          className="inline-flex items-center gap-1 rounded-[8px] border border-accent bg-accent px-2.5 py-1 text-[11px] font-bold text-white hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 disabled:opacity-40"
-          onClick={() => void go()}
-        >
-          {busy ? <Loader2 className="h-3 w-3 animate-spin" aria-hidden /> : <Zap className="h-3 w-3" aria-hidden />}
-          {t("tasks.spawnGo")}
-        </button>
-      </div>
-    </div>
   );
 }
 
@@ -304,9 +136,8 @@ export const TaskCard = memo(function TaskCard({
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
   /* The last edit ended blank: nothing was saved (the server rejects empty
-     text), so deliveries are blocked until the user restores the text. */
+     text), so handoffs/drafts are blocked until the user restores the text. */
   const [blankEdit, setBlankEdit] = useState(false);
-  const [pop, setPop] = useState<"send" | "spawn" | null>(null);
   const [armDelete, setArmDelete] = useState(false);
   const editRef = useRef<HTMLTextAreaElement | null>(null);
 
@@ -317,9 +148,9 @@ export const TaskCard = memo(function TaskCard({
   }, [armDelete]);
 
   /* Autosave while typing; blur/Esc commit instantly. The effect closes over
-     the latest draft because it re-arms on every draft change. Deliveries
-     never race these saves: taskApi tracks in-flight text PATCHes per task
-     and sendTask/spawnTaskAgent wait them out (aborting on failure). */
+     the latest draft because it re-arms on every draft change. Handoffs never
+     race these saves: taskApi tracks in-flight text PATCHes per task and
+     handoffTask waits them out (aborting on failure). */
   useEffect(() => {
     if (!editing) return;
     const timer = window.setTimeout(() => {
@@ -345,21 +176,13 @@ export const TaskCard = memo(function TaskCard({
   };
 
   /* Blur fires before an action button's click, so commitEdit has already
-     classified the edit by the time these guards run. */
+     classified the edit by the time this guard runs. */
   const deliveryBlocked = (): boolean => {
     if (editing ? !draft.trim() : blankEdit) {
       pushTaskToast("err", t("tasks.emptyTextBlocked"));
       return true;
     }
     return false;
-  };
-  const guardedSend = (target: BoardTask, paths: string[]) => {
-    if (deliveryBlocked()) return;
-    handlers.send(target, paths);
-  };
-  const guardedSpawn = async (target: BoardTask, input: SpawnAgentInput): Promise<string | null> => {
-    if (deliveryBlocked()) return t("tasks.emptyTextBlocked");
-    return handlers.spawn(target, input);
   };
 
   const beginEdit = () => {
@@ -426,18 +249,22 @@ export const TaskCard = memo(function TaskCard({
   const title = taskTitle(task.text) || t("tasks.untitled");
   const rest = task.text.includes("\n") ? task.text.slice(task.text.indexOf("\n") + 1) : "";
   const byPath = new Map(files.map((file) => [file.path, file]));
-  const lifted = editing || drag !== null || pop !== null;
+  const lifted = editing || drag !== null;
 
-  /* The handoff gesture, task-flavored: pull the arrow off the «send»
-     pill onto a pane to deliver the task there; a drop on empty canvas means
-     «no suitable target» — it opens the spawn popover for a fresh agent. */
+  /* The handoff gesture, task-flavored: pull the arrow off the «send» pill
+     onto a pane to route the task into that agent's composer (nothing is
+     auto-sent); a drop on empty canvas means «no aimed agent» — it seeds a
+     fresh draft conversation with the task text. */
   const link = useLinkDrag({
     onDrop: (hit) => {
       if (deliveryBlocked()) return null;
-      handlers.send(task, [hit.file.path]);
-      return t("tasks.linkSent", { title: cleanTitle(hit.file.title, 48) });
+      void handlers.handoff(task, hit.file);
+      return t("tasks.linkHanded", { title: cleanTitle(hit.file.title, 48) });
     },
-    onMiss: () => setPop("spawn"),
+    onMiss: () => {
+      if (deliveryBlocked()) return;
+      handlers.draft(task);
+    },
   });
 
   return (
@@ -493,7 +320,7 @@ export const TaskCard = memo(function TaskCard({
                 task={task}
                 assignment={assignment}
                 file={assignment.path ? (byPath.get(assignment.path) ?? null) : null}
-                onRetry={(target, path) => guardedSend(target, [path])}
+                onDetach={(target, path) => handlers.unassign(target, path)}
               />
             ))}
           </div>
@@ -507,9 +334,9 @@ export const TaskCard = memo(function TaskCard({
           lifted ? "" : "pointer-events-none opacity-0 group-hover:pointer-events-auto group-hover:opacity-100"
         } transition-opacity`}
       >
-        {/* One pill for both deliveries: drag the arrow onto a pane to send
-            the task there, drop it on empty canvas to spawn a fresh agent.
-            A plain click keeps the checklist fallback (multi-send / no aim). */}
+        {/* One pill, two handoffs, neither auto-sends: drag the arrow onto a
+            pane to drop the task into that agent's composer, or click (drop on
+            empty canvas) to seed a fresh draft conversation. */}
         <button
           type="button"
           className="inline-flex h-7 touch-none items-center gap-1 rounded-full border border-line bg-panel px-2 text-[10.5px] font-semibold text-dim shadow-card hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
@@ -517,12 +344,8 @@ export const TaskCard = memo(function TaskCard({
           onPointerDown={link.onPillPointerDown}
           onClick={() => {
             if (link.consumeClick()) return;
-            const selection = handlers.selectionPaths();
-            if (selection.length) {
-              guardedSend(task, selection);
-              return;
-            }
-            setPop((prev) => (prev === "send" ? null : "send"));
+            if (deliveryBlocked()) return;
+            handlers.draft(task);
           }}
         >
           <Send className="h-3 w-3" aria-hidden /> {t("tasks.send")}
@@ -557,10 +380,6 @@ export const TaskCard = memo(function TaskCard({
         </button>
       </div>
 
-      {pop === "send" ? (
-        <SendPicker task={task} files={files} project={task.project} onSend={guardedSend} onClose={() => setPop(null)} />
-      ) : null}
-      {pop === "spawn" ? <SpawnPopover task={task} onSpawn={guardedSpawn} onClose={() => setPop(null)} /> : null}
       {link.overlay}
     </div>
   );

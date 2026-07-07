@@ -59,6 +59,12 @@ export function setDraftSrc(id: string, src: string) {
   writeField(id, "src", src);
 }
 
+/** Seeds a fresh draft's first prompt, before it mounts — the «send a task to
+    a brand-new agent» path drops the task text here, launching nothing. */
+export function setDraftText(id: string, text: string) {
+  writeField(id, "text", text);
+}
+
 function readBoot(id: string): Boot | null {
   try {
     const raw = JSON.parse(readField(id, "boot") || "null") as Boot | null;
