@@ -101,10 +101,20 @@ function loadPrefs(project: string): ColumnPrefs {
   }
 }
 
-/** Pre-adds a conversation as a manual scheme node of its project. */
-export function queueColumnOpen(project: string, path: string) {
+/**
+ * Pre-adds a conversation to its project's scheme before that project mounts.
+ * A connected conversation (`connected` = it has a parent) goes into the expand
+ * set so it renders as a node wired below its parent; a parentless one becomes a
+ * standalone manual node. Without this split, cross-project opens of a connected
+ * child would detach it from its parent.
+ */
+export function queueColumnOpen(project: string, path: string, connected = false) {
   const prefs = loadPrefs(project);
-  if (!prefs.manual.includes(path)) prefs.manual.push(path);
+  if (connected) {
+    if (!prefs.expanded.includes(path)) prefs.expanded.push(path);
+  } else if (!prefs.manual.includes(path)) {
+    prefs.manual.push(path);
+  }
   prefs.hidden = prefs.hidden.filter((item) => item !== path);
   localStorage.setItem(prefsKey(project), JSON.stringify(prefs));
 }
@@ -429,7 +439,7 @@ export function ProjectDashboard({
   const openSwitchboardFile = (file: FileEntry) => {
     const fileProject = projectKey(file);
     if (fileProject !== project) {
-      queueColumnOpen(fileProject, file.path);
+      queueColumnOpen(fileProject, file.path, file.parent != null);
       gotoProject(fileProject);
       return;
     }

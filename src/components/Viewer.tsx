@@ -120,7 +120,7 @@ export function Viewer() {
   const openFile = useCallback(
     (file: FileEntry) => {
       const key = projectKey(file);
-      queueColumnOpen(key, file.path);
+      queueColumnOpen(key, file.path, file.parent != null);
       selectProject(key);
       setOpenNonce((value) => value + 1);
     },
