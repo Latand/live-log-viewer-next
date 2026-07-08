@@ -14,7 +14,7 @@ import type { FileEntry } from "@/lib/types";
 import { attentionId, buildAttentionQueue, nextAttention, STALLED_ATTENTION_TTL, type AttentionItem } from "./attention";
 import { OverviewBoard } from "./OverviewBoard";
 import { ProjectDashboard, queueColumnOpen } from "./ProjectDashboard";
-import { OVERVIEW, projectKey } from "./projectModel";
+import { isChildConversation, OVERVIEW, projectKey } from "./projectModel";
 import { ProjectRail } from "./ProjectRail";
 import { cleanTitle, fmtAge } from "./utils";
 
@@ -120,7 +120,7 @@ export function Viewer() {
   const openFile = useCallback(
     (file: FileEntry) => {
       const key = projectKey(file);
-      queueColumnOpen(key, file.path, file.parent != null);
+      queueColumnOpen(key, file.path, isChildConversation(file));
       selectProject(key);
       setOpenNonce((value) => value + 1);
     },

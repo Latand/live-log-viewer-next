@@ -25,6 +25,7 @@ import {
   buildArchiveBranchGroups,
   buildBranchGroups,
   collapsedTrees,
+  isChildConversation,
   projectKey,
   quietRootsWithActiveDescendants,
   residualItems,
@@ -103,10 +104,10 @@ function loadPrefs(project: string): ColumnPrefs {
 
 /**
  * Pre-adds a conversation to its project's scheme before that project mounts.
- * A connected conversation (`connected` = it has a parent) goes into the expand
- * set so it renders as a node wired below its parent; a parentless one becomes a
- * standalone manual node. Without this split, cross-project opens of a connected
- * child would detach it from its parent.
+ * A child conversation (`connected` = isChildConversation, what the tree can
+ * actually nest) goes into the expand set so it renders as a node wired below
+ * its parent; anything else becomes a standalone manual node. Without this
+ * split, cross-project opens of a connected child would detach from its parent.
  */
 export function queueColumnOpen(project: string, path: string, connected = false) {
   const prefs = loadPrefs(project);
@@ -439,7 +440,7 @@ export function ProjectDashboard({
   const openSwitchboardFile = (file: FileEntry) => {
     const fileProject = projectKey(file);
     if (fileProject !== project) {
-      queueColumnOpen(fileProject, file.path, file.parent != null);
+      queueColumnOpen(fileProject, file.path, isChildConversation(file));
       gotoProject(fileProject);
       return;
     }
@@ -450,16 +451,20 @@ export function ProjectDashboard({
       return;
     }
     const hidden = prefs.hidden.filter((item) => item !== file.path);
-    if (file.parent) {
-      /* A connected conversation (we know its parent) expands as a node wired
-         below that parent — clicking its collapsed form promotes it into the
-         tree via the scheme's expandedConversationPaths, not as a loose
-         standalone node. */
+    if (isChildConversation(file)) {
+      /* A child conversation expands as a node wired below its parent — clicking
+         its collapsed form promotes it into the tree via the scheme's
+         expandedConversationPaths. The predicate must match what
+         buildBranchGroups can actually promote (isChildConversation), not just
+         "has a parent": a compaction predecessor has a parent but is neither a
+         conversation nor a child conversation, so routing it to expanded would
+         render nothing. */
       const expanded = [...new Set([...prefs.expanded, file.path])];
       persistPrefs({ ...prefs, hidden, expanded });
     } else {
-      /* A parentless conversation has no parent to nest under, so it opens as a
-         standalone managed node. */
+      /* Everything else (a root conversation, or a parented row the tree can't
+         nest — e.g. a compaction predecessor) opens as a standalone managed
+         node. */
       const manual = autoPaths.has(file.path) ? prefs.manual : [...new Set([...prefs.manual, file.path])];
       persistPrefs({ ...prefs, hidden, manual });
     }
