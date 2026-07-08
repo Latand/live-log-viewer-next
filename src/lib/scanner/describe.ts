@@ -340,21 +340,7 @@ export function describe(rootName: RootKey, root: string, pathname: string, st: 
   let engine: Engine = "claude";
   let kind = "";
   let fmt: Fmt = "plain";
-  if (rootName === "codex-jobs") {
-    const slug = rel.split(path.sep)[0] ?? "";
-    const parts = slug.split("-");
-    const suffix = parts.at(-1) ?? "";
-    project = parts.length >= 2 && suffix.length >= 12 ? parts.slice(0, -1).join("-") : slug;
-    engine = "codex";
-    kind = "job";
-    const job = readJson(pathname.replace(/\.log$/, ".json"));
-    if (job) {
-      const bits = [stringValue(job.kindLabel) ?? "", stringValue(job.title) ?? ""].filter(Boolean);
-      const head = bits.join(" · ");
-      const summary = (stringValue(job.summary) ?? "").split(/\s+/).join(" ").trim();
-      title = (head + (summary ? " — " + summary : "")) || fn;
-    } else title = fn;
-  } else if (rootName === "codex-sessions") {
+  if (rootName === "codex-sessions") {
     const cachedProject = codexProjectCache.get(pathname);
     if (cachedProject) {
       project = cachedProject.project;

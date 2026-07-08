@@ -2,16 +2,9 @@
 
 import { useEffect, useState } from "react";
 
-import { Command, Play } from "@/components/icons";
-import { type TFunction, useLocale } from "@/lib/i18n";
+import { Play } from "@/components/icons";
+import { useLocale } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
-
-function activityText(t: TFunction, file: FileEntry): string {
-  if (file.activity === "live") return t("task.working");
-  if (file.activity === "stalled") return t("task.interrupted");
-  if (file.activity === "recent") return t("task.finished");
-  return "";
-}
 
 export function ProcessStatusChip({ file }: { file: FileEntry }) {
   const { t } = useLocale();
@@ -126,41 +119,8 @@ export function ProcessStatusControls({
   );
 }
 
-export function TaskHeader({
-  file,
-  files,
-  onSelect,
-}: {
-  file: FileEntry;
-  files: FileEntry[];
-  onSelect: (file: FileEntry) => void;
-}) {
+export function TaskHeader({ file }: { file: FileEntry }) {
   const { t } = useLocale();
-  if (file.root === "codex-jobs") {
-    const rollout = files.find((entry) => entry.root === "codex-sessions" && entry.parent === file.path);
-    return (
-      <div className="mb-4 mt-1 rounded-[14px] border border-line bg-panel px-4 py-3 shadow-card">
-        <div className="mb-2 flex flex-wrap items-center gap-2">
-          <ProcessStatusChip file={file} />
-        </div>
-        {rollout ? (
-          <>
-            <div className="mb-2 whitespace-pre-line text-[13.5px] font-semibold">
-              {t("task.jobLogHint")}
-            </div>
-            <button
-              className="inline-flex items-center gap-1.5 rounded-[10px] border border-line bg-bg px-3 py-1.5 text-[13px] font-semibold text-codex hover:bg-codex-soft"
-              onClick={() => onSelect(rollout)}
-            >
-              <Command className="h-3.5 w-3.5" aria-hidden /> {t("task.openCodexSession", { size: (rollout.size / 1024).toFixed(0), activity: activityText(t, rollout) })}
-            </button>
-          </>
-        ) : (
-          <div className="text-[13.5px] text-dim">{t("task.rolloutMissing")}</div>
-        )}
-      </div>
-    );
-  }
   if (file.root !== "claude-tasks") return null;
   return (
     <div className="mb-4 mt-1 rounded-[14px] border border-line bg-panel px-4 py-3 shadow-card">

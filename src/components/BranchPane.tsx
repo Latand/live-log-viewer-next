@@ -65,10 +65,8 @@ function LastActivity({ file }: { file: FileEntry }) {
 
 interface Props {
   file: FileEntry;
-  files: FileEntry[];
   /** Background tasks attached to this column as collapsed rows. */
   tasks: FileEntry[];
-  onSelect: (file: FileEntry) => void;
   /** Column of the root conversation of a branch group. */
   isRoot: boolean;
   /** Removes the column from the managed list. */
@@ -91,7 +89,7 @@ interface Props {
   dormant?: boolean;
 }
 
-export function BranchPane({ file, files, tasks, onSelect, isRoot, onClose, dragHandle, noComposer, banner, onToggleExpand, expanded, dormant }: Props) {
+export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noComposer, banner, onToggleExpand, expanded, dormant }: Props) {
   const { t } = useLocale();
   const isMobile = useIsMobile();
   const paneRef = useRef<HTMLElement | null>(null);
@@ -228,15 +226,13 @@ export function BranchPane({ file, files, tasks, onSelect, isRoot, onClose, drag
           <FlipRow className="shrink-0 border-b border-line bg-[#fbfbfd]" enter="fade">
             {tasks.map((task) => (
               <div key={task.path} data-flip-key={task.path}>
-                <TaskStrip file={task} files={files} onSelect={onSelect} paused={feedPaused} />
+                <TaskStrip file={task} paused={feedPaused} />
               </div>
             ))}
           </FlipRow>
         ) : null}
         <LogFeed
           file={file}
-          files={files}
-          onSelect={onSelect}
           showSvc={false}
           lineFilter=""
           onStatus={noop}
@@ -254,13 +250,9 @@ export function BranchPane({ file, files, tasks, onSelect, isRoot, onClose, drag
 /** Collapsed background-task row: glyph, title, PID chip, kill; click expands an inline mini feed. */
 export function TaskStrip({
   file,
-  files,
-  onSelect,
   paused = false,
 }: {
   file: FileEntry;
-  files: FileEntry[];
-  onSelect: (file: FileEntry) => void;
   paused?: boolean;
 }) {
   const { t } = useLocale();
@@ -287,8 +279,6 @@ export function TaskStrip({
         <div className="flex h-[220px] flex-col border-t border-dashed border-line bg-bg/60">
           <LogFeed
             file={file}
-            files={files}
-            onSelect={onSelect}
             showSvc={false}
             lineFilter=""
             onStatus={noop}

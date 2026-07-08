@@ -2,8 +2,8 @@
 
 `agent-log-viewer` is a local web UI that turns raw Codex / Claude Code agent
 logs into a readable, live-updating chat feed. It discovers every session,
-subagent, Codex companion job and background shell task on your machine, links
-them into a parent→child tree, and tails the selected one in real time.
+subagent and background shell task on your machine, links them into a
+parent→child tree, and tails the selected one in real time.
 
 Everything runs locally against files already on disk. There is no database and
 no external service — the app reads `~/.claude` and `~/.codex` and renders what
@@ -19,8 +19,6 @@ statuses and expandable output](docs/media/chat-feed.png)
   cards with ✓/✗ statuses and expandable output.
 - **Codex CLI sessions** (`~/.codex/sessions/**/rollout-*.jsonl`) with command
   cards, patches and service events.
-- **Codex companion jobs** (`~/.claude/plugins/data/codex-openai-codex/state`)
-  with a one-click jump to the full rollout session behind each job.
 - **Background shell tasks** (`claude-<uid>/**/tasks/*.output` under the OS
   temp dir — `/tmp` on Linux, `$TMPDIR` on macOS) — the originating Bash
   command is recovered from the session transcript and shown above the
@@ -28,8 +26,8 @@ statuses and expandable output](docs/media/chat-feed.png)
 
 ## Highlights
 
-- **Parentage tree**: session → subagents → codex jobs → rollouts → background
-  tasks, built server-side by scanning transcripts (append-only incremental,
+- **Parentage tree**: session → subagents → rollouts → background tasks, built
+  server-side by scanning transcripts (append-only incremental,
   cached — the warm `/api/files` poll stays around 100 ms).
 - **Live activity**: content-based badges — a transcript reads *working* while
   it is mid-turn and *done* once the final assistant message lands.
@@ -89,6 +87,21 @@ file-watch limit for large home directories).
 
 **Prerequisites:** Node ≥ 20.9, and bun or npm/pnpm. `tmux` is optional — see
 [Platform support](#platform-support).
+
+### Docker (reproducible runtime)
+
+For a pinned, reproducible deployment the repo ships a `Dockerfile` and
+`docker-compose.yml` that build `.next` inside the image and run the viewer
+with host parity (the container reuses your real `tmux`, `claude`, `codex` and
+home directory). This is how the maintainer's own prod instance runs.
+
+```bash
+docker compose up -d viewer          # prod on 127.0.0.1:8898, restarts on reboot
+LLV_TEST_PORT=8901 docker compose --profile test up -d viewer-test
+```
+
+See [docs/docker.md](docs/docker.md) for the parity model, the nsenter shims,
+and volume/port details.
 
 ### CLI options
 
@@ -217,6 +230,7 @@ All optional. Transcription variables are documented in full in
 | `LLV_WHISPER_VENV` | Path to the whisper virtualenv (default `~/.cache/agent-log-viewer/whisper-venv`). |
 | `LLV_ELEVENLABS_STT_MODEL` | ElevenLabs batch model override. |
 | `ELEVENLABS_API_KEY` | ElevenLabs API key for the ElevenLabs backend. |
+| `LLV_DOCKER_NSENTER_SHIMS` | `1` makes the agent CLI resolver prefer the container's `/usr/local/bin` nsenter shims for host CLIs. Set automatically by the Docker image; leave unset on a host runtime. See [docs/docker.md](docs/docker.md). |
 
 ## Config paths
 

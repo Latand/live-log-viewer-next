@@ -3,7 +3,6 @@ import type { BoardTask } from "@/lib/tasks/types";
 import type { Workflow } from "@/lib/workflows/types";
 
 export type RootKey =
-  | "codex-jobs"
   | "codex-sessions"
   | "claude-projects"
   | "claude-tasks";

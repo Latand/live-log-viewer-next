@@ -6,6 +6,37 @@ versions follow [SemVer](https://semver.org/) (0.x — the API may still move).
 
 ## [Unreleased]
 
+## [0.10.0] — 2026-07-08
+
+### Added
+- Docker runtime: a `Dockerfile` and `docker-compose.yml` build `.next` inside
+  the image from a clean environment and run the viewer with host parity — host
+  network and PID namespace, the real `/home/latand` tree and tmux socket, and
+  `nsenter` shims that exec the exact host `claude`/`codex`/`bun`/`uv`/`tmux`.
+  Prod runs as the `viewer` service on `127.0.0.1:8898` with
+  `restart: unless-stopped`; a `test` profile brings up a second instance on
+  another port. Reproducibility, not isolation — see `docs/docker.md`.
+- Idle conversation roots now appear in the quiet history list even when they
+  head an active group, marked to set them apart from fully-quiet roots.
+
+### Changed
+- The prod deployment moved from the `agent-log-viewer.service` systemd user
+  unit to Docker Compose; the systemd unit is disabled. `scripts/rebuild.sh`
+  now rebuilds and redeploys the container (still verifying the served CSS the
+  HTML references returns 200).
+- Removed Codex companion-job support. The viewer no longer scans, links, or
+  renders `~/.claude/plugins/data/codex-openai-codex/state` jobs — the
+  `codex-jobs` root and its parentage linking are gone. Codex spawning was
+  never routed through the companion plugin (it uses tmux directly), so
+  spawn behavior is unchanged.
+
+### Fixed
+- Spawning an agent survives a deleted tmux server cwd: the pane receives an
+  explicit `cd` into the target directory before the boot command, so a stale
+  server working directory no longer aborts the launch.
+- An archived project revives when an agent inside it is running again: an
+  idle-but-running conversation un-hides its project instead of staying hidden.
+
 ## [0.9.3] — 2026-07-07
 
 ### Changed
@@ -163,7 +194,11 @@ Initial public release, packaged as `agent-log-viewer` with a `bunx` CLI.
 - Implement→review flows with fresh headless reviewer rounds.
 - Remote access over Tailscale behind a token gate.
 
-[Unreleased]: https://github.com/Latand/live-log-viewer-next/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/Latand/live-log-viewer-next/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/Latand/live-log-viewer-next/compare/v0.9.3...v0.10.0
+[0.9.3]: https://github.com/Latand/live-log-viewer-next/compare/v0.9.1...v0.9.3
+[0.9.1]: https://github.com/Latand/live-log-viewer-next/compare/v0.9.0...v0.9.1
+[0.9.0]: https://github.com/Latand/live-log-viewer-next/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/Latand/live-log-viewer-next/compare/714badd...v0.8.0
 [0.7.0]: https://github.com/Latand/live-log-viewer-next/compare/v0.6.0...714badd
 [0.6.0]: https://github.com/Latand/live-log-viewer-next/compare/v0.5.0...v0.6.0

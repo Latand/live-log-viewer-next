@@ -409,7 +409,6 @@ function MiniStackShell({ stack, dimmed, onSelect }: { stack: MiniStack; dimmed:
 
 function NodeShell({
   node,
-  files,
   ringed,
   marked,
   dimmed,
@@ -423,7 +422,6 @@ function NodeShell({
   onExpand,
 }: {
   node: SchemeNode;
-  files: FileEntry[];
   ringed: boolean;
   /** Member of the selection session: checkmark badge + exempt from dimming. */
   marked: boolean;
@@ -496,8 +494,6 @@ function NodeShell({
         <BranchPane
           file={node.file}
           tasks={node.tasks}
-          files={files}
-          onSelect={onSelect}
           isRoot={node.isRoot}
           dormant={dormant}
           onClose={() => onClose(node.file.path)}
@@ -581,18 +577,14 @@ function DraftShell({
 /** The review deck as a scheme citizen: positioned like a child node. */
 function DeckShell({
   deck,
-  files,
   focus,
   dimmed,
   dormant,
-  onSelect,
 }: {
   deck: DeckNode;
-  files: FileEntry[];
   focus: DeckFocus | null;
   dimmed: boolean;
   dormant: boolean;
-  onSelect: (file: FileEntry) => void;
 }) {
   const focusRound = focus && focus.flowId === deck.flow.id ? focus.round + focus.nonce / 1000 : null;
   return (
@@ -601,7 +593,7 @@ function DeckShell({
       className={`scheme-enter absolute${dimClass(dimmed)}`}
       style={{ transform: `translate(${deck.x}px, ${deck.y}px)`, width: deck.w, height: deck.h, transition: MOVE_TRANSITION }}
     >
-      <RoundDeck flow={deck.flow} rounds={deck.rounds} files={files} onSelect={onSelect} focusRound={focusRound} dormant={dormant} />
+      <RoundDeck flow={deck.flow} rounds={deck.rounds} focusRound={focusRound} dormant={dormant} />
       <RoleTag role="reviewer" active={activeLoopRole(deck.flow) === "reviewer"} />
     </div>
   );
@@ -678,11 +670,9 @@ export const NodesLayer = memo(function NodesLayer({
           <DeckShell
             key={deck.key}
             deck={deck}
-            files={files}
             focus={deckFocus}
             dimmed={deckDimmed(deck)}
             dormant={dormant}
-            onSelect={onSelect}
           />
         ),
       )}
@@ -720,7 +710,6 @@ export const NodesLayer = memo(function NodesLayer({
           <NodeShell
             key={node.file.path}
             node={node}
-            files={files}
             ringed={session ? multi.has(node.file.path) : selected === node.file.path || focus === node.file.path}
             marked={session && multi.has(node.file.path)}
             dimmed={attentionPaths !== null && !attentionPaths.has(node.file.path)}

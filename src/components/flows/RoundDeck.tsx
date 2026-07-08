@@ -80,15 +80,11 @@ function RoundTab({
 export function RoundDeck({
   flow,
   rounds,
-  files,
-  onSelect,
   focusRound,
   dormant = false,
 }: {
   flow: Flow;
   rounds: DeckRound[];
-  files: FileEntry[];
-  onSelect: (file: FileEntry) => void;
   /** Round chip clicked on the strip; nonce-encoded as `n + fraction` changes. */
   focusRound: number | null;
   /** Far zoom on the board: the front pane's feed sleeps behind the labels. */
@@ -142,9 +138,7 @@ export function RoundDeck({
         {front.file ? (
           <BranchPane
             file={front.file}
-            files={files}
             tasks={[]}
-            onSelect={onSelect}
             isRoot={false}
             dormant={dormant}
             noComposer={flow.reviewerMode === "headless" || finished}

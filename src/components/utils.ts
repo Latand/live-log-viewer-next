@@ -141,13 +141,11 @@ export function engineBadge(file: FileEntry) {
 }
 
 export function syntheticFile(pathname: string): FileEntry {
-  const root = pathname.includes("/.codex/sessions/")
-    ? "codex-sessions"
-    : pathname.includes("/.claude/projects/")
-      ? "claude-projects"
-      : /\/tmp\/claude-\d+\//.test(pathname)
-        ? "claude-tasks"
-        : "codex-jobs";
+  const root = pathname.includes("/.claude/projects/")
+    ? "claude-projects"
+    : /\/tmp\/claude-\d+\//.test(pathname)
+      ? "claude-tasks"
+      : "codex-sessions";
   const fmt = pathname.endsWith(".jsonl") ? (root === "claude-projects" ? "claude" : "codex") : "plain";
   const engine = root.startsWith("codex") ? "codex" : root === "claude-tasks" ? "shell" : "claude";
   return {

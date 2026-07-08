@@ -268,12 +268,6 @@ export function SchemeBoard({
   /* The handle renders only when the opener wired a handler (not in map mode). */
   const handoffForNodes = onHandoff ? stableHandoff : undefined;
   const stableExpand = useCallback((path: string) => setExpanded(path), []);
-  /* Opening another conversation from inside the overlay (agent links,
-     subagent chips) collapses it first, so the board jump stays visible. */
-  const overlaySelect = useCallback((file: FileEntry) => {
-    setExpanded(null);
-    selectRef.current(file);
-  }, []);
 
   /* A stationary background tap: inside the session it toggles the node under
      the cursor (panes are click-through, so the DOM can't answer) or exits on
@@ -697,9 +691,7 @@ export function SchemeBoard({
       >
         <BranchPane
           file={expandedNode.file}
-          files={files}
           tasks={expandedNode.tasks}
-          onSelect={overlaySelect}
           isRoot={expandedNode.isRoot}
           expanded
           onToggleExpand={() => setExpanded(null)}

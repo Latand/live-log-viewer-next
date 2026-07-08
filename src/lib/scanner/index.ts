@@ -7,37 +7,15 @@ import { tickWorkflows } from "../workflows/engine";
 import { ctxFor } from "./context";
 import { discoverFiles } from "./discover";
 import { entryEffort } from "./effort";
-import { numberValue, readJson } from "./json";
 import { linkEntries } from "./links";
 import { entryModel } from "./model";
-import { outputHolders, pidAlive } from "./process";
+import { outputHolders } from "./process";
 import { goalFor, planFor } from "./plan";
 import { pendingQuestionFor } from "./questions";
 import { assignTranscriptPids } from "./transcripts";
 import { waitingInputProbe } from "./waitingInput";
 
-function applyProcessState(entry: FileEntry, holders: Map<string, number>, job: Record<string, unknown> | null) {
-  if (entry.root === "codex-jobs") {
-    if (!job) return;
-    const pid = numberValue(job.pid);
-    entry.pid = pid;
-    if (job.status === "running") {
-      if (pid !== null && pidAlive(pid)) {
-        entry.proc = "running";
-        entry.activity = "live";
-        entry.activityReason = "job_pid_alive";
-      } else {
-        entry.proc = "killed";
-        if (entry.activity === "live") {
-          entry.activity = Date.now() / 1000 - entry.mtime < 900 ? "recent" : "idle";
-          entry.activityReason = "job_pid_dead";
-        }
-      }
-      return;
-    }
-    entry.proc = "done";
-    return;
-  }
+function applyProcessState(entry: FileEntry, holders: Map<string, number>) {
   if (entry.root === "claude-tasks" && entry.path.endsWith(".output")) {
     const holder = holders.get(entry.path) ?? null;
     entry.pid = holder;
@@ -98,17 +76,14 @@ export async function listFiles(): Promise<FileEntry[]> {
   // activity() only consults holders on the same claude-tasks/.output path.
   const needsHolders = entries.some((entry) => entry.root === "claude-tasks" && entry.path.endsWith(".output"));
   const holders = needsHolders ? outputHolders() : NO_HOLDERS;
-  const jobs = new Map<string, Record<string, unknown> | null>();
   await forEachEntryYielding(entries, (entry) => {
-    const job = entry.root === "codex-jobs" ? readJson(entry.path.replace(/\.log$/, ".json")) : null;
-    jobs.set(entry.path, job);
-    const verdict = activityVerdict(entry.root, entry.path, entry.mtime, entry.size, job);
+    const verdict = activityVerdict(entry.root, entry.path, entry.mtime, entry.size);
     entry.activity = verdict.state;
     entry.activityReason = verdict.reason;
     entry.model = entryModel(entry);
   });
   await forEachEntryYielding(entries, (entry) => {
-    applyProcessState(entry, holders, jobs.get(entry.path) ?? null);
+    applyProcessState(entry, holders);
   });
   assignTranscriptPids(entries);
   // After pid assignment: the claude effort source is the live process argv.

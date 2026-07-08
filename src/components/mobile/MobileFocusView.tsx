@@ -209,8 +209,6 @@ export function MobileFocusView({ project, groups, manual, files, flows, tasks, 
             <BranchPane
               file={activeNode.file}
               tasks={activeNode.tasks}
-              files={files}
-              onSelect={onSelect}
               isRoot={activeNode.isRoot}
               onClose={() => onClose(activeNode.file.path)}
               dragHandle={swipeHandle}
@@ -219,7 +217,7 @@ export function MobileFocusView({ project, groups, manual, files, flows, tasks, 
           </div>
         ) : activeDeck ? (
           <div key={activeDeck.key} className="relative min-h-0 flex-1">
-            <RoundDeck flow={activeDeck.flow} rounds={activeDeck.rounds} files={files} onSelect={onSelect} focusRound={null} />
+            <RoundDeck flow={activeDeck.flow} rounds={activeDeck.rounds} focusRound={null} />
           </div>
         ) : activeDraft ? (
           isWorkflowDraftId(activeDraft.id) ? (

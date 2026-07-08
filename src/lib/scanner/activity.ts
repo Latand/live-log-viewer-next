@@ -2,8 +2,8 @@ import fs from "node:fs";
 
 import type { Activity, RootKey } from "../types";
 import { globalCache } from "./caches";
-import { numberValue, readJson, recordValue, stringValue } from "./json";
-import { outputHolders, pidAlive } from "./process";
+import { recordValue, stringValue } from "./json";
+import { outputHolders } from "./process";
 
 const turnCache = globalCache<[number, string | null]>("turn");
 
@@ -122,20 +122,8 @@ export function activityVerdict(
   pathname: string,
   mtime: number,
   size: number,
-  job: Record<string, unknown> | null = null,
 ): ActivityVerdict {
   const age = Date.now() / 1000 - mtime;
-  if (root === "codex-jobs") {
-    const jobJson = job ?? readJson(pathname.replace(/\.log$/, ".json"));
-    if (jobJson) {
-      if (jobJson.status === "running") {
-        const pid = numberValue(jobJson.pid);
-        if (pid !== null && pidAlive(pid)) return { state: "live", reason: "job_pid_alive" };
-        return { state: age < 900 ? "recent" : "idle", reason: "job_pid_dead" };
-      }
-      return { state: age < 900 ? "recent" : "idle", reason: "job_finished" };
-    }
-  }
   if (root === "claude-tasks" && pathname.endsWith(".output")) {
     if (outputHolders().has(pathname)) return { state: "live", reason: "output_held" };
     return { state: age < 900 ? "recent" : "idle", reason: "output_released" };
@@ -165,7 +153,6 @@ export function activity(
   pathname: string,
   mtime: number,
   size: number,
-  job: Record<string, unknown> | null = null,
 ): Activity {
-  return activityVerdict(root, pathname, mtime, size, job).state;
+  return activityVerdict(root, pathname, mtime, size).state;
 }

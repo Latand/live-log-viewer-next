@@ -15,7 +15,7 @@ import { globalCache } from "./caches";
 import { taskParts } from "./discover";
 import { readJson, recordValue, recordsValue, stringValue } from "./json";
 import { fileHasNeedle, findNeedle } from "./needle";
-import { readEnvVar, readPpid } from "./process";
+import { readPpid } from "./process";
 import { ROOTS } from "./roots";
 
 const sidSlugCache = globalCache<string>("sid-slug");
@@ -152,10 +152,6 @@ async function sessionTranscripts(sid: string, limit: Limit, slug?: string | nul
   return [fs.existsSync(main) ? main : null, subs];
 }
 
-function jobMeta(logPath: string) {
-  return readJson(logPath.replace(/\.log$/, ".json"));
-}
-
 const FALLBACK_TRANSCRIPT_CAP = 8;
 const FALLBACK_BYTES_CAP = 64 * 1024 * 1024;
 
@@ -245,7 +241,6 @@ function bgCommand(tid: string, transcripts: (string | null)[], fallbackTranscri
   return weak;
 }
 
-const COMPANION_TRANSCRIPT_ENV = "CODEX_COMPANION_TRANSCRIPT_PATH";
 const ANCESTRY_MAX_DEPTH = 15;
 
 /**
@@ -304,14 +299,11 @@ function persistLineage(): void {
 }
 
 /**
- * Live rollouts without a job-state link still prove their spawner through
- * /proc. The codex plugin hook exports the Claude transcript path into every
- * Bash environment, and children keep it across exec — including the
- * app-server broker whose ppid chain detaches to systemd, where walking
- * ancestry alone would dead-end. A pid already attributed to a Claude
- * transcript among the ancestors is the equivalent proof for direct spawns
- * without the hook. Both are spawn-lineage facts; no mtime or project
- * heuristics participate.
+ * Live rollouts without a recorded parent still prove their spawner through
+ * /proc. A pid already attributed to a Claude transcript among the rollout's
+ * ancestors is the spawner: the nearest Claude ancestor owns the codex it
+ * launched. This is a spawn-lineage fact; no mtime or project heuristics
+ * participate.
  */
 function attachLiveCodexParents(entries: FileEntry[]): void {
   loadLineage();
@@ -327,13 +319,9 @@ function attachLiveCodexParents(entries: FileEntry[]): void {
     for (let pid: number | null = rollout.pid; pid !== null && !seen.has(pid); pid = readPpid(pid)) {
       seen.add(pid);
       if (seen.size > ANCESTRY_MAX_DEPTH) break;
-      // The nearest Claude ancestor wins over the env value: a teammate agent
-      // spawned from another session re-exports the hook variable, but its own
-      // environ still carries the grandparent's transcript.
       const owner = claudeByPid.get(pid);
-      const transcript = owner ?? readEnvVar(pid, COMPANION_TRANSCRIPT_ENV);
-      if (transcript) {
-        resolved = transcript;
+      if (owner) {
+        resolved = owner;
         break;
       }
     }
@@ -385,18 +373,6 @@ function attachHandoffParents(entries: FileEntry[]): void {
 export async function linkEntries(entries: FileEntry[]): Promise<void> {
   const limit = createLimiter(48);
   const byPath = new Map(entries.map((entry) => [entry.path, entry]));
-  const threadMap = new Map<string, string>();
-  if (fs.existsSync(ROOTS["codex-jobs"])) {
-    for (const jsonPath of await globWalk(
-      ROOTS["codex-jobs"],
-      (p) => path.basename(p).startsWith("task-") && p.endsWith(".json"),
-      limit,
-    )) {
-      const job = readJson(jsonPath);
-      const threadId = stringValue(job?.threadId);
-      if (threadId) threadMap.set(threadId, jsonPath.slice(0, -".json".length) + ".log");
-    }
-  }
   for (const entry of entries) {
     if (entry.root === "claude-projects") {
       const parts = entry.name.split(path.sep);
@@ -416,21 +392,6 @@ export async function linkEntries(entries: FileEntry[]): Promise<void> {
           if (found) entry.parent = found;
         }
       }
-    } else if (entry.root === "codex-jobs") {
-      const job = jobMeta(entry.path) ?? {};
-      const sid = stringValue(job.sessionId);
-      if (sid) {
-        const ws = stringValue(job.workspaceRoot) ?? "";
-        const slug = ws ? ws.replace(/[^A-Za-z0-9-]/g, "-") : null;
-        let [main, subs] = await sessionTranscripts(sid, limit, slug);
-        if (!main && slug) [main, subs] = await sessionTranscripts(sid, limit, null);
-        const jobId = path.basename(entry.path).slice(0, -".log".length);
-        const found = findNeedle(jobId, subs);
-        entry.parent = found ?? main;
-      }
-    } else if (entry.root === "codex-sessions") {
-      const threadId = entry.path.match(/([0-9a-f-]{36})\.jsonl$/)?.[1];
-      if (threadId && threadMap.has(threadId)) entry.parent = threadMap.get(threadId) ?? null;
     } else if (entry.root === "claude-tasks") {
       const parts = taskParts(ROOTS["claude-tasks"], entry.path);
       if (!parts) continue;

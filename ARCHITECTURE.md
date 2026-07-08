@@ -6,7 +6,7 @@ behavioral reference; every feature it has must survive the port unless this
 document overrides it).
 
 Local single-user tool. Tails Codex/Claude agent logs into a chat-style UI.
-Runs with `bun dev` (dev) / `bun run build && bun start` on **127.0.0.1:8899**.
+Runs with `bun dev` (dev) / `bun run build && bun start` on **127.0.0.1:8898**.
 
 ## Hard constraints
 
@@ -28,7 +28,6 @@ Runs with `bun dev` (dev) / `bun run build && bun start` on **127.0.0.1:8899**.
 
 | root key         | path                                                        |
 |------------------|-------------------------------------------------------------|
-| codex-jobs       | ~/.claude/plugins/data/codex-openai-codex/state             |
 | codex-sessions   | ~/.codex/sessions                                           |
 | claude-projects  | ~/.claude/projects                                          |
 | claude-tasks     | /tmp/claude-1000 (ONLY `<slug>/<sid>/tasks/*.output` files) |
@@ -234,8 +233,8 @@ so dev hot-reload does not wipe them):
   head-40-lines fallback; ignore `<synthetic>`).
 - `links.ts` — port `_link_entries`: background-task command recovery
   (`_bg_command` needle search), subagent parentage via meta.json toolUseId,
-  codex-jobs parentage via job JSON sessionId + job-id needle, rollout↔job via
-  threadId in filename, project inheritance from root ancestor.
+  live codex rollout parentage via /proc ancestry (nearest Claude ancestor),
+  project inheritance from root ancestor.
 - `needle.ts` — port `_find_needle` (append-only incremental byte scanner).
 
 Performance budget: warm `/api/files` under ~150 ms (measure). Do the same

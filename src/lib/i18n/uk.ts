@@ -584,9 +584,6 @@ export const uk: Record<keyof typeof en, Message> = {
   "task.confirmKillYes": "Так, вбити",
   "task.stopAria": "Зупинити процес PID {pid}",
   "task.kill": "Вбити",
-  "task.jobLogHint": "Це короткий джоб-лог (лише службові події). Реальна робота Codex — у повній сесії:",
-  "task.openCodexSession": "Відкрити сесію Codex ({size} kB{activity})",
-  "task.rolloutMissing": "Це короткий джоб-лог. Повна rollout-сесія Codex ще не з'явилась у списку",
   "task.backgroundCommand": "Фонова команда",
   "task.commandNotFound": "Команду, що запустила цю фонову задачу, не знайдено у транскриптах сесії",
 

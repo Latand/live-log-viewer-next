@@ -69,8 +69,6 @@ function WorkingRow({ icon: Icon, label }: { icon: LucideIcon; label: string }) 
 
 interface Props {
   file: FileEntry | null;
-  files: FileEntry[];
-  onSelect: (file: FileEntry) => void;
   showSvc: boolean;
   lineFilter: string;
   onStatus: (status: string) => void;
@@ -80,7 +78,7 @@ interface Props {
   compact?: boolean;
 }
 
-export function LogFeed({ file, files, onSelect, showSvc, lineFilter, onStatus, paused, follow, setFollow, compact = false }: Props) {
+export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, setFollow, compact = false }: Props) {
   const { locale, t } = useLocale();
   /* The scroll magnet lives per feed instance, so each column remembers its
      own state across polls: glued to the live tail, or released by the user.
@@ -362,7 +360,7 @@ export function LogFeed({ file, files, onSelect, showSvc, lineFilter, onStatus, 
             {!compact && !canRevealOlder && feed.items.length ? (
               <div className="mb-3 text-center text-[11px] text-dim">{t("feed.startOfConvo")}</div>
             ) : null}
-            {compact ? null : <TaskHeader file={file} files={files} onSelect={onSelect} />}
+            {compact ? null : <TaskHeader file={file} />}
             {feed.items.length ? (
               <>
                 {visibleItems.map(({ key, item }) =>

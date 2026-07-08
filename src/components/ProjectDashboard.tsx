@@ -546,7 +546,7 @@ export function ProjectDashboard({
               key={task.path}
               className={`border-l-4 ${task.activity === "live" ? "border-l-ok bg-[#f2faf4]" : "border-l-[#9a9aa4]"}`}
             >
-              <TaskStrip file={task} files={files} onSelect={openSwitchboardFile} />
+              <TaskStrip file={task} />
             </div>
           ))}
         </div>

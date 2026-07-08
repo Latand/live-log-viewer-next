@@ -4,8 +4,7 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
 import { listFiles } from "@/lib/scanner";
-import { numberValue, readJson } from "@/lib/scanner/json";
-import { outputHolders, pidAlive, pidHoldsPath, readCmdlineText } from "@/lib/scanner/process";
+import { outputHolders, pidAlive, pidHoldsPath } from "@/lib/scanner/process";
 import { pathAllowed, ROOTS } from "@/lib/scanner/roots";
 import { transcriptEngine, verifyTranscriptPid } from "@/lib/scanner/transcripts";
 import type { ApiError } from "@/lib/types";
@@ -24,12 +23,6 @@ function isUnder(pathname: string, root: string): boolean {
 }
 
 async function derivePid(pathname: string): Promise<number | null | "invalid" | "stale"> {
-  if (isUnder(pathname, ROOTS["codex-jobs"]) && pathname.endsWith(".log")) {
-    const job = readJson(pathname.replace(/\.log$/, ".json"));
-    const pid = numberValue(job?.pid);
-    if (pid === null || !pidAlive(pid)) return null;
-    return readCmdlineText(pid).includes("codex") ? pid : null;
-  }
   if (isUnder(pathname, ROOTS["claude-tasks"]) && pathname.endsWith(".output")) {
     const pid = outputHolders(true).get(pathname) ?? null;
     if (pid === null || !pidAlive(pid)) return null;

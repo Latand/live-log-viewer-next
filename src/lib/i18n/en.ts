@@ -618,9 +618,6 @@ export const en = {
   "task.confirmKillYes": "Yes, kill",
   "task.stopAria": "Stop process PID {pid}",
   "task.kill": "Kill",
-  "task.jobLogHint": "This is a short job log (service events only). Codex's real work is in the full session:",
-  "task.openCodexSession": "Open Codex session ({size} kB{activity})",
-  "task.rolloutMissing": "This is a short job log. The full Codex rollout session hasn't appeared in the list yet",
   "task.backgroundCommand": "Background command",
   "task.commandNotFound": "The command that started this background task wasn't found in the session transcripts",
 

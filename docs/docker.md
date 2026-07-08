@@ -6,15 +6,15 @@ Runtime tools are split by coupling. The image owns stable runtimes: Node 22, Gi
 
 Host developer CLIs run through `nsenter` shims in `/usr/local/bin`, ahead of mounted user bins in `PATH`. The shims enter the host mount and PID namespaces, use the caller uid/gid, preserve host-visible cwd values, and fall back to `$HOME` for container-only paths such as `/app`. They execute the exact host paths: `claude`, `codex`, and `bun` from `/home/latand/.bun/bin`; `uv` from `/home/latand/.local/bin`; `just` and `tmux` from `/usr/bin`. `LLV_DOCKER_NSENTER_SHIMS=1` also makes direct Claude/Codex resolver calls choose `/usr/local/bin` shims. The image contains the app, Node dependencies, the local transcription helper script, and the prebuilt `.next` output.
 
-## Production-shaped service
+## Production instance
 
-The `viewer` service mirrors the current systemd unit on `127.0.0.1:8898`:
+The `viewer` service is the production runtime on `127.0.0.1:8898`. It replaced the old `agent-log-viewer.service` systemd user unit, which is now disabled and inactive.
 
 ```bash
-docker compose up --build viewer
+docker compose up -d --build viewer
 ```
 
-The existing systemd deployment can continue to own port 8898. Stop that unit before switching port 8898 to Compose, then start the `viewer` service.
+`restart: unless-stopped` gives reboot survival (it replaces the systemd `Restart=always`). Manage the viewer with `docker compose` — `docker compose restart viewer`, `docker compose logs -f viewer` — not `systemctl`. If you ever re-enable the old systemd unit, stop the container first: both bind `127.0.0.1:8898` and only one process can own the port.
 
 ## Test instance
 
@@ -42,7 +42,6 @@ This gives the scanner and spawn validation the same paths the host service sees
 
 - `/home/latand/.claude/projects`
 - `/home/latand/.codex/sessions`
-- `/home/latand/.claude/plugins/data/codex-openai-codex/state`
 - `/home/latand/.claude.json`
 - any cwd under `/home/latand`, such as `.agents`, `Projects`, `Documents`, `Downloads`, `Desktop`, and `remote`
 

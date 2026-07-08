@@ -46,9 +46,9 @@ export function isChildConversation(file: FileEntry): boolean {
   return file.root === "codex-sessions" && !!file.parent;
 }
 
-/** Background helpers without agent reasoning: bash tasks and codex job service logs. */
+/** Background helpers without agent reasoning: bash task outputs. */
 export function isAuxTask(file: FileEntry): boolean {
-  return file.engine === "shell" || file.root === "codex-jobs";
+  return file.engine === "shell";
 }
 
 export function projectKey(file: FileEntry): string {

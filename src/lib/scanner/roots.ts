@@ -27,7 +27,6 @@ function claudeTasksRoot(): string {
 }
 
 export const ROOTS: Record<RootKey, string> = {
-  "codex-jobs": path.join(HOME, ".claude/plugins/data/codex-openai-codex/state"),
   "codex-sessions": path.join(HOME, ".codex/sessions"),
   "claude-projects": path.join(HOME, ".claude/projects"),
   "claude-tasks": claudeTasksRoot(),

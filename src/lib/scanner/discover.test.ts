@@ -18,7 +18,6 @@ test("discoverFiles preserves scanner filters, mtime ordering, and the cap", asy
   const base = await mkdtemp(path.join(os.tmpdir(), "llv-discover-"));
   try {
     const roots: Record<RootKey, string> = {
-      "codex-jobs": path.join(base, "codex-jobs"),
       "codex-sessions": path.join(base, "codex-sessions"),
       "claude-projects": path.join(base, "claude-projects"),
       "claude-tasks": path.join(base, "claude-tasks"),
