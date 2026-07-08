@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 
 import { spawn } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync } from "node:fs";
 import http from "node:http";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -482,9 +483,76 @@ async function prepareRuntime(options) {
   return runtime;
 }
 
+/* Symlink every skill this repo ships (.claude/skills/*) into each installed
+   agent's global skills dir, so one `git pull` propagates the skills to Claude
+   and Codex at once — no per-agent copy to keep in sync. Only runs from a real
+   git checkout (the persistent source), never from a transient npm/bunx install.
+   Idempotent; a pre-existing real copy is backed up once (<name>.bak) before it
+   is replaced with the link. Best-effort — never blocks startup. */
+function linkSkills(packageRoot) {
+  if (!existsSync(join(packageRoot, ".git"))) return; // not a checkout → skip
+  const source = join(packageRoot, ".claude", "skills");
+  let skills;
+  try {
+    skills = readdirSync(source, { withFileTypes: true }).filter((entry) => entry.isDirectory());
+  } catch {
+    return;
+  }
+  if (skills.length === 0) return;
+  const roots = [join(homedir(), ".claude", "skills"), join(homedir(), ".codex", "skills")];
+  for (const root of roots) {
+    if (!existsSync(dirname(root))) continue; // that agent isn't installed
+    try {
+      mkdirSync(root, { recursive: true });
+    } catch {
+      continue;
+    }
+    for (const skill of skills) {
+      const src = join(source, skill.name);
+      const dest = join(root, skill.name);
+      try {
+        const stat = lstatSync(dest);
+        if (stat.isSymbolicLink()) {
+          try {
+            if (realpathSync(dest) === realpathSync(src)) continue; // already linked here
+          } catch {
+            /* dangling link → relink below */
+          }
+          rmSync(dest);
+        } else {
+          /* Back up a pre-existing real copy into a hidden sibling dir so the
+             skill loader (which scans visible subdirs for SKILL.md) never picks
+             the backup up as a duplicate skill. */
+          const backupDir = join(root, ".skill-backups");
+          const backup = join(backupDir, skill.name);
+          try {
+            mkdirSync(backupDir, { recursive: true });
+          } catch {
+            /* fall through */
+          }
+          if (existsSync(backup)) rmSync(dest, { recursive: true, force: true });
+          else renameSync(dest, backup);
+        }
+      } catch {
+        /* dest is absent — fall through and create the link */
+      }
+      try {
+        symlinkSync(src, dest, "dir");
+      } catch {
+        /* non-fatal: a single skill failing to link must not break launch */
+      }
+    }
+  }
+}
+
 async function main() {
   const options = parseArgs(process.argv.slice(2));
   const packageRoot = findPackageRoot(cliDir);
+  try {
+    linkSkills(packageRoot);
+  } catch {
+    /* skill linking is best-effort — never block the viewer from starting */
+  }
   const packageJson = readPackageJson(packageRoot);
   const version = typeof packageJson.version === "string" ? packageJson.version : "0.0.0";
 
