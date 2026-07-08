@@ -13,6 +13,14 @@ export interface TaskAssignment {
   at: string; // ISO of the last attempt
 }
 
+export interface TaskSource {
+  path: string;
+  ts: string | null;
+  text: string;
+  fingerprint: string;
+  engine: "claude" | "codex";
+}
+
 export interface BoardTask {
   id: string; // crypto.randomUUID(), server-side
   project: string; // FileEntry.project — the board the card lives on
@@ -23,6 +31,8 @@ export interface BoardTask {
   /** Own world position on the board — the card is dragged freely. */
   pos: { x: number; y: number };
   assignments: TaskAssignment[];
+  /** User prompt that produced an auto-captured inbox card. */
+  source?: TaskSource;
   createdAt: string;
   updatedAt: string; // bumped by every PATCH
 }

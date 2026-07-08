@@ -9,6 +9,8 @@ import type { TaskEdgeGeom } from "./taskGeometry";
 
 /* Coral of a failed delivery beats the task's own status tone. */
 const FAILED_COLOR = "#d97757";
+/* Muted teal marks the provenance thread back to the originating session. */
+const SOURCE_COLOR = "#0d8a72";
 
 /**
  * Dashed status-colored beziers from task cards to their assigned agents.
@@ -33,27 +35,32 @@ export const TaskEdgesLayer = memo(function TaskEdgesLayer({
   return (
     <svg width={width} height={height} className="pointer-events-none absolute left-0 top-0 z-[2]">
       {edges.map((edge) => {
-        const color = edge.failed ? FAILED_COLOR : TASK_TONES[edge.status].color;
+        /* A source edge is provenance, not an active hand-off: it reads as a
+           faint green thread so it never competes with the status-colored
+           assignment links. */
+        const isSource = edge.relation === "source";
+        const color = edge.failed ? FAILED_COLOR : isSource ? SOURCE_COLOR : TASK_TONES[edge.status].color;
+        const opacity = edge.failed ? 0.95 : isSource ? 0.4 : 0.65;
         const mx = (edge.x1 + edge.x2) / 2;
         const curve = `M ${edge.x1} ${edge.y1} C ${mx} ${edge.y1}, ${mx} ${edge.y2}, ${edge.x2} ${edge.y2}`;
         /* Cubic with these controls passes through the plain midpoint. */
         const midX = (edge.x1 + edge.x2) / 2;
         const midY = (edge.y1 + edge.y2) / 2;
         return (
-          <g key={edge.key} opacity={edge.failed ? 0.95 : 0.65}>
+          <g key={edge.key} opacity={opacity}>
             <path
               d={curve}
               style={{ d: `path("${curve}")`, transition: `d ${MOVE_MS}ms ${MOVE_EASE}` } as React.CSSProperties}
               fill="none"
               stroke={color}
-              strokeWidth={2.5}
+              strokeWidth={isSource ? 1.75 : 2.5}
               strokeLinecap="round"
-              strokeDasharray="5 7"
+              strokeDasharray={isSource ? "2 6" : "5 7"}
             />
             <circle
               cx={edge.x2}
               cy={edge.y2}
-              r={4}
+              r={isSource ? 3 : 4}
               fill={color}
               style={
                 {
@@ -63,7 +70,7 @@ export const TaskEdgesLayer = memo(function TaskEdgesLayer({
                 } as React.CSSProperties
               }
             />
-            {edge.failed ? (
+            {edge.failed && edge.relation === "assignment" ? (
               <g
                 className="pointer-events-auto cursor-pointer"
                 role="button"

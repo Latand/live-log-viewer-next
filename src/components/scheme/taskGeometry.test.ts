@@ -101,6 +101,14 @@ describe("taskRect / taskCardHeight", () => {
     const chipped = taskCardHeight(task({ id: "t", assignments: [assignment({}), assignment({ path: "/b" })] }));
     expect(chipped).toBeGreaterThan(bare);
   });
+
+  test("source adds one chip row", () => {
+    const bare = taskCardHeight(task({ id: "t" }));
+    const sourced = taskCardHeight(
+      task({ id: "t", source: { path: "/node", ts: null, text: "Fix it", fingerprint: "fp", engine: "codex" } }),
+    );
+    expect(sourced).toBeGreaterThan(bare);
+  });
 });
 
 describe("rectAnchor", () => {
@@ -137,6 +145,7 @@ describe("buildTaskEdges", () => {
     );
     expect(edges).toHaveLength(1);
     expect(edges[0]!.key).toBe("t1::/node");
+    expect(edges[0]!.relation).toBe("assignment");
     /* Card sits left of the node: the edge leaves the card's right side and
        enters the node's left side. */
     expect(edges[0]!.x1).toBe(TASK_W);
@@ -155,5 +164,16 @@ describe("buildTaskEdges", () => {
   test("status rides on the edge for coloring", () => {
     const edges = buildTaskEdges([task({ id: "t3", status: "blocked", assignments: [assignment({ path: "/node" })] })], index);
     expect(edges[0]!.status).toBe("blocked");
+  });
+
+  test("draws a source edge without assignment state", () => {
+    const edges = buildTaskEdges(
+      [task({ id: "t4", source: { path: "/node", ts: null, text: "Fix it", fingerprint: "fp", engine: "codex" } })],
+      index,
+    );
+    expect(edges).toHaveLength(1);
+    expect(edges[0]!.key).toBe("t4::source::/node");
+    expect(edges[0]!.relation).toBe("source");
+    expect(edges[0]!.failed).toBe(false);
   });
 });

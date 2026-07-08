@@ -70,6 +70,23 @@ describe("task store", () => {
     expect(loadTasks(filePath)).toEqual(tasks);
   });
 
+  test("round-trips an auto-captured source link", () => {
+    const filePath = tmpFile();
+    const tasks = [
+      task({
+        source: {
+          path: "/session.jsonl",
+          ts: "2026-07-05T10:00:00.000Z",
+          text: "Fix the dashboard",
+          fingerprint: "abc123",
+          engine: "codex",
+        },
+      }),
+    ];
+    saveTasks(tasks, filePath);
+    expect(loadTasks(filePath)).toEqual(tasks);
+  });
+
   test("corrupt or missing files load as an empty list", () => {
     const filePath = tmpFile();
     expect(loadTasks(filePath)).toEqual([]);
@@ -138,6 +155,23 @@ describe("task command helpers", () => {
     const capped = createTask(fullProject, { project: "proj", text: "new", pos: { x: 0, y: 0 } });
     expect(capped.ok).toBe(false);
     if (!capped.ok) expect(capped.status).toBe(409);
+  });
+
+  test("create accepts a task source", () => {
+    const result = createTask(
+      [],
+      {
+        project: "proj",
+        text: "Fix the dashboard",
+        pos: { x: 0, y: 0 },
+        source: { path: "/session.jsonl", ts: null, text: "Fix the dashboard", fingerprint: "fp", engine: "claude" },
+      },
+      { now: () => "now", id: () => "id" },
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error(result.error);
+    expect(result.task.source?.fingerprint).toBe("fp");
+    expect(result.task.status).toBe("inbox");
   });
 
   test("patch is last-write-wins and delete wins late patches", () => {

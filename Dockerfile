@@ -26,6 +26,8 @@ ENV NODE_ENV=production \
     HOSTNAME=127.0.0.1 \
     PORT=8898 \
     LLV_WHISPER_VENV=/opt/llv-whisper-venv \
+    LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8 \
     PATH=/usr/local/bin:/home/latand/.bun/bin:/home/latand/.npm-global/bin:/home/latand/.local/bin:/usr/bin:/bin
 
 RUN <<'EOF'
@@ -85,7 +87,11 @@ host_wd() {
 
 run_host_tmux() {
   wd=$(host_wd)
-  nsenter -t 1 -m -p --setgid="$(id -g)" --setuid="$(id -u)" -- /bin/sh -c 'cd "$1" || exit; shift; exec "$@"' sh "$wd" /usr/bin/tmux "$@"
+  # LC_ALL: without a UTF-8 locale tmux sanitizes control bytes in `-F` output,
+  # turning the TAB field separators panePidMap relies on into "_" — which left
+  # the viewer unable to see (or kill) any tmux session. Force UTF-8 so tabs
+  # survive regardless of whether the container env propagates through nsenter.
+  nsenter -t 1 -m -p --setgid="$(id -g)" --setuid="$(id -u)" -- /bin/sh -c 'cd "$1" || exit; shift; exec "$@"' sh "$wd" env LC_ALL=C.UTF-8 /usr/bin/tmux "$@"
 }
 
 target_key() {

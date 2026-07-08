@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 
 import { isoNow } from "./helpers";
-import type { BoardTask, TaskAssignment, TaskStatus } from "./types";
+import type { BoardTask, TaskAssignment, TaskSource, TaskStatus } from "./types";
 
 export const TASK_TEXT_LIMIT = 6000;
 export const TASKS_PER_PROJECT_LIMIT = 300;
@@ -14,6 +14,7 @@ export interface CreateTaskInput {
   project?: unknown;
   text?: unknown;
   pos?: unknown;
+  source?: unknown;
 }
 
 export interface PatchTaskInput {
@@ -48,6 +49,24 @@ function normalizeStatus(value: unknown): TaskStatus | null {
   return value === "inbox" || value === "assigned" || value === "blocked" || value === "done" ? value : null;
 }
 
+function normalizeSource(value: unknown): TaskSource | undefined | null {
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const source = value as Partial<TaskSource>;
+  if (typeof source.path !== "string" || !source.path.trim()) return null;
+  if (source.ts !== null && typeof source.ts !== "string") return null;
+  if (typeof source.text !== "string" || !source.text.trim()) return null;
+  if (typeof source.fingerprint !== "string" || !source.fingerprint.trim()) return null;
+  if (source.engine !== "claude" && source.engine !== "codex") return null;
+  return {
+    path: source.path,
+    ts: source.ts,
+    text: source.text,
+    fingerprint: source.fingerprint,
+    engine: source.engine,
+  };
+}
+
 function textLimitError(): TaskCommandResult {
   return { ok: false, error: `Task text must be no longer than ${TASK_TEXT_LIMIT} characters`, status: 400 };
 }
@@ -64,6 +83,8 @@ export function createTask(
   if (text.length > TASK_TEXT_LIMIT) return textLimitError();
   const pos = normalizePos(input.pos);
   if (!pos) return { ok: false, error: "task position is required", status: 400 };
+  const source = normalizeSource(input.source);
+  if (source === null) return { ok: false, error: "invalid task source", status: 400 };
   const count = existing.filter((task) => task.project === project).length;
   if (count >= TASKS_PER_PROJECT_LIMIT) {
     return { ok: false, error: `The project already has ${TASKS_PER_PROJECT_LIMIT} tasks. Close or delete extra tasks.`, status: 409 };
@@ -77,6 +98,7 @@ export function createTask(
     text,
     pos,
     assignments: [],
+    ...(source ? { source } : {}),
     createdAt: now,
     updatedAt: now,
   };

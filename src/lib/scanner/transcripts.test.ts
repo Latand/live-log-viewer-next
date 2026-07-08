@@ -10,6 +10,10 @@ const processes: Array<{
   tty: number;
 }> = [];
 
+// Path → holder pid, populated per test to simulate a process keeping a
+// transcript's rollout open for writing.
+let holderMap = new Map<string, number>();
+
 mock.module("./process", () => ({
   agentProcesses: () => processes,
   argvEngine: (argv: string[]) => {
@@ -23,7 +27,14 @@ mock.module("./process", () => ({
   pidWritesPath: () => false,
   readArgv: (pid: number) => processes.find((proc) => proc.pid === pid)?.argv ?? [],
   readCwd: (pid: number) => processes.find((proc) => proc.pid === pid)?.cwd ?? null,
-  writingHolders: () => new Map<string, number>(),
+  writingHolders: (paths: Iterable<string>) => {
+    const out = new Map<string, number>();
+    for (const pathname of paths) {
+      const pid = holderMap.get(pathname);
+      if (pid !== undefined) out.set(pathname, pid);
+    }
+    return out;
+  },
 }));
 
 const { assignTranscriptPids } = await import("./transcripts");
@@ -54,6 +65,35 @@ function entry(pathname: string, overrides: Partial<FileEntry> = {}): FileEntry 
 describe("assignTranscriptPids", () => {
   beforeEach(() => {
     processes.length = 0;
+    holderMap = new Map<string, number>();
+  });
+
+  test("never assigns one writing-holder pid to two transcripts", () => {
+    // A single codex process keeps both its resumed-from original and the fresh
+    // rollout open for writing. Attributing that pid to both transcripts would
+    // route two conversations into the one pane the pid lives in.
+    const pid = 3409423;
+    const freshPath = "/home/user/.codex/sessions/2026/07/08/rollout-fresh-a6f79fdb.jsonl";
+    const oldPath = "/home/user/.codex/sessions/2026/07/07/rollout-old-b1c2d3e4.jsonl";
+    processes.push({
+      pid,
+      engine: "codex",
+      argv: ["/home/user/.local/bin/codex", "resume"],
+      cwd: "/repo",
+      tty: 1,
+    });
+    holderMap.set(freshPath, pid);
+    holderMap.set(oldPath, pid);
+
+    // Fresh entry first (scanner delivers entries mtime-desc).
+    const fresh = entry(freshPath, { mtime: 200 });
+    const old = entry(oldPath, { mtime: 100 });
+    assignTranscriptPids([fresh, old]);
+
+    expect(fresh.pid).toBe(pid);
+    expect(fresh.proc).toBe("running");
+    expect(old.pid).toBeNull();
+    expect(old.proc).toBeNull();
   });
 
   test("matches a Claude resume process to its transcript and leaves cwd sibling untouched", () => {

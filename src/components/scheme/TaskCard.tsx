@@ -10,7 +10,7 @@ import type { FileEntry } from "@/lib/types";
 import { useLinkDrag } from "@/components/AgentLink";
 import { pushTaskToast } from "@/components/tasks/taskToast";
 import { nextTaskStatus, TASK_TONES, taskTitle } from "@/components/tasks/taskModel";
-import { activityDot, cleanTitle, engineBadge } from "@/components/utils";
+import { activityDot, cleanTitle, engineBadge, engineBadgeFor } from "@/components/utils";
 
 import type { Camera } from "./Minimap";
 import { MOVE_EASE, MOVE_MS } from "./nodes";
@@ -106,6 +106,30 @@ function AssignmentChip({
       >
         <X className="h-3 w-3" aria-hidden />
       </button>
+    </span>
+  );
+}
+
+function SourceChip({ task, file }: { task: BoardTask; file: FileEntry | null }) {
+  const { t } = useLocale();
+  const source = task.source;
+  if (!source) return null;
+  /* The originating conversation may sit outside the current list (other
+     project or scope), so fall back to its filename and lean on the engine
+     recorded in the source itself for the badge. */
+  const title = file ? cleanTitle(file.title, 40) : (source.path.split("/").pop() ?? source.path);
+  const badge = engineBadgeFor(source.engine);
+  return (
+    <span
+      className="flex h-6 w-full min-w-0 items-center gap-1.5 rounded-[6px] bg-white/55 px-1.5 text-[#0d6f5f]"
+      title={`${t("tasks.sourceTitle")}: ${source.text}`}
+    >
+      <Link2 className="h-3 w-3 shrink-0" aria-hidden />
+      <span className="shrink-0 rounded-full px-1.5 text-[9px] font-bold" style={badge.style}>
+        {badge.label}
+      </span>
+      <span className="shrink-0 text-[10.5px] font-bold">{t("tasks.source")}</span>
+      <span className="min-w-0 flex-1 truncate text-[10.5px] font-semibold">{title}</span>
     </span>
   );
 }
@@ -312,8 +336,9 @@ export const TaskCard = memo(function TaskCard({
             ) : null}
           </div>
         )}
-        {task.assignments.length ? (
+        {task.source || task.assignments.length ? (
           <div className="flex flex-col gap-1 px-2 pb-2">
+            <SourceChip task={task} file={task.source ? (byPath.get(task.source.path) ?? null) : null} />
             {task.assignments.map((assignment, index) => (
               <AssignmentChip
                 key={(assignment.path ?? "spawning") + "::" + index}

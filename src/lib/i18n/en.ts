@@ -133,6 +133,10 @@ export const en = {
   "composer.launchAgent": "Launch the agent",
   "composer.sendToAgent": "Send to the agent",
   "composer.stopAndSendTitle": "stop recording and send",
+  "composer.quickAck": "Yes, continue",
+  "composer.quickAckLabel": "Continue",
+  "composer.quickAckAria": "Send a quick “Yes, continue” to the agent",
+  "composer.quickAckTitle": "Quick reply — yes, continue",
 
   // DraftAgentPane
   "draft.readPrompt": "Read the agent conversation in file {src} and continue from there: ",
@@ -649,6 +653,8 @@ export const en = {
   "tasks.editAria": "Task text",
   "tasks.spawning": "starting…",
   "tasks.deadChip": "the conversation is gone from the list",
+  "tasks.source": "source",
+  "tasks.sourceTitle": "Captured from",
   "tasks.retry": "retry delivery",
   "tasks.chipFailedTitle": "not delivered: {error}",
   "tasks.handoffChip": "routed into this agent's prompt — not sent yet",

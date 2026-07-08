@@ -132,7 +132,14 @@ export function assignTranscriptPids(entries: FileEntry[]): void {
   const unheld: FileEntry[] = [];
   for (const entry of exactCandidates) {
     const holder = holders.get(entry.path) ?? null;
-    if (holder !== null && pidAlive(holder)) {
+    // One process can keep several rollouts open for writing at once (codex
+    // holds its resumed-from original alongside the fresh one). Attributing
+    // the same pid to two transcripts routes both conversations into the one
+    // pane that pid lives in — a send then lands in the wrong agent. Entries
+    // arrive mtime-desc, so the freshest holder wins the pid; a later sibling
+    // that names the same pid is left unheld to seek a distinct owner below,
+    // and stays null when none exists (ambiguity beats a misroute).
+    if (holder !== null && !claimed.has(holder) && pidAlive(holder)) {
       markRunning(entry, holder);
       claimed.add(holder);
     } else {

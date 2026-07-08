@@ -22,18 +22,18 @@ const CHIP_ROW_H = 26;
  * Estimated on-board height of a task card: status strip + wrapped text
  * (capped at the internal-scroll threshold) + one chip row per assignment.
  */
-export function taskCardHeight(task: Pick<BoardTask, "text" | "assignments">): number {
+export function taskCardHeight(task: Pick<BoardTask, "text" | "assignments" | "source">): number {
   let lines = 0;
   for (const raw of task.text.split(/\r?\n/)) {
     lines += Math.max(1, Math.ceil(raw.length / CHARS_PER_LINE));
   }
   const bodyH = Math.min(lines * LINE_H, TASK_BODY_MAX) + PAD_Y;
-  const chipsH = task.assignments.length ? task.assignments.length * CHIP_ROW_H + 6 : 0;
+  const chipsH = (task.assignments.length + (task.source ? 1 : 0)) * CHIP_ROW_H + (task.assignments.length || task.source ? 6 : 0);
   return Math.max(TASK_MIN_H, STRIP_H + bodyH + chipsH);
 }
 
 /** World-space box of a task card, derived from its owned position. */
-export function taskRect(task: Pick<BoardTask, "pos" | "text" | "assignments">): SchemeRect {
+export function taskRect(task: Pick<BoardTask, "pos" | "text" | "assignments" | "source">): SchemeRect {
   return { x: task.pos.x, y: task.pos.y, w: TASK_W, h: taskCardHeight(task) };
 }
 
@@ -94,7 +94,8 @@ export function buildTaskTargetIndex(layout: TaskTargetSource): Map<string, Sche
 export interface TaskEdgeGeom {
   key: string;
   taskId: string;
-  /** Assignment transcript path — the retry handle for failed edges. */
+  relation: "assignment" | "source";
+  /** Transcript path — the retry handle for failed assignment edges. */
   path: string;
   x1: number;
   y1: number;
@@ -115,6 +116,26 @@ export function buildTaskEdges(tasks: readonly BoardTask[], index: ReadonlyMap<s
   for (const task of tasks) {
     const card = taskRect(task);
     const cardCenter = rectCenter(card);
+    if (task.source) {
+      const target = index.get(task.source.path);
+      if (target) {
+        const from = rectAnchor(card, rectCenter(target));
+        const to = rectAnchor(target, cardCenter);
+        edges.push({
+          key: task.id + "::source::" + task.source.path,
+          taskId: task.id,
+          relation: "source",
+          path: task.source.path,
+          x1: from.x,
+          y1: from.y,
+          x2: to.x,
+          y2: to.y,
+          status: task.status,
+          failed: false,
+          error: null,
+        });
+      }
+    }
     for (const assignment of task.assignments) {
       if (!assignment.path) continue;
       const target = index.get(assignment.path);
@@ -124,6 +145,7 @@ export function buildTaskEdges(tasks: readonly BoardTask[], index: ReadonlyMap<s
       edges.push({
         key: task.id + "::" + assignment.path,
         taskId: task.id,
+        relation: "assignment",
         path: assignment.path,
         x1: from.x,
         y1: from.y,

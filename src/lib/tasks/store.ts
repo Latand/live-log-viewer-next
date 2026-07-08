@@ -4,7 +4,7 @@ import path from "node:path";
 
 import { statePath } from "@/lib/configDir";
 
-import type { AssignmentState, BoardTask, TaskAssignment, TaskStatus } from "./types";
+import type { AssignmentState, BoardTask, TaskAssignment, TaskSource, TaskStatus } from "./types";
 
 export const TASKS_FILE = statePath("tasks.json");
 
@@ -52,6 +52,18 @@ export function isTaskAssignment(value: unknown): value is TaskAssignment {
   );
 }
 
+export function isTaskSource(value: unknown): value is TaskSource {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const source = value as Partial<TaskSource>;
+  return (
+    typeof source.path === "string" &&
+    (typeof source.ts === "string" || source.ts === null) &&
+    typeof source.text === "string" &&
+    typeof source.fingerprint === "string" &&
+    (source.engine === "claude" || source.engine === "codex")
+  );
+}
+
 export function isTask(value: unknown): value is BoardTask {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const task = value as Partial<BoardTask>;
@@ -63,6 +75,7 @@ export function isTask(value: unknown): value is BoardTask {
     isFinitePos(task.pos) &&
     Array.isArray(task.assignments) &&
     task.assignments.every(isTaskAssignment) &&
+    (task.source === undefined || isTaskSource(task.source)) &&
     typeof task.createdAt === "string" &&
     typeof task.updatedAt === "string"
   );

@@ -3,6 +3,7 @@ import { notifyQuestion } from "../push";
 import { resolveTarget } from "../tmux";
 import { activityVerdict } from "./activity";
 import { tickFlows } from "../flows/engine";
+import { tickTaskInbox } from "../tasks/inboxScanner";
 import { tickWorkflows } from "../workflows/engine";
 import { ctxFor } from "./context";
 import { discoverFiles } from "./discover";
@@ -114,5 +115,6 @@ export async function listFiles(): Promise<FileEntry[]> {
   /* Workflows tick after flows: a workflow watching its embedded flow sees
      the state that same poll just produced. */
   await tickWorkflows(entries);
+  tickTaskInbox(entries);
   return entries;
 }

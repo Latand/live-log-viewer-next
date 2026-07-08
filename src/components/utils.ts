@@ -134,10 +134,14 @@ export function engineEdge(file: FileEntry): { backgroundColor: string } {
   return { backgroundColor: modelTint(file).color };
 }
 
-export function engineBadge(file: FileEntry) {
-  const label = { codex: "Codex", claude: "Claude", shell: "Bash" }[file.engine] ?? file.engine;
-  const tint = ENGINE_TINTS[file.engine] ?? NEUTRAL_TINT;
+export function engineBadgeFor(engine: string) {
+  const label = { codex: "Codex", claude: "Claude", shell: "Bash" }[engine] ?? engine;
+  const tint = ENGINE_TINTS[engine] ?? NEUTRAL_TINT;
   return { label, style: { backgroundColor: tint.soft, color: tint.color } };
+}
+
+export function engineBadge(file: FileEntry) {
+  return engineBadgeFor(file.engine);
 }
 
 export function syntheticFile(pathname: string): FileEntry {

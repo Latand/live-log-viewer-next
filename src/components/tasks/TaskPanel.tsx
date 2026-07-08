@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from "react";
 
-import { X } from "@/components/icons";
+import { Link2, X } from "@/components/icons";
 import { fmtAge } from "@/components/utils";
 import { useLocale } from "@/lib/i18n";
 import type { BoardTask } from "@/lib/tasks/types";
@@ -94,6 +94,12 @@ export function TaskPanel({
                 </span>
                 <span className="flex items-center gap-2 pl-0.5 text-[10px] text-dim">
                   {scope === "all" ? <span className="min-w-0 max-w-[110px] truncate">{task.project}</span> : null}
+                  {task.source ? (
+                    <span className="inline-flex items-center gap-0.5 text-[#0d6f5f]" title={`${t("tasks.sourceTitle")}: ${task.source.text}`}>
+                      <Link2 className="h-2.5 w-2.5" aria-hidden />
+                      {t("tasks.source")}
+                    </span>
+                  ) : null}
                   {task.assignments.length ? <span>⤷ {task.assignments.length}</span> : null}
                   <span>{fmtAge(new Date(task.updatedAt).getTime() / 1000)}</span>
                 </span>
