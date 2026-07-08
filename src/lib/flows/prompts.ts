@@ -32,7 +32,7 @@ export function reviewerPrompt(flow: Flow, round: Round): string {
        user-triggered round, from the user directly. */
     round.readyNote ? `Ready note: ${round.readyNote}` : "Ready note: none provided.",
     "",
-    "Read-only requirement: inspect files and commands as needed, but do not edit files, write notebooks, commit, stage, or mutate the working tree.",
+    "Read-only requirement: run tests, builds, linters, searches, and other investigation commands as needed. Do not edit files, write notebooks, commit, stage, or mutate the working tree.",
     "",
     "Output exactly this format:",
     "VERDICT: APPROVE | REQUEST_CHANGES | COMMENT",

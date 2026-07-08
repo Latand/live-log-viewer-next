@@ -139,19 +139,14 @@ export function reviewerCommand(
 ): { command: string; args: string[]; outputPath: string | null; sessionId: string | null; reviewerPath: string | null } {
   if (role.engine === "claude") {
     const sessionId = crypto.randomUUID();
-    /* Plan mode instead of --dangerously-skip-permissions: the bypass would
-       leave Bash free to mutate the worktree despite the disallowed edit
-       tools. In plan mode mutating actions need an approval that a headless
-       run never grants, so the reviewer is genuinely read-only. */
+    /* Headless reviewers need approval-free command access for tests, builds,
+       linters, and local diagnostics. The read-only rule lives in the prompt. */
     const args = [
       "-p",
       prompt,
-      "--permission-mode",
-      "plan",
+      "--dangerously-skip-permissions",
       "--session-id",
       sessionId,
-      "--disallowedTools",
-      "Edit,Write,NotebookEdit",
     ];
     if (role.model) args.push("--model", role.model);
     if (role.effort) args.push("--effort", role.effort);
@@ -160,7 +155,7 @@ export function reviewerCommand(
   /* --json turns stdout into a JSONL event stream whose first events carry
      the session/thread id — a structured contract instead of parsing the
      human banner. The verdict itself still arrives via --output-last-message. */
-  const args = ["exec", prompt, "--json", "--output-last-message", outputPath, "--sandbox", "read-only"];
+  const args = ["exec", prompt, "--json", "--output-last-message", outputPath, "--dangerously-bypass-approvals-and-sandbox"];
   if (role.model) args.push("-m", role.model);
   if (role.effort) args.push("-c", `model_reasoning_effort=${role.effort}`);
   return { command: resolveBinary("codex"), args, outputPath, sessionId: null, reviewerPath: null };

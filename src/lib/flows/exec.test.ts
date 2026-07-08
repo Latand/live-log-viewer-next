@@ -7,7 +7,8 @@ import path from "node:path";
 /* The state dir must point at a sandbox before store.ts computes its
    module-level constants, so exec/store load dynamically after the env set. */
 process.env.LLV_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "llv-exec-test-"));
-const { headlessReviewStatus, scanEventStream } = await import("./exec");
+const { headlessReviewStatus, reviewerCommand, scanEventStream } = await import("./exec");
+const { reviewerPrompt } = await import("./prompts");
 const { outputPathFor, stdoutPathFor } = await import("./store");
 
 afterAll(() => {
@@ -50,6 +51,70 @@ test("scanEventStream extracts session id and last agent message", () => {
   const scanned = scanEventStream(EVENTS);
   expect(scanned.sessionId).toBe("11111111-2222-3333-4444-555555555555");
   expect(scanned.lastAgentMessage).toContain("VERDICT: APPROVE");
+});
+
+test("headless codex reviewer launches without CLI sandbox blocking", () => {
+  const built = reviewerCommand({ engine: "codex", model: null, effort: "xhigh" }, "review prompt", "/out/review.md", "/repo");
+
+  expect(built.args).toContain("--dangerously-bypass-approvals-and-sandbox");
+  expect(built.args).not.toContain("--sandbox");
+  expect(built.args).not.toContain("read-only");
+});
+
+test("headless claude reviewer launches with approval-free tool access", () => {
+  const built = reviewerCommand({ engine: "claude", model: null, effort: null }, "review prompt", "/out/review.md", "/repo");
+
+  expect(built.args).toContain("--dangerously-skip-permissions");
+  expect(built.args).not.toContain("--permission-mode");
+  expect(built.args).not.toContain("--disallowedTools");
+});
+
+test("reviewer prompt carries the read-only contract while allowing validation commands", () => {
+  const prompt = reviewerPrompt(
+    {
+      id: "flow-a",
+      template: "implement-review-loop",
+      project: "repo",
+      cwd: "/repo",
+      implementerPath: "/sessions/implementer.jsonl",
+      roles: {
+        implementer: { engine: "codex", model: null, effort: null },
+        reviewer: { engine: "codex", model: null, effort: null },
+      },
+      baseRef: "abc123",
+      baseMode: "head",
+      mode: "auto",
+      reviewerMode: "headless",
+      roundLimit: 5,
+      state: "reviewing",
+      pausedState: null,
+      stateDetail: null,
+      rounds: [],
+      createdAt: "2026-01-01T00:00:00.000Z",
+      closedAt: null,
+    },
+    {
+      n: 1,
+      reviewerPath: null,
+      sessionId: null,
+      reviewerPid: null,
+      reviewerPane: null,
+      findingsPath: null,
+      triggeredBy: "marker",
+      readyNote: "tests are green",
+      verdict: null,
+      findingsCount: null,
+      startedAt: "2026-01-01T00:01:00.000Z",
+      spawnStartedAt: null,
+      relayStartedAt: null,
+      reviewedAt: null,
+      relayedAt: null,
+      error: null,
+    },
+  );
+
+  expect(prompt).toContain("run tests, builds, linters, searches");
+  expect(prompt).toContain("Do not edit files");
 });
 
 test("status is null when the round never left a trace", () => {

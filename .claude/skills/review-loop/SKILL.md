@@ -19,8 +19,9 @@ are same-origin: call them from localhost without an Origin header.
 - **Implementer** — an interactive CLI agent (claude or codex) in a tmux pane,
   tracked by its transcript path. It lives across all rounds.
 - **Reviewer** — a fresh session per round, headless by default
-  (`codex exec` / `claude -p` with edit tools disabled), so every round is a
-  blind, independent look at the full diff.
+  (`codex exec` / `claude -p` with approval-free command access). The prompt
+  carries the read-only contract, so every round is a blind, independent look
+  at the full diff while still allowing tests and diagnostics.
 - **Round scope** — `git diff <baseRef>...HEAD` plus uncommitted changes.
   `baseRef` is captured once at flow creation, so later rounds re-check
   earlier fixes.

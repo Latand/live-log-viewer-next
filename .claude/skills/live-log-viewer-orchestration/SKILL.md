@@ -67,7 +67,7 @@ Any interactive `claude`/`codex` process in tmux is auto-matched to its transcri
 1. `PANE=$(tmux new-window -d -P -F "#{pane_id}" -t <active-session>: -n <window-name> -c <cwd>)` — pick the active session via `tmux list-clients -F "#{client_activity} #{client_session}"` (freshest wins), fallback `list-sessions`.
 2. Type the boot command literally, then Enter:
    - claude: `claude --dangerously-skip-permissions --session-id $(uuidgen)` (+ `--model <m>`); the session-id makes the transcript path knowable: `~/.claude/projects/<cwd with non-alnum → "-">/<sid>.jsonl`.
-   - codex: `codex -c model_reasoning_effort=<low|medium|high|xhigh>` (+ `-m <model>`); read-only reviewer: add `--sandbox read-only`.
+   - codex: `codex -c model_reasoning_effort=<low|medium|high|xhigh>` (+ `-m <model>`).
 3. Poll readiness every ~1s (≤60s): `tmux capture-pane -p -t $PANE`. Ready markers: `? for shortcuts`, `Context N% used`, `⏎ send`, `Press up to edit`. Startup gates (`Do you trust`, `Press enter to continue`, `Resume from summary`) default to the safe option — answer with Enter and keep polling. If the foreground command falls back to a shell, the agent died: read the screen tail for the error.
 4. Deliver the prompt as a bracketed paste, never raw send-keys for multi-line text:
    `tmux load-buffer -b <buf> <file>` → `tmux paste-buffer -d -p -b <buf> -t $PANE` → sleep ~0.5s → `tmux send-keys -t $PANE Enter`.
@@ -82,7 +82,7 @@ Any interactive `claude`/`codex` process in tmux is auto-matched to its transcri
 
 ## Review-loop flows (implement→review)
 
-The viewer orchestrates implement→review cycles itself (spec: `docs/review-loop-ui.md` in the repo): long-lived implementer in tmux + fresh headless reviewer per round (`codex exec --sandbox read-only` / `claude -p --disallowedTools Edit,Write,NotebookEdit`), `REVIEW_READY:` marker protocol, verdict files under `~/.claude/viewer-state/flows/`. API: `GET/POST /api/flows`, `PATCH /api/flows/<id>` (`pause|resume|advance|retry-round|extend|another-round|close`). Prefer starting a flow over hand-rolling your own loop when the task is implement→review.
+The viewer orchestrates implement→review cycles itself (spec: `docs/review-loop-ui.md` in the repo): long-lived implementer in tmux + fresh headless reviewer per round with approval-free command access and a prompt-level read-only contract, `REVIEW_READY:` marker protocol, verdict files under `~/.claude/viewer-state/flows/`. API: `GET/POST /api/flows`, `PATCH /api/flows/<id>` (`pause|resume|advance|retry-round|extend|another-round|close`). Prefer starting a flow over hand-rolling your own loop when the task is implement→review.
 
 ## Conventions
 

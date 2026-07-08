@@ -175,7 +175,6 @@ async function launchReviewer(flow: Flow, round: Round): Promise<void> {
     const spec = freshSpecFor(flow.roles.reviewer.engine, flow.cwd, {
       model: flow.roles.reviewer.model,
       effort: flow.roles.reviewer.effort,
-      readOnly: true,
     });
     const startedAtMs = Date.now();
     const pane = await spawnAgentWithPrompt(spec, prompt);
