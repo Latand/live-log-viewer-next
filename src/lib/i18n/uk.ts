@@ -125,6 +125,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "composer.launchAgent": "Запустити агента",
   "composer.sendToAgent": "Надіслати агенту",
   "composer.stopAndSendTitle": "зупинити запис і надіслати",
+  "composer.sendMenuTitle": "Дії відправки",
   "composer.quickAck": "Так, продовжуй",
   "composer.quickAckLabel": "Продовжити",
   "composer.quickAckAria": "Надіслати агенту швидке «Так, продовжуй»",

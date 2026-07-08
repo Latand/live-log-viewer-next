@@ -8,6 +8,7 @@ import { loadFlows } from "@/lib/flows/store";
 import { pathForPanePid, reconcileTasks } from "@/lib/tasks/reconcile";
 import { mutateTasks } from "@/lib/tasks/store";
 import { loadWorkflows } from "@/lib/workflows/store";
+import { filterWorkflowsForFileScan } from "@/lib/workflows/visibility";
 import type { FilesResponse } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -25,7 +26,8 @@ export async function GET(request: Request): Promise<NextResponse> {
     });
     return { tasks: reconciled.dirty ? reconciled.tasks : undefined, result: reconciled.tasks };
   });
-  const body = JSON.stringify({ files, flows: loadFlows(), workflows: loadWorkflows(), tasks } satisfies FilesResponse);
+  const workflows = filterWorkflowsForFileScan(loadWorkflows(), files);
+  const body = JSON.stringify({ files, flows: loadFlows(), workflows, tasks } satisfies FilesResponse);
   /* The client re-polls every 10 s and this ~410 KB payload is usually
      identical between polls; a strong ETag over the exact bytes lets an
      unchanged response come back as a bodyless 304. force-dynamic still holds

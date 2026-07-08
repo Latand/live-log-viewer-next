@@ -326,23 +326,8 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
     </>
   ) : null;
 
-  /* One-click acknowledgement for an existing agent. It uses the same send()
-     path as typed text, with guards for send, voice, and staged-image states. */
   const canQuickAck = !spawnMode || relayMode;
-  const quickReply = canQuickAck ? (
-    <Hint label={t("composer.quickAckTitle")}>
-      <button
-        type="button"
-        aria-label={t("composer.quickAckAria")}
-        disabled={busy || voiceSending || attachments.images.length > 0}
-        onClick={() => void send(t("composer.quickAck"))}
-        className="inline-flex shrink-0 items-center justify-center gap-1 rounded-[8px] border border-ok bg-ok p-2 text-white hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ok/40 disabled:opacity-40"
-      >
-        <Check className="h-4 w-4" aria-hidden />
-        <span className="text-[10.5px] font-bold">{t("composer.quickAckLabel")}</span>
-      </button>
-    </Hint>
-  ) : null;
+  const quickAckDisabled = busy || voiceSending || attachments.images.length > 0;
 
   return (
     <form
@@ -385,6 +370,21 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
         sendLabelRecording={t("composer.stopAndSend")}
         sendTitleRecording={t("composer.stopAndSendTitle")}
         sendIdleClassName="border-accent bg-accent hover:opacity-90"
+        sendMenuLabel={t("composer.sendMenuTitle")}
+        sendMenuActions={
+          canQuickAck
+            ? [
+                {
+                  id: "quick-ack",
+                  label: t("composer.quickAckLabel"),
+                  description: t("composer.quickAck"),
+                  disabled: quickAckDisabled,
+                  tone: "ok",
+                  onSelect: () => void send(t("composer.quickAck")),
+                },
+              ]
+            : []
+        }
         showImage={!isMobile}
         leftSlot={
           isMobile ? (
@@ -403,7 +403,6 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
                 <>
                   {modeChip}
                   {liveControls}
-                  {quickReply}
                   <ImagePickerButton
                     ariaLabel={t("composer.addImages")}
                     className="inline-flex shrink-0 items-center justify-center rounded-[8px] border border-line bg-panel p-2 text-dim hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
@@ -416,7 +415,6 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
             <div className="flex min-w-0 items-center gap-1.5">
               {modeChip}
               {liveControls}
-              {quickReply}
             </div>
           )
         }

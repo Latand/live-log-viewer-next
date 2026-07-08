@@ -6,6 +6,17 @@ versions follow [SemVer](https://semver.org/) (0.x — the API may still move).
 
 ## [Unreleased]
 
+## [0.11.1] — 2026-07-08
+
+### Added
+- Composer send now has a compact context menu with a quick "Yes, continue"
+  action, mirroring the microphone backend menu pattern.
+
+### Fixed
+- Orphaned workflow records no longer keep missing repositories visible in the
+  project rail. A workflow is listed only when its workspace still exists or a
+  linked transcript is present in the current scan.
+
 ## [0.10.0] — 2026-07-08
 
 ### Added

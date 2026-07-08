@@ -133,6 +133,7 @@ export const en = {
   "composer.launchAgent": "Launch the agent",
   "composer.sendToAgent": "Send to the agent",
   "composer.stopAndSendTitle": "stop recording and send",
+  "composer.sendMenuTitle": "Send options",
   "composer.quickAck": "Yes, continue",
   "composer.quickAckLabel": "Continue",
   "composer.quickAckAria": "Send a quick “Yes, continue” to the agent",
