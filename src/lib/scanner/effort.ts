@@ -3,7 +3,7 @@ import fs from "node:fs";
 import type { FileEntry } from "../types";
 import { tailRecords } from "./activity";
 import { globalCache } from "./caches";
-import { recordValue, stringValue } from "./json";
+import { recordValue, recordsValue, stringValue } from "./json";
 import { readArgv } from "./process";
 
 const effortCache = globalCache<[number, string | null]>("effort");
@@ -16,19 +16,24 @@ function normalizeEffort(value: string | null | undefined): string | null {
   return TIERS.has(tier) ? tier : null;
 }
 
-/** Codex rollouts: turn_context carries the turn's effort, top-level and
-    (older CLIs) inside collaboration_mode settings. session_meta has none. */
 function pickEffort(entry: FileEntry, obj: Record<string, unknown>): string | null {
-  if (entry.root !== "codex-sessions" || obj.type !== "turn_context") return null;
-  const payload = recordValue(obj.payload);
-  const direct = stringValue(payload?.effort);
-  if (direct) return direct;
-  const settings = recordValue(recordValue(payload?.collaboration_mode)?.settings);
-  return stringValue(settings?.reasoning_effort);
+  if (entry.root === "codex-sessions" && obj.type === "turn_context") {
+    const payload = recordValue(obj.payload);
+    const direct = stringValue(payload?.effort);
+    if (direct) return direct;
+    const settings = recordValue(recordValue(payload?.collaboration_mode)?.settings);
+    return stringValue(settings?.reasoning_effort);
+  }
+  if (entry.root === "claude-projects" && obj.type === "assistant") {
+    const message = recordValue(obj.message);
+    const content = recordsValue(message?.content);
+    if (content.some((item) => stringValue(item.type) === "thinking")) return "high";
+  }
+  return null;
 }
 
 /** Live-process argv: codex `-c model_reasoning_effort=X`, claude `--effort X`.
-    Claude transcripts never record the flag, so argv is its only source. */
+    Claude JSONL can still prove thinking use through assistant content blocks. */
 function argvEffort(entry: FileEntry): string | null {
   if (entry.pid === null) return null;
   const argv = readArgv(entry.pid);
@@ -44,16 +49,17 @@ function argvEffort(entry: FileEntry): string | null {
 
 /**
  * Reasoning-effort tier of a transcript entry, or null when undetectable.
- * Codex: newest turn_context in the tail, head lines as fallback, live argv
- * as the second source. Claude: live argv only — never guessed from the model.
+ * Codex uses turn_context. Claude uses explicit argv first, then JSONL thinking
+ * blocks as a transcript-backed fallback.
  */
 export function entryEffort(entry: FileEntry): string | null {
   if ((entry.root !== "claude-projects" && entry.root !== "codex-sessions") || !entry.path.endsWith(".jsonl")) {
     return null;
   }
-  if (entry.root !== "codex-sessions") return normalizeEffort(argvEffort(entry));
+  const argv = normalizeEffort(argvEffort(entry));
+  if (entry.root === "claude-projects" && argv) return argv;
   const cached = effortCache.get(entry.path);
-  if (cached?.[0] === entry.size) return cached[1] ?? normalizeEffort(argvEffort(entry));
+  if (cached?.[0] === entry.size) return cached[1] ?? argv;
   let effort: string | null = null;
   for (const obj of tailRecords(entry.path, entry.size).reverse()) {
     effort = normalizeEffort(pickEffort(entry, obj));
@@ -78,5 +84,5 @@ export function entryEffort(entry: FileEntry): string | null {
     }
   }
   effortCache.set(entry.path, [entry.size, effort]);
-  return effort ?? normalizeEffort(argvEffort(entry));
+  return effort ?? argv;
 }

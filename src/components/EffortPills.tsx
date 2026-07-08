@@ -17,18 +17,20 @@ export function EffortPills({ file }: { file: FileEntry }) {
   const title = effortTitle(file);
   return (
     <span
-      className="inline-flex shrink-0 items-end gap-[1.5px]"
+      className="inline-flex h-[12px] shrink-0 items-end gap-px"
       role="img"
       aria-label={title}
       title={title}
+      style={{ transform: "scale(clamp(1, var(--inv-z, 1), 5))", transformOrigin: "left bottom" }}
     >
       {Array.from({ length: EFFORT_LEVEL_MAX }, (_, i) => (
         <span
           key={i}
           aria-hidden
-          className="w-[2px] rounded-full"
+          className="shrink-0 rounded-full"
           style={{
-            height: `${5 + i}px`,
+            width: "3px",
+            height: `${7 + i}px`,
             backgroundColor: i < level ? color : "var(--color-line, #e6e6ea)",
           }}
         />
