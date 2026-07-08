@@ -72,6 +72,26 @@ function worktreeFromPath(cwd: string): { repo: string; worktree: string } | nul
   return { repo: cwd.slice(0, index), worktree };
 }
 
+/** Nested worktree conventions: `git worktree add worktrees/<name>` (or the
+    dotted `.worktrees/<name>`) puts checkouts under a container dir INSIDE the
+    repo, so the parent repo is literally the path prefix before that container.
+    Recognizing them by path means a deleted nested worktree still names its
+    repo — no on-disk `.git` needed. `.claude/worktrees` (#1) and
+    `.codex/worktrees` (#3) have dedicated recognizers, so a `worktrees` segment
+    sitting directly under `.claude`/`.codex` is left to them. The FIRST
+    container wins, so a worktree-of-a-worktree groups under the outermost repo. */
+function worktreeFromNested(cwd: string): { repo: string; worktree: string } | null {
+  const parts = cwd.split(path.sep);
+  for (let i = 1; i < parts.length - 1; i++) {
+    if (parts[i] !== "worktrees" && parts[i] !== ".worktrees") continue;
+    if (parts[i - 1] === ".claude" || parts[i - 1] === ".codex") continue;
+    const worktree = parts[i + 1];
+    if (!worktree) return null;
+    return { repo: parts.slice(0, i).join(path.sep) || path.sep, worktree };
+  }
+  return null;
+}
+
 function existingRepoPath(repoName: string): string {
   const roots = [path.join(os.homedir(), "Projects"), path.join(os.homedir(), ".agents", "tools")];
   for (const root of roots) {
@@ -125,9 +145,78 @@ const persistedProjectCache = globalCache<[number, string, {
 }]>("persisted-project");
 const PERSISTED_PROJECT_TTL_MS = 10_000;
 
+/* A `git worktree add ../foo` checkout has NO recognizable path layout — unlike
+   `.claude/worktrees/` (#1) and `.codex/worktrees/` (#3), its sibling path
+   reveals nothing about the parent repo. While it lives, `worktreeFromGitFile`
+   resolves it via the on-disk `.git` pointer; once deleted (and `git worktree
+   prune`d) that pointer AND git's admin record are gone, so a purely path-based
+   recognizer cannot exist. The only thing that survives deletion is a
+   resolution we WROTE DOWN while the checkout was alive. This map is that
+   record: `worktreeFromGitFile` stamps cwd→{repo,worktree} on every live
+   resolution and `worktreeFromMemory` replays it after deletion, keeping the
+   dead worktree's sessions grouped under the parent repo instead of
+   fragmenting into a phantom `-…-<branch>` project. */
+const WORKTREE_MAP_FILE = "worktree-map.json";
+let worktreeMemory: { dir: string; map: Map<string, { repo: string; worktree: string }> } | null = null;
+let worktreeMemoryDirty = false;
+
+function worktreeMap(): Map<string, { repo: string; worktree: string }> {
+  const dir = stateDir();
+  if (worktreeMemory && worktreeMemory.dir === dir) return worktreeMemory.map;
+  const map = new Map<string, { repo: string; worktree: string }>();
+  try {
+    const raw = JSON.parse(fs.readFileSync(path.join(dir, WORKTREE_MAP_FILE), "utf8")) as Record<
+      string,
+      { repo?: unknown; worktree?: unknown }
+    >;
+    for (const [cwd, info] of Object.entries(raw)) {
+      if (typeof info?.repo === "string" && typeof info?.worktree === "string") {
+        map.set(cwd, { repo: info.repo, worktree: info.worktree });
+      }
+    }
+  } catch {
+    /* no map yet or unreadable — start empty */
+  }
+  worktreeMemory = { dir, map };
+  worktreeMemoryDirty = false;
+  return map;
+}
+
+function rememberWorktree(cwd: string, info: { repo: string; worktree: string }): void {
+  const map = worktreeMap();
+  const prev = map.get(cwd);
+  if (prev && prev.repo === info.repo && prev.worktree === info.worktree) return;
+  map.set(cwd, info);
+  worktreeMemoryDirty = true;
+}
+
+/** Remembered resolution of a now-deleted `git worktree add` checkout — the
+    fallback that survives the checkout being removed from disk. */
+function worktreeFromMemory(cwd: string): { repo: string; worktree: string } | null {
+  return worktreeMap().get(cwd) ?? null;
+}
+
+/** Flush freshly-learned worktree resolutions to disk. Called once per scan
+    from `linkEntries`; a no-op when nothing new was seen. */
+export function persistWorktreeMap(): void {
+  if (!worktreeMemoryDirty || !worktreeMemory) return;
+  worktreeMemoryDirty = false;
+  try {
+    fs.mkdirSync(worktreeMemory.dir, { recursive: true });
+    fs.writeFileSync(
+      path.join(worktreeMemory.dir, WORKTREE_MAP_FILE),
+      JSON.stringify(Object.fromEntries(worktreeMemory.map)),
+    );
+  } catch {
+    /* best-effort: a lost map only re-fragments deleted worktrees */
+  }
+}
+
 /** Linked git worktrees created anywhere (`git worktree add ../foo`), not
     only under `.claude/worktrees/`: such a checkout has a `.git` FILE whose
-    gitdir points into the main repo — the session belongs to that project. */
+    gitdir points into the main repo — the session belongs to that project.
+    A live resolution is also written to the persistent worktree map so the
+    grouping survives the checkout later being deleted. */
 function worktreeFromGitFile(cwd: string): { repo: string; worktree: string } | null {
   const cached = worktreeGitCache.get(cwd);
   if (cached && cached[0] > Date.now()) return cached[1];
@@ -141,6 +230,7 @@ function worktreeFromGitFile(cwd: string): { repo: string; worktree: string } | 
     /* no .git or cwd gone — a plain (or vanished) project dir */
   }
   worktreeGitCache.set(cwd, [Date.now() + WORKTREE_TTL_MS, info]);
+  if (info) rememberWorktree(cwd, info);
   return info;
 }
 
@@ -230,10 +320,18 @@ function persistedProjects(): {
     means a codex session, a claude session, and any worktree of the same repo
     all land in the SAME sidebar group instead of lookalike neighbors. */
 function projectInfoFromCwd(cwd: string): { project: string; worktree?: string } | null {
-  const worktree = worktreeFromPath(cwd) ?? worktreeFromGitFile(cwd) ?? worktreeFromCodexPath(cwd);
+  let worktree =
+    worktreeFromPath(cwd) ??
+    worktreeFromNested(cwd) ??
+    worktreeFromCodexPath(cwd) ??
+    worktreeFromGitFile(cwd);
   if (!worktree && !hasGitMarker(cwd)) {
     const persisted = persistedProjects().byCwd.get(cwd);
     if (persisted) return persisted;
+    /* An arbitrary-path worktree that has since been deleted: no live
+       recognizer matched and its `.git` is gone, but a resolution we recorded
+       while it was alive still names the parent repo. */
+    worktree = worktreeFromMemory(cwd);
   }
   const root = worktree ? worktree.repo : cwd;
   const project = projectFromSlug(root.replace(/[^a-zA-Z0-9]/g, "-"));

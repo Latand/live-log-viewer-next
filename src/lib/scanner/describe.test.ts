@@ -4,7 +4,7 @@ import path from "node:path";
 
 import { afterAll, expect, test } from "bun:test";
 
-import { describe, parseWorktreeGitdir, projectForCwd, projectFromSlug } from "./describe";
+import { describe, parseWorktreeGitdir, persistWorktreeMap, projectForCwd, projectFromSlug } from "./describe";
 
 const SANDBOX = fs.mkdtempSync(path.join(os.tmpdir(), "llv-describe-test-"));
 const REAL_STATE = process.env.LLV_STATE_DIR;
@@ -46,6 +46,61 @@ test("a deleted codex worktree still groups under its parent repo project", () =
   const liveRepo = path.join(os.homedir(), "Projects", "CelestiaCompose");
   expect(projectForCwd(dead)).toBe("CelestiaCompose");
   expect(projectForCwd(dead)).toBe(projectForCwd(liveRepo));
+});
+
+test("a deleted nested worktree (repo/worktrees/<name>) still groups under its parent repo", () => {
+  /* `git worktree add worktrees/foo` and the dotted `.worktrees/foo` nest the
+     checkout inside the repo, so the repo is the path prefix — recognizable by
+     path even after the checkout is deleted, no on-disk `.git` required. */
+  const repo = `${os.homedir()}/Projects/CelestiaCompose`;
+  const nested = `${repo}/worktrees/memory-ui-redesign`;
+  const nestedDotted = `${repo}/.worktrees/some-branch`;
+  const deepNested = `${repo}/worktrees/issue-1424/worktrees/pr-tools`; // worktree of a worktree
+  expect(projectForCwd(nested)).toBe(projectForCwd(repo));
+  expect(projectForCwd(nestedDotted)).toBe(projectForCwd(repo));
+  expect(projectForCwd(deepNested)).toBe(projectForCwd(repo));
+  expect(projectForCwd(nested)).toBe("CelestiaCompose");
+});
+
+test("a nested `worktrees` segment under .claude/.codex is left to its own recognizer", () => {
+  /* `.codex/worktrees/<hash>/<Repo>` must resolve via the codex recognizer to
+     the repo name, not be mis-read as a repo ending in `.codex`. */
+  const codex = `${os.homedir()}/.codex/worktrees/2d25/CelestiaCompose`;
+  expect(projectForCwd(codex)).toBe("CelestiaCompose");
+});
+
+test("a deleted arbitrary-path git worktree still groups under its parent repo project", () => {
+  /* `git worktree add ../live-log-viewer-workflows` has no recognizable path
+     layout, so once deleted only a resolution recorded while it was alive ties
+     it back to the main repo. Live checkout → `.git` pointer is read AND
+     remembered; delete it → the remembered map keeps the same project name. */
+  const base = path.join(SANDBOX, "wt-del"); // isolated so cwd keys don't collide with other tests
+  const state = path.join(base, "state");
+  process.env.LLV_STATE_DIR = state;
+  fs.mkdirSync(state, { recursive: true });
+  const repo = path.join(base, "live-log-viewer-next");
+  const worktree = path.join(base, "live-log-viewer-branchx");
+  fs.mkdirSync(path.join(repo, ".git", "worktrees", "live-log-viewer-branchx"), { recursive: true });
+  fs.mkdirSync(worktree, { recursive: true });
+  fs.writeFileSync(
+    path.join(worktree, ".git"),
+    `gitdir: ${path.join(repo, ".git", "worktrees", "live-log-viewer-branchx")}\n`,
+  );
+
+  const live = projectForCwd(worktree);
+  expect(live).toBe(projectForCwd(repo));
+  persistWorktreeMap();
+
+  fs.rmSync(worktree, { recursive: true, force: true });
+  /* Drop the in-memory map by rebinding to a different state dir, then back —
+     the second lookup must reload the resolution from disk, proving it
+     survives a process restart, not just an in-memory cache. */
+  const other = path.join(base, "wt-map-other");
+  fs.mkdirSync(other, { recursive: true });
+  process.env.LLV_STATE_DIR = other;
+  projectForCwd(worktree);
+  process.env.LLV_STATE_DIR = state;
+  expect(projectForCwd(worktree)).toBe(live);
 });
 
 test("a worktree's main repo slugifies to the same project name its own sessions use", () => {

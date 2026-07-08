@@ -13,6 +13,7 @@ import {
 import type { FileEntry } from "../types";
 import { globalCache } from "./caches";
 import { codexThreadIdFromPath, nativeCodexParentThreadId } from "./codexNative";
+import { persistWorktreeMap } from "./describe";
 import { taskParts } from "./discover";
 import { readJson, recordValue, recordsValue, stringValue } from "./json";
 import { fileHasNeedle, findNeedle } from "./needle";
@@ -446,4 +447,5 @@ export async function linkEntries(entries: FileEntry[]): Promise<void> {
     if (!entry.parent || !byPath.has(entry.parent)) entry.parent = null;
     else entry.project = rootProject(entry);
   }
+  persistWorktreeMap();
 }
