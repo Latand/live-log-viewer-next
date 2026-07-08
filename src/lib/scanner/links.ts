@@ -422,6 +422,13 @@ export async function linkEntries(entries: FileEntry[]): Promise<void> {
         const base = info.description || info.command;
         if (base) entry.title = base.split(/\s+/).join(" ").slice(0, 120);
       } else {
+        /* No launch banner recovered — the spawning tool_result was never
+           persisted (interrupted/unflushed) or the output file is a stale
+           leftover. The task's own path still names its owner
+           (`…/<sid>/tasks/<tid>.output`), so bind it to that session's main
+           transcript instead of leaving it a floating orphan; the command just
+           stays unknown. */
+        entry.parent = main;
         entry.title = "Background task " + tid;
         entry.cmd = "";
         entry.cmdDesc = "";
