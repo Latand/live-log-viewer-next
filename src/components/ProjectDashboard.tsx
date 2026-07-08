@@ -68,6 +68,10 @@ interface Props {
 interface ColumnPrefs {
   manual: string[];
   hidden: string[];
+  /** Connected conversations the user expanded from a collapsed view: they
+      render as nodes wired below their parent (fed into the scheme's
+      expandedConversationPaths), surviving reloads. */
+  expanded: string[];
 }
 
 const prefsKey = (project: string) => `llvCols:${project}`;
@@ -91,9 +95,9 @@ function loadDrafts(project: string): string[] {
 function loadPrefs(project: string): ColumnPrefs {
   try {
     const raw = JSON.parse(localStorage.getItem(prefsKey(project)) ?? "{}") as Partial<ColumnPrefs>;
-    return { manual: raw.manual ?? [], hidden: raw.hidden ?? [] };
+    return { manual: raw.manual ?? [], hidden: raw.hidden ?? [], expanded: raw.expanded ?? [] };
   } catch {
-    return { manual: [], hidden: [] };
+    return { manual: [], hidden: [], expanded: [] };
   }
 }
 
@@ -131,7 +135,7 @@ export function ProjectDashboard({
   const isMobile = useIsMobile();
   const highlightTimer = useRef<number | null>(null);
   const pendingFocusRef = useRef<string | null>(null);
-  const [prefs, setPrefs] = useState<ColumnPrefs>({ manual: [], hidden: [] });
+  const [prefs, setPrefs] = useState<ColumnPrefs>({ manual: [], hidden: [], expanded: [] });
   const [drafts, setDrafts] = useState<string[]>([]);
   const [emptyView, setEmptyView] = useState<EmptyView>("scheme");
   const [highlight, setHighlight] = useState<string | null>(null);
@@ -192,11 +196,19 @@ export function ProjectDashboard({
     for (const flow of activeFlows) paths.add(flow.implementerPath);
     return paths;
   }, [files, flows]);
+  /* Flow-driven expansions plus the ones the user opened by hand from a
+     collapsed view: a connected conversation the user expanded renders as a
+     node wired below its parent, just like an active-group child. */
+  const expandedConversations = useMemo(() => {
+    const paths = new Set(expandedFlowConversations);
+    for (const path of prefs.expanded) paths.add(path);
+    return paths;
+  }, [expandedFlowConversations, prefs.expanded]);
   const groupFiles = useMemo(() => foldClaimedReviewers(files, flows), [files, flows]);
   const projectWorkflows = useMemo(() => workflowsForProject(workflows, project, files), [workflows, project, files]);
   const groups = useMemo(
-    () => buildBranchGroups(groupFiles, project, { expandedConversationPaths: expandedFlowConversations }),
-    [groupFiles, project, expandedFlowConversations],
+    () => buildBranchGroups(groupFiles, project, { expandedConversationPaths: expandedConversations }),
+    [groupFiles, project, expandedConversations],
   );
   const activeRoots = useMemo(() => new Set(groups.map((group) => group.key)), [groups]);
   const cards = useMemo(() => collapsedTrees(groupFiles, project, activeRoots), [groupFiles, project, activeRoots]);
@@ -391,7 +403,10 @@ export function ProjectDashboard({
     }).catch(() => {});
     const manual = prefs.manual.filter((item) => item !== path);
     const hidden = autoPaths.has(path) ? [...new Set([...prefs.hidden, path])] : prefs.hidden;
-    persistPrefs({ manual, hidden });
+    /* Closing a hand-expanded child also drops it from the expand set, so it
+       collapses back into its parent's quiet history instead of reappearing. */
+    const expanded = prefs.expanded.filter((item) => item !== path);
+    persistPrefs({ ...prefs, manual, hidden, expanded });
     setEphemeral((prev) => (prev.includes(path) ? prev.filter((item) => item !== path) : prev));
   };
 
@@ -425,8 +440,19 @@ export function ProjectDashboard({
       return;
     }
     const hidden = prefs.hidden.filter((item) => item !== file.path);
-    const manual = autoPaths.has(file.path) ? prefs.manual : [...new Set([...prefs.manual, file.path])];
-    persistPrefs({ manual, hidden });
+    if (file.parent) {
+      /* A connected conversation (we know its parent) expands as a node wired
+         below that parent — clicking its collapsed form promotes it into the
+         tree via the scheme's expandedConversationPaths, not as a loose
+         standalone node. */
+      const expanded = [...new Set([...prefs.expanded, file.path])];
+      persistPrefs({ ...prefs, hidden, expanded });
+    } else {
+      /* A parentless conversation has no parent to nest under, so it opens as a
+         standalone managed node. */
+      const manual = autoPaths.has(file.path) ? prefs.manual : [...new Set([...prefs.manual, file.path])];
+      persistPrefs({ ...prefs, hidden, manual });
+    }
     pendingFocusRef.current = file.path;
   };
 
