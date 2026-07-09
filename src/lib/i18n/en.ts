@@ -231,7 +231,9 @@ export const en = {
   "mic.cancel": "Cancel recording",
   "mic.recognizing": "Transcribing…",
   "mic.dictate": "Dictate",
-  "mic.dictateHint": "dictate (up to 2 min) · right-click: transcription method",
+  "mic.dictateHint": "dictate (up to 10 min) · right-click: transcription method",
+  "mic.timeLeft": "{time} left before auto-stop",
+  "mic.capStopped": "stopped at 10:00",
   "mic.connecting": "Connecting the microphone — a moment…",
   "mic.menuTitle": "Transcription method",
   "mic.menuLoading": "checking what's available…",
@@ -597,6 +599,8 @@ export const en = {
   "status.flow": "flow: {label}",
 
   // useDictation errors
+  "dictation.capWarn": "less than a minute of recording left",
+  "dictation.capStopped": "Recording stopped at the 10-minute limit; the text will appear in the field.",
   "dictation.failed": "couldn't transcribe",
   "dictation.silence": "silence — nothing recognized",
   "dictation.unsupported": "recording is not supported in this browser",

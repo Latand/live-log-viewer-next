@@ -1,9 +1,14 @@
 "use client";
 
-import { useLayoutEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
 
 import { useImageAttachments } from "@/components/imageAttachments";
+import { useAutosizePinned } from "@/hooks/useAutosizePinned";
 import { useDictation } from "@/hooks/useDictation";
+
+/* The pane / draft / bulk / task-create composers grow to ~6 rows, then scroll
+   internally pinned to the newest text. */
+const COMPOSER_MAX_PX = 160;
 
 export interface ComposerStatus {
   kind: "ok" | "err";
@@ -62,9 +67,19 @@ export function useComposer({ initialText, persistText, submit, disabled = false
   const insertSpoken = (spoken: string) => {
     setText((prev) => (prev ? prev.trimEnd() + " " + spoken : spoken));
     setStatus(null);
-    inputRef.current?.focus();
+    /* After the state-driven value updates, drop the caret at the end and
+       scroll the newest words into view — an insert always follows the text,
+       so the batch/unclaimed transcript never lands off-screen. */
+    requestAnimationFrame(() => {
+      const el = inputRef.current;
+      if (!el) return;
+      el.focus();
+      const end = el.value.length;
+      el.setSelectionRange(end, end);
+      el.scrollTop = el.scrollHeight;
+    });
   };
-  /* onUnclaimedText catches the 120s auto-stop, whose transcript no stop()
+  /* onUnclaimedText catches the cap auto-stop, whose transcript no stop()
      promise waits for — it goes into the input for review, never auto-sent.
      onLiveCommit lands realtime segments in the draft while still talking. */
   const dictation = useDictation({
@@ -78,15 +93,13 @@ export function useComposer({ initialText, persistText, submit, disabled = false
      appends the final text, so the two never double up. */
   const displayText = dictation.liveText ? (text ? text.trimEnd() + " " : "") + dictation.liveText : text;
 
-  /* The field grows with its content up to ~6 rows, then scrolls inside
-     itself. Measured from scrollHeight on every text change, which also
-     covers restored drafts and dictation inserts. */
-  useLayoutEffect(() => {
-    const el = inputRef.current;
-    if (!el) return;
-    el.style.height = "0px";
-    el.style.height = Math.min(el.scrollHeight + 2, 160) + "px";
-  }, [displayText]);
+  /* Grow-to-max plus pin-to-newest: while a live dictation overlays the draft
+     the field pins to the bottom on every update so the latest spoken words
+     stay visible; while typing it pins only when the caret is at the end. */
+  useAutosizePinned(inputRef, displayText, {
+    maxPx: COMPOSER_MAX_PX,
+    pinned: Boolean(dictation.liveText),
+  });
 
   /* One-tap voice send: stop the recording in flight, wait for the transcript,
      append it to whatever is already typed, then hand off to submit — no
