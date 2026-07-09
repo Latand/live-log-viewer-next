@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 
 import { getLocale, type Locale, translate, useLocale } from "@/lib/i18n";
-import type { EngineLimits, LimitsPayload, LimitWindow } from "@/lib/types";
+import type { EngineLimits, LimitsPayload, LimitsProvenance, LimitWindow } from "@/lib/types";
 
 import { engineTintOf, fmtAge } from "./utils";
 
@@ -89,18 +89,19 @@ function EngineBlock({
   engine,
   limits,
   now,
-  staleHint,
+  provenance,
 }: {
   label: string;
   engine: string;
   limits: EngineLimits | null;
   now: number;
-  staleHint: string | null;
+  provenance: LimitsProvenance;
 }) {
   const { t } = useLocale();
   if (!limits || (!limits.session && !limits.weekly)) return null;
   const tint = engineTintOf(engine);
   const stale = limits.capturedAt && now - limits.capturedAt > STALE_S ? fmtAge(limits.capturedAt) : null;
+  const staleHint = fmtStaleSince(provenance.staleSince, getLocale());
   return (
     <div className={`mt-2.5 first:mt-0 ${staleHint ? "opacity-60" : ""}`}>
       <div className="flex items-baseline gap-1.5">
@@ -122,24 +123,23 @@ function EngineBlock({
   );
 }
 
-function isEmptyPayload(data: LimitsPayload): boolean {
-  return !data.claude && !data.codex;
-}
-
-function stickyPayload(previous: LimitsPayload | null, next: LimitsPayload): LimitsPayload {
-  if (isEmptyPayload(next) && previous) {
-    return { ...previous, staleSince: next.staleSince ?? previous.staleSince ?? null };
-  }
+export function stickyPayload(previous: LimitsPayload | null, next: LimitsPayload): LimitsPayload {
+  if (!previous) return next;
+  const sameCodexAccount = previous.codexAccountId === next.codexAccountId;
   return {
     claude: next.claude ?? previous?.claude ?? null,
-    codex: next.codex ?? previous?.codex ?? null,
+    codex: sameCodexAccount ? next.codex ?? previous.codex : next.codex,
+    codexAccountId: next.codexAccountId,
+    provenance: {
+      claude: next.claude ? next.provenance.claude : previous.provenance.claude,
+      codex: sameCodexAccount && !next.codex ? previous.provenance.codex : next.provenance.codex,
+    },
     staleSince: next.staleSince ?? null,
   };
 }
 
 /** Sidebar footer: Claude Code and Codex plan limits (5h session + weekly). */
 export function LimitsFooter() {
-  const { locale } = useLocale();
   const [snap, setSnap] = useState<{ data: LimitsPayload; at: number } | null>(null);
 
   useEffect(() => {
@@ -165,11 +165,10 @@ export function LimitsFooter() {
   }, []);
 
   if (!snap || (!snap.data.claude && !snap.data.codex)) return null;
-  const staleHint = fmtStaleSince(snap.data.staleSince, locale);
   return (
     <div className="shrink-0 border-t border-line px-3.5 pb-3 pt-2.5">
-      <EngineBlock label="Claude" engine="claude" limits={snap.data.claude} now={snap.at} staleHint={staleHint} />
-      <EngineBlock label="Codex" engine="codex" limits={snap.data.codex} now={snap.at} staleHint={staleHint} />
+      <EngineBlock label="Claude" engine="claude" limits={snap.data.claude} now={snap.at} provenance={snap.data.provenance.claude} />
+      <EngineBlock label="Codex" engine="codex" limits={snap.data.codex} now={snap.at} provenance={snap.data.provenance.codex} />
     </div>
   );
 }

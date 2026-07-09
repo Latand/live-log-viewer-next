@@ -210,9 +210,20 @@ export interface EngineLimits {
   capturedAt: number | null;
 }
 
+/** Origin and freshness are independent for each engine. Reasons are safe for
+    display/logging and never contain credential material. */
+export interface LimitsProvenance {
+  source: "live" | "transcript" | "cache" | "unavailable";
+  reason: string | null;
+  staleSince: string | null;
+}
+
 export interface LimitsPayload {
   claude: EngineLimits | null;
   codex: EngineLimits | null;
+  /** The account whose Codex values appear in this payload. */
+  codexAccountId: string;
+  provenance: { claude: LimitsProvenance; codex: LimitsProvenance };
   /** ISO timestamp from the first failed refresh behind this fallback payload. */
   staleSince?: string | null;
 }

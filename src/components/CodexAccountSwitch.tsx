@@ -5,7 +5,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useLocale } from "@/lib/i18n";
 
 type DeviceAuth = { url: string; code: string };
-export type CodexAccountOption = { id: string; label: string; authPresent: boolean; loginPending: boolean; loginState: "pending" | "idle" | "authenticated"; deviceAuth: DeviceAuth | null };
+export type CodexAccountOption = { id: string; label: string; authPresent: boolean; loginPending: boolean; loginState: "pending" | "completed" | "failed" | "stale" | "cancelled" | "idle" | "authenticated"; attemptState?: "pending" | "completed" | "failed" | "stale" | "cancelled" | null; deviceAuth: DeviceAuth | null };
 
 export function pendingDeviceAuth(accounts: CodexAccountOption[]): DeviceAuth | null {
   return accounts.find((account) => account.loginPending)?.deviceAuth ?? null;
