@@ -1,4 +1,4 @@
-import type { FileEntry } from "../types";
+import type { FileEntry, ProjectCatalogEntry } from "../types";
 import { notifyQuestion } from "../push";
 import { resolveTarget } from "../tmux";
 import { activityVerdict } from "./activity";
@@ -6,7 +6,7 @@ import { tickFlows } from "../flows/engine";
 import { tickTaskInbox } from "../tasks/inboxScanner";
 import { tickWorkflows } from "../workflows/engine";
 import { ctxFor } from "./context";
-import { discoverFiles } from "./discover";
+import { discoverFiles, discoverFilesWithProjectCatalog } from "./discover";
 import { entryEffort } from "./effort";
 import { linkEntries } from "./links";
 import { entryModel } from "./model";
@@ -71,7 +71,16 @@ async function forEachEntryBatchYielding(
 }
 
 export async function listFiles(): Promise<FileEntry[]> {
-  const entries = await discoverFiles();
+  return (await listFilesInternal(false)).files;
+}
+
+export async function listFilesWithProjectCatalog(): Promise<{ files: FileEntry[]; projectCatalog: ProjectCatalogEntry[] }> {
+  return listFilesInternal(true);
+}
+
+async function listFilesInternal(includeProjectCatalog: boolean): Promise<{ files: FileEntry[]; projectCatalog: ProjectCatalogEntry[] }> {
+  const scan = includeProjectCatalog ? await discoverFilesWithProjectCatalog() : { files: await discoverFiles(), projectCatalog: [] };
+  const entries = scan.files;
   // The /proc fd scan is only needed to attribute background-task outputs to a
   // live pid. When the shortlist has no such entries, skip the scan entirely;
   // activity() only consults holders on the same claude-tasks/.output path.
@@ -116,5 +125,5 @@ export async function listFiles(): Promise<FileEntry[]> {
      the state that same poll just produced. */
   await tickWorkflows(entries);
   tickTaskInbox(entries);
-  return entries;
+  return { files: entries, projectCatalog: scan.projectCatalog };
 }

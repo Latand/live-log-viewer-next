@@ -229,3 +229,35 @@ describe("buildProjectSummaries with workflows", () => {
     expect(buildProjectSummaries([], 2_000, [wf({ state: "closed" })])).toHaveLength(0);
   });
 });
+
+describe("buildProjectSummaries with project catalog", () => {
+  test("adds catalog-only projects as muted summaries", () => {
+    const summaries = buildProjectSummaries([], 2_000, [], [
+      { project: "Pr-Gram", conversations: 3, smt: 1_700_000_100 },
+    ]);
+
+    expect(summaries).toEqual([
+      {
+        project: "Pr-Gram",
+        liveCount: 0,
+        attentionCount: 0,
+        conversations: 3,
+        smt: 1_700_000_100,
+        catalogOnly: true,
+      },
+    ]);
+  });
+
+  test("catalog counts enrich projects already in the recent shortlist", () => {
+    const summaries = buildProjectSummaries([entry({ path: "/recent", project: "Pr-Gram", mtime: 100 })], 2_000, [], [
+      { project: "Pr-Gram", conversations: 7, smt: 50 },
+    ]);
+
+    expect(summaries[0]).toMatchObject({
+      project: "Pr-Gram",
+      conversations: 7,
+      smt: 100,
+      catalogOnly: false,
+    });
+  });
+});

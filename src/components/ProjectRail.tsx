@@ -3,7 +3,7 @@
 import { useMemo, useState } from "react";
 
 import { useLocale } from "@/lib/i18n";
-import type { FileEntry } from "@/lib/types";
+import type { FileEntry, ProjectCatalogEntry } from "@/lib/types";
 import type { Workflow } from "@/lib/workflows/types";
 
 import { AccessQrButton } from "./AccessQrButton";
@@ -18,6 +18,7 @@ import { fmtAge } from "./utils";
 
 interface Props {
   files: FileEntry[];
+  projectCatalog: ProjectCatalogEntry[];
   /** Active workflows: their stamped projects stay listed even while no
       transcript of theirs exists yet. */
   workflows: Workflow[];
@@ -31,11 +32,11 @@ interface Props {
   onSelect: (project: string) => void;
 }
 
-export function ProjectRail({ files, workflows, archivedProjects, selected, loaded, now, onSelect }: Props) {
+export function ProjectRail({ files, projectCatalog, workflows, archivedProjects, selected, loaded, now, onSelect }: Props) {
   const { t } = useLocale();
   const [query, setQuery] = useState("");
   const [archiveOpen, setArchiveOpen] = useState(false);
-  const summaries = useMemo(() => buildProjectSummaries(files, now, workflows), [files, now, workflows]);
+  const summaries = useMemo(() => buildProjectSummaries(files, now, workflows, projectCatalog), [files, now, workflows, projectCatalog]);
   const visible = useMemo(() => {
     const q = query.trim().toLowerCase();
     return q ? summaries.filter((summary) => summary.project.toLowerCase().includes(q)) : summaries;
@@ -95,6 +96,7 @@ export function ProjectRail({ files, workflows, archivedProjects, selected, load
                 age={fmtAge(summary.smt)}
                 active={selected === summary.project}
                 hasLive={summary.liveCount > 0}
+                muted={summary.catalogOnly}
                 onClick={() => onSelect(summary.project)}
               />
             </div>
@@ -125,6 +127,7 @@ export function ProjectRail({ files, workflows, archivedProjects, selected, load
                     age={fmtAge(summary.smt)}
                     active={selected === summary.project}
                     hasLive={summary.liveCount > 0}
+                    muted={summary.catalogOnly}
                     onClick={() => onSelect(summary.project)}
                   />
                 ))
@@ -156,6 +159,7 @@ function RailRow({
   age,
   active,
   hasLive,
+  muted = false,
   onClick,
 }: {
   label: string;
@@ -165,6 +169,7 @@ function RailRow({
   age: string;
   active: boolean;
   hasLive: boolean;
+  muted?: boolean;
   onClick: () => void;
 }) {
   return (
@@ -172,6 +177,7 @@ function RailRow({
       className={[
         "mb-0.5 flex w-full items-center gap-2 rounded-[10px] border px-2.5 py-2 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40",
         active ? "border-line bg-bg shadow-card" : "border-transparent hover:bg-bg",
+        muted ? "opacity-65" : "",
       ].join(" ")}
       aria-current={active ? "page" : undefined}
       onClick={onClick}
@@ -179,11 +185,11 @@ function RailRow({
       <span
         className={[
           "h-2 w-2 shrink-0 rounded-full",
-          hasLive ? "animate-pulse bg-ok" : "bg-[#d6d6dd]",
+          hasLive ? "animate-pulse bg-ok" : muted ? "bg-[#b8b8c2]" : "bg-[#d6d6dd]",
         ].join(" ")}
       />
       <span className="min-w-0 flex-1">
-        <span className={`block truncate text-[13px] ${active ? "font-bold" : "font-semibold"}`}>{label}</span>
+        <span className={`block truncate text-[13px] ${active ? "font-bold" : "font-semibold"} ${muted ? "text-dim" : ""}`}>{label}</span>
         {age ? <span className="block text-[10.5px] text-dim">{age}</span> : null}
       </span>
       {live > 0 ? (

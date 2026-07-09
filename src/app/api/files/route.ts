@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 
 import { NextResponse } from "next/server";
 
-import { listFiles } from "@/lib/scanner";
+import { listFilesWithProjectCatalog } from "@/lib/scanner";
 import { pidAlive, readPpid } from "@/lib/scanner/process";
 import { loadFlows } from "@/lib/flows/store";
 import { pathForPanePid, reconcileTasks } from "@/lib/tasks/reconcile";
@@ -15,7 +15,7 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function GET(request: Request): Promise<NextResponse> {
-  const files = await listFiles();
+  const { files, projectCatalog } = await listFilesWithProjectCatalog();
   /* Reconciliation runs inside the serialized read-modify-write: the file
      scan above is the slow part, so a task edit landing during it is picked
      up by this fresh load instead of being overwritten by a stale snapshot. */
@@ -27,7 +27,7 @@ export async function GET(request: Request): Promise<NextResponse> {
     return { tasks: reconciled.dirty ? reconciled.tasks : undefined, result: reconciled.tasks };
   });
   const workflows = filterWorkflowsForFileScan(loadWorkflows(), files);
-  const body = JSON.stringify({ files, flows: loadFlows(), workflows, tasks } satisfies FilesResponse);
+  const body = JSON.stringify({ files, projectCatalog, flows: loadFlows(), workflows, tasks } satisfies FilesResponse);
   /* The client re-polls every 10 s and this ~410 KB payload is usually
      identical between polls; a strong ETag over the exact bytes lets an
      unchanged response come back as a bodyless 304. force-dynamic still holds

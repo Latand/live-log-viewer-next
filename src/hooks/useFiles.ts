@@ -7,20 +7,21 @@ import { TASKS_CHANGED_EVENT } from "@/components/tasks/taskApi";
 import { WORKFLOWS_CHANGED_EVENT } from "@/components/workflows/workflowModel";
 import type { Flow } from "@/lib/flows/types";
 import type { BoardTask } from "@/lib/tasks/types";
-import type { FileEntry, FilesResponse } from "@/lib/types";
+import type { FileEntry, FilesResponse, ProjectCatalogEntry } from "@/lib/types";
 import type { Workflow } from "@/lib/workflows/types";
 
 const POLL_MS = 10_000;
 
 export interface FilesData {
   files: FileEntry[];
+  projectCatalog: ProjectCatalogEntry[];
   flows: Flow[];
   workflows: Workflow[];
   tasks: BoardTask[];
   loaded: boolean;
 }
 
-const EMPTY: FilesData = { files: [], flows: [], workflows: [], tasks: [], loaded: false };
+const EMPTY: FilesData = { files: [], projectCatalog: [], flows: [], workflows: [], tasks: [], loaded: false };
 
 /** Polls /api/files. Keeps the last good list on transient fetch errors. */
 export function useFiles(): FilesData {
@@ -44,10 +45,11 @@ export function useFiles(): FilesData {
         /* The flows rollout changes the payload from a bare array to
            {files, flows}; accept both so client and server can deploy in
            either order. */
-        if (Array.isArray(parsed)) setData({ files: parsed, flows: [], workflows: [], tasks: [], loaded: true });
+        if (Array.isArray(parsed)) setData({ files: parsed, projectCatalog: [], flows: [], workflows: [], tasks: [], loaded: true });
         else {
           setData({
             files: parsed.files ?? [],
+            projectCatalog: parsed.projectCatalog ?? [],
             flows: parsed.flows ?? [],
             workflows: parsed.workflows ?? [],
             tasks: parsed.tasks ?? [],

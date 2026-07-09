@@ -60,8 +60,17 @@ export interface FileEntry {
   flow?: FlowAnnotation;
 }
 
+export interface ProjectCatalogEntry {
+  project: string;
+  /** Unix seconds of the newest valid transcript candidate in the project. */
+  smt: number;
+  /** Lightweight count from the full candidate scan. */
+  conversations: number;
+}
+
 export interface FilesResponse {
   files: FileEntry[];
+  projectCatalog?: ProjectCatalogEntry[];
   flows: Flow[];
   workflows: Workflow[];
   tasks: BoardTask[];

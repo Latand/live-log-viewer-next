@@ -2,9 +2,10 @@ import fs from "node:fs";
 import { access, readdir, stat } from "node:fs/promises";
 import path from "node:path";
 
-import type { FileEntry, RootKey } from "../types";
+import type { FileEntry, ProjectCatalogEntry, RootKey } from "../types";
 import { codexThreadIdFromPath, nativeCodexParentThreadId } from "./codexNative";
 import { describe } from "./describe";
+import { projectCatalogFromRaw } from "./projectCatalog";
 import { EXTS, FILE_CAP, ROOTS } from "./roots";
 
 export function taskParts(root: string, pathname: string): [string, string, string] | null {
@@ -15,7 +16,7 @@ export function taskParts(root: string, pathname: string): [string, string, stri
   return null;
 }
 
-interface RawEntry {
+export interface RawEntry {
   rootName: RootKey;
   root: string;
   path: string;
@@ -88,14 +89,14 @@ async function rootExists(root: string, limit: Limit): Promise<boolean> {
   }
 }
 
-export async function discoverFiles(roots: Roots = ROOTS): Promise<FileEntry[]> {
-  const limit = createLimiter(48);
-  const raw = (await Promise.all((Object.entries(roots) as [RootKey, string][]).map(async ([rootName, root]) => {
+async function discoverRaw(roots: Roots, limit: Limit): Promise<RawEntry[]> {
+  return (await Promise.all((Object.entries(roots) as [RootKey, string][]).map(async ([rootName, root]) => {
     if (!(await rootExists(root, limit))) return [];
     return walk(rootName, roots, root, root, limit);
   }))).flat();
-  // describe() reads file heads, so it runs only on the capped shortlist plus
-  // parent closure; the walk stays a cheap stat pass over every candidate.
+}
+
+function entriesFromRaw(raw: RawEntry[]): FileEntry[] {
   raw.sort((a, b) => b.st.mtimeMs - a.st.mtimeMs);
   const rawByCodexThread = new Map<string, RawEntry>();
   for (const entry of raw) {
@@ -138,4 +139,22 @@ export async function discoverFiles(roots: Roots = ROOTS): Promise<FileEntry[]> 
       waitingInput: null,
     };
   });
+}
+
+export async function discoverFilesWithProjectCatalog(roots: Roots = ROOTS): Promise<{
+  files: FileEntry[];
+  projectCatalog: ProjectCatalogEntry[];
+}> {
+  const limit = createLimiter(48);
+  const raw = await discoverRaw(roots, limit);
+  const projectCatalog = projectCatalogFromRaw(raw);
+  return { files: entriesFromRaw(raw), projectCatalog };
+}
+
+export async function discoverFiles(roots: Roots = ROOTS): Promise<FileEntry[]> {
+  const limit = createLimiter(48);
+  const raw = await discoverRaw(roots, limit);
+  // describe() reads file heads, so it runs only on the capped shortlist plus
+  // parent closure; the walk stays a cheap stat pass over every candidate.
+  return entriesFromRaw(raw);
 }

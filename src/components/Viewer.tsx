@@ -64,12 +64,13 @@ function attentionSnippet(t: TFunction, item: AttentionItem): string {
 
 export function Viewer() {
   const { t } = useLocale();
-  const { files, flows: polledFlows, workflows, tasks, loaded } = useFiles();
+  const { files, projectCatalog, flows: polledFlows, workflows, tasks, loaded } = useFiles();
   /* This tab's optimistic flow closes apply before anything renders: the X
      on a flow strip clears the reviewer side of the scheme instantly. */
   const flows = useEffectiveFlows(polledFlows);
   useAgentChimes(files);
   const { archivedProjects, archiveProject, unarchiveProject } = useArchivedProjects(files);
+  const catalogProjects = useMemo(() => new Set(projectCatalog.map((entry) => entry.project)), [projectCatalog]);
   const isMobile = useIsMobile();
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [project, setProject] = useState<string>(OVERVIEW);
@@ -363,11 +364,11 @@ export function Viewer() {
   return (
     <div className="flex h-full">
       {isMobile ? null : (
-        <ProjectRail files={files} workflows={workflows} archivedProjects={archivedProjects} selected={project} now={clock} loaded={loaded} onSelect={selectProject} />
+        <ProjectRail files={files} projectCatalog={projectCatalog} workflows={workflows} archivedProjects={archivedProjects} selected={project} now={clock} loaded={loaded} onSelect={selectProject} />
       )}
       {isMobile && drawerOpen ? (
         <div className="fixed inset-0 z-50 flex">
-          <ProjectRail files={files} workflows={workflows} archivedProjects={archivedProjects} selected={project} now={clock} loaded={loaded} onSelect={selectProject} />
+          <ProjectRail files={files} projectCatalog={projectCatalog} workflows={workflows} archivedProjects={archivedProjects} selected={project} now={clock} loaded={loaded} onSelect={selectProject} />
           <button
             type="button"
             className="min-w-0 flex-1 bg-ink/35"
@@ -406,6 +407,7 @@ export function Viewer() {
         {project === OVERVIEW ? (
           <OverviewBoard
             files={files}
+            projectCatalog={projectCatalog}
             workflows={workflows}
             archivedProjects={archivedProjects}
             now={clock}
@@ -426,6 +428,7 @@ export function Viewer() {
             focusRequest={focusRequest}
             attentionPaths={attentionPaths}
             archived={archivedProjects.has(project)}
+            catalogKnown={catalogProjects.has(project)}
             onArchive={archiveProject}
             onUnarchive={unarchiveProject}
             onMenu={isMobile ? () => setDrawerOpen(true) : undefined}

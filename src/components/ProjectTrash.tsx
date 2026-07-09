@@ -116,9 +116,19 @@ function QuietFileRow({
  * stays available next to it for the rare case the transcripts must go.
  * Reversible (rail archive section / new activity), so no confirmation.
  */
-export function ArchiveProjectButton({ files, onArchive, compact = false }: { files: FileEntry[]; onArchive: () => void; compact?: boolean }) {
+export function ArchiveProjectButton({
+  files,
+  allowEmpty = false,
+  onArchive,
+  compact = false,
+}: {
+  files: FileEntry[];
+  allowEmpty?: boolean;
+  onArchive: () => void;
+  compact?: boolean;
+}) {
   const { t } = useLocale();
-  if (!files.length || files.some((file) => file.proc === "running" || file.activity === "live")) return null;
+  if ((!files.length && !allowEmpty) || files.some((file) => file.proc === "running" || file.activity === "live")) return null;
   return (
     <button
       type="button"

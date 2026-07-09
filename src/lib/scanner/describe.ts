@@ -8,6 +8,7 @@ import type { Engine, Fmt, RootKey } from "../types";
 import { cleanTitle } from "../title";
 import { globalCache } from "./caches";
 import { readJson, recordValue, recordsValue, stringValue } from "./json";
+import { projectResolutionStateKey } from "./projectState";
 
 interface Meta {
   project: string;
@@ -18,7 +19,7 @@ interface Meta {
   fmt: Fmt;
 }
 
-const metaCache = globalCache<[number, Meta]>("meta-v2");
+const metaCache = globalCache<[number, string, Meta]>("meta-v3");
 // Title and codex project live in the immutable head of a growing transcript,
 // so both are keyed by path and kept for good once resolved. A live file grows
 // on every poll, so a size-keyed meta cache would re-read the whole file each
@@ -26,7 +27,7 @@ const metaCache = globalCache<[number, Meta]>("meta-v2");
 // fixed. A head that has not yet produced a title (empty/short file) is left
 // open so growth can still yield one.
 const titleCache = globalCache<[number, string | null]>("title");
-const codexProjectCache = globalCache<{ project: string; worktree?: string }>("codex-project-v2");
+const codexProjectCache = globalCache<{ stateKey: string; project: string; worktree?: string }>("codex-project-v3");
 /* The cwd sits in the immutable head, so it follows the title-cache rule:
    keyed by path, re-read only while unresolved and the head still short. */
 const cwdCache = globalCache<[number, string | null]>("claude-cwd");
@@ -138,11 +139,11 @@ export function parseWorktreeGitdir(cwd: string, gitFileText: string): { repo: s
    checkout that just became (or stopped being) a worktree is noticed. */
 const worktreeGitCache = globalCache<[number, { repo: string; worktree: string } | null]>("worktree-git");
 const WORKTREE_TTL_MS = 60_000;
-const persistedProjectCache = globalCache<[number, string, {
+const persistedProjectCache = globalCache<[number, string, string, {
   byCwd: Map<string, { project: string; worktree?: string }>;
   byPath: Map<string, { project: string; worktree?: string }>;
   bySlug: Map<string, { project: string; worktree?: string }>;
-}]>("persisted-project");
+}]>("persisted-project-v2");
 const PERSISTED_PROJECT_TTL_MS = 10_000;
 
 /* A `git worktree add ../foo` checkout has NO recognizable path layout — unlike
@@ -264,8 +265,9 @@ function persistedProjects(): {
   bySlug: Map<string, { project: string; worktree?: string }>;
 } {
   const dir = stateDir();
+  const stateKey = projectResolutionStateKey();
   const cached = persistedProjectCache.get("state");
-  if (cached && cached[0] > Date.now() && cached[1] === dir) return cached[2];
+  if (cached && cached[0] > Date.now() && cached[1] === dir && cached[2] === stateKey) return cached[3];
   const byCwd = new Map<string, { project: string; worktree?: string }>();
   const byPath = new Map<string, { project: string; worktree?: string }>();
   const bySlug = new Map<string, { project: string; worktree?: string }>();
@@ -310,7 +312,7 @@ function persistedProjects(): {
     rememberPath(workflow.fixerPath, worktreeInfo ?? repoInfo);
   }
   const maps = { byCwd, byPath, bySlug };
-  persistedProjectCache.set("state", [Date.now() + PERSISTED_PROJECT_TTL_MS, dir, maps]);
+  persistedProjectCache.set("state", [Date.now() + PERSISTED_PROJECT_TTL_MS, dir, stateKey, maps]);
   return maps;
 }
 
@@ -457,8 +459,9 @@ function scanJsonlTitle(pathname: string, size: number, wantCodex: boolean): str
 }
 
 export function describe(rootName: RootKey, root: string, pathname: string, st: fs.Stats): Meta {
+  const stateKey = projectResolutionStateKey();
   const cached = metaCache.get(pathname);
-  if (cached?.[0] === st.size) return cached[1];
+  if (cached?.[0] === st.size && cached[1] === stateKey) return cached[2];
   const rel = path.relative(root, pathname);
   const fn = path.basename(pathname);
   let project = "other";
@@ -469,7 +472,7 @@ export function describe(rootName: RootKey, root: string, pathname: string, st: 
   let fmt: Fmt = "plain";
   if (rootName === "codex-sessions") {
     const cachedProject = codexProjectCache.get(pathname);
-    if (cachedProject) {
+    if (cachedProject?.stateKey === stateKey) {
       project = cachedProject.project;
       worktree = cachedProject.worktree;
     } else {
@@ -491,7 +494,7 @@ export function describe(rootName: RootKey, root: string, pathname: string, st: 
         project = info?.project ?? "";
         worktree = info?.worktree;
       }
-      if (project) codexProjectCache.set(pathname, { project, worktree });
+      if (project) codexProjectCache.set(pathname, { stateKey, project, worktree });
     }
     if (!project) project = "codex";
     engine = "codex";
@@ -542,6 +545,6 @@ export function describe(rootName: RootKey, root: string, pathname: string, st: 
     kind,
     fmt,
   };
-  metaCache.set(pathname, [st.size, meta]);
+  metaCache.set(pathname, [st.size, stateKey, meta]);
   return meta;
 }

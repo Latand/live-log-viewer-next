@@ -56,6 +56,7 @@ interface Props {
   attentionPaths?: ReadonlySet<string> | null;
   /** The project is shelved: hidden from the rail and the overview. */
   archived: boolean;
+  catalogKnown: boolean;
   onArchive: (project: string) => void;
   onUnarchive: (project: string) => void;
   /** Mobile shell: the rail hides behind a drawer, this opens it. */
@@ -137,6 +138,7 @@ export function ProjectDashboard({
   focusRequest,
   attentionPaths,
   archived,
+  catalogKnown,
   onArchive,
   onUnarchive,
   onMenu,
@@ -539,7 +541,7 @@ export function ProjectDashboard({
             <ArchiveRestore className="h-3 w-3" aria-hidden /> {t("dash.unarchive")}
           </button>
         ) : (
-          <ArchiveProjectButton files={projectFiles} onArchive={() => onArchive(project)} compact={isMobile} />
+          <ArchiveProjectButton files={projectFiles} allowEmpty={catalogKnown} onArchive={() => onArchive(project)} compact={isMobile} />
         )}
         <DeleteProjectButton files={projectFiles} />
         {isMobile ? (

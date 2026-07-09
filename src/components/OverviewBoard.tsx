@@ -5,7 +5,7 @@ import { useMemo } from "react";
 
 import { useColumns } from "@/hooks/useColumns";
 import { useLocale } from "@/lib/i18n";
-import type { FileEntry } from "@/lib/types";
+import type { FileEntry, ProjectCatalogEntry } from "@/lib/types";
 import type { Workflow } from "@/lib/workflows/types";
 
 import { buildBranchGroups, buildProjectSummaries, projectKey } from "./projectModel";
@@ -13,6 +13,7 @@ import { activityDot, cleanTitle, engineBadge, fmtAge } from "./utils";
 
 interface Props {
   files: FileEntry[];
+  projectCatalog: ProjectCatalogEntry[];
   /** Active workflows: their stamped projects get a card even without files. */
   workflows: Workflow[];
   /** Shelved projects: their cards stay off the board until unarchived or live again. */
@@ -28,10 +29,10 @@ interface Props {
   attention?: React.ReactNode;
 }
 
-export function OverviewBoard({ files, workflows, archivedProjects, now, onSelectProject, onSelectFile, onMenu, attention }: Props) {
+export function OverviewBoard({ files, projectCatalog, workflows, archivedProjects, now, onSelectProject, onSelectFile, onMenu, attention }: Props) {
   const { t } = useLocale();
   const cols = useColumns();
-  const allSummaries = useMemo(() => buildProjectSummaries(files, now, workflows), [files, now, workflows]);
+  const allSummaries = useMemo(() => buildProjectSummaries(files, now, workflows, projectCatalog), [files, now, workflows, projectCatalog]);
   const summaries = useMemo(
     () => allSummaries.filter((summary) => !archivedProjects.has(summary.project)),
     [allSummaries, archivedProjects],
@@ -85,7 +86,9 @@ export function OverviewBoard({ files, workflows, archivedProjects, now, onSelec
           return (
             <button
               key={summary.project}
-              className="flex flex-col gap-1.5 rounded-[10px] border border-line bg-panel p-3 text-left shadow-card hover:border-accent/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+              className={`flex flex-col gap-1.5 rounded-[10px] border border-line bg-panel p-3 text-left shadow-card hover:border-accent/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+                summary.catalogOnly ? "opacity-70" : ""
+              }`}
               onClick={() => onSelectProject(summary.project)}
             >
               <span className="flex items-center gap-2">

@@ -5,7 +5,7 @@ import path from "node:path";
 import { expect, test } from "bun:test";
 
 import type { RootKey } from "../types";
-import { discoverFiles } from "./discover";
+import { discoverFiles, discoverFilesWithProjectCatalog } from "./discover";
 import { FILE_CAP } from "./roots";
 
 async function writeFixture(pathname: string, content: string, mtimeSeconds: number): Promise<void> {
@@ -114,6 +114,107 @@ test("discoverFiles keeps native Codex spawn parents outside the recent cap", as
     expect(entries[0]?.path).toBe(childPath);
     expect(entries.some((entry) => entry.path === parentPath)).toBe(true);
   } finally {
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test("discoverFilesWithProjectCatalog keeps projects outside the recent cap", async () => {
+  const base = await mkdtemp(path.join(os.tmpdir(), "llv-discover-catalog-"));
+  const previousStateDir = process.env.LLV_STATE_DIR;
+  try {
+    process.env.LLV_STATE_DIR = path.join(base, "state");
+    const roots: Record<RootKey, string> = {
+      "codex-sessions": path.join(base, "codex-sessions"),
+      "claude-projects": path.join(base, "claude-projects"),
+      "claude-tasks": path.join(base, "claude-tasks"),
+    };
+    await Promise.all(Object.values(roots).map((root) => mkdir(root, { recursive: true })));
+
+    const startedAt = 1_700_020_000;
+    const oldProjectSlug = "-" + path.join(os.homedir(), "Projects", "Pr-Gram").split(path.sep).filter(Boolean).join("-");
+    const oldPath = path.join(roots["claude-projects"], oldProjectSlug, "old-session.jsonl");
+    await writeFixture(oldPath, JSON.stringify({ type: "user", message: { content: "Old project" } }) + "\n", startedAt - 10);
+    for (let index = 0; index < FILE_CAP; index += 1) {
+      const pathname = path.join(roots["codex-sessions"], `fresh-${String(index).padStart(3, "0")}.jsonl`);
+      await writeFixture(
+        pathname,
+        JSON.stringify({ type: "session_meta", payload: { cwd: "/home/latand/Projects/fresh-project" } }) + "\n",
+        startedAt + index,
+      );
+    }
+
+    const scan = await discoverFilesWithProjectCatalog(roots);
+
+    expect(scan.files.some((entry) => entry.path === oldPath)).toBe(false);
+    expect(scan.projectCatalog.find((entry) => entry.project === "Pr-Gram")).toEqual({
+      project: "Pr-Gram",
+      conversations: 1,
+      smt: startedAt - 10,
+    });
+  } finally {
+    if (previousStateDir === undefined) delete process.env.LLV_STATE_DIR;
+    else process.env.LLV_STATE_DIR = previousStateDir;
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test("discoverFilesWithProjectCatalog refreshes cached projects when flow state changes", async () => {
+  const base = await mkdtemp(path.join(os.tmpdir(), "llv-discover-catalog-state-"));
+  const previousStateDir = process.env.LLV_STATE_DIR;
+  try {
+    const stateDir = path.join(base, "state");
+    process.env.LLV_STATE_DIR = stateDir;
+    const roots: Record<RootKey, string> = {
+      "codex-sessions": path.join(base, "codex-sessions"),
+      "claude-projects": path.join(base, "claude-projects"),
+      "claude-tasks": path.join(base, "claude-tasks"),
+    };
+    await Promise.all(Object.values(roots).map((root) => mkdir(root, { recursive: true })));
+
+    const startedAt = 1_700_030_000;
+    const staleCwd = path.join(os.homedir(), ".agents", "tools", "live-log-viewer-workflows");
+    const canonicalCwd = path.join(os.homedir(), ".agents", "tools", "live-log-viewer-next");
+    const staleSlug = "-" + staleCwd.split(path.sep).filter(Boolean).join("-");
+    const staleProject = staleSlug.slice(("-" + os.homedir().split(path.sep).filter(Boolean).join("-") + "-").length);
+    const sessionPath = path.join(roots["claude-projects"], staleSlug, "old-session.jsonl");
+    await writeFixture(sessionPath, JSON.stringify({ type: "user", message: { content: "Old project" } }) + "\n", startedAt - 10);
+    for (let index = 0; index < FILE_CAP; index += 1) {
+      const pathname = path.join(roots["codex-sessions"], `fresh-${String(index).padStart(3, "0")}.jsonl`);
+      await writeFixture(
+        pathname,
+        JSON.stringify({ type: "session_meta", payload: { cwd: "/home/latand/Projects/fresh-project" } }) + "\n",
+        startedAt + index,
+      );
+    }
+
+    const first = await discoverFilesWithProjectCatalog(roots);
+    expect(first.files.some((entry) => entry.path === sessionPath)).toBe(false);
+    expect(first.projectCatalog.some((entry) => entry.project === staleProject)).toBe(true);
+
+    await mkdir(stateDir, { recursive: true });
+    await writeFile(
+      path.join(stateDir, "flows.json"),
+      JSON.stringify({
+        flows: [
+          {
+            project: "live-log-viewer-next",
+            cwd: canonicalCwd,
+            implementerPath: sessionPath,
+            rounds: [],
+          },
+        ],
+      }),
+    );
+
+    const second = await discoverFilesWithProjectCatalog(roots);
+    expect(second.projectCatalog.some((entry) => entry.project === staleProject)).toBe(false);
+    expect(second.projectCatalog.find((entry) => entry.project === "live-log-viewer-next")).toMatchObject({
+      conversations: 1,
+      smt: startedAt - 10,
+    });
+  } finally {
+    if (previousStateDir === undefined) delete process.env.LLV_STATE_DIR;
+    else process.env.LLV_STATE_DIR = previousStateDir;
     await rm(base, { recursive: true, force: true });
   }
 });
