@@ -213,6 +213,9 @@ export interface EngineLimits {
 export interface LimitsPayload {
   claude: EngineLimits | null;
   codex: EngineLimits | null;
+  /** Active Codex account the `codex` numbers belong to. Every limits response
+      carries this identity; null means the server has no active Codex account. */
+  codexAccountId: string | null;
   /** ISO timestamp from the first failed refresh behind this fallback payload. */
   staleSince?: string | null;
 }

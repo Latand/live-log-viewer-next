@@ -107,7 +107,18 @@ export const en = {
   "accounts.loginOpened": "Device login opened in {target}",
   "accounts.openLogin": "Open sign-in",
   "accounts.refreshFailed": "Could not refresh accounts. Try again.",
+  "accounts.loading": "Loading accounts…",
+  "accounts.noAccounts": "No accounts available yet.",
+  "limits.accountLoading": "Loading account limits…",
   "accounts.retry": "Retry",
+  "accounts.title": "Codex accounts",
+  "accounts.trigger": "Accounts",
+  "accounts.active": "active",
+  "accounts.needsLogin": "needs sign-in",
+  "accounts.pendingLogin": "signing in…",
+  "accounts.labelPlaceholder": "New account label",
+  "accounts.confirmAdd": "Add",
+  "accounts.close": "Close",
 
   // SwitchCard
   "switchCard.openColumn": "Open {title} as a column",
@@ -544,6 +555,8 @@ export const en = {
   "limits.stale": "data is stale: {stale}",
   "limits.5h": "5h",
   "limits.week": "Week",
+  "limits.accountsOpenAria": "Codex accounts — switch or add",
+  "limits.noDataYet": "no data yet",
 
   // ResourcesFooter
   "resources.ram": "RAM",
