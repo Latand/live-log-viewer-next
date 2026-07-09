@@ -20,8 +20,8 @@ import { cleanTitle, fmtAge } from "./utils";
 
 const PROJECT_KEY = "llvProject";
 
-function readHash(): { filePath: string | null; project: string | null } {
-  const fileMatch = location.hash.match(/^#f=(.+)$/);
+function readHashValue(hash: string): { filePath: string | null; project: string | null } {
+  const fileMatch = hash.match(/^#f=(.+)$/);
   if (fileMatch) {
     const raw = (fileMatch[1] ?? "").replace(/#question$/, "");
     try {
@@ -30,7 +30,7 @@ function readHash(): { filePath: string | null; project: string | null } {
       return { filePath: raw, project: null };
     }
   }
-  const projectMatch = location.hash.match(/^#p=(.+)$/);
+  const projectMatch = hash.match(/^#p=(.+)$/);
   if (projectMatch) {
     try {
       return { filePath: null, project: decodeURIComponent(projectMatch[1]) };
@@ -39,6 +39,25 @@ function readHash(): { filePath: string | null; project: string | null } {
     }
   }
   return { filePath: null, project: null };
+}
+
+function readHash(): { filePath: string | null; project: string | null } {
+  return readHashValue(location.hash);
+}
+
+export function initialProjectFromState(hash: string, storedProject: string | null): string {
+  return readHashValue(hash).project ?? storedProject ?? OVERVIEW;
+}
+
+function initialProject(): string {
+  if (typeof window === "undefined") return OVERVIEW;
+  let stored: string | null = null;
+  try {
+    stored = window.localStorage.getItem(PROJECT_KEY);
+  } catch {
+    stored = null;
+  }
+  return initialProjectFromState(window.location.hash, stored);
 }
 
 function writeHash(project: string) {
@@ -64,7 +83,7 @@ function attentionSnippet(t: TFunction, item: AttentionItem): string {
 
 export function Viewer() {
   const { t } = useLocale();
-  const [project, setProject] = useState<string>(OVERVIEW);
+  const [project, setProject] = useState<string>(() => initialProject());
   const { files, projectCatalog, flows: polledFlows, workflows, tasks, loaded } = useFiles(project === OVERVIEW ? null : project);
   /* This tab's optimistic flow closes apply before anything renders: the X
      on a flow strip clears the reviewer side of the scheme instantly. */
