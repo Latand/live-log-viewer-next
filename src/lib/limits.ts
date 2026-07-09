@@ -80,7 +80,10 @@ function writeDiskCache(entry: LimitsCacheEntry): void {
 }
 
 function lastCache(accountId: string): LimitsCacheEntry | null {
-  if (globalStore.__llvLimitsCache?.accountId === accountId) return globalStore.__llvLimitsCache;
+  if (globalStore.__llvLimitsCache?.accountId === accountId) {
+    const entry = globalStore.__llvLimitsCache;
+    return { ...entry, data: cleanPayload(entry.data, accountId) };
+  }
   globalStore.__llvLimitsCache = readDiskCache(accountId);
   return globalStore.__llvLimitsCache ?? null;
 }
