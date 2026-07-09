@@ -29,14 +29,14 @@ function hasLimits(data: LimitsPayload): boolean {
 }
 
 function cleanPayload(data: LimitsPayload): LimitsPayload {
-  return { claude: data.claude, codex: data.codex, staleSince: data.staleSince ?? null };
+  return { claude: data.claude, codex: data.codex, codexAccountId: data.codexAccountId ?? null, staleSince: data.staleSince ?? null };
 }
 
 function readDiskCache(accountId: string): LimitsCacheEntry | null {
   try {
     const raw = JSON.parse(fs.readFileSync(LIMITS_CACHE_FILE, "utf8")) as Partial<LimitsCacheEntry>;
     if (!raw || typeof raw.at !== "number" || raw.accountId !== accountId || !raw.data) return null;
-    const data = cleanPayload(raw.data);
+    const data = cleanPayload({ ...raw.data, codexAccountId: accountId });
     if (!hasLimits(data)) return null;
     return { at: raw.at, accountId, data };
   } catch {
@@ -66,9 +66,9 @@ function remember(accountId: string, data: LimitsPayload): LimitsPayload {
   return entry.data;
 }
 
-function fallbackFromCache(cache: LimitsCacheEntry | null, staleSince: string): LimitsPayload {
-  if (!cache) return { claude: null, codex: null, staleSince };
-  return { ...cache.data, staleSince };
+function fallbackFromCache(cache: LimitsCacheEntry | null, accountId: string, staleSince: string): LimitsPayload {
+  if (!cache) return { claude: null, codex: null, codexAccountId: accountId, staleSince };
+  return { ...cache.data, codexAccountId: accountId, staleSince };
 }
 
 function logRefreshMiss(claude: LimitRead, codex: LimitRead, cached: boolean): void {
@@ -91,6 +91,7 @@ export async function readLimits(): Promise<LimitsPayload> {
   const data: LimitsPayload = {
     claude: claude.data ?? cached?.data.claude ?? null,
     codex: codex.data ?? cached?.data.codex ?? null,
+    codexAccountId: accountId,
     staleSince: claude.data && codex.data ? null : staleSince,
   };
   if (hasLimits(data)) {
@@ -98,7 +99,7 @@ export async function readLimits(): Promise<LimitsPayload> {
     return remember(accountId, data);
   }
   logRefreshMiss(claude, codex, Boolean(cached));
-  return fallbackFromCache(cached, staleSince);
+  return fallbackFromCache(cached, accountId, staleSince);
 }
 
 /* ------------------------------- Claude ------------------------------- */
