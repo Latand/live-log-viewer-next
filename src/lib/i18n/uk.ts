@@ -101,7 +101,18 @@ export const uk: Record<keyof typeof en, Message> = {
   "accounts.loginOpened": "Вхід через пристрій відкрито в {target}",
   "accounts.openLogin": "Відкрити вхід",
   "accounts.refreshFailed": "Не вдалося оновити акаунти. Спробуй ще раз.",
+  "accounts.loading": "Завантаження акаунтів…",
+  "accounts.noAccounts": "Акаунтів поки немає.",
+  "limits.accountLoading": "Завантаження лімітів акаунта…",
   "accounts.retry": "Повторити",
+  "accounts.title": "Акаунти Codex",
+  "accounts.trigger": "Акаунти",
+  "accounts.active": "активний",
+  "accounts.needsLogin": "потрібен вхід",
+  "accounts.pendingLogin": "вхід…",
+  "accounts.labelPlaceholder": "Назва нового акаунта",
+  "accounts.confirmAdd": "Додати",
+  "accounts.close": "Закрити",
 
   "switchCard.openColumn": "Відкрити колонкою {title}",
   "switchCard.remove": "Прибрати з пульта",
@@ -511,6 +522,8 @@ export const uk: Record<keyof typeof en, Message> = {
   "limits.stale": "дані застарілі: {stale}",
   "limits.5h": "5 год",
   "limits.week": "Тиждень",
+  "limits.accountsOpenAria": "Акаунти Codex — змінити або додати",
+  "limits.noDataYet": "поки немає даних",
 
   // ResourcesFooter
   "resources.ram": "RAM",
