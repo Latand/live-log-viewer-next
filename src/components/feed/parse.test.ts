@@ -137,6 +137,61 @@ describe("feed session parity with one-shot parse", () => {
     assertParity(codexFile, noEcho, { cap: 3, chunks: [1] });
   });
 
+  test("codex custom tools render their call and structured output", () => {
+    const lines = [
+      JSON.stringify({ type: "session_meta", timestamp: "t0", payload: { model: "gpt-5.6-sol", cwd: "/tmp" } }),
+      JSON.stringify({
+        type: "response_item",
+        timestamp: "t1",
+        payload: {
+          type: "custom_tool_call",
+          id: "ctc-1",
+          call_id: "call-1",
+          name: "exec",
+          status: "completed",
+          input: "const r = await tools.exec_command({ cmd: \"rtk git status\" }); text(r.output);",
+        },
+      }),
+      JSON.stringify({
+        type: "response_item",
+        timestamp: "t2",
+        payload: {
+          type: "custom_tool_call_output",
+          call_id: "call-1",
+          output: [{ type: "input_text", text: "Script completed\nWall time 0.2 seconds\nOutput:\n## main" }],
+        },
+      }),
+      JSON.stringify({
+        type: "response_item",
+        timestamp: "t2.1",
+        payload: { type: "custom_tool_call", id: "ctc-2", call_id: "call-2", name: "exec", status: "completed", input: "throw new Error();" },
+      }),
+      JSON.stringify({
+        type: "response_item",
+        timestamp: "t2.2",
+        payload: { type: "custom_tool_call_output", call_id: "call-2", output: [{ type: "input_text", text: "Script failed\nError: boom" }] },
+      }),
+      JSON.stringify({
+        type: "response_item",
+        timestamp: "t3",
+        payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "Status checked." }] },
+      }),
+    ];
+    const feed = buildFeed(codexFile, lines, false, "");
+    const commands = feed.items.filter((item) => item.kind === "cmd");
+    expect(commands).toHaveLength(2);
+    const command = commands[0];
+    if (command?.kind !== "cmd") throw new Error("expected cmd item");
+    expect(command.call.display).toContain("exec");
+    expect(command.call.output).toContain("## main");
+    expect(command.call.status).toBe("ok");
+    const failed = commands[1];
+    if (failed?.kind !== "cmd") throw new Error("expected failed cmd item");
+    expect(failed.call.status).toBe("err");
+    expect(failed.call.output).toContain("Error: boom");
+    assertParity(codexFile, lines, { chunks: [1] });
+  });
+
   test("plain job log: command lifecycle and a pending structured block", () => {
     const lines = [
       "[10:00] Running command: /usr/bin/zsh -lc bun run build",

@@ -186,6 +186,22 @@ function arr(value: unknown): Record<string, unknown>[] {
   return Array.isArray(value) ? value.filter((x): x is Record<string, unknown> => x && typeof x === "object" && !Array.isArray(x)) : [];
 }
 
+/** Responses custom tools return either plain text or typed text blocks. */
+function toolOutputText(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) {
+    return arr(value)
+      .map((part) => textPart(part.text) || textPart(part.input_text) || textPart(part.output_text))
+      .filter(Boolean)
+      .join("\n");
+  }
+  return value === undefined || value === null ? "" : JSON.stringify(value);
+}
+
+function toolOutputFailed(text: string): boolean {
+  return /^Script failed\b/im.test(text) || /\b(?:exit|exited with) code [1-9]\d*\b/i.test(text);
+}
+
 function parseMemCitation(matchText: string, entriesText: string, idsText: string): MemCitationItem {
   const entries = entriesText
     .split("\n")
@@ -584,7 +600,10 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
         if (name === "write_stdin") return addSvc(tr("render.stdinSession", { id: String(args.session_id ?? "") }));
         return addCmd(ts, name + " " + JSON.stringify(args).slice(0, 120), textPart(p.call_id), "tool");
       }
-      if (p.type === "function_call_output") return addOutput(textPart(p.call_id), typeof p.output === "string" ? p.output : JSON.stringify(p.output ?? ""));
+      if (p.type === "function_call_output") {
+        const output = toolOutputText(p.output);
+        return addOutput(textPart(p.call_id), output, toolOutputFailed(output));
+      }
       /* Fresh rollouts wrap apply_patch as a "custom_tool_call": `input` is the
          raw patch text directly (unlike function_call, whose `arguments` is a
          JSON-encoded string), so no JSON.parse step is needed here. */
@@ -593,7 +612,15 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
         push({ kind: "edit", files: files ? files.join(", ").replace(/(Add|Update|Delete) File: /g, "") : tr("render.patch") });
         return;
       }
-      if (p.type === "custom_tool_call_output") return addOutput(textPart(p.call_id), typeof p.output === "string" ? p.output : JSON.stringify(p.output ?? ""));
+      if (p.type === "custom_tool_call") {
+        const name = textPart(p.name) || "tool";
+        const input = textPart(p.input) || textPart(p.arguments);
+        return addCmd(ts, `${name}: ${input || "{}"}`, textPart(p.call_id) || textPart(p.id), "tool");
+      }
+      if (p.type === "custom_tool_call_output") {
+        const output = toolOutputText(p.output);
+        return addOutput(textPart(p.call_id), output, toolOutputFailed(output));
+      }
       if (p.type === "reasoning") return addSvc("reasoning");
       return addSvc(textPart(p.type) || "item");
     }
