@@ -3,6 +3,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { accountForSpawn, codexHomeOwningSessionPath, isManagedCodexHome } from "@/lib/accounts/codex";
+
 import { claudeTranscriptPath, headCwd } from "./transcript";
 
 export { ENGINE_EFFORTS, isEngineEffort } from "./efforts";
@@ -69,6 +71,8 @@ export interface FreshSpecOptions {
       `service_tier=standard`; unset leaves the user's config.toml default. */
   fast?: boolean | null;
   readOnly?: boolean;
+  /** Codex only: explicit account home scoped into the typed host command. */
+  codexHome?: string | null;
 }
 
 /** Boot spec for a brand-new agent (no prior conversation) in a chosen directory. */
@@ -97,11 +101,18 @@ export function freshSpecFor(engine: AgentEngine, cwd: string, options: FreshSpe
     };
   }
   const args = [resolveBinary("codex")];
+  const home = options.codexHome ?? accountForSpawn().home;
+  if (isManagedCodexHome(home)) args.push("-c", "cli_auth_credentials_store=file");
   if (options.model) args.push("-m", options.model);
   if (options.effort) args.push("-c", `model_reasoning_effort=${options.effort}`);
   if (options.fast != null) args.push("-c", `service_tier=${options.fast ? "priority" : "standard"}`);
   if (options.readOnly) args.push("--sandbox", "read-only");
-  return { command: args.map(shellQuote).join(" "), cwd, windowName: "codex-new" };
+  const command = args.map(shellQuote).join(" ");
+  return {
+    command: `CODEX_HOME=${shellQuote(home)} ${command}`,
+    cwd,
+    windowName: "codex-new",
+  };
 }
 
 /**
@@ -123,8 +134,11 @@ export function resumeSpecFor(root: string, pathname: string): ResumeSpec | null
   if (root === "codex-sessions" && base.endsWith(".jsonl")) {
     const id = base.match(/([0-9a-f-]{36})\.jsonl$/)?.[1];
     if (!id) return null;
+    const home = codexHomeOwningSessionPath(pathname);
+    if (!home) return null;
+    const credentialsStore = isManagedCodexHome(home) ? " -c cli_auth_credentials_store=file" : "";
     return {
-      command: `${resolveBinary("codex")} resume ${id}`,
+      command: `CODEX_HOME=${shellQuote(home)} ${resolveBinary("codex")}${credentialsStore} resume ${id}`,
       cwd: resumeCwd(pathname),
       windowName: "codex-resume",
     };

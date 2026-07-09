@@ -6,7 +6,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { readTailChunk } from "@/lib/logRead";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
 import { listFiles } from "@/lib/scanner";
-import { MAX_CHUNK, pathAllowed, ROOTS } from "@/lib/scanner/roots";
+import { MAX_CHUNK, pathAllowed, ROOTS, scanRootEntries } from "@/lib/scanner/roots";
 import type { ApiError, LogChunk } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -82,7 +82,7 @@ function companionDir(filePath: string): string | null {
  * non-empty directories, so a sibling that appeared mid-walk just stops it.
  */
 async function pruneEmptyDirs(filePath: string): Promise<void> {
-  const root = Object.values(ROOTS).find((candidate) => filePath.startsWith(candidate + path.sep));
+  const root = scanRootEntries().map(([, candidate]) => candidate).find((candidate) => filePath.startsWith(candidate + path.sep));
   if (!root) return;
   let dir = path.dirname(filePath);
   while (dir !== root && dir.startsWith(root + path.sep)) {

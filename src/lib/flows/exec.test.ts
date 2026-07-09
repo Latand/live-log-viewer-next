@@ -61,6 +61,19 @@ test("headless codex reviewer launches without CLI sandbox blocking", () => {
   expect(built.args).not.toContain("read-only");
 });
 
+test("headless managed Codex reviewer fixes its account home and file credential store at launch", () => {
+  const built = reviewerCommand(
+    { engine: "codex", model: null, effort: null },
+    "review prompt",
+    "/out/review.md",
+    "/repo",
+    { home: "/accounts/work", managed: true },
+  );
+
+  expect(built.env.CODEX_HOME).toBe("/accounts/work");
+  expect(built.args).toContain("cli_auth_credentials_store=file");
+});
+
 test("headless claude reviewer launches with approval-free tool access", () => {
   const built = reviewerCommand({ engine: "claude", model: null, effort: null }, "review prompt", "/out/review.md", "/repo");
 

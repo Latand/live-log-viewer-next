@@ -2,6 +2,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { codexSessionRoots } from "@/lib/accounts/codex";
+
 import type { RootKey } from "../types";
 
 const HOME = os.homedir();
@@ -32,6 +34,15 @@ export const ROOTS: Record<RootKey, string> = {
   "claude-tasks": claudeTasksRoot(),
 };
 
+/** Every scanner root, including the account-specific Codex homes. */
+export function scanRootEntries(): [RootKey, string][] {
+  return [
+    ...codexSessionRoots().map((root): [RootKey, string] => ["codex-sessions", root]),
+    ["claude-projects", ROOTS["claude-projects"]],
+    ["claude-tasks", ROOTS["claude-tasks"]],
+  ];
+}
+
 export const EXTS = [".log", ".jsonl", ".output", ".txt"] as const;
 
 export const MAX_CHUNK = 768 * 1024;
@@ -54,8 +65,22 @@ function realpathSafe(p: string): string | null {
 export function pathAllowed(candidate: string): boolean {
   const real = realpathSafe(candidate);
   if (!real) return false;
-  return Object.values(ROOTS).some((root) => {
+  return scanRootEntries().some(([, root]) => {
     const rootReal = realpathSafe(root);
     return rootReal !== null && real.startsWith(rootReal + path.sep);
   });
+}
+
+/** The registered Codex session root containing a path, when it has one. */
+export function codexSessionRootFor(candidate: string): string | null {
+  for (const root of codexSessionRoots()) {
+    try {
+      const real = fs.realpathSync(candidate);
+      const rootReal = fs.realpathSync(root);
+      if (real.startsWith(rootReal + path.sep)) return root;
+    } catch {
+      continue;
+    }
+  }
+  return null;
 }

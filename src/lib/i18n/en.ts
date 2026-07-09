@@ -97,6 +97,17 @@ export const en = {
   "switch.hidden": "Hidden ({count})",
   "switch.hide": "hide",
   "switch.restore": "restore",
+  "accounts.activeAria": "Active Codex account",
+  "accounts.placeholder": "Codex account",
+  "accounts.add": "Add",
+  "accounts.prompt": "Account label",
+  "accounts.login": "login",
+  "accounts.switchFailed": "Could not switch account",
+  "accounts.addFailed": "Could not add account",
+  "accounts.loginOpened": "Device login opened in {target}",
+  "accounts.openLogin": "Open sign-in",
+  "accounts.refreshFailed": "Could not refresh accounts. Try again.",
+  "accounts.retry": "Retry",
 
   // SwitchCard
   "switchCard.openColumn": "Open {title} as a column",

@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { freshSpecFor, resumeSpecFor } from "@/lib/agent/cli";
+import { accountForSpawn } from "@/lib/accounts/codex";
 import { resolveSpawnedTranscriptPath } from "@/lib/agent/spawnedTranscript";
 import { headCwd } from "@/lib/agent/transcript";
 import { isNativeCodexSubagentTranscript } from "@/lib/scanner/codexNative";
@@ -169,12 +170,14 @@ function applyVerdict(flow: Flow, round: Round, parsed: ParsedFindings): void {
 
 async function launchReviewer(flow: Flow, round: Round): Promise<void> {
   const prompt = reviewerPrompt(flow, round);
+  const account = flow.roles.reviewer.engine === "codex" ? accountForSpawn() : null;
   flow.state = "reviewing";
   flow.stateDetail = null;
   if (flow.reviewerMode === "pane") {
     const spec = freshSpecFor(flow.roles.reviewer.engine, flow.cwd, {
       model: flow.roles.reviewer.model,
       effort: flow.roles.reviewer.effort,
+      codexHome: account?.home,
     });
     const startedAtMs = Date.now();
     const pane = await spawnAgentWithPrompt(spec, prompt);
@@ -187,12 +190,21 @@ async function launchReviewer(flow: Flow, round: Round): Promise<void> {
       panePid: pane.panePid ?? null,
       cwd: flow.cwd,
       startedAtMs,
+      codexSessionsDir: account?.sessionsDir,
     });
     if (transcript) round.reviewerPath = transcript;
     if (!round.reviewerPath && pane.panePid) round.error = null;
     return;
   }
-  const launched = startHeadlessReview(flow.id, round.n, flow.roles.reviewer, flow.cwd, prompt);
+  const launched = startHeadlessReview(
+    flow.id,
+    round.n,
+    flow.roles.reviewer,
+    flow.cwd,
+    prompt,
+    undefined,
+    account ? { home: account.home, managed: account.kind === "managed" } : null,
+  );
   if (launched.pid) round.reviewerPid = launched.pid;
   if (launched.sessionId) round.sessionId = launched.sessionId;
   if (launched.reviewerPath) round.reviewerPath = launched.reviewerPath;

@@ -28,6 +28,11 @@ export interface HeadlessReviewLaunch {
   reviewerPath: string | null;
 }
 
+export interface HeadlessCodexAccount {
+  home: string;
+  managed: boolean;
+}
+
 /* The reviewer runs detached with file-backed stdio, so it survives a viewer
    restart. This in-memory record only adds what disk cannot know: the exact
    exit code and the in-process timeout timer. Everything in
@@ -136,7 +141,8 @@ export function reviewerCommand(
   prompt: string,
   outputPath: string,
   cwd: string,
-): { command: string; args: string[]; outputPath: string | null; sessionId: string | null; reviewerPath: string | null } {
+  codexAccount?: HeadlessCodexAccount | null,
+): { command: string; args: string[]; env: NodeJS.ProcessEnv; outputPath: string | null; sessionId: string | null; reviewerPath: string | null } {
   if (role.engine === "claude") {
     const sessionId = crypto.randomUUID();
     /* Headless reviewers need approval-free command access for tests, builds,
@@ -150,15 +156,23 @@ export function reviewerCommand(
     ];
     if (role.model) args.push("--model", role.model);
     if (role.effort) args.push("--effort", role.effort);
-    return { command: resolveBinary("claude"), args, outputPath: null, sessionId, reviewerPath: claudeTranscriptPath(cwd, sessionId) };
+    return { command: resolveBinary("claude"), args, env: process.env, outputPath: null, sessionId, reviewerPath: claudeTranscriptPath(cwd, sessionId) };
   }
   /* --json turns stdout into a JSONL event stream whose first events carry
      the session/thread id — a structured contract instead of parsing the
      human banner. The verdict itself still arrives via --output-last-message. */
   const args = ["exec", prompt, "--json", "--output-last-message", outputPath, "--dangerously-bypass-approvals-and-sandbox"];
+  if (codexAccount?.managed) args.unshift("-c", "cli_auth_credentials_store=file");
   if (role.model) args.push("-m", role.model);
   if (role.effort) args.push("-c", `model_reasoning_effort=${role.effort}`);
-  return { command: resolveBinary("codex"), args, outputPath, sessionId: null, reviewerPath: null };
+  return {
+    command: resolveBinary("codex"),
+    args,
+    env: codexAccount?.home ? { ...process.env, CODEX_HOME: codexAccount.home } : process.env,
+    outputPath,
+    sessionId: null,
+    reviewerPath: null,
+  };
 }
 
 export function startHeadlessReview(
@@ -168,12 +182,13 @@ export function startHeadlessReview(
   cwd: string,
   prompt: string,
   timeoutMs = DEFAULT_TIMEOUT_MS,
+  codexAccount?: HeadlessCodexAccount | null,
 ): HeadlessReviewLaunch {
   const key = runKey(flowId, round);
   if (runs.has(key)) return { pid: null, sessionId: null, reviewerPath: null };
   const outputPath = outputPathFor(flowId, round);
   fs.mkdirSync(path.dirname(outputPath), { recursive: true });
-  const built = reviewerCommand(role, prompt, outputPath, cwd);
+  const built = reviewerCommand(role, prompt, outputPath, cwd, codexAccount);
   /* Detached + file-backed stdio: the reviewer must not die with the viewer.
      A plain child shares the dev server's process group, so Ctrl+C on the
      server delivers SIGINT to the reviewer too; detached makes it a group
@@ -184,7 +199,7 @@ export function startHeadlessReview(
   try {
     child = spawn(built.command, built.args, {
       cwd,
-      env: process.env,
+      env: built.env,
       detached: true,
       stdio: ["ignore", stdoutFd, stderrFd],
     });

@@ -6,7 +6,7 @@ import type { FileEntry, ProjectCatalogEntry, RootKey } from "../types";
 import { codexThreadIdFromPath, nativeCodexParentThreadId } from "./codexNative";
 import { describe } from "./describe";
 import { projectCatalogSnapshotFromRaw } from "./projectCatalog";
-import { EXTS, FILE_CAP, ROOTS } from "./roots";
+import { EXTS, FILE_CAP, ROOTS, scanRootEntries } from "./roots";
 
 export function taskParts(root: string, pathname: string): [string, string, string] | null {
   const parts = path.relative(root, pathname).split(path.sep);
@@ -24,6 +24,7 @@ export interface RawEntry {
 }
 
 type Roots = Record<RootKey, string>;
+type RootEntries = [RootKey, string][];
 type Limit = <T>(work: () => Promise<T>) => Promise<T>;
 
 function createLimiter(max: number): Limit {
@@ -89,10 +90,15 @@ async function rootExists(root: string, limit: Limit): Promise<boolean> {
   }
 }
 
-async function discoverRaw(roots: Roots, limit: Limit): Promise<RawEntry[]> {
-  return (await Promise.all((Object.entries(roots) as [RootKey, string][]).map(async ([rootName, root]) => {
+function rootEntries(roots: Roots | RootEntries): RootEntries {
+  return Array.isArray(roots) ? roots : Object.entries(roots) as RootEntries;
+}
+
+async function discoverRaw(roots: Roots | RootEntries, limit: Limit): Promise<RawEntry[]> {
+  const staticRoots = Array.isArray(roots) ? ROOTS : roots;
+  return (await Promise.all(rootEntries(roots).map(async ([rootName, root]) => {
     if (!(await rootExists(root, limit))) return [];
-    return walk(rootName, roots, root, root, limit);
+    return walk(rootName, staticRoots, root, root, limit);
   }))).flat();
 }
 
@@ -151,7 +157,7 @@ function entriesFromRaw(raw: RawEntry[], selectedProject?: string, projectByPath
 }
 
 export async function discoverFilesWithProjectCatalog(
-  roots: Roots = ROOTS,
+  roots: Roots | RootEntries = scanRootEntries(),
   selectedProject?: string,
 ): Promise<{
   files: FileEntry[];
@@ -163,7 +169,7 @@ export async function discoverFilesWithProjectCatalog(
   return { files: entriesFromRaw(raw, selectedProject, projectByPath), projectCatalog };
 }
 
-export async function discoverFiles(roots: Roots = ROOTS): Promise<FileEntry[]> {
+export async function discoverFiles(roots: Roots | RootEntries = scanRootEntries()): Promise<FileEntry[]> {
   const limit = createLimiter(48);
   const raw = await discoverRaw(roots, limit);
   // describe() reads file heads, so it runs only on the capped shortlist plus

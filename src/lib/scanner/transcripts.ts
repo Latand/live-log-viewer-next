@@ -16,7 +16,7 @@ import {
   type AgentEngine,
   type AgentProcess,
 } from "./process";
-import { ROOTS } from "./roots";
+import { ROOTS, codexSessionRootFor } from "./roots";
 
 /**
  * Pid attribution for interactive transcripts (claude-projects and
@@ -44,7 +44,7 @@ const codexCwdCache = globalCache<string>("codex-cwd");
 export function transcriptEngine(pathname: string): AgentEngine | null {
   if (!pathname.endsWith(".jsonl")) return null;
   if (pathname.startsWith(ROOTS["claude-projects"] + path.sep)) return "claude";
-  if (pathname.startsWith(ROOTS["codex-sessions"] + path.sep)) return "codex";
+  if (codexSessionRootFor(pathname)) return "codex";
   return null;
 }
 

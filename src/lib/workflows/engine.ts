@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { freshSpecFor } from "@/lib/agent/cli";
+import { accountForSpawn } from "@/lib/accounts/codex";
 import { resolveSpawnedTranscriptPath } from "@/lib/agent/spawnedTranscript";
 import { headCwd } from "@/lib/agent/transcript";
 import { closeFlow, createFlowFromRequest, patchFlow as patchReviewFlow } from "@/lib/flows/commands";
@@ -74,7 +75,8 @@ export function defaultPorts(): WorkflowPorts {
     startSetup,
     setupStatus,
     spawnAgent: async (role, cwd, prompt) => {
-      const spec = freshSpecFor(role.engine, cwd, { model: role.model, effort: role.effort });
+      const account = role.engine === "codex" ? accountForSpawn() : null;
+      const spec = freshSpecFor(role.engine, cwd, { model: role.model, effort: role.effort, codexHome: account?.home });
       const startedAtMs = Date.now();
       const pane = await spawnAgentWithPrompt(spec, prompt);
       const transcript = await resolveSpawnedTranscriptPath({
@@ -83,6 +85,7 @@ export function defaultPorts(): WorkflowPorts {
         panePid: pane.panePid ?? null,
         cwd,
         startedAtMs,
+        codexSessionsDir: account?.sessionsDir,
       });
       return { paneId: pane.paneId, transcript, panePid: pane.panePid ?? null };
     },

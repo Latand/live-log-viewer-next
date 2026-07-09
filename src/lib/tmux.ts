@@ -712,6 +712,26 @@ export async function spawnAgentWithPrompt(spec: ResumeSpec, text: string): Prom
   };
 }
 
+/** Opens a visible shell window and types one command without agent readiness or paste handling. */
+export async function spawnCommandWindow(spec: { command: string; cwd: string; windowName: string }): Promise<SpawnedPane> {
+  const session = await activeTmuxSession();
+  const spawned = await runTmux(["new-window", "-d", "-P", "-F", "#{pane_id}\t#{session_name}:#{window_index}.#{pane_index}\t#{pane_pid}", "-t", session + ":", "-n", spec.windowName, "-c", spec.cwd]);
+  if (spawned.code !== 0) throw new Error(spawned.stderr.trim() || "could not open tmux window");
+  const [paneId = "", display = "", pidRaw = ""] = spawned.stdout.trim().split("\t");
+  if (!paneId) throw new Error("tmux did not return a window address");
+  for (const [args, message] of [
+    [["send-keys", "-t", paneId, "-l", cdCommandForCwd(spec.cwd)], "could not type cwd into pane"],
+    [["send-keys", "-t", paneId, "Enter"], "could not enter cwd"],
+    [["send-keys", "-t", paneId, "-l", spec.command], "could not type command into pane"],
+    [["send-keys", "-t", paneId, "Enter"], "could not start command"],
+  ] as const) {
+    const result = await runTmux([...args]);
+    if (result.code !== 0) throw new Error(result.stderr.trim() || message);
+  }
+  const panePid = Number(pidRaw);
+  return { paneId, display: display || paneId, ...(Number.isInteger(panePid) && panePid > 0 ? { panePid } : {}) };
+}
+
 export interface SavedImage {
   path: string;
 }

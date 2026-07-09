@@ -1,14 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import { readSession } from "@/lib/session/reader";
-import { pathAllowed, ROOTS } from "@/lib/scanner/roots";
+import { codexSessionRootFor, pathAllowed, ROOTS } from "@/lib/scanner/roots";
 import type { ApiError } from "@/lib/types";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 function engineForPath(pathname: string): "claude" | "codex" | null {
-  if (pathname.startsWith(ROOTS["codex-sessions"] + "/")) return "codex";
+  if (codexSessionRootFor(pathname)) return "codex";
   if (pathname.startsWith(ROOTS["claude-projects"] + "/")) return "claude";
   return null;
 }
@@ -20,4 +20,3 @@ export async function GET(req: NextRequest): Promise<NextResponse<ReturnType<typ
   if (!engine) return NextResponse.json({ error: "unsupported session path" }, { status: 400 });
   return NextResponse.json(readSession(pathname, engine));
 }
-

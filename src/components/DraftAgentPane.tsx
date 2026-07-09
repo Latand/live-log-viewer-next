@@ -47,7 +47,7 @@ function writeField(id: string, name: string, value: string) {
 
 /** Everything a draft keeps in sessionStorage; called when the draft leaves the scheme. */
 export function clearDraftStorage(id: string) {
-  for (const name of ["engine", "model", "cwd", "text", "boot", "src", "effort", "speed"]) sessionStorage.removeItem(field(id, name));
+  for (const name of ["engine", "model", "cwd", "text", "boot", "src", "effort", "speed", "accountId"]) sessionStorage.removeItem(field(id, name));
 }
 
 /** Source transcript a handoff draft continues; empty for a plain draft. */
@@ -112,6 +112,8 @@ export function DraftAgentPane({
     const stored = readField(draftId, "speed");
     return stored === "fast" || stored === "standard" ? stored : "";
   });
+  const [accountId, setAccountIdState] = useState(() => readField(draftId, "accountId"));
+  const [accounts, setAccounts] = useState<{ id: string; label: string }[]>([]);
   const [dirs, setDirs] = useState<string[]>([]);
   const [boot, setBootState] = useState<Boot | null>(() => readBoot(draftId));
   const [slowBoot, setSlowBoot] = useState(false);
@@ -181,6 +183,15 @@ export function DraftAgentPane({
     };
   }, [project, draftId, src]);
 
+  useEffect(() => {
+    void fetch("/api/accounts").then(async (res) => {
+      if (!res.ok) return;
+      const body = await res.json() as { codex: { active: string; accounts: { id: string; label: string }[] } };
+      setAccounts(body.codex.accounts);
+      setAccountIdState((value) => value || body.codex.active);
+    }).catch(() => {});
+  }, []);
+
   /* The handover: a claude spawn knows its transcript path up front and waits
      for exactly that file; a codex rollout has no knowable path, so the first
      fresh root conversation in codex-sessions after the spawn moment is ours. */
@@ -234,6 +245,7 @@ export function DraftAgentPane({
           cwd: cwd.trim(),
           ...(effort ? { effort } : {}),
           ...(engine === "codex" && speed ? { fast: speed === "fast" } : {}),
+          ...(engine === "codex" && accountId ? { accountId } : {}),
           prompt: payloadText,
           images: attachments.images.map((image) => ({ base64: image.base64, mime: image.mime })),
           /* Ties the fresh agent to the source conversation: the scanner links
@@ -269,6 +281,7 @@ export function DraftAgentPane({
     >
       <span aria-hidden className="h-1 w-full shrink-0" style={{ backgroundColor: tint.color }} />
       <header className="flex h-10 shrink-0 items-center gap-1.5 border-b border-line px-2.5" style={{ backgroundColor: tint.soft }}>
+        {engine === "codex" && accounts.length ? <select value={accountId} onChange={(event) => { setAccountIdState(event.target.value); writeField(draftId, "accountId", event.target.value); }} className="h-6 max-w-28 rounded border border-line bg-bg px-1 text-[10px] font-semibold" aria-label={t("accounts.activeAria")}>{accounts.map((account) => <option key={account.id} value={account.id}>{account.label}</option>)}</select> : null}
         <span className="h-2 w-2 shrink-0 rounded-full bg-[#c9c9d1]" title={t("draft.notStarted")} />
         <div className="flex shrink-0 items-center gap-1" role="radiogroup" aria-label={t("draft.engineAria")}>
           {ENGINES.map(({ key, label }) => {

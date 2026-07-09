@@ -4,6 +4,7 @@ import path from "node:path";
 
 import { NextRequest, NextResponse } from "next/server";
 
+import { accountForSpawn } from "@/lib/accounts/codex";
 import { freshSpecFor, type AgentEngine } from "@/lib/agent/cli";
 import { reasoningFromBody } from "@/lib/agent/efforts";
 import { modelFromBody } from "@/lib/agent/models";
@@ -71,7 +72,8 @@ export async function POST(req: NextRequest, ctx: TaskRouteContext): Promise<Nex
   if (!task) return NextResponse.json({ error: "task not found" }, { status: 404 });
 
   try {
-    const spec = freshSpecFor(engine, cwdResult.cwd, { model: selectedModel.model, effort: reasoning.effort, fast: reasoning.fast });
+    const account = engine === "codex" ? accountForSpawn() : null;
+    const spec = freshSpecFor(engine, cwdResult.cwd, { model: selectedModel.model, effort: reasoning.effort, fast: reasoning.fast, codexHome: account?.home });
     const startedAtMs = Date.now();
     const pane = await spawnAgentWithPrompt(spec, task.text);
     const transcript = await resolveSpawnedTranscriptPath({
@@ -80,6 +82,7 @@ export async function POST(req: NextRequest, ctx: TaskRouteContext): Promise<Nex
       panePid: pane.panePid ?? null,
       cwd: cwdResult.cwd,
       startedAtMs,
+      codexSessionsDir: account?.sessionsDir,
     });
     const at = isoNow();
     let patch: AssignmentPatch;

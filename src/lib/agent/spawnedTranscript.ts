@@ -31,6 +31,8 @@ export interface SpawnedTranscriptLookup {
   panePid?: number | null;
   cwd: string;
   startedAtMs: number;
+  /** The single Codex sessions directory selected for this fresh spawn. */
+  codexSessionsDir?: string | null;
   env?: SpawnedTranscriptLookupEnv;
 }
 
@@ -38,7 +40,7 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function recentCodexSessionPaths(sinceMs: number): string[] {
+function recentCodexSessionPaths(sinceMs: number, sessionsDir = ROOTS["codex-sessions"]): string[] {
   const minMtime = sinceMs - CODEX_MTIME_SLOP_MS;
   const candidates: { path: string; mtimeMs: number }[] = [];
   const walk = (dir: string, depth: number) => {
@@ -64,7 +66,7 @@ function recentCodexSessionPaths(sinceMs: number): string[] {
       }
     }
   };
-  walk(ROOTS["codex-sessions"], 0);
+  walk(sessionsDir, 0);
   return candidates
     .sort((a, b) => b.mtimeMs - a.mtimeMs)
     .slice(0, CODEX_MAX_CANDIDATES)
@@ -125,7 +127,7 @@ export async function resolveSpawnedTranscriptPath(input: SpawnedTranscriptLooku
   const env = input.env ?? {};
   const now = env.now ?? Date.now;
   const wait = env.sleep ?? sleep;
-  const candidatePaths = env.candidatePaths ?? recentCodexSessionPaths;
+  const candidatePaths = env.candidatePaths ?? ((sinceMs: number) => recentCodexSessionPaths(sinceMs, input.codexSessionsDir ?? ROOTS["codex-sessions"]));
   const holderPidByPath = env.holderPidByPath ?? ((paths: Iterable<string>) => writingHolders(paths, true));
   const parentPidOf = env.parentPidOf ?? readPpid;
   const timeoutMs = env.timeoutMs ?? CODEX_DISCOVERY_TIMEOUT_MS;

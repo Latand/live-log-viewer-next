@@ -13,6 +13,7 @@ import type { FileEntry } from "@/lib/types";
 
 import { projectKey } from "./projectModel";
 import { CornerStatus } from "./CornerStatus";
+import { CodexAccountSwitch } from "./CodexAccountSwitch";
 import { FlipRow } from "./FlipRow";
 import { SwitchCard, type SwitchCardTone } from "./SwitchCard";
 
@@ -133,6 +134,7 @@ export function Switchboard({ files, flows, project, loaded, onOpenFile }: Props
           >
             <header className="flex h-14 shrink-0 items-center gap-3 border-b border-line bg-panel px-4">
               <div className="text-[15px] font-bold">{t("switch.title")}</div>
+              <CodexAccountSwitch />
               <input
                 ref={inputRef}
                 value={query}

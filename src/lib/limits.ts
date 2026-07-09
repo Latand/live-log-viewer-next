@@ -2,13 +2,13 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { accountForSpawn } from "@/lib/accounts/codex";
 import { statePath } from "@/lib/configDir";
 import type { EngineLimits, LimitsPayload, LimitWindow } from "./types";
 
 const HOME = os.homedir();
 const CLAUDE_CREDENTIALS = path.join(HOME, ".claude", ".credentials.json");
 const LIMITS_CACHE_FILE = statePath("limits-cache.json");
-const CODEX_SESSIONS = path.join(HOME, ".codex", "sessions");
 const OAUTH_USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
 
 /** How far back into a session file to look for the last rate-limit event. */
@@ -17,7 +17,7 @@ const TAIL_BYTES = 192 * 1024;
 const MAX_FILES = 12;
 const CACHE_MS = 30_000;
 
-type LimitsCacheEntry = { at: number; data: LimitsPayload };
+type LimitsCacheEntry = { at: number; accountId: string; data: LimitsPayload };
 type LimitRead = { data: EngineLimits | null; reason: string | null };
 
 const globalStore = globalThis as unknown as {
@@ -32,13 +32,13 @@ function cleanPayload(data: LimitsPayload): LimitsPayload {
   return { claude: data.claude, codex: data.codex, staleSince: data.staleSince ?? null };
 }
 
-function readDiskCache(): LimitsCacheEntry | null {
+function readDiskCache(accountId: string): LimitsCacheEntry | null {
   try {
     const raw = JSON.parse(fs.readFileSync(LIMITS_CACHE_FILE, "utf8")) as Partial<LimitsCacheEntry>;
-    if (!raw || typeof raw.at !== "number" || !raw.data) return null;
+    if (!raw || typeof raw.at !== "number" || raw.accountId !== accountId || !raw.data) return null;
     const data = cleanPayload(raw.data);
     if (!hasLimits(data)) return null;
-    return { at: raw.at, data };
+    return { at: raw.at, accountId, data };
   } catch {
     return null;
   }
@@ -53,14 +53,14 @@ function writeDiskCache(entry: LimitsCacheEntry): void {
   }
 }
 
-function lastCache(): LimitsCacheEntry | null {
-  if (globalStore.__llvLimitsCache) return globalStore.__llvLimitsCache;
-  globalStore.__llvLimitsCache = readDiskCache();
+function lastCache(accountId: string): LimitsCacheEntry | null {
+  if (globalStore.__llvLimitsCache?.accountId === accountId) return globalStore.__llvLimitsCache;
+  globalStore.__llvLimitsCache = readDiskCache(accountId);
   return globalStore.__llvLimitsCache ?? null;
 }
 
-function remember(data: LimitsPayload): LimitsPayload {
-  const entry = { at: Date.now(), data: cleanPayload(data) };
+function remember(accountId: string, data: LimitsPayload): LimitsPayload {
+  const entry = { at: Date.now(), accountId, data: cleanPayload(data) };
   globalStore.__llvLimitsCache = entry;
   writeDiskCache({ ...entry, data: cleanPayload({ ...data, staleSince: null }) });
   return entry.data;
@@ -83,7 +83,8 @@ function logPartialFallback(claude: LimitRead, codex: LimitRead): void {
 
 /** Claude Code + Codex plan limits, cached briefly so UI polling stays cheap. */
 export async function readLimits(): Promise<LimitsPayload> {
-  const cached = lastCache();
+  const accountId = accountForSpawn().id;
+  const cached = lastCache(accountId);
   if (cached && Date.now() - cached.at < CACHE_MS) return cached.data;
   const staleSince = new Date().toISOString();
   const [claude, codex] = await Promise.all([fetchClaudeLimits(), Promise.resolve(readCodexLimits())]);
@@ -94,7 +95,7 @@ export async function readLimits(): Promise<LimitsPayload> {
   };
   if (hasLimits(data)) {
     if (!claude.data || !codex.data) logPartialFallback(claude, codex);
-    return remember(data);
+    return remember(accountId, data);
   }
   logRefreshMiss(claude, codex, Boolean(cached));
   return fallbackFromCache(cached, staleSince);
@@ -174,7 +175,7 @@ interface CodexRateLimits {
  * session transcript. The last such event in the newest transcript is the
  * freshest number available offline.
  */
-function readCodexLimits(): LimitRead {
+export function readCodexLimits(): LimitRead {
   let scanned = 0;
   for (const file of latestSessionFiles()) {
     scanned += 1;
@@ -192,13 +193,14 @@ function listDesc(dir: string): string[] {
   }
 }
 
-/** Session transcripts under ~/.codex/sessions/YYYY/MM/DD, newest first. */
+/** Session transcripts for the account a new Codex pane will use, newest first. */
 function* latestSessionFiles(): Generator<string> {
+  const sessionsDir = accountForSpawn().sessionsDir;
   let yielded = 0;
-  for (const year of listDesc(CODEX_SESSIONS)) {
-    for (const month of listDesc(path.join(CODEX_SESSIONS, year))) {
-      for (const day of listDesc(path.join(CODEX_SESSIONS, year, month))) {
-        const dir = path.join(CODEX_SESSIONS, year, month, day);
+  for (const year of listDesc(sessionsDir)) {
+    for (const month of listDesc(path.join(sessionsDir, year))) {
+      for (const day of listDesc(path.join(sessionsDir, year, month))) {
+        const dir = path.join(sessionsDir, year, month, day);
         const entries: { p: string; m: number }[] = [];
         for (const name of listDesc(dir)) {
           if (!name.endsWith(".jsonl")) continue;

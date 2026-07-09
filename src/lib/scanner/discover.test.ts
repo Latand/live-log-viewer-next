@@ -82,6 +82,32 @@ test("discoverFiles preserves scanner filters, mtime ordering, and the cap", asy
   }
 });
 
+test("discoverFiles merges multiple Codex session roots without duplicate paths", async () => {
+  const base = await mkdtemp(path.join(os.tmpdir(), "llv-discover-codex-accounts-"));
+  try {
+    const first = path.join(base, "codex-default");
+    const second = path.join(base, "codex-work");
+    const claudeProjects = path.join(base, "claude-projects");
+    const claudeTasks = path.join(base, "claude-tasks");
+    await Promise.all([first, second, claudeProjects, claudeTasks].map((root) => mkdir(root, { recursive: true })));
+    const firstFile = path.join(first, "first.jsonl");
+    const secondFile = path.join(second, "second.jsonl");
+    await writeFixture(firstFile, JSON.stringify({ type: "session_meta", payload: { cwd: "/repo" } }) + "\n", 10);
+    await writeFixture(secondFile, JSON.stringify({ type: "session_meta", payload: { cwd: "/repo" } }) + "\n", 20);
+
+    const entries = await discoverFiles([
+      ["codex-sessions", first],
+      ["codex-sessions", second],
+      ["claude-projects", claudeProjects],
+      ["claude-tasks", claudeTasks],
+    ]);
+
+    expect(entries.map((entry) => entry.path)).toEqual([secondFile, firstFile]);
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
 test("discoverFiles keeps native Codex spawn parents outside the recent cap", async () => {
   const base = await mkdtemp(path.join(os.tmpdir(), "llv-discover-parent-"));
   try {
