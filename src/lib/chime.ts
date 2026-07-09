@@ -7,7 +7,16 @@
  * right speaker, so the ear finds the column the eye should jump to.
  */
 
-export type ChimeKind = "waiting" | "returned" | "stalled" | "question" | "spawned";
+export type ChimeKind =
+  | "waiting"
+  | "returned"
+  | "stalled"
+  | "question"
+  | "spawned"
+  /* Dictation cap cues: a single soft near-cap ping, and a distinct descending
+     two-note that marks the recording auto-stopping at the limit. */
+  | "dictWarn"
+  | "dictStop";
 
 const SOUND_KEY = "llvSound";
 
@@ -94,7 +103,7 @@ interface Note {
 /* Each state gets its own melodic gesture: rising = your move, a little
    arpeggio = a branch came home, falling = something got stuck, a quick
    low blip up = a new agent joined the tree. */
-const TUNES: Record<ChimeKind, Note[]> = {
+export const TUNES: Record<ChimeKind, Note[]> = {
   waiting: [
     { freq: 784, at: 0, dur: 0.5 }, // G5
     { freq: 1175, at: 0.16, dur: 0.75 }, // D6
@@ -116,6 +125,18 @@ const TUNES: Record<ChimeKind, Note[]> = {
   spawned: [
     { freq: 523, at: 0, dur: 0.14 }, // C5
     { freq: 784, at: 0.06, dur: 0.4 }, // G5
+  ],
+  /* One gentle mid-register ping — "heads up, the cap is close" — a single
+     note so it never reads as one of the multi-note lifecycle tunes. */
+  dictWarn: [
+    { freq: 660, at: 0, dur: 0.32 }, // E5
+  ],
+  /* A low, unmistakably descending two-note: recording has stopped. Pitched
+     below every other tune (including the stalled A5→D5 fall) so the ear
+     reads "ended", not "your move". */
+  dictStop: [
+    { freq: 523, at: 0, dur: 0.3 }, // C5
+    { freq: 330, at: 0.17, dur: 0.62 }, // E4
   ],
 };
 
