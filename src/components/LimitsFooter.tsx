@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { codexEntryPointVisible, useCodexAccounts } from "@/hooks/useCodexAccounts";
 import { getLocale, type Locale, translate, useLocale } from "@/lib/i18n";
-import type { EngineLimits, LimitsPayload, LimitWindow } from "@/lib/types";
+import type { EngineLimits, LimitsPayload, LimitsProvenance, LimitWindow } from "@/lib/types";
 
 import { CodexAccountsPanel } from "./CodexAccountsPanel";
 import { ChevronDown } from "./icons";
@@ -94,18 +94,19 @@ function EngineBlock({
   engine,
   limits,
   now,
-  staleHint,
+  provenance,
 }: {
   label: string;
   engine: string;
   limits: EngineLimits | null;
   now: number;
-  staleHint: string | null;
+  provenance: LimitsProvenance;
 }) {
   const { t } = useLocale();
   if (!limits || (!limits.session && !limits.weekly)) return null;
   const tint = engineTintOf(engine);
   const stale = limits.capturedAt && now - limits.capturedAt > STALE_S ? fmtAge(limits.capturedAt) : null;
+  const staleHint = fmtStaleSince(provenance.staleSince, getLocale());
   return (
     <div className={`mt-2.5 first:mt-0 ${staleHint ? "opacity-60" : ""}`}>
       <div className="flex items-baseline gap-1.5">
@@ -127,10 +128,6 @@ function EngineBlock({
   );
 }
 
-function isEmptyPayload(data: LimitsPayload): boolean {
-  return !data.claude && !data.codex;
-}
-
 /** True only when both payloads name a Codex account and the id changed. A
     freshly added account has no transcripts, so its payload arrives with
     `codex: null`; without this guard the sticky merge would carry the previous
@@ -145,15 +142,13 @@ function codexAccountChanged(previous: LimitsPayload | null, next: LimitsPayload
 
 export function stickyPayload(previous: LimitsPayload | null, next: LimitsPayload): LimitsPayload {
   const accountChanged = codexAccountChanged(previous, next);
-  if (isEmptyPayload(next) && previous && !accountChanged) {
-    return { ...previous, staleSince: next.staleSince ?? previous.staleSince ?? null };
-  }
   return {
     claude: next.claude ?? previous?.claude ?? null,
-    // Across a switch the fresh (possibly null) codex value stands alone; only
-    // a same-account refresh may keep the last good numbers.
+    // A switch clears the prior account's values. Same-account refreshes may
+    // retain the last snapshot while provenance explains its freshness.
     codex: accountChanged ? next.codex : (next.codex ?? previous?.codex ?? null),
     codexAccountId: next.codexAccountId ?? previous?.codexAccountId ?? null,
+    provenance: next.provenance,
     staleSince: next.staleSince ?? null,
   };
 }
@@ -166,7 +161,7 @@ export function stickyPayload(previous: LimitsPayload | null, next: LimitsPayloa
 /** Masks Codex values until the payload explicitly names the active account.
     A stale request can still complete, while its quota values stay detached from
     the visible account until a payload with the same identity arrives. */
-export function codexLimitsForActiveAccount(payload: LimitsPayload | null, activeAccountId: string): EngineLimits | null {
+export function codexLimitsForActiveAccount(payload: Pick<LimitsPayload, "codex" | "codexAccountId"> | null, activeAccountId: string): EngineLimits | null {
   if (!payload?.codex || !activeAccountId || payload.codexAccountId !== activeAccountId) return null;
   return payload.codex;
 }
@@ -256,7 +251,7 @@ function CodexLimitsBlock({
   if (!codexEntryPointVisible(Boolean(limits), accounts.status)) return null;
 
   const tint = engineTintOf("codex");
-  const accountLimits = codexLimitsForActiveAccount({ claude: null, codex: limits, codexAccountId, staleSince: null }, accounts.active);
+  const accountLimits = codexLimitsForActiveAccount({ codex: limits, codexAccountId }, accounts.active);
   const identityPending = Boolean(limits && accountLimits === null);
   const hasWindows = Boolean(accountLimits && (accountLimits.session || accountLimits.weekly));
   const stale = accountLimits?.capturedAt && now - accountLimits.capturedAt > STALE_S ? fmtAge(accountLimits.capturedAt) : null;
@@ -304,8 +299,8 @@ function CodexLimitsBlock({
 export function LimitsFooter() {
   const { locale } = useLocale();
   const [snap, setSnap] = useState<{ data: LimitsPayload; at: number } | null>(null);
-  /* A switch busts the account-keyed server cache; the ref lets the panel force
-     an immediate re-read instead of waiting out the 60s poll. */
+  /* A switch busts the account-keyed server cache and immediately schedules a
+     fresh read through this ref. */
   const loadRef = useRef<() => Promise<void>>(async () => {});
   const invalidateLimits = useCallback(() => void loadRef.current(), []);
 
@@ -326,16 +321,16 @@ export function LimitsFooter() {
 
   // The Codex account list governs switcher visibility. It remains mounted
   // through empty limits, initial loading, and account refresh failures.
-  const staleHint = snap ? fmtStaleSince(snap.data.staleSince, locale) : null;
+  const codexStaleHint = snap ? fmtStaleSince(snap.data.provenance.codex.staleSince, locale) : null;
   const now = snap?.at ?? 0;
   return (
     <div className="shrink-0 border-t border-line empty:hidden">
       {snap?.data.claude ? (
         <div className="px-3.5 pt-2.5">
-          <EngineBlock label="Claude" engine="claude" limits={snap.data.claude} now={now} staleHint={staleHint} />
+          <EngineBlock label="Claude" engine="claude" limits={snap.data.claude} now={now} provenance={snap.data.provenance.claude} />
         </div>
       ) : null}
-      <CodexLimitsBlock limits={snap?.data.codex ?? null} codexAccountId={snap?.data.codexAccountId ?? null} now={now} staleHint={staleHint} onSwitched={invalidateLimits} />
+      <CodexLimitsBlock limits={snap?.data.codex ?? null} codexAccountId={snap?.data.codexAccountId ?? null} now={now} staleHint={codexStaleHint} onSwitched={invalidateLimits} />
     </div>
   );
 }

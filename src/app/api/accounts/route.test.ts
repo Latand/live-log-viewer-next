@@ -1,4 +1,5 @@
 import { afterAll, beforeEach, expect, test } from "bun:test";
+import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -14,9 +15,37 @@ process.env.LLV_CODEX_HOME = path.join(SANDBOX, "legacy");
 const { GET } = await import("./route");
 const { POST } = await import("./codex/active/route");
 const { createManagedCodexAccount, listCodexAccounts, setCodexAccountLoginPane } = await import("@/lib/accounts/codex");
+const { CodexAppServerClient } = await import("@/lib/accounts/codexAppServer");
+const { ManagedCodexRuntime, setManagedCodexRuntimeForTests } = await import("@/lib/accounts/codexRuntime");
 
-beforeEach(() => fs.rmSync(process.env.LLV_STATE_DIR!, { recursive: true, force: true }));
+class FakeChild extends EventEmitter {
+  authenticated = false;
+  readonly stdin = { write: (line: string) => { this.handle(JSON.parse(line) as Record<string, unknown>); return true; }, end: () => undefined };
+  readonly stdout = { on: (_event: string, listener: (chunk: string) => void) => this.on("stdout", listener) };
+  readonly stderr = { on: (_event: string, listener: (chunk: string) => void) => this.on("stderr", listener) };
+  kill(): boolean { return true; }
+  handle(message: Record<string, unknown>): void {
+    if (typeof message.id !== "number") return;
+    if (message.method === "initialize") this.respond(message.id, {});
+    if (message.method === "account/read") this.respond(message.id, this.authenticated ? { account: { type: "chatgpt" }, requiresOpenaiAuth: false } : { account: null, requiresOpenaiAuth: true });
+  }
+  respond(id: number, result: unknown): void { this.emit("stdout", JSON.stringify({ jsonrpc: "2.0", id, result }) + "\n"); }
+}
+
+function installRuntime(authenticated: boolean): void {
+  setManagedCodexRuntimeForTests(new ManagedCodexRuntime({ startClient: async (home) => {
+    const child = new FakeChild();
+    child.authenticated = authenticated;
+    return CodexAppServerClient.start({ home, spawn: () => child as never });
+  } }));
+}
+
+beforeEach(() => {
+  fs.rmSync(process.env.LLV_STATE_DIR!, { recursive: true, force: true });
+  installRuntime(false);
+});
 afterAll(() => {
+  setManagedCodexRuntimeForTests(null);
   if (OLD_STATE === undefined) delete process.env.LLV_STATE_DIR;
   else process.env.LLV_STATE_DIR = OLD_STATE;
   if (OLD_HOME === undefined) delete process.env.LLV_CODEX_HOME;
@@ -41,15 +70,20 @@ test("accounts response is secret-free and clears a dead login pane", async () =
   expect(listCodexAccounts().find((item) => item.id === account.id)?.loginPane).toBeNull();
 });
 
-test("authentication completion clears the tracked login pane", async () => {
+test("managed authentication comes from account/read while auth.json remains diagnostic", async () => {
   const account = createManagedCodexAccount("Done");
   fs.writeFileSync(path.join(account.home, "auth.json"), "credential sentinel");
   setCodexAccountLoginPane(account.id, { paneId: "%does-not-matter", windowName: "codex-login", startedAt: 0 });
 
+  // An arbitrary auth file does not authenticate a managed account.
   const response = await GET();
   const body = await response.json() as { codex: { accounts: { id: string; loginState: string; deviceAuth: unknown }[] } };
+  expect(body.codex.accounts.find((item) => item.id === account.id)).toEqual(expect.objectContaining({ loginState: "idle", deviceAuth: null }));
+  installRuntime(true);
+  const valid = await GET();
+  const validBody = await valid.json() as { codex: { accounts: { id: string; loginState: string; deviceAuth: unknown }[] } };
 
-  expect(body.codex.accounts.find((item) => item.id === account.id)).toEqual(expect.objectContaining({ loginState: "authenticated", deviceAuth: null }));
+  expect(validBody.codex.accounts.find((item) => item.id === account.id)).toEqual(expect.objectContaining({ loginState: "authenticated", deviceAuth: null }));
   expect(listCodexAccounts().find((item) => item.id === account.id)?.loginPane).toBeNull();
 });
 

@@ -5,7 +5,16 @@ import { useSyncExternalStore } from "react";
 import type { TFunction } from "@/lib/i18n";
 
 export type DeviceAuth = { url: string; code: string };
-export type CodexAccountOption = { id: string; label: string; authPresent: boolean; loginPending: boolean; loginState: "pending" | "idle" | "authenticated"; deviceAuth: DeviceAuth | null };
+export type ManagedAttemptState = "pending" | "completed" | "failed" | "stale" | "cancelled";
+export type CodexAccountOption = {
+  id: string;
+  label: string;
+  authPresent: boolean;
+  loginPending: boolean;
+  loginState: ManagedAttemptState | "idle" | "authenticated";
+  attemptState?: ManagedAttemptState | null;
+  deviceAuth: DeviceAuth | null;
+};
 export type AccountLoadState = "loading" | "ready" | "error";
 export type AccountOperation = "refresh" | "select" | "add";
 
