@@ -16,6 +16,8 @@ let registryRoot = "";
 beforeEach(() => {
   registryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "llv-files-route-"));
   setAgentRegistryForTests(new AgentRegistry(path.join(registryRoot, "registry.json")));
+  resetFilesRouteCacheForTests();
+  scans = 0;
   scannedFiles = [];
 });
 
@@ -43,10 +45,10 @@ mock.module("@/lib/tasks/store", () => ({
 mock.module("@/lib/workflows/store", () => ({ loadWorkflows: () => [] }));
 mock.module("@/lib/workflows/visibility", () => ({ filterWorkflowsForFileScan: () => [] }));
 
+const { cachedFileScan, resetFilesRouteCacheForTests } = await import("./scanCache");
 const { GET } = await import("./route");
 
-test("repeated files reads execute only pure read ports and retain ETag behavior", async () => {
-  scans = 0;
+test("repeated files reads reuse the pure read snapshot and retain ETag behavior", async () => {
   scannedFiles = [];
   const first = await GET(new Request("http://127.0.0.1/api/files"));
   const etag = first.headers.get("etag");
@@ -54,8 +56,30 @@ test("repeated files reads execute only pure read ports and retain ETag behavior
   expect(first.status).toBe(200);
   expect(await first.json()).toEqual({ files: [], projectCatalog: [], flows: [], pipelines: [], workflows: [], tasks: [] });
   expect(second.status).toBe(304);
-  expect(scans).toBe(2);
+  expect(scans).toBe(1);
   expect(scanOptions).toEqual({ persist: false });
+});
+
+test("concurrent cold files reads share one scan", async () => {
+  const [first, second] = await Promise.all([
+    GET(new Request("http://127.0.0.1/api/files")),
+    GET(new Request("http://127.0.0.1/api/files")),
+  ]);
+
+  expect(first.status).toBe(200);
+  expect(second.status).toBe(200);
+  expect(scans).toBe(1);
+});
+
+test("an expired snapshot schedules its refresh after the response", async () => {
+  await cachedFileScan();
+  const stale = await cachedFileScan(undefined, Number.MAX_SAFE_INTEGER);
+
+  expect(scans).toBe(1);
+  expect(stale.refreshAfterResponse).toBeFunction();
+
+  await stale.refreshAfterResponse?.();
+  expect(scans).toBe(2);
 });
 
 function file(path: string): FileEntry {
