@@ -1,4 +1,6 @@
 import { resumeSpecFor } from "@/lib/agent/cli";
+import { agentRegistry } from "@/lib/agent/registry";
+import { deliveryFence } from "@/lib/accounts/migration/coordinator";
 import { deliverToTranscriptHost, readTranscriptHosts, type HostDeliveryOutcome } from "@/lib/agent/transcriptHost";
 import { listFiles } from "@/lib/scanner";
 import { pathAllowed } from "@/lib/scanner/roots";
@@ -35,7 +37,7 @@ export interface DeliveryFailure {
 export interface DeliverySuccess {
   ok: true;
   target: string;
-  outcome?: "delivered-to-live" | "resumed";
+  outcome?: "delivered-to-live" | "resumed" | "held";
   imagePaths?: string[];
   /** Set when the message booted a fresh agent window instead of an existing pane. */
   spawned?: boolean;
@@ -225,6 +227,8 @@ export async function killConversation(filePath: string): Promise<DeliveryOutcom
 export interface ConversationMessage {
   pid: number | null;
   path: string;
+  conversationId?: string | null;
+  clientMessageId?: string | null;
   text: string;
   images: InboxImagePayload[];
 }
@@ -237,8 +241,19 @@ export interface ConversationMessage {
  * resume window otherwise.
  */
 export async function deliverConversationMessage(message: ConversationMessage): Promise<DeliveryOutcome> {
-  const { pid, path: filePath, images } = message;
+  const { pid, images } = message;
   const text = message.text.trim();
+
+  const registry = agentRegistry();
+  const conversation = message.conversationId?.startsWith("conversation_")
+    ? registry.conversation(message.conversationId as `conversation_${string}`)
+    : registry.conversationForPath(message.path);
+  const filePath = conversation?.generations.at(-1)?.path ?? message.path;
+  if (conversation && deliveryFence(conversation) === "held") {
+    if (images.length) return failure("image delivery waits for migration completion", 409);
+    registry.holdDelivery(conversation.id, text, message.clientMessageId ?? null);
+    return { ok: true, target: conversation.id, outcome: "held" };
+  }
 
   let target: string | null = null;
   if (!filePath && pid !== null) {

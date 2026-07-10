@@ -3,6 +3,7 @@ import path from "node:path";
 
 import { statePath } from "@/lib/configDir";
 import { pidAlive } from "@/lib/scanner/process";
+import { agentRegistry, type AgentRegistry } from "@/lib/agent/registry";
 
 /**
  * Spawn parentage of a handoff: the card on a conversation pane boots a fresh
@@ -21,20 +22,23 @@ const MAX_CHILDREN = 20_000;
 export interface HandoffLineageStoreShape {
   panes?: Record<string, string>;
   children?: Record<string, string>;
+  conversationChildren?: Record<string, string>;
 }
 
 /** Pane pid of a handoff window → source transcript, while the pane lives. */
 let panes: Map<number, string> | null = null;
 /** New conversation transcript → source transcript, durable. */
 let children: Map<string, string> | null = null;
+let conversationChildren: Map<string, string> | null = null;
 let dirty = false;
 
 export function normalizeHandoffLineageStore(
   stored: HandoffLineageStoreShape,
   pidIsAlive: (pid: number) => boolean = pidAlive,
-): { panes: Map<number, string>; children: Map<string, string>; dirty: boolean } {
+): { panes: Map<number, string>; children: Map<string, string>; conversationChildren: Map<string, string>; dirty: boolean } {
   const nextPanes = new Map<number, string>();
   const nextChildren = new Map<string, string>();
+  const nextConversationChildren = new Map<string, string>();
   for (const [pidRaw, parent] of Object.entries(stored.panes ?? {})) {
     const pid = Number(pidRaw);
     /* A dead pane pid can only match again after the OS reuses it — drop it. */
@@ -43,12 +47,15 @@ export function normalizeHandoffLineageStore(
   for (const [child, parent] of Object.entries(stored.children ?? {})) {
     if (typeof parent === "string") nextChildren.set(child, parent);
   }
-  const storedSize = Object.keys(stored.panes ?? {}).length + Object.keys(stored.children ?? {}).length;
-  return { panes: nextPanes, children: nextChildren, dirty: nextPanes.size + nextChildren.size !== storedSize };
+  for (const [child, parent] of Object.entries(stored.conversationChildren ?? {})) {
+    if (child.startsWith("conversation_") && parent.startsWith("conversation_")) nextConversationChildren.set(child, parent);
+  }
+  const storedSize = Object.keys(stored.panes ?? {}).length + Object.keys(stored.children ?? {}).length + Object.keys(stored.conversationChildren ?? {}).length;
+  return { panes: nextPanes, children: nextChildren, conversationChildren: nextConversationChildren, dirty: nextPanes.size + nextChildren.size + nextConversationChildren.size !== storedSize };
 }
 
-function load(): { panes: Map<number, string>; children: Map<string, string> } {
-  if (panes && children) return { panes, children };
+function load(): { panes: Map<number, string>; children: Map<string, string>; conversationChildren: Map<string, string> } {
+  if (panes && children && conversationChildren) return { panes, children, conversationChildren };
   let stored: HandoffLineageStoreShape = {};
   try {
     stored = JSON.parse(fs.readFileSync(LINEAGE_FILE, "utf8")) as HandoffLineageStoreShape;
@@ -58,8 +65,9 @@ function load(): { panes: Map<number, string>; children: Map<string, string> } {
   const normalized = normalizeHandoffLineageStore(stored);
   panes = normalized.panes;
   children = normalized.children;
+  conversationChildren = normalized.conversationChildren;
   if (normalized.dirty) dirty = true;
-  return { panes, children };
+  return { panes, children, conversationChildren };
 }
 
 /** Records that the pane just booted for a handoff descends from `parent`. */
@@ -95,6 +103,23 @@ export function handoffParentForChild(child: string): string | null {
   return load().children.get(child) ?? null;
 }
 
+export function handoffParentConversation(childConversationId: string): string | null {
+  return load().conversationChildren.get(childConversationId) ?? null;
+}
+
+export function reconcileHandoffConversationOwnership(registry: AgentRegistry = agentRegistry()): void {
+  const store = load();
+  let changed = false;
+  for (const [childPath, parentPath] of store.children) {
+    const child = registry.conversationForPath(childPath);
+    const parent = registry.conversationForPath(parentPath);
+    if (!child || !parent || store.conversationChildren.get(child.id) === parent.id) continue;
+    store.conversationChildren.set(child.id, parent.id);
+    changed = true;
+  }
+  if (changed) { dirty = true; persistHandoffLineage(); }
+}
+
 export function persistHandoffLineage(): void {
   if (!dirty) return;
   dirty = false;
@@ -106,6 +131,7 @@ export function persistHandoffLineage(): void {
       JSON.stringify({
         panes: Object.fromEntries([...store.panes].map(([pid, parent]) => [String(pid), parent])),
         children: Object.fromEntries(store.children),
+        conversationChildren: Object.fromEntries(store.conversationChildren),
       }),
     );
   } catch {

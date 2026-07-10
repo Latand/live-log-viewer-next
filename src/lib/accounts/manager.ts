@@ -2,6 +2,7 @@ import { accountForSpawn, activeCodexAccountId, codexHomeOwningSessionPath, crea
 import { activeClaudeAccountId, claudeAccountForSpawn, claudeHomeOwningTranscript, claudeManagedEnvironment, createManagedClaudeAccount, listClaudeAccounts, setActiveClaudeAccount } from "./claude";
 import type { AccountManager, AccountSummary } from "./contracts";
 import { unavailableLimits } from "./contracts";
+import { agentRegistry } from "@/lib/agent/registry";
 
 function summary(engine: "claude" | "codex", id: string): AccountSummary {
   const account = (engine === "claude" ? listClaudeAccounts() : listCodexAccounts()).find((item) => item.id === id);
@@ -18,8 +19,9 @@ export const accountManager: AccountManager = {
   async submitLoginInput() { throw new Error("login input is Claude-operation specific"); },
   async cancelLogin() { throw new Error("login cancellation is Claude-operation specific"); },
   resolveSpawn(engine, requested) {
-    if (engine === "claude") { const item = claudeAccountForSpawn(requested); return { engine, accountId: item.id, kind: item.kind, home: item.home, transcriptRoot: item.projectsDir, env: item.kind === "managed" ? claudeManagedEnvironment(item.home) : process.env }; }
-    const item = accountForSpawn(requested); return { engine, accountId: item.id, kind: item.kind, home: item.home, transcriptRoot: item.sessionsDir, env: { ...process.env, CODEX_HOME: item.home } };
+    const routed = requested ?? agentRegistry().engineRouting(engine).activeAccountId ?? undefined;
+    if (engine === "claude") { const item = claudeAccountForSpawn(routed); return { engine, accountId: item.id, kind: item.kind, home: item.home, transcriptRoot: item.projectsDir, env: item.kind === "managed" ? claudeManagedEnvironment(item.home) : process.env }; }
+    const item = accountForSpawn(routed); return { engine, accountId: item.id, kind: item.kind, home: item.home, transcriptRoot: item.sessionsDir, env: { ...process.env, CODEX_HOME: item.home } };
   },
   resolveTranscriptOwner(engine, transcript) {
     if (engine === "claude") { const home = claudeHomeOwningTranscript(transcript); if (!home) return null; const item = listClaudeAccounts().find((candidate) => candidate.home === home); return item ? { engine, accountId: item.id, kind: item.kind, home, transcriptRoot: item.projectsDir, env: item.kind === "managed" ? claudeManagedEnvironment(home) : process.env } : null; }

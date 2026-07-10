@@ -3,17 +3,32 @@
 import { useEffect, useState } from "react";
 
 import { ArrowRight, ArrowUpToLine, FoldVertical, Loader2, Play, Square, SquareTerminal, X } from "@/components/icons";
-import { Check, Plus } from "lucide-react";
+import { Check, Plus, RotateCcw } from "lucide-react";
+
+import type { TFunction } from "@/lib/i18n";
 
 import { Hint } from "@/components/Hint";
 import { useComposer } from "@/hooks/useComposer";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useTmuxTarget } from "@/hooks/useTmuxTarget";
+import { conversationIdentity } from "@/lib/accounts/identity";
+import { cardMigrationState, migrationHoldsSends } from "@/lib/accounts/migration";
 import { getLocale, useLocale } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
 
 import { ComposerBar } from "./ComposerBar";
 import { ImagePickerButton } from "./imageAttachments";
+
+/**
+ * A delivery receipt shown above the composer. `state` tracks whether the
+ * message actually reached an agent: `sent` landed in a live pane or booted a
+ * spawn; `held`/`queued`/`recovering` are the account-migration delivery states
+ * (the backend accepted and is holding the text for the successor generation);
+ * `failed` means a held delivery was stranded (e.g. a rollback) and the user
+ * can retry. Held/queued/recovering/failed receipts persist across both the
+ * desktop and mobile composers until they resolve or the user dismisses them.
+ */
+type DeliveryReceiptState = "sent" | "held" | "queued" | "recovering" | "failed";
 
 interface SentEntry {
   id: number;
@@ -21,16 +36,27 @@ interface SentEntry {
   at: number;
   /** How the message left: into an existing pane or by booting a new window. */
   via: "pane" | "spawn";
+  /** Delivery lifecycle (defaults to `sent` for legacy receipts without it). */
+  state?: DeliveryReceiptState;
+  /** Idempotency key echoed to the backend so a retry can't double-deliver. */
+  clientMessageId?: string;
 }
 
 const SENT_LIMIT = 8;
 const SPAWN_TTL_MS = 90_000;
 const PANE_TTL_MS = 10 * 60_000;
-const sentKey = (path: string) => "llvSent:" + path;
+const sentKey = (id: string) => "llvSent:" + id;
 
-function readSent(path: string): SentEntry[] {
+/** A receipt still awaiting durable delivery (a migration hold) must never be
+    pruned by the pane/spawn TTLs — its text lands on the successor, whose
+    transcript is a different file, so only an explicit resolve/dismiss clears it. */
+function isPendingReceipt(entry: SentEntry): boolean {
+  return entry.state === "held" || entry.state === "queued" || entry.state === "recovering" || entry.state === "failed";
+}
+
+function readSent(id: string): SentEntry[] {
   try {
-    const raw = JSON.parse(sessionStorage.getItem(sentKey(path)) ?? "[]") as SentEntry[];
+    const raw = JSON.parse(sessionStorage.getItem(sentKey(id)) ?? "[]") as SentEntry[];
     return Array.isArray(raw) ? raw : [];
   } catch {
     return [];
@@ -44,25 +70,61 @@ function canMessageWithoutPane(file: FileEntry): boolean {
   return file.root === "codex-sessions";
 }
 
-const draftKey = (path: string) => "llvDraft:" + path;
+const draftKey = (id: string) => "llvDraft:" + id;
 const COMPOSE_EVENT = "llv-compose-draft";
 
 /**
  * Drops text into a conversation's composer from outside (the link-arrow
- * gesture): the stored draft grows and any mounted composer for that path
- * reloads it and takes focus, so the user types their ask right where the
- * context landed. With no composer on screen the draft simply waits in
- * sessionStorage for the next mount.
+ * gesture): the stored draft grows and any mounted composer for that
+ * conversation reloads it and takes focus, so the user types their ask right
+ * where the context landed. With no composer on screen the draft simply waits
+ * in sessionStorage for the next mount. `id` is the stable conversation identity
+ * (falls back to path), so a draft survives an account-migration succession.
  */
-export function appendComposerDraft(path: string, text: string) {
-  const key = draftKey(path);
+export function appendComposerDraft(id: string, text: string) {
+  const key = draftKey(id);
   const prev = sessionStorage.getItem(key) ?? "";
   sessionStorage.setItem(key, prev.trim() ? prev.replace(/\s*$/, "") + "\n\n" + text : text);
-  window.dispatchEvent(new CustomEvent(COMPOSE_EVENT, { detail: { path } }));
+  window.dispatchEvent(new CustomEvent(COMPOSE_EVENT, { detail: { path: id } }));
 }
 
 const hhmm = (at: number) =>
   new Date(at).toLocaleTimeString(getLocale() === "uk" ? "uk-UA" : "en-US", { hour12: false, hour: "2-digit", minute: "2-digit" });
+
+/** The label + tone for a delivery-receipt state chip, or `null` for a plainly
+    delivered message (no chip). Held/queued/recovering read amber (pending),
+    failed reads red (actionable). Text carries the state — never colour alone. */
+function receiptMeta(t: TFunction, state: DeliveryReceiptState | undefined): { label: string; className: string } | null {
+  switch (state) {
+    case "held":
+      return { label: t("composer.receiptHeld"), className: "bg-[#fff2d6] text-[#7a5300]" };
+    case "queued":
+      return { label: t("composer.receiptQueued"), className: "bg-[#fff2d6] text-[#7a5300]" };
+    case "recovering":
+      return { label: t("composer.receiptRecovering"), className: "bg-[#fff2d6] text-[#7a5300]" };
+    case "failed":
+      return { label: t("composer.receiptFailed"), className: "bg-[#ffe0e0] text-err" };
+    default:
+      return null;
+  }
+}
+
+/** Wall-clock read hoisted out of the component so the React Compiler's purity
+    check does not see a bare `Date.now()` in a render-scope closure. */
+function nowMs(): number {
+  return Date.now();
+}
+
+/** Idempotency key for a delivery. randomUUID needs a secure context; plain
+    LAN http access falls back to a good-enough random id. */
+function mintMessageId(): string {
+  try {
+    if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") return crypto.randomUUID();
+  } catch {
+    /* fall through */
+  }
+  return "msg-" + Math.random().toString(36).slice(2) + Date.now().toString(36);
+}
 
 /**
  * Chat-style composer pinned under the feed. A live pane gets the text typed
@@ -72,16 +134,25 @@ const hhmm = (at: number) =>
  */
 export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; pollPaused?: boolean }) {
   const { t } = useLocale();
+  /* Draft text and delivery receipts key on the stable conversation identity,
+     not the transcript path: a committed account migration gives the card a new
+     path under the target account, and the draft/held receipts must ride along
+     (falls back to path pre-migration). */
+  const cardId = conversationIdentity(file);
+  /* While a card is switching accounts its next send is held for the successor
+     (Sol delivery fence): the composer shows the held affordance instead of
+     pretending the text reached the live predecessor pane. */
+  const holdsSends = migrationHoldsSends(cardMigrationState(file.migration));
   /* An off-screen or far-zoom pane skips the pane-resolution poll; the last
      known target keeps the composer usable the moment it comes back. */
   const target = useTmuxTarget(file.pid, canMessageWithoutPane(file) ? file.path : undefined, !pollPaused);
   /* Column reshuffles can remount the composer mid-typing; the draft lives in
      sessionStorage so the text survives the remount. */
   const composer = useComposer({
-    initialText: () => (typeof window === "undefined" ? "" : sessionStorage.getItem(draftKey(file.path)) ?? ""),
+    initialText: () => (typeof window === "undefined" ? "" : sessionStorage.getItem(draftKey(cardId)) ?? ""),
     persistText: (value) => {
-      if (value) sessionStorage.setItem(draftKey(file.path), value);
-      else sessionStorage.removeItem(draftKey(file.path));
+      if (value) sessionStorage.setItem(draftKey(cardId), value);
+      else sessionStorage.removeItem(draftKey(cardId));
     },
     submit: (overrideText) => send(overrideText),
   });
@@ -104,7 +175,7 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
   }, [compactArmed]);
 
   /* eslint-disable-next-line react-hooks/set-state-in-effect */
-  useEffect(() => setSent(readSent(file.path)), [file.path]);
+  useEffect(() => setSent(readSent(cardId)), [cardId]);
 
   /* A link-arrow drop appended to the stored draft; reload it and put the
      caret at the end so the ask can be typed straight away. Goes through the
@@ -112,8 +183,8 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
      persisted, and the closure must not go stale between events. */
   useEffect(() => {
     const onCompose = (event: Event) => {
-      if ((event as CustomEvent<{ path?: string }>).detail?.path !== file.path) return;
-      const next = sessionStorage.getItem(draftKey(file.path)) ?? "";
+      if ((event as CustomEvent<{ path?: string }>).detail?.path !== cardId) return;
+      const next = sessionStorage.getItem(draftKey(cardId)) ?? "";
       textRef.current = next;
       setTextState(next);
       requestAnimationFrame(() => {
@@ -125,28 +196,32 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
     };
     window.addEventListener(COMPOSE_EVENT, onCompose);
     return () => window.removeEventListener(COMPOSE_EVENT, onCompose);
-  }, [file.path, inputRef, setTextState, textRef]);
+  }, [cardId, inputRef, setTextState, textRef]);
 
   /* The queue drains itself: a pane message is delivered once the transcript
      grew after the send moment; a spawn prompt lands in a fresh window whose
      transcript is a different file, so it expires by time instead. A pane
      relay into a subagent that has since finished never grows its transcript
      again, so pane entries also fall back to a TTL, just a longer one than
-     spawn entries since a live pane can legitimately go quiet for a while. */
+     spawn entries since a live pane can legitimately go quiet for a while.
+     Pending migration receipts (held/queued/recovering/failed) are exempt: they
+     resolve on the successor, not this predecessor, so only an explicit
+     resolve/dismiss removes them. */
   useEffect(() => {
     const prune = () =>
       setSent((prev) => {
         const next = prev.filter((entry) => {
+          if (isPendingReceipt(entry)) return true;
           if (entry.via === "pane") return file.mtime * 1000 < entry.at + 2_000 && Date.now() - entry.at < PANE_TTL_MS;
           return Date.now() - entry.at < SPAWN_TTL_MS;
         });
-        if (next.length !== prev.length) sessionStorage.setItem(sentKey(file.path), JSON.stringify(next));
+        if (next.length !== prev.length) sessionStorage.setItem(sentKey(cardId), JSON.stringify(next));
         return next.length !== prev.length ? next : prev;
       });
     prune();
     const timer = setInterval(prune, 5_000);
     return () => clearInterval(timer);
-  }, [file.mtime, file.path]);
+  }, [file.mtime, cardId]);
 
   const resumable = canMessageWithoutPane(file);
   if (target === null && !resumable) return null;
@@ -155,7 +230,7 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
 
   const persistSent = (next: SentEntry[]) => {
     setSent(next);
-    sessionStorage.setItem(sentKey(file.path), JSON.stringify(next));
+    sessionStorage.setItem(sentKey(cardId), JSON.stringify(next));
   };
 
   const send = async (overrideText?: string) => {
@@ -163,6 +238,9 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
     if (busy || voiceSending || (!payloadText.trim() && !attachments.images.length)) return;
     setBusy(true);
     setStatus(null);
+    /* Idempotency key: the backend can dedupe a retried held/failed delivery
+       against this id so the successor never receives the same prompt twice. */
+    const clientMessageId = mintMessageId();
     try {
       const res = await fetch("/api/tmux", {
         method: "POST",
@@ -171,6 +249,7 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
           pid: file.pid ?? undefined,
           path: file.path,
           text: payloadText,
+          clientMessageId,
           images: attachments.images.map((image) => ({ base64: image.base64, mime: image.mime })),
         }),
       });
@@ -180,29 +259,41 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
         imagePaths?: string[];
         target?: string;
         spawned?: boolean;
-        outcome?: "delivered-to-live" | "resumed" | "failed";
+        outcome?: "delivered-to-live" | "resumed" | "held" | "queued" | "recovering" | "failed";
       };
       if (!res.ok || !json.ok) {
+        // A hard failure keeps the draft text (never cleared) so the message is
+        // not lost; the error is announced by the composer's live status region.
         setStatus({ kind: "err", text: json.error ?? t("common.failedSend") });
         return;
       }
       const imgCount = attachments.images.length;
+      // The migration delivery fence returns `held`/`queued`/`recovering` when
+      // the text was accepted for the successor rather than delivered live. Those
+      // are durable acknowledgements (the backend persisted the message), so the
+      // draft clears but the receipt tracks the pending state until it resolves.
+      const held = json.outcome === "held" || json.outcome === "queued" || json.outcome === "recovering";
+      const at = nowMs();
       const entry: SentEntry = {
-        id: Date.now(),
+        id: at,
         text: payloadText.trim() || (imgCount ? t("composer.imagesCount", { count: imgCount }) : ""),
-        at: Date.now(),
+        at,
         via: json.outcome === "resumed" || json.spawned ? "spawn" : "pane",
+        state: held ? (json.outcome as DeliveryReceiptState) : "sent",
+        clientMessageId,
       };
       persistSent([...sent, entry].slice(-SENT_LIMIT));
       setText("");
       attachments.clear();
       setStatus({
-        kind: "ok",
-        text: json.outcome === "resumed" || json.spawned
-          ? t("composer.spawned", { target: json.target ?? "" })
-          : json.imagePaths?.length
-            ? t("composer.sentPaths", { count: json.imagePaths.length })
-            : t("common.sent"),
+        kind: held ? "info" : "ok",
+        text: held
+          ? t("composer.deliveryHeld", { label: file.migration?.targetLabel ?? file.migration?.targetAccountId ?? "" })
+          : json.outcome === "resumed" || json.spawned
+            ? t("composer.spawned", { target: json.target ?? "" })
+            : json.imagePaths?.length
+              ? t("composer.sentPaths", { count: json.imagePaths.length })
+              : t("common.sent"),
       });
       inputRef.current?.focus();
     } catch {
@@ -342,10 +433,45 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
       className="flex shrink-0 flex-col gap-1.5 border-t border-line bg-[#fbfbfd] px-2.5 py-2"
       aria-label={spawnMode ? t("composer.spawnAria") : t("composer.sendAria", { target: target ?? "" })}
     >
+      {/* Proactive hold hint: while the card is switching accounts, the next
+          send is queued for the successor rather than delivered live. Shown
+          identically under the desktop and mobile composers. */}
+      {holdsSends ? (
+        <div role="status" aria-live="polite" className="flex items-center gap-1.5 rounded-[8px] border border-[#e0ae45]/45 bg-[#fff9ed] px-2 py-1 text-[10.5px] font-semibold text-[#7a5300]">
+          <ArrowUpToLine className="h-3 w-3 shrink-0" aria-hidden />
+          <span className="min-w-0 truncate">{t("migrate.heldSend")}</span>
+        </div>
+      ) : null}
       {sent.length ? (
         <div className="flex flex-col gap-0.5" aria-label={t("composer.queueAria")}>
-          {sent.map((entry) => (
+          {sent.map((entry) => {
+            const receipt = receiptMeta(t, entry.state);
+            return (
             <div key={entry.id} className="flex items-center justify-end gap-1.5">
+              {receipt ? (
+                <span
+                  role="status"
+                  aria-live="polite"
+                  className={`inline-flex shrink-0 items-center gap-0.5 rounded-full px-1.5 py-0.5 text-[9px] font-bold ${receipt.className}`}
+                >
+                  {receipt.label}
+                </span>
+              ) : null}
+              {entry.state === "failed" ? (
+                <button
+                  type="button"
+                  aria-label={t("composer.retrySend")}
+                  title={t("composer.retrySend")}
+                  disabled={busy || voiceSending}
+                  className="inline-flex shrink-0 items-center rounded px-0.5 text-dim hover:text-accent disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                  onClick={() => {
+                    persistSent(sent.filter((item) => item.id !== entry.id));
+                    void send(entry.text);
+                  }}
+                >
+                  <RotateCcw className="h-3 w-3" aria-hidden />
+                </button>
+              ) : null}
               <span
                 className="min-w-0 max-w-[85%] truncate rounded-[10px] rounded-br-[3px] bg-[#ecebfb] px-2 py-0.5 text-[11px] text-[#333]"
                 title={entry.text}
@@ -365,7 +491,8 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
                 <X className="h-3 w-3" aria-hidden />
               </button>
             </div>
-          ))}
+            );
+          })}
         </div>
       ) : null}
       <ComposerBar

@@ -3,6 +3,7 @@
 import { Filter, TriangleAlert, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import { parseConversationHash, resolveConversationTarget, withoutArchivedPredecessors, type ConversationHash } from "@/lib/accounts/identity";
 import { useAgentChimes } from "@/hooks/useAgentChimes";
 import { useArchivedProjects } from "@/hooks/useArchivedProjects";
 import { useEffectiveFlows } from "@/components/flows/flowModel";
@@ -22,33 +23,15 @@ import { cleanTitle, fmtAge } from "./utils";
 
 const PROJECT_KEY = "llvProject";
 
-function readHashValue(hash: string): { filePath: string | null; project: string | null } {
-  const fileMatch = hash.match(/^#f=(.+)$/);
-  if (fileMatch) {
-    const raw = (fileMatch[1] ?? "").replace(/#question$/, "");
-    try {
-      return { filePath: decodeURIComponent(raw), project: null };
-    } catch {
-      return { filePath: raw, project: null };
-    }
-  }
-  const projectMatch = hash.match(/^#p=(.+)$/);
-  if (projectMatch) {
-    try {
-      return { filePath: null, project: decodeURIComponent(projectMatch[1]) };
-    } catch {
-      return { filePath: null, project: projectMatch[1] };
-    }
-  }
-  return { filePath: null, project: null };
-}
-
-function readHash(): { filePath: string | null; project: string | null } {
-  return readHashValue(location.hash);
+/** Reads the location hash into its conversation/file/project intent. Recognises
+    the canonical `#c=<conversationId>` deep link alongside the legacy `#f=` /
+    `#p=` forms (see parseConversationHash). */
+function readHash(): ConversationHash {
+  return parseConversationHash(location.hash);
 }
 
 export function initialProjectFromState(hash: string, storedProject: string | null): string {
-  return readHashValue(hash).project ?? storedProject ?? OVERVIEW;
+  return parseConversationHash(hash).project ?? storedProject ?? OVERVIEW;
 }
 
 function initialProject(): string {
@@ -90,7 +73,12 @@ export function Viewer() {
      per-tab snapshot to the server. Renders nothing. */
   useViewPresence();
   const [project, setProject] = useState<string>(() => initialProject());
-  const { files, projectCatalog, flows: polledFlows, workflows, tasks, loaded } = useFiles(project === OVERVIEW ? null : project);
+  const { files: allFiles, projectCatalog, flows: polledFlows, workflows, tasks, loaded } = useFiles(project === OVERVIEW ? null : project);
+  /* A committed account migration keeps the archived predecessor entry in the
+     payload (for chain history) but it must never render as a second standalone
+     card — every surface below sees only current generations. A no-op (same
+     array identity) until something actually migrates. */
+  const files = useMemo(() => withoutArchivedPredecessors(allFiles), [allFiles]);
   /* This tab's optimistic flow closes apply before anything renders: the X
      on a flow strip clears the reviewer side of the scheme instantly. */
   const flows = useEffectiveFlows(polledFlows);
@@ -99,7 +87,7 @@ export function Viewer() {
   const catalogProjects = useMemo(() => new Set(projectCatalog.map((entry) => entry.project)), [projectCatalog]);
   const isMobile = useIsMobile();
   const [drawerOpen, setDrawerOpen] = useState(false);
-  const [pendingPath, setPendingPath] = useState<string | null>(null);
+  const [pendingHash, setPendingHash] = useState<ConversationHash | null>(null);
   const [toastPath, setToastPath] = useState<string | null>(null);
   const seenQuestionsRef = useRef<Set<string> | null>(null);
   /* Reopening a file whose project is already selected does not change
@@ -110,7 +98,7 @@ export function Viewer() {
   /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
     const initial = readHash();
-    if (initial.filePath) setPendingPath(initial.filePath);
+    if (initial.filePath || initial.conversationId) setPendingHash(initial);
     const savedProject = initial.project ?? localStorage.getItem(PROJECT_KEY);
     if (savedProject) setProject(savedProject);
   }, []);
@@ -118,7 +106,7 @@ export function Viewer() {
   useEffect(() => {
     const onHash = () => {
       const next = readHash();
-      if (next.filePath) setPendingPath(next.filePath);
+      if (next.filePath || next.conversationId) setPendingHash(next);
       else if (next.project) setProject(next.project);
     };
     window.addEventListener("hashchange", onHash);
@@ -164,11 +152,16 @@ export function Viewer() {
 
   /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
-    if (!pendingPath || files.length === 0) return;
-    const hit = files.find((file) => file.path === pendingPath);
+    if (!pendingHash || allFiles.length === 0) return;
+    /* Resolves against the UNFILTERED payload (finding 6): a legacy `#f=` path
+       may point at an archived predecessor, which `withoutArchivedPredecessors`
+       has already folded out of `files`. Resolving against `allFiles` keeps that
+       predecessor visible long enough to redirect the link to its current
+       generation; the canonical `#c=` id resolves the same way. */
+    const hit = resolveConversationTarget(allFiles, pendingHash);
     if (hit) openFile(hit);
-    setPendingPath(null);
-  }, [pendingPath, files, openFile]);
+    setPendingHash(null);
+  }, [pendingHash, allFiles, openFile]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
   /* The one queue every counter shows: badge, popover and the tab title all

@@ -11,6 +11,8 @@ export interface ReconcileEnv {
   successorForPath?: (pathname: string, files: FileEntry[]) => string | null;
   pathForPanePid?: (panePid: number, files: FileEntry[]) => string | null;
   panePidAlive?: (panePid: number) => boolean;
+  conversationIdForPath?: (pathname: string) => string | null;
+  pathForConversationId?: (conversationId: string) => string | null;
   now?: () => string;
 }
 
@@ -62,29 +64,51 @@ export function pathForPanePid(
 }
 
 function reconcileAssignment(assignment: TaskAssignment, files: FileEntry[], env: ReconcileEnv): { assignment: TaskAssignment; dirty: boolean } {
+  let current = assignment;
+  let dirty = false;
+  if (current.path && !current.conversationId) {
+    const conversationId = env.conversationIdForPath?.(current.path)
+      ?? files.find((file) => file.path === current.path)?.conversationId
+      ?? null;
+    if (conversationId) { current = { ...current, conversationId }; dirty = true; }
+  }
   const at = env.now?.() ?? new Date().toISOString();
-  if (assignment.path) {
-    const successor = terminalSuccessor(assignment.path, files, env.successorForPath);
-    if (successor && successor !== assignment.path) {
+  if (current.path) {
+    const ownedPath = current.conversationId ? env.pathForConversationId?.(current.conversationId) ?? null : null;
+    const successor = ownedPath ?? terminalSuccessor(current.path, files, env.successorForPath);
+    if (successor && successor !== current.path) {
       /* A handoff that follows its agent into a resumed transcript stays a
          handoff — the routing moved, but nothing was ever auto-delivered. */
-      const state = assignment.state === "handoff" ? "handoff" : "delivered";
-      return { assignment: { ...assignment, path: successor, state, error: null, at }, dirty: true };
+      const state = current.state === "handoff" ? "handoff" : "delivered";
+      return { assignment: { ...current, path: successor, state, error: null, at }, dirty: true };
     }
-    return { assignment, dirty: false };
+    return { assignment: current, dirty };
   }
 
-  if (assignment.panePid !== null) {
-    const attributed = env.pathForPanePid?.(assignment.panePid, files) ?? null;
+  if (current.panePid !== null) {
+    const attributed = env.pathForPanePid?.(current.panePid, files) ?? null;
     if (attributed) {
-      return { assignment: { ...assignment, path: attributed, state: "delivered", error: null, at }, dirty: true };
+      const conversationId = env.conversationIdForPath?.(attributed)
+        ?? files.find((file) => file.path === attributed)?.conversationId
+        ?? null;
+      return {
+        assignment: {
+          ...current,
+          path: attributed,
+          ...(conversationId ? { conversationId } : {}),
+          state: "delivered",
+          error: null,
+          at,
+        },
+        dirty: true,
+      };
     }
-    const alive = env.panePidAlive?.(assignment.panePid) ?? true;
-    if (!alive && assignment.state !== "failed") {
-      return { assignment: { ...assignment, state: "failed", error: DEAD_SPAWN_ERROR, at }, dirty: true };
+    const alive = env.panePidAlive?.(current.panePid) ?? true;
+    if (!alive && current.state !== "failed") {
+      return { assignment: { ...current, state: "failed", error: DEAD_SPAWN_ERROR, at }, dirty: true };
     }
   }
-  return { assignment, dirty: false };
+  return { assignment: current, dirty };
 }
 
 export function reconcileTasks(files: FileEntry[], tasks: BoardTask[], env: ReconcileEnv = {}): { tasks: BoardTask[]; dirty: boolean } {

@@ -219,7 +219,11 @@ export function ComposerBar({
       </div>
       <ImagePreviewStrip images={attachments.images} onRemove={attachments.removeAt} />
       {status ? (
-        <span className={`truncate text-[10.5px] font-semibold ${status.kind === "ok" ? "text-ok" : "text-err"}`}>
+        <span
+          role="status"
+          aria-live={status.kind === "err" ? "assertive" : "polite"}
+          className={`truncate text-[10.5px] font-semibold ${status.kind === "ok" ? "text-ok" : status.kind === "info" ? "text-[#7a5300]" : "text-err"}`}
+        >
           {status.text}
         </span>
       ) : null}

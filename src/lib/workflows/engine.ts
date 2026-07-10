@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { freshSpecFor } from "@/lib/agent/cli";
+import { agentRegistry } from "@/lib/agent/registry";
 import { accountManager } from "@/lib/accounts/manager";
 import { resolveSpawnedTranscriptPath } from "@/lib/agent/spawnedTranscript";
 import { headCwd } from "@/lib/agent/transcript";
@@ -157,9 +158,22 @@ function detectStageDone(run: WorkflowStageRun, entry: FileEntry, ports: Workflo
 /** Transcript paths already owned by this workflow's stages. */
 function claimedPaths(wf: Workflow): Set<string> {
   const set = new Set<string>();
-  for (const run of wf.stageRuns) if (run.agentPath) set.add(run.agentPath);
-  if (wf.fixerPath) set.add(wf.fixerPath);
+  for (const run of wf.stageRuns) if (run.agentPath) {
+    set.add(run.agentPath);
+    set.add(currentConversationPath(run.agentConversationId, run.agentPath));
+  }
+  if (wf.fixerPath) {
+    set.add(wf.fixerPath);
+    set.add(currentConversationPath(wf.fixerConversationId, wf.fixerPath));
+  }
   return set;
+}
+
+function currentConversationPath(conversationId: string | null | undefined, fallback: string): string {
+  if (conversationId?.startsWith("conversation_")) {
+    return agentRegistry().conversation(conversationId as `conversation_${string}`)?.generations.at(-1)?.path ?? fallback;
+  }
+  return agentRegistry().canonicalPath(fallback);
 }
 
 function isNativeCodexSubagentEntry(entry: FileEntry): boolean {
@@ -193,9 +207,9 @@ function claimTranscript(wf: Workflow, run: WorkflowStageRun, role: RoleConfig, 
 function lineageParent(wf: Workflow, stageIndex: number): string | null {
   for (let i = stageIndex - 1; i >= 0; i -= 1) {
     const prev = wf.stageRuns[i];
-    if (prev?.agentPath) return prev.agentPath;
+    if (prev?.agentPath) return currentConversationPath(prev.agentConversationId, prev.agentPath);
   }
-  return wf.srcPath ?? null;
+  return wf.srcPath ? currentConversationPath(wf.srcConversationId, wf.srcPath) : null;
 }
 
 function roleForStage(wf: Workflow, index: number): RoleConfig | null {
@@ -313,7 +327,7 @@ async function tickImplementing(
   }
   const agent = await ensureStageAgent(wf, run, role, stageKickoff(wf, wf.stageIndex), entries, ports, persistCheckpoint);
   if (agent !== "ready") return;
-  const entry = entriesByPath.get(run.agentPath!);
+  const entry = entriesByPath.get(currentConversationPath(run.agentConversationId, run.agentPath!));
   if (!entry) return; // scanner has not picked the transcript up yet
   const note = detectStageDone(run, entry, ports);
   if (note !== null) {
@@ -348,19 +362,23 @@ async function tickReviewing(
   }
   const agent = await ensureStageAgent(wf, run, stage.fixer, fixerKickoff(wf), entries, ports, persistCheckpoint);
   if (agent !== "ready") return;
-  if (!wf.fixerPath) wf.fixerPath = run.agentPath;
+  if (!wf.fixerPath) {
+    wf.fixerPath = run.agentPath;
+    wf.fixerConversationId = run.agentConversationId ?? null;
+  }
 
   if (!wf.flowId) {
     /* A restart between flow creation and the flowId write leaves an orphaned
        flow bound to the fixer — adopt it instead of colliding on create. */
-    const existing = ports.findFlowByImplementer(wf.fixerPath!);
+    const currentFixerPath = currentConversationPath(wf.fixerConversationId, wf.fixerPath!);
+    const existing = ports.findFlowByImplementer(currentFixerPath);
     if (existing) {
       wf.flowId = existing.id;
       return;
     }
     const created = await ports.createFlow(
       {
-        implementerPath: wf.fixerPath!,
+        implementerPath: currentFixerPath,
         roles: { implementer: stage.fixer, reviewer: stage.reviewer },
         baseMode: "head",
         baseRef: wf.baseRef,
@@ -462,7 +480,7 @@ function noteFromRequest(req: PatchWorkflowRequest): string | null {
 }
 
 function resetRun(run: WorkflowStageRun): void {
-  Object.assign(run, { agentPath: null, paneId: null, startedAt: null, doneAt: null, doneNote: null });
+  Object.assign(run, { agentPath: null, agentConversationId: null, paneId: null, startedAt: null, doneAt: null, doneNote: null });
 }
 
 /** The phase a parked workflow belongs to; live states answer for themselves. */
@@ -536,6 +554,7 @@ export async function patchWorkflow(
         if (flow && flow.closedAt === null && flow.state !== "closed") await ports.closeFlow(flow.id);
         wf.flowId = null;
         wf.fixerPath = null;
+        wf.fixerConversationId = null;
       }
     }
     wf.state = phase;
@@ -595,7 +614,10 @@ export function createWorkflowFromRequest(
     mode: req.mode === "manual" ? "manual" : "auto",
     now: ports.now(),
   });
-  if (typeof req.src === "string" && req.src.trim()) wf.srcPath = req.src.trim();
+  if (typeof req.src === "string" && req.src.trim()) {
+    wf.srcPath = req.src.trim();
+    wf.srcConversationId = agentRegistry().conversationForPath(wf.srcPath)?.id ?? null;
+  }
   const workflows = loadWorkflows();
   workflows.push(wf);
   saveWorkflows(workflows);
