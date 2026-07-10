@@ -12,9 +12,11 @@ const OLD_HOME = process.env.LLV_CODEX_HOME;
 process.env.LLV_STATE_DIR = path.join(SANDBOX, "state");
 process.env.LLV_CODEX_HOME = path.join(SANDBOX, "legacy");
 
-const { POST } = await import("./route");
+const { DELETE: remove, POST } = await import("./route");
+const { createManagedCodexAccount } = await import("@/lib/accounts/codex");
 const { CodexAppServerClient } = await import("@/lib/accounts/codexAppServer");
 const { ManagedCodexRuntime, setManagedCodexRuntimeForTests } = await import("@/lib/accounts/codexRuntime");
+const { agentRegistry } = await import("@/lib/agent/registry");
 
 class FakeChild extends EventEmitter {
   readonly stdin = { write: (line: string) => { this.onWrite(JSON.parse(line) as Record<string, unknown>); return true; }, end: () => undefined };
@@ -87,4 +89,91 @@ test("managed account creation returns an app-server challenge without the tmux 
   const source = fs.readFileSync(path.join(import.meta.dir, "route.ts"), "utf8");
   expect(source).not.toContain("@/lib/tmux");
   expect(source).not.toContain("spawnCommandWindow");
+});
+
+test("managed Codex removal requires force during device login and cancels the login child", async () => {
+  const children: FakeChild[] = [];
+  setManagedCodexRuntimeForTests(new ManagedCodexRuntime({
+    startClient: async (home) => {
+      const child = new FakeChild();
+      children.push(child);
+      return CodexAppServerClient.start({ home, spawn: () => child as never });
+    },
+  }));
+  const created = await POST(new NextRequest("http://127.0.0.1/api/accounts/codex", {
+    method: "POST", headers: { host: "127.0.0.1", "content-type": "application/json" }, body: JSON.stringify({ label: "Remove me" }),
+  }));
+  const { account } = await created.json() as { account: { id: string } };
+
+  const blocked = await remove(new NextRequest("http://127.0.0.1/api/accounts/codex", {
+    method: "DELETE", headers: { host: "127.0.0.1", "content-type": "application/json" }, body: JSON.stringify({ id: account.id }),
+  }));
+  expect(blocked.status).toBe(409);
+  await expect(blocked.json()).resolves.toEqual(expect.objectContaining({ code: "account_removal_blocked", blockers: ["login_pending"] }));
+
+  const forced = await remove(new NextRequest("http://127.0.0.1/api/accounts/codex", {
+    method: "DELETE", headers: { host: "127.0.0.1", "content-type": "application/json" }, body: JSON.stringify({ id: account.id, force: true }),
+  }));
+  expect(forced.status).toBe(200);
+  expect(children[0]?.kills).toBeGreaterThan(0);
+});
+
+test("managed Codex removal retires routing and migration intents targeting the account", async () => {
+  const account = createManagedCodexAccount("Routed removal");
+  const registry = agentRegistry();
+  registry.setEngineRouting("codex", account.id);
+  const intent = registry.commitMigrationIntent({
+    engine: "codex",
+    targetId: account.id,
+    origin: "manual",
+    requestId: "remove-routed-codex",
+    expectedRevision: registry.engineRouting("codex").revision,
+  });
+
+  const response = await remove(new NextRequest("http://127.0.0.1/api/accounts/codex", {
+    method: "DELETE", headers: { host: "127.0.0.1", "content-type": "application/json" }, body: JSON.stringify({ id: account.id }),
+  }));
+
+  expect(response.status).toBe(200);
+  expect(registry.engineRouting("codex").activeAccountId).toBe("default");
+  expect(registry.snapshot().migrationIntents[intent.id]?.state).toBe("stopped");
+});
+
+test("managed Codex removal restores routing when the underlying deletion fails after routing was retired", async () => {
+  const account = createManagedCodexAccount("Unsafe home");
+  const registry = agentRegistry();
+  registry.setEngineRouting("codex", account.id);
+  // Simulates the home becoming unsafe in the window between the route's
+  // initial listCodexAccounts() check and removeManagedCodexAccount's own
+  // re-read: retireAccount is the last synchronous step before that re-read,
+  // so corrupting the home here lands exactly in that window.
+  const originalRetire = registry.retireAccount.bind(registry);
+  registry.retireAccount = ((...args: Parameters<typeof originalRetire>) => {
+    originalRetire(...args);
+    fs.chmodSync(account.home, 0o755);
+  }) as typeof registry.retireAccount;
+
+  try {
+    const response = await remove(new NextRequest("http://127.0.0.1/api/accounts/codex", {
+      method: "DELETE", headers: { host: "127.0.0.1", "content-type": "application/json" }, body: JSON.stringify({ id: account.id }),
+    }));
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual(expect.objectContaining({ code: "accounts_locked" }));
+    expect(registry.engineRouting("codex").activeAccountId).toBe(account.id);
+  } finally {
+    registry.retireAccount = originalRetire;
+  }
+});
+
+test("managed Codex removal reports a corrupt registry as locked", async () => {
+  const file = path.join(process.env.LLV_STATE_DIR!, "codex-accounts.json");
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, "{ corrupt");
+
+  const response = await remove(new NextRequest("http://127.0.0.1/api/accounts/codex", {
+    method: "DELETE", headers: { host: "127.0.0.1", "content-type": "application/json" }, body: JSON.stringify({ id: "missing" }),
+  }));
+
+  expect(response.status).toBe(409);
+  await expect(response.json()).resolves.toEqual(expect.objectContaining({ code: "accounts_locked" }));
 });

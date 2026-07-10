@@ -48,6 +48,8 @@ function state(currentLogin: ClaudeLoginView, over: Partial<EngineAccountsState>
     submitLoginCode: async () => true,
     cancelLogin: async () => true,
     retryLogin: async () => true,
+    remove: async () => true,
+    cleanupOrphans: async () => true,
     ...over,
   };
 }
@@ -107,6 +109,44 @@ test("keyboard Submit code restores focus to the Claude sign-in row after it ent
 
   await view.rerender(state(login({ phase: "verifying", loginUrl: null, acceptsCode: false }), { submitLoginCode: initial.submitLoginCode }));
   expect(document.activeElement).toBe(view.host.querySelector('[role="group"]'));
+});
+
+test("removing a managed account arms on the first click and only removes on an explicit confirm", async () => {
+  let removed: string | null = null;
+  const initial = state(login({ phase: "authenticated" }), {
+    accounts: [{ id: "acc", label: "Acc", kind: "managed", authPresent: true, loginPending: false, loginState: "authenticated", deviceAuth: null, login: null }],
+    remove: async (id) => { removed = id; return true; },
+  });
+  const view = await mount(initial);
+  mounted.push(view);
+  const remove = [...view.host.querySelectorAll("button")].find((button) => button.textContent === "Remove")!;
+
+  flushSync(() => { remove.click(); });
+  expect(removed).toBeNull();
+  expect(view.host.textContent).toContain("Remove this account?");
+
+  const confirm = [...view.host.querySelectorAll("button")].find((button) => button.textContent === "Confirm")!;
+  flushSync(() => { confirm.click(); });
+  expect(removed as unknown as string).toBe("acc");
+});
+
+test("canceling an armed removal backs out without removing the account", async () => {
+  let removed: string | null = null;
+  const initial = state(login({ phase: "authenticated" }), {
+    accounts: [{ id: "acc", label: "Acc", kind: "managed", authPresent: true, loginPending: false, loginState: "authenticated", deviceAuth: null, login: null }],
+    remove: async (id) => { removed = id; return true; },
+  });
+  const view = await mount(initial);
+  mounted.push(view);
+  const remove = [...view.host.querySelectorAll("button")].find((button) => button.textContent === "Remove")!;
+  flushSync(() => { remove.click(); });
+
+  const cancel = [...view.host.querySelectorAll("button")].find((button) => button.textContent === "Cancel")!;
+  flushSync(() => { cancel.click(); });
+
+  expect(removed).toBeNull();
+  expect(view.host.textContent).not.toContain("Remove this account?");
+  expect([...view.host.querySelectorAll("button")].some((button) => button.textContent === "Remove")).toBe(true);
 });
 
 test("keyboard Cancel restores focus to the Claude sign-in row after it enters canceling", async () => {

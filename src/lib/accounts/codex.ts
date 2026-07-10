@@ -8,6 +8,8 @@ import { isShellCommand } from "@/lib/status";
 const ACCOUNT_ID = /^[a-z0-9][a-z0-9-]{0,31}$/;
 const DEFAULT_ID = "default";
 const REGISTRY_VERSION = 1;
+const REGISTRY_LOCK_WAIT_MS = 5_000;
+const REGISTRY_LOCK_STALE_MS = 30_000;
 export const LOGIN_STARTUP_GRACE_MS = 15_000;
 /* Shared, read-mostly capability state. Account tokens, sessions, plugin data,
    and MCP OAuth state deliberately have no link and remain home-local. */
@@ -79,11 +81,18 @@ export class CorruptCodexAccountsError extends Error {
   }
 }
 
+export class UnsafeCodexHomeError extends Error {
+  constructor() {
+    super("managed Codex home failed safety checks");
+    this.name = "UnsafeCodexHomeError";
+  }
+}
+
 function legacyHome(): string {
   return path.resolve(process.env.LLV_CODEX_HOME || path.join(os.homedir(), ".codex"));
 }
 
-function accountsRoot(): string {
+export function codexAccountsRoot(): string {
   return path.join(path.dirname(stateDir()), "accounts", "codex");
 }
 
@@ -128,21 +137,22 @@ function isStoredAccount(value: unknown): value is StoredAccount {
 }
 
 function managedHome(id: string): string {
-  return path.join(accountsRoot(), id);
+  return path.join(codexAccountsRoot(), id);
 }
 
-function managedHomeIsSafe(id: string): boolean {
+function managedHomeIsSafe(id: string, requireExisting = false): boolean {
   if (!ACCOUNT_ID.test(id) || id === DEFAULT_ID) return false;
-  const root = path.resolve(accountsRoot());
+  const root = path.resolve(codexAccountsRoot());
   const home = path.resolve(managedHome(id));
   if (path.dirname(home) !== root) return false;
   try {
+    const rootStat = fs.lstatSync(root);
     const stat = fs.lstatSync(home);
-    if (stat.isSymbolicLink()) return false;
+    if (!rootStat.isDirectory() || rootStat.isSymbolicLink() || !stat.isDirectory() || stat.isSymbolicLink() || (stat.mode & 0o077) !== 0) return false;
     const rootReal = fs.realpathSync(root);
     return path.dirname(fs.realpathSync(home)) === rootReal;
   } catch {
-    return true;
+    return !requireExisting;
   }
 }
 
@@ -197,6 +207,46 @@ function mutableRegistry(): Registry {
   const loaded = readRegistry();
   if (loaded.corrupt) throw new CorruptCodexAccountsError();
   return loaded.registry;
+}
+
+function sleep(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function registryLockPath(): string {
+  return `${registryPath()}.lock`;
+}
+
+function withRegistryLock<T>(operation: () => T): T {
+  const lock = registryLockPath();
+  const started = Date.now();
+  fs.mkdirSync(path.dirname(lock), { recursive: true, mode: 0o700 });
+  for (;;) {
+    let fd: number;
+    try {
+      fd = fs.openSync(lock, "wx", 0o600);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      try {
+        if (Date.now() - fs.statSync(lock).mtimeMs > REGISTRY_LOCK_STALE_MS) {
+          fs.rmSync(lock, { force: true });
+          continue;
+        }
+      } catch {
+        continue;
+      }
+      if (Date.now() - started >= REGISTRY_LOCK_WAIT_MS) throw new Error("Codex account registry is busy; retry shortly");
+      sleep(10);
+      continue;
+    }
+    try {
+      fs.writeFileSync(fd, `${process.pid}\n`, "utf8");
+      return operation();
+    } finally {
+      fs.closeSync(fd);
+      fs.rmSync(lock, { force: true });
+    }
+  }
 }
 
 /** True when the registry is degraded and any persistence would throw
@@ -276,9 +326,12 @@ export function isManagedCodexHome(home: string): boolean {
 }
 
 export function setActiveCodexAccount(id: string): void {
-  const registry = mutableRegistry();
-  if (!listCodexAccounts().some((account) => account.id === id)) throw new UnknownAccountError(id);
-  writeRegistry({ ...registry, active: id });
+  withRegistryLock(() => {
+    cached = null;
+    const registry = mutableRegistry();
+    if (!listCodexAccounts().some((account) => account.id === id)) throw new UnknownAccountError(id);
+    writeRegistry({ ...registry, active: id });
+  });
 }
 
 export function codexSessionRoots(): string[] {
@@ -314,34 +367,77 @@ function accountIdForLabel(label: string, existing: Set<string>): string {
 export function createManagedCodexAccount(label: string): CodexAccount {
   const cleanLabel = label.trim();
   if (!cleanLabel || cleanLabel.length > 80 || /[\u0000-\u001f\u007f]/.test(cleanLabel)) throw new InvalidAccountLabelError();
-  const registry = mutableRegistry();
-  const id = accountIdForLabel(cleanLabel, new Set(listCodexAccounts().map((account) => account.id)));
-  const home = managedHome(id);
-  let createdHome = false;
-  try {
-    fs.mkdirSync(path.dirname(home), { recursive: true, mode: 0o700 });
-    fs.mkdirSync(home, { recursive: false, mode: 0o700 });
-    createdHome = true;
-    fs.chmodSync(home, 0o700);
-    for (const entry of OVERLAY_LINKS) fs.symlinkSync(path.join(legacyHome(), entry), path.join(home, entry));
-    fs.mkdirSync(path.join(home, "plugins"), { mode: 0o700 });
-    fs.symlinkSync(path.join(legacyHome(), "plugins", "cache"), path.join(home, "plugins", "cache"));
-    const stored: StoredAccount = { id, label: cleanLabel, kind: "managed", createdAt: Date.now(), loginPane: null };
-    writeRegistry({ ...registry, accounts: [...registry.accounts, stored] });
-    return asAccount(stored);
-  } catch (error) {
-    if (createdHome) fs.rmSync(home, { recursive: true, force: true });
-    throw error;
-  }
+  return withRegistryLock(() => {
+    cached = null;
+    const registry = mutableRegistry();
+    const id = accountIdForLabel(cleanLabel, new Set(listCodexAccounts().map((account) => account.id)));
+    const home = managedHome(id);
+    let createdHome = false;
+    try {
+      fs.mkdirSync(path.dirname(home), { recursive: true, mode: 0o700 });
+      fs.mkdirSync(home, { recursive: false, mode: 0o700 });
+      createdHome = true;
+      fs.chmodSync(home, 0o700);
+      for (const entry of OVERLAY_LINKS) fs.symlinkSync(path.join(legacyHome(), entry), path.join(home, entry));
+      fs.mkdirSync(path.join(home, "plugins"), { mode: 0o700 });
+      fs.symlinkSync(path.join(legacyHome(), "plugins", "cache"), path.join(home, "plugins", "cache"));
+      const stored: StoredAccount = { id, label: cleanLabel, kind: "managed", createdAt: Date.now(), loginPane: null };
+      writeRegistry({ ...registry, accounts: [...registry.accounts, stored] });
+      return asAccount(stored);
+    } catch (error) {
+      if (createdHome) fs.rmSync(home, { recursive: true, force: true });
+      throw error;
+    }
+  });
+}
+
+export function removeManagedCodexAccount(id: string): void {
+  withRegistryLock(() => {
+    cached = null;
+    const registry = mutableRegistry();
+    const existing = registry.accounts.find((account) => account.id === id);
+    if (!existing) throw new UnknownAccountError(id);
+    const home = managedHome(id);
+    const exists = fs.existsSync(home);
+    if (exists && !managedHomeIsSafe(id, true)) throw new UnsafeCodexHomeError();
+    if (exists) fs.rmSync(home, { recursive: true, force: true });
+    writeRegistry({
+      ...registry,
+      active: registry.active === id ? DEFAULT_ID : registry.active,
+      accounts: registry.accounts.filter((account) => account.id !== id),
+    });
+  });
+}
+
+/** Removes failed-login homes that have no registry owner. Only safe direct children qualify. */
+export function cleanupOrphanedCodexHomes(): string[] {
+  return withRegistryLock(() => {
+    cached = null;
+    const registry = mutableRegistry();
+    const registered = new Set(registry.accounts.map((account) => account.id));
+    let entries: fs.Dirent[];
+    try { entries = fs.readdirSync(codexAccountsRoot(), { withFileTypes: true }); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return []; throw error; }
+    const removed: string[] = [];
+    for (const entry of entries) {
+      if (!entry.isDirectory() || registered.has(entry.name) || !managedHomeIsSafe(entry.name, true)) continue;
+      fs.rmSync(managedHome(entry.name), { recursive: true, force: true });
+      removed.push(entry.name);
+    }
+    return removed.sort();
+  });
 }
 
 export function setCodexAccountLoginPane(id: string, loginPane: LoginPane | null): void {
-  const registry = mutableRegistry();
-  const index = registry.accounts.findIndex((account) => account.id === id);
-  if (index < 0) throw new UnknownAccountError(id);
-  const accounts = [...registry.accounts];
-  accounts[index] = { ...accounts[index]!, loginPane };
-  writeRegistry({ ...registry, accounts });
+  withRegistryLock(() => {
+    cached = null;
+    const registry = mutableRegistry();
+    const index = registry.accounts.findIndex((account) => account.id === id);
+    if (index < 0) throw new UnknownAccountError(id);
+    const accounts = [...registry.accounts];
+    accounts[index] = { ...accounts[index]!, loginPane };
+    writeRegistry({ ...registry, accounts });
+  });
 }
 
 export type CodexLoginState = "pending" | "idle" | "authenticated";

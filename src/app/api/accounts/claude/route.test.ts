@@ -13,7 +13,9 @@ process.env.LLV_STATE_DIR = path.join(sandbox, "state");
 process.env.LLV_CLAUDE_HOME = path.join(sandbox, "legacy");
 
 const { ClaudeLoginSupervisor, setClaudeLoginSupervisorForTests } = await import("@/lib/accounts/claudeLogin");
-const { POST } = await import("./route");
+const { claudeRegistryPath, createManagedClaudeAccount } = await import("@/lib/accounts/claude");
+const { agentRegistry } = await import("@/lib/agent/registry");
+const { DELETE: remove, POST } = await import("./route");
 const { DELETE } = await import("./login/[operationId]/route");
 const { POST: submitInput } = await import("./login/[operationId]/input/route");
 
@@ -28,6 +30,7 @@ let child: FakeChild;
 
 beforeEach(() => {
   fs.rmSync(process.env.LLV_STATE_DIR!, { recursive: true, force: true });
+  fs.rmSync(path.join(sandbox, "accounts"), { recursive: true, force: true });
   child = new FakeChild();
   setClaudeLoginSupervisorForTests(new ClaudeLoginSupervisor({
     spawn: () => child as never,
@@ -115,4 +118,89 @@ test("the authorization code is accepted through stdin and never appears in the 
   expect(submitted.status).toBe(200);
   expect(submittedBody).toEqual({ login: expect.objectContaining({ phase: "verifying", acceptsCode: false }) });
   expect(JSON.stringify(submittedBody)).not.toContain(code);
+});
+
+test("managed Claude removal requires force during login and cancels the operation before removing credentials", async () => {
+  const created = await POST(new NextRequest("http://127.0.0.1/api/accounts/claude", {
+    method: "POST",
+    headers: { host: "127.0.0.1", "content-type": "application/json" },
+    body: JSON.stringify({ label: "Remove me" }),
+  }));
+  const { account } = await created.json() as { account: { id: string } };
+
+  const blocked = await remove(new NextRequest("http://127.0.0.1/api/accounts/claude", {
+    method: "DELETE",
+    headers: { host: "127.0.0.1", "content-type": "application/json" },
+    body: JSON.stringify({ id: account.id }),
+  }));
+  expect(blocked.status).toBe(409);
+  await expect(blocked.json()).resolves.toEqual(expect.objectContaining({ code: "account_removal_blocked", blockers: ["login_pending"] }));
+
+  const forced = await remove(new NextRequest("http://127.0.0.1/api/accounts/claude", {
+    method: "DELETE",
+    headers: { host: "127.0.0.1", "content-type": "application/json" },
+    body: JSON.stringify({ id: account.id, force: true }),
+  }));
+  expect(forced.status).toBe(200);
+  await expect(forced.json()).resolves.toEqual({ removed: { id: account.id } });
+});
+
+test("managed Claude removal retires routing and migration intents targeting the account", async () => {
+  const account = createManagedClaudeAccount("Routed removal");
+  const registry = agentRegistry();
+  registry.setEngineRouting("claude", account.id);
+  const intent = registry.commitMigrationIntent({
+    engine: "claude",
+    targetId: account.id,
+    origin: "manual",
+    requestId: "remove-routed-claude",
+    expectedRevision: registry.engineRouting("claude").revision,
+  });
+
+  const response = await remove(new NextRequest("http://127.0.0.1/api/accounts/claude", {
+    method: "DELETE", headers: { host: "127.0.0.1", "content-type": "application/json" }, body: JSON.stringify({ id: account.id }),
+  }));
+
+  expect(response.status).toBe(200);
+  expect(registry.engineRouting("claude").activeAccountId).toBe("default");
+  expect(registry.snapshot().migrationIntents[intent.id]?.state).toBe("stopped");
+});
+
+test("managed Claude removal restores routing when the underlying deletion fails after routing was retired", async () => {
+  const account = createManagedClaudeAccount("Unsafe home");
+  const registry = agentRegistry();
+  registry.setEngineRouting("claude", account.id);
+  // Simulates the home becoming unsafe in the window between the route's
+  // initial listClaudeAccounts() check and removeManagedClaudeAccount's own
+  // re-read: retireAccount is the last synchronous step before that re-read,
+  // so corrupting the home here lands exactly in that window.
+  const originalRetire = registry.retireAccount.bind(registry);
+  registry.retireAccount = ((...args: Parameters<typeof originalRetire>) => {
+    originalRetire(...args);
+    fs.chmodSync(account.home, 0o755);
+  }) as typeof registry.retireAccount;
+
+  try {
+    const response = await remove(new NextRequest("http://127.0.0.1/api/accounts/claude", {
+      method: "DELETE", headers: { host: "127.0.0.1", "content-type": "application/json" }, body: JSON.stringify({ id: account.id }),
+    }));
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual(expect.objectContaining({ code: "accounts_locked" }));
+    expect(registry.engineRouting("claude").activeAccountId).toBe(account.id);
+  } finally {
+    registry.retireAccount = originalRetire;
+  }
+});
+
+test("managed Claude removal reports a corrupt registry as locked", async () => {
+  const file = claudeRegistryPath();
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, "{ corrupt");
+
+  const response = await remove(new NextRequest("http://127.0.0.1/api/accounts/claude", {
+    method: "DELETE", headers: { host: "127.0.0.1", "content-type": "application/json" }, body: JSON.stringify({ id: "missing" }),
+  }));
+
+  expect(response.status).toBe(409);
+  await expect(response.json()).resolves.toEqual(expect.objectContaining({ code: "accounts_locked" }));
 });

@@ -80,6 +80,25 @@ test("cancellation and independent homes never share a managed app-server child"
   expect(children[1]!.kills).toBe(0);
 });
 
+test("cancellation waits for an in-flight client startup to be reaped", async () => {
+  let release!: (client: CodexAppServerClient) => void;
+  const starting = new Promise<CodexAppServerClient>((resolve) => { release = resolve; });
+  const child = new FakeChild();
+  const runtime = new ManagedCodexRuntime({ startClient: () => starting });
+  const work = account("starting", "/accounts/starting");
+  const launch = runtime.startLogin(work).catch(() => null);
+  let cancelled = false;
+  const cancel = runtime.cancelLogin(work.id).then((value) => { cancelled = value; });
+
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(cancelled).toBe(false);
+  release(await CodexAppServerClient.start({ home: work.home, spawn: () => child as never }));
+  await cancel;
+  await launch;
+  expect(cancelled).toBe(true);
+  expect(child.kills).toBeGreaterThan(0);
+});
+
 test("child death, false completion, and account-read failure become recoverable states", async () => {
   const stateFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-state-")), "attempts.json");
   const children: FakeChild[] = [];

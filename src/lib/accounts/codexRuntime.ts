@@ -198,7 +198,15 @@ export class ManagedCodexRuntime {
     if (!this.owns(attempt)) return;
     const client = attempt.client;
     this.settle(attempt, "cancelled", reason, false);
-    if (!client || !attempt.loginId) return;
+    if (!client) {
+      await attempt.startPromise.catch(() => undefined);
+      return;
+    }
+    if (!attempt.loginId) {
+      client.close();
+      await attempt.startPromise.catch(() => undefined);
+      return;
+    }
     try { await client.cancelLogin(attempt.loginId); } catch { /* closing the child finalizes the cancellation */ }
     finally { client.close(); }
   }

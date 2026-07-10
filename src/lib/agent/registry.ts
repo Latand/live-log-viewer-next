@@ -897,6 +897,34 @@ export class AgentRegistry {
     return clone(this.snapshot().engineRouting[engine]);
   }
 
+  retireAccount(engine: Extract<AgentEngine, "claude" | "codex">, accountId: string, fallbackAccountId: string): void {
+    this.mutate((file) => {
+      const changedAt = now();
+      const route = file.engineRouting[engine];
+      if (route.activeAccountId === accountId) {
+        route.activeAccountId = fallbackAccountId;
+        route.revision += 1;
+      }
+      const retiredIntentIds = new Set<string>();
+      for (const intent of Object.values(file.migrationIntents)) {
+        if (intent.engine !== engine || intent.targetId !== accountId) continue;
+        retiredIntentIds.add(intent.id);
+        if (intent.state === "stopped") continue;
+        intent.state = "stopped";
+        intent.revision += 1;
+        intent.updatedAt = changedAt;
+        intent.stoppedAt = changedAt;
+      }
+      if (retiredIntentIds.size === 0) return;
+      for (const conversation of Object.values(file.conversations)) {
+        if (!conversation.migration || !retiredIntentIds.has(conversation.migration.intentId)) continue;
+        conversation.migration = null;
+        conversation.updatedAt = changedAt;
+        file.conversationRevision[conversation.engine] += 1;
+      }
+    });
+  }
+
   commitMigrationIntent(input: {
     engine: Extract<AgentEngine, "claude" | "codex">;
     targetId: string;

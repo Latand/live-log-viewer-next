@@ -10,10 +10,11 @@ const OLD_HOME = process.env.LLV_CODEX_HOME;
 process.env.LLV_STATE_DIR = path.join(SANDBOX, "state");
 process.env.LLV_CODEX_HOME = path.join(SANDBOX, "legacy-codex");
 
-const { CorruptCodexAccountsError, LOGIN_STARTUP_GRACE_MS, activeCodexAccountId, codexLoginPaneStatus, createManagedCodexAccount, listCodexAccounts, setActiveCodexAccount } = await import("./codex");
+const { CorruptCodexAccountsError, LOGIN_STARTUP_GRACE_MS, activeCodexAccountId, cleanupOrphanedCodexHomes, codexAccountsRoot, codexLoginPaneStatus, createManagedCodexAccount, listCodexAccounts, removeManagedCodexAccount, setActiveCodexAccount } = await import("./codex");
 
 beforeEach(() => {
   fs.rmSync(process.env.LLV_STATE_DIR!, { recursive: true, force: true });
+  fs.rmSync(path.join(SANDBOX, "accounts"), { recursive: true, force: true });
 });
 
 afterAll(() => {
@@ -88,6 +89,90 @@ test("account creation preserves an occupied home and chooses a safe suffix", ()
   expect(account.id).toBe("work-1");
   expect(fs.readFileSync(auth, "utf8")).toBe("credential sentinel");
   expect(fs.readFileSync(session, "utf8")).toBe("session sentinel");
+});
+
+test("managed Codex account removal deletes its registry record and home, then cleans safe orphan homes", () => {
+  const account = createManagedCodexAccount("Delete me");
+  const orphan = path.join(codexAccountsRoot(), "probe-login");
+  fs.mkdirSync(orphan, { recursive: true, mode: 0o700 });
+
+  removeManagedCodexAccount(account.id);
+  const cleaned = cleanupOrphanedCodexHomes();
+
+  expect(listCodexAccounts().map((item) => item.id)).not.toContain(account.id);
+  expect(fs.existsSync(account.home)).toBe(false);
+  expect(cleaned).toEqual(["probe-login"]);
+  expect(fs.existsSync(orphan)).toBe(false);
+});
+
+test("a home deletion failure keeps the Codex account registered and retryable", () => {
+  const account = createManagedCodexAccount("Retry removal");
+  const originalRm = fs.rmSync;
+  fs.rmSync = ((target: fs.PathLike, options?: fs.RmDirOptions) => {
+    if (String(target).includes(account.id)) throw Object.assign(new Error("denied"), { code: "EACCES" });
+    return originalRm(target, options);
+  }) as typeof fs.rmSync;
+  try {
+    expect(() => removeManagedCodexAccount(account.id)).toThrow("denied");
+  } finally {
+    fs.rmSync = originalRm;
+  }
+
+  expect(listCodexAccounts().map((item) => item.id)).toContain(account.id);
+  expect(fs.existsSync(account.home)).toBe(true);
+  expect(() => removeManagedCodexAccount(account.id)).not.toThrow();
+});
+
+test("orphan cleanup propagates a Codex accounts-root read failure", () => {
+  const root = codexAccountsRoot();
+  fs.mkdirSync(root, { recursive: true, mode: 0o700 });
+  const originalRead = fs.readdirSync;
+  fs.readdirSync = ((target: fs.PathLike, options?: unknown) => {
+    if (path.resolve(String(target)) === path.resolve(root)) throw Object.assign(new Error("unreadable"), { code: "EACCES" });
+    return originalRead(target, options as never);
+  }) as typeof fs.readdirSync;
+  try {
+    expect(() => cleanupOrphanedCodexHomes()).toThrow("unreadable");
+  } finally {
+    fs.readdirSync = originalRead;
+  }
+});
+
+test("concurrent Codex removal and creation preserve both mutations", async () => {
+  const removed = createManagedCodexAccount("Remove child");
+  const modulePath = path.join(import.meta.dir, "codex.ts");
+  const registry = path.join(process.env.LLV_STATE_DIR!, "codex-accounts.json");
+  const ready = path.join(SANDBOX, "remove-ready");
+  const createReady = path.join(SANDBOX, "create-ready");
+  const removedDone = path.join(SANDBOX, "remove-done");
+  const common = `
+    const fs = (await import("node:fs")).default;
+    const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+    const wait = (file) => { const until = Date.now() + 1000; while (!fs.existsSync(file) && Date.now() < until) sleep(5); };
+    const originalRename = fs.renameSync;
+  `;
+  const remover = Bun.spawn({
+    cmd: [process.execPath, "-e", `${common}
+      fs.renameSync = (from, to) => { if (to === ${JSON.stringify(registry)}) { fs.writeFileSync(${JSON.stringify(ready)}, "1"); wait(${JSON.stringify(createReady)}); } originalRename(from, to); if (to === ${JSON.stringify(registry)}) fs.writeFileSync(${JSON.stringify(removedDone)}, "1"); };
+      const m = await import(${JSON.stringify(modulePath)}); m.removeManagedCodexAccount(${JSON.stringify(removed.id)});
+    `],
+    env: { ...process.env, LLV_STATE_DIR: process.env.LLV_STATE_DIR!, LLV_CODEX_HOME: process.env.LLV_CODEX_HOME! },
+    stdout: "ignore", stderr: "pipe",
+  });
+  const creator = Bun.spawn({
+    cmd: [process.execPath, "-e", `${common}
+      wait(${JSON.stringify(ready)});
+      fs.renameSync = (from, to) => { if (to === ${JSON.stringify(registry)}) { fs.writeFileSync(${JSON.stringify(createReady)}, "1"); wait(${JSON.stringify(removedDone)}); } originalRename(from, to); };
+      const m = await import(${JSON.stringify(modulePath)}); m.createManagedCodexAccount("Created child");
+    `],
+    env: { ...process.env, LLV_STATE_DIR: process.env.LLV_STATE_DIR!, LLV_CODEX_HOME: process.env.LLV_CODEX_HOME! },
+    stdout: "ignore", stderr: "pipe",
+  });
+
+  expect(await remover.exited).toBe(0);
+  expect(await creator.exited).toBe(0);
+  expect(listCodexAccounts().map((item) => item.id)).toContain("created-child");
+  expect(listCodexAccounts().map((item) => item.id)).not.toContain(removed.id);
 });
 
 test("a shell during login startup grace remains pending", () => {

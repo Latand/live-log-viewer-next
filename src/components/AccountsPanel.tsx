@@ -75,10 +75,15 @@ function StateChip({ state }: { state: RowState }) {
   return null;
 }
 
-function AccountRow({ account, engine, activeId, onSelect, disabled }: { account: AccountOption; engine: "claude" | "codex"; activeId: string; onSelect: () => void; disabled: boolean }) {
+function AccountRow({ account, engine, activeId, onSelect, onRemove, disabled }: { account: AccountOption; engine: "claude" | "codex"; activeId: string; onSelect: () => void; onRemove: () => void; disabled: boolean }) {
   const { t } = useLocale();
   const state = rowState(account, activeId);
   const isActive = account.id === activeId;
+  // Removal deletes the managed home (including its credentials) with no undo,
+  // so the unblocked path arms on the first click and only executes on a
+  // second, explicit confirm — mirroring the confirm step migration already
+  // requires for its far less destructive account switch.
+  const [confirmingRemove, setConfirmingRemove] = useState(false);
   return (
     <div>
       <button
@@ -97,6 +102,44 @@ function AccountRow({ account, engine, activeId, onSelect, disabled }: { account
         <div className="flex items-center gap-2 px-3 pb-1.5 pl-[26px] text-[10px] text-dim">
           <a href={account.deviceAuth.url} target="_blank" rel="noreferrer" className="truncate underline">{t("accounts.openLogin")}</a>
           <code className="select-all font-semibold text-ink">{account.deviceAuth.code}</code>
+        </div>
+      ) : null}
+      {account.kind === "managed" ? (
+        <div className="flex items-center gap-2 px-3 pb-1.5 pl-[26px]">
+          {confirmingRemove ? (
+            <>
+              <span className="min-w-0 flex-1 text-[10.5px] font-semibold text-err">{t("accounts.removeConfirm")}</span>
+              <button
+                type="button"
+                disabled={disabled}
+                onClick={() => {
+                  setConfirmingRemove(false);
+                  onRemove();
+                }}
+                className="shrink-0 rounded-[7px] border border-err bg-err px-2 py-0.5 text-[10.5px] font-semibold text-white hover:opacity-90 disabled:opacity-45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+              >
+                {t("accounts.removeConfirmCta")}
+              </button>
+              <button
+                type="button"
+                disabled={disabled}
+                onClick={() => setConfirmingRemove(false)}
+                className="shrink-0 rounded-[7px] border border-line bg-bg px-2 py-0.5 text-[10.5px] font-semibold hover:bg-chip disabled:opacity-45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+              >
+                {t("accounts.removeConfirmCancel")}
+              </button>
+            </>
+          ) : (
+            <button
+              type="button"
+              aria-label={t("accounts.removeAria", { label: account.label })}
+              disabled={disabled}
+              onClick={() => setConfirmingRemove(true)}
+              className="rounded-[7px] border border-line bg-bg px-2 py-0.5 text-[10.5px] font-semibold text-err hover:bg-[#fff5f5] disabled:opacity-45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            >
+              {t("accounts.remove")}
+            </button>
+          )}
         </div>
       ) : null}
     </div>
@@ -637,7 +680,7 @@ export function AccountsPanel({
               {status === "error" && accounts.length === 0 ? <div className="px-3 py-2 text-[11px] text-dim">{t("accounts.noAccounts")}</div> : null}
               {accounts.map((account) => (
                 <Fragment key={account.id}>
-                  <AccountRow account={account} engine={engine} activeId={active} disabled={mutation !== null} onSelect={() => void onSelect(account.id)} />
+                  <AccountRow account={account} engine={engine} activeId={active} disabled={mutation !== null} onSelect={() => void onSelect(account.id)} onRemove={() => void state.remove(account.id)} />
                   {engine === "claude" ? <ClaudeLoginRow key={account.login?.operationId ?? account.id} account={account} state={state} loginBusy={loginBusy} /> : null}
                 </Fragment>
               ))}
@@ -657,6 +700,16 @@ export function AccountsPanel({
                 {t("accounts.confirmAdd")}
               </button>
             </form>
+            <div className="flex justify-end border-t border-line px-3 py-1.5">
+              <button
+                type="button"
+                disabled={mutation !== null}
+                onClick={() => void state.cleanupOrphans()}
+                className="text-[10.5px] font-semibold text-dim underline underline-offset-2 hover:text-ink disabled:opacity-45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+              >
+                {t("accounts.cleanupOrphans")}
+              </button>
+            </div>
             {notice ? (
               <div className="flex items-center gap-2 border-t border-line px-3 py-1.5">
                 <span className="min-w-0 flex-1 truncate text-[11px] text-dim" title={accountNoticeText(t, notice)}>{accountNoticeText(t, notice)}</span>
@@ -669,7 +722,7 @@ export function AccountsPanel({
                     })}
                     className="shrink-0 rounded-[7px] border border-line bg-bg px-2 py-0.5 text-[11px] font-semibold hover:bg-chip focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
                   >
-                    {t("accounts.retry")}
+                    {notice.action.kind === "forceRemove" ? t("accounts.forceRemove") : t("accounts.retry")}
                   </button>
                 ) : null}
               </div>
