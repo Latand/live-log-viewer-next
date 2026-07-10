@@ -244,7 +244,7 @@ test("session recovery refuses a missing revision before issuing a request", asy
   globalThis.fetch = (async () => {
     called = true;
     return new Response(null, { status: 200 });
-  }) as typeof fetch;
+  }) as unknown as typeof fetch;
   try {
     expect(await postConversationMigration("conversation_abc", "retry")).toEqual({ ok: false, error: null });
     expect(called).toBeFalse();
