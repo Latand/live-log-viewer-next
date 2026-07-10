@@ -4,23 +4,14 @@ import { useState } from "react";
 
 import { Infinity as InfinityIcon, Pause, Play, RefreshCw, Square, X } from "lucide-react";
 
-import { type MessageKey, useLocale } from "@/lib/i18n";
+import { useLocale } from "@/lib/i18n";
 import type { Flow, FlowAction } from "@/lib/flows/types";
 
 import { Hint } from "@/components/Hint";
 import { useRuntimeFlow } from "@/hooks/useRuntime";
 
-import { ATTENTION_STATES, patchFlow, stateLabel, verdictTone } from "./flowModel";
+import { ATTENTION_STATES, patchFlow, PENDING_ACTIONS, stateLabel, verdictTone } from "./flowModel";
 import { RoundStateIcon } from "./RoundIcons";
-
-/* The one button the current state is waiting on, rendered prominent. */
-const PENDING_ACTIONS: Partial<Record<Flow["state"], { labelKey: MessageKey; action: FlowAction }>> = {
-  waiting_ready: { labelKey: "flowStrip.startReview", action: "advance" },
-  spawn_pending: { labelKey: "flowStrip.spawnReviewer", action: "advance" },
-  relay_pending: { labelKey: "flowStrip.relayNotes", action: "advance" },
-  needs_decision: { labelKey: "flowStrip.retryRound", action: "retry-round" },
-  done_comment: { labelKey: "flowStrip.anotherRound", action: "another-round" },
-};
 
 const BUSY_STATES: ReadonlySet<Flow["state"]> = new Set(["spawning", "reviewing", "relaying", "fixing"]);
 

@@ -5,6 +5,7 @@ import type { FileEntry } from "@/lib/types";
 
 import { type BranchGroup, buildBranchGroups } from "@/components/projectModel";
 
+import { deckKey, flowLinkKey } from "./agentLinks";
 import { buildSchemeLayout } from "./layout";
 
 function entry(overrides: Partial<FileEntry> & { path: string }): FileEntry {
@@ -84,6 +85,41 @@ describe("buildSchemeLayout byPath", () => {
     expect(layout.byPath.get(layout.stacks[0]!.key)).toBe(layout.stacks[0]!);
     expect(layout.decks).toHaveLength(1);
     expect(layout.byPath.get(layout.decks[0]!.key)).toBe(layout.decks[0]!);
+  });
+
+  test("derives a flow link whose endpoints resolve to placed board rects", () => {
+    const root = entry({ path: "/root", activity: "live" });
+    const group: BranchGroup = {
+      key: "/root",
+      columns: [{ file: root, tasks: [] }],
+      returnable: [],
+      finished: [],
+      smt: root.mtime,
+      orphanTask: false,
+    };
+    const layout = buildSchemeLayout([group], [], [root], [flow({ id: "f1", implementerPath: "/root" })], []);
+
+    expect(layout.links).toHaveLength(1);
+    const link = layout.links[0]!;
+    expect(link).toMatchObject({ key: flowLinkKey("f1"), kind: "flow", from: "/root", to: deckKey("f1") });
+    /* Both endpoints must be drawable rects, or the link layer has nothing to anchor to. */
+    expect(layout.byPath.has(link.from)).toBe(true);
+    expect(layout.byPath.has(link.to)).toBe(true);
+    expect(link.flow).toMatchObject({ round: 1, phase: "awaiting_verdict" });
+  });
+
+  test("a flow whose implementer is off the board derives no link", () => {
+    const root = entry({ path: "/root", activity: "live" });
+    const group: BranchGroup = {
+      key: "/root",
+      columns: [{ file: root, tasks: [] }],
+      returnable: [],
+      finished: [],
+      smt: root.mtime,
+      orphanTask: false,
+    };
+    const layout = buildSchemeLayout([group], [], [root], [flow({ id: "f1", implementerPath: "/elsewhere" })], []);
+    expect(layout.links).toHaveLength(0);
   });
 
   test("expanded reviewer children render as connected nodes below the implementer", () => {

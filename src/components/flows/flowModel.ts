@@ -1,6 +1,6 @@
 import { useMemo, useSyncExternalStore } from "react";
 
-import { getLocale, type TFunction, translate } from "@/lib/i18n";
+import { getLocale, type MessageKey, type TFunction, translate } from "@/lib/i18n";
 import type { Flow, FlowAction, FlowRoleKey, FlowState, ReviewVerdict } from "@/lib/flows/types";
 import type { FileEntry } from "@/lib/types";
 
@@ -166,6 +166,16 @@ export const ATTENTION_STATES: ReadonlySet<FlowState> = new Set([
 
 /** Flow states in which one of the loop sides is visibly doing work. */
 export const BUSY_FLOW_STATES: ReadonlySet<FlowState> = new Set(["spawning", "reviewing", "relaying", "fixing"]);
+
+/** The one action the current state is waiting on, rendered prominent on the
+    strip and in the loop hub's controls. */
+export const PENDING_ACTIONS: Partial<Record<FlowState, { labelKey: MessageKey; action: FlowAction }>> = {
+  waiting_ready: { labelKey: "flowStrip.startReview", action: "advance" },
+  spawn_pending: { labelKey: "flowStrip.spawnReviewer", action: "advance" },
+  relay_pending: { labelKey: "flowStrip.relayNotes", action: "advance" },
+  needs_decision: { labelKey: "flowStrip.retryRound", action: "retry-round" },
+  done_comment: { labelKey: "flowStrip.anotherRound", action: "another-round" },
+};
 
 /** The loop side working right now — drives the role tags on the scheme. */
 export function activeLoopRole(flow: Flow): FlowRoleKey | null {

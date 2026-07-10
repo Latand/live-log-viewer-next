@@ -14,14 +14,8 @@ import { deriveSessionState, hasBlockingAttention, runtimeActivity } from "@/com
 import { BranchPane, kindLabel } from "@/components/BranchPane";
 import { DraftAgentPane } from "@/components/DraftAgentPane";
 import { FlowDialog } from "@/components/flows/FlowDialog";
-import {
-  activeLoopLeg,
-  activeLoopRole,
-  ATTENTION_STATES,
-  BUSY_FLOW_STATES,
-  canStartFlow,
-  verdictTone,
-} from "@/components/flows/flowModel";
+import { activeLoopLeg, activeLoopRole, canStartFlow, verdictTone } from "@/components/flows/flowModel";
+import { FlowHub } from "@/components/flows/FlowHub";
 import { FlowStrip } from "@/components/flows/FlowStrip";
 import { RoleTag } from "@/components/flows/RoleTag";
 import { RoundDeck } from "@/components/flows/RoundDeck";
@@ -31,6 +25,7 @@ import { isWorkflowDraftId } from "@/components/workflows/workflowModel";
 import { WorkflowDraftPane } from "@/components/workflows/WorkflowDraftPane";
 import { activityDot, cleanTitle, engineBadge, engineEdge, fmtAge } from "@/components/utils";
 
+import type { AgentLink } from "./agentLinks";
 import {
   LOOP_GAP,
   NODE_W,
@@ -41,6 +36,7 @@ import {
   type SchemeEdge,
   type SchemeLayout,
   type SchemeNode,
+  type SchemeRect,
 } from "./layout";
 
 /* Layout reshuffles glide instead of jumping. */
@@ -132,31 +128,20 @@ function loopArrowHead(x: number, y: number, angle: number): string {
   return `M ${bx + half * nx} ${by + half * ny} L ${bx - half * nx} ${by - half * ny} L ${x} ${y} Z`;
 }
 
-/** Hub color of a loop: green while a side works, amber when it waits on the
-    user, verdict green once approved, gray otherwise. */
-function loopTone(flow: FlowLoop["flow"]): string {
-  if (flow.state === "approved") return "#1a8a3e";
-  if (BUSY_FLOW_STATES.has(flow.state)) return "#5a51e0";
-  if (ATTENTION_STATES.has(flow.state)) return "#e0ae45";
-  return "#9a9aa4";
-}
-
 /* The implement↔review pair drawn as an explicit cycle: a forward arc into
-   the reviewer, a return arc back into the implementer, and a ⟳ hub between
-   them. The leg traffic is currently on runs an animated dash in its travel
-   direction; the other leg stays quiet. Geometry transitions mirror
-   EdgesLayer so layout reshuffles glide. */
+   the reviewer and a return arc back into the implementer. The leg traffic is
+   currently on runs an animated dash in its travel direction; the other leg
+   stays quiet. The ⟳ hub between the arcs is the AgentLinksLayer's FlowHub —
+   an interactive control, so it lives outside this aria-hidden SVG. Geometry
+   transitions mirror EdgesLayer so layout reshuffles glide. */
 export const LoopsLayer = memo(function LoopsLayer({ loops, width, height }: { loops: FlowLoop[]; width: number; height: number }) {
   if (!loops.length) return null;
   return (
     <svg width={width} height={height} className="absolute left-0 top-0" aria-hidden>
       {loops.map((loop) => {
         const leg = activeLoopLeg(loop.flow);
-        const tone = loopTone(loop.flow);
         const yTop = loop.y + LOOP_ARC_TOP;
         const yBot = loop.y + LOOP_ARC_BOT;
-        const midX = (loop.x1 + loop.x2) / 2;
-        const midY = (yTop + yBot) / 2;
         const forward = `M ${loop.x1} ${yTop} C ${loop.x1 + LOOP_REACH} ${yTop - LOOP_BULGE}, ${loop.x2 - LOOP_REACH} ${
           yTop - LOOP_BULGE
         }, ${loop.x2 - LOOP_HEAD_INSET} ${yTop}`;
@@ -182,30 +167,46 @@ export const LoopsLayer = memo(function LoopsLayer({ loops, width, height }: { l
             <path d={forwardHead} style={headStyle(forwardHead)} fill={leg === "forward" ? "#5a51e0" : "#c9c9d1"} />
             <path {...arc(back, leg === "back")} />
             <path d={backHead} style={headStyle(backHead)} fill={leg === "back" ? "#5a51e0" : "#c9c9d1"} />
-            <circle
-              cx={midX}
-              cy={midY}
-              r={17}
-              fill="#ffffff"
-              stroke={tone}
-              strokeWidth={2}
-              style={{ cx: `${midX}px`, cy: `${midY}px`, transition: `cx ${MOVE_MS}ms ${MOVE_EASE}, cy ${MOVE_MS}ms ${MOVE_EASE}` } as React.CSSProperties}
-            />
-            <text
-              x={midX}
-              y={midY + 6}
-              textAnchor="middle"
-              fontSize={17}
-              fontWeight={700}
-              fill={tone}
-              style={{ x: `${midX}px`, y: `${midY + 6}px`, transition: `x ${MOVE_MS}ms ${MOVE_EASE}, y ${MOVE_MS}ms ${MOVE_EASE}` } as React.CSSProperties}
-            >
-              ⟳
-            </text>
           </g>
         );
       })}
     </svg>
+  );
+});
+
+/**
+ * The agent-to-agent link layer (issue #16): renders the interactive face of
+ * every AgentLink the layout derived. Flow links materialize as the ⟳ hub in
+ * the corridor between the pair (round number, lifecycle tone, click →
+ * controls); message links (#12) will add their aggregated edges here. Both
+ * endpoints come pre-resolved to board rects, so this layer never repositions
+ * anything — it only decorates geometry the layout already owns.
+ */
+export const AgentLinksLayer = memo(function AgentLinksLayer({
+  links,
+  byPath,
+  interactive,
+}: {
+  links: AgentLink[];
+  byPath: Map<string, SchemeRect>;
+  interactive: boolean;
+}) {
+  if (!links.length) return null;
+  return (
+    <>
+      {links.map((link) => {
+        if (!link.flow) return null;
+        const from = byPath.get(link.from);
+        const to = byPath.get(link.to);
+        if (!from || !to) return null;
+        /* Corridor midpoint of the pair, level with the cycle arcs' center. */
+        const x = (from.x + from.w + to.x) / 2;
+        const y = Math.min(from.y, to.y) + (LOOP_ARC_TOP + LOOP_ARC_BOT) / 2;
+        return (
+          <FlowHub key={link.key} flow={link.flow.flow} x={x} y={y} interactive={interactive} moveTransition={MOVE_TRANSITION} />
+        );
+      })}
+    </>
   );
 });
 

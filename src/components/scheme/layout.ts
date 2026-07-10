@@ -4,6 +4,8 @@ import type { FileEntry } from "@/lib/types";
 import type { DeckRound } from "@/components/flows/RoundDeck";
 import { draftSrc } from "@/components/DraftAgentPane";
 import { claimedReviewerPaths, flowByImplementer } from "@/components/flows/flowModel";
+
+import { buildAnchorIndex, deckKey, deriveFlowLinks, type AgentLink } from "./agentLinks";
 import { type BranchGroup, descendantsOf, isChildConversation, kidsIndex } from "@/components/projectModel";
 import { engineColor } from "@/components/utils";
 
@@ -114,6 +116,9 @@ export interface SchemeLayout {
   stacks: MiniStack[];
   decks: DeckNode[];
   loops: FlowLoop[];
+  /** Agent-to-agent links between board occupants (flow links today, message
+      links from #12 later), endpoints resolved against byPath keys. */
+  links: AgentLink[];
   drafts: DraftNode[];
   byPath: Map<string, SchemeRect>;
   width: number;
@@ -184,7 +189,7 @@ export function buildSchemeLayout(
       round,
       file: round.reviewerPath ? (byAll.get(round.reviewerPath) ?? null) : null,
     }));
-    const deck: DeckNode = { key: "deck::" + flow.id, flow, rounds, x, y, w: NODE_W, h: deckHeight(flow.rounds.length, baseH) };
+    const deck: DeckNode = { key: deckKey(flow.id), flow, rounds, x, y, w: NODE_W, h: deckHeight(flow.rounds.length, baseH) };
     decks.push(deck);
     return deck;
   };
@@ -359,12 +364,20 @@ export function buildSchemeLayout(
   for (const stack of stacks) bottom = Math.max(bottom, stack.y + stack.h);
   for (const deck of decks) bottom = Math.max(bottom, deck.y + deck.h);
   for (const draft of drafts) bottom = Math.max(bottom, draft.y + draft.h);
+  /* Links resolve against what this pass actually placed, so geometry and
+     link endpoints can never disagree. */
+  const anchors = buildAnchorIndex(
+    nodes.map((node) => node.file.path),
+    decks.map((deck) => ({ key: deck.key, flow: deck.flow })),
+    stacks.map((stack) => ({ key: stack.key, paths: stack.items.map((item) => item.file.path) })),
+  );
   return {
     nodes,
     edges,
     stacks,
     decks,
     loops,
+    links: deriveFlowLinks(flows, (key) => anchors.get(key) ?? null),
     drafts,
     byPath: new Map<string, SchemeRect>([
       ...nodes.map((node) => [node.file.path, node] as const),

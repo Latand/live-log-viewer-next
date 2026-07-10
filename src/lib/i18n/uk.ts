@@ -512,6 +512,10 @@ export const uk: Record<keyof typeof en, Message> = {
   "flowStrip.pause": "Пауза",
   "flowStrip.close": "Закрити флоу",
 
+  "flowHub.aria": "Керування флоу — раунд {n}, {state}",
+  "flowHub.ariaNoRound": "Керування флоу — {state}",
+  "flowHub.controls": "Керування флоу",
+
   "roundDeck.roundAborted": "Раунд {n} · перервано",
   "roundDeck.roundVerdict": "Раунд {n} · {verdict}",
   "roundDeck.roundInProgress": "Раунд {n} · триває",

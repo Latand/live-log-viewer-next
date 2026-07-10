@@ -24,7 +24,7 @@ import { BulkActionBar } from "./BulkActionBar";
 import { nodesInRect, pruneSelection, selectionBBox } from "./lasso";
 import { buildSchemeLayout } from "./layout";
 import { Minimap } from "./Minimap";
-import { EdgesLayer, LoopsLayer, MOVE_EASE, NodesLayer, type DeckFocus } from "./nodes";
+import { AgentLinksLayer, EdgesLayer, LoopsLayer, MOVE_EASE, NodesLayer, type DeckFocus } from "./nodes";
 import type { TaskCardHandlers } from "./TaskCard";
 import { TaskEdgesLayer } from "./TaskEdgesLayer";
 import { TasksLayer } from "./TasksLayer";
@@ -614,6 +614,7 @@ export function SchemeBoard({
       >
         <EdgesLayer edges={layout.edges} width={layout.width} height={layout.height} />
         <LoopsLayer loops={layout.loops} width={layout.width} height={layout.height} />
+        <AgentLinksLayer links={layout.links} byPath={layout.byPath} interactive={!mapMode && !handLike && !session} />
         <NodesLayer
           layout={layout}
           project={project}

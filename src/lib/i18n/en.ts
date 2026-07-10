@@ -536,6 +536,11 @@ export const en = {
   "flowStrip.pause": "Pause",
   "flowStrip.close": "Close flow",
 
+  // flows/FlowHub
+  "flowHub.aria": "Flow controls — round {n}, {state}",
+  "flowHub.ariaNoRound": "Flow controls — {state}",
+  "flowHub.controls": "Flow controls",
+
   // flows/RoundDeck
   "roundDeck.roundAborted": "Round {n} · aborted",
   "roundDeck.roundVerdict": "Round {n} · {verdict}",
