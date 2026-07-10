@@ -13,6 +13,8 @@ export interface TaskAssignment {
   at: string; // ISO of the last attempt
   /** Account fixed when the agent is first launched; retries keep this owner. */
   accountId?: string | null;
+  /** Engine paired with accountId. A Claude account id can equal a Codex id. */
+  engine?: "claude" | "codex" | null;
 }
 
 export interface TaskSource {

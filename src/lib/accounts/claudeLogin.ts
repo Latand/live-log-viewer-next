@@ -7,7 +7,7 @@ import { resolveBinary } from "@/lib/agent/cli";
 import { statePath } from "@/lib/configDir";
 
 import type { LoginOperationSummary, LoginPhase } from "./contracts";
-import { claudeAccountForSpawn, claudeManagedEnvironment, isManagedClaudeHome } from "./claude";
+import { claudeAccountForSpawn, claudeManagedEnvironment, isManagedClaudeHome, managedClaudeCredentialIsSafe } from "./claude";
 
 const OUTPUT_LIMIT = 64 * 1024;
 const CODE_LIMIT = 8 * 1024;
@@ -17,7 +17,7 @@ const URL_HOSTS = new Set(["claude.ai", "console.anthropic.com"]);
 const ANSI = /\x1B(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1B\\))/g;
 const URL_PATTERN = /https:\/\/[^\s"'<>]+/g;
 
-export type LoginOperation = LoginOperationSummary & { accountId: string; pid: number | null; startToken: string | null; generation: number; submitted: boolean; error: string | null; startedAt: string };
+export type LoginOperation = LoginOperationSummary & { accountId: string | null; pid: number | null; startToken: string | null; generation: number; submitted: boolean; error: string | null; startedAt: string };
 type PersistedOperation = Pick<LoginOperation, "operationId" | "accountId" | "phase" | "pid" | "startToken" | "generation" | "startedAt" | "deadlineAt">;
 
 export interface LoginChild {
@@ -41,9 +41,13 @@ export interface ClaudeLoginPorts {
 
 function procStartToken(pid: number): string | null { try { return fs.readFileSync(`/proc/${pid}/stat`, "utf8").split(" ")[21] ?? null; } catch { return null; } }
 function expectedClaude(pid: number): boolean { try { return /(^|\0|\/)claude(?:\0|$)/.test(fs.readFileSync(`/proc/${pid}/cmdline`, "utf8")); } catch { return false; } }
+export function claudeStatusEnvironment(home: string): NodeJS.ProcessEnv {
+  return isManagedClaudeHome(home) ? claudeManagedEnvironment(home) : process.env;
+}
+
 async function structuredStatus(home: string): Promise<{ loggedIn: boolean; method: string | null; email: string | null; plan: string | null }> {
   return await new Promise((resolve) => {
-    const child = spawn(resolveBinary("claude"), ["auth", "status", "--json"], { env: claudeManagedEnvironment(home), stdio: ["ignore", "pipe", "ignore"], detached: false });
+    const child = spawn(resolveBinary("claude"), ["auth", "status", "--json"], { env: claudeStatusEnvironment(home), stdio: ["ignore", "pipe", "ignore"], detached: false });
     let text = ""; child.stdout?.on("data", (part: Buffer) => { if (text.length < OUTPUT_LIMIT) text += part.toString("utf8"); });
     const timer = setTimeout(() => { child.kill("SIGKILL"); resolve({ loggedIn: false, method: null, email: null, plan: null }); }, 5_000);
     child.once("close", () => { clearTimeout(timer); try { const raw = JSON.parse(text) as Record<string, unknown>; resolve({ loggedIn: raw.loggedIn === true, method: typeof raw.authMethod === "string" ? raw.authMethod : null, email: typeof raw.email === "string" ? raw.email : null, plan: typeof raw.subscriptionType === "string" ? raw.subscriptionType : null }); } catch { resolve({ loggedIn: false, method: null, email: null, plan: null }); } });
@@ -87,13 +91,28 @@ export class ClaudeLoginSupervisor {
   private summary(item: LoginOperation): LoginOperationSummary { const { operationId, phase, loginUrl, acceptsCode, deadlineAt } = item; return { operationId, phase, loginUrl, acceptsCode, deadlineAt }; }
   private update(id: string, patch: Partial<LoginOperation>): LoginOperation { const current = this.operations.get(id); if (!current) throw new Error("unknown Claude login operation"); const next = { ...current, ...patch }; this.operations.set(id, next); this.persist(); return next; }
 
-  start(accountId: string): LoginOperationSummary {
+  reserve(): LoginOperationSummary {
     if (!this.enabled()) throw new Error("Claude login is disabled until LLV_ENABLE_CLAUDE_LOGIN=1 and LLV_CLAUDE_LOGIN_POLICY_ACCEPTED=1 are set");
     if ([...this.operations.values()].some((item) => !terminal(item.phase))) throw new Error("a Claude login operation is already running");
-    const account = claudeAccountForSpawn(accountId); if (account.kind !== "managed" || !isManagedClaudeHome(account.home)) throw new Error("Claude login requires a safe managed account");
-    const now = this.ports.now(); const operationId = crypto.randomUUID(); const item: LoginOperation = { operationId, accountId, phase: "starting", loginUrl: null, acceptsCode: false, deadlineAt: new Date(now + LOGIN_TIMEOUT_MS).toISOString(), pid: null, startToken: null, generation: ++this.generation, submitted: false, error: null, startedAt: new Date(now).toISOString() };
-    this.operations.set(operationId, item); this.persist();
+    const now = this.ports.now(); const item: LoginOperation = { operationId: crypto.randomUUID(), accountId: null, phase: "starting", loginUrl: null, acceptsCode: false, deadlineAt: new Date(now + LOGIN_TIMEOUT_MS).toISOString(), pid: null, startToken: null, generation: ++this.generation, submitted: false, error: null, startedAt: new Date(now).toISOString() };
+    this.operations.set(item.operationId, item); this.persist(); return this.summary(item);
+  }
+
+  abandon(operationId: string): void {
+    const item = this.operations.get(operationId); if (item && !terminal(item.phase)) this.finish(operationId, "failed", "Claude account creation did not complete");
+  }
+
+  start(accountId: string, reservationId?: string): LoginOperationSummary {
+    let operationId: string;
+    if (reservationId) {
+      const reserved = this.operations.get(reservationId);
+      if (!reserved || terminal(reserved.phase) || reserved.accountId !== null) throw new Error("Claude login reservation is unavailable");
+      operationId = reservationId; this.update(operationId, { accountId });
+    } else {
+      operationId = this.reserve().operationId; this.update(operationId, { accountId });
+    }
     try {
+      const account = claudeAccountForSpawn(accountId); if (account.kind !== "managed" || !isManagedClaudeHome(account.home)) throw new Error("Claude login requires a safe managed account");
       const child = this.ports.spawn(resolveBinary("claude"), ["auth", "login", "--claudeai"], { cwd: osHome(), env: { ...claudeManagedEnvironment(account.home), UMASK: "077" }, detached: true, stdio: ["pipe", "pipe", "pipe"] });
       const pid = child.pid ?? null; const started = this.update(operationId, { pid, startToken: pid ? this.ports.pidStartToken(pid) : null, phase: "awaiting_browser" }); this.children.set(operationId, child); this.capture(operationId, child.stdout); this.capture(operationId, child.stderr); this.closed.set(operationId, new Promise((resolve) => child.once("close", () => resolve())));
       child.once("close", () => { void this.reconcileExit(operationId, account.home); }); child.once("error", (error) => { this.finish(operationId, "failed", safeError(error)); });
@@ -105,12 +124,12 @@ export class ClaudeLoginSupervisor {
   private async awaitClose(id: string): Promise<void> { const closed = this.closed.get(id); if (!closed) return; await Promise.race([closed, new Promise<void>((resolve) => this.ports.setTimeout(resolve, TERM_GRACE_MS))]); }
   async cancel(operationId: string): Promise<LoginOperationSummary> { const item = this.operations.get(operationId); if (!item) throw new Error("unknown Claude login operation"); if (terminal(item.phase)) return this.summary(item); this.update(operationId, { phase: "canceling" }); if (item.pid) this.ports.kill(item.pid, "SIGTERM"); await new Promise<void>((resolve) => this.ports.setTimeout(resolve, TERM_GRACE_MS)); const current = this.operations.get(operationId); if (current?.pid && this.ports.pidStartToken(current.pid) === current.startToken) this.ports.kill(current.pid, "SIGKILL"); await this.awaitClose(operationId); return this.summary(this.finish(operationId, "canceled")); }
   private async timeout(id: string): Promise<void> { const item = this.operations.get(id); if (!item || terminal(item.phase)) return; this.update(id, { phase: "canceling" }); if (item.pid) this.ports.kill(item.pid, "SIGTERM"); await new Promise<void>((resolve) => this.ports.setTimeout(resolve, TERM_GRACE_MS)); const current = this.operations.get(id); if (current?.pid && this.ports.pidStartToken(current.pid) === current.startToken) this.ports.kill(current.pid, "SIGKILL"); await this.awaitClose(id); this.finish(id, "timed_out"); }
-  private async reconcileExit(id: string, home: string): Promise<void> { const item = this.operations.get(id); if (!item || terminal(item.phase)) return; this.update(id, { phase: "verifying" }); try { const status = await this.ports.status(home); this.finish(id, status.loggedIn ? "authenticated" : "failed", status.loggedIn ? null : "Claude authentication did not complete"); } catch { this.finish(id, "failed", "Claude authentication status could not be verified"); } }
+  private async reconcileExit(id: string, home: string): Promise<void> { const item = this.operations.get(id); if (!item || terminal(item.phase)) return; this.update(id, { phase: "verifying" }); try { const status = await this.ports.status(home); const credentialsSafe = !status.loggedIn || managedClaudeCredentialIsSafe(home, true); this.finish(id, status.loggedIn && credentialsSafe ? "authenticated" : "failed", status.loggedIn ? (credentialsSafe ? null : "Claude credentials failed safety checks") : "Claude authentication did not complete"); } catch { this.finish(id, "failed", "Claude authentication status could not be verified"); } }
   private finish(id: string, phase: Extract<LoginPhase, "authenticated" | "canceled" | "timed_out" | "failed" | "interrupted">, error: string | null = null): LoginOperation { const timer = this.timers.get(id); if (timer) this.ports.clearTimeout(timer); this.timers.delete(id); this.children.delete(id); this.closed.delete(id); this.output.delete(id); const result = this.update(id, { phase, acceptsCode: false, error, pid: null, startToken: null }); return result; }
   canStart(): boolean { return this.enabled(); }
   get(id: string): LoginOperationSummary | null { const item = this.operations.get(id); return item ? this.summary(item) : null; }
-  forAccount(accountId: string): LoginOperationSummary | null { const item = [...this.operations.values()].filter((candidate) => candidate.accountId === accountId).sort((a, b) => b.generation - a.generation)[0]; return item && !terminal(item.phase) ? this.summary(item) : null; }
-  private reconcilePersisted(): void { try { const rows = JSON.parse(fs.readFileSync(statePath("claude-auth-operations.json"), "utf8")) as PersistedOperation[]; for (const row of rows) { if (!row || typeof row.operationId !== "string" || typeof row.pid !== "number") continue; if (this.ports.pidStartToken(row.pid) === row.startToken && this.ports.isExpectedClaude(row.pid)) this.ports.kill(row.pid, "SIGTERM"); const item: LoginOperation = { ...row, phase: "interrupted", loginUrl: null, acceptsCode: false, submitted: false, error: null }; this.operations.set(item.operationId, item); } this.persist(); } catch { /* no persisted operation */ } }
+  forAccount(accountId: string): LoginOperationSummary | null { const item = [...this.operations.values()].filter((candidate) => candidate.accountId === accountId).sort((a, b) => b.generation - a.generation)[0]; return item ? this.summary(item) : null; }
+  private reconcilePersisted(): void { try { const rows = JSON.parse(fs.readFileSync(statePath("claude-auth-operations.json"), "utf8")) as PersistedOperation[]; for (const row of rows) { if (!row || typeof row.operationId !== "string" || typeof row.accountId !== "string") continue; const safeCredentials = (() => { try { const account = claudeAccountForSpawn(row.accountId); return account.kind === "managed" && managedClaudeCredentialIsSafe(account.home, true); } catch { return false; } })(); if (!safeCredentials && typeof row.pid === "number" && this.ports.pidStartToken(row.pid) === row.startToken && this.ports.isExpectedClaude(row.pid)) { this.ports.kill(row.pid, "SIGTERM"); const pid = row.pid; const token = row.startToken; this.ports.setTimeout(() => { if (this.ports.pidStartToken(pid) === token && this.ports.isExpectedClaude(pid)) this.ports.kill(pid, "SIGKILL"); }, TERM_GRACE_MS); } const item: LoginOperation = { ...row, phase: safeCredentials ? "authenticated" : "interrupted", loginUrl: null, acceptsCode: false, submitted: false, error: safeCredentials ? null : "login interrupted by restart", pid: null, startToken: null }; this.operations.set(item.operationId, item); } this.persist(); } catch { /* no persisted operation */ } }
 }
 
 function osHome(): string { return process.env.HOME || "/"; }

@@ -12,6 +12,8 @@ const CAPABILITY_FILES = ["settings.json"] as const;
 const PRIVATE_NAMES = new Set([".credentials.json", ".claude.json", "projects", "history.jsonl", "session-env", "shell-snapshots", "file-history", "todos", "cache", "debug", "backups", "paste-cache", "plugins", "mcp.json", "settings.local.json"]);
 const MAX_CAPABILITY_FILES = 2_000;
 const MAX_CAPABILITY_BYTES = 16 * 1024 * 1024;
+const REGISTRY_LOCK_WAIT_MS = 5_000;
+const REGISTRY_LOCK_STALE_MS = 30_000;
 
 export type ClaudeAccount = {
   id: string;
@@ -85,24 +87,48 @@ function readRegistry(): Loaded {
   cached = { key: storeKey, loaded }; return loaded;
 }
 function mutable(): Registry { const loaded = readRegistry(); if (loaded.corrupt) throw new CorruptClaudeAccountsError(); return loaded.registry; }
+function sleep(ms: number): void { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); }
+function registryLockPath(): string { return `${claudeRegistryPath()}.lock`; }
+function withRegistryLock<T>(operation: () => T): T {
+  const lock = registryLockPath(); const started = Date.now(); fs.mkdirSync(path.dirname(lock), { recursive: true, mode: 0o700 });
+  for (;;) {
+    try {
+      const fd = fs.openSync(lock, "wx", 0o600);
+      try { fs.writeFileSync(fd, `${process.pid}\n`, "utf8"); return operation(); }
+      finally { fs.closeSync(fd); fs.rmSync(lock, { force: true }); }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      try { if (Date.now() - fs.statSync(lock).mtimeMs > REGISTRY_LOCK_STALE_MS) { fs.rmSync(lock, { force: true }); continue; } } catch { continue; }
+      if (Date.now() - started >= REGISTRY_LOCK_WAIT_MS) throw new Error("Claude account registry is busy; retry shortly");
+      sleep(10);
+    }
+  }
+}
 function write(registry: Registry): void {
   const file = claudeRegistryPath(); fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
   const tmp = path.join(path.dirname(file), `.${path.basename(file)}.${process.pid}.${Date.now()}.tmp`);
-  try { fs.writeFileSync(tmp, JSON.stringify(registry, null, 2) + "\n", { mode: 0o600 }); const fd = fs.openSync(tmp, "r"); try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); } fs.renameSync(tmp, file); cached = null; }
+  try {
+    fs.writeFileSync(tmp, JSON.stringify(registry, null, 2) + "\n", { mode: 0o600 });
+    const fd = fs.openSync(tmp, "r"); try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+    fs.renameSync(tmp, file);
+    const directory = fs.openSync(path.dirname(file), "r"); try { fs.fsyncSync(directory); } finally { fs.closeSync(directory); }
+    cached = null;
+  }
   finally { fs.rmSync(tmp, { force: true }); }
 }
 
-function credentialIsSafe(home: string): boolean {
+export function managedClaudeCredentialIsSafe(home: string, required = false): boolean {
   const file = path.join(home, ".credentials.json");
-  try { const s = fs.lstatSync(file); return s.isFile() && !s.isSymbolicLink() && s.uid === (process.getuid?.() ?? s.uid) && (s.mode & 0o077) === 0; } catch { return false; }
+  try { const s = fs.lstatSync(file); return s.isFile() && !s.isSymbolicLink() && s.uid === (process.getuid?.() ?? s.uid) && (s.mode & 0o077) === 0; } catch { return !required; }
 }
+function credentialIsSafe(home: string): boolean { return managedClaudeCredentialIsSafe(home, true); }
 function account(stored: StoredAccount): ClaudeAccount { const home = managedHome(stored.id); return { ...stored, home, projectsDir: path.join(home, "projects"), authPresent: credentialIsSafe(home) }; }
 function main(): ClaudeAccount { const home = legacyClaudeHome(); return { id: DEFAULT_ID, label: "Main", kind: "legacy", home, projectsDir: path.join(home, "projects"), authPresent: credentialIsSafe(home), createdAt: 0 }; }
 export function listClaudeAccounts(): ClaudeAccount[] { return [main(), ...readRegistry().registry.accounts.map(account)]; }
 export function activeClaudeAccountId(): string { const active = readRegistry().registry.active; return listClaudeAccounts().some((item) => item.id === active) ? active : DEFAULT_ID; }
 export function claudeAccountsMutationLocked(): boolean { return readRegistry().corrupt; }
-export function claudeAccountForSpawn(requested?: string | null): Pick<ClaudeAccount, "id" | "kind" | "home" | "projectsDir"> { const found = listClaudeAccounts().find((item) => item.id === (requested ?? activeClaudeAccountId())); if (!found) throw new UnknownClaudeAccountError(requested ?? ""); if (found.kind === "managed" && !managedClaudeHomeIsSafe(found.id, true)) throw new UnsafeClaudeHomeError(); return { id: found.id, kind: found.kind, home: found.home, projectsDir: found.projectsDir }; }
-export function setActiveClaudeAccount(id: string): void { const registry = mutable(); if (!listClaudeAccounts().some((item) => item.id === id)) throw new UnknownClaudeAccountError(id); write({ ...registry, active: id }); }
+export function claudeAccountForSpawn(requested?: string | null): Pick<ClaudeAccount, "id" | "kind" | "home" | "projectsDir"> { const found = listClaudeAccounts().find((item) => item.id === (requested ?? activeClaudeAccountId())); if (!found) throw new UnknownClaudeAccountError(requested ?? ""); if (found.kind === "managed" && (!managedClaudeHomeIsSafe(found.id, true) || !managedClaudeCredentialIsSafe(found.home))) throw new UnsafeClaudeHomeError(); return { id: found.id, kind: found.kind, home: found.home, projectsDir: found.projectsDir }; }
+export function setActiveClaudeAccount(id: string): void { withRegistryLock(() => { cached = null; const registry = mutable(); if (!listClaudeAccounts().some((item) => item.id === id)) throw new UnknownClaudeAccountError(id); write({ ...registry, active: id }); }); }
 export function claudeProjectRoots(): string[] { return [...new Set(listClaudeAccounts().map((item) => item.projectsDir))]; }
 
 export function claudeHomeOwningTranscript(pathname: string): string | null {
@@ -140,14 +166,24 @@ export function claudeSettingsPath(): string | null { const file = path.join(cla
 
 export function createManagedClaudeAccount(label: string): ClaudeAccount {
   const clean = label.trim(); if (!clean || clean.length > 80 || /[\u0000-\u001f\u007f]/.test(clean)) throw new InvalidClaudeAccountLabelError();
-  const registry = mutable(); const id = nextId(clean, new Set(listClaudeAccounts().map((item) => item.id))); const home = managedHome(id); let made = false;
-  try {
-    fs.mkdirSync(path.dirname(home), { recursive: true, mode: 0o700 }); fs.chmodSync(path.dirname(home), 0o700); fs.mkdirSync(home, { mode: 0o700 }); fs.chmodSync(home, 0o700); made = true;
-    const shared = syncClaudeCapabilitySnapshot();
-    for (const name of CAPABILITY_DIRS) { const source = path.join(shared, name); if (fs.existsSync(source)) fs.symlinkSync(source, path.join(home, name)); }
-    fs.mkdirSync(path.join(home, "projects"), { mode: 0o700 });
-    const stored: StoredAccount = { id, label: clean, kind: "managed", createdAt: Date.now() }; write({ ...registry, accounts: [...registry.accounts, stored] }); return account(stored);
-  } catch (error) { if (made) fs.rmSync(home, { recursive: true, force: true }); throw error; }
+  return withRegistryLock(() => {
+    cached = null; const registry = mutable(); const id = nextId(clean, new Set(listClaudeAccounts().map((item) => item.id))); const home = managedHome(id); let made = false;
+    try {
+      fs.mkdirSync(path.dirname(home), { recursive: true, mode: 0o700 }); fs.chmodSync(path.dirname(home), 0o700); fs.mkdirSync(home, { mode: 0o700 }); fs.chmodSync(home, 0o700); made = true;
+      const shared = syncClaudeCapabilitySnapshot();
+      for (const name of CAPABILITY_DIRS) { const source = path.join(shared, name); if (fs.existsSync(source)) fs.symlinkSync(source, path.join(home, name)); }
+      fs.mkdirSync(path.join(home, "projects"), { mode: 0o700 });
+      const stored: StoredAccount = { id, label: clean, kind: "managed", createdAt: Date.now() }; write({ ...registry, accounts: [...registry.accounts, stored] }); return account(stored);
+    } catch (error) { if (made) fs.rmSync(home, { recursive: true, force: true }); throw error; }
+  });
+}
+
+export function removeManagedClaudeAccount(id: string): void {
+  withRegistryLock(() => {
+    cached = null; const registry = mutable(); const existing = registry.accounts.find((item) => item.id === id); if (!existing) return;
+    write({ ...registry, active: registry.active === id ? DEFAULT_ID : registry.active, accounts: registry.accounts.filter((item) => item.id !== id) });
+    fs.rmSync(managedHome(id), { recursive: true, force: true });
+  });
 }
 
 const SHADOWED_ENV = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_BASE_URL", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "GOOGLE_APPLICATION_CREDENTIALS", "VERTEXAI_PROJECT", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX"];

@@ -58,3 +58,43 @@ test("unsafe modes and corrupt registries reject sensitive mutation while read m
   expect(() => mod.createManagedClaudeAccount("Other")).toThrow(mod.CorruptClaudeAccountsError);
   expect(fs.readFileSync(registry, "utf8")).toBe("{ corrupt registry");
 });
+
+test("managed credentials reject symlinks and broad modes before an agent can spawn", () => {
+  const account = mod.createManagedClaudeAccount("Credential safety");
+  const credentials = path.join(account.home, ".credentials.json");
+  fs.writeFileSync(credentials, "{}", { mode: 0o600 });
+  expect(mod.managedClaudeCredentialIsSafe(account.home, true)).toBe(true);
+  fs.chmodSync(credentials, 0o644);
+  expect(mod.managedClaudeCredentialIsSafe(account.home, true)).toBe(false);
+  expect(() => mod.claudeAccountForSpawn(account.id)).toThrow(mod.UnsafeClaudeHomeError);
+  fs.rmSync(credentials); fs.symlinkSync(path.join(process.env.LLV_CLAUDE_HOME!, "missing"), credentials);
+  expect(mod.managedClaudeCredentialIsSafe(account.home, true)).toBe(false);
+});
+
+test("an interrupted registry replacement leaves the prior atomic registry readable", () => {
+  const account = mod.createManagedClaudeAccount("Atomic");
+  const registry = mod.claudeRegistryPath();
+  fs.writeFileSync(`${registry}.${process.pid}.tmp`, "{ interrupted");
+  expect(mod.listClaudeAccounts().map((item) => item.id)).toContain(account.id);
+  mod.setActiveClaudeAccount(account.id);
+  expect(mod.activeClaudeAccountId()).toBe(account.id);
+});
+
+test("concurrent child processes create and select accounts without losing registry updates", async () => {
+  const modulePath = path.join(import.meta.dir, "claude.ts");
+  const run = (source: string) => Bun.spawn({
+    cmd: [process.execPath, "-e", source],
+    env: { ...process.env, LLV_STATE_DIR: process.env.LLV_STATE_DIR!, LLV_CLAUDE_HOME: process.env.LLV_CLAUDE_HOME! },
+    stdout: "ignore",
+    stderr: "pipe",
+  });
+  const create = (label: string) => run(`const m = await import(${JSON.stringify(modulePath)}); m.createManagedClaudeAccount(${JSON.stringify(label)});`);
+  const [first, second] = [create("Child A"), create("Child B")];
+  expect(await first.exited).toBe(0); expect(await second.exited).toBe(0);
+  const ids = mod.listClaudeAccounts().map((item) => item.id);
+  expect(ids).toEqual(expect.arrayContaining(["child-a", "child-b"]));
+  const select = (id: string) => run(`const m = await import(${JSON.stringify(modulePath)}); m.setActiveClaudeAccount(${JSON.stringify(id)});`);
+  const [left, right] = [select("child-a"), select("child-b")];
+  expect(await left.exited).toBe(0); expect(await right.exited).toBe(0);
+  expect(["child-a", "child-b"]).toContain(mod.activeClaudeAccountId());
+});

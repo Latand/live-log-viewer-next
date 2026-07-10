@@ -4,7 +4,7 @@ import path from "node:path";
 
 import { describe, expect, test } from "bun:test";
 
-import { applyAssignmentPatches, createTask, deleteTask, mergeAssignments, patchTask, TASKS_PER_PROJECT_LIMIT } from "./commands";
+import { applyAssignmentPatches, createTask, deleteTask, mergeAssignments, patchTask, pinnedAccountId, TASKS_PER_PROJECT_LIMIT } from "./commands";
 import { firstLineTitle } from "./helpers";
 import { reconcileTasks } from "./reconcile";
 import { assembleSendResults } from "./send";
@@ -272,5 +272,14 @@ describe("task delivery assembly", () => {
     if (!result.ok) throw new Error(result.error);
     expect(result.task.status).toBe("assigned");
     expect(result.task.assignments).toEqual([{ path: "/one", panePid: null, state: "delivered", error: null, at: "new" }]);
+  });
+
+  test("pins retries to the account owned by the requested engine", () => {
+    const assignments = [
+      { path: "/claude", panePid: 1, state: "failed" as const, error: "retry", at: "now", engine: "claude" as const, accountId: "claude-work" },
+      { path: "/codex", panePid: 2, state: "delivered" as const, error: null, at: "now", engine: "codex" as const, accountId: "codex-work" },
+    ];
+    expect(pinnedAccountId(assignments, "claude")).toBe("claude-work");
+    expect(pinnedAccountId(assignments, "codex")).toBe("codex-work");
   });
 });
