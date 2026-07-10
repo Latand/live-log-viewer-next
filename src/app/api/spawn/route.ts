@@ -17,7 +17,7 @@ import { sessionKeyFromTranscript } from "@/lib/agent/sessionKey";
 import { spawnResponseForReceipt, type SpawnResponse } from "@/lib/agent/spawnResponse";
 import { resolveSpawnedTranscriptPath } from "@/lib/agent/spawnedTranscript";
 import { headCwd } from "@/lib/agent/transcript";
-import { persistHandoffLineage, rememberHandoffChild, rememberHandoffPane } from "@/lib/handoffLineage";
+import { persistHandoffLineage, rememberHandoffChild } from "@/lib/handoffLineage";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
 import { runtimeHostClient } from "@/lib/runtime/client";
 import { runtimeScope } from "@/lib/runtime/contracts";
@@ -25,7 +25,7 @@ import { runtimeEventsEnabled } from "@/lib/runtime/flags";
 import { listFiles } from "@/lib/scanner";
 import { projectForCwd } from "@/lib/scanner/describe";
 import { claudeProjectRootFor, codexSessionRootFor } from "@/lib/scanner/roots";
-import { buildImagePayload, collectImagePayloads, deleteInboxImages, spawnAgentWithPrompt } from "@/lib/tmux";
+import { buildImagePayload, collectImagePayloads, deleteInboxImages, spawnAgentWithPrompt, verifyTmuxHostEvidence } from "@/lib/tmux";
 import type { ApiError } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -182,6 +182,8 @@ export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse
     const account = accountManager.resolveSpawn(engine, body.accountId);
     const src = parentFromBody(body);
     const parentConversationId = src && transcriptAllowed(src) ? conversationForTranscript(src) : null;
+    const parentEngine = parentConversationId ? (codexSessionRootFor(src) ? "codex" : "claude") : null;
+    const parentSessionKey = parentEngine ? sessionKeyFromTranscript(parentEngine, src) : null;
     const digest = spawnDigest({
       engine,
       cwd,
@@ -190,6 +192,8 @@ export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse
       fast: reasoning.fast,
       accountId: account.accountId,
       parentConversationId,
+      parentSessionKey,
+      parentArtifactPath: parentConversationId ? src : null,
       prompt,
       images: images.map((image) => ({ mime: image.mime, digest: spawnDigest({ image: image.base64 }) })),
     });
@@ -207,6 +211,8 @@ export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse
       cwd,
       accountId: account.accountId,
       parentConversationId,
+      parentSessionKey,
+      parentArtifactPath: parentConversationId ? src : null,
       launchProfile: spec.launchProfile,
       clientAttemptId: body.clientAttemptId ?? null,
       requestDigest: digest,
@@ -251,6 +257,11 @@ export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse
       codexSessionsDir: engine === "codex" ? account.transcriptRoot : null,
     });
     const key = childPath ? sessionKeyFromTranscript(engine, childPath) : null;
+    if (!pane.host || !await verifyTmuxHostEvidence(pane.host)) {
+      agentRegistry().invalidateSpawnHost(begun.receipt.launchId, "spawn host disappeared before API confirmation");
+      const lost = agentRegistry().snapshot().receipts[begun.receipt.launchId]!;
+      return NextResponse.json(spawnResponseForReceipt(lost, childPath));
+    }
     if (!childPath || !key || !pane.receipt) {
       const pending = agentRegistry().markSpawnPathPending(begun.receipt.launchId);
       return NextResponse.json(spawnResponseForReceipt(pending, null));
@@ -261,7 +272,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse
       cwd,
       accountId: account.accountId,
       status: "starting",
-      host: null,
+      host: pane.host,
       claimEpoch: 0,
       claimOwner: null,
       pendingAction: "spawn",
@@ -286,8 +297,12 @@ export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse
     }
     if (src && transcriptAllowed(src)) {
       if (childPath) rememberHandoffChild(childPath, src);
-      if (pane.panePid) rememberHandoffPane(pane.panePid, src);
       persistHandoffLineage();
+    }
+    if (!await verifyTmuxHostEvidence(pane.host)) {
+      agentRegistry().invalidateSpawnHost(begun.receipt.launchId, "spawn host disappeared before API response");
+      const lost = agentRegistry().snapshot().receipts[begun.receipt.launchId]!;
+      return NextResponse.json(spawnResponseForReceipt(lost, childPath));
     }
     return NextResponse.json(spawnResponseForReceipt(settled.receipt, childPath));
   } catch (error) {
@@ -298,7 +313,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse
     }
     if (error instanceof UnknownAccountError || error instanceof UnknownClaudeAccountError) return NextResponse.json({ error: error.message }, { status: 400 });
     if (receipt?.pane) {
-      if (receipt.state === "prompt-delivered" || receipt.state === "pane-bound") agentRegistry().markSpawnPathPending(receipt.launchId);
+      if (receipt.state === "prompt-delivered" || receipt.state === "host-verified") agentRegistry().markSpawnPathPending(receipt.launchId);
       const recovered = agentRegistry().snapshot().receipts[receipt.launchId];
       if (recovered) return NextResponse.json(spawnResponseForReceipt(recovered, recovered.artifactPath));
     }

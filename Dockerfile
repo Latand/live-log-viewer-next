@@ -140,10 +140,9 @@ if [ "$1" = "new-window" ]; then
   err=$(mktemp)
   run_host_tmux "$@" >"$out" 2>"$err"
   code=$?
-  normalized=$(sed -E 's/^([^_]+)_(.*)_([0-9]+)_(.*)$/\1\t\2\t\3\t\4/' "$out")
-  printf '%s\n' "$normalized"
+  cat "$out"
   if [ "$code" -eq 0 ] && [ -n "$cwd" ]; then
-    target=$(printf '%s' "$normalized" | awk 'NR == 1 { print $1 }')
+    target=$(awk 'NR == 1 { print $1 }' "$out")
     if [ -n "$target" ]; then
       mkdir -p "$state_dir"
       printf '%s' "$cwd" > "$state_dir/$(target_key "$target")"

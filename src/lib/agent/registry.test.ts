@@ -129,9 +129,21 @@ describe("agent registry", () => {
     const store = registry();
     const begun = store.beginSpawnRequest({
       engine: "codex", cwd: "/repo", accountId: "terra", parentConversationId: "conversation_parent",
+      parentSessionKey: { engine: "codex", sessionId: "parent-session" }, parentArtifactPath: "/sessions/parent-session.jsonl",
       launchProfile: emptyLaunchProfile({ cwd: "/repo", model: "gpt-5.6", parentConversationId: "conversation_parent" }),
     });
     if (begun.kind !== "created") throw new Error("expected create");
+    const born = new AgentRegistry(store.filename).snapshot();
+    expect(born.lineageEdges[begun.receipt.conversationId]).toMatchObject({
+      childConversationId: begun.receipt.conversationId,
+      parentConversationId: "conversation_parent",
+      childSessionKey: null,
+      parentSessionKey: { engine: "codex", sessionId: "parent-session" },
+      childArtifactPath: null,
+      parentArtifactPath: "/sessions/parent-session.jsonl",
+      source: "viewer-spawn",
+      evidence: { launchId: begun.receipt.launchId },
+    });
     const receipt = store.bindSpawnPane(begun.receipt.launchId, { endpoint: "/tmp", server: { pid: 9, startIdentity: "9:a" }, paneId: "%9", panePid: { pid: 99, startIdentity: "99:a" }, target: "agents:9.0" });
     expect(receipt.state).toBe("pane-bound");
     store.markSpawnPromptDelivered(receipt.launchId);
@@ -147,6 +159,10 @@ describe("agent registry", () => {
     expect(snapshot.conversations[begun.receipt.conversationId]?.generations).toHaveLength(1);
     expect(snapshot.conversationRevision.codex).toBe(1);
     expect(snapshot.entries["codex:019f4906-3f67-7b72-9fbc-9ec3b5ad1326"]?.launchProfile?.parentConversationId).toBe("conversation_parent");
+    expect(snapshot.lineageEdges[begun.receipt.conversationId]).toMatchObject({
+      childSessionKey: { engine: "codex", sessionId: "019f4906-3f67-7b72-9fbc-9ec3b5ad1326" },
+      childArtifactPath: path,
+    });
   });
 
   test("keeps simultaneous same-engine same-cwd receipts isolated and fails conflicting artifacts closed", () => {

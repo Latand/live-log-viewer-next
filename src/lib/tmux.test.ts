@@ -1,12 +1,18 @@
 import { describe, expect, test } from "bun:test";
+import fs from "node:fs";
+import path from "node:path";
 
 import {
   cdCommandForCwd,
   classifyTmuxAttachSnapshot,
+  createSpawnWindow,
   createTmuxEndpointDescriptor,
   resolveTmuxAttach,
+  resolveTmuxEndpointContract,
+  selectSpawnedAgentProcess,
   tmuxAttachCommands,
   tmuxEndpoint,
+  verifyTmuxSpawnBinding,
 } from "@/lib/tmux";
 
 describe("cdCommandForCwd", () => {
@@ -21,6 +27,126 @@ describe("cdCommandForCwd", () => {
 
 test("reports the configured tmux endpoint", () => {
   expect(tmuxEndpoint()).toBe(process.env.TMUX_TMPDIR || "/tmp");
+});
+
+describe("tmux endpoint ownership", () => {
+  test("requires the external supervisor endpoint after migration", () => {
+    expect(() => resolveTmuxEndpointContract({
+      configuredTmpdir: "/tmp",
+      externalFlag: "0",
+      migrationComplete: true,
+      uid: 1000,
+    })).toThrow("migration marker requires the external tmux supervisor");
+
+    expect(resolveTmuxEndpointContract({
+      configuredTmpdir: "/run/user/1000/agent-log-viewer",
+      externalFlag: "1",
+      migrationComplete: true,
+      uid: 1000,
+    })).toEqual({
+      external: true,
+      tmuxTmpdir: "/run/user/1000/agent-log-viewer",
+    });
+  });
+});
+
+describe("spawn pane fencing", () => {
+  const endpoint = createTmuxEndpointDescriptor("/run/user/1000/agent-log-viewer", 1000);
+  const server = { pid: 900, startIdentity: "900:start" };
+
+  test("uses the pane id created by new-window while foreign idle panes exist and coordinates renumber", async () => {
+    let display = "agents:3.0";
+    const calls: string[][] = [];
+    const deps = {
+      runTmux: async (args: string[]) => {
+        calls.push(args);
+        if (args[0] === "list-panes") return { code: 0, stdout: "%1\n%2\n", stderr: "" };
+        if (args[0] === "new-window") return { code: 0, stdout: "%9\n", stderr: "" };
+        return { code: 0, stdout: `900\t%9\t109\t${display}\tcodex-new\tzsh\n`, stderr: "" };
+      },
+      processIdentity: (pid: number) => `${pid}:start`,
+    };
+
+    const binding = await createSpawnWindow({
+      session: "agents",
+      cwd: "/repo",
+      windowName: "codex-new",
+      endpoint,
+      server,
+    }, deps);
+    expect(binding).toMatchObject({ paneId: "%9", panePid: { pid: 109 }, target: "%9", display: "agents:3.0" });
+    expect(calls[0]).toContain("#{pane_id}");
+    expect(calls.flat()).not.toContain("agents:1.0");
+    expect(calls.flat()).not.toContain("agents:2.0");
+
+    display = "agents:1.0";
+    const current = await verifyTmuxSpawnBinding(binding, endpoint, deps);
+    expect(current).toMatchObject({ paneId: "%9", panePid: 109, display: "agents:1.0" });
+  });
+
+  test("rejects the shim's legacy underscore-normalized output", async () => {
+    const deps = {
+      runTmux: async (args: string[]) => args[0] === "list-panes"
+        ? { code: 0, stdout: "%1\n%2\n", stderr: "" }
+        : { code: 0, stdout: "%9_agents:3.0_109_extra\n", stderr: "" },
+      processIdentity: (pid: number) => `${pid}:start`,
+    };
+    await expect(createSpawnWindow({
+      session: "agents",
+      cwd: "/repo",
+      windowName: "codex-new",
+      endpoint,
+      server,
+    }, deps)).rejects.toThrow("invalid pane id");
+
+    const dockerfile = fs.readFileSync(path.join(process.cwd(), "Dockerfile"), "utf8");
+    expect(dockerfile).not.toContain("normalized=$(sed -E");
+  });
+
+  test("rejects a pane id that existed before new-window", async () => {
+    const deps = {
+      runTmux: async (args: string[]) => args[0] === "list-panes"
+        ? { code: 0, stdout: "%1\n%2\n", stderr: "" }
+        : { code: 0, stdout: "%2\n", stderr: "" },
+      processIdentity: (pid: number) => `${pid}:start`,
+    };
+    await expect(createSpawnWindow({
+      session: "agents",
+      cwd: "/repo",
+      windowName: "codex-new",
+      endpoint,
+      server,
+    }, deps)).rejects.toThrow("pre-existing pane id");
+  });
+
+  test("rejects a server flip between new-window and pane verification", async () => {
+    const deps = {
+      runTmux: async (args: string[]) => {
+        if (args[0] === "list-panes") return { code: 0, stdout: "%1\n%2\n", stderr: "" };
+        if (args[0] === "new-window") return { code: 0, stdout: "%9\n", stderr: "" };
+        return { code: 0, stdout: "901\t%9\t109\tagents:3.0\tcodex-new\tzsh\n", stderr: "" };
+      },
+      processIdentity: (pid: number) => `${pid}:start`,
+    };
+    await expect(createSpawnWindow({
+      session: "agents",
+      cwd: "/repo",
+      windowName: "codex-new",
+      endpoint,
+      server,
+    }, deps)).rejects.toThrow("server changed");
+  });
+
+  test("selects only the booted agent beneath the created pane", () => {
+    const processes = [
+      { pid: 201, engine: "codex" as const, argv: ["codex"], cwd: "/repo", tty: 1 },
+      { pid: 202, engine: "codex" as const, argv: ["codex"], cwd: "/repo", tty: 1 },
+      { pid: 209, engine: "codex" as const, argv: ["codex"], cwd: "/repo", tty: 1 },
+    ];
+    const parents = new Map([[201, 101], [202, 102], [209, 109], [101, 900], [102, 900], [109, 900]]);
+    expect(selectSpawnedAgentProcess(109, "codex", "/repo", processes, (pid) => parents.get(pid) ?? null)?.pid).toBe(209);
+    expect(selectSpawnedAgentProcess(110, "codex", "/repo", processes, (pid) => parents.get(pid) ?? null)).toBeNull();
+  });
 });
 
 describe("endpoint-aware attach commands", () => {

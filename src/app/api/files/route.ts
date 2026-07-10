@@ -47,8 +47,9 @@ export async function GET(request: Request): Promise<NextResponse> {
       file.effort = profile.effort ?? file.effort;
       file.goal = profile.goal ?? file.goal;
       file.plan = profile.plan ?? file.plan;
-      if (profile.parentConversationId) {
-        file.parent = registrySnapshot.conversations[profile.parentConversationId]?.generations.at(-1)?.path ?? file.parent;
+      const parentConversationId = registrySnapshot.lineageEdges[conversation.id]?.parentConversationId ?? profile.parentConversationId;
+      if (parentConversationId) {
+        file.parent = registrySnapshot.conversations[parentConversationId]?.generations.at(-1)?.path ?? file.parent;
       }
     }
     if (conversation.migration && conversation.migration.phase !== "committed") {

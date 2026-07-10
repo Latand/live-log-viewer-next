@@ -16,20 +16,22 @@ export function spawnResponseForReceipt(receipt: SpawnReceipt, path = receipt.ar
   const conflict = receipt.state === "conflicted";
   const pending = receipt.state === "starting"
     || receipt.state === "pane-bound"
+    || receipt.state === "host-verified"
     || receipt.state === "prompt-delivered"
     || receipt.state === "path-pending";
+  const launched = receipt.verifiedHost !== null && receipt.state !== "failed" && receipt.state !== "conflicted";
   return {
     ok: true,
-    target: receipt.target ?? receipt.pane?.target ?? null,
+    target: receipt.pane?.paneId ?? receipt.target ?? null,
     path,
     launchId: receipt.launchId,
     conversationId: receipt.conversationId,
-    launched: receipt.pane !== null,
+    launched,
     retrySafe: receipt.state === "failed",
     state: conflict
       ? "conflict"
       : pending
-        ? (receipt.state === "path-pending" || receipt.state === "prompt-delivered" ? "path-pending" : "starting")
+        ? (receipt.state === "path-pending" || receipt.state === "prompt-delivered" || receipt.state === "host-verified" ? "path-pending" : "starting")
         : "settled",
   };
 }

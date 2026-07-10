@@ -48,6 +48,9 @@ export interface TmuxSpawnBinding {
   server: ProcessIdentity;
   paneId: string;
   panePid: ProcessIdentity;
+  /** Current human-readable coordinates at creation time. */
+  display?: string;
+  /** Stable actuation target. Normalization upgrades legacy coordinates to paneId. */
   target: string;
 }
 
@@ -78,14 +81,30 @@ export interface SpawnReceipt {
   accountId: string | null;
   parentConversationId: ViewerConversationId | null;
   createdAt: string;
-  state: "starting" | "pane-bound" | "prompt-delivered" | "path-pending" | "completed" | "failed" | "conflicted";
+  state: "starting" | "pane-bound" | "host-verified" | "prompt-delivered" | "path-pending" | "completed" | "failed" | "conflicted";
   artifactPath: string | null;
   key: SessionKey | null;
   pane: TmuxSpawnBinding | null;
+  verifiedHost: TmuxHostEvidence | null;
   target: string | null;
   completionMode: "route-completed" | "observed-completed" | "route-recovered" | null;
   error: string | null;
   launchProfile: LaunchProfile;
+}
+
+export interface SpawnLineageEdge {
+  childConversationId: ViewerConversationId;
+  parentConversationId: ViewerConversationId;
+  childSessionKey: SessionKey | null;
+  parentSessionKey: SessionKey | null;
+  childArtifactPath: string | null;
+  parentArtifactPath: string | null;
+  source: "viewer-spawn";
+  evidence: {
+    launchId: string;
+    clientAttemptId: string | null;
+  };
+  createdAt: string;
 }
 
 export interface SpawnRequest {
@@ -96,6 +115,8 @@ export interface SpawnRequest {
   requestDigest?: string | null;
   accountId?: string | null;
   parentConversationId?: ViewerConversationId | null;
+  parentSessionKey?: SessionKey | null;
+  parentArtifactPath?: string | null;
 }
 
 export type SpawnBeginResult =
@@ -121,6 +142,7 @@ export interface RegistryFile {
   version: 2;
   entries: Record<string, AgentRegistryEntry>;
   receipts: Record<string, SpawnReceipt>;
+  lineageEdges: Record<string, SpawnLineageEdge>;
   importedResumePanes: boolean;
   /** Compatibility evidence only. It never authorizes a pane until the live
       resolver proves server, process, engine, and transcript ownership. */
@@ -173,6 +195,7 @@ const EMPTY: RegistryFile = {
   version: 2,
   entries: {},
   receipts: {},
+  lineageEdges: {},
   importedResumePanes: false,
   legacyResumePanes: { serverPid: null, panes: {} },
   conversations: {},
@@ -255,9 +278,12 @@ function normalizeHeldDelivery(value: HeldDelivery): HeldDelivery {
 }
 
 function normalizeReceipt(value: SpawnReceipt): SpawnReceipt {
-  const state = value.state === "completed" || value.state === "failed" || value.state === "pane-bound" || value.state === "prompt-delivered" || value.state === "path-pending" || value.state === "conflicted"
+  const state = value.state === "completed" || value.state === "failed" || value.state === "pane-bound" || value.state === "host-verified" || value.state === "prompt-delivered" || value.state === "path-pending" || value.state === "conflicted"
     ? value.state
     : "starting";
+  const pane = value.pane && typeof value.pane === "object" && typeof value.pane.paneId === "string" && typeof value.pane.target === "string"
+    ? { ...value.pane, display: typeof value.pane.display === "string" ? value.pane.display : value.pane.target, target: value.pane.paneId }
+    : null;
   return {
     ...value,
     clientAttemptId: typeof value.clientAttemptId === "string" ? value.clientAttemptId : null,
@@ -271,8 +297,9 @@ function normalizeReceipt(value: SpawnReceipt): SpawnReceipt {
       : null,
     state,
     key: value.key && typeof value.key === "object" && (value.key.engine === "claude" || value.key.engine === "codex") && typeof value.key.sessionId === "string" ? value.key : null,
-    pane: value.pane && typeof value.pane === "object" && typeof value.pane.paneId === "string" && typeof value.pane.target === "string" ? value.pane : null,
-    target: typeof value.target === "string" ? value.target : null,
+    pane,
+    verifiedHost: value.verifiedHost && typeof value.verifiedHost === "object" && value.verifiedHost.kind === "tmux" ? value.verifiedHost : null,
+    target: pane?.paneId ?? (typeof value.target === "string" && /^%\d+$/.test(value.target) ? value.target : null),
     completionMode: value.completionMode === "route-completed" || value.completionMode === "observed-completed" || value.completionMode === "route-recovered" ? value.completionMode : null,
     launchProfile: emptyLaunchProfile({ ...(value.launchProfile ?? {}), cwd: value.launchProfile?.cwd ?? value.cwd }),
   };
@@ -305,6 +332,7 @@ function readFile(filename: string): RegistryFile {
       version: 2,
       entries: parsed.entries,
       receipts: Object.fromEntries(Object.entries(parsed.receipts).map(([id, receipt]) => [id, normalizeReceipt(receipt)])),
+      lineageEdges: parsed.lineageEdges && typeof parsed.lineageEdges === "object" ? parsed.lineageEdges : {},
       importedResumePanes: parsed.importedResumePanes === true,
       legacyResumePanes: legacy && typeof legacy === "object" && "panes" in legacy
         ? { serverPid: typeof (legacy as { serverPid?: unknown }).serverPid === "number" ? (legacy as { serverPid: number }).serverPid : null, panes: ((legacy as { panes?: unknown }).panes as Record<string, ResumePaneRecord>) ?? {} }
@@ -431,12 +459,26 @@ export class AgentRegistry {
         artifactPath: null,
         key: null,
         pane: null,
+        verifiedHost: null,
         target: null,
         completionMode: null,
         error: null,
         launchProfile: profile,
       };
       file.receipts[receipt.launchId] = receipt;
+      if (receipt.parentConversationId) {
+        file.lineageEdges[receipt.conversationId] = {
+          childConversationId: receipt.conversationId,
+          parentConversationId: receipt.parentConversationId,
+          childSessionKey: null,
+          parentSessionKey: input.parentSessionKey ?? null,
+          childArtifactPath: null,
+          parentArtifactPath: input.parentArtifactPath ?? null,
+          source: "viewer-spawn",
+          evidence: { launchId: receipt.launchId, clientAttemptId: receipt.clientAttemptId },
+          createdAt: receipt.createdAt,
+        };
+      }
       return { kind: "created", receipt: clone(receipt) };
     });
   }
@@ -457,9 +499,31 @@ export class AgentRegistry {
         return clone(receipt);
       }
       if (receipt.state === "failed" || receipt.state === "conflicted") return clone(receipt);
-      receipt.pane = pane;
-      receipt.target = pane.target;
+      receipt.pane = { ...pane, display: pane.display ?? pane.target, target: pane.paneId };
+      receipt.target = pane.paneId;
       if (receipt.state === "starting") receipt.state = "pane-bound";
+      return clone(receipt);
+    });
+  }
+
+  markSpawnHostVerified(launchId: string, host: TmuxHostEvidence): SpawnReceipt {
+    return this.mutate((file) => {
+      const receipt = file.receipts[launchId];
+      if (!receipt) throw new Error("unknown spawn receipt");
+      if (!receipt.pane ||
+        receipt.pane.paneId !== host.paneId ||
+        receipt.pane.server.pid !== host.server.pid ||
+        receipt.pane.server.startIdentity !== host.server.startIdentity ||
+        receipt.pane.panePid.pid !== host.panePid.pid ||
+        receipt.pane.panePid.startIdentity !== host.panePid.startIdentity) {
+        receipt.state = "conflicted";
+        receipt.error = "spawn_host_identity_conflict";
+        return clone(receipt);
+      }
+      if (receipt.state === "failed" || receipt.state === "conflicted") return clone(receipt);
+      receipt.verifiedHost = host;
+      receipt.target = host.paneId;
+      if (receipt.state === "starting" || receipt.state === "pane-bound") receipt.state = "host-verified";
       return clone(receipt);
     });
   }
@@ -468,7 +532,7 @@ export class AgentRegistry {
     return this.mutate((file) => {
       const receipt = file.receipts[launchId];
       if (!receipt) throw new Error("unknown spawn receipt");
-      if (receipt.state === "pane-bound" || receipt.state === "starting") receipt.state = "prompt-delivered";
+      if (receipt.verifiedHost && (receipt.state === "host-verified" || receipt.state === "pane-bound" || receipt.state === "starting")) receipt.state = "prompt-delivered";
       return clone(receipt);
     });
   }
@@ -477,7 +541,7 @@ export class AgentRegistry {
     return this.mutate((file) => {
       const receipt = file.receipts[launchId];
       if (!receipt) throw new Error("unknown spawn receipt");
-      if (receipt.state === "prompt-delivered" || receipt.state === "pane-bound") receipt.state = "path-pending";
+      if (receipt.verifiedHost && (receipt.state === "prompt-delivered" || receipt.state === "host-verified")) receipt.state = "path-pending";
       return clone(receipt);
     });
   }
@@ -561,7 +625,13 @@ export class AgentRegistry {
     file.entries[sessionKeyId(entry.key)] = full;
     receipt.key = entry.key;
     receipt.artifactPath = entry.artifactPath;
-    if (receipt.target === null && entry.host?.kind === "tmux") receipt.target = entry.host.windowName || entry.host.paneId;
+    const lineage = file.lineageEdges[receipt.conversationId];
+    if (lineage) {
+      lineage.childSessionKey = entry.key;
+      lineage.childArtifactPath = entry.artifactPath;
+    }
+    if (entry.host?.kind === "tmux") receipt.verifiedHost = entry.host;
+    if (receipt.target === null && entry.host?.kind === "tmux") receipt.target = entry.host.paneId;
     receipt.state = "completed";
     receipt.error = null;
     receipt.completionMode = receipt.completionMode === "observed-completed" && completionMode === "route-completed"
@@ -583,10 +653,20 @@ export class AgentRegistry {
   failSpawn(launchId: string, error: string): void {
     this.mutate((file) => {
       const receipt = file.receipts[launchId];
-      if (receipt && receipt.state === "starting") {
-        receipt.state = "failed";
-        receipt.error = error;
-      }
+      if (!receipt || receipt.state === "completed" || receipt.state === "failed" || receipt.state === "conflicted") return;
+      receipt.state = receipt.pane ? "conflicted" : "failed";
+      receipt.error = error;
+      if (receipt.state === "conflicted") receipt.verifiedHost = null;
+    });
+  }
+
+  invalidateSpawnHost(launchId: string, error: string): void {
+    this.mutate((file) => {
+      const receipt = file.receipts[launchId];
+      if (!receipt || receipt.state === "failed" || receipt.state === "conflicted") return;
+      receipt.state = "conflicted";
+      receipt.error = error;
+      receipt.verifiedHost = null;
     });
   }
 

@@ -6,15 +6,10 @@ import { pidAlive } from "@/lib/scanner/process";
 import { agentRegistry, type AgentRegistry } from "@/lib/agent/registry";
 
 /**
- * Spawn parentage of a handoff: the card on a conversation pane boots a fresh
- * agent that inherits the source transcript, and the new conversation must
- * land in the source's tree — linked and placed next to it — instead of
- * standing as an unrelated root. The transcript of the new agent does not
- * exist yet at spawn time, so the fact is recorded in two steps: the spawn
- * remembers «tmux pane pid → source transcript», and callers that know the
- * child path record «child transcript → source transcript» immediately. The
- * pane-pid path remains as a fallback for engines whose transcript path appears
- * only after boot.
+ * Compatibility lineage for older handoffs. Viewer spawns now commit a durable
+ * conversation edge in the agent registry at intent creation. This store keeps
+ * historical transcript edges and live pane-pid evidence readable while those
+ * sessions age out.
  */
 const LINEAGE_FILE = statePath("handoff-lineage.json");
 const MAX_CHILDREN = 20_000;

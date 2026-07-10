@@ -4,7 +4,13 @@ import fs from "node:fs";
 import path from "node:path";
 
 import type { ResumeSpec } from "@/lib/agent/cli";
-import { agentRegistry, type SpawnReceipt } from "@/lib/agent/registry";
+import {
+  agentRegistry,
+  type ProcessIdentity,
+  type SpawnReceipt,
+  type TmuxHostEvidence,
+  type TmuxSpawnBinding,
+} from "@/lib/agent/registry";
 import { statePath } from "@/lib/configDir";
 import { logEvent } from "@/lib/events";
 import { inboxImageExt, MAX_INBOX_IMAGE_BYTES } from "@/lib/imagePolicy";
@@ -12,7 +18,7 @@ import { INBOX_DIR } from "@/lib/inbox";
 import { normalizeResumePanesFile, type ResumePaneRecord, type ResumePanesFile } from "@/lib/resumePanesFile";
 import { procBackend } from "@/lib/proc";
 import { listFiles } from "@/lib/scanner";
-import { isHelperArgv, pidAlive, readArgv, readPpid } from "@/lib/scanner/process";
+import { agentProcesses, isHelperArgv, pidAlive, readArgv, readPpid, type AgentProcess } from "@/lib/scanner/process";
 import {
   composerLine,
   detectBlockingGate,
@@ -27,6 +33,7 @@ export { READY_MARKERS, screenTail } from "@/lib/status";
 
 const TMUX = "tmux";
 const CANONICAL_EXTERNAL_SESSION = "agents";
+const LEGACY_TMUX_MIGRATION_MARKER = statePath("legacy-tmux-migration-complete");
 /* Outlives the 10 s /api/files poll so the pane map is not rebuilt every
    request; a post-kill rebuild passes fresh=true to bypass the memo. */
 const PANE_MAP_TTL_MS = 12_000;
@@ -128,6 +135,18 @@ interface RunResult {
   stderr: string;
 }
 
+export interface TmuxEndpointContractInput {
+  configuredTmpdir: string;
+  externalFlag: string | undefined;
+  migrationComplete: boolean;
+  uid: number;
+}
+
+export interface TmuxEndpointContract {
+  external: boolean;
+  tmuxTmpdir: string;
+}
+
 interface ResolveTmuxAttachDeps {
   runTmux(args: string[], input?: Buffer | string, endpoint?: TmuxEndpointDescriptor): Promise<RunResult>;
   processIdentity(pid: number): string | null;
@@ -135,12 +154,35 @@ interface ResolveTmuxAttachDeps {
 
 /** The service endpoint is intentionally an environment contract. During the
     migration the old /tmp server remains reachable until this flag is enabled. */
+export function resolveTmuxEndpointContract(input: TmuxEndpointContractInput): TmuxEndpointContract {
+  const supervisorTmpdir = `/run/user/${input.uid}/agent-log-viewer`;
+  const external = input.externalFlag === "1";
+  if (input.migrationComplete && (!external || input.configuredTmpdir !== supervisorTmpdir)) {
+    throw new Error(
+      `legacy tmux migration marker requires the external tmux supervisor at ${supervisorTmpdir}; configured endpoint is ${input.configuredTmpdir}`,
+    );
+  }
+  if (external && input.configuredTmpdir !== supervisorTmpdir) {
+    throw new Error(`external tmux supervisor requires TMUX_TMPDIR=${supervisorTmpdir}`);
+  }
+  return { external, tmuxTmpdir: input.configuredTmpdir };
+}
+
+function tmuxEndpointContract(): TmuxEndpointContract {
+  return resolveTmuxEndpointContract({
+    configuredTmpdir: process.env.TMUX_TMPDIR || "/tmp",
+    externalFlag: process.env.LLV_LEGACY_TMUX_EXTERNAL,
+    migrationComplete: fs.existsSync(LEGACY_TMUX_MIGRATION_MARKER),
+    uid: process.getuid?.() ?? 0,
+  });
+}
+
 export function externalTmuxMode(): boolean {
-  return process.env.LLV_LEGACY_TMUX_EXTERNAL === "1";
+  return tmuxEndpointContract().external;
 }
 
 export function tmuxEndpoint(): string {
-  return process.env.TMUX_TMPDIR || "/tmp";
+  return tmuxEndpointContract().tmuxTmpdir;
 }
 
 /** Builds the descriptor from values supplied by the host process. The small
@@ -171,6 +213,171 @@ function runTmux(args: string[], input?: Buffer | string, endpoint = tmuxEndpoin
     if (input !== undefined) child.stdin.end(input);
     else child.stdin.end();
   });
+}
+
+interface TmuxRunnerDeps {
+  runTmux(args: string[], input?: Buffer | string, endpoint?: TmuxEndpointDescriptor): Promise<RunResult>;
+  processIdentity(pid: number): string | null;
+}
+
+export interface TmuxPaneIdentity {
+  serverPid: number;
+  serverStartIdentity: string | null;
+  paneId: string;
+  panePid: number;
+  paneStartIdentity: string | null;
+  display: TmuxTarget;
+  windowName: string;
+  command: string;
+}
+
+const PANE_IDENTITY_FORMAT = "#{pid}\t#{pane_id}\t#{pane_pid}\t#{session_name}:#{window_index}.#{pane_index}\t#{window_name}\t#{pane_current_command}";
+
+function parsePaneIdentity(stdout: string, processIdentity: (pid: number) => string | null): TmuxPaneIdentity | null {
+  const [serverRaw = "", paneId = "", paneRaw = "", display = "", windowName = "", command = ""] = stdout.trim().split("\t");
+  const serverPid = Number(serverRaw);
+  const panePid = Number(paneRaw);
+  if (!Number.isInteger(serverPid) || serverPid <= 0 || !/^%\d+$/.test(paneId) || !Number.isInteger(panePid) || panePid <= 0 || !display) {
+    return null;
+  }
+  return {
+    serverPid,
+    serverStartIdentity: processIdentity(serverPid),
+    paneId,
+    panePid,
+    paneStartIdentity: processIdentity(panePid),
+    display,
+    windowName,
+    command,
+  };
+}
+
+async function inspectTmuxPane(
+  paneId: string,
+  endpoint: TmuxEndpointDescriptor,
+  deps: TmuxRunnerDeps,
+): Promise<TmuxPaneIdentity | null> {
+  const result = await deps.runTmux(["display-message", "-p", "-t", paneId, PANE_IDENTITY_FORMAT], undefined, endpoint).catch(() => null);
+  return result && result.code === 0 ? parsePaneIdentity(result.stdout, deps.processIdentity) : null;
+}
+
+function sameProcess(expected: ProcessIdentity, pid: number, startIdentity: string | null): boolean {
+  return expected.pid === pid && (expected.startIdentity === null || expected.startIdentity === startIdentity);
+}
+
+export async function verifyTmuxSpawnBinding(
+  binding: TmuxSpawnBinding,
+  endpoint: TmuxEndpointDescriptor,
+  deps: TmuxRunnerDeps = { runTmux, processIdentity: (pid) => procBackend.processIdentity(pid) },
+): Promise<TmuxPaneIdentity | null> {
+  const current = await inspectTmuxPane(binding.paneId, endpoint, deps);
+  if (!current ||
+    current.paneId !== binding.paneId ||
+    !sameProcess(binding.server, current.serverPid, current.serverStartIdentity) ||
+    !sameProcess(binding.panePid, current.panePid, current.paneStartIdentity)) return null;
+  return current;
+}
+
+export async function createSpawnWindow(
+  input: {
+    session: string;
+    cwd: string;
+    windowName: string;
+    endpoint: TmuxEndpointDescriptor;
+    server: ProcessIdentity;
+  },
+  deps: TmuxRunnerDeps = { runTmux, processIdentity: (pid) => procBackend.processIdentity(pid) },
+): Promise<TmuxSpawnBinding> {
+  const listed = await deps.runTmux(["list-panes", "-a", "-F", "#{pane_id}"], undefined, input.endpoint);
+  if (listed.code !== 0) throw new Error(listed.stderr.trim() || "could not snapshot tmux panes before spawn");
+  const existingPaneIds = new Set(listed.stdout.split("\n").map((line) => line.trim()).filter(Boolean));
+  if ([...existingPaneIds].some((paneId) => !/^%\d+$/.test(paneId))) {
+    throw new Error("tmux returned an invalid pre-spawn pane listing");
+  }
+  const spawned = await deps.runTmux([
+    "new-window",
+    "-d",
+    "-P",
+    "-F",
+    "#{pane_id}",
+    "-t",
+    input.session + ":",
+    "-n",
+    input.windowName,
+    "-c",
+    input.cwd,
+  ], undefined, input.endpoint);
+  if (spawned.code !== 0) throw new Error(spawned.stderr.trim() || "could not open tmux window");
+  const lines = spawned.stdout.split("\n").map((line) => line.trim()).filter(Boolean);
+  const paneId = lines.length === 1 ? lines[0]! : "";
+  if (!/^%\d+$/.test(paneId)) throw new Error("tmux returned an invalid pane id");
+  if (existingPaneIds.has(paneId)) throw new Error("tmux new-window returned a pre-existing pane id");
+  const current = await inspectTmuxPane(paneId, input.endpoint, deps);
+  if (!current) throw new Error("tmux could not verify the created pane");
+  if (current.paneId !== paneId) throw new Error("tmux created pane identity changed before verification");
+  if (current.windowName !== input.windowName) throw new Error("tmux created pane has an unexpected window name");
+  if (!sameProcess(input.server, current.serverPid, current.serverStartIdentity)) {
+    throw new Error("tmux server changed while creating the spawn pane");
+  }
+  if (procBackend.name === "linux" && (current.serverStartIdentity === null || current.paneStartIdentity === null)) {
+    throw new Error("tmux process start identity is unavailable");
+  }
+  return {
+    endpoint: input.endpoint.tmuxTmpdir,
+    server: { pid: current.serverPid, startIdentity: current.serverStartIdentity },
+    paneId,
+    panePid: { pid: current.panePid, startIdentity: current.paneStartIdentity },
+    target: paneId,
+    display: current.display,
+  };
+}
+
+function normalizedCwd(cwd: string): string {
+  try { return fs.realpathSync(cwd); } catch { return path.resolve(cwd); }
+}
+
+function ancestryDistance(pid: number, ancestor: number, parentPid: (pid: number) => number | null): number | null {
+  const seen = new Set<number>();
+  let cursor: number | null = pid;
+  for (let distance = 0; cursor !== null && distance < MAX_ANCESTRY_HOPS; distance += 1) {
+    if (cursor === ancestor) return distance;
+    if (seen.has(cursor)) return null;
+    seen.add(cursor);
+    cursor = parentPid(cursor);
+  }
+  return null;
+}
+
+export function selectSpawnedAgentProcess(
+  panePid: number,
+  engine: ResumeSpec["engine"],
+  cwd: string,
+  processes: AgentProcess[],
+  parentPid: (pid: number) => number | null,
+): AgentProcess | null {
+  const expectedCwd = normalizedCwd(cwd);
+  const matches = processes.flatMap((process) => {
+    if (process.engine !== engine || normalizedCwd(process.cwd) !== expectedCwd) return [];
+    const distance = ancestryDistance(process.pid, panePid, parentPid);
+    return distance === null ? [] : [{ process, distance }];
+  }).sort((left, right) => left.distance - right.distance || left.process.pid - right.process.pid);
+  if (!matches[0] || (matches[1] && matches[1].distance === matches[0].distance)) return null;
+  return matches[0].process;
+}
+
+export async function verifyTmuxHostEvidence(host: TmuxHostEvidence): Promise<boolean> {
+  const endpoint = createTmuxEndpointDescriptor(host.endpoint, process.getuid?.() ?? 0);
+  const binding: TmuxSpawnBinding = {
+    endpoint: host.endpoint,
+    server: host.server,
+    paneId: host.paneId,
+    panePid: host.panePid,
+    target: host.paneId,
+  };
+  const pane = await verifyTmuxSpawnBinding(binding, endpoint);
+  if (!pane || pane.windowName !== host.windowName || !pidAlive(host.agent.pid)) return false;
+  if (host.agent.startIdentity !== null && procBackend.processIdentity(host.agent.pid) !== host.agent.startIdentity) return false;
+  return ancestryDistance(host.agent.pid, host.panePid.pid, readPpid) !== null;
 }
 
 /** pane_pid → pane map from `tmux list-panes -a`, memoised for a few seconds.
@@ -301,15 +508,21 @@ export async function withPaneLock<T>(target: string, fn: () => Promise<T>): Pro
  * the send with a readable reason — a blind paste there vanishes or, worse,
  * answers a question the user never saw.
  */
-async function ensureDeliverable(target: TmuxTarget): Promise<void> {
-  const command = await paneCommand(target);
+async function ensureDeliverable(
+  target: TmuxTarget,
+  endpoint: TmuxEndpointDescriptor,
+  guard: () => Promise<void>,
+): Promise<void> {
+  await guard();
+  const command = await paneCommand(target, endpoint);
   if (command === null) throw new Error("tmux pane is unavailable");
   if (isShellCommand(command)) {
     logEvent("gate", { target, result: "error", reason: "shell_prompt" });
     throw new Error("pane has no agent (plain shell) — message was not sent");
   }
   for (let round = 0; round < 3; round += 1) {
-    const screen = await paneScreen(target);
+    await guard();
+    const screen = await paneScreen(target, endpoint);
     const menu = parseScreenMenu(screen);
     if (menu !== null) {
       logEvent("gate", { target, result: "error", reason: "select_dialog" });
@@ -327,7 +540,8 @@ async function ensureDeliverable(target: TmuxTarget): Promise<void> {
     const startup = detectStartupGate(screen);
     if (startup !== null) {
       logEvent("gate", { target, result: "ok", reason: startup });
-      await runTmux(["send-keys", "-t", target, "Enter"]);
+      await guard();
+      await runTmux(["send-keys", "-t", target, "Enter"], undefined, endpoint);
       await sleep(GATE_SETTLE_MS);
       continue;
     }
@@ -350,38 +564,64 @@ async function ensureDeliverable(target: TmuxTarget): Promise<void> {
  * is a no-op in both CLIs, so a false positive here costs nothing.
  */
 export async function sendText(target: TmuxTarget, text: string): Promise<void> {
-  await withPaneLock(target, async () => {
+  const endpoint = tmuxEndpointDescriptor();
+  const initial = await inspectTmuxPane(target, endpoint, { runTmux, processIdentity: (pid) => procBackend.processIdentity(pid) });
+  if (!initial) throw new Error("tmux pane is unavailable");
+  const binding: TmuxSpawnBinding = {
+    endpoint: endpoint.tmuxTmpdir,
+    server: { pid: initial.serverPid, startIdentity: initial.serverStartIdentity },
+    paneId: initial.paneId,
+    panePid: { pid: initial.panePid, startIdentity: initial.paneStartIdentity },
+    target: initial.paneId,
+    display: initial.display,
+  };
+  const guard = async () => {
+    if (!await verifyTmuxSpawnBinding(binding, endpoint)) {
+      throw new Error("tmux server or pane identity changed during delivery");
+    }
+  };
+  await withPaneLock(initial.paneId, async () => {
     try {
-      await ensureDeliverable(target);
-      await sendTextUnlocked(target, text);
-      logEvent("send", { target, result: "ok", meta: { bytes: text.length } });
+      await ensureDeliverable(initial.paneId, endpoint, guard);
+      await sendTextUnlocked(initial.paneId, text, endpoint, guard);
+      logEvent("send", { target: initial.paneId, result: "ok", meta: { bytes: text.length, display: initial.display } });
     } catch (error) {
-      logEvent("send", { target, result: "error", reason: error instanceof Error ? error.message : String(error) });
+      logEvent("send", { target: initial.paneId, result: "error", reason: error instanceof Error ? error.message : String(error) });
       throw error;
     }
   });
 }
 
 /** The raw paste+Enter sequence; callers must hold the pane lock. */
-async function sendTextUnlocked(target: TmuxTarget, text: string): Promise<void> {
+async function sendTextUnlocked(
+  target: TmuxTarget,
+  text: string,
+  endpoint: TmuxEndpointDescriptor,
+  guard: () => Promise<void>,
+): Promise<void> {
   const bufferName = `viewer-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
-  const load = await runTmux(["load-buffer", "-b", bufferName, "-"], Buffer.from(text, "utf8"));
+  await guard();
+  const load = await runTmux(["load-buffer", "-b", bufferName, "-"], Buffer.from(text, "utf8"), endpoint);
   if (load.code !== 0) throw new Error(load.stderr.trim() || "could not load tmux buffer");
 
-  const paste = await runTmux(["paste-buffer", "-d", "-p", "-b", bufferName, "-t", target]);
+  await guard();
+  const paste = await runTmux(["paste-buffer", "-d", "-p", "-b", bufferName, "-t", target], undefined, endpoint);
   if (paste.code !== 0) throw new Error(paste.stderr.trim() || "could not paste text into pane");
 
   await sleep(PASTE_SETTLE_MS);
-  const enter = await runTmux(["send-keys", "-t", target, "Enter"]);
+  await guard();
+  const enter = await runTmux(["send-keys", "-t", target, "Enter"], undefined, endpoint);
   if (enter.code !== 0) throw new Error(enter.stderr.trim() || "could not press Enter");
 
   const head = text.split("\n").map((line) => line.trim()).find(Boolean)?.slice(0, 32) ?? "";
   for (let round = 0; round < SUBMIT_VERIFY_TRIES; round += 1) {
     await sleep(SUBMIT_VERIFY_DELAY_MS);
-    const line = composerLine(await paneScreen(target));
+    await guard();
+    const line = composerLine(await paneScreen(target, endpoint));
     const stillUnsent = (head !== "" && line.includes(head)) || line.includes("[Pasted text");
     if (!stillUnsent) return;
-    await runTmux(["send-keys", "-t", target, "Enter"]);
+    await guard();
+    await runTmux(["send-keys", "-t", target, "Enter"], undefined, endpoint);
   }
 }
 
@@ -541,15 +781,15 @@ export async function killPane(target: TmuxTarget): Promise<void> {
  * the freshest activity wins; a detached server falls back to the most recent
  * session; no server at all yields a fresh detached «agents» session.
  */
-export async function activeTmuxSession(): Promise<string> {
+export async function activeTmuxSession(endpoint = tmuxEndpointDescriptor()): Promise<string> {
   if (externalTmuxMode()) {
-    const healthy = await runTmux(["has-session", "-t", CANONICAL_EXTERNAL_SESSION]).catch(() => null);
+    const healthy = await runTmux(["has-session", "-t", CANONICAL_EXTERNAL_SESSION], undefined, endpoint).catch(() => null);
     if (!healthy || healthy.code !== 0) {
       throw new Error("external legacy tmux supervisor is unavailable; refusing to create a container-owned server");
     }
     return CANONICAL_EXTERNAL_SESSION;
   }
-  const clients = await runTmux(["list-clients", "-F", "#{client_activity} #{client_session}"]).catch(() => null);
+  const clients = await runTmux(["list-clients", "-F", "#{client_activity} #{client_session}"], undefined, endpoint).catch(() => null);
   const pick = (stdout: string) => {
     let best: { at: number; name: string } | null = null;
     for (const line of stdout.split("\n")) {
@@ -565,7 +805,7 @@ export async function activeTmuxSession(): Promise<string> {
     const name = pick(clients.stdout);
     if (name) return name;
   }
-  const sessions = await runTmux(["list-sessions", "-F", "#{session_activity} #{session_name}"]).catch(() => null);
+  const sessions = await runTmux(["list-sessions", "-F", "#{session_activity} #{session_name}"], undefined, endpoint).catch(() => null);
   if (sessions && sessions.code === 0) {
     const name = pick(sessions.stdout);
     if (name) return name;
@@ -573,7 +813,7 @@ export async function activeTmuxSession(): Promise<string> {
   /* A detached session created without a size falls back to 80x24 and
      reflows every agent TUI into an unreadable strip; a generous fixed size
      keeps captures and screen-scrape detection stable until a client attaches. */
-  const created = await runTmux(["new-session", "-d", "-x", "220", "-y", "50", "-s", "agents"]);
+  const created = await runTmux(["new-session", "-d", "-x", "220", "-y", "50", "-s", "agents"], undefined, endpoint);
   if (created.code !== 0 && !/duplicate session/.test(created.stderr)) {
     throw new Error(created.stderr.trim() || "could not create tmux session");
   }
@@ -642,6 +882,15 @@ export async function tmuxServerPid(): Promise<number | null> {
   return Number.isInteger(pid) && pid > 0 ? pid : null;
 }
 
+async function tmuxServerReference(endpoint: TmuxEndpointDescriptor): Promise<ProcessIdentity | null> {
+  const result = await runTmux(["display-message", "-p", "#{pid}"], undefined, endpoint).catch(() => null);
+  const pid = result && result.code === 0 ? Number(result.stdout.trim()) : NaN;
+  if (!Number.isInteger(pid) || pid <= 0) return null;
+  const startIdentity = procBackend.processIdentity(pid);
+  if (procBackend.name === "linux" && startIdentity === null) return null;
+  return { pid, startIdentity };
+}
+
 export async function tmuxServerIdentity(): Promise<string | null> {
   const pid = await tmuxServerPid();
   return pid === null ? null : procBackend.processIdentity(pid);
@@ -675,9 +924,10 @@ export interface SpawnedPane {
   paneId: string;
   /** Human-readable `session:window.pane` shown in the UI. */
   display: TmuxTarget;
-  /** Shell pid of the pane, set on freshly spawned windows: handoff lineage
-      matches a later-born conversation to its source through this pid. */
+  /** Shell pid of the pane, used for transcript discovery and task tracking. */
   panePid?: number;
+  /** Fully fenced live process evidence captured after prompt delivery. */
+  host?: TmuxHostEvidence;
   receipt?: SpawnReceipt;
 }
 
@@ -742,13 +992,13 @@ export function cdCommandForCwd(cwd: string): string {
   return `cd -- ${shellSingleQuote(cwd)}`;
 }
 
-async function paneCommand(target: TmuxTarget): Promise<string | null> {
-  const res = await runTmux(["display-message", "-p", "-t", target, "#{pane_current_command}"]).catch(() => null);
+async function paneCommand(target: TmuxTarget, endpoint = tmuxEndpointDescriptor()): Promise<string | null> {
+  const res = await runTmux(["display-message", "-p", "-t", target, "#{pane_current_command}"], undefined, endpoint).catch(() => null);
   return res && res.code === 0 ? res.stdout.trim() : null;
 }
 
-export async function paneScreen(target: TmuxTarget): Promise<string> {
-  const res = await runTmux(["capture-pane", "-p", "-t", target]).catch(() => null);
+export async function paneScreen(target: TmuxTarget, endpoint = tmuxEndpointDescriptor()): Promise<string> {
+  const res = await runTmux(["capture-pane", "-p", "-t", target], undefined, endpoint).catch(() => null);
   return res && res.code === 0 ? res.stdout : "";
 }
 
@@ -773,51 +1023,43 @@ export async function sendKeys(target: TmuxTarget, keys: string[]): Promise<void
  * the prompt text as a shell command.
  */
 async function spawnAgentWithPromptUnchecked(spec: ResumeSpec, text: string, receipt: SpawnReceipt): Promise<SpawnedPane> {
-  const session = await activeTmuxSession();
-  const spawned = await runTmux([
-    "new-window",
-    "-d",
-    "-P",
-    "-F",
-    "#{pane_id}\t#{session_name}:#{window_index}.#{pane_index}\t#{pane_pid}",
-    "-t",
-    session + ":",
-    "-n",
-    spec.windowName,
-    "-c",
-    spec.cwd,
-  ]);
-  if (spawned.code !== 0) throw new Error(spawned.stderr.trim() || "could not open tmux window");
-  /* The %N pane id addresses the pane even after window indexes shift; the
-     display form only labels UI messages. */
-  const [target = "", display = "", pidRaw = ""] = spawned.stdout.trim().split("\t");
-  if (!target) throw new Error("tmux did not return a window address");
-  const panePid = Number(pidRaw);
+  const endpoint = tmuxEndpointDescriptor();
+  const session = await activeTmuxSession(endpoint);
+  const server = await tmuxServerReference(endpoint);
+  if (!server) throw new Error("tmux server identity is unavailable before spawn");
+  const binding = await createSpawnWindow({
+    session,
+    cwd: spec.cwd,
+    windowName: spec.windowName,
+    endpoint,
+    server,
+  });
+  const target = binding.paneId;
+  const display = binding.display ?? binding.paneId;
+  const panePid = binding.panePid.pid;
+  const runBoundTmux = async (args: string[]): Promise<RunResult> => {
+    if (!await verifyTmuxSpawnBinding(binding, endpoint)) {
+      throw new Error("tmux server or created pane changed before spawn actuation");
+    }
+    return runTmux(args, undefined, endpoint);
+  };
 
   /* The marker and receipt binding precede every command/poll. An observer
      therefore has one exact launch identity whenever it can see the host. */
-  const marker = await runTmux(["set-option", "-p", "-t", target, "@llv_launch_id", receipt.launchId]);
+  const marker = await runBoundTmux(["set-option", "-p", "-t", target, "@llv_launch_id", receipt.launchId]);
   if (marker.code !== 0) throw new Error(marker.stderr.trim() || "could not bind launch marker to pane");
-  const serverPid = await tmuxServerPid();
-  if (serverPid === null) throw new Error("tmux server disappeared before launch binding");
-  const bound = agentRegistry().bindSpawnPane(receipt.launchId, {
-    endpoint: tmuxEndpoint(),
-    server: { pid: serverPid, startIdentity: procBackend.processIdentity(serverPid) },
-    paneId: target,
-    panePid: { pid: Number.isInteger(panePid) && panePid > 0 ? panePid : 0, startIdentity: Number.isInteger(panePid) && panePid > 0 ? procBackend.processIdentity(panePid) : null },
-    target: display || target,
-  });
+  const bound = agentRegistry().bindSpawnPane(receipt.launchId, binding);
   if (bound.state === "conflicted") throw new Error("spawn pane binding conflict");
 
-  const cwdTyped = await runTmux(["send-keys", "-t", target, "-l", cdCommandForCwd(spec.cwd)]);
+  const cwdTyped = await runBoundTmux(["send-keys", "-t", target, "-l", cdCommandForCwd(spec.cwd)]);
   if (cwdTyped.code !== 0) throw new Error(cwdTyped.stderr.trim() || "could not type cwd into pane");
-  const cwdEnter = await runTmux(["send-keys", "-t", target, "Enter"]);
+  const cwdEnter = await runBoundTmux(["send-keys", "-t", target, "Enter"]);
   if (cwdEnter.code !== 0) throw new Error(cwdEnter.stderr.trim() || "could not enter cwd");
 
   /* Type the boot command literally into the fresh shell, then run it. */
-  const typed = await runTmux(["send-keys", "-t", target, "-l", spec.command]);
+  const typed = await runBoundTmux(["send-keys", "-t", target, "-l", spec.command]);
   if (typed.code !== 0) throw new Error(typed.stderr.trim() || "could not type command into pane");
-  const enter = await runTmux(["send-keys", "-t", target, "Enter"]);
+  const enter = await runBoundTmux(["send-keys", "-t", target, "Enter"]);
   if (enter.code !== 0) throw new Error(enter.stderr.trim() || "could not start agent");
 
   const deadline = Date.now() + SPAWN_READY_TIMEOUT_MS;
@@ -827,17 +1069,18 @@ async function spawnAgentWithPromptUnchecked(spec: ResumeSpec, text: string, rec
   let stableRounds = 0;
   while (Date.now() < deadline) {
     await sleep(SPAWN_POLL_MS);
-    const command = await paneCommand(target);
-    if (command === null) throw new Error("agent window closed immediately after launch");
+    const current = await verifyTmuxSpawnBinding(binding, endpoint);
+    if (!current) throw new Error("tmux server or created pane changed during agent launch");
+    const command = current.command;
     if (isShellCommand(command)) {
       if (agentSeen) {
-        throw new Error(`agent exited immediately after launch: ${screenTail(await paneScreen(target))}`);
+        throw new Error(`agent exited immediately after launch: ${screenTail(await paneScreen(target, endpoint))}`);
       }
       continue;
     }
     agentSeen = true;
 
-    const screen = await paneScreen(target);
+    const screen = await paneScreen(target, endpoint);
     /* Startup gates (trust-folder, resume-summary picker, other option-list
        dialogs) each default to the safe option, so Enter clears them.
        Re-answering only when the screen changed avoids hammering Enter into a
@@ -845,7 +1088,7 @@ async function spawnAgentWithPromptUnchecked(spec: ResumeSpec, text: string, rec
     const gate = screen !== answeredScreen ? detectStartupGate(screen) : null;
     if (gate !== null) {
       logEvent("gate", { target, cwd: spec.cwd, result: "ok", reason: gate });
-      await runTmux(["send-keys", "-t", target, "Enter"]);
+      await runBoundTmux(["send-keys", "-t", target, "Enter"]);
       answeredScreen = screen;
       previousScreen = "";
       stableRounds = 0;
@@ -861,24 +1104,50 @@ async function spawnAgentWithPromptUnchecked(spec: ResumeSpec, text: string, rec
     }
   }
 
-  const finalCommand = await paneCommand(target);
-  if (finalCommand === null || isShellCommand(finalCommand)) {
+  const finalPane = await verifyTmuxSpawnBinding(binding, endpoint);
+  if (!finalPane || isShellCommand(finalPane.command)) {
     logEvent("spawn", { target, cwd: spec.cwd, result: "error", reason: "agent_exited_on_boot" });
-    throw new Error(`agent did not start in the window: ${screenTail(await paneScreen(target))}`);
+    throw new Error(`agent did not start in the window: ${screenTail(await paneScreen(target, endpoint))}`);
   }
+  const agent = selectSpawnedAgentProcess(panePid, spec.engine, spec.cwd, agentProcesses(true), readPpid);
+  if (!agent) throw new Error("booted agent process could not be verified beneath the created pane");
+  const agentStartIdentity = procBackend.processIdentity(agent.pid);
+  if (!pidAlive(agent.pid) || (procBackend.name === "linux" && agentStartIdentity === null)) {
+    throw new Error("booted agent process identity is unavailable");
+  }
+  const host: TmuxHostEvidence = {
+    kind: "tmux",
+    endpoint: endpoint.tmuxTmpdir,
+    server: binding.server,
+    paneId: binding.paneId,
+    panePid: binding.panePid,
+    windowName: finalPane.windowName,
+    agent: { pid: agent.pid, startIdentity: agentStartIdentity },
+    argv: [...agent.argv],
+  };
   logEvent("spawn", {
     target,
     cwd: spec.cwd,
     ...(spec.transcript ? { path: spec.transcript } : {}),
     result: "ok",
-    meta: { window: spec.windowName },
+    meta: { window: spec.windowName, display },
   });
   if (text) await sendText(target, text);
+  const finalVerification = await verifyTmuxSpawnBinding(binding, endpoint);
+  if (!finalVerification ||
+    !pidAlive(agent.pid) ||
+    (agentStartIdentity !== null && procBackend.processIdentity(agent.pid) !== agentStartIdentity) ||
+    ancestryDistance(agent.pid, panePid, readPpid) === null) {
+    throw new Error("spawn host identity changed before launch confirmation");
+  }
+  const verified = agentRegistry().markSpawnHostVerified(receipt.launchId, host);
+  if (verified.state === "conflicted") throw new Error(verified.error ?? "spawn host verification conflict");
   agentRegistry().markSpawnPromptDelivered(receipt.launchId);
   return {
     paneId: target,
-    display: display || target,
-    ...(Number.isInteger(panePid) && panePid > 0 ? { panePid } : {}),
+    display,
+    panePid,
+    host,
   };
 }
 
@@ -896,22 +1165,23 @@ export async function spawnAgentWithPrompt(spec: ResumeSpec, text: string, exist
 
 /** Opens a visible shell window and types one command without agent readiness or paste handling. */
 export async function spawnCommandWindow(spec: { command: string; cwd: string; windowName: string }): Promise<SpawnedPane> {
-  const session = await activeTmuxSession();
-  const spawned = await runTmux(["new-window", "-d", "-P", "-F", "#{pane_id}\t#{session_name}:#{window_index}.#{pane_index}\t#{pane_pid}", "-t", session + ":", "-n", spec.windowName, "-c", spec.cwd]);
-  if (spawned.code !== 0) throw new Error(spawned.stderr.trim() || "could not open tmux window");
-  const [paneId = "", display = "", pidRaw = ""] = spawned.stdout.trim().split("\t");
-  if (!paneId) throw new Error("tmux did not return a window address");
+  const endpoint = tmuxEndpointDescriptor();
+  const session = await activeTmuxSession(endpoint);
+  const server = await tmuxServerReference(endpoint);
+  if (!server) throw new Error("tmux server identity is unavailable before command spawn");
+  const binding = await createSpawnWindow({ session, ...spec, endpoint, server });
+  const paneId = binding.paneId;
   for (const [args, message] of [
     [["send-keys", "-t", paneId, "-l", cdCommandForCwd(spec.cwd)], "could not type cwd into pane"],
     [["send-keys", "-t", paneId, "Enter"], "could not enter cwd"],
     [["send-keys", "-t", paneId, "-l", spec.command], "could not type command into pane"],
     [["send-keys", "-t", paneId, "Enter"], "could not start command"],
   ] as const) {
-    const result = await runTmux([...args]);
+    if (!await verifyTmuxSpawnBinding(binding, endpoint)) throw new Error("tmux server or created pane changed during command launch");
+    const result = await runTmux([...args], undefined, endpoint);
     if (result.code !== 0) throw new Error(result.stderr.trim() || message);
   }
-  const panePid = Number(pidRaw);
-  return { paneId, display: display || paneId, ...(Number.isInteger(panePid) && panePid > 0 ? { panePid } : {}) };
+  return { paneId, display: binding.display ?? paneId, panePid: binding.panePid.pid };
 }
 
 export interface SavedImage {
