@@ -486,6 +486,14 @@ export async function tmuxServerIdentity(): Promise<string | null> {
   return pid === null ? null : procBackend.processIdentity(pid);
 }
 
+/** Pane-local launch marker used by transcript observation. This value is an
+    opaque UUID, never a prompt, path, command, or account secret. */
+export async function paneLaunchId(paneId: string): Promise<string | null> {
+  const result = await runTmux(["show-options", "-p", "-v", "-t", paneId, "@llv_launch_id"]).catch(() => null);
+  const value = result && result.code === 0 ? result.stdout.trim() : "";
+  return /^[0-9a-f-]{36}$/i.test(value) ? value : null;
+}
+
 /**
  * The resume-pane map scoped to the live server: when the current server pid
  * differs from the one the records were written under, they belong to a
@@ -607,7 +615,7 @@ export async function sendKeys(target: TmuxTarget, keys: string[]): Promise<void
  * the agent CLI — a pane that fell back to the shell would otherwise execute
  * the prompt text as a shell command.
  */
-async function spawnAgentWithPromptUnchecked(spec: ResumeSpec, text: string): Promise<SpawnedPane> {
+async function spawnAgentWithPromptUnchecked(spec: ResumeSpec, text: string, receipt: SpawnReceipt): Promise<SpawnedPane> {
   const session = await activeTmuxSession();
   const spawned = await runTmux([
     "new-window",
@@ -628,6 +636,21 @@ async function spawnAgentWithPromptUnchecked(spec: ResumeSpec, text: string): Pr
   const [target = "", display = "", pidRaw = ""] = spawned.stdout.trim().split("\t");
   if (!target) throw new Error("tmux did not return a window address");
   const panePid = Number(pidRaw);
+
+  /* The marker and receipt binding precede every command/poll. An observer
+     therefore has one exact launch identity whenever it can see the host. */
+  const marker = await runTmux(["set-option", "-p", "-t", target, "@llv_launch_id", receipt.launchId]);
+  if (marker.code !== 0) throw new Error(marker.stderr.trim() || "could not bind launch marker to pane");
+  const serverPid = await tmuxServerPid();
+  if (serverPid === null) throw new Error("tmux server disappeared before launch binding");
+  const bound = agentRegistry().bindSpawnPane(receipt.launchId, {
+    endpoint: tmuxEndpoint(),
+    server: { pid: serverPid, startIdentity: procBackend.processIdentity(serverPid) },
+    paneId: target,
+    panePid: { pid: Number.isInteger(panePid) && panePid > 0 ? panePid : 0, startIdentity: Number.isInteger(panePid) && panePid > 0 ? procBackend.processIdentity(panePid) : null },
+    target: display || target,
+  });
+  if (bound.state === "conflicted") throw new Error("spawn pane binding conflict");
 
   const cwdTyped = await runTmux(["send-keys", "-t", target, "-l", cdCommandForCwd(spec.cwd)]);
   if (cwdTyped.code !== 0) throw new Error(cwdTyped.stderr.trim() || "could not type cwd into pane");
@@ -694,6 +717,7 @@ async function spawnAgentWithPromptUnchecked(spec: ResumeSpec, text: string): Pr
     meta: { window: spec.windowName },
   });
   if (text) await sendText(target, text);
+  agentRegistry().markSpawnPromptDelivered(receipt.launchId);
   return {
     paneId: target,
     display: display || target,
@@ -703,10 +727,10 @@ async function spawnAgentWithPromptUnchecked(spec: ResumeSpec, text: string): Pr
 
 /** Every visible legacy launch receives a durable receipt before tmux creates
     its window. Callers may later attach the engine-native transcript identity. */
-export async function spawnAgentWithPrompt(spec: ResumeSpec, text: string): Promise<SpawnedPane> {
-  const receipt = agentRegistry().beginSpawn(spec.engine, spec.cwd, spec.launchProfile);
+export async function spawnAgentWithPrompt(spec: ResumeSpec, text: string, existingReceipt?: SpawnReceipt): Promise<SpawnedPane> {
+  const receipt = existingReceipt ?? agentRegistry().beginSpawn(spec.engine, spec.cwd, spec.launchProfile);
   try {
-    return { ...(await spawnAgentWithPromptUnchecked(spec, text)), receipt };
+    return { ...(await spawnAgentWithPromptUnchecked(spec, text, receipt)), receipt };
   } catch (error) {
     agentRegistry().failSpawn(receipt.launchId, error instanceof Error ? error.message : String(error));
     throw error;

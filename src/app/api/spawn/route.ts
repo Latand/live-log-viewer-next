@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -7,8 +8,9 @@ import { NextRequest, NextResponse } from "next/server";
 import { UnknownAccountError } from "@/lib/accounts/codex";
 import { UnknownClaudeAccountError } from "@/lib/accounts/claude";
 import { accountManager } from "@/lib/accounts/manager";
+import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
 import { freshSpecFor, type AgentEngine } from "@/lib/agent/cli";
-import { agentRegistry } from "@/lib/agent/registry";
+import { agentRegistry, type SpawnReceipt } from "@/lib/agent/registry";
 import { reasoningFromBody } from "@/lib/agent/efforts";
 import { modelFromBody } from "@/lib/agent/models";
 import { sessionKeyFromTranscript } from "@/lib/agent/sessionKey";
@@ -17,7 +19,7 @@ import { headCwd } from "@/lib/agent/transcript";
 import { persistHandoffLineage, rememberHandoffChild, rememberHandoffPane } from "@/lib/handoffLineage";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
 import { runtimeHostClient } from "@/lib/runtime/client";
-import { newOperationId, runtimeScope, viewerConversationId } from "@/lib/runtime/contracts";
+import { runtimeScope } from "@/lib/runtime/contracts";
 import { runtimeEventsEnabled } from "@/lib/runtime/flags";
 import { listFiles } from "@/lib/scanner";
 import { projectForCwd } from "@/lib/scanner/describe";
@@ -40,10 +42,15 @@ interface SuggestResponse {
 
 interface SpawnResponse {
   ok: true;
-  target: string;
+  target: string | null;
   /** Transcript path the fresh session will write, when knowable (claude);
       the draft pane waits for exactly this file to appear in the scanner. */
   path: string | null;
+  launchId: string;
+  conversationId: string;
+  launched: boolean;
+  retrySafe: boolean;
+  state: "settled" | "path-pending" | "starting" | "conflict";
 }
 
 /** Security gate for `?src=`: the resolved real path must be a regular .jsonl
@@ -128,15 +135,37 @@ function parentFromBody(body: { src?: unknown; parent?: unknown }): string {
   return typeof body.src === "string" ? body.src : "";
 }
 
-function conversationForTranscript(transcript: string): string {
-  return viewerConversationId(codexSessionRootFor(transcript) ? "codex" : "claude", transcript);
+function conversationForTranscript(transcript: string): `conversation_${string}` {
+  const registry = agentRegistry();
+  const existing = registry.conversationForPath(transcript);
+  if (existing) return existing.id;
+  return registry.ensureConversation(codexSessionRootFor(transcript) ? "codex" : "claude", transcript, null).id;
+}
+
+function spawnDigest(input: Record<string, unknown>): string {
+  return crypto.createHash("sha256").update(JSON.stringify(input)).digest("hex");
+}
+
+export function spawnResponseForReceipt(receipt: SpawnReceipt, path = receipt.artifactPath): SpawnResponse {
+  const conflict = receipt.state === "conflicted";
+  const pending = receipt.state === "starting" || receipt.state === "pane-bound" || receipt.state === "prompt-delivered" || receipt.state === "path-pending";
+  return {
+    ok: true,
+    target: receipt.target ?? receipt.pane?.target ?? null,
+    path,
+    launchId: receipt.launchId,
+    conversationId: receipt.conversationId,
+    launched: receipt.pane !== null,
+    retrySafe: receipt.state === "failed",
+    state: conflict ? "conflict" : pending ? (receipt.state === "path-pending" || receipt.state === "prompt-delivered" ? "path-pending" : "starting") : "settled",
+  };
 }
 
 export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse | ApiError>> {
   const rejection = rejectCrossOrigin(req);
   if (rejection) return rejection;
 
-  let body: { engine?: unknown; model?: unknown; cwd?: unknown; prompt?: unknown; images?: unknown; src?: unknown; parent?: unknown; effort?: unknown; fast?: unknown; accountId?: unknown };
+  let body: { engine?: unknown; model?: unknown; cwd?: unknown; prompt?: unknown; images?: unknown; src?: unknown; parent?: unknown; effort?: unknown; fast?: unknown; accountId?: unknown; clientAttemptId?: unknown };
   try {
     body = (await req.json()) as typeof body;
   } catch {
@@ -146,6 +175,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse
   const engine = body.engine === "claude" || body.engine === "codex" ? (body.engine as AgentEngine) : null;
   if (!engine) return NextResponse.json({ error: "engine must be claude or codex" }, { status: 400 });
   if (body.accountId !== undefined && typeof body.accountId !== "string") return NextResponse.json({ error: "accountId must be a string" }, { status: 400 });
+  if (body.clientAttemptId !== undefined && (typeof body.clientAttemptId !== "string" || !/^[A-Za-z0-9_-]{8,128}$/.test(body.clientAttemptId))) return NextResponse.json({ error: "clientAttemptId must be 8-128 URL-safe characters" }, { status: 400 });
 
   const reasoning = reasoningFromBody(engine, body);
   if (reasoning.error) return NextResponse.json({ error: reasoning.error }, { status: 400 });
@@ -171,33 +201,26 @@ export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse
     return NextResponse.json({ error: imageError.error }, { status: imageError.status });
   }
 
-  /* Saved paths stay visible to the catch: a failed spawn deletes them so a
-     retry cannot pile duplicates into the inbox. */
+  /* Saved paths stay visible to the catch. A pane-bound receipt keeps them:
+     the agent may already have accepted the prompt despite a later failure. */
   let imagePaths: string[] = [];
+  let launchId: string | null = null;
   try {
-    /* Pasted images land in the inbox and reach the fresh agent as file paths
-       appended to its first prompt — the same contract the pane composer uses. */
-    const bundle = buildImagePayload(prompt, images);
-    imagePaths = bundle.imagePaths;
     const account = accountManager.resolveSpawn(engine, body.accountId);
-    let runtimeClient = runtimeEventsEnabled() ? runtimeHostClient() : null;
-    const operationId = runtimeClient ? newOperationId() : null;
     const src = parentFromBody(body);
-    if (runtimeClient && operationId) {
-      try {
-        await runtimeClient.operation({
-          scope: runtimeScope("operation", operationId),
-          kind: "spawn.intent",
-          operationId,
-          producerKey: `viewer-spawn:${operationId}`,
-          payload: { engine, cwd, accountId: account.accountId, parentConversationId: src && transcriptAllowed(src) ? conversationForTranscript(src) : null },
-        });
-      } catch {
-        console.warn("[runtime] spawn bookkeeping unavailable; continuing through the legacy spawn path");
-        runtimeClient = null;
-      }
-    }
-    const spec = freshSpecFor(engine, cwd, {
+    const parentConversationId = src && transcriptAllowed(src) ? conversationForTranscript(src) : null;
+    const digest = spawnDigest({
+      engine,
+      cwd,
+      model: selectedModel.model,
+      effort: reasoning.effort,
+      fast: reasoning.fast,
+      accountId: account.accountId,
+      parentConversationId,
+      prompt,
+      images: images.map((image) => ({ mime: image.mime, digest: spawnDigest({ image: image.base64 }) })),
+    });
+    const specBase = freshSpecFor(engine, cwd, {
       model: selectedModel.model,
       effort: reasoning.effort,
       fast: reasoning.fast,
@@ -205,8 +228,47 @@ export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse
       claudeConfigDir: engine === "claude" ? account.home : null,
       claudeProjectsDir: engine === "claude" ? account.transcriptRoot : null,
     });
+    const spec = { ...specBase, launchProfile: emptyLaunchProfile({ ...(specBase.launchProfile ?? {}), cwd, parentConversationId }) };
+    const begun = agentRegistry().beginSpawnRequest({
+      engine,
+      cwd,
+      accountId: account.accountId,
+      parentConversationId,
+      launchProfile: spec.launchProfile,
+      clientAttemptId: body.clientAttemptId ?? null,
+      requestDigest: digest,
+    });
+    if (begun.kind === "conflict") return NextResponse.json({ error: "spawn attempt conflicts with its original request" }, { status: 409 });
+    if (begun.kind === "replay") {
+      const response = spawnResponseForReceipt(begun.receipt);
+      if (begun.receipt.state === "failed") return NextResponse.json({ error: "original spawn failed before launch", retrySafe: true }, { status: 409 });
+      return NextResponse.json(response, { status: response.state === "starting" ? 202 : 200 });
+    }
+    launchId = begun.receipt.launchId;
+    /* Pasted images land in the inbox and reach the fresh agent as file paths
+       appended to its first prompt — the same contract the pane composer uses. */
+    const bundle = buildImagePayload(prompt, images);
+    imagePaths = bundle.imagePaths;
+    let runtimeClient = runtimeEventsEnabled() ? runtimeHostClient() : null;
+    /* The durable launch receipt owns the runtime idempotency key too. A
+       recovered route cannot create a second logical lineage edge. */
+    const operationId = runtimeClient ? begun.receipt.launchId : null;
+    if (runtimeClient && operationId) {
+      try {
+        await runtimeClient.operation({
+          scope: runtimeScope("operation", operationId),
+          kind: "spawn.intent",
+          operationId,
+          producerKey: `viewer-spawn:${operationId}`,
+          payload: { engine, cwd, accountId: account.accountId, parentConversationId },
+        });
+      } catch {
+        console.warn("[runtime] spawn bookkeeping unavailable; continuing through the legacy spawn path");
+        runtimeClient = null;
+      }
+    }
     const startedAtMs = Date.now();
-    const pane = await spawnAgentWithPrompt(spec, bundle.payload);
+    const pane = await spawnAgentWithPrompt(spec, bundle.payload, begun.receipt);
     const childPath = await resolveSpawnedTranscriptPath({
       engine,
       knownTranscript: spec.transcript ?? null,
@@ -217,24 +279,22 @@ export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse
     });
     const key = childPath ? sessionKeyFromTranscript(engine, childPath) : null;
     if (!childPath || !key || !pane.receipt) {
-      if (pane.receipt) agentRegistry().failSpawn(pane.receipt.launchId, "spawned transcript could not be identified");
-      throw new Error("spawned transcript could not be identified safely");
+      const pending = agentRegistry().markSpawnPathPending(begun.receipt.launchId);
+      return NextResponse.json(spawnResponseForReceipt(pending, null));
     }
-    {
-      agentRegistry().completeSpawn(pane.receipt.launchId, {
-        key,
-        artifactPath: childPath,
-        cwd,
-        accountId: account.accountId,
-        status: "starting",
-        host: null,
-        claimEpoch: 0,
-        claimOwner: null,
-        pendingAction: "spawn",
-      });
-    }
+    const settled = agentRegistry().settleSpawn(pane.receipt.launchId, {
+      key,
+      artifactPath: childPath,
+      cwd,
+      accountId: account.accountId,
+      status: "starting",
+      host: null,
+      claimEpoch: 0,
+      claimOwner: null,
+      pendingAction: "spawn",
+    });
+    if (settled.kind === "conflict") return NextResponse.json(spawnResponseForReceipt(settled.receipt));
     if (runtimeClient && operationId) {
-      const childConversationId = viewerConversationId(engine, childPath);
       try {
         await runtimeClient.append({
           scope: runtimeScope("edge", operationId),
@@ -242,8 +302,8 @@ export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse
           producerKey: `viewer-spawn-edge:${operationId}`,
           payload: {
             edge: "viewer_spawn",
-            childConversationId,
-            parentConversationId: src && transcriptAllowed(src) ? conversationForTranscript(src) : null,
+            childConversationId: settled.conversation.id,
+            parentConversationId,
             operationId,
           },
         });
@@ -256,10 +316,19 @@ export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse
       if (pane.panePid) rememberHandoffPane(pane.panePid, src);
       persistHandoffLineage();
     }
-    return NextResponse.json({ ok: true, target: pane.display, path: childPath });
+    return NextResponse.json(spawnResponseForReceipt(settled.receipt, childPath));
   } catch (error) {
-    deleteInboxImages(imagePaths);
+    const receipt = launchId ? agentRegistry().snapshot().receipts[launchId] : null;
+    if (!receipt || receipt.pane === null) {
+      if (receipt) agentRegistry().failSpawn(receipt.launchId, "spawn failed before pane binding");
+      deleteInboxImages(imagePaths);
+    }
     if (error instanceof UnknownAccountError || error instanceof UnknownClaudeAccountError) return NextResponse.json({ error: error.message }, { status: 400 });
+    if (receipt?.pane) {
+      if (receipt.state === "prompt-delivered" || receipt.state === "pane-bound") agentRegistry().markSpawnPathPending(receipt.launchId);
+      const recovered = agentRegistry().snapshot().receipts[receipt.launchId];
+      if (recovered) return NextResponse.json(spawnResponseForReceipt(recovered, recovered.artifactPath));
+    }
     return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 500 });
   }
 }

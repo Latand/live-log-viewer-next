@@ -37,6 +37,7 @@ const duplicate: TranscriptHost = {
   cwd: "/repo",
   agentArgv: ["codex", "resume", "019f4906-3f67-7b72-9fbc-9ec3b5ad1326"],
   agentIdentity: "200:one",
+  launchId: null,
   claimedPaths: [PATHNAME],
   primaryPath: PATHNAME,
 };
