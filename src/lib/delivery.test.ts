@@ -75,6 +75,38 @@ test("sending to deferred history starts lazy migration and holds the message", 
   ]);
 });
 
+test("sending during a busy or unknown turn waits to migrate and keeps the message on the current generation", async () => {
+  for (const turnState of ["busy", "unknown"] as const) {
+    const registry = new AgentRegistry(path.join(SANDBOX, `${turnState}-registry.json`));
+    setAgentRegistryForTests(registry);
+    const observation: ConversationObservation = {
+      engine: "codex",
+      path: `/${turnState}-history.jsonl`,
+      accountId: "managed",
+      launchProfile: emptyLaunchProfile({ cwd: "/repo", project: "repo" }),
+      turn: { state: turnState, source: "lifecycle", terminalAt: null },
+      observedAt: "2026-07-11T10:00:00.000Z",
+    };
+    registry.reconcileConversations([observation]);
+    registry.setEngineRouting("codex", "default");
+
+    const outcome = await deliverConversationMessage({
+      pid: null,
+      path: observation.path,
+      text: "Continue the active turn",
+      images: [],
+      clientMessageId: `during-${turnState}-turn`,
+    });
+
+    expect(outcome).not.toMatchObject({ ok: true, outcome: "held" });
+    expect(registry.conversationForPath(observation.path)?.migration).toMatchObject({
+      targetId: "default",
+      phase: "waiting-turn",
+    });
+    expect(registry.pendingDeliveries(registry.conversationForPath(observation.path)!.id)).toHaveLength(0);
+  }
+});
+
 test("a stopped migration survives restart and blocks lazy re-enrollment for its routing revision", async () => {
   const filename = path.join(SANDBOX, "registry.json");
   const registry = new AgentRegistry(filename);

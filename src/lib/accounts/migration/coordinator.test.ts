@@ -119,6 +119,75 @@ describe("durable account migration coordinator", () => {
     expect(preview.counts).toEqual({ total: 1, idle: 1, busy: 0, deferred: 0, alreadyTarget: 0 });
   });
 
+  test("host readiness changes invalidate migration previews", async () => {
+    const store = registry();
+    const key = { engine: "codex" as const, sessionId: "019f4906-3f67-7b72-9fbc-9ec3b5ad1327" };
+    store.reconcileConversations([observation("/readiness-fence.jsonl", "managed", "idle")]);
+    const deferredPreview = await previewMigration("codex", "default", store);
+
+    store.upsert({
+      key,
+      artifactPath: "/readiness-fence.jsonl",
+      cwd: "/repo",
+      accountId: "managed",
+      status: "live",
+      host: null,
+      claimEpoch: 0,
+      claimOwner: null,
+      pendingAction: null,
+    });
+
+    await expect(createMigrationIntent(
+      "codex",
+      "default",
+      "manual",
+      "stale-deferred-preview",
+      deferredPreview.previewRevision,
+      "active",
+      store,
+    )).rejects.toBeInstanceOf(MigrationRevisionError);
+
+    const livePreview = await previewMigration("codex", "default", store);
+    expect(livePreview.counts).toEqual({ total: 1, idle: 1, busy: 0, deferred: 0, alreadyTarget: 0 });
+    const liveRevision = livePreview.previewRevision;
+    store.upsert({
+      key,
+      artifactPath: "/readiness-fence.jsonl",
+      cwd: "/repo",
+      accountId: "managed",
+      status: "idle",
+      host: null,
+      claimEpoch: 0,
+      claimOwner: null,
+      pendingAction: null,
+    });
+    expect(store.engineRouting("codex").revision).toBe(liveRevision);
+
+    store.markUnhosted(key);
+    await expect(createMigrationIntent(
+      "codex",
+      "default",
+      "manual",
+      "stale-live-preview",
+      liveRevision,
+      "active",
+      store,
+    )).rejects.toBeInstanceOf(MigrationRevisionError);
+
+    const refreshedPreview = await previewMigration("codex", "default", store);
+    expect(refreshedPreview.counts).toEqual({ total: 1, idle: 0, busy: 0, deferred: 1, alreadyTarget: 0 });
+    const result = await createMigrationIntent(
+      "codex",
+      "default",
+      "manual",
+      "refreshed-preview",
+      refreshedPreview.previewRevision,
+      "active",
+      store,
+    );
+    expect(result.intent.state).toBe("complete");
+  });
+
   test("preview reads the controller inventory without rewriting the registry", async () => {
     const store = registry();
     store.reconcileConversations([observation("/owned.jsonl", "managed", "idle")]);

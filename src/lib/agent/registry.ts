@@ -210,6 +210,49 @@ function migrationReadiness(
   return hasPendingDelivery ? "idle" : "deferred";
 }
 
+function migrationReadinessSignature(
+  file: RegistryFile,
+  engine: Extract<AgentEngine, "claude" | "codex">,
+  paths: ReadonlySet<string>,
+): string {
+  return JSON.stringify(Object.values(file.conversations)
+    .filter((conversation) => conversation.engine === engine
+      && paths.has(conversation.generations.at(-1)?.path ?? ""))
+    .map((conversation) => [conversation.id, migrationReadiness(file, conversation)])
+    .sort(([left], [right]) => left.localeCompare(right)));
+}
+
+function activeHostPathsChangedByEntry(
+  file: RegistryFile,
+  keyId: string,
+  replacement: Omit<AgentRegistryEntry, "updatedAt">,
+): Set<string> {
+  const previous = file.entries[keyId];
+  const paths = new Set([previous?.artifactPath, replacement.artifactPath].filter((value): value is string => Boolean(value)));
+  const activeStatuses = new Set<AgentRegistryEntry["status"]>(["starting", "live", "idle", "handoff"]);
+  const activeAtPath = (pathname: string, replace: boolean): boolean => {
+    for (const [candidateKey, current] of Object.entries(file.entries)) {
+      const candidate = replace && candidateKey === keyId ? replacement : current;
+      if (candidate.artifactPath === pathname && activeStatuses.has(candidate.status)) return true;
+    }
+    return replace && !(keyId in file.entries)
+      && replacement.artifactPath === pathname
+      && activeStatuses.has(replacement.status);
+  };
+  return new Set([...paths].filter((pathname) => activeAtPath(pathname, false) !== activeAtPath(pathname, true)));
+}
+
+function advanceMigrationScopeRevision(
+  file: RegistryFile,
+  engine: Extract<AgentEngine, "claude" | "codex">,
+  previousSignature: string,
+  paths: ReadonlySet<string>,
+): void {
+  if (migrationReadinessSignature(file, engine, paths) === previousSignature) return;
+  file.conversationRevision[engine] += 1;
+  file.engineRouting[engine].revision += 1;
+}
+
 function migrationScopeCounts(
   file: RegistryFile,
   engine: Extract<AgentEngine, "claude" | "codex">,
@@ -916,8 +959,12 @@ export class AgentRegistry {
 
   upsert(entry: Omit<AgentRegistryEntry, "updatedAt">): AgentRegistryEntry {
     return this.mutate((file) => {
+      const keyId = sessionKeyId(entry.key);
+      const changedHostPaths = activeHostPathsChangedByEntry(file, keyId, entry);
+      const readinessBefore = migrationReadinessSignature(file, entry.key.engine, changedHostPaths);
       const full = { ...entry, updatedAt: now() };
-      file.entries[sessionKeyId(entry.key)] = full;
+      file.entries[keyId] = full;
+      advanceMigrationScopeRevision(file, entry.key.engine, readinessBefore, changedHostPaths);
       return clone(full);
     });
   }
@@ -926,9 +973,13 @@ export class AgentRegistry {
     this.mutate((file) => {
       const entry = file.entries[sessionKeyId(key)];
       if (!entry) return;
+      const replacement = { ...entry, host: null, status: "unhosted" as const };
+      const changedHostPaths = activeHostPathsChangedByEntry(file, sessionKeyId(key), replacement);
+      const readinessBefore = migrationReadinessSignature(file, key.engine, changedHostPaths);
       entry.host = null;
       entry.status = "unhosted";
       entry.updatedAt = now();
+      advanceMigrationScopeRevision(file, key.engine, readinessBefore, changedHostPaths);
     });
   }
 
@@ -1311,7 +1362,8 @@ export class AgentRegistry {
         intent.updatedAt = changedAt;
       }
 
-      conversation.migration = conversationMigrationForIntent(conversation, source, intent, "requested", changedAt);
+      const phase = migrationReadiness(file, conversation) === "busy" ? "waiting-turn" : "requested";
+      conversation.migration = conversationMigrationForIntent(conversation, source, intent, phase, changedAt);
       conversation.updatedAt = changedAt;
       return clone(conversation);
     });

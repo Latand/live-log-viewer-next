@@ -9,7 +9,7 @@ import { emptyLaunchProfile, type SuccessorProviderPort } from "./contracts";
 import { QuotaController, type QuotaProbePort } from "./quotaController";
 
 const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "llv-account-controller-"));
-const { reconcileAccountMigrationCycle } = await import("./controller");
+const { AccountMigrationController, reconcileAccountMigrationCycle } = await import("./controller");
 
 afterAll(() => {
   fs.rmSync(stateDir, { recursive: true, force: true });
@@ -39,6 +39,38 @@ test("controller migration cycle reconciles and ticks both durable quota policy 
   expect(ticks.sort()).toEqual(["claude", "codex"]);
   expect(registry.conversation(conversation.id)?.migration?.phase).toBe("committed");
 }, 20_000);
+
+test("controller runs a trailing cycle when a signal arrives during reconciliation", async () => {
+  const registry = new AgentRegistry(path.join(stateDir, "trailing-cycle-registry.json"));
+  let releaseFirstCycle = () => {};
+  const firstCycleBlocked = new Promise<void>((resolve) => { releaseFirstCycle = resolve; });
+  let cycles = 0;
+  let activeCycles = 0;
+  let maxActiveCycles = 0;
+  const controller = new AccountMigrationController(
+    registry,
+    { tick: async () => {} } as never,
+    async () => {
+      cycles += 1;
+      activeCycles += 1;
+      maxActiveCycles = Math.max(maxActiveCycles, activeCycles);
+      try {
+        if (cycles === 1) await firstCycleBlocked;
+      } finally {
+        activeCycles -= 1;
+      }
+    },
+  );
+
+  const firstTick = controller.tick();
+  const trailingTick = controller.tick();
+  const coalescedTick = controller.tick();
+  releaseFirstCycle();
+  await Promise.all([firstTick, trailingTick, coalescedTick]);
+
+  expect(cycles).toBe(2);
+  expect(maxActiveCycles).toBe(1);
+});
 
 test("three controller cycles move depleted Main to a stronger managed account and suppress a bounce", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "llv-account-controller-auto-"));

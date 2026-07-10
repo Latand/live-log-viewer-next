@@ -67,16 +67,28 @@ async function reconcileAccountLogins(): Promise<void> {
 
 export class AccountMigrationController {
   private running: Promise<void> | null = null;
+  private trailingCycleRequested = false;
 
   constructor(
     private readonly registry: AgentRegistry = agentRegistry(),
     private readonly quota = new QuotaController(registry),
+    private readonly cycle: (() => Promise<void>) | null = null,
   ) {}
 
   tick(): Promise<void> {
-    if (this.running) return this.running;
-    this.running = this.run().finally(() => { this.running = null; });
+    if (this.running) {
+      this.trailingCycleRequested = true;
+      return this.running;
+    }
+    this.running = this.runRequestedCycles().finally(() => { this.running = null; });
     return this.running;
+  }
+
+  private async runRequestedCycles(): Promise<void> {
+    do {
+      this.trailingCycleRequested = false;
+      await (this.cycle?.() ?? this.run());
+    } while (this.trailingCycleRequested);
   }
 
   private async run(): Promise<void> {
