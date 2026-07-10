@@ -1,8 +1,7 @@
 import { createHash } from "node:crypto";
 
-import { NextResponse } from "next/server";
+import { after, NextResponse } from "next/server";
 
-import { listFilesWithProjectCatalog } from "@/lib/scanner";
 import { agentRegistry } from "@/lib/agent/registry";
 import { pidAlive, readPpid } from "@/lib/scanner/process";
 import { loadFlows } from "@/lib/flows/store";
@@ -16,13 +15,17 @@ import { filterWorkflowsForFileScan } from "@/lib/workflows/visibility";
 import { projectRateLimitReadModel } from "@/lib/rateLimit";
 import type { FilesResponse } from "@/lib/types";
 
+import { cachedFileScan } from "./scanCache";
+
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function GET(request: Request): Promise<NextResponse> {
   const url = new URL(request.url);
   const selectedProject = url.searchParams.get("project")?.trim() || undefined;
-  const { files, projectCatalog } = await listFilesWithProjectCatalog(selectedProject, { persist: false });
+  const scan = await cachedFileScan(selectedProject);
+  if (scan.refreshAfterResponse) after(scan.refreshAfterResponse);
+  const { files, projectCatalog } = scan.snapshot;
   // A scan is a read model. Runtime reconciliation and notifications belong to
   // the external scheduler, keeping repeated GETs byte-stable for state files.
   const registry = agentRegistry();
