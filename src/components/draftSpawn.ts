@@ -95,7 +95,7 @@ export function createSpawnAttempt(clientAttemptId: string, at: number, request:
 }
 
 /** Validates records before a reload replays them. Missing or altered fields
-    leave the card frozen rather than issuing a broad substitute launch. */
+    leave the card frozen until exact recovery data arrives. */
 export function hasRecoverableRequest(attempt: SpawnAttempt): attempt is SpawnAttempt & { request: RecoverableSpawnRequest } {
   const request = attempt.request;
   return Boolean(

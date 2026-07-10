@@ -82,7 +82,7 @@ function readAttempt(id: string): SpawnAttempt | null {
 }
 
 /** A fresh idempotency key for one launch — a converging re-POST replays onto
-    the same server receipt rather than spawning a duplicate worker. Matches the
+    the same server receipt and prevents a duplicate worker. Matches the
     route's `^[A-Za-z0-9_-]{8,128}$` gate. */
 function newAttemptId(): string {
   const raw = typeof crypto !== "undefined" && typeof crypto.randomUUID === "function" ? crypto.randomUUID() : Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 12);

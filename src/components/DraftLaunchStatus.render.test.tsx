@@ -37,7 +37,7 @@ test("attention is assertive, focusable, and discourages a relaunch by name", ()
   expect(html).toContain("tabindex=\"-1\"");
   expect(html).toContain("sess:3.0");
   expect(html).toContain("launch it again");
-  /* No spinner in the terminal state — a static glyph, not a false "working". */
+  /* The terminal state uses a static glyph with no working animation. */
   expect(html).not.toContain("animate-spin");
 });
 
