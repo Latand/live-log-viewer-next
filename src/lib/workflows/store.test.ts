@@ -4,11 +4,13 @@ import os from "node:os";
 import path from "node:path";
 
 import { AgentRegistry } from "@/lib/agent/registry";
+import { CODEX_SOL_MODEL } from "@/lib/agent/models";
+import { saveRoleOverrides } from "@/lib/roles/store";
 
 /* The state dir must point at a sandbox before store.ts computes its
    module-level constants, so the store loads dynamically after the env set. */
 process.env.LLV_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "llv-wf-store-test-"));
-const { buildWorkflow, DEFAULT_FIXER, loadTemplates, loadWorkflows, mergeSeededTemplates, normalizeStages, normalizeTemplate, reconcileWorkflowConversationOwnership, roleConfigFromReference, saveWorkflows } =
+const { buildWorkflow, DEFAULT_FIXER, loadTemplates, loadWorkflows, mergeSeededTemplates, normalizeStages, normalizeTemplate, reconcileWorkflowConversationOwnership, roleConfigFromReference, saveWorkflows, seededTemplatesFromRoles } =
   await import("./store");
 
 type WorkflowTemplate = import("./types").WorkflowTemplate;
@@ -159,6 +161,25 @@ test("an untouched pre-registry workflow template updates from role defaults", (
   expect(migrated.stages[0]).toMatchObject({ agent: { model: "gpt-5.6-sol", effort: "medium" } });
 });
 
+test("template seeds fall back to the role default when a saved builder override is semantically invalid", () => {
+  const previousState = process.env.LLV_STATE_DIR;
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-wf-bad-override-"));
+  process.env.LLV_STATE_DIR = sandbox;
+  try {
+    saveRoleOverrides({ builder: { config: { model: "not-a-gpt-model" } } });
+    expect(() => seededTemplatesFromRoles()).not.toThrow();
+    const fullstack = seededTemplatesFromRoles().find((template) => template.name === "fullstack")!;
+    expect(fullstack.stages[0]?.kind === "implement" && fullstack.stages[0].agent).toEqual({
+      engine: "codex",
+      model: CODEX_SOL_MODEL,
+      effort: "medium",
+    });
+  } finally {
+    if (previousState === undefined) delete process.env.LLV_STATE_DIR;
+    else process.env.LLV_STATE_DIR = previousState;
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  }
+});
 
 test("workflows round-trip through the store", () => {
   const template = normalizeTemplate({ name: "demo", stages: [IMPLEMENT, REVIEW], finish: "merge" })!;

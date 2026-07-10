@@ -7,6 +7,7 @@ import { useComposer } from "@/hooks/useComposer";
 import { isEngineEffort } from "@/lib/agent/efforts";
 import { defaultModelFor } from "@/lib/agent/models";
 import { useLocale } from "@/lib/i18n";
+import { BUILDER_APPLY_FIXES_CONFIG, BUILDER_FRONTEND_CONFIG } from "@/lib/roles/paramConfig";
 import type { RoleDefinition } from "@/lib/roles/types";
 import type { FileEntry } from "@/lib/types";
 
@@ -106,10 +107,6 @@ function newAttemptId(): string {
   return raw.replace(/[^A-Za-z0-9_-]/g, "").slice(0, 128).padEnd(8, "0");
 }
 
-function attemptTimestamp(): number {
-  return Date.now();
-}
-
 /**
  * A conversation that does not exist yet, drawn as a full pane on the scheme:
  * engine picker in the header retints the whole card, the directory rides
@@ -195,21 +192,23 @@ export function DraftAgentPane({
     const selected = roles.find((role) => role.id === roleId);
     if (selected?.id !== "builder") return;
     if (next.domain === "frontend") {
-      setEngine("claude");
-      setModel("opus");
-      setEffort("high");
+      setEngine(BUILDER_FRONTEND_CONFIG.engine);
+      setModel(BUILDER_FRONTEND_CONFIG.model);
+      setEffort(BUILDER_FRONTEND_CONFIG.effort);
       setSpeed("");
       return;
     }
     if (next.mode === "apply-fixes") {
-      setEngine("codex");
-      setModel("gpt-5.6-terra");
-      setEffort("low");
+      setEngine(BUILDER_APPLY_FIXES_CONFIG.engine);
+      setModel(BUILDER_APPLY_FIXES_CONFIG.model);
+      setEffort(BUILDER_APPLY_FIXES_CONFIG.effort);
       return;
     }
-    setEngine("codex");
-    setModel("gpt-5.6-sol");
-    setEffort("medium");
+    /* Plain/general mode falls back to the server-merged config so a saved
+       role override is honored, matching selectRole below. */
+    setEngine(selected.config.engine);
+    setModel(selected.config.model);
+    setEffort(selected.config.effort);
   };
   const setDeployConfirm = (value: string) => {
     setDeployConfirmState(value);
@@ -398,7 +397,7 @@ export function DraftAgentPane({
       }
     }
     if (!payloadText.trim() && !attachments.images.length) return;
-    const candidate = createSpawnAttempt(newAttemptId(), attemptTimestamp(), {
+    const candidate = createSpawnAttempt(newAttemptId(), Date.now(), {
       engine,
       model,
       cwd: cwd.trim(),

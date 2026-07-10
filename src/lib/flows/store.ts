@@ -4,6 +4,7 @@ import path from "node:path";
 
 import { statePath } from "@/lib/configDir";
 import { agentRegistry, type AgentRegistry } from "@/lib/agent/registry";
+import { ROLE_DEFAULTS } from "@/lib/roles/defaults";
 import { listRoles, resolveRole } from "@/lib/roles/registry";
 
 import type { Flow, FlowPreset, ReviewVerdict } from "./types";
@@ -41,7 +42,10 @@ const LEGACY_SEEDED_PRESETS: FlowPreset[] = [
 ];
 
 /** Defaults written by releases before the role registry. Exact matches are
-    regenerated, while any user-edited variant stays intact. */
+    regenerated, while any user-edited variant stays intact. The next time a
+    role default's engine/model/effort changes, append the previous
+    generation's seed shape here too, or its exact-match migration silently
+    stops firing for anyone still on the old preset name/config pair. */
 const PRE_ROLE_SEEDED_PRESETS: FlowPreset[] = [
   { name: "Terra high → Sol xhigh", implementer: { engine: "codex", model: "gpt-5.6-terra", effort: "high" }, reviewer: { engine: "codex", model: "gpt-5.6-sol", effort: "xhigh" } },
   { name: "Terra low → Sol xhigh", implementer: { engine: "codex", model: "gpt-5.6-terra", effort: "low" }, reviewer: { engine: "codex", model: "gpt-5.6-sol", effort: "xhigh" } },
@@ -50,11 +54,15 @@ const PRE_ROLE_SEEDED_PRESETS: FlowPreset[] = [
   { name: "Sonnet → Sol xhigh", implementer: { engine: "claude", model: "sonnet", effort: null }, reviewer: { engine: "codex", model: "gpt-5.6-sol", effort: "xhigh" } },
 ];
 
+/** A role override that passes the store's shape check can still fail the
+    registry's semantic validation (e.g. a codex model not prefixed `gpt-`).
+    Seed derivation must never crash on that — it falls back to the role's
+    hardcoded default config instead of propagating the broken override. */
 function flowRole(role: "builder" | "reviewer" | "architect", params: Record<string, string> = {}): FlowPreset["implementer"] {
   if (role !== "builder") return { ...listRoles().find((candidate) => candidate.id === role)!.config };
   const resolved = resolveRole(role, params);
-  if (!resolved.ok) throw new Error(resolved.error);
-  return { ...resolved.value.config };
+  if (resolved.ok) return { ...resolved.value.config };
+  return { ...ROLE_DEFAULTS.find((candidate) => candidate.id === role)!.config };
 }
 
 /** Seed profiles resolve from the role registry on every load. Existing saved

@@ -5,6 +5,7 @@ import { statePath } from "@/lib/configDir";
 import { agentRegistry, type AgentRegistry } from "@/lib/agent/registry";
 import type { RoleConfig } from "@/lib/flows/types";
 import { atomicWriteText } from "@/lib/flows/store";
+import { ROLE_DEFAULTS } from "@/lib/roles/defaults";
 import { listRoles, resolveRole } from "@/lib/roles/registry";
 import type { RoleConfig as RegistryRoleConfig } from "@/lib/roles/types";
 
@@ -14,12 +15,16 @@ const WORKFLOWS_FILE = statePath("workflows.json");
 const TEMPLATES_FILE = statePath("workflow-templates.json");
 const ARTIFACT_DIR = statePath("workflows");
 
-/** The hard fixer default (W5): Terra supplies fast hands for applying findings. */
+/** The hard fixer default (W5): Terra supplies fast hands for applying findings.
+    A role override that passes the store's shape check can still fail the
+    registry's semantic validation (e.g. a codex model not prefixed `gpt-`).
+    Seed derivation must never crash on that — it falls back to the role's
+    hardcoded default config instead of propagating the broken override. */
 function registryRole(role: "builder" | "reviewer" | "architect" | "cleaner", params: Record<string, string> = {}): RoleConfig {
   if (role !== "builder") return { ...listRoles().find((candidate) => candidate.id === role)!.config };
   const resolved = resolveRole(role, params);
-  if (!resolved.ok) throw new Error(resolved.error);
-  return { ...resolved.value.config };
+  if (resolved.ok) return { ...resolved.value.config };
+  return { ...ROLE_DEFAULTS.find((candidate) => candidate.id === role)!.config };
 }
 
 /** The hard fixer default (W5) derives from Cleaner and clamps its effort. */
@@ -27,6 +32,9 @@ export function defaultFixerFromRoles(): RoleConfig {
   return { ...registryRole("cleaner"), effort: "low" };
 }
 
+/** Compatibility export for consumers that render the initial seed default;
+    `normalizeFixer` below re-resolves live so a saved role override still
+    takes effect without a process restart. */
 export const DEFAULT_FIXER: RoleConfig = defaultFixerFromRoles();
 
 /* The user's canonical template (design doc example), seeded on first load
@@ -60,7 +68,11 @@ const LEGACY_SEEDED_TEMPLATES: WorkflowTemplate[] = [
 ];
 
 /** Defaults written before registry-derived profiles. Exact copies migrate to
-    the current role configs; records changed by a user retain their values. */
+    the current role configs; records changed by a user retain their values.
+    The next time a role default's engine/model/effort changes, append the
+    previous generation's seed shape here too, or its exact-match migration
+    silently stops firing for anyone still on the old template name/config
+    pair. */
 const PRE_ROLE_SEEDED_TEMPLATES: WorkflowTemplate[] = [
   {
     name: "fullstack",
@@ -195,7 +207,7 @@ function implementStageOf(value: Partial<ImplementStage>): ImplementStage | null
     collapses to the default. */
 function normalizeFixer(value: unknown): RoleConfig {
   const role = roleOf(value);
-  if (!role || role.engine !== "codex") return { ...DEFAULT_FIXER };
+  if (!role || role.engine !== "codex") return defaultFixerFromRoles();
   return { engine: "codex", model: role.model, effort: "low" };
 }
 
