@@ -147,11 +147,28 @@ function MigrationBanner({ state }: { state: EngineAccountsState }) {
           ) : null}
         </>
       ) : (
-        <span className="text-[11px] text-dim">
-          {model.state === "stopped"
-            ? t("migrate.stoppedNotice", { label: model.targetLabel })
-            : t("migrate.completeNotice", { engine, label: model.targetLabel })}
-        </span>
+        <div className="flex items-center gap-2">
+          <span className="min-w-0 flex-1 text-[11px] text-dim">
+            {model.failed > 0
+              ? t("migrate.failedNotice", { label: model.targetLabel, n: model.failed })
+              : model.state === "stopped"
+                ? t("migrate.stoppedNotice", { label: model.targetLabel })
+                : t("migrate.completeNotice", { engine, label: model.targetLabel })}
+          </span>
+          {model.failed > 0 ? (
+            // A terminal intent that still carries failed-recoverable sessions
+            // keeps the bulk retry (Terra retains the intent while counts.failed
+            // stays positive), so terminal recoverable failures remain recoverable.
+            <button
+              type="button"
+              onClick={() => void state.retryFailedMigration()}
+              disabled={state.mutation !== null}
+              className="shrink-0 rounded-[7px] border border-line bg-bg px-2 py-0.5 text-[11px] font-semibold hover:bg-chip disabled:opacity-45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            >
+              {t("migrate.bannerRetryFailed", { n: model.failed })}
+            </button>
+          ) : null}
+        </div>
       )}
     </div>
   );
@@ -251,7 +268,6 @@ function ConfirmStep({
           ? t("migrate.retargetBody", { current: state.migration!.targetLabel, label })
           : t("migrate.confirmBody", { total: preview.counts.total, idle: preview.counts.idle, busy: preview.counts.busy, label })}
       </p>
-      {preview.rootWarning ? <p className="mt-1.5 text-[10.5px] font-semibold text-[#8a5a00]">{t("accounts.rootWarning")}</p> : null}
       <div className="mt-2.5 flex items-center justify-end gap-2">
         <button
           type="button"
@@ -277,25 +293,47 @@ function ConfirmStep({
 }
 
 /**
- * Unified, engine-parameterized Accounts panel opened from the limits footer.
- * Symmetric for Claude and Codex: account list with capacity chips, per-engine
- * Auto balance switch, a scope confirm step before any migration, a draining
- * banner with Stop, and the add-account form. Positioning mirrors the resources
- * CleanupPanel: a flyout beside the rail on desktop, a bottom sheet inside the
- * drawer on mobile.
+ * Unified, engine-parameterized Accounts panel. Symmetric for Claude and Codex:
+ * account list with capacity chips, per-engine Auto balance switch, a scope
+ * confirm step before any migration, a draining banner with Stop, and the
+ * add-account form.
+ *
+ * `placement` picks the desktop anchor for the caller's surface (mobile always
+ * uses the bottom sheet):
+ * - `"footer"` (the limits footer): a flyout beside the rail (`sm:left-full`),
+ *   bottom-aligned, mirroring the resources CleanupPanel.
+ * - `"header"` (the Switchboard header): a dropdown below the trigger
+ *   (`sm:top-full`). The header sits at the top of an overflow-hidden modal, so
+ *   a bottom-anchored flyout would grow upward out of that shell and clip; the
+ *   header placement anchors downward and stays inside the box.
  */
-export function AccountsPanel({ state, onClose }: { state: EngineAccountsState; onClose: () => void }) {
+export function AccountsPanel({
+  state,
+  onClose,
+  placement = "footer",
+}: {
+  state: EngineAccountsState;
+  onClose: () => void;
+  placement?: "footer" | "header";
+}) {
   const { t } = useLocale();
   const { accounts, active, status, notice, mutation, engine } = state;
   const [label, setLabel] = useState("");
   const [confirm, setConfirm] = useState<{ targetId: string; preview: MigrationPreview } | null>(null);
   /* A preview that fails to parse must never fall through to an instant switch
      (finding 3): the operator would silently reroute new spawns with no scope
-     shown and no durable intent. Instead we hold the target here and show a
+     shown and no durable intent. The failed target is held here and shown as a
      recoverable, announced error with a Retry. */
   const [previewError, setPreviewError] = useState<{ targetId: string; label: string } | null>(null);
   const closeRef = useRef<HTMLButtonElement>(null);
   const engineName = engineDisplay(engine);
+  // Desktop anchor per caller; both share the mobile bottom sheet. The header
+  // placement drops downward (`sm:top-full`) so an overflow-hidden ancestor
+  // can't clip the panel; the footer keeps the bottom-aligned right-side flyout.
+  const placementClass =
+    placement === "header"
+      ? "sm:absolute sm:top-full sm:left-0 sm:mt-2 sm:bottom-auto sm:translate-x-0"
+      : "sm:absolute sm:bottom-1 sm:left-full sm:ml-2 sm:translate-x-0";
 
   useEffect(() => {
     closeRef.current?.focus();
@@ -311,7 +349,8 @@ export function AccountsPanel({ state, onClose }: { state: EngineAccountsState; 
     const preview = await state.preview(id);
     switch (accountSelectOutcome(preview)) {
       case "recoverable-error":
-        // The preview failed: do NOT switch (finding 3) — surface a retry instead.
+        // A failed preview holds the target and surfaces a retryable error; it
+        // never falls through to a switch (finding 3).
         setPreviewError({ targetId: id, label: accounts.find((account) => account.id === id)?.label ?? id });
         return;
       case "confirm":
@@ -320,7 +359,7 @@ export function AccountsPanel({ state, onClose }: { state: EngineAccountsState; 
       case "migrate":
         // No live sessions in scope: submit a zero-scope, revision-fenced
         // migration so new spawns adopt the target through the durable intent
-        // path, never a legacy bare select.
+        // path.
         await state.selectAndMigrate(id, preview!.previewRevision);
         return;
     }
@@ -362,7 +401,7 @@ export function AccountsPanel({ state, onClose }: { state: EngineAccountsState; 
           }
           handleOverlayEscape(event, onClose);
         }}
-        className="fixed bottom-3 left-1/2 z-50 flex w-[min(360px,calc(100vw-16px))] -translate-x-1/2 flex-col rounded-[12px] border border-line bg-panel shadow-[0_8px_28px_rgba(20,20,30,0.14)] sm:absolute sm:bottom-1 sm:left-full sm:ml-2 sm:translate-x-0"
+        className={`fixed bottom-3 left-1/2 z-50 flex w-[min(360px,calc(100vw-16px))] -translate-x-1/2 flex-col rounded-[12px] border border-line bg-panel shadow-[0_8px_28px_rgba(20,20,30,0.14)] ${placementClass}`}
       >
         <header className="flex items-center gap-2 border-b border-line px-3 py-2">
           <span className="text-[12.5px] font-bold">{t("accounts.titleFor", { engine: engineName })}</span>

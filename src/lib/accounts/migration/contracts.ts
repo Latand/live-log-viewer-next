@@ -164,6 +164,7 @@ export interface SuccessorProviderPort {
     targetAccountId: string;
   }): Promise<ProviderReceipt>;
   verify(receipt: ProviderReceipt, input: { engine: MigrationEngine; targetAccountId: string; launchProfile: LaunchProfile }): Promise<void>;
+  cleanup?(receipt: ProviderReceipt): Promise<void>;
 }
 
 /** Transitional copy-only fake supported by the legacy coordinator wrapper. */

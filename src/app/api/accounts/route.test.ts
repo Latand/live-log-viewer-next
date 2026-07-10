@@ -223,10 +223,11 @@ test("active route returns a target-aware preview and idempotent revision-fenced
   }]);
   const previewResponse = await POST(migrationRequest({ id: target.id, mode: "preview" }));
   expect(previewResponse.status).toBe(200);
-  const preview = await previewResponse.json() as { targetId: string; targetLabel: string; counts: { total: number; idle: number; busy: number; alreadyTarget: number; excludedRoots: number }; excludedRoots: unknown[]; rootWarning: boolean; previewRevision: number };
+  const preview = await previewResponse.json() as { targetId: string; targetLabel: string; counts: { total: number; idle: number; busy: number; alreadyTarget: number }; previewRevision: number };
   expect(preview).toMatchObject({ targetId: target.id, targetLabel: "Migration target" });
-  expect(preview.counts).toEqual(expect.objectContaining({ total: 1, idle: 1, busy: 0, alreadyTarget: 0, excludedRoots: 0 }));
-  expect(preview.excludedRoots).toEqual([]);
+  expect(preview.counts).toEqual({ total: 1, idle: 1, busy: 0, alreadyTarget: 0 });
+  expect(preview).not.toHaveProperty("excludedRoots");
+  expect(preview).not.toHaveProperty("rootWarning");
 
   const body = { id: target.id, mode: "migrate", previewRevision: preview.previewRevision, requestId: "route-idempotency" };
   const first = await POST(migrationRequest(body));
@@ -256,6 +257,60 @@ test("migrate repairs generations on another account when routing already names 
   expect(preview.counts.total).toBeGreaterThanOrEqual(1);
   expect(response.status).toBe(202);
   expect(agentRegistry().conversationForPath("/stale-account.jsonl")?.migration).toMatchObject({ targetId: target.id, phase: "requested" });
+});
+
+test("GET retains the latest completed intent with recoverable failures for bulk retry", async () => {
+  const target = createManagedCodexAccount("Recovery target");
+  for (const existing of Object.values(agentRegistry().snapshot().migrationIntents)) {
+    if (existing.state === "draining") agentRegistry().setMigrationIntentState(existing.id, "stopped");
+  }
+  agentRegistry().reconcileConversations([{
+    engine: "codex",
+    path: "/recoverable.jsonl",
+    accountId: "default",
+    launchProfile: emptyLaunchProfile(),
+    turn: { state: "idle", source: "empty", terminalAt: null },
+    observedAt: "2026-07-10T12:00:00.000Z",
+  }]);
+  const conversation = agentRegistry().conversationForPath("/recoverable.jsonl")!;
+  const intent = agentRegistry().commitMigrationIntent({ engine: "codex", targetId: target.id, origin: "manual", requestId: "recoverable-projection", expectedRevision: agentRegistry().engineRouting("codex").revision });
+  const revision = agentRegistry().conversation(conversation.id)!.migration!.revision;
+  agentRegistry().transitionConversationMigration(conversation.id, revision, ["requested"], { phase: "failed-recoverable", error: "retry later", errorCode: "provider-failed" });
+  agentRegistry().setMigrationIntentState(intent.id, "complete");
+
+  const body = await (await GET()).json() as { codex: { migration: { intentId: string; state: string; counts: { failed: number; total: number } } | null } };
+
+  expect(body.codex.migration).toEqual(expect.objectContaining({
+    intentId: intent.id,
+    state: "complete",
+    counts: expect.objectContaining({ failed: 1 }),
+  }));
+
+  agentRegistry().retryConversationMigration(conversation.id, revision);
+  agentRegistry().transitionConversationMigration(conversation.id, revision, ["requested"], { phase: "preparing" });
+  agentRegistry().transitionConversationMigration(conversation.id, revision, ["preparing"], { phase: "successor-starting" });
+  agentRegistry().transitionConversationMigration(conversation.id, revision, ["successor-starting"], {
+    phase: "verifying",
+    providerReceipt: {
+      operationId: agentRegistry().conversation(conversation.id)!.migration!.operationId,
+      nativeId: "recovered-successor",
+      path: "/recovered-successor.jsonl",
+      historyHash: "recovered",
+      host: { kind: "codex-app-server", identity: "recovered", epoch: 1, verifiedAt: "2026-07-10T12:01:00.000Z" },
+    },
+  });
+  agentRegistry().commitSuccessor(conversation.id, {
+    id: "recovered-successor",
+    path: "/recovered-successor.jsonl",
+    accountId: target.id,
+    launchProfile: emptyLaunchProfile(),
+    historyHash: "recovered",
+    host: { kind: "codex-app-server", identity: "recovered", epoch: 1, verifiedAt: "2026-07-10T12:01:00.000Z" },
+  }, revision);
+  agentRegistry().setMigrationIntentState(intent.id, "complete");
+
+  const afterRetry = await (await GET()).json() as { codex: { migration: unknown } };
+  expect(afterRetry.codex.migration).toBeNull();
 });
 
 test("Claude DTOs remain secret-free and creation rejects cross-origin before any state change", async () => {

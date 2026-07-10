@@ -7,7 +7,7 @@ import type { AccountContext, AccountManager } from "@/lib/accounts/contracts";
 import { CodexAppServerClient } from "@/lib/accounts/codexAppServer";
 import { realClaudeLoginPorts } from "@/lib/accounts/claudeLogin";
 import { claudeSuccessorSpecFor } from "@/lib/agent/cli";
-import { spawnAgentWithPrompt } from "@/lib/tmux";
+import { forgetResumePane, killPane, paneInfo, panePidOf, spawnAgentWithPrompt } from "@/lib/tmux";
 
 import type { LaunchProfile, ProviderReceipt, SuccessorProviderPort } from "./contracts";
 import { hashValidatedHistory, safeCopyHistory, validateHistorySource } from "./safeHistoryCopy";
@@ -17,6 +17,8 @@ export interface ProviderDependencies {
   startCodex(home: string): Promise<CodexAppServerClient>;
   claudeStatus(home: string): Promise<{ loggedIn: boolean }>;
   spawnClaude(spec: ReturnType<typeof claudeSuccessorSpecFor>): Promise<{ paneId: string; panePid?: number }>;
+  claudeHost?(paneId: string): Promise<{ paneId: string; panePid: number; windowName: string } | null>;
+  cancelClaude?(paneId: string): Promise<void>;
   now(): string;
 }
 
@@ -25,6 +27,12 @@ const defaultDependencies: ProviderDependencies = {
   startCodex: (home) => CodexAppServerClient.start({ home }),
   claudeStatus: (home) => realClaudeLoginPorts.status(home),
   spawnClaude: (spec) => spawnAgentWithPrompt(spec, ""),
+  claudeHost: async (paneId) => {
+    const [info, panePid] = await Promise.all([paneInfo(paneId), panePidOf(paneId)]);
+    if (!info || panePid === null) return null;
+    return { paneId, panePid, windowName: info.windowName };
+  },
+  cancelClaude: async (paneId) => { await killPane(paneId); },
   now: () => new Date().toISOString(),
 };
 
@@ -75,6 +83,37 @@ function ensureTargetRoot(account: AccountContext): void {
   }
 }
 
+function claudePaneFromHost(receipt: ProviderReceipt): { paneId: string; panePid: number } {
+  if (receipt.host.kind !== "claude-stream") throw new Error("successor Claude host identity is invalid");
+  const matched = /^(%[0-9]+):([1-9][0-9]*)$/.exec(receipt.host.identity);
+  if (!matched) throw new Error("successor Claude host identity is invalid");
+  return { paneId: matched[1]!, panePid: Number(matched[2]) };
+}
+
+function claudePaneIdFromHost(receipt: ProviderReceipt): string {
+  if (receipt.host.kind !== "claude-stream") throw new Error("successor Claude host identity is invalid");
+  const matched = /^(%[0-9]+):/.exec(receipt.host.identity);
+  if (!matched) throw new Error("successor Claude host identity is invalid");
+  return matched[1]!;
+}
+
+function assertClaudeTranscript(receipt: ProviderReceipt, target: AccountContext): void {
+  if (!receipt.path.startsWith(target.transcriptRoot + path.sep)) throw new Error("target Claude history is outside its registered root");
+  if (path.basename(receipt.path, ".jsonl") !== receipt.nativeId) throw new Error("target Claude transcript identity does not match");
+  if (!fs.existsSync(receipt.path)) throw new Error("target Claude successor transcript is not durable");
+  const history = hashValidatedHistory(receipt.path, target.transcriptRoot);
+  if (history.size === 0) throw new Error("target Claude successor transcript is not durable");
+  const records = fs.readFileSync(receipt.path, "utf8").split("\n");
+  const matchesSession = records.some((line) => {
+    try {
+      const value = JSON.parse(line) as { sessionId?: unknown; session_id?: unknown };
+      return value.sessionId === receipt.nativeId || value.session_id === receipt.nativeId;
+    } catch { return false; }
+  });
+  if (!matchesSession) throw new Error("target Claude transcript session identity does not match");
+  receipt.historyHash = history.hash;
+}
+
 export class RegisteredSuccessorProvider implements SuccessorProviderPort {
   constructor(private readonly dependencies: ProviderDependencies = defaultDependencies) {}
 
@@ -93,7 +132,12 @@ export class RegisteredSuccessorProvider implements SuccessorProviderPort {
     if (input.engine === "claude") {
       const status = await this.dependencies.claudeStatus(target.home);
       if (!status.loggedIn) throw new Error("target Claude account is not authenticated");
-      if (!receipt.path.startsWith(target.transcriptRoot + path.sep)) throw new Error("target Claude history is outside its registered root");
+      assertClaudeTranscript(receipt, target);
+      const expected = claudePaneFromHost(receipt);
+      const host = await this.dependencies.claudeHost?.(expected.paneId);
+      if (!host || host.paneId !== expected.paneId || host.panePid !== expected.panePid || host.windowName !== "claude-migration-successor") {
+        throw new Error("target Claude successor host is not live and canonical");
+      }
       return;
     }
     const client = await this.dependencies.startCodex(target.home);
@@ -103,6 +147,13 @@ export class RegisteredSuccessorProvider implements SuccessorProviderPort {
       const thread = await client.readThread(receipt.nativeId);
       if (thread.id !== receipt.nativeId) throw new Error("target Codex thread identity does not match");
     } finally { client.close(); }
+  }
+
+  async cleanup(receipt: ProviderReceipt): Promise<void> {
+    if (receipt.host.kind !== "claude-stream") return;
+    const paneId = claudePaneIdFromHost(receipt);
+    forgetResumePane(receipt.path);
+    await this.dependencies.cancelClaude?.(paneId);
   }
 
   private async createClaude(operationId: string, sourcePath: string, profile: LaunchProfile, source: AccountContext, target: AccountContext): Promise<ProviderReceipt> {

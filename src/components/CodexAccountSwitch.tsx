@@ -61,7 +61,7 @@ export function CodexAccountSwitch() {
           <ChevronDown className="h-3 w-3 shrink-0 text-dim" aria-hidden />
         )}
       </button>
-      {open ? <AccountsPanel state={state} onClose={close} /> : null}
+      {open ? <AccountsPanel state={state} onClose={close} placement="header" /> : null}
     </div>
   );
 }

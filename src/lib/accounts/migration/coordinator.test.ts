@@ -179,6 +179,24 @@ describe("durable account migration coordinator", () => {
     expect(store.pendingDeliveries(conversation.id)).toEqual([]);
   });
 
+  test("a root session preserves its active goal and drains held delivery through the successor", async () => {
+    const store = registry();
+    store.reconcileConversations([observation("/root.jsonl", "a", "idle", "root")]);
+    const conversation = store.conversationForPath("/root.jsonl")!;
+    store.commitMigrationIntent({ engine: "codex", targetId: "b", origin: "manual", requestId: "root-lifecycle", expectedRevision: store.engineRouting("codex").revision });
+    store.holdDelivery(conversation.id, "continue the active goal", "root-delivery");
+
+    const committed = await advanceConversationMigration(conversation.id, store, provider(["/root-successor.jsonl"]));
+    const successor = committed.generations.at(-1)!;
+    expect(committed.migration?.phase).toBe("committed");
+    expect(successor.launchProfile).toMatchObject({ role: "root", goal: { objective: "Ship", status: "active" } });
+    expect(store.pendingDeliveries(conversation.id)[0]).toMatchObject({ state: "assigned", generationId: successor.id });
+
+    const delivered: string[] = [];
+    await drainHeldDeliveries(conversation.id, { async deliver(input) { delivered.push(input.clientMessageId); return "delivered"; } }, store);
+    expect(delivered).toEqual(["root-delivery"]);
+  });
+
   test("an ambiguous held delivery is claimed once and never replayed automatically", async () => {
     const store = registry();
     store.reconcileConversations([observation("/source.jsonl", "a", "idle")]);
@@ -219,5 +237,59 @@ describe("durable account migration coordinator", () => {
     const latest = await advanceConversationMigration(conversation.id, store, staleProvider);
     expect(latest.migration).toMatchObject({ targetId: "c", phase: "requested" });
     expect(latest.generations).toHaveLength(1);
+  });
+
+  test("stopping during successor startup fences the stale completion and cleans the discarded successor", async () => {
+    const store = registry();
+    store.reconcileConversations([observation("/source.jsonl", "a", "idle")]);
+    const conversation = store.conversationForPath("/source.jsonl")!;
+    const intent = store.commitMigrationIntent({ engine: "codex", targetId: "b", origin: "manual", requestId: "stop-during-start", expectedRevision: store.engineRouting("codex").revision });
+    const cleaned: string[] = [];
+    const provider: SuccessorProviderPort = {
+      async create(input) {
+        store.setMigrationIntentState(intent.id, "stopped");
+        return {
+          operationId: input.operationId,
+          nativeId: "discarded-successor",
+          path: "/discarded-successor.jsonl",
+          historyHash: "discarded",
+          host: { kind: "codex-app-server", identity: "discarded", epoch: 1, verifiedAt: "2026-07-10T12:01:00.000Z" },
+        };
+      },
+      async verify() { throw new Error("verification must not run after stop"); },
+      async cleanup(receipt) { cleaned.push(receipt.nativeId); },
+    };
+
+    const settled = await advanceConversationMigration(conversation.id, store, provider);
+
+    expect(settled.migration?.phase).toBe("rolled-back");
+    expect(settled.generations).toHaveLength(1);
+    expect(cleaned).toEqual(["discarded-successor"]);
+  });
+
+  test("a verification failure releases the successor before returning a recoverable phase", async () => {
+    const store = registry();
+    store.reconcileConversations([observation("/source.jsonl", "a", "idle")]);
+    const conversation = store.conversationForPath("/source.jsonl")!;
+    store.commitMigrationIntent({ engine: "codex", targetId: "b", origin: "manual", requestId: "verification-cleanup", expectedRevision: store.engineRouting("codex").revision });
+    const cleaned: string[] = [];
+    const provider: SuccessorProviderPort = {
+      async create(input) {
+        return {
+          operationId: input.operationId,
+          nativeId: "failed-successor",
+          path: "/failed-successor.jsonl",
+          historyHash: "failed",
+          host: { kind: "codex-app-server", identity: "failed", epoch: 1, verifiedAt: "2026-07-10T12:01:00.000Z" },
+        };
+      },
+      async verify() { throw new Error("durability check failed"); },
+      async cleanup(receipt) { cleaned.push(receipt.nativeId); },
+    };
+
+    const failed = await advanceConversationMigration(conversation.id, store, provider);
+
+    expect(failed.migration?.phase).toBe("failed-recoverable");
+    expect(cleaned).toEqual(["failed-successor"]);
   });
 });

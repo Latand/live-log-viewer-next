@@ -11,7 +11,7 @@ import { CodexAccountSwitch } from "./CodexAccountSwitch";
  */
 const render = () => renderToStaticMarkup(<CodexAccountSwitch />);
 
-test("renders a single dialog trigger, never a bare <select> switch", () => {
+test("renders a single dialog trigger and no bare <select> switch", () => {
   const html = render();
   expect(html).not.toContain("<select");
   expect(html).not.toContain("<option");
@@ -20,7 +20,7 @@ test("renders a single dialog trigger, never a bare <select> switch", () => {
 
 test("the trigger stays mounted with no accounts so Accounts is always reachable", () => {
   // The shared store starts empty (no fetch runs under static render); the
-  // trigger still shows the fallback Accounts label rather than disappearing.
+  // trigger keeps showing the fallback Accounts label and stays mounted.
   const html = render();
   expect(html).toContain("Accounts");
   expect(html).toContain("<button");

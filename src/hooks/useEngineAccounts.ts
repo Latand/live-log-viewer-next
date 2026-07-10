@@ -32,12 +32,24 @@ export type AccountOption = {
 export type AccountLoadState = "loading" | "ready" | "error";
 export type AccountOperation = "refresh" | "add" | "migrate" | "policy";
 
+/** A retry action carries exactly the identifier its endpoint needs. The account
+    target id drives the preview → migrate path; the durable intent id drives the
+    stop and retry-failed endpoints. Each operation retries through its own path,
+    so an intent id can never reach the account preview route (the recovery-retry
+    bug where a `"migrate"` action fed an intent uuid to `/accounts/{engine}/active`). */
+export type AccountRetryAction =
+  | { type: "retry"; kind: "refresh" }
+  | { type: "retry"; kind: "add"; label: string }
+  | { type: "retry"; kind: "migrate"; accountId: string }
+  | { type: "retry"; kind: "stop"; intentId: string }
+  | { type: "retry"; kind: "retryFailed"; intentId: string };
+
 export interface AccountNotice {
   kind: "error" | "success";
   operation: AccountOperation;
   messageKey: "accounts.refreshFailed" | "accounts.switchFailed" | "accounts.addFailed" | "accounts.loginOpened";
   target?: string;
-  action: { type: "retry"; operation: AccountOperation; id?: string; label?: string } | null;
+  action: AccountRetryAction | null;
 }
 
 export function accountNoticeText(t: TFunction, notice: AccountNotice): string {
@@ -146,16 +158,27 @@ function accountResponse(body: unknown, engine: Engine): EngineResponse {
 }
 
 function refreshFailure(): AccountNotice {
-  return { kind: "error", operation: "refresh", messageKey: "accounts.refreshFailed", action: { type: "retry", operation: "refresh" } };
+  return { kind: "error", operation: "refresh", messageKey: "accounts.refreshFailed", action: { type: "retry", kind: "refresh" } };
 }
 
-function mutationFailure(operation: "add" | "migrate", value: string): AccountNotice {
-  return {
-    kind: "error",
-    operation,
-    messageKey: operation === "add" ? "accounts.addFailed" : "accounts.switchFailed",
-    action: operation === "add" ? { type: "retry", operation, label: value } : { type: "retry", operation, id: value },
-  };
+function addFailure(label: string): AccountNotice {
+  return { kind: "error", operation: "add", messageKey: "accounts.addFailed", action: { type: "retry", kind: "add", label } };
+}
+
+/** A failed account switch retries by re-previewing the account target and
+    committing a fresh, revision-fenced migration. */
+function migrateFailure(accountId: string): AccountNotice {
+  return { kind: "error", operation: "migrate", messageKey: "accounts.switchFailed", action: { type: "retry", kind: "migrate", accountId } };
+}
+
+/** Stop and retry-failed retries address the durable intent by its id and read a
+    fresh revision fence when they re-issue, so both route to
+    `/api/account-migrations/{intentId}` and stay off the account preview route. */
+function stopFailure(intentId: string): AccountNotice {
+  return { kind: "error", operation: "migrate", messageKey: "accounts.switchFailed", action: { type: "retry", kind: "stop", intentId } };
+}
+function retryFailedFailure(intentId: string): AccountNotice {
+  return { kind: "error", operation: "migrate", messageKey: "accounts.switchFailed", action: { type: "retry", kind: "retryFailed", intentId } };
 }
 
 /** One narrow state store backs every account control of one engine. It owns
@@ -275,7 +298,7 @@ export function createEngineAccountsStore(
           notice: { kind: "success", operation: "add", messageKey: "accounts.loginOpened", target: body.target, action: null },
         });
       } catch {
-        patchSnapshot({ notice: mutationFailure("add", trimmed) });
+        patchSnapshot({ notice: addFailure(trimmed) });
         await refresh();
         return false;
       }
@@ -292,7 +315,7 @@ export function createEngineAccountsStore(
     // The client already knows the target it asked to preview, so it canonicalises
     // the response into the target-aware DTO even when the coordinator returns the
     // leaner counts-and-revision shape. A `null` therefore means the preview truly
-    // failed (non-OK / unreachable), which the panel surfaces instead of switching.
+    // failed (non-OK / unreachable), which the panel surfaces as a recoverable error.
     const fallback = { targetId: id, targetLabel: snapshot.accounts.find((account) => account.id === id)?.label ?? id };
     try {
       const response = await fetcher(activeUrl, {
@@ -321,7 +344,7 @@ export function createEngineAccountsStore(
         });
         if (!response.ok) throw new Error("migration request failed");
       } catch {
-        patchSnapshot({ active: previous, identityVersion: snapshot.identityVersion + 1, notice: mutationFailure("migrate", id) });
+        patchSnapshot({ active: previous, identityVersion: snapshot.identityVersion + 1, notice: migrateFailure(id) });
         await refresh();
         return false;
       }
@@ -347,7 +370,7 @@ export function createEngineAccountsStore(
         });
         if (!response.ok) throw new Error("stop failed");
       } catch {
-        patchSnapshot({ notice: mutationFailure("migrate", intentId) });
+        patchSnapshot({ notice: stopFailure(intentId) });
         await refresh();
         return false;
       }
@@ -370,7 +393,7 @@ export function createEngineAccountsStore(
         });
         if (!response.ok) throw new Error("retry-failed failed");
       } catch {
-        patchSnapshot({ notice: mutationFailure("migrate", intentId) });
+        patchSnapshot({ notice: retryFailedFailure(intentId) });
         await refresh();
         return false;
       }
@@ -406,17 +429,28 @@ export function createEngineAccountsStore(
   const retryNotice = async (): Promise<boolean> => {
     const action = snapshot.notice?.action;
     if (!action) return false;
-    if (action.operation === "refresh") return refresh();
-    if (action.operation === "migrate" && action.id) {
-      // A migrate retry must re-fence against a fresh preview revision: the old
-      // one is stale (the intent moved on / another switch raced), so reusing it
-      // would 409. Fail closed if the preview can't be obtained.
-      const fresh = await preview(action.id);
-      if (!fresh) return false;
-      return selectAndMigrate(action.id, fresh.previewRevision);
+    switch (action.kind) {
+      case "refresh":
+        return refresh();
+      case "add":
+        return add(action.label);
+      case "migrate": {
+        // A migrate retry re-fences against a fresh preview revision: the stored
+        // one is stale once the intent moved on or another switch raced, so it
+        // would 409. Fail closed when the preview cannot be obtained.
+        const fresh = await preview(action.accountId);
+        if (!fresh) return false;
+        return selectAndMigrate(action.accountId, fresh.previewRevision);
+      }
+      case "stop":
+        // Re-issues the stop against the durable intent; stopMigration reads the
+        // current revision fence when it runs.
+        return stopMigration();
+      case "retryFailed":
+        // Re-issues retry-failed against the durable intent with the current
+        // revision fence.
+        return retryFailedMigration();
     }
-    if (action.operation === "add" && action.label) return add(action.label);
-    return false;
   };
 
   return {

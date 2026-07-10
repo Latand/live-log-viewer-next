@@ -50,7 +50,14 @@ function accountProjection(observation: DurableQuotaObservation | undefined, aut
 }
 
 function migrationProjection(engine: MigrationEngine, snapshot: ReturnType<ReturnType<typeof agentRegistry>["snapshot"]>) {
-  const intent = Object.values(snapshot.migrationIntents).find((candidate) => candidate.engine === engine && candidate.state === "draining") ?? null;
+  const intent = Object.values(snapshot.migrationIntents)
+    .filter((candidate) => {
+      if (candidate.engine !== engine) return false;
+      if (candidate.state === "draining") return true;
+      return candidate.state === "complete" && Object.values(snapshot.conversations)
+        .some((conversation) => conversation.migration?.intentId === candidate.id && conversation.migration.phase === "failed-recoverable");
+    })
+    .sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt))[0] ?? null;
   if (!intent) return null;
   const conversations = Object.values(snapshot.conversations).filter((conversation) => conversation.migration?.intentId === intent.id);
   const count = (phase: string) => conversations.filter((conversation) => conversation.migration?.phase === phase).length;

@@ -38,7 +38,13 @@ test("Claude successor provider uses registered homes and shared model normaliza
     },
     startCodex: async () => { throw new Error("unexpected Codex client"); },
     claudeStatus: async () => ({ loggedIn: true }),
-    spawnClaude: async (spec) => { command = spec.command; return { paneId: "%9", panePid: 99 }; },
+    spawnClaude: async (spec) => {
+      command = spec.command;
+      fs.mkdirSync(path.dirname(spec.transcript!), { recursive: true, mode: 0o700 });
+      fs.writeFileSync(spec.transcript!, JSON.stringify({ sessionId: path.basename(spec.transcript!, ".jsonl") }) + "\n", { mode: 0o600 });
+      return { paneId: "%9", panePid: 99 };
+    },
+    claudeHost: async () => ({ paneId: "%9", panePid: 99, windowName: "claude-migration-successor" }),
     now: () => "2026-07-10T12:00:00.000Z",
   };
   const provider = new RegisteredSuccessorProvider(dependencies);
@@ -59,6 +65,32 @@ test("Claude successor provider uses registered homes and shared model normaliza
   expect(command).toContain("--effort' 'high'");
   expect(receipt.path.startsWith(target.transcriptRoot + path.sep)).toBeTrue();
   await expect(provider.verify(receipt, { engine: "claude", targetAccountId: "target", launchProfile: sourceGeneration.launchProfile })).resolves.toBeUndefined();
+});
+
+test("Claude successor verification rejects a missing durable transcript", async () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "llv-provider-claude-missing-"));
+  roots.push(base);
+  const source = accountRoot("claude", base, "source");
+  const target = accountRoot("claude", base, "target");
+  const sourcePath = path.join(source.transcriptRoot, "source.jsonl");
+  fs.writeFileSync(sourcePath, "{}\n", { mode: 0o600 });
+  const provider = new RegisteredSuccessorProvider({
+    accounts: { resolveSpawn: () => target, resolveTranscriptOwner: () => source },
+    startCodex: async () => { throw new Error("unexpected Codex client"); },
+    claudeStatus: async () => ({ loggedIn: true }),
+    spawnClaude: async () => ({ paneId: "%11", panePid: 111 }),
+    now: () => "2026-07-10T12:00:00.000Z",
+  });
+  const receipt = await provider.create({
+    engine: "claude",
+    operationId: "019f423a-d6e9-4903-8597-3e676b6ff3d4",
+    conversationId: "conversation_test",
+    targetAccountId: "target",
+    source: { id: "source", path: sourcePath, accountId: "source", launchProfile: emptyLaunchProfile({ cwd: "/repo" }), historyHash: null, host: null, createdAt: "now", archivedAt: null },
+  });
+
+  await expect(provider.verify(receipt, { engine: "claude", targetAccountId: "target", launchProfile: emptyLaunchProfile({ cwd: "/repo" }) }))
+    .rejects.toThrow("durable");
 });
 
 test("unknown Claude transcript model omits the successor override", async () => {

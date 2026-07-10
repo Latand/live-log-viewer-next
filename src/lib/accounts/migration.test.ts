@@ -155,36 +155,34 @@ describe("tolerant parsers", () => {
   });
 
   test("parseMigrationPreview reads targetId from top level or nested intent", () => {
-    expect(parseMigrationPreview({ targetId: "work", counts: { total: 3, idle: 2 }, rootWarning: true, previewRevision: 7 })).toMatchObject({ targetId: "work", rootWarning: true, previewRevision: 7 });
+    expect(parseMigrationPreview({ targetId: "work", counts: { total: 3, idle: 2 }, previewRevision: 7 })).toMatchObject({ targetId: "work", previewRevision: 7 });
     expect(parseMigrationPreview({ intent: { targetId: "work" }, revision: 2 })).toMatchObject({ targetId: "work", previewRevision: 2 });
     expect(parseMigrationPreview({})).toBeNull();
   });
 
   test("parseMigrationPreview canonicalises the flat coordinator DTO with a known target", () => {
-    // The coordinator's actual preview shape: flat counts + revision, no targetId.
+    // The coordinator emits a flat preview shape with counts and revision.
     const flat = { total: 4, idle: 3, busy: 1, revision: 9 };
-    // Without a fallback the client cannot name the target → null (never switch).
+    // The caller supplies the target identity when the response omits it.
     expect(parseMigrationPreview(flat)).toBeNull();
-    // With the account the client asked to preview, it fills in the identity and
-    // reads the counts/revision from the top level.
+    // The requested account supplies identity while the response supplies counts.
     expect(parseMigrationPreview(flat, { targetId: "work", targetLabel: "Work" })).toEqual({
       targetId: "work",
       targetLabel: "Work",
       counts: { total: 4, idle: 3, busy: 1 },
-      rootWarning: false,
       previewRevision: 9,
     });
-    // A rich server DTO still wins over the fallback identity.
+    // A rich server DTO provides its own target identity.
     expect(parseMigrationPreview({ targetId: "prod", targetLabel: "Prod", counts: { total: 1, idle: 1, busy: 0 } }, { targetId: "work" })).toMatchObject({ targetId: "prod", targetLabel: "Prod" });
   });
 });
 
-describe("accountSelectOutcome (finding 3 — no bare switch on preview failure)", () => {
-  const preview = (total: number): MigrationPreview => ({ targetId: "work", targetLabel: "Work", counts: { total, idle: total, busy: 0 }, rootWarning: false, previewRevision: 1 });
-  test("a preview that failed → recoverable error, never a switch", () => {
+describe("accountSelectOutcome preview failure guard", () => {
+  const preview = (total: number): MigrationPreview => ({ targetId: "work", targetLabel: "Work", counts: { total, idle: total, busy: 0 }, previewRevision: 1 });
+  test("a preview failure yields a recoverable error", () => {
     expect(accountSelectOutcome(null)).toBe("recoverable-error");
   });
-  test("live sessions in scope → confirm; empty scope → zero-scope migrate (never a bare select)", () => {
+  test("live sessions confirm and empty scope creates a zero-scope migration", () => {
     expect(accountSelectOutcome(preview(3))).toBe("confirm");
     expect(accountSelectOutcome(preview(0))).toBe("migrate");
   });
