@@ -189,7 +189,28 @@ export function DraftAgentPane({
     setRoleParamsState(value);
     writeField(draftId, "roleParams", JSON.stringify(value));
   };
-  const setRoleParam = (key: string, value: string | number) => setRoleParams({ ...roleParams, [key]: value });
+  const setRoleParam = (key: string, value: string | number) => {
+    const next = { ...roleParams, [key]: value };
+    setRoleParams(next);
+    const selected = roles.find((role) => role.id === roleId);
+    if (selected?.id !== "builder") return;
+    if (next.domain === "frontend") {
+      setEngine("claude");
+      setModel("opus");
+      setEffort("high");
+      setSpeed("");
+      return;
+    }
+    if (next.mode === "apply-fixes") {
+      setEngine("codex");
+      setModel("gpt-5.6-terra");
+      setEffort("low");
+      return;
+    }
+    setEngine("codex");
+    setModel("gpt-5.6-sol");
+    setEffort("high");
+  };
   const setDeployConfirm = (value: string) => {
     setDeployConfirmState(value);
     writeField(draftId, "confirm", value);

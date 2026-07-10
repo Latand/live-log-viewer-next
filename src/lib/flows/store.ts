@@ -4,7 +4,7 @@ import path from "node:path";
 
 import { statePath } from "@/lib/configDir";
 import { agentRegistry, type AgentRegistry } from "@/lib/agent/registry";
-import { listRoles } from "@/lib/roles/registry";
+import { listRoles, resolveRole } from "@/lib/roles/registry";
 
 import type { Flow, FlowPreset, ReviewVerdict } from "./types";
 
@@ -50,21 +50,24 @@ const PRE_ROLE_SEEDED_PRESETS: FlowPreset[] = [
   { name: "Sonnet → Sol xhigh", implementer: { engine: "claude", model: "sonnet", effort: null }, reviewer: { engine: "codex", model: "gpt-5.6-sol", effort: "xhigh" } },
 ];
 
-function flowRole(role: "builder" | "reviewer" | "architect"): FlowPreset["implementer"] {
-  const definition = listRoles().find((candidate) => candidate.id === role)!;
-  return { ...definition.config };
+function flowRole(role: "builder" | "reviewer" | "architect", params: Record<string, string> = {}): FlowPreset["implementer"] {
+  if (role !== "builder") return { ...listRoles().find((candidate) => candidate.id === role)!.config };
+  const resolved = resolveRole(role, params);
+  if (!resolved.ok) throw new Error(resolved.error);
+  return { ...resolved.value.config };
 }
 
 /** Seed profiles resolve from the role registry on every load. Existing saved
     presets remain records of the user choices made when they were saved. */
 export function seededPresetsFromRoles(): FlowPreset[] {
   const builder = flowRole("builder");
+  const fixer = flowRole("builder", { mode: "apply-fixes", domain: "general" });
   const reviewer = flowRole("reviewer");
   const architect = flowRole("architect");
   return [
-    { name: "Terra high → Sol xhigh", implementer: builder, reviewer },
-    { name: "Terra low → Sol xhigh", implementer: { ...builder, effort: "low" }, reviewer },
-    { name: "Terra high → Fable", implementer: builder, reviewer: architect },
+    { name: "Sol high → Sol xhigh", implementer: builder, reviewer },
+    { name: "Terra low → Sol xhigh", implementer: fixer, reviewer },
+    { name: "Sol high → Fable", implementer: builder, reviewer: architect },
     { name: "Fable → Sol xhigh", implementer: architect, reviewer },
     { name: "Sonnet → Sol xhigh", implementer: { engine: "claude", model: "sonnet", effort: "high" }, reviewer },
   ];

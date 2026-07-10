@@ -15,12 +15,12 @@ const LEGACY_DEFAULT: FlowPreset = {
   reviewer: { engine: "claude", model: "fable", effort: null },
 };
 
-test("seed migration replaces an untouched legacy preset with Terra and Sol roles", () => {
+test("seed migration replaces an untouched legacy preset with Sol and Sol roles", () => {
   const presets = mergeSeededPresets([LEGACY_DEFAULT]);
   expect(presets.some((preset) => preset.name === LEGACY_DEFAULT.name)).toBe(false);
   expect(presets[0]).toEqual({
-    name: "Terra high → Sol xhigh",
-    implementer: { engine: "codex", model: CODEX_TERRA_MODEL, effort: "high" },
+    name: "Sol high → Sol xhigh",
+    implementer: { engine: "codex", model: CODEX_SOL_MODEL, effort: "high" },
     reviewer: { engine: "codex", model: CODEX_SOL_MODEL, effort: "xhigh" },
   });
 });
@@ -32,9 +32,9 @@ test("seed migration preserves a customized preset", () => {
 
 test("flow preset seeds derive their canonical roles from the role registry", () => {
   const presets = seededPresetsFromRoles();
-  expect(presets.find((preset) => preset.name === "Terra high → Sol xhigh")).toEqual({
-    name: "Terra high → Sol xhigh",
-    implementer: { engine: "codex", model: CODEX_TERRA_MODEL, effort: "high" },
+  expect(presets.find((preset) => preset.name === "Sol high → Sol xhigh")).toEqual({
+    name: "Sol high → Sol xhigh",
+    implementer: { engine: "codex", model: CODEX_SOL_MODEL, effort: "high" },
     reviewer: { engine: "codex", model: CODEX_SOL_MODEL, effort: "xhigh" },
   });
 });
@@ -45,7 +45,7 @@ test("an untouched pre-registry flow preset migrates to the current role config"
     implementer: { engine: "codex" as const, model: CODEX_TERRA_MODEL, effort: "high" },
     reviewer: { engine: "claude" as const, model: "fable", effort: null },
   };
-  expect(mergeSeededPresets([previous]).find((preset) => preset.name === previous.name)?.reviewer).toEqual({
+  expect(mergeSeededPresets([previous]).find((preset) => preset.name === "Sol high → Fable")?.reviewer).toEqual({
     engine: "claude",
     model: "fable",
     effort: "high",

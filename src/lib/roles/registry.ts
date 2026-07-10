@@ -52,13 +52,23 @@ function renderScaffold(template: string, params: RoleParamValues): string {
 }
 
 function promptWithFences(definition: RoleDefinition, params: RoleParamValues): string {
-  const scaffold = renderScaffold(definition.promptScaffold, params);
+  const frontendGuidance = definition.id === "builder" && params.domain === "frontend"
+    ? "\n\nUI/frontend implementation guidance: follow the approved interaction and visual contract, preserve accessible semantics, responsive behavior, and English/Ukrainian parity."
+    : "";
+  const scaffold = renderScaffold(definition.promptScaffold, params) + frontendGuidance;
   if (!definition.safetyFences.length) return scaffold;
   return `${scaffold}\n\nSafety fences:\n${definition.safetyFences.map((fence) => `- ${fence}`).join("\n")}`;
 }
 
-function resolveConfig(definition: RoleDefinition, explicit: ExplicitRoleConfig): { ok: true; value: RoleConfig } | { ok: false; error: string } {
-  const config = { ...definition.config, ...explicit };
+function configForParams(definition: RoleDefinition, params: RoleParamValues): RoleConfig {
+  if (definition.id !== "builder") return definition.config;
+  if (params.domain === "frontend") return { engine: "claude", model: "opus", effort: "high" };
+  if (params.mode === "apply-fixes") return { engine: "codex", model: "gpt-5.6-terra", effort: "low" };
+  return definition.config;
+}
+
+function resolveConfig(definition: RoleDefinition, params: RoleParamValues, explicit: ExplicitRoleConfig): { ok: true; value: RoleConfig } | { ok: false; error: string } {
+  const config = { ...configForParams(definition, params), ...explicit };
   if (config.engine !== "claude" && config.engine !== "codex") return { ok: false, error: "engine must be claude or codex" };
   if (!config.model || config.model.length > 128) return { ok: false, error: "model must be a printable id up to 128 characters" };
   if (config.engine === "claude" && !normalizeClaudeLaunchModel(config.model)) return { ok: false, error: "model is not supported by claude" };
@@ -72,7 +82,7 @@ export function resolveRole(role: string, params: unknown = {}, explicit: Explic
   const definition = loadRoleDefinitions().find((candidate) => candidate.id === role)!;
   const parsedParams = validateParams(definition, params);
   if (!parsedParams.ok) return parsedParams;
-  const config = resolveConfig(definition, explicit);
+  const config = resolveConfig(definition, parsedParams.value, explicit);
   if (!config.ok) return config;
   return {
     ok: true,

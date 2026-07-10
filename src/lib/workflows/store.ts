@@ -15,9 +15,11 @@ const TEMPLATES_FILE = statePath("workflow-templates.json");
 const ARTIFACT_DIR = statePath("workflows");
 
 /** The hard fixer default (W5): Terra supplies fast hands for applying findings. */
-function registryRole(role: "builder" | "reviewer" | "architect" | "cleaner"): RoleConfig {
-  const definition = listRoles().find((candidate) => candidate.id === role)!;
-  return { ...definition.config };
+function registryRole(role: "builder" | "reviewer" | "architect" | "cleaner", params: Record<string, string> = {}): RoleConfig {
+  if (role !== "builder") return { ...listRoles().find((candidate) => candidate.id === role)!.config };
+  const resolved = resolveRole(role, params);
+  if (!resolved.ok) throw new Error(resolved.error);
+  return { ...resolved.value.config };
 }
 
 /** The hard fixer default (W5) derives from Cleaner and clamps its effort. */
@@ -84,8 +86,8 @@ const PRE_ROLE_SEEDED_TEMPLATES: WorkflowTemplate[] = [
 
 export function seededTemplatesFromRoles(): WorkflowTemplate[] {
   const builder = registryRole("builder");
+  const frontendBuilder = registryRole("builder", { mode: "plain", domain: "frontend" });
   const reviewer = registryRole("reviewer");
-  const architect = registryRole("architect");
   const fixer = defaultFixerFromRoles();
   return [
   {
@@ -101,7 +103,7 @@ export function seededTemplatesFromRoles(): WorkflowTemplate[] {
       },
       {
         kind: "implement",
-        agent: architect,
+        agent: frontendBuilder,
         scope: "UI/frontend: components, hooks, styling, i18n labels. Build on the backend contract from the previous stage.",
       },
       {
@@ -114,7 +116,7 @@ export function seededTemplatesFromRoles(): WorkflowTemplate[] {
     ],
   },
   {
-    name: "Terra → Sol review",
+    name: "Sol → Sol review",
     verify: "bun test && bun run build",
     finish: "pr",
     stages: [
