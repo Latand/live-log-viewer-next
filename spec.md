@@ -4,6 +4,8 @@
 
 Preserve a conversation's durable board identity, placement, delivery state, and migration history while account migration creates source forks, target copies, successor generations, restarts, and partial repairs. Ensure concurrent processes and recovery scans converge on one stable conversation owner without duplicate board cards.
 
+Harden recovery after partial successor creation: definite Codex fork failures must remain retryable, uncertain transport outcomes must retain ambiguity, and Claude tmux cleanup must distinguish an absent original host from an endpoint whose state cannot be verified.
+
 ## Acceptance criteria
 
 - AC1: A committed migration successor inherits the predecessor conversation's durable board placement.
@@ -19,3 +21,7 @@ Preserve a conversation's durable board identity, placement, delivery state, and
 - AC11: `bunx tsc --noEmit` completes without diagnostics.
 - AC12: Account preview reads the controller inventory without scanning transcripts or rewriting the registry.
 - AC13: Revision-fenced migration commit performs no second inventory scan in the UI request path.
+- AC14: A definite pre-dispatch or server-rejected Codex fork failure clears the pending request marker and retries the fork on the next attempt.
+- AC15: A Codex fork failure with an uncertain transport outcome preserves the pending request marker and blocks duplicate dispatch until artifact recovery resolves it.
+- AC16: Claude cleanup treats a missing pane, replaced pane identity, or restarted original tmux server as completed cleanup.
+- AC17: Claude cleanup remains pending when its tmux endpoint cannot be queried or returns malformed evidence.
