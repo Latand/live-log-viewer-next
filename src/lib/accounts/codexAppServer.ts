@@ -1,6 +1,14 @@
 import { spawn } from "node:child_process";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 
+import {
+  CodexAppServerProtocolError,
+  parseAppServerMessage,
+  redactAppServerDetail,
+  type AppServerEnvelope,
+  type AppServerRequestId,
+} from "./codexAppServerProtocol";
+
 export interface CodexAppServerChild {
   stdin: Pick<ChildProcessWithoutNullStreams["stdin"], "write" | "end">;
   stdout: Pick<ChildProcessWithoutNullStreams["stdout"], "on">;
@@ -100,16 +108,9 @@ function spawnCodexAppServer(home: string): CodexAppServerChild {
 /** Errors crossing the app-server boundary are deliberately safe for logs and routes. */
 export class CodexAppServerError extends Error {
   constructor(message: string) {
-    super(redact(message));
+    super(redactAppServerDetail(message));
     this.name = "CodexAppServerError";
   }
-}
-
-function redact(value: string): string {
-  return value
-    .replace(/(bearer\s+)[^\s,;]+/gi, "$1[REDACTED]")
-    .replace(/(["']?(?:access|refresh|id)[_-]?token["']?\s*[:=]\s*["']?)[^\s,"'}]+/gi, "$1[REDACTED]")
-    .replace(/(["']?(?:api[_-]?key|authorization)["']?\s*[:=]\s*["']?)[^\s,"'}]+/gi, "$1[REDACTED]");
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -120,9 +121,8 @@ function protocolError(message: string): CodexAppServerError {
   return new CodexAppServerError(`Codex app-server protocol error: ${message}`);
 }
 
-function serverError(value: unknown): CodexAppServerError {
-  if (!isRecord(value)) return protocolError("server returned an invalid error payload");
-  const message = typeof value.message === "string" ? value.message : "server request failed";
+function serverError(value: { code: number; message: string }): CodexAppServerError {
+  const message = value.message;
   return new CodexAppServerError(`Codex app-server request failed: ${message}`);
 }
 
@@ -133,7 +133,7 @@ function requiredString(value: Record<string, unknown>, key: string, method: str
 
 function optionalWindow(value: unknown, method: string): AppServerRateLimitWindow | null {
   if (value === null || value === undefined) return null;
-  if (!isRecord(value) || typeof value.usedPercent !== "number") throw protocolError(`${method} response has an invalid rate-limit window`);
+  if (!isRecord(value) || typeof value.usedPercent !== "number" || !Number.isFinite(value.usedPercent) || value.usedPercent < 0 || value.usedPercent > 100) throw protocolError(`${method} response has an invalid rate-limit window`);
   const resetsAt = value.resetsAt;
   const windowDurationMins = value.windowDurationMins;
   if (resetsAt !== null && resetsAt !== undefined && (typeof resetsAt !== "number" || !Number.isInteger(resetsAt) || resetsAt < 0)) {
@@ -168,6 +168,7 @@ export class CodexAppServerClient {
   private nextId = 1;
   private stdoutBuffer = "";
   private stderrTail = "";
+  private lastInboundEnvelope: AppServerEnvelope | null = null;
   private closed = false;
   private reaped = false;
   private shutdownTimer: ReturnType<typeof setTimeout> | null = null;
@@ -180,7 +181,7 @@ export class CodexAppServerClient {
   ) {
     child.stdout.on("data", (chunk: Buffer | string) => this.acceptStdout(String(chunk)));
     child.stderr?.on("data", (chunk: Buffer | string) => {
-      this.stderrTail = redact((this.stderrTail + String(chunk)).slice(-2_000));
+      this.stderrTail = redactAppServerDetail((this.stderrTail + String(chunk)).slice(-2_000));
     });
     child.on("error", (error) => this.fail(new CodexAppServerError(`Codex app-server child error: ${error.message}`)));
     child.on("close", (code, signal) => {
@@ -230,6 +231,10 @@ export class CodexAppServerClient {
   onLifecycle(listener: (event: CodexAppServerLifecycleEvent) => void): () => void {
     this.lifecycleListeners.add(listener);
     return () => this.lifecycleListeners.delete(listener);
+  }
+
+  inboundEnvelope(): AppServerEnvelope | null {
+    return this.lastInboundEnvelope;
   }
 
   async readAccount(): Promise<AppServerAccountRead> {
@@ -375,16 +380,20 @@ export class CodexAppServerClient {
   private acceptStdout(chunk: string): void {
     if (this.closed) return;
     this.stdoutBuffer += chunk;
-    if (this.stdoutBuffer.length > MAX_STDOUT_BUFFER_BYTES) {
-      this.fail(protocolError("received an oversized unterminated JSONL line"));
-      return;
-    }
     let newline = this.stdoutBuffer.indexOf("\n");
     while (newline >= 0) {
-      const line = this.stdoutBuffer.slice(0, newline).trim();
+      const rawLine = this.stdoutBuffer.slice(0, newline);
       this.stdoutBuffer = this.stdoutBuffer.slice(newline + 1);
+      if (Buffer.byteLength(rawLine, "utf8") > MAX_STDOUT_BUFFER_BYTES) {
+        this.fail(protocolError("received an oversized JSONL line"));
+        return;
+      }
+      const line = rawLine.trim();
       if (line) this.acceptMessage(line);
       newline = this.stdoutBuffer.indexOf("\n");
+    }
+    if (Buffer.byteLength(this.stdoutBuffer, "utf8") > MAX_STDOUT_BUFFER_BYTES) {
+      this.fail(protocolError("received an oversized unterminated JSONL line"));
     }
   }
 
@@ -396,37 +405,38 @@ export class CodexAppServerClient {
       this.fail(protocolError("received malformed JSON"));
       return;
     }
-    if (!isRecord(message) || message.jsonrpc !== "2.0") {
-      this.fail(protocolError("received malformed JSON-RPC"));
+    let parsed;
+    try {
+      parsed = parseAppServerMessage(message);
+    } catch (error) {
+      const detail = error instanceof CodexAppServerProtocolError ? error.message : "received malformed JSON-RPC";
+      this.fail(new CodexAppServerError(detail));
       return;
     }
-    if (typeof message.method === "string") {
-      if ("id" in message) {
-        if (typeof message.id !== "string" && (typeof message.id !== "number" || !Number.isInteger(message.id))) {
-          this.fail(protocolError(`server request ${message.method} has an invalid id`));
-          return;
-        }
+    this.lastInboundEnvelope = parsed.envelope;
+    if (parsed.kind === "request") {
         const listener = this.requestListeners.values().next().value as ((request: AppServerRequest) => unknown | Promise<unknown>) | undefined;
         if (!listener) {
-          console.warn(`[codex app-server] rejected unhandled server request ${message.method}`);
-          this.write({ jsonrpc: "2.0", id: message.id, error: { code: -32601, message: "Viewer has no handler for this request" } });
+          console.warn(`[codex app-server] rejected unhandled server request ${parsed.method}`);
+          this.write({ jsonrpc: "2.0", id: parsed.id, error: { code: -32601, message: "Viewer has no handler for this request" } });
           return;
         }
         // Requests have one response owner. Additional listeners are observers
         // for notifications and never compete to answer a JSON-RPC request.
-        Promise.resolve(listener({ id: message.id, method: message.method, params: message.params }))
-          .then((result) => this.write({ jsonrpc: "2.0", id: message.id, result: result ?? {} }))
-          .catch((error) => this.write({ jsonrpc: "2.0", id: message.id, error: { code: -32000, message: redact(error instanceof Error ? error.message : "request handler failed") } }));
+        Promise.resolve(listener({ id: parsed.id, method: parsed.method, params: parsed.params }))
+          .then((result) => this.write({ jsonrpc: "2.0", id: parsed.id, result: result ?? {} }))
+          .catch((error) => this.write({ jsonrpc: "2.0", id: parsed.id, error: { code: -32000, message: redactAppServerDetail(error instanceof Error ? error.message : "request handler failed") } }));
         return;
-      }
-      const notification = { method: message.method, params: message.params };
+    }
+    if (parsed.kind === "notification") {
+      const notification = { method: parsed.method, params: parsed.params };
       for (const listener of this.notificationListeners) {
         try { listener(notification); } catch { /* one consumer cannot break the transport */ }
       }
       return;
     }
-    const id = message.id;
-    if (typeof id !== "number" || !Number.isInteger(id)) {
+    const id: AppServerRequestId = parsed.id;
+    if (typeof id !== "number") {
       this.fail(protocolError("response has an invalid id"));
       return;
     }
@@ -435,16 +445,10 @@ export class CodexAppServerClient {
       this.fail(protocolError(`response id ${id} has no matching request`));
       return;
     }
-    const hasResult = Object.prototype.hasOwnProperty.call(message, "result");
-    const hasError = Object.prototype.hasOwnProperty.call(message, "error");
-    if (hasResult === hasError) {
-      this.fail(protocolError(`response for ${pending.method} must contain exactly one of result or error`));
-      return;
-    }
     this.pending.delete(id);
     this.clock.clearTimeout(pending.timeout);
-    if (hasError) pending.reject(serverError(message.error));
-    else pending.resolve(message.result);
+    if (parsed.error) pending.reject(serverError(parsed.error));
+    else pending.resolve(parsed.result);
   }
 
   private fail(error: CodexAppServerError): void {

@@ -16,6 +16,7 @@ class FakeChild extends EventEmitter {
   readonly methods: string[] = [];
   kills = 0;
   authenticated = false;
+  requiresOpenaiAuth = false;
   readFailure = false;
   onWrite(message: Record<string, unknown>): void {
     if (typeof message.method === "string") this.methods.push(message.method);
@@ -24,7 +25,7 @@ class FakeChild extends EventEmitter {
     if (message.method === "account/login/cancel") this.respond(message.id as number, { status: "canceled" });
     if (message.method === "account/read") {
       if (this.readFailure) this.emit("stdout", JSON.stringify({ jsonrpc: "2.0", id: message.id, error: { message: "offline" } }) + "\n");
-      else this.respond(message.id as number, this.authenticated ? { account: { type: "chatgpt" }, requiresOpenaiAuth: false } : { account: null, requiresOpenaiAuth: true });
+      else this.respond(message.id as number, this.authenticated ? { account: { type: "chatgpt" }, requiresOpenaiAuth: this.requiresOpenaiAuth } : { account: null, requiresOpenaiAuth: true });
     }
     if (message.method === "account/rateLimits/read") this.respond(message.id as number, { rateLimits: { primary: { usedPercent: 7, resetsAt: 99 }, secondary: { usedPercent: 31, resetsAt: 199 }, planType: "pro" } });
   }
@@ -165,4 +166,27 @@ test("account/read owns authentication independently from auth.json diagnostics"
   } });
   const missingFile = { ...work, authPresent: false };
   await expect(valid.loginSnapshot(missingFile)).resolves.toEqual({ state: "authenticated", attemptState: "completed", deviceAuth: null });
+});
+
+test("legacy Main and managed homes use the read-only account-plus-limits probe", async () => {
+  const children: FakeChild[] = [];
+  const runtime = new ManagedCodexRuntime({ startClient: async (home) => {
+    const child = new FakeChild();
+    child.authenticated = true;
+    child.requiresOpenaiAuth = true;
+    children.push(child);
+    return CodexAppServerClient.start({ home, spawn: () => child as never });
+  } });
+  const main: CodexAccount = { id: "default", label: "Main", kind: "legacy", home: "/accounts/main", sessionsDir: "/accounts/main/sessions", authPresent: true, loginPane: null, createdAt: 0 };
+  const managed = account("managed", "/accounts/managed");
+
+  await expect(runtime.probeQuota(main)).resolves.toMatchObject({ authenticated: true, rateLimits: { primary: { usedPercent: 7 } } });
+  await expect(runtime.probeQuota(managed)).resolves.toMatchObject({ authenticated: true, rateLimits: { secondary: { usedPercent: 31 } } });
+
+  for (const child of children) {
+    expect(child.methods).toEqual(["initialize", "initialized", "account/read", "account/rateLimits/read"]);
+    expect(child.methods).not.toContain("account/rateLimitResetCredit/consume");
+    expect(child.methods).not.toContain("account/login/start");
+    expect(child.methods).not.toContain("account/login/cancel");
+  }
 });

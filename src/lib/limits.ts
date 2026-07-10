@@ -5,6 +5,7 @@ import { accountForSpawn, type CodexAccount } from "@/lib/accounts/codex";
 import { claudeAccountForSpawn } from "@/lib/accounts/claude";
 import { managedCodexRuntime } from "@/lib/accounts/codexRuntime";
 import type { AppServerRateLimits } from "@/lib/accounts/codexAppServer";
+import { redactAppServerDetail } from "@/lib/accounts/codexAppServerProtocol";
 import { statePath } from "@/lib/configDir";
 import type { EngineLimits, LimitsPayload, LimitsProvenance, LimitWindow } from "./types";
 
@@ -124,10 +125,7 @@ function remember(engine: EngineName, accountId: string, resolved: { data: Engin
 }
 
 function safeReason(reason: string): string {
-  return reason
-    .replace(/(bearer\s+)[^\s,;]+/gi, "$1[REDACTED]")
-    .replace(/((?:access|refresh|id)[_-]?token\s*[:=]\s*)[^\s,;}]+/gi, "$1[REDACTED]")
-    .slice(0, 500);
+  return redactAppServerDetail(reason);
 }
 
 function provenance(read: LimitRead, cached: EngineCacheEntry | null, staleSince: string): { data: EngineLimits | null; meta: LimitsProvenance } {
@@ -143,7 +141,7 @@ function logFallbackReasons(claude: LimitsProvenance, codex: LimitsProvenance): 
 }
 
 /** Claude Code + Codex plan limits, cached briefly so UI polling stays cheap. */
-export async function readLimits(): Promise<LimitsPayload> {
+export async function readLimits(options: { codexLiveReader?: CodexLiveLimitsReader } = {}): Promise<LimitsPayload> {
   const claudeAccount = claudeAccountForSpawn();
   const codexAccount = accountForSpawn();
   const cachedClaude = lastCache("claude", claudeAccount.id);
@@ -156,7 +154,7 @@ export async function readLimits(): Promise<LimitsPayload> {
   const staleSince = new Date().toISOString();
   const [claude, codex] = await Promise.all([
     claudeFresh ? Promise.resolve(null) : fetchClaudeLimits(path.join(claudeAccount.home, ".credentials.json")),
-    codexFresh ? Promise.resolve(null) : readCodexLimits({ account: codexAccount }),
+    codexFresh ? Promise.resolve(null) : readCodexLimits({ account: codexAccount, liveReader: options.codexLiveReader }),
   ]);
   const resolvedClaude = claudeFresh
     ? { data: cachedClaude!.data, meta: cachedClaude!.provenance }
@@ -256,7 +254,7 @@ export function mapAppServerRateLimits(rateLimits: AppServerRateLimits, captured
 }
 
 /**
- * Managed homes receive a fresh structured snapshot from the app-server. The
+ * Every Codex home receives a fresh structured snapshot from the app-server. The
  * transcript scanner remains a compatibility fallback when that local host is
  * unavailable; its reason keeps old quota data visibly stale.
  */
@@ -265,18 +263,16 @@ export async function readCodexLimits(options: {
   liveReader?: CodexLiveLimitsReader;
 } = {}): Promise<LimitRead> {
   const account = options.account ?? accountForSpawn();
-  if (account.kind === "managed") {
-    try {
-      const rateLimits = await (options.liveReader ?? ((candidate) => managedCodexRuntime().readRateLimits(candidate as CodexAccount)))(account);
-      return { data: mapAppServerRateLimits(rateLimits), reason: null, source: "live" };
-    } catch (error) {
-      const fallback = readCodexTranscriptLimits(account.sessionsDir);
-      const detail = error instanceof Error ? error.message : String(error);
-      if (fallback.data) return { data: fallback.data, reason: `app-server unavailable; transcript fallback: ${detail}`, source: "transcript" };
-      return { data: null, reason: `app-server unavailable: ${detail}; ${fallback.reason}`, source: "unavailable" };
-    }
+  try {
+    const rateLimits = await (options.liveReader ?? ((candidate) => managedCodexRuntime().readRateLimits(candidate as CodexAccount)))(account);
+    return { data: mapAppServerRateLimits(rateLimits), reason: null, source: "live" };
+  } catch (error) {
+    const detail = redactAppServerDetail(error instanceof Error ? error.message : String(error));
+    console.warn(`[limits] Codex app-server probe for ${account.id} failed: ${detail}`);
+    const fallback = readCodexTranscriptLimits(account.sessionsDir);
+    if (fallback.data) return { data: fallback.data, reason: "transcript-fallback", source: "transcript" };
+    return { data: null, reason: "app-server-unavailable", source: "unavailable" };
   }
-  return readCodexTranscriptLimits(account.sessionsDir);
 }
 
 /** Compatibility reader for legacy homes and unavailable app-server children. */

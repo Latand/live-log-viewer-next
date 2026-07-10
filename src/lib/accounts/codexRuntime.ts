@@ -5,9 +5,11 @@ import type { CodexAccount } from "./codex";
 import { statePath } from "../configDir";
 import {
   CodexAppServerClient,
+  type AppServerAccountRead,
   type AppServerRateLimits,
   type DeviceCodeChallenge,
 } from "./codexAppServer";
+import type { AppServerEnvelope } from "./codexAppServerProtocol";
 
 /** Authentication is only asserted after `account/read`; attempt state is a
  * separate recoverable record for device-login supervision. */
@@ -32,6 +34,13 @@ export interface ManagedCodexRuntimeOptions {
   startClient?: (home: string) => Promise<CodexAppServerClient>;
   now?: () => number;
   stateFile?: string;
+}
+
+export interface CodexQuotaProbe {
+  account: AppServerAccountRead;
+  rateLimits: AppServerRateLimits;
+  authenticated: boolean;
+  envelope: AppServerEnvelope | null;
 }
 
 type AttemptReason = "child-died" | "login-unsuccessful" | "cancelled" | "viewer-restarted" | "account-read-failed" | "start-failed";
@@ -214,7 +223,7 @@ export class ManagedCodexRuntime {
     const stored = this.records.get(home);
     try {
       const status = await this.readAccount(active?.client ?? null, account.home);
-      if (status.account && !status.requiresOpenaiAuth) {
+      if (isSupportedChatGptAccount(status)) {
         if (active) this.settle(active, "completed", null, true);
         else if (stored) this.record(home, { ...stored, state: "completed", updatedAt: this.now(), reason: null });
         return { state: "authenticated", attemptState: "completed", deviceAuth: null };
@@ -257,17 +266,20 @@ export class ManagedCodexRuntime {
 
   /** Reads a structured rate snapshot through an active login child when one exists. */
   async readRateLimits(account: CodexAccount): Promise<AppServerRateLimits> {
-    const active = this.active.get(canonicalHome(account.home));
-    if (active?.client) return this.readRateLimitsFrom(active.client);
-    const client = await this.startClient(account.home);
-    try { return await this.readRateLimitsFrom(client); }
-    finally { client.close(); }
+    return (await this.probeQuota(account)).rateLimits;
   }
 
   async verifyAuthentication(account: CodexAccount): Promise<boolean> {
+    return (await this.probeQuota(account)).authenticated;
+  }
+
+  /** Performs the two read-only account calls on one app-server client. */
+  async probeQuota(account: CodexAccount): Promise<CodexQuotaProbe> {
     const active = this.active.get(canonicalHome(account.home));
-    const status = await this.readAccount(active?.client ?? null, account.home);
-    return Boolean(status.account && !status.requiresOpenaiAuth);
+    if (active?.client) return this.probeQuotaFrom(active.client);
+    const client = await this.startClient(account.home);
+    try { return await this.probeQuotaFrom(client); }
+    finally { client.close(); }
   }
 
   private async readAccount(existing: CodexAppServerClient | null, home: string) {
@@ -277,10 +289,10 @@ export class ManagedCodexRuntime {
     finally { client.close(); }
   }
 
-  private async readRateLimitsFrom(client: CodexAppServerClient): Promise<AppServerRateLimits> {
+  private async probeQuotaFrom(client: CodexAppServerClient): Promise<CodexQuotaProbe> {
     const account = await client.readAccount();
-    if (!account.account || account.requiresOpenaiAuth) throw new Error("Codex account is not authenticated");
-    return (await client.readRateLimits()).rateLimits;
+    const rateLimits = (await client.readRateLimits()).rateLimits;
+    return { account, rateLimits, authenticated: isSupportedChatGptAccount(account), envelope: client.inboundEnvelope() };
   }
 
   private owns(attempt: ActiveAttempt): boolean {
@@ -314,6 +326,10 @@ export class ManagedCodexRuntime {
       fs.rmSync(tmp, { force: true });
     }
   }
+}
+
+function isSupportedChatGptAccount(account: AppServerAccountRead): boolean {
+  return account.account?.type === "chatgpt";
 }
 
 function publicAttempt(attempt: ActiveAttempt): ManagedLoginAttempt {

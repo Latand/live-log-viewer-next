@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 
 import { agentRegistry, MigrationRevisionError, type AgentRegistry } from "@/lib/agent/registry";
+import { logAccountMigrationEvent } from "@/lib/events";
 
 import type { DurableQuotaObservation, MigrationIntent } from "./contracts";
 import { AUTO_BALANCE_COOLDOWN_MS, AUTO_BALANCE_SAMPLE_GAP_MS, chooseAutoBalance, type QuotaObservation } from "./quotaPolicy";
@@ -52,6 +53,17 @@ export function evaluateAutoBalance(
     if (intent.origin === "auto" && intent.state === "complete") {
       registry.recordAutoBalanceOutcome(engine, "complete", intent.evidence, new Date(now + AUTO_BALANCE_COOLDOWN_MS).toISOString());
     }
+    if (intent.origin === "auto") {
+      logAccountMigrationEvent({
+        engine,
+        intentId: intent.id,
+        origin: intent.origin,
+        sourceId: intent.evidence?.sourceId ?? null,
+        targetId: intent.targetId,
+        outcome: intent.state === "complete" ? "complete" : "committed",
+        cooldownUntil: intent.state === "complete" ? new Date(now + AUTO_BALANCE_COOLDOWN_MS).toISOString() : null,
+      });
+    }
     return intent.origin === "auto" ? intent : null;
   } catch (error) {
     if (error instanceof MigrationRevisionError) return null;
@@ -63,4 +75,16 @@ export function completeAutoBalanceIntent(engine: "claude" | "codex", intentId: 
   registry.setMigrationIntentState(intentId, outcome === "stopped" ? "stopped" : "complete");
   const snapshot = registry.snapshot();
   registry.recordAutoBalanceOutcome(engine, outcome, snapshot.migrationIntents[intentId]?.evidence ?? null, new Date(now + AUTO_BALANCE_COOLDOWN_MS).toISOString());
+  const intent = snapshot.migrationIntents[intentId];
+  if (intent?.origin === "auto") {
+    logAccountMigrationEvent({
+      engine,
+      intentId,
+      origin: "auto",
+      sourceId: intent.evidence?.sourceId ?? null,
+      targetId: intent.targetId,
+      outcome,
+      cooldownUntil: new Date(now + AUTO_BALANCE_COOLDOWN_MS).toISOString(),
+    });
+  }
 }

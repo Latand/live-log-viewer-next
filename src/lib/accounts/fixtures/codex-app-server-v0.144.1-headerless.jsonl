@@ -1,0 +1,3 @@
+{"id":1,"result":{"serverInfo":{"name":"codex"}}}
+{"method":"account/rateLimits/updated","params":{"rateLimits":{}}}
+{"id":"request-1","method":"item/tool/requestUserInput","params":{"questions":[]}}

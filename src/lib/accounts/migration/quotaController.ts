@@ -6,7 +6,8 @@ import { realClaudeLoginPorts } from "@/lib/accounts/claudeLogin";
 import { activeCodexAccountId, listCodexAccounts, type CodexAccount } from "@/lib/accounts/codex";
 import { managedCodexRuntime } from "@/lib/accounts/codexRuntime";
 import { agentRegistry, type AgentRegistry } from "@/lib/agent/registry";
-import { fetchClaudeLimits, readCodexLimits } from "@/lib/limits";
+import { logQuotaEvent } from "@/lib/events";
+import { fetchClaudeLimits, mapAppServerRateLimits, readCodexLimits } from "@/lib/limits";
 
 import { evaluateAutoBalance } from "./autoBalance";
 import type { MigrationEngine } from "./contracts";
@@ -39,19 +40,33 @@ const productionProbe: QuotaProbePort = {
       };
     }
     const candidate = account as CodexAccount;
-    const authenticated = await managedCodexRuntime().verifyAuthentication(candidate).catch(() => false);
-    const limits = authenticated
-      ? await readCodexLimits({ account: candidate })
-      : { data: null, source: "unavailable" as const, reason: "live authentication check failed" };
-    return {
-      engine,
-      accountId: candidate.id,
-      authenticated,
-      authCheckedAt: now,
-      limits: limits.data,
-      provenance: { source: limits.source, reason: limits.reason, staleSince: null },
-      observedAt: now,
-    };
+    try {
+      const probe = await managedCodexRuntime().probeQuota(candidate);
+      return {
+        engine,
+        accountId: candidate.id,
+        authenticated: probe.authenticated,
+        authCheckedAt: now,
+        limits: mapAppServerRateLimits(probe.rateLimits, Math.floor(now / 1000)),
+        provenance: { source: "live", reason: probe.authenticated ? null : "unsupported-account-type", staleSince: null },
+        observedAt: now,
+        envelope: probe.envelope,
+      };
+    } catch (error) {
+      // The reader owns redacted server-local detail and returns a closed code
+      // suitable for the durable quota registry.
+      const limits = await readCodexLimits({ account: candidate, liveReader: async () => Promise.reject(error) });
+      return {
+        engine,
+        accountId: candidate.id,
+        authenticated: false,
+        authCheckedAt: now,
+        limits: limits.data,
+        provenance: { source: limits.source, reason: limits.reason, staleSince: null },
+        observedAt: now,
+        envelope: null,
+      };
+    }
   },
 };
 
@@ -79,7 +94,35 @@ export class QuotaController {
   async tick(engine: MigrationEngine): Promise<void> {
     if (!this.registry.autoBalancePolicy(engine).enabled) return;
     const now = this.now();
-    const observations = await mapLimit(this.probe.list(engine), 2, (account) => this.probe.probe(engine, account, now));
+    const accounts = this.probe.list(engine);
+    const observations = await mapLimit(accounts, 2, async (account) => {
+      try {
+        return await this.probe.probe(engine, account, now);
+      } catch {
+        return {
+          engine,
+          accountId: account.id,
+          authenticated: false,
+          authCheckedAt: now,
+          limits: null,
+          provenance: { source: "unavailable" as const, reason: "quota-probe-failed", staleSince: null },
+          observedAt: now,
+          envelope: null,
+        };
+      }
+    });
+    observations.forEach((observation, index) => {
+      const account = accounts[index]!;
+      logQuotaEvent({
+        engine,
+        accountId: observation.accountId,
+        accountKind: account.kind,
+        envelope: observation.envelope ?? null,
+        probePhase: "account-rate-limits",
+        provenance: observation.provenance.source,
+        reasonCode: observation.provenance.reason,
+      });
+    });
     const active = this.registry.engineRouting(engine).activeAccountId ?? this.probe.active(engine);
     evaluateAutoBalance(engine, active, observations, now, this.registry, this.bootId);
   }

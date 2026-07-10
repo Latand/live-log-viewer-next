@@ -30,8 +30,8 @@ class FakeChild extends EventEmitter {
     this.emit("stdout", value);
   }
 
-  respond(id: number, result: unknown): void {
-    this.output(JSON.stringify({ jsonrpc: "2.0", id, result }) + "\n");
+  respond(id: number, result: unknown, headerless = false): void {
+    this.output(JSON.stringify({ ...(headerless ? {} : { jsonrpc: "2.0" }), id, result }) + "\n");
   }
 
   failRequest(id: number, message: string): void {
@@ -79,6 +79,24 @@ test("JSON-RPC initialization frames lines, correlates ids, and sends initialize
   expect(child.killed).toBe(1);
 });
 
+test("headerless app-server responses, notifications, and requests keep the client healthy", async () => {
+  const { child, start } = clientWith((fake, message) => {
+    if (message.method === "initialize") fake.respond(requestId(message), {}, true);
+    if (message.method === "account/read") fake.respond(requestId(message), { account: { type: "chatgpt" }, requiresOpenaiAuth: true }, true);
+  });
+  const client = await start();
+  const notifications: string[] = [];
+  client.onNotification((message) => notifications.push(message.method));
+  client.onRequest(() => ({ accepted: true }));
+  child.output('{"method":"account/rateLimits/updated","params":{}}\n');
+  child.output('{"id":"request-1","method":"item/tool/requestUserInput","params":{}}\n');
+  await expect(client.readAccount()).resolves.toEqual({ account: { type: "chatgpt" }, requiresOpenaiAuth: true });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(notifications).toEqual(["account/rateLimits/updated"]);
+  expect(JSON.parse(child.writes.at(-1)!)).toEqual({ jsonrpc: "2.0", id: "request-1", result: { accepted: true } });
+  client.close();
+});
+
 test("out-of-order responses stay attached to their request ids", async () => {
   const pending: Record<string, number> = {};
   const { child, start } = clientWith((fake, message) => {
@@ -97,6 +115,28 @@ test("out-of-order responses stay attached to their request ids", async () => {
   await expect(limits).resolves.toEqual({ rateLimits: { primary: { usedPercent: 12, resetsAt: 42, windowDurationMins: null }, secondary: null, planType: null } });
   expect(child.writes.map((line) => JSON.parse(line)).find((message) => message.method === "account/rateLimits/read")).toEqual({ jsonrpc: "2.0", id: pending.limits, method: "account/rateLimits/read" });
   client.close();
+});
+
+test("response ids require an exact numeric correlation and duplicate replies fail the transport", async () => {
+  const mismatched = clientWith((fake, message) => {
+    if (message.method === "initialize") fake.respond(requestId(message), {});
+    if (message.method === "account/read") fake.output(JSON.stringify({ id: String(requestId(message)), result: {} }) + "\n");
+  });
+  const first = await mismatched.start();
+  await expect(first.readAccount()).rejects.toThrow("response has an invalid id");
+  expect(mismatched.child.signals).toContain("SIGTERM");
+
+  const duplicate = clientWith((fake, message) => {
+    if (message.method === "initialize") fake.respond(requestId(message), {});
+    if (message.method === "account/read") {
+      const id = requestId(message);
+      fake.respond(id, { account: null, requiresOpenaiAuth: true }, true);
+      fake.respond(id, { account: null, requiresOpenaiAuth: true }, true);
+    }
+  });
+  const second = await duplicate.start();
+  await expect(second.readAccount()).resolves.toEqual({ account: null, requiresOpenaiAuth: true });
+  expect(duplicate.child.signals).toContain("SIGTERM");
 });
 
 test("device-code login validates official challenge fields and forwards completion notifications safely", async () => {
@@ -187,6 +227,20 @@ test("fragmented and coalesced JSONL messages preserve request and notification 
   client.onNotification((notification) => seen.push(notification.method));
   await expect(client.readAccount()).resolves.toEqual({ account: null, requiresOpenaiAuth: true });
   expect(seen).toEqual(["account/login/completed"]);
+  client.close();
+});
+
+test("coalesced bounded frames exceed no transport limit", async () => {
+  const { start } = clientWith((fake, message) => {
+    if (message.method === "initialize") fake.respond(requestId(message), {});
+    if (message.method === "account/read") {
+      const padding = "x".repeat(600_000);
+      fake.output(JSON.stringify({ id: requestId(message), result: { account: null, requiresOpenaiAuth: true, padding } }) + "\n" +
+        JSON.stringify({ method: "account/updated", params: { padding } }) + "\n");
+    }
+  });
+  const client = await start();
+  await expect(client.readAccount()).resolves.toEqual({ account: null, requiresOpenaiAuth: true });
   client.close();
 });
 

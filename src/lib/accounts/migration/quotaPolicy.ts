@@ -17,6 +17,7 @@ export interface QuotaObservation {
   provenance: LimitsProvenance;
   observedAt: number;
   authCheckedAt?: number;
+  envelope?: "headerless" | "jsonrpc-2.0" | null;
 }
 
 export interface EffectiveRemaining {
@@ -25,15 +26,19 @@ export interface EffectiveRemaining {
 }
 
 export function effectiveRemaining(observation: QuotaObservation, now = Date.now()): EffectiveRemaining | null {
+  if (!Number.isFinite(now) || !Number.isFinite(observation.observedAt) ||
+    (observation.authCheckedAt !== undefined && !Number.isFinite(observation.authCheckedAt))) return null;
   const age = now - observation.observedAt;
   const authAge = now - (observation.authCheckedAt ?? observation.observedAt);
   if (!observation.authenticated || observation.provenance.source !== "live" || age < 0 || authAge < 0 || age > AUTO_BALANCE_FRESH_MS || authAge > AUTO_BALANCE_FRESH_MS || !observation.limits) return null;
-  const windows = (["session", "weekly"] as const)
+  const reportedWindows = (["session", "weekly"] as const)
     .map((window) => ({ window, value: observation.limits?.[window] }))
-    .filter((entry): entry is { window: "session" | "weekly"; value: NonNullable<EngineLimits["session"]> } =>
-      entry.value !== null && entry.value !== undefined && Number.isFinite(entry.value.usedPercent));
+    .filter((entry): entry is { window: "session" | "weekly"; value: NonNullable<EngineLimits["session"]> } => entry.value !== null && entry.value !== undefined);
+  if (reportedWindows.some(({ value }) => !Number.isFinite(value.usedPercent) || value.usedPercent < 0 || value.usedPercent > 100 ||
+    (value.resetsAt !== null && (!Number.isSafeInteger(value.resetsAt) || value.resetsAt < 0)))) return null;
+  const windows = reportedWindows;
   if (!windows.length) return null;
-  return windows.map(({ window, value }) => ({ window, percent: Math.max(0, Math.min(100, 100 - value.usedPercent)) }))
+  return windows.map(({ window, value }) => ({ window, percent: 100 - value.usedPercent }))
     .sort((a, b) => a.percent - b.percent || a.window.localeCompare(b.window))[0] ?? null;
 }
 

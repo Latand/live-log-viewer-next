@@ -21,7 +21,9 @@ export type ViewerEventAction =
   | "kill"
   | "gate"
   | "answer"
-  | "flow";
+  | "flow"
+  | "quota"
+  | "account-migration";
 
 export interface ViewerEventFields {
   /** tmux target the action addressed, when known. */
@@ -51,4 +53,56 @@ export function logEvent(action: ViewerEventAction, fields: ViewerEventFields): 
   } catch {
     /* logging is advisory */
   }
+}
+
+function bounded(value: string | null | undefined, max = 128): string | null {
+  if (!value) return null;
+  return value.replace(/[^a-zA-Z0-9:_-]/g, "_").slice(0, max);
+}
+
+/** Account telemetry keeps protocol diagnostics useful without exposing homes or payloads. */
+export function logQuotaEvent(fields: {
+  engine: "claude" | "codex";
+  accountId: string;
+  accountKind: "legacy" | "managed";
+  envelope?: "headerless" | "jsonrpc-2.0" | null;
+  probePhase: "account-rate-limits";
+  provenance: "live" | "transcript" | "cache" | "unavailable";
+  reasonCode: string | null;
+}): void {
+  logEvent("quota", {
+    result: fields.provenance === "live" ? "ok" : "error",
+    meta: {
+      engine: fields.engine,
+      accountId: bounded(fields.accountId) ?? "unknown",
+      accountKind: fields.accountKind,
+      envelope: fields.envelope ?? "unknown",
+      probePhase: fields.probePhase,
+      provenance: fields.provenance,
+      reasonCode: bounded(fields.reasonCode),
+    },
+  });
+}
+
+export function logAccountMigrationEvent(fields: {
+  engine: "claude" | "codex";
+  intentId: string;
+  origin: "manual" | "auto";
+  sourceId: string | null;
+  targetId: string;
+  outcome: "committed" | "complete" | "stopped" | "failed-partial";
+  cooldownUntil: string | null;
+}): void {
+  logEvent("account-migration", {
+    result: fields.outcome === "failed-partial" ? "error" : "ok",
+    meta: {
+      engine: fields.engine,
+      intentId: bounded(fields.intentId) ?? "unknown",
+      origin: fields.origin,
+      sourceId: bounded(fields.sourceId),
+      targetId: bounded(fields.targetId) ?? "unknown",
+      outcome: fields.outcome,
+      cooldown: Boolean(fields.cooldownUntil),
+    },
+  });
 }

@@ -24,11 +24,11 @@ test("switching to an account without events never reuses another account's Code
   const legacySession = path.join(process.env.LLV_CODEX_HOME!, "sessions", "2026", "07", "09", "rollout.jsonl");
   fs.mkdirSync(path.dirname(legacySession), { recursive: true });
   fs.writeFileSync(legacySession, JSON.stringify({ timestamp: "2026-07-09T00:00:00.000Z", payload: { rate_limits: { primary: { used_percent: 37 }, plan_type: "pro" } } }) + "\n");
-  expect((await readCodexLimits()).data?.session?.usedPercent).toBe(37);
+  expect((await readCodexLimits({ liveReader: async () => { throw new Error("offline"); } })).data?.session?.usedPercent).toBe(37);
 
   const fresh = createManagedCodexAccount("No events");
   setActiveCodexAccount(fresh.id);
-  expect(await readCodexLimits({ liveReader: async () => { throw new Error("offline"); } })).toEqual({ data: null, reason: "app-server unavailable: offline; no codex session files", source: "unavailable" });
+  expect(await readCodexLimits({ liveReader: async () => { throw new Error("offline"); } })).toEqual({ data: null, reason: "app-server-unavailable", source: "unavailable" });
 });
 
 test("structured app-server windows map directly to the account-panel limits shape", () => {
@@ -52,7 +52,8 @@ test("managed transcript fallback reports per-engine provenance without account 
   const result = await readCodexLimits({ account: fallback, liveReader: async () => { throw new Error("offline access_token=secret"); } });
   expect(result.data?.session?.usedPercent).toBe(22);
   expect(result.source).toBe("transcript");
-  expect(result.reason).toContain("transcript fallback");
+  expect(result.reason).toBe("transcript-fallback");
+  expect(result.reason).not.toContain("secret");
 });
 
 test("readLimits stamps the active account id into the payload and disk cache", async () => {
@@ -65,13 +66,13 @@ test("readLimits stamps the active account id into the payload and disk cache", 
     // though there is no Codex data and nothing is written to the cache.
     const empty = createManagedCodexAccount("Stamp empty");
     setActiveCodexAccount(empty.id);
-    const emptyPayload = await readLimits();
+    const emptyPayload = await readLimits({ codexLiveReader: async () => { throw new Error("offline"); } });
     expect(emptyPayload.codexAccountId).toBe(empty.id);
 
     // The legacy account has a rate-limits event, so its payload is remembered:
     // the disk cache must round-trip the account id inside the payload too.
     setActiveCodexAccount("default");
-    const payload = await readLimits();
+    const payload = await readLimits({ codexLiveReader: async () => { throw new Error("offline"); } });
     expect(payload.codexAccountId).toBe("default");
     const cacheFile = path.join(process.env.LLV_STATE_DIR!, "limits-cache.json");
     const cached = JSON.parse(fs.readFileSync(cacheFile, "utf8")) as { accountId: string; data: { codexAccountId: string } };
@@ -105,7 +106,7 @@ test("readLimits stamps a fresh legacy Codex cache while refreshing Claude", asy
     throw new Error("Claude refresh unavailable");
   }) as unknown as typeof fetch;
   try {
-    const payload = await readLimits();
+    const payload = await readLimits({ codexLiveReader: async () => { throw new Error("offline"); } });
     expect(payload.codexAccountId).toBe(account.id);
     expect(payload.codex?.session?.usedPercent).toBe(37);
     expect(fetchCalled).toBeTrue();
@@ -141,7 +142,7 @@ test("a fresh Claude cache still refreshes missing Codex limits", async () => {
     throw new Error("fresh Claude cache should skip the OAuth request");
   }) as unknown as typeof fetch;
   try {
-    const payload = await readLimits();
+    const payload = await readLimits({ codexLiveReader: async () => { throw new Error("offline"); } });
     expect(payload.claude?.session?.usedPercent).toBe(11);
     expect(payload.codex?.session?.usedPercent).toBe(37);
     expect(payload.codexAccountId).toBe("default");

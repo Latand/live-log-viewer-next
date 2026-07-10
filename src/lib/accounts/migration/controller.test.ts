@@ -4,7 +4,9 @@ import os from "node:os";
 import path from "node:path";
 
 import { AgentRegistry } from "@/lib/agent/registry";
+import type { CodexAccount } from "@/lib/accounts/codex";
 import { emptyLaunchProfile, type SuccessorProviderPort } from "./contracts";
+import { QuotaController, type QuotaProbePort } from "./quotaController";
 
 const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "llv-account-controller-"));
 const { reconcileAccountMigrationCycle } = await import("./controller");
@@ -36,4 +38,73 @@ test("controller migration cycle reconciles and ticks both durable quota policy 
 
   expect(ticks.sort()).toEqual(["claude", "codex"]);
   expect(registry.conversation(conversation.id)?.migration?.phase).toBe("committed");
+}, 20_000);
+
+test("three controller cycles move depleted Main to a stronger managed account and suppress a bounce", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "llv-account-controller-auto-"));
+  try {
+    const registry = new AgentRegistry(path.join(root, "registry.json"));
+    let current = Date.parse("2026-07-10T12:00:00.000Z");
+    const main: CodexAccount = { id: "default", label: "Main", kind: "legacy", home: "/homes/main", sessionsDir: "/homes/main/sessions", authPresent: true, loginPane: null, createdAt: 0 };
+    const managed: CodexAccount = { id: "managed", label: "Managed", kind: "managed", home: "/homes/managed", sessionsDir: "/homes/managed/sessions", authPresent: true, loginPane: null, createdAt: 1 };
+    const probe: QuotaProbePort = {
+      list: (engine) => engine === "codex" ? [main, managed] : [],
+      active: () => "default",
+      async probe(engine, candidate, observedAt) {
+        const used = candidate.id === "default" ? 80 : 20;
+        return {
+          engine,
+          accountId: candidate.id,
+          authenticated: true,
+          authCheckedAt: observedAt,
+          limits: { session: { usedPercent: used, resetsAt: null }, weekly: null, plan: "pro", capturedAt: Math.floor(observedAt / 1000) },
+          provenance: { source: "live", reason: null, staleSince: null },
+          observedAt,
+        };
+      },
+    };
+    const quota = new QuotaController(registry, probe, "00000000-0000-4000-8000-000000000040", () => current);
+    registry.setAutoBalancePolicy("codex", true);
+    registry.reconcileConversations([{
+      engine: "codex",
+      path: "/main.jsonl",
+      accountId: "default",
+      launchProfile: emptyLaunchProfile({ title: "Main card" }),
+      turn: { state: "idle", source: "empty", terminalAt: null },
+      observedAt: new Date(current).toISOString(),
+    }]);
+    const conversationId = registry.conversationForPath("/main.jsonl")!.id;
+    const provider: SuccessorProviderPort = {
+      async create(input) {
+        return {
+          operationId: input.operationId,
+          nativeId: "managed-successor",
+          path: "/managed.jsonl",
+          historyHash: "managed-history",
+          host: { kind: "codex-app-server", identity: "managed-successor", epoch: 1, verifiedAt: new Date(current).toISOString() },
+        };
+      },
+      async verify() {},
+    };
+
+    await reconcileAccountMigrationCycle(registry, quota, provider, { async deliver() { return "delivered"; } });
+    expect(registry.snapshot().autoBalance.codex.sustain).toMatchObject({ bootId: "00000000-0000-4000-8000-000000000040" });
+
+    current += 60_000;
+    await reconcileAccountMigrationCycle(registry, quota, provider, { async deliver() { return "delivered"; } });
+    const intent = Object.values(registry.snapshot().migrationIntents).find((item) => item.engine === "codex");
+    expect(intent).toMatchObject({ origin: "auto", targetId: "managed", state: "draining" });
+    expect(registry.engineRouting("codex").activeAccountId).toBe("managed");
+
+    current += 60_000;
+    await reconcileAccountMigrationCycle(registry, quota, provider, { async deliver() { return "delivered"; } });
+    const snapshot = registry.snapshot();
+    expect(snapshot.conversations[conversationId]?.migration?.phase).toBe("committed");
+    expect(snapshot.conversations[conversationId]?.generations.at(-1)?.accountId).toBe("managed");
+    expect(snapshot.migrationIntents[intent!.id]?.state).toBe("complete");
+    expect(snapshot.autoBalance.codex.cooldownUntil).toBeTruthy();
+    expect(Object.values(snapshot.migrationIntents)).toHaveLength(1);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 }, 20_000);
