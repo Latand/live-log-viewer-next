@@ -3,9 +3,8 @@ import crypto from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
 
 import { CorruptCodexAccountsError, UnknownAccountError, setActiveCodexAccount } from "@/lib/accounts/codex";
-import { accountManager } from "@/lib/accounts/manager";
 import { createMigrationIntent, previewMigration } from "@/lib/accounts/migration/coordinator";
-import { agentRegistry, MigrationRevisionError } from "@/lib/agent/registry";
+import { MigrationRevisionError } from "@/lib/agent/registry";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
 
 export const runtime = "nodejs";
@@ -28,11 +27,7 @@ export async function POST(req: NextRequest) {
       try { setActiveCodexAccount(body.id); } catch { compatibilityPending = true; }
       return NextResponse.json({ ...result, compatibilityPending }, { status: 202 });
     }
-    if (body.mode !== undefined) return NextResponse.json({ error: "unsupported account selection mode" }, { status: 400 });
-    accountManager.resolveSpawn("codex", body.id);
-    agentRegistry().setEngineRouting("codex", body.id);
-    setActiveCodexAccount(body.id);
-    return new NextResponse(null, { status: 204 });
+    return NextResponse.json({ error: "mode must be preview or migrate" }, { status: 400 });
   } catch (error) {
     if (error instanceof MigrationRevisionError) {
       return NextResponse.json({ error: "migration preview is stale", preview: await previewMigration("codex", body.id) }, { status: 409 });

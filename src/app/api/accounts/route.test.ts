@@ -16,11 +16,14 @@ process.env.LLV_CLAUDE_HOME = path.join(SANDBOX, "legacy-claude");
 
 const { GET } = await import("./route");
 const { POST } = await import("./codex/active/route");
+const { POST: setClaudeActive } = await import("./claude/active/route");
 const { POST: createClaude } = await import("./claude/route");
+const { createManagedClaudeAccount } = await import("@/lib/accounts/claude");
 const { createManagedCodexAccount, listCodexAccounts, setCodexAccountLoginPane } = await import("@/lib/accounts/codex");
 const { CodexAppServerClient } = await import("@/lib/accounts/codexAppServer");
 const { ManagedCodexRuntime, setManagedCodexRuntimeForTests } = await import("@/lib/accounts/codexRuntime");
 const { agentRegistry } = await import("@/lib/agent/registry");
+const { emptyLaunchProfile } = await import("@/lib/accounts/migration/contracts");
 
 class FakeChild extends EventEmitter {
   authenticated = false;
@@ -68,6 +71,14 @@ function migrationRequest(body: Record<string, unknown>): NextRequest {
     method: "POST",
     headers: { host: "127.0.0.1", "content-type": "application/json" },
     body: JSON.stringify(body),
+  });
+}
+
+function claudeActiveRequest(id: string): NextRequest {
+  return new NextRequest("http://127.0.0.1/api/accounts/claude/active", {
+    method: "POST",
+    headers: { host: "127.0.0.1", "content-type": "application/json" },
+    body: JSON.stringify({ id }),
   });
 }
 
@@ -184,14 +195,38 @@ test("active mutation rejects cross-origin, unknown, and corrupt catalogs", asyn
   expect(fs.readFileSync(registry, "utf8")).toBe("{ corrupt");
 });
 
+test("Codex active route requires preview or revision-fenced migrate mode", async () => {
+  const target = createManagedCodexAccount("Mode target");
+  const routingBefore = agentRegistry().snapshot().engineRouting.codex;
+
+  expect((await POST(request(target.id))).status).toBe(400);
+  expect(agentRegistry().snapshot().engineRouting.codex).toEqual(routingBefore);
+});
+
+test("Claude active route requires preview or revision-fenced migrate mode", async () => {
+  const target = createManagedClaudeAccount("Mode target");
+  const routingBefore = agentRegistry().snapshot().engineRouting.claude;
+
+  expect((await setClaudeActive(claudeActiveRequest(target.id))).status).toBe(400);
+  expect(agentRegistry().snapshot().engineRouting.claude).toEqual(routingBefore);
+});
+
 test("active route returns a target-aware preview and idempotent revision-fenced intent", async () => {
   const target = createManagedCodexAccount("Migration target");
+  agentRegistry().reconcileConversations([{
+    engine: "codex",
+    path: "/root.jsonl",
+    accountId: "default",
+    launchProfile: emptyLaunchProfile({ role: "root", title: "Root" }),
+    turn: { state: "idle", source: "empty", terminalAt: null },
+    observedAt: "2026-07-10T12:00:00.000Z",
+  }]);
   const previewResponse = await POST(migrationRequest({ id: target.id, mode: "preview" }));
   expect(previewResponse.status).toBe(200);
   const preview = await previewResponse.json() as { targetId: string; targetLabel: string; counts: { total: number; idle: number; busy: number; alreadyTarget: number; excludedRoots: number }; excludedRoots: unknown[]; rootWarning: boolean; previewRevision: number };
   expect(preview).toMatchObject({ targetId: target.id, targetLabel: "Migration target" });
-  expect(preview.counts).toEqual(expect.objectContaining({ total: expect.any(Number), idle: expect.any(Number), busy: expect.any(Number), alreadyTarget: expect.any(Number), excludedRoots: expect.any(Number) }));
-  expect(Array.isArray(preview.excludedRoots)).toBeTrue();
+  expect(preview.counts).toEqual(expect.objectContaining({ total: 1, idle: 1, busy: 0, alreadyTarget: 0, excludedRoots: 0 }));
+  expect(preview.excludedRoots).toEqual([]);
 
   const body = { id: target.id, mode: "migrate", previewRevision: preview.previewRevision, requestId: "route-idempotency" };
   const first = await POST(migrationRequest(body));
@@ -201,6 +236,26 @@ test("active route returns a target-aware preview and idempotent revision-fenced
   const firstBody = await first.json() as { intent: { id: string; targetId: string } };
   const repeatedBody = await repeated.json() as { intent: { id: string; targetId: string } };
   expect(repeatedBody.intent).toEqual(firstBody.intent);
+});
+
+test("migrate repairs generations on another account when routing already names the target", async () => {
+  const target = createManagedCodexAccount("Main");
+  agentRegistry().reconcileConversations([{
+    engine: "codex",
+    path: "/stale-account.jsonl",
+    accountId: "default",
+    launchProfile: emptyLaunchProfile({ role: "root", title: "Stale root" }),
+    turn: { state: "idle", source: "empty", terminalAt: null },
+    observedAt: "2026-07-10T12:00:00.000Z",
+  }]);
+  agentRegistry().setEngineRouting("codex", target.id);
+
+  const preview = await (await POST(migrationRequest({ id: target.id, mode: "preview" }))).json() as { counts: { total: number }; previewRevision: number };
+  const response = await POST(migrationRequest({ id: target.id, mode: "migrate", previewRevision: preview.previewRevision, requestId: "same-active-repair" }));
+
+  expect(preview.counts.total).toBeGreaterThanOrEqual(1);
+  expect(response.status).toBe(202);
+  expect(agentRegistry().conversationForPath("/stale-account.jsonl")?.migration).toMatchObject({ targetId: target.id, phase: "requested" });
 });
 
 test("Claude DTOs remain secret-free and creation rejects cross-origin before any state change", async () => {

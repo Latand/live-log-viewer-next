@@ -3,9 +3,8 @@ import crypto from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
 
 import { CorruptClaudeAccountsError, UnknownClaudeAccountError, setActiveClaudeAccount } from "@/lib/accounts/claude";
-import { accountManager } from "@/lib/accounts/manager";
 import { createMigrationIntent, previewMigration } from "@/lib/accounts/migration/coordinator";
-import { agentRegistry, MigrationRevisionError } from "@/lib/agent/registry";
+import { MigrationRevisionError } from "@/lib/agent/registry";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
 
 export const runtime = "nodejs";
@@ -26,11 +25,7 @@ export async function POST(req: NextRequest) {
       try { setActiveClaudeAccount(body.id); } catch { compatibilityPending = true; }
       return NextResponse.json({ ...result, compatibilityPending }, { status: 202 });
     }
-    if (body.mode !== undefined) return NextResponse.json({ error: "unsupported account selection mode" }, { status: 400 });
-    accountManager.resolveSpawn("claude", body.id);
-    agentRegistry().setEngineRouting("claude", body.id);
-    setActiveClaudeAccount(body.id);
-    return new NextResponse(null, { status: 204 });
+    return NextResponse.json({ error: "mode must be preview or migrate" }, { status: 400 });
   }
   catch (error) {
     if (error instanceof MigrationRevisionError) {

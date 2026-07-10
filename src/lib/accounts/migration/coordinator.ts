@@ -10,7 +10,6 @@ import { tailRecords } from "@/lib/scanner/activity";
 import type { FileEntry } from "@/lib/types";
 
 import {
-  DisabledSuccessorProviderPort,
   emptyLaunchProfile,
   type HistoryCopyPort,
   type HeldDelivery,
@@ -21,7 +20,7 @@ import {
   type SuccessorProviderPort,
   type ViewerConversationId,
 } from "./contracts";
-import { accountMigrationActivationEnabled, RegisteredSuccessorProvider } from "./provider";
+import { RegisteredSuccessorProvider } from "./provider";
 import { sanitizeProviderError } from "./safeHistoryCopy";
 import { turnStateFromRecords } from "./turnState";
 import { AUTO_BALANCE_COOLDOWN_MS } from "./quotaPolicy";
@@ -98,10 +97,6 @@ function previewFromSnapshot(engine: MigrationEngine, targetId: string, registry
     if (conversation.engine !== engine) continue;
     const generation = conversation.generations.at(-1);
     if (!generation) continue;
-    if (generation.launchProfile.role === "root") {
-      excludedRoots.push({ conversationId: conversation.id, title: generation.launchProfile.title });
-      continue;
-    }
     if (generation.accountId === targetId) { alreadyTarget += 1; continue; }
     if (conversation.turn.state === "busy" || conversation.turn.state === "unknown") busy += 1;
     else idle += 1;
@@ -175,7 +170,7 @@ function copyAdapter(copy: HistoryCopyPort): SuccessorProviderPort {
 }
 
 function productionProvider(): SuccessorProviderPort {
-  return accountMigrationActivationEnabled() ? new RegisteredSuccessorProvider() : new DisabledSuccessorProviderPort();
+  return new RegisteredSuccessorProvider();
 }
 
 export async function advanceConversationMigration(

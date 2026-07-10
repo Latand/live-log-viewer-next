@@ -169,7 +169,3 @@ export class RegisteredSuccessorProvider implements SuccessorProviderPort {
     };
   }
 }
-
-export function accountMigrationActivationEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-  return env.LLV_ACCOUNT_MIGRATION_ACTIVATE === "1" && env.LLV_ACCOUNT_MIGRATION_PROVIDER === "registered";
-}

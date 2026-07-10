@@ -84,7 +84,3 @@ export class QuotaController {
     evaluateAutoBalance(engine, active, observations, now, this.registry, this.bootId);
   }
 }
-
-export function autoBalanceActivationEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-  return env.LLV_ACCOUNT_AUTO_BALANCE_ACTIVATE === "1";
-}

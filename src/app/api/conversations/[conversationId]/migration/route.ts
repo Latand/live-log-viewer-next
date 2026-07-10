@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { agentRegistry } from "@/lib/agent/registry";
 import { advanceConversationMigration, drainHeldDeliveries } from "@/lib/accounts/migration/coordinator";
-import { accountMigrationActivationEnabled, RegisteredSuccessorProvider } from "@/lib/accounts/migration/provider";
+import { RegisteredSuccessorProvider } from "@/lib/accounts/migration/provider";
 import { deliverConversationMessage } from "@/lib/delivery";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
 import type { ViewerConversationId } from "@/lib/accounts/migration/contracts";
@@ -37,7 +37,6 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ con
     }
   }
   if (body.action === "retry") {
-    if (!accountMigrationActivationEnabled()) return NextResponse.json({ error: "account migration activation requires an explicit operator preflight" }, { status: 409 });
     try {
       const registry = agentRegistry();
       registry.retryConversationMigration(conversationId as ViewerConversationId, body.expectedRevision as number);

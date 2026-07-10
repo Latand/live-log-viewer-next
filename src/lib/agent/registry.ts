@@ -652,7 +652,7 @@ export class AgentRegistry {
       for (const conversation of Object.values(file.conversations)) {
         if (conversation.engine !== input.engine) continue;
         const source = conversation.generations.at(-1);
-        if (!source || source.launchProfile.role === "root" || source.accountId === input.targetId) {
+        if (!source || source.accountId === input.targetId) {
           if (conversation.migration && conversation.migration.phase !== "committed") conversation.migration = null;
           continue;
         }

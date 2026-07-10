@@ -14,8 +14,9 @@ import { reconcileWorkflowConversationOwnership } from "@/lib/workflows/store";
 import { paneInfo } from "@/lib/tmux";
 
 import { drainHeldDeliveries, reconcileMigrationInventory, reconcileMigrations, type HeldDeliveryPort } from "./coordinator";
-import { accountMigrationActivationEnabled, RegisteredSuccessorProvider } from "./provider";
-import { autoBalanceActivationEnabled, QuotaController } from "./quotaController";
+import type { SuccessorProviderPort } from "./contracts";
+import { RegisteredSuccessorProvider } from "./provider";
+import { QuotaController } from "./quotaController";
 
 const CONTROLLER_INTERVAL_MS = 10_000;
 
@@ -26,6 +27,19 @@ const deliveryPort: HeldDeliveryPort = {
     return "delivered";
   },
 };
+
+export async function reconcileAccountMigrationCycle(
+  registry: AgentRegistry,
+  quota: Pick<QuotaController, "tick">,
+  provider: SuccessorProviderPort = new RegisteredSuccessorProvider(),
+  delivery: HeldDeliveryPort = deliveryPort,
+): Promise<void> {
+  await reconcileMigrations(provider, delivery, registry);
+  for (const conversation of Object.values(registry.snapshot().conversations)) {
+    if (conversation.migration?.phase === "rolled-back") await drainHeldDeliveries(conversation.id, delivery, registry);
+  }
+  await Promise.all([quota.tick("claude"), quota.tick("codex")]);
+}
 
 function syncCompatibilityRouting(registry: AgentRegistry): void {
   const snapshot = registry.snapshot();
@@ -85,13 +99,7 @@ export class AccountMigrationController {
       return { tasks: reconciled.dirty ? reconciled.tasks : undefined, result: undefined };
     });
     syncCompatibilityRouting(this.registry);
-    if (accountMigrationActivationEnabled()) {
-      await reconcileMigrations(new RegisteredSuccessorProvider(), deliveryPort, this.registry);
-      for (const conversation of Object.values(this.registry.snapshot().conversations)) {
-        if (conversation.migration?.phase === "rolled-back") await drainHeldDeliveries(conversation.id, deliveryPort, this.registry);
-      }
-    }
-    if (autoBalanceActivationEnabled()) await Promise.all([this.quota.tick("claude"), this.quota.tick("codex")]);
+    await reconcileAccountMigrationCycle(this.registry, this.quota);
   }
 }
 

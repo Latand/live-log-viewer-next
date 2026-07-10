@@ -60,7 +60,7 @@ afterEach(() => {
 });
 
 describe("durable account migration coordinator", () => {
-  test("commits routing, intent, scope, root exclusions, and request id atomically", () => {
+  test("commits routing, intent, and every conversation scope including roots atomically", () => {
     const store = registry();
     store.reconcileConversations([
       observation("/idle.jsonl", "a", "idle"),
@@ -73,7 +73,7 @@ describe("durable account migration coordinator", () => {
     expect(snapshot.engineRouting.codex.activeAccountId).toBe("b");
     expect(Object.values(snapshot.conversations).find((item) => item.generations[0]?.path === "/idle.jsonl")?.migration?.phase).toBe("requested");
     expect(Object.values(snapshot.conversations).find((item) => item.generations[0]?.path === "/busy.jsonl")?.migration?.phase).toBe("waiting-turn");
-    expect(Object.values(snapshot.conversations).find((item) => item.generations[0]?.path === "/root.jsonl")?.migration).toBeNull();
+    expect(Object.values(snapshot.conversations).find((item) => item.generations[0]?.path === "/root.jsonl")?.migration?.phase).toBe("requested");
     expect(store.commitMigrationIntent({ engine: "codex", targetId: "b", origin: "manual", requestId: "request-1", expectedRevision: previewRevision }).id).toBe(intent.id);
     expect(() => store.commitMigrationIntent({ engine: "codex", targetId: "a", origin: "manual", requestId: "request-2", expectedRevision: previewRevision }))
       .toThrow(MigrationRevisionError);
