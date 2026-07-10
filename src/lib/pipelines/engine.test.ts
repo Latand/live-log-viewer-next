@@ -451,3 +451,30 @@ test("closing a mid-run or parked pipeline persists a record that loads back", a
   await patchPipeline(parked.id, { action: "close" }, h.ports);
   expect(loadPipelines()[0]!).toMatchObject({ state: "closed", cursor: null });
 });
+
+test("a lost advance on a fresh review flow is re-issued instead of waiting forever", async () => {
+  const h = harness();
+  const stages = [
+    { id: "build", kind: "run", prompt: "build", next: "review" },
+    { id: "review", kind: "review-loop", role: { roleId: "reviewer" }, prompt: "review", next: null },
+  ] as const;
+  await create(h.ports, stages as never);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([h.finish("/codex/stage-1.jsonl", "pass")], h.ports);
+  await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
+  /* The harness flow stays waiting_ready with zero rounds — exactly the
+     crash-between-persist-and-advance shape. The next tick re-issues. */
+  await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
+  expect(h.calls.filter((call) => call === "flow-patch:flow-1:advance").length).toBe(2);
+});
+
+test("creation caps task, spec, and stage prompt sizes", async () => {
+  const { ports } = harness();
+  expect((await createPipelineFromRequest({ task: "x".repeat(4_001), repoDir: "/repo", stages: [] }, ports)).error).toContain("task exceeds");
+  expect((await createPipelineFromRequest({ task: "x", spec: "y".repeat(16_001), repoDir: "/repo", stages: [] }, ports)).error).toContain("spec exceeds");
+  expect((await createPipelineFromRequest({ task: "x", repoDir: "/repo", stages: [
+    { id: "a", kind: "run", prompt: "p".repeat(8_001), next: "b" },
+    { id: "b", kind: "run", prompt: "b", next: null },
+  ] }, ports)).error).toContain("prompt exceeds");
+});

@@ -125,3 +125,10 @@ test("a referenced role with an empty scaffold fails the create instead of persi
   expect(resolvePipelineRole({ role: { roleId: "builder" } }, "run", lookup).error)
     .toContain("empty prompt scaffold");
 });
+
+test("codex model overrides mirror the store bounds at create time", () => {
+  expect(resolvePipelineRole({ model: `gpt-${"x".repeat(200)}` }, "run", REGISTRY_LOOKUP).error)
+    .toContain("not supported by codex");
+  expect(resolvePipelineRole({ model: "gpt-5.6\u0000sol" }, "run", REGISTRY_LOOKUP).error)
+    .toContain("not supported by codex");
+});

@@ -26,7 +26,11 @@ export async function PATCH(
   }
   if (!ACTIONS.has(body.action)) return NextResponse.json({ error: "unknown pipeline action" }, { status: 400 });
   const { id } = await ctx.params;
-  const result = await patchPipeline(id, body);
-  if (!result.pipeline) return NextResponse.json({ error: result.error ?? "could not update pipeline" }, { status: result.status ?? 400 });
-  return NextResponse.json({ ok: true, pipeline: result.pipeline });
+  try {
+    const result = await patchPipeline(id, body);
+    if (!result.pipeline) return NextResponse.json({ error: result.error ?? "could not update pipeline" }, { status: result.status ?? 400 });
+    return NextResponse.json({ ok: true, pipeline: result.pipeline });
+  } catch (error) {
+    return NextResponse.json({ error: error instanceof Error ? error.message : "could not update pipeline" }, { status: 500 });
+  }
 }

@@ -16,7 +16,11 @@ asks for:
 - **Preset** — an engine/model/effort pair for each role. Seeded presets put
   GPT-5.6-Terra on implementation and GPT-5.6-Sol on adversarial review, with
   Fable and Sonnet combinations available alongside them. Edit or add your
-  own in `~/.config/agent-log-viewer/state/review-loop-presets.json`.
+  own in `~/.config/agent-log-viewer/state/review-loop-presets.json`. Records
+  carrying `managed: "role-registry"` (seeded presets and workflow templates)
+  regenerate from the role registry on every load — a hand edit survives only
+  after removing that flag, which turns the record into a custom entry that
+  shadows the seed of the same name.
 - **Base** — the git ref reviews diff against: current `HEAD` or the
   merge-base with the default branch. Captured once, so later rounds re-check
   earlier fixes across the whole range.

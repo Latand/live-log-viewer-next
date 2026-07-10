@@ -231,6 +231,12 @@ export function defaultPipelinePorts(): PipelinePorts {
 const spawnsThisProcess = new Set<string>();
 const TERMINAL_STATES = new Set<Pipeline["state"]>(["completed", "closed"]);
 
+/* Everything created here rides every 10s files poll, so unbounded
+   create-time strings become permanent payload weight. */
+const MAX_TASK_LENGTH = 4_000;
+const MAX_SPEC_LENGTH = 16_000;
+const MAX_STAGE_PROMPT_LENGTH = 8_000;
+
 function attemptKey(pipeline: Pipeline, stage: PipelineStage, attempt: PipelineStageAttempt): string {
   return `${pipeline.id}:${stage.id}:${attempt.n}`;
 }
@@ -565,6 +571,15 @@ async function tickReviewStage(
     park(pipeline, `review flow paused during startup: ${flow.stateDetail ?? "operator decision required"}`, attempt);
     return;
   }
+  /* Advance appends round 1 synchronously, so waiting_ready with zero rounds
+     means the advance never landed (crash between persisting flowId and the
+     patch) — without a re-issue the flow waits forever for a ready marker a
+     verdict-terminated stage transcript will not produce. */
+  if (flow.state === "waiting_ready" && flow.rounds.length === 0) {
+    const advanced = ports.patchFlow(flow.id, "advance", reviewNote(pipeline, stage, attempt.effectiveRole));
+    if (advanced.error) park(pipeline, `advancing the review flow failed: ${advanced.error}`, attempt);
+    return;
+  }
   const round = flow.rounds.at(-1);
   attempt.sessionId = round?.sessionId ?? attempt.sessionId;
   attempt.agentPath = round?.reviewerPath ?? attempt.agentPath;
@@ -644,6 +659,7 @@ function normalizeStages(value: unknown, lookup?: PipelineRoleLookup | null): { 
     if (stage.kind === "review-loop" && !hasRun) return { error: "review-loop stage requires a preceding run stage" };
     const prompt = typeof stage.prompt === "string" ? stage.prompt.trim() : "";
     if (!prompt) return { error: `stage ${id} prompt is required` };
+    if (prompt.length > MAX_STAGE_PROMPT_LENGTH) return { error: `stage ${id} prompt exceeds ${MAX_STAGE_PROMPT_LENGTH} characters` };
     const roleValue = (raw as { role?: unknown }).role;
     if (roleValue !== undefined && (!roleValue || typeof roleValue !== "object" || Array.isArray(roleValue))) {
       return { error: `stage ${id} role must be an object` };
@@ -688,8 +704,10 @@ export async function createPipelineFromRequest(
 ): Promise<{ pipeline?: Pipeline; error?: string; status?: number }> {
   const task = typeof req.task === "string" ? req.task.trim() : "";
   if (!task) return { error: "task is required", status: 400 };
+  if (task.length > MAX_TASK_LENGTH) return { error: `task exceeds ${MAX_TASK_LENGTH} characters`, status: 400 };
   const spec = typeof req.spec === "string" && req.spec.trim() ? req.spec.trim() : undefined;
   if (req.spec !== undefined && typeof req.spec !== "string") return { error: "spec must be a string", status: 400 };
+  if (spec && spec.length > MAX_SPEC_LENGTH) return { error: `spec exceeds ${MAX_SPEC_LENGTH} characters`, status: 400 };
   const repoDir = typeof req.repoDir === "string" ? req.repoDir.trim() : "";
   if (!repoDir) return { error: "repoDir is required", status: 400 };
   const git = ports.exec("git", ["rev-parse", "--git-dir"], repoDir);

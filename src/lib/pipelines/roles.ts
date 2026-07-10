@@ -94,7 +94,9 @@ export function resolvePipelineRole(
   if (model && engine === "claude" && !normalizeClaudeLaunchModel(model)) {
     return { error: "stage model is not supported by claude; provide a compatible model override" };
   }
-  if (model && engine === "codex" && !model.startsWith("gpt-")) {
+  /* Mirrors the store's isEffectiveRole bounds so a bad override fails the
+     create with a 400 instead of surfacing as a persist-time 500. */
+  if (model && engine === "codex" && (!model.startsWith("gpt-") || model.length > 128 || /[\u0000-\u001f\u007f]/.test(model))) {
     return { error: "stage model is not supported by codex; provide a compatible model override" };
   }
   if (effort && !isEngineEffort(engine, effort)) {
