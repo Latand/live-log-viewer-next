@@ -117,7 +117,7 @@ describe("resolveTmuxAttach", () => {
   };
   const endpoint = createTmuxEndpointDescriptor("/run/user/1000/agent-log-viewer", 1000);
 
-  test("reports stale-pane when the server is healthy and the pane vanished", async () => {
+  test("reports stale-pane when a healthy server no longer has the pane", async () => {
     const calls: Array<{ args: string[]; endpointPath: string }> = [];
     const result = await resolveTmuxAttach(expected, endpoint, {
       runTmux: async (args, _input, seenEndpoint) => {
@@ -144,7 +144,7 @@ describe("resolveTmuxAttach", () => {
     ]);
   });
 
-  test("reports server-restarted before resolving a missing pane on a new server", async () => {
+  test("reports server-restarted before resolving a pane missing from the new server", async () => {
     const calls: Array<{ args: string[]; endpointPath: string }> = [];
     const result = await resolveTmuxAttach(expected, endpoint, {
       runTmux: async (args, _input, seenEndpoint) => {
