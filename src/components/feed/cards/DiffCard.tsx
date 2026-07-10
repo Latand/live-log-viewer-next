@@ -110,7 +110,7 @@ function FileDiffView({ file }: { file: FileDiff }) {
   );
 }
 
-export function DiffCard({ body }: { body: Extract<ToolBody, { type: "diff" }> }) {
+export function DiffCard({ body }: { body: ToolBody }) {
   return (
     <div className="mt-1.5 space-y-1.5">
       {body.files.map((file, i) => (

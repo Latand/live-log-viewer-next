@@ -21,23 +21,21 @@ export const tr = (key: Parameters<typeof translate>[1], params?: Parameters<typ
 
 export type ToolStatus = "run" | "ok" | "err";
 
-/** Structured body attached to an expanded tool event (issue #9 §1). */
-export type ToolBody =
-  | { type: "diff"; files: FileDiff[]; filesTruncated: boolean }
-  | { type: "code"; lang: string | null; text: string; truncated: boolean }
-  | { type: "text"; text: string; truncated: boolean };
+/** Structured body attached to an expanded tool event (issue #9 §1). Only the
+    diff body is built today; the code/text variants are added when a consumer
+    (e.g. a highlighted Read body) actually needs them. */
+export type ToolBody = { type: "diff"; files: FileDiff[]; filesTruncated: boolean };
 
-/** One inner operation of a `functions.exec` orchestration record. */
+/** One inner operation of a `functions.exec` orchestration record. Per-call
+    status and output are not in the transcript — the combined output attaches
+    to the outer event — so a nested call carries only what was parsed: its
+    target and summary. */
 export type NestedCall = {
   id: string;
   tool: string;
   family: ToolFamily;
   icon: GlyphName;
   summary: string;
-  status: ToolStatus;
-  statusLabel: string;
-  outputPreview: string;
-  outputTruncated: boolean;
 };
 
 /** The two-level orchestration detail of a `functions.exec` record. */
@@ -389,8 +387,8 @@ const ORCH_METHOD_TOOL: Record<string, string> = {
   fetch: "WebFetch",
   web_search: "WebSearch",
 };
-/* Compose helpers that shape output rather than run a tool — rendered as quiet
-   semantic labels, not full tool rows (issue #9 fresh production evidence). */
+/* Compose helpers shape display output. Render them as quiet semantic labels
+   outside full tool rows (issue #9 fresh production evidence). */
 const ORCH_HELPERS = new Set(["text", "image", "generatedImage", "store", "notify"]);
 const ORCH_CALL_RE = /\btools\.([A-Za-z_]\w*)\s*\(/g;
 const ORCH_HELPER_RE = /(?:^|[^.\w])(text|image|generatedImage|store|notify)\s*\(/g;
@@ -425,25 +423,13 @@ function parseOrchestration(input: string): { overlay: Partial<ToolEvent>; body:
     const arg = tail.match(/(['"`])([^'"`]*)\1/)?.[2] ?? "";
     const tool = ORCH_METHOD_TOOL[method] ?? method;
     const s = summarizeTool(tool, orchArgFor(tool, arg), "codex");
-    calls.push({
-      id: `${method}#${calls.length}`,
-      tool: method,
-      family: s.family,
-      icon: s.icon,
-      summary: s.summary,
-      /* Per-call status is not in the transcript; the combined result lives on
-         the outer event. "ok" reflects that the orchestration produced output. */
-      status: "ok",
-      statusLabel: "ok",
-      outputPreview: "",
-      outputTruncated: false,
-    });
+    calls.push({ id: `${method}#${calls.length}`, tool: method, family: s.family, icon: s.icon, summary: s.summary });
   }
   ORCH_HELPER_RE.lastIndex = 0;
   while ((match = ORCH_HELPER_RE.exec(input)) && calls.length < ORCH_MAX_CALLS) {
     const helper = match[1];
     if (!ORCH_HELPERS.has(helper)) continue;
-    calls.push({ id: `${helper}#${calls.length}`, tool: helper, family: "other", icon: "note", summary: helper, status: "ok", statusLabel: "ok", outputPreview: "", outputTruncated: false });
+    calls.push({ id: `${helper}#${calls.length}`, tool: helper, family: "other", icon: "note", summary: helper });
   }
   const toolCalls = calls.filter((call) => call.icon !== "note");
   if (!toolCalls.length) return null;
@@ -1201,7 +1187,13 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
       if (lastPlainCall) attach(lastPlainCall, rest, /^Command failed/.test(rest));
       return;
     }
-    if (/^Applying \d+ file/.test(rest)) return void registerCall(newToolEvent({ ts, id: "plain-" + pushSeq + "-" + String(ts ?? ""), tool: "apply_patch", engine: "codex", summary: rest }));
+    if (/^Applying \d+ file/.test(rest)) {
+      /* A job log only announces the patch — no output record ever carries this
+         id. Emit it already-complete (like a statically-parsed nested call) and
+         skip registerCall, so it never sits spinning "executing…" forever. */
+      const event = newToolEvent({ ts, id: "plain-" + pushSeq + "-" + String(ts ?? ""), tool: "apply_patch", engine: "codex", summary: rest });
+      return void push({ ...event, status: "ok", statusLabel: "ok" });
+    }
     if (m && !/^(Running|Command|Applying)/.test(rest)) return addProse(ts, rest);
     if (pushBlobIfHuge(line)) return;
     push({ kind: "raw", text: redactSecrets(line), err: /error|failed|traceback|exception/i.test(line) });

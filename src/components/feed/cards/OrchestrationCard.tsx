@@ -2,35 +2,21 @@
 
 import { GlyphIcon } from "../../icons";
 import { tr, type NestedCall, type Orchestration } from "../parse";
-import { OutputPreview } from "./OutputPreview";
-import { StatusIcon } from "./shared";
 
-function statusClass(status: NestedCall["status"]): string {
-  return status === "ok" ? "text-ok" : status === "err" ? "text-err" : "text-dim";
-}
-
-/* One inner operation of a functions.exec record: its own icon, target/command
-   summary, status, and bounded output — so four concurrent tools read as four
-   distinct structured children instead of one repeated flat row. */
+/* One inner operation of a functions.exec record: its icon and target/command
+   summary. Four concurrent tools read as four distinct structured children.
+   The transcript stores the combined result on the outer event and omits
+   per-call status/output, so each child shows parsed data only. */
 function NestedRow({ call }: { call: NestedCall }) {
   return (
-    <details className="overflow-hidden rounded-[10px] border border-line bg-panel" open={call.status === "err"}>
-      <summary className="flex cursor-pointer list-none items-center gap-2 px-2.5 py-1 text-[11.5px]">
-        <span className="flex h-4.5 w-4.5 shrink-0 items-center justify-center rounded-md bg-chip">
-          <GlyphIcon name={call.icon} className="h-3 w-3" />
-        </span>
-        <span className="min-w-0 flex-1 truncate" title={call.summary}>
-          {call.summary}
-        </span>
-        <span className={`inline-flex shrink-0 items-center gap-1 text-[10.5px] font-semibold ${statusClass(call.status)}`}>
-          <StatusIcon status={call.status} className="h-3 w-3" />
-          {call.statusLabel}
-        </span>
-      </summary>
-      <div className="border-t border-line px-2.5 py-1.5">
-        <OutputPreview output={call.outputPreview} truncated={call.outputTruncated} />
-      </div>
-    </details>
+    <div className="flex items-center gap-2 rounded-[10px] border border-line bg-panel px-2.5 py-1 text-[11.5px]">
+      <span className="flex h-4.5 w-4.5 shrink-0 items-center justify-center rounded-md bg-chip">
+        <GlyphIcon name={call.icon} className="h-3 w-3" />
+      </span>
+      <span className="min-w-0 flex-1 truncate" title={call.summary}>
+        {call.summary}
+      </span>
+    </div>
   );
 }
 

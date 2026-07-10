@@ -221,6 +221,16 @@ describe("feed session parity with one-shot parse", () => {
     assertParity(plainFile, lines, { cap: 3, chunks: [2, 1] });
   });
 
+  test("a job-log 'Applying N files' line renders complete with no perpetual spinner", () => {
+    const lines = ["[10:00] Applying 3 files to the working tree"];
+    const feed = buildFeed(plainFile, lines, false, "");
+    const tool = feed.items.find((item) => item.kind === "tool");
+    if (tool?.kind !== "tool") throw new Error("expected tool item");
+    expect(tool.status).toBe("ok");
+    expect(tool.summary).toContain("3 files");
+    assertParity(plainFile, lines, { chunks: [1] });
+  });
+
   test("window slide past a tool_use: its result degrades to the svc fallback", () => {
     const lines = [
       claudeTool("c1", "Bash", "sleep 100"),
@@ -598,7 +608,7 @@ describe("Codex functions.exec orchestration", () => {
     expect(nested.every((call) => call.id.length > 0)).toBe(true);
     // combined output attaches to the outer event
     expect(event.outputPreview).toContain("## main");
-    // compose helper text() becomes a quiet label, not a tool row
+    // compose helper text() becomes a quiet label outside the tool rows
     expect(event.orchestration?.calls.some((call) => call.tool === "text" && call.icon === "note")).toBe(true);
   });
 

@@ -27,7 +27,7 @@ describe("Claude Edit / MultiEdit / Write normalization", () => {
     expect(kinds).toEqual(["-a", "-b", "+a", "+B", "+c"]);
   });
 
-  test("Edit without old_string is an all-added file (new-file write), never throws", () => {
+  test("Edit without old_string becomes an all-added file safely", () => {
     const model = normalizeEdit("Edit", { file_path: "/repo/new.ts", new_string: "line1\nline2" });
     const file = only(model.files);
     expect(file.op).toBe("add");

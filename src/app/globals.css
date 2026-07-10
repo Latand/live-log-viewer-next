@@ -121,9 +121,8 @@ body {
 }
 
 /* Syntax highlighting palette (issue #9 §7): highlight.js emits .hljs-* class
-   names; we color them from the app's own light-theme tokens rather than
-   shipping a hljs theme, so no app-wide dark theme sneaks in and every color
-   stays a single source of truth. */
+   names. The app's light-theme tokens supply their colors and keep every color
+   in a single source of truth. */
 .hljs-comment,
 .hljs-quote {
   color: var(--color-dim);

@@ -428,7 +428,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "tools.noOutput": "вивід не збережено",
   "tools.noOutputTip": "повний вивід зберігається в сесії rollout",
   "tools.diffTruncated": "обрізано",
-  "tools.orchestration": { one: "запуск {count} інструмента одночасно", few: "запуск {count} інструментів одночасно", many: "запуск {count} інструментів одночасно", other: "запуск {count} інструментів одночасно" },
+  "tools.orchestration": { one: "{count} виклик інструмента", few: "{count} виклики інструментів", many: "{count} викликів інструментів", other: "{count} викликів інструментів" },
   "tools.nestedCalls": "вкладені виклики",
   "tools.callId": "виклик {id}",
   "tools.copyId": "копіювати id",

@@ -450,7 +450,7 @@ export const en = {
   "tools.noOutput": "no output captured",
   "tools.noOutputTip": "the full output lives in the rollout session",
   "tools.diffTruncated": "truncated to fit",
-  "tools.orchestration": { one: "run {count} tool concurrently", other: "run {count} tools concurrently" },
+  "tools.orchestration": { one: "{count} tool call", other: "{count} tool calls" },
   "tools.nestedCalls": "nested calls",
   "tools.callId": "call {id}",
   "tools.copyId": "copy id",

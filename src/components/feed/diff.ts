@@ -34,8 +34,8 @@ export const DIFF_CAPS = {
 
 const BLOB_MIN = 20_000;
 
-/* A near-whitespace-free run this large is base64/binary content: rendered as a
-   size chip instead of thousands of unreadable "+" lines. */
+/* A near-whitespace-free run this large is base64/binary content. Its renderer
+   shows a size chip and hides thousands of unreadable "+" lines. */
 function looksLikeBinary(text: string): boolean {
   if (text.length <= BLOB_MIN) return false;
   const ws = text.match(/\s/g)?.length ?? 0;

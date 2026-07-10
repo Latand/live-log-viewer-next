@@ -31,7 +31,7 @@ function toolEvent(over: Partial<ToolEvent> = {}): ToolEvent {
   };
 }
 
-test("a collapsed tool row renders its summary and status but no body nodes (lazy mount)", () => {
+test("a collapsed tool row renders its summary and status while body nodes stay lazily unmounted", () => {
   const html = renderToStaticMarkup(<ToolCard event={toolEvent({ outputPreview: "total 8\nfile.ts" })} />);
   expect(html).toContain("ls -la");
   expect(html).toContain(">ok<");
@@ -86,8 +86,8 @@ test("an orchestration row renders nested children and the meaningful outer summ
           source: "await Promise.all([...])",
           sourceTruncated: false,
           calls: [
-            { id: "a#0", tool: "exec_command", family: "shell", icon: "shell", summary: "git status", status: "ok", statusLabel: "ok", outputPreview: "", outputTruncated: false },
-            { id: "b#1", tool: "read_file", family: "read", icon: "file", summary: "Read a.ts", status: "ok", statusLabel: "ok", outputPreview: "", outputTruncated: false },
+            { id: "a#0", tool: "exec_command", family: "shell", icon: "shell", summary: "git status" },
+            { id: "b#1", tool: "read_file", family: "read", icon: "file", summary: "Read a.ts" },
           ],
         },
       })}

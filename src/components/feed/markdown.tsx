@@ -224,12 +224,16 @@ export function mdBlocks(text: string): ReactNode {
   while (i < lines.length) {
     if (/^\s*```/.test(lines[i])) {
       const start = i;
+      /* The opening fence's info string (```ts, ```python, …) is the language
+         hint highlight.js resolves; fence-only names like `python`/`shell` have
+         no file-extension equivalent, so this is their only entry point. */
+      const lang = lines[i].match(/^\s*```+\s*([A-Za-z0-9+#_-]+)/)?.[1] ?? null;
       i++;
       while (i < lines.length && !/^\s*```\s*$/.test(lines[i])) i++;
       const code = lines.slice(start + 1, i).join("\n");
       if (i < lines.length) i++;
       if (out[out.length - 1] === "\n") out.pop();
-      out.push(<CodeBlock key={`c${start}`} code={code} />);
+      out.push(<CodeBlock key={`c${start}`} code={code} lang={lang} />);
       continue;
     }
     if (TABLE_ROW_RE.test(lines[i])) {
