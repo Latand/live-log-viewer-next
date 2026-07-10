@@ -5,7 +5,7 @@ import path from "node:path";
 
 import { AgentRegistry, MigrationRevisionError, type ConversationObservation } from "@/lib/agent/registry";
 
-import { advanceConversationMigration, drainHeldDeliveries, previewMigration } from "./coordinator";
+import { advanceConversationMigration, drainHeldDeliveries, previewMigration, reconcileMigrations } from "./coordinator";
 import { emptyLaunchProfile, type ProviderReceipt, type SuccessorProviderPort } from "./contracts";
 
 const roots: string[] = [];
@@ -79,6 +79,32 @@ describe("durable account migration coordinator", () => {
 
     expect(store.conversationForPath("/owned.jsonl")?.migration).toMatchObject({ targetId: "default" });
     expect(store.conversationForPath("/scanner-artifact.log")?.migration).toBeNull();
+  });
+
+  test("reconciliation rolls back an unowned annotation persisted by an older build", async () => {
+    const store = registry();
+    store.reconcileConversations([observation("/legacy-scanner-artifact.log", null, "busy")]);
+    const conversation = store.conversationForPath("/legacy-scanner-artifact.log")!;
+    const intent = store.upsertMigrationIntent("codex", "default", "manual", "legacy-unowned");
+    store.setConversationMigration(conversation.id, {
+      intentId: intent.id,
+      phase: "waiting-turn",
+      targetId: "default",
+      revision: intent.revision,
+      sourceGenerationId: conversation.generations[0]!.id,
+      operationId: "legacy-unowned-operation",
+      error: null,
+      errorCode: null,
+      providerReceipt: null,
+      updatedAt: "2026-07-10T12:00:00.000Z",
+    });
+    const calls = { create: 0, verify: 0 };
+
+    await reconcileMigrations(provider([], calls), { async deliver() { return "delivered"; } }, store);
+
+    expect(calls).toEqual({ create: 0, verify: 0 });
+    expect(store.conversation(conversation.id)?.migration?.phase).toBe("rolled-back");
+    expect(store.snapshot().migrationIntents[intent.id]?.state).toBe("complete");
   });
 
   test("commits routing, intent, and every conversation scope including roots atomically", () => {

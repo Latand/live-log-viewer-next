@@ -288,6 +288,12 @@ export async function reconcileMigrations(
   const before = registry.snapshot();
   for (const conversation of Object.values(before.conversations)) {
     if (!conversation.migration || conversation.migration.phase === "committed" || conversation.migration.phase === "rolled-back") continue;
+    const source = conversation.generations.find((generation) => generation.id === conversation.migration?.sourceGenerationId)
+      ?? conversation.generations.at(-1);
+    if (source?.accountId === null && !conversation.migration.providerReceipt) {
+      registry.rollbackConversationMigration(conversation.id, conversation.migration.revision);
+      continue;
+    }
     const advanced = await advanceConversationMigration(conversation.id, registry, provider);
     if (advanced.migration?.phase === "committed") await drainHeldDeliveries(advanced.id, delivery, registry);
   }
