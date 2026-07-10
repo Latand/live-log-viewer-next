@@ -403,8 +403,12 @@ export type TmuxHostCleanupResult = "cancelled" | "absent" | "unverifiable";
 
 /** Resolves cleanup ambiguity: a missing or replaced original host is complete.
     An unreachable tmux endpoint remains retryable. */
-export async function cleanupTmuxHostIfMatches(host: TmuxHostEvidence): Promise<TmuxHostCleanupResult> {
+export async function cleanupTmuxHostIfMatches(
+  host: TmuxHostEvidence,
+  deps: Partial<ResolveTmuxAttachDeps> = {},
+): Promise<TmuxHostCleanupResult> {
   const endpoint = createTmuxEndpointDescriptor(host.endpoint, process.getuid?.() ?? 0);
+  const run = deps.runTmux ?? runTmux;
   const expected: TmuxAttachReference = {
     tmuxServerPid: host.server.pid,
     tmuxServerStartIdentity: host.server.startIdentity,
@@ -412,14 +416,14 @@ export async function cleanupTmuxHostIfMatches(host: TmuxHostEvidence): Promise<
     panePid: host.panePid.pid,
     paneStartIdentity: host.panePid.startIdentity,
   };
-  const resolved = await resolveTmuxAttach(expected, endpoint);
+  const resolved = await resolveTmuxAttach(expected, endpoint, deps);
   if (!resolved.ok) return resolved.reason === "tmux-unavailable" ? "unverifiable" : "absent";
   const condition = `#{&&:#{==:#{pid},${host.server.pid}},#{&&:#{==:#{pane_id},${host.paneId}},#{==:#{pane_pid},${host.panePid.pid}}}}`;
   const mismatch = `llv-host-mismatch-${crypto.randomUUID()}`;
-  const result = await runTmux(["if-shell", "-t", host.paneId, "-F", condition, `kill-pane -t ${host.paneId}`, `display-message -p ${mismatch}`], undefined, endpoint);
-  if (result.code !== 0) return "unverifiable";
+  const result = await run(["if-shell", "-t", host.paneId, "-F", condition, `kill-pane -t ${host.paneId}`, `display-message -p ${mismatch}`], undefined, endpoint).catch(() => null);
+  if (!result || result.code !== 0) return "unverifiable";
   if (!result.stdout.includes(mismatch)) return "cancelled";
-  const after = await resolveTmuxAttach(expected, endpoint);
+  const after = await resolveTmuxAttach(expected, endpoint, deps);
   return !after.ok && after.reason !== "tmux-unavailable" ? "absent" : "unverifiable";
 }
 
@@ -784,8 +788,9 @@ export async function resolveTmuxAttach(
     undefined,
     endpoint,
   ).catch(() => null);
-  if (!res || res.code !== 0) {
-    return { ok: false, reason: "stale-pane" };
+  if (!res) return { ok: false, reason: "tmux-unavailable" };
+  if (res.code !== 0) {
+    return { ok: false, reason: /can't find pane/i.test(`${res.stderr}\n${res.stdout}`) ? "stale-pane" : "tmux-unavailable" };
   }
   const [serverRaw = "", paneId = "", paneRaw = "", target = ""] = res.stdout.trim().split("\t");
   const observedServerPid = Number(serverRaw);

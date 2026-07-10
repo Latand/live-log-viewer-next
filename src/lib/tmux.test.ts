@@ -5,6 +5,7 @@ import path from "node:path";
 import {
   cdCommandForCwd,
   classifyTmuxAttachSnapshot,
+  cleanupTmuxHostIfMatches,
   createSpawnWindow,
   createTmuxEndpointDescriptor,
   resolveTmuxAttach,
@@ -270,6 +271,24 @@ describe("resolveTmuxAttach", () => {
     ]);
   });
 
+  test("keeps pane probe transport and generic command failures unverifiable", async () => {
+    for (const paneProbe of [
+      async () => { throw new Error("socket read failed"); },
+      async () => ({ code: 1, stdout: "", stderr: "lost server\n" }),
+    ]) {
+      let calls = 0;
+      const result = await resolveTmuxAttach(expected, endpoint, {
+        runTmux: async () => {
+          calls += 1;
+          if (calls === 1) return { code: 0, stdout: "900\n", stderr: "" };
+          return paneProbe();
+        },
+        processIdentity: (pid) => (pid === 900 ? "900:one" : null),
+      });
+      expect(result).toEqual({ ok: false, reason: "tmux-unavailable" });
+    }
+  });
+
   test("reports server-restarted before resolving a pane missing from the new server", async () => {
     const calls: Array<{ args: string[]; endpointPath: string }> = [];
     const result = await resolveTmuxAttach(expected, endpoint, {
@@ -284,5 +303,37 @@ describe("resolveTmuxAttach", () => {
     expect(calls).toEqual([
       { args: ["display-message", "-p", "#{pid}"], endpointPath: endpoint.socketPath },
     ]);
+  });
+});
+
+describe("cleanupTmuxHostIfMatches", () => {
+  const host = {
+    kind: "tmux" as const,
+    endpoint: "/run/user/1000/agent-log-viewer",
+    server: { pid: 900, startIdentity: "900:one" },
+    paneId: "%11",
+    panePid: { pid: 100, startIdentity: "100:one" },
+    windowName: "migration",
+    agent: { pid: 101, startIdentity: "101:one" },
+    argv: ["claude"],
+  };
+
+  test("confirms explicit pane absence and retries unverifiable pane probes", async () => {
+    for (const [paneProbe, expected] of [
+      [async () => ({ code: 1, stdout: "", stderr: "can't find pane: %11\n" }), "absent"],
+      [async () => { throw new Error("socket read failed"); }, "unverifiable"],
+      [async () => ({ code: 1, stdout: "", stderr: "lost server\n" }), "unverifiable"],
+    ] as const) {
+      let calls = 0;
+      const result = await cleanupTmuxHostIfMatches(host, {
+        runTmux: async () => {
+          calls += 1;
+          if (calls === 1) return { code: 0, stdout: "900\n", stderr: "" };
+          return paneProbe();
+        },
+        processIdentity: (pid) => (pid === 900 ? "900:one" : null),
+      });
+      expect(result).toBe(expected);
+    }
   });
 });
