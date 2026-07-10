@@ -2,8 +2,9 @@
 
 import { useEffect, useRef, useState } from "react";
 
-import { Check, Copy, Loader2, Mic, X } from "@/components/icons";
+import { Check, Copy, Loader2, Mic, Square, X } from "@/components/icons";
 import { fmtElapsed, METER_HEIGHT, METER_WIDTH, prewarmLiveToken, type UseDictationResult } from "@/hooks/useDictation";
+import { micVisual } from "@/lib/dictationTimer";
 import { translate, useLocale } from "@/lib/i18n";
 
 export interface MicButtonViewProps extends UseDictationResult {
@@ -200,9 +201,23 @@ function BackendMenu({ onClose }: { onClose: () => void }) {
  * around the same recording (see TmuxComposer) shares one hook instance.
  * Right-click (long-press on touch) opens the transcription-backend menu.
  */
-export function MicButtonView({ phase, elapsed, canvasRef, start, stop, discard, onText, busy = false }: MicButtonViewProps) {
+export function MicButtonView({
+  phase,
+  elapsed,
+  maxSeconds,
+  remaining,
+  capStopped,
+  srMessage,
+  canvasRef,
+  start,
+  stop,
+  discard,
+  onText,
+  busy = false,
+}: MicButtonViewProps) {
   const { t } = useLocale();
   const [menuOpen, setMenuOpen] = useState(false);
+  const visual = micVisual({ phase, elapsed, maxSeconds, capStopped });
   const handleMain = () => {
     if (busy) return;
     if (phase === "idle") void start();
@@ -213,17 +228,34 @@ export function MicButtonView({ phase, elapsed, canvasRef, start, stop, discard,
     }
   };
 
+  /* Owned here so it covers every mic-hosting surface (composers and the task
+     edit field alike): the near-cap warning and the cap stop are announced to
+     assistive tech even when the visual cue is off-screen. Polite, and always
+     mounted so a first message isn't missed by an appearing region. */
+  const srRegion = (
+    <span role="status" aria-live="polite" className="sr-only">
+      {srMessage}
+    </span>
+  );
+
   if (phase === "rec") {
+    const warn = visual === "recWarn";
     return (
       <span className="flex shrink-0 items-center gap-1">
+        {srRegion}
         <button
           type="button"
           aria-label={t("mic.stopRecognize")}
+          title={warn ? t("mic.timeLeft", { time: fmtElapsed(remaining) }) : undefined}
           onClick={handleMain}
-          className="flex items-center gap-1.5 rounded-[8px] border border-err/50 bg-[#fff2f2] px-2 py-2 text-[11px] font-bold text-err focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-err/40"
+          className={`flex items-center gap-1.5 rounded-[8px] border px-2 py-2 text-[11px] font-bold tabular-nums focus-visible:outline-none focus-visible:ring-2 ${
+            warn
+              ? "border-[#e0ae45]/70 bg-[#fdf3dd] text-[#b07d1f] focus-visible:ring-[#e0ae45]/50"
+              : "border-err/50 bg-[#fff2f2] text-err focus-visible:ring-err/40"
+          }`}
         >
           <canvas ref={canvasRef} width={METER_WIDTH} height={METER_HEIGHT} className="h-4 w-14" aria-hidden />
-          {fmtElapsed(elapsed)}
+          {warn ? `−${fmtElapsed(remaining)}` : fmtElapsed(elapsed)}
         </button>
         <button
           type="button"
@@ -237,8 +269,27 @@ export function MicButtonView({ phase, elapsed, canvasRef, start, stop, discard,
     );
   }
 
+  /* The held "stopped at the cap" chip: distinct amber outline, and the
+     transcription spinner rides inside it while a batch recording resolves. */
+  if (visual === "capStopped") {
+    return (
+      <span className="flex shrink-0 items-center gap-1">
+        {srRegion}
+        <span className="flex items-center gap-1.5 rounded-[8px] border border-[#e0ae45]/70 bg-[#fdf3dd] px-2 py-2 text-[11px] font-bold text-[#b07d1f]">
+          {phase === "busy" ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
+          ) : (
+            <Square className="h-3.5 w-3.5" fill="currentColor" aria-hidden />
+          )}
+          {t("mic.capStopped")}
+        </span>
+      </span>
+    );
+  }
+
   return (
     <span className="relative inline-flex shrink-0">
+      {srRegion}
       <button
         type="button"
         aria-label={phase === "busy" ? t("mic.recognizing") : phase === "starting" ? t("mic.connecting") : t("mic.dictate")}
@@ -260,7 +311,8 @@ export function MicButtonView({ phase, elapsed, canvasRef, start, stop, discard,
         {phase === "busy" ? (
           <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
         ) : phase === "starting" ? (
-          <Mic className="h-4 w-4 animate-pulse" aria-hidden />
+          /* No pulse under reduced-motion: the accent tint alone signals it. */
+          <Mic className="h-4 w-4 animate-pulse motion-reduce:animate-none" aria-hidden />
         ) : (
           <Mic className="h-4 w-4" aria-hidden />
         )}

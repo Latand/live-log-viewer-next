@@ -10,6 +10,8 @@ import {
   METER_HEIGHT,
   METER_WIDTH,
 } from "@/lib/audio";
+import { chime } from "@/lib/chime";
+import { CAP_SECONDS, dictationCues, remaining as remainingSeconds } from "@/lib/dictationTimer";
 import { useLocale } from "@/lib/i18n";
 
 /* Re-exported so existing importers (MicButton and friends) keep resolving
@@ -21,7 +23,14 @@ export { drawMeter, fmtElapsed, METER_BARS, METER_HEIGHT, METER_WIDTH };
     so a second tap can't pile a recorder on top. */
 export type DictationPhase = "idle" | "starting" | "rec" | "busy";
 
-const MAX_SECONDS = 120;
+const MAX_SECONDS = CAP_SECONDS;
+/* Voice mono at 32 kbps keeps a full 10-minute batch recording near ~2.4 MB —
+   well under the /api/transcribe 16 MB cap and the upstream provider limit —
+   while staying clear for speech. */
+const BATCH_BITRATE = 32_000;
+/* How long the "stopped at the cap" chip holds before the mic returns to idle,
+   so an auto-stop is unmistakable even if the transcription lands instantly. */
+const CAP_HOLD_MS = 5_000;
 /* Sub-2KB blobs are a misclick, not speech — dropped without a server call. */
 const MIN_BLOB_BYTES = 2_000;
 
@@ -102,7 +111,7 @@ interface LiveSession {
 
 export interface UseDictationOptions {
   onError: (message: string) => void;
-  /** Receives a transcript no stop() call was waiting for. The 120s auto-stop
+  /** Receives a transcript no stop() call was waiting for. The cap auto-stop
       fires with no pending resolver; without this handler that recording's
       text would be silently dropped. */
   onUnclaimedText: (text: string) => void;
@@ -115,6 +124,18 @@ export interface UseDictationOptions {
 export interface UseDictationResult {
   phase: DictationPhase;
   elapsed: number;
+  /** The recording cap in seconds; the view derives the countdown from it. */
+  maxSeconds: number;
+  /** Seconds left before the auto-stop (`maxSeconds - elapsed`, never negative). */
+  remaining: number;
+  /** True once the cap fired the stop, held briefly so the "stopped" chip and
+      chime are unmistakable; self-clears. A manual stop or discard never sets
+      it, so the capped state and a user stop stay visually distinct. */
+  capStopped: boolean;
+  /** Screen-reader announcement for the near-cap warning and the cap stop,
+      surfaced through a `role="status"` region by the mic view. Empty when
+      there is nothing to announce. */
+  srMessage: string;
   /** The in-flight partial of the current segment while a realtime session
       records; committed segments have already left through onLiveCommit.
       Empty in batch mode. Composers overlay it on the draft so speech shows
@@ -149,6 +170,13 @@ export function useDictation({ onError, onUnclaimedText, onLiveCommit }: UseDict
   const [phase, setPhase] = useState<DictationPhase>("idle");
   const [elapsed, setElapsed] = useState(0);
   const [liveText, setLiveText] = useState("");
+  const [capStopped, setCapStopped] = useState(false);
+  const [srMessage, setSrMessage] = useState("");
+  /* The interval owns elapsed through this ref rather than a functional
+     setState updater: the cap chimes and stop must fire exactly once, and a
+     reducer body can be re-invoked (StrictMode) which would double them. */
+  const elapsedRef = useRef(0);
+  const capHoldRef = useRef<number | null>(null);
   const recRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
   const liveRef = useRef<LiveSession | null>(null);
@@ -169,6 +197,27 @@ export function useDictation({ onError, onUnclaimedText, onLiveCommit }: UseDict
       clearInterval(timerRef.current);
       timerRef.current = null;
     }
+  };
+
+  const clearCapHold = () => {
+    if (capHoldRef.current !== null) {
+      clearTimeout(capHoldRef.current);
+      capHoldRef.current = null;
+    }
+  };
+
+  /* Marks the cap-fired stop and holds the "stopped" chip briefly. Only the
+     timer's cap branch calls this — stop()/discard() leave it untouched, so a
+     manual stop never shows the capped state or plays the stop chime. */
+  const flagCapStopped = () => {
+    clearCapHold();
+    setCapStopped(true);
+    setSrMessage(t("dictation.capStopped"));
+    chime("dictStop", 0);
+    capHoldRef.current = window.setTimeout(() => {
+      capHoldRef.current = null;
+      if (mountedRef.current) setCapStopped(false);
+    }, CAP_HOLD_MS);
   };
 
   const stopMeter = () => {
@@ -247,6 +296,7 @@ export function useDictation({ onError, onUnclaimedText, onLiveCommit }: UseDict
       mountedRef.current = false;
       stopTimer();
       stopMeter();
+      clearCapHold();
       discardRef.current = true;
       teardownLive();
       const rec = recRef.current;
@@ -405,7 +455,9 @@ export function useDictation({ onError, onUnclaimedText, onLiveCommit }: UseDict
           : MediaRecorder.isTypeSupported("audio/webm")
             ? "audio/webm"
             : "";
-        const rec = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
+        const rec = mimeType
+          ? new MediaRecorder(stream, { mimeType, audioBitsPerSecond: BATCH_BITRATE })
+          : new MediaRecorder(stream, { audioBitsPerSecond: BATCH_BITRATE });
         chunksRef.current = [];
         rec.ondataavailable = (event) => {
           if (event.data.size) chunksRef.current.push(event.data);
@@ -418,17 +470,30 @@ export function useDictation({ onError, onUnclaimedText, onLiveCommit }: UseDict
       }
       streamOwned = false;
       startMeter(stream);
+      /* A fresh recording clears any lingering cap-stopped chip / SR text from
+         a previous run so the new session starts clean. */
+      clearCapHold();
+      setCapStopped(false);
+      setSrMessage("");
+      elapsedRef.current = 0;
       setElapsed(0);
       setPhase("rec");
       timerRef.current = window.setInterval(() => {
-        setElapsed((seconds) => {
-          const next = seconds + 1;
-          if (next >= MAX_SECONDS) {
-            if (recRef.current?.state === "recording") recRef.current.stop();
-            else if (liveRef.current) finishLive(liveRef.current);
-          }
-          return next;
-        });
+        const prev = elapsedRef.current;
+        const next = prev + 1;
+        elapsedRef.current = next;
+        setElapsed(next);
+        const cues = dictationCues(prev, next, MAX_SECONDS);
+        /* Near-cap warning: announce once, then the single ping once. */
+        if (cues.warn) setSrMessage(t("dictation.capWarn"));
+        if (cues.ping) chime("dictWarn", 0);
+        if (cues.capped) {
+          flagCapStopped();
+          /* The transcript is preserved and reviewed, never auto-sent: the
+             stop resolves through onUnclaimedText (no pending stop() waits). */
+          if (recRef.current?.state === "recording") recRef.current.stop();
+          else if (liveRef.current) finishLive(liveRef.current);
+        }
       }, 1_000);
     } catch {
       if (mountedRef.current) onError(stream ? t("dictation.unsupported") : t("dictation.noMic"));
@@ -467,5 +532,17 @@ export function useDictation({ onError, onUnclaimedText, onLiveCommit }: UseDict
     else if (liveRef.current) finishLive(liveRef.current);
   };
 
-  return { phase, elapsed, liveText, canvasRef, start, stop, discard };
+  return {
+    phase,
+    elapsed,
+    maxSeconds: MAX_SECONDS,
+    remaining: remainingSeconds(elapsed, MAX_SECONDS),
+    capStopped,
+    srMessage,
+    liveText,
+    canvasRef,
+    start,
+    stop,
+    discard,
+  };
 }

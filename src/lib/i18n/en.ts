@@ -107,7 +107,18 @@ export const en = {
   "accounts.loginOpened": "Device login opened in {target}",
   "accounts.openLogin": "Open sign-in",
   "accounts.refreshFailed": "Could not refresh accounts. Try again.",
+  "accounts.loading": "Loading accounts…",
+  "accounts.noAccounts": "No accounts available yet.",
+  "limits.accountLoading": "Loading account limits…",
   "accounts.retry": "Retry",
+  "accounts.title": "Codex accounts",
+  "accounts.trigger": "Accounts",
+  "accounts.active": "active",
+  "accounts.needsLogin": "needs sign-in",
+  "accounts.pendingLogin": "signing in…",
+  "accounts.labelPlaceholder": "New account label",
+  "accounts.confirmAdd": "Add",
+  "accounts.close": "Close",
 
   // SwitchCard
   "switchCard.openColumn": "Open {title} as a column",
@@ -220,7 +231,9 @@ export const en = {
   "mic.cancel": "Cancel recording",
   "mic.recognizing": "Transcribing…",
   "mic.dictate": "Dictate",
-  "mic.dictateHint": "dictate (up to 2 min) · right-click: transcription method",
+  "mic.dictateHint": "dictate (up to 10 min) · right-click: transcription method",
+  "mic.timeLeft": "{time} left before auto-stop",
+  "mic.capStopped": "stopped at 10:00",
   "mic.connecting": "Connecting the microphone — a moment…",
   "mic.menuTitle": "Transcription method",
   "mic.menuLoading": "checking what's available…",
@@ -542,6 +555,8 @@ export const en = {
   "limits.stale": "data is stale: {stale}",
   "limits.5h": "5h",
   "limits.week": "Week",
+  "limits.accountsOpenAria": "Codex accounts — switch or add",
+  "limits.noDataYet": "no data yet",
 
   // ResourcesFooter
   "resources.ram": "RAM",
@@ -584,6 +599,8 @@ export const en = {
   "status.flow": "flow: {label}",
 
   // useDictation errors
+  "dictation.capWarn": "less than a minute of recording left",
+  "dictation.capStopped": "Recording stopped at the 10-minute limit; the text will appear in the field.",
   "dictation.failed": "couldn't transcribe",
   "dictation.silence": "silence — nothing recognized",
   "dictation.unsupported": "recording is not supported in this browser",

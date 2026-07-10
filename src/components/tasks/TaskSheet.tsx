@@ -1,12 +1,13 @@
 "use client";
 
 import { ChevronLeft, Loader2, Send, Trash2 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { ComposerBar } from "@/components/ComposerBar";
 import { X } from "@/components/icons";
 import { MicButtonView } from "@/components/MicButton";
 import { activityDot, cleanTitle, engineBadge, fmtAge, syntheticFile } from "@/components/utils";
+import { useAutosizePinned } from "@/hooks/useAutosizePinned";
 import { useComposer } from "@/hooks/useComposer";
 import { useDictation } from "@/hooks/useDictation";
 import { useLocale } from "@/lib/i18n";
@@ -179,11 +180,18 @@ function TaskDetailView({
     return () => window.clearTimeout(timer);
   }, [armDelete]);
 
+  const editRef = useRef<HTMLTextAreaElement>(null);
   const dictation = useDictation({
     onError: (message) => pushTaskToast("err", message),
     onUnclaimedText: (spoken) => setDraft((prev) => (prev ? prev.trimEnd() + " " + spoken : spoken)),
     onLiveCommit: (spoken) => setDraft((prev) => (prev ? prev.trimEnd() + " " + spoken : spoken)),
   });
+
+  /* Same grow-and-pin seam as the composers: the edit field keeps the newest
+     dictated/typed words visible instead of the old wrapped-line `rows`
+     heuristic that miscounted height and pinned the view to the top. */
+  const displayText = dictation.liveText ? (draft ? draft.trimEnd() + " " : "") + dictation.liveText : draft;
+  useAutosizePinned(editRef, displayText, { maxPx: 260, minPx: 84, pinned: Boolean(dictation.liveText) });
 
   /* Re-created each render, so blur/send always commit the latest draft.
      Returns the PATCH error: deliveries read the persisted text server-side,
@@ -226,14 +234,15 @@ function TaskDetailView({
     <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto p-3">
       <div className="flex flex-col gap-1.5 rounded-[10px] border border-line bg-panel p-2">
         <textarea
-          value={dictation.liveText ? (draft ? draft.trimEnd() + " " : "") + dictation.liveText : draft}
+          ref={editRef}
+          value={displayText}
           readOnly={Boolean(dictation.liveText)}
           onChange={(event) => setDraft(event.target.value)}
           onBlur={() => void commitText()}
-          rows={Math.min(14, Math.max(4, draft.split("\n").length + 1))}
+          rows={4}
           aria-label={t("tasks.editAria")}
           maxLength={6000}
-          className="w-full resize-none rounded-[8px] border border-line bg-panel px-2.5 py-1.5 text-[12.5px] leading-[18px] text-[#222] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+          className="w-full resize-none overflow-y-auto rounded-[8px] border border-line bg-panel px-2.5 py-1.5 text-[12.5px] leading-[18px] text-[#222] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
         />
         <div className="flex items-center justify-between gap-1.5">
           <StatusRow
