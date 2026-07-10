@@ -100,9 +100,12 @@ Deep server seams (each owns its knowledge; callers never re-derive it):
 ```
 src/lib/agent/cli.ts         agent CLI binaries + boot/resume command specs
 src/lib/agent/transcript.ts  project slug, transcript paths, headCwd() reader
-src/lib/delivery.ts          conversation delivery ladder (pane → resume →
-                             root relay) + per-action guards; /api/tmux is a
-                             thin adapter over it
+src/lib/agent/transcriptHost.ts canonical transcript→live-host observation,
+                             identity revalidation, and single-flight resume
+                             decisions shared by resources and delivery
+src/lib/delivery.ts          conversation delivery and root relay over the
+                             transcript-host seam + per-action guards;
+                             /api/tmux is a thin adapter over it
 src/lib/answer/menu.ts       pure screen→options parser for TUI dialogs
 src/lib/answer/driver.ts     dialog navigation over an injected PaneIo port
 src/lib/transcribe/*.ts      the three STT backends beside their selector

@@ -6,7 +6,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { readTailChunk } from "@/lib/logRead";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
 import { listFiles } from "@/lib/scanner";
-import { MAX_CHUNK, pathAllowed, ROOTS, scanRootEntries } from "@/lib/scanner/roots";
+import { claudeProjectRootFor, MAX_CHUNK, pathAllowed, scanRootEntries } from "@/lib/scanner/roots";
 import type { ApiError, LogChunk } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -67,7 +67,9 @@ export async function GET(
  * the list as orphan branches.
  */
 function companionDir(filePath: string): string | null {
-  const rel = path.relative(ROOTS["claude-projects"], filePath);
+  const root = claudeProjectRootFor(filePath);
+  if (!root) return null;
+  const rel = path.relative(root, filePath);
   if (rel.startsWith("..") || path.isAbsolute(rel)) return null;
   const parts = rel.split(path.sep);
   if (parts.length !== 2 || !filePath.endsWith(".jsonl")) return null;

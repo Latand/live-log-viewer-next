@@ -1,4 +1,5 @@
 import { resumeSpecFor } from "@/lib/agent/cli";
+import { deliverToTranscriptHost, readTranscriptHosts, type HostDeliveryOutcome } from "@/lib/agent/transcriptHost";
 import { listFiles } from "@/lib/scanner";
 import { pathAllowed } from "@/lib/scanner/roots";
 import { detectBlockingGate, parseScreenMenu, screenWaitsForInput } from "@/lib/status";
@@ -8,13 +9,11 @@ import {
   forgetResumePane,
   killPane,
   knownLivePids,
-  liveResumePane,
   paneScreen,
   resolveTarget,
   sendInterrupt,
   sendKeys,
   sendText,
-  sendToResumedAgent,
   withPaneLock,
   type InboxImagePayload,
 } from "@/lib/tmux";
@@ -27,6 +26,8 @@ import {
  */
 
 export interface DeliveryFailure {
+  ok: false;
+  outcome: "failed";
   error: string;
   status: number;
 }
@@ -34,6 +35,7 @@ export interface DeliveryFailure {
 export interface DeliverySuccess {
   ok: true;
   target: string;
+  outcome?: "delivered-to-live" | "resumed";
   imagePaths?: string[];
   /** Set when the message booted a fresh agent window instead of an existing pane. */
   spawned?: boolean;
@@ -42,7 +44,21 @@ export interface DeliverySuccess {
 export type DeliveryOutcome = DeliverySuccess | DeliveryFailure;
 
 function failure(error: unknown, status = 500): DeliveryFailure {
-  return { error: error instanceof Error ? error.message : String(error), status };
+  return { ok: false, outcome: "failed", error: error instanceof Error ? error.message : String(error), status };
+}
+
+async function hostOutcome(result: Promise<HostDeliveryOutcome>): Promise<DeliveryOutcome> {
+  const outcome = await result;
+  if (!outcome.ok) return outcome;
+  return { ...outcome, spawned: outcome.outcome === "resumed" };
+}
+
+/** A host failure happens after image payload construction. Keep the cleanup
+    beside the returned outcome so direct and root-relayed delivery share the
+    same no-orphan contract. */
+export function cleanupFailedImageDelivery(outcome: DeliveryOutcome, imagePaths: string[]): DeliveryOutcome {
+  if (!outcome.ok) deleteInboxImages(imagePaths);
+  return outcome;
 }
 
 /** Resolves and revalidates a request pid against the scanner's live set. */
@@ -59,27 +75,28 @@ export async function targetForKnownPid(pid: number): Promise<string | null | "u
  * caller reach an unrelated agent's pane. Never boots a fresh agent window:
  * both actions only make sense against a pane that already exists.
  */
+async function livePaneHost(filePath: string) {
+  if (!filePath || !pathAllowed(filePath)) return null;
+  return (await readTranscriptHosts(true)).canonicalFor(filePath);
+}
+
+/** Human-readable target of the shared canonical resolver for non-message
+    actions that only operate on a presently live pane. */
 export async function livePaneTarget(filePath: string): Promise<string | null> {
-  const entry = (await listFiles()).find((item) => item.path === filePath);
-  if (entry && entry.pid !== null) {
-    const target = await resolveTarget(entry.pid);
-    if (target !== null) return target;
-  }
-  const pane = await liveResumePane(filePath);
-  return pane ? pane.display : null;
+  return (await livePaneHost(filePath))?.display ?? null;
 }
 
 export async function interruptConversation(filePath: string): Promise<DeliveryOutcome> {
   if (!filePath || !pathAllowed(filePath)) {
-    return { error: "the conversation path is required to interrupt", status: 400 };
+    return failure("the conversation path is required to interrupt", 400);
   }
-  const target = await livePaneTarget(filePath);
-  if (target === null) {
-    return { error: "no active agent pane to interrupt", status: 409 };
+  const host = await livePaneHost(filePath);
+  if (host === null) {
+    return failure("no active agent pane to interrupt", 409);
   }
   try {
-    await sendInterrupt(target);
-    return { ok: true, target };
+    await sendInterrupt(host.paneId);
+    return { ok: true, target: host.display };
   } catch (error) {
     return failure(error);
   }
@@ -91,15 +108,15 @@ export async function interruptConversation(filePath: string): Promise<DeliveryO
    sense against a pane that already exists — never boots a window. */
 export async function compactConversation(filePath: string): Promise<DeliveryOutcome> {
   if (!filePath || !pathAllowed(filePath)) {
-    return { error: "the conversation path is required to compact", status: 400 };
+    return failure("the conversation path is required to compact", 400);
   }
-  const target = await livePaneTarget(filePath);
-  if (target === null) {
-    return { error: "no active agent pane to compact", status: 409 };
+  const host = await livePaneHost(filePath);
+  if (host === null) {
+    return failure("no active agent pane to compact", 409);
   }
   try {
-    await sendText(target, "/compact");
-    return { ok: true, target };
+    await sendText(host.paneId, "/compact");
+    return { ok: true, target: host.display };
   } catch (error) {
     return failure(error);
   }
@@ -139,25 +156,25 @@ export function dialogKeyStale(screen: string, key: string, label: unknown, ques
    The pane is re-read right before sending — see dialogKeyStale. */
 export async function answerDialogKey(filePath: string, key: string, label: unknown, question: unknown): Promise<DeliveryOutcome> {
   if (!filePath || !pathAllowed(filePath)) {
-    return { error: "the conversation path is required to answer", status: 400 };
+    return failure("the conversation path is required to answer", 400);
   }
   if (!/^([1-9]|Tab|Enter|Escape)$/.test(key)) {
-    return { error: "invalid key", status: 400 };
+    return failure("invalid key", 400);
   }
-  const target = await livePaneTarget(filePath);
-  if (target === null) {
-    return { error: "no active agent pane", status: 409 };
+  const host = await livePaneHost(filePath);
+  if (host === null) {
+    return failure("no active agent pane", 409);
   }
   try {
-    const stale = await withPaneLock(target, async () => {
-      const verdict = dialogKeyStale(await paneScreen(target), key, label, question);
-      if (verdict === null) await sendKeys(target, [key]);
+    const stale = await withPaneLock(host.paneId, async () => {
+      const verdict = dialogKeyStale(await paneScreen(host.paneId), key, label, question);
+      if (verdict === null) await sendKeys(host.paneId, [key]);
       return verdict;
     });
-    if (stale === "blocked") return { error: "pane is waiting for a confirmation that requires a manual decision", status: 409 };
-    if (stale === "closed") return { error: "pane is no longer waiting for a response", status: 409 };
-    if (stale === "changed") return { error: "the on-screen menu has changed", status: 409 };
-    return { ok: true, target };
+    if (stale === "blocked") return failure("pane is waiting for a confirmation that requires a manual decision", 409);
+    if (stale === "closed") return failure("pane is no longer waiting for a response", 409);
+    if (stale === "changed") return failure("the on-screen menu has changed", 409);
+    return { ok: true, target: host.display };
   } catch (error) {
     return failure(error);
   }
@@ -165,15 +182,14 @@ export async function answerDialogKey(filePath: string, key: string, label: unkn
 
 export async function resumeConversation(filePath: string): Promise<DeliveryOutcome> {
   if (!filePath || !pathAllowed(filePath)) {
-    return { error: "the conversation path is required to open", status: 400 };
+    return failure("the conversation path is required to open", 400);
   }
   const entry = (await listFiles()).find((item) => item.path === filePath);
-  if (!entry) return { error: "file is unknown to the viewer", status: 403 };
-  const spec = resumeSpecFor(entry.root, entry.path);
-  if (!spec) return { error: "this conversation cannot be resumed", status: 409 };
+  if (!entry) return failure("file is unknown to the viewer", 403);
+  const spec = resumeSpecFor(entry.root, entry.path, { model: entry.launchModel ?? entry.model, effort: entry.effort });
+  if (!spec) return failure("this conversation cannot be resumed", 409);
   try {
-    const sent = await sendToResumedAgent(entry.path, spec, "");
-    return { ok: true, target: sent.target, spawned: sent.spawned };
+    return await hostOutcome(deliverToTranscriptHost({ entry, spec, payload: "" }));
   } catch (error) {
     return failure(error);
   }
@@ -184,7 +200,7 @@ export async function resumeConversation(filePath: string): Promise<DeliveryOutc
    then a pure UI removal and still succeeds. */
 export async function killConversation(filePath: string): Promise<DeliveryOutcome> {
   if (!filePath || !pathAllowed(filePath)) {
-    return { error: "the conversation path is required to close", status: 400 };
+    return failure("the conversation path is required to close", 400);
   }
   const entry = (await listFiles()).find((item) => item.path === filePath);
   /* A branch column shares the root conversation's pane: killing it from a
@@ -193,14 +209,14 @@ export async function killConversation(filePath: string): Promise<DeliveryOutcom
   if (entry && entry.parent) {
     return { ok: true, target: "" };
   }
-  const target = await livePaneTarget(filePath);
-  if (target === null) {
+  const host = await livePaneHost(filePath);
+  if (host === null) {
     return { ok: true, target: "" };
   }
   try {
-    await killPane(target);
+    await killPane(host.paneId);
     forgetResumePane(filePath);
-    return { ok: true, target };
+    return { ok: true, target: host.display };
   } catch (error) {
     return failure(error);
   }
@@ -225,10 +241,10 @@ export async function deliverConversationMessage(message: ConversationMessage): 
   const text = message.text.trim();
 
   let target: string | null = null;
-  if (pid !== null) {
+  if (!filePath && pid !== null) {
     const resolved = await targetForKnownPid(pid);
     if (resolved === "unknown" && !filePath) {
-      return { error: "process is unknown to the viewer", status: 403 };
+      return failure("process is unknown to the viewer", 403);
     }
     target = resolved === "unknown" ? null : resolved;
   }
@@ -250,19 +266,20 @@ export async function deliverConversationMessage(message: ConversationMessage): 
     /* No live pane: reopen the conversation as a fresh agent window in the
        user's current tmux session and type the prompt there. */
     if (!filePath || !pathAllowed(filePath)) {
-      return { error: "process is not in a tmux session", status: 409 };
+      return failure("process is not in a tmux session", 409);
     }
     const all = await listFiles();
     const entry = all.find((item) => item.path === filePath);
     if (!entry) {
-      return { error: "file is unknown to the viewer", status: 403 };
+      return failure("file is unknown to the viewer", 403);
     }
-    const spec = resumeSpecFor(entry.root, entry.path);
+    const spec = resumeSpecFor(entry.root, entry.path, { model: entry.launchModel ?? entry.model, effort: entry.effort });
     if (spec) {
       const bundle = buildImagePayload(text, images);
       imagePaths = bundle.imagePaths;
-      const sent = await sendToResumedAgent(entry.path, spec, bundle.payload);
-      return { ok: true, target: sent.target, spawned: sent.spawned, ...(imagePaths.length ? { imagePaths } : {}) };
+      const outcome = await hostOutcome(deliverToTranscriptHost({ entry, spec, payload: bundle.payload }));
+      if (!outcome.ok) return cleanupFailedImageDelivery(outcome, imagePaths);
+      return { ...outcome, ...(imagePaths.length ? { imagePaths } : {}) };
     }
 
     const byPath = new Map(all.map((item) => [item.path, item]));
@@ -273,25 +290,21 @@ export async function deliverConversationMessage(message: ConversationMessage): 
       root = byPath.get(root.parent)!;
     }
     if (root.path === entry.path) {
-      return { error: "this conversation cannot be resumed", status: 409 };
+      return failure("this conversation cannot be resumed", 409);
     }
     /* Resolved before saving anything: the root's live pane or resume spec
        must exist, or the request is rejected without ever writing an image. */
-    const rootTarget = root.pid !== null ? await resolveTarget(root.pid) : null;
-    const rootSpec = rootTarget === null ? resumeSpecFor(root.root, root.path) : null;
-    if (rootTarget === null && !rootSpec) {
-      return { error: "root session is unavailable for messaging", status: 409 };
+    const rootSpec = resumeSpecFor(root.root, root.path, { model: root.launchModel ?? root.model, effort: root.effort });
+    if (!rootSpec) {
+      return failure("root session is unavailable for messaging", 409);
     }
     const bundle = buildImagePayload(text, images);
     imagePaths = bundle.imagePaths;
     const relayText = `User message for your branch «${entry.title.slice(0, 100)}» — forward it or handle it yourself:\n${bundle.payload}`;
     const imageField = imagePaths.length ? { imagePaths } : {};
-    if (rootTarget !== null) {
-      await sendText(rootTarget, relayText);
-      return { ok: true, target: rootTarget, ...imageField };
-    }
-    const sent = await sendToResumedAgent(root.path, rootSpec!, relayText);
-    return { ok: true, target: sent.target, spawned: sent.spawned, ...imageField };
+    const outcome = await hostOutcome(deliverToTranscriptHost({ entry: root, spec: rootSpec, payload: relayText }));
+    if (!outcome.ok) return cleanupFailedImageDelivery(outcome, imagePaths);
+    return { ...outcome, ...imageField };
   } catch (error) {
     deleteInboxImages(imagePaths);
     return failure(error);

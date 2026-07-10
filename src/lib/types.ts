@@ -39,6 +39,10 @@ export interface FileEntry {
   handoff?: boolean;
   /** Short model name (fable-5, gpt-5.5, sonnet…) or null when unknown. */
   model: string | null;
+  /** Exact model identifier recorded by the agent CLI. Kept separate from the
+      display-normalized `model` because resuming a pinned Claude model needs
+      the original identifier. */
+  launchModel?: string | null;
   /** Reasoning-effort tier (minimal|low|medium|high|xhigh|max) or null when
       no reliable source exists (claude transcripts carry none). */
   effort?: string | null;
@@ -221,6 +225,8 @@ export interface LimitsProvenance {
 export interface LimitsPayload {
   claude: EngineLimits | null;
   codex: EngineLimits | null;
+  /** The Claude account whose values appear in this payload. */
+  claudeAccountId: string | null;
   /** The account whose Codex values appear in this payload. The server always
       stamps it; null remains accepted while a legacy cached/browser payload is
       being replaced after an upgrade. */

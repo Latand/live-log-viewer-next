@@ -163,6 +163,13 @@ export interface AssignmentPatch {
   state: TaskAssignment["state"];
   error: string | null;
   at: string;
+  accountId?: string | null;
+  engine?: "claude" | "codex" | null;
+}
+
+/** A task can own the same textual account id once per engine. */
+export function pinnedAccountId(assignments: TaskAssignment[], engine: "claude" | "codex"): string | null {
+  return assignments.find((assignment) => assignment.engine === engine && typeof assignment.accountId === "string")?.accountId ?? null;
 }
 
 export function mergeAssignments(assignments: TaskAssignment[], patches: AssignmentPatch[]): TaskAssignment[] {
@@ -178,6 +185,8 @@ export function mergeAssignments(assignments: TaskAssignment[], patches: Assignm
       state: patch.state,
       error: patch.error,
       at: patch.at,
+      ...(patch.accountId !== undefined ? { accountId: patch.accountId } : {}),
+      ...(patch.engine !== undefined ? { engine: patch.engine } : {}),
     };
     if (index >= 0) {
       next = [...next.slice(0, index), merged, ...next.slice(index + 1)];

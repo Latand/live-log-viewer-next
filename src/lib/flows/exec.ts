@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { resolveBinary } from "@/lib/agent/cli";
+import { claudeManagedEnvironment, claudeSettingsPath } from "@/lib/accounts/claude";
 import { claudeTranscriptPath } from "@/lib/agent/transcript";
 
 import type { FlowEngine, RoleConfig, Round } from "./types";
@@ -32,6 +33,7 @@ export interface HeadlessCodexAccount {
   home: string;
   managed: boolean;
 }
+export interface HeadlessClaudeAccount { home: string; projectsDir: string; managed: boolean; }
 
 /* The reviewer runs detached with file-backed stdio, so it survives a viewer
    restart. This in-memory record only adds what disk cannot know: the exact
@@ -142,6 +144,7 @@ export function reviewerCommand(
   outputPath: string,
   cwd: string,
   codexAccount?: HeadlessCodexAccount | null,
+  claudeAccount?: HeadlessClaudeAccount | null,
 ): { command: string; args: string[]; env: NodeJS.ProcessEnv; outputPath: string | null; sessionId: string | null; reviewerPath: string | null } {
   if (role.engine === "claude") {
     const sessionId = crypto.randomUUID();
@@ -156,7 +159,9 @@ export function reviewerCommand(
     ];
     if (role.model) args.push("--model", role.model);
     if (role.effort) args.push("--effort", role.effort);
-    return { command: resolveBinary("claude"), args, env: process.env, outputPath: null, sessionId, reviewerPath: claudeTranscriptPath(cwd, sessionId) };
+    const settings = claudeAccount?.managed ? claudeSettingsPath() : null;
+    if (settings) args.push("--settings", settings);
+    return { command: resolveBinary("claude"), args, env: claudeAccount?.managed ? claudeManagedEnvironment(claudeAccount.home) : process.env, outputPath: null, sessionId, reviewerPath: claudeTranscriptPath(cwd, sessionId, claudeAccount?.projectsDir) };
   }
   /* --json turns stdout into a JSONL event stream whose first events carry
      the session/thread id — a structured contract instead of parsing the
@@ -183,12 +188,13 @@ export function startHeadlessReview(
   prompt: string,
   timeoutMs = DEFAULT_TIMEOUT_MS,
   codexAccount?: HeadlessCodexAccount | null,
+  claudeAccount?: HeadlessClaudeAccount | null,
 ): HeadlessReviewLaunch {
   const key = runKey(flowId, round);
   if (runs.has(key)) return { pid: null, sessionId: null, reviewerPath: null };
   const outputPath = outputPathFor(flowId, round);
   fs.mkdirSync(path.dirname(outputPath), { recursive: true });
-  const built = reviewerCommand(role, prompt, outputPath, cwd, codexAccount);
+  const built = reviewerCommand(role, prompt, outputPath, cwd, codexAccount, claudeAccount);
   /* Detached + file-backed stdio: the reviewer must not die with the viewer.
      A plain child shares the dev server's process group, so Ctrl+C on the
      server delivers SIGINT to the reviewer too; detached makes it a group

@@ -6,10 +6,10 @@ describe("normalizeResumePanesFile", () => {
   it("reads the current {serverPid, panes} shape", () => {
     const file = normalizeResumePanesFile({
       serverPid: 4242,
-      panes: { "/t/a.jsonl": { paneId: "%1", windowName: "claude-resume" } },
+      panes: { "/t/a.jsonl": { paneId: "%1", panePid: 77, windowName: "claude-resume", engine: "claude" } },
     });
     expect(file.serverPid).toBe(4242);
-    expect(file.panes["/t/a.jsonl"]).toEqual({ paneId: "%1", windowName: "claude-resume" });
+    expect(file.panes["/t/a.jsonl"]).toEqual({ paneId: "%1", panePid: 77, windowName: "claude-resume", engine: "claude" });
   });
 
   it("treats a legacy bare record map as belonging to no known server", () => {
@@ -21,6 +21,12 @@ describe("normalizeResumePanesFile", () => {
     });
     expect(file.serverPid).toBeNull();
     expect(file.panes["/t/a.jsonl"]).toEqual({ paneId: "%1", windowName: "claude-resume" });
+  });
+
+  it("keeps old records readable while leaving their missing pane pid detectable", () => {
+    const file = normalizeResumePanesFile({ serverPid: 4242, panes: { "/t/a.jsonl": { paneId: "%1", windowName: "codex-resume" } } });
+    expect(file.panes["/t/a.jsonl"]?.panePid).toBeUndefined();
+    expect(file.panes["/t/a.jsonl"]?.engine).toBeUndefined();
   });
 
   it("drops a non-integer server pid to null", () => {

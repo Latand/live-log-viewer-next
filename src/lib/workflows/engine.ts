@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { freshSpecFor } from "@/lib/agent/cli";
-import { accountForSpawn } from "@/lib/accounts/codex";
+import { accountManager } from "@/lib/accounts/manager";
 import { resolveSpawnedTranscriptPath } from "@/lib/agent/spawnedTranscript";
 import { headCwd } from "@/lib/agent/transcript";
 import { closeFlow, createFlowFromRequest, patchFlow as patchReviewFlow } from "@/lib/flows/commands";
@@ -52,7 +52,7 @@ export interface WorkflowPorts {
   exec: ExecPort;
   startSetup(wf: Workflow): { pid: number | null; error?: string };
   setupStatus(wf: Workflow): SetupStatus;
-  spawnAgent(role: RoleConfig, cwd: string, prompt: string): Promise<StageSpawn>;
+  spawnAgent(role: RoleConfig, cwd: string, prompt: string, accountId?: string | null): Promise<StageSpawn>;
   /** The pane still hosts a non-shell foreground process. */
   paneAgentAlive(paneId: string): Promise<boolean>;
   headCwd(transcriptPath: string): string | null;
@@ -74,9 +74,9 @@ export function defaultPorts(): WorkflowPorts {
     exec: realExec,
     startSetup,
     setupStatus,
-    spawnAgent: async (role, cwd, prompt) => {
-      const account = role.engine === "codex" ? accountForSpawn() : null;
-      const spec = freshSpecFor(role.engine, cwd, { model: role.model, effort: role.effort, codexHome: account?.home });
+    spawnAgent: async (role, cwd, prompt, accountId) => {
+      const account = accountManager.resolveSpawn(role.engine, accountId);
+      const spec = freshSpecFor(role.engine, cwd, { model: role.model, effort: role.effort, codexHome: account.engine === "codex" ? account.home : null, claudeConfigDir: account.engine === "claude" ? account.home : null, claudeProjectsDir: account.engine === "claude" ? account.transcriptRoot : null });
       const startedAtMs = Date.now();
       const pane = await spawnAgentWithPrompt(spec, prompt);
       const transcript = await resolveSpawnedTranscriptPath({
@@ -85,7 +85,7 @@ export function defaultPorts(): WorkflowPorts {
         panePid: pane.panePid ?? null,
         cwd,
         startedAtMs,
-        codexSessionsDir: account?.sessionsDir,
+        codexSessionsDir: account.engine === "codex" ? account.transcriptRoot : null,
       });
       return { paneId: pane.paneId, transcript, panePid: pane.panePid ?? null };
     },
@@ -224,10 +224,11 @@ async function ensureStageAgent(
 ): Promise<"spawning" | "waiting" | "ready"> {
   if (!run.startedAt) {
     run.startedAt = ports.now();
+    if (!run.accountId) run.accountId = accountManager.resolveSpawn(role.engine).accountId;
     spawnsThisProcess.add(spawnKey(wf, run));
     persistCheckpoint();
     try {
-      const spawned = await ports.spawnAgent(role, wf.worktreeDir, prompt);
+      const spawned = await ports.spawnAgent(role, wf.worktreeDir, prompt, run.accountId);
       run.paneId = spawned.paneId;
       if (spawned.transcript) {
         run.agentPath = spawned.transcript;

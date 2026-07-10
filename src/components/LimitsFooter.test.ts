@@ -21,6 +21,7 @@ const engine = (usedPercent: number): EngineLimits => ({
 const payload = ({
   claude = null,
   codex = null,
+  claudeAccountId = "default",
   codexAccountId = "default",
   claudeProvenance = live,
   codexProvenance = live,
@@ -28,6 +29,7 @@ const payload = ({
 }: {
   claude?: EngineLimits | null;
   codex?: EngineLimits | null;
+  claudeAccountId?: string | null;
   codexAccountId?: string | null;
   claudeProvenance?: LimitsProvenance;
   codexProvenance?: LimitsProvenance;
@@ -35,6 +37,7 @@ const payload = ({
 } = {}): LimitsPayload => ({
   claude,
   codex,
+  claudeAccountId,
   codexAccountId,
   provenance: { claude: claudeProvenance, codex: codexProvenance },
   staleSince,
@@ -61,6 +64,14 @@ test("a Codex account change drops the previous account numbers", () => {
   const merged = stickyPayload(previous, next);
   expect(merged.codex).toBeNull();
   expect(merged.codexAccountId).toBe("work");
+});
+
+test("a Claude account change drops Claude values while keeping the active Codex account", () => {
+  const previous = payload({ claude: engine(19), codex: engine(41), claudeAccountId: "main", codexAccountId: "codex-work" });
+  const next = payload({ claudeAccountId: "claude-work", codexAccountId: "codex-work" });
+  const merged = stickyPayload(previous, next);
+  expect(merged.claude).toBeNull();
+  expect(merged.codex).toEqual(engine(41));
 });
 
 test("a same-account refresh with no fresh Codex numbers keeps the last snapshot", () => {

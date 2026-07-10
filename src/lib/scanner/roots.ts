@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { codexSessionRoots } from "@/lib/accounts/codex";
+import { claudeProjectRoots } from "@/lib/accounts/claude";
 
 import type { RootKey } from "../types";
 
@@ -34,13 +35,22 @@ export const ROOTS: Record<RootKey, string> = {
   "claude-tasks": claudeTasksRoot(),
 };
 
-/** Every scanner root, including the account-specific Codex homes. */
+/** Every scanner root, including all account homes, with real-path dedupe. */
 export function scanRootEntries(): [RootKey, string][] {
-  return [
+  const entries: [RootKey, string][] = [
     ...codexSessionRoots().map((root): [RootKey, string] => ["codex-sessions", root]),
-    ["claude-projects", ROOTS["claude-projects"]],
+    ...claudeProjectRoots().map((root): [RootKey, string] => ["claude-projects", root]),
     ["claude-tasks", ROOTS["claude-tasks"]],
   ];
+  const seen = new Set<string>();
+  return entries.filter(([, root]) => { const real = realpathSafe(root) ?? path.resolve(root); if (seen.has(real)) return false; seen.add(real); return true; });
+}
+
+export function claudeProjectRootFor(candidate: string): string | null {
+  for (const root of claudeProjectRoots()) {
+    try { const real = fs.realpathSync(candidate); const rootReal = fs.realpathSync(root); if (real.startsWith(rootReal + path.sep)) return root; } catch { /* unavailable root */ }
+  }
+  return null;
 }
 
 export const EXTS = [".log", ".jsonl", ".output", ".txt"] as const;

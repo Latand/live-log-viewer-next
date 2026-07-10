@@ -1,8 +1,7 @@
 import { procBackend } from "@/lib/proc";
 import { descendantPids } from "@/lib/proc/memory";
 import { listFiles } from "@/lib/scanner";
-import { agentProcesses, type AgentEngine } from "@/lib/scanner/process";
-import { panePidMap } from "@/lib/tmux";
+import { readTranscriptHosts, type TranscriptHost, type TranscriptHostSnapshot } from "@/lib/agent/transcriptHost";
 
 import type { FileEntry, ResourceSession, ResourcesPayload } from "./types";
 
@@ -54,54 +53,26 @@ export function consumeKillTarget(target: string): void {
   globalStore.__llvResourceTargets?.delete(target);
 }
 
-function isoFromUnix(seconds: number): string {
-  return new Date(seconds * 1000).toISOString();
-}
-
-/**
- * pid → transcript entry for every conversation the scanner attributed to a
- * live process. Root conversations win over their branches (a branch shares
- * the root's pane and pid, but the root card carries the title the user knows).
- */
-function entriesByPid(entries: FileEntry[]): Map<number, FileEntry> {
-  const byPid = new Map<number, FileEntry>();
-  for (const entry of entries) {
-    if (entry.pid === null || entry.proc !== "running") continue;
-    const current = byPid.get(entry.pid);
-    if (!current || (current.parent && !entry.parent)) byPid.set(entry.pid, entry);
-  }
-  return byPid;
-}
-
-const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/;
-
-/**
- * session-uuid → transcript entry, keyed by the uuid in the file basename
- * (claude `<uuid>.jsonl`, codex `rollout-<ts>-<uuid>.jsonl`). Pid attribution
- * needs the CLI to hold its transcript open, which an idle session at the
- * prompt does not — the uuid the CLI was launched with (`--session-id`,
- * `--resume`, `codex resume <id>`) still names it.
- */
-function entriesBySessionUuid(entries: FileEntry[]): Map<string, FileEntry> {
-  const byUuid = new Map<string, FileEntry>();
-  for (const entry of entries) {
-    if (!entry.path.endsWith(".jsonl")) continue;
-    const base = entry.path.slice(entry.path.lastIndexOf("/") + 1);
-    const uuid = base.match(UUID_RE)?.[0];
-    if (!uuid) continue;
-    const current = byUuid.get(uuid);
-    if (!current || (current.parent && !entry.parent)) byUuid.set(uuid, entry);
-  }
-  return byUuid;
-}
-
-/** Last uuid-shaped token in the CLI's argv, if any. */
-function argvSessionUuid(argv: string[]): string | null {
-  for (let i = argv.length - 1; i >= 0; i--) {
-    const match = argv[i].match(UUID_RE);
-    if (match) return match[0];
+/** The resources rail may list duplicate panes for cleanup. Only the host
+    elected by the shared resolver receives the transcript path and its UI
+    metadata, keeping observation aligned with path-addressed delivery. */
+export function canonicalResourceEntry(
+  snapshot: TranscriptHostSnapshot,
+  paneHosts: TranscriptHost[],
+  entriesByPath: Map<string, FileEntry>,
+): FileEntry | null {
+  for (const candidate of paneHosts) {
+    if (!candidate.primaryPath) continue;
+    const canonical = snapshot.canonicalFor(candidate.primaryPath);
+    if (canonical?.paneId === candidate.paneId && canonical.agentPid === candidate.agentPid) {
+      return entriesByPath.get(candidate.primaryPath) ?? null;
+    }
   }
   return null;
+}
+
+function isoFromUnix(seconds: number): string {
+  return new Date(seconds * 1000).toISOString();
 }
 
 /** `fresh` skips the pane/agent-process memos too, all the way down: a
@@ -111,31 +82,33 @@ async function buildResources(fresh: boolean): Promise<ResourcesPayload> {
   const capturedAt = new Date().toISOString();
   const system = procBackend.systemMemory();
 
-  const panes = await panePidMap(fresh);
+  const hosts = await readTranscriptHosts(fresh);
   const sessions: ResourceSession[] = [];
-  if (panes.size > 0) {
+  if (hosts.hosts.length > 0) {
     const ppids = procBackend.ppidMap();
-    const agents = new Map<number, { engine: AgentEngine; argv: string[]; cwd: string }>();
-    for (const proc of agentProcesses(fresh)) agents.set(proc.pid, { engine: proc.engine, argv: proc.argv, cwd: proc.cwd });
     const files = await listFiles();
-    const byPid = entriesByPid(files);
-    const byUuid = entriesBySessionUuid(files);
+    const byPath = new Map(files.map((entry) => [entry.path, entry]));
+    const byPane = new Map<string, TranscriptHost[]>();
+    for (const host of hosts.hosts) {
+      const paneHosts = byPane.get(host.paneId);
+      if (paneHosts) paneHosts.push(host);
+      else byPane.set(host.paneId, [host]);
+    }
 
     /* Trees first, memory second: one processMemory() batch over the union
        keeps the portable backend at a single `ps` spawn for all panes. */
-    const paneTrees: Array<{ target: string; paneId: string; panePid: number; tree: number[]; agentPids: number[] }> = [];
+    const paneTrees: Array<{ host: TranscriptHost; tree: number[]; paneHosts: TranscriptHost[] }> = [];
     const treePids = new Set<number>();
-    for (const [panePid, pane] of panes) {
-      const tree = descendantPids(panePid, ppids);
-      const agentPids = tree.filter((pid) => agents.has(pid));
-      if (agentPids.length === 0) continue; // plain shell / editor / dev-server pane
-      paneTrees.push({ target: pane.target, paneId: pane.paneId, panePid, tree, agentPids });
+    for (const paneHosts of byPane.values()) {
+      const host = paneHosts[0]!;
+      const tree = descendantPids(host.panePid, ppids);
+      paneTrees.push({ host, tree, paneHosts });
       for (const pid of tree) treePids.add(pid);
     }
     const memory = procBackend.processMemory(treePids);
 
     const killRefs: Array<{ target: string; ref: KillTargetRef }> = [];
-    for (const { target, paneId, panePid, tree, agentPids } of paneTrees) {
+    for (const { host, tree, paneHosts } of paneTrees) {
       let rssBytes = 0;
       let swapBytes = 0;
       for (const pid of tree) {
@@ -144,33 +117,25 @@ async function buildResources(fresh: boolean): Promise<ResourcesPayload> {
         rssBytes += mem.rssBytes;
         swapBytes += mem.swapBytes;
       }
-      /* Pid attribution first (live sessions), argv session-uuid second (idle
-         CLIs sitting at their prompt no longer hold the transcript open). */
-      const entry =
-        agentPids.map((pid) => byPid.get(pid)).find(Boolean) ??
-        agentPids
-          .map((pid) => {
-            const uuid = argvSessionUuid(agents.get(pid)?.argv ?? []);
-            return uuid ? byUuid.get(uuid) : undefined;
-          })
-          .find(Boolean) ??
-        null;
-      const lead = agents.get(agentPids[0]) ?? null;
+      /* The resolver elects one canonical host for every transcript. A
+         duplicate pane stays visible for cleanup, though it carries no path
+         and cannot disagree with path-addressed delivery. */
+      const entry = canonicalResourceEntry(hosts, paneHosts, byPath);
       sessions.push({
-        target,
-        panePid,
+        target: host.display,
+        panePid: host.panePid,
         path: entry?.path ?? null,
-        engine: lead?.engine ?? null,
+        engine: host.engine,
         title: entry?.title ?? null,
         project: entry?.project || null,
         activity: entry?.activity ?? null,
         lastActiveAt: entry ? isoFromUnix(entry.mtime) : null,
-        cwd: lead?.cwd ?? null,
+        cwd: host.cwd,
         rssBytes,
         swapBytes,
         procCount: tree.length,
       });
-      killRefs.push({ target, ref: { panePid, paneId } });
+      killRefs.push({ target: host.display, ref: { panePid: host.panePid, paneId: host.paneId } });
     }
     sessions.sort((a, b) => b.rssBytes + b.swapBytes - (a.rssBytes + a.swapBytes));
     noteSessionTargets(killRefs);

@@ -6,7 +6,13 @@
 
 export interface ResumePaneRecord {
   paneId: string;
+  /** Shell pid captured with the stable pane id. Both values must still match
+      before a cached resume host can receive a message. */
+  panePid?: number;
   windowName: string;
+  /** Engine that created the resume pane. Older records omit it and are not
+      eligible for live-host reuse. */
+  engine?: "claude" | "codex";
 }
 
 export interface ResumePanesFile {

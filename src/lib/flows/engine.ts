@@ -2,11 +2,12 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { freshSpecFor, resumeSpecFor } from "@/lib/agent/cli";
-import { accountForSpawn } from "@/lib/accounts/codex";
+import { accountManager } from "@/lib/accounts/manager";
+import { deliverToTranscriptHost } from "@/lib/agent/transcriptHost";
 import { resolveSpawnedTranscriptPath } from "@/lib/agent/spawnedTranscript";
 import { headCwd } from "@/lib/agent/transcript";
 import { isNativeCodexSubagentTranscript } from "@/lib/scanner/codexNative";
-import { resolveTarget, sendText, sendToResumedAgent, spawnAgentWithPrompt } from "@/lib/tmux";
+import { spawnAgentWithPrompt } from "@/lib/tmux";
 import type { FileEntry } from "@/lib/types";
 
 import { forgetHeadlessReview, headlessReviewStatus, startHeadlessReview } from "./exec";
@@ -75,6 +76,7 @@ export function newRound(flow: Flow, triggeredBy: Round["triggeredBy"], readyNot
   return {
     n: flow.rounds.length + 1,
     reviewerPath: null,
+    accountId: null,
     sessionId: null,
     reviewerPane: null,
     findingsPath: null,
@@ -103,16 +105,10 @@ function roundKey(flow: Flow, round: Round): string {
 export async function sendToImplementer(flow: Flow, entriesByPath: Map<string, FileEntry>, text: string): Promise<void> {
   const entry = entriesByPath.get(flow.implementerPath);
   if (!entry) throw new Error("implementer transcript is missing from scanner");
-  if (entry.pid !== null) {
-    const target = await resolveTarget(entry.pid);
-    if (target) {
-      await sendText(target, text);
-      return;
-    }
-  }
-  const spec = resumeSpecFor(entry.root, entry.path);
+  const spec = resumeSpecFor(entry.root, entry.path, { model: entry.launchModel ?? entry.model, effort: entry.effort });
   if (!spec) throw new Error("implementer session cannot be resumed");
-  await sendToResumedAgent(entry.path, spec, text);
+  const outcome = await deliverToTranscriptHost({ entry, spec, payload: text });
+  if (!outcome.ok) throw new Error(outcome.error);
 }
 
 function sessionIdFromHeadlessStdout(stdout: string): string | null {
@@ -170,14 +166,17 @@ function applyVerdict(flow: Flow, round: Round, parsed: ParsedFindings): void {
 
 async function launchReviewer(flow: Flow, round: Round): Promise<void> {
   const prompt = reviewerPrompt(flow, round);
-  const account = flow.roles.reviewer.engine === "codex" ? accountForSpawn() : null;
+  const account = accountManager.resolveSpawn(flow.roles.reviewer.engine, round.accountId);
+  round.accountId ??= account.accountId;
   flow.state = "reviewing";
   flow.stateDetail = null;
   if (flow.reviewerMode === "pane") {
     const spec = freshSpecFor(flow.roles.reviewer.engine, flow.cwd, {
       model: flow.roles.reviewer.model,
       effort: flow.roles.reviewer.effort,
-      codexHome: account?.home,
+      codexHome: account.engine === "codex" ? account.home : null,
+      claudeConfigDir: account.engine === "claude" ? account.home : null,
+      claudeProjectsDir: account.engine === "claude" ? account.transcriptRoot : null,
     });
     const startedAtMs = Date.now();
     const pane = await spawnAgentWithPrompt(spec, prompt);
@@ -190,7 +189,7 @@ async function launchReviewer(flow: Flow, round: Round): Promise<void> {
       panePid: pane.panePid ?? null,
       cwd: flow.cwd,
       startedAtMs,
-      codexSessionsDir: account?.sessionsDir,
+      codexSessionsDir: account.engine === "codex" ? account.transcriptRoot : null,
     });
     if (transcript) round.reviewerPath = transcript;
     if (!round.reviewerPath && pane.panePid) round.error = null;
@@ -203,7 +202,8 @@ async function launchReviewer(flow: Flow, round: Round): Promise<void> {
     flow.cwd,
     prompt,
     undefined,
-    account ? { home: account.home, managed: account.kind === "managed" } : null,
+    account.engine === "codex" ? { home: account.home, managed: account.kind === "managed" } : null,
+    account.engine === "claude" ? { home: account.home, projectsDir: account.transcriptRoot, managed: account.kind === "managed" } : null,
   );
   if (launched.pid) round.reviewerPid = launched.pid;
   if (launched.sessionId) round.sessionId = launched.sessionId;

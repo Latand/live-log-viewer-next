@@ -132,21 +132,23 @@ function EngineBlock({
     freshly added account has no transcripts, so its payload arrives with
     `codex: null`; without this guard the sticky merge would carry the previous
     account's percentages forward under the new account's name. */
-function codexAccountChanged(previous: LimitsPayload | null, next: LimitsPayload): boolean {
+function accountChanged(previous: LimitsPayload | null, next: LimitsPayload, engine: "claude" | "codex"): boolean {
   if (!previous) return false;
-  const prevId = previous.codexAccountId ?? null;
-  const nextId = next.codexAccountId ?? null;
+  const prevId = engine === "claude" ? previous.claudeAccountId ?? null : previous.codexAccountId ?? null;
+  const nextId = engine === "claude" ? next.claudeAccountId ?? null : next.codexAccountId ?? null;
   if (prevId === null || nextId === null) return false;
   return prevId !== nextId;
 }
 
 export function stickyPayload(previous: LimitsPayload | null, next: LimitsPayload): LimitsPayload {
-  const accountChanged = codexAccountChanged(previous, next);
+  const claudeChanged = accountChanged(previous, next, "claude");
+  const codexChanged = accountChanged(previous, next, "codex");
   return {
-    claude: next.claude ?? previous?.claude ?? null,
+    claude: claudeChanged ? next.claude : (next.claude ?? previous?.claude ?? null),
     // A switch clears the prior account's values. Same-account refreshes may
     // retain the last snapshot while provenance explains its freshness.
-    codex: accountChanged ? next.codex : (next.codex ?? previous?.codex ?? null),
+    codex: codexChanged ? next.codex : (next.codex ?? previous?.codex ?? null),
+    claudeAccountId: next.claudeAccountId ?? previous?.claudeAccountId ?? null,
     codexAccountId: next.codexAccountId ?? previous?.codexAccountId ?? null,
     provenance: next.provenance,
     staleSince: next.staleSince ?? null,

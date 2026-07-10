@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import { readSession } from "@/lib/session/reader";
-import { codexSessionRootFor, pathAllowed, ROOTS } from "@/lib/scanner/roots";
+import { claudeProjectRootFor, codexSessionRootFor, pathAllowed } from "@/lib/scanner/roots";
 import type { ApiError } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -9,7 +9,7 @@ export const dynamic = "force-dynamic";
 
 function engineForPath(pathname: string): "claude" | "codex" | null {
   if (codexSessionRootFor(pathname)) return "codex";
-  if (pathname.startsWith(ROOTS["claude-projects"] + "/")) return "claude";
+  if (claudeProjectRootFor(pathname)) return "claude";
   return null;
 }
 

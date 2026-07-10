@@ -1,15 +1,13 @@
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 
 import { accountForSpawn, type CodexAccount } from "@/lib/accounts/codex";
+import { claudeAccountForSpawn } from "@/lib/accounts/claude";
 import { managedCodexRuntime } from "@/lib/accounts/codexRuntime";
 import type { AppServerRateLimits } from "@/lib/accounts/codexAppServer";
 import { statePath } from "@/lib/configDir";
 import type { EngineLimits, LimitsPayload, LimitsProvenance, LimitWindow } from "./types";
 
-const HOME = os.homedir();
-const CLAUDE_CREDENTIALS = path.join(HOME, ".claude", ".credentials.json");
 const LIMITS_CACHE_FILE = statePath("limits-cache.json");
 const OAUTH_USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
 
@@ -19,17 +17,15 @@ const TAIL_BYTES = 192 * 1024;
 const MAX_FILES = 12;
 const CACHE_MS = 30_000;
 
-type LimitsCacheEntry = { at: number; accountId: string; data: LimitsPayload };
+type EngineName = "claude" | "codex";
+type EngineCacheEntry = { at: number; data: EngineLimits; provenance: LimitsProvenance };
+type LimitsCache = { version: 2; engines: Record<EngineName, Record<string, EngineCacheEntry>> };
 export type LimitRead = { data: EngineLimits | null; reason: string | null; source: "live" | "transcript" | "unavailable" };
 export type CodexLiveLimitsReader = (account: Pick<CodexAccount, "id" | "kind" | "home" | "sessionsDir">) => Promise<AppServerRateLimits>;
 
 const globalStore = globalThis as unknown as {
-  __llvLimitsCache?: LimitsCacheEntry | null;
+  __llvLimitsCache?: LimitsCache | null;
 };
-
-function hasLimits(data: LimitsPayload): boolean {
-  return Boolean(data.claude || data.codex);
-}
 
 function isProvenance(value: unknown): value is { claude: LimitsProvenance; codex: LimitsProvenance } {
   if (!value || typeof value !== "object") return false;
@@ -43,56 +39,88 @@ function isProvenance(value: unknown): value is { claude: LimitsProvenance; code
   return valid(record.claude) && valid(record.codex);
 }
 
-function cleanPayload(data: LimitsPayload, accountId = data.codexAccountId): LimitsPayload {
-  const legacyStaleSince = data.staleSince ?? null;
-  const provenance = isProvenance(data.provenance) ? data.provenance : {
-    claude: { source: "cache" as const, reason: "legacy cache provenance unavailable", staleSince: legacyStaleSince },
-    codex: { source: "cache" as const, reason: "legacy cache provenance unavailable", staleSince: legacyStaleSince },
-  };
-  return {
-    claude: data.claude,
-    codex: data.codex,
-    codexAccountId: typeof data.codexAccountId === "string" ? data.codexAccountId : accountId,
-    provenance,
-    staleSince: legacyStaleSince,
-  };
+function emptyCache(): LimitsCache {
+  return { version: 2, engines: { claude: {}, codex: {} } };
 }
 
-function readDiskCache(accountId: string): LimitsCacheEntry | null {
+function safeCacheEntry(value: unknown): EngineCacheEntry | null {
+  if (!value || typeof value !== "object") return null;
+  const entry = value as Partial<EngineCacheEntry>;
+  if (typeof entry.at !== "number" || !entry.data || !entry.provenance) return null;
+  const provenance = entry.provenance as Partial<LimitsProvenance>;
+  if ((provenance.source !== "live" && provenance.source !== "transcript" && provenance.source !== "cache" && provenance.source !== "unavailable") ||
+      (typeof provenance.reason !== "string" && provenance.reason !== null) ||
+      (typeof provenance.staleSince !== "string" && provenance.staleSince !== null)) return null;
+  return entry as EngineCacheEntry;
+}
+
+function readDiskCache(): LimitsCache {
   try {
-    const raw = JSON.parse(fs.readFileSync(LIMITS_CACHE_FILE, "utf8")) as Partial<LimitsCacheEntry>;
-    if (!raw || typeof raw.at !== "number" || raw.accountId !== accountId || !raw.data) return null;
-    const data = cleanPayload(raw.data, accountId);
-    if (!hasLimits(data)) return null;
-    return { at: raw.at, accountId, data };
+    const raw = JSON.parse(fs.readFileSync(LIMITS_CACHE_FILE, "utf8")) as Partial<LimitsCache> & { at?: unknown; accountId?: unknown; data?: LimitsPayload };
+    if (raw.version === 2 && raw.engines && typeof raw.engines === "object") {
+      const cache = emptyCache();
+      for (const engine of ["claude", "codex"] as const) {
+        const entries = raw.engines[engine];
+        if (!entries || typeof entries !== "object") continue;
+        for (const [id, entry] of Object.entries(entries)) {
+          const valid = safeCacheEntry(entry);
+          if (valid) cache.engines[engine][id] = valid;
+        }
+      }
+      return cache;
+    }
+    // Preserve the usable half of a pre-v2 cache during the one-time upgrade.
+    if (typeof raw.at === "number" && typeof raw.accountId === "string" && raw.data?.codex) {
+      const provenance = isProvenance(raw.data.provenance) ? raw.data.provenance.codex : { source: "cache" as const, reason: "legacy cache provenance unavailable", staleSince: raw.data.staleSince ?? null };
+      return { version: 2, engines: { claude: {}, codex: { [raw.accountId]: { at: raw.at, data: raw.data.codex, provenance } } } };
+    }
   } catch {
-    return null;
+    // An unreadable cache is a cache miss; the source accounts remain usable.
   }
+  return emptyCache();
 }
 
-function writeDiskCache(entry: LimitsCacheEntry): void {
+function cache(): LimitsCache {
+  if (!globalStore.__llvLimitsCache) globalStore.__llvLimitsCache = readDiskCache();
+  return globalStore.__llvLimitsCache;
+}
+
+function writeDiskCache(value: LimitsCache): void {
   try {
     fs.mkdirSync(path.dirname(LIMITS_CACHE_FILE), { recursive: true });
-    fs.writeFileSync(LIMITS_CACHE_FILE, JSON.stringify(entry, null, 2) + "\n", "utf8");
+    const latest = (engine: EngineName): [string, EngineCacheEntry] | null => Object.entries(value.engines[engine]).sort(([, a], [, b]) => b.at - a.at)[0] ?? null;
+    const claude = latest("claude"); const codex = latest("codex");
+    // Keep a read-only v1 projection during the cache migration so a rolling
+    // deployment can continue to serve the previous process generation.
+    const projection = codex ? {
+      at: codex[1].at,
+      accountId: codex[0],
+      data: {
+        claude: claude?.[1].data ?? null,
+        codex: codex[1].data,
+        claudeAccountId: claude?.[0] ?? null,
+        codexAccountId: codex[0],
+        provenance: {
+          claude: claude?.[1].provenance ?? { source: "unavailable" as const, reason: "no cached Claude limits", staleSince: null },
+          codex: codex[1].provenance,
+        },
+        staleSince: claude?.[1].provenance.staleSince ?? codex[1].provenance.staleSince,
+      },
+    } : {};
+    fs.writeFileSync(LIMITS_CACHE_FILE, JSON.stringify({ ...value, ...projection }, null, 2) + "\n", "utf8");
   } catch (err) {
     console.warn("[limits] failed to persist cache", err);
   }
 }
 
-function lastCache(accountId: string): LimitsCacheEntry | null {
-  if (globalStore.__llvLimitsCache?.accountId === accountId) {
-    const entry = globalStore.__llvLimitsCache;
-    return { ...entry, data: cleanPayload(entry.data, accountId) };
-  }
-  globalStore.__llvLimitsCache = readDiskCache(accountId);
-  return globalStore.__llvLimitsCache ?? null;
+function lastCache(engine: EngineName, accountId: string): EngineCacheEntry | null {
+  return cache().engines[engine][accountId] ?? null;
 }
 
-function remember(accountId: string, data: LimitsPayload): LimitsPayload {
-  const entry = { at: Date.now(), accountId, data: cleanPayload(data) };
-  globalStore.__llvLimitsCache = entry;
-  writeDiskCache(entry);
-  return entry.data;
+function remember(engine: EngineName, accountId: string, resolved: { data: EngineLimits | null; meta: LimitsProvenance }): void {
+  if (!resolved.data || resolved.meta.source === "cache" || resolved.meta.source === "unavailable") return;
+  cache().engines[engine][accountId] = { at: Date.now(), data: resolved.data, provenance: resolved.meta };
+  writeDiskCache(cache());
 }
 
 function safeReason(reason: string): string {
@@ -102,9 +130,9 @@ function safeReason(reason: string): string {
     .slice(0, 500);
 }
 
-function provenance(read: LimitRead, cached: EngineLimits | null, staleSince: string): { data: EngineLimits | null; meta: LimitsProvenance } {
+function provenance(read: LimitRead, cached: EngineCacheEntry | null, staleSince: string): { data: EngineLimits | null; meta: LimitsProvenance } {
   if (read.data) return { data: read.data, meta: { source: read.source, reason: read.reason, staleSince: read.reason ? staleSince : null } };
-  if (cached) return { data: cached, meta: { source: "cache", reason: read.reason, staleSince } };
+  if (cached) return { data: cached.data, meta: { source: "cache", reason: read.reason, staleSince: cached.provenance.staleSince ?? staleSince } };
   return { data: null, meta: { source: "unavailable", reason: read.reason, staleSince } };
 }
 
@@ -116,24 +144,37 @@ function logFallbackReasons(claude: LimitsProvenance, codex: LimitsProvenance): 
 
 /** Claude Code + Codex plan limits, cached briefly so UI polling stays cheap. */
 export async function readLimits(): Promise<LimitsPayload> {
-  const accountId = accountForSpawn().id;
-  const cached = lastCache(accountId);
-  if (cached && Date.now() - cached.at < CACHE_MS) return cached.data;
+  const claudeAccount = claudeAccountForSpawn();
+  const codexAccount = accountForSpawn();
+  const cachedClaude = lastCache("claude", claudeAccount.id);
+  const cachedCodex = lastCache("codex", codexAccount.id);
+  const claudeFresh = Boolean(cachedClaude && Date.now() - cachedClaude.at < CACHE_MS);
+  const codexFresh = Boolean(cachedCodex && Date.now() - cachedCodex.at < CACHE_MS);
+  if (claudeFresh && codexFresh) {
+    return { claude: cachedClaude?.data ?? null, codex: cachedCodex?.data ?? null, claudeAccountId: claudeAccount.id, codexAccountId: codexAccount.id, provenance: { claude: cachedClaude?.provenance ?? { source: "unavailable", reason: "no cached Claude limits", staleSince: null }, codex: cachedCodex?.provenance ?? { source: "unavailable", reason: "no cached Codex limits", staleSince: null } }, staleSince: cachedClaude?.provenance.staleSince ?? cachedCodex?.provenance.staleSince ?? null };
+  }
   const staleSince = new Date().toISOString();
-  const [claude, codex] = await Promise.all([fetchClaudeLimits(), readCodexLimits()]);
-  const resolvedClaude = provenance(claude, cached?.data.claude ?? null, staleSince);
-  const resolvedCodex = provenance(codex, cached?.data.codex ?? null, staleSince);
+  const [claude, codex] = await Promise.all([
+    claudeFresh ? Promise.resolve(null) : fetchClaudeLimits(path.join(claudeAccount.home, ".credentials.json")),
+    codexFresh ? Promise.resolve(null) : readCodexLimits({ account: codexAccount }),
+  ]);
+  const resolvedClaude = claudeFresh
+    ? { data: cachedClaude!.data, meta: cachedClaude!.provenance }
+    : provenance(claude!, cachedClaude, staleSince);
+  const resolvedCodex = codexFresh
+    ? { data: cachedCodex!.data, meta: cachedCodex!.provenance }
+    : provenance(codex!, cachedCodex, staleSince);
   const data: LimitsPayload = {
     claude: resolvedClaude.data,
     codex: resolvedCodex.data,
-    codexAccountId: accountId,
+    claudeAccountId: claudeAccount.id,
+    codexAccountId: codexAccount.id,
     provenance: { claude: resolvedClaude.meta, codex: resolvedCodex.meta },
     staleSince: resolvedClaude.meta.staleSince ?? resolvedCodex.meta.staleSince,
   };
   logFallbackReasons(data.provenance.claude, data.provenance.codex);
-  if (hasLimits(data)) {
-    return remember(accountId, data);
-  }
+  if (!claudeFresh) remember("claude", claudeAccount.id, resolvedClaude);
+  if (!codexFresh) remember("codex", codexAccount.id, resolvedCodex);
   return data;
 }
 
@@ -149,11 +190,11 @@ interface OauthWindow {
  * from ~/.claude/.credentials.json stays inside the server process; the
  * browser only ever sees percentages.
  */
-async function fetchClaudeLimits(): Promise<LimitRead> {
+export async function fetchClaudeLimits(credentialsPath: string): Promise<LimitRead> {
   let accessToken = "";
   let plan: string | null = null;
   try {
-    const raw = JSON.parse(fs.readFileSync(CLAUDE_CREDENTIALS, "utf8")) as {
+    const raw = JSON.parse(fs.readFileSync(credentialsPath, "utf8")) as {
       claudeAiOauth?: { accessToken?: unknown; subscriptionType?: unknown };
     };
     if (typeof raw.claudeAiOauth?.accessToken === "string") accessToken = raw.claudeAiOauth.accessToken;

@@ -33,6 +33,9 @@ export type ReviewVerdict = "APPROVE" | "REQUEST_CHANGES" | "COMMENT";
 export type Round = {
   n: number; // 1-based
   reviewerPath: string | null; // reviewer run's transcript path once known
+  /** Engine account frozen when this round starts; subsequent polling and retry
+      must never silently adopt a newly selected active account. */
+  accountId?: string | null;
   /** Reviewer session/thread id, persisted as soon as it is known: claude
       pre-chooses it at spawn, codex reports it in the first `--json` event.
       Survives viewer restarts so the transcript claim stays deterministic. */

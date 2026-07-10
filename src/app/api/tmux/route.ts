@@ -9,6 +9,8 @@ import {
   resumeConversation,
   type DeliveryOutcome,
 } from "@/lib/delivery";
+import { canonicalTranscriptTarget, readTranscriptHosts } from "@/lib/agent/transcriptHost";
+import { pathAllowed } from "@/lib/scanner/roots";
 import { allowedKillTarget, consumeKillTarget } from "@/lib/resources";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
 import { collectImagePayloads, killPane, panePidOf, resolveRequestedTmuxTarget } from "@/lib/tmux";
@@ -27,11 +29,25 @@ interface SendResponse {
   imagePaths?: string[];
   /** Set when the message booted a fresh agent window instead of an existing pane. */
   spawned?: boolean;
+  outcome?: "delivered-to-live" | "resumed";
 }
 
-function respond(outcome: DeliveryOutcome): NextResponse<SendResponse | ApiError> {
-  if ("error" in outcome) return NextResponse.json({ error: outcome.error }, { status: outcome.status });
+function respond(outcome: DeliveryOutcome): NextResponse<SendResponse | ApiError | { ok: false; outcome: "failed"; error: string }> {
+  if (!outcome.ok) {
+    const { status, ...body } = outcome;
+    return NextResponse.json(body, { status });
+  }
   return NextResponse.json(outcome);
+}
+
+async function targetForRequest(pid: number | null, filePath: string): Promise<string | null> {
+  if (filePath && pathAllowed(filePath)) {
+    /* A transcript path names the conversation being addressed. Its canonical
+       host therefore wins over a client-side pid that may have exited and
+       been recycled for another session between scanner polls. */
+    return canonicalTranscriptTarget(await readTranscriptHosts(true), filePath);
+  }
+  return pid === null ? null : resolveRequestedTmuxTarget(pid);
 }
 
 export async function GET(req: NextRequest): Promise<NextResponse<TargetResponse | ApiError>> {
@@ -42,7 +58,11 @@ export async function GET(req: NextRequest): Promise<NextResponse<TargetResponse
   if (!hasPid && !filePath) {
     return NextResponse.json({ error: "pid or path is required" }, { status: 400 });
   }
-  return NextResponse.json({ target: await resolveRequestedTmuxTarget(hasPid ? pid : null, filePath) });
+  try {
+    return NextResponse.json({ target: await targetForRequest(hasPid ? pid : null, filePath) });
+  } catch (error) {
+    return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 409 });
+  }
 }
 
 export async function POST(req: NextRequest): Promise<NextResponse<SendResponse | ApiError>> {

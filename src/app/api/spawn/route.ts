@@ -4,7 +4,9 @@ import path from "node:path";
 
 import { NextRequest, NextResponse } from "next/server";
 
-import { UnknownAccountError, accountForSpawn } from "@/lib/accounts/codex";
+import { UnknownAccountError } from "@/lib/accounts/codex";
+import { UnknownClaudeAccountError } from "@/lib/accounts/claude";
+import { accountManager } from "@/lib/accounts/manager";
 import { freshSpecFor, type AgentEngine } from "@/lib/agent/cli";
 import { reasoningFromBody } from "@/lib/agent/efforts";
 import { modelFromBody } from "@/lib/agent/models";
@@ -14,7 +16,7 @@ import { persistHandoffLineage, rememberHandoffChild, rememberHandoffPane } from
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
 import { listFiles } from "@/lib/scanner";
 import { projectForCwd } from "@/lib/scanner/describe";
-import { codexSessionRootFor, ROOTS } from "@/lib/scanner/roots";
+import { claudeProjectRootFor, codexSessionRootFor } from "@/lib/scanner/roots";
 import { buildImagePayload, collectImagePayloads, deleteInboxImages, spawnAgentWithPrompt } from "@/lib/tmux";
 import type { ApiError } from "@/lib/types";
 
@@ -53,11 +55,7 @@ function transcriptAllowed(candidate: string): boolean {
   }
   if (!stat.isFile() || !real.endsWith(".jsonl")) return false;
   if (codexSessionRootFor(real)) return true;
-  try {
-    return real.startsWith(fs.realpathSync(ROOTS["claude-projects"]) + path.sep);
-  } catch {
-    return false;
-  }
+  return Boolean(claudeProjectRootFor(real));
 }
 
 function addDir(dirs: string[], cwd: string | null, project: string): void {
@@ -139,7 +137,6 @@ export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse
   const engine = body.engine === "claude" || body.engine === "codex" ? (body.engine as AgentEngine) : null;
   if (!engine) return NextResponse.json({ error: "engine must be claude or codex" }, { status: 400 });
   if (body.accountId !== undefined && typeof body.accountId !== "string") return NextResponse.json({ error: "accountId must be a string" }, { status: 400 });
-  if (engine === "claude" && body.accountId !== undefined) return NextResponse.json({ error: "accountId is only supported for Codex" }, { status: 400 });
 
   const reasoning = reasoningFromBody(engine, body);
   if (reasoning.error) return NextResponse.json({ error: reasoning.error }, { status: 400 });
@@ -173,12 +170,14 @@ export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse
        appended to its first prompt — the same contract the pane composer uses. */
     const bundle = buildImagePayload(prompt, images);
     imagePaths = bundle.imagePaths;
-    const account = engine === "codex" ? accountForSpawn(body.accountId) : null;
+    const account = accountManager.resolveSpawn(engine, body.accountId);
     const spec = freshSpecFor(engine, cwd, {
       model: selectedModel.model,
       effort: reasoning.effort,
       fast: reasoning.fast,
-      codexHome: account?.home,
+      codexHome: engine === "codex" ? account.home : null,
+      claudeConfigDir: engine === "claude" ? account.home : null,
+      claudeProjectsDir: engine === "claude" ? account.transcriptRoot : null,
     });
     const startedAtMs = Date.now();
     const pane = await spawnAgentWithPrompt(spec, bundle.payload);
@@ -188,7 +187,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse
       panePid: pane.panePid ?? null,
       cwd,
       startedAtMs,
-      codexSessionsDir: account?.sessionsDir,
+      codexSessionsDir: engine === "codex" ? account.transcriptRoot : null,
     });
     const src = parentFromBody(body);
     if (src && transcriptAllowed(src)) {
@@ -199,7 +198,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse
     return NextResponse.json({ ok: true, target: pane.display, path: childPath });
   } catch (error) {
     deleteInboxImages(imagePaths);
-    if (error instanceof UnknownAccountError) return NextResponse.json({ error: error.message }, { status: 400 });
+    if (error instanceof UnknownAccountError || error instanceof UnknownClaudeAccountError) return NextResponse.json({ error: error.message }, { status: 400 });
     return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 500 });
   }
 }

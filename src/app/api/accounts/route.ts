@@ -2,6 +2,8 @@ import { NextResponse } from "next/server";
 
 import { activeCodexAccountId, codexAccountsMutationLocked, codexLoginPaneStatus, listCodexAccounts, setCodexAccountLoginPane } from "@/lib/accounts/codex";
 import { deviceAuthChallenge } from "@/lib/accounts/deviceAuth";
+import { activeClaudeAccountId, claudeAccountsMutationLocked, listClaudeAccounts } from "@/lib/accounts/claude";
+import { claudeLoginSupervisor } from "@/lib/accounts/claudeLogin";
 import { managedCodexRuntime } from "@/lib/accounts/codexRuntime";
 import { paneInfo, paneScreen } from "@/lib/tmux";
 
@@ -45,5 +47,19 @@ export async function GET() {
     attemptState: login.get(account.id)?.attemptState ?? null,
     deviceAuth: login.get(account.id)?.deviceAuth ?? null,
   }));
-  return NextResponse.json({ codex: { active: activeCodexAccountId(), accounts } });
+  const claudeAccounts = listClaudeAccounts().map((account) => ({
+    id: account.id,
+    label: account.label,
+    kind: account.kind,
+    authPresent: account.authPresent,
+    auth: { state: account.authPresent ? "authenticated" : "signed_out", method: null, email: null, plan: null, checkedAt: null },
+    limits: { state: "unavailable", session: null, weekly: null, checkedAt: null },
+    login: claudeLoginSupervisor.forAccount(account.id),
+  }));
+  return NextResponse.json({
+    codex: { active: activeCodexAccountId(), accounts },
+    // A corrupt Claude registry keeps the compatible Codex response available and
+    // reduces Claude to immutable legacy Main until an operator repairs it.
+    claude: { active: activeClaudeAccountId(), accounts: claudeAccounts, mutationLocked: claudeAccountsMutationLocked() },
+  });
 }

@@ -16,8 +16,8 @@ export function slugifyCwd(cwd: string): string {
 }
 
 /** Transcript path a claude session with a pre-chosen id writes under ~/.claude/projects. */
-export function claudeTranscriptPath(cwd: string, sessionId: string): string {
-  return path.join(os.homedir(), ".claude", "projects", slugifyCwd(cwd), sessionId + ".jsonl");
+export function claudeTranscriptPath(cwd: string, sessionId: string, projectsRoot = path.join(os.homedir(), ".claude", "projects")): string {
+  return path.join(projectsRoot, slugifyCwd(cwd), sessionId + ".jsonl");
 }
 
 const HEAD_BYTES = 65_536;

@@ -16,7 +16,7 @@ import {
   type AgentEngine,
   type AgentProcess,
 } from "./process";
-import { ROOTS, codexSessionRootFor } from "./roots";
+import { claudeProjectRootFor, codexSessionRootFor } from "./roots";
 
 /**
  * Pid attribution for interactive transcripts (claude-projects and
@@ -43,7 +43,7 @@ const codexCwdCache = globalCache<string>("codex-cwd");
 
 export function transcriptEngine(pathname: string): AgentEngine | null {
   if (!pathname.endsWith(".jsonl")) return null;
-  if (pathname.startsWith(ROOTS["claude-projects"] + path.sep)) return "claude";
+  if (claudeProjectRootFor(pathname)) return "claude";
   if (codexSessionRootFor(pathname)) return "codex";
   return null;
 }
@@ -87,7 +87,8 @@ function argvSessionId(argv: string[]): string | null {
 }
 
 function claudeSlug(pathname: string): string {
-  return path.relative(ROOTS["claude-projects"], pathname).split(path.sep)[0] ?? "";
+  const root = claudeProjectRootFor(pathname);
+  return root ? path.relative(root, pathname).split(path.sep)[0] ?? "" : "";
 }
 
 function codexSessionCwd(pathname: string): string {

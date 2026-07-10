@@ -6,7 +6,12 @@ import { tailRecords } from "./activity";
 import { globalCache } from "./caches";
 import { readJson, recordValue, stringValue } from "./json";
 
-const modelCache = globalCache<[number, string | null]>("model");
+interface EntryModels {
+  display: string | null;
+  launch: string | null;
+}
+
+const modelCache = globalCache<[number, EntryModels]>("model");
 
 function shortModel(value: string | null): string | null {
   if (!value) return null;
@@ -25,14 +30,14 @@ function pickModel(entry: FileEntry, obj: Record<string, unknown>): string | nul
   return null;
 }
 
-export function entryModel(entry: FileEntry): string | null {
+export function entryModels(entry: FileEntry): EntryModels {
   if (entry.root === "claude-projects" && entry.path.includes(path.sep + "subagents" + path.sep)) {
     const meta = readJson(entry.path.slice(0, -".jsonl".length) + ".meta.json") ?? {};
     const model = stringValue(meta.model);
-    if (model) return shortModel(model);
+    if (model) return { display: shortModel(model), launch: model };
   }
   if ((entry.root !== "claude-projects" && entry.root !== "codex-sessions") || !entry.path.endsWith(".jsonl")) {
-    return null;
+    return { display: null, launch: null };
   }
   const cached = modelCache.get(entry.path);
   if (cached?.[0] === entry.size) return cached[1];
@@ -59,7 +64,15 @@ export function entryModel(entry: FileEntry): string | null {
       /* skip */
     }
   }
-  const value = shortModel(model);
+  const value = { display: shortModel(model), launch: model };
   modelCache.set(entry.path, [entry.size, value]);
   return value;
+}
+
+export function entryModel(entry: FileEntry): string | null {
+  return entryModels(entry).display;
+}
+
+export function entryLaunchModel(entry: FileEntry): string | null {
+  return entryModels(entry).launch;
 }

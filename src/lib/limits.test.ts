@@ -82,7 +82,7 @@ test("readLimits stamps the active account id into the payload and disk cache", 
   }
 });
 
-test("readLimits stamps a fresh legacy disk cache before returning it", async () => {
+test("readLimits stamps a fresh legacy Codex cache while refreshing Claude", async () => {
   const account = createManagedCodexAccount("Legacy cache");
   setActiveCodexAccount(account.id);
   const cacheFile = path.join(process.env.LLV_STATE_DIR!, "limits-cache.json");
@@ -102,12 +102,49 @@ test("readLimits stamps a fresh legacy disk cache before returning it", async ()
   let fetchCalled = false;
   globalThis.fetch = (async () => {
     fetchCalled = true;
-    throw new Error("fresh cache should return before fetch");
+    throw new Error("Claude refresh unavailable");
   }) as unknown as typeof fetch;
   try {
     const payload = await readLimits();
     expect(payload.codexAccountId).toBe(account.id);
-    expect(fetchCalled).toBeFalse();
+    expect(payload.codex?.session?.usedPercent).toBe(37);
+    expect(fetchCalled).toBeTrue();
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("a fresh Claude cache still refreshes missing Codex limits", async () => {
+  setActiveCodexAccount("default");
+  const legacySession = path.join(process.env.LLV_CODEX_HOME!, "sessions", "2026", "07", "09", "refresh.jsonl");
+  fs.mkdirSync(path.dirname(legacySession), { recursive: true });
+  fs.writeFileSync(legacySession, JSON.stringify({ timestamp: "2026-07-09T00:00:00.000Z", payload: { rate_limits: { primary: { used_percent: 37 }, plan_type: "pro" } } }) + "\n");
+  const cacheFile = path.join(process.env.LLV_STATE_DIR!, "limits-cache.json");
+  fs.mkdirSync(path.dirname(cacheFile), { recursive: true });
+  fs.writeFileSync(cacheFile, JSON.stringify({
+    version: 2,
+    engines: {
+      claude: {
+        default: {
+          at: Date.now(),
+          data: { session: { usedPercent: 11, resetsAt: null }, weekly: null, plan: "max", capturedAt: null },
+          provenance: { source: "live", reason: null, staleSince: null },
+        },
+      },
+      codex: {},
+    },
+  }));
+  delete (globalThis as { __llvLimitsCache?: unknown }).__llvLimitsCache;
+
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async () => {
+    throw new Error("fresh Claude cache should skip the OAuth request");
+  }) as unknown as typeof fetch;
+  try {
+    const payload = await readLimits();
+    expect(payload.claude?.session?.usedPercent).toBe(11);
+    expect(payload.codex?.session?.usedPercent).toBe(37);
+    expect(payload.codexAccountId).toBe("default");
   } finally {
     globalThis.fetch = realFetch;
   }

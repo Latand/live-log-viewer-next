@@ -9,11 +9,14 @@ import { NextRequest } from "next/server";
 const SANDBOX = fs.mkdtempSync(path.join(os.tmpdir(), "llv-accounts-route-test-"));
 const OLD_STATE = process.env.LLV_STATE_DIR;
 const OLD_HOME = process.env.LLV_CODEX_HOME;
+const OLD_CLAUDE_HOME = process.env.LLV_CLAUDE_HOME;
 process.env.LLV_STATE_DIR = path.join(SANDBOX, "state");
 process.env.LLV_CODEX_HOME = path.join(SANDBOX, "legacy");
+process.env.LLV_CLAUDE_HOME = path.join(SANDBOX, "legacy-claude");
 
 const { GET } = await import("./route");
 const { POST } = await import("./codex/active/route");
+const { POST: createClaude } = await import("./claude/route");
 const { createManagedCodexAccount, listCodexAccounts, setCodexAccountLoginPane } = await import("@/lib/accounts/codex");
 const { CodexAppServerClient } = await import("@/lib/accounts/codexAppServer");
 const { ManagedCodexRuntime, setManagedCodexRuntimeForTests } = await import("@/lib/accounts/codexRuntime");
@@ -50,6 +53,8 @@ afterAll(() => {
   else process.env.LLV_STATE_DIR = OLD_STATE;
   if (OLD_HOME === undefined) delete process.env.LLV_CODEX_HOME;
   else process.env.LLV_CODEX_HOME = OLD_HOME;
+  if (OLD_CLAUDE_HOME === undefined) delete process.env.LLV_CLAUDE_HOME;
+  else process.env.LLV_CLAUDE_HOME = OLD_CLAUDE_HOME;
   fs.rmSync(SANDBOX, { recursive: true, force: true });
 });
 
@@ -121,4 +126,14 @@ test("active mutation rejects cross-origin, unknown, and corrupt catalogs", asyn
   const response = await POST(request("default"));
   expect(response.status).toBe(400);
   expect(fs.readFileSync(registry, "utf8")).toBe("{ corrupt");
+});
+
+test("Claude DTOs remain secret-free and creation rejects cross-origin before any state change", async () => {
+  const response = await GET();
+  const body = await response.json() as { claude: { active: string; accounts: unknown[] } };
+  expect(body.claude.active).toBe("default");
+  expect(JSON.stringify(body)).not.toContain("credentials");
+  const req = new NextRequest("http://127.0.0.1/api/accounts/claude", { method: "POST", headers: { host: "evil.example", origin: "https://evil.example" }, body: JSON.stringify({ label: "Work" }) });
+  expect((await createClaude(req)).status).toBe(403);
+  expect(fs.existsSync(path.join(process.env.LLV_STATE_DIR!, "claude-accounts.json"))).toBe(false);
 });

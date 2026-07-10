@@ -49,6 +49,7 @@ export type WorkflowStageRun = {
   startedAt: string | null;
   doneAt: string | null;
   doneNote: string | null; // text after STAGE_DONE:
+  accountId?: string | null;
 };
 
 export type Workflow = {

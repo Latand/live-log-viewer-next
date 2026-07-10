@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
+import { readTranscriptHosts, type TranscriptHostSnapshot } from "@/lib/agent/transcriptHost";
+import { pathAllowed } from "@/lib/scanner/roots";
 import { resolveRequestedTmuxTarget } from "@/lib/tmux";
 
 export const runtime = "nodejs";
@@ -15,6 +17,19 @@ interface TargetBatchReq {
 
 interface TargetBatchResponse {
   targets: Record<string, string | null>;
+}
+
+async function targetForRequest(
+  snapshot: TranscriptHostSnapshot,
+  pid: number | null,
+  pathname: string,
+): Promise<string | null> {
+  if (pathname && pathAllowed(pathname)) {
+    /* Paths carry the conversation identity. A supplied pid may already name
+       another process, so it is used only when the request has no path. */
+    return snapshot.canonicalFor(pathname)?.display ?? null;
+  }
+  return pid === null ? null : resolveRequestedTmuxTarget(pid);
 }
 
 function parseReqs(body: unknown): TargetBatchReq[] | null {
@@ -43,8 +58,10 @@ export async function POST(req: NextRequest): Promise<NextResponse<TargetBatchRe
   const reqs = parseReqs(body);
   if (reqs === null) return NextResponse.json({ error: "invalid request list" }, { status: 400 });
 
-  const pairs = await Promise.all(
-    reqs.map(async ({ id, pid, path }) => [id, pid === null && !path ? null : await resolveRequestedTmuxTarget(pid, path)] as const),
-  );
+  /* Every path in this batch projects one observation. This keeps the feed's
+     target badges internally consistent while panes are being created or
+     closed. PID-only compatibility requests retain their own lookup. */
+  const snapshot = await readTranscriptHosts(true);
+  const pairs = await Promise.all(reqs.map(async ({ id, pid, path }) => [id, await targetForRequest(snapshot, pid, path)] as const));
   return NextResponse.json({ targets: Object.fromEntries(pairs) });
 }

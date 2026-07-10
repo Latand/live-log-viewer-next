@@ -9,7 +9,7 @@ import { ctxFor } from "./context";
 import { discoverFiles, discoverFilesWithProjectCatalog } from "./discover";
 import { entryEffort } from "./effort";
 import { linkEntries } from "./links";
-import { entryModel } from "./model";
+import { entryModels } from "./model";
 import { outputHolders } from "./process";
 import { goalFor, planFor } from "./plan";
 import { pendingQuestionFor } from "./questions";
@@ -95,7 +95,9 @@ async function listFilesInternal(
     const verdict = activityVerdict(entry.root, entry.path, entry.mtime, entry.size);
     entry.activity = verdict.state;
     entry.activityReason = verdict.reason;
-    entry.model = entryModel(entry);
+    const models = entryModels(entry);
+    entry.model = models.display;
+    entry.launchModel = models.launch;
   });
   await forEachEntryYielding(entries, (entry) => {
     applyProcessState(entry, holders);

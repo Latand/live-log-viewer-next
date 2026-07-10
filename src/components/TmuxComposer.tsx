@@ -174,7 +174,14 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
           images: attachments.images.map((image) => ({ base64: image.base64, mime: image.mime })),
         }),
       });
-      const json = (await res.json()) as { ok?: boolean; error?: string; imagePaths?: string[]; target?: string; spawned?: boolean };
+      const json = (await res.json()) as {
+        ok?: boolean;
+        error?: string;
+        imagePaths?: string[];
+        target?: string;
+        spawned?: boolean;
+        outcome?: "delivered-to-live" | "resumed" | "failed";
+      };
       if (!res.ok || !json.ok) {
         setStatus({ kind: "err", text: json.error ?? t("common.failedSend") });
         return;
@@ -184,14 +191,14 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
         id: Date.now(),
         text: payloadText.trim() || (imgCount ? t("composer.imagesCount", { count: imgCount }) : ""),
         at: Date.now(),
-        via: json.spawned ? "spawn" : "pane",
+        via: json.outcome === "resumed" || json.spawned ? "spawn" : "pane",
       };
       persistSent([...sent, entry].slice(-SENT_LIMIT));
       setText("");
       attachments.clear();
       setStatus({
         kind: "ok",
-        text: json.spawned
+        text: json.outcome === "resumed" || json.spawned
           ? t("composer.spawned", { target: json.target ?? "" })
           : json.imagePaths?.length
             ? t("composer.sentPaths", { count: json.imagePaths.length })
