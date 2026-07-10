@@ -504,6 +504,17 @@ export class RegisteredSuccessorProvider implements SuccessorProviderPort {
     const spec = claudeSuccessorSpecFor({ sourcePath, candidateId: nativeId, targetHome: target.home, targetProjectsDir: target.transcriptRoot, profile });
     const successorPath = spec.transcript ?? path.join(target.transcriptRoot, `${nativeId}.jsonl`);
     const registry = this.dependencies.registry ?? agentRegistry();
+    const recordContinuityOrCancel = async (launchId: string, host: TmuxHostEvidence): Promise<void> => {
+      try {
+        recordContinuityPath(successorPath);
+      } catch (error) {
+        registry.failSpawn(launchId, "migration continuity persistence failed");
+        try {
+          if (await this.dependencies.cancelClaude?.(host)) await forgetResumePaneIfMatches(successorPath, host);
+        } catch { /* the durable terminal receipt prevents this host from being reused */ }
+        throw error;
+      }
+    };
     const requestDigest = crypto.createHash("sha256").update(JSON.stringify({ operationId, conversationId, target: target.accountId, nativeId })).digest("hex");
     const begun = registry.beginSpawnRequest({
       engine: "claude",
@@ -527,7 +538,7 @@ export class RegisteredSuccessorProvider implements SuccessorProviderPort {
         if (!await this.dependencies.verifyClaudeHost?.(host)) {
           throw new Error("successor Claude operation has no recoverable live host");
         }
-        recordContinuityPath(successorPath);
+        await recordContinuityOrCancel(spawnReceipt.launchId, host);
         return {
           operationId,
           nativeId,
@@ -570,7 +581,7 @@ export class RegisteredSuccessorProvider implements SuccessorProviderPort {
     await fenceReceipt(verified);
     const delivered = registry.markSpawnPromptDelivered(spawnReceipt.launchId);
     await fenceReceipt(delivered);
-    recordContinuityPath(successorPath);
+    await recordContinuityOrCancel(spawnReceipt.launchId, pane.host);
     assertLeaseOwned();
     this.dependencies.afterClaudeSpawned?.();
     return {

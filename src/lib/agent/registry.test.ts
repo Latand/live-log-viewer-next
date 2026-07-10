@@ -288,7 +288,7 @@ describe("agent registry", () => {
     expect(store.snapshot().receipts[begun.receipt.launchId]).toMatchObject({ state: "conflicted", error: "spawn_identity_conflict" });
   });
 
-  test("migration settlement preserves a provisional owner with durable child references", () => {
+  test("migration settlement atomically reassigns durable provisional references", () => {
     const store = registry();
     const original = store.ensureConversation("claude", "/source.jsonl", "source");
     const targetPath = "/target.jsonl";
@@ -301,7 +301,16 @@ describe("agent registry", () => {
       observedAt: "2026-07-10T12:00:00.000Z",
     }]);
     const provisional = store.conversationForPath(targetPath)!;
-    store.beginSpawnRequest({ engine: "claude", cwd: "/repo", parentConversationId: provisional.id });
+    const childReceipt = store.beginSpawnRequest({ engine: "claude", cwd: "/repo", parentConversationId: provisional.id });
+    const held = store.holdDelivery(provisional.id, "deliver after migration");
+    store.reconcileConversations([{
+      engine: "claude",
+      path: "/child.jsonl",
+      accountId: "target",
+      launchProfile: emptyLaunchProfile({ cwd: "/repo", parentConversationId: provisional.id }),
+      turn: { state: "idle", source: "empty", terminalAt: null },
+      observedAt: "2026-07-10T12:00:01.000Z",
+    }]);
     const migration = store.beginSpawnRequest({
       engine: "claude",
       cwd: "/repo",
@@ -323,10 +332,15 @@ describe("agent registry", () => {
       pendingAction: null,
     });
 
-    expect(settled).toMatchObject({ kind: "conflict", code: "spawn_artifact_conflict" });
-    expect(store.conversationForPath(targetPath)?.id).toBe(provisional.id);
-    expect(store.conversation(original.id)?.continuityPaths).toEqual([]);
+    expect(settled).toMatchObject({ kind: "settled", conversation: { id: original.id } });
+    expect(store.conversationForPath(targetPath)?.id).toBe(original.id);
+    expect(store.conversation(original.id)?.continuityPaths).toEqual([targetPath]);
     expect(Object.values(store.snapshot().conversations)).toHaveLength(2);
+    const snapshot = store.snapshot();
+    expect(snapshot.receipts[childReceipt.receipt.launchId]).toMatchObject({ parentConversationId: original.id });
+    expect(snapshot.lineageEdges[childReceipt.receipt.conversationId]).toMatchObject({ parentConversationId: original.id });
+    expect(snapshot.heldDeliveries[held.id]).toMatchObject({ conversationId: original.id });
+    expect(store.conversationForPath("/child.jsonl")?.generations[0]?.launchProfile.parentConversationId).toBe(original.id);
   });
 
   test("normalizes a legacy receipt after restart without changing its schema version", () => {

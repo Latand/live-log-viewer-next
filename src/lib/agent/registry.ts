@@ -319,21 +319,46 @@ function scannerAllocatedProvisionalOwner(conversation: RegistryConversation, pa
     && conversation.continuityPaths.length === 0;
 }
 
-function conversationHasDurableReferences(file: RegistryFile, id: ViewerConversationId): boolean {
-  return Object.values(file.receipts).some((receipt) => receipt.conversationId === id || receipt.parentConversationId === id)
-    || Object.values(file.lineageEdges).some((edge) => edge.childConversationId === id || edge.parentConversationId === id)
-    || Object.values(file.heldDeliveries).some((delivery) => delivery.conversationId === id)
-    || Object.values(file.conversations).some((conversation) => conversation.id !== id
-      && conversation.generations.some((generation) => generation.launchProfile.parentConversationId === id));
-}
-
 function adoptProvisionalOwner(
   file: RegistryFile,
   owner: RegistryConversation,
   target: RegistryConversation,
   pathname: string,
 ): boolean {
-  if (!scannerAllocatedProvisionalOwner(owner, pathname) || conversationHasDurableReferences(file, owner.id)) return false;
+  if (!scannerAllocatedProvisionalOwner(owner, pathname)) return false;
+  for (const receipt of Object.values(file.receipts)) {
+    if (receipt.conversationId === owner.id) receipt.conversationId = target.id;
+    if (receipt.parentConversationId === owner.id) receipt.parentConversationId = target.id;
+    if (receipt.launchProfile.parentConversationId === owner.id) {
+      receipt.launchProfile = { ...receipt.launchProfile, parentConversationId: target.id };
+    }
+  }
+  const reassignedEdges: RegistryFile["lineageEdges"] = {};
+  for (const edge of Object.values(file.lineageEdges)) {
+    const reassigned = {
+      ...edge,
+      childConversationId: edge.childConversationId === owner.id ? target.id : edge.childConversationId,
+      parentConversationId: edge.parentConversationId === owner.id ? target.id : edge.parentConversationId,
+    };
+    const existing = reassignedEdges[reassigned.childConversationId];
+    if (!existing || edge.childConversationId === target.id) reassignedEdges[reassigned.childConversationId] = reassigned;
+  }
+  file.lineageEdges = reassignedEdges;
+  for (const delivery of Object.values(file.heldDeliveries)) {
+    if (delivery.conversationId === owner.id) delivery.conversationId = target.id;
+  }
+  for (const entry of Object.values(file.entries)) {
+    if (entry.launchProfile?.parentConversationId === owner.id) {
+      entry.launchProfile = { ...entry.launchProfile, parentConversationId: target.id };
+    }
+  }
+  for (const conversation of Object.values(file.conversations)) {
+    for (const generation of conversation.generations) {
+      if (generation.launchProfile.parentConversationId === owner.id) {
+        generation.launchProfile = { ...generation.launchProfile, parentConversationId: target.id };
+      }
+    }
+  }
   delete file.conversations[owner.id];
   file.conversationRevision[target.engine] += 1;
   file.engineRouting[target.engine].revision += 1;

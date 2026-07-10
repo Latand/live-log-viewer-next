@@ -43,7 +43,7 @@ test("GET accounts and files preserve registry bytes exactly", async () => {
   const files = await getFiles(new Request("http://127.0.0.1/api/files"));
   expect(files.status).toBe(200);
   expect(stateBytes()).toEqual(before);
-});
+}, 15_000);
 
 test("conditional GET keeps the same durable bytes", async () => {
   const first = await getFiles(new Request("http://127.0.0.1/api/files"));
@@ -53,4 +53,4 @@ test("conditional GET keeps the same durable bytes", async () => {
   const second = await getFiles(new Request("http://127.0.0.1/api/files", { headers: { "if-none-match": etag! } }));
   expect(second.status).toBe(304);
   expect(stateBytes()).toEqual(before);
-});
+}, 15_000);

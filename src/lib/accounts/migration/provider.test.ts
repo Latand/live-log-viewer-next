@@ -277,6 +277,80 @@ test("concurrent Claude creates reuse one durable migration spawn receipt", asyn
   expect(launchReceipts[0]).toMatchObject({ conversationId: conversation.id, purpose: "migration-successor" });
 });
 
+test("Claude create cancels the live host when continuity persistence fails", async () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "llv-provider-claude-continuity-failure-"));
+  roots.push(base);
+  const source = accountRoot("claude", base, "source");
+  const target = accountRoot("claude", base, "target");
+  const sourcePath = path.join(source.transcriptRoot, "source.jsonl");
+  fs.writeFileSync(sourcePath, "{}\n", { mode: 0o600 });
+  const registry = new AgentRegistry(path.join(base, "provider-registry.json"));
+  const conversation = registry.ensureConversation("claude", sourcePath, "source");
+  const cancelled: string[] = [];
+  const provider = new RegisteredSuccessorProvider({
+    accounts: { resolveSpawn: () => target, resolveTranscriptOwner: () => source },
+    startCodex: async () => { throw new Error("unexpected Codex client"); },
+    claudeStatus: async () => ({ loggedIn: true }),
+    spawnClaude: async () => ({ paneId: "%25", panePid: 2525, host: claudeHost("%25", 2525) }),
+    cancelClaude: async (host) => { cancelled.push(host.paneId); return true; },
+    registry,
+    claudeJournalRoot: path.join(base, "claude-operations"),
+    now: () => "2026-07-10T12:00:00.000Z",
+  });
+
+  await expect(provider.create({
+    engine: "claude",
+    operationId: "claude-continuity-failure",
+    conversationId: conversation.id,
+    targetAccountId: "target",
+    source: conversation.generations[0]!,
+    recordContinuityPath() { throw new Error("registry unavailable"); },
+  })).rejects.toThrow("registry unavailable");
+
+  expect(cancelled).toEqual(["%25"]);
+  expect(Object.values(registry.snapshot().receipts)[0]).toMatchObject({ state: "conflicted", error: "migration continuity persistence failed" });
+});
+
+test("Claude replay cancels its verified host when continuity persistence fails", async () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "llv-provider-claude-replay-continuity-failure-"));
+  roots.push(base);
+  const source = accountRoot("claude", base, "source");
+  const target = accountRoot("claude", base, "target");
+  const sourcePath = path.join(source.transcriptRoot, "source.jsonl");
+  fs.writeFileSync(sourcePath, "{}\n", { mode: 0o600 });
+  const registry = new AgentRegistry(path.join(base, "provider-registry.json"));
+  const conversation = registry.ensureConversation("claude", sourcePath, "source");
+  const cancelled: string[] = [];
+  const dependencies = {
+    accounts: { resolveSpawn: () => target, resolveTranscriptOwner: () => source },
+    startCodex: async () => { throw new Error("unexpected Codex client"); },
+    claudeStatus: async () => ({ loggedIn: true }),
+    spawnClaude: async () => ({ paneId: "%26", panePid: 2626, host: claudeHost("%26", 2626) }),
+    verifyClaudeHost: async () => true,
+    cancelClaude: async (host: TmuxHostEvidence) => { cancelled.push(host.paneId); return true; },
+    registry,
+    claudeJournalRoot: path.join(base, "claude-operations"),
+    now: () => "2026-07-10T12:00:00.000Z",
+  } satisfies ProviderDependencies;
+  const input = {
+    engine: "claude" as const,
+    operationId: "claude-replay-continuity-failure",
+    conversationId: conversation.id,
+    targetAccountId: "target",
+    source: conversation.generations[0]!,
+    recordContinuityPath() {},
+  };
+  await new RegisteredSuccessorProvider(dependencies).create(input);
+
+  await expect(new RegisteredSuccessorProvider(dependencies).create({
+    ...input,
+    recordContinuityPath() { throw new Error("registry unavailable on replay"); },
+  })).rejects.toThrow("registry unavailable on replay");
+
+  expect(cancelled).toEqual(["%26"]);
+  expect(Object.values(registry.snapshot().receipts)[0]).toMatchObject({ state: "conflicted", error: "migration continuity persistence failed" });
+});
+
 test("Claude replay resumes a pane-free birth receipt and fences terminal spawn state", async () => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), "llv-provider-claude-receipt-recovery-"));
   roots.push(base);
