@@ -19,10 +19,14 @@ import type { FilesResponse } from "@/lib/types";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-export async function GET(request: Request): Promise<NextResponse> {
+interface FilesRouteDependencies {
+  listFilesWithProjectCatalog: typeof listFilesWithProjectCatalog;
+}
+
+export async function buildFilesResponse(request: Request, dependencies: FilesRouteDependencies): Promise<NextResponse> {
   const url = new URL(request.url);
   const selectedProject = url.searchParams.get("project")?.trim() || undefined;
-  const { files, projectCatalog } = await listFilesWithProjectCatalog(selectedProject, { persist: false });
+  const { files, projectCatalog } = await dependencies.listFilesWithProjectCatalog(selectedProject, { persist: false });
   // A scan is a read model. Runtime reconciliation and notifications belong to
   // the external scheduler, keeping repeated GETs byte-stable for state files.
   const registry = agentRegistry();
@@ -123,4 +127,8 @@ export async function GET(request: Request): Promise<NextResponse> {
     status: 200,
     headers: { "content-type": "application/json", ETag: etag },
   });
+}
+
+export async function GET(request: Request): Promise<NextResponse> {
+  return buildFilesResponse(request, { listFilesWithProjectCatalog });
 }
