@@ -49,8 +49,8 @@ export function PipelineStrip({ pipeline }: { pipeline: Pipeline }) {
         {pipeline.stages.map((stage, index) => {
           const tone = stageTone(pipeline, stage.id);
           const attempt = stageAttempt(pipeline, stage.id);
-          const access = attempt?.effectiveRole.access ?? stage.role.access ?? (stage.kind === "review-loop" ? "read-only" : "read-write");
-          const title = [stage.role.roleId, t(access === "read-only" ? "pipelineStrip.readOnly" : "pipelineStrip.readWrite"), attempt?.sessionId].filter(Boolean).join(" · ");
+          const access = attempt?.effectiveRole.access ?? stage.access ?? (stage.kind === "review-loop" ? "read-only" : "read-write");
+          const title = [stage.role?.roleId, t(access === "read-only" ? "pipelineStrip.readOnly" : "pipelineStrip.readWrite"), attempt?.sessionId].filter(Boolean).join(" · ");
           return (
             <span key={stage.id} className="flex shrink-0 items-center gap-1.5">
               {index ? <span className="text-[10px] font-bold text-[#c9c9d1]" aria-hidden>→</span> : null}

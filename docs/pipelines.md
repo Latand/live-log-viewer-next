@@ -18,39 +18,27 @@ Pipelines run a user-defined chain of two to four agent stages in one dedicated 
     {
       "id": "plan",
       "kind": "run",
-      "role": {
-        "roleId": "architect",
-        "engine": "codex",
-        "model": "gpt-5.6-sol",
-        "effort": "xhigh",
-        "access": "read-only"
-      },
+      "engine": "claude",
+      "model": "sonnet",
+      "effort": "high",
+      "access": "read-only",
       "prompt": "Plan {{task}}. Use the pinned specification.",
       "next": "build"
     },
     {
       "id": "build",
       "kind": "run",
-      "role": {
-        "roleId": "builder",
-        "engine": "codex",
-        "model": "gpt-5.6-terra",
-        "effort": "high",
-        "access": "read-write"
-      },
+      "role": { "roleId": "builder" },
+      "access": "read-write",
       "prompt": "Implement {{task}} using this prior output:\n{{prev.output}}",
       "next": "review"
     },
     {
       "id": "review",
       "kind": "review-loop",
-      "role": {
-        "roleId": "reviewer",
-        "engine": "codex",
-        "model": "gpt-5.6-sol",
-        "effort": "xhigh",
-        "access": "read-only"
-      },
+      "role": { "roleId": "reviewer" },
+      "effort": "xhigh",
+      "access": "read-only",
       "prompt": "Review the full pinned task and acceptance criteria.",
       "next": null
     }
@@ -62,7 +50,9 @@ Stage ids use letters, numbers, `_`, and `-`. They must be unique. Each `next` v
 
 ### Role references and issue #35
 
-`role.roleId` is the durable identity. Engine, model, effort, and access are per-stage overrides. Current main requires an explicit engine while the shared role registry from issue #35 is unavailable. When that registry is installed, its defaults fill omitted values and stage overrides keep precedence. Every attempt freezes its resolved role so later registry edits cannot change a running stage.
+`role` is optional. When present, `role.roleId` is a durable reference to one of the eight presets from issue #35. `engine`, `model`, `effort`, and `access` live on the stage as explicit overrides.
+
+Resolution follows this order for each runtime field: explicit stage value, referenced role default, global Builder default. The global default is Codex GPT-5.6-Sol with high effort. This keeps role references and raw-prompt stages runnable while the shared registry is landing. A raw-prompt stage receives the task/spec context and structured verdict contract without a role scaffold. A referenced role receives its registry scaffold when the adapter supplies one. Every attempt freezes the resolved role, runtime, access, and scaffold so later registry edits cannot change a running attempt.
 
 ## Structured stage verdicts
 

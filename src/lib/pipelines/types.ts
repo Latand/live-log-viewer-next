@@ -15,16 +15,12 @@ export type PipelineRoleId =
 /** Durable reference to the shared role registry introduced by issue #35. */
 export type PipelineRoleRef = {
   roleId: PipelineRoleId;
-  /** Temporary and per-stage overrides. Engine is the current-main fallback. */
-  engine?: FlowEngine;
-  model?: string | null;
-  effort?: string | null;
-  access?: PipelineAccess;
 };
 
 export type EffectivePipelineRole = RoleConfig & {
-  roleId: PipelineRoleId;
+  roleId: PipelineRoleId | null;
   access: PipelineAccess;
+  promptScaffold: string | null;
 };
 
 export type PipelineStageKind = "run" | "review-loop";
@@ -32,7 +28,11 @@ export type PipelineStageKind = "run" | "review-loop";
 export type PipelineStage = {
   id: string;
   kind: PipelineStageKind;
-  role: PipelineRoleRef;
+  role?: PipelineRoleRef;
+  engine?: FlowEngine;
+  model?: string | null;
+  effort?: string | null;
+  access?: PipelineAccess;
   prompt: string;
   next: string | null;
 };

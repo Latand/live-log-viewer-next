@@ -12,8 +12,8 @@ test("pipelines round-trip through a schema-versioned state file", () => {
   process.env.LLV_STATE_DIR = sandbox;
   try {
     const stages: PipelineStage[] = [
-      { id: "build", kind: "run" as const, role: { roleId: "builder", engine: "codex" as const }, prompt: "build", next: "review" },
-      { id: "review", kind: "review-loop" as const, role: { roleId: "reviewer", engine: "codex" as const }, prompt: "review", next: null },
+      { id: "build", kind: "run" as const, role: { roleId: "builder" }, engine: "codex" as const, prompt: "build", next: "review" },
+      { id: "review", kind: "review-loop" as const, role: { roleId: "reviewer" }, engine: "codex" as const, prompt: "review", next: null },
     ];
     const pipeline = buildPipeline({ id: "abcdef12", task: "task", spec: "AC1", project: "viewer", repoDir: "/repo", stages, srcPath: null, srcConversationId: null, now: "now" });
     savePipelines([pipeline]);

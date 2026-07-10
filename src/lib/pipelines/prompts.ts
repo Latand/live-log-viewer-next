@@ -12,9 +12,17 @@ export function renderStagePrompt(
 ): string {
   let body = replaceAll(stage.prompt, "{{task}}", pipeline.task);
   body = replaceAll(body, "{{prev.output}}", previousOutput);
+  let roleScaffold = role.promptScaffold ? replaceAll(role.promptScaffold, "{{task}}", pipeline.task) : null;
+  if (roleScaffold) roleScaffold = replaceAll(roleScaffold, "{{prev.output}}", previousOutput);
   const access = role.access === "read-only"
     ? "Access: read-only. Inspect and validate freely. Avoid edits, staging, commits, pushes, and other repository mutations."
     : "Access: read-write. Work only inside this pipeline's dedicated worktree and commit-ready scope.";
+  const roleContext = role.roleId
+    ? [
+        `Role preset: ${role.roleId} (${role.engine}${role.model ? `/${role.model}` : ""}${role.effort ? `, ${role.effort}` : ""}).`,
+        ...(roleScaffold ? ["", "Role prompt scaffold:", roleScaffold] : []),
+      ]
+    : [];
   return [
     body.trim(),
     "",
@@ -24,7 +32,7 @@ export function renderStagePrompt(
     "Pinned specification and acceptance criteria:",
     pipeline.spec?.trim() || "No separate pinned specification was supplied.",
     "",
-    `Role: ${role.roleId} (${role.engine}${role.model ? `/${role.model}` : ""}${role.effort ? `, ${role.effort}` : ""}).`,
+    ...roleContext,
     access,
     "Pipeline nesting is forbidden. Never create or start another pipeline from this stage.",
     "",

@@ -68,8 +68,8 @@ test("pipeline links connect adjacent resolved stage sessions", () => {
     id: "pipeline-1",
     state: "running",
     stages: [
-      { id: "plan", kind: "run", role: { roleId: "architect", engine: "codex" }, prompt: "plan", next: "build" },
-      { id: "build", kind: "run", role: { roleId: "builder", engine: "codex" }, prompt: "build", next: null },
+      { id: "plan", kind: "run", role: { roleId: "architect" }, engine: "codex", prompt: "plan", next: "build" },
+      { id: "build", kind: "run", role: { roleId: "builder" }, engine: "codex", prompt: "build", next: null },
     ],
     runs: [
       { stageId: "plan", attempts: [{ agentPath: "/plan" }] },

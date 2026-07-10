@@ -30,6 +30,7 @@ import type {
   EffectivePipelineRole,
   PatchPipelineRequest,
   Pipeline,
+  PipelineRoleId,
   PipelineStage,
   PipelineStageAttempt,
 } from "./types";
@@ -272,7 +273,7 @@ function latestPassedRun(pipeline: Pipeline, stageId: string): PipelineStageAtte
 }
 
 function newAttempt(pipeline: Pipeline, stage: PipelineStage, ports: PipelinePorts): PipelineStageAttempt | null {
-  const resolved = resolvePipelineRole(stage.role, stage.kind, ports.roleLookup);
+  const resolved = resolvePipelineRole(stage, stage.kind, ports.roleLookup);
   if (!resolved.role) {
     park(pipeline, resolved.error ?? "stage role cannot be resolved");
     return null;
@@ -586,26 +587,35 @@ function normalizeStages(value: unknown, lookup?: PipelineRoleLookup | null): { 
     if (stage.kind === "review-loop" && !hasRun) return { error: "review-loop stage requires a preceding run stage" };
     const prompt = typeof stage.prompt === "string" ? stage.prompt.trim() : "";
     if (!prompt) return { error: `stage ${id} prompt is required` };
-    const rawRole = stage.role as Partial<PipelineStage["role"]> | undefined;
-    if (rawRole?.model !== undefined && rawRole.model !== null && typeof rawRole.model !== "string") return { error: `stage ${id} model must be a string or null` };
-    if (rawRole?.effort !== undefined && rawRole.effort !== null && typeof rawRole.effort !== "string") return { error: `stage ${id} effort must be a string or null` };
-    const role = resolvePipelineRole(rawRole as never, stage.kind, lookup);
-    if (!role.role) return { error: role.error };
-    ids.add(id);
-    if (stage.kind === "run") hasRun = true;
-    stages.push({
+    const roleValue = (raw as { role?: unknown }).role;
+    if (roleValue !== undefined && (!roleValue || typeof roleValue !== "object" || Array.isArray(roleValue))) {
+      return { error: `stage ${id} role must be an object` };
+    }
+    if (roleValue && Object.keys(roleValue).some((key) => key !== "roleId")) {
+      return { error: `stage ${id} role only accepts roleId; place overrides on the stage` };
+    }
+    const roleId = roleValue && typeof (roleValue as { roleId?: unknown }).roleId === "string"
+      ? (roleValue as { roleId: string }).roleId.trim()
+      : "";
+    if (roleValue && !roleId) return { error: `stage ${id} roleId is required when role is present` };
+    if (stage.model !== undefined && stage.model !== null && typeof stage.model !== "string") return { error: `stage ${id} model must be a string or null` };
+    if (stage.effort !== undefined && stage.effort !== null && typeof stage.effort !== "string") return { error: `stage ${id} effort must be a string or null` };
+    const normalizedStage: PipelineStage = {
       id,
       kind: stage.kind,
-      role: {
-        roleId: role.role.roleId,
-        ...(rawRole?.engine ? { engine: rawRole.engine } : {}),
-        ...(rawRole?.model !== undefined ? { model: typeof rawRole.model === "string" ? rawRole.model.trim() || null : null } : {}),
-        ...(rawRole?.effort !== undefined ? { effort: typeof rawRole.effort === "string" ? rawRole.effort.trim() || null : null } : {}),
-        ...(rawRole?.access ? { access: rawRole.access } : {}),
-      },
+      ...(roleId ? { role: { roleId: roleId as PipelineRoleId } } : {}),
+      ...(stage.engine !== undefined ? { engine: stage.engine } : {}),
+      ...(stage.model !== undefined ? { model: typeof stage.model === "string" ? stage.model.trim() || null : null } : {}),
+      ...(stage.effort !== undefined ? { effort: typeof stage.effort === "string" ? stage.effort.trim() || null : null } : {}),
+      ...(stage.access !== undefined ? { access: stage.access } : {}),
       prompt,
       next: stage.next ?? null,
-    });
+    };
+    const resolved = resolvePipelineRole(normalizedStage, stage.kind, lookup);
+    if (!resolved.role) return { error: resolved.error };
+    ids.add(id);
+    if (stage.kind === "run") hasRun = true;
+    stages.push(normalizedStage);
   }
   for (let index = 0; index < stages.length; index += 1) {
     const expected = stages[index + 1]?.id ?? null;

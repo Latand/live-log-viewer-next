@@ -29,12 +29,17 @@ function readJson(filePath: string): unknown {
 function isStage(value: unknown): value is PipelineStage {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const stage = value as Partial<PipelineStage>;
+  const role = (value as { role?: unknown }).role;
   return (
     typeof stage.id === "string" &&
     (stage.kind === "run" || stage.kind === "review-loop") &&
     typeof stage.prompt === "string" &&
     (stage.next === null || typeof stage.next === "string") &&
-    Boolean(stage.role && typeof stage.role === "object" && typeof stage.role.roleId === "string")
+    (role === undefined || Boolean(role && typeof role === "object" && !Array.isArray(role) && typeof (role as { roleId?: unknown }).roleId === "string")) &&
+    (stage.engine === undefined || stage.engine === "claude" || stage.engine === "codex") &&
+    (stage.model === undefined || stage.model === null || typeof stage.model === "string") &&
+    (stage.effort === undefined || stage.effort === null || typeof stage.effort === "string") &&
+    (stage.access === undefined || stage.access === "read-only" || stage.access === "read-write")
   );
 }
 

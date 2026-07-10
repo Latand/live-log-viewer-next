@@ -14,8 +14,8 @@ type PipelinePorts = import("./engine").PipelinePorts;
 afterAll(() => fs.rmSync(process.env.LLV_STATE_DIR!, { recursive: true, force: true }));
 
 const RUN_STAGES = [
-  { id: "plan", kind: "run", role: { roleId: "architect", engine: "codex", access: "read-only" }, prompt: "Plan {{task}}", next: "build" },
-  { id: "build", kind: "run", role: { roleId: "builder", engine: "codex", access: "read-write" }, prompt: "Build from {{prev.output}}", next: null },
+  { id: "plan", kind: "run", role: { roleId: "architect" }, engine: "codex", access: "read-only", prompt: "Plan {{task}}", next: "build" },
+  { id: "build", kind: "run", role: { roleId: "builder" }, engine: "codex", access: "read-write", prompt: "Build from {{prev.output}}", next: null },
 ] as const;
 
 function entry(pathname: string): FileEntry {
@@ -79,17 +79,22 @@ function create(ports: PipelinePorts, stages = RUN_STAGES as never) {
   return result.pipeline;
 }
 
-test("creation validates linear 2–4 stage chains and role fallbacks", () => {
+test("creation validates linear 2–4 stage chains and optional roles", () => {
   const { ports } = harness();
   expect(createPipelineFromRequest({ task: "x", repoDir: "/repo", stages: [] }, ports).status).toBe(400);
   expect(createPipelineFromRequest({ task: "x", repoDir: "/repo", stages: [
-    { id: "a", kind: "run", role: { roleId: "builder", engine: "codex" }, prompt: "a", next: null },
-    { id: "b", kind: "run", role: { roleId: "builder", engine: "codex" }, prompt: "b", next: null },
+    { id: "a", kind: "run", role: { roleId: "builder" }, engine: "codex", prompt: "a", next: null },
+    { id: "b", kind: "run", role: { roleId: "builder" }, engine: "codex", prompt: "b", next: null },
   ] }, ports).error).toContain("next must be b");
+  const roleless = createPipelineFromRequest({ task: "x", repoDir: "/repo", stages: [
+    { id: "a", kind: "run", prompt: "a", next: "b" },
+    { id: "b", kind: "run", prompt: "b", next: null },
+  ] }, ports);
+  expect(roleless.pipeline?.stages[0]?.role).toBeUndefined();
   expect(createPipelineFromRequest({ task: "x", repoDir: "/repo", stages: [
     { id: "a", kind: "run", role: { roleId: "builder" }, prompt: "a", next: "b" },
     { id: "b", kind: "run", role: { roleId: "builder", engine: "codex" }, prompt: "b", next: null },
-  ] }, ports).error).toContain("explicit engine");
+  ] as never }, ports).error).toContain("role only accepts roleId");
 });
 
 test("linear run stages persist sessions, structured outputs, commits, and lineage", async () => {
@@ -111,11 +116,29 @@ test("linear run stages persist sessions, structured outputs, commits, and linea
   expect(current.lastPassedCommit).toStartWith("sha-");
 });
 
+test("role-less run stages persist the Builder global runtime", async () => {
+  const h = harness();
+  create(h.ports, [
+    { id: "research", kind: "run", prompt: "research", next: "summarize" },
+    { id: "summarize", kind: "run", prompt: "summarize", next: null },
+  ] as never);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  expect(loadPipelines()[0]!.runs[0]!.attempts[0]!.effectiveRole).toEqual({
+    roleId: null,
+    engine: "codex",
+    model: "gpt-5.6-sol",
+    effort: "high",
+    access: "read-write",
+    promptScaffold: null,
+  });
+});
+
 test("review-loop stage delegates to one regular flow and maps approval", async () => {
   const h = harness();
   const stages = [
-    { id: "build", kind: "run", role: { roleId: "builder", engine: "codex" }, prompt: "build", next: "review" },
-    { id: "review", kind: "review-loop", role: { roleId: "reviewer", engine: "codex" }, prompt: "Review {{task}}", next: null },
+    { id: "build", kind: "run", role: { roleId: "builder" }, engine: "codex", prompt: "build", next: "review" },
+    { id: "review", kind: "review-loop", role: { roleId: "reviewer" }, engine: "codex", prompt: "Review {{task}}", next: null },
   ] as const;
   create(h.ports, stages as never);
   await tickPipelines([], h.ports);
