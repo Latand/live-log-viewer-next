@@ -353,7 +353,18 @@ interface PendingCodexUser {
   entrySeqs: number[];
 }
 
-function sameCodexUserTurn(leftTs: unknown, leftText: unknown, rightTs: unknown, rightText: unknown): boolean {
+type CodexAssistantShape = "event-agent" | "response-assistant";
+
+interface CodexAssistantRecord {
+  shape: CodexAssistantShape;
+  text: string;
+  ts: unknown;
+  src: number;
+  firstSeq: number;
+  lastSeq: number;
+}
+
+function sameCodexTextAtTime(leftTs: unknown, leftText: unknown, rightTs: unknown, rightText: unknown): boolean {
   const leftNormalizedText = textPart(leftText).trim();
   const rightNormalizedText = textPart(rightText).trim();
   if (!leftNormalizedText || leftNormalizedText !== rightNormalizedText) return false;
@@ -422,7 +433,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
   /* Dedup/marker state remembers the source line it came from: when that line
      slides out of the window the state clears, matching what a re-parse of
      the shortened window would know. */
-  let lastProse: { text: string; src: number; seq: number } | null = null;
+  let codexAssistantRecord: CodexAssistantRecord | null = null;
   /* A composer turn is recorded as a user response item immediately followed
      by its user_message event. The event owns the logical turn, while this
      provisional record keeps a live tail visible until its echo arrives. */
@@ -518,23 +529,47 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
       .trim();
     return { cleaned, cites };
   };
-  const addProse = (ts: unknown, text: string) => {
-    if (!text.trim()) return;
-    const src = curSrc;
-    if (pushBlobIfHuge(text)) return;
+  const addProse = (ts: unknown, text: string): { firstSeq: number; lastSeq: number } | null => {
+    if (!text.trim()) return null;
+    const firstSeq = pushSeq;
+    if (pushBlobIfHuge(text)) return { firstSeq, lastSeq: pushSeq - 1 };
     const engine = cfg.engine === "codex" ? "codex" : "claude";
-    if (pushStructured(ts, text, (segment) => push({ kind: "prose", ts, text: segment, engine }))) return;
-    const seq = push({ kind: "prose", ts, text, engine });
-    lastProse = { text, src, seq };
+    if (pushStructured(ts, text, (segment) => push({ kind: "prose", ts, text: segment, engine }))) {
+      return { firstSeq, lastSeq: pushSeq - 1 };
+    }
+    push({ kind: "prose", ts, text, engine });
+    return { firstSeq, lastSeq: pushSeq - 1 };
   };
-  const adoptCodexProseEcho = (ts: unknown, text: string): boolean => {
-    if (!lastProse || lastProse.text !== text || lastProse.src !== curSrc - 1) return false;
-    const idx = entryIndex(lastProse.seq);
-    if (idx < 0 || idx >= entries.length || entries[idx]?.item.kind !== "prose") return false;
-    entries[idx] = { ...entries[idx], src: curSrc, item: { ...entries[idx].item, ts } };
-    lastProse = { ...lastProse, src: curSrc };
-    snapshot = null;
-    return true;
+  const addCodexAssistant = (shape: CodexAssistantShape, ts: unknown, text: string) => {
+    const normalizedText = text.trim();
+    const candidate = codexAssistantRecord;
+    if (
+      candidate &&
+      candidate.shape !== shape &&
+      candidate.src === curSrc - 1 &&
+      candidate.text === normalizedText &&
+      sameCodexTextAtTime(candidate.ts, candidate.text, ts, normalizedText)
+    ) {
+      const eventTimestamp = shape === "event-agent" ? ts : candidate.shape === "event-agent" ? candidate.ts : ts;
+      for (let seq = candidate.firstSeq; seq <= candidate.lastSeq; seq += 1) {
+        const idx = entryIndex(seq);
+        if (idx < 0 || idx >= entries.length) continue;
+        const entry = entries[idx];
+        const item = entry.item;
+        entries[idx] = {
+          ...entry,
+          src: curSrc,
+          item: item.kind === "prose" || item.kind === "review" ? { ...item, ts: eventTimestamp } : item,
+        };
+      }
+      codexAssistantRecord = null;
+      snapshot = null;
+      return;
+    }
+    const emitted = addProse(ts, text);
+    codexAssistantRecord = emitted
+      ? { shape, text: normalizedText, ts, src: curSrc, firstSeq: emitted.firstSeq, lastSeq: emitted.lastSeq }
+      : null;
   };
   const addCmd = (ts: unknown, cmd: string, callId?: string, icon?: GlyphName) => {
     const id = callId || "plain-" + pushSeq + "-" + String(ts ?? "");
@@ -700,7 +735,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
     pendingCodexUsers.push(pending);
   };
   const addCodexEventUser = (ts: unknown, text: string) => {
-    const pendingIndex = pendingCodexUsers.findIndex((pending) => sameCodexUserTurn(pending.ts, pending.text, ts, text));
+    const pendingIndex = pendingCodexUsers.findIndex((pending) => sameCodexTextAtTime(pending.ts, pending.text, ts, text));
     if (pendingIndex < 0) {
       emitCodexUserContent(ts, { text, attachments: [] });
       return;
@@ -747,9 +782,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
       if (p.type === "user_message" && p.message) return addCodexEventUser(ts, textPart(p.message));
       finalizePendingCodexUsers();
       if (p.type === "agent_message" && p.message) {
-        const text = textPart(p.message);
-        if (!adoptCodexProseEcho(ts, text)) addProse(ts, text);
-        return;
+        return addCodexAssistant("event-agent", ts, textPart(p.message));
       }
       if (p.type === "task_started") return addNote(tr("render.taskStarted") + (ts ? " · " + hhmm(ts) : ""));
       if (p.type === "task_complete") return addNote(tr("render.taskComplete") + (ts ? " · " + hhmm(ts) : ""));
@@ -765,7 +798,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
         finalizePendingCodexUsers();
         const text = normalizeCodexUserContent(p.content).text;
         if (!text) return addSvc("message " + textPart(p.role));
-        if (p.role === "assistant") return addProse(ts, text);
+        if (p.role === "assistant") return addCodexAssistant("response-assistant", ts, text);
         /* developer/system turns (<permissions instructions>, collaboration
            mode, …) are harness-injected, never something the user typed. */
         return addSysMsg(text, textPart(p.role));
@@ -991,7 +1024,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
     tmsgKeyBySeq.clear();
     hiddenSvcBySrc.clear();
     hiddenServiceCount = 0;
-    lastProse = null;
+    codexAssistantRecord = null;
     pendingCodexUsers = [];
     codexCompacted = null;
     plainBlock = null;
@@ -1027,7 +1060,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
       hiddenSvcBySrc.delete(src);
       snapshot = null;
     }
-    if (lastProse && lastProse.src < start) lastProse = null;
+    if (codexAssistantRecord && codexAssistantRecord.src < start) codexAssistantRecord = null;
     pendingCodexUsers = pendingCodexUsers.filter((pending) => pending.src >= start);
     if (codexCompacted && codexCompacted.src < start) codexCompacted = null;
     if (lastPlainCall && entryIndex(lastPlainCall.seq) < 0) lastPlainCall = null;
