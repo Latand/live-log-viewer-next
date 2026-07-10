@@ -5,7 +5,9 @@ import path from "node:path";
 import { statePath } from "@/lib/configDir";
 import { agentRegistry, type AgentRegistry } from "@/lib/agent/registry";
 import { ROLE_DEFAULTS } from "@/lib/roles/defaults";
-import { listRoles, resolveRole } from "@/lib/roles/registry";
+import { resolveRole } from "@/lib/roles/registry";
+import { loadRoleDefinitionsOrDefaults } from "@/lib/roles/store";
+import type { RoleDefinition } from "@/lib/roles/types";
 
 import type { Flow, FlowPreset, ReviewVerdict } from "./types";
 
@@ -58,27 +60,28 @@ const PRE_ROLE_SEEDED_PRESETS: FlowPreset[] = [
     registry's semantic validation (e.g. a codex model not prefixed `gpt-`).
     Seed derivation must never crash on that — it falls back to the role's
     hardcoded default config instead of propagating the broken override. */
-function flowRole(role: "builder" | "reviewer" | "architect", params: Record<string, string> = {}): FlowPreset["implementer"] {
-  if (role !== "builder") return { ...listRoles().find((candidate) => candidate.id === role)!.config };
-  const resolved = resolveRole(role, params);
+function flowRole(definitions: RoleDefinition[], role: "builder" | "reviewer" | "architect", params: Record<string, string> = {}): FlowPreset["implementer"] {
+  if (role !== "builder") return { ...definitions.find((candidate) => candidate.id === role)!.config };
+  const resolved = resolveRole(role, params, {}, definitions);
   if (resolved.ok) return { ...resolved.value.config };
   return { ...ROLE_DEFAULTS.find((candidate) => candidate.id === role)!.config };
 }
 
-/** Seed profiles resolve from the role registry on every load. Existing saved
-    presets remain records of the user choices made when they were saved. */
+/** Managed seed profiles resolve from the role registry on every load. */
 export function seededPresetsFromRoles(): FlowPreset[] {
-  const builder = flowRole("builder");
-  const fixer = flowRole("builder", { mode: "apply-fixes", domain: "general" });
-  const reviewer = flowRole("reviewer");
-  const architect = flowRole("architect");
-  return [
+  const definitions = loadRoleDefinitionsOrDefaults();
+  const builder = flowRole(definitions, "builder");
+  const fixer = flowRole(definitions, "builder", { mode: "apply-fixes", domain: "general" });
+  const reviewer = flowRole(definitions, "reviewer");
+  const architect = flowRole(definitions, "architect");
+  const presets: FlowPreset[] = [
     { name: "Sol medium → Sol xhigh", implementer: builder, reviewer },
     { name: "Terra low → Sol xhigh", implementer: fixer, reviewer },
     { name: "Sol medium → Fable", implementer: builder, reviewer: architect },
     { name: "Fable → Sol xhigh", implementer: architect, reviewer },
     { name: "Sonnet → Sol xhigh", implementer: { engine: "claude", model: "sonnet", effort: "high" }, reviewer },
   ];
+  return presets.map((preset) => ({ ...preset, managed: "role-registry" }));
 }
 
 /** Compatibility export for consumers that render the initial seed list. */
@@ -128,7 +131,7 @@ function isFlow(value: unknown): value is Flow {
 function isPreset(value: unknown): value is FlowPreset {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const preset = value as Partial<FlowPreset>;
-  return typeof preset.name === "string" && isRoleConfig(preset.implementer) && isRoleConfig(preset.reviewer);
+  return typeof preset.name === "string" && isRoleConfig(preset.implementer) && isRoleConfig(preset.reviewer) && (preset.managed === undefined || preset.managed === "role-registry");
 }
 
 function isRoleConfig(value: unknown): value is FlowPreset["implementer"] {
@@ -151,7 +154,7 @@ function samePreset(left: FlowPreset, right: FlowPreset): boolean {
 
 /** Replace untouched legacy defaults while retaining every custom preset. */
 export function mergeSeededPresets(presets: FlowPreset[], seeds = seededPresetsFromRoles()): FlowPreset[] {
-  const custom = presets.filter((preset) => ![...LEGACY_SEEDED_PRESETS, ...PRE_ROLE_SEEDED_PRESETS].some((legacy) => samePreset(preset, legacy)));
+  const custom = presets.filter((preset) => preset.managed !== "role-registry" && ![...LEGACY_SEEDED_PRESETS, ...PRE_ROLE_SEEDED_PRESETS].some((legacy) => samePreset(preset, legacy)));
   const names = new Set(custom.map((preset) => preset.name));
   const missingSeeds = seeds.filter((preset) => !names.has(preset.name));
   return [...missingSeeds, ...custom];

@@ -5,6 +5,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { cameraToPresence, orderedSelection, schemeFocusedPath, schemeVisiblePaths, viewBus } from "@/hooks/viewPresenceBus";
 import type { Flow } from "@/lib/flows/types";
+import type { Pipeline } from "@/lib/pipelines/types";
 import { useLocale } from "@/lib/i18n";
 import type { BoardTask } from "@/lib/tasks/types";
 import type { FileEntry } from "@/lib/types";
@@ -49,6 +50,7 @@ interface Props {
   manual: FileEntry[];
   files: FileEntry[];
   flows: Flow[];
+  pipelines?: Pipeline[];
   /** This project's board tasks — sticky cards over the panes. */
   tasks: BoardTask[];
   /** Ids of not-yet-spawned conversation drafts drawn as full panes. */
@@ -116,6 +118,7 @@ export function SchemeBoard({
   manual,
   files,
   flows,
+  pipelines = [],
   tasks,
   drafts,
   focus,
@@ -146,7 +149,7 @@ export function SchemeBoard({
   }, [focus]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
-  const layout = useMemo(() => buildSchemeLayout(groups, manual, files, flows, drafts), [groups, manual, files, flows, drafts]);
+  const layout = useMemo(() => buildSchemeLayout(groups, manual, files, flows, drafts, pipelines), [groups, manual, files, flows, drafts, pipelines]);
 
   /* Selection keys are transcript paths, so the 10s poll relayout keeps the
      set for free; nodes that left the board are pruned out of the state

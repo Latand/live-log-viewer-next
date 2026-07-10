@@ -3,9 +3,11 @@
 import { useEffect, useState } from "react";
 
 import { FLOWS_CHANGED_EVENT } from "@/components/flows/flowModel";
+import { PIPELINES_CHANGED_EVENT } from "@/components/pipelines/pipelineModel";
 import { TASKS_CHANGED_EVENT } from "@/components/tasks/taskApi";
 import { WORKFLOWS_CHANGED_EVENT } from "@/components/workflows/workflowModel";
 import type { Flow } from "@/lib/flows/types";
+import type { Pipeline } from "@/lib/pipelines/types";
 import type { BoardTask } from "@/lib/tasks/types";
 import type { FileEntry, FilesResponse, ProjectCatalogEntry } from "@/lib/types";
 import type { Workflow } from "@/lib/workflows/types";
@@ -21,12 +23,15 @@ export interface FilesData {
   files: FileEntry[];
   projectCatalog: ProjectCatalogEntry[];
   flows: Flow[];
+  pipelines: Pipeline[];
   workflows: Workflow[];
   tasks: BoardTask[];
+  /** Set when the server's pipelines store failed closed for this poll. */
+  pipelinesError?: string;
   loaded: boolean;
 }
 
-const EMPTY: FilesData = { files: [], projectCatalog: [], flows: [], workflows: [], tasks: [], loaded: false };
+const EMPTY: FilesData = { files: [], projectCatalog: [], flows: [], pipelines: [], workflows: [], tasks: [], loaded: false };
 
 export function filesApiUrl(project?: string | null): string {
   return project ? "/api/files?project=" + encodeURIComponent(project) : "/api/files";
@@ -64,14 +69,16 @@ export function useFiles(project?: string | null): FilesData {
         /* The flows rollout changes the payload from a bare array to
            {files, flows}; accept both so client and server can deploy in
            either order. */
-        if (Array.isArray(parsed)) setData({ files: parsed, projectCatalog: [], flows: [], workflows: [], tasks: [], loaded: true });
+        if (Array.isArray(parsed)) setData({ files: parsed, projectCatalog: [], flows: [], pipelines: [], workflows: [], tasks: [], loaded: true });
         else {
           setData({
             files: parsed.files ?? [],
             projectCatalog: parsed.projectCatalog ?? [],
             flows: parsed.flows ?? [],
+            pipelines: parsed.pipelines ?? [],
             workflows: parsed.workflows ?? [],
             tasks: parsed.tasks ?? [],
+            pipelinesError: parsed.pipelinesError,
             loaded: true,
           });
         }
@@ -104,6 +111,7 @@ export function useFiles(project?: string | null): FilesData {
        cards must not sit on stale state for up to a full poll interval. */
     const onChanged = () => void load();
     window.addEventListener(FLOWS_CHANGED_EVENT, onChanged);
+    window.addEventListener(PIPELINES_CHANGED_EVENT, onChanged);
     window.addEventListener(WORKFLOWS_CHANGED_EVENT, onChanged);
     window.addEventListener(TASKS_CHANGED_EVENT, onChanged);
 
@@ -130,6 +138,7 @@ export function useFiles(project?: string | null): FilesData {
       unsubBus();
       unsubFiles();
       window.removeEventListener(FLOWS_CHANGED_EVENT, onChanged);
+      window.removeEventListener(PIPELINES_CHANGED_EVENT, onChanged);
       window.removeEventListener(WORKFLOWS_CHANGED_EVENT, onChanged);
       window.removeEventListener(TASKS_CHANGED_EVENT, onChanged);
     };

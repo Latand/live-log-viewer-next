@@ -5,7 +5,6 @@ import path from "node:path";
 
 import { AgentRegistry } from "@/lib/agent/registry";
 import { CODEX_SOL_MODEL, CODEX_TERRA_MODEL } from "@/lib/agent/models";
-import { saveRoleOverrides } from "@/lib/roles/store";
 
 import { FLOWS_SCHEMA_VERSION, loadFlows, mergeSeededPresets, reconcileFlowConversationOwnership, saveFlows, seededPresetsFromRoles } from "./store";
 import type { Flow, FlowPreset } from "./types";
@@ -19,7 +18,7 @@ const LEGACY_DEFAULT: FlowPreset = {
 test("seed migration replaces an untouched legacy preset with Sol and Sol roles", () => {
   const presets = mergeSeededPresets([LEGACY_DEFAULT]);
   expect(presets.some((preset) => preset.name === LEGACY_DEFAULT.name)).toBe(false);
-  expect(presets[0]).toEqual({
+  expect(presets[0]).toMatchObject({
     name: "Sol medium → Sol xhigh",
     implementer: { engine: "codex", model: CODEX_SOL_MODEL, effort: "medium" },
     reviewer: { engine: "codex", model: CODEX_SOL_MODEL, effort: "xhigh" },
@@ -33,11 +32,21 @@ test("seed migration preserves a customized preset", () => {
 
 test("flow preset seeds derive their canonical roles from the role registry", () => {
   const presets = seededPresetsFromRoles();
-  expect(presets.find((preset) => preset.name === "Sol medium → Sol xhigh")).toEqual({
+  expect(presets.find((preset) => preset.name === "Sol medium → Sol xhigh")).toMatchObject({
     name: "Sol medium → Sol xhigh",
     implementer: { engine: "codex", model: CODEX_SOL_MODEL, effort: "medium" },
     reviewer: { engine: "codex", model: CODEX_SOL_MODEL, effort: "xhigh" },
   });
+});
+
+test("managed flow seeds refresh while an unmarked same-name edit wins", () => {
+  const first = seededPresetsFromRoles();
+  const refreshed = structuredClone(first);
+  refreshed[0]!.implementer.effort = "high";
+  expect(mergeSeededPresets(first, refreshed)[0]!.implementer.effort).toBe("high");
+
+  const custom = { ...structuredClone(first[0]!), managed: undefined, implementer: { ...first[0]!.implementer, effort: "low" } };
+  expect(mergeSeededPresets([custom], refreshed)).toContainEqual(custom);
 });
 
 test("flow preset seeds fall back to the role default when a saved builder override is semantically invalid", () => {
@@ -45,7 +54,14 @@ test("flow preset seeds fall back to the role default when a saved builder overr
   const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-flow-bad-override-"));
   process.env.LLV_STATE_DIR = sandbox;
   try {
-    saveRoleOverrides({ builder: { config: { model: "not-a-gpt-model" } } });
+    /* saveRoleOverrides refuses this override on this branch, so the bytes
+       land via a hand-edit; the fail-closed loader rejects the file and
+       seeding degrades to the built-in defaults either way. */
+    fs.writeFileSync(
+      path.join(sandbox, "role-presets.json"),
+      JSON.stringify({ schemaVersion: 1, overrides: { builder: { config: { model: "not-a-gpt-model" } } } }),
+      "utf8",
+    );
     expect(() => seededPresetsFromRoles()).not.toThrow();
     expect(seededPresetsFromRoles().find((preset) => preset.name === "Sol medium → Sol xhigh")?.implementer).toEqual({
       engine: "codex",
@@ -154,6 +170,22 @@ test("flow bindings follow active conversation generations", () => {
   } finally {
     if (previousState === undefined) delete process.env.LLV_STATE_DIR;
     else process.env.LLV_STATE_DIR = previousState;
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  }
+});
+
+test("seed presets survive an unreadable role overrides file", () => {
+  const previous = process.env.LLV_STATE_DIR;
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-flow-seed-corrupt-"));
+  process.env.LLV_STATE_DIR = sandbox;
+  try {
+    fs.writeFileSync(path.join(sandbox, "role-presets.json"), "{", "utf8");
+    expect(seededPresetsFromRoles().find((preset) => preset.name === "Sol medium → Sol xhigh")).toMatchObject({
+      implementer: { engine: "codex", model: CODEX_SOL_MODEL, effort: "medium" },
+    });
+  } finally {
+    if (previous === undefined) delete process.env.LLV_STATE_DIR;
+    else process.env.LLV_STATE_DIR = previous;
     fs.rmSync(sandbox, { recursive: true, force: true });
   }
 });

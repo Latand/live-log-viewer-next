@@ -1,4 +1,5 @@
 import type { Flow, FlowAnnotation } from "@/lib/flows/types";
+import type { Pipeline } from "@/lib/pipelines/types";
 import type { BoardTask } from "@/lib/tasks/types";
 import type { Workflow } from "@/lib/workflows/types";
 
@@ -124,6 +125,9 @@ export interface FilesResponse {
   files: FileEntry[];
   projectCatalog?: ProjectCatalogEntry[];
   flows: Flow[];
+  pipelines: Pipeline[];
+  /** Present when the pipelines store failed closed; the rest of the payload stays valid. */
+  pipelinesError?: string;
   workflows: Workflow[];
   tasks: BoardTask[];
 }

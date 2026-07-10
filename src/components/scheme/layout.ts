@@ -1,11 +1,12 @@
 import type { Flow } from "@/lib/flows/types";
+import type { Pipeline } from "@/lib/pipelines/types";
 import type { FileEntry } from "@/lib/types";
 
 import type { DeckRound } from "@/components/flows/RoundDeck";
 import { draftSrc } from "@/components/DraftAgentPane";
 import { claimedReviewerPaths, flowByImplementer } from "@/components/flows/flowModel";
 
-import { buildAnchorIndex, deckKey, deriveFlowLinks, type AgentLink } from "./agentLinks";
+import { buildAnchorIndex, deckKey, deriveFlowLinks, derivePipelineLinks, type AgentLink } from "./agentLinks";
 import { type BranchGroup, descendantsOf, isChildConversation, kidsIndex } from "@/components/projectModel";
 import { engineColor } from "@/components/utils";
 
@@ -154,6 +155,7 @@ export function buildSchemeLayout(
   files: FileEntry[],
   flows: Flow[] = [],
   draftIds: string[] = [],
+  pipelines: Pipeline[] = [],
 ): SchemeLayout {
   const byAll = new Map(files.map((file) => [file.path, file]));
   const kids = kidsIndex(files);
@@ -377,7 +379,10 @@ export function buildSchemeLayout(
     stacks,
     decks,
     loops,
-    links: deriveFlowLinks(flows, (key) => anchors.get(key) ?? null),
+    links: [
+      ...deriveFlowLinks(flows, (key) => anchors.get(key) ?? null),
+      ...derivePipelineLinks(pipelines, (key) => anchors.get(key) ?? null),
+    ],
     drafts,
     byPath: new Map<string, SchemeRect>([
       ...nodes.map((node) => [node.file.path, node] as const),

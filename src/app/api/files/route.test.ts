@@ -16,7 +16,10 @@ mock.module("@/lib/scanner", () => ({
     return { files: scannedFiles, projectCatalog: [] };
   },
 }));
+let pipelinesStore: () => unknown[] = () => [];
 mock.module("@/lib/flows/store", () => ({ loadFlows: () => [] }));
+mock.module("@/lib/pipelines/store", () => ({ loadPipelines: () => pipelinesStore() }));
+mock.module("@/lib/pipelines/visibility", () => ({ filterPipelinesForFileScan: () => [] }));
 mock.module("@/lib/tasks/store", () => ({
   loadTasks: () => [],
   mutateTasks: () => { throw new Error("files route attempted a task mutation"); },
@@ -33,7 +36,7 @@ test("repeated files reads execute only pure read ports and retain ETag behavior
   const etag = first.headers.get("etag");
   const second = await GET(new Request("http://127.0.0.1/api/files", { headers: { "if-none-match": etag! } }));
   expect(first.status).toBe(200);
-  expect(await first.json()).toEqual({ files: [], projectCatalog: [], flows: [], workflows: [], tasks: [] });
+  expect(await first.json()).toEqual({ files: [], projectCatalog: [], flows: [], pipelines: [], workflows: [], tasks: [] });
   expect(second.status).toBe(304);
   expect(scans).toBe(2);
   expect(scanOptions).toEqual({ persist: false });
@@ -95,4 +98,18 @@ test("spawn-time lineage keeps the child grouped after its tmux host disappears"
 
   expect(child?.parent).toBe(parentPath);
   expect(child?.conversationId).toBe(begun.receipt.conversationId);
+});
+
+test("an unreadable pipelines store degrades to pipelinesError without failing the poll", async () => {
+  scannedFiles = [];
+  pipelinesStore = () => { throw new Error("pipeline registry contains malformed records"); };
+  try {
+    const response = await GET(new Request("http://127.0.0.1/api/files"));
+    expect(response.status).toBe(200);
+    const body = await response.json() as { files: unknown[]; pipelines: unknown[]; pipelinesError?: string };
+    expect(body.pipelines).toEqual([]);
+    expect(body.pipelinesError).toContain("malformed records");
+  } finally {
+    pipelinesStore = () => [];
+  }
 });

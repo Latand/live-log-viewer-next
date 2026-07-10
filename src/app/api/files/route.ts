@@ -6,6 +6,9 @@ import { listFilesWithProjectCatalog } from "@/lib/scanner";
 import { agentRegistry } from "@/lib/agent/registry";
 import { pidAlive, readPpid } from "@/lib/scanner/process";
 import { loadFlows } from "@/lib/flows/store";
+import { loadPipelines } from "@/lib/pipelines/store";
+import type { Pipeline } from "@/lib/pipelines/types";
+import { filterPipelinesForFileScan } from "@/lib/pipelines/visibility";
 import { pathForPanePid, reconcileTasks } from "@/lib/tasks/reconcile";
 import { loadTasks } from "@/lib/tasks/store";
 import { loadWorkflows } from "@/lib/workflows/store";
@@ -78,7 +81,19 @@ export async function GET(request: Request): Promise<NextResponse> {
       : null,
   });
   const workflows = filterWorkflowsForFileScan(loadWorkflows(), files);
-  const body = JSON.stringify({ files, projectCatalog, flows: loadFlows(), workflows, tasks: tasks.tasks } satisfies FilesResponse);
+  /* The pipelines store fails closed on malformed or future-schema state
+     (both viewer instances share one config dir, so skew is a normal
+     condition) — that must degrade to "pipelines unavailable", never take
+     the whole files poll down with it. */
+  let pipelines: Pipeline[] = [];
+  let pipelinesError: string | undefined;
+  try {
+    pipelines = filterPipelinesForFileScan(loadPipelines(), files);
+  } catch (error) {
+    pipelinesError = error instanceof Error ? error.message : "pipeline registry unreadable";
+    console.error("[files] pipelines store unreadable; serving without pipelines", error);
+  }
+  const body = JSON.stringify({ files, projectCatalog, flows: loadFlows(), pipelines, workflows, tasks: tasks.tasks, ...(pipelinesError ? { pipelinesError } : {}) } satisfies FilesResponse);
   /* The client re-polls every 10 s and this ~410 KB payload is usually
      identical between polls; a strong ETag over the exact bytes lets an
      unchanged response come back as a bodyless 304. force-dynamic still holds

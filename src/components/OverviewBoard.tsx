@@ -6,6 +6,7 @@ import { useMemo } from "react";
 import { useColumns } from "@/hooks/useColumns";
 import { useLocale } from "@/lib/i18n";
 import type { FileEntry, ProjectCatalogEntry } from "@/lib/types";
+import type { Pipeline } from "@/lib/pipelines/types";
 import type { Workflow } from "@/lib/workflows/types";
 
 import { buildBranchGroups, buildProjectSummaries, projectKey } from "./projectModel";
@@ -14,6 +15,7 @@ import { activityDot, cleanTitle, engineBadge, fmtAge } from "./utils";
 interface Props {
   files: FileEntry[];
   projectCatalog: ProjectCatalogEntry[];
+  pipelines: Pipeline[];
   /** Active workflows: their stamped projects get a card even without files. */
   workflows: Workflow[];
   /** Shelved projects: their cards stay off the board until unarchived or live again. */
@@ -29,10 +31,10 @@ interface Props {
   attention?: React.ReactNode;
 }
 
-export function OverviewBoard({ files, projectCatalog, workflows, archivedProjects, now, onSelectProject, onSelectFile, onMenu, attention }: Props) {
+export function OverviewBoard({ files, projectCatalog, pipelines, workflows, archivedProjects, now, onSelectProject, onSelectFile, onMenu, attention }: Props) {
   const { t } = useLocale();
   const cols = useColumns();
-  const allSummaries = useMemo(() => buildProjectSummaries(files, now, workflows, projectCatalog), [files, now, workflows, projectCatalog]);
+  const allSummaries = useMemo(() => buildProjectSummaries(files, now, workflows, projectCatalog, pipelines), [files, now, workflows, projectCatalog, pipelines]);
   const summaries = useMemo(
     () => allSummaries.filter((summary) => !archivedProjects.has(summary.project)),
     [allSummaries, archivedProjects],

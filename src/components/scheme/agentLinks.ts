@@ -1,4 +1,5 @@
 import type { Flow, FlowState, Round } from "@/lib/flows/types";
+import type { Pipeline } from "@/lib/pipelines/types";
 
 import { activeLoopLeg, flowByImplementer } from "@/components/flows/flowModel";
 
@@ -15,7 +16,7 @@ import { activeLoopLeg, flowByImplementer } from "@/components/flows/flowModel";
  * endpoint resolution). buildAnchorIndex owns that resolution.
  */
 
-export type AgentLinkKind = "flow" | "message";
+export type AgentLinkKind = "flow" | "pipeline" | "message";
 
 /** Coarse lifecycle of a flow link — drives the hub tone and pulse. */
 export type FlowLinkPhase = "waiting" | "running" | "awaiting_verdict" | "attention" | "paused" | "done";
@@ -31,6 +32,8 @@ export interface AgentLink {
   leg: "forward" | "back" | null;
   /** Flow links: the loop this link materializes. */
   flow?: { flow: Flow; round: number; phase: FlowLinkPhase };
+  /** Pipeline links: one linear handoff edge between adjacent stage sessions. */
+  pipeline?: { pipeline: Pipeline; fromStageId: string; toStageId: string };
   /** Message links (#12): one aggregated edge per endpoint pair. */
   message?: { count: number; lastAt: number };
 }
@@ -130,6 +133,34 @@ export function deriveFlowLinks(flows: Flow[], anchorOf: (pathOrKey: string) => 
       leg: activeLoopLeg(flow),
       flow: { flow, round: round?.n ?? 0, phase: flowLinkPhase(flow.state) },
     });
+  }
+  return links;
+}
+
+export function derivePipelineLinks(pipelines: Pipeline[], anchorOf: (pathOrKey: string) => string | null): AgentLink[] {
+  const links: AgentLink[] = [];
+  for (const pipeline of pipelines) {
+    if (pipeline.state === "closed") continue;
+    let previous: { stageId: string; path: string } | null = null;
+    for (const stage of pipeline.stages) {
+      const attempt = pipeline.runs.find((run) => run.stageId === stage.id)?.attempts.at(-1);
+      if (!attempt?.agentPath) continue;
+      if (previous) {
+        const from = anchorOf(previous.path);
+        const to = anchorOf(attempt.agentPath);
+        if (from && to && from !== to) {
+          links.push({
+            key: `pipelinelink::${pipeline.id}::${previous.stageId}::${stage.id}`,
+            kind: "pipeline",
+            from,
+            to,
+            leg: "forward",
+            pipeline: { pipeline, fromStageId: previous.stageId, toStageId: stage.id },
+          });
+        }
+      }
+      previous = { stageId: stage.id, path: attempt.agentPath };
+    }
   }
   return links;
 }

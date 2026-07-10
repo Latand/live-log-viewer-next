@@ -8,6 +8,7 @@ import { useIsMobile } from "@/hooks/useIsMobile";
 import { viewBus } from "@/hooks/viewPresenceBus";
 import type { Flow } from "@/lib/flows/types";
 import { useLocale } from "@/lib/i18n";
+import type { Pipeline } from "@/lib/pipelines/types";
 import type { BoardTask } from "@/lib/tasks/types";
 import type { FileEntry } from "@/lib/types";
 import { MAX_VISIBLE_PATHS } from "@/lib/view/types";
@@ -17,6 +18,8 @@ import { TaskStrip } from "./BranchPane";
 import { clearDraftStorage, draftSrc, setDraftSrc, setDraftText } from "./DraftAgentPane";
 import { planBoardConvergence, planClose } from "./projectBoardMutations";
 import { claimedReviewerDescendantPaths, foldClaimedReviewers, isActiveFlow } from "./flows/flowModel";
+import { PipelineStrip } from "./pipelines/PipelineStrip";
+import { pipelinesForProject } from "./pipelines/pipelineModel";
 import { clearWorkflowDraftStorage } from "./workflows/WorkflowDraftPane";
 import { WorkflowStrip } from "./workflows/WorkflowStrip";
 import { isWorkflowDraftId, workflowsForProject } from "./workflows/workflowModel";
@@ -48,6 +51,9 @@ const HIGHLIGHT_MS = 1800;
 interface Props {
   files: FileEntry[];
   flows: Flow[];
+  pipelines: Pipeline[];
+  /** Server-side pipelines store failed closed; pipelines above are empty. */
+  pipelinesError?: string;
   workflows: Workflow[];
   tasks: BoardTask[];
   project: string;
@@ -146,6 +152,8 @@ function ProjectViewTabs({
 export function ProjectDashboard({
   files,
   flows,
+  pipelines,
+  pipelinesError,
   workflows,
   tasks,
   project,
@@ -217,6 +225,7 @@ export function ProjectDashboard({
     return paths;
   }, [expandedFlowConversations, prefs.expanded]);
   const groupFiles = useMemo(() => foldClaimedReviewers(files, flows), [files, flows]);
+  const projectPipelines = useMemo(() => pipelinesForProject(pipelines, project, files), [pipelines, project, files]);
   const projectWorkflows = useMemo(() => workflowsForProject(workflows, project, files), [workflows, project, files]);
   const groups = useMemo(
     () => buildBranchGroups(groupFiles, project, { expandedConversationPaths: expandedConversations }),
@@ -630,8 +639,17 @@ export function ProjectDashboard({
         </button>
       </div>
 
-      {projectWorkflows.length ? (
+      {pipelinesError ? (
+        <div className="shrink-0 border-b border-line bg-[#fdf6ec] px-3 py-1.5 text-[11.5px] text-[#8a5b00]" role="alert">
+          {t("dash.pipelinesUnavailable")}
+        </div>
+      ) : null}
+
+      {projectPipelines.length || projectWorkflows.length ? (
         <div className="flex shrink-0 flex-col gap-1.5 border-b border-line bg-[#fbfbfd] px-3 py-1.5">
+          {projectPipelines.map((pipeline) => (
+            <PipelineStrip key={pipeline.id} pipeline={pipeline} />
+          ))}
           {projectWorkflows.map((wf) => (
             <WorkflowStrip key={wf.id} wf={wf} />
           ))}
@@ -661,6 +679,7 @@ export function ProjectDashboard({
               manual={hasNodes ? schemeManual : []}
               files={files}
               flows={flows}
+              pipelines={pipelines}
               tasks={hasNodes ? projectTasks : []}
               drafts={hasNodes ? drafts : []}
               loaded={loaded}
@@ -695,6 +714,7 @@ export function ProjectDashboard({
                 manual={hasNodes ? schemeManual : []}
                 files={files}
                 flows={flows}
+                pipelines={pipelines}
                 tasks={hasNodes ? projectTasks : []}
                 drafts={hasNodes ? drafts : []}
                 focus={highlight}

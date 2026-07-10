@@ -16,6 +16,7 @@ import { DraftAgentPane } from "@/components/DraftAgentPane";
 import { FlowDialog } from "@/components/flows/FlowDialog";
 import { activeLoopLeg, activeLoopRole, canStartFlow, verdictTone } from "@/components/flows/flowModel";
 import { FlowHub } from "@/components/flows/FlowHub";
+import { PipelineHub } from "@/components/pipelines/PipelineHub";
 import { FlowStrip } from "@/components/flows/FlowStrip";
 import { RoleTag } from "@/components/flows/RoleTag";
 import { RoundDeck } from "@/components/flows/RoundDeck";
@@ -195,10 +196,15 @@ export const AgentLinksLayer = memo(function AgentLinksLayer({
   return (
     <>
       {links.map((link) => {
-        if (!link.flow) return null;
         const from = byPath.get(link.from);
         const to = byPath.get(link.to);
         if (!from || !to) return null;
+        if (link.pipeline) {
+          const x = (from.x + from.w / 2 + to.x + to.w / 2) / 2;
+          const y = (from.y + from.h / 2 + to.y + to.h / 2) / 2;
+          return <PipelineHub key={link.key} pipeline={link.pipeline.pipeline} x={x} y={y} moveTransition={MOVE_TRANSITION} />;
+        }
+        if (!link.flow) return null;
         /* Corridor midpoint of the pair, level with the cycle arcs' center. */
         const x = (from.x + from.w + to.x) / 2;
         const y = Math.min(from.y, to.y) + (LOOP_ARC_TOP + LOOP_ARC_BOT) / 2;

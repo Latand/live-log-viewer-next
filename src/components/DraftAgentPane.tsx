@@ -397,6 +397,9 @@ export function DraftAgentPane({
       }
     }
     if (!payloadText.trim() && !attachments.images.length) return;
+    /* eslint-disable-next-line react-hooks/purity -- `send` only runs from
+       user events (submit/keydown), never during render; the id and timestamp
+       must be minted at click time. */
     const candidate = createSpawnAttempt(newAttemptId(), Date.now(), {
       engine,
       model,

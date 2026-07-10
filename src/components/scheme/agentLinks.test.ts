@@ -1,8 +1,9 @@
 import { describe, expect, test } from "bun:test";
 
 import type { Flow, FlowState, Round } from "@/lib/flows/types";
+import type { Pipeline } from "@/lib/pipelines/types";
 
-import { buildAnchorIndex, currentRound, deckKey, deriveFlowLinks, flowLinkKey, flowLinkPhase } from "./agentLinks";
+import { buildAnchorIndex, currentRound, deckKey, deriveFlowLinks, derivePipelineLinks, flowLinkKey, flowLinkPhase } from "./agentLinks";
 
 const roleConfig = { engine: "claude" as const, model: null, effort: null };
 
@@ -60,6 +61,29 @@ describe("flowLinkPhase", () => {
   test.each(cases)("%s → %s", (state, phase) => {
     expect(flowLinkPhase(state)).toBe(phase);
   });
+});
+
+test("pipeline links connect adjacent resolved stage sessions", () => {
+  const pipeline = {
+    id: "pipeline-1",
+    state: "running",
+    stages: [
+      { id: "plan", kind: "run", role: { roleId: "architect" }, engine: "codex", prompt: "plan", next: "build" },
+      { id: "build", kind: "run", role: { roleId: "builder" }, engine: "codex", prompt: "build", next: null },
+    ],
+    runs: [
+      { stageId: "plan", attempts: [{ agentPath: "/plan" }] },
+      { stageId: "build", attempts: [{ agentPath: "/build" }] },
+    ],
+  } as unknown as Pipeline;
+  const links = derivePipelineLinks([pipeline], (key) => key === "/plan" || key === "/build" ? key : null);
+  expect(links).toMatchObject([{
+    kind: "pipeline",
+    from: "/plan",
+    to: "/build",
+    pipeline: { fromStageId: "plan", toStageId: "build" },
+  }]);
+  expect(derivePipelineLinks([pipeline], (key) => key === "/plan" ? key : null)).toEqual([]);
 });
 
 describe("buildAnchorIndex", () => {

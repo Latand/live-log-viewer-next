@@ -1,5 +1,6 @@
 import type { FileEntry, ProjectCatalogEntry } from "../types";
 import { tickFlows } from "../flows/engine";
+import { tickPipelines } from "../pipelines/engine";
 import { notifyQuestion } from "../push";
 import { tickTaskInbox } from "../tasks/inboxScanner";
 import { resolveTarget } from "../tmux";
@@ -139,6 +140,7 @@ export async function reconcileFileControllers(entries: FileEntry[]): Promise<vo
   await linkEntries(entries, { persist: true });
   for (const entry of entries) if (entry.pendingQuestion || entry.waitingInput) void notifyQuestion(entry);
   await tickFlows(entries);
+  await tickPipelines(entries);
   await tickWorkflows(entries);
   tickTaskInbox(entries);
 }

@@ -10,7 +10,7 @@ import { saveRoleOverrides } from "@/lib/roles/store";
 /* The state dir must point at a sandbox before store.ts computes its
    module-level constants, so the store loads dynamically after the env set. */
 process.env.LLV_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "llv-wf-store-test-"));
-const { buildWorkflow, DEFAULT_FIXER, loadTemplates, loadWorkflows, mergeSeededTemplates, normalizeStages, normalizeTemplate, reconcileWorkflowConversationOwnership, roleConfigFromReference, saveWorkflows, seededTemplatesFromRoles } =
+const { buildWorkflow, defaultFixerFromRoles, loadTemplates, loadWorkflows, mergeSeededTemplates, normalizeStages, normalizeTemplate, reconcileWorkflowConversationOwnership, roleConfigFromReference, saveWorkflows, seededTemplatesFromRoles } =
   await import("./store");
 
 type WorkflowTemplate = import("./types").WorkflowTemplate;
@@ -58,7 +58,7 @@ test("normalizeStages injects the codex-low fixer default and review defaults", 
   if ("error" in res) throw new Error(res.error);
   const review = res.stages[1]!;
   if (review.kind !== "review-loop") throw new Error("expected review stage");
-  expect(review.fixer).toEqual(DEFAULT_FIXER);
+  expect(review.fixer).toEqual(defaultFixerFromRoles());
   expect(review.roundLimit).toBe(5);
   expect(review.reviewerMode).toBe("headless");
 });
@@ -68,7 +68,7 @@ test("fixer overrides keep the W5 contract: always codex at low effort", () => {
   if ("error" in claudeFixer) throw new Error(claudeFixer.error);
   const claudeStage = claudeFixer.stages[1]!;
   if (claudeStage.kind !== "review-loop") throw new Error("expected review stage");
-  expect(claudeStage.fixer).toEqual(DEFAULT_FIXER);
+  expect(claudeStage.fixer).toEqual(defaultFixerFromRoles());
 
   /* A codex fixer may pick its model; the effort still clamps to low. */
   const codexFixer = normalizeStages([IMPLEMENT, { ...REVIEW, fixer: { engine: "codex", model: "gpt-5.5", effort: "xhigh" } }]);
@@ -161,12 +161,35 @@ test("an untouched pre-registry workflow template updates from role defaults", (
   expect(migrated.stages[0]).toMatchObject({ agent: { model: "gpt-5.6-sol", effort: "medium" } });
 });
 
+test("managed workflow seeds refresh while an unmarked same-name edit wins", () => {
+  const first = seededTemplatesFromRoles();
+  const refreshed = structuredClone(first);
+  const refreshedStage = refreshed[0]!.stages[0]!;
+  if (refreshedStage.kind !== "implement") throw new Error("expected implement stage");
+  refreshedStage.agent.effort = "high";
+  const merged = mergeSeededTemplates(first, refreshed);
+  expect(merged[0]!.stages[0]).toMatchObject({ agent: { effort: "high" } });
+
+  const custom = structuredClone(first[0]!);
+  delete custom.managed;
+  const customStage = custom.stages[0]!;
+  if (customStage.kind !== "implement") throw new Error("expected implement stage");
+  customStage.agent.effort = "low";
+  expect(mergeSeededTemplates([custom], refreshed)).toContainEqual(custom);
+});
+
 test("template seeds fall back to the role default when a saved builder override is semantically invalid", () => {
   const previousState = process.env.LLV_STATE_DIR;
   const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-wf-bad-override-"));
   process.env.LLV_STATE_DIR = sandbox;
   try {
-    saveRoleOverrides({ builder: { config: { model: "not-a-gpt-model" } } });
+    /* saveRoleOverrides refuses this override on this branch; a hand-edit
+       lands the bytes and the fail-closed loader degrades to defaults. */
+    fs.writeFileSync(
+      path.join(sandbox, "role-presets.json"),
+      JSON.stringify({ schemaVersion: 1, overrides: { builder: { config: { model: "not-a-gpt-model" } } } }),
+      "utf8",
+    );
     expect(() => seededTemplatesFromRoles()).not.toThrow();
     const fullstack = seededTemplatesFromRoles().find((template) => template.name === "fullstack")!;
     expect(fullstack.stages[0]?.kind === "implement" && fullstack.stages[0].agent).toEqual({
@@ -259,4 +282,33 @@ test("buildWorkflow freezes the template: later template mutation stays invisibl
   const frozen = wf.template.stages[0]!;
   expect(frozen.kind === "implement" && frozen.scope).toBe("Backend/API");
   expect(wf.template.name).toBe("demo");
+});
+
+test("seed templates and the fixer default survive an unreadable role overrides file", () => {
+  const previous = process.env.LLV_STATE_DIR;
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-wf-seed-corrupt-"));
+  process.env.LLV_STATE_DIR = sandbox;
+  try {
+    fs.writeFileSync(path.join(sandbox, "role-presets.json"), "{", "utf8");
+    expect(seededTemplatesFromRoles().length).toBeGreaterThan(0);
+    expect(defaultFixerFromRoles()).toMatchObject({ engine: "codex", effort: "low" });
+  } finally {
+    if (previous === undefined) delete process.env.LLV_STATE_DIR;
+    else process.env.LLV_STATE_DIR = previous;
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  }
+});
+
+test("the fixer default stays codex when a Cleaner override switches engine", () => {
+  const previous = process.env.LLV_STATE_DIR;
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-wf-fixer-clamp-"));
+  process.env.LLV_STATE_DIR = sandbox;
+  try {
+    saveRoleOverrides({ cleaner: { config: { engine: "claude", model: "fable", effort: "high" } } });
+    expect(defaultFixerFromRoles()).toMatchObject({ engine: "codex", effort: "low" });
+  } finally {
+    if (previous === undefined) delete process.env.LLV_STATE_DIR;
+    else process.env.LLV_STATE_DIR = previous;
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  }
 });
