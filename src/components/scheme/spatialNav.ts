@@ -1,3 +1,6 @@
+import type { TFunction } from "@/lib/i18n";
+import { cleanTitle } from "@/lib/title";
+
 import type { Camera } from "./Minimap";
 import { GAP_X, NODE_W, type SchemeLayout, type SchemeRect } from "./layout";
 
@@ -84,6 +87,26 @@ export function collectNavTargets(layout: SchemeLayout): NavTarget[] {
   const out: NavTarget[] = [];
   for (const [key, rect] of layout.byPath) out.push({ key, x: rect.x, y: rect.y, w: rect.w, h: rect.h });
   return out;
+}
+
+/**
+ * Screen-reader label for a nav-target key. A real conversation node announces
+ * its clean title; virtual layout keys must never leak a filesystem path or a
+ * raw `::stack` suffix — a quiet-branch stack reads as "N quiet branches under
+ * <parent title>", and drafts/decks drop their `draft::`/`deck::` prefix.
+ */
+export function navTargetLabel(layout: SchemeLayout, key: string, t: TFunction): string {
+  const node = layout.nodes.find((n) => n.file.path === key);
+  if (node) return cleanTitle(node.file.title, 80);
+  const stack = layout.stacks.find((s) => s.key === key);
+  if (stack) {
+    const parent = layout.nodes.find((n) => n.file.path === stack.parent);
+    const title = parent ? cleanTitle(parent.file.title, 60) : null;
+    return title
+      ? t("scheme.navStack", { count: stack.items.length, title })
+      : t("scheme.navStackBare", { count: stack.items.length });
+  }
+  return key.replace(/^(?:draft|deck)::/, "");
 }
 
 const overlap1D = (a0: number, a1: number, b0: number, b1: number) => Math.min(a1, b1) - Math.max(a0, b0);

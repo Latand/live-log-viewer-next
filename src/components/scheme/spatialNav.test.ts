@@ -1,17 +1,19 @@
 import { describe, expect, test } from "bun:test";
 
 import type { Camera } from "./Minimap";
-import { GAP_X, NODE_W } from "./layout";
+import { GAP_X, NODE_W, type SchemeLayout } from "./layout";
 import {
   collectNavTargets,
   LABEL_Z,
   MAX_Z,
+  navTargetLabel,
   nearestToViewportCenter,
   type NavTarget,
   nextZoomStep,
   pickDirectional,
   zoomLadderSteps,
 } from "./spatialNav";
+import { translate, type TFunction } from "@/lib/i18n";
 
 function target(key: string, x: number, y: number, w = NODE_W, h = 680): NavTarget {
   return { key, x, y, w, h };
@@ -195,5 +197,42 @@ describe("nextZoomStep", () => {
   test("ignores a step within ±1% of the current zoom", () => {
     expect(nextZoomStep(steps, 0.79, 1)).toBe(1.2);
     expect(nextZoomStep(steps, 0.79, -1)).toBe(0.59);
+  });
+});
+
+describe("navTargetLabel — screen-reader labels", () => {
+  const t: TFunction = (key, params) => translate("en", key, params);
+  /* A layout with one real node and a quiet-branch stack hanging under it. */
+  const layout = {
+    nodes: [{ file: { path: "/home/u/conv/parent.jsonl", title: "Refactor the auth module" }, tasks: [], under: [], isRoot: true, x: 0, y: 0, w: 1, h: 1 }],
+    stacks: [{ key: "/home/u/conv/parent.jsonl::stack", parent: "/home/u/conv/parent.jsonl", items: [{ file: {} }, { file: {} }, { file: {} }], x: 0, y: 0, w: 1, h: 1 }],
+    decks: [],
+    edges: [],
+    loops: [],
+    drafts: [],
+    byPath: new Map(),
+    width: 0,
+    height: 0,
+  } as unknown as SchemeLayout;
+
+  test("a real node announces its clean title", () => {
+    expect(navTargetLabel(layout, "/home/u/conv/parent.jsonl", t)).toBe("Refactor the auth module");
+  });
+
+  test("a mini-stack reads as human text — no raw path, no ::stack suffix", () => {
+    const label = navTargetLabel(layout, "/home/u/conv/parent.jsonl::stack", t);
+    expect(label).toBe("3 quiet branches under Refactor the auth module");
+    expect(label).not.toContain("::stack");
+    expect(label).not.toContain("/home/u/");
+  });
+
+  test("a single-item stack uses the singular form", () => {
+    const one = { ...layout, stacks: [{ ...(layout.stacks[0] as object), items: [{ file: {} }] }] } as unknown as SchemeLayout;
+    expect(navTargetLabel(one, "/home/u/conv/parent.jsonl::stack", t)).toBe("1 quiet branch under Refactor the auth module");
+  });
+
+  test("draft and deck keys drop their prefix (never a path)", () => {
+    expect(navTargetLabel(layout, "draft::abc-123", t)).toBe("abc-123");
+    expect(navTargetLabel(layout, "deck::flow-1", t)).toBe("flow-1");
   });
 });

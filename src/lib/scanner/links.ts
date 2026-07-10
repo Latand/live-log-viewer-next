@@ -294,7 +294,7 @@ function persistLineage(): void {
   }
 }
 
-function attachNativeCodexSubagentParents(entries: FileEntry[]): void {
+function attachNativeCodexSubagentParents(entries: FileEntry[], persist: boolean): void {
   loadLineage();
   const pathByThreadId = new Map<string, string>();
   for (const entry of entries) {
@@ -308,10 +308,10 @@ function attachNativeCodexSubagentParents(entries: FileEntry[]): void {
     const parent = parentThreadId ? (pathByThreadId.get(parentThreadId) ?? null) : null;
     if (parent && parent !== entry.path) {
       entry.parent = parent;
-      rememberLineage(entry.path, parent);
+      if (persist) rememberLineage(entry.path, parent);
     }
   }
-  persistLineage();
+  if (persist) persistLineage();
 }
 
 /**
@@ -320,7 +320,7 @@ function attachNativeCodexSubagentParents(entries: FileEntry[]): void {
  * is the spawner: the nearest Claude or Codex ancestor owns the child rollout.
  * This is a spawn-lineage fact; no mtime or project heuristics participate.
  */
-function attachLiveCodexParents(entries: FileEntry[]): void {
+function attachLiveCodexParents(entries: FileEntry[], persist: boolean): void {
   loadLineage();
   const orphans = entries.filter((entry) => entry.root === "codex-sessions" && !entry.parent);
   if (orphans.length === 0) return;
@@ -344,14 +344,14 @@ function attachLiveCodexParents(entries: FileEntry[]): void {
     }
     if (resolved) {
       rollout.parent = resolved;
-      rememberLineage(rollout.path, resolved);
+      if (persist) rememberLineage(rollout.path, resolved);
     } else {
       // pid is gone or ancestry dead-ended: reuse the parent proven while live.
       const remembered = lineageCache.get(rollout.path);
       if (remembered) rollout.parent = remembered;
     }
   }
-  persistLineage();
+  if (persist) persistLineage();
 }
 
 /**
@@ -362,7 +362,7 @@ function attachLiveCodexParents(entries: FileEntry[]): void {
  * The `handoff` flag makes the UI treat the child as a branch of its source
  * rather than a compaction predecessor.
  */
-function attachHandoffParents(entries: FileEntry[]): void {
+function attachHandoffParents(entries: FileEntry[], persist: boolean): void {
   const byPath = new Map(entries.map((entry) => [entry.path, entry]));
   for (const entry of entries) {
     if (entry.parent) continue;
@@ -377,17 +377,18 @@ function attachHandoffParents(entries: FileEntry[]): void {
         parent = handoffParentForPid(pid);
         if (parent) break;
       }
-      if (parent && parent !== entry.path) rememberHandoffChild(entry.path, parent);
+      if (persist && parent && parent !== entry.path) rememberHandoffChild(entry.path, parent);
     }
     if (parent && parent !== entry.path && byPath.has(parent)) {
       entry.parent = parent;
       entry.handoff = true;
     }
   }
-  persistHandoffLineage();
+  if (persist) persistHandoffLineage();
 }
 
-export async function linkEntries(entries: FileEntry[]): Promise<void> {
+export async function linkEntries(entries: FileEntry[], options: { persist?: boolean } = {}): Promise<void> {
+  const persist = options.persist !== false;
   const limit = createLimiter(48);
   const byPath = new Map(entries.map((entry) => [entry.path, entry]));
   for (const entry of entries) {
@@ -435,9 +436,9 @@ export async function linkEntries(entries: FileEntry[]): Promise<void> {
       }
     }
   }
-  attachNativeCodexSubagentParents(entries);
-  attachLiveCodexParents(entries);
-  attachHandoffParents(entries);
+  attachNativeCodexSubagentParents(entries, persist);
+  attachLiveCodexParents(entries, persist);
+  attachHandoffParents(entries, persist);
   chainCompactedSessions(entries);
   const rootProject = (entry: FileEntry): string => {
     const seen = new Set<string>();
@@ -454,5 +455,5 @@ export async function linkEntries(entries: FileEntry[]): Promise<void> {
     if (!entry.parent || !byPath.has(entry.parent)) entry.parent = null;
     else entry.project = rootProject(entry);
   }
-  persistWorktreeMap();
+  if (persist) persistWorktreeMap();
 }

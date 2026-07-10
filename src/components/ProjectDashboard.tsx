@@ -3,11 +3,14 @@
 import { List, ListTodo, Menu, Network } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
+import { queueColumnOpen, useBoardState } from "@/hooks/useBoardState";
 import { useIsMobile } from "@/hooks/useIsMobile";
+import { viewBus } from "@/hooks/viewPresenceBus";
 import type { Flow } from "@/lib/flows/types";
 import { useLocale } from "@/lib/i18n";
 import type { BoardTask } from "@/lib/tasks/types";
 import type { FileEntry } from "@/lib/types";
+import { MAX_VISIBLE_PATHS } from "@/lib/view/types";
 import type { Workflow } from "@/lib/workflows/types";
 
 import { TaskStrip } from "./BranchPane";
@@ -79,13 +82,11 @@ interface ColumnPrefs {
   expanded: string[];
 }
 
-const prefsKey = (project: string) => `llvCols:${project}`;
 /* Conversation drafts survive remounts and reloads within the tab: an agent
-   booted from a draft keeps its waiting pane until the transcript arrives. */
+   booted from a draft keeps its waiting pane until the transcript arrives. They
+   are unspawned composer state, not shared board arrangement, so they stay
+   per-tab in sessionStorage and do not sync (#38). */
 const draftsKey = (project: string) => `llvDrafts:${project}`;
-/* Project view choice: active work opens on the scheme, quiet history opens as
-   root conversations. User selections persist per project. */
-const emptyViewKey = (project: string) => `llvEmptyView:${project}`;
 
 function loadDrafts(project: string): string[] {
   try {
@@ -96,32 +97,10 @@ function loadDrafts(project: string): string[] {
   }
 }
 
-function loadPrefs(project: string): ColumnPrefs {
-  try {
-    const raw = JSON.parse(localStorage.getItem(prefsKey(project)) ?? "{}") as Partial<ColumnPrefs>;
-    return { manual: raw.manual ?? [], hidden: raw.hidden ?? [], expanded: raw.expanded ?? [] };
-  } catch {
-    return { manual: [], hidden: [], expanded: [] };
-  }
-}
-
-/**
- * Pre-adds a conversation to its project's scheme before that project mounts.
- * A child conversation (`connected` = isChildConversation, what the tree can
- * actually nest) goes into the expand set so it renders as a node wired below
- * its parent; anything else becomes a standalone manual node. Without this
- * split, cross-project opens of a connected child would detach from its parent.
- */
-export function queueColumnOpen(project: string, path: string, connected = false) {
-  const prefs = loadPrefs(project);
-  if (connected) {
-    if (!prefs.expanded.includes(path)) prefs.expanded.push(path);
-  } else if (!prefs.manual.includes(path)) {
-    prefs.manual.push(path);
-  }
-  prefs.hidden = prefs.hidden.filter((item) => item !== path);
-  localStorage.setItem(prefsKey(project), JSON.stringify(prefs));
-}
+/* Pre-adding a conversation to a project's board before it mounts is recorded
+   against the shared board store (queued, then flushed on that project's next
+   load), so cross-project opens survive across devices — see useBoardState. */
+export { queueColumnOpen };
 
 /* Kept outside the component: the React Compiler's immutability check flags
    direct global mutation (location.hash = ...) inside a component body. */
@@ -184,42 +163,30 @@ export function ProjectDashboard({
   const isMobile = useIsMobile();
   const highlightTimer = useRef<number | null>(null);
   const pendingFocusRef = useRef<string | null>(null);
-  const [prefs, setPrefs] = useState<ColumnPrefs>({ manual: [], hidden: [], expanded: [] });
+  /* The board arrangement (which windows, hidden/expanded, view mode, task
+     panel) now lives in the shared server store, synced across devices, with a
+     one-time seed from the old per-browser localStorage (#38). Reads stay
+     optimistic — a local edit shows at once, then PATCHes. */
+  const board = useBoardState(project);
+  const prefs = useMemo<ColumnPrefs>(
+    () => ({ manual: board.prefs.manual, hidden: board.prefs.hidden, expanded: board.prefs.expanded }),
+    [board.prefs],
+  );
+  const taskPanelOpen = board.prefs.taskPanelOpen;
   const [drafts, setDrafts] = useState<string[]>([]);
-  const [emptyView, setEmptyView] = useState<{ project: string; view: ProjectView } | null>(null);
   const [highlight, setHighlight] = useState<string | null>(null);
-  const [taskPanelOpen, setTaskPanelOpen] = useState(false);
   /* Jump targets the scheme would otherwise skip (a stalled root builds no
      automatic group; a stalled branch hides inside a mini stack) materialize
      as ephemeral nodes: React state only, never written to prefs, gone on
      reload — the queue can route to its quietest members while the manual
      column state stays untouched. */
   const [ephemeral, setEphemeral] = useState<string[]>([]);
-  /* Mirrors `prefs` synchronously so the missing-nodes effect below can read
-     the value the project-switch load just set, even within the same commit
-     (state updates from sibling effects are not visible via closure yet). */
-  const prefsRef = useRef(prefs);
 
   useEffect(() => {
-    const loaded = loadPrefs(project);
-    prefsRef.current = loaded;
-    /* eslint-disable react-hooks/set-state-in-effect */
-    setPrefs(loaded);
-    setDrafts(loadDrafts(project));
-    const savedView = localStorage.getItem(emptyViewKey(project));
-    setEmptyView(savedView === "scheme" || savedView === "list" ? { project, view: savedView } : null);
-    /* eslint-enable react-hooks/set-state-in-effect */
-  }, [project, openNonce]);
-  useEffect(() => {
     /* eslint-disable-next-line react-hooks/set-state-in-effect */
-    setTaskPanelOpen(localStorage.getItem("llvTaskPanel") === "1");
-  }, []);
-  const toggleTaskPanel = () => {
-    setTaskPanelOpen((open) => {
-      localStorage.setItem("llvTaskPanel", open ? "0" : "1");
-      return !open;
-    });
-  };
+    setDrafts(loadDrafts(project));
+  }, [project, openNonce]);
+  const toggleTaskPanel = () => board.setTaskPanelOpen(!taskPanelOpen);
   useEffect(
     () => () => {
       if (highlightTimer.current) window.clearTimeout(highlightTimer.current);
@@ -227,11 +194,7 @@ export function ProjectDashboard({
     [],
   );
 
-  const persistPrefs = (next: ColumnPrefs) => {
-    prefsRef.current = next;
-    setPrefs(next);
-    localStorage.setItem(prefsKey(project), JSON.stringify(next));
-  };
+  const persistPrefs = (next: ColumnPrefs) => board.patchColumns(next);
 
   /* Reviewer transcripts of active flows live inside their round decks:
      they never build their own groups, quiet trees or residual chips. */
@@ -376,10 +339,7 @@ export function ProjectDashboard({
     sessionStorage.setItem(draftsKey(project), JSON.stringify(next));
   };
 
-  const chooseEmptyView = (next: ProjectView) => {
-    setEmptyView({ project, view: next });
-    localStorage.setItem(emptyViewKey(project), next);
-  };
+  const chooseEmptyView = (next: ProjectView) => board.setViewMode(next);
 
   /* randomUUID needs a secure context; LAN http access gets the fallback. */
   const newDraftId = () =>
@@ -460,18 +420,28 @@ export function ProjectDashboard({
     setEphemeral((prev) => (prev.includes(path) ? prev.filter((item) => item !== path) : prev));
   };
 
-  /* A node never vanishes on its own: every auto node is recorded as a
-     manual one, so a branch that goes quiet keeps its place until the user
-     closes it. Capped so old projects do not accumulate forever. */
+  /* Latest prefs behind a ref so the auto-record effect below reads current
+     board state without re-running on every prefs change (which would oscillate
+     when auto nodes exceed the 40 cap). */
+  const prefsSnapshotRef = useRef(prefs);
   useEffect(() => {
-    const prev = prefsRef.current;
+    prefsSnapshotRef.current = prefs;
+  });
+
+  /* A node never vanishes on its own: every auto node is recorded as a manual
+     one, so a branch that goes quiet keeps its place until the user closes it.
+     Capped so old projects do not accumulate forever. Runs once per auto-node
+     change (like the old localStorage path) and only after the shared board has
+     loaded, so it patches on top of the server state, not over it. */
+  useEffect(() => {
+    if (!board.loaded || board.sync === "unavailable") return;
+    const prev = prefsSnapshotRef.current;
     const missing = [...autoPaths].filter((path) => !prev.manual.includes(path) && !prev.hidden.includes(path));
     if (!missing.length) return;
-    const next = { ...prev, manual: [...prev.manual, ...missing].slice(-40) };
-    prefsRef.current = next;
-    setPrefs(next);
-    localStorage.setItem(prefsKey(project), JSON.stringify(next));
-  }, [autoPaths, project]);
+    board.patchColumns({ manual: [...prev.manual, ...missing].slice(-40), hidden: prev.hidden, expanded: prev.expanded });
+    /* eslint-disable-next-line react-hooks/exhaustive-deps -- board setters are
+       ref-stable; prefs are read from the ref, not tracked as deps */
+  }, [autoPaths, board.loaded, board.sync]);
 
   /* Any open lands on the scheme: a card of another project pre-adds its node
      and switches the project; a conversation of this project joins the managed
@@ -547,12 +517,31 @@ export function ProjectDashboard({
   const schemeAvailable = hasNodes || hasArchiveNodes;
   const listAvailable = historyRows.length > 0;
   const projectView = resolveProjectView({
-    preferredView: emptyView?.project === project ? emptyView.view : null,
+    preferredView: board.prefs.viewMode,
     hasNodes,
     hasArchiveNodes,
     hasHistoryRows: listAvailable,
   });
   const viewToggle = schemeAvailable && listAvailable;
+
+  /* Presence context: which project is open and how its durable board is
+     syncing. Reported here so every leaf's slice merges under it. */
+  useEffect(() => {
+    const revision = board.sync === "unavailable" ? null : board.revision;
+    viewBus.reportContext({ project, board: { renderedRevision: revision, durableRevision: revision, sync: board.sync } });
+  }, [project, board.revision, board.sync]);
+
+  /* Presence slice for the non-scheme leaves: the flat history list reports its
+     rows in rendered (visual) order; an empty project reports an empty view.
+     When the scheme is shown, SchemeBoard / MobileFocusView owns the slice. */
+  useEffect(() => {
+    if (projectView === "scheme" && schemeAvailable) return;
+    const visiblePaths = listAvailable ? historyRows.map((row) => row.path).slice(0, MAX_VISIBLE_PATHS) : [];
+    /* A quiet history list is "list" on either platform; a truly empty project
+       on the phone is the mobile-focus empty state. */
+    const mode = listAvailable ? "list" : isMobile ? "mobile-focus" : "list";
+    viewBus.reportSlice({ mode, focusedPath: null, selectedPaths: [], visiblePaths, camera: null });
+  }, [projectView, schemeAvailable, listAvailable, historyRows, isMobile]);
 
   return (
     <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">

@@ -509,6 +509,9 @@ export const en = {
   "scheme.roleWaiting": "waiting",
   "scheme.lassoTool": "Multi-select — draw a box around agents, click cards to toggle",
   "scheme.boardAria": "Agent board — arrow keys move between agent windows",
+  // Screen-reader announcement when the arrow keys land on a quiet-branch stack.
+  "scheme.navStack": { one: "{count} quiet branch under {title}", other: "{count} quiet branches under {title}" },
+  "scheme.navStackBare": { one: "{count} quiet branch", other: "{count} quiet branches" },
 
   // scheme/BulkActionBar (selection session)
   "bulk.selectedCount": { one: "{count} selected", other: "{count} selected" },
