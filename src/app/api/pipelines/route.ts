@@ -20,7 +20,9 @@ export async function POST(req: NextRequest): Promise<NextResponse<{ ok: true; p
   if (rejection) return rejection;
   let body: CreatePipelineRequest;
   try {
-    body = (await req.json()) as CreatePipelineRequest;
+    const raw = await req.json();
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return NextResponse.json({ error: "request body must be an object" }, { status: 400 });
+    body = raw as CreatePipelineRequest;
   } catch {
     return NextResponse.json({ error: "invalid JSON" }, { status: 400 });
   }
@@ -35,7 +37,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<{ ok: true; p
   }
   if (!stat.isDirectory()) return NextResponse.json({ error: `not a directory: ${repoDir}` }, { status: 400 });
   try {
-    const result = createPipelineFromRequest({ ...body, repoDir });
+    const result = await createPipelineFromRequest({ ...body, repoDir });
     if (!result.pipeline) return NextResponse.json({ error: result.error ?? "could not create pipeline" }, { status: result.status ?? 400 });
     return NextResponse.json({ ok: true, pipeline: result.pipeline }, { status: 201 });
   } catch (error) {

@@ -1,3 +1,7 @@
+import { listRoles } from "@/lib/roles/registry";
+import { isEngineEffort } from "@/lib/agent/efforts";
+import { normalizeClaudeLaunchModel } from "@/lib/agent/models";
+
 import type { EffectivePipelineRole, PipelineRoleId, PipelineStage, PipelineStageKind } from "./types";
 
 export const PIPELINE_ROLE_IDS: readonly PipelineRoleId[] = [
@@ -23,6 +27,26 @@ export type PipelineRoleDefaults = {
 export type PipelineRoleLookup = (roleId: string) => PipelineRoleDefaults | null;
 
 let installedLookup: PipelineRoleLookup | null = null;
+
+function defaultParameterValue(parameter: ReturnType<typeof listRoles>[number]["parameters"][number]): string | number {
+  if (parameter.kind === "integer") return parameter.min ?? 1;
+  return parameter.options?.[0] ?? "";
+}
+
+/** Production adapter for the shared issue-35 registry. */
+export const pipelineRoleLookup: PipelineRoleLookup = (roleId) => {
+  const definition = listRoles().find((candidate) => candidate.id === roleId);
+  if (!definition) return null;
+  const parameters = Object.fromEntries(definition.parameters.map((parameter) => [parameter.key, defaultParameterValue(parameter)]));
+  const scaffold = definition.promptScaffold.replace(/\{\{([A-Za-z][A-Za-z0-9]*)\}\}/g, (_match, key: string) => String(parameters[key] ?? ""));
+  return {
+    ...definition.config,
+    access: definition.capabilities.includes("read-only") ? "read-only" : "read-write",
+    promptScaffold: definition.safetyFences.length
+      ? `${scaffold}\n\nSafety fences:\n${definition.safetyFences.map((fence) => `- ${fence}`).join("\n")}`
+      : scaffold,
+  };
+};
 
 export function setPipelineRoleLookup(lookup: PipelineRoleLookup | null): void {
   installedLookup = lookup;
@@ -59,12 +83,24 @@ export function resolvePipelineRole(
     if (typeof override === "string") return override.trim() || null;
     return fallback ?? null;
   };
+  const engine = stage.engine ?? registered?.engine ?? builder.engine;
+  const model = value(stage.model, registered?.model ?? builder.model);
+  const effort = value(stage.effort, registered?.effort ?? builder.effort);
+  if (model && engine === "claude" && !normalizeClaudeLaunchModel(model)) {
+    return { error: "stage model is not supported by claude; provide a compatible model override" };
+  }
+  if (model && engine === "codex" && !model.startsWith("gpt-")) {
+    return { error: "stage model is not supported by codex; provide a compatible model override" };
+  }
+  if (effort && !isEngineEffort(engine, effort)) {
+    return { error: `stage effort is not supported by ${engine}` };
+  }
   return {
     role: {
       roleId,
-      engine: stage.engine ?? registered?.engine ?? builder.engine,
-      model: value(stage.model, registered?.model ?? builder.model),
-      effort: value(stage.effort, registered?.effort ?? builder.effort),
+      engine,
+      model,
+      effort,
       access: kind === "review-loop" ? "read-only" : stage.access ?? registered?.access ?? builder.access ?? "read-write",
       promptScaffold: roleId && typeof registered?.promptScaffold === "string"
         ? registered.promptScaffold.trim() || null

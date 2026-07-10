@@ -28,3 +28,13 @@ test("pipeline PATCH rejects unknown actions", async () => {
   );
   expect(response.status).toBe(400);
 });
+
+test("pipeline PATCH rejects non-object JSON", async () => {
+  for (const body of ["null", "[]"]) {
+    const response = await PATCH(
+      new NextRequest("http://127.0.0.1/api/pipelines/pipeline-1", { method: "PATCH", headers: { host: "127.0.0.1" }, body }),
+      { params: Promise.resolve({ id: "pipeline-1" }) },
+    );
+    expect(response.status).toBe(400);
+  }
+});

@@ -28,6 +28,7 @@ export type WorkflowTemplate = {
   name: string;
   stages: WorkflowStage[]; // implement+, then one review-loop last (W1)
   finish: FinishAction; // default "pr" (W7)
+  managed?: "role-registry";
   setup?: string; // e.g. "bun install", runs in the worktree before stage 0
   verify?: string; // hint for stage kickoffs, e.g. "bun test && bun run build"
 };

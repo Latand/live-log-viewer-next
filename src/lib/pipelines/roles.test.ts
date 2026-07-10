@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 
-import { resolvePipelineRole } from "./roles";
+import { pipelineRoleLookup, resolvePipelineRole } from "./roles";
 
 const REGISTRY_LOOKUP = (roleId: string) => {
   if (roleId === "builder") return { engine: "codex" as const, model: "gpt-5.6-sol", effort: "medium", access: "read-write" as const, promptScaffold: "Builder guidance" };
@@ -51,6 +51,17 @@ test("role resolution fails closed when the Builder preset is unavailable", () =
     .toBe("Builder role is unavailable in the role registry");
 });
 
+test("production role lookup reads the shared Builder preset", () => {
+  expect(resolvePipelineRole({}, "run", pipelineRoleLookup).role).toMatchObject({
+    roleId: null,
+    engine: "codex",
+    model: "gpt-5.6-sol",
+    effort: "medium",
+    access: "read-write",
+    promptScaffold: null,
+  });
+});
+
 test("stage runtime fields override registry and global defaults", () => {
   expect(resolvePipelineRole({ engine: "claude", model: "opus", effort: "xhigh", access: "read-only" }, "run", REGISTRY_LOOKUP).role).toEqual({
     roleId: null,
@@ -66,6 +77,15 @@ test("stage runtime fields override registry and global defaults", () => {
     model: "gpt-5.6-sol",
     effort: "medium",
   });
+});
+
+test("cross-engine overrides require a compatible model", () => {
+  expect(resolvePipelineRole({ role: { roleId: "reviewer" }, engine: "claude" }, "review-loop", REGISTRY_LOOKUP).error)
+    .toContain("model is not supported by claude");
+  expect(resolvePipelineRole({ engine: "claude" }, "run", REGISTRY_LOOKUP).error)
+    .toContain("model is not supported by claude");
+  expect(resolvePipelineRole({ engine: "claude", model: "opus", effort: "high" }, "run", REGISTRY_LOOKUP).role)
+    .toMatchObject({ engine: "claude", model: "opus", effort: "high" });
 });
 
 test("review-loop roles default to read-only access", () => {

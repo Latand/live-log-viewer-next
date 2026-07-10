@@ -18,7 +18,9 @@ export async function PATCH(
   if (rejection) return rejection;
   let body: PatchPipelineRequest;
   try {
-    body = (await req.json()) as PatchPipelineRequest;
+    const raw = await req.json();
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return NextResponse.json({ error: "request body must be an object" }, { status: 400 });
+    body = raw as PatchPipelineRequest;
   } catch {
     return NextResponse.json({ error: "invalid JSON" }, { status: 400 });
   }

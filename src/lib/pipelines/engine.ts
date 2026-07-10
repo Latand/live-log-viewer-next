@@ -13,7 +13,6 @@ import { lastAssistantMessage } from "@/lib/flows/findings";
 import { loadFlows } from "@/lib/flows/store";
 import type { CreateFlowRequest, Flow, RoleConfig } from "@/lib/flows/types";
 import { persistHandoffLineage, rememberHandoffChild } from "@/lib/handoffLineage";
-import { isNativeCodexSubagentTranscript } from "@/lib/scanner/codexNative";
 import { projectForCwd } from "@/lib/scanner/describe";
 import { claudeProjectRootFor, codexSessionRootFor } from "@/lib/scanner/roots";
 import { isShellCommand } from "@/lib/status";
@@ -23,8 +22,8 @@ import { realExec, type ExecPort } from "@/lib/workflows/provision";
 
 import { commitPipelineStage, provisionPipelineWorktree, resetPipelineStage } from "./git";
 import { renderStagePrompt } from "./prompts";
-import { resolvePipelineRole, type PipelineRoleLookup } from "./roles";
-import { buildPipeline, loadPipelines, savePipelines } from "./store";
+import { pipelineRoleLookup, resolvePipelineRole, type PipelineRoleLookup } from "./roles";
+import { buildPipeline, loadPipelines, withPipelineMutation } from "./store";
 import type {
   CreatePipelineRequest,
   EffectivePipelineRole,
@@ -32,6 +31,7 @@ import type {
   Pipeline,
   PipelineRoleId,
   PipelineStage,
+  PipelineStageInput,
   PipelineStageAttempt,
 } from "./types";
 import { parseStageVerdict } from "./verdict";
@@ -44,6 +44,11 @@ export type PipelineStageSpawn = {
   paneId: string | null;
 };
 
+export type PipelineStageLaunchReservation = Pick<PipelineStageSpawn, "launchId" | "conversationId">;
+export type PipelineSpawnReceipt = PipelineStageSpawn & {
+  state: "starting" | "pane-bound" | "host-verified" | "prompt-delivered" | "path-pending" | "completed" | "failed" | "conflicted";
+};
+
 export interface PipelinePorts {
   exec: ExecPort;
   roleLookup?: PipelineRoleLookup | null;
@@ -53,14 +58,15 @@ export interface PipelinePorts {
     prompt: string;
     parentPath: string | null;
     clientAttemptId: string;
-  }): Promise<PipelineStageSpawn>;
+  }, onReserved: (reservation: PipelineStageLaunchReservation) => void): Promise<PipelineStageSpawn>;
+  spawnReceipt(launchId: string): PipelineSpawnReceipt | null;
   paneAgentAlive(paneId: string): Promise<boolean>;
   headCwd(transcriptPath: string): string | null;
   lastMessage(entry: FileEntry): { text: string; ts: number } | null;
   pathForConversation(conversationId: string): string | null;
   conversationIdForPath(pathname: string): string | null;
   createFlow(req: CreateFlowRequest, entries: FileEntry[]): Promise<{ flow?: Flow; error?: string }>;
-  patchFlow(id: string, action: "advance" | "pause" | "resume", note?: string): void;
+  patchFlow(id: string, action: "advance" | "pause" | "resume", note?: string): { error?: string; status?: number };
   closeFlow(id: string): Promise<unknown>;
   getFlow(id: string): Flow | null;
   findFlow(implementerPath: string, baseRef: string, createdAfter: string): Flow | null;
@@ -86,7 +92,10 @@ function parentIdentity(parentPath: string | null): {
   return { conversationId: conversation.id, sessionKey: sessionKeyFromTranscript(engine, parentPath) };
 }
 
-async function spawnPipelineAgent(input: Parameters<PipelinePorts["spawnAgent"]>[0]): Promise<PipelineStageSpawn> {
+async function spawnPipelineAgent(
+  input: Parameters<PipelinePorts["spawnAgent"]>[0],
+  onReserved: (reservation: PipelineStageLaunchReservation) => void,
+): Promise<PipelineStageSpawn> {
   const account = accountManager.resolveSpawn(input.role.engine);
   const parent = parentIdentity(input.parentPath);
   const specBase = freshSpecFor(input.role.engine, input.cwd, {
@@ -122,6 +131,7 @@ async function spawnPipelineAgent(input: Parameters<PipelinePorts["spawnAgent"]>
     requestDigest: digest,
   });
   if (begun.kind === "conflict") throw new Error("pipeline spawn attempt conflicts with its original request");
+  onReserved({ launchId: begun.receipt.launchId, conversationId: begun.receipt.conversationId });
   if (begun.kind === "replay") {
     const conversation = registry.conversation(begun.receipt.conversationId);
     const transcript = begun.receipt.artifactPath ?? conversation?.generations.at(-1)?.path ?? null;
@@ -182,7 +192,20 @@ async function spawnPipelineAgent(input: Parameters<PipelinePorts["spawnAgent"]>
 export function defaultPipelinePorts(): PipelinePorts {
   return {
     exec: realExec,
+    roleLookup: pipelineRoleLookup,
     spawnAgent: spawnPipelineAgent,
+    spawnReceipt: (launchId) => {
+      const receipt = agentRegistry().snapshot().receipts[launchId];
+      if (!receipt) return null;
+      return {
+        state: receipt.state,
+        launchId: receipt.launchId,
+        conversationId: receipt.conversationId,
+        sessionId: receipt.key?.sessionId ?? null,
+        transcript: receipt.artifactPath,
+        paneId: receipt.verifiedHost?.paneId ?? receipt.pane?.paneId ?? null,
+      };
+    },
     paneAgentAlive: async (paneId) => {
       const info = await paneInfo(paneId);
       return info !== null && !isShellCommand(info.command);
@@ -194,7 +217,7 @@ export function defaultPipelinePorts(): PipelinePorts {
       : null,
     conversationIdForPath: (pathname) => agentRegistry().conversationForPath(pathname)?.id ?? null,
     createFlow: createFlowFromRequest,
-    patchFlow: (id, action, note) => void patchFlow(id, { action, ...(note ? { note } : {}) }),
+    patchFlow: (id, action, note) => patchFlow(id, { action, ...(note ? { note } : {}) }),
     closeFlow,
     getFlow: (id) => loadFlows().find((flow) => flow.id === id) ?? null,
     findFlow: (implementerPath, baseRef, createdAfter) => loadFlows()
@@ -272,12 +295,7 @@ function latestPassedRun(pipeline: Pipeline, stageId: string): PipelineStageAtte
   return null;
 }
 
-function newAttempt(pipeline: Pipeline, stage: PipelineStage, ports: PipelinePorts): PipelineStageAttempt | null {
-  const resolved = resolvePipelineRole(stage, stage.kind, ports.roleLookup);
-  if (!resolved.role) {
-    park(pipeline, resolved.error ?? "stage role cannot be resolved");
-    return null;
-  }
+function newAttempt(pipeline: Pipeline, stage: PipelineStage): PipelineStageAttempt | null {
   const run = runFor(pipeline, stage.id);
   if (!run) {
     park(pipeline, "pipeline stage run record is missing");
@@ -286,7 +304,7 @@ function newAttempt(pipeline: Pipeline, stage: PipelineStage, ports: PipelinePor
   const attempt: PipelineStageAttempt = {
     n: run.attempts.length + 1,
     state: "pending",
-    effectiveRole: resolved.role,
+    effectiveRole: structuredClone(stage.effectiveRole),
     launchId: null,
     conversationId: null,
     sessionId: null,
@@ -324,7 +342,7 @@ function commitPassedStage(
   attempt: PipelineStageAttempt,
   ports: PipelinePorts,
 ): void {
-  const result = commitPipelineStage(pipeline, stage.id, ports.exec);
+  const result = commitPipelineStage(pipeline, stage.id, stage.kind === "review-loop" || attempt.effectiveRole.access === "read-write", ports.exec);
   if (!result.ok) {
     park(pipeline, result.error, attempt);
     return;
@@ -335,25 +353,10 @@ function commitPassedStage(
   advancePipeline(pipeline, stage, ports);
 }
 
-function isNativeCodexSubagentEntry(entry: FileEntry): boolean {
-  return entry.root === "codex-sessions" && entry.path.endsWith(".jsonl") && isNativeCodexSubagentTranscript(entry.path, entry.size);
-}
-
-function claimedPaths(pipeline: Pipeline): Set<string> {
-  return new Set(pipeline.runs.flatMap((run) => run.attempts.flatMap((attempt) => attempt.agentPath ? [attempt.agentPath] : [])));
-}
-
 function updateAttemptIdentity(pipeline: Pipeline, attempt: PipelineStageAttempt, entries: FileEntry[], ports: PipelinePorts): void {
   if (!attempt.agentPath && attempt.conversationId) attempt.agentPath = ports.pathForConversation(attempt.conversationId);
   if (!attempt.agentPath && attempt.sessionId) {
     attempt.agentPath = entries.find((entry) => path.basename(entry.path).includes(attempt.sessionId!))?.path ?? null;
-  }
-  if (!attempt.agentPath && attempt.startedAt) {
-    const started = unixMs(attempt.startedAt) / 1000 - 5;
-    const taken = claimedPaths(pipeline);
-    attempt.agentPath = entries
-      .filter((entry) => entry.engine === attempt.effectiveRole.engine && entry.mtime >= started && !taken.has(entry.path) && !isNativeCodexSubagentEntry(entry) && ports.headCwd(entry.path) === pipeline.worktreeDir)
-      .sort((left, right) => right.mtime - left.mtime)[0]?.path ?? null;
   }
   if (attempt.agentPath) {
     attempt.conversationId ??= ports.conversationIdForPath(attempt.agentPath);
@@ -370,8 +373,8 @@ async function tickRunStage(
 ): Promise<void> {
   const prior = currentAttempt(pipeline, stage.id);
   const attempt = pipeline.cursor?.state === "pending" && prior && ["passed", "failed", "needs_decision", "skipped"].includes(prior.state)
-    ? newAttempt(pipeline, stage, ports)
-    : prior ?? newAttempt(pipeline, stage, ports);
+    ? newAttempt(pipeline, stage)
+    : prior ?? newAttempt(pipeline, stage);
   if (!attempt || pipeline.state === "needs_decision") return;
 
   if (attempt.state === "committing") {
@@ -393,6 +396,10 @@ async function tickRunStage(
         prompt,
         parentPath: latestCompletedAgentPath(pipeline, stage.id),
         clientAttemptId: clientAttemptId(pipeline, stage, attempt),
+      }, (reservation) => {
+        attempt.launchId = reservation.launchId;
+        attempt.conversationId = reservation.conversationId;
+        persist();
       });
       attempt.launchId = spawned.launchId;
       attempt.conversationId = spawned.conversationId;
@@ -412,6 +419,21 @@ async function tickRunStage(
       park(pipeline, "stage spawn was interrupted before durable launch evidence", attempt);
       return;
     }
+    if (!spawnsThisProcess.has(attemptKey(pipeline, stage, attempt)) && attempt.launchId) {
+      const receipt = ports.spawnReceipt(attempt.launchId);
+      if (!receipt) {
+        park(pipeline, "stage spawn receipt disappeared before recovery", attempt);
+        return;
+      }
+      attempt.conversationId = receipt.conversationId;
+      attempt.sessionId = receipt.sessionId;
+      attempt.agentPath = receipt.transcript;
+      attempt.paneId = receipt.paneId;
+      if (receipt.state === "failed" || receipt.state === "conflicted" || (receipt.state === "starting" && !receipt.paneId && !receipt.transcript)) {
+        park(pipeline, `stage spawn cannot recover from receipt state ${receipt.state}`, attempt);
+        return;
+      }
+    }
     attempt.state = "running";
   }
 
@@ -421,10 +443,16 @@ async function tickRunStage(
     return;
   }
   const entry = entries.find((candidate) => candidate.path === attempt!.agentPath);
-  if (!entry) return;
+  if (!entry) {
+    if (attempt.paneId && !(await ports.paneAgentAlive(attempt.paneId))) park(pipeline, "stage agent exited after its transcript disappeared from the scan", attempt);
+    return;
+  }
   if (entry.activity === "live" || entry.activityReason === "jsonl_turn_open" || entry.activityReason === "jsonl_turn_stalled") return;
   const message = ports.lastMessage(entry);
-  if (!message || message.ts <= unixMs(attempt.startedAt)) return;
+  if (!message || message.ts <= unixMs(attempt.startedAt)) {
+    if (attempt.paneId && !(await ports.paneAgentAlive(attempt.paneId))) park(pipeline, "stage agent exited without producing a verdict", attempt);
+    return;
+  }
   const parsed = parseStageVerdict(message.text);
   if (!parsed) {
     park(pipeline, "stage completed without a valid final JSON verdict", attempt);
@@ -444,12 +472,18 @@ async function tickRunStage(
   commitPassedStage(pipeline, stage, attempt, ports);
 }
 
-function reviewNote(pipeline: Pipeline, stage: PipelineStage): string {
-  return stage.prompt
+function reviewNote(pipeline: Pipeline, stage: PipelineStage, role: EffectivePipelineRole): string {
+  const prompt = stage.prompt
     .split("{{task}}").join(pipeline.task)
     .split("{{prev.output}}").join(normalizedOutput(pipeline))
-    .trim()
-    .slice(0, 2_000);
+    .trim();
+  const scaffold = role.roleId && role.promptScaffold
+    ? role.promptScaffold
+      .split("{{task}}").join(pipeline.task)
+      .split("{{prev.output}}").join(normalizedOutput(pipeline))
+      .trim()
+    : "";
+  return [prompt, ...(scaffold ? ["", `Reviewer role scaffold (${role.roleId}):`, scaffold] : [])].join("\n").slice(0, 2_000);
 }
 
 async function tickReviewStage(
@@ -459,7 +493,10 @@ async function tickReviewStage(
   ports: PipelinePorts,
   persist: () => void,
 ): Promise<void> {
-  const attempt = currentAttempt(pipeline, stage.id) ?? newAttempt(pipeline, stage, ports);
+  const prior = currentAttempt(pipeline, stage.id);
+  const attempt = pipeline.cursor?.state === "pending" && prior && ["passed", "failed", "needs_decision", "skipped"].includes(prior.state)
+    ? newAttempt(pipeline, stage)
+    : prior ?? newAttempt(pipeline, stage);
   if (!attempt || pipeline.state === "needs_decision") return;
   if (attempt.state === "committing") {
     commitPassedStage(pipeline, stage, attempt, ports);
@@ -507,13 +544,22 @@ async function tickReviewStage(
     }
     attempt.flowId = created.flow.id;
     persist();
-    ports.patchFlow(created.flow.id, "advance", reviewNote(pipeline, stage));
+    if (created.flow.state === "paused") {
+      park(pipeline, `review flow startup paused: ${created.flow.stateDetail ?? "kickoff delivery failed"}`, attempt);
+      return;
+    }
+    const advanced = ports.patchFlow(created.flow.id, "advance", reviewNote(pipeline, stage, attempt.effectiveRole));
+    if (advanced.error) park(pipeline, `advancing the review flow failed: ${advanced.error}`, attempt);
     return;
   }
 
   const flow = ports.getFlow(attempt.flowId);
   if (!flow) {
     park(pipeline, "embedded review flow record disappeared", attempt);
+    return;
+  }
+  if (flow.state === "paused") {
+    park(pipeline, `review flow paused during startup: ${flow.stateDetail ?? "operator decision required"}`, attempt);
     return;
   }
   const round = flow.rounds.at(-1);
@@ -558,16 +604,17 @@ const tickStore = globalThis as unknown as { __llvPipelineTick?: boolean };
 export async function tickPipelines(entries: FileEntry[], ports: PipelinePorts = defaultPipelinePorts()): Promise<{ pipelines: Pipeline[]; changed: boolean }> {
   if (tickStore.__llvPipelineTick) return { pipelines: loadPipelines(), changed: false };
   tickStore.__llvPipelineTick = true;
-  const pipelines = loadPipelines();
   try {
-    let changed = false;
-    for (const pipeline of pipelines) {
-      if (TERMINAL_STATES.has(pipeline.state) || pipeline.state === "paused" || pipeline.state === "needs_decision") continue;
-      if (await tickPipeline(pipeline, entries, ports, () => savePipelines(pipelines))) changed = true;
-      if (changed) savePipelines(pipelines);
-    }
-    if (changed) savePipelines(pipelines);
-    return { pipelines, changed };
+    return await withPipelineMutation(async (pipelines, persist) => {
+      let changed = false;
+      for (const pipeline of pipelines) {
+        if (TERMINAL_STATES.has(pipeline.state) || pipeline.state === "paused" || pipeline.state === "needs_decision") continue;
+        if (await tickPipeline(pipeline, entries, ports, persist)) changed = true;
+        if (changed) persist();
+      }
+      if (changed) persist();
+      return { pipelines, changed };
+    });
   } finally {
     tickStore.__llvPipelineTick = false;
   }
@@ -580,7 +627,7 @@ function normalizeStages(value: unknown, lookup?: PipelineRoleLookup | null): { 
   let hasRun = false;
   for (const raw of value) {
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { error: "invalid pipeline stage" };
-    const stage = raw as Partial<PipelineStage>;
+    const stage = raw as Partial<PipelineStageInput>;
     const id = typeof stage.id === "string" ? stage.id.trim() : "";
     if (!/^[A-Za-z0-9_-]{1,64}$/.test(id) || ids.has(id)) return { error: "stage ids must be unique URL-safe names" };
     if (stage.kind !== "run" && stage.kind !== "review-loop") return { error: "stage kind must be run or review-loop" };
@@ -600,7 +647,7 @@ function normalizeStages(value: unknown, lookup?: PipelineRoleLookup | null): { 
     if (roleValue && !roleId) return { error: `stage ${id} roleId is required when role is present` };
     if (stage.model !== undefined && stage.model !== null && typeof stage.model !== "string") return { error: `stage ${id} model must be a string or null` };
     if (stage.effort !== undefined && stage.effort !== null && typeof stage.effort !== "string") return { error: `stage ${id} effort must be a string or null` };
-    const normalizedStage: PipelineStage = {
+    const input: PipelineStageInput = {
       id,
       kind: stage.kind,
       ...(roleId ? { role: { roleId: roleId as PipelineRoleId } } : {}),
@@ -611,8 +658,9 @@ function normalizeStages(value: unknown, lookup?: PipelineRoleLookup | null): { 
       prompt,
       next: stage.next ?? null,
     };
-    const resolved = resolvePipelineRole(normalizedStage, stage.kind, lookup);
+    const resolved = resolvePipelineRole(input, stage.kind, lookup);
     if (!resolved.role) return { error: resolved.error };
+    const normalizedStage: PipelineStage = { ...input, effectiveRole: structuredClone(resolved.role) };
     ids.add(id);
     if (stage.kind === "run") hasRun = true;
     stages.push(normalizedStage);
@@ -624,10 +672,10 @@ function normalizeStages(value: unknown, lookup?: PipelineRoleLookup | null): { 
   return { stages };
 }
 
-export function createPipelineFromRequest(
+export async function createPipelineFromRequest(
   req: CreatePipelineRequest,
   ports: PipelinePorts = defaultPipelinePorts(),
-): { pipeline?: Pipeline; error?: string; status?: number } {
+): Promise<{ pipeline?: Pipeline; error?: string; status?: number }> {
   const task = typeof req.task === "string" ? req.task.trim() : "";
   if (!task) return { error: "task is required", status: 400 };
   const spec = typeof req.spec === "string" && req.spec.trim() ? req.spec.trim() : undefined;
@@ -650,10 +698,11 @@ export function createPipelineFromRequest(
     srcConversationId: srcPath ? ports.conversationIdForPath(srcPath) : null,
     now: ports.now(),
   });
-  const pipelines = loadPipelines();
-  pipelines.push(pipeline);
-  savePipelines(pipelines);
-  return { pipeline };
+  return withPipelineMutation((pipelines, persist) => {
+    pipelines.push(pipeline);
+    persist();
+    return { pipeline };
+  });
 }
 
 export async function patchPipeline(
@@ -661,62 +710,63 @@ export async function patchPipeline(
   req: PatchPipelineRequest,
   ports: PipelinePorts = defaultPipelinePorts(),
 ): Promise<{ pipeline?: Pipeline; error?: string; status?: number }> {
-  const pipelines = loadPipelines();
-  const pipeline = pipelines.find((item) => item.id === id);
-  if (!pipeline) return { error: "pipeline not found", status: 404 };
-  const stage = currentStage(pipeline);
-  const attempt = stage ? currentAttempt(pipeline, stage.id) : null;
-  const flow = attempt?.flowId ? ports.getFlow(attempt.flowId) : null;
+  return withPipelineMutation(async (pipelines, persist) => {
+    const pipeline = pipelines.find((item) => item.id === id);
+    if (!pipeline) return { error: "pipeline not found", status: 404 };
+    const stage = currentStage(pipeline);
+    const attempt = stage ? currentAttempt(pipeline, stage.id) : null;
+    const flow = attempt?.flowId ? ports.getFlow(attempt.flowId) : null;
 
-  if (req.action === "pause") {
-    if (!TERMINAL_STATES.has(pipeline.state) && pipeline.state !== "paused") {
-      pipeline.pausedState = pipeline.state;
-      pipeline.state = "paused";
-      pipeline.stateDetail = "paused by user";
-      if (flow && flow.state !== "paused" && flow.state !== "closed") ports.patchFlow(flow.id, "pause");
-    }
-  } else if (req.action === "resume") {
-    if (pipeline.state !== "paused") return { error: "pipeline is not paused", status: 409 };
-    pipeline.state = pipeline.pausedState ?? "running";
-    pipeline.pausedState = null;
-    pipeline.stateDetail = null;
-    if (flow?.state === "paused") ports.patchFlow(flow.id, "resume");
-  } else if (req.action === "retry-stage") {
-    if (pipeline.state !== "needs_decision") return { error: "pipeline does not have a stage awaiting retry", status: 409 };
-    if (flow && flow.state !== "closed") await ports.closeFlow(flow.id);
-    if (pipeline.lastPassedCommit) {
+    if (req.action === "pause") {
+      if (!TERMINAL_STATES.has(pipeline.state) && pipeline.state !== "paused") {
+        pipeline.pausedState = pipeline.state;
+        pipeline.state = "paused";
+        pipeline.stateDetail = "paused by user";
+        if (flow && flow.state !== "paused" && flow.state !== "closed") ports.patchFlow(flow.id, "pause");
+      }
+    } else if (req.action === "resume") {
+      if (pipeline.state !== "paused") return { error: "pipeline is not paused", status: 409 };
+      pipeline.state = pipeline.pausedState ?? "running";
+      pipeline.pausedState = null;
+      pipeline.stateDetail = null;
+      if (flow?.state === "paused") ports.patchFlow(flow.id, "resume");
+    } else if (req.action === "retry-stage") {
+      if (pipeline.state !== "needs_decision") return { error: "pipeline does not have a stage awaiting retry", status: 409 };
+      if (flow && flow.state !== "closed") await ports.closeFlow(flow.id);
+      if (pipeline.lastPassedCommit) {
+        const reset = resetPipelineStage(pipeline, ports.exec);
+        if (!reset.ok) return { error: reset.error, status: 409 };
+        pipeline.state = "running";
+      } else {
+        pipeline.state = "provisioning";
+      }
+      if (stage) pipeline.cursor = { stageId: stage.id, state: "pending" };
+      pipeline.pausedState = null;
+      pipeline.stateDetail = null;
+    } else if (req.action === "skip-stage") {
+      if (pipeline.state !== "needs_decision" || !stage) return { error: "pipeline does not have a stage awaiting a decision", status: 409 };
+      if (flow && flow.state !== "closed") await ports.closeFlow(flow.id);
+      if (!pipeline.lastPassedCommit) return { error: "pipeline worktree has not been provisioned", status: 409 };
       const reset = resetPipelineStage(pipeline, ports.exec);
       if (!reset.ok) return { error: reset.error, status: 409 };
-      pipeline.state = "running";
+      if (attempt) {
+        attempt.state = "skipped";
+        attempt.completedAt = ports.now();
+        attempt.output = "Skipped by operator.";
+      }
+      advancePipeline(pipeline, stage, ports);
+    } else if (req.action === "close") {
+      if (flow && flow.state !== "closed") await ports.closeFlow(flow.id);
+      pipeline.state = "closed";
+      pipeline.pausedState = null;
+      pipeline.stateDetail = null;
+      pipeline.closedAt = ports.now();
     } else {
-      pipeline.state = "provisioning";
+      return { error: "unknown pipeline action", status: 400 };
     }
-    if (stage) pipeline.cursor = { stageId: stage.id, state: "pending" };
-    pipeline.pausedState = null;
-    pipeline.stateDetail = null;
-  } else if (req.action === "skip-stage") {
-    if (pipeline.state !== "needs_decision" || !stage) return { error: "pipeline does not have a stage awaiting a decision", status: 409 };
-    if (flow && flow.state !== "closed") await ports.closeFlow(flow.id);
-    if (!pipeline.lastPassedCommit) return { error: "pipeline worktree has not been provisioned", status: 409 };
-    const reset = resetPipelineStage(pipeline, ports.exec);
-    if (!reset.ok) return { error: reset.error, status: 409 };
-    if (attempt) {
-      attempt.state = "skipped";
-      attempt.completedAt = ports.now();
-      attempt.output = "Skipped by operator.";
-    }
-    advancePipeline(pipeline, stage, ports);
-  } else if (req.action === "close") {
-    if (flow && flow.state !== "closed") await ports.closeFlow(flow.id);
-    pipeline.state = "closed";
-    pipeline.pausedState = null;
-    pipeline.stateDetail = null;
-    pipeline.closedAt = ports.now();
-  } else {
-    return { error: "unknown pipeline action", status: 400 };
-  }
-  savePipelines(pipelines);
-  return { pipeline };
+    persist();
+    return { pipeline };
+  });
 }
 
 export function getPipelines(): { pipelines: Pipeline[] } {

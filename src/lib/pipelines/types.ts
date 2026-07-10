@@ -25,7 +25,7 @@ export type EffectivePipelineRole = RoleConfig & {
 
 export type PipelineStageKind = "run" | "review-loop";
 
-export type PipelineStage = {
+export type PipelineStageInput = {
   id: string;
   kind: PipelineStageKind;
   role?: PipelineRoleRef;
@@ -35,6 +35,11 @@ export type PipelineStage = {
   access?: PipelineAccess;
   prompt: string;
   next: string | null;
+};
+
+export type PipelineStage = PipelineStageInput & {
+  /** Immutable registry resolution captured when the pipeline is created. */
+  effectiveRole: EffectivePipelineRole;
 };
 
 export type StageVerdictStatus = "pass" | "fail" | "needs_decision";
@@ -110,7 +115,7 @@ export type CreatePipelineRequest = {
   task: string;
   spec?: string;
   repoDir: string;
-  stages: PipelineStage[];
+  stages: PipelineStageInput[];
   src?: string;
 };
 

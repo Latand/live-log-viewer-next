@@ -91,6 +91,7 @@ export type FlowPreset = {
   name: string;
   implementer: RoleConfig;
   reviewer: RoleConfig;
+  managed?: "role-registry";
 };
 
 export type CreateFlowRequest = {

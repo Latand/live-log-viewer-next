@@ -18,7 +18,7 @@ const LEGACY_DEFAULT: FlowPreset = {
 test("seed migration replaces an untouched legacy preset with Sol and Sol roles", () => {
   const presets = mergeSeededPresets([LEGACY_DEFAULT]);
   expect(presets.some((preset) => preset.name === LEGACY_DEFAULT.name)).toBe(false);
-  expect(presets[0]).toEqual({
+  expect(presets[0]).toMatchObject({
     name: "Sol medium → Sol xhigh",
     implementer: { engine: "codex", model: CODEX_SOL_MODEL, effort: "medium" },
     reviewer: { engine: "codex", model: CODEX_SOL_MODEL, effort: "xhigh" },
@@ -32,11 +32,21 @@ test("seed migration preserves a customized preset", () => {
 
 test("flow preset seeds derive their canonical roles from the role registry", () => {
   const presets = seededPresetsFromRoles();
-  expect(presets.find((preset) => preset.name === "Sol medium → Sol xhigh")).toEqual({
+  expect(presets.find((preset) => preset.name === "Sol medium → Sol xhigh")).toMatchObject({
     name: "Sol medium → Sol xhigh",
     implementer: { engine: "codex", model: CODEX_SOL_MODEL, effort: "medium" },
     reviewer: { engine: "codex", model: CODEX_SOL_MODEL, effort: "xhigh" },
   });
+});
+
+test("managed flow seeds refresh while an unmarked same-name edit wins", () => {
+  const first = seededPresetsFromRoles();
+  const refreshed = structuredClone(first);
+  refreshed[0]!.implementer.effort = "high";
+  expect(mergeSeededPresets(first, refreshed)[0]!.implementer.effort).toBe("high");
+
+  const custom = { ...structuredClone(first[0]!), managed: undefined, implementer: { ...first[0]!.implementer, effort: "low" } };
+  expect(mergeSeededPresets([custom], refreshed)).toContainEqual(custom);
 });
 
 test("an untouched pre-registry flow preset migrates to the current role config", () => {

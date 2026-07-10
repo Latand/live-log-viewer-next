@@ -52,7 +52,7 @@ Stage ids use letters, numbers, `_`, and `-`. They must be unique. Each `next` v
 
 `role` is optional. When present, `role.roleId` is a durable reference to one of the eight presets from issue #35. `engine`, `model`, `effort`, and `access` live on the stage as explicit overrides.
 
-Resolution follows this order for each runtime field: explicit stage value, referenced role preset, Builder preset from the shared role registry. The current Builder preset is Codex GPT-5.6-Sol with medium effort. Pipeline creation fails closed when the registry cannot provide Builder, preventing a second embedded default from drifting away from the registry. A raw-prompt stage receives the task/spec context and structured verdict contract without a role scaffold. A referenced role receives its registry scaffold. Every attempt freezes the resolved role, runtime, access, and scaffold so later registry edits cannot change a running attempt.
+Resolution follows this order for each runtime field: explicit stage value, referenced role preset, Builder preset from the shared role registry. The current Builder preset is Codex GPT-5.6-Sol with medium effort. Pipeline creation fails closed when the registry cannot provide Builder, preventing a second embedded default from drifting away from the registry. A raw-prompt stage receives the task/spec context and structured verdict contract without a role scaffold. A referenced role receives its registry scaffold. Creation persists one immutable effective-role snapshot on each stage, and every attempt clones that snapshot so later registry edits cannot change first execution or retries.
 
 ## Structured stage verdicts
 

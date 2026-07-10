@@ -32,7 +32,7 @@ test("pass commits a dirty stage and retry resets plus cleans", () => {
     if (args[0] === "rev-parse") return { code: 0, stdout: "stage-sha\n", stderr: "" };
     return { code: 0, stdout: "", stderr: "" };
   };
-  expect(commitPipelineStage(pipeline(), "build", exec)).toEqual({ ok: true, sha: "stage-sha" });
+  expect(commitPipelineStage(pipeline(), "build", true, exec)).toEqual({ ok: true, sha: "stage-sha" });
   expect(resetPipelineStage(pipeline(), exec)).toEqual({ ok: true, sha: "base" });
   expect(calls).toContain("git add -A");
   expect(calls).toContain("git reset --hard base");

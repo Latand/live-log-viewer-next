@@ -12,6 +12,7 @@ test("run prompt renders task, previous output, spec, access, verdict, and nesti
     engine: "codex" as const,
     prompt: "Build {{task}} from {{prev.output}}",
     next: "review",
+    effectiveRole: { roleId: "builder", engine: "codex", model: null, effort: "high", access: "read-write", promptScaffold: "Keep the implementation focused on {{task}}." },
   };
   const pipeline = buildPipeline({
     id: "12345678",
@@ -42,7 +43,13 @@ test("run prompt renders task, previous output, spec, access, verdict, and nesti
 });
 
 test("role-less prompts omit role identity and scaffolding", () => {
-  const stage: PipelineStage = { id: "research", kind: "run", prompt: "Investigate {{task}}", next: "write" };
+  const stage: PipelineStage = {
+    id: "research",
+    kind: "run",
+    prompt: "Investigate {{task}}",
+    next: "write",
+    effectiveRole: { roleId: null, engine: "codex", model: "gpt-5.6-sol", effort: "medium", access: "read-write", promptScaffold: null },
+  };
   const pipeline = buildPipeline({
     id: "12345678",
     task: "pipeline support",

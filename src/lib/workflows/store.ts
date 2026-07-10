@@ -89,7 +89,7 @@ export function seededTemplatesFromRoles(): WorkflowTemplate[] {
   const frontendBuilder = registryRole("builder", { mode: "plain", domain: "frontend" });
   const reviewer = registryRole("reviewer");
   const fixer = defaultFixerFromRoles();
-  return [
+  const templates: WorkflowTemplate[] = [
   {
     name: "fullstack",
     setup: "bun install",
@@ -135,6 +135,7 @@ export function seededTemplatesFromRoles(): WorkflowTemplate[] {
     ],
   },
   ];
+  return templates.map((template) => ({ ...template, managed: "role-registry" }));
 }
 
 /** Compatibility export for initial template renderers. */
@@ -253,6 +254,7 @@ export function normalizeTemplate(value: unknown): WorkflowTemplate | null {
     name: raw.name.trim(),
     stages: normalized.stages,
     finish,
+    ...(raw.managed === "role-registry" ? { managed: raw.managed } : {}),
     ...(typeof raw.setup === "string" && raw.setup.trim() ? { setup: raw.setup.trim() } : {}),
     ...(typeof raw.verify === "string" && raw.verify.trim() ? { verify: raw.verify.trim() } : {}),
   };
@@ -343,7 +345,7 @@ export function saveTemplates(templates: WorkflowTemplate[]): void {
 /** Upgrade untouched built-in templates and keep user-authored definitions. */
 export function mergeSeededTemplates(templates: WorkflowTemplate[], seeds = seededTemplatesFromRoles()): WorkflowTemplate[] {
   const legacy = new Set([...LEGACY_SEEDED_TEMPLATES, ...PRE_ROLE_SEEDED_TEMPLATES].map((template) => JSON.stringify(normalizeTemplate(template))));
-  const custom = templates.filter((template) => !legacy.has(JSON.stringify(template)));
+  const custom = templates.filter((template) => template.managed !== "role-registry" && !legacy.has(JSON.stringify(template)));
   const names = new Set(custom.map((template) => template.name));
   const missingSeeds = seeds.filter((template) => !names.has(template.name));
   return [...missingSeeds, ...custom];

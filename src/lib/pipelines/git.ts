@@ -22,10 +22,11 @@ export function provisionPipelineWorktree(pipeline: Pipeline, exec: ExecPort): P
   return { ok: true, sha: base.stdout.trim(), baseBranch };
 }
 
-export function commitPipelineStage(pipeline: Pipeline, stageId: string, exec: ExecPort): PipelineGitResult {
+export function commitPipelineStage(pipeline: Pipeline, stageId: string, allowCommit: boolean, exec: ExecPort): PipelineGitResult {
   const status = exec("git", ["status", "--porcelain"], pipeline.worktreeDir);
   if (status.code !== 0) return failure("checking the pipeline worktree", status);
   if (status.stdout.trim()) {
+    if (!allowCommit) return { ok: false, error: `read-only stage ${stageId} modified the pipeline worktree` };
     const add = exec("git", ["add", "-A"], pipeline.worktreeDir);
     if (add.code !== 0) return failure("staging the passed stage", add);
     const commit = exec("git", ["commit", "-m", `pipeline(${pipeline.id}): complete ${stageId}`], pipeline.worktreeDir);
