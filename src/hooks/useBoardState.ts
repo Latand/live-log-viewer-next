@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 
+import { applyBoardMutations, type BoardMutationV1 } from "@/lib/board/mutations";
 import type { BoardProjectStateV1 } from "@/lib/view/types";
 
 export type BoardPrefs = BoardProjectStateV1["prefs"];
@@ -15,6 +16,12 @@ const POLL_MS = 10_000;
    backoff and recovery cancels it. */
 const RETRY_BASE_MS = 1_000;
 const RETRY_MAX_MS = 30_000;
+/* Immediate re-sends after a revision conflict before falling back to the
+   backoff timer. Each conflict means another writer landed first; we adopt the
+   server board, replay the outbox on top, and retry the same prefix. A real
+   consecutive conflict requires a fresh concurrent write each round, so this
+   cap only guards against a pathological writer that never yields. */
+const MAX_CONFLICT_RETRIES = 8;
 
 export const EMPTY_BOARD_PREFS: BoardPrefs = { manual: [], hidden: [], expanded: [], viewMode: null, taskPanelOpen: false };
 
@@ -109,10 +116,32 @@ export function resetPendingOpensForTest(): void {
   activeStores.clear();
 }
 
-type PatchAttempt =
+type WriteAttempt =
   | { status: "ok"; board: BoardProjectStateV1 }
   | { status: "conflict"; board: BoardProjectStateV1 }
   | { status: "error" };
+
+/** Two boards carry the same durable arrangement when their prefs and aliases
+    match — the same comparison the server uses to treat a mutation as a no-op. */
+function sameArrangement(left: BoardProjectStateV1, right: BoardProjectStateV1): boolean {
+  return (
+    JSON.stringify({ prefs: left.prefs, pathAliases: left.pathAliases ?? {} }) ===
+    JSON.stringify({ prefs: right.prefs, pathAliases: right.pathAliases ?? {} })
+  );
+}
+
+/** Replay the unacknowledged outbox over the last server-confirmed board to get
+    the optimistic arrangement the UI renders. The reducer normalizes and could
+    in principle throw on a malformed batch; fall back to the confirmed board so a
+    bad optimistic replay never blanks the arrangement. */
+function optimisticBoard(confirmed: BoardProjectStateV1, outbox: readonly BoardMutationV1[]): BoardProjectStateV1 {
+  if (outbox.length === 0) return confirmed;
+  try {
+    return applyBoardMutations(confirmed, outbox);
+  } catch {
+    return confirmed;
+  }
+}
 
 export interface BoardStoreOptions {
   project: string;
@@ -129,17 +158,20 @@ export interface BoardStoreOptions {
 export interface BoardStore {
   getSnapshot(): BoardSnapshot;
   subscribe(listener: () => void): () => void;
-  patch(partial: Partial<BoardPrefs>): void;
+  mutate(mutations: readonly BoardMutationV1[]): void;
   dispose(): void;
 }
 
 /**
  * The per-project durable board arrangement, moved off per-browser storage into
- * the shared server store. It loads the server state, runs the one-time legacy
- * seed, polls for changes other devices made, and applies edits optimistically:
- * a local patch updates the UI at once, then PATCHes; a revision conflict rebases
- * exactly once onto the server's state before giving up to the next poll. Legacy
- * localStorage is only read (for the seed), never written — a rollback keeps it.
+ * the shared server store. It holds the last server-confirmed board plus an
+ * outbox of unacknowledged semantic mutations (close/restore/reconcile/remap/
+ * presentation); the UI renders the outbox replayed over the confirmed board
+ * (optimistic), and a background drain flushes the outbox as a stable prefix. A
+ * revision conflict adopts the server board, replays the whole outbox on top, and
+ * retries, preserving a close, restore or remap intent across an interleaved
+ * write by another device. The one-time legacy seed still writes
+ * whole prefs; localStorage serves as read-only migration input.
  */
 export function createBoardStore(options: BoardStoreOptions): BoardStore {
   const { project, fetcher, storage } = options;
@@ -151,10 +183,27 @@ export function createBoardStore(options: BoardStoreOptions): BoardStore {
   };
   const getUrl = "/api/board?project=" + encodeURIComponent(project);
 
+  const emptyBoard = (): BoardProjectStateV1 => ({
+    schemaVersion: 1,
+    revision: 0,
+    updatedAt: new Date(0).toISOString(),
+    pathAliases: {},
+    prefs: EMPTY_BOARD_PREFS,
+  });
+
   let snapshot: BoardSnapshot = { prefs: EMPTY_BOARD_PREFS, revision: 0, sync: "unavailable", loaded: false };
-  let pending: Partial<BoardPrefs> | null = null;
+  /* Last board the server acknowledged, and the semantic mutations not yet
+     acknowledged. The optimistic arrangement is the outbox replayed over the
+     confirmed board. */
+  let confirmed: BoardProjectStateV1 = emptyBoard();
+  let outbox: BoardMutationV1[] = [];
   let inflight = false;
+  let loaded = false;
+  let unavailable = false;
   let disposed = false;
+  /* Consecutive revision conflicts: each means a fresh concurrent write, so we
+     retry immediately up to a cap before falling back to the backoff timer. */
+  let conflictStreak = 0;
   let retryHandle: ReturnType<typeof scheduler.setTimeout> | null = null;
   let retryDelay = RETRY_BASE_MS;
   const listeners = new Set<() => void>();
@@ -162,16 +211,34 @@ export function createBoardStore(options: BoardStoreOptions): BoardStore {
   const emit = () => {
     for (const listener of listeners) listener();
   };
-  const set = (next: Partial<BoardSnapshot>) => {
-    snapshot = { ...snapshot, ...next };
+  const syncFor = (): BoardSync => (unavailable ? "unavailable" : inflight || outbox.length ? "pending" : "current");
+  /* Recompute the published snapshot from the confirmed board + outbox. The
+     revision stays the confirmed one — optimistic mutations do not invent a
+     revision the server has not assigned. */
+  const refresh = () => {
+    const board = optimisticBoard(confirmed, outbox);
+    snapshot = { prefs: board.prefs, revision: confirmed.revision, sync: syncFor(), loaded };
     emit();
   };
-  const syncFor = (): BoardSync => (inflight || pending ? "pending" : "current");
-  const adopt = (board: BoardProjectStateV1) => {
-    set({ prefs: board.prefs, revision: board.revision, sync: syncFor(), loaded: true });
+
+  const attemptMutations = async (mutations: readonly BoardMutationV1[], baseRevision: number): Promise<WriteAttempt> => {
+    try {
+      const res = await fetcher("/api/board", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ schemaVersion: 1, project, baseRevision, mutations }),
+      });
+      if (res.ok) return { status: "ok", board: ((await res.json()) as { board: BoardProjectStateV1 }).board };
+      if (res.status === 409) return { status: "conflict", board: ((await res.json()) as { board: BoardProjectStateV1 }).board };
+      return { status: "error" };
+    } catch {
+      return { status: "error" };
+    }
   };
 
-  const attempt = async (patch: Partial<BoardPrefs>, baseRevision: number): Promise<PatchAttempt> => {
+  /* The legacy seed writes whole prefs (the patch form) onto the empty
+     revision-0 board — the mutation protocol only carries membership deltas. */
+  const attemptSeed = async (patch: BoardPrefs, baseRevision: number): Promise<WriteAttempt> => {
     try {
       const res = await fetcher("/api/board", {
         method: "PATCH",
@@ -186,32 +253,38 @@ export function createBoardStore(options: BoardStoreOptions): BoardStore {
     }
   };
 
-  const applyPatch = (partial: Partial<BoardPrefs>) => {
-    /* Optimistic: reflect the edit immediately, then queue the PATCH. */
-    snapshot = { ...snapshot, prefs: { ...snapshot.prefs, ...partial }, sync: "pending" };
-    emit();
-    pending = mergePatch(pending, partial);
+  const mutate = (mutations: readonly BoardMutationV1[]) => {
+    if (mutations.length === 0) return;
+    /* Drop a batch that changes nothing optimistically — an idempotent
+       reconcile/remap, or a close of an already-hidden path — so it never
+       reaches transport and never bumps a revision. */
+    const before = optimisticBoard(confirmed, outbox);
+    const nextOutbox = [...outbox, ...mutations];
+    const after = optimisticBoard(confirmed, nextOutbox);
+    if (sameArrangement(before, after)) return;
+    outbox = nextOutbox;
+    refresh();
     void drain();
   };
 
-  /* Flush any cross-project opens queued for this project into a single patch.
-     Runs after the store has loaded, so it merges onto the server's arrangement
-     rather than an empty placeholder. */
+  /* Flush any cross-project opens queued for this project. A queued open is an
+     explicit user restore: it lifts the tombstone and places the node — a
+     standalone conversation as a manual node, a connected child expanded below
+     its parent. Runs after load so it replays onto the server's arrangement. */
   const drainOpens = () => {
-    if (!snapshot.loaded || disposed) return;
+    if (!loaded || disposed) return;
     const open = pendingOpens.get(project);
     if (!open || (open.manual.length === 0 && open.expanded.length === 0)) return;
     pendingOpens.delete(project);
-    const opened = new Set([...open.manual, ...open.expanded]);
-    applyPatch({
-      manual: [...new Set([...snapshot.prefs.manual, ...open.manual])],
-      expanded: [...new Set([...snapshot.prefs.expanded, ...open.expanded])],
-      hidden: snapshot.prefs.hidden.filter((path) => !opened.has(path)),
-    });
+    const restores: BoardMutationV1[] = [
+      ...open.manual.map((path) => ({ kind: "restore", path, placement: "manual" }) as const),
+      ...open.expanded.map((path) => ({ kind: "restore", path, placement: "expanded" }) as const),
+    ];
+    mutate(restores);
   };
 
   /* Cancel a scheduled backoff and reset the delay — called on any accepted
-     PATCH and on disposal, so a healed network starts the next failure fresh. */
+     write and on disposal, so a healed network starts the next failure fresh. */
   const cancelRetry = () => {
     if (retryHandle !== null) {
       scheduler.clearTimeout(retryHandle);
@@ -219,50 +292,56 @@ export function createBoardStore(options: BoardStoreOptions): BoardStore {
     }
     retryDelay = RETRY_BASE_MS;
   };
-  /* Arm the bounded backoff after a network error: one timer at a time, delay
-     doubling up to the cap. The queued patch drains when it fires. */
+  /* Arm the bounded backoff after repeated conflicts or a network error: one
+     timer at a time, delay doubling up to the cap. The outbox drains when it
+     fires, with a fresh immediate-retry budget. */
   const scheduleRetry = () => {
     if (retryHandle !== null || disposed) return;
     const delay = retryDelay;
     retryDelay = Math.min(retryDelay * 2, RETRY_MAX_MS);
     retryHandle = scheduler.setTimeout(() => {
       retryHandle = null;
+      conflictStreak = 0;
       void drain();
     }, delay);
   };
 
   const drain = async () => {
-    if (inflight || !pending || disposed) return;
-    const patch = pending;
-    pending = null;
+    if (inflight || disposed || outbox.length === 0) return;
     inflight = true;
-    set({ sync: "pending" });
-    const first = await attempt(patch, snapshot.revision);
-    if (first.status === "ok") {
+    refresh();
+    /* Send the outbox as a stable prefix: mutations appended while this request
+       is inflight stay queued and flush on the next drain, so an earlier response
+       never drops a later optimistic action. */
+    const prefix = outbox.slice();
+    const result = await attemptMutations(prefix, confirmed.revision);
+    inflight = false;
+    if (disposed) return;
+    if (result.status === "ok") {
       cancelRetry();
-      adopt(first.board);
-    } else if (first.status === "conflict") {
-      /* Rebase exactly once: take the server's state, replay this intent on top,
-         resubmit. A second conflict means another writer keeps winning — adopt
-         the server and let the poll reconcile. */
-      set({ prefs: { ...first.board.prefs, ...patch }, revision: first.board.revision });
-      const second = await attempt(patch, first.board.revision);
-      if (second.status === "ok") cancelRetry();
-      adopt(second.status === "ok" ? second.board : first.board);
-    } else {
-      /* Network error: keep the optimistic prefs and requeue, then back off on a
-         cancellable timer. Re-draining synchronously here spins thousands of
-         failed PATCHes in one microtask turn and starves every timer (#11); the
-         backoff retries and any accepted PATCH cancels it. */
-      pending = mergePatch(patch, pending ?? {});
-      inflight = false;
-      set({ sync: syncFor() });
-      scheduleRetry();
+      conflictStreak = 0;
+      confirmed = result.board;
+      outbox = outbox.slice(prefix.length);
+      refresh();
+      if (outbox.length) void drain();
       return;
     }
-    inflight = false;
-    set({ sync: syncFor() });
-    if (pending) void drain();
+    if (result.status === "conflict") {
+      /* Another writer landed first. Adopt the server board and retain the whole
+         outbox: the optimistic replay puts this intent back on top, and we retry
+         the same prefix at the returned revision. A satisfied mutation then
+         reduces to a server no-op that leaves the revision untouched. */
+      confirmed = result.board;
+      conflictStreak += 1;
+      refresh();
+      if (conflictStreak <= MAX_CONFLICT_RETRIES) void drain();
+      else scheduleRetry();
+      return;
+    }
+    /* Network error: keep the outbox and back off on a cancellable timer. This
+       prevents failed-request spinning inside one microtask turn (#11). */
+    refresh();
+    scheduleRetry();
   };
 
   const load = async () => {
@@ -275,39 +354,50 @@ export function createBoardStore(options: BoardStoreOptions): BoardStore {
     }
     if (disposed) return;
     if (!board) {
-      set({ sync: "unavailable", loaded: true });
+      unavailable = true;
+      loaded = true;
+      refresh();
       return;
     }
     if (board.revision === 0 && isEmptyPrefs(board.prefs)) {
       const seed = readLegacyPrefs(project, storage);
       if (seed && isMeaningfulPrefs(seed)) {
-        set({ prefs: seed, revision: 0, sync: "pending", loaded: true });
+        /* Show the seed optimistically while its PATCH is inflight. */
+        confirmed = { ...board, prefs: seed };
+        loaded = true;
         inflight = true;
-        const result = await attempt(seed, 0);
+        refresh();
+        const result = await attemptSeed(seed, 0);
         inflight = false;
-        if (!disposed) {
-          adopt(result.status === "error" ? board : result.board);
-          /* An edit made while the seed PATCH was inflight parked in `pending`
-             (drain early-returns during inflight); flush it now instead of
-             leaving it stranded until the next edit. */
-          if (pending) void drain();
-        }
+        if (disposed) return;
+        confirmed = result.status === "error" ? board : result.board;
+        refresh();
+        /* A mutation queued while the seed was inflight parked in the outbox
+           because drain returns early during inflight. Flush it now so the
+           queued action proceeds without another edit. */
+        if (outbox.length) void drain();
         return;
       }
     }
-    adopt(board);
+    confirmed = board;
+    loaded = true;
+    refresh();
   };
 
   const poll = () => {
-    if (inflight || pending || disposed) return;
+    if (inflight || outbox.length || disposed) return;
     void (async () => {
       try {
         const res = await fetcher(getUrl);
         if (!res.ok) return;
         const board = ((await res.json()) as { board: BoardProjectStateV1 }).board;
-        /* Another device moved the board: adopt it, but never clobber a local
-           edit that has not yet flushed (guarded by the pending/inflight check). */
-        if (!inflight && !pending && !disposed && board.revision !== snapshot.revision) adopt(board);
+        /* Another device moved the board. Adopt it while preserving unflushed
+           local intent through the outbox/inflight guard. */
+        if (!inflight && outbox.length === 0 && !disposed && board.revision !== confirmed.revision) {
+          confirmed = board;
+          unavailable = false;
+          refresh();
+        }
       } catch {
         /* transient — next tick retries */
       }
@@ -324,8 +414,8 @@ export function createBoardStore(options: BoardStoreOptions): BoardStore {
       listeners.add(listener);
       return () => listeners.delete(listener);
     },
-    patch(partial) {
-      applyPatch(partial);
+    mutate(mutations) {
+      mutate(mutations);
     },
     dispose() {
       disposed = true;
@@ -340,7 +430,11 @@ export function createBoardStore(options: BoardStoreOptions): BoardStore {
 const UNAVAILABLE_SNAPSHOT: BoardSnapshot = { prefs: EMPTY_BOARD_PREFS, revision: 0, sync: "unavailable", loaded: false };
 
 export interface BoardState extends BoardSnapshot {
-  patchColumns(columns: Pick<BoardPrefs, "manual" | "hidden" | "expanded">): void;
+  /** Dispatch a semantic mutation batch (close/restore/reconcile/remap/
+      presentation). The store replays it optimistically and flushes durably. */
+  mutate(mutations: readonly BoardMutationV1[]): void;
+  close(path: string): void;
+  restore(path: string, placement: "auto" | "manual" | "expanded"): void;
   setViewMode(viewMode: BoardViewMode): void;
   setTaskPanelOpen(open: boolean): void;
 }
@@ -380,14 +474,20 @@ export function useBoardState(project: string | null): BoardState {
 
   return {
     ...snapshot,
-    patchColumns(columns) {
-      storeRef.current?.patch(columns);
+    mutate(mutations) {
+      storeRef.current?.mutate(mutations);
+    },
+    close(path) {
+      storeRef.current?.mutate([{ kind: "close", path }]);
+    },
+    restore(path, placement) {
+      storeRef.current?.mutate([{ kind: "restore", path, placement }]);
     },
     setViewMode(viewMode) {
-      storeRef.current?.patch({ viewMode });
+      storeRef.current?.mutate([{ kind: "set-presentation", viewMode }]);
     },
     setTaskPanelOpen(open) {
-      storeRef.current?.patch({ taskPanelOpen: open });
+      storeRef.current?.mutate([{ kind: "set-presentation", taskPanelOpen: open }]);
     },
   };
 }

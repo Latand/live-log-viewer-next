@@ -5,7 +5,22 @@ import { NextRequest } from "next/server";
 const PATHNAME = "/allowed/rollout-019f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl";
 
 let transcriptReads = 0;
+let lastTranscriptReadFresh: boolean | undefined;
 let pidTargets = new Map<number, string | null>();
+let resourceTarget: Record<string, unknown> | null = null;
+const endpoint = {
+  kind: "tmux-tmpdir" as const,
+  tmuxTmpdir: "/run/user/1000/agent-log-viewer",
+  socketName: "default" as const,
+  socketPath: "/run/user/1000/agent-log-viewer/tmux-1000/default",
+};
+let attachResolution: unknown = {
+  ok: true,
+  target: "agents:4.0",
+  endpoint,
+  command: "TMUX_TMPDIR='/run/user/1000/agent-log-viewer' tmux attach-session -t 'agents:4.0'",
+  readOnlyCommand: "TMUX_TMPDIR='/run/user/1000/agent-log-viewer' tmux attach-session -r -t 'agents:4.0'",
+};
 let delivery: (message: unknown) => Promise<{ ok: true; outcome: "delivered-to-live" | "resumed"; target: string; spawned?: boolean }> = async () => ({
   ok: true,
   outcome: "delivered-to-live",
@@ -34,8 +49,9 @@ const snapshot = {
 
 mock.module("@/lib/agent/transcriptHost", () => ({
   canonicalTranscriptTarget: (observed: typeof snapshot, pathname: string) => observed.canonicalFor(pathname)?.display ?? null,
-  readTranscriptHosts: async () => {
+  readTranscriptHosts: async (fresh?: boolean) => {
     transcriptReads += 1;
+    lastTranscriptReadFresh = fresh;
     return snapshot;
   },
 }));
@@ -48,21 +64,24 @@ mock.module("@/lib/delivery", () => ({
   resumeConversation: async () => ({ ok: true, target: "" }),
 }));
 mock.module("@/lib/resources", () => ({
-  allowedKillTarget: () => null,
+  allowedKillTarget: (target: string) => (target === "agents:9.0" ? resourceTarget : null),
   consumeKillTarget: () => {},
 }));
 mock.module("@/lib/scanner/roots", () => ({ pathAllowed: (pathname: string) => pathname.startsWith("/allowed/") }));
 mock.module("@/lib/tmux", () => ({
+  captureTmuxAttachReference: (value: Record<string, unknown>) => ({ ...value, tmuxServerStartIdentity: "900:one", paneStartIdentity: "100:one" }),
   collectImagePayloads: () => ({ images: [], error: null }),
   killPane: async () => {},
   panePidOf: async () => null,
   resolveRequestedTmuxTarget: async (pid: number | null) => (pid === null ? null : pidTargets.get(pid) ?? null),
+  resolveTmuxAttach: async () => attachResolution,
+  tmuxEndpointDescriptor: () => endpoint,
 }));
 
 const { GET, POST } = await import("./route");
 
 function get(url: string): NextRequest {
-  return new NextRequest(url);
+  return new NextRequest(url, { headers: { host: "127.0.0.1" } });
 }
 
 function post(body: unknown): NextRequest {
@@ -82,6 +101,59 @@ test("/api/tmux GET uses the transcript host when a recycled pid disagrees", asy
   expect(response.status).toBe(200);
   expect(await response.json()).toEqual({ target: "agents:4.0" });
   expect(transcriptReads).toBe(1);
+});
+
+test("/api/tmux attach resolves a fresh transcript host and returns an uncached opaque command", async () => {
+  transcriptReads = 0;
+  lastTranscriptReadFresh = undefined;
+  attachResolution = {
+    ok: true,
+    target: "agents:8.0",
+    endpoint,
+    command: "TMUX_TMPDIR='/run/user/1000/agent-log-viewer' tmux attach-session -t 'agents:8.0'",
+    readOnlyCommand: "TMUX_TMPDIR='/run/user/1000/agent-log-viewer' tmux attach-session -r -t 'agents:8.0'",
+  };
+
+  const response = await GET(get(`http://127.0.0.1/api/tmux?attach=1&path=${encodeURIComponent(PATHNAME)}`));
+
+  expect(response.status).toBe(200);
+  expect(response.headers.get("cache-control")).toBe("no-store");
+  expect(await response.json()).toEqual({
+    attach: {
+      target: "agents:8.0",
+      command: "TMUX_TMPDIR='/run/user/1000/agent-log-viewer' tmux attach-session -t 'agents:8.0'",
+      readOnlyCommand: "TMUX_TMPDIR='/run/user/1000/agent-log-viewer' tmux attach-session -r -t 'agents:8.0'",
+    },
+    endpoint,
+  });
+  expect(transcriptReads).toBe(1);
+  expect(lastTranscriptReadFresh === true).toBe(true);
+});
+
+test("/api/tmux attach resolves an allowlisted orphan resource target", async () => {
+  resourceTarget = { tmuxServerPid: 900, tmuxServerStartIdentity: "900:one", paneId: "%9", panePid: 109, paneStartIdentity: "109:one" };
+  attachResolution = { ok: false, reason: "stale-pane" };
+
+  const response = await GET(get("http://127.0.0.1/api/tmux?attach=1&target=agents%3A9.0"));
+
+  expect(response.status).toBe(409);
+  expect(response.headers.get("cache-control")).toBe("no-store");
+  expect(await response.json()).toEqual({ reason: "stale-pane", error: "This pane changed or closed. Refresh and try again." });
+});
+
+test("/api/tmux attach reports a restarted server and rejects malformed, cross-origin requests", async () => {
+  attachResolution = { ok: false, reason: "server-restarted" };
+  const restarted = await GET(get(`http://127.0.0.1/api/tmux?attach=1&path=${encodeURIComponent(PATHNAME)}`));
+  expect(restarted.status).toBe(409);
+  expect(await restarted.json()).toEqual({ reason: "server-restarted", error: "The tmux server restarted. Refresh and try again." });
+
+  const malformed = await GET(get("http://127.0.0.1/api/tmux?attach=1&path=/allowed/a&target=agents%3A9.0"));
+  expect(malformed.status).toBe(400);
+
+  const hostile = await GET(new NextRequest(`http://127.0.0.1/api/tmux?attach=1&path=${encodeURIComponent(PATHNAME)}`, {
+    headers: { host: "127.0.0.1", origin: "https://evil.example", "sec-fetch-site": "cross-site" },
+  }));
+  expect(hostile.status).toBe(403);
 });
 
 test("/api/tmux GET keeps pid lookup for pid-only compatibility requests", async () => {

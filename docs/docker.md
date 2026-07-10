@@ -26,11 +26,23 @@ Run this read-only preflight first:
 ./scripts/install-legacy-tmux-supervisor.sh
 ```
 
-The installation command requires `--install` and a later operator approval. It enables `agent-log-viewer-legacy-tmux.service`; it does not run as a Compose service. A human can attach after installation with:
+The installation command requires `--install` and a later operator approval. It enables `agent-log-viewer-legacy-tmux.service`; it does not run as a Compose service.
+
+## Attach to a Viewer pane
+
+Use the attach command copied by the Viewer for a live pane. It includes the configured endpoint and the pane's current display target. For example:
 
 ```bash
-TMUX_TMPDIR=/run/user/1000/agent-log-viewer tmux attach -t agents
+TMUX_TMPDIR='/run/user/1000/agent-log-viewer' tmux attach-session -t 'agents:2.0'
 ```
+
+For an observation-only terminal, use the read-only form:
+
+```bash
+TMUX_TMPDIR='/run/user/1000/agent-log-viewer' tmux attach-session -r -t 'agents:2.0'
+```
+
+Detach with `Ctrl-b d`; the pane and its agent continue running. The endpoint prefix is required because an unqualified `tmux attach-session` can select another tmux server. If the Viewer reports that the pane changed or the tmux server restarted, refresh the page and copy a newly resolved command. Window renumbering is handled when the command is copied.
 
 Keep `LLV_LEGACY_TMUX_EXTERNAL=0` while the container-owned server still hosts legacy panes. That preserves the current `/tmp/tmux-1000` behavior. After the root handoff succeeds and its completion marker exists, deploy the Viewer with:
 

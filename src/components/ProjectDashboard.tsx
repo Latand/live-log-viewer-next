@@ -15,6 +15,7 @@ import type { Workflow } from "@/lib/workflows/types";
 
 import { TaskStrip } from "./BranchPane";
 import { clearDraftStorage, draftSrc, setDraftSrc, setDraftText } from "./DraftAgentPane";
+import { planBoardConvergence, planClose } from "./projectBoardMutations";
 import { claimedReviewerDescendantPaths, foldClaimedReviewers, isActiveFlow } from "./flows/flowModel";
 import { clearWorkflowDraftStorage } from "./workflows/WorkflowDraftPane";
 import { WorkflowStrip } from "./workflows/WorkflowStrip";
@@ -193,8 +194,6 @@ export function ProjectDashboard({
     },
     [],
   );
-
-  const persistPrefs = (next: ColumnPrefs) => board.patchColumns(next);
 
   /* Reviewer transcripts of active flows live inside their round decks:
      they never build their own groups, quiet trees or residual chips. */
@@ -411,56 +410,55 @@ export function ProjectDashboard({
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ action: "kill", path }),
     }).catch(() => {});
-    const manual = prefs.manual.filter((item) => item !== path);
-    const hidden = autoPaths.has(path) ? [...new Set([...prefs.hidden, path])] : prefs.hidden;
-    /* Closing a hand-expanded child also drops it from the expand set, so it
-       collapses back into its parent's quiet history instead of reappearing. */
-    const expanded = prefs.expanded.filter((item) => item !== path);
-    persistPrefs({ ...prefs, manual, hidden, expanded });
-    setEphemeral((prev) => (prev.includes(path) ? prev.filter((item) => item !== path) : prev));
+    /* One durable close, independent of the node's current render class: the
+       server reducer tombstones the path and strips manual/expanded membership,
+       so a node closed while momentarily outside `autoPaths` no longer loses its
+       tombstone and reappears (#60). The matching ephemeral jump target, if any,
+       clears locally. */
+    board.mutate([planClose(path, ephemeral).mutation]);
+    setEphemeral((prev) => planClose(path, prev).ephemeral);
   };
 
-  /* Latest prefs behind a ref so the auto-record effect below reads current
-     board state without re-running on every prefs change (which would oscillate
-     when auto nodes exceed the 40 cap). */
+  /* Latest manual list behind a ref so the convergence effect below reads
+     current board state without re-running on every prefs change. */
   const prefsSnapshotRef = useRef(prefs);
   useEffect(() => {
     prefsSnapshotRef.current = prefs;
   });
 
-  /* Account-migration succession replaces a predecessor transcript path with
-     its successor while retaining the stable conversation identity. Rewrite
-     path-keyed board preferences through the shared server store so placement,
-     hidden state and hand-expanded state survive across devices. */
-  useEffect(() => {
-    if (!board.loaded || board.sync === "unavailable") return;
-    const rename = new Map<string, string>();
-    for (const file of files) {
-      if (file.predecessorPath && projectKey(file) === project) rename.set(file.predecessorPath, file.path);
-    }
-    if (!rename.size) return;
-    const prev = prefsSnapshotRef.current;
-    const remap = (list: string[]) => [...new Set(list.map((path) => rename.get(path) ?? path))];
-    const next: ColumnPrefs = { manual: remap(prev.manual), hidden: remap(prev.hidden), expanded: remap(prev.expanded) };
-    if (JSON.stringify(next) === JSON.stringify(prev)) return;
-    prefsSnapshotRef.current = next;
-    board.patchColumns(next);
-  }, [board, files, project]);
+  /* Every conversation the current catalog knows for this project, keyed by
+     path — the convergence planner retires a manual entry that has left it. */
+  const projectCatalog = useMemo(
+    () => new Map(groupFiles.filter((file) => projectKey(file) === project).map((file) => [file.path, file] as const)),
+    [groupFiles, project],
+  );
+  /* Only the root key and orphan flag of each group matter to reconciliation. */
+  const rootGroups = useMemo(() => groups.map((group) => ({ key: group.key, orphanTask: group.orphanTask })), [groups]);
 
-  /* A node never vanishes on its own: every auto node is recorded as a manual
-     one, so a branch that goes quiet keeps its place until the user closes it.
-     Capped so old projects do not accumulate forever. Runs once per auto-node
-     change (like the old localStorage path) and only after the shared board has
-     loaded, so it patches on top of the server state, not over it. */
+  /* Board membership convergence, as one ordered mutation batch:
+       1. succession remap — a predecessor's tombstone/placement follows the
+          stable conversation identity to its successor path;
+       2. root reconciliation — seed every current root and retire child/subagent
+          or catalog-absent pollution from `manual`, preserving tombstones.
+     Remap precedes reconciliation so a hidden successor is honored and never
+     re-seeded. Both mutations are idempotent, so a batch that changes nothing is
+     dropped by the store before transport — no revision churn, no 40-entry
+     oscillation. Runs only after the shared board has loaded, so it replays onto
+     the server arrangement. */
   useEffect(() => {
     if (!board.loaded || board.sync === "unavailable") return;
-    const prev = prefsSnapshotRef.current;
-    const missing = [...autoPaths].filter((path) => !prev.manual.includes(path) && !prev.hidden.includes(path));
-    if (!missing.length) return;
-    board.patchColumns({ manual: [...prev.manual, ...missing].slice(-40), hidden: prev.hidden, expanded: prev.expanded });
-    /* eslint-disable-next-line react-hooks/exhaustive-deps -- board setters are
-       ref-stable; prefs are read from the ref, not tracked as deps */
-  }, [autoPaths, board.loaded, board.sync]);
+    board.mutate(
+      planBoardConvergence({
+        files,
+        groups: rootGroups,
+        manual: prefsSnapshotRef.current.manual,
+        catalog: projectCatalog,
+        project,
+      }),
+    );
+    /* eslint-disable-next-line react-hooks/exhaustive-deps -- board.mutate is
+       delegated to a ref-stable store; manual is read through that ref. */
+  }, [rootGroups, files, projectCatalog, project, board.loaded, board.sync]);
 
   /* Any open lands on the scheme: a card of another project pre-adds its node
      and switches the project; a conversation of this project joins the managed
@@ -478,23 +476,20 @@ export function ProjectDashboard({
       flashNode(file.path);
       return;
     }
-    const hidden = prefs.hidden.filter((item) => item !== file.path);
+    /* An explicit open is a restore: it lifts any tombstone and places the node
+       by role. A child conversation expands as a node wired below its parent
+       (the scheme promotes it via expandedConversationPaths); the predicate must
+       match what buildBranchGroups can actually promote (isChildConversation).
+       A compaction predecessor belongs outside the conversation and child
+       categories, so routing it to expanded renders nothing. A node that is
+       already an auto column restores in place (no stored
+       membership); everything else becomes a standalone manual node. */
     if (isChildConversation(file)) {
-      /* A child conversation expands as a node wired below its parent — clicking
-         its collapsed form promotes it into the tree via the scheme's
-         expandedConversationPaths. The predicate must match what
-         buildBranchGroups can actually promote (isChildConversation), not just
-         "has a parent": a compaction predecessor has a parent but is neither a
-         conversation nor a child conversation, so routing it to expanded would
-         render nothing. */
-      const expanded = [...new Set([...prefs.expanded, file.path])];
-      persistPrefs({ ...prefs, hidden, expanded });
+      board.restore(file.path, "expanded");
+    } else if (autoPaths.has(file.path)) {
+      board.restore(file.path, "auto");
     } else {
-      /* Everything else (a root conversation, or a parented row the tree can't
-         nest — e.g. a compaction predecessor) opens as a standalone managed
-         node. */
-      const manual = autoPaths.has(file.path) ? prefs.manual : [...new Set([...prefs.manual, file.path])];
-      persistPrefs({ ...prefs, hidden, manual });
+      board.restore(file.path, "manual");
     }
     pendingFocusRef.current = file.path;
   };

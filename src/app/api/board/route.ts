@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 
-import { boardFor, BoardStoreError, patchBoard } from "@/lib/board/store";
+import { boardFor, BoardStoreError, mutateBoard, patchBoard } from "@/lib/board/store";
 import { validateBoardPatchRequest } from "@/lib/board/validation";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
 import { ViewValidationError } from "@/lib/view/validation";
@@ -27,7 +27,9 @@ export async function PATCH(request: NextRequest): Promise<NextResponse> {
   if (rejection) { rejection.headers.set("Cache-Control", "no-store"); return rejection; }
   try {
     const payload = await validateBoardPatchRequest(request);
-    const result = patchBoard(payload.project, payload.baseRevision, payload.patch);
+    const result = payload.mutations
+      ? mutateBoard(payload.project, payload.baseRevision, payload.mutations)
+      : patchBoard(payload.project, payload.baseRevision, payload.patch!);
     if (!result.ok) return NextResponse.json({ error: "BOARD_REVISION_CONFLICT", board: result.board }, { status: 409, headers });
     return NextResponse.json({ ok: true, board: result.board }, { headers });
   } catch (error) {

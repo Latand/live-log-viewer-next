@@ -2,6 +2,7 @@ import { procBackend } from "@/lib/proc";
 import { descendantPids } from "@/lib/proc/memory";
 import { listFiles } from "@/lib/scanner";
 import { readTranscriptHosts, type TranscriptHost, type TranscriptHostSnapshot } from "@/lib/agent/transcriptHost";
+import { captureTmuxAttachReference, type TmuxAttachReference } from "@/lib/tmux";
 
 import type { FileEntry, ResourceSession, ResourcesPayload } from "./types";
 
@@ -17,10 +18,7 @@ const CACHE_MS = 10_000;
 
 /** What the kill path needs to take a snapshot session down safely: the
     stable `%N` pane id to address, and the pane pid to verify it against. */
-export interface KillTargetRef {
-  panePid: number;
-  paneId: string;
-}
+export type KillTargetRef = TmuxAttachReference;
 
 const globalStore = globalThis as unknown as {
   __llvResourcesCache?: { at: number; data: ResourcesPayload } | null;
@@ -135,7 +133,10 @@ async function buildResources(fresh: boolean): Promise<ResourcesPayload> {
         swapBytes,
         procCount: tree.length,
       });
-      killRefs.push({ target: host.display, ref: { panePid: host.panePid, paneId: host.paneId } });
+      killRefs.push({
+        target: host.display,
+        ref: captureTmuxAttachReference({ tmuxServerPid: host.tmuxServerPid, panePid: host.panePid, paneId: host.paneId }),
+      });
     }
     sessions.sort((a, b) => b.rssBytes + b.swapBytes - (a.rssBytes + a.swapBytes));
     noteSessionTargets(killRefs);

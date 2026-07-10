@@ -1,5 +1,6 @@
 import { beforeEach, expect, test } from "bun:test";
 
+import { applyBoardMutations, type BoardMutationV1 } from "@/lib/board/mutations";
 import type { BoardProjectStateV1 } from "@/lib/view/types";
 
 import {
@@ -19,32 +20,78 @@ const settle = async () => {
 };
 
 const prefsWith = (over: Partial<BoardPrefs>): BoardPrefs => ({ ...EMPTY_BOARD_PREFS, ...over });
-const boardOf = (revision: number, prefs: Partial<BoardPrefs> = {}): BoardProjectStateV1 => ({ schemaVersion: 1, revision, updatedAt: new Date(0).toISOString(), prefs: prefsWith(prefs) });
+const boardOf = (revision: number, prefs: Partial<BoardPrefs> = {}, pathAliases: Record<string, string> = {}): BoardProjectStateV1 => ({
+  schemaVersion: 1,
+  revision,
+  updatedAt: new Date(0).toISOString(),
+  pathAliases,
+  prefs: prefsWith(prefs),
+});
 
-/** In-memory board API: mirrors the real GET/PATCH revision semantics. */
+/** Same durable arrangement the server compares to treat a write as a no-op. */
+const sameReduced = (left: BoardProjectStateV1, right: BoardProjectStateV1): boolean =>
+  JSON.stringify({ prefs: left.prefs, pathAliases: left.pathAliases ?? {} }) ===
+  JSON.stringify({ prefs: right.prefs, pathAliases: right.pathAliases ?? {} });
+
+/**
+ * In-memory board API mirroring the real GET/PATCH contract: whole-array `patch`
+ * (used by the legacy seed) and the `mutations` protocol applied through the real
+ * shared reducer. A semantic no-op preserves the revision even on a stale base,
+ * exactly like `mutateBoard` on the server.
+ */
 function fakeServer(seed: Record<string, BoardProjectStateV1> = {}) {
   const projects: Record<string, BoardProjectStateV1> = { ...seed };
   const read = (project: string) => projects[project] ?? boardOf(0);
   let patchCount = 0;
+  const commit = (project: string, reduced: BoardProjectStateV1, revision: number): BoardProjectStateV1 => {
+    const next: BoardProjectStateV1 = {
+      ...reduced,
+      schemaVersion: 1,
+      revision,
+      updatedAt: new Date(0).toISOString(),
+      pathAliases: reduced.pathAliases ?? {},
+    };
+    projects[project] = next;
+    return next;
+  };
   const fetcher = async (input: string, init?: RequestInit) => {
     if (!init || (init.method ?? "GET") === "GET") {
       const project = new URL(input, "http://x").searchParams.get("project")!;
       return { ok: true, status: 200, json: async () => ({ ok: true, board: read(project) }) };
     }
     patchCount += 1;
-    const body = JSON.parse(String(init.body)) as { project: string; baseRevision: number; patch: Partial<BoardPrefs> };
+    const body = JSON.parse(String(init.body)) as {
+      project: string;
+      baseRevision: number;
+      patch?: Partial<BoardPrefs>;
+      mutations?: BoardMutationV1[];
+    };
     const current = read(body.project);
-    if (current.revision !== body.baseRevision) return { ok: false, status: 409, json: async () => ({ error: "BOARD_REVISION_CONFLICT", board: current }) };
+    const conflict = () => ({ ok: false, status: 409, json: async () => ({ error: "BOARD_REVISION_CONFLICT", board: current }) });
+    if (body.mutations) {
+      const reduced = applyBoardMutations(current, body.mutations);
+      if (sameReduced(current, reduced)) return { ok: true, status: 200, json: async () => ({ ok: true, board: current }) };
+      if (current.revision !== body.baseRevision) return conflict();
+      const next = commit(body.project, reduced, current.revision + 1);
+      return { ok: true, status: 200, json: async () => ({ ok: true, board: next }) };
+    }
+    /* Whole-array patch form: the legacy seed onto an empty revision-0 board. */
+    if (current.revision !== body.baseRevision) return conflict();
     const next = boardOf(current.revision + 1, { ...current.prefs, ...body.patch });
     projects[body.project] = next;
     return { ok: true, status: 200, json: async () => ({ ok: true, board: next }) };
   };
-  /* Simulate another device landing an accepted PATCH. */
+  /* Another device landing an accepted whole-array patch. */
   const bump = (project: string, patch: Partial<BoardPrefs>) => {
     const current = read(project);
     projects[project] = boardOf(current.revision + 1, { ...current.prefs, ...patch });
   };
-  return { projects, fetcher, bump, patchCount: () => patchCount };
+  /* Another device landing an accepted semantic mutation. */
+  const bumpMutations = (project: string, mutations: BoardMutationV1[]) => {
+    const current = read(project);
+    commit(project, applyBoardMutations(current, mutations), current.revision + 1);
+  };
+  return { projects, fetcher, bump, bumpMutations, patchCount: () => patchCount };
 }
 
 const idleScheduler = () => {
@@ -135,7 +182,7 @@ test("an edit queued during the legacy seed PATCH drains as soon as the seed lan
   };
   const store = createBoardStore({ project: "proj", fetcher, storage, scheduler: idleScheduler().scheduler });
   await settle(); // load(): GET resolves, the seed PATCH is now inflight and gated
-  store.patch({ viewMode: "list" }); // queued while the seed is inflight (drain early-returns)
+  store.mutate([{ kind: "set-presentation", viewMode: "list" }]); // queued while the seed is inflight (drain early-returns)
   expect(store.getSnapshot().prefs.viewMode).toBe("list"); // optimistic
   releaseSeed();
   await settle();
@@ -157,11 +204,11 @@ test("an empty legacy state leaves the server uninitialized", async () => {
   store.dispose();
 });
 
-test("a patch applies optimistically, then bumps the revision", async () => {
+test("a mutation applies optimistically, then bumps the revision", async () => {
   const server = fakeServer({ proj: boardOf(2) });
   const store = createBoardStore({ project: "proj", fetcher: server.fetcher, storage: null, scheduler: idleScheduler().scheduler });
   await settle();
-  store.patch({ viewMode: "list" });
+  store.mutate([{ kind: "set-presentation", viewMode: "list" }]);
   /* Immediately visible, before the PATCH resolves. */
   expect(store.getSnapshot().prefs.viewMode).toBe("list");
   expect(store.getSnapshot().sync).toBe("pending");
@@ -170,18 +217,18 @@ test("a patch applies optimistically, then bumps the revision", async () => {
   store.dispose();
 });
 
-test("a revision conflict rebases exactly once onto the server state", async () => {
+test("a revision conflict adopts the server board and replays the outbox", async () => {
   const server = fakeServer({ proj: boardOf(1) });
   const store = createBoardStore({ project: "proj", fetcher: server.fetcher, storage: null, scheduler: idleScheduler().scheduler });
   await settle();
-  /* Another device advances the board after this store loaded at revision 1. */
-  server.bump("proj", { hidden: ["/other"] }); // now revision 2
-  store.patch({ manual: ["/mine"] }); // still thinks base is 1 → 409 → rebase onto 2
+  /* Another device closes /other after this store loaded at revision 1. */
+  server.bumpMutations("proj", [{ kind: "close", path: "/other" }]); // now revision 2, hidden:[/other]
+  store.mutate([{ kind: "restore", path: "/mine", placement: "manual" }]); // base 1 → 409 → adopt rev 2, replay, retry
   await settle();
   const snap = store.getSnapshot();
   expect(snap.revision).toBe(3);
   expect(snap.sync).toBe("current");
-  /* Rebase kept the other device's change and replayed this intent on top. */
+  /* The other device's change survives and this intent replayed on top. */
   expect(snap.prefs.hidden).toEqual(["/other"]);
   expect(snap.prefs.manual).toEqual(["/mine"]);
   store.dispose();
@@ -227,7 +274,7 @@ test("a PATCH network error backs off instead of spinning, then recovers", async
   const store = createBoardStore({ project: "proj", fetcher, storage: null, scheduler: sched.scheduler });
   await settle();
 
-  store.patch({ viewMode: "list" });
+  store.mutate([{ kind: "set-presentation", viewMode: "list" }]);
   await settle();
   /* The regression: exactly one attempt, not a tight microtask storm. The old
      code re-drained synchronously and reached thousands of attempts here. */
@@ -243,7 +290,7 @@ test("a PATCH network error backs off instead of spinning, then recovers", async
   expect(patchAttempts).toBe(2);
   expect(sched.pendingTimeouts()).toBe(1);
 
-  /* Network heals; the next backoff flushes the queued patch and lands it. */
+  /* Network heals; the next backoff flushes the queued mutation and lands it. */
   failPatches = false;
   sched.runTimeouts();
   await settle();
@@ -260,5 +307,108 @@ test("a connected open is queued into the expand set", async () => {
   const store = createBoardStore({ project: "proj", fetcher: server.fetcher, storage: null, scheduler: idleScheduler().scheduler });
   await settle();
   expect(store.getSnapshot().prefs.expanded).toEqual(["/child"]);
+  store.dispose();
+});
+
+/* ── Sol frontend cases 13–19 (membership stability under the mutation contract). */
+
+test("13: remote close survives local root reconciliation conflict", async () => {
+  /* revision 1: /a and /x are both manual roots. */
+  const server = fakeServer({ proj: boardOf(1, { manual: ["/a", "/x"] }) });
+  const store = createBoardStore({ project: "proj", fetcher: server.fetcher, storage: null, scheduler: idleScheduler().scheduler });
+  await settle();
+  expect(store.getSnapshot().revision).toBe(1);
+  /* A remote device closes /x → revision 2, hidden:[/x], manual:[/a]. */
+  server.bumpMutations("proj", [{ kind: "close", path: "/x" }]);
+  expect(server.projects.proj.revision).toBe(2);
+  /* Local root reconciliation still at base revision 1: keep /a, retire /x. */
+  store.mutate([{ kind: "reconcile-roots", roots: ["/a"], removeManual: ["/x"] }]);
+  await settle();
+  const snap = store.getSnapshot();
+  /* Converges on the remote close, /x stays hidden and absent from manual, and the
+     satisfied reconciliation adds no extra revision. */
+  expect(snap.revision).toBe(2);
+  expect(snap.prefs.hidden).toEqual(["/x"]);
+  expect(snap.prefs.manual).toEqual(["/a"]);
+  expect(server.projects.proj.revision).toBe(2);
+  store.dispose();
+});
+
+test("14: the outbox retains a close through consecutive conflicts", async () => {
+  const server = fakeServer({ proj: boardOf(1, { manual: ["/x"] }) });
+  let forced = 0;
+  /* Force two 409s (a concurrent writer keeps advancing the revision), then let
+     the third attempt through. */
+  const fetcher = async (input: string, init?: RequestInit) => {
+    if (init && (init.method ?? "GET") !== "GET") {
+      forced += 1;
+      if (forced <= 2) {
+        server.bumpMutations("proj", [{ kind: "set-presentation", taskPanelOpen: forced === 1 }]);
+        return { ok: false, status: 409, json: async () => ({ error: "BOARD_REVISION_CONFLICT", board: server.projects.proj }) };
+      }
+    }
+    return server.fetcher(input, init);
+  };
+  const store = createBoardStore({ project: "proj", fetcher, storage: null, scheduler: idleScheduler().scheduler });
+  await settle();
+  store.mutate([{ kind: "close", path: "/x" }]);
+  /* Optimistically hidden the instant the close is dispatched. */
+  expect(store.getSnapshot().prefs.hidden).toEqual(["/x"]);
+  await settle();
+  const snap = store.getSnapshot();
+  /* Third attempt lands; the close is durable and never lost across the conflicts. */
+  expect(forced).toBe(3);
+  expect(snap.prefs.hidden).toEqual(["/x"]);
+  expect(snap.prefs.manual).toEqual([]);
+  expect(server.projects.proj.prefs.hidden).toEqual(["/x"]);
+  expect(server.projects.proj.prefs.manual).toEqual([]);
+  store.dispose();
+});
+
+test("15: a later restore survives the earlier close acknowledgement", async () => {
+  const server = fakeServer({ proj: boardOf(1, { manual: ["/x"] }) });
+  let releaseClose = () => {};
+  const closeGate = new Promise<void>((resolve) => (releaseClose = resolve));
+  let attempts = 0;
+  const fetcher = async (input: string, init?: RequestInit) => {
+    if (init && (init.method ?? "GET") !== "GET") {
+      attempts += 1;
+      if (attempts === 1) await closeGate; // hold the close PATCH inflight
+    }
+    return server.fetcher(input, init);
+  };
+  const store = createBoardStore({ project: "proj", fetcher, storage: null, scheduler: idleScheduler().scheduler });
+  await settle();
+  store.mutate([{ kind: "close", path: "/x" }]); // outbox=[close], drain inflight (gated)
+  await settle();
+  store.mutate([{ kind: "restore", path: "/x", placement: "manual" }]); // queued while close inflight
+  /* Optimistic: the later restore wins and /x remains visible in manual. */
+  expect(store.getSnapshot().prefs.hidden).toEqual([]);
+  expect(store.getSnapshot().prefs.manual).toEqual(["/x"]);
+  releaseClose();
+  await settle();
+  const snap = store.getSnapshot();
+  /* After the close ack the still-queued restore keeps /x restored, then persists. */
+  expect(snap.prefs.hidden).toEqual([]);
+  expect(snap.prefs.manual).toEqual(["/x"]);
+  expect(server.projects.proj.prefs.hidden).toEqual([]);
+  expect(server.projects.proj.prefs.manual).toEqual(["/x"]);
+  store.dispose();
+});
+
+test("16: a queued cross-project open dispatches explicit restore", async () => {
+  const server = fakeServer({ proj: boardOf(2, { hidden: ["/root", "/child"] }) });
+  queueColumnOpen("proj", "/root", false); // standalone → restore manual
+  queueColumnOpen("proj", "/child", true); // connected → restore expanded
+  const store = createBoardStore({ project: "proj", fetcher: server.fetcher, storage: null, scheduler: idleScheduler().scheduler });
+  await settle();
+  const snap = store.getSnapshot();
+  /* Both tombstones are lifted only through the explicit opens, each placed by role. */
+  expect(snap.prefs.hidden).toEqual([]);
+  expect(snap.prefs.manual).toEqual(["/root"]);
+  expect(snap.prefs.expanded).toEqual(["/child"]);
+  expect(server.projects.proj.prefs.hidden).toEqual([]);
+  expect(server.projects.proj.prefs.manual).toEqual(["/root"]);
+  expect(server.projects.proj.prefs.expanded).toEqual(["/child"]);
   store.dispose();
 });

@@ -24,12 +24,19 @@ export type AccountSummary = {
 
 export type LoginPhase = "idle" | "starting" | "awaiting_browser" | "awaiting_code" | "verifying" | "authenticated" | "canceling" | "canceled" | "timed_out" | "failed" | "interrupted";
 
+export type LoginResult = {
+  status: "success" | "failure" | "canceled";
+  code: string;
+  message: string;
+};
+
 export type LoginOperationSummary = {
   operationId: string;
   phase: LoginPhase;
   loginUrl: string | null;
   acceptsCode: boolean;
   deadlineAt: string;
+  result: LoginResult | null;
 };
 
 export type AccountCatalog = { claude: { active: string; accounts: AccountSummary[] }; codex: { active: string; accounts: AccountSummary[] } };

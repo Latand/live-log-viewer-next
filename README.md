@@ -103,6 +103,17 @@ LLV_TEST_PORT=8901 docker compose --profile test up -d viewer-test
 See [docs/docker.md](docs/docker.md) for the parity model, the nsenter shims,
 and volume/port details.
 
+### Attach to a live tmux pane
+
+The Viewer resolves and copies a complete command for each live pane. Paste that command into a normal shell; it selects the supervisor endpoint and the current pane coordinate. The read-only variant adds `-r`.
+
+```bash
+TMUX_TMPDIR='/run/user/1000/agent-log-viewer' tmux attach-session -t 'agents:2.0'
+TMUX_TMPDIR='/run/user/1000/agent-log-viewer' tmux attach-session -r -t 'agents:2.0'
+```
+
+Detach with `Ctrl-b d` and the agent keeps running. An unqualified tmux command may use a different server. Refresh and copy again after a stale-pane or restarted-server message; the fresh command accounts for window renumbering. See [the Docker guide](docs/docker.md#attach-to-a-viewer-pane) for the supervisor migration context.
+
 ### CLI options
 
 ```

@@ -15,8 +15,12 @@ import {
   ClipboardList,
   Command,
   Copy,
+  Eye,
+  FileDiff,
+  FileText,
   FoldVertical,
   GitBranch,
+  Globe,
   Image as ImageIcon,
   Link2,
   type LucideIcon,
@@ -27,6 +31,8 @@ import {
   PencilLine,
   Play,
   Power,
+  RotateCw,
+  Search,
   Sparkle,
   Square,
   SquareTerminal,
@@ -51,6 +57,7 @@ export {
   CircleCheck,
   Command,
   Copy,
+  Eye,
   FoldVertical,
   GitBranch,
   ImageIcon,
@@ -60,9 +67,11 @@ export {
   Mic,
   Play,
   Power,
+  RotateCw,
   Sparkle,
   Square,
   SquareTerminal,
+  Terminal,
   Trash2,
   X,
 };
@@ -88,7 +97,12 @@ export type GlyphName =
   | "message"
   | "shutdown"
   | "plan"
-  | "compact";
+  | "compact"
+  | "file"
+  | "edit"
+  | "search"
+  | "web"
+  | "spawn";
 
 const GLYPHS: Record<GlyphName, LucideIcon> = {
   shell: ChevronRight,
@@ -104,6 +118,11 @@ const GLYPHS: Record<GlyphName, LucideIcon> = {
   shutdown: Power,
   plan: ClipboardList,
   compact: FoldVertical,
+  file: FileText,
+  edit: FileDiff,
+  search: Search,
+  web: Globe,
+  spawn: GitBranch,
 };
 
 export function GlyphIcon({ name, className }: { name: GlyphName; className?: string }) {

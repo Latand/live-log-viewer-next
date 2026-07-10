@@ -9,6 +9,7 @@ import {
   panePidMap,
   panePidOf,
   paneInfo,
+  paneLaunchId,
   rememberResumePane,
   resumePaneRecords,
   sendText,
@@ -47,6 +48,8 @@ export interface TranscriptHost {
   /** Linux process start tick when available; keeps pid reuse from inheriting
       a former agent's host claim. */
   agentIdentity: string | null;
+  /** Exact receipt correlation read from tmux pane-local state. */
+  launchId: string | null;
   claimedPaths: string[];
   primaryPath: string | null;
 }
@@ -94,7 +97,8 @@ interface HostDependencies {
   spawn: (spec: ResumeSpec, text: string) => Promise<SpawnedPane>;
   remember: (pathname: string, spec: ResumeSpec, pane: SpawnedPane) => Promise<void>;
   deliver: (paneId: string, text: string) => Promise<void>;
-  reconcile?: (hosts: TranscriptHost[]) => void;
+  launchId?: (paneId: string) => Promise<string | null>;
+  reconcile?: (hosts: TranscriptHost[]) => void | Promise<void>;
   serializeDelivery?: (entry: FileEntry, task: () => Promise<HostDeliveryOutcome>) => Promise<HostDeliveryOutcome>;
 }
 
@@ -229,11 +233,11 @@ export function createTranscriptHostResolver(
       return { hosts: [], observation: "failure", observationError: paneObservation.error, canonicalFor: () => null };
     }
     if (serverPid === null || paneObservation.kind === "no-server") {
-      dependencies.reconcile?.([]);
+      await dependencies.reconcile?.([]);
       return { hosts: [], observation: "no-server", canonicalFor: () => null };
     }
     if (paneObservation.kind !== "available" || paneObservation.panes.size === 0) {
-      dependencies.reconcile?.([]);
+      await dependencies.reconcile?.([]);
       return { hosts: [], observation: "available", canonicalFor: () => null };
     }
     const { panes } = paneObservation;
@@ -261,6 +265,7 @@ export function createTranscriptHostResolver(
           cwd: agent.cwd,
           agentArgv: [...agent.argv],
           agentIdentity: dependencies.identity(agent.pid),
+          launchId: dependencies.launchId ? await dependencies.launchId(pane.paneId) : null,
           claimedPaths: [...new Set(claims.map((claim) => claim.pathname))],
           primaryPath: primary?.pathname ?? null,
           claims,
@@ -268,7 +273,7 @@ export function createTranscriptHostResolver(
       }
     }
 
-    dependencies.reconcile?.(hosts);
+    await dependencies.reconcile?.(hosts);
 
     return {
       hosts,
@@ -394,7 +399,7 @@ export function createTranscriptHostResolver(
   };
 }
 
-function reconcileRegistry(hosts: TranscriptHost[]): void {
+async function reconcileRegistry(hosts: TranscriptHost[]): Promise<void> {
   const registry = agentRegistry();
   const seen = new Set<string>();
   for (const host of hosts) {
@@ -412,8 +417,27 @@ function reconcileRegistry(hosts: TranscriptHost[]): void {
       agent: { pid: host.agentPid, startIdentity: host.agentIdentity },
       argv: host.agentArgv,
     };
+    if (host.launchId) {
+      const settled = registry.completeObservedSpawn(host.launchId, {
+        key,
+        artifactPath: host.primaryPath,
+        cwd: host.cwd,
+        accountId: null,
+        status: "live",
+        host: evidence,
+        claimEpoch: 0,
+        claimOwner: null,
+        pendingAction: null,
+      });
+      /* A mismatched pane/artifact remains quarantined. It must never fall
+         through into the generic upsert and overwrite the real receipt. */
+      if (settled.kind === "settled") {
+        seen.add(`${key.engine}:${key.sessionId}`);
+        continue;
+      }
+      continue;
+    }
     const existing = registry.snapshot().entries[`${key.engine}:${key.sessionId}`];
-    registry.completeObservedSpawn(key, host.primaryPath, host.cwd);
     registry.upsert({
       key,
       artifactPath: host.primaryPath,
@@ -480,6 +504,7 @@ const runtimeResolver = createTranscriptHostResolver({
   argv: readArgv,
   parentPid: readPpid,
   identity: procBackend.processIdentity,
+  launchId: paneLaunchId,
   spawn: spawnAgentWithPrompt,
   remember: rememberRegistryResume,
   deliver: sendText,

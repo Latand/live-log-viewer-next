@@ -1,12 +1,12 @@
 import { Check, Loader2, X } from "../../icons";
-import type { Call } from "../parse";
+import type { ToolStatus } from "../parse";
 
 /* Paths that live under a viewer transcript root can deep-link to that file;
    source-tree paths in a finding stay plain code chips. Mirrors ROOTS. */
 const TRANSCRIPT_PATH_RE = /(?:\/\.codex\/sessions\/|\/\.claude\/projects\/|\/\.claude\/plugins\/data\/codex-openai-codex\/state\/|^\/tmp\/claude-\d+\/)/;
 
 /** Run/ok/err status shown as an icon so the cmd rows read at a glance. */
-export function StatusIcon({ status, className }: { status: Call["status"]; className?: string }) {
+export function StatusIcon({ status, className }: { status: ToolStatus; className?: string }) {
   const cls = className ?? "h-3.5 w-3.5";
   if (status === "ok") return <Check className={cls} aria-hidden />;
   if (status === "err") return <X className={cls} aria-hidden />;

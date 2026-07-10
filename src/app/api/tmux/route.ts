@@ -13,7 +13,15 @@ import { canonicalTranscriptTarget, readTranscriptHosts } from "@/lib/agent/tran
 import { pathAllowed } from "@/lib/scanner/roots";
 import { allowedKillTarget, consumeKillTarget } from "@/lib/resources";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
-import { collectImagePayloads, killPane, panePidOf, resolveRequestedTmuxTarget } from "@/lib/tmux";
+import {
+  captureTmuxAttachReference,
+  collectImagePayloads,
+  killPane,
+  panePidOf,
+  resolveRequestedTmuxTarget,
+  resolveTmuxAttach,
+  tmuxEndpointDescriptor,
+} from "@/lib/tmux";
 import type { ApiError } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -21,6 +29,16 @@ export const dynamic = "force-dynamic";
 
 interface TargetResponse {
   target: string | null;
+}
+
+interface AttachResponse {
+  attach: { target: string; command: string; readOnlyCommand: string };
+  endpoint: { kind: "tmux-tmpdir"; tmuxTmpdir: string; socketName: "default"; socketPath: string };
+}
+
+interface AttachError {
+  error: string;
+  reason: "stale-pane" | "server-restarted" | "tmux-unavailable";
 }
 
 interface SendResponse {
@@ -50,9 +68,46 @@ async function targetForRequest(pid: number | null, filePath: string): Promise<s
   return pid === null ? null : resolveRequestedTmuxTarget(pid);
 }
 
-export async function GET(req: NextRequest): Promise<NextResponse<TargetResponse | ApiError>> {
+function attachJson(body: AttachResponse | AttachError, status = 200): NextResponse<AttachResponse | AttachError> {
+  return NextResponse.json(body, { status, headers: { "Cache-Control": "no-store" } });
+}
+
+export async function GET(req: NextRequest): Promise<NextResponse<TargetResponse | ApiError | AttachResponse | AttachError>> {
+  const rejection = rejectCrossOrigin(req);
+  if (rejection) return rejection;
   const pidRaw = req.nextUrl.searchParams.get("pid");
   const filePath = req.nextUrl.searchParams.get("path") ?? "";
+  const resourceTarget = req.nextUrl.searchParams.get("target") ?? "";
+  if (req.nextUrl.searchParams.get("attach") === "1") {
+    if (Boolean(filePath) === Boolean(resourceTarget)) {
+      return attachJson({ error: "path or target is required", reason: "tmux-unavailable" }, 400);
+    }
+    let reference;
+    if (filePath) {
+      if (!pathAllowed(filePath)) return attachJson({ error: "invalid transcript path", reason: "tmux-unavailable" }, 400);
+      const host = (await readTranscriptHosts(true)).canonicalFor(filePath);
+      if (host === null) return attachJson({ error: "unknown transcript host", reason: "tmux-unavailable" }, 400);
+      reference = captureTmuxAttachReference(host);
+    } else {
+      const host = allowedKillTarget(resourceTarget);
+      if (host === null) return attachJson({ error: "unknown resource target", reason: "tmux-unavailable" }, 400);
+      reference = host;
+    }
+    const resolution = await resolveTmuxAttach(reference, tmuxEndpointDescriptor());
+    if (!resolution.ok) {
+      if (resolution.reason === "stale-pane") {
+        return attachJson({ reason: resolution.reason, error: "This pane changed or closed. Refresh and try again." }, 409);
+      }
+      if (resolution.reason === "server-restarted") {
+        return attachJson({ reason: resolution.reason, error: "The tmux server restarted. Refresh and try again." }, 409);
+      }
+      return attachJson({ reason: resolution.reason, error: "The tmux endpoint is unavailable. Refresh and try again." }, 503);
+    }
+    return attachJson({
+      attach: { target: resolution.target, command: resolution.command, readOnlyCommand: resolution.readOnlyCommand },
+      endpoint: resolution.endpoint,
+    });
+  }
   const pid = Number(pidRaw);
   const hasPid = Number.isInteger(pid) && pid > 0;
   if (!hasPid && !filePath) {

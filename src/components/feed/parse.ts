@@ -12,12 +12,66 @@ import type { FileEntry } from "@/lib/types";
 
 import type { GlyphName } from "../icons";
 import { hhmm } from "../utils";
+import { diffFromApplyPatch, normalizeEdit, type DiffModel, type FileDiff } from "./diff";
+import { familyOf, summarizeTool, type ArgChip, type ToolFamily } from "./tools";
 
 /* Feed labels resolve against the active locale at build/render time; a locale
    flip rebuilds the feed (see LogFeed's memo), so cached items re-localize. */
 export const tr = (key: Parameters<typeof translate>[1], params?: Parameters<typeof translate>[2]) => translate(getLocale(), key, params);
 
-export type Call = { cmd: string; display: string; output: string; status: "run" | "ok" | "err"; label: string; icon: GlyphName; open: boolean };
+export type ToolStatus = "run" | "ok" | "err";
+
+/** Structured body attached to an expanded tool event (issue #9 §1). Only the
+    diff body is built today; the code/text variants are added when a consumer
+    (e.g. a highlighted Read body) actually needs them. */
+export type ToolBody = { type: "diff"; files: FileDiff[]; filesTruncated: boolean };
+
+/** One inner operation of a `functions.exec` orchestration record. Per-call
+    status and output are not in the transcript — the combined output attaches
+    to the outer event — so a nested call carries only what was parsed: its
+    target and summary. */
+export type NestedCall = {
+  id: string;
+  tool: string;
+  family: ToolFamily;
+  icon: GlyphName;
+  summary: string;
+};
+
+/** The two-level orchestration detail of a `functions.exec` record. */
+export type Orchestration = { source: string; sourceTruncated: boolean; calls: NestedCall[] };
+
+/**
+ * One normalized, bounded, source-agnostic tool event shared by Claude, Codex,
+ * and future engines. Every string field is redacted and capped inside the
+ * `newToolEvent`/`attachResult` funnel, so no renderer, copy, or speech
+ * consumer can reach an unbounded or unredacted value.
+ */
+export type ToolEvent = {
+  kind: "tool";
+  id: string;
+  ts: unknown;
+  /** Absolute line index of the tool_use/function_call record (provenance). */
+  srcCall: number;
+  /** Absolute line index of the result record, once attached. */
+  srcResult?: number;
+  family: ToolFamily;
+  tool: string;
+  icon: GlyphName;
+  summary: string;
+  chips: ArgChip[];
+  body?: ToolBody;
+  /** Highlight hint for an output rendered as code (Read/Write bodies). */
+  lang?: string | null;
+  /** Full redacted command text for the shell `$` line in the expanded view. */
+  command?: string;
+  status: ToolStatus;
+  statusLabel: string;
+  outputPreview: string;
+  outputTruncated: boolean;
+  open: boolean;
+  orchestration?: Orchestration;
+};
 export type CitationEntry = {
   target: string;
   line?: string;
@@ -45,7 +99,7 @@ export type Tmsg = {
 export type CmdGroupItem = {
   kind: "cmd-group";
   ids: string[];
-  calls: Call[];
+  calls: ToolEvent[];
   t0: unknown;
   t1: unknown;
   byTool: Record<string, number>;
@@ -58,9 +112,8 @@ export type Item =
   | { kind: "user"; ts: unknown; text: string }
   | { kind: "svc"; text: string }
   | { kind: "note"; text: string }
-  | { kind: "cmd"; id: string; call: Call; ts: unknown }
+  | ToolEvent
   | CmdGroupItem
-  | { kind: "edit"; files: string }
   | ReviewCardItem
   | MemCitationItem
   | Tmsg
@@ -291,43 +344,101 @@ function parseMemCitation(matchText: string, entriesText: string, idsText: strin
   return { kind: "mem-citation", entries, rolloutIds, raw: raw.raw, truncated: raw.truncated };
 }
 
-/* Strips visual boilerplate from a cmd chip caption only; `call.cmd` (the raw
-   text used in the expanded <pre>) is left untouched. A tool-name prefix like
-   "Bash: " (added by renderClaude) is preserved across the cleanup passes. */
-function displayCmd(cmd: string): string {
-  const prefixMatch = cmd.match(/^([A-Za-z][\w.]*): /);
-  const prefix = prefixMatch ? prefixMatch[0] : "";
-  let body = prefix ? cmd.slice(prefix.length) : cmd;
-  let prev: string;
-  do {
-    prev = body;
-    body = body.replace(/^export PATH=[^;]+;\s*/, "");
-    body = body.replace(/^cd\s+\S+\s*&&\s*/, "");
-    body = body.replace(/^\/usr\/bin\/zsh -lc\s+/, "");
-    // Only an outer quote pair that fully wraps the command is boilerplate;
-    // an unescaped occurrence of the same quote inside (e.g. 'a' && 'b') means
-    // the leading/trailing quotes belong to separate tokens, so leave it as is.
-    body = body.replace(/^(["'])([\s\S]*)\1$/, (whole: string, quote: string, inner: string) =>
-      new RegExp(`(?<!\\\\)${quote}`).test(inner) ? whole : inner,
-    );
-  } while (body !== prev);
-  const heredoc = body.match(/^([\w./-]+(?:\s+-)?)\s*<<\s*['"]?(\w+)['"]?/);
-  if (heredoc) body = `${heredoc[1].trim()} «heredoc»`;
-  body = body.replace(/\s+/g, " ").trim();
-  return (prefix + body).slice(0, 160);
-}
-
-function newCmd(cmd: string, icon: GlyphName = "shell"): Call {
-  const redacted = redactSecrets(cmd);
-  return { cmd: redacted, display: displayCmd(redacted), icon, output: "", status: "run", label: tr("render.executing"), open: false };
-}
-
 const CMD_GROUP_MIN = 4;
+/* Output preview caps (unchanged from the original cmd model): ok output keeps
+   the last 12 KB, an error the last 60 KB. The full command line keeps a bound
+   too, so a giant heredoc cannot balloon the DOM in the expanded view. */
+const OUTPUT_OK_MAX = 12_000;
+const OUTPUT_ERR_MAX = 60_000;
+const COMMAND_MAX = 8_000;
+const CODE_EXT_RE = /\.([A-Za-z0-9]{1,10})$/;
 
-/* First word of the tool-name prefix ("Bash: ls" → "Bash"); Codex shell/exec
-   calls carry no prefix and bucket under a generic label. */
-function toolNameOf(cmd: string): string {
-  return cmd.match(/^([A-Za-z][\w.]*): /)?.[1] ?? "cmd";
+function extLang(path: string): string | null {
+  return path.match(CODE_EXT_RE)?.[1]?.toLowerCase() ?? null;
+}
+
+/* Grouping bucket key: the verbatim tool name, falling back to the family for
+   engine calls that carry none (Codex shell, plain job-log commands). */
+function toolBucket(event: ToolEvent): string {
+  return event.tool || event.family;
+}
+
+/* A diff or an orchestration record earns its own card; simple tool rows
+   (shell/read/search/…) still fold into a cmd-group like the old cmd items. */
+function foldableTool(item: Item): item is ToolEvent {
+  return item.kind === "tool" && item.body?.type !== "diff" && !item.orchestration;
+}
+
+/* Maps a `tools.<method>` orchestration call to a canonical tool name so the
+   nested row reuses the same summarizer/icon as a top-level call. */
+const ORCH_METHOD_TOOL: Record<string, string> = {
+  exec_command: "Bash",
+  shell: "Bash",
+  bash: "Bash",
+  read_file: "Read",
+  read: "Read",
+  write_file: "Write",
+  write: "Write",
+  apply_patch: "apply_patch",
+  edit_file: "Edit",
+  search: "Grep",
+  grep: "Grep",
+  glob: "Glob",
+  fetch: "WebFetch",
+  web_search: "WebSearch",
+};
+/* Compose helpers shape display output. Render them as quiet semantic labels
+   outside full tool rows (issue #9 fresh production evidence). */
+const ORCH_HELPERS = new Set(["text", "image", "generatedImage", "store", "notify"]);
+const ORCH_CALL_RE = /\btools\.([A-Za-z_]\w*)\s*\(/g;
+const ORCH_HELPER_RE = /(?:^|[^.\w])(text|image|generatedImage|store|notify)\s*\(/g;
+const ORCH_MAX_CALLS = 16;
+
+function orchArgFor(tool: string, arg: string): Record<string, unknown> {
+  const family = familyOf(tool);
+  if (family === "shell") return { command: arg };
+  if (family === "read" || family === "write") return { file_path: arg };
+  if (family === "search") return { pattern: arg };
+  if (family === "web") return { url: arg };
+  return { value: arg };
+}
+
+/**
+ * Recognizes a Codex `functions.exec` orchestration (a `custom_tool_call` whose
+ * JS input drives `tools.*` operations) and turns it into a meaningful outer
+ * summary plus structured nested children. The nested per-call status/output is
+ * not separately recorded in the transcript — the combined output attaches to
+ * the outer event — so children carry their statically-parsed target summary;
+ * the full source and raw record expose the ground truth at level 2. Returns
+ * null for a plain custom tool, which keeps rendering as one generic row.
+ */
+function parseOrchestration(input: string): { overlay: Partial<ToolEvent>; body: Orchestration } | null {
+  if (!input || !/\btools\.[A-Za-z_]\w*\s*\(/.test(input)) return null;
+  const calls: NestedCall[] = [];
+  ORCH_CALL_RE.lastIndex = 0;
+  let match: RegExpExecArray | null;
+  while ((match = ORCH_CALL_RE.exec(input)) && calls.length < ORCH_MAX_CALLS) {
+    const method = match[1];
+    const tail = input.slice(match.index + match[0].length, match.index + match[0].length + 400);
+    const arg = tail.match(/(['"`])([^'"`]*)\1/)?.[2] ?? "";
+    const tool = ORCH_METHOD_TOOL[method] ?? method;
+    const s = summarizeTool(tool, orchArgFor(tool, arg), "codex");
+    calls.push({ id: `${method}#${calls.length}`, tool: method, family: s.family, icon: s.icon, summary: s.summary });
+  }
+  ORCH_HELPER_RE.lastIndex = 0;
+  while ((match = ORCH_HELPER_RE.exec(input)) && calls.length < ORCH_MAX_CALLS) {
+    const helper = match[1];
+    if (!ORCH_HELPERS.has(helper)) continue;
+    calls.push({ id: `${helper}#${calls.length}`, tool: helper, family: "other", icon: "note", summary: helper });
+  }
+  const toolCalls = calls.filter((call) => call.icon !== "note");
+  if (!toolCalls.length) return null;
+  const source = redactSecrets(input).slice(0, COMMAND_MAX);
+  const summary = toolCalls.length === 1 ? toolCalls[0].summary : tr("tools.orchestration", { count: toolCalls.length });
+  return {
+    overlay: { summary, icon: "cmd-group" },
+    body: { source, sourceTruncated: input.length > COMMAND_MAX, calls },
+  };
 }
 
 interface StoredEntry {
@@ -342,7 +453,7 @@ interface StoredEntry {
 }
 
 interface CallRec {
-  call: Call;
+  event: ToolEvent;
   seq: number;
 }
 
@@ -571,17 +682,84 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
       ? { shape, text: normalizedText, ts, src: curSrc, firstSeq: emitted.firstSeq, lastSeq: emitted.lastSeq }
       : null;
   };
-  const addCmd = (ts: unknown, cmd: string, callId?: string, icon?: GlyphName) => {
-    const id = callId || "plain-" + pushSeq + "-" + String(ts ?? "");
-    const call = newCmd(cmd, icon);
-    const seq = push({ kind: "cmd", id, call, ts });
-    const callRec: CallRec = { call, seq };
-    calls.set(id, callRec);
-    lastPlainCall = callRec;
-    return call;
+  /* One redaction/cap funnel for every tool event: the summary and chips are
+     already redacted by summarizeTool, the diff by diff.ts; the full command is
+     redacted and bounded here. No call site may build a ToolEvent by hand. */
+  const newToolEvent = (opts: {
+    ts: unknown;
+    id: string;
+    tool: string;
+    args?: Record<string, unknown>;
+    engine: "claude" | "codex";
+    command?: string;
+    diff?: DiffModel;
+    lang?: string | null;
+    summary?: string;
+  }): ToolEvent => {
+    const args = opts.args ?? {};
+    const family = familyOf(opts.tool);
+    const diff = opts.diff ?? (family === "edit" || family === "write" ? normalizeEdit(opts.tool, args) : undefined);
+    const s = summarizeTool(opts.tool, args, opts.engine, diff);
+    const body: ToolBody | undefined = diff && diff.files.length ? { type: "diff", files: diff.files, filesTruncated: diff.filesTruncated } : undefined;
+    const command = opts.command !== undefined ? redactSecrets(opts.command).slice(0, COMMAND_MAX) : undefined;
+    const summary = opts.summary !== undefined ? redactSecrets(opts.summary).replace(/\s+/g, " ").trim().slice(0, 160) : s.summary;
+    return {
+      kind: "tool",
+      id: opts.id,
+      ts: opts.ts,
+      srcCall: curSrc,
+      family: s.family,
+      tool: opts.tool,
+      icon: s.icon,
+      summary,
+      chips: s.chips,
+      body,
+      lang: opts.lang,
+      command,
+      status: "run",
+      statusLabel: tr("render.executing"),
+      outputPreview: "",
+      outputTruncated: false,
+      open: false,
+    };
   };
-  /* Attaches a result to its call copy-on-write: the record gets a fresh Call
-     and the owning entry a fresh item, so exactly one row changes identity. */
+  const registerCall = (event: ToolEvent): CallRec => {
+    const seq = push(event);
+    const rec: CallRec = { event, seq };
+    calls.set(event.id, rec);
+    return rec;
+  };
+  /* A shell command from any engine. `callId` is absent for plain job logs, so
+     a synthetic id keeps the row addressable (and the last one attachable). */
+  const addShell = (ts: unknown, command: string, callId?: string, tool = "Bash"): ToolEvent => {
+    const id = callId || "plain-" + pushSeq + "-" + String(ts ?? "");
+    const engine = cfg.engine === "codex" ? "codex" : "claude";
+    const event = newToolEvent({ ts, id, tool, args: { command }, engine, command });
+    const rec = registerCall(event);
+    if (!callId) lastPlainCall = rec;
+    return event;
+  };
+  /* apply_patch (either the function_call or the custom_tool_call shape) → a
+     diff tool event. Registered so a later output record can attach. */
+  const addPatch = (ts: unknown, patchText: string, callId?: string): ToolEvent => {
+    const id = callId || "plain-" + pushSeq + "-" + String(ts ?? "");
+    const event = newToolEvent({ ts, id, tool: "apply_patch", args: { input: patchText }, engine: "codex", diff: diffFromApplyPatch(patchText) });
+    registerCall(event);
+    return event;
+  };
+  /* A Codex custom tool call (both the custom_tool_call and the function_call
+     "exec" shapes). Orchestration records (`functions.exec` driving tools.*)
+     get their meaningful outer summary and structured nested children. */
+  const emitCustomTool = (ts: unknown, name: string, input: string, callId?: string): ToolEvent => {
+    const id = callId || "plain-" + pushSeq + "-" + String(ts ?? "");
+    const orchestration = parseOrchestration(input);
+    const base = newToolEvent({ ts, id, tool: name, args: { input }, engine: "codex" });
+    const event = orchestration ? { ...base, ...orchestration.overlay, orchestration: orchestration.body } : base;
+    registerCall(event);
+    return event;
+  };
+  /* Attaches a result copy-on-write: the record gets a fresh ToolEvent and the
+     owning entry a fresh item, so exactly one row changes identity. */
   const attach = (callRec: CallRec | undefined, output: string, errFlag?: boolean) => {
     if (!callRec) return null;
     const code = output.match(/exited with code (\d+)/)?.[1];
@@ -591,24 +769,34 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
       .replace(/Original token count:[^\n]*\n?/, "")
       .trim();
     const isErr = errFlag === true || (code !== undefined && code !== "0");
-    const call: Call = { ...callRec.call };
-    call.status = isErr ? "err" : "ok";
-    call.label = isErr ? (code && code !== "0" ? "exit " + code : tr("render.error")) : "ok";
-    call.open ||= isErr;
+    const prev = callRec.event;
+    let outputPreview = prev.outputPreview;
+    let outputTruncated = prev.outputTruncated;
     if (body) {
-      const limit = isErr ? 60_000 : 12_000;
-      call.output = (call.output + "\n" + redactSecrets(body)).trim().slice(-limit);
+      const limit = isErr ? OUTPUT_ERR_MAX : OUTPUT_OK_MAX;
+      const combined = (prev.outputPreview + "\n" + redactSecrets(body)).trim();
+      outputTruncated = prev.outputTruncated || combined.length > limit;
+      outputPreview = combined.slice(-limit);
     }
-    callRec.call = call;
+    const event: ToolEvent = {
+      ...prev,
+      status: isErr ? "err" : "ok",
+      statusLabel: isErr ? (code && code !== "0" ? "exit " + code : tr("render.error")) : "ok",
+      open: prev.open || isErr,
+      srcResult: curSrc,
+      outputPreview,
+      outputTruncated,
+    };
+    callRec.event = event;
     const idx = entryIndex(callRec.seq);
     if (idx >= 0 && idx < entries.length) {
       const old = entries[idx].item;
-      if (old.kind === "cmd") {
-        entries[idx] = { ...entries[idx], item: { ...old, call } };
+      if (old.kind === "tool") {
+        entries[idx] = { ...entries[idx], item: event };
         snapshot = null;
       }
     }
-    return call;
+    return event;
   };
   const addOutput = (callId: string | undefined, output: string, err?: boolean) => {
     if (!callId) return;
@@ -627,8 +815,8 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
       }
       return;
     }
-    const call = attach(calls.get(callId), output, err);
-    if (!call && output && showSvc) push({ kind: "svc", text: "output: " + redactSecrets(output).slice(0, 200) });
+    const event = attach(calls.get(callId), output, err);
+    if (!event && output && showSvc) push({ kind: "svc", text: "output: " + redactSecrets(output).slice(0, 200) });
   };
   const addSvc = (text: string) => {
     if (showSvc) push({ kind: "svc", text: text.slice(0, 300) });
@@ -814,15 +1002,14 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
         const name = textPart(p.name);
         if (name === "exec_command" || name === "shell") {
           const cmd = String(args.cmd ?? args.command ?? "").replace(/^\/usr\/bin\/zsh -lc /, "");
-          return addCmd(ts, cmd, textPart(p.call_id));
+          return void addShell(ts, cmd, textPart(p.call_id), name);
         }
         if (name === "apply_patch") {
-          const files = String(args.input ?? "").match(/(Add|Update|Delete) File: [^\n]+/g);
-          push({ kind: "edit", files: files ? files.join(", ").replace(/(Add|Update|Delete) File: /g, "") : tr("render.patch") });
-          return;
+          return void addPatch(ts, String(args.input ?? ""), textPart(p.call_id));
         }
         if (name === "write_stdin") return addSvc(tr("render.stdinSession", { id: String(args.session_id ?? "") }));
-        return addCmd(ts, name + " " + JSON.stringify(args).slice(0, 120), textPart(p.call_id), "tool");
+        if (name === "exec" || name === "functions.exec") return void emitCustomTool(ts, name, textPart(args.input), textPart(p.call_id));
+        return void registerCall(newToolEvent({ ts, id: textPart(p.call_id) || "plain-" + pushSeq + "-" + String(ts ?? ""), tool: name, args, engine: "codex" }));
       }
       if (p.type === "function_call_output") {
         const output = toolOutputText(p.output);
@@ -832,14 +1019,13 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
          raw patch text directly (unlike function_call, whose `arguments` is a
          JSON-encoded string), so no JSON.parse step is needed here. */
       if (p.type === "custom_tool_call" && textPart(p.name) === "apply_patch") {
-        const files = textPart(p.input).match(/(Add|Update|Delete) File: [^\n]+/g);
-        push({ kind: "edit", files: files ? files.join(", ").replace(/(Add|Update|Delete) File: /g, "") : tr("render.patch") });
-        return;
+        return void addPatch(ts, textPart(p.input), textPart(p.call_id) || textPart(p.id));
       }
       if (p.type === "custom_tool_call") {
         const name = textPart(p.name) || "tool";
         const input = textPart(p.input) || textPart(p.arguments);
-        return addCmd(ts, `${name}: ${input || "{}"}`, textPart(p.call_id) || textPart(p.id), "tool");
+        const id = textPart(p.call_id) || textPart(p.id);
+        return void emitCustomTool(ts, name, input, id);
       }
       if (p.type === "custom_tool_call_output") {
         const output = toolOutputText(p.output);
@@ -926,9 +1112,12 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
             addSvc(`SendMessage → ${String(input.to ?? "")} · ${textPart(rec(message).type) || tr("render.protocol")}`);
           }
         } else if (part.type === "tool_use") {
+          const name = textPart(part.name) || "tool";
           const input = rec(part.input);
-          const cmd = String(input.command ?? input.file_path ?? input.prompt ?? JSON.stringify(input));
-          addCmd(ts, textPart(part.name) + ": " + cmd.slice(0, 160), textPart(part.id), "tool");
+          const id = textPart(part.id) || "plain-" + pushSeq + "-" + String(ts ?? "");
+          const command = familyOf(name) === "shell" ? textPart(input.command) : undefined;
+          const lang = familyOf(name) === "read" ? extLang(textPart(input.file_path)) : undefined;
+          registerCall(newToolEvent({ ts, id, tool: name, args: input, engine: "claude", command, lang }));
         }
       }
       return;
@@ -990,14 +1179,21 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
       snapshot = null;
       return;
     }
-    if (/^Running command: /.test(rest)) return void addCmd(ts, rest.replace(/^Running command: /, "").replace(/^\/usr\/bin\/zsh -lc /, ""));
+    if (/^Running command: /.test(rest)) return void addShell(ts, rest.replace(/^Running command: /, "").replace(/^\/usr\/bin\/zsh -lc /, ""));
     if (/^Command (completed|failed)/.test(rest)) {
-      if (lastPlainCall) {
-        attach(lastPlainCall, /^Command failed/.test(rest) ? rest + "\n" + tr("render.jobLogNote") : rest, /^Command failed/.test(rest));
-      }
+      /* A job log carries no stdout: attach only the status line. The absent
+         output surfaces as the compact "no output captured" chip in the card,
+         replacing the old apology paragraph (issue #9 §6). */
+      if (lastPlainCall) attach(lastPlainCall, rest, /^Command failed/.test(rest));
       return;
     }
-    if (/^Applying \d+ file/.test(rest)) return void push({ kind: "edit", files: rest });
+    if (/^Applying \d+ file/.test(rest)) {
+      /* A job log only announces the patch — no output record ever carries this
+         id. Emit it already-complete (like a statically-parsed nested call) and
+         skip registerCall, so it never sits spinning "executing…" forever. */
+      const event = newToolEvent({ ts, id: "plain-" + pushSeq + "-" + String(ts ?? ""), tool: "apply_patch", engine: "codex", summary: rest });
+      return void push({ ...event, status: "ok", statusLabel: "ok" });
+    }
     if (m && !/^(Running|Command|Applying)/.test(rest)) return addProse(ts, rest);
     if (pushBlobIfHuge(line)) return;
     push({ kind: "raw", text: redactSecrets(line), err: /error|failed|traceback|exception/i.test(line) });
@@ -1042,7 +1238,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
     while (entries.length && entries[0].src < start) {
       const gone = entries.shift()!;
       snapshot = null;
-      if (gone.item.kind === "cmd") {
+      if (gone.item.kind === "tool") {
         const callRec = calls.get(gone.item.id);
         /* A later tool_result for an evicted call now falls back to the svc
            row, exactly like a full re-parse of the shortened window would. */
@@ -1067,56 +1263,57 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
     return crossedEchoSeam || (plainBlock !== null && plainBlock.src < start);
   };
 
-  /* Collapses runs of >=4 consecutive cmd entries into one cmd-group item so a
-     long unbroken command series reads as a single summary line. "think" items
-     inside a run don't break it (and are absorbed into the group, since they
-     carry no signal once the run they annotate is folded); prose/user/tmsg/
-     edit/review/image do break it. The last run of a live transcript is never
-     folded, so the currently running call always stays visible. A group whose
-     members' calls are all identity-equal to the previous snapshot's is reused
-     as-is, keeping its card memoized. */
+  /* Collapses runs of >=4 consecutive foldable tool entries into one cmd-group
+     item so a long unbroken command series reads as a single summary line.
+     "think" items inside a run don't break it (and are absorbed into the group,
+     since they carry no signal once the run they annotate is folded); prose/
+     user/tmsg/review/image, plus diff and orchestration tool events, break it.
+     The last run of a live transcript is never folded, so the currently running
+     call always stays visible. A group whose members' events are all
+     identity-equal to the previous snapshot's is reused as-is, keeping its card
+     memoized. */
   const buildSnapshot = (isLive: boolean): FeedSnapshot => {
     const out: FeedEntry[] = [];
     const nextGroups = new Map<number, CmdGroupItem>();
     let i = 0;
     while (i < entries.length) {
       const head = entries[i];
-      if (head.item.kind !== "cmd") {
+      if (!foldableTool(head.item)) {
         out.push({ key: String(head.seq), item: head.item });
         i += 1;
         continue;
       }
       let j = i;
-      const cmdEntries: { seq: number; item: Extract<Item, { kind: "cmd" }> }[] = [];
+      const toolEntries: { seq: number; item: ToolEvent }[] = [];
       while (j < entries.length) {
         const cur = entries[j];
-        if (cur.item.kind === "cmd") cmdEntries.push({ seq: cur.seq, item: cur.item });
+        if (foldableTool(cur.item)) toolEntries.push({ seq: cur.seq, item: cur.item });
         else if (cur.item.kind !== "think") break;
         j += 1;
       }
       const isLastRun = j === entries.length;
-      if (cmdEntries.length >= CMD_GROUP_MIN && !(isLive && isLastRun)) {
-        const gkey = cmdEntries[0].seq;
+      if (toolEntries.length >= CMD_GROUP_MIN && !(isLive && isLastRun)) {
+        const gkey = toolEntries[0].seq;
         const prev = prevGroups.get(gkey);
         let group: CmdGroupItem;
-        if (prev && prev.calls.length === cmdEntries.length && cmdEntries.every((entry, k) => prev.calls[k] === entry.item.call)) {
+        if (prev && prev.calls.length === toolEntries.length && toolEntries.every((entry, k) => prev.calls[k] === entry.item)) {
           group = prev;
         } else {
           const byTool: Record<string, number> = {};
           let okCount = 0;
           let errCount = 0;
-          for (const entry of cmdEntries) {
-            const tool = toolNameOf(entry.item.call.cmd);
+          for (const entry of toolEntries) {
+            const tool = toolBucket(entry.item);
             byTool[tool] = (byTool[tool] ?? 0) + 1;
-            if (entry.item.call.status === "ok") okCount += 1;
-            else if (entry.item.call.status === "err") errCount += 1;
+            if (entry.item.status === "ok") okCount += 1;
+            else if (entry.item.status === "err") errCount += 1;
           }
           group = {
             kind: "cmd-group",
-            ids: cmdEntries.map((entry) => entry.item.id),
-            calls: cmdEntries.map((entry) => entry.item.call),
-            t0: cmdEntries[0]?.item.ts,
-            t1: cmdEntries.at(-1)?.item.ts,
+            ids: toolEntries.map((entry) => entry.item.id),
+            calls: toolEntries.map((entry) => entry.item),
+            t0: toolEntries[0]?.item.ts,
+            t1: toolEntries.at(-1)?.item.ts,
             byTool,
             okCount,
             errCount,

@@ -2,7 +2,7 @@
 
 import { memo } from "react";
 
-import { Brain, Check, ChevronUp, Command, GlyphIcon, Mail, Sparkle, X } from "../icons";
+import { Brain, ChevronUp, Command, Check, Mail, Sparkle, X } from "../icons";
 import { hhmm } from "../utils";
 import { CopyButton } from "./CopyButton";
 import { InboxImageCard } from "./InboxImage";
@@ -15,8 +15,8 @@ import { ImageCard } from "./cards/ImageCard";
 import { MemCitationCard } from "./cards/MemCitationCard";
 import { ProtocolMessageBody, parseProtocolPayload } from "./cards/ProtocolMessage";
 import { ReviewCard } from "./cards/ReviewCard";
-import { StatusIcon } from "./cards/shared";
 import { SysMsgCard } from "./cards/SysMsgCard";
+import { ToolCard } from "./cards/ToolCard";
 
 /* Memoized: feed items are immutable after buildFeed, so a pane re-render
    (poll tick, camera state, files refresh) skips re-parsing markdown for
@@ -78,47 +78,15 @@ export const FeedItem = memo(function FeedItem({ item }: { item: Item }) {
       </div>
     );
   }
-  if (item.kind === "cmd") {
-    const statusCls = item.call.status === "ok" ? "text-ok" : item.call.status === "err" ? "text-err" : "text-dim";
-    return (
-      <details className="my-2.5 ml-9 overflow-hidden rounded-[14px] border border-line bg-panel shadow-card" open={item.call.open}>
-        <summary className="flex cursor-pointer list-none items-center gap-2.5 px-3.5 py-2">
-          <span className="flex h-6.5 w-6.5 shrink-0 items-center justify-center rounded-lg bg-chip">
-            <GlyphIcon name={item.call.icon} className="h-4 w-4" />
-          </span>
-          <code className="max-w-[70%] overflow-hidden text-ellipsis whitespace-nowrap rounded-md bg-chip px-2 py-0.5 font-mono text-[12.5px]">{item.call.display}</code>
-          <span className={`ml-auto inline-flex shrink-0 items-center gap-1 text-xs font-semibold ${statusCls}`}>
-            <StatusIcon status={item.call.status} />
-            {item.call.label}
-          </span>
-        </summary>
-        <pre className="max-h-[340px] overflow-auto whitespace-pre-wrap border-t border-line bg-[#fafafc] px-3.5 py-2.5 font-mono text-[12.5px]">
-          {"$ " + item.call.cmd + (item.call.output ? "\n" + item.call.output : "\n" + tr("render.noOutputInLog"))}
-        </pre>
-      </details>
-    );
-  }
+  if (item.kind === "tool") return <ToolCard event={item} />;
   if (item.kind === "cmd-group") return <CmdGroupCard item={item} />;
-  if (item.kind === "edit") {
-    return (
-      <div className="my-2.5 ml-9 flex items-center gap-3 rounded-[14px] border border-line bg-panel px-3.5 py-2.5 shadow-card">
-        <span className="flex h-7.5 w-7.5 items-center justify-center rounded-lg bg-chip">
-          <GlyphIcon name="note" className="h-4 w-4" />
-        </span>
-        <div>
-          <div className="text-[13.5px] font-semibold">{item.files}</div>
-          <div className="text-xs text-dim">{tr("render.filesChanged")}</div>
-        </div>
-      </div>
-    );
-  }
   if (item.kind === "tmsg") {
     const protocol = parseProtocolPayload(item.text);
     const long = item.text.length > 420 || item.text.split("\n").length > 6;
     return (
-      <div className="my-2.5 ml-9 overflow-hidden rounded-[14px] border border-accent/25 bg-[#f8f8fd] shadow-card">
+      <div className="my-2.5 ml-9 overflow-hidden rounded-[14px] border border-accent/25 bg-tmsg shadow-card">
         <div className="flex items-center gap-2 px-3.5 pt-2">
-          <span className="flex h-6.5 w-6.5 shrink-0 items-center justify-center rounded-lg bg-[#ecebfb] text-accent">
+          <span className="flex h-6.5 w-6.5 shrink-0 items-center justify-center rounded-lg bg-accent-soft text-accent">
             <Mail className="h-3.5 w-3.5" aria-hidden />
           </span>
           <span className="text-[11px] font-semibold text-dim">{item.dir === "out" ? tr("render.toDir") : tr("render.fromDir")}</span>
@@ -142,7 +110,7 @@ export const FeedItem = memo(function FeedItem({ item }: { item: Item }) {
               {item.summary ? <div className="text-[13px] font-bold">{md(item.summary)}</div> : null}
               {long ? (
                 <details className="group/tmsg mt-0.5 whitespace-pre-wrap break-words text-[13px]">
-                  <summary className="cursor-pointer list-none text-[12.5px] text-[#555] [&::-webkit-details-marker]:hidden">
+                  <summary className="cursor-pointer list-none text-[12.5px] text-faint [&::-webkit-details-marker]:hidden">
                     <span className="group-open/tmsg:hidden">
                       {item.text.slice(0, 260).trimEnd()}… <span className="font-semibold text-accent">{tr("common.showAll")}</span>
                     </span>
@@ -186,5 +154,5 @@ export const FeedItem = memo(function FeedItem({ item }: { item: Item }) {
   }
   if (item.kind === "svc") return <div className="my-1 break-words text-[11.5px] text-dim">{item.text}</div>;
   if (item.kind === "note") return <div className="my-2 break-words text-[12.5px] text-dim">{md(item.text)}</div>;
-  return <div className={`my-0.5 break-words text-[12.5px] ${item.err ? "text-err" : "text-[#555]"}`}>{item.text}</div>;
+  return <div className={`my-0.5 break-words text-[12.5px] ${item.err ? "text-err" : "text-faint"}`}>{item.text}</div>;
 });

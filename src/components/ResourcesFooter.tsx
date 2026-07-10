@@ -6,6 +6,7 @@ import { useLocale } from "@/lib/i18n";
 import type { ResourceSession, ResourcesPayload } from "@/lib/types";
 
 import { X } from "./icons";
+import { AttachControls } from "./resources/AttachControls";
 import { activityDot, engineTintOf, fmtAge } from "./utils";
 
 const POLL_MS = 30_000;
@@ -315,6 +316,7 @@ function CleanupPanel({
               armed={armed === session.target}
               onArm={() => setArmed(session.target)}
               onKill={() => void killOne(session)}
+              onRefresh={onRefresh}
             />
           ))
         )}
@@ -382,12 +384,15 @@ function SessionRow({
   armed,
   onArm,
   onKill,
+  onRefresh,
 }: {
   session: ResourceSession;
   busy: boolean;
   armed: boolean;
   onArm: () => void;
   onKill: () => void;
+  /** Re-poll the snapshot — the attach control's stale-pane recovery. */
+  onRefresh: () => Promise<void>;
 }) {
   const { t } = useLocale();
   const tint = engineTintOf(session.engine ?? "");
@@ -398,52 +403,55 @@ function SessionRow({
      agent mid-turn with one stray tap. */
   const needsArm = live && !armed;
   return (
-    <div className="flex items-center gap-2 px-3 py-1.5 hover:bg-bg">
-      <span className={`h-2 w-2 shrink-0 rounded-full ${activityDot(session.activity ?? "idle")}`} />
-      <span
-        className="shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-bold"
-        style={{ backgroundColor: tint.soft, color: tint.color }}
-      >
-        {session.engine === "codex" ? "Codex" : session.engine === "claude" ? "Claude" : "?"}
-      </span>
-      <span
-        className="min-w-0 flex-1"
-        title={[session.cwd, session.target, t("resources.procs", { count: session.procCount })].filter(Boolean).join(" · ")}
-      >
-        <span className="block truncate text-[12px] font-semibold">
-          {session.title ?? (session.cwd ? tailPath(session.cwd) : t("resources.orphan"))}
+    <div className="px-3 py-1.5 hover:bg-bg">
+      <div className="flex items-center gap-2">
+        <span className={`h-2 w-2 shrink-0 rounded-full ${activityDot(session.activity ?? "idle")}`} />
+        <span
+          className="shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-bold"
+          style={{ backgroundColor: tint.soft, color: tint.color }}
+        >
+          {session.engine === "codex" ? "Codex" : session.engine === "claude" ? "Claude" : "?"}
         </span>
-        <span className="block truncate text-[10.5px] text-dim">
-          {session.title === null ? t("resources.orphan") + " · " : session.project ? session.project + " · " : ""}
-          {lastActive !== null ? fmtAge(lastActive) : session.target}
-        </span>
-      </span>
-      <span className="shrink-0 text-right">
-        <span className="block text-[11.5px] font-bold tabular-nums">{fmtBytes(session.rssBytes)}</span>
-        {session.swapBytes > 0 ? (
-          <span className="block text-[10px] tabular-nums text-dim">
-            {t("resources.swapShare", { amount: fmtBytes(session.swapBytes) })}
+        <span
+          className="min-w-0 flex-1"
+          title={[session.cwd, session.target, t("resources.procs", { count: session.procCount })].filter(Boolean).join(" · ")}
+        >
+          <span className="block truncate text-[12px] font-semibold">
+            {session.title ?? (session.cwd ? tailPath(session.cwd) : t("resources.orphan"))}
           </span>
-        ) : null}
-      </span>
-      <button
-        type="button"
-        disabled={busy}
-        aria-disabled={needsArm || busy}
-        title={live ? t("resources.killLiveHint") : t("resources.killHint")}
-        onClick={() => (needsArm ? onArm() : onKill())}
-        className={[
-          "shrink-0 rounded-[8px] border px-2 py-1 text-[11px] font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-err/40",
-          busy ? "cursor-wait opacity-50" : "",
-          armed
-            ? "border-err bg-err text-white"
-            : needsArm
-              ? "border-line text-dim opacity-60 hover:opacity-90"
-              : "border-err/40 text-err hover:bg-err/10",
-        ].join(" ")}
-      >
-        {armed ? t("resources.confirm") : t("resources.kill")}
-      </button>
+          <span className="block truncate text-[10.5px] text-dim">
+            {session.title === null ? t("resources.orphan") + " · " : session.project ? session.project + " · " : ""}
+            {lastActive !== null ? fmtAge(lastActive) : session.target}
+          </span>
+        </span>
+        <span className="shrink-0 text-right">
+          <span className="block text-[11.5px] font-bold tabular-nums">{fmtBytes(session.rssBytes)}</span>
+          {session.swapBytes > 0 ? (
+            <span className="block text-[10px] tabular-nums text-dim">
+              {t("resources.swapShare", { amount: fmtBytes(session.swapBytes) })}
+            </span>
+          ) : null}
+        </span>
+        <button
+          type="button"
+          disabled={busy}
+          aria-disabled={needsArm || busy}
+          title={live ? t("resources.killLiveHint") : t("resources.killHint")}
+          onClick={() => (needsArm ? onArm() : onKill())}
+          className={[
+            "shrink-0 rounded-[8px] border px-2 py-1 text-[11px] font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-err/40",
+            busy ? "cursor-wait opacity-50" : "",
+            armed
+              ? "border-err bg-err text-white"
+              : needsArm
+                ? "border-line text-dim opacity-60 hover:opacity-90"
+                : "border-err/40 text-err hover:bg-err/10",
+          ].join(" ")}
+        >
+          {armed ? t("resources.confirm") : t("resources.kill")}
+        </button>
+      </div>
+      <AttachControls target={session.target} onRefresh={() => void onRefresh()} />
     </div>
   );
 }

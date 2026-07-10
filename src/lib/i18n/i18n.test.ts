@@ -41,3 +41,38 @@ describe("new dictation-cap copy is present and interpolates", () => {
     expect(translate("uk", "mic.timeLeft", { time: "0:45" })).not.toContain("{time}");
   });
 });
+
+describe("attach copy (issue #68) is present in both locales", () => {
+  const keys = [
+    "attach.attach",
+    "attach.readonly",
+    "attach.copy",
+    "attach.copyReadonly",
+    "attach.hint",
+    "attach.readonlyHint",
+    "attach.loading",
+    "attach.copied",
+    "attach.copiedReadonly",
+    "attach.stale",
+    "attach.restarted",
+    "attach.unavailable",
+    "attach.badRequest",
+    "attach.network",
+    "attach.clipboard",
+    "attach.refresh",
+  ] as const;
+
+  test("every attach key exists in en and uk", () => {
+    for (const key of keys) {
+      expect(key in en, `en ${key}`).toBe(true);
+      expect(key in uk, `uk ${key}`).toBe(true);
+    }
+  });
+
+  test("the stale/restart copy tells the user to refresh in both languages", () => {
+    expect(en["attach.stale"]).toBe("This pane changed or closed. Refresh and try again.");
+    expect(uk["attach.stale"]).toContain("Онови");
+    expect(en["attach.restarted"]).toContain("Refresh");
+    expect(uk["attach.restarted"]).toContain("Онови");
+  });
+});

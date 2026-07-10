@@ -8,15 +8,18 @@ const claudeFile = { path: "/tmp/x.jsonl", engine: "claude", fmt: "claude", acti
 const codexFile = { path: "/tmp/x.jsonl", engine: "codex", fmt: "codex", activity: "recent" } as FileEntry;
 const plainFile = { path: "/tmp/x.output", engine: "codex", fmt: "plain", activity: "recent" } as FileEntry;
 
-/* Auto-incrementing ids inside plain-cmd items depend on how many pushes the
+/* Auto-incrementing ids inside plain tool items depend on how many pushes the
    session has ever seen, so a slid window numbers them differently than a
-   fresh one-shot parse. The ids are opaque uniqueness tokens; normalize them
-   before structural comparison. */
+   fresh one-shot parse. Likewise srcCall/srcResult are absolute stream indices,
+   which differ between a windowed parse and a start-0 one-shot for the same
+   logical line. Both are opaque provenance tokens; normalize them out before
+   structural comparison. */
 function normalize(items: Item[]): unknown {
   return JSON.parse(
-    JSON.stringify(items, (key, value) =>
-      typeof value === "string" && (key === "id" || key === "ids") ? value.replace(/^plain-\d+-/, "plain-N-") : value,
-    ),
+    JSON.stringify(items, (key, value) => {
+      if (key === "srcCall" || key === "srcResult") return 0;
+      return typeof value === "string" && (key === "id" || key === "ids") ? value.replace(/^plain-\d+-/, "plain-N-") : value;
+    }),
   );
 }
 
@@ -186,17 +189,22 @@ describe("feed session parity with one-shot parse", () => {
       }),
     ];
     const feed = buildFeed(codexFile, lines, false, "");
-    const commands = feed.items.filter((item) => item.kind === "cmd");
+    const commands = feed.items.filter((item) => item.kind === "tool");
     expect(commands).toHaveLength(2);
     const command = commands[0];
-    if (command?.kind !== "cmd") throw new Error("expected cmd item");
-    expect(command.call.display).toContain("exec");
-    expect(command.call.output).toContain("## main");
-    expect(command.call.status).toBe("ok");
+    if (command?.kind !== "tool") throw new Error("expected tool item");
+    // A tools.exec_command orchestration: the outer summary names the nested
+    // operation, the combined output attaches to the outer event.
+    expect(command.orchestration?.calls.length).toBeGreaterThanOrEqual(1);
+    expect(command.summary).toContain("rtk git status");
+    expect(command.outputPreview).toContain("## main");
+    expect(command.status).toBe("ok");
     const failed = commands[1];
-    if (failed?.kind !== "cmd") throw new Error("expected failed cmd item");
-    expect(failed.call.status).toBe("err");
-    expect(failed.call.output).toContain("Error: boom");
+    if (failed?.kind !== "tool") throw new Error("expected failed tool item");
+    expect(failed.orchestration).toBeUndefined();
+    expect(failed.summary).toContain("exec");
+    expect(failed.status).toBe("err");
+    expect(failed.outputPreview).toContain("Error: boom");
     assertParity(codexFile, lines, { chunks: [1] });
   });
 
@@ -211,6 +219,16 @@ describe("feed session parity with one-shot parse", () => {
     ];
     assertParity(plainFile, lines, { chunks: [1] });
     assertParity(plainFile, lines, { cap: 3, chunks: [2, 1] });
+  });
+
+  test("a job-log 'Applying N files' line renders complete with no perpetual spinner", () => {
+    const lines = ["[10:00] Applying 3 files to the working tree"];
+    const feed = buildFeed(plainFile, lines, false, "");
+    const tool = feed.items.find((item) => item.kind === "tool");
+    if (tool?.kind !== "tool") throw new Error("expected tool item");
+    expect(tool.status).toBe("ok");
+    expect(tool.summary).toContain("3 files");
+    assertParity(plainFile, lines, { chunks: [1] });
   });
 
   test("window slide past a tool_use: its result degrades to the svc fallback", () => {
@@ -250,8 +268,8 @@ describe("feed session identity stability", () => {
     // the resolved call is a fresh object with the result attached
     expect(after.items[1].item).not.toBe(before.items[1].item);
     const resolved = after.items[1].item;
-    if (resolved.kind !== "cmd") throw new Error("expected cmd item");
-    expect(resolved.call.status).toBe("ok");
+    if (resolved.kind !== "tool") throw new Error("expected tool item");
+    expect(resolved.status).toBe("ok");
     expect(after.items[1].key).toBe(before.items[1].key);
   });
 
@@ -564,6 +582,63 @@ describe("Codex assistant prose coalescing", () => {
       const secondOnly = sliding.feed([lines[1]], 1, false);
       expect(secondOnly.items.map((entry) => entry.item)).toEqual(buildFeed(codexFile, [lines[1]], false, "").items);
     }
+  });
+});
+
+describe("Codex functions.exec orchestration", () => {
+  const orch = (input: string, callId: string, ts = "t") =>
+    JSON.stringify({ type: "response_item", timestamp: ts, payload: { type: "custom_tool_call", id: "ctc-" + callId, call_id: callId, name: "exec", status: "completed", input } });
+  const orchOutput = (callId: string, text: string) =>
+    JSON.stringify({ type: "response_item", timestamp: "t", payload: { type: "custom_tool_call_output", call_id: callId, output: [{ type: "input_text", text }] } });
+
+  test("four concurrent tools read as one record with structured, distinct children", () => {
+    const src =
+      'const r = await Promise.all([tools.exec_command({cmd:"git status"}), tools.exec_command({cmd:"git diff"}), tools.read_file({path:"src/a.ts"}), tools.exec_command({cmd:"ls -la"})]); text(r);';
+    const feed = buildFeed(codexFile, [orch(src, "c1"), orchOutput("c1", "## main")], false, "");
+    const tools = feed.items.filter((item) => item.kind === "tool");
+    expect(tools).toHaveLength(1);
+    const event = tools[0];
+    if (event.kind !== "tool") throw new Error("expected tool");
+    const nested = event.orchestration?.calls.filter((call) => call.icon !== "note") ?? [];
+    expect(nested).toHaveLength(4);
+    expect(event.summary).toContain("4");
+    expect(new Set(nested.map((call) => call.summary)).size).toBeGreaterThan(1);
+    // outer + nested ids are available for diagnosis
+    expect(event.id).toBe("c1");
+    expect(nested.every((call) => call.id.length > 0)).toBe(true);
+    // combined output attaches to the outer event
+    expect(event.outputPreview).toContain("## main");
+    // compose helper text() becomes a quiet label outside the tool rows
+    expect(event.orchestration?.calls.some((call) => call.tool === "text" && call.icon === "note")).toBe(true);
+  });
+
+  test("consecutive exec records with different nested calls stay distinguishable and never fold", () => {
+    const lines = [orch('await tools.exec_command({cmd:"aaa"})', "a"), orch('await tools.exec_command({cmd:"bbb"})', "b"), orch('await tools.exec_command({cmd:"ccc"})', "c"), orch('await tools.exec_command({cmd:"ddd"})', "d")];
+    const tools = buildFeed(codexFile, lines, false, "").items.filter((item) => item.kind === "tool");
+    // four consecutive orchestration rows, each its own card (not a cmd-group)
+    expect(tools).toHaveLength(4);
+    expect(new Set(tools.map((item) => (item.kind === "tool" ? item.summary : ""))).size).toBe(4);
+    assertParity(codexFile, lines, { chunks: [1] });
+  });
+
+  test("supports the function_call exec shape and redacts source", () => {
+    const fc = JSON.stringify({
+      type: "response_item",
+      timestamp: "t",
+      payload: { type: "function_call", name: "exec", call_id: "f1", arguments: JSON.stringify({ input: 'await tools.exec_command({cmd:"echo token=SECRETLEAK99"})' }) },
+    });
+    const feed = buildFeed(codexFile, [fc], false, "");
+    const event = feed.items.find((item) => item.kind === "tool");
+    if (event?.kind !== "tool") throw new Error("expected tool");
+    expect(event.orchestration).toBeDefined();
+    expect(JSON.stringify(event)).not.toContain("SECRETLEAK99");
+  });
+
+  test("a plain custom tool without tools.* stays a single generic row", () => {
+    const feed = buildFeed(codexFile, [orch("return 2 + 2;", "p1")], false, "");
+    const event = feed.items.find((item) => item.kind === "tool");
+    if (event?.kind !== "tool") throw new Error("expected tool");
+    expect(event.orchestration).toBeUndefined();
   });
 });
 
