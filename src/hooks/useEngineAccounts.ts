@@ -30,7 +30,7 @@ export type AccountOption = {
   effective?: AccountEffective | null;
 };
 export type AccountLoadState = "loading" | "ready" | "error";
-export type AccountOperation = "refresh" | "select" | "add" | "migrate" | "policy";
+export type AccountOperation = "refresh" | "add" | "migrate" | "policy";
 
 export interface AccountNotice {
   kind: "error" | "success";
@@ -83,15 +83,18 @@ export interface EngineAccountsSnapshot {
 export interface EngineAccountsState extends EngineAccountsSnapshot {
   engine: Engine;
   refresh: () => Promise<boolean>;
-  select: (id: string) => Promise<boolean>;
   add: (label: string) => Promise<boolean>;
   retryNotice: () => Promise<boolean>;
-  /** Non-mutating scope preview for the confirm step; null when unsupported. */
+  /** Non-mutating scope preview for the confirm step; null when it fails. Every
+      switch surface previews first — there is no mode-less bare switch anymore. */
   preview: (id: string) => Promise<MigrationPreview | null>;
-  /** Confirmed engine-wide migration to `id`; coalesces to the latest target. */
+  /** Confirmed engine-wide migration to `id`; coalesces to the latest target.
+      Also the zero-scope path when a preview finds nothing live to move. */
   selectAndMigrate: (id: string, previewRevision?: number) => Promise<boolean>;
   /** Halts a draining intent (idempotent). */
   stopMigration: () => Promise<boolean>;
+  /** Re-runs the failed sessions of the current intent (idempotent). */
+  retryFailedMigration: () => Promise<boolean>;
   /** Toggles the per-engine auto-balancer. */
   setAutoBalance: (enabled: boolean) => Promise<boolean>;
 }
@@ -146,7 +149,7 @@ function refreshFailure(): AccountNotice {
   return { kind: "error", operation: "refresh", messageKey: "accounts.refreshFailed", action: { type: "retry", operation: "refresh" } };
 }
 
-function mutationFailure(operation: "select" | "add" | "migrate", value: string): AccountNotice {
+function mutationFailure(operation: "add" | "migrate", value: string): AccountNotice {
   return {
     kind: "error",
     operation,
@@ -245,31 +248,6 @@ export function createEngineAccountsStore(
     });
   };
 
-  const select = (id: string): Promise<boolean> => {
-    if (!id || id === snapshot.active) return Promise.resolve(false);
-    return runMutation("select", async () => {
-      const previous = snapshot.active;
-      patchSnapshot({ active: id, identityVersion: snapshot.identityVersion + 1 });
-      try {
-        const response = await fetcher(activeUrl, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ id }),
-        });
-        if (!response.ok) throw new Error("account selection failed");
-      } catch {
-        patchSnapshot({ active: previous, identityVersion: snapshot.identityVersion + 1, notice: mutationFailure("select", id) });
-        await refresh();
-        return false;
-      }
-      // The optimistic invalidation may have raced the server-side mutation.
-      // A confirmed version schedules one authoritative limits read for this id.
-      patchSnapshot({ identityVersion: snapshot.identityVersion + 1 });
-      await refresh();
-      return true;
-    });
-  };
-
   const add = (label: string): Promise<boolean> => {
     const trimmed = label.trim();
     if (!trimmed) return Promise.resolve(false);
@@ -306,9 +284,9 @@ export function createEngineAccountsStore(
     });
   };
 
-  /** Non-mutating scope preview. Sent only when the coordinator is present
-      (guarded by the caller via {@link EngineAccountsSnapshot.autoBalance}) so a
-      legacy `/active` route that ignores `mode` never switches as a side effect. */
+  /** Non-mutating scope preview: every switch surface runs this first, so the
+      only writes to `/active` are `mode:"preview"` and `mode:"migrate"` — never a
+      mode-less bare switch. The route treats `mode:"preview"` as read-only. */
   const preview = async (id: string): Promise<MigrationPreview | null> => {
     if (!id) return null;
     // The client already knows the target it asked to preview, so it canonicalises
@@ -347,7 +325,9 @@ export function createEngineAccountsStore(
         await refresh();
         return false;
       }
-      patchSnapshot({ identityVersion: snapshot.identityVersion + 1 });
+      // A committed migration clears any lingering switch-failure notice so a
+      // recovered retry doesn't leave a stale error behind.
+      patchSnapshot({ identityVersion: snapshot.identityVersion + 1, notice: snapshot.notice?.operation === "migrate" ? null : snapshot.notice });
       await refresh();
       return true;
     });
@@ -366,6 +346,29 @@ export function createEngineAccountsStore(
           body: JSON.stringify({ action: "stop", expectedRevision: snapshot.migration?.revision }),
         });
         if (!response.ok) throw new Error("stop failed");
+      } catch {
+        patchSnapshot({ notice: mutationFailure("migrate", intentId) });
+        await refresh();
+        return false;
+      }
+      await refresh();
+      return true;
+    });
+  };
+
+  const retryFailedMigration = (): Promise<boolean> => {
+    const intentId = snapshot.migration?.intentId;
+    if (!intentId) return Promise.resolve(false);
+    return runMutation("migrate", async () => {
+      try {
+        // Frozen retry-failed route (Sol contract): re-run only the
+        // failed-recoverable sessions of the intent, fenced by its revision.
+        const response = await fetcher(`/api/account-migrations/${encodeURIComponent(intentId)}`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ action: "retry-failed", expectedRevision: snapshot.migration?.revision }),
+        });
+        if (!response.ok) throw new Error("retry-failed failed");
       } catch {
         patchSnapshot({ notice: mutationFailure("migrate", intentId) });
         await refresh();
@@ -400,14 +403,20 @@ export function createEngineAccountsStore(
     });
   };
 
-  const retryNotice = (): Promise<boolean> => {
+  const retryNotice = async (): Promise<boolean> => {
     const action = snapshot.notice?.action;
-    if (!action) return Promise.resolve(false);
+    if (!action) return false;
     if (action.operation === "refresh") return refresh();
-    if (action.operation === "select" && action.id) return select(action.id);
-    if (action.operation === "migrate" && action.id) return selectAndMigrate(action.id);
+    if (action.operation === "migrate" && action.id) {
+      // A migrate retry must re-fence against a fresh preview revision: the old
+      // one is stale (the intent moved on / another switch raced), so reusing it
+      // would 409. Fail closed if the preview can't be obtained.
+      const fresh = await preview(action.id);
+      if (!fresh) return false;
+      return selectAndMigrate(action.id, fresh.previewRevision);
+    }
     if (action.operation === "add" && action.label) return add(action.label);
-    return Promise.resolve(false);
+    return false;
   };
 
   return {
@@ -437,12 +446,12 @@ export function createEngineAccountsStore(
     get migration() { return snapshot.migration; },
     get autoBalance() { return snapshot.autoBalance; },
     refresh,
-    select,
     add,
     retryNotice,
     preview,
     selectAndMigrate,
     stopMigration,
+    retryFailedMigration,
     setAutoBalance,
   };
 }
@@ -471,12 +480,12 @@ export function useEngineAccounts(engine: Engine): EngineAccountsState {
     ...snapshot,
     engine,
     refresh: store.refresh,
-    select: store.select,
     add: store.add,
     retryNotice: store.retryNotice,
     preview: store.preview,
     selectAndMigrate: store.selectAndMigrate,
     stopMigration: store.stopMigration,
+    retryFailedMigration: store.retryFailedMigration,
     setAutoBalance: store.setAutoBalance,
   };
 }

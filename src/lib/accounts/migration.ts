@@ -151,19 +151,17 @@ export function migrationHoldsSends(state: CardMigrationState | null): boolean {
   return state === "switching";
 }
 
-/** What selecting an account should do, given whether the migration coordinator
-    is available and (when it is) the preview result. `recoverable-error` is the
-    finding-3 guard: a present coordinator whose preview failed must NOT fall
-    through to an instant switch — an unscoped switch with no durable intent is
-    exactly the hazard — so the caller surfaces a retryable error instead. */
-export type AccountSelectOutcome = "instant" | "confirm" | "recoverable-error";
-export function accountSelectOutcome(
-  migrationCapable: boolean,
-  preview: MigrationPreview | null,
-): AccountSelectOutcome {
-  if (!migrationCapable) return "instant";
+/** What selecting an account should do, given the preview result. Every switch
+    surface previews first — there is no mode-less bare switch left (issue #40).
+    `recoverable-error` is the finding-3 guard: a preview that failed must NOT
+    fall through to a switch (an unscoped switch with no durable intent is exactly
+    the hazard), so the caller surfaces a retryable error instead. An empty scope
+    still routes through `migrate`: a zero-scope, revision-fenced migration adopts
+    the target through the durable intent path rather than a legacy bare select. */
+export type AccountSelectOutcome = "migrate" | "confirm" | "recoverable-error";
+export function accountSelectOutcome(preview: MigrationPreview | null): AccountSelectOutcome {
   if (preview === null) return "recoverable-error";
-  return preview.counts.total > 0 ? "confirm" : "instant";
+  return preview.counts.total > 0 ? "confirm" : "migrate";
 }
 
 // ── Banner projection ─────────────────────────────────────────────────────────

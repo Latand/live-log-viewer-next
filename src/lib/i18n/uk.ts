@@ -132,6 +132,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "migrate.bannerFailed": "{n} з помилкою",
   "migrate.bannerAria": "Хід міграції {engine}",
   "migrate.stop": "Зупинити міграцію",
+  "migrate.bannerRetryFailed": "Повторити невдалі ({n})",
   "migrate.stoppedNotice": "Міграцію зупинено. Решта сесій лишається на своєму акаунті; нові агенти й далі використовують «{label}».",
   "migrate.completeNotice": "Усі сесії {engine} тепер на «{label}»",
   "migrate.announceComplete": "Усі сесії {engine} тепер на {label}",

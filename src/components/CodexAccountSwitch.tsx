@@ -1,44 +1,67 @@
 "use client";
 
-import { accountNoticeText, accountSwitchView, type CodexAccountOption, pendingDeviceAuth, useCodexAccounts } from "@/hooks/useCodexAccounts";
+import { useEffect, useRef, useState } from "react";
+
+import { useEngineAccounts } from "@/hooks/useEngineAccounts";
 import { useLocale } from "@/lib/i18n";
 
-// The account shape lives in the shared store. Keep these exports for existing
-// importers that use the compact control's helpers.
-export { accountSwitchView, pendingDeviceAuth };
-export type { CodexAccountOption };
+import { AccountsPanel } from "./AccountsPanel";
+import { ChevronDown, Loader2 } from "./icons";
 
-/** Compact selector in the Switchboard header. The trigger remains mounted while
-    account data loads or recovers, so it always offers a path to Accounts. */
+/**
+ * Compact Codex account trigger in the Switchboard header. One button opens the
+ * canonical {@link AccountsPanel} — the exact preview → confirm → migrate surface
+ * the limits footer uses — so the two never diverge and there is no second,
+ * bare-switch semantics (issue #40). The trigger stays mounted while account data
+ * loads or recovers, so it always offers a path to Accounts.
+ */
 export function CodexAccountSwitch() {
-  const { accounts, active, status, notice, challenge, mutation, select, add, retryNotice } = useCodexAccounts();
+  const state = useEngineAccounts("codex");
   const { t } = useLocale();
-  const busy = mutation !== null;
-  const noticeText = notice ? accountNoticeText(t, notice) : null;
+  const [open, setOpen] = useState(false);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+
+  const close = () => {
+    setOpen(false);
+    triggerRef.current?.focus();
+  };
+
+  // Outside-pointer close only; Escape is owned by the panel's dialog subtree
+  // (see AccountsPanel / handleOverlayEscape) to avoid racing the Switchboard's
+  // own window Escape handler.
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (event: PointerEvent) => {
+      if (containerRef.current && !containerRef.current.contains(event.target as Node)) setOpen(false);
+    };
+    window.addEventListener("pointerdown", onDown);
+    return () => window.removeEventListener("pointerdown", onDown);
+  }, [open]);
+
+  const activeAccount = state.accounts.find((account) => account.id === state.active);
+  const label = activeAccount?.label ?? t("accounts.trigger");
+  const draining = state.migration?.state === "draining";
 
   return (
-    <div className="flex items-center gap-1.5">
-      <select
-        aria-label={t("accounts.activeAria")}
-        value={active}
-        disabled={busy || status === "loading"}
-        onChange={(event) => void select(event.target.value)}
-        className="h-8 max-w-36 rounded-[7px] border border-line bg-bg px-2 text-[11px] font-semibold disabled:cursor-wait disabled:opacity-60"
-      >
-        <option value="">{status === "loading" ? t("accounts.loading") : t("accounts.placeholder")}</option>
-        {accounts.map((account) => <option key={account.id} value={account.id}>{account.label}{account.authPresent ? "" : ` · ${t("accounts.login")}`}</option>)}
-      </select>
+    <div ref={containerRef} className="relative">
       <button
+        ref={triggerRef}
         type="button"
-        disabled={busy}
-        onClick={() => void add(window.prompt(t("accounts.prompt")) ?? "")}
-        className="h-8 rounded-[7px] border border-line bg-bg px-2 text-[11px] font-semibold disabled:cursor-wait disabled:opacity-60"
+        aria-expanded={open}
+        aria-haspopup="dialog"
+        aria-label={t("accounts.triggerAria", { engine: "Codex" })}
+        onClick={() => setOpen((value) => !value)}
+        className="flex h-8 items-center gap-1 rounded-[7px] border border-line bg-bg px-2 text-[11px] font-semibold hover:bg-chip focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
       >
-        {t("accounts.add")}
+        <span className="max-w-36 truncate">{label}</span>
+        {draining ? (
+          <Loader2 className="h-3 w-3 shrink-0 animate-spin motion-reduce:animate-none text-accent" aria-hidden />
+        ) : (
+          <ChevronDown className="h-3 w-3 shrink-0 text-dim" aria-hidden />
+        )}
       </button>
-      {challenge ? <span className="flex items-center gap-1 text-[10px] text-dim"><a href={challenge.url} target="_blank" rel="noreferrer" className="underline">{t("accounts.openLogin")}</a><code className="select-all font-semibold text-ink">{challenge.code}</code></span> : null}
-      {noticeText ? <span className="max-w-48 truncate text-[10px] text-dim" title={noticeText}>{noticeText}</span> : null}
-      {notice?.action ? <button type="button" disabled={busy} onClick={() => void retryNotice()} className="h-8 rounded-[7px] border border-line bg-bg px-2 text-[11px] font-semibold disabled:cursor-wait disabled:opacity-60">{t("accounts.retry")}</button> : null}
+      {open ? <AccountsPanel state={state} onClose={close} /> : null}
     </div>
   );
 }

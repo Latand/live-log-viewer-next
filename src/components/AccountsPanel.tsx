@@ -120,6 +120,16 @@ function MigrationBanner({ state }: { state: EngineAccountsState }) {
               {model.auto ? <span className="mr-1 rounded-full bg-accent/15 px-1.5 py-0.5 text-[9.5px] font-bold uppercase tracking-wide text-accent">{t("autobalance.bannerTag")}</span> : null}
               {t("migrate.banner", { label: model.targetLabel, done: model.done, total: model.total })}
             </span>
+            {model.failed ? (
+              <button
+                type="button"
+                onClick={() => void state.retryFailedMigration()}
+                disabled={state.mutation !== null}
+                className="shrink-0 rounded-[7px] border border-line bg-bg px-2 py-0.5 text-[11px] font-semibold hover:bg-chip disabled:opacity-45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+              >
+                {t("migrate.bannerRetryFailed", { n: model.failed })}
+              </button>
+            ) : null}
             <button
               type="button"
               onClick={() => void state.stopMigration()}
@@ -286,35 +296,32 @@ export function AccountsPanel({ state, onClose }: { state: EngineAccountsState; 
   const [previewError, setPreviewError] = useState<{ targetId: string; label: string } | null>(null);
   const closeRef = useRef<HTMLButtonElement>(null);
   const engineName = engineDisplay(engine);
-  // The coordinator advertises itself via the auto-balance block; without it the
-  // panel keeps today's instant-switch behavior and never sends a preview POST.
-  const migrationCapable = state.autoBalance !== null;
 
   useEffect(() => {
     closeRef.current?.focus();
   }, []);
 
+  // Every switch surface previews first — there is no mode-less bare switch left
+  // (issue #40). Clicking the already-active account is allowed too: its preview
+  // surfaces sessions still stranded on a stale generation so a zero-scope,
+  // revision-fenced migration can repair them.
   const onSelect = async (id: string) => {
-    if (id === active || mutation) return;
-    if (!migrationCapable) {
-      // No coordinator: today's instant-switch behavior, never a preview POST.
-      await state.select(id);
-      return;
-    }
+    if (mutation) return;
     setPreviewError(null);
     const preview = await state.preview(id);
-    switch (accountSelectOutcome(migrationCapable, preview)) {
+    switch (accountSelectOutcome(preview)) {
       case "recoverable-error":
-        // Coordinator present but the preview failed: do NOT switch (finding 3).
+        // The preview failed: do NOT switch (finding 3) — surface a retry instead.
         setPreviewError({ targetId: id, label: accounts.find((account) => account.id === id)?.label ?? id });
         return;
       case "confirm":
         setConfirm({ targetId: id, preview: preview! });
         return;
-      case "instant":
-        // Preview succeeded with no live sessions in scope: nothing to migrate,
-        // so the confirm step adds no value — degrade to an instant switch.
-        await state.select(id);
+      case "migrate":
+        // No live sessions in scope: submit a zero-scope, revision-fenced
+        // migration so new spawns adopt the target through the durable intent
+        // path, never a legacy bare select.
+        await state.selectAndMigrate(id, preview!.previewRevision);
         return;
     }
   };

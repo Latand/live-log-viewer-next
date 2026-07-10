@@ -141,6 +141,92 @@ test("setAutoBalance PATCHes the frozen policy route with automaticSwitching", a
   // The old POST …/auto-balance {enabled} route must never be called.
 });
 
+test("the store exposes no bare select, and every write to /active carries a mode", async () => {
+  const { calls, fetcher } = scripted((url, body) => {
+    if (url === "/api/accounts") return claudePayload();
+    if ((body as { mode?: string })?.mode === "preview") return { total: 2, idle: 2, busy: 0, revision: 4 };
+    return new Response(null, { status: 202 });
+  });
+  const store = createEngineAccountsStore("claude", { fetcher });
+  store.subscribe(() => {});
+  await advance();
+  // The bare instant-switch method is gone — the only account-switch path is
+  // preview → migrate (issue #40).
+  expect((store as unknown as { select?: unknown }).select).toBeUndefined();
+  await store.preview("work");
+  await store.selectAndMigrate("work", 4);
+  const activeWrites = calls.filter((call) => call.url === "/api/accounts/claude/active");
+  expect(activeWrites.length).toBeGreaterThan(0);
+  // Not one mode-less write exists: an unscoped switch with no durable intent is
+  // exactly the hazard the unified UX removes.
+  for (const write of activeWrites) expect((write.body as { mode?: string }).mode).toBeDefined();
+});
+
+test("retryNotice re-fences a failed migrate against a fresh preview revision before migrating", async () => {
+  let previewRevision = 4;
+  const { calls, fetcher } = scripted((url, body) => {
+    if (url === "/api/accounts") return claudePayload();
+    const mode = (body as { mode?: string })?.mode;
+    if (mode === "preview") return { total: 1, idle: 1, busy: 0, revision: previewRevision };
+    if (mode === "migrate") {
+      // The first migrate (stale revision 1) fails; that seeds the retryable notice.
+      if ((body as { previewRevision?: number }).previewRevision === 1) return new Response(null, { status: 409 });
+      return new Response(null, { status: 202 });
+    }
+    return new Response(null, { status: 204 });
+  });
+  const store = createEngineAccountsStore("claude", { fetcher });
+  store.subscribe(() => {});
+  await advance();
+  const failed = await store.selectAndMigrate("work", 1);
+  expect(failed).toBeFalse();
+  expect(store.notice?.action).toMatchObject({ operation: "migrate", id: "work" });
+  // The retry must fetch a fresh revision first, then migrate with it — never
+  // replay the stale one.
+  previewRevision = 9;
+  calls.length = 0;
+  const recovered = await store.retryNotice();
+  expect(recovered).toBeTrue();
+  const previewIdx = calls.findIndex((call) => (call.body as { mode?: string })?.mode === "preview");
+  const migrateCall = calls.find((call) => (call.body as { mode?: string })?.mode === "migrate");
+  expect(previewIdx).toBeGreaterThanOrEqual(0);
+  expect(calls.indexOf(migrateCall!)).toBeGreaterThan(previewIdx); // preview precedes migrate
+  expect(migrateCall?.body).toMatchObject({ previewRevision: 9 });
+  expect(store.notice).toBeNull(); // the recovered retry clears the stale failure
+});
+
+test("retryNotice fails closed when a migrate retry can't obtain a fresh preview", async () => {
+  const { calls, fetcher } = scripted((url, body) => {
+    if (url === "/api/accounts") return claudePayload();
+    const mode = (body as { mode?: string })?.mode;
+    if (mode === "preview") return new Response(null, { status: 500 }); // preview unreachable
+    if (mode === "migrate") return new Response(null, { status: 409 });
+    return new Response(null, { status: 204 });
+  });
+  const store = createEngineAccountsStore("claude", { fetcher });
+  store.subscribe(() => {});
+  await advance();
+  await store.selectAndMigrate("work", 1);
+  calls.length = 0;
+  const recovered = await store.retryNotice();
+  expect(recovered).toBeFalse();
+  // No migrate is attempted with a stale revision when the fresh preview fails.
+  expect(calls.some((call) => (call.body as { mode?: string })?.mode === "migrate")).toBeFalse();
+});
+
+test("retryFailedMigration posts action:retry-failed fenced by the intent revision", async () => {
+  const { calls, fetcher } = scripted((url) => {
+    if (url === "/api/accounts") return claudePayload({ migration: { intentId: "intent-9", targetId: "work", state: "draining", revision: 3, counts: { done: 1, total: 4, waitingTurn: 0, inFlight: 1, failed: 2 } } });
+    return new Response(null, { status: 200 });
+  });
+  const store = createEngineAccountsStore("claude", { fetcher });
+  store.subscribe(() => {});
+  await advance();
+  await store.retryFailedMigration();
+  const retry = calls.find((call) => call.url === "/api/account-migrations/intent-9" && call.method === "POST");
+  expect(retry?.body).toMatchObject({ action: "retry-failed", expectedRevision: 3 });
+});
+
 test("stopMigration targets the frozen account-migrations route by intent id", async () => {
   const { calls, fetcher } = scripted((url) => {
     if (url === "/api/accounts") return claudePayload({ migration: { intentId: "intent-7", targetId: "work", state: "draining" } });

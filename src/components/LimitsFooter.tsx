@@ -117,7 +117,7 @@ export function stickyPayload(previous: LimitsPayload | null, next: LimitsPayloa
 }
 
 /** The Codex limits block doubles as the account switcher: the whole block is a
-    button that opens {@link CodexAccountsPanel}, and the header carries the
+    button that opens the unified {@link AccountsPanel}, and the header carries the
     active account chip so "which account am I on" reads without a click. It
     renders even with no Codex numbers (a freshly switched account) so the entry
     point never disappears. */

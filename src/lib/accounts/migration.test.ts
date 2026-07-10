@@ -179,17 +179,14 @@ describe("tolerant parsers", () => {
   });
 });
 
-describe("accountSelectOutcome (finding 3 — no instant switch on preview failure)", () => {
+describe("accountSelectOutcome (finding 3 — no bare switch on preview failure)", () => {
   const preview = (total: number): MigrationPreview => ({ targetId: "work", targetLabel: "Work", counts: { total, idle: total, busy: 0 }, rootWarning: false, previewRevision: 1 });
-  test("no coordinator → instant switch, never a preview", () => {
-    expect(accountSelectOutcome(false, null)).toBe("instant");
+  test("a preview that failed → recoverable error, never a switch", () => {
+    expect(accountSelectOutcome(null)).toBe("recoverable-error");
   });
-  test("coordinator present but preview failed → recoverable error, not a switch", () => {
-    expect(accountSelectOutcome(true, null)).toBe("recoverable-error");
-  });
-  test("live sessions in scope → confirm; empty scope → instant", () => {
-    expect(accountSelectOutcome(true, preview(3))).toBe("confirm");
-    expect(accountSelectOutcome(true, preview(0))).toBe("instant");
+  test("live sessions in scope → confirm; empty scope → zero-scope migrate (never a bare select)", () => {
+    expect(accountSelectOutcome(preview(3))).toBe("confirm");
+    expect(accountSelectOutcome(preview(0))).toBe("migrate");
   });
 });
 

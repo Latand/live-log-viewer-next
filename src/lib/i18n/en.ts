@@ -138,6 +138,7 @@ export const en = {
   "migrate.bannerFailed": "{n} failed",
   "migrate.bannerAria": "{engine} migration progress",
   "migrate.stop": "Stop migration",
+  "migrate.bannerRetryFailed": "Retry failed ({n})",
   "migrate.stoppedNotice": "Migration stopped. Remaining sessions stay on their current account; new agents keep using «{label}».",
   "migrate.completeNotice": "All {engine} sessions now on «{label}»",
   "migrate.announceComplete": "All {engine} sessions now on {label}",
