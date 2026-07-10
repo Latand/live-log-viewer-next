@@ -82,12 +82,12 @@ describe("nav state machine (hook logic simulation)", () => {
         follow = true;
         prev = layout.byPath.get(key) ?? null;
       },
-      arrow(dir: NavDir, live: SchemeLayout = layout) {
+      arrow(dir: NavDir, live: SchemeLayout = layout, liveCam: Camera = cam) {
         const targets = collectNavTargets(live);
-        const hasSel = selected != null && targets.some((t) => t.key === selected);
+        const hasSel = follow && selected != null && targets.some((t) => t.key === selected);
         const pick = hasSel
           ? pickDirectional(targets, selected!, dir)
-          : nearestToViewportCenter(targets, cam, vp, selected);
+          : nearestToViewportCenter(targets, liveCam, vp, selected);
         if (pick) {
           selected = pick;
           follow = true;
@@ -162,5 +162,17 @@ describe("nav state machine (hook logic simulation)", () => {
     const after = layoutOf({ a: rect(step, 0), b: rect(step * 2, 0) });
     m.reflow(after);
     expect(m.translates).toEqual([]); // no camera write after re-baseline
+  });
+
+  test("the first Arrow after a manual gesture starts from the new viewport centre", () => {
+    const layout = layoutOf({ a: rect(0, 0), b: rect(step, 0), c: rect(step * 2, 0) });
+    const m = makeMachine(layout);
+    m.seed("a");
+    m.manualGesture();
+    const centredOnC: Camera = { x: vp.w / 2 - (step * 2 + NODE_W / 2), y: vp.h / 2 - 340, z: 1 };
+
+    expect(m.arrow("right", layout, centredOnC)).toBe("c");
+    expect(m.selected).toBe("c");
+    expect(m.follow).toBe(true);
   });
 });

@@ -160,7 +160,7 @@ export function useSpatialNav({
     const targets = collectNavTargets(layoutRef.current);
     if (!targets.length) return false;
     const sel = selectedRef.current;
-    const hasSel = sel != null && targets.some((t) => t.key === sel);
+    const hasSel = followRef.current && sel != null && targets.some((t) => t.key === sel);
     if (!hasSel) {
       /* First press after a re-baseline: pick the on-screen-centre window and
          centre it — no directional step, so nothing jumps unexpectedly. */
