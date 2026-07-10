@@ -171,7 +171,7 @@ export interface BoardStore {
  * revision conflict adopts the server board, replays the whole outbox on top, and
  * retries, preserving a close, restore or remap intent across an interleaved
  * write by another device. The one-time legacy seed still writes
- * whole prefs; localStorage is only read for it, never written.
+ * whole prefs; localStorage serves as read-only migration input.
  */
 export function createBoardStore(options: BoardStoreOptions): BoardStore {
   const { project, fetcher, storage } = options;
