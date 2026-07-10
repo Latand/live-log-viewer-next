@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { AgentRegistry } from "@/lib/agent/registry";
+import { CODEX_SOL_MODEL } from "@/lib/agent/models";
 import { saveRoleOverrides } from "@/lib/roles/store";
 
 /* The state dir must point at a sandbox before store.ts computes its
@@ -177,6 +178,31 @@ test("managed workflow seeds refresh while an unmarked same-name edit wins", () 
   expect(mergeSeededTemplates([custom], refreshed)).toContainEqual(custom);
 });
 
+test("template seeds fall back to the role default when a saved builder override is semantically invalid", () => {
+  const previousState = process.env.LLV_STATE_DIR;
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-wf-bad-override-"));
+  process.env.LLV_STATE_DIR = sandbox;
+  try {
+    /* saveRoleOverrides refuses this override on this branch; a hand-edit
+       lands the bytes and the fail-closed loader degrades to defaults. */
+    fs.writeFileSync(
+      path.join(sandbox, "role-presets.json"),
+      JSON.stringify({ schemaVersion: 1, overrides: { builder: { config: { model: "not-a-gpt-model" } } } }),
+      "utf8",
+    );
+    expect(() => seededTemplatesFromRoles()).not.toThrow();
+    const fullstack = seededTemplatesFromRoles().find((template) => template.name === "fullstack")!;
+    expect(fullstack.stages[0]?.kind === "implement" && fullstack.stages[0].agent).toEqual({
+      engine: "codex",
+      model: CODEX_SOL_MODEL,
+      effort: "medium",
+    });
+  } finally {
+    if (previousState === undefined) delete process.env.LLV_STATE_DIR;
+    else process.env.LLV_STATE_DIR = previousState;
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  }
+});
 
 test("workflows round-trip through the store", () => {
   const template = normalizeTemplate({ name: "demo", stages: [IMPLEMENT, REVIEW], finish: "merge" })!;

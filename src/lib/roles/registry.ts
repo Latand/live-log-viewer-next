@@ -1,6 +1,7 @@
 import { isEngineEffort } from "@/lib/agent/efforts";
 import { normalizeClaudeLaunchModel } from "@/lib/agent/models";
 
+import { BUILDER_APPLY_FIXES_CONFIG, BUILDER_FRONTEND_CONFIG } from "./paramConfig";
 import { loadRoleDefinitions } from "./store";
 import type { ResolvedRole, RoleConfig, RoleDefinition, RoleId, RoleParamValues } from "./types";
 
@@ -58,8 +59,8 @@ function promptWithFences(definition: RoleDefinition, params: RoleParamValues): 
 
 function configForParams(definition: RoleDefinition, params: RoleParamValues): RoleConfig {
   if (definition.id !== "builder") return definition.config;
-  if (params.domain === "frontend") return { engine: "claude", model: "opus", effort: "high" };
-  if (params.mode === "apply-fixes") return { engine: "codex", model: "gpt-5.6-terra", effort: "low" };
+  if (params.domain === "frontend") return BUILDER_FRONTEND_CONFIG;
+  if (params.mode === "apply-fixes") return BUILDER_APPLY_FIXES_CONFIG;
   return definition.config;
 }
 

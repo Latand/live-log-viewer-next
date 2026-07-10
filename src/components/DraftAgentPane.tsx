@@ -7,6 +7,7 @@ import { useComposer } from "@/hooks/useComposer";
 import { isEngineEffort } from "@/lib/agent/efforts";
 import { defaultModelFor } from "@/lib/agent/models";
 import { useLocale } from "@/lib/i18n";
+import { BUILDER_APPLY_FIXES_CONFIG, BUILDER_FRONTEND_CONFIG } from "@/lib/roles/paramConfig";
 import type { RoleDefinition } from "@/lib/roles/types";
 import type { FileEntry } from "@/lib/types";
 
@@ -106,10 +107,6 @@ function newAttemptId(): string {
   return raw.replace(/[^A-Za-z0-9_-]/g, "").slice(0, 128).padEnd(8, "0");
 }
 
-function attemptTimestamp(): number {
-  return Date.now();
-}
-
 /**
  * A conversation that does not exist yet, drawn as a full pane on the scheme:
  * engine picker in the header retints the whole card, the directory rides
@@ -194,23 +191,21 @@ export function DraftAgentPane({
     setRoleParams(next);
     const selected = roles.find((role) => role.id === roleId);
     if (selected?.id !== "builder") return;
-    /* The frontend/apply-fixes routing mirrors configForParams in
-       src/lib/roles/registry.ts — the server re-derives it on spawn. */
     if (next.domain === "frontend") {
-      setEngine("claude");
-      setModel("opus");
-      setEffort("high");
+      setEngine(BUILDER_FRONTEND_CONFIG.engine);
+      setModel(BUILDER_FRONTEND_CONFIG.model);
+      setEffort(BUILDER_FRONTEND_CONFIG.effort);
       setSpeed("");
       return;
     }
     if (next.mode === "apply-fixes") {
-      setEngine("codex");
-      setModel("gpt-5.6-terra");
-      setEffort("low");
+      setEngine(BUILDER_APPLY_FIXES_CONFIG.engine);
+      setModel(BUILDER_APPLY_FIXES_CONFIG.model);
+      setEffort(BUILDER_APPLY_FIXES_CONFIG.effort);
       return;
     }
-    /* Plain mode returns to the registry's builder config so operator
-       overrides in role-presets.json survive parameter changes. */
+    /* Plain/general mode falls back to the server-merged config so a saved
+       role override is honored, matching selectRole below. */
     setEngine(selected.config.engine);
     setModel(selected.config.model);
     setEffort(selected.config.effort);
@@ -402,7 +397,10 @@ export function DraftAgentPane({
       }
     }
     if (!payloadText.trim() && !attachments.images.length) return;
-    const candidate = createSpawnAttempt(newAttemptId(), attemptTimestamp(), {
+    /* eslint-disable-next-line react-hooks/purity -- `send` only runs from
+       user events (submit/keydown), never during render; the id and timestamp
+       must be minted at click time. */
+    const candidate = createSpawnAttempt(newAttemptId(), Date.now(), {
       engine,
       model,
       cwd: cwd.trim(),

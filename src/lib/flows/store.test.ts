@@ -49,6 +49,32 @@ test("managed flow seeds refresh while an unmarked same-name edit wins", () => {
   expect(mergeSeededPresets([custom], refreshed)).toContainEqual(custom);
 });
 
+test("flow preset seeds fall back to the role default when a saved builder override is semantically invalid", () => {
+  const previousState = process.env.LLV_STATE_DIR;
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-flow-bad-override-"));
+  process.env.LLV_STATE_DIR = sandbox;
+  try {
+    /* saveRoleOverrides refuses this override on this branch, so the bytes
+       land via a hand-edit; the fail-closed loader rejects the file and
+       seeding degrades to the built-in defaults either way. */
+    fs.writeFileSync(
+      path.join(sandbox, "role-presets.json"),
+      JSON.stringify({ schemaVersion: 1, overrides: { builder: { config: { model: "not-a-gpt-model" } } } }),
+      "utf8",
+    );
+    expect(() => seededPresetsFromRoles()).not.toThrow();
+    expect(seededPresetsFromRoles().find((preset) => preset.name === "Sol medium → Sol xhigh")?.implementer).toEqual({
+      engine: "codex",
+      model: CODEX_SOL_MODEL,
+      effort: "medium",
+    });
+  } finally {
+    if (previousState === undefined) delete process.env.LLV_STATE_DIR;
+    else process.env.LLV_STATE_DIR = previousState;
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  }
+});
+
 test("an untouched pre-registry flow preset migrates to the current role config", () => {
   const previous = {
     name: "Terra high → Fable",
@@ -61,7 +87,6 @@ test("an untouched pre-registry flow preset migrates to the current role config"
     effort: "high",
   });
 });
-
 
 test("flow specs persist in the versioned state file and legacy flow entries load", () => {
   const previousState = process.env.LLV_STATE_DIR;
