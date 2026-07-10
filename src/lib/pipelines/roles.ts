@@ -1,5 +1,3 @@
-import { CODEX_SOL_MODEL } from "@/lib/agent/models";
-
 import type { EffectivePipelineRole, PipelineRoleId, PipelineStage, PipelineStageKind } from "./types";
 
 export const PIPELINE_ROLE_IDS: readonly PipelineRoleId[] = [
@@ -51,8 +49,11 @@ export function resolvePipelineRole(
   if (kind === "review-loop" && stage.access === "read-write") {
     return { error: "review-loop stages require read-only access" };
   }
+  const registry = lookup === undefined ? installedLookup : lookup;
+  const builder = registry?.("builder") ?? null;
+  if (!builder) return { error: "Builder role is unavailable in the role registry" };
   const roleId = rawRoleId ? rawRoleId as PipelineRoleId : null;
-  const registered = roleId ? (lookup === undefined ? installedLookup : lookup)?.(roleId) ?? null : null;
+  const registered = roleId ? registry?.(roleId) ?? null : null;
   const value = (override: unknown, fallback: string | null | undefined): string | null => {
     if (override === null) return null;
     if (typeof override === "string") return override.trim() || null;
@@ -61,10 +62,10 @@ export function resolvePipelineRole(
   return {
     role: {
       roleId,
-      engine: stage.engine ?? registered?.engine ?? "codex",
-      model: value(stage.model, registered?.model ?? CODEX_SOL_MODEL),
-      effort: value(stage.effort, registered?.effort ?? "high"),
-      access: kind === "review-loop" ? "read-only" : stage.access ?? registered?.access ?? "read-write",
+      engine: stage.engine ?? registered?.engine ?? builder.engine,
+      model: value(stage.model, registered?.model ?? builder.model),
+      effort: value(stage.effort, registered?.effort ?? builder.effort),
+      access: kind === "review-loop" ? "read-only" : stage.access ?? registered?.access ?? builder.access ?? "read-write",
       promptScaffold: roleId && typeof registered?.promptScaffold === "string"
         ? registered.promptScaffold.trim() || null
         : null,

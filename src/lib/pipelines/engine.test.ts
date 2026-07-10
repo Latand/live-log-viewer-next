@@ -41,7 +41,12 @@ function harness() {
       if (args[0] === "status") return { code: 0, stdout: "", stderr: "" };
       return { code: 0, stdout: "", stderr: "" };
     },
-    roleLookup: null,
+    roleLookup: (roleId) => {
+      if (roleId === "builder") return { engine: "codex", model: "gpt-5.6-sol", effort: "medium", access: "read-write", promptScaffold: "Builder guidance" };
+      if (roleId === "reviewer") return { engine: "codex", model: "gpt-5.6-sol", effort: "xhigh", access: "read-only", promptScaffold: "Reviewer guidance" };
+      if (roleId === "architect") return { engine: "claude", model: "fable", effort: "high", access: "read-only", promptScaffold: "Architect guidance" };
+      return null;
+    },
     spawnAgent: async ({ parentPath, clientAttemptId }) => {
       spawn += 1;
       calls.push(`spawn:${clientAttemptId}:parent=${parentPath ?? "root"}`);
@@ -116,7 +121,7 @@ test("linear run stages persist sessions, structured outputs, commits, and linea
   expect(current.lastPassedCommit).toStartWith("sha-");
 });
 
-test("role-less run stages persist the Builder global runtime", async () => {
+test("role-less run stages persist the Builder registry runtime", async () => {
   const h = harness();
   create(h.ports, [
     { id: "research", kind: "run", prompt: "research", next: "summarize" },
@@ -128,7 +133,7 @@ test("role-less run stages persist the Builder global runtime", async () => {
     roleId: null,
     engine: "codex",
     model: "gpt-5.6-sol",
-    effort: "high",
+    effort: "medium",
     access: "read-write",
     promptScaffold: null,
   });
