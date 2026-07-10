@@ -169,8 +169,8 @@ export interface BoardStore {
  * presentation); the UI renders the outbox replayed over the confirmed board
  * (optimistic), and a background drain flushes the outbox as a stable prefix. A
  * revision conflict adopts the server board, replays the whole outbox on top, and
- * retries — so a close, restore or remap intent survives an interleaved write by
- * another device instead of being dropped. The one-time legacy seed still writes
+ * retries, preserving a close, restore or remap intent across an interleaved
+ * write by another device. The one-time legacy seed still writes
  * whole prefs; localStorage is only read for it, never written.
  */
 export function createBoardStore(options: BoardStoreOptions): BoardStore {
@@ -338,8 +338,8 @@ export function createBoardStore(options: BoardStoreOptions): BoardStore {
       else scheduleRetry();
       return;
     }
-    /* Network error: keep the outbox and back off on a cancellable timer instead
-       of spinning failed requests in one microtask turn (#11). */
+    /* Network error: keep the outbox and back off on a cancellable timer. This
+       prevents failed-request spinning inside one microtask turn (#11). */
     refresh();
     scheduleRetry();
   };
@@ -373,8 +373,8 @@ export function createBoardStore(options: BoardStoreOptions): BoardStore {
         confirmed = result.status === "error" ? board : result.board;
         refresh();
         /* A mutation queued while the seed was inflight parked in the outbox
-           (drain early-returns during inflight); flush it now instead of leaving
-           it stranded until the next edit. */
+           because drain returns early during inflight. Flush it now so the
+           queued action proceeds without another edit. */
         if (outbox.length) void drain();
         return;
       }
@@ -391,8 +391,8 @@ export function createBoardStore(options: BoardStoreOptions): BoardStore {
         const res = await fetcher(getUrl);
         if (!res.ok) return;
         const board = ((await res.json()) as { board: BoardProjectStateV1 }).board;
-        /* Another device moved the board: adopt it, but never clobber unflushed
-           local intent (guarded by the outbox/inflight check). */
+        /* Another device moved the board. Adopt it while preserving unflushed
+           local intent through the outbox/inflight guard. */
         if (!inflight && outbox.length === 0 && !disposed && board.revision !== confirmed.revision) {
           confirmed = board;
           unavailable = false;

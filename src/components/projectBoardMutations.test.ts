@@ -97,8 +97,8 @@ test("18: planBoardConvergence orders remap before reconciliation and keeps a hi
   const remap = planSuccessionRemap([successor], "demo")!;
   const reconcile = planRootReconciliation({ groups, manual: [], catalog });
   const reversed = applyBoardMutations(boardOf({ hidden: ["/old"] }), [reconcile, remap]);
-  /* Even reversed the normalize step keeps hidden dominant, but the canonical
-     batch never depends on that — assert the ordering explicitly. */
+  /* Even reversed, normalization keeps hidden dominant. The canonical batch
+     carries an explicit ordering guarantee. */
   expect(batch.map((mutation) => mutation.kind)).toEqual(["remap-paths", "reconcile-roots"]);
   expect(reversed.prefs.hidden).toEqual(["/new"]);
 });
@@ -117,8 +117,8 @@ test("19: planClose emits one durable close independent of autoPaths and clears 
   expect(result.mutation).toEqual({ kind: "close", path: "/x" });
   /* Only the closed path leaves the ephemeral set. */
   expect(result.ephemeral).toEqual(["/y"]);
-  /* The mutation takes no render-state input, so it is identical whether or not
-     the node is an auto column right now. */
+  /* The mutation has no render-state input and produces the same result for
+     every current auto-column state. */
   expect(planClose("/x", []).mutation).toEqual(planClose("/x", ["/x"]).mutation);
   /* And it durably tombstones every membership shape when applied. */
   const closed = applyBoardMutations(boardOf({ manual: ["/x"], expanded: ["/x"] }), [result.mutation]);
