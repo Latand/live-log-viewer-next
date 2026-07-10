@@ -65,7 +65,7 @@ export class AccountMigrationController {
   }
 
   private async run(): Promise<void> {
-    const { files } = await listFilesWithProjectCatalog(undefined, { persistCatalog: true });
+    const { files } = await listFilesWithProjectCatalog(undefined, { persist: true });
     await reconcileMigrationInventory(this.registry, files);
     reconcileFlowConversationOwnership(this.registry);
     reconcileWorkflowConversationOwnership(this.registry);

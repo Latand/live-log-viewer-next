@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { ArrowRight, ArrowUpToLine, FoldVertical, Loader2, Play, Square, SquareTerminal, X } from "@/components/icons";
 import { Check, Plus, RotateCcw } from "lucide-react";
@@ -10,6 +10,7 @@ import type { TFunction } from "@/lib/i18n";
 import { Hint } from "@/components/Hint";
 import { useComposer } from "@/hooks/useComposer";
 import { useIsMobile } from "@/hooks/useIsMobile";
+import { useRuntimeReceiptsForArtifact } from "@/hooks/useRuntime";
 import { useTmuxTarget } from "@/hooks/useTmuxTarget";
 import { conversationIdentity } from "@/lib/accounts/identity";
 import { cardMigrationState, migrationHoldsSends } from "@/lib/accounts/migration";
@@ -18,6 +19,8 @@ import type { FileEntry } from "@/lib/types";
 
 import { ComposerBar } from "./ComposerBar";
 import { ImagePickerButton } from "./imageAttachments";
+import { ReceiptChip } from "./runtime/ReceiptChip";
+import { mintIdempotencyKey } from "./runtime/runtimeModel";
 
 /**
  * A delivery receipt shown above the composer. `state` tracks whether the
@@ -46,6 +49,10 @@ const SENT_LIMIT = 8;
 const SPAWN_TTL_MS = 90_000;
 const PANE_TTL_MS = 10 * 60_000;
 const sentKey = (id: string) => "llvSent:" + id;
+
+export function deliveryAttemptKey(current: string, stored?: string): string {
+  return stored || current;
+}
 
 /** A receipt still awaiting durable delivery (a migration hold) must never be
     pruned by the pane/spawn TTLs — its text lands on the successor, whose
@@ -115,17 +122,6 @@ function nowMs(): number {
   return Date.now();
 }
 
-/** Idempotency key for a delivery. randomUUID needs a secure context; plain
-    LAN http access falls back to a good-enough random id. */
-function mintMessageId(): string {
-  try {
-    if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") return crypto.randomUUID();
-  } catch {
-    /* fall through */
-  }
-  return "msg-" + Math.random().toString(36).slice(2) + Date.now().toString(36);
-}
-
 /**
  * Chat-style composer pinned under the feed. A live pane gets the text typed
  * straight into its tmux pane; a finished resumable conversation boots a new
@@ -167,6 +163,14 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
      /compact — a stray click must never condense a live agent's context. */
   const [compactArmed, setCompactArmed] = useState(false);
   const [sent, setSent] = useState<SentEntry[]>([]);
+  /* One idempotency key per message draft: reused verbatim on a retry (never a
+     second send) and re-minted after a successful delivery. Passed to the send
+     so the runtime host can round-trip it once the structured plane is on; the
+     legacy /api/tmux route ignores the extra field. */
+  const idempotencyKey = useRef<string>(mintIdempotencyKey());
+  /* Durable receipts for this session from the runtime bus (empty while the bus
+     is disabled or the session is legacy/unhosted). */
+  const runtimeReceipts = useRuntimeReceiptsForArtifact(file.path);
 
   useEffect(() => {
     if (!compactArmed) return;
@@ -233,14 +237,14 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
     sessionStorage.setItem(sentKey(cardId), JSON.stringify(next));
   };
 
-  const send = async (overrideText?: string) => {
+  const send = async (overrideText?: string, retry?: { receiptId: number; clientMessageId?: string }) => {
     const payloadText = overrideText ?? text;
     if (busy || voiceSending || (!payloadText.trim() && !attachments.images.length)) return;
     setBusy(true);
     setStatus(null);
     /* Idempotency key: the backend can dedupe a retried held/failed delivery
        against this id so the successor never receives the same prompt twice. */
-    const clientMessageId = mintMessageId();
+    const clientMessageId = deliveryAttemptKey(idempotencyKey.current, retry?.clientMessageId);
     try {
       const res = await fetch("/api/tmux", {
         method: "POST",
@@ -249,6 +253,7 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
           pid: file.pid ?? undefined,
           path: file.path,
           text: payloadText,
+          idempotencyKey: clientMessageId,
           clientMessageId,
           images: attachments.images.map((image) => ({ base64: image.base64, mime: image.mime })),
         }),
@@ -282,7 +287,9 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
         state: held ? (json.outcome as DeliveryReceiptState) : "sent",
         clientMessageId,
       };
-      persistSent([...sent, entry].slice(-SENT_LIMIT));
+      const prior = retry ? sent.filter((item) => item.id !== retry.receiptId) : sent;
+      persistSent([...prior, entry].slice(-SENT_LIMIT));
+      idempotencyKey.current = mintIdempotencyKey(); // next draft is a new message
       setText("");
       attachments.clear();
       setStatus({
@@ -465,8 +472,7 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
                   disabled={busy || voiceSending}
                   className="inline-flex shrink-0 items-center rounded px-0.5 text-dim hover:text-accent disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
                   onClick={() => {
-                    persistSent(sent.filter((item) => item.id !== entry.id));
-                    void send(entry.text);
+                    void send(entry.text, { receiptId: entry.id, clientMessageId: entry.clientMessageId });
                   }}
                 >
                   <RotateCcw className="h-3 w-3" aria-hidden />
@@ -520,6 +526,11 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
             : []
         }
         showImage={!isMobile}
+        receipts={
+          runtimeReceipts.length
+            ? runtimeReceipts.map((receipt) => <ReceiptChip key={receipt.operationId} receipt={receipt} />)
+            : undefined
+        }
         leftSlot={
           isMobile ? (
             <div className="flex min-w-0 items-center gap-1.5">

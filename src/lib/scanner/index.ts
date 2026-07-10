@@ -1,10 +1,10 @@
 import type { FileEntry, ProjectCatalogEntry } from "../types";
-import { notifyQuestion } from "../push";
-import { resolveTarget } from "../tmux";
-import { activityVerdict } from "./activity";
 import { tickFlows } from "../flows/engine";
+import { notifyQuestion } from "../push";
 import { tickTaskInbox } from "../tasks/inboxScanner";
+import { resolveTarget } from "../tmux";
 import { tickWorkflows } from "../workflows/engine";
+import { activityVerdict } from "./activity";
 import { ctxFor } from "./context";
 import { discoverFiles, discoverFilesWithProjectCatalog } from "./discover";
 import { entryEffort } from "./effort";
@@ -70,24 +70,26 @@ async function forEachEntryBatchYielding(
   }
 }
 
-export async function listFiles(): Promise<FileEntry[]> {
-  return (await listFilesInternal(false)).files;
+export interface FileScanOptions {
+  persist?: boolean;
 }
 
-export async function listFilesWithProjectCatalog(
-  selectedProject?: string,
-  options: { persistCatalog?: boolean } = {},
-): Promise<{ files: FileEntry[]; projectCatalog: ProjectCatalogEntry[] }> {
-  return listFilesInternal(true, selectedProject, options.persistCatalog === true);
+export async function listFiles(options: FileScanOptions = {}): Promise<FileEntry[]> {
+  return (await listFilesInternal(false, undefined, options)).files;
+}
+
+export async function listFilesWithProjectCatalog(selectedProject?: string, options: FileScanOptions = {}): Promise<{ files: FileEntry[]; projectCatalog: ProjectCatalogEntry[] }> {
+  return listFilesInternal(true, selectedProject, options);
 }
 
 async function listFilesInternal(
   includeProjectCatalog: boolean,
   selectedProject?: string,
-  persistCatalog = false,
+  options: FileScanOptions = {},
 ): Promise<{ files: FileEntry[]; projectCatalog: ProjectCatalogEntry[] }> {
+  const persist = options.persist === true;
   const scan = includeProjectCatalog
-    ? await discoverFilesWithProjectCatalog(undefined, selectedProject, { persistCatalog })
+    ? await discoverFilesWithProjectCatalog(undefined, selectedProject, { persist })
     : { files: await discoverFiles(), projectCatalog: [] };
   const entries = scan.files;
   // The /proc fd scan is only needed to attribute background-task outputs to a
@@ -127,7 +129,7 @@ async function listFilesInternal(
     entry.goal = goalFor(entry);
     entry.ctx = ctxFor(entry);
   });
-  await linkEntries(entries, { persist: false });
+  await linkEntries(entries, { persist });
   return { files: entries, projectCatalog: scan.projectCatalog };
 }
 

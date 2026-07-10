@@ -190,6 +190,23 @@ test("fragmented and coalesced JSONL messages preserve request and notification 
   client.close();
 });
 
+test("structured server requests receive a response and leave the app-server transport healthy", async () => {
+  const { child, start } = clientWith((fake, message) => {
+    if (message.method === "initialize") fake.respond(requestId(message), {});
+    if (message.method === "account/read") fake.respond(requestId(message), { account: null, requiresOpenaiAuth: true });
+  });
+  const client = await start();
+  client.onRequest((request) => {
+    expect(request.method).toBe("item/tool/requestUserInput");
+    return { answers: { size: "small" } };
+  });
+  child.output('{"jsonrpc":"2.0","id":77,"method":"item/tool/requestUserInput","params":{"questions":[]}}\n');
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(JSON.parse(child.writes.at(-1)!)).toEqual({ jsonrpc: "2.0", id: 77, result: { answers: { size: "small" } } });
+  await expect(client.readAccount()).resolves.toEqual({ account: null, requiresOpenaiAuth: true });
+  client.close();
+});
+
 test("an ambiguous request timeout closes the transport and ignores later bytes", async () => {
   const clock = new FakeClock();
   const child = new FakeChild();

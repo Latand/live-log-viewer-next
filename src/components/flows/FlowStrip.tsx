@@ -8,6 +8,7 @@ import { type MessageKey, useLocale } from "@/lib/i18n";
 import type { Flow, FlowAction } from "@/lib/flows/types";
 
 import { Hint } from "@/components/Hint";
+import { useRuntimeFlow } from "@/hooks/useRuntime";
 
 import { ATTENTION_STATES, patchFlow, stateLabel, verdictTone } from "./flowModel";
 import { RoundStateIcon } from "./RoundIcons";
@@ -40,8 +41,11 @@ function stateDot(flow: Flow): string {
  * the right. All mutations go through PATCH /api/flows/:id; the poll
  * refresh carries the resulting state back.
  */
-export function FlowStrip({ flow, onFocusRound }: { flow: Flow; onFocusRound?: (n: number) => void }) {
+export function FlowStrip({ flow: polledFlow, onFocusRound }: { flow: Flow; onFocusRound?: (n: number) => void }) {
   const { t } = useLocale();
+  /* Event-driven progression wins over the poll: if the runtime bus carries
+     this flow, its state is fresher than the last /api/files snapshot. */
+  const flow = useRuntimeFlow(polledFlow.id) ?? polledFlow;
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [note, setNote] = useState("");

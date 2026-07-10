@@ -18,7 +18,9 @@ export const dynamic = "force-dynamic";
 export async function GET(request: Request): Promise<NextResponse> {
   const url = new URL(request.url);
   const selectedProject = url.searchParams.get("project")?.trim() || undefined;
-  const { files, projectCatalog } = await listFilesWithProjectCatalog(selectedProject);
+  const { files, projectCatalog } = await listFilesWithProjectCatalog(selectedProject, { persist: false });
+  // A scan is a read model. Runtime reconciliation and notifications belong to
+  // the external scheduler, keeping repeated GETs byte-stable for state files.
   const registry = agentRegistry();
   const registrySnapshot = registry.snapshot();
   for (const file of files) {

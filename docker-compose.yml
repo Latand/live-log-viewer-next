@@ -33,6 +33,22 @@ x-viewer-common: &viewer-common
     - /tmp/claude-${LLV_UID:-1000}:/tmp/claude-${LLV_UID:-1000}
 
 services:
+  # Explicit activation only. This service is deliberately independent of the
+  # Viewer replacement lifecycle; deployment and cutover remain operator work.
+  runtime-host:
+    <<: *viewer-common
+    profiles:
+      - runtime-host
+    command: ["bun", "run", "src/runtime-host/main.ts"]
+    environment:
+      HOME: /home/latand
+      XDG_CONFIG_HOME: /home/latand/.config
+      XDG_CACHE_HOME: /home/latand/.cache
+      LLV_RUNTIME_EVENTS: ${LLV_RUNTIME_EVENTS:-0}
+      LLV_RUNTIME_LEGACY_SCHEDULER: ${LLV_RUNTIME_LEGACY_SCHEDULER:-0}
+      LLV_RUNTIME_HOST_SOCKET: ${LLV_RUNTIME_HOST_SOCKET:-/home/latand/.config/agent-log-viewer/state/runtime-host.sock}
+      LLV_RUNTIME_JOURNAL: ${LLV_RUNTIME_JOURNAL:-/home/latand/.config/agent-log-viewer/state/runtime-events.sqlite}
+
   viewer:
     <<: *viewer-common
     restart: unless-stopped

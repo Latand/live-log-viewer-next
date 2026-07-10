@@ -1,4 +1,5 @@
 import { mkdtemp, mkdir, rm, utimes, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -13,6 +14,26 @@ async function writeFixture(pathname: string, content: string, mtimeSeconds: num
   await writeFile(pathname, content);
   await utimes(pathname, mtimeSeconds, mtimeSeconds);
 }
+
+test("pure project-catalog discovery leaves the state directory unchanged", async () => {
+  const base = await mkdtemp(path.join(os.tmpdir(), "llv-discover-pure-"));
+  const previousStateDir = process.env.LLV_STATE_DIR;
+  process.env.LLV_STATE_DIR = path.join(base, "state");
+  try {
+    const roots: Record<RootKey, string> = {
+      "codex-sessions": path.join(base, "codex-sessions"),
+      "claude-projects": path.join(base, "claude-projects"),
+      "claude-tasks": path.join(base, "claude-tasks"),
+    };
+    await Promise.all(Object.values(roots).map((root) => mkdir(root, { recursive: true })));
+    await discoverFilesWithProjectCatalog(roots, undefined, { persist: false });
+    expect(existsSync(path.join(process.env.LLV_STATE_DIR, "project-catalog.json"))).toBe(false);
+  } finally {
+    if (previousStateDir === undefined) delete process.env.LLV_STATE_DIR;
+    else process.env.LLV_STATE_DIR = previousStateDir;
+    await rm(base, { recursive: true, force: true });
+  }
+});
 
 test("discoverFiles preserves scanner filters, mtime ordering, and the cap", async () => {
   const base = await mkdtemp(path.join(os.tmpdir(), "llv-discover-"));

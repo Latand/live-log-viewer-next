@@ -159,14 +159,14 @@ function entriesFromRaw(raw: RawEntry[], selectedProject?: string, projectByPath
 export async function discoverFilesWithProjectCatalog(
   roots: Roots | RootEntries = scanRootEntries(),
   selectedProject?: string,
-  options: { persistCatalog?: boolean } = {},
+  options: { persist?: boolean } = {},
 ): Promise<{
   files: FileEntry[];
   projectCatalog: ProjectCatalogEntry[];
 }> {
   const limit = createLimiter(48);
   const raw = await discoverRaw(roots, limit);
-  const { projectCatalog, projectByPath } = projectCatalogSnapshotFromRaw(raw, { persist: options.persistCatalog !== false });
+  const { projectCatalog, projectByPath } = projectCatalogSnapshotFromRaw(raw, options);
   return { files: entriesFromRaw(raw, selectedProject, projectByPath), projectCatalog };
 }
 
