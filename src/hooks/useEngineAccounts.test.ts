@@ -332,7 +332,7 @@ test("parseClaudeLogin validates fields and rejects unknown phases without throw
   expect(parseClaudeLogin("nope")).toBeNull();
   expect(parseClaudeLogin({ operationId: 1, phase: "starting", loginUrl: null, acceptsCode: false, deadlineAt: "t", result: null })).toBeNull();
   expect(parseClaudeLogin({ operationId: "o", phase: "weird", loginUrl: null, acceptsCode: false, deadlineAt: "t", result: null })).toBeNull();
-  // A malformed result object is rejected, not silently accepted.
+  // A malformed result object is rejected explicitly.
   expect(parseClaudeLogin({ operationId: "o", phase: "failed", loginUrl: null, acceptsCode: false, deadlineAt: "t", result: { status: "failure" } })).toBeNull();
   const ok = parseClaudeLogin(loginView());
   expect(ok).toMatchObject({ operationId: "op1", phase: "awaiting_code", loginUrl: "https://claude.ai/login", acceptsCode: true });
