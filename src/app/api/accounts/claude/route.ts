@@ -7,24 +7,38 @@ import { rejectCrossOrigin } from "@/lib/sameOrigin";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+const CLAUDE_LOGIN_TARGET = "claude-auth-login";
+
+function failure(status: number, code: string, message: string) {
+  return NextResponse.json({ error: message, code }, { status });
+}
+
+function accountResponse(account: { id: string; label: string; kind: "legacy" | "managed"; authPresent: boolean }, login: ReturnType<typeof claudeLoginSupervisor.start>) {
+  return NextResponse.json({
+    account: { id: account.id, label: account.label, kind: account.kind, authPresent: account.authPresent },
+    login,
+    target: CLAUDE_LOGIN_TARGET,
+  }, { status: 202 });
+}
+
 export async function POST(req: NextRequest) {
   const rejected = rejectCrossOrigin(req); if (rejected) return rejected;
-  let body: { label?: unknown; id?: unknown; action?: unknown }; try { body = await req.json() as { label?: unknown; id?: unknown; action?: unknown }; } catch { return NextResponse.json({ error: "invalid JSON" }, { status: 400 }); }
-  if (!claudeLoginSupervisor.canStart()) return NextResponse.json({ error: "Claude login is disabled until LLV_ENABLE_CLAUDE_LOGIN=1 and LLV_CLAUDE_LOGIN_POLICY_ACCEPTED=1 are set" }, { status: 503 });
+  let body: { label?: unknown; id?: unknown; action?: unknown }; try { body = await req.json() as { label?: unknown; id?: unknown; action?: unknown }; } catch { return failure(400, "invalid_json", "Invalid JSON"); }
   if (body.action === "retry") {
-    if (typeof body.id !== "string") return NextResponse.json({ error: "id must be a string" }, { status: 400 });
+    if (typeof body.id !== "string") return failure(400, "invalid_account", "Account id must be a string");
     try {
       const account = listClaudeAccounts().find((candidate) => candidate.id === body.id);
       if (!account || account.kind !== "managed") throw new UnknownClaudeAccountError(body.id);
       const login = claudeLoginSupervisor.start(account.id);
-      if (login.phase === "failed") return NextResponse.json({ error: "could not start Claude login" }, { status: 503 });
-      return NextResponse.json({ account: { id: account.id, label: account.label, kind: account.kind, authPresent: account.authPresent }, login }, { status: 202 });
+      if (login.phase === "failed") return failure(503, login.result?.code ?? "start_failed", login.result?.message ?? "Claude login could not start");
+      return accountResponse(account, login);
     } catch (error) {
-      const status = error instanceof UnknownClaudeAccountError || error instanceof CorruptClaudeAccountsError ? 400 : 503;
-      return NextResponse.json({ error: error instanceof Error ? error.message : "could not retry Claude login" }, { status });
+      if (error instanceof UnknownClaudeAccountError || error instanceof CorruptClaudeAccountsError) return failure(400, "unknown_account", "Claude account is unavailable");
+      if (error instanceof Error && error.message === "a Claude login operation is already running") return failure(409, "login_busy", "A Claude login operation is already running");
+      return failure(503, "login_unavailable", "Claude login is temporarily unavailable");
     }
   }
-  if (typeof body.label !== "string") return NextResponse.json({ error: "label must be a string" }, { status: 400 });
+  if (typeof body.label !== "string") return failure(400, "invalid_label", "Account label must be a string");
   let reserved: string | null = null; let accountId: string | null = null;
   try {
     reserved = claudeLoginSupervisor.reserve().operationId;
@@ -33,13 +47,14 @@ export async function POST(req: NextRequest) {
     const login = claudeLoginSupervisor.start(account.id, reserved);
     if (login.phase === "failed") {
       removeManagedClaudeAccount(account.id);
-      return NextResponse.json({ error: "could not start Claude login" }, { status: 503 });
+      return failure(503, login.result?.code ?? "start_failed", login.result?.message ?? "Claude login could not start");
     }
-    return NextResponse.json({ account: { id: account.id, label: account.label, kind: account.kind, authPresent: account.authPresent }, login }, { status: 202 });
+    return accountResponse(account, login);
   } catch (error) {
     if (accountId) removeManagedClaudeAccount(accountId);
     if (reserved) claudeLoginSupervisor.abandon(reserved);
-    const status = error instanceof InvalidClaudeAccountLabelError || error instanceof CorruptClaudeAccountsError ? 400 : 503;
-    return NextResponse.json({ error: error instanceof Error ? error.message : "could not create Claude account" }, { status });
+    if (error instanceof InvalidClaudeAccountLabelError || error instanceof CorruptClaudeAccountsError) return failure(400, "invalid_account", "Claude account could not be created");
+    if (error instanceof Error && error.message === "a Claude login operation is already running") return failure(409, "login_busy", "A Claude login operation is already running");
+    return failure(503, "login_unavailable", "Claude login is temporarily unavailable");
   }
 }
