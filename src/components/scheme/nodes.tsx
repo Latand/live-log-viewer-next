@@ -1,12 +1,15 @@
 "use client";
 
 import { Check, Layers } from "lucide-react";
-import { memo, useState } from "react";
+import { memo, useMemo, useState } from "react";
 
 import { ChevronRight } from "@/components/icons";
 import type { Flow } from "@/lib/flows/types";
 import { useLocale } from "@/lib/i18n";
-import type { FileEntry } from "@/lib/types";
+import type { Activity, FileEntry } from "@/lib/types";
+
+import { useRuntime } from "@/hooks/useRuntime";
+import { deriveSessionState, hasBlockingAttention, runtimeActivity } from "@/components/runtime/runtimeModel";
 
 import { BranchPane, kindLabel } from "@/components/BranchPane";
 import { DraftAgentPane } from "@/components/DraftAgentPane";
@@ -672,6 +675,25 @@ export const NodesLayer = memo(function NodesLayer({
   /** Opens a conversation as the full-window overlay (desktop panes only). */
   onExpand: (path: string) => void;
 }) {
+  /* Hosted session nodes take their status dot from the runtime bus's
+     session-status events instead of the poll-derived activity (Fable §7).
+     Empty while the bus is off, and legacy tmux nodes are skipped, so today's
+     derivation is unchanged everywhere the bus does not own the session. */
+  const { store, enabled: runtimeEnabled } = useRuntime();
+  const runtimeActivityByPath = useMemo(() => {
+    const map = new Map<string, Activity>();
+    if (!runtimeEnabled) return map;
+    for (const s of Object.values(store.sessions)) {
+      if (s.hostKind === "tmux-legacy" || !s.artifactPath) continue;
+      map.set(s.artifactPath, runtimeActivity(deriveSessionState(s, hasBlockingAttention(store, s))));
+    }
+    return map;
+  }, [store, runtimeEnabled]);
+  const withRuntimeActivity = (node: SchemeNode): SchemeNode => {
+    const activity = runtimeActivityByPath.get(node.file.path);
+    return activity ? { ...node, file: { ...node.file, activity } } : node;
+  };
+
   /* A stack or deck stays lit when any conversation inside it is in the
      queue — a stalled branch may live in a mini stack, and a blocked
      reviewer inside a round deck. */
@@ -720,8 +742,9 @@ export const NodesLayer = memo(function NodesLayer({
           />
         ),
       )}
-      {layout.nodes.map((node) =>
-        lite ? (
+      {layout.nodes.map((rawNode) => {
+        const node = withRuntimeActivity(rawNode);
+        return lite ? (
           <LiteNodeShell
             key={node.file.path}
             node={node}
@@ -745,8 +768,8 @@ export const NodesLayer = memo(function NodesLayer({
             onHandoff={onHandoff}
             onExpand={onExpand}
           />
-        ),
-      )}
+        );
+      })}
     </div>
   );
 });

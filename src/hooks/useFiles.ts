@@ -10,7 +10,12 @@ import type { BoardTask } from "@/lib/tasks/types";
 import type { FileEntry, FilesResponse, ProjectCatalogEntry } from "@/lib/types";
 import type { Workflow } from "@/lib/workflows/types";
 
+import { getRuntimeBus, isRuntimeUiEnabled } from "./runtimeBus";
+
+/** The universal fallback cadence — also the only source for legacy sessions. */
 const POLL_MS = 10_000;
+/** Debounce after a `files.revision` event before the pure GET fires. */
+const FILES_DEBOUNCE_MS = 400;
 
 export interface FilesData {
   files: FileEntry[];
@@ -25,6 +30,15 @@ const EMPTY: FilesData = { files: [], projectCatalog: [], flows: [], workflows: 
 
 export function filesApiUrl(project?: string | null): string {
   return project ? "/api/files?project=" + encodeURIComponent(project) : "/api/files";
+}
+
+/**
+ * The recurring `/api/files` cadence given the runtime connection: a healthy
+ * live stream removes the timer entirely (`live`, freshness rides
+ * `files.revision`), every other state keeps the bounded 10s fallback poll.
+ */
+export function filesPollCadence(connection: "live" | "reconnecting" | "degraded" | "offline"): "poll" | "live" {
+  return connection === "live" ? "live" : "poll";
 }
 
 /** Polls /api/files. Keeps the last good list on transient fetch errors. */
@@ -68,16 +82,53 @@ export function useFiles(project?: string | null): FilesData {
       }
     };
     void load();
-    const t = setInterval(load, POLL_MS);
+
+    /*
+     * Recurring poll cadence. With the runtime bus off (the default,
+     * landing-disabled slice) this stays a flat 10s poll — identical to before.
+     * With the bus healthy the recurring timer is removed entirely: freshness
+     * rides `files.revision` events (a debounced pure GET), satisfying "healthy
+     * SSE disables the recurring /api/files timer". When the bus degrades, the
+     * 10s fallback poll is restored.
+     */
+    let timer: ReturnType<typeof setInterval> | null = null;
+    let mode: "poll" | "live" | null = null;
+    const setCadence = (next: "poll" | "live") => {
+      if (next === mode) return;
+      mode = next;
+      if (timer) clearInterval(timer);
+      timer = next === "poll" ? setInterval(load, POLL_MS) : null;
+    };
+
     /* Flow, workflow and task mutations refresh out of band: strips and
        cards must not sit on stale state for up to a full poll interval. */
     const onChanged = () => void load();
     window.addEventListener(FLOWS_CHANGED_EVENT, onChanged);
     window.addEventListener(WORKFLOWS_CHANGED_EVENT, onChanged);
     window.addEventListener(TASKS_CHANGED_EVENT, onChanged);
+
+    let unsubBus = () => {};
+    let unsubFiles = () => {};
+    let filesDebounce: ReturnType<typeof setTimeout> | null = null;
+    if (isRuntimeUiEnabled() && typeof window !== "undefined") {
+      const bus = getRuntimeBus();
+      const applyConnection = () => setCadence(filesPollCadence(bus.getState().connection));
+      applyConnection();
+      unsubBus = bus.subscribe(applyConnection);
+      unsubFiles = bus.subscribeFilesRevision(() => {
+        if (filesDebounce) clearTimeout(filesDebounce);
+        filesDebounce = setTimeout(() => void load(), FILES_DEBOUNCE_MS);
+      });
+    } else {
+      setCadence("poll");
+    }
+
     return () => {
       alive = false;
-      clearInterval(t);
+      if (timer) clearInterval(timer);
+      if (filesDebounce) clearTimeout(filesDebounce);
+      unsubBus();
+      unsubFiles();
       window.removeEventListener(FLOWS_CHANGED_EVENT, onChanged);
       window.removeEventListener(WORKFLOWS_CHANGED_EVENT, onChanged);
       window.removeEventListener(TASKS_CHANGED_EVENT, onChanged);

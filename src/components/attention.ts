@@ -9,8 +9,28 @@ import { projectKey } from "./projectModel";
  * the one `attentionId` helper here so counts and dedupe keys cannot drift.
  */
 
-/** «blocked» — a hard question/prompt; «stalled» — an interrupted agent (FIFO tail segment). */
-export type AttentionTier = "blocked" | "stalled";
+/**
+ * Attention severity tiers, highest first:
+ * - «unowned» — a hosted approval with no attached owner (a first-class alarm,
+ *   issue #25 R10-5); always sorts to the queue head.
+ * - «blocked» — a hard structured question/prompt.
+ * - «heuristic» — a low-confidence "possibly waiting" signal (turn-ended +
+ *   idle + nothing pending); visually distinct, ranks below hard blocks.
+ * - «stalled» — an interrupted agent (FIFO tail segment).
+ *
+ * The FileEntry-derived queue below only ever emits «blocked»/«stalled» (its
+ * historical behavior is byte-identical); «unowned»/«heuristic» come from the
+ * runtime bus's structured attentions.
+ */
+export type AttentionTier = "unowned" | "blocked" | "heuristic" | "stalled";
+
+/** Sort priority per tier (lower = closer to the queue head). */
+export const TIER_RANK: Record<AttentionTier, number> = {
+  unowned: 0,
+  blocked: 1,
+  heuristic: 2,
+  stalled: 3,
+};
 
 export interface AttentionItem {
   /** attentionId(file) — stable while the underlying signal is unchanged. */
@@ -78,8 +98,7 @@ export function buildAttentionQueue(
     items.push({ id, file, project: projectKey(file), tier, since });
   }
   return items.sort(
-    (a, b) =>
-      (a.tier === b.tier ? 0 : a.tier === "blocked" ? -1 : 1) || a.since - b.since || a.id.localeCompare(b.id),
+    (a, b) => TIER_RANK[a.tier] - TIER_RANK[b.tier] || a.since - b.since || a.id.localeCompare(b.id),
   );
 }
 

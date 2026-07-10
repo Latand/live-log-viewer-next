@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { ArrowRight, ArrowUpToLine, FoldVertical, Loader2, Play, Square, SquareTerminal, X } from "@/components/icons";
 import { Check, Plus } from "lucide-react";
@@ -8,12 +8,15 @@ import { Check, Plus } from "lucide-react";
 import { Hint } from "@/components/Hint";
 import { useComposer } from "@/hooks/useComposer";
 import { useIsMobile } from "@/hooks/useIsMobile";
+import { useRuntimeReceiptsForArtifact } from "@/hooks/useRuntime";
 import { useTmuxTarget } from "@/hooks/useTmuxTarget";
 import { getLocale, useLocale } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
 
 import { ComposerBar } from "./ComposerBar";
 import { ImagePickerButton } from "./imageAttachments";
+import { ReceiptChip } from "./runtime/ReceiptChip";
+import { mintIdempotencyKey } from "./runtime/runtimeModel";
 
 interface SentEntry {
   id: number;
@@ -96,6 +99,14 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
      /compact — a stray click must never condense a live agent's context. */
   const [compactArmed, setCompactArmed] = useState(false);
   const [sent, setSent] = useState<SentEntry[]>([]);
+  /* One idempotency key per message draft: reused verbatim on a retry (never a
+     second send) and re-minted after a successful delivery. Passed to the send
+     so the runtime host can round-trip it once the structured plane is on; the
+     legacy /api/tmux route ignores the extra field. */
+  const idempotencyKey = useRef<string>(mintIdempotencyKey());
+  /* Durable receipts for this session from the runtime bus (empty while the bus
+     is disabled or the session is legacy/unhosted). */
+  const runtimeReceipts = useRuntimeReceiptsForArtifact(file.path);
 
   useEffect(() => {
     if (!compactArmed) return;
@@ -171,6 +182,7 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
           pid: file.pid ?? undefined,
           path: file.path,
           text: payloadText,
+          idempotencyKey: idempotencyKey.current,
           images: attachments.images.map((image) => ({ base64: image.base64, mime: image.mime })),
         }),
       });
@@ -194,6 +206,7 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
         via: json.outcome === "resumed" || json.spawned ? "spawn" : "pane",
       };
       persistSent([...sent, entry].slice(-SENT_LIMIT));
+      idempotencyKey.current = mintIdempotencyKey(); // next draft is a new message
       setText("");
       attachments.clear();
       setStatus({
@@ -393,6 +406,11 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
             : []
         }
         showImage={!isMobile}
+        receipts={
+          runtimeReceipts.length
+            ? runtimeReceipts.map((receipt) => <ReceiptChip key={receipt.operationId} receipt={receipt} />)
+            : undefined
+        }
         leftSlot={
           isMobile ? (
             <div className="flex min-w-0 items-center gap-1.5">

@@ -14,6 +14,7 @@ import { type TFunction, useLocale } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
 
 import { attentionId, buildAttentionQueue, nextAttention, STALLED_ATTENTION_TTL, type AttentionItem } from "./attention";
+import { ConnectionPill } from "./ConnectionPill";
 import { OverviewBoard } from "./OverviewBoard";
 import { ProjectDashboard, queueColumnOpen } from "./ProjectDashboard";
 import { isChildConversation, OVERVIEW, projectKey } from "./projectModel";
@@ -470,6 +471,15 @@ export function Viewer() {
           />
         )}
       </main>
+      {/* Runtime connection pill — mounts the tab-wide bus and shows live /
+          reconnecting / degraded / offline. Renders nothing while slice-one is
+          disabled, so on the landing page it is inert. Docked bottom-left, clear
+          of the bottom-right CornerStatus and the top-right attention anchor. */}
+      {isMobile ? null : (
+        <div className="pointer-events-auto fixed bottom-3 left-3 z-20">
+          <ConnectionPill />
+        </div>
+      )}
     </div>
   );
 }

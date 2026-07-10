@@ -42,6 +42,10 @@ export interface ComposerBarProps {
   /** The phone composer moves the image picker behind the leftSlot toggle;
       this hides the inline one so the picker exists only once. */
   showImage?: boolean;
+  /** Durable runtime receipt chips for the last sends on this target (issue
+      #25). Rendered under the status line; absent while the runtime bus is off,
+      so the composer is unchanged on the landing-disabled path. */
+  receipts?: ReactNode;
 }
 
 function SendMenu({ label, actions, onClose }: { label: string; actions: SendMenuAction[]; onClose: () => void }) {
@@ -117,6 +121,7 @@ export function ComposerBar({
   sendMenuLabel,
   sendMenuActions = [],
   showImage = true,
+  receipts,
 }: ComposerBarProps) {
   const {
     displayText,
@@ -223,6 +228,7 @@ export function ComposerBar({
           {status.text}
         </span>
       ) : null}
+      {receipts ? <div className="flex flex-wrap gap-1.5">{receipts}</div> : null}
     </>
   );
 }
