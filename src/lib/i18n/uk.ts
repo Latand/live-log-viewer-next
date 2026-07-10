@@ -482,6 +482,8 @@ export const uk: Record<keyof typeof en, Message> = {
   "scheme.roleWaiting": "чекає",
   "scheme.lassoTool": "Вибірка — обведи агентів рамкою, кліком додавай чи знімай",
   "scheme.boardAria": "Дошка агентів — стрілки переміщують між вікнами агентів",
+  "scheme.navStack": { one: "{count} тиха гілка під {title}", few: "{count} тихі гілки під {title}", many: "{count} тихих гілок під {title}", other: "{count} тихих гілок під {title}" },
+  "scheme.navStackBare": { one: "{count} тиха гілка", few: "{count} тихі гілки", many: "{count} тихих гілок", other: "{count} тихих гілок" },
 
   "bulk.selectedCount": { one: "Вибрано {count}", few: "Вибрано {count}", many: "Вибрано {count}", other: "Вибрано {count}" },
   "bulk.placeholder": "одне повідомлення кожному вибраному агенту…",

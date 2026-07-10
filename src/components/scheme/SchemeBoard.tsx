@@ -3,10 +3,12 @@
 import { BoxSelect, Hand, Maximize2, Minus, MousePointer2, Plus, StickyNote } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import { cameraToPresence, orderedSelection, schemeFocusedPath, schemeVisiblePaths, viewBus } from "@/hooks/viewPresenceBus";
 import type { Flow } from "@/lib/flows/types";
 import { useLocale } from "@/lib/i18n";
 import type { BoardTask } from "@/lib/tasks/types";
 import type { FileEntry } from "@/lib/types";
+import { MAX_VISIBLE_PATHS } from "@/lib/view/types";
 
 import { appendComposerDraft } from "@/components/TmuxComposer";
 import { BranchPane } from "@/components/BranchPane";
@@ -446,6 +448,43 @@ export function SchemeBoard({
   useEffect(() => {
     camRef.current = cam;
   }, [cam]);
+
+  /* Presence: the desktop scheme reports its view slice for observation. The
+     assembler reads current state each commit through this ref, so publishing a
+     camera frame never re-renders the memoized pane layers. The mobile map
+     (mapMode) reports through MobileFocusView, so this instance stays quiet. */
+  const reportView = useRef<() => void>(() => {});
+  useEffect(() => {
+    reportView.current = () => {
+      if (mapMode) return;
+      /* A full-window expanded pane is the sole visible transcript; otherwise
+         the nodes whose rect the camera frames, in layout order. */
+      const visiblePaths = expanded ? [expanded] : schemeVisiblePaths(layout, cam, vp, MAX_VISIBLE_PATHS);
+      /* The ring can sit on a virtual layout key (a deck, draft or quiet-branch
+         stack) while spatial nav walks the board; only real transcript nodes
+         are valid focus targets, so anything else publishes as no focus. */
+      const transcriptPaths = new Set(layout.nodes.map((node) => node.file.path));
+      viewBus.reportSlice({
+        mode: "scheme",
+        focusedPath: schemeFocusedPath(expanded, selected, transcriptPaths),
+        selectedPaths: orderedSelection(layout, multi),
+        visiblePaths,
+        camera: cameraToPresence(cam, vp),
+        viewport: { width: vp.w, height: vp.h, dpr: typeof window === "undefined" ? 1 : window.devicePixelRatio || 1 },
+      });
+    };
+  });
+  /* Focus, selection, overlay and layout changes publish promptly. */
+  useEffect(() => {
+    if (!mapMode) reportView.current();
+  }, [mapMode, layout, multi, selected, expanded]);
+  /* Camera and viewport settles are debounced, mirroring the 300 ms llvCam
+     persist — a pan produces one publish after it stops, never per frame. */
+  useEffect(() => {
+    if (mapMode) return;
+    const timer = window.setTimeout(() => reportView.current(), 300);
+    return () => window.clearTimeout(timer);
+  }, [mapMode, cam, vp]);
 
   /* A wrong-target legacy edge (a failed delivery from an older build) is
      cleaned up by a click — nothing is ever re-delivered from the board. */

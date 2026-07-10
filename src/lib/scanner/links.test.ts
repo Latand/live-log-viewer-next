@@ -172,4 +172,15 @@ describe("linkEntries", () => {
 
     expect(child.parent as string | null).toBe(parent.path);
   });
+
+  test("pure linking leaves scanner state files byte-identical", async () => {
+    const stateFiles = ["codex-lineage.json", "handoff-lineage.json", "worktree-map.json"].map((name) => path.join(SANDBOX, name));
+    const before = stateFiles.map((file) => fs.existsSync(file) ? fs.readFileSync(file) : null);
+    const parent = entry("/home/user/.codex/sessions/pure-parent.jsonl", { pid: 700 });
+    const child = entry("/home/user/.codex/sessions/pure-child.jsonl", { pid: 900 });
+    parentByPid = new Map([[900, 800], [800, 700], [700, null]]);
+    await linkEntries([parent, child], { persist: false });
+    expect(child.parent).toBe(parent.path);
+    expect(stateFiles.map((file) => fs.existsSync(file) ? fs.readFileSync(file) : null)).toEqual(before);
+  });
 });

@@ -7,6 +7,7 @@ import type { SchemeLayout, SchemeRect } from "./layout";
 import {
   collectNavTargets,
   keyToDir,
+  navTargetLabel,
   nearestToViewportCenter,
   type NavDir,
   nextZoomStep,
@@ -14,7 +15,7 @@ import {
   planReflow,
   zoomLadderSteps,
 } from "./spatialNav";
-import { cleanTitle } from "@/components/utils";
+import { useLocale } from "@/lib/i18n";
 
 interface SpatialNavOptions {
   /** Nav is live only on the desktop board with no session/overlay/map mode. */
@@ -92,6 +93,7 @@ export function useSpatialNav({
   glideFrame,
   manualNonce,
 }: SpatialNavOptions): SpatialNav {
+  const { t } = useLocale();
   const followRef = useRef(false);
   /* The anchor's rect at its last known layout, tagged with its key, so a
      relayout yields a delta only when it is still the same anchor (a selection
@@ -111,6 +113,7 @@ export function useSpatialNav({
   const glideByRef = useRef(glideBy);
   const glideFrameRef = useRef(glideFrame);
   const setSelectedRef = useRef(setSelected);
+  const tRef = useRef(t);
   useEffect(() => {
     enabledRef.current = enabled;
     layoutRef.current = layout;
@@ -121,13 +124,10 @@ export function useSpatialNav({
     glideByRef.current = glideBy;
     glideFrameRef.current = glideFrame;
     setSelectedRef.current = setSelected;
+    tRef.current = t;
   });
 
-  const labelFor = useCallback((key: string): string => {
-    const node = layoutRef.current.nodes.find((n) => n.file.path === key);
-    if (node) return cleanTitle(node.file.title, 80);
-    return key.replace(/^(?:draft|deck)::/, "");
-  }, []);
+  const labelFor = useCallback((key: string): string => navTargetLabel(layoutRef.current, key, tRef.current), []);
 
   /* Land on a target: anchor it, centre it (zoom unchanged), seed the reflow
      baseline, ring it, and announce it. */

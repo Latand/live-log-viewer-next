@@ -5,10 +5,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { Loader2, X } from "@/components/icons";
 import { TaskSheet, type TaskSheetView } from "@/components/tasks/TaskSheet";
+import { viewBus } from "@/hooks/viewPresenceBus";
 import type { Flow } from "@/lib/flows/types";
 import { useLocale } from "@/lib/i18n";
 import type { BoardTask } from "@/lib/tasks/types";
 import type { FileEntry } from "@/lib/types";
+import { MAX_VISIBLE_PATHS } from "@/lib/view/types";
 
 import { BranchPane } from "@/components/BranchPane";
 import { DraftAgentPane } from "@/components/DraftAgentPane";
@@ -136,6 +138,20 @@ export function MobileFocusView({ project, groups, manual, files, flows, tasks, 
   const activeNode = useMemo(() => layout.nodes.find((node) => node.file.path === resolvedKey) ?? null, [layout, resolvedKey]);
   const activeDeck = useMemo(() => layout.decks.find((deck) => deck.key === resolvedKey) ?? null, [layout, resolvedKey]);
   const activeDraft = useMemo(() => layout.drafts.find((draft) => draft.key === resolvedKey) ?? null, [layout, resolvedKey]);
+
+  /* Presence: the phone reports the pinned pane as the sole visible transcript
+     (a deck/draft carries no transcript path, so focus is null there); opening
+     the map switches to mobile-map and reports the whole board in layout order.
+     The nested map camera is not surfaced to observers in this MVP. */
+  useEffect(() => {
+    const focusedPath = activeNode ? activeNode.file.path : null;
+    const visiblePaths = mapOpen
+      ? layout.nodes.slice(0, MAX_VISIBLE_PATHS).map((node) => node.file.path)
+      : activeNode
+        ? [activeNode.file.path]
+        : [];
+    viewBus.reportSlice({ mode: mapOpen ? "mobile-map" : "mobile-focus", focusedPath, selectedPaths: [], visiblePaths, camera: null });
+  }, [activeNode, mapOpen, layout]);
 
   const step = useCallback(
     (dir: number) => {
