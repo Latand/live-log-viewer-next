@@ -59,6 +59,7 @@ interface FakeHostState {
   identitySequence: string[] | null;
   aliveReads: number;
   retireOnAliveRead: number | null;
+  launchId: string | null;
 }
 
 function fakeHost(existing = true) {
@@ -83,6 +84,7 @@ function fakeHost(existing = true) {
     identitySequence: null,
     aliveReads: 0,
     retireOnAliveRead: null,
+    launchId: null,
   };
 
   const resolver = createTranscriptHostResolver({
@@ -115,6 +117,7 @@ function fakeHost(existing = true) {
       const identity = state.identities.get(pid) ?? null;
       return identity;
     },
+    launchId: async () => state.launchId,
     spawn: async (resumeSpec: ResumeSpec, payload: string): Promise<SpawnedPane> => {
       state.spawnCalls += 1;
       state.spawnSpecs.push({ spec: resumeSpec, payload });
@@ -143,6 +146,15 @@ function fakeHost(existing = true) {
 }
 
 describe("transcript host resolver", () => {
+  test("carries the pane launch marker into observation reconciliation", async () => {
+    const { resolver, state } = fakeHost();
+    state.launchId = "019f4906-3f67-7b72-9fbc-9ec3b5ad1326";
+
+    const snapshot = await resolver.readTranscriptHosts(true);
+
+    expect(snapshot.hosts[0]?.launchId).toBe(state.launchId);
+  });
+
   test("observes and delivers to the same canonical live pane", async () => {
     const { resolver, state } = fakeHost();
 

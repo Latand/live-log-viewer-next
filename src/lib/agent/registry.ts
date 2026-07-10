@@ -40,6 +40,17 @@ export interface TmuxHostEvidence {
   argv: string[];
 }
 
+/** Immutable tmux facts captured before readiness polling can expose a new
+    pane to the observer. They are the only durable correlation between a
+    launch receipt and an externally observed host. */
+export interface TmuxSpawnBinding {
+  endpoint: string;
+  server: ProcessIdentity;
+  paneId: string;
+  panePid: ProcessIdentity;
+  target: string;
+}
+
 export interface AgentRegistryEntry {
   key: SessionKey;
   artifactPath: string;
@@ -56,14 +67,45 @@ export interface AgentRegistryEntry {
 
 export interface SpawnReceipt {
   launchId: string;
+  /** Client-owned idempotency key. Legacy callers leave this null. */
+  clientAttemptId: string | null;
+  /** SHA-256 of the public launch shape. Prompt/image contents never persist. */
+  requestDigest: string | null;
+  /** Reserved at receipt birth so path discovery cannot choose the identity. */
+  conversationId: ViewerConversationId;
   engine: AgentEngine;
   cwd: string;
+  accountId: string | null;
+  parentConversationId: ViewerConversationId | null;
   createdAt: string;
-  state: "starting" | "completed" | "failed";
+  state: "starting" | "pane-bound" | "prompt-delivered" | "path-pending" | "completed" | "failed" | "conflicted";
   artifactPath: string | null;
+  key: SessionKey | null;
+  pane: TmuxSpawnBinding | null;
+  target: string | null;
+  completionMode: "route-completed" | "observed-completed" | "route-recovered" | null;
   error: string | null;
   launchProfile: LaunchProfile;
 }
+
+export interface SpawnRequest {
+  engine: AgentEngine;
+  cwd: string;
+  launchProfile?: Partial<LaunchProfile>;
+  clientAttemptId?: string | null;
+  requestDigest?: string | null;
+  accountId?: string | null;
+  parentConversationId?: ViewerConversationId | null;
+}
+
+export type SpawnBeginResult =
+  | { kind: "created"; receipt: SpawnReceipt }
+  | { kind: "replay"; receipt: SpawnReceipt }
+  | { kind: "conflict"; receipt: SpawnReceipt };
+
+export type SpawnSettlement =
+  | { kind: "settled"; receipt: SpawnReceipt; entry: AgentRegistryEntry; conversation: RegistryConversation }
+  | { kind: "conflict"; receipt: SpawnReceipt; code: "spawn_artifact_conflict" | "spawn_pane_conflict" | "spawn_identity_conflict" };
 
 export interface RegistryConversation {
   id: ViewerConversationId;
@@ -213,7 +255,27 @@ function normalizeHeldDelivery(value: HeldDelivery): HeldDelivery {
 }
 
 function normalizeReceipt(value: SpawnReceipt): SpawnReceipt {
-  return { ...value, launchProfile: emptyLaunchProfile(value.launchProfile ?? { cwd: value.cwd }) };
+  const state = value.state === "completed" || value.state === "failed" || value.state === "pane-bound" || value.state === "prompt-delivered" || value.state === "path-pending" || value.state === "conflicted"
+    ? value.state
+    : "starting";
+  return {
+    ...value,
+    clientAttemptId: typeof value.clientAttemptId === "string" ? value.clientAttemptId : null,
+    requestDigest: typeof value.requestDigest === "string" ? value.requestDigest : null,
+    conversationId: typeof value.conversationId === "string" && value.conversationId.startsWith("conversation_")
+      ? value.conversationId as ViewerConversationId
+      : `conversation_${crypto.randomUUID()}`,
+    accountId: typeof value.accountId === "string" ? value.accountId : null,
+    parentConversationId: typeof value.parentConversationId === "string" && value.parentConversationId.startsWith("conversation_")
+      ? value.parentConversationId as ViewerConversationId
+      : null,
+    state,
+    key: value.key && typeof value.key === "object" && (value.key.engine === "claude" || value.key.engine === "codex") && typeof value.key.sessionId === "string" ? value.key : null,
+    pane: value.pane && typeof value.pane === "object" && typeof value.pane.paneId === "string" && typeof value.pane.target === "string" ? value.pane : null,
+    target: typeof value.target === "string" ? value.target : null,
+    completionMode: value.completionMode === "route-completed" || value.completionMode === "observed-completed" || value.completionMode === "route-recovered" ? value.completionMode : null,
+    launchProfile: emptyLaunchProfile({ ...(value.launchProfile ?? {}), cwd: value.launchProfile?.cwd ?? value.cwd }),
+  };
 }
 
 function upgradeV1(parsed: Omit<Partial<RegistryFile>, "version">): RegistryFile {
@@ -343,24 +405,179 @@ export class AgentRegistry {
 
   snapshot(): RegistryFile { return readFile(this.filename); }
 
-  beginSpawn(engine: AgentEngine, cwd: string, launchProfile: Partial<LaunchProfile> = {}): SpawnReceipt {
+  /** Create or replay a client-correlated durable launch receipt. Existing
+      internal callers use beginSpawn() and receive an uncorrelated receipt. */
+  beginSpawnRequest(input: SpawnRequest): SpawnBeginResult {
     return this.mutate((file) => {
-      const receipt: SpawnReceipt = { launchId: crypto.randomUUID(), engine, cwd, createdAt: now(), state: "starting", artifactPath: null, error: null, launchProfile: emptyLaunchProfile({ cwd, ...launchProfile }) };
+      const profile = emptyLaunchProfile({ cwd: input.cwd, parentConversationId: input.parentConversationId ?? null, ...(input.launchProfile ?? {}) });
+      if (input.clientAttemptId) {
+        const existing = Object.values(file.receipts).find((receipt) => receipt.clientAttemptId === input.clientAttemptId);
+        if (existing) {
+          const compatible = existing.requestDigest === (input.requestDigest ?? null) && existing.engine === input.engine && existing.cwd === input.cwd;
+          return { kind: compatible ? "replay" : "conflict", receipt: clone(existing) };
+        }
+      }
+      const receipt: SpawnReceipt = {
+        launchId: crypto.randomUUID(),
+        clientAttemptId: input.clientAttemptId ?? null,
+        requestDigest: input.requestDigest ?? null,
+        conversationId: `conversation_${crypto.randomUUID()}`,
+        engine: input.engine,
+        cwd: input.cwd,
+        accountId: input.accountId ?? null,
+        parentConversationId: input.parentConversationId ?? null,
+        createdAt: now(),
+        state: "starting",
+        artifactPath: null,
+        key: null,
+        pane: null,
+        target: null,
+        completionMode: null,
+        error: null,
+        launchProfile: profile,
+      };
       file.receipts[receipt.launchId] = receipt;
+      return { kind: "created", receipt: clone(receipt) };
+    });
+  }
+
+  beginSpawn(engine: AgentEngine, cwd: string, launchProfile: Partial<LaunchProfile> = {}): SpawnReceipt {
+    const result = this.beginSpawnRequest({ engine, cwd, launchProfile });
+    if (result.kind !== "created") throw new Error("could not create spawn receipt");
+    return result.receipt;
+  }
+
+  bindSpawnPane(launchId: string, pane: TmuxSpawnBinding): SpawnReceipt {
+    return this.mutate((file) => {
+      const receipt = file.receipts[launchId];
+      if (!receipt) throw new Error("unknown spawn receipt");
+      if (receipt.pane && (receipt.pane.paneId !== pane.paneId || receipt.pane.server.startIdentity !== pane.server.startIdentity || receipt.pane.panePid.startIdentity !== pane.panePid.startIdentity)) {
+        receipt.state = "conflicted";
+        receipt.error = "spawn_pane_conflict";
+        return clone(receipt);
+      }
+      if (receipt.state === "failed" || receipt.state === "conflicted") return clone(receipt);
+      receipt.pane = pane;
+      receipt.target = pane.target;
+      if (receipt.state === "starting") receipt.state = "pane-bound";
       return clone(receipt);
     });
   }
 
-  completeSpawn(launchId: string, entry: Omit<AgentRegistryEntry, "updatedAt">): AgentRegistryEntry {
+  markSpawnPromptDelivered(launchId: string): SpawnReceipt {
     return this.mutate((file) => {
       const receipt = file.receipts[launchId];
-      if (!receipt || receipt.state !== "starting") throw new Error("unknown or completed spawn receipt");
-      const full = { ...entry, updatedAt: now() };
-      file.entries[sessionKeyId(entry.key)] = full;
-      receipt.state = "completed";
-      receipt.artifactPath = entry.artifactPath;
-      return clone(full);
+      if (!receipt) throw new Error("unknown spawn receipt");
+      if (receipt.state === "pane-bound" || receipt.state === "starting") receipt.state = "prompt-delivered";
+      return clone(receipt);
     });
+  }
+
+  markSpawnPathPending(launchId: string): SpawnReceipt {
+    return this.mutate((file) => {
+      const receipt = file.receipts[launchId];
+      if (!receipt) throw new Error("unknown spawn receipt");
+      if (receipt.state === "prompt-delivered" || receipt.state === "pane-bound") receipt.state = "path-pending";
+      return clone(receipt);
+    });
+  }
+
+  private settleSpawnInFile(file: RegistryFile, launchId: string, entry: Omit<AgentRegistryEntry, "updatedAt">, completionMode: NonNullable<SpawnReceipt["completionMode"]>): SpawnSettlement {
+    const receipt = file.receipts[launchId];
+    if (!receipt) throw new Error("unknown spawn receipt");
+    const prior = receipt.key ? file.entries[sessionKeyId(receipt.key)] : null;
+    const conflict = (code: "spawn_artifact_conflict" | "spawn_pane_conflict" | "spawn_identity_conflict"): SpawnSettlement => {
+      receipt.state = "conflicted";
+      receipt.error = code;
+      return { kind: "conflict", receipt: clone(receipt), code };
+    };
+    if (receipt.engine !== entry.key.engine || receipt.cwd !== entry.cwd) return conflict("spawn_identity_conflict");
+    if (receipt.pane && entry.host?.kind === "tmux" && (
+      receipt.pane.paneId !== entry.host.paneId ||
+      receipt.pane.server.pid !== entry.host.server.pid ||
+      (receipt.pane.server.startIdentity !== null && entry.host.server.startIdentity !== receipt.pane.server.startIdentity) ||
+      (receipt.pane.panePid.pid > 0 && receipt.pane.panePid.pid !== entry.host.panePid.pid) ||
+      (receipt.pane.panePid.startIdentity !== null && entry.host.panePid.startIdentity !== receipt.pane.panePid.startIdentity)
+    )) return conflict("spawn_pane_conflict");
+    if (receipt.artifactPath && receipt.artifactPath !== entry.artifactPath) return conflict("spawn_artifact_conflict");
+    if (receipt.key && sessionKeyId(receipt.key) !== sessionKeyId(entry.key)) return conflict("spawn_identity_conflict");
+    const occupied = file.entries[sessionKeyId(entry.key)];
+    if (occupied && occupied.artifactPath !== entry.artifactPath && (!prior || sessionKeyId(prior.key) !== sessionKeyId(entry.key))) return conflict("spawn_artifact_conflict");
+
+    const existingConversation = file.conversations[receipt.conversationId];
+    const createdAt = now();
+    const conversation = existingConversation ?? {
+      id: receipt.conversationId,
+      engine: receipt.engine as Extract<AgentEngine, "claude" | "codex">,
+      generations: [],
+      migration: null,
+      turn: { state: "unknown" as const, source: "empty" as const, terminalAt: null, observedAt: null },
+      createdAt,
+      updatedAt: createdAt,
+    };
+    if (conversation.engine !== receipt.engine) return conflict("spawn_identity_conflict");
+    if (!conversation.generations.some((generation) => generation.path === entry.artifactPath)) {
+      conversation.generations.push({
+        id: nativeGenerationId(entry.artifactPath),
+        path: entry.artifactPath,
+        accountId: receipt.accountId,
+        launchProfile: receipt.launchProfile,
+        historyHash: null,
+        host: null,
+        createdAt,
+        archivedAt: null,
+      });
+      file.conversationRevision[conversation.engine] += 1;
+      file.engineRouting[conversation.engine].revision += 1;
+    }
+    /* A spawn that began before an account switch remains attributable to its
+       birth account. The already-active migration intent still applies to the
+       new conversation through the existing coordinator contract. */
+    const activeIntent = Object.values(file.migrationIntents).find((intent) => intent.engine === conversation.engine && intent.state === "draining");
+    const source = conversation.generations.at(-1);
+    if (activeIntent && source && source.accountId !== activeIntent.targetId && !conversation.migration) {
+      conversation.migration = {
+        intentId: activeIntent.id,
+        phase: conversation.turn.state === "busy" || conversation.turn.state === "unknown" ? "waiting-turn" : "requested",
+        targetId: activeIntent.targetId,
+        revision: activeIntent.revision,
+        error: null,
+        errorCode: null,
+        operationId: crypto.randomUUID(),
+        sourceGenerationId: source.id,
+        providerReceipt: null,
+        updatedAt: createdAt,
+      };
+    }
+    conversation.updatedAt = createdAt;
+    file.conversations[conversation.id] = conversation;
+
+    const full: AgentRegistryEntry = {
+      ...entry,
+      accountId: receipt.accountId,
+      launchProfile: receipt.launchProfile,
+      updatedAt: createdAt,
+    };
+    file.entries[sessionKeyId(entry.key)] = full;
+    receipt.key = entry.key;
+    receipt.artifactPath = entry.artifactPath;
+    if (receipt.target === null && entry.host?.kind === "tmux") receipt.target = entry.host.windowName || entry.host.paneId;
+    receipt.state = "completed";
+    receipt.error = null;
+    receipt.completionMode = receipt.completionMode === "observed-completed" && completionMode === "route-completed"
+      ? "route-recovered"
+      : receipt.completionMode ?? completionMode;
+    return { kind: "settled", receipt: clone(receipt), entry: clone(full), conversation: clone(conversation) };
+  }
+
+  settleSpawn(launchId: string, entry: Omit<AgentRegistryEntry, "updatedAt">, completionMode: NonNullable<SpawnReceipt["completionMode"]> = "route-completed"): SpawnSettlement {
+    return this.mutate((file) => this.settleSpawnInFile(file, launchId, entry, completionMode));
+  }
+
+  completeSpawn(launchId: string, entry: Omit<AgentRegistryEntry, "updatedAt">): AgentRegistryEntry {
+    const outcome = this.settleSpawn(launchId, entry);
+    if (outcome.kind === "conflict") throw new Error(outcome.code);
+    return outcome.entry;
   }
 
   failSpawn(launchId: string, error: string): void {
@@ -460,15 +677,10 @@ export class AgentRegistry {
     });
   }
 
-  completeObservedSpawn(key: SessionKey, artifactPath: string, cwd: string): void {
-    this.mutate((file) => {
-      for (const receipt of Object.values(file.receipts)) {
-        if (receipt.state === "starting" && receipt.engine === key.engine && receipt.cwd === cwd) {
-          receipt.state = "completed";
-          receipt.artifactPath = artifactPath;
-        }
-      }
-    });
+  /** Observation may enrich only the receipt named by the pane marker. Engine
+      and cwd are validation evidence; they never select a launch receipt. */
+  completeObservedSpawn(launchId: string, entry: Omit<AgentRegistryEntry, "updatedAt">): SpawnSettlement {
+    return this.settleSpawn(launchId, entry, "observed-completed");
   }
 
   /** Allocates one Viewer-owned identity for every native generation. Paths

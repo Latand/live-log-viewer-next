@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 
-import { Loader2, Play, X } from "@/components/icons";
+import { Play, X } from "@/components/icons";
 import { useComposer } from "@/hooks/useComposer";
 import { isEngineEffort } from "@/lib/agent/efforts";
 import { defaultModelFor } from "@/lib/agent/models";
@@ -10,6 +10,17 @@ import { useLocale } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
 
 import { ComposerBar } from "./ComposerBar";
+import { DraftLaunchStatus } from "./DraftLaunchStatus";
+import {
+  CONFIRM_ATTENTION_MS,
+  SLOW_BOOT_MS,
+  type SpawnAttempt,
+  type SpawnResponseBody,
+  classifySpawnResponse,
+  classifyTransportLoss,
+  displayPhase,
+  matchSpawnedFile,
+} from "./draftSpawn";
 import { ReasoningControls, type SpeedChoice } from "./ReasoningControls";
 import { cleanTitle, engineTintOf } from "./utils";
 
@@ -19,19 +30,6 @@ const ENGINES: { key: Engine; label: string }[] = [
   { key: "claude", label: "Claude" },
   { key: "codex", label: "Codex" },
 ];
-
-/* After this long without a matched transcript the draft admits something is
-   off and points at the tmux window instead of spinning forever. */
-const SLOW_BOOT_MS = 90_000;
-
-/** A spawn already fired from this draft: the moment, the tmux window and —
-    for claude — the exact transcript path the fresh session will write. */
-interface Boot {
-  at: number;
-  target: string;
-  path: string | null;
-  prompt: string;
-}
 
 const field = (id: string, name: string) => `llvDraftPane:${id}:${name}`;
 
@@ -66,13 +64,25 @@ export function setDraftText(id: string, text: string) {
   writeField(id, "text", text);
 }
 
-function readBoot(id: string): Boot | null {
+/** Reads back the durable spawn attempt persisted across reload. Its presence
+    means a worker may exist, so the composer stays frozen and send disabled. */
+function readAttempt(id: string): SpawnAttempt | null {
   try {
-    const raw = JSON.parse(readField(id, "boot") || "null") as Boot | null;
-    return raw && typeof raw.at === "number" && typeof raw.prompt === "string" ? raw : null;
+    const raw = JSON.parse(readField(id, "boot") || "null") as SpawnAttempt | null;
+    if (!raw || typeof raw.at !== "number" || typeof raw.prompt !== "string") return null;
+    if (raw.phase !== "booting" && raw.phase !== "confirming" && raw.phase !== "attention") return null;
+    return raw;
   } catch {
     return null;
   }
+}
+
+/** A fresh idempotency key for one launch — a converging re-POST replays onto
+    the same server receipt rather than spawning a duplicate worker. Matches the
+    route's `^[A-Za-z0-9_-]{8,128}$` gate. */
+function newAttemptId(): string {
+  const raw = typeof crypto !== "undefined" && typeof crypto.randomUUID === "function" ? crypto.randomUUID() : Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 12);
+  return raw.replace(/[^A-Za-z0-9_-]/g, "").slice(0, 128).padEnd(8, "0");
 }
 
 /**
@@ -115,8 +125,9 @@ export function DraftAgentPane({
   const [accountId, setAccountIdState] = useState(() => readField(draftId, "accountId"));
   const [accounts, setAccounts] = useState<{ id: string; label: string }[]>([]);
   const [dirs, setDirs] = useState<string[]>([]);
-  const [boot, setBootState] = useState<Boot | null>(() => readBoot(draftId));
+  const [attempt, setAttemptState] = useState<SpawnAttempt | null>(() => readAttempt(draftId));
   const [slowBoot, setSlowBoot] = useState(false);
+  const attentionRef = useRef<HTMLDivElement>(null);
   /* Transcripts that existed before the spawn: the codex match below must
      never grab a conversation that was already on disk. Not persisted — after
      a reload the mtime cutoff alone carries the match. */
@@ -146,8 +157,8 @@ export function DraftAgentPane({
     setCwdState(value);
     writeField(draftId, "cwd", value);
   };
-  const setBoot = (value: Boot | null) => {
-    setBootState(value);
+  const setAttempt = (value: SpawnAttempt | null) => {
+    setAttemptState(value);
     writeField(draftId, "boot", value ? JSON.stringify(value) : "");
   };
 
@@ -157,7 +168,7 @@ export function DraftAgentPane({
     initialText: () => readField(draftId, "text") || (src ? t("draft.readPrompt", { src }) : ""),
     persistText: (value) => writeField(draftId, "text", value),
     submit: (overrideText) => send(overrideText),
-    disabled: Boolean(boot),
+    disabled: Boolean(attempt),
   });
   const { text, setText, setStatus, busy, setBusy, voiceSending, attachments } = composer;
 
@@ -192,49 +203,68 @@ export function DraftAgentPane({
     }).catch(() => {});
   }, []);
 
-  /* The handover: a claude spawn knows its transcript path up front and waits
-     for exactly that file; a codex rollout has no knowable path, so the first
-     fresh root conversation in codex-sessions after the spawn moment is ours. */
+  /* The handover, by strongest evidence first: a settled spawn waits for its
+     exact transcript path; a launched-but-unresolved one (codex slow-boot, or a
+     transport-loss confirm) adopts by the settled conversation id, else the
+     first fresh root conversation of this engine after the launch moment that
+     was not already on disk. Reactive to the file feed — no polling loop — so it
+     still converges even after the card has escalated to `attention`. */
   useEffect(() => {
-    if (!boot) return;
-    const known = knownRef.current;
-    const hit = boot.path
-      ? files.find((file) => file.path === boot.path)
-      : files.find(
-          (file) =>
-            file.engine === "codex" &&
-            file.root === "codex-sessions" &&
-            /* A handoff spawn gets linked under its source by the scanner, so
-               the fresh rollout may already carry a parent — accept that too. */
-            (src ? file.parent === src || !file.parent : !file.parent) &&
-            file.mtime >= boot.at / 1000 - 30 &&
-            (!known || !known.has(file.path)),
-        );
+    if (!attempt) return;
+    const hit = matchSpawnedFile(attempt, knownRef.current, files);
     if (hit) onSpawned(hit);
-  }, [files, boot, onSpawned, src]);
+  }, [files, attempt, onSpawned]);
 
+  /* One bounded timer per attempt: a known-path boot only earns the slow hint
+     (its file is deterministic and will still appear); a path-unknown confirm
+     escalates to `attention` after the bound, where the copy discourages a
+     relaunch. Adoption above can still win afterward. */
   useEffect(() => {
-    if (!boot) return;
-    const left = boot.at + SLOW_BOOT_MS - Date.now();
+    if (!attempt || attempt.phase === "attention") return;
+    const bound = attempt.phase === "booting" ? SLOW_BOOT_MS : CONFIRM_ATTENTION_MS;
+    const escalate = () => {
+      if (attempt.phase === "booting") setSlowBoot(true);
+      else setAttempt({ ...attempt, phase: "attention" });
+    };
+    const left = attempt.at + bound - Date.now();
     if (left <= 0) {
-      /* eslint-disable-next-line react-hooks/set-state-in-effect */
-      setSlowBoot(true);
+      escalate();
       return;
     }
-    const timer = window.setTimeout(() => setSlowBoot(true), left);
+    const timer = window.setTimeout(escalate, left);
     return () => window.clearTimeout(timer);
-  }, [boot]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [attempt]);
+
+  /* When recovery gives up, move focus to the assertive attention notice so a
+     keyboard/screen-reader user lands on the "don't relaunch" guidance. */
+  useEffect(() => {
+    if (attempt?.phase === "attention") attentionRef.current?.focus();
+  }, [attempt?.phase]);
 
   const send = async (overrideText?: string) => {
     const payloadText = overrideText ?? text;
-    if (busy || voiceSending || boot) return;
+    if (busy || voiceSending || attempt) return;
     if (!cwd.trim()) {
       setStatus({ kind: "err", text: t("draft.needDir") });
       return;
     }
     if (!payloadText.trim() && !attachments.images.length) return;
+    /* One idempotency key per launch; the known-set (transcripts already on
+       disk) freezes the heuristic-adoption floor before the POST fires. */
+    const clientAttemptId = newAttemptId();
+    const hasImages = attachments.images.length > 0;
+    knownRef.current = new Set(files.map((file) => file.path));
     setBusy(true);
     setStatus(null);
+    /* Records a launched/uncertain attempt: the composer freezes, the prompt
+       moves into the frozen bubble, and send stays disabled until adoption or a
+       proven pre-launch failure. */
+    const land = (durable: "booting" | "confirming", target: string, path: string | null, conversationId: string | null, launchId: string | null) => {
+      setAttempt({ clientAttemptId, at: Date.now(), target, path, conversationId, launchId, prompt: payloadText.trim(), hasImages, engine, src, phase: durable });
+      setText("");
+      attachments.clear();
+    };
     try {
       const res = await fetch("/api/spawn", {
         method: "POST",
@@ -248,22 +278,36 @@ export function DraftAgentPane({
           ...(engine === "codex" && accountId ? { accountId } : {}),
           prompt: payloadText,
           images: attachments.images.map((image) => ({ base64: image.base64, mime: image.mime })),
+          clientAttemptId,
           /* Ties the fresh agent to the source conversation: the scanner links
              its transcript as a handoff branch next to the parent's node. */
           ...(src ? { src } : {}),
         }),
       });
-      const json = (await res.json()) as { ok?: boolean; target?: string; path?: string | null; error?: string };
-      if (!res.ok || !json.ok) {
-        setStatus({ kind: "err", text: json.error ?? t("draft.launchFailed") });
-        return;
+      let json: SpawnResponseBody | null = null;
+      try {
+        json = (await res.json()) as SpawnResponseBody;
+      } catch {
+        json = null;
       }
-      knownRef.current = new Set(files.map((file) => file.path));
-      setBoot({ at: Date.now(), target: json.target ?? "", path: json.path ?? null, prompt: payloadText.trim() });
-      setText("");
-      attachments.clear();
+      const outcome = classifySpawnResponse(res.status, res.ok, json);
+      if (outcome.kind === "launched") {
+        land(outcome.durable, outcome.target, outcome.path, outcome.conversationId, outcome.launchId);
+      } else if (outcome.kind === "failed-preflight") {
+        /* No pane opened: keep the prompt and images in the composer and
+           re-enable send so the user can fix the input and retry. */
+        setStatus({ kind: "err", text: outcome.message ?? t("draft.launchFailed") });
+      } else {
+        /* Ambiguous (transport loss / opaque 5xx / conflicting attempt): a
+           worker may exist, so freeze the card into confirming rather than
+           inviting a duplicate. */
+        land("confirming", "", null, null, null);
+      }
     } catch {
-      setStatus({ kind: "err", text: t("common.serverUnavailable") });
+      /* Transport loss: the client saw nothing, so the worker may or may not
+         exist — freeze into confirming, never re-enable send. */
+      classifyTransportLoss();
+      land("confirming", "", null, null, null);
     } finally {
       setBusy(false);
     }
@@ -272,6 +316,10 @@ export function DraftAgentPane({
   const tint = engineTintOf(engine);
   const fieldsDisabled = composer.fieldsDisabled;
   const dirListId = "draft-dirs-" + draftId;
+  /* Display phase drives the frozen-card copy. `busy` (POST in flight) shows as
+     `launching`; a durable attempt shows booting/booting-slow/confirming/attention. */
+  const phase = displayPhase(attempt, busy, slowBoot);
+  const target = attempt?.target ?? "";
 
   return (
     <section
@@ -353,24 +401,14 @@ export function DraftAgentPane({
       </div>
 
       <div className="flex min-h-0 flex-1 flex-col overflow-y-auto px-4 py-4">
-        {boot ? (
+        {attempt ? (
           <div className="flex flex-1 flex-col justify-end gap-3">
             <div className="flex justify-end">
               <span className="min-w-0 max-w-[85%] whitespace-pre-wrap rounded-[10px] rounded-br-[3px] bg-[#ecebfb] px-2.5 py-1.5 text-[12px] text-[#333]">
-                {boot.prompt || t("draft.imagesOnly")}
+                {attempt.prompt || t("draft.imagesOnly")}
               </span>
             </div>
-            <div className="flex items-center gap-2 text-[11.5px] font-semibold text-dim">
-              <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
-              <span>
-                {t("draft.launched", { target: boot.target })}
-              </span>
-            </div>
-            {slowBoot ? (
-              <div className="text-[11px] text-dim">
-                {t("draft.slow", { target: boot.target })}
-              </div>
-            ) : null}
+            <DraftLaunchStatus ref={attentionRef} phase={phase} target={target} />
           </div>
         ) : (
           <div className="flex flex-1 flex-col items-center justify-center gap-2 text-center">
