@@ -7,6 +7,7 @@ import { Loader2, X } from "@/components/icons";
 import { TaskSheet, type TaskSheetView } from "@/components/tasks/TaskSheet";
 import { viewBus } from "@/hooks/viewPresenceBus";
 import type { Flow } from "@/lib/flows/types";
+import type { Pipeline } from "@/lib/pipelines/types";
 import { useLocale } from "@/lib/i18n";
 import type { BoardTask } from "@/lib/tasks/types";
 import type { FileEntry } from "@/lib/types";
@@ -50,6 +51,7 @@ interface Props {
   manual: FileEntry[];
   files: FileEntry[];
   flows: Flow[];
+  pipelines: Pipeline[];
   /** This project's board tasks: mini-cards on the map, editable in the sheet. */
   tasks: BoardTask[];
   /** Ids of not-yet-spawned conversation drafts, focusable like nodes. */
@@ -71,7 +73,7 @@ interface Props {
  * data the scheme draws — nothing on the diagram is unreachable, it is just
  * shown one pane at a time.
  */
-export function MobileFocusView({ project, groups, manual, files, flows, tasks, drafts, loaded, focus, onSelect, onClose, onDraftClose, onDraftSpawned, onHandoff }: Props) {
+export function MobileFocusView({ project, groups, manual, files, flows, pipelines, tasks, drafts, loaded, focus, onSelect, onClose, onDraftClose, onDraftSpawned, onHandoff }: Props) {
   const { t } = useLocale();
   const [focusPath, setFocusPath] = useState<string | null>(null);
   const [mapOpen, setMapOpen] = useState(false);
@@ -79,7 +81,7 @@ export function MobileFocusView({ project, groups, manual, files, flows, tasks, 
   const swipeRef = useRef<{ x: number; y: number } | null>(null);
   const activeChipRef = useRef<HTMLButtonElement | null>(null);
 
-  const layout = useMemo(() => buildSchemeLayout(groups, manual, files, flows, drafts), [groups, manual, files, flows, drafts]);
+  const layout = useMemo(() => buildSchemeLayout(groups, manual, files, flows, drafts, pipelines), [groups, manual, files, flows, drafts, pipelines]);
   /* Scheme order (depth-first, groups left to right) becomes the strip order,
      so chips and the map agree on what "next" means. */
   const entries = useMemo<Entry[]>(
@@ -298,6 +300,7 @@ export function MobileFocusView({ project, groups, manual, files, flows, tasks, 
             manual={manual}
             files={files}
             flows={flows}
+            pipelines={pipelines}
             tasks={tasks}
             drafts={drafts}
             focus={null}

@@ -281,6 +281,17 @@ describe("buildProjectSummaries with workflows", () => {
   });
 });
 
+test("buildProjectSummaries keeps a pipeline-only project reachable and marks decisions", () => {
+  const pipeline = {
+    id: "pipeline-1",
+    project: "pipeline-project",
+    state: "needs_decision",
+    createdAt: "2026-01-01T00:00:00.000Z",
+  } as never;
+  const summaries = buildProjectSummaries([], 2_000, [], [], [pipeline]);
+  expect(summaries).toMatchObject([{ project: "pipeline-project", liveCount: 0, attentionCount: 1 }]);
+});
+
 describe("buildProjectSummaries with project catalog", () => {
   test("adds catalog-only projects as muted summaries", () => {
     const summaries = buildProjectSummaries([], 2_000, [], [

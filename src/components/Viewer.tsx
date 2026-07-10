@@ -74,7 +74,7 @@ export function Viewer() {
      per-tab snapshot to the server. Renders nothing. */
   useViewPresence();
   const [project, setProject] = useState<string>(() => initialProject());
-  const { files: allFiles, projectCatalog, flows: polledFlows, workflows, tasks, loaded } = useFiles(project === OVERVIEW ? null : project);
+  const { files: allFiles, projectCatalog, flows: polledFlows, pipelines, workflows, tasks, loaded } = useFiles(project === OVERVIEW ? null : project);
   /* A committed account migration keeps the archived predecessor entry in the
      payload (for chain history) but it must never render as a second standalone
      card — every surface below sees only current generations. A no-op (same
@@ -392,11 +392,11 @@ export function Viewer() {
   return (
     <div className="flex h-full">
       {isMobile ? null : (
-        <ProjectRail files={files} projectCatalog={projectCatalog} workflows={workflows} archivedProjects={archivedProjects} selected={project} now={clock} loaded={loaded} onSelect={selectProject} />
+        <ProjectRail files={files} projectCatalog={projectCatalog} pipelines={pipelines} workflows={workflows} archivedProjects={archivedProjects} selected={project} now={clock} loaded={loaded} onSelect={selectProject} />
       )}
       {isMobile && drawerOpen ? (
         <div className="fixed inset-0 z-50 flex">
-          <ProjectRail files={files} projectCatalog={projectCatalog} workflows={workflows} archivedProjects={archivedProjects} selected={project} now={clock} loaded={loaded} onSelect={selectProject} />
+          <ProjectRail files={files} projectCatalog={projectCatalog} pipelines={pipelines} workflows={workflows} archivedProjects={archivedProjects} selected={project} now={clock} loaded={loaded} onSelect={selectProject} />
           <button
             type="button"
             className="min-w-0 flex-1 bg-ink/35"
@@ -436,6 +436,7 @@ export function Viewer() {
           <OverviewBoard
             files={files}
             projectCatalog={projectCatalog}
+            pipelines={pipelines}
             workflows={workflows}
             archivedProjects={archivedProjects}
             now={clock}
@@ -448,6 +449,7 @@ export function Viewer() {
           <ProjectDashboard
             files={files}
             flows={flows}
+            pipelines={pipelines}
             workflows={workflows}
             tasks={tasks}
             project={project}

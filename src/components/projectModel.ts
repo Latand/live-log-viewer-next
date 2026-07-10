@@ -1,4 +1,5 @@
 import type { FileEntry, ProjectCatalogEntry } from "@/lib/types";
+import type { Pipeline } from "@/lib/pipelines/types";
 import type { Workflow } from "@/lib/workflows/types";
 
 import { attentionId } from "./attention";
@@ -76,6 +77,7 @@ export function buildProjectSummaries(
   now: number = Date.now() / 1000,
   workflows: Workflow[] = [],
   projectCatalog: ProjectCatalogEntry[] = [],
+  pipelines: Pipeline[] = [],
 ): ProjectSummary[] {
   const map = new Map<string, ProjectSummary>();
   const summaryFor = (key: string): ProjectSummary => {
@@ -112,6 +114,14 @@ export function buildProjectSummaries(
     if (WF_BUSY.has(wf.state)) summary.liveCount += 1;
     if (wf.state === "needs_decision" || wf.state === "paused") summary.attentionCount += 1;
     summary.smt = Math.max(summary.smt, (Date.parse(wf.createdAt) || 0) / 1000);
+  }
+  for (const pipeline of pipelines) {
+    if (pipeline.state === "closed" || !pipeline.project) continue;
+    const summary = summaryFor(pipeline.project);
+    summary.catalogOnly = false;
+    if (pipeline.state === "provisioning" || pipeline.state === "running") summary.liveCount += 1;
+    if (pipeline.state === "needs_decision" || pipeline.state === "paused") summary.attentionCount += 1;
+    summary.smt = Math.max(summary.smt, (Date.parse(pipeline.createdAt) || 0) / 1000);
   }
   return [...map.values()].sort((a, b) => {
     const al = a.attentionCount > 0;

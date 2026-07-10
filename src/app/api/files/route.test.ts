@@ -17,6 +17,8 @@ mock.module("@/lib/scanner", () => ({
   },
 }));
 mock.module("@/lib/flows/store", () => ({ loadFlows: () => [] }));
+mock.module("@/lib/pipelines/store", () => ({ loadPipelines: () => [] }));
+mock.module("@/lib/pipelines/visibility", () => ({ filterPipelinesForFileScan: () => [] }));
 mock.module("@/lib/tasks/store", () => ({
   loadTasks: () => [],
   mutateTasks: () => { throw new Error("files route attempted a task mutation"); },
@@ -33,7 +35,7 @@ test("repeated files reads execute only pure read ports and retain ETag behavior
   const etag = first.headers.get("etag");
   const second = await GET(new Request("http://127.0.0.1/api/files", { headers: { "if-none-match": etag! } }));
   expect(first.status).toBe(200);
-  expect(await first.json()).toEqual({ files: [], projectCatalog: [], flows: [], workflows: [], tasks: [] });
+  expect(await first.json()).toEqual({ files: [], projectCatalog: [], flows: [], pipelines: [], workflows: [], tasks: [] });
   expect(second.status).toBe(304);
   expect(scans).toBe(2);
   expect(scanOptions).toEqual({ persist: false });

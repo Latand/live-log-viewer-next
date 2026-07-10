@@ -6,6 +6,8 @@ import { listFilesWithProjectCatalog } from "@/lib/scanner";
 import { agentRegistry } from "@/lib/agent/registry";
 import { pidAlive, readPpid } from "@/lib/scanner/process";
 import { loadFlows } from "@/lib/flows/store";
+import { loadPipelines } from "@/lib/pipelines/store";
+import { filterPipelinesForFileScan } from "@/lib/pipelines/visibility";
 import { pathForPanePid, reconcileTasks } from "@/lib/tasks/reconcile";
 import { loadTasks } from "@/lib/tasks/store";
 import { loadWorkflows } from "@/lib/workflows/store";
@@ -78,7 +80,8 @@ export async function GET(request: Request): Promise<NextResponse> {
       : null,
   });
   const workflows = filterWorkflowsForFileScan(loadWorkflows(), files);
-  const body = JSON.stringify({ files, projectCatalog, flows: loadFlows(), workflows, tasks: tasks.tasks } satisfies FilesResponse);
+  const pipelines = filterPipelinesForFileScan(loadPipelines(), files);
+  const body = JSON.stringify({ files, projectCatalog, flows: loadFlows(), pipelines, workflows, tasks: tasks.tasks } satisfies FilesResponse);
   /* The client re-polls every 10 s and this ~410 KB payload is usually
      identical between polls; a strong ETag over the exact bytes lets an
      unchanged response come back as a bodyless 304. force-dynamic still holds
