@@ -7,7 +7,7 @@ import {
   type AccountOption,
   type EngineAccountsState,
 } from "@/hooks/useEngineAccounts";
-import { autoBalanceLine, bannerModel, type MigrationPreview } from "@/lib/accounts/migration";
+import { accountSelectOutcome, autoBalanceLine, bannerModel, type MigrationPreview } from "@/lib/accounts/migration";
 import { useLocale } from "@/lib/i18n";
 import { handleOverlayEscape } from "@/lib/overlay";
 
@@ -279,6 +279,11 @@ export function AccountsPanel({ state, onClose }: { state: EngineAccountsState; 
   const { accounts, active, status, notice, mutation, engine } = state;
   const [label, setLabel] = useState("");
   const [confirm, setConfirm] = useState<{ targetId: string; preview: MigrationPreview } | null>(null);
+  /* A preview that fails to parse must never fall through to an instant switch
+     (finding 3): the operator would silently reroute new spawns with no scope
+     shown and no durable intent. Instead we hold the target here and show a
+     recoverable, announced error with a Retry. */
+  const [previewError, setPreviewError] = useState<{ targetId: string; label: string } | null>(null);
   const closeRef = useRef<HTMLButtonElement>(null);
   const engineName = engineDisplay(engine);
   // The coordinator advertises itself via the auto-balance block; without it the
@@ -292,16 +297,26 @@ export function AccountsPanel({ state, onClose }: { state: EngineAccountsState; 
   const onSelect = async (id: string) => {
     if (id === active || mutation) return;
     if (!migrationCapable) {
+      // No coordinator: today's instant-switch behavior, never a preview POST.
       await state.select(id);
       return;
     }
+    setPreviewError(null);
     const preview = await state.preview(id);
-    if (preview && preview.counts.total > 0) {
-      setConfirm({ targetId: id, preview });
-      return;
+    switch (accountSelectOutcome(migrationCapable, preview)) {
+      case "recoverable-error":
+        // Coordinator present but the preview failed: do NOT switch (finding 3).
+        setPreviewError({ targetId: id, label: accounts.find((account) => account.id === id)?.label ?? id });
+        return;
+      case "confirm":
+        setConfirm({ targetId: id, preview: preview! });
+        return;
+      case "instant":
+        // Preview succeeded with no live sessions in scope: nothing to migrate,
+        // so the confirm step adds no value — degrade to an instant switch.
+        await state.select(id);
+        return;
     }
-    // No live sessions in scope: degrade to an instant switch (Fable P1).
-    await state.select(id);
   };
 
   const onAdd = async (event: React.FormEvent) => {
@@ -356,6 +371,22 @@ export function AccountsPanel({ state, onClose }: { state: EngineAccountsState; 
         </header>
 
         <MigrationBanner state={state} />
+
+        {previewError ? (
+          <div role="alert" aria-live="assertive" className="flex items-center gap-2 border-b border-line bg-[#fff5f5] px-3 py-1.5">
+            <span className="min-w-0 flex-1 text-[11px] font-semibold text-err">
+              {t("accounts.previewFailed", { label: previewError.label })}
+            </span>
+            <button
+              type="button"
+              disabled={mutation !== null}
+              onClick={() => void onSelect(previewError.targetId)}
+              className="shrink-0 rounded-[7px] border border-line bg-bg px-2 py-0.5 text-[11px] font-semibold hover:bg-chip disabled:opacity-45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            >
+              {t("accounts.retry")}
+            </button>
+          </div>
+        ) : null}
 
         {confirm ? (
           <ConfirmStep

@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 import type { ConversationMigration } from "@/lib/types";
 
 import {
+  accountSelectOutcome,
   autoBalanceLine,
   bannerModel,
   cardMigrationState,
@@ -12,8 +13,10 @@ import {
   parseEffective,
   parseEngineMigration,
   parseMigrationPreview,
+  postConversationMigration,
   type AutoBalance,
   type EngineMigration,
+  type MigrationPreview,
 } from "./migration";
 
 const migration = (phase: string): ConversationMigration => ({
@@ -155,5 +158,82 @@ describe("tolerant parsers", () => {
     expect(parseMigrationPreview({ targetId: "work", counts: { total: 3, idle: 2 }, rootWarning: true, previewRevision: 7 })).toMatchObject({ targetId: "work", rootWarning: true, previewRevision: 7 });
     expect(parseMigrationPreview({ intent: { targetId: "work" }, revision: 2 })).toMatchObject({ targetId: "work", previewRevision: 2 });
     expect(parseMigrationPreview({})).toBeNull();
+  });
+
+  test("parseMigrationPreview canonicalises the flat coordinator DTO with a known target", () => {
+    // The coordinator's actual preview shape: flat counts + revision, no targetId.
+    const flat = { total: 4, idle: 3, busy: 1, revision: 9 };
+    // Without a fallback the client cannot name the target → null (never switch).
+    expect(parseMigrationPreview(flat)).toBeNull();
+    // With the account the client asked to preview, it fills in the identity and
+    // reads the counts/revision from the top level.
+    expect(parseMigrationPreview(flat, { targetId: "work", targetLabel: "Work" })).toEqual({
+      targetId: "work",
+      targetLabel: "Work",
+      counts: { total: 4, idle: 3, busy: 1 },
+      rootWarning: false,
+      previewRevision: 9,
+    });
+    // A rich server DTO still wins over the fallback identity.
+    expect(parseMigrationPreview({ targetId: "prod", targetLabel: "Prod", counts: { total: 1, idle: 1, busy: 0 } }, { targetId: "work" })).toMatchObject({ targetId: "prod", targetLabel: "Prod" });
+  });
+});
+
+describe("accountSelectOutcome (finding 3 — no instant switch on preview failure)", () => {
+  const preview = (total: number): MigrationPreview => ({ targetId: "work", targetLabel: "Work", counts: { total, idle: total, busy: 0 }, rootWarning: false, previewRevision: 1 });
+  test("no coordinator → instant switch, never a preview", () => {
+    expect(accountSelectOutcome(false, null)).toBe("instant");
+  });
+  test("coordinator present but preview failed → recoverable error, not a switch", () => {
+    expect(accountSelectOutcome(true, null)).toBe("recoverable-error");
+  });
+  test("live sessions in scope → confirm; empty scope → instant", () => {
+    expect(accountSelectOutcome(true, preview(3))).toBe("confirm");
+    expect(accountSelectOutcome(true, preview(0))).toBe("instant");
+  });
+});
+
+describe("postConversationMigration (frozen /api/conversations/{id}/migration route)", () => {
+  test("POSTs the action to the conversation route keyed by conversationId", async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ url: String(input), init });
+      return new Response(null, { status: 200 });
+    }) as unknown as typeof fetch;
+    try {
+      const result = await postConversationMigration("conversation_abc", "retry");
+      expect(result).toEqual({ ok: true, error: null });
+      expect(calls[0]?.url).toBe("/api/conversations/conversation_abc/migration");
+      expect(calls[0]?.init?.method).toBe("POST");
+      expect(JSON.parse(String(calls[0]?.init?.body))).toEqual({ action: "retry" });
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  test("surfaces the server error text on failure (never swallowed)", async () => {
+    const original = globalThis.fetch;
+    globalThis.fetch = (async () => new Response(JSON.stringify({ error: "migration retry failed" }), { status: 409 })) as unknown as typeof fetch;
+    try {
+      expect(await postConversationMigration("conversation_abc", "rollback")).toEqual({ ok: false, error: "migration retry failed" });
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  test("encodes the id and returns a null error when the network throws", async () => {
+    const calls: string[] = [];
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      calls.push(String(input));
+      throw new Error("offline");
+    }) as unknown as typeof fetch;
+    try {
+      expect(await postConversationMigration("conversation a/b", "retry")).toEqual({ ok: false, error: null });
+      expect(calls[0]).toBe("/api/conversations/conversation%20a%2Fb/migration");
+    } finally {
+      globalThis.fetch = original;
+    }
   });
 });

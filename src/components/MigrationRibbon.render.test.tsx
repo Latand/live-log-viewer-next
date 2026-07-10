@@ -25,6 +25,19 @@ test("failed shows the error detail plus Retry and Keep actions", () => {
   expect(html).toContain("Keep on «Main»");
 });
 
+test("a failed recovery attempt is announced assertively, never swallowed", () => {
+  const html = renderToStaticMarkup(
+    <MigrationRibbon state="failed" targetLabel="Work" currentLabel="Main" error="auth expired" actionError="conversation is unknown" onRetry={() => {}} onKeep={() => {}} />,
+  );
+  expect(html).toContain('aria-live="assertive"');
+  expect(html).toContain("conversation is unknown");
+});
+
+test("actionError also surfaces while still switching (not only in the failed state)", () => {
+  const html = renderToStaticMarkup(<MigrationRibbon state="switching" targetLabel="Work" actionError="retry rejected" />);
+  expect(html).toContain("retry rejected");
+});
+
 test("done and rolled-back render nothing (feed divider / silent)", () => {
   expect(renderToStaticMarkup(<MigrationRibbon state="done" targetLabel="Work" />)).toBe("");
   expect(renderToStaticMarkup(<MigrationRibbon state="rolled-back" targetLabel="Work" />)).toBe("");

@@ -9,7 +9,8 @@ import { registerPane } from "@/lib/chime";
 import { type TFunction, useLocale } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
 
-import { cardMigrationState, postSessionMigration } from "@/lib/accounts/migration";
+import { cardMigrationState, postConversationMigration } from "@/lib/accounts/migration";
+import { conversationIdentity } from "@/lib/accounts/identity";
 
 import { registerLinkTarget } from "./AgentLink";
 import { DeleteFileButton } from "./DeleteFileButton";
@@ -101,6 +102,26 @@ export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noCompose
   const state = paneState(file);
   const tone = PANE_TONES[state];
   const migState = cardMigrationState(file.migration);
+  /* Stable card identity: a committed migration gives this conversation a new
+     transcript `path` under the target account, but the same conversationId. So
+     the chime pane registry, the composer's held receipts, and per-card recovery
+     all key on this — never on `path`, which is active-generation metadata. */
+  const cardId = conversationIdentity(file);
+  /* A failed per-card retry/rollback must be announced, not swallowed (finding
+     3): the previous code ignored the POST result entirely. */
+  const [recoveryError, setRecoveryError] = useState<string | null>(null);
+  /* Retry/rollback address the durable conversation by its stable id; without a
+     server-assigned conversationId the recovery route can't be targeted, so the
+     actions stay hidden until the backend supplies one. */
+  const recover = file.conversationId
+    ? async (action: "retry" | "rollback") => {
+        setRecoveryError(null);
+        const result = await postConversationMigration(file.conversationId!, action);
+        if (!result.ok) {
+          setRecoveryError(result.error ?? t(action === "retry" ? "migrate.retryFailed" : "migrate.keepFailed"));
+        }
+      }
+    : undefined;
   /* Panes outside the viewport stop polling and parsing: the board can hold
      dozens of live conversations while only a handful fit on screen. The
      margin pre-wakes panes just beyond the edge so panning never shows a
@@ -122,8 +143,8 @@ export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noCompose
      owning both registries, so collapsing leaves them intact. */
   useEffect(() => {
     if (expanded) return;
-    if (paneRef.current) return registerPane(file.path, paneRef.current);
-  }, [file.path, expanded]);
+    if (paneRef.current) return registerPane(cardId, paneRef.current);
+  }, [cardId, expanded]);
   /* Link-arrow drop target; re-registers each poll so the pid stays current. */
   useEffect(() => {
     if (noComposer || expanded) return;
@@ -236,8 +257,9 @@ export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noCompose
             targetLabel={file.migration?.targetLabel ?? file.migration?.targetAccountId ?? ""}
             currentLabel={file.migration?.sourceLabel}
             error={file.migration?.failure ?? null}
-            onRetry={() => void postSessionMigration(file.path, "retry")}
-            onKeep={() => void postSessionMigration(file.path, "rollback")}
+            actionError={recoveryError}
+            onRetry={recover ? () => void recover("retry") : undefined}
+            onKeep={recover ? () => void recover("rollback") : undefined}
           />
         ) : null}
         {banner ?? null}

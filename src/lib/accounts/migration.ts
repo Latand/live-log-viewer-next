@@ -151,6 +151,21 @@ export function migrationHoldsSends(state: CardMigrationState | null): boolean {
   return state === "switching";
 }
 
+/** What selecting an account should do, given whether the migration coordinator
+    is available and (when it is) the preview result. `recoverable-error` is the
+    finding-3 guard: a present coordinator whose preview failed must NOT fall
+    through to an instant switch — an unscoped switch with no durable intent is
+    exactly the hazard — so the caller surfaces a retryable error instead. */
+export type AccountSelectOutcome = "instant" | "confirm" | "recoverable-error";
+export function accountSelectOutcome(
+  migrationCapable: boolean,
+  preview: MigrationPreview | null,
+): AccountSelectOutcome {
+  if (!migrationCapable) return "instant";
+  if (preview === null) return "recoverable-error";
+  return preview.counts.total > 0 ? "confirm" : "instant";
+}
+
 // ── Banner projection ─────────────────────────────────────────────────────────
 
 export interface BannerModel {
@@ -354,37 +369,70 @@ export function parseEffective(raw: unknown): AccountEffective | null {
   return { percent: record.percent, window, freshness };
 }
 
+/** The canonical result of a per-card recovery call: whether the coordinator
+    accepted it, plus a secret-free error string for the actionable failure line
+    (finding 3 — recovery failures must be surfaced, not swallowed). */
+export interface ConversationMigrationResult {
+  ok: boolean;
+  /** Public failure detail from the route, safe to show; null on success. */
+  error: string | null;
+}
+
 /**
- * Fire-and-forget per-session recovery: `retry` re-runs the migration for one
- * conversation against the latest intent revision; `rollback` (the card's "Keep
- * on «A»") removes the session from the intent and leaves the predecessor
- * authoritative. Same-origin POST; errors are swallowed like the tmux-kill path
- * (the ribbon updates from the next `/api/files` poll either way).
+ * Per-conversation recovery against the frozen route
+ * `POST /api/conversations/{conversationId}/migration` (Sol contract): `retry`
+ * re-runs the migration for one conversation against the latest intent
+ * revision; `rollback` (the card's "Keep on «A»") removes the session from the
+ * intent and leaves the predecessor authoritative. Keyed by the stable Viewer
+ * `conversationId` — never the transcript path, which changes on succession.
+ * The result is returned (not swallowed) so the card can show an actionable,
+ * announced failure; the ribbon still reconciles from the next `/api/files`
+ * poll on success.
  */
-export async function postSessionMigration(path: string, action: "retry" | "rollback"): Promise<boolean> {
+export async function postConversationMigration(
+  conversationId: string,
+  action: "retry" | "rollback",
+): Promise<ConversationMigrationResult> {
   try {
-    const response = await fetch("/api/session/migration", {
+    const response = await fetch(`/api/conversations/${encodeURIComponent(conversationId)}/migration`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ path, action }),
+      body: JSON.stringify({ action }),
     });
-    return response.ok;
+    if (response.ok) return { ok: true, error: null };
+    const body = (await response.json().catch(() => null)) as { error?: unknown } | null;
+    return { ok: false, error: str(body?.error) };
   } catch {
-    return false;
+    return { ok: false, error: null };
   }
 }
 
-/** Parses a preview response from POST …/active `mode:"preview"`. */
-export function parseMigrationPreview(raw: unknown): MigrationPreview | null {
+/**
+ * Parses a preview response from POST …/active `mode:"preview"`.
+ *
+ * The route is the canonical migration seam; whether the coordinator echoes a
+ * rich target-aware DTO (`{ targetId, targetLabel, counts, rootWarning,
+ * previewRevision }`) or the leaner counts-and-revision shape, the client
+ * already knows which account it asked to preview, so `fallback` supplies the
+ * target identity/label the response may omit. That is what lets the confirm
+ * step render without ever collapsing a valid preview to `null` merely because
+ * the server left `targetId` implicit — a `null` here means the preview genuinely
+ * failed (non-OK / unparseable), which the caller surfaces instead of silently
+ * switching accounts (finding 3).
+ */
+export function parseMigrationPreview(
+  raw: unknown,
+  fallback?: { targetId: string; targetLabel?: string },
+): MigrationPreview | null {
   const record = asRecord(raw);
   if (!record) return null;
   const intent = asRecord(record.intent);
-  const targetId = str(record.targetId ?? intent?.targetId);
+  const targetId = str(record.targetId ?? intent?.targetId) ?? fallback?.targetId ?? null;
   if (!targetId) return null;
-  const counts = asRecord(record.counts ?? intent?.counts) ?? {};
+  const counts = asRecord(record.counts ?? intent?.counts) ?? record;
   return {
     targetId,
-    targetLabel: str(record.targetLabel ?? intent?.targetLabel) ?? targetId,
+    targetLabel: str(record.targetLabel ?? intent?.targetLabel) ?? fallback?.targetLabel ?? targetId,
     counts: { total: num(counts.total), idle: num(counts.idle), busy: num(counts.busy) },
     rootWarning: record.rootWarning === true,
     previewRevision: num(record.previewRevision ?? record.revision ?? intent?.revision),

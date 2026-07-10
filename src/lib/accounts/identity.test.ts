@@ -85,3 +85,29 @@ describe("withoutArchivedPredecessors", () => {
     expect(withoutArchivedPredecessors(all)).toEqual(kept);
   });
 });
+
+describe("succession keeps a stable card identity (finding 6)", () => {
+  test("a successor's identity equals its predecessor's, so DOM/React keys never remount", () => {
+    const predecessor = file({ path: "/gen1", conversationId: "conv-9" });
+    const successor = file({ path: "/gen2", conversationId: "conv-9", predecessorPath: "/gen1" });
+    // Same key across the path change → the card, its scroll and focus survive.
+    expect(conversationIdentity(successor)).toBe(conversationIdentity(predecessor));
+    // The canonical deep link is likewise stable across the succession.
+    expect(formatConversationHash(successor)).toBe(formatConversationHash(predecessor));
+  });
+});
+
+describe("legacy deep links must resolve against the UNFILTERED payload (finding 6)", () => {
+  const predecessor = file({ path: "/gen1", conversationId: "conv-1", migratedTo: "/gen2" });
+  const successor = file({ path: "/gen2", conversationId: "conv-1", predecessorPath: "/gen1" });
+  const all = [predecessor, successor];
+
+  test("against all files, a #f=predecessor link redirects to the successor", () => {
+    expect(resolveConversationTarget(all, { conversationId: null, filePath: "/gen1", project: null })).toBe(successor);
+  });
+
+  test("folding the predecessor out first breaks resolution — why Viewer resolves against allFiles", () => {
+    const folded = withoutArchivedPredecessors(all); // what the board renders from
+    expect(resolveConversationTarget(folded, { conversationId: null, filePath: "/gen1", project: null })).toBeNull();
+  });
+});

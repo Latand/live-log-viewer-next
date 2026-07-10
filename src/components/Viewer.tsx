@@ -137,13 +137,16 @@ export function Viewer() {
 
   /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
-    if (!pendingHash || files.length === 0) return;
-    /* Resolves the canonical `#c=` id or a legacy `#f=` path — a legacy path
-       that now points at an archived predecessor redirects to its successor. */
-    const hit = resolveConversationTarget(files, pendingHash);
+    if (!pendingHash || allFiles.length === 0) return;
+    /* Resolves against the UNFILTERED payload (finding 6): a legacy `#f=` path
+       may point at an archived predecessor, which `withoutArchivedPredecessors`
+       has already folded out of `files`. Resolving against `allFiles` keeps that
+       predecessor visible long enough to redirect the link to its current
+       generation; the canonical `#c=` id resolves the same way. */
+    const hit = resolveConversationTarget(allFiles, pendingHash);
     if (hit) openFile(hit);
     setPendingHash(null);
-  }, [pendingHash, files, openFile]);
+  }, [pendingHash, allFiles, openFile]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
   /* The one queue every counter shows: badge, popover and the tab title all

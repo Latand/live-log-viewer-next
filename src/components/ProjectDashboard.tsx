@@ -460,6 +460,27 @@ export function ProjectDashboard({
     setEphemeral((prev) => (prev.includes(path) ? prev.filter((item) => item !== path) : prev));
   };
 
+  /* Account-migration succession (finding 6): a committed migration replaces a
+     predecessor transcript (path P1) with a successor (path P2) that carries the
+     same conversationId and a `predecessorPath` back-link. The board is keyed on
+     the active generation's path, so rewrite every preference still naming P1 to
+     P2 — the card keeps its manual placement, hidden state and hand-expanded
+     state instead of resetting to a default position under the new account. */
+  useEffect(() => {
+    const rename = new Map<string, string>();
+    for (const file of files) {
+      if (file.predecessorPath && projectKey(file) === project) rename.set(file.predecessorPath, file.path);
+    }
+    if (!rename.size) return;
+    const prev = prefsRef.current;
+    const remap = (list: string[]) => [...new Set(list.map((path) => rename.get(path) ?? path))];
+    const next: ColumnPrefs = { manual: remap(prev.manual), hidden: remap(prev.hidden), expanded: remap(prev.expanded) };
+    if (JSON.stringify(next) === JSON.stringify(prev)) return;
+    prefsRef.current = next;
+    setPrefs(next);
+    localStorage.setItem(prefsKey(project), JSON.stringify(next));
+  }, [files, project]);
+
   /* A node never vanishes on its own: every auto node is recorded as a
      manual one, so a branch that goes quiet keeps its place until the user
      closes it. Capped so old projects do not accumulate forever. */

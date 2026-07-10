@@ -86,24 +86,61 @@ test("preview posts mode:preview and parses the scope counts without mutating ac
   expect(store.active).toBe("main");
 });
 
-test("setAutoBalance optimistically flips and posts to the engine auto-balance route", async () => {
-  const seen: string[] = [];
+test("preview canonicalises the flat coordinator DTO using the known target account", async () => {
   const { fetcher } = scripted((url, body) => {
-    if (url === "/api/accounts") return claudePayload({ autoBalance: { enabled: true, state: "idle", thresholdPercent: 25 } });
-    if (url === "/api/accounts/claude/auto-balance") {
-      seen.push(JSON.stringify(body));
-      return new Response(null, { status: 200 });
-    }
+    if (url === "/api/accounts") return claudePayload();
+    // The coordinator returns flat counts + revision with no targetId/label.
+    if ((body as { mode?: string })?.mode === "preview") return { total: 4, idle: 3, busy: 1, revision: 9 };
     return new Response(null, { status: 204 });
   });
   const store = createEngineAccountsStore("claude", { fetcher });
   store.subscribe(() => {});
   await advance();
-  await store.setAutoBalance(false);
-  expect(seen).toContain(JSON.stringify({ enabled: false }));
+  const preview = await store.preview("work");
+  // The client fills the target identity/label from the account it asked about.
+  expect(preview).toEqual({ targetId: "work", targetLabel: "Work", counts: { total: 4, idle: 3, busy: 1 }, rootWarning: false, previewRevision: 9 });
+  expect(store.active).toBe("main");
 });
 
-test("stopMigration targets the draining intent id", async () => {
+test("preview returns null on a non-OK response so the panel can surface a recoverable error", async () => {
+  const { fetcher } = scripted((url, body) => {
+    if (url === "/api/accounts") return claudePayload();
+    if ((body as { mode?: string })?.mode === "preview") return new Response(null, { status: 500 });
+    return new Response(null, { status: 204 });
+  });
+  const store = createEngineAccountsStore("claude", { fetcher });
+  store.subscribe(() => {});
+  await advance();
+  expect(await store.preview("work")).toBeNull();
+  expect(store.active).toBe("main"); // never switched as a side effect
+});
+
+test("setAutoBalance PATCHes the frozen policy route with automaticSwitching", async () => {
+  const seen: Array<{ method?: string; body: unknown }> = [];
+  const { fetcher } = scripted((url) => {
+    if (url === "/api/accounts") return claudePayload({ autoBalance: { enabled: true, state: "idle", thresholdPercent: 25 } });
+    return new Response(null, { status: 204 });
+  });
+  // Wrap the scripted fetcher so this test can also see the HTTP method.
+  const withMethod = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    const url = String(input);
+    if (url === "/api/accounts/claude/policy") {
+      seen.push({ method: init?.method, body: typeof init?.body === "string" ? JSON.parse(init.body) : undefined });
+      return new Response(null, { status: 200 });
+    }
+    return fetcher(input, init);
+  };
+  const store = createEngineAccountsStore("claude", { fetcher: withMethod });
+  store.subscribe(() => {});
+  await advance();
+  await store.setAutoBalance(false);
+  expect(seen.length).toBe(1);
+  expect(seen[0]?.method).toBe("PATCH");
+  expect(seen[0]?.body).toEqual({ automaticSwitching: false });
+  // The old POST …/auto-balance {enabled} route must never be called.
+});
+
+test("stopMigration targets the frozen account-migrations route by intent id", async () => {
   const { calls, fetcher } = scripted((url) => {
     if (url === "/api/accounts") return claudePayload({ migration: { intentId: "intent-7", targetId: "work", state: "draining" } });
     return new Response(null, { status: 200 });
@@ -112,5 +149,7 @@ test("stopMigration targets the draining intent id", async () => {
   store.subscribe(() => {});
   await advance();
   await store.stopMigration();
-  expect(calls.some((call) => call.url === "/api/accounts/migration/intent-7" && (call.body as { action?: string }).action === "stop")).toBeTrue();
+  expect(calls.some((call) => call.url === "/api/account-migrations/intent-7" && (call.body as { action?: string }).action === "stop")).toBeTrue();
+  // The old /api/accounts/migration/{id} route never existed.
+  expect(calls.some((call) => call.url.includes("/api/accounts/migration/"))).toBeFalse();
 });

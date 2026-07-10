@@ -26,6 +26,9 @@ export interface MigrationRibbonProps {
   currentLabel?: string;
   /** Secret-free server failure detail appended to the failed state. */
   error?: string | null;
+  /** Actionable, secret-free error from the last retry/keep attempt. Announced
+      assertively so a swallowed recovery failure can never pass silently. */
+  actionError?: string | null;
   onRetry?: () => void;
   onKeep?: () => void;
 }
@@ -53,7 +56,7 @@ const TONE: Record<"pending" | "switching" | "failed", string> = {
   failed: "border-err/40 bg-[#fff5f5] text-err",
 };
 
-export function MigrationRibbon({ state, targetLabel, currentLabel, error, onRetry, onKeep }: MigrationRibbonProps) {
+export function MigrationRibbon({ state, targetLabel, currentLabel, error, actionError, onRetry, onKeep }: MigrationRibbonProps) {
   const { t } = useLocale();
   if (state !== "pending" && state !== "switching" && state !== "failed") return null;
 
@@ -107,6 +110,12 @@ export function MigrationRibbon({ state, targetLabel, currentLabel, error, onRet
             ) : null}
           </span>
         </>
+      ) : null}
+
+      {actionError ? (
+        <span role="alert" aria-live="assertive" className="w-full text-[10.5px] font-semibold text-err" title={actionError}>
+          {t("migrate.recoveryFailed", { detail: actionError })}
+        </span>
       ) : null}
     </div>
   );

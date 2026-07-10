@@ -311,6 +311,11 @@ export function createEngineAccountsStore(
       legacy `/active` route that ignores `mode` never switches as a side effect. */
   const preview = async (id: string): Promise<MigrationPreview | null> => {
     if (!id) return null;
+    // The client already knows the target it asked to preview, so it canonicalises
+    // the response into the target-aware DTO even when the coordinator returns the
+    // leaner counts-and-revision shape. A `null` therefore means the preview truly
+    // failed (non-OK / unreachable), which the panel surfaces instead of switching.
+    const fallback = { targetId: id, targetLabel: snapshot.accounts.find((account) => account.id === id)?.label ?? id };
     try {
       const response = await fetcher(activeUrl, {
         method: "POST",
@@ -318,7 +323,7 @@ export function createEngineAccountsStore(
         body: JSON.stringify({ id, mode: "preview" }),
       });
       if (!response.ok) return null;
-      return parseMigrationPreview(await response.json().catch(() => null));
+      return parseMigrationPreview(await response.json().catch(() => null), fallback);
     } catch {
       return null;
     }
@@ -353,7 +358,9 @@ export function createEngineAccountsStore(
     if (!intentId) return Promise.resolve(false);
     return runMutation("migrate", async () => {
       try {
-        const response = await fetcher(`/api/accounts/migration/${encodeURIComponent(intentId)}`, {
+        // Frozen stop route (Sol contract): the durable intent is addressed by
+        // its own id under /api/account-migrations, not under /api/accounts.
+        const response = await fetcher(`/api/account-migrations/${encodeURIComponent(intentId)}`, {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({ action: "stop" }),
@@ -374,12 +381,16 @@ export function createEngineAccountsStore(
       const previous = snapshot.autoBalance;
       if (previous) patchSnapshot({ autoBalance: { ...previous, enabled, state: enabled ? "idle" : "disabled" } });
       try {
-        const response = await fetcher(`/api/accounts/${engine}/auto-balance`, {
-          method: "POST",
+        // Frozen policy route (Sol contract): PATCH the account policy with the
+        // `automaticSwitching` flag. The old POST …/auto-balance {enabled} route
+        // never existed. `expectedRevision` is optional and the projected
+        // AutoBalance DTO carries no revision, so it is left to the server default.
+        const response = await fetcher(`/api/accounts/${engine}/policy`, {
+          method: "PATCH",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ enabled }),
+          body: JSON.stringify({ automaticSwitching: enabled }),
         });
-        if (!response.ok) throw new Error("auto-balance toggle failed");
+        if (!response.ok) throw new Error("policy update failed");
       } catch {
         if (previous) patchSnapshot({ autoBalance: previous });
         await refresh();
