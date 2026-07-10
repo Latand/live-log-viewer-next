@@ -52,6 +52,8 @@ interface Props {
   files: FileEntry[];
   flows: Flow[];
   pipelines: Pipeline[];
+  /** Server-side pipelines store failed closed; pipelines above are empty. */
+  pipelinesError?: string;
   workflows: Workflow[];
   tasks: BoardTask[];
   project: string;
@@ -151,6 +153,7 @@ export function ProjectDashboard({
   files,
   flows,
   pipelines,
+  pipelinesError,
   workflows,
   tasks,
   project,
@@ -635,6 +638,12 @@ export function ProjectDashboard({
           <span className="text-[13px] leading-none text-accent">+</span> {t("dash.workflow")}
         </button>
       </div>
+
+      {pipelinesError ? (
+        <div className="shrink-0 border-b border-line bg-[#fdf6ec] px-3 py-1.5 text-[11.5px] text-[#8a5b00]" role="alert">
+          {t("dash.pipelinesUnavailable")}
+        </div>
+      ) : null}
 
       {projectPipelines.length || projectWorkflows.length ? (
         <div className="flex shrink-0 flex-col gap-1.5 border-b border-line bg-[#fbfbfd] px-3 py-1.5">

@@ -87,3 +87,24 @@ test("pipeline mutations preserve corrupt and future-schema registries", async (
     fs.rmSync(sandbox, { recursive: true, force: true });
   }
 });
+
+test("savePipelines rejects a malformed record instead of poisoning the registry", () => {
+  const previous = process.env.LLV_STATE_DIR;
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-pipelines-save-guard-"));
+  process.env.LLV_STATE_DIR = sandbox;
+  try {
+    const stages: PipelineStage[] = [
+      { id: "build", kind: "run", prompt: "build", next: "verify", effectiveRole: { roleId: null, engine: "codex", model: "gpt-5.6-sol", effort: "medium", access: "read-write", promptScaffold: null } },
+      { id: "verify", kind: "run", prompt: "verify", next: null, effectiveRole: { roleId: null, engine: "codex", model: "gpt-5.6-sol", effort: "medium", access: "read-write", promptScaffold: null } },
+    ];
+    const pipeline = buildPipeline({ id: "guard123", task: "task", project: "viewer", repoDir: "/repo", stages, srcPath: null, srcConversationId: null, now: "now" });
+    pipeline.state = "closed"; // closed with a live cursor is exactly the poison shape
+    pipeline.cursor = { stageId: "build", state: "running" };
+    expect(() => savePipelines([pipeline])).toThrow("malformed pipeline record");
+    expect(fs.existsSync(path.join(sandbox, "pipelines.json"))).toBe(false);
+  } finally {
+    if (previous === undefined) delete process.env.LLV_STATE_DIR;
+    else process.env.LLV_STATE_DIR = previous;
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  }
+});

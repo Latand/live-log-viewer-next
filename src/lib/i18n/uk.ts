@@ -57,6 +57,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "dash.agent": "Агент",
   "dash.newWorkflow": "Новий воркфлоу: етапи → ревью → PR",
   "dash.workflow": "Воркфлоу",
+  "dash.pipelinesUnavailable": "Пайплайни тимчасово недоступні: файл стану пайплайнів не вдалося прочитати. Решта панелей працює.",
   "dash.emptyTitle": "На схемі поки порожньо",
   "dash.emptyHint": "Відкрий пульт у правому нижньому куті і клікни розмову — вона з'явиться тут",
   "dash.viewScheme": "схема",

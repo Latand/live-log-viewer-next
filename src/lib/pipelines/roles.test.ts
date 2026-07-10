@@ -117,3 +117,11 @@ test("a near-limit override scaffold composes with fences inside the store cap",
     fs.rmSync(sandbox, { recursive: true, force: true });
   }
 });
+
+test("a referenced role with an empty scaffold fails the create instead of persisting", () => {
+  const lookup = (roleId: string) => roleId === "builder"
+    ? { engine: "codex" as const, model: "gpt-5.6-sol", effort: "medium", access: "read-write" as const, promptScaffold: "   " }
+    : null;
+  expect(resolvePipelineRole({ role: { roleId: "builder" } }, "run", lookup).error)
+    .toContain("empty prompt scaffold");
+});

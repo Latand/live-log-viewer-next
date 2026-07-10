@@ -430,3 +430,24 @@ test("retry and skip refuse while a verdict-less parked stage still hosts a live
   const retried = await patchPipeline(pipeline.id, { action: "retry-stage" }, h.ports);
   expect(retried.pipeline?.state).toBe("running");
 });
+
+test("closing a mid-run or parked pipeline persists a record that loads back", async () => {
+  const h = harness();
+  const running = await create(h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  expect(loadPipelines()[0]!.cursor).not.toBeNull();
+  const closed = await patchPipeline(running.id, { action: "close" }, h.ports);
+  expect(closed.pipeline?.state).toBe("closed");
+  expect(closed.pipeline?.cursor).toBeNull();
+  expect(loadPipelines()[0]!.state).toBe("closed");
+
+  /* The second spawn in this harness lands in stage-2.jsonl. */
+  const parked = await create(h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([h.finish("/codex/stage-2.jsonl", "fail", "blocked")], h.ports);
+  expect(loadPipelines()[0]!.state).toBe("needs_decision");
+  await patchPipeline(parked.id, { action: "close" }, h.ports);
+  expect(loadPipelines()[0]!).toMatchObject({ state: "closed", cursor: null });
+});

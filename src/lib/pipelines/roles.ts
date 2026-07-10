@@ -100,6 +100,15 @@ export function resolvePipelineRole(
   if (effort && !isEngineEffort(engine, effort)) {
     return { error: `stage effort is not supported by ${engine}` };
   }
+  /* The store refuses to load a referenced role without a scaffold, so an
+     empty resolution must fail the create instead of persisting a record
+     that can never load back. */
+  const promptScaffold = roleId && typeof registered?.promptScaffold === "string"
+    ? registered.promptScaffold.trim() || null
+    : null;
+  if (roleId && !promptScaffold) {
+    return { error: `role ${roleId} resolves to an empty prompt scaffold` };
+  }
   return {
     role: {
       roleId,
@@ -107,9 +116,7 @@ export function resolvePipelineRole(
       model,
       effort,
       access: kind === "review-loop" ? "read-only" : stage.access ?? registered?.access ?? builder.access ?? "read-write",
-      promptScaffold: roleId && typeof registered?.promptScaffold === "string"
-        ? registered.promptScaffold.trim() || null
-        : null,
+      promptScaffold,
     },
   };
 }

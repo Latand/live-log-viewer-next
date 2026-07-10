@@ -26,6 +26,8 @@ export interface FilesData {
   pipelines: Pipeline[];
   workflows: Workflow[];
   tasks: BoardTask[];
+  /** Set when the server's pipelines store failed closed for this poll. */
+  pipelinesError?: string;
   loaded: boolean;
 }
 
@@ -76,6 +78,7 @@ export function useFiles(project?: string | null): FilesData {
             pipelines: parsed.pipelines ?? [],
             workflows: parsed.workflows ?? [],
             tasks: parsed.tasks ?? [],
+            pipelinesError: parsed.pipelinesError,
             loaded: true,
           });
         }

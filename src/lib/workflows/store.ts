@@ -6,6 +6,7 @@ import { agentRegistry, type AgentRegistry } from "@/lib/agent/registry";
 import type { RoleConfig } from "@/lib/flows/types";
 import { atomicWriteText } from "@/lib/flows/store";
 import { resolveRole } from "@/lib/roles/registry";
+import { ROLE_DEFAULTS } from "@/lib/roles/defaults";
 import { loadRoleDefinitionsOrDefaults } from "@/lib/roles/store";
 import type { RoleConfig as RegistryRoleConfig, RoleDefinition } from "@/lib/roles/types";
 
@@ -23,9 +24,13 @@ function registryRole(role: "builder" | "reviewer" | "architect" | "cleaner", pa
   return { ...resolved.value.config };
 }
 
-/** The hard fixer default (W5) derives from Cleaner and clamps its effort. */
-export function defaultFixerFromRoles(): RoleConfig {
-  return { ...registryRole("cleaner"), effort: "low" };
+/** The hard fixer default (W5) derives from Cleaner and clamps its effort.
+    W5's codex-only contract outranks the registry: a Cleaner override that
+    switches engine falls back to the built-in Cleaner config. */
+export function defaultFixerFromRoles(definitions?: RoleDefinition[]): RoleConfig {
+  const cleaner = registryRole("cleaner", {}, definitions);
+  const config = cleaner.engine === "codex" ? cleaner : { ...ROLE_DEFAULTS.find((role) => role.id === "cleaner")!.config };
+  return { ...config, effort: "low" };
 }
 
 /* The user's canonical template (design doc example), seeded on first load
@@ -88,7 +93,7 @@ export function seededTemplatesFromRoles(): WorkflowTemplate[] {
   const builder = registryRole("builder", {}, definitions);
   const frontendBuilder = registryRole("builder", { mode: "plain", domain: "frontend" }, definitions);
   const reviewer = registryRole("reviewer", {}, definitions);
-  const fixer = { ...registryRole("cleaner", {}, definitions), effort: "low" };
+  const fixer = defaultFixerFromRoles(definitions);
   const templates: WorkflowTemplate[] = [
   {
     name: "fullstack",

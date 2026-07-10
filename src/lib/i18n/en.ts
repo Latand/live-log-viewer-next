@@ -63,6 +63,7 @@ export const en = {
   "dash.agent": "Agent",
   "dash.newWorkflow": "New workflow: stages → review → PR",
   "dash.workflow": "Workflow",
+  "dash.pipelinesUnavailable": "Pipelines are temporarily unavailable: the pipelines state file could not be read. Other panels stay live.",
   "dash.emptyTitle": "The scheme is empty for now",
   "dash.emptyHint": "Open the switchboard in the bottom-right corner and click a conversation — it will appear here",
   "dash.viewScheme": "scheme",

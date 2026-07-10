@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { AgentRegistry } from "@/lib/agent/registry";
+import { saveRoleOverrides } from "@/lib/roles/store";
 
 /* The state dir must point at a sandbox before store.ts computes its
    module-level constants, so the store loads dynamically after the env set. */
@@ -264,6 +265,20 @@ test("seed templates and the fixer default survive an unreadable role overrides 
   try {
     fs.writeFileSync(path.join(sandbox, "role-presets.json"), "{", "utf8");
     expect(seededTemplatesFromRoles().length).toBeGreaterThan(0);
+    expect(defaultFixerFromRoles()).toMatchObject({ engine: "codex", effort: "low" });
+  } finally {
+    if (previous === undefined) delete process.env.LLV_STATE_DIR;
+    else process.env.LLV_STATE_DIR = previous;
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  }
+});
+
+test("the fixer default stays codex when a Cleaner override switches engine", () => {
+  const previous = process.env.LLV_STATE_DIR;
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-wf-fixer-clamp-"));
+  process.env.LLV_STATE_DIR = sandbox;
+  try {
+    saveRoleOverrides({ cleaner: { config: { engine: "claude", model: "fable", effort: "high" } } });
     expect(defaultFixerFromRoles()).toMatchObject({ engine: "codex", effort: "low" });
   } finally {
     if (previous === undefined) delete process.env.LLV_STATE_DIR;

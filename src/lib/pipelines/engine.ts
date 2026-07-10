@@ -410,6 +410,9 @@ async function tickRunStage(
       pipeline.cursor = { stageId: stage.id, state: "running" };
     } catch (error) {
       park(pipeline, error instanceof Error ? error.message : String(error), attempt);
+    } finally {
+      /* The key only means "this spawn is in flight in this process". */
+      spawnsThisProcess.delete(attemptKey(pipeline, stage, attempt));
     }
     return;
   }
@@ -783,6 +786,7 @@ export async function patchPipeline(
     } else if (req.action === "close") {
       if (flow && flow.state !== "closed") await ports.closeFlow(flow.id);
       pipeline.state = "closed";
+      pipeline.cursor = null;
       pipeline.pausedState = null;
       pipeline.stateDetail = null;
       pipeline.closedAt = ports.now();

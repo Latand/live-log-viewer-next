@@ -222,6 +222,13 @@ export async function withPipelineMutation<T>(
 }
 
 export function savePipelines(pipelines: Pipeline[]): void {
+  /* The loader rejects the whole file on one malformed record, so a writer
+     bug must become a failed mutation here, never a poisoned registry that
+     only a hand edit can recover. */
+  for (const pipeline of pipelines) {
+    const id = pipeline.id;
+    if (!isPipeline(pipeline)) throw new PipelineStoreError(`refusing to persist a malformed pipeline record: ${id}`);
+  }
   atomicWriteJson(pipelinesFile(), { schemaVersion: PIPELINES_SCHEMA_VERSION, pipelines });
 }
 
