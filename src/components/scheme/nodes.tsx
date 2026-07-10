@@ -18,7 +18,9 @@ import { activeLoopLeg, activeLoopRole, canStartFlow, verdictTone } from "@/comp
 import { FlowHub } from "@/components/flows/FlowHub";
 import { PipelineDialog } from "@/components/pipelines/PipelineDialog";
 import { PipelineHub } from "@/components/pipelines/PipelineHub";
+import { PipelineStrip } from "@/components/pipelines/PipelineStrip";
 import { canSourcePipeline } from "@/components/pipelines/pipelineModel";
+import type { Pipeline } from "@/lib/pipelines/types";
 import { FlowStrip } from "@/components/flows/FlowStrip";
 import { RoleTag } from "@/components/flows/RoleTag";
 import { RateLimitBadge } from "@/components/RateLimitBadge";
@@ -505,9 +507,13 @@ function NodeShell({
   dimmed,
   dormant,
   flow,
+  pipeline,
+  flows,
   canFlow,
   canPipeline,
   onSelect,
+  onOpenPath,
+  onOpenFlow,
   onClose,
   onFocusRound,
   onHandoff,
@@ -523,12 +529,22 @@ function NodeShell({
   dormant: boolean;
   /** Active review-loop flow attached to this conversation, if any. */
   flow: Flow | null;
+  /** Active pipeline whose compact strip mounts over this node — the node is its
+      current run stage (§2.2). Null when none, or the current stage is a
+      review-loop (the FlowStrip owns that slot). */
+  pipeline: Pipeline | null;
+  /** All flows, for the strip's review-loop round counters + open-review. */
+  flows: Flow[];
   /** This node may host a new flow (root claude/codex conversation without one). */
   canFlow: boolean;
   /** This conversation may seed a pipeline — broader than canFlow: children and
       flow-hosting roots qualify too (#93 AC3). */
   canPipeline: boolean;
   onSelect: (file: FileEntry) => void;
+  /** Focus a transcript path on the board (pipeline strip chip / open-transcript). */
+  onOpenPath: (path: string) => void;
+  /** Focus an embedded flow's implementer (pipeline strip open-review). */
+  onOpenFlow: (flowId: string) => void;
   onClose: (path: string) => void;
   onFocusRound: (flowId: string, round: number) => void;
   onHandoff?: (file: FileEntry) => void;
@@ -539,6 +555,10 @@ function NodeShell({
   const [underOpen, setUnderOpen] = useState(false);
   const [flowOpen, setFlowOpen] = useState(false);
   const [pipelineOpen, setPipelineOpen] = useState(false);
+  /* The compact board strip sits in FlowStrip's slot; a review-loop current
+     stage never reaches here (its node carries the flow, and the strip map
+     already excludes it), but gate on !flow so the two can never stack. */
+  const boardStrip = pipeline && !flow ? pipeline : null;
   return (
     <div
       data-scheme-node={node.file.path}
@@ -561,12 +581,20 @@ function NodeShell({
           <FlowStrip flow={flow} onFocusRound={(round) => onFocusRound(flow.id, round)} />
         </div>
       ) : null}
+      {/* §2.2 board strip rule: the pipeline's controls mount over its current
+          run stage, in the same slot FlowStrip uses (a review-loop stage yields
+          the slot to FlowStrip, so the two never coexist here). */}
+      {boardStrip ? (
+        <div className="absolute -top-[60px] left-0 z-[5]" style={{ width: node.w }}>
+          <PipelineStrip pipeline={boardStrip} flows={flows} compact onOpenPath={onOpenPath} onOpenFlow={onOpenFlow} />
+        </div>
+      ) : null}
       {/* Flow + pipeline entry buttons. The pipeline button is decoupled from
           flow eligibility (#93 AC3): it appears on any pipeline-source
           conversation — children and flow-hosting roots included — sitting in
-          the controls row when free, or above the flow strip when one is up. */}
+          the controls row when free, or above the flow/pipeline strip when one is up. */}
       {canFlow || canPipeline ? (
-        <div className={`absolute left-0 z-[4] flex items-center gap-1.5 ${flow ? "-top-[92px]" : "-top-11"}`}>
+        <div className={`absolute left-0 z-[4] flex items-center gap-1.5 ${flow || boardStrip ? "-top-[92px]" : "-top-11"}`}>
           {canFlow ? (
             <button
               data-scheme-ui
@@ -734,6 +762,8 @@ export const NodesLayer = memo(function NodesLayer({
   focus,
   attentionPaths,
   flowsByImpl,
+  flows,
+  pipelineStrips,
   deckFocus,
   onSelect,
   onClose,
@@ -761,6 +791,10 @@ export const NodesLayer = memo(function NodesLayer({
       Identity is stable while membership is, so camera frames never see it move. */
   attentionPaths: ReadonlySet<string> | null;
   flowsByImpl: Map<string, Flow>;
+  /** All flows, for a pipeline strip's review-loop round counters + open-review. */
+  flows: Flow[];
+  /** Node path → the pipeline whose compact strip mounts over it (§2.2). */
+  pipelineStrips: Map<string, Pipeline>;
   deckFocus: DeckFocus | null;
   onSelect: (file: FileEntry) => void;
   onClose: (path: string) => void;
@@ -788,6 +822,18 @@ export const NodesLayer = memo(function NodesLayer({
   const withRuntimeActivity = (node: SchemeNode): SchemeNode => {
     const activity = runtimeActivityByPath.get(node.file.path);
     return activity ? { ...node, file: { ...node.file, activity } } : node;
+  };
+
+  /* Board pipeline strip actions: a stage chip / verdict routes a transcript
+     path (or an embedded flow's implementer) through the board's own select,
+     mirroring ProjectDashboard's openPipelinePath/openPipelineFlow. */
+  const openPipelinePath = (path: string) => {
+    const file = files.find((entry) => entry.path === path);
+    if (file) onSelect(file);
+  };
+  const openPipelineFlow = (flowId: string) => {
+    const flow = flows.find((candidate) => candidate.id === flowId);
+    if (flow) openPipelinePath(flow.implementerPath);
   };
 
   /* A stack or deck stays lit when any conversation inside it is in the
@@ -857,9 +903,13 @@ export const NodesLayer = memo(function NodesLayer({
             dimmed={attentionPaths !== null && !attentionPaths.has(node.file.path)}
             dormant={dormant}
             flow={flowsByImpl.get(node.file.path) ?? null}
+            pipeline={pipelineStrips.get(node.file.path) ?? null}
+            flows={flows}
             canFlow={canStartFlow(node.file, flowsByImpl)}
             canPipeline={canSourcePipeline(node.file)}
             onSelect={onSelect}
+            onOpenPath={openPipelinePath}
+            onOpenFlow={openPipelineFlow}
             onClose={onClose}
             onFocusRound={onFocusRound}
             onHandoff={onHandoff}

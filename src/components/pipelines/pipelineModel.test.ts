@@ -13,8 +13,10 @@ import {
   draftStagesToInput,
   normalizeStageOrder,
   pipelineAnnouncement,
+  pipelineBoardStripPath,
   pipelineCursorActive,
   pipelineNeedsAttention,
+  pipelineStripByPath,
   stageChipState,
 } from "./pipelineModel";
 
@@ -255,4 +257,43 @@ test("pipelineNeedsAttention flags parked and paused, not closed", () => {
   expect(pipelineNeedsAttention(pipeline({ state: "paused" }))).toBe(true);
   expect(pipelineNeedsAttention(pipeline({ state: "running" }))).toBe(false);
   expect(pipelineNeedsAttention(pipeline({ state: "closed" }))).toBe(false);
+});
+
+describe("pipelineBoardStripPath (§2.2 board strip anchor)", () => {
+  const stages = [stage("plan"), stage("build"), stage("review", "review-loop")];
+  const run = (stageId: string, agentPath: string | null) => ({ stageId, attempts: [{ state: "running", agentPath } as never] });
+
+  test("anchors on the current run stage's latest attempt path", () => {
+    const p = pipeline({ stages, cursor: { stageId: "build", state: "running" }, runs: [run("plan", "/a"), run("build", "/b")] });
+    expect(pipelineBoardStripPath(p)).toBe("/b");
+  });
+
+  test("a review-loop current stage yields the slot (null) so FlowStrip owns it", () => {
+    const p = pipeline({ stages, cursor: { stageId: "review", state: "reviewing" }, runs: [run("review", "/r")] });
+    expect(pipelineBoardStripPath(p)).toBeNull();
+  });
+
+  test("an unmaterialized current stage (no agent path) anchors nowhere", () => {
+    const p = pipeline({ stages, cursor: { stageId: "build", state: "running" }, runs: [run("build", null)] });
+    expect(pipelineBoardStripPath(p)).toBeNull();
+  });
+
+  test("a closed pipeline never anchors a strip", () => {
+    const p = pipeline({ stages, state: "closed", cursor: { stageId: "build", state: "running" }, runs: [run("build", "/b")] });
+    expect(pipelineBoardStripPath(p)).toBeNull();
+  });
+
+  test("a completed pipeline falls back to the last stage", () => {
+    const done = [stage("plan"), stage("build")];
+    const p = pipeline({ stages: done, state: "completed", cursor: null, runs: [run("plan", "/a"), run("build", "/b")] });
+    expect(pipelineBoardStripPath(p)).toBe("/b");
+  });
+
+  test("pipelineStripByPath maps every anchored pipeline by its node path", () => {
+    const a = pipeline({ id: "a", stages, cursor: { stageId: "build", state: "running" }, runs: [run("build", "/b")] });
+    const b = pipeline({ id: "b", stages, cursor: { stageId: "review", state: "reviewing" }, runs: [run("review", "/r")] });
+    const map = pipelineStripByPath([a, b]);
+    expect(map.get("/b")?.id).toBe("a");
+    expect(map.has("/r")).toBe(false);
+  });
 });

@@ -31,6 +31,18 @@ export function roleAccess(role: RoleCatalogItem): PipelineAccess {
   return role.capabilities.includes("read-only") ? "read-only" : "read-write";
 }
 
+/**
+ * The runtime a role-param change should apply. Builder's domain=frontend /
+ * mode=apply-fixes shift the autofilled runtime — but only while the operator
+ * hasn't pinned engine/model/effort by hand. An explicit override wins over
+ * param autofill (design §1.3), so this returns null (leave the runtime as-is)
+ * once `runtimeOverridden` is set, and for any non-Builder role.
+ */
+export function paramChangeRuntime(role: RoleCatalogItem | null, params: Record<string, string | number>, runtimeOverridden: boolean): RoleConfig | null {
+  if (role?.id !== "builder" || runtimeOverridden) return null;
+  return roleRuntime(role, params);
+}
+
 export function defaultRoleParams(role: RoleCatalogItem): Record<string, string | number> {
   return Object.fromEntries(
     role.parameters.map((parameter) => [parameter.key, parameter.kind === "integer" ? parameter.min ?? 1 : parameter.options?.[0] ?? ""]),
@@ -81,7 +93,8 @@ export function StageRow({
   const selectRole = (roleId: string) => {
     const role = roles.find((item) => item.id === roleId) ?? null;
     if (!role) {
-      patch({ roleId: "", roleParams: {} });
+      /* Re-selecting "No role" hands the runtime back to autofill/default too. */
+      patch({ roleId: "", roleParams: {}, runtimeOverridden: false });
       return;
     }
     const params = defaultRoleParams(role);
@@ -93,13 +106,18 @@ export function StageRow({
       model: runtime.model,
       effort: runtime.effort,
       access: isReview ? "read-only" : roleAccess(role),
+      /* A freshly selected role owns the runtime again, discarding any prior
+         hand override — the runtime line reflects the new role's preset. */
+      runtimeOverridden: false,
     });
   };
 
   const setRoleParam = (key: string, value: string | number) => {
     const params = { ...stage.roleParams, [key]: value };
-    if (selectedRole?.id === "builder") {
-      const runtime = roleRuntime(selectedRole, params);
+    /* A param change must not silently relaunch the stage on a different runtime
+       once the operator has pinned one — paramChangeRuntime honors that override. */
+    const runtime = paramChangeRuntime(selectedRole, params, Boolean(stage.runtimeOverridden));
+    if (runtime) {
       patch({ roleParams: params, engine: runtime.engine, model: runtime.model, effort: runtime.effort });
       return;
     }
@@ -110,7 +128,7 @@ export function StageRow({
     /* Switch to a model the new engine actually accepts. Clearing it to "" would
        serialize no override and let the server fall back to the role/Builder
        default — a codex model (gpt-5.6-sol) under a Claude stage, i.e. a 400. */
-    patch({ engine, model: ENGINE_MODELS[engine][0]?.id ?? "", effort: ENGINE_EFFORTS[engine].includes(stage.effort) ? stage.effort : "" });
+    patch({ engine, model: ENGINE_MODELS[engine][0]?.id ?? "", effort: ENGINE_EFFORTS[engine].includes(stage.effort) ? stage.effort : "", runtimeOverridden: true });
   };
 
   const insertPlaceholder = (token: string) => {
@@ -260,7 +278,7 @@ export function StageRow({
             placeholder={defaultRuntime.model || t("pipelineDialog.modelPlaceholder")}
             aria-label={t("pipelineDialog.model")}
             className="h-7 w-0 min-w-24 flex-1 rounded-[8px] border border-line bg-bg px-1.5 font-mono text-[11px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
-            onChange={(event) => patch({ model: event.target.value.trim() })}
+            onChange={(event) => patch({ model: event.target.value.trim(), runtimeOverridden: true })}
           />
           <datalist id={modelListId}>
             {ENGINE_MODELS[stage.engine].map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}
@@ -269,7 +287,7 @@ export function StageRow({
             value={stage.effort}
             aria-label={t("pipelineDialog.effort")}
             className="h-7 rounded-[8px] border border-line bg-bg px-1.5 text-[11.5px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
-            onChange={(event) => patch({ effort: event.target.value })}
+            onChange={(event) => patch({ effort: event.target.value, runtimeOverridden: true })}
           >
             <option value="">{t("pipelineDialog.effortDefault")}</option>
             {ENGINE_EFFORTS[stage.engine].map((effort) => <option key={effort} value={effort}>{effort}</option>)}

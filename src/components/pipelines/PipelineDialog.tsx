@@ -172,6 +172,8 @@ export function PipelineDialog({
 }) {
   const { t } = useLocale();
   const [roles, setRoles] = useState<RoleCatalogItem[]>([]);
+  const [rolesError, setRolesError] = useState(false);
+  const [rolesReload, setRolesReload] = useState(0);
   const [dirs, setDirs] = useState<string[]>([]);
   const [task, setTask] = useState(() => readDraft(project).task);
   const [spec, setSpec] = useState(() => readDraft(project).spec);
@@ -191,15 +193,31 @@ export function PipelineDialog({
     taskRef.current?.focus();
   }, []);
 
+  /* Role catalog fetch, retryable via the rolesReload bump. A non-2xx, network
+     error, or malformed body surfaces `rolesError` instead of failing silently —
+     otherwise the templates stay disabled under a permanent loading tooltip and
+     the role picker only ever offers "No role". */
   useEffect(() => {
     let cancelled = false;
-    void fetch("/api/roles").then(async (res) => {
-      if (!res.ok) return;
-      const body = (await res.json()) as { roles?: RoleCatalogItem[] };
-      /* Deployer needs an interactive deploy confirmation a pipeline can't give,
-         so it never enters the picker (the API rejects it too). */
-      if (!cancelled && Array.isArray(body.roles)) setRoles(body.roles.filter((role) => !PIPELINE_DISALLOWED_ROLE_IDS.includes(role.id as PipelineRoleId)));
-    }).catch(() => {});
+    void fetch("/api/roles")
+      .then(async (res) => {
+        if (!res.ok) throw new Error(String(res.status));
+        const body = (await res.json()) as { roles?: RoleCatalogItem[] };
+        if (!Array.isArray(body.roles)) throw new Error("malformed");
+        if (cancelled) return;
+        /* Deployer needs an interactive deploy confirmation a pipeline can't give,
+           so it never enters the picker (the API rejects it too). */
+        setRoles(body.roles.filter((role) => !PIPELINE_DISALLOWED_ROLE_IDS.includes(role.id as PipelineRoleId)));
+        setRolesError(false);
+      })
+      .catch(() => {
+        if (!cancelled) setRolesError(true);
+      });
+    return () => { cancelled = true; };
+  }, [rolesReload]);
+
+  useEffect(() => {
+    let cancelled = false;
     void fetch("/api/spawn?project=" + encodeURIComponent(project) + (src ? "&src=" + encodeURIComponent(src) : ""))
       .then((res) => res.json() as Promise<{ dirs?: string[]; cwd?: string | null }>)
       .then((json) => {
@@ -350,7 +368,7 @@ export function PipelineDialog({
                   key={template.id}
                   type="button"
                   disabled={!ready}
-                  title={ready ? undefined : t("pipelineDialog.templatesLoading")}
+                  title={ready ? undefined : rolesError ? t("pipelineDialog.templatesUnavailable") : t("pipelineDialog.templatesLoading")}
                   className="rounded-full border border-line bg-bg px-2.5 py-1 text-[10.5px] font-semibold text-dim hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:cursor-not-allowed disabled:opacity-40"
                   onClick={() => applyTemplate(template)}
                 >
@@ -359,6 +377,18 @@ export function PipelineDialog({
               );
             })}
           </div>
+          {rolesError ? (
+            <div className="flex flex-wrap items-center gap-2 rounded-[8px] border border-[#e0ae45]/50 bg-[#fdf6ec] px-2.5 py-1.5" role="alert">
+              <span className="min-w-0 flex-1 text-[10.5px] font-semibold text-[#8a5b00]">{t("pipelineDialog.rolesError")}</span>
+              <button
+                type="button"
+                className="shrink-0 rounded-full border border-[#e0ae45]/60 bg-panel px-2.5 py-0.5 text-[10.5px] font-bold text-[#8a5b00] hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                onClick={() => setRolesReload((n) => n + 1)}
+              >
+                {t("pipelineDialog.rolesRetry")}
+              </button>
+            </div>
+          ) : null}
         </div>
 
         <div className="flex items-center gap-2">

@@ -21,7 +21,7 @@ import { pushTaskToast } from "@/components/tasks/taskToast";
 import { cleanTitle } from "@/components/utils";
 import { taskDeliveryText } from "@/lib/tasks/helpers";
 
-import { pipelineAnnouncement } from "@/components/pipelines/pipelineModel";
+import { pipelineAnnouncement, pipelineStripByPath } from "@/components/pipelines/pipelineModel";
 import { BulkActionBar } from "./BulkActionBar";
 import { nodesInRect, pruneSelection, selectionBBox } from "./lasso";
 import { buildSchemeLayout } from "./layout";
@@ -207,6 +207,10 @@ export function SchemeBoard({
     [layout, clearSession],
   );
   const flowsByImpl = useMemo(() => flowByImplementer(flows), [flows]);
+  /* Which node hosts each pipeline's compact strip (§2.2): the current run
+     stage's node. Review-loop current stages resolve to null here — their
+     FlowStrip owns that slot — so the two controls never stack. */
+  const pipelineStrips = useMemo(() => pipelineStripByPath(pipelines), [pipelines]);
 
   /* One conversation expanded full-window at a time. React state only — never
      persisted, gone on reload; the board underneath stays mounted, so camera,
@@ -656,6 +660,8 @@ export function SchemeBoard({
           focus={visualFocus}
           attentionPaths={attentionPaths ?? null}
           flowsByImpl={flowsByImpl}
+          flows={flows}
+          pipelineStrips={pipelineStrips}
           deckFocus={deckFocus}
           onSelect={stableSelect}
           onClose={stableClose}

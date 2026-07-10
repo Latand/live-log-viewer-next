@@ -114,6 +114,34 @@ export function stageAttempts(pipeline: Pipeline, stageId: string): PipelineStag
 }
 
 /**
+ * The board node that should host this pipeline's compact strip (§2.2 "Board
+ * strip rule"): the current stage's latest attempt agent path, so controls sit
+ * over the node the operator is watching. Returns null when the current stage is
+ * a review-loop — the flow's own FlowStrip owns that slot — or when it hasn't
+ * materialized a session yet, or the pipeline is closed. The current stage is the
+ * cursor's, falling back to the last stage once the chain completes (matching the
+ * hub's cursor read).
+ */
+export function pipelineBoardStripPath(pipeline: Pipeline): string | null {
+  if (pipeline.state === "closed") return null;
+  const stageId = pipeline.cursor?.stageId ?? pipeline.stages.at(-1)?.id ?? null;
+  if (!stageId) return null;
+  const stage = pipeline.stages.find((candidate) => candidate.id === stageId);
+  if (!stage || stage.kind === "review-loop") return null;
+  return latestAttempt(pipeline, stageId)?.agentPath ?? null;
+}
+
+/** Map from board node path → the pipeline whose compact strip mounts over it. */
+export function pipelineStripByPath(pipelines: Pipeline[]): Map<string, Pipeline> {
+  const map = new Map<string, Pipeline>();
+  for (const pipeline of pipelines) {
+    const path = pipelineBoardStripPath(pipeline);
+    if (path) map.set(path, pipeline);
+  }
+  return map;
+}
+
+/**
  * Resolves a stage's chip state from its latest attempt and the pipeline cursor,
  * following the state matrix: a terminal attempt state wins; otherwise a stage
  * under an active cursor shows running/reviewing/committing; everything else is
@@ -189,6 +217,9 @@ export type DraftStage = {
   access: PipelineAccess;
   prompt: string;
   roleParams: Record<string, string | number>;
+  /** The operator edited engine/model/effort by hand, so role/param autofill must
+      no longer clobber the runtime. Reset when a role is (re)selected. */
+  runtimeOverridden?: boolean;
 };
 
 export type PipelineTemplate = {

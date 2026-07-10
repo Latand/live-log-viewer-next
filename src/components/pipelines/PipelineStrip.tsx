@@ -111,11 +111,15 @@ function StageChip({
 export function PipelineStrip({
   pipeline,
   flows = [],
+  compact = false,
   onOpenPath,
   onOpenFlow,
 }: {
   pipeline: Pipeline;
   flows?: Flow[];
+  /** Board variant (§2.2): trimmed to node width — drops the "PIPELINE" kicker
+      and tightens padding so the chips + controls fit over a single node. */
+  compact?: boolean;
   onOpenPath?: (path: string) => void;
   onOpenFlow?: (flowId: string) => void;
 }) {
@@ -138,11 +142,11 @@ export function PipelineStrip({
       data-scheme-ui
       role="group"
       aria-label={t("pipelineStrip.groupAria", { task: pipeline.task })}
-      className={`pointer-events-auto flex min-h-11 w-full flex-wrap items-center gap-3 rounded-[14px] border bg-panel/95 px-4 py-1 shadow-[0_2px_10px_rgb(20_20_30/0.08)] ${attention ? "border-[#e0ae45]/70" : "border-line"}`}
+      className={`pointer-events-auto flex min-h-11 w-full flex-wrap items-center gap-3 rounded-[14px] border bg-panel/95 py-1 shadow-[0_2px_10px_rgb(20_20_30/0.08)] ${compact ? "px-2.5" : "px-4"} ${attention ? "border-[#e0ae45]/70" : "border-line"}`}
     >
       <span className="flex min-w-0 max-w-[42%] shrink-0 items-center gap-2">
         <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${pipeline.state === "needs_decision" ? "bg-err" : PIPELINE_BUSY_STATES.has(pipeline.state) ? "animate-pulse bg-ok" : pipeline.state === "completed" ? "bg-ok" : "bg-[#9a9aa4]"}`} aria-hidden />
-        <span className="shrink-0 text-[10.5px] font-bold tracking-[0.08em] text-dim">{t("pipelineStrip.pipeline")}</span>
+        {compact ? null : <span className="shrink-0 text-[10.5px] font-bold tracking-[0.08em] text-dim">{t("pipelineStrip.pipeline")}</span>}
         <span className="min-w-0 truncate text-[12px] font-bold" title={pipeline.task}>{pipeline.task}</span>
         <span className="shrink-0 text-[11.5px] font-semibold text-dim">{pipelineStateLabel(t, pipeline.state)}</span>
         {detail ? <span className={`min-w-0 truncate text-[11.5px] font-semibold ${attention ? "text-[#a06a15]" : "text-err"}`} title={detail}>{detail}</span> : null}
