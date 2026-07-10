@@ -118,7 +118,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function protocolError(message: string): CodexAppServerError {
-  return new CodexAppServerError(`Codex app-server protocol error: ${message}`);
+  return new CodexAppServerError(`Codex app-server protocol error: ${message}`, "unknown");
 }
 
 function serverError(value: { code: number; message: string }): CodexAppServerError {
