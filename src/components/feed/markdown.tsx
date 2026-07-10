@@ -4,6 +4,7 @@ import { Fragment, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 
 import { CopyButton, copyText } from "./CopyButton";
+import { useHighlighted } from "./highlight";
 import { Lightbox } from "./Lightbox";
 import { tr } from "./parse";
 
@@ -44,11 +45,22 @@ function InlineCode({ text }: { text: string }) {
 }
 
 /* Fenced block with a copy control that surfaces on hover (always faintly
-   there on touch screens, where hover never comes). */
-function CodeBlock({ code }: { code: string }) {
+   there on touch screens, where hover never comes). A `lang` hint lazily
+   upgrades the body to highlight.js output on first paint (see useHighlighted);
+   until the chunk resolves — or when the language is unknown — it stays plain
+   monospace, so nothing blocks or flashes. */
+export function CodeBlock({ code, lang }: { code: string; lang?: string | null }) {
+  const highlighted = useHighlighted(code, lang);
   return (
     <div className="group/code relative my-1.5 max-w-full">
-      <pre className="max-w-full overflow-x-auto rounded-[10px] border border-line bg-bg px-3 py-2 font-mono text-[11.5px]">{code}</pre>
+      {highlighted ? (
+        <pre
+          className="hljs max-w-full overflow-x-auto rounded-[10px] border border-line bg-bg px-3 py-2 font-mono text-[11.5px]"
+          dangerouslySetInnerHTML={{ __html: highlighted }}
+        />
+      ) : (
+        <pre className="max-w-full overflow-x-auto rounded-[10px] border border-line bg-bg px-3 py-2 font-mono text-[11.5px]">{code}</pre>
+      )}
       <CopyButton
         text={code}
         label={tr("feed.copyCode")}
@@ -212,12 +224,16 @@ export function mdBlocks(text: string): ReactNode {
   while (i < lines.length) {
     if (/^\s*```/.test(lines[i])) {
       const start = i;
+      /* The opening fence's info string (```ts, ```python, …) is the language
+         hint highlight.js resolves; fence-only names like `python`/`shell` have
+         no file-extension equivalent, so this is their only entry point. */
+      const lang = lines[i].match(/^\s*```+\s*([A-Za-z0-9+#_-]+)/)?.[1] ?? null;
       i++;
       while (i < lines.length && !/^\s*```\s*$/.test(lines[i])) i++;
       const code = lines.slice(start + 1, i).join("\n");
       if (i < lines.length) i++;
       if (out[out.length - 1] === "\n") out.pop();
-      out.push(<CodeBlock key={`c${start}`} code={code} />);
+      out.push(<CodeBlock key={`c${start}`} code={code} lang={lang} />);
       continue;
     }
     if (TABLE_ROW_RE.test(lines[i])) {

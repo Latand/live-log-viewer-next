@@ -12,6 +12,7 @@ import { isAwaitingUser } from "@/hooks/useSwitchboardData";
 
 import { createFeedSession, type FeedSession, type FeedSnapshot } from "./feed/parse";
 import { FeedItem } from "./feed/FeedItem";
+import { RawLineProvider, type RawLineLookup } from "./feed/rawLine";
 import { QuestionCard } from "./feed/QuestionCard";
 import { isSubagent } from "./projectModel";
 import { TaskHeader } from "./TaskHeader";
@@ -192,6 +193,15 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
   const hiddenLocal = Math.max(0, feed.items.length - visibleCount);
   const visibleItems = hiddenLocal ? feed.items.slice(-visibleCount) : feed.items;
 
+  /* Lazy raw-record provenance: a tool card resolves its source line(s) from
+     the retained window, client-side, with no server round-trip. A line that
+     slid out returns null, which the card renders as a quiet chip. */
+  const getRawLine: RawLineLookup = useMemo(() => {
+    const lines = tail.lines;
+    const base = tail.linesStart;
+    return (src) => (src >= base && src < base + lines.length ? (lines[src - base] ?? null) : null);
+  }, [tail.lines, tail.linesStart]);
+
   useEffect(() => {
     const time = tail.tickTime?.toLocaleTimeString(getLocale() === "uk" ? "uk-UA" : "en-US", { hour12: false }) ?? "";
     if (tail.error) onStatus(tail.error);
@@ -264,8 +274,8 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
 
   const lastItem = feed.items.at(-1)?.item;
   const working: { icon: LucideIcon; label: string } =
-    lastItem?.kind === "cmd" && lastItem.call.status === "run"
-      ? { icon: Wrench, label: t("feed.running", { tool: lastItem.call.cmd.split(/[\s:]/, 1)[0] || t("feed.tool") }) }
+    lastItem?.kind === "tool" && lastItem.status === "run"
+      ? { icon: Wrench, label: t("feed.running", { tool: (lastItem.command ?? lastItem.summary).split(/[\s:·]/, 1)[0] || t("feed.tool") }) }
       : lastItem?.kind === "think"
         ? { icon: Sparkle, label: t("feed.thinking") }
         : { icon: Sparkle, label: t("feed.working") };
@@ -280,6 +290,7 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
   const pillPos = compact ? "left-1/2 -translate-x-1/2" : "right-3";
 
   return (
+    <RawLineProvider value={getRawLine}>
     <div className="relative flex min-h-0 flex-1 flex-col">
       {file && feed.items.length ? (
         magnet ? (
@@ -417,5 +428,6 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
         </div>
       </div>
     </div>
+    </RawLineProvider>
   );
 }
