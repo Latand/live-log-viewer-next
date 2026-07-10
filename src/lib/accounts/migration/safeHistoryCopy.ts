@@ -189,11 +189,50 @@ export interface SafeHistoryCopyInput {
   destinationRelative: string;
   operationId: string;
   maxBytes?: number;
+  afterDestinationPublished?(): void;
 }
 
 export interface SafeHistoryCopyResult { path: string; hash: string; size: number; reused: boolean }
 
 export interface SafeProviderDiagnostic { type: string; message: string }
+
+function writeReceipt(pathname: string, receipt: ReceiptFile): void {
+  const parent = path.dirname(pathname);
+  const temp = `${pathname}.${process.pid}.${crypto.randomUUID()}.tmp`;
+  let descriptor: number | null = null;
+  try {
+    descriptor = fs.openSync(temp, "wx", 0o600);
+    fs.writeFileSync(descriptor, JSON.stringify(receipt) + "\n", "utf8");
+    fs.fsyncSync(descriptor);
+    fs.closeSync(descriptor);
+    descriptor = null;
+    fs.renameSync(temp, pathname);
+    const directory = fs.openSync(parent, "r");
+    try { fs.fsyncSync(directory); } finally { fs.closeSync(directory); }
+  } finally {
+    if (descriptor !== null) fs.closeSync(descriptor);
+    fs.rmSync(temp, { force: true });
+  }
+}
+
+function removeInterruptedPublishLinks(destination: string): void {
+  const listed = fs.lstatSync(destination);
+  if (listed.nlink === 1) return;
+  const parent = path.dirname(destination);
+  const prefix = `.${path.basename(destination)}.`;
+  const candidates = fs.readdirSync(parent)
+    .filter((entry) => entry.startsWith(prefix) && entry.endsWith(".tmp"))
+    .map((entry) => path.join(parent, entry))
+    .filter((candidate) => {
+      const stat = fs.lstatSync(candidate);
+      return stat.isFile() && !stat.isSymbolicLink() && stat.dev === listed.dev && stat.ino === listed.ino;
+    });
+  if (candidates.length !== listed.nlink - 1) throw new HistorySecurityError("history-collision");
+  for (const candidate of candidates) fs.unlinkSync(candidate);
+  const directory = fs.openSync(parent, "r");
+  try { fs.fsyncSync(directory); } finally { fs.closeSync(directory); }
+  if (fs.lstatSync(destination).nlink !== 1) throw new HistorySecurityError("history-collision");
+}
 
 /** Preserves actionable server detail while keeping routes and registry state generic. */
 export function safeProviderDiagnostic(error: unknown): SafeProviderDiagnostic {
@@ -215,11 +254,16 @@ export function safeCopyHistory(input: SafeHistoryCopyInput): SafeHistoryCopyRes
   const destination = path.join(parent, path.basename(relative));
   const receiptPath = `${destination}.llv-receipt.json`;
   if (fs.existsSync(destination)) {
+    if (!fs.existsSync(receiptPath)) removeInterruptedPublishLinks(destination);
     const receipt = readReceipt(receiptPath);
     const existing = hashFile(destination, maxBytes, undefined, true);
     const original = hashFile(source.sourcePath, maxBytes, source);
     if (receipt?.operationId === input.operationId && receipt.hash === existing.hash && receipt.size === existing.size
       && original.hash === existing.hash && original.size === existing.size) {
+      return { path: destination, ...existing, reused: true };
+    }
+    if (!fs.existsSync(receiptPath) && original.hash === existing.hash && original.size === existing.size) {
+      writeReceipt(receiptPath, { operationId: input.operationId, hash: existing.hash, size: existing.size });
       return { path: destination, ...existing, reused: true };
     }
     throw new HistorySecurityError("history-collision");
@@ -260,12 +304,11 @@ export function safeCopyHistory(input: SafeHistoryCopyInput): SafeHistoryCopyRes
       throw error;
     }
     fs.rmSync(temp, { force: true });
+    const publishedDirectory = fs.openSync(parent, "r");
+    try { fs.fsyncSync(publishedDirectory); } finally { fs.closeSync(publishedDirectory); }
+    input.afterDestinationPublished?.();
     const hash = digest.digest("hex");
-    const receiptTemp = `${receiptPath}.${process.pid}.${crypto.randomUUID()}.tmp`;
-    try {
-      fs.writeFileSync(receiptTemp, JSON.stringify({ operationId: input.operationId, hash, size: total }) + "\n", { mode: 0o600, flag: "wx" });
-      fs.renameSync(receiptTemp, receiptPath);
-    } finally { fs.rmSync(receiptTemp, { force: true }); }
+    writeReceipt(receiptPath, { operationId: input.operationId, hash, size: total });
     const dir = fs.openSync(parent, "r");
     try { fs.fsyncSync(dir); } finally { fs.closeSync(dir); }
     return { path: destination, hash, size: total, reused: false };

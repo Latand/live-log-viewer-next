@@ -92,6 +92,9 @@ export class AccountMigrationController {
         pathForPanePid: (panePid, entries) => pathForPanePid(entries, panePid, readPpid),
         panePidAlive: pidAlive,
         conversationIdForPath: (pathname) => this.registry.conversationForPath(pathname)?.id ?? null,
+        canonicalConversationId: (conversationId) => conversationId.startsWith("conversation_")
+          ? this.registry.canonicalConversationId(conversationId as `conversation_${string}`)
+          : null,
         pathForConversationId: (conversationId) => conversationId.startsWith("conversation_")
           ? this.registry.conversation(conversationId as `conversation_${string}`)?.generations.at(-1)?.path ?? null
           : null,

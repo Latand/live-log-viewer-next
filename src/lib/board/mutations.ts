@@ -48,16 +48,29 @@ function normalize(board: BoardProjectStateV1, aliases = aliasesOf(board)): Boar
 }
 
 function remapPaths(board: BoardProjectStateV1, pairs: readonly { from: string; to: string }[]): BoardProjectStateV1 {
-  const aliases = { ...aliasesOf(board) };
-  for (const { from, to } of pairs) aliases[from] = to;
-  return normalize(board, aliases);
+  const currentAliases = aliasesOf(board);
+  const activePairs = pairs.filter(({ from, to }) => resolvePath(from, currentAliases) !== resolvePath(to, currentAliases));
+  if (activePairs.length === 0) return normalize(board);
+  const sources = new Set(pairs.map(({ from }) => resolvePath(from, currentAliases)));
+  const targets = new Set(activePairs.map(({ to }) => resolvePath(to, currentAliases)));
+  const manual = board.prefs.manual.filter((pathname) => {
+    const resolved = resolvePath(pathname, currentAliases);
+    return !targets.has(resolved) || sources.has(resolved);
+  });
+  const aliases = { ...currentAliases };
+  for (const { from, to } of activePairs) aliases[from] = to;
+  return normalize({ ...board, prefs: { ...board.prefs, manual } }, aliases);
 }
 
 function reconcileRoots(board: BoardProjectStateV1, roots: readonly string[], removeManual: readonly string[]): BoardProjectStateV1 {
   const aliases = aliasesOf(board);
   const removed = new Set(removeManual.map((item) => resolvePath(item, aliases)));
   const manual = board.prefs.manual.filter((item) => !removed.has(item));
-  const present = new Set([...manual, ...board.prefs.hidden]);
+  const present = new Set([
+    ...manual,
+    ...board.prefs.hidden,
+    ...Object.values(aliases).map((item) => resolvePath(item, aliases)),
+  ]);
   for (const root of roots.map((item) => resolvePath(item, aliases))) {
     if (!present.has(root)) {
       manual.push(root);
