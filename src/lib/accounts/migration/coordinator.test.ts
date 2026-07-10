@@ -336,7 +336,12 @@ describe("durable account migration coordinator", () => {
 
     const failed = await advanceConversationMigration(conversation.id, store, provider);
 
-    expect(failed.migration?.phase).toBe("failed-recoverable");
+    expect(failed.migration).toMatchObject({
+      phase: "failed-recoverable",
+      errorCode: "provider-failed",
+      error: "successor provider failed a recoverable preflight",
+    });
+    expect(JSON.stringify(failed.migration)).not.toContain("durability check failed");
     expect(cleaned).toEqual(["failed-successor"]);
   });
 });
