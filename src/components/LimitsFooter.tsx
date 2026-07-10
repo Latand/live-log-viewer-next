@@ -2,12 +2,12 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { codexEntryPointVisible, useCodexAccounts } from "@/hooks/useCodexAccounts";
+import { accountEntryPointVisible, type Engine, useEngineAccounts } from "@/hooks/useEngineAccounts";
 import { getLocale, type Locale, translate, useLocale } from "@/lib/i18n";
-import type { EngineLimits, LimitsPayload, LimitsProvenance, LimitWindow } from "@/lib/types";
+import type { EngineLimits, LimitsPayload, LimitWindow } from "@/lib/types";
 
-import { CodexAccountsPanel } from "./CodexAccountsPanel";
-import { ChevronDown } from "./icons";
+import { AccountsPanel } from "./AccountsPanel";
+import { ChevronDown, Loader2 } from "./icons";
 import { engineTintOf, fmtAge } from "./utils";
 
 const POLL_MS = 60_000;
@@ -89,45 +89,6 @@ function LimitRow({
   );
 }
 
-function EngineBlock({
-  label,
-  engine,
-  limits,
-  now,
-  provenance,
-}: {
-  label: string;
-  engine: string;
-  limits: EngineLimits | null;
-  now: number;
-  provenance: LimitsProvenance;
-}) {
-  const { t } = useLocale();
-  if (!limits || (!limits.session && !limits.weekly)) return null;
-  const tint = engineTintOf(engine);
-  const stale = limits.capturedAt && now - limits.capturedAt > STALE_S ? fmtAge(limits.capturedAt) : null;
-  const staleHint = fmtStaleSince(provenance.staleSince, getLocale());
-  return (
-    <div className={`mt-2.5 first:mt-0 ${staleHint ? "opacity-60" : ""}`}>
-      <div className="flex items-baseline gap-1.5">
-        <span className="text-[11.5px] font-bold" style={{ color: tint.color }}>
-          {label}
-        </span>
-        {limits.plan ? <span className="truncate text-[10px] text-dim">{limits.plan}</span> : null}
-        {staleHint ? <span className="truncate text-[10px] text-dim">{staleHint}</span> : null}
-        {stale ? (
-          <span
-            className="h-1.5 w-1.5 shrink-0 self-center rounded-full bg-[#d29a2f]"
-            title={t("limits.stale", { stale })}
-          />
-        ) : null}
-      </div>
-      <LimitRow label={t("limits.5h")} window={limits.session} engineColor={tint.color} now={now} />
-      <LimitRow label={t("limits.week")} window={limits.weekly} engineColor={tint.color} now={now} />
-    </div>
-  );
-}
-
 /** True only when both payloads name a Codex account and the id changed. A
     freshly added account has no transcripts, so its payload arrives with
     `codex: null`; without this guard the sticky merge would carry the previous
@@ -168,6 +129,14 @@ export function codexLimitsForActiveAccount(payload: Pick<LimitsPayload, "codex"
   return payload.codex;
 }
 
+/** Engine-symmetric masking gate: the same account-ownership stamp check for
+    either engine, so a stale limits response never renders one account's
+    percentages under another account's label (Fable/Sol invariant 19). */
+export function limitsForActiveAccount(limits: EngineLimits | null, payloadAccountId: string | null, activeAccountId: string): EngineLimits | null {
+  if (!limits || !activeAccountId || payloadAccountId !== activeAccountId) return null;
+  return limits;
+}
+
 type Fetcher = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
 /** A single latest-request-wins limits channel. Abort improves resource use;
@@ -201,21 +170,31 @@ export function createLatestLimitsLoader(fetcher: Fetcher, onPayload: (payload: 
   };
 }
 
-function CodexLimitsBlock({
+/** One engine's limits block, doubling as its account switcher: the whole block
+    is a button opening the unified {@link AccountsPanel} for that engine, and
+    the header carries the active-account chip (with a live capacity chip) so
+    "which account am I on, and how much is left" reads without a click. Renders
+    even with no numbers (a freshly switched account) so the entry point never
+    disappears — symmetric for Claude and Codex (Fable P9). */
+function EngineLimitsBlock({
+  engine,
+  label,
   limits,
-  codexAccountId,
+  payloadAccountId,
   now,
   staleHint,
   onSwitched,
 }: {
+  engine: Engine;
+  label: string;
   limits: EngineLimits | null;
-  codexAccountId: string | null;
+  payloadAccountId: string | null;
   now: number;
   staleHint: string | null;
   onSwitched: () => void;
 }) {
   const { t } = useLocale();
-  const accounts = useCodexAccounts();
+  const accounts = useEngineAccounts(engine);
   const [open, setOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -227,7 +206,7 @@ function CodexLimitsBlock({
   };
 
   // Outside-pointer close only. Escape is owned by the panel's dialog subtree
-  // (see CodexAccountsPanel / handleOverlayEscape): routing it through a second
+  // (see AccountsPanel / handleOverlayEscape): routing it through a second
   // window listener here would race the project drawer's window Escape handler,
   // so one press would close both the sheet and the drawer beneath it.
   useEffect(() => {
@@ -236,28 +215,29 @@ function CodexLimitsBlock({
       if (containerRef.current && !containerRef.current.contains(event.target as Node)) setOpen(false);
     };
     window.addEventListener("pointerdown", onDown);
-    return () => {
-      window.removeEventListener("pointerdown", onDown);
-    };
+    return () => window.removeEventListener("pointerdown", onDown);
   }, [open]);
 
-  // Every mounted account surface shares this store. A version bump arrives for
-  // both the compact Switchboard selector and the footer panel, including the
-  // post-mutation confirmation that can follow an optimistic switch.
+  // Every mounted account surface of this engine shares one store. A version
+  // bump arrives for both the compact Switchboard selector and the footer panel,
+  // including the post-mutation confirmation that can follow an optimistic switch.
   useEffect(() => {
     if (identityVersion.current === accounts.identityVersion) return;
     identityVersion.current = accounts.identityVersion;
     onSwitched();
   }, [accounts.identityVersion, onSwitched]);
 
-  if (!codexEntryPointVisible(Boolean(limits), accounts.status)) return null;
+  if (!accountEntryPointVisible(Boolean(limits), accounts.status)) return null;
 
-  const tint = engineTintOf("codex");
-  const accountLimits = codexLimitsForActiveAccount({ codex: limits, codexAccountId }, accounts.active);
+  const tint = engineTintOf(engine);
+  const accountLimits = limitsForActiveAccount(limits, payloadAccountId, accounts.active);
   const identityPending = Boolean(limits && accountLimits === null);
   const hasWindows = Boolean(accountLimits && (accountLimits.session || accountLimits.weekly));
   const stale = accountLimits?.capturedAt && now - accountLimits.capturedAt > STALE_S ? fmtAge(accountLimits.capturedAt) : null;
-  const activeLabel = accounts.accounts.find((account) => account.id === accounts.active)?.label ?? t("accounts.trigger");
+  const activeAccount = accounts.accounts.find((account) => account.id === accounts.active);
+  const activeLabel = activeAccount?.label ?? t("accounts.trigger");
+  const effective = activeAccount?.effective;
+  const draining = accounts.migration?.state === "draining";
 
   return (
     <div ref={containerRef} className="relative">
@@ -266,20 +246,32 @@ function CodexLimitsBlock({
         type="button"
         aria-expanded={open}
         aria-haspopup="dialog"
-        aria-label={t("limits.accountsOpenAria")}
+        aria-label={t("accounts.triggerAria", { engine: label })}
         onClick={() => setOpen((value) => !value)}
         className={`block w-full px-3.5 pb-3 pt-2.5 text-left hover:bg-bg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${staleHint ? "opacity-60" : ""}`}
       >
         <div className="flex items-center gap-1.5">
-          <span className="text-[11.5px] font-bold" style={{ color: tint.color }}>Codex</span>
+          <span className="text-[11.5px] font-bold" style={{ color: tint.color }}>{label}</span>
           {accountLimits?.plan ? <span className="truncate text-[10px] text-dim">{accountLimits.plan}</span> : null}
           {staleHint ? <span className="truncate text-[10px] text-dim">{staleHint}</span> : null}
-          {stale ? (
-            <span className="h-1.5 w-1.5 shrink-0 self-center rounded-full bg-[#d29a2f]" title={t("limits.stale", { stale })} />
-          ) : null}
-          <span className="ml-auto flex shrink-0 items-center gap-0.5 rounded-full border border-line bg-bg px-1.5 py-0.5 text-[10px] font-semibold text-ink">
-            <span className="max-w-24 truncate">{activeLabel}</span>
-            <ChevronDown className="h-3 w-3 text-dim" aria-hidden />
+          {stale ? <span className="h-1.5 w-1.5 shrink-0 self-center rounded-full bg-[#d29a2f]" title={t("limits.stale", { stale })} /> : null}
+          <span className="ml-auto flex shrink-0 items-center gap-1">
+            {effective && effective.freshness !== "unavailable" ? (
+              <span
+                className={`rounded-full border border-line bg-bg px-1.5 py-0.5 text-[9.5px] font-bold tabular-nums ${effective.freshness === "stale" ? "opacity-55" : ""}`}
+                style={{ color: barColor(effective.percent, tint.color) }}
+              >
+                {t("accounts.effective", { pct: Math.round(effective.percent) })}
+              </span>
+            ) : null}
+            <span className="flex items-center gap-0.5 rounded-full border border-line bg-bg px-1.5 py-0.5 text-[10px] font-semibold text-ink">
+              <span className="max-w-24 truncate">{activeLabel}</span>
+              {draining ? (
+                <Loader2 className="h-3 w-3 animate-spin motion-reduce:animate-none text-accent" aria-hidden />
+              ) : (
+                <ChevronDown className="h-3 w-3 text-dim" aria-hidden />
+              )}
+            </span>
           </span>
         </div>
         {hasWindows ? (
@@ -291,13 +283,13 @@ function CodexLimitsBlock({
           <div className="mt-1.5 text-[10px] text-dim">{accounts.status === "loading" || identityPending ? t("limits.accountLoading") : t("limits.noDataYet")}</div>
         )}
       </button>
-      {open ? <CodexAccountsPanel state={accounts} onClose={close} /> : null}
+      {open ? <AccountsPanel state={accounts} onClose={close} /> : null}
     </div>
   );
 }
 
-/** Sidebar footer: Claude Code and Codex plan limits (5h session + weekly). The
-    Codex block is also the account switcher (see {@link CodexLimitsBlock}). */
+/** Sidebar footer: Claude and Codex plan limits (5h session + weekly). Each
+    block is also that engine's account switcher (see {@link EngineLimitsBlock}). */
 export function LimitsFooter() {
   const { locale } = useLocale();
   const [snap, setSnap] = useState<{ data: LimitsPayload; at: number } | null>(null);
@@ -321,18 +313,15 @@ export function LimitsFooter() {
     };
   }, []);
 
-  // The Codex account list governs switcher visibility. It remains mounted
-  // through empty limits, initial loading, and account refresh failures.
+  // Each engine's account list governs its switcher visibility. Both remain
+  // mounted through empty limits, initial loading, and account refresh failures.
+  const claudeStaleHint = snap ? fmtStaleSince(snap.data.provenance.claude.staleSince, locale) : null;
   const codexStaleHint = snap ? fmtStaleSince(snap.data.provenance.codex.staleSince, locale) : null;
   const now = snap?.at ?? 0;
   return (
     <div className="shrink-0 border-t border-line empty:hidden">
-      {snap?.data.claude ? (
-        <div className="px-3.5 pt-2.5">
-          <EngineBlock label="Claude" engine="claude" limits={snap.data.claude} now={now} provenance={snap.data.provenance.claude} />
-        </div>
-      ) : null}
-      <CodexLimitsBlock limits={snap?.data.codex ?? null} codexAccountId={snap?.data.codexAccountId ?? null} now={now} staleHint={codexStaleHint} onSwitched={invalidateLimits} />
+      <EngineLimitsBlock engine="claude" label="Claude" limits={snap?.data.claude ?? null} payloadAccountId={snap?.data.claudeAccountId ?? null} now={now} staleHint={claudeStaleHint} onSwitched={invalidateLimits} />
+      <EngineLimitsBlock engine="codex" label="Codex" limits={snap?.data.codex ?? null} payloadAccountId={snap?.data.codexAccountId ?? null} now={now} staleHint={codexStaleHint} onSwitched={invalidateLimits} />
     </div>
   );
 }

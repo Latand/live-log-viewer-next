@@ -3,6 +3,7 @@ import path from "node:path";
 
 import { statePath } from "@/lib/configDir";
 import { CODEX_SOL_MODEL, CODEX_TERRA_MODEL } from "@/lib/agent/models";
+import { agentRegistry, type AgentRegistry } from "@/lib/agent/registry";
 import type { RoleConfig } from "@/lib/flows/types";
 import { atomicWriteText } from "@/lib/flows/store";
 
@@ -216,10 +217,44 @@ export function loadWorkflows(): Workflow[] {
     pausedState: wf.pausedState ?? null,
     setupPid: wf.setupPid ?? null,
     srcPath: wf.srcPath ?? null,
+    srcConversationId: wf.srcConversationId ?? null,
     flowId: wf.flowId ?? null,
     fixerPath: wf.fixerPath ?? null,
+    fixerConversationId: wf.fixerConversationId ?? null,
+    stageRuns: wf.stageRuns.map((run) => ({ ...run, agentConversationId: run.agentConversationId ?? null })),
     prUrl: wf.prUrl ?? null,
   }));
+}
+
+export function reconcileWorkflowConversationOwnership(registry: AgentRegistry = agentRegistry()): void {
+  const workflows = loadWorkflows();
+  let dirty = false;
+  for (const workflow of workflows) {
+    if (workflow.srcConversationId?.startsWith("conversation_")) {
+      const current = registry.conversation(workflow.srcConversationId as `conversation_${string}`)?.generations.at(-1)?.path;
+      if (current && current !== workflow.srcPath) { workflow.srcPath = current; dirty = true; }
+    } else if (workflow.srcPath) {
+      const owner = registry.conversationForPath(workflow.srcPath);
+      if (owner) { workflow.srcConversationId = owner.id; dirty = true; }
+    }
+    if (workflow.fixerConversationId?.startsWith("conversation_")) {
+      const current = registry.conversation(workflow.fixerConversationId as `conversation_${string}`)?.generations.at(-1)?.path;
+      if (current && current !== workflow.fixerPath) { workflow.fixerPath = current; dirty = true; }
+    } else if (workflow.fixerPath) {
+      const owner = registry.conversationForPath(workflow.fixerPath);
+      if (owner) { workflow.fixerConversationId = owner.id; dirty = true; }
+    }
+    for (const run of workflow.stageRuns) {
+      if (run.agentConversationId?.startsWith("conversation_")) {
+        const current = registry.conversation(run.agentConversationId as `conversation_${string}`)?.generations.at(-1)?.path;
+        if (current && current !== run.agentPath) { run.agentPath = current; dirty = true; }
+      } else if (run.agentPath) {
+        const owner = registry.conversationForPath(run.agentPath);
+        if (owner) { run.agentConversationId = owner.id; dirty = true; }
+      }
+    }
+  }
+  if (dirty) saveWorkflows(workflows);
 }
 
 export function saveWorkflows(workflows: Workflow[]): void {
@@ -289,6 +324,7 @@ export function buildWorkflow(input: {
     stageRuns: input.template.stages.map((_, index) => ({
       index,
       agentPath: null,
+      agentConversationId: null,
       paneId: null,
       startedAt: null,
       doneAt: null,
@@ -297,12 +333,14 @@ export function buildWorkflow(input: {
     stageIndex: 0,
     flowId: null,
     fixerPath: null,
+    fixerConversationId: null,
     state: "provisioning",
     pausedState: null,
     stateDetail: null,
     mode: input.mode,
     setupPid: null,
     srcPath: null,
+    srcConversationId: null,
     prUrl: null,
     createdAt: input.now,
     closedAt: null,

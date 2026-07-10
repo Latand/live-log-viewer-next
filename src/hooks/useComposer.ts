@@ -11,7 +11,8 @@ import { useDictation } from "@/hooks/useDictation";
 const COMPOSER_MAX_PX = 160;
 
 export interface ComposerStatus {
-  kind: "ok" | "err";
+  /** `info` is a neutral/pending tone (e.g. a message held for a migration). */
+  kind: "ok" | "err" | "info";
   text: string;
 }
 

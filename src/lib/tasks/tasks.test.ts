@@ -212,6 +212,20 @@ describe("task reconciliation", () => {
     expect(result.tasks[0]?.assignments[0]?.at).toBe("new");
   });
 
+  test("stable conversation ownership routes assignments to the active generation", () => {
+    const tasks = [task({ assignments: [{ path: "/a", conversationId: "conversation_owner", panePid: null, state: "handoff", error: null, at: "old" }] })];
+    const result = reconcileTasks([], tasks, {
+      now: () => "new",
+      pathForConversationId: (conversationId) => conversationId === "conversation_owner" ? "/b" : null,
+    });
+    expect(result.tasks[0]?.assignments[0]).toMatchObject({
+      path: "/b",
+      conversationId: "conversation_owner",
+      state: "handoff",
+      at: "new",
+    });
+  });
+
   test("fills codex spawn path from pane attribution", () => {
     const tasks = [task({ assignments: [{ path: null, panePid: 42, state: "spawning", error: null, at: "old" }] })];
     const result = reconcileTasks([], tasks, {

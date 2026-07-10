@@ -4,6 +4,7 @@ let scans = 0;
 let scanOptions: unknown;
 
 mock.module("@/lib/scanner", () => ({
+  listFiles: async () => [],
   listFilesWithProjectCatalog: async (_project: string | undefined, options: unknown) => {
     scans += 1;
     scanOptions = options;

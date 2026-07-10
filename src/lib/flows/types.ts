@@ -33,6 +33,7 @@ export type ReviewVerdict = "APPROVE" | "REQUEST_CHANGES" | "COMMENT";
 export type Round = {
   n: number; // 1-based
   reviewerPath: string | null; // reviewer run's transcript path once known
+  reviewerConversationId?: string | null;
   /** Engine account frozen when this round starts; subsequent polling and retry
       must never silently adopt a newly selected active account. */
   accountId?: string | null;
@@ -68,6 +69,7 @@ export type Flow = {
   project: string; // FileEntry.project of the implementer
   cwd: string; // implementer's working directory
   implementerPath: string; // transcript path of the attached session
+  implementerConversationId?: string | null;
   roles: Record<FlowRoleKey, RoleConfig>;
   baseRef: string; // resolved git SHA captured at creation
   baseMode: "head" | "merge-base";

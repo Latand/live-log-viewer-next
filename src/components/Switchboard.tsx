@@ -11,6 +11,8 @@ import { useLocale } from "@/lib/i18n";
 import { cleanTitle } from "@/lib/title";
 import type { FileEntry } from "@/lib/types";
 
+import { conversationIdentity } from "@/lib/accounts/identity";
+
 import { projectKey } from "./projectModel";
 import { CornerStatus } from "./CornerStatus";
 import { CodexAccountSwitch } from "./CodexAccountSwitch";
@@ -55,8 +57,13 @@ function Section({
         <span className="text-[11px] font-semibold text-dim">{items.length}</span>
       </div>
       <FlipRow className="flex flex-wrap gap-2.5" enter="fade">
-        {items.map((item) => (
-          <div key={item.file.path} data-flip-key={item.file.path}>
+        {items.map((item) => {
+          /* Key by stable conversation identity, never the transcript path: a
+             migrated successor keeps its card (and its FlipRow position/animation)
+             instead of unmounting as the predecessor and remounting anew. */
+          const id = conversationIdentity(item.file);
+          return (
+          <div key={id} data-flip-key={id}>
             <SwitchCard
               file={item.file}
               title={item.title}
@@ -70,7 +77,8 @@ function Section({
               onArchive={onArchive}
             />
           </div>
-        ))}
+          );
+        })}
       </FlipRow>
     </section>
   );
@@ -194,7 +202,7 @@ export function Switchboard({ files, flows, project, loaded, onOpenFile }: Props
                     <div className="mt-2 space-y-1">
                       {archivedItems.map((item) => (
                         <div
-                          key={item.file.path}
+                          key={conversationIdentity(item.file)}
                           className="flex min-w-0 items-center gap-2 rounded-[8px] border border-line bg-panel/60 px-3 py-1.5 text-[11.5px] text-dim"
                         >
                           <span className="min-w-0 flex-1 truncate">{item.title}</span>

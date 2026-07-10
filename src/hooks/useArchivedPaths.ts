@@ -57,11 +57,20 @@ export function useArchivedPaths(files: FileEntry[]): UseArchivedPaths {
     if (!prev.size) return;
     const next = new Set(prev);
     for (const file of files) {
+      /* Account-migration succession (finding 6): an archived predecessor whose
+         card migrated hands its hidden state to the successor, so the migrated
+         card stays hidden instead of reappearing under the new account. */
+      if (file.predecessorPath && next.has(file.predecessorPath)) {
+        next.delete(file.predecessorPath);
+        next.add(file.path);
+      }
       /* A running process counts as activity even after its last turn ends
          (activity "recent", not "live"), so an idle-but-alive card unhides. */
       if (file.activity === "live" || file.proc === "running") next.delete(file.path);
     }
-    if (next.size === prev.size) return;
+    /* Membership, not just size, can change (a succession swaps one path for
+       another): compare contents so the carry-over persists. */
+    if (next.size === prev.size && [...next].every((path) => prev.has(path))) return;
     archivedRef.current = next;
     setArchivedPaths(next);
     writeStored(next);

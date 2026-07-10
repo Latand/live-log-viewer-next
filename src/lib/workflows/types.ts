@@ -45,6 +45,7 @@ export type WorkflowState =
 export type WorkflowStageRun = {
   index: number;
   agentPath: string | null; // transcript once known
+  agentConversationId?: string | null;
   paneId: string | null;
   startedAt: string | null;
   doneAt: string | null;
@@ -69,6 +70,7 @@ export type Workflow = {
   stageIndex: number;
   flowId: string | null; // embedded review Flow (W9)
   fixerPath: string | null;
+  fixerConversationId?: string | null;
   state: WorkflowState;
   /** The state to return to on resume/retry; set for paused and needs_decision. */
   pausedState: WorkflowState | null;
@@ -79,6 +81,7 @@ export type Workflow = {
   /** Transcript of the conversation that launched the workflow, when known;
       stage 0 gets linked under it as a handoff branch. */
   srcPath?: string | null;
+  srcConversationId?: string | null;
   prUrl: string | null; // finish=pr result
   createdAt: string;
   closedAt: string | null;

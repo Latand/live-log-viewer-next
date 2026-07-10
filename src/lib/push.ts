@@ -4,6 +4,7 @@ import path from "node:path";
 
 import { attentionId } from "@/components/attention";
 
+import { formatConversationHash } from "@/lib/accounts/identity";
 import { statePath } from "@/lib/configDir";
 
 import type { FileEntry } from "./types";
@@ -177,7 +178,9 @@ function payloadFor(entry: FileEntry): PushPayload {
   return {
     title: `${entry.title || "Agent"} · ${entry.engine}`,
     body: header,
-    url: `/#f=${encodeURIComponent(entry.path)}#question`,
+    // Canonical deep link: `#c=<conversationId>` when the entry carries a stable
+    // id (survives an account-migration succession), else the legacy `#f=<path>`.
+    url: `/${formatConversationHash(entry)}#question`,
   };
 }
 

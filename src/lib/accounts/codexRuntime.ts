@@ -240,6 +240,21 @@ export class ManagedCodexRuntime {
     }
   }
 
+  /** Request-safe in-memory projection. Authentication probes and persisted
+   * attempt transitions remain owned by the background controller. */
+  peekLogin(account: CodexAccount): ManagedLoginSnapshot {
+    if (account.kind !== "managed") return { state: account.authPresent ? "authenticated" : "idle", attemptState: null, deviceAuth: null };
+    const home = canonicalHome(account.home);
+    const active = this.active.get(home);
+    if (active?.state === "pending" && active.verificationUrl && active.userCode) {
+      return { state: "pending", attemptState: "pending", deviceAuth: { url: active.verificationUrl, code: active.userCode } };
+    }
+    const stored = this.records.get(home);
+    return stored
+      ? { state: stored.state, attemptState: stored.state, deviceAuth: null }
+      : { state: "idle", attemptState: null, deviceAuth: null };
+  }
+
   /** Reads a structured rate snapshot through an active login child when one exists. */
   async readRateLimits(account: CodexAccount): Promise<AppServerRateLimits> {
     const active = this.active.get(canonicalHome(account.home));
@@ -247,6 +262,12 @@ export class ManagedCodexRuntime {
     const client = await this.startClient(account.home);
     try { return await this.readRateLimitsFrom(client); }
     finally { client.close(); }
+  }
+
+  async verifyAuthentication(account: CodexAccount): Promise<boolean> {
+    const active = this.active.get(canonicalHome(account.home));
+    const status = await this.readAccount(active?.client ?? null, account.home);
+    return Boolean(status.account && !status.requiresOpenaiAuth);
   }
 
   private async readAccount(existing: CodexAppServerClient | null, home: string) {
