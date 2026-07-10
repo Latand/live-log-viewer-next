@@ -54,9 +54,9 @@ order:
 
 > **Legacy paths:** the config and cache directories moved from `live-log-viewer`
 > to `agent-log-viewer` (matching the package name). Files still under the old
-> `~/.config/live-log-viewer/…` and `~/.cache/live-log-viewer/…` locations are
-> read as a fallback when no `agent-log-viewer` copy exists, so existing setups
-> keep working unchanged.
+> `~/.config/live-log-viewer/…` and `~/.cache/live-log-viewer/…` locations remain
+> valid fallbacks when no `agent-log-viewer` copy exists. Updates keep using a
+> resolved legacy config or cache file, so existing setups continue unchanged.
 
 The cloud backends stay off the UI on purpose. There is no in-app toggle to
 enable ChatGPT or ElevenLabs transcription; each one turns on only when you set

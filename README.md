@@ -244,8 +244,9 @@ package:
 - `~/.cache/agent-log-viewer/whisper-venv` — the local transcription
   virtualenv.
 
-Legacy `live-log-viewer` paths are still honored as read-only fallbacks, so
-existing setups keep working without changes.
+Legacy `live-log-viewer` paths remain valid fallbacks. When a legacy config or
+cache file is the resolved existing file, subsequent updates keep using that
+same path so existing setups continue without a forced move.
 
 ## Architecture
 
