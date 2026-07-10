@@ -126,6 +126,8 @@ export interface FilesResponse {
   projectCatalog?: ProjectCatalogEntry[];
   flows: Flow[];
   pipelines: Pipeline[];
+  /** Present when the pipelines store failed closed; the rest of the payload stays valid. */
+  pipelinesError?: string;
   workflows: Workflow[];
   tasks: BoardTask[];
 }

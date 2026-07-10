@@ -5,6 +5,7 @@ import path from "node:path";
 import { statePath } from "@/lib/configDir";
 import { isEngineEffort } from "@/lib/agent/efforts";
 import { normalizeClaudeLaunchModel } from "@/lib/agent/models";
+import { MAX_SCAFFOLD_LENGTH } from "@/lib/roles/store";
 
 import type { EffectivePipelineRole, Pipeline, PipelineStage } from "./types";
 import { stageVerdictFrom } from "./verdict";
@@ -49,7 +50,7 @@ function isEffectiveRole(value: unknown): value is EffectivePipelineRole {
   return (
     (role.roleId === null || PIPELINE_ROLE_IDS.includes(role.roleId as typeof PIPELINE_ROLE_IDS[number])) &&
     (role.access === "read-only" || role.access === "read-write") &&
-    (role.promptScaffold === null || (typeof role.promptScaffold === "string" && role.promptScaffold.length <= 12_000))
+    (role.promptScaffold === null || (typeof role.promptScaffold === "string" && role.promptScaffold.length <= MAX_SCAFFOLD_LENGTH))
   );
 }
 

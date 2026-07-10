@@ -12,8 +12,12 @@ import type { ApiError } from "@/lib/types";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-export async function GET(): Promise<NextResponse<PipelinesResponse>> {
-  return NextResponse.json(getPipelines());
+export async function GET(): Promise<NextResponse<PipelinesResponse | ApiError>> {
+  try {
+    return NextResponse.json(getPipelines());
+  } catch (error) {
+    return NextResponse.json({ error: error instanceof Error ? error.message : "pipeline registry unreadable" }, { status: 500 });
+  }
 }
 export async function POST(req: NextRequest): Promise<NextResponse<{ ok: true; pipeline: Pipeline } | ApiError>> {
   const rejection = rejectCrossOrigin(req);

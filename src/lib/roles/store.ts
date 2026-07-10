@@ -10,6 +10,10 @@ import type { RoleDefinition, RoleId, RoleOverride, RoleOverridesFile } from "./
 
 export const ROLE_OVERRIDES_SCHEMA_VERSION = 1;
 
+/** Hard cap for any persisted prompt scaffold, shared with the pipeline store
+    so a value that saves is always a value that loads. */
+export const MAX_SCAFFOLD_LENGTH = 12_000;
+
 export class RoleStoreError extends Error {
   constructor(message: string, options?: ErrorOptions) {
     super(message, options);
@@ -34,7 +38,7 @@ function isOverride(value: unknown): value is RoleOverride {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   if (Object.keys(value).some((key) => key !== "config" && key !== "promptScaffold")) return false;
   const override = value as RoleOverride;
-  if (override.promptScaffold !== undefined && (typeof override.promptScaffold !== "string" || override.promptScaffold.length > 12_000)) return false;
+  if (override.promptScaffold !== undefined && (typeof override.promptScaffold !== "string" || override.promptScaffold.length > MAX_SCAFFOLD_LENGTH)) return false;
   if (override.config !== undefined) {
     if (!override.config || typeof override.config !== "object" || Array.isArray(override.config)) return false;
     if (Object.keys(override.config).some((key) => key !== "engine" && key !== "model" && key !== "effort")) return false;
@@ -103,4 +107,17 @@ export function mergeRoleDefinitions(overrides: Partial<Record<RoleId, RoleOverr
 
 export function loadRoleDefinitions(): RoleDefinition[] {
   return mergeRoleDefinitions(loadRoleOverrides().overrides);
+}
+
+/** Seed catalogs must stay renderable when the overrides file fails closed
+    (hand edit, or schema skew between viewer versions sharing one config
+    dir) — they degrade to the built-in role defaults instead of taking the
+    importing module down with them. */
+export function loadRoleDefinitionsOrDefaults(): RoleDefinition[] {
+  try {
+    return loadRoleDefinitions();
+  } catch (error) {
+    console.warn("[roles] override registry unreadable; falling back to built-in defaults", error);
+    return mergeRoleDefinitions({});
+  }
 }

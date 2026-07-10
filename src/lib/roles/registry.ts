@@ -8,10 +8,6 @@ type ExplicitRoleConfig = Partial<RoleConfig>;
 type RoleResolution = { ok: true; value: ResolvedRole } | { ok: false; error: string };
 type SpawnRoleResolution = { ok: true; value: { config: RoleConfig; scaffold: string; role: RoleId } | null } | { ok: false; error: string };
 
-function isRoleId(value: string): value is RoleId {
-  return loadRoleDefinitions().some((role) => role.id === value);
-}
-
 function boundedText(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const text = value.trim();
@@ -77,9 +73,9 @@ function resolveConfig(definition: RoleDefinition, params: RoleParamValues, expl
   return { ok: true, value: config };
 }
 
-export function resolveRole(role: string, params: unknown = {}, explicit: ExplicitRoleConfig = {}): RoleResolution {
-  if (!isRoleId(role)) return { ok: false, error: "unknown role" };
-  const definition = loadRoleDefinitions().find((candidate) => candidate.id === role)!;
+export function resolveRole(role: string, params: unknown = {}, explicit: ExplicitRoleConfig = {}, definitions: RoleDefinition[] = loadRoleDefinitions()): RoleResolution {
+  const definition = definitions.find((candidate) => candidate.id === role);
+  if (!definition) return { ok: false, error: "unknown role" };
   const parsedParams = validateParams(definition, params);
   if (!parsedParams.ok) return parsedParams;
   const config = resolveConfig(definition, parsedParams.value, explicit);

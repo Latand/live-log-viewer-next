@@ -8,7 +8,7 @@ import { AgentRegistry } from "@/lib/agent/registry";
 /* The state dir must point at a sandbox before store.ts computes its
    module-level constants, so the store loads dynamically after the env set. */
 process.env.LLV_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "llv-wf-store-test-"));
-const { buildWorkflow, DEFAULT_FIXER, loadTemplates, loadWorkflows, mergeSeededTemplates, normalizeStages, normalizeTemplate, reconcileWorkflowConversationOwnership, roleConfigFromReference, saveWorkflows, seededTemplatesFromRoles } =
+const { buildWorkflow, defaultFixerFromRoles, loadTemplates, loadWorkflows, mergeSeededTemplates, normalizeStages, normalizeTemplate, reconcileWorkflowConversationOwnership, roleConfigFromReference, saveWorkflows, seededTemplatesFromRoles } =
   await import("./store");
 
 type WorkflowTemplate = import("./types").WorkflowTemplate;
@@ -56,7 +56,7 @@ test("normalizeStages injects the codex-low fixer default and review defaults", 
   if ("error" in res) throw new Error(res.error);
   const review = res.stages[1]!;
   if (review.kind !== "review-loop") throw new Error("expected review stage");
-  expect(review.fixer).toEqual(DEFAULT_FIXER);
+  expect(review.fixer).toEqual(defaultFixerFromRoles());
   expect(review.roundLimit).toBe(5);
   expect(review.reviewerMode).toBe("headless");
 });
@@ -66,7 +66,7 @@ test("fixer overrides keep the W5 contract: always codex at low effort", () => {
   if ("error" in claudeFixer) throw new Error(claudeFixer.error);
   const claudeStage = claudeFixer.stages[1]!;
   if (claudeStage.kind !== "review-loop") throw new Error("expected review stage");
-  expect(claudeStage.fixer).toEqual(DEFAULT_FIXER);
+  expect(claudeStage.fixer).toEqual(defaultFixerFromRoles());
 
   /* A codex fixer may pick its model; the effort still clamps to low. */
   const codexFixer = normalizeStages([IMPLEMENT, { ...REVIEW, fixer: { engine: "codex", model: "gpt-5.5", effort: "xhigh" } }]);
@@ -255,4 +255,19 @@ test("buildWorkflow freezes the template: later template mutation stays invisibl
   const frozen = wf.template.stages[0]!;
   expect(frozen.kind === "implement" && frozen.scope).toBe("Backend/API");
   expect(wf.template.name).toBe("demo");
+});
+
+test("seed templates and the fixer default survive an unreadable role overrides file", () => {
+  const previous = process.env.LLV_STATE_DIR;
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-wf-seed-corrupt-"));
+  process.env.LLV_STATE_DIR = sandbox;
+  try {
+    fs.writeFileSync(path.join(sandbox, "role-presets.json"), "{", "utf8");
+    expect(seededTemplatesFromRoles().length).toBeGreaterThan(0);
+    expect(defaultFixerFromRoles()).toMatchObject({ engine: "codex", effort: "low" });
+  } finally {
+    if (previous === undefined) delete process.env.LLV_STATE_DIR;
+    else process.env.LLV_STATE_DIR = previous;
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  }
 });

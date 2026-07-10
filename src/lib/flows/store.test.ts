@@ -148,3 +148,19 @@ test("flow bindings follow active conversation generations", () => {
     fs.rmSync(sandbox, { recursive: true, force: true });
   }
 });
+
+test("seed presets survive an unreadable role overrides file", () => {
+  const previous = process.env.LLV_STATE_DIR;
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-flow-seed-corrupt-"));
+  process.env.LLV_STATE_DIR = sandbox;
+  try {
+    fs.writeFileSync(path.join(sandbox, "role-presets.json"), "{", "utf8");
+    expect(seededPresetsFromRoles().find((preset) => preset.name === "Sol medium → Sol xhigh")).toMatchObject({
+      implementer: { engine: "codex", model: CODEX_SOL_MODEL, effort: "medium" },
+    });
+  } finally {
+    if (previous === undefined) delete process.env.LLV_STATE_DIR;
+    else process.env.LLV_STATE_DIR = previous;
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  }
+});

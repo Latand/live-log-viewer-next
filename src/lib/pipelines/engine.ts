@@ -23,7 +23,7 @@ import { realExec, type ExecPort } from "@/lib/workflows/provision";
 import { commitPipelineStage, provisionPipelineWorktree, resetPipelineStage } from "./git";
 import { renderStagePrompt } from "./prompts";
 import { pipelineRoleLookup, resolvePipelineRole, type PipelineRoleLookup } from "./roles";
-import { buildPipeline, loadPipelines, withPipelineMutation } from "./store";
+import { buildPipeline, loadPipelines, PipelineStoreError, withPipelineMutation } from "./store";
 import type {
   CreatePipelineRequest,
   EffectivePipelineRole,
@@ -261,7 +261,7 @@ function park(pipeline: Pipeline, detail: string, attempt?: PipelineStageAttempt
   if (attempt && attempt.state !== "failed") attempt.state = "needs_decision";
   if (attempt) attempt.error = detail;
   pipeline.state = "needs_decision";
-  pipeline.pausedState = "running";
+  pipeline.pausedState = null;
   pipeline.stateDetail = detail;
 }
 
@@ -602,7 +602,7 @@ async function tickPipeline(pipeline: Pipeline, entries: FileEntry[], ports: Pip
 const tickStore = globalThis as unknown as { __llvPipelineTick?: boolean };
 
 export async function tickPipelines(entries: FileEntry[], ports: PipelinePorts = defaultPipelinePorts()): Promise<{ pipelines: Pipeline[]; changed: boolean }> {
-  if (tickStore.__llvPipelineTick) return { pipelines: loadPipelines(), changed: false };
+  if (tickStore.__llvPipelineTick) return { pipelines: [], changed: false };
   tickStore.__llvPipelineTick = true;
   try {
     return await withPipelineMutation(async (pipelines, persist) => {
@@ -615,6 +615,13 @@ export async function tickPipelines(entries: FileEntry[], ports: PipelinePorts =
       if (changed) persist();
       return { pipelines, changed };
     });
+  } catch (error) {
+    /* The store fails closed on malformed state, but this tick runs inside
+       the shared reconcile pass — flows, workflows, and the task inbox must
+       keep ticking when only the pipelines registry is unreadable. */
+    if (!(error instanceof PipelineStoreError)) throw error;
+    console.error("[pipelines] skipping tick; registry unreadable", error);
+    return { pipelines: [], changed: false };
   } finally {
     tickStore.__llvPipelineTick = false;
   }
@@ -705,6 +712,20 @@ export async function createPipelineFromRequest(
   });
 }
 
+/** A park without a verdict (interrupted spawn, vanished transcript) can
+    leave the stage agent mid-turn in its pane; retry/skip would reset the
+    worktree under it and the next passed stage would commit its strays. An
+    attempt that produced a verdict finished its turn — an idle interactive
+    CLI in the pane is safe to leave behind. */
+async function orphanAgentPane(
+  attempt: PipelineStageAttempt | null,
+  ports: PipelinePorts,
+): Promise<{ error: string; status: number } | null> {
+  if (!attempt || attempt.verdict || !attempt.paneId) return null;
+  if (!(await ports.paneAgentAlive(attempt.paneId))) return null;
+  return { error: `stage agent may still be running in pane ${attempt.paneId}; wait for it to exit or kill the pane first`, status: 409 };
+}
+
 export async function patchPipeline(
   id: string,
   req: PatchPipelineRequest,
@@ -732,6 +753,8 @@ export async function patchPipeline(
       if (flow?.state === "paused") ports.patchFlow(flow.id, "resume");
     } else if (req.action === "retry-stage") {
       if (pipeline.state !== "needs_decision") return { error: "pipeline does not have a stage awaiting retry", status: 409 };
+      const orphan = await orphanAgentPane(attempt, ports);
+      if (orphan) return orphan;
       if (flow && flow.state !== "closed") await ports.closeFlow(flow.id);
       if (pipeline.lastPassedCommit) {
         const reset = resetPipelineStage(pipeline, ports.exec);
@@ -745,6 +768,8 @@ export async function patchPipeline(
       pipeline.stateDetail = null;
     } else if (req.action === "skip-stage") {
       if (pipeline.state !== "needs_decision" || !stage) return { error: "pipeline does not have a stage awaiting a decision", status: 409 };
+      const orphan = await orphanAgentPane(attempt, ports);
+      if (orphan) return orphan;
       if (flow && flow.state !== "closed") await ports.closeFlow(flow.id);
       if (!pipeline.lastPassedCommit) return { error: "pipeline worktree has not been provisioned", status: 409 };
       const reset = resetPipelineStage(pipeline, ports.exec);

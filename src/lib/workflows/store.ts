@@ -5,8 +5,9 @@ import { statePath } from "@/lib/configDir";
 import { agentRegistry, type AgentRegistry } from "@/lib/agent/registry";
 import type { RoleConfig } from "@/lib/flows/types";
 import { atomicWriteText } from "@/lib/flows/store";
-import { listRoles, resolveRole } from "@/lib/roles/registry";
-import type { RoleConfig as RegistryRoleConfig } from "@/lib/roles/types";
+import { resolveRole } from "@/lib/roles/registry";
+import { loadRoleDefinitionsOrDefaults } from "@/lib/roles/store";
+import type { RoleConfig as RegistryRoleConfig, RoleDefinition } from "@/lib/roles/types";
 
 import type { FinishAction, ImplementStage, ReviewStage, Workflow, WorkflowStage, WorkflowTemplate } from "./types";
 
@@ -15,9 +16,9 @@ const TEMPLATES_FILE = statePath("workflow-templates.json");
 const ARTIFACT_DIR = statePath("workflows");
 
 /** The hard fixer default (W5): Terra supplies fast hands for applying findings. */
-function registryRole(role: "builder" | "reviewer" | "architect" | "cleaner", params: Record<string, string> = {}): RoleConfig {
-  if (role !== "builder") return { ...listRoles().find((candidate) => candidate.id === role)!.config };
-  const resolved = resolveRole(role, params);
+function registryRole(role: "builder" | "reviewer" | "architect" | "cleaner", params: Record<string, string> = {}, definitions: RoleDefinition[] = loadRoleDefinitionsOrDefaults()): RoleConfig {
+  if (role !== "builder") return { ...definitions.find((candidate) => candidate.id === role)!.config };
+  const resolved = resolveRole(role, params, {}, definitions);
   if (!resolved.ok) throw new Error(resolved.error);
   return { ...resolved.value.config };
 }
@@ -26,8 +27,6 @@ function registryRole(role: "builder" | "reviewer" | "architect" | "cleaner", pa
 export function defaultFixerFromRoles(): RoleConfig {
   return { ...registryRole("cleaner"), effort: "low" };
 }
-
-export const DEFAULT_FIXER: RoleConfig = defaultFixerFromRoles();
 
 /* The user's canonical template (design doc example), seeded on first load
    the way flow presets are. */
@@ -85,10 +84,11 @@ const PRE_ROLE_SEEDED_TEMPLATES: WorkflowTemplate[] = [
 ];
 
 export function seededTemplatesFromRoles(): WorkflowTemplate[] {
-  const builder = registryRole("builder");
-  const frontendBuilder = registryRole("builder", { mode: "plain", domain: "frontend" });
-  const reviewer = registryRole("reviewer");
-  const fixer = defaultFixerFromRoles();
+  const definitions = loadRoleDefinitionsOrDefaults();
+  const builder = registryRole("builder", {}, definitions);
+  const frontendBuilder = registryRole("builder", { mode: "plain", domain: "frontend" }, definitions);
+  const reviewer = registryRole("reviewer", {}, definitions);
+  const fixer = { ...registryRole("cleaner", {}, definitions), effort: "low" };
   const templates: WorkflowTemplate[] = [
   {
     name: "fullstack",
@@ -137,9 +137,6 @@ export function seededTemplatesFromRoles(): WorkflowTemplate[] {
   ];
   return templates.map((template) => ({ ...template, managed: "role-registry" }));
 }
-
-/** Compatibility export for initial template renderers. */
-export const SEEDED_TEMPLATES: WorkflowTemplate[] = seededTemplatesFromRoles();
 
 type WorkflowFile = { workflows?: unknown };
 type TemplateFile = { templates?: unknown };
@@ -196,7 +193,7 @@ function implementStageOf(value: Partial<ImplementStage>): ImplementStage | null
     collapses to the default. */
 function normalizeFixer(value: unknown): RoleConfig {
   const role = roleOf(value);
-  if (!role || role.engine !== "codex") return { ...DEFAULT_FIXER };
+  if (!role || role.engine !== "codex") return defaultFixerFromRoles();
   return { engine: "codex", model: role.model, effort: "low" };
 }
 

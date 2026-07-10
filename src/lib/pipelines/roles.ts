@@ -1,4 +1,5 @@
 import { listRoles } from "@/lib/roles/registry";
+import { MAX_SCAFFOLD_LENGTH } from "@/lib/roles/store";
 import { isEngineEffort } from "@/lib/agent/efforts";
 import { normalizeClaudeLaunchModel } from "@/lib/agent/models";
 
@@ -39,12 +40,16 @@ export const pipelineRoleLookup: PipelineRoleLookup = (roleId) => {
   if (!definition) return null;
   const parameters = Object.fromEntries(definition.parameters.map((parameter) => [parameter.key, defaultParameterValue(parameter)]));
   const scaffold = definition.promptScaffold.replace(/\{\{([A-Za-z][A-Za-z0-9]*)\}\}/g, (_match, key: string) => String(parameters[key] ?? ""));
+  /* A near-limit override scaffold plus appended fences must still fit the
+     store's persistence cap, or the created pipeline could never load back.
+     Fences are never truncated; the scaffold body yields the room instead. */
+  const fences = definition.safetyFences.length
+    ? `\n\nSafety fences:\n${definition.safetyFences.map((fence) => `- ${fence}`).join("\n")}`
+    : "";
   return {
     ...definition.config,
     access: definition.capabilities.includes("read-only") ? "read-only" : "read-write",
-    promptScaffold: definition.safetyFences.length
-      ? `${scaffold}\n\nSafety fences:\n${definition.safetyFences.map((fence) => `- ${fence}`).join("\n")}`
-      : scaffold,
+    promptScaffold: `${scaffold.slice(0, MAX_SCAFFOLD_LENGTH - fences.length)}${fences}`,
   };
 };
 

@@ -400,3 +400,33 @@ test("skip-stage cleans failed work before advancing", async () => {
   expect(h.calls.some((call) => call.includes("reset --hard"))).toBe(true);
   expect(h.calls.some((call) => call.includes("clean -fd"))).toBe(true);
 });
+
+test("a corrupt pipelines registry skips the tick without escalating", async () => {
+  const h = harness();
+  await create(h.ports);
+  const file = path.join(process.env.LLV_STATE_DIR!, "pipelines.json");
+  fs.writeFileSync(file, "{", "utf8");
+  expect(await tickPipelines([], h.ports)).toEqual({ pipelines: [], changed: false });
+  expect(fs.readFileSync(file, "utf8")).toBe("{");
+  savePipelines([]);
+});
+
+test("retry and skip refuse while a verdict-less parked stage still hosts a live agent", async () => {
+  const h = harness();
+  const pipeline = await create(h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  h.messages.set("/codex/stage-1.jsonl", { text: "narrative without a JSON verdict", ts: 2_000_000 });
+  await tickPipelines([entry("/codex/stage-1.jsonl")], h.ports);
+  expect(loadPipelines()[0]!.state).toBe("needs_decision");
+
+  const blockedRetry = await patchPipeline(pipeline.id, { action: "retry-stage" }, h.ports);
+  expect(blockedRetry.status).toBe(409);
+  expect(blockedRetry.error).toContain("still be running");
+  const blockedSkip = await patchPipeline(pipeline.id, { action: "skip-stage" }, h.ports);
+  expect(blockedSkip.status).toBe(409);
+
+  h.setPaneAlive(false);
+  const retried = await patchPipeline(pipeline.id, { action: "retry-stage" }, h.ports);
+  expect(retried.pipeline?.state).toBe("running");
+});

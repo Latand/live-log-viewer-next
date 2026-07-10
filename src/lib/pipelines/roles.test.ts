@@ -1,4 +1,9 @@
 import { expect, test } from "bun:test";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
+import { MAX_SCAFFOLD_LENGTH, saveRoleOverrides } from "@/lib/roles/store";
 
 import { pipelineRoleLookup, resolvePipelineRole } from "./roles";
 
@@ -95,4 +100,20 @@ test("review-loop roles default to read-only access", () => {
 
 test("role references stay inside the eight-role registry", () => {
   expect(resolvePipelineRole({ role: { roleId: "implementer" } } as never, "run", null).error).toBe("unknown pipeline role: implementer");
+});
+
+test("a near-limit override scaffold composes with fences inside the store cap", () => {
+  const previous = process.env.LLV_STATE_DIR;
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-pipeline-roles-cap-"));
+  process.env.LLV_STATE_DIR = sandbox;
+  try {
+    saveRoleOverrides({ reviewer: { promptScaffold: "x".repeat(MAX_SCAFFOLD_LENGTH) } });
+    const resolved = pipelineRoleLookup("reviewer");
+    expect(resolved?.promptScaffold?.length).toBeLessThanOrEqual(MAX_SCAFFOLD_LENGTH);
+    expect(resolved?.promptScaffold).toContain("Safety fences:");
+  } finally {
+    if (previous === undefined) delete process.env.LLV_STATE_DIR;
+    else process.env.LLV_STATE_DIR = previous;
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  }
 });

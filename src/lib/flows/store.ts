@@ -4,7 +4,9 @@ import path from "node:path";
 
 import { statePath } from "@/lib/configDir";
 import { agentRegistry, type AgentRegistry } from "@/lib/agent/registry";
-import { listRoles, resolveRole } from "@/lib/roles/registry";
+import { resolveRole } from "@/lib/roles/registry";
+import { loadRoleDefinitionsOrDefaults } from "@/lib/roles/store";
+import type { RoleDefinition } from "@/lib/roles/types";
 
 import type { Flow, FlowPreset, ReviewVerdict } from "./types";
 
@@ -50,19 +52,20 @@ const PRE_ROLE_SEEDED_PRESETS: FlowPreset[] = [
   { name: "Sonnet → Sol xhigh", implementer: { engine: "claude", model: "sonnet", effort: null }, reviewer: { engine: "codex", model: "gpt-5.6-sol", effort: "xhigh" } },
 ];
 
-function flowRole(role: "builder" | "reviewer" | "architect", params: Record<string, string> = {}): FlowPreset["implementer"] {
-  if (role !== "builder") return { ...listRoles().find((candidate) => candidate.id === role)!.config };
-  const resolved = resolveRole(role, params);
+function flowRole(definitions: RoleDefinition[], role: "builder" | "reviewer" | "architect", params: Record<string, string> = {}): FlowPreset["implementer"] {
+  if (role !== "builder") return { ...definitions.find((candidate) => candidate.id === role)!.config };
+  const resolved = resolveRole(role, params, {}, definitions);
   if (!resolved.ok) throw new Error(resolved.error);
   return { ...resolved.value.config };
 }
 
 /** Managed seed profiles resolve from the role registry on every load. */
 export function seededPresetsFromRoles(): FlowPreset[] {
-  const builder = flowRole("builder");
-  const fixer = flowRole("builder", { mode: "apply-fixes", domain: "general" });
-  const reviewer = flowRole("reviewer");
-  const architect = flowRole("architect");
+  const definitions = loadRoleDefinitionsOrDefaults();
+  const builder = flowRole(definitions, "builder");
+  const fixer = flowRole(definitions, "builder", { mode: "apply-fixes", domain: "general" });
+  const reviewer = flowRole(definitions, "reviewer");
+  const architect = flowRole(definitions, "architect");
   const presets: FlowPreset[] = [
     { name: "Sol medium → Sol xhigh", implementer: builder, reviewer },
     { name: "Terra low → Sol xhigh", implementer: fixer, reviewer },
@@ -72,9 +75,6 @@ export function seededPresetsFromRoles(): FlowPreset[] {
   ];
   return presets.map((preset) => ({ ...preset, managed: "role-registry" }));
 }
-
-/** Compatibility export for consumers that render the initial seed list. */
-export const SEEDED_PRESETS: FlowPreset[] = seededPresetsFromRoles();
 
 export const FLOWS_SCHEMA_VERSION = 2;
 

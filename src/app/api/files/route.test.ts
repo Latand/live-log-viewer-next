@@ -16,8 +16,9 @@ mock.module("@/lib/scanner", () => ({
     return { files: scannedFiles, projectCatalog: [] };
   },
 }));
+let pipelinesStore: () => unknown[] = () => [];
 mock.module("@/lib/flows/store", () => ({ loadFlows: () => [] }));
-mock.module("@/lib/pipelines/store", () => ({ loadPipelines: () => [] }));
+mock.module("@/lib/pipelines/store", () => ({ loadPipelines: () => pipelinesStore() }));
 mock.module("@/lib/pipelines/visibility", () => ({ filterPipelinesForFileScan: () => [] }));
 mock.module("@/lib/tasks/store", () => ({
   loadTasks: () => [],
@@ -97,4 +98,18 @@ test("spawn-time lineage keeps the child grouped after its tmux host disappears"
 
   expect(child?.parent).toBe(parentPath);
   expect(child?.conversationId).toBe(begun.receipt.conversationId);
+});
+
+test("an unreadable pipelines store degrades to pipelinesError without failing the poll", async () => {
+  scannedFiles = [];
+  pipelinesStore = () => { throw new Error("pipeline registry contains malformed records"); };
+  try {
+    const response = await GET(new Request("http://127.0.0.1/api/files"));
+    expect(response.status).toBe(200);
+    const body = await response.json() as { files: unknown[]; pipelines: unknown[]; pipelinesError?: string };
+    expect(body.pipelines).toEqual([]);
+    expect(body.pipelinesError).toContain("malformed records");
+  } finally {
+    pipelinesStore = () => [];
+  }
 });

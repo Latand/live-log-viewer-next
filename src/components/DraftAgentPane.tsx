@@ -194,6 +194,8 @@ export function DraftAgentPane({
     setRoleParams(next);
     const selected = roles.find((role) => role.id === roleId);
     if (selected?.id !== "builder") return;
+    /* The frontend/apply-fixes routing mirrors configForParams in
+       src/lib/roles/registry.ts — the server re-derives it on spawn. */
     if (next.domain === "frontend") {
       setEngine("claude");
       setModel("opus");
@@ -207,9 +209,11 @@ export function DraftAgentPane({
       setEffort("low");
       return;
     }
-    setEngine("codex");
-    setModel("gpt-5.6-sol");
-    setEffort("medium");
+    /* Plain mode returns to the registry's builder config so operator
+       overrides in role-presets.json survive parameter changes. */
+    setEngine(selected.config.engine);
+    setModel(selected.config.model);
+    setEffort(selected.config.effort);
   };
   const setDeployConfirm = (value: string) => {
     setDeployConfirmState(value);
