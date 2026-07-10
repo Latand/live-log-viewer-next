@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { HistorySecurityError, safeCopyHistory } from "./safeHistoryCopy";
+import { HistorySecurityError, safeCopyHistory, safeProviderDiagnostic } from "./safeHistoryCopy";
 
 const roots: string[] = [];
 
@@ -24,6 +24,18 @@ afterEach(() => {
 });
 
 describe("safe history copy", () => {
+  test("provider diagnostics redact credential-shaped details and ignore opaque values", () => {
+    const diagnostic = safeProviderDiagnostic(new Error("access_token=secret-value bearer hidden-value api_key=another-secret"));
+    expect(diagnostic).toEqual({
+      type: "Error",
+      message: "access_token=[REDACTED] bearer [REDACTED] api_key=[REDACTED]",
+    });
+    expect(safeProviderDiagnostic({ refresh_token: "never-serialize-me" })).toEqual({
+      type: "object",
+      message: "provider failed without an Error detail",
+    });
+  });
+
   test("accepts owner-controlled 0755 directory trees and rejects writable peer roots", () => {
     const f = fixture();
     const year = path.join(f.sourceRoot, "2026");

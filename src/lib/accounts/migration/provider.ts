@@ -143,7 +143,9 @@ export class RegisteredSuccessorProvider implements SuccessorProviderPort {
     const client = await this.dependencies.startCodex(target.home);
     try {
       const account = await client.readAccount();
-      if (!account.account || account.requiresOpenaiAuth) throw new Error("target Codex account is not authenticated");
+      // Authenticated ChatGPT responses carry requiresOpenaiAuth=true because
+      // the field describes the active provider's credential requirement.
+      if (!account.account) throw new Error("target Codex account is not authenticated");
       const thread = await client.readThread(receipt.nativeId);
       if (thread.id !== receipt.nativeId) throw new Error("target Codex thread identity does not match");
     } finally { client.close(); }
@@ -177,7 +179,7 @@ export class RegisteredSuccessorProvider implements SuccessorProviderPort {
     let fork: Awaited<ReturnType<CodexAppServerClient["forkThread"]>>;
     try {
       const account = await sourceClient.readAccount();
-      if (!account.account || account.requiresOpenaiAuth) throw new Error("source Codex account is not authenticated");
+      if (!account.account) throw new Error("source Codex account is not authenticated");
       fork = await sourceClient.forkThread(sourceNativeId);
     } finally { sourceClient.close(); }
     const sourceFork = fork.path ?? findCodexRollout(source.transcriptRoot, fork.id);
@@ -192,7 +194,7 @@ export class RegisteredSuccessorProvider implements SuccessorProviderPort {
     const targetClient = await this.dependencies.startCodex(target.home);
     try {
       const account = await targetClient.readAccount();
-      if (!account.account || account.requiresOpenaiAuth) throw new Error("target Codex account is not authenticated");
+      if (!account.account) throw new Error("target Codex account is not authenticated");
       const approvalPolicy = profile.permissionMode && ["never", "on-request", "untrusted"].includes(profile.permissionMode)
         ? profile.permissionMode
         : null;

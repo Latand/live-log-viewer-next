@@ -118,7 +118,7 @@ test("unknown Claude transcript model omits the successor override", async () =>
   expect(command).not.toContain("--model");
 });
 
-test("Codex successor provider accepts standard 0755 account roots and migrates through app-server ports", async () => {
+test("Codex successor provider accepts authenticated ChatGPT account responses and standard 0755 roots", async () => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), "llv-provider-codex-"));
   roots.push(base);
   const source = accountRoot("codex", base, "source");
@@ -132,8 +132,9 @@ test("Codex successor provider accepts standard 0755 account roots and migrates 
   const calls: string[] = [];
   let resumeOptions: unknown = null;
   let goalOptions: unknown = null;
+  let appServerAccount: { type: string } | null = { type: "chatgpt" };
   const client = (home: string) => ({
-    async readAccount() { calls.push(`${path.basename(home)}:account`); return { account: { type: "chatgpt" }, requiresOpenaiAuth: false }; },
+    async readAccount() { calls.push(`${path.basename(home)}:account`); return { account: appServerAccount, requiresOpenaiAuth: true }; },
     async forkThread() { calls.push("source:fork"); fs.writeFileSync(forkPath, "{\"type\":\"session_meta\"}\n", { mode: 0o644 }); return { id: forkId, path: forkPath }; },
     async resumeThread(id: string, options: unknown) { calls.push("target:resume"); resumeOptions = options; return { id, path: null }; },
     async readThread(id: string) { calls.push("target:read"); return { id, path: null }; },
@@ -167,4 +168,7 @@ test("Codex successor provider accepts standard 0755 account roots and migrates 
   expect(goalOptions).toEqual({ objective: "Ship", status: "active" });
   await provider.verify(receipt, { engine: "codex", targetAccountId: "target", launchProfile: profile });
   expect(calls.filter((call) => call === "target:read").length).toBeGreaterThanOrEqual(2);
+  appServerAccount = null;
+  await expect(provider.verify(receipt, { engine: "codex", targetAccountId: "target", launchProfile: profile }))
+    .rejects.toThrow("target Codex account is not authenticated");
 });

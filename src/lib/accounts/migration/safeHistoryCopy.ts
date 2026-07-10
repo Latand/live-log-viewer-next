@@ -2,6 +2,8 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
+import { redactAppServerDetail } from "../codexAppServerProtocol";
+
 export const DEFAULT_HISTORY_LIMIT = 512 * 1024 * 1024;
 
 export type HistorySecurityCode =
@@ -190,6 +192,19 @@ export interface SafeHistoryCopyInput {
 }
 
 export interface SafeHistoryCopyResult { path: string; hash: string; size: number; reused: boolean }
+
+export interface SafeProviderDiagnostic { type: string; message: string }
+
+/** Preserves actionable server detail while keeping routes and registry state generic. */
+export function safeProviderDiagnostic(error: unknown): SafeProviderDiagnostic {
+  if (error instanceof Error) {
+    return {
+      type: redactAppServerDetail(error.name || "Error"),
+      message: redactAppServerDetail(error.message),
+    };
+  }
+  return { type: typeof error, message: "provider failed without an Error detail" };
+}
 
 /** Streams one transcript into a registered target root with an operation/hash receipt. */
 export function safeCopyHistory(input: SafeHistoryCopyInput): SafeHistoryCopyResult {

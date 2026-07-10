@@ -21,7 +21,7 @@ import {
   type ViewerConversationId,
 } from "./contracts";
 import { RegisteredSuccessorProvider } from "./provider";
-import { sanitizeProviderError } from "./safeHistoryCopy";
+import { safeProviderDiagnostic, sanitizeProviderError } from "./safeHistoryCopy";
 import { turnStateFromRecords } from "./turnState";
 import { AUTO_BALANCE_COOLDOWN_MS } from "./quotaPolicy";
 
@@ -247,6 +247,13 @@ export async function advanceConversationMigration(
       await cleanupDiscardedSuccessor(successorProvider, receipt, latest);
       return latest;
     }
+    console.warn("[account-migration] recoverable successor provider failure", {
+      conversationId: conversation.id,
+      engine: conversation.engine,
+      phase: migration.phase,
+      targetAccountId: migration.targetId,
+      error: safeProviderDiagnostic(error),
+    });
     const safe = sanitizeProviderError(error);
     const failed = registry.transitionConversationMigration(conversation.id, migration.revision, ["requested", "preparing", "successor-starting", "verifying"], {
       phase: "failed-recoverable",
