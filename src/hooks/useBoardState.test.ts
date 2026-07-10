@@ -382,7 +382,7 @@ test("15: a later restore survives the earlier close acknowledgement", async () 
   store.mutate([{ kind: "close", path: "/x" }]); // outbox=[close], drain inflight (gated)
   await settle();
   store.mutate([{ kind: "restore", path: "/x", placement: "manual" }]); // queued while close inflight
-  /* Optimistic: the later restore wins — /x visible in manual, not hidden. */
+  /* Optimistic: the later restore wins and /x remains visible in manual. */
   expect(store.getSnapshot().prefs.hidden).toEqual([]);
   expect(store.getSnapshot().prefs.manual).toEqual(["/x"]);
   releaseClose();

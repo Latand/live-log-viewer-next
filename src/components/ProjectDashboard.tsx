@@ -457,7 +457,7 @@ export function ProjectDashboard({
       }),
     );
     /* eslint-disable-next-line react-hooks/exhaustive-deps -- board.mutate is
-       delegated to a ref-stable store; manual is read from the ref, not tracked */
+       delegated to a ref-stable store; manual is read through that ref. */
   }, [rootGroups, files, projectCatalog, project, board.loaded, board.sync]);
 
   /* Any open lands on the scheme: a card of another project pre-adds its node
@@ -479,10 +479,10 @@ export function ProjectDashboard({
     /* An explicit open is a restore: it lifts any tombstone and places the node
        by role. A child conversation expands as a node wired below its parent
        (the scheme promotes it via expandedConversationPaths); the predicate must
-       match what buildBranchGroups can actually promote (isChildConversation),
-       not just "has a parent" — a compaction predecessor has a parent but is
-       neither a conversation nor a child, so routing it to expanded renders
-       nothing. A node that is already an auto column restores in place (no stored
+       match what buildBranchGroups can actually promote (isChildConversation).
+       A compaction predecessor belongs outside the conversation and child
+       categories, so routing it to expanded renders nothing. A node that is
+       already an auto column restores in place (no stored
        membership); everything else becomes a standalone manual node. */
     if (isChildConversation(file)) {
       board.restore(file.path, "expanded");
