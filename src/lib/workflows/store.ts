@@ -6,7 +6,7 @@ import { agentRegistry, type AgentRegistry } from "@/lib/agent/registry";
 import type { RoleConfig } from "@/lib/flows/types";
 import { atomicWriteText } from "@/lib/flows/store";
 import { ROLE_DEFAULTS } from "@/lib/roles/defaults";
-import { listRoles, resolveRole } from "@/lib/roles/registry";
+import { isValidRoleConfig, listRoles, resolveRole } from "@/lib/roles/registry";
 import type { RoleConfig as RegistryRoleConfig } from "@/lib/roles/types";
 
 import type { FinishAction, ImplementStage, ReviewStage, Workflow, WorkflowStage, WorkflowTemplate } from "./types";
@@ -19,9 +19,16 @@ const ARTIFACT_DIR = statePath("workflows");
     A role override that passes the store's shape check can still fail the
     registry's semantic validation (e.g. a codex model not prefixed `gpt-`).
     Seed derivation must never crash on that — it falls back to the role's
-    hardcoded default config instead of propagating the broken override. */
+    hardcoded default config instead of propagating the broken override.
+    Non-builder roles skip resolveRole (some have required params, like
+    reviewer's diffSource, that make no sense to supply at seed time), so
+    their merged config is checked with the same semantic rules directly. */
 function registryRole(role: "builder" | "reviewer" | "architect" | "cleaner", params: Record<string, string> = {}): RoleConfig {
-  if (role !== "builder") return { ...listRoles().find((candidate) => candidate.id === role)!.config };
+  if (role !== "builder") {
+    const config = listRoles().find((candidate) => candidate.id === role)!.config;
+    if (isValidRoleConfig(config)) return { ...config };
+    return { ...ROLE_DEFAULTS.find((candidate) => candidate.id === role)!.config };
+  }
   const resolved = resolveRole(role, params);
   if (resolved.ok) return { ...resolved.value.config };
   return { ...ROLE_DEFAULTS.find((candidate) => candidate.id === role)!.config };
@@ -148,9 +155,6 @@ export function seededTemplatesFromRoles(): WorkflowTemplate[] {
   },
   ];
 }
-
-/** Compatibility export for initial template renderers. */
-export const SEEDED_TEMPLATES: WorkflowTemplate[] = seededTemplatesFromRoles();
 
 type WorkflowFile = { workflows?: unknown };
 type TemplateFile = { templates?: unknown };

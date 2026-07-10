@@ -68,14 +68,29 @@ function configForParams(definition: RoleDefinition, params: RoleParamValues): R
   return definition.config;
 }
 
+function configValidationError(config: RoleConfig): string | null {
+  if (config.engine !== "claude" && config.engine !== "codex") return "engine must be claude or codex";
+  if (!config.model || config.model.length > 128) return "model must be a printable id up to 128 characters";
+  if (config.engine === "claude" && !normalizeClaudeLaunchModel(config.model)) return "model is not supported by claude";
+  if (config.engine === "codex" && !config.model.startsWith("gpt-")) return "model is not supported by codex";
+  if (!isEngineEffort(config.engine, config.effort)) return `effort for ${config.engine} must be one of: ${config.engine === "codex" ? "low, medium, high, xhigh" : "low, medium, high, xhigh, max"}`;
+  return null;
+}
+
 function resolveConfig(definition: RoleDefinition, params: RoleParamValues, explicit: ExplicitRoleConfig): { ok: true; value: RoleConfig } | { ok: false; error: string } {
   const config = { ...configForParams(definition, params), ...explicit };
-  if (config.engine !== "claude" && config.engine !== "codex") return { ok: false, error: "engine must be claude or codex" };
-  if (!config.model || config.model.length > 128) return { ok: false, error: "model must be a printable id up to 128 characters" };
-  if (config.engine === "claude" && !normalizeClaudeLaunchModel(config.model)) return { ok: false, error: "model is not supported by claude" };
-  if (config.engine === "codex" && !config.model.startsWith("gpt-")) return { ok: false, error: "model is not supported by codex" };
-  if (!isEngineEffort(config.engine, config.effort)) return { ok: false, error: `effort for ${config.engine} must be one of: ${config.engine === "codex" ? "low, medium, high, xhigh" : "low, medium, high, xhigh, max"}` };
+  const error = configValidationError(config);
+  if (error) return { ok: false, error };
   return { ok: true, value: config };
+}
+
+/** Whether a merged role config (e.g. a saved override merged over
+    ROLE_DEFAULTS) would survive resolveConfig's semantic checks. Used by seed
+    derivation for roles that don't route through resolveRole/resolveConfig
+    directly, since those roles can have required params (like reviewer's
+    diffSource) that make no sense to supply at seed time. */
+export function isValidRoleConfig(config: RoleConfig): boolean {
+  return configValidationError(config) === null;
 }
 
 export function resolveRole(role: string, params: unknown = {}, explicit: ExplicitRoleConfig = {}): RoleResolution {

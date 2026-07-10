@@ -5,7 +5,7 @@ import path from "node:path";
 import { statePath } from "@/lib/configDir";
 import { agentRegistry, type AgentRegistry } from "@/lib/agent/registry";
 import { ROLE_DEFAULTS } from "@/lib/roles/defaults";
-import { listRoles, resolveRole } from "@/lib/roles/registry";
+import { isValidRoleConfig, listRoles, resolveRole } from "@/lib/roles/registry";
 
 import type { Flow, FlowPreset, ReviewVerdict } from "./types";
 
@@ -57,9 +57,16 @@ const PRE_ROLE_SEEDED_PRESETS: FlowPreset[] = [
 /** A role override that passes the store's shape check can still fail the
     registry's semantic validation (e.g. a codex model not prefixed `gpt-`).
     Seed derivation must never crash on that — it falls back to the role's
-    hardcoded default config instead of propagating the broken override. */
+    hardcoded default config instead of propagating the broken override.
+    Non-builder roles skip resolveRole (some have required params, like
+    reviewer's diffSource, that make no sense to supply at seed time), so
+    their merged config is checked with the same semantic rules directly. */
 function flowRole(role: "builder" | "reviewer" | "architect", params: Record<string, string> = {}): FlowPreset["implementer"] {
-  if (role !== "builder") return { ...listRoles().find((candidate) => candidate.id === role)!.config };
+  if (role !== "builder") {
+    const config = listRoles().find((candidate) => candidate.id === role)!.config;
+    if (isValidRoleConfig(config)) return { ...config };
+    return { ...ROLE_DEFAULTS.find((candidate) => candidate.id === role)!.config };
+  }
   const resolved = resolveRole(role, params);
   if (resolved.ok) return { ...resolved.value.config };
   return { ...ROLE_DEFAULTS.find((candidate) => candidate.id === role)!.config };
@@ -80,9 +87,6 @@ export function seededPresetsFromRoles(): FlowPreset[] {
     { name: "Sonnet → Sol xhigh", implementer: { engine: "claude", model: "sonnet", effort: "high" }, reviewer },
   ];
 }
-
-/** Compatibility export for consumers that render the initial seed list. */
-export const SEEDED_PRESETS: FlowPreset[] = seededPresetsFromRoles();
 
 export const FLOWS_SCHEMA_VERSION = 2;
 

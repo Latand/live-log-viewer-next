@@ -155,12 +155,16 @@ export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse
   if (body.accountId !== undefined && typeof body.accountId !== "string") return NextResponse.json({ error: "accountId must be a string" }, { status: 400 });
   if (body.clientAttemptId !== undefined && (typeof body.clientAttemptId !== "string" || !/^[A-Za-z0-9_-]{8,128}$/.test(body.clientAttemptId))) return NextResponse.json({ error: "clientAttemptId must be 8-128 URL-safe characters" }, { status: 400 });
 
+  /* An explicit "" is the same "no override" signal as undefined here —
+     resolveSpawnRole already treats them identically (via .trim() truthiness)
+     when deciding whether to override the role's own model/effort, so a
+     caller sending "" must still get the role's config, not a dropped field. */
   const reasoning = reasoningFromBody(engine, {
     ...body,
-    effort: body.effort === undefined ? role.value?.config.effort : body.effort,
+    effort: body.effort === undefined || body.effort === "" ? role.value?.config.effort : body.effort,
   });
   if (reasoning.error) return NextResponse.json({ error: reasoning.error }, { status: 400 });
-  const selectedModel = modelFromBody({ model: body.model === undefined ? role.value?.config.model : body.model });
+  const selectedModel = modelFromBody({ model: body.model === undefined || body.model === "" ? role.value?.config.model : body.model });
   if (selectedModel.error) return NextResponse.json({ error: selectedModel.error }, { status: 400 });
 
   const rawCwd = typeof body.cwd === "string" ? body.cwd.trim() : "";
@@ -200,7 +204,11 @@ export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse
       effort: reasoning.effort,
       fast: reasoning.fast,
       accountId: account.accountId,
-      role: role.value?.role ?? null,
+      /* Omitted (not `role: null`) for a role-less request, so its digest
+         stays byte-identical to the pre-role-registry generation and an
+         unsettled attempt persisted before this deploy still replays onto
+         its receipt instead of 409ing as a conflict. */
+      ...(role.value ? { role: role.value.role } : {}),
       parentConversationId,
       parentSessionKey,
       parentArtifactPath: parentConversationId ? src : null,

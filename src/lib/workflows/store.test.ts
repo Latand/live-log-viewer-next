@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { AgentRegistry } from "@/lib/agent/registry";
-import { CODEX_SOL_MODEL } from "@/lib/agent/models";
+import { CODEX_SOL_MODEL, CODEX_TERRA_MODEL } from "@/lib/agent/models";
 import { saveRoleOverrides } from "@/lib/roles/store";
 
 /* The state dir must point at a sandbox before store.ts computes its
@@ -173,6 +173,27 @@ test("template seeds fall back to the role default when a saved builder override
       engine: "codex",
       model: CODEX_SOL_MODEL,
       effort: "medium",
+    });
+  } finally {
+    if (previousState === undefined) delete process.env.LLV_STATE_DIR;
+    else process.env.LLV_STATE_DIR = previousState;
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  }
+});
+
+test("template seeds fall back to the role default when a saved cleaner override is semantically invalid", () => {
+  const previousState = process.env.LLV_STATE_DIR;
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-wf-bad-cleaner-override-"));
+  process.env.LLV_STATE_DIR = sandbox;
+  try {
+    saveRoleOverrides({ cleaner: { config: { model: "not-a-gpt-model" } } });
+    expect(() => seededTemplatesFromRoles()).not.toThrow();
+    const fullstack = seededTemplatesFromRoles().find((template) => template.name === "fullstack")!;
+    const review = fullstack.stages.at(-1)!;
+    expect(review.kind === "review-loop" && review.fixer).toEqual({
+      engine: "codex",
+      model: CODEX_TERRA_MODEL,
+      effort: "low",
     });
   } finally {
     if (previousState === undefined) delete process.env.LLV_STATE_DIR;

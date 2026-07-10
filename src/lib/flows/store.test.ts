@@ -59,6 +59,25 @@ test("flow preset seeds fall back to the role default when a saved builder overr
   }
 });
 
+test("flow preset seeds fall back to the role default when a saved reviewer override is semantically invalid", () => {
+  const previousState = process.env.LLV_STATE_DIR;
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-flow-bad-reviewer-override-"));
+  process.env.LLV_STATE_DIR = sandbox;
+  try {
+    saveRoleOverrides({ reviewer: { config: { model: "not-a-gpt-model" } } });
+    expect(() => seededPresetsFromRoles()).not.toThrow();
+    expect(seededPresetsFromRoles().find((preset) => preset.name === "Sol medium → Sol xhigh")?.reviewer).toEqual({
+      engine: "codex",
+      model: CODEX_SOL_MODEL,
+      effort: "xhigh",
+    });
+  } finally {
+    if (previousState === undefined) delete process.env.LLV_STATE_DIR;
+    else process.env.LLV_STATE_DIR = previousState;
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  }
+});
+
 test("an untouched pre-registry flow preset migrates to the current role config", () => {
   const previous = {
     name: "Terra high → Fable",
