@@ -300,6 +300,23 @@ function conversationMigrationForIntent(
   };
 }
 
+function queueAbandonedMigrationCleanup(
+  file: RegistryFile,
+  conversation: RegistryConversation,
+  changedAt: string,
+): void {
+  const receipt = conversation.migration?.phase === "committed"
+    ? null
+    : conversation.migration?.providerReceipt;
+  if (!receipt) return;
+  file.pendingSuccessorCleanups[receipt.operationId] ??= {
+    conversationId: conversation.id,
+    receipt,
+    createdAt: changedAt,
+    lastError: null,
+  };
+}
+
 export class MigrationRevisionError extends Error {
   constructor(readonly expected: number, readonly actual: number) {
     super("migration preview is stale");
@@ -1305,15 +1322,7 @@ export class AgentRegistry {
         const source = conversation.generations.at(-1);
         if (!source || source.accountId === null || source.accountId === input.targetId) {
           if (source && conversation.migration && conversation.migration.phase !== "committed") {
-            const receipt = conversation.migration.providerReceipt;
-            if (receipt) {
-              file.pendingSuccessorCleanups[receipt.operationId] ??= {
-                conversationId: conversation.id,
-                receipt,
-                createdAt: changedAt,
-                lastError: null,
-              };
-            }
+            queueAbandonedMigrationCleanup(file, conversation, changedAt);
             for (const delivery of Object.values(file.heldDeliveries)) {
               if (delivery.conversationId !== conversation.id
                 || delivery.state === "delivered"
@@ -1331,6 +1340,7 @@ export class AgentRegistry {
         const readiness = migrationReadiness(file, conversation);
         if ((input.scope ?? "all") === "active" && readiness === "deferred") continue;
         scoped += 1;
+        queueAbandonedMigrationCleanup(file, conversation, changedAt);
         conversation.migration = conversationMigrationForIntent(
           conversation,
           source,
@@ -1379,13 +1389,17 @@ export class AgentRegistry {
         };
         file.migrationIntents[intent.id] = intent;
       } else {
+        if (intent.state !== "draining") intent.revision += 1;
         intent.state = "draining";
         intent.updatedAt = changedAt;
       }
 
       const phase = migrationReadiness(file, conversation) === "busy" ? "waiting-turn" : "requested";
+      queueAbandonedMigrationCleanup(file, conversation, changedAt);
       conversation.migration = conversationMigrationForIntent(conversation, source, intent, phase, changedAt);
       conversation.updatedAt = changedAt;
+      file.conversationRevision[conversation.engine] += 1;
+      file.engineRouting[conversation.engine].revision += 1;
       return clone(conversation);
     });
   }
@@ -1610,6 +1624,7 @@ export class AgentRegistry {
             conversation.updatedAt = intent.updatedAt;
           }
           if (conversation.migration?.intentId !== id || conversation.migration.phase === "committed") continue;
+          queueAbandonedMigrationCleanup(file, conversation, intent.updatedAt);
           const source = conversation.generations.find((generation) => generation.id === conversation.migration?.sourceGenerationId)
             ?? conversation.generations.at(-1);
           if (!source) continue;
@@ -1829,6 +1844,7 @@ export class AgentRegistry {
         ?? conversation.generations.at(-1);
       if (!source) throw new Error("conversation has no source generation");
       const rolledAt = now();
+      queueAbandonedMigrationCleanup(file, conversation, rolledAt);
       const route = file.engineRouting[conversation.engine];
       if (route.activeAccountId === conversation.migration.targetId) {
         conversation.migrationOptOut = {

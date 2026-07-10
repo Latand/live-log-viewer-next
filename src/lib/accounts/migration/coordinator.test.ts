@@ -140,6 +140,42 @@ describe("durable account migration coordinator", () => {
     });
   });
 
+  test("lazy activation invalidates previews and advances a reactivated intent once", async () => {
+    const store = registry();
+    store.reconcileConversations([observation("/lazy-fence.jsonl", "a", "idle")]);
+    const initialIntent = store.commitMigrationIntent({
+      engine: "codex",
+      targetId: "b",
+      origin: "manual",
+      requestId: "route-to-b",
+      expectedRevision: store.engineRouting("codex").revision,
+      scope: "active",
+    });
+    expect(initialIntent).toMatchObject({ state: "complete", revision: 1 });
+    const stalePreview = await previewMigration("codex", "default", store);
+    const conversation = store.conversationForPath("/lazy-fence.jsonl")!;
+
+    const activated = store.requestConversationMigrationToActiveAccount(conversation.id);
+    const reactivatedIntent = store.snapshot().migrationIntents[initialIntent.id]!;
+    expect(activated.migration).toMatchObject({ targetId: "b", revision: 2, phase: "requested" });
+    expect(reactivatedIntent).toMatchObject({ state: "draining", revision: 2 });
+    expect(() => store.commitMigrationIntent({
+      engine: "codex",
+      targetId: "default",
+      origin: "manual",
+      requestId: "stale-preview-to-default",
+      expectedRevision: stalePreview.previewRevision,
+      scope: "active",
+    })).toThrow(MigrationRevisionError);
+    expect(() => store.setMigrationIntentState(initialIntent.id, "stopped", initialIntent.revision))
+      .toThrow("migration intent revision is stale");
+
+    const routingRevision = store.engineRouting("codex").revision;
+    store.requestConversationMigrationToActiveAccount(conversation.id);
+    expect(store.engineRouting("codex").revision).toBe(routingRevision);
+    expect(store.snapshot().migrationIntents[initialIntent.id]?.revision).toBe(2);
+  });
+
   test("an idle conversation with a live host stays in the eager switch scope", async () => {
     const store = registry();
     store.reconcileConversations([observation("/live-idle.jsonl", "managed", "idle")]);
@@ -1357,6 +1393,62 @@ describe("durable account migration coordinator", () => {
     await reconcileMigrations(cleanupProvider, { async deliver() { return "delivered"; } }, restarted);
     expect(cleanupAttempts).toBe(2);
     expect(Object.keys(restarted.snapshot().pendingSuccessorCleanups)).toHaveLength(0);
+  });
+
+  test("retarget, Stop, and Keep persist abandoned successor cleanup across restart", async () => {
+    for (const action of ["retarget", "stop", "keep"] as const) {
+      const store = registry();
+      const sourcePath = `/abandoned-${action}.jsonl`;
+      store.reconcileConversations([observation(sourcePath, "a", "idle")]);
+      const conversation = store.conversationForPath(sourcePath)!;
+      const intent = store.commitMigrationIntent({
+        engine: "codex",
+        targetId: "b",
+        origin: "manual",
+        requestId: `abandon-${action}`,
+        expectedRevision: store.engineRouting("codex").revision,
+      });
+      const revision = store.conversation(conversation.id)!.migration!.revision;
+      store.transitionConversationMigration(conversation.id, revision, ["requested"], { phase: "preparing" });
+      store.transitionConversationMigration(conversation.id, revision, ["preparing"], { phase: "successor-starting" });
+      const receipt: ProviderReceipt = {
+        operationId: store.conversation(conversation.id)!.migration!.operationId,
+        nativeId: `successor-${action}`,
+        path: `/successor-${action}.jsonl`,
+        continuityPaths: [],
+        historyHash: `hash-${action}`,
+        host: { kind: "codex-app-server", identity: `host-${action}`, epoch: 1, verifiedAt: "2026-07-10T12:01:00.000Z" },
+      };
+      store.transitionConversationMigration(conversation.id, revision, ["successor-starting"], { phase: "verifying", providerReceipt: receipt });
+
+      if (action === "retarget") {
+        store.commitMigrationIntent({
+          engine: "codex",
+          targetId: "c",
+          origin: "manual",
+          requestId: "retarget-to-c",
+          expectedRevision: store.engineRouting("codex").revision,
+        });
+      } else if (action === "stop") {
+        store.setMigrationIntentState(intent.id, "stopped", intent.revision);
+      } else {
+        store.rollbackConversationMigration(conversation.id, revision);
+      }
+
+      const restarted = new AgentRegistry(store.filename);
+      expect(Object.values(restarted.snapshot().pendingSuccessorCleanups)).toMatchObject([{ receipt: { nativeId: `successor-${action}` } }]);
+      const cleaned: string[] = [];
+      const cleanupProvider: SuccessorProviderPort = {
+        async create() { throw new SuccessorPendingError(); },
+        async verify() {},
+        async cleanup(value) { cleaned.push(value.nativeId); },
+      };
+      await reconcileMigrations(cleanupProvider, { async deliver() { return "delivered"; } }, restarted);
+      await reconcileMigrations(cleanupProvider, { async deliver() { return "delivered"; } }, restarted);
+      expect(cleaned).toEqual([`successor-${action}`]);
+      expect(Object.keys(restarted.snapshot().pendingSuccessorCleanups)).toHaveLength(0);
+      expect(restarted.conversation(conversation.id)?.generations).toHaveLength(1);
+    }
   });
 
   test("a return-to-source retarget cleans a stale successor after clearing migration state", async () => {
