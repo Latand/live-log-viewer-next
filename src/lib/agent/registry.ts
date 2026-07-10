@@ -157,6 +157,9 @@ export interface RegistryFile {
       resolver proves server, process, engine, and transcript ownership. */
   legacyResumePanes: { serverPid: number | null; panes: Record<string, ResumePaneRecord> };
   conversations: Record<string, RegistryConversation>;
+  /** Durable redirects for conversation IDs that escaped before scanner-owned
+      provisional identities were adopted by their canonical owner. */
+  conversationAliases: Record<string, ViewerConversationId>;
   conversationRevision: Record<Extract<AgentEngine, "claude" | "codex">, number>;
   migrationIntents: Record<string, MigrationIntent>;
   engineRouting: Record<Extract<AgentEngine, "claude" | "codex">, { activeAccountId: string | null; revision: number }>;
@@ -208,6 +211,7 @@ const EMPTY: RegistryFile = {
   importedResumePanes: false,
   legacyResumePanes: { serverPid: null, panes: {} },
   conversations: {},
+  conversationAliases: {},
   conversationRevision: { claude: 0, codex: 0 },
   migrationIntents: {},
   engineRouting: { claude: { activeAccountId: null, revision: 0 }, codex: { activeAccountId: null, revision: 0 } },
@@ -319,6 +323,18 @@ function scannerAllocatedProvisionalOwner(conversation: RegistryConversation, pa
     && conversation.continuityPaths.length === 0;
 }
 
+function resolveConversationAlias(file: Pick<RegistryFile, "conversationAliases">, id: ViewerConversationId): ViewerConversationId {
+  const seen = new Set<ViewerConversationId>();
+  let current = id;
+  while (!seen.has(current)) {
+    seen.add(current);
+    const next = file.conversationAliases[current];
+    if (!next) return current;
+    current = next;
+  }
+  return current;
+}
+
 function adoptProvisionalOwner(
   file: RegistryFile,
   owner: RegistryConversation,
@@ -359,6 +375,10 @@ function adoptProvisionalOwner(
       }
     }
   }
+  for (const [alias, destination] of Object.entries(file.conversationAliases)) {
+    if (destination === owner.id) file.conversationAliases[alias] = target.id;
+  }
+  file.conversationAliases[owner.id] = target.id;
   delete file.conversations[owner.id];
   file.conversationRevision[target.engine] += 1;
   file.engineRouting[target.engine].revision += 1;
@@ -400,6 +420,7 @@ function upgradeV1(parsed: Omit<Partial<RegistryFile>, "version">): RegistryFile
     ...clone(EMPTY),
     entries: (parsed.entries as RegistryFile["entries"]) ?? {},
     receipts: Object.fromEntries(Object.entries((parsed.receipts as RegistryFile["receipts"]) ?? {}).map(([id, receipt]) => [id, normalizeReceipt(receipt)])),
+    conversationAliases: {},
     importedResumePanes: parsed.importedResumePanes === true,
     legacyResumePanes: legacy && typeof legacy === "object" && "panes" in legacy
       ? { serverPid: typeof (legacy as { serverPid?: unknown }).serverPid === "number" ? (legacy as { serverPid: number }).serverPid : null, panes: ((legacy as { panes?: unknown }).panes as Record<string, ResumePaneRecord>) ?? {} }
@@ -428,6 +449,9 @@ function readFile(filename: string): RegistryFile {
         : { serverPid: null, panes: {} },
       conversations: parsed.conversations && typeof parsed.conversations === "object"
         ? Object.fromEntries(Object.entries(parsed.conversations).map(([id, conversation]) => [id, normalizeConversation(conversation)]))
+        : {},
+      conversationAliases: parsed.conversationAliases && typeof parsed.conversationAliases === "object"
+        ? Object.fromEntries(Object.entries(parsed.conversationAliases).filter(([alias, destination]) => alias.startsWith("conversation_") && typeof destination === "string" && destination.startsWith("conversation_"))) as RegistryFile["conversationAliases"]
         : {},
       conversationRevision: parsed.conversationRevision && typeof parsed.conversationRevision === "object"
         ? { ...EMPTY.conversationRevision, ...parsed.conversationRevision }
@@ -526,8 +550,10 @@ export class AgentRegistry {
       internal callers use beginSpawn() and receive an uncorrelated receipt. */
   beginSpawnRequest(input: SpawnRequest): SpawnBeginResult {
     return this.mutate((file) => {
-      const profile = emptyLaunchProfile({ cwd: input.cwd, parentConversationId: input.parentConversationId ?? null, ...(input.launchProfile ?? {}) });
-      const existingConversation = input.conversationId ? file.conversations[input.conversationId] : null;
+      const conversationId = input.conversationId ? resolveConversationAlias(file, input.conversationId) : null;
+      const parentConversationId = input.parentConversationId ? resolveConversationAlias(file, input.parentConversationId) : null;
+      const profile = emptyLaunchProfile({ cwd: input.cwd, ...(input.launchProfile ?? {}), parentConversationId });
+      const existingConversation = conversationId ? file.conversations[conversationId] : null;
       if (existingConversation && existingConversation.engine !== input.engine) {
         throw new Error("spawn conversation ownership is invalid");
       }
@@ -542,12 +568,12 @@ export class AgentRegistry {
         launchId: crypto.randomUUID(),
         clientAttemptId: input.clientAttemptId ?? null,
         requestDigest: input.requestDigest ?? null,
-        conversationId: input.conversationId ?? `conversation_${crypto.randomUUID()}`,
+        conversationId: conversationId ?? `conversation_${crypto.randomUUID()}`,
         purpose: input.purpose ?? "launch",
         engine: input.engine,
         cwd: input.cwd,
         accountId: input.accountId ?? null,
-        parentConversationId: input.parentConversationId ?? null,
+        parentConversationId,
         createdAt: now(),
         state: "starting",
         artifactPath: input.expectedArtifactPath ?? null,
@@ -1001,8 +1027,13 @@ export class AgentRegistry {
     return Object.values(this.snapshot().conversations).find((conversation) => conversationOwnsPath(conversation, artifactPath)) ?? null;
   }
 
+  canonicalConversationId(id: ViewerConversationId): ViewerConversationId {
+    return resolveConversationAlias(this.snapshot(), id);
+  }
+
   conversation(id: ViewerConversationId): RegistryConversation | null {
-    return this.snapshot().conversations[id] ?? null;
+    const snapshot = this.snapshot();
+    return snapshot.conversations[resolveConversationAlias(snapshot, id)] ?? null;
   }
 
   launchProfileForPath(artifactPath: string): LaunchProfile | null {
@@ -1162,13 +1193,14 @@ export class AgentRegistry {
 
   setConversationMigration(id: ViewerConversationId, migration: ConversationMigrationInput | null): RegistryConversation {
     return this.mutate((file) => {
-      const conversation = file.conversations[id];
+      const canonicalId = resolveConversationAlias(file, id);
+      const conversation = file.conversations[canonicalId];
       if (!conversation) throw new Error("viewer conversation is unknown");
       const source = conversation.generations.at(-1);
       conversation.migration = migration ? {
         ...migration,
         errorCode: migration.errorCode ?? null,
-        operationId: migration.operationId ?? `${migration.intentId}:${id}:${migration.revision}`,
+        operationId: migration.operationId ?? `${migration.intentId}:${canonicalId}:${migration.revision}`,
         sourceGenerationId: migration.sourceGenerationId ?? source?.id ?? "",
         providerReceipt: migration.providerReceipt ?? null,
         boardProject: migration.boardProject ?? null,
@@ -1187,7 +1219,7 @@ export class AgentRegistry {
     patch: Partial<Pick<ConversationMigration, "phase" | "error" | "errorCode" | "providerReceipt" | "targetId" | "revision">>,
   ): RegistryConversation {
     return this.mutate((file) => {
-      const conversation = file.conversations[id];
+      const conversation = file.conversations[resolveConversationAlias(file, id)];
       const migration = conversation?.migration;
       if (!conversation || !migration) throw new Error("conversation has no migration");
       if (migration.revision !== expectedRevision || !expectedPhases.includes(migration.phase)) throw new Error("migration transition is stale");
@@ -1204,7 +1236,7 @@ export class AgentRegistry {
     receipt: ProviderReceipt,
   ): RegistryConversation {
     return this.mutate((file) => {
-      const conversation = file.conversations[id];
+      const conversation = file.conversations[resolveConversationAlias(file, id)];
       const migration = conversation?.migration;
       if (!conversation || !migration) throw new Error("conversation has no migration");
       if (migration.revision !== expectedRevision || migration.operationId !== operationId) {
@@ -1226,10 +1258,11 @@ export class AgentRegistry {
 
   recordConversationContinuityPath(id: ViewerConversationId, pathname: string): RegistryConversation {
     return this.mutate((file) => {
-      const conversation = file.conversations[id];
+      const canonicalId = resolveConversationAlias(file, id);
+      const conversation = file.conversations[canonicalId];
       if (!conversation) throw new Error("viewer conversation is unknown");
       const provisionalOwner = Object.values(file.conversations).find((candidate) =>
-        candidate.id !== id && candidate.engine === conversation.engine && conversationOwnsPath(candidate, pathname));
+        candidate.id !== canonicalId && candidate.engine === conversation.engine && conversationOwnsPath(candidate, pathname));
       if (provisionalOwner) {
         if (!adoptProvisionalOwner(file, provisionalOwner, conversation, pathname)) {
           throw new Error("migration continuity path has another durable owner");
@@ -1246,7 +1279,7 @@ export class AgentRegistry {
     this.mutate((file) => {
       const updatedAt = now();
       for (const update of updates) {
-        const conversation = file.conversations[update.id];
+        const conversation = file.conversations[resolveConversationAlias(file, update.id)];
         const migration = conversation?.migration;
         if (!conversation || !migration || migration.phase !== "committed" || migration.operationId !== update.operationId) continue;
         migration.boardProject = update.project;
@@ -1263,7 +1296,7 @@ export class AgentRegistry {
     this.mutate((file) => {
       const updatedAt = now();
       for (const update of updates) {
-        const conversation = file.conversations[update.id];
+        const conversation = file.conversations[resolveConversationAlias(file, update.id)];
         const migration = conversation?.migration;
         if (!conversation || !migration || migration.phase !== "committed" || migration.operationId !== update.operationId) continue;
         migration.boardPlacementProject = update.project;
@@ -1275,7 +1308,7 @@ export class AgentRegistry {
 
   retryConversationMigration(id: ViewerConversationId, expectedRevision?: number): RegistryConversation {
     return this.mutate((file) => {
-      const conversation = file.conversations[id];
+      const conversation = file.conversations[resolveConversationAlias(file, id)];
       const current = conversation?.migration;
       if (!conversation || !current) throw new Error("conversation has no migration");
       if (expectedRevision !== undefined && current.revision !== expectedRevision) throw new Error("migration revision is stale");
@@ -1309,7 +1342,7 @@ export class AgentRegistry {
 
   commitSuccessor(id: ViewerConversationId, successor: SuccessorGenerationInput, expectedRevision: number): RegistryConversation {
     return this.mutate((file) => {
-      const conversation = file.conversations[id];
+      const conversation = file.conversations[resolveConversationAlias(file, id)];
       if (!conversation?.migration || conversation.migration.revision !== expectedRevision) throw new Error("migration revision is stale");
       if (conversation.migration.phase === "committed") {
         const current = conversation.generations.at(-1);
@@ -1454,11 +1487,12 @@ export class AgentRegistry {
   holdDelivery(conversationId: ViewerConversationId, text: string, clientMessageId: string | null = null): HeldDelivery {
     if (!text || text.length > 32_000) throw new Error("held delivery must contain at most 32000 characters");
     return this.mutate((file) => {
-      const existing = clientMessageId ? Object.values(file.heldDeliveries).find((item) => item.conversationId === conversationId && item.clientMessageId === clientMessageId) : undefined;
+      const canonicalId = resolveConversationAlias(file, conversationId);
+      const existing = clientMessageId ? Object.values(file.heldDeliveries).find((item) => item.conversationId === canonicalId && item.clientMessageId === clientMessageId) : undefined;
       if (existing) return clone(existing);
       const held: HeldDelivery = {
         id: crypto.randomUUID(),
-        conversationId,
+        conversationId: canonicalId,
         text,
         createdAt: now(),
         clientMessageId,
@@ -1469,7 +1503,7 @@ export class AgentRegistry {
         deliveredAt: null,
         error: null,
       };
-      const count = Object.values(file.heldDeliveries).filter((item) => item.conversationId === conversationId && item.state !== "delivered").length;
+      const count = Object.values(file.heldDeliveries).filter((item) => item.conversationId === canonicalId && item.state !== "delivered").length;
       if (count >= 100) throw new Error("held delivery limit reached for conversation");
       file.heldDeliveries[held.id] = held;
       return clone(held);
@@ -1477,8 +1511,10 @@ export class AgentRegistry {
   }
 
   pendingDeliveries(conversationId: ViewerConversationId): HeldDelivery[] {
-    return Object.values(this.snapshot().heldDeliveries)
-      .filter((item) => item.conversationId === conversationId && item.state !== "delivered")
+    const snapshot = this.snapshot();
+    const canonicalId = resolveConversationAlias(snapshot, conversationId);
+    return Object.values(snapshot.heldDeliveries)
+      .filter((item) => item.conversationId === canonicalId && item.state !== "delivered")
       .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id));
   }
 
@@ -1511,7 +1547,8 @@ export class AgentRegistry {
 
   rollbackConversationMigration(id: ViewerConversationId, expectedRevision?: number): RegistryConversation {
     return this.mutate((file) => {
-      const conversation = file.conversations[id];
+      const canonicalId = resolveConversationAlias(file, id);
+      const conversation = file.conversations[canonicalId];
       if (!conversation?.migration) throw new Error("conversation has no migration");
       if (expectedRevision !== undefined && conversation.migration.revision !== expectedRevision) throw new Error("migration revision is stale");
       const source = conversation.generations.find((generation) => generation.id === conversation.migration?.sourceGenerationId)
@@ -1519,7 +1556,7 @@ export class AgentRegistry {
       if (!source) throw new Error("conversation has no source generation");
       const rolledAt = now();
       for (const delivery of Object.values(file.heldDeliveries)) {
-        if (delivery.conversationId !== id || delivery.state === "delivered" || delivery.state === "delivery-uncertain") continue;
+        if (delivery.conversationId !== canonicalId || delivery.state === "delivered" || delivery.state === "delivery-uncertain") continue;
         delivery.state = "assigned";
         delivery.generationId = source.id;
         delivery.assignedAt = rolledAt;

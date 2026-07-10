@@ -341,6 +341,10 @@ describe("agent registry", () => {
     expect(snapshot.lineageEdges[childReceipt.receipt.conversationId]).toMatchObject({ parentConversationId: original.id });
     expect(snapshot.heldDeliveries[held.id]).toMatchObject({ conversationId: original.id });
     expect(store.conversationForPath("/child.jsonl")?.generations[0]?.launchProfile.parentConversationId).toBe(original.id);
+    expect(snapshot.conversationAliases[provisional.id]).toBe(original.id);
+    expect(store.canonicalConversationId(provisional.id)).toBe(original.id);
+    expect(store.conversation(provisional.id)?.id).toBe(original.id);
+    expect(new AgentRegistry(store.filename).conversation(provisional.id)?.id).toBe(original.id);
   });
 
   test("normalizes a legacy receipt after restart without changing its schema version", () => {

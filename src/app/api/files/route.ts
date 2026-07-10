@@ -80,8 +80,11 @@ export async function GET(request: Request): Promise<NextResponse> {
     panePidAlive: pidAlive,
     conversationIdForPath: (pathname) => Object.values(registrySnapshot.conversations).find((conversation) =>
       ownsPath(conversation, pathname))?.id ?? null,
+    canonicalConversationId: (conversationId) => conversationId.startsWith("conversation_")
+      ? registry.canonicalConversationId(conversationId as `conversation_${string}`)
+      : null,
     pathForConversationId: (conversationId) => conversationId.startsWith("conversation_")
-      ? registrySnapshot.conversations[conversationId as `conversation_${string}`]?.generations.at(-1)?.path ?? null
+      ? registry.conversation(conversationId as `conversation_${string}`)?.generations.at(-1)?.path ?? null
       : null,
   });
   const workflows = filterWorkflowsForFileScan(loadWorkflows(), files);

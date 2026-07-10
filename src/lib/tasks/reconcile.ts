@@ -12,6 +12,7 @@ export interface ReconcileEnv {
   pathForPanePid?: (panePid: number, files: FileEntry[]) => string | null;
   panePidAlive?: (panePid: number) => boolean;
   conversationIdForPath?: (pathname: string) => string | null;
+  canonicalConversationId?: (conversationId: string) => string | null;
   pathForConversationId?: (conversationId: string) => string | null;
   now?: () => string;
 }
@@ -66,6 +67,13 @@ export function pathForPanePid(
 function reconcileAssignment(assignment: TaskAssignment, files: FileEntry[], env: ReconcileEnv): { assignment: TaskAssignment; dirty: boolean } {
   let current = assignment;
   let dirty = false;
+  if (current.conversationId) {
+    const canonicalId = env.canonicalConversationId?.(current.conversationId) ?? current.conversationId;
+    if (canonicalId !== current.conversationId) {
+      current = { ...current, conversationId: canonicalId };
+      dirty = true;
+    }
+  }
   if (current.path && !current.conversationId) {
     const conversationId = env.conversationIdForPath?.(current.path)
       ?? files.find((file) => file.path === current.path)?.conversationId
