@@ -5,6 +5,7 @@ export interface LegacySchedulerPorts {
   tickFlows(entries: FileEntry[]): Promise<unknown>;
   tickWorkflows(entries: FileEntry[]): Promise<unknown>;
   tickTaskInbox(entries: FileEntry[]): void;
+  publishFiles?(entries: FileEntry[]): Promise<void> | void;
 }
 
 /** Bounded legacy reconciliation while structured runtime ownership is disabled. */
@@ -19,6 +20,7 @@ export class LegacyRuntimeScheduler {
     this.running = true;
     try {
       const entries = await this.ports.scan();
+      await this.ports.publishFiles?.(entries);
       await this.ports.tickFlows(entries);
       await this.ports.tickWorkflows(entries);
       this.ports.tickTaskInbox(entries);

@@ -14,6 +14,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   if (!runtimeEventsEnabled()) return NextResponse.json({ error: "runtime events are disabled" }, { status: 503 });
   let event: RuntimeEventInput;
   try { event = await request.json() as RuntimeEventInput; } catch { return NextResponse.json({ error: "invalid JSON" }, { status: 400 }); }
+  if (event.effect !== undefined) return NextResponse.json({ error: "generic runtime operations cannot submit effects" }, { status: 400 });
   const client = runtimeHostClient();
   if (!client) return NextResponse.json({ error: "runtime host socket is unavailable" }, { status: 503 });
   try {

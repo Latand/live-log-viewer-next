@@ -66,20 +66,26 @@ async function forEachEntryBatchYielding(
   }
 }
 
-export async function listFiles(): Promise<FileEntry[]> {
-  return (await listFilesInternal(false)).files;
+export interface FileScanOptions {
+  persist?: boolean;
 }
 
-export async function listFilesWithProjectCatalog(selectedProject?: string): Promise<{ files: FileEntry[]; projectCatalog: ProjectCatalogEntry[] }> {
-  return listFilesInternal(true, selectedProject);
+export async function listFiles(options: FileScanOptions = {}): Promise<FileEntry[]> {
+  return (await listFilesInternal(false, undefined, options)).files;
+}
+
+export async function listFilesWithProjectCatalog(selectedProject?: string, options: FileScanOptions = {}): Promise<{ files: FileEntry[]; projectCatalog: ProjectCatalogEntry[] }> {
+  return listFilesInternal(true, selectedProject, options);
 }
 
 async function listFilesInternal(
   includeProjectCatalog: boolean,
   selectedProject?: string,
+  options: FileScanOptions = {},
 ): Promise<{ files: FileEntry[]; projectCatalog: ProjectCatalogEntry[] }> {
+  const persist = options.persist !== false;
   const scan = includeProjectCatalog
-    ? await discoverFilesWithProjectCatalog(undefined, selectedProject)
+    ? await discoverFilesWithProjectCatalog(undefined, selectedProject, { persist })
     : { files: await discoverFiles(), projectCatalog: [] };
   const entries = scan.files;
   // The /proc fd scan is only needed to attribute background-task outputs to a
@@ -119,6 +125,6 @@ async function listFilesInternal(
     entry.goal = goalFor(entry);
     entry.ctx = ctxFor(entry);
   });
-  await linkEntries(entries, { persist: false });
+  await linkEntries(entries, { persist });
   return { files: entries, projectCatalog: scan.projectCatalog };
 }

@@ -13,6 +13,7 @@ export function serveRuntimeHost(socketPath: string, host: RuntimeHost): net.Ser
   fs.mkdirSync(path.dirname(socketPath), { recursive: true, mode: 0o700 });
   try { fs.unlinkSync(socketPath); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
   const server = net.createServer((socket) => {
+    socket.setTimeout(30_000, () => socket.destroy());
     let buffer = "";
     socket.on("data", (chunk) => {
       buffer += String(chunk);
@@ -24,12 +25,14 @@ export function serveRuntimeHost(socketPath: string, host: RuntimeHost): net.Ser
       try {
         const request = JSON.parse(frame) as RuntimeSocketRequest;
         if (!request.id || !request.method) throw new Error("runtime request is malformed");
-        socket.end(JSON.stringify(host.handle(request)) + "\n");
+        void host.handle(request).then((response) => socket.end(JSON.stringify(response) + "\n"));
       } catch {
         socket.end(JSON.stringify({ id: "unknown", ok: false, error: "runtime request is malformed" }) + "\n");
       }
     });
   });
+  server.maxConnections = 64;
+  server.once("listening", () => fs.chmodSync(socketPath, 0o600));
   server.listen(socketPath);
   return server;
 }

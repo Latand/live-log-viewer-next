@@ -1,44 +1,114 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import type { RuntimeEventInput, RuntimeSocketRequest, RuntimeSocketResponse } from "@/lib/runtime/contracts";
+import { RuntimeIdempotencyConflictError, type RuntimeEvent, type RuntimeEventInput, type RuntimeOperationCommand, type RuntimeSocketRequest, type RuntimeSocketResponse } from "@/lib/runtime/contracts";
+import { consumeRuntimeEvent, type RuntimeConsumerPorts } from "@/lib/runtime/consumers";
+import { procBackend } from "@/lib/proc";
 
 import { RuntimeJournal } from "./journal";
 
 export class RuntimeHostFence {
   private held = false;
-  constructor(private readonly filename: string) {}
+  constructor(
+    private readonly filename: string,
+    private readonly ownerAlive: (owner: { pid: number; startIdentity: string | null }) => boolean = (owner) =>
+      procBackend.pidAlive(owner.pid) && (owner.startIdentity === null || procBackend.processIdentity(owner.pid) === owner.startIdentity),
+  ) {}
   acquire(): void {
     fs.mkdirSync(path.dirname(this.filename), { recursive: true, mode: 0o700 });
-    try {
-      fs.writeFileSync(this.filename, JSON.stringify({ pid: process.pid, startedAt: Date.now() }), { flag: "wx", mode: 0o600 });
-      this.held = true;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "EEXIST") throw new Error("runtime host singleton fence is held");
-      throw error;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        fs.writeFileSync(this.filename, JSON.stringify({ pid: process.pid, startIdentity: procBackend.processIdentity(process.pid) }), { flag: "wx", mode: 0o600 });
+        this.held = true;
+        return;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        let stale = false;
+        try {
+          const owner = JSON.parse(fs.readFileSync(this.filename, "utf8")) as { pid: number; startIdentity?: string | null };
+          stale = Number.isInteger(owner.pid) && owner.pid > 0 && !this.ownerAlive({ pid: owner.pid, startIdentity: owner.startIdentity ?? null });
+        } catch {
+          stale = false;
+        }
+        if (!stale) throw new Error("runtime host singleton fence is held");
+        fs.rmSync(this.filename, { force: true });
+      }
     }
+    throw new Error("runtime host singleton fence is held");
   }
   release(): void { if (this.held) fs.rmSync(this.filename, { force: true }); this.held = false; }
 }
 
 export class RuntimeHost {
-  constructor(readonly journal: RuntimeJournal) {}
+  private consumerQueue: Promise<void> = Promise.resolve();
 
-  handle(request: RuntimeSocketRequest): RuntimeSocketResponse {
+  constructor(readonly journal: RuntimeJournal, private readonly consumers?: RuntimeConsumerPorts) {}
+
+  async recoverConsumers(): Promise<number> {
+    if (!this.consumers) return 0;
+    return this.runConsumerExclusive(async () => {
+      let recovered = 0;
+      while (true) {
+        const events = this.journal.unconsumedEvents("orchestration");
+        if (events.length === 0) return recovered;
+        for (const event of events) {
+          await this.consume(event);
+          recovered += 1;
+        }
+      }
+    });
+  }
+
+  private runConsumerExclusive<T>(work: () => Promise<T>): Promise<T> {
+    const run = this.consumerQueue.then(work);
+    this.consumerQueue = run.then(() => undefined, () => undefined);
+    return run;
+  }
+
+  private consumeExclusive(event: RuntimeEvent): Promise<void> {
+    if (!this.consumers) return Promise.resolve();
+    return this.runConsumerExclusive(() => this.consume(event));
+  }
+
+  private async consume(event: RuntimeEvent): Promise<void> {
+    if (!this.consumers || this.journal.consumerCompleted(event.eventId, "orchestration")) return;
+    const session = event.scope.type === "session" ? this.journal.sessionState(event.scope.id) : null;
+    const consumerEvent = session?.flowId && event.kind === "turn-ended" && typeof event.payload.flowId !== "string"
+      ? { ...event, payload: { ...event.payload, flowId: session.flowId } }
+      : event;
+    for (const projection of await consumeRuntimeEvent(consumerEvent, this.consumers)) {
+      await this.consume(this.journal.append(projection));
+    }
+    this.journal.markConsumerCompleted(event.eventId, "orchestration");
+  }
+
+  async handle(request: RuntimeSocketRequest): Promise<RuntimeSocketResponse> {
     try {
       let result: unknown;
       if (request.method === "snapshot") result = this.journal.snapshot();
       else if (request.method === "events") result = this.journal.replay(Number(request.params?.after ?? 0));
+      else if (request.method === "wait") result = await this.journal.waitForEvents(Number(request.params?.after ?? 0), Number(request.params?.timeoutMs ?? 15_000));
       else if (request.method === "append" || request.method === "operation") {
         const event = request.params?.event as RuntimeEventInput;
         const appended = this.journal.append(event);
+        await this.consumeExclusive(appended);
         result = request.method === "operation" && event.operationId
           ? { operationId: event.operationId, state: "accepted", seq: appended.seq, revision: appended.revision }
           : appended;
+      } else if (request.method === "command") {
+        result = this.journal.executeOperation(request.params?.command as RuntimeOperationCommand);
+        await this.recoverConsumers();
+      } else if (request.method === "operation-status") {
+        result = this.journal.operationResult(String(request.params?.operationId ?? ""));
       } else throw new Error("runtime request method is unsupported");
       return { id: request.id, ok: true, result };
     } catch (error) {
-      return { id: request.id, ok: false, error: error instanceof Error ? error.message : "runtime request failed" };
+      return {
+        id: request.id,
+        ok: false,
+        error: error instanceof Error ? error.message : "runtime request failed",
+        ...(error instanceof RuntimeIdempotencyConflictError ? { code: error.code } : {}),
+      };
     }
   }
 }
