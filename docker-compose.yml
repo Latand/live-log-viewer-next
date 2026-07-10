@@ -37,14 +37,19 @@ services:
   # Viewer replacement lifecycle; deployment and cutover remain operator work.
   runtime-host:
     <<: *viewer-common
+    restart: unless-stopped
     profiles:
       - runtime-host
-    command: ["bun", "run", "src/runtime-host/main.ts"]
+    # bun-container is the real in-image bun; plain `bun` is the nsenter shim
+    # to the host and remaps /app to $HOME, so the module is never found.
+    command: ["bun-container", "run", "src/runtime-host/main.ts"]
     environment:
       HOME: /home/latand
       XDG_CONFIG_HOME: /home/latand/.config
       XDG_CACHE_HOME: /home/latand/.cache
-      LLV_RUNTIME_EVENTS: ${LLV_RUNTIME_EVENTS:-0}
+      # The profile gate is the activation switch; a started runtime-host is
+      # always an events host (main.ts refuses to boot without the flag).
+      LLV_RUNTIME_EVENTS: ${LLV_RUNTIME_EVENTS:-1}
       LLV_RUNTIME_LEGACY_SCHEDULER: ${LLV_RUNTIME_LEGACY_SCHEDULER:-0}
       LLV_RUNTIME_HOST_SOCKET: ${LLV_RUNTIME_HOST_SOCKET:-/home/latand/.config/agent-log-viewer/state/runtime-host.sock}
       LLV_RUNTIME_JOURNAL: ${LLV_RUNTIME_JOURNAL:-/home/latand/.config/agent-log-viewer/state/runtime-events.sqlite}

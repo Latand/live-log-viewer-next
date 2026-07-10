@@ -44,6 +44,13 @@ apt-get install -y --no-install-recommends \
   python3-venv \
   util-linux
 rm -rf /var/lib/apt/lists/*
+# A real in-container bun for first-party services (runtime-host). It must
+# live under a name the nsenter shims never claim: the `bun` shim below
+# redirects to the HOST bun and remaps any cwd outside /home/latand to $HOME,
+# which broke `bun run src/runtime-host/main.ts` with "Module not found".
+npm install -g bun@1.2.18
+cp "$(realpath /usr/local/bin/bun)" /usr/local/bin/bun-container
+chmod +x /usr/local/bin/bun-container
 chmod u+s /usr/bin/nsenter
 python3 -m venv /opt/llv-whisper-venv
 /opt/llv-whisper-venv/bin/pip install --no-cache-dir --upgrade pip
