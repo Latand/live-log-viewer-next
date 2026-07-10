@@ -227,7 +227,7 @@ test("Claude cleanup cancels only the pane PID recorded by the losing receipt", 
     host: { kind: "claude-stream" as const, identity: "%7:77", epoch: 1, verifiedAt: "2026-07-10T12:00:00.000Z", tmuxHost: claudeHost("%7", 77) },
   };
 
-  await provider.cleanup(receipt);
+  await expect(provider.cleanup(receipt)).rejects.toThrow("cleanup is still pending");
   expect(cancelled).toEqual([]);
   observedPid = 77;
   await provider.cleanup(receipt);

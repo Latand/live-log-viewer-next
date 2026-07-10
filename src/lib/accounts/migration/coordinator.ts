@@ -26,7 +26,7 @@ import {
   type SuccessorProviderPort,
   type ViewerConversationId,
 } from "./contracts";
-import { RegisteredSuccessorProvider, SuccessorPendingError } from "./provider";
+import { CodexForkOutcomeUnknownError, RegisteredSuccessorProvider, SuccessorPendingError } from "./provider";
 import { safeProviderDiagnostic, sanitizeProviderError } from "./safeHistoryCopy";
 import { turnStateFromRecords } from "./turnState";
 import { AUTO_BALANCE_COOLDOWN_MS } from "./quotaPolicy";
@@ -283,14 +283,24 @@ async function cleanupDiscardedSuccessor(
   provider: SuccessorProviderPort,
   receipt: ProviderReceipt | null,
   latest: RegistryConversation,
+  registry: AgentRegistry,
 ): Promise<void> {
   if (!receipt) return;
   const committed = latest.migration?.phase === "committed";
   const current = latest.generations.at(-1);
   const ownsCommittedHost = current?.host !== null && current?.host !== undefined
     && sameGenerationHostEvidence(current.host, receipt.host);
-  if (committed && current?.id === receipt.nativeId && current.path === receipt.path && ownsCommittedHost) return;
-  try { await provider.cleanup?.(receipt); } catch { /* cleanup is best effort after a fenced result */ }
+  if (committed && current?.id === receipt.nativeId && current.path === receipt.path && ownsCommittedHost) {
+    registry.completeSuccessorCleanup(receipt.operationId);
+    return;
+  }
+  registry.queueSuccessorCleanup(latest.id, receipt);
+  try {
+    await provider.cleanup?.(receipt);
+    registry.completeSuccessorCleanup(receipt.operationId);
+  } catch (error) {
+    registry.recordSuccessorCleanupFailure(receipt.operationId, error instanceof Error ? error.message : String(error));
+  }
 }
 
 export async function advanceConversationMigration(
@@ -380,7 +390,7 @@ export async function advanceConversationMigration(
       || terminalMigrationPhase(latest.migration.phase)
       || fencedByDurableReceipt
     )) {
-      await cleanupDiscardedSuccessor(successorProvider, receipt, latest);
+      await cleanupDiscardedSuccessor(successorProvider, receipt, latest, registry);
       if (!options.deferBoardRepair) repairCommittedBoardSuccessions(
         [latest],
         registry,
@@ -396,13 +406,15 @@ export async function advanceConversationMigration(
       targetAccountId: migration.targetId,
       error: safeProviderDiagnostic(error),
     });
-    const safe = sanitizeProviderError(error);
+    const safe = error instanceof CodexForkOutcomeUnknownError
+      ? { message: "Codex fork outcome is awaiting recovery", code: "codex-fork-outcome-unknown" }
+      : sanitizeProviderError(error);
     const failed = registry.transitionConversationMigration(conversation.id, migration.revision, ["requested", "preparing", "successor-starting", "verifying"], {
       phase: "failed-recoverable",
       error: safe.message,
       errorCode: safe.code,
     });
-    await cleanupDiscardedSuccessor(successorProvider, receipt, failed);
+    await cleanupDiscardedSuccessor(successorProvider, receipt, failed, registry);
     return failed;
   }
 }
@@ -436,6 +448,10 @@ export async function reconcileMigrations(
   options: MigrationCoordinatorOptions = {},
 ): Promise<void> {
   const before = registry.snapshot();
+  for (const pending of Object.values(before.pendingSuccessorCleanups)) {
+    const owner = registry.conversation(pending.conversationId);
+    if (owner) await cleanupDiscardedSuccessor(provider, pending.receipt, owner, registry);
+  }
   const pendingDeliveries = new Set(Object.values(before.heldDeliveries)
     .filter((item) => item.state !== "delivered" && item.state !== "delivery-uncertain")
     .map((item) => item.conversationId));

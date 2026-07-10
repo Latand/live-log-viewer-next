@@ -41,6 +41,13 @@ export class SuccessorPendingError extends Error {
   }
 }
 
+export class CodexForkOutcomeUnknownError extends Error {
+  constructor(message = "Codex provider fork outcome is unknown") {
+    super(message);
+    this.name = "CodexForkOutcomeUnknownError";
+  }
+}
+
 const defaultDependencies: ProviderDependencies = {
   accounts: accountManager,
   startCodex: (home) => CodexAppServerClient.start({ home }),
@@ -371,7 +378,7 @@ function recoverCodexFork(
   if (journal.forkRequestedAtMs === null) return null;
   const candidates = scan(journal.sourceRoot, journal.sourceNativeId, journal.forkRequestedAtMs)
     .map((candidate) => validatedCodexFork(candidate, journal.sourceNativeId, journal.sourceRoot));
-  if (candidates.length > 1) throw new Error("Codex provider fork ownership is ambiguous");
+  if (candidates.length > 1) throw new CodexForkOutcomeUnknownError("Codex provider fork ownership is ambiguous");
   return candidates[0] ?? null;
 }
 
@@ -462,7 +469,8 @@ export class RegisteredSuccessorProvider implements SuccessorProviderPort {
     if (receipt.host.kind !== "claude-stream") return;
     const host = claudeTmuxHostFromReceipt(receipt);
     const cancelled = await this.dependencies.cancelClaude?.(host);
-    if (cancelled) await forgetResumePaneIfMatches(receipt.path, host);
+    if (!cancelled) throw new Error("successor Claude host cleanup is still pending");
+    await forgetResumePaneIfMatches(receipt.path, host);
   }
 
   private async createClaude(
@@ -639,6 +647,7 @@ export class RegisteredSuccessorProvider implements SuccessorProviderPort {
       assertLeaseOwned();
       writeCodexOperationJournal(journalRoot, journal);
     }
+    if (!fork && !prepared.fresh && journal.forkRequestedAtMs !== null) throw new CodexForkOutcomeUnknownError();
     if (!fork) {
       const sourceClient = await this.dependencies.startCodex(source.home);
       let created: Awaited<ReturnType<CodexAppServerClient["forkThread"]>>;
@@ -648,7 +657,11 @@ export class RegisteredSuccessorProvider implements SuccessorProviderPort {
         journal.forkRequestedAtMs = Date.now();
         assertLeaseOwned();
         writeCodexOperationJournal(journalRoot, journal);
-        created = await sourceClient.forkThread(sourceNativeId);
+        try {
+          created = await sourceClient.forkThread(sourceNativeId);
+        } catch (error) {
+          throw new CodexForkOutcomeUnknownError(error instanceof Error ? error.message : String(error));
+        }
         this.dependencies.afterCodexForkReturned?.();
       } finally { sourceClient.close(); }
       const reportedSourceFork = created.path ?? findCodexRollout(source.transcriptRoot, created.id);

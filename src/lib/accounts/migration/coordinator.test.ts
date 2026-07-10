@@ -8,7 +8,7 @@ import { boardFor, mutateBoard, setBoardFileForTests } from "@/lib/board/store";
 
 import { advanceConversationMigration, drainHeldDeliveries, previewMigration, reconcileMigrations } from "./coordinator";
 import { emptyLaunchProfile, type ProviderReceipt, type SuccessorProviderPort } from "./contracts";
-import { SuccessorPendingError } from "./provider";
+import { CodexForkOutcomeUnknownError, SuccessorPendingError } from "./provider";
 
 const roots: string[] = [];
 
@@ -1062,6 +1062,48 @@ describe("durable account migration coordinator", () => {
     const latest = await advanceConversationMigration(conversation.id, store, staleProvider);
     expect(latest.migration).toMatchObject({ targetId: "c", phase: "requested" });
     expect(latest.generations).toHaveLength(1);
+  });
+
+  test("retry preserves an ambiguous Codex fork operation id", async () => {
+    const store = registry();
+    store.reconcileConversations([observation("/source.jsonl", "a", "idle")]);
+    const conversation = store.conversationForPath("/source.jsonl")!;
+    store.commitMigrationIntent({ engine: "codex", targetId: "b", origin: "manual", requestId: "ambiguous-fork", expectedRevision: store.engineRouting("codex").revision });
+    const operations: string[] = [];
+    const ambiguousProvider: SuccessorProviderPort = {
+      async create(input) {
+        operations.push(input.operationId);
+        if (operations.length === 1) throw new CodexForkOutcomeUnknownError();
+        input.recordContinuityPath("/recovered-fork.jsonl");
+        return { operationId: input.operationId, nativeId: "recovered", path: "/recovered.jsonl", continuityPaths: ["/recovered-fork.jsonl"], historyHash: "hash", host: { kind: "codex-app-server", identity: "recovered", epoch: 1, verifiedAt: "now" } };
+      },
+      async verify() {},
+    };
+    const failed = await advanceConversationMigration(conversation.id, store, ambiguousProvider);
+    expect(failed).toMatchObject({ migration: { phase: "failed-recoverable", errorCode: "codex-fork-outcome-unknown" } });
+    store.retryConversationMigration(conversation.id, failed.migration!.revision);
+    const committed = await advanceConversationMigration(conversation.id, store, ambiguousProvider);
+    expect(committed.migration?.phase).toBe("committed");
+    expect(operations).toEqual([operations[0]!, operations[0]!]);
+  });
+
+  test("reconciliation retries a durable stale-successor cleanup after restart", async () => {
+    const store = registry();
+    store.reconcileConversations([observation("/source.jsonl", "a", "idle")]);
+    const conversation = store.conversationForPath("/source.jsonl")!;
+    store.commitMigrationIntent({ engine: "codex", targetId: "b", origin: "manual", requestId: "cleanup-retry", expectedRevision: store.engineRouting("codex").revision });
+    let cleanupAttempts = 0;
+    const cleanupProvider: SuccessorProviderPort = {
+      async create(input) { return { operationId: input.operationId, nativeId: "stale", path: "/stale.jsonl", continuityPaths: [], historyHash: "hash", host: { kind: "claude-stream", identity: "%9:99", epoch: 1, verifiedAt: "now" } }; },
+      async verify() { throw new Error("verification failed"); },
+      async cleanup() { cleanupAttempts += 1; if (cleanupAttempts === 1) throw new Error("tmux unavailable"); },
+    };
+    await advanceConversationMigration(conversation.id, store, cleanupProvider);
+    expect(Object.keys(store.snapshot().pendingSuccessorCleanups)).toHaveLength(1);
+    const restarted = new AgentRegistry(store.filename);
+    await reconcileMigrations(cleanupProvider, { async deliver() { return "delivered"; } }, restarted);
+    expect(cleanupAttempts).toBe(2);
+    expect(Object.keys(restarted.snapshot().pendingSuccessorCleanups)).toHaveLength(0);
   });
 
   test("a return-to-source retarget cleans a stale successor after clearing migration state", async () => {

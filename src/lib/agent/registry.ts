@@ -166,6 +166,7 @@ export interface RegistryFile {
   autoBalance: Record<Extract<AgentEngine, "claude" | "codex">, AutoBalancePolicy>;
   quotaObservations: Record<Extract<AgentEngine, "claude" | "codex">, Record<string, DurableQuotaObservation>>;
   heldDeliveries: Record<string, HeldDelivery>;
+  pendingSuccessorCleanups: Record<string, { conversationId: ViewerConversationId; receipt: ProviderReceipt; createdAt: string; lastError: string | null }>;
 }
 
 type ConversationMigrationInput = Omit<ConversationMigration, "errorCode" | "operationId" | "sourceGenerationId" | "providerReceipt" | "boardProject" | "boardOperationId" | "boardPlacementProject"> &
@@ -218,6 +219,7 @@ const EMPTY: RegistryFile = {
   autoBalance: { claude: emptyPolicy(), codex: emptyPolicy() },
   quotaObservations: { claude: {}, codex: {} },
   heldDeliveries: {},
+  pendingSuccessorCleanups: {},
 };
 
 export class RegistryReadError extends Error {}
@@ -466,6 +468,9 @@ function readFile(filename: string): RegistryFile {
         : clone(EMPTY.quotaObservations),
       heldDeliveries: parsed.heldDeliveries && typeof parsed.heldDeliveries === "object"
         ? Object.fromEntries(Object.entries(parsed.heldDeliveries).map(([id, delivery]) => [id, normalizeHeldDelivery(delivery)]))
+        : {},
+      pendingSuccessorCleanups: parsed.pendingSuccessorCleanups && typeof parsed.pendingSuccessorCleanups === "object"
+        ? parsed.pendingSuccessorCleanups
         : {},
     };
   } catch (error) {
@@ -1336,7 +1341,7 @@ export class AgentRegistry {
         phase: conversation.turn.state === "busy" || conversation.turn.state === "unknown" ? "waiting-turn" : "requested",
         targetId: intent.targetId,
         revision: intent.revision,
-        operationId: crypto.randomUUID(),
+        operationId: current.errorCode === "codex-fork-outcome-unknown" ? current.operationId : crypto.randomUUID(),
         sourceGenerationId: source.id,
         providerReceipt: null,
         boardProject: current.boardProject,
@@ -1527,6 +1532,26 @@ export class AgentRegistry {
     return Object.values(snapshot.heldDeliveries)
       .filter((item) => item.conversationId === canonicalId && item.state !== "delivered")
       .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id));
+  }
+
+  queueSuccessorCleanup(conversationId: ViewerConversationId, receipt: ProviderReceipt): void {
+    this.mutate((file) => {
+      const existing = file.pendingSuccessorCleanups[receipt.operationId];
+      file.pendingSuccessorCleanups[receipt.operationId] = existing ?? {
+        conversationId: resolveConversationAlias(file, conversationId), receipt, createdAt: now(), lastError: null,
+      };
+    });
+  }
+
+  recordSuccessorCleanupFailure(operationId: string, error: string): void {
+    this.mutate((file) => {
+      const pending = file.pendingSuccessorCleanups[operationId];
+      if (pending) pending.lastError = error.slice(0, 240);
+    });
+  }
+
+  completeSuccessorCleanup(operationId: string): void {
+    this.mutate((file) => { delete file.pendingSuccessorCleanups[operationId]; });
   }
 
   beginDeliveryAttempt(id: string, generationId: string): HeldDelivery | null {
