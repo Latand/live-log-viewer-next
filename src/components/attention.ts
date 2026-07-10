@@ -3,8 +3,8 @@ import type { FileEntry } from "@/lib/types";
 import { projectKey } from "./projectModel";
 
 /**
- * The attention queue: which agents are blocked on the user right now, oldest
- * wait first. Pure derived state over the polled file list — every surface
+ * The attention queue: which agents need operator attention right now, oldest
+ * signal first. Pure derived state over the polled file list — every surface
  * (badge, popover, title, N-cycle, push/toast seen-sets) derives identity from
  * the one `attentionId` helper here so counts and dedupe keys cannot drift.
  */
@@ -13,7 +13,7 @@ import { projectKey } from "./projectModel";
  * Attention severity tiers, highest first:
  * - «unowned» — a hosted approval with no attached owner (a first-class alarm,
  *   issue #25 R10-5); always sorts to the queue head.
- * - «blocked» — a hard structured question/prompt.
+ * - «blocked» — a hard question, prompt, or rate-limit wall.
  * - «heuristic» — a low-confidence "possibly waiting" signal (turn-ended +
  *   idle + nothing pending); visually distinct, ranks below hard blocks.
  * - «stalled» — an interrupted agent (FIFO tail segment).
@@ -55,8 +55,8 @@ function isoSeconds(iso: string): number | null {
 
 /**
  * The shared attention identity of a file, by signal precedence:
- * a structured question wins over the screen-scrape fallback, which wins over
- * the stalled state; anything else is not in the queue. The id doubles as the
+ * a structured question wins, followed by a rate-limit wall, the screen-scrape
+ * fallback, and the stalled state. The id doubles as the
  * dedupe key of the toast and push pipelines, so the formats here must stay
  * byte-identical to the historical inline derivations (`push-sent.json`
  * entries survive the refactor).
@@ -77,8 +77,8 @@ export function attentionId(file: FileEntry, now: number = Date.now() / 1000): s
 }
 
 /**
- * Ordered queue of everyone blocked on the user: hard-blocked segment first,
- * stalled tail after, oldest wait first inside each segment, id as the
+ * Ordered queue of every agent needing operator attention: hard-blocked segment
+ * first, stalled tail after, oldest signal first inside each segment, id as the
  * tie-breaker. The sort keys are frozen at enqueue (`since` never moves while
  * the id is unchanged), so polls cannot reshuffle the order.
  */

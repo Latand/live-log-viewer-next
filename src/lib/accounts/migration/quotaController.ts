@@ -92,7 +92,6 @@ export class QuotaController {
   ) {}
 
   async tick(engine: MigrationEngine): Promise<void> {
-    if (!this.registry.autoBalancePolicy(engine).enabled) return;
     const now = this.now();
     const accounts = this.probe.list(engine);
     const observations = await mapLimit(accounts, 2, async (account) => {

@@ -8,25 +8,52 @@ import type { CodexAccount } from "@/lib/accounts/codex";
 
 import { QuotaController, type QuotaProbePort } from "./quotaController";
 
-test("durable per-engine policy is the quota evaluation guard", async () => {
+test("quota visibility remains fresh when automatic balancing is disabled", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "llv-quota-controller-"));
   try {
     const registry = new AgentRegistry(path.join(root, "registry.json"));
     let listed = 0;
+    let current = Date.parse("2026-07-10T12:00:00.000Z");
+    const accounts: CodexAccount[] = [
+      { id: "default", label: "Main", kind: "legacy", home: "/homes/main", sessionsDir: "/homes/main/sessions", authPresent: true, loginPane: null, createdAt: 0 },
+      { id: "managed", label: "Managed", kind: "managed", home: "/homes/managed", sessionsDir: "/homes/managed/sessions", authPresent: true, loginPane: null, createdAt: 1 },
+    ];
     const probe: QuotaProbePort = {
-      list() { listed += 1; return []; },
+      list() { listed += 1; return accounts; },
       active() { return "default"; },
-      async probe() { throw new Error("no account should be probed"); },
+      async probe(engine, candidate, now) {
+        return {
+          engine,
+          accountId: candidate.id,
+          authenticated: true,
+          authCheckedAt: now,
+          limits: {
+            session: { usedPercent: candidate.id === "default" ? 100 : 10, resetsAt: Math.floor(now / 1000) + 3_600 },
+            weekly: null,
+            plan: "pro",
+            capturedAt: Math.floor(now / 1000),
+          },
+          provenance: { source: "live", reason: null, staleSince: null },
+          observedAt: now,
+        };
+      },
     };
-    const controller = new QuotaController(registry, probe, "00000000-0000-4000-8000-000000000000", () => Date.parse("2026-07-10T12:00:00.000Z"));
+    const controller = new QuotaController(registry, probe, "00000000-0000-4000-8000-000000000000", () => current);
 
     registry.setAutoBalancePolicy("codex", false);
     await controller.tick("codex");
-    expect(listed).toBe(0);
-
-    registry.setAutoBalancePolicy("codex", true);
+    current += 60_000;
     await controller.tick("codex");
-    expect(listed).toBe(1);
+    expect(listed).toBe(2);
+    expect(registry.snapshot().quotaObservations.codex.default).toMatchObject({
+      authenticated: true,
+      limits: { session: { usedPercent: 100 } },
+    });
+    expect(registry.snapshot().quotaObservations.codex.managed).toMatchObject({
+      authenticated: true,
+      limits: { session: { usedPercent: 10 } },
+    });
+    expect(Object.values(registry.snapshot().migrationIntents)).toHaveLength(0);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

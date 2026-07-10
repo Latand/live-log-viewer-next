@@ -91,6 +91,22 @@ test("fresh exhausted account limits become a structured rate-limit signal", () 
   }, NOW)).toBeNull();
 });
 
+test("an unknown exhausted-window reset suppresses a misleading badge time", () => {
+  const limited = observation(100);
+  expect(rateLimitFromQuotaObservation({
+    ...limited,
+    limits: {
+      ...limited.limits,
+      weekly: { usedPercent: 100, resetsAt: null },
+    },
+  }, NOW)).toMatchObject({
+    source: "account",
+    accountId: "main",
+    window: "weekly",
+    resetAt: null,
+  });
+});
+
 test("reviewer-side flow work keeps its own state while the implementer account is exhausted", () => {
   const reviewing = { ...flow(), state: "reviewing" as const };
   const snapshot = {

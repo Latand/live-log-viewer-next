@@ -39,11 +39,8 @@ export function rateLimitFromQuotaObservation(
   if (!exhausted.length) return null;
   const activeExhausted = exhausted.filter((item) => item.resetAt === null || item.resetAt * 1000 > now);
   if (!activeExhausted.length) return null;
-  const governing = activeExhausted
-    .filter((item) => item.resetAt !== null && item.resetAt * 1000 > now)
-    .sort((left, right) => right.resetAt! - left.resetAt!)[0]
-    ?? activeExhausted.find((item) => item.window === remaining.window)
-    ?? activeExhausted[0]!;
+  const governing = activeExhausted.find((item) => item.resetAt === null)
+    ?? activeExhausted.sort((left, right) => right.resetAt! - left.resetAt!)[0]!;
   return {
     source: "account",
     accountId: observation.accountId,

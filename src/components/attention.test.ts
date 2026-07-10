@@ -44,14 +44,22 @@ function waiting(since: number): WaitingInput {
 }
 
 describe("attentionId", () => {
-  test("precedence: question > waiting > stalled > null", () => {
+  test("precedence: question > rate limit > waiting > stalled > null", () => {
     const both = entry({
       path: "/q",
       activity: "stalled",
       pendingQuestion: question("toolu_1", NOW - 10),
+      rateLimit: { source: "pane", accountId: null, window: null, resetAt: NOW + 60 },
       waitingInput: waiting(NOW - 20),
     });
     expect(attentionId(both, NOW)).toBe("toolu_1");
+    const limited = entry({
+      path: "/limited",
+      activity: "stalled",
+      rateLimit: { source: "pane", accountId: null, window: null, resetAt: NOW + 60 },
+      waitingInput: waiting(NOW - 20),
+    });
+    expect(attentionId(limited, NOW)).toBe(`/limited:rate-limited:${NOW + 60}`);
     const wait = entry({ path: "/w", activity: "stalled", waitingInput: waiting(NOW - 20) });
     expect(attentionId(wait, NOW)).toBe(`/w:waiting:${NOW - 20}`);
     const stalled = entry({ path: "/s", activity: "stalled", proc: "running", mtime: NOW - 300 });
