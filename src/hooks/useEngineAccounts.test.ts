@@ -539,6 +539,34 @@ test("retryLogin replaces the login on 202 and reports login_busy on 409 (C12f)"
   unsub();
 });
 
+test("a stale device hydrates the active login after login_busy and starts fast polling", async () => {
+  const timers = withCapturedTimers();
+  try {
+    const activeElsewhere = loginView({ operationId: "op-other-device", phase: "awaiting_browser", acceptsCode: false });
+    let currentLogin: unknown = null;
+    const { calls, fetcher } = scripted((url, body) => {
+      if (url === "/api/accounts") return { claude: { active: "main", accounts: [claudeAcct({ login: currentLogin })] } };
+      if (url === "/api/accounts/claude" && (body as { action?: string }).action === "retry") {
+        currentLogin = activeElsewhere;
+        return new Response(JSON.stringify({ error: "busy", code: "login_busy" }), { status: 409 });
+      }
+      return new Response(null, { status: 204 });
+    });
+    const store = createEngineAccountsStore("claude", { fetcher });
+    const unsub = store.subscribe(() => {});
+    await advance();
+    expect(store.accounts.find((account) => account.id === "acc")?.login).toBeNull();
+    const ok = await store.retryLogin("acc");
+
+    expect(ok).toBeFalse();
+    expect(calls.filter((call) => call.url === "/api/accounts").length).toBe(2);
+    expect(store.accounts.find((account) => account.id === "acc")?.login).toEqual(expect.objectContaining({ operationId: "op-other-device", phase: "awaiting_browser" }));
+    expect(timers.active()?.ms).toBe(2_500);
+    expect(store.notice?.messageKey).toBe("accounts.claudeLogin.err.login_busy");
+    unsub();
+  } finally { timers.restore(); }
+});
+
 test("a non-202 claude add keeps the add retry action with the draft label (C12g)", async () => {
   const { fetcher } = scripted((url) => {
     if (url === "/api/accounts") return { claude: { active: "main", accounts: [claudeMain] } };

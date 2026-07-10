@@ -47,6 +47,7 @@ export interface ClaudeLoginPorts {
   kill(pid: number, signal: NodeJS.Signals): void;
   pidStartToken(pid: number): string | null;
   isExpectedClaude(pid: number): boolean;
+  waitForExit(pid: number, startToken: string): Promise<void>;
   status(home: string): Promise<{ loggedIn: boolean; method: string | null; email: string | null; plan: string | null }>;
   now(): number;
   setTimeout(callback: () => void, ms: number): NodeJS.Timeout;
@@ -55,6 +56,12 @@ export interface ClaudeLoginPorts {
 
 function procStartToken(pid: number): string | null {
   try { return fs.readFileSync(`/proc/${pid}/stat`, "utf8").split(" ")[21] ?? null; } catch { return null; }
+}
+
+async function waitForProcessExit(pid: number, startToken: string): Promise<void> {
+  while (procStartToken(pid) === startToken) {
+    await new Promise<void>((resolve) => setTimeout(resolve, 25));
+  }
 }
 
 export function isExpectedClaudeLoginCommand(commandLine: string): boolean {
@@ -95,6 +102,7 @@ export const realClaudeLoginPorts: ClaudeLoginPorts = {
   kill: (pid, signal) => { try { process.kill(-pid, signal); } catch { try { process.kill(pid, signal); } catch { /* process already exited */ } } },
   pidStartToken: procStartToken,
   isExpectedClaude: expectedClaude,
+  waitForExit: waitForProcessExit,
   status: structuredStatus,
   now: Date.now,
   setTimeout,
@@ -164,7 +172,15 @@ export class ClaudeLoginSupervisor {
   private closed = new Map<string, Promise<void>>();
   private generation = 0;
 
-  constructor(private readonly ports: ClaudeLoginPorts = realClaudeLoginPorts, private readonly store: ClaudeLoginStore = fileClaudeLoginStore) { this.reconcilePersisted(); }
+  private readonly recovery: Promise<void>;
+
+  constructor(private readonly ports: ClaudeLoginPorts = realClaudeLoginPorts, private readonly store: ClaudeLoginStore = fileClaudeLoginStore) {
+    this.recovery = this.reconcilePersisted();
+  }
+
+  /** Waits for persisted login recovery. Tests and startup callers can use this
+      before reading a terminal recovery result. */
+  whenRecovered(): Promise<void> { return this.recovery; }
 
   private persist(): void {
     const data = [...this.operations.values()]
@@ -414,27 +430,42 @@ export class ClaudeLoginSupervisor {
     return item ? this.summary(item) : null;
   }
 
-  private reconcilePersisted(): void {
+  private async terminateInherited(item: LoginOperation): Promise<boolean> {
+    if (!this.ownsProcess(item)) return true;
+    this.terminate(item, "SIGTERM");
+    await this.ports.waitForExit(item.pid, item.startToken);
+    if (!this.ownsProcess(item)) return true;
+    this.terminate(item, "SIGKILL");
+    await this.ports.waitForExit(item.pid, item.startToken);
+    return !this.ownsProcess(item);
+  }
+
+  private async reconcilePersisted(): Promise<void> {
     try {
       const rows = this.store.load();
       for (const row of rows) {
         if (!validPersistedOperation(row)) continue;
         this.generation = Math.max(this.generation, row.generation);
-        const safeCredentials = typeof row.accountId === "string" && (() => {
-          try {
-            const account = claudeAccountForSpawn(row.accountId);
-            return account.kind === "managed" && managedClaudeCredentialIsSafe(account.home, true);
-          } catch { return false; }
-        })();
         const inherited: LoginOperation = { ...row, loginUrl: null, acceptsCode: false, result: null, submitted: false };
-        this.terminate(inherited, "SIGTERM");
-        if (inherited.pid !== null && inherited.startToken !== null) {
-          this.ports.setTimeout(() => this.terminate(inherited, "SIGKILL"), TERM_GRACE_MS);
+        this.operations.set(inherited.operationId, { ...inherited, phase: "canceling" });
+        this.persist();
+
+        const terminated = await this.terminateInherited(inherited);
+        let authenticated = false;
+        if (terminated && typeof inherited.accountId === "string") {
+          try {
+            const account = claudeAccountForSpawn(inherited.accountId);
+            if (account.kind === "managed" && managedClaudeCredentialIsSafe(account.home, true)) {
+              const status = await this.ports.status(account.home);
+              authenticated = status.loggedIn;
+            }
+          } catch { /* recovery publishes interruption when verification fails */ }
         }
+
         this.operations.set(inherited.operationId, {
           ...inherited,
-          phase: safeCredentials ? "authenticated" : "interrupted",
-          result: safeCredentials
+          phase: authenticated ? "authenticated" : "interrupted",
+          result: authenticated
             ? loginResult("success", "authenticated", "Claude authentication completed")
             : loginResult("failure", "interrupted", "Claude login was interrupted by restart"),
           pid: null,
