@@ -80,6 +80,10 @@ const claudeSend = (id: string, to: string, message: string) =>
 const codexUserResponse = (timestamp: string, content: Record<string, unknown>[]) =>
   JSON.stringify({ type: "response_item", timestamp, payload: { type: "message", role: "user", content } });
 const codexUserEvent = (timestamp: string, message: string) => JSON.stringify({ type: "event_msg", timestamp, payload: { type: "user_message", message } });
+const codexAssistantResponse = (timestamp: string, text: string) =>
+  JSON.stringify({ type: "response_item", timestamp, payload: { type: "message", role: "assistant", phase: "commentary", content: [{ type: "output_text", text }] } });
+const codexAssistantEvent = (timestamp: string, message: string) =>
+  JSON.stringify({ type: "event_msg", timestamp, payload: { type: "agent_message", phase: "commentary", message } });
 const codexUserPair = (timestamp: string, text: string) => [codexUserResponse(timestamp, [{ type: "input_text", text }]), codexUserEvent(timestamp, text)];
 const codexReasoning = (timestamp: string) => JSON.stringify({ type: "response_item", timestamp, payload: { type: "reasoning" } });
 
@@ -452,6 +456,114 @@ describe("Codex user-turn coalescing", () => {
     expect(itemsOfKind({ items: echoOnly.items.map((entry) => entry.item), hiddenServiceCount: echoOnly.hiddenServiceCount }, "user")).toHaveLength(1);
     assertParity(codexFile, [response, echo, next], { chunks: [2, 1], cap: 2 });
     assertParity(codexFile, [response, echo, next], { chunks: [1], cap: 1 });
+  });
+});
+
+describe("Codex assistant prose coalescing", () => {
+  test("coalesces production-shaped echoes in either record order and gives the event timestamp ownership", () => {
+    const sevenMsText = "Причина `sudo` тоже найдена точно: сокет Docker имеет права `root:docker`, пользователь `latand` уже записан в группу `docker`, однако текущая login-сессия запущена без этой дополнительной группы. Host network, PID namespace и маунты к этому отношения не имеют. После нового входа в сессию группа подхватится; для текущей оболочки можно запускать через `sg docker -c ...`. Проверяю доступ этим способом без изменения системы.";
+    const zeroMsText = "Account-switch UI готов и закоммичен: bare `select()` удалён, обе поверхности используют preview → confirm/migrate, активный аккаунт можно нажать для ремонта застрявших поколений, retry получает свежую revision. Переношу UI-коммит в общую ветку и запускаю интеграционную проверку backend+frontend. После неё будет один свежий независимый review-round.";
+    const productionOrder = [
+      JSON.stringify({ type: "event_msg", timestamp: "2026-07-10T07:05:12.128Z", payload: { type: "agent_message", message: sevenMsText, phase: "commentary", memory_citation: null } }),
+      JSON.stringify({ type: "response_item", timestamp: "2026-07-10T07:05:12.135Z", payload: { type: "message", id: "msg_0393b5967eeb6b3d016a5099a6c6f881918750dcfe9b95b684", role: "assistant", content: [{ type: "output_text", text: sevenMsText }], phase: "commentary" } }),
+    ];
+    const reversedOrder = [
+      JSON.stringify({ type: "response_item", timestamp: "2026-07-10T07:05:24.424Z", payload: { type: "message", id: "msg_0393b5967eeb6b3d016a5099b33df88191bfb8b5a7b245ebb7", role: "assistant", content: [{ type: "output_text", text: zeroMsText }], phase: "commentary" } }),
+      JSON.stringify({ type: "event_msg", timestamp: "2026-07-10T07:05:24.424Z", payload: { type: "agent_message", message: zeroMsText, phase: "commentary", memory_citation: null } }),
+    ];
+
+    expect(itemsOfKind(buildFeed(codexFile, productionOrder, false, ""), "prose")).toEqual([
+      { kind: "prose", ts: "2026-07-10T07:05:12.128Z", text: sevenMsText, engine: "codex" },
+    ]);
+    expect(itemsOfKind(buildFeed(codexFile, reversedOrder, false, ""), "prose")).toEqual([
+      { kind: "prose", ts: "2026-07-10T07:05:24.424Z", text: zeroMsText, engine: "codex" },
+    ]);
+  });
+
+  test("requires opposite shapes, adjacent source records, matching normalized text, and the correlation boundary", () => {
+    const text = "same assistant message";
+    const at = "2026-07-10T07:06:16.000Z";
+    const cases: { lines: string[]; count: number; label: string }[] = [
+      { label: "two events", lines: [codexAssistantEvent(at, text), codexAssistantEvent(at, text)], count: 2 },
+      { label: "two responses", lines: [codexAssistantResponse(at, text), codexAssistantResponse(at, text)], count: 2 },
+      { label: "different text", lines: [codexAssistantEvent(at, text), codexAssistantResponse(at, "different")], count: 2 },
+      { label: "normalized whitespace", lines: [codexAssistantEvent(at, `  ${text}  `), codexAssistantResponse("2026-07-10T07:06:16.500Z", `\n${text}\n`)], count: 1 },
+      { label: "one second", lines: [codexAssistantEvent(at, text), codexAssistantResponse("2026-07-10T07:06:17.000Z", text)], count: 1 },
+      { label: "one second plus one millisecond", lines: [codexAssistantEvent(at, text), codexAssistantResponse("2026-07-10T07:06:17.001Z", text)], count: 2 },
+    ];
+    for (const { lines, count, label } of cases) {
+      expect(itemsOfKind(buildFeed(codexFile, lines, false, ""), "prose"), label).toHaveLength(count);
+    }
+
+    const separated = [codexAssistantEvent(at, text), codexReasoning("2026-07-10T07:06:16.100Z"), codexAssistantResponse("2026-07-10T07:06:16.200Z", text)];
+    for (const showSvc of [false, true]) {
+      expect(itemsOfKind(buildFeed(codexFile, separated, showSvc, ""), "prose")).toHaveLength(2);
+    }
+  });
+
+  test("consumes echo eligibility one pair at a time", () => {
+    const text = "alternate";
+    const event = codexAssistantEvent("2026-07-10T07:06:16.000Z", text);
+    const response = codexAssistantResponse("2026-07-10T07:06:16.001Z", text);
+    expect(itemsOfKind(buildFeed(codexFile, [event, response, event, response], false, ""), "prose")).toHaveLength(2);
+    expect(itemsOfKind(buildFeed(codexFile, [event, response, event], false, ""), "prose")).toHaveLength(2);
+  });
+
+  test("preserves the first live-tail key in both orders", () => {
+    const text = "live tail";
+    const orders = [
+      { lines: [codexAssistantEvent("2026-07-10T07:06:16.000Z", text), codexAssistantResponse("2026-07-10T07:06:16.007Z", text)], eventTs: "2026-07-10T07:06:16.000Z" },
+      { lines: [codexAssistantResponse("2026-07-10T07:06:17.000Z", text), codexAssistantEvent("2026-07-10T07:06:17.007Z", text)], eventTs: "2026-07-10T07:06:17.007Z" },
+    ];
+    for (const { lines: [first, second], eventTs } of orders) {
+      const session = createFeedSession({ engine: "codex", fmt: "codex", showSvc: false, lineFilter: "" });
+      const preview = session.feed([first], 0, true);
+      const complete = session.feed([first, second], 0, true);
+      expect(complete.items).toHaveLength(1);
+      expect(complete.items[0]?.key).toBe(preview.items[0]?.key);
+      expect(complete.items[0]?.item).toMatchObject({ kind: "prose", ts: eventTs });
+    }
+  });
+
+  test("keeps review, citation, and blob payloads intact while coalescing their sources", () => {
+    const review = "VERDICT: APPROVE\n\nSummary: parser contract holds.";
+    const citation = "<oai-mem-citation>\n<citation_entries>\nMEMORY.md:1-2|note=[contract]\n</citation_entries>\n<rollout_ids>\n019f4944-97f1-7f20-bd8b-7c3c23085bb0\n</rollout_ids>\n</oai-mem-citation>";
+    const variants = [review, `${review}\n\n${citation}`, "x".repeat(20_001)];
+    for (const text of variants) {
+      for (const [first, second] of [
+        [codexAssistantEvent("2026-07-10T07:06:16.000Z", text), codexAssistantResponse("2026-07-10T07:06:16.007Z", text)],
+        [codexAssistantResponse("2026-07-10T07:06:17.000Z", text), codexAssistantEvent("2026-07-10T07:06:17.007Z", text)],
+      ]) {
+        const paired = buildFeed(codexFile, [first, second], false, "").items;
+        const eventRecord = first.includes("event_msg") ? first : second;
+        const standalone = buildFeed(codexFile, [eventRecord], false, "").items;
+        expect(paired.map((item) => ({ ...item, ts: undefined }))).toEqual(standalone.map((item) => ({ ...item, ts: undefined })));
+        expect(paired.filter((item) => item.kind === "review")).toHaveLength(text.startsWith("VERDICT") ? 1 : 0);
+        expect(paired.filter((item) => item.kind === "mem-citation")).toHaveLength(text.includes("<oai-mem-citation>") ? 1 : 0);
+        expect(paired.filter((item) => item.kind === "blob")).toHaveLength(text.length === 20_001 ? 1 : 0);
+        const reviewItem = paired.find((item) => item.kind === "review");
+        if (reviewItem?.kind === "review") expect(reviewItem.ts).toBe(second.includes("event_msg") ? JSON.parse(second).timestamp : JSON.parse(first).timestamp);
+      }
+    }
+  }, 15_000);
+
+  test("keeps incremental, prepend, and sliding-window parsing equivalent to a fresh parse", () => {
+    const event = codexAssistantEvent("2026-07-10T07:06:16.000Z", "seam");
+    const response = codexAssistantResponse("2026-07-10T07:06:16.007Z", "seam");
+    for (const lines of [[event, response], [response, event]]) {
+      assertParity(codexFile, lines, { chunks: [1], cap: 1, live: true });
+      assertParity(codexFile, lines, { chunks: [2, 1], cap: 2 });
+      const session = createFeedSession({ engine: "codex", fmt: "codex", showSvc: false, lineFilter: "" });
+      const prepend = session.feed([lines[1]], 1, false);
+      const widened = session.feed(lines, 0, false);
+      expect(widened.items.map((entry) => entry.item)).toEqual(buildFeed(codexFile, lines, false, "").items);
+      expect(prepend.items).toHaveLength(1);
+
+      const sliding = createFeedSession({ engine: "codex", fmt: "codex", showSvc: false, lineFilter: "" });
+      sliding.feed(lines, 0, false);
+      const secondOnly = sliding.feed([lines[1]], 1, false);
+      expect(secondOnly.items.map((entry) => entry.item)).toEqual(buildFeed(codexFile, [lines[1]], false, "").items);
+    }
   });
 });
 
