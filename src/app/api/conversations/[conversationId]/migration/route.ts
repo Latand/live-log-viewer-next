@@ -3,7 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { agentRegistry } from "@/lib/agent/registry";
 import { advanceConversationMigration, drainHeldDeliveries } from "@/lib/accounts/migration/coordinator";
 import { RegisteredSuccessorProvider } from "@/lib/accounts/migration/provider";
-import { deliverConversationMessage } from "@/lib/delivery";
+import { deliverConversationMessage, migrationDeliveryOutcome } from "@/lib/delivery";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
 import type { ViewerConversationId } from "@/lib/accounts/migration/contracts";
 
@@ -13,8 +13,7 @@ export const dynamic = "force-dynamic";
 const deliveryPort = {
   async deliver({ delivery, path, clientMessageId }: { delivery: { text: string }; path: string; clientMessageId: string }) {
     const result = await deliverConversationMessage({ pid: null, path, text: delivery.text, images: [], clientMessageId });
-    if (!result.ok) return "failed" as const;
-    return "delivered" as const;
+    return migrationDeliveryOutcome(result);
   },
 };
 

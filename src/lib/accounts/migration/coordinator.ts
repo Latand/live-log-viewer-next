@@ -39,7 +39,7 @@ export interface MigrationPreview {
 }
 
 export interface HeldDeliveryPort {
-  deliver(input: { delivery: HeldDelivery; path: string; clientMessageId: string }): Promise<"delivered" | "failed" | "delivery-uncertain">;
+  deliver(input: { delivery: HeldDelivery; path: string; clientMessageId: string }): Promise<"delivered" | "failed" | "delivery-uncertain" | "held">;
 }
 
 function engineOf(entry: FileEntry): MigrationEngine | null {
@@ -424,7 +424,8 @@ export async function drainHeldDeliveries(
     const clientMessageId = claimed.clientMessageId ?? `migration:${claimed.id}`;
     try {
       const outcome = await delivery.deliver({ delivery: claimed, path: current.path, clientMessageId });
-      registry.recordDeliveryOutcome(claimed.id, outcome, outcome === "failed" ? "delivery failed and remains recoverable" : null);
+      if (outcome === "held") registry.requeueHeldDelivery(claimed.id);
+      else registry.recordDeliveryOutcome(claimed.id, outcome, outcome === "failed" ? "delivery failed and remains recoverable" : null);
     } catch {
       registry.recordDeliveryOutcome(claimed.id, "delivery-uncertain", "delivery result is uncertain and remains recoverable");
     }

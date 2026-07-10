@@ -46,6 +46,11 @@ export interface DeliverySuccess {
 
 export type DeliveryOutcome = DeliverySuccess | DeliveryFailure;
 
+export function migrationDeliveryOutcome(outcome: DeliveryOutcome): "delivered" | "failed" | "held" {
+  if (!outcome.ok) return "failed";
+  return outcome.outcome === "held" ? "held" : "delivered";
+}
+
 function failure(error: unknown, status = 500): DeliveryFailure {
   return { ok: false, outcome: "failed", error: error instanceof Error ? error.message : String(error), status };
 }

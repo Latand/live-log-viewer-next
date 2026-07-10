@@ -99,6 +99,47 @@ describe("durable account migration coordinator", () => {
     expect(store.conversationForPath("/inactive-history.jsonl")?.migration).toBeNull();
   });
 
+  test("automatic balance preserves an opt-out until a later manual selection", () => {
+    const store = registry();
+    store.reconcileConversations([observation("/opted-out-turn.jsonl", "managed", "busy")]);
+    const first = store.commitMigrationIntent({
+      engine: "codex",
+      targetId: "default",
+      origin: "manual",
+      requestId: "initial-manual-selection",
+      expectedRevision: store.engineRouting("codex").revision,
+      scope: "active",
+    });
+    store.setMigrationIntentState(first.id, "stopped", first.revision);
+
+    const automatic = store.commitMigrationIntent({
+      engine: "codex",
+      targetId: "default",
+      origin: "auto",
+      requestId: "later-automatic-selection",
+      expectedRevision: store.engineRouting("codex").revision,
+      scope: "active",
+    });
+    expect(automatic.state).toBe("complete");
+    expect(store.conversationForPath("/opted-out-turn.jsonl")).toMatchObject({
+      migration: { phase: "rolled-back" },
+      migrationOptOut: { targetId: "default" },
+    });
+
+    store.commitMigrationIntent({
+      engine: "codex",
+      targetId: "default",
+      origin: "manual",
+      requestId: "later-manual-selection",
+      expectedRevision: store.engineRouting("codex").revision,
+      scope: "active",
+    });
+    expect(store.conversationForPath("/opted-out-turn.jsonl")).toMatchObject({
+      migration: { targetId: "default", phase: "waiting-turn" },
+      migrationOptOut: null,
+    });
+  });
+
   test("an idle conversation with a live host stays in the eager switch scope", async () => {
     const store = registry();
     store.reconcileConversations([observation("/live-idle.jsonl", "managed", "idle")]);
@@ -1048,6 +1089,52 @@ describe("durable account migration coordinator", () => {
     expect(final.generations.at(-1)?.launchProfile).toMatchObject({ cwd: "/repo", model: "gpt-5.6-terra", effort: "high", fast: true, permissionMode: "never", title: "Title /a.jsonl" });
     expect(final.generations.at(-1)?.launchProfile.goal?.objective).toBe("Ship");
     expect(final.generations.at(-1)?.launchProfile.plan?.current).toBe("Implement");
+  });
+
+  test("retargeting during a drain keeps the durable message queued for the new successor", async () => {
+    const store = registry();
+    store.reconcileConversations([observation("/delivery-source.jsonl", "a", "idle")]);
+    const conversation = store.conversationForPath("/delivery-source.jsonl")!;
+    store.commitMigrationIntent({
+      engine: "codex",
+      targetId: "b",
+      origin: "manual",
+      requestId: "delivery-to-b",
+      expectedRevision: store.engineRouting("codex").revision,
+    });
+    store.holdDelivery(conversation.id, "continue after retarget", "delivery-retarget");
+    await advanceConversationMigration(conversation.id, store, provider(["/delivery-b.jsonl"]));
+
+    await drainHeldDeliveries(conversation.id, {
+      async deliver() {
+        store.commitMigrationIntent({
+          engine: "codex",
+          targetId: "c",
+          origin: "manual",
+          requestId: "delivery-to-c",
+          expectedRevision: store.engineRouting("codex").revision,
+        });
+        return "held";
+      },
+    }, store);
+
+    expect(store.conversation(conversation.id)?.migration).toMatchObject({ targetId: "c", phase: "requested" });
+    expect(store.pendingDeliveries(conversation.id)).toMatchObject([{
+      clientMessageId: "delivery-retarget",
+      state: "held",
+      generationId: null,
+    }]);
+
+    await advanceConversationMigration(conversation.id, store, provider(["/delivery-c.jsonl"]));
+    const delivered: string[] = [];
+    await drainHeldDeliveries(conversation.id, {
+      async deliver({ clientMessageId }) {
+        delivered.push(clientMessageId);
+        return "delivered";
+      },
+    }, store);
+    expect(delivered).toEqual(["delivery-retarget"]);
+    expect(store.pendingDeliveries(conversation.id)).toEqual([]);
   });
 
   test("restart adopts a persisted two-path Codex receipt and repairs board continuity", async () => {

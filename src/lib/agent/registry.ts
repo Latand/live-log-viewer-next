@@ -143,7 +143,7 @@ export interface RegistryConversation {
   continuityPaths: string[];
   migration: ConversationMigration | null;
   /** Explicit Stop/Keep decision for one target at one routing revision. */
-  migrationOptOut: { targetId: string; routeRevision: number; updatedAt: string } | null;
+  migrationOptOut: { targetId: string; updatedAt: string } | null;
   turn: TurnState & { observedAt: string | null };
   createdAt: string;
   updatedAt: string;
@@ -396,10 +396,8 @@ function normalizeConversation(value: RegistryConversation): RegistryConversatio
   const rawOptOut = (value as Partial<RegistryConversation>).migrationOptOut;
   const migrationOptOut = rawOptOut
     && typeof rawOptOut.targetId === "string"
-    && Number.isInteger(rawOptOut.routeRevision)
-    && rawOptOut.routeRevision >= 0
     && typeof rawOptOut.updatedAt === "string"
-    ? rawOptOut
+    ? { targetId: rawOptOut.targetId, updatedAt: rawOptOut.updatedAt }
     : null;
   return {
     ...value,
@@ -1300,6 +1298,10 @@ export class AgentRegistry {
       let scoped = 0;
       for (const conversation of Object.values(file.conversations)) {
         if (conversation.engine !== input.engine) continue;
+        if (input.origin === "manual" && conversation.migrationOptOut?.targetId === input.targetId) {
+          conversation.migrationOptOut = null;
+        }
+        if (input.origin === "auto" && conversation.migrationOptOut?.targetId === input.targetId) continue;
         const source = conversation.generations.at(-1);
         if (!source || source.accountId === null || source.accountId === input.targetId) {
           if (conversation.migration && conversation.migration.phase !== "committed") conversation.migration = null;
@@ -1328,11 +1330,9 @@ export class AgentRegistry {
       const conversation = file.conversations[canonicalId];
       if (!conversation) throw new Error("viewer conversation is unknown");
       const targetId = file.engineRouting[conversation.engine].activeAccountId;
-      const routeRevision = file.engineRouting[conversation.engine].revision;
       const source = conversation.generations.at(-1);
       if (!targetId || !source || source.accountId === null || source.accountId === targetId) return clone(conversation);
-      if (conversation.migrationOptOut?.targetId === targetId
-        && conversation.migrationOptOut.routeRevision === routeRevision) return clone(conversation);
+      if (conversation.migrationOptOut?.targetId === targetId) return clone(conversation);
       if (conversation.migration?.targetId === targetId
         && !["committed", "rolled-back", "failed-recoverable"].includes(conversation.migration.phase)) {
         return clone(conversation);
@@ -1583,10 +1583,9 @@ export class AgentRegistry {
       if (state === "stopped") {
         for (const conversation of Object.values(file.conversations)) {
           if (conversation.engine !== intent.engine) continue;
-          const route = file.engineRouting[conversation.engine];
           const current = conversation.generations.at(-1);
-          if (route.activeAccountId === intent.targetId && current?.accountId !== intent.targetId) {
-            conversation.migrationOptOut = { targetId: intent.targetId, routeRevision: route.revision, updatedAt: intent.updatedAt };
+          if (file.engineRouting[conversation.engine].activeAccountId === intent.targetId && current?.accountId !== intent.targetId) {
+            conversation.migrationOptOut = { targetId: intent.targetId, updatedAt: intent.updatedAt };
             conversation.updatedAt = intent.updatedAt;
           }
           if (conversation.migration?.intentId !== id || conversation.migration.phase === "committed") continue;
@@ -1767,6 +1766,38 @@ export class AgentRegistry {
     });
   }
 
+  requeueHeldDelivery(id: string): HeldDelivery {
+    return this.mutate((file) => {
+      const delivery = file.heldDeliveries[id];
+      if (!delivery) throw new Error("held delivery is unknown");
+      if (delivery.state === "delivered") return clone(delivery);
+      const conversation = file.conversations[resolveConversationAlias(file, delivery.conversationId)];
+      const migrationBlocksDelivery = conversation?.migration
+        && ["requested", "preparing", "successor-starting", "verifying"].includes(conversation.migration.phase);
+      if (migrationBlocksDelivery) {
+        delivery.state = "held";
+        delivery.generationId = null;
+        delivery.assignedAt = null;
+        delivery.deliveredAt = null;
+        delivery.error = null;
+        return clone(delivery);
+      }
+      const current = conversation?.generations.at(-1);
+      if (!current) {
+        delivery.state = "failed";
+        delivery.deliveredAt = null;
+        delivery.error = "delivery target is unavailable and remains recoverable";
+        return clone(delivery);
+      }
+      delivery.state = "assigned";
+      delivery.generationId = current.id;
+      delivery.assignedAt = now();
+      delivery.deliveredAt = null;
+      delivery.error = null;
+      return clone(delivery);
+    });
+  }
+
   rollbackConversationMigration(id: ViewerConversationId, expectedRevision?: number): RegistryConversation {
     return this.mutate((file) => {
       const canonicalId = resolveConversationAlias(file, id);
@@ -1781,7 +1812,6 @@ export class AgentRegistry {
       if (route.activeAccountId === conversation.migration.targetId) {
         conversation.migrationOptOut = {
           targetId: conversation.migration.targetId,
-          routeRevision: route.revision,
           updatedAt: rolledAt,
         };
       }

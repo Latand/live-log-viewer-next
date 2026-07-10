@@ -3,7 +3,7 @@ import { activeCodexAccountId, codexAccountsMutationLocked, codexLoginPaneStatus
 import { managedCodexRuntime } from "@/lib/accounts/codexRuntime";
 import { agentRegistry, type AgentRegistry } from "@/lib/agent/registry";
 import { readTranscriptHosts } from "@/lib/agent/transcriptHost";
-import { deliverConversationMessage } from "@/lib/delivery";
+import { deliverConversationMessage, migrationDeliveryOutcome } from "@/lib/delivery";
 import { reconcileFlowConversationOwnership } from "@/lib/flows/store";
 import { reconcileHandoffConversationOwnership } from "@/lib/handoffLineage";
 import { listFilesWithProjectCatalog, reconcileFileControllers } from "@/lib/scanner";
@@ -24,8 +24,7 @@ const CONTROLLER_INTERVAL_MS = 10_000;
 const deliveryPort: HeldDeliveryPort = {
   async deliver({ delivery, path, clientMessageId }) {
     const result = await deliverConversationMessage({ pid: null, path, text: delivery.text, images: [], clientMessageId });
-    if (!result.ok) return "failed";
-    return "delivered";
+    return migrationDeliveryOutcome(result);
   },
 };
 

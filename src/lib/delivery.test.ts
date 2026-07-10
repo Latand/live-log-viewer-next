@@ -5,7 +5,7 @@ import path from "node:path";
 
 import { AgentRegistry, setAgentRegistryForTests, type ConversationObservation } from "./agent/registry";
 import { emptyLaunchProfile } from "./accounts/migration/contracts";
-import { cleanupFailedImageDelivery, deliverConversationMessage, type DeliveryFailure } from "./delivery";
+import { cleanupFailedImageDelivery, deliverConversationMessage, migrationDeliveryOutcome, type DeliveryFailure } from "./delivery";
 
 const SANDBOX = fs.mkdtempSync(path.join(os.tmpdir(), "llv-delivery-test-"));
 const failure: DeliveryFailure = { ok: false, outcome: "failed", error: "resume unavailable", status: 503 };
@@ -37,6 +37,12 @@ test("removes a relayed-delivery inbox image before returning its host failure",
 
   expect(cleanupFailedImageDelivery(failure, [imagePath])).toEqual(failure);
   expect(fs.existsSync(imagePath)).toBe(false);
+});
+
+test("migration delivery keeps an internally held result recoverable", () => {
+  expect(migrationDeliveryOutcome({ ok: true, target: "conversation_held", outcome: "held" })).toBe("held");
+  expect(migrationDeliveryOutcome({ ok: true, target: "pane" })).toBe("delivered");
+  expect(migrationDeliveryOutcome(failure)).toBe("failed");
 });
 
 test("sending to deferred history starts lazy migration and holds the message", async () => {
@@ -107,7 +113,7 @@ test("sending during a busy or unknown turn waits to migrate and keeps the messa
   }
 });
 
-test("a stopped migration survives restart and blocks lazy re-enrollment for its routing revision", async () => {
+test("a stopped migration survives restart and unrelated inventory revisions", async () => {
   const filename = path.join(SANDBOX, "registry.json");
   const registry = new AgentRegistry(filename);
   const observation: ConversationObservation = {
@@ -132,6 +138,28 @@ test("a stopped migration survives restart and blocks lazy re-enrollment for its
   });
   expect(registry.conversationForPath(observation.path)?.migration).toBeNull();
   registry.setMigrationIntentState(intent.id, "stopped", intent.revision);
+  const stoppedRevision = registry.engineRouting("codex").revision;
+  const unrelated = { ...observation, path: "/unrelated-turn.jsonl" };
+  registry.reconcileConversations([unrelated]);
+  registry.reconcileConversations([{
+    ...unrelated,
+    turn: { state: "busy", source: "lifecycle", terminalAt: null },
+    observedAt: "2026-07-11T10:01:00.000Z",
+  }]);
+  const unrelatedKey = { engine: "codex" as const, sessionId: "019f4e76-66b4-7f87-94b2-cfa9bf711111" };
+  registry.upsert({
+    key: unrelatedKey,
+    artifactPath: unrelated.path,
+    cwd: "/repo",
+    accountId: "managed",
+    status: "live",
+    host: null,
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  registry.markUnhosted(unrelatedKey);
+  expect(registry.engineRouting("codex").revision).toBeGreaterThan(stoppedRevision);
 
   const restarted = new AgentRegistry(filename);
   setAgentRegistryForTests(restarted);
@@ -146,7 +174,7 @@ test("a stopped migration survives restart and blocks lazy re-enrollment for its
   expect(outcome).not.toMatchObject({ ok: true, outcome: "held" });
   expect(restarted.conversationForPath(observation.path)).toMatchObject({
     migration: null,
-    migrationOptOut: { targetId: "default", routeRevision: restarted.engineRouting("codex").revision },
+    migrationOptOut: { targetId: "default" },
   });
   expect(restarted.pendingDeliveries(restarted.conversationForPath(observation.path)!.id)).toHaveLength(0);
   expect(Object.values(restarted.snapshot().migrationIntents)).toHaveLength(1);
@@ -169,7 +197,7 @@ test("a stopped migration survives restart and blocks lazy re-enrollment for its
   expect(reenrolled).toMatchObject({ ok: true, outcome: "held" });
 });
 
-test("card-level Keep blocks lazy re-enrollment for the current routing revision", async () => {
+test("card-level Keep survives unrelated inventory revisions", async () => {
   const filename = path.join(SANDBOX, "registry.json");
   const registry = new AgentRegistry(filename);
   const observation: ConversationObservation = {
@@ -191,6 +219,13 @@ test("card-level Keep blocks lazy re-enrollment for the current routing revision
   });
   const conversation = registry.conversationForPath(observation.path)!;
   registry.rollbackConversationMigration(conversation.id, conversation.migration!.revision);
+  registry.reconcileConversations([{ ...observation, path: "/unrelated-after-keep.jsonl" }]);
+  registry.reconcileConversations([{
+    ...observation,
+    path: "/unrelated-after-keep.jsonl",
+    turn: { state: "busy", source: "lifecycle", terminalAt: null },
+    observedAt: "2026-07-11T10:01:00.000Z",
+  }]);
 
   const restarted = new AgentRegistry(filename);
   setAgentRegistryForTests(restarted);
