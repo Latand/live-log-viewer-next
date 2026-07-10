@@ -45,6 +45,16 @@ export interface GenerationHostEvidence {
   identity: string;
   epoch: number;
   verifiedAt: string;
+  tmuxHost?: {
+    kind: "tmux";
+    endpoint: string;
+    server: { pid: number; startIdentity: string | null };
+    paneId: string;
+    panePid: { pid: number; startIdentity: string | null };
+    windowName: string;
+    agent: { pid: number; startIdentity: string | null };
+    argv: string[];
+  };
 }
 
 export interface NativeGeneration {
@@ -68,6 +78,12 @@ export interface ConversationMigration {
   operationId: string;
   sourceGenerationId: string;
   providerReceipt: ProviderReceipt | null;
+  /** Canonical board project whose path aliases have converged for this generation. */
+  boardProject: string | null;
+  /** Migration operation whose aliases have converged in boardProject. */
+  boardOperationId: string | null;
+  /** Project currently holding this conversation's durable placement. */
+  boardPlacementProject: string | null;
   updatedAt: string;
 }
 
@@ -75,8 +91,43 @@ export interface ProviderReceipt {
   operationId: string;
   nativeId: string;
   path: string;
+  /** Provider-created artifacts that retain the conversation identity throughout migration. */
+  continuityPaths: string[];
   historyHash: string;
   host: GenerationHostEvidence;
+}
+
+function sameProcessIdentity(
+  left: { pid: number; startIdentity: string | null },
+  right: { pid: number; startIdentity: string | null },
+): boolean {
+  return left.pid === right.pid && left.startIdentity === right.startIdentity;
+}
+
+export function sameGenerationHostEvidence(left: GenerationHostEvidence, right: GenerationHostEvidence): boolean {
+  if (left.kind !== right.kind || left.identity !== right.identity || left.epoch !== right.epoch) return false;
+  const leftTmux = left.tmuxHost;
+  const rightTmux = right.tmuxHost;
+  if (!leftTmux || !rightTmux) return leftTmux === rightTmux;
+  return leftTmux.kind === rightTmux.kind
+    && leftTmux.endpoint === rightTmux.endpoint
+    && sameProcessIdentity(leftTmux.server, rightTmux.server)
+    && leftTmux.paneId === rightTmux.paneId
+    && sameProcessIdentity(leftTmux.panePid, rightTmux.panePid)
+    && leftTmux.windowName === rightTmux.windowName
+    && sameProcessIdentity(leftTmux.agent, rightTmux.agent)
+    && leftTmux.argv.length === rightTmux.argv.length
+    && leftTmux.argv.every((argument, index) => argument === rightTmux.argv[index]);
+}
+
+export function sameProviderReceiptOutcome(left: ProviderReceipt, right: ProviderReceipt): boolean {
+  return left.operationId === right.operationId
+    && left.nativeId === right.nativeId
+    && left.path === right.path
+    && left.historyHash === right.historyHash
+    && left.continuityPaths.length === right.continuityPaths.length
+    && left.continuityPaths.every((pathname, index) => pathname === right.continuityPaths[index])
+    && sameGenerationHostEvidence(left.host, right.host);
 }
 
 export interface MigrationEvidence {
@@ -162,6 +213,8 @@ export interface SuccessorProviderPort {
     conversationId: ViewerConversationId;
     source: NativeGeneration;
     targetAccountId: string;
+    /** Persists a provider-created artifact after its path and file identity are validated. */
+    recordContinuityPath(pathname: string): void;
   }): Promise<ProviderReceipt>;
   verify(receipt: ProviderReceipt, input: { engine: MigrationEngine; targetAccountId: string; launchProfile: LaunchProfile }): Promise<void>;
   cleanup?(receipt: ProviderReceipt): Promise<void>;

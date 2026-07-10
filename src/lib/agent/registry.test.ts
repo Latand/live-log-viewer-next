@@ -76,6 +76,101 @@ describe("agent registry", () => {
     expect(store.canonicalPath("/a.jsonl")).toBe("/a2.jsonl");
   });
 
+  test("provisional migration paths retain one stable conversation owner", () => {
+    const store = registry();
+    const source = store.ensureConversation("codex", "/source.jsonl", "a");
+    store.setConversationMigration(source.id, {
+      intentId: "intent",
+      phase: "successor-starting",
+      targetId: "b",
+      revision: 1,
+      error: null,
+      updatedAt: "2026-07-10T12:00:00.000Z",
+    });
+    store.recordConversationContinuityPath(source.id, "/source-account/fork.jsonl");
+
+    store.reconcileConversations([{
+      engine: "codex",
+      path: "/source-account/fork.jsonl",
+      accountId: "a",
+      launchProfile: emptyLaunchProfile({ cwd: "/repo", project: "repo" }),
+      turn: { state: "idle", source: "empty", terminalAt: null },
+      observedAt: "2026-07-10T12:01:00.000Z",
+    }]);
+
+    expect(Object.values(store.snapshot().conversations)).toHaveLength(1);
+    expect(store.conversationForPath("/source-account/fork.jsonl")?.id).toBe(source.id);
+    expect(store.canonicalPath("/source-account/fork.jsonl")).toBe("/source.jsonl");
+
+    store.setConversationMigration(source.id, {
+      intentId: "later-intent",
+      phase: "requested",
+      targetId: "c",
+      revision: 2,
+      error: null,
+      updatedAt: "2026-07-10T12:02:00.000Z",
+    });
+    expect(store.conversationForPath("/source-account/fork.jsonl")?.id).toBe(source.id);
+  });
+
+  test("migration provenance adopts a path allocated by a concurrent inventory scan", () => {
+    const store = registry();
+    const source = store.ensureConversation("codex", "/source.jsonl", "a");
+    store.setConversationMigration(source.id, {
+      intentId: "intent",
+      phase: "successor-starting",
+      targetId: "b",
+      revision: 1,
+      error: null,
+      updatedAt: "2026-07-10T12:00:00.000Z",
+    });
+    const targetPath = "/target-account/fork.jsonl";
+    store.reconcileConversations([{
+      engine: "codex",
+      path: targetPath,
+      accountId: "b",
+      launchProfile: emptyLaunchProfile({ cwd: "/repo", project: "repo" }),
+      turn: { state: "idle", source: "empty", terminalAt: null },
+      observedAt: "2026-07-10T12:01:00.000Z",
+    }]);
+    expect(Object.values(store.snapshot().conversations)).toHaveLength(2);
+
+    const beforeAdoption = store.snapshot();
+    store.recordConversationContinuityPath(source.id, targetPath);
+
+    const adopted = store.snapshot();
+    expect(Object.values(adopted.conversations)).toHaveLength(1);
+    expect(store.conversationForPath(targetPath)?.id).toBe(source.id);
+    expect(store.canonicalPath(targetPath)).toBe("/source.jsonl");
+    expect(adopted.conversationRevision.codex).toBe(beforeAdoption.conversationRevision.codex + 1);
+    expect(adopted.engineRouting.codex.revision).toBe(beforeAdoption.engineRouting.codex.revision + 1);
+  });
+
+  test("validated provider provenance survives migration retarget and stop", () => {
+    const store = registry();
+    const source = store.ensureConversation("codex", "/source.jsonl", "a");
+    store.setConversationMigration(source.id, {
+      intentId: "intent",
+      phase: "successor-starting",
+      targetId: "b",
+      revision: 1,
+      error: null,
+      updatedAt: "2026-07-10T12:00:00.000Z",
+    });
+    store.setConversationMigration(source.id, {
+      intentId: "replacement",
+      phase: "rolled-back",
+      targetId: "c",
+      revision: 2,
+      error: null,
+      updatedAt: "2026-07-10T12:01:00.000Z",
+    });
+
+    store.recordConversationContinuityPath(source.id, "/late-provider-artifact.jsonl");
+
+    expect(store.conversationForPath("/late-provider-artifact.jsonl")?.id).toBe(source.id);
+  });
+
   test("coalesces durable intents and enforces policy compare-and-set", () => {
     const store = registry();
     const first = store.upsertMigrationIntent("claude", "a", "auto", "first");
@@ -178,6 +273,60 @@ describe("agent registry", () => {
     expect(conflict).toMatchObject({ kind: "conflict", code: "spawn_artifact_conflict" });
     expect(store.snapshot().receipts[first.receipt.launchId]?.artifactPath).toBe(firstPath);
     expect(store.snapshot().receipts[second.receipt.launchId]?.artifactPath).toBe(secondPath);
+  });
+
+  test("keeps a conflicted spawn receipt terminal across later settlement", () => {
+    const store = registry();
+    const begun = store.beginSpawnRequest({ engine: "codex", cwd: "/repo" });
+    if (begun.kind !== "created") throw new Error("expected create");
+    const pathname = "/sessions/019f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl";
+    const conflict = store.settleSpawn(begun.receipt.launchId, { ...spawnEntry(pathname), cwd: "/wrong" });
+    const replay = store.settleSpawn(begun.receipt.launchId, spawnEntry(pathname));
+
+    expect(conflict).toMatchObject({ kind: "conflict", code: "spawn_identity_conflict" });
+    expect(replay).toMatchObject({ kind: "conflict", receipt: { state: "conflicted", error: "spawn_identity_conflict" } });
+    expect(store.snapshot().receipts[begun.receipt.launchId]).toMatchObject({ state: "conflicted", error: "spawn_identity_conflict" });
+  });
+
+  test("migration settlement preserves a provisional owner with durable child references", () => {
+    const store = registry();
+    const original = store.ensureConversation("claude", "/source.jsonl", "source");
+    const targetPath = "/target.jsonl";
+    store.reconcileConversations([{
+      engine: "claude",
+      path: targetPath,
+      accountId: "target",
+      launchProfile: emptyLaunchProfile({ cwd: "/repo" }),
+      turn: { state: "idle", source: "empty", terminalAt: null },
+      observedAt: "2026-07-10T12:00:00.000Z",
+    }]);
+    const provisional = store.conversationForPath(targetPath)!;
+    store.beginSpawnRequest({ engine: "claude", cwd: "/repo", parentConversationId: provisional.id });
+    const migration = store.beginSpawnRequest({
+      engine: "claude",
+      cwd: "/repo",
+      conversationId: original.id,
+      purpose: "migration-successor",
+      expectedArtifactPath: targetPath,
+    });
+    if (migration.kind !== "created") throw new Error("expected create");
+
+    const settled = store.settleSpawn(migration.receipt.launchId, {
+      key: { engine: "claude", sessionId: "target" },
+      artifactPath: targetPath,
+      cwd: "/repo",
+      accountId: "target",
+      status: "live",
+      host: null,
+      claimEpoch: 0,
+      claimOwner: null,
+      pendingAction: null,
+    });
+
+    expect(settled).toMatchObject({ kind: "conflict", code: "spawn_artifact_conflict" });
+    expect(store.conversationForPath(targetPath)?.id).toBe(provisional.id);
+    expect(store.conversation(original.id)?.continuityPaths).toEqual([]);
+    expect(Object.values(store.snapshot().conversations)).toHaveLength(2);
   });
 
   test("normalizes a legacy receipt after restart without changing its schema version", () => {

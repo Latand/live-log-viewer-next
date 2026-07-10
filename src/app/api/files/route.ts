@@ -26,10 +26,13 @@ export async function GET(request: Request): Promise<NextResponse> {
   // the external scheduler, keeping repeated GETs byte-stable for state files.
   const registry = agentRegistry();
   const registrySnapshot = registry.snapshot();
+  const ownsPath = (conversation: (typeof registrySnapshot.conversations)[keyof typeof registrySnapshot.conversations], pathname: string) =>
+    conversation.generations.some((generation) => generation.path === pathname)
+    || conversation.continuityPaths.includes(pathname);
   for (const file of files) {
     if (file.engine !== "claude" && file.engine !== "codex") continue;
     const conversation = Object.values(registrySnapshot.conversations).find((candidate) =>
-      candidate.engine === file.engine && candidate.generations.some((generation) => generation.path === file.path));
+      candidate.engine === file.engine && ownsPath(candidate, file.path));
     if (!conversation) continue;
     const generation = conversation.generations.find((item) => item.path === file.path);
     const generationIndex = conversation.generations.findIndex((item) => item.path === file.path);
@@ -37,6 +40,7 @@ export async function GET(request: Request): Promise<NextResponse> {
     file.conversationId = conversation.id;
     if (generationIndex >= 0) file.generation = generationIndex + 1;
     if (generation && latest && generation.path !== latest.path) file.migratedTo = latest.path;
+    if (!generation && latest && conversation.continuityPaths.includes(file.path)) file.migratedTo = latest.path;
     if (latest?.path === file.path && conversation.generations.length > 1) {
       const predecessor = conversation.generations.at(-2);
       file.predecessorPath = predecessor?.path;
@@ -75,7 +79,7 @@ export async function GET(request: Request): Promise<NextResponse> {
     pathForPanePid: (panePid, entries) => pathForPanePid(entries, panePid, readPpid),
     panePidAlive: pidAlive,
     conversationIdForPath: (pathname) => Object.values(registrySnapshot.conversations).find((conversation) =>
-      conversation.generations.some((generation) => generation.path === pathname))?.id ?? null,
+      ownsPath(conversation, pathname))?.id ?? null,
     pathForConversationId: (conversationId) => conversationId.startsWith("conversation_")
       ? registrySnapshot.conversations[conversationId as `conversation_${string}`]?.generations.at(-1)?.path ?? null
       : null,

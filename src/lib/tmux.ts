@@ -380,6 +380,25 @@ export async function verifyTmuxHostEvidence(host: TmuxHostEvidence): Promise<bo
   return ancestryDistance(host.agent.pid, host.panePid.pid, readPpid) !== null;
 }
 
+/** Closes a pane after full host verification and an in-command server/pane fence. */
+export async function killTmuxHostIfMatches(host: TmuxHostEvidence): Promise<boolean> {
+  if (!await verifyTmuxHostEvidence(host)) return false;
+  const endpoint = createTmuxEndpointDescriptor(host.endpoint, process.getuid?.() ?? 0);
+  const condition = `#{&&:#{==:#{pid},${host.server.pid}},#{&&:#{==:#{pane_id},${host.paneId}},#{==:#{pane_pid},${host.panePid.pid}}}}`;
+  const mismatch = `llv-host-mismatch-${crypto.randomUUID()}`;
+  const result = await runTmux([
+    "if-shell",
+    "-t",
+    host.paneId,
+    "-F",
+    condition,
+    `kill-pane -t ${host.paneId}`,
+    `display-message -p ${mismatch}`,
+  ], undefined, endpoint);
+  if (result.code !== 0) return false;
+  return !result.stdout.includes(mismatch);
+}
+
 /** pane_pid → pane map from `tmux list-panes -a`, memoised for a few seconds.
     `fresh` bypasses the memo — a rebuild right after a kill must observe the
     pane's absence immediately, or the killed session ghosts back in. */
@@ -978,6 +997,18 @@ export async function paneInfo(paneId: string): Promise<PaneInfo | null> {
 /** Drops a transcript's resume-window record, e.g. after its pane was killed. */
 export function forgetResumePane(transcriptPath: string): void {
   if (loadResumePanes().delete(transcriptPath)) persistResumePanes();
+}
+
+/** Drops a resume record only while it still identifies the pane being retired. */
+export async function forgetResumePaneIfMatches(transcriptPath: string, host: TmuxHostEvidence): Promise<void> {
+  const endpoint = createTmuxEndpointDescriptor(host.endpoint, process.getuid?.() ?? 0);
+  const server = await tmuxServerReference(endpoint);
+  if (!server || !sameProcess(host.server, server.pid, server.startIdentity)) return;
+  const panes = resumePanesForServer(server.pid);
+  const current = panes.get(transcriptPath);
+  if (current?.paneId !== host.paneId || current.panePid !== host.panePid.pid) return;
+  panes.delete(transcriptPath);
+  persistResumePanes();
 }
 
 const SPAWN_READY_TIMEOUT_MS = 60_000;

@@ -42,6 +42,26 @@ describe("board mutations", () => {
     expect(remapped.prefs).toMatchObject({ manual: [], hidden: ["/b", "/hidden"], expanded: ["/expanded"] });
   });
 
+  test("remap replaces provisional target membership with predecessor placement", () => {
+    const mutation = { kind: "remap-paths" as const, pairs: [{ from: "/source", to: "/target" }] };
+    const automatic = applyBoardMutations(board({ manual: ["/target"] }), [mutation]);
+    const expanded = applyBoardMutations(board({ manual: ["/target"], expanded: ["/source"] }), [mutation]);
+    const manual = applyBoardMutations(board({ manual: ["/source", "/target"] }), [mutation]);
+
+    expect(automatic.prefs.manual).toEqual([]);
+    expect(expanded.prefs).toMatchObject({ manual: [], expanded: ["/target"] });
+    expect(manual.prefs.manual).toEqual(["/target"]);
+    expect(applyBoardMutations(expanded, [mutation])).toEqual(expanded);
+  });
+
+  test("a remapped automatic root stays automatic through root reconciliation", () => {
+    const remapped = applyBoardMutations(board(), [{ kind: "remap-paths", pairs: [{ from: "/source", to: "/target" }] }]);
+    const reconciled = applyBoardMutations(remapped, [{ kind: "reconcile-roots", roots: ["/target"], removeManual: [] }]);
+
+    expect(reconciled.pathAliases).toEqual({ "/source": "/target" });
+    expect(reconciled.prefs).toMatchObject({ manual: [], hidden: [], expanded: [] });
+  });
+
   test("reconciles every root without a numeric cap, removes transient children, and is idempotent", () => {
     const roots = Array.from({ length: 61 }, (_, index) => `/root-${index}`);
     const first = applyBoardMutations(board({ manual: ["/transient-child"], hidden: ["/closed-root"] }), [{

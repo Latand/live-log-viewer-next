@@ -14,6 +14,8 @@ import {
   type MigrationIntent,
   type MigrationOrigin,
   type NativeGeneration,
+  type ProviderReceipt,
+  sameProviderReceiptOutcome,
   type TurnState,
   type ViewerConversationId,
 } from "@/lib/accounts/migration/contracts";
@@ -76,6 +78,7 @@ export interface SpawnReceipt {
   requestDigest: string | null;
   /** Reserved at receipt birth so path discovery cannot choose the identity. */
   conversationId: ViewerConversationId;
+  purpose: "launch" | "migration-successor";
   engine: AgentEngine;
   cwd: string;
   accountId: string | null;
@@ -117,6 +120,9 @@ export interface SpawnRequest {
   parentConversationId?: ViewerConversationId | null;
   parentSessionKey?: SessionKey | null;
   parentArtifactPath?: string | null;
+  conversationId?: ViewerConversationId;
+  purpose?: SpawnReceipt["purpose"];
+  expectedArtifactPath?: string | null;
 }
 
 export type SpawnBeginResult =
@@ -132,6 +138,9 @@ export interface RegistryConversation {
   id: ViewerConversationId;
   engine: Extract<AgentEngine, "claude" | "codex">;
   generations: NativeGeneration[];
+  /** Provider-created transcript artifacts that retain this conversation's
+      identity while the canonical generation path advances. */
+  continuityPaths: string[];
   migration: ConversationMigration | null;
   turn: TurnState & { observedAt: string | null };
   createdAt: string;
@@ -156,8 +165,8 @@ export interface RegistryFile {
   heldDeliveries: Record<string, HeldDelivery>;
 }
 
-type ConversationMigrationInput = Omit<ConversationMigration, "errorCode" | "operationId" | "sourceGenerationId" | "providerReceipt"> &
-  Partial<Pick<ConversationMigration, "errorCode" | "operationId" | "sourceGenerationId" | "providerReceipt">>;
+type ConversationMigrationInput = Omit<ConversationMigration, "errorCode" | "operationId" | "sourceGenerationId" | "providerReceipt" | "boardProject" | "boardOperationId" | "boardPlacementProject"> &
+  Partial<Pick<ConversationMigration, "errorCode" | "operationId" | "sourceGenerationId" | "providerReceipt" | "boardProject" | "boardOperationId" | "boardPlacementProject">>;
 type SuccessorGenerationInput = Omit<NativeGeneration, "createdAt" | "archivedAt" | "launchProfile" | "historyHash" | "host"> &
   Partial<Pick<NativeGeneration, "launchProfile" | "historyHash" | "host">>;
 
@@ -230,21 +239,41 @@ function normalizeGeneration(value: NativeGeneration): NativeGeneration {
   };
 }
 
+function normalizeProviderReceipt(value: ProviderReceipt | null | undefined): ProviderReceipt | null {
+  if (!value || typeof value !== "object") return null;
+  return {
+    ...value,
+    continuityPaths: Array.isArray(value.continuityPaths)
+      ? value.continuityPaths.filter((pathname): pathname is string => typeof pathname === "string")
+      : [],
+  };
+}
+
 function normalizeConversation(value: RegistryConversation): RegistryConversation {
   const generations = Array.isArray(value.generations) ? value.generations.map(normalizeGeneration) : [];
   const current = generations.at(-1);
+  const legacyContinuity = (value.migration as (ConversationMigration & { continuityPaths?: unknown }) | null)?.continuityPaths;
   const migration = value.migration && typeof value.migration === "object"
     ? {
       ...value.migration,
       errorCode: value.migration.errorCode ?? null,
       operationId: value.migration.operationId ?? `${value.migration.intentId}:${value.id}:${value.migration.revision}`,
       sourceGenerationId: value.migration.sourceGenerationId ?? current?.id ?? "",
-      providerReceipt: value.migration.providerReceipt ?? null,
+      providerReceipt: normalizeProviderReceipt(value.migration.providerReceipt),
+      boardProject: typeof value.migration.boardProject === "string" ? value.migration.boardProject : null,
+      boardOperationId: typeof value.migration.boardOperationId === "string" ? value.migration.boardOperationId : null,
+      boardPlacementProject: typeof value.migration.boardPlacementProject === "string" ? value.migration.boardPlacementProject : null,
     }
     : null;
+  const continuityPaths = [...new Set([
+    ...(Array.isArray(value.continuityPaths) ? value.continuityPaths.filter((pathname): pathname is string => typeof pathname === "string") : []),
+    ...(Array.isArray(legacyContinuity) ? legacyContinuity.filter((pathname): pathname is string => typeof pathname === "string") : []),
+    ...(migration?.providerReceipt?.continuityPaths ?? []),
+  ])];
   return {
     ...value,
     generations,
+    continuityPaths,
     migration,
     turn: value.turn && typeof value.turn === "object"
       ? { state: value.turn.state, source: value.turn.source, terminalAt: value.turn.terminalAt ?? null, observedAt: value.turn.observedAt ?? null }
@@ -277,6 +306,40 @@ function normalizeHeldDelivery(value: HeldDelivery): HeldDelivery {
   };
 }
 
+function conversationOwnsPath(conversation: RegistryConversation, artifactPath: string): boolean {
+  return conversation.generations.some((generation) => generation.path === artifactPath)
+    || conversation.continuityPaths.includes(artifactPath);
+}
+
+function scannerAllocatedProvisionalOwner(conversation: RegistryConversation, pathname: string): boolean {
+  const generation = conversation.generations[0];
+  return conversation.migration === null
+    && conversation.generations.length === 1
+    && generation?.path === pathname
+    && conversation.continuityPaths.length === 0;
+}
+
+function conversationHasDurableReferences(file: RegistryFile, id: ViewerConversationId): boolean {
+  return Object.values(file.receipts).some((receipt) => receipt.conversationId === id || receipt.parentConversationId === id)
+    || Object.values(file.lineageEdges).some((edge) => edge.childConversationId === id || edge.parentConversationId === id)
+    || Object.values(file.heldDeliveries).some((delivery) => delivery.conversationId === id)
+    || Object.values(file.conversations).some((conversation) => conversation.id !== id
+      && conversation.generations.some((generation) => generation.launchProfile.parentConversationId === id));
+}
+
+function adoptProvisionalOwner(
+  file: RegistryFile,
+  owner: RegistryConversation,
+  target: RegistryConversation,
+  pathname: string,
+): boolean {
+  if (!scannerAllocatedProvisionalOwner(owner, pathname) || conversationHasDurableReferences(file, owner.id)) return false;
+  delete file.conversations[owner.id];
+  file.conversationRevision[target.engine] += 1;
+  file.engineRouting[target.engine].revision += 1;
+  return true;
+}
+
 function normalizeReceipt(value: SpawnReceipt): SpawnReceipt {
   const state = value.state === "completed" || value.state === "failed" || value.state === "pane-bound" || value.state === "host-verified" || value.state === "prompt-delivered" || value.state === "path-pending" || value.state === "conflicted"
     ? value.state
@@ -291,6 +354,7 @@ function normalizeReceipt(value: SpawnReceipt): SpawnReceipt {
     conversationId: typeof value.conversationId === "string" && value.conversationId.startsWith("conversation_")
       ? value.conversationId as ViewerConversationId
       : `conversation_${crypto.randomUUID()}`,
+    purpose: value.purpose === "migration-successor" ? "migration-successor" : "launch",
     accountId: typeof value.accountId === "string" ? value.accountId : null,
     parentConversationId: typeof value.parentConversationId === "string" && value.parentConversationId.startsWith("conversation_")
       ? value.parentConversationId as ViewerConversationId
@@ -438,6 +502,10 @@ export class AgentRegistry {
   beginSpawnRequest(input: SpawnRequest): SpawnBeginResult {
     return this.mutate((file) => {
       const profile = emptyLaunchProfile({ cwd: input.cwd, parentConversationId: input.parentConversationId ?? null, ...(input.launchProfile ?? {}) });
+      const existingConversation = input.conversationId ? file.conversations[input.conversationId] : null;
+      if (existingConversation && existingConversation.engine !== input.engine) {
+        throw new Error("spawn conversation ownership is invalid");
+      }
       if (input.clientAttemptId) {
         const existing = Object.values(file.receipts).find((receipt) => receipt.clientAttemptId === input.clientAttemptId);
         if (existing) {
@@ -449,14 +517,15 @@ export class AgentRegistry {
         launchId: crypto.randomUUID(),
         clientAttemptId: input.clientAttemptId ?? null,
         requestDigest: input.requestDigest ?? null,
-        conversationId: `conversation_${crypto.randomUUID()}`,
+        conversationId: input.conversationId ?? `conversation_${crypto.randomUUID()}`,
+        purpose: input.purpose ?? "launch",
         engine: input.engine,
         cwd: input.cwd,
         accountId: input.accountId ?? null,
         parentConversationId: input.parentConversationId ?? null,
         createdAt: now(),
         state: "starting",
-        artifactPath: null,
+        artifactPath: input.expectedArtifactPath ?? null,
         key: null,
         pane: null,
         verifiedHost: null,
@@ -555,6 +624,15 @@ export class AgentRegistry {
       receipt.error = code;
       return { kind: "conflict", receipt: clone(receipt), code };
     };
+    if (receipt.state === "failed" || receipt.state === "conflicted") {
+      return {
+        kind: "conflict",
+        receipt: clone(receipt),
+        code: receipt.error === "spawn_artifact_conflict" || receipt.error === "spawn_pane_conflict" || receipt.error === "spawn_identity_conflict"
+          ? receipt.error
+          : "spawn_identity_conflict",
+      };
+    }
     if (receipt.engine !== entry.key.engine || receipt.cwd !== entry.cwd) return conflict("spawn_identity_conflict");
     if (receipt.pane && entry.host?.kind === "tmux" && (
       receipt.pane.paneId !== entry.host.paneId ||
@@ -574,13 +652,25 @@ export class AgentRegistry {
       id: receipt.conversationId,
       engine: receipt.engine as Extract<AgentEngine, "claude" | "codex">,
       generations: [],
+      continuityPaths: [],
       migration: null,
       turn: { state: "unknown" as const, source: "empty" as const, terminalAt: null, observedAt: null },
       createdAt,
       updatedAt: createdAt,
     };
     if (conversation.engine !== receipt.engine) return conflict("spawn_identity_conflict");
-    if (!conversation.generations.some((generation) => generation.path === entry.artifactPath)) {
+    if (receipt.purpose === "migration-successor") {
+      const provisionalOwner = Object.values(file.conversations).find((candidate) => candidate.id !== conversation.id
+        && candidate.engine === conversation.engine && conversationOwnsPath(candidate, entry.artifactPath));
+      if (provisionalOwner && !adoptProvisionalOwner(file, provisionalOwner, conversation, entry.artifactPath)) {
+        return conflict("spawn_artifact_conflict");
+      }
+      if (!conversation.continuityPaths.includes(entry.artifactPath)
+        && !conversation.generations.some((generation) => generation.path === entry.artifactPath)) {
+        conversation.continuityPaths.push(entry.artifactPath);
+      }
+    }
+    if (receipt.purpose !== "migration-successor" && !conversation.generations.some((generation) => generation.path === entry.artifactPath)) {
       conversation.generations.push({
         id: nativeGenerationId(entry.artifactPath),
         path: entry.artifactPath,
@@ -610,6 +700,9 @@ export class AgentRegistry {
         operationId: crypto.randomUUID(),
         sourceGenerationId: source.id,
         providerReceipt: null,
+        boardProject: null,
+        boardOperationId: null,
+        boardPlacementProject: source.launchProfile.project,
         updatedAt: createdAt,
       };
     }
@@ -767,7 +860,7 @@ export class AgentRegistry {
       remain an interoperability detail and can change on every account move. */
   ensureConversation(engine: Extract<AgentEngine, "claude" | "codex">, artifactPath: string, accountId: string | null): RegistryConversation {
     return this.mutate((file) => {
-      const existing = Object.values(file.conversations).find((conversation) => conversation.engine === engine && conversation.generations.some((generation) => generation.path === artifactPath));
+      const existing = Object.values(file.conversations).find((conversation) => conversation.engine === engine && conversationOwnsPath(conversation, artifactPath));
       if (existing) return clone(existing);
       const createdAt = now();
       const conversation: RegistryConversation = {
@@ -783,6 +876,7 @@ export class AgentRegistry {
           createdAt,
           archivedAt: null,
         }],
+        continuityPaths: [],
         migration: null,
         turn: { state: "unknown", source: "empty", terminalAt: null, observedAt: null },
         createdAt,
@@ -802,7 +896,21 @@ export class AgentRegistry {
       const scopeChanged = new Set<Extract<AgentEngine, "claude" | "codex">>();
       for (const observation of observations) {
         let conversation = Object.values(file.conversations).find((candidate) =>
-          candidate.engine === observation.engine && candidate.generations.some((generation) => generation.path === observation.path));
+          candidate.engine === observation.engine && conversationOwnsPath(candidate, observation.path));
+        if (!conversation) {
+          const migrationReceipt = Object.values(file.receipts).find((receipt) => receipt.engine === observation.engine
+            && receipt.purpose === "migration-successor"
+            && receipt.artifactPath === observation.path
+            && receipt.state !== "failed"
+            && receipt.state !== "conflicted");
+          const migrationOwner = migrationReceipt ? file.conversations[migrationReceipt.conversationId] : null;
+          if (migrationOwner) {
+            conversation = migrationOwner;
+            if (!conversation.continuityPaths.includes(observation.path)) conversation.continuityPaths.push(observation.path);
+            conversation.updatedAt = observation.observedAt;
+            scopeChanged.add(observation.engine);
+          }
+        }
         if (!conversation) {
           const createdAt = observation.observedAt;
           conversation = {
@@ -818,6 +926,7 @@ export class AgentRegistry {
               createdAt,
               archivedAt: null,
             }],
+            continuityPaths: [],
             migration: null,
             turn: { ...observation.turn, observedAt: observation.observedAt },
             createdAt,
@@ -843,7 +952,7 @@ export class AgentRegistry {
           permissionMode: generation.launchProfile.permissionMode ?? observation.launchProfile.permissionMode,
           readOnly: generation.launchProfile.readOnly ?? observation.launchProfile.readOnly,
           title: generation.launchProfile.title ?? observation.launchProfile.title,
-          project: generation.launchProfile.project ?? observation.launchProfile.project,
+          project: observation.launchProfile.project ?? generation.launchProfile.project,
           parentConversationId: generation.launchProfile.parentConversationId ?? observation.launchProfile.parentConversationId,
           role: generation.launchProfile.role === "root" || observation.launchProfile.role === "root" ? "root" : "worker",
           goal: observation.launchProfile.goal ?? generation.launchProfile.goal,
@@ -864,7 +973,7 @@ export class AgentRegistry {
   }
 
   conversationForPath(artifactPath: string): RegistryConversation | null {
-    return Object.values(this.snapshot().conversations).find((conversation) => conversation.generations.some((generation) => generation.path === artifactPath)) ?? null;
+    return Object.values(this.snapshot().conversations).find((conversation) => conversationOwnsPath(conversation, artifactPath)) ?? null;
   }
 
   conversation(id: ViewerConversationId): RegistryConversation | null {
@@ -873,8 +982,14 @@ export class AgentRegistry {
 
   launchProfileForPath(artifactPath: string): LaunchProfile | null {
     const snapshot = this.snapshot();
-    const generation = Object.values(snapshot.conversations).flatMap((conversation) => conversation.generations).find((item) => item.path === artifactPath);
-    if (generation) return clone(generation.launchProfile);
+    for (const conversation of Object.values(snapshot.conversations)) {
+      const generation = conversation.generations.find((item) => item.path === artifactPath);
+      if (generation) return clone(generation.launchProfile);
+      if (conversation.continuityPaths.includes(artifactPath)) {
+        const current = conversation.generations.at(-1);
+        if (current) return clone(current.launchProfile);
+      }
+    }
     const receipt = Object.values(snapshot.receipts).find((item) => item.artifactPath === artifactPath);
     return receipt ? clone(receipt.launchProfile) : null;
   }
@@ -977,6 +1092,10 @@ export class AgentRegistry {
           continue;
         }
         scoped += 1;
+        const boardProject = conversation.migration?.boardProject ?? null;
+        const boardPlacementProject = conversation.migration?.boardPlacementProject
+          ?? boardProject
+          ?? source.launchProfile.project;
         conversation.migration = {
           intentId: intent.id,
           phase: conversation.turn.state === "busy" || conversation.turn.state === "unknown" ? "waiting-turn" : "requested",
@@ -987,6 +1106,9 @@ export class AgentRegistry {
           operationId: crypto.randomUUID(),
           sourceGenerationId: source.id,
           providerReceipt: null,
+          boardProject,
+          boardOperationId: conversation.migration?.boardOperationId ?? null,
+          boardPlacementProject,
           updatedAt: changedAt,
         };
         conversation.updatedAt = changedAt;
@@ -1024,6 +1146,9 @@ export class AgentRegistry {
         operationId: migration.operationId ?? `${migration.intentId}:${id}:${migration.revision}`,
         sourceGenerationId: migration.sourceGenerationId ?? source?.id ?? "",
         providerReceipt: migration.providerReceipt ?? null,
+        boardProject: migration.boardProject ?? null,
+        boardOperationId: migration.boardOperationId ?? null,
+        boardPlacementProject: migration.boardPlacementProject ?? migration.boardProject ?? null,
       } : null;
       conversation.updatedAt = now();
       return clone(conversation);
@@ -1044,6 +1169,82 @@ export class AgentRegistry {
       conversation.migration = { ...migration, ...patch, updatedAt: now() };
       conversation.updatedAt = now();
       return clone(conversation);
+    });
+  }
+
+  persistMigrationProviderReceipt(
+    id: ViewerConversationId,
+    expectedRevision: number,
+    operationId: string,
+    receipt: ProviderReceipt,
+  ): RegistryConversation {
+    return this.mutate((file) => {
+      const conversation = file.conversations[id];
+      const migration = conversation?.migration;
+      if (!conversation || !migration) throw new Error("conversation has no migration");
+      if (migration.revision !== expectedRevision || migration.operationId !== operationId) {
+        throw new Error("migration provider receipt is stale");
+      }
+      if (migration.phase === "successor-starting") {
+        conversation.migration = { ...migration, phase: "verifying", providerReceipt: receipt, updatedAt: now() };
+        conversation.updatedAt = now();
+        return clone(conversation);
+      }
+      const matchingReceipt = migration.providerReceipt !== null
+        && sameProviderReceiptOutcome(migration.providerReceipt, receipt);
+      if ((migration.phase === "verifying" || migration.phase === "committed") && matchingReceipt) {
+        return clone(conversation);
+      }
+      throw new Error("migration provider receipt conflicts with durable state");
+    });
+  }
+
+  recordConversationContinuityPath(id: ViewerConversationId, pathname: string): RegistryConversation {
+    return this.mutate((file) => {
+      const conversation = file.conversations[id];
+      if (!conversation) throw new Error("viewer conversation is unknown");
+      const provisionalOwner = Object.values(file.conversations).find((candidate) =>
+        candidate.id !== id && candidate.engine === conversation.engine && conversationOwnsPath(candidate, pathname));
+      if (provisionalOwner) {
+        if (!adoptProvisionalOwner(file, provisionalOwner, conversation, pathname)) {
+          throw new Error("migration continuity path has another durable owner");
+        }
+      }
+      if (!conversation.continuityPaths.includes(pathname)) conversation.continuityPaths.push(pathname);
+      conversation.updatedAt = now();
+      return clone(conversation);
+    });
+  }
+
+  markMigrationBoardProjects(updates: readonly { id: ViewerConversationId; operationId: string; project: string }[]): void {
+    if (updates.length === 0) return;
+    this.mutate((file) => {
+      const updatedAt = now();
+      for (const update of updates) {
+        const conversation = file.conversations[update.id];
+        const migration = conversation?.migration;
+        if (!conversation || !migration || migration.phase !== "committed" || migration.operationId !== update.operationId) continue;
+        migration.boardProject = update.project;
+        migration.boardOperationId = update.operationId;
+        migration.boardPlacementProject = update.project;
+        migration.updatedAt = updatedAt;
+        conversation.updatedAt = updatedAt;
+      }
+    });
+  }
+
+  markMigrationBoardPlacementProjects(updates: readonly { id: ViewerConversationId; operationId: string; project: string }[]): void {
+    if (updates.length === 0) return;
+    this.mutate((file) => {
+      const updatedAt = now();
+      for (const update of updates) {
+        const conversation = file.conversations[update.id];
+        const migration = conversation?.migration;
+        if (!conversation || !migration || migration.phase !== "committed" || migration.operationId !== update.operationId) continue;
+        migration.boardPlacementProject = update.project;
+        migration.updatedAt = updatedAt;
+        conversation.updatedAt = updatedAt;
+      }
     });
   }
 
@@ -1069,6 +1270,9 @@ export class AgentRegistry {
         operationId: crypto.randomUUID(),
         sourceGenerationId: source.id,
         providerReceipt: null,
+        boardProject: current.boardProject,
+        boardOperationId: current.boardOperationId,
+        boardPlacementProject: current.boardPlacementProject,
         error: null,
         errorCode: null,
         updatedAt: now(),
@@ -1101,6 +1305,7 @@ export class AgentRegistry {
         archivedAt: null,
       };
       conversation.generations.push(generation);
+      conversation.continuityPaths = conversation.continuityPaths.filter((pathname) => pathname !== generation.path);
       conversation.migration = { ...conversation.migration, phase: "committed", updatedAt: now() };
       conversation.updatedAt = now();
       for (const delivery of Object.values(file.heldDeliveries)) {

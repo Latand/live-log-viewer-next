@@ -1,12 +1,28 @@
-import { expect, mock, test } from "bun:test";
+import { afterEach, beforeEach, expect, mock, test } from "bun:test";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
-import { agentRegistry } from "@/lib/agent/registry";
+import { withoutArchivedPredecessors } from "@/lib/accounts/identity";
+import { agentRegistry, AgentRegistry, setAgentRegistryForTests } from "@/lib/agent/registry";
 import type { FileEntry } from "@/lib/types";
 
 let scans = 0;
 let scanOptions: unknown;
 let scannedFiles: FileEntry[] = [];
+let registryRoot = "";
+
+beforeEach(() => {
+  registryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "llv-files-route-"));
+  setAgentRegistryForTests(new AgentRegistry(path.join(registryRoot, "registry.json")));
+  scannedFiles = [];
+});
+
+afterEach(() => {
+  setAgentRegistryForTests(null);
+  fs.rmSync(registryRoot, { recursive: true, force: true });
+});
 
 mock.module("@/lib/scanner", () => ({
   listFiles: async () => [],
@@ -63,6 +79,33 @@ function file(path: string): FileEntry {
     waitingInput: null,
   };
 }
+
+test("a provisional Codex fork projects as archived history of its stable conversation", async () => {
+  const registry = agentRegistry();
+  const sourcePath = "/sessions/source-019f4906-3f67-7b72-9fbc-9ec3b5ad1301.jsonl";
+  const forkPath = "/source-account/sessions/fork-019f4906-3f67-7b72-9fbc-9ec3b5ad1302.jsonl";
+  const targetPath = "/target-account/sessions/fork-019f4906-3f67-7b72-9fbc-9ec3b5ad1302.jsonl";
+  const conversation = registry.ensureConversation("codex", sourcePath, "source");
+  registry.setConversationMigration(conversation.id, {
+    intentId: "files-route-continuity",
+    phase: "verifying",
+    targetId: "target",
+    revision: 1,
+    error: null,
+    updatedAt: "2026-07-10T12:00:00.000Z",
+  });
+  registry.recordConversationContinuityPath(conversation.id, forkPath);
+  registry.commitSuccessor(conversation.id, { id: "019f4906-3f67-7b72-9fbc-9ec3b5ad1302", path: targetPath, accountId: "target" }, 1);
+  scannedFiles = [file(forkPath), file(targetPath)];
+
+  const response = await GET(new Request("http://127.0.0.1/api/files"));
+  const body = await response.json() as { files: FileEntry[] };
+  const fork = body.files.find((entry) => entry.path === forkPath);
+
+  expect(fork?.conversationId).toBe(conversation.id);
+  expect(fork?.migratedTo).toBe(targetPath);
+  expect(withoutArchivedPredecessors(body.files).map((entry) => entry.path)).toEqual([targetPath]);
+});
 
 test("spawn-time lineage keeps the child grouped after its tmux host disappears", async () => {
   const registry = agentRegistry();
