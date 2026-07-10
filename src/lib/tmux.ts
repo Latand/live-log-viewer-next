@@ -487,7 +487,7 @@ export async function tmuxServerIdentity(): Promise<string | null> {
 }
 
 /** Pane-local launch marker used by transcript observation. This value is an
-    opaque UUID, never a prompt, path, command, or account secret. */
+    opaque UUID. Prompt, path, command, and account secrets stay outside it. */
 export async function paneLaunchId(paneId: string): Promise<string | null> {
   const result = await runTmux(["show-options", "-p", "-v", "-t", paneId, "@llv_launch_id"]).catch(() => null);
   const value = result && result.code === 0 ? result.stdout.trim() : "";
