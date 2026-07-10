@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import path from "node:path";
 
 import type { FileEntry } from "@/lib/types";
 
@@ -89,6 +91,10 @@ const codexAssistantEvent = (timestamp: string, message: string) =>
   JSON.stringify({ type: "event_msg", timestamp, payload: { type: "agent_message", phase: "commentary", message } });
 const codexUserPair = (timestamp: string, text: string) => [codexUserResponse(timestamp, [{ type: "input_text", text }]), codexUserEvent(timestamp, text)];
 const codexReasoning = (timestamp: string) => JSON.stringify({ type: "response_item", timestamp, payload: { type: "reasoning" } });
+
+function fixtureLines(name: string): string[] {
+  return readFileSync(path.join(import.meta.dir, "fixtures", name), "utf8").trim().split("\n");
+}
 
 function itemsOfKind(feed: ReturnType<typeof buildFeed>, kind: Item["kind"]) {
   return feed.items.filter((item) => item.kind === kind);
@@ -643,6 +649,19 @@ describe("Codex functions.exec orchestration", () => {
 });
 
 describe("Claude protocol and repeated prose", () => {
+  test("keeps a queued human message in the user role beside harness records", () => {
+    const lines = fixtureLines("claude-queued-mid-turn.jsonl");
+    const feed = buildFeed(claudeFile, lines, false, "");
+
+    expect(itemsOfKind(feed, "user")).toEqual([
+      expect.objectContaining({ text: expect.stringContaining("Keep this request styled as a user message.") }),
+    ]);
+    expect(itemsOfKind(feed, "sysmsg")).toEqual([
+      expect.objectContaining({ text: expect.stringContaining("<task-notification>") }),
+    ]);
+    assertParity(claudeFile, lines, { chunks: [1] });
+  });
+
   test("classifies structural and complete-wrapper protocol rows as system messages", () => {
     const lines = [
       JSON.stringify({ type: "user", isMeta: true, message: { content: "<local-command-caveat>Caveat: command</local-command-caveat>" } }),
