@@ -7,6 +7,7 @@ import {
   type ReviewCardItem,
 } from "@/lib/review";
 import { getLocale, translate } from "@/lib/i18n";
+import { inboxImageExt, MAX_INBOX_IMAGE_BYTES } from "@/lib/imagePolicy";
 import type { FileEntry } from "@/lib/types";
 
 import type { GlyphName } from "../icons";
@@ -106,6 +107,7 @@ export interface FeedSession {
 
 const BLOB_MIN = 20_000;
 const BLOB_KEEP = 200_000;
+const ATTACHMENT_TYPE_MAX = 80;
 const MEM_CITATION_RE = /<oai-mem-citation>\s*<citation_entries>([\s\S]*?)<\/citation_entries>\s*<rollout_ids>([\s\S]*?)<\/rollout_ids>\s*<\/oai-mem-citation>/g;
 
 /* A near-whitespace-free run this large is base64/binary:
@@ -157,11 +159,6 @@ function extractInboxImages(text: string): { cleaned: string; images: InboxImage
   return { cleaned: kept.join("\n").trim(), images };
 }
 
-/* Harness-injected turns (system prompts, reminders, command wrappers, hook
-   output) arrive as "user" records but the user never typed them; they fold
-   into a collapsed system row so real messages stand out. */
-const SYS_MSG_RE = /^\s*(?:<[a-zA-Z][\w:-]*|Caveat: The messages below|\[Request interrupted|This came from another Claude session|# AGENTS\.md instructions)/;
-
 function sysMsgLabel(text: string, fallback?: string): string {
   const tag = text.match(/^\s*<([a-zA-Z][\w:-]*)/)?.[1];
   if (tag) return tag;
@@ -184,6 +181,79 @@ function rec(value: unknown): Record<string, unknown> {
 
 function arr(value: unknown): Record<string, unknown>[] {
   return Array.isArray(value) ? value.filter((x): x is Record<string, unknown> => x && typeof x === "object" && !Array.isArray(x)) : [];
+}
+
+function hasNonEmptyValue(value: unknown): boolean {
+  if (typeof value === "string") return value.trim().length > 0;
+  if (typeof value === "number" || typeof value === "boolean") return true;
+  if (Array.isArray(value)) return value.some(hasNonEmptyValue);
+  return value !== null && typeof value === "object" && Object.values(value).some(hasNonEmptyValue);
+}
+
+function codexAttachmentLabel(type: string): string {
+  const normalized = type.trim().replace(/[_-]/g, " ");
+  if (!normalized) return "Attachment";
+  return `Attachment: ${normalized.slice(0, ATTACHMENT_TYPE_MAX)}${normalized.length > ATTACHMENT_TYPE_MAX ? "…" : ""}`;
+}
+
+function base64DecodedLength(base64: string): number {
+  if (!base64.length) return 0;
+  const padding = base64.endsWith("==") ? 2 : base64.endsWith("=") ? 1 : 0;
+  return Math.floor((base64.length * 3) / 4) - padding;
+}
+
+function codexImageFromDataUrl(value: string): Extract<Item, { kind: "image" }> | null {
+  const match = value.match(/^data:([^;,]+);base64,([A-Za-z0-9+/=]+)$/i);
+  if (!match) return null;
+  const media = match[1].toLowerCase();
+  if (!inboxImageExt(media)) return null;
+  if (base64DecodedLength(match[2]) > MAX_INBOX_IMAGE_BYTES) return null;
+  return { kind: "image", media, data: match[2] };
+}
+
+function inboxImagesFromPath(path: string): Extract<Item, { kind: "inbox-image" }>[] {
+  const { images } = extractInboxImages(path);
+  return images.map((image) => ({ kind: "inbox-image", ...image }));
+}
+
+interface CodexUserContent {
+  text: string;
+  attachments: Item[];
+}
+
+/* Codex has added content-part variants over time. Keep the text path broad,
+   render approved inline raster data as an image, and describe every other
+   non-empty attachment without exposing its payload in the feed. */
+function normalizeCodexUserContent(content: unknown): CodexUserContent {
+  const text: string[] = [];
+  const attachments: Item[] = [];
+  for (const part of arr(content)) {
+    const type = textPart(part.type);
+    const partText = textPart(part.text) || textPart(part.input_text) || textPart(part.output_text);
+    if (partText) text.push(partText);
+
+    if (type === "input_image" || type === "image") {
+      const imageUrl = textPart(part.image_url) || textPart(rec(part.image_url).url) || textPart(part.data);
+      const image = codexImageFromDataUrl(imageUrl);
+      if (image) attachments.push(image);
+      else if (hasNonEmptyValue(part)) attachments.push({ kind: "note", text: codexAttachmentLabel(type) });
+      continue;
+    }
+
+    if (type === "local-image" || type === "local_image" || type === "localImage") {
+      const path = textPart(part.path) || textPart(part.local_path) || textPart(part.image_url) || textPart(part.url);
+      const images = inboxImagesFromPath(path);
+      if (images.length) attachments.push(...images);
+      else if (hasNonEmptyValue(part)) attachments.push({ kind: "note", text: codexAttachmentLabel(type) });
+      continue;
+    }
+
+    if ((type === "input_text" || type === "text" || type === "output_text") && partText) continue;
+    if (!partText && hasNonEmptyValue(part)) {
+      attachments.push({ kind: "note", text: codexAttachmentLabel(type) });
+    }
+  }
+  return { text: text.join(" ").trim(), attachments };
 }
 
 /** Responses custom tools return either plain text or typed text blocks. */
@@ -263,6 +333,9 @@ function toolNameOf(cmd: string): string {
 interface StoredEntry {
   /** Monotonic push counter — the React key; consecutive within `entries`. */
   seq: number;
+  /** Initial source line. A later echo can move `src`; crossing that seam
+      requires a fresh window parse to preserve one-shot ordering. */
+  bornSrc: number;
   /** Absolute index of the source line, for window-slide eviction. */
   src: number;
   item: Item;
@@ -271,6 +344,51 @@ interface StoredEntry {
 interface CallRec {
   call: Call;
   seq: number;
+}
+
+interface PendingCodexUser {
+  src: number;
+  ts: unknown;
+  text: string;
+  entrySeqs: number[];
+}
+
+function sameCodexUserTurn(leftTs: unknown, leftText: unknown, rightTs: unknown, rightText: unknown): boolean {
+  const leftNormalizedText = textPart(leftText).trim();
+  const rightNormalizedText = textPart(rightText).trim();
+  if (!leftNormalizedText || leftNormalizedText !== rightNormalizedText) return false;
+
+  const a = textPart(leftTs).trim();
+  const b = textPart(rightTs).trim();
+  if (!a || !b) return false;
+  if (a === b) return true;
+
+  const aTime = Date.parse(a);
+  const bTime = Date.parse(b);
+  if (Number.isFinite(aTime) && Number.isFinite(bTime)) return Math.abs(aTime - bTime) <= 1_000;
+
+  const synthetic = /^(.*?)(\d+)(?:\.(\d+))?$/;
+  const aMatch = a.match(synthetic);
+  const bMatch = b.match(synthetic);
+  if (!aMatch || !bMatch || aMatch[1] !== bMatch[1]) return false;
+  const aValue = Number(aMatch[2] + "." + (aMatch[3] ?? "0"));
+  const bValue = Number(bMatch[2] + "." + (bMatch[3] ?? "0"));
+  return Math.abs(aValue - bValue) <= 0.01;
+}
+
+function claudeContentText(content: unknown): string {
+  return typeof content === "string" ? content : arr(content).map((part) => textPart(part.text)).filter(Boolean).join("\n");
+}
+
+function isClaudeProtocolUser(obj: Record<string, unknown>, content: unknown): boolean {
+  if (obj.isMeta === true || "interruptedMessageId" in obj || "promptSource" in obj || "origin" in obj) return true;
+  const text = claudeContentText(content).trim();
+  return (
+    /^\[Request interrupted by user\]$/.test(text) ||
+    /^<local-command-caveat>\s*Caveat:[\s\S]*<\/local-command-caveat>$/.test(text) ||
+    /^<task-notification\b[^>]*>[\s\S]*<\/task-notification>$/.test(text) ||
+    /^This came from another Claude session\b[\s\S]*not typed by your user[\s\S]*$/.test(text)
+  );
 }
 
 /**
@@ -304,8 +422,11 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
   /* Dedup/marker state remembers the source line it came from: when that line
      slides out of the window the state clears, matching what a re-parse of
      the shortened window would know. */
-  let lastProse: { text: string; src: number } | null = null;
-  let lastUser: { text: string; at: number; src: number } | null = null;
+  let lastProse: { text: string; src: number; seq: number } | null = null;
+  /* A composer turn is recorded as a user response item immediately followed
+     by its user_message event. The event owns the logical turn, while this
+     provisional record keeps a live tail visible until its echo arrives. */
+  let pendingCodexUsers: PendingCodexUser[] = [];
   let codexCompacted: { src: number } | null = null;
   let plainBlock: { lines: string[]; src: number } | null = null;
   let lastPlainCall: CallRec | null = null;
@@ -317,7 +438,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
   const entryIndex = (seq: number): number => (entries.length ? seq - entries[0].seq : -1);
 
   const push = (item: Item): number => {
-    entries.push({ seq: pushSeq, src: curSrc, item });
+    entries.push({ seq: pushSeq, bornSrc: curSrc, src: curSrc, item });
     snapshot = null;
     return pushSeq++;
   };
@@ -398,12 +519,22 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
     return { cleaned, cites };
   };
   const addProse = (ts: unknown, text: string) => {
-    if (!text.trim() || text === lastProse?.text) return;
-    lastProse = { text, src: curSrc };
+    if (!text.trim()) return;
+    const src = curSrc;
     if (pushBlobIfHuge(text)) return;
     const engine = cfg.engine === "codex" ? "codex" : "claude";
     if (pushStructured(ts, text, (segment) => push({ kind: "prose", ts, text: segment, engine }))) return;
-    push({ kind: "prose", ts, text, engine });
+    const seq = push({ kind: "prose", ts, text, engine });
+    lastProse = { text, src, seq };
+  };
+  const adoptCodexProseEcho = (ts: unknown, text: string): boolean => {
+    if (!lastProse || lastProse.text !== text || lastProse.src !== curSrc - 1) return false;
+    const idx = entryIndex(lastProse.seq);
+    if (idx < 0 || idx >= entries.length || entries[idx]?.item.kind !== "prose") return false;
+    entries[idx] = { ...entries[idx], src: curSrc, item: { ...entries[idx].item, ts } };
+    lastProse = { ...lastProse, src: curSrc };
+    snapshot = null;
+    return true;
   };
   const addCmd = (ts: unknown, cmd: string, callId?: string, icon?: GlyphName) => {
     const id = callId || "plain-" + pushSeq + "-" + String(ts ?? "");
@@ -477,7 +608,8 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
   };
   /* Inbound teammate traffic arrives as user text wrapped in <teammate-message>;
      idle_notification JSON bodies collapse to a thin service-style row. */
-  const addUserText = (ts: unknown, text: string) => {
+  const addUserText = (ts: unknown, text: string, isHarness = false) => {
+    if (isHarness) return void addSysMsg(text, tr("render.system"));
     const rest = text.replace(TMSG_RE, (_whole, _tag: string, attrs: string, body: string) => {
       const peer = tmsgAttr(attrs, "teammate_id") || tmsgAttr(attrs, "from") || tr("render.teammate");
       const summary = tmsgAttr(attrs, "summary");
@@ -506,31 +638,90 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
     });
     const leftover = rest.replace(/Another Claude session sent a message:\s*/g, "").trim();
     if (!leftover || pushBlobIfHuge(leftover)) return;
-    if (SYS_MSG_RE.test(leftover)) return void push({ kind: "sysmsg", label: sysMsgLabel(leftover), text: leftover });
     const { cleaned, images } = extractInboxImages(leftover);
     if (cleaned && !pushStructured(ts, cleaned, (segment) => push({ kind: "user", ts, text: segment }))) {
       push({ kind: "user", ts, text: cleaned });
     }
     for (const image of images) push({ kind: "inbox-image", name: image.name, path: image.path });
   };
-  /* Codex user turns carry no envelopes to unwrap: the bubble text plus a card
-     per attached inbox image. A rollout logs the same turn twice — as a
-     response_item and as an event_msg echo right next to it — so an exact
-     repeat with nothing rendered in between folds away; a message the user
-     really sent twice has agent output between the copies and stays. */
-  const addPlainUser = (ts: unknown, text: string) => {
-    if (lastUser && lastUser.text === text && lastUser.at === pushSeq) return;
-    const { cleaned, images } = extractInboxImages(text);
-    if (cleaned) push({ kind: "user", ts, text: cleaned });
-    for (const image of images) push({ kind: "inbox-image", name: image.name, path: image.path });
-    lastUser = { text, at: pushSeq, src: curSrc };
-  };
-  /* Harness turns fold into a sysmsg row; the same echo dedup applies since
-     they arrive through the same doubled user-role records. */
+  /* Harness classification is driven by the source record, never a textual
+     prefix. A human can legitimately begin a composer message with XML or a
+     phrase that looks like a harness reminder. */
   const addSysMsg = (text: string, fallbackLabel?: string) => {
-    if (lastUser && lastUser.text === text && lastUser.at === pushSeq) return;
     push({ kind: "sysmsg", label: sysMsgLabel(text, fallbackLabel), text });
-    lastUser = { text, at: pushSeq, src: curSrc };
+  };
+  const emitCodexUserContent = (ts: unknown, content: CodexUserContent): PendingCodexUser => {
+    const entrySeqs: number[] = [];
+    const emit = (item: Item) => entrySeqs.push(push(item));
+    const { cleaned, images } = extractInboxImages(content.text);
+    if (cleaned) emit({ kind: "user", ts, text: cleaned });
+    for (const image of images) emit({ kind: "inbox-image", name: image.name, path: image.path });
+    for (const attachment of content.attachments) emit(attachment);
+    return { src: curSrc, ts, text: content.text, entrySeqs };
+  };
+  const updateCodexPendingSource = (pending: PendingCodexUser, src: number) => {
+    for (const seq of pending.entrySeqs) {
+      const idx = entryIndex(seq);
+      if (idx >= 0 && idx < entries.length) entries[idx] = { ...entries[idx], src };
+    }
+    pending.src = src;
+    snapshot = null;
+  };
+  const finalizePendingCodexUsers = () => {
+    const pendingUsers = pendingCodexUsers;
+    pendingCodexUsers = [];
+    for (const pending of pendingUsers) {
+      /* A user-role response without the immediately following event is a
+         harness/service injection in the observed Codex schema. Its content may
+         use any prefix, so record shape provides the classification. */
+      let converted = false;
+      for (const seq of pending.entrySeqs) {
+        const idx = entryIndex(seq);
+        if (idx < 0 || idx >= entries.length) continue;
+        if (entries[idx].item.kind === "user") {
+          entries[idx] = { ...entries[idx], item: { kind: "sysmsg", label: sysMsgLabel(pending.text), text: pending.text } };
+          snapshot = null;
+          converted = true;
+          break;
+        }
+      }
+      if (!converted && pending.text) {
+        const source = curSrc;
+        curSrc = pending.src;
+        addSysMsg(pending.text);
+        curSrc = source;
+      }
+    }
+  };
+  const addCodexResponseUser = (ts: unknown, content: unknown) => {
+    const normalized = normalizeCodexUserContent(content);
+    const pending = emitCodexUserContent(ts, normalized);
+    if (!pending.entrySeqs.length && !pending.text) addSvc("message user");
+    pendingCodexUsers.push(pending);
+  };
+  const addCodexEventUser = (ts: unknown, text: string) => {
+    const pendingIndex = pendingCodexUsers.findIndex((pending) => sameCodexUserTurn(pending.ts, pending.text, ts, text));
+    if (pendingIndex < 0) {
+      emitCodexUserContent(ts, { text, attachments: [] });
+      return;
+    }
+    const [pending] = pendingCodexUsers.splice(pendingIndex, 1);
+    if (!pending) return;
+    const { cleaned, images } = extractInboxImages(text);
+    if (cleaned) {
+      const userSeq = pending.entrySeqs.find((seq) => {
+        const idx = entryIndex(seq);
+        return idx >= 0 && entries[idx]?.item.kind === "user";
+      });
+      if (userSeq !== undefined) {
+        const idx = entryIndex(userSeq);
+        entries[idx] = { ...entries[idx], item: { kind: "user", ts, text: cleaned } };
+      } else {
+        pending.entrySeqs.push(push({ kind: "user", ts, text: cleaned }));
+      }
+    }
+    for (const image of images) pending.entrySeqs.push(push({ kind: "inbox-image", name: image.name, path: image.path }));
+    updateCodexPendingSource(pending, curSrc);
   };
   const addCompact = (ts: unknown, meta?: { trigger?: string; preTokens?: number }) => {
     push({ kind: "compact", ts, trigger: meta?.trigger, preTokens: meta?.preTokens });
@@ -552,15 +743,13 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
   const renderCodex = (obj: Record<string, unknown>) => {
     const p = rec(obj.payload);
     const ts = obj.timestamp;
-    if (obj.type === "session_meta") {
-      return addNote(`${tr("render.codexSessionCreated")} · ${textPart(p.model)} · ${textPart(p.cwd)}`);
-    }
     if (obj.type === "event_msg") {
-      if (p.type === "agent_message" && p.message) return addProse(ts, textPart(p.message));
-      if (p.type === "user_message" && p.message) {
+      if (p.type === "user_message" && p.message) return addCodexEventUser(ts, textPart(p.message));
+      finalizePendingCodexUsers();
+      if (p.type === "agent_message" && p.message) {
         const text = textPart(p.message);
-        if (SYS_MSG_RE.test(text)) return addSysMsg(text);
-        return addPlainUser(ts, text);
+        if (!adoptCodexProseEcho(ts, text)) addProse(ts, text);
+        return;
       }
       if (p.type === "task_started") return addNote(tr("render.taskStarted") + (ts ? " · " + hhmm(ts) : ""));
       if (p.type === "task_complete") return addNote(tr("render.taskComplete") + (ts ? " · " + hhmm(ts) : ""));
@@ -572,14 +761,16 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
     }
     if (obj.type === "response_item") {
       if (p.type === "message") {
-        const text = arr(p.content).map((c) => textPart(c.text) || textPart(c.input_text)).join(" ").trim();
+        if (p.role === "user") return addCodexResponseUser(ts, p.content);
+        finalizePendingCodexUsers();
+        const text = normalizeCodexUserContent(p.content).text;
         if (!text) return addSvc("message " + textPart(p.role));
         if (p.role === "assistant") return addProse(ts, text);
         /* developer/system turns (<permissions instructions>, collaboration
            mode, …) are harness-injected, never something the user typed. */
-        if (p.role !== "user" || SYS_MSG_RE.test(text)) return addSysMsg(text, textPart(p.role));
-        return addPlainUser(ts, text);
+        return addSysMsg(text, textPart(p.role));
       }
+      finalizePendingCodexUsers();
       if (p.type === "function_call") {
         let args: Record<string, unknown> = {};
         try {
@@ -624,6 +815,10 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
       if (p.type === "reasoning") return addSvc("reasoning");
       return addSvc(textPart(p.type) || "item");
     }
+    finalizePendingCodexUsers();
+    if (obj.type === "session_meta") {
+      return addNote(`${tr("render.codexSessionCreated")} · ${textPart(p.model)} · ${textPart(p.cwd)}`);
+    }
     if (obj.type === "compacted") {
       codexCompacted = { src: curSrc };
       return addCompact(ts);
@@ -646,10 +841,11 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
         if (text.trim()) attachCompactSummary(ts, text.trim());
         return;
       }
-      if (typeof content === "string") addUserText(ts, content);
+      const isHarness = isClaudeProtocolUser(obj, content);
+      if (typeof content === "string") addUserText(ts, content, isHarness);
       else {
         for (const part of arr(content)) {
-          if (part.type === "text") addUserText(ts, textPart(part.text));
+          if (part.type === "text") addUserText(ts, textPart(part.text), isHarness);
           else if (part.type === "image") pushImage(part, fileWrap);
           else if (part.type === "tool_result") {
             const inner = arr(part.content);
@@ -796,7 +992,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
     hiddenSvcBySrc.clear();
     hiddenServiceCount = 0;
     lastProse = null;
-    lastUser = null;
+    pendingCodexUsers = [];
     codexCompacted = null;
     plainBlock = null;
     lastPlainCall = null;
@@ -809,6 +1005,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
       true when a pending plain block lost its opening line — sequential state
       that cannot be resumed, so the caller re-parses the window whole. */
   const dropBefore = (start: number): boolean => {
+    const crossedEchoSeam = entries.some((entry) => entry.bornSrc < start && entry.src >= start);
     while (entries.length && entries[0].src < start) {
       const gone = entries.shift()!;
       snapshot = null;
@@ -831,10 +1028,10 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
       snapshot = null;
     }
     if (lastProse && lastProse.src < start) lastProse = null;
-    if (lastUser && lastUser.src < start) lastUser = null;
+    pendingCodexUsers = pendingCodexUsers.filter((pending) => pending.src >= start);
     if (codexCompacted && codexCompacted.src < start) codexCompacted = null;
     if (lastPlainCall && entryIndex(lastPlainCall.seq) < 0) lastPlainCall = null;
-    return plainBlock !== null && plainBlock.src < start;
+    return crossedEchoSeam || (plainBlock !== null && plainBlock.src < start);
   };
 
   /* Collapses runs of >=4 consecutive cmd entries into one cmd-group item so a
