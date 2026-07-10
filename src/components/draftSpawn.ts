@@ -190,7 +190,7 @@ export function classifySpawnResponse(status: number, ok: boolean, body: SpawnRe
     const launchId = typeof body.launchId === "string" ? body.launchId : null;
     const target = typeof body.target === "string" ? body.target : "";
     /* A settled receipt with a known path is the only deterministic match; any
-       other launched-but-unresolved receipt (path-pending, starting replay,
+       other unresolved launch receipt (path-pending, starting replay,
        conflict) becomes confirming and adopts by identity/heuristic. */
     const deterministic = body.state === "settled" && path !== null;
     return {
@@ -204,19 +204,19 @@ export function classifySpawnResponse(status: number, ok: boolean, body: SpawnRe
   }
   /* A replay of a receipt that failed before launch is explicitly retry-safe. */
   if (status === 409 && body?.retrySafe) return { kind: "failed-preflight", message: body?.error ?? null };
-  /* A conflicting attempt (same key, different request) may have left the
-     original worker alive — do not re-enable send. */
+  /* A conflicting attempt (same key, different request) can leave the
+     original worker alive. Send stays disabled. */
   if (status === 409) return { kind: "ambiguous" };
   /* Every other 4xx is a preflight rejection (validation, bad account, missing
      dir, oversize image, cross-origin) — no pane opened, safe to fix and retry. */
   if (status >= 400 && status < 500) return { kind: "failed-preflight", message: body?.error ?? null };
-  /* 5xx / opaque: the fixed route only 500s pre-launch, but a proxy 5xx could
-     land after launch — fail closed and treat the worker as possibly alive. */
+  /* 5xx / opaque: the fixed route emits 500 before launch. A proxy 5xx can
+     land after launch, so recovery treats the worker as possibly alive. */
   return { kind: "ambiguous" };
 }
 
-/** A thrown fetch (network drop, navigation) — the client saw nothing, so the
-    worker may or may not exist. Always ambiguous → confirming. */
+/** A thrown fetch (network drop, navigation) leaves worker existence
+    uncertain. Recovery stays in the confirming state. */
 export function classifyTransportLoss(): SpawnOutcome {
   return { kind: "ambiguous" };
 }

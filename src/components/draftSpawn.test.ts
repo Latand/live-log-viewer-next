@@ -105,13 +105,13 @@ describe("classifySpawnResponse — server → card outcome", () => {
     });
   });
 
-  test("starting replay (202, launched not yet a pane) → confirming, never re-enables send", () => {
+  test("starting replay (202, launch reserved before pane) → confirming with send disabled", () => {
     const out = classifySpawnResponse(202, true, { ok: true, state: "starting", launched: false, path: null, launchId: "launch-1" });
     expect(out.kind).toBe("launched");
     if (out.kind === "launched") expect(out.durable).toBe("confirming");
   });
 
-  test("conflict 200 (launched: true) → confirming, worker exists but is not cleanly ours", () => {
+  test("conflict 200 (launched: true) → confirming with uncertain worker ownership", () => {
     const out = classifySpawnResponse(200, true, { ok: true, state: "conflict", launched: true, path: null, launchId: "launch-1", target: "sess:3.0" });
     expect(out.kind).toBe("launched");
     if (out.kind === "launched") {
