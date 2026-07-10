@@ -25,6 +25,7 @@ import type { BranchGroup } from "@/components/projectModel";
 import { activityDot, cleanTitle, engineBadge, engineColor } from "@/components/utils";
 
 import { STAGE_GLYPH, STAGE_TONES, latestAttempt, stageChipLabel, stageChipState } from "@/components/pipelines/pipelineModel";
+import { VerdictPopover } from "@/components/pipelines/VerdictPopover";
 import { buildSchemeLayout, type SchemeLayout } from "@/components/scheme/layout";
 import { SchemeBoard } from "@/components/scheme/SchemeBoard";
 import { TASK_W, taskCardHeight } from "@/components/scheme/taskGeometry";
@@ -163,12 +164,19 @@ export function MobileFocusView({ project, groups, manual, files, flows, pipelin
   const activePath = activeNode ? activeNode.file.path : null;
   const pipelineFocus = findPipelineStage(pipelines, activePath);
 
+  const openStagePath = useCallback(
+    (path: string) => {
+      const file = files.find((entry) => entry.path === path);
+      if (file) onSelect(file);
+    },
+    [files, onSelect],
+  );
+
   const hopToStage = (index: number) => {
     if (!pipelineFocus) return;
     const stage = pipelineFocus.pipeline.stages[index];
     const path = stage ? latestAttempt(pipelineFocus.pipeline, stage.id)?.agentPath : null;
-    const file = path ? files.find((entry) => entry.path === path) : null;
-    if (file) onSelect(file);
+    if (path) openStagePath(path);
   };
 
   const step = useCallback(
@@ -241,7 +249,7 @@ export function MobileFocusView({ project, groups, manual, files, flows, pipelin
       ) : null}
 
       {pipelineFocus ? (
-        <PipelineFocusRow pipeline={pipelineFocus.pipeline} index={pipelineFocus.index} onHop={hopToStage} />
+        <PipelineFocusRow pipeline={pipelineFocus.pipeline} index={pipelineFocus.index} onHop={hopToStage} onOpenPath={openStagePath} />
       ) : null}
 
       <div className="relative flex min-h-0 flex-1 flex-col p-1.5 pb-[max(0.375rem,env(safe-area-inset-bottom))]">
@@ -355,9 +363,12 @@ function findPipelineStage(pipelines: Pipeline[], path: string | null): { pipeli
 }
 
 /** Compact pipeline chain row over a focused stage pane: position, current
-    stage/state, and prev/next stage chips as hop targets along the chain. */
-function PipelineFocusRow({ pipeline, index, onHop }: { pipeline: Pipeline; index: number; onHop: (index: number) => void }) {
+    stage/state, and prev/next stage chips as hop targets along the chain. The
+    current-stage chip opens a verdict bottom sheet (#93 §2.3) when its stage has
+    run, surfacing findings/confidence and parked Retry/Skip on mobile. */
+function PipelineFocusRow({ pipeline, index, onHop, onOpenPath }: { pipeline: Pipeline; index: number; onHop: (index: number) => void; onOpenPath: (path: string) => void }) {
   const { t } = useLocale();
+  const [sheetOpen, setSheetOpen] = useState(false);
   const total = pipeline.stages.length;
   const stage = pipeline.stages[index]!;
   const state = stageChipState(pipeline, stage);
@@ -366,6 +377,8 @@ function PipelineFocusRow({ pipeline, index, onHop }: { pipeline: Pipeline; inde
   const next = index < total - 1 ? pipeline.stages[index + 1]! : null;
   const prevHopEnabled = prev ? Boolean(latestAttempt(pipeline, prev.id)?.agentPath) : false;
   const nextHopEnabled = next ? Boolean(latestAttempt(pipeline, next.id)?.agentPath) : false;
+  const attempt = latestAttempt(pipeline, stage.id);
+  const canOpenVerdict = Boolean(attempt);
   return (
     <div className="flex shrink-0 items-center gap-1.5 overflow-x-auto border-b border-line bg-[#fbfbfd] px-2 py-1.5" role="group" aria-label={t("pipelineMobile.chipAria", { task: pipeline.task })}>
       <span className="shrink-0 rounded-full bg-chip px-1.5 py-0.5 text-[10px] font-bold text-dim" aria-hidden>⇢ {t("pipelineMobile.position", { k: index + 1, n: total })}</span>
@@ -378,12 +391,21 @@ function PipelineFocusRow({ pipeline, index, onHop }: { pipeline: Pipeline; inde
       >
         ‹ {prev ? stageChipLabel(t, prev) : ""}
       </button>
-      <span className="inline-flex shrink-0 items-center gap-1 rounded-full px-2 py-0.5 text-[10.5px] font-bold" style={{ backgroundColor: tone.soft, color: tone.color }}>
+      <button
+        type="button"
+        disabled={!canOpenVerdict}
+        onClick={() => setSheetOpen(true)}
+        aria-haspopup="dialog"
+        aria-label={t("pipelineMobile.openVerdict", { label: stageChipLabel(t, stage) })}
+        className="inline-flex shrink-0 items-center gap-1 rounded-full px-2 py-0.5 text-[10.5px] font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:cursor-default"
+        style={{ backgroundColor: tone.soft, color: tone.color }}
+      >
         <span aria-hidden>{stage.kind === "review-loop" ? "⟳" : "▸"}</span>
         {stageChipLabel(t, stage)}
         {STAGE_GLYPH[state] ? <span aria-hidden>{STAGE_GLYPH[state]}</span> : null}
         <span className="text-[9px] font-semibold opacity-80">{t(`pipelineChipState.${state}`)}</span>
-      </span>
+        {attempt?.verdict ? <span aria-hidden>{attempt.verdict.status === "pass" ? "✓" : attempt.verdict.status === "fail" ? "✕" : "●"}</span> : null}
+      </button>
       <button
         type="button"
         disabled={!nextHopEnabled}
@@ -393,6 +415,26 @@ function PipelineFocusRow({ pipeline, index, onHop }: { pipeline: Pipeline; inde
       >
         {next ? stageChipLabel(t, next) : ""} ›
       </button>
+      {sheetOpen && attempt ? (
+        <div
+          className="fixed inset-0 z-[70] flex items-end justify-center bg-black/40"
+          role="presentation"
+          onClick={(event) => {
+            if (event.target === event.currentTarget) setSheetOpen(false);
+          }}
+        >
+          <div className="mb-0 w-full max-w-[420px] rounded-t-[16px] bg-panel p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] shadow-[0_-8px_36px_rgb(20_20_30/0.24)]">
+            <div className="mx-auto mb-2 h-1 w-10 rounded-full bg-line" aria-hidden />
+            <VerdictPopover
+              pipeline={pipeline}
+              stage={stage}
+              attempt={attempt}
+              onClose={() => setSheetOpen(false)}
+              onOpenPath={(path) => { setSheetOpen(false); onOpenPath(path); }}
+            />
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

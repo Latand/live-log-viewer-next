@@ -633,6 +633,7 @@ export const en = {
   "pipelineStrip.readOnly": "read-only",
   "pipelineStrip.readWrite": "read-write",
   "pipelineStrip.groupAria": "Pipeline {task}",
+  "pipelineStrip.announce": "Pipeline {task}: {state}, stage {stage} {k} of {n}",
   "pipelineStrip.openStage": "Open stage {label}",
   "pipelineStrip.openVerdict": "Open verdict for stage {label}",
   "pipelineStrip.roundShort": "R{n}",
@@ -681,6 +682,7 @@ export const en = {
   "pipelineDialog.fromSession": "Wired from {node}",
   "pipelineDialog.clearSession": "Unlink source session",
   "pipelineDialog.templatesLabel": "Start from a template",
+  "pipelineDialog.templatesLoading": "Loading roles…",
   "pipelineDialog.templates.planBuildReview": "Plan → Build → Review",
   "pipelineDialog.templates.buildReview": "Build → Review",
   "pipelineDialog.templates.buildVerify": "Build → Verify",
@@ -719,6 +721,7 @@ export const en = {
   "pipelineDialog.errors.taskRequired": "task is required",
   "pipelineDialog.errors.repoRequired": "repository is required",
   "pipelineDialog.errors.promptRequired": "every run stage needs a prompt",
+  "pipelineDialog.errors.paramRequired": "{label} is required for this role",
 
   "dash.pipeline": "Pipeline",
   "dash.newPipeline": "New pipeline",
@@ -731,6 +734,7 @@ export const en = {
   "pipelineMobile.position": "{k}/{n}",
   "pipelineMobile.prevStage": "Previous stage",
   "pipelineMobile.nextStage": "Next stage",
+  "pipelineMobile.openVerdict": "Open verdict for {label}",
 
   "wfDraft.paneAria": "Draft of a new workflow",
   "wfDraft.notStarted": "the workflow is not launched yet",

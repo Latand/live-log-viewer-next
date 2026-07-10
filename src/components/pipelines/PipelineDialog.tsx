@@ -11,6 +11,7 @@ import {
   PIPELINE_TEMPLATES,
   createPipeline,
   draftStagesToInput,
+  normalizeStageOrder,
   type DraftStage,
   type PipelineTemplate,
 } from "./pipelineModel";
@@ -48,8 +49,12 @@ function blankStage(runtime: RoleConfig): DraftStage {
 }
 
 /** Turns a client template into draft stages, resolving each role's runtime from
-    the loaded catalog so the runtime line and access match the +Agent draft. */
-function stagesFromTemplate(template: PipelineTemplate, roles: RoleCatalogItem[], runtime: RoleConfig): DraftStage[] {
+    the loaded catalog so the runtime line and access match the +Agent draft.
+    Seeds carry concrete model/effort exactly as {@link StageRow.selectRole}
+    would, so an architect stage shows its own runtime, not the Builder fallback.
+    Callers gate role-bearing templates on a loaded catalog (see below), so a
+    seeded roleId always resolves here. */
+export function stagesFromTemplate(template: PipelineTemplate, roles: RoleCatalogItem[], runtime: RoleConfig): DraftStage[] {
   return template.stages.map((seed) => {
     const role = seed.roleId ? roles.find((item) => item.id === seed.roleId) ?? null : null;
     const params = role ? defaultRoleParams(role) : {};
@@ -59,13 +64,19 @@ function stagesFromTemplate(template: PipelineTemplate, roles: RoleCatalogItem[]
       kind: seed.kind,
       roleId: role ? seed.roleId : "",
       engine: resolved.engine,
-      model: "",
-      effort: "",
+      model: role ? resolved.model : "",
+      effort: role ? resolved.effort : "",
       access: seed.kind === "review-loop" ? "read-only" : role ? roleAccess(role) : seed.access,
       prompt: seed.prompt,
       roleParams: params,
     };
   });
+}
+
+/** A template that seeds any role can only be applied once the role catalog has
+    loaded — otherwise every seeded roleId would strip to a raw stage. */
+export function templateReady(template: PipelineTemplate, roles: RoleCatalogItem[]): boolean {
+  return roles.length > 0 || template.stages.every((seed) => !seed.roleId);
 }
 
 /**
@@ -98,7 +109,7 @@ export function PipelineDialog({
   const [repoDir, setRepoDir] = useState(() => readDraft(project).repoDir || repoPrefill || "");
   const [stages, setStages] = useState<DraftStage[]>(() => {
     const restored = readDraft(project).stages;
-    return restored.length >= 2 ? restored.map((stage) => ({ ...stage, key: nextStageKey() })) : [blankStage(FALLBACK_RUNTIME), blankStage(FALLBACK_RUNTIME)];
+    return restored.length >= 2 ? normalizeStageOrder(restored.map((stage) => ({ ...stage, key: nextStageKey() }))) : [blankStage(FALLBACK_RUNTIME), blankStage(FALLBACK_RUNTIME)];
   });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -138,15 +149,15 @@ export function PipelineDialog({
     }
   }, [project, task, spec, repoDir, stages]);
 
-  const setStage = (index: number, next: DraftStage) => setStages((prev) => prev.map((stage, i) => (i === index ? next : stage)));
-  const removeStage = (index: number) => setStages((prev) => (prev.length <= 2 ? prev : prev.filter((_, i) => i !== index)));
+  const setStage = (index: number, next: DraftStage) => setStages((prev) => normalizeStageOrder(prev.map((stage, i) => (i === index ? next : stage))));
+  const removeStage = (index: number) => setStages((prev) => (prev.length <= 2 ? prev : normalizeStageOrder(prev.filter((_, i) => i !== index))));
   const moveStage = (index: number, direction: -1 | 1) => {
     const target = index + direction;
     if (target < 0 || target >= stages.length) return;
     setStages((prev) => {
       const next = [...prev];
       [next[index], next[target]] = [next[target]!, next[index]!];
-      return next;
+      return normalizeStageOrder(next);
     });
   };
   const addStage = () => setStages((prev) => (prev.length >= 4 ? prev : [...prev, blankStage(defaultRuntime)]));
@@ -156,8 +167,15 @@ export function PipelineDialog({
     if (!task.trim()) return t("pipelineDialog.errors.taskRequired");
     if (!repoDir.trim()) return t("pipelineDialog.errors.repoRequired");
     if (stages.some((stage) => !stage.prompt.trim())) return t("pipelineDialog.errors.promptRequired");
+    /* A role can mark parameters required (reviewer diff source, verifier
+       claims); an empty one would silently resolve to a registry default. */
+    for (const stage of stages) {
+      const role = stage.roleId ? roles.find((item) => item.id === stage.roleId) ?? null : null;
+      const missing = role?.parameters.find((parameter) => parameter.required && String(stage.roleParams[parameter.key] ?? "").trim() === "");
+      if (role && missing) return t("pipelineDialog.errors.paramRequired", { label: missing.label });
+    }
     return null;
-  }, [task, repoDir, stages, t]);
+  }, [task, repoDir, stages, roles, t]);
 
   const submit = async () => {
     if (busy) return;
@@ -263,16 +281,21 @@ export function PipelineDialog({
         <div className="flex flex-col gap-1">
           <span className="text-[10.5px] font-semibold text-dim">{t("pipelineDialog.templatesLabel")}</span>
           <div className="flex flex-wrap gap-1.5">
-            {PIPELINE_TEMPLATES.map((template) => (
-              <button
-                key={template.id}
-                type="button"
-                className="rounded-full border border-line bg-bg px-2.5 py-1 text-[10.5px] font-semibold text-dim hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
-                onClick={() => applyTemplate(template)}
-              >
-                {t(template.labelKey)}
-              </button>
-            ))}
+            {PIPELINE_TEMPLATES.map((template) => {
+              const ready = templateReady(template, roles);
+              return (
+                <button
+                  key={template.id}
+                  type="button"
+                  disabled={!ready}
+                  title={ready ? undefined : t("pipelineDialog.templatesLoading")}
+                  className="rounded-full border border-line bg-bg px-2.5 py-1 text-[10.5px] font-semibold text-dim hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:cursor-not-allowed disabled:opacity-40"
+                  onClick={() => applyTemplate(template)}
+                >
+                  {t(template.labelKey)}
+                </button>
+              );
+            })}
           </div>
         </div>
 

@@ -606,6 +606,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "pipelineStrip.readOnly": "лише читання",
   "pipelineStrip.readWrite": "читання й запис",
   "pipelineStrip.groupAria": "Пайплайн {task}",
+  "pipelineStrip.announce": "Пайплайн {task}: {state}, етап {stage} {k} з {n}",
   "pipelineStrip.openStage": "Відкрити етап {label}",
   "pipelineStrip.openVerdict": "Відкрити вердикт етапу {label}",
   "pipelineStrip.roundShort": "Р{n}",
@@ -654,6 +655,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "pipelineDialog.fromSession": "З’єднано з {node}",
   "pipelineDialog.clearSession": "Від’єднати сесію-джерело",
   "pipelineDialog.templatesLabel": "Почати з шаблону",
+  "pipelineDialog.templatesLoading": "Завантаження ролей…",
   "pipelineDialog.templates.planBuildReview": "План → Збірка → Рев’ю",
   "pipelineDialog.templates.buildReview": "Збірка → Рев’ю",
   "pipelineDialog.templates.buildVerify": "Збірка → Перевірка",
@@ -692,6 +694,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "pipelineDialog.errors.taskRequired": "потрібне завдання",
   "pipelineDialog.errors.repoRequired": "потрібен репозиторій",
   "pipelineDialog.errors.promptRequired": "кожен етап запуску потребує промпт",
+  "pipelineDialog.errors.paramRequired": "{label} обовʼязковий для цієї ролі",
 
   "dash.pipeline": "Пайплайн",
   "dash.newPipeline": "Новий пайплайн",
@@ -704,6 +707,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "pipelineMobile.position": "{k}/{n}",
   "pipelineMobile.prevStage": "Попередній етап",
   "pipelineMobile.nextStage": "Наступний етап",
+  "pipelineMobile.openVerdict": "Відкрити вердикт для {label}",
 
   "wfDraft.paneAria": "Чернетка нового воркфлоу",
   "wfDraft.notStarted": "воркфлоу ще не запущений",

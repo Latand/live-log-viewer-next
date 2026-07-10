@@ -21,6 +21,7 @@ import { pushTaskToast } from "@/components/tasks/taskToast";
 import { cleanTitle } from "@/components/utils";
 import { taskDeliveryText } from "@/lib/tasks/helpers";
 
+import { pipelineAnnouncement } from "@/components/pipelines/pipelineModel";
 import { BulkActionBar } from "./BulkActionBar";
 import { nodesInRect, pruneSelection, selectionBBox } from "./lasso";
 import { buildSchemeLayout } from "./layout";
@@ -412,6 +413,27 @@ export function SchemeBoard({
     navZoomRef.current = onZoomKey;
   }, [onArrow, onZoomKey]);
 
+  /* Pipeline transitions (a stage advancing, parking, pausing, completing) are
+     otherwise silent to screen readers — the spatial-nav live region only speaks
+     on arrow moves. Track each pipeline's state+cursor signature and, when one
+     changes, write the new position straight into its own live region. Writing
+     the DOM node in an effect (rather than via setState) is the sanctioned way to
+     push the latest state into an external system without a cascading render. */
+  const pipelineLiveRef = useRef<HTMLDivElement>(null);
+  const pipelineSigs = useRef(new Map<string, string>());
+  useEffect(() => {
+    const next = new Map<string, string>();
+    const changed: string[] = [];
+    for (const pipeline of pipelines) {
+      const sig = `${pipeline.state}:${pipeline.cursor?.stageId ?? ""}:${pipeline.cursor?.state ?? ""}`;
+      next.set(pipeline.id, sig);
+      const before = pipelineSigs.current.get(pipeline.id);
+      if (before !== undefined && before !== sig) changed.push(pipelineAnnouncement(t, pipeline));
+    }
+    pipelineSigs.current = next;
+    if (changed.length && pipelineLiveRef.current) pipelineLiveRef.current.textContent = changed.join(". ");
+  }, [pipelines, t]);
+
   const commitMarquee = useCallback((paths: string[], additive: boolean) => {
     marqueeClickGuard.current = true;
     setSelected(null);
@@ -585,6 +607,9 @@ export function SchemeBoard({
       <div className="sr-only" aria-live="polite" role="status">
         {announcement}
       </div>
+      {/* Separate region so a pipeline transition never races the nav message;
+          its text is written imperatively by the effect above. */}
+      <div ref={pipelineLiveRef} className="sr-only" aria-live="polite" role="status" />
       {/* Dot grid on its own composited layer: panning moves it with a
           transform (modulo one tile) instead of repainting the viewport
           background every frame. */}

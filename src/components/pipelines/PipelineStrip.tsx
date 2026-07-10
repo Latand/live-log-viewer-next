@@ -59,7 +59,8 @@ function StageChip({
   const attempt = latestAttempt(pipeline, stage.id);
   const label = stageChipLabel(t, stage);
   const access = stageAccess(pipeline, stage);
-  const pulse = state === "running" || state === "reviewing" || state === "committing";
+  /* Paused keeps the active tone (pipelineCursorActive) but freezes motion. */
+  const pulse = (state === "running" || state === "reviewing" || state === "committing") && pipeline.state !== "paused";
   const flow = attempt?.flowId ? flows.find((candidate) => candidate.id === attempt.flowId) ?? null : null;
   const round = stage.kind === "review-loop" && flow ? currentRound(flow)?.n ?? 0 : 0;
   const attemptCount = stageAttempts(pipeline, stage.id).length;

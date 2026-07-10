@@ -1,7 +1,26 @@
 import { expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import { PipelineDialog } from "./PipelineDialog";
+import type { RoleConfig } from "@/lib/roles/types";
+
+import { PipelineDialog, stagesFromTemplate, templateReady } from "./PipelineDialog";
+import { PIPELINE_TEMPLATES } from "./pipelineModel";
+import type { RoleCatalogItem } from "./StageRow";
+
+const FALLBACK: RoleConfig = { engine: "codex", model: "gpt-5.6-sol", effort: "medium" };
+
+function role(id: string, config: RoleConfig): RoleCatalogItem {
+  return { id, name: id, description: "", config, parameters: [], capabilities: id === "reviewer" ? ["read-only"] : ["read-write"], promptScaffold: "", safetyFences: [], promptPreview: "" } as unknown as RoleCatalogItem;
+}
+
+const CATALOG: RoleCatalogItem[] = [
+  role("architect", { engine: "claude", model: "fable", effort: "high" }),
+  role("builder", { engine: "codex", model: "gpt-5.6-sol", effort: "medium" }),
+  role("reviewer", { engine: "codex", model: "gpt-5.6-sol", effort: "xhigh" }),
+];
+
+const planBuildReview = PIPELINE_TEMPLATES.find((template) => template.id === "planBuildReview")!;
+const blank = PIPELINE_TEMPLATES.find((template) => template.id === "blank")!;
 
 /* SSR runs no effects (roles/dirs stay empty) and has no sessionStorage, so the
    dialog renders its fresh two-Run-stage default. Interactive behavior (role
@@ -51,4 +70,20 @@ test("the start and cancel controls are present", () => {
   const html = render();
   expect(html).toContain("Start pipeline");
   expect(html).toContain("Cancel");
+});
+
+test("a template seeds each role's own resolved runtime, not the Builder fallback", () => {
+  const [architect, builder, reviewer] = stagesFromTemplate(planBuildReview, CATALOG, FALLBACK);
+  /* The architect stage keeps its own model/effort so its runtime line is right. */
+  expect(architect).toMatchObject({ roleId: "architect", engine: "claude", model: "fable", effort: "high" });
+  expect(builder).toMatchObject({ roleId: "builder", model: "gpt-5.6-sol", effort: "medium" });
+  expect(reviewer).toMatchObject({ roleId: "reviewer", kind: "review-loop", access: "read-only" });
+});
+
+test("role-seeded templates wait for the catalog; role-less ones are always ready", () => {
+  /* Applying planBuildReview before /api/roles resolves would strip every role. */
+  expect(templateReady(planBuildReview, [])).toBe(false);
+  expect(templateReady(planBuildReview, CATALOG)).toBe(true);
+  /* The blank template seeds no roles, so it needs nothing loaded. */
+  expect(templateReady(blank, [])).toBe(true);
 });

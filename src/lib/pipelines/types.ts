@@ -15,6 +15,9 @@ export type PipelineRoleId =
 /** Durable reference to the shared role registry introduced by issue #35. */
 export type PipelineRoleRef = {
   roleId: PipelineRoleId;
+  /** Typed parameter values the operator chose; substituted into the role's
+      prompt scaffold at create time (falling back to registry defaults). */
+  params?: Record<string, string | number>;
 };
 
 export type EffectivePipelineRole = RoleConfig & {

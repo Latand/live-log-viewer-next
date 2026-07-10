@@ -17,6 +17,12 @@ import type {
 
 export const PIPELINES_CHANGED_EVENT = "llv:pipelines-changed";
 
+/** Stable DOM id for a pipeline's dashboard strip, so the on-board hub can
+    reveal the always-available detailed surface (#93 §2.2). */
+export function pipelineStripDomId(pipelineId: string): string {
+  return `pipeline-strip-${pipelineId}`;
+}
+
 export function pipelinesForProject(pipelines: Pipeline[], project: string, files: FileEntry[]): Pipeline[] {
   const paths = new Set(files.filter((file) => file.project === project).map((file) => file.path));
   return pipelines.filter((pipeline) => {
@@ -31,6 +37,18 @@ export function pipelineStateLabel(t: TFunction, state: PipelineState): string {
 
 export const PIPELINE_BUSY_STATES: ReadonlySet<PipelineState> = new Set(["provisioning", "running"]);
 export const PIPELINE_ATTENTION_STATES: ReadonlySet<PipelineState> = new Set(["needs_decision", "paused"]);
+
+/**
+ * Is the pipeline actively working its cursor stage? Pausing a running pipeline
+ * flips `state` to `paused` but preserves the busy state in `pausedState`; the
+ * cursor stage must keep its active tone (only the pulse/chevron animation
+ * freezes, which callers handle). Reading `state` alone would demote a paused
+ * live stage to `pending`/`dim`.
+ */
+export function pipelineCursorActive(pipeline: Pipeline): boolean {
+  if (PIPELINE_BUSY_STATES.has(pipeline.state)) return true;
+  return pipeline.state === "paused" && pipeline.pausedState !== null && PIPELINE_BUSY_STATES.has(pipeline.pausedState);
+}
 
 /** Does this pipeline still need the operator's eyes? Drives rail/project badges. */
 export function pipelineNeedsAttention(pipeline: Pipeline): boolean {
@@ -95,7 +113,7 @@ export function stageChipState(pipeline: Pipeline, stage: PipelineStage): StageC
     if (attempt.state === "needs_decision") return "needs_decision";
   }
   const onCursor = pipeline.cursor?.stageId === stage.id;
-  if (onCursor && PIPELINE_BUSY_STATES.has(pipeline.state)) {
+  if (onCursor && pipelineCursorActive(pipeline)) {
     if (pipeline.cursor?.state === "committing" || attempt?.state === "committing") return "committing";
     if (stage.kind === "review-loop" || pipeline.cursor?.state === "reviewing" || attempt?.state === "reviewing") return "reviewing";
     return "running";
@@ -113,6 +131,23 @@ export function stageChipLabel(t: TFunction, stage: PipelineStage): string {
   if (stage.role?.roleId) return stage.role.roleId;
   if (stage.kind === "review-loop") return t("pipelineStrip.reviewStage");
   return stage.id;
+}
+
+/** A spoken one-liner for a pipeline's current position — used by the board's
+    live region so a state/cursor transition is announced, not just spatial nav. */
+export function pipelineAnnouncement(t: TFunction, pipeline: Pipeline): string {
+  const total = pipeline.stages.length;
+  const cursorStageId = pipeline.cursor?.stageId ?? null;
+  const index = cursorStageId ? pipeline.stages.findIndex((stage) => stage.id === cursorStageId) : -1;
+  const stage = index >= 0 ? pipeline.stages[index]! : null;
+  const stageLabel = stage ? stageChipLabel(t, stage) : "";
+  return t("pipelineStrip.announce", {
+    task: pipeline.task,
+    state: pipelineStateLabel(t, pipeline.state),
+    stage: stageLabel,
+    k: index >= 0 ? index + 1 : total,
+    n: total,
+  });
 }
 
 export const VERDICT_TONES: Record<StageVerdictStatus, { color: string; soft: string }> = {
@@ -184,6 +219,21 @@ export const PIPELINE_TEMPLATES: readonly PipelineTemplate[] = [
   },
 ];
 
+/**
+ * The linear-chain invariant the API enforces (a review-loop needs a preceding
+ * run) is owned client-side: stage 1 can never be a review-loop. Any reorder or
+ * deletion that floats one to the front demotes it back to a run — without this
+ * a review-loop moved up would submit and 400. A run stage may keep read-only
+ * access, so only the kind changes.
+ */
+export function normalizeStageOrder(stages: DraftStage[]): DraftStage[] {
+  const first = stages[0];
+  if (first && first.kind === "review-loop") {
+    return stages.map((stage, index) => (index === 0 ? { ...stage, kind: "run" as const } : stage));
+  }
+  return stages;
+}
+
 /** Slugs a role id / kind into a URL-safe stage id, deduped with numeric suffixes. */
 export function deriveStageId(kind: PipelineStageKind, roleId: string, taken: Set<string>): string {
   const base =
@@ -195,6 +245,12 @@ export function deriveStageId(kind: PipelineStageKind, roleId: string, taken: Se
   return id;
 }
 
+/** Any parameter with a non-empty value is worth sending; blanks fall back to
+    the role's registry default server-side, so an all-blank map is omitted. */
+function hasParams(params: Record<string, string | number>): boolean {
+  return Object.values(params).some((value) => value !== "" && value !== undefined && value !== null);
+}
+
 /** Folds the builder's draft stages into the ordered, id/next-derived POST body. */
 export function draftStagesToInput(drafts: DraftStage[]): PipelineStageInput[] {
   const taken = new Set<string>();
@@ -202,7 +258,9 @@ export function draftStagesToInput(drafts: DraftStage[]): PipelineStageInput[] {
   return drafts.map((draft, index) => ({
     id: ids[index]!,
     kind: draft.kind,
-    ...(draft.roleId ? { role: { roleId: draft.roleId as PipelineRoleId } } : {}),
+    ...(draft.roleId
+      ? { role: { roleId: draft.roleId as PipelineRoleId, ...(hasParams(draft.roleParams) ? { params: draft.roleParams } : {}) } }
+      : {}),
     engine: draft.engine,
     ...(draft.model.trim() ? { model: draft.model.trim() } : {}),
     ...(draft.effort ? { effort: draft.effort } : {}),

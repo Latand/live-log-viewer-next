@@ -38,8 +38,13 @@ export function VerdictPopover({
   const [error, setError] = useState<string | null>(null);
   const ref = useRef<HTMLDivElement>(null);
 
+  /* Focus enters the popover on open and returns to the verdict glyph that
+     opened it on close — Escape, an action, or an outside toggle all unmount
+     this component, so restoring here covers every path. */
   useEffect(() => {
+    const trigger = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     ref.current?.focus();
+    return () => trigger?.focus();
   }, []);
 
   const label = stageChipLabel(t, stage);

@@ -1,12 +1,12 @@
 "use client";
 
 import { Pause, Play, RefreshCw, X } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { useLocale } from "@/lib/i18n";
 import type { Pipeline, PipelineAction } from "@/lib/pipelines/types";
 
-import { latestAttempt, patchPipeline, pipelineStateLabel, stageChipLabel } from "./pipelineModel";
+import { latestAttempt, patchPipeline, pipelineStateLabel, pipelineStripDomId, stageChipLabel } from "./pipelineModel";
 
 const TONES: Record<Pipeline["state"], string> = {
   provisioning: "#5a51e0",
@@ -40,6 +40,22 @@ export function PipelineHub({
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const popoverRef = useRef<HTMLDivElement>(null);
+  const wasOpen = useRef(false);
+
+  /* Focus enters the control popover on open and returns to the hub chip when it
+     closes (Escape, close action, or toggle), matching the verdict popover. The
+     wasOpen guard keeps the board's initial render from stealing focus. */
+  useEffect(() => {
+    if (open) {
+      popoverRef.current?.focus();
+      wasOpen.current = true;
+    } else if (wasOpen.current) {
+      triggerRef.current?.focus();
+      wasOpen.current = false;
+    }
+  }, [open]);
 
   const tone = TONES[pipeline.state];
   const total = pipeline.stages.length;
@@ -51,6 +67,16 @@ export function PipelineHub({
   const attempt = cursorStageId ? latestAttempt(pipeline, cursorStageId) : null;
   const finished = pipeline.state === "completed" || pipeline.state === "closed";
   const parked = pipeline.state === "needs_decision";
+
+  /* Reveal the always-available detailed surface (#93 §2.2): the dashboard strip
+     is a sibling view, so a DOM-id scroll + focus is the lightest coupling. */
+  const openDashboardStrip = () => {
+    const el = typeof document !== "undefined" ? document.getElementById(pipelineStripDomId(pipeline.id)) : null;
+    if (!el) return;
+    el.scrollIntoView({ behavior: "smooth", block: "center" });
+    el.focus({ preventScroll: true });
+    setOpen(false);
+  };
 
   const run = async (action: PipelineAction) => {
     if (busy) return;
@@ -73,11 +99,13 @@ export function PipelineHub({
       }}
     >
       <button
+        ref={triggerRef}
         data-scheme-ui
         className="absolute inline-flex h-[30px] -translate-x-1/2 -translate-y-1/2 items-center gap-1 whitespace-nowrap rounded-full border-2 bg-panel px-2.5 text-[10.5px] font-bold shadow-card hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
         style={{ borderColor: tone, color: tone }}
         aria-label={t("pipelineHub.aria", { task: pipeline.task, stage: stageLabel, k, n: total })}
         aria-expanded={open}
+        aria-haspopup="dialog"
         onClick={() => setOpen((value) => !value)}
       >
         <span aria-hidden>{pipeline.state === "paused" ? "⏸" : "⇢"}</span>
@@ -85,9 +113,12 @@ export function PipelineHub({
       </button>
       {open ? (
         <div
+          ref={popoverRef}
           data-scheme-ui
+          role="dialog"
+          tabIndex={-1}
           aria-label={t("pipelineHub.controls")}
-          className="absolute bottom-[24px] left-0 z-30 flex w-[224px] -translate-x-1/2 flex-col gap-1.5 rounded-[12px] border border-line bg-panel p-2.5 shadow-[0_10px_36px_rgb(20_20_30/0.18)]"
+          className="absolute bottom-[24px] left-0 z-30 flex w-[224px] -translate-x-1/2 flex-col gap-1.5 rounded-[12px] border border-line bg-panel p-2.5 shadow-[0_10px_36px_rgb(20_20_30/0.18)] focus-visible:outline-none"
         >
           <span className="flex min-w-0 items-center gap-1.5">
             <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: tone }} aria-hidden />
@@ -120,6 +151,12 @@ export function PipelineHub({
               <X className="h-3 w-3" aria-hidden /> {t("pipelineStrip.close")}
             </button>
           </span>
+          <button
+            className="rounded-full border border-line bg-bg px-3 py-1 text-[10.5px] font-semibold text-dim hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            onClick={openDashboardStrip}
+          >
+            {t("pipelineHub.openDashboard")}
+          </button>
         </div>
       ) : null}
     </div>

@@ -664,19 +664,28 @@ function normalizeStages(value: unknown, lookup?: PipelineRoleLookup | null): { 
     if (roleValue !== undefined && (!roleValue || typeof roleValue !== "object" || Array.isArray(roleValue))) {
       return { error: `stage ${id} role must be an object` };
     }
-    if (roleValue && Object.keys(roleValue).some((key) => key !== "roleId")) {
-      return { error: `stage ${id} role only accepts roleId; place overrides on the stage` };
+    if (roleValue && Object.keys(roleValue).some((key) => key !== "roleId" && key !== "params")) {
+      return { error: `stage ${id} role only accepts roleId and params; place runtime overrides on the stage` };
     }
     const roleId = roleValue && typeof (roleValue as { roleId?: unknown }).roleId === "string"
       ? (roleValue as { roleId: string }).roleId.trim()
       : "";
     if (roleValue && !roleId) return { error: `stage ${id} roleId is required when role is present` };
+    const rawParams = (roleValue as { params?: unknown } | undefined)?.params;
+    if (rawParams !== undefined && (!rawParams || typeof rawParams !== "object" || Array.isArray(rawParams))) {
+      return { error: `stage ${id} role params must be an object` };
+    }
+    const roleParams = rawParams as Record<string, unknown> | undefined;
+    if (roleParams && Object.values(roleParams).some((value) => typeof value !== "string" && typeof value !== "number")) {
+      return { error: `stage ${id} role params must be strings or numbers` };
+    }
+    if (roleParams && !roleId) return { error: `stage ${id} role params require a roleId` };
     if (stage.model !== undefined && stage.model !== null && typeof stage.model !== "string") return { error: `stage ${id} model must be a string or null` };
     if (stage.effort !== undefined && stage.effort !== null && typeof stage.effort !== "string") return { error: `stage ${id} effort must be a string or null` };
     const input: PipelineStageInput = {
       id,
       kind: stage.kind,
-      ...(roleId ? { role: { roleId: roleId as PipelineRoleId } } : {}),
+      ...(roleId ? { role: { roleId: roleId as PipelineRoleId, ...(roleParams && Object.keys(roleParams).length ? { params: roleParams as Record<string, string | number> } : {}) } } : {}),
       ...(stage.engine !== undefined ? { engine: stage.engine } : {}),
       ...(stage.model !== undefined ? { model: typeof stage.model === "string" ? stage.model.trim() || null : null } : {}),
       ...(stage.effort !== undefined ? { effort: typeof stage.effort === "string" ? stage.effort.trim() || null : null } : {}),

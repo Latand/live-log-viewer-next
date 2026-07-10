@@ -24,8 +24,10 @@ export type PipelineRoleDefaults = {
   promptScaffold?: string | null;
 };
 
-/** Adapter seam for #35. The role registry can register its resolver at startup. */
-export type PipelineRoleLookup = (roleId: string) => PipelineRoleDefaults | null;
+/** Adapter seam for #35. The role registry can register its resolver at startup.
+    Optional operator-chosen parameter values override registry defaults when the
+    role's prompt scaffold is substituted. */
+export type PipelineRoleLookup = (roleId: string, params?: Record<string, string | number>) => PipelineRoleDefaults | null;
 
 let installedLookup: PipelineRoleLookup | null = null;
 
@@ -35,10 +37,19 @@ function defaultParameterValue(parameter: ReturnType<typeof listRoles>[number]["
 }
 
 /** Production adapter for the shared issue-35 registry. */
-export const pipelineRoleLookup: PipelineRoleLookup = (roleId) => {
+export const pipelineRoleLookup: PipelineRoleLookup = (roleId, params) => {
   const definition = listRoles().find((candidate) => candidate.id === roleId);
   if (!definition) return null;
-  const parameters = Object.fromEntries(definition.parameters.map((parameter) => [parameter.key, defaultParameterValue(parameter)]));
+  const parameters = Object.fromEntries(
+    definition.parameters.map((parameter) => {
+      /* Operator overrides win over registry defaults, but only for a known,
+         non-empty value — a blank field keeps the default rather than erasing
+         the scaffold token. */
+      const chosen = params?.[parameter.key];
+      const value = chosen !== undefined && chosen !== "" ? chosen : defaultParameterValue(parameter);
+      return [parameter.key, value];
+    }),
+  );
   const scaffold = definition.promptScaffold.replace(/\{\{([A-Za-z][A-Za-z0-9]*)\}\}/g, (_match, key: string) => String(parameters[key] ?? ""));
   /* A near-limit override scaffold plus appended fences must still fit the
      store's persistence cap, or the created pipeline could never load back.
@@ -69,6 +80,7 @@ export function resolvePipelineRole(
   const rawRoleId = ref && typeof ref.roleId === "string" ? ref.roleId.trim() : "";
   if (ref && !rawRoleId) return { error: "stage roleId is required when role is present" };
   if (rawRoleId && !PIPELINE_ROLE_IDS.includes(rawRoleId as PipelineRoleId)) return { error: `unknown pipeline role: ${rawRoleId}` };
+  const roleParams = ref && ref.params && typeof ref.params === "object" && !Array.isArray(ref.params) ? ref.params : undefined;
   if (stage.engine !== undefined && stage.engine !== "claude" && stage.engine !== "codex") {
     return { error: "stage engine must be claude or codex" };
   }
@@ -82,7 +94,7 @@ export function resolvePipelineRole(
   const builder = registry?.("builder") ?? null;
   if (!builder) return { error: "Builder role is unavailable in the role registry" };
   const roleId = rawRoleId ? rawRoleId as PipelineRoleId : null;
-  const registered = roleId ? registry?.(roleId) ?? null : null;
+  const registered = roleId ? registry?.(roleId, roleParams) ?? null : null;
   const value = (override: unknown, fallback: string | null | undefined): string | null => {
     if (override === null) return null;
     if (typeof override === "string") return override.trim() || null;

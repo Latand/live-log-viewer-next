@@ -126,6 +126,27 @@ test("a referenced role with an empty scaffold fails the create instead of persi
     .toContain("empty prompt scaffold");
 });
 
+test("operator role params substitute into the resolved prompt scaffold", () => {
+  const resolved = resolvePipelineRole(
+    { role: { roleId: "reviewer", params: { diffSource: "PR#100", lens: "scope" } } },
+    "review-loop",
+    pipelineRoleLookup,
+  );
+  expect(resolved.role?.promptScaffold).toContain("PR#100");
+  expect(resolved.role?.promptScaffold).toContain("lens scope");
+});
+
+test("blank role params fall back to the registry default token value", () => {
+  const resolved = resolvePipelineRole(
+    { role: { roleId: "reviewer", params: { diffSource: "", lens: "" } } },
+    "review-loop",
+    pipelineRoleLookup,
+  );
+  /* lens defaults to the first registry option rather than an empty token. */
+  expect(resolved.role?.promptScaffold).toContain("lens correctness");
+  expect(resolved.role?.promptScaffold).not.toContain("lens .");
+});
+
 test("codex model overrides mirror the store bounds at create time", () => {
   expect(resolvePipelineRole({ model: `gpt-${"x".repeat(200)}` }, "run", REGISTRY_LOOKUP).error)
     .toContain("not supported by codex");

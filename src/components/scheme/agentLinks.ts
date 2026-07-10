@@ -217,13 +217,21 @@ export function deriveFlowLinks(flows: Flow[], anchorOf: (pathOrKey: string) => 
 
 const PIPELINE_BUSY_LINK_STATES: ReadonlySet<Pipeline["state"]> = new Set(["provisioning", "running"]);
 
+/** The cursor stage stays active while paused: `state` is `paused` but the
+    pre-pause busy state survives in `pausedState`. The rail keeps its active
+    tone; the `paused` link flag freezes the chevron drift (see nodes.tsx). */
+function pipelineCursorActive(pipeline: Pipeline): boolean {
+  if (PIPELINE_BUSY_LINK_STATES.has(pipeline.state)) return true;
+  return pipeline.state === "paused" && pipeline.pausedState !== null && PIPELINE_BUSY_LINK_STATES.has(pipeline.pausedState);
+}
+
 /** Rail tone into a stage from the target stage's latest attempt + the cursor,
     a straight read of the §3 matrix that avoids importing the strip's helpers. */
 function pipelineLinkTone(pipeline: Pipeline, stageId: string): PipelineLinkTone {
   const attempt = pipeline.runs.find((run) => run.stageId === stageId)?.attempts.at(-1) ?? null;
   if (attempt?.state === "passed" || attempt?.state === "skipped") return "ok";
   if (attempt?.state === "failed" || attempt?.state === "needs_decision") return "amber";
-  if (pipeline.cursor?.stageId === stageId && PIPELINE_BUSY_LINK_STATES.has(pipeline.state)) return "active";
+  if (pipeline.cursor?.stageId === stageId && pipelineCursorActive(pipeline)) return "active";
   return "dim";
 }
 

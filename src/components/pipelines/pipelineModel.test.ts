@@ -2,14 +2,22 @@ import { describe, expect, test } from "bun:test";
 
 import type { Pipeline, PipelineStage } from "@/lib/pipelines/types";
 
+import type { TFunction } from "@/lib/i18n";
+
 import {
   PIPELINE_TEMPLATES,
   type DraftStage,
   deriveStageId,
   draftStagesToInput,
+  normalizeStageOrder,
+  pipelineAnnouncement,
+  pipelineCursorActive,
   pipelineNeedsAttention,
   stageChipState,
 } from "./pipelineModel";
+
+/** A structural stand-in for the locale function: echoes the key and its vars. */
+const fakeT = ((key: string, vars?: Record<string, unknown>) => (vars ? `${key}:${JSON.stringify(vars)}` : key)) as unknown as TFunction;
 
 function stage(id: string, kind: PipelineStage["kind"] = "run", roleId?: string): PipelineStage {
   return {
@@ -78,6 +86,56 @@ describe("stageChipState", () => {
     const skipped = pipeline({ stages, runs: [{ stageId: "plan", attempts: [{ state: "skipped" } as never] }] });
     expect(stageChipState(skipped, stages[0]!)).toBe("skipped");
   });
+
+  test("pausing a running pipeline keeps the cursor stage active, not pending", () => {
+    const p = pipeline({
+      stages,
+      state: "paused",
+      pausedState: "running",
+      cursor: { stageId: "build", state: "running" },
+      runs: [{ stageId: "build", attempts: [{ state: "running" } as never] }],
+    });
+    expect(stageChipState(p, stages[1]!)).toBe("running");
+    /* A stage the cursor has not reached stays pending even while paused. */
+    expect(stageChipState(p, stages[2]!)).toBe("pending");
+  });
+});
+
+describe("pipelineCursorActive", () => {
+  const stages = [stage("plan"), stage("build")];
+  test("is true while busy and while paused-from-busy, false when parked", () => {
+    expect(pipelineCursorActive(pipeline({ stages, state: "running" }))).toBe(true);
+    expect(pipelineCursorActive(pipeline({ stages, state: "paused", pausedState: "running" }))).toBe(true);
+    expect(pipelineCursorActive(pipeline({ stages, state: "paused", pausedState: "needs_decision" }))).toBe(false);
+    expect(pipelineCursorActive(pipeline({ stages, state: "needs_decision" }))).toBe(false);
+  });
+});
+
+describe("pipelineAnnouncement", () => {
+  test("names the pipeline's task, state, and cursor position", () => {
+    const stages = [stage("plan"), stage("build"), stage("review", "review-loop")];
+    const p = pipeline({ task: "ship it", stages, state: "running", cursor: { stageId: "build", state: "running" } });
+    const message = pipelineAnnouncement(fakeT, p);
+    expect(message).toContain("ship it");
+    expect(message).toContain('"k":2');
+    expect(message).toContain('"n":3');
+  });
+});
+
+describe("normalizeStageOrder", () => {
+  const d = (over: Partial<DraftStage>): DraftStage => ({ key: "k", kind: "run", roleId: "", engine: "codex", model: "", effort: "", access: "read-write", prompt: "p", roleParams: {}, ...over });
+
+  test("demotes a review-loop that lands at stage 1 back to a run", () => {
+    /* Reordering a [run, review-loop] chain up would otherwise submit and 400. */
+    const out = normalizeStageOrder([d({ kind: "review-loop", roleId: "reviewer" }), d({ kind: "run", roleId: "builder" })]);
+    expect(out[0]!.kind).toBe("run");
+    expect(out[1]!.kind).toBe("run");
+  });
+
+  test("leaves a valid order untouched (same reference)", () => {
+    const stages = [d({ kind: "run" }), d({ kind: "review-loop" })];
+    expect(normalizeStageOrder(stages)).toBe(stages);
+  });
 });
 
 describe("deriveStageId", () => {
@@ -128,6 +186,19 @@ describe("draftStagesToInput", () => {
     expect(raw!.access).toBe("read-write");
     expect(review!.role).toEqual({ roleId: "reviewer" });
     expect(review!.access).toBeUndefined();
+  });
+
+  test("carries non-empty role params and omits an all-blank map", () => {
+    const [withParams, blank, noRole] = draftStagesToInput([
+      draft({ roleId: "reviewer", prompt: "review", roleParams: { diffSource: "PR#100", lens: "correctness" } }),
+      draft({ roleId: "builder", prompt: "build", roleParams: { mode: "", domain: "" } }),
+      draft({ roleId: "", prompt: "raw", roleParams: { ignored: "x" } }),
+    ]);
+    expect(withParams!.role).toEqual({ roleId: "reviewer", params: { diffSource: "PR#100", lens: "correctness" } });
+    /* A role with only blank params drops the params key rather than shipping empties. */
+    expect(blank!.role).toEqual({ roleId: "builder" });
+    /* Params without a chosen role are never serialized. */
+    expect(noRole!.role).toBeUndefined();
   });
 
   test("only sends model/effort overrides when set", () => {

@@ -118,6 +118,23 @@ test("creation validates linear 2–4 stage chains and optional roles", async ()
   ] as never }, ports)).error).toContain("role only accepts roleId");
 });
 
+test("role params are accepted, persisted on the stage, and type-checked", async () => {
+  const { ports } = harness();
+  savePipelines([]);
+  const ok = await createPipelineFromRequest({ task: "x", spec: "AC", repoDir: "/repo", stages: [
+    { id: "build", kind: "run", role: { roleId: "builder", params: { mode: "tdd" } }, engine: "codex", prompt: "a", next: "review" },
+    { id: "review", kind: "review-loop", role: { roleId: "reviewer" }, prompt: "b", next: null },
+  ] as never }, ports);
+  expect(ok.pipeline?.stages[0]?.role).toEqual({ roleId: "builder", params: { mode: "tdd" } });
+
+  savePipelines([]);
+  const bad = await createPipelineFromRequest({ task: "x", spec: "AC", repoDir: "/repo", stages: [
+    { id: "build", kind: "run", role: { roleId: "builder", params: { mode: { nested: true } } }, engine: "codex", prompt: "a", next: "review" },
+    { id: "review", kind: "review-loop", role: { roleId: "reviewer" }, prompt: "b", next: null },
+  ] as never }, ports);
+  expect(bad.error).toContain("params must be strings or numbers");
+});
+
 test("linear run stages persist sessions, structured outputs, commits, and lineage", async () => {
   const h = harness();
   await create(h.ports);

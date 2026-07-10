@@ -136,10 +136,18 @@ describe("derivePipelineLinks tones and hub", () => {
     expect(edge?.pipeline!.tone).toBe("amber");
   });
 
-  test("a paused pipeline flags its edges so the chevron drift freezes", () => {
-    const links = derivePipelineLinks([threeStagePipeline({ state: "paused" })], anchor);
+  test("pausing mid-run keeps the active tone but freezes the chevron drift", () => {
+    /* pausedState carries the pre-pause busy state, so the cursor edge stays
+       active; the paused flag freezes the animation (nodes.tsx gates on it). */
+    const links = derivePipelineLinks([threeStagePipeline({ state: "paused", pausedState: "running" })], anchor);
     expect(links.every((link) => link.pipeline!.paused)).toBe(true);
-    /* Paused is not 'active', so no edge animates. */
+    const build = links.find((link) => link.pipeline!.toStageId === "build");
+    expect(build?.pipeline!.tone).toBe("active");
+  });
+
+  test("a pause with no busy pre-state leaves the edge un-animated", () => {
+    /* pausedState null (paused while idle/pending) must not fabricate motion. */
+    const links = derivePipelineLinks([threeStagePipeline({ state: "paused", pausedState: null })], anchor);
     expect(links.some((link) => link.pipeline!.tone === "active")).toBe(false);
   });
 
