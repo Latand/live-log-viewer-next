@@ -227,6 +227,8 @@ export async function killConversation(filePath: string): Promise<DeliveryOutcom
 export interface ConversationMessage {
   pid: number | null;
   path: string;
+  conversationId?: string | null;
+  clientMessageId?: string | null;
   text: string;
   images: InboxImagePayload[];
 }
@@ -239,13 +241,17 @@ export interface ConversationMessage {
  * resume window otherwise.
  */
 export async function deliverConversationMessage(message: ConversationMessage): Promise<DeliveryOutcome> {
-  const { pid, path: filePath, images } = message;
+  const { pid, images } = message;
   const text = message.text.trim();
 
-  const conversation = agentRegistry().conversationForPath(filePath);
+  const registry = agentRegistry();
+  const conversation = message.conversationId?.startsWith("conversation_")
+    ? registry.conversation(message.conversationId as `conversation_${string}`)
+    : registry.conversationForPath(message.path);
+  const filePath = conversation?.generations.at(-1)?.path ?? message.path;
   if (conversation && deliveryFence(conversation) === "held") {
     if (images.length) return failure("image delivery waits for migration completion", 409);
-    agentRegistry().holdDelivery(conversation.id, text);
+    registry.holdDelivery(conversation.id, text, message.clientMessageId ?? null);
     return { ok: true, target: conversation.id, outcome: "held" };
   }
 

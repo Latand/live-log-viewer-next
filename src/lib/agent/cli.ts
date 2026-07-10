@@ -7,6 +7,8 @@ import { accountForSpawn, codexHomeOwningSessionPath, isManagedCodexHome } from 
 import { claudeHomeOwningTranscript, claudeSettingsPath, isManagedClaudeHome, legacyClaudeHome } from "@/lib/accounts/claude";
 
 import { claudeTranscriptPath, headCwd } from "./transcript";
+import { normalizeClaudeLaunchModel } from "./models";
+import type { LaunchProfile } from "@/lib/accounts/migration/contracts";
 
 export { ENGINE_EFFORTS, isEngineEffort } from "./efforts";
 
@@ -64,6 +66,7 @@ export interface ResumeSpec {
   /** Transcript path the session will write, when knowable at spawn time —
       a fresh claude session launched with a pre-chosen --session-id. */
   transcript?: string;
+  launchProfile?: LaunchProfile;
 }
 
 export interface FreshSpecOptions {
@@ -116,6 +119,20 @@ export function freshSpecFor(engine: AgentEngine, cwd: string, options: FreshSpe
       windowName: "claude-new",
       engine: "claude",
       transcript: claudeTranscriptPath(cwd, sid, options.claudeProjectsDir ?? path.join(legacyClaudeHome(), "projects")),
+      launchProfile: {
+        cwd,
+        model: options.model ?? null,
+        effort: options.effort ?? null,
+        fast: null,
+        permissionMode: options.readOnly ? "plan" : "bypassPermissions",
+        readOnly: options.readOnly ?? false,
+        title: null,
+        project: null,
+        parentConversationId: null,
+        role: "worker",
+        goal: null,
+        plan: null,
+      },
     };
   }
   const args = [resolveBinary("codex")];
@@ -131,6 +148,62 @@ export function freshSpecFor(engine: AgentEngine, cwd: string, options: FreshSpe
     cwd,
     windowName: "codex-new",
     engine: "codex",
+    launchProfile: {
+      cwd,
+      model: options.model ?? null,
+      effort: options.effort ?? null,
+      fast: options.fast ?? null,
+      permissionMode: options.readOnly ? "never" : null,
+      readOnly: options.readOnly ?? false,
+      title: null,
+      project: null,
+      parentConversationId: null,
+      role: "worker",
+      goal: null,
+      plan: null,
+    },
+  };
+}
+
+export function claudeSuccessorSpecFor(input: {
+  sourcePath: string;
+  candidateId: string;
+  targetHome: string;
+  targetProjectsDir: string;
+  profile: LaunchProfile;
+}): ResumeSpec {
+  if (!/^[0-9a-f-]{36}$/.test(input.candidateId)) throw new Error("candidate session id is invalid");
+  const args = [
+    resolveBinary("claude"),
+    "-p",
+    "--input-format", "stream-json",
+    "--output-format", "stream-json",
+    "--verbose",
+    "--replay-user-messages",
+    "--permission-prompt-tool", "stdio",
+  ];
+  if (input.profile.readOnly || input.profile.permissionMode === "plan") {
+    args.push("--permission-mode", "plan", "--disallowedTools", "Edit,Write,NotebookEdit");
+  } else if (input.profile.permissionMode && input.profile.permissionMode !== "bypassPermissions") {
+    if (input.profile.permissionMode.length <= 64 && /^[a-zA-Z-]+$/.test(input.profile.permissionMode)) {
+      args.push("--permission-mode", input.profile.permissionMode);
+    }
+  } else {
+    args.push("--dangerously-skip-permissions");
+  }
+  const model = normalizeClaudeLaunchModel(input.profile.model);
+  if (model) args.push("--model", model);
+  if (input.profile.effort && /^[a-z]+$/.test(input.profile.effort)) args.push("--effort", input.profile.effort);
+  args.push("--resume", input.sourcePath, "--fork-session", "--session-id", input.candidateId);
+  const settings = isManagedClaudeHome(input.targetHome) ? claudeSettingsPath() : null;
+  if (settings) args.push("--settings", settings);
+  return {
+    command: `${claudeEnvPrefix(input.targetHome)} ${args.map(shellQuote).join(" ")}`,
+    cwd: input.profile.cwd || resumeCwd(input.sourcePath),
+    windowName: "claude-migration-successor",
+    engine: "claude",
+    transcript: claudeTranscriptPath(input.profile.cwd || resumeCwd(input.sourcePath), input.candidateId, input.targetProjectsDir),
+    launchProfile: { ...input.profile, model },
   };
 }
 
@@ -150,7 +223,8 @@ export function resumeSpecFor(root: string, pathname: string, options: ResumeSpe
     const settings = managed ? claudeSettingsPath() : null;
     let command = `${shellQuote(resolveBinary("claude"))} --dangerously-skip-permissions`;
     if (settings) command += ` --settings ${shellQuote(settings)}`;
-    if (options.model) command += ` --model ${shellQuote(options.model)}`;
+    const launchModel = normalizeClaudeLaunchModel(options.model);
+    if (launchModel) command += ` --model ${shellQuote(launchModel)}`;
     if (options.effort) command += ` --effort ${shellQuote(options.effort)}`;
     command += ` --resume ${shellQuote(sid)}`;
     return {
@@ -158,6 +232,7 @@ export function resumeSpecFor(root: string, pathname: string, options: ResumeSpe
       cwd: resumeCwd(pathname),
       windowName: "claude-resume",
       engine: "claude",
+      launchProfile: emptyLaunchProfileForResume(resumeCwd(pathname), launchModel, options.effort ?? null),
     };
   }
   if (root === "codex-sessions" && base.endsWith(".jsonl")) {
@@ -175,9 +250,27 @@ export function resumeSpecFor(root: string, pathname: string, options: ResumeSpe
       cwd: resumeCwd(pathname),
       windowName: "codex-resume",
       engine: "codex",
+      launchProfile: emptyLaunchProfileForResume(resumeCwd(pathname), options.model ?? null, options.effort ?? null),
     };
   }
   return null;
+}
+
+function emptyLaunchProfileForResume(cwd: string, model: string | null, effort: string | null): LaunchProfile {
+  return {
+    cwd,
+    model,
+    effort,
+    fast: null,
+    permissionMode: null,
+    readOnly: null,
+    title: null,
+    project: null,
+    parentConversationId: null,
+    role: "worker",
+    goal: null,
+    plan: null,
+  };
 }
 
 /** A resume window must land in a directory that still exists; the home

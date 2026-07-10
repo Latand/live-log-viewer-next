@@ -3,10 +3,12 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { AgentRegistry } from "@/lib/agent/registry";
+
 /* The state dir must point at a sandbox before store.ts computes its
    module-level constants, so the store loads dynamically after the env set. */
 process.env.LLV_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "llv-wf-store-test-"));
-const { buildWorkflow, DEFAULT_FIXER, loadTemplates, loadWorkflows, mergeSeededTemplates, normalizeStages, normalizeTemplate, saveWorkflows } =
+const { buildWorkflow, DEFAULT_FIXER, loadTemplates, loadWorkflows, mergeSeededTemplates, normalizeStages, normalizeTemplate, reconcileWorkflowConversationOwnership, saveWorkflows } =
   await import("./store");
 
 type WorkflowTemplate = import("./types").WorkflowTemplate;
@@ -143,6 +145,31 @@ test("workflows round-trip through the store", () => {
   saveWorkflows([wf]);
   const loaded = loadWorkflows();
   expect(loaded).toEqual([wf]);
+});
+
+test("workflow bindings follow the active conversation generation", () => {
+  const registry = new AgentRegistry(path.join(process.env.LLV_STATE_DIR!, "workflow-registry.json"));
+  const owner = registry.ensureConversation("codex", "/stage-a.jsonl", "a");
+  registry.setConversationMigration(owner.id, { intentId: "workflow", phase: "verifying", targetId: "b", revision: 1, error: null, updatedAt: "now" });
+  registry.commitSuccessor(owner.id, { id: "stage-b", path: "/stage-b.jsonl", accountId: "b" }, 1);
+  const template = normalizeTemplate({ name: "owner-demo", stages: [IMPLEMENT, REVIEW] })!;
+  const workflow = buildWorkflow({ id: "owner123", name: "owner-demo", task: "Ship", project: "repo", repoDir: "/repo", template, mode: "manual", now: "now" });
+  workflow.srcPath = "/stage-a.jsonl";
+  workflow.srcConversationId = owner.id;
+  workflow.fixerPath = "/stage-a.jsonl";
+  workflow.fixerConversationId = owner.id;
+  workflow.stageRuns[0]!.agentPath = "/stage-a.jsonl";
+  workflow.stageRuns[0]!.agentConversationId = owner.id;
+  saveWorkflows([workflow]);
+
+  reconcileWorkflowConversationOwnership(registry);
+
+  const reconciled = loadWorkflows()[0]!;
+  expect(reconciled).toMatchObject({
+    srcPath: "/stage-b.jsonl",
+    fixerPath: "/stage-b.jsonl",
+  });
+  expect(reconciled.stageRuns[0]).toMatchObject({ agentPath: "/stage-b.jsonl", agentConversationId: owner.id });
 });
 
 test("buildWorkflow derives sibling worktree dir and wf/ branch from the task", () => {

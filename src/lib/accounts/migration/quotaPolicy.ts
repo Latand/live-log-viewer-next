@@ -16,6 +16,7 @@ export interface QuotaObservation {
   limits: EngineLimits | null;
   provenance: LimitsProvenance;
   observedAt: number;
+  authCheckedAt?: number;
 }
 
 export interface EffectiveRemaining {
@@ -24,10 +25,13 @@ export interface EffectiveRemaining {
 }
 
 export function effectiveRemaining(observation: QuotaObservation, now = Date.now()): EffectiveRemaining | null {
-  if (!observation.authenticated || observation.provenance.source !== "live" || now - observation.observedAt > AUTO_BALANCE_FRESH_MS || !observation.limits) return null;
+  const age = now - observation.observedAt;
+  const authAge = now - (observation.authCheckedAt ?? observation.observedAt);
+  if (!observation.authenticated || observation.provenance.source !== "live" || age < 0 || authAge < 0 || age > AUTO_BALANCE_FRESH_MS || authAge > AUTO_BALANCE_FRESH_MS || !observation.limits) return null;
   const windows = (["session", "weekly"] as const)
     .map((window) => ({ window, value: observation.limits?.[window] }))
-    .filter((entry): entry is { window: "session" | "weekly"; value: NonNullable<EngineLimits["session"]> } => entry.value !== null);
+    .filter((entry): entry is { window: "session" | "weekly"; value: NonNullable<EngineLimits["session"]> } =>
+      entry.value !== null && entry.value !== undefined && Number.isFinite(entry.value.usedPercent));
   if (!windows.length) return null;
   return windows.map(({ window, value }) => ({ window, percent: Math.max(0, Math.min(100, 100 - value.usedPercent)) }))
     .sort((a, b) => a.percent - b.percent || a.window.localeCompare(b.window))[0] ?? null;
@@ -43,11 +47,11 @@ export function chooseAutoBalance(
   now = Date.now(),
 ): BalanceDecision | null {
   if (!policy.enabled || (policy.cooldownUntil && Date.parse(policy.cooldownUntil) > now)) return null;
-  const active = observations.find((item) => item.accountId === activeId);
+  const active = observations.find((item) => item.engine === engine && item.accountId === activeId);
   const activeRemaining = active && effectiveRemaining(active, now);
   if (!active || !activeRemaining || activeRemaining.percent >= AUTO_BALANCE_THRESHOLD) return null;
   const candidates = observations.flatMap((item) => {
-    if (item.accountId === activeId) return [];
+    if (item.engine !== engine || item.accountId === activeId) return [];
     const remaining = effectiveRemaining(item, now);
     const departedAt = policy.departed[item.accountId] ? Date.parse(policy.departed[item.accountId]) : 0;
     const returnBlocked = departedAt > 0 && now - departedAt < AUTO_BALANCE_RETURN_WINDOW_MS && (remaining?.percent ?? 0) <= AUTO_BALANCE_RETURN_ERC;

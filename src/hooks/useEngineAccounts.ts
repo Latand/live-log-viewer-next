@@ -353,10 +353,10 @@ export function createEngineAccountsStore(
     if (!intentId) return Promise.resolve(false);
     return runMutation("migrate", async () => {
       try {
-        const response = await fetcher(`/api/accounts/migration/${encodeURIComponent(intentId)}`, {
+        const response = await fetcher(`/api/account-migrations/${encodeURIComponent(intentId)}`, {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ action: "stop" }),
+          body: JSON.stringify({ action: "stop", expectedRevision: snapshot.migration?.revision }),
         });
         if (!response.ok) throw new Error("stop failed");
       } catch {
@@ -374,10 +374,10 @@ export function createEngineAccountsStore(
       const previous = snapshot.autoBalance;
       if (previous) patchSnapshot({ autoBalance: { ...previous, enabled, state: enabled ? "idle" : "disabled" } });
       try {
-        const response = await fetcher(`/api/accounts/${engine}/auto-balance`, {
-          method: "POST",
+        const response = await fetcher(`/api/accounts/${engine}/policy`, {
+          method: "PATCH",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ enabled }),
+          body: JSON.stringify({ automaticSwitching: enabled, requestId: mintRequestId() }),
         });
         if (!response.ok) throw new Error("auto-balance toggle failed");
       } catch {

@@ -236,8 +236,8 @@ export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noCompose
             targetLabel={file.migration?.targetLabel ?? file.migration?.targetAccountId ?? ""}
             currentLabel={file.migration?.sourceLabel}
             error={file.migration?.failure ?? null}
-            onRetry={() => void postSessionMigration(file.path, "retry")}
-            onKeep={() => void postSessionMigration(file.path, "rollback")}
+            onRetry={() => void postSessionMigration(file.conversationId ?? "", "retry", file.migration?.revision)}
+            onKeep={() => void postSessionMigration(file.conversationId ?? "", "rollback", file.migration?.revision)}
           />
         ) : null}
         {banner ?? null}

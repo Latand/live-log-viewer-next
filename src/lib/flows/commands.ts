@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 
+import { agentRegistry } from "@/lib/agent/registry";
 import { headCwd } from "@/lib/agent/transcript";
 import { livePaneTarget } from "@/lib/delivery";
 import { isShellCommand } from "@/lib/status";
@@ -68,6 +69,7 @@ export async function createFlowFromRequest(req: CreateFlowRequest, entries: Fil
     project: entry.project,
     cwd,
     implementerPath: entry.path,
+    implementerConversationId: entry.conversationId ?? null,
     roles,
     baseRef: base.sha,
     baseMode,
@@ -119,7 +121,10 @@ async function stopReviewer(flow: Flow, round: Round): Promise<void> {
         await killPane(pane.paneId);
       }
     } else if (round.reviewerPath) {
-      const target = await livePaneTarget(round.reviewerPath);
+      const currentPath = round.reviewerConversationId?.startsWith("conversation_")
+        ? agentRegistry().conversation(round.reviewerConversationId as `conversation_${string}`)?.generations.at(-1)?.path ?? round.reviewerPath
+        : agentRegistry().canonicalPath(round.reviewerPath);
+      const target = await livePaneTarget(currentPath);
       if (target !== null) await killPane(target);
     }
   } catch {

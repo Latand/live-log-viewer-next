@@ -1,94 +1,150 @@
 import { NextResponse } from "next/server";
-import path from "node:path";
 
-import { activeCodexAccountId, codexAccountsMutationLocked, codexLoginPaneStatus, listCodexAccounts, setCodexAccountLoginPane } from "@/lib/accounts/codex";
-import { deviceAuthChallenge } from "@/lib/accounts/deviceAuth";
+import { activeCodexAccountId, codexAccountsMutationLocked, listCodexAccounts } from "@/lib/accounts/codex";
 import { activeClaudeAccountId, claudeAccountsMutationLocked, listClaudeAccounts } from "@/lib/accounts/claude";
 import { claudeLoginSupervisor } from "@/lib/accounts/claudeLogin";
 import { managedCodexRuntime } from "@/lib/accounts/codexRuntime";
-import { paneInfo, paneScreen } from "@/lib/tmux";
 import { agentRegistry } from "@/lib/agent/registry";
-import { evaluateAutoBalance } from "@/lib/accounts/migration/autoBalance";
-import { fetchClaudeLimits, readCodexLimits } from "@/lib/limits";
-
-async function tickAutoBalance(): Promise<void> {
-  const registry = agentRegistry();
-  const now = Date.now();
-  if (registry.autoBalancePolicy("claude").enabled) {
-    const observations = await Promise.all(listClaudeAccounts().filter((account) => account.authPresent).map(async (account) => {
-      const read = await fetchClaudeLimits(path.join(account.home, ".credentials.json"));
-      return { engine: "claude" as const, accountId: account.id, authenticated: account.authPresent, limits: read.data, provenance: { source: read.source, reason: read.reason, staleSince: null }, observedAt: now };
-    }));
-    evaluateAutoBalance("claude", activeClaudeAccountId(), observations, now, registry);
-  }
-  if (registry.autoBalancePolicy("codex").enabled) {
-    const observations = await Promise.all(listCodexAccounts().filter((account) => account.authPresent).map(async (account) => {
-      const read = await readCodexLimits({ account });
-      return { engine: "codex" as const, accountId: account.id, authenticated: account.authPresent, limits: read.data, provenance: { source: read.source, reason: read.reason, staleSince: null }, observedAt: now };
-    }));
-    evaluateAutoBalance("codex", activeCodexAccountId(), observations, now, registry);
-  }
-}
+import { AUTO_BALANCE_FRESH_MS, AUTO_BALANCE_THRESHOLD, effectiveRemaining } from "@/lib/accounts/migration/quotaPolicy";
+import type { DurableQuotaObservation, MigrationEngine } from "@/lib/accounts/migration/contracts";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+function liveFreshObservation(observation: DurableQuotaObservation | undefined, now: number): boolean {
+  if (!observation?.authenticated || observation.provenance.source !== "live") return false;
+  const observedAge = now - Date.parse(observation.observedAt);
+  const authAge = now - Date.parse(observation.authCheckedAt);
+  return Number.isFinite(observedAge) && Number.isFinite(authAge)
+    && observedAge >= 0 && authAge >= 0
+    && observedAge <= AUTO_BALANCE_FRESH_MS && authAge <= AUTO_BALANCE_FRESH_MS;
+}
+
+function accountProjection(observation: DurableQuotaObservation | undefined, authPresent: boolean, now: number) {
+  const eligible = liveFreshObservation(observation, now);
+  const effective = observation ? effectiveRemaining({
+    engine: observation.engine,
+    accountId: observation.accountId,
+    authenticated: observation.authenticated,
+    limits: observation.limits,
+    provenance: observation.provenance,
+    observedAt: Date.parse(observation.observedAt),
+    authCheckedAt: Date.parse(observation.authCheckedAt),
+  }, now) : null;
+  return {
+    auth: {
+      state: eligible ? "authenticated" : authPresent ? "unknown" : "signed_out",
+      method: null,
+      email: null,
+      plan: observation?.limits?.plan ?? null,
+      checkedAt: observation?.authCheckedAt ?? null,
+    },
+    limits: {
+      state: eligible ? "fresh" : observation?.limits ? "stale" : "unavailable",
+      session: observation?.limits?.session ?? null,
+      weekly: observation?.limits?.weekly ?? null,
+      checkedAt: observation?.observedAt ?? null,
+    },
+    effective: effective ? { ...effective, freshness: eligible ? "fresh" : "stale" } : null,
+  };
+}
+
+function migrationProjection(engine: MigrationEngine, snapshot: ReturnType<ReturnType<typeof agentRegistry>["snapshot"]>) {
+  const intent = Object.values(snapshot.migrationIntents).find((candidate) => candidate.engine === engine && candidate.state === "draining") ?? null;
+  if (!intent) return null;
+  const conversations = Object.values(snapshot.conversations).filter((conversation) => conversation.migration?.intentId === intent.id);
+  const count = (phase: string) => conversations.filter((conversation) => conversation.migration?.phase === phase).length;
+  const committed = count("committed");
+  const rolledBack = count("rolled-back");
+  const targetLabel = (engine === "claude" ? listClaudeAccounts() : listCodexAccounts())
+    .find((account) => account.id === intent.targetId)?.label ?? intent.targetId;
+  return {
+    intentId: intent.id,
+    targetId: intent.targetId,
+    targetLabel,
+    revision: intent.revision,
+    origin: intent.origin,
+    reason: intent.evidence ? { window: intent.evidence.sourceWindow, fromPercent: intent.evidence.sourcePercent, toPercent: intent.evidence.targetPercent } : null,
+    state: intent.state,
+    counts: {
+      done: committed + rolledBack,
+      waitingTurn: count("waiting-turn"),
+      inFlight: conversations.filter((conversation) => ["requested", "preparing", "successor-starting", "verifying"].includes(conversation.migration?.phase ?? "")).length,
+      failed: count("failed-recoverable"),
+      total: conversations.length,
+    },
+    startedAt: intent.createdAt,
+  };
+}
+
+function autoBalanceProjection(engine: MigrationEngine, snapshot: ReturnType<ReturnType<typeof agentRegistry>["snapshot"]>, now: number) {
+  const policy = snapshot.autoBalance[engine];
+  const draining = Object.values(snapshot.migrationIntents).some((intent) => intent.engine === engine && intent.state === "draining");
+  const fresh = Object.values(snapshot.quotaObservations[engine]).some((observation) =>
+    liveFreshObservation(observation, now));
+  const cooling = Boolean(policy.cooldownUntil && Date.parse(policy.cooldownUntil) > now);
+  return {
+    ...policy,
+    thresholdPercent: AUTO_BALANCE_THRESHOLD,
+    state: !policy.enabled ? "disabled" : draining ? "draining" : cooling ? "cooldown" : fresh ? "idle" : "waiting-fresh",
+  };
+}
+
+/** Pure durable projection. Live auth/quota/login reconciliation runs in the controller. */
 export async function GET() {
-  await tickAutoBalance();
-  // When the registry is degraded it still reads as default-only-plus-valid, but any
-  // write throws CorruptCodexAccountsError. Skip the best-effort stale-pane cleanup in
-  // that state so the read path stays a 200 and the corrupt bytes are left untouched.
-  const mutationLocked = codexAccountsMutationLocked();
-  const login = new Map<string, Awaited<ReturnType<ReturnType<typeof managedCodexRuntime>["loginSnapshot"]>>>();
-  const listed = listCodexAccounts();
-  for (const account of listed) {
-    if (account.kind === "managed") {
-      // Managed logins have no tmux owner. Clear a pre-migration pane record
-      // without probing tmux so every managed route stays app-server-only.
-      if (account.loginPane && !mutationLocked) setCodexAccountLoginPane(account.id, null);
-      login.set(account.id, await managedCodexRuntime().loginSnapshot(account));
-      continue;
-    }
-    if (!account.loginPane) {
-      login.set(account.id, { state: account.authPresent ? "authenticated" : "idle", attemptState: null, deviceAuth: null });
-      continue;
-    }
-    // Compatibility adapter for device-login panes created before the
-    // app-server migration. Newly managed accounts never enter this branch.
-    const pane = account.loginPane ? await paneInfo(account.loginPane.paneId) : null;
-    const status = codexLoginPaneStatus(account.authPresent, account.loginPane, pane);
-    if (status.clear && !mutationLocked) setCodexAccountLoginPane(account.id, null);
-    const deviceAuth = status.state === "pending" && pane && account.loginPane ? deviceAuthChallenge(await paneScreen(account.loginPane.paneId)) : null;
-    login.set(account.id, { state: status.state, attemptState: null, deviceAuth });
-  }
-  const accounts = listed.map((account) => ({
-    id: account.id,
-    label: account.label,
-    kind: account.kind,
-    authPresent: account.authPresent,
-    loginPending: login.get(account.id)?.state === "pending",
-    loginState: login.get(account.id)?.state ?? "idle",
-    attemptState: login.get(account.id)?.attemptState ?? null,
-    deviceAuth: login.get(account.id)?.deviceAuth ?? null,
-  }));
+  const registry = agentRegistry();
+  const snapshot = registry.snapshot();
+  const now = Date.now();
+  const claudeObservations = snapshot.quotaObservations.claude;
+  const codexObservations = snapshot.quotaObservations.codex;
+  const codexAccounts = listCodexAccounts().map((account) => {
+    const authenticated = liveFreshObservation(codexObservations[account.id], now);
+    const login = managedCodexRuntime().peekLogin(account);
+    const compatibilityPending = Boolean(account.loginPane && !authenticated);
+    return {
+      id: account.id,
+      label: account.label,
+      kind: account.kind,
+      authPresent: account.authPresent,
+      loginPending: compatibilityPending || login.state === "pending",
+      loginState: authenticated ? "authenticated" : compatibilityPending ? "pending" : login.state,
+      attemptState: compatibilityPending ? "pending" : login.attemptState,
+      deviceAuth: login.deviceAuth,
+      ...accountProjection(codexObservations[account.id], account.authPresent, now),
+    };
+  });
   const claudeAccounts = listClaudeAccounts().map((account) => ({
     id: account.id,
     label: account.label,
     kind: account.kind,
     authPresent: account.authPresent,
-    auth: { state: account.authPresent ? "authenticated" : "signed_out", method: null, email: null, plan: null, checkedAt: null },
-    limits: { state: "unavailable", session: null, weekly: null, checkedAt: null },
+    loginPending: claudeLoginSupervisor.forAccount(account.id)?.phase === "awaiting_browser",
+    loginState: account.authPresent ? "authenticated" : "idle",
+    attemptState: null,
+    deviceAuth: null,
+    ...accountProjection(claudeObservations[account.id], account.authPresent, now),
     login: claudeLoginSupervisor.forAccount(account.id),
   }));
-  const registry = agentRegistry();
-  const snapshot = registry.snapshot();
-  const migration = (engine: "claude" | "codex") => Object.values(snapshot.migrationIntents).find((intent) => intent.engine === engine && intent.state === "draining") ?? null;
+  const codexMigration = migrationProjection("codex", snapshot);
+  const claudeMigration = migrationProjection("claude", snapshot);
+  const codexAuto = autoBalanceProjection("codex", snapshot, now);
+  const claudeAuto = autoBalanceProjection("claude", snapshot, now);
   return NextResponse.json({
-    codex: { active: activeCodexAccountId(), accounts, migration: migration("codex"), autoBalance: registry.autoBalancePolicy("codex") },
-    // A corrupt Claude registry keeps the compatible Codex response available and
-    // reduces Claude to immutable legacy Main until an operator repairs it.
-    claude: { active: activeClaudeAccountId(), accounts: claudeAccounts, mutationLocked: claudeAccountsMutationLocked(), migration: migration("claude"), autoBalance: registry.autoBalancePolicy("claude") },
-    migration: { codex: migration("codex"), claude: migration("claude") },
-    autoBalance: { codex: registry.autoBalancePolicy("codex"), claude: registry.autoBalancePolicy("claude") },
+    codex: {
+      active: snapshot.engineRouting.codex.activeAccountId ?? activeCodexAccountId(),
+      accounts: codexAccounts,
+      migration: codexMigration,
+      autoBalance: codexAuto,
+    },
+    claude: {
+      active: snapshot.engineRouting.claude.activeAccountId ?? activeClaudeAccountId(),
+      accounts: claudeAccounts,
+      mutationLocked: claudeAccountsMutationLocked(),
+      migration: claudeMigration,
+      autoBalance: claudeAuto,
+    },
+    mutationLocked: { codex: codexAccountsMutationLocked(), claude: claudeAccountsMutationLocked() },
+    migration: { codex: codexMigration, claude: claudeMigration },
+    autoBalance: { codex: codexAuto, claude: claudeAuto },
   });
 }

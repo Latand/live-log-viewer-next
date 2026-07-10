@@ -71,4 +71,31 @@ describe("agent registry", () => {
     expect(() => store.setAutoBalancePolicy("claude", true, 1)).toThrow("revision is stale");
     expect(store.setAutoBalancePolicy("claude", true, 0).enabled).toBe(true);
   });
+
+  test("normalizes legacy v2 migration fields for restart recovery", () => {
+    const store = registry();
+    const conversation = store.ensureConversation("codex", "/legacy.jsonl", "a");
+    store.setConversationMigration(conversation.id, {
+      intentId: "legacy-intent",
+      phase: "requested",
+      targetId: "b",
+      revision: 3,
+      error: null,
+      updatedAt: "2026-07-10T00:00:00.000Z",
+    });
+    const raw = JSON.parse(fs.readFileSync(store.filename, "utf8")) as { conversations: Record<string, { migration: Record<string, unknown> }> };
+    delete raw.conversations[conversation.id]!.migration.operationId;
+    delete raw.conversations[conversation.id]!.migration.sourceGenerationId;
+    delete raw.conversations[conversation.id]!.migration.providerReceipt;
+    delete raw.conversations[conversation.id]!.migration.errorCode;
+    fs.writeFileSync(store.filename, JSON.stringify(raw));
+
+    const recovered = new AgentRegistry(store.filename).conversation(conversation.id)!;
+    expect(recovered.migration).toMatchObject({
+      operationId: `legacy-intent:${conversation.id}:3`,
+      sourceGenerationId: recovered.generations[0]!.id,
+      providerReceipt: null,
+      errorCode: null,
+    });
+  });
 });

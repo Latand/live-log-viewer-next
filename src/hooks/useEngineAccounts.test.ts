@@ -6,7 +6,7 @@ const advance = async () => {
   for (let tick = 0; tick < 8; tick += 1) await Promise.resolve();
 };
 
-type Call = { url: string; body: unknown };
+type Call = { url: string; method: string; body: unknown };
 
 /** A fetcher that records every request and replies from a per-URL script. */
 function scripted(reply: (url: string, body: unknown) => unknown) {
@@ -14,7 +14,7 @@ function scripted(reply: (url: string, body: unknown) => unknown) {
   const fetcher = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     const url = String(input);
     const body = typeof init?.body === "string" ? JSON.parse(init.body) : undefined;
-    calls.push({ url, body });
+    calls.push({ url, method: init?.method ?? "GET", body });
     const value = reply(url, body);
     if (value instanceof Response) return value;
     return new Response(JSON.stringify(value), { headers: { "content-type": "application/json" } });
@@ -86,11 +86,11 @@ test("preview posts mode:preview and parses the scope counts without mutating ac
   expect(store.active).toBe("main");
 });
 
-test("setAutoBalance optimistically flips and posts to the engine auto-balance route", async () => {
+test("setAutoBalance uses the frozen engine policy route contract", async () => {
   const seen: string[] = [];
-  const { fetcher } = scripted((url, body) => {
+  const { calls, fetcher } = scripted((url, body) => {
     if (url === "/api/accounts") return claudePayload({ autoBalance: { enabled: true, state: "idle", thresholdPercent: 25 } });
-    if (url === "/api/accounts/claude/auto-balance") {
+    if (url === "/api/accounts/claude/policy") {
       seen.push(JSON.stringify(body));
       return new Response(null, { status: 200 });
     }
@@ -100,7 +100,8 @@ test("setAutoBalance optimistically flips and posts to the engine auto-balance r
   store.subscribe(() => {});
   await advance();
   await store.setAutoBalance(false);
-  expect(seen).toContain(JSON.stringify({ enabled: false }));
+  expect(seen.some((body) => JSON.parse(body).automaticSwitching === false)).toBeTrue();
+  expect(calls.some((call) => call.url === "/api/accounts/claude/policy" && call.method === "PATCH")).toBeTrue();
 });
 
 test("stopMigration targets the draining intent id", async () => {
@@ -112,5 +113,5 @@ test("stopMigration targets the draining intent id", async () => {
   store.subscribe(() => {});
   await advance();
   await store.stopMigration();
-  expect(calls.some((call) => call.url === "/api/accounts/migration/intent-7" && (call.body as { action?: string }).action === "stop")).toBeTrue();
+  expect(calls.some((call) => call.url === "/api/account-migrations/intent-7" && call.method === "POST" && (call.body as { action?: string }).action === "stop")).toBeTrue();
 });

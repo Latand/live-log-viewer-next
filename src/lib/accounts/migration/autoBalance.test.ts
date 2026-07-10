@@ -22,6 +22,15 @@ test("automatic balance needs two samples and cannot supersede a manual intent",
   registry.setAutoBalancePolicy("claude", true);
   evaluateAutoBalance("claude", "a", [{ ...observation("a", 90, start), engine: "claude" }, { ...observation("b", 20, start), engine: "claude" }], start, registry);
   const result = evaluateAutoBalance("claude", "a", [{ ...observation("a", 90, start + 60_000), engine: "claude" }, { ...observation("b", 20, start + 60_000), engine: "claude" }], start + 60_000, registry);
-  expect(result?.id).toBe(manual.id);
-  expect(result?.origin).toBe("manual");
+  expect(result).toBeNull();
+  expect(registry.snapshot().migrationIntents[manual.id]?.targetId).toBe("manual");
+});
+
+test("restart requires two fresh samples from the new controller boot", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "llv-auto-restart-"));
+  const registry = new AgentRegistry(path.join(dir, "registry.json"));
+  expect(evaluateAutoBalance("codex", "a", [observation("a", 90, start), observation("b", 20, start)], start, registry, "boot-1")).toBeNull();
+  expect(evaluateAutoBalance("codex", "a", [observation("a", 90, start + 60_000), observation("b", 20, start + 60_000)], start + 60_000, registry, "boot-2")).toBeNull();
+  expect(evaluateAutoBalance("codex", "a", [observation("a", 90, start + 120_000), observation("b", 20, start + 120_000)], start + 120_000, registry, "boot-2"))
+    .toMatchObject({ origin: "auto", targetId: "b" });
 });

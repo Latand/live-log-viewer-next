@@ -4,6 +4,7 @@ import path from "node:path";
 import { freshSpecFor, resumeSpecFor } from "@/lib/agent/cli";
 import { accountManager } from "@/lib/accounts/manager";
 import { deliverToTranscriptHost } from "@/lib/agent/transcriptHost";
+import { agentRegistry } from "@/lib/agent/registry";
 import { resolveSpawnedTranscriptPath } from "@/lib/agent/spawnedTranscript";
 import { headCwd } from "@/lib/agent/transcript";
 import { isNativeCodexSubagentTranscript } from "@/lib/scanner/codexNative";
@@ -102,8 +103,15 @@ function roundKey(flow: Flow, round: Round): string {
   return `${flow.id}:${round.n}`;
 }
 
+function currentConversationPath(conversationId: string | null | undefined, fallback: string): string {
+  if (conversationId?.startsWith("conversation_")) {
+    return agentRegistry().conversation(conversationId as `conversation_${string}`)?.generations.at(-1)?.path ?? fallback;
+  }
+  return agentRegistry().canonicalPath(fallback);
+}
+
 export async function sendToImplementer(flow: Flow, entriesByPath: Map<string, FileEntry>, text: string): Promise<void> {
-  const entry = entriesByPath.get(flow.implementerPath);
+  const entry = entriesByPath.get(currentConversationPath(flow.implementerConversationId, flow.implementerPath));
   if (!entry) throw new Error("implementer transcript is missing from scanner");
   const spec = resumeSpecFor(entry.root, entry.path, { model: entry.launchModel ?? entry.model, effort: entry.effort });
   if (!spec) throw new Error("implementer session cannot be resumed");
@@ -137,7 +145,7 @@ function maybeClaimReviewerPathByHeuristic(flow: Flow, entries: FileEntry[], rou
     .filter(
       (entry) =>
         entry.engine === engine &&
-        entry.path !== flow.implementerPath &&
+        entry.path !== currentConversationPath(flow.implementerConversationId, flow.implementerPath) &&
         entry.mtime >= started &&
         !isNativeCodexSubagentEntry(entry) &&
         headCwd(entry.path) === flow.cwd,
@@ -236,7 +244,11 @@ async function tickFlow(
   persistCheckpoint: () => void,
 ): Promise<boolean> {
   const before = JSON.stringify(flow);
-  if (flow.state === "closed" || flow.state === "paused") return false;
+  flow.implementerPath = currentConversationPath(flow.implementerConversationId, flow.implementerPath);
+  for (const round of flow.rounds) {
+    if (round.reviewerPath) round.reviewerPath = currentConversationPath(round.reviewerConversationId, round.reviewerPath);
+  }
+  if (flow.state === "closed" || flow.state === "paused") return JSON.stringify(flow) !== before;
   const implementer = entriesByPath.get(flow.implementerPath);
   if (!implementer) {
     const pausedFrom = flow.state;
@@ -389,11 +401,11 @@ export function annotateFlowEntries(entries: FileEntry[], flows: Flow[]): void {
   for (const entry of entries) delete entry.flow;
   const byPath = new Map(entries.map((entry) => [entry.path, entry]));
   for (const flow of flows) {
-    const implementer = byPath.get(flow.implementerPath);
+    const implementer = byPath.get(currentConversationPath(flow.implementerConversationId, flow.implementerPath));
     if (implementer) implementer.flow = { flowId: flow.id, flowRole: "implementer", round: null };
     for (const round of flow.rounds) {
       if (!round.reviewerPath) continue;
-      const reviewer = byPath.get(round.reviewerPath);
+      const reviewer = byPath.get(currentConversationPath(round.reviewerConversationId, round.reviewerPath));
       if (reviewer) reviewer.flow = { flowId: flow.id, flowRole: "reviewer", round: round.n };
     }
   }

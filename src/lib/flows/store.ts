@@ -4,6 +4,7 @@ import path from "node:path";
 
 import { statePath } from "@/lib/configDir";
 import { CODEX_SOL_MODEL, CODEX_TERRA_MODEL } from "@/lib/agent/models";
+import { agentRegistry, type AgentRegistry } from "@/lib/agent/registry";
 
 import type { Flow, FlowPreset, ReviewVerdict } from "./types";
 
@@ -142,9 +143,11 @@ export function loadFlows(): Flow[] {
   const flows = Array.isArray(raw?.flows) ? raw.flows.filter(isFlow) : [];
   return flows.map((flow) => ({
     ...flow,
+    implementerConversationId: flow.implementerConversationId ?? null,
     pausedState: flow.pausedState ?? null,
     rounds: flow.rounds.map((round) => ({
       ...round,
+      reviewerConversationId: round.reviewerConversationId ?? null,
       sessionId: round.sessionId ?? null,
       reviewerPid: round.reviewerPid ?? null,
       spawnStartedAt: round.spawnStartedAt ?? null,
@@ -152,6 +155,30 @@ export function loadFlows(): Flow[] {
       error: round.error ?? null,
     })),
   }));
+}
+
+export function reconcileFlowConversationOwnership(registry: AgentRegistry = agentRegistry()): void {
+  const flows = loadFlows();
+  let dirty = false;
+  for (const flow of flows) {
+    if (flow.implementerConversationId?.startsWith("conversation_")) {
+      const current = registry.conversation(flow.implementerConversationId as `conversation_${string}`)?.generations.at(-1)?.path;
+      if (current && current !== flow.implementerPath) { flow.implementerPath = current; dirty = true; }
+    } else {
+      const owner = registry.conversationForPath(flow.implementerPath);
+      if (owner) { flow.implementerConversationId = owner.id; dirty = true; }
+    }
+    for (const round of flow.rounds) {
+      if (round.reviewerConversationId?.startsWith("conversation_")) {
+        const current = registry.conversation(round.reviewerConversationId as `conversation_${string}`)?.generations.at(-1)?.path;
+        if (current && current !== round.reviewerPath) { round.reviewerPath = current; dirty = true; }
+      } else if (round.reviewerPath) {
+        const owner = registry.conversationForPath(round.reviewerPath);
+        if (owner) { round.reviewerConversationId = owner.id; dirty = true; }
+      }
+    }
+  }
+  if (dirty) saveFlows(flows);
 }
 
 export function saveFlows(flows: Flow[]): void {

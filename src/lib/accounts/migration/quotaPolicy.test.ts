@@ -4,7 +4,7 @@ import { chooseAutoBalance, effectiveRemaining } from "./quotaPolicy";
 import type { AutoBalancePolicy, MigrationEngine } from "./contracts";
 
 const now = Date.parse("2026-07-10T12:00:00.000Z");
-const policy = (): AutoBalancePolicy => ({ enabled: true, revision: 0, cooldownUntil: null, departed: {}, lastOutcome: null, lastTrigger: null, restartedAt: new Date(now).toISOString() });
+const policy = (): AutoBalancePolicy => ({ enabled: true, revision: 0, cooldownUntil: null, departed: {}, lastOutcome: null, lastTrigger: null, lastCheckAt: null, sustain: null, restartedAt: new Date(now).toISOString() });
 const observation = (accountId: string, session: number, weekly: number, source: "live" | "cache" = "live") => ({ engine: "codex" as MigrationEngine, accountId, authenticated: true, limits: { session: { usedPercent: session, resetsAt: null }, weekly: { usedPercent: weekly, resetsAt: null }, plan: null, capturedAt: Math.floor(now / 1000) }, provenance: { source, reason: null, staleSince: null }, observedAt: now });
 
 describe("quota migration policy", () => {

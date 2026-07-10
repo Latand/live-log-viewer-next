@@ -361,12 +361,14 @@ export function parseEffective(raw: unknown): AccountEffective | null {
  * authoritative. Same-origin POST; errors are swallowed like the tmux-kill path
  * (the ribbon updates from the next `/api/files` poll either way).
  */
-export async function postSessionMigration(path: string, action: "retry" | "rollback"): Promise<boolean> {
+export async function postSessionMigration(conversationId: string, action: "retry" | "rollback", expectedRevision?: number): Promise<boolean> {
+  if (!conversationId.startsWith("conversation_")) return false;
+  if (!Number.isInteger(expectedRevision) || (expectedRevision as number) < 0) return false;
   try {
-    const response = await fetch("/api/session/migration", {
+    const response = await fetch(`/api/conversations/${encodeURIComponent(conversationId)}/migration`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ path, action }),
+      body: JSON.stringify({ action, expectedRevision }),
     });
     return response.ok;
   } catch {

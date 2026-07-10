@@ -69,11 +69,13 @@ export async function POST(req: NextRequest): Promise<NextResponse<SendResponse 
   const rejection = rejectCrossOrigin(req);
   if (rejection) return rejection;
 
-  let body: { pid?: unknown; path?: unknown; text?: unknown; image?: unknown; images?: unknown; action?: unknown; key?: unknown; label?: unknown; question?: unknown; target?: unknown };
+  let body: { pid?: unknown; path?: unknown; conversationId?: unknown; clientMessageId?: unknown; text?: unknown; image?: unknown; images?: unknown; action?: unknown; key?: unknown; label?: unknown; question?: unknown; target?: unknown };
   try {
     body = (await req.json()) as {
       pid?: unknown;
       path?: unknown;
+      conversationId?: unknown;
+      clientMessageId?: unknown;
       text?: unknown;
       image?: unknown;
       images?: unknown;
@@ -118,8 +120,9 @@ export async function POST(req: NextRequest): Promise<NextResponse<SendResponse 
   const pid = Number(body.pid);
   const hasPid = Number.isInteger(pid) && pid > 0;
   const filePath = typeof body.path === "string" ? body.path : "";
-  if (!hasPid && !filePath) {
-    return NextResponse.json({ error: "pid or path is required" }, { status: 400 });
+  const conversationId = typeof body.conversationId === "string" ? body.conversationId : "";
+  if (!hasPid && !filePath && !conversationId.startsWith("conversation_")) {
+    return NextResponse.json({ error: "pid, path, or conversationId is required" }, { status: 400 });
   }
 
   if (body.action === "interrupt") return respond(await interruptConversation(filePath));
@@ -140,5 +143,12 @@ export async function POST(req: NextRequest): Promise<NextResponse<SendResponse 
     return NextResponse.json({ error: "empty message" }, { status: 400 });
   }
 
-  return respond(await deliverConversationMessage({ pid: hasPid ? pid : null, path: filePath, text, images }));
+  return respond(await deliverConversationMessage({
+    pid: hasPid ? pid : null,
+    path: filePath,
+    ...(conversationId ? { conversationId } : {}),
+    ...(typeof body.clientMessageId === "string" ? { clientMessageId: body.clientMessageId.slice(0, 128) } : {}),
+    text,
+    images,
+  }));
 }

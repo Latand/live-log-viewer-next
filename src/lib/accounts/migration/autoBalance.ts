@@ -1,35 +1,62 @@
 import crypto from "node:crypto";
 
-import { agentRegistry, type AgentRegistry } from "@/lib/agent/registry";
+import { agentRegistry, MigrationRevisionError, type AgentRegistry } from "@/lib/agent/registry";
 
-import type { MigrationIntent } from "./contracts";
+import type { DurableQuotaObservation, MigrationIntent } from "./contracts";
 import { AUTO_BALANCE_COOLDOWN_MS, AUTO_BALANCE_SAMPLE_GAP_MS, chooseAutoBalance, type QuotaObservation } from "./quotaPolicy";
 
-type Sustain = { signature: string; firstAt: number };
-const sustained = new Map<string, Sustain>();
+const BOOT_ID = crypto.randomUUID();
 
-/** Evaluates only supplied structured quota observations. This controller has
-    no login, credential, process, or provider mutation capability. */
+/** Records every sample and the sustain clock in the durable registry. */
 export function evaluateAutoBalance(
   engine: "claude" | "codex",
   activeId: string,
   observations: QuotaObservation[],
   now = Date.now(),
   registry: AgentRegistry = agentRegistry(),
+  bootId: string = BOOT_ID,
 ): MigrationIntent | null {
   const policy = registry.autoBalancePolicy(engine);
-  const decision = chooseAutoBalance(engine, activeId, observations, policy, now);
-  const key = `${engine}:${activeId}`;
-  if (!decision) { sustained.delete(key); return null; }
-  const signature = `${decision.targetId}:${decision.evidence.sourcePercent}:${decision.evidence.targetPercent}`;
-  const previous = sustained.get(key);
-  if (!previous || previous.signature !== signature) { sustained.set(key, { signature, firstAt: now }); return null; }
-  if (now - previous.firstAt < AUTO_BALANCE_SAMPLE_GAP_MS) return null;
-  sustained.delete(key);
-  const intent = registry.upsertMigrationIntent(engine, decision.targetId, "auto", crypto.randomUUID(), decision.evidence);
-  registry.setEngineRouting(engine, decision.targetId);
-  registry.setAutoBalancePolicy(engine, policy.enabled, policy.revision);
-  return intent;
+  const draining = Object.values(registry.snapshot().migrationIntents).some((intent) => intent.engine === engine && intent.state === "draining");
+  const decision = draining ? null : chooseAutoBalance(engine, activeId, observations, policy, now);
+  const recorded: DurableQuotaObservation[] = observations.map((observation) => ({
+    engine,
+    accountId: observation.accountId,
+    authenticated: observation.authenticated,
+    authCheckedAt: new Date(observation.authCheckedAt ?? observation.observedAt).toISOString(),
+    limits: observation.limits,
+    provenance: observation.provenance,
+    observedAt: new Date(observation.observedAt).toISOString(),
+    bootId,
+  }));
+  const signature = decision ? `${activeId}:${decision.targetId}` : null;
+  const evaluation = registry.recordQuotaEvaluation({
+    engine,
+    observations: recorded,
+    signature,
+    evidence: decision?.evidence ?? null,
+    bootId,
+    now: new Date(now).toISOString(),
+    minimumGapMs: AUTO_BALANCE_SAMPLE_GAP_MS,
+  });
+  if (!decision || !evaluation.sustained) return null;
+  try {
+    const intent = registry.commitMigrationIntent({
+      engine,
+      targetId: decision.targetId,
+      origin: "auto",
+      requestId: `auto:${engine}:${decision.targetId}:${decision.evidence.observedAt}`,
+      expectedRevision: evaluation.routeRevision,
+      evidence: decision.evidence,
+    });
+    if (intent.origin === "auto" && intent.state === "complete") {
+      registry.recordAutoBalanceOutcome(engine, "complete", intent.evidence, new Date(now + AUTO_BALANCE_COOLDOWN_MS).toISOString());
+    }
+    return intent.origin === "auto" ? intent : null;
+  } catch (error) {
+    if (error instanceof MigrationRevisionError) return null;
+    throw error;
+  }
 }
 
 export function completeAutoBalanceIntent(engine: "claude" | "codex", intentId: string, outcome: "complete" | "stopped" | "failed-partial", now = Date.now(), registry: AgentRegistry = agentRegistry()): void {

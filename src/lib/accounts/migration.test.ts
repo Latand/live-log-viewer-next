@@ -12,6 +12,7 @@ import {
   parseEffective,
   parseEngineMigration,
   parseMigrationPreview,
+  postSessionMigration,
   type AutoBalance,
   type EngineMigration,
 } from "./migration";
@@ -156,4 +157,27 @@ describe("tolerant parsers", () => {
     expect(parseMigrationPreview({ intent: { targetId: "work" }, revision: 2 })).toMatchObject({ targetId: "work", previewRevision: 2 });
     expect(parseMigrationPreview({})).toBeNull();
   });
+});
+
+test("session recovery consumer uses the frozen conversation migration route", async () => {
+  const original = globalThis.fetch;
+  let request: { url: string; method: string; body: unknown } | null = null;
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    request = {
+      url: String(input),
+      method: init?.method ?? "GET",
+      body: typeof init?.body === "string" ? JSON.parse(init.body) : null,
+    };
+    return new Response(null, { status: 200 });
+  }) as typeof fetch;
+  try {
+    expect(await postSessionMigration("conversation_abc", "retry", 7)).toBeTrue();
+    expect(request as unknown).toEqual({
+      url: "/api/conversations/conversation_abc/migration",
+      method: "POST",
+      body: { action: "retry", expectedRevision: 7 },
+    });
+  } finally {
+    globalThis.fetch = original;
+  }
 });

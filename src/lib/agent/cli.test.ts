@@ -68,6 +68,17 @@ test("resume preserves the transcript model and reasoning effort for both engine
   expect(claude?.command).toContain("--effort 'max'");
 });
 
+test("Claude resume normalizes transcript families and omits unknown model overrides", () => {
+  const transcript = path.join(process.env.LLV_CLAUDE_HOME!, "projects", "-repo", "019f423a-d6e9-7903-b597-3e676b6ff3d4.jsonl");
+  fs.mkdirSync(path.dirname(transcript), { recursive: true });
+  fs.writeFileSync(transcript, JSON.stringify({ cwd: SANDBOX }) + "\n");
+
+  expect(resumeSpecFor("claude-projects", transcript, { model: "claude-fable-5-20260701" })?.command)
+    .toContain("--model 'fable'");
+  expect(resumeSpecFor("claude-projects", transcript, { model: "mythos-1" })?.command)
+    .not.toContain("--model");
+});
+
 test("managed Codex commands pin file-backed credential storage", () => {
   const account = createManagedCodexAccount("Review");
   const fresh = freshSpecFor("codex", "/repo", { codexHome: account.home, model: "gpt-5" });
