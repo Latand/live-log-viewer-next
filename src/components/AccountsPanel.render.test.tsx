@@ -196,11 +196,11 @@ test("canceling shows its spinner line with all actions withdrawn", () => {
   expect(/<button[^>]*>Cancel<\/button>/.test(html)).toBeFalse();
 });
 
-test("a terminal failure renders sanitized copy in an alert plus Retry, never the raw message", () => {
+test("a terminal failure renders sanitized copy in an alert plus Retry and excludes raw detail", () => {
   const html = render(claudeState(loginView({ phase: "timed_out", loginUrl: null, acceptsCode: false, result: { status: "failure", code: "timed_out", message: "raw internal detail" } })));
   expect(html).toContain('role="alert"');
   expect(html).toContain("Sign-in timed out.");
-  expect(html).not.toContain("raw internal detail"); // server message never rendered
+  expect(html).not.toContain("raw internal detail"); // raw server detail stays absent
   expect(html).toContain("Retry");
 });
 

@@ -135,7 +135,7 @@ function ClaudeLoginRow({ account, state, loginBusy }: { account: AccountOption;
   }
 
   // Keep focus inside the sub-row when a control the operator just pressed
-  // unmounts across a phase change (C9); never steal focus on other transitions.
+  // unmounts across a phase change (C9). Other transitions preserve their focus.
   useEffect(() => {
     if (wantFocus.current) {
       wantFocus.current = false;

@@ -46,8 +46,8 @@ export const NONTERMINAL_CLAUDE_LOGIN_PHASES = new Set<ClaudeLoginPhase>([
 ]);
 
 /** Crash-safe validation of the supervisor's login summary. An unknown phase, a
-    malformed field, or a non-object yields `null` — never a throw — so a stray
-    payload can never break the accounts read. */
+    malformed field, or a non-object yields `null`, keeping stray payloads from
+    breaking the accounts read. */
 export function parseClaudeLogin(raw: unknown): ClaudeLoginView | null {
   if (typeof raw !== "object" || raw === null) return null;
   const row = raw as Record<string, unknown>;
@@ -74,8 +74,8 @@ export function parseClaudeLogin(raw: unknown): ClaudeLoginView | null {
 }
 
 /** Sanitized error copy (C7): the client renders i18n keyed on `result.code` /
-    route `code`, never the server's raw message. Unknown codes fall back to a
-    generic actionable line. */
+    route `code`. Raw server messages stay private, and unknown codes fall back
+    to a generic actionable line. */
 export type ClaudeLoginErrKey =
   | "accounts.claudeLogin.err.timed_out"
   | "accounts.claudeLogin.err.interrupted"

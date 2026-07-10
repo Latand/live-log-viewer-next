@@ -528,7 +528,7 @@ test("retryLogin replaces the login on 202 and reports login_busy on 409 (C12f)"
   const ok = await store.retryLogin("acc");
   expect(ok).toBeTrue();
   const retryCall = calls.find((call) => call.url === "/api/accounts/claude" && (call.body as { action?: string }).action === "retry");
-  expect((retryCall?.body as { id?: string }).id).toBe("acc"); // account id, never a draft label
+  expect((retryCall?.body as { id?: string }).id).toBe("acc"); // account id from the stored row
   expect(store.accounts.find((account) => account.id === "acc")?.login?.operationId).toBe("op9");
   // A second concurrent sign-in is refused with the busy code; the row survives.
   busy = true;
