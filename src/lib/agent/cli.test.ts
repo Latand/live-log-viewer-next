@@ -45,6 +45,21 @@ test("Codex resume derives its owning account home from the transcript path", ()
   expect(spec?.command).toContain("resume 019f423a-d6e9-7903-b597-3e676b6ff3d4");
 });
 
+test("resume preserves the transcript model and reasoning effort for both engines", () => {
+  const codexTranscript = path.join(SANDBOX, "legacy", "sessions", "2026", "07", "09", "rollout-019f423a-d6e9-7903-b597-3e676b6ff3d4.jsonl");
+  const codex = resumeSpecFor("codex-sessions", codexTranscript, { model: "gpt-5.6-terra", effort: "xhigh" });
+  const claude = resumeSpecFor("claude-projects", "/repo/.claude/projects/-repo/019f423a-d6e9-7903-b597-3e676b6ff3d4.jsonl", {
+    model: "opus",
+    effort: "max",
+  });
+
+  expect(codex?.command).toContain("-m 'gpt-5.6-terra'");
+  expect(codex?.command).toContain("model_reasoning_effort=xhigh");
+  expect(codex?.command).toContain("CODEX_HOME='");
+  expect(claude?.command).toContain("--model 'opus'");
+  expect(claude?.command).toContain("--effort 'max'");
+});
+
 test("managed Codex commands pin file-backed credential storage", () => {
   const account = createManagedCodexAccount("Review");
   const fresh = freshSpecFor("codex", "/repo", { codexHome: account.home, model: "gpt-5" });

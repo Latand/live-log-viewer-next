@@ -11,7 +11,6 @@ import { INBOX_DIR } from "@/lib/inbox";
 import { normalizeResumePanesFile, type ResumePaneRecord, type ResumePanesFile } from "@/lib/resumePanesFile";
 import { listFiles } from "@/lib/scanner";
 import { isHelperArgv, pidAlive, readArgv, readPpid } from "@/lib/scanner/process";
-import { pathAllowed } from "@/lib/scanner/roots";
 import {
   composerLine,
   detectBlockingGate,
@@ -87,7 +86,15 @@ export interface PaneRef {
   paneId: string;
 }
 
-let paneMemo: { at: number; map: Map<number, PaneRef> } | null = null;
+/** A pane listing has three meaningful states. A missing tmux server is an
+    expected absence; a command failure is uncertain observation and callers
+    that might resume an agent must stop there. */
+export type PaneObservation =
+  | { kind: "available"; panes: Map<number, PaneRef> }
+  | { kind: "no-server" }
+  | { kind: "failure"; error: string };
+
+let paneMemo: { at: number; observation: PaneObservation } | null = null;
 
 interface RunResult {
   code: number | null;
@@ -113,9 +120,9 @@ function runTmux(args: string[], input?: Buffer | string): Promise<RunResult> {
 /** pane_pid → pane map from `tmux list-panes -a`, memoised for a few seconds.
     `fresh` bypasses the memo — a rebuild right after a kill must observe the
     pane's absence immediately, or the killed session ghosts back in. */
-export async function panePidMap(fresh = false): Promise<Map<number, PaneRef>> {
+export async function panePidMap(fresh = false): Promise<PaneObservation> {
   const now = Date.now();
-  if (!fresh && paneMemo && now - paneMemo.at < PANE_MAP_TTL_MS) return paneMemo.map;
+  if (!fresh && paneMemo && now - paneMemo.at < PANE_MAP_TTL_MS) return paneMemo.observation;
 
   const map = new Map<number, PaneRef>();
   let result: RunResult;
@@ -126,21 +133,24 @@ export async function panePidMap(fresh = false): Promise<Map<number, PaneRef>> {
       "-F",
       "#{session_name}:#{window_index}.#{pane_index}\t#{pane_id}\t#{pane_pid}",
     ]);
-  } catch {
-    paneMemo = { at: now, map };
-    return map;
+  } catch (error) {
+    return { kind: "failure", error: error instanceof Error ? error.message : String(error) };
   }
-  if (result.code === 0) {
-    for (const line of result.stdout.split("\n")) {
-      const [target = "", paneId = "", pidRaw = ""] = line.split("\t");
-      const panePid = Number(pidRaw.trim());
-      if (target.trim() && paneId.startsWith("%") && Number.isInteger(panePid) && panePid > 0) {
-        map.set(panePid, { target: target.trim(), paneId: paneId.trim() });
-      }
+  if (result.code !== 0) {
+    const error = result.stderr.trim() || `tmux list-panes exited ${result.code ?? "without a status"}`;
+    if (/no server running on|failed to connect to server/i.test(error)) return { kind: "no-server" };
+    return { kind: "failure", error };
+  }
+  for (const line of result.stdout.split("\n")) {
+    const [target = "", paneId = "", pidRaw = ""] = line.split("\t");
+    const panePid = Number(pidRaw.trim());
+    if (target.trim() && paneId.startsWith("%") && Number.isInteger(panePid) && panePid > 0) {
+      map.set(panePid, { target: target.trim(), paneId: paneId.trim() });
     }
   }
-  paneMemo = { at: now, map };
-  return map;
+  const observation: PaneObservation = { kind: "available", panes: map };
+  paneMemo = { at: now, observation };
+  return observation;
 }
 
 /**
@@ -153,7 +163,9 @@ export async function panePidMap(fresh = false): Promise<Map<number, PaneRef>> {
  */
 export async function resolveTarget(pid: number): Promise<TmuxTarget | null> {
   if (!Number.isInteger(pid) || pid <= 0) return null;
-  const panes = await panePidMap();
+  const observation = await panePidMap();
+  if (observation.kind !== "available") return null;
+  const { panes } = observation;
   if (panes.size === 0) return null;
 
   const seen = new Set<number>();
@@ -187,14 +199,12 @@ export async function targetForKnownPid(pid: number): Promise<TmuxTarget | null 
   return resolveTarget(pid);
 }
 
-export async function resolveRequestedTmuxTarget(pid: number | null, filePath: string): Promise<TmuxTarget | null> {
+/** Resolves a scanner-approved pid only. Transcript-to-pane policy lives in
+    agent/transcriptHost so resource observation and delivery cannot diverge. */
+export async function resolveRequestedTmuxTarget(pid: number | null): Promise<TmuxTarget | null> {
   if (pid !== null) {
     const target = await targetForKnownPid(pid);
     if (target !== "unknown" && target !== null) return target;
-  }
-  if (filePath && pathAllowed(filePath)) {
-    const pane = await liveResumePane(filePath);
-    if (pane) return pane.display;
   }
   return null;
 }
@@ -475,6 +485,30 @@ export interface SpawnedPane {
   panePid?: number;
 }
 
+/** Resume records scoped to the current tmux server. Callers still have to
+    compare a record's pane pid and engine with their observed host. */
+export async function resumePaneRecords(): Promise<{ serverPid: number; records: Map<string, ResumePaneRecord> } | null> {
+  const serverPid = await tmuxServerPid();
+  if (serverPid === null) return null;
+  return { serverPid, records: new Map(resumePanesForServer(serverPid)) };
+}
+
+/** Saves a fully identified resume pane. A missing pane pid deliberately
+    leaves no record: a later lookup must discover a real live process or
+    perform one controlled resume instead of trusting a reusable pane id. */
+export async function rememberResumePane(transcriptPath: string, spec: ResumeSpec, pane: SpawnedPane): Promise<void> {
+  if (!pane.panePid) return;
+  const serverPid = await tmuxServerPid();
+  if (serverPid === null) return;
+  resumePanesForServer(serverPid).set(transcriptPath, {
+    paneId: pane.paneId,
+    panePid: pane.panePid,
+    windowName: spec.windowName,
+    engine: spec.engine,
+  });
+  persistResumePanes();
+}
+
 export interface PaneInfo {
   windowName: string;
   command: string;
@@ -495,81 +529,9 @@ export async function paneInfo(paneId: string): Promise<PaneInfo | null> {
   return { windowName: parts[0] ?? "", command: parts[1] ?? "", display: parts[2] ?? paneId };
 }
 
-/**
- * The pane previously opened for this transcript when it still runs the agent.
- * Records from a prior tmux server are dropped first (`resumePanesForServer`),
- * since a restarted server reuses `%N` ids for unrelated panes. Within the live
- * server the pane is trusted only while the window keeps its resume name and a
- * non-shell foreground process; anything else drops the stale record.
- */
-export async function liveResumePane(transcriptPath: string): Promise<SpawnedPane | null> {
-  const serverPid = await tmuxServerPid();
-  if (serverPid === null) return null;
-  const map = resumePanesForServer(serverPid);
-  const record = map.get(transcriptPath);
-  if (!record) return null;
-  const info = await paneInfo(record.paneId);
-  if (!info || info.windowName !== record.windowName || isShellCommand(info.command)) {
-    map.delete(transcriptPath);
-    persistResumePanes();
-    return null;
-  }
-  return { paneId: record.paneId, display: info.display };
-}
-
 /** Drops a transcript's resume-window record, e.g. after its pane was killed. */
 export function forgetResumePane(transcriptPath: string): void {
   if (loadResumePanes().delete(transcriptPath)) persistResumePanes();
-}
-
-const resumeInFlight = new Map<string, Promise<SpawnedPane>>();
-
-/**
- * Delivers a message to the conversation's resume window: an already-running
- * window gets the text pasted in, a boot still in progress is awaited and
- * joined, and only a transcript with no window at all spawns a new one.
- */
-export async function sendToResumedAgent(
-  transcriptPath: string,
-  spec: ResumeSpec,
-  text: string,
-): Promise<{ target: TmuxTarget; spawned: boolean }> {
-  const existing = await liveResumePane(transcriptPath);
-  if (existing) {
-    await sendText(existing.paneId, text);
-    return { target: existing.display, spawned: false };
-  }
-  const pending = resumeInFlight.get(transcriptPath);
-  if (pending) {
-    const pane = await pending;
-    await sendText(pane.paneId, text);
-    return { target: pane.display, spawned: false };
-  }
-  const boot = spawnAgentWithPrompt(spec, text);
-  resumeInFlight.set(transcriptPath, boot);
-  try {
-    const pane = await boot;
-    /* Scope the record to the server that just hosted the new window: a pid we
-       cannot read means no stable namespace to key against, so skip the record
-       and let the next message respawn rather than persist an unscoped id. */
-    const serverPid = await tmuxServerPid();
-    if (serverPid !== null) {
-      resumePanesForServer(serverPid).set(transcriptPath, { paneId: pane.paneId, windowName: spec.windowName });
-      persistResumePanes();
-    }
-    logEvent("resume", { target: pane.display, path: transcriptPath, cwd: spec.cwd, result: "ok" });
-    return { target: pane.display, spawned: true };
-  } catch (error) {
-    logEvent("resume", {
-      path: transcriptPath,
-      cwd: spec.cwd,
-      result: "error",
-      reason: error instanceof Error ? error.message : String(error),
-    });
-    throw error;
-  } finally {
-    resumeInFlight.delete(transcriptPath);
-  }
 }
 
 const SPAWN_READY_TIMEOUT_MS = 60_000;

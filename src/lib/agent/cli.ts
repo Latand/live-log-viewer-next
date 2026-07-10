@@ -59,6 +59,7 @@ export interface ResumeSpec {
   command: string;
   cwd: string;
   windowName: string;
+  engine: AgentEngine;
   /** Transcript path the session will write, when knowable at spawn time —
       a fresh claude session launched with a pre-chosen --session-id. */
   transcript?: string;
@@ -73,6 +74,11 @@ export interface FreshSpecOptions {
   readOnly?: boolean;
   /** Codex only: explicit account home scoped into the typed host command. */
   codexHome?: string | null;
+}
+
+export interface ResumeSpecOptions {
+  model?: string | null;
+  effort?: string | null;
 }
 
 /** Boot spec for a brand-new agent (no prior conversation) in a chosen directory. */
@@ -97,6 +103,7 @@ export function freshSpecFor(engine: AgentEngine, cwd: string, options: FreshSpe
       command: args.map(shellQuote).join(" "),
       cwd,
       windowName: "claude-new",
+      engine: "claude",
       transcript: claudeTranscriptPath(cwd, sid),
     };
   }
@@ -112,6 +119,7 @@ export function freshSpecFor(engine: AgentEngine, cwd: string, options: FreshSpe
     command: `CODEX_HOME=${shellQuote(home)} ${command}`,
     cwd,
     windowName: "codex-new",
+    engine: "codex",
   };
 }
 
@@ -120,15 +128,20 @@ export function freshSpecFor(engine: AgentEngine, cwd: string, options: FreshSpe
  * prompt can be typed into it. Claude subagent transcripts have no resumable
  * session of their own, so only root session files qualify.
  */
-export function resumeSpecFor(root: string, pathname: string): ResumeSpec | null {
+export function resumeSpecFor(root: string, pathname: string, options: ResumeSpecOptions = {}): ResumeSpec | null {
   const base = path.basename(pathname);
   if (root === "claude-projects" && base.endsWith(".jsonl") && !pathname.includes(path.sep + "subagents" + path.sep)) {
     const sid = base.slice(0, -".jsonl".length);
     if (!/^[0-9a-f-]{36}$/.test(sid)) return null;
+    let command = `${resolveBinary("claude")} --dangerously-skip-permissions`;
+    if (options.model) command += ` --model ${shellQuote(options.model)}`;
+    if (options.effort) command += ` --effort ${shellQuote(options.effort)}`;
+    command += ` --resume ${sid}`;
     return {
-      command: `${resolveBinary("claude")} --dangerously-skip-permissions --resume ${sid}`,
+      command,
       cwd: resumeCwd(pathname),
       windowName: "claude-resume",
+      engine: "claude",
     };
   }
   if (root === "codex-sessions" && base.endsWith(".jsonl")) {
@@ -136,11 +149,16 @@ export function resumeSpecFor(root: string, pathname: string): ResumeSpec | null
     if (!id) return null;
     const home = codexHomeOwningSessionPath(pathname);
     if (!home) return null;
-    const credentialsStore = isManagedCodexHome(home) ? " -c cli_auth_credentials_store=file" : "";
+    let command = `${resolveBinary("codex")}`;
+    if (isManagedCodexHome(home)) command += " -c cli_auth_credentials_store=file";
+    if (options.model) command += ` -m ${shellQuote(options.model)}`;
+    if (options.effort) command += ` -c ${shellQuote(`model_reasoning_effort=${options.effort}`)}`;
+    command += ` resume ${id}`;
     return {
-      command: `CODEX_HOME=${shellQuote(home)} ${resolveBinary("codex")}${credentialsStore} resume ${id}`,
+      command: `CODEX_HOME=${shellQuote(home)} ${command}`,
       cwd: resumeCwd(pathname),
       windowName: "codex-resume",
+      engine: "codex",
     };
   }
   return null;

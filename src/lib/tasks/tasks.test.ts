@@ -246,7 +246,7 @@ describe("task reconciliation", () => {
 
 describe("task delivery assembly", () => {
   test("builds per-target results and assignment patches", () => {
-    const outcomes: DeliveryOutcome[] = [{ ok: true, target: "%1" }, { error: "no pane", status: 409 }];
+    const outcomes: DeliveryOutcome[] = [{ ok: true, target: "%1" }, { ok: false, outcome: "failed", error: "no pane", status: 409 }];
     const assembled = assembleSendResults(task({ id: "12345678-aaaa", text: "Do it" }), ["/one", "/two"], outcomes, "now");
     expect(assembled.message).toBe("Task #12345678: Do it");
     expect(assembled.delivered).toBe(1);

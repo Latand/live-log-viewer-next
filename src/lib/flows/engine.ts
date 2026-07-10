@@ -2,11 +2,12 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { freshSpecFor, resumeSpecFor } from "@/lib/agent/cli";
+import { deliverToTranscriptHost } from "@/lib/agent/transcriptHost";
 import { accountForSpawn } from "@/lib/accounts/codex";
 import { resolveSpawnedTranscriptPath } from "@/lib/agent/spawnedTranscript";
 import { headCwd } from "@/lib/agent/transcript";
 import { isNativeCodexSubagentTranscript } from "@/lib/scanner/codexNative";
-import { resolveTarget, sendText, sendToResumedAgent, spawnAgentWithPrompt } from "@/lib/tmux";
+import { spawnAgentWithPrompt } from "@/lib/tmux";
 import type { FileEntry } from "@/lib/types";
 
 import { forgetHeadlessReview, headlessReviewStatus, startHeadlessReview } from "./exec";
@@ -103,16 +104,10 @@ function roundKey(flow: Flow, round: Round): string {
 export async function sendToImplementer(flow: Flow, entriesByPath: Map<string, FileEntry>, text: string): Promise<void> {
   const entry = entriesByPath.get(flow.implementerPath);
   if (!entry) throw new Error("implementer transcript is missing from scanner");
-  if (entry.pid !== null) {
-    const target = await resolveTarget(entry.pid);
-    if (target) {
-      await sendText(target, text);
-      return;
-    }
-  }
-  const spec = resumeSpecFor(entry.root, entry.path);
+  const spec = resumeSpecFor(entry.root, entry.path, { model: entry.launchModel ?? entry.model, effort: entry.effort });
   if (!spec) throw new Error("implementer session cannot be resumed");
-  await sendToResumedAgent(entry.path, spec, text);
+  const outcome = await deliverToTranscriptHost({ entry, spec, payload: text });
+  if (!outcome.ok) throw new Error(outcome.error);
 }
 
 function sessionIdFromHeadlessStdout(stdout: string): string | null {
