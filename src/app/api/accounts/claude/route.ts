@@ -89,12 +89,19 @@ export async function DELETE(req: NextRequest) {
   if (blockers.length && body.force !== true) {
     return NextResponse.json({ error: "Claude account has active sessions or sign-in", code: "account_removal_blocked", blockers }, { status: 409 });
   }
+  const wasActive = agentRegistry().engineRouting("claude").activeAccountId === account.id;
   try {
     if (login && LIVE_CLAUDE_LOGIN_PHASES.has(login.phase)) await claudeLoginSupervisor.cancel(login.operationId);
     agentRegistry().retireAccount("claude", account.id, "default");
-    removeManagedClaudeAccount(account.id);
+    try {
+      removeManagedClaudeAccount(account.id);
+    } catch (error) {
+      if (wasActive) agentRegistry().setEngineRouting("claude", account.id);
+      throw error;
+    }
     return NextResponse.json({ removed: { id: account.id } });
   } catch (error) {
+    if (error instanceof UnknownClaudeAccountError) return failure(404, "unknown_account", "Claude account is unavailable");
     if (error instanceof CorruptClaudeAccountsError) return failure(409, "accounts_locked", "Claude accounts require registry repair");
     if (error instanceof UnsafeClaudeHomeError) return failure(409, "unsafe_home", "Claude account home failed safety checks");
     return failure(500, "removal_failed", "Claude account could not be removed");

@@ -79,6 +79,11 @@ function AccountRow({ account, engine, activeId, onSelect, onRemove, disabled }:
   const { t } = useLocale();
   const state = rowState(account, activeId);
   const isActive = account.id === activeId;
+  // Removal deletes the managed home (including its credentials) with no undo,
+  // so the unblocked path arms on the first click and only executes on a
+  // second, explicit confirm — mirroring the confirm step migration already
+  // requires for its far less destructive account switch.
+  const [confirmingRemove, setConfirmingRemove] = useState(false);
   return (
     <div>
       <button
@@ -100,16 +105,41 @@ function AccountRow({ account, engine, activeId, onSelect, onRemove, disabled }:
         </div>
       ) : null}
       {account.kind === "managed" ? (
-        <div className="flex px-3 pb-1.5 pl-[26px]">
-          <button
-            type="button"
-            aria-label={t("accounts.removeAria", { label: account.label })}
-            disabled={disabled}
-            onClick={onRemove}
-            className="rounded-[7px] border border-line bg-bg px-2 py-0.5 text-[10.5px] font-semibold text-err hover:bg-[#fff5f5] disabled:opacity-45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
-          >
-            {t("accounts.remove")}
-          </button>
+        <div className="flex items-center gap-2 px-3 pb-1.5 pl-[26px]">
+          {confirmingRemove ? (
+            <>
+              <span className="min-w-0 flex-1 text-[10.5px] font-semibold text-err">{t("accounts.removeConfirm")}</span>
+              <button
+                type="button"
+                disabled={disabled}
+                onClick={() => {
+                  setConfirmingRemove(false);
+                  onRemove();
+                }}
+                className="shrink-0 rounded-[7px] border border-err bg-err px-2 py-0.5 text-[10.5px] font-semibold text-white hover:opacity-90 disabled:opacity-45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+              >
+                {t("accounts.removeConfirmCta")}
+              </button>
+              <button
+                type="button"
+                disabled={disabled}
+                onClick={() => setConfirmingRemove(false)}
+                className="shrink-0 rounded-[7px] border border-line bg-bg px-2 py-0.5 text-[10.5px] font-semibold hover:bg-chip disabled:opacity-45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+              >
+                {t("accounts.removeConfirmCancel")}
+              </button>
+            </>
+          ) : (
+            <button
+              type="button"
+              aria-label={t("accounts.removeAria", { label: account.label })}
+              disabled={disabled}
+              onClick={() => setConfirmingRemove(true)}
+              className="rounded-[7px] border border-line bg-bg px-2 py-0.5 text-[10.5px] font-semibold text-err hover:bg-[#fff5f5] disabled:opacity-45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            >
+              {t("accounts.remove")}
+            </button>
+          )}
         </div>
       ) : null}
     </div>

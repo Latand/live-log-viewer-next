@@ -129,7 +129,7 @@ export type AccountRetryAction =
 export type AccountNoticeKey =
   | "accounts.refreshFailed" | "accounts.switchFailed" | "accounts.addFailed" | "accounts.loginOpened"
   | "accounts.claudeLoginStarted"
-  | "accounts.removeBlocked" | "accounts.removeFailed"
+  | "accounts.removeBlocked" | "accounts.removeFailed" | "accounts.cleanupFailed"
   | ClaudeLoginErrKey;
 
 export interface AccountNotice {
@@ -739,7 +739,7 @@ export function createEngineAccountsStore(
         });
         if (!response.ok) throw new Error("orphan cleanup failed");
       } catch {
-        patchSnapshot({ notice: { kind: "error", operation: "remove", messageKey: "accounts.removeFailed", action: null } });
+        patchSnapshot({ notice: { kind: "error", operation: "remove", messageKey: "accounts.cleanupFailed", action: null } });
         await refresh();
         return false;
       }

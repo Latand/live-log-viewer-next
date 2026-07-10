@@ -166,6 +166,32 @@ test("managed Claude removal retires routing and migration intents targeting the
   expect(registry.snapshot().migrationIntents[intent.id]?.state).toBe("stopped");
 });
 
+test("managed Claude removal restores routing when the underlying deletion fails after routing was retired", async () => {
+  const account = createManagedClaudeAccount("Unsafe home");
+  const registry = agentRegistry();
+  registry.setEngineRouting("claude", account.id);
+  // Simulates the home becoming unsafe in the window between the route's
+  // initial listClaudeAccounts() check and removeManagedClaudeAccount's own
+  // re-read: retireAccount is the last synchronous step before that re-read,
+  // so corrupting the home here lands exactly in that window.
+  const originalRetire = registry.retireAccount.bind(registry);
+  registry.retireAccount = ((...args: Parameters<typeof originalRetire>) => {
+    originalRetire(...args);
+    fs.chmodSync(account.home, 0o755);
+  }) as typeof registry.retireAccount;
+
+  try {
+    const response = await remove(new NextRequest("http://127.0.0.1/api/accounts/claude", {
+      method: "DELETE", headers: { host: "127.0.0.1", "content-type": "application/json" }, body: JSON.stringify({ id: account.id }),
+    }));
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual(expect.objectContaining({ code: "accounts_locked" }));
+    expect(registry.engineRouting("claude").activeAccountId).toBe(account.id);
+  } finally {
+    registry.retireAccount = originalRetire;
+  }
+});
+
 test("managed Claude removal reports a corrupt registry as locked", async () => {
   const file = claudeRegistryPath();
   fs.mkdirSync(path.dirname(file), { recursive: true });

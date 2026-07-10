@@ -115,8 +115,12 @@ export const uk: Record<keyof typeof en, Message> = {
   "accounts.close": "Закрити",
   "accounts.remove": "Видалити",
   "accounts.removeAria": "Видалити {label}",
+  "accounts.removeConfirm": "Видалити цей акаунт?",
+  "accounts.removeConfirmCta": "Підтвердити",
+  "accounts.removeConfirmCancel": "Скасувати",
   "accounts.removeBlocked": "Для {label} ще є активна сесія або вхід.",
   "accounts.removeFailed": "Не вдалося видалити цей акаунт.",
+  "accounts.cleanupFailed": "Не вдалося очистити покинуті теки.",
   "accounts.forceRemove": "Видалити примусово",
   "accounts.cleanupOrphans": "Очистити покинуті теки",
   // Міграція акаунтів (#40) — уніфікована панель, підтвердження, банер, стрічки

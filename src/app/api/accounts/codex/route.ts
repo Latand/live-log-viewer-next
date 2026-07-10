@@ -72,13 +72,20 @@ export async function DELETE(req: NextRequest) {
   if (blockers.length && body.force !== true) {
     return NextResponse.json({ error: "Codex account has active sessions or sign-in", code: "account_removal_blocked", blockers }, { status: 409 });
   }
+  const wasActive = agentRegistry().engineRouting("codex").activeAccountId === account.id;
   try {
     if (login.attemptState === "pending") await managedCodexRuntime().cancelLogin(account.id);
     if (account.loginPane !== null) setCodexAccountLoginPane(account.id, null);
     agentRegistry().retireAccount("codex", account.id, "default");
-    removeManagedCodexAccount(account.id);
+    try {
+      removeManagedCodexAccount(account.id);
+    } catch (error) {
+      if (wasActive) agentRegistry().setEngineRouting("codex", account.id);
+      throw error;
+    }
     return NextResponse.json({ removed: { id: account.id } });
   } catch (error) {
+    if (error instanceof UnknownAccountError) return NextResponse.json({ error: "Codex account is unavailable", code: "unknown_account" }, { status: 404 });
     if (error instanceof CorruptCodexAccountsError) return NextResponse.json({ error: "Codex accounts require registry repair", code: "accounts_locked" }, { status: 409 });
     if (error instanceof UnsafeCodexHomeError) return NextResponse.json({ error: "Codex account home failed safety checks", code: "unsafe_home" }, { status: 409 });
     return NextResponse.json({ error: "Codex account could not be removed", code: "removal_failed" }, { status: 500 });

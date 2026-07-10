@@ -121,8 +121,12 @@ export const en = {
   "accounts.close": "Close",
   "accounts.remove": "Remove",
   "accounts.removeAria": "Remove {label}",
+  "accounts.removeConfirm": "Remove this account?",
+  "accounts.removeConfirmCta": "Confirm",
+  "accounts.removeConfirmCancel": "Cancel",
   "accounts.removeBlocked": "{label} still has an active session or sign-in.",
   "accounts.removeFailed": "Could not remove this account.",
+  "accounts.cleanupFailed": "Could not clean up abandoned homes.",
   "accounts.forceRemove": "Force remove",
   "accounts.cleanupOrphans": "Clean up abandoned homes",
   // Account migration (#40) — unified panel, confirm, banner, ribbons
