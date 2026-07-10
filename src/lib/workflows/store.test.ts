@@ -7,16 +7,19 @@ import { AgentRegistry } from "@/lib/agent/registry";
 import { CODEX_SOL_MODEL } from "@/lib/agent/models";
 import { saveRoleOverrides } from "@/lib/roles/store";
 
-/* The state dir must point at a sandbox before store.ts computes its
-   module-level constants, so the store loads dynamically after the env set. */
-process.env.LLV_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "llv-wf-store-test-"));
+/* Keep every workflow-store side effect inside this file's sandbox. */
+const previousState = process.env.LLV_STATE_DIR;
+const state = fs.mkdtempSync(path.join(os.tmpdir(), "llv-wf-store-test-"));
+process.env.LLV_STATE_DIR = state;
 const { buildWorkflow, defaultFixerFromRoles, loadTemplates, loadWorkflows, mergeSeededTemplates, normalizeStages, normalizeTemplate, reconcileWorkflowConversationOwnership, roleConfigFromReference, saveWorkflows, seededTemplatesFromRoles } =
   await import("./store");
 
 type WorkflowTemplate = import("./types").WorkflowTemplate;
 
 afterAll(() => {
-  fs.rmSync(process.env.LLV_STATE_DIR!, { recursive: true, force: true });
+  if (previousState === undefined) delete process.env.LLV_STATE_DIR;
+  else process.env.LLV_STATE_DIR = previousState;
+  fs.rmSync(state, { recursive: true, force: true });
 });
 
 const IMPLEMENT = {

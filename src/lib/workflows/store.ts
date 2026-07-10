@@ -12,9 +12,9 @@ import type { RoleConfig as RegistryRoleConfig, RoleDefinition } from "@/lib/rol
 
 import type { FinishAction, ImplementStage, ReviewStage, Workflow, WorkflowStage, WorkflowTemplate } from "./types";
 
-const WORKFLOWS_FILE = statePath("workflows.json");
-const TEMPLATES_FILE = statePath("workflow-templates.json");
-const ARTIFACT_DIR = statePath("workflows");
+const workflowsFile = () => statePath("workflows.json");
+const templatesFile = () => statePath("workflow-templates.json");
+const artifactDir = () => statePath("workflows");
 
 /** The hard fixer default (W5): Terra supplies fast hands for applying findings.
     A role override that passes the store's shape check can still fail the
@@ -294,7 +294,7 @@ function isWorkflow(value: unknown): value is Workflow {
 }
 
 export function loadWorkflows(): Workflow[] {
-  const raw = readJson(WORKFLOWS_FILE) as WorkflowFile | null;
+  const raw = readJson(workflowsFile()) as WorkflowFile | null;
   const workflows = Array.isArray(raw?.workflows) ? raw.workflows.filter(isWorkflow) : [];
   return workflows.map((wf) => ({
     ...wf,
@@ -343,11 +343,11 @@ export function reconcileWorkflowConversationOwnership(registry: AgentRegistry =
 }
 
 export function saveWorkflows(workflows: Workflow[]): void {
-  atomicWriteJson(WORKFLOWS_FILE, { workflows });
+  atomicWriteJson(workflowsFile(), { workflows });
 }
 
 export function loadTemplates(): WorkflowTemplate[] {
-  const raw = readJson(TEMPLATES_FILE) as TemplateFile | null;
+  const raw = readJson(templatesFile()) as TemplateFile | null;
   const templates = Array.isArray(raw?.templates)
     ? raw.templates.map(normalizeTemplate).filter((template): template is WorkflowTemplate => template !== null)
     : [];
@@ -357,7 +357,7 @@ export function loadTemplates(): WorkflowTemplate[] {
 }
 
 export function saveTemplates(templates: WorkflowTemplate[]): void {
-  atomicWriteJson(TEMPLATES_FILE, { templates });
+  atomicWriteJson(templatesFile(), { templates });
 }
 
 /** Upgrade untouched built-in templates and keep user-authored definitions. */
@@ -433,7 +433,7 @@ export function buildWorkflow(input: {
 }
 
 export function workflowArtifactsDir(workflowId: string): string {
-  return path.join(ARTIFACT_DIR, workflowId);
+  return path.join(artifactDir(), workflowId);
 }
 
 export function setupStdoutPath(workflowId: string): string {
