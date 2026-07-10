@@ -7,6 +7,8 @@ import { useComposer } from "@/hooks/useComposer";
 import { isEngineEffort } from "@/lib/agent/efforts";
 import { defaultModelFor } from "@/lib/agent/models";
 import { useLocale } from "@/lib/i18n";
+import { BUILDER_APPLY_FIXES_CONFIG, BUILDER_FRONTEND_CONFIG } from "@/lib/roles/paramConfig";
+import type { RoleDefinition } from "@/lib/roles/types";
 import type { FileEntry } from "@/lib/types";
 
 import { ComposerBar } from "./ComposerBar";
@@ -37,6 +39,8 @@ const ENGINES: { key: Engine; label: string }[] = [
 
 const field = (id: string, name: string) => `llvDraftPane:${id}:${name}`;
 
+type RoleCatalogItem = RoleDefinition & { promptPreview: string };
+
 function readField(id: string, name: string): string {
   if (typeof window === "undefined") return "";
   return sessionStorage.getItem(field(id, name)) ?? "";
@@ -47,9 +51,23 @@ function writeField(id: string, name: string, value: string) {
   else sessionStorage.removeItem(field(id, name));
 }
 
+function readRoleParams(id: string): Record<string, string | number> {
+  try {
+    const value = JSON.parse(readField(id, "roleParams") || "{}") as unknown;
+    if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+    return Object.fromEntries(Object.entries(value).filter(([, parameter]) => typeof parameter === "string" || typeof parameter === "number"));
+  } catch {
+    return {};
+  }
+}
+
+function scaffoldPreview(scaffold: string, params: Record<string, string | number>): string {
+  return scaffold.replace(/\{\{([A-Za-z][A-Za-z0-9]*)\}\}/g, (_match, key: string) => String(params[key] ?? ""));
+}
+
 /** Everything a draft keeps in sessionStorage; called when the draft leaves the scheme. */
 export function clearDraftStorage(id: string) {
-  for (const name of ["engine", "model", "cwd", "text", "boot", "src", "effort", "speed", "accountId"]) sessionStorage.removeItem(field(id, name));
+  for (const name of ["engine", "model", "cwd", "text", "boot", "src", "effort", "speed", "accountId", "role", "roleParams", "confirm"]) sessionStorage.removeItem(field(id, name));
 }
 
 /** Source transcript a handoff draft continues; empty for a plain draft. */
@@ -127,6 +145,10 @@ export function DraftAgentPane({
     return stored === "fast" || stored === "standard" ? stored : "";
   });
   const [accountId, setAccountIdState] = useState(() => readField(draftId, "accountId"));
+  const [roles, setRoles] = useState<RoleCatalogItem[]>([]);
+  const [roleId, setRoleIdState] = useState(() => readField(draftId, "role"));
+  const [roleParams, setRoleParamsState] = useState(() => readRoleParams(draftId));
+  const [deployConfirm, setDeployConfirmState] = useState(() => readField(draftId, "confirm"));
   const [accounts, setAccounts] = useState<{ id: string; label: string }[]>([]);
   const [dirs, setDirs] = useState<string[]>([]);
   const [attempt, setAttemptState] = useState<SpawnAttempt | null>(() => readAttempt(draftId));
@@ -159,6 +181,58 @@ export function DraftAgentPane({
   const setCwd = (value: string) => {
     setCwdState(value);
     writeField(draftId, "cwd", value);
+  };
+  const setRoleParams = (value: Record<string, string | number>) => {
+    setRoleParamsState(value);
+    writeField(draftId, "roleParams", JSON.stringify(value));
+  };
+  const setRoleParam = (key: string, value: string | number) => {
+    const next = { ...roleParams, [key]: value };
+    setRoleParams(next);
+    const selected = roles.find((role) => role.id === roleId);
+    if (selected?.id !== "builder") return;
+    if (next.domain === "frontend") {
+      setEngine(BUILDER_FRONTEND_CONFIG.engine);
+      setModel(BUILDER_FRONTEND_CONFIG.model);
+      setEffort(BUILDER_FRONTEND_CONFIG.effort);
+      setSpeed("");
+      return;
+    }
+    if (next.mode === "apply-fixes") {
+      setEngine(BUILDER_APPLY_FIXES_CONFIG.engine);
+      setModel(BUILDER_APPLY_FIXES_CONFIG.model);
+      setEffort(BUILDER_APPLY_FIXES_CONFIG.effort);
+      return;
+    }
+    /* Plain/general mode falls back to the server-merged config so a saved
+       role override is honored, matching selectRole below. */
+    setEngine(selected.config.engine);
+    setModel(selected.config.model);
+    setEffort(selected.config.effort);
+  };
+  const setDeployConfirm = (value: string) => {
+    setDeployConfirmState(value);
+    writeField(draftId, "confirm", value);
+  };
+  const selectRole = (nextId: string) => {
+    setRoleIdState(nextId);
+    writeField(draftId, "role", nextId);
+    const selected = roles.find((role) => role.id === nextId);
+    if (!selected) {
+      setRoleParams({});
+      setDeployConfirm("");
+      return;
+    }
+    const params = Object.fromEntries(selected.parameters.map((parameter) => [
+      parameter.key,
+      parameter.kind === "integer" ? parameter.min ?? 1 : parameter.options?.[0] ?? "",
+    ]));
+    setRoleParams(params);
+    setDeployConfirm("");
+    setEngine(selected.config.engine);
+    setModel(selected.config.model);
+    setEffort(selected.config.effort);
+    setSpeed("");
   };
   const setAttempt = useCallback((value: SpawnAttempt | null) => {
     setAttemptState(value);
@@ -204,6 +278,16 @@ export function DraftAgentPane({
       setAccounts(body.codex.accounts);
       setAccountIdState((value) => value || body.codex.active);
     }).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    void fetch("/api/roles").then(async (res) => {
+      if (!res.ok) return;
+      const body = await res.json() as { roles?: RoleCatalogItem[] };
+      if (!cancelled && Array.isArray(body.roles)) setRoles(body.roles);
+    }).catch(() => {});
+    return () => { cancelled = true; };
   }, []);
 
   /* The handover uses the exact receipt path or conversation id. A nearby
@@ -288,12 +372,29 @@ export function DraftAgentPane({
     void submitAttempt(attempt);
   }, [attempt, submitAttempt]);
 
+  const selectedRole = roles.find((role) => role.id === roleId) ?? null;
+
   const send = async (overrideText?: string) => {
     const payloadText = overrideText ?? text;
     if (busy || voiceSending || attempt) return;
     if (!cwd.trim()) {
       setStatus({ kind: "err", text: t("draft.needDir") });
       return;
+    }
+    if (selectedRole) {
+      const missing = selectedRole.parameters.find((parameter) => {
+        if (!parameter.required) return false;
+        const value = roleParams[parameter.key];
+        return value === undefined || (typeof value === "string" && !value.trim());
+      });
+      if (missing) {
+        setStatus({ kind: "err", text: t("draft.roleNeedsParams") });
+        return;
+      }
+      if (selectedRole.id === "deployer" && deployConfirm !== "deploy") {
+        setStatus({ kind: "err", text: t("draft.deployConfirm") });
+        return;
+      }
     }
     if (!payloadText.trim() && !attachments.images.length) return;
     const candidate = createSpawnAttempt(newAttemptId(), Date.now(), {
@@ -306,6 +407,7 @@ export function DraftAgentPane({
       prompt: payloadText,
       images: attachments.images.map((image) => ({ base64: image.base64, mime: image.mime })),
       src,
+      ...(roleId ? { role: roleId, roleParams, ...(deployConfirm ? { confirm: deployConfirm } : {}) } : {}),
     });
     /* Persist before POST: a navigation now has the launch id, timestamp, and
        exact recoverable payload needed to reconcile the original request. */
@@ -387,6 +489,58 @@ export function DraftAgentPane({
             <option key={dir} value={dir} />
           ))}
         </datalist>
+      </div>
+
+      <div className="flex shrink-0 flex-col gap-1.5 border-b border-line bg-[#fbfbfd] px-2.5 py-1.5">
+        <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+          <label className="shrink-0 text-[10px] font-semibold text-dim" htmlFor={`draft-role-${draftId}`}>{t("draft.role")}</label>
+          <select
+            id={`draft-role-${draftId}`}
+            value={roleId}
+            disabled={fieldsDisabled}
+            onChange={(event) => selectRole(event.target.value)}
+            aria-label={t("draft.roleAria")}
+            className="h-7 min-w-0 flex-1 rounded-[8px] border border-line bg-panel px-1.5 text-[11px] text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60"
+          >
+            <option value="">{t("draft.noRole")}</option>
+            {roles.map((role) => <option key={role.id} value={role.id}>{role.name}</option>)}
+          </select>
+        </div>
+        {selectedRole ? (
+          <>
+            <p className="text-[10px] leading-4 text-dim">{selectedRole.description}</p>
+            {selectedRole.parameters.length ? (
+              <div className="flex flex-wrap gap-1.5" role="group" aria-label={t("draft.roleParameters")}>
+                {selectedRole.parameters.map((parameter) => (
+                  <label key={parameter.key} className="flex min-w-28 flex-1 flex-col gap-0.5 text-[10px] text-dim">
+                    <span>{parameter.label}{parameter.required ? " *" : ""}</span>
+                    {parameter.kind === "select" ? (
+                      <select value={String(roleParams[parameter.key] ?? "")} disabled={fieldsDisabled} onChange={(event) => setRoleParam(parameter.key, event.target.value)} className="h-7 rounded-[7px] border border-line bg-panel px-1 text-[11px] text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60">
+                        {parameter.options?.map((option) => <option key={option} value={option}>{option}</option>)}
+                      </select>
+                    ) : (
+                      <input type={parameter.kind === "integer" ? "number" : "text"} min={parameter.min} max={parameter.max} value={String(roleParams[parameter.key] ?? "")} disabled={fieldsDisabled} onChange={(event) => setRoleParam(parameter.key, parameter.kind === "integer" && event.target.value ? Number(event.target.value) : event.target.value)} aria-label={parameter.label} className="h-7 min-w-0 rounded-[7px] border border-line bg-panel px-1.5 text-[11px] text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60" />
+                    )}
+                    <span className="leading-3">{parameter.description}</span>
+                  </label>
+                ))}
+              </div>
+            ) : null}
+            {selectedRole.id === "deployer" ? (
+              <label className="flex max-w-52 flex-col gap-0.5 text-[10px] text-dim">
+                <span>{t("draft.deployConfirm")}</span>
+                <input value={deployConfirm} disabled={fieldsDisabled} onChange={(event) => setDeployConfirm(event.target.value)} aria-label={t("draft.deployConfirm")} placeholder="deploy" className="h-7 rounded-[7px] border border-line bg-panel px-1.5 text-[11px] text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60" />
+              </label>
+            ) : null}
+            <div className="rounded-[7px] border border-line bg-chip px-2 py-1.5 text-[10px] leading-4 text-dim">
+              <span className="font-semibold text-ink">{t("draft.scaffoldPreview")}</span>
+              <pre className="mt-1 whitespace-pre-wrap font-sans">{scaffoldPreview(selectedRole.promptPreview, roleParams)}</pre>
+              <ul className="mt-1 list-disc pl-4" aria-label={t("draft.safetyFences")}>
+                {selectedRole.safetyFences.map((fence) => <li key={fence}>{fence}</li>)}
+              </ul>
+            </div>
+          </>
+        ) : null}
       </div>
 
       <div className="flex shrink-0 flex-wrap items-center gap-1.5 border-b border-line bg-[#fbfbfd] px-2.5 py-1.5">

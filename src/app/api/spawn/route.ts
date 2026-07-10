@@ -13,6 +13,7 @@ import { freshSpecFor, type AgentEngine } from "@/lib/agent/cli";
 import { agentRegistry } from "@/lib/agent/registry";
 import { reasoningFromBody } from "@/lib/agent/efforts";
 import { modelFromBody } from "@/lib/agent/models";
+import { resolveSpawnRole } from "@/lib/roles/registry";
 import { sessionKeyFromTranscript } from "@/lib/agent/sessionKey";
 import { spawnResponseForReceipt, type SpawnResponse } from "@/lib/agent/spawnResponse";
 import { resolveSpawnedTranscriptPath } from "@/lib/agent/spawnedTranscript";
@@ -138,21 +139,28 @@ export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse
   const rejection = rejectCrossOrigin(req);
   if (rejection) return rejection;
 
-  let body: { engine?: unknown; model?: unknown; cwd?: unknown; prompt?: unknown; images?: unknown; src?: unknown; parent?: unknown; effort?: unknown; fast?: unknown; accountId?: unknown; clientAttemptId?: unknown };
+  let body: { engine?: unknown; model?: unknown; cwd?: unknown; prompt?: unknown; images?: unknown; src?: unknown; parent?: unknown; effort?: unknown; fast?: unknown; accountId?: unknown; clientAttemptId?: unknown; role?: unknown; roleParams?: unknown; confirm?: unknown };
   try {
     body = (await req.json()) as typeof body;
   } catch {
     return NextResponse.json({ error: "invalid JSON" }, { status: 400 });
   }
 
-  const engine = body.engine === "claude" || body.engine === "codex" ? (body.engine as AgentEngine) : null;
+  const role = resolveSpawnRole(body);
+  if (!role.ok) return NextResponse.json({ error: role.error }, { status: 400 });
+  const engine = body.engine === "claude" || body.engine === "codex"
+    ? (body.engine as AgentEngine)
+    : (role.value?.config.engine ?? null);
   if (!engine) return NextResponse.json({ error: "engine must be claude or codex" }, { status: 400 });
   if (body.accountId !== undefined && typeof body.accountId !== "string") return NextResponse.json({ error: "accountId must be a string" }, { status: 400 });
   if (body.clientAttemptId !== undefined && (typeof body.clientAttemptId !== "string" || !/^[A-Za-z0-9_-]{8,128}$/.test(body.clientAttemptId))) return NextResponse.json({ error: "clientAttemptId must be 8-128 URL-safe characters" }, { status: 400 });
 
-  const reasoning = reasoningFromBody(engine, body);
+  const reasoning = reasoningFromBody(engine, {
+    ...body,
+    effort: body.effort === undefined ? role.value?.config.effort : body.effort,
+  });
   if (reasoning.error) return NextResponse.json({ error: reasoning.error }, { status: 400 });
-  const selectedModel = modelFromBody(body);
+  const selectedModel = modelFromBody({ model: body.model === undefined ? role.value?.config.model : body.model });
   if (selectedModel.error) return NextResponse.json({ error: selectedModel.error }, { status: 400 });
 
   const rawCwd = typeof body.cwd === "string" ? body.cwd.trim() : "";
@@ -168,7 +176,8 @@ export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse
     return NextResponse.json({ error: `not a directory: ${cwd}` }, { status: 400 });
   }
 
-  const prompt = typeof body.prompt === "string" ? body.prompt.trim() : "";
+  const userPrompt = typeof body.prompt === "string" ? body.prompt.trim() : "";
+  const prompt = role.value ? [role.value.scaffold, userPrompt].filter(Boolean).join("\n\n") : userPrompt;
   const { images, error: imageError } = collectImagePayloads(body);
   if (imageError) {
     return NextResponse.json({ error: imageError.error }, { status: imageError.status });
@@ -191,6 +200,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse
       effort: reasoning.effort,
       fast: reasoning.fast,
       accountId: account.accountId,
+      role: role.value?.role ?? null,
       parentConversationId,
       parentSessionKey,
       parentArtifactPath: parentConversationId ? src : null,

@@ -219,6 +219,18 @@ describe("durable request recovery", () => {
     expect(replay.clientAttemptId).toBe("attempt_transport_1");
   });
 
+  test("a selected role and its parameters survive recovery and reach the spawn route", () => {
+    const attempt = createSpawnAttempt("attempt_role_1", 2_000_000_000_123, {
+      ...baseAttempt.request!,
+      role: "reviewer",
+      roleParams: { diffSource: "main...HEAD", lens: "all" },
+    });
+    expect(spawnRequestBody(attempt)).toMatchObject({
+      role: "reviewer",
+      roleParams: { diffSource: "main...HEAD", lens: "all" },
+    });
+  });
+
   test("receipt replay enriches the persisted attempt without changing its recovery data", () => {
     const attempt = createSpawnAttempt("attempt_receipt_1", 2_000_000_000_123, baseAttempt.request!);
     const outcome = classifySpawnResponse(200, true, {
