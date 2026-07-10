@@ -386,7 +386,11 @@ export function createEngineAccountsStore(
     } catch {
       if (generation !== requestGeneration) return false;
       activeRequest = null;
-      setSnapshot({ ...snapshot, status: "error", notice: refreshFailure() });
+      // A more specific notice already in flight (e.g. removeBlocked's
+      // force-remove action) survives a transient refresh failure — only a
+      // refresh-owned or absent notice gets replaced by the generic failure.
+      const notice = snapshot.notice && snapshot.notice.operation !== "refresh" ? snapshot.notice : refreshFailure();
+      setSnapshot({ ...snapshot, status: "error", notice });
       return false;
     } finally {
       clearTimeout(timeout);

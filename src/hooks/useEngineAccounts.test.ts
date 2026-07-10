@@ -622,3 +622,27 @@ test("managed account removal retries with force only after the API reports a sa
   expect(store.notice).toBeNull();
   unsub();
 });
+
+test("a blocked removal's force-remove notice survives the follow-up refresh failing", async () => {
+  let accountsCalls = 0;
+  const { fetcher } = scripted((url) => {
+    if (url === "/api/accounts") {
+      accountsCalls += 1;
+      // First read succeeds so the store hydrates; the refresh triggered by
+      // the blocked removal below fails transiently.
+      if (accountsCalls > 1) return new Response(null, { status: 500 });
+      return { claude: { active: "main", accounts: [claudeMain, claudeAcct({ id: "work", label: "Work", login: null })] } };
+    }
+    if (url === "/api/accounts/claude") {
+      return new Response(JSON.stringify({ code: "account_removal_blocked", blockers: ["live_sessions"] }), { status: 409 });
+    }
+    return new Response(null, { status: 204 });
+  });
+  const store = createEngineAccountsStore("claude", { fetcher });
+  const unsub = store.subscribe(() => {});
+  await advance();
+
+  expect(await store.remove("work")).toBeFalse();
+  expect(store.notice?.action).toMatchObject({ type: "retry", kind: "forceRemove", accountId: "work" });
+  unsub();
+});
