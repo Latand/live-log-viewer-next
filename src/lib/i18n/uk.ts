@@ -481,6 +481,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "scheme.roleWorking": "працює",
   "scheme.roleWaiting": "чекає",
   "scheme.lassoTool": "Вибірка — обведи агентів рамкою, кліком додавай чи знімай",
+  "scheme.boardAria": "Дошка агентів — стрілки переміщують між вікнами агентів",
 
   "bulk.selectedCount": { one: "Вибрано {count}", few: "Вибрано {count}", many: "Вибрано {count}", other: "Вибрано {count}" },
   "bulk.placeholder": "одне повідомлення кожному вибраному агенту…",

@@ -508,6 +508,7 @@ export const en = {
   "scheme.roleWorking": "working",
   "scheme.roleWaiting": "waiting",
   "scheme.lassoTool": "Multi-select — draw a box around agents, click cards to toggle",
+  "scheme.boardAria": "Agent board — arrow keys move between agent windows",
 
   // scheme/BulkActionBar (selection session)
   "bulk.selectedCount": { one: "{count} selected", other: "{count} selected" },

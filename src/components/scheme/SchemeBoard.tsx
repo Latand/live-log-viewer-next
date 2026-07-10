@@ -28,6 +28,7 @@ import { TasksLayer } from "./TasksLayer";
 import { buildTaskEdges, buildTaskTargetIndex, TASK_W, taskRect, type SchemeRect } from "./taskGeometry";
 import { useLasso } from "./useLasso";
 import { useSchemeCamera } from "./useSchemeCamera";
+import { useSpatialNav } from "./useSpatialNav";
 
 /* Below this zoom the big node labels fade in over the unreadable panes. */
 const LABEL_Z = 0.45;
@@ -336,6 +337,12 @@ export function SchemeBoard({
     setPendingTask({ x: Math.round(wx - TASK_W / 2), y: Math.round(wy - 14) });
   }, []);
 
+  /* Spatial-nav handlers behind refs: the camera's keydown listener reads these
+     while useSpatialNav (created below) needs the camera's own outputs — the
+     ref breaks that creation cycle, same as lassoDownRef. */
+  const navArrowRef = useRef<(event: KeyboardEvent) => boolean>(() => false);
+  const navZoomRef = useRef<(dir: 1 | -1) => boolean>(() => false);
+
   const {
     cam,
     vp,
@@ -356,6 +363,9 @@ export function SchemeBoard({
     fit,
     fitRect,
     jump,
+    manualNonce,
+    glideBy,
+    glideFrame,
   } = useSchemeCamera({
     project,
     layout,
@@ -372,7 +382,29 @@ export function SchemeBoard({
     onWorldTap: mapMode ? undefined : onWorldTap,
     taskRects,
     onPlaceTask: mapMode ? undefined : onPlaceTask,
+    onArrowNav: navArrowRef,
+    onZoomKey: navZoomRef,
   });
+
+  /* Spatial keyboard navigation: live only on the desktop board — a selection
+     session, an expanded overlay, or map mode all suspend it. */
+  const navEnabled = !mapMode && !session && !overlayOpen;
+  const { onArrow, onZoomKey, announcement } = useSpatialNav({
+    enabled: navEnabled,
+    layout,
+    cam,
+    vp,
+    selected,
+    setSelected,
+    centerOn,
+    glideBy,
+    glideFrame,
+    manualNonce,
+  });
+  useEffect(() => {
+    navArrowRef.current = onArrow;
+    navZoomRef.current = onZoomKey;
+  }, [onArrow, onZoomKey]);
 
   const commitMarquee = useCallback((paths: string[], additive: boolean) => {
     marqueeClickGuard.current = true;
@@ -499,11 +531,17 @@ export function SchemeBoard({
       className={`relative min-h-0 flex-1 overflow-hidden ${
         panning ? "cursor-grabbing select-none" : taskTool ? "cursor-crosshair" : handLike ? "cursor-grab" : ""
       } ${handLike ? "touch-none" : ""}`}
+      tabIndex={mapMode ? undefined : 0}
+      aria-label={mapMode ? undefined : t("scheme.boardAria")}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onDoubleClick={onDoubleClick}
       onClick={onClick}
     >
+      {/* Announces the window the arrow keys just landed on, for screen readers. */}
+      <div className="sr-only" aria-live="polite" role="status">
+        {announcement}
+      </div>
       {/* Dot grid on its own composited layer: panning moves it with a
           transform (modulo one tile) instead of repainting the viewport
           background every frame. */}
