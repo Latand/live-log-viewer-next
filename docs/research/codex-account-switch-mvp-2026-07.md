@@ -1,6 +1,6 @@
 # Codex multi-account switching — MVP design (issue #40, urgent slice)
 
-**Date:** 2026-07-09 · **Author:** Fable 5 architect session · **Status:** design, review-ready
+**Date:** 2026-07-09 · **Author:** Fable architect session · **Status:** design, review-ready
 **Scope:** Codex only. Claude account parity and UI polish are explicitly deferred (see §12).
 
 This document is the implementation contract for the expedited Codex-first slice of

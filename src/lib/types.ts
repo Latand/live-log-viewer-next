@@ -37,7 +37,7 @@ export interface FileEntry {
   pid: number | null;
   /** Set when this conversation was spawned by a handoff from `parent`. */
   handoff?: boolean;
-  /** Short model name (fable-5, gpt-5.5, sonnet…) or null when unknown. */
+  /** Short model name (fable, gpt-5.5, sonnet…) or null when unknown. */
   model: string | null;
   /** Exact model identifier recorded by the agent CLI. Kept separate from the
       display-normalized `model` because resuming a pinned Claude model needs

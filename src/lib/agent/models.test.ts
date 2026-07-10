@@ -26,8 +26,8 @@ test("spawn model validation accepts CLI ids and rejects control characters", ()
 
 test("Claude transcript model families normalize to stable launch aliases", () => {
   expect(normalizeClaudeLaunchModel("fable")).toBe("fable");
-  expect(normalizeClaudeLaunchModel("claude-fable-5")).toBe("fable");
-  expect(normalizeClaudeLaunchModel("fable-5-20260701")).toBe("fable");
+  expect(normalizeClaudeLaunchModel("claude-fable")).toBe("fable");
+  expect(normalizeClaudeLaunchModel("fable-20260701")).toBe("fable");
   expect(normalizeClaudeLaunchModel("claude-opus-4-8-20260630")).toBe("opus");
   expect(normalizeClaudeLaunchModel("claude-sonnet-5-20260701")).toBe("sonnet");
   expect(normalizeClaudeLaunchModel("claude-3-5-haiku-20241022")).toBe("haiku");

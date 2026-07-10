@@ -46,7 +46,7 @@ test("Claude successor provider uses registered homes and shared model normaliza
     id: "019f423a-d6e9-7903-b597-3e676b6ff3d4",
     path: sourcePath,
     accountId: "source",
-    launchProfile: emptyLaunchProfile({ cwd: "/repo", model: "claude-fable-5-20260701", effort: "high" }),
+    launchProfile: emptyLaunchProfile({ cwd: "/repo", model: "claude-fable-20260701", effort: "high" }),
     historyHash: null,
     host: null,
     createdAt: "2026-07-10T11:00:00.000Z",
@@ -55,7 +55,7 @@ test("Claude successor provider uses registered homes and shared model normaliza
   const receipt = await provider.create({ engine: "claude", operationId: "019f423a-d6e9-4903-8597-3e676b6ff3d4", conversationId: "conversation_test", source: sourceGeneration, targetAccountId: "target" });
   expect(command).toContain("CLAUDE_CONFIG_DIR=");
   expect(command).toContain("--model' 'fable'");
-  expect(command).not.toContain("claude-fable-5");
+  expect(command).not.toContain("claude-fable-");
   expect(command).toContain("--effort' 'high'");
   expect(receipt.path.startsWith(target.transcriptRoot + path.sep)).toBeTrue();
   await expect(provider.verify(receipt, { engine: "claude", targetAccountId: "target", launchProfile: sourceGeneration.launchProfile })).resolves.toBeUndefined();

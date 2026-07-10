@@ -36,7 +36,7 @@ statuses and expandable output](docs/media/chat-feed.png)
 - **Project scheme**: each project is a pannable, zoomable diagram — the root
   conversation on top, spawned agents one generation below, arrows colored by
   engine. Quiet branches and tasks collapse under their nearest ancestor.
-- **English or Ukrainian UI**, model chips (`fable-5`, `gpt-5.5`, `sonnet`…),
+- **English or Ukrainian UI**, model chips (`fable`, `gpt-5.5`, `sonnet`…),
   collapsible tree with persisted state, follow-mode autoscroll, service-event
   toggle, and a line filter.
 

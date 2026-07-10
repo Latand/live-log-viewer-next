@@ -73,7 +73,7 @@ test("Claude resume normalizes transcript families and omits unknown model overr
   fs.mkdirSync(path.dirname(transcript), { recursive: true });
   fs.writeFileSync(transcript, JSON.stringify({ cwd: SANDBOX }) + "\n");
 
-  expect(resumeSpecFor("claude-projects", transcript, { model: "claude-fable-5-20260701" })?.command)
+  expect(resumeSpecFor("claude-projects", transcript, { model: "claude-fable-20260701" })?.command)
     .toContain("--model 'fable'");
   expect(resumeSpecFor("claude-projects", transcript, { model: "mythos-1" })?.command)
     .not.toContain("--model");
