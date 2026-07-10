@@ -18,7 +18,10 @@ x-viewer-common: &viewer-common
     PATH: /usr/local/bin:/home/latand/.bun/bin:/home/latand/.npm-global/bin:/home/latand/.local/bin:/usr/bin:/bin
     XDG_CONFIG_HOME: /home/latand/.config
     XDG_CACHE_HOME: /home/latand/.cache
-    TMUX_TMPDIR: /tmp
+    # Keep /tmp until the explicit migration flag is enabled. The supervisor
+    # endpoint lives outside the disposable Viewer container.
+    TMUX_TMPDIR: ${LLV_TMUX_TMPDIR:-/tmp}
+    LLV_LEGACY_TMUX_EXTERNAL: ${LLV_LEGACY_TMUX_EXTERNAL:-0}
     HF_HOME: /home/latand/.cache/huggingface
     LLV_WHISPER_VENV: /opt/llv-whisper-venv
     LLV_TRANSCRIBE_BACKEND: ${LLV_TRANSCRIBE_BACKEND:-}
@@ -40,7 +43,8 @@ services:
       PATH: /usr/local/bin:/home/latand/.bun/bin:/home/latand/.npm-global/bin:/home/latand/.local/bin:/usr/bin:/bin
       XDG_CONFIG_HOME: /home/latand/.config
       XDG_CACHE_HOME: /home/latand/.cache
-      TMUX_TMPDIR: /tmp
+      TMUX_TMPDIR: ${LLV_TMUX_TMPDIR:-/tmp}
+      LLV_LEGACY_TMUX_EXTERNAL: ${LLV_LEGACY_TMUX_EXTERNAL:-0}
       HF_HOME: /home/latand/.cache/huggingface
       LLV_WHISPER_VENV: /opt/llv-whisper-venv
       LLV_TRANSCRIBE_BACKEND: ${LLV_TRANSCRIBE_BACKEND:-}
@@ -58,7 +62,8 @@ services:
       PATH: /usr/local/bin:/home/latand/.bun/bin:/home/latand/.npm-global/bin:/home/latand/.local/bin:/usr/bin:/bin
       XDG_CONFIG_HOME: /home/latand/.config
       XDG_CACHE_HOME: /home/latand/.cache
-      TMUX_TMPDIR: /tmp
+      TMUX_TMPDIR: ${LLV_TMUX_TMPDIR:-/tmp}
+      LLV_LEGACY_TMUX_EXTERNAL: ${LLV_LEGACY_TMUX_EXTERNAL:-0}
       HF_HOME: /home/latand/.cache/huggingface
       LLV_WHISPER_VENV: /opt/llv-whisper-venv
       LLV_TRANSCRIBE_BACKEND: ${LLV_TRANSCRIBE_BACKEND:-}

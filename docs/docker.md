@@ -16,6 +16,34 @@ docker compose up -d --build viewer
 
 `restart: unless-stopped` gives reboot survival (it replaces the systemd `Restart=always`). Manage the viewer with `docker compose` — `docker compose restart viewer`, `docker compose logs -f viewer` — not `systemctl`. If you ever re-enable the old systemd unit, stop the container first: both bind `127.0.0.1:8898` and only one process can own the port.
 
+## Legacy tmux supervisor migration
+
+The Viewer listens on `127.0.0.1:8898`. Legacy tmux panes acquire a separate user-service owner only after the explicitly approved migration. The service runs a foreground tmux server at `/run/user/1000/agent-log-viewer`, then bootstraps the canonical `agents` session.
+
+Run this read-only preflight first:
+
+```bash
+./scripts/install-legacy-tmux-supervisor.sh
+```
+
+The installation command requires `--install` and a later operator approval. It enables `agent-log-viewer-legacy-tmux.service`; it does not run as a Compose service. A human can attach after installation with:
+
+```bash
+TMUX_TMPDIR=/run/user/1000/agent-log-viewer tmux attach -t agents
+```
+
+Keep `LLV_LEGACY_TMUX_EXTERNAL=0` while the container-owned server still hosts legacy panes. That preserves the current `/tmp/tmux-1000` behavior. After the root handoff succeeds and its completion marker exists, deploy the Viewer with:
+
+```bash
+LLV_LEGACY_TMUX_EXTERNAL=1 \
+LLV_TMUX_TMPDIR=/run/user/1000/agent-log-viewer \
+./scripts/rebuild.sh
+```
+
+External-host mode fails closed when `agents` cannot be found through the dedicated endpoint. It never creates a replacement tmux server from the Viewer container. The migration preflight records a nonce-bound approval token; the later operator runbook must checkpoint the root, verify its successor uses the same engine-native thread, and roll back on any failed verification.
+
+The `scripts/e2e-viewer-replacement.ts` helper provides prepare and verify snapshots for that later runbook. Its normal modes only inspect state. It does not recreate a container, send a root message, or kill a pane.
+
 ## Test instance
 
 Use the test profile for local validation on another port:

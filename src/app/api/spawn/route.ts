@@ -8,8 +8,10 @@ import { UnknownAccountError } from "@/lib/accounts/codex";
 import { UnknownClaudeAccountError } from "@/lib/accounts/claude";
 import { accountManager } from "@/lib/accounts/manager";
 import { freshSpecFor, type AgentEngine } from "@/lib/agent/cli";
+import { agentRegistry } from "@/lib/agent/registry";
 import { reasoningFromBody } from "@/lib/agent/efforts";
 import { modelFromBody } from "@/lib/agent/models";
+import { sessionKeyFromTranscript } from "@/lib/agent/sessionKey";
 import { resolveSpawnedTranscriptPath } from "@/lib/agent/spawnedTranscript";
 import { headCwd } from "@/lib/agent/transcript";
 import { persistHandoffLineage, rememberHandoffChild, rememberHandoffPane } from "@/lib/handoffLineage";
@@ -189,6 +191,24 @@ export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse
       startedAtMs,
       codexSessionsDir: engine === "codex" ? account.transcriptRoot : null,
     });
+    const key = childPath ? sessionKeyFromTranscript(engine, childPath) : null;
+    if (!childPath || !key || !pane.receipt) {
+      if (pane.receipt) agentRegistry().failSpawn(pane.receipt.launchId, "spawned transcript could not be identified");
+      throw new Error("spawned transcript could not be identified safely");
+    }
+    {
+      agentRegistry().completeSpawn(pane.receipt.launchId, {
+        key,
+        artifactPath: childPath,
+        cwd,
+        accountId: account.accountId,
+        status: "starting",
+        host: null,
+        claimEpoch: 0,
+        claimOwner: null,
+        pendingAction: "spawn",
+      });
+    }
     const src = parentFromBody(body);
     if (src && transcriptAllowed(src)) {
       if (childPath) rememberHandoffChild(childPath, src);

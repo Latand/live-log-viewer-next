@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { NextResponse } from "next/server";
 
 import { listFilesWithProjectCatalog } from "@/lib/scanner";
+import { readTranscriptHosts } from "@/lib/agent/transcriptHost";
 import { pidAlive, readPpid } from "@/lib/scanner/process";
 import { loadFlows } from "@/lib/flows/store";
 import { pathForPanePid, reconcileTasks } from "@/lib/tasks/reconcile";
@@ -18,6 +19,9 @@ export async function GET(request: Request): Promise<NextResponse> {
   const url = new URL(request.url);
   const selectedProject = url.searchParams.get("project")?.trim() || undefined;
   const { files, projectCatalog } = await listFilesWithProjectCatalog(selectedProject);
+  /* This is the scanner-refresh reconciliation point. A failed tmux probe is
+     represented by the resolver and preserves durable rows for a later retry. */
+  await readTranscriptHosts(true);
   /* Reconciliation runs inside the serialized read-modify-write: the file
      scan above is the slow part, so a task edit landing during it is picked
      up by this fresh load instead of being overwritten by a stale snapshot. */

@@ -1,5 +1,6 @@
 import type { ResumeSpec } from "@/lib/agent/cli";
-import fs from "node:fs";
+import { agentRegistry, type TmuxHostEvidence } from "@/lib/agent/registry";
+import { sessionKeyFromTranscript } from "@/lib/agent/sessionKey";
 import { procBackend } from "@/lib/proc";
 import { descendantPids } from "@/lib/proc/memory";
 import { listFiles } from "@/lib/scanner";
@@ -7,10 +8,12 @@ import { agentProcesses, argvEngine, pidAlive, readArgv, readPpid, type AgentPro
 import {
   panePidMap,
   panePidOf,
+  paneInfo,
   rememberResumePane,
   resumePaneRecords,
   sendText,
   spawnAgentWithPrompt,
+  tmuxEndpoint,
   tmuxServerPid,
   type PaneRef,
   type PaneObservation,
@@ -35,6 +38,7 @@ export interface TranscriptHost {
   panePid: number;
   agentPid: number;
   display: string;
+  windowName?: string;
   engine: "claude" | "codex";
   cwd: string;
   /** argv observed with this pid; detects a pid that was recycled between
@@ -82,6 +86,7 @@ interface HostDependencies {
   serverPid: () => Promise<number | null>;
   resumeRecords: () => ReturnType<typeof resumePaneRecords>;
   panePid: (paneId: string) => Promise<number | null>;
+  paneWindowName?: (paneId: string) => Promise<string | null>;
   alive: (pid: number) => boolean;
   argv: (pid: number) => string[];
   parentPid: (pid: number) => number | null;
@@ -89,6 +94,8 @@ interface HostDependencies {
   spawn: (spec: ResumeSpec, text: string) => Promise<SpawnedPane>;
   remember: (pathname: string, spec: ResumeSpec, pane: SpawnedPane) => Promise<void>;
   deliver: (paneId: string, text: string) => Promise<void>;
+  reconcile?: (hosts: TranscriptHost[]) => void;
+  serializeDelivery?: (entry: FileEntry, task: () => Promise<HostDeliveryOutcome>) => Promise<HostDeliveryOutcome>;
 }
 
 interface HostClaim {
@@ -205,18 +212,6 @@ function failure(error: unknown, status = 500): HostDeliveryOutcome {
   return { ok: false, outcome: "failed", error: error instanceof Error ? error.message : String(error), status };
 }
 
-function processIdentity(pid: number): string | null {
-  try {
-    const raw = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
-    const closing = raw.lastIndexOf(")");
-    const fields = raw.slice(closing + 2).trim().split(/\s+/);
-    const startTicks = fields[19];
-    return startTicks ? `${pid}:${startTicks}` : null;
-  } catch {
-    return null;
-  }
-}
-
 /**
  * Creates the deep transcript-host module. The optional dependencies form a
  * test seam; production callers use the singleton below and only learn the
@@ -234,9 +229,11 @@ export function createTranscriptHostResolver(
       return { hosts: [], observation: "failure", observationError: paneObservation.error, canonicalFor: () => null };
     }
     if (serverPid === null || paneObservation.kind === "no-server") {
+      dependencies.reconcile?.([]);
       return { hosts: [], observation: "no-server", canonicalFor: () => null };
     }
     if (paneObservation.kind !== "available" || paneObservation.panes.size === 0) {
+      dependencies.reconcile?.([]);
       return { hosts: [], observation: "available", canonicalFor: () => null };
     }
     const { panes } = paneObservation;
@@ -259,6 +256,7 @@ export function createTranscriptHostResolver(
           panePid,
           agentPid: agent.pid,
           display: pane.target,
+          windowName: pane.windowName ?? "",
           engine: agent.engine,
           cwd: agent.cwd,
           agentArgv: [...agent.argv],
@@ -270,6 +268,8 @@ export function createTranscriptHostResolver(
       }
     }
 
+    dependencies.reconcile?.(hosts);
+
     return {
       hosts,
       observation: "available",
@@ -280,6 +280,7 @@ export function createTranscriptHostResolver(
   async function revalidate(host: TranscriptHost, entry: FileEntry): Promise<boolean> {
     if (host.engine !== entry.engine || (await dependencies.serverPid()) !== host.tmuxServerPid) return false;
     if ((await dependencies.panePid(host.paneId)) !== host.panePid || !dependencies.alive(host.agentPid)) return false;
+    if (host.windowName && dependencies.paneWindowName && (await dependencies.paneWindowName(host.paneId)) !== host.windowName) return false;
     if (!isDescendantOf(host.agentPid, host.panePid, dependencies.parentPid)) return false;
     const argv = dependencies.argv(host.agentPid);
     if (argv.length !== host.agentArgv.length || argv.some((value, index) => value !== host.agentArgv[index])) return false;
@@ -336,9 +337,7 @@ export function createTranscriptHostResolver(
     return { owner: true, task };
   }
 
-  return {
-    readTranscriptHosts: observe,
-    async deliverToTranscriptHost(input): Promise<HostDeliveryOutcome> {
+  async function deliverToTranscriptHost(input: { entry: FileEntry; spec: ResumeSpec; payload: string }): Promise<HostDeliveryOutcome> {
       let owner = false;
       let resumed = false;
       let decision: Decision;
@@ -385,8 +384,87 @@ export function createTranscriptHostResolver(
         }
       }
       return failure("agent host became unavailable during delivery");
-    },
+  }
+
+  return {
+    readTranscriptHosts: observe,
+    deliverToTranscriptHost: (input) => dependencies.serializeDelivery
+      ? dependencies.serializeDelivery(input.entry, () => deliverToTranscriptHost(input))
+      : deliverToTranscriptHost(input),
   };
+}
+
+function reconcileRegistry(hosts: TranscriptHost[]): void {
+  const registry = agentRegistry();
+  const seen = new Set<string>();
+  for (const host of hosts) {
+    if (!host.primaryPath) continue;
+    const key = sessionKeyFromTranscript(host.engine, host.primaryPath);
+    if (!key) continue;
+    const serverStart = procBackend.processIdentity(host.tmuxServerPid);
+    const evidence: TmuxHostEvidence = {
+      kind: "tmux",
+      endpoint: tmuxEndpoint(),
+      server: { pid: host.tmuxServerPid, startIdentity: serverStart },
+      paneId: host.paneId,
+      panePid: { pid: host.panePid, startIdentity: procBackend.processIdentity(host.panePid) },
+      windowName: host.windowName ?? "",
+      agent: { pid: host.agentPid, startIdentity: host.agentIdentity },
+      argv: host.agentArgv,
+    };
+    const existing = registry.snapshot().entries[`${key.engine}:${key.sessionId}`];
+    registry.completeObservedSpawn(key, host.primaryPath, host.cwd);
+    registry.upsert({
+      key,
+      artifactPath: host.primaryPath,
+      cwd: host.cwd,
+      accountId: existing?.accountId ?? null,
+      status: "live",
+      host: evidence,
+      claimEpoch: existing?.claimEpoch ?? 0,
+      claimOwner: existing?.claimOwner ?? null,
+      pendingAction: null,
+    });
+    seen.add(`${key.engine}:${key.sessionId}`);
+  }
+  for (const [id, entry] of Object.entries(registry.snapshot().entries)) {
+    if (entry.host?.kind === "tmux" && !seen.has(id)) registry.markUnhosted(entry.key);
+  }
+  registry.reconcileSpawnReceipts([...seen].map((id) => {
+    const [engine, sessionId] = id.split(":");
+    return { engine: engine as "claude" | "codex", sessionId };
+  }));
+}
+
+async function registryResumeRecords(): ReturnType<typeof resumePaneRecords> {
+  const serverPid = await tmuxServerPid();
+  if (serverPid === null) return null;
+  const registry = agentRegistry();
+  const snapshot = registry.snapshot();
+  if (!snapshot.importedResumePanes) {
+    const legacy = await resumePaneRecords();
+    if (legacy) registry.importResumePanes(legacy.serverPid, legacy.records);
+  }
+  return { serverPid, records: registry.resumePanes(serverPid) };
+}
+
+async function rememberRegistryResume(pathname: string, spec: ResumeSpec, pane: SpawnedPane): Promise<void> {
+  await rememberResumePane(pathname, spec, pane);
+  if (!pane.panePid) return;
+  const serverPid = await tmuxServerPid();
+  if (serverPid !== null) agentRegistry().rememberResumePane(serverPid, pathname, { paneId: pane.paneId, panePid: pane.panePid, windowName: spec.windowName, engine: spec.engine });
+}
+
+async function serializeRegistryDelivery(entry: FileEntry, task: () => Promise<HostDeliveryOutcome>): Promise<HostDeliveryOutcome> {
+  if (entry.engine !== "claude" && entry.engine !== "codex") return task();
+  const key = sessionKeyFromTranscript(entry.engine, entry.path);
+  if (!key) return task();
+  const owner = { pid: process.pid, startIdentity: procBackend.processIdentity(process.pid) };
+  try {
+    return await agentRegistry().withOperationLock(key, owner, task);
+  } catch (error) {
+    return failure(error, 409);
+  }
 }
 
 const runtimeResolver = createTranscriptHostResolver({
@@ -395,15 +473,18 @@ const runtimeResolver = createTranscriptHostResolver({
   ppidMap: () => procBackend.ppidMap(),
   agents: agentProcesses,
   serverPid: tmuxServerPid,
-  resumeRecords: resumePaneRecords,
+  resumeRecords: registryResumeRecords,
   panePid: panePidOf,
+  paneWindowName: async (paneId) => (await paneInfo(paneId))?.windowName ?? null,
   alive: pidAlive,
   argv: readArgv,
   parentPid: readPpid,
-  identity: processIdentity,
+  identity: procBackend.processIdentity,
   spawn: spawnAgentWithPrompt,
-  remember: rememberResumePane,
+  remember: rememberRegistryResume,
   deliver: sendText,
+  reconcile: reconcileRegistry,
+  serializeDelivery: serializeRegistryDelivery,
 }, globalStore.__llvTranscriptHostDecisions ??= new Map());
 
 export const readTranscriptHosts = runtimeResolver.readTranscriptHosts;

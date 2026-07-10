@@ -1,0 +1,21 @@
+[Unit]
+Description=Agent Log Viewer legacy tmux supervisor
+After=default.target
+
+[Service]
+Type=simple
+RuntimeDirectory=agent-log-viewer
+RuntimeDirectoryMode=0700
+UMask=0077
+Environment=HOME=/home/latand
+Environment=SHELL=/usr/bin/zsh
+Environment=LANG=C.UTF-8
+Environment=TMUX_TMPDIR=%t/agent-log-viewer
+ExecStart=/usr/bin/tmux -D
+ExecStartPost=/home/latand/.agents/tools/live-log-viewer-next/scripts/ensure-legacy-tmux-session.sh
+Restart=always
+RestartSec=1
+KillMode=control-group
+
+[Install]
+WantedBy=default.target

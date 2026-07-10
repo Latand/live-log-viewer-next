@@ -16,6 +16,28 @@ cd "$REPO_DIR"
 
 PORT="${PORT:-8898}"
 TOKEN="$(sed -n 's/^LLV_TOKEN=//p' "$HOME/.config/agent-log-viewer/service.env" 2>/dev/null | head -1)"
+MIGRATION_MARKER="$HOME/.config/agent-log-viewer/state/legacy-tmux-migration-complete"
+SUPERVISOR_TMUX_TMPDIR="/run/user/$(id -u)/agent-log-viewer"
+
+if [ -f "$MIGRATION_MARKER" ]; then
+  if [ "${LLV_LEGACY_TMUX_EXTERNAL:-1}" = "0" ] && [ "${LLV_ALLOW_LEGACY_TMUX_ROLLBACK:-0}" != "1" ]; then
+    echo "!! migrated supervisor endpoint cannot be downgraded without LLV_ALLOW_LEGACY_TMUX_ROLLBACK=1" >&2
+    exit 1
+  fi
+  export LLV_LEGACY_TMUX_EXTERNAL=1
+  export LLV_TMUX_TMPDIR="$SUPERVISOR_TMUX_TMPDIR"
+fi
+
+if [ "${LLV_LEGACY_TMUX_EXTERNAL:-0}" = "1" ]; then
+  systemctl --user is-active --quiet agent-log-viewer-legacy-tmux.service || {
+    echo "!! external legacy tmux supervisor is inactive; Viewer-only rebuild refused" >&2
+    exit 1
+  }
+  [ -f "$MIGRATION_MARKER" ] || {
+    echo "!! legacy tmux migration completion marker is absent; Viewer-only rebuild refused" >&2
+    exit 1
+  }
+fi
 
 # --- 1. build the image (clean-env .next build happens inside it) ----------
 echo "==> building image"
@@ -23,7 +45,7 @@ docker compose build viewer
 
 # --- 2. redeploy ----------------------------------------------------------
 echo "==> redeploying viewer (127.0.0.1:${PORT})"
-docker compose up -d viewer
+docker compose up -d --no-deps --force-recreate viewer
 
 # --- 3. verify page + CSS -------------------------------------------------
 BASE="http://127.0.0.1:${PORT}/"
@@ -47,4 +69,4 @@ else
   echo "==> page 200 (no <link> css found — check manually)"
 fi
 
-echo "==> done. tmux agents: $(tmux has-session -t agents 2>/dev/null && echo alive || echo none)"
+echo "==> done. Viewer replacement completed without Compose dependency recreation"

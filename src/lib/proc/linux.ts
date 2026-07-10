@@ -54,6 +54,12 @@ function readPpid(pid: number): number | null {
   return Number.isInteger(ppid) && ppid > 1 ? ppid : null;
 }
 
+function processIdentity(pid: number): string | null {
+  const fields = statFields(pid);
+  const startTicks = fields?.[19];
+  return startTicks ? `${pid}:${startTicks}` : null;
+}
+
 /**
  * Value of `name` in /proc/<pid>/environ. The environ array can carry the
  * variable more than once when wrapper shells re-export it; the last
@@ -237,6 +243,7 @@ export const linuxBackend: ProcBackend = {
   readArgv,
   readCwd,
   readPpid,
+  processIdentity,
   readEnvVar,
   listProcesses,
   systemMemory,

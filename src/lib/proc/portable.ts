@@ -175,6 +175,13 @@ function readPpid(pid: number): number | null {
   return snapshot().get(pid)?.ppid ?? null;
 }
 
+/* ps does not provide a portable process-birth identity. Null makes callers
+   require their other live-host evidence on platforms without Linux /proc. */
+function processIdentity(pid: number): string | null {
+  void pid;
+  return null;
+}
+
 /**
  * No portable route to another process's environment without root (macOS has
  * no /proc, and reading another process's memory needs task_for_pid
@@ -271,6 +278,7 @@ export const portableBackend: ProcBackend = {
   readArgv,
   readCwd,
   readPpid,
+  processIdentity,
   readEnvVar,
   listProcesses,
   systemMemory,
