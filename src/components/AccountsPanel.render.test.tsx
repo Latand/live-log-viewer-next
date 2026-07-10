@@ -177,7 +177,7 @@ test("awaiting_code renders the browser link, bounded code input, hint, and Canc
   expect(html).toContain("Cancel");
 });
 
-test("starting and verifying show a spinner line and Cancel but never the browser link", () => {
+test("starting and verifying show a spinner line, Cancel, and a hidden browser link", () => {
   const starting = render(claudeState(loginView({ phase: "starting", loginUrl: null, acceptsCode: false })));
   expect(starting).toContain("Starting sign-in…");
   expect(starting).toContain("animate-spin");
