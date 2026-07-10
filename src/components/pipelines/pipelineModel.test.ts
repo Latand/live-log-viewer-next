@@ -7,6 +7,7 @@ import type { TFunction } from "@/lib/i18n";
 
 import {
   PIPELINE_TEMPLATES,
+  STAGE_GLYPH,
   type DraftStage,
   canSourcePipeline,
   deriveStageId,
@@ -18,6 +19,7 @@ import {
   pipelineNeedsAttention,
   pipelineStripByPath,
   stageChipState,
+  stageOpenTarget,
 } from "./pipelineModel";
 
 /** A structural stand-in for the locale function: echoes the key and its vars. */
@@ -250,6 +252,39 @@ test("templates are all 2–4 stages with a run before any review-loop", () => {
       }
     });
   }
+});
+
+describe("stageOpenTarget (reviewer paths route to the flow, not the folded node)", () => {
+  const runStage = stage("build");
+  const reviewStage = stage("review", "review-loop");
+  const attempt = (over: Record<string, unknown>) => ({ n: 1, state: "running", agentPath: null, flowId: null, ...over }) as never;
+
+  test("a run stage opens its own node by path", () => {
+    expect(stageOpenTarget(runStage, attempt({ agentPath: "/build" }))).toEqual({ kind: "path", path: "/build" });
+  });
+
+  test("a review-loop stage routes to its embedded flow, never the reviewer path", () => {
+    /* agentPath here is the reviewer transcript the board folds into the deck. */
+    expect(stageOpenTarget(reviewStage, attempt({ agentPath: "/reviewer", flowId: "f1" }))).toEqual({ kind: "flow", flowId: "f1" });
+  });
+
+  test("a review-loop stage with no flow yet has no open target (no dead path click)", () => {
+    expect(stageOpenTarget(reviewStage, attempt({ agentPath: "/reviewer", flowId: null }))).toBeNull();
+  });
+
+  test("an unmaterialized stage opens nothing", () => {
+    expect(stageOpenTarget(runStage, null)).toBeNull();
+    expect(stageOpenTarget(runStage, attempt({ agentPath: null }))).toBeNull();
+  });
+});
+
+test("every stage-chip state carries a distinct, non-empty glyph (AC4/AC8)", () => {
+  const glyphs = Object.values(STAGE_GLYPH);
+  /* No blank glyph (pending used to be empty) and no two states share one, so
+     color/animation is never the sole differentiator — running vs committing
+     included. */
+  expect(glyphs.every((glyph) => glyph.length > 0)).toBe(true);
+  expect(new Set(glyphs).size).toBe(glyphs.length);
 });
 
 test("pipelineNeedsAttention flags parked and paused, not closed", () => {

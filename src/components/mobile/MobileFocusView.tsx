@@ -24,8 +24,9 @@ import { paneState, type PaneState } from "@/components/paneState";
 import type { BranchGroup } from "@/components/projectModel";
 import { activityDot, cleanTitle, engineBadge, engineColor } from "@/components/utils";
 
-import { STAGE_GLYPH, STAGE_TONES, latestAttempt, stageChipLabel, stageChipState } from "@/components/pipelines/pipelineModel";
+import { STAGE_GLYPH, STAGE_TONES, latestAttempt, stageChipLabel, stageChipState, stageOpenTarget } from "@/components/pipelines/pipelineModel";
 import { VerdictPopover } from "@/components/pipelines/VerdictPopover";
+import { deckKey } from "@/components/scheme/agentLinks";
 import { buildSchemeLayout, type SchemeLayout } from "@/components/scheme/layout";
 import { SchemeBoard } from "@/components/scheme/SchemeBoard";
 import { TASK_W, taskCardHeight } from "@/components/scheme/taskGeometry";
@@ -160,9 +161,12 @@ export function MobileFocusView({ project, groups, manual, files, flows, pipelin
 
   /* When the focused pane is a pipeline stage, a compact chain row rides above
      it: position, current stage/state, and prev/next stage chips to hop along
-     the chain (#93 §2.3). */
+     the chain (#93 §2.3). A review-loop stage is represented on the board by its
+     round deck, so match the focused deck's flow too — otherwise focusing a
+     reviewer session would hide the row entirely. */
   const activePath = activeNode ? activeNode.file.path : null;
-  const pipelineFocus = findPipelineStage(pipelines, activePath);
+  const activeFlowId = activeDeck ? activeDeck.flow.id : null;
+  const pipelineFocus = findPipelineStage(pipelines, activePath, activeFlowId);
 
   const openStagePath = useCallback(
     (path: string) => {
@@ -175,8 +179,17 @@ export function MobileFocusView({ project, groups, manual, files, flows, pipelin
   const hopToStage = (index: number) => {
     if (!pipelineFocus) return;
     const stage = pipelineFocus.pipeline.stages[index];
-    const path = stage ? latestAttempt(pipelineFocus.pipeline, stage.id)?.agentPath : null;
-    if (path) openStagePath(path);
+    if (!stage) return;
+    const target = stageOpenTarget(stage, latestAttempt(pipelineFocus.pipeline, stage.id));
+    if (!target) return;
+    /* Review-loop targets land on the flow's round deck (an entry key), not the
+       folded reviewer transcript; run stages open their own node by path. */
+    if (target.kind === "flow") {
+      const key = deckKey(target.flowId);
+      if (byKey.has(key)) setFocusPath(key);
+      return;
+    }
+    openStagePath(target.path);
   };
 
   const step = useCallback(
@@ -351,12 +364,19 @@ export function MobileFocusView({ project, groups, manual, files, flows, pipelin
   );
 }
 
-/** The pipeline + stage index a focused transcript path belongs to, if any. */
-function findPipelineStage(pipelines: Pipeline[], path: string | null): { pipeline: Pipeline; index: number } | null {
-  if (!path) return null;
+/** The pipeline + stage index a focused transcript path — or a focused round
+    deck's flow — belongs to, if any. Review-loop stages match by flow id, since
+    their reviewer transcript is folded into the deck rather than a board node. */
+function findPipelineStage(pipelines: Pipeline[], path: string | null, flowId: string | null): { pipeline: Pipeline; index: number } | null {
+  if (!path && !flowId) return null;
   for (const pipeline of pipelines) {
     if (pipeline.state === "closed") continue;
-    const index = pipeline.stages.findIndex((stage) => latestAttempt(pipeline, stage.id)?.agentPath === path);
+    const index = pipeline.stages.findIndex((stage) => {
+      const attempt = latestAttempt(pipeline, stage.id);
+      if (!attempt) return false;
+      if (path && attempt.agentPath === path) return true;
+      return Boolean(flowId && attempt.flowId === flowId);
+    });
     if (index >= 0) return { pipeline, index };
   }
   return null;
@@ -375,8 +395,10 @@ function PipelineFocusRow({ pipeline, index, onHop, onOpenPath }: { pipeline: Pi
   const tone = STAGE_TONES[state];
   const prev = index > 0 ? pipeline.stages[index - 1]! : null;
   const next = index < total - 1 ? pipeline.stages[index + 1]! : null;
-  const prevHopEnabled = prev ? Boolean(latestAttempt(pipeline, prev.id)?.agentPath) : false;
-  const nextHopEnabled = next ? Boolean(latestAttempt(pipeline, next.id)?.agentPath) : false;
+  /* A hop resolves through stageOpenTarget, so a review-loop neighbor is
+     reachable once its flow exists (deck), not only a run stage's own path. */
+  const prevHopEnabled = prev ? Boolean(stageOpenTarget(prev, latestAttempt(pipeline, prev.id))) : false;
+  const nextHopEnabled = next ? Boolean(stageOpenTarget(next, latestAttempt(pipeline, next.id))) : false;
   const attempt = latestAttempt(pipeline, stage.id);
   const canOpenVerdict = Boolean(attempt);
   return (

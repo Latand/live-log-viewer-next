@@ -133,7 +133,10 @@ export function VerdictPopover({
       {error ? <span className="truncate text-[10px] font-semibold text-err" title={error}>{error}</span> : null}
 
       <div className="flex flex-wrap items-center gap-1.5 border-t border-line pt-2">
-        {attempt.agentPath && onOpenPath ? (
+        {/* A review-loop's agentPath is the reviewer transcript the board folds
+            into the round deck — opening it reveals nothing, so offer only the
+            flow route below. A run stage opens its own node here (#93 §2.2). */}
+        {stage.kind !== "review-loop" && attempt.agentPath && onOpenPath ? (
           <button type="button" className="rounded-full border border-line bg-bg px-2.5 py-1 text-[10px] font-bold text-dim hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40" onClick={() => onOpenPath(attempt.agentPath!)}>
             {t("pipelineVerdict.openTranscript")}
           </button>

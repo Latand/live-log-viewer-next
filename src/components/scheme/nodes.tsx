@@ -824,16 +824,18 @@ export const NodesLayer = memo(function NodesLayer({
     return activity ? { ...node, file: { ...node.file, activity } } : node;
   };
 
-  /* Board pipeline strip actions: a stage chip / verdict routes a transcript
-     path (or an embedded flow's implementer) through the board's own select,
-     mirroring ProjectDashboard's openPipelinePath/openPipelineFlow. */
+  /* Board pipeline strip actions: a run stage chip / verdict opens the stage's
+     own node by path; a review-loop chip routes through openPipelineFlow. */
   const openPipelinePath = (path: string) => {
     const file = files.find((entry) => entry.path === path);
     if (file) onSelect(file);
   };
+  /* A review-loop stage's reviewer transcript is folded into the flow's round
+     deck, so focus the deck's latest round (revealing that reviewer) rather than
+     the removed node — the same round-focus channel FlowStrip drives (#93 §2.2). */
   const openPipelineFlow = (flowId: string) => {
     const flow = flows.find((candidate) => candidate.id === flowId);
-    if (flow) openPipelinePath(flow.implementerPath);
+    if (flow) onFocusRound(flow.id, flow.rounds.at(-1)?.n ?? 1);
   };
 
   /* A stack or deck stays lit when any conversation inside it is in the

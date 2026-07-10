@@ -93,12 +93,17 @@ export const STAGE_TONES: Record<StageChipState, { color: string; soft: string }
   skipped: { color: "#8b8b95", soft: "#efeff3" },
 };
 
-/** The glyph paired with every state so color is never the sole signal (a11y). */
+/**
+ * The glyph paired with every state so color is never the sole signal (AC4/AC8).
+ * Every state carries a distinct, non-empty glyph: pending is no longer blank,
+ * and committing (▾, landing the commit) reads apart from running (▸) even
+ * though the §3 matrix gives them the same accent tone.
+ */
 export const STAGE_GLYPH: Record<StageChipState, string> = {
-  pending: "",
+  pending: "○",
   running: "▸",
   reviewing: "⟳",
-  committing: "▸",
+  committing: "▾",
   passed: "✓",
   failed: "✕",
   needs_decision: "●!",
@@ -167,6 +172,27 @@ export function stageChipState(pipeline: Pipeline, stage: PipelineStage): StageC
 export function stageAccess(pipeline: Pipeline, stage: PipelineStage): PipelineAccess {
   const attempt = latestAttempt(pipeline, stage.id);
   return attempt?.effectiveRole.access ?? stage.access ?? (stage.kind === "review-loop" ? "read-only" : "read-write");
+}
+
+/**
+ * How a stage chip / "open transcript" reveals an attempt on the board. A
+ * review-loop stage stores the reviewer transcript in `agentPath`, but
+ * foldClaimedReviewers removes that transcript from the board and folds it into
+ * the flow's round deck — so opening the raw path reveals nothing. Route those
+ * to the embedded flow (deck + round focus) instead; a plain run stage opens its
+ * own node by path.
+ */
+export function stageOpenTarget(
+  stage: PipelineStage,
+  attempt: PipelineStageAttempt | null,
+): { kind: "flow"; flowId: string } | { kind: "path"; path: string } | null {
+  if (!attempt) return null;
+  /* A review-loop stage's agentPath is always the reviewer transcript the board
+     folds into the round deck, so never route to it — the flow (or nothing) is
+     the only valid target. Only a run stage opens its own node by path. */
+  if (stage.kind === "review-loop") return attempt.flowId ? { kind: "flow", flowId: attempt.flowId } : null;
+  if (attempt.agentPath) return { kind: "path", path: attempt.agentPath };
+  return null;
 }
 
 /** Short label a chip shows: the role's registry id, or the stage id for raw stages. */

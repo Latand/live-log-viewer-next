@@ -1,7 +1,8 @@
 "use client";
 
 import { Pause, Play, RefreshCw, X } from "lucide-react";
-import { useState } from "react";
+import { useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
+import { createPortal } from "react-dom";
 
 import { Hint } from "@/components/Hint";
 import { currentRound } from "@/components/scheme/agentLinks";
@@ -21,8 +22,40 @@ import {
   stageAttempts,
   stageChipLabel,
   stageChipState,
+  stageOpenTarget,
 } from "./pipelineModel";
 import { VerdictPopover } from "./VerdictPopover";
+
+/**
+ * Renders the verdict popover through a body portal anchored above a chip. The
+ * chip lives inside the strip's `overflow-x-auto` scroller, whose clip would
+ * otherwise hide the popover above it (#93 finding: clipped verdict). Fixed
+ * positioning off the anchor's rect, recomputed on scroll/resize, keeps it
+ * pinned to the chip while escaping the scroller.
+ */
+function AnchoredVerdict({ anchorRef, children }: { anchorRef: RefObject<HTMLElement | null>; children: ReactNode }) {
+  const [pos, setPos] = useState<{ x: number; y: number } | null>(null);
+  useLayoutEffect(() => {
+    const measure = () => {
+      const el = anchorRef.current;
+      if (el) setPos({ x: el.getBoundingClientRect().left + el.getBoundingClientRect().width / 2, y: el.getBoundingClientRect().top });
+    };
+    measure();
+    window.addEventListener("scroll", measure, true);
+    window.addEventListener("resize", measure);
+    return () => {
+      window.removeEventListener("scroll", measure, true);
+      window.removeEventListener("resize", measure);
+    };
+  }, [anchorRef]);
+  if (typeof document === "undefined" || !pos) return null;
+  return createPortal(
+    <div className="fixed z-[60]" style={{ left: pos.x, top: pos.y - 8, transform: "translate(-50%, -100%)" }}>
+      {children}
+    </div>,
+    document.body,
+  );
+}
 
 /** The parked stage's first finding, when present, is the most useful summary. */
 function parkedDetail(pipeline: Pipeline): string | null {
@@ -66,15 +99,25 @@ function StageChip({
   const attemptCount = stageAttempts(pipeline, stage.id).length;
   const chipState = t(`pipelineChipState.${state}`);
   const title = [stage.role?.roleId ?? stage.id, t(access === "read-only" ? "pipelineStrip.readOnly" : "pipelineStrip.readWrite"), attempt?.sessionId].filter(Boolean).join(" · ");
+  /* Review-loop chips open their flow's round deck, not the reviewer transcript
+     path (which the board folds away), so the chip never dead-ends (#93 §2.2). */
+  const openTarget = stageOpenTarget(stage, attempt);
+  const canOpen = openTarget ? (openTarget.kind === "flow" ? Boolean(onOpenFlow) : Boolean(onOpenPath)) : false;
+  const openStage = () => {
+    if (!openTarget) return;
+    if (openTarget.kind === "flow") onOpenFlow?.(openTarget.flowId);
+    else onOpenPath?.(openTarget.path);
+  };
+  const chipRef = useRef<HTMLSpanElement>(null);
 
   return (
-    <span className="relative flex shrink-0 items-center gap-1.5">
+    <span ref={chipRef} className="relative flex shrink-0 items-center gap-1.5">
       {index ? <span className="text-[10px] font-bold text-[#c9c9d1]" aria-hidden>→</span> : null}
       <span className="inline-flex items-center">
         <button
           type="button"
-          disabled={!attempt?.agentPath || !onOpenPath}
-          onClick={() => attempt?.agentPath && onOpenPath?.(attempt.agentPath)}
+          disabled={!canOpen}
+          onClick={openStage}
           className={`inline-flex h-6 max-w-[180px] items-center gap-1 truncate rounded-l-full ${attempt?.verdict ? "" : "rounded-r-full"} px-2 text-[10.5px] font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:cursor-default ${pulse ? "animate-pulse" : ""}`}
           style={{ backgroundColor: tone.soft, color: tone.color }}
           title={title}
@@ -100,9 +143,9 @@ function StageChip({
         ) : null}
       </span>
       {open && attempt ? (
-        <div className="absolute bottom-[calc(100%+8px)] left-1/2 z-30 -translate-x-1/2">
+        <AnchoredVerdict anchorRef={chipRef}>
           <VerdictPopover pipeline={pipeline} stage={stage} attempt={attempt} onClose={onCloseVerdict} onOpenPath={onOpenPath} onOpenFlow={onOpenFlow} />
-        </div>
+        </AnchoredVerdict>
       ) : null}
     </span>
   );

@@ -59,3 +59,15 @@ test("a first attempt shows no earlier-attempts section", () => {
   );
   expect(html).not.toContain("Earlier attempts");
 });
+
+test("a review-loop verdict offers Open flow, not the folded reviewer transcript", () => {
+  const reviewStage: PipelineStage = { ...stage, id: "review", kind: "review-loop" };
+  /* agentPath is the reviewer transcript the board folds into the deck, so
+     "Open transcript" must be withheld; only the flow route is offered. */
+  const only = attempt(1, { agentPath: "/reviewer.jsonl", flowId: "f1", verdict: { status: "fail", findings: [] } });
+  const html = renderToStaticMarkup(
+    <VerdictPopover pipeline={pipeline([only])} stage={reviewStage} attempt={only} onClose={() => {}} onOpenPath={() => {}} onOpenFlow={() => {}} />,
+  );
+  expect(html).not.toContain("Open transcript");
+  expect(html).toContain("Open review");
+});

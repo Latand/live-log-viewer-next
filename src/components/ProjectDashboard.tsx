@@ -21,6 +21,7 @@ import { claimedReviewerDescendantPaths, foldClaimedReviewers, isActiveFlow } fr
 import { PipelineDialog } from "./pipelines/PipelineDialog";
 import { PipelineStrip } from "./pipelines/PipelineStrip";
 import { pipelinesForProject, pipelineStripDomId } from "./pipelines/pipelineModel";
+import { deckKey } from "./scheme/agentLinks";
 import { clearWorkflowDraftStorage } from "./workflows/WorkflowDraftPane";
 import { WorkflowStrip } from "./workflows/WorkflowStrip";
 import { isWorkflowDraftId, workflowsForProject } from "./workflows/workflowModel";
@@ -505,15 +506,17 @@ export function ProjectDashboard({
     pendingFocusRef.current = file.path;
   };
 
-  /* Pipeline strip/verdict "open transcript" and "open review": route a stage's
-     agent path (or an embedded flow's implementer) through the same board open. */
+  /* Pipeline strip/verdict "open transcript": a run stage owns a board node, so
+     route its agent path through the same board open. */
   const openPipelinePath = (path: string) => {
     const file = files.find((entry) => entry.path === path);
     if (file) openSwitchboardFile(file);
   };
+  /* A review-loop stage's reviewer transcript is folded into the flow's round
+     deck, so glide to that deck (a byPath key) rather than the removed node —
+     openPipelinePath on the reviewer path would reveal nothing (#93 §2.2). */
   const openPipelineFlow = (flowId: string) => {
-    const flow = flows.find((candidate) => candidate.id === flowId);
-    if (flow) openPipelinePath(flow.implementerPath);
+    flashNode(deckKey(flowId));
   };
 
   const statusBits: string[] = [];
