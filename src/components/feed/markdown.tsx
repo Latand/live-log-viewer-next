@@ -4,6 +4,7 @@ import { Fragment, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 
 import { CopyButton, copyText } from "./CopyButton";
+import { useHighlighted } from "./highlight";
 import { Lightbox } from "./Lightbox";
 import { tr } from "./parse";
 
@@ -44,11 +45,22 @@ function InlineCode({ text }: { text: string }) {
 }
 
 /* Fenced block with a copy control that surfaces on hover (always faintly
-   there on touch screens, where hover never comes). */
-function CodeBlock({ code }: { code: string }) {
+   there on touch screens, where hover never comes). A `lang` hint lazily
+   upgrades the body to highlight.js output on first paint (see useHighlighted);
+   until the chunk resolves — or when the language is unknown — it stays plain
+   monospace, so nothing blocks or flashes. */
+export function CodeBlock({ code, lang }: { code: string; lang?: string | null }) {
+  const highlighted = useHighlighted(code, lang);
   return (
     <div className="group/code relative my-1.5 max-w-full">
-      <pre className="max-w-full overflow-x-auto rounded-[10px] border border-line bg-bg px-3 py-2 font-mono text-[11.5px]">{code}</pre>
+      {highlighted ? (
+        <pre
+          className="hljs max-w-full overflow-x-auto rounded-[10px] border border-line bg-bg px-3 py-2 font-mono text-[11.5px]"
+          dangerouslySetInnerHTML={{ __html: highlighted }}
+        />
+      ) : (
+        <pre className="max-w-full overflow-x-auto rounded-[10px] border border-line bg-bg px-3 py-2 font-mono text-[11.5px]">{code}</pre>
+      )}
       <CopyButton
         text={code}
         label={tr("feed.copyCode")}

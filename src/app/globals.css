@@ -16,6 +16,19 @@
   --color-codex-soft: #e8f0fb;
   --color-claude: #d97757;
   --color-claude-soft: #faeee9;
+  /* Feed surfaces previously hardcoded as hex literals in the cards. */
+  --color-panel-alt: #fafafc;
+  --color-tmsg: #f8f8fd;
+  --color-err-soft: #fff4f4;
+  --color-accent-soft: #ecebfb;
+  --color-faint: #555555;
+  /* Structural diff colors (issue #9 §4): line-type tokens, independent of the
+     syntax highlighter. Light-theme only for now — a dark theme lands app-wide
+     later in one place. */
+  --color-diff-add: #1a7f37;
+  --color-diff-add-soft: #e6ffec;
+  --color-diff-del: #cf222e;
+  --color-diff-del-soft: #ffebe9;
   --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto,
     sans-serif;
   --font-mono: ui-monospace, "JetBrains Mono", Menlo, monospace;
@@ -105,6 +118,41 @@ body {
   .pane-attention::before {
     animation: none;
   }
+}
+
+/* Syntax highlighting palette (issue #9 §7): highlight.js emits .hljs-* class
+   names; we color them from the app's own light-theme tokens rather than
+   shipping a hljs theme, so no app-wide dark theme sneaks in and every color
+   stays a single source of truth. */
+.hljs-comment,
+.hljs-quote {
+  color: var(--color-dim);
+  font-style: italic;
+}
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-built_in,
+.hljs-name,
+.hljs-tag {
+  color: var(--color-accent);
+}
+.hljs-string,
+.hljs-attr,
+.hljs-template-tag,
+.hljs-addition {
+  color: var(--color-ok);
+}
+.hljs-number,
+.hljs-literal,
+.hljs-type,
+.hljs-title,
+.hljs-title.class_,
+.hljs-title.function_ {
+  color: var(--color-codex);
+}
+.hljs-deletion,
+.hljs-meta {
+  color: var(--color-err);
 }
 
 /* Scrollable chip rows inside pill-shaped controls (the flow strip): the
