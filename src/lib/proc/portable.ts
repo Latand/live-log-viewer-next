@@ -175,11 +175,10 @@ function readPpid(pid: number): number | null {
   return snapshot().get(pid)?.ppid ?? null;
 }
 
-/* ps does not provide a portable process-birth identity. Null makes callers
-   require their other live-host evidence on platforms without Linux /proc. */
 function processIdentity(pid: number): string | null {
-  void pid;
-  return null;
+  if (!Number.isInteger(pid) || pid <= 0) return null;
+  const started = runCapture("ps", ["-p", String(pid), "-o", "lstart="]).trim().replace(/\s+/g, " ");
+  return started ? `${pid}:${started}` : null;
 }
 
 /**

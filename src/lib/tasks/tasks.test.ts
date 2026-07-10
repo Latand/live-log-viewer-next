@@ -226,6 +226,23 @@ describe("task reconciliation", () => {
     });
   });
 
+  test("rewrites an escaped provisional conversation id through its durable alias", () => {
+    const tasks = [task({ assignments: [{ path: "/artifact", conversationId: "conversation_provisional", panePid: null, state: "handoff", error: null, at: "old" }] })];
+    const result = reconcileTasks([], tasks, {
+      now: () => "new",
+      canonicalConversationId: (conversationId) => conversationId === "conversation_provisional" ? "conversation_canonical" : conversationId,
+      pathForConversationId: () => "/artifact",
+    });
+
+    expect(result.dirty).toBe(true);
+    expect(result.tasks[0]?.assignments[0]).toMatchObject({
+      path: "/artifact",
+      conversationId: "conversation_canonical",
+      state: "handoff",
+      at: "old",
+    });
+  });
+
   test("fills codex spawn path from pane attribution", () => {
     const tasks = [task({ assignments: [{ path: null, panePid: 42, state: "spawning", error: null, at: "old" }] })];
     const result = reconcileTasks([], tasks, {

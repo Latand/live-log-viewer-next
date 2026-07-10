@@ -30,7 +30,7 @@ test("controller migration cycle reconciles and ticks both durable quota policy 
   const conversation = registry.conversationForPath("/source.jsonl")!;
   registry.commitMigrationIntent({ engine: "codex", targetId: "target", origin: "manual", requestId: "controller-cycle", expectedRevision: registry.engineRouting("codex").revision });
   const provider: SuccessorProviderPort = {
-    async create(input) { return { operationId: input.operationId, nativeId: "successor", path: "/target.jsonl", historyHash: "hash", host: { kind: "codex-app-server", identity: "successor", epoch: 1, verifiedAt: "2026-07-10T12:01:00.000Z" } }; },
+    async create(input) { return { operationId: input.operationId, nativeId: "successor", path: "/target.jsonl", continuityPaths: [], historyHash: "hash", host: { kind: "codex-app-server", identity: "successor", epoch: 1, verifiedAt: "2026-07-10T12:01:00.000Z" } }; },
     async verify() {},
   };
 
@@ -80,6 +80,7 @@ test("three controller cycles move depleted Main to a stronger managed account a
           operationId: input.operationId,
           nativeId: "managed-successor",
           path: "/managed.jsonl",
+          continuityPaths: [],
           historyHash: "managed-history",
           host: { kind: "codex-app-server", identity: "managed-successor", epoch: 1, verifiedAt: new Date(current).toISOString() },
         };

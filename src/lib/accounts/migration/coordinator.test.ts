@@ -4,19 +4,28 @@ import os from "node:os";
 import path from "node:path";
 
 import { AgentRegistry, MigrationRevisionError, type ConversationObservation } from "@/lib/agent/registry";
+import { boardFor, mutateBoard, setBoardFileForTests } from "@/lib/board/store";
 
 import { advanceConversationMigration, drainHeldDeliveries, previewMigration, reconcileMigrations } from "./coordinator";
 import { emptyLaunchProfile, type ProviderReceipt, type SuccessorProviderPort } from "./contracts";
+import { CodexForkOutcomeUnknownError, SuccessorPendingError } from "./provider";
 
 const roots: string[] = [];
 
 function registry(): AgentRegistry {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "llv-migration-coordinator-"));
   roots.push(root);
+  setBoardFileForTests(path.join(root, "board.json"));
   return new AgentRegistry(path.join(root, "registry.json"));
 }
 
-function observation(pathname: string, accountId: string | null, state: "idle" | "busy" | "terminal", role: "root" | "worker" = "worker"): ConversationObservation {
+function observation(
+  pathname: string,
+  accountId: string | null,
+  state: "idle" | "busy" | "terminal",
+  role: "root" | "worker" = "worker",
+  project = "repo",
+): ConversationObservation {
   return {
     engine: "codex",
     path: pathname,
@@ -28,7 +37,7 @@ function observation(pathname: string, accountId: string | null, state: "idle" |
       fast: true,
       permissionMode: "never",
       title: `Title ${pathname}`,
-      project: "repo",
+      project,
       role,
       goal: { objective: "Ship", status: "active", tokensUsed: 12, timeUsedSeconds: 4 },
       plan: { steps: [{ text: "Implement", status: "in_progress" }], done: 0, total: 1, current: "Implement", updatedAt: "2026-07-10T12:00:00.000Z" },
@@ -38,15 +47,18 @@ function observation(pathname: string, accountId: string | null, state: "idle" |
   };
 }
 
-function provider(paths: string[], counts = { create: 0, verify: 0 }): SuccessorProviderPort {
+function provider(paths: string[], counts = { create: 0, verify: 0 }, continuityPaths: string[][] = []): SuccessorProviderPort {
   return {
     async create(input) {
       counts.create += 1;
       const next = paths.shift() ?? `/successor-${counts.create}.jsonl`;
+      const recordedPaths = continuityPaths.shift() ?? [];
+      for (const pathname of recordedPaths) input.recordContinuityPath(pathname);
       return {
         operationId: input.operationId,
         nativeId: path.basename(next, ".jsonl"),
         path: next,
+        continuityPaths: recordedPaths,
         historyHash: `hash-${counts.create}`,
         host: { kind: "codex-app-server", identity: `host-${counts.create}`, epoch: counts.create, verifiedAt: "2026-07-10T12:01:00.000Z" },
       };
@@ -56,10 +68,778 @@ function provider(paths: string[], counts = { create: 0, verify: 0 }): Successor
 }
 
 afterEach(() => {
+  setBoardFileForTests(null);
   for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
 });
 
 describe("durable account migration coordinator", () => {
+  test("preview reads the controller inventory without rewriting the registry", async () => {
+    const store = registry();
+    store.reconcileConversations([observation("/owned.jsonl", "managed", "idle")]);
+    const before = fs.statSync(store.filename, { bigint: true });
+
+    const preview = await previewMigration("codex", "default", store);
+
+    const after = fs.statSync(store.filename, { bigint: true });
+    expect(preview.counts).toEqual({ total: 1, idle: 1, busy: 0, alreadyTarget: 0 });
+    expect(after.ino).toBe(before.ino);
+  });
+
+  test("an in-progress successor receipt remains pending for observer settlement", async () => {
+    const store = registry();
+    store.reconcileConversations([observation("/pending-source.jsonl", "a", "idle")]);
+    const conversation = store.conversationForPath("/pending-source.jsonl")!;
+    store.commitMigrationIntent({
+      engine: "codex",
+      targetId: "b",
+      origin: "manual",
+      requestId: "pending-successor-receipt",
+      expectedRevision: store.engineRouting("codex").revision,
+    });
+    const provider: SuccessorProviderPort = {
+      async create() { throw new SuccessorPendingError(); },
+      async verify() {},
+    };
+
+    const pending = await advanceConversationMigration(conversation.id, store, provider);
+
+    expect(pending.migration).toMatchObject({ phase: "successor-starting", error: null, errorCode: null });
+  });
+
+  test("concurrent same-operation advances commit one matching provider receipt", async () => {
+    const store = registry();
+    store.reconcileConversations([observation("/concurrent-source.jsonl", "a", "idle")]);
+    const conversation = store.conversationForPath("/concurrent-source.jsonl")!;
+    store.commitMigrationIntent({
+      engine: "codex",
+      targetId: "b",
+      origin: "manual",
+      requestId: "concurrent-provider-receipt",
+      expectedRevision: store.engineRouting("codex").revision,
+    });
+    let current = store.conversation(conversation.id)!;
+    current = store.transitionConversationMigration(current.id, current.migration!.revision, ["requested"], { phase: "preparing" });
+    store.transitionConversationMigration(current.id, current.migration!.revision, ["preparing"], { phase: "successor-starting" });
+    let arrivals = 0;
+    let release!: () => void;
+    const bothCreating = new Promise<void>((resolve) => { release = resolve; });
+    const provider: SuccessorProviderPort = {
+      async create(input) {
+        arrivals += 1;
+        const arrival = arrivals;
+        if (arrivals === 2) release();
+        await bothCreating;
+        return {
+          operationId: input.operationId,
+          nativeId: "concurrent-successor",
+          path: "/concurrent-successor.jsonl",
+          continuityPaths: [],
+          historyHash: "same-history",
+          host: { kind: "codex-app-server", identity: "concurrent-successor", epoch: 1, verifiedAt: `2026-07-10T12:01:0${arrival}.000Z` },
+        };
+      },
+      async verify() {},
+    };
+
+    await Promise.all([
+      advanceConversationMigration(conversation.id, store, provider),
+      advanceConversationMigration(conversation.id, store, provider),
+    ]);
+
+    const committed = store.conversation(conversation.id)!;
+    expect(committed.migration?.phase).toBe("committed");
+    expect(committed.generations.map((generation) => generation.path)).toEqual([
+      "/concurrent-source.jsonl",
+      "/concurrent-successor.jsonl",
+    ]);
+  });
+
+  test("concurrent Claude successors clean the losing host after one receipt commits", async () => {
+    const store = registry();
+    store.reconcileConversations([{ ...observation("/claude-source.jsonl", "a", "idle"), engine: "claude" }]);
+    const conversation = store.conversationForPath("/claude-source.jsonl")!;
+    store.commitMigrationIntent({
+      engine: "claude",
+      targetId: "b",
+      origin: "manual",
+      requestId: "concurrent-claude-hosts",
+      expectedRevision: store.engineRouting("claude").revision,
+    });
+    let current = store.conversation(conversation.id)!;
+    current = store.transitionConversationMigration(current.id, current.migration!.revision, ["requested"], { phase: "preparing" });
+    store.transitionConversationMigration(current.id, current.migration!.revision, ["preparing"], { phase: "successor-starting" });
+    let calls = 0;
+    let releaseSecond!: () => void;
+    const secondMayReturn = new Promise<void>((resolve) => { releaseSecond = resolve; });
+    const cleaned: string[] = [];
+    const provider: SuccessorProviderPort = {
+      async create(input) {
+        calls += 1;
+        const call = calls;
+        if (call === 2) await secondMayReturn;
+        return {
+          operationId: input.operationId,
+          nativeId: "same-claude-successor",
+          path: "/same-claude-successor.jsonl",
+          continuityPaths: [],
+          historyHash: "same-history",
+          host: { kind: "claude-stream", identity: call === 1 ? "%1:101" : "%2:202", epoch: 1, verifiedAt: `2026-07-10T12:01:0${call}.000Z` },
+        };
+      },
+      async verify(receipt) {
+        if (receipt.host.identity === "%1:101") setTimeout(releaseSecond, 0);
+      },
+      async cleanup(receipt) { cleaned.push(receipt.host.identity); },
+    };
+
+    await Promise.all([
+      advanceConversationMigration(conversation.id, store, provider),
+      advanceConversationMigration(conversation.id, store, provider),
+    ]);
+
+    expect(store.conversation(conversation.id)).toMatchObject({
+      migration: { phase: "committed", providerReceipt: { host: { identity: "%1:101" } } },
+      generations: [{ path: "/claude-source.jsonl" }, { path: "/same-claude-successor.jsonl", host: { identity: "%1:101" } }],
+    });
+    expect(cleaned).toEqual(["%2:202"]);
+  });
+
+  test("a Codex source fork resolves to the committed target without another manual root", async () => {
+    const project = "issue-86-codex-source-fork";
+    const sourcePath = "/codex-predecessor.jsonl";
+    const sourceForkPath = "/source-account/fork.jsonl";
+    const targetPath = "/target-account/fork.jsonl";
+    const store = registry();
+    store.reconcileConversations([observation(sourcePath, "a", "idle", "worker", project)]);
+    const conversation = store.conversationForPath(sourcePath)!;
+    store.commitMigrationIntent({
+      engine: "codex",
+      targetId: "b",
+      origin: "manual",
+      requestId: "codex-two-path-successor",
+      expectedRevision: store.engineRouting("codex").revision,
+    });
+    const closed = mutateBoard(project, boardFor(project).revision, [{ kind: "close", path: sourcePath }]);
+    expect(closed.ok).toBeTrue();
+
+    await advanceConversationMigration(
+      conversation.id,
+      store,
+      provider([targetPath], { create: 0, verify: 0 }, [[sourceForkPath]]),
+    );
+    const committed = boardFor(project);
+    const afterScan = mutateBoard(project, committed.revision, [{
+      kind: "reconcile-roots",
+      roots: [sourceForkPath, targetPath],
+      removeManual: [],
+    }]);
+
+    expect(afterScan.ok).toBeTrue();
+    expect(afterScan.board.pathAliases).toEqual({
+      [sourcePath]: targetPath,
+      [sourceForkPath]: targetPath,
+    });
+    expect(afterScan.board.prefs.hidden).toEqual([targetPath]);
+    expect(afterScan.board.prefs.manual).toEqual([]);
+  });
+
+  test("retry preserves every provider fork until the successor commits", async () => {
+    const project = "issue-86-failed-fork-retry";
+    const sourcePath = "/retry-predecessor.jsonl";
+    const firstForkPath = "/source-account/failed-fork.jsonl";
+    const secondForkPath = "/source-account/retry-fork.jsonl";
+    const targetPath = "/target-account/retry-fork.jsonl";
+    const store = registry();
+    store.reconcileConversations([observation(sourcePath, "a", "idle", "worker", project)]);
+    const conversation = store.conversationForPath(sourcePath)!;
+    store.commitMigrationIntent({
+      engine: "codex",
+      targetId: "b",
+      origin: "manual",
+      requestId: "failed-fork-retry",
+      expectedRevision: store.engineRouting("codex").revision,
+    });
+    const failingProvider: SuccessorProviderPort = {
+      async create(input) {
+        input.recordContinuityPath(firstForkPath);
+        throw new Error("target account unavailable");
+      },
+      async verify() {},
+    };
+
+    const failed = await advanceConversationMigration(conversation.id, store, failingProvider);
+    expect(failed.migration?.phase).toBe("failed-recoverable");
+    expect(failed.continuityPaths).toEqual([firstForkPath]);
+    const provisional = mutateBoard(project, boardFor(project).revision, [
+      { kind: "restore", path: firstForkPath, placement: "manual" },
+    ]);
+    expect(provisional.ok).toBeTrue();
+
+    const restarted = new AgentRegistry(store.filename);
+    restarted.reconcileConversations([observation(firstForkPath, "a", "idle", "worker", project)]);
+    expect(Object.values(restarted.snapshot().conversations)).toHaveLength(1);
+    expect(restarted.conversationForPath(firstForkPath)?.id).toBe(conversation.id);
+    restarted.retryConversationMigration(conversation.id, failed.migration!.revision);
+    const committed = await advanceConversationMigration(
+      conversation.id,
+      restarted,
+      provider([targetPath], { create: 0, verify: 0 }, [[secondForkPath]]),
+    );
+
+    expect(committed.migration?.phase).toBe("committed");
+    expect(committed.continuityPaths).toEqual([firstForkPath, secondForkPath]);
+    expect(boardFor(project).pathAliases).toEqual({
+      [sourcePath]: targetPath,
+      [firstForkPath]: targetPath,
+      [secondForkPath]: targetPath,
+    });
+    expect(boardFor(project).prefs.manual).toEqual([]);
+  });
+
+  test("a committed successor keeps its predecessor hidden through root reconciliation", async () => {
+    const project = "issue-86-hidden-successor";
+    const sourcePath = "/hidden-predecessor.jsonl";
+    const successorPath = "/hidden-successor.jsonl";
+    const store = registry();
+    store.reconcileConversations([observation(sourcePath, "a", "idle", "worker", project)]);
+    const conversation = store.conversationForPath(sourcePath)!;
+    store.commitMigrationIntent({
+      engine: "codex",
+      targetId: "b",
+      origin: "manual",
+      requestId: "hidden-board-successor",
+      expectedRevision: store.engineRouting("codex").revision,
+    });
+    const closed = mutateBoard(project, boardFor(project).revision, [{ kind: "close", path: sourcePath }]);
+    expect(closed.ok).toBeTrue();
+
+    await advanceConversationMigration(conversation.id, store, provider([successorPath]));
+    const afterCommit = boardFor(project);
+    const reconciled = mutateBoard(project, afterCommit.revision, [{
+      kind: "reconcile-roots",
+      roots: [successorPath],
+      removeManual: [],
+    }]);
+
+    expect(reconciled.ok).toBeTrue();
+    expect(reconciled.board.pathAliases).toEqual({ [sourcePath]: successorPath });
+    expect(reconciled.board.prefs.hidden).toEqual([successorPath]);
+    expect(reconciled.board.prefs.manual).toEqual([]);
+  });
+
+  test("reconciliation repairs board continuity for an already committed successor", async () => {
+    const project = "issue-86-committed-repair";
+    const sourcePath = "/repair-predecessor.jsonl";
+    const successorPath = "/repair-successor.jsonl";
+    const store = registry();
+    store.reconcileConversations([observation(sourcePath, "a", "idle", "worker", project)]);
+    const conversation = store.conversationForPath(sourcePath)!;
+    store.commitMigrationIntent({
+      engine: "codex",
+      targetId: "b",
+      origin: "manual",
+      requestId: "repair-committed-board",
+      expectedRevision: store.engineRouting("codex").revision,
+    });
+    let current = store.conversation(conversation.id)!;
+    current = store.transitionConversationMigration(current.id, current.migration!.revision, ["requested"], { phase: "preparing" });
+    current = store.transitionConversationMigration(current.id, current.migration!.revision, ["preparing"], { phase: "successor-starting" });
+    current = store.transitionConversationMigration(current.id, current.migration!.revision, ["successor-starting"], { phase: "verifying" });
+    store.holdDelivery(current.id, "continue after restart", "repair-client");
+    store.commitSuccessor(current.id, { id: "repair-successor", path: successorPath, accountId: "b" }, current.migration!.revision);
+    const closed = mutateBoard(project, boardFor(project).revision, [{ kind: "close", path: sourcePath }]);
+    expect(closed.ok).toBeTrue();
+
+    const restarted = new AgentRegistry(store.filename);
+    const delivered: string[] = [];
+    await reconcileMigrations(provider([]), {
+      async deliver(input) {
+        delivered.push(input.clientMessageId);
+        return "delivered";
+      },
+    }, restarted);
+    const repaired = boardFor(project);
+    const reconciled = mutateBoard(project, repaired.revision, [{
+      kind: "reconcile-roots",
+      roots: [successorPath],
+      removeManual: [],
+    }]);
+
+    expect(reconciled.ok).toBeTrue();
+    expect(reconciled.board.pathAliases).toEqual({ [sourcePath]: successorPath });
+    expect(reconciled.board.prefs.hidden).toEqual([successorPath]);
+    expect(reconciled.board.prefs.manual).toEqual([]);
+    expect(delivered).toEqual(["repair-client"]);
+    expect(restarted.pendingDeliveries(conversation.id)).toEqual([]);
+  });
+
+  test("restart repair preserves placement after an interleaved client remap", async () => {
+    const project = "issue-86-partial-board-convergence";
+    const sourcePath = "/partial-source.jsonl";
+    const forkPath = "/partial-source-fork.jsonl";
+    const targetPath = "/partial-target.jsonl";
+    const store = registry();
+    store.reconcileConversations([observation(sourcePath, "a", "idle", "worker", project)]);
+    const conversation = store.conversationForPath(sourcePath)!;
+    store.commitMigrationIntent({
+      engine: "codex",
+      targetId: "b",
+      origin: "manual",
+      requestId: "partial-board-convergence",
+      expectedRevision: store.engineRouting("codex").revision,
+    });
+    let current = store.conversation(conversation.id)!;
+    current = store.transitionConversationMigration(current.id, current.migration!.revision, ["requested"], { phase: "preparing" });
+    current = store.transitionConversationMigration(current.id, current.migration!.revision, ["preparing"], { phase: "successor-starting" });
+    store.recordConversationContinuityPath(current.id, forkPath);
+    const receipt: ProviderReceipt = {
+      operationId: current.migration!.operationId,
+      nativeId: "partial-target",
+      path: targetPath,
+      continuityPaths: [forkPath],
+      historyHash: "partial-history",
+      host: { kind: "codex-app-server", identity: "partial-target", epoch: 1, verifiedAt: "2026-07-10T12:01:00.000Z" },
+    };
+    current = store.transitionConversationMigration(current.id, current.migration!.revision, ["successor-starting"], { phase: "verifying", providerReceipt: receipt });
+    store.commitSuccessor(current.id, { id: receipt.nativeId, path: targetPath, accountId: "b" }, current.migration!.revision);
+    const arranged = mutateBoard(project, boardFor(project).revision, [
+      { kind: "restore", path: sourcePath, placement: "manual" },
+      { kind: "remap-paths", pairs: [{ from: sourcePath, to: targetPath }] },
+    ]);
+    expect(arranged.ok).toBeTrue();
+    expect(arranged.board.prefs.manual).toEqual([targetPath]);
+
+    const restarted = new AgentRegistry(store.filename);
+    await reconcileMigrations(provider([]), { async deliver() { return "delivered"; } }, restarted);
+
+    expect(boardFor(project)).toMatchObject({
+      pathAliases: { [sourcePath]: targetPath, [forkPath]: targetPath },
+      prefs: { manual: [targetPath] },
+    });
+  });
+
+  test("committed successors replace provisional manual roots with predecessor placement", async () => {
+    const project = "issue-86-placement";
+    const sources = ["/manual-source.jsonl", "/expanded-source.jsonl", "/auto-source.jsonl"];
+    const successors = ["/manual-next.jsonl", "/expanded-next.jsonl", "/auto-next.jsonl"];
+    const continuityPaths = ["/manual-fork.jsonl", "/expanded-fork.jsonl", "/auto-fork.jsonl"];
+    const store = registry();
+    store.reconcileConversations(sources.map((pathname) => observation(pathname, "a", "idle", "worker", project)));
+    store.commitMigrationIntent({
+      engine: "codex",
+      targetId: "b",
+      origin: "manual",
+      requestId: "preserve-board-placement",
+      expectedRevision: store.engineRouting("codex").revision,
+    });
+    const arranged = mutateBoard(project, boardFor(project).revision, [
+      { kind: "restore", path: sources[0]!, placement: "manual" },
+      { kind: "restore", path: sources[1]!, placement: "expanded" },
+      ...successors.map((pathname) => ({ kind: "restore" as const, path: pathname, placement: "manual" as const })),
+      ...continuityPaths.map((pathname) => ({ kind: "restore" as const, path: pathname, placement: "manual" as const })),
+    ]);
+    expect(arranged.ok).toBeTrue();
+
+    await reconcileMigrations(
+      provider([...successors], { create: 0, verify: 0 }, continuityPaths.map((pathname) => [pathname])),
+      { async deliver() { return "delivered"; } },
+      store,
+    );
+
+    const board = boardFor(project);
+    expect(board.pathAliases).toEqual(Object.fromEntries([
+      ...sources.map((source, index) => [source, successors[index]!] as const),
+      ...continuityPaths.map((source, index) => [source, successors[index]!] as const),
+    ]));
+    expect(board.prefs.manual).toEqual([successors[0]]);
+    expect(board.prefs.expanded).toEqual([successors[1]]);
+    expect(board.prefs.hidden).toEqual([]);
+    expect([...board.prefs.manual, ...board.prefs.expanded, ...board.prefs.hidden]).not.toContain(successors[2]);
+    const converged = mutateBoard(project, board.revision, [{
+      kind: "reconcile-roots",
+      roots: successors,
+      removeManual: [],
+    }]);
+    expect(converged.ok).toBeTrue();
+    expect(converged.board.prefs.manual).toEqual([successors[0]]);
+    expect(converged.board.prefs.expanded).toEqual([successors[1]]);
+    expect([...converged.board.prefs.manual, ...converged.board.prefs.expanded, ...converged.board.prefs.hidden]).not.toContain(successors[2]);
+  });
+
+  test("repeat migration carries manual placement across historical continuity aliases", async () => {
+    const project = "issue-86-repeat-placement";
+    const store = registry();
+    store.reconcileConversations([observation("/a.jsonl", "a", "idle", "worker", project)]);
+    const conversation = store.conversationForPath("/a.jsonl")!;
+    let arranged = mutateBoard(project, boardFor(project).revision, [
+      { kind: "restore", path: "/a.jsonl", placement: "manual" },
+    ]);
+    expect(arranged.ok).toBeTrue();
+    store.commitMigrationIntent({
+      engine: "codex",
+      targetId: "b",
+      origin: "manual",
+      requestId: "repeat-placement-b",
+      expectedRevision: store.engineRouting("codex").revision,
+    });
+    await advanceConversationMigration(
+      conversation.id,
+      store,
+      provider(["/b.jsonl"], { create: 0, verify: 0 }, [["/fork-b.jsonl"]]),
+    );
+    expect(boardFor(project).prefs.manual).toEqual(["/b.jsonl"]);
+
+    store.commitMigrationIntent({
+      engine: "codex",
+      targetId: "c",
+      origin: "manual",
+      requestId: "repeat-placement-c",
+      expectedRevision: store.engineRouting("codex").revision,
+    });
+    arranged = mutateBoard(project, boardFor(project).revision, [
+      { kind: "restore", path: "/fork-c.jsonl", placement: "manual" },
+      { kind: "restore", path: "/c.jsonl", placement: "manual" },
+    ]);
+    expect(arranged.ok).toBeTrue();
+    await advanceConversationMigration(
+      conversation.id,
+      store,
+      provider(["/c.jsonl"], { create: 0, verify: 0 }, [["/fork-c.jsonl"]]),
+    );
+
+    expect(boardFor(project)).toMatchObject({
+      pathAliases: {
+        "/a.jsonl": "/c.jsonl",
+        "/b.jsonl": "/c.jsonl",
+        "/fork-b.jsonl": "/c.jsonl",
+        "/fork-c.jsonl": "/c.jsonl",
+      },
+      prefs: { manual: ["/c.jsonl"] },
+    });
+  });
+
+  test("a 51-conversation drain keeps a two-card board from growing", async () => {
+    const project = "issue-86-mass-drain";
+    const sources = Array.from({ length: 51 }, (_, index) => `/drain-source-${index}.jsonl`);
+    const forks = Array.from({ length: 51 }, (_, index) => `/source-account/drain-fork-${index}.jsonl`);
+    const successors = Array.from({ length: 51 }, (_, index) => `/drain-successor-${index}.jsonl`);
+    const visible = ["/visible-one.jsonl", "/visible-two.jsonl"];
+    const store = registry();
+    store.reconcileConversations(sources.map((pathname) => observation(pathname, "a", "idle", "worker", project)));
+    store.commitMigrationIntent({
+      engine: "codex",
+      targetId: "b",
+      origin: "manual",
+      requestId: "mass-drain-board-continuity",
+      expectedRevision: store.engineRouting("codex").revision,
+    });
+    const arranged = mutateBoard(project, boardFor(project).revision, [
+      ...visible.map((pathname) => ({ kind: "restore" as const, path: pathname, placement: "manual" as const })),
+      ...forks.map((pathname) => ({ kind: "restore" as const, path: pathname, placement: "manual" as const })),
+      ...successors.map((pathname) => ({ kind: "restore" as const, path: pathname, placement: "manual" as const })),
+      ...sources.map((pathname) => ({ kind: "close" as const, path: pathname })),
+    ]);
+    expect(arranged.ok).toBeTrue();
+    expect(arranged.board.prefs.manual).toHaveLength(104);
+
+    await reconcileMigrations(
+      provider([...successors], { create: 0, verify: 0 }, forks.map((pathname) => [pathname])),
+      { async deliver() { return "delivered"; } },
+      store,
+    );
+    const committed = boardFor(project);
+    expect(committed.revision).toBe(arranged.board.revision + 1);
+    const afterScan = mutateBoard(project, committed.revision, [{
+      kind: "reconcile-roots",
+      roots: [...visible, ...forks, ...successors],
+      removeManual: [],
+    }]);
+
+    expect(afterScan.ok).toBeTrue();
+    expect(afterScan.board.prefs.manual).toEqual(visible);
+    expect(afterScan.board.prefs.hidden).toEqual(successors);
+    expect(Object.keys(afterScan.board.pathAliases ?? {})).toHaveLength(102);
+    expect(Object.values(store.snapshot().conversations).every((conversation) => conversation.migration?.boardProject === project)).toBeTrue();
+  });
+
+  test("board repair failures keep delivery and intent reconciliation live", async () => {
+    const project = "issue-86-board-retry";
+    const store = registry();
+    store.reconcileConversations([observation("/repair-source.jsonl", "a", "idle", "worker", project)]);
+    const conversation = store.conversationForPath("/repair-source.jsonl")!;
+    store.commitMigrationIntent({
+      engine: "codex",
+      targetId: "b",
+      origin: "manual",
+      requestId: "board-retry",
+      expectedRevision: store.engineRouting("codex").revision,
+    });
+    store.holdDelivery(conversation.id, "continue", "board-retry-delivery");
+    const delivered: string[] = [];
+
+    await reconcileMigrations(
+      provider(["/repair-target.jsonl"]),
+      { async deliver(input) { delivered.push(input.clientMessageId); return "delivered"; } },
+      store,
+      { remapBoardPaths() { throw new Error("board unavailable"); } },
+    );
+
+    expect(delivered).toEqual(["board-retry-delivery"]);
+    expect(store.snapshot().migrationIntents[store.conversation(conversation.id)!.migration!.intentId]?.state).toBe("complete");
+    expect(store.conversation(conversation.id)?.migration?.boardProject).toBeNull();
+
+    await reconcileMigrations(provider([]), { async deliver() { return "delivered"; } }, store);
+    expect(store.conversation(conversation.id)?.migration?.boardProject).toBe(project);
+    expect(boardFor(project).pathAliases).toEqual({ "/repair-source.jsonl": "/repair-target.jsonl" });
+  });
+
+  test("board repair remains pending when storage omits requested aliases", async () => {
+    const project = "issue-86-board-verification";
+    const store = registry();
+    store.reconcileConversations([observation("/verify-source.jsonl", "a", "idle", "worker", project)]);
+    const conversation = store.conversationForPath("/verify-source.jsonl")!;
+    store.commitMigrationIntent({
+      engine: "codex",
+      targetId: "b",
+      origin: "manual",
+      requestId: "board-verification",
+      expectedRevision: store.engineRouting("codex").revision,
+    });
+
+    await advanceConversationMigration(
+      conversation.id,
+      store,
+      provider(["/verify-target.jsonl"]),
+      { remapBoardPaths: () => boardFor(project) },
+    );
+
+    expect(store.conversation(conversation.id)?.migration?.boardProject).toBeNull();
+    await reconcileMigrations(provider([]), { async deliver() { return "delivered"; } }, store);
+    expect(store.conversation(conversation.id)?.migration?.boardProject).toBe(project);
+  });
+
+  test("a later migration repairs placement stranded by an earlier board outage", async () => {
+    const project = "issue-86-deferred-chain";
+    const store = registry();
+    store.reconcileConversations([observation("/a.jsonl", "a", "idle", "worker", project)]);
+    const conversation = store.conversationForPath("/a.jsonl")!;
+    const closed = mutateBoard(project, boardFor(project).revision, [{ kind: "close", path: "/a.jsonl" }]);
+    expect(closed.ok).toBeTrue();
+    const firstIntent = store.commitMigrationIntent({
+      engine: "codex",
+      targetId: "b",
+      origin: "manual",
+      requestId: "deferred-chain-b",
+      expectedRevision: store.engineRouting("codex").revision,
+    });
+    await advanceConversationMigration(
+      conversation.id,
+      store,
+      provider(["/b.jsonl"]),
+      { remapBoardPaths() { throw new Error("board unavailable"); } },
+    );
+    expect(store.conversation(conversation.id)?.migration?.boardProject).toBeNull();
+    store.setMigrationIntentState(firstIntent.id, "complete");
+    store.reconcileConversations([observation("/b.jsonl", "b", "idle", "worker", project)]);
+    store.commitMigrationIntent({
+      engine: "codex",
+      targetId: "c",
+      origin: "manual",
+      requestId: "deferred-chain-c",
+      expectedRevision: store.engineRouting("codex").revision,
+    });
+
+    await advanceConversationMigration(conversation.id, store, provider(["/c.jsonl"]));
+
+    expect(boardFor(project)).toMatchObject({
+      pathAliases: { "/a.jsonl": "/c.jsonl", "/b.jsonl": "/c.jsonl" },
+      prefs: { hidden: ["/c.jsonl"], manual: [] },
+    });
+  });
+
+  test("board repair follows a successor into its current catalog project", async () => {
+    const store = registry();
+    store.reconcileConversations([observation("/group-source.jsonl", "a", "idle", "worker", "stale-project")]);
+    const conversation = store.conversationForPath("/group-source.jsonl")!;
+    store.commitMigrationIntent({ engine: "codex", targetId: "b", origin: "manual", requestId: "group-repair", expectedRevision: store.engineRouting("codex").revision });
+    let current = store.conversation(conversation.id)!;
+    current = store.transitionConversationMigration(current.id, current.migration!.revision, ["requested"], { phase: "preparing" });
+    current = store.transitionConversationMigration(current.id, current.migration!.revision, ["preparing"], { phase: "successor-starting" });
+    current = store.transitionConversationMigration(current.id, current.migration!.revision, ["successor-starting"], { phase: "verifying" });
+    store.commitSuccessor(current.id, { id: "group-target", path: "/group-target.jsonl", accountId: "b" }, current.migration!.revision);
+    store.reconcileConversations([observation("/group-target.jsonl", "b", "idle", "worker", "canonical-project")]);
+
+    await reconcileMigrations(provider([]), { async deliver() { return "delivered"; } }, store);
+
+    expect(boardFor("canonical-project").pathAliases).toEqual({ "/group-source.jsonl": "/group-target.jsonl" });
+    expect(store.conversation(conversation.id)?.migration?.boardProject).toBe("canonical-project");
+  });
+
+  test("first restart repair transfers predecessor placement into the corrected project", async () => {
+    for (const placement of ["hidden", "manual", "expanded"] as const) {
+      const store = registry();
+      const sourcePath = `/restart-${placement}-source.jsonl`;
+      const targetPath = `/restart-${placement}-target.jsonl`;
+      const oldProject = `restart-${placement}-old`;
+      const newProject = `restart-${placement}-new`;
+      store.reconcileConversations([observation(sourcePath, "a", "idle", "worker", oldProject)]);
+      const conversation = store.conversationForPath(sourcePath)!;
+      const arranged = mutateBoard(oldProject, boardFor(oldProject).revision, [placement === "hidden"
+        ? { kind: "close", path: sourcePath }
+        : { kind: "restore", path: sourcePath, placement }]);
+      expect(arranged.ok).toBeTrue();
+      store.commitMigrationIntent({
+        engine: "codex",
+        targetId: "b",
+        origin: "manual",
+        requestId: `restart-${placement}`,
+        expectedRevision: store.engineRouting("codex").revision,
+      });
+      let current = store.conversation(conversation.id)!;
+      current = store.transitionConversationMigration(current.id, current.migration!.revision, ["requested"], { phase: "preparing" });
+      current = store.transitionConversationMigration(current.id, current.migration!.revision, ["preparing"], { phase: "successor-starting" });
+      current = store.transitionConversationMigration(current.id, current.migration!.revision, ["successor-starting"], { phase: "verifying" });
+      store.commitSuccessor(current.id, { id: `restart-${placement}-target`, path: targetPath, accountId: "b" }, current.migration!.revision);
+      store.reconcileConversations([
+        observation(sourcePath, "a", "idle", "worker", newProject),
+        observation(targetPath, "b", "idle", "worker", newProject),
+      ]);
+
+      await reconcileMigrations(provider([]), { async deliver() { return "delivered"; } }, store);
+
+      expect(boardFor(oldProject).prefs[placement]).toEqual([]);
+      expect(boardFor(newProject).prefs[placement]).toEqual([targetPath]);
+    }
+  });
+
+  test("project correction removes provisional continuity cards after a board outage", async () => {
+    const store = registry();
+    const sourcePath = "/outage-project-source.jsonl";
+    const forkPath = "/outage-project-fork.jsonl";
+    const targetPath = "/outage-project-target.jsonl";
+    store.reconcileConversations([observation(sourcePath, "a", "idle", "worker", "outage-old-project")]);
+    const conversation = store.conversationForPath(sourcePath)!;
+    store.commitMigrationIntent({
+      engine: "codex",
+      targetId: "b",
+      origin: "manual",
+      requestId: "outage-project-correction",
+      expectedRevision: store.engineRouting("codex").revision,
+    });
+    const provisional = mutateBoard("outage-old-project", boardFor("outage-old-project").revision, [
+      { kind: "restore", path: forkPath, placement: "manual" },
+    ]);
+    expect(provisional.ok).toBeTrue();
+    await advanceConversationMigration(
+      conversation.id,
+      store,
+      provider([targetPath], { create: 0, verify: 0 }, [[forkPath]]),
+      { remapBoardPaths() { throw new Error("board unavailable"); } },
+    );
+    store.reconcileConversations([
+      observation(targetPath, "b", "idle", "worker", "outage-new-project"),
+    ]);
+
+    await reconcileMigrations(provider([]), { async deliver() { return "delivered"; } }, store);
+
+    expect(boardFor("outage-old-project").prefs.manual).toEqual([]);
+    expect(boardFor("outage-new-project")).toMatchObject({
+      pathAliases: { [sourcePath]: targetPath, [forkPath]: targetPath },
+      prefs: { manual: [], hidden: [], expanded: [] },
+    });
+  });
+
+  test("project correction transfers previously repaired placement", async () => {
+    const store = registry();
+    store.reconcileConversations([observation("/project-source.jsonl", "a", "idle", "worker", "stale-project")]);
+    const conversation = store.conversationForPath("/project-source.jsonl")!;
+    const closed = mutateBoard("stale-project", boardFor("stale-project").revision, [
+      { kind: "close", path: "/project-source.jsonl" },
+    ]);
+    expect(closed.ok).toBeTrue();
+    store.commitMigrationIntent({
+      engine: "codex",
+      targetId: "b",
+      origin: "manual",
+      requestId: "project-correction",
+      expectedRevision: store.engineRouting("codex").revision,
+    });
+    await advanceConversationMigration(conversation.id, store, provider(["/project-target.jsonl"]));
+    expect(boardFor("stale-project").prefs.hidden).toEqual(["/project-target.jsonl"]);
+    expect(store.conversation(conversation.id)?.migration?.boardProject).toBe("stale-project");
+    store.reconcileConversations([
+      observation("/stays-in-source.jsonl", "a", "idle", "worker", "stale-project"),
+    ]);
+    const kept = mutateBoard("stale-project", boardFor("stale-project").revision, [
+      { kind: "close", path: "/stays-in-source.jsonl" },
+    ]);
+    expect(kept.ok).toBeTrue();
+    store.reconcileConversations([
+      observation("/project-target.jsonl", "b", "idle", "worker", "canonical-project"),
+    ]);
+
+    await reconcileMigrations(
+      provider([]),
+      { async deliver() { return "delivered"; } },
+      store,
+      { remapBoardPaths() { throw new Error("alias storage unavailable"); } },
+    );
+    expect(boardFor("canonical-project").prefs.hidden).toEqual(["/project-target.jsonl"]);
+    expect(store.conversation(conversation.id)?.migration?.boardProject).toBe("stale-project");
+    store.reconcileConversations([
+      observation("/project-target.jsonl", "b", "idle", "worker", "final-project"),
+    ]);
+
+    await reconcileMigrations(provider([]), { async deliver() { return "delivered"; } }, store);
+
+    expect(boardFor("stale-project").prefs.hidden).toEqual(["/stays-in-source.jsonl"]);
+    expect(boardFor("canonical-project").prefs.hidden).toEqual([]);
+    expect(boardFor("final-project")).toMatchObject({
+      pathAliases: { "/project-source.jsonl": "/project-target.jsonl" },
+      prefs: { hidden: ["/project-target.jsonl"], manual: [] },
+    });
+    expect(store.conversation(conversation.id)?.migration?.boardProject).toBe("final-project");
+  });
+
+  test("repeat migration carries prior project placement into the regrouped board", async () => {
+    for (const placement of ["hidden", "manual", "expanded"] as const) {
+      const store = registry();
+      const sourcePath = `/${placement}-a.jsonl`;
+      const middlePath = `/${placement}-b.jsonl`;
+      const targetPath = `/${placement}-c.jsonl`;
+      const oldProject = `${placement}-old-project`;
+      const newProject = `${placement}-new-project`;
+      store.reconcileConversations([observation(sourcePath, "a", "idle", "worker", oldProject)]);
+      const conversation = store.conversationForPath(sourcePath)!;
+      const arranged = mutateBoard(oldProject, boardFor(oldProject).revision, [placement === "hidden"
+        ? { kind: "close", path: sourcePath }
+        : { kind: "restore", path: sourcePath, placement }]);
+      expect(arranged.ok).toBeTrue();
+      const firstIntent = store.commitMigrationIntent({
+        engine: "codex",
+        targetId: "b",
+        origin: "manual",
+        requestId: `${placement}-to-b`,
+        expectedRevision: store.engineRouting("codex").revision,
+      });
+      await advanceConversationMigration(conversation.id, store, provider([middlePath]));
+      store.setMigrationIntentState(firstIntent.id, "complete");
+      store.reconcileConversations([observation(middlePath, "b", "idle", "worker", newProject)]);
+      store.commitMigrationIntent({
+        engine: "codex",
+        targetId: "c",
+        origin: "manual",
+        requestId: `${placement}-to-c`,
+        expectedRevision: store.engineRouting("codex").revision,
+      });
+
+      await advanceConversationMigration(conversation.id, store, provider([targetPath]));
+
+      expect(boardFor(oldProject).prefs[placement]).toEqual([]);
+      expect(boardFor(newProject).prefs[placement]).toEqual([targetPath]);
+    }
+  });
+
   test("unowned inventory stays outside previews and committed migration scope", async () => {
     const store = registry();
     store.reconcileConversations([
@@ -67,7 +847,7 @@ describe("durable account migration coordinator", () => {
       observation("/scanner-artifact.log", null, "busy"),
     ]);
 
-    const preview = await previewMigration("codex", "default", store, []);
+    const preview = await previewMigration("codex", "default", store);
     expect(preview.counts).toEqual({ total: 1, idle: 1, busy: 0, alreadyTarget: 0 });
     store.commitMigrationIntent({
       engine: "codex",
@@ -155,9 +935,11 @@ describe("durable account migration coordinator", () => {
     expect(final.generations.at(-1)?.launchProfile.plan?.current).toBe("Implement");
   });
 
-  test("restart adopts a persisted provider receipt without creating another successor", async () => {
+  test("restart adopts a persisted two-path Codex receipt and repairs board continuity", async () => {
+    const project = "issue-86-restart-two-path";
+    const sourceForkPath = "/source-account/restart-fork.jsonl";
     const store = registry();
-    store.reconcileConversations([observation("/source.jsonl", "a", "idle")]);
+    store.reconcileConversations([observation("/source.jsonl", "a", "idle", "worker", project)]);
     const conversation = store.conversationForPath("/source.jsonl")!;
     store.commitMigrationIntent({ engine: "codex", targetId: "b", origin: "manual", requestId: "restart", expectedRevision: store.engineRouting("codex").revision });
     const revision = store.conversation(conversation.id)!.migration!.revision;
@@ -167,16 +949,23 @@ describe("durable account migration coordinator", () => {
       operationId: store.conversation(conversation.id)!.migration!.operationId,
       nativeId: "native-b",
       path: "/b.jsonl",
+      continuityPaths: [sourceForkPath],
       historyHash: "hash",
       host: { kind: "codex-app-server", identity: "host", epoch: 1, verifiedAt: "2026-07-10T12:01:00.000Z" },
     };
     store.transitionConversationMigration(conversation.id, revision, ["successor-starting"], { phase: "verifying", providerReceipt: receipt });
+    const closed = mutateBoard(project, boardFor(project).revision, [{ kind: "close", path: "/source.jsonl" }]);
+    expect(closed.ok).toBeTrue();
 
     const restarted = new AgentRegistry(store.filename);
     const counts = { create: 0, verify: 0 };
     const final = await advanceConversationMigration(conversation.id, restarted, provider([], counts));
     expect(counts).toEqual({ create: 0, verify: 1 });
     expect(final.generations.at(-1)?.path).toBe("/b.jsonl");
+    expect(boardFor(project)).toMatchObject({
+      pathAliases: { "/source.jsonl": "/b.jsonl", [sourceForkPath]: "/b.jsonl" },
+      prefs: { hidden: ["/b.jsonl"], manual: [] },
+    });
   });
 
   test("busy sessions wait for authoritative terminal evidence", async () => {
@@ -275,6 +1064,7 @@ describe("durable account migration coordinator", () => {
           operationId: input.operationId,
           nativeId: "stale-b",
           path: "/stale-b.jsonl",
+          continuityPaths: [],
           historyHash: "stale",
           host: { kind: "codex-app-server", identity: "stale", epoch: 1, verifiedAt: "2026-07-10T12:01:00.000Z" },
         };
@@ -286,6 +1076,81 @@ describe("durable account migration coordinator", () => {
     expect(latest.generations).toHaveLength(1);
   });
 
+  test("retry preserves an ambiguous Codex fork operation id", async () => {
+    const store = registry();
+    store.reconcileConversations([observation("/source.jsonl", "a", "idle")]);
+    const conversation = store.conversationForPath("/source.jsonl")!;
+    store.commitMigrationIntent({ engine: "codex", targetId: "b", origin: "manual", requestId: "ambiguous-fork", expectedRevision: store.engineRouting("codex").revision });
+    const operations: string[] = [];
+    const ambiguousProvider: SuccessorProviderPort = {
+      async create(input) {
+        operations.push(input.operationId);
+        if (operations.length === 1) throw new CodexForkOutcomeUnknownError();
+        input.recordContinuityPath("/recovered-fork.jsonl");
+        return { operationId: input.operationId, nativeId: "recovered", path: "/recovered.jsonl", continuityPaths: ["/recovered-fork.jsonl"], historyHash: "hash", host: { kind: "codex-app-server", identity: "recovered", epoch: 1, verifiedAt: "now" } };
+      },
+      async verify() {},
+    };
+    const failed = await advanceConversationMigration(conversation.id, store, ambiguousProvider);
+    expect(failed).toMatchObject({ migration: { phase: "failed-recoverable", errorCode: "codex-fork-outcome-unknown" } });
+    store.retryConversationMigration(conversation.id, failed.migration!.revision);
+    const committed = await advanceConversationMigration(conversation.id, store, ambiguousProvider);
+    expect(committed.migration?.phase).toBe("committed");
+    expect(operations).toEqual([operations[0]!, operations[0]!]);
+  });
+
+  test("reconciliation retries a durable stale-successor cleanup after restart", async () => {
+    const store = registry();
+    store.reconcileConversations([observation("/source.jsonl", "a", "idle")]);
+    const conversation = store.conversationForPath("/source.jsonl")!;
+    store.commitMigrationIntent({ engine: "codex", targetId: "b", origin: "manual", requestId: "cleanup-retry", expectedRevision: store.engineRouting("codex").revision });
+    let cleanupAttempts = 0;
+    const cleanupProvider: SuccessorProviderPort = {
+      async create(input) { return { operationId: input.operationId, nativeId: "stale", path: "/stale.jsonl", continuityPaths: [], historyHash: "hash", host: { kind: "claude-stream", identity: "%9:99", epoch: 1, verifiedAt: "now" } }; },
+      async verify() { throw new Error("verification failed"); },
+      async cleanup() { cleanupAttempts += 1; if (cleanupAttempts === 1) throw new Error("tmux unavailable"); },
+    };
+    await advanceConversationMigration(conversation.id, store, cleanupProvider);
+    expect(Object.keys(store.snapshot().pendingSuccessorCleanups)).toHaveLength(1);
+    const restarted = new AgentRegistry(store.filename);
+    await reconcileMigrations(cleanupProvider, { async deliver() { return "delivered"; } }, restarted);
+    expect(cleanupAttempts).toBe(2);
+    expect(Object.keys(restarted.snapshot().pendingSuccessorCleanups)).toHaveLength(0);
+  });
+
+  test("a return-to-source retarget cleans a stale successor after clearing migration state", async () => {
+    const store = registry();
+    store.reconcileConversations([observation("/source.jsonl", "a", "idle")]);
+    const conversation = store.conversationForPath("/source.jsonl")!;
+    store.commitMigrationIntent({ engine: "codex", targetId: "b", origin: "manual", requestId: "to-b-before-return", expectedRevision: store.engineRouting("codex").revision });
+    const cleaned: string[] = [];
+    let verified = false;
+    const staleProvider: SuccessorProviderPort = {
+      async create(input) {
+        input.recordContinuityPath("/stale-b.jsonl");
+        store.commitMigrationIntent({ engine: "codex", targetId: "a", origin: "manual", requestId: "return-to-a", expectedRevision: store.engineRouting("codex").revision });
+        return {
+          operationId: input.operationId,
+          nativeId: "stale-b",
+          path: "/stale-b.jsonl",
+          continuityPaths: ["/stale-b.jsonl"],
+          historyHash: "stale",
+          host: { kind: "codex-app-server", identity: "stale", epoch: 1, verifiedAt: "2026-07-10T12:01:00.000Z" },
+        };
+      },
+      async verify() { verified = true; },
+      async cleanup(receipt) { cleaned.push(receipt.nativeId); },
+    };
+
+    const latest = await advanceConversationMigration(conversation.id, store, staleProvider);
+
+    expect(latest.migration).toBeNull();
+    expect(latest.generations).toHaveLength(1);
+    expect(verified).toBeFalse();
+    expect(cleaned).toEqual(["stale-b"]);
+    expect(store.conversationForPath("/stale-b.jsonl")?.id).toBe(conversation.id);
+  });
+
   test("stopping during successor startup fences the stale completion and cleans the discarded successor", async () => {
     const store = registry();
     store.reconcileConversations([observation("/source.jsonl", "a", "idle")]);
@@ -295,10 +1160,12 @@ describe("durable account migration coordinator", () => {
     const provider: SuccessorProviderPort = {
       async create(input) {
         store.setMigrationIntentState(intent.id, "stopped");
+        input.recordContinuityPath("/discarded-successor.jsonl");
         return {
           operationId: input.operationId,
           nativeId: "discarded-successor",
           path: "/discarded-successor.jsonl",
+          continuityPaths: [],
           historyHash: "discarded",
           host: { kind: "codex-app-server", identity: "discarded", epoch: 1, verifiedAt: "2026-07-10T12:01:00.000Z" },
         };
@@ -312,6 +1179,7 @@ describe("durable account migration coordinator", () => {
     expect(settled.migration?.phase).toBe("rolled-back");
     expect(settled.generations).toHaveLength(1);
     expect(cleaned).toEqual(["discarded-successor"]);
+    expect(store.conversationForPath("/discarded-successor.jsonl")?.id).toBe(conversation.id);
   });
 
   test("a verification failure releases the successor before returning a recoverable phase", async () => {
@@ -326,6 +1194,7 @@ describe("durable account migration coordinator", () => {
           operationId: input.operationId,
           nativeId: "failed-successor",
           path: "/failed-successor.jsonl",
+          continuityPaths: [],
           historyHash: "failed",
           host: { kind: "codex-app-server", identity: "failed", epoch: 1, verifiedAt: "2026-07-10T12:01:00.000Z" },
         };

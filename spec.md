@@ -1,17 +1,21 @@
-# Issue #97: Rate-limit visibility and blocked flows
+# Issue #86: Preserve board continuity across account migration
 
 ## Task statement
 
-Detect current per-conversation engine usage limits, combine pane and structured account-limit evidence, and expose the blocked state in the viewer so operators can see why a conversation or attached flow cannot progress. Preserve ready composers containing historical quota text and keep successor spawning, flow rebinding, and migration-lineage handling outside this PR.
+Preserve a conversation's durable board identity, placement, delivery state, and migration history while account migration creates source forks, target copies, successor generations, restarts, and partial repairs. Ensure concurrent processes and recovery scans converge on one stable conversation owner without duplicate board cards.
 
 ## Acceptance criteria
 
-- AC1: A current usage-limit banner in a live conversation pane marks that conversation as rate-limited and captures a reliable reset time when one can be parsed.
-- AC2: Historical quota prose in a ready composer does not mark the conversation as rate-limited.
-- AC3: Fresh structured account exhaustion is joined to live conversations using stable account identity, including when automatic account balancing is disabled.
-- AC4: Rate-limited conversations expose a visible badge and attention state; exact reset copy is omitted when the exhausted window has no reliable timestamp.
-- AC5: An attached implementer flow projects the rate-limited conversation as `blocked: rate-limited` instead of remaining silently in `waiting_ready`.
-- AC6: A rate-limited flow does not offer the waiting-state transition action while its implementer is blocked.
-- AC7: Conversation and exhausted-account identifiers remain available as stable seams for a later continue-on-account successor workflow.
-- AC8: Rate-limit evidence refreshes with live state and clears when the active signal is no longer present or fresh.
-- AC9: Existing automated tests pass with `bun test`, and the project type-checks with `bunx tsc --noEmit`.
+- AC1: A committed migration successor inherits the predecessor conversation's durable board placement.
+- AC2: Source forks, target copies, and later successor generations converge on one stable conversation owner.
+- AC3: Board placement and held deliveries recover after controller restarts and partial migration repairs.
+- AC4: Codex fork and copy operations are journaled so recovery can identify artifacts and avoid duplicate cards.
+- AC5: Concurrent board mutations are serialized and durably persisted across processes.
+- AC6: Migration artifacts appear as archived history in the files read model.
+- AC7: Deleted or repaired migration paths retain continuity through durable remapping.
+- AC8: Provider operations and repair flows remain idempotent under retries, crashes, and concurrent scans.
+- AC9: Existing behavior remains covered by the full test suite.
+- AC10: `bun test` passes.
+- AC11: `bunx tsc --noEmit` completes without diagnostics.
+- AC12: Account preview reads the controller inventory without scanning transcripts or rewriting the registry.
+- AC13: Revision-fenced migration commit performs no second inventory scan in the UI request path.

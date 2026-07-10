@@ -88,6 +88,48 @@ describe("safe history copy", () => {
       .toThrow(HistorySecurityError);
   });
 
+  test("recovers an identical destination published before its operation receipt", () => {
+    const f = fixture();
+    const destinationRelative = "2026/07/recoverable.jsonl";
+    const destination = path.join(f.targetRoot, destinationRelative);
+    expect(() => safeCopyHistory({
+      ...f,
+      destinationRelative,
+      operationId: "publish-before-receipt",
+      afterDestinationPublished() { throw new Error("simulated crash before copy receipt"); },
+    })).toThrow("simulated crash before copy receipt");
+    expect(fs.existsSync(destination)).toBeTrue();
+    expect(fs.existsSync(`${destination}.llv-receipt.json`)).toBeFalse();
+
+    const recovered = safeCopyHistory({
+      ...f,
+      destinationRelative,
+      operationId: "publish-before-receipt",
+    });
+
+    expect(recovered).toMatchObject({ path: destination, reused: true });
+    expect(fs.existsSync(`${destination}.llv-receipt.json`)).toBeTrue();
+  });
+
+  test("recovers a published destination with its interrupted temporary hard link", () => {
+    const f = fixture();
+    const destination = path.join(f.targetRoot, "recover-hardlink.jsonl");
+    fs.copyFileSync(f.sourcePath, destination, fs.constants.COPYFILE_EXCL);
+    fs.chmodSync(destination, 0o600);
+    const interruptedTemp = path.join(f.targetRoot, ".recover-hardlink.jsonl.123.operation.tmp");
+    fs.linkSync(destination, interruptedTemp);
+
+    const recovered = safeCopyHistory({
+      ...f,
+      destinationRelative: "recover-hardlink.jsonl",
+      operationId: "recover-hardlink",
+    });
+
+    expect(recovered).toMatchObject({ path: destination, reused: true });
+    expect(fs.existsSync(interruptedTemp)).toBeFalse();
+    expect(fs.statSync(destination).nlink).toBe(1);
+  });
+
   test("rejects traversal, symlinks, unsafe modes, oversize input, and collisions", () => {
     const f = fixture();
     expect(() => safeCopyHistory({ ...f, destinationRelative: "../escape.jsonl", operationId: "traversal" }))

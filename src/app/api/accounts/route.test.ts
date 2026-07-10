@@ -295,6 +295,7 @@ test("GET retains the latest completed intent with recoverable failures for bulk
       operationId: agentRegistry().conversation(conversation.id)!.migration!.operationId,
       nativeId: "recovered-successor",
       path: "/recovered-successor.jsonl",
+      continuityPaths: [],
       historyHash: "recovered",
       host: { kind: "codex-app-server", identity: "recovered", epoch: 1, verifiedAt: "2026-07-10T12:01:00.000Z" },
     },
