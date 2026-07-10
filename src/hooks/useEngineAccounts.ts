@@ -658,7 +658,9 @@ export function createEngineAccountsStore(
         });
         const body = await response.json().catch(() => null) as { account?: { id?: unknown }; login?: unknown } | null;
         if (response.status === 409) {
-          // Another sign-in already holds the supervisor: surface it, keep the row.
+          // A stale client can miss a login started on another device. Hydrate
+          // that operation immediately so fast polling and cancellation return.
+          await refresh();
           patchSnapshot({ notice: { kind: "error", operation: "login", messageKey: "accounts.claudeLogin.err.login_busy", action: null } });
           return false;
         }

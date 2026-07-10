@@ -34,6 +34,7 @@ beforeEach(() => {
     kill: () => undefined,
     pidStartToken: () => "start-4312",
     isExpectedClaude: () => true,
+    waitForExit: async () => undefined,
     status: async () => ({ loggedIn: false, method: null, email: null, plan: null }),
     now: () => 1_000,
     setTimeout: (callback, ms) => { if (ms <= 2_000) callback(); return {} as NodeJS.Timeout; },

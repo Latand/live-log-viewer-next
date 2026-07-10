@@ -12,9 +12,9 @@ const { ClaudeLoginSupervisor, claudeStatusEnvironment, cleanClaudeLoginOutput, 
 type ClaudeLoginPorts = import("./claudeLogin").ClaudeLoginPorts;
 
 class FakeChild extends EventEmitter { pid = 4242; stdout = new EventEmitter(); stderr = new EventEmitter(); writes: string[] = []; stdin = { write: (text: string) => { this.writes.push(text); return true; }, end: () => undefined }; }
-let child: FakeChild; let signals: string[];
-function ports(): ClaudeLoginPorts { return { spawn: () => child as never, kill: (_pid, signal) => { signals.push(signal); }, pidStartToken: () => "start-1", isExpectedClaude: () => true, status: async () => ({ loggedIn: true, method: "oauth", email: "a@example.test", plan: "max" }), now: () => 1_000, setTimeout: (fn, ms) => { if (ms <= 2_000) fn(); return {} as NodeJS.Timeout; }, clearTimeout: () => undefined }; }
-beforeEach(() => { fs.rmSync(process.env.LLV_STATE_DIR!, { recursive: true, force: true }); child = new FakeChild(); signals = []; });
+let child: FakeChild; let signals: string[]; let inheritedChildAlive: boolean;
+function ports(): ClaudeLoginPorts { return { spawn: () => child as never, kill: (_pid, signal) => { signals.push(signal); if (signal === "SIGKILL") inheritedChildAlive = false; }, pidStartToken: () => inheritedChildAlive ? "start-1" : null, isExpectedClaude: () => true, waitForExit: async () => undefined, status: async () => ({ loggedIn: true, method: "oauth", email: "a@example.test", plan: "max" }), now: () => 1_000, setTimeout: (fn, ms) => { if (ms <= 2_000) fn(); return {} as NodeJS.Timeout; }, clearTimeout: () => undefined }; }
+beforeEach(() => { fs.rmSync(process.env.LLV_STATE_DIR!, { recursive: true, force: true }); child = new FakeChild(); signals = []; inheritedChildAlive = true; });
 afterAll(() => { if (OLD_STATE === undefined) delete process.env.LLV_STATE_DIR; else process.env.LLV_STATE_DIR = OLD_STATE; if (OLD_HOME === undefined) delete process.env.LLV_CLAUDE_HOME; else process.env.LLV_CLAUDE_HOME = OLD_HOME; fs.rmSync(SANDBOX, { recursive: true, force: true }); });
 
 test("parser handles ANSI and chunks while only allowlisted URLs survive", () => {
@@ -114,11 +114,12 @@ test("input is admitted only after the browser prompt and persists verification 
   expect(child.writes).toEqual(["authorizationCode#state\n"]);
 });
 
-test("restart reconciliation rejects PID reuse and preserves only an interrupted safe DTO", () => {
+test("restart reconciliation rejects PID reuse and preserves only an interrupted safe DTO", async () => {
   const file = path.join(process.env.LLV_STATE_DIR!, "claude-auth-operations.json");
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, JSON.stringify([{ operationId: "00000000-0000-4000-8000-000000000001", accountId: "work", phase: "awaiting_browser", pid: 4242, startToken: "old-start", generation: 3, startedAt: new Date(0).toISOString(), deadlineAt: new Date(1).toISOString() }]));
   const supervisor = new ClaudeLoginSupervisor({ ...ports(), pidStartToken: () => "new-process" });
+  await supervisor.whenRecovered();
   expect(signals).toEqual([]);
   expect(supervisor.get("00000000-0000-4000-8000-000000000001")).toEqual(expect.objectContaining({ phase: "interrupted", loginUrl: null, acceptsCode: false }));
 });
@@ -284,22 +285,60 @@ test("a child exit after cancellation begins cannot restart verification", async
   expect(supervisor.get(operation.operationId)).toEqual(expect.objectContaining({ phase: "canceled" }));
 });
 
-test("restart sends TERM then grace-period KILL for a resistant Claude child", () => {
+test("restart sends TERM and KILL, awaits the resistant child exit, then verifies Claude status", async () => {
   const account = createManagedClaudeAccount("Restart");
+  fs.writeFileSync(path.join(account.home, ".credentials.json"), "{}", { mode: 0o600 });
   const file = path.join(process.env.LLV_STATE_DIR!, "claude-auth-operations.json");
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, JSON.stringify([{ operationId: "00000000-0000-4000-8000-000000000002", accountId: account.id, phase: "awaiting_browser", pid: 4242, startToken: "start-1", generation: 3, startedAt: new Date(0).toISOString(), deadlineAt: new Date(1).toISOString() }]));
-  const supervisor = new ClaudeLoginSupervisor(ports());
+  const calls: string[] = [];
+  const supervisor = new ClaudeLoginSupervisor({
+    ...ports(),
+    kill: (_pid, signal) => {
+      calls.push(`kill:${signal}`);
+      signals.push(signal);
+      if (signal === "SIGKILL") inheritedChildAlive = false;
+    },
+    waitForExit: async () => { calls.push("wait"); },
+    status: async () => {
+      calls.push("status");
+      return { loggedIn: true, method: "oauth", email: "a@example.test", plan: "max" };
+    },
+  });
+  await supervisor.whenRecovered();
   expect(signals).toEqual(["SIGTERM", "SIGKILL"]);
-  expect(supervisor.get("00000000-0000-4000-8000-000000000002")).toEqual(expect.objectContaining({ phase: "interrupted" }));
+  expect(calls).toEqual(["kill:SIGTERM", "wait", "kill:SIGKILL", "wait", "status"]);
+  expect(supervisor.get("00000000-0000-4000-8000-000000000002")).toEqual(expect.objectContaining({ phase: "authenticated" }));
 });
 
-test("a retry after recovery supersedes the recovered operation", () => {
+test("a restart with a safe credential file remains interrupted when Claude status is logged out", async () => {
+  const account = createManagedClaudeAccount("Status false");
+  fs.writeFileSync(path.join(account.home, ".credentials.json"), "{}", { mode: 0o600 });
+  const file = path.join(process.env.LLV_STATE_DIR!, "claude-auth-operations.json");
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify([{ operationId: "00000000-0000-4000-8000-000000000012", accountId: account.id, phase: "verifying", pid: 4242, startToken: "start-1", generation: 12, startedAt: new Date(0).toISOString(), deadlineAt: new Date(1).toISOString() }]));
+  const statusHomes: string[] = [];
+  const restarted = new ClaudeLoginSupervisor({
+    ...ports(),
+    status: async (home) => {
+      statusHomes.push(home);
+      return { loggedIn: false, method: null, email: null, plan: null };
+    },
+  });
+
+  await restarted.whenRecovered();
+
+  expect(statusHomes).toEqual([account.home]);
+  expect(restarted.get("00000000-0000-4000-8000-000000000012")).toEqual(expect.objectContaining({ phase: "interrupted", result: expect.objectContaining({ code: "interrupted" }) }));
+});
+
+test("a retry after recovery supersedes the recovered operation", async () => {
   const account = createManagedClaudeAccount("Recovered retry");
   const file = path.join(process.env.LLV_STATE_DIR!, "claude-auth-operations.json");
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, JSON.stringify([{ operationId: "00000000-0000-4000-8000-000000000009", accountId: account.id, phase: "awaiting_browser", pid: 4242, startToken: "old-start", generation: 9, startedAt: new Date(0).toISOString(), deadlineAt: new Date(1).toISOString() }]));
   const restarted = new ClaudeLoginSupervisor(ports());
+  await restarted.whenRecovered();
 
   const retry = restarted.start(account.id);
 
@@ -320,6 +359,7 @@ test("a successful login requires a safe credential file and survives restart as
   const file = path.join(process.env.LLV_STATE_DIR!, "claude-auth-operations.json");
   fs.writeFileSync(file, JSON.stringify([{ operationId: "00000000-0000-4000-8000-000000000003", accountId: account.id, phase: "verifying", pid: 4242, startToken: "start-1", generation: 9, startedAt: new Date(0).toISOString(), deadlineAt: new Date(1).toISOString() }]));
   const restarted = new ClaudeLoginSupervisor(ports());
+  await restarted.whenRecovered();
   expect(restarted.get("00000000-0000-4000-8000-000000000003")).toEqual(expect.objectContaining({ phase: "authenticated" }));
 });
 

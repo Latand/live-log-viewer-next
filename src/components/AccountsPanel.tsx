@@ -152,7 +152,7 @@ function ClaudeLoginRow({ account, state, loginBusy }: { account: AccountOption;
     const cancelButton = (
       <button
         type="button"
-        onClick={() => void state.cancelLogin(login.operationId)}
+        onClick={() => activate(() => void state.cancelLogin(login.operationId))}
         disabled={busy || !cancelable}
         className="shrink-0 rounded-[7px] border border-line bg-bg px-2 py-0.5 text-[11px] font-semibold hover:bg-chip disabled:opacity-45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
       >
@@ -192,8 +192,10 @@ function ClaudeLoginRow({ account, state, loginBusy }: { account: AccountOption;
               onSubmit={(event) => {
                 event.preventDefault();
                 if (submitted || busy || code.trim() === "") return;
-                setSubmitted(true);
-                void state.submitLoginCode(login.operationId, code);
+                activate(() => {
+                  setSubmitted(true);
+                  void state.submitLoginCode(login.operationId, code);
+                });
               }}
               className="flex items-center gap-2"
             >
