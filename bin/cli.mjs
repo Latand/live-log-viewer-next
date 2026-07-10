@@ -368,7 +368,7 @@ function localUrl(options) {
 }
 
 function printBanner(version, options) {
-  console.log(`  ✳ Live Log Viewer v${version}`);
+  console.log(`  ✳ Agent Log Viewer v${version}`);
   console.log(m.bannerOpened(localUrl(options)));
   console.log(m.bannerReads());
   console.log(m.bannerStop());

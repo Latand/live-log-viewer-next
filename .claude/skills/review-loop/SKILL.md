@@ -1,11 +1,11 @@
 ---
 name: review-loop
-description: Drive Live Log Viewer's implement→review flows — start a review cycle for a conversation, monitor rounds, relay verdicts, and recover stuck rounds. Use when the user asks to run a review loop / review cycle on agent work, wants a fresh reviewer per round, or asks to orchestrate implement→review with the viewer.
+description: Drive Agent Log Viewer's implement→review flows — start a review cycle for a conversation, monitor rounds, relay verdicts, and recover stuck rounds. Use when the user asks to run a review loop / review cycle on agent work, wants a fresh reviewer per round, or asks to orchestrate implement→review with the viewer.
 ---
 
 # Review loops (implement → review flows)
 
-Live Log Viewer ships a flow engine that orchestrates the implement→review
+Agent Log Viewer ships a flow engine that orchestrates the implement→review
 cycle: one long-lived implementer agent writes code, a fresh reviewer session
 audits the full diff each round, findings are relayed back automatically, and
 the cycle repeats until the reviewer approves. This skill explains how to

@@ -6,6 +6,12 @@ versions follow [SemVer](https://semver.org/) (0.x — the API may still move).
 
 ## [Unreleased]
 
+### Changed
+- Current product prose, static page metadata, and the CLI startup banner use
+  the `Agent Log Viewer` display name. Compatibility identifiers stay stable:
+  the `agent-log-viewer` package and CLI, `LLV_*` variables, `llv_auth`, browser
+  storage keys, supported legacy config/cache paths, and the existing repository URL.
+
 ## [0.11.2] — 2026-07-08
 
 ### Added

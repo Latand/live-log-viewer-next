@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "live-log-viewer-next",
+      "name": "agent-log-viewer",
       "dependencies": {
         "lucide-react": "^1.23.0",
         "next": "16.2.10",

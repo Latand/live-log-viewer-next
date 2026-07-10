@@ -18,3 +18,12 @@ test("remote agent access accepts the exact Bearer LLV_TOKEN", () => {
   expect(proxy(remote("Bearer viewer-token")).headers.get("x-middleware-next")).toBe("1");
   expect(proxy(remote("Bearer wrong-token")).status).toBe(403);
 });
+
+test("remote access accepts the existing llv_auth cookie", () => {
+  process.env.LLV_TOKEN = "viewer-token";
+  const request = new NextRequest("http://viewer.example/api/agent/snapshot", {
+    headers: { host: "viewer.example", "x-forwarded-for": "203.0.113.10", cookie: "llv_auth=viewer-token" },
+  });
+
+  expect(proxy(request).headers.get("x-middleware-next")).toBe("1");
+});

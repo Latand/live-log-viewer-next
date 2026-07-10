@@ -5,13 +5,16 @@ import path from "node:path";
 
 const SANDBOX = fs.mkdtempSync(path.join(os.tmpdir(), "llv-configdir-test-"));
 const REAL_XDG = process.env.XDG_CONFIG_HOME;
+const REAL_CACHE = process.env.XDG_CACHE_HOME;
 const REAL_STATE = process.env.LLV_STATE_DIR;
 
-const { inboxDir, migrateLegacyDir, stateDir, statePath } = await import("./configDir");
+const { cacheEntryPath, configFilePath, inboxDir, migrateLegacyDir, stateDir, statePath } = await import("./configDir");
 
 afterAll(() => {
   if (REAL_XDG !== undefined) process.env.XDG_CONFIG_HOME = REAL_XDG;
   else delete process.env.XDG_CONFIG_HOME;
+  if (REAL_CACHE !== undefined) process.env.XDG_CACHE_HOME = REAL_CACHE;
+  else delete process.env.XDG_CACHE_HOME;
   if (REAL_STATE !== undefined) process.env.LLV_STATE_DIR = REAL_STATE;
   else delete process.env.LLV_STATE_DIR;
   fs.rmSync(SANDBOX, { recursive: true, force: true });
@@ -37,6 +40,23 @@ test("state and inbox live under the agent-log-viewer config dir", () => {
   }
   expect(stateDir()).toBe(path.join(xdg, "agent-log-viewer", "state"));
   expect(inboxDir()).toBe(path.join(xdg, "agent-log-viewer", "inbox"));
+});
+
+test("legacy config and cache paths remain active when the current entries are absent", () => {
+  const configRoot = path.join(SANDBOX, "legacy-paths-config");
+  const cacheRoot = path.join(SANDBOX, "legacy-paths-cache");
+  process.env.XDG_CONFIG_HOME = configRoot;
+  process.env.XDG_CACHE_HOME = cacheRoot;
+  const legacyConfig = path.join(configRoot, "live-log-viewer", "transcribe-backend");
+  const legacyCache = path.join(cacheRoot, "live-log-viewer", "whisper-venv");
+  fs.mkdirSync(path.dirname(legacyConfig), { recursive: true });
+  fs.mkdirSync(legacyCache, { recursive: true });
+  fs.writeFileSync(legacyConfig, "local\n");
+
+  expect(configFilePath("transcribe-backend")).toBe(legacyConfig);
+  expect(cacheEntryPath("whisper-venv")).toBe(legacyCache);
+  fs.writeFileSync(configFilePath("transcribe-backend"), "chatgpt\n");
+  expect(fs.readFileSync(legacyConfig, "utf8")).toBe("chatgpt\n");
 });
 
 test("migration copies the legacy tree once, marks completion, leaves the source in place", () => {

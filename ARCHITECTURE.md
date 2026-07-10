@@ -1,4 +1,4 @@
-# Live Log Viewer — Next.js rewrite
+# Agent Log Viewer — Next.js rewrite
 
 Rewrite of the working Python prototype at
 `the original single-file Python prototype (../live-log-viewer/server.py)` (READ IT FIRST — it is the

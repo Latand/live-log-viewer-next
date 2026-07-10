@@ -2,8 +2,8 @@ import type { Metadata, Viewport } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Live logs",
-  description: "Live viewer for Codex/Claude agent logs",
+  title: "Agent Log Viewer",
+  description: "Agent Log Viewer for Codex and Claude agent logs",
 };
 
 /* The on-screen keyboard shrinks the layout instead of covering it, so the

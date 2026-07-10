@@ -1,11 +1,11 @@
 ---
 name: live-log-viewer-orchestration
-description: One management surface for coding agents on this machine — spawn, message, and monitor Claude/Codex workers the way live-log-viewer does (tmux panes + viewer API), never via detached background-job runtimes. Use when launching worker/reviewer agents, delegating fixes to Codex, continuing an agent conversation programmatically, or working in ~/.agents/tools/live-log-viewer-next.
+description: One management surface for coding agents on this machine — spawn, message, and monitor Claude/Codex workers through Agent Log Viewer (tmux panes + viewer API), never via detached background-job runtimes. Use when launching worker/reviewer agents, delegating fixes to Codex, continuing an agent conversation programmatically, or working in ~/.agents/tools/live-log-viewer-next.
 ---
 
-# Live Log Viewer — agent orchestration
+# Agent Log Viewer — agent orchestration
 
-The user's agent dashboard is **live-log-viewer** (`~/.agents/tools/live-log-viewer-next`, Next.js app on `127.0.0.1:8898`, start with `bun dev` / `agent-log-viewer`). It tails every agent conversation on the machine and manages agents as **tmux panes**. 
+The user's agent dashboard is **Agent Log Viewer** (`~/.agents/tools/live-log-viewer-next`, Next.js app on `127.0.0.1:8898`, start with `bun dev` / `agent-log-viewer`). It tails every agent conversation on the machine and manages agents as **tmux panes**.
 
 **Core rule: one management surface.** Every helper agent you start must be visible and controllable in the viewer — a tmux pane plus a transcript the scanner picks up. Never launch workers through detached background-job mechanisms (e.g. `codex-companion.mjs task`, plugin rescue subagents): they create a second, invisible control channel the user has explicitly rejected.
 
