@@ -42,6 +42,10 @@ export interface RecoverableSpawnRequest {
   prompt: string;
   images: SpawnImage[];
   src: string;
+  /** Optional role registry reference. Omitted for the unchanged blank draft. */
+  role?: string;
+  roleParams?: Record<string, string | number>;
+  confirm?: string;
 }
 
 /** The persisted record of an in-flight or unsettled launch. Its presence is
@@ -109,6 +113,9 @@ export function hasRecoverableRequest(attempt: SpawnAttempt): attempt is SpawnAt
     typeof request.accountId === "string" &&
     typeof request.prompt === "string" &&
     typeof request.src === "string" && request.src === attempt.src &&
+    (request.role === undefined || typeof request.role === "string") &&
+    (request.roleParams === undefined || (typeof request.roleParams === "object" && request.roleParams !== null && !Array.isArray(request.roleParams))) &&
+    (request.confirm === undefined || typeof request.confirm === "string") &&
     Array.isArray(request.images) && request.images.every((image) => typeof image?.base64 === "string" && typeof image?.mime === "string"),
   );
 }
@@ -127,6 +134,8 @@ export function spawnRequestBody(attempt: SpawnAttempt & { request: RecoverableS
     images: request.images,
     clientAttemptId: attempt.clientAttemptId,
     ...(request.src ? { src: request.src } : {}),
+    ...(request.role ? { role: request.role, roleParams: request.roleParams ?? {} } : {}),
+    ...(request.confirm ? { confirm: request.confirm } : {}),
   };
 }
 

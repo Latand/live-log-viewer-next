@@ -2,10 +2,11 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { statePath } from "@/lib/configDir";
-import { CODEX_SOL_MODEL, CODEX_TERRA_MODEL } from "@/lib/agent/models";
 import { agentRegistry, type AgentRegistry } from "@/lib/agent/registry";
 import type { RoleConfig } from "@/lib/flows/types";
 import { atomicWriteText } from "@/lib/flows/store";
+import { listRoles, resolveRole } from "@/lib/roles/registry";
+import type { RoleConfig as RegistryRoleConfig } from "@/lib/roles/types";
 
 import type { FinishAction, ImplementStage, ReviewStage, Workflow, WorkflowStage, WorkflowTemplate } from "./types";
 
@@ -14,7 +15,17 @@ const TEMPLATES_FILE = statePath("workflow-templates.json");
 const ARTIFACT_DIR = statePath("workflows");
 
 /** The hard fixer default (W5): Terra supplies fast hands for applying findings. */
-export const DEFAULT_FIXER: RoleConfig = { engine: "codex", model: CODEX_TERRA_MODEL, effort: "low" };
+function registryRole(role: "builder" | "reviewer" | "architect" | "cleaner"): RoleConfig {
+  const definition = listRoles().find((candidate) => candidate.id === role)!;
+  return { ...definition.config };
+}
+
+/** The hard fixer default (W5) derives from Cleaner and clamps its effort. */
+export function defaultFixerFromRoles(): RoleConfig {
+  return { ...registryRole("cleaner"), effort: "low" };
+}
+
+export const DEFAULT_FIXER: RoleConfig = defaultFixerFromRoles();
 
 /* The user's canonical template (design doc example), seeded on first load
    the way flow presets are. */
@@ -46,7 +57,37 @@ const LEGACY_SEEDED_TEMPLATES: WorkflowTemplate[] = [
   },
 ];
 
-export const SEEDED_TEMPLATES: WorkflowTemplate[] = [
+/** Defaults written before registry-derived profiles. Exact copies migrate to
+    the current role configs; records changed by a user retain their values. */
+const PRE_ROLE_SEEDED_TEMPLATES: WorkflowTemplate[] = [
+  {
+    name: "fullstack",
+    setup: "bun install",
+    verify: "bun test && bun run build",
+    finish: "pr",
+    stages: [
+      { kind: "implement", agent: { engine: "codex", model: "gpt-5.6-terra", effort: "high" }, scope: "Backend/API: server logic, data layer, API routes. Leave UI components alone." },
+      { kind: "implement", agent: { engine: "claude", model: "fable", effort: null }, scope: "UI/frontend: components, hooks, styling, i18n labels. Build on the backend contract from the previous stage." },
+      { kind: "review-loop", reviewer: { engine: "codex", model: "gpt-5.6-sol", effort: "xhigh" }, fixer: { engine: "codex", model: "gpt-5.6-terra", effort: "low" }, roundLimit: 5, reviewerMode: "headless" },
+    ],
+  },
+  {
+    name: "Terra → Sol review",
+    verify: "bun test && bun run build",
+    finish: "pr",
+    stages: [
+      { kind: "implement", agent: { engine: "codex", model: "gpt-5.6-terra", effort: "high" }, scope: "Implement the requested change end to end, including focused tests and documentation updates." },
+      { kind: "review-loop", reviewer: { engine: "codex", model: "gpt-5.6-sol", effort: "xhigh" }, fixer: { engine: "codex", model: "gpt-5.6-terra", effort: "low" }, roundLimit: 5, reviewerMode: "headless" },
+    ],
+  },
+];
+
+export function seededTemplatesFromRoles(): WorkflowTemplate[] {
+  const builder = registryRole("builder");
+  const reviewer = registryRole("reviewer");
+  const architect = registryRole("architect");
+  const fixer = defaultFixerFromRoles();
+  return [
   {
     name: "fullstack",
     setup: "bun install",
@@ -55,18 +96,18 @@ export const SEEDED_TEMPLATES: WorkflowTemplate[] = [
     stages: [
       {
         kind: "implement",
-        agent: { engine: "codex", model: CODEX_TERRA_MODEL, effort: "high" },
+        agent: builder,
         scope: "Backend/API: server logic, data layer, API routes. Leave UI components alone.",
       },
       {
         kind: "implement",
-        agent: { engine: "claude", model: "fable", effort: null },
+        agent: architect,
         scope: "UI/frontend: components, hooks, styling, i18n labels. Build on the backend contract from the previous stage.",
       },
       {
         kind: "review-loop",
-        reviewer: { engine: "codex", model: CODEX_SOL_MODEL, effort: "xhigh" },
-        fixer: { ...DEFAULT_FIXER },
+        reviewer,
+        fixer,
         roundLimit: 5,
         reviewerMode: "headless",
       },
@@ -79,19 +120,23 @@ export const SEEDED_TEMPLATES: WorkflowTemplate[] = [
     stages: [
       {
         kind: "implement",
-        agent: { engine: "codex", model: CODEX_TERRA_MODEL, effort: "high" },
+        agent: builder,
         scope: "Implement the requested change end to end, including focused tests and documentation updates.",
       },
       {
         kind: "review-loop",
-        reviewer: { engine: "codex", model: CODEX_SOL_MODEL, effort: "xhigh" },
-        fixer: { ...DEFAULT_FIXER },
+        reviewer,
+        fixer,
         roundLimit: 5,
         reviewerMode: "headless",
       },
     ],
   },
-];
+  ];
+}
+
+/** Compatibility export for initial template renderers. */
+export const SEEDED_TEMPLATES: WorkflowTemplate[] = seededTemplatesFromRoles();
 
 type WorkflowFile = { workflows?: unknown };
 type TemplateFile = { templates?: unknown };
@@ -119,8 +164,26 @@ function roleOf(value: unknown): RoleConfig | null {
   };
 }
 
+/** Resolve a role reference immediately so a stored workflow has a frozen
+    concrete config. Pipelines can consume the same registry interface. */
+export function roleConfigFromReference(value: unknown): RoleConfig | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const reference = value as { role?: unknown; roleParams?: unknown; overrides?: unknown };
+  if (typeof reference.role !== "string") return null;
+  const rawOverrides = reference.overrides;
+  if (rawOverrides !== undefined && (!rawOverrides || typeof rawOverrides !== "object" || Array.isArray(rawOverrides))) return null;
+  const raw = (rawOverrides ?? {}) as { engine?: unknown; model?: unknown; effort?: unknown };
+  const overrides: Partial<RegistryRoleConfig> = {
+    ...(raw.engine === "claude" || raw.engine === "codex" ? { engine: raw.engine as RegistryRoleConfig["engine"] } : {}),
+    ...(typeof raw.model === "string" ? { model: raw.model } : {}),
+    ...(typeof raw.effort === "string" ? { effort: raw.effort } : {}),
+  };
+  const resolved = resolveRole(reference.role, reference.roleParams, overrides);
+  return resolved.ok ? resolved.value.config : null;
+}
+
 function implementStageOf(value: Partial<ImplementStage>): ImplementStage | null {
-  const agent = roleOf(value.agent);
+  const agent = roleOf(value.agent) ?? roleConfigFromReference(value);
   if (!agent || typeof value.scope !== "string" || !value.scope.trim()) return null;
   return { kind: "implement", agent, scope: value.scope.trim() };
 }
@@ -136,7 +199,7 @@ function normalizeFixer(value: unknown): RoleConfig {
 
 /** Missing fixer/limits fall back to the W5/W9 defaults instead of failing. */
 function reviewStageOf(value: Partial<ReviewStage>): ReviewStage | null {
-  const reviewer = roleOf(value.reviewer);
+  const reviewer = roleOf(value.reviewer) ?? roleConfigFromReference(value);
   if (!reviewer) return null;
   return {
     kind: "review-loop",
@@ -276,11 +339,11 @@ export function saveTemplates(templates: WorkflowTemplate[]): void {
 }
 
 /** Upgrade untouched built-in templates and keep user-authored definitions. */
-export function mergeSeededTemplates(templates: WorkflowTemplate[]): WorkflowTemplate[] {
-  const legacy = new Set(LEGACY_SEEDED_TEMPLATES.map((template) => JSON.stringify(normalizeTemplate(template))));
+export function mergeSeededTemplates(templates: WorkflowTemplate[], seeds = seededTemplatesFromRoles()): WorkflowTemplate[] {
+  const legacy = new Set([...LEGACY_SEEDED_TEMPLATES, ...PRE_ROLE_SEEDED_TEMPLATES].map((template) => JSON.stringify(normalizeTemplate(template))));
   const custom = templates.filter((template) => !legacy.has(JSON.stringify(template)));
   const names = new Set(custom.map((template) => template.name));
-  const missingSeeds = SEEDED_TEMPLATES.filter((template) => !names.has(template.name));
+  const missingSeeds = seeds.filter((template) => !names.has(template.name));
   return [...missingSeeds, ...custom];
 }
 

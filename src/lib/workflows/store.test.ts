@@ -8,7 +8,7 @@ import { AgentRegistry } from "@/lib/agent/registry";
 /* The state dir must point at a sandbox before store.ts computes its
    module-level constants, so the store loads dynamically after the env set. */
 process.env.LLV_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "llv-wf-store-test-"));
-const { buildWorkflow, DEFAULT_FIXER, loadTemplates, loadWorkflows, mergeSeededTemplates, normalizeStages, normalizeTemplate, reconcileWorkflowConversationOwnership, saveWorkflows } =
+const { buildWorkflow, DEFAULT_FIXER, loadTemplates, loadWorkflows, mergeSeededTemplates, normalizeStages, normalizeTemplate, reconcileWorkflowConversationOwnership, roleConfigFromReference, saveWorkflows } =
   await import("./store");
 
 type WorkflowTemplate = import("./types").WorkflowTemplate;
@@ -88,6 +88,20 @@ test("normalizeTemplate rejects an invalid stage list", () => {
   expect(normalizeTemplate({ name: "bad", stages: [IMPLEMENT] })).toBeNull();
 });
 
+test("workflow role references resolve to a frozen effective config", () => {
+  expect(roleConfigFromReference({ role: "builder", roleParams: { mode: "tdd" } })).toEqual({
+    engine: "codex",
+    model: "gpt-5.6-terra",
+    effort: "high",
+  });
+  const template = normalizeTemplate({ name: "role template", stages: [
+    { kind: "implement", role: "builder", roleParams: { mode: "plain" }, scope: "Backend/API" },
+    { kind: "review-loop", role: "reviewer", roleParams: { diffSource: "main...HEAD", lens: "all" } },
+  ] });
+  expect(template?.stages[0]).toMatchObject({ agent: { model: "gpt-5.6-terra", effort: "high" } });
+  expect(template?.stages[1]).toMatchObject({ reviewer: { model: "gpt-5.6-sol", effort: "xhigh" } });
+});
+
 test("templates seed the canonical fullstack pipeline on first load", () => {
   const templates = loadTemplates();
   expect(templates.map((template) => template.name)).toContain("fullstack");
@@ -129,6 +143,21 @@ test("template seed migration upgrades the untouched legacy fullstack definition
   const fullstack = merged.find((template) => template.name === "fullstack")!;
   expect(fullstack.stages[0]?.kind === "implement" && fullstack.stages[0].agent.model).toBe("gpt-5.6-terra");
 });
+
+test("an untouched pre-registry workflow template updates from role defaults", () => {
+  const previous = normalizeTemplate({
+    name: "Terra → Sol review",
+    verify: "bun test && bun run build",
+    finish: "pr",
+    stages: [
+      { kind: "implement", agent: { engine: "codex", model: "gpt-5.6-terra", effort: "high" }, scope: "Implement the requested change end to end, including focused tests and documentation updates." },
+      { kind: "review-loop", reviewer: { engine: "codex", model: "gpt-5.6-sol", effort: "xhigh" }, fixer: { engine: "codex", model: "gpt-5.6-terra", effort: "low" }, roundLimit: 5, reviewerMode: "headless" },
+    ],
+  })!;
+  const migrated = mergeSeededTemplates([previous]).find((template) => template.name === previous.name)!;
+  expect(migrated.stages[0]).toMatchObject({ agent: { model: "gpt-5.6-terra", effort: "high" } });
+});
+
 
 test("workflows round-trip through the store", () => {
   const template = normalizeTemplate({ name: "demo", stages: [IMPLEMENT, REVIEW], finish: "merge" })!;

@@ -14,6 +14,8 @@ test("a fresh draft renders the composer with no frozen launch status", () => {
   expect(html).toContain("Draft of a new agent conversation");
   /* The new-conversation hint marks the composing phase before launch. */
   expect(html).toContain("Choose an engine and a directory");
+  expect(html).toContain('aria-label="Agent role preset"');
+  expect(html).toContain("No role");
   /* The composer's send affordance is present (draft is the only sendable phase). */
   expect(html).toContain('aria-label="Launch the agent"');
   /* No frozen launch status while composing — none of the lifecycle copy shows. */

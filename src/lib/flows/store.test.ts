@@ -6,7 +6,7 @@ import path from "node:path";
 import { AgentRegistry } from "@/lib/agent/registry";
 import { CODEX_SOL_MODEL, CODEX_TERRA_MODEL } from "@/lib/agent/models";
 
-import { FLOWS_SCHEMA_VERSION, loadFlows, mergeSeededPresets, reconcileFlowConversationOwnership, saveFlows } from "./store";
+import { FLOWS_SCHEMA_VERSION, loadFlows, mergeSeededPresets, reconcileFlowConversationOwnership, saveFlows, seededPresetsFromRoles } from "./store";
 import type { Flow, FlowPreset } from "./types";
 
 const LEGACY_DEFAULT: FlowPreset = {
@@ -29,6 +29,29 @@ test("seed migration preserves a customized preset", () => {
   const custom = { ...LEGACY_DEFAULT, reviewer: { engine: "claude" as const, model: "fable", effort: "max" } };
   expect(mergeSeededPresets([custom])).toContainEqual(custom);
 });
+
+test("flow preset seeds derive their canonical roles from the role registry", () => {
+  const presets = seededPresetsFromRoles();
+  expect(presets.find((preset) => preset.name === "Terra high → Sol xhigh")).toEqual({
+    name: "Terra high → Sol xhigh",
+    implementer: { engine: "codex", model: CODEX_TERRA_MODEL, effort: "high" },
+    reviewer: { engine: "codex", model: CODEX_SOL_MODEL, effort: "xhigh" },
+  });
+});
+
+test("an untouched pre-registry flow preset migrates to the current role config", () => {
+  const previous = {
+    name: "Terra high → Fable",
+    implementer: { engine: "codex" as const, model: CODEX_TERRA_MODEL, effort: "high" },
+    reviewer: { engine: "claude" as const, model: "fable", effort: null },
+  };
+  expect(mergeSeededPresets([previous]).find((preset) => preset.name === previous.name)?.reviewer).toEqual({
+    engine: "claude",
+    model: "fable",
+    effort: "high",
+  });
+});
+
 
 test("flow specs persist in the versioned state file and legacy flow entries load", () => {
   const previousState = process.env.LLV_STATE_DIR;
