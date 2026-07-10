@@ -128,6 +128,11 @@ interface RunResult {
   stderr: string;
 }
 
+interface ResolveTmuxAttachDeps {
+  runTmux(args: string[], input?: Buffer | string, endpoint?: TmuxEndpointDescriptor): Promise<RunResult>;
+  processIdentity(pid: number): string | null;
+}
+
 /** The service endpoint is intentionally an environment contract. During the
     migration the old /tmp server remains reachable until this flag is enabled. */
 export function externalTmuxMode(): boolean {
@@ -469,8 +474,23 @@ export function tmuxAttachCommands(endpoint: TmuxEndpointDescriptor, target: Tmu
 export async function resolveTmuxAttach(
   expected: TmuxAttachReference,
   endpoint = tmuxEndpointDescriptor(),
+  deps: Partial<ResolveTmuxAttachDeps> = {},
 ): Promise<TmuxAttachResolution> {
-  const res = await runTmux(
+  const run = deps.runTmux ?? runTmux;
+  const processIdentity = deps.processIdentity ?? ((pid: number) => procBackend.processIdentity(pid));
+  const server = await run(["display-message", "-p", "#{pid}"], undefined, endpoint).catch(() => null);
+  const tmuxServerPid = server && server.code === 0 ? Number(server.stdout.trim()) : NaN;
+  if (!server || server.code !== 0 || !Number.isInteger(tmuxServerPid) || tmuxServerPid <= 0) {
+    return { ok: false, reason: "tmux-unavailable" };
+  }
+  const tmuxServerStartIdentity = processIdentity(tmuxServerPid);
+  if (
+    tmuxServerPid !== expected.tmuxServerPid ||
+    (expected.tmuxServerStartIdentity !== null && tmuxServerStartIdentity !== expected.tmuxServerStartIdentity)
+  ) {
+    return { ok: false, reason: "server-restarted" };
+  }
+  const res = await run(
     [
       "display-message",
       "-p",
@@ -481,18 +501,21 @@ export async function resolveTmuxAttach(
     undefined,
     endpoint,
   ).catch(() => null);
-  const [serverRaw = "", paneId = "", paneRaw = "", target = ""] = res && res.code === 0 ? res.stdout.trim().split("\t") : [];
-  const tmuxServerPid = Number(serverRaw);
+  if (!res || res.code !== 0) {
+    return { ok: false, reason: "stale-pane" };
+  }
+  const [serverRaw = "", paneId = "", paneRaw = "", target = ""] = res.stdout.trim().split("\t");
+  const observedServerPid = Number(serverRaw);
   const panePid = Number(paneRaw);
-  if (!res || res.code !== 0 || !Number.isInteger(tmuxServerPid) || tmuxServerPid <= 0 || !paneId || !Number.isInteger(panePid) || panePid <= 0 || !target) {
+  if (!Number.isInteger(observedServerPid) || observedServerPid <= 0 || !paneId || !Number.isInteger(panePid) || panePid <= 0 || !target) {
     return { ok: false, reason: "tmux-unavailable" };
   }
   const state = classifyTmuxAttachSnapshot(expected, {
-    tmuxServerPid,
-    tmuxServerStartIdentity: procBackend.processIdentity(tmuxServerPid),
+    tmuxServerPid: observedServerPid,
+    tmuxServerStartIdentity: observedServerPid === tmuxServerPid ? tmuxServerStartIdentity : processIdentity(observedServerPid),
     paneId,
     panePid,
-    paneStartIdentity: procBackend.processIdentity(panePid),
+    paneStartIdentity: processIdentity(panePid),
     target,
   });
   if (state !== "ok") return { ok: false, reason: state };

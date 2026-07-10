@@ -4,6 +4,7 @@ import {
   cdCommandForCwd,
   classifyTmuxAttachSnapshot,
   createTmuxEndpointDescriptor,
+  resolveTmuxAttach,
   tmuxAttachCommands,
   tmuxEndpoint,
 } from "@/lib/tmux";
@@ -103,5 +104,59 @@ describe("attach identity classification", () => {
       paneStartIdentity: "100:one",
       target: "agents:2.0",
     })).toBe("server-restarted");
+  });
+});
+
+describe("resolveTmuxAttach", () => {
+  const expected = {
+    tmuxServerPid: 900,
+    tmuxServerStartIdentity: "900:one",
+    paneId: "%11",
+    panePid: 100,
+    paneStartIdentity: "100:one",
+  };
+  const endpoint = createTmuxEndpointDescriptor("/run/user/1000/agent-log-viewer", 1000);
+
+  test("reports stale-pane when the server is healthy and the pane vanished", async () => {
+    const calls: Array<{ args: string[]; endpointPath: string }> = [];
+    const result = await resolveTmuxAttach(expected, endpoint, {
+      runTmux: async (args, _input, seenEndpoint) => {
+        calls.push({ args, endpointPath: seenEndpoint?.socketPath ?? "" });
+        if (calls.length === 1) return { code: 0, stdout: "900\n", stderr: "" };
+        return { code: 1, stdout: "", stderr: "can't find pane: %11\n" };
+      },
+      processIdentity: (pid) => (pid === 900 ? "900:one" : pid === 100 ? "100:one" : null),
+    });
+
+    expect(result).toEqual({ ok: false, reason: "stale-pane" });
+    expect(calls).toEqual([
+      { args: ["display-message", "-p", "#{pid}"], endpointPath: endpoint.socketPath },
+      {
+        args: [
+          "display-message",
+          "-p",
+          "-t",
+          "%11",
+          "#{pid}\t#{pane_id}\t#{pane_pid}\t#{session_name}:#{window_index}.#{pane_index}",
+        ],
+        endpointPath: endpoint.socketPath,
+      },
+    ]);
+  });
+
+  test("reports server-restarted before resolving a missing pane on a new server", async () => {
+    const calls: Array<{ args: string[]; endpointPath: string }> = [];
+    const result = await resolveTmuxAttach(expected, endpoint, {
+      runTmux: async (args, _input, seenEndpoint) => {
+        calls.push({ args, endpointPath: seenEndpoint?.socketPath ?? "" });
+        return { code: 0, stdout: "901\n", stderr: "" };
+      },
+      processIdentity: (pid) => (pid === 901 ? "901:one" : null),
+    });
+
+    expect(result).toEqual({ ok: false, reason: "server-restarted" });
+    expect(calls).toEqual([
+      { args: ["display-message", "-p", "#{pid}"], endpointPath: endpoint.socketPath },
+    ]);
   });
 });
