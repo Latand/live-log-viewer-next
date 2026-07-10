@@ -1,14 +1,16 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 
 import {
   accountNoticeText,
+  claudeLoginErrKey,
+  NONTERMINAL_CLAUDE_LOGIN_PHASES,
   type AccountOption,
   type EngineAccountsState,
 } from "@/hooks/useEngineAccounts";
 import { accountSelectOutcome, autoBalanceLine, bannerModel, type MigrationPreview } from "@/lib/accounts/migration";
-import { useLocale } from "@/lib/i18n";
+import { type TFunction, useLocale } from "@/lib/i18n";
 import { handleOverlayEscape } from "@/lib/overlay";
 
 import { Check, Loader2, X } from "./icons";
@@ -99,6 +101,180 @@ function AccountRow({ account, engine, activeId, onSelect, disabled }: { account
       ) : null}
     </div>
   );
+}
+
+/** The Claude sign-in slice for one account row (issue #61). Renders the live
+    login phase (browser link + bounded code entry, Cancel), a sanitized failure
+    with Retry, or a Sign in affordance for a managed unauthenticated account —
+    and never removes the account. Codex rows never mount this (device login owns
+    its own inline affordance in AccountRow). */
+function ClaudeLoginRow({ account, state, loginBusy }: { account: AccountOption; state: EngineAccountsState; loginBusy: boolean }) {
+  const { t } = useLocale();
+  const login = account.login ?? null;
+  const phase = login?.phase;
+  const nonterminal = login != null && NONTERMINAL_CLAUDE_LOGIN_PHASES.has(login.phase);
+  // The op's own Cancel/Submit gate on the shared mutation lock; the Sign in and
+  // Retry affordances also stand down while any Claude login is nonterminal (C10).
+  const busy = state.mutation !== null;
+  const rowRef = useRef<HTMLDivElement>(null);
+  const wantFocus = useRef(false);
+  const [code, setCode] = useState("");
+  const [submitted, setSubmitted] = useState(false);
+
+  // Drop the pasted code the moment we leave code entry so it never lingers or
+  // re-submits after a phase change (C6). Adjusting state during render (the
+  // React-endorsed "reset on prop change" pattern) keeps it off an effect; the
+  // row is also keyed by operationId so a fresh op after a retry starts clean.
+  const [seenPhase, setSeenPhase] = useState(phase);
+  if (phase !== seenPhase) {
+    setSeenPhase(phase);
+    if (phase !== "awaiting_code") {
+      setCode("");
+      setSubmitted(false);
+    }
+  }
+
+  // Keep focus inside the sub-row when a control the operator just pressed
+  // unmounts across a phase change (C9); never steal focus on other transitions.
+  useEffect(() => {
+    if (wantFocus.current) {
+      wantFocus.current = false;
+      rowRef.current?.focus();
+    }
+  });
+  const activate = (run: () => void) => {
+    wantFocus.current = true;
+    run();
+  };
+
+  if (nonterminal && login) {
+    const cancelable = phase !== "canceling";
+    const cancelButton = (
+      <button
+        type="button"
+        onClick={() => void state.cancelLogin(login.operationId)}
+        disabled={busy || !cancelable}
+        className="shrink-0 rounded-[7px] border border-line bg-bg px-2 py-0.5 text-[11px] font-semibold hover:bg-chip disabled:opacity-45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+      >
+        {t("accounts.claudeLogin.cancel")}
+      </button>
+    );
+    const spinnerLine = (key: "accounts.claudeLogin.starting" | "accounts.claudeLogin.awaitingBrowser" | "accounts.claudeLogin.verifying" | "accounts.claudeLogin.canceling") => (
+      <div className="flex items-center gap-2">
+        <Loader2 className="h-3 w-3 shrink-0 animate-spin motion-reduce:animate-none text-dim" aria-hidden />
+        <span className="min-w-0 flex-1 text-[11px] text-dim">{t(key)}</span>
+        {cancelable ? cancelButton : null}
+      </div>
+    );
+    const hintId = `${login.operationId}-hint`;
+    return (
+      <div
+        ref={rowRef}
+        tabIndex={-1}
+        role="group"
+        aria-label={t("accounts.claudeLogin.groupAria", { label: account.label })}
+        className="flex flex-col gap-1.5 px-3 pb-2 pl-[26px] focus-visible:outline-none"
+      >
+        {phase === "starting" ? spinnerLine("accounts.claudeLogin.starting") : null}
+        {phase === "awaiting_browser" ? spinnerLine("accounts.claudeLogin.awaitingBrowser") : null}
+        {phase === "verifying" ? spinnerLine("accounts.claudeLogin.verifying") : null}
+        {phase === "canceling" ? spinnerLine("accounts.claudeLogin.canceling") : null}
+        {phase === "awaiting_code" ? (
+          <>
+            {/* The link renders only in awaiting_code — it is stale once the code
+                is submitted. The URL is server-vetted; render it verbatim. */}
+            {login.loginUrl ? (
+              <a href={login.loginUrl} target="_blank" rel="noreferrer noopener" className="text-[11px] font-semibold text-accent underline">
+                {t("accounts.claudeLogin.openLink")}
+              </a>
+            ) : null}
+            <form
+              onSubmit={(event) => {
+                event.preventDefault();
+                if (submitted || busy || code.trim() === "") return;
+                setSubmitted(true);
+                void state.submitLoginCode(login.operationId, code);
+              }}
+              className="flex items-center gap-2"
+            >
+              <input
+                type="text"
+                value={code}
+                onChange={(event) => setCode(event.target.value)}
+                onFocus={(event) => event.currentTarget.scrollIntoView({ block: "nearest" })}
+                maxLength={8192}
+                autoComplete="off"
+                autoCapitalize="off"
+                spellCheck={false}
+                aria-label={t("accounts.claudeLogin.codeLabel")}
+                aria-describedby={hintId}
+                placeholder={t("accounts.claudeLogin.codePlaceholder")}
+                className="h-8 min-w-0 flex-1 rounded-[8px] border border-line bg-bg px-2 font-mono text-[11.5px] outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+              />
+              <button
+                type="submit"
+                disabled={busy || submitted || code.trim() === ""}
+                className="h-8 shrink-0 rounded-[8px] border border-line bg-bg px-2.5 text-[11px] font-semibold hover:bg-chip disabled:cursor-not-allowed disabled:opacity-45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+              >
+                {t("accounts.claudeLogin.submit")}
+              </button>
+            </form>
+            <p id={hintId} className="text-[10px] leading-snug text-dim">{t("accounts.claudeLogin.codeHint")}</p>
+            <div className="flex justify-end">{cancelButton}</div>
+          </>
+        ) : null}
+      </div>
+    );
+  }
+
+  // Terminal failure (failed / timed_out / interrupted): sanitized copy + Retry.
+  if (login && login.result?.status === "failure") {
+    return (
+      <div ref={rowRef} tabIndex={-1} role="alert" className="flex items-center gap-2 px-3 pb-2 pl-[26px] focus-visible:outline-none">
+        <span className="min-w-0 flex-1 text-[10.5px] font-semibold text-err">{t(claudeLoginErrKey(login.result.code))}</span>
+        <button
+          type="button"
+          onClick={() => activate(() => void state.retryLogin(account.id))}
+          disabled={busy || loginBusy}
+          className="shrink-0 rounded-[7px] border border-line bg-bg px-2 py-0.5 text-[11px] font-semibold hover:bg-chip disabled:opacity-45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+        >
+          {t("accounts.retry")}
+        </button>
+      </div>
+    );
+  }
+
+  // Managed account with no auth and no live op (covers canceled and the broken
+  // production account): a Sign in affordance that restarts login in place.
+  if (account.kind === "managed" && !account.authPresent) {
+    return (
+      <div ref={rowRef} tabIndex={-1} className="flex items-center gap-2 px-3 pb-2 pl-[26px] focus-visible:outline-none">
+        <button
+          type="button"
+          onClick={() => activate(() => void state.retryLogin(account.id))}
+          disabled={busy || loginBusy}
+          className="shrink-0 rounded-[7px] border border-line bg-bg px-2.5 py-0.5 text-[11px] font-semibold hover:bg-chip disabled:opacity-45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+        >
+          {t("accounts.claudeLogin.signIn")}
+        </button>
+      </div>
+    );
+  }
+
+  return null;
+}
+
+/** Derived polite announcement for the sign-in live region (C9): the code-ready
+    prompt while any account awaits its code, then the signed-in confirmation.
+    Deriving from current state means the aria-live text changes exactly on the
+    transition, with no effect and no mount-time announcement. */
+function claudeAnnouncement(engine: "claude" | "codex", accounts: AccountOption[], t: TFunction): string {
+  if (engine !== "claude") return "";
+  const awaitingCode = accounts.find((account) => account.login?.phase === "awaiting_code");
+  if (awaitingCode) return t("accounts.claudeLogin.announceCodeReady", { label: awaitingCode.label });
+  const signedIn = accounts.find((account) => account.login?.phase === "authenticated");
+  if (signedIn) return t("accounts.claudeLogin.announceDone", { label: signedIn.label });
+  return "";
 }
 
 /** Progress banner pinned at the top of the panel while an intent drains, and a
@@ -319,6 +495,13 @@ export function AccountsPanel({
   const { t } = useLocale();
   const { accounts, active, status, notice, mutation, engine } = state;
   const [label, setLabel] = useState("");
+  // While any Claude account has a live login op, the add/sign-in/retry starters
+  // stand down so a second login can't race the supervisor (C10).
+  const loginBusy = engine === "claude" && accounts.some((account) => account.login != null && NONTERMINAL_CLAUDE_LOGIN_PHASES.has(account.login.phase));
+  // One polite live region per panel (C9). Derived from current state, so the
+  // aria-live text changes exactly on the code-ready and signed-in transitions —
+  // no effect/setState needed, and mount content is never announced.
+  const announcement = claudeAnnouncement(engine, accounts, t);
   const [confirm, setConfirm] = useState<{ targetId: string; preview: MigrationPreview } | null>(null);
   /* A preview that fails to parse must never fall through to an instant switch
      (finding 3): the operator would silently reroute new spawns with no scope
@@ -416,6 +599,8 @@ export function AccountsPanel({
           </button>
         </header>
 
+        <p className="sr-only" role="status" aria-live="polite">{announcement}</p>
+
         <MigrationBanner state={state} />
 
         {previewError ? (
@@ -449,7 +634,10 @@ export function AccountsPanel({
               {status === "loading" ? <div className="px-3 py-2 text-[11px] text-dim">{t("accounts.loading")}</div> : null}
               {status === "error" && accounts.length === 0 ? <div className="px-3 py-2 text-[11px] text-dim">{t("accounts.noAccounts")}</div> : null}
               {accounts.map((account) => (
-                <AccountRow key={account.id} account={account} engine={engine} activeId={active} disabled={mutation !== null} onSelect={() => void onSelect(account.id)} />
+                <Fragment key={account.id}>
+                  <AccountRow account={account} engine={engine} activeId={active} disabled={mutation !== null} onSelect={() => void onSelect(account.id)} />
+                  {engine === "claude" ? <ClaudeLoginRow key={account.login?.operationId ?? account.id} account={account} state={state} loginBusy={loginBusy} /> : null}
+                </Fragment>
               ))}
             </div>
             <form onSubmit={onAdd} className="flex items-center gap-2 border-t border-line px-3 py-2">
@@ -461,7 +649,7 @@ export function AccountsPanel({
               />
               <button
                 type="submit"
-                disabled={mutation !== null || label.trim() === ""}
+                disabled={mutation !== null || label.trim() === "" || loginBusy}
                 className="h-8 shrink-0 rounded-[8px] border border-line bg-bg px-2.5 text-[11px] font-semibold hover:bg-chip disabled:cursor-not-allowed disabled:opacity-45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
               >
                 {t("accounts.confirmAdd")}

@@ -18,19 +18,99 @@ export type Engine = "claude" | "codex";
 
 export type DeviceAuth = { url: string; code: string };
 export type ManagedAttemptState = "pending" | "completed" | "failed" | "stale" | "cancelled";
+
+/** Typed, secret-free projection of a Claude login operation (issue #61). The
+    supervisor never emits browser URLs or CLI output beyond `loginUrl`, which the
+    route vets to claude.ai / console.anthropic.com before it reaches the client. */
+export type ClaudeLoginPhase =
+  | "starting" | "awaiting_browser" | "awaiting_code" | "verifying" | "canceling"   // nonterminal
+  | "authenticated" | "canceled" | "timed_out" | "failed" | "interrupted";          // terminal
+export type ClaudeLoginResult = { status: "success" | "failure" | "canceled"; code: string; message: string };
+export type ClaudeLoginView = {
+  operationId: string;
+  phase: ClaudeLoginPhase;
+  loginUrl: string | null;
+  acceptsCode: boolean;
+  deadlineAt: string;
+  result: ClaudeLoginResult | null;
+};
+
+const CLAUDE_LOGIN_PHASES = new Set<ClaudeLoginPhase>([
+  "starting", "awaiting_browser", "awaiting_code", "verifying", "canceling",
+  "authenticated", "canceled", "timed_out", "failed", "interrupted",
+]);
+/** Phases in which the operation is still live: the client keeps fast-polling and
+    the row keeps its login affordances until one of these clears. */
+export const NONTERMINAL_CLAUDE_LOGIN_PHASES = new Set<ClaudeLoginPhase>([
+  "starting", "awaiting_browser", "awaiting_code", "verifying", "canceling",
+]);
+
+/** Crash-safe validation of the supervisor's login summary. An unknown phase, a
+    malformed field, or a non-object yields `null` — never a throw — so a stray
+    payload can never break the accounts read. */
+export function parseClaudeLogin(raw: unknown): ClaudeLoginView | null {
+  if (typeof raw !== "object" || raw === null) return null;
+  const row = raw as Record<string, unknown>;
+  if (typeof row.operationId !== "string") return null;
+  if (typeof row.phase !== "string" || !CLAUDE_LOGIN_PHASES.has(row.phase as ClaudeLoginPhase)) return null;
+  if (row.loginUrl !== null && typeof row.loginUrl !== "string") return null;
+  if (typeof row.acceptsCode !== "boolean") return null;
+  if (typeof row.deadlineAt !== "string") return null;
+  let result: ClaudeLoginResult | null = null;
+  if (row.result !== null && row.result !== undefined) {
+    const r = row.result as Record<string, unknown>;
+    if (r.status !== "success" && r.status !== "failure" && r.status !== "canceled") return null;
+    if (typeof r.code !== "string" || typeof r.message !== "string") return null;
+    result = { status: r.status, code: r.code, message: r.message };
+  }
+  return {
+    operationId: row.operationId,
+    phase: row.phase as ClaudeLoginPhase,
+    loginUrl: (row.loginUrl as string | null) ?? null,
+    acceptsCode: row.acceptsCode,
+    deadlineAt: row.deadlineAt,
+    result,
+  };
+}
+
+/** Sanitized error copy (C7): the client renders i18n keyed on `result.code` /
+    route `code`, never the server's raw message. Unknown codes fall back to a
+    generic actionable line. */
+export type ClaudeLoginErrKey =
+  | "accounts.claudeLogin.err.timed_out"
+  | "accounts.claudeLogin.err.interrupted"
+  | "accounts.claudeLogin.err.verification_failed"
+  | "accounts.claudeLogin.err.input_failed"
+  | "accounts.claudeLogin.err.login_busy"
+  | "accounts.claudeLogin.err.generic";
+export function claudeLoginErrKey(code: string | null | undefined): ClaudeLoginErrKey {
+  switch (code) {
+    case "timed_out": return "accounts.claudeLogin.err.timed_out";
+    case "interrupted": return "accounts.claudeLogin.err.interrupted";
+    case "verification_failed": return "accounts.claudeLogin.err.verification_failed";
+    case "input_failed": return "accounts.claudeLogin.err.input_failed";
+    case "login_busy": return "accounts.claudeLogin.err.login_busy";
+    default: return "accounts.claudeLogin.err.generic";
+  }
+}
+
 export type AccountOption = {
   id: string;
   label: string;
+  /** Managed accounts own the sign-in/retry affordances; legacy ones never do. */
+  kind?: "legacy" | "managed";
   authPresent: boolean;
   loginPending: boolean;
   loginState: ManagedAttemptState | "idle" | "authenticated";
   attemptState?: ManagedAttemptState | null;
   deviceAuth: DeviceAuth | null;
+  /** Typed Claude login operation for this account, when one exists (issue #61). */
+  login?: ClaudeLoginView | null;
   /** Effective remaining capacity chip (min across quota windows), when known. */
   effective?: AccountEffective | null;
 };
 export type AccountLoadState = "loading" | "ready" | "error";
-export type AccountOperation = "refresh" | "add" | "migrate" | "policy";
+export type AccountOperation = "refresh" | "add" | "migrate" | "policy" | "login";
 
 /** A retry action carries exactly the identifier its endpoint needs. The account
     target id drives the preview → migrate path; the durable intent id drives the
@@ -42,18 +122,26 @@ export type AccountRetryAction =
   | { type: "retry"; kind: "add"; label: string }
   | { type: "retry"; kind: "migrate"; accountId: string }
   | { type: "retry"; kind: "stop"; intentId: string }
-  | { type: "retry"; kind: "retryFailed"; intentId: string };
+  | { type: "retry"; kind: "retryFailed"; intentId: string }
+  | { type: "retry"; kind: "loginRetry"; accountId: string };
+
+export type AccountNoticeKey =
+  | "accounts.refreshFailed" | "accounts.switchFailed" | "accounts.addFailed" | "accounts.loginOpened"
+  | "accounts.claudeLoginStarted"
+  | ClaudeLoginErrKey;
 
 export interface AccountNotice {
   kind: "error" | "success";
   operation: AccountOperation;
-  messageKey: "accounts.refreshFailed" | "accounts.switchFailed" | "accounts.addFailed" | "accounts.loginOpened";
+  messageKey: AccountNoticeKey;
   target?: string;
   action: AccountRetryAction | null;
 }
 
 export function accountNoticeText(t: TFunction, notice: AccountNotice): string {
-  return notice.target ? t(notice.messageKey, { target: notice.target }) : t(notice.messageKey);
+  // A single carrier field feeds both the codex `{target}` copy and the claude
+  // `{label}` copy; interpolate() only substitutes placeholders the message uses.
+  return notice.target ? t(notice.messageKey, { target: notice.target, label: notice.target }) : t(notice.messageKey);
 }
 
 export function pendingDeviceAuth(accounts: AccountOption[]): DeviceAuth | null {
@@ -109,6 +197,15 @@ export interface EngineAccountsState extends EngineAccountsSnapshot {
   retryFailedMigration: () => Promise<boolean>;
   /** Toggles the per-engine auto-balancer. */
   setAutoBalance: (enabled: boolean) => Promise<boolean>;
+  /** Submits the pasted authorization code for a Claude login operation
+      (claude only; codex resolves `false`). Optimistically enters `verifying`. */
+  submitLoginCode: (operationId: string, code: string) => Promise<boolean>;
+  /** Cancels an in-flight Claude login operation (claude only). Optimistic
+      `canceling`; the account row is never removed. */
+  cancelLogin: (operationId: string) => Promise<boolean>;
+  /** Restarts sign-in for an existing managed Claude account (claude only) —
+      recovers a canceled/failed/broken account without deleting it. */
+  retryLogin: (accountId: string) => Promise<boolean>;
 }
 
 type Fetcher = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
@@ -146,8 +243,12 @@ function accountResponse(body: unknown, engine: Engine): EngineResponse {
   const section = (body as Record<string, unknown> | null)?.[engine] as { active?: unknown; accounts?: unknown; migration?: unknown; autoBalance?: unknown } | undefined;
   if (typeof section?.active !== "string" || !Array.isArray(section.accounts)) throw new Error("accounts response invalid");
   const accounts = section.accounts.map((raw): AccountOption => {
-    const account = raw as AccountOption & { effective?: unknown };
-    return { ...account, effective: parseEffective(account.effective) };
+    const account = raw as AccountOption & { effective?: unknown; login?: unknown };
+    const login = engine === "claude" ? parseClaudeLogin(account.login) : null;
+    // The phase is authoritative for pending state (C3): a nonterminal login
+    // keeps the row pending even when the server's raw `loginPending` lags.
+    const loginPending = login ? NONTERMINAL_CLAUDE_LOGIN_PHASES.has(login.phase) : account.loginPending === true;
+    return { ...account, login, loginPending, effective: parseEffective(account.effective) };
   });
   return {
     active: section.active,
@@ -163,6 +264,17 @@ function refreshFailure(): AccountNotice {
 
 function addFailure(label: string): AccountNotice {
   return { kind: "error", operation: "add", messageKey: "accounts.addFailed", action: { type: "retry", kind: "add", label } };
+}
+
+function codeOf(body: unknown): string | null {
+  const code = (body as { code?: unknown } | null)?.code;
+  return typeof code === "string" ? code : null;
+}
+
+/** A failed Claude add maps the route `code` to sanitized copy (C7) while keeping
+    the `add` retry action so the draft label survives (C10). */
+function claudeAddFailure(code: string | null | undefined, label: string): AccountNotice {
+  return { kind: "error", operation: "add", messageKey: claudeLoginErrKey(code), action: { type: "retry", kind: "add", label } };
 }
 
 /** A failed account switch retries by re-previewing the account target and
@@ -196,6 +308,7 @@ export function createEngineAccountsStore(
   let mutationQueued = false;
   let mutationQueue = Promise.resolve();
   let pollTimer: ReturnType<typeof setInterval> | null = null;
+  let pollIntervalMs: number | null = null;
   const listeners = new Set<() => void>();
 
   const emit = () => {
@@ -210,15 +323,30 @@ export function createEngineAccountsStore(
   const stopPolling = () => {
     if (pollTimer !== null) clearInterval(pollTimer);
     pollTimer = null;
+    pollIntervalMs = null;
+  };
+  /** The desired poll cadence, or `null` for none. A live Claude login polls
+      fast (2 500 ms) so the browser link and code state land within a beat; a
+      codex device login or a draining migration keeps the slower 10 000 ms. */
+  const desiredIntervalMs = (): number | null => {
+    if (listeners.size === 0) return null;
+    const fastLogin = snapshot.accounts.some(
+      (account) => account.login != null && NONTERMINAL_CLAUDE_LOGIN_PHASES.has(account.login.phase),
+    );
+    if (fastLogin) return 2_500;
+    if (snapshot.accounts.some((account) => account.loginPending) || snapshot.migration?.state === "draining") return 10_000;
+    return null;
   };
   const updatePolling = () => {
-    // Poll while a device login is in flight, or while a migration drains so the
-    // banner/ribbon counts stay ≤ one interval behind the coordinator.
-    const needsPoll =
-      listeners.size > 0 &&
-      (snapshot.accounts.some((account) => account.loginPending) || snapshot.migration?.state === "draining");
-    if (!needsPoll) return stopPolling();
-    if (pollTimer === null) pollTimer = setInterval(() => void refresh(), 10_000);
+    // Recompute only when the cadence class changes, so a steady phase never
+    // resets the interval mid-cycle.
+    const desired = desiredIntervalMs();
+    if (desired === pollIntervalMs) return;
+    stopPolling();
+    if (desired !== null) {
+      pollTimer = setInterval(() => void refresh(), desired);
+      pollIntervalMs = desired;
+    }
   };
   const abortRead = () => {
     requestGeneration += 1;
@@ -281,24 +409,60 @@ export function createEngineAccountsStore(
           headers: { "content-type": "application/json" },
           body: JSON.stringify({ label: trimmed }),
         });
-        const body = await response.json().catch(() => null) as { account?: { id?: unknown; label?: unknown; authPresent?: unknown; loginPending?: unknown }; target?: unknown } | null;
-        if (!response.ok || typeof body?.account?.id !== "string" || typeof body.account.label !== "string" || typeof body.target !== "string") throw new Error("account creation failed");
-        const created: AccountOption = {
-          id: body.account.id,
-          label: body.account.label,
-          authPresent: body.account.authPresent === true,
-          loginPending: body.account.loginPending === true,
-          loginState: body.account.loginPending === true ? "pending" : "idle",
-          deviceAuth: null,
-        };
-        const accounts = snapshot.accounts.some((account) => account.id === created.id) ? snapshot.accounts : [...snapshot.accounts, created];
-        patchSnapshot({
-          accounts,
-          challenge: pendingDeviceAuth(accounts),
-          notice: { kind: "success", operation: "add", messageKey: "accounts.loginOpened", target: body.target, action: null },
-        });
+        const body = await response.json().catch(() => null) as {
+          account?: { id?: unknown; label?: unknown; authPresent?: unknown; loginPending?: unknown };
+          login?: unknown; target?: unknown; code?: unknown;
+        } | null;
+        if (engine === "claude") {
+          // Claude's create returns 202 { account, login } — `target` is a
+          // transitional field the new client ignores (Sol/Fable answer 1).
+          if (!response.ok) {
+            patchSnapshot({ notice: claudeAddFailure(codeOf(body), trimmed) });
+            await refresh();
+            return false;
+          }
+          const login = parseClaudeLogin(body?.login);
+          if (typeof body?.account?.id !== "string" || typeof body.account.label !== "string" || !login) throw new Error("account creation failed");
+          const created: AccountOption = {
+            id: body.account.id,
+            label: body.account.label,
+            kind: "managed",
+            authPresent: body.account.authPresent === true,
+            login,
+            loginPending: NONTERMINAL_CLAUDE_LOGIN_PHASES.has(login.phase),
+            loginState: "pending",
+            deviceAuth: null,
+          };
+          // Upsert by id so a raced refresh never duplicates the optimistic row.
+          const accounts = snapshot.accounts.some((account) => account.id === created.id)
+            ? snapshot.accounts.map((account) => (account.id === created.id ? { ...account, ...created } : account))
+            : [...snapshot.accounts, created];
+          patchSnapshot({
+            accounts,
+            challenge: pendingDeviceAuth(accounts),
+            notice: { kind: "success", operation: "add", messageKey: "accounts.claudeLoginStarted", target: created.label, action: null },
+          });
+        } else {
+          // Codex keeps the existing device-login contract: a string `target`.
+          if (!response.ok || typeof body?.account?.id !== "string" || typeof body.account.label !== "string" || typeof body.target !== "string") throw new Error("account creation failed");
+          const created: AccountOption = {
+            id: body.account.id,
+            label: body.account.label,
+            authPresent: body.account.authPresent === true,
+            loginPending: body.account.loginPending === true,
+            loginState: body.account.loginPending === true ? "pending" : "idle",
+            deviceAuth: null,
+            login: null,
+          };
+          const accounts = snapshot.accounts.some((account) => account.id === created.id) ? snapshot.accounts : [...snapshot.accounts, created];
+          patchSnapshot({
+            accounts,
+            challenge: pendingDeviceAuth(accounts),
+            notice: { kind: "success", operation: "add", messageKey: "accounts.loginOpened", target: body.target, action: null },
+          });
+        }
       } catch {
-        patchSnapshot({ notice: addFailure(trimmed) });
+        patchSnapshot({ notice: engine === "claude" ? claudeAddFailure(null, trimmed) : addFailure(trimmed) });
         await refresh();
         return false;
       }
@@ -426,6 +590,101 @@ export function createEngineAccountsStore(
     });
   };
 
+  /** Optimistic in-place patch of one account's live login op, keyed by operation
+      id, re-deriving `loginPending` from the new phase. */
+  const patchAccountLogin = (operationId: string, updater: (login: ClaudeLoginView) => ClaudeLoginView) => {
+    const accounts = snapshot.accounts.map((account) => {
+      if (!account.login || account.login.operationId !== operationId) return account;
+      const login = updater(account.login);
+      return { ...account, login, loginPending: NONTERMINAL_CLAUDE_LOGIN_PHASES.has(login.phase) };
+    });
+    patchSnapshot({ accounts });
+  };
+
+  const submitLoginCode = (operationId: string, code: string): Promise<boolean> => {
+    if (engine !== "claude") return Promise.resolve(false);
+    const trimmed = code.trim();
+    if (!trimmed) return Promise.resolve(false);
+    return runMutation("login", async () => {
+      // Optimistically enter verifying so the code field yields to a spinner and
+      // no second submit is possible; the next refresh reconciles the truth.
+      patchAccountLogin(operationId, (login) => ({ ...login, phase: "verifying", acceptsCode: false }));
+      try {
+        const response = await fetcher(`/api/accounts/claude/login/${encodeURIComponent(operationId)}/input`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ code: trimmed }),
+        });
+        if (!response.ok) {
+          patchSnapshot({ notice: { kind: "error", operation: "login", messageKey: "accounts.claudeLogin.err.input_failed", action: null } });
+          await refresh();
+          return false;
+        }
+      } catch {
+        patchSnapshot({ notice: { kind: "error", operation: "login", messageKey: "accounts.claudeLogin.err.input_failed", action: null } });
+        await refresh();
+        return false;
+      }
+      await refresh();
+      return true;
+    });
+  };
+
+  const cancelLogin = (operationId: string): Promise<boolean> => {
+    if (engine !== "claude") return Promise.resolve(false);
+    return runMutation("login", async () => {
+      patchAccountLogin(operationId, (login) => ({ ...login, phase: "canceling", acceptsCode: false }));
+      try {
+        const response = await fetcher(`/api/accounts/claude/login/${encodeURIComponent(operationId)}`, { method: "DELETE" });
+        if (!response.ok) throw new Error("cancel failed");
+      } catch {
+        // A failed cancel keeps the account and restores real state from the read.
+        await refresh();
+        return false;
+      }
+      await refresh();
+      return true;
+    });
+  };
+
+  const retryLogin = (accountId: string): Promise<boolean> => {
+    if (engine !== "claude") return Promise.resolve(false);
+    return runMutation("login", async () => {
+      try {
+        const response = await fetcher(addUrl, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ action: "retry", id: accountId }),
+        });
+        const body = await response.json().catch(() => null) as { account?: { id?: unknown }; login?: unknown } | null;
+        if (response.status === 409) {
+          // Another sign-in already holds the supervisor: surface it, keep the row.
+          patchSnapshot({ notice: { kind: "error", operation: "login", messageKey: "accounts.claudeLogin.err.login_busy", action: null } });
+          return false;
+        }
+        const login = parseClaudeLogin(body?.login);
+        if (response.status !== 202 || !login) throw new Error("login retry failed");
+        // Replace the account's login op in place — the row is never removed (C8).
+        const label = snapshot.accounts.find((account) => account.id === accountId)?.label ?? accountId;
+        const accounts = snapshot.accounts.map((account) =>
+          account.id === accountId
+            ? { ...account, login, authPresent: false, loginState: "pending" as const, loginPending: NONTERMINAL_CLAUDE_LOGIN_PHASES.has(login.phase) }
+            : account,
+        );
+        patchSnapshot({
+          accounts,
+          notice: { kind: "success", operation: "login", messageKey: "accounts.claudeLoginStarted", target: label, action: null },
+        });
+      } catch {
+        patchSnapshot({ notice: { kind: "error", operation: "login", messageKey: "accounts.claudeLogin.err.generic", action: { type: "retry", kind: "loginRetry", accountId } } });
+        await refresh();
+        return false;
+      }
+      await refresh();
+      return true;
+    });
+  };
+
   const retryNotice = async (): Promise<boolean> => {
     const action = snapshot.notice?.action;
     if (!action) return false;
@@ -434,6 +693,8 @@ export function createEngineAccountsStore(
         return refresh();
       case "add":
         return add(action.label);
+      case "loginRetry":
+        return retryLogin(action.accountId);
       case "migrate": {
         // A migrate retry re-fences against a fresh preview revision: the stored
         // one is stale once the intent moved on or another switch raced, so it
@@ -487,6 +748,9 @@ export function createEngineAccountsStore(
     stopMigration,
     retryFailedMigration,
     setAutoBalance,
+    submitLoginCode,
+    cancelLogin,
+    retryLogin,
   };
 }
 
@@ -521,5 +785,8 @@ export function useEngineAccounts(engine: Engine): EngineAccountsState {
     stopMigration: store.stopMigration,
     retryFailedMigration: store.retryFailedMigration,
     setAutoBalance: store.setAutoBalance,
+    submitLoginCode: store.submitLoginCode,
+    cancelLogin: store.cancelLogin,
+    retryLogin: store.retryLogin,
   };
 }

@@ -1,7 +1,8 @@
 import { expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import type { EngineAccountsState } from "@/hooks/useEngineAccounts";
+import type { ClaudeLoginView, EngineAccountsState } from "@/hooks/useEngineAccounts";
+import { translate } from "@/lib/i18n";
 
 import { AccountsPanel } from "./AccountsPanel";
 
@@ -27,6 +28,9 @@ const base = (over: Partial<EngineAccountsState> = {}): EngineAccountsState => (
   stopMigration: async () => true,
   retryFailedMigration: async () => true,
   setAutoBalance: async () => true,
+  submitLoginCode: async () => true,
+  cancelLogin: async () => true,
+  retryLogin: async () => true,
   ...over,
 });
 
@@ -141,4 +145,97 @@ test("a terminal migration that still has failures keeps the bulk Retry-failed c
   expect(html).not.toContain("Stop migration");
   // The misleading "all sessions moved" settle line is suppressed while failures remain.
   expect(html).not.toContain("All Codex sessions now on «Work»");
+});
+
+// ── Issue #61 — Claude login slice render coverage (Fable contract C12) ──────
+
+const loginView = (over: Partial<ClaudeLoginView> = {}): ClaudeLoginView => ({
+  operationId: "op1", phase: "awaiting_code", loginUrl: "https://claude.ai/login", acceptsCode: true,
+  deadlineAt: "2026-07-10T12:00:00.000Z", result: null, ...over,
+});
+const claudeState = (login: ClaudeLoginView | null, over: Partial<EngineAccountsState> = {}): EngineAccountsState =>
+  base({
+    engine: "claude",
+    active: "main",
+    accounts: [{ id: "acc", label: "Acc", kind: "managed", authPresent: false, loginPending: login != null, loginState: "pending", deviceAuth: null, login }],
+    ...over,
+  });
+
+test("awaiting_code renders the browser link, bounded code input, hint, and Cancel", () => {
+  const html = render(claudeState(loginView()));
+  expect(html).toContain('href="https://claude.ai/login"');
+  expect(html).toContain('target="_blank"');
+  expect(html).toContain("noreferrer noopener");
+  expect(html).toContain("Open claude.ai sign-in");
+  expect(html).toContain('maxLength="8192"');
+  expect(html).toContain("Paste the code from the browser"); // placeholder
+  expect(html).toContain("After signing in, copy the code"); // hint
+  expect(html).toContain('role="group"');
+  expect(html).toContain("Acc sign-in"); // group aria-label
+  // Empty code disables the submit; the Cancel affordance is present.
+  expect(/<button[^>]*disabled[^>]*>Submit code<\/button>/.test(html)).toBeTrue();
+  expect(html).toContain("Cancel");
+});
+
+test("starting and verifying show a spinner line and Cancel but never the browser link", () => {
+  const starting = render(claudeState(loginView({ phase: "starting", loginUrl: null, acceptsCode: false })));
+  expect(starting).toContain("Starting sign-in…");
+  expect(starting).toContain("animate-spin");
+  expect(starting).not.toContain("Open claude.ai sign-in");
+  expect(starting).not.toContain("claude.ai/login");
+  const verifying = render(claudeState(loginView({ phase: "verifying", loginUrl: null, acceptsCode: false })));
+  expect(verifying).toContain("Verifying…");
+  expect(verifying).not.toContain("Open claude.ai sign-in");
+  expect(verifying).toContain("Cancel");
+});
+
+test("canceling shows its spinner line with all actions withdrawn", () => {
+  const html = render(claudeState(loginView({ phase: "canceling", loginUrl: null, acceptsCode: false })));
+  expect(html).toContain("Canceling…");
+  // Cancel is withdrawn in the canceling phase (nothing left to cancel).
+  expect(/<button[^>]*>Cancel<\/button>/.test(html)).toBeFalse();
+});
+
+test("a terminal failure renders sanitized copy in an alert plus Retry, never the raw message", () => {
+  const html = render(claudeState(loginView({ phase: "timed_out", loginUrl: null, acceptsCode: false, result: { status: "failure", code: "timed_out", message: "raw internal detail" } })));
+  expect(html).toContain('role="alert"');
+  expect(html).toContain("Sign-in timed out.");
+  expect(html).not.toContain("raw internal detail"); // server message never rendered
+  expect(html).toContain("Retry");
+});
+
+test("an unknown failure code falls back to the generic sanitized line", () => {
+  const html = render(claudeState(loginView({ phase: "failed", loginUrl: null, acceptsCode: false, result: { status: "failure", code: "persistence_failed", message: "secret path" } })));
+  expect(html).toContain("Sign-in could not start. Try again.");
+  expect(html).not.toContain("secret path");
+});
+
+test("a managed unauthenticated account with no live login offers Sign in", () => {
+  const html = render(claudeState(null));
+  expect(html).toContain("Sign in");
+  // A legacy account never gets the managed sign-in affordance.
+  const legacy = render(claudeState(null, { accounts: [{ id: "acc", label: "Acc", kind: "legacy", authPresent: false, loginPending: false, loginState: "idle", deviceAuth: null, login: null }] }));
+  expect(legacy).not.toContain(">Sign in<");
+});
+
+test("a live claude login disables the Add-account submit (no second sign-in races)", () => {
+  const html = render(claudeState(loginView()));
+  // The add form's submit ("Add") is disabled while a login is nonterminal.
+  expect(/<button[^>]*type="submit"[^>]*disabled[^>]*>Add<\/button>/.test(html)).toBeTrue();
+});
+
+test("the panel carries one polite live region for sign-in announcements", () => {
+  const html = render(claudeState(loginView()));
+  expect(html).toContain('class="sr-only"');
+  expect(html).toContain('aria-live="polite"');
+});
+
+test("uk-locale smoke: every new claude login key resolves and interpolates in Ukrainian", () => {
+  expect(translate("uk", "accounts.claudeLoginStarted", { label: "Робочий" })).toBe("Вхід для Робочий розпочато");
+  expect(translate("uk", "accounts.claudeLogin.openLink")).toBe("Відкрити вхід claude.ai");
+  expect(translate("uk", "accounts.claudeLogin.codeHint")).toContain("claude.ai");
+  expect(translate("uk", "accounts.claudeLogin.err.timed_out")).toBe("Час на вхід вичерпано.");
+  expect(translate("uk", "accounts.claudeLogin.err.generic")).toBe("Не вдалося почати вхід. Спробуй ще раз.");
+  expect(translate("uk", "accounts.claudeLogin.announceCodeReady", { label: "Робочий" })).toContain("Робочий");
+  expect(translate("uk", "accounts.claudeLogin.announceCodeReady", { label: "Робочий" })).not.toContain("{label}");
 });

@@ -11,6 +11,11 @@ import type { DurableQuotaObservation, MigrationEngine } from "@/lib/accounts/mi
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+/** Every nonterminal Claude login phase keeps the account pending so all
+    consumers poll until sign-in settles (issue #61 C3). The upgraded client
+    re-derives this from the typed login phase regardless. */
+const CLAUDE_LOGIN_PENDING_PHASES = new Set(["starting", "awaiting_browser", "awaiting_code", "verifying", "canceling"]);
+
 function liveFreshObservation(observation: DurableQuotaObservation | undefined, now: number): boolean {
   if (!observation?.authenticated || observation.provenance.source !== "live") return false;
   const observedAge = now - Date.parse(observation.observedAt);
@@ -120,18 +125,21 @@ export async function GET() {
       ...accountProjection(codexObservations[account.id], account.authPresent, now),
     };
   });
-  const claudeAccounts = listClaudeAccounts().map((account) => ({
-    id: account.id,
-    label: account.label,
-    kind: account.kind,
-    authPresent: account.authPresent,
-    loginPending: claudeLoginSupervisor.forAccount(account.id)?.phase === "awaiting_browser",
-    loginState: account.authPresent ? "authenticated" : "idle",
-    attemptState: null,
-    deviceAuth: null,
-    ...accountProjection(claudeObservations[account.id], account.authPresent, now),
-    login: claudeLoginSupervisor.forAccount(account.id),
-  }));
+  const claudeAccounts = listClaudeAccounts().map((account) => {
+    const login = claudeLoginSupervisor.forAccount(account.id);
+    return {
+      id: account.id,
+      label: account.label,
+      kind: account.kind,
+      authPresent: account.authPresent,
+      loginPending: login ? CLAUDE_LOGIN_PENDING_PHASES.has(login.phase) : false,
+      loginState: account.authPresent ? "authenticated" : "idle",
+      attemptState: null,
+      deviceAuth: null,
+      ...accountProjection(claudeObservations[account.id], account.authPresent, now),
+      login,
+    };
+  });
   const codexMigration = migrationProjection("codex", snapshot);
   const claudeMigration = migrationProjection("claude", snapshot);
   const codexAuto = autoBalanceProjection("codex", snapshot, now);
