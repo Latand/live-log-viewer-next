@@ -3,11 +3,8 @@ import { createHash } from "node:crypto";
 import { NextResponse } from "next/server";
 
 import { listFilesWithProjectCatalog } from "@/lib/scanner";
-import { readTranscriptHosts } from "@/lib/agent/transcriptHost";
-import { pidAlive, readPpid } from "@/lib/scanner/process";
 import { loadFlows } from "@/lib/flows/store";
-import { pathForPanePid, reconcileTasks } from "@/lib/tasks/reconcile";
-import { mutateTasks } from "@/lib/tasks/store";
+import { loadTasks } from "@/lib/tasks/store";
 import { loadWorkflows } from "@/lib/workflows/store";
 import { filterWorkflowsForFileScan } from "@/lib/workflows/visibility";
 import type { FilesResponse } from "@/lib/types";
@@ -19,19 +16,9 @@ export async function GET(request: Request): Promise<NextResponse> {
   const url = new URL(request.url);
   const selectedProject = url.searchParams.get("project")?.trim() || undefined;
   const { files, projectCatalog } = await listFilesWithProjectCatalog(selectedProject);
-  /* This is the scanner-refresh reconciliation point. A failed tmux probe is
-     represented by the resolver and preserves durable rows for a later retry. */
-  await readTranscriptHosts(true);
-  /* Reconciliation runs inside the serialized read-modify-write: the file
-     scan above is the slow part, so a task edit landing during it is picked
-     up by this fresh load instead of being overwritten by a stale snapshot. */
-  const tasks = mutateTasks((current) => {
-    const reconciled = reconcileTasks(files, current, {
-      pathForPanePid: (panePid, entries) => pathForPanePid(entries, panePid, readPpid),
-      panePidAlive: pidAlive,
-    });
-    return { tasks: reconciled.dirty ? reconciled.tasks : undefined, result: reconciled.tasks };
-  });
+  // A scan is a read model. Runtime reconciliation and notifications belong to
+  // the external scheduler, keeping repeated GETs byte-stable for state files.
+  const tasks = loadTasks();
   const workflows = filterWorkflowsForFileScan(loadWorkflows(), files);
   const body = JSON.stringify({ files, projectCatalog, flows: loadFlows(), workflows, tasks } satisfies FilesResponse);
   /* The client re-polls every 10 s and this ~410 KB payload is usually

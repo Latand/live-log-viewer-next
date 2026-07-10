@@ -64,6 +64,12 @@ export interface AppServerNotification {
   params: unknown;
 }
 
+export interface AppServerRequest {
+  id: string | number;
+  method: string;
+  params: unknown;
+}
+
 export interface CodexAppServerLifecycleEvent {
   type: "failed" | "closed" | "reaped";
   error?: CodexAppServerError;
@@ -152,6 +158,7 @@ interface PendingRequest {
 export class CodexAppServerClient {
   private readonly pending = new Map<number, PendingRequest>();
   private readonly notificationListeners = new Set<(notification: AppServerNotification) => void>();
+  private readonly requestListeners = new Set<(request: AppServerRequest) => unknown | Promise<unknown>>();
   private readonly lifecycleListeners = new Set<(event: CodexAppServerLifecycleEvent) => void>();
   private nextId = 1;
   private stdoutBuffer = "";
@@ -207,6 +214,12 @@ export class CodexAppServerClient {
   onNotification(listener: (notification: AppServerNotification) => void): () => void {
     this.notificationListeners.add(listener);
     return () => this.notificationListeners.delete(listener);
+  }
+
+  /** Handles app-server approval and question requests without sacrificing the transport. */
+  onRequest(listener: (request: AppServerRequest) => unknown | Promise<unknown>): () => void {
+    this.requestListeners.add(listener);
+    return () => this.requestListeners.delete(listener);
   }
 
   onLifecycle(listener: (event: CodexAppServerLifecycleEvent) => void): () => void {
@@ -335,7 +348,18 @@ export class CodexAppServerClient {
     }
     if (typeof message.method === "string") {
       if ("id" in message) {
-        this.fail(protocolError(`received unsupported server request: ${message.method}`));
+        if (typeof message.id !== "string" && (typeof message.id !== "number" || !Number.isInteger(message.id))) {
+          this.fail(protocolError(`server request ${message.method} has an invalid id`));
+          return;
+        }
+        const listener = this.requestListeners.values().next().value as ((request: AppServerRequest) => unknown | Promise<unknown>) | undefined;
+        if (!listener) {
+          this.write({ jsonrpc: "2.0", id: message.id, error: { code: -32601, message: "Viewer has no handler for this request" } });
+          return;
+        }
+        Promise.resolve(listener({ id: message.id, method: message.method, params: message.params }))
+          .then((result) => this.write({ jsonrpc: "2.0", id: message.id, result: result ?? {} }))
+          .catch((error) => this.write({ jsonrpc: "2.0", id: message.id, error: { code: -32000, message: redact(error instanceof Error ? error.message : "request handler failed") } }));
         return;
       }
       const notification = { method: message.method, params: message.params };

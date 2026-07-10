@@ -1,10 +1,6 @@
 import type { FileEntry, ProjectCatalogEntry } from "../types";
-import { notifyQuestion } from "../push";
 import { resolveTarget } from "../tmux";
 import { activityVerdict } from "./activity";
-import { tickFlows } from "../flows/engine";
-import { tickTaskInbox } from "../tasks/inboxScanner";
-import { tickWorkflows } from "../workflows/engine";
 import { ctxFor } from "./context";
 import { discoverFiles, discoverFilesWithProjectCatalog } from "./discover";
 import { entryEffort } from "./effort";
@@ -123,14 +119,6 @@ async function listFilesInternal(
     entry.goal = goalFor(entry);
     entry.ctx = ctxFor(entry);
   });
-  await forEachEntryYielding(entries, (entry) => {
-    if (entry.pendingQuestion || entry.waitingInput) void notifyQuestion(entry);
-  });
-  await linkEntries(entries);
-  await tickFlows(entries);
-  /* Workflows tick after flows: a workflow watching its embedded flow sees
-     the state that same poll just produced. */
-  await tickWorkflows(entries);
-  tickTaskInbox(entries);
+  await linkEntries(entries, { persist: false });
   return { files: entries, projectCatalog: scan.projectCatalog };
 }

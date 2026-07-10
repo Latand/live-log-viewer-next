@@ -16,6 +16,9 @@ import { resolveSpawnedTranscriptPath } from "@/lib/agent/spawnedTranscript";
 import { headCwd } from "@/lib/agent/transcript";
 import { persistHandoffLineage, rememberHandoffChild, rememberHandoffPane } from "@/lib/handoffLineage";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
+import { runtimeHostClient } from "@/lib/runtime/client";
+import { newOperationId, runtimeScope, viewerConversationId } from "@/lib/runtime/contracts";
+import { runtimeEventsEnabled } from "@/lib/runtime/flags";
 import { listFiles } from "@/lib/scanner";
 import { projectForCwd } from "@/lib/scanner/describe";
 import { claudeProjectRootFor, codexSessionRootFor } from "@/lib/scanner/roots";
@@ -125,6 +128,10 @@ function parentFromBody(body: { src?: unknown; parent?: unknown }): string {
   return typeof body.src === "string" ? body.src : "";
 }
 
+function conversationForTranscript(transcript: string): string {
+  return viewerConversationId(codexSessionRootFor(transcript) ? "codex" : "claude", transcript);
+}
+
 export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse | ApiError>> {
   const rejection = rejectCrossOrigin(req);
   if (rejection) return rejection;
@@ -173,6 +180,19 @@ export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse
     const bundle = buildImagePayload(prompt, images);
     imagePaths = bundle.imagePaths;
     const account = accountManager.resolveSpawn(engine, body.accountId);
+    const runtimeClient = runtimeEventsEnabled() ? runtimeHostClient() : null;
+    const operationId = runtimeClient ? newOperationId() : null;
+    const src = parentFromBody(body);
+    if (runtimeEventsEnabled() && !runtimeClient) throw new Error("runtime host socket is unavailable");
+    if (runtimeClient && operationId) {
+      await runtimeClient.operation({
+        scope: runtimeScope("operation", operationId),
+        kind: "spawn.intent",
+        operationId,
+        producerKey: `viewer-spawn:${operationId}`,
+        payload: { engine, cwd, accountId: account.accountId, parentConversationId: src && transcriptAllowed(src) ? conversationForTranscript(src) : null },
+      });
+    }
     const spec = freshSpecFor(engine, cwd, {
       model: selectedModel.model,
       effort: reasoning.effort,
@@ -209,7 +229,20 @@ export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse
         pendingAction: "spawn",
       });
     }
-    const src = parentFromBody(body);
+    if (runtimeClient && operationId) {
+      const childConversationId = viewerConversationId(engine, childPath);
+      await runtimeClient.append({
+        scope: runtimeScope("edge", operationId),
+        kind: "edge.created",
+        producerKey: `viewer-spawn-edge:${operationId}`,
+        payload: {
+          edge: "viewer_spawn",
+          childConversationId,
+          parentConversationId: src && transcriptAllowed(src) ? conversationForTranscript(src) : null,
+          operationId,
+        },
+      });
+    }
     if (src && transcriptAllowed(src)) {
       if (childPath) rememberHandoffChild(childPath, src);
       if (pane.panePid) rememberHandoffPane(pane.panePid, src);
