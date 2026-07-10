@@ -6,11 +6,15 @@ import {
   CONFIRM_ATTENTION_MS,
   SLOW_BOOT_MS,
   type SpawnAttempt,
+  applySpawnOutcome,
   classifySpawnResponse,
   classifyTransportLoss,
+  createSpawnAttempt,
   displayPhase,
+  hasRecoverableRequest,
   matchSpawnedFile,
   sendEnabled,
+  spawnRequestBody,
 } from "./draftSpawn";
 
 function mkFile(partial: Partial<FileEntry> & { path: string }): FileEntry {
@@ -44,6 +48,17 @@ const baseAttempt: SpawnAttempt = {
   launchId: "launch-1",
   prompt: "do the thing",
   hasImages: false,
+  request: {
+    engine: "codex",
+    model: "gpt-5.6",
+    cwd: "/repo",
+    effort: "high",
+    fast: false,
+    accountId: "terra",
+    prompt: "do the thing",
+    images: [],
+    src: "",
+  },
   engine: "codex",
   src: "",
   phase: "confirming",
@@ -137,13 +152,13 @@ describe("matchSpawnedFile — adoption evidence, strongest first", () => {
   test("same-card adoption by exact settled path", () => {
     const files = [mkFile({ path: "/a.jsonl", mtime: 1 }), mkFile({ path: "/b.jsonl", mtime: 1 })];
     const attempt = { ...baseAttempt, path: "/b.jsonl" };
-    expect(matchSpawnedFile(attempt, null, files)?.path).toBe("/b.jsonl");
+    expect(matchSpawnedFile(attempt, files)?.path).toBe("/b.jsonl");
   });
 
   test("no exact path match yet → null (waits, does not grab a stranger)", () => {
     const files = [mkFile({ path: "/a.jsonl", mtime: 1 })];
     const attempt = { ...baseAttempt, path: "/b.jsonl" };
-    expect(matchSpawnedFile(attempt, null, files)).toBeNull();
+    expect(matchSpawnedFile(attempt, files)).toBeNull();
   });
 
   test("path-null confirming adopts by exact conversation id", () => {
@@ -152,53 +167,71 @@ describe("matchSpawnedFile — adoption evidence, strongest first", () => {
       mkFile({ path: "/mine.jsonl", conversationId: "conversation_9", mtime: 2_000_000_000 }),
     ];
     const attempt = { ...baseAttempt, path: null, conversationId: "conversation_9" };
-    expect(matchSpawnedFile(attempt, null, files)?.path).toBe("/mine.jsonl");
+    expect(matchSpawnedFile(attempt, files)?.path).toBe("/mine.jsonl");
   });
 
-  test("codex slow-boot heuristic: first fresh root rollout after the launch moment, not already on disk", () => {
+  test("simultaneous same-cwd drafts do not adopt each other's fresh transcript", () => {
     const secondsAt = baseAttempt.at / 1000;
-    const known = new Set(["/old.jsonl"]);
     const files = [
-      mkFile({ path: "/old.jsonl", mtime: secondsAt + 5 }), // pre-existing → excluded by known-set
-      mkFile({ path: "/fresh.jsonl", mtime: secondsAt + 5 }),
+      mkFile({ path: "/other-draft.jsonl", mtime: secondsAt + 5, conversationId: "conversation_other" }),
     ];
     const attempt = { ...baseAttempt, path: null, conversationId: null };
-    expect(matchSpawnedFile(attempt, known, files)?.path).toBe("/fresh.jsonl");
+    expect(matchSpawnedFile(attempt, files)).toBeNull();
   });
 
-  test("duplicate/concurrent guard: a rollout older than the launch floor is never adopted", () => {
-    const secondsAt = baseAttempt.at / 1000;
-    const files = [mkFile({ path: "/stale.jsonl", mtime: secondsAt - 120 })];
-    const attempt = { ...baseAttempt, path: null, conversationId: null };
-    expect(matchSpawnedFile(attempt, null, files)).toBeNull();
+  test("a receipt path remains authoritative when another draft has the same cwd", () => {
+    const files = [
+      mkFile({ path: "/other-draft.jsonl", conversationId: "conversation_other" }),
+      mkFile({ path: "/mine.jsonl", conversationId: "conversation_mine" }),
+    ];
+    expect(matchSpawnedFile({ ...baseAttempt, conversationId: "conversation_mine" }, files)?.path).toBe("/mine.jsonl");
+  });
+});
+
+describe("durable request recovery", () => {
+  test("reload during POST retains attempt id, launch timestamp, and exact attachment payload", () => {
+    const attempt = createSpawnAttempt("attempt_reload_1", 2_000_000_000_123, {
+      ...baseAttempt.request!,
+      prompt: "inspect these",
+      images: [{ base64: "aGVsbG8=", mime: "image/png" }],
+    });
+    expect(hasRecoverableRequest(attempt)).toBe(true);
+    expect(spawnRequestBody(attempt)).toEqual({
+      engine: "codex",
+      model: "gpt-5.6",
+      cwd: "/repo",
+      effort: "high",
+      fast: false,
+      accountId: "terra",
+      prompt: "inspect these",
+      images: [{ base64: "aGVsbG8=", mime: "image/png" }],
+      clientAttemptId: "attempt_reload_1",
+    });
+    expect(attempt.at).toBe(2_000_000_000_123);
   });
 
-  test("reload recovery: with the known-set gone, the mtime floor alone still matches", () => {
-    const secondsAt = baseAttempt.at / 1000;
-    const files = [mkFile({ path: "/fresh.jsonl", mtime: secondsAt + 1 })];
-    const attempt = { ...baseAttempt, path: null, conversationId: null };
-    expect(matchSpawnedFile(attempt, null, files)?.path).toBe("/fresh.jsonl");
+  test("transport loss re-POST uses the same id and exact original request", () => {
+    const attempt = createSpawnAttempt("attempt_transport_1", 2_000_000_000_123, baseAttempt.request!);
+    const before = spawnRequestBody(attempt);
+    expect(classifyTransportLoss().kind).toBe("ambiguous");
+    const replay = spawnRequestBody(attempt);
+    expect(replay).toEqual(before);
+    expect(replay.clientAttemptId).toBe("attempt_transport_1");
   });
 
-  test("transport-loss claude launch adopts a fresh claude-projects transcript", () => {
-    const secondsAt = baseAttempt.at / 1000;
-    const files = [mkFile({ path: "/c.jsonl", engine: "claude", root: "claude-projects", mtime: secondsAt + 1 })];
-    const attempt = { ...baseAttempt, engine: "claude" as const, path: null, conversationId: null };
-    expect(matchSpawnedFile(attempt, null, files)?.path).toBe("/c.jsonl");
-  });
-
-  test("a handoff spawn accepts a fresh rollout linked under its source parent", () => {
-    const secondsAt = baseAttempt.at / 1000;
-    const files = [mkFile({ path: "/child.jsonl", parent: "/src.jsonl", mtime: secondsAt + 1 })];
-    const attempt = { ...baseAttempt, path: null, conversationId: null, src: "/src.jsonl" };
-    expect(matchSpawnedFile(attempt, null, files)?.path).toBe("/child.jsonl");
-  });
-
-  test("a handoff spawn ignores an unrelated fresh rollout under a different parent", () => {
-    const secondsAt = baseAttempt.at / 1000;
-    const files = [mkFile({ path: "/other.jsonl", parent: "/elsewhere.jsonl", mtime: secondsAt + 1 })];
-    const attempt = { ...baseAttempt, path: null, conversationId: null, src: "/src.jsonl" };
-    expect(matchSpawnedFile(attempt, null, files)).toBeNull();
+  test("receipt replay enriches the persisted attempt without changing its recovery data", () => {
+    const attempt = createSpawnAttempt("attempt_receipt_1", 2_000_000_000_123, baseAttempt.request!);
+    const outcome = classifySpawnResponse(200, true, {
+      ok: true,
+      state: "settled",
+      path: "/mine.jsonl",
+      conversationId: "conversation_mine",
+      launchId: "launch-mine",
+      target: "agents:1.0",
+    });
+    if (outcome.kind !== "launched") throw new Error("expected receipt response");
+    const settled = applySpawnOutcome(attempt, outcome);
+    expect(settled).toMatchObject({ at: attempt.at, clientAttemptId: attempt.clientAttemptId, request: attempt.request, path: "/mine.jsonl", conversationId: "conversation_mine" });
   });
 });
 

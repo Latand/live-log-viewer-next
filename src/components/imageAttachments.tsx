@@ -86,6 +86,7 @@ export function useImageAttachments(handlers: { onError: (message: string) => vo
     handlePaste,
     removeAt: (idx: number) => setImages((prev) => prev.filter((_, i) => i !== idx)),
     clear: () => setImages([]),
+    replace: (next: PendingImage[]) => setImages(next),
   };
 }
 

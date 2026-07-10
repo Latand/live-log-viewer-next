@@ -23,6 +23,27 @@ export type DraftPhase = "draft" | "launching" | "booting" | "booting-slow" | "c
     dismissed or the transcript is adopted. `draft`/`launching` persist nothing. */
 export type DurablePhase = "booting" | "confirming" | "attention";
 
+/** The exact attachment payload accepted by the spawn route. Keeping it with
+    the attempt lets a reload replay the same request without inventing a new
+    launch shape. */
+export interface SpawnImage {
+  base64: string;
+  mime: string;
+}
+
+/** Request fields that must survive a reload while POST is in flight. */
+export interface RecoverableSpawnRequest {
+  engine: DraftEngine;
+  model: string;
+  cwd: string;
+  effort: string;
+  fast: boolean | null;
+  accountId: string;
+  prompt: string;
+  images: SpawnImage[];
+  src: string;
+}
+
 /** The persisted record of an in-flight or unsettled launch. Its presence is
     the single source of truth for "a worker may exist" — send stays disabled,
     the prompt/images stay shown, and the copy discourages relaunch. */
@@ -47,10 +68,82 @@ export interface SpawnAttempt {
   prompt: string;
   /** Whether the prompt carried pasted images (shown as a placeholder). */
   hasImages: boolean;
+  /** Exact POST data for idempotent recovery. Legacy records have no request
+      payload and remain frozen because their identity cannot be reconstructed. */
+  request: RecoverableSpawnRequest | null;
   engine: DraftEngine;
   /** Handoff source transcript, or "" for a plain draft. */
   src: string;
   phase: DurablePhase;
+}
+
+export function createSpawnAttempt(clientAttemptId: string, at: number, request: RecoverableSpawnRequest): SpawnAttempt & { request: RecoverableSpawnRequest } {
+  return {
+    clientAttemptId,
+    at,
+    target: "",
+    path: null,
+    conversationId: null,
+    launchId: null,
+    prompt: request.prompt.trim(),
+    hasImages: request.images.length > 0,
+    request,
+    engine: request.engine,
+    src: request.src,
+    phase: "confirming",
+  };
+}
+
+/** Validates records before a reload replays them. Missing or altered fields
+    leave the card frozen rather than issuing a broad substitute launch. */
+export function hasRecoverableRequest(attempt: SpawnAttempt): attempt is SpawnAttempt & { request: RecoverableSpawnRequest } {
+  const request = attempt.request;
+  return Boolean(
+    request &&
+    (request.engine === "claude" || request.engine === "codex") &&
+    request.engine === attempt.engine &&
+    typeof request.model === "string" &&
+    typeof request.cwd === "string" && request.cwd.length > 0 &&
+    typeof request.effort === "string" &&
+    (request.fast === null || typeof request.fast === "boolean") &&
+    typeof request.accountId === "string" &&
+    typeof request.prompt === "string" &&
+    typeof request.src === "string" && request.src === attempt.src &&
+    Array.isArray(request.images) && request.images.every((image) => typeof image?.base64 === "string" && typeof image?.mime === "string"),
+  );
+}
+
+/** Builds the same request body on the initial POST and on reload recovery. */
+export function spawnRequestBody(attempt: SpawnAttempt & { request: RecoverableSpawnRequest }): Record<string, unknown> {
+  const { request } = attempt;
+  return {
+    engine: request.engine,
+    ...(request.model ? { model: request.model } : {}),
+    cwd: request.cwd,
+    ...(request.effort ? { effort: request.effort } : {}),
+    ...(request.fast === null ? {} : { fast: request.fast }),
+    ...(request.accountId ? { accountId: request.accountId } : {}),
+    prompt: request.prompt,
+    images: request.images,
+    clientAttemptId: attempt.clientAttemptId,
+    ...(request.src ? { src: request.src } : {}),
+  };
+}
+
+/** Applies an exact receipt response while preserving the persisted request and
+    original launch timestamp used to correlate the attempt. */
+export function applySpawnOutcome(
+  attempt: SpawnAttempt,
+  outcome: Extract<SpawnOutcome, { kind: "launched" }>,
+): SpawnAttempt {
+  return {
+    ...attempt,
+    target: outcome.target,
+    path: outcome.path,
+    conversationId: outcome.conversationId,
+    launchId: outcome.launchId,
+    phase: outcome.durable,
+  };
 }
 
 /** The subset of the spawn POST body the client reads back. */
@@ -129,15 +222,12 @@ export function classifyTransportLoss(): SpawnOutcome {
 }
 
 /**
- * Find the spawned transcript for an attempt, by the strongest evidence first:
- * the exact settled path, then the exact settled conversation id, then a
- * bounded heuristic (the first fresh root conversation of this engine after the
- * launch moment that was not already on disk). The heuristic is what recovers a
- * codex slow-boot or a transport-loss launch that never returned a path.
+ * Find the spawned transcript using only evidence carried by the exact server
+ * receipt. Similar engine/cwd/timestamp transcripts can belong to another
+ * concurrent draft and must never be adopted here.
  */
 export function matchSpawnedFile(
-  attempt: Pick<SpawnAttempt, "at" | "path" | "conversationId" | "engine" | "src">,
-  known: ReadonlySet<string> | null,
+  attempt: Pick<SpawnAttempt, "path" | "conversationId">,
   files: readonly FileEntry[],
 ): FileEntry | null {
   if (attempt.path) return files.find((file) => file.path === attempt.path) ?? null;
@@ -145,19 +235,7 @@ export function matchSpawnedFile(
     const byId = files.find((file) => file.conversationId === attempt.conversationId);
     if (byId) return byId;
   }
-  const root = attempt.engine === "codex" ? "codex-sessions" : "claude-projects";
-  return (
-    files.find(
-      (file) =>
-        file.engine === attempt.engine &&
-        file.root === root &&
-        /* A handoff spawn is linked under its source by the scanner, so the
-           fresh rollout may already carry that parent — accept it, or a root. */
-        (attempt.src ? file.parent === attempt.src || !file.parent : !file.parent) &&
-        file.mtime >= attempt.at / 1000 - 30 &&
-        (!known || !known.has(file.path)),
-    ) ?? null
-  );
+  return null;
 }
 
 /** The send affordance re-enables only in `draft`/`failed-preflight` — i.e.

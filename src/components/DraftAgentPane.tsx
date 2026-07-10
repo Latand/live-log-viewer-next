@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { Play, X } from "@/components/icons";
 import { useComposer } from "@/hooks/useComposer";
@@ -16,10 +16,14 @@ import {
   SLOW_BOOT_MS,
   type SpawnAttempt,
   type SpawnResponseBody,
+  applySpawnOutcome,
   classifySpawnResponse,
   classifyTransportLoss,
+  createSpawnAttempt,
   displayPhase,
+  hasRecoverableRequest,
   matchSpawnedFile,
+  spawnRequestBody,
 } from "./draftSpawn";
 import { ReasoningControls, type SpeedChoice } from "./ReasoningControls";
 import { cleanTitle, engineTintOf } from "./utils";
@@ -69,9 +73,9 @@ export function setDraftText(id: string, text: string) {
 function readAttempt(id: string): SpawnAttempt | null {
   try {
     const raw = JSON.parse(readField(id, "boot") || "null") as SpawnAttempt | null;
-    if (!raw || typeof raw.at !== "number" || typeof raw.prompt !== "string") return null;
-    if (raw.phase !== "booting" && raw.phase !== "confirming" && raw.phase !== "attention") return null;
-    return raw;
+  if (!raw || typeof raw.at !== "number" || typeof raw.prompt !== "string" || typeof raw.clientAttemptId !== "string") return null;
+  if (raw.phase !== "booting" && raw.phase !== "confirming" && raw.phase !== "attention") return null;
+  return { ...raw, request: raw.request && typeof raw.request === "object" ? raw.request : null };
   } catch {
     return null;
   }
@@ -128,10 +132,9 @@ export function DraftAgentPane({
   const [attempt, setAttemptState] = useState<SpawnAttempt | null>(() => readAttempt(draftId));
   const [slowBoot, setSlowBoot] = useState(false);
   const attentionRef = useRef<HTMLDivElement>(null);
-  /* Transcripts that existed before the spawn: the codex match below must
-     never grab a conversation that was already on disk. Not persisted — after
-     a reload the mtime cutoff alone carries the match. */
-  const knownRef = useRef<Set<string> | null>(null);
+  /* Records launched from this mount are already in flight. Reloaded records
+     are replayed once with their own idempotency key to fetch the same receipt. */
+  const replayedAttemptIds = useRef(new Set<string>());
 
   const setModel = (value: string) => {
     setModelState(value);
@@ -203,15 +206,11 @@ export function DraftAgentPane({
     }).catch(() => {});
   }, []);
 
-  /* The handover, by strongest evidence first: a settled spawn waits for its
-     exact transcript path; a launched-but-unresolved one (codex slow-boot, or a
-     transport-loss confirm) adopts by the settled conversation id, else the
-     first fresh root conversation of this engine after the launch moment that
-     was not already on disk. Reactive to the file feed — no polling loop — so it
-     still converges even after the card has escalated to `attention`. */
+  /* The handover uses the exact receipt path or conversation id. A nearby
+     transcript can be a simultaneous draft, so it cannot establish ownership. */
   useEffect(() => {
     if (!attempt) return;
-    const hit = matchSpawnedFile(attempt, knownRef.current, files);
+    const hit = matchSpawnedFile(attempt, files);
     if (hit) onSpawned(hit);
   }, [files, attempt, onSpawned]);
 
@@ -242,47 +241,14 @@ export function DraftAgentPane({
     if (attempt?.phase === "attention") attentionRef.current?.focus();
   }, [attempt?.phase]);
 
-  const send = async (overrideText?: string) => {
-    const payloadText = overrideText ?? text;
-    if (busy || voiceSending || attempt) return;
-    if (!cwd.trim()) {
-      setStatus({ kind: "err", text: t("draft.needDir") });
-      return;
-    }
-    if (!payloadText.trim() && !attachments.images.length) return;
-    /* One idempotency key per launch; the known-set (transcripts already on
-       disk) freezes the heuristic-adoption floor before the POST fires. */
-    const clientAttemptId = newAttemptId();
-    const hasImages = attachments.images.length > 0;
-    knownRef.current = new Set(files.map((file) => file.path));
+  const submitAttempt = useCallback(async (candidate: SpawnAttempt & { request: NonNullable<SpawnAttempt["request"]> }) => {
     setBusy(true);
     setStatus(null);
-    /* Records a launched/uncertain attempt: the composer freezes, the prompt
-       moves into the frozen bubble, and send stays disabled until adoption or a
-       proven pre-launch failure. */
-    const land = (durable: "booting" | "confirming", target: string, path: string | null, conversationId: string | null, launchId: string | null) => {
-      setAttempt({ clientAttemptId, at: Date.now(), target, path, conversationId, launchId, prompt: payloadText.trim(), hasImages, engine, src, phase: durable });
-      setText("");
-      attachments.clear();
-    };
     try {
       const res = await fetch("/api/spawn", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          engine,
-          ...(model ? { model } : {}),
-          cwd: cwd.trim(),
-          ...(effort ? { effort } : {}),
-          ...(engine === "codex" && speed ? { fast: speed === "fast" } : {}),
-          ...(engine === "codex" && accountId ? { accountId } : {}),
-          prompt: payloadText,
-          images: attachments.images.map((image) => ({ base64: image.base64, mime: image.mime })),
-          clientAttemptId,
-          /* Ties the fresh agent to the source conversation: the scanner links
-             its transcript as a handoff branch next to the parent's node. */
-          ...(src ? { src } : {}),
-        }),
+        body: JSON.stringify(spawnRequestBody(candidate)),
       });
       let json: SpawnResponseBody | null = null;
       try {
@@ -292,25 +258,63 @@ export function DraftAgentPane({
       }
       const outcome = classifySpawnResponse(res.status, res.ok, json);
       if (outcome.kind === "launched") {
-        land(outcome.durable, outcome.target, outcome.path, outcome.conversationId, outcome.launchId);
+        setAttempt(applySpawnOutcome(candidate, outcome));
       } else if (outcome.kind === "failed-preflight") {
-        /* No pane opened: keep the prompt and images in the composer and
-           re-enable send so the user can fix the input and retry. */
+        /* The server proved that no pane opened. Restore the exact durable
+           payload so editing and retrying cannot lose an attachment. */
+        setAttempt(null);
+        setText(candidate.request.prompt);
+        attachments.replace(candidate.request.images.map((image) => ({
+          ...image,
+          preview: `data:${image.mime};base64,${image.base64}`,
+        })));
         setStatus({ kind: "err", text: outcome.message ?? t("draft.launchFailed") });
-      } else {
-        /* Ambiguous (transport loss / opaque 5xx / conflicting attempt): a
-           worker may exist, so freeze the card into confirming rather than
-           inviting a duplicate. */
-        land("confirming", "", null, null, null);
       }
+      /* Ambiguous outcomes keep the persisted request and frozen card. A
+         future reload can re-POST the identical idempotency key. */
     } catch {
-      /* Transport loss: the client saw nothing, so the worker may or may not
-         exist — freeze into confirming, never re-enable send. */
       classifyTransportLoss();
-      land("confirming", "", null, null, null);
+      /* Transport loss leaves the persisted attempt unchanged. */
     } finally {
       setBusy(false);
     }
+  }, [attachments, setAttempt, setBusy, setStatus, setText, t]);
+
+  /* A reload during POST has the original payload already in session storage.
+     Replaying that exact body returns its server receipt and never starts a
+     second worker because clientAttemptId is stable. */
+  useEffect(() => {
+    if (!attempt || !hasRecoverableRequest(attempt) || replayedAttemptIds.current.has(attempt.clientAttemptId)) return;
+    replayedAttemptIds.current.add(attempt.clientAttemptId);
+    void submitAttempt(attempt);
+  }, [attempt, submitAttempt]);
+
+  const send = async (overrideText?: string) => {
+    const payloadText = overrideText ?? text;
+    if (busy || voiceSending || attempt) return;
+    if (!cwd.trim()) {
+      setStatus({ kind: "err", text: t("draft.needDir") });
+      return;
+    }
+    if (!payloadText.trim() && !attachments.images.length) return;
+    const candidate = createSpawnAttempt(newAttemptId(), Date.now(), {
+      engine,
+      model,
+      cwd: cwd.trim(),
+      effort,
+      fast: engine === "codex" && speed ? speed === "fast" : null,
+      accountId: engine === "codex" ? accountId : "",
+      prompt: payloadText,
+      images: attachments.images.map((image) => ({ base64: image.base64, mime: image.mime })),
+      src,
+    });
+    /* Persist before POST: a navigation now has the launch id, timestamp, and
+       exact recoverable payload needed to reconcile the original request. */
+    replayedAttemptIds.current.add(candidate.clientAttemptId);
+    setAttempt(candidate);
+    setText("");
+    attachments.clear();
+    await submitAttempt(candidate);
   };
 
   const tint = engineTintOf(engine);
