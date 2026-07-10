@@ -327,6 +327,29 @@ describe("Codex user-turn coalescing", () => {
     }
   });
 
+  test("requires matching text inside the ISO timestamp correlation window", () => {
+    const responseTs = "2026-07-10T10:00:00.000Z";
+    const echoTs = "2026-07-10T10:00:00.500Z";
+    const differentTexts = [
+      codexUserResponse(responseTs, [{ type: "input_text", text: "first message" }]),
+      codexUserEvent(echoTs, "second message"),
+    ];
+    const identicalEcho = [
+      codexUserResponse(responseTs, [{ type: "input_text", text: "same message" }]),
+      codexUserEvent(echoTs, "same message"),
+    ];
+
+    expect(itemsOfKind(buildFeed(codexFile, differentTexts, false, ""), "user")).toEqual([
+      { kind: "user", ts: responseTs, text: "first message" },
+      { kind: "user", ts: echoTs, text: "second message" },
+    ]);
+    expect(itemsOfKind(buildFeed(codexFile, identicalEcho, false, ""), "user")).toEqual([
+      { kind: "user", ts: echoTs, text: "same message" },
+    ]);
+    assertParity(codexFile, differentTexts, { chunks: [1] });
+    assertParity(codexFile, identicalEcho, { chunks: [1] });
+  });
+
   test("keeps every reserved-looking composer prefix in a user bubble", () => {
     const prefixes = ["<task>", "Caveat: The messages below", "[Request interrupted", "This came from another Claude session", "# AGENTS.md instructions"];
     const lines = prefixes.flatMap((prefix, index) => codexUserPair(`t${index}`, `${prefix} human input`));
@@ -403,7 +426,7 @@ describe("Codex user-turn coalescing", () => {
 
   test("uses event text with response attachments and keeps the original feed key", () => {
     const response = codexUserResponse("t1", [
-      { type: "input_text", text: "response preview" },
+      { type: "input_text", text: "canonical composer text" },
       { type: "input_image", image_url: "data:image/png;base64,AA==" },
     ]);
     const echo = codexUserEvent("t1.001", "canonical composer text");

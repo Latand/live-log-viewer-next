@@ -353,9 +353,13 @@ interface PendingCodexUser {
   entrySeqs: number[];
 }
 
-function sameCodexUserTurn(left: unknown, right: unknown): boolean {
-  const a = textPart(left).trim();
-  const b = textPart(right).trim();
+function sameCodexUserTurn(leftTs: unknown, leftText: unknown, rightTs: unknown, rightText: unknown): boolean {
+  const leftNormalizedText = textPart(leftText).trim();
+  const rightNormalizedText = textPart(rightText).trim();
+  if (!leftNormalizedText || leftNormalizedText !== rightNormalizedText) return false;
+
+  const a = textPart(leftTs).trim();
+  const b = textPart(rightTs).trim();
   if (!a || !b) return false;
   if (a === b) return true;
 
@@ -696,7 +700,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
     pendingCodexUsers.push(pending);
   };
   const addCodexEventUser = (ts: unknown, text: string) => {
-    const pendingIndex = pendingCodexUsers.findIndex((pending) => sameCodexUserTurn(pending.ts, ts));
+    const pendingIndex = pendingCodexUsers.findIndex((pending) => sameCodexUserTurn(pending.ts, pending.text, ts, text));
     if (pendingIndex < 0) {
       emitCodexUserContent(ts, { text, attachments: [] });
       return;
