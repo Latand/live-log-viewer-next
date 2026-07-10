@@ -270,6 +270,21 @@ body {
   }
 }
 
+/* The active leg of a pipeline handoff: the base rail's dashes drift from the
+   just-finished stage toward the one now working, matching the loop-leg timing
+   so the two grammars feel related without looking alike (straight vs arc). */
+.pipeline-rail-live {
+  stroke-dasharray: 6 8;
+  animation: loop-dash 0.7s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pipeline-rail-live {
+    animation: none;
+    stroke-dasharray: none;
+  }
+}
+
 /* Pane currently under an agent-link arrow (drag off the handoff pill): its
    border switches to the gesture's own teal, overriding whatever lifecycle
    tone the pane wears — hence the !important against the utility classes. */

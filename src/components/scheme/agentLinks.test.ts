@@ -3,7 +3,8 @@ import { describe, expect, test } from "bun:test";
 import type { Flow, FlowState, Round } from "@/lib/flows/types";
 import type { Pipeline } from "@/lib/pipelines/types";
 
-import { buildAnchorIndex, currentRound, deckKey, deriveFlowLinks, derivePipelineLinks, flowLinkKey, flowLinkPhase } from "./agentLinks";
+import { buildAnchorIndex, currentRound, deckKey, deriveFlowLinks, derivePipelineLinks, flowLinkKey, flowLinkPhase, pipelineRailSegment } from "./agentLinks";
+import type { SchemeRect } from "./layout";
 
 const roleConfig = { engine: "claude" as const, model: null, effort: null };
 
@@ -84,6 +85,95 @@ test("pipeline links connect adjacent resolved stage sessions", () => {
     pipeline: { fromStageId: "plan", toStageId: "build" },
   }]);
   expect(derivePipelineLinks([pipeline], (key) => key === "/plan" ? key : null)).toEqual([]);
+});
+
+function threeStagePipeline(overrides: Partial<Pipeline> = {}): Pipeline {
+  return {
+    id: "pipeline-2",
+    state: "running",
+    cursor: { stageId: "build", state: "running" },
+    stages: [
+      { id: "plan", kind: "run", next: "build" },
+      { id: "build", kind: "run", next: "review" },
+      { id: "review", kind: "review-loop", next: null },
+    ],
+    runs: [
+      { stageId: "plan", attempts: [{ agentPath: "/plan", state: "passed", verdict: { status: "pass" } }] },
+      { stageId: "build", attempts: [{ agentPath: "/build", state: "running" }] },
+      { stageId: "review", attempts: [{ agentPath: "/review", state: "pending" }] },
+    ],
+    ...overrides,
+  } as unknown as Pipeline;
+}
+
+describe("derivePipelineLinks tones and hub", () => {
+  const anchor = (key: string) => (["/plan", "/build", "/review"].includes(key) ? key : null);
+
+  test("each edge is toned by its target stage's latest attempt", () => {
+    const links = derivePipelineLinks([threeStagePipeline()], anchor);
+    expect(links.map((link) => [link.pipeline!.toStageId, link.pipeline!.tone])).toEqual([
+      ["build", "active"],
+      ["review", "dim"],
+    ]);
+  });
+
+  test("exactly one edge — the one into the current stage — carries the hub", () => {
+    const links = derivePipelineLinks([threeStagePipeline()], anchor);
+    expect(links.filter((link) => link.pipeline!.hub).map((link) => link.pipeline!.toStageId)).toEqual(["build"]);
+  });
+
+  test("a parked stage tones its incoming edge amber, not red", () => {
+    const parked = threeStagePipeline({
+      state: "needs_decision",
+      cursor: { stageId: "build", state: "running" },
+      runs: [
+        { stageId: "plan", attempts: [{ agentPath: "/plan", state: "passed" }] },
+        { stageId: "build", attempts: [{ agentPath: "/build", state: "needs_decision" }] },
+        { stageId: "review", attempts: [{ agentPath: "/review", state: "pending" }] },
+      ],
+    } as unknown as Partial<Pipeline>);
+    const edge = derivePipelineLinks([parked], anchor).find((link) => link.pipeline!.toStageId === "build");
+    expect(edge?.pipeline!.tone).toBe("amber");
+  });
+
+  test("a paused pipeline flags its edges so the chevron drift freezes", () => {
+    const links = derivePipelineLinks([threeStagePipeline({ state: "paused" })], anchor);
+    expect(links.every((link) => link.pipeline!.paused)).toBe(true);
+    /* Paused is not 'active', so no edge animates. */
+    expect(links.some((link) => link.pipeline!.tone === "active")).toBe(false);
+  });
+
+  test("a partially spawned chain draws only its materialized prefix", () => {
+    const partial = threeStagePipeline({
+      runs: [
+        { stageId: "plan", attempts: [{ agentPath: "/plan", state: "passed" }] },
+        { stageId: "build", attempts: [] },
+        { stageId: "review", attempts: [] },
+      ],
+    } as unknown as Partial<Pipeline>);
+    expect(derivePipelineLinks([partial], anchor)).toEqual([]);
+  });
+});
+
+describe("pipelineRailSegment", () => {
+  const from: SchemeRect = { x: 0, y: 0, w: 100, h: 60 };
+  const to: SchemeRect = { x: 300, y: 0, w: 100, h: 60 };
+
+  test("connects facing edges along the dominant axis with an off-center offset", () => {
+    const seg = pipelineRailSegment(from, to);
+    /* Horizontal handoff: leaves from's right edge, enters to's left edge. */
+    expect(seg.x1).toBe(100);
+    expect(seg.x2).toBe(300);
+    /* Both endpoints share the 14px vertical offset so the rail clears the bezier. */
+    expect(seg.y1).toBe(44);
+    expect(seg.y2).toBe(44);
+  });
+
+  test("emits repeating chevron marks pointing along the handoff", () => {
+    const seg = pipelineRailSegment(from, to);
+    expect(seg.chevrons.length).toBeGreaterThan(1);
+    expect(seg.chevrons.every((mark) => mark.startsWith("M "))).toBe(true);
+  });
 });
 
 describe("buildAnchorIndex", () => {

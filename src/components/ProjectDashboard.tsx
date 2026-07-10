@@ -18,6 +18,7 @@ import { TaskStrip } from "./BranchPane";
 import { clearDraftStorage, draftSrc, setDraftSrc, setDraftText } from "./DraftAgentPane";
 import { planBoardConvergence, planClose } from "./projectBoardMutations";
 import { claimedReviewerDescendantPaths, foldClaimedReviewers, isActiveFlow } from "./flows/flowModel";
+import { PipelineDialog } from "./pipelines/PipelineDialog";
 import { PipelineStrip } from "./pipelines/PipelineStrip";
 import { pipelinesForProject } from "./pipelines/pipelineModel";
 import { clearWorkflowDraftStorage } from "./workflows/WorkflowDraftPane";
@@ -183,6 +184,7 @@ export function ProjectDashboard({
   );
   const taskPanelOpen = board.prefs.taskPanelOpen;
   const [drafts, setDrafts] = useState<string[]>([]);
+  const [pipelineDialogOpen, setPipelineDialogOpen] = useState(false);
   const [highlight, setHighlight] = useState<string | null>(null);
   /* Jump targets the scheme would otherwise skip (a stalled root builds no
      automatic group; a stalled branch hides inside a mini stack) materialize
@@ -503,6 +505,17 @@ export function ProjectDashboard({
     pendingFocusRef.current = file.path;
   };
 
+  /* Pipeline strip/verdict "open transcript" and "open review": route a stage's
+     agent path (or an embedded flow's implementer) through the same board open. */
+  const openPipelinePath = (path: string) => {
+    const file = files.find((entry) => entry.path === path);
+    if (file) openSwitchboardFile(file);
+  };
+  const openPipelineFlow = (flowId: string) => {
+    const flow = flows.find((candidate) => candidate.id === flowId);
+    if (flow) openPipelinePath(flow.implementerPath);
+  };
+
   const statusBits: string[] = [];
   if (liveCount) {
     statusBits.push(
@@ -631,6 +644,14 @@ export function ProjectDashboard({
         )}
         <button
           type="button"
+          onClick={() => setPipelineDialogOpen(true)}
+          aria-label={t("dash.newPipeline")}
+          className="flex shrink-0 items-center gap-1 rounded-[8px] border border-line bg-panel px-2.5 py-1 text-[11.5px] font-bold text-ink shadow-card hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+        >
+          <span className="text-[13px] leading-none text-accent">+</span> {t("dash.pipeline")}
+        </button>
+        <button
+          type="button"
           onClick={addWorkflowDraft}
           aria-label={t("dash.newWorkflow")}
           className="flex shrink-0 items-center gap-1 rounded-[8px] border border-line bg-panel px-2.5 py-1 text-[11.5px] font-bold text-ink shadow-card hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
@@ -638,6 +659,10 @@ export function ProjectDashboard({
           <span className="text-[13px] leading-none text-accent">+</span> {t("dash.workflow")}
         </button>
       </div>
+
+      {pipelineDialogOpen ? (
+        <PipelineDialog project={project} onClose={() => setPipelineDialogOpen(false)} />
+      ) : null}
 
       {pipelinesError ? (
         <div className="shrink-0 border-b border-line bg-[#fdf6ec] px-3 py-1.5 text-[11.5px] text-[#8a5b00]" role="alert">
@@ -648,7 +673,7 @@ export function ProjectDashboard({
       {projectPipelines.length || projectWorkflows.length ? (
         <div className="flex shrink-0 flex-col gap-1.5 border-b border-line bg-[#fbfbfd] px-3 py-1.5">
           {projectPipelines.map((pipeline) => (
-            <PipelineStrip key={pipeline.id} pipeline={pipeline} />
+            <PipelineStrip key={pipeline.id} pipeline={pipeline} flows={flows} onOpenPath={openPipelinePath} onOpenFlow={openPipelineFlow} />
           ))}
           {projectWorkflows.map((wf) => (
             <WorkflowStrip key={wf.id} wf={wf} />
@@ -747,6 +772,14 @@ export function ProjectDashboard({
                 className="pointer-events-auto flex shrink-0 items-center gap-1 rounded-[8px] border border-line bg-panel px-3 py-1.5 text-[11.5px] font-bold text-ink shadow-card hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
               >
                 <span className="text-[13px] leading-none text-accent">+</span> {t("dash.agent")}
+              </button>
+              <button
+                type="button"
+                onClick={() => setPipelineDialogOpen(true)}
+                aria-label={t("board.newPipeline")}
+                className="pointer-events-auto flex shrink-0 items-center gap-1 rounded-[8px] border border-line bg-panel px-3 py-1.5 text-[11.5px] font-bold text-ink shadow-card hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+              >
+                <span className="text-[13px] leading-none text-accent">+</span> {t("board.pipeline")}
               </button>
             </div>
           </div>

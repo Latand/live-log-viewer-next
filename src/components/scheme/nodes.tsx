@@ -16,6 +16,7 @@ import { DraftAgentPane } from "@/components/DraftAgentPane";
 import { FlowDialog } from "@/components/flows/FlowDialog";
 import { activeLoopLeg, activeLoopRole, canStartFlow, verdictTone } from "@/components/flows/flowModel";
 import { FlowHub } from "@/components/flows/FlowHub";
+import { PipelineDialog } from "@/components/pipelines/PipelineDialog";
 import { PipelineHub } from "@/components/pipelines/PipelineHub";
 import { FlowStrip } from "@/components/flows/FlowStrip";
 import { RoleTag } from "@/components/flows/RoleTag";
@@ -28,6 +29,7 @@ import { WorkflowDraftPane } from "@/components/workflows/WorkflowDraftPane";
 import { activityDot, cleanTitle, engineBadge, engineEdge, fmtAge } from "@/components/utils";
 
 import type { AgentLink } from "./agentLinks";
+import { PIPELINE_RAIL_COLOR, pipelineRailSegment } from "./agentLinks";
 import {
   LOOP_GAP,
   NODE_W,
@@ -188,22 +190,59 @@ export const AgentLinksLayer = memo(function AgentLinksLayer({
   links,
   byPath,
   interactive,
+  width,
+  height,
 }: {
   links: AgentLink[];
   byPath: Map<string, SchemeRect>;
   interactive: boolean;
+  width: number;
+  height: number;
 }) {
   if (!links.length) return null;
+  const pipelineLinks = links.filter((link) => link.pipeline && byPath.has(link.from) && byPath.has(link.to));
   return (
     <>
+      {pipelineLinks.length ? (
+        <svg width={width} height={height} className="absolute left-0 top-0" aria-hidden>
+          {pipelineLinks.map((link) => {
+            const seg = pipelineRailSegment(byPath.get(link.from)!, byPath.get(link.to)!);
+            const color = PIPELINE_RAIL_COLOR[link.pipeline!.tone];
+            const line = `M ${seg.x1} ${seg.y1} L ${seg.x2} ${seg.y2}`;
+            const active = link.pipeline!.tone === "active" && !link.pipeline!.paused;
+            return (
+              <g key={link.key}>
+                <path
+                  d={line}
+                  className={active ? "pipeline-rail-live" : undefined}
+                  style={{ d: `path("${line}")`, transition: `d ${MOVE_MS}ms ${MOVE_EASE}` } as React.CSSProperties}
+                  fill="none"
+                  stroke={color}
+                  strokeWidth={2.5}
+                  strokeLinecap="round"
+                  strokeDasharray={link.pipeline!.tone === "dim" ? "5 7" : undefined}
+                />
+                {seg.chevrons.map((chevron, index) => (
+                  <path key={index} d={chevron} fill="none" stroke={color} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" opacity={0.9} />
+                ))}
+              </g>
+            );
+          })}
+        </svg>
+      ) : null}
       {links.map((link) => {
         const from = byPath.get(link.from);
         const to = byPath.get(link.to);
         if (!from || !to) return null;
         if (link.pipeline) {
-          const x = (from.x + from.w / 2 + to.x + to.w / 2) / 2;
-          const y = (from.y + from.h / 2 + to.y + to.h / 2) / 2;
-          return <PipelineHub key={link.key} pipeline={link.pipeline.pipeline} x={x} y={y} moveTransition={MOVE_TRANSITION} />;
+          /* Rail midpoint, nudged onto the same off-center offset as the line. */
+          const seg = pipelineRailSegment(from, to);
+          const x = (seg.x1 + seg.x2) / 2;
+          const y = (seg.y1 + seg.y2) / 2;
+          if (link.pipeline.hub) {
+            return <PipelineHub key={link.key} pipeline={link.pipeline.pipeline} x={x} y={y} interactive={interactive} moveTransition={MOVE_TRANSITION} />;
+          }
+          return <PipelineEdgeBadge key={link.key} index={link.pipeline.index} total={link.pipeline.total} color={PIPELINE_RAIL_COLOR[link.pipeline.tone]} x={x} y={y} moveTransition={MOVE_TRANSITION} />;
         }
         if (!link.flow) return null;
         /* Corridor midpoint of the pair, level with the cycle arcs' center. */
@@ -216,6 +255,21 @@ export const AgentLinksLayer = memo(function AgentLinksLayer({
     </>
   );
 });
+
+/** A non-hub pipeline edge's marker: the stage index it hands off into. */
+function PipelineEdgeBadge({ index, total, color, x, y, moveTransition }: { index: number; total: number; color: string; x: number; y: number; moveTransition: string }) {
+  return (
+    <div
+      data-scheme-ui
+      className="pointer-events-none absolute left-0 top-0 z-[4] inline-flex h-[18px] -translate-x-1/2 -translate-y-1/2 items-center gap-0.5 rounded-full border bg-panel px-1.5 text-[9.5px] font-bold shadow-card"
+      style={{ transform: `translate(${x}px, ${y}px) translate(-50%, -50%)`, transition: moveTransition, borderColor: color, color }}
+      aria-hidden
+    >
+      <span>›</span>
+      <span>{index}/{total}</span>
+    </div>
+  );
+}
 
 /** Quiet history chip inside an expanded under-deck panel. */
 function UnderRow({ file, onSelect }: { file: FileEntry; onSelect: (file: FileEntry) => void }) {
@@ -479,6 +533,7 @@ function NodeShell({
   const { t } = useLocale();
   const [underOpen, setUnderOpen] = useState(false);
   const [flowOpen, setFlowOpen] = useState(false);
+  const [pipelineOpen, setPipelineOpen] = useState(false);
   return (
     <div
       data-scheme-node={node.file.path}
@@ -501,7 +556,7 @@ function NodeShell({
           <FlowStrip flow={flow} onFocusRound={(round) => onFocusRound(flow.id, round)} />
         </div>
       ) : canFlow ? (
-        <div className="absolute -top-11 left-0 z-[4]">
+        <div className="absolute -top-11 left-0 z-[4] flex items-center gap-1.5">
           <button
             data-scheme-ui
             className="inline-flex h-7 items-center gap-1 rounded-full border border-line bg-panel px-2.5 text-[11px] font-semibold text-dim shadow-card hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
@@ -511,12 +566,29 @@ function NodeShell({
           >
             <span className="text-[13px] leading-none text-accent">⟳</span> {t("scheme.flow")}
           </button>
+          <button
+            data-scheme-ui
+            className="inline-flex h-7 items-center gap-1 rounded-full border border-line bg-panel px-2.5 text-[11px] font-semibold text-dim shadow-card hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            aria-expanded={pipelineOpen}
+            title={t("scheme.pipelineTitle")}
+            onClick={() => setPipelineOpen(true)}
+          >
+            <span className="text-[13px] leading-none text-accent">⇢</span> {t("scheme.pipeline")}
+          </button>
         </div>
       ) : null}
       {flowOpen ? (
         <div className="absolute left-0 top-[-8px] z-40 -translate-y-full">
           <FlowDialog file={node.file} onClose={() => setFlowOpen(false)} />
         </div>
+      ) : null}
+      {pipelineOpen ? (
+        <PipelineDialog
+          project={node.file.project}
+          src={node.file.path}
+          srcLabel={cleanTitle(node.file.title, 48)}
+          onClose={() => setPipelineOpen(false)}
+        />
       ) : null}
       {/* The hidden stack peeking from under the card: previous chats and
           finished tasks lie beneath the conversation, deck-style. */}

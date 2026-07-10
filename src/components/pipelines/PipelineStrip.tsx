@@ -4,26 +4,124 @@ import { Pause, Play, RefreshCw, X } from "lucide-react";
 import { useState } from "react";
 
 import { Hint } from "@/components/Hint";
+import { currentRound } from "@/components/scheme/agentLinks";
+import type { Flow } from "@/lib/flows/types";
 import { useLocale } from "@/lib/i18n";
-import type { Pipeline, PipelineAction } from "@/lib/pipelines/types";
+import type { Pipeline, PipelineAction, PipelineStage } from "@/lib/pipelines/types";
 
-import { patchPipeline, PIPELINE_ATTENTION_STATES, PIPELINE_BUSY_STATES, pipelineStateLabel } from "./pipelineModel";
+import {
+  PIPELINE_ATTENTION_STATES,
+  PIPELINE_BUSY_STATES,
+  STAGE_GLYPH,
+  STAGE_TONES,
+  latestAttempt,
+  patchPipeline,
+  pipelineStateLabel,
+  stageAccess,
+  stageAttempts,
+  stageChipLabel,
+  stageChipState,
+} from "./pipelineModel";
+import { VerdictPopover } from "./VerdictPopover";
 
-function stageAttempt(pipeline: Pipeline, stageId: string) {
-  return pipeline.runs.find((run) => run.stageId === stageId)?.attempts.at(-1) ?? null;
+/** The parked stage's first finding, when present, is the most useful summary. */
+function parkedDetail(pipeline: Pipeline): string | null {
+  if (!PIPELINE_ATTENTION_STATES.has(pipeline.state) || !pipeline.cursor) return pipeline.stateDetail;
+  const finding = latestAttempt(pipeline, pipeline.cursor.stageId)?.verdict?.findings?.[0];
+  return finding ?? pipeline.stateDetail;
 }
-function stageTone(pipeline: Pipeline, stageId: string): { color: string; soft: string; pulse: boolean } {
-  const attempt = stageAttempt(pipeline, stageId);
-  if (attempt?.state === "passed" || attempt?.state === "skipped") return { color: "#1a8a3e", soft: "#e7f4ea", pulse: false };
-  if (pipeline.cursor?.stageId === stageId && PIPELINE_BUSY_STATES.has(pipeline.state)) return { color: "#5a51e0", soft: "#ecebfb", pulse: true };
-  if (attempt?.state === "failed" || attempt?.state === "needs_decision") return { color: "#b4483d", soft: "#fbeaea", pulse: false };
-  return { color: "#8b8b95", soft: "#efeff3", pulse: false };
+
+function StageChip({
+  pipeline,
+  stage,
+  index,
+  flows,
+  open,
+  onToggleVerdict,
+  onCloseVerdict,
+  onOpenPath,
+  onOpenFlow,
+}: {
+  pipeline: Pipeline;
+  stage: PipelineStage;
+  index: number;
+  flows: Flow[];
+  open: boolean;
+  onToggleVerdict: () => void;
+  onCloseVerdict: () => void;
+  onOpenPath?: (path: string) => void;
+  onOpenFlow?: (flowId: string) => void;
+}) {
+  const { t } = useLocale();
+  const state = stageChipState(pipeline, stage);
+  const tone = STAGE_TONES[state];
+  const glyph = STAGE_GLYPH[state];
+  const attempt = latestAttempt(pipeline, stage.id);
+  const label = stageChipLabel(t, stage);
+  const access = stageAccess(pipeline, stage);
+  const pulse = state === "running" || state === "reviewing" || state === "committing";
+  const flow = attempt?.flowId ? flows.find((candidate) => candidate.id === attempt.flowId) ?? null : null;
+  const round = stage.kind === "review-loop" && flow ? currentRound(flow)?.n ?? 0 : 0;
+  const attemptCount = stageAttempts(pipeline, stage.id).length;
+  const chipState = t(`pipelineChipState.${state}`);
+  const title = [stage.role?.roleId ?? stage.id, t(access === "read-only" ? "pipelineStrip.readOnly" : "pipelineStrip.readWrite"), attempt?.sessionId].filter(Boolean).join(" · ");
+
+  return (
+    <span className="relative flex shrink-0 items-center gap-1.5">
+      {index ? <span className="text-[10px] font-bold text-[#c9c9d1]" aria-hidden>→</span> : null}
+      <span className="inline-flex items-center">
+        <button
+          type="button"
+          disabled={!attempt?.agentPath || !onOpenPath}
+          onClick={() => attempt?.agentPath && onOpenPath?.(attempt.agentPath)}
+          className={`inline-flex h-6 max-w-[180px] items-center gap-1 truncate rounded-l-full ${attempt?.verdict ? "" : "rounded-r-full"} px-2 text-[10.5px] font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:cursor-default ${pulse ? "animate-pulse" : ""}`}
+          style={{ backgroundColor: tone.soft, color: tone.color }}
+          title={title}
+          aria-label={t("pipelineStrip.chipAria", { label, state: chipState })}
+        >
+          <span aria-hidden>{stage.kind === "review-loop" ? "⟳" : "▸"}</span>
+          <span className="min-w-0 truncate">{label}</span>
+          {glyph ? <span aria-hidden>{glyph}</span> : null}
+          {round > 0 ? <span aria-hidden>{t("pipelineStrip.roundShort", { n: round })}</span> : null}
+          {attemptCount > 1 ? <span aria-hidden>{t("pipelineStrip.attemptSuffix", { n: attemptCount })}</span> : null}
+        </button>
+        {attempt?.verdict ? (
+          <button
+            type="button"
+            onClick={onToggleVerdict}
+            aria-expanded={open}
+            aria-label={t("pipelineStrip.openVerdict", { label })}
+            className="inline-flex h-6 items-center rounded-r-full border-l border-panel/60 px-1 text-[10.5px] font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            style={{ backgroundColor: tone.soft, color: tone.color }}
+          >
+            <span aria-hidden>{attempt.verdict.status === "pass" ? "✓" : attempt.verdict.status === "fail" ? "✕" : "●"}</span>
+          </button>
+        ) : null}
+      </span>
+      {open && attempt ? (
+        <div className="absolute bottom-[calc(100%+8px)] left-1/2 z-30 -translate-x-1/2">
+          <VerdictPopover pipeline={pipeline} stage={stage} attempt={attempt} onClose={onCloseVerdict} onOpenPath={onOpenPath} onOpenFlow={onOpenFlow} />
+        </div>
+      ) : null}
+    </span>
+  );
 }
 
-export function PipelineStrip({ pipeline }: { pipeline: Pipeline }) {
+export function PipelineStrip({
+  pipeline,
+  flows = [],
+  onOpenPath,
+  onOpenFlow,
+}: {
+  pipeline: Pipeline;
+  flows?: Flow[];
+  onOpenPath?: (path: string) => void;
+  onOpenFlow?: (flowId: string) => void;
+}) {
   const { t } = useLocale();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [openVerdict, setOpenVerdict] = useState<string | null>(null);
   const mutate = async (action: PipelineAction) => {
     if (busy) return;
     setBusy(true);
@@ -33,38 +131,36 @@ export function PipelineStrip({ pipeline }: { pipeline: Pipeline }) {
   };
   const attention = PIPELINE_ATTENTION_STATES.has(pipeline.state);
   const finished = pipeline.state === "completed" || pipeline.state === "closed";
+  const detail = parkedDetail(pipeline);
   return (
     <div
       data-scheme-ui
-      className={`pointer-events-auto flex min-h-11 w-full items-center gap-3 rounded-[14px] border bg-panel/95 px-4 py-1 shadow-[0_2px_10px_rgb(20_20_30/0.08)] ${attention ? "border-[#e0ae45]/70" : "border-line"}`}
+      role="group"
+      aria-label={t("pipelineStrip.groupAria", { task: pipeline.task })}
+      className={`pointer-events-auto flex min-h-11 w-full flex-wrap items-center gap-3 rounded-[14px] border bg-panel/95 px-4 py-1 shadow-[0_2px_10px_rgb(20_20_30/0.08)] ${attention ? "border-[#e0ae45]/70" : "border-line"}`}
     >
       <span className="flex min-w-0 max-w-[42%] shrink-0 items-center gap-2">
         <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${pipeline.state === "needs_decision" ? "bg-err" : PIPELINE_BUSY_STATES.has(pipeline.state) ? "animate-pulse bg-ok" : pipeline.state === "completed" ? "bg-ok" : "bg-[#9a9aa4]"}`} aria-hidden />
         <span className="shrink-0 text-[10.5px] font-bold tracking-[0.08em] text-dim">{t("pipelineStrip.pipeline")}</span>
         <span className="min-w-0 truncate text-[12px] font-bold" title={pipeline.task}>{pipeline.task}</span>
         <span className="shrink-0 text-[11.5px] font-semibold text-dim">{pipelineStateLabel(t, pipeline.state)}</span>
-        {pipeline.stateDetail ? <span className="min-w-0 truncate text-[11.5px] font-semibold text-err" title={pipeline.stateDetail}>{pipeline.stateDetail}</span> : null}
+        {detail ? <span className={`min-w-0 truncate text-[11.5px] font-semibold ${attention ? "text-[#a06a15]" : "text-err"}`} title={detail}>{detail}</span> : null}
       </span>
       <span className="no-scrollbar flex min-w-0 flex-1 items-center justify-center gap-1.5 overflow-x-auto" aria-label={t("pipelineStrip.stagesAria")}>
-        {pipeline.stages.map((stage, index) => {
-          const tone = stageTone(pipeline, stage.id);
-          const attempt = stageAttempt(pipeline, stage.id);
-          const access = attempt?.effectiveRole.access ?? stage.access ?? (stage.kind === "review-loop" ? "read-only" : "read-write");
-          const title = [stage.role?.roleId, t(access === "read-only" ? "pipelineStrip.readOnly" : "pipelineStrip.readWrite"), attempt?.sessionId].filter(Boolean).join(" · ");
-          return (
-            <span key={stage.id} className="flex shrink-0 items-center gap-1.5">
-              {index ? <span className="text-[10px] font-bold text-[#c9c9d1]" aria-hidden>→</span> : null}
-              <span
-                className={`inline-flex h-6 max-w-[180px] items-center gap-1 truncate rounded-full px-2 text-[10.5px] font-bold ${tone.pulse ? "animate-pulse" : ""}`}
-                style={{ backgroundColor: tone.soft, color: tone.color }}
-                title={title}
-              >
-                {attempt?.state === "passed" ? "✓ " : attempt?.state === "skipped" ? "↷ " : ""}
-                {stage.kind === "review-loop" ? t("pipelineStrip.reviewStage") : stage.id}
-              </span>
-            </span>
-          );
-        })}
+        {pipeline.stages.map((stage, index) => (
+          <StageChip
+            key={stage.id}
+            pipeline={pipeline}
+            stage={stage}
+            index={index}
+            flows={flows}
+            open={openVerdict === stage.id}
+            onToggleVerdict={() => setOpenVerdict((prev) => (prev === stage.id ? null : stage.id))}
+            onCloseVerdict={() => setOpenVerdict(null)}
+            onOpenPath={onOpenPath}
+            onOpenFlow={onOpenFlow}
+          />
+        ))}
       </span>
       <span className="flex shrink-0 items-center gap-1.5">
         {error ? <span className="max-w-[220px] truncate text-[10.5px] font-semibold text-err" title={error}>{error}</span> : null}

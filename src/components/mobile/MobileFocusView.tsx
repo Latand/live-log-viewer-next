@@ -24,6 +24,7 @@ import { paneState, type PaneState } from "@/components/paneState";
 import type { BranchGroup } from "@/components/projectModel";
 import { activityDot, cleanTitle, engineBadge, engineColor } from "@/components/utils";
 
+import { STAGE_GLYPH, STAGE_TONES, latestAttempt, stageChipLabel, stageChipState } from "@/components/pipelines/pipelineModel";
 import { buildSchemeLayout, type SchemeLayout } from "@/components/scheme/layout";
 import { SchemeBoard } from "@/components/scheme/SchemeBoard";
 import { TASK_W, taskCardHeight } from "@/components/scheme/taskGeometry";
@@ -156,6 +157,20 @@ export function MobileFocusView({ project, groups, manual, files, flows, pipelin
     viewBus.reportSlice({ mode: mapOpen ? "mobile-map" : "mobile-focus", focusedPath, selectedPaths: [], visiblePaths, camera: null });
   }, [activeNode, mapOpen, layout]);
 
+  /* When the focused pane is a pipeline stage, a compact chain row rides above
+     it: position, current stage/state, and prev/next stage chips to hop along
+     the chain (#93 §2.3). */
+  const activePath = activeNode ? activeNode.file.path : null;
+  const pipelineFocus = findPipelineStage(pipelines, activePath);
+
+  const hopToStage = (index: number) => {
+    if (!pipelineFocus) return;
+    const stage = pipelineFocus.pipeline.stages[index];
+    const path = stage ? latestAttempt(pipelineFocus.pipeline, stage.id)?.agentPath : null;
+    const file = path ? files.find((entry) => entry.path === path) : null;
+    if (file) onSelect(file);
+  };
+
   const step = useCallback(
     (dir: number) => {
       if (!entries.length) return;
@@ -223,6 +238,10 @@ export function MobileFocusView({ project, groups, manual, files, flows, pipelin
             />
           ))}
         </div>
+      ) : null}
+
+      {pipelineFocus ? (
+        <PipelineFocusRow pipeline={pipelineFocus.pipeline} index={pipelineFocus.index} onHop={hopToStage} />
       ) : null}
 
       <div className="relative flex min-h-0 flex-1 flex-col p-1.5 pb-[max(0.375rem,env(safe-area-inset-bottom))]">
@@ -320,6 +339,60 @@ export function MobileFocusView({ project, groups, manual, files, flows, pipelin
       {taskSheet ? (
         <TaskSheet project={project} tasks={tasks} files={files} initialView={taskSheet} onClose={() => setTaskSheet(null)} />
       ) : null}
+    </div>
+  );
+}
+
+/** The pipeline + stage index a focused transcript path belongs to, if any. */
+function findPipelineStage(pipelines: Pipeline[], path: string | null): { pipeline: Pipeline; index: number } | null {
+  if (!path) return null;
+  for (const pipeline of pipelines) {
+    if (pipeline.state === "closed") continue;
+    const index = pipeline.stages.findIndex((stage) => latestAttempt(pipeline, stage.id)?.agentPath === path);
+    if (index >= 0) return { pipeline, index };
+  }
+  return null;
+}
+
+/** Compact pipeline chain row over a focused stage pane: position, current
+    stage/state, and prev/next stage chips as hop targets along the chain. */
+function PipelineFocusRow({ pipeline, index, onHop }: { pipeline: Pipeline; index: number; onHop: (index: number) => void }) {
+  const { t } = useLocale();
+  const total = pipeline.stages.length;
+  const stage = pipeline.stages[index]!;
+  const state = stageChipState(pipeline, stage);
+  const tone = STAGE_TONES[state];
+  const prev = index > 0 ? pipeline.stages[index - 1]! : null;
+  const next = index < total - 1 ? pipeline.stages[index + 1]! : null;
+  const prevHopEnabled = prev ? Boolean(latestAttempt(pipeline, prev.id)?.agentPath) : false;
+  const nextHopEnabled = next ? Boolean(latestAttempt(pipeline, next.id)?.agentPath) : false;
+  return (
+    <div className="flex shrink-0 items-center gap-1.5 overflow-x-auto border-b border-line bg-[#fbfbfd] px-2 py-1.5" role="group" aria-label={t("pipelineMobile.chipAria", { task: pipeline.task })}>
+      <span className="shrink-0 rounded-full bg-chip px-1.5 py-0.5 text-[10px] font-bold text-dim" aria-hidden>⇢ {t("pipelineMobile.position", { k: index + 1, n: total })}</span>
+      <button
+        type="button"
+        disabled={!prevHopEnabled}
+        onClick={() => onHop(index - 1)}
+        aria-label={t("pipelineMobile.prevStage")}
+        className="shrink-0 rounded-full border border-line bg-panel px-2 py-0.5 text-[10px] font-bold text-dim focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-30"
+      >
+        ‹ {prev ? stageChipLabel(t, prev) : ""}
+      </button>
+      <span className="inline-flex shrink-0 items-center gap-1 rounded-full px-2 py-0.5 text-[10.5px] font-bold" style={{ backgroundColor: tone.soft, color: tone.color }}>
+        <span aria-hidden>{stage.kind === "review-loop" ? "⟳" : "▸"}</span>
+        {stageChipLabel(t, stage)}
+        {STAGE_GLYPH[state] ? <span aria-hidden>{STAGE_GLYPH[state]}</span> : null}
+        <span className="text-[9px] font-semibold opacity-80">{t(`pipelineChipState.${state}`)}</span>
+      </span>
+      <button
+        type="button"
+        disabled={!nextHopEnabled}
+        onClick={() => onHop(index + 1)}
+        aria-label={t("pipelineMobile.nextStage")}
+        className="shrink-0 rounded-full border border-line bg-panel px-2 py-0.5 text-[10px] font-bold text-dim focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-30"
+      >
+        {next ? stageChipLabel(t, next) : ""} ›
+      </button>
     </div>
   );
 }
