@@ -108,6 +108,12 @@ export function proxy(request: NextRequest): NextResponse {
     return NextResponse.next();
   }
 
+  const authorization = request.headers.get("authorization");
+  const bearer = authorization?.match(/^Bearer\s+(.+)$/i)?.[1];
+  if (tokenMatches(bearer, token)) {
+    return NextResponse.next();
+  }
+
   const queryToken = request.nextUrl.searchParams.get("k");
   if (queryToken !== null && tokensMatch(queryToken, token)) {
     return redirectWithCookie(request, token);

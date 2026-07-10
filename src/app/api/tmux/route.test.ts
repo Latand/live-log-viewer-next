@@ -51,7 +51,6 @@ mock.module("@/lib/resources", () => ({
   allowedKillTarget: () => null,
   consumeKillTarget: () => {},
 }));
-mock.module("@/lib/sameOrigin", () => ({ rejectCrossOrigin: () => null }));
 mock.module("@/lib/scanner/roots", () => ({ pathAllowed: (pathname: string) => pathname.startsWith("/allowed/") }));
 mock.module("@/lib/tmux", () => ({
   collectImagePayloads: () => ({ images: [], error: null }),

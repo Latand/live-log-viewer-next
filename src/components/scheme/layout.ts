@@ -11,7 +11,7 @@ import { engineColor } from "@/components/utils";
 export const NODE_W = 600;
 const ROOT_H = 780;
 const CHILD_H = 680;
-const GAP_X = 48;
+export const GAP_X = 48;
 /* Vertical corridor between generations: arrows plus the under-deck chip. */
 const GAP_Y = 130;
 /* Children start slightly right of the parent's left edge — the requested

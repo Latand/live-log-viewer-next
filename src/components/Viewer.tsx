@@ -9,6 +9,8 @@ import { useArchivedProjects } from "@/hooks/useArchivedProjects";
 import { useEffectiveFlows } from "@/components/flows/flowModel";
 import { useFiles } from "@/hooks/useFiles";
 import { useIsMobile } from "@/hooks/useIsMobile";
+import { useViewPresence } from "@/hooks/useViewPresence";
+import { OVERVIEW_CONTEXT, OVERVIEW_SLICE, viewBus } from "@/hooks/viewPresenceBus";
 import { type TFunction, useLocale } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
 
@@ -66,6 +68,10 @@ function attentionSnippet(t: TFunction, item: AttentionItem): string {
 
 export function Viewer() {
   const { t } = useLocale();
+  /* The one presence publisher for the whole app: it reads the shared view bus
+     that the board/scheme/mobile components report into and ships an ephemeral
+     per-tab snapshot to the server. Renders nothing. */
+  useViewPresence();
   const [project, setProject] = useState<string>(() => initialProject());
   const { files: allFiles, projectCatalog, flows: polledFlows, workflows, tasks, loaded } = useFiles(project === OVERVIEW ? null : project);
   /* A committed account migration keeps the archived predecessor entry in the
@@ -114,6 +120,15 @@ export function Viewer() {
     writeHash(nextProject);
     setDrawerOpen(false);
   }, []);
+
+  /* The overview board has no project view state to report: presence publishes
+     the overview context/slice here, and ProjectDashboard takes over the moment
+     a project opens. */
+  useEffect(() => {
+    if (project !== OVERVIEW) return;
+    viewBus.reportContext(OVERVIEW_CONTEXT);
+    viewBus.reportSlice(OVERVIEW_SLICE);
+  }, [project]);
 
   useEffect(() => {
     if (!drawerOpen) return;

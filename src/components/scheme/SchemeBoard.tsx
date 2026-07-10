@@ -3,10 +3,12 @@
 import { BoxSelect, Hand, Maximize2, Minus, MousePointer2, Plus, StickyNote } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import { cameraToPresence, orderedSelection, schemeFocusedPath, schemeVisiblePaths, viewBus } from "@/hooks/viewPresenceBus";
 import type { Flow } from "@/lib/flows/types";
 import { useLocale } from "@/lib/i18n";
 import type { BoardTask } from "@/lib/tasks/types";
 import type { FileEntry } from "@/lib/types";
+import { MAX_VISIBLE_PATHS } from "@/lib/view/types";
 
 import { appendComposerDraft } from "@/components/TmuxComposer";
 import { conversationIdentity } from "@/lib/accounts/identity";
@@ -29,6 +31,7 @@ import { TasksLayer } from "./TasksLayer";
 import { buildTaskEdges, buildTaskTargetIndex, TASK_W, taskRect, type SchemeRect } from "./taskGeometry";
 import { useLasso } from "./useLasso";
 import { useSchemeCamera } from "./useSchemeCamera";
+import { useSpatialNav } from "./useSpatialNav";
 
 /* Below this zoom the big node labels fade in over the unreadable panes. */
 const LABEL_Z = 0.45;
@@ -337,6 +340,12 @@ export function SchemeBoard({
     setPendingTask({ x: Math.round(wx - TASK_W / 2), y: Math.round(wy - 14) });
   }, []);
 
+  /* Spatial-nav handlers behind refs: the camera's keydown listener reads these
+     while useSpatialNav (created below) needs the camera's own outputs — the
+     ref breaks that creation cycle, same as lassoDownRef. */
+  const navArrowRef = useRef<(event: KeyboardEvent) => boolean>(() => false);
+  const navZoomRef = useRef<(dir: 1 | -1) => boolean>(() => false);
+
   const {
     cam,
     vp,
@@ -357,6 +366,9 @@ export function SchemeBoard({
     fit,
     fitRect,
     jump,
+    manualNonce,
+    glideBy,
+    glideFrame,
   } = useSchemeCamera({
     project,
     layout,
@@ -373,7 +385,29 @@ export function SchemeBoard({
     onWorldTap: mapMode ? undefined : onWorldTap,
     taskRects,
     onPlaceTask: mapMode ? undefined : onPlaceTask,
+    onArrowNav: navArrowRef,
+    onZoomKey: navZoomRef,
   });
+
+  /* Spatial keyboard navigation: live only on the desktop board — a selection
+     session, an expanded overlay, or map mode all suspend it. */
+  const navEnabled = !mapMode && !session && !overlayOpen;
+  const { onArrow, onZoomKey, announcement } = useSpatialNav({
+    enabled: navEnabled,
+    layout,
+    cam,
+    vp,
+    selected,
+    setSelected,
+    centerOn,
+    glideBy,
+    glideFrame,
+    manualNonce,
+  });
+  useEffect(() => {
+    navArrowRef.current = onArrow;
+    navZoomRef.current = onZoomKey;
+  }, [onArrow, onZoomKey]);
 
   const commitMarquee = useCallback((paths: string[], additive: boolean) => {
     marqueeClickGuard.current = true;
@@ -415,6 +449,43 @@ export function SchemeBoard({
   useEffect(() => {
     camRef.current = cam;
   }, [cam]);
+
+  /* Presence: the desktop scheme reports its view slice for observation. The
+     assembler reads current state each commit through this ref, so publishing a
+     camera frame never re-renders the memoized pane layers. The mobile map
+     (mapMode) reports through MobileFocusView, so this instance stays quiet. */
+  const reportView = useRef<() => void>(() => {});
+  useEffect(() => {
+    reportView.current = () => {
+      if (mapMode) return;
+      /* A full-window expanded pane is the sole visible transcript; otherwise
+         the nodes whose rect the camera frames, in layout order. */
+      const visiblePaths = expanded ? [expanded] : schemeVisiblePaths(layout, cam, vp, MAX_VISIBLE_PATHS);
+      /* The ring can sit on a virtual layout key (a deck, draft or quiet-branch
+         stack) while spatial nav walks the board; only real transcript nodes
+         are valid focus targets, so anything else publishes as no focus. */
+      const transcriptPaths = new Set(layout.nodes.map((node) => node.file.path));
+      viewBus.reportSlice({
+        mode: "scheme",
+        focusedPath: schemeFocusedPath(expanded, selected, transcriptPaths),
+        selectedPaths: orderedSelection(layout, multi),
+        visiblePaths,
+        camera: cameraToPresence(cam, vp),
+        viewport: { width: vp.w, height: vp.h, dpr: typeof window === "undefined" ? 1 : window.devicePixelRatio || 1 },
+      });
+    };
+  });
+  /* Focus, selection, overlay and layout changes publish promptly. */
+  useEffect(() => {
+    if (!mapMode) reportView.current();
+  }, [mapMode, layout, multi, selected, expanded]);
+  /* Camera and viewport settles are debounced, mirroring the 300 ms llvCam
+     persist — a pan produces one publish after it stops, never per frame. */
+  useEffect(() => {
+    if (mapMode) return;
+    const timer = window.setTimeout(() => reportView.current(), 300);
+    return () => window.clearTimeout(timer);
+  }, [mapMode, cam, vp]);
 
   /* A wrong-target legacy edge (a failed delivery from an older build) is
      cleaned up by a click — nothing is ever re-delivered from the board. */
@@ -500,11 +571,17 @@ export function SchemeBoard({
       className={`relative min-h-0 flex-1 overflow-hidden ${
         panning ? "cursor-grabbing select-none" : taskTool ? "cursor-crosshair" : handLike ? "cursor-grab" : ""
       } ${handLike ? "touch-none" : ""}`}
+      tabIndex={mapMode ? undefined : 0}
+      aria-label={mapMode ? undefined : t("scheme.boardAria")}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onDoubleClick={onDoubleClick}
       onClick={onClick}
     >
+      {/* Announces the window the arrow keys just landed on, for screen readers. */}
+      <div className="sr-only" aria-live="polite" role="status">
+        {announcement}
+      </div>
       {/* Dot grid on its own composited layer: panning moves it with a
           transform (modulo one tile) instead of repainting the viewport
           background every frame. */}

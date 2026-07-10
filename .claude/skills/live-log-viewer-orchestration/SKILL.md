@@ -56,6 +56,31 @@ detached job — the port rule and core rule above still apply.
 
 Any interactive `claude`/`codex` process in tmux is auto-matched to its transcript (fd holders, `--session-id` argv, cwd) — so a pane you spawn correctly appears in the UI with composer, kill and interrupt controls.
 
+## Reading the operator's live view — `viewer.snapshot`
+
+To see **what the human is actually looking at right now** — same board, same device — call the snapshot capability. Discover it first with the manifest:
+
+`GET http://127.0.0.1:8898/api/agent` → self-describing capability list with example calls.
+
+The capability is `viewer.snapshot`:
+
+`POST http://127.0.0.1:8898/api/agent/snapshot` with `{"schemaVersion":1}` (all fields optional). It returns the live browser view: the resolved device/view session and its freshness, the active `project` and view `mode` (`overview`/`scheme`/`list`/`mobile-focus`/`mobile-map`), the `viewport` and `camera`, the `focusedPath`, `selectedPaths`, and `visiblePaths` **in visual order** (freshest-first, left→right on the board), each visible conversation's activity + attention state, the durable board revision, and **bounded, secret-redacted compact text** for the requested scope.
+
+Scope controls only which conversations get text, never membership:
+
+```jsonc
+{ "schemaVersion": 1,
+  "scope": { "kind": "selected" },        // focused | selected | visible | focused-selected | paths
+  "text": { "include": true, "lastMessages": 6, "maxCharsPerConversation": 3000 } }
+```
+
+- **Multi-device.** Default resolution picks the **latest-interacted** view and lists the others under `resolution.alternatives`. Pin one with `view.id` / `view.deviceId`. `view.resolution: "require-explicit"` returns **409 `AMBIGUOUS_ACTIVE_VIEW`** when two devices interacted near-simultaneously — pick from the alternatives and retry.
+- **Nobody watching / after a server restart.** Returns **404 `NO_ACTIVE_VIEW`** — presence is in-memory and republishes on the browser's next heartbeat. This is honest: there is no live human view to report.
+- **Reads are inert.** The snapshot never moves a camera, adds a node, touches board state, or ticks flows/tasks — safe to poll for orientation.
+- Loopback needs no token; a remote agent caller uses `Authorization: Bearer <LLV_TOKEN>`. Port rule holds: **always `8898`**.
+
+Use this to answer "what am I looking at, and which of these is blocked" before you spawn or message — then act through `/api/spawn` and `/api/tmux` as below.
+
 ## Spawning a new agent
 
 **Preferred — viewer running:** `POST http://127.0.0.1:8898/api/spawn` with JSON `{"engine":"codex","model":"gpt-5.6-terra","cwd":"<abs dir>","prompt":"<first message>","src":"<your own transcript path>"}`. Use `gpt-5.6-sol` for architecture, diagnosis, and review. Same-origin only (call from localhost, no Origin header). **Always pass `src`** when spawning on behalf of a conversation (e.g. your own session): it records lineage in `~/.config/agent-log-viewer/state/handoff-lineage.json`, and the board draws the child under the parent with an arrow. Without it the new agent shows up as an unrelated root — the user treats that as a bug.

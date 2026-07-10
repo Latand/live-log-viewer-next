@@ -16,6 +16,9 @@ export type Mode = "hand" | "select";
 
 const dist = (a: { x: number; y: number }, b: { x: number; y: number }) => Math.hypot(a.x - b.x, a.y - b.y);
 
+/* Reduced-motion: camera glides become instant jumps (matches useFlip.ts:7). */
+const reducedMotion = () => typeof matchMedia !== "undefined" && matchMedia("(prefers-reduced-motion: reduce)").matches;
+
 interface CameraOptions {
   project: string;
   layout: SchemeLayout;
@@ -41,6 +44,14 @@ interface CameraOptions {
   /** One-shot «task» tool sink: the next canvas click lands here in world
       coordinates, then the tool reverts to select. Absent in map mode. */
   onPlaceTask?: (wx: number, wy: number) => void;
+  /** Spatial keyboard navigation (issue #27), held behind a ref to break the
+      camera↔nav creation cycle. `onArrowNav` handles an Arrow press and returns
+      true when it consumed it (the old fixed 160px pan is gone — an unconsumed
+      press does nothing). `onZoomKey` gets first refusal on +/−: true means it
+      snapped the anchor to a ladder framing, false falls back to continuous
+      zoom around the viewport centre. */
+  onArrowNav?: React.RefObject<(event: KeyboardEvent) => boolean>;
+  onZoomKey?: React.RefObject<(dir: 1 | -1) => boolean>;
 }
 
 export interface SchemeCamera {
@@ -68,6 +79,15 @@ export interface SchemeCamera {
   /** Glide to fit a world rect (the "show selection" bulk action). */
   fitRect: (rect: SchemeRect) => void;
   jump: (wx: number, wy: number) => void;
+  /** Bumps whenever the user drives the camera by hand (pan >9px, pinch end,
+      wheel settle) — spatial nav watches it to drop follow and re-baseline. */
+  manualNonce: number;
+  /** Glide-translate so a point that moved by (worldDx, worldDy) keeps its
+      screen position: the follow anchor holds still through a reflow. */
+  glideBy: (worldDx: number, worldDy: number) => void;
+  /** Glide the anchor to the `centerOn` placement at an explicit zoom — the
+      keyboard zoom ladder, which unlike `centerOn` may zoom out below `c.z`. */
+  glideFrame: (rect: SchemeRect, z: number) => void;
 }
 
 /**
@@ -90,6 +110,8 @@ export function useSchemeCamera({
   onWorldTap,
   taskRects,
   onPlaceTask,
+  onArrowNav,
+  onZoomKey,
 }: CameraOptions): SchemeCamera {
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const tapRef = useRef<{ x: number; y: number } | null>(null);
@@ -100,7 +122,13 @@ export function useSchemeCamera({
   const [panning, setPanning] = useState(false);
   const [glide, setGlide] = useState(false);
   const [vp, setVp] = useState({ w: 1, h: 1 });
+  const [manualNonce, setManualNonce] = useState(0);
   const panRef = useRef<{ sx: number; sy: number; cx: number; cy: number } | null>(null);
+  /* A pan that actually travelled >9px, and an active two-finger pinch — both
+     bump manualNonce when they end so a settled hand gesture re-baselines nav. */
+  const panMovedRef = useRef(false);
+  const pinchActiveRef = useRef(false);
+  const wheelSettle = useRef<number | null>(null);
   const pointersRef = useRef(new Map<number, { x: number; y: number }>());
   const pinchRef = useRef<{ d: number; cx: number; cy: number } | null>(null);
   const modeRef = useRef<Mode>(mode);
@@ -233,7 +261,8 @@ export function useSchemeCamera({
   }, [layout]);
 
   const glideTo = useCallback((next: Camera | ((c: Camera) => Camera)) => {
-    setGlide(true);
+    /* Reduced motion: skip the CSS transition — the move lands instantly. */
+    if (!reducedMotion()) setGlide(true);
     setCam(next);
     if (glideTimer.current) window.clearTimeout(glideTimer.current);
     glideTimer.current = window.setTimeout(() => setGlide(false), 500);
@@ -276,6 +305,33 @@ export function useSchemeCamera({
       });
     },
     [glideTo],
+  );
+
+  /* Follow-anchor reflow: the anchor's world position shifted by (wdx, wdy);
+     translate the camera the opposite way (× z) so it holds its screen spot. */
+  const glideBy = useCallback(
+    (wdx: number, wdy: number) => {
+      glideTo((c) => clampCam({ ...c, x: c.x - wdx * c.z, y: c.y - wdy * c.z }));
+    },
+    [glideTo, clampCam],
+  );
+
+  /* The keyboard zoom ladder: same centered/head-near-top placement as
+     `centerOn`, but at an explicit zoom (it may zoom out below the current z). */
+  const glideFrame = useCallback(
+    (node: SchemeRect, z: number) => {
+      const rect = viewportRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      const zz = Math.min(MAX_Z, Math.max(MIN_Z, z));
+      glideTo(
+        clampCam({
+          z: zz,
+          x: rect.width / 2 - (node.x + node.w / 2) * zz,
+          y: Math.min(rect.height / 2 - node.y * zz, rect.height * 0.08 - (node.y - 40) * zz),
+        }),
+      );
+    },
+    [glideTo, clampCam],
   );
 
   /* First layout of a project: restore the saved camera or fit everything.
@@ -333,12 +389,19 @@ export function useSchemeCamera({
   useEffect(() => {
     const el = viewportRef.current;
     if (!el) return;
+    /* A camera-moving wheel re-baselines nav once it stops: bump manualNonce
+       250ms after the last such event (a wheel that scrolls a feed does not). */
+    const armSettle = () => {
+      if (wheelSettle.current) window.clearTimeout(wheelSettle.current);
+      wheelSettle.current = window.setTimeout(() => setManualNonce((n) => n + 1), 250);
+    };
     const onWheel = (event: WheelEvent) => {
       if ((event.target as HTMLElement).closest("[data-scheme-ui]")) return;
       const rect = el.getBoundingClientRect();
       if (event.ctrlKey || event.metaKey) {
         event.preventDefault();
         applyZoom(event.clientX - rect.left, event.clientY - rect.top, Math.exp(-event.deltaY * 0.0022));
+        armSettle();
         return;
       }
       if (modeRef.current === "select" && !spaceRef.current) {
@@ -353,9 +416,13 @@ export function useSchemeCamera({
       const dx = event.shiftKey && !event.deltaX ? event.deltaY : event.deltaX;
       const dy = event.shiftKey && !event.deltaX ? 0 : event.deltaY;
       queueCam((c) => clampCam({ ...c, x: c.x - dx, y: c.y - dy }));
+      armSettle();
     };
     el.addEventListener("wheel", onWheel, { passive: false });
-    return () => el.removeEventListener("wheel", onWheel);
+    return () => {
+      el.removeEventListener("wheel", onWheel);
+      if (wheelSettle.current) window.clearTimeout(wheelSettle.current);
+    };
   }, [applyZoom, clampCam, queueCam]);
 
   /* Keyboard: H/V tools, Space-hold temporary hand, +/−/1 zoom, 0 fit,
@@ -367,6 +434,16 @@ export function useSchemeCamera({
       return ["INPUT", "TEXTAREA", "SELECT", "BUTTON"].includes(el.tagName) || el.isContentEditable;
     };
     const onDown = (event: KeyboardEvent) => {
+      /* Arrows go to spatial nav before the typing() guard: they must still
+         work when a pane's button holds focus after a click. Nav runs its own
+         richer guards (inputs, dialogs, scroll-consuming feeds) and only
+         preventDefaults when it actually consumed the key. Modifier variants
+         are left to the browser (no MVP bindings). */
+      if (event.key.startsWith("Arrow")) {
+        if (event.metaKey || event.ctrlKey || event.altKey) return;
+        if (onArrowNav?.current?.(event)) event.preventDefault();
+        return;
+      }
       if (typing(event.target)) return;
       if (event.key === " ") {
         event.preventDefault();
@@ -386,14 +463,12 @@ export function useSchemeCamera({
       }
       else if (event.key === "0") fit();
       else if (event.key === "1") zoomTo(1);
-      else if (event.key === "+" || event.key === "=") zoomCenter(1.25);
-      else if (event.key === "-") zoomCenter(0.8);
-      else if (event.key.startsWith("Arrow")) {
-        event.preventDefault();
-        const step = 160;
-        const dx = event.key === "ArrowLeft" ? step : event.key === "ArrowRight" ? -step : 0;
-        const dy = event.key === "ArrowUp" ? step : event.key === "ArrowDown" ? -step : 0;
-        setCam((c) => clampCam({ ...c, x: c.x + dx, y: c.y + dy }));
+      /* +/− first offer the anchor-preserving zoom ladder; without a followed
+         anchor it falls back to continuous zoom around the viewport centre. */
+      else if (event.key === "+" || event.key === "=") {
+        if (!onZoomKey?.current?.(1)) zoomCenter(1.25);
+      } else if (event.key === "-") {
+        if (!onZoomKey?.current?.(-1)) zoomCenter(0.8);
       }
     };
     const onUp = (event: KeyboardEvent) => {
@@ -405,7 +480,7 @@ export function useSchemeCamera({
       window.removeEventListener("keydown", onDown);
       window.removeEventListener("keyup", onUp);
     };
-  }, [fit, zoomCenter, zoomTo, setMode, clampCam, setSelected]);
+  }, [fit, zoomCenter, zoomTo, setMode, setSelected, onArrowNav, onZoomKey]);
 
   const localPoint = (event: { clientX: number; clientY: number }) => {
     const rect = viewportRef.current?.getBoundingClientRect();
@@ -414,6 +489,7 @@ export function useSchemeCamera({
 
   const startPan = (event: React.PointerEvent<HTMLDivElement>) => {
     panRef.current = { sx: event.clientX, sy: event.clientY, cx: cam.x, cy: cam.y };
+    panMovedRef.current = false;
     setPanning(true);
     try {
       viewportRef.current?.setPointerCapture(event.pointerId);
@@ -434,6 +510,7 @@ export function useSchemeCamera({
       if (pointersRef.current.size === 2) {
         const [a, b] = [...pointersRef.current.values()];
         pinchRef.current = { d: dist(a!, b!), cx: (a!.x + b!.x) / 2, cy: (a!.y + b!.y) / 2 };
+        pinchActiveRef.current = true;
         panRef.current = null;
         setPanning(false);
         return;
@@ -509,6 +586,9 @@ export function useSchemeCamera({
     if (!pan) return;
     const dx = event.clientX - pan.sx;
     const dy = event.clientY - pan.sy;
+    /* Past the 9px tap threshold this is a real drag, not a click — mark it so
+       its end re-baselines nav. */
+    if (Math.hypot(dx, dy) > 9) panMovedRef.current = true;
     queueCam((c) => clampCam({ ...c, x: pan.cx + dx, y: pan.cy + dy }));
   };
 
@@ -518,7 +598,16 @@ export function useSchemeCamera({
   useEffect(() => {
     const end = (event: PointerEvent) => {
       pointersRef.current.delete(event.pointerId);
-      if (pointersRef.current.size < 2) pinchRef.current = null;
+      if (pointersRef.current.size < 2) {
+        pinchRef.current = null;
+        if (pinchActiveRef.current) {
+          pinchActiveRef.current = false;
+          setManualNonce((n) => n + 1);
+        }
+      }
+      /* A drag that actually moved is a manual camera gesture — re-baseline. */
+      if (panRef.current && panMovedRef.current) setManualNonce((n) => n + 1);
+      panMovedRef.current = false;
       panRef.current = null;
       setPanning(false);
     };
@@ -609,5 +698,8 @@ export function useSchemeCamera({
     fit,
     fitRect,
     jump,
+    manualNonce,
+    glideBy,
+    glideFrame,
   };
 }
