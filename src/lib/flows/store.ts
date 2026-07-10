@@ -65,9 +65,9 @@ export function seededPresetsFromRoles(): FlowPreset[] {
   const reviewer = flowRole("reviewer");
   const architect = flowRole("architect");
   return [
-    { name: "Sol high → Sol xhigh", implementer: builder, reviewer },
+    { name: "Sol medium → Sol xhigh", implementer: builder, reviewer },
     { name: "Terra low → Sol xhigh", implementer: fixer, reviewer },
-    { name: "Sol high → Fable", implementer: builder, reviewer: architect },
+    { name: "Sol medium → Fable", implementer: builder, reviewer: architect },
     { name: "Fable → Sol xhigh", implementer: architect, reviewer },
     { name: "Sonnet → Sol xhigh", implementer: { engine: "claude", model: "sonnet", effort: "high" }, reviewer },
   ];

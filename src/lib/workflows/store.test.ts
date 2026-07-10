@@ -92,13 +92,13 @@ test("workflow role references resolve to a frozen effective config", () => {
   expect(roleConfigFromReference({ role: "builder", roleParams: { mode: "tdd" } })).toEqual({
     engine: "codex",
     model: "gpt-5.6-sol",
-    effort: "high",
+    effort: "medium",
   });
   const template = normalizeTemplate({ name: "role template", stages: [
     { kind: "implement", role: "builder", roleParams: { mode: "plain" }, scope: "Backend/API" },
     { kind: "review-loop", role: "reviewer", roleParams: { diffSource: "main...HEAD", lens: "all" } },
   ] });
-  expect(template?.stages[0]).toMatchObject({ agent: { model: "gpt-5.6-sol", effort: "high" } });
+  expect(template?.stages[0]).toMatchObject({ agent: { model: "gpt-5.6-sol", effort: "medium" } });
   expect(template?.stages[1]).toMatchObject({ reviewer: { model: "gpt-5.6-sol", effort: "xhigh" } });
 });
 
@@ -107,11 +107,11 @@ test("templates seed the canonical fullstack pipeline on first load", () => {
   expect(templates.map((template) => template.name)).toContain("fullstack");
   const fullstack = templates.find((template) => template.name === "fullstack")!;
   expect(fullstack.stages.at(-1)?.kind).toBe("review-loop");
-  expect(fullstack.stages[0]?.kind === "implement" && fullstack.stages[0].agent.model).toBe("gpt-5.6-sol");
+  expect(fullstack.stages[0]?.kind === "implement" && fullstack.stages[0].agent).toMatchObject({ model: "gpt-5.6-sol", effort: "medium" });
   expect(fullstack.stages[1]?.kind === "implement" && fullstack.stages[1].agent.model).toBe("opus");
   const review = fullstack.stages.at(-1)!;
   expect(review.kind === "review-loop" && review.reviewer.model).toBe("gpt-5.6-sol");
-  expect(templates.map((template) => template.name)).toContain("Sol → Sol review");
+  expect(templates.map((template) => template.name)).toContain("Sol medium → Sol xhigh review");
 });
 
 test("template seed migration upgrades the untouched legacy fullstack definition", () => {
@@ -155,8 +155,8 @@ test("an untouched pre-registry workflow template updates from role defaults", (
       { kind: "review-loop", reviewer: { engine: "codex", model: "gpt-5.6-sol", effort: "xhigh" }, fixer: { engine: "codex", model: "gpt-5.6-terra", effort: "low" }, roundLimit: 5, reviewerMode: "headless" },
     ],
   })!;
-  const migrated = mergeSeededTemplates([previous]).find((template) => template.name === "Sol → Sol review")!;
-  expect(migrated.stages[0]).toMatchObject({ agent: { model: "gpt-5.6-sol", effort: "high" } });
+  const migrated = mergeSeededTemplates([previous]).find((template) => template.name === "Sol medium → Sol xhigh review")!;
+  expect(migrated.stages[0]).toMatchObject({ agent: { model: "gpt-5.6-sol", effort: "medium" } });
 });
 
 

@@ -15,6 +15,16 @@ test("role registry exposes the frozen eight role ids and campaign-ready orchest
     "prod-auditor",
     "deployer",
   ]);
+  expect(Object.fromEntries(roles.map((role) => [role.id, role.config]))).toEqual({
+    orchestrator: { engine: "claude", model: "fable", effort: "high" },
+    reviewer: { engine: "codex", model: "gpt-5.6-sol", effort: "xhigh" },
+    verifier: { engine: "codex", model: "gpt-5.6-sol", effort: "high" },
+    builder: { engine: "codex", model: "gpt-5.6-sol", effort: "medium" },
+    architect: { engine: "claude", model: "fable", effort: "high" },
+    cleaner: { engine: "codex", model: "gpt-5.6-terra", effort: "low" },
+    "prod-auditor": { engine: "codex", model: "gpt-5.6-sol", effort: "xhigh" },
+    deployer: { engine: "codex", model: "gpt-5.6-terra", effort: "medium" },
+  });
 
   const orchestrator = resolveRole("orchestrator", {
     mode: "backlog-campaign",
@@ -30,7 +40,7 @@ test("role registry exposes the frozen eight role ids and campaign-ready orchest
 
   expect(resolveRole("builder", { mode: "plain", domain: "general" })).toMatchObject({
     ok: true,
-    value: { config: { engine: "codex", model: "gpt-5.6-sol", effort: "high" } },
+    value: { config: { engine: "codex", model: "gpt-5.6-sol", effort: "medium" } },
   });
   expect(resolveRole("verifier", { claims: "the regression is fixed" })).toMatchObject({
     ok: true,

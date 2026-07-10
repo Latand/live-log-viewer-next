@@ -61,7 +61,7 @@ export const ROLE_DEFAULTS: readonly RoleDefinition[] = [
     id: "builder",
     name: "Builder",
     description: "Writes product code for a scoped directive.",
-    config: { engine: "codex", model: CODEX_SOL_MODEL, effort: "high" },
+    config: { engine: "codex", model: CODEX_SOL_MODEL, effort: "medium" },
     parameters: [
       { key: "mode", label: "Mode", description: "Implementation discipline.", kind: "select", options: ["plain", "apply-fixes", "tdd", "diagnose", "prototype", "merge-resolve"] },
       { key: "domain", label: "Domain", description: "Product domain for the implementation.", kind: "select", options: ["general", "frontend"] },

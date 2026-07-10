@@ -209,7 +209,7 @@ export function DraftAgentPane({
     }
     setEngine("codex");
     setModel("gpt-5.6-sol");
-    setEffort("high");
+    setEffort("medium");
   };
   const setDeployConfirm = (value: string) => {
     setDeployConfirmState(value);

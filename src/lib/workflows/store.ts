@@ -116,7 +116,7 @@ export function seededTemplatesFromRoles(): WorkflowTemplate[] {
     ],
   },
   {
-    name: "Sol → Sol review",
+    name: "Sol medium → Sol xhigh review",
     verify: "bun test && bun run build",
     finish: "pr",
     stages: [
