@@ -49,7 +49,7 @@ export interface RecoverableSpawnRequest {
     the prompt/images stay shown, and the copy discourages relaunch. */
 export interface SpawnAttempt {
   /** Idempotency key sent with the POST; a converging re-POST replays onto the
-      same server receipt instead of spawning a duplicate. */
+      same server receipt and prevents a duplicate. */
   clientAttemptId: string;
   /** Launch moment (ms) — the mtime floor for heuristic transcript matching. */
   at: number;
