@@ -1,0 +1,3 @@
+{"type":"assistant","timestamp":"2026-07-10T11:43:20.000Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_active","name":"Bash","input":{"command":"bun test"}}]}}
+{"type":"user","timestamp":"2026-07-10T11:43:21.443Z","message":{"role":"user","content":"<system-reminder>\nThe user sent a new message while you were working.\n</system-reminder>\n\nKeep this request styled as a user message."},"promptSource":"typed","origin":{"kind":"human"}}
+{"type":"user","timestamp":"2026-07-10T11:43:22.000Z","message":{"role":"user","content":"<task-notification>\n<status>completed</status>\n</task-notification>"},"promptSource":"system","origin":{"kind":"task-notification"}}

@@ -503,6 +503,11 @@ function claudeContentText(content: unknown): string {
 }
 
 function isClaudeProtocolUser(obj: Record<string, unknown>, content: unknown): boolean {
+  const originKind = textPart(rec(obj.origin).kind);
+  /* Claude records queued human input with the same envelope fields that its
+     harness uses. Explicit human provenance and typed prompts keep their
+     transcript role through any wrapper text. */
+  if (originKind === "human" || textPart(obj.promptSource) === "typed") return false;
   if (obj.isMeta === true || "interruptedMessageId" in obj || "promptSource" in obj || "origin" in obj) return true;
   const text = claudeContentText(content).trim();
   return (
