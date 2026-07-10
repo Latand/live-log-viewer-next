@@ -160,10 +160,10 @@ export function DraftAgentPane({
     setCwdState(value);
     writeField(draftId, "cwd", value);
   };
-  const setAttempt = (value: SpawnAttempt | null) => {
+  const setAttempt = useCallback((value: SpawnAttempt | null) => {
     setAttemptState(value);
     writeField(draftId, "boot", value ? JSON.stringify(value) : "");
-  };
+  }, [draftId]);
 
   /* While a spawn is in flight the whole draft is frozen (boot set), so the
      composer's fields lock alongside the send/voice flags. */
@@ -232,8 +232,7 @@ export function DraftAgentPane({
     }
     const timer = window.setTimeout(escalate, left);
     return () => window.clearTimeout(timer);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [attempt]);
+  }, [attempt, setAttempt]);
 
   /* When recovery gives up, move focus to the assertive attention notice so a
      keyboard/screen-reader user lands on the "don't relaunch" guidance. */
