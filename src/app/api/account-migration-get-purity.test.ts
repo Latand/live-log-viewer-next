@@ -8,7 +8,7 @@ const oldState = process.env.LLV_STATE_DIR;
 process.env.LLV_STATE_DIR = root;
 const { AgentRegistry, setAgentRegistryForTests } = await import("@/lib/agent/registry");
 const { GET: getAccounts } = await import("@/app/api/accounts/route");
-const { buildFilesResponse } = await import("@/app/api/files/route");
+const { buildFilesResponse } = await import("@/app/api/files/response");
 const registry = new AgentRegistry(path.join(root, "registry.json"));
 registry.beginSpawn("codex", "/repo");
 const getFiles = (request: Request) => buildFilesResponse(request, {
