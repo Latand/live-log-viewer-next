@@ -59,6 +59,11 @@ export interface AppServerRateLimitsRead {
   rateLimits: AppServerRateLimits;
 }
 
+export interface AppServerThreadRef {
+  id: string;
+  path: string | null;
+}
+
 export interface AppServerNotification {
   method: string;
   params: unknown;
@@ -255,6 +260,55 @@ export class CodexAppServerClient {
         planType: typeof snapshot.planType === "string" ? snapshot.planType : null,
       },
     };
+  }
+
+  async forkThread(threadId: string): Promise<AppServerThreadRef> {
+    const response = await this.request("thread/fork", { threadId });
+    const thread = isRecord(response) && isRecord(response.thread) ? response.thread : response;
+    if (!isRecord(thread)) throw protocolError("thread/fork response is malformed");
+    return {
+      id: requiredString(thread, "id", "thread/fork"),
+      path: typeof thread.path === "string" ? thread.path : null,
+    };
+  }
+
+  async resumeThread(threadId: string, options: {
+    path?: string | null;
+    cwd?: string;
+    model?: string | null;
+    effort?: string | null;
+    fast?: boolean | null;
+    approvalPolicy?: string | null;
+    sandbox?: string | null;
+  } = {}): Promise<AppServerThreadRef> {
+    const response = await this.request("thread/resume", {
+      threadId,
+      ...(options.path ? { path: options.path } : {}),
+      ...(options.cwd ? { cwd: options.cwd } : {}),
+      ...(options.model ? { model: options.model } : {}),
+      ...(options.fast != null ? { serviceTier: options.fast ? "priority" : "standard" } : {}),
+      ...(options.approvalPolicy ? { approvalPolicy: options.approvalPolicy } : {}),
+      ...(options.sandbox ? { sandbox: options.sandbox } : {}),
+      ...(options.effort ? { config: { model_reasoning_effort: options.effort } } : {}),
+    });
+    const thread = isRecord(response) && isRecord(response.thread) ? response.thread : response;
+    if (!isRecord(thread)) throw protocolError("thread/resume response is malformed");
+    return { id: requiredString(thread, "id", "thread/resume"), path: typeof thread.path === "string" ? thread.path : null };
+  }
+
+  async readThread(threadId: string): Promise<AppServerThreadRef> {
+    const response = await this.request("thread/read", { threadId, includeTurns: true });
+    const thread = isRecord(response) && isRecord(response.thread) ? response.thread : response;
+    if (!isRecord(thread)) throw protocolError("thread/read response is malformed");
+    return { id: requiredString(thread, "id", "thread/read"), path: typeof thread.path === "string" ? thread.path : null };
+  }
+
+  async setThreadName(threadId: string, name: string): Promise<void> {
+    await this.request("thread/name/set", { threadId, name });
+  }
+
+  async setThreadGoal(threadId: string, objective: string, status?: "active" | "complete" | "blocked"): Promise<void> {
+    await this.request("thread/goal/set", { threadId, objective, ...(status ? { status } : {}) });
   }
 
   close(): void {

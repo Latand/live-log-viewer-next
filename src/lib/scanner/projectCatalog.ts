@@ -113,7 +113,7 @@ function cachedFile(raw: RawEntry, state: ProjectCatalogState, stateKey: string)
   return file;
 }
 
-export function projectCatalogSnapshotFromRaw(raw: RawEntry[]): {
+export function projectCatalogSnapshotFromRaw(raw: RawEntry[], options: { persist?: boolean } = {}): {
   projectCatalog: ProjectCatalogEntry[];
   projectByPath: Map<string, string>;
 } {
@@ -143,7 +143,7 @@ export function projectCatalogSnapshotFromRaw(raw: RawEntry[]): {
     group.smt = Math.max(group.smt, file.mtimeMs / 1000);
     if (file.session) group.conversations += 1;
   }
-  writeState({ version: 1, files: nextFiles });
+  if (options.persist !== false) writeState({ version: 1, files: nextFiles });
   return {
     projectCatalog: [...groups.values()].sort((a, b) => b.smt - a.smt || a.project.localeCompare(b.project)),
     projectByPath,

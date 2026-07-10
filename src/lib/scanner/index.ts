@@ -74,16 +74,20 @@ export async function listFiles(): Promise<FileEntry[]> {
   return (await listFilesInternal(false)).files;
 }
 
-export async function listFilesWithProjectCatalog(selectedProject?: string): Promise<{ files: FileEntry[]; projectCatalog: ProjectCatalogEntry[] }> {
-  return listFilesInternal(true, selectedProject);
+export async function listFilesWithProjectCatalog(
+  selectedProject?: string,
+  options: { persistCatalog?: boolean } = {},
+): Promise<{ files: FileEntry[]; projectCatalog: ProjectCatalogEntry[] }> {
+  return listFilesInternal(true, selectedProject, options.persistCatalog === true);
 }
 
 async function listFilesInternal(
   includeProjectCatalog: boolean,
   selectedProject?: string,
+  persistCatalog = false,
 ): Promise<{ files: FileEntry[]; projectCatalog: ProjectCatalogEntry[] }> {
   const scan = includeProjectCatalog
-    ? await discoverFilesWithProjectCatalog(undefined, selectedProject)
+    ? await discoverFilesWithProjectCatalog(undefined, selectedProject, { persistCatalog })
     : { files: await discoverFiles(), projectCatalog: [] };
   const entries = scan.files;
   // The /proc fd scan is only needed to attribute background-task outputs to a
@@ -123,14 +127,16 @@ async function listFilesInternal(
     entry.goal = goalFor(entry);
     entry.ctx = ctxFor(entry);
   });
-  await forEachEntryYielding(entries, (entry) => {
-    if (entry.pendingQuestion || entry.waitingInput) void notifyQuestion(entry);
-  });
-  await linkEntries(entries);
+  await linkEntries(entries, { persist: false });
+  return { files: entries, projectCatalog: scan.projectCatalog };
+}
+
+/** Durable controllers run outside request handlers. Flow ordering remains
+    stable: workflows observe the flow state from the same controller tick. */
+export async function reconcileFileControllers(entries: FileEntry[]): Promise<void> {
+  await linkEntries(entries, { persist: true });
+  for (const entry of entries) if (entry.pendingQuestion || entry.waitingInput) void notifyQuestion(entry);
   await tickFlows(entries);
-  /* Workflows tick after flows: a workflow watching its embedded flow sees
-     the state that same poll just produced. */
   await tickWorkflows(entries);
   tickTaskInbox(entries);
-  return { files: entries, projectCatalog: scan.projectCatalog };
 }

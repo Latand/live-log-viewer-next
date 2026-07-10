@@ -181,6 +181,7 @@ export function mergeAssignments(assignments: TaskAssignment[], patches: Assignm
     });
     const merged: TaskAssignment = {
       path: patch.path,
+      ...(index >= 0 && next[index]?.conversationId ? { conversationId: next[index]?.conversationId } : {}),
       panePid: patch.panePid,
       state: patch.state,
       error: patch.error,

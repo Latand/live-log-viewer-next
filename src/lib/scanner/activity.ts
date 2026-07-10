@@ -2,8 +2,8 @@ import fs from "node:fs";
 
 import type { Activity, RootKey } from "../types";
 import { globalCache } from "./caches";
-import { recordValue, stringValue } from "./json";
 import { outputHolders } from "./process";
+import { turnStateFromRecords as structuredTurnStateFromRecords } from "@/lib/accounts/migration/turnState";
 
 const turnCache = globalCache<[number, string | null]>("turn");
 
@@ -64,49 +64,14 @@ function readTail(pathname: string, size: number, nbytes: number): Record<string
 }
 
 function jsonlTurnState(pathname: string, size: number, codex: boolean) {
-  return turnStateFromRecords(tailRecords(pathname, size), codex);
+  const state = structuredTurnStateFromRecords(tailRecords(pathname, size), codex).state;
+  return state === "terminal" ? "done" : state === "busy" ? "busy" : null;
 }
 
-export function turnStateFromRecords(records: Record<string, unknown>[], codex: boolean) {
-  /* Codex rollouts without task lifecycle events (≤ May 2026) fall back to
-     the newest record kind: a final answer newer than all tool activity means
-     the turn is over; tool activity newer than any message means it is open. */
-  let codexFallback: "done" | "busy" | null = null;
-  for (const obj of [...records].reverse()) {
-    if (codex) {
-      const payload = recordValue(obj.payload) ?? {};
-      const pt = stringValue(payload.type);
-      if (obj.type === "session_meta" || pt === "token_count" || pt === "reasoning" || pt === null) {
-        continue;
-      }
-      /* Turn lifecycle events are the authoritative signal. Codex narrates
-         with interim agent_message records mid-turn (dozens per long turn),
-         so a message alone must never be read as «turn over» — that misread
-         showed working agents as «finished turn — waiting for response». */
-      if (pt === "task_complete" || pt === "turn_complete" || pt === "turn_aborted") return "done";
-      if (pt === "task_started" || pt === "turn_started" || pt === "user_message") return "busy";
-      if (pt === "agent_message" || (pt === "message" && payload.role === "assistant")) {
-        codexFallback ??= "done";
-        continue;
-      }
-      if (pt === "message") return "busy";
-      /* Function calls, outputs, patch applications: mid-turn work. Only a
-         provisional verdict — an even newer lifecycle event still wins. */
-      codexFallback ??= "busy";
-      continue;
-    }
-    const t = obj.type;
-    if (t === "assistant") {
-      /* Only stop_reason ends a Claude turn. Mid-turn narration lands as a
-         text-only record with stop_reason null moments before its tool_use
-         record — reading that window as «done» stamped working subagents
-         with «returned with a result» while they were still writing files. */
-      const stop = stringValue((recordValue(obj.message) ?? {}).stop_reason);
-      return stop === "end_turn" || stop === "stop_sequence" ? "done" : "busy";
-    }
-    if (t === "user") return "busy";
-  }
-  return codexFallback;
+/** Compatibility projection retained for scanner callers. */
+export function turnStateFromRecords(records: Record<string, unknown>[], codex: boolean): "done" | "busy" | null {
+  const state = structuredTurnStateFromRecords(records, codex).state;
+  return state === "terminal" ? "done" : state === "busy" ? "busy" : null;
 }
 
 /** Activity plus the machine-readable reason behind the judgement — surfaced

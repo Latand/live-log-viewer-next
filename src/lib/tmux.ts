@@ -704,7 +704,7 @@ async function spawnAgentWithPromptUnchecked(spec: ResumeSpec, text: string): Pr
 /** Every visible legacy launch receives a durable receipt before tmux creates
     its window. Callers may later attach the engine-native transcript identity. */
 export async function spawnAgentWithPrompt(spec: ResumeSpec, text: string): Promise<SpawnedPane> {
-  const receipt = agentRegistry().beginSpawn(spec.engine, spec.cwd);
+  const receipt = agentRegistry().beginSpawn(spec.engine, spec.cwd, spec.launchProfile);
   try {
     return { ...(await spawnAgentWithPromptUnchecked(spec, text)), receipt };
   } catch (error) {

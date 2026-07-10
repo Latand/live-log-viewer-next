@@ -113,6 +113,39 @@ test("device-code login validates official challenge fields and forwards complet
   client.close();
 });
 
+test("successor thread methods use the structured fork, resume, read, name, and goal ports", async () => {
+  const methods: Array<{ method: string; params: unknown }> = [];
+  const { start } = clientWith((fake, message) => {
+    if (message.method === "initialize") return fake.respond(requestId(message), {});
+    if (message.method === "initialized") return;
+    if (typeof message.method !== "string") return;
+    methods.push({ method: message.method, params: message.params });
+    if (message.method === "thread/fork") fake.respond(requestId(message), { thread: { id: "fork-1", path: "/source/fork-1.jsonl" } });
+    else if (message.method === "thread/resume") fake.respond(requestId(message), { thread: { id: "fork-1" } });
+    else if (message.method === "thread/read") fake.respond(requestId(message), { thread: { id: "fork-1", path: "/target/fork-1.jsonl" } });
+    else fake.respond(requestId(message), {});
+  });
+  const client = await start();
+  await expect(client.forkThread("source-1")).resolves.toEqual({ id: "fork-1", path: "/source/fork-1.jsonl" });
+  await expect(client.resumeThread("fork-1", { path: "/target/fork-1.jsonl", cwd: "/repo", model: "gpt-5.6-terra", effort: "high", fast: true, approvalPolicy: "never", sandbox: "read-only" }))
+    .resolves.toEqual({ id: "fork-1", path: null });
+  await expect(client.readThread("fork-1")).resolves.toEqual({ id: "fork-1", path: "/target/fork-1.jsonl" });
+  await client.setThreadName("fork-1", "Title");
+  await client.setThreadGoal("fork-1", "Ship");
+  expect(methods.map((item) => item.method)).toEqual(["thread/fork", "thread/resume", "thread/read", "thread/name/set", "thread/goal/set"]);
+  expect(methods.find((item) => item.method === "thread/resume")?.params).toEqual({
+    threadId: "fork-1",
+    path: "/target/fork-1.jsonl",
+    cwd: "/repo",
+    model: "gpt-5.6-terra",
+    serviceTier: "priority",
+    approvalPolicy: "never",
+    sandbox: "read-only",
+    config: { model_reasoning_effort: "high" },
+  });
+  client.close();
+});
+
 test("malformed output and protocol errors reject safely with redacted details", async () => {
   const malformed = clientWith((fake, message) => {
     if (message.method === "initialize") fake.output("not json\n");

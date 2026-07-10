@@ -26,6 +26,25 @@ export function defaultModelFor(engine: "claude" | "codex"): string {
   return engine === "codex" ? CODEX_SOL_MODEL : "";
 }
 
+const CLAUDE_MODEL_FAMILIES = ["fable", "opus", "sonnet", "haiku"] as const;
+export type ClaudeLaunchModel = (typeof CLAUDE_MODEL_FAMILIES)[number];
+
+/**
+ * Claude transcripts preserve provider model provenance, including dated ids
+ * that the installed CLI may reject as launch arguments. Resume and migration
+ * succession share this bounded family projection. Unknown ids intentionally
+ * omit `--model`, allowing native resume semantics to choose a supported model.
+ */
+export function normalizeClaudeLaunchModel(value: string | null | undefined): ClaudeLaunchModel | null {
+  if (typeof value !== "string") return null;
+  const model = value.trim().toLowerCase();
+  if (!model || model.length > 128 || /[\u0000-\u001f\u007f]/.test(model)) return null;
+  for (const family of CLAUDE_MODEL_FAMILIES) {
+    if (model === family || new RegExp(`(?:^|[-_.])${family}(?:[-_.]|$)`).test(model)) return family;
+  }
+  return null;
+}
+
 /** Model ids travel to a shell-quoted CLI argument. Keep them bounded and printable. */
 export function modelFromBody(body: { model?: unknown }): { model: string | null; error?: string } {
   if (body.model === undefined || body.model === null || body.model === "") return { model: null };

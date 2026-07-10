@@ -117,9 +117,13 @@ describe("linkEntries", () => {
   test("keeps explicit handoff child links even before the child file exists", () => {
     const child = path.join(SANDBOX, "future-child.jsonl");
     const parent = path.join(SANDBOX, "parent.jsonl");
-    const normalized = normalizeHandoffLineageStore({ children: { [child]: parent } }, () => false);
+    const normalized = normalizeHandoffLineageStore({
+      children: { [child]: parent },
+      conversationChildren: { conversation_child: "conversation_parent" },
+    }, () => false);
 
     expect(normalized.children.get(child)).toBe(parent);
+    expect(normalized.conversationChildren.get("conversation_child")).toBe("conversation_parent");
   });
 
   test("links a native Codex spawn_agent child through parent_thread_id metadata", async () => {

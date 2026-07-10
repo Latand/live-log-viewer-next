@@ -428,6 +428,25 @@ export function ProjectDashboard({
     prefsSnapshotRef.current = prefs;
   });
 
+  /* Account-migration succession replaces a predecessor transcript path with
+     its successor while retaining the stable conversation identity. Rewrite
+     path-keyed board preferences through the shared server store so placement,
+     hidden state and hand-expanded state survive across devices. */
+  useEffect(() => {
+    if (!board.loaded || board.sync === "unavailable") return;
+    const rename = new Map<string, string>();
+    for (const file of files) {
+      if (file.predecessorPath && projectKey(file) === project) rename.set(file.predecessorPath, file.path);
+    }
+    if (!rename.size) return;
+    const prev = prefsSnapshotRef.current;
+    const remap = (list: string[]) => [...new Set(list.map((path) => rename.get(path) ?? path))];
+    const next: ColumnPrefs = { manual: remap(prev.manual), hidden: remap(prev.hidden), expanded: remap(prev.expanded) };
+    if (JSON.stringify(next) === JSON.stringify(prev)) return;
+    prefsSnapshotRef.current = next;
+    board.patchColumns(next);
+  }, [board, files, project]);
+
   /* A node never vanishes on its own: every auto node is recorded as a manual
      one, so a branch that goes quiet keeps its place until the user closes it.
      Capped so old projects do not accumulate forever. Runs once per auto-node

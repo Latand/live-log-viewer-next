@@ -62,6 +62,54 @@ export interface FileEntry {
   cmdDesc?: string;
   /** Review-loop ownership for grouping implementer/reviewer sessions. */
   flow?: FlowAnnotation;
+  /** Stable Viewer conversation identity (issue #40 account migration). Owns
+      the card across native generation changes; falls back to `path` while the
+      backend coordinator is unmerged. See {@link ConversationMigration} and
+      `conversationIdentity`. Consumers must never derive current identity by
+      walking `predecessorPath`/`migratedTo` — those are compatibility metadata. */
+  conversationId?: string;
+  /** Native generation number under the current account; provenance only. */
+  generation?: number;
+  /** Compatibility link to the archived predecessor transcript of a committed
+      migration. Presence marks this entry as a successor (renders a feed
+      divider); never used to determine identity. */
+  predecessorPath?: string | null;
+  /** Human label of the account the predecessor ran under, for the "Continued
+      from «…»" divider. Divider stays hidden until the server supplies it. */
+  predecessorLabel?: string;
+  /** Compatibility link to the successor transcript once a migration commits.
+      Presence marks this entry as an archived predecessor: it folds into the
+      successor's history and never renders a standalone card. */
+  migratedTo?: string | null;
+  /** Live per-session migration annotation while an intent drains. Absent for
+      every session not currently migrating. */
+  migration?: ConversationMigration;
+}
+
+/** Per-session migration annotation carried on a {@link FileEntry} while an
+    account-migration intent drains. The coordinator's internal phases collapse
+    to the four user-visible card states via `cardMigrationState`. */
+export interface ConversationMigration {
+  /** The durable engine-wide intent this session belongs to. */
+  intentId: string;
+  /** Whether the intent was authored by a manual selection or the auto-balancer. */
+  trigger: "manual" | "quota";
+  /** Raw coordinator phase (`waiting-turn` | `preparing` | `successor-starting`
+      | `verifying` | `committed` | `failed-recoverable` | `rolled-back` | …). */
+  phase: string;
+  /** Target account id the session is moving to. */
+  targetAccountId: string;
+  /** Human label of the target account, safe for display. */
+  targetLabel?: string;
+  /** Human label of the current (source) account, for the failed-state
+      "Keep on «…»" per-session rollback action. Keep hides without it. */
+  sourceLabel?: string;
+  /** Number of composer/queue deliveries held for the successor. */
+  heldDeliveries?: number;
+  /** Secret-free failure reason from the server, shown on failed ribbons. */
+  failure: string | null;
+  /** Optimistic-concurrency revision of the owning operation. */
+  revision?: number;
 }
 
 export interface ProjectCatalogEntry {

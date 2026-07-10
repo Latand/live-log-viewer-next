@@ -11,6 +11,7 @@ import type { FileEntry } from "@/lib/types";
 import { MAX_VISIBLE_PATHS } from "@/lib/view/types";
 
 import { appendComposerDraft } from "@/components/TmuxComposer";
+import { conversationIdentity } from "@/lib/accounts/identity";
 import { BranchPane } from "@/components/BranchPane";
 import { flowByImplementer } from "@/components/flows/flowModel";
 import type { BranchGroup } from "@/components/projectModel";
@@ -518,7 +519,7 @@ export function SchemeBoard({
           pushTaskToast("err", res.error);
           return res.error;
         }
-        appendComposerDraft(file.path, taskDeliveryText(res.task.id, res.task.text));
+        appendComposerDraft(conversationIdentity(file), taskDeliveryText(res.task.id, res.task.text));
         return null;
       },
       /* No aimed agent: seed a fresh draft conversation with the task text —

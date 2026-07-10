@@ -4,6 +4,7 @@ import { Link2 } from "lucide-react";
 import { useEffect, useId, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
+import { conversationIdentity } from "@/lib/accounts/identity";
 import { useLocale } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
 
@@ -263,7 +264,7 @@ export function useAgentLink(source: FileEntry, onDragStart?: () => void) {
     onDragStart,
     onDrop: (hit) => {
       appendComposerDraft(
-        hit.file.path,
+        conversationIdentity(hit.file),
         t("link.handoffContext", { title: cleanTitle(source.title, 80), path: source.path, ask: "" }).trimEnd() + "\n\n",
       );
       return t("link.dropped", { title: cleanTitle(hit.file.title, 48) });

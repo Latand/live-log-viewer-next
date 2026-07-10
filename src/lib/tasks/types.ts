@@ -5,6 +5,8 @@ export type AssignmentState = "delivered" | "failed" | "spawning" | "handoff";
 export interface TaskAssignment {
   /** Transcript path; null while a codex spawn awaits scanner attribution. */
   path: string | null;
+  /** Stable Viewer owner; paths remain native-generation provenance. */
+  conversationId?: string | null;
   /** tmux pane pid captured at spawn — the codex rollout attribution handle. */
   panePid: number | null;
   state: AssignmentState;
