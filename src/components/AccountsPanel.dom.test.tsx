@@ -48,6 +48,8 @@ function state(currentLogin: ClaudeLoginView, over: Partial<EngineAccountsState>
     submitLoginCode: async () => true,
     cancelLogin: async () => true,
     retryLogin: async () => true,
+    remove: async () => true,
+    cleanupOrphans: async () => true,
     ...over,
   };
 }

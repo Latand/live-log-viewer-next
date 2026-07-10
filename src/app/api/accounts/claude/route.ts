@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 
-import { CorruptClaudeAccountsError, InvalidClaudeAccountLabelError, UnknownClaudeAccountError, createManagedClaudeAccount, listClaudeAccounts, removeManagedClaudeAccount } from "@/lib/accounts/claude";
+import { CorruptClaudeAccountsError, InvalidClaudeAccountLabelError, UnknownClaudeAccountError, UnsafeClaudeHomeError, cleanupOrphanedClaudeHomes, createManagedClaudeAccount, listClaudeAccounts, removeManagedClaudeAccount } from "@/lib/accounts/claude";
 import { claudeLoginSupervisor } from "@/lib/accounts/claudeLogin";
+import { accountRemovalBlockers } from "@/lib/accounts/removal";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
 
 export const runtime = "nodejs";
@@ -56,5 +57,43 @@ export async function POST(req: NextRequest) {
     if (error instanceof InvalidClaudeAccountLabelError || error instanceof CorruptClaudeAccountsError) return failure(400, "invalid_account", "Claude account could not be created");
     if (error instanceof Error && error.message === "a Claude login operation is already running") return failure(409, "login_busy", "A Claude login operation is already running");
     return failure(503, "login_unavailable", "Claude login is temporarily unavailable");
+  }
+}
+
+const LIVE_CLAUDE_LOGIN_PHASES = new Set(["starting", "awaiting_browser", "awaiting_code", "verifying", "canceling"]);
+
+export async function DELETE(req: NextRequest) {
+  const rejected = rejectCrossOrigin(req); if (rejected) return rejected;
+  let body: { id?: unknown; force?: unknown; cleanupOrphans?: unknown };
+  try { body = await req.json() as { id?: unknown; force?: unknown; cleanupOrphans?: unknown }; } catch { return failure(400, "invalid_json", "Invalid JSON"); }
+  if (body.cleanupOrphans === true) {
+    if (body.id !== undefined) return failure(400, "invalid_request", "Cleanup accepts no account id");
+    try { return NextResponse.json({ removed: cleanupOrphanedClaudeHomes() }); }
+    catch (error) {
+      if (error instanceof CorruptClaudeAccountsError) return failure(409, "accounts_locked", "Claude accounts require registry repair");
+      return failure(500, "cleanup_failed", "Claude orphan cleanup failed");
+    }
+  }
+  if (typeof body.id !== "string" || typeof body.force !== "undefined" && typeof body.force !== "boolean") {
+    return failure(400, "invalid_request", "Account id and force flag are invalid");
+  }
+  const account = listClaudeAccounts().find((candidate) => candidate.id === body.id);
+  if (!account || account.kind !== "managed") return failure(404, "unknown_account", "Claude account is unavailable");
+  const login = claudeLoginSupervisor.forAccount(account.id);
+  const blockers = [
+    ...accountRemovalBlockers("claude", account.id),
+    ...(login && LIVE_CLAUDE_LOGIN_PHASES.has(login.phase) ? ["login_pending"] : []),
+  ];
+  if (blockers.length && body.force !== true) {
+    return NextResponse.json({ error: "Claude account has active sessions or sign-in", code: "account_removal_blocked", blockers }, { status: 409 });
+  }
+  try {
+    if (login && LIVE_CLAUDE_LOGIN_PHASES.has(login.phase)) await claudeLoginSupervisor.cancel(login.operationId);
+    removeManagedClaudeAccount(account.id);
+    return NextResponse.json({ removed: { id: account.id } });
+  } catch (error) {
+    if (error instanceof CorruptClaudeAccountsError) return failure(409, "accounts_locked", "Claude accounts require registry repair");
+    if (error instanceof UnsafeClaudeHomeError) return failure(409, "unsafe_home", "Claude account home failed safety checks");
+    return failure(500, "removal_failed", "Claude account could not be removed");
   }
 }

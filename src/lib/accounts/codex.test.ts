@@ -10,10 +10,11 @@ const OLD_HOME = process.env.LLV_CODEX_HOME;
 process.env.LLV_STATE_DIR = path.join(SANDBOX, "state");
 process.env.LLV_CODEX_HOME = path.join(SANDBOX, "legacy-codex");
 
-const { CorruptCodexAccountsError, LOGIN_STARTUP_GRACE_MS, activeCodexAccountId, codexLoginPaneStatus, createManagedCodexAccount, listCodexAccounts, setActiveCodexAccount } = await import("./codex");
+const { CorruptCodexAccountsError, LOGIN_STARTUP_GRACE_MS, activeCodexAccountId, cleanupOrphanedCodexHomes, codexAccountsRoot, codexLoginPaneStatus, createManagedCodexAccount, listCodexAccounts, removeManagedCodexAccount, setActiveCodexAccount } = await import("./codex");
 
 beforeEach(() => {
   fs.rmSync(process.env.LLV_STATE_DIR!, { recursive: true, force: true });
+  fs.rmSync(path.join(SANDBOX, "accounts"), { recursive: true, force: true });
 });
 
 afterAll(() => {
@@ -88,6 +89,20 @@ test("account creation preserves an occupied home and chooses a safe suffix", ()
   expect(account.id).toBe("work-1");
   expect(fs.readFileSync(auth, "utf8")).toBe("credential sentinel");
   expect(fs.readFileSync(session, "utf8")).toBe("session sentinel");
+});
+
+test("managed Codex account removal deletes its registry record and home, then cleans safe orphan homes", () => {
+  const account = createManagedCodexAccount("Delete me");
+  const orphan = path.join(codexAccountsRoot(), "probe-login");
+  fs.mkdirSync(orphan, { recursive: true, mode: 0o700 });
+
+  removeManagedCodexAccount(account.id);
+  const cleaned = cleanupOrphanedCodexHomes();
+
+  expect(listCodexAccounts().map((item) => item.id)).not.toContain(account.id);
+  expect(fs.existsSync(account.home)).toBe(false);
+  expect(cleaned).toEqual(["probe-login"]);
+  expect(fs.existsSync(orphan)).toBe(false);
 });
 
 test("a shell during login startup grace remains pending", () => {

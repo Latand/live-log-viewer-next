@@ -12,7 +12,7 @@ const OLD_HOME = process.env.LLV_CODEX_HOME;
 process.env.LLV_STATE_DIR = path.join(SANDBOX, "state");
 process.env.LLV_CODEX_HOME = path.join(SANDBOX, "legacy");
 
-const { POST } = await import("./route");
+const { DELETE: remove, POST } = await import("./route");
 const { CodexAppServerClient } = await import("@/lib/accounts/codexAppServer");
 const { ManagedCodexRuntime, setManagedCodexRuntimeForTests } = await import("@/lib/accounts/codexRuntime");
 
@@ -87,4 +87,31 @@ test("managed account creation returns an app-server challenge without the tmux 
   const source = fs.readFileSync(path.join(import.meta.dir, "route.ts"), "utf8");
   expect(source).not.toContain("@/lib/tmux");
   expect(source).not.toContain("spawnCommandWindow");
+});
+
+test("managed Codex removal requires force during device login and cancels the login child", async () => {
+  const children: FakeChild[] = [];
+  setManagedCodexRuntimeForTests(new ManagedCodexRuntime({
+    startClient: async (home) => {
+      const child = new FakeChild();
+      children.push(child);
+      return CodexAppServerClient.start({ home, spawn: () => child as never });
+    },
+  }));
+  const created = await POST(new NextRequest("http://127.0.0.1/api/accounts/codex", {
+    method: "POST", headers: { host: "127.0.0.1", "content-type": "application/json" }, body: JSON.stringify({ label: "Remove me" }),
+  }));
+  const { account } = await created.json() as { account: { id: string } };
+
+  const blocked = await remove(new NextRequest("http://127.0.0.1/api/accounts/codex", {
+    method: "DELETE", headers: { host: "127.0.0.1", "content-type": "application/json" }, body: JSON.stringify({ id: account.id }),
+  }));
+  expect(blocked.status).toBe(409);
+  await expect(blocked.json()).resolves.toEqual(expect.objectContaining({ code: "account_removal_blocked", blockers: ["login_pending"] }));
+
+  const forced = await remove(new NextRequest("http://127.0.0.1/api/accounts/codex", {
+    method: "DELETE", headers: { host: "127.0.0.1", "content-type": "application/json" }, body: JSON.stringify({ id: account.id, force: true }),
+  }));
+  expect(forced.status).toBe(200);
+  expect(children[0]?.kills).toBeGreaterThan(0);
 });

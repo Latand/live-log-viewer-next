@@ -14,6 +14,7 @@ const mod = await import("./claude");
 beforeEach(() => {
   fs.rmSync(process.env.LLV_STATE_DIR!, { recursive: true, force: true });
   fs.rmSync(process.env.LLV_CLAUDE_HOME!, { recursive: true, force: true });
+  fs.rmSync(path.join(SANDBOX, "accounts"), { recursive: true, force: true });
 });
 afterAll(() => {
   if (OLD_STATE === undefined) delete process.env.LLV_STATE_DIR; else process.env.LLV_STATE_DIR = OLD_STATE;
@@ -69,6 +70,20 @@ test("managed credentials reject symlinks and broad modes before an agent can sp
   expect(() => mod.claudeAccountForSpawn(account.id)).toThrow(mod.UnsafeClaudeHomeError);
   fs.rmSync(credentials); fs.symlinkSync(path.join(process.env.LLV_CLAUDE_HOME!, "missing"), credentials);
   expect(mod.managedClaudeCredentialIsSafe(account.home, true)).toBe(false);
+});
+
+test("managed account removal deletes its registry record and home, while orphan cleanup only removes safe managed children", () => {
+  const account = mod.createManagedClaudeAccount("Delete me");
+  const orphan = path.join(mod.claudeAccountsRoot(), "probe-login");
+  fs.mkdirSync(orphan, { recursive: true, mode: 0o700 });
+
+  mod.removeManagedClaudeAccount(account.id);
+  const cleaned = mod.cleanupOrphanedClaudeHomes();
+
+  expect(mod.listClaudeAccounts().map((item) => item.id)).not.toContain(account.id);
+  expect(fs.existsSync(account.home)).toBe(false);
+  expect(cleaned).toEqual(["probe-login"]);
+  expect(fs.existsSync(orphan)).toBe(false);
 });
 
 test("an interrupted registry replacement leaves the prior atomic registry readable", () => {

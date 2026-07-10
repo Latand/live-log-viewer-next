@@ -583,3 +583,41 @@ test("a non-202 claude add keeps the add retry action with the draft label (C12g
   expect(store.notice?.messageKey).toBe("accounts.claudeLogin.err.generic");
   unsub();
 });
+
+test("managed account removal retries with force only after the API reports a safety blocker", async () => {
+  let removed = false;
+  const { calls, fetcher } = scripted((url, body) => {
+    if (url === "/api/accounts") {
+      return {
+        claude: {
+          active: "main",
+          accounts: [
+            claudeMain,
+            ...(removed ? [] : [claudeAcct({ id: "work", label: "Work", login: null })]),
+          ],
+        },
+      };
+    }
+    if (url === "/api/accounts/claude" && (body as { id?: string }).id === "work") {
+      if ((body as { force?: boolean }).force !== true) {
+        return new Response(JSON.stringify({ code: "account_removal_blocked", blockers: ["live_sessions"] }), { status: 409 });
+      }
+      removed = true;
+      return new Response(JSON.stringify({ removed: { id: "work" } }));
+    }
+    return new Response(null, { status: 204 });
+  });
+  const store = createEngineAccountsStore("claude", { fetcher });
+  const unsub = store.subscribe(() => {});
+  await advance();
+
+  expect(await store.remove("work")).toBeFalse();
+  expect(store.notice?.action).toMatchObject({ type: "retry", kind: "forceRemove", accountId: "work" });
+  expect(await store.retryNotice()).toBeTrue();
+  expect(calls.filter((call) => call.url === "/api/accounts/claude").map((call) => call.body)).toEqual([
+    { id: "work", force: false },
+    { id: "work", force: true },
+  ]);
+  expect(store.accounts.some((account) => account.id === "work")).toBeFalse();
+  unsub();
+});

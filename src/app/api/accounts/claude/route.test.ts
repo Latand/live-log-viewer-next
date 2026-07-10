@@ -13,7 +13,7 @@ process.env.LLV_STATE_DIR = path.join(sandbox, "state");
 process.env.LLV_CLAUDE_HOME = path.join(sandbox, "legacy");
 
 const { ClaudeLoginSupervisor, setClaudeLoginSupervisorForTests } = await import("@/lib/accounts/claudeLogin");
-const { POST } = await import("./route");
+const { DELETE: remove, POST } = await import("./route");
 const { DELETE } = await import("./login/[operationId]/route");
 const { POST: submitInput } = await import("./login/[operationId]/input/route");
 
@@ -28,6 +28,7 @@ let child: FakeChild;
 
 beforeEach(() => {
   fs.rmSync(process.env.LLV_STATE_DIR!, { recursive: true, force: true });
+  fs.rmSync(path.join(sandbox, "accounts"), { recursive: true, force: true });
   child = new FakeChild();
   setClaudeLoginSupervisorForTests(new ClaudeLoginSupervisor({
     spawn: () => child as never,
@@ -115,4 +116,29 @@ test("the authorization code is accepted through stdin and never appears in the 
   expect(submitted.status).toBe(200);
   expect(submittedBody).toEqual({ login: expect.objectContaining({ phase: "verifying", acceptsCode: false }) });
   expect(JSON.stringify(submittedBody)).not.toContain(code);
+});
+
+test("managed Claude removal requires force during login and cancels the operation before removing credentials", async () => {
+  const created = await POST(new NextRequest("http://127.0.0.1/api/accounts/claude", {
+    method: "POST",
+    headers: { host: "127.0.0.1", "content-type": "application/json" },
+    body: JSON.stringify({ label: "Remove me" }),
+  }));
+  const { account } = await created.json() as { account: { id: string } };
+
+  const blocked = await remove(new NextRequest("http://127.0.0.1/api/accounts/claude", {
+    method: "DELETE",
+    headers: { host: "127.0.0.1", "content-type": "application/json" },
+    body: JSON.stringify({ id: account.id }),
+  }));
+  expect(blocked.status).toBe(409);
+  await expect(blocked.json()).resolves.toEqual(expect.objectContaining({ code: "account_removal_blocked", blockers: ["login_pending"] }));
+
+  const forced = await remove(new NextRequest("http://127.0.0.1/api/accounts/claude", {
+    method: "DELETE",
+    headers: { host: "127.0.0.1", "content-type": "application/json" },
+    body: JSON.stringify({ id: account.id, force: true }),
+  }));
+  expect(forced.status).toBe(200);
+  await expect(forced.json()).resolves.toEqual({ removed: { id: account.id } });
 });

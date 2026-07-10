@@ -9,8 +9,8 @@ import { AccountsPanel } from "./AccountsPanel";
 const base = (over: Partial<EngineAccountsState> = {}): EngineAccountsState => ({
   engine: "codex",
   accounts: [
-    { id: "main", label: "Main", authPresent: true, loginPending: false, loginState: "authenticated", deviceAuth: null, effective: { percent: 12, window: "session", freshness: "fresh" } },
-    { id: "work", label: "Work", authPresent: true, loginPending: false, loginState: "authenticated", deviceAuth: null, effective: { percent: 64, window: "weekly", freshness: "stale" } },
+    { id: "main", label: "Main", kind: "legacy", authPresent: true, loginPending: false, loginState: "authenticated", deviceAuth: null, effective: { percent: 12, window: "session", freshness: "fresh" } },
+    { id: "work", label: "Work", kind: "managed", authPresent: true, loginPending: false, loginState: "authenticated", deviceAuth: null, effective: { percent: 64, window: "weekly", freshness: "stale" } },
   ],
   active: "main",
   identityVersion: 0,
@@ -31,6 +31,8 @@ const base = (over: Partial<EngineAccountsState> = {}): EngineAccountsState => (
   submitLoginCode: async () => true,
   cancelLogin: async () => true,
   retryLogin: async () => true,
+  remove: async () => true,
+  cleanupOrphans: async () => true,
   ...over,
 });
 
@@ -108,6 +110,13 @@ test("the active account row stays clickable so a same-active repair can run", (
   // React renders a disabled control as the bare `disabled=""` attribute; the
   // `disabled:` tailwind class variants in className are not the disabled state.
   expect(active).not.toContain('disabled=""');
+});
+
+test("shows removal only for a managed account and keeps cleanup reachable", () => {
+  const html = render(base());
+  expect(html).toContain('aria-label="Remove Work"');
+  expect(html).not.toContain('aria-label="Remove Main"');
+  expect(html).toContain("Clean up abandoned homes");
 });
 
 test("a draining migration with failures offers a Retry-failed affordance", () => {

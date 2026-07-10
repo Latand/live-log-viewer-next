@@ -181,8 +181,28 @@ export function createManagedClaudeAccount(label: string): ClaudeAccount {
 export function removeManagedClaudeAccount(id: string): void {
   withRegistryLock(() => {
     cached = null; const registry = mutable(); const existing = registry.accounts.find((item) => item.id === id); if (!existing) return;
+    const home = managedHome(id);
+    if (fs.existsSync(home) && !managedClaudeHomeIsSafe(id, true)) throw new UnsafeClaudeHomeError();
     write({ ...registry, active: registry.active === id ? DEFAULT_ID : registry.active, accounts: registry.accounts.filter((item) => item.id !== id) });
-    fs.rmSync(managedHome(id), { recursive: true, force: true });
+    fs.rmSync(home, { recursive: true, force: true });
+  });
+}
+
+/** Removes failed-login homes that have no registry owner. Only safe direct children qualify. */
+export function cleanupOrphanedClaudeHomes(): string[] {
+  return withRegistryLock(() => {
+    cached = null;
+    const registry = mutable();
+    const registered = new Set(registry.accounts.map((account) => account.id));
+    let entries: fs.Dirent[];
+    try { entries = fs.readdirSync(claudeAccountsRoot(), { withFileTypes: true }); } catch { return []; }
+    const removed: string[] = [];
+    for (const entry of entries) {
+      if (!entry.isDirectory() || registered.has(entry.name) || !managedClaudeHomeIsSafe(entry.name, true)) continue;
+      fs.rmSync(managedHome(entry.name), { recursive: true, force: true });
+      removed.push(entry.name);
+    }
+    return removed.sort();
   });
 }
 

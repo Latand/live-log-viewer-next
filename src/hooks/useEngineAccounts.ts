@@ -110,7 +110,7 @@ export type AccountOption = {
   effective?: AccountEffective | null;
 };
 export type AccountLoadState = "loading" | "ready" | "error";
-export type AccountOperation = "refresh" | "add" | "migrate" | "policy" | "login";
+export type AccountOperation = "refresh" | "add" | "migrate" | "policy" | "login" | "remove";
 
 /** A retry action carries exactly the identifier its endpoint needs. The account
     target id drives the preview → migrate path; the durable intent id drives the
@@ -123,11 +123,13 @@ export type AccountRetryAction =
   | { type: "retry"; kind: "migrate"; accountId: string }
   | { type: "retry"; kind: "stop"; intentId: string }
   | { type: "retry"; kind: "retryFailed"; intentId: string }
-  | { type: "retry"; kind: "loginRetry"; accountId: string };
+  | { type: "retry"; kind: "loginRetry"; accountId: string }
+  | { type: "retry"; kind: "forceRemove"; accountId: string };
 
 export type AccountNoticeKey =
   | "accounts.refreshFailed" | "accounts.switchFailed" | "accounts.addFailed" | "accounts.loginOpened"
   | "accounts.claudeLoginStarted"
+  | "accounts.removeBlocked" | "accounts.removeFailed"
   | ClaudeLoginErrKey;
 
 export interface AccountNotice {
@@ -206,6 +208,10 @@ export interface EngineAccountsState extends EngineAccountsSnapshot {
   /** Restarts sign-in for an existing managed Claude account (claude only) —
       recovers a canceled/failed/broken account without deleting it. */
   retryLogin: (accountId: string) => Promise<boolean>;
+  /** Removes one managed account. A blocked safety check exposes an explicit force retry. */
+  remove: (accountId: string, force?: boolean) => Promise<boolean>;
+  /** Removes safe managed-home directories that have no registry owner. */
+  cleanupOrphans: () => Promise<boolean>;
 }
 
 type Fetcher = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
@@ -687,6 +693,61 @@ export function createEngineAccountsStore(
     });
   };
 
+  const remove = (accountId: string, force = false): Promise<boolean> => {
+    const label = snapshot.accounts.find((account) => account.id === accountId)?.label ?? accountId;
+    return runMutation("remove", async () => {
+      try {
+        const response = await fetcher(addUrl, {
+          method: "DELETE",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ id: accountId, force }),
+        });
+        if (!response.ok) {
+          const body = await response.json().catch(() => null) as { code?: unknown } | null;
+          const blocked = body?.code === "account_removal_blocked";
+          patchSnapshot({
+            notice: {
+              kind: "error",
+              operation: "remove",
+              messageKey: blocked ? "accounts.removeBlocked" : "accounts.removeFailed",
+              target: label,
+              action: blocked ? { type: "retry", kind: "forceRemove", accountId } : null,
+            },
+          });
+          await refresh();
+          return false;
+        }
+        const accounts = snapshot.accounts.filter((account) => account.id !== accountId);
+        patchSnapshot({ accounts, challenge: pendingDeviceAuth(accounts), identityVersion: snapshot.identityVersion + 1 });
+      } catch {
+        patchSnapshot({ notice: { kind: "error", operation: "remove", messageKey: "accounts.removeFailed", target: label, action: null } });
+        await refresh();
+        return false;
+      }
+      await refresh();
+      return true;
+    });
+  };
+
+  const cleanupOrphans = (): Promise<boolean> => {
+    return runMutation("remove", async () => {
+      try {
+        const response = await fetcher(addUrl, {
+          method: "DELETE",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ cleanupOrphans: true }),
+        });
+        if (!response.ok) throw new Error("orphan cleanup failed");
+      } catch {
+        patchSnapshot({ notice: { kind: "error", operation: "remove", messageKey: "accounts.removeFailed", action: null } });
+        await refresh();
+        return false;
+      }
+      await refresh();
+      return true;
+    });
+  };
+
   const retryNotice = async (): Promise<boolean> => {
     const action = snapshot.notice?.action;
     if (!action) return false;
@@ -697,6 +758,8 @@ export function createEngineAccountsStore(
         return add(action.label);
       case "loginRetry":
         return retryLogin(action.accountId);
+      case "forceRemove":
+        return remove(action.accountId, true);
       case "migrate": {
         // A migrate retry re-fences against a fresh preview revision: the stored
         // one is stale once the intent moved on or another switch raced, so it
@@ -753,6 +816,8 @@ export function createEngineAccountsStore(
     submitLoginCode,
     cancelLogin,
     retryLogin,
+    remove,
+    cleanupOrphans,
   };
 }
 
@@ -790,5 +855,7 @@ export function useEngineAccounts(engine: Engine): EngineAccountsState {
     submitLoginCode: store.submitLoginCode,
     cancelLogin: store.cancelLogin,
     retryLogin: store.retryLogin,
+    remove: store.remove,
+    cleanupOrphans: store.cleanupOrphans,
   };
 }

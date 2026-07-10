@@ -113,6 +113,12 @@ export const uk: Record<keyof typeof en, Message> = {
   "accounts.labelPlaceholder": "Назва нового акаунта",
   "accounts.confirmAdd": "Додати",
   "accounts.close": "Закрити",
+  "accounts.remove": "Видалити",
+  "accounts.removeAria": "Видалити {label}",
+  "accounts.removeBlocked": "Для {label} ще є активна сесія або вхід.",
+  "accounts.removeFailed": "Не вдалося видалити цей акаунт.",
+  "accounts.forceRemove": "Видалити примусово",
+  "accounts.cleanupOrphans": "Очистити покинуті теки",
   // Міграція акаунтів (#40) — уніфікована панель, підтвердження, банер, стрічки
   "accounts.titleFor": "Акаунти {engine}",
   "accounts.triggerAria": "Акаунти {engine} — змінити, мігрувати або додати",

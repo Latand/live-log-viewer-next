@@ -79,11 +79,18 @@ export class CorruptCodexAccountsError extends Error {
   }
 }
 
+export class UnsafeCodexHomeError extends Error {
+  constructor() {
+    super("managed Codex home failed safety checks");
+    this.name = "UnsafeCodexHomeError";
+  }
+}
+
 function legacyHome(): string {
   return path.resolve(process.env.LLV_CODEX_HOME || path.join(os.homedir(), ".codex"));
 }
 
-function accountsRoot(): string {
+export function codexAccountsRoot(): string {
   return path.join(path.dirname(stateDir()), "accounts", "codex");
 }
 
@@ -128,21 +135,22 @@ function isStoredAccount(value: unknown): value is StoredAccount {
 }
 
 function managedHome(id: string): string {
-  return path.join(accountsRoot(), id);
+  return path.join(codexAccountsRoot(), id);
 }
 
-function managedHomeIsSafe(id: string): boolean {
+function managedHomeIsSafe(id: string, requireExisting = false): boolean {
   if (!ACCOUNT_ID.test(id) || id === DEFAULT_ID) return false;
-  const root = path.resolve(accountsRoot());
+  const root = path.resolve(codexAccountsRoot());
   const home = path.resolve(managedHome(id));
   if (path.dirname(home) !== root) return false;
   try {
+    const rootStat = fs.lstatSync(root);
     const stat = fs.lstatSync(home);
-    if (stat.isSymbolicLink()) return false;
+    if (!rootStat.isDirectory() || rootStat.isSymbolicLink() || !stat.isDirectory() || stat.isSymbolicLink() || (stat.mode & 0o077) !== 0) return false;
     const rootReal = fs.realpathSync(root);
     return path.dirname(fs.realpathSync(home)) === rootReal;
   } catch {
-    return true;
+    return !requireExisting;
   }
 }
 
@@ -333,6 +341,35 @@ export function createManagedCodexAccount(label: string): CodexAccount {
     if (createdHome) fs.rmSync(home, { recursive: true, force: true });
     throw error;
   }
+}
+
+export function removeManagedCodexAccount(id: string): void {
+  const registry = mutableRegistry();
+  const existing = registry.accounts.find((account) => account.id === id);
+  if (!existing) throw new UnknownAccountError(id);
+  const home = managedHome(id);
+  if (fs.existsSync(home) && !managedHomeIsSafe(id, true)) throw new UnsafeCodexHomeError();
+  writeRegistry({
+    ...registry,
+    active: registry.active === id ? DEFAULT_ID : registry.active,
+    accounts: registry.accounts.filter((account) => account.id !== id),
+  });
+  fs.rmSync(home, { recursive: true, force: true });
+}
+
+/** Removes failed-login homes that have no registry owner. Only safe direct children qualify. */
+export function cleanupOrphanedCodexHomes(): string[] {
+  const registry = mutableRegistry();
+  const registered = new Set(registry.accounts.map((account) => account.id));
+  let entries: fs.Dirent[];
+  try { entries = fs.readdirSync(codexAccountsRoot(), { withFileTypes: true }); } catch { return []; }
+  const removed: string[] = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory() || registered.has(entry.name) || !managedHomeIsSafe(entry.name, true)) continue;
+    fs.rmSync(managedHome(entry.name), { recursive: true, force: true });
+    removed.push(entry.name);
+  }
+  return removed.sort();
 }
 
 export function setCodexAccountLoginPane(id: string, loginPane: LoginPane | null): void {

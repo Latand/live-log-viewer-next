@@ -119,6 +119,12 @@ export const en = {
   "accounts.labelPlaceholder": "New account label",
   "accounts.confirmAdd": "Add",
   "accounts.close": "Close",
+  "accounts.remove": "Remove",
+  "accounts.removeAria": "Remove {label}",
+  "accounts.removeBlocked": "{label} still has an active session or sign-in.",
+  "accounts.removeFailed": "Could not remove this account.",
+  "accounts.forceRemove": "Force remove",
+  "accounts.cleanupOrphans": "Clean up abandoned homes",
   // Account migration (#40) — unified panel, confirm, banner, ribbons
   "accounts.titleFor": "{engine} accounts",
   "accounts.triggerAria": "{engine} accounts — switch, migrate, or add",
