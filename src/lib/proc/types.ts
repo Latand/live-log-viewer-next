@@ -46,6 +46,8 @@ export interface ProcBackend {
   readArgv(pid: number): string[];
   readCwd(pid: number): string | null;
   readPpid(pid: number): number | null;
+  /** PID plus a kernel start-time token where the platform exposes one. */
+  processIdentity(pid: number): string | null;
 
   /**
    * Value of an environment variable for a live pid. Reading another

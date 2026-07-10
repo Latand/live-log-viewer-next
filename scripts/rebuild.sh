@@ -17,13 +17,24 @@ cd "$REPO_DIR"
 PORT="${PORT:-8898}"
 TOKEN="$(sed -n 's/^LLV_TOKEN=//p' "$HOME/.config/agent-log-viewer/service.env" 2>/dev/null | head -1)"
 
+if [ "${LLV_LEGACY_TMUX_EXTERNAL:-0}" = "1" ]; then
+  systemctl --user is-active --quiet agent-log-viewer-legacy-tmux.service || {
+    echo "!! external legacy tmux supervisor is inactive; Viewer-only rebuild refused" >&2
+    exit 1
+  }
+  [ -f "$HOME/.config/agent-log-viewer/state/legacy-tmux-migration-complete" ] || {
+    echo "!! legacy tmux migration completion marker is absent; Viewer-only rebuild refused" >&2
+    exit 1
+  }
+fi
+
 # --- 1. build the image (clean-env .next build happens inside it) ----------
 echo "==> building image"
 docker compose build viewer
 
 # --- 2. redeploy ----------------------------------------------------------
 echo "==> redeploying viewer (127.0.0.1:${PORT})"
-docker compose up -d viewer
+docker compose up -d --no-deps --force-recreate viewer
 
 # --- 3. verify page + CSS -------------------------------------------------
 BASE="http://127.0.0.1:${PORT}/"
@@ -47,4 +58,4 @@ else
   echo "==> page 200 (no <link> css found — check manually)"
 fi
 
-echo "==> done. tmux agents: $(tmux has-session -t agents 2>/dev/null && echo alive || echo none)"
+echo "==> done. Viewer replacement completed without Compose dependency recreation"

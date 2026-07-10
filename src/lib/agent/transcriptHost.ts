@@ -1,5 +1,6 @@
 import type { ResumeSpec } from "@/lib/agent/cli";
-import fs from "node:fs";
+import { agentRegistry, type TmuxHostEvidence } from "@/lib/agent/registry";
+import { sessionKeyFromTranscript } from "@/lib/agent/sessionKey";
 import { procBackend } from "@/lib/proc";
 import { descendantPids } from "@/lib/proc/memory";
 import { listFiles } from "@/lib/scanner";
@@ -11,6 +12,7 @@ import {
   resumePaneRecords,
   sendText,
   spawnAgentWithPrompt,
+  tmuxEndpoint,
   tmuxServerPid,
   type PaneRef,
   type PaneObservation,
@@ -89,6 +91,8 @@ interface HostDependencies {
   spawn: (spec: ResumeSpec, text: string) => Promise<SpawnedPane>;
   remember: (pathname: string, spec: ResumeSpec, pane: SpawnedPane) => Promise<void>;
   deliver: (paneId: string, text: string) => Promise<void>;
+  reconcile?: (hosts: TranscriptHost[]) => void;
+  serializeDelivery?: (entry: FileEntry, task: () => Promise<HostDeliveryOutcome>) => Promise<HostDeliveryOutcome>;
 }
 
 interface HostClaim {
@@ -205,18 +209,6 @@ function failure(error: unknown, status = 500): HostDeliveryOutcome {
   return { ok: false, outcome: "failed", error: error instanceof Error ? error.message : String(error), status };
 }
 
-function processIdentity(pid: number): string | null {
-  try {
-    const raw = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
-    const closing = raw.lastIndexOf(")");
-    const fields = raw.slice(closing + 2).trim().split(/\s+/);
-    const startTicks = fields[19];
-    return startTicks ? `${pid}:${startTicks}` : null;
-  } catch {
-    return null;
-  }
-}
-
 /**
  * Creates the deep transcript-host module. The optional dependencies form a
  * test seam; production callers use the singleton below and only learn the
@@ -229,6 +221,7 @@ export function createTranscriptHostResolver(
 
   async function observe(fresh: boolean): Promise<TranscriptHostSnapshot> {
     const [entries, paneObservation, records] = await Promise.all([dependencies.listFiles(), dependencies.panes(fresh), dependencies.resumeRecords()]);
+    if (records) agentRegistry().importResumePanes(records.records);
     const serverPid = records?.serverPid ?? (await dependencies.serverPid());
     if (paneObservation.kind === "failure" && serverPid !== null) {
       return { hosts: [], observation: "failure", observationError: paneObservation.error, canonicalFor: () => null };
@@ -269,6 +262,8 @@ export function createTranscriptHostResolver(
         });
       }
     }
+
+    dependencies.reconcile?.(hosts);
 
     return {
       hosts,
@@ -336,9 +331,7 @@ export function createTranscriptHostResolver(
     return { owner: true, task };
   }
 
-  return {
-    readTranscriptHosts: observe,
-    async deliverToTranscriptHost(input): Promise<HostDeliveryOutcome> {
+  async function deliverToTranscriptHost(input: { entry: FileEntry; spec: ResumeSpec; payload: string }): Promise<HostDeliveryOutcome> {
       let owner = false;
       let resumed = false;
       let decision: Decision;
@@ -385,8 +378,63 @@ export function createTranscriptHostResolver(
         }
       }
       return failure("agent host became unavailable during delivery");
-    },
+  }
+
+  return {
+    readTranscriptHosts: observe,
+    deliverToTranscriptHost: (input) => dependencies.serializeDelivery
+      ? dependencies.serializeDelivery(input.entry, () => deliverToTranscriptHost(input))
+      : deliverToTranscriptHost(input),
   };
+}
+
+function reconcileRegistry(hosts: TranscriptHost[]): void {
+  const registry = agentRegistry();
+  const seen = new Set<string>();
+  for (const host of hosts) {
+    if (!host.primaryPath) continue;
+    const key = sessionKeyFromTranscript(host.engine, host.primaryPath);
+    if (!key) continue;
+    const serverStart = procBackend.processIdentity(host.tmuxServerPid);
+    const evidence: TmuxHostEvidence = {
+      kind: "tmux",
+      endpoint: tmuxEndpoint(),
+      server: { pid: host.tmuxServerPid, startIdentity: serverStart },
+      paneId: host.paneId,
+      panePid: { pid: host.panePid, startIdentity: procBackend.processIdentity(host.panePid) },
+      windowName: host.display.slice(0, host.display.indexOf(":")) || "agents",
+      agent: { pid: host.agentPid, startIdentity: host.agentIdentity },
+      argv: host.agentArgv,
+    };
+    const existing = registry.snapshot().entries[`${key.engine}:${key.sessionId}`];
+    registry.upsert({
+      key,
+      artifactPath: host.primaryPath,
+      cwd: host.cwd,
+      accountId: existing?.accountId ?? null,
+      status: "live",
+      host: evidence,
+      claimEpoch: existing?.claimEpoch ?? 0,
+      claimOwner: existing?.claimOwner ?? null,
+      pendingAction: existing?.pendingAction ?? null,
+    });
+    seen.add(`${key.engine}:${key.sessionId}`);
+  }
+  for (const [id, entry] of Object.entries(registry.snapshot().entries)) {
+    if (entry.host?.kind === "tmux" && !seen.has(id)) registry.markUnhosted(entry.key);
+  }
+}
+
+async function serializeRegistryDelivery(entry: FileEntry, task: () => Promise<HostDeliveryOutcome>): Promise<HostDeliveryOutcome> {
+  if (entry.engine !== "claude" && entry.engine !== "codex") return task();
+  const key = sessionKeyFromTranscript(entry.engine, entry.path);
+  if (!key) return task();
+  const owner = { pid: process.pid, startIdentity: procBackend.processIdentity(process.pid) };
+  try {
+    return await agentRegistry().withOperationLock(key, owner, task);
+  } catch (error) {
+    return failure(error, 409);
+  }
 }
 
 const runtimeResolver = createTranscriptHostResolver({
@@ -400,10 +448,12 @@ const runtimeResolver = createTranscriptHostResolver({
   alive: pidAlive,
   argv: readArgv,
   parentPid: readPpid,
-  identity: processIdentity,
+  identity: procBackend.processIdentity,
   spawn: spawnAgentWithPrompt,
   remember: rememberResumePane,
   deliver: sendText,
+  reconcile: reconcileRegistry,
+  serializeDelivery: serializeRegistryDelivery,
 }, globalStore.__llvTranscriptHostDecisions ??= new Map());
 
 export const readTranscriptHosts = runtimeResolver.readTranscriptHosts;

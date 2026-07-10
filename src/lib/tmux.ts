@@ -9,6 +9,7 @@ import { logEvent } from "@/lib/events";
 import { inboxImageExt, MAX_INBOX_IMAGE_BYTES } from "@/lib/imagePolicy";
 import { INBOX_DIR } from "@/lib/inbox";
 import { normalizeResumePanesFile, type ResumePaneRecord, type ResumePanesFile } from "@/lib/resumePanesFile";
+import { procBackend } from "@/lib/proc";
 import { listFiles } from "@/lib/scanner";
 import { isHelperArgv, pidAlive, readArgv, readPpid } from "@/lib/scanner/process";
 import {
@@ -24,6 +25,7 @@ import {
 export { READY_MARKERS, screenTail } from "@/lib/status";
 
 const TMUX = "tmux";
+const CANONICAL_EXTERNAL_SESSION = "agents";
 /* Outlives the 10 s /api/files poll so the pane map is not rebuilt every
    request; a post-kill rebuild passes fresh=true to bypass the memo. */
 const PANE_MAP_TTL_MS = 12_000;
@@ -102,10 +104,20 @@ interface RunResult {
   stderr: string;
 }
 
+/** The service endpoint is intentionally an environment contract. During the
+    migration the old /tmp server remains reachable until this flag is enabled. */
+export function externalTmuxMode(): boolean {
+  return process.env.LLV_LEGACY_TMUX_EXTERNAL === "1";
+}
+
+export function tmuxEndpoint(): string {
+  return process.env.TMUX_TMPDIR || "/tmp";
+}
+
 /** Runs tmux with an explicit argv (no shell) and optional stdin payload. */
 function runTmux(args: string[], input?: Buffer | string): Promise<RunResult> {
   return new Promise((resolve, reject) => {
-    const child = spawn(TMUX, args, { stdio: ["pipe", "pipe", "pipe"] });
+    const child = spawn(TMUX, args, { stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, TMUX_TMPDIR: tmuxEndpoint() } });
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (chunk: Buffer) => (stdout += chunk.toString("utf8")));
@@ -367,6 +379,13 @@ export async function killPane(target: TmuxTarget): Promise<void> {
  * session; no server at all yields a fresh detached «agents» session.
  */
 export async function activeTmuxSession(): Promise<string> {
+  if (externalTmuxMode()) {
+    const healthy = await runTmux(["has-session", "-t", CANONICAL_EXTERNAL_SESSION]).catch(() => null);
+    if (!healthy || healthy.code !== 0) {
+      throw new Error("external legacy tmux supervisor is unavailable; refusing to create a container-owned server");
+    }
+    return CANONICAL_EXTERNAL_SESSION;
+  }
   const clients = await runTmux(["list-clients", "-F", "#{client_activity} #{client_session}"]).catch(() => null);
   const pick = (stdout: string) => {
     let best: { at: number; name: string } | null = null;
@@ -458,6 +477,11 @@ export async function tmuxServerPid(): Promise<number | null> {
   const res = await runTmux(["display-message", "-p", "#{pid}"]).catch(() => null);
   const pid = res && res.code === 0 ? Number(res.stdout.trim()) : NaN;
   return Number.isInteger(pid) && pid > 0 ? pid : null;
+}
+
+export async function tmuxServerIdentity(): Promise<string | null> {
+  const pid = await tmuxServerPid();
+  return pid === null ? null : procBackend.processIdentity(pid);
 }
 
 /**

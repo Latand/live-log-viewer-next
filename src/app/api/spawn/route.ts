@@ -8,8 +8,10 @@ import { UnknownAccountError } from "@/lib/accounts/codex";
 import { UnknownClaudeAccountError } from "@/lib/accounts/claude";
 import { accountManager } from "@/lib/accounts/manager";
 import { freshSpecFor, type AgentEngine } from "@/lib/agent/cli";
+import { agentRegistry, type SpawnReceipt } from "@/lib/agent/registry";
 import { reasoningFromBody } from "@/lib/agent/efforts";
 import { modelFromBody } from "@/lib/agent/models";
+import { sessionKeyFromTranscript } from "@/lib/agent/sessionKey";
 import { resolveSpawnedTranscriptPath } from "@/lib/agent/spawnedTranscript";
 import { headCwd } from "@/lib/agent/transcript";
 import { persistHandoffLineage, rememberHandoffChild, rememberHandoffPane } from "@/lib/handoffLineage";
@@ -165,6 +167,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse
   /* Saved paths stay visible to the catch: a failed spawn deletes them so a
      retry cannot pile duplicates into the inbox. */
   let imagePaths: string[] = [];
+  let receipt: SpawnReceipt | null = null;
   try {
     /* Pasted images land in the inbox and reach the fresh agent as file paths
        appended to its first prompt — the same contract the pane composer uses. */
@@ -179,6 +182,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse
       claudeConfigDir: engine === "claude" ? account.home : null,
       claudeProjectsDir: engine === "claude" ? account.transcriptRoot : null,
     });
+    receipt = agentRegistry().beginSpawn(engine, cwd);
     const startedAtMs = Date.now();
     const pane = await spawnAgentWithPrompt(spec, bundle.payload);
     const childPath = await resolveSpawnedTranscriptPath({
@@ -189,6 +193,20 @@ export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse
       startedAtMs,
       codexSessionsDir: engine === "codex" ? account.transcriptRoot : null,
     });
+    const key = childPath ? sessionKeyFromTranscript(engine, childPath) : null;
+    if (receipt && childPath && key) {
+      agentRegistry().completeSpawn(receipt.launchId, {
+        key,
+        artifactPath: childPath,
+        cwd,
+        accountId: body.accountId ?? null,
+        status: "starting",
+        host: null,
+        claimEpoch: 0,
+        claimOwner: null,
+        pendingAction: "spawn",
+      });
+    }
     const src = parentFromBody(body);
     if (src && transcriptAllowed(src)) {
       if (childPath) rememberHandoffChild(childPath, src);
@@ -197,6 +215,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse
     }
     return NextResponse.json({ ok: true, target: pane.display, path: childPath });
   } catch (error) {
+    if (receipt) agentRegistry().failSpawn(receipt.launchId, error instanceof Error ? error.message : String(error));
     deleteInboxImages(imagePaths);
     if (error instanceof UnknownAccountError || error instanceof UnknownClaudeAccountError) return NextResponse.json({ error: error.message }, { status: 400 });
     return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 500 });
