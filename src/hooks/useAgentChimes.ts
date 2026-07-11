@@ -72,9 +72,14 @@ export function planAgentChimes(
   const next = new Map<string, TrackedConversation>();
   for (const file of files) {
     if (isAuxTask(file) || isArchivedPredecessor(file)) continue;
+    const id = conversationIdentity(file);
+    /* Bound the current poll itself (selected-project hydration can exceed the
+       cap): the feed arrives mtime-descending, so the retained slice is the
+       most recently active conversations and every return path stays capped. */
+    if (next.size >= MAX_TRACKED_IDENTITIES && !next.has(id)) continue;
     const state = paneState(file);
     const kind = file.pendingQuestion || file.waitingInput ? "question" : CHIME_OF[state];
-    next.set(conversationIdentity(file), { state, kind, parent: file.parent });
+    next.set(id, { state, kind, parent: file.parent });
   }
   const nextLinked = new Set(linked);
   const chimes: PlannedChime[] = [];

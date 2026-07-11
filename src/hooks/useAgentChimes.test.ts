@@ -112,3 +112,14 @@ test("tracked history is bounded: oldest absent identities evict first", () => {
   expect(plan.linked.has("/old-0")).toBe(false);
   expect(plan.tracked.has(`/old-${MAX_TRACKED_IDENTITIES + 9}`)).toBe(true);
 });
+
+test("a current feed larger than the cap stays bounded on every return path", () => {
+  const files = Array.from({ length: MAX_TRACKED_IDENTITIES + 1 }, (_, index) => live(`/f-${index}`));
+  const seed = planAgentChimes(files, null, new Set());
+  expect(seed.tracked.size).toBe(MAX_TRACKED_IDENTITIES);
+  /* The mtime-descending head survives; the overflow tail is the one dropped. */
+  expect(seed.tracked.has("/f-0")).toBe(true);
+  expect(seed.tracked.has(`/f-${MAX_TRACKED_IDENTITIES}`)).toBe(false);
+  const again = planAgentChimes(files, seed.tracked, seed.linked);
+  expect(again.tracked.size).toBe(MAX_TRACKED_IDENTITIES);
+});
