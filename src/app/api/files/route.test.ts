@@ -120,16 +120,44 @@ test("a files revision request refreshes the snapshot before responding", async 
   expect(scans).toBe(2);
 });
 
+test("concurrent requests for one files revision share one forced scan", async () => {
+  await GET(new Request("http://127.0.0.1/api/files"));
+  let release!: () => void;
+  scanGates.push(new Promise<void>((resolve) => { release = resolve; }));
+  const request = () => GET(new Request("http://127.0.0.1/api/files", {
+    headers: { "x-llv-files-revision": "41" },
+  }));
+
+  const first = request();
+  await Promise.resolve();
+  const second = request();
+  release();
+  await Promise.all([first, second]);
+
+  expect(scans).toBe(2);
+});
+
+test("a completed client revision cannot suppress a later refresh with the same value", async () => {
+  const request = () => GET(new Request("http://127.0.0.1/api/files", {
+    headers: { "x-llv-files-revision": "41" },
+  }));
+
+  await request();
+  await request();
+
+  expect(scans).toBe(2);
+});
+
 test("a newer revision waits for a follow-up scan when an older scan is in flight", async () => {
   let releaseOlder!: () => void;
   scanGates.push(new Promise<void>((resolve) => { releaseOlder = resolve; }));
   scannedFiles = [file("/sessions/revision-1.jsonl")];
-  const older = cachedFileScan(undefined, Date.now(), true);
+  const older = cachedFileScan(undefined, Date.now(), 1);
   await Promise.resolve();
   expect(scans).toBe(1);
 
   scannedFiles = [file("/sessions/revision-2.jsonl")];
-  const newer = cachedFileScan(undefined, Date.now(), true);
+  const newer = cachedFileScan(undefined, Date.now(), 2);
   releaseOlder();
   await older;
   const result = await newer;
@@ -153,7 +181,7 @@ test("a persisted legacy cache slot upgrades before fresh hydration", async () =
   }]]);
   scannedFiles = [file("/sessions/upgraded-fresh.jsonl")];
 
-  const result = await cachedFileScan(undefined, Date.now(), true);
+  const result = await cachedFileScan(undefined, Date.now(), 1);
 
   expect(result.snapshot.files.map((entry) => entry.path)).toEqual(["/sessions/upgraded-fresh.jsonl"]);
   expect(scans).toBe(1);

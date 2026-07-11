@@ -459,7 +459,7 @@ export function createEngineAccountsStore(
     if (!target?.authPresent || target.loginPending) return Promise.resolve(false);
     if (id === snapshot.active) {
       if (snapshot.notice?.operation === "switch") patchSnapshot({ notice: null });
-      return Promise.resolve(true);
+      return refresh();
     }
     return runMutation("switch", async () => {
       const previous = snapshot.active;

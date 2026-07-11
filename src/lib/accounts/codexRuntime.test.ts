@@ -102,6 +102,43 @@ test("lock contention defers Codex completion persistence and still closes the c
   }
 });
 
+test("Codex completion write failures log with backoff and eventually persist", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-retry-"));
+  const stateFile = path.join(dir, "attempts.json");
+  const child = new FakeChild();
+  const runtime = new ManagedCodexRuntime({
+    stateFile,
+    startClient: async (home) => CodexAppServerClient.start({ home, spawn: () => child as never }),
+    now: () => 123,
+  });
+  const work = account("retry-write", path.join(dir, "account"));
+  const login = await runtime.startLogin(work);
+  const originalRename = fs.renameSync.bind(fs);
+  const originalError = console.error;
+  const messages: string[] = [];
+  let failures = 0;
+  fs.renameSync = ((source: fs.PathLike, target: fs.PathLike) => {
+    if (target === stateFile && failures < 2) {
+      failures += 1;
+      throw new Error("state file unavailable");
+    }
+    return originalRename(source, target);
+  }) as typeof fs.renameSync;
+  console.error = (message?: unknown) => { messages.push(String(message)); };
+  try {
+    child.completed(login.loginId);
+    await Bun.sleep(25);
+  } finally {
+    fs.renameSync = originalRename;
+    console.error = originalError;
+  }
+
+  expect(messages).toEqual([expect.stringContaining("Codex login outcome persistence failed")]);
+  for (let attempt = 0; attempt < 30 && !fs.readFileSync(stateFile, "utf8").includes('"state": "completed"'); attempt += 1) await Bun.sleep(10);
+  expect(fs.readFileSync(stateFile, "utf8")).toContain('"state": "completed"');
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
 test("cancellation and independent homes never share a managed app-server child", async () => {
   const homes: string[] = [];
   const children: FakeChild[] = [];

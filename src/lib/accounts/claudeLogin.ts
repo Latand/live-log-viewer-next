@@ -505,7 +505,9 @@ export class ClaudeLoginSupervisor {
 
   forAccounts(accountIds: readonly string[]): Map<string, LoginOperationSummary | null> {
     let durable: PersistedOperation[] = [];
-    try { durable = this.store.load().filter(validPersistedOperation); } catch { /* in-memory terminal results remain readable */ }
+    let durableReadable = true;
+    try { durable = this.store.load().filter(validPersistedOperation); }
+    catch { durableReadable = false; }
     return new Map(accountIds.map((accountId) => {
       const persisted = durable.filter((candidate) => candidate.accountId === accountId).sort((a, b) => b.generation - a.generation)[0];
       if (persisted) {
@@ -521,7 +523,7 @@ export class ClaudeLoginSupervisor {
         }];
       }
       const item = [...this.operations.values()]
-        .filter((candidate) => candidate.accountId === accountId && terminal(candidate.phase))
+        .filter((candidate) => candidate.accountId === accountId && (terminal(candidate.phase) || !durableReadable))
         .sort((a, b) => b.generation - a.generation)[0];
       return [accountId, item ? this.summary(item) : null];
     }));

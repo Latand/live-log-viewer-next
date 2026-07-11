@@ -102,6 +102,8 @@ export class ManagedCodexRuntime {
   private records: Map<string, PersistedAttempt>;
   private readonly pendingRecords = new Map<string, PersistedAttempt>();
   private recordDrain: Promise<void> | null = null;
+  private recordRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  private recordRetryAttempt = 0;
   private readonly startClient: (home: string) => Promise<CodexAppServerClient>;
   private readonly now: () => number;
   private readonly stateFile: string;
@@ -377,7 +379,7 @@ export class ManagedCodexRuntime {
   }
 
   private startRecordDrain(): void {
-    if (this.recordDrain) return;
+    if (this.recordDrain || this.recordRetryTimer) return;
     const drain = async () => {
       while (this.pendingRecords.size > 0) {
         const batch = new Map(this.pendingRecords);
@@ -392,11 +394,21 @@ export class ManagedCodexRuntime {
     void pending.then(
       () => {
         this.recordDrain = null;
+        this.recordRetryAttempt = 0;
         if (this.pendingRecords.size > 0) this.startRecordDrain();
       },
       () => {
         this.recordDrain = null;
-        setTimeout(() => this.startRecordDrain(), 100).unref?.();
+        this.recordRetryAttempt += 1;
+        const retryMs = Math.min(100 * 2 ** Math.min(this.recordRetryAttempt - 1, 8), 30_000);
+        if (this.recordRetryAttempt === 1 || (this.recordRetryAttempt & (this.recordRetryAttempt - 1)) === 0) {
+          console.error(`[codex accounts] Codex login outcome persistence failed; retry ${this.recordRetryAttempt} in ${retryMs}ms`);
+        }
+        this.recordRetryTimer = setTimeout(() => {
+          this.recordRetryTimer = null;
+          this.startRecordDrain();
+        }, retryMs);
+        this.recordRetryTimer.unref?.();
       },
     );
   }

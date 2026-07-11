@@ -10,6 +10,8 @@ type FileScanCacheSlot = {
   snapshot?: FileScanSnapshot;
   snapshotGeneration: number;
   requestedGeneration: number;
+  forcedRevision?: number;
+  forcedGeneration?: number;
   refreshedAt: number;
   refresh?: FileScanRefresh;
   refreshScheduled?: boolean;
@@ -110,7 +112,7 @@ async function refreshThroughGeneration(
 export async function cachedFileScan(
   selectedProject?: string,
   now = Date.now(),
-  requireFresh = false,
+  requiredRevision?: number,
 ): Promise<CachedFileScan> {
   const key = selectedProject ?? "";
   const cache = fileScanCache();
@@ -134,11 +136,25 @@ export async function cachedFileScan(
     cache.set(key, slot);
   }
 
-  if (requireFresh) {
-    const requestedGeneration = slot.requestedGeneration + 1;
-    slot.requestedGeneration = requestedGeneration;
-    const snapshot = await refreshThroughGeneration(slot, selectedProject, requestedGeneration);
-    return { snapshot: structuredClone(snapshot) };
+  if (requiredRevision !== undefined) {
+    let requestedGeneration: number;
+    if (slot.forcedRevision === requiredRevision && slot.forcedGeneration !== undefined) {
+      requestedGeneration = slot.forcedGeneration;
+    } else {
+      requestedGeneration = slot.requestedGeneration + 1;
+      slot.requestedGeneration = requestedGeneration;
+      slot.forcedRevision = requiredRevision;
+      slot.forcedGeneration = requestedGeneration;
+    }
+    try {
+      const snapshot = await refreshThroughGeneration(slot, selectedProject, requestedGeneration);
+      return { snapshot: structuredClone(snapshot) };
+    } finally {
+      if (slot.forcedGeneration === requestedGeneration) {
+        slot.forcedRevision = undefined;
+        slot.forcedGeneration = undefined;
+      }
+    }
   }
 
   if (!slot.snapshot) {

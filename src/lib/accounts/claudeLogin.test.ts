@@ -186,6 +186,25 @@ test("batched Claude login projection loads durable state once", async () => {
   expect(loads).toBe(1);
 });
 
+test("an unreadable Claude login store preserves a live in-memory operation", () => {
+  const account = createManagedClaudeAccount("Unreadable projection");
+  let readable = true;
+  const supervisor = new ClaudeLoginSupervisor(ports(), {
+    load: () => {
+      if (!readable) throw new Error("store unavailable");
+      return [];
+    },
+    save: () => undefined,
+  });
+  const operation = supervisor.start(account.id);
+  readable = false;
+
+  expect(supervisor.forAccount(account.id)).toEqual(expect.objectContaining({
+    operationId: operation.operationId,
+    phase: "awaiting_browser",
+  }));
+});
+
 test("a login spawn error stays terminal and an existing account can retry", () => {
   const account = createManagedClaudeAccount("Retry");
   let failSpawn = true;

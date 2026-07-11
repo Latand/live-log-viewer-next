@@ -71,6 +71,23 @@ test("select posts one route-only account change and adopts the target", async (
   expect(selectCall?.body).toEqual({ id: "work", mode: "select" });
 });
 
+test("selecting the locally active account refreshes stale server state", async () => {
+  let committed = "main";
+  const { calls, fetcher } = scripted((url) => {
+    if (url === "/api/accounts") return claudePayload({ active: committed });
+    return new Response(null, { status: 200 });
+  });
+  const store = createEngineAccountsStore("claude", { fetcher });
+  store.subscribe(() => {});
+  await advance();
+  committed = "work";
+
+  expect(await store.select("main")).toBeTrue();
+  expect(store.active).toBe("work");
+  expect(calls.filter((call) => call.url === "/api/accounts")).toHaveLength(2);
+  expect(calls.some((call) => call.url === "/api/accounts/claude/active")).toBeFalse();
+});
+
 test("select exposes its in-flight state and never calls migration endpoints", async () => {
   let resolveSelection: (() => void) | null = null;
   const calls: Call[] = [];
