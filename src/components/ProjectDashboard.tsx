@@ -80,6 +80,10 @@ interface Props {
   /** Mobile shell: the attention badge lives in the header row instead of the
       fixed corner, so it never covers the header's own controls. */
   attention?: React.ReactNode;
+  /** Dashboard-local navigation and focus (switchboard/quiet-list opens,
+      drafts, pipeline and task jumps) supersede any unresolved deep-link
+      intent held above; the Viewer cancels its pending hash here. */
+  onUserNavigate?: () => void;
 }
 
 /** Manual additions and removals of scheme nodes, persisted per project. */
@@ -170,6 +174,7 @@ export function ProjectDashboard({
   onUnarchive,
   onMenu,
   attention,
+  onUserNavigate,
 }: Props) {
   const { t } = useLocale();
   const isMobile = useIsMobile();
@@ -301,6 +306,7 @@ export function ProjectDashboard({
 
   /* The highlight drives the scheme: the camera glides to the node and rings it. */
   const flashNode = (path: string) => {
+    onUserNavigate?.();
     setHighlight(path);
     if (highlightTimer.current) window.clearTimeout(highlightTimer.current);
     highlightTimer.current = window.setTimeout(() => setHighlight(null), HIGHLIGHT_MS);
@@ -364,6 +370,7 @@ export function ProjectDashboard({
      pane and the camera glides to it — engine, directory and the first prompt
      are picked right inside that pane. */
   const addDraft = () => {
+    onUserNavigate?.();
     const id = newDraftId();
     persistDrafts([...drafts, id]);
     pendingFocusRef.current = "draft::" + id;
@@ -372,6 +379,7 @@ export function ProjectDashboard({
   /* The «+ Workflow» sibling (W6): the same draft-card pattern, its pane
      carries the template picker, the repo directory and the task brief. */
   const addWorkflowDraft = () => {
+    onUserNavigate?.();
     const id = "wf-" + newDraftId();
     persistDrafts([...drafts, id]);
     pendingFocusRef.current = "draft::" + id;
@@ -381,6 +389,7 @@ export function ProjectDashboard({
      hangs right below it, inheriting the transcript and its directory. A
      repeat click refocuses the existing draft instead of stacking duplicates. */
   const addHandoffDraft = (file: FileEntry) => {
+    onUserNavigate?.();
     const existing = drafts.find((id) => draftSrc(id) === file.path);
     if (existing) {
       flashNode("draft::" + existing);
@@ -402,6 +411,7 @@ export function ProjectDashboard({
      scheme seeded with the task text as its first prompt — the user picks the
      engine and directory and launches it. Nothing runs until they do. */
   const openTaskDraft = (task: BoardTask) => {
+    onUserNavigate?.();
     const id = newDraftId();
     setDraftText(id, task.text);
     persistDrafts([...drafts, id]);
@@ -480,6 +490,7 @@ export function ProjectDashboard({
      and switches the project; a conversation of this project joins the managed
      node list (or gets flashed when already there). */
   const openSwitchboardFile = (file: FileEntry) => {
+    onUserNavigate?.();
     const fileProject = projectKey(file);
     if (fileProject !== project) {
       queueColumnOpen(fileProject, file.path, isChildConversation(file));

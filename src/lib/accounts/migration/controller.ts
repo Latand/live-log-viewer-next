@@ -1,6 +1,7 @@
 import { activeClaudeAccountId, setActiveClaudeAccount } from "@/lib/accounts/claude";
 import { activeCodexAccountId, codexAccountsMutationLocked, codexLoginPaneStatus, listCodexAccounts, setActiveCodexAccount, setCodexAccountLoginPane } from "@/lib/accounts/codex";
 import { managedCodexRuntime } from "@/lib/accounts/codexRuntime";
+import { withAccountMutationLock } from "@/lib/accounts/accountMutation";
 import { agentRegistry, conversationLookupFromSnapshot, type AgentRegistry } from "@/lib/agent/registry";
 import { readTranscriptHosts } from "@/lib/agent/transcriptHost";
 import { deliverConversationMessage, migrationDeliveryOutcome } from "@/lib/delivery";
@@ -50,12 +51,24 @@ export async function reconcileAccountMigrationCycle(
   await Promise.all([quota.tick("claude"), quota.tick("codex")]);
 }
 
-function syncCompatibilityRouting(registry: AgentRegistry): void {
-  const snapshot = registry.snapshot();
-  const claude = snapshot.engineRouting.claude.activeAccountId;
-  const codex = snapshot.engineRouting.codex.activeAccountId;
-  try { if (claude && claude !== activeClaudeAccountId()) setActiveClaudeAccount(claude); } catch { /* registry routing stays authoritative */ }
-  try { if (codex && codex !== activeCodexAccountId()) setActiveCodexAccount(codex); } catch { /* registry routing stays authoritative */ }
+export function syncCompatibilityRouting(registry: AgentRegistry): void {
+  const current = registry.snapshot().engineRouting;
+  const claudeNeedsSync = (() => {
+    try { return Boolean(current.claude.activeAccountId && current.claude.activeAccountId !== activeClaudeAccountId()); }
+    catch { return true; }
+  })();
+  const codexNeedsSync = (() => {
+    try { return Boolean(current.codex.activeAccountId && current.codex.activeAccountId !== activeCodexAccountId()); }
+    catch { return true; }
+  })();
+  if (!claudeNeedsSync && !codexNeedsSync) return;
+  withAccountMutationLock(() => {
+    const snapshot = registry.snapshot();
+    const claude = snapshot.engineRouting.claude.activeAccountId;
+    const codex = snapshot.engineRouting.codex.activeAccountId;
+    try { if (claude && claude !== activeClaudeAccountId()) setActiveClaudeAccount(claude); } catch { /* registry routing stays authoritative */ }
+    try { if (codex && codex !== activeCodexAccountId()) setActiveCodexAccount(codex); } catch { /* registry routing stays authoritative */ }
+  });
 }
 
 async function reconcileAccountLogins(): Promise<void> {

@@ -4,6 +4,7 @@ import path from "node:path";
 
 import { statePath } from "@/lib/configDir";
 import { procBackend } from "@/lib/proc";
+import { withAccountMutationLock } from "@/lib/accounts/accountMutation";
 import {
   emptyLaunchProfile,
   type AutoBalancePolicy,
@@ -1362,12 +1363,12 @@ export class AgentRegistry {
   }
 
   setEngineRouting(engine: Extract<AgentEngine, "claude" | "codex">, accountId: string): number {
-    return this.mutate((file) => {
+    return withAccountMutationLock(() => this.mutate((file) => {
       const route = file.engineRouting[engine];
       route.activeAccountId = accountId;
       route.revision += 1;
       return route.revision;
-    });
+    }));
   }
 
   engineRouting(engine: Extract<AgentEngine, "claude" | "codex">): { activeAccountId: string | null; revision: number } {
@@ -1379,7 +1380,7 @@ export class AgentRegistry {
   }
 
   retireAccount(engine: Extract<AgentEngine, "claude" | "codex">, accountId: string, fallbackAccountId: string): void {
-    this.mutate((file) => {
+    withAccountMutationLock(() => this.mutate((file) => {
       const currentConversation = Object.values(file.conversations).find((conversation) =>
         conversation.engine === engine && conversation.generations.at(-1)?.accountId === accountId);
       if (currentConversation) throw new Error("account has current conversations");
@@ -1419,7 +1420,7 @@ export class AgentRegistry {
         conversation.updatedAt = changedAt;
         file.conversationRevision[conversation.engine] += 1;
       }
-    });
+    }));
   }
 
   commitMigrationIntent(input: {
@@ -1431,7 +1432,7 @@ export class AgentRegistry {
     evidence?: MigrationIntent["evidence"];
     scope?: MigrationScope;
   }): MigrationIntent {
-    return this.mutate((file) => {
+    return withAccountMutationLock(() => this.mutate((file) => {
       const repeated = Object.values(file.migrationIntents).find((intent) =>
         intent.engine === input.engine && intent.requestIds.includes(input.requestId));
       if (repeated) return clone(repeated);
@@ -1507,7 +1508,7 @@ export class AgentRegistry {
       }
       if (scoped === 0) intent.state = "complete";
       return clone(intent);
-    });
+    }));
   }
 
   requestConversationMigrationToActiveAccount(id: ViewerConversationId): RegistryConversation {
@@ -2021,9 +2022,9 @@ export class AgentRegistry {
   }
 
   restoreSnapshot(expectedCurrent: RegistryFile, replacement: RegistryFile): void {
-    this.mutate((file) => {
+    withAccountMutationLock(() => this.mutate((file) => {
       Object.assign(file, restoreOwnedChanges(file, expectedCurrent, replacement) as RegistryFile);
-    });
+    }));
   }
 
   recordDeliveryOutcome(

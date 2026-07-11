@@ -284,7 +284,7 @@ test("successful actuation retains images when settlement persistence fails", as
   }
 });
 
-test("sending to deferred history starts lazy migration and holds the message", async () => {
+test("switching engine routing leaves deferred transcript ownership unchanged", async () => {
   const registry = new AgentRegistry(path.join(SANDBOX, "registry.json"));
   setAgentRegistryForTests(registry);
   const observation: ConversationObservation = {
@@ -297,13 +297,7 @@ test("sending to deferred history starts lazy migration and holds the message", 
   };
   registry.reconcileConversations([observation]);
   const conversation = registry.conversationForPath(observation.path)!;
-  registry.commitMigrationIntent({
-    engine: "codex",
-    targetId: "default",
-    origin: "manual",
-    requestId: "route-only-switch",
-    expectedRevision: registry.engineRouting("codex").revision,
-  });
+  registry.setEngineRouting("codex", "default");
 
   const outcome = await deliverConversationMessage({
     pid: null,
@@ -313,14 +307,13 @@ test("sending to deferred history starts lazy migration and holds the message", 
     clientMessageId: "lazy-message",
   });
 
-  expect(outcome).toEqual({ ok: true, target: conversation.id, outcome: "held" });
-  expect(registry.conversationForPath(observation.path)?.migration).toMatchObject({ targetId: "default", phase: "requested" });
-  expect(registry.pendingDeliveries(registry.conversationForPath(observation.path)!.id)).toMatchObject([
-    { text: "Continue this conversation", clientMessageId: "lazy-message", state: "held" },
-  ]);
+  expect(outcome).not.toMatchObject({ ok: true, outcome: "held" });
+  expect(registry.conversationForPath(observation.path)?.migration).toBeNull();
+  expect(registry.conversationForPath(observation.path)?.generations.at(-1)?.accountId).toBe("managed");
+  expect(registry.pendingDeliveries(conversation.id)).toHaveLength(0);
 });
 
-test("sending during a busy or unknown turn waits to migrate and keeps the message on the current generation", async () => {
+test("routing changes leave busy and unknown turns on their current generation", async () => {
   for (const turnState of ["busy", "unknown"] as const) {
     const registry = new AgentRegistry(path.join(SANDBOX, `${turnState}-registry.json`));
     setAgentRegistryForTests(registry);
@@ -344,10 +337,8 @@ test("sending during a busy or unknown turn waits to migrate and keeps the messa
     });
 
     expect(outcome).not.toMatchObject({ ok: true, outcome: "held" });
-    expect(registry.conversationForPath(observation.path)?.migration).toMatchObject({
-      targetId: "default",
-      phase: "waiting-turn",
-    });
+    expect(registry.conversationForPath(observation.path)?.migration).toBeNull();
+    expect(registry.conversationForPath(observation.path)?.generations.at(-1)?.accountId).toBe("managed");
     expect(registry.pendingDeliveries(registry.conversationForPath(observation.path)!.id)).toHaveLength(0);
   }
 });
@@ -433,7 +424,8 @@ test("a stopped migration survives restart and unrelated inventory revisions", a
     images: [],
     clientMessageId: "after-new-switch",
   });
-  expect(reenrolled).toMatchObject({ ok: true, outcome: "held" });
+  expect(reenrolled).not.toMatchObject({ ok: true, outcome: "held" });
+  expect(restarted.conversationForPath(observation.path)?.migration).toBeNull();
 });
 
 test("card-level Keep survives unrelated inventory revisions", async () => {

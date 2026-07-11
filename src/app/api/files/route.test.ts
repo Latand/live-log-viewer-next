@@ -11,6 +11,7 @@ import type { FileEntry } from "@/lib/types";
 let scans = 0;
 let scanOptions: unknown;
 let scannedFiles: FileEntry[] = [];
+let scanGates: Promise<void>[] = [];
 let registryRoot = "";
 let tmuxHealth: unknown = { status: "healthy" };
 
@@ -20,6 +21,7 @@ beforeEach(() => {
   resetFilesRouteCacheForTests();
   scans = 0;
   scannedFiles = [];
+  scanGates = [];
   tmuxHealth = { status: "healthy" };
 });
 
@@ -33,7 +35,9 @@ mock.module("@/lib/scanner", () => ({
   listFilesWithProjectCatalog: async (_project: string | undefined, options: unknown) => {
     scans += 1;
     scanOptions = options;
-    return { files: scannedFiles, projectCatalog: [] };
+    const files = scannedFiles;
+    await scanGates.shift();
+    return { files, projectCatalog: [] };
   },
 }));
 let pipelinesStore: () => unknown[] = () => [];
@@ -57,7 +61,7 @@ test("repeated files reads reuse the pure read snapshot and retain ETag behavior
   const etag = first.headers.get("etag");
   const second = await GET(new Request("http://127.0.0.1/api/files", { headers: { "if-none-match": etag! } }));
   expect(first.status).toBe(200);
-  expect(await first.json()).toEqual({ files: [], projectCatalog: [], flows: [], pipelines: [], workflows: [], tasks: [], systemHealth: { tmux: { status: "healthy" } } });
+  expect(await first.json()).toEqual({ files: [], projectCatalog: [], flows: [], pipelines: [], workflows: [], tasks: [], systemHealth: { tmux: { status: "healthy" } }, conversationAliases: {} });
   expect(second.status).toBe(304);
   expect(scans).toBe(1);
   expect(scanOptions).toEqual({ persist: false });
@@ -93,13 +97,120 @@ test("concurrent cold files reads share one scan", async () => {
 
 test("an expired snapshot schedules its refresh after the response", async () => {
   await cachedFileScan();
-  const stale = await cachedFileScan(undefined, Number.MAX_SAFE_INTEGER);
+  const stale = await cachedFileScan(undefined, undefined, Number.MAX_SAFE_INTEGER);
 
   expect(scans).toBe(1);
   expect(stale.refreshAfterResponse).toBeFunction();
 
   await stale.refreshAfterResponse?.();
   expect(scans).toBe(2);
+});
+
+test("a files revision request refreshes the snapshot before responding", async () => {
+  scannedFiles = [file("/sessions/before-revision.jsonl")];
+  await GET(new Request("http://127.0.0.1/api/files"));
+
+  scannedFiles = [file("/sessions/after-revision.jsonl")];
+  const response = await GET(new Request("http://127.0.0.1/api/files", {
+    headers: { "x-llv-files-revision": "1" },
+  }));
+  const body = await response.json() as { files: FileEntry[] };
+
+  expect(body.files.map((entry) => entry.path)).toEqual(["/sessions/after-revision.jsonl"]);
+  expect(scans).toBe(2);
+});
+
+test("concurrent requests for one files revision share one forced scan", async () => {
+  await GET(new Request("http://127.0.0.1/api/files"));
+  let release!: () => void;
+  scanGates.push(new Promise<void>((resolve) => { release = resolve; }));
+  const request = () => GET(new Request("http://127.0.0.1/api/files", {
+    headers: { "x-llv-files-revision": "41" },
+  }));
+
+  const first = request();
+  await Promise.resolve();
+  const second = request();
+  release();
+  await Promise.all([first, second]);
+
+  expect(scans).toBe(2);
+});
+
+test("a completed client revision cannot suppress a later refresh with the same value", async () => {
+  const request = () => GET(new Request("http://127.0.0.1/api/files", {
+    headers: { "x-llv-files-revision": "41" },
+  }));
+
+  await request();
+  await request();
+
+  expect(scans).toBe(2);
+});
+
+test("a newer revision waits for a follow-up scan when an older scan is in flight", async () => {
+  let releaseOlder!: () => void;
+  scanGates.push(new Promise<void>((resolve) => { releaseOlder = resolve; }));
+  scannedFiles = [file("/sessions/revision-1.jsonl")];
+  const older = cachedFileScan(undefined, undefined, Date.now(), 1);
+  await Promise.resolve();
+  expect(scans).toBe(1);
+
+  scannedFiles = [file("/sessions/revision-2.jsonl")];
+  const newer = cachedFileScan(undefined, undefined, Date.now(), 2);
+  releaseOlder();
+  await older;
+  const result = await newer;
+
+  expect(result.snapshot.files.map((entry) => entry.path)).toEqual(["/sessions/revision-2.jsonl"]);
+  expect(scans).toBe(2);
+});
+
+test("a persisted legacy cache slot upgrades before fresh hydration", async () => {
+  const legacySnapshot = {
+    files: [file("/sessions/sentinel-stale.jsonl")],
+    projectCatalog: [],
+  };
+  const cacheStore = globalThis as typeof globalThis & {
+    __llvFilesRouteScans?: Map<string, unknown>;
+  };
+  cacheStore.__llvFilesRouteScans = new Map([["", {
+    snapshot: legacySnapshot,
+    refreshedAt: Date.now(),
+    refresh: Promise.resolve(legacySnapshot),
+  }]]);
+  scannedFiles = [file("/sessions/upgraded-fresh.jsonl")];
+
+  const result = await cachedFileScan(undefined, undefined, Date.now(), 1);
+
+  expect(result.snapshot.files.map((entry) => entry.path)).toEqual(["/sessions/upgraded-fresh.jsonl"]);
+  expect(scans).toBe(1);
+});
+
+test("an arbitrary client revision cannot suppress a later revision refresh", async () => {
+  scannedFiles = [file("/sessions/untrusted-watermark.jsonl")];
+  await GET(new Request("http://127.0.0.1/api/files", {
+    headers: { "x-llv-files-revision": String(Number.MAX_SAFE_INTEGER) },
+  }));
+
+  scannedFiles = [file("/sessions/genuine-revision.jsonl")];
+  const response = await GET(new Request("http://127.0.0.1/api/files", {
+    headers: { "x-llv-files-revision": "7" },
+  }));
+  const body = await response.json() as { files: FileEntry[] };
+
+  expect(body.files.map((entry) => entry.path)).toEqual(["/sessions/genuine-revision.jsonl"]);
+  expect(scans).toBe(2);
+});
+
+test("the project scan cache evicts its least recently used entry", async () => {
+  for (let index = 0; index <= 32; index += 1) {
+    await cachedFileScan(`project-${index}`);
+  }
+  expect(scans).toBe(33);
+
+  await cachedFileScan("project-0");
+  expect(scans).toBe(34);
 });
 
 function file(path: string): FileEntry {

@@ -158,29 +158,21 @@ test("orphan cleanup propagates a Codex accounts-root read failure", () => {
 test("concurrent Codex removal and creation preserve both mutations", async () => {
   const removed = createManagedCodexAccount("Remove child");
   const modulePath = path.join(import.meta.dir, "codex.ts");
-  const registry = path.join(process.env.LLV_STATE_DIR!, "codex-accounts.json");
-  const ready = path.join(SANDBOX, "remove-ready");
-  const createReady = path.join(SANDBOX, "create-ready");
-  const removedDone = path.join(SANDBOX, "remove-done");
-  const common = `
-    const fs = (await import("node:fs")).default;
-    const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-    const wait = (file) => { const until = Date.now() + 1000; while (!fs.existsSync(file) && Date.now() < until) sleep(5); };
-    const originalRename = fs.renameSync;
-  `;
+  const mutationPath = path.join(import.meta.dir, "accountMutation.ts");
   const remover = Bun.spawn({
-    cmd: [process.execPath, "-e", `${common}
-      fs.renameSync = (from, to) => { if (to === ${JSON.stringify(registry)}) { fs.writeFileSync(${JSON.stringify(ready)}, "1"); wait(${JSON.stringify(createReady)}); } originalRename(from, to); if (to === ${JSON.stringify(registry)}) fs.writeFileSync(${JSON.stringify(removedDone)}, "1"); };
-      const m = await import(${JSON.stringify(modulePath)}); m.removeManagedCodexAccount(${JSON.stringify(removed.id)});
+    cmd: [process.execPath, "-e", `
+      const m = await import(${JSON.stringify(modulePath)});
+      const { withAccountMutationLockAsync } = await import(${JSON.stringify(mutationPath)});
+      await withAccountMutationLockAsync(async () => m.removeManagedCodexAccount(${JSON.stringify(removed.id)}));
     `],
     env: { ...process.env, LLV_STATE_DIR: process.env.LLV_STATE_DIR!, LLV_CODEX_HOME: process.env.LLV_CODEX_HOME! },
     stdout: "ignore", stderr: "pipe",
   });
   const creator = Bun.spawn({
-    cmd: [process.execPath, "-e", `${common}
-      wait(${JSON.stringify(ready)});
-      fs.renameSync = (from, to) => { if (to === ${JSON.stringify(registry)}) { fs.writeFileSync(${JSON.stringify(createReady)}, "1"); wait(${JSON.stringify(removedDone)}); } originalRename(from, to); };
-      const m = await import(${JSON.stringify(modulePath)}); m.createManagedCodexAccount("Created child");
+    cmd: [process.execPath, "-e", `
+      const m = await import(${JSON.stringify(modulePath)});
+      const { withAccountMutationLockAsync } = await import(${JSON.stringify(mutationPath)});
+      await withAccountMutationLockAsync(async () => m.createManagedCodexAccount("Created child"));
     `],
     env: { ...process.env, LLV_STATE_DIR: process.env.LLV_STATE_DIR!, LLV_CODEX_HOME: process.env.LLV_CODEX_HOME! },
     stdout: "ignore", stderr: "pipe",

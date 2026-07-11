@@ -1,4 +1,5 @@
 import type { FileEntry, ProjectCatalogEntry } from "../types";
+import { agentRegistry, RegistryReadError } from "../agent/registry";
 import { tickFlows } from "../flows/engine";
 import { tickPipelines } from "../pipelines/engine";
 import { notifyQuestion } from "../push";
@@ -73,6 +74,35 @@ async function forEachEntryBatchYielding(
 
 export interface FileScanOptions {
   persist?: boolean;
+  /** Deep-link target that must survive the recency cap: a transcript path,
+      or a `conversation_*` id resolved to its current generation path. */
+  pin?: string;
+}
+
+/** Transcript paths a pin value requires in the feed. A conversation id is
+    canonicalized through the registry's durable aliases and maps to its
+    latest generation. A plain path also brings the registry-current
+    generation of its owning conversation, so an archived `#f=` target always
+    ships together with the successor the client must redirect to. An
+    unreadable registry keeps a path pin as itself and drops an id pin. */
+export function pinnedPathsFor(pin: string | undefined): ReadonlySet<string> {
+  if (!pin) return new Set();
+  try {
+    const registry = agentRegistry();
+    const snapshot = registry.snapshot();
+    if (pin.startsWith("conversation_")) {
+      const canonical = registry.canonicalConversationId(pin as `conversation_${string}`) ?? pin;
+      const latest = snapshot.conversations[canonical]?.generations.at(-1)?.path;
+      return new Set(latest ? [latest] : []);
+    }
+    const owner = Object.values(snapshot.conversations).find((conversation) =>
+      conversation.generations.some((generation) => generation.path === pin) || conversation.continuityPaths.includes(pin));
+    const latest = owner?.generations.at(-1)?.path;
+    return new Set(latest && latest !== pin ? [pin, latest] : [pin]);
+  } catch (error) {
+    if (error instanceof RegistryReadError) return new Set(pin.startsWith("conversation_") ? [] : [pin]);
+    throw error;
+  }
 }
 
 export async function listFiles(options: FileScanOptions = {}): Promise<FileEntry[]> {
@@ -83,15 +113,43 @@ export async function listFilesWithProjectCatalog(selectedProject?: string, opti
   return listFilesInternal(true, selectedProject, options);
 }
 
+/* Transcript paths superseded by an account migration: every generation and
+   continuity path of a conversation except its current one. Mirrors the
+   `migratedTo` annotation in the files response — these entries are folded
+   into their successor's card, so they rank below live transcripts when the
+   recency cap is applied and leave the cap slots to live conversations. */
+export function archivedTranscriptPaths(): ReadonlySet<string> {
+  const archived = new Set<string>();
+  let snapshot: ReturnType<ReturnType<typeof agentRegistry>["snapshot"]>;
+  try {
+    snapshot = agentRegistry().snapshot();
+  } catch (error) {
+    /* Demotion only shapes the recency ranking. When the registry is
+       corrupt or unsupported, discovery proceeds with an empty demotion set
+       and timeline/spawn/tasks/tmux stay available. Mirrors the board
+       route's RegistryReadError handling. */
+    if (error instanceof RegistryReadError) return archived;
+    throw error;
+  }
+  for (const conversation of Object.values(snapshot.conversations)) {
+    const latest = conversation.generations.at(-1);
+    if (!latest) continue;
+    for (const generation of conversation.generations) if (generation.path !== latest.path) archived.add(generation.path);
+    for (const pathname of conversation.continuityPaths) if (pathname !== latest.path) archived.add(pathname);
+  }
+  return archived;
+}
+
 async function listFilesInternal(
   includeProjectCatalog: boolean,
   selectedProject?: string,
   options: FileScanOptions = {},
 ): Promise<{ files: FileEntry[]; projectCatalog: ProjectCatalogEntry[] }> {
   const persist = options.persist === true;
+  const demote = archivedTranscriptPaths();
   const scan = includeProjectCatalog
-    ? await discoverFilesWithProjectCatalog(undefined, selectedProject, { persist })
-    : { files: await discoverFiles(), projectCatalog: [] };
+    ? await discoverFilesWithProjectCatalog(undefined, selectedProject, { persist, demote, pin: pinnedPathsFor(options.pin) })
+    : { files: await discoverFiles(undefined, demote), projectCatalog: [] };
   const entries = scan.files;
   // The /proc fd scan is only needed to attribute background-task outputs to a
   // live pid. When the shortlist has no such entries, skip the scan entirely;

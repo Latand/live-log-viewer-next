@@ -22,6 +22,40 @@ const RETRY_MAX_MS = 30_000;
    consecutive conflict requires a fresh concurrent write each round, so this
    cap only guards against a pathological writer that never yields. */
 const MAX_CONFLICT_RETRIES = 8;
+/* Mirrors the server's per-PATCH mutation cap (`validateBoardPatchRequest`):
+   an outbox that grew past it during an outage drains in accepted chunks;
+   a single batch past the cap would draw the server's validation error. */
+const MAX_MUTATIONS_PER_PATCH = 128;
+/* Serialized-bytes target per PATCH, purely a batching-efficiency budget.
+   Validity lives in the server's MAX_BOARD_BODY_BYTES, which admits every
+   single validator-legal mutation — `patchPrefix` letting its first mutation
+   through regardless of size stays safe. */
+const MAX_PATCH_BYTES = 192 * 1024;
+
+/** Exact serialized footprint: JSON escaping (backslashes, quotes, control
+    characters) can multiply a pathname's raw UTF-8 size, and byte budgets
+    must match the serialized form the server measures. */
+function serializedBytes(value: unknown): number {
+  const json = JSON.stringify(value);
+  return typeof TextEncoder === "undefined" ? json.length : new TextEncoder().encode(json).length;
+}
+
+/** The longest outbox prefix that fits both per-PATCH batching caps
+    (`maxCount` can tighten the count cap while isolating a rejected batch).
+    Always at least one mutation — safe, because the server body cap admits
+    any single validator-legal mutation regardless of this batching budget. */
+export function patchPrefix(outbox: readonly BoardMutationV1[], maxCount = MAX_MUTATIONS_PER_PATCH): BoardMutationV1[] {
+  const cap = Math.max(1, Math.min(maxCount, MAX_MUTATIONS_PER_PATCH));
+  const prefix: BoardMutationV1[] = [];
+  let bytes = 0;
+  for (const mutation of outbox) {
+    const size = serializedBytes(mutation);
+    if (prefix.length > 0 && (prefix.length >= cap || bytes + size > MAX_PATCH_BYTES)) break;
+    prefix.push(mutation);
+    bytes += size;
+  }
+  return prefix;
+}
 
 export const EMPTY_BOARD_PREFS: BoardPrefs = { manual: [], hidden: [], expanded: [], viewMode: null, taskPanelOpen: false };
 
@@ -119,7 +153,24 @@ export function resetPendingOpensForTest(): void {
 type WriteAttempt =
   | { status: "ok"; board: BoardProjectStateV1 }
   | { status: "conflict"; board: BoardProjectStateV1 }
+  /* The server's validator refused the batch content itself, identified by a
+     structured permanent error code. Resending the same bytes can never
+     succeed, so the batch must be dropped — retrying it forever wedges every
+     later mutation queued behind it (the /api/board 413 storm). Access
+     failures (401/403) and other transient 4xx keep the queued intent and
+     take the backoff path. */
+  | { status: "rejected" }
+  /* The request envelope is refused (client/server schema skew): every
+     bisected prefix would draw the same verdict, so shedding is wrong — the
+     outbox survives and the board reports unavailable until versions align. */
+  | { status: "envelope" }
   | { status: "error" };
+
+/* Mutation-content verdicts that no retry can change; bisection isolates the
+   offending mutation. Envelope-level failures (schema-version skew) apply to
+   every request equally, so they keep the outbox and surface as unavailable. */
+const PERMANENT_REJECTION_CODES = new Set(["INVALID_REQUEST", "PAYLOAD_TOO_LARGE"]);
+const ENVELOPE_REJECTION_CODES = new Set(["UNSUPPORTED_SCHEMA_VERSION"]);
 
 /** Two boards carry the same durable arrangement when their prefs and aliases
     match — the same comparison the server uses to treat a mutation as a no-op. */
@@ -204,6 +255,10 @@ export function createBoardStore(options: BoardStoreOptions): BoardStore {
   /* Consecutive revision conflicts: each means a fresh concurrent write, so we
      retry immediately up to a cap before falling back to the backoff timer. */
   let conflictStreak = 0;
+  /* Bisection cap while isolating a rejected batch: a refused multi-mutation
+     PATCH drops nothing and halves the next attempt, until the offender
+     stands alone and only it is shed. Reset on any accepted write. */
+  let rejectCap: number | null = null;
   let retryHandle: ReturnType<typeof scheduler.setTimeout> | null = null;
   let retryDelay = RETRY_BASE_MS;
   const listeners = new Set<() => void>();
@@ -230,6 +285,14 @@ export function createBoardStore(options: BoardStoreOptions): BoardStore {
       });
       if (res.ok) return { status: "ok", board: ((await res.json()) as { board: BoardProjectStateV1 }).board };
       if (res.status === 409) return { status: "conflict", board: ((await res.json()) as { board: BoardProjectStateV1 }).board };
+      if (res.status >= 400 && res.status < 500) {
+        const body = (await res.json().catch(() => null)) as { error?: string } | null;
+        if (body?.error !== undefined && PERMANENT_REJECTION_CODES.has(body.error)) return { status: "rejected" };
+        if (body?.error !== undefined && ENVELOPE_REJECTION_CODES.has(body.error)) return { status: "envelope" };
+        /* Expired auth (403 from the proxy), rate limiting, unknown codes:
+           the queued intent survives and drains once access heals. */
+        return { status: "error" };
+      }
       return { status: "error" };
     } catch {
       return { status: "error" };
@@ -255,13 +318,28 @@ export function createBoardStore(options: BoardStoreOptions): BoardStore {
 
   const mutate = (mutations: readonly BoardMutationV1[]) => {
     if (mutations.length === 0) return;
+    /* Semantics-coupled mutations (reconcile-roots, remap-paths) always travel
+       whole: the server body cap admits the worst validator-legal mutation, so
+       transport never needs to split one — splitting a remap graph or a
+       reconcile provably cannot preserve reducer atomicity in general. Lists
+       past the item-level validator caps draw the server's atomic rejection
+       and the bisection sheds only that mutation. */
     /* Drop a batch that changes nothing optimistically — an idempotent
        reconcile/remap, or a close of an already-hidden path — so it never
-       reaches transport and never bumps a revision. */
+       reaches transport and never bumps a revision. A batch whose replay
+       throws (a cyclic remap) is enqueued regardless: the optimistic
+       fallback would render it indistinguishable from a no-op, and the
+       server verdict plus bisection must isolate the invalid mutation while
+       the valid ones sharing the batch land. */
     const before = optimisticBoard(confirmed, outbox);
     const nextOutbox = [...outbox, ...mutations];
-    const after = optimisticBoard(confirmed, nextOutbox);
-    if (sameArrangement(before, after)) return;
+    let after: BoardProjectStateV1 | null;
+    try {
+      after = applyBoardMutations(confirmed, nextOutbox);
+    } catch {
+      after = null;
+    }
+    if (after !== null && sameArrangement(before, after)) return;
     outbox = nextOutbox;
     refresh();
     void drain();
@@ -312,18 +390,52 @@ export function createBoardStore(options: BoardStoreOptions): BoardStore {
     refresh();
     /* Send the outbox as a stable prefix: mutations appended while this request
        is inflight stay queued and flush on the next drain, so an earlier response
-       never drops a later optimistic action. */
-    const prefix = outbox.slice();
+       never drops a later optimistic action. Bounded to the server's per-PATCH
+       mutation and body-size caps (tightened while bisecting a rejection); a
+       longer outbox drains over consecutive requests. */
+    const prefix = patchPrefix(outbox, rejectCap ?? MAX_MUTATIONS_PER_PATCH);
     const result = await attemptMutations(prefix, confirmed.revision);
     inflight = false;
     if (disposed) return;
     if (result.status === "ok") {
       cancelRetry();
       conflictStreak = 0;
+      rejectCap = null;
+      unavailable = false;
       confirmed = result.board;
       outbox = outbox.slice(prefix.length);
       refresh();
       if (outbox.length) void drain();
+      return;
+    }
+    if (result.status === "rejected") {
+      /* The server refused the batch as a unit without naming the offender.
+         Bisect: a refused multi-mutation batch drops nothing and retries its
+         first half, halving until the offender stands alone; only
+         a single rejected mutation is shed. Valid mutations on either side of
+         the poison all land on later attempts, and the loop terminates because
+         every round either halves the attempt or shrinks the outbox. The
+         dropped intent reverts optimistically on the next refresh. */
+      cancelRetry();
+      conflictStreak = 0;
+      if (prefix.length === 1) {
+        rejectCap = null;
+        outbox = outbox.slice(1);
+      } else {
+        rejectCap = Math.max(1, Math.floor(prefix.length / 2));
+      }
+      refresh();
+      if (outbox.length) void drain();
+      return;
+    }
+    if (result.status === "envelope") {
+      /* Schema skew: hold every queued mutation, tell the UI the board is
+         unavailable, and probe again on the backoff timer — a redeploy plus
+         tab reload resolves the skew and the intent then drains. */
+      rejectCap = null;
+      unavailable = true;
+      refresh();
+      scheduleRetry();
       return;
     }
     if (result.status === "conflict") {
@@ -370,7 +482,7 @@ export function createBoardStore(options: BoardStoreOptions): BoardStore {
         const result = await attemptSeed(seed, 0);
         inflight = false;
         if (disposed) return;
-        confirmed = result.status === "error" ? board : result.board;
+        confirmed = result.status === "ok" || result.status === "conflict" ? result.board : board;
         refresh();
         /* A mutation queued while the seed was inflight parked in the outbox
            because drain returns early during inflight. Flush it now so the
