@@ -33,6 +33,7 @@ import { activityDot, cleanTitle, engineBadge, engineEdge, fmtAge } from "@/comp
 
 import type { AgentLink } from "./agentLinks";
 import { PIPELINE_RAIL_COLOR, pipelineRailSegment } from "./agentLinks";
+import { GroupOverridePanel } from "./GroupOverridePanel";
 import {
   LOOP_GAP,
   NODE_W,
@@ -41,6 +42,7 @@ import {
   type FlowLoop,
   type MiniStack,
   type SchemeEdge,
+  type SchemeGroup,
   type SchemeLayout,
   type SchemeNode,
   type SchemeRect,
@@ -264,6 +266,78 @@ export const AgentLinksLayer = memo(function AgentLinksLayer({
         );
       })}
     </>
+  );
+});
+
+/**
+ * Flow/pipeline GROUP overlay (issue #118): draws each running flow/pipeline as
+ * one tinted, dashed region enclosing all of its board occupants, with a colored
+ * label chip naming it. The chip is the on-canvas entry point to the stage
+ * override controls (GroupOverridePanel). The region itself is inert
+ * (pointer-events-none) so it never blocks the cards it frames; only the chip
+ * (and its open panel) take pointer events. The label sizes off `--inv-z` so it
+ * stays readable when the board is zoomed out to the map. A group appears only
+ * while its flow/pipeline is open, so it dissolves on close with no extra state.
+ */
+export const GroupsLayer = memo(function GroupsLayer({
+  groups,
+  interactive,
+}: {
+  groups: SchemeGroup[];
+  /** Passive on the hand-tool, during a selection session and on the lite map:
+      the halos still render, but the label chip stops opening the panel. */
+  interactive: boolean;
+}) {
+  const [openId, setOpenId] = useState<string | null>(null);
+  if (!groups.length) return null;
+  return (
+    <div aria-hidden={false}>
+      {groups.map((group) => {
+        const color = `hsl(${group.hue} 62% 42%)`;
+        const soft = `hsl(${group.hue} 62% 42% / 0.055)`;
+        const open = interactive && openId === group.id;
+        return (
+          <div
+            key={group.key}
+            data-scheme-group={group.kind}
+            className="pointer-events-none absolute z-0"
+            style={{ transform: `translate(${group.x}px, ${group.y}px)`, width: group.w, height: group.h, transition: MOVE_TRANSITION }}
+          >
+            <div
+              aria-hidden
+              className="absolute inset-0 rounded-[20px] border-2 border-dashed"
+              style={{ borderColor: color, backgroundColor: soft }}
+            />
+            <div className={`absolute -top-3 left-5 ${interactive ? "pointer-events-auto" : ""}`}>
+              <button
+                data-scheme-ui
+                className="inline-flex max-w-[240px] items-center gap-1 rounded-full border-2 bg-panel px-2.5 py-0.5 font-bold shadow-card hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:cursor-default"
+                style={{ borderColor: color, color, fontSize: "calc(11px * min(var(--inv-z, 1), 2.6))" }}
+                aria-expanded={open}
+                aria-haspopup="dialog"
+                disabled={!interactive}
+                onClick={() => setOpenId((value) => (value === group.id ? null : group.id))}
+              >
+                <span aria-hidden>{group.kind === "pipeline" ? "⇢" : "⟳"}</span>
+                <span className="truncate">{group.label}</span>
+              </button>
+              {open ? (
+                <div
+                  className="absolute left-0 top-full z-40 mt-1"
+                  onKeyDown={(event) => {
+                    if (event.key !== "Escape") return;
+                    event.stopPropagation();
+                    setOpenId(null);
+                  }}
+                >
+                  <GroupOverridePanel group={group} onClose={() => setOpenId(null)} />
+                </div>
+              ) : null}
+            </div>
+          </div>
+        );
+      })}
+    </div>
   );
 });
 

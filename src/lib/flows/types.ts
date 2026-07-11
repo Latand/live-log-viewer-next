@@ -131,6 +131,7 @@ export type FlowAction =
   | "set-round-limit"
   | "extend"
   | "another-round"
+  | "set-roles"
   | "close";
 
 export type PatchFlowRequest = {
@@ -143,6 +144,10 @@ export type PatchFlowRequest = {
   /** for advance/retry-round: a user note the next reviewer sees as the
       round's ready note */
   note?: string;
+  /** for set-roles: a partial override of the implementer/reviewer role config
+      applied to subsequent rounds without recreating the flow (issue #118).
+      Only the provided fields change; a running round keeps its frozen role. */
+  roles?: Partial<Record<FlowRoleKey, Partial<RoleConfig>>>;
 };
 
 /** Per-transcript annotation piggybacked on /api/files entries. */

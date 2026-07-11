@@ -13,6 +13,7 @@ import type {
   PipelineStageInput,
   PipelineStageKind,
   PipelineState,
+  PatchPipelineRequest,
   StageVerdictStatus,
 } from "@/lib/pipelines/types";
 
@@ -426,12 +427,16 @@ export async function createPipeline(req: CreatePipelineRequest): Promise<{ pipe
   }
 }
 
-export async function patchPipeline(id: string, action: PipelineAction): Promise<string | null> {
+export async function patchPipeline(
+  id: string,
+  action: PipelineAction,
+  extra?: Omit<PatchPipelineRequest, "action">,
+): Promise<string | null> {
   try {
     const response = await fetch(`/api/pipelines/${encodeURIComponent(id)}`, {
       method: "PATCH",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ action }),
+      body: JSON.stringify({ action, ...extra }),
     });
     if (response.ok) {
       window.dispatchEvent(new Event(PIPELINES_CHANGED_EVENT));

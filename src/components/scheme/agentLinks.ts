@@ -220,6 +220,128 @@ export function deriveFlowLinks(flows: Flow[], anchorOf: (pathOrKey: string) => 
   return links;
 }
 
+/*
+ * Flow/pipeline GROUP overlay (issue #118): every session belonging to a
+ * running flow or pipeline — implementer, reviewer round deck, run-stage
+ * children — reads as ONE marked region (a tinted halo with the flow/pipeline
+ * name). The membership derivation below reuses the same anchor resolution the
+ * links do, so the halo can never enclose a board key that isn't drawn; the
+ * geometry (union bounding box) lives in layout.ts where the rects are known.
+ * A group dissolves the moment its flow/pipeline closes (both are skipped here),
+ * honoring PR #115 tombstone/close semantics without touching them.
+ */
+
+/** A group's membership + identity, before geometry (owned by the layout). */
+export interface SchemeGroupSpec {
+  key: string;
+  kind: "flow" | "pipeline";
+  /** The flow or pipeline id — stable across polls, seeds the halo hue. */
+  id: string;
+  /** Deterministic hue [0,360): a distinct, reload-stable tint per group. */
+  hue: number;
+  /** Board keys (layout.byPath keys) enclosed by the halo. */
+  members: string[];
+  flow?: Flow;
+  pipeline?: Pipeline;
+}
+
+/** Deterministic hue [0,360) from an id: each flow/pipeline gets a distinct,
+    stable tint so two concurrent groups never read as the same region. */
+export function hueFromId(id: string): number {
+  let hash = 0;
+  for (let i = 0; i < id.length; i += 1) hash = (hash * 31 + id.charCodeAt(i)) % 360;
+  return ((hash % 360) + 360) % 360;
+}
+
+/** Union bounding box of the resolvable member rects, padded so the halo sits
+    clear of the cards. Null when nothing resolves (an off-board group). */
+export function groupRect(
+  members: Iterable<string>,
+  rectOf: (key: string) => SchemeRect | null,
+  pad: number,
+): SchemeRect | null {
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  let found = false;
+  for (const key of members) {
+    const rect = rectOf(key);
+    if (!rect) continue;
+    found = true;
+    minX = Math.min(minX, rect.x);
+    minY = Math.min(minY, rect.y);
+    maxX = Math.max(maxX, rect.x + rect.w);
+    maxY = Math.max(maxY, rect.y + rect.h);
+  }
+  if (!found) return null;
+  return { x: minX - pad, y: minY - pad, w: maxX - minX + pad * 2, h: maxY - minY + pad * 2 };
+}
+
+/**
+ * One group per active flow and per active pipeline (issue #118). A pipeline
+ * that embeds a review-loop owns the flow it drives, so that flow's own group is
+ * suppressed (its implementer/deck already sit inside the pipeline halo) to avoid
+ * a double outline. Members resolve through the same anchorOf as the links:
+ * a run stage → its agent node, a review-loop → the flow's implementer node plus
+ * its round deck, a flow → implementer plus deck. A group with no resolvable
+ * member is dropped so the caller never draws an empty halo.
+ */
+export function deriveGroups(
+  flows: Flow[],
+  pipelines: Pipeline[],
+  anchorOf: (pathOrKey: string) => string | null,
+  flowImplementerPath: (flowId: string) => string | null = () => null,
+): SchemeGroupSpec[] {
+  const specs: SchemeGroupSpec[] = [];
+  /* Flows a pipeline drives through a review-loop stage: their halo is the
+     pipeline's, so skip their standalone group below. */
+  const embeddedFlowIds = new Set<string>();
+  for (const pipeline of pipelines) {
+    if (pipeline.state === "closed") continue;
+    for (const run of pipeline.runs) {
+      for (const attempt of run.attempts) {
+        if (attempt.flowId) embeddedFlowIds.add(attempt.flowId);
+      }
+    }
+  }
+  for (const pipeline of pipelines) {
+    if (pipeline.state === "closed") continue;
+    const members = new Set<string>();
+    for (const stage of pipeline.stages) {
+      const attempt = pipeline.runs.find((run) => run.stageId === stage.id)?.attempts.at(-1);
+      if (!attempt) continue;
+      if (stage.kind === "review-loop") {
+        const implPath = attempt.flowId ? flowImplementerPath(attempt.flowId) : null;
+        const impl = implPath ? anchorOf(implPath) : null;
+        if (impl) members.add(impl);
+        if (attempt.flowId) {
+          const deck = anchorOf(deckKey(attempt.flowId));
+          if (deck) members.add(deck);
+        }
+      } else if (attempt.agentPath) {
+        const at = anchorOf(attempt.agentPath);
+        if (at) members.add(at);
+      }
+    }
+    if (members.size) {
+      specs.push({ key: `group::pipeline::${pipeline.id}`, kind: "pipeline", id: pipeline.id, hue: hueFromId(pipeline.id), members: [...members], pipeline });
+    }
+  }
+  for (const flow of flowByImplementer(flows).values()) {
+    if (embeddedFlowIds.has(flow.id)) continue;
+    const members = new Set<string>();
+    const impl = anchorOf(flow.implementerPath);
+    if (impl) members.add(impl);
+    const deck = anchorOf(deckKey(flow.id));
+    if (deck) members.add(deck);
+    if (members.size) {
+      specs.push({ key: `group::flow::${flow.id}`, kind: "flow", id: flow.id, hue: hueFromId(flow.id), members: [...members], flow });
+    }
+  }
+  return specs;
+}
+
 const PIPELINE_BUSY_LINK_STATES: ReadonlySet<Pipeline["state"]> = new Set(["provisioning", "running"]);
 
 /** The cursor stage stays active while paused: `state` is `paused` but the

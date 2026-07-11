@@ -576,3 +576,43 @@ test("reviewNote parks a too-long directive for raw and role-backed review stage
   } as unknown as Parameters<typeof reviewNote>[2]);
   expect(noteOf(ok)).toBe("Check ship the widget against the ACs.");
 });
+
+test("override-stage re-configures an unstarted stage and rejects a started one (issue #118)", async () => {
+  const { ports } = harness();
+  const created = await create(ports);
+  /* The trailing "build" stage has not run yet, so its config is still editable. */
+  const res = await patchPipeline(
+    created.id,
+    { action: "override-stage", stageId: "build", engine: "claude", model: "opus", effort: "high", prompt: "New build prompt" },
+    ports,
+  );
+  expect(res.error).toBeUndefined();
+  const build = loadPipelines()[0]!.stages.find((stage) => stage.id === "build")!;
+  expect(build.effectiveRole).toMatchObject({ engine: "claude", model: "opus", effort: "high" });
+  expect(build.prompt).toBe("New build prompt");
+
+  /* A blank model resolves to the engine default (null), not the literal "". */
+  const cleared = await patchPipeline(created.id, { action: "override-stage", stageId: "build", model: "  " }, ports);
+  expect(cleared.error).toBeUndefined();
+  expect(loadPipelines()[0]!.stages.find((stage) => stage.id === "build")!.effectiveRole.model).toBeNull();
+
+  /* Once the stage has an attempt it is frozen: the override 409s. */
+  const started = loadPipelines()[0]!;
+  const buildStage = started.stages.find((stage) => stage.id === "build")!;
+  started.runs.find((run) => run.stageId === "build")!.attempts.push({
+    n: 1, state: "running", effectiveRole: structuredClone(buildStage.effectiveRole), launchId: null,
+    conversationId: null, sessionId: null, agentPath: null, paneId: null, flowId: null,
+    startedAt: null, completedAt: null, output: null, verdict: null, error: null,
+  });
+  savePipelines([started]);
+  expect((await patchPipeline(started.id, { action: "override-stage", stageId: "build", prompt: "x" }, ports)).status).toBe(409);
+});
+
+test("override-stage validates the target and requires a change", async () => {
+  const { ports } = harness();
+  const created = await create(ports);
+  expect((await patchPipeline(created.id, { action: "override-stage", stageId: "ghost", prompt: "x" }, ports)).status).toBe(404);
+  expect((await patchPipeline(created.id, { action: "override-stage", stageId: "build" }, ports)).status).toBe(400);
+  expect((await patchPipeline(created.id, { action: "override-stage", stageId: "build", engine: "gemini" as never }, ports)).status).toBe(400);
+  expect((await patchPipeline(created.id, { action: "override-stage", stageId: "build", prompt: "  " }, ports)).status).toBe(400);
+});

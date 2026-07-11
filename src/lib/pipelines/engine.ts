@@ -24,7 +24,7 @@ import { commitPipelineStage, provisionPipelineWorktree, resetPipelineStage } fr
 import { MAX_SPEC_LENGTH, MAX_STAGE_PROMPT_LENGTH, MAX_TASK_LENGTH } from "./limits";
 import { renderStagePrompt } from "./prompts";
 import { pipelineRoleLookup, resolvePipelineRole, validatePipelineRoleParams, type PipelineRoleLookup } from "./roles";
-import { buildPipeline, loadPipelines, PipelineStoreError, withPipelineMutation } from "./store";
+import { buildPipeline, isEffectiveRole, loadPipelines, PipelineStoreError, withPipelineMutation } from "./store";
 import type {
   CreatePipelineRequest,
   EffectivePipelineRole,
@@ -848,6 +848,50 @@ export async function patchPipeline(
         attempt.output = "Skipped by operator.";
       }
       advancePipeline(pipeline, stage, ports);
+    } else if (req.action === "override-stage") {
+      if (TERMINAL_STATES.has(pipeline.state)) return { error: "pipeline is closed or completed", status: 409 };
+      const targetId = typeof req.stageId === "string" ? req.stageId : null;
+      const target = targetId ? pipeline.stages.find((item) => item.id === targetId) ?? null : null;
+      if (!target) return { error: "stage not found", status: 404 };
+      /* Every attempt snapshots the stage's effectiveRole/prompt when it is
+         created (newAttempt), so an override only takes effect on a stage that
+         has not started; editing a stage mid-attempt would silently no-op. */
+      const run = pipeline.runs.find((item) => item.stageId === target.id);
+      if (run && run.attempts.length > 0) return { error: "stage has already started", status: 409 };
+      /* The store keeps a stage's input-level engine/model/effort consistent with
+         its effectiveRole (isStage), so mirror every change onto both — the
+         effectiveRole is what a fresh attempt snapshots, the input fields keep the
+         record valid to persist. */
+      let touched = false;
+      if (req.engine !== undefined) {
+        if (req.engine !== "claude" && req.engine !== "codex") return { error: "engine must be claude or codex", status: 400 };
+        target.effectiveRole.engine = req.engine;
+        target.engine = req.engine;
+        touched = true;
+      }
+      if (req.model !== undefined) {
+        if (req.model !== null && typeof req.model !== "string") return { error: "model must be a string or null", status: 400 };
+        const model = typeof req.model === "string" && req.model.trim() ? req.model.trim() : null;
+        target.effectiveRole.model = model;
+        target.model = model;
+        touched = true;
+      }
+      if (req.effort !== undefined) {
+        if (req.effort !== null && typeof req.effort !== "string") return { error: "effort must be a string or null", status: 400 };
+        const effort = typeof req.effort === "string" && req.effort.trim() ? req.effort.trim() : null;
+        target.effectiveRole.effort = effort;
+        target.effort = effort;
+        touched = true;
+      }
+      if (req.prompt !== undefined) {
+        if (typeof req.prompt !== "string" || !req.prompt.trim()) return { error: "prompt must be a non-empty string", status: 400 };
+        target.prompt = req.prompt.trim();
+        touched = true;
+      }
+      if (!touched) return { error: "override-stage needs at least one field to change", status: 400 };
+      /* A claude override with a launch model the engine can't resolve would poison
+         the record on persist; reject it here so the operator gets a 400, not a 500. */
+      if (!isEffectiveRole(target.effectiveRole)) return { error: "stage role is not a valid engine/model/effort combination", status: 400 };
     } else if (req.action === "close") {
       if (flow && flow.state !== "closed") await ports.closeFlow(flow.id);
       pipeline.state = "closed";

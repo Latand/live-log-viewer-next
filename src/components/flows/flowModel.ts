@@ -1,7 +1,7 @@
 import { useMemo, useSyncExternalStore } from "react";
 
 import { getLocale, type Locale, type MessageKey, type TFunction, translate } from "@/lib/i18n";
-import type { Flow, FlowAction, FlowRoleKey, FlowState, ReviewVerdict } from "@/lib/flows/types";
+import type { Flow, FlowAction, FlowRoleKey, FlowState, ReviewVerdict, RoleConfig } from "@/lib/flows/types";
 import type { FileEntry } from "@/lib/types";
 
 import { isConversation } from "@/components/projectModel";
@@ -230,7 +230,13 @@ export function verdictTone(verdict: ReviewVerdict | null): { color: string; sof
 
 export async function patchFlow(
   id: string,
-  body: { action: FlowAction; mode?: "auto" | "manual"; rounds?: number; note?: string },
+  body: {
+    action: FlowAction;
+    mode?: "auto" | "manual";
+    rounds?: number;
+    note?: string;
+    roles?: Partial<Record<FlowRoleKey, Partial<RoleConfig>>>;
+  },
 ): Promise<string | null> {
   try {
     const res = await fetch(`/api/flows/${encodeURIComponent(id)}`, {

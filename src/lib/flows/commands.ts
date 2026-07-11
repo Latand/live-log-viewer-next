@@ -31,6 +31,31 @@ function validateRole(value: unknown): RoleConfig | null {
   };
 }
 
+/**
+ * Merges a partial role override (issue #118 on-canvas stage controls) onto the
+ * flow's current role config, field by field: engine must stay claude/codex,
+ * model/effort blank out to the engine default. Returns null on an invalid
+ * engine so the caller can 400 instead of silently keeping the old value.
+ */
+export function applyRoleOverride(current: RoleConfig, patch: unknown): RoleConfig | null {
+  if (!patch || typeof patch !== "object" || Array.isArray(patch)) return null;
+  const p = patch as Partial<RoleConfig>;
+  const next: RoleConfig = { ...current };
+  if (p.engine !== undefined) {
+    if (p.engine !== "claude" && p.engine !== "codex") return null;
+    next.engine = p.engine;
+  }
+  if (p.model !== undefined) {
+    if (p.model !== null && typeof p.model !== "string") return null;
+    next.model = typeof p.model === "string" && p.model.trim() ? p.model.trim() : null;
+  }
+  if (p.effort !== undefined) {
+    if (p.effort !== null && typeof p.effort !== "string") return null;
+    next.effort = typeof p.effort === "string" && p.effort.trim() ? p.effort.trim() : null;
+  }
+  return next;
+}
+
 export function rolesFromRequest(req: CreateFlowRequest): Record<"implementer" | "reviewer", RoleConfig> | null {
   const presets = loadPresets();
   if (req.preset) {
@@ -271,6 +296,25 @@ export function patchFlow(id: string, req: PatchFlowRequest): { flow?: Flow; err
     flow.closedAt = null;
     flow.state = "waiting_ready";
     flow.stateDetail = null;
+  } else if (req.action === "set-roles") {
+    if (flow.state === "closed") return { error: "flow is closed", status: 409 };
+    if (!req.roles || typeof req.roles !== "object" || Array.isArray(req.roles)) {
+      return { error: "roles override is required", status: 400 };
+    }
+    const next = { ...flow.roles };
+    let touched = false;
+    for (const key of ["implementer", "reviewer"] as const) {
+      const patch = req.roles[key];
+      if (patch === undefined) continue;
+      const merged = applyRoleOverride(flow.roles[key], patch);
+      if (!merged) return { error: `invalid ${key} role override`, status: 400 };
+      next[key] = merged;
+      touched = true;
+    }
+    if (!touched) return { error: "roles override is required", status: 400 };
+    /* The change lands on the next spawned reviewer; a round in flight keeps the
+       role it froze at spawn. */
+    flow.roles = next;
   }
   /* "close" and "cancel-round" never reach this function — the route sends
      them to closeFlow/cancelRound, which also stop a running reviewer. */

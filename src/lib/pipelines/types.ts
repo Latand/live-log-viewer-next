@@ -130,10 +130,18 @@ export type CreatePipelineRequest = {
   src?: string;
 };
 
-export type PipelineAction = "pause" | "resume" | "retry-stage" | "skip-stage" | "close";
+export type PipelineAction = "pause" | "resume" | "retry-stage" | "skip-stage" | "override-stage" | "close";
 
 export type PatchPipelineRequest = {
   action: PipelineAction;
+  /** for override-stage: the not-yet-started stage to re-configure (issue #118
+      on-canvas stage controls). Only fields present are changed; a stage that
+      already ran an attempt is rejected so the override always targets the future. */
+  stageId?: string;
+  engine?: FlowEngine;
+  model?: string | null;
+  effort?: string | null;
+  prompt?: string;
 };
 
 export type PipelinesResponse = {

@@ -8,7 +8,7 @@ import type { ApiError } from "@/lib/types";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const ACTIONS = new Set<PipelineAction>(["pause", "resume", "retry-stage", "skip-stage", "close"]);
+const ACTIONS = new Set<PipelineAction>(["pause", "resume", "retry-stage", "skip-stage", "override-stage", "close"]);
 
 export async function PATCH(
   req: NextRequest,

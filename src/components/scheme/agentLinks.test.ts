@@ -3,7 +3,7 @@ import { describe, expect, test } from "bun:test";
 import type { Flow, FlowState, Round } from "@/lib/flows/types";
 import type { Pipeline } from "@/lib/pipelines/types";
 
-import { buildAnchorIndex, currentRound, deckKey, deriveFlowLinks, derivePipelineLinks, flowLinkKey, flowLinkPhase, pipelineRailSegment } from "./agentLinks";
+import { buildAnchorIndex, currentRound, deckKey, deriveFlowLinks, deriveGroups, derivePipelineLinks, flowLinkKey, flowLinkPhase, groupRect, hueFromId, pipelineRailSegment } from "./agentLinks";
 import type { SchemeRect } from "./layout";
 
 const roleConfig = { engine: "claude" as const, model: null, effort: null };
@@ -383,5 +383,83 @@ describe("deriveFlowLinks", () => {
     const f = flow({ id: "f1", implementerPath: "/impl", rounds: [round({ n: 1 }), round({ n: 2 })] });
     expect(currentRound(f)!.n).toBe(2);
     expect(currentRound(flow({ id: "f2", implementerPath: "/impl", rounds: [] }))).toBeNull();
+  });
+});
+
+describe("group overlay derivation (issue #118)", () => {
+  test("hueFromId is deterministic, in range, and distinct per id", () => {
+    expect(hueFromId("f1")).toBe(hueFromId("f1"));
+    expect(hueFromId("f1")).toBeGreaterThanOrEqual(0);
+    expect(hueFromId("f1")).toBeLessThan(360);
+    expect(hueFromId("flow-a")).not.toBe(hueFromId("flow-b"));
+  });
+
+  test("groupRect unions member rects and pads, ignoring the unresolvable", () => {
+    const rects = new Map<string, SchemeRect>([
+      ["/a", { x: 100, y: 100, w: 200, h: 100 }],
+      ["/b", { x: 400, y: 300, w: 200, h: 100 }],
+    ]);
+    const rect = groupRect(["/a", "/b", "/gone"], (key) => rects.get(key) ?? null, 10);
+    expect(rect).toEqual({ x: 90, y: 90, w: 520, h: 320 });
+    expect(groupRect(["/gone"], (key) => rects.get(key) ?? null, 10)).toBeNull();
+  });
+
+  test("a flow group encloses the implementer node and its round deck", () => {
+    const f = flow({ id: "f1", implementerPath: "/impl", rounds: [round({ n: 1, reviewerPath: "/rev" })] });
+    const index = buildAnchorIndex(["/impl"], [{ key: deckKey("f1"), flow: f }], []);
+    const specs = deriveGroups([f], [], (key) => index.get(key) ?? null);
+    expect(specs).toHaveLength(1);
+    expect(specs[0]).toMatchObject({ kind: "flow", id: "f1" });
+    expect([...specs[0]!.members].sort()).toEqual([deckKey("f1"), "/impl"].sort());
+  });
+
+  test("a pipeline group gathers every materialized stage vertex", () => {
+    const pipeline = {
+      id: "p1",
+      state: "running",
+      stages: [
+        { id: "plan", kind: "run", next: "build" },
+        { id: "build", kind: "run", next: null },
+      ],
+      runs: [
+        { stageId: "plan", attempts: [{ agentPath: "/plan" }] },
+        { stageId: "build", attempts: [{ agentPath: "/build" }] },
+      ],
+    } as unknown as Pipeline;
+    const specs = deriveGroups([], [pipeline], (key) => (["/plan", "/build"].includes(key) ? key : null));
+    expect(specs).toHaveLength(1);
+    expect(specs[0]).toMatchObject({ kind: "pipeline", id: "p1" });
+    expect([...specs[0]!.members].sort()).toEqual(["/build", "/plan"]);
+  });
+
+  test("closed flows and pipelines produce no group (dissolves on close)", () => {
+    const closedFlow = flow({ id: "f1", implementerPath: "/impl", state: "closed", closedAt: "2026-07-06T00:00:00Z" });
+    const closedPipeline = { id: "p1", state: "closed", stages: [], runs: [] } as unknown as Pipeline;
+    const index = buildAnchorIndex(["/impl"], [], []);
+    expect(deriveGroups([closedFlow], [closedPipeline], (key) => index.get(key) ?? null)).toEqual([]);
+  });
+
+  test("a flow embedded in a pipeline is not drawn as its own group", () => {
+    /* build (run) → review (review-loop, flow f-rev). The pipeline group owns
+       the flow's implementer + deck, so f-rev has no standalone halo. */
+    const f = flow({ id: "f-rev", implementerPath: "/build", rounds: [round({ n: 1, reviewerPath: "/reviewer" })] });
+    const pipeline = {
+      id: "p-rev",
+      state: "running",
+      stages: [
+        { id: "build", kind: "run", next: "review" },
+        { id: "review", kind: "review-loop", next: null },
+      ],
+      runs: [
+        { stageId: "build", attempts: [{ agentPath: "/build", state: "passed" }] },
+        { stageId: "review", attempts: [{ agentPath: "/reviewer", flowId: "f-rev", state: "reviewing" }] },
+      ],
+    } as unknown as Pipeline;
+    const index = buildAnchorIndex(["/build"], [{ key: deckKey("f-rev"), flow: f }], []);
+    const specs = deriveGroups([f], [pipeline], (key) => index.get(key) ?? null, () => "/build");
+    expect(specs.map((spec) => spec.kind)).toEqual(["pipeline"]);
+    /* The pipeline halo still encloses the folded reviewer deck. */
+    expect(specs[0]!.members).toContain(deckKey("f-rev"));
+    expect(specs[0]!.members).toContain("/build");
   });
 });
