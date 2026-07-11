@@ -120,9 +120,16 @@ test("pipelineValidationError rejects an unresolved role and unknown role params
      with "unknown role" — block it once the catalog is present. */
   const staleRole = pipelineValidationError(fakeT, { ...base, roles: CATALOG, stages: [stage({ roleId: "ghost" }), stage({ key: "k2" })] });
   expect(staleRole).toContain("roleUnavailable");
-  /* While the catalog is still loading (empty) the same draft is not false-flagged. */
+  /* While the catalog is still loading (empty, no error yet) it is not false-flagged. */
   const loading = pipelineValidationError(fakeT, { ...base, roles: [], stages: [stage({ roleId: "ghost" }), stage({ key: "k2" })] });
   expect(loading).toBeNull();
+  /* But once the catalog fails to load (rolesError, still empty), a role-bearing
+     restored draft must be blocked rather than submitting a stale roleId → 400. */
+  const failed = pipelineValidationError(fakeT, { ...base, roles: [], rolesError: true, stages: [stage({ roleId: "ghost" }), stage({ key: "k2" })] });
+  expect(failed).toContain("roleUnavailable");
+  /* A role-less draft still submits fine while the catalog is down. */
+  const rawWhileDown = pipelineValidationError(fakeT, { ...base, roles: [], rolesError: true, stages: [stage({}), stage({ key: "k2" })] });
+  expect(rawWhileDown).toBeNull();
   /* A stale param key the role does not declare is rejected like the API does.
      (architect resolves to Claude/Fable, so the stage engine matches its runtime.) */
   const staleParam = pipelineValidationError(fakeT, { ...base, roles: CATALOG, stages: [stage({ roleId: "architect", engine: "claude", roleParams: { bogus: "x" } }), stage({ key: "k2" })] });

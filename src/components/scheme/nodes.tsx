@@ -193,12 +193,17 @@ export const AgentLinksLayer = memo(function AgentLinksLayer({
   links,
   byPath,
   interactive,
+  hubInteractive = interactive,
   width,
   height,
 }: {
   links: AgentLink[];
   byPath: Map<string, SchemeRect>;
   interactive: boolean;
+  /** Pipeline control hub stays tappable even where the rest of the layer is
+      passive — the mobile lite map is pick-only for nodes but its PipelineHub
+      opens the same controls as desktop (#93 §2.3). Defaults to `interactive`. */
+  hubInteractive?: boolean;
   width: number;
   height: number;
 }) {
@@ -243,7 +248,7 @@ export const AgentLinksLayer = memo(function AgentLinksLayer({
           const x = (seg.x1 + seg.x2) / 2;
           const y = (seg.y1 + seg.y2) / 2;
           if (link.pipeline.hub) {
-            return <PipelineHub key={link.key} pipeline={link.pipeline.pipeline} x={x} y={y} interactive={interactive} moveTransition={MOVE_TRANSITION} />;
+            return <PipelineHub key={link.key} pipeline={link.pipeline.pipeline} x={x} y={y} interactive={hubInteractive} moveTransition={MOVE_TRANSITION} />;
           }
           return <PipelineEdgeBadge key={link.key} index={link.pipeline.index} total={link.pipeline.total} color={PIPELINE_RAIL_COLOR[link.pipeline.tone]} x={x} y={y} moveTransition={MOVE_TRANSITION} />;
         }

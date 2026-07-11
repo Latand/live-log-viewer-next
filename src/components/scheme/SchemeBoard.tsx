@@ -646,7 +646,10 @@ export function SchemeBoard({
       >
         <EdgesLayer edges={layout.edges} width={layout.width} height={layout.height} />
         <LoopsLayer loops={layout.loops} width={layout.width} height={layout.height} />
-        <AgentLinksLayer links={layout.links} byPath={layout.byPath} interactive={!mapMode && !handLike && !session} width={layout.width} height={layout.height} />
+        {/* Rails/badges stay passive on the map, but the pipeline hub keeps its
+            tap target there — the mobile lite map reaches pipeline controls only
+            through it (#93 §2.3). */}
+        <AgentLinksLayer links={layout.links} byPath={layout.byPath} interactive={!mapMode && !handLike && !session} hubInteractive={!handLike && !session} width={layout.width} height={layout.height} />
         <NodesLayer
           layout={layout}
           project={project}

@@ -161,8 +161,12 @@ export function templateReady(template: PipelineTemplate, roles: RoleCatalogItem
     error message, or null when the request would be accepted. */
 export function pipelineValidationError(
   t: TFunction,
-  { task, spec, repoDir, stages, roles, defaultRuntime }: { task: string; spec: string; repoDir: string; stages: DraftStage[]; roles: RoleCatalogItem[]; defaultRuntime: RoleConfig },
+  { task, spec, repoDir, stages, roles, rolesError = false, defaultRuntime }: { task: string; spec: string; repoDir: string; stages: DraftStage[]; roles: RoleCatalogItem[]; rolesError?: boolean; defaultRuntime: RoleConfig },
 ): string | null {
+  /* The catalog has "settled" once it loaded (roles present) or failed
+     (rolesError). Only while it is genuinely still loading — empty and no error —
+     is an unresolved roleId ambiguous and left unflagged. */
+  const catalogSettled = roles.length > 0 || rolesError;
   if (!task.trim()) return t("pipelineDialog.errors.taskRequired");
   if (!repoDir.trim()) return t("pipelineDialog.errors.repoRequired");
   if (stages.some((stage) => !stage.prompt.trim())) return t("pipelineDialog.errors.promptRequired");
@@ -189,9 +193,11 @@ export function pipelineValidationError(
     if (stage.roleId && !role) {
       /* A restored draft can carry a roleId (and its params) the current catalog
          no longer offers; serialization ships them unchanged and the API 400s with
-         "unknown role". Reject once the catalog has loaded — while it is still
-         empty (loading/errored) the picker is unusable anyway, so don't false-flag. */
-      if (roles.length) return t("pipelineDialog.errors.roleUnavailable", { role: stage.roleId });
+         "unknown role". Once the catalog has settled — loaded OR failed — an
+         unresolvable roleId is blocked, so a role-bearing draft can't submit while
+         the catalog is down (the operator retries the catalog or clears the role).
+         Only mid-load (empty, no error yet) is it left unflagged. */
+      if (catalogSettled) return t("pipelineDialog.errors.roleUnavailable", { role: stage.roleId });
       continue;
     }
     if (!role) continue;
@@ -343,7 +349,7 @@ export function PipelineDialog({
   const addStage = () => setStages((prev) => (prev.length >= 4 ? prev : [...prev, blankStage(defaultRuntime)]));
   const applyTemplate = (template: PipelineTemplate) => setStages(stagesFromTemplate(template, roles, defaultRuntime));
 
-  const validationError = pipelineValidationError(t, { task, spec, repoDir, stages, roles, defaultRuntime });
+  const validationError = pipelineValidationError(t, { task, spec, repoDir, stages, roles, rolesError, defaultRuntime });
 
   const submit = async () => {
     if (busy) return;
