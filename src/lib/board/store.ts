@@ -158,6 +158,16 @@ export function boardFor(project: string, filePath = boardFileForTests ?? BOARD_
 export type BoardPatch = Partial<BoardProjectStateV1["prefs"]>;
 type BoardWriteResult = { ok: true; board: BoardProjectStateV1 } | { ok: false; board: BoardProjectStateV1 };
 
+function applyLegacyPatch(current: BoardProjectStateV1, patch: BoardPatch): BoardProjectStateV1 {
+  const hidden = patch.hidden === undefined
+    ? current.prefs.hidden
+    : [...new Set([...current.prefs.hidden, ...patch.hidden])];
+  return applyBoardMutations({
+    ...current,
+    prefs: { ...current.prefs, ...patch, hidden },
+  }, []);
+}
+
 function sameReduced(left: BoardProjectStateV1, right: BoardProjectStateV1): boolean {
   return JSON.stringify({ prefs: left.prefs, pathAliases: left.pathAliases ?? {} }) === JSON.stringify({ prefs: right.prefs, pathAliases: right.pathAliases ?? {} });
 }
@@ -196,7 +206,7 @@ function writeLatest(project: string, reduce: (current: BoardProjectStateV1) => 
 }
 
 export function patchBoard(project: string, baseRevision: number, patch: BoardPatch, filePath = boardFileForTests ?? BOARD_FILE): { ok: true; board: BoardProjectStateV1 } | { ok: false; board: BoardProjectStateV1 } {
-  return writeReduced(project, baseRevision, (current) => ({ ...current, prefs: { ...current.prefs, ...patch } }), filePath);
+  return writeReduced(project, baseRevision, (current) => applyLegacyPatch(current, patch), filePath);
 }
 
 export function mutateBoard(project: string, baseRevision: number, mutations: readonly BoardMutationV1[], filePath = boardFileForTests ?? BOARD_FILE): BoardWriteResult {
