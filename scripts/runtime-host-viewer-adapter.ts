@@ -1,6 +1,6 @@
 #!/usr/bin/env bun-container
 
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -13,6 +13,7 @@ import {
   viewerComposeServiceUid,
 } from "../src/runtime-host/candidateContainer";
 import { ensureCanonicalMirror } from "../src/runtime-host/canonicalMirror";
+import { candidatePortsFromEnvironmentLists, isCandidatePortAvailable, selectCandidatePort } from "../src/runtime-host/candidatePort";
 import { hasViewerDeploymentCapability, viewerHealthRequestPlan, waitForViewerReadiness, type ViewerCandidateContainerState } from "../src/runtime-host/deploymentHealth";
 
 const stateDir = process.env.LLV_STATE_DIR || "/home/latand/.config/agent-log-viewer/state";
@@ -46,11 +47,6 @@ async function resolveRevision(requested: string): Promise<string> {
   return revision;
 }
 
-function candidatePort(deploymentId: string): number {
-  const slot = Number.parseInt(createHash("sha256").update(deploymentId).digest("hex").slice(0, 6), 16) % 2_000;
-  return Number(process.env.LLV_VIEWER_CANDIDATE_PORT_BASE || 18_000) + slot;
-}
-
 function composeConfigFile(revision: string): string {
   return path.join(deploymentDir, "compose", `${revision}.json`);
 }
@@ -62,6 +58,22 @@ function writeComposeConfig(revision: string, config: string): void {
   const temporary = `${filename}.${process.pid}.${randomUUID()}.tmp`;
   fs.writeFileSync(temporary, config, { mode: 0o600, flag: "wx" });
   fs.renameSync(temporary, filename);
+}
+
+async function managedCandidatePorts(): Promise<Set<number>> {
+  const output = await command(["docker", "container", "ls", "-a", "--filter", "label=dev.live-log-viewer.managed=1", "--format", "{{.ID}}"]);
+  const environments: string[][] = [];
+  for (const id of output.split("\n").map((item) => item.trim()).filter(Boolean)) {
+    try {
+      const value = JSON.parse(await command(["docker", "container", "inspect", "--format", "{{json .Config.Env}}", id])) as unknown;
+      if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) throw new Error("managed Viewer environment is invalid");
+      environments.push(value as string[]);
+    } catch (error) {
+      if (error instanceof Error && (error.message.includes("No such container") || error.message.includes("No such object"))) continue;
+      throw error;
+    }
+  }
+  return candidatePortsFromEnvironmentLists(environments);
 }
 
 function release(value: unknown): ViewerReleaseIdentity {
@@ -93,7 +105,12 @@ async function buildCandidate(deploymentId: string, revision: string): Promise<V
     try { await command(["git", "--git-dir", mirrorDir, "worktree", "remove", "--force", sourceDir]); }
     catch { fs.rmSync(sourceDir, { recursive: true, force: true }); }
   }
-  const port = candidatePort(deploymentId);
+  const reservedPorts = await managedCandidatePorts();
+  const port = await selectCandidatePort(deploymentId, {
+    base: Number(process.env.LLV_VIEWER_CANDIDATE_PORT_BASE || 18_000),
+    slots: 2_000,
+    isAvailable: async (candidate) => !reservedPorts.has(candidate) && await isCandidatePortAvailable(candidate),
+  });
   return { revision, image, container: `llv-deploy-${deploymentId.replace(/[^a-zA-Z0-9_.-]/g, "-")}`, endpoint: `http://127.0.0.1:${port}` };
 }
 
@@ -107,10 +124,14 @@ async function containerExists(container: string): Promise<boolean> {
 }
 
 async function startCandidate(candidate: ViewerReleaseIdentity): Promise<void> {
+  const port = Number(new URL(candidate.endpoint).port);
   if (await containerExists(candidate.container)) {
+    const state = await command(["docker", "inspect", "--format", "{{.State.Status}}", candidate.container]);
+    if (state !== "running" && !await isCandidatePortAvailable(port)) throw new Error("candidate Viewer port is unavailable before restart");
     await command(["docker", "start", candidate.container]);
     return;
   }
+  if (!await isCandidatePortAvailable(port)) throw new Error("candidate Viewer port is unavailable before start");
   const composeService = viewerComposeServiceFromConfig(fs.readFileSync(composeConfigFile(candidate.revision), "utf8"));
   const uid = viewerComposeServiceUid(composeService);
   const tmuxEnvironment = viewerCandidateTmuxEnvironment(stateDir, uid, {

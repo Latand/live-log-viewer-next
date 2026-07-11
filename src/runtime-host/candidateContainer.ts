@@ -148,6 +148,7 @@ export function viewerCandidateDockerArgs(
     "dev.live-log-viewer.managed": "1",
     "dev.live-log-viewer.revision": candidate.revision,
   };
+  const command = service.command?.map((argument) => argument.replaceAll("$$", () => "$")) ?? [];
   const args = [
     "docker", "run", "-d",
     "--restart", service.restart,
@@ -164,7 +165,7 @@ export function viewerCandidateDockerArgs(
       `type=bind,source=${volume.source},target=${volume.target}${volume.read_only ? ",readonly" : ""}`,
     ]),
     candidate.image,
-    ...(service.command ?? []),
+    ...command,
   ];
   return args;
 }

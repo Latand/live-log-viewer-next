@@ -145,7 +145,9 @@ test("actual Viewer Compose keys remain covered by the candidate generator", () 
   expect(valuesAfter(args, "--mount")).toHaveLength(service.volumes.length);
   expect(args[args.indexOf("--restart") + 1]).toBe(service.restart);
   expect(environment.LLV_ALLOW_LEGACY_VIEWER).toBe("1");
-  expect(args.slice(args.indexOf(candidate.image) + 1)).toEqual(service.command ?? []);
+  expect(args.slice(args.indexOf(candidate.image) + 1)).toEqual(
+    service.command?.map((argument) => argument.replaceAll("$$", () => "$")) ?? [],
+  );
   expect(valuesAfter(args, "--label").map((label) => label.split("=", 1)[0]).sort()).toEqual([
     ...Object.keys(service.labels),
     "dev.live-log-viewer.managed",
@@ -176,6 +178,30 @@ test("legacy Viewer requires a migration profile and launch grant", () => {
   expect(viewer.profiles).toEqual(["legacy-viewer-migration"]);
   expect(viewer.environment.LLV_ALLOW_LEGACY_VIEWER).toBe("0");
   expect(viewer.command.join(" ")).toContain("LLV_ALLOW_LEGACY_VIEWER");
+});
+
+test("candidate executes the Compose guard with its runtime launch grant", () => {
+  const viewer = resolvedCompose().services.viewer;
+  const service = viewerComposeServiceFromConfig(JSON.stringify({ services: { viewer } }));
+  const args = viewerCandidateDockerArgs(candidate, service, {
+    runtimeSocket: "/state/runtime-host.sock",
+    legacyTmuxExternal: "1",
+    tmuxTmpdir: "/run/user/1000/agent-log-viewer",
+  });
+  const command = args.slice(args.indexOf(candidate.image) + 1);
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-viewer-guard-"));
+  const next = path.join(sandbox, "node_modules", ".bin", "next");
+  fs.mkdirSync(path.dirname(next), { recursive: true });
+  fs.writeFileSync(next, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  const result = Bun.spawnSync(command, {
+    cwd: sandbox,
+    env: { ...process.env, ...environmentFromArgs(args) },
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  fs.rmSync(sandbox, { recursive: true, force: true });
+
+  expect(result.exitCode).toBe(0);
 });
 
 test("candidate tmux environment follows the durable migration marker", () => {
