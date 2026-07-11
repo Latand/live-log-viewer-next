@@ -1,6 +1,7 @@
 import { beforeEach, expect, test } from "bun:test";
 
 import { applyBoardMutations, type BoardMutationV1 } from "@/lib/board/mutations";
+import { MAX_BOARD_BODY_BYTES } from "@/lib/board/validation";
 import type { BoardProjectStateV1 } from "@/lib/view/types";
 
 import {
@@ -572,14 +573,14 @@ test("a validator-accepted reconciliation past the body cap splits and lands who
   await settle();
 
   /* The review probe: 70 roots × 4096-char paths ≈ 287 KB — accepted by the
-     item validator yet past the 256 KiB body cap as a single mutation. */
+     item validator, so the server body cap must admit it whole. */
   const roots = Array.from({ length: 70 }, (_, index) => `/${String(index).padStart(4, "0")}${"r".repeat(4090)}`);
   store.mutate([{ kind: "reconcile-roots", roots, removeManual: [] }]);
   await settle();
   await settle();
 
-  expect(bodyBytes.length).toBeGreaterThan(1);
-  expect(Math.max(...bodyBytes)).toBeLessThanOrEqual(256 * 1024);
+  expect(bodyBytes.length).toBeGreaterThanOrEqual(1);
+  expect(Math.max(...bodyBytes)).toBeLessThanOrEqual(MAX_BOARD_BODY_BYTES);
   /* Nothing was shed: every root of the split reconciliation is durable. */
   expect(server.projects.proj.prefs.manual).toHaveLength(70);
   expect(store.getSnapshot().sync).toBe("current");
@@ -600,10 +601,11 @@ test("splitMutationForTransport chunks by item count and bytes, preserving conte
   }
   expect(byCount.flatMap((piece) => (piece.kind === "reconcile-roots" ? piece.roots : []))).toEqual(manyRoots);
 
+  /* Byte size alone never splits a validator-legal mutation: the server body
+     cap admits it whole, preserving reducer atomicity. */
   const pairs = Array.from({ length: 40 }, (_, index) => ({ from: `/${index}${"f".repeat(4000)}`, to: `/${index}${"t".repeat(4000)}` }));
-  const byBytes = splitMutationForTransport({ kind: "remap-paths", pairs });
-  expect(byBytes.length).toBeGreaterThan(1);
-  expect(byBytes.flatMap((piece) => (piece.kind === "remap-paths" ? piece.pairs : []))).toEqual(pairs);
+  const wholeMutation: BoardMutationV1 = { kind: "remap-paths", pairs };
+  expect(splitMutationForTransport(wholeMutation)).toEqual([wholeMutation]);
 });
 
 test("escaping-heavy paths stay under the body cap after splitting", async () => {
@@ -626,8 +628,8 @@ test("escaping-heavy paths stay under the body cap after splitting", async () =>
   await settle();
   await settle();
 
-  expect(bodyBytes.length).toBeGreaterThan(1);
-  expect(Math.max(...bodyBytes)).toBeLessThanOrEqual(256 * 1024);
+  expect(bodyBytes.length).toBeGreaterThanOrEqual(1);
+  expect(Math.max(...bodyBytes)).toBeLessThanOrEqual(MAX_BOARD_BODY_BYTES);
   expect(server.projects.proj.prefs.manual).toHaveLength(70);
   expect(store.getSnapshot().sync).toBe("current");
   store.dispose();
@@ -643,9 +645,10 @@ test("a split remap chain keeps its alias-chain atomicity and manual placement",
   const pairs = Array.from({ length: 40 }, (_, index) => ({ from: hop(index), to: hop(index + 1) }));
   const mutation: BoardMutationV1 = { kind: "remap-paths", pairs };
   const pieces = splitMutationForTransport(mutation);
-  for (const piece of pieces) {
-    if (piece.kind !== "remap-paths") throw new Error("unexpected kind");
-  }
+  /* 321 KB but validator-legal (≤512 pairs): rides whole — the raised server
+     cap admits it, so chain atomicity is never at risk from byte size. */
+  expect(pieces).toEqual([mutation]);
+  expect(new TextEncoder().encode(JSON.stringify(pieces[0])).length).toBeLessThanOrEqual(MAX_BOARD_BODY_BYTES);
   /* The reviewer's probe: manual /p12 must transform to /p40, not vanish. */
   const board = boardOf(1, { manual: [hop(12)] });
   const atomic = applyBoardMutations(board, [mutation]);
@@ -656,14 +659,14 @@ test("a split remap chain keeps its alias-chain atomicity and manual placement",
 });
 
 test("disjoint remap pairs still split and replay to the atomic result", () => {
-  const pairs = Array.from({ length: 40 }, (_, index) => ({
-    from: `/from-${index}${"f".repeat(4000)}`,
-    to: `/to-${index}${"t".repeat(4000)}`,
+  const pairs = Array.from({ length: 700 }, (_, index) => ({
+    from: `/from-${index}`,
+    to: `/to-${index}`,
   }));
   const mutation: BoardMutationV1 = { kind: "remap-paths", pairs };
   const pieces = splitMutationForTransport(mutation);
   expect(pieces.length).toBeGreaterThan(1);
-  const board = boardOf(1, { manual: [pairs[0]!.from, pairs[39]!.from] });
+  const board = boardOf(1, { manual: [pairs[0]!.from, pairs[699]!.from] });
   const atomic = applyBoardMutations(board, [mutation]);
   const split = applyBoardMutations(board, pieces);
   expect(split.prefs).toEqual(atomic.prefs);
@@ -674,8 +677,8 @@ test("split reconcile applies every removal before any addition, matching the at
   /* The overlap trap: a path in both lists. Atomically the removal filters
      manual first and the root is re-seeded; interleaved chunks would add it
      first and then delete it. */
-  const shared = `/shared${"s".repeat(4000)}`;
-  const roots = [shared, ...Array.from({ length: 69 }, (_, index) => `/r${String(index).padStart(3, "0")}${"r".repeat(4000)}`)];
+  const shared = "/shared-root";
+  const roots = [shared, ...Array.from({ length: 600 }, (_, index) => `/r${String(index).padStart(3, "0")}`)];
   const mutation: BoardMutationV1 = { kind: "reconcile-roots", roots, removeManual: [shared] };
   const pieces = splitMutationForTransport(mutation);
   expect(pieces.length).toBeGreaterThan(1);
@@ -684,4 +687,58 @@ test("split reconcile applies every removal before any addition, matching the at
   const split = applyBoardMutations(board, pieces);
   expect(atomic.prefs.manual).toContain(shared);
   expect(split.prefs).toEqual(atomic.prefs);
+});
+
+test("remap splitting honors pre-existing board aliases bridging the pieces", () => {
+  /* Existing alias a→b silently connects two incoming pairs. Oversized
+     padding forces x→a and b→y into different transport pieces; the split
+     must still preserve manual /b as /y, exactly like the atomic remap. */
+  const alias = { "/a": "/b" };
+  const padding = Array.from({ length: 600 }, (_, index) => ({
+    from: `/pad-from-${index}`,
+    to: `/pad-to-${index}`,
+  }));
+  const pairs = [{ from: "/x", to: "/a" }, ...padding, { from: "/b", to: "/y" }];
+  const mutation: BoardMutationV1 = { kind: "remap-paths", pairs };
+  const pieces = splitMutationForTransport(mutation, alias);
+  expect(pieces.length).toBeGreaterThan(1);
+  const board = boardOf(1, { manual: ["/b"] }, alias);
+  const atomic = applyBoardMutations(board, [mutation]);
+  const split = applyBoardMutations(board, pieces);
+  expect(atomic.prefs.manual).toEqual(["/y"]);
+  expect(split.prefs).toEqual(atomic.prefs);
+  expect(split.pathAliases).toEqual(atomic.pathAliases);
+});
+
+test("a remap chain past the 512-pair validator cap splits into valid pieces", () => {
+  const hop = (index: number) => `/n${index}`;
+  const pairs = Array.from({ length: 600 }, (_, index) => ({ from: hop(index), to: hop(index + 1) }));
+  const mutation: BoardMutationV1 = { kind: "remap-paths", pairs };
+  const pieces = splitMutationForTransport(mutation);
+  /* One connected component past the validator cap is inexpressible as valid
+     pieces without breaking reducer atomicity — it ships whole (flattened) so
+     the server's rejection matches the atomic mutation's own fate, and the
+     bisection sheds only it while neighbors land. */
+  expect(pieces).toHaveLength(1);
+  const board = boardOf(1, { manual: [hop(0), hop(300)] });
+  const atomic = applyBoardMutations(board, [mutation]);
+  const split = applyBoardMutations(board, pieces);
+  expect(atomic.prefs.manual).toEqual([hop(600)]);
+  expect(split.prefs).toEqual(atomic.prefs);
+
+  /* Disjoint pairs past the cap DO split into valid pieces that replay to the
+     atomic result. */
+  const disjoint = Array.from({ length: 600 }, (_, index) => ({ from: `/d-from-${index}`, to: `/d-to-${index}` }));
+  const disjointMutation: BoardMutationV1 = { kind: "remap-paths", pairs: disjoint };
+  const disjointPieces = splitMutationForTransport(disjointMutation);
+  expect(disjointPieces.length).toBeGreaterThan(1);
+  for (const piece of disjointPieces) {
+    if (piece.kind !== "remap-paths") throw new Error("unexpected kind");
+    expect(piece.pairs.length).toBeLessThanOrEqual(512);
+  }
+  const disjointBoard = boardOf(1, { manual: [disjoint[0]!.from, disjoint[599]!.from] });
+  const atomicDisjoint = applyBoardMutations(disjointBoard, [disjointMutation]);
+  const splitDisjoint = applyBoardMutations(disjointBoard, disjointPieces);
+  expect(splitDisjoint.prefs).toEqual(atomicDisjoint.prefs);
+  expect(splitDisjoint.pathAliases).toEqual(atomicDisjoint.pathAliases);
 });

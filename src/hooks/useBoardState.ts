@@ -26,20 +26,16 @@ const MAX_CONFLICT_RETRIES = 8;
    an outbox that grew past it during an outage drains in accepted chunks
    instead of one oversized batch the server would reject. */
 const MAX_MUTATIONS_PER_PATCH = 128;
-/* Serialized-bytes budget per PATCH, safely under the server's
-   MAX_BOARD_BODY_BYTES (256 KB) with headroom for the request envelope. Large
-   mutations (a reconcile carrying hundreds of root paths) chunk by bytes long
-   before the 128-count cap, so a batch is never refused for size alone. */
+/* Serialized-bytes target per PATCH — a batching-efficiency budget, not a
+   validity bound: the server's MAX_BOARD_BODY_BYTES admits every single
+   validator-legal mutation, so `patchPrefix` letting its first mutation
+   through regardless of size can never draw a size rejection. */
 const MAX_PATCH_BYTES = 192 * 1024;
 
 /* Server-side per-list validation cap (`pathList` / remap `pairs`): a single
    mutation carrying more entries than this is refused outright, so transport
    splitting bounds item counts alongside bytes. */
 const MAX_PATHS_PER_MUTATION = 512;
-/* Path-bytes budget per split piece: half the per-PATCH byte budget, keeping
-   every piece (plus envelope and JSON syntax) far under the server body cap. */
-const SPLIT_PATH_BYTES = 96 * 1024;
-
 /** Exact serialized footprint of one array element: JSON escaping (backslashes,
     quotes, control characters) can double a pathname's raw UTF-8 size, and the
     server's body cap applies to the serialized form — so the budget must too. */
@@ -48,95 +44,107 @@ function serializedBytes(value: unknown): number {
   return typeof TextEncoder === "undefined" ? json.length : new TextEncoder().encode(json).length;
 }
 
-function chunkByBudget<T>(items: readonly T[], bytesOf: (item: T) => number): T[][] {
+function chunkByCount<T>(items: readonly T[]): T[][] {
   const chunks: T[][] = [];
-  let current: T[] = [];
-  let bytes = 0;
-  for (const item of items) {
-    const size = bytesOf(item) + 1;
-    if (current.length > 0 && (current.length >= MAX_PATHS_PER_MUTATION || bytes + size > SPLIT_PATH_BYTES)) {
-      chunks.push(current);
-      current = [];
-      bytes = 0;
-    }
-    current.push(item);
-    bytes += size;
+  for (let start = 0; start < items.length; start += MAX_PATHS_PER_MUTATION) {
+    chunks.push([...items.slice(start, start + MAX_PATHS_PER_MUTATION)]);
   }
-  if (current.length) chunks.push(current);
   return chunks;
 }
 
-/** Connected components of remap pairs over shared endpoints, preserving the
-    original pair order inside each chain. */
-function remapChains(pairs: readonly { from: string; to: string }[]): { from: string; to: string }[][] {
-  const parent = new Map<string, string>();
-  const find = (start: string): string => {
-    let root = start;
-    while ((parent.get(root) ?? root) !== root) root = parent.get(root)!;
-    parent.set(start, root);
-    return root;
-  };
-  for (const pair of pairs) {
-    const from = find(pair.from);
-    const to = find(pair.to);
-    if (from !== to) parent.set(from, to);
+/** Follow the alias graph to its canonical end; null on a cycle (the server
+    validator rejects those atomically, so the caller passes them through). */
+function resolveAlias(path: string, aliases: Readonly<Record<string, string>>): string | null {
+  const seen = new Set<string>();
+  let resolved = path;
+  while (aliases[resolved] !== undefined) {
+    if (seen.has(resolved)) return null;
+    seen.add(resolved);
+    resolved = aliases[resolved]!;
   }
-  const groups = new Map<string, { from: string; to: string }[]>();
-  for (const pair of pairs) {
-    const root = find(pair.from);
-    const group = groups.get(root) ?? [];
-    group.push(pair);
-    groups.set(root, group);
-  }
-  return [...groups.values()];
+  return resolved;
 }
 
 /**
- * Break a validator-oversized mutation into transport-sized pieces. The two
- * list-carrying kinds are safe to split: `reconcile-roots` is additive on
- * `roots` and subtractive on the disjoint `removeManual`, and `remap-paths`
- * accumulates aliases through normalization, so replaying the pieces in order
- * reduces to the same board as the single large mutation. Everything else
- * carries at most one path and passes through untouched.
+ * Break a mutation the item-level validators would refuse (>512 entries per
+ * list) into transportable pieces. Byte size never forces a split: the server
+ * body cap admits every validator-legal mutation whole, which is what makes
+ * lossless splitting possible at all — cutting a remap graph by bytes cannot
+ * preserve the reducer's atomic semantics in general.
+ *
+ * - `reconcile-roots` pieces apply every removal before any addition,
+ *   mirroring the reducer's atomic order for overlapping lists; the lists are
+ *   otherwise element-independent.
+ * - `remap-paths` over the cap is flattened onto final canonical targets
+ *   (resolved through the board's alias graph plus the batch — aliases only
+ *   accumulate, so the closure is identical) and partitioned into groups that
+ *   must stay whole: all pairs sharing a final target, unioned with any group
+ *   whose final a pair's pre-resolved source lands on. Split anywhere else
+ *   and a later piece re-targeting an already-planted final deletes its
+ *   manual placement. A single group past the cap is inexpressible atomically
+ *   — it ships whole so the server's verdict matches the atomic mutation's.
  */
-export function splitMutationForTransport(mutation: BoardMutationV1): BoardMutationV1[] {
+export function splitMutationForTransport(mutation: BoardMutationV1, boardAliases: Readonly<Record<string, string>> = {}): BoardMutationV1[] {
   if (mutation.kind === "reconcile-roots") {
-    const oversized = mutation.roots.length > MAX_PATHS_PER_MUTATION
-      || mutation.removeManual.length > MAX_PATHS_PER_MUTATION
-      || serializedBytes(mutation) > MAX_PATCH_BYTES;
-    if (!oversized) return [mutation];
-    /* All removals precede all additions, mirroring the reducer's atomic
-       order (it filters removeManual before seeding roots): interleaving the
-       chunks would let a later removal chunk delete a root a preceding chunk
-       just added when the two lists overlap. */
+    if (mutation.roots.length <= MAX_PATHS_PER_MUTATION && mutation.removeManual.length <= MAX_PATHS_PER_MUTATION) return [mutation];
     return [
-      ...chunkByBudget(mutation.removeManual, serializedBytes)
-        .map((removeManual): BoardMutationV1 => ({ kind: "reconcile-roots", roots: [], removeManual })),
-      ...chunkByBudget(mutation.roots, serializedBytes)
-        .map((roots): BoardMutationV1 => ({ kind: "reconcile-roots", roots, removeManual: [] })),
+      ...chunkByCount(mutation.removeManual).map((removeManual): BoardMutationV1 => ({ kind: "reconcile-roots", roots: [], removeManual })),
+      ...chunkByCount(mutation.roots).map((roots): BoardMutationV1 => ({ kind: "reconcile-roots", roots, removeManual: [] })),
     ];
   }
   if (mutation.kind === "remap-paths") {
-    const oversized = mutation.pairs.length > MAX_PATHS_PER_MUTATION || serializedBytes(mutation) > MAX_PATCH_BYTES;
-    if (!oversized) return [mutation];
-    /* Pack whole chains: pairs sharing an endpoint must ride in one piece,
-       because the reducer computes source/target sets per call — a chain cut
-       at a piece boundary turns an intermediate hop into a bare target and
-       deletes its manual placement. Chains are disjoint, so pieces holding
-       complete chains replay to the same board as the atomic remap. A single
-       chain past the budgets stays whole: correctness over transport size. */
+    if (mutation.pairs.length <= MAX_PATHS_PER_MUTATION) return [mutation];
+    const combined: Record<string, string> = { ...boardAliases };
+    for (const pair of mutation.pairs) combined[pair.from] = pair.to;
+    /* Group pairs by flattened final target; a cycle is server-rejected, so it
+       passes through for the same atomic verdict. */
+    const groups = new Map<string, { from: string; to: string }[]>();
+    for (const pair of mutation.pairs) {
+      const final = resolveAlias(pair.to, combined);
+      if (final === null) return [mutation];
+      const group = groups.get(final) ?? [];
+      group.push({ from: pair.from, to: final });
+      groups.set(final, group);
+    }
+    /* Union-find over group finals: a pair whose PRE-batch source resolution
+       lands on another group's final couples the two (the reducer's
+       keep-manual test sees that source in the atomic batch, so the pieces
+       must too). */
+    const parent = new Map<string, string>();
+    const find = (start: string): string => {
+      let root = start;
+      while ((parent.get(root) ?? root) !== root) root = parent.get(root)!;
+      parent.set(start, root);
+      return root;
+    };
+    for (const pair of mutation.pairs) {
+      const source = resolveAlias(pair.from, boardAliases);
+      const final = resolveAlias(pair.to, combined)!;
+      if (source !== null && source !== final && groups.has(source)) {
+        const a = find(final);
+        const b = find(source);
+        if (a !== b) parent.set(a, b);
+      }
+    }
+    const merged = new Map<string, { from: string; to: string }[]>();
+    for (const [final, group] of groups) {
+      const root = find(final);
+      merged.set(root, [...(merged.get(root) ?? []), ...group]);
+    }
+    /* Pack whole merged groups; an over-cap group ships alone and whole. */
     const pieces: BoardMutationV1[] = [];
     let current: { from: string; to: string }[] = [];
-    let bytes = 0;
-    for (const chain of remapChains(mutation.pairs)) {
-      const chainBytes = chain.reduce((sum, pair) => sum + serializedBytes(pair) + 1, 0);
-      if (current.length > 0 && (current.length + chain.length > MAX_PATHS_PER_MUTATION || bytes + chainBytes > SPLIT_PATH_BYTES)) {
+    for (const group of merged.values()) {
+      if (group.length > MAX_PATHS_PER_MUTATION) {
+        if (current.length) { pieces.push({ kind: "remap-paths", pairs: current }); current = []; }
+        pieces.push({ kind: "remap-paths", pairs: group });
+        continue;
+      }
+      if (current.length && current.length + group.length > MAX_PATHS_PER_MUTATION) {
         pieces.push({ kind: "remap-paths", pairs: current });
         current = [];
-        bytes = 0;
       }
-      current.push(...chain);
-      bytes += chainBytes;
+      current.push(...group);
     }
     if (current.length) pieces.push({ kind: "remap-paths", pairs: current });
     return pieces;
@@ -405,8 +413,11 @@ export function createBoardStore(options: BoardStoreOptions): BoardStore {
     if (mutations.length === 0) return;
     /* Oversized mutations (a reconcile past the 512-path or byte budget) are
        split into equivalent transport-sized pieces before they enter the
-       outbox, so no queued mutation can ever draw a size rejection alone. */
-    const expanded = mutations.flatMap(splitMutationForTransport);
+       outbox, so no queued mutation can ever draw a size rejection alone.
+       Remap flattening resolves through the optimistic alias graph — the
+       confirmed board plus every queued remap. */
+    const aliasBase = optimisticBoard(confirmed, outbox).pathAliases ?? {};
+    const expanded = mutations.flatMap((mutation) => splitMutationForTransport(mutation, aliasBase));
     /* Drop a batch that changes nothing optimistically — an idempotent
        reconcile/remap, or a close of an already-hidden path — so it never
        reaches transport and never bumps a revision. */

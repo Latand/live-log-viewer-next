@@ -2,11 +2,13 @@ import type { BoardProjectStateV1 } from "@/lib/view/types";
 import { readBoundedJson, ViewValidationError } from "@/lib/view/validation";
 import type { BoardMutationV1 } from "@/lib/board/mutations";
 
-/* A root reconciliation carries every current root path of a project; on a
-   busy machine (hundreds of roots × ~120-char paths) that batch alone passes
-   32 KB, and a rejected reconcile wedged every close queued behind it. The
-   item-level limits (512 paths × 4096 chars per list) stay the real guard. */
-export const MAX_BOARD_BODY_BYTES = 256 * 1024;
+/* Must admit every single mutation the item-level validators accept, or a
+   validator-legal mutation becomes untransportable and the client can only
+   drop it: the worst case (512 paths × 4096 chars per list, escaping doubled)
+   serializes to ~4.2 MB. 6 MB covers that plus envelope with headroom. The
+   real guards are the item-level limits; this cap only fences unbounded
+   bodies on a localhost-only endpoint. */
+export const MAX_BOARD_BODY_BYTES = 6 * 1024 * 1024;
 export type BoardPatch = Partial<BoardProjectStateV1["prefs"]>;
 
 function exact(value: Record<string, unknown>, allowed: readonly string[], field: string): void {
