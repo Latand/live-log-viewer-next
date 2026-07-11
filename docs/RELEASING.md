@@ -30,7 +30,31 @@ and process-start identity durably, launches it with a parent-death signal, and
 reconciles that exact process group before replaying a journaled phase after a
 restart.
 
-The adapter protocol is a fixed executable plus one action argument. JSON request data arrives on stdin. Supported actions are `resolve-revision`, `build-candidate`, `start-candidate`, `current-release`, `verify-candidate`, `promote`, `verify-promoted`, and `rollback`. Browser request data cannot select executables, Docker arguments, Compose projects, or shell text.
+The adapter protocol invokes one fixed executable with one action argument and
+sends one JSON object on stdin. Every action must be idempotent because restart
+recovery can replay it.
+
+`ViewerReleaseIdentity` is an object with string fields `image`, `container`,
+`endpoint`, and `revision`.
+
+| Action | JSON input |
+| --- | --- |
+| `resolve-revision` | `{ "revision": string }` |
+| `build-candidate` | `{ "deploymentId": string, "revision": string }` |
+| `start-candidate` | `{ "candidate": ViewerReleaseIdentity }` |
+| `current-release` | `{}` |
+| `verify-candidate` | `{ "candidate": ViewerReleaseIdentity }` |
+| `promote` | `{ "candidate": ViewerReleaseIdentity }` |
+| `verify-promoted` | `{ "candidate": ViewerReleaseIdentity }` |
+| `rollback` | `{ "previous": ViewerReleaseIdentity, "candidate": ViewerReleaseIdentity }` |
+| `retire` | `{ "release": ViewerReleaseIdentity }` |
+| `retain-only` | `{ "releases": ViewerReleaseIdentity[] }` |
+
+`retire` removes the supplied failed or superseded release container and may
+remove its unused image. `retain-only` preserves the supplied serving and
+rollback releases and removes every other managed Viewer container and unused
+image. Browser request data cannot select executables, Docker arguments,
+Compose projects, or shell text.
 
 Deployment state is available through `POST /api/runtime/deployments`, `GET /api/runtime/deployments/:id`, the runtime snapshot, and the existing SSE stream. The Viewer shows the latest phase in a compact status pill.
 
