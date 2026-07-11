@@ -5,6 +5,7 @@ import { flushSync } from "react-dom";
 
 import type { FileEntry } from "@/lib/types";
 
+import { requestSessionRename } from "./sessionTitleApi";
 import { SessionTitle } from "./SessionTitle";
 
 const dom = new Window({ url: "http://127.0.0.1/" });
@@ -16,6 +17,7 @@ Object.assign(globalThis, {
   HTMLElement: dom.HTMLElement,
   HTMLInputElement: dom.HTMLInputElement,
   Event: dom.Event,
+  CustomEvent: dom.CustomEvent,
   KeyboardEvent: dom.KeyboardEvent,
   MouseEvent: dom.MouseEvent,
   PointerEvent: dom.MouseEvent,
@@ -234,4 +236,45 @@ test("a revision conflict adopts the server record and retries once", async () =
   // The retry carries the server's revision (5) as the new base.
   expect(calls[1]!.body.baseRevision).toBe(5);
   expect(calls[1]!.body.title).toBe("my rename");
+});
+
+test("returns focus to the launcher after Escape closes the editor", async () => {
+  const view = mount(entry());
+  const pencil = view.host.querySelector('button[aria-label^="Rename"]') as HTMLButtonElement;
+  flushSync(() => pencil.click());
+  const input = view.host.querySelector('input[aria-label="Session title"]') as HTMLInputElement;
+  expect(input).toBeTruthy();
+
+  flushSync(() => dispatch(input, new dom.KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true })));
+  await settle();
+  // Keyboard users keep their place: focus lands back on the rename launcher.
+  expect(view.host.querySelector('input[aria-label="Session title"]')).toBeNull();
+  expect(document.activeElement).toBe(view.host.querySelector('button[aria-label^="Rename"]'));
+});
+
+test("an external rename request opens the editor (scheme-board F2)", async () => {
+  const view = mount(entry());
+  expect(view.host.querySelector('input[aria-label="Session title"]')).toBeNull();
+  flushSync(() => requestSessionRename(entry().path));
+  expect(view.host.querySelector('input[aria-label="Session title"]')).toBeTruthy();
+});
+
+test("a request that fires before mount is replayed on mount (pending rename)", async () => {
+  // The scheme board expands a node and requests the rename before that node's
+  // SessionTitle has mounted; the pending entry must still open it.
+  requestSessionRename(entry().path);
+  const view = mount(entry());
+  await settle();
+  expect(view.host.querySelector('input[aria-label="Session title"]')).toBeTruthy();
+});
+
+test("the mobile variant renders an always-visible 44px launcher", () => {
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  flushSync(() => root.render(<SessionTitle file={entry()} alwaysVisible />));
+  mounted.push(() => { flushSync(() => root.unmount()); host.remove(); });
+  const pencil = host.querySelector('button[aria-label^="Rename"]') as HTMLButtonElement;
+  expect(pencil.className).toContain("h-11");
+  expect(pencil.className).toContain("w-11");
 });

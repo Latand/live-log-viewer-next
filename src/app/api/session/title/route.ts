@@ -9,6 +9,7 @@ import {
   writeSessionTitle,
   type SessionTitleOverride,
 } from "@/lib/session/titleStore";
+import { publishTitleUpdate } from "@/lib/session/titleEvents";
 import { propagateTitleToWindow, resolveTitleTarget } from "@/lib/session/titleTarget";
 import type { ApiError } from "@/lib/types";
 
@@ -73,6 +74,10 @@ export async function PATCH(req: NextRequest): Promise<NextResponse<PatchTitleRe
   const windowName = outcome.override?.title
     ?? (typeof body.windowName === "string" ? sanitizeCustomTitle(body.windowName) : null);
   if (windowName) await propagateTitleToWindow(target, windowName);
+
+  // Publish an identity-based set/clear signal + a files bump so other
+  // tabs/devices converge even when SSE has disabled their fallback poll.
+  await publishTitleUpdate(candidateKeys[0]!, outcome.override === null);
 
   return NextResponse.json({ ok: true, override: outcome.override });
 }

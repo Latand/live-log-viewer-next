@@ -15,9 +15,15 @@ let scannedFiles: FileEntry[] = [];
 let scanGates: Promise<void>[] = [];
 let registryRoot = "";
 let tmuxHealth: unknown = { status: "healthy" };
+let stateDir = "";
+const previousState = process.env.LLV_STATE_DIR;
 
 beforeEach(() => {
   registryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "llv-files-route-"));
+  // Sandbox the title store so the integration test's writeSessionTitle never
+  // touches the real ~/.config/agent-log-viewer state.
+  stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "llv-files-route-state-"));
+  process.env.LLV_STATE_DIR = stateDir;
   setAgentRegistryForTests(new AgentRegistry(path.join(registryRoot, "registry.json")));
   resetFilesRouteCacheForTests();
   scans = 0;
@@ -28,7 +34,10 @@ beforeEach(() => {
 
 afterEach(() => {
   setAgentRegistryForTests(null);
+  if (previousState === undefined) delete process.env.LLV_STATE_DIR;
+  else process.env.LLV_STATE_DIR = previousState;
   fs.rmSync(registryRoot, { recursive: true, force: true });
+  fs.rmSync(stateDir, { recursive: true, force: true });
 });
 
 mock.module("@/lib/scanner", () => ({

@@ -17,6 +17,7 @@ import { BranchPane } from "@/components/BranchPane";
 import { flowByImplementer } from "@/components/flows/flowModel";
 import type { BranchGroup } from "@/components/projectModel";
 import { createTask, deleteTask, handoffTask, unassignTask, updateTask } from "@/components/tasks/taskApi";
+import { requestSessionRename } from "@/components/session/sessionTitleApi";
 import { pushTaskToast } from "@/components/tasks/taskToast";
 import { cleanTitle } from "@/components/utils";
 import { taskDeliveryText } from "@/lib/tasks/helpers";
@@ -241,6 +242,24 @@ export function SchemeBoard({
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
   }, [overlayOpen]);
+  /* F2 renames the selected node: expand it (so its BranchPane mounts) and ask
+     that pane's SessionTitle to open its editor. Ignored inside text fields. */
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "F2") return;
+      const el = event.target as HTMLElement | null;
+      if (el && (["INPUT", "TEXTAREA", "SELECT"].includes(el.tagName) || el.isContentEditable)) return;
+      const path = selectedRef.current;
+      if (!path) return;
+      const node = layout.nodes.find((candidate) => candidate.file.path === path);
+      if (!node?.file.renamable) return;
+      event.preventDefault();
+      setExpanded(path);
+      requestSessionRename(path);
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [layout]);
   const [deckFocus, setDeckFocus] = useState<DeckFocus | null>(null);
   const focusRound = useCallback((flowId: string, round: number) => {
     setDeckFocus((prev) => ({ flowId, round, nonce: (prev?.nonce ?? 0) + 1 }));

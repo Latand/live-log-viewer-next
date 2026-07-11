@@ -37,6 +37,7 @@ mock.module("@/lib/session/titleTarget", () => ({
 const { PATCH } = await import("./route");
 
 let stateDir = "";
+const previousState = process.env.LLV_STATE_DIR;
 
 beforeEach(() => {
   stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "llv-title-state-"));
@@ -46,7 +47,10 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  delete process.env.LLV_STATE_DIR;
+  // Restore the prior value (the test-preload sandbox), never unset it — leaving
+  // LLV_STATE_DIR undefined would point later tests at the real state dir.
+  if (previousState === undefined) delete process.env.LLV_STATE_DIR;
+  else process.env.LLV_STATE_DIR = previousState;
   fs.rmSync(stateDir, { recursive: true, force: true });
 });
 

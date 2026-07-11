@@ -157,7 +157,12 @@ export function applyTitleOverride(
   if (!record) return;
   entry.titleRevision = record.revision;
   if (record.title === null) return;
-  entry.autoTitle = entry.title;
+  // Capture the derived title as provenance on the first application only —
+  // even when it equals the custom title, so an explicit override keeps its
+  // Reset control (finding: equal titles lost Reset). The `autoTitle`-unset
+  // guard also makes a second pass idempotent: it never recaptures the custom
+  // title as the auto title.
+  if (entry.autoTitle === undefined) entry.autoTitle = entry.title;
   entry.title = record.title;
 }
 

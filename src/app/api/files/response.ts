@@ -14,8 +14,7 @@ import { loadTasks } from "@/lib/tasks/store";
 import { loadWorkflows } from "@/lib/workflows/store";
 import { filterWorkflowsForFileScan } from "@/lib/workflows/visibility";
 import { projectRateLimitReadModel } from "@/lib/rateLimit";
-import { isRenameableSessionEntry } from "@/lib/session/renameEligibility";
-import { applyTitleOverride, indexSessionTitles, loadSessionTitles } from "@/lib/session/titleStore";
+import { overlaySessionTitles } from "@/lib/session/titleProjection";
 import { tmuxEndpointHealth } from "@/lib/tmux";
 import type { FilesResponse } from "@/lib/types";
 
@@ -85,27 +84,14 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
       };
     }
   }
-  /* Custom session titles (issue #33) are the last word on `title`: they run
-     after the registry has stamped `conversationId`, so an override filed under
-     the stable conversation identity wins over the launch-profile title, the
-     derived title, and everything downstream (cards, lists, attention, push).
-     The pre-override title survives on `autoTitle`. The rename-eligibility flag
-     is projected here too so the client never imports the Node-only store. */
-  const titleIndex = indexSessionTitles(loadSessionTitles());
-  // Reverse the alias map (canonical → [former ids]) so a title filed under a
-  // provisional conversation id the registry has since coalesced is still found.
-  const aliasesByCanonical = new Map<string, string[]>();
-  for (const alias of Object.keys(registrySnapshot.conversationAliases)) {
-    const canonical = registry.canonicalConversationId(alias as `conversation_${string}`);
-    if (canonical === alias) continue;
-    const list = aliasesByCanonical.get(canonical);
-    if (list) list.push(alias); else aliasesByCanonical.set(canonical, [alias]);
-  }
-  for (const file of files) {
-    if (file.engine !== "claude" && file.engine !== "codex") continue;
-    file.renamable = isRenameableSessionEntry(file);
-    if (titleIndex.size > 0) applyTitleOverride(file, titleIndex, file.conversationId ? aliasesByCanonical.get(file.conversationId) ?? [] : []);
-  }
+  /* Custom session titles (issue #33) are the last word on `title`. The shared
+     projection runs after the registry has stamped `conversationId` and the
+     launch profile, so an override filed under the stable conversation identity
+     wins over the launch-profile title, the derived title, and everything
+     downstream (cards, lists, attention, push). The pre-override title survives
+     on `autoTitle`; the `renamable` flag is projected too so the client never
+     imports the Node-only store. */
+  overlaySessionTitles(files);
   const tasks = reconcileTasks(files, loadTasks(), {
     pathForPanePid: (panePid, entries) => pathForPanePid(entries, panePid, readPpid),
     panePidAlive: pidAlive,
