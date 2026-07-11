@@ -285,6 +285,65 @@ test("a repeated migration cannot alias its pending successor backward", async (
   });
 });
 
+test("a pending repeated migration preserves deferred historical continuity tombstones", async () => {
+  const registry = new AgentRegistry(path.join(path.dirname(testFile), "agent-registry.json"));
+  setAgentRegistryForTests(registry);
+  const first = "/deferred-generation-a.jsonl";
+  const fork = "/deferred-fork-b.jsonl";
+  const second = "/deferred-generation-b.jsonl";
+  const conversation = registry.ensureConversation("codex", first, "account-a");
+
+  registry.commitMigrationIntent({
+    engine: "codex",
+    targetId: "account-b",
+    origin: "manual",
+    requestId: "deferred-first-migration",
+    expectedRevision: registry.engineRouting("codex").revision,
+  });
+  const firstRevision = registry.conversation(conversation.id)!.migration!.revision;
+  registry.recordConversationContinuityPath(conversation.id, fork);
+
+  const closed = await PATCH(patch({
+    schemaVersion: 1,
+    project: "deferred-continuity",
+    baseRevision: 0,
+    mutations: [{ kind: "close", path: fork }],
+  }));
+  expect(closed.status).toBe(200);
+  expect(await closed.json()).toMatchObject({
+    board: { revision: 1, pathAliases: {}, prefs: { hidden: [fork] } },
+  });
+
+  registry.transitionConversationMigration(conversation.id, firstRevision, ["requested", "waiting-turn"], { phase: "preparing" });
+  registry.transitionConversationMigration(conversation.id, firstRevision, ["preparing"], { phase: "successor-starting" });
+  registry.transitionConversationMigration(conversation.id, firstRevision, ["successor-starting"], { phase: "verifying" });
+  registry.commitSuccessor(conversation.id, { id: "deferred-generation-b", path: second, accountId: "account-b" }, firstRevision);
+
+  registry.commitMigrationIntent({
+    engine: "codex",
+    targetId: "account-c",
+    origin: "manual",
+    requestId: "deferred-second-migration",
+    expectedRevision: registry.engineRouting("codex").revision,
+  });
+
+  const reconciled = await PATCH(patch({
+    schemaVersion: 1,
+    project: "deferred-continuity",
+    baseRevision: 1,
+    mutations: [{ kind: "reconcile-roots", roots: [second], removeManual: [] }],
+  }));
+  expect(reconciled.status).toBe(200);
+  expect(await reconciled.json()).toMatchObject({
+    ok: true,
+    board: {
+      revision: 2,
+      pathAliases: { [first]: second, [fork]: second },
+      prefs: { manual: [], hidden: [second] },
+    },
+  });
+});
+
 test("a corrupt conversation registry cannot block a valid close", async () => {
   fs.writeFileSync(path.join(path.dirname(testFile), "agent-registry.json"), "{ corrupt", "utf8");
 

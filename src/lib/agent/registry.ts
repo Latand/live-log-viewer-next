@@ -177,8 +177,8 @@ export interface ConversationLookup {
   conversation(id: ViewerConversationId): RegistryConversation | null;
 }
 
-type ConversationMigrationInput = Omit<ConversationMigration, "errorCode" | "operationId" | "sourceGenerationId" | "providerReceipt" | "boardProject" | "boardOperationId" | "boardPlacementProject"> &
-  Partial<Pick<ConversationMigration, "errorCode" | "operationId" | "sourceGenerationId" | "providerReceipt" | "boardProject" | "boardOperationId" | "boardPlacementProject">>;
+type ConversationMigrationInput = Omit<ConversationMigration, "errorCode" | "operationId" | "sourceGenerationId" | "providerReceipt" | "pendingContinuityPaths" | "boardProject" | "boardOperationId" | "boardPlacementProject"> &
+  Partial<Pick<ConversationMigration, "errorCode" | "operationId" | "sourceGenerationId" | "providerReceipt" | "pendingContinuityPaths" | "boardProject" | "boardOperationId" | "boardPlacementProject">>;
 type SuccessorGenerationInput = Omit<NativeGeneration, "createdAt" | "archivedAt" | "launchProfile" | "historyHash" | "host"> &
   Partial<Pick<NativeGeneration, "launchProfile" | "historyHash" | "host">>;
 
@@ -290,6 +290,9 @@ function conversationMigrationForIntent(
   changedAt: string,
 ): ConversationMigration {
   const boardProject = conversation.migration?.boardProject ?? null;
+  const pendingContinuityPaths = conversation.migration && conversation.migration.phase !== "committed"
+    ? conversation.migration.pendingContinuityPaths
+    : [];
   return {
     intentId: intent.id,
     phase,
@@ -300,6 +303,7 @@ function conversationMigrationForIntent(
     operationId: crypto.randomUUID(),
     sourceGenerationId: source.id,
     providerReceipt: null,
+    pendingContinuityPaths,
     boardProject,
     boardOperationId: conversation.migration?.boardOperationId ?? null,
     boardPlacementProject: conversation.migration?.boardPlacementProject
@@ -422,13 +426,20 @@ function normalizeConversation(value: RegistryConversation): RegistryConversatio
   const generations = Array.isArray(value.generations) ? value.generations.map(normalizeGeneration) : [];
   const current = generations.at(-1);
   const legacyContinuity = (value.migration as (ConversationMigration & { continuityPaths?: unknown }) | null)?.continuityPaths;
+  const providerReceipt = normalizeProviderReceipt(value.migration?.providerReceipt);
+  const pendingContinuityPaths = Array.isArray(value.migration?.pendingContinuityPaths)
+    ? value.migration.pendingContinuityPaths.filter((pathname): pathname is string => typeof pathname === "string")
+    : value.migration?.phase !== "committed" && providerReceipt
+      ? [...new Set([...providerReceipt.continuityPaths, providerReceipt.path])]
+      : [];
   const migration = value.migration && typeof value.migration === "object"
     ? {
       ...value.migration,
       errorCode: value.migration.errorCode ?? null,
       operationId: value.migration.operationId ?? `${value.migration.intentId}:${value.id}:${value.migration.revision}`,
       sourceGenerationId: value.migration.sourceGenerationId ?? current?.id ?? "",
-      providerReceipt: normalizeProviderReceipt(value.migration.providerReceipt),
+      providerReceipt,
+      pendingContinuityPaths,
       boardProject: typeof value.migration.boardProject === "string" ? value.migration.boardProject : null,
       boardOperationId: typeof value.migration.boardOperationId === "string" ? value.migration.boardOperationId : null,
       boardPlacementProject: typeof value.migration.boardPlacementProject === "string" ? value.migration.boardPlacementProject : null,
@@ -1008,6 +1019,7 @@ export class AgentRegistry {
         operationId: crypto.randomUUID(),
         sourceGenerationId: source.id,
         providerReceipt: null,
+        pendingContinuityPaths: [],
         boardProject: null,
         boardOperationId: null,
         boardPlacementProject: source.launchProfile.project,
@@ -1553,6 +1565,7 @@ export class AgentRegistry {
         operationId: migration.operationId ?? `${migration.intentId}:${canonicalId}:${migration.revision}`,
         sourceGenerationId: migration.sourceGenerationId ?? source?.id ?? "",
         providerReceipt: migration.providerReceipt ?? null,
+        pendingContinuityPaths: migration.pendingContinuityPaths ?? [],
         boardProject: migration.boardProject ?? null,
         boardOperationId: migration.boardOperationId ?? null,
         boardPlacementProject: migration.boardPlacementProject ?? migration.boardProject ?? null,
@@ -1593,7 +1606,17 @@ export class AgentRegistry {
         throw new Error("migration provider receipt is stale");
       }
       if (migration.phase === "successor-starting") {
-        conversation.migration = { ...migration, phase: "verifying", providerReceipt: receipt, updatedAt: now() };
+        const receiptPaths = [...new Set([...receipt.continuityPaths, receipt.path])];
+        for (const pathname of receiptPaths) {
+          if (!conversation.continuityPaths.includes(pathname)) conversation.continuityPaths.push(pathname);
+        }
+        conversation.migration = {
+          ...migration,
+          phase: "verifying",
+          providerReceipt: receipt,
+          pendingContinuityPaths: [...new Set([...migration.pendingContinuityPaths, ...receiptPaths])],
+          updatedAt: now(),
+        };
         conversation.updatedAt = now();
         return clone(conversation);
       }
@@ -1619,6 +1642,10 @@ export class AgentRegistry {
         }
       }
       if (!conversation.continuityPaths.includes(pathname)) conversation.continuityPaths.push(pathname);
+      if (conversation.migration && conversation.migration.phase !== "committed"
+        && !conversation.migration.pendingContinuityPaths.includes(pathname)) {
+        conversation.migration.pendingContinuityPaths.push(pathname);
+      }
       conversation.updatedAt = now();
       return clone(conversation);
     });
@@ -1678,6 +1705,7 @@ export class AgentRegistry {
         operationId: current.errorCode === "codex-fork-outcome-unknown" ? current.operationId : crypto.randomUUID(),
         sourceGenerationId: source.id,
         providerReceipt: null,
+        pendingContinuityPaths: current.phase === "committed" ? [] : current.pendingContinuityPaths,
         boardProject: current.boardProject,
         boardOperationId: current.boardOperationId,
         boardPlacementProject: current.boardPlacementProject,

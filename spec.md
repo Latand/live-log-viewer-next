@@ -26,7 +26,8 @@ or omit a `remap-paths` mutation.
 - AC8: A malformed or unreadable conversation registry leaves validated board
   mutations available and skips alias enrichment for that request.
 - AC9: Pending continuity paths cannot create aliases from a future successor
-  back to the current predecessor during initial or repeated migrations.
+  back to the current predecessor during initial or repeated migrations;
+  committed continuity paths keep carrying tombstones during later migrations.
 - AC10: `bun test` passes.
 - AC11: `bunx tsc --noEmit` passes.
 - AC12: The live board state and production Viewer on port 8898 remain

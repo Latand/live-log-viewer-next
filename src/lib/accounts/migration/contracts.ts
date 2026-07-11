@@ -78,6 +78,8 @@ export interface ConversationMigration {
   operationId: string;
   sourceGenerationId: string;
   providerReceipt: ProviderReceipt | null;
+  /** Continuity artifacts created by the active succession and awaiting commit. */
+  pendingContinuityPaths: string[];
   /** Canonical board project whose path aliases have converged for this generation. */
   boardProject: string | null;
   /** Migration operation whose aliases have converged in boardProject. */
