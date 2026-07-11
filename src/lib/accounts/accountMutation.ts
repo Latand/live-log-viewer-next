@@ -6,7 +6,7 @@ import path from "node:path";
 import { statePath } from "@/lib/configDir";
 import { procBackend } from "@/lib/proc";
 
-const LOCK_ATTEMPTS = 2_000;
+const ASYNC_LOCK_ATTEMPTS = 2_000;
 const LOCK_WAIT_MS = 5;
 const LOCK_STALE_MS = 30_000;
 const REVISION_VERSION = 1;
@@ -19,12 +19,15 @@ const transactionContext = new AsyncLocalStorage<TransactionContext>();
 const localWaiters: Array<() => void> = [];
 let localHeld = false;
 
-function sleep(milliseconds: number): void {
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
-}
-
 function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+export class AccountMutationBusyError extends Error {
+  constructor(message = "account mutation is busy; retry shortly") {
+    super(message);
+    this.name = "AccountMutationBusyError";
+  }
 }
 
 function releaseLocal(): void {
@@ -34,7 +37,7 @@ function releaseLocal(): void {
 }
 
 function acquireLocalSync(): () => void {
-  if (localHeld) throw new Error("account mutation is busy in this process; retry shortly");
+  if (localHeld) throw new AccountMutationBusyError("account mutation is busy in this process; retry shortly");
   localHeld = true;
   return releaseLocal;
 }
@@ -159,12 +162,11 @@ function acquire(): AcquiredLock {
   let pending: PendingLock | null = null;
   try {
     pending = createPendingLock();
-    for (let attempt = 0; attempt < LOCK_ATTEMPTS; attempt += 1) {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
       const acquired = tryAcquireFile(pending);
       if (acquired) return attachLocalRelease(acquired, release);
-      sleep(LOCK_WAIT_MS);
     }
-    throw new Error("account mutation is busy; retry shortly");
+    throw new AccountMutationBusyError();
   } catch (error) {
     if (pending) removeIfOwned(pending.ticket, pending.owner.token);
     release();
@@ -177,7 +179,7 @@ async function acquireAsync(): Promise<AcquiredLock> {
   let pending: PendingLock | null = null;
   try {
     pending = createPendingLock();
-    for (let attempt = 0; attempt < LOCK_ATTEMPTS; attempt += 1) {
+    for (let attempt = 0; attempt < ASYNC_LOCK_ATTEMPTS; attempt += 1) {
       const acquired = tryAcquireFile(pending);
       if (acquired) return attachLocalRelease(acquired, release);
       await delay(LOCK_WAIT_MS);

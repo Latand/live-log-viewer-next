@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import type { CodexAccount } from "./codex";
-import { withAccountMutationLock } from "./accountMutation";
+import { AccountMutationBusyError, withAccountMutationLock, withAccountMutationLockAsync } from "./accountMutation";
 import { statePath } from "../configDir";
 import {
   CodexAppServerClient,
@@ -100,6 +100,8 @@ function readStoredAttempts(file: string): Map<string, PersistedAttempt> {
 export class ManagedCodexRuntime {
   private readonly active = new Map<string, ActiveAttempt>();
   private records: Map<string, PersistedAttempt>;
+  private readonly pendingRecords = new Map<string, PersistedAttempt>();
+  private recordDrain: Promise<void> | null = null;
   private readonly startClient: (home: string) => Promise<CodexAppServerClient>;
   private readonly now: () => number;
   private readonly stateFile: string;
@@ -263,10 +265,19 @@ export class ManagedCodexRuntime {
   /** Request-safe in-memory projection. Authentication probes and persisted
    * attempt transitions remain owned by the background controller. */
   peekLogin(account: CodexAccount): ManagedLoginSnapshot {
+    return this.peekLoginFrom(account, readStoredAttempts(this.stateFile));
+  }
+
+  peekLogins(accounts: readonly CodexAccount[]): Map<string, ManagedLoginSnapshot> {
+    const stored = readStoredAttempts(this.stateFile);
+    return new Map(accounts.map((account) => [account.id, this.peekLoginFrom(account, stored)]));
+  }
+
+  private peekLoginFrom(account: CodexAccount, storedAttempts: Map<string, PersistedAttempt>): ManagedLoginSnapshot {
     if (account.kind !== "managed") return { state: account.authPresent ? "authenticated" : "idle", attemptState: null, deviceAuth: null };
     const home = canonicalHome(account.home);
     const active = this.active.get(home);
-    const stored = readStoredAttempts(this.stateFile).get(home);
+    const stored = storedAttempts.get(home);
     if (stored?.state === "pending" && active?.state === "pending" && active.verificationUrl && active.userCode) {
       return { state: "pending", attemptState: "pending", deviceAuth: { url: active.verificationUrl, code: active.userCode } };
     }
@@ -315,15 +326,27 @@ export class ManagedCodexRuntime {
   private settle(attempt: ActiveAttempt | null, state: PersistedAttemptState, reason: AttemptReason | null, close: boolean): void {
     if (!attempt || !this.owns(attempt)) return;
     this.active.delete(attempt.home);
-    this.record(attempt.home, { ...attempt, state, updatedAt: this.now(), reason });
-    if (close) attempt.client?.close();
+    const completed = { ...attempt, state, updatedAt: this.now(), reason };
+    try { this.record(attempt.home, completed); }
+    catch { this.queueRecord(attempt.home, completed); }
+    finally { if (close) attempt.client?.close(); }
   }
 
   private record(home: string, attempt: PersistedAttempt): void {
-    withAccountMutationLock(() => {
-      this.records = readStoredAttempts(this.stateFile);
+    try {
+      withAccountMutationLock(() => this.writeRecords(new Map([[home, attempt]])));
+    } catch (error) {
+      if (!(error instanceof AccountMutationBusyError)) throw error;
+      this.queueRecord(home, attempt);
+    }
+  }
+
+  private writeRecords(updates: Map<string, PersistedAttempt>): void {
+    this.records = readStoredAttempts(this.stateFile);
+    let changed = false;
+    for (const [home, attempt] of updates) {
       const previous = this.records.get(home);
-      if (previous && previous.generation > attempt.generation) return;
+      if (previous && previous.generation > attempt.generation) continue;
       this.records.set(home, {
         accountId: attempt.accountId,
         generation: attempt.generation,
@@ -332,17 +355,50 @@ export class ManagedCodexRuntime {
         updatedAt: attempt.updatedAt,
         reason: attempt.reason,
       });
-      const stored: StoredAttempts = { version: 1, attempts: Object.fromEntries(this.records) };
-      const dir = path.dirname(this.stateFile);
-      const tmp = path.join(dir, `.${path.basename(this.stateFile)}.${process.pid}.${Date.now()}.tmp`);
-      try {
-        fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-        fs.writeFileSync(tmp, JSON.stringify(stored, null, 2) + "\n", { mode: 0o600 });
-        fs.renameSync(tmp, this.stateFile);
-      } finally {
-        fs.rmSync(tmp, { force: true });
+      changed = true;
+    }
+    if (!changed) return;
+    const stored: StoredAttempts = { version: 1, attempts: Object.fromEntries(this.records) };
+    const dir = path.dirname(this.stateFile);
+    const tmp = path.join(dir, `.${path.basename(this.stateFile)}.${process.pid}.${Date.now()}.tmp`);
+    try {
+      fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+      fs.writeFileSync(tmp, JSON.stringify(stored, null, 2) + "\n", { mode: 0o600 });
+      fs.renameSync(tmp, this.stateFile);
+    } finally {
+      fs.rmSync(tmp, { force: true });
+    }
+  }
+
+  private queueRecord(home: string, attempt: PersistedAttempt): void {
+    const queued = this.pendingRecords.get(home);
+    if (!queued || queued.generation <= attempt.generation) this.pendingRecords.set(home, attempt);
+    this.startRecordDrain();
+  }
+
+  private startRecordDrain(): void {
+    if (this.recordDrain) return;
+    const drain = async () => {
+      while (this.pendingRecords.size > 0) {
+        const batch = new Map(this.pendingRecords);
+        await withAccountMutationLockAsync(async () => this.writeRecords(batch));
+        for (const [queuedHome, queuedAttempt] of batch) {
+          if (this.pendingRecords.get(queuedHome) === queuedAttempt) this.pendingRecords.delete(queuedHome);
+        }
       }
-    });
+    };
+    const pending = drain();
+    this.recordDrain = pending;
+    void pending.then(
+      () => {
+        this.recordDrain = null;
+        if (this.pendingRecords.size > 0) this.startRecordDrain();
+      },
+      () => {
+        this.recordDrain = null;
+        setTimeout(() => this.startRecordDrain(), 100).unref?.();
+      },
+    );
   }
 }
 

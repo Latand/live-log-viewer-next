@@ -89,3 +89,52 @@ test("revision admission failure prevents the durable mutation callback", async 
   expect({ exit, error }).toEqual({ exit: 0, error: "" });
   expect(JSON.parse(fs.readFileSync(result, "utf8"))).toEqual({ callbackRan: false, failed: true });
 });
+
+test("a sync contender fails quickly while another process owns the file lock", async () => {
+  const state = path.join(sandbox, "cross-process-state");
+  const modulePath = path.join(import.meta.dir, "accountMutation.ts");
+  const ready = path.join(sandbox, "cross-process-ready");
+  const release = path.join(sandbox, "cross-process-release");
+  const env = { ...process.env, LLV_STATE_DIR: state };
+  const holder = Bun.spawn({
+    cmd: [process.execPath, "-e", `
+      const fs = await import("node:fs");
+      const { withAccountMutationLockAsync } = await import(${JSON.stringify(modulePath)});
+      await withAccountMutationLockAsync(async () => {
+        fs.writeFileSync(${JSON.stringify(ready)}, "ready");
+        while (!fs.existsSync(${JSON.stringify(release)})) await Bun.sleep(5);
+      });
+    `],
+    env,
+    stdout: "ignore",
+    stderr: "pipe",
+  });
+  for (let attempt = 0; attempt < 100 && !fs.existsSync(ready); attempt += 1) await Bun.sleep(10);
+  expect(fs.existsSync(ready)).toBeTrue();
+
+  const contender = Bun.spawn({
+    cmd: [process.execPath, "-e", `
+      const { withAccountMutationLock } = await import(${JSON.stringify(modulePath)});
+      try { withAccountMutationLock(() => undefined); process.exit(2); }
+      catch { process.exit(0); }
+    `],
+    env,
+    stdout: "ignore",
+    stderr: "pipe",
+  });
+  const completed = await Promise.race([contender.exited.then(() => true), Bun.sleep(500).then(() => false)]);
+  if (!completed) contender.kill();
+  fs.writeFileSync(release, "release");
+  const [holderExit, contenderError, holderError] = await Promise.all([
+    holder.exited,
+    new Response(contender.stderr).text(),
+    new Response(holder.stderr).text(),
+  ]);
+
+  expect({ completed, holderExit, contenderError, holderError }).toEqual({
+    completed: true,
+    holderExit: 0,
+    contenderError: "",
+    holderError: "",
+  });
+});

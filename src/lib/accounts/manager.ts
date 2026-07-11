@@ -1,10 +1,10 @@
-import { accountForSpawn, activeCodexAccountId, codexAccountsMutationLocked, codexHomeOwningSessionPath, CorruptCodexAccountsError, createManagedCodexAccount, listCodexAccounts, setActiveCodexAccount, UnknownAccountError } from "./codex";
+import { accountForSpawn, activeCodexAccountId, codexAccountsMutationLocked, codexHomeOwningSessionPath, CorruptCodexAccountsError, createManagedCodexAccount, listCodexAccounts, setActiveCodexAccount, UnknownAccountError, type CodexAccount } from "./codex";
 import { activeClaudeAccountId, claudeAccountForSpawn, claudeAccountsMutationLocked, claudeHomeOwningTranscript, claudeManagedEnvironment, CorruptClaudeAccountsError, createManagedClaudeAccount, listClaudeAccounts, setActiveClaudeAccount, UnknownClaudeAccountError } from "./claude";
 import { claudeLoginSupervisor, LIVE_CLAUDE_LOGIN_PHASES } from "./claudeLogin";
 import { managedCodexRuntime } from "./codexRuntime";
 import type { AccountManager, AccountSummary } from "./contracts";
 import { unavailableLimits } from "./contracts";
-import { withAccountMutationLock } from "./accountMutation";
+import { withAccountMutationLockAsync } from "./accountMutation";
 import { agentRegistry, type AgentRegistry } from "@/lib/agent/registry";
 
 function summary(engine: "claude" | "codex", id: string): AccountSummary {
@@ -47,7 +47,7 @@ function selectAccountLocked(engine: "claude" | "codex", id: string, routing: Ro
         return login !== null && LIVE_CLAUDE_LOGIN_PHASES.has(login.phase);
       })()
     : (() => {
-        const codexAccount = listCodexAccounts().find((candidate) => candidate.id === id)!;
+        const codexAccount = account as CodexAccount;
         return codexAccount.loginPane !== null || managedCodexRuntime().peekLogin(codexAccount).attemptState === "pending";
       })();
   if (loginPending) throw new AccountLoginPendingError(engine, id);
@@ -77,14 +77,19 @@ function selectAccountLocked(engine: "claude" | "codex", id: string, routing: Ro
   return summary(engine, id);
 }
 
-export function selectAccount(engine: "claude" | "codex", id: string, routing: RoutingStore = agentRegistry()): AccountSummary {
-  return withAccountMutationLock(() => selectAccountLocked(engine, id, routing));
+export async function selectAccount(engine: "claude" | "codex", id: string, routing: RoutingStore = agentRegistry()): Promise<AccountSummary> {
+  return await withAccountMutationLockAsync(async () => selectAccountLocked(engine, id, routing));
 }
 
 /** Narrow boundary used by all launch paths. Filesystem account details remain behind it. */
 export const accountManager: AccountManager = {
   async list() { return { claude: { active: activeClaudeAccountId(), accounts: listClaudeAccounts().map((item) => summary("claude", item.id)) }, codex: { active: activeCodexAccountId(), accounts: listCodexAccounts().map((item) => summary("codex", item.id)) } }; },
-  async add(engine, label) { const item = engine === "claude" ? createManagedClaudeAccount(label) : createManagedCodexAccount(label); return summary(engine, item.id); },
+  async add(engine, label) {
+    return await withAccountMutationLockAsync(async () => {
+      const item = engine === "claude" ? createManagedClaudeAccount(label) : createManagedCodexAccount(label);
+      return summary(engine, item.id);
+    });
+  },
   async select(engine, id) { return selectAccount(engine, id); },
   async status(engine, id) { return summary(engine, id); },
   async submitLoginInput() { throw new Error("login input is Claude-operation specific"); },

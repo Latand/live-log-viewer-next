@@ -5,7 +5,7 @@ import path from "node:path";
 
 import { resolveBinary } from "@/lib/agent/cli";
 import { statePath } from "@/lib/configDir";
-import { withAccountMutationLock } from "./accountMutation";
+import { AccountMutationBusyError, withAccountMutationLock, withAccountMutationLockAsync } from "./accountMutation";
 
 import type { LoginOperationSummary, LoginPhase, LoginResult } from "./contracts";
 import { claudeAccountForSpawn, claudeManagedEnvironment, isManagedClaudeHome, managedClaudeCredentialIsSafe } from "./claude";
@@ -184,6 +184,8 @@ export class ClaudeLoginSupervisor {
   private output = new Map<string, string>();
   private closed = new Map<string, Promise<void>>();
   private generation = 0;
+  private persistDirty = false;
+  private deferredPersist: Promise<void> | null = null;
 
   private readonly recovery: Promise<void>;
 
@@ -195,11 +197,43 @@ export class ClaudeLoginSupervisor {
       before reading a terminal recovery result. */
   whenRecovered(): Promise<void> { return this.recovery; }
 
-  private persist(): void {
-    const data = [...this.operations.values()]
+  private persistedOperations(): PersistedOperation[] {
+    return [...this.operations.values()]
       .filter((item) => !terminal(item.phase))
       .map(({ operationId, accountId, phase, pid, startToken, generation, startedAt, deadlineAt }) => ({ operationId, accountId, phase, pid, startToken, generation, startedAt, deadlineAt }));
-    withAccountMutationLock(() => this.store.save(data));
+  }
+
+  private persist(): void {
+    try {
+      withAccountMutationLock(() => this.store.save(this.persistedOperations()));
+    } catch (error) {
+      if (!(error instanceof AccountMutationBusyError)) throw error;
+      this.queuePersist();
+    }
+  }
+
+  private queuePersist(): void {
+    this.persistDirty = true;
+    if (this.deferredPersist) return;
+    const drain = async () => {
+      while (this.persistDirty) {
+        this.persistDirty = false;
+        await withAccountMutationLockAsync(async () => this.store.save(this.persistedOperations()));
+      }
+    };
+    const pending = drain();
+    this.deferredPersist = pending;
+    void pending.then(
+      () => {
+        this.deferredPersist = null;
+        if (this.persistDirty) this.queuePersist();
+      },
+      () => {
+        this.deferredPersist = null;
+        const live = [...this.operations.values()].find((item) => !terminal(item.phase));
+        if (live) this.persistenceFailure(live.operationId);
+      },
+    );
   }
 
   private refreshDurableOperations(): void {
@@ -466,25 +500,31 @@ export class ClaudeLoginSupervisor {
   }
 
   forAccount(accountId: string): LoginOperationSummary | null {
+    return this.forAccounts([accountId]).get(accountId) ?? null;
+  }
+
+  forAccounts(accountIds: readonly string[]): Map<string, LoginOperationSummary | null> {
     let durable: PersistedOperation[] = [];
     try { durable = this.store.load().filter(validPersistedOperation); } catch { /* in-memory terminal results remain readable */ }
-    const persisted = durable.filter((candidate) => candidate.accountId === accountId).sort((a, b) => b.generation - a.generation)[0];
-    if (persisted) {
-      const local = this.operations.get(persisted.operationId);
-      if (local) return this.summary(local);
-      return {
-        operationId: persisted.operationId,
-        phase: persisted.phase,
-        loginUrl: null,
-        acceptsCode: false,
-        deadlineAt: persisted.deadlineAt,
-        result: null,
-      };
-    }
-    const item = [...this.operations.values()]
-      .filter((candidate) => candidate.accountId === accountId && terminal(candidate.phase))
-      .sort((a, b) => b.generation - a.generation)[0];
-    return item ? this.summary(item) : null;
+    return new Map(accountIds.map((accountId) => {
+      const persisted = durable.filter((candidate) => candidate.accountId === accountId).sort((a, b) => b.generation - a.generation)[0];
+      if (persisted) {
+        const local = this.operations.get(persisted.operationId);
+        if (local) return [accountId, this.summary(local)];
+        return [accountId, {
+          operationId: persisted.operationId,
+          phase: persisted.phase,
+          loginUrl: null,
+          acceptsCode: false,
+          deadlineAt: persisted.deadlineAt,
+          result: null,
+        }];
+      }
+      const item = [...this.operations.values()]
+        .filter((candidate) => candidate.accountId === accountId && terminal(candidate.phase))
+        .sort((a, b) => b.generation - a.generation)[0];
+      return [accountId, item ? this.summary(item) : null];
+    }));
   }
 
   private async terminateInherited(item: LoginOperation): Promise<boolean> {

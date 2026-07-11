@@ -338,7 +338,7 @@ test("active routes reject authenticated accounts while login is in progress", a
   }
 });
 
-test("a routing-store write failure restores both active-account values", () => {
+test("a routing-store write failure restores both active-account values", async () => {
   const target = createManagedCodexAccount("Rollback target");
   authenticateCodex(target);
   let currentRoutingId: string | null = "default";
@@ -355,7 +355,7 @@ test("a routing-store write failure restores both active-account values", () => 
     },
   };
 
-  expect(() => selectAccount("codex", target.id, routing)).toThrow("injected routing write failure");
+  await expect(selectAccount("codex", target.id, routing)).rejects.toThrow("injected routing write failure");
   expect(activeCodexAccountId()).toBe("default");
   expect(currentRoutingId).toBe("default");
 });

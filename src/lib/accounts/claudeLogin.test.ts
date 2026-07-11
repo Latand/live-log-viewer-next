@@ -9,6 +9,7 @@ const OLD_STATE = process.env.LLV_STATE_DIR; const OLD_HOME = process.env.LLV_CL
 process.env.LLV_STATE_DIR = path.join(SANDBOX, "state"); process.env.LLV_CLAUDE_HOME = path.join(SANDBOX, "legacy");
 const { createManagedClaudeAccount } = await import("./claude");
 const { ClaudeLoginSupervisor, claudeStatusEnvironment, cleanClaudeLoginOutput, isExpectedClaudeLoginCommand, loginUrlFromOutput } = await import("./claudeLogin");
+const { withAccountMutationLockAsync } = await import("./accountMutation");
 type ClaudeLoginPorts = import("./claudeLogin").ClaudeLoginPorts;
 
 class FakeChild extends EventEmitter { pid = 4242; stdout = new EventEmitter(); stderr = new EventEmitter(); writes: string[] = []; stdin = { write: (text: string) => { this.writes.push(text); return true; }, end: () => undefined }; }
@@ -73,6 +74,35 @@ test("fake supervised login accepts one bounded code, contains it, and cancels w
   const cancelled = await supervisor.cancel(operation.operationId);
   expect(cancelled.phase).toBe("canceled"); expect(signals).toEqual(["SIGTERM", "SIGKILL"]);
   expect(JSON.stringify(cancelled)).not.toContain("one-time-code");
+});
+
+test("lock contention defers a stdout transition without terminating the Claude login", async () => {
+  const account = createManagedClaudeAccount("Contended stdout");
+  const saved: string[][] = [];
+  const supervisor = new ClaudeLoginSupervisor(ports(), {
+    load: () => [],
+    save: (rows) => { saved.push(rows.map((row) => row.phase)); },
+  });
+  const operation = supervisor.start(account.id);
+  let release!: () => void;
+  let entered!: () => void;
+  const ready = new Promise<void>((resolve) => { entered = resolve; });
+  const holder = withAccountMutationLockAsync(async () => {
+    entered();
+    await new Promise<void>((resolve) => { release = resolve; });
+  });
+  await ready;
+
+  child.stdout.emit("data", "Open https://claude.ai/authorize?state=contended");
+  const observed = supervisor.get(operation.operationId);
+  const observedSignals = [...signals];
+  release();
+  await holder;
+
+  expect(observed).toEqual(expect.objectContaining({ phase: "awaiting_code" }));
+  expect(observedSignals).toEqual([]);
+  for (let attempt = 0; attempt < 20 && saved.at(-1)?.[0] !== "awaiting_code"; attempt += 1) await Bun.sleep(10);
+  expect(saved.at(-1)).toEqual(["awaiting_code"]);
 });
 
 test("the browser, code, verification, and canceling phases are durable and stdout-only", async () => {
@@ -141,6 +171,19 @@ test("malformed persisted operations are discarded so recovery cannot block a fr
 
   expect(supervisor.get("bad-phase")).toBeNull();
   expect(() => supervisor.reserve()).not.toThrow();
+});
+
+test("batched Claude login projection loads durable state once", async () => {
+  let loads = 0;
+  const supervisor = new ClaudeLoginSupervisor(ports(), {
+    load: () => { loads += 1; return []; },
+    save: () => undefined,
+  });
+  await supervisor.whenRecovered();
+  loads = 0;
+
+  expect(supervisor.forAccounts(["one", "two"])).toEqual(new Map([["one", null], ["two", null]]));
+  expect(loads).toBe(1);
 });
 
 test("a login spawn error stays terminal and an existing account can retry", () => {

@@ -15,6 +15,7 @@ const { activeCodexAccountId, createManagedCodexAccount } = await import("./code
 const { activeClaudeAccountId, createManagedClaudeAccount, listClaudeAccounts } = await import("./claude");
 const { accountMutationRevisionForTests, withAccountMutationLock } = await import("./accountMutation");
 const { AgentRegistry } = await import("@/lib/agent/registry");
+const { syncCompatibilityRouting } = await import("./migration/controller");
 
 beforeEach(() => {
   fs.rmSync(process.env.LLV_STATE_DIR!, { recursive: true, force: true });
@@ -75,7 +76,7 @@ async function selectionRemovalRace(engine: "claude" | "codex"): Promise<void> {
           return registry.setEngineRouting(engine, accountId);
         },
       };
-      manager.selectAccount(${JSON.stringify(engine)}, ${JSON.stringify(account.id)}, routing);
+      await manager.selectAccount(${JSON.stringify(engine)}, ${JSON.stringify(account.id)}, routing);
     `],
     env,
     stdout: "ignore",
@@ -115,6 +116,15 @@ async function selectionRemovalRace(engine: "claude" | "codex"): Promise<void> {
     expect(listClaudeAccounts().some((candidate) => candidate.id === account.id)).toBeFalse();
   }
 }
+
+test("an aligned compatibility sync skips transaction admission", () => {
+  const registry = new AgentRegistry();
+  const revision = accountMutationRevisionForTests();
+
+  syncCompatibilityRouting(registry);
+
+  expect(accountMutationRevisionForTests()).toBe(revision);
+});
 
 test("simultaneous stale-lock recovery admits one account mutation at a time", async () => {
   const accountB = createManagedCodexAccount("Recovery B");
@@ -173,7 +183,7 @@ test("simultaneous stale-lock recovery admits one account mutation at a time", a
         return current.revision + 1;
       },
     };
-    manager.selectAccount("codex", ${JSON.stringify(accountId)}, routing);
+    await manager.selectAccount("codex", ${JSON.stringify(accountId)}, routing);
   `;
   const spawn = (accountId: string, role: "a" | "b") => Bun.spawn({
     cmd: [process.execPath, "-e", source(accountId, role)],
@@ -239,7 +249,7 @@ test("overlapping selections keep catalog and launch routing aligned across proc
         return current.revision + 1;
       },
     };
-    manager.selectAccount("codex", ${JSON.stringify(id)}, routing);
+    await manager.selectAccount("codex", ${JSON.stringify(id)}, routing);
   `;
   const spawn = (id: string, pause: boolean) => Bun.spawn({
     cmd: [process.execPath, "-e", source(id, pause)],
@@ -305,7 +315,7 @@ async function controllerSelectionRace(): Promise<void> {
     cmd: [process.execPath, "-e", `
       const fs = await import("node:fs");
       const manager = await import(${JSON.stringify(managerPath)});
-      manager.selectAccount("codex", ${JSON.stringify(account.id)});
+      await manager.selectAccount("codex", ${JSON.stringify(account.id)});
       fs.writeFileSync(${JSON.stringify(selectorDonePath)}, "done");
     `],
     env,
@@ -349,7 +359,7 @@ async function persistedLoginFence(engine: "claude" | "codex"): Promise<void> {
       fs.writeFileSync(${JSON.stringify(readyPath)}, "ready");
       while (!fs.existsSync(${JSON.stringify(releasePath)})) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
       try {
-        manager.selectAccount(${JSON.stringify(engine)}, ${JSON.stringify(account.id)});
+        await manager.selectAccount(${JSON.stringify(engine)}, ${JSON.stringify(account.id)});
         fs.writeFileSync(${JSON.stringify(resultPath)}, "selected");
       } catch (error) {
         fs.writeFileSync(${JSON.stringify(resultPath)}, error?.name ?? "error");

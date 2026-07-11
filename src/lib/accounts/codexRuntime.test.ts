@@ -8,6 +8,7 @@ import { expect, test } from "bun:test";
 import type { CodexAccount } from "./codex";
 import { CodexAppServerClient } from "./codexAppServer";
 import { ManagedCodexRuntime } from "./codexRuntime";
+import { withAccountMutationLockAsync } from "./accountMutation";
 
 class FakeChild extends EventEmitter {
   readonly stdin = { write: (line: string) => { this.onWrite(JSON.parse(line) as Record<string, unknown>); return true; }, end: () => undefined };
@@ -56,6 +57,49 @@ test("managed login keeps one per-home child until completion and returns only c
   children[0]!.completed("login-3");
   await expect(runtime.loginSnapshot(work)).resolves.toEqual({ state: "completed", attemptState: "completed", deviceAuth: null });
   expect(children[0]!.kills).toBe(1);
+});
+
+test("lock contention defers Codex completion persistence and still closes the client", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-contention-"));
+  const previousState = process.env.LLV_STATE_DIR;
+  process.env.LLV_STATE_DIR = path.join(dir, "state");
+  const stateFile = path.join(dir, "attempts.json");
+  const child = new FakeChild();
+  try {
+    const runtime = new ManagedCodexRuntime({
+      stateFile,
+      startClient: async (home) => CodexAppServerClient.start({ home, spawn: () => child as never }),
+      now: () => 123,
+    });
+    const work = account("contended", path.join(dir, "account"));
+    const login = await runtime.startLogin(work);
+    let release!: () => void;
+    let entered!: () => void;
+    const ready = new Promise<void>((resolve) => { entered = resolve; });
+    const holder = withAccountMutationLockAsync(async () => {
+      entered();
+      await new Promise<void>((resolve) => { release = resolve; });
+    });
+    await ready;
+
+    child.completed(login.loginId);
+    const killsAfterCompletion = child.kills;
+    release();
+    await holder;
+
+    expect(killsAfterCompletion).toBe(1);
+    let persisted = "";
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      persisted = fs.readFileSync(stateFile, "utf8");
+      if (persisted.includes('"state": "completed"')) break;
+      await Bun.sleep(10);
+    }
+    expect(persisted).toContain('"state": "completed"');
+  } finally {
+    if (previousState === undefined) delete process.env.LLV_STATE_DIR;
+    else process.env.LLV_STATE_DIR = previousState;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("cancellation and independent homes never share a managed app-server child", async () => {
@@ -185,6 +229,30 @@ test("account/read owns authentication independently from auth.json diagnostics"
   } });
   const missingFile = { ...work, authPresent: false };
   await expect(valid.loginSnapshot(missingFile)).resolves.toEqual({ state: "authenticated", attemptState: "completed", deviceAuth: null });
+});
+
+test("batched Codex login projection reads durable state once", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-batch-"));
+  const stateFile = path.join(dir, "attempts.json");
+  fs.writeFileSync(stateFile, JSON.stringify({ version: 1, attempts: {} }));
+  const originalRead = fs.readFileSync.bind(fs);
+  let reads = 0;
+  const runtime = new ManagedCodexRuntime({ stateFile });
+  fs.readFileSync = ((file: fs.PathOrFileDescriptor, ...args: unknown[]) => {
+    if (file === stateFile) reads += 1;
+    return originalRead(file, ...(args as [never]));
+  }) as typeof fs.readFileSync;
+  try {
+    const snapshots = runtime.peekLogins([
+      account("one", path.join(dir, "one")),
+      account("two", path.join(dir, "two")),
+    ]);
+    expect([...snapshots.keys()]).toEqual(["one", "two"]);
+    expect(reads).toBe(1);
+  } finally {
+    fs.readFileSync = originalRead;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("legacy Main and managed homes use the read-only account-plus-limits probe", async () => {

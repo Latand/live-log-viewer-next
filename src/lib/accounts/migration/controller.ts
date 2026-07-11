@@ -52,6 +52,16 @@ export async function reconcileAccountMigrationCycle(
 }
 
 export function syncCompatibilityRouting(registry: AgentRegistry): void {
+  const current = registry.snapshot().engineRouting;
+  const claudeNeedsSync = (() => {
+    try { return Boolean(current.claude.activeAccountId && current.claude.activeAccountId !== activeClaudeAccountId()); }
+    catch { return true; }
+  })();
+  const codexNeedsSync = (() => {
+    try { return Boolean(current.codex.activeAccountId && current.codex.activeAccountId !== activeCodexAccountId()); }
+    catch { return true; }
+  })();
+  if (!claudeNeedsSync && !codexNeedsSync) return;
   withAccountMutationLock(() => {
     const snapshot = registry.snapshot();
     const claude = snapshot.engineRouting.claude.activeAccountId;
