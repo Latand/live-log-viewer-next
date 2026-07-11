@@ -654,6 +654,18 @@ test("override-stage rejects an unknown/disallowed role and an incompatible role
   expect(bad.status).toBe(400);
 });
 
+test("override-stage rejects non-string model/effort instead of silently ignoring them (issue #118 review F3)", async () => {
+  const { ports } = harness();
+  const created = await create(ports);
+  /* resolvePipelineRole would treat these as absent and 200 with the old config;
+     the type guards must 400 instead, and never mutate the stage. */
+  expect((await patchPipeline(created.id, { action: "override-stage", stageId: "build", model: 123 as never }, ports)).status).toBe(400);
+  expect((await patchPipeline(created.id, { action: "override-stage", stageId: "build", effort: false as never }, ports)).status).toBe(400);
+  expect((await patchPipeline(created.id, { action: "override-stage", stageId: "build", engine: 7 as never }, ports)).status).toBe(400);
+  const build = loadPipelines()[0]!.stages.find((stage) => stage.id === "build")!;
+  expect(build.prompt).toBe("Build from {{prev.output}}");
+});
+
 test("override-stage enforces the same prompt-size ceiling as creation (issue #118 review F5)", async () => {
   const { ports } = harness();
   const { MAX_STAGE_PROMPT_LENGTH } = await import("./limits");

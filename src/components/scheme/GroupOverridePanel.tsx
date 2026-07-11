@@ -4,11 +4,11 @@ import { Pause, Play, RefreshCw, Square, X } from "lucide-react";
 import { useMemo, useState } from "react";
 
 import type { FlowEngine } from "@/lib/flows/types";
-import type { PipelineRoleId, PipelineStage } from "@/lib/pipelines/types";
+import type { PipelineStage } from "@/lib/pipelines/types";
 import { useLocale } from "@/lib/i18n";
 
 import { flowPresentation, patchFlow } from "@/components/flows/flowModel";
-import { patchPipeline, PIPELINE_ROLE_OPTIONS } from "@/components/pipelines/pipelineModel";
+import { patchPipeline, PIPELINE_ROLE_OPTIONS, stageOverrideBody } from "@/components/pipelines/pipelineModel";
 
 import type { SchemeGroup } from "./layout";
 
@@ -334,15 +334,9 @@ function StageForm({
         disabled={busy || disabled || !prompt.trim()}
         onClick={() =>
           void run(t("groupOverride.savedStage"), () =>
-            patchPipeline(pipeline.id, "override-stage", {
-              stageId: stage.id,
-              /* null clears the role back to the Builder default; the id assigns it. */
-              role: roleId ? { roleId: roleId as PipelineRoleId } : null,
-              engine,
-              model: model.trim() || null,
-              effort: effort || null,
-              prompt: prompt.trim(),
-            }),
+            /* Only the fields the operator changed are sent, so a role-only change
+               lets the backend apply the new role's runtime defaults (Finding 4). */
+            patchPipeline(pipeline.id, "override-stage", stageOverrideBody(stage, { roleId, engine, model, effort, prompt })),
           )
         }
       >

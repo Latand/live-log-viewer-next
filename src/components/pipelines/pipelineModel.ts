@@ -27,6 +27,26 @@ export const PIPELINE_ROLE_OPTIONS: readonly PipelineRoleId[] = (
   ["orchestrator", "reviewer", "verifier", "builder", "architect", "cleaner", "prod-auditor", "deployer"] as const
 ).filter((roleId) => !PIPELINE_DISALLOWED_ROLE_IDS.includes(roleId));
 
+/** The stage-override form's raw values (issue #118 on-canvas controls). */
+export type StageOverrideForm = { roleId: string; engine: FlowEngine; model: string; effort: string; prompt: string };
+
+/**
+ * Builds an override-stage PATCH body that carries ONLY the fields the operator
+ * actually changed from the stage's current config (issue #118 Finding 4).
+ * Sending an unchanged engine/model/effort would pin the previous role's runtime
+ * as an explicit override and defeat the backend's "changing the role resets
+ * unpinned runtime to its defaults" rule — so a role-only change must omit them.
+ * Prompt is always sent (it is required and the primary edit).
+ */
+export function stageOverrideBody(stage: PipelineStage, form: StageOverrideForm): Omit<PatchPipelineRequest, "action"> {
+  const body: Omit<PatchPipelineRequest, "action"> = { stageId: stage.id, prompt: form.prompt.trim() };
+  if (form.roleId !== (stage.role?.roleId ?? "")) body.role = form.roleId ? { roleId: form.roleId as PipelineRoleId } : null;
+  if (form.engine !== stage.effectiveRole.engine) body.engine = form.engine;
+  if (form.model.trim() !== (stage.effectiveRole.model ?? "")) body.model = form.model.trim() || null;
+  if (form.effort !== (stage.effectiveRole.effort ?? "")) body.effort = form.effort || null;
+  return body;
+}
+
 /**
  * A node can seed a pipeline (its transcript becomes the src lineage of stage 0)
  * whenever it is a claude/codex session — a root or a child, whether or not it

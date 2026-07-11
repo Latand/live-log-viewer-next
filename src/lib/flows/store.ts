@@ -172,6 +172,13 @@ export function loadFlows(): Flow[] {
       reviewerConversationId: round.reviewerConversationId ?? null,
       sessionId: round.sessionId ?? null,
       reviewerPid: round.reviewerPid ?? null,
+      /* Migrate rounds persisted before per-round reviewer snapshots (issue #118):
+         freeze the round to the flow's current reviewer role at load, so a later
+         set-roles cannot retarget an in-flight legacy round's launch/recovery/
+         polling. loadFlows is the single entry point every consumer (the tick and
+         set-roles) reads through, and both snapshot before mutating, so the value
+         captured here is the role the round is actually running under. */
+      reviewerRole: round.reviewerRole ?? { ...flow.roles.reviewer },
       spawnStartedAt: round.spawnStartedAt ?? null,
       relayStartedAt: round.relayStartedAt ?? null,
       error: round.error ?? null,

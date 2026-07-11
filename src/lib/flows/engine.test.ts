@@ -8,7 +8,7 @@ import type { FileEntry } from "@/lib/types";
 import type { Flow } from "./types";
 
 process.env.LLV_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "llv-flow-engine-test-"));
-const { tickFlows } = await import("./engine");
+const { tickFlows, persistTickFlows } = await import("./engine");
 const { loadFlows, saveFlows } = await import("./store");
 
 afterAll(() => {
@@ -176,4 +176,81 @@ test("a mid-flight round is polled with its frozen reviewer role, not a raced se
      and the reviewer path would still be null. */
   expect(after.rounds[0]!.reviewerPath).toBe(reviewerCandidate.path);
   expect(after.rounds[0]!.reviewerRole).toEqual({ engine: "codex", model: null, effort: "xhigh" });
+});
+
+test("loadFlows migrates a legacy round without a reviewer snapshot (issue #118 Finding 1)", () => {
+  /* A round persisted before per-round snapshots existed: no reviewerRole. */
+  const legacy = {
+    id: "flow-legacy",
+    template: "implement-review-loop",
+    project: "repo",
+    cwd: "/repo",
+    implementerPath: "/impl",
+    roles: {
+      implementer: { engine: "codex", model: null, effort: "high" },
+      reviewer: { engine: "codex", model: null, effort: "xhigh" },
+    },
+    baseRef: "base",
+    baseMode: "head",
+    mode: "auto",
+    reviewerMode: "headless",
+    roundLimit: 5,
+    state: "reviewing",
+    pausedState: null,
+    stateDetail: null,
+    rounds: [{
+      n: 1, reviewerPath: "/rev", findingsPath: null, triggeredBy: "marker", readyNote: null,
+      verdict: null, findingsCount: null, startedAt: "2026-03-03T00:00:00Z", reviewedAt: null, relayedAt: null, error: null,
+    }],
+    createdAt: "2026-03-03T00:00:00Z",
+    closedAt: null,
+  } as unknown as Flow;
+  saveFlows([legacy]);
+  /* On load, the round is frozen to the flow's current reviewer role. */
+  const loaded = loadFlows()[0]!;
+  expect(loaded.rounds[0]!.reviewerRole).toEqual({ engine: "codex", model: null, effort: "xhigh" });
+});
+
+test("persistTickFlows never reverts a concurrent operator config change (issue #118 Finding 2)", () => {
+  /* On disk: the operator has switched the reviewer to claude/fable and bumped
+     the round limit. */
+  const onDisk = {
+    id: "flow-race",
+    template: "implement-review-loop",
+    project: "repo",
+    cwd: "/repo",
+    implementerPath: "/impl",
+    roles: {
+      implementer: { engine: "codex", model: null, effort: "high" },
+      reviewer: { engine: "claude", model: "fable", effort: null },
+    },
+    baseRef: "base",
+    baseMode: "head",
+    mode: "manual",
+    reviewerMode: "headless",
+    roundLimit: 9,
+    state: "reviewing",
+    pausedState: null,
+    stateDetail: null,
+    rounds: [],
+    createdAt: "2026-04-04T00:00:00Z",
+    closedAt: null,
+  } as unknown as Flow;
+  saveFlows([onDisk]);
+
+  /* A stale tick clone still carries the OLD codex reviewer, roundLimit 5, auto
+     mode, and a state advance the tick computed. */
+  const staleClone = structuredClone(onDisk);
+  staleClone.roles.reviewer = { engine: "codex", model: null, effort: "xhigh" };
+  staleClone.roundLimit = 5;
+  staleClone.mode = "auto";
+  staleClone.state = "relaying";
+  persistTickFlows([staleClone]);
+
+  const after = loadFlows()[0]!;
+  /* Operator-owned config survives from disk; the tick's own state change lands. */
+  expect(after.roles.reviewer).toMatchObject({ engine: "claude", model: "fable" });
+  expect(after.roundLimit).toBe(9);
+  expect(after.mode).toBe("manual");
+  expect(after.state).toBe("relaying");
 });

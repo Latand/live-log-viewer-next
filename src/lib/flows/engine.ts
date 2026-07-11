@@ -390,6 +390,27 @@ async function tickFlow(
   return JSON.stringify(flow) !== before;
 }
 
+/**
+ * Persists the tick's clone WITHOUT clobbering operator-owned config (roles,
+ * roundLimit, mode). The tick clones flows at start and then awaits reviewer
+ * launch/relay; a set-roles/extend/set-round-limit/set-mode landing in that
+ * window saves to disk, and the tick's later save of its stale clone would revert
+ * it (issue #118 Finding 2). The tick never writes these fields, so re-read the
+ * freshest on-disk value and overlay it before writing. Fully synchronous, so no
+ * patchFlow can interleave between the re-read and the write.
+ */
+export function persistTickFlows(flows: Flow[]): void {
+  const disk = new Map(loadFlows().map((flow) => [flow.id, flow] as const));
+  for (const flow of flows) {
+    const current = disk.get(flow.id);
+    if (!current) continue;
+    flow.roles = current.roles;
+    flow.roundLimit = current.roundLimit;
+    flow.mode = current.mode;
+  }
+  saveFlows(flows);
+}
+
 export async function tickFlows(entries: FileEntry[]): Promise<TickResult> {
   if (store.__llvFlowTick) {
     const flows = cloneFlows(loadFlows());
@@ -403,11 +424,11 @@ export async function tickFlows(entries: FileEntry[]): Promise<TickResult> {
     let changed = false;
     for (const flow of flows) {
       if (TERMINAL_STATES.has(flow.state)) continue;
-      if (await tickFlow(flow, entries, entriesByPath, () => saveFlows(flows))) changed = true;
-      if (changed) saveFlows(flows);
+      if (await tickFlow(flow, entries, entriesByPath, () => persistTickFlows(flows))) changed = true;
+      if (changed) persistTickFlows(flows);
     }
     annotateFlowEntries(entries, flows);
-    if (changed) saveFlows(flows);
+    if (changed) persistTickFlows(flows);
     return { flows, changed };
   } finally {
     store.__llvFlowTick = false;

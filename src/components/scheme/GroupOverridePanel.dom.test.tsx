@@ -120,7 +120,7 @@ const pipelineGroup: SchemeGroup = {
   } as unknown as Pipeline,
 };
 
-test("applying a stage override submits the selected role via override-stage (issue #118 review F3)", async () => {
+test("an unchanged stage override submits no stale runtime or role (issue #118 review F4)", async () => {
   const { host, root } = mount(<GroupOverridePanel group={pipelineGroup} onClose={() => undefined} />);
   /* The role select (the one offering "No role") seeds from the stage's role. */
   const roleSelect = Array.from(host.querySelectorAll("select")).find((select) =>
@@ -133,8 +133,10 @@ test("applying a stage override submits the selected role via override-stage (is
   flushSync(() => apply.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event));
   await Promise.resolve();
 
+  /* Nothing was edited, so only stageId + prompt travel — never the current
+     engine/model/effort/role as spurious pins that would defeat role-reset. */
   const patch = calls.find((call) => call.url.includes("/api/pipelines/p1"));
-  expect(patch?.body).toMatchObject({ action: "override-stage", stageId: "build", role: { roleId: "architect" } });
+  expect(patch?.body).toEqual({ action: "override-stage", stageId: "build", prompt: "Build it" });
 
   flushSync(() => root.unmount());
   host.remove();

@@ -860,6 +860,13 @@ export async function patchPipeline(
       if (run && run.attempts.length > 0) return { error: "stage has already started", status: 409 };
       const changesRoleOrRuntime = req.role !== undefined || req.engine !== undefined || req.model !== undefined || req.effort !== undefined;
       if (!changesRoleOrRuntime && req.prompt === undefined) return { error: "override-stage needs at least one field to change", status: 400 };
+      /* Validate the runtime types up front: resolvePipelineRole treats a
+         non-string, non-null model/effort as absent and silently uses the
+         fallback, so a raw `model: 123` / `effort: false` would 200 with the old
+         config instead of the required 400 (issue #118 Finding 3). */
+      if (req.engine !== undefined && req.engine !== "claude" && req.engine !== "codex") return { error: "engine must be claude or codex", status: 400 };
+      if (req.model !== undefined && req.model !== null && typeof req.model !== "string") return { error: "model must be a string or null", status: 400 };
+      if (req.effort !== undefined && req.effort !== null && typeof req.effort !== "string") return { error: "effort must be a string or null", status: 400 };
 
       /* Resolve the role/runtime combination through the same path creation uses
          (resolvePipelineRole), so a stage override honors canonical role
