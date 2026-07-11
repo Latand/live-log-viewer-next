@@ -167,10 +167,11 @@ export function MobileFocusView({ project, groups, manual, files, flows, pipelin
   const activePath = activeNode ? activeNode.file.path : null;
   const activeFlowId = activeDeck ? activeDeck.flow.id : null;
   const pipelineFocus = findPipelineStage(pipelines, activePath, activeFlowId);
-  /* Only flows whose implementer is still placed (so a deck exists) — and run
-     transcripts still in the scan — can be hopped/opened to. */
+  /* Run transcripts still in the scan can be opened; a review-loop only if its
+     flow has a rendered deck — which exists only for a placed implementer node,
+     so derive that from the layout's nodes, not mere scan membership. */
   const renderablePaths = useMemo(() => new Set(files.map((entry) => entry.path)), [files]);
-  const renderableFlows = useMemo(() => renderableFlowIds(flows, renderablePaths), [flows, renderablePaths]);
+  const renderableFlows = useMemo(() => renderableFlowIds(flows, new Set(layout.nodes.map((node) => node.file.path))), [flows, layout]);
 
   const openStagePath = useCallback(
     (path: string) => {

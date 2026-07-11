@@ -20,6 +20,7 @@ Object.assign(globalThis, {
   HTMLInputElement: dom.HTMLInputElement,
   Event: dom.Event,
   MouseEvent: dom.MouseEvent,
+  KeyboardEvent: dom.KeyboardEvent,
 });
 
 function role(id: string, config: RoleConfig): RoleCatalogItem {
@@ -30,11 +31,11 @@ const DEFAULT_RUNTIME: RoleConfig = { engine: "codex", model: "gpt-5.6-sol", eff
 const baseStage: DraftStage = { key: "k", kind: "run", roleId: "", engine: "codex", model: "", effort: "", access: "read-write", prompt: "", roleParams: {} };
 
 /* A controlled host so StageRow's onChange updates the stage between interactions. */
-function Host({ onStage }: { onStage: (stage: DraftStage) => void }) {
+function Host({ onStage, index = 0 }: { onStage: (stage: DraftStage) => void; index?: number }) {
   const [stage, setStage] = useState<DraftStage>(baseStage);
   return (
     <StageRow
-      index={0}
+      index={index}
       total={2}
       stage={stage}
       roles={CATALOG}
@@ -99,6 +100,34 @@ test("clearing a role's model override shows the role runtime, not the Builder f
   });
   expect(summary().textContent).toContain("fable");
   expect(summary().textContent).not.toContain("gpt-5.6-sol");
+
+  flushSync(() => { root.unmount(); });
+  host.remove();
+});
+
+test("the kind radiogroup follows the ARIA contract: roving tabIndex + arrow keys", () => {
+  let latest: DraftStage = baseStage;
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root: Root = createRoot(host);
+  /* index=1 so Review-loop is a valid option. */
+  flushSync(() => { root.render(<Host index={1} onStage={(s) => { latest = s; }} />); });
+
+  const group = host.querySelector('[role="radiogroup"]') as HTMLElement;
+  const [runBtn, reviewBtn] = Array.from(group.querySelectorAll('[role="radio"]')) as HTMLElement[];
+  /* Exactly one option is tabbable (the checked Run), the other is removed from the tab order. */
+  expect(runBtn.getAttribute("tabindex")).toBe("0");
+  expect(reviewBtn.getAttribute("tabindex")).toBe("-1");
+
+  /* ArrowDown moves selection to Review-loop and the tab stop with it. */
+  flushSync(() => { group.dispatchEvent(new dom.KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }) as unknown as Event); });
+  expect(latest.kind).toBe("review-loop");
+  expect(runBtn.getAttribute("tabindex")).toBe("-1");
+  expect(reviewBtn.getAttribute("tabindex")).toBe("0");
+
+  /* ArrowLeft toggles back to Run. */
+  flushSync(() => { group.dispatchEvent(new dom.KeyboardEvent("keydown", { key: "ArrowLeft", bubbles: true }) as unknown as Event); });
+  expect(latest.kind).toBe("run");
 
   flushSync(() => { root.unmount(); });
   host.remove();

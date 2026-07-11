@@ -19,7 +19,7 @@ import { FlowHub } from "@/components/flows/FlowHub";
 import { PipelineDialog } from "@/components/pipelines/PipelineDialog";
 import { PipelineHub } from "@/components/pipelines/PipelineHub";
 import { PipelineStrip } from "@/components/pipelines/PipelineStrip";
-import { canSourcePipeline } from "@/components/pipelines/pipelineModel";
+import { canSourcePipeline, renderableFlowIds } from "@/components/pipelines/pipelineModel";
 import type { Pipeline } from "@/lib/pipelines/types";
 import { FlowStrip } from "@/components/flows/FlowStrip";
 import { RoleTag } from "@/components/flows/RoleTag";
@@ -518,6 +518,7 @@ function NodeShell({
   pipeline,
   flows,
   renderablePaths,
+  renderableFlows,
   canFlow,
   canPipeline,
   onSelect,
@@ -546,6 +547,8 @@ function NodeShell({
   flows: Flow[];
   /** Transcript paths still in the scan; gates the strip's run-stage actions. */
   renderablePaths: ReadonlySet<string>;
+  /** Flow ids with a rendered deck; gates the strip's review-loop actions. */
+  renderableFlows: ReadonlySet<string>;
   /** This node may host a new flow (root claude/codex conversation without one). */
   canFlow: boolean;
   /** This conversation may seed a pipeline — broader than canFlow: children and
@@ -597,7 +600,7 @@ function NodeShell({
           the slot to FlowStrip, so the two never coexist here). */}
       {boardStrip ? (
         <div className="absolute -top-[60px] left-0 z-[5]" style={{ width: node.w }}>
-          <PipelineStrip pipeline={boardStrip} flows={flows} renderablePaths={renderablePaths} compact onOpenPath={onOpenPath} onOpenFlow={onOpenFlow} />
+          <PipelineStrip pipeline={boardStrip} flows={flows} renderablePaths={renderablePaths} renderableFlows={renderableFlows} compact onOpenPath={onOpenPath} onOpenFlow={onOpenFlow} />
         </div>
       ) : null}
       {/* Flow + pipeline entry buttons. The pipeline button is decoupled from
@@ -844,6 +847,10 @@ export const NodesLayer = memo(function NodesLayer({
   /* Paths still in the scan; a run stage action is disabled once its transcript
      leaves the file set (AC4). */
   const renderablePaths = useMemo(() => new Set(files.map((entry) => entry.path)), [files]);
+  /* Flow ids with a rendered deck: a deck exists only for a placed implementer
+     node, so derive from the layout's nodes to disable review actions whose
+     implementer is unplaced. */
+  const renderableFlows = useMemo(() => renderableFlowIds(flows, new Set(layout.nodes.map((node) => node.file.path))), [flows, layout]);
   /* A review-loop stage's reviewer transcript is folded into the flow's round
      deck, so focus the deck's latest round (revealing that reviewer) rather than
      the removed node — the same round-focus channel FlowStrip drives (#93 §2.2). */
@@ -922,6 +929,7 @@ export const NodesLayer = memo(function NodesLayer({
             pipeline={pipelineStrips.get(node.file.path) ?? null}
             flows={flows}
             renderablePaths={renderablePaths}
+            renderableFlows={renderableFlows}
             canFlow={canStartFlow(node.file, flowsByImpl)}
             canPipeline={canSourcePipeline(node.file)}
             onSelect={onSelect}

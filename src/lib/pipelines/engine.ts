@@ -488,31 +488,34 @@ function renderNoteTemplate(text: string, pipeline: Pipeline): string {
 const FENCE_MARKER = "\n\nSafety fences:\n";
 
 /**
- * The review-loop stage's directive + role scaffold, fitted into the flow note's
+ * Fits the review-loop stage's directive + role scaffold into the flow note's
  * transmissible cap (MAX_FLOW_NOTE_LENGTH — the flow layer truncates anything
- * longer). A blind slice would drop the scaffold and its safety fences, so only
- * the scaffold *body* is trimmed: the operator's directive and the fence block
- * are kept whole. If the directive + fences alone overflow (pathological), the
- * fences win (safety) and the directive is fitted before them.
+ * longer). The operator's directive and the role's safety fences must survive
+ * whole: only the scaffold *body* (supplementary role guidance) is trimmed to
+ * make room. When the directive and fences together already exceed the cap there
+ * is no safe truncation — no character of the directive can be dropped without
+ * losing acceptance criteria — so this returns an actionable error for the
+ * caller to park on rather than silently slicing the directive.
  */
-export function reviewNote(pipeline: Pipeline, stage: PipelineStage, role: EffectivePipelineRole): string {
+export function reviewNote(pipeline: Pipeline, stage: PipelineStage, role: EffectivePipelineRole): { note: string } | { error: string } {
   const prompt = renderNoteTemplate(stage.prompt, pipeline);
   const scaffold = role.roleId && role.promptScaffold ? renderNoteTemplate(role.promptScaffold, pipeline) : "";
-  if (!scaffold) return prompt.slice(0, MAX_FLOW_NOTE_LENGTH);
-
-  const header = `\n\nReviewer role scaffold (${role.roleId}):\n`;
-  const fenceIndex = scaffold.lastIndexOf(FENCE_MARKER);
+  const fenceIndex = scaffold ? scaffold.lastIndexOf(FENCE_MARKER) : -1;
   const body = fenceIndex >= 0 ? scaffold.slice(0, fenceIndex) : scaffold;
   const fences = fenceIndex >= 0 ? scaffold.slice(fenceIndex) : "";
 
-  const full = `${prompt}${header}${body}${fences}`;
-  if (full.length <= MAX_FLOW_NOTE_LENGTH) return full;
+  /* The directive + fences are non-negotiable; if they don't both fit, park. */
+  if (prompt.length + fences.length > MAX_FLOW_NOTE_LENGTH) {
+    return {
+      error: `review directive is too long for the reviewer note (${prompt.length + fences.length} chars after expansion; the reviewer receives at most ${MAX_FLOW_NOTE_LENGTH}). Shorten this stage's prompt.`,
+    };
+  }
+  if (!scaffold) return { note: prompt };
 
+  const header = `\n\nReviewer role scaffold (${role.roleId}):\n`;
   const bodyBudget = MAX_FLOW_NOTE_LENGTH - prompt.length - header.length - fences.length;
-  if (bodyBudget > 0) return `${prompt}${header}${body.slice(0, bodyBudget)}${fences}`;
-  /* Even the directive + fences overflow: keep the fences whole and fit the
-     directive ahead of them. */
-  return `${prompt.slice(0, Math.max(0, MAX_FLOW_NOTE_LENGTH - fences.length))}${fences}`;
+  const trimmedBody = bodyBudget > 0 ? body.slice(0, bodyBudget) : "";
+  return { note: trimmedBody ? `${prompt}${header}${trimmedBody}${fences}` : `${prompt}${fences}` };
 }
 
 async function tickReviewStage(
@@ -577,7 +580,12 @@ async function tickReviewStage(
       park(pipeline, `review flow startup paused: ${created.flow.stateDetail ?? "kickoff delivery failed"}`, attempt);
       return;
     }
-    const advanced = ports.patchFlow(created.flow.id, "advance", reviewNote(pipeline, stage, attempt.effectiveRole));
+    const note = reviewNote(pipeline, stage, attempt.effectiveRole);
+    if ("error" in note) {
+      park(pipeline, note.error, attempt);
+      return;
+    }
+    const advanced = ports.patchFlow(created.flow.id, "advance", note.note);
     if (advanced.error) park(pipeline, `advancing the review flow failed: ${advanced.error}`, attempt);
     return;
   }
@@ -596,7 +604,12 @@ async function tickReviewStage(
      patch) — without a re-issue the flow waits forever for a ready marker a
      verdict-terminated stage transcript will not produce. */
   if (flow.state === "waiting_ready" && flow.rounds.length === 0) {
-    const advanced = ports.patchFlow(flow.id, "advance", reviewNote(pipeline, stage, attempt.effectiveRole));
+    const note = reviewNote(pipeline, stage, attempt.effectiveRole);
+    if ("error" in note) {
+      park(pipeline, note.error, attempt);
+      return;
+    }
+    const advanced = ports.patchFlow(flow.id, "advance", note.note);
     if (advanced.error) park(pipeline, `advancing the review flow failed: ${advanced.error}`, attempt);
     return;
   }

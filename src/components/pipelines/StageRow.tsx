@@ -77,6 +77,8 @@ export function StageRow({
   const modelListId = useId();
   const [runtimeOpen, setRuntimeOpen] = useState(false);
   const promptRef = useRef<HTMLTextAreaElement>(null);
+  const runKindRef = useRef<HTMLButtonElement>(null);
+  const reviewKindRef = useRef<HTMLButtonElement>(null);
   const n = index + 1;
   const selectedRole = roles.find((role) => role.id === stage.roleId) ?? null;
   const canReviewLoop = index > 0;
@@ -88,6 +90,22 @@ export function StageRow({
     if (kind === "review-loop" && !canReviewLoop) return;
     /* Review-loop pins read-only reviewer semantics; the flow engine owns the pair. */
     patch(kind === "review-loop" ? { kind, access: "read-only" } : { kind });
+  };
+
+  /* WAI-ARIA radiogroup keyboard contract: one option is tabbable (the checked
+     one, via roving tabIndex below) and arrow keys move selection between the
+     enabled options, moving focus with it. With two options every arrow toggles
+     to the other enabled kind (Review-loop is skipped on stage 1). */
+  const onKindArrow = (event: React.KeyboardEvent) => {
+    if (!["ArrowRight", "ArrowDown", "ArrowLeft", "ArrowUp"].includes(event.key)) return;
+    event.preventDefault();
+    if (isReview) {
+      selectKind("run");
+      runKindRef.current?.focus();
+    } else if (canReviewLoop) {
+      selectKind("review-loop");
+      reviewKindRef.current?.focus();
+    }
   };
 
   const selectRole = (roleId: string) => {
@@ -200,21 +218,25 @@ export function StageRow({
 
       <div className="flex flex-wrap items-center gap-1.5">
         <span className="shrink-0 text-[10px] font-semibold text-dim">{t("pipelineDialog.kind")}</span>
-        <div className="inline-flex overflow-hidden rounded-[8px] border border-line" role="radiogroup" aria-label={t("pipelineDialog.kind")}>
+        <div className="inline-flex overflow-hidden rounded-[8px] border border-line" role="radiogroup" aria-label={t("pipelineDialog.kind")} onKeyDown={onKindArrow}>
           <button
+            ref={runKindRef}
             type="button"
             role="radio"
             aria-checked={!isReview}
+            tabIndex={isReview ? -1 : 0}
             onClick={() => selectKind("run")}
             className={`px-2.5 py-1 text-[11px] font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${!isReview ? "bg-accent text-white" : "bg-panel text-dim hover:text-ink"}`}
           >
             {t("pipelineDialog.kindRun")}
           </button>
           <button
+            ref={reviewKindRef}
             type="button"
             role="radio"
             aria-checked={isReview}
             aria-disabled={!canReviewLoop}
+            tabIndex={isReview ? 0 : -1}
             aria-describedby={!canReviewLoop ? `${modelListId}-rev` : undefined}
             onClick={() => selectKind("review-loop")}
             className={`px-2.5 py-1 text-[11px] font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${isReview ? "bg-accent text-white" : "bg-panel text-dim hover:text-ink"} ${!canReviewLoop ? "cursor-not-allowed opacity-40" : ""}`}

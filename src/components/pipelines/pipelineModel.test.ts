@@ -305,11 +305,13 @@ describe("stageOpenTarget (reviewer paths route to the flow, not the folded node
 describe("renderableFlowIds (a deck exists only when the implementer is placed)", () => {
   const flow = (id: string, implementerPath: string, state = "running"): Flow => ({ id, implementerPath, state } as unknown as Flow);
 
-  test("includes an active flow only when its implementer is a placed path", () => {
+  test("a scanned-but-unplaced implementer is excluded (present-in-scan, absent-from-layout)", () => {
     const flows = [flow("f1", "/impl-1"), flow("f2", "/impl-2"), flow("closed", "/impl-3", "closed")];
-    /* /impl-2 vanished from the scan, so f2 has no deck despite being active. */
-    const placed = new Set<string>(["/impl-1", "/impl-3"]);
-    const ids = renderableFlowIds(flows, placed);
+    /* placedPaths is the layout's node paths, NOT the scan. /impl-2 is still
+       scanned but its node was not placed (hidden/tombstoned), so f2 has zero
+       decks despite being active and must be excluded. */
+    const placedLayoutNodes = new Set<string>(["/impl-1", "/impl-3"]);
+    const ids = renderableFlowIds(flows, placedLayoutNodes);
     expect(ids.has("f1")).toBe(true);
     expect(ids.has("f2")).toBe(false);
     /* A closed flow is excluded even though its implementer is placed. */

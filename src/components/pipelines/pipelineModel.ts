@@ -176,10 +176,10 @@ export function stageAccess(pipeline: Pipeline, stage: PipelineStage): PipelineA
 }
 
 /** Ids of flows that actually have a board deck to reveal. A deck is created only
-    when the flow's implementer is placed (buildSchemeLayout), so a not-closed
-    flow whose implementer transcript is absent from the current scan has no deck —
-    gate on `placedPaths` (the current node/file paths), not just the closed state,
-    or Open-review/hops enable an action that finds no target. */
+    when the flow's implementer is placed (buildSchemeLayout), so a flow counts as
+    renderable only when it is open and its implementer path appears in
+    `placedPaths` (the current layout's node paths). An open flow whose implementer
+    is unplaced has zero decks, and Open-review/hops must stay disabled for it. */
 export function renderableFlowIds(flows: Flow[], placedPaths: ReadonlySet<string>): Set<string> {
   return new Set(
     flows.filter((flow) => flow.state !== "closed" && placedPaths.has(flow.implementerPath)).map((flow) => flow.id),
@@ -245,7 +245,8 @@ export function stageChipLabel(t: TFunction, stage: PipelineStage): string {
 }
 
 /** A spoken one-liner for a pipeline's current position — used by the board's
-    live region so a state/cursor transition is announced, not just spatial nav. */
+    live region so a state/cursor transition gets its own announcement alongside
+    the spatial-nav messages. */
 export function pipelineAnnouncement(t: TFunction, pipeline: Pipeline): string {
   const total = pipeline.stages.length;
   const cursorStageId = pipeline.cursor?.stageId ?? null;

@@ -20,7 +20,8 @@ import { planBoardConvergence, planClose } from "./projectBoardMutations";
 import { claimedReviewerDescendantPaths, foldClaimedReviewers, isActiveFlow } from "./flows/flowModel";
 import { PipelineDialog } from "./pipelines/PipelineDialog";
 import { PipelineStrip } from "./pipelines/PipelineStrip";
-import { pipelinesForProject, pipelineStripDomId } from "./pipelines/pipelineModel";
+import { pipelinesForProject, pipelineStripDomId, renderableFlowIds } from "./pipelines/pipelineModel";
+import { buildSchemeLayout } from "./scheme/layout";
 import { deckKey } from "./scheme/agentLinks";
 import { clearWorkflowDraftStorage } from "./workflows/WorkflowDraftPane";
 import { WorkflowStrip } from "./workflows/WorkflowStrip";
@@ -567,6 +568,12 @@ export function ProjectDashboard({
   );
   const hasArchiveNodes = archiveGroups.length > 0;
   const schemeAvailable = hasNodes || hasArchiveNodes;
+  /* A review-loop action only lands if its flow has a rendered deck, and a deck
+     exists only for an implementer placed as a board node — the same layout the
+     scheme draws. Derive availability from that layout's nodes, so a scanned but
+     unplaced (hidden/tombstoned) implementer disables the action (#93 finding). */
+  const pipelineLayout = buildSchemeLayout(hasNodes ? schemeGroups : archiveGroups, hasNodes ? schemeManual : [], files, flows, hasNodes ? drafts : [], pipelines);
+  const renderableFlows = renderableFlowIds(flows, new Set(pipelineLayout.nodes.map((node) => node.file.path)));
   const listAvailable = historyRows.length > 0;
   const projectView = resolveProjectView({
     preferredView: board.prefs.viewMode,
@@ -693,7 +700,7 @@ export function ProjectDashboard({
         <div className="flex shrink-0 flex-col gap-1.5 border-b border-line bg-[#fbfbfd] px-3 py-1.5">
           {projectPipelines.map((pipeline) => (
             <div key={pipeline.id} id={pipelineStripDomId(pipeline.id)} tabIndex={-1} className="scroll-mt-2 rounded-[14px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50">
-              <PipelineStrip pipeline={pipeline} flows={flows} renderablePaths={renderablePaths} onOpenPath={openPipelinePath} onOpenFlow={openPipelineFlow} />
+              <PipelineStrip pipeline={pipeline} flows={flows} renderablePaths={renderablePaths} renderableFlows={renderableFlows} onOpenPath={openPipelinePath} onOpenFlow={openPipelineFlow} />
             </div>
           ))}
           {projectWorkflows.map((wf) => (

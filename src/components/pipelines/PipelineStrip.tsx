@@ -18,7 +18,6 @@ import {
   latestAttempt,
   patchPipeline,
   pipelineStateLabel,
-  renderableFlowIds,
   stageAccess,
   stageAttempts,
   stageChipLabel,
@@ -226,6 +225,7 @@ export function PipelineStrip({
   pipeline,
   flows = [],
   renderablePaths,
+  renderableFlows = EMPTY_PATHS,
   compact = false,
   onOpenPath,
   onOpenFlow,
@@ -235,6 +235,9 @@ export function PipelineStrip({
   /** Transcript paths currently in the scan; a run chip / "open transcript" is
       disabled for an attempt whose path is absent (AC4). Omitted → no gating. */
   renderablePaths?: ReadonlySet<string>;
+  /** Flow ids that actually have a board deck (their implementer is placed);
+      review-loop chip / "Open review" is disabled for a flow absent from it. */
+  renderableFlows?: ReadonlySet<string>;
   /** Board variant (§2.2): trimmed to node width — drops the "PIPELINE" kicker
       and tightens padding so the chips + controls fit over a single node. */
   compact?: boolean;
@@ -255,7 +258,6 @@ export function PipelineStrip({
   const attention = PIPELINE_ATTENTION_STATES.has(pipeline.state);
   const finished = pipeline.state === "completed" || pipeline.state === "closed";
   const detail = parkedDetail(pipeline);
-  const renderableFlows = renderableFlowIds(flows, renderablePaths ?? EMPTY_PATHS);
   return (
     <div
       data-scheme-ui

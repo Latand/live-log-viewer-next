@@ -526,6 +526,10 @@ test("creation caps task, spec, and stage prompt sizes", async () => {
   ] }, ports)).error).toContain("prompt exceeds");
 });
 
+const reviewPipeline = { task: "ship the widget", cursor: null, stages: [], runs: [] } as unknown as Parameters<typeof reviewNote>[0];
+const reviewStage = (prompt: string) => ({ id: "review", kind: "review-loop", prompt, next: null } as unknown as Parameters<typeof reviewNote>[1]);
+const noteOf = (result: ReturnType<typeof reviewNote>) => ("note" in result ? result.note : "");
+
 test("reviewNote fits the flow-note cap while preserving the directive and safety fences", () => {
   /* A long role scaffold + fences would blow past the flow note's 2,000-char cap.
      The directive and the fences must survive; only the scaffold body is trimmed. */
@@ -535,10 +539,9 @@ test("reviewNote fits the flow-note cap while preserving the directive and safet
     roleId: "reviewer" as const, access: "read-only" as const,
     promptScaffold: `${"scaffold body ".repeat(400)}${fences}`,
   };
-  const pipeline = { task: "ship the widget", cursor: null, stages: [], runs: [] } as unknown as Parameters<typeof reviewNote>[0];
-  const stage = { id: "review", kind: "review-loop", prompt: "Review the diff for {{task}} carefully.", next: null } as unknown as Parameters<typeof reviewNote>[1];
-
-  const note = reviewNote(pipeline, stage, role);
+  const result = reviewNote(reviewPipeline, reviewStage("Review the diff for {{task}} carefully."), role);
+  const note = noteOf(result);
+  expect("note" in result).toBe(true);
   expect(note.length).toBeLessThanOrEqual(2_000);
   /* The operator's directive (with {{task}} substituted) is kept whole. */
   expect(note).toContain("Review the diff for ship the widget carefully.");
@@ -547,4 +550,29 @@ test("reviewNote fits the flow-note cap while preserving the directive and safet
   expect(note).toContain("keep read-only when reviewing");
   /* The scaffold body was trimmed (it did not all fit). */
   expect(note).toContain("scaffold body");
+});
+
+test("reviewNote parks a too-long directive instead of silently truncating it (raw + role-backed)", () => {
+  const longDirective = `${"X".repeat(3_000)} {{task}}`;
+  /* Raw review stage (no role scaffold): a 3,000-char directive can't be
+     delivered whole, so it parks with an actionable error, not a 1,967-char slice. */
+  const raw = reviewNote(reviewPipeline, reviewStage(longDirective), {
+    engine: "codex", model: "gpt-5.6-sol", effort: "high", roleId: null, access: "read-only", promptScaffold: null,
+  } as unknown as Parameters<typeof reviewNote>[2]);
+  expect("error" in raw).toBe(true);
+  if ("error" in raw) expect(raw.error).toContain("too long");
+
+  /* Role-backed review stage: same over-cap directive still parks (the scaffold
+     body trims, but the directive itself cannot be dropped). */
+  const backed = reviewNote(reviewPipeline, reviewStage(longDirective), {
+    engine: "codex", model: "gpt-5.6-sol", effort: "high", roleId: "reviewer", access: "read-only",
+    promptScaffold: "guidance\n\nSafety fences:\n- stay read-only",
+  } as unknown as Parameters<typeof reviewNote>[2]);
+  expect("error" in backed).toBe(true);
+
+  /* A directive that fits is delivered whole. */
+  const ok = reviewNote(reviewPipeline, reviewStage("Check {{task}} against the ACs."), {
+    engine: "codex", model: "gpt-5.6-sol", effort: "high", roleId: null, access: "read-only", promptScaffold: null,
+  } as unknown as Parameters<typeof reviewNote>[2]);
+  expect(noteOf(ok)).toBe("Check ship the widget against the ACs.");
 });
