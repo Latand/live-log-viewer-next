@@ -24,6 +24,18 @@ test("headless reviewer falls back to the configured Fable role when Codex accou
   });
 });
 
+test("headless retry chooses Fable before reusing its only failed Codex account", () => {
+  const resolve = (engine: "claude" | "codex"): HeadlessSpawnAvailability => engine === "codex"
+    ? { kind: "available", account: account("codex", "default") }
+    : { kind: "available", account: account("claude", "fable-main") };
+
+  expect(chooseHeadlessReviewer(codex, fable, ["codex:default"], resolve)).toEqual({
+    kind: "available",
+    role: fable,
+    account: account("claude", "fable-main"),
+  });
+});
+
 test("headless reviewer reports the earliest reset when primary and fallback accounts are exhausted", () => {
   const resolve = (engine: "claude" | "codex"): HeadlessSpawnAvailability => ({
     kind: "exhausted",

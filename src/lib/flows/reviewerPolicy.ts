@@ -22,17 +22,24 @@ export function chooseHeadlessReviewer(
 ): HeadlessReviewerDecision {
   const roles = [primary, ...(fallback && fallback.engine !== primary.engine ? [fallback] : [])];
   const exhaustedResets: number[] = [];
+  let attemptedChoice: Extract<HeadlessReviewerDecision, { kind: "available" }> | null = null;
   let exhausted = 0;
   for (const role of roles) {
     const prefix = `${role.engine}:`;
     const excludedIds = attemptedAccounts.filter((key) => key.startsWith(prefix)).map((key) => key.slice(prefix.length));
     const availability = resolve(role.engine, null, excludedIds);
-    if (availability.kind === "available") return { kind: "available", role, account: availability.account };
+    if (availability.kind === "available") {
+      const choice = { kind: "available" as const, role, account: availability.account };
+      if (!attemptedAccounts.includes(`${availability.account.engine}:${availability.account.accountId}`)) return choice;
+      attemptedChoice ??= choice;
+      continue;
+    }
     if (availability.kind === "exhausted") {
       exhausted += 1;
       if (availability.resetsAt !== null) exhaustedResets.push(availability.resetsAt);
     }
   }
+  if (attemptedChoice) return attemptedChoice;
   if (exhausted !== roles.length) return { kind: "unavailable" };
   return { kind: "exhausted", resetsAt: exhaustedResets.length ? Math.min(...exhaustedResets) : null };
 }
