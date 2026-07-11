@@ -141,6 +141,7 @@ test("snapshot exposes the canonical projected runtime model", () => {
     flows: [],
     workflows: [],
     tasks: [],
+    deployments: [],
   });
   journal.close();
 });

@@ -21,6 +21,7 @@ import { ProjectDashboard, queueColumnOpen } from "./ProjectDashboard";
 import { isChildConversation, OVERVIEW, projectKey } from "./projectModel";
 import { ProjectRail } from "./ProjectRail";
 import { SupervisorHealthAlert } from "./SupervisorHealthAlert";
+import { DeploymentStatusPill } from "./runtime/DeploymentStatusPill";
 import { cleanTitle, fmtAge } from "./utils";
 
 const PROJECT_KEY = "llvProject";
@@ -475,6 +476,7 @@ export function Viewer() {
           disabled, so on the landing page it is inert. Docked bottom-left, clear
           of the bottom-right CornerStatus and the top-right attention anchor. */}
       {isMobile ? null : <ConnectionPill />}
+      <DeploymentStatusPill />
     </div>
   );
 }

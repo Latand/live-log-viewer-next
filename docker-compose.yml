@@ -53,6 +53,10 @@ services:
       LLV_RUNTIME_LEGACY_SCHEDULER: ${LLV_RUNTIME_LEGACY_SCHEDULER:-0}
       LLV_RUNTIME_HOST_SOCKET: ${LLV_RUNTIME_HOST_SOCKET:-/home/latand/.config/agent-log-viewer/state/runtime-host.sock}
       LLV_RUNTIME_JOURNAL: ${LLV_RUNTIME_JOURNAL:-/home/latand/.config/agent-log-viewer/state/runtime-events.sqlite}
+      LLV_VIEWER_DEPLOYMENTS: ${LLV_VIEWER_DEPLOYMENTS:-0}
+      LLV_VIEWER_DEPLOY_ADAPTER: ${LLV_VIEWER_DEPLOY_ADAPTER:-/app/scripts/runtime-host-viewer-adapter.ts}
+      LLV_VIEWER_DEPLOY_TARGET: ${LLV_VIEWER_DEPLOY_TARGET:-/home/latand/.config/agent-log-viewer/state/viewer-release.json}
+      LLV_VIEWER_PORT: ${LLV_VIEWER_PORT:-8898}
 
   viewer:
     <<: *viewer-common

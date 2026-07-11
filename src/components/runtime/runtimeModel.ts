@@ -21,6 +21,7 @@ import type { Flow } from "@/lib/flows/types";
 import type { BoardTask } from "@/lib/tasks/types";
 import type { Activity } from "@/lib/types";
 import type { Workflow } from "@/lib/workflows/types";
+import type { ViewerDeploymentStatus } from "@/lib/runtime/contracts";
 
 /* ------------------------------------------------------------------ *
  * Vocabulary (frozen)                                                 *
@@ -108,7 +109,7 @@ export type RuntimeEventKind =
   | "files.revision"
   | (string & {});
 
-export type ScopeType = "session" | "flow" | "workflow" | "task" | "operation" | "edge" | "account" | "system";
+export type ScopeType = "session" | "flow" | "workflow" | "task" | "operation" | "deployment" | "edge" | "account" | "system";
 
 /* ------------------------------------------------------------------ *
  * Wire envelope + payloads (match Sol)                                *
@@ -253,6 +254,7 @@ export interface RuntimeSnapshot {
   flows: ScopedEntity<Flow>[];
   workflows: ScopedEntity<Workflow>[];
   tasks: ScopedEntity<BoardTask>[];
+  deployments?: ViewerDeploymentStatus[];
 }
 
 /* ------------------------------------------------------------------ *
@@ -275,6 +277,7 @@ export interface RuntimeStore {
   flows: Record<string, Flow>;
   workflows: Record<string, Workflow>;
   tasks: Record<string, BoardTask>;
+  deployments: Record<string, ViewerDeploymentStatus>;
 }
 
 /** Most recent receipts kept per session on the client (Fable "last N"). */
@@ -295,6 +298,7 @@ export function emptyStore(): RuntimeStore {
     flows: {},
     workflows: {},
     tasks: {},
+    deployments: {},
   };
 }
 
@@ -345,6 +349,11 @@ export function installSnapshot(snapshot: RuntimeSnapshot): RuntimeStore {
     tasks[value.id] = value;
     scopeHeads[`task:${value.id}`] = revision;
   }
+  const deployments: Record<string, ViewerDeploymentStatus> = {};
+  for (const deployment of snapshot.deployments ?? []) {
+    deployments[deployment.deploymentId] = deployment;
+    scopeHeads[`deployment:${deployment.deploymentId}`] = deployment.revisionNumber;
+  }
   return {
     cursor: snapshot.snapshotSeq,
     retentionFloorSeq: snapshot.retentionFloorSeq,
@@ -359,6 +368,7 @@ export function installSnapshot(snapshot: RuntimeSnapshot): RuntimeStore {
     flows,
     workflows,
     tasks,
+    deployments,
   };
 }
 
@@ -496,6 +506,11 @@ function reduceKnown(store: RuntimeStore, env: RuntimeEnvelope, revision: number
     case "reconcile.drift": {
       const drift = env.payload as RuntimeDrift;
       updateSession(store, drift.conversationId, revision, (s) => ({ ...s, drift }));
+      break;
+    }
+    case "deployment.state": {
+      const deployment = env.payload as ViewerDeploymentStatus;
+      store.deployments = { ...store.deployments, [deployment.deploymentId]: deployment };
       break;
     }
     case "limits":

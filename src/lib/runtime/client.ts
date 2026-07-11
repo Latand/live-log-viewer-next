@@ -1,6 +1,6 @@
 import net from "node:net";
 
-import type { RuntimeEventInput, RuntimeOperationCommand, RuntimeOperationResult, RuntimeReplay, RuntimeSnapshot, RuntimeSocketRequest, RuntimeSocketResponse } from "./contracts";
+import type { RuntimeEventInput, RuntimeOperationCommand, RuntimeOperationResult, RuntimeReplay, RuntimeSnapshot, RuntimeSocketRequest, RuntimeSocketResponse, ViewerDeploymentReceipt, ViewerDeploymentRequest, ViewerDeploymentStatus } from "./contracts";
 import { runtimeHostSocket } from "./flags";
 
 const MAX_RESPONSE_FRAME_BYTES = 8 * 1024 * 1024;
@@ -19,6 +19,8 @@ export interface RuntimeHostClient {
   operation(event: RuntimeEventInput): Promise<unknown>;
   command(command: RuntimeOperationCommand): Promise<RuntimeOperationResult>;
   operationStatus(operationId: string): Promise<RuntimeOperationResult | null>;
+  requestViewerDeployment(request: ViewerDeploymentRequest): Promise<ViewerDeploymentReceipt>;
+  readViewerDeployment(deploymentId: string): Promise<ViewerDeploymentStatus | null>;
 }
 
 export class UnixRuntimeHostClient implements RuntimeHostClient {
@@ -31,6 +33,8 @@ export class UnixRuntimeHostClient implements RuntimeHostClient {
   operation(event: RuntimeEventInput): Promise<unknown> { return this.call("operation", { event }); }
   command(command: RuntimeOperationCommand): Promise<RuntimeOperationResult> { return this.call("command", { command }) as Promise<RuntimeOperationResult>; }
   operationStatus(operationId: string): Promise<RuntimeOperationResult | null> { return this.call("operation-status", { operationId }) as Promise<RuntimeOperationResult | null>; }
+  requestViewerDeployment(request: ViewerDeploymentRequest): Promise<ViewerDeploymentReceipt> { return this.call("viewer-deployment-request", request as unknown as Record<string, unknown>) as Promise<ViewerDeploymentReceipt>; }
+  readViewerDeployment(deploymentId: string): Promise<ViewerDeploymentStatus | null> { return this.call("viewer-deployment-read", { deploymentId }) as Promise<ViewerDeploymentStatus | null>; }
 
   private call(method: RuntimeSocketRequest["method"], params?: Record<string, unknown>, timeoutMs = this.timeoutMs, signal?: AbortSignal): Promise<unknown> {
     return new Promise((resolve, reject) => {

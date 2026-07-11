@@ -1,0 +1,196 @@
+#!/usr/bin/env bun-container
+
+import { createHash, randomUUID } from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
+
+import type { ViewerHealthEvidence, ViewerReleaseIdentity } from "../src/lib/runtime/contracts";
+
+const stateDir = process.env.LLV_STATE_DIR || "/home/latand/.config/agent-log-viewer/state";
+const deploymentDir = path.join(stateDir, "deployments");
+const mirrorDir = path.join(deploymentDir, "canonical.git");
+const targetFile = process.env.LLV_VIEWER_DEPLOY_TARGET || path.join(stateDir, "viewer-release.json");
+const canonicalRemote = process.env.LLV_VIEWER_CANONICAL_REMOTE || "git@github.com:Latand/live-log-viewer-next.git";
+const envFile = process.env.LLV_ENV_FILE || "/home/latand/.config/agent-log-viewer/service.env";
+const stableEndpoint = `http://127.0.0.1:${Number(process.env.LLV_VIEWER_PORT || 8898)}`;
+
+async function command(argv: string[]): Promise<string> {
+  const child = Bun.spawn(argv, { stdout: "pipe", stderr: "pipe", env: process.env });
+  const [stdout, stderr, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
+  if (code !== 0) throw new Error((stderr.trim() || `${argv[0]} failed`).slice(0, 1000));
+  return stdout.trim();
+}
+
+async function ensureMirror(): Promise<void> {
+  fs.mkdirSync(deploymentDir, { recursive: true, mode: 0o700 });
+  if (!fs.existsSync(mirrorDir)) await command(["git", "clone", "--mirror", canonicalRemote, mirrorDir]);
+  await command(["git", "--git-dir", mirrorDir, "remote", "set-url", "origin", canonicalRemote]);
+  await command(["git", "--git-dir", mirrorDir, "fetch", "--prune", "origin", "+refs/heads/*:refs/heads/*"]);
+}
+
+async function resolveRevision(requested: string): Promise<string> {
+  await ensureMirror();
+  const value = requested === "origin/main" ? "refs/heads/main^{commit}" : `${requested}^{commit}`;
+  const revision = await command(["git", "--git-dir", mirrorDir, "rev-parse", "--verify", value]);
+  if (!/^[0-9a-f]{40}$/.test(revision)) throw new Error("canonical repository returned an invalid revision");
+  return revision;
+}
+
+function candidatePort(deploymentId: string): number {
+  const slot = Number.parseInt(createHash("sha256").update(deploymentId).digest("hex").slice(0, 6), 16) % 2_000;
+  return Number(process.env.LLV_VIEWER_CANDIDATE_PORT_BASE || 18_000) + slot;
+}
+
+function release(value: unknown): ViewerReleaseIdentity {
+  if (!value || typeof value !== "object") throw new Error("release identity is invalid");
+  const item = value as Partial<ViewerReleaseIdentity>;
+  if (typeof item.image !== "string" || typeof item.container !== "string" || typeof item.endpoint !== "string" || typeof item.revision !== "string") {
+    throw new Error("release identity is invalid");
+  }
+  return item as ViewerReleaseIdentity;
+}
+
+async function buildCandidate(deploymentId: string, revision: string): Promise<ViewerReleaseIdentity> {
+  await ensureMirror();
+  await command(["git", "--git-dir", mirrorDir, "cat-file", "-e", `${revision}^{commit}`]);
+  const sourceDir = path.join(deploymentDir, deploymentId, "source");
+  fs.rmSync(path.dirname(sourceDir), { recursive: true, force: true });
+  fs.mkdirSync(path.dirname(sourceDir), { recursive: true, mode: 0o700 });
+  await command(["git", "--git-dir", mirrorDir, "worktree", "prune"]);
+  await command(["git", "--git-dir", mirrorDir, "worktree", "add", "--detach", sourceDir, revision]);
+  const image = `agent-log-viewer:deploy-${revision}`;
+  await command(["docker", "build", "--pull", "--label", `dev.live-log-viewer.revision=${revision}`, "-t", image, sourceDir]);
+  const port = candidatePort(deploymentId);
+  return { revision, image, container: `llv-deploy-${deploymentId.replace(/[^a-zA-Z0-9_.-]/g, "-")}`, endpoint: `http://127.0.0.1:${port}` };
+}
+
+async function containerExists(container: string): Promise<boolean> {
+  const child = Bun.spawn(["docker", "container", "inspect", container], { stdout: "ignore", stderr: "ignore" });
+  return (await child.exited) === 0;
+}
+
+async function startCandidate(candidate: ViewerReleaseIdentity): Promise<void> {
+  const endpoint = new URL(candidate.endpoint);
+  if (await containerExists(candidate.container)) {
+    await command(["docker", "start", candidate.container]);
+    return;
+  }
+  const uid = String(process.getuid?.() ?? 1000);
+  const gid = String(process.getgid?.() ?? 1000);
+  const args = [
+    "docker", "run", "-d", "--name", candidate.container,
+    "--network", "host", "--pid", "host", "--privileged", "--user", `${uid}:${gid}`,
+    "-e", "HOME=/home/latand", "-e", "HOSTNAME=127.0.0.1", "-e", `PORT=${endpoint.port}`,
+    "-e", "XDG_CONFIG_HOME=/home/latand/.config", "-e", "XDG_CACHE_HOME=/home/latand/.cache",
+    "-v", "/home/latand:/home/latand", "-v", `/tmp/tmux-${uid}:/tmp/tmux-${uid}`, "-v", `/tmp/claude-${uid}:/tmp/claude-${uid}`,
+  ];
+  if (fs.existsSync(envFile)) args.push("--env-file", envFile);
+  args.push(candidate.image);
+  await command(args);
+}
+
+function serviceToken(): string | null {
+  try {
+    const match = fs.readFileSync(envFile, "utf8").match(/^LLV_TOKEN=(.*)$/m);
+    return match?.[1]?.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+async function fetchStatus(url: string): Promise<{ status: number; text: string }> {
+  try {
+    const response = await fetch(url, { redirect: "manual", signal: AbortSignal.timeout(5_000) });
+    return { status: response.status, text: await response.text() };
+  } catch {
+    return { status: 0, text: "" };
+  }
+}
+
+function referencedAssets(html: string): string[] {
+  const assets = new Set<string>();
+  for (const match of html.matchAll(/(?:src|href)=["']([^"']+)["']/g)) {
+    const asset = match[1];
+    if (asset?.startsWith("/_next/") && /\.(?:css|js)(?:\?|$)/.test(asset)) assets.add(asset);
+  }
+  return [...assets].sort();
+}
+
+async function containerRunning(container: string): Promise<boolean> {
+  if (!await containerExists(container)) return false;
+  return await command(["docker", "inspect", "--format", "{{.State.Running}}", container]) === "true";
+}
+
+async function verify(candidate: ViewerReleaseIdentity, endpoint: string, expectedAssetsEndpoint?: string): Promise<ViewerHealthEvidence> {
+  const token = serviceToken();
+  const root = await fetchStatus(`${endpoint}/`);
+  const authenticated = token ? await fetchStatus(`${endpoint}/?k=${encodeURIComponent(token)}`) : null;
+  const html = authenticated?.status === 200 ? authenticated.text : root.text;
+  const paths = referencedAssets(html);
+  const assets = await Promise.all(paths.map(async (asset) => ({ path: asset, status: (await fetchStatus(`${endpoint}${asset}`)).status })));
+  let expectedAssetsMatch = true;
+  if (expectedAssetsEndpoint) {
+    const expectedRoot = await fetchStatus(`${expectedAssetsEndpoint}/${token ? `?k=${encodeURIComponent(token)}` : ""}`);
+    expectedAssetsMatch = JSON.stringify(referencedAssets(expectedRoot.text)) === JSON.stringify(paths);
+  }
+  const processReady = await containerRunning(candidate.container);
+  const ok = processReady
+    && root.status === 200
+    && (authenticated === null || authenticated.status === 200)
+    && assets.length > 0
+    && assets.every((asset) => asset.status === 200)
+    && expectedAssetsMatch;
+  return {
+    checkedAt: new Date().toISOString(), endpoint, processReady, rootStatus: root.status,
+    authenticatedStatus: authenticated?.status ?? null, assets, ok,
+    ...(ok ? {} : { detail: expectedAssetsMatch ? "Viewer health or referenced asset gate failed" : "stable listener does not serve the candidate asset set" }),
+  };
+}
+
+function readCurrentRelease(): ViewerReleaseIdentity | null {
+  try { return release(JSON.parse(fs.readFileSync(targetFile, "utf8"))); }
+  catch { return null; }
+}
+
+function switchTarget(target: ViewerReleaseIdentity): void {
+  fs.mkdirSync(path.dirname(targetFile), { recursive: true, mode: 0o700 });
+  const temporary = `${targetFile}.${process.pid}.${randomUUID()}.tmp`;
+  const fd = fs.openSync(temporary, "wx", 0o600);
+  try {
+    fs.writeFileSync(fd, JSON.stringify(target));
+    fs.fsyncSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
+  fs.renameSync(temporary, targetFile);
+  const dir = fs.openSync(path.dirname(targetFile), "r");
+  try { fs.fsyncSync(dir); } finally { fs.closeSync(dir); }
+}
+
+async function main(): Promise<unknown> {
+  if (process.env.LLV_DEPLOYMENT_ADAPTER_PROTOCOL !== "1") throw new Error("deployment adapter protocol is required");
+  const action = process.argv[2];
+  const input = JSON.parse(await Bun.stdin.text()) as Record<string, unknown>;
+  if (action === "resolve-revision") return { revision: await resolveRevision(String(input.revision ?? "")) };
+  if (action === "build-candidate") return buildCandidate(String(input.deploymentId ?? ""), String(input.revision ?? ""));
+  if (action === "start-candidate") { await startCandidate(release(input.candidate)); return {}; }
+  if (action === "current-release") {
+    const current = readCurrentRelease();
+    if (current === null) return null;
+    const health = await verify(current, stableEndpoint, current.endpoint);
+    if (!health.ok) throw new Error("current release health verification failed");
+    return current;
+  }
+  if (action === "verify-candidate") { const candidate = release(input.candidate); return verify(candidate, candidate.endpoint); }
+  if (action === "promote") { switchTarget(release(input.candidate)); return {}; }
+  if (action === "verify-promoted") { const candidate = release(input.candidate); return verify(candidate, stableEndpoint, candidate.endpoint); }
+  if (action === "rollback") { switchTarget(release(input.previous)); return {}; }
+  throw new Error("deployment adapter action is unsupported");
+}
+
+try {
+  process.stdout.write(`${JSON.stringify(await main())}\n`);
+} catch (error) {
+  process.stderr.write(`${error instanceof Error ? error.message : "deployment adapter failed"}\n`);
+  process.exitCode = 1;
+}

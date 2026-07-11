@@ -5,7 +5,7 @@ import type { BoardTask } from "@/lib/tasks/types";
 import type { Workflow } from "@/lib/workflows/types";
 
 export const RUNTIME_SCHEMA_VERSION = 1;
-export const RUNTIME_SCOPE_KINDS = ["session", "flow", "workflow", "task", "operation", "edge", "account", "system"] as const;
+export const RUNTIME_SCOPE_KINDS = ["session", "flow", "workflow", "task", "operation", "deployment", "edge", "account", "system"] as const;
 export type RuntimeScopeKind = (typeof RUNTIME_SCOPE_KINDS)[number];
 
 export interface RuntimeScope {
@@ -263,7 +263,69 @@ export interface RuntimeSnapshot {
   flows: ScopedEntity<Flow>[];
   workflows: ScopedEntity<Workflow>[];
   tasks: ScopedEntity<BoardTask>[];
+  deployments: ViewerDeploymentStatus[];
 }
+
+export type ViewerDeploymentPhase =
+  | "admitted"
+  | "building"
+  | "candidate-starting"
+  | "candidate-health"
+  | "promoting"
+  | "post-promotion-health"
+  | "rolling-back"
+  | "succeeded"
+  | "rolled-back"
+  | "failed";
+
+export interface ViewerReleaseIdentity {
+  image: string;
+  container: string;
+  endpoint: string;
+  revision: string;
+}
+
+export interface ViewerHealthEvidence {
+  checkedAt: string;
+  endpoint: string;
+  processReady: boolean;
+  rootStatus: number;
+  authenticatedStatus: number | null;
+  assets: Array<{ path: string; status: number }>;
+  ok: boolean;
+  detail?: string;
+}
+
+export interface ViewerDeploymentOwner {
+  pid: number;
+  startIdentity: string | null;
+}
+
+export interface ViewerDeploymentStatus {
+  deploymentId: string;
+  idempotencyKey: string;
+  requestedRevision: string;
+  revision: string;
+  phase: ViewerDeploymentPhase;
+  terminal: boolean;
+  candidate: ViewerReleaseIdentity | null;
+  previous: ViewerReleaseIdentity | null;
+  health: ViewerHealthEvidence[];
+  error: string | null;
+  owner: ViewerDeploymentOwner;
+  createdAt: string;
+  updatedAt: string;
+  revisionNumber: number;
+}
+
+export interface ViewerDeploymentRequest {
+  revision?: string;
+  idempotencyKey: string;
+}
+
+export type ViewerDeploymentReceipt =
+  | { state: "accepted"; deploymentId: string; revision: string; replayed: boolean }
+  | { state: "busy"; deploymentId: string; revision: string };
 
 export interface RuntimeReplay {
   reset: boolean;
@@ -273,7 +335,7 @@ export interface RuntimeReplay {
 
 export interface RuntimeSocketRequest {
   id: string;
-  method: "snapshot" | "events" | "wait" | "append" | "operation" | "command" | "operation-status";
+  method: "snapshot" | "events" | "wait" | "append" | "operation" | "command" | "operation-status" | "viewer-deployment-request" | "viewer-deployment-read";
   params?: Record<string, unknown>;
 }
 

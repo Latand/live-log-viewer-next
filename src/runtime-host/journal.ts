@@ -24,6 +24,9 @@ import {
   type RuntimeReplay,
   type RuntimeSession,
   type RuntimeSnapshot,
+  type ViewerDeploymentOwner,
+  type ViewerDeploymentReceipt,
+  type ViewerDeploymentStatus,
 } from "@/lib/runtime/contracts";
 
 export class RuntimeJournalFault extends Error {}
@@ -222,6 +225,13 @@ export class RuntimeJournal {
         event_id TEXT NOT NULL, consumer TEXT NOT NULL, completed_at INTEGER NOT NULL,
         PRIMARY KEY(event_id, consumer)
       );
+      CREATE TABLE IF NOT EXISTS viewer_deployments (
+        deployment_id TEXT PRIMARY KEY, idempotency_key TEXT NOT NULL UNIQUE,
+        request_hash TEXT NOT NULL, status_json TEXT NOT NULL,
+        active INTEGER NOT NULL, updated_at INTEGER NOT NULL
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS viewer_deployments_one_active
+        ON viewer_deployments(active) WHERE active = 1;
     `);
     this.migrateLegacyEvents();
     for (const row of this.db.query<EventRow, []>("SELECT * FROM events WHERE producer_key IS NOT NULL").all()) {
@@ -378,6 +388,7 @@ export class RuntimeJournal {
         flows: this.scopedValues<RuntimeSnapshot["flows"][number]["value"]>("flow"),
         workflows: this.scopedValues<RuntimeSnapshot["workflows"][number]["value"]>("workflow"),
         tasks: this.scopedValues<RuntimeSnapshot["tasks"][number]["value"]>("task"),
+        deployments: this.entityValues<ViewerDeploymentStatus>("deployment"),
       };
       this.db.exec("COMMIT");
       return snapshot;
@@ -413,6 +424,117 @@ export class RuntimeJournal {
 
   sessionState(conversationId: string): RuntimeSession | null {
     return this.entity<RuntimeSession>("session", conversationId);
+  }
+
+  admitViewerDeployment(
+    input: { idempotencyKey: string; requestedRevision: string; revision: string },
+    owner: ViewerDeploymentOwner,
+  ): ViewerDeploymentReceipt {
+    this.assertHealthy();
+    const requestHash = createHash("sha256").update(stableJson({ requestedRevision: input.requestedRevision, revision: input.revision })).digest("hex");
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const existing = this.db.query<{ deployment_id: string; request_hash: string; status_json: string }, [string]>(
+        "SELECT deployment_id, request_hash, status_json FROM viewer_deployments WHERE idempotency_key = ?",
+      ).get(input.idempotencyKey);
+      if (existing) {
+        if (existing.request_hash !== requestHash) throw new RuntimeIdempotencyConflictError("idempotency key already belongs to another deployment");
+        const status = JSON.parse(existing.status_json) as ViewerDeploymentStatus;
+        this.db.exec("COMMIT");
+        return { state: "accepted", deploymentId: status.deploymentId, revision: status.revision, replayed: true };
+      }
+      const active = this.db.query<{ status_json: string }, []>("SELECT status_json FROM viewer_deployments WHERE active = 1").get();
+      if (active) {
+        const status = JSON.parse(active.status_json) as ViewerDeploymentStatus;
+        this.db.exec("COMMIT");
+        return { state: "busy", deploymentId: status.deploymentId, revision: status.revision };
+      }
+      const now = this.now();
+      const deploymentId = `deploy_${randomUUID()}`;
+      const status: ViewerDeploymentStatus = {
+        deploymentId,
+        idempotencyKey: input.idempotencyKey,
+        requestedRevision: input.requestedRevision,
+        revision: input.revision,
+        phase: "admitted",
+        terminal: false,
+        candidate: null,
+        previous: null,
+        health: [],
+        error: null,
+        owner,
+        createdAt: new Date(now).toISOString(),
+        updatedAt: new Date(now).toISOString(),
+        revisionNumber: 1,
+      };
+      this.db.query("INSERT INTO viewer_deployments(deployment_id, idempotency_key, request_hash, status_json, active, updated_at) VALUES (?, ?, ?, ?, 1, ?)")
+        .run(deploymentId, input.idempotencyKey, requestHash, stableJson(status), now);
+      this.appendInTransaction(normalizeRuntimeEventInput({
+        scope: { type: "deployment", id: deploymentId },
+        kind: "deployment.state",
+        producer: { kind: "runtime-host", eventKey: `deployment:${deploymentId}:1` },
+        payload: status as unknown as Record<string, unknown>,
+      }));
+      this.db.exec("COMMIT");
+      this.notifyWaiters();
+      return { state: "accepted", deploymentId, revision: input.revision, replayed: false };
+    } catch (error) {
+      try { this.db.exec("ROLLBACK"); } catch { /* transaction already closed */ }
+      throw error;
+    }
+  }
+
+  viewerDeployment(deploymentId: string): ViewerDeploymentStatus | null {
+    const row = this.db.query<{ status_json: string }, [string]>("SELECT status_json FROM viewer_deployments WHERE deployment_id = ?").get(deploymentId);
+    return row ? JSON.parse(row.status_json) as ViewerDeploymentStatus : null;
+  }
+
+  viewerDeploymentByIdempotencyKey(idempotencyKey: string): ViewerDeploymentStatus | null {
+    const row = this.db.query<{ status_json: string }, [string]>("SELECT status_json FROM viewer_deployments WHERE idempotency_key = ?").get(idempotencyKey);
+    return row ? JSON.parse(row.status_json) as ViewerDeploymentStatus : null;
+  }
+
+  activeViewerDeployment(): ViewerDeploymentStatus | null {
+    const row = this.db.query<{ status_json: string }, []>("SELECT status_json FROM viewer_deployments WHERE active = 1").get();
+    return row ? JSON.parse(row.status_json) as ViewerDeploymentStatus : null;
+  }
+
+  updateViewerDeployment(
+    deploymentId: string,
+    update: Partial<Omit<ViewerDeploymentStatus, "deploymentId" | "idempotencyKey" | "requestedRevision" | "revision" | "createdAt" | "revisionNumber">>,
+  ): ViewerDeploymentStatus {
+    this.assertHealthy();
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const current = this.viewerDeployment(deploymentId);
+      if (!current) throw new Error("viewer deployment is missing");
+      const now = this.now();
+      const next: ViewerDeploymentStatus = {
+        ...current,
+        ...update,
+        deploymentId: current.deploymentId,
+        idempotencyKey: current.idempotencyKey,
+        requestedRevision: current.requestedRevision,
+        revision: current.revision,
+        createdAt: current.createdAt,
+        updatedAt: new Date(now).toISOString(),
+        revisionNumber: current.revisionNumber + 1,
+      };
+      this.db.query("UPDATE viewer_deployments SET status_json = ?, active = ?, updated_at = ? WHERE deployment_id = ?")
+        .run(stableJson(next), next.terminal ? 0 : 1, now, deploymentId);
+      this.appendInTransaction(normalizeRuntimeEventInput({
+        scope: { type: "deployment", id: deploymentId },
+        kind: "deployment.state",
+        producer: { kind: "runtime-host", eventKey: `deployment:${deploymentId}:${next.revisionNumber}` },
+        payload: next as unknown as Record<string, unknown>,
+      }));
+      this.db.exec("COMMIT");
+      this.notifyWaiters();
+      return next;
+    } catch (error) {
+      try { this.db.exec("ROLLBACK"); } catch { /* transaction already closed */ }
+      throw error;
+    }
   }
 
   isWritable(): boolean {
@@ -848,6 +970,11 @@ export class RuntimeJournal {
       const conversationId = typeof payload.conversationId === "string" ? payload.conversationId : scope.id;
       const session = this.entity<RuntimeSession>("session", conversationId);
       if (session) this.upsertEntity("session", conversationId, event.revision, { ...session, revision: event.revision, drift: payload as unknown as RuntimeSession["drift"] }, event.seq);
+      return;
+    }
+    if (event.kind === "deployment.state") {
+      const status = payload as unknown as ViewerDeploymentStatus;
+      this.upsertEntity("deployment", scope.id, event.revision, status, event.seq);
     }
   }
 

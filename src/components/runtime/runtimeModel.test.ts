@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import type { Flow } from "@/lib/flows/types";
+import type { ViewerDeploymentStatus } from "@/lib/runtime/contracts";
 
 import {
   applyEvent,
@@ -112,6 +113,18 @@ describe("installSnapshot", () => {
     expect(store.scopeHeads["operation:op_1"]).toBe(2);
     expect(store.scopeHeads["flow:flow_1"]).toBe(4);
     expect(store.flows["flow_1"]?.state).toBe("reviewing");
+  });
+
+  test("installs deployment status and advances it from the event stream", () => {
+    const deployment: ViewerDeploymentStatus = {
+      deploymentId: "deploy_1", idempotencyKey: "key_1", requestedRevision: "origin/main", revision: "a".repeat(40),
+      phase: "building", terminal: false, candidate: null, previous: null, health: [], error: null,
+      owner: { pid: 10, startIdentity: "10:1" }, createdAt: "2026-07-11T00:00:00.000Z", updatedAt: "2026-07-11T00:00:00.000Z", revisionNumber: 2,
+    };
+    const store = installSnapshot(snapshot({ deployments: [deployment] }));
+    expect(store.scopeHeads["deployment:deploy_1"]).toBe(2);
+    const next = apply(store, env("deployment.state", { type: "deployment", id: "deploy_1" }, 3, { ...deployment, phase: "candidate-health", revisionNumber: 3 }));
+    expect(next.deployments.deploy_1?.phase).toBe("candidate-health");
   });
 });
 

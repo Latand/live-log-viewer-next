@@ -6,6 +6,7 @@ import { consumeRuntimeEvent, type RuntimeConsumerPorts } from "@/lib/runtime/co
 import { procBackend } from "@/lib/proc";
 
 import { RuntimeJournal } from "./journal";
+import type { ViewerDeploymentCoordinator } from "./deployment";
 
 export class RuntimeHostFence {
   private held = false;
@@ -43,7 +44,11 @@ export class RuntimeHost {
   private consumerQueue: Promise<void> = Promise.resolve();
   private readonly consumerFailures = new Map<string, number>();
 
-  constructor(readonly journal: RuntimeJournal, private readonly consumers?: RuntimeConsumerPorts) {}
+  constructor(
+    readonly journal: RuntimeJournal,
+    private readonly consumers?: RuntimeConsumerPorts,
+    private readonly deployments?: ViewerDeploymentCoordinator,
+  ) {}
 
   async recoverConsumers(): Promise<number> {
     if (!this.consumers) return 0;
@@ -119,6 +124,15 @@ export class RuntimeHost {
         await this.recoverConsumersBestEffort();
       } else if (request.method === "operation-status") {
         result = this.journal.operationResult(String(request.params?.operationId ?? ""));
+      } else if (request.method === "viewer-deployment-request") {
+        if (!this.deployments) throw new Error("viewer deployments are disabled");
+        result = await this.deployments.requestViewerDeployment({
+          revision: typeof request.params?.revision === "string" ? request.params.revision : undefined,
+          idempotencyKey: String(request.params?.idempotencyKey ?? ""),
+        });
+      } else if (request.method === "viewer-deployment-read") {
+        if (!this.deployments) throw new Error("viewer deployments are disabled");
+        result = this.deployments.readViewerDeployment(String(request.params?.deploymentId ?? ""));
       } else throw new Error("runtime request method is unsupported");
       return { id: request.id, ok: true, result };
     } catch (error) {

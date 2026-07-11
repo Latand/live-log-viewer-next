@@ -88,6 +88,7 @@ make_nsenter_shim codex /home/latand/.bun/bin/codex
 make_nsenter_shim bun /home/latand/.bun/bin/bun
 make_nsenter_shim uv /home/latand/.local/bin/uv
 make_nsenter_shim just /usr/bin/just
+make_nsenter_shim docker /usr/bin/docker
 make_nsenter_shim tmux /usr/bin/tmux
 cat > /usr/local/bin/tmux <<'WRAPPER'
 #!/bin/sh
@@ -187,6 +188,7 @@ COPY --from=build /app/next.config.ts ./next.config.ts
 COPY --from=build /app/tsconfig.json ./tsconfig.json
 COPY --from=build /app/src ./src
 COPY --from=build /app/scripts/whisper_transcribe.py ./scripts/whisper_transcribe.py
+COPY --from=build /app/scripts/runtime-host-viewer-adapter.ts ./scripts/runtime-host-viewer-adapter.ts
 COPY --from=build /app/node_modules ./node_modules
 
 # Permission gate: the compose service runs this image as a non-root user
