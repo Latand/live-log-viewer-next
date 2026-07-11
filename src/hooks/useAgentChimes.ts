@@ -24,9 +24,9 @@ const STAGGER_MS = 220;
    from the current poll are evicted first. */
 export const MAX_TRACKED_IDENTITIES = 4096;
 
-/** Only what a future transition decision reads — never the whole FileEntry,
-    whose nested payloads (plans, questions, migration data) would otherwise
-    accumulate for every conversation a long-running tab has ever observed. */
+/** Only what a future transition decision reads. Retaining whole FileEntry
+    values would accumulate their nested payloads (plans, questions,
+    migration data) for every conversation a long-running tab has observed. */
 export interface TrackedConversation {
   state: PaneState;
   /** The finish chime this poll's entry would ring, derived at map build. */
@@ -63,10 +63,11 @@ export function planAgentChimes(
   prev: ReadonlyMap<string, TrackedConversation> | null,
   linked: ReadonlySet<string>,
 ): ChimePlan {
-  /* Keyed by the stable conversation identity, never the transcript path: a
-     committed account migration swaps the path but keeps the conversation, so
-     tracking by identity means succession is silent instead of ringing a
-     spurious finish-then-spawn cascade (falls back to path pre-migration).
+  /* Keyed by the stable conversation identity (with the path as the
+     pre-migration fallback): a committed account migration swaps the path
+     while the conversation stays, so identity-keyed tracking keeps
+     succession silent where a path-keyed scan would ring a spurious
+     finish-then-spawn cascade.
      Archived predecessors share their successor's identity and would flap the
      tracked state between generations, so they are skipped outright. */
   const next = new Map<string, TrackedConversation>();

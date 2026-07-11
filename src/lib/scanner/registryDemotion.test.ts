@@ -9,7 +9,7 @@ import { archivedTranscriptPaths } from "./index";
 
 afterEach(() => setAgentRegistryForTests(null));
 
-test("a corrupt agent registry degrades to an empty demotion set instead of failing discovery", async () => {
+test("a corrupt agent registry yields an empty demotion set and discovery stays available", async () => {
   const base = await mkdtemp(path.join(os.tmpdir(), "llv-registry-demotion-"));
   try {
     const file = path.join(base, "agent-registry.json");

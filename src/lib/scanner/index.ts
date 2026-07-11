@@ -87,18 +87,18 @@ export async function listFilesWithProjectCatalog(selectedProject?: string, opti
 /* Transcript paths superseded by an account migration: every generation and
    continuity path of a conversation except its current one. Mirrors the
    `migratedTo` annotation in the files response — these entries are folded
-   into their successor's card, so they rank below live transcripts for the
-   recency cap instead of crowding it out. */
+   into their successor's card, so they rank below live transcripts when the
+   recency cap is applied and leave the cap slots to live conversations. */
 export function archivedTranscriptPaths(): ReadonlySet<string> {
   const archived = new Set<string>();
   let snapshot: ReturnType<ReturnType<typeof agentRegistry>["snapshot"]>;
   try {
     snapshot = agentRegistry().snapshot();
   } catch (error) {
-    /* Demotion only shapes the recency ranking; a corrupt or unsupported
-       registry must degrade to "no demotion", never take file discovery (and
-       with it timeline/spawn/tasks/tmux) down. Mirrors the board route's
-       RegistryReadError handling. */
+    /* Demotion only shapes the recency ranking. When the registry is
+       corrupt or unsupported, discovery proceeds with an empty demotion set
+       and timeline/spawn/tasks/tmux stay available. Mirrors the board
+       route's RegistryReadError handling. */
     if (error instanceof RegistryReadError) return archived;
     throw error;
   }

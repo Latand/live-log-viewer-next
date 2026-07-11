@@ -29,3 +29,23 @@ test("the body cap admits the worst-case validator-legal mutation under maximal 
   const parsed = await validateBoardPatchRequest(patchRequest(body));
   expect(parsed.mutations).toHaveLength(1);
 });
+
+test("the body cap admits the maximal validator-legal legacy-seed patch", async () => {
+  /* The whole-preferences patch form carries three 512-path lists
+     (manual/hidden/expanded); under maximal escaping that is ~37.7 MB and it
+     must clear the cap so the one-time legacy seed survives on arrangements
+     of any legal size. */
+  const path = (prefix: string, index: number) => `/${prefix}-${String(index).padStart(4, "0")}${"\u0007".repeat(4080)}`;
+  const list = (prefix: string) => Array.from({ length: 512 }, (_, index) => path(prefix, index));
+  const body = {
+    schemaVersion: 1,
+    project: "proj",
+    baseRevision: 0,
+    patch: { manual: list("a"), hidden: list("b"), expanded: list("c") },
+  };
+  const serialized = new TextEncoder().encode(JSON.stringify(body)).length;
+  expect(serialized).toBeGreaterThan(37 * 1000 * 1000);
+  expect(serialized).toBeLessThanOrEqual(MAX_BOARD_BODY_BYTES);
+  const parsed = await validateBoardPatchRequest(patchRequest(body));
+  expect(parsed.patch?.manual).toHaveLength(512);
+});

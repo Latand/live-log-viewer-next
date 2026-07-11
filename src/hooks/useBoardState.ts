@@ -23,13 +23,13 @@ const RETRY_MAX_MS = 30_000;
    cap only guards against a pathological writer that never yields. */
 const MAX_CONFLICT_RETRIES = 8;
 /* Mirrors the server's per-PATCH mutation cap (`validateBoardPatchRequest`):
-   an outbox that grew past it during an outage drains in accepted chunks
-   instead of one oversized batch the server would reject. */
+   an outbox that grew past it during an outage drains in accepted chunks;
+   a single batch past the cap would draw the server's validation error. */
 const MAX_MUTATIONS_PER_PATCH = 128;
-/* Serialized-bytes target per PATCH — a batching-efficiency budget, not a
-   validity bound: the server's MAX_BOARD_BODY_BYTES admits every single
-   validator-legal mutation, so `patchPrefix` letting its first mutation
-   through regardless of size can never draw a size rejection. */
+/* Serialized-bytes target per PATCH, purely a batching-efficiency budget.
+   Validity lives in the server's MAX_BOARD_BODY_BYTES, which admits every
+   single validator-legal mutation — `patchPrefix` letting its first mutation
+   through regardless of size stays safe. */
 const MAX_PATCH_BYTES = 192 * 1024;
 
 /** Exact serialized footprint: JSON escaping (backslashes, quotes, control
@@ -153,12 +153,18 @@ export function resetPendingOpensForTest(): void {
 type WriteAttempt =
   | { status: "ok"; board: BoardProjectStateV1 }
   | { status: "conflict"; board: BoardProjectStateV1 }
-  /* The server refused the batch itself (a non-409 4xx: oversized body,
-     validation failure). Resending the same bytes can never succeed, so the
-     batch must be dropped — retrying it forever wedges every later mutation
-     queued behind it (the /api/board 413 storm). */
+  /* The server's validator refused the batch content itself, identified by a
+     structured permanent error code. Resending the same bytes can never
+     succeed, so the batch must be dropped — retrying it forever wedges every
+     later mutation queued behind it (the /api/board 413 storm). Access
+     failures (401/403) and other transient 4xx keep the queued intent and
+     take the backoff path. */
   | { status: "rejected" }
   | { status: "error" };
+
+/* Validation verdicts that no retry can change; every other failure keeps the
+   outbox for the backoff retry. */
+const PERMANENT_REJECTION_CODES = new Set(["INVALID_REQUEST", "PAYLOAD_TOO_LARGE", "UNSUPPORTED_SCHEMA_VERSION", "SCOPE_TOO_LARGE"]);
 
 /** Two boards carry the same durable arrangement when their prefs and aliases
     match — the same comparison the server uses to treat a mutation as a no-op. */
@@ -244,8 +250,8 @@ export function createBoardStore(options: BoardStoreOptions): BoardStore {
      retry immediately up to a cap before falling back to the backoff timer. */
   let conflictStreak = 0;
   /* Bisection cap while isolating a rejected batch: a refused multi-mutation
-     PATCH halves the next attempt instead of dropping anything, until the
-     offender stands alone and only it is shed. Reset on any accepted write. */
+     PATCH drops nothing and halves the next attempt, until the offender
+     stands alone and only it is shed. Reset on any accepted write. */
   let rejectCap: number | null = null;
   let retryHandle: ReturnType<typeof scheduler.setTimeout> | null = null;
   let retryDelay = RETRY_BASE_MS;
@@ -273,7 +279,13 @@ export function createBoardStore(options: BoardStoreOptions): BoardStore {
       });
       if (res.ok) return { status: "ok", board: ((await res.json()) as { board: BoardProjectStateV1 }).board };
       if (res.status === 409) return { status: "conflict", board: ((await res.json()) as { board: BoardProjectStateV1 }).board };
-      if (res.status >= 400 && res.status < 500) return { status: "rejected" };
+      if (res.status >= 400 && res.status < 500) {
+        const body = (await res.json().catch(() => null)) as { error?: string } | null;
+        if (body?.error !== undefined && PERMANENT_REJECTION_CODES.has(body.error)) return { status: "rejected" };
+        /* Expired auth (403 from the proxy), rate limiting, unknown codes:
+           the queued intent survives and drains once access heals. */
+        return { status: "error" };
+      }
       return { status: "error" };
     } catch {
       return { status: "error" };
@@ -381,8 +393,8 @@ export function createBoardStore(options: BoardStoreOptions): BoardStore {
     }
     if (result.status === "rejected") {
       /* The server refused the batch as a unit without naming the offender.
-         Bisect instead of guessing: a multi-mutation batch drops nothing and
-         retries its first half, halving until the offender stands alone; only
+         Bisect: a refused multi-mutation batch drops nothing and retries its
+         first half, halving until the offender stands alone; only
          a single rejected mutation is shed. Valid mutations on either side of
          the poison all land on later attempts, and the loop terminates because
          every round either halves the attempt or shrinks the outbox. The

@@ -20,12 +20,15 @@ predecessor transcripts with recent mtimes):
 
 ## Acceptance criteria
 
-- AC1: A non-409 4xx response to a board PATCH drops the sent batch instead of
-  retrying it: no backoff timer armed, sync returns to "current", and
-  mutations queued behind the dropped batch still drain to the server.
+- AC1: A board PATCH refused with a structured permanent validation code
+  (INVALID_REQUEST, PAYLOAD_TOO_LARGE, UNSUPPORTED_SCHEMA_VERSION) sheds the
+  offending mutation after bisection: no backoff timer stays armed, sync
+  returns to "current", and mutations queued behind it still drain to the
+  server. Access failures (401/403) and other transient 4xx preserve the
+  queued intent and take the backoff path until access heals.
 - AC2: Semantics-coupled mutations (`reconcile-roots`, `remap-paths`) always
-  travel as ONE mutation — never split, so reducer atomicity can never be
-  broken by transport. Independent mutations batch into PATCHes bounded by
+  travel as ONE mutation each; transport therefore preserves reducer
+  atomicity by construction. Independent mutations batch into PATCHes bounded by
   the server's 128-mutation cap and a serialized-bytes batching budget. A
   rejected multi-mutation batch is bisected until the offender stands alone;
   only the lone rejected mutation is shed, so valid mutations on either side

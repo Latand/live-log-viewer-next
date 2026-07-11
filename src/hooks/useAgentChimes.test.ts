@@ -86,13 +86,13 @@ test("a child joining the tree blips spawned once, even across feed churn", () =
   expect(back.chimes).toEqual([]);
 });
 
-test("a subagent that lived its whole life between polls rings the finish, not the blip", () => {
+test("a subagent that lived its whole life between polls rings only the finish chime", () => {
   const prev = new Map<string, TrackedConversation>([["/parent", { state: "live", kind: undefined, parent: null }]]);
   const plan = planAgentChimes([live("/parent"), waiting("/child", { parent: "/parent" })], prev, new Set());
   expect(plan.chimes).toEqual([{ kind: "question", id: "/child" }]);
 });
 
-test("tracked history stores transition fields only, never the FileEntry", () => {
+test("tracked history stores transition fields only", () => {
   const plan = planAgentChimes([waiting("/a", { parent: "/p" })], null, new Set());
   expect(plan.tracked.get("/a")).toEqual({ state: "waiting", kind: "question", parent: "/p" });
 });
