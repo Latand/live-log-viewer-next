@@ -18,7 +18,7 @@ function readTarget(filename: string): ViewerReleaseIdentity | null {
 
 /** Each accepted connection reads one atomically replaced release target. */
 export function serveViewerDeploymentProxy(targetFile: string, port = 8898, host = "127.0.0.1"): net.Server {
-  const server = net.createServer((downstream) => {
+  const server = net.createServer({ pauseOnConnect: true }, (downstream) => {
     const target = readTarget(targetFile);
     if (!target) {
       downstream.end("HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nContent-Length: 0\r\n\r\n");
@@ -30,10 +30,9 @@ export function serveViewerDeploymentProxy(targetFile: string, port = 8898, host
       return;
     }
     const upstream = net.createConnection({ host: endpoint.hostname, port: Number(endpoint.port) });
-    upstream.once("connect", () => {
-      downstream.pipe(upstream);
-      upstream.pipe(downstream);
-    });
+    downstream.pipe(upstream);
+    upstream.pipe(downstream);
+    downstream.resume();
     upstream.once("error", () => downstream.destroy());
     downstream.once("error", () => upstream.destroy());
     downstream.once("close", () => upstream.destroy());

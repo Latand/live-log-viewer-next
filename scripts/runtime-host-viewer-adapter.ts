@@ -23,7 +23,7 @@ const stateDir = process.env.LLV_STATE_DIR || "/home/latand/.config/agent-log-vi
 const deploymentDir = path.join(stateDir, "deployments");
 const mirrorDir = path.join(deploymentDir, "canonical.git");
 const targetFile = process.env.LLV_VIEWER_DEPLOY_TARGET || path.join(stateDir, "viewer-release.json");
-const canonicalRemote = process.env.LLV_VIEWER_CANONICAL_REMOTE || "git@github.com:Latand/live-log-viewer-next.git";
+const canonicalRemote = process.env.LLV_VIEWER_CANONICAL_REMOTE || "https://github.com/Latand/live-log-viewer-next.git";
 const runtimeSocket = process.env.LLV_RUNTIME_HOST_SOCKET || path.join(stateDir, "runtime-host.sock");
 const stableEndpoint = `http://127.0.0.1:${Number(process.env.LLV_VIEWER_PORT || 8898)}`;
 
