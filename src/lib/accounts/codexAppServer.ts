@@ -107,7 +107,7 @@ function spawnCodexAppServer(home: string): CodexAppServerChild {
 
 /** Errors crossing the app-server boundary are deliberately safe for logs and routes. */
 export class CodexAppServerError extends Error {
-  constructor(message: string) {
+  constructor(message: string, readonly outcome: "definite" | "unknown" = "definite") {
     super(redactAppServerDetail(message));
     this.name = "CodexAppServerError";
   }
@@ -118,7 +118,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function protocolError(message: string): CodexAppServerError {
-  return new CodexAppServerError(`Codex app-server protocol error: ${message}`);
+  return new CodexAppServerError(`Codex app-server protocol error: ${message}`, "unknown");
 }
 
 function serverError(value: { code: number; message: string }): CodexAppServerError {
@@ -183,7 +183,7 @@ export class CodexAppServerClient {
     child.stderr?.on("data", (chunk: Buffer | string) => {
       this.stderrTail = redactAppServerDetail((this.stderrTail + String(chunk)).slice(-2_000));
     });
-    child.on("error", (error) => this.fail(new CodexAppServerError(`Codex app-server child error: ${error.message}`)));
+    child.on("error", (error) => this.fail(new CodexAppServerError(`Codex app-server child error: ${error.message}`, "unknown")));
     child.on("close", (code, signal) => {
       this.reaped = true;
       if (this.shutdownTimer) {
@@ -192,7 +192,7 @@ export class CodexAppServerClient {
       }
       this.emitLifecycle({ type: "reaped" });
       const detail = this.stderrTail ? `: ${this.stderrTail}` : "";
-      if (!this.closed) this.fail(new CodexAppServerError(`Codex app-server exited (code ${code ?? "none"}, signal ${signal ?? "none"})${detail}`));
+      if (!this.closed) this.fail(new CodexAppServerError(`Codex app-server exited (code ${code ?? "none"}, signal ${signal ?? "none"})${detail}`, "unknown"));
     });
   }
 
@@ -334,7 +334,7 @@ export class CodexAppServerClient {
     this.closed = true;
     for (const pending of this.pending.values()) {
       this.clock.clearTimeout(pending.timeout);
-      pending.reject(new CodexAppServerError("Codex app-server client closed"));
+      pending.reject(new CodexAppServerError("Codex app-server client closed", "unknown"));
     }
     this.pending.clear();
     this.beginShutdown();
@@ -352,7 +352,7 @@ export class CodexAppServerClient {
       const timeout = this.clock.setTimeout(() => {
         if (!this.pending.has(id)) return;
         this.pending.delete(id);
-        const error = new CodexAppServerError(`Codex app-server request timed out: ${method}`);
+        const error = new CodexAppServerError(`Codex app-server request timed out: ${method}`, "unknown");
         reject(error);
         // A timed-out JSON-RPC id cannot be safely correlated with a later reply.
         // Reap the whole stdio transport so a late response cannot affect a new call.
@@ -410,7 +410,7 @@ export class CodexAppServerClient {
       parsed = parseAppServerMessage(message);
     } catch (error) {
       const detail = error instanceof CodexAppServerProtocolError ? error.message : "received malformed JSON-RPC";
-      this.fail(new CodexAppServerError(detail));
+      this.fail(new CodexAppServerError(detail, "unknown"));
       return;
     }
     this.lastInboundEnvelope = parsed.envelope;

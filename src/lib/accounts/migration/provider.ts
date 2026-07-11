@@ -665,8 +665,7 @@ export class RegisteredSuccessorProvider implements SuccessorProviderPort {
         try {
           created = await sourceClient.forkThread(sourceNativeId);
         } catch (error) {
-          const uncertain = error instanceof CodexAppServerError
-            && /request timed out|app-server exited|app-server child error|protocol error|malformed JSON-RPC/i.test(error.message);
+          const uncertain = error instanceof CodexAppServerError && error.outcome === "unknown";
           if (uncertain) throw new CodexForkOutcomeUnknownError(error.message);
           journal.forkRequestedAtMs = null;
           assertLeaseOwned();

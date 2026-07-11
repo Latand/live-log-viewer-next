@@ -1,16 +1,16 @@
-# Issue #98: Flaky account-migration GET purity test
+# Issue #86 follow-up: Harden migration successor recovery
 
-## Task
+## Task statement
 
-Diagnose and remove the cross-test state pollution that intermittently causes `src/app/api/account-migration-get-purity.test.ts` to fail during the full Bun test suite. Preserve the conditional GET and durable-byte purity guarantees with hermetic test inputs and correctly isolated workflow-store state.
+Harden recovery after partial successor creation. Definite Codex fork failures must remain retryable, uncertain transport and protocol outcomes must retain ambiguity, and Claude tmux cleanup must distinguish an absent original host from an endpoint or process identity whose state cannot be verified.
 
 ## Acceptance criteria
 
-- AC1: The pollution has a deterministic regression test that fails when workflow state paths remain bound to an earlier `LLV_STATE_DIR`.
-- AC2: Workflow persistence resolves its state directory at operation time and follows an environment change made after module import.
-- AC3: Workflow-store tests restore the captured environment value and remove only their owned sandbox.
-- AC4: The account-migration GET-purity test uses stable transcript-scan input while exercising the production response implementation.
-- AC5: A matching conditional request returns HTTP 304 and leaves durable state bytes unchanged.
-- AC6: The targeted regression tests pass.
-- AC7: At least three consecutive full `bun test` runs pass.
-- AC8: `bunx tsc --noEmit` passes.
+- AC1: A definite pre-dispatch or server-rejected Codex fork failure clears the pending request marker and retries the fork on the next attempt.
+- AC2: A Codex fork failure with an uncertain transport or protocol outcome preserves the pending request marker and blocks duplicate dispatch until artifact recovery resolves it.
+- AC3: Malformed post-dispatch app-server frames and successful fork payloads with missing required fields are classified as unknown outcomes.
+- AC4: Claude cleanup treats explicit missing-pane evidence, a replaced pane identity, or a restarted original tmux server as completed cleanup.
+- AC5: Claude cleanup remains pending when its tmux endpoint or pane query fails without explicit absence evidence.
+- AC6: Claude cleanup remains pending when a required persisted server or pane process identity cannot be observed.
+- AC7: `bun test` passes.
+- AC8: `bunx tsc --noEmit` completes without diagnostics.
