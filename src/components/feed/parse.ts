@@ -129,6 +129,8 @@ export type Item =
 /** One rendered feed row: `key` is stable across incremental re-feeds, so a
     row keeps its DOM node (and its memoized render) while the tail grows. */
 export interface FeedEntry {
+  /** Source-position identity for viewport restoration across parser resets. */
+  anchorKey: string | null;
   key: string;
   item: Item;
 }
@@ -1525,11 +1527,18 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
   const buildSnapshot = (isLive: boolean): FeedSnapshot => {
     const out: FeedEntry[] = [];
     const nextGroups = new Map<number, CmdGroupItem>();
+    const anchorOrdinals = new Map<string, number>();
+    const anchorKey = (entry: StoredEntry, prefix: "row" | "group") => {
+      const source = `${prefix}:${entry.src}`;
+      const ordinal = anchorOrdinals.get(source) ?? 0;
+      anchorOrdinals.set(source, ordinal + 1);
+      return `${source}:${ordinal}`;
+    };
     let i = 0;
     while (i < entries.length) {
       const head = entries[i];
       if (!foldableTool(head.item)) {
-        out.push({ key: String(head.seq), item: head.item });
+        out.push({ anchorKey: anchorKey(head, "row"), key: String(head.seq), item: head.item });
         i += 1;
         continue;
       }
@@ -1571,15 +1580,15 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
           };
         }
         nextGroups.set(gkey, group);
-        out.push({ key: "g" + gkey, item: group });
+        out.push({ anchorKey: anchorKey(head, "group"), key: "g" + gkey, item: group });
         i = j;
       } else {
-        out.push({ key: String(head.seq), item: head.item });
+        out.push({ anchorKey: anchorKey(head, "row"), key: String(head.seq), item: head.item });
         i += 1;
       }
     }
     prevGroups = nextGroups;
-    pendingPlainItems().forEach((item, idx) => out.push({ key: "pb" + idx, item }));
+    pendingPlainItems().forEach((item, idx) => out.push({ anchorKey: null, key: "pb" + idx, item }));
     return { items: out, hiddenServiceCount };
   };
 
