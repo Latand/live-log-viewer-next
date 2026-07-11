@@ -885,7 +885,12 @@ export async function patchPipeline(
       }
       if (req.prompt !== undefined) {
         if (typeof req.prompt !== "string" || !req.prompt.trim()) return { error: "prompt must be a non-empty string", status: 400 };
-        target.prompt = req.prompt.trim();
+        const prompt = req.prompt.trim();
+        /* Same ceiling creation enforces (normalizeStages), so an override can
+           never persist a record larger than the create path would accept and
+           later balloon a run prompt / park review-loop delivery. */
+        if (prompt.length > MAX_STAGE_PROMPT_LENGTH) return { error: `stage prompt exceeds ${MAX_STAGE_PROMPT_LENGTH} characters`, status: 400 };
+        target.prompt = prompt;
         touched = true;
       }
       if (!touched) return { error: "override-stage needs at least one field to change", status: 400 };

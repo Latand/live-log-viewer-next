@@ -52,6 +52,10 @@ import {
 export const MOVE_MS = 380;
 export const MOVE_EASE = `cubic-bezier(.22,.8,.36,1)`;
 export const MOVE_TRANSITION = `transform ${MOVE_MS}ms ${MOVE_EASE}`;
+/* Group halos position with left/top (to avoid a transform stacking context that
+   would trap the label chip); their glide transitions those instead of transform,
+   plus transform for the detached override panel. */
+export const GROUP_MOVE_TRANSITION = `left ${MOVE_MS}ms ${MOVE_EASE}, top ${MOVE_MS}ms ${MOVE_EASE}, width ${MOVE_MS}ms ${MOVE_EASE}, height ${MOVE_MS}ms ${MOVE_EASE}, transform ${MOVE_MS}ms ${MOVE_EASE}`;
 
 /** Round-chip click on a strip, delivered to that flow's deck. */
 export interface DeckFocus {
@@ -290,53 +294,66 @@ export const GroupsLayer = memo(function GroupsLayer({
 }) {
   const [openId, setOpenId] = useState<string | null>(null);
   if (!groups.length) return null;
+  const openGroup = interactive ? groups.find((group) => group.id === openId) ?? null : null;
   return (
+    /* A plain (static) root: it creates no stacking context, so the chip's and
+       panel's z-indexes below participate directly in the board's world layer
+       and can paint above the cards. */
     <div aria-hidden={false}>
       {groups.map((group) => {
         const color = `hsl(${group.hue} 62% 42%)`;
         const soft = `hsl(${group.hue} 62% 42% / 0.055)`;
-        const open = interactive && openId === group.id;
+        const open = openGroup?.id === group.id;
         return (
+          /* Positioned with left/top rather than a transform: a transform would
+             create a stacking context that traps the chip beneath the later
+             NodesLayer (and its strips). left/top with no z-index keeps this
+             wrapper stacking-context-free, so the chip's z-index escapes it. */
           <div
             key={group.key}
             data-scheme-group={group.kind}
-            className="pointer-events-none absolute z-0"
-            style={{ transform: `translate(${group.x}px, ${group.y}px)`, width: group.w, height: group.h, transition: MOVE_TRANSITION }}
+            className="pointer-events-none absolute"
+            style={{ left: group.x, top: group.y, width: group.w, height: group.h, transition: GROUP_MOVE_TRANSITION }}
           >
             <div
               aria-hidden
               className="absolute inset-0 rounded-[20px] border-2 border-dashed"
               style={{ borderColor: color, backgroundColor: soft }}
             />
-            <div className={`absolute -top-3 left-5 ${interactive ? "pointer-events-auto" : ""}`}>
-              <button
-                data-scheme-ui
-                className="inline-flex max-w-[240px] items-center gap-1 rounded-full border-2 bg-panel px-2.5 py-0.5 font-bold shadow-card hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:cursor-default"
-                style={{ borderColor: color, color, fontSize: "calc(11px * min(var(--inv-z, 1), 2.6))" }}
-                aria-expanded={open}
-                aria-haspopup="dialog"
-                disabled={!interactive}
-                onClick={() => setOpenId((value) => (value === group.id ? null : group.id))}
-              >
-                <span aria-hidden>{group.kind === "pipeline" ? "⇢" : "⟳"}</span>
-                <span className="truncate">{group.label}</span>
-              </button>
-              {open ? (
-                <div
-                  className="absolute left-0 top-full z-40 mt-1"
-                  onKeyDown={(event) => {
-                    if (event.key !== "Escape") return;
-                    event.stopPropagation();
-                    setOpenId(null);
-                  }}
-                >
-                  <GroupOverridePanel group={group} onClose={() => setOpenId(null)} />
-                </div>
-              ) : null}
-            </div>
+            <button
+              data-scheme-ui
+              className={`absolute -top-3 left-5 z-[8] inline-flex max-w-[240px] items-center gap-1 rounded-full border-2 bg-panel px-2.5 py-0.5 font-bold shadow-card hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:cursor-default ${
+                interactive ? "pointer-events-auto" : ""
+              }`}
+              style={{ borderColor: color, color, fontSize: "calc(11px * min(var(--inv-z, 1), 2.6))" }}
+              aria-expanded={open}
+              aria-haspopup="dialog"
+              disabled={!interactive}
+              onClick={() => setOpenId((value) => (value === group.id ? null : group.id))}
+            >
+              <span aria-hidden>{group.kind === "pipeline" ? "⇢" : "⟳"}</span>
+              <span className="truncate">{group.label}</span>
+            </button>
           </div>
         );
       })}
+      {/* The open panel is a foreground sibling — outside every halo's wrapper —
+          so its high z-index paints above the scheme cards (issue #118 review:
+          the panel must never open beneath a card). Positioned in world space
+          just under its group's label chip. */}
+      {openGroup ? (
+        <div
+          className="pointer-events-auto absolute left-0 top-0 z-[45]"
+          style={{ transform: `translate(${openGroup.x + 20}px, ${openGroup.y + 16}px)`, transition: GROUP_MOVE_TRANSITION }}
+          onKeyDown={(event) => {
+            if (event.key !== "Escape") return;
+            event.stopPropagation();
+            setOpenId(null);
+          }}
+        >
+          <GroupOverridePanel group={openGroup} onClose={() => setOpenId(null)} />
+        </div>
+      ) : null}
     </div>
   );
 });

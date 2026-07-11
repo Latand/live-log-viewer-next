@@ -616,3 +616,17 @@ test("override-stage validates the target and requires a change", async () => {
   expect((await patchPipeline(created.id, { action: "override-stage", stageId: "build", engine: "gemini" as never }, ports)).status).toBe(400);
   expect((await patchPipeline(created.id, { action: "override-stage", stageId: "build", prompt: "  " }, ports)).status).toBe(400);
 });
+
+test("override-stage enforces the same prompt-size ceiling as creation (issue #118 review F5)", async () => {
+  const { ports } = harness();
+  const { MAX_STAGE_PROMPT_LENGTH } = await import("./limits");
+  const created = await create(ports);
+  /* Over the ceiling is rejected with a 400, not persisted as an oversized record. */
+  const over = await patchPipeline(created.id, { action: "override-stage", stageId: "build", prompt: "x".repeat(MAX_STAGE_PROMPT_LENGTH + 1) }, ports);
+  expect(over.status).toBe(400);
+  expect(over.error).toContain(String(MAX_STAGE_PROMPT_LENGTH));
+  expect(loadPipelines()[0]!.stages.find((stage) => stage.id === "build")!.prompt).toBe("Build from {{prev.output}}");
+  /* Exactly at the ceiling is accepted. */
+  const atLimit = await patchPipeline(created.id, { action: "override-stage", stageId: "build", prompt: "y".repeat(MAX_STAGE_PROMPT_LENGTH) }, ports);
+  expect(atLimit.error).toBeUndefined();
+});

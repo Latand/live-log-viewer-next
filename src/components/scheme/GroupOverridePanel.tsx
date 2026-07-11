@@ -7,7 +7,7 @@ import type { FlowEngine } from "@/lib/flows/types";
 import type { PipelineStage } from "@/lib/pipelines/types";
 import { useLocale } from "@/lib/i18n";
 
-import { patchFlow } from "@/components/flows/flowModel";
+import { flowPresentation, patchFlow } from "@/components/flows/flowModel";
 import { patchPipeline } from "@/components/pipelines/pipelineModel";
 
 import type { SchemeGroup } from "./layout";
@@ -106,7 +106,7 @@ function EngineSelect({ value, onChange }: { value: FlowEngine; onChange: (value
 }
 
 function FlowOverride({ group, onClose }: { group: SchemeGroup; onClose: () => void }) {
-  const { t } = useLocale();
+  const { locale, t } = useLocale();
   const flow = group.flow!;
   const reviewer = flow.roles.reviewer;
   const [engine, setEngine] = useState<FlowEngine>(reviewer.engine);
@@ -119,6 +119,13 @@ function FlowOverride({ group, onClose }: { group: SchemeGroup; onClose: () => v
   const [saved, setSaved] = useState<string | null>(null);
 
   const closed = flow.state === "closed" || flow.state === "approved";
+  /* The one action the current state is waiting on (Start review / Spawn / Relay
+     / Retry round / …). `advance` and `retry-round` create or restart the next
+     round, so they carry the next-round note; the others (spawn/relay hops) don't
+     consume it, so the note stays a no-op input there — but the button still lets
+     the operator drive the flow forward from the panel. */
+  const pending = flowPresentation(t, flow, locale).pending;
+  const pendingCarriesNote = pending?.action === "advance" || pending?.action === "retry-round";
 
   const run = async (label: string, action: () => Promise<string | null>) => {
     if (busy) return;
@@ -209,17 +216,20 @@ function FlowOverride({ group, onClose }: { group: SchemeGroup; onClose: () => v
       </div>
 
       <div className="flex items-center gap-1.5">
-        {flow.state === "needs_decision" ? (
+        {pending ? (
           <button
             className={primaryBtn + " flex-1"}
             disabled={busy}
             onClick={() =>
-              void run(t("groupOverride.savedRetry"), () =>
-                patchFlow(flow.id, { action: "retry-round", note: note.trim() || undefined }),
+              void run(pending.action === "retry-round" ? t("groupOverride.savedRetry") : t(pending.labelKey), () =>
+                patchFlow(flow.id, {
+                  action: pending.action,
+                  ...(pendingCarriesNote ? { note: note.trim() || undefined } : {}),
+                }),
               )
             }
           >
-            <RefreshCw className="h-3 w-3" aria-hidden /> {t("flowStrip.retryRound")}
+            <RefreshCw className="h-3 w-3" aria-hidden /> {t(pending.labelKey)}
           </button>
         ) : null}
         {flow.state === "reviewing" ? (

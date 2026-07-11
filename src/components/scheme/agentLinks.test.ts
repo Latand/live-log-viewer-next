@@ -432,6 +432,22 @@ describe("group overlay derivation (issue #118)", () => {
     expect([...specs[0]!.members].sort()).toEqual(["/build", "/plan"]);
   });
 
+  test("a retried stage keeps every materialized attempt node in the halo", () => {
+    /* build was retried: attempt 1 (/build-1) still renders as a sibling node,
+       attempt 2 (/build-2) is current. Both must stay inside the halo even though
+       links/controls use only the latest. */
+    const pipeline = {
+      id: "p1",
+      state: "running",
+      stages: [{ id: "build", kind: "run", next: null }],
+      runs: [
+        { stageId: "build", attempts: [{ agentPath: "/build-1", state: "failed" }, { agentPath: "/build-2", state: "running" }] },
+      ],
+    } as unknown as Pipeline;
+    const specs = deriveGroups([], [pipeline], (key) => (["/build-1", "/build-2"].includes(key) ? key : null));
+    expect([...specs[0]!.members].sort()).toEqual(["/build-1", "/build-2"]);
+  });
+
   test("closed flows and pipelines produce no group (dissolves on close)", () => {
     const closedFlow = flow({ id: "f1", implementerPath: "/impl", state: "closed", closedAt: "2026-07-06T00:00:00Z" });
     const closedPipeline = { id: "p1", state: "closed", stages: [], runs: [] } as unknown as Pipeline;

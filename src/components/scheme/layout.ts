@@ -404,10 +404,11 @@ export function buildSchemeLayout(
   ]);
   const flowImplementerPath = (flowId: string) => flows.find((flow) => flow.id === flowId)?.implementerPath ?? null;
 
-  /* Group halos enclose every placed node of the flow/pipeline, including the
-     stage children hanging below a run stage — so a spawned subtree reads as
-     part of the same marked region. Expand each derived member with its placed
-     descendants before taking the union bounding box. */
+  /* A pipeline halo also encloses the children hanging below its run stages, so a
+     spawned stage subtree reads as part of the same region. Expansion is limited
+     to pipeline stage roots on purpose: a standalone flow's halo stays the
+     implementer + reviewer deck, so an unrelated agent spawned below the
+     implementer never stretches the flow region across the board. */
   const placedNodePaths = new Set(nodes.map((node) => node.file.path));
   const expandMembers = (members: string[]): string[] => {
     const out = new Set(members);
@@ -427,7 +428,8 @@ export function buildSchemeLayout(
   };
   const groupHalos: SchemeGroup[] = [];
   for (const spec of deriveGroups(flows, pipelines, (key) => anchors.get(key) ?? null, flowImplementerPath)) {
-    const rect = groupRect(expandMembers(spec.members), (key) => byPath.get(key) ?? null, GROUP_PAD);
+    const members = spec.kind === "pipeline" ? expandMembers(spec.members) : spec.members;
+    const rect = groupRect(members, (key) => byPath.get(key) ?? null, GROUP_PAD);
     if (!rect) continue;
     groupHalos.push({ ...spec, ...rect, label: groupLabel(spec) });
   }

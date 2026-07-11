@@ -309,19 +309,23 @@ export function deriveGroups(
     if (pipeline.state === "closed") continue;
     const members = new Set<string>();
     for (const stage of pipeline.stages) {
-      const attempt = pipeline.runs.find((run) => run.stageId === stage.id)?.attempts.at(-1);
-      if (!attempt) continue;
-      if (stage.kind === "review-loop") {
-        const implPath = attempt.flowId ? flowImplementerPath(attempt.flowId) : null;
-        const impl = implPath ? anchorOf(implPath) : null;
-        if (impl) members.add(impl);
-        if (attempt.flowId) {
-          const deck = anchorOf(deckKey(attempt.flowId));
-          if (deck) members.add(deck);
+      /* Every materialized attempt, not just the latest: a retried stage can
+         leave earlier attempt transcripts as sibling nodes still on the board,
+         and the halo must enclose them too. Links/controls keep latest-attempt
+         semantics — this is membership only. */
+      for (const attempt of pipeline.runs.find((run) => run.stageId === stage.id)?.attempts ?? []) {
+        if (stage.kind === "review-loop") {
+          const implPath = attempt.flowId ? flowImplementerPath(attempt.flowId) : null;
+          const impl = implPath ? anchorOf(implPath) : null;
+          if (impl) members.add(impl);
+          if (attempt.flowId) {
+            const deck = anchorOf(deckKey(attempt.flowId));
+            if (deck) members.add(deck);
+          }
+        } else if (attempt.agentPath) {
+          const at = anchorOf(attempt.agentPath);
+          if (at) members.add(at);
         }
-      } else if (attempt.agentPath) {
-        const at = anchorOf(attempt.agentPath);
-        if (at) members.add(at);
       }
     }
     if (members.size) {
