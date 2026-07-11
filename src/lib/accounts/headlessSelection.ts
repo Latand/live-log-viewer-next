@@ -55,15 +55,17 @@ export function selectHeadlessAccount(
     .map((account) => ({ account, capacity: capacity(byAccount.get(account.id), now) }))
     .filter((candidate) => candidate.capacity.kind !== "unavailable");
   if (!candidates.length) return { kind: "unavailable" };
-  const rank = (accountId: string): number => excluded.has(accountId) ? 1 : 0;
-  const available = candidates
-    .flatMap((candidate) => candidate.capacity.kind === "available" ? [{ ...candidate, remaining: candidate.capacity.remaining }] : [])
-    .sort((left, right) => rank(left.account.id) - rank(right.account.id) || right.remaining - left.remaining || Number(right.account.id === preferredId) - Number(left.account.id === preferredId) || left.account.id.localeCompare(right.account.id));
-  if (available[0]) return { kind: "available", accountId: available[0].account.id };
-  const unknown = candidates
-    .filter((candidate) => candidate.capacity.kind === "unknown")
-    .sort((left, right) => rank(left.account.id) - rank(right.account.id) || Number(right.account.id === preferredId) - Number(left.account.id === preferredId) || left.account.id.localeCompare(right.account.id));
-  if (unknown[0]) return { kind: "available", accountId: unknown[0].account.id };
+  for (const attempted of [false, true]) {
+    const tier = candidates.filter((candidate) => excluded.has(candidate.account.id) === attempted);
+    const available = tier
+      .flatMap((candidate) => candidate.capacity.kind === "available" ? [{ ...candidate, remaining: candidate.capacity.remaining }] : [])
+      .sort((left, right) => right.remaining - left.remaining || Number(right.account.id === preferredId) - Number(left.account.id === preferredId) || left.account.id.localeCompare(right.account.id));
+    if (available[0]) return { kind: "available", accountId: available[0].account.id };
+    const unknown = tier
+      .filter((candidate) => candidate.capacity.kind === "unknown")
+      .sort((left, right) => Number(right.account.id === preferredId) - Number(left.account.id === preferredId) || left.account.id.localeCompare(right.account.id));
+    if (unknown[0]) return { kind: "available", accountId: unknown[0].account.id };
+  }
   const resets = candidates.flatMap((candidate) => candidate.capacity.kind === "exhausted" && candidate.capacity.resetsAt !== null ? [candidate.capacity.resetsAt] : []);
   return { kind: "exhausted", resetsAt: resets.length ? Math.min(...resets) : null };
 }

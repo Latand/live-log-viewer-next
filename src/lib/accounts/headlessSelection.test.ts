@@ -76,6 +76,13 @@ test("headless retry prefers an eligible account that has not already failed", (
   });
 });
 
+test("headless retry chooses an untried unknown-capacity account before a tried account with known headroom", () => {
+  expect(selectHeadlessAccount(accounts, [observation("default", 20)], "default", ["default"], NOW)).toEqual({
+    kind: "available",
+    accountId: "spare",
+  });
+});
+
 test("headless selection distinguishes missing authentication from exhausted quota", () => {
   expect(selectHeadlessAccount([{ id: "default", authPresent: false }], [], "default", [], NOW)).toEqual({ kind: "unavailable" });
 });
