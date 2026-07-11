@@ -17,6 +17,7 @@ import {
   sendInterrupt,
   sendKeys,
   sendText,
+  TmuxDeliveryUncertainError,
   withPaneLock,
   type InboxImagePayload,
 } from "@/lib/tmux";
@@ -363,7 +364,6 @@ export async function deliverConversationMessage(message: ConversationMessage, o
       const bundle = materializePayload();
       imagePaths = bundle.imagePaths;
       recordArtifacts();
-      actuation = "started";
       await (overrides.sendText ?? sendText)(target, bundle.payload);
       actuation = "completed";
       return settle({ ok: true, target, ...(imagePaths.length ? { imagePaths } : {}) });
@@ -384,7 +384,6 @@ export async function deliverConversationMessage(message: ConversationMessage, o
       const bundle = materializePayload();
       imagePaths = bundle.imagePaths;
       recordArtifacts();
-      actuation = "started";
       const outcome = await hostOutcome(deliverToTranscriptHost({ entry, spec, payload: bundle.payload }));
       if (!outcome.ok) { actuation = outcome.actuation === "started" ? "started" : "none"; return settle(cleanupFailedImageDelivery(outcome, imagePaths)); }
       actuation = "completed";
@@ -412,16 +411,16 @@ export async function deliverConversationMessage(message: ConversationMessage, o
     recordArtifacts();
     const relayText = `User message for your branch «${entry.title.slice(0, 100)}» — forward it or handle it yourself:\n${bundle.payload}`;
     const imageField = imagePaths.length ? { imagePaths } : {};
-    actuation = "started";
     const outcome = await hostOutcome(deliverToTranscriptHost({ entry: root, spec: rootSpec, payload: relayText }));
     if (!outcome.ok) { actuation = outcome.actuation === "started" ? "started" : "none"; return settle(cleanupFailedImageDelivery(outcome, imagePaths)); }
     actuation = "completed";
     return settle({ ...outcome, ...imageField });
   } catch (error) {
-    if (actuation === "none") {
+    const uncertain = actuation === "completed" || error instanceof TmuxDeliveryUncertainError;
+    if (!uncertain) {
       if (deliveryId) try { registry.discardDelivery(deliveryId); } catch { /* the original registry failure remains actionable */ }
       deleteInboxImages(imagePaths);
     }
-    return failure(error, 500, actuation === "none" ? undefined : "started");
+    return failure(error, 500, uncertain ? "started" : undefined);
   }
 }
