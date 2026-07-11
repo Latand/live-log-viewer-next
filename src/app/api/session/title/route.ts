@@ -20,10 +20,9 @@ interface PatchTitleBody {
   conversationId?: unknown;
   title?: unknown;
   baseRevision?: unknown;
-  /** Live agent pid so the change propagates to the tmux window name. */
-  pid?: unknown;
-  /** Effective title to stamp on the tmux window — the custom title on a set,
-      the derived title on a reset. Falls back to the stored title when absent. */
+  /** Derived title to stamp on the tmux window on a reset (the set-path window
+      name comes from the server-sanitized stored title). Sanitized server-side;
+      the pane is resolved from the target, not from the client. */
   windowName?: unknown;
 }
 
@@ -55,7 +54,9 @@ export async function PATCH(req: NextRequest): Promise<NextResponse<PatchTitleRe
   const target = resolveTitleTarget(body);
   if (!target) return NextResponse.json({ error: "unknown or unsupported session" }, { status: 400 });
 
-  const candidateKeys = titleKeysForEntry(target);
+  // Candidate keys include the target's alias conversation ids so a title filed
+  // under a provisional id is found and migrated onto the canonical key.
+  const candidateKeys = titleKeysForEntry(target, target.aliasConversationIds);
   const outcome = writeSessionTitle(candidateKeys, candidateKeys[0]!, body.title as string | null, body.baseRevision as number | undefined, isoNow());
   if (!outcome.ok) {
     // Structured 409: the editor adopts the current server record and retries.
@@ -65,16 +66,13 @@ export async function PATCH(req: NextRequest): Promise<NextResponse<PatchTitleRe
     );
   }
 
-  // Best-effort tmux window rename. Never let a tmux hiccup fail the durable
-  // rename that already committed to disk. On a set the window name is the
-  // server-sanitized title (never the raw client string); on a reset the client
-  // supplies the derived title, which we still sanitize before it reaches tmux.
-  const pid = typeof body.pid === "number" && Number.isInteger(body.pid) && body.pid > 0 ? body.pid : null;
-  if (pid !== null) {
-    const windowName = outcome.override?.title
-      ?? (typeof body.windowName === "string" ? sanitizeCustomTitle(body.windowName) : null);
-    if (windowName) await propagateTitleToWindow(pid, windowName);
-  }
+  // Best-effort tmux window rename, bound to the target's own live pane (the pid
+  // is resolved from the target, never trusted from the request). On a set the
+  // window name is the server-sanitized title; on a reset the client supplies
+  // the derived title, which we still sanitize before it reaches tmux.
+  const windowName = outcome.override?.title
+    ?? (typeof body.windowName === "string" ? sanitizeCustomTitle(body.windowName) : null);
+  if (windowName) await propagateTitleToWindow(target, windowName);
 
   return NextResponse.json({ ok: true, override: outcome.override });
 }

@@ -94,10 +94,20 @@ export function isRenameableSessionPath(pathname: string): boolean {
     identity owns the title when present (so account/compaction successors adopt
     it through the registry), the session UUID is the compatibility key that
     survives archive/revive/move, and the transcript path is the bounded
-    fallback for a session the registry never named. */
-export function titleKeysForEntry(entry: Pick<FileEntry, "engine" | "path" | "conversationId">): string[] {
+    fallback for a session the registry never named. `aliasConversationIds` are
+    former (e.g. provisional) conversation ids the registry has since coalesced
+    into the canonical one — including them keeps a title filed under an old id
+    reachable, and (because a write collapses onto the first key) migrates it
+    onto the canonical id. */
+export function titleKeysForEntry(
+  entry: Pick<FileEntry, "engine" | "path" | "conversationId">,
+  aliasConversationIds: readonly string[] = [],
+): string[] {
   const keys: string[] = [];
   if (entry.conversationId?.startsWith("conversation_")) keys.push(`conversation:${entry.conversationId}`);
+  for (const alias of aliasConversationIds) {
+    if (alias.startsWith("conversation_") && alias !== entry.conversationId) keys.push(`conversation:${alias}`);
+  }
   if (entry.engine === "claude" || entry.engine === "codex") {
     const sessionKey = sessionKeyFromTranscript(entry.engine, entry.path);
     if (sessionKey) keys.push(`uuid:${sessionKeyId(sessionKey)}`);
@@ -122,8 +132,9 @@ export function indexSessionTitles(records: SessionTitleOverride[]): Map<string,
 export function overrideForEntry(
   entry: Pick<FileEntry, "engine" | "path" | "conversationId">,
   index: Map<string, SessionTitleOverride>,
+  aliasConversationIds: readonly string[] = [],
 ): SessionTitleOverride | null {
-  for (const key of titleKeysForEntry(entry)) {
+  for (const key of titleKeysForEntry(entry, aliasConversationIds)) {
     const hit = index.get(key);
     if (hit) return hit;
   }
@@ -131,32 +142,81 @@ export function overrideForEntry(
 }
 
 /** Overlay a custom title onto a scanned entry. An active record replaces
-    `title` and preserves the derived title on `autoTitle`; a tombstone leaves
-    the title untouched (cleared → auto title stands). Either way `titleRevision`
-    carries the concurrency token consumers echo back on the next PATCH, so a
-    reset-then-rename never reuses a stale revision. */
-export function applyTitleOverride(entry: FileEntry, index: Map<string, SessionTitleOverride>): void {
-  const record = overrideForEntry(entry, index);
+    `title` and preserves the derived title on `autoTitle` — even when the two
+    strings match, so an explicit override that equals the derived title keeps
+    its provenance and Reset control. A tombstone leaves the title untouched
+    (cleared → auto title stands). Either way `titleRevision` carries the
+    concurrency token consumers echo back on the next PATCH, so a reset-then-
+    rename never reuses a stale revision. */
+export function applyTitleOverride(
+  entry: FileEntry,
+  index: Map<string, SessionTitleOverride>,
+  aliasConversationIds: readonly string[] = [],
+): void {
+  const record = overrideForEntry(entry, index, aliasConversationIds);
   if (!record) return;
   entry.titleRevision = record.revision;
-  if (record.title === null || record.title === entry.title) return;
+  if (record.title === null) return;
   entry.autoTitle = entry.title;
   entry.title = record.title;
 }
 
+const LOCK_STALE_MS = 10_000;
+const LOCK_WAIT_MS = 5_000;
+
+function sleep(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/**
+ * Interprocess mutual exclusion around the whole read-modify-write. Two Viewer
+ * instances share one `session-titles.json`; without a cross-process lock both
+ * could read the same revision, accept it, and clobber each other's write
+ * (mirrors `withRegistryLock` in accounts/claude.ts — exclusive-create lock
+ * file with stale reclamation and a bounded wait).
+ */
+function withTitlesLock<T>(lockPath: string, operation: () => T): T {
+  const started = Date.now();
+  fs.mkdirSync(path.dirname(lockPath), { recursive: true });
+  for (;;) {
+    try {
+      const fd = fs.openSync(lockPath, "wx", 0o600);
+      try {
+        fs.writeFileSync(fd, `${process.pid}\n`, "utf8");
+        return operation();
+      } finally {
+        fs.closeSync(fd);
+        fs.rmSync(lockPath, { force: true });
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      try {
+        if (Date.now() - fs.statSync(lockPath).mtimeMs > LOCK_STALE_MS) { fs.rmSync(lockPath, { force: true }); continue; }
+      } catch {
+        continue;
+      }
+      if (Date.now() - started >= LOCK_WAIT_MS) throw new Error("session titles store is busy; retry shortly");
+      sleep(10);
+    }
+  }
+}
+
 /**
  * Serialized read-modify-write over the titles file — the only sanctioned way
- * to persist a rename. The whole load→transform→save runs synchronously so a
- * handler can never save a snapshot that predates another handler's write
+ * to persist a rename. The load→transform→save runs synchronously inside an
+ * interprocess lock, so neither a concurrent request handler nor a second
+ * Viewer process can save a snapshot that predates another writer's write
  * (mirrors {@link import("@/lib/tasks/store").mutateTasks}).
  */
 export function mutateSessionTitles<R>(
   mutate: (records: SessionTitleOverride[]) => { records: SessionTitleOverride[] | undefined; result: R },
   filePath = titlesFile(),
 ): R {
-  const outcome = mutate(loadSessionTitles(filePath));
-  if (outcome.records) saveSessionTitles(capRecords(outcome.records), filePath);
-  return outcome.result;
+  return withTitlesLock(`${filePath}.lock`, () => {
+    const outcome = mutate(loadSessionTitles(filePath));
+    if (outcome.records) saveSessionTitles(capRecords(outcome.records), filePath);
+    return outcome.result;
+  });
 }
 
 /** Keep the store bounded — evict the least-recently-updated records once the

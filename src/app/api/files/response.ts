@@ -92,10 +92,19 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
      The pre-override title survives on `autoTitle`. The rename-eligibility flag
      is projected here too so the client never imports the Node-only store. */
   const titleIndex = indexSessionTitles(loadSessionTitles());
+  // Reverse the alias map (canonical → [former ids]) so a title filed under a
+  // provisional conversation id the registry has since coalesced is still found.
+  const aliasesByCanonical = new Map<string, string[]>();
+  for (const alias of Object.keys(registrySnapshot.conversationAliases)) {
+    const canonical = registry.canonicalConversationId(alias as `conversation_${string}`);
+    if (canonical === alias) continue;
+    const list = aliasesByCanonical.get(canonical);
+    if (list) list.push(alias); else aliasesByCanonical.set(canonical, [alias]);
+  }
   for (const file of files) {
     if (file.engine !== "claude" && file.engine !== "codex") continue;
     file.renamable = isRenameableSessionEntry(file);
-    if (titleIndex.size > 0) applyTitleOverride(file, titleIndex);
+    if (titleIndex.size > 0) applyTitleOverride(file, titleIndex, file.conversationId ? aliasesByCanonical.get(file.conversationId) ?? [] : []);
   }
   const tasks = reconcileTasks(files, loadTasks(), {
     pathForPanePid: (panePid, entries) => pathForPanePid(entries, panePid, readPpid),

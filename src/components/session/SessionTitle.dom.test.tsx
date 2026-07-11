@@ -123,7 +123,7 @@ test("pencil opens the editor and Enter saves the new name (rename + persistence
 
   expect(calls).toHaveLength(1);
   expect(calls[0]!.url).toBe("/api/session/title");
-  expect(calls[0]!.body).toMatchObject({ path: entry().path, title: "Login flow rework", pid: 4242 });
+  expect(calls[0]!.body).toMatchObject({ path: entry().path, title: "Login flow rework" });
 
   // Optimistic: the displayed title updates before any poll arrives.
   flushSync(() => {});

@@ -13,14 +13,13 @@ export function fireSessionTitlesChanged(): void {
 export interface SaveTitleInput {
   path: string;
   conversationId?: string;
-  /** Live agent pid so the change reaches the tmux window name. */
-  pid?: number | null;
   /** Non-empty sets the override; null/empty clears it back to the auto title. */
   title: string | null;
   /** Revision the editor last saw, for optimistic concurrency. */
   baseRevision: number;
-  /** Title to stamp on the tmux window — the custom title, or the auto title on
-      a reset. */
+  /** Derived title to stamp on the tmux window on a reset; the set-path window
+      name is the server-sanitized stored title. The pane is resolved from the
+      session server-side, not from the client. */
   windowName?: string;
 }
 
@@ -37,7 +36,6 @@ export async function saveSessionTitle(input: SaveTitleInput): Promise<SaveTitle
       body: JSON.stringify({
         path: input.path,
         conversationId: input.conversationId,
-        pid: input.pid ?? undefined,
         title: input.title,
         baseRevision: input.baseRevision,
         windowName: input.windowName,

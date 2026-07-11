@@ -94,7 +94,6 @@ export function SessionTitle({ file, displayMax = 90, titleClassName = "", class
     const result = await saveSessionTitle({
       path: file.path,
       conversationId: file.conversationId,
-      pid: file.pid,
       title: trimmed,
       baseRevision,
       windowName: trimmed ?? autoTitle,
@@ -115,7 +114,6 @@ export function SessionTitle({ file, displayMax = 90, titleClassName = "", class
       const retried = await saveSessionTitle({
         path: file.path,
         conversationId: file.conversationId,
-        pid: file.pid,
         title: trimmed,
         baseRevision: serverRevision,
         windowName: trimmed ?? autoTitle,

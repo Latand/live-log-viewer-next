@@ -16,8 +16,8 @@ const SESSION_PATH = `/home/u/.claude/projects/proj/${UUID}.jsonl`;
    @/lib/tmux — modules that sibling suites replace through bun's shared module
    registry. `target` drives what resolveTitleTarget returns; `renamed` records
    propagation calls. */
-let target: TitleTarget | null = { engine: "claude", path: SESSION_PATH, conversationId: "conversation_owner" };
-let renamed: { pid: number; name: string }[] = [];
+let target: TitleTarget | null = { engine: "claude", path: SESSION_PATH, conversationId: "conversation_owner", aliasConversationIds: [] };
+let renamed: { path: string; name: string }[] = [];
 
 mock.module("@/lib/session/titleTarget", () => ({
   resolveTitleTarget: (input: TitleTargetInput) => {
@@ -27,8 +27,10 @@ mock.module("@/lib/session/titleTarget", () => ({
     if (typeof input.path === "string" && input.path === "/etc/passwd") return null;
     return target;
   },
-  propagateTitleToWindow: async (pid: number, name: string) => {
-    renamed.push({ pid, name });
+  propagateTitleToWindow: async (resolved: TitleTarget, name: string) => {
+    // Records the resolved target and window name — the route resolves the pane
+    // from the target, never from the request.
+    renamed.push({ path: resolved.path, name });
   },
 }));
 
@@ -39,7 +41,7 @@ let stateDir = "";
 beforeEach(() => {
   stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "llv-title-state-"));
   process.env.LLV_STATE_DIR = stateDir;
-  target = { engine: "claude", path: SESSION_PATH, conversationId: "conversation_owner" };
+  target = { engine: "claude", path: SESSION_PATH, conversationId: "conversation_owner", aliasConversationIds: [] };
   renamed = [];
 });
 
@@ -68,10 +70,29 @@ test("sets a custom title keyed by the stable conversation identity and persists
 });
 
 test("falls back to the session UUID key when the registry does not own the session", async () => {
-  target = { engine: "claude", path: SESSION_PATH };
+  target = { engine: "claude", path: SESSION_PATH, aliasConversationIds: [] };
   const res = await patch({ path: SESSION_PATH, title: "Named" });
   const json = (await res.json()) as { override: { key: string } };
   expect(json.override.key).toBe(`uuid:claude:${UUID}`);
+});
+
+test("a title filed under a coalesced alias id migrates onto the canonical key", async () => {
+  // A rename lands while the session's provisional id is current.
+  target = { engine: "claude", path: SESSION_PATH, conversationId: "conversation_prov", aliasConversationIds: [] };
+  await patch({ conversationId: "conversation_prov", title: "Sticky" });
+  expect(loadSessionTitles().find((record) => record.key === "conversation:conversation_prov")?.title).toBe("Sticky");
+
+  // The registry coalesces it into the canonical id; the target now carries the
+  // former id as an alias. An update must find and migrate the stored record.
+  target = { engine: "claude", path: SESSION_PATH, conversationId: "conversation_canon", aliasConversationIds: ["conversation_prov"] };
+  const res = await patch({ conversationId: "conversation_canon", title: "Renamed", baseRevision: 1 });
+  expect(res.status).toBe(200);
+  const json = (await res.json()) as { override: { key: string; title: string; revision: number } };
+  expect(json.override.key).toBe("conversation:conversation_canon");
+  expect(json.override.title).toBe("Renamed");
+  const records = loadSessionTitles();
+  expect(records.some((record) => record.key === "conversation:conversation_prov")).toBe(false);
+  expect(records).toHaveLength(1);
 });
 
 test("empty title clears the override (leaving a revision-preserving tombstone)", async () => {
@@ -105,35 +126,31 @@ test("retrying against the current revision after a conflict succeeds", async ()
   expect(json.override.revision).toBe(2);
 });
 
-test("propagates the server-sanitized title to the tmux window, ignoring a crafted windowName", async () => {
+test("propagates the server-sanitized title to the resolved target, ignoring a crafted windowName", async () => {
   // The client asks for one window label but the persisted title is another —
-  // the window must follow the sanitized stored title, not the raw request.
-  await patch({ conversationId: "conversation_owner", title: "**Bold** name", pid: 4242, windowName: "arbitrary label" });
-  expect(renamed).toEqual([{ pid: 4242, name: "Bold name" }]);
+  // the window must follow the sanitized stored title, not the raw request; and
+  // propagation targets the resolved session, not a request-supplied pid.
+  await patch({ conversationId: "conversation_owner", title: "**Bold** name", windowName: "arbitrary label" });
+  expect(renamed).toEqual([{ path: SESSION_PATH, name: "Bold name" }]);
 });
 
 test("a reset sanitizes the client-provided window name before it reaches tmux", async () => {
-  await patch({ conversationId: "conversation_owner", title: "temp", pid: 4242 });
+  await patch({ conversationId: "conversation_owner", title: "temp" });
   renamed = [];
-  await patch({ conversationId: "conversation_owner", title: "", baseRevision: 1, pid: 4242, windowName: "**Auto** derived" });
-  expect(renamed).toEqual([{ pid: 4242, name: "Auto derived" }]);
-});
-
-test("does not attempt a window rename without a pid", async () => {
-  await patch({ conversationId: "conversation_owner", title: "No pane" });
-  expect(renamed).toHaveLength(0);
+  await patch({ conversationId: "conversation_owner", title: "", baseRevision: 1, windowName: "**Auto** derived" });
+  expect(renamed).toEqual([{ path: SESSION_PATH, name: "Auto derived" }]);
 });
 
 test("clearing after the registry claims ownership migrates and clears the fallback-key override", async () => {
   // Filed under the session UUID before the conversation id existed.
-  target = { engine: "claude", path: SESSION_PATH };
+  target = { engine: "claude", path: SESSION_PATH, aliasConversationIds: [] };
   await patch({ path: SESSION_PATH, title: "Sticky" });
   expect(loadSessionTitles().find((record) => record.key === `uuid:claude:${UUID}`)?.title).toBe("Sticky");
 
   // The registry now owns the session; a reset routed through the conversation
   // key must still clear the UUID-filed record (finding: fallback-key overrides
   // couldn't be cleared and got restored on the next poll).
-  target = { engine: "claude", path: SESSION_PATH, conversationId: "conversation_owner" };
+  target = { engine: "claude", path: SESSION_PATH, conversationId: "conversation_owner", aliasConversationIds: [] };
   const res = await patch({ conversationId: "conversation_owner", title: "", baseRevision: 1 });
   expect(res.status).toBe(200);
   const records = loadSessionTitles();

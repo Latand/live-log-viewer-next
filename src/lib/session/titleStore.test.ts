@@ -154,6 +154,40 @@ test("base revision mismatch is a conflict carrying current server state", () =>
   expect(write(key, "two", 1, "t3")).toMatchObject({ ok: true, override: { title: "two", revision: 2 } });
 });
 
+test("alias conversation ids keep a title reachable and migrate it onto the canonical key", () => {
+  const provKey = "conversation:conversation_prov";
+  write(provKey, "Sticky", undefined, "t1");
+
+  const canonical = entry({ conversationId: "conversation_canon" });
+  const keys = titleKeysForEntry(canonical, ["conversation_prov"]);
+  // Canonical id stays preferred; the alias id is an extra candidate key.
+  expect(keys[0]).toBe("conversation:conversation_canon");
+  expect(keys).toContain("conversation:conversation_prov");
+
+  // Lookup finds the provisional-keyed record via the alias.
+  const index = indexSessionTitles(loadSessionTitles(file));
+  expect(overrideForEntry(canonical, index, ["conversation_prov"])?.title).toBe("Sticky");
+
+  // A write collapses onto the canonical key and drops the stale provisional one.
+  const updated = writeSessionTitle(keys, keys[0]!, "Renamed", 1, "t2", file);
+  expect(updated).toMatchObject({ ok: true, override: { key: "conversation:conversation_canon", title: "Renamed", revision: 2 } });
+  const after = loadSessionTitles(file);
+  expect(after.some((record) => record.key === provKey)).toBe(false);
+  expect(after).toHaveLength(1);
+});
+
+test("an override equal to the derived title keeps its autoTitle provenance and Reset marker", () => {
+  const key = preferredTitleKey(entry());
+  write(key, "Auto derived title", undefined, "t1"); // identical to the derived title
+  const index = indexSessionTitles(loadSessionTitles(file));
+  const file0 = entry();
+  applyTitleOverride(file0, index);
+  expect(file0.title).toBe("Auto derived title");
+  // autoTitle is set even though the strings match, so the client shows Reset.
+  expect(file0.autoTitle).toBe("Auto derived title");
+  expect(file0.titleRevision).toBe(1);
+});
+
 test("overlay applies the override and preserves the derived title as autoTitle", () => {
   const key = preferredTitleKey(entry());
   write(key, "Human name", undefined, "t1");
