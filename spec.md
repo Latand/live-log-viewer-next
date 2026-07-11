@@ -23,22 +23,18 @@ predecessor transcripts with recent mtimes):
 - AC1: A non-409 4xx response to a board PATCH drops the sent batch instead of
   retrying it: no backoff timer armed, sync returns to "current", and
   mutations queued behind the dropped batch still drain to the server.
-- AC2: The board store never sends more mutations in one PATCH than the
-  server's per-request validation cap (128); batching targets a byte budget
-  measured on the JSON-serialized form. A single mutation whose lists exceed
-  the per-list validation cap (512) is split into equivalent transport pieces
-  before entering the outbox. Splitting never changes reducer semantics:
-  reconcile pieces apply every removal before any addition; an over-cap remap
-  is flattened onto final targets through the board alias graph and
-  partitioned into groups that stay whole (shared final target, or coupled
-  via a pre-resolved source), proven equal to the atomic reducer result by
-  regression; an unsplittable over-cap component ships whole so the server's
-  verdict matches the atomic mutation's. A rejected multi-mutation batch is
-  bisected until the offender stands alone; only the lone rejected mutation
-  is shed, so valid mutations on either side of the poison still land.
-- AC3: `MAX_BOARD_BODY_BYTES` admits EVERY single mutation the item-level
-  validators accept (worst case ~4.2 MB), so no validator-legal mutation is
-  ever size-refused and byte size never forces a semantics-risking split; the
+- AC2: Semantics-coupled mutations (`reconcile-roots`, `remap-paths`) always
+  travel as ONE mutation — never split, so reducer atomicity can never be
+  broken by transport. Independent mutations batch into PATCHes bounded by
+  the server's 128-mutation cap and a serialized-bytes batching budget. A
+  rejected multi-mutation batch is bisected until the offender stands alone;
+  only the lone rejected mutation is shed, so valid mutations on either side
+  of the poison still land.
+- AC3: `MAX_BOARD_BODY_BYTES` is derived from the true worst case of one
+  maximal validator-legal mutation under full JSON escaping (two 512-path
+  lists of 4096-char control-heavy paths ≈ 25.2 MB → 32 MB cap), so no
+  validator-legal mutation is ever size-refused mid-transport; lists past the
+  item-level caps draw the server's atomic validation error instead. The
   per-item limits (512 paths, 4096 chars each) remain the real guard.
 - AC4: A conversation identity that leaves the capped feed and returns later
   in an unchanged attention state rings no chime; a genuine transition

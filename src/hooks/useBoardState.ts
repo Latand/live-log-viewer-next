@@ -32,130 +32,18 @@ const MAX_MUTATIONS_PER_PATCH = 128;
    through regardless of size can never draw a size rejection. */
 const MAX_PATCH_BYTES = 192 * 1024;
 
-/* Server-side per-list validation cap (`pathList` / remap `pairs`): a single
-   mutation carrying more entries than this is refused outright, so transport
-   splitting bounds item counts alongside bytes. */
-const MAX_PATHS_PER_MUTATION = 512;
-/** Exact serialized footprint of one array element: JSON escaping (backslashes,
-    quotes, control characters) can double a pathname's raw UTF-8 size, and the
-    server's body cap applies to the serialized form — so the budget must too. */
+/** Exact serialized footprint: JSON escaping (backslashes, quotes, control
+    characters) can multiply a pathname's raw UTF-8 size, and byte budgets
+    must match the serialized form the server measures. */
 function serializedBytes(value: unknown): number {
   const json = JSON.stringify(value);
   return typeof TextEncoder === "undefined" ? json.length : new TextEncoder().encode(json).length;
 }
 
-function chunkByCount<T>(items: readonly T[]): T[][] {
-  const chunks: T[][] = [];
-  for (let start = 0; start < items.length; start += MAX_PATHS_PER_MUTATION) {
-    chunks.push([...items.slice(start, start + MAX_PATHS_PER_MUTATION)]);
-  }
-  return chunks;
-}
-
-/** Follow the alias graph to its canonical end; null on a cycle (the server
-    validator rejects those atomically, so the caller passes them through). */
-function resolveAlias(path: string, aliases: Readonly<Record<string, string>>): string | null {
-  const seen = new Set<string>();
-  let resolved = path;
-  while (aliases[resolved] !== undefined) {
-    if (seen.has(resolved)) return null;
-    seen.add(resolved);
-    resolved = aliases[resolved]!;
-  }
-  return resolved;
-}
-
-/**
- * Break a mutation the item-level validators would refuse (>512 entries per
- * list) into transportable pieces. Byte size never forces a split: the server
- * body cap admits every validator-legal mutation whole, which is what makes
- * lossless splitting possible at all — cutting a remap graph by bytes cannot
- * preserve the reducer's atomic semantics in general.
- *
- * - `reconcile-roots` pieces apply every removal before any addition,
- *   mirroring the reducer's atomic order for overlapping lists; the lists are
- *   otherwise element-independent.
- * - `remap-paths` over the cap is flattened onto final canonical targets
- *   (resolved through the board's alias graph plus the batch — aliases only
- *   accumulate, so the closure is identical) and partitioned into groups that
- *   must stay whole: all pairs sharing a final target, unioned with any group
- *   whose final a pair's pre-resolved source lands on. Split anywhere else
- *   and a later piece re-targeting an already-planted final deletes its
- *   manual placement. A single group past the cap is inexpressible atomically
- *   — it ships whole so the server's verdict matches the atomic mutation's.
- */
-export function splitMutationForTransport(mutation: BoardMutationV1, boardAliases: Readonly<Record<string, string>> = {}): BoardMutationV1[] {
-  if (mutation.kind === "reconcile-roots") {
-    if (mutation.roots.length <= MAX_PATHS_PER_MUTATION && mutation.removeManual.length <= MAX_PATHS_PER_MUTATION) return [mutation];
-    return [
-      ...chunkByCount(mutation.removeManual).map((removeManual): BoardMutationV1 => ({ kind: "reconcile-roots", roots: [], removeManual })),
-      ...chunkByCount(mutation.roots).map((roots): BoardMutationV1 => ({ kind: "reconcile-roots", roots, removeManual: [] })),
-    ];
-  }
-  if (mutation.kind === "remap-paths") {
-    if (mutation.pairs.length <= MAX_PATHS_PER_MUTATION) return [mutation];
-    const combined: Record<string, string> = { ...boardAliases };
-    for (const pair of mutation.pairs) combined[pair.from] = pair.to;
-    /* Group pairs by flattened final target; a cycle is server-rejected, so it
-       passes through for the same atomic verdict. */
-    const groups = new Map<string, { from: string; to: string }[]>();
-    for (const pair of mutation.pairs) {
-      const final = resolveAlias(pair.to, combined);
-      if (final === null) return [mutation];
-      const group = groups.get(final) ?? [];
-      group.push({ from: pair.from, to: final });
-      groups.set(final, group);
-    }
-    /* Union-find over group finals: a pair whose PRE-batch source resolution
-       lands on another group's final couples the two (the reducer's
-       keep-manual test sees that source in the atomic batch, so the pieces
-       must too). */
-    const parent = new Map<string, string>();
-    const find = (start: string): string => {
-      let root = start;
-      while ((parent.get(root) ?? root) !== root) root = parent.get(root)!;
-      parent.set(start, root);
-      return root;
-    };
-    for (const pair of mutation.pairs) {
-      const source = resolveAlias(pair.from, boardAliases);
-      const final = resolveAlias(pair.to, combined)!;
-      if (source !== null && source !== final && groups.has(source)) {
-        const a = find(final);
-        const b = find(source);
-        if (a !== b) parent.set(a, b);
-      }
-    }
-    const merged = new Map<string, { from: string; to: string }[]>();
-    for (const [final, group] of groups) {
-      const root = find(final);
-      merged.set(root, [...(merged.get(root) ?? []), ...group]);
-    }
-    /* Pack whole merged groups; an over-cap group ships alone and whole. */
-    const pieces: BoardMutationV1[] = [];
-    let current: { from: string; to: string }[] = [];
-    for (const group of merged.values()) {
-      if (group.length > MAX_PATHS_PER_MUTATION) {
-        if (current.length) { pieces.push({ kind: "remap-paths", pairs: current }); current = []; }
-        pieces.push({ kind: "remap-paths", pairs: group });
-        continue;
-      }
-      if (current.length && current.length + group.length > MAX_PATHS_PER_MUTATION) {
-        pieces.push({ kind: "remap-paths", pairs: current });
-        current = [];
-      }
-      current.push(...group);
-    }
-    if (current.length) pieces.push({ kind: "remap-paths", pairs: current });
-    return pieces;
-  }
-  return [mutation];
-}
-
-/** The longest outbox prefix that fits both per-PATCH caps (`maxCount` can
-    tighten the count cap while isolating a rejected batch). Always at least
-    one mutation, so a single over-budget mutation is attempted (and, refused,
-    dropped) rather than wedging the queue. */
+/** The longest outbox prefix that fits both per-PATCH batching caps
+    (`maxCount` can tighten the count cap while isolating a rejected batch).
+    Always at least one mutation — safe, because the server body cap admits
+    any single validator-legal mutation regardless of this batching budget. */
 export function patchPrefix(outbox: readonly BoardMutationV1[], maxCount = MAX_MUTATIONS_PER_PATCH): BoardMutationV1[] {
   const cap = Math.max(1, Math.min(maxCount, MAX_MUTATIONS_PER_PATCH));
   const prefix: BoardMutationV1[] = [];
@@ -411,18 +299,17 @@ export function createBoardStore(options: BoardStoreOptions): BoardStore {
 
   const mutate = (mutations: readonly BoardMutationV1[]) => {
     if (mutations.length === 0) return;
-    /* Oversized mutations (a reconcile past the 512-path or byte budget) are
-       split into equivalent transport-sized pieces before they enter the
-       outbox, so no queued mutation can ever draw a size rejection alone.
-       Remap flattening resolves through the optimistic alias graph — the
-       confirmed board plus every queued remap. */
-    const aliasBase = optimisticBoard(confirmed, outbox).pathAliases ?? {};
-    const expanded = mutations.flatMap((mutation) => splitMutationForTransport(mutation, aliasBase));
+    /* Semantics-coupled mutations (reconcile-roots, remap-paths) always travel
+       whole: the server body cap admits the worst validator-legal mutation, so
+       transport never needs to split one — splitting a remap graph or a
+       reconcile provably cannot preserve reducer atomicity in general. Lists
+       past the item-level validator caps draw the server's atomic rejection
+       and the bisection sheds only that mutation. */
     /* Drop a batch that changes nothing optimistically — an idempotent
        reconcile/remap, or a close of an already-hidden path — so it never
        reaches transport and never bumps a revision. */
     const before = optimisticBoard(confirmed, outbox);
-    const nextOutbox = [...outbox, ...expanded];
+    const nextOutbox = [...outbox, ...mutations];
     const after = optimisticBoard(confirmed, nextOutbox);
     if (sameArrangement(before, after)) return;
     outbox = nextOutbox;

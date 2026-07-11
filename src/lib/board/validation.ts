@@ -4,11 +4,12 @@ import type { BoardMutationV1 } from "@/lib/board/mutations";
 
 /* Must admit every single mutation the item-level validators accept, or a
    validator-legal mutation becomes untransportable and the client can only
-   drop it: the worst case (512 paths × 4096 chars per list, escaping doubled)
-   serializes to ~4.2 MB. 6 MB covers that plus envelope with headroom. The
-   real guards are the item-level limits; this cap only fences unbounded
-   bodies on a localhost-only endpoint. */
-export const MAX_BOARD_BODY_BYTES = 6 * 1024 * 1024;
+   drop it. True worst case: JSON escapes a control character to six bytes
+   (`\u0007`), so one 4096-char path serializes to ~24.6 KB and a reconcile
+   carrying two full 512-path lists to ~25.2 MB. 32 MB covers that plus the
+   envelope with headroom. The real guards are the item-level limits; this
+   cap only fences unbounded bodies on a localhost-only endpoint. */
+export const MAX_BOARD_BODY_BYTES = 32 * 1024 * 1024;
 export type BoardPatch = Partial<BoardProjectStateV1["prefs"]>;
 
 function exact(value: Record<string, unknown>, allowed: readonly string[], field: string): void {
