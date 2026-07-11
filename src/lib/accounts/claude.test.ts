@@ -147,18 +147,27 @@ test("an interrupted registry replacement leaves the prior atomic registry reada
 
 test("concurrent child processes create and select accounts without losing registry updates", async () => {
   const modulePath = path.join(import.meta.dir, "claude.ts");
+  const mutationPath = path.join(import.meta.dir, "accountMutation.ts");
   const run = (source: string) => Bun.spawn({
     cmd: [process.execPath, "-e", source],
     env: { ...process.env, LLV_STATE_DIR: process.env.LLV_STATE_DIR!, LLV_CLAUDE_HOME: process.env.LLV_CLAUDE_HOME! },
     stdout: "ignore",
     stderr: "pipe",
   });
-  const create = (label: string) => run(`const m = await import(${JSON.stringify(modulePath)}); m.createManagedClaudeAccount(${JSON.stringify(label)});`);
+  const create = (label: string) => run(`
+    const m = await import(${JSON.stringify(modulePath)});
+    const { withAccountMutationLockAsync } = await import(${JSON.stringify(mutationPath)});
+    await withAccountMutationLockAsync(async () => m.createManagedClaudeAccount(${JSON.stringify(label)}));
+  `);
   const [first, second] = [create("Child A"), create("Child B")];
   expect(await first.exited).toBe(0); expect(await second.exited).toBe(0);
   const ids = mod.listClaudeAccounts().map((item) => item.id);
   expect(ids).toEqual(expect.arrayContaining(["child-a", "child-b"]));
-  const select = (id: string) => run(`const m = await import(${JSON.stringify(modulePath)}); m.setActiveClaudeAccount(${JSON.stringify(id)});`);
+  const select = (id: string) => run(`
+    const m = await import(${JSON.stringify(modulePath)});
+    const { withAccountMutationLockAsync } = await import(${JSON.stringify(mutationPath)});
+    await withAccountMutationLockAsync(async () => m.setActiveClaudeAccount(${JSON.stringify(id)}));
+  `);
   const [left, right] = [select("child-a"), select("child-b")];
   expect(await left.exited).toBe(0); expect(await right.exited).toBe(0);
   expect(["child-a", "child-b"]).toContain(mod.activeClaudeAccountId());

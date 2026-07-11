@@ -19,10 +19,12 @@ const { POST } = await import("./codex/active/route");
 const { POST: setClaudeActive } = await import("./claude/active/route");
 const { POST: createClaude } = await import("./claude/route");
 const { updateMigrationAction } = await import("../account-migrations/[intentId]/action");
-const { createManagedClaudeAccount } = await import("@/lib/accounts/claude");
-const { createManagedCodexAccount, listCodexAccounts, setCodexAccountLoginPane } = await import("@/lib/accounts/codex");
+const { activeClaudeAccountId, createManagedClaudeAccount, setActiveClaudeAccount } = await import("@/lib/accounts/claude");
+const { activeCodexAccountId, createManagedCodexAccount, listCodexAccounts, setActiveCodexAccount, setCodexAccountLoginPane } = await import("@/lib/accounts/codex");
+const { selectAccount } = await import("@/lib/accounts/manager");
 const { CodexAppServerClient } = await import("@/lib/accounts/codexAppServer");
 const { ManagedCodexRuntime, setManagedCodexRuntimeForTests } = await import("@/lib/accounts/codexRuntime");
+const { setClaudeLoginSupervisorForTests } = await import("@/lib/accounts/claudeLogin");
 const { AgentRegistry, agentRegistry } = await import("@/lib/agent/registry");
 const { emptyLaunchProfile } = await import("@/lib/accounts/migration/contracts");
 
@@ -53,6 +55,7 @@ beforeEach(() => {
   installRuntime(false);
 });
 afterAll(() => {
+  setClaudeLoginSupervisorForTests(null);
   setManagedCodexRuntimeForTests(null);
   if (OLD_STATE === undefined) delete process.env.LLV_STATE_DIR;
   else process.env.LLV_STATE_DIR = OLD_STATE;
@@ -67,7 +70,7 @@ function request(id: unknown, headers: HeadersInit = { host: "127.0.0.1" }): Nex
   return new NextRequest("http://127.0.0.1/api/accounts/codex/active", { method: "POST", headers, body: JSON.stringify({ id }) });
 }
 
-function migrationRequest(body: Record<string, unknown>): NextRequest {
+function activeRequest(body: Record<string, unknown>): NextRequest {
   return new NextRequest("http://127.0.0.1/api/accounts/codex/active", {
     method: "POST",
     headers: { host: "127.0.0.1", "content-type": "application/json" },
@@ -75,12 +78,12 @@ function migrationRequest(body: Record<string, unknown>): NextRequest {
   });
 }
 
-function claudeActiveRequest(id: string): NextRequest {
-  return new NextRequest("http://127.0.0.1/api/accounts/claude/active", {
-    method: "POST",
-    headers: { host: "127.0.0.1", "content-type": "application/json" },
-    body: JSON.stringify({ id }),
-  });
+function authenticateCodex(account: { home: string }): void {
+  fs.writeFileSync(path.join(account.home, "auth.json"), "{}", { mode: 0o600 });
+}
+
+function authenticateClaude(account: { home: string }): void {
+  fs.writeFileSync(path.join(account.home, ".credentials.json"), "{}", { mode: 0o600 });
 }
 
 test("accounts GET is secret-free and leaves login reconciliation to the controller", async () => {
@@ -233,24 +236,9 @@ test("active mutation rejects cross-origin, unknown, and corrupt catalogs", asyn
   expect(fs.readFileSync(registry, "utf8")).toBe("{ corrupt");
 });
 
-test("Codex active route requires preview or revision-fenced migrate mode", async () => {
-  const target = createManagedCodexAccount("Mode target");
-  const routingBefore = agentRegistry().snapshot().engineRouting.codex;
-
-  expect((await POST(request(target.id))).status).toBe(400);
-  expect(agentRegistry().snapshot().engineRouting.codex).toEqual(routingBefore);
-});
-
-test("Claude active route requires preview or revision-fenced migrate mode", async () => {
-  const target = createManagedClaudeAccount("Mode target");
-  const routingBefore = agentRegistry().snapshot().engineRouting.claude;
-
-  expect((await setClaudeActive(claudeActiveRequest(target.id))).status).toBe(400);
-  expect(agentRegistry().snapshot().engineRouting.claude).toEqual(routingBefore);
-});
-
-test("active route returns a target-aware preview and idempotent revision-fenced intent", async () => {
-  const target = createManagedCodexAccount("Migration target");
+test("Codex selection changes routing while preserving every conversation record", async () => {
+  const target = createManagedCodexAccount("Routing target");
+  authenticateCodex(target);
   agentRegistry().reconcileConversations([{
     engine: "codex",
     path: "/root.jsonl",
@@ -259,70 +247,117 @@ test("active route returns a target-aware preview and idempotent revision-fenced
     turn: { state: "idle", source: "empty", terminalAt: null },
     observedAt: "2026-07-10T12:00:00.000Z",
   }]);
-  const previewResponse = await POST(migrationRequest({ id: target.id, mode: "preview" }));
-  expect(previewResponse.status).toBe(200);
-  const preview = await previewResponse.json() as { targetId: string; targetLabel: string; counts: { total: number; idle: number; busy: number; deferred: number; alreadyTarget: number }; previewRevision: number };
-  expect(preview).toMatchObject({ targetId: target.id, targetLabel: "Migration target" });
-  expect(preview.counts).toEqual({ total: 1, idle: 0, busy: 0, deferred: 1, alreadyTarget: 0 });
-  expect(preview).not.toHaveProperty("excludedRoots");
-  expect(preview).not.toHaveProperty("rootWarning");
+  const before = agentRegistry().snapshot();
+  const response = await POST(activeRequest({ id: target.id, mode: "select" }));
+  const after = agentRegistry().snapshot();
 
-  const body = { id: target.id, mode: "migrate", previewRevision: preview.previewRevision, requestId: "route-idempotency" };
-  const first = await POST(migrationRequest(body));
-  const repeated = await POST(migrationRequest(body));
-  expect(first.status).toBe(202);
-  expect(repeated.status).toBe(202);
-  const firstBody = await first.json() as { intent: { id: string; targetId: string } };
-  const repeatedBody = await repeated.json() as { intent: { id: string; targetId: string } };
-  expect(repeatedBody.intent).toEqual(firstBody.intent);
+  expect(response.status).toBe(200);
+  expect(await response.json()).toMatchObject({ active: target.id, account: { id: target.id, active: true } });
+  expect(after.engineRouting.codex.activeAccountId).toBe(target.id);
+  expect(after.conversations).toEqual(before.conversations);
+  expect(after.migrationIntents).toEqual(before.migrationIntents);
+  expect(after.heldDeliveries).toEqual(before.heldDeliveries);
+  setActiveCodexAccount("default");
+  agentRegistry().setEngineRouting("codex", "default");
 });
 
-test("an explicit all scope migrates deferred history", async () => {
-  const target = createManagedCodexAccount("Bulk target");
-  agentRegistry().reconcileConversations([{
-    engine: "codex",
-    path: "/bulk-history.jsonl",
-    accountId: "default",
-    launchProfile: emptyLaunchProfile({ title: "Bulk history" }),
-    turn: { state: "idle", source: "empty", terminalAt: null },
-    observedAt: "2026-07-11T10:00:00.000Z",
-  }]);
-  const preview = await (await POST(migrationRequest({ id: target.id, mode: "preview" }))).json() as {
-    counts: { deferred: number };
-    previewRevision: number;
+test("Claude selection also updates only routing and the account catalog", async () => {
+  const target = createManagedClaudeAccount("Routing target");
+  authenticateClaude(target);
+  const before = agentRegistry().snapshot();
+  const response = await setClaudeActive(activeRequest({ id: target.id, mode: "select" }));
+  const after = agentRegistry().snapshot();
+
+  expect(response.status).toBe(200);
+  expect(after.engineRouting.claude.activeAccountId).toBe(target.id);
+  expect(after.conversations).toEqual(before.conversations);
+  expect(after.migrationIntents).toEqual(before.migrationIntents);
+  setActiveClaudeAccount("default");
+  agentRegistry().setEngineRouting("claude", "default");
+});
+
+test("active routes reject transcript migration modes", async () => {
+  const codex = createManagedCodexAccount("Codex target");
+  const claude = createManagedClaudeAccount("Claude target");
+  const before = agentRegistry().snapshot();
+
+  expect((await POST(activeRequest({ id: codex.id, mode: "migrate", previewRevision: 0 }))).status).toBe(400);
+  expect((await setClaudeActive(activeRequest({ id: claude.id, mode: "preview" }))).status).toBe(400);
+  expect(agentRegistry().snapshot()).toEqual(before);
+});
+
+test("active routes reject signed-out accounts before changing either routing store", async () => {
+  const codex = createManagedCodexAccount("Signed-out Codex");
+  const claude = createManagedClaudeAccount("Signed-out Claude");
+  const before = agentRegistry().snapshot();
+
+  const codexResponse = await POST(activeRequest({ id: codex.id, mode: "select" }));
+  const claudeResponse = await setClaudeActive(activeRequest({ id: claude.id, mode: "select" }));
+
+  expect(codexResponse.status).toBe(409);
+  expect(await codexResponse.json()).toMatchObject({ code: "authentication_required" });
+  expect(claudeResponse.status).toBe(409);
+  expect(await claudeResponse.json()).toMatchObject({ code: "authentication_required" });
+  expect(activeCodexAccountId()).toBe("default");
+  expect(activeClaudeAccountId()).toBe("default");
+  expect(agentRegistry().snapshot()).toEqual(before);
+});
+
+test("active routes reject authenticated accounts while login is in progress", async () => {
+  const codex = createManagedCodexAccount("Logging-in Codex");
+  const claude = createManagedClaudeAccount("Logging-in Claude");
+  authenticateCodex(codex);
+  authenticateClaude(claude);
+  setCodexAccountLoginPane(codex.id, { paneId: "%login", windowName: "codex-login", startedAt: Date.now() });
+  setClaudeLoginSupervisorForTests({
+    forAccount: (accountId: string) => accountId === claude.id ? {
+      operationId: "claude-login-pending",
+      phase: "verifying",
+      loginUrl: null,
+      acceptsCode: false,
+      deadlineAt: new Date(Date.now() + 60_000).toISOString(),
+      result: null,
+    } : null,
+  } as never);
+  const before = agentRegistry().snapshot();
+
+  try {
+    const codexResponse = await POST(activeRequest({ id: codex.id, mode: "select" }));
+    const claudeResponse = await setClaudeActive(activeRequest({ id: claude.id, mode: "select" }));
+
+    expect(codexResponse.status).toBe(409);
+    expect(await codexResponse.json()).toMatchObject({ code: "login_pending" });
+    expect(claudeResponse.status).toBe(409);
+    expect(await claudeResponse.json()).toMatchObject({ code: "login_pending" });
+    expect(activeCodexAccountId()).toBe("default");
+    expect(activeClaudeAccountId()).toBe("default");
+    expect(agentRegistry().snapshot()).toEqual(before);
+  } finally {
+    setCodexAccountLoginPane(codex.id, null);
+    setClaudeLoginSupervisorForTests(null);
+  }
+});
+
+test("a routing-store write failure restores both active-account values", async () => {
+  const target = createManagedCodexAccount("Rollback target");
+  authenticateCodex(target);
+  let currentRoutingId: string | null = "default";
+  let failTargetWrite = true;
+  const routing = {
+    engineRouting() { return { activeAccountId: currentRoutingId, revision: 0 }; },
+    setEngineRouting(_engine: "claude" | "codex", accountId: string) {
+      currentRoutingId = accountId;
+      if (accountId === target.id && failTargetWrite) {
+        failTargetWrite = false;
+        throw new Error("injected routing write failure");
+      }
+      return 1;
+    },
   };
 
-  const response = await POST(migrationRequest({
-    id: target.id,
-    mode: "migrate",
-    scope: "all",
-    previewRevision: preview.previewRevision,
-    requestId: "explicit-bulk",
-  }));
-
-  expect(preview.counts.deferred).toBeGreaterThanOrEqual(1);
-  expect(response.status).toBe(202);
-  expect(agentRegistry().conversationForPath("/bulk-history.jsonl")?.migration).toMatchObject({ targetId: target.id, phase: "requested" });
-});
-
-test("migrate repairs generations on another account when routing already names the target", async () => {
-  const target = createManagedCodexAccount("Main");
-  agentRegistry().reconcileConversations([{
-    engine: "codex",
-    path: "/stale-account.jsonl",
-    accountId: "default",
-    launchProfile: emptyLaunchProfile({ role: "root", title: "Stale root" }),
-    turn: { state: "idle", source: "empty", terminalAt: null },
-    observedAt: "2026-07-10T12:00:00.000Z",
-  }]);
-  agentRegistry().setEngineRouting("codex", target.id);
-
-  const preview = await (await POST(migrationRequest({ id: target.id, mode: "preview" }))).json() as { counts: { total: number }; previewRevision: number };
-  const response = await POST(migrationRequest({ id: target.id, mode: "migrate", scope: "all", previewRevision: preview.previewRevision, requestId: "same-active-repair" }));
-
-  expect(preview.counts.total).toBeGreaterThanOrEqual(1);
-  expect(response.status).toBe(202);
-  expect(agentRegistry().conversationForPath("/stale-account.jsonl")?.migration).toMatchObject({ targetId: target.id, phase: "requested" });
+  await expect(selectAccount("codex", target.id, routing)).rejects.toThrow("injected routing write failure");
+  expect(activeCodexAccountId()).toBe("default");
+  expect(currentRoutingId).toBe("default");
 });
 
 test("GET retains the latest completed intent with recoverable failures for bulk retry", async () => {

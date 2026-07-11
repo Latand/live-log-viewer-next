@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import type { CodexAccount } from "./codex";
+import { AccountMutationBusyError, withAccountMutationLock, withAccountMutationLockAsync } from "./accountMutation";
 import { statePath } from "../configDir";
 import {
   CodexAppServerClient,
@@ -98,7 +99,11 @@ function readStoredAttempts(file: string): Map<string, PersistedAttempt> {
  */
 export class ManagedCodexRuntime {
   private readonly active = new Map<string, ActiveAttempt>();
-  private readonly records: Map<string, PersistedAttempt>;
+  private records: Map<string, PersistedAttempt>;
+  private readonly pendingRecords = new Map<string, PersistedAttempt>();
+  private recordDrain: Promise<void> | null = null;
+  private recordRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  private recordRetryAttempt = 0;
   private readonly startClient: (home: string) => Promise<CodexAppServerClient>;
   private readonly now: () => number;
   private readonly stateFile: string;
@@ -121,6 +126,7 @@ export class ManagedCodexRuntime {
 
   private beginLogin(account: CodexAccount, replace: boolean): Promise<ManagedLoginAttempt> {
     if (account.kind !== "managed") return Promise.reject(new Error("only managed Codex accounts can start an app-server login"));
+    this.records = readStoredAttempts(this.stateFile);
     const home = canonicalHome(account.home);
     const existing = this.active.get(home);
     if (existing && !replace) return existing.startPromise;
@@ -188,6 +194,7 @@ export class ManagedCodexRuntime {
       await this.cancelAttempt(active, "cancelled");
       return true;
     }
+    this.records = readStoredAttempts(this.stateFile);
     const stored = [...this.records.entries()].find(([, attempt]) => attempt.accountId === accountId);
     if (!stored) return false;
     this.record(stored[0], { ...stored[1], state: "cancelled", updatedAt: this.now(), reason: "cancelled" });
@@ -228,7 +235,7 @@ export class ManagedCodexRuntime {
     if (account.kind !== "managed") return { state: account.authPresent ? "authenticated" : "idle", attemptState: null, deviceAuth: null };
     const home = canonicalHome(account.home);
     const active = this.active.get(home);
-    const stored = this.records.get(home);
+    const stored = readStoredAttempts(this.stateFile).get(home);
     try {
       const status = await this.readAccount(active?.client ?? null, account.home);
       if (isSupportedChatGptAccount(status)) {
@@ -260,15 +267,26 @@ export class ManagedCodexRuntime {
   /** Request-safe in-memory projection. Authentication probes and persisted
    * attempt transitions remain owned by the background controller. */
   peekLogin(account: CodexAccount): ManagedLoginSnapshot {
+    return this.peekLoginFrom(account, readStoredAttempts(this.stateFile));
+  }
+
+  peekLogins(accounts: readonly CodexAccount[]): Map<string, ManagedLoginSnapshot> {
+    const stored = readStoredAttempts(this.stateFile);
+    return new Map(accounts.map((account) => [account.id, this.peekLoginFrom(account, stored)]));
+  }
+
+  private peekLoginFrom(account: CodexAccount, storedAttempts: Map<string, PersistedAttempt>): ManagedLoginSnapshot {
     if (account.kind !== "managed") return { state: account.authPresent ? "authenticated" : "idle", attemptState: null, deviceAuth: null };
     const home = canonicalHome(account.home);
     const active = this.active.get(home);
-    if (active?.state === "pending" && active.verificationUrl && active.userCode) {
+    const stored = storedAttempts.get(home);
+    if (stored?.state === "pending" && active?.state === "pending" && active.verificationUrl && active.userCode) {
       return { state: "pending", attemptState: "pending", deviceAuth: { url: active.verificationUrl, code: active.userCode } };
     }
-    const stored = this.records.get(home);
     return stored
       ? { state: stored.state, attemptState: stored.state, deviceAuth: null }
+      : active?.state === "pending"
+        ? { state: "pending", attemptState: "pending", deviceAuth: null }
       : { state: "idle", attemptState: null, deviceAuth: null };
   }
 
@@ -310,19 +328,38 @@ export class ManagedCodexRuntime {
   private settle(attempt: ActiveAttempt | null, state: PersistedAttemptState, reason: AttemptReason | null, close: boolean): void {
     if (!attempt || !this.owns(attempt)) return;
     this.active.delete(attempt.home);
-    this.record(attempt.home, { ...attempt, state, updatedAt: this.now(), reason });
-    if (close) attempt.client?.close();
+    const completed = { ...attempt, state, updatedAt: this.now(), reason };
+    try { this.record(attempt.home, completed); }
+    catch { this.queueRecord(attempt.home, completed); }
+    finally { if (close) attempt.client?.close(); }
   }
 
   private record(home: string, attempt: PersistedAttempt): void {
-    this.records.set(home, {
-      accountId: attempt.accountId,
-      generation: attempt.generation,
-      state: attempt.state,
-      startedAt: attempt.startedAt,
-      updatedAt: attempt.updatedAt,
-      reason: attempt.reason,
-    });
+    try {
+      withAccountMutationLock(() => this.writeRecords(new Map([[home, attempt]])));
+    } catch (error) {
+      if (!(error instanceof AccountMutationBusyError)) throw error;
+      this.queueRecord(home, attempt);
+    }
+  }
+
+  private writeRecords(updates: Map<string, PersistedAttempt>): void {
+    this.records = readStoredAttempts(this.stateFile);
+    let changed = false;
+    for (const [home, attempt] of updates) {
+      const previous = this.records.get(home);
+      if (previous && previous.generation > attempt.generation) continue;
+      this.records.set(home, {
+        accountId: attempt.accountId,
+        generation: attempt.generation,
+        state: attempt.state,
+        startedAt: attempt.startedAt,
+        updatedAt: attempt.updatedAt,
+        reason: attempt.reason,
+      });
+      changed = true;
+    }
+    if (!changed) return;
     const stored: StoredAttempts = { version: 1, attempts: Object.fromEntries(this.records) };
     const dir = path.dirname(this.stateFile);
     const tmp = path.join(dir, `.${path.basename(this.stateFile)}.${process.pid}.${Date.now()}.tmp`);
@@ -333,6 +370,47 @@ export class ManagedCodexRuntime {
     } finally {
       fs.rmSync(tmp, { force: true });
     }
+  }
+
+  private queueRecord(home: string, attempt: PersistedAttempt): void {
+    const queued = this.pendingRecords.get(home);
+    if (!queued || queued.generation <= attempt.generation) this.pendingRecords.set(home, attempt);
+    this.startRecordDrain();
+  }
+
+  private startRecordDrain(): void {
+    if (this.recordDrain || this.recordRetryTimer) return;
+    const drain = async () => {
+      while (this.pendingRecords.size > 0) {
+        const batch = new Map(this.pendingRecords);
+        await withAccountMutationLockAsync(async () => this.writeRecords(batch));
+        for (const [queuedHome, queuedAttempt] of batch) {
+          if (this.pendingRecords.get(queuedHome) === queuedAttempt) this.pendingRecords.delete(queuedHome);
+        }
+      }
+    };
+    const pending = drain();
+    this.recordDrain = pending;
+    void pending.then(
+      () => {
+        this.recordDrain = null;
+        this.recordRetryAttempt = 0;
+        if (this.pendingRecords.size > 0) this.startRecordDrain();
+      },
+      () => {
+        this.recordDrain = null;
+        this.recordRetryAttempt += 1;
+        const retryMs = Math.min(100 * 2 ** Math.min(this.recordRetryAttempt - 1, 8), 30_000);
+        if (this.recordRetryAttempt === 1 || (this.recordRetryAttempt & (this.recordRetryAttempt - 1)) === 0) {
+          console.error(`[codex accounts] Codex login outcome persistence failed; retry ${this.recordRetryAttempt} in ${retryMs}ms`);
+        }
+        this.recordRetryTimer = setTimeout(() => {
+          this.recordRetryTimer = null;
+          this.startRecordDrain();
+        }, retryMs);
+        this.recordRetryTimer.unref?.();
+      },
+    );
   }
 }
 

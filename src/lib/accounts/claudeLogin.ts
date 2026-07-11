@@ -5,6 +5,7 @@ import path from "node:path";
 
 import { resolveBinary } from "@/lib/agent/cli";
 import { statePath } from "@/lib/configDir";
+import { AccountMutationBusyError, withAccountMutationLock, withAccountMutationLockAsync } from "./accountMutation";
 
 import type { LoginOperationSummary, LoginPhase, LoginResult } from "./contracts";
 import { claudeAccountForSpawn, claudeManagedEnvironment, isManagedClaudeHome, managedClaudeCredentialIsSafe } from "./claude";
@@ -156,14 +157,14 @@ function terminal(phase: LoginPhase): boolean {
   return phase === "authenticated" || phase === "canceled" || phase === "timed_out" || phase === "failed" || phase === "interrupted";
 }
 
-const PERSISTED_NONTERMINAL_PHASES = new Set<LoginPhase>(["starting", "awaiting_browser", "awaiting_code", "verifying", "canceling"]);
+export const LIVE_CLAUDE_LOGIN_PHASES: ReadonlySet<LoginPhase> = new Set(["starting", "awaiting_browser", "awaiting_code", "verifying", "canceling"]);
 
 function validPersistedOperation(value: unknown): value is PersistedOperation {
   if (!value || typeof value !== "object") return false;
   const row = value as Partial<PersistedOperation>;
   return typeof row.operationId === "string" && row.operationId.length > 0
     && (typeof row.accountId === "string" || row.accountId === null)
-    && typeof row.phase === "string" && PERSISTED_NONTERMINAL_PHASES.has(row.phase as LoginPhase)
+    && typeof row.phase === "string" && LIVE_CLAUDE_LOGIN_PHASES.has(row.phase as LoginPhase)
     && (typeof row.pid === "number" && Number.isInteger(row.pid) && row.pid > 0 || row.pid === null)
     && (typeof row.startToken === "string" || row.startToken === null)
     && typeof row.generation === "number" && Number.isInteger(row.generation) && row.generation >= 0
@@ -183,6 +184,8 @@ export class ClaudeLoginSupervisor {
   private output = new Map<string, string>();
   private closed = new Map<string, Promise<void>>();
   private generation = 0;
+  private persistDirty = false;
+  private deferredPersist: Promise<void> | null = null;
 
   private readonly recovery: Promise<void>;
 
@@ -194,11 +197,60 @@ export class ClaudeLoginSupervisor {
       before reading a terminal recovery result. */
   whenRecovered(): Promise<void> { return this.recovery; }
 
-  private persist(): void {
-    const data = [...this.operations.values()]
+  private persistedOperations(): PersistedOperation[] {
+    return [...this.operations.values()]
       .filter((item) => !terminal(item.phase))
       .map(({ operationId, accountId, phase, pid, startToken, generation, startedAt, deadlineAt }) => ({ operationId, accountId, phase, pid, startToken, generation, startedAt, deadlineAt }));
-    this.store.save(data);
+  }
+
+  private persist(): void {
+    try {
+      withAccountMutationLock(() => this.store.save(this.persistedOperations()));
+    } catch (error) {
+      if (!(error instanceof AccountMutationBusyError)) throw error;
+      this.queuePersist();
+    }
+  }
+
+  private queuePersist(): void {
+    this.persistDirty = true;
+    if (this.deferredPersist) return;
+    const drain = async () => {
+      while (this.persistDirty) {
+        this.persistDirty = false;
+        await withAccountMutationLockAsync(async () => this.store.save(this.persistedOperations()));
+      }
+    };
+    const pending = drain();
+    this.deferredPersist = pending;
+    void pending.then(
+      () => {
+        this.deferredPersist = null;
+        if (this.persistDirty) this.queuePersist();
+      },
+      () => {
+        this.deferredPersist = null;
+        const live = [...this.operations.values()].find((item) => !terminal(item.phase));
+        if (live) this.persistenceFailure(live.operationId);
+      },
+    );
+  }
+
+  private refreshDurableOperations(): void {
+    let rows: PersistedOperation[];
+    try { rows = this.store.load(); } catch { return; }
+    for (const row of rows) {
+      if (!validPersistedOperation(row)) continue;
+      this.generation = Math.max(this.generation, row.generation);
+      if (this.operations.has(row.operationId)) continue;
+      this.operations.set(row.operationId, {
+        ...row,
+        loginUrl: null,
+        acceptsCode: false,
+        result: null,
+        submitted: row.phase === "verifying",
+      });
+    }
   }
 
   private summary(item: LoginOperation): LoginOperationSummary {
@@ -216,6 +268,7 @@ export class ClaudeLoginSupervisor {
   }
 
   reserve(): LoginOperationSummary {
+    this.refreshDurableOperations();
     if ([...this.operations.values()].some((item) => !terminal(item.phase))) throw new Error("a Claude login operation is already running");
     const now = this.ports.now();
     const item: LoginOperation = {
@@ -312,6 +365,7 @@ export class ClaudeLoginSupervisor {
   }
 
   async input(operationId: string, code: string): Promise<LoginOperationSummary> {
+    this.refreshDurableOperations();
     const item = this.operations.get(operationId);
     if (!item || terminal(item.phase)) throw new Error("login operation is unavailable");
     if (item.submitted) throw new Error("login code was already submitted");
@@ -380,6 +434,7 @@ export class ClaudeLoginSupervisor {
   }
 
   async cancel(operationId: string): Promise<LoginOperationSummary> {
+    this.refreshDurableOperations();
     const item = this.operations.get(operationId);
     if (!item) throw new Error("unknown Claude login operation");
     if (terminal(item.phase) || item.phase === "canceling") return this.summary(item);
@@ -439,13 +494,39 @@ export class ClaudeLoginSupervisor {
   }
 
   get(id: string): LoginOperationSummary | null {
+    this.refreshDurableOperations();
     const item = this.operations.get(id);
     return item ? this.summary(item) : null;
   }
 
   forAccount(accountId: string): LoginOperationSummary | null {
-    const item = [...this.operations.values()].filter((candidate) => candidate.accountId === accountId).sort((a, b) => b.generation - a.generation)[0];
-    return item ? this.summary(item) : null;
+    return this.forAccounts([accountId]).get(accountId) ?? null;
+  }
+
+  forAccounts(accountIds: readonly string[]): Map<string, LoginOperationSummary | null> {
+    let durable: PersistedOperation[] = [];
+    let durableReadable = true;
+    try { durable = this.store.load().filter(validPersistedOperation); }
+    catch { durableReadable = false; }
+    return new Map(accountIds.map((accountId) => {
+      const persisted = durable.filter((candidate) => candidate.accountId === accountId).sort((a, b) => b.generation - a.generation)[0];
+      if (persisted) {
+        const local = this.operations.get(persisted.operationId);
+        if (local) return [accountId, this.summary(local)];
+        return [accountId, {
+          operationId: persisted.operationId,
+          phase: persisted.phase,
+          loginUrl: null,
+          acceptsCode: false,
+          deadlineAt: persisted.deadlineAt,
+          result: null,
+        }];
+      }
+      const item = [...this.operations.values()]
+        .filter((candidate) => candidate.accountId === accountId && (terminal(candidate.phase) || !durableReadable))
+        .sort((a, b) => b.generation - a.generation)[0];
+      return [accountId, item ? this.summary(item) : null];
+    }));
   }
 
   private async terminateInherited(item: LoginOperation): Promise<boolean> {

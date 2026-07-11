@@ -19,6 +19,7 @@ import { getRuntimeBus, isRuntimeUiEnabled } from "./runtimeBus";
 const POLL_MS = 10_000;
 /** Debounce after a `files.revision` event before the pure GET fires. */
 const FILES_DEBOUNCE_MS = 400;
+const FILES_REVISION_RETRY_MS = 1_000;
 
 export interface FilesData {
   files: FileEntry[];
@@ -47,6 +48,13 @@ export function filesApiUrl(project?: string | null, pinnedPath?: string | null)
   return params.length ? "/api/files?" + params.join("&") : "/api/files";
 }
 
+export function filesRequestHeaders(etag: string, revision?: number): Record<string, string> | undefined {
+  const headers: Record<string, string> = {};
+  if (etag) headers["If-None-Match"] = etag;
+  if (revision !== undefined) headers["x-llv-files-revision"] = String(revision);
+  return Object.keys(headers).length > 0 ? headers : undefined;
+}
+
 /**
  * The recurring `/api/files` cadence given the runtime connection: a healthy
  * live stream removes the timer entirely (`live`, freshness rides
@@ -64,17 +72,18 @@ export function useFiles(project?: string | null, pinnedPath?: string | null): F
     let lastBody = "";
     let lastEtag = "";
     const url = filesApiUrl(project, pinnedPath);
-    const load = async () => {
+    const performLoad = async (revision?: number): Promise<boolean> => {
+      if (!alive) return true;
       try {
-        const res = await fetch(url, lastEtag ? { headers: { "If-None-Match": lastEtag } } : undefined);
+        const headers = filesRequestHeaders(lastEtag, revision);
+        const res = await fetch(url, headers ? { headers } : undefined);
         /* 304: the server confirms the payload is byte-identical to the last
            one, so there is nothing to read or re-parse. */
-        if (res.status === 304) return;
+        if (res.status === 304) return true;
+        if (!res.ok) throw new Error(`files request failed: ${res.status}`);
         const etag = res.headers.get("ETag");
         const body = await res.text();
-        if (!alive || body === lastBody) return;
-        lastBody = body;
-        if (etag) lastEtag = etag;
+        if (!alive || body === lastBody) return true;
         const parsed = JSON.parse(body) as FilesResponse | FileEntry[];
         /* The flows rollout changes the payload from a bare array to
            {files, flows}; accept both so client and server can deploy in
@@ -94,11 +103,21 @@ export function useFiles(project?: string | null, pinnedPath?: string | null): F
             loaded: true,
           });
         }
+        lastBody = body;
+        if (etag) lastEtag = etag;
+        return true;
       } catch {
         /* keep previous list */
+        return false;
       } finally {
         if (alive) setData((d) => (d.loaded ? d : { ...d, loaded: true }));
       }
+    };
+    let loadQueue: Promise<void> = Promise.resolve();
+    const load = (revision?: number): Promise<boolean> => {
+      const result = loadQueue.then(() => performLoad(revision));
+      loadQueue = result.then(() => undefined);
+      return result;
     };
     void load();
 
@@ -129,15 +148,36 @@ export function useFiles(project?: string | null, pinnedPath?: string | null): F
 
     let unsubBus = () => {};
     let unsubFiles = () => {};
-    let filesDebounce: ReturnType<typeof setTimeout> | null = null;
+    let revisionTimer: ReturnType<typeof setTimeout> | null = null;
+    let pendingRevision: number | null = null;
+    let revisionHydrating = false;
+    const scheduleRevisionHydration = (delay: number) => {
+      if (revisionTimer) clearTimeout(revisionTimer);
+      revisionTimer = setTimeout(() => {
+        revisionTimer = null;
+        void hydratePendingRevision();
+      }, delay);
+    };
+    const hydratePendingRevision = async () => {
+      if (revisionHydrating || pendingRevision === null) return;
+      revisionHydrating = true;
+      const requestedRevision = pendingRevision;
+      const hydrated = await load(requestedRevision);
+      revisionHydrating = false;
+      if (!alive) return;
+      if (hydrated && pendingRevision === requestedRevision) pendingRevision = null;
+      if (pendingRevision !== null) {
+        scheduleRevisionHydration(hydrated ? 0 : FILES_REVISION_RETRY_MS);
+      }
+    };
     if (isRuntimeUiEnabled() && typeof window !== "undefined") {
       const bus = getRuntimeBus();
       const applyConnection = () => setCadence(filesPollCadence(bus.getState().connection));
       applyConnection();
       unsubBus = bus.subscribe(applyConnection);
-      unsubFiles = bus.subscribeFilesRevision(() => {
-        if (filesDebounce) clearTimeout(filesDebounce);
-        filesDebounce = setTimeout(() => void load(), FILES_DEBOUNCE_MS);
+      unsubFiles = bus.subscribeFilesRevision((revision) => {
+        pendingRevision = pendingRevision === null ? revision : Math.max(pendingRevision, revision);
+        scheduleRevisionHydration(FILES_DEBOUNCE_MS);
       });
     } else {
       setCadence("poll");
@@ -146,7 +186,7 @@ export function useFiles(project?: string | null, pinnedPath?: string | null): F
     return () => {
       alive = false;
       if (timer) clearInterval(timer);
-      if (filesDebounce) clearTimeout(filesDebounce);
+      if (revisionTimer) clearTimeout(revisionTimer);
       unsubBus();
       unsubFiles();
       window.removeEventListener(FLOWS_CHANGED_EVENT, onChanged);

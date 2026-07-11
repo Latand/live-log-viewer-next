@@ -57,7 +57,7 @@ describe("effortMeter", () => {
   test("recognized tiers outside the model's scale clamp to the nearest end", () => {
     // A legacy transcript recording `minimal` still shows the lowest bar.
     expect(effortMeter("codex", "gpt-5.5", "minimal")).toEqual({ level: 1, slots: 4 });
-    // A tier above the known scale reads as the top rather than disappearing.
+    // A tier above the known scale appears at the top.
     expect(effortMeter("codex", "gpt-5.5", "max")).toEqual({ level: 4, slots: 4 });
     expect(effortMeter("codex", "gpt-5.6-luna", "ultra")).toEqual({ level: 5, slots: 5 });
   });

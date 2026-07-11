@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 
 import { activeCodexAccountId, codexAccountsMutationLocked, listCodexAccounts } from "@/lib/accounts/codex";
 import { activeClaudeAccountId, claudeAccountsMutationLocked, listClaudeAccounts } from "@/lib/accounts/claude";
-import { claudeLoginSupervisor } from "@/lib/accounts/claudeLogin";
+import { claudeLoginSupervisor, LIVE_CLAUDE_LOGIN_PHASES } from "@/lib/accounts/claudeLogin";
 import { managedCodexRuntime } from "@/lib/accounts/codexRuntime";
 import { agentRegistry } from "@/lib/agent/registry";
 import { AUTO_BALANCE_FRESH_MS, AUTO_BALANCE_THRESHOLD, effectiveRemaining } from "@/lib/accounts/migration/quotaPolicy";
@@ -10,11 +10,6 @@ import type { DurableQuotaObservation, MigrationEngine } from "@/lib/accounts/mi
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-
-/** Every nonterminal Claude login phase keeps the account pending so all
-    consumers poll until sign-in settles (issue #61 C3). The upgraded client
-    re-derives this from the typed login phase regardless. */
-const CLAUDE_LOGIN_PENDING_PHASES = new Set(["starting", "awaiting_browser", "awaiting_code", "verifying", "canceling"]);
 
 function liveFreshObservation(observation: DurableQuotaObservation | undefined, now: number): boolean {
   if (!observation?.authenticated || observation.provenance.source !== "live") return false;
@@ -109,9 +104,11 @@ export async function GET() {
   const now = Date.now();
   const claudeObservations = snapshot.quotaObservations.claude;
   const codexObservations = snapshot.quotaObservations.codex;
-  const codexAccounts = listCodexAccounts().map((account) => {
+  const codexAccountList = listCodexAccounts();
+  const codexLogins = managedCodexRuntime().peekLogins(codexAccountList);
+  const codexAccounts = codexAccountList.map((account) => {
     const authenticated = liveFreshObservation(codexObservations[account.id], now);
-    const login = managedCodexRuntime().peekLogin(account);
+    const login = codexLogins.get(account.id) ?? { state: "idle" as const, attemptState: null, deviceAuth: null };
     const compatibilityPending = Boolean(account.loginPane && !authenticated);
     return {
       id: account.id,
@@ -125,14 +122,16 @@ export async function GET() {
       ...accountProjection(codexObservations[account.id], account.authPresent, now),
     };
   });
-  const claudeAccounts = listClaudeAccounts().map((account) => {
-    const login = claudeLoginSupervisor.forAccount(account.id);
+  const claudeAccountList = listClaudeAccounts();
+  const claudeLogins = claudeLoginSupervisor.forAccounts(claudeAccountList.map((account) => account.id));
+  const claudeAccounts = claudeAccountList.map((account) => {
+    const login = claudeLogins.get(account.id) ?? null;
     return {
       id: account.id,
       label: account.label,
       kind: account.kind,
       authPresent: account.authPresent,
-      loginPending: login ? CLAUDE_LOGIN_PENDING_PHASES.has(login.phase) : false,
+      loginPending: login ? LIVE_CLAUDE_LOGIN_PHASES.has(login.phase) : false,
       loginState: account.authPresent ? "authenticated" : "idle",
       attemptState: null,
       deviceAuth: null,

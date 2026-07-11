@@ -49,7 +49,7 @@ export function effortScale(engine: string, model: string | null | undefined): r
  * is the scale length, `level` the 1-based position (lowest tier = 1, top tier
  * fills the meter). A recognized tier missing from the scale — a transcript
  * from an older or newer CLI than the table knows — clamps to the nearest end
- * instead of vanishing. level 0 means "hide the indicator".
+ * and remains visible. level 0 means "hide the indicator".
  */
 export function effortMeter(
   engine: string,
@@ -69,8 +69,8 @@ export function effortMeter(
 }
 
 /** Validates the optional effort/fast fields of a spawn request body. An
-    invalid effort is a client error, not something to drop silently; fast is
-    meaningful for codex only and stays unset elsewhere. */
+    invalid effort produces a client error. Fast applies to codex and stays
+    unset elsewhere. */
 export function reasoningFromBody(
   engine: AgentEngineName,
   body: { effort?: unknown; fast?: unknown },

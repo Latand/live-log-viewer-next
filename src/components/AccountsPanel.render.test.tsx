@@ -23,11 +23,7 @@ const base = (over: Partial<EngineAccountsState> = {}): EngineAccountsState => (
   refresh: async () => true,
   add: async () => true,
   retryNotice: async () => true,
-  preview: async () => null,
-  selectAndMigrate: async () => true,
-  stopMigration: async () => true,
-  retryFailedMigration: async () => true,
-  setAutoBalance: async () => true,
+  select: async () => true,
   submitLoginCode: async () => true,
   cancelLogin: async () => true,
   retryLogin: async () => true,
@@ -74,38 +70,27 @@ test("renders a capacity chip per account and dims the stale one", () => {
   expect(html).toContain("opacity-55"); // the stale Work chip
 });
 
-test("the auto-balance switch appears only when the coordinator advertises it", () => {
-  expect(render(base())).not.toContain('role="switch"');
+test("automatic transcript migration controls stay outside the account panel", () => {
   const withAuto = render(base({ autoBalance: { enabled: true, thresholdPercent: 25, state: "idle", cooldownUntil: null, lastCheckAt: "2026-07-10T14:32:00.000Z", lastOutcome: null } }));
-  expect(withAuto).toContain('role="switch"');
-  expect(withAuto).toContain('aria-checked="true"');
-  expect(withAuto).toContain("Auto balance");
+  expect(withAuto).not.toContain('role="switch"');
+  expect(withAuto).not.toContain("Auto balance");
 });
 
-test("a draining migration shows a polite banner with counts and Stop", () => {
-  const html = render(base({
-    migration: { intentId: "i1", targetId: "work", targetLabel: "Work", revision: 1, origin: "auto", reason: null, state: "draining", counts: { done: 4, waitingTurn: 2, inFlight: 1, failed: 1, total: 7 }, startedAt: null },
-    autoBalance: { enabled: true, thresholdPercent: 25, state: "draining", cooldownUntil: null, lastCheckAt: null, lastOutcome: null },
-  }));
-  expect(html).toContain('aria-live="polite"');
-  expect(html).toContain("Migrating to «Work» — 4/7 done");
-  expect(html).toContain("2 waiting on turns");
-  expect(html).toContain("1 failed");
-  expect(html).toContain("Stop migration");
-  expect(html).toContain("Auto"); // origin tag
+test("a switch mutation shows an accessible in-flight status", () => {
+  const html = render(base({ mutation: "switch", active: "work" }));
+  expect(html).toContain('aria-busy="true"');
+  expect(html).toContain('role="status"');
+  expect(html).toContain("Switching the account for future launches…");
 });
 
 test("the panel renders account buttons with no bare <select> switch control", () => {
   const html = render(base());
   expect(html).not.toContain("<select");
-  // Each account is a real button (preview → confirm/migrate), never an <option>.
   expect(html).not.toContain("<option");
 });
 
-test("the active account row stays clickable so a same-active repair can run", () => {
+test("the active account row stays keyboard reachable", () => {
   const html = render(base());
-  // The active row carries aria-current and must not be disabled: clicking it
-  // previews and can launch a zero-scope, revision-fenced repair migration.
   const active = html.match(/<button[^>]*aria-current="true"[^>]*>/)?.[0] ?? "";
   // React renders a disabled control as the bare `disabled=""` attribute; the
   // `disabled:` tailwind class variants in className are not the disabled state.
@@ -117,43 +102,6 @@ test("shows removal only for a managed account and keeps cleanup reachable", () 
   expect(html).toContain('aria-label="Remove Work"');
   expect(html).not.toContain('aria-label="Remove Main"');
   expect(html).toContain("Clean up abandoned homes");
-});
-
-test("a draining migration with failures offers a Retry-failed affordance", () => {
-  const html = render(base({
-    migration: { intentId: "i1", targetId: "work", targetLabel: "Work", revision: 2, origin: "manual", reason: null, state: "draining", counts: { done: 3, waitingTurn: 0, inFlight: 1, failed: 2, total: 6 }, startedAt: null },
-  }));
-  expect(html).toContain("Retry failed (2)");
-  expect(html).toContain("Stop migration");
-});
-
-test("a draining migration with no failures hides the Retry-failed button", () => {
-  const html = render(base({
-    migration: { intentId: "i1", targetId: "work", targetLabel: "Work", revision: 2, origin: "manual", reason: null, state: "draining", counts: { done: 5, waitingTurn: 1, inFlight: 0, failed: 0, total: 6 }, startedAt: null },
-  }));
-  expect(html).not.toContain("Retry failed");
-});
-
-test("a completed migration with no failures shows the settle notice and no progress row", () => {
-  const html = render(base({
-    migration: { intentId: "i1", targetId: "work", targetLabel: "Work", revision: 1, origin: "manual", reason: null, state: "complete", counts: { done: 7, waitingTurn: 0, inFlight: 0, failed: 0, total: 7 }, startedAt: null },
-  }));
-  expect(html).toContain("All Codex sessions now on «Work»");
-  expect(html).not.toContain("Stop migration");
-  expect(html).not.toContain("Retry failed");
-});
-
-test("a terminal migration that still has failures keeps the bulk Retry-failed control", () => {
-  // Terra's projection retains a `complete` intent while any conversation is
-  // failed-recoverable (counts.failed stays positive). The banner drops Stop but
-  // keeps the bulk retry so terminal recoverable failures remain recoverable.
-  const html = render(base({
-    migration: { intentId: "i1", targetId: "work", targetLabel: "Work", revision: 4, origin: "manual", reason: null, state: "complete", counts: { done: 5, waitingTurn: 0, inFlight: 0, failed: 2, total: 7 }, startedAt: null },
-  }));
-  expect(html).toContain("Retry failed (2)");
-  expect(html).not.toContain("Stop migration");
-  // The misleading "all sessions moved" settle line is suppressed while failures remain.
-  expect(html).not.toContain("All Codex sessions now on «Work»");
 });
 
 // ── Issue #61 — Claude login slice render coverage (Fable contract C12) ──────

@@ -267,17 +267,9 @@ export async function deliverConversationMessage(message: ConversationMessage, o
   const requestLocalPayload = images.length > 0 || text.length > 32_000;
 
   const registry = agentRegistry();
-  let conversation = message.conversationId?.startsWith("conversation_")
+  const conversation = message.conversationId?.startsWith("conversation_")
     ? registry.conversation(message.conversationId as `conversation_${string}`)
     : registry.conversationForPath(message.path);
-  if (conversation && !message.reservedDeliveryId && deliveryFence(conversation) === "deliver") {
-    const currentAccountId = conversation.generations.at(-1)?.accountId;
-    const activeAccountId = registry.engineRouting(conversation.engine).activeAccountId;
-    if (currentAccountId && activeAccountId && currentAccountId !== activeAccountId
-      && conversation.migrationOptOut?.targetId !== activeAccountId) {
-      conversation = registry.requestConversationMigrationToActiveAccount(conversation.id);
-    }
-  }
   let filePath = conversation?.generations.at(-1)?.path ?? message.path;
   let deliveryId: string | null = null;
   let retryArtifactPaths: string[] = [];

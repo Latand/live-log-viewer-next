@@ -4,6 +4,7 @@ import path from "node:path";
 
 import { stateDir, statePath } from "@/lib/configDir";
 import { isShellCommand } from "@/lib/status";
+import { withAccountMutationLock } from "./accountMutation";
 
 const ACCOUNT_ID = /^[a-z0-9][a-z0-9-]{0,31}$/;
 const DEFAULT_ID = "default";
@@ -218,35 +219,37 @@ function registryLockPath(): string {
 }
 
 function withRegistryLock<T>(operation: () => T): T {
-  const lock = registryLockPath();
-  const started = Date.now();
-  fs.mkdirSync(path.dirname(lock), { recursive: true, mode: 0o700 });
-  for (;;) {
-    let fd: number;
-    try {
-      fd = fs.openSync(lock, "wx", 0o600);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+  return withAccountMutationLock(() => {
+    const lock = registryLockPath();
+    const started = Date.now();
+    fs.mkdirSync(path.dirname(lock), { recursive: true, mode: 0o700 });
+    for (;;) {
+      let fd: number;
       try {
-        if (Date.now() - fs.statSync(lock).mtimeMs > REGISTRY_LOCK_STALE_MS) {
-          fs.rmSync(lock, { force: true });
+        fd = fs.openSync(lock, "wx", 0o600);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        try {
+          if (Date.now() - fs.statSync(lock).mtimeMs > REGISTRY_LOCK_STALE_MS) {
+            fs.rmSync(lock, { force: true });
+            continue;
+          }
+        } catch {
           continue;
         }
-      } catch {
+        if (Date.now() - started >= REGISTRY_LOCK_WAIT_MS) throw new Error("Codex account registry is busy; retry shortly");
+        sleep(10);
         continue;
       }
-      if (Date.now() - started >= REGISTRY_LOCK_WAIT_MS) throw new Error("Codex account registry is busy; retry shortly");
-      sleep(10);
-      continue;
+      try {
+        fs.writeFileSync(fd, `${process.pid}\n`, "utf8");
+        return operation();
+      } finally {
+        fs.closeSync(fd);
+        fs.rmSync(lock, { force: true });
+      }
     }
-    try {
-      fs.writeFileSync(fd, `${process.pid}\n`, "utf8");
-      return operation();
-    } finally {
-      fs.closeSync(fd);
-      fs.rmSync(lock, { force: true });
-    }
-  }
+  });
 }
 
 /** True when the registry is degraded and any persistence would throw

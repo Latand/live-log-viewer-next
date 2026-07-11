@@ -1,72 +1,44 @@
-# Task: stop the /api/board 413 storm and the phantom chime cascade
+# Issue #40 — in-UI multi-account switching
 
-Production viewer (127.0.0.1:8898) showed two linked regressions on a busy
-machine (400+ sessions; an account-migration wave left 183 archived
-predecessor transcripts with recent mtimes):
+## Task statement
 
-1. `PATCH /api/board` failed with 413 in an endless loop. The dashboard's
-   `reconcile-roots` mutation for project `-agents-tools-live-log-viewer-next`
-   carries all 263 root paths (~37 KB serialized) against the 32 KB
-   `MAX_BOARD_BODY_BYTES` cap. The board store treated the non-409 4xx as a
-   transient network error and retried the identical payload forever, so every
-   `close` mutation queued behind it never persisted (closed cards
-   resurrected on reload / other devices).
-2. A storm of identical spawn/finish chimes on every 10 s poll. The scan feed
-   is capped at the `FILE_CAP = 400` most-recent files; with more sessions
-   than that, the tail churns in and out each poll, and `useAgentChimes`
-   forgot identities that left the feed — each return rang as a brand-new
-   agent. Archived migration predecessors both ate ~half the cap slots and
-   duplicated live conversation identities in the feed.
+Provide one shared account panel for Claude and Codex that lists stored accounts,
+shows authentication and quota state, supports direct active-account selection,
+and exposes add-account and quick-login flows with clear operation progress.
+Account selection updates the engine routing used by future launches while every
+existing pane, conversation generation, transcript path, migration intent, and
+held delivery retains its current ownership and content.
 
 ## Acceptance criteria
 
-- AC1: A board PATCH refused with a structured mutation-content code
-  (INVALID_REQUEST, PAYLOAD_TOO_LARGE) sheds the offending mutation after
-  bisection: no backoff timer stays armed, sync
-  returns to "current", and mutations queued behind it still drain to the
-  server. Access failures (401/403) and other transient 4xx preserve the
-  queued intent and take the backoff path until access heals; an
-  envelope-level verdict (UNSUPPORTED_SCHEMA_VERSION) holds the whole outbox
-  and surfaces the board as unavailable until versions align.
-- AC2: Semantics-coupled mutations (`reconcile-roots`, `remap-paths`) always
-  travel as ONE mutation each; transport therefore preserves reducer
-  atomicity by construction. Independent mutations batch into PATCHes bounded by
-  the server's 128-mutation cap and a serialized-bytes batching budget. A
-  rejected multi-mutation batch is bisected until the offender stands alone;
-  only the lone rejected mutation is shed, so valid mutations on either side
-  of the poison still land.
-- AC3: `MAX_BOARD_BODY_BYTES` is derived from the largest request shape the
-  client transport emits under full JSON escaping: `patchPrefix` ships a
-  byte-heavy mutation alone, so the bound covers one maximal mutation
-  (~25.2 MB) and the three-list legacy-seed patch (~37.7 MB) → 48 MB cap.
-  No client-emittable request is ever size-refused mid-transport; lists past
-  the item-level caps draw the server's atomic validation error. The
-  per-item limits (512 paths, 4096 chars each) remain the real guard.
-- AC4: A conversation identity that leaves the capped feed and returns later
-  in an unchanged attention state rings no chime; a genuine transition
-  (live → waiting, or a truly new finished agent) still rings exactly once.
-  The bounded history evicts by observation recency (LRU), so an identity
-  that skipped a single poll is never evicted ahead of long-unseen entries.
-- AC5: Archived migration predecessors (`migratedTo` set / non-current
-  generations) never ring chimes and never clobber the tracked state of their
-  successor (same stable conversation identity).
-- AC6: The scanner ranks archived transcript generations (every
-  generation/continuity path except the conversation's current one, per the
-  agent registry) below live transcripts when applying `FILE_CAP`, so a
-  migration wave cannot evict live conversations from the feed; with slack
-  under the cap they still appear, and selected-project hydration stays
-  complete (archived predecessors included) so legacy `#f=` deep links keep
-  resolving to their successor. A pending deep link pins its target through
-  the cap: `#f=` pins the exact transcript path together with its
-  registry-current generation, `#c=` canonicalizes the conversation id
-  through durable aliases and pins the current generation; the payload
-  carries the alias map so the client resolver matches links copied before
-  provisional-id adoption, following chained aliases with cycle protection.
-  Pinned scans bypass the shared cache (no per-path cache slots), and every
-  user-driven navigation or focus action — project selection, hash changes,
-  attention jumps, N/Shift-N, and dashboard-local opens/drafts/pipeline/task
-  jumps — cancels the pending intent.
-- AC7: Existing behavior preserved: first-poll chime baseline stays silent,
-  spawn blips ring once per child, revision-conflict replay and network-error
-  backoff in the board store are unchanged. Full `bun test` suite passes and
-  `tsc --noEmit` is clean.
+- AC1: The Accounts panel lists Claude and Codex accounts with labels,
+  authentication state, active state, and available quota capacity.
+- AC2: Selecting an authenticated account updates the engine routing and
+  compatibility account catalog through the existing active-account endpoint.
+- AC3: Account selection leaves conversation records, transcript files,
+  migration intents, held deliveries, and running panes unchanged.
+- AC4: Active-account endpoints reject legacy preview and transcript-migration
+  selection modes.
+- AC5: Future launches resolve the newly selected account through the shared
+  account manager.
+- AC6: Add-account and quick-login entry points remain available for both
+  engines, including Codex device authorization and Claude browser/code login.
+- AC7: Authentication, add, switch, login, removal, refresh, failure, retry, and
+  empty/loading states remain visible and actionable in the panel.
+- AC8: Account mutations are serialized, account selection is optimistic, and a
+  failed selection restores the prior active account before offering retry.
+- AC9: Signed-out accounts and accounts with an active login remain unavailable
+  as launch targets in the UI and active-account endpoints.
+- AC10: Quota polling records fresh per-account observations without changing
+  engine routing or creating transcript-migration intents.
+- AC11: English and Ukrainian account-panel copy describes direct routing and
+  operation progress.
+- AC12: Regression tests cover route-only selection for both engines and assert
+  unchanged conversations, migration intents, held deliveries, and transcript
+  ownership.
+- AC13: A response lost after server commit reconciles as success, and a failed
+  routing-registry write restores both durable active-account values.
+- AC14: `bun test` passes.
+- AC15: `bunx tsc --noEmit` completes without diagnostics.
+- AC16: Verification uses unit and integration tests only; the live Viewer on
+  port 8898 receives no account switch or login requests.

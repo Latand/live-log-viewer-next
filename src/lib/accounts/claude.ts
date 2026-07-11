@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { stateDir, statePath } from "@/lib/configDir";
+import { withAccountMutationLock } from "./accountMutation";
 
 const ACCOUNT_ID = /^[a-z0-9][a-z0-9-]{0,31}$/;
 const DEFAULT_ID = "default";
@@ -90,19 +91,21 @@ function mutable(): Registry { const loaded = readRegistry(); if (loaded.corrupt
 function sleep(ms: number): void { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); }
 function registryLockPath(): string { return `${claudeRegistryPath()}.lock`; }
 function withRegistryLock<T>(operation: () => T): T {
-  const lock = registryLockPath(); const started = Date.now(); fs.mkdirSync(path.dirname(lock), { recursive: true, mode: 0o700 });
-  for (;;) {
-    try {
-      const fd = fs.openSync(lock, "wx", 0o600);
-      try { fs.writeFileSync(fd, `${process.pid}\n`, "utf8"); return operation(); }
-      finally { fs.closeSync(fd); fs.rmSync(lock, { force: true }); }
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      try { if (Date.now() - fs.statSync(lock).mtimeMs > REGISTRY_LOCK_STALE_MS) { fs.rmSync(lock, { force: true }); continue; } } catch { continue; }
-      if (Date.now() - started >= REGISTRY_LOCK_WAIT_MS) throw new Error("Claude account registry is busy; retry shortly");
-      sleep(10);
+  return withAccountMutationLock(() => {
+    const lock = registryLockPath(); const started = Date.now(); fs.mkdirSync(path.dirname(lock), { recursive: true, mode: 0o700 });
+    for (;;) {
+      try {
+        const fd = fs.openSync(lock, "wx", 0o600);
+        try { fs.writeFileSync(fd, `${process.pid}\n`, "utf8"); return operation(); }
+        finally { fs.closeSync(fd); fs.rmSync(lock, { force: true }); }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        try { if (Date.now() - fs.statSync(lock).mtimeMs > REGISTRY_LOCK_STALE_MS) { fs.rmSync(lock, { force: true }); continue; } } catch { continue; }
+        if (Date.now() - started >= REGISTRY_LOCK_WAIT_MS) throw new Error("Claude account registry is busy; retry shortly");
+        sleep(10);
+      }
     }
-  }
+  });
 }
 function write(registry: Registry): void {
   const file = claudeRegistryPath(); fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
