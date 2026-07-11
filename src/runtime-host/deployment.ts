@@ -12,6 +12,7 @@ import { RuntimeIdempotencyConflictError } from "@/lib/runtime/contracts";
 import { RuntimeJournal } from "./journal";
 
 export interface ViewerDeploymentAdapter {
+  reconcile(): Promise<void>;
   resolveRevision(revision: string): Promise<string>;
   buildCandidate(deploymentId: string, revision: string): Promise<ViewerReleaseIdentity>;
   startCandidate(candidate: ViewerReleaseIdentity): Promise<void>;
@@ -20,6 +21,8 @@ export interface ViewerDeploymentAdapter {
   promote(candidate: ViewerReleaseIdentity): Promise<void>;
   verifyPromoted(candidate: ViewerReleaseIdentity): Promise<ViewerHealthEvidence>;
   rollback(previous: ViewerReleaseIdentity, candidate: ViewerReleaseIdentity): Promise<void>;
+  retire(release: ViewerReleaseIdentity): Promise<void>;
+  retainOnly(releases: ViewerReleaseIdentity[]): Promise<void>;
 }
 
 export interface ViewerDeploymentCoordinatorOptions {
@@ -94,6 +97,7 @@ export class ViewerDeploymentCoordinator {
   }
 
   async recover(): Promise<ViewerDeploymentStatus | null> {
+    await this.adapter.reconcile();
     const active = this.journal.activeViewerDeployment();
     if (!active) return null;
     const sameOwner = active.owner.pid === this.owner.pid && active.owner.startIdentity === this.owner.startIdentity;
@@ -140,6 +144,7 @@ export class ViewerDeploymentCoordinator {
           const evidence = await this.adapter.verifyCandidate(status.candidate);
           const health = [...status.health, evidence];
           if (!evidence.ok) {
+            await this.adapter.retire(status.candidate);
             status = this.journal.updateViewerDeployment(status.deploymentId, {
               health,
               phase: "failed",
@@ -164,6 +169,8 @@ export class ViewerDeploymentCoordinator {
           const evidence = await this.adapter.verifyPromoted(status.candidate);
           const health = [...status.health, evidence];
           if (evidence.ok) {
+            if (!status.previous) throw new Error("previous release identity is missing");
+            await this.adapter.retainOnly([status.candidate, status.previous]);
             status = this.journal.updateViewerDeployment(status.deploymentId, { health, phase: "succeeded", terminal: true });
             continue;
           }
@@ -177,6 +184,7 @@ export class ViewerDeploymentCoordinator {
         if (status.phase === "rolling-back") {
           if (!status.previous || !status.candidate) throw new Error("rollback release identity is missing");
           await this.adapter.rollback(status.previous, status.candidate);
+          await this.adapter.retire(status.candidate);
           status = this.journal.updateViewerDeployment(status.deploymentId, { phase: "rolled-back", terminal: true });
           continue;
         }
@@ -192,6 +200,7 @@ export class ViewerDeploymentCoordinator {
             ? latest
             : this.journal.updateViewerDeployment(latest.deploymentId, { phase: "rolling-back", error: message });
           await this.adapter.rollback(rolling.previous!, rolling.candidate!);
+          await this.adapter.retire(rolling.candidate!);
           this.journal.updateViewerDeployment(rolling.deploymentId, { phase: "rolled-back", terminal: true, error: message });
           return;
         } catch (rollbackError) {
@@ -199,6 +208,17 @@ export class ViewerDeploymentCoordinator {
             phase: "failed",
             terminal: true,
             error: `${message}; rollback failed: ${safeError(rollbackError)}`,
+          });
+          return;
+        }
+      }
+      if (latest.candidate) {
+        try { await this.adapter.retire(latest.candidate); }
+        catch (cleanupError) {
+          this.journal.updateViewerDeployment(latest.deploymentId, {
+            phase: "failed",
+            terminal: true,
+            error: `${message}; candidate cleanup failed: ${safeError(cleanupError)}`,
           });
           return;
         }

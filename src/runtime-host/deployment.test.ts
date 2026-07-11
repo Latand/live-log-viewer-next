@@ -4,9 +4,10 @@ import os from "node:os";
 import path from "node:path";
 
 import type { ViewerHealthEvidence, ViewerReleaseIdentity } from "@/lib/runtime/contracts";
-import { UnixRuntimeHostClient } from "@/lib/runtime/client";
+import { runtimeHostClient, UnixRuntimeHostClient } from "@/lib/runtime/client";
 
 import { ViewerDeploymentCoordinator, type ViewerDeploymentAdapter } from "./deployment";
+import { viewerCandidateDockerArgs } from "./candidateContainer";
 import { RuntimeHost } from "./host";
 import { RuntimeJournal } from "./journal";
 import { serveRuntimeHost } from "./socket";
@@ -39,6 +40,7 @@ function healthy(endpoint: string): ViewerHealthEvidence {
     processReady: true,
     rootStatus: 200,
     authenticatedStatus: 200,
+    unauthorizedStatus: 403,
     assets: [{ path: "/_next/static/app.js", status: 200 }, { path: "/_next/static/app.css", status: 200 }],
     ok: true,
   };
@@ -47,14 +49,17 @@ function healthy(endpoint: string): ViewerHealthEvidence {
 class FakeDeploymentAdapter implements ViewerDeploymentAdapter {
   current = release("old", "old");
   resolveGate: Promise<void> | null = null;
+  resolveFailures = 0;
   buildGate: Promise<void> | null = null;
   candidateHealth = healthy("http://127.0.0.1/candidate");
   promotedHealth = healthy("http://127.0.0.1:8898");
   calls: string[] = [];
 
+  async reconcile(): Promise<void> { this.calls.push("reconcile"); }
   async resolveRevision(revision: string): Promise<string> {
     this.calls.push(`resolve:${revision}`);
     await this.resolveGate;
+    if (this.resolveFailures > 0) { this.resolveFailures -= 1; throw new Error("revision resolution timed out"); }
     return revision === "origin/main" ? "a".repeat(40) : revision;
   }
   async buildCandidate(deploymentId: string, revision: string): Promise<ViewerReleaseIdentity> {
@@ -68,6 +73,8 @@ class FakeDeploymentAdapter implements ViewerDeploymentAdapter {
   async promote(candidate: ViewerReleaseIdentity): Promise<void> { this.calls.push(`promote:${candidate.container}`); this.current = candidate; }
   async verifyPromoted(candidate: ViewerReleaseIdentity): Promise<ViewerHealthEvidence> { this.calls.push(`verify-promoted:${candidate.container}`); return this.promotedHealth; }
   async rollback(previous: ViewerReleaseIdentity, candidate: ViewerReleaseIdentity): Promise<void> { this.calls.push(`rollback:${candidate.container}`); this.current = previous; }
+  async retire(candidate: ViewerReleaseIdentity): Promise<void> { this.calls.push(`retire:${candidate.container}`); }
+  async retainOnly(releases: ViewerReleaseIdentity[]): Promise<void> { this.calls.push(`retain-only:${releases.map((item) => item.container).join(",")}`); }
 }
 
 test("deployment admission is serialized and idempotent", async () => {
@@ -90,6 +97,7 @@ test("deployment admission is serialized and idempotent", async () => {
 
   releaseBuild();
   await coordinator.waitForDeployment(first.deploymentId);
+  expect(adapter.calls.some((call) => call.startsWith("retain-only:"))).toBe(true);
   store.close();
 });
 
@@ -114,6 +122,20 @@ test("genuinely concurrent requests serialize revision resolution and return bus
   store.close();
 });
 
+test("failed revision resolution releases admission for a deterministic retry", async () => {
+  const store = journal("admission-timeout");
+  const adapter = new FakeDeploymentAdapter();
+  adapter.resolveFailures = 1;
+  const coordinator = new ViewerDeploymentCoordinator(store, adapter, { pid: 10, startIdentity: "10:1" });
+
+  await expect(coordinator.requestViewerDeployment({ idempotencyKey: "timed-out" })).rejects.toThrow("timed out");
+  const retry = await coordinator.requestViewerDeployment({ idempotencyKey: "retry-after-timeout" });
+
+  expect(retry).toMatchObject({ state: "accepted", replayed: false });
+  if (retry.state === "accepted") await coordinator.waitForDeployment(retry.deploymentId);
+  store.close();
+});
+
 test("an unhealthy candidate leaves the serving release unchanged", async () => {
   const store = journal("candidate-gate");
   const adapter = new FakeDeploymentAdapter();
@@ -129,6 +151,7 @@ test("an unhealthy candidate leaves the serving release unchanged", async () => 
   expect(status?.health[0]?.assets).toEqual([{ path: "/_next/static/app.js", status: 404 }]);
   expect(adapter.current).toEqual(previous);
   expect(adapter.calls.some((call) => call.startsWith("promote:"))).toBe(false);
+  expect(adapter.calls).toContain(`retire:${status?.candidate?.container}`);
   store.close();
 });
 
@@ -146,7 +169,26 @@ test("a post-promotion failure restores the previous healthy release", async () 
   expect(status).toMatchObject({ phase: "rolled-back", terminal: true, previous });
   expect(adapter.current).toEqual(previous);
   expect(adapter.calls.findIndex((call) => call.startsWith("promote:"))).toBeLessThan(adapter.calls.findIndex((call) => call.startsWith("rollback:")));
+  expect(adapter.calls).toContain(`retire:${status?.candidate?.container}`);
   expect(status?.health).toHaveLength(2);
+  store.close();
+});
+
+test("successful cleanup retains the serving and immediate rollback releases", async () => {
+  const store = journal("release-retention");
+  const adapter = new FakeDeploymentAdapter();
+  const coordinator = new ViewerDeploymentCoordinator(store, adapter, { pid: 10, startIdentity: "10:1" });
+
+  const first = await coordinator.requestViewerDeployment({ idempotencyKey: "retention-one", revision: "1".repeat(40) });
+  if (first.state !== "accepted") throw new Error("deployment was not accepted");
+  const firstStatus = await coordinator.waitForDeployment(first.deploymentId);
+  const second = await coordinator.requestViewerDeployment({ idempotencyKey: "retention-two", revision: "2".repeat(40) });
+  if (second.state !== "accepted") throw new Error("deployment was not accepted");
+  const secondStatus = await coordinator.waitForDeployment(second.deploymentId);
+
+  expect(adapter.calls.filter((call) => call.startsWith("retain-only:")).at(-1)).toBe(
+    `retain-only:${secondStatus?.candidate?.container},${firstStatus?.candidate?.container}`,
+  );
   store.close();
 });
 
@@ -235,14 +277,25 @@ test("staged end-to-end build survives a host restart and a later release rolls 
   restartedJournal.close();
 });
 
-test("Viewer socket requests receive deployment receipts and durable status", async () => {
+test("newly promoted Viewer environment requests the next deployment through runtime-host", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "llv-deploy-socket-"));
   sandboxes.push(dir);
   const store = new RuntimeJournal(path.join(dir, "runtime.sqlite"), { now: () => 1_000 });
   const coordinator = new ViewerDeploymentCoordinator(store, new FakeDeploymentAdapter(), { pid: 10, startIdentity: "10:1" });
-  const server = serveRuntimeHost(path.join(dir, "runtime.sock"), new RuntimeHost(store, undefined, coordinator));
+  const socketPath = path.join(dir, "runtime.sock");
+  const server = serveRuntimeHost(socketPath, new RuntimeHost(store, undefined, coordinator));
   await new Promise<void>((resolve) => server.once("listening", resolve));
-  const client = new UnixRuntimeHostClient(path.join(dir, "runtime.sock"));
+  const args = viewerCandidateDockerArgs(release("current", "current"), {
+    uid: "1000", gid: "1000", envFile: "/config/service.env", envFileExists: false, runtimeSocket: socketPath,
+  });
+  const environment = {} as NodeJS.ProcessEnv;
+  for (let index = 0; index < args.length; index += 1) {
+    if (args[index] !== "-e") continue;
+    const [key, ...value] = args[index + 1]!.split("=");
+    environment[key!] = value.join("=");
+  }
+  const client = runtimeHostClient(environment);
+  if (!client) throw new Error("promoted Viewer runtime client is unavailable");
 
   const receipt = await client.requestViewerDeployment({ idempotencyKey: "socket-deploy" });
   if (receipt.state !== "accepted") throw new Error("deployment was not accepted");

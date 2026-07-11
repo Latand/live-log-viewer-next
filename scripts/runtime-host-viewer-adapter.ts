@@ -5,7 +5,8 @@ import fs from "node:fs";
 import path from "node:path";
 
 import type { ViewerHealthEvidence, ViewerReleaseIdentity } from "../src/lib/runtime/contracts";
-import { waitForViewerReadiness, type ViewerCandidateContainerState } from "../src/runtime-host/deploymentHealth";
+import { obsoleteManagedViewerContainers, viewerCandidateDockerArgs } from "../src/runtime-host/candidateContainer";
+import { viewerHealthRequestPlan, waitForViewerReadiness, type ViewerCandidateContainerState } from "../src/runtime-host/deploymentHealth";
 
 const stateDir = process.env.LLV_STATE_DIR || "/home/latand/.config/agent-log-viewer/state";
 const deploymentDir = path.join(stateDir, "deployments");
@@ -13,10 +14,11 @@ const mirrorDir = path.join(deploymentDir, "canonical.git");
 const targetFile = process.env.LLV_VIEWER_DEPLOY_TARGET || path.join(stateDir, "viewer-release.json");
 const canonicalRemote = process.env.LLV_VIEWER_CANONICAL_REMOTE || "git@github.com:Latand/live-log-viewer-next.git";
 const envFile = process.env.LLV_ENV_FILE || "/home/latand/.config/agent-log-viewer/service.env";
+const runtimeSocket = process.env.LLV_RUNTIME_HOST_SOCKET || path.join(stateDir, "runtime-host.sock");
 const stableEndpoint = `http://127.0.0.1:${Number(process.env.LLV_VIEWER_PORT || 8898)}`;
 
 async function command(argv: string[]): Promise<string> {
-  const child = Bun.spawn(argv, { stdout: "pipe", stderr: "pipe", env: process.env });
+  const child = Bun.spawn(["/usr/bin/setpriv", "--pdeathsig", "KILL", "--", ...argv], { stdout: "pipe", stderr: "pipe", env: process.env });
   const [stdout, stderr, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
   if (code !== 0) throw new Error((stderr.trim() || `${argv[0]} failed`).slice(0, 1000));
   return stdout.trim();
@@ -60,34 +62,51 @@ async function buildCandidate(deploymentId: string, revision: string): Promise<V
   await command(["git", "--git-dir", mirrorDir, "worktree", "prune"]);
   await command(["git", "--git-dir", mirrorDir, "worktree", "add", "--detach", sourceDir, revision]);
   const image = `agent-log-viewer:deploy-${revision}`;
-  await command(["docker", "build", "--pull", "--label", `dev.live-log-viewer.revision=${revision}`, "-t", image, sourceDir]);
+  try {
+    await command(["docker", "build", "--pull", "--label", `dev.live-log-viewer.revision=${revision}`, "-t", image, sourceDir]);
+  } finally {
+    try { await command(["git", "--git-dir", mirrorDir, "worktree", "remove", "--force", sourceDir]); }
+    catch { fs.rmSync(sourceDir, { recursive: true, force: true }); }
+  }
   const port = candidatePort(deploymentId);
   return { revision, image, container: `llv-deploy-${deploymentId.replace(/[^a-zA-Z0-9_.-]/g, "-")}`, endpoint: `http://127.0.0.1:${port}` };
 }
 
 async function containerExists(container: string): Promise<boolean> {
-  const child = Bun.spawn(["docker", "container", "inspect", container], { stdout: "ignore", stderr: "ignore" });
-  return (await child.exited) === 0;
+  try { await command(["docker", "container", "inspect", container]); return true; }
+  catch (error) {
+    const message = error instanceof Error ? error.message : "";
+    if (message.includes("No such container") || message.includes("No such object")) return false;
+    throw error;
+  }
 }
 
 async function startCandidate(candidate: ViewerReleaseIdentity): Promise<void> {
-  const endpoint = new URL(candidate.endpoint);
   if (await containerExists(candidate.container)) {
     await command(["docker", "start", candidate.container]);
     return;
   }
   const uid = String(process.getuid?.() ?? 1000);
   const gid = String(process.getgid?.() ?? 1000);
-  const args = [
-    "docker", "run", "-d", "--name", candidate.container,
-    "--network", "host", "--pid", "host", "--privileged", "--user", `${uid}:${gid}`,
-    "-e", "HOME=/home/latand", "-e", "HOSTNAME=127.0.0.1", "-e", `PORT=${endpoint.port}`,
-    "-e", "XDG_CONFIG_HOME=/home/latand/.config", "-e", "XDG_CACHE_HOME=/home/latand/.cache",
-    "-v", "/home/latand:/home/latand", "-v", `/tmp/tmux-${uid}:/tmp/tmux-${uid}`, "-v", `/tmp/claude-${uid}:/tmp/claude-${uid}`,
-  ];
-  if (fs.existsSync(envFile)) args.push("--env-file", envFile);
-  args.push(candidate.image);
-  await command(args);
+  await command(viewerCandidateDockerArgs(candidate, { uid, gid, envFile, envFileExists: fs.existsSync(envFile), runtimeSocket }));
+}
+
+async function retireRelease(candidate: ViewerReleaseIdentity): Promise<void> {
+  if (await containerExists(candidate.container)) await command(["docker", "container", "rm", "-f", candidate.container]);
+  try { await command(["docker", "image", "rm", candidate.image]); } catch { /* another retained release may use this image */ }
+}
+
+async function retainOnly(releases: ViewerReleaseIdentity[]): Promise<void> {
+  const output = await command(["docker", "container", "ls", "-a", "--filter", "label=dev.live-log-viewer.managed=1", "--format", "{{.Names}}"]);
+  const containers = output.split("\n").map((item) => item.trim()).filter(Boolean);
+  const retainedImages = new Set(releases.map((item) => item.image));
+  for (const container of obsoleteManagedViewerContainers(containers, releases.map((item) => item.container))) {
+    const image = await command(["docker", "container", "inspect", "--format", "{{.Config.Image}}", container]);
+    await command(["docker", "container", "rm", "-f", container]);
+    if (image && !retainedImages.has(image)) {
+      try { await command(["docker", "image", "rm", image]); } catch { /* another container may use this image */ }
+    }
+  }
 }
 
 function serviceToken(): string | null {
@@ -99,9 +118,9 @@ function serviceToken(): string | null {
   }
 }
 
-async function fetchStatus(url: string): Promise<{ status: number; text: string }> {
+async function fetchStatus(url: string, headers: Record<string, string> = {}): Promise<{ status: number; text: string }> {
   try {
-    const response = await fetch(url, { redirect: "manual", signal: AbortSignal.timeout(5_000) });
+    const response = await fetch(url, { headers, redirect: "manual", signal: AbortSignal.timeout(5_000) });
     return { status: response.status, text: await response.text() };
   } catch {
     return { status: 0, text: "" };
@@ -124,25 +143,30 @@ async function containerState(container: string): Promise<ViewerCandidateContain
 
 async function probeRoutes(endpoint: string, expectedAssetsEndpoint?: string): Promise<ViewerHealthEvidence> {
   const token = serviceToken();
-  const root = await fetchStatus(`${endpoint}/`);
-  const authenticated = token ? await fetchStatus(`${endpoint}/?k=${encodeURIComponent(token)}`) : null;
+  const requests = viewerHealthRequestPlan(endpoint, token);
+  const root = await fetchStatus(requests.root.url, requests.root.headers);
+  const authenticated = requests.authenticated ? await fetchStatus(requests.authenticated.url, requests.authenticated.headers) : null;
+  const unauthorized = requests.unauthorized ? await fetchStatus(requests.unauthorized.url, requests.unauthorized.headers) : null;
   const html = authenticated?.status === 200 ? authenticated.text : root.text;
   const paths = referencedAssets(html);
   const assets = await Promise.all(paths.map(async (asset) => ({ path: asset, status: (await fetchStatus(`${endpoint}${asset}`)).status })));
   let expectedAssetsMatch = true;
   if (expectedAssetsEndpoint) {
-    const expectedRoot = await fetchStatus(`${expectedAssetsEndpoint}/${token ? `?k=${encodeURIComponent(token)}` : ""}`);
+    const expectedRequests = viewerHealthRequestPlan(expectedAssetsEndpoint, token);
+    const expectedRequest = expectedRequests.authenticated ?? expectedRequests.root;
+    const expectedRoot = await fetchStatus(expectedRequest.url, expectedRequest.headers);
     expectedAssetsMatch = JSON.stringify(referencedAssets(expectedRoot.text)) === JSON.stringify(paths);
   }
   const processReady = true;
   const ok = root.status === 200
     && (authenticated === null || authenticated.status === 200)
+    && (unauthorized === null || unauthorized.status === 403)
     && assets.length > 0
     && assets.every((asset) => asset.status === 200)
     && expectedAssetsMatch;
   return {
     checkedAt: new Date().toISOString(), endpoint, processReady, rootStatus: root.status,
-    authenticatedStatus: authenticated?.status ?? null, assets, ok,
+    authenticatedStatus: authenticated?.status ?? null, unauthorizedStatus: unauthorized?.status ?? null, assets, ok,
     ...(ok ? {} : { detail: expectedAssetsMatch ? "Viewer health or referenced asset gate failed" : "stable listener does not serve the candidate asset set" }),
   };
 }
@@ -193,6 +217,12 @@ async function main(): Promise<unknown> {
   if (action === "promote") { switchTarget(release(input.candidate)); return {}; }
   if (action === "verify-promoted") { const candidate = release(input.candidate); return verify(candidate, stableEndpoint, candidate.endpoint); }
   if (action === "rollback") { switchTarget(release(input.previous)); return {}; }
+  if (action === "retire") { await retireRelease(release(input.release)); return {}; }
+  if (action === "retain-only") {
+    if (!Array.isArray(input.releases)) throw new Error("retained releases are invalid");
+    await retainOnly(input.releases.map(release));
+    return {};
+  }
   throw new Error("deployment adapter action is unsupported");
 }
 

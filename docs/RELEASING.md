@@ -23,7 +23,12 @@ The runtime-host container keeps UID/GID `1000:1000` by default and receives
 the Docker socket GID as a supplementary group. Its Docker namespace shim
 restores that complete credential set before invoking the host CLI.
 
-The built-in host adapter lives at `/app/scripts/runtime-host-viewer-adapter.ts`. It maintains a clean canonical Git mirror under the durable state directory, resolves a commit SHA, creates a detached source worktree, builds a versioned Docker image, starts a distinct candidate container, checks process readiness plus root/authenticated routes and every referenced CSS/JavaScript asset, and atomically changes the listener target. Post-promotion failure restores the journaled previous target.
+The built-in host adapter lives at `/app/scripts/runtime-host-viewer-adapter.ts`. It maintains a clean canonical Git mirror under the durable state directory, resolves a commit SHA, creates a detached source worktree, builds a versioned Docker image, starts a distinct candidate container with the runtime-host socket configured, checks process readiness plus remote authorized/unauthorized behavior and every referenced CSS/JavaScript asset, and atomically changes the listener target. Post-promotion failure restores the journaled previous target. Successful cleanup retains the serving and immediate rollback containers; failed and superseded managed candidates are retired.
+
+Each adapter action has a fixed deadline. Runtime-host records the adapter PID
+and process-start identity durably, launches it with a parent-death signal, and
+reconciles that exact process group before replaying a journaled phase after a
+restart.
 
 The adapter protocol is a fixed executable plus one action argument. JSON request data arrives on stdin. Supported actions are `resolve-revision`, `build-candidate`, `start-candidate`, `current-release`, `verify-candidate`, `promote`, `verify-promoted`, and `rollback`. Browser request data cannot select executables, Docker arguments, Compose projects, or shell text.
 

@@ -291,6 +291,7 @@ export interface ViewerHealthEvidence {
   processReady: boolean;
   rootStatus: number;
   authenticatedStatus: number | null;
+  unauthorizedStatus: number | null;
   assets: Array<{ path: string; status: number }>;
   ok: boolean;
   detail?: string;

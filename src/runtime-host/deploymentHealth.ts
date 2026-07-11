@@ -2,6 +2,28 @@ import type { ViewerHealthEvidence } from "@/lib/runtime/contracts";
 
 export type ViewerCandidateContainerState = "running" | "exited" | "missing";
 
+export interface ViewerHealthRequest {
+  url: string;
+  headers: Record<string, string>;
+}
+
+export interface ViewerHealthRequestPlan {
+  root: ViewerHealthRequest;
+  authenticated: ViewerHealthRequest | null;
+  unauthorized: ViewerHealthRequest | null;
+}
+
+export function viewerHealthRequestPlan(endpoint: string, token: string | null): ViewerHealthRequestPlan {
+  const remoteHeaders = { "x-forwarded-for": "203.0.113.10" };
+  return {
+    root: { url: `${endpoint}/`, headers: {} },
+    authenticated: token
+      ? { url: `${endpoint}/`, headers: { ...remoteHeaders, authorization: `Bearer ${token}` } }
+      : null,
+    unauthorized: token ? { url: `${endpoint}/`, headers: remoteHeaders } : null,
+  };
+}
+
 export interface ViewerReadinessProbe {
   endpoint: string;
   inspect(): Promise<ViewerCandidateContainerState>;
@@ -18,6 +40,7 @@ function unavailable(endpoint: string, state: Exclude<ViewerCandidateContainerSt
     processReady: false,
     rootStatus: 0,
     authenticatedStatus: null,
+    unauthorizedStatus: null,
     assets: [],
     ok: false,
     detail: state === "exited" ? "candidate container exited before readiness" : "candidate container disappeared before readiness",

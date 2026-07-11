@@ -1,8 +1,16 @@
-import { expect, test } from "bun:test";
+import { afterEach, expect, test } from "bun:test";
+import { NextRequest } from "next/server";
 
 import type { ViewerHealthEvidence } from "@/lib/runtime/contracts";
+import { proxy } from "@/proxy";
 
-import { waitForViewerReadiness } from "./deploymentHealth";
+import { viewerHealthRequestPlan, waitForViewerReadiness } from "./deploymentHealth";
+
+const originalToken = process.env.LLV_TOKEN;
+afterEach(() => {
+  if (originalToken === undefined) delete process.env.LLV_TOKEN;
+  else process.env.LLV_TOKEN = originalToken;
+});
 
 function evidence(ok: boolean): ViewerHealthEvidence {
   return {
@@ -11,6 +19,7 @@ function evidence(ok: boolean): ViewerHealthEvidence {
     processReady: true,
     rootStatus: ok ? 200 : 0,
     authenticatedStatus: null,
+    unauthorizedStatus: null,
     assets: ok ? [{ path: "/_next/static/app.js", status: 200 }] : [],
     ok,
   };
@@ -46,4 +55,17 @@ test("candidate readiness stops immediately after container exit", async () => {
   expect(result).toMatchObject({ ok: false, processReady: false, rootStatus: 0, detail: "candidate container exited before readiness" });
   expect(probes).toBe(0);
   expect(sleeps).toBe(0);
+});
+
+test("health request plan exercises remote authorization and rejection", () => {
+  process.env.LLV_TOKEN = "viewer-token";
+  const plan = viewerHealthRequestPlan("http://127.0.0.1:18001", "viewer-token");
+  if (!plan.authenticated || !plan.unauthorized) throw new Error("authenticated request plan is missing");
+
+  const authorized = proxy(new NextRequest(plan.authenticated.url, { headers: plan.authenticated.headers }));
+  const unauthorized = proxy(new NextRequest(plan.unauthorized.url, { headers: plan.unauthorized.headers }));
+
+  expect(plan.root.headers).toEqual({});
+  expect(authorized.headers.get("x-middleware-next")).toBe("1");
+  expect(unauthorized.status).toBe(403);
 });
