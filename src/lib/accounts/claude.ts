@@ -178,14 +178,15 @@ export function createManagedClaudeAccount(label: string): ClaudeAccount {
   });
 }
 
-export function removeManagedClaudeAccount(id: string): void {
-  withRegistryLock(() => {
+export function removeManagedClaudeAccount(id: string): { cleanupPending: boolean } {
+  return withRegistryLock(() => {
     cached = null; const registry = mutable(); const existing = registry.accounts.find((item) => item.id === id); if (!existing) throw new UnknownClaudeAccountError(id);
     const home = managedHome(id);
     const exists = fs.existsSync(home);
     if (exists && !managedClaudeHomeIsSafe(id, true)) throw new UnsafeClaudeHomeError();
     write({ ...registry, active: registry.active === id ? DEFAULT_ID : registry.active, accounts: registry.accounts.filter((item) => item.id !== id) });
-    if (exists) try { fs.rmSync(home, { recursive: true, force: true }); } catch { /* orphan cleanup retries the canonical managed home */ }
+    if (exists) try { fs.rmSync(home, { recursive: true, force: true }); } catch { return { cleanupPending: true }; }
+    return { cleanupPending: false };
   });
 }
 

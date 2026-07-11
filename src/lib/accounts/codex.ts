@@ -391,8 +391,8 @@ export function createManagedCodexAccount(label: string): CodexAccount {
   });
 }
 
-export function removeManagedCodexAccount(id: string): void {
-  withRegistryLock(() => {
+export function removeManagedCodexAccount(id: string): { cleanupPending: boolean } {
+  return withRegistryLock(() => {
     cached = null;
     const registry = mutableRegistry();
     const existing = registry.accounts.find((account) => account.id === id);
@@ -405,7 +405,8 @@ export function removeManagedCodexAccount(id: string): void {
       active: registry.active === id ? DEFAULT_ID : registry.active,
       accounts: registry.accounts.filter((account) => account.id !== id),
     });
-    if (exists) try { fs.rmSync(home, { recursive: true, force: true }); } catch { /* orphan cleanup retries the canonical managed home */ }
+    if (exists) try { fs.rmSync(home, { recursive: true, force: true }); } catch { return { cleanupPending: true }; }
+    return { cleanupPending: false };
   });
 }
 

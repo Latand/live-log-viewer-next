@@ -93,12 +93,14 @@ test("a home deletion failure leaves a removable Claude orphan after logical rem
     if (String(target).includes(account.id)) throw Object.assign(new Error("denied"), { code: "EACCES" });
     return originalRm(target, options);
   }) as typeof fs.rmSync;
+  let removal: { cleanupPending: boolean } | undefined;
   try {
-    expect(() => mod.removeManagedClaudeAccount(account.id)).not.toThrow();
+    removal = mod.removeManagedClaudeAccount(account.id);
   } finally {
     fs.rmSync = originalRm;
   }
 
+  expect(removal).toEqual({ cleanupPending: true });
   expect(mod.listClaudeAccounts().map((item) => item.id)).not.toContain(account.id);
   expect(fs.existsSync(account.home)).toBe(true);
   expect(mod.cleanupOrphanedClaudeHomes()).toContain(account.id);

@@ -294,6 +294,32 @@ describe("durable account migration coordinator", () => {
     expect(store.engineRouting("codex").revision).toBe(beforeStop + 1);
   });
 
+  test("card rollback invalidates an active-scope preview when readiness becomes deferred", () => {
+    const store = registry();
+    store.reconcileConversations([observation("/rollback-preview.jsonl", "a", "idle")]);
+    const conversation = store.conversationForPath("/rollback-preview.jsonl")!;
+    const intent = store.commitMigrationIntent({
+      engine: "codex", targetId: "b", origin: "manual", requestId: "rollback-preview",
+      expectedRevision: store.engineRouting("codex").revision, scope: "all",
+    });
+    store.transitionConversationMigration(conversation.id, intent.revision, ["requested"], {
+      phase: "failed-recoverable", error: "retry later",
+    });
+    const previewRevision = store.engineRouting("codex").revision;
+
+    store.rollbackConversationMigration(conversation.id, intent.revision);
+
+    expect(store.engineRouting("codex").revision).toBe(previewRevision + 1);
+    expect(store.migrationScope("codex", "c")).toMatchObject({ idle: 0, deferred: 1 });
+    expect(() => store.commitMigrationIntent({
+      engine: "codex", targetId: "c", origin: "manual", requestId: "stale-rollback-preview",
+      expectedRevision: previewRevision, scope: "active",
+    })).toThrow(MigrationRevisionError);
+    const settledRevision = store.engineRouting("codex").revision;
+    store.rollbackConversationMigration(conversation.id, intent.revision);
+    expect(store.engineRouting("codex").revision).toBe(settledRevision);
+  });
+
   test("preview reads the controller inventory without rewriting the registry", async () => {
     const store = registry();
     store.reconcileConversations([observation("/owned.jsonl", "managed", "idle")]);

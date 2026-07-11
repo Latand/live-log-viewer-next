@@ -1952,6 +1952,8 @@ export class AgentRegistry {
       const conversation = file.conversations[canonicalId];
       if (!conversation?.migration) throw new Error("conversation has no migration");
       if (expectedRevision !== undefined && conversation.migration.revision !== expectedRevision) throw new Error("migration revision is stale");
+      const paths = new Set([conversation.generations.at(-1)?.path].filter((pathname): pathname is string => Boolean(pathname)));
+      const signature = migrationReadinessSignature(file, conversation.engine, paths);
       const source = conversation.generations.find((generation) => generation.id === conversation.migration?.sourceGenerationId)
         ?? conversation.generations.at(-1);
       if (!source) throw new Error("conversation has no source generation");
@@ -1973,6 +1975,7 @@ export class AgentRegistry {
       }
       conversation.migration = { ...conversation.migration, phase: "rolled-back", error: null, errorCode: null, updatedAt: rolledAt };
       conversation.updatedAt = rolledAt;
+      advanceMigrationScopeRevision(file, conversation.engine, signature, paths);
       return clone(conversation);
     });
   }

@@ -112,12 +112,14 @@ test("a home deletion failure leaves a removable Codex orphan after logical remo
     if (String(target).includes(account.id)) throw Object.assign(new Error("denied"), { code: "EACCES" });
     return originalRm(target, options);
   }) as typeof fs.rmSync;
+  let removal: { cleanupPending: boolean } | undefined;
   try {
-    expect(() => removeManagedCodexAccount(account.id)).not.toThrow();
+    removal = removeManagedCodexAccount(account.id);
   } finally {
     fs.rmSync = originalRm;
   }
 
+  expect(removal).toEqual({ cleanupPending: true });
   expect(listCodexAccounts().map((item) => item.id)).not.toContain(account.id);
   expect(fs.existsSync(account.home)).toBe(true);
   expect(cleanupOrphanedCodexHomes()).toContain(account.id);

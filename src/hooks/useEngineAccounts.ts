@@ -125,12 +125,13 @@ export type AccountRetryAction =
   | { type: "retry"; kind: "stop"; intentId: string }
   | { type: "retry"; kind: "retryFailed"; intentId: string }
   | { type: "retry"; kind: "loginRetry"; accountId: string }
-  | { type: "retry"; kind: "forceRemove"; accountId: string };
+  | { type: "retry"; kind: "forceRemove"; accountId: string }
+  | { type: "retry"; kind: "cleanupOrphans" };
 
 export type AccountNoticeKey =
   | "accounts.refreshFailed" | "accounts.switchFailed" | "accounts.addFailed" | "accounts.loginOpened"
   | "accounts.claudeLoginStarted"
-  | "accounts.removeBlocked" | "accounts.removeHistoryBlocked" | "accounts.removeFailed" | "accounts.cleanupFailed"
+  | "accounts.removeBlocked" | "accounts.removeHistoryBlocked" | "accounts.removeFailed" | "accounts.cleanupPending" | "accounts.cleanupFailed"
   | ClaudeLoginErrKey;
 
 export interface AccountNotice {
@@ -723,8 +724,16 @@ export function createEngineAccountsStore(
           await refresh();
           return false;
         }
+        const body = await response.json().catch(() => null) as { cleanupPending?: unknown } | null;
         const accounts = snapshot.accounts.filter((account) => account.id !== accountId);
-        patchSnapshot({ accounts, challenge: pendingDeviceAuth(accounts), identityVersion: snapshot.identityVersion + 1, notice: null });
+        patchSnapshot({
+          accounts,
+          challenge: pendingDeviceAuth(accounts),
+          identityVersion: snapshot.identityVersion + 1,
+          notice: body?.cleanupPending === true
+            ? { kind: "error", operation: "remove", messageKey: "accounts.cleanupPending", target: label, action: { type: "retry", kind: "cleanupOrphans" } }
+            : null,
+        });
       } catch {
         patchSnapshot({ notice: { kind: "error", operation: "remove", messageKey: "accounts.removeFailed", target: label, action: null } });
         await refresh();
@@ -744,6 +753,7 @@ export function createEngineAccountsStore(
           body: JSON.stringify({ cleanupOrphans: true }),
         });
         if (!response.ok) throw new Error("orphan cleanup failed");
+        patchSnapshot({ notice: null });
       } catch {
         patchSnapshot({ notice: { kind: "error", operation: "remove", messageKey: "accounts.cleanupFailed", action: null } });
         await refresh();
@@ -764,6 +774,8 @@ export function createEngineAccountsStore(
         return add(action.label);
       case "loginRetry":
         return retryLogin(action.accountId);
+      case "cleanupOrphans":
+        return cleanupOrphans();
       case "forceRemove":
         return remove(action.accountId, true);
       case "migrate": {

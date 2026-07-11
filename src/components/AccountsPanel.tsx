@@ -741,7 +741,11 @@ export function AccountsPanel({
                     })}
                     className="shrink-0 rounded-[7px] border border-line bg-bg px-2 py-0.5 text-[11px] font-semibold hover:bg-chip focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
                   >
-                    {notice.action.kind === "forceRemove" ? t("accounts.forceRemove") : t("accounts.retry")}
+                    {notice.action.kind === "forceRemove"
+                      ? t("accounts.forceRemove")
+                      : notice.action.kind === "cleanupOrphans"
+                        ? t("accounts.cleanupOrphans")
+                        : t("accounts.retry")}
                   </button>
                 ) : null}
               </div>

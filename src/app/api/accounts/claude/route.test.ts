@@ -142,7 +142,25 @@ test("managed Claude removal requires force during login and cancels the operati
     body: JSON.stringify({ id: account.id, force: true }),
   }));
   expect(forced.status).toBe(200);
-  await expect(forced.json()).resolves.toEqual({ removed: { id: account.id } });
+  await expect(forced.json()).resolves.toEqual({ removed: { id: account.id }, cleanupPending: false });
+});
+
+test("managed Claude removal reports pending cleanup when local data survives", async () => {
+  const account = createManagedClaudeAccount("Cleanup pending");
+  const originalRm = fs.rmSync;
+  fs.rmSync = ((target: fs.PathLike, options?: fs.RmDirOptions) => {
+    if (path.resolve(String(target)) === path.resolve(account.home)) throw Object.assign(new Error("denied"), { code: "EACCES" });
+    return originalRm(target, options);
+  }) as typeof fs.rmSync;
+  try {
+    const response = await remove(new NextRequest("http://127.0.0.1/api/accounts/claude", {
+      method: "DELETE", headers: { host: "127.0.0.1", "content-type": "application/json" }, body: JSON.stringify({ id: account.id }),
+    }));
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({ removed: { id: account.id }, cleanupPending: true });
+  } finally {
+    fs.rmSync = originalRm;
+  }
 });
 
 test("managed Claude removal retires routing and migration intents targeting the account", async () => {

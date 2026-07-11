@@ -97,13 +97,13 @@ export async function DELETE(req: NextRequest) {
     registry.retireAccount("claude", account.id, "default");
     const retired = registry.snapshot();
     try {
-      removeManagedClaudeAccount(account.id);
+      const removal = removeManagedClaudeAccount(account.id);
       requestAccountMigrationTick();
+      return NextResponse.json({ removed: { id: account.id }, cleanupPending: removal.cleanupPending });
     } catch (error) {
       registry.restoreSnapshot(retired, beforeRetirement);
       throw error;
     }
-    return NextResponse.json({ removed: { id: account.id } });
   } catch (error) {
     if (error instanceof UnknownClaudeAccountError) return failure(404, "unknown_account", "Claude account is unavailable");
     if (error instanceof CorruptClaudeAccountsError) return failure(409, "accounts_locked", "Claude accounts require registry repair");

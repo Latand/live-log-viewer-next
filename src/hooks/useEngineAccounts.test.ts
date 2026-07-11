@@ -629,12 +629,46 @@ test("managed account removal retries with force only after the API reports a sa
   expect(await store.remove("work")).toBeFalse();
   expect(store.notice?.action).toMatchObject({ type: "retry", kind: "forceRemove", accountId: "work" });
   expect(await store.retryNotice()).toBeTrue();
+  expect(store.notice).toBeNull();
   expect(calls.filter((call) => call.url === "/api/accounts/claude").map((call) => call.body)).toEqual([
     { id: "work", force: false },
     { id: "work", force: true },
   ]);
   expect(store.accounts.some((account) => account.id === "work")).toBeFalse();
   expect(store.notice).toBeNull();
+  unsub();
+});
+
+test("managed account removal surfaces pending local cleanup with a recovery action", async () => {
+  let removed = false;
+  const { calls, fetcher } = scripted((url, body) => {
+    if (url === "/api/accounts") {
+      return { claude: { active: "main", accounts: [claudeMain, ...(removed ? [] : [claudeAcct({ id: "work", label: "Work", login: null })])] } };
+    }
+    if (url === "/api/accounts/claude" && (body as { cleanupOrphans?: boolean }).cleanupOrphans === true) {
+      return new Response(JSON.stringify({ removed: ["work"] }));
+    }
+    if (url === "/api/accounts/claude") {
+      removed = true;
+      return new Response(JSON.stringify({ removed: { id: "work" }, cleanupPending: true }));
+    }
+    return new Response(null, { status: 204 });
+  });
+  const store = createEngineAccountsStore("claude", { fetcher });
+  const unsub = store.subscribe(() => {});
+  await advance();
+
+  expect(await store.remove("work")).toBeTrue();
+  expect(store.notice).toMatchObject({
+    messageKey: "accounts.cleanupPending",
+    target: "Work",
+    action: { type: "retry", kind: "cleanupOrphans" },
+  });
+  expect(await store.retryNotice()).toBeTrue();
+  expect(calls.filter((call) => call.url === "/api/accounts/claude").map((call) => call.body)).toEqual([
+    { id: "work", force: false },
+    { cleanupOrphans: true },
+  ]);
   unsub();
 });
 

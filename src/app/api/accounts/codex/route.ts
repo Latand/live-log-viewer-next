@@ -81,13 +81,13 @@ export async function DELETE(req: NextRequest) {
     registry.retireAccount("codex", account.id, "default");
     const retired = registry.snapshot();
     try {
-      removeManagedCodexAccount(account.id);
+      const removal = removeManagedCodexAccount(account.id);
       requestAccountMigrationTick();
+      return NextResponse.json({ removed: { id: account.id }, cleanupPending: removal.cleanupPending });
     } catch (error) {
       registry.restoreSnapshot(retired, beforeRetirement);
       throw error;
     }
-    return NextResponse.json({ removed: { id: account.id } });
   } catch (error) {
     if (error instanceof UnknownAccountError) return NextResponse.json({ error: "Codex account is unavailable", code: "unknown_account" }, { status: 404 });
     if (error instanceof CorruptCodexAccountsError) return NextResponse.json({ error: "Codex accounts require registry repair", code: "accounts_locked" }, { status: 409 });
