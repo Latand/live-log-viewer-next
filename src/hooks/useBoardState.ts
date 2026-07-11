@@ -32,11 +32,6 @@ const MAX_MUTATIONS_PER_PATCH = 128;
    before the 128-count cap, so a batch is never refused for size alone. */
 const MAX_PATCH_BYTES = 192 * 1024;
 
-function mutationBytes(mutation: BoardMutationV1): number {
-  const json = JSON.stringify(mutation);
-  return typeof TextEncoder === "undefined" ? json.length : new TextEncoder().encode(json).length;
-}
-
 /* Server-side per-list validation cap (`pathList` / remap `pairs`): a single
    mutation carrying more entries than this is refused outright, so transport
    splitting bounds item counts alongside bytes. */
@@ -45,8 +40,12 @@ const MAX_PATHS_PER_MUTATION = 512;
    every piece (plus envelope and JSON syntax) far under the server body cap. */
 const SPLIT_PATH_BYTES = 96 * 1024;
 
-function byteLength(value: string): number {
-  return typeof TextEncoder === "undefined" ? value.length : new TextEncoder().encode(value).length;
+/** Exact serialized footprint of one array element: JSON escaping (backslashes,
+    quotes, control characters) can double a pathname's raw UTF-8 size, and the
+    server's body cap applies to the serialized form — so the budget must too. */
+function serializedBytes(value: unknown): number {
+  const json = JSON.stringify(value);
+  return typeof TextEncoder === "undefined" ? json.length : new TextEncoder().encode(json).length;
 }
 
 function chunkByBudget<T>(items: readonly T[], bytesOf: (item: T) => number): T[][] {
@@ -54,7 +53,7 @@ function chunkByBudget<T>(items: readonly T[], bytesOf: (item: T) => number): T[
   let current: T[] = [];
   let bytes = 0;
   for (const item of items) {
-    const size = bytesOf(item) + 4;
+    const size = bytesOf(item) + 1;
     if (current.length > 0 && (current.length >= MAX_PATHS_PER_MUTATION || bytes + size > SPLIT_PATH_BYTES)) {
       chunks.push(current);
       current = [];
@@ -79,10 +78,10 @@ export function splitMutationForTransport(mutation: BoardMutationV1): BoardMutat
   if (mutation.kind === "reconcile-roots") {
     const oversized = mutation.roots.length > MAX_PATHS_PER_MUTATION
       || mutation.removeManual.length > MAX_PATHS_PER_MUTATION
-      || mutationBytes(mutation) > MAX_PATCH_BYTES;
+      || serializedBytes(mutation) > MAX_PATCH_BYTES;
     if (!oversized) return [mutation];
-    const rootChunks = chunkByBudget(mutation.roots, byteLength);
-    const removeChunks = chunkByBudget(mutation.removeManual, byteLength);
+    const rootChunks = chunkByBudget(mutation.roots, serializedBytes);
+    const removeChunks = chunkByBudget(mutation.removeManual, serializedBytes);
     const pieces: BoardMutationV1[] = [];
     for (let index = 0; index < Math.max(rootChunks.length, removeChunks.length); index += 1) {
       pieces.push({ kind: "reconcile-roots", roots: rootChunks[index] ?? [], removeManual: removeChunks[index] ?? [] });
@@ -90,9 +89,9 @@ export function splitMutationForTransport(mutation: BoardMutationV1): BoardMutat
     return pieces;
   }
   if (mutation.kind === "remap-paths") {
-    const oversized = mutation.pairs.length > MAX_PATHS_PER_MUTATION || mutationBytes(mutation) > MAX_PATCH_BYTES;
+    const oversized = mutation.pairs.length > MAX_PATHS_PER_MUTATION || serializedBytes(mutation) > MAX_PATCH_BYTES;
     if (!oversized) return [mutation];
-    return chunkByBudget(mutation.pairs, (pair) => byteLength(pair.from) + byteLength(pair.to))
+    return chunkByBudget(mutation.pairs, serializedBytes)
       .map((pairs): BoardMutationV1 => ({ kind: "remap-paths", pairs }));
   }
   return [mutation];
@@ -107,7 +106,7 @@ export function patchPrefix(outbox: readonly BoardMutationV1[], maxCount = MAX_M
   const prefix: BoardMutationV1[] = [];
   let bytes = 0;
   for (const mutation of outbox) {
-    const size = mutationBytes(mutation);
+    const size = serializedBytes(mutation);
     if (prefix.length > 0 && (prefix.length >= cap || bytes + size > MAX_PATCH_BYTES)) break;
     prefix.push(mutation);
     bytes += size;

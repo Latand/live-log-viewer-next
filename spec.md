@@ -28,7 +28,9 @@ predecessor transcripts with recent mtimes):
   serialized bytes exceed the server body cap; an oversized outbox drains
   across consecutive requests and fully lands. A single mutation whose lists
   exceed the per-list validation cap (512) or the byte budget is split into
-  equivalent transport pieces before entering the outbox. A rejected
+  equivalent transport pieces before entering the outbox; all byte budgets
+  measure the JSON-serialized form (escaping included), matching how the
+  server enforces its cap. A rejected
   multi-mutation batch is bisected until the offender stands alone; only the
   lone rejected mutation is shed, so valid mutations on either side of the
   poison still land.

@@ -605,3 +605,30 @@ test("splitMutationForTransport chunks by item count and bytes, preserving conte
   expect(byBytes.length).toBeGreaterThan(1);
   expect(byBytes.flatMap((piece) => (piece.kind === "remap-paths" ? piece.pairs : []))).toEqual(pairs);
 });
+
+test("escaping-heavy paths stay under the body cap after splitting", async () => {
+  const server = fakeServer({ proj: boardOf(1) });
+  const bodyBytes: number[] = [];
+  const fetcher = async (input: string, init?: RequestInit) => {
+    if (init && (init.method ?? "GET") !== "GET") bodyBytes.push(new TextEncoder().encode(String(init.body)).length);
+    return server.fetcher(input, init);
+  };
+  const store = createBoardStore({ project: "proj", fetcher, storage: null, scheduler: idleScheduler().scheduler });
+  await settle();
+
+  /* The review probe: backslash-laden paths double in size under JSON
+     escaping, so a raw-bytes budget under-counts and still emits 300 KB+
+     bodies. 70 roots + 70 removals × 4,000 backslashes ≈ 1.1 MB serialized. */
+  const roots = Array.from({ length: 70 }, (_, index) => `/r${String(index).padStart(3, "0")}${"\\".repeat(4000)}`);
+  const removeManual = Array.from({ length: 70 }, (_, index) => `/m${String(index).padStart(3, "0")}${"\\".repeat(4000)}`);
+  store.mutate([{ kind: "reconcile-roots", roots, removeManual }]);
+  await settle();
+  await settle();
+  await settle();
+
+  expect(bodyBytes.length).toBeGreaterThan(1);
+  expect(Math.max(...bodyBytes)).toBeLessThanOrEqual(256 * 1024);
+  expect(server.projects.proj.prefs.manual).toHaveLength(70);
+  expect(store.getSnapshot().sync).toBe("current");
+  store.dispose();
+});
