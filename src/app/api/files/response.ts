@@ -18,13 +18,17 @@ import { tmuxEndpointHealth } from "@/lib/tmux";
 import type { FilesResponse } from "@/lib/types";
 
 interface FilesRouteDependencies {
-  listFilesWithProjectCatalog: typeof listFilesWithProjectCatalog;
+  listFilesWithProjectCatalog: (
+    selectedProject: string | undefined,
+    pinnedPath: string | undefined,
+  ) => ReturnType<typeof listFilesWithProjectCatalog>;
 }
 
 export async function buildFilesResponse(request: Request, dependencies: FilesRouteDependencies): Promise<NextResponse> {
   const url = new URL(request.url);
   const selectedProject = url.searchParams.get("project")?.trim() || undefined;
-  const { files, projectCatalog } = await dependencies.listFilesWithProjectCatalog(selectedProject, { persist: false });
+  const pinnedPath = url.searchParams.get("path")?.trim() || undefined;
+  const { files, projectCatalog } = await dependencies.listFilesWithProjectCatalog(selectedProject, pinnedPath);
   // A scan is a read model. Runtime reconciliation and notifications belong to
   // the external scheduler, keeping repeated GETs byte-stable for state files.
   const registry = agentRegistry();
@@ -113,6 +117,7 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
     workflows,
     tasks: tasks.tasks,
     systemHealth: { tmux: tmuxEndpointHealth() },
+    conversationAliases: registrySnapshot.conversationAliases,
     ...(pipelinesError ? { pipelinesError } : {}),
   } satisfies FilesResponse);
   /* The client re-polls every 10 s and this ~410 KB payload is usually

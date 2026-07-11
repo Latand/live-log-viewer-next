@@ -57,7 +57,7 @@ test("repeated files reads reuse the pure read snapshot and retain ETag behavior
   const etag = first.headers.get("etag");
   const second = await GET(new Request("http://127.0.0.1/api/files", { headers: { "if-none-match": etag! } }));
   expect(first.status).toBe(200);
-  expect(await first.json()).toEqual({ files: [], projectCatalog: [], flows: [], pipelines: [], workflows: [], tasks: [], systemHealth: { tmux: { status: "healthy" } } });
+  expect(await first.json()).toEqual({ files: [], projectCatalog: [], flows: [], pipelines: [], workflows: [], tasks: [], systemHealth: { tmux: { status: "healthy" } }, conversationAliases: {} });
   expect(second.status).toBe(304);
   expect(scans).toBe(1);
   expect(scanOptions).toEqual({ persist: false });
@@ -93,7 +93,7 @@ test("concurrent cold files reads share one scan", async () => {
 
 test("an expired snapshot schedules its refresh after the response", async () => {
   await cachedFileScan();
-  const stale = await cachedFileScan(undefined, Number.MAX_SAFE_INTEGER);
+  const stale = await cachedFileScan(undefined, undefined, Number.MAX_SAFE_INTEGER);
 
   expect(scans).toBe(1);
   expect(stale.refreshAfterResponse).toBeFunction();

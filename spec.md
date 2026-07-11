@@ -1,44 +1,72 @@
-# Issue #60 — durable board closes
+# Task: stop the /api/board 413 storm and the phantom chime cascade
 
-## Task statement
+Production viewer (127.0.0.1:8898) showed two linked regressions on a busy
+machine (400+ sessions; an account-migration wave left 183 archived
+predecessor transcripts with recent mtimes):
 
-Fix closed scheme cards resurfacing after reload. The server must preserve close
-tombstones across concurrent board writers and carry them across transcript
-succession paths, including clients that retry a stale whole-list `hidden` patch
-or omit a `remap-paths` mutation.
+1. `PATCH /api/board` failed with 413 in an endless loop. The dashboard's
+   `reconcile-roots` mutation for project `-agents-tools-live-log-viewer-next`
+   carries all 263 root paths (~37 KB serialized) against the 32 KB
+   `MAX_BOARD_BODY_BYTES` cap. The board store treated the non-409 4xx as a
+   transient network error and retried the identical payload forever, so every
+   `close` mutation queued behind it never persisted (closed cards
+   resurrected on reload / other devices).
+2. A storm of identical spawn/finish chimes on every 10 s poll. The scan feed
+   is capped at the `FILE_CAP = 400` most-recent files; with more sessions
+   than that, the tail churns in and out each poll, and `useAgentChimes`
+   forgot identities that left the feed — each return rang as a brand-new
+   agent. Archived migration predecessors both ate ~half the cap slots and
+   duplicated live conversation identities in the feed.
 
 ## Acceptance criteria
 
-- AC1: A legacy whole-list board PATCH retried with a current revision cannot
-  erase hidden entries committed by another writer.
-- AC2: Legacy board PATCH requests remain schema-compatible, and revision-zero
-  preference seeding continues to work.
-- AC3: Hidden tombstones take precedence over stale manual and expanded
-  membership supplied by whole-list clients.
-- AC4: Server-side board mutations derive aliases from durable conversation
-  generations and continuity paths.
-- AC5: A closed predecessor remains hidden when its successor appears and root
-  reconciliation arrives without a client-provided remap.
-- AC6: Root reconciliation preserves hidden entries when conversation identity
-  remains stable.
-- AC7: Regression tests reproduce the concurrent stale-list retry and the
-  successor-without-remap scenarios through the board route.
-- AC8: A malformed or unreadable conversation registry leaves validated board
-  mutations available and skips alias enrichment for that request.
-- AC9: Pending continuity paths cannot create aliases from a future successor
-  back to the current predecessor during initial or repeated migrations;
-  committed continuity paths keep carrying tombstones during later migrations.
-- AC10: Scanner discovery, observed spawn settlement, provider persistence, and
-  explicit continuity callbacks all record pending succession provenance.
-- AC11: Return-to-source routing and target retirement preserve an abandoned
-  successor fence after clearing the active migration.
-- AC12: A table-driven route regression covers commit, return-to-source,
-  target retirement, chained succession, deferred board repair, and queued
-  cleanup receipts across close-before/during/after timing and alias
-  enrichment, root reconciliation, and client remap mutations.
-- AC13: Fenced successor paths can trigger committed alias repair while
-  remaining ineligible for root reconciliation and client remaps.
-- AC14: `bun test` passes.
-- AC15: `bunx tsc --noEmit` passes.
-- AC16: The live board state and production Viewer on port 8898 remain
-  unchanged during implementation and verification.
+- AC1: A board PATCH refused with a structured mutation-content code
+  (INVALID_REQUEST, PAYLOAD_TOO_LARGE) sheds the offending mutation after
+  bisection: no backoff timer stays armed, sync
+  returns to "current", and mutations queued behind it still drain to the
+  server. Access failures (401/403) and other transient 4xx preserve the
+  queued intent and take the backoff path until access heals; an
+  envelope-level verdict (UNSUPPORTED_SCHEMA_VERSION) holds the whole outbox
+  and surfaces the board as unavailable until versions align.
+- AC2: Semantics-coupled mutations (`reconcile-roots`, `remap-paths`) always
+  travel as ONE mutation each; transport therefore preserves reducer
+  atomicity by construction. Independent mutations batch into PATCHes bounded by
+  the server's 128-mutation cap and a serialized-bytes batching budget. A
+  rejected multi-mutation batch is bisected until the offender stands alone;
+  only the lone rejected mutation is shed, so valid mutations on either side
+  of the poison still land.
+- AC3: `MAX_BOARD_BODY_BYTES` is derived from the largest request shape the
+  client transport emits under full JSON escaping: `patchPrefix` ships a
+  byte-heavy mutation alone, so the bound covers one maximal mutation
+  (~25.2 MB) and the three-list legacy-seed patch (~37.7 MB) → 48 MB cap.
+  No client-emittable request is ever size-refused mid-transport; lists past
+  the item-level caps draw the server's atomic validation error. The
+  per-item limits (512 paths, 4096 chars each) remain the real guard.
+- AC4: A conversation identity that leaves the capped feed and returns later
+  in an unchanged attention state rings no chime; a genuine transition
+  (live → waiting, or a truly new finished agent) still rings exactly once.
+  The bounded history evicts by observation recency (LRU), so an identity
+  that skipped a single poll is never evicted ahead of long-unseen entries.
+- AC5: Archived migration predecessors (`migratedTo` set / non-current
+  generations) never ring chimes and never clobber the tracked state of their
+  successor (same stable conversation identity).
+- AC6: The scanner ranks archived transcript generations (every
+  generation/continuity path except the conversation's current one, per the
+  agent registry) below live transcripts when applying `FILE_CAP`, so a
+  migration wave cannot evict live conversations from the feed; with slack
+  under the cap they still appear, and selected-project hydration stays
+  complete (archived predecessors included) so legacy `#f=` deep links keep
+  resolving to their successor. A pending deep link pins its target through
+  the cap: `#f=` pins the exact transcript path together with its
+  registry-current generation, `#c=` canonicalizes the conversation id
+  through durable aliases and pins the current generation; the payload
+  carries the alias map so the client resolver matches links copied before
+  provisional-id adoption, following chained aliases with cycle protection.
+  Pinned scans bypass the shared cache (no per-path cache slots), and every
+  user-driven navigation or focus action — project selection, hash changes,
+  attention jumps, N/Shift-N, and dashboard-local opens/drafts/pipeline/task
+  jumps — cancels the pending intent.
+- AC7: Existing behavior preserved: first-poll chime baseline stays silent,
+  spawn blips ring once per child, revision-conflict replay and network-error
+  backoff in the board store are unchanged. Full `bun test` suite passes and
+  `tsc --noEmit` is clean.

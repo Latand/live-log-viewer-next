@@ -8,8 +8,8 @@ export const dynamic = "force-dynamic";
 
 export async function GET(request: Request): Promise<Response> {
   return buildFilesResponse(request, {
-    listFilesWithProjectCatalog: async (selectedProject) => {
-      const scan = await cachedFileScan(selectedProject);
+    listFilesWithProjectCatalog: async (selectedProject, pinnedPath) => {
+      const scan = await cachedFileScan(selectedProject, pinnedPath);
       if (scan.refreshAfterResponse) after(scan.refreshAfterResponse);
       return scan.snapshot;
     },

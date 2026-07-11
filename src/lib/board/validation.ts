@@ -2,7 +2,19 @@ import type { BoardProjectStateV1 } from "@/lib/view/types";
 import { readBoundedJson, ViewValidationError } from "@/lib/view/validation";
 import type { BoardMutationV1 } from "@/lib/board/mutations";
 
-export const MAX_BOARD_BODY_BYTES = 32 * 1024;
+/* Must admit every request shape the client transport emits, or a legal
+   write becomes untransportable and the client can only drop it. The board
+   store's `patchPrefix` ships a byte-heavy mutation alone, so the largest
+   client-emittable bodies are one maximal mutation and the one-time seed
+   patch. True worst case under JSON escaping (a control character costs six
+   bytes, so one 4096-char path serializes to ~24.6 KB): a reconcile carries
+   two full 512-path lists (~25.2 MB) and the legacy-seed patch form carries
+   three (manual/hidden/expanded, ~37.7 MB). 48 MB covers both with headroom.
+   A hand-crafted 128-mutation array of maximal reconciles exceeds any
+   reasonable bound and correctly draws 413. The real guards are the
+   item-level limits; this cap only fences unbounded bodies on a
+   localhost-only endpoint. */
+export const MAX_BOARD_BODY_BYTES = 48 * 1024 * 1024;
 export type BoardPatch = Partial<BoardProjectStateV1["prefs"]>;
 
 function exact(value: Record<string, unknown>, allowed: readonly string[], field: string): void {

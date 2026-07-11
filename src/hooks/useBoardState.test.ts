@@ -1,6 +1,7 @@
 import { beforeEach, expect, test } from "bun:test";
 
 import { applyBoardMutations, type BoardMutationV1 } from "@/lib/board/mutations";
+import { MAX_BOARD_BODY_BYTES } from "@/lib/board/validation";
 import type { BoardProjectStateV1 } from "@/lib/view/types";
 
 import {
@@ -9,6 +10,7 @@ import {
   isEmptyPrefs,
   isMeaningfulPrefs,
   mergePatch,
+  patchPrefix,
   queueColumnOpen,
   readLegacyPrefs,
   resetPendingOpensForTest,
@@ -410,5 +412,307 @@ test("16: a queued cross-project open dispatches explicit restore", async () => 
   expect(server.projects.proj.prefs.hidden).toEqual([]);
   expect(server.projects.proj.prefs.manual).toEqual(["/root"]);
   expect(server.projects.proj.prefs.expanded).toEqual(["/child"]);
+  store.dispose();
+});
+
+test("a non-409 4xx drops the rejected batch so later mutations still land", async () => {
+  const backing = fakeServer({ proj: boardOf(1, { manual: ["/a"] }) });
+  let patchAttempts = 0;
+  /* The server refuses any batch carrying a reconcile — the shape of the 413
+     oversized-reconcile regression; plain closes pass through untouched. */
+  const fetcher = async (input: string, init?: RequestInit) => {
+    if (init && (init.method ?? "GET") !== "GET") {
+      patchAttempts += 1;
+      const body = JSON.parse(String(init.body)) as { mutations?: BoardMutationV1[] };
+      if (body.mutations?.some((mutation) => mutation.kind === "reconcile-roots")) {
+        return { ok: false, status: 413, json: async () => ({ error: "PAYLOAD_TOO_LARGE" }) };
+      }
+    }
+    return backing.fetcher(input, init);
+  };
+  const sched = idleScheduler();
+  const store = createBoardStore({ project: "proj", fetcher, storage: null, scheduler: sched.scheduler });
+  await settle();
+
+  store.mutate([{ kind: "reconcile-roots", roots: ["/a", "/b"], removeManual: [] }]);
+  await settle();
+  /* One refusal with no backoff timer: the batch is gone and nothing retries it. */
+  expect(patchAttempts).toBe(1);
+  expect(sched.pendingTimeouts()).toBe(0);
+  expect(store.getSnapshot().sync).toBe("current");
+
+  /* The regression this guards: a close queued after the poisoned batch must
+     still reach the server; the old code starved it behind endless 413 retries. */
+  store.mutate([{ kind: "close", path: "/a" }]);
+  await settle();
+  expect(store.getSnapshot().prefs.hidden).toEqual(["/a"]);
+  expect(backing.projects.proj.prefs.hidden).toEqual(["/a"]);
+  store.dispose();
+});
+
+test("an outbox longer than the server's per-PATCH cap drains in bounded chunks", async () => {
+  const server = fakeServer({ proj: boardOf(1) });
+  const batchSizes: number[] = [];
+  const fetcher = async (input: string, init?: RequestInit) => {
+    if (init && (init.method ?? "GET") !== "GET") {
+      const body = JSON.parse(String(init.body)) as { mutations?: BoardMutationV1[] };
+      batchSizes.push(body.mutations?.length ?? 0);
+    }
+    return server.fetcher(input, init);
+  };
+  const store = createBoardStore({ project: "proj", fetcher, storage: null, scheduler: idleScheduler().scheduler });
+  await settle();
+
+  for (let index = 0; index < 200; index += 1) store.mutate([{ kind: "close", path: `/c${index}` }]);
+  await settle();
+  await settle();
+
+  /* Every PATCH stays within the server's 128-mutation validation cap and the
+     whole outbox still lands. */
+  expect(Math.max(...batchSizes)).toBeLessThanOrEqual(128);
+  expect(batchSizes.length).toBeGreaterThan(1);
+  expect(server.projects.proj.prefs.hidden).toHaveLength(200);
+  store.dispose();
+});
+
+test("a close sharing the rejected batch with a poisoned mutation still lands", async () => {
+  const backing = fakeServer({ proj: boardOf(1, { manual: ["/a"] }) });
+  let patchAttempts = 0;
+  const fetcher = async (input: string, init?: RequestInit) => {
+    if (init && (init.method ?? "GET") !== "GET") {
+      patchAttempts += 1;
+      const body = JSON.parse(String(init.body)) as { mutations?: BoardMutationV1[] };
+      if (body.mutations?.some((mutation) => mutation.kind === "reconcile-roots")) {
+        return { ok: false, status: 400, json: async () => ({ error: "INVALID_REQUEST" }) };
+      }
+    }
+    return backing.fetcher(input, init);
+  };
+  const store = createBoardStore({ project: "proj", fetcher, storage: null, scheduler: idleScheduler().scheduler });
+  await settle();
+
+  /* One batch: the refused reconcile rides together with the user's close. */
+  store.mutate([{ kind: "reconcile-roots", roots: ["/a", "/b"], removeManual: [] }, { kind: "close", path: "/a" }]);
+  await settle();
+
+  /* Bisection: the pair is refused, the poisoned reconcile is isolated and
+     shed alone, and the close lands untouched. */
+  expect(patchAttempts).toBe(3);
+  expect(backing.projects.proj.prefs.hidden).toEqual(["/a"]);
+  store.dispose();
+});
+
+test("a poison-tail batch keeps the valid mutations queued before the offender", async () => {
+  const backing = fakeServer({ proj: boardOf(1, { manual: ["/a"] }) });
+  const attempts: string[][] = [];
+  const fetcher = async (input: string, init?: RequestInit) => {
+    if (init && (init.method ?? "GET") !== "GET") {
+      const body = JSON.parse(String(init.body)) as { mutations?: BoardMutationV1[] };
+      attempts.push((body.mutations ?? []).map((mutation) => mutation.kind));
+      if (body.mutations?.some((mutation) => mutation.kind === "reconcile-roots")) {
+        return { ok: false, status: 400, json: async () => ({ error: "INVALID_REQUEST" }) };
+      }
+    }
+    return backing.fetcher(input, init);
+  };
+  const store = createBoardStore({ project: "proj", fetcher, storage: null, scheduler: idleScheduler().scheduler });
+  await settle();
+
+  /* The adversarial ordering from review: the valid close PRECEDES the
+     poisoned reconcile in one batch. */
+  store.mutate([{ kind: "close", path: "/a" }, { kind: "reconcile-roots", roots: ["/a", "/b"], removeManual: [] }]);
+  await settle();
+
+  /* Bisection retries the first half after the refusal, so the close lands
+     durably before the lone reconcile is shed. */
+  expect(attempts).toEqual([["close", "reconcile-roots"], ["close"], ["reconcile-roots"]]);
+  expect(backing.projects.proj.prefs.hidden).toEqual(["/a"]);
+  expect(store.getSnapshot().sync).toBe("current");
+  store.dispose();
+});
+
+test("the drain chunks by serialized bytes under the server body cap", async () => {
+  const server = fakeServer({ proj: boardOf(1) });
+  const bodyBytes: number[] = [];
+  const fetcher = async (input: string, init?: RequestInit) => {
+    if (init && (init.method ?? "GET") !== "GET") bodyBytes.push(new TextEncoder().encode(String(init.body)).length);
+    return server.fetcher(input, init);
+  };
+  const store = createBoardStore({ project: "proj", fetcher, storage: null, scheduler: idleScheduler().scheduler });
+  await settle();
+
+  /* 100 closes × ~4 KB paths ≈ 410 KB of mutations — far past one request. */
+  for (let index = 0; index < 100; index += 1) {
+    store.mutate([{ kind: "close", path: `/${String(index).padStart(4, "0")}${"x".repeat(4000)}` }]);
+  }
+  await settle();
+  await settle();
+
+  expect(bodyBytes.length).toBeGreaterThan(1);
+  expect(Math.max(...bodyBytes)).toBeLessThanOrEqual(256 * 1024);
+  expect(server.projects.proj.prefs.hidden).toHaveLength(100);
+  store.dispose();
+});
+
+test("patchPrefix ships a byte-heavy mutation alone", () => {
+  const oversized: BoardMutationV1 = { kind: "reconcile-roots", roots: Array.from({ length: 60 }, (_, index) => `/${String(index)}${"y".repeat(4000)}`), removeManual: [] };
+  const second: BoardMutationV1 = { kind: "reconcile-roots", roots: Array.from({ length: 60 }, (_, index) => `/second-${String(index)}${"z".repeat(4000)}`), removeManual: [] };
+  const small: BoardMutationV1 = { kind: "close", path: "/small" };
+  expect(patchPrefix([oversized, small])).toEqual([oversized]);
+  expect(patchPrefix([small, oversized])).toEqual([small]);
+  /* Two byte-heavy mutations travel in separate PATCHes, which is what keeps
+     the server body cap sufficient for every client-emittable request. */
+  expect(patchPrefix([oversized, second])).toEqual([oversized]);
+});
+
+test("a validator-accepted reconciliation past the body cap splits and lands whole", async () => {
+  const server = fakeServer({ proj: boardOf(1) });
+  const bodyBytes: number[] = [];
+  const fetcher = async (input: string, init?: RequestInit) => {
+    if (init && (init.method ?? "GET") !== "GET") bodyBytes.push(new TextEncoder().encode(String(init.body)).length);
+    return server.fetcher(input, init);
+  };
+  const store = createBoardStore({ project: "proj", fetcher, storage: null, scheduler: idleScheduler().scheduler });
+  await settle();
+
+  /* The review probe: 70 roots × 4096-char paths ≈ 287 KB — accepted by the
+     item validator, so the server body cap must admit it whole. */
+  const roots = Array.from({ length: 70 }, (_, index) => `/${String(index).padStart(4, "0")}${"r".repeat(4090)}`);
+  store.mutate([{ kind: "reconcile-roots", roots, removeManual: [] }]);
+  await settle();
+  await settle();
+
+  expect(bodyBytes.length).toBeGreaterThanOrEqual(1);
+  expect(Math.max(...bodyBytes)).toBeLessThanOrEqual(MAX_BOARD_BODY_BYTES);
+  /* Nothing was shed: every root of the split reconciliation is durable. */
+  expect(server.projects.proj.prefs.manual).toHaveLength(70);
+  expect(store.getSnapshot().sync).toBe("current");
+  store.dispose();
+});
+
+test("escaping-heavy paths stay under the body cap after splitting", async () => {
+  const server = fakeServer({ proj: boardOf(1) });
+  const bodyBytes: number[] = [];
+  const fetcher = async (input: string, init?: RequestInit) => {
+    if (init && (init.method ?? "GET") !== "GET") bodyBytes.push(new TextEncoder().encode(String(init.body)).length);
+    return server.fetcher(input, init);
+  };
+  const store = createBoardStore({ project: "proj", fetcher, storage: null, scheduler: idleScheduler().scheduler });
+  await settle();
+
+  /* The review probe: backslash-laden paths double in size under JSON
+     escaping, so a raw-bytes budget under-counts and still emits 300 KB+
+     bodies. 70 roots + 70 removals × 4,000 backslashes ≈ 1.1 MB serialized. */
+  const roots = Array.from({ length: 70 }, (_, index) => `/r${String(index).padStart(3, "0")}${"\\".repeat(4000)}`);
+  const removeManual = Array.from({ length: 70 }, (_, index) => `/m${String(index).padStart(3, "0")}${"\\".repeat(4000)}`);
+  store.mutate([{ kind: "reconcile-roots", roots, removeManual }]);
+  await settle();
+  await settle();
+  await settle();
+
+  expect(bodyBytes.length).toBeGreaterThanOrEqual(1);
+  expect(Math.max(...bodyBytes)).toBeLessThanOrEqual(MAX_BOARD_BODY_BYTES);
+  expect(server.projects.proj.prefs.manual).toHaveLength(70);
+  expect(store.getSnapshot().sync).toBe("current");
+  store.dispose();
+});
+
+
+test("an expired-auth 403 preserves the queued intent and lands after recovery", async () => {
+  const backing = fakeServer({ proj: boardOf(1) });
+  let denyAccess = true;
+  let patchAttempts = 0;
+  const fetcher = async (input: string, init?: RequestInit) => {
+    if (init && (init.method ?? "GET") !== "GET") {
+      patchAttempts += 1;
+      if (denyAccess) return { ok: false, status: 403, json: async () => ({ error: "FORBIDDEN" }) };
+    }
+    return backing.fetcher(input, init);
+  };
+  const sched = idleScheduler();
+  const store = createBoardStore({ project: "proj", fetcher, storage: null, scheduler: sched.scheduler });
+  await settle();
+
+  store.mutate([{ kind: "close", path: "/a" }]);
+  await settle();
+  /* Access failure: nothing is shed, the outbox stays pending and one
+     backoff timer is armed. */
+  expect(patchAttempts).toBe(1);
+  expect(store.getSnapshot().sync).toBe("pending");
+  expect(store.getSnapshot().prefs.hidden).toEqual(["/a"]);
+  expect(sched.pendingTimeouts()).toBe(1);
+
+  /* Auth heals; the retained close drains and persists. */
+  denyAccess = false;
+  sched.runTimeouts();
+  await settle();
+  expect(backing.projects.proj.prefs.hidden).toEqual(["/a"]);
+  expect(store.getSnapshot().sync).toBe("current");
+  store.dispose();
+});
+
+test("a batch whose optimistic replay throws is enqueued for the server verdict", async () => {
+  const backing = fakeServer({ proj: boardOf(1, { manual: ["/a"] }) });
+  const attempts: string[][] = [];
+  /* The real server rejects a cyclic remap at validation; the fake reducer
+     would throw on it, so intercept remap batches with the same verdict. */
+  const fetcher = async (input: string, init?: RequestInit) => {
+    if (init && (init.method ?? "GET") !== "GET") {
+      const body = JSON.parse(String(init.body)) as { mutations?: BoardMutationV1[] };
+      attempts.push((body.mutations ?? []).map((mutation) => mutation.kind));
+      if (body.mutations?.some((mutation) => mutation.kind === "remap-paths")) {
+        return { ok: false, status: 400, json: async () => ({ error: "INVALID_REQUEST" }) };
+      }
+    }
+    return backing.fetcher(input, init);
+  };
+  const store = createBoardStore({ project: "proj", fetcher, storage: null, scheduler: idleScheduler().scheduler });
+  await settle();
+
+  /* A valid close rides with a cyclic remap: replaying this batch throws, so
+     a no-op comparison against the fallback board would silently drop both. */
+  store.mutate([
+    { kind: "close", path: "/a" },
+    { kind: "remap-paths", pairs: [{ from: "/x", to: "/y" }, { from: "/y", to: "/x" }] },
+  ]);
+  await settle();
+
+  /* Bisection isolates the cyclic remap; the close lands durably. */
+  expect(attempts).toEqual([["close", "remap-paths"], ["close"], ["remap-paths"]]);
+  expect(backing.projects.proj.prefs.hidden).toEqual(["/a"]);
+  expect(store.getSnapshot().sync).toBe("current");
+  store.dispose();
+});
+
+test("schema-version skew holds the outbox and reports unavailable until it heals", async () => {
+  const backing = fakeServer({ proj: boardOf(1) });
+  let skew = true;
+  let patchAttempts = 0;
+  const fetcher = async (input: string, init?: RequestInit) => {
+    if (init && (init.method ?? "GET") !== "GET") {
+      patchAttempts += 1;
+      if (skew) return { ok: false, status: 400, json: async () => ({ error: "UNSUPPORTED_SCHEMA_VERSION" }) };
+    }
+    return backing.fetcher(input, init);
+  };
+  const sched = idleScheduler();
+  const store = createBoardStore({ project: "proj", fetcher, storage: null, scheduler: sched.scheduler });
+  await settle();
+
+  store.mutate([{ kind: "close", path: "/a" }, { kind: "close", path: "/b" }]);
+  await settle();
+  /* An envelope verdict hits every bisected prefix identically, so nothing is
+     shed: one attempt, the intent held, the board reported unavailable. */
+  expect(patchAttempts).toBe(1);
+  expect(store.getSnapshot().sync).toBe("unavailable");
+  expect(store.getSnapshot().prefs.hidden).toEqual(["/a", "/b"]);
+  expect(sched.pendingTimeouts()).toBe(1);
+
+  /* The skew resolves (server redeployed); the held closes drain intact. */
+  skew = false;
+  sched.runTimeouts();
+  await settle();
+  expect(backing.projects.proj.prefs.hidden).toEqual(["/a", "/b"]);
+  expect(store.getSnapshot().sync).toBe("current");
   store.dispose();
 });

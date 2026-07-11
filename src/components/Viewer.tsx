@@ -76,7 +76,8 @@ export function Viewer() {
      per-tab snapshot to the server. Renders nothing. */
   useViewPresence();
   const [project, setProject] = useState<string>(() => initialProject());
-  const { files: allFiles, projectCatalog, flows: polledFlows, pipelines, pipelinesError, workflows, tasks, systemHealth, loaded } = useFiles(project === OVERVIEW ? null : project);
+  const [pendingHash, setPendingHash] = useState<ConversationHash | null>(null);
+  const { files: allFiles, projectCatalog, flows: polledFlows, pipelines, pipelinesError, workflows, tasks, systemHealth, conversationAliases, loaded } = useFiles(project === OVERVIEW ? null : project, pendingHash?.filePath ?? pendingHash?.conversationId ?? null);
   /* A committed account migration keeps the archived predecessor entry in the
      payload (for chain history) but it must never render as a second standalone
      card — every surface below sees only current generations. A no-op (same
@@ -90,7 +91,6 @@ export function Viewer() {
   const catalogProjects = useMemo(() => new Set(projectCatalog.map((entry) => entry.project)), [projectCatalog]);
   const isMobile = useIsMobile();
   const [drawerOpen, setDrawerOpen] = useState(false);
-  const [pendingHash, setPendingHash] = useState<ConversationHash | null>(null);
   const [toastPath, setToastPath] = useState<string | null>(null);
   const seenQuestionsRef = useRef<Set<string> | null>(null);
   /* Reopening a file whose project is already selected does not change
@@ -110,7 +110,12 @@ export function Viewer() {
     const onHash = () => {
       const next = readHash();
       if (next.filePath || next.conversationId) setPendingHash(next);
-      else if (next.project) setProject(next.project);
+      else {
+        /* Navigation moved off the conversation link: the old target must
+           stop pinning polls and must not open later out of nowhere. */
+        setPendingHash(null);
+        if (next.project) setProject(next.project);
+      }
     };
     window.addEventListener("hashchange", onHash);
     return () => window.removeEventListener("hashchange", onHash);
@@ -119,6 +124,9 @@ export function Viewer() {
 
   const selectProject = useCallback((nextProject: string) => {
     setProject(nextProject);
+    /* Explicit project navigation replaces the hash without a hashchange
+       event, so any unresolved conversation intent is cancelled here. */
+    setPendingHash(null);
     localStorage.setItem(PROJECT_KEY, nextProject);
     writeHash(nextProject);
     setDrawerOpen(false);
@@ -161,10 +169,16 @@ export function Viewer() {
        has already folded out of `files`. Resolving against `allFiles` keeps that
        predecessor visible long enough to redirect the link to its current
        generation; the canonical `#c=` id resolves the same way. */
-    const hit = resolveConversationTarget(allFiles, pendingHash);
-    if (hit) openFile(hit);
-    setPendingHash(null);
-  }, [pendingHash, allFiles, openFile]);
+    const hit = resolveConversationTarget(allFiles, pendingHash, conversationAliases);
+    /* A miss keeps the request pending: the pinned `path` param asks the
+       scanner to include the exact transcript on the next poll, so a fresh
+       `#f=` link to a demoted archived predecessor resolves once that poll
+       lands instead of being cleared after the first cap-limited payload. */
+    if (hit) {
+      openFile(hit);
+      setPendingHash(null);
+    }
+  }, [pendingHash, allFiles, conversationAliases, openFile]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
   /* The one queue every counter shows: badge, popover and the tab title all
@@ -228,7 +242,12 @@ export function Viewer() {
   /* The jump channel into the board: nonce so repeated jumps to the same node
      re-flash (D9); consumed by ProjectDashboard's pendingFocusRef path. */
   const [focusRequest, setFocusRequest] = useState<{ path: string; nonce: number } | null>(null);
+  const cancelPendingIntent = useCallback(() => setPendingHash(null), []);
   const requestFocus = useCallback((path: string) => {
+    /* A user-driven focus (N/Shift-N cycle, attention jump) supersedes any
+       unresolved deep-link intent; a stale pin must never re-steal focus when
+       its target shows up in a later poll. */
+    setPendingHash(null);
     setFocusRequest((prev) => ({ path, nonce: (prev?.nonce ?? 0) + 1 }));
   }, []);
 
@@ -467,6 +486,7 @@ export function Viewer() {
             onUnarchive={unarchiveProject}
             onMenu={isMobile ? () => setDrawerOpen(true) : undefined}
             attention={isMobile ? attentionBadge : undefined}
+            onUserNavigate={cancelPendingIntent}
           />
         )}
       </main>

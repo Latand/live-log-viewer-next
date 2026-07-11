@@ -30,14 +30,21 @@ export interface FilesData {
   /** Set when the server's pipelines store failed closed for this poll. */
   pipelinesError?: string;
   systemHealth: { tmux: TmuxEndpointHealth };
+  conversationAliases: Record<string, string>;
   loaded: boolean;
 }
 
 const HEALTHY_SYSTEM = { tmux: { status: "healthy" as const } };
-const EMPTY: FilesData = { files: [], projectCatalog: [], flows: [], pipelines: [], workflows: [], tasks: [], systemHealth: HEALTHY_SYSTEM, loaded: false };
+const EMPTY: FilesData = { files: [], projectCatalog: [], flows: [], pipelines: [], workflows: [], tasks: [], systemHealth: HEALTHY_SYSTEM, conversationAliases: {}, loaded: false };
 
-export function filesApiUrl(project?: string | null): string {
-  return project ? "/api/files?project=" + encodeURIComponent(project) : "/api/files";
+export function filesApiUrl(project?: string | null, pinnedPath?: string | null): string {
+  const params: string[] = [];
+  if (project) params.push("project=" + encodeURIComponent(project));
+  /* A pending legacy `#f=` target: the scanner keeps this exact transcript in
+     the capped feed so the deep link can resolve its conversation id even
+     when the path is a demoted archived predecessor. */
+  if (pinnedPath) params.push("path=" + encodeURIComponent(pinnedPath));
+  return params.length ? "/api/files?" + params.join("&") : "/api/files";
 }
 
 /**
@@ -50,13 +57,13 @@ export function filesPollCadence(connection: "live" | "reconnecting" | "degraded
 }
 
 /** Polls /api/files. Keeps the last good list on transient fetch errors. */
-export function useFiles(project?: string | null): FilesData {
+export function useFiles(project?: string | null, pinnedPath?: string | null): FilesData {
   const [data, setData] = useState<FilesData>(EMPTY);
   useEffect(() => {
     let alive = true;
     let lastBody = "";
     let lastEtag = "";
-    const url = filesApiUrl(project);
+    const url = filesApiUrl(project, pinnedPath);
     const load = async () => {
       try {
         const res = await fetch(url, lastEtag ? { headers: { "If-None-Match": lastEtag } } : undefined);
@@ -72,7 +79,7 @@ export function useFiles(project?: string | null): FilesData {
         /* The flows rollout changes the payload from a bare array to
            {files, flows}; accept both so client and server can deploy in
            either order. */
-        if (Array.isArray(parsed)) setData({ files: parsed, projectCatalog: [], flows: [], pipelines: [], workflows: [], tasks: [], systemHealth: HEALTHY_SYSTEM, loaded: true });
+        if (Array.isArray(parsed)) setData({ files: parsed, projectCatalog: [], flows: [], pipelines: [], workflows: [], tasks: [], systemHealth: HEALTHY_SYSTEM, conversationAliases: {}, loaded: true });
         else {
           setData({
             files: parsed.files ?? [],
@@ -83,6 +90,7 @@ export function useFiles(project?: string | null): FilesData {
             tasks: parsed.tasks ?? [],
             pipelinesError: parsed.pipelinesError,
             systemHealth: parsed.systemHealth ?? HEALTHY_SYSTEM,
+            conversationAliases: parsed.conversationAliases ?? {},
             loaded: true,
           });
         }
@@ -146,6 +154,6 @@ export function useFiles(project?: string | null): FilesData {
       window.removeEventListener(WORKFLOWS_CHANGED_EVENT, onChanged);
       window.removeEventListener(TASKS_CHANGED_EVENT, onChanged);
     };
-  }, [project]);
+  }, [project, pinnedPath]);
   return data;
 }

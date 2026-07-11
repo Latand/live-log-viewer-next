@@ -35,7 +35,14 @@ function beginFileScanRefresh(slot: FileScanCacheSlot, selectedProject?: string)
   return refresh;
 }
 
-export async function cachedFileScan(selectedProject?: string, now = Date.now()): Promise<CachedFileScan> {
+export async function cachedFileScan(selectedProject?: string, pinnedPath?: string, now = Date.now()): Promise<CachedFileScan> {
+  /* Pinned scans are rare (a poll or two while a deep link resolves) and the
+     pin value is user-controlled: caching them would grow one permanent
+     snapshot slot per distinct path. They run uncached; the shared slots hold
+     project-keyed scans only. */
+  if (pinnedPath) {
+    return { snapshot: await listFilesWithProjectCatalog(selectedProject, { persist: false, pin: pinnedPath }) };
+  }
   const key = selectedProject ?? "";
   const cache = fileScanCache();
   let slot = cache.get(key);
