@@ -11,7 +11,7 @@ export interface ViewerCandidateContainerOptions {
 export function viewerCandidateDockerArgs(candidate: ViewerReleaseIdentity, options: ViewerCandidateContainerOptions): string[] {
   const endpoint = new URL(candidate.endpoint);
   const args = [
-    "docker", "run", "-d", "--name", candidate.container,
+    "docker", "run", "-d", "--restart", "unless-stopped", "--name", candidate.container,
     "--label", "dev.live-log-viewer.managed=1",
     "--label", `dev.live-log-viewer.revision=${candidate.revision}`,
     "--network", "host", "--pid", "host", "--privileged", "--user", `${options.uid}:${options.gid}`,

@@ -14,11 +14,15 @@ esac
 case "$IDEMPOTENCY_KEY" in
   *$'\n'*|*$'\r'*|'') echo "invalid deployment idempotency key" >&2; exit 1 ;;
 esac
+if [ "${#IDEMPOTENCY_KEY}" -gt 200 ]; then
+  echo "invalid deployment idempotency key" >&2
+  exit 1
+fi
 
 QUERY=""
 [ -n "$TOKEN" ] && QUERY="?k=$TOKEN"
 BASE="http://127.0.0.1:${PORT}"
-BODY="$(printf '{"revision":"%s","idempotencyKey":"%s"}' "$REVISION" "$IDEMPOTENCY_KEY")"
+BODY="$(bun -e 'const [revision, idempotencyKey] = process.argv.slice(1); process.stdout.write(JSON.stringify({ revision, idempotencyKey }))' "$REVISION" "$IDEMPOTENCY_KEY")"
 
 echo "deployment key: $IDEMPOTENCY_KEY"
 response="$(curl -sS --max-time 125 -H 'content-type: application/json' -d "$BODY" -w $'\n%{http_code}' "${BASE}/api/runtime/deployments${QUERY}")"

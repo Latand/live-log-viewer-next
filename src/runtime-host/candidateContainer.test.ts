@@ -30,6 +30,8 @@ test("promoted candidate receives the runtime deployment control plane", () => {
   expect(runtimeHostSocket(environment)).toBe("/state/runtime-host.sock");
   expect(args).toContain("dev.live-log-viewer.managed=1");
   expect(args).toContain("--env-file");
+  expect(args).toContain("--restart");
+  expect(args[args.indexOf("--restart") + 1]).toBe("unless-stopped");
 });
 
 test("container retention keeps the serving and immediate rollback releases", () => {
