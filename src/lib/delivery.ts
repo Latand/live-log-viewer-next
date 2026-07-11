@@ -262,18 +262,33 @@ export async function deliverConversationMessage(message: ConversationMessage): 
   let deliveryId: string | null = null;
   if (conversation && !message.reservedDeliveryId) {
     if (deliveryFence(conversation) === "held" && images.length) return failure("image delivery waits for migration completion", 409);
-    const queued = registry.holdDelivery(conversation.id, text, message.clientMessageId ?? null);
+    const queued = registry.holdDelivery(
+      conversation.id,
+      text,
+      message.clientMessageId ?? null,
+      images.length ? "ephemeral-images" : "text",
+    );
     if (queued.state === "delivered") return { ok: true, target: conversation.id };
     if (queued.state === "delivery-uncertain") return failure("delivery outcome is uncertain and requires recovery", 409);
     if (queued.state === "held") {
+      if (images.length) {
+        registry.discardDelivery(queued.id);
+        return failure("image delivery waits for migration completion", 409);
+      }
       requestAccountMigrationTick();
       return { ok: true, target: conversation.id, outcome: "held" };
     }
-    if (queued.state !== "assigned" || !queued.generationId) return failure("delivery target is unavailable", 409);
+    if (queued.state !== "assigned" || !queued.generationId) {
+      if (images.length) registry.discardDelivery(queued.id);
+      return failure("delivery target is unavailable", 409);
+    }
     const claimed = registry.beginDeliveryAttempt(queued.id, queued.generationId);
     if (!claimed) {
+      if (images.length) {
+        registry.discardDelivery(queued.id);
+        return failure("image delivery waits for migration completion", 409);
+      }
       registry.requeueHeldDelivery(queued.id);
-      if (images.length) return failure("image delivery waits for migration completion", 409);
       requestAccountMigrationTick();
       return { ok: true, target: conversation.id, outcome: "held" };
     }

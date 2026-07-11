@@ -198,6 +198,8 @@ export interface HeldDelivery {
   text: string;
   createdAt: string;
   clientMessageId: string | null;
+  /** Image payload bytes stay request-local; these reservations can only be retried by the client. */
+  payloadKind: "text" | "ephemeral-images";
   state: "held" | "assigned" | "delivered" | "failed" | "delivery-uncertain";
   generationId: string | null;
   attempts: number;

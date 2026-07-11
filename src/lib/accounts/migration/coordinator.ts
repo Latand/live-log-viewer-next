@@ -420,6 +420,10 @@ export async function drainHeldDeliveries(
   if (!current) return;
   for (const item of registry.pendingDeliveries(conversationId)) {
     if (item.state !== "assigned" || item.generationId !== current.id) continue;
+    if (item.payloadKind === "ephemeral-images") {
+      registry.recordDeliveryOutcome(item.id, "failed", "image delivery requires client retry");
+      continue;
+    }
     const claimed = registry.beginDeliveryAttempt(item.id, current.id);
     if (!claimed) continue;
     const clientMessageId = claimed.clientMessageId ?? `migration:${claimed.id}`;

@@ -5,6 +5,7 @@ import path from "node:path";
 
 import { AgentRegistry, setAgentRegistryForTests, type ConversationObservation } from "./agent/registry";
 import { emptyLaunchProfile } from "./accounts/migration/contracts";
+import { drainHeldDeliveries } from "./accounts/migration/coordinator";
 import { cleanupFailedImageDelivery, deliverConversationMessage, migrationDeliveryOutcome, type DeliveryFailure } from "./delivery";
 
 const SANDBOX = fs.mkdtempSync(path.join(os.tmpdir(), "llv-delivery-test-"));
@@ -43,6 +44,84 @@ test("migration delivery keeps an internally held result recoverable", () => {
   expect(migrationDeliveryOutcome({ ok: true, target: "conversation_held", outcome: "held" })).toBe("held");
   expect(migrationDeliveryOutcome({ ok: true, target: "pane" })).toBe("delivered");
   expect(migrationDeliveryOutcome(failure)).toBe("failed");
+});
+
+test("image-only reservations stay request-local and never drain without the client payload", async () => {
+  const registry = new AgentRegistry(path.join(SANDBOX, "image-reservation-registry.json"));
+  const observation: ConversationObservation = {
+    engine: "codex",
+    path: "/image-only.jsonl",
+    accountId: "default",
+    launchProfile: emptyLaunchProfile({ cwd: "/repo", project: "repo" }),
+    turn: { state: "idle", source: "empty", terminalAt: null },
+    observedAt: "2026-07-11T10:00:00.000Z",
+  };
+  registry.reconcileConversations([observation]);
+  const conversation = registry.conversationForPath(observation.path)!;
+  const queued = registry.holdDelivery(conversation.id, "", "image-only", "ephemeral-images");
+  expect(queued).toMatchObject({ state: "assigned", text: "", payloadKind: "ephemeral-images" });
+  let delivered = 0;
+
+  await drainHeldDeliveries(conversation.id, { async deliver() { delivered += 1; return "delivered"; } }, registry);
+
+  expect(delivered).toBe(0);
+  expect(registry.pendingDeliveries(conversation.id)).toMatchObject([
+    { state: "failed", text: "", payloadKind: "ephemeral-images", error: "image delivery requires client retry" },
+  ]);
+});
+
+test("delivered reservations retain only a bounded idempotency window", () => {
+  const registry = new AgentRegistry(path.join(SANDBOX, "delivery-tombstones-registry.json"));
+  const observation: ConversationObservation = {
+    engine: "codex",
+    path: "/bounded-delivery.jsonl",
+    accountId: "default",
+    launchProfile: emptyLaunchProfile({ cwd: "/repo", project: "repo" }),
+    turn: { state: "idle", source: "empty", terminalAt: null },
+    observedAt: "2026-07-11T10:00:00.000Z",
+  };
+  registry.reconcileConversations([observation]);
+  const conversation = registry.conversationForPath(observation.path)!;
+  const generationId = conversation.generations.at(-1)!.id;
+  for (let index = 0; index < 105; index += 1) {
+    const queued = registry.holdDelivery(conversation.id, `message body ${index}`, `message-${index}`);
+    registry.beginDeliveryAttempt(queued.id, generationId);
+    registry.recordDeliveryOutcome(queued.id, "delivered");
+  }
+
+  const tombstones = Object.values(registry.snapshot().heldDeliveries);
+  expect(tombstones).toHaveLength(100);
+  expect(tombstones.every((delivery) => delivery.state === "delivered" && delivery.text === "")).toBe(true);
+  expect(registry.holdDelivery(conversation.id, "replayed body", "message-104")).toMatchObject({ state: "delivered", text: "" });
+});
+
+test("an image-only migration race stays recoverable without an orphan reservation", async () => {
+  const registry = new AgentRegistry(path.join(SANDBOX, "image-race-registry.json"));
+  setAgentRegistryForTests(registry);
+  const observation: ConversationObservation = {
+    engine: "codex",
+    path: "/image-race.jsonl",
+    accountId: "managed",
+    launchProfile: emptyLaunchProfile({ cwd: "/repo", project: "repo" }),
+    turn: { state: "idle", source: "empty", terminalAt: null },
+    observedAt: "2026-07-11T10:00:00.000Z",
+  };
+  registry.reconcileConversations([observation]);
+  registry.commitMigrationIntent({
+    engine: "codex", targetId: "default", origin: "manual", requestId: "image-race",
+    expectedRevision: registry.engineRouting("codex").revision, scope: "all",
+  });
+  const outcome = await deliverConversationMessage({
+    pid: null,
+    path: observation.path,
+    text: "",
+    images: [{ base64: "aW1hZ2U=", mime: "image/png" }],
+    clientMessageId: "image-race-message",
+  });
+
+  expect(outcome).toMatchObject({ ok: false, status: 409 });
+  expect(Object.values(registry.snapshot().heldDeliveries)).toHaveLength(0);
+  expect(fs.readdirSync(SANDBOX).some((name) => name.endsWith(".png"))).toBe(false);
 });
 
 test("sending to deferred history starts lazy migration and holds the message", async () => {

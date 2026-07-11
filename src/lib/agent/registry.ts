@@ -464,10 +464,13 @@ function normalizePolicy(value: AutoBalancePolicy | undefined): AutoBalancePolic
 }
 
 function normalizeHeldDelivery(value: HeldDelivery): HeldDelivery {
+  const state = value.state ?? "held";
   return {
     ...value,
+    text: state === "delivered" ? "" : value.text,
     clientMessageId: value.clientMessageId ?? null,
-    state: value.state ?? "held",
+    payloadKind: value.payloadKind ?? "text",
+    state,
     generationId: value.generationId ?? null,
     attempts: Number.isInteger(value.attempts) ? value.attempts : 0,
     assignedAt: value.assignedAt ?? null,
@@ -1773,8 +1776,13 @@ export class AgentRegistry {
     });
   }
 
-  holdDelivery(conversationId: ViewerConversationId, text: string, clientMessageId: string | null = null): HeldDelivery {
-    if (!text || text.length > 32_000) throw new Error("held delivery must contain at most 32000 characters");
+  holdDelivery(
+    conversationId: ViewerConversationId,
+    text: string,
+    clientMessageId: string | null = null,
+    payloadKind: HeldDelivery["payloadKind"] = "text",
+  ): HeldDelivery {
+    if (text.length > 32_000 || payloadKind === "text" && !text) throw new Error("held delivery must contain at most 32000 characters");
     return this.mutate((file) => {
       const canonicalId = resolveConversationAlias(file, conversationId);
       const existing = clientMessageId ? Object.values(file.heldDeliveries).find((item) => item.conversationId === canonicalId && item.clientMessageId === clientMessageId) : undefined;
@@ -1812,6 +1820,7 @@ export class AgentRegistry {
         text,
         createdAt: now(),
         clientMessageId,
+        payloadKind,
         state: "held",
         generationId: null,
         attempts: 0,
@@ -1893,8 +1902,17 @@ export class AgentRegistry {
       delivery.state = state;
       delivery.deliveredAt = state === "delivered" ? now() : null;
       delivery.error = error?.slice(0, 240) ?? null;
+      if (state === "delivered") delivery.text = "";
       if (conversation) advanceMigrationScopeRevision(file, conversation.engine, signature, paths);
-      return clone(delivery);
+      const settled = clone(delivery);
+      if (state === "delivered") {
+        const tombstones = Object.values(file.heldDeliveries)
+          .filter((item) => item.conversationId === delivery.conversationId && item.state === "delivered")
+          .sort((left, right) => (left.deliveredAt ?? left.createdAt).localeCompare(right.deliveredAt ?? right.createdAt) || left.id.localeCompare(right.id));
+        const expired = tombstones.filter((item) => item.id !== delivery.id).slice(0, Math.max(0, tombstones.length - 100));
+        for (const item of expired) delete file.heldDeliveries[item.id];
+      }
+      return settled;
     });
   }
 
