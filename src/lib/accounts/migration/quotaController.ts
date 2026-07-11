@@ -9,8 +9,7 @@ import { agentRegistry, type AgentRegistry } from "@/lib/agent/registry";
 import { logQuotaEvent } from "@/lib/events";
 import { fetchClaudeLimits, mapAppServerRateLimits, readCodexLimits } from "@/lib/limits";
 
-import { evaluateAutoBalance } from "./autoBalance";
-import type { MigrationEngine } from "./contracts";
+import type { DurableQuotaObservation, MigrationEngine } from "./contracts";
 import type { QuotaObservation } from "./quotaPolicy";
 
 export interface QuotaProbePort {
@@ -122,7 +121,24 @@ export class QuotaController {
         reasonCode: observation.provenance.reason,
       });
     });
-    const active = this.registry.engineRouting(engine).activeAccountId ?? this.probe.active(engine);
-    evaluateAutoBalance(engine, active, observations, now, this.registry, this.bootId);
+    const recorded: DurableQuotaObservation[] = observations.map((observation) => ({
+      engine,
+      accountId: observation.accountId,
+      authenticated: observation.authenticated,
+      authCheckedAt: new Date(observation.authCheckedAt ?? observation.observedAt).toISOString(),
+      limits: observation.limits,
+      provenance: observation.provenance,
+      observedAt: new Date(observation.observedAt).toISOString(),
+      bootId: this.bootId,
+    }));
+    this.registry.recordQuotaEvaluation({
+      engine,
+      observations: recorded,
+      signature: null,
+      evidence: null,
+      bootId: this.bootId,
+      now: new Date(now).toISOString(),
+      minimumGapMs: 60_000,
+    });
   }
 }

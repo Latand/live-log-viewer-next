@@ -106,7 +106,7 @@ test("controller preserves one trailing cycle when the running cycle fails", asy
   expect(cycles).toBe(2);
 });
 
-test("three controller cycles move depleted Main to a stronger managed account and suppress a bounce", async () => {
+test("quota controller cycles preserve routing and transcript ownership", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "llv-account-controller-auto-"));
   try {
     const registry = new AgentRegistry(path.join(root, "registry.json"));
@@ -131,6 +131,7 @@ test("three controller cycles move depleted Main to a stronger managed account a
     };
     const quota = new QuotaController(registry, probe, "00000000-0000-4000-8000-000000000040", () => current);
     registry.setAutoBalancePolicy("codex", true);
+    registry.setEngineRouting("codex", "default");
     registry.reconcileConversations([{
       engine: "codex",
       path: "/main.jsonl",
@@ -151,8 +152,10 @@ test("three controller cycles move depleted Main to a stronger managed account a
       pendingAction: null,
     });
     const conversationId = registry.conversationForPath("/main.jsonl")!.id;
+    let successorStarts = 0;
     const provider: SuccessorProviderPort = {
       async create(input) {
+        successorStarts += 1;
         return {
           operationId: input.operationId,
           nativeId: "managed-successor",
@@ -166,22 +169,18 @@ test("three controller cycles move depleted Main to a stronger managed account a
     };
 
     await reconcileAccountMigrationCycle(registry, quota, provider, { async deliver() { return "delivered"; } });
-    expect(registry.snapshot().autoBalance.codex.sustain).toMatchObject({ bootId: "00000000-0000-4000-8000-000000000040" });
-
     current += 60_000;
     await reconcileAccountMigrationCycle(registry, quota, provider, { async deliver() { return "delivered"; } });
-    const intent = Object.values(registry.snapshot().migrationIntents).find((item) => item.engine === "codex");
-    expect(intent).toMatchObject({ origin: "auto", targetId: "managed", state: "draining" });
-    expect(registry.engineRouting("codex").activeAccountId).toBe("managed");
-
     current += 60_000;
     await reconcileAccountMigrationCycle(registry, quota, provider, { async deliver() { return "delivered"; } });
     const snapshot = registry.snapshot();
-    expect(snapshot.conversations[conversationId]?.migration?.phase).toBe("committed");
-    expect(snapshot.conversations[conversationId]?.generations.at(-1)?.accountId).toBe("managed");
-    expect(snapshot.migrationIntents[intent!.id]?.state).toBe("complete");
-    expect(snapshot.autoBalance.codex.cooldownUntil).toBeTruthy();
-    expect(Object.values(snapshot.migrationIntents)).toHaveLength(1);
+    expect(snapshot.quotaObservations.codex.default).toMatchObject({ authenticated: true, bootId: "00000000-0000-4000-8000-000000000040" });
+    expect(snapshot.quotaObservations.codex.managed).toMatchObject({ authenticated: true, bootId: "00000000-0000-4000-8000-000000000040" });
+    expect(snapshot.engineRouting.codex.activeAccountId).toBe("default");
+    expect(snapshot.conversations[conversationId]?.migration).toBeNull();
+    expect(snapshot.conversations[conversationId]?.generations.at(-1)?.accountId).toBe("default");
+    expect(Object.values(snapshot.migrationIntents)).toHaveLength(0);
+    expect(successorStarts).toBe(0);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

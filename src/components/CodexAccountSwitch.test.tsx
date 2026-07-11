@@ -5,9 +5,8 @@ import { CodexAccountSwitch } from "./CodexAccountSwitch";
 
 /**
  * The Switchboard's Codex control is now one trigger that opens the canonical
- * AccountsPanel — the same preview → confirm → migrate surface as the limits
- * footer. It must never fall back to the legacy `<select>` (a mode-less bare
- * switch), so both account surfaces share one behavior (issue #40).
+ * AccountsPanel, matching the limits footer's direct account-selection surface.
+ * Both account surfaces share one behavior (issue #40).
  */
 const render = () => renderToStaticMarkup(<CodexAccountSwitch />);
 

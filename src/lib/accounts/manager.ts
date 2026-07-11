@@ -14,7 +14,11 @@ function summary(engine: "claude" | "codex", id: string): AccountSummary {
 export const accountManager: AccountManager = {
   async list() { return { claude: { active: activeClaudeAccountId(), accounts: listClaudeAccounts().map((item) => summary("claude", item.id)) }, codex: { active: activeCodexAccountId(), accounts: listCodexAccounts().map((item) => summary("codex", item.id)) } }; },
   async add(engine, label) { const item = engine === "claude" ? createManagedClaudeAccount(label) : createManagedCodexAccount(label); return summary(engine, item.id); },
-  async select(engine, id) { if (engine === "claude") setActiveClaudeAccount(id); else setActiveCodexAccount(id); return summary(engine, id); },
+  async select(engine, id) {
+    if (engine === "claude") setActiveClaudeAccount(id); else setActiveCodexAccount(id);
+    agentRegistry().setEngineRouting(engine, id);
+    return summary(engine, id);
+  },
   async status(engine, id) { return summary(engine, id); },
   async submitLoginInput() { throw new Error("login input is Claude-operation specific"); },
   async cancelLogin() { throw new Error("login cancellation is Claude-operation specific"); },

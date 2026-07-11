@@ -10,9 +10,8 @@ import { ChevronDown, Loader2 } from "./icons";
 
 /**
  * Compact Codex account trigger in the Switchboard header. One button opens the
- * canonical {@link AccountsPanel} — the exact preview → confirm → migrate surface
- * the limits footer uses — so the two never diverge and there is no second,
- * bare-switch semantics (issue #40). The trigger stays mounted while account data
+ * canonical {@link AccountsPanel}, sharing the limits footer's direct account
+ * selection and sign-in controls (issue #40). The trigger stays mounted while account data
  * loads or recovers, so it always offers a path to Accounts.
  */
 export function CodexAccountSwitch() {

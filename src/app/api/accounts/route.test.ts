@@ -19,8 +19,8 @@ const { POST } = await import("./codex/active/route");
 const { POST: setClaudeActive } = await import("./claude/active/route");
 const { POST: createClaude } = await import("./claude/route");
 const { updateMigrationAction } = await import("../account-migrations/[intentId]/action");
-const { createManagedClaudeAccount } = await import("@/lib/accounts/claude");
-const { createManagedCodexAccount, listCodexAccounts, setCodexAccountLoginPane } = await import("@/lib/accounts/codex");
+const { createManagedClaudeAccount, setActiveClaudeAccount } = await import("@/lib/accounts/claude");
+const { createManagedCodexAccount, listCodexAccounts, setActiveCodexAccount, setCodexAccountLoginPane } = await import("@/lib/accounts/codex");
 const { CodexAppServerClient } = await import("@/lib/accounts/codexAppServer");
 const { ManagedCodexRuntime, setManagedCodexRuntimeForTests } = await import("@/lib/accounts/codexRuntime");
 const { AgentRegistry, agentRegistry } = await import("@/lib/agent/registry");
@@ -67,7 +67,7 @@ function request(id: unknown, headers: HeadersInit = { host: "127.0.0.1" }): Nex
   return new NextRequest("http://127.0.0.1/api/accounts/codex/active", { method: "POST", headers, body: JSON.stringify({ id }) });
 }
 
-function migrationRequest(body: Record<string, unknown>): NextRequest {
+function activeRequest(body: Record<string, unknown>): NextRequest {
   return new NextRequest("http://127.0.0.1/api/accounts/codex/active", {
     method: "POST",
     headers: { host: "127.0.0.1", "content-type": "application/json" },
@@ -233,24 +233,8 @@ test("active mutation rejects cross-origin, unknown, and corrupt catalogs", asyn
   expect(fs.readFileSync(registry, "utf8")).toBe("{ corrupt");
 });
 
-test("Codex active route requires preview or revision-fenced migrate mode", async () => {
-  const target = createManagedCodexAccount("Mode target");
-  const routingBefore = agentRegistry().snapshot().engineRouting.codex;
-
-  expect((await POST(request(target.id))).status).toBe(400);
-  expect(agentRegistry().snapshot().engineRouting.codex).toEqual(routingBefore);
-});
-
-test("Claude active route requires preview or revision-fenced migrate mode", async () => {
-  const target = createManagedClaudeAccount("Mode target");
-  const routingBefore = agentRegistry().snapshot().engineRouting.claude;
-
-  expect((await setClaudeActive(claudeActiveRequest(target.id))).status).toBe(400);
-  expect(agentRegistry().snapshot().engineRouting.claude).toEqual(routingBefore);
-});
-
-test("active route returns a target-aware preview and idempotent revision-fenced intent", async () => {
-  const target = createManagedCodexAccount("Migration target");
+test("Codex selection changes routing while preserving every conversation record", async () => {
+  const target = createManagedCodexAccount("Routing target");
   agentRegistry().reconcileConversations([{
     engine: "codex",
     path: "/root.jsonl",
@@ -259,70 +243,42 @@ test("active route returns a target-aware preview and idempotent revision-fenced
     turn: { state: "idle", source: "empty", terminalAt: null },
     observedAt: "2026-07-10T12:00:00.000Z",
   }]);
-  const previewResponse = await POST(migrationRequest({ id: target.id, mode: "preview" }));
-  expect(previewResponse.status).toBe(200);
-  const preview = await previewResponse.json() as { targetId: string; targetLabel: string; counts: { total: number; idle: number; busy: number; deferred: number; alreadyTarget: number }; previewRevision: number };
-  expect(preview).toMatchObject({ targetId: target.id, targetLabel: "Migration target" });
-  expect(preview.counts).toEqual({ total: 1, idle: 0, busy: 0, deferred: 1, alreadyTarget: 0 });
-  expect(preview).not.toHaveProperty("excludedRoots");
-  expect(preview).not.toHaveProperty("rootWarning");
+  const before = agentRegistry().snapshot();
+  const response = await POST(activeRequest({ id: target.id, mode: "select" }));
+  const after = agentRegistry().snapshot();
 
-  const body = { id: target.id, mode: "migrate", previewRevision: preview.previewRevision, requestId: "route-idempotency" };
-  const first = await POST(migrationRequest(body));
-  const repeated = await POST(migrationRequest(body));
-  expect(first.status).toBe(202);
-  expect(repeated.status).toBe(202);
-  const firstBody = await first.json() as { intent: { id: string; targetId: string } };
-  const repeatedBody = await repeated.json() as { intent: { id: string; targetId: string } };
-  expect(repeatedBody.intent).toEqual(firstBody.intent);
+  expect(response.status).toBe(200);
+  expect(await response.json()).toMatchObject({ active: target.id, account: { id: target.id, active: true } });
+  expect(after.engineRouting.codex.activeAccountId).toBe(target.id);
+  expect(after.conversations).toEqual(before.conversations);
+  expect(after.migrationIntents).toEqual(before.migrationIntents);
+  expect(after.heldDeliveries).toEqual(before.heldDeliveries);
+  setActiveCodexAccount("default");
+  agentRegistry().setEngineRouting("codex", "default");
 });
 
-test("an explicit all scope migrates deferred history", async () => {
-  const target = createManagedCodexAccount("Bulk target");
-  agentRegistry().reconcileConversations([{
-    engine: "codex",
-    path: "/bulk-history.jsonl",
-    accountId: "default",
-    launchProfile: emptyLaunchProfile({ title: "Bulk history" }),
-    turn: { state: "idle", source: "empty", terminalAt: null },
-    observedAt: "2026-07-11T10:00:00.000Z",
-  }]);
-  const preview = await (await POST(migrationRequest({ id: target.id, mode: "preview" }))).json() as {
-    counts: { deferred: number };
-    previewRevision: number;
-  };
+test("Claude selection also updates only routing and the account catalog", async () => {
+  const target = createManagedClaudeAccount("Routing target");
+  const before = agentRegistry().snapshot();
+  const response = await setClaudeActive(activeRequest({ id: target.id, mode: "select" }));
+  const after = agentRegistry().snapshot();
 
-  const response = await POST(migrationRequest({
-    id: target.id,
-    mode: "migrate",
-    scope: "all",
-    previewRevision: preview.previewRevision,
-    requestId: "explicit-bulk",
-  }));
-
-  expect(preview.counts.deferred).toBeGreaterThanOrEqual(1);
-  expect(response.status).toBe(202);
-  expect(agentRegistry().conversationForPath("/bulk-history.jsonl")?.migration).toMatchObject({ targetId: target.id, phase: "requested" });
+  expect(response.status).toBe(200);
+  expect(after.engineRouting.claude.activeAccountId).toBe(target.id);
+  expect(after.conversations).toEqual(before.conversations);
+  expect(after.migrationIntents).toEqual(before.migrationIntents);
+  setActiveClaudeAccount("default");
+  agentRegistry().setEngineRouting("claude", "default");
 });
 
-test("migrate repairs generations on another account when routing already names the target", async () => {
-  const target = createManagedCodexAccount("Main");
-  agentRegistry().reconcileConversations([{
-    engine: "codex",
-    path: "/stale-account.jsonl",
-    accountId: "default",
-    launchProfile: emptyLaunchProfile({ role: "root", title: "Stale root" }),
-    turn: { state: "idle", source: "empty", terminalAt: null },
-    observedAt: "2026-07-10T12:00:00.000Z",
-  }]);
-  agentRegistry().setEngineRouting("codex", target.id);
+test("active routes reject transcript migration modes", async () => {
+  const codex = createManagedCodexAccount("Codex target");
+  const claude = createManagedClaudeAccount("Claude target");
+  const before = agentRegistry().snapshot();
 
-  const preview = await (await POST(migrationRequest({ id: target.id, mode: "preview" }))).json() as { counts: { total: number }; previewRevision: number };
-  const response = await POST(migrationRequest({ id: target.id, mode: "migrate", scope: "all", previewRevision: preview.previewRevision, requestId: "same-active-repair" }));
-
-  expect(preview.counts.total).toBeGreaterThanOrEqual(1);
-  expect(response.status).toBe(202);
-  expect(agentRegistry().conversationForPath("/stale-account.jsonl")?.migration).toMatchObject({ targetId: target.id, phase: "requested" });
+  expect((await POST(activeRequest({ id: codex.id, mode: "migrate", previewRevision: 0 }))).status).toBe(400);
+  expect((await setClaudeActive(activeRequest({ id: claude.id, mode: "preview" }))).status).toBe(400);
+  expect(agentRegistry().snapshot()).toEqual(before);
 });
 
 test("GET retains the latest completed intent with recoverable failures for bulk retry", async () => {
