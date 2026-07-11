@@ -1,50 +1,44 @@
-# PR #100 — Pipeline chain builder + progress UI (issue #93)
+# Issue #60 — durable board closes
 
 ## Task statement
 
-Build the front-end for agent **pipelines** (linear chains of stages) on top of the
-already-merged backend from PR #96 (`/api/pipelines`, engine, `PipelineStrip`/`PipelineHub`/
-`derivePipelineLinks`) and the role registry from PR #95 (`GET /api/roles`), following the
-approved Fable design attached to issue #93 (`ARCHITECTURE_READY` comment). Two surfaces:
-
-1. **Chain builder** — a modal to author a pipeline (ordered stages, each Run or Review-loop,
-   with role/params/access/prompt), reachable from board toolbar, dashboard header, and a node
-   action that prefills the source transcript.
-2. **Chain progress** — interactive stage strip, verdict popover, board rail with a single
-   interactive hub, control hub, and a mobile chain row.
-
-No mocks — everything wires to the real backend endpoints and existing engine types.
+Fix closed scheme cards resurfacing after reload. The server must preserve close
+tombstones across concurrent board writers and carry them across transcript
+succession paths, including clients that retry a stale whole-list `hidden` patch
+or omit a `remap-paths` mutation.
 
 ## Acceptance criteria
 
-- **AC1 — Builder dialog.** `PipelineDialog` renders a modal (patterned on `FlowDialog`) with
-  task, optional pinned spec, repository combobox, client templates, and inline validation that
-  mirrors the API. Stage `id`/`next` are derived by the dialog so the linear-chain invariant is
-  owned client-side and never shown to the user. Draft persists to
-  `sessionStorage` under `llvPipelineDraft:<project>`.
-- **AC2 — StageRow.** Each stage exposes a kind toggle (Review-loop **disabled on stage 1**),
-  role select + typed params (reusing PR #95 role UI) with runtime autofill, a collapsed runtime
-  line with `[edit]`, access radios (hidden for review-loop), and a prompt field with
-  `{{task}}`/`{{prev.output}}` insert chips (`{{prev.output}}` disabled on stage 1). Keyboard
-  `↑`/`↓` reorder and delete, delete disabled at the 2-stage floor.
-- **AC3 — Entry points.** Builder opens from board toolbar, dashboard orchestration header, and a
-  "Start pipeline from here" node action that prefills `src` from the node's transcript.
-- **AC4 — PipelineStrip v2.** Stage chips implement the §3 state matrix using glyph + tone
-  (never color alone): review-loop round counter, attempt-count suffix, verdict glyph, parked
-  first-finding summary. Chips focus the stage conversation; the verdict glyph opens the popover.
-- **AC5 — VerdictPopover.** Shows status badge, confidence bar, bounded findings (first 8 +
-  `+N more`), prior-attempt audit lines, open-transcript / open-review actions, and inline
-  Retry/Skip when parked.
-- **AC6 — Board rail + hub.** `derivePipelineLinks` carries per-edge tone keyed off the target
-  stage, marks exactly one edge (into the current stage) as the interactive hub, and badges the
-  rest. `AgentLinksLayer` draws a straight chevroned rail distinct from spawn/flow links,
-  animated on the active edge. `PipelineHub` v2 is a single control hub (pause/resume,
-  retry/skip when parked, close).
-- **AC7 — Mobile.** `MobileFocusView` shows a pipeline chain row over the focused stage pane with
-  prev/next hop.
-- **AC8 — i18n + a11y.** Full en + uk parity for all new `pipeline*` namespaces (plural forms for
-  finding counts). Real radio groups, `role="group"` + aria labels, glyph-redundant states,
-  Escape-closes-popover, disabled-with-hint affordances.
-- **AC9 — Quality gates.** `bun test` green, `bunx tsc --noEmit` clean, `bun run lint` clean.
-  New unit tests cover the state matrix, id/next derivation, template invariants, dialog render,
-  and the agentLinks tone/hub/geometry logic.
+- AC1: A legacy whole-list board PATCH retried with a current revision cannot
+  erase hidden entries committed by another writer.
+- AC2: Legacy board PATCH requests remain schema-compatible, and revision-zero
+  preference seeding continues to work.
+- AC3: Hidden tombstones take precedence over stale manual and expanded
+  membership supplied by whole-list clients.
+- AC4: Server-side board mutations derive aliases from durable conversation
+  generations and continuity paths.
+- AC5: A closed predecessor remains hidden when its successor appears and root
+  reconciliation arrives without a client-provided remap.
+- AC6: Root reconciliation preserves hidden entries when conversation identity
+  remains stable.
+- AC7: Regression tests reproduce the concurrent stale-list retry and the
+  successor-without-remap scenarios through the board route.
+- AC8: A malformed or unreadable conversation registry leaves validated board
+  mutations available and skips alias enrichment for that request.
+- AC9: Pending continuity paths cannot create aliases from a future successor
+  back to the current predecessor during initial or repeated migrations;
+  committed continuity paths keep carrying tombstones during later migrations.
+- AC10: Scanner discovery, observed spawn settlement, provider persistence, and
+  explicit continuity callbacks all record pending succession provenance.
+- AC11: Return-to-source routing and target retirement preserve an abandoned
+  successor fence after clearing the active migration.
+- AC12: A table-driven route regression covers commit, return-to-source,
+  target retirement, chained succession, deferred board repair, and queued
+  cleanup receipts across close-before/during/after timing and alias
+  enrichment, root reconciliation, and client remap mutations.
+- AC13: Fenced successor paths can trigger committed alias repair while
+  remaining ineligible for root reconciliation and client remaps.
+- AC14: `bun test` passes.
+- AC15: `bunx tsc --noEmit` passes.
+- AC16: The live board state and production Viewer on port 8898 remain
+  unchanged during implementation and verification.
