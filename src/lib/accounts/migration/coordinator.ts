@@ -47,17 +47,36 @@ function engineOf(entry: FileEntry): MigrationEngine | null {
 }
 
 function inventory(files: FileEntry[], registry: AgentRegistry): ConversationObservation[] {
+  const snapshot = registry.snapshot();
+  const conversationByPath = new Map<string, RegistryConversation>();
+  const launchProfileByPath = new Map<string, RegistryConversation["generations"][number]["launchProfile"]>();
+  for (const conversation of Object.values(snapshot.conversations)) {
+    for (const generation of conversation.generations) {
+      if (!conversationByPath.has(generation.path)) conversationByPath.set(generation.path, conversation);
+      if (!launchProfileByPath.has(generation.path)) launchProfileByPath.set(generation.path, generation.launchProfile);
+    }
+    const current = conversation.generations.at(-1);
+    for (const pathname of conversation.continuityPaths) {
+      if (!conversationByPath.has(pathname)) conversationByPath.set(pathname, conversation);
+      if (current && !launchProfileByPath.has(pathname)) launchProfileByPath.set(pathname, current.launchProfile);
+    }
+  }
+  for (const receipt of Object.values(snapshot.receipts)) {
+    if (receipt.artifactPath && !launchProfileByPath.has(receipt.artifactPath)) {
+      launchProfileByPath.set(receipt.artifactPath, receipt.launchProfile);
+    }
+  }
   return files.flatMap((entry) => {
     const engine = engineOf(entry);
     if (!engine) return [];
-    const existing = registry.conversationForPath(entry.path);
-    const parentConversation = entry.parent ? registry.conversationForPath(entry.parent) : null;
+    const existing = conversationByPath.get(entry.path) ?? null;
+    const parentConversation = entry.parent ? conversationByPath.get(entry.parent) ?? null : null;
     const owner = accountManager.resolveTranscriptOwner(engine, entry.path);
     const parsed = turnStateFromRecords(tailRecords(entry.path, entry.size), engine === "codex", true);
     const turn = parsed.state !== "terminal" && (entry.activity === "idle" || entry.activity === "recent")
       ? { state: "idle" as const, source: "empty" as const, terminalAt: null }
       : parsed;
-    const currentProfile = registry.launchProfileForPath(entry.path)
+    const currentProfile = launchProfileByPath.get(entry.path)
       ?? existing?.generations.find((generation) => generation.path === entry.path)?.launchProfile;
     const configuredRoot = process.env.LLV_ROOT_CONVERSATION_ID;
     return [{
