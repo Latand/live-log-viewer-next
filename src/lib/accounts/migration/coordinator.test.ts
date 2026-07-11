@@ -5,8 +5,9 @@ import path from "node:path";
 
 import { AgentRegistry, MigrationRevisionError, type ConversationObservation } from "@/lib/agent/registry";
 import { boardFor, mutateBoard, setBoardFileForTests } from "@/lib/board/store";
+import type { FileEntry } from "@/lib/types";
 
-import { advanceConversationMigration, createMigrationIntent, drainHeldDeliveries, previewMigration, reconcileMigrations } from "./coordinator";
+import { advanceConversationMigration, createMigrationIntent, drainHeldDeliveries, previewMigration, reconcileMigrationInventory, reconcileMigrations } from "./coordinator";
 import { emptyLaunchProfile, type ProviderReceipt, type SuccessorProviderPort } from "./contracts";
 import { CodexForkOutcomeUnknownError, SuccessorPendingError } from "./provider";
 
@@ -73,6 +74,43 @@ afterEach(() => {
 });
 
 describe("durable account migration coordinator", () => {
+  test("inventory builds path ownership from one registry snapshot", async () => {
+    const store = registry();
+    const firstPath = path.join(path.dirname(store.filename), "first.jsonl");
+    const secondPath = path.join(path.dirname(store.filename), "second.jsonl");
+    fs.writeFileSync(firstPath, JSON.stringify({ type: "event_msg", timestamp: "2026-07-11T00:00:00.000Z", payload: { type: "task_complete" } }) + "\n");
+    fs.writeFileSync(secondPath, JSON.stringify({ type: "event_msg", timestamp: "2026-07-11T00:00:00.000Z", payload: { type: "task_complete" } }) + "\n");
+    store.reconcileConversations([observation(firstPath, "default", "idle")]);
+    let snapshotCalls = 0;
+    const originalSnapshot = store.snapshot.bind(store);
+    store.snapshot = (() => { snapshotCalls += 1; return originalSnapshot(); }) as typeof store.snapshot;
+    store.conversationForPath = (() => { throw new Error("inventory must use its snapshot index"); }) as typeof store.conversationForPath;
+    store.launchProfileForPath = (() => { throw new Error("inventory must use its snapshot index"); }) as typeof store.launchProfileForPath;
+    const files = [firstPath, secondPath].map((pathname): FileEntry => ({
+      path: pathname,
+      root: "codex-sessions",
+      name: path.basename(pathname),
+      project: "repo",
+      title: path.basename(pathname),
+      engine: "codex",
+      kind: "session",
+      fmt: "codex",
+      parent: null,
+      mtime: Date.now() / 1000,
+      size: fs.statSync(pathname).size,
+      activity: "idle",
+      proc: null,
+      pid: null,
+      model: null,
+      pendingQuestion: null,
+      waitingInput: null,
+    }));
+
+    await reconcileMigrationInventory(store, files);
+
+    expect(snapshotCalls).toBe(1);
+  });
+
   test("a standard account switch migrates active conversations and defers inactive history", async () => {
     const store = registry();
     store.reconcileConversations([
