@@ -186,6 +186,25 @@ test("successor thread methods use the structured fork, resume, read, name, and 
   client.close();
 });
 
+test("post-dispatch fork protocol failures have an unknown outcome", async () => {
+  const malformedFrame = clientWith((fake, message) => {
+    if (message.method === "initialize") fake.respond(requestId(message), {});
+    if (message.method === "thread/fork") fake.output("not json\n");
+  });
+  const malformedClient = await malformedFrame.start();
+  const malformedError = await malformedClient.forkThread("source-1").catch((error: unknown) => error);
+  expect(malformedError).toMatchObject({ outcome: "unknown" });
+
+  const malformedPayload = clientWith((fake, message) => {
+    if (message.method === "initialize") fake.respond(requestId(message), {});
+    if (message.method === "thread/fork") fake.respond(requestId(message), { thread: { path: "/source/fork-1.jsonl" } });
+  });
+  const payloadClient = await malformedPayload.start();
+  const payloadError = await payloadClient.forkThread("source-1").catch((error: unknown) => error);
+  expect(payloadError).toMatchObject({ outcome: "unknown" });
+  payloadClient.close();
+});
+
 test("malformed output and protocol errors reject safely with redacted details", async () => {
   const malformed = clientWith((fake, message) => {
     if (message.method === "initialize") fake.output("not json\n");

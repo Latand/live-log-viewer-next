@@ -19,6 +19,14 @@ RUN env -u __NEXT_PRIVATE_STANDALONE_CONFIG \
         -u __NEXT_PRIVATE_BUILD_WORKER \
         bun run build
 
+# COPY preserves source file modes while resetting ownership to root:root, so a
+# umask-077 checkout (tsconfig.json at 0600) produces runtime files the
+# UID-1000 viewer user cannot read and `next start` crashes (#76). Normalize
+# here — the runtime stage inherits these modes via COPY --from — so image
+# permissions derive from the Dockerfile alone, identically for every
+# worktree: dirs 755, files 644, anything already executable 755.
+RUN chmod -R u=rwX,go=rX /app
+
 FROM node:22.16.0-bookworm-slim AS runtime
 WORKDIR /app
 ENV NODE_ENV=production \
@@ -181,11 +189,23 @@ COPY --from=build /app/src ./src
 COPY --from=build /app/scripts/whisper_transcribe.py ./scripts/whisper_transcribe.py
 COPY --from=build /app/node_modules ./node_modules
 
-# COPY preserves source-context modes. Agent worktrees are created with umask
-# 077, which once shipped root-owned 0600 files into an image that runs as uid
-# 1000 and crash-looped on EACCES (/app/tsconfig.json). Normalize read bits so
-# context perms can never take the runtime down again.
-RUN chmod -R a+rX /app
+# Permission gate: the compose service runs this image as a non-root user
+# (default 1000:1000 — the same UID as `node` here), so every runtime file
+# must be readable and every directory traversable by that identity. A bad
+# checkout must fail the image build, never the production health gate. The
+# build-stage normalization above makes this hold for every worktree umask;
+# this gate replaces the emergency runtime-stage `chmod -R a+rX /app`, which
+# duplicated all of /app into an extra image layer.
+RUN <<'EOF'
+set -eu
+bad=$(/usr/sbin/runuser -u node -- find /app \( -type d ! -executable \) -o \( ! -type l ! -readable \) 2>&1 | head -20 || true)
+if [ -n "$bad" ]; then
+  echo "runtime files not accessible to UID 1000:" >&2
+  printf '%s\n' "$bad" >&2
+  exit 1
+fi
+/usr/sbin/runuser -u node -- sh -c 'cat /app/tsconfig.json /app/next.config.ts /app/package.json > /dev/null'
+EOF
 
 EXPOSE 8898
 CMD ["sh", "-c", "exec node_modules/.bin/next start --port ${PORT:-8898} --hostname ${HOSTNAME:-127.0.0.1}"]

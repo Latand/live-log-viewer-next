@@ -149,6 +149,84 @@ test("canceling an armed removal backs out without removing the account", async 
   expect([...view.host.querySelectorAll("button")].some((button) => button.textContent === "Remove")).toBe(true);
 });
 
+test("the confirm step offers an explicit migration for deferred history", async () => {
+  let selectedScope: "active" | "all" | undefined;
+  const initial = state(login({ phase: "authenticated" }), {
+    accounts: [
+      { id: "main", label: "Main", kind: "legacy", authPresent: true, loginPending: false, loginState: "authenticated", deviceAuth: null, login: null },
+      { id: "work", label: "Work", kind: "managed", authPresent: true, loginPending: false, loginState: "authenticated", deviceAuth: null, login: null },
+    ],
+    active: "main",
+    preview: async () => ({
+      targetId: "work",
+      targetLabel: "Work",
+      counts: { total: 4, idle: 0, busy: 1, deferred: 3 },
+      previewRevision: 9,
+    }),
+    selectAndMigrate: async (_id, _revision, scope) => {
+      selectedScope = scope;
+      return true;
+    },
+  });
+  const view = await mount(initial);
+  mounted.push(view);
+  const work = [...view.host.querySelectorAll("button")].find((button) => button.textContent?.includes("Work"))!;
+
+  flushSync(() => { work.click(); });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  flushSync(() => {});
+
+  expect(view.host.textContent).toContain("Migrate all");
+  const bulk = [...view.host.querySelectorAll("button")].find((button) => button.textContent === "Migrate all (4)")!;
+  expect(bulk).toBeDefined();
+  flushSync(() => { bulk.click(); });
+  expect(selectedScope).toBe("all");
+});
+
+test("retarget confirmation explains active and full-history scopes", async () => {
+  const selectedScopes: Array<"active" | "all"> = [];
+  const accounts = [
+    { id: "main", label: "Main", kind: "legacy" as const, authPresent: true, loginPending: false, loginState: "authenticated" as const, deviceAuth: null, login: null },
+    { id: "work", label: "Work", kind: "managed" as const, authPresent: true, loginPending: false, loginState: "authenticated" as const, deviceAuth: null, login: null },
+    { id: "next", label: "Next", kind: "managed" as const, authPresent: true, loginPending: false, loginState: "authenticated" as const, deviceAuth: null, login: null },
+  ];
+  const initial = state(login({ phase: "authenticated" }), {
+    accounts,
+    active: "work",
+    migration: {
+      intentId: "intent-retarget", targetId: "work", targetLabel: "Work", revision: 3, origin: "manual", reason: null,
+      state: "draining", counts: { done: 1, waitingTurn: 1, inFlight: 0, failed: 0, total: 3 }, startedAt: "2026-07-11T00:00:00.000Z",
+    },
+    preview: async () => ({
+      targetId: "next", targetLabel: "Next", counts: { total: 4, idle: 1, busy: 1, deferred: 2 }, previewRevision: 10,
+    }),
+    selectAndMigrate: async (_id, _revision, scope) => {
+      selectedScopes.push(scope ?? "active");
+      return true;
+    },
+  });
+  const view = await mount(initial);
+  mounted.push(view);
+  const openNext = async () => {
+    const next = [...view.host.querySelectorAll("button")].find((button) => button.textContent?.includes("Next"))!;
+    flushSync(() => { next.click(); });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    flushSync(() => {});
+  };
+
+  await openNext();
+  expect(view.host.textContent).toContain("active sessions redirect there");
+  expect(view.host.textContent).toContain("inactive conversations move when you message them");
+  expect(view.host.textContent).toContain("Migrate all also moves deferred history and previously moved conversations now");
+  const primary = [...view.host.querySelectorAll("button")].find((button) => button.textContent === "Switch account")!;
+  flushSync(() => { primary.click(); });
+
+  await openNext();
+  const bulk = [...view.host.querySelectorAll("button")].find((button) => button.textContent === "Migrate all (4)")!;
+  flushSync(() => { bulk.click(); });
+  expect(selectedScopes).toEqual(["active", "all"]);
+});
+
 test("keyboard Cancel restores focus to the Claude sign-in row after it enters canceling", async () => {
   let canceled: string | null = null;
   const initial = state(login(), {

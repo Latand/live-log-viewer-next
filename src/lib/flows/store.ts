@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { statePath } from "@/lib/configDir";
-import { agentRegistry, type AgentRegistry } from "@/lib/agent/registry";
+import { agentRegistry, type ConversationLookup } from "@/lib/agent/registry";
 import { ROLE_DEFAULTS } from "@/lib/roles/defaults";
 import { resolveRole } from "@/lib/roles/registry";
 import { loadRoleDefinitionsOrDefaults } from "@/lib/roles/store";
@@ -179,7 +179,7 @@ export function loadFlows(): Flow[] {
   }));
 }
 
-export function reconcileFlowConversationOwnership(registry: AgentRegistry = agentRegistry()): void {
+export function reconcileFlowConversationOwnership(registry: ConversationLookup = agentRegistry()): void {
   const flows = loadFlows();
   let dirty = false;
   for (const flow of flows) {

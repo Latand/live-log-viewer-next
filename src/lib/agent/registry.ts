@@ -142,6 +142,8 @@ export interface RegistryConversation {
       identity while the canonical generation path advances. */
   continuityPaths: string[];
   migration: ConversationMigration | null;
+  /** Explicit Stop/Keep decision for one target at one routing revision. */
+  migrationOptOut: { targetId: string; updatedAt: string } | null;
   turn: TurnState & { observedAt: string | null };
   createdAt: string;
   updatedAt: string;
@@ -169,6 +171,12 @@ export interface RegistryFile {
   pendingSuccessorCleanups: Record<string, { conversationId: ViewerConversationId; receipt: ProviderReceipt; createdAt: string; lastError: string | null }>;
 }
 
+export interface ConversationLookup {
+  conversationForPath(artifactPath: string): RegistryConversation | null;
+  canonicalConversationId(id: ViewerConversationId): ViewerConversationId;
+  conversation(id: ViewerConversationId): RegistryConversation | null;
+}
+
 type ConversationMigrationInput = Omit<ConversationMigration, "errorCode" | "operationId" | "sourceGenerationId" | "providerReceipt" | "boardProject" | "boardOperationId" | "boardPlacementProject"> &
   Partial<Pick<ConversationMigration, "errorCode" | "operationId" | "sourceGenerationId" | "providerReceipt" | "boardProject" | "boardOperationId" | "boardPlacementProject">>;
 type SuccessorGenerationInput = Omit<NativeGeneration, "createdAt" | "archivedAt" | "launchProfile" | "historyHash" | "host"> &
@@ -181,6 +189,141 @@ export interface ConversationObservation {
   launchProfile: LaunchProfile;
   turn: TurnState;
   observedAt: string;
+}
+
+export type MigrationScope = "active" | "all";
+
+export interface MigrationScopeCounts {
+  total: number;
+  idle: number;
+  busy: number;
+  deferred: number;
+  alreadyTarget: number;
+}
+
+function migrationReadiness(
+  file: RegistryFile,
+  conversation: RegistryConversation,
+): "idle" | "busy" | "deferred" {
+  if (conversation.turn.state === "busy" || conversation.turn.state === "unknown") return "busy";
+  const deliveryInFlight = Object.values(file.heldDeliveries).some((delivery) =>
+    delivery.conversationId === conversation.id && delivery.state === "delivery-uncertain");
+  if (deliveryInFlight) return "busy";
+  if (conversation.migration && !["committed", "rolled-back"].includes(conversation.migration.phase)) return "idle";
+  const sourcePath = conversation.generations.at(-1)?.path;
+  const hasActiveHost = sourcePath !== undefined && Object.values(file.entries).some((entry) =>
+    entry.artifactPath === sourcePath && ["starting", "live", "idle", "handoff"].includes(entry.status));
+  if (hasActiveHost) return "idle";
+  const hasPendingDelivery = Object.values(file.heldDeliveries).some((delivery) =>
+    delivery.conversationId === conversation.id && delivery.state !== "delivered");
+  return hasPendingDelivery ? "idle" : "deferred";
+}
+
+function migrationReadinessSignature(
+  file: RegistryFile,
+  engine: Extract<AgentEngine, "claude" | "codex">,
+  paths: ReadonlySet<string>,
+): string {
+  return JSON.stringify(Object.values(file.conversations)
+    .filter((conversation) => conversation.engine === engine
+      && paths.has(conversation.generations.at(-1)?.path ?? ""))
+    .map((conversation) => [conversation.id, migrationReadiness(file, conversation)])
+    .sort(([left], [right]) => left.localeCompare(right)));
+}
+
+function activeHostPathsChangedByEntry(
+  file: RegistryFile,
+  keyId: string,
+  replacement: Omit<AgentRegistryEntry, "updatedAt">,
+): Set<string> {
+  const previous = file.entries[keyId];
+  const paths = new Set([previous?.artifactPath, replacement.artifactPath].filter((value): value is string => Boolean(value)));
+  const activeStatuses = new Set<AgentRegistryEntry["status"]>(["starting", "live", "idle", "handoff"]);
+  const activeAtPath = (pathname: string, replace: boolean): boolean => {
+    for (const [candidateKey, current] of Object.entries(file.entries)) {
+      const candidate = replace && candidateKey === keyId ? replacement : current;
+      if (candidate.artifactPath === pathname && activeStatuses.has(candidate.status)) return true;
+    }
+    return replace && !(keyId in file.entries)
+      && replacement.artifactPath === pathname
+      && activeStatuses.has(replacement.status);
+  };
+  return new Set([...paths].filter((pathname) => activeAtPath(pathname, false) !== activeAtPath(pathname, true)));
+}
+
+function advanceMigrationScopeRevision(
+  file: RegistryFile,
+  engine: Extract<AgentEngine, "claude" | "codex">,
+  previousSignature: string,
+  paths: ReadonlySet<string>,
+): void {
+  if (migrationReadinessSignature(file, engine, paths) === previousSignature) return;
+  file.conversationRevision[engine] += 1;
+  file.engineRouting[engine].revision += 1;
+}
+
+function migrationScopeCounts(
+  file: RegistryFile,
+  engine: Extract<AgentEngine, "claude" | "codex">,
+  targetId: string,
+): MigrationScopeCounts {
+  const counts: MigrationScopeCounts = { total: 0, idle: 0, busy: 0, deferred: 0, alreadyTarget: 0 };
+  for (const conversation of Object.values(file.conversations)) {
+    if (conversation.engine !== engine) continue;
+    const source = conversation.generations.at(-1);
+    if (!source || source.accountId === null) continue;
+    if (source.accountId === targetId) {
+      counts.alreadyTarget += 1;
+      continue;
+    }
+    counts.total += 1;
+    counts[migrationReadiness(file, conversation)] += 1;
+  }
+  return counts;
+}
+
+function conversationMigrationForIntent(
+  conversation: RegistryConversation,
+  source: NativeGeneration,
+  intent: MigrationIntent,
+  phase: ConversationMigration["phase"],
+  changedAt: string,
+): ConversationMigration {
+  const boardProject = conversation.migration?.boardProject ?? null;
+  return {
+    intentId: intent.id,
+    phase,
+    targetId: intent.targetId,
+    revision: intent.revision,
+    error: null,
+    errorCode: null,
+    operationId: crypto.randomUUID(),
+    sourceGenerationId: source.id,
+    providerReceipt: null,
+    boardProject,
+    boardOperationId: conversation.migration?.boardOperationId ?? null,
+    boardPlacementProject: conversation.migration?.boardPlacementProject
+      ?? boardProject
+      ?? source.launchProfile.project,
+    updatedAt: changedAt,
+  };
+}
+
+function queueAbandonedMigrationCleanup(
+  file: RegistryFile,
+  conversation: RegistryConversation,
+  changedAt: string,
+): void {
+  const receipt = conversation.migration?.phase === "committed"
+    ? null
+    : conversation.migration?.providerReceipt;
+  if (!receipt) return;
+  file.pendingSuccessorCleanups[receipt.operationId] ??= {
+    conversationId: conversation.id,
+    receipt,
+    createdAt: changedAt,
+    lastError: null,
+  };
 }
 
 export class MigrationRevisionError extends Error {
@@ -226,6 +369,26 @@ export class RegistryReadError extends Error {}
 
 function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
+}
+
+function restoreOwnedChanges(current: unknown, retired: unknown, previous: unknown): unknown {
+  if (JSON.stringify(retired) === JSON.stringify(previous)) return current;
+  if (JSON.stringify(current) === JSON.stringify(retired)) return previous === undefined ? undefined : clone(previous);
+  if (current && retired && previous && typeof current === "object" && typeof retired === "object" && typeof previous === "object"
+    && !Array.isArray(current) && !Array.isArray(retired) && !Array.isArray(previous)) {
+    const restored: Record<string, unknown> = { ...(current as Record<string, unknown>) };
+    const keys = new Set([...Object.keys(retired), ...Object.keys(previous)]);
+    for (const key of keys) {
+      const value = restoreOwnedChanges(
+        (current as Record<string, unknown>)[key],
+        (retired as Record<string, unknown>)[key],
+        (previous as Record<string, unknown>)[key],
+      );
+      if (value === undefined) delete restored[key]; else restored[key] = value;
+    }
+    return restored;
+  }
+  return current;
 }
 
 function now(): string {
@@ -276,11 +439,18 @@ function normalizeConversation(value: RegistryConversation): RegistryConversatio
     ...(Array.isArray(legacyContinuity) ? legacyContinuity.filter((pathname): pathname is string => typeof pathname === "string") : []),
     ...(migration?.providerReceipt?.continuityPaths ?? []),
   ])];
+  const rawOptOut = (value as Partial<RegistryConversation>).migrationOptOut;
+  const migrationOptOut = rawOptOut
+    && typeof rawOptOut.targetId === "string"
+    && typeof rawOptOut.updatedAt === "string"
+    ? { targetId: rawOptOut.targetId, updatedAt: rawOptOut.updatedAt }
+    : null;
   return {
     ...value,
     generations,
     continuityPaths,
     migration,
+    migrationOptOut,
     turn: value.turn && typeof value.turn === "object"
       ? { state: value.turn.state, source: value.turn.source, terminalAt: value.turn.terminalAt ?? null, observedAt: value.turn.observedAt ?? null }
       : { state: "unknown", source: "empty", terminalAt: null, observedAt: null },
@@ -300,16 +470,61 @@ function normalizePolicy(value: AutoBalancePolicy | undefined): AutoBalancePolic
 }
 
 function normalizeHeldDelivery(value: HeldDelivery): HeldDelivery {
+  const state = value.state ?? "held";
   return {
     ...value,
+    text: state === "delivered" ? "" : value.text,
     clientMessageId: value.clientMessageId ?? null,
-    state: value.state ?? "held",
+    payloadKind: value.payloadKind ?? "text",
+    artifactPaths: Array.isArray(value.artifactPaths)
+      ? value.artifactPaths.filter((pathname): pathname is string => typeof pathname === "string")
+      : [],
+    state,
     generationId: value.generationId ?? null,
     attempts: Number.isInteger(value.attempts) ? value.attempts : 0,
     assignedAt: value.assignedAt ?? null,
     deliveredAt: value.deliveredAt ?? null,
     error: value.error ?? null,
   };
+}
+
+function compactDeliveryReservations(file: RegistryFile, onlyConversationId?: ViewerConversationId): number {
+  const deliveredGroups = new Map<ViewerConversationId, HeldDelivery[]>();
+  const failedGroups = new Map<ViewerConversationId, HeldDelivery[]>();
+  for (const delivery of Object.values(file.heldDeliveries)) {
+    const canonicalId = resolveConversationAlias(file, delivery.conversationId);
+    if (onlyConversationId && canonicalId !== resolveConversationAlias(file, onlyConversationId)) continue;
+    if (delivery.state === "delivered") {
+      delivery.text = "";
+      const group = deliveredGroups.get(canonicalId) ?? [];
+      group.push(delivery);
+      deliveredGroups.set(canonicalId, group);
+    } else if (delivery.state === "failed") {
+      const group = failedGroups.get(canonicalId) ?? [];
+      group.push(delivery);
+      failedGroups.set(canonicalId, group);
+    }
+  }
+  let removed = 0;
+  for (const deliveries of deliveredGroups.values()) {
+    deliveries.sort((left, right) => (right.deliveredAt ?? right.createdAt).localeCompare(left.deliveredAt ?? left.createdAt) || right.id.localeCompare(left.id));
+    for (const expired of deliveries.slice(100)) {
+      delete file.heldDeliveries[expired.id];
+      removed += 1;
+    }
+  }
+  for (const [conversationId, deliveries] of failedGroups) {
+    const activeCount = Object.values(file.heldDeliveries).filter((delivery) =>
+      resolveConversationAlias(file, delivery.conversationId) === conversationId
+      && ["held", "assigned", "delivery-uncertain"].includes(delivery.state)).length;
+    const retainedFailed = Math.max(0, Math.min(50, 99 - activeCount));
+    deliveries.sort((left, right) => right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id));
+    for (const expired of deliveries.slice(retainedFailed)) {
+      delete file.heldDeliveries[expired.id];
+      removed += 1;
+    }
+  }
+  return removed;
 }
 
 function conversationOwnsPath(conversation: RegistryConversation, artifactPath: string): boolean {
@@ -335,6 +550,31 @@ function resolveConversationAlias(file: Pick<RegistryFile, "conversationAliases"
     current = next;
   }
   return current;
+}
+
+export function conversationLookupFromSnapshot(snapshot: RegistryFile): ConversationLookup {
+  const byPath = new Map<string, RegistryConversation>();
+  for (const conversation of Object.values(snapshot.conversations)) {
+    for (const generation of conversation.generations) {
+      if (!byPath.has(generation.path)) byPath.set(generation.path, conversation);
+    }
+    for (const pathname of conversation.continuityPaths) {
+      if (!byPath.has(pathname)) byPath.set(pathname, conversation);
+    }
+  }
+  return {
+    conversationForPath(artifactPath) {
+      const conversation = byPath.get(artifactPath);
+      return conversation ? clone(conversation) : null;
+    },
+    canonicalConversationId(id) {
+      return resolveConversationAlias(snapshot, id);
+    },
+    conversation(id) {
+      const conversation = snapshot.conversations[resolveConversationAlias(snapshot, id)];
+      return conversation ? clone(conversation) : null;
+    },
+  };
 }
 
 function adoptProvisionalOwner(
@@ -721,6 +961,7 @@ export class AgentRegistry {
       generations: [],
       continuityPaths: [],
       migration: null,
+      migrationOptOut: null,
       turn: { state: "unknown" as const, source: "empty" as const, terminalAt: null, observedAt: null },
       createdAt,
       updatedAt: createdAt,
@@ -801,7 +1042,13 @@ export class AgentRegistry {
   }
 
   settleSpawn(launchId: string, entry: Omit<AgentRegistryEntry, "updatedAt">, completionMode: NonNullable<SpawnReceipt["completionMode"]> = "route-completed"): SpawnSettlement {
-    return this.mutate((file) => this.settleSpawnInFile(file, launchId, entry, completionMode));
+    return this.mutate((file) => {
+      const paths = new Set([entry.artifactPath]);
+      const signature = migrationReadinessSignature(file, entry.key.engine, paths);
+      const settled = this.settleSpawnInFile(file, launchId, entry, completionMode);
+      advanceMigrationScopeRevision(file, entry.key.engine, signature, paths);
+      return settled;
+    });
   }
 
   completeSpawn(launchId: string, entry: Omit<AgentRegistryEntry, "updatedAt">): AgentRegistryEntry {
@@ -832,8 +1079,12 @@ export class AgentRegistry {
 
   upsert(entry: Omit<AgentRegistryEntry, "updatedAt">): AgentRegistryEntry {
     return this.mutate((file) => {
+      const keyId = sessionKeyId(entry.key);
+      const changedHostPaths = activeHostPathsChangedByEntry(file, keyId, entry);
+      const readinessBefore = migrationReadinessSignature(file, entry.key.engine, changedHostPaths);
       const full = { ...entry, updatedAt: now() };
-      file.entries[sessionKeyId(entry.key)] = full;
+      file.entries[keyId] = full;
+      advanceMigrationScopeRevision(file, entry.key.engine, readinessBefore, changedHostPaths);
       return clone(full);
     });
   }
@@ -842,9 +1093,13 @@ export class AgentRegistry {
     this.mutate((file) => {
       const entry = file.entries[sessionKeyId(key)];
       if (!entry) return;
+      const replacement = { ...entry, host: null, status: "unhosted" as const };
+      const changedHostPaths = activeHostPathsChangedByEntry(file, sessionKeyId(key), replacement);
+      const readinessBefore = migrationReadinessSignature(file, key.engine, changedHostPaths);
       entry.host = null;
       entry.status = "unhosted";
       entry.updatedAt = now();
+      advanceMigrationScopeRevision(file, key.engine, readinessBefore, changedHostPaths);
     });
   }
 
@@ -945,6 +1200,7 @@ export class AgentRegistry {
         }],
         continuityPaths: [],
         migration: null,
+        migrationOptOut: null,
         turn: { state: "unknown", source: "empty", terminalAt: null, observedAt: null },
         createdAt,
         updatedAt: createdAt,
@@ -995,6 +1251,7 @@ export class AgentRegistry {
             }],
             continuityPaths: [],
             migration: null,
+            migrationOptOut: null,
             turn: { ...observation.turn, observedAt: observation.observedAt },
             createdAt,
             updatedAt: createdAt,
@@ -1084,8 +1341,15 @@ export class AgentRegistry {
     return clone(this.snapshot().engineRouting[engine]);
   }
 
+  migrationScope(engine: Extract<AgentEngine, "claude" | "codex">, targetId: string): MigrationScopeCounts {
+    return migrationScopeCounts(this.snapshot(), engine, targetId);
+  }
+
   retireAccount(engine: Extract<AgentEngine, "claude" | "codex">, accountId: string, fallbackAccountId: string): void {
     this.mutate((file) => {
+      const currentConversation = Object.values(file.conversations).find((conversation) =>
+        conversation.engine === engine && conversation.generations.at(-1)?.accountId === accountId);
+      if (currentConversation) throw new Error("account has current conversations");
       const changedAt = now();
       const route = file.engineRouting[engine];
       if (route.activeAccountId === accountId) {
@@ -1105,6 +1369,18 @@ export class AgentRegistry {
       if (retiredIntentIds.size === 0) return;
       for (const conversation of Object.values(file.conversations)) {
         if (!conversation.migration || !retiredIntentIds.has(conversation.migration.intentId)) continue;
+        queueAbandonedMigrationCleanup(file, conversation, changedAt);
+        const source = conversation.generations.find((generation) => generation.id === conversation.migration?.sourceGenerationId)
+          ?? conversation.generations.at(-1);
+        if (source) {
+          for (const delivery of Object.values(file.heldDeliveries)) {
+            if (delivery.conversationId !== conversation.id || delivery.state === "delivered" || delivery.state === "delivery-uncertain") continue;
+            delivery.state = "assigned";
+            delivery.generationId = source.id;
+            delivery.assignedAt = changedAt;
+            delivery.error = null;
+          }
+        }
         conversation.migration = null;
         conversation.updatedAt = changedAt;
         file.conversationRevision[conversation.engine] += 1;
@@ -1119,6 +1395,7 @@ export class AgentRegistry {
     requestId: string;
     expectedRevision: number;
     evidence?: MigrationIntent["evidence"];
+    scope?: MigrationScope;
   }): MigrationIntent {
     return this.mutate((file) => {
       const repeated = Object.values(file.migrationIntents).find((intent) =>
@@ -1158,35 +1435,92 @@ export class AgentRegistry {
       let scoped = 0;
       for (const conversation of Object.values(file.conversations)) {
         if (conversation.engine !== input.engine) continue;
+        if (input.origin === "manual" && conversation.migrationOptOut?.targetId === input.targetId) {
+          conversation.migrationOptOut = null;
+        }
+        if (input.origin === "auto" && conversation.migrationOptOut?.targetId === input.targetId) continue;
         const source = conversation.generations.at(-1);
         if (!source || source.accountId === null || source.accountId === input.targetId) {
-          if (conversation.migration && conversation.migration.phase !== "committed") conversation.migration = null;
+          if (source && conversation.migration && conversation.migration.phase !== "committed") {
+            queueAbandonedMigrationCleanup(file, conversation, changedAt);
+            for (const delivery of Object.values(file.heldDeliveries)) {
+              if (delivery.conversationId !== conversation.id
+                || delivery.state === "delivered"
+                || delivery.state === "delivery-uncertain") continue;
+              delivery.state = "assigned";
+              delivery.generationId = source.id;
+              delivery.assignedAt = changedAt;
+              delivery.error = null;
+            }
+            conversation.migration = null;
+            conversation.updatedAt = changedAt;
+          }
           continue;
         }
+        const readiness = migrationReadiness(file, conversation);
+        if ((input.scope ?? "all") === "active" && readiness === "deferred") continue;
         scoped += 1;
-        const boardProject = conversation.migration?.boardProject ?? null;
-        const boardPlacementProject = conversation.migration?.boardPlacementProject
-          ?? boardProject
-          ?? source.launchProfile.project;
-        conversation.migration = {
-          intentId: intent.id,
-          phase: conversation.turn.state === "busy" || conversation.turn.state === "unknown" ? "waiting-turn" : "requested",
-          targetId: input.targetId,
-          revision: intent.revision,
-          error: null,
-          errorCode: null,
-          operationId: crypto.randomUUID(),
-          sourceGenerationId: source.id,
-          providerReceipt: null,
-          boardProject,
-          boardOperationId: conversation.migration?.boardOperationId ?? null,
-          boardPlacementProject,
-          updatedAt: changedAt,
-        };
+        queueAbandonedMigrationCleanup(file, conversation, changedAt);
+        conversation.migration = conversationMigrationForIntent(
+          conversation,
+          source,
+          intent,
+          readiness === "busy" ? "waiting-turn" : "requested",
+          changedAt,
+        );
         conversation.updatedAt = changedAt;
       }
       if (scoped === 0) intent.state = "complete";
       return clone(intent);
+    });
+  }
+
+  requestConversationMigrationToActiveAccount(id: ViewerConversationId): RegistryConversation {
+    return this.mutate((file) => {
+      const canonicalId = resolveConversationAlias(file, id);
+      const conversation = file.conversations[canonicalId];
+      if (!conversation) throw new Error("viewer conversation is unknown");
+      const targetId = file.engineRouting[conversation.engine].activeAccountId;
+      const source = conversation.generations.at(-1);
+      if (!targetId || !source || source.accountId === null || source.accountId === targetId) return clone(conversation);
+      if (conversation.migrationOptOut?.targetId === targetId) return clone(conversation);
+      if (conversation.migration?.targetId === targetId
+        && !["committed", "rolled-back", "failed-recoverable"].includes(conversation.migration.phase)) {
+        return clone(conversation);
+      }
+
+      const changedAt = now();
+      let intent = Object.values(file.migrationIntents)
+        .filter((candidate) => candidate.engine === conversation.engine && candidate.targetId === targetId && candidate.state !== "stopped")
+        .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0];
+      if (!intent) {
+        intent = {
+          id: crypto.randomUUID(),
+          engine: conversation.engine,
+          targetId,
+          origin: "manual",
+          revision: 1,
+          state: "draining",
+          createdAt: changedAt,
+          updatedAt: changedAt,
+          requestIds: [`lazy:${file.engineRouting[conversation.engine].revision}:${canonicalId}`],
+          evidence: null,
+          stoppedAt: null,
+        };
+        file.migrationIntents[intent.id] = intent;
+      } else {
+        if (intent.state !== "draining") intent.revision += 1;
+        intent.state = "draining";
+        intent.updatedAt = changedAt;
+      }
+
+      const phase = migrationReadiness(file, conversation) === "busy" ? "waiting-turn" : "requested";
+      queueAbandonedMigrationCleanup(file, conversation, changedAt);
+      conversation.migration = conversationMigrationForIntent(conversation, source, intent, phase, changedAt);
+      conversation.updatedAt = changedAt;
+      file.conversationRevision[conversation.engine] += 1;
+      file.engineRouting[conversation.engine].revision += 1;
+      return clone(conversation);
     });
   }
 
@@ -1389,6 +1723,8 @@ export class AgentRegistry {
         delivery.assignedAt = committedAt;
         delivery.error = null;
       }
+      file.conversationRevision[conversation.engine] += 1;
+      file.engineRouting[conversation.engine].revision += 1;
       return clone(conversation);
     });
   }
@@ -1398,12 +1734,24 @@ export class AgentRegistry {
       const intent = file.migrationIntents[id];
       if (!intent) throw new Error("migration intent is unknown");
       if (expectedRevision !== undefined && intent.revision !== expectedRevision) throw new Error("migration intent revision is stale");
+      const paths = new Set(Object.values(file.conversations)
+        .filter((conversation) => conversation.engine === intent.engine)
+        .map((conversation) => conversation.generations.at(-1)?.path)
+        .filter((pathname): pathname is string => Boolean(pathname)));
+      const signature = migrationReadinessSignature(file, intent.engine, paths);
       intent.state = state;
       intent.stoppedAt = state === "stopped" ? now() : intent.stoppedAt;
       intent.updatedAt = now();
       if (state === "stopped") {
         for (const conversation of Object.values(file.conversations)) {
+          if (conversation.engine !== intent.engine) continue;
+          const current = conversation.generations.at(-1);
+          if (file.engineRouting[conversation.engine].activeAccountId === intent.targetId && current?.accountId !== intent.targetId) {
+            conversation.migrationOptOut = { targetId: intent.targetId, updatedAt: intent.updatedAt };
+            conversation.updatedAt = intent.updatedAt;
+          }
           if (conversation.migration?.intentId !== id || conversation.migration.phase === "committed") continue;
+          queueAbandonedMigrationCleanup(file, conversation, intent.updatedAt);
           const source = conversation.generations.find((generation) => generation.id === conversation.migration?.sourceGenerationId)
             ?? conversation.generations.at(-1);
           if (!source) continue;
@@ -1417,6 +1765,7 @@ export class AgentRegistry {
           }
         }
       }
+      advanceMigrationScopeRevision(file, intent.engine, signature, paths);
       return clone(intent);
     });
   }
@@ -1500,18 +1849,52 @@ export class AgentRegistry {
     });
   }
 
-  holdDelivery(conversationId: ViewerConversationId, text: string, clientMessageId: string | null = null): HeldDelivery {
-    if (!text || text.length > 32_000) throw new Error("held delivery must contain at most 32000 characters");
+  holdDelivery(
+    conversationId: ViewerConversationId,
+    text: string,
+    clientMessageId: string | null = null,
+    payloadKind: HeldDelivery["payloadKind"] = "text",
+  ): HeldDelivery {
+    if (payloadKind === "text" && (!text || text.length > 32_000)) throw new Error("held delivery must contain at most 32000 characters");
     return this.mutate((file) => {
       const canonicalId = resolveConversationAlias(file, conversationId);
       const existing = clientMessageId ? Object.values(file.heldDeliveries).find((item) => item.conversationId === canonicalId && item.clientMessageId === clientMessageId) : undefined;
-      if (existing) return clone(existing);
+      const conversation = file.conversations[canonicalId];
+      const paths = new Set([conversation?.generations.at(-1)?.path].filter((pathname): pathname is string => Boolean(pathname)));
+      const signature = conversation ? migrationReadinessSignature(file, conversation.engine, paths) : "";
+      const migrationBlocksDelivery = conversation?.migration
+        && ["requested", "preparing", "successor-starting", "verifying"].includes(conversation.migration.phase);
+      const current = conversation?.generations.at(-1);
+      const place = (delivery: HeldDelivery): HeldDelivery => {
+        if (delivery.state === "delivered" || delivery.state === "delivery-uncertain") return clone(delivery);
+        delivery.deliveredAt = null;
+        delivery.error = null;
+        if (migrationBlocksDelivery) {
+          delivery.state = "held";
+          delivery.generationId = null;
+          delivery.assignedAt = null;
+        } else if (current) {
+          delivery.state = "assigned";
+          delivery.generationId = current.id;
+          delivery.assignedAt = now();
+        } else {
+          delivery.state = "failed";
+          delivery.generationId = null;
+          delivery.assignedAt = null;
+          delivery.error = "delivery target is unavailable and remains recoverable";
+        }
+        if (conversation) advanceMigrationScopeRevision(file, conversation.engine, signature, paths);
+        return clone(delivery);
+      };
+      if (existing) return place(existing);
       const held: HeldDelivery = {
         id: crypto.randomUUID(),
         conversationId: canonicalId,
         text,
         createdAt: now(),
         clientMessageId,
+        payloadKind,
+        artifactPaths: [],
         state: "held",
         generationId: null,
         attempts: 0,
@@ -1519,10 +1902,11 @@ export class AgentRegistry {
         deliveredAt: null,
         error: null,
       };
+      compactDeliveryReservations(file, canonicalId);
       const count = Object.values(file.heldDeliveries).filter((item) => item.conversationId === canonicalId && item.state !== "delivered").length;
       if (count >= 100) throw new Error("held delivery limit reached for conversation");
       file.heldDeliveries[held.id] = held;
-      return clone(held);
+      return place(held);
     });
   }
 
@@ -1532,6 +1916,10 @@ export class AgentRegistry {
     return Object.values(snapshot.heldDeliveries)
       .filter((item) => item.conversationId === canonicalId && item.state !== "delivered")
       .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id));
+  }
+
+  compactDeliveryReservations(): number {
+    return this.mutate((file) => compactDeliveryReservations(file));
   }
 
   queueSuccessorCleanup(conversationId: ViewerConversationId, receipt: ProviderReceipt): void {
@@ -1558,10 +1946,33 @@ export class AgentRegistry {
     return this.mutate((file) => {
       const delivery = file.heldDeliveries[id];
       if (!delivery || delivery.state !== "assigned" || delivery.generationId !== generationId) return null;
+      const conversation = file.conversations[resolveConversationAlias(file, delivery.conversationId)];
+      const paths = new Set([conversation?.generations.at(-1)?.path].filter((pathname): pathname is string => Boolean(pathname)));
+      const signature = conversation ? migrationReadinessSignature(file, conversation.engine, paths) : "";
+      const migrationBlocksDelivery = conversation?.migration
+        && ["requested", "preparing", "successor-starting", "verifying"].includes(conversation.migration.phase);
+      if (migrationBlocksDelivery || conversation?.generations.at(-1)?.id !== generationId) return null;
       delivery.state = "delivery-uncertain";
       delivery.attempts += 1;
       delivery.error = "delivery started; recovery requires an explicit outcome";
+      if (conversation) advanceMigrationScopeRevision(file, conversation.engine, signature, paths);
       return clone(delivery);
+    });
+  }
+
+  recordDeliveryArtifacts(id: string, artifactPaths: string[]): HeldDelivery {
+    return this.mutate((file) => {
+      const delivery = file.heldDeliveries[id];
+      if (!delivery) throw new Error("held delivery is unknown");
+      if (delivery.state !== "delivery-uncertain") throw new Error("delivery attempt has not started");
+      delivery.artifactPaths = [...new Set(artifactPaths)];
+      return clone(delivery);
+    });
+  }
+
+  restoreSnapshot(expectedCurrent: RegistryFile, replacement: RegistryFile): void {
+    this.mutate((file) => {
+      Object.assign(file, restoreOwnedChanges(file, expectedCurrent, replacement) as RegistryFile);
     });
   }
 
@@ -1574,9 +1985,82 @@ export class AgentRegistry {
       const delivery = file.heldDeliveries[id];
       if (!delivery) throw new Error("held delivery is unknown");
       if (delivery.state === "delivered") return clone(delivery);
+      const conversation = file.conversations[resolveConversationAlias(file, delivery.conversationId)];
+      const paths = new Set([conversation?.generations.at(-1)?.path].filter((pathname): pathname is string => Boolean(pathname)));
+      const signature = conversation ? migrationReadinessSignature(file, conversation.engine, paths) : "";
       delivery.state = state;
       delivery.deliveredAt = state === "delivered" ? now() : null;
       delivery.error = error?.slice(0, 240) ?? null;
+      if (state === "delivered") delivery.text = "";
+      if (conversation) advanceMigrationScopeRevision(file, conversation.engine, signature, paths);
+      const settled = clone(delivery);
+      if (state === "delivered" || state === "failed") compactDeliveryReservations(file, delivery.conversationId);
+      return settled;
+    });
+  }
+
+  discardDelivery(id: string): void {
+    this.mutate((file) => {
+      const delivery = file.heldDeliveries[id];
+      const conversation = delivery ? file.conversations[resolveConversationAlias(file, delivery.conversationId)] : undefined;
+      const paths = new Set([conversation?.generations.at(-1)?.path].filter((pathname): pathname is string => Boolean(pathname)));
+      const signature = conversation ? migrationReadinessSignature(file, conversation.engine, paths) : "";
+      delete file.heldDeliveries[id];
+      if (conversation) advanceMigrationScopeRevision(file, conversation.engine, signature, paths);
+    });
+  }
+
+  requeueHeldDelivery(id: string): HeldDelivery {
+    return this.placeDeliveryForRetry(id, false);
+  }
+
+  retryUncertainDelivery(id: string): HeldDelivery {
+    return this.placeDeliveryForRetry(id, true);
+  }
+
+  requeueUnactuatedDelivery(id: string): HeldDelivery {
+    return this.placeDeliveryForRetry(id, true);
+  }
+
+  private placeDeliveryForRetry(id: string, allowUncertain: boolean): HeldDelivery {
+    return this.mutate((file) => {
+      const delivery = file.heldDeliveries[id];
+      if (!delivery) throw new Error("held delivery is unknown");
+      if (delivery.state === "delivered") return clone(delivery);
+      if (delivery.state === "delivery-uncertain" && !allowUncertain) {
+        throw new Error("uncertain delivery requires an explicit client retry");
+      }
+      if (allowUncertain && delivery.state !== "delivery-uncertain") {
+        throw new Error("delivery outcome is already resolved");
+      }
+      const conversation = file.conversations[resolveConversationAlias(file, delivery.conversationId)];
+      const paths = new Set([conversation?.generations.at(-1)?.path].filter((pathname): pathname is string => Boolean(pathname)));
+      const signature = conversation ? migrationReadinessSignature(file, conversation.engine, paths) : "";
+      const migrationBlocksDelivery = conversation?.migration
+        && ["waiting-turn", "requested", "preparing", "successor-starting", "verifying"].includes(conversation.migration.phase);
+      if (migrationBlocksDelivery) {
+        delivery.state = "held";
+        delivery.generationId = null;
+        delivery.assignedAt = null;
+        delivery.deliveredAt = null;
+        delivery.error = null;
+        if (conversation) advanceMigrationScopeRevision(file, conversation.engine, signature, paths);
+        return clone(delivery);
+      }
+      const current = conversation?.generations.at(-1);
+      if (!current) {
+        delivery.state = "failed";
+        delivery.deliveredAt = null;
+        delivery.error = "delivery target is unavailable and remains recoverable";
+        if (conversation) advanceMigrationScopeRevision(file, conversation.engine, signature, paths);
+        return clone(delivery);
+      }
+      delivery.state = "assigned";
+      delivery.generationId = current.id;
+      delivery.assignedAt = now();
+      delivery.deliveredAt = null;
+      delivery.error = null;
+      if (conversation) advanceMigrationScopeRevision(file, conversation.engine, signature, paths);
       return clone(delivery);
     });
   }
@@ -1587,10 +2071,20 @@ export class AgentRegistry {
       const conversation = file.conversations[canonicalId];
       if (!conversation?.migration) throw new Error("conversation has no migration");
       if (expectedRevision !== undefined && conversation.migration.revision !== expectedRevision) throw new Error("migration revision is stale");
+      const paths = new Set([conversation.generations.at(-1)?.path].filter((pathname): pathname is string => Boolean(pathname)));
+      const signature = migrationReadinessSignature(file, conversation.engine, paths);
       const source = conversation.generations.find((generation) => generation.id === conversation.migration?.sourceGenerationId)
         ?? conversation.generations.at(-1);
       if (!source) throw new Error("conversation has no source generation");
       const rolledAt = now();
+      queueAbandonedMigrationCleanup(file, conversation, rolledAt);
+      const route = file.engineRouting[conversation.engine];
+      if (route.activeAccountId === conversation.migration.targetId) {
+        conversation.migrationOptOut = {
+          targetId: conversation.migration.targetId,
+          updatedAt: rolledAt,
+        };
+      }
       for (const delivery of Object.values(file.heldDeliveries)) {
         if (delivery.conversationId !== canonicalId || delivery.state === "delivered" || delivery.state === "delivery-uncertain") continue;
         delivery.state = "assigned";
@@ -1600,6 +2094,7 @@ export class AgentRegistry {
       }
       conversation.migration = { ...conversation.migration, phase: "rolled-back", error: null, errorCode: null, updatedAt: rolledAt };
       conversation.updatedAt = rolledAt;
+      advanceMigrationScopeRevision(file, conversation.engine, signature, paths);
       return clone(conversation);
     });
   }

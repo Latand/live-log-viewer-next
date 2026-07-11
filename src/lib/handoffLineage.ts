@@ -3,7 +3,7 @@ import path from "node:path";
 
 import { statePath } from "@/lib/configDir";
 import { pidAlive } from "@/lib/scanner/process";
-import { agentRegistry, type AgentRegistry } from "@/lib/agent/registry";
+import { agentRegistry, type ConversationLookup } from "@/lib/agent/registry";
 
 /**
  * Compatibility lineage for older handoffs. Viewer spawns now commit a durable
@@ -102,7 +102,7 @@ export function handoffParentConversation(childConversationId: string): string |
   return load().conversationChildren.get(childConversationId) ?? null;
 }
 
-export function reconcileHandoffConversationOwnership(registry: AgentRegistry = agentRegistry()): void {
+export function reconcileHandoffConversationOwnership(registry: ConversationLookup = agentRegistry()): void {
   const store = load();
   let changed = false;
   for (const [childPath, parentPath] of store.children) {

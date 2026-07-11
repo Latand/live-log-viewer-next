@@ -82,26 +82,43 @@ test("managed account removal deletes its registry record and home, while orphan
 
   expect(mod.listClaudeAccounts().map((item) => item.id)).not.toContain(account.id);
   expect(fs.existsSync(account.home)).toBe(false);
-  expect(cleaned).toEqual(["probe-login"]);
+  expect(cleaned).toEqual({ removed: ["probe-login"], unresolved: [] });
   expect(fs.existsSync(orphan)).toBe(false);
 });
 
-test("a home deletion failure keeps the Claude account registered and retryable", () => {
+test("a home deletion failure leaves a removable Claude orphan after logical removal", () => {
   const account = mod.createManagedClaudeAccount("Retry removal");
   const originalRm = fs.rmSync;
   fs.rmSync = ((target: fs.PathLike, options?: fs.RmDirOptions) => {
     if (String(target).includes(account.id)) throw Object.assign(new Error("denied"), { code: "EACCES" });
     return originalRm(target, options);
   }) as typeof fs.rmSync;
+  let removal: { cleanupPending: boolean } | undefined;
   try {
-    expect(() => mod.removeManagedClaudeAccount(account.id)).toThrow("denied");
+    removal = mod.removeManagedClaudeAccount(account.id);
   } finally {
     fs.rmSync = originalRm;
   }
 
-  expect(mod.listClaudeAccounts().map((item) => item.id)).toContain(account.id);
+  expect(removal).toEqual({ cleanupPending: true });
+  expect(mod.listClaudeAccounts().map((item) => item.id)).not.toContain(account.id);
   expect(fs.existsSync(account.home)).toBe(true);
-  expect(() => mod.removeManagedClaudeAccount(account.id)).not.toThrow();
+  expect(mod.cleanupOrphanedClaudeHomes().removed).toContain(account.id);
+  expect(fs.existsSync(account.home)).toBe(false);
+});
+
+test("orphan cleanup reports unsafe Claude children for manual recovery", () => {
+  const unsafe = path.join(mod.claudeAccountsRoot(), "unsafe-orphan");
+  const link = path.join(mod.claudeAccountsRoot(), "linked-orphan");
+  fs.mkdirSync(unsafe, { recursive: true, mode: 0o777 });
+  fs.chmodSync(unsafe, 0o777);
+  fs.symlinkSync(unsafe, link);
+
+  const result = mod.cleanupOrphanedClaudeHomes();
+
+  expect(result.unresolved).toEqual(expect.arrayContaining(["unsafe-orphan", "linked-orphan"]));
+  expect(fs.existsSync(unsafe)).toBe(true);
+  expect(fs.lstatSync(link).isSymbolicLink()).toBe(true);
 });
 
 test("orphan cleanup propagates a Claude accounts-root read failure", () => {

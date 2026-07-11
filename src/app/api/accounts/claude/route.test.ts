@@ -142,7 +142,25 @@ test("managed Claude removal requires force during login and cancels the operati
     body: JSON.stringify({ id: account.id, force: true }),
   }));
   expect(forced.status).toBe(200);
-  await expect(forced.json()).resolves.toEqual({ removed: { id: account.id } });
+  await expect(forced.json()).resolves.toEqual({ removed: { id: account.id }, cleanupPending: false });
+});
+
+test("managed Claude removal reports pending cleanup when local data survives", async () => {
+  const account = createManagedClaudeAccount("Cleanup pending");
+  const originalRm = fs.rmSync;
+  fs.rmSync = ((target: fs.PathLike, options?: fs.RmDirOptions) => {
+    if (path.resolve(String(target)) === path.resolve(account.home)) throw Object.assign(new Error("denied"), { code: "EACCES" });
+    return originalRm(target, options);
+  }) as typeof fs.rmSync;
+  try {
+    const response = await remove(new NextRequest("http://127.0.0.1/api/accounts/claude", {
+      method: "DELETE", headers: { host: "127.0.0.1", "content-type": "application/json" }, body: JSON.stringify({ id: account.id }),
+    }));
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({ removed: { id: account.id }, cleanupPending: true });
+  } finally {
+    fs.rmSync = originalRm;
+  }
 });
 
 test("managed Claude removal retires routing and migration intents targeting the account", async () => {
@@ -170,6 +188,7 @@ test("managed Claude removal restores routing when the underlying deletion fails
   const account = createManagedClaudeAccount("Unsafe home");
   const registry = agentRegistry();
   registry.setEngineRouting("claude", account.id);
+  const before = registry.snapshot();
   // Simulates the home becoming unsafe in the window between the route's
   // initial listClaudeAccounts() check and removeManagedClaudeAccount's own
   // re-read: retireAccount is the last synchronous step before that re-read,
@@ -186,10 +205,23 @@ test("managed Claude removal restores routing when the underlying deletion fails
     }));
     expect(response.status).toBe(409);
     await expect(response.json()).resolves.toEqual(expect.objectContaining({ code: "accounts_locked" }));
-    expect(registry.engineRouting("claude").activeAccountId).toBe(account.id);
+    expect(registry.snapshot()).toEqual(before);
   } finally {
     registry.retireAccount = originalRetire;
   }
+});
+
+test("managed Claude removal stays blocked while a current conversation depends on the account", async () => {
+  const account = createManagedClaudeAccount("Current history");
+  const registry = agentRegistry();
+  registry.ensureConversation("claude", "/current-claude.jsonl", account.id);
+
+  const response = await remove(new NextRequest("http://127.0.0.1/api/accounts/claude", {
+    method: "DELETE", headers: { host: "127.0.0.1", "content-type": "application/json" }, body: JSON.stringify({ id: account.id, force: true }),
+  }));
+
+  expect(response.status).toBe(409);
+  await expect(response.json()).resolves.toEqual(expect.objectContaining({ blockers: ["current_conversations"] }));
 });
 
 test("managed Claude removal reports a corrupt registry as locked", async () => {

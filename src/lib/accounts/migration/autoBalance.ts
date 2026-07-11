@@ -49,6 +49,7 @@ export function evaluateAutoBalance(
       requestId: `auto:${engine}:${decision.targetId}:${decision.evidence.observedAt}`,
       expectedRevision: evaluation.routeRevision,
       evidence: decision.evidence,
+      scope: "active",
     });
     if (intent.origin === "auto" && intent.state === "complete") {
       registry.recordAutoBalanceOutcome(engine, "complete", intent.evidence, new Date(now + AUTO_BALANCE_COOLDOWN_MS).toISOString());

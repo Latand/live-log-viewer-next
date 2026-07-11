@@ -72,6 +72,21 @@ test("selectAndMigrate posts a migrate intent to the engine active route and ado
   expect(typeof (migrateCall?.body as { requestId?: string }).requestId).toBe("string");
 });
 
+test("selectAndMigrate forwards an explicit bulk scope", async () => {
+  const { calls, fetcher } = scripted((url) => {
+    if (url === "/api/accounts") return claudePayload();
+    return new Response(null, { status: 202 });
+  });
+  const store = createEngineAccountsStore("claude", { fetcher });
+  store.subscribe(() => {});
+  await advance();
+
+  expect(await store.selectAndMigrate("work", 7, "all")).toBeTrue();
+
+  const migrateCall = calls.find((call) => call.url === "/api/accounts/claude/active" && (call.body as { mode?: string }).mode === "migrate");
+  expect(migrateCall?.body).toMatchObject({ id: "work", scope: "all", previewRevision: 7 });
+});
+
 test("preview posts mode:preview and parses the scope counts without mutating active", async () => {
   const { fetcher } = scripted((url, body) => {
     if (url === "/api/accounts") return claudePayload();
@@ -98,7 +113,7 @@ test("preview canonicalises the flat coordinator DTO using the known target acco
   await advance();
   const preview = await store.preview("work");
   // The client fills the target identity/label from the account it asked about.
-  expect(preview).toEqual({ targetId: "work", targetLabel: "Work", counts: { total: 4, idle: 3, busy: 1 }, previewRevision: 9 });
+  expect(preview).toEqual({ targetId: "work", targetLabel: "Work", counts: { total: 4, idle: 3, busy: 1, deferred: 0 }, previewRevision: 9 });
   expect(store.active).toBe("main");
 });
 
@@ -162,7 +177,7 @@ test("the store exposes no bare select, and every write to /active carries a mod
   for (const write of activeWrites) expect((write.body as { mode?: string }).mode).toBeDefined();
 });
 
-test("retryNotice re-fences a failed migrate against a fresh preview revision before migrating", async () => {
+test("retryNotice re-fences a failed full-history migration and preserves its scope", async () => {
   let previewRevision = 4;
   const { calls, fetcher } = scripted((url, body) => {
     if (url === "/api/accounts") return claudePayload();
@@ -178,11 +193,11 @@ test("retryNotice re-fences a failed migrate against a fresh preview revision be
   const store = createEngineAccountsStore("claude", { fetcher });
   store.subscribe(() => {});
   await advance();
-  const failed = await store.selectAndMigrate("work", 1);
+  const failed = await store.selectAndMigrate("work", 1, "all");
   expect(failed).toBeFalse();
   // A switch failure retains the account target id and retries through the
   // preview → migrate path.
-  expect(store.notice?.action).toMatchObject({ type: "retry", kind: "migrate", accountId: "work" });
+  expect(store.notice?.action).toMatchObject({ type: "retry", kind: "migrate", accountId: "work", scope: "all" });
   // The retry must fetch a fresh revision first, then migrate with it — never
   // replay the stale one.
   previewRevision = 9;
@@ -193,7 +208,7 @@ test("retryNotice re-fences a failed migrate against a fresh preview revision be
   const migrateCall = calls.find((call) => (call.body as { mode?: string })?.mode === "migrate");
   expect(previewIdx).toBeGreaterThanOrEqual(0);
   expect(calls.indexOf(migrateCall!)).toBeGreaterThan(previewIdx); // preview precedes migrate
-  expect(migrateCall?.body).toMatchObject({ previewRevision: 9 });
+  expect(migrateCall?.body).toMatchObject({ previewRevision: 9, scope: "all" });
   expect(store.notice).toBeNull(); // the recovered retry clears the stale failure
 });
 
@@ -614,12 +629,77 @@ test("managed account removal retries with force only after the API reports a sa
   expect(await store.remove("work")).toBeFalse();
   expect(store.notice?.action).toMatchObject({ type: "retry", kind: "forceRemove", accountId: "work" });
   expect(await store.retryNotice()).toBeTrue();
+  expect(store.notice).toBeNull();
   expect(calls.filter((call) => call.url === "/api/accounts/claude").map((call) => call.body)).toEqual([
     { id: "work", force: false },
     { id: "work", force: true },
   ]);
   expect(store.accounts.some((account) => account.id === "work")).toBeFalse();
   expect(store.notice).toBeNull();
+  unsub();
+});
+
+test("managed account removal surfaces pending local cleanup with a recovery action", async () => {
+  let removed = false;
+  const { calls, fetcher } = scripted((url, body) => {
+    if (url === "/api/accounts") {
+      return { claude: { active: "main", accounts: [claudeMain, ...(removed ? [] : [claudeAcct({ id: "work", label: "Work", login: null })])] } };
+    }
+    if (url === "/api/accounts/claude" && (body as { cleanupOrphans?: boolean }).cleanupOrphans === true) {
+      return new Response(JSON.stringify({ removed: ["work"] }));
+    }
+    if (url === "/api/accounts/claude") {
+      removed = true;
+      return new Response(JSON.stringify({ removed: { id: "work" }, cleanupPending: true }));
+    }
+    return new Response(null, { status: 204 });
+  });
+  const store = createEngineAccountsStore("claude", { fetcher });
+  const unsub = store.subscribe(() => {});
+  await advance();
+
+  expect(await store.remove("work")).toBeTrue();
+  expect(store.notice).toMatchObject({
+    messageKey: "accounts.cleanupPending",
+    target: "Work",
+    action: { type: "retry", kind: "cleanupOrphans" },
+  });
+  expect(await store.retryNotice()).toBeTrue();
+  expect(calls.filter((call) => call.url === "/api/accounts/claude").map((call) => call.body)).toEqual([
+    { id: "work", force: false },
+    { cleanupOrphans: true },
+  ]);
+  unsub();
+});
+
+test("orphan cleanup keeps manual guidance when unsafe local data remains", async () => {
+  const { fetcher } = scripted((url) => {
+    if (url === "/api/accounts") return { claude: { active: "main", accounts: [claudeMain] } };
+    if (url === "/api/accounts/claude") {
+      return new Response(JSON.stringify({ removed: [], unresolved: ["unsafe-orphan"] }));
+    }
+    return new Response(null, { status: 204 });
+  });
+  const store = createEngineAccountsStore("claude", { fetcher });
+  const unsub = store.subscribe(() => {});
+  await advance();
+
+  expect(await store.cleanupOrphans()).toBeTrue();
+  expect(store.notice).toMatchObject({ messageKey: "accounts.cleanupManual", action: null });
+  unsub();
+});
+
+test("current conversation blockers provide migration guidance without a force loop", async () => {
+  const { fetcher } = scripted((url) => {
+    if (url === "/api/accounts") return { claude: { active: "main", accounts: [claudeMain, claudeAcct({ id: "work", label: "Work", login: null })] } };
+    if (url === "/api/accounts/claude") return new Response(JSON.stringify({ code: "account_removal_blocked", blockers: ["current_conversations"] }), { status: 409 });
+    return new Response(null, { status: 204 });
+  });
+  const store = createEngineAccountsStore("claude", { fetcher });
+  const unsub = store.subscribe(() => {});
+  await advance();
+  expect(await store.remove("work")).toBeFalse();
+  expect(store.notice).toMatchObject({ messageKey: "accounts.removeHistoryBlocked", action: null });
   unsub();
 });
 

@@ -241,6 +241,26 @@ test("Claude cleanup cancels only the pane PID recorded by the losing receipt", 
     now: () => "2026-07-10T12:00:00.000Z",
   });
   await expect(providerWithoutCleanup.cleanup(receipt)).rejects.toThrow("cleanup is still pending");
+
+  const absentProvider = new RegisteredSuccessorProvider({
+    accounts: { resolveSpawn: () => target, resolveTranscriptOwner: () => source },
+    startCodex: async () => { throw new Error("unexpected Codex client"); },
+    claudeStatus: async () => ({ loggedIn: true }),
+    spawnClaude: async () => ({ paneId: "%7", panePid: 77, host: claudeHost("%7", 77) }),
+    cancelClaude: async () => "absent",
+    now: () => "2026-07-10T12:00:00.000Z",
+  });
+  await absentProvider.cleanup(receipt);
+
+  const unverifiableProvider = new RegisteredSuccessorProvider({
+    accounts: { resolveSpawn: () => target, resolveTranscriptOwner: () => source },
+    startCodex: async () => { throw new Error("unexpected Codex client"); },
+    claudeStatus: async () => ({ loggedIn: true }),
+    spawnClaude: async () => ({ paneId: "%7", panePid: 77, host: claudeHost("%7", 77) }),
+    cancelClaude: async () => "unverifiable",
+    now: () => "2026-07-10T12:00:00.000Z",
+  });
+  await expect(unverifiableProvider.cleanup(receipt)).rejects.toThrow("cleanup is still pending");
 });
 
 test("concurrent Claude creates reuse one durable migration spawn receipt", async () => {

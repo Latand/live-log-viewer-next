@@ -17,7 +17,10 @@ let tmuxHealth: unknown = { status: "healthy" };
 beforeEach(() => {
   registryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "llv-files-route-"));
   setAgentRegistryForTests(new AgentRegistry(path.join(registryRoot, "registry.json")));
+  resetFilesRouteCacheForTests();
+  scans = 0;
   scannedFiles = [];
+  tmuxHealth = { status: "healthy" };
 });
 
 afterEach(() => {
@@ -45,10 +48,10 @@ mock.module("@/lib/workflows/store", () => ({ loadWorkflows: () => [] }));
 mock.module("@/lib/workflows/visibility", () => ({ filterWorkflowsForFileScan: () => [] }));
 mock.module("@/lib/tmux", () => ({ tmuxEndpointHealth: () => tmuxHealth }));
 
+const { cachedFileScan, resetFilesRouteCacheForTests } = await import("./scanCache");
 const { GET } = await import("./route");
 
-test("repeated files reads execute only pure read ports and retain ETag behavior", async () => {
-  scans = 0;
+test("repeated files reads reuse the pure read snapshot and retain ETag behavior", async () => {
   scannedFiles = [];
   const first = await GET(new Request("http://127.0.0.1/api/files"));
   const etag = first.headers.get("etag");
@@ -56,7 +59,7 @@ test("repeated files reads execute only pure read ports and retain ETag behavior
   expect(first.status).toBe(200);
   expect(await first.json()).toEqual({ files: [], projectCatalog: [], flows: [], pipelines: [], workflows: [], tasks: [], systemHealth: { tmux: { status: "healthy" } } });
   expect(second.status).toBe(304);
-  expect(scans).toBe(2);
+  expect(scans).toBe(1);
   expect(scanOptions).toEqual({ persist: false });
 });
 
@@ -75,6 +78,28 @@ test("files API surfaces degraded tmux endpoint health", async () => {
   } finally {
     tmuxHealth = { status: "healthy" };
   }
+});
+
+test("concurrent cold files reads share one scan", async () => {
+  const [first, second] = await Promise.all([
+    GET(new Request("http://127.0.0.1/api/files")),
+    GET(new Request("http://127.0.0.1/api/files")),
+  ]);
+
+  expect(first.status).toBe(200);
+  expect(second.status).toBe(200);
+  expect(scans).toBe(1);
+});
+
+test("an expired snapshot schedules its refresh after the response", async () => {
+  await cachedFileScan();
+  const stale = await cachedFileScan(undefined, Number.MAX_SAFE_INTEGER);
+
+  expect(scans).toBe(1);
+  expect(stale.refreshAfterResponse).toBeFunction();
+
+  await stale.refreshAfterResponse?.();
+  expect(scans).toBe(2);
 });
 
 function file(path: string): FileEntry {
@@ -124,6 +149,30 @@ test("a provisional Codex fork projects as archived history of its stable conver
   expect(fork?.conversationId).toBe(conversation.id);
   expect(fork?.migratedTo).toBe(targetPath);
   expect(withoutArchivedPredecessors(body.files).map((entry) => entry.path)).toEqual([targetPath]);
+});
+
+test("migration projection counts pending deliveries and omits delivered tombstones", async () => {
+  const registry = agentRegistry();
+  const sourcePath = "/sessions/pending-delivery-019f4906-3f67-7b72-9fbc-9ec3b5ad1303.jsonl";
+  const conversation = registry.ensureConversation("codex", sourcePath, "source");
+  const delivered = registry.holdDelivery(conversation.id, "already sent", "delivered-message");
+  registry.beginDeliveryAttempt(delivered.id, conversation.generations.at(-1)!.id);
+  registry.recordDeliveryOutcome(delivered.id, "delivered");
+  registry.setConversationMigration(conversation.id, {
+    intentId: "files-route-deliveries",
+    phase: "requested",
+    targetId: "target",
+    revision: 1,
+    error: null,
+    updatedAt: "2026-07-11T12:00:00.000Z",
+  });
+  registry.holdDelivery(conversation.id, "send after switch", "pending-message");
+  scannedFiles = [file(sourcePath)];
+
+  const response = await GET(new Request("http://127.0.0.1/api/files"));
+  const body = await response.json() as { files: FileEntry[] };
+
+  expect(body.files[0]?.migration?.heldDeliveries).toBe(1);
 });
 
 test("spawn-time lineage keeps the child grouped after its tmux host disappears", async () => {

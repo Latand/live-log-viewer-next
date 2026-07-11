@@ -1,6 +1,7 @@
 import { resumeSpecFor } from "@/lib/agent/cli";
 import { agentRegistry } from "@/lib/agent/registry";
 import { deliveryFence } from "@/lib/accounts/migration/coordinator";
+import { requestAccountMigrationTick } from "@/lib/accounts/migration/controllerSignal";
 import { deliverToTranscriptHost, readTranscriptHosts, type HostDeliveryOutcome } from "@/lib/agent/transcriptHost";
 import { listFiles } from "@/lib/scanner";
 import { pathAllowed } from "@/lib/scanner/roots";
@@ -32,6 +33,7 @@ export interface DeliveryFailure {
   outcome: "failed";
   error: string;
   status: number;
+  actuation?: "started";
 }
 
 export interface DeliverySuccess {
@@ -44,6 +46,11 @@ export interface DeliverySuccess {
 }
 
 export type DeliveryOutcome = DeliverySuccess | DeliveryFailure;
+
+export function migrationDeliveryOutcome(outcome: DeliveryOutcome): "delivered" | "failed" | "delivery-uncertain" | "held" {
+  if (!outcome.ok) return outcome.actuation === "started" ? "delivery-uncertain" : "failed";
+  return outcome.outcome === "held" ? "held" : "delivered";
+}
 
 function failure(error: unknown, status = 500): DeliveryFailure {
   return { ok: false, outcome: "failed", error: error instanceof Error ? error.message : String(error), status };
@@ -59,7 +66,7 @@ async function hostOutcome(result: Promise<HostDeliveryOutcome>): Promise<Delive
     beside the returned outcome so direct and root-relayed delivery share the
     same no-orphan contract. */
 export function cleanupFailedImageDelivery(outcome: DeliveryOutcome, imagePaths: string[]): DeliveryOutcome {
-  if (!outcome.ok) deleteInboxImages(imagePaths);
+  if (!outcome.ok && outcome.actuation !== "started") deleteInboxImages(imagePaths);
   return outcome;
 }
 
@@ -229,8 +236,15 @@ export interface ConversationMessage {
   path: string;
   conversationId?: string | null;
   clientMessageId?: string | null;
+  reservedDeliveryId?: string | null;
   text: string;
   images: InboxImagePayload[];
+}
+
+interface DeliveryOverrides {
+  targetForKnownPid?: typeof targetForKnownPid;
+  buildImagePayload?: typeof buildImagePayload;
+  sendText?: typeof sendText;
 }
 
 /**
@@ -240,61 +254,135 @@ export interface ConversationMessage {
  * through the root conversation — into its live pane when it runs, through a
  * resume window otherwise.
  */
-export async function deliverConversationMessage(message: ConversationMessage): Promise<DeliveryOutcome> {
+export async function deliverConversationMessage(message: ConversationMessage, overrides: DeliveryOverrides = {}): Promise<DeliveryOutcome> {
   const { pid, images } = message;
   const text = message.text.trim();
+  const requestLocalPayload = images.length > 0 || text.length > 32_000;
 
   const registry = agentRegistry();
-  const conversation = message.conversationId?.startsWith("conversation_")
+  let conversation = message.conversationId?.startsWith("conversation_")
     ? registry.conversation(message.conversationId as `conversation_${string}`)
     : registry.conversationForPath(message.path);
-  const filePath = conversation?.generations.at(-1)?.path ?? message.path;
-  if (conversation && deliveryFence(conversation) === "held") {
-    if (images.length) return failure("image delivery waits for migration completion", 409);
-    registry.holdDelivery(conversation.id, text, message.clientMessageId ?? null);
-    return { ok: true, target: conversation.id, outcome: "held" };
-  }
-
-  let target: string | null = null;
-  if (!filePath && pid !== null) {
-    const resolved = await targetForKnownPid(pid);
-    if (resolved === "unknown" && !filePath) {
-      return failure("process is unknown to the viewer", 403);
+  if (conversation && !message.reservedDeliveryId && deliveryFence(conversation) === "deliver") {
+    const currentAccountId = conversation.generations.at(-1)?.accountId;
+    const activeAccountId = registry.engineRouting(conversation.engine).activeAccountId;
+    if (currentAccountId && activeAccountId && currentAccountId !== activeAccountId
+      && conversation.migrationOptOut?.targetId !== activeAccountId) {
+      conversation = registry.requestConversationMigrationToActiveAccount(conversation.id);
     }
-    target = resolved === "unknown" ? null : resolved;
   }
+  let filePath = conversation?.generations.at(-1)?.path ?? message.path;
+  let deliveryId: string | null = null;
+  let retryArtifactPaths: string[] = [];
+  if (conversation && !message.reservedDeliveryId) {
+    if (deliveryFence(conversation) === "held" && requestLocalPayload) return failure("request-local delivery waits for migration completion", 409);
+    let queued;
+    try {
+      queued = registry.holdDelivery(
+        conversation.id,
+        text.length > 32_000 ? "" : text,
+        message.clientMessageId ?? null,
+        images.length ? "ephemeral-images" : text.length > 32_000 ? "ephemeral-text" : "text",
+      );
+    } catch (error) {
+      return failure(error, 409);
+    }
+    if (queued.state === "delivered") return { ok: true, target: conversation.id };
+    if (queued.state === "delivery-uncertain") {
+      retryArtifactPaths = queued.artifactPaths;
+      queued = registry.retryUncertainDelivery(queued.id);
+    }
+    if (queued.state === "held") {
+      if (requestLocalPayload) {
+        registry.discardDelivery(queued.id);
+        return failure("request-local delivery waits for migration completion", 409);
+      }
+      requestAccountMigrationTick();
+      return { ok: true, target: conversation.id, outcome: "held" };
+    }
+    if (queued.state !== "assigned" || !queued.generationId) {
+      if (requestLocalPayload) registry.discardDelivery(queued.id);
+      return failure("delivery target is unavailable", 409);
+    }
+    const claimed = registry.beginDeliveryAttempt(queued.id, queued.generationId);
+    if (!claimed) {
+      if (requestLocalPayload) {
+        registry.discardDelivery(queued.id);
+        return failure("request-local delivery waits for migration completion", 409);
+      }
+      registry.requeueHeldDelivery(queued.id);
+      requestAccountMigrationTick();
+      return { ok: true, target: conversation.id, outcome: "held" };
+    }
+    deliveryId = claimed.id;
+    const claimedConversation = registry.conversation(conversation.id);
+    filePath = claimedConversation?.generations.find((generation) => generation.id === claimed.generationId)?.path ?? filePath;
+  }
+  let actuation: "none" | "started" | "completed" = "none";
+  const settle = (outcome: DeliveryOutcome): DeliveryOutcome => {
+    try {
+      if (deliveryId) {
+        if (outcome.ok) registry.recordDeliveryOutcome(deliveryId, "delivered");
+        else if (outcome.actuation !== "started") registry.discardDelivery(deliveryId);
+      }
+      return outcome;
+    } catch (error) {
+      return failure(error);
+    }
+  };
 
   /* Saved paths stay visible to the catch-all: a delivery that fails after
      the images hit disk deletes them so a retry cannot duplicate files. */
   let imagePaths: string[] = [];
+  const materializePayload = () => {
+    if (retryArtifactPaths.length > 0) {
+      return { payload: [text, ...retryArtifactPaths].filter(Boolean).join("\n"), imagePaths: retryArtifactPaths };
+    }
+    return (overrides.buildImagePayload ?? buildImagePayload)(text, images);
+  };
+  const recordArtifacts = () => {
+    if (deliveryId && imagePaths.length > 0) registry.recordDeliveryArtifacts(deliveryId, imagePaths);
+  };
   try {
+    let target: string | null = null;
+    if (!filePath && pid !== null) {
+      const resolved = await (overrides.targetForKnownPid ?? targetForKnownPid)(pid);
+      if (resolved === "unknown" && !filePath) return settle(failure("process is unknown to the viewer", 403));
+      target = resolved === "unknown" ? null : resolved;
+    }
     /* Images are only saved to the inbox once a deliverable destination is
        confirmed below — every early 409/403 return above and below happens
        before any file touches disk, so a rejected request never orphans one. */
     if (target !== null) {
-      const bundle = buildImagePayload(text, images);
+      const bundle = materializePayload();
       imagePaths = bundle.imagePaths;
-      await sendText(target, bundle.payload);
-      return { ok: true, target, ...(imagePaths.length ? { imagePaths } : {}) };
+      recordArtifacts();
+      actuation = "started";
+      await (overrides.sendText ?? sendText)(target, bundle.payload);
+      actuation = "completed";
+      return settle({ ok: true, target, ...(imagePaths.length ? { imagePaths } : {}) });
     }
 
     /* No live pane: reopen the conversation as a fresh agent window in the
        user's current tmux session and type the prompt there. */
     if (!filePath || !pathAllowed(filePath)) {
-      return failure("process is not in a tmux session", 409);
+      return settle(failure("process is not in a tmux session", 409));
     }
     const all = await listFiles();
     const entry = all.find((item) => item.path === filePath);
     if (!entry) {
-      return failure("file is unknown to the viewer", 403);
+      return settle(failure("file is unknown to the viewer", 403));
     }
     const spec = resumeSpecFor(entry.root, entry.path, { model: entry.launchModel ?? entry.model, effort: entry.effort });
     if (spec) {
-      const bundle = buildImagePayload(text, images);
+      const bundle = materializePayload();
       imagePaths = bundle.imagePaths;
+      recordArtifacts();
+      actuation = "started";
       const outcome = await hostOutcome(deliverToTranscriptHost({ entry, spec, payload: bundle.payload }));
-      if (!outcome.ok) return cleanupFailedImageDelivery(outcome, imagePaths);
-      return { ...outcome, ...(imagePaths.length ? { imagePaths } : {}) };
+      if (!outcome.ok) { actuation = outcome.actuation === "started" ? "started" : "none"; return settle(cleanupFailedImageDelivery(outcome, imagePaths)); }
+      actuation = "completed";
+      return settle({ ...outcome, ...(imagePaths.length ? { imagePaths } : {}) });
     }
 
     const byPath = new Map(all.map((item) => [item.path, item]));
@@ -305,23 +393,29 @@ export async function deliverConversationMessage(message: ConversationMessage): 
       root = byPath.get(root.parent)!;
     }
     if (root.path === entry.path) {
-      return failure("this conversation cannot be resumed", 409);
+      return settle(failure("this conversation cannot be resumed", 409));
     }
     /* Resolved before saving anything: the root's live pane or resume spec
        must exist, or the request is rejected without ever writing an image. */
     const rootSpec = resumeSpecFor(root.root, root.path, { model: root.launchModel ?? root.model, effort: root.effort });
     if (!rootSpec) {
-      return failure("root session is unavailable for messaging", 409);
+      return settle(failure("root session is unavailable for messaging", 409));
     }
-    const bundle = buildImagePayload(text, images);
+    const bundle = materializePayload();
     imagePaths = bundle.imagePaths;
+    recordArtifacts();
     const relayText = `User message for your branch «${entry.title.slice(0, 100)}» — forward it or handle it yourself:\n${bundle.payload}`;
     const imageField = imagePaths.length ? { imagePaths } : {};
+    actuation = "started";
     const outcome = await hostOutcome(deliverToTranscriptHost({ entry: root, spec: rootSpec, payload: relayText }));
-    if (!outcome.ok) return cleanupFailedImageDelivery(outcome, imagePaths);
-    return { ...outcome, ...imageField };
+    if (!outcome.ok) { actuation = outcome.actuation === "started" ? "started" : "none"; return settle(cleanupFailedImageDelivery(outcome, imagePaths)); }
+    actuation = "completed";
+    return settle({ ...outcome, ...imageField });
   } catch (error) {
-    deleteInboxImages(imagePaths);
+    if (actuation === "none") {
+      if (deliveryId) try { registry.discardDelivery(deliveryId); } catch { /* the original registry failure remains actionable */ }
+      deleteInboxImages(imagePaths);
+    }
     return failure(error);
   }
 }
