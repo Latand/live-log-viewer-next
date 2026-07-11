@@ -287,7 +287,8 @@ export type DraftStage = {
   prompt: string;
   roleParams: Record<string, string | number>;
   /** The operator edited engine/model/effort by hand, so role/param autofill must
-      no longer clobber the runtime. Reset when a role is (re)selected. */
+      no longer clobber the runtime. Selecting a role preserves the pin (design
+      §1.3); selecting "No role" clears it back to the pipeline default. */
   runtimeOverridden?: boolean;
 };
 
