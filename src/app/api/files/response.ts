@@ -14,6 +14,7 @@ import { loadTasks } from "@/lib/tasks/store";
 import { loadWorkflows } from "@/lib/workflows/store";
 import { filterWorkflowsForFileScan } from "@/lib/workflows/visibility";
 import { projectRateLimitReadModel } from "@/lib/rateLimit";
+import { isRenameableSessionEntry } from "@/lib/session/renameEligibility";
 import { applyTitleOverride, indexSessionTitles, loadSessionTitles } from "@/lib/session/titleStore";
 import { tmuxEndpointHealth } from "@/lib/tmux";
 import type { FilesResponse } from "@/lib/types";
@@ -88,13 +89,13 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
      after the registry has stamped `conversationId`, so an override filed under
      the stable conversation identity wins over the launch-profile title, the
      derived title, and everything downstream (cards, lists, attention, push).
-     The pre-override title survives on `autoTitle`. */
+     The pre-override title survives on `autoTitle`. The rename-eligibility flag
+     is projected here too so the client never imports the Node-only store. */
   const titleIndex = indexSessionTitles(loadSessionTitles());
-  if (titleIndex.size > 0) {
-    for (const file of files) {
-      if (file.engine !== "claude" && file.engine !== "codex") continue;
-      applyTitleOverride(file, titleIndex);
-    }
+  for (const file of files) {
+    if (file.engine !== "claude" && file.engine !== "codex") continue;
+    file.renamable = isRenameableSessionEntry(file);
+    if (titleIndex.size > 0) applyTitleOverride(file, titleIndex);
   }
   const tasks = reconcileTasks(files, loadTasks(), {
     pathForPanePid: (panePid, entries) => pathForPanePid(entries, panePid, readPpid),

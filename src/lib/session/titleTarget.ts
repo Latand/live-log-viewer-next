@@ -1,6 +1,6 @@
 import { agentRegistry } from "@/lib/agent/registry";
 import { claudeProjectRootFor, codexSessionRootFor, pathAllowed } from "@/lib/scanner/roots";
-import { isRenameableSessionPath } from "@/lib/session/titleStore";
+import { isRenameableTranscriptPath } from "@/lib/session/renameEligibility";
 import { renameTmuxWindowForPid } from "@/lib/tmux";
 
 /** A concrete, rename-eligible session resolved from a PATCH request. */
@@ -33,15 +33,15 @@ export function resolveTitleTarget(input: TitleTargetInput): TitleTarget | null 
   if (conversationId) {
     const conversation = agentRegistry().conversation(conversationId as `conversation_${string}`);
     const path = conversation?.generations.at(-1)?.path;
-    if (conversation && path && (conversation.engine === "claude" || conversation.engine === "codex") && isRenameableSessionPath(path)) {
+    if (conversation && path && (conversation.engine === "claude" || conversation.engine === "codex") && isRenameableTranscriptPath(conversation.engine, path)) {
       return { engine: conversation.engine, path, conversationId };
     }
     return null;
   }
   const path = typeof input.path === "string" ? input.path : "";
-  if (!path || !pathAllowed(path) || !isRenameableSessionPath(path)) return null;
+  if (!path || !pathAllowed(path)) return null;
   const engine = engineForPath(path);
-  if (!engine) return null;
+  if (!engine || !isRenameableTranscriptPath(engine, path)) return null;
   const owner = agentRegistry().conversationForPath(path);
   return { engine, path, conversationId: owner?.id };
 }

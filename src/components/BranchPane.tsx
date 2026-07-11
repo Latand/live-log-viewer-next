@@ -12,8 +12,6 @@ import type { FileEntry } from "@/lib/types";
 import { cardMigrationState, postConversationMigration } from "@/lib/accounts/migration";
 import { conversationIdentity } from "@/lib/accounts/identity";
 
-import { isRenameableSession } from "@/lib/session/titleStore";
-
 import { registerLinkTarget } from "./AgentLink";
 import { DeleteFileButton } from "./DeleteFileButton";
 import { MigrationDivider, MigrationRibbon } from "./MigrationRibbon";
@@ -185,7 +183,7 @@ export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noCompose
         >
           <div className="flex min-w-0 items-center gap-1.5">
             <span className={`h-2 w-2 shrink-0 rounded-full ${activityDot(file.activity)}`} title={t(`branch.${state}`)} />
-            {isRenameableSession(file) ? (
+            {file.renamable ? (
               <SessionTitle file={file} displayMax={90} titleClassName="text-[12px] font-semibold" />
             ) : (
               <span className="min-w-0 flex-1 truncate text-[12px] font-semibold" title={cleanTitle(file.title)}>

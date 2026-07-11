@@ -8,7 +8,6 @@ import type { FileEntry } from "@/lib/types";
 import {
   applyTitleOverride,
   indexSessionTitles,
-  isRenameableSession,
   isRenameableSessionPath,
   loadSessionTitles,
   MAX_TITLE_OVERRIDES,
@@ -87,12 +86,11 @@ test("sanitize caps length, strips markdown, and treats blank as a clear", () =>
   expect(sanitizeCustomTitle("x".repeat(400))!.length).toBeLessThanOrEqual(120);
 });
 
-test("isRenameableSession/Path admit only main Claude/Codex sessions", () => {
+test("isRenameableSessionPath rejects Claude subagent transcripts", () => {
   expect(isRenameableSessionPath(claudePath)).toBe(true);
   expect(isRenameableSessionPath("/home/u/.claude/projects/proj/agent-123.jsonl")).toBe(false);
-  expect(isRenameableSession(entry())).toBe(true);
-  expect(isRenameableSession(entry({ kind: "subagent", path: "/home/u/.claude/projects/proj/agent-9.jsonl" }))).toBe(false);
-  expect(isRenameableSession(entry({ engine: "shell", kind: "background" }))).toBe(false);
+  expect(isRenameableSessionPath("/home/u/.claude/projects/proj/abc/subagents/agent-9.jsonl")).toBe(false);
+  expect(isRenameableSessionPath("/home/u/.claude/projects/proj/abc/subagents/x.jsonl")).toBe(false);
 });
 
 test("set then clear leaves a tombstone and the label survives a reload (persistence)", () => {

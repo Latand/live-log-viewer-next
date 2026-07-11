@@ -338,6 +338,8 @@ test("a custom session title (issue #33) overrides the derived title and keeps i
   expect(entry?.title).toBe("My human name");
   expect(entry?.autoTitle).toBe("auto derived from first prompt");
   expect(entry?.titleRevision).toBe(1);
+  // A main session projects the rename-eligibility flag for the client gate.
+  expect(entry?.renamable).toBe(true);
 });
 
 test("an unreadable pipelines store degrades to pipelinesError without failing the poll", async () => {

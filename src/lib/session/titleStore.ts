@@ -79,16 +79,15 @@ export function sanitizeCustomTitle(value: string): string | null {
   return cleaned.length > 0 ? cleaned : null;
 }
 
-/** Only main Claude/Codex sessions are renameable (issue #33 scope, AC9):
-    subagent transcripts (`agent-*.jsonl`) and background/shell tasks are not. */
+/** Path-level subagent exclusion for the rename scope (issue #33, AC9): Claude
+    subagent transcripts are `agent-*.jsonl` and/or live under a `subagents/`
+    directory. Native Codex subagents share the ordinary `rollout-*.jsonl` name
+    and are filtered separately from transcript metadata — see
+    `isRenameableSessionEntry` in `renameEligibility.ts`. Pure string ops so this
+    stays importable from client-safe server code without pulling `node:fs`. */
 export function isRenameableSessionPath(pathname: string): boolean {
-  return !path.basename(pathname).startsWith("agent-");
-}
-
-export function isRenameableSession(entry: Pick<FileEntry, "engine" | "kind" | "path">): boolean {
-  if (entry.engine !== "claude" && entry.engine !== "codex") return false;
-  if (entry.kind && entry.kind !== "session") return false;
-  return isRenameableSessionPath(entry.path);
+  const base = pathname.slice(pathname.lastIndexOf("/") + 1);
+  return !base.startsWith("agent-") && !pathname.includes("/subagents/");
 }
 
 /** Candidate keys for an entry, most-stable first: the Viewer conversation

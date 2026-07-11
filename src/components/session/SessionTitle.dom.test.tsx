@@ -162,6 +162,37 @@ test("Reset clears the override back to the auto title", async () => {
   expect(view.host.textContent).toContain("Fix the login bug");
 });
 
+test("a newer server rename settles an optimistic set instead of masking it", async () => {
+  const view = mount(entry());
+  flushSync(() => (view.host.querySelector('button[aria-label^="Rename"]') as HTMLButtonElement).click());
+  const input = view.host.querySelector('input[aria-label="Session title"]') as HTMLInputElement;
+  flushSync(() => typeInto(input, "mine"));
+  flushSync(() => dispatch(input, new dom.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true })));
+  await settle();
+  expect(view.host.textContent).toContain("mine");
+
+  // A poll brings a newer revision with a different title (another device).
+  view.rerender(entry({ title: "theirs", autoTitle: "Fix the login bug", titleRevision: 5 }));
+  flushSync(() => {});
+  const title = view.host.querySelector('span[role="button"]')!;
+  expect(title.textContent).toContain("theirs");
+  expect(title.textContent).not.toContain("mine");
+});
+
+test("a later server change surfaces after an optimistic reset settles the tombstone", async () => {
+  const view = mount(entry({ title: "Custom name", autoTitle: "Fix the login bug", titleRevision: 3 }));
+  flushSync(() => (view.host.querySelector('button[aria-label^="Rename"]') as HTMLButtonElement).click());
+  flushSync(() => (view.host.querySelector('button[aria-label="Reset to auto title"]') as HTMLButtonElement).click());
+  await settle();
+  expect(view.host.textContent).toContain("Fix the login bug");
+
+  // The reset's tombstone lands (rev 4) and then a newer rename (rev 5) arrives;
+  // the optimistic overlay must not keep masking server state.
+  view.rerender(entry({ title: "renamed elsewhere", autoTitle: "Fix the login bug", titleRevision: 5 }));
+  flushSync(() => {});
+  expect(view.host.querySelector('span[role="button"]')!.textContent).toContain("renamed elsewhere");
+});
+
 test("a second edit still saves on blur after an earlier cancel (no stale suppression)", async () => {
   const view = mount(entry());
   // First edit, then cancel via the Cancel control (arms blur suppression;

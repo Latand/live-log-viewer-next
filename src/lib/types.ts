@@ -40,6 +40,12 @@ export interface FileEntry {
       base revision on the next `PATCH /api/session/title` for optimistic
       concurrency. Absent when the session has no override. */
   titleRevision?: number;
+  /** Whether this entry may be renamed (issue #33): only main Claude/Codex
+      sessions qualify — subagents (Claude `agent-*`, native Codex threads with a
+      parent) and background/shell tasks do not. Computed server-side because
+      Codex subagent detection needs transcript metadata; the client reads this
+      flag rather than importing the Node-only eligibility logic. */
+  renamable?: boolean;
   engine: Engine;
   kind: string;
   fmt: Fmt;

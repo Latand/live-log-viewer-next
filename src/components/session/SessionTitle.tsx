@@ -46,12 +46,16 @@ export function SessionTitle({ file, displayMax = 90, titleClassName = "", class
      treat as a second, plain "save the field" save. */
   const suppressBlur = useRef(false);
 
-  // Ignore the optimistic overlay once a poll has caught the server up to it,
-  // derived at render time so no effect writes state (cascading-render safe).
+  // Ignore the optimistic overlay once the server has caught up to (or past)
+  // the revision we wrote — derived at render time so no effect writes state
+  // (cascading-render safe). Comparing revisions, not titles, means a tombstone
+  // acknowledgement (cleared → `titleRevision` present again) and a newer
+  // conflicting server rename both settle instead of masking server state
+  // forever. A clear against a session with no record settles immediately.
   const optimisticSettled = optimistic !== null && (
-    optimistic.title === null
-      ? file.titleRevision === undefined
-      : file.titleRevision !== undefined && file.titleRevision >= optimistic.revision && file.title === optimistic.title
+    file.titleRevision !== undefined
+      ? file.titleRevision >= optimistic.revision
+      : optimistic.title === null
   );
   const opt = optimisticSettled ? null : optimistic;
 
@@ -96,7 +100,9 @@ export function SessionTitle({ file, displayMax = 90, titleClassName = "", class
       windowName: trimmed ?? autoTitle,
     });
     if (result.ok) {
-      const revision = result.override?.revision ?? (trimmed === null ? 0 : baseRevision + 1);
+      // A clear returns no record; its tombstone lands at baseRevision + 1, so
+      // the overlay waits for exactly that revision instead of settling early.
+      const revision = result.override?.revision ?? baseRevision + 1;
       setOptimistic({ title: result.override?.title ?? null, revision });
       setAnnounce(trimmed === null ? t("rename.reset") : t("rename.saved", { title: cleanTitle(trimmed, 60) }));
       setBusy(false);
