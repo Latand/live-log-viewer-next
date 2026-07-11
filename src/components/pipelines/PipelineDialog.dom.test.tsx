@@ -13,6 +13,7 @@ Object.assign(globalThis, {
   Node: dom.Node,
   HTMLElement: dom.HTMLElement,
   HTMLButtonElement: dom.HTMLButtonElement,
+  HTMLInputElement: dom.HTMLInputElement,
   Event: dom.Event,
   MouseEvent: dom.MouseEvent,
 });
@@ -59,4 +60,34 @@ test("a failed role catalog fetch surfaces an error with a retry, not a silent e
 
   flushSync(() => { root.unmount(); });
   host.remove();
+});
+
+test("the modal focuses in, inerts the background, and restores focus on close", async () => {
+  globalThis.fetch = (async () => ({ ok: true, json: async () => ({ roles: [], dirs: [], cwd: null }) }) as Response) as unknown as typeof fetch;
+
+  /* A background control the operator's focus was on before opening. */
+  const opener = document.createElement("button");
+  opener.textContent = "opener";
+  document.body.append(opener);
+  opener.focus();
+  expect(document.activeElement).toBe(opener);
+
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root: Root = createRoot(host);
+  flushSync(() => { root.render(<PipelineDialog project="proj" onClose={() => {}} />); });
+  await settle();
+
+  /* Focus entered the dialog (task field), and the background opener is inert. */
+  const taskInput = document.querySelector('input[placeholder="Describe what this chain should accomplish"]')
+    ?? Array.from(document.querySelectorAll("input"))[0];
+  expect(document.activeElement).toBe(taskInput as Element);
+  expect(opener.hasAttribute("inert")).toBe(true);
+
+  flushSync(() => { root.unmount(); });
+  /* Closing lifts inert and returns focus to the opener. */
+  expect(opener.hasAttribute("inert")).toBe(false);
+  expect(document.activeElement).toBe(opener);
+  host.remove();
+  opener.remove();
 });

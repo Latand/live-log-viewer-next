@@ -26,19 +26,54 @@ import {
 } from "./pipelineModel";
 import { VerdictPopover } from "./VerdictPopover";
 
+const VERDICT_MARGIN = 8;
+
 /**
- * Renders the verdict popover through a body portal anchored above a chip. The
- * chip lives inside the strip's `overflow-x-auto` scroller, whose clip would
- * otherwise hide the popover above it (#93 finding: clipped verdict). Fixed
- * positioning off the anchor's rect, recomputed on scroll/resize, keeps it
- * pinned to the chip while escaping the scroller.
+ * Pure placement math for the verdict popover (kept out of the effect so it is
+ * unit-testable). Prefers above the chip (the design's placement) and flips
+ * below only when the popover cannot fit above and below has at least as much
+ * room; clamps the horizontal center so the box never spills past either edge.
+ */
+export function verdictPlacement(
+  anchor: { top: number; bottom: number; left: number; width: number },
+  content: { width: number; height: number },
+  viewport: { width: number; height: number },
+  margin = VERDICT_MARGIN,
+): { left: number; top: number; below: boolean } {
+  const roomAbove = anchor.top - margin;
+  const roomBelow = viewport.height - anchor.bottom - margin;
+  const below = content.height > roomAbove && roomBelow >= roomAbove;
+  const half = content.width / 2;
+  const cx = anchor.left + anchor.width / 2;
+  const left = Math.min(Math.max(cx, half + margin), viewport.width - half - margin);
+  const top = below ? anchor.bottom + margin : anchor.top - margin;
+  return { left, top, below };
+}
+
+/**
+ * Renders the verdict popover through a body portal anchored to a chip. The chip
+ * lives inside the strip's `overflow-x-auto` scroller, whose clip would hide the
+ * popover (#93 finding: clipped verdict); a fixed portal escapes it. Placement
+ * measures the popover's own box and flips/clamps via {@link verdictPlacement}
+ * so a strip near the page header never renders it off-screen. Recomputed on
+ * scroll/resize.
  */
 function AnchoredVerdict({ anchorRef, children }: { anchorRef: RefObject<HTMLElement | null>; children: ReactNode }) {
-  const [pos, setPos] = useState<{ x: number; y: number } | null>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
+  const [placement, setPlacement] = useState<{ left: number; top: number; below: boolean } | null>(null);
   useLayoutEffect(() => {
     const measure = () => {
       const el = anchorRef.current;
-      if (el) setPos({ x: el.getBoundingClientRect().left + el.getBoundingClientRect().width / 2, y: el.getBoundingClientRect().top });
+      const content = contentRef.current;
+      if (!el) return;
+      const a = el.getBoundingClientRect();
+      setPlacement(
+        verdictPlacement(
+          { top: a.top, bottom: a.bottom, left: a.left, width: a.width },
+          { width: content?.offsetWidth ?? 260, height: content?.offsetHeight ?? 0 },
+          { width: window.innerWidth, height: window.innerHeight },
+        ),
+      );
     };
     measure();
     window.addEventListener("scroll", measure, true);
@@ -48,9 +83,17 @@ function AnchoredVerdict({ anchorRef, children }: { anchorRef: RefObject<HTMLEle
       window.removeEventListener("resize", measure);
     };
   }, [anchorRef]);
-  if (typeof document === "undefined" || !pos) return null;
+  if (typeof document === "undefined") return null;
   return createPortal(
-    <div className="fixed z-[60]" style={{ left: pos.x, top: pos.y - 8, transform: "translate(-50%, -100%)" }}>
+    <div
+      ref={contentRef}
+      className="fixed z-[60]"
+      style={
+        placement
+          ? { left: placement.left, top: placement.top, transform: placement.below ? "translate(-50%, 0)" : "translate(-50%, -100%)" }
+          : { left: -9999, top: 0, visibility: "hidden" }
+      }
+    >
       {children}
     </div>,
     document.body,

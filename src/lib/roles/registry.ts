@@ -59,13 +59,28 @@ function renderScaffold(template: string, params: RoleParamValues): string {
   return template.replace(/\{\{([A-Za-z][A-Za-z0-9]*)\}\}/g, (_match, key: string) => String(params[key] ?? ""));
 }
 
-function promptWithFences(definition: RoleDefinition, params: RoleParamValues): string {
+/**
+ * The rendered scaffold body — parameter substitution plus any role-specific
+ * guidance (Builder's domain=frontend contract) — with the safety-fence block
+ * kept separate so a length-capped caller (the pipeline lookup) can trim the
+ * body without ever cutting a fence. This is the single source of the frontend
+ * guidance; the pipeline reuses it rather than re-rendering (and dropping it).
+ */
+export function roleScaffoldBody(definition: RoleDefinition, params: RoleParamValues): string {
   const frontendGuidance = definition.id === "builder" && params.domain === "frontend"
     ? "\n\nUI/frontend implementation guidance: follow the approved interaction and visual contract, preserve accessible semantics, responsive behavior, and English/Ukrainian parity."
     : "";
-  const scaffold = renderScaffold(definition.promptScaffold, params) + frontendGuidance;
-  if (!definition.safetyFences.length) return scaffold;
-  return `${scaffold}\n\nSafety fences:\n${definition.safetyFences.map((fence) => `- ${fence}`).join("\n")}`;
+  return renderScaffold(definition.promptScaffold, params) + frontendGuidance;
+}
+
+/** The trailing safety-fence block for a role, or "" when it declares none. */
+export function roleFenceBlock(definition: RoleDefinition): string {
+  if (!definition.safetyFences.length) return "";
+  return `\n\nSafety fences:\n${definition.safetyFences.map((fence) => `- ${fence}`).join("\n")}`;
+}
+
+function promptWithFences(definition: RoleDefinition, params: RoleParamValues): string {
+  return roleScaffoldBody(definition, params) + roleFenceBlock(definition);
 }
 
 export function configForParams(definition: RoleDefinition, params: RoleParamValues): RoleConfig {

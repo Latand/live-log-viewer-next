@@ -6,7 +6,7 @@ import type { RoleConfig } from "@/lib/roles/types";
 import type { TFunction } from "@/lib/i18n";
 import type { RoleParameter } from "@/lib/roles/types";
 
-import { PipelineDialog, pipelineValidationError, roleParamError, stagesFromTemplate, templateReady } from "./PipelineDialog";
+import { PipelineDialog, coerceStage, pipelineValidationError, roleParamError, stagesFromTemplate, templateReady } from "./PipelineDialog";
 import { PIPELINE_TEMPLATES, type DraftStage } from "./pipelineModel";
 import type { RoleCatalogItem } from "./StageRow";
 
@@ -99,6 +99,31 @@ test("pipelineValidationError mirrors the API's cross-engine model check", () =>
 test("pipelineValidationError enforces the API task-length cap", () => {
   const err = pipelineValidationError(fakeT, { task: "x".repeat(4_001), spec: "", repoDir: "/r", roles: [], defaultRuntime: FALLBACK, stages: [stage({}), stage({ key: "k2" })] });
   expect(err).toContain("tooLong");
+});
+
+test("pipelineValidationError mirrors the API's codex bounds and effort check", () => {
+  const base = { task: "t", spec: "", repoDir: "/r", roles: [], defaultRuntime: FALLBACK };
+  /* A codex model over 128 chars would 400; the client must catch it too. */
+  const longModel = pipelineValidationError(fakeT, { ...base, stages: [stage({ engine: "codex", model: `gpt-${"x".repeat(200)}` }), stage({ key: "k2" })] });
+  expect(longModel).toContain("modelEngineMismatch");
+  /* max effort is valid on claude but not codex — the API rejects it, so does this. */
+  const badEffort = pipelineValidationError(fakeT, { ...base, stages: [stage({ engine: "codex", effort: "max" }), stage({ key: "k2" })] });
+  expect(badEffort).toContain("effortEngineMismatch");
+  /* A codex-legal effort passes. */
+  const ok = pipelineValidationError(fakeT, { ...base, stages: [stage({ engine: "codex", effort: "high" }), stage({ key: "k2" })] });
+  expect(ok).toBeNull();
+});
+
+test("coerceStage repairs a malformed persisted stage instead of crashing on restore", () => {
+  /* A stale draft missing model/roleParams and carrying wrong-typed fields must
+     become a well-formed DraftStage, not blow up later on .trim()/property access. */
+  const repaired = coerceStage({ kind: "bogus", engine: "nope", access: "sideways", model: 5, roleId: 7, roleParams: [1, 2] });
+  expect(repaired).toMatchObject({ kind: "run", engine: "codex", access: "read-write", model: "", roleId: "", roleParams: {} });
+  expect(() => repaired.model.trim()).not.toThrow();
+  /* Valid fields survive; only string/number role params are kept. */
+  const kept = coerceStage({ kind: "review-loop", engine: "claude", access: "read-only", roleParams: { a: "x", b: 2, c: { nested: true } } });
+  expect(kept).toMatchObject({ kind: "review-loop", engine: "claude", access: "read-only", roleParams: { a: "x", b: 2 } });
+  expect("c" in kept.roleParams).toBe(false);
 });
 
 test("roleParamError mirrors the API: values checked, absent allowed", () => {

@@ -93,8 +93,12 @@ export function StageRow({
   const selectRole = (roleId: string) => {
     const role = roles.find((item) => item.id === roleId) ?? null;
     if (!role) {
-      /* Re-selecting "No role" hands the runtime back to autofill/default too. */
-      patch({ roleId: "", roleParams: {}, runtimeOverridden: false });
+      /* "No role" returns the stage to the raw-prompt pipeline default: clear the
+         prior role's runtime overrides (engine/model/effort) too, otherwise an
+         Architect → No role stage keeps submitting Claude/Fable while the runtime
+         line claims the default. Blank model/effort serialize as no override, so
+         the server resolves the Builder default the line shows. */
+      patch({ roleId: "", roleParams: {}, engine: defaultRuntime.engine, model: "", effort: "", runtimeOverridden: false });
       return;
     }
     const params = defaultRoleParams(role);

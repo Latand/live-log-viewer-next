@@ -45,6 +45,16 @@ export function normalizeClaudeLaunchModel(value: string | null | undefined): Cl
   return null;
 }
 
+/** True when a model id is a valid codex launch model: a `gpt-*` id, printable
+    and within the CLI length bound. Shared by the API's pipeline validator and
+    the builder's client-side pre-check so a valid-looking submission never 400s
+    on a bound the client failed to mirror. */
+export function isCodexLaunchModel(value: string | null | undefined): boolean {
+  if (typeof value !== "string") return false;
+  const model = value.trim();
+  return model.startsWith("gpt-") && model.length <= 128 && !/[\u0000-\u001f\u007f]/.test(model);
+}
+
 /** Model ids travel to a shell-quoted CLI argument. Keep them bounded and printable. */
 export function modelFromBody(body: { model?: unknown }): { model: string | null; error?: string } {
   if (body.model === undefined || body.model === null || body.model === "") return { model: null };

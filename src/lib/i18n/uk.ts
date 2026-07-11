@@ -700,6 +700,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "pipelineDialog.errors.tooLong": "{field} перевищує {max} символів",
   "pipelineDialog.errors.paramInvalid": "{label} має недопустиме значення",
   "pipelineDialog.errors.modelEngineMismatch": "виберіть модель, сумісну з {engine}",
+  "pipelineDialog.errors.effortEngineMismatch": "виберіть зусилля, сумісне з {engine}",
 
   "dash.pipeline": "Пайплайн",
   "dash.newPipeline": "Новий пайплайн",

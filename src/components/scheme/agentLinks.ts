@@ -241,7 +241,11 @@ function pipelineLinkTone(pipeline: Pipeline, stageId: string): PipelineLinkTone
  * pipeline — the one into the current stage (or the last drawn edge as a
  * fallback) — carries the interactive hub, the rest a stage-index chevron badge.
  */
-export function derivePipelineLinks(pipelines: Pipeline[], anchorOf: (pathOrKey: string) => string | null): AgentLink[] {
+export function derivePipelineLinks(
+  pipelines: Pipeline[],
+  anchorOf: (pathOrKey: string) => string | null,
+  flowImplementerPath: (flowId: string) => string | null = () => null,
+): AgentLink[] {
   const links: AgentLink[] = [];
   for (const pipeline of pipelines) {
     if (pipeline.state === "closed") continue;
@@ -252,10 +256,19 @@ export function derivePipelineLinks(pipelines: Pipeline[], anchorOf: (pathOrKey:
     for (let index = 0; index < pipeline.stages.length; index += 1) {
       const stage = pipeline.stages[index]!;
       const attempt = pipeline.runs.find((run) => run.stageId === stage.id)?.attempts.at(-1);
-      if (!attempt?.agentPath) continue;
+      /* A review-loop stage's agentPath is the reviewer transcript, which the
+         board folds into the flow's round deck — anchoring a rail there would
+         draw an implementer→deck→next chain and drop a PipelineHub on top of the
+         FlowHub. Resolve the stage to its flow's implementer node instead; the
+         resulting edge from the preceding run collapses (from === to) and is
+         suppressed below, leaving the loop's own grammar to represent it. */
+      const vertexPath = stage.kind === "review-loop"
+        ? (attempt?.flowId ? flowImplementerPath(attempt.flowId) : null)
+        : attempt?.agentPath ?? null;
+      if (!vertexPath) continue;
       if (previous) {
         const from = anchorOf(previous.path);
-        const to = anchorOf(attempt.agentPath);
+        const to = anchorOf(vertexPath);
         if (from && to && from !== to) {
           own.push({
             key: `pipelinelink::${pipeline.id}::${previous.stageId}::${stage.id}`,
@@ -276,7 +289,7 @@ export function derivePipelineLinks(pipelines: Pipeline[], anchorOf: (pathOrKey:
           });
         }
       }
-      previous = { stageId: stage.id, path: attempt.agentPath };
+      previous = { stageId: stage.id, path: vertexPath };
     }
     /* One hub per pipeline: the edge into the current stage, else the last edge. */
     const hubLink = own.find((link) => link.pipeline!.toStageId === cursorStageId) ?? own.at(-1);

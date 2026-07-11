@@ -1,7 +1,7 @@
-import { configForParams, listRoles, validateRoleParams } from "@/lib/roles/registry";
+import { configForParams, listRoles, roleFenceBlock, roleScaffoldBody, validateRoleParams } from "@/lib/roles/registry";
 import { MAX_SCAFFOLD_LENGTH } from "@/lib/roles/store";
 import { isEngineEffort } from "@/lib/agent/efforts";
-import { normalizeClaudeLaunchModel } from "@/lib/agent/models";
+import { isCodexLaunchModel, normalizeClaudeLaunchModel } from "@/lib/agent/models";
 
 import { PIPELINE_DISALLOWED_ROLE_IDS, type EffectivePipelineRole, type PipelineRoleId, type PipelineStage, type PipelineStageKind } from "./types";
 
@@ -50,20 +50,19 @@ export const pipelineRoleLookup: PipelineRoleLookup = (roleId, params) => {
       return [parameter.key, value];
     }),
   );
-  const scaffold = definition.promptScaffold.replace(/\{\{([A-Za-z][A-Za-z0-9]*)\}\}/g, (_match, key: string) => String(parameters[key] ?? ""));
-  /* A near-limit override scaffold plus appended fences must still fit the
-     store's persistence cap, or the created pipeline could never load back.
-     Fences are never truncated; the scaffold body yields the room instead. */
-  const fences = definition.safetyFences.length
-    ? `\n\nSafety fences:\n${definition.safetyFences.map((fence) => `- ${fence}`).join("\n")}`
-    : "";
+  /* Reuse the canonical renderer so a Builder domain=frontend stage gets the
+     same frontend guidance resolveRole emits — a hand-rolled substitution here
+     dropped it, weakening the Opus scaffold. Fences stay separate so a near-limit
+     body can be trimmed to the store cap without ever cutting a fence. */
+  const body = roleScaffoldBody(definition, parameters);
+  const fences = roleFenceBlock(definition);
   return {
     /* Parameter-aware runtime: Builder domain=frontend → Claude/Opus,
        mode=apply-fixes → Terra, matching the registry so an omitted override
        does not silently fall back to the base Sol config. */
     ...configForParams(definition, parameters),
     access: definition.capabilities.includes("read-only") ? "read-only" : "read-write",
-    promptScaffold: `${scaffold.slice(0, MAX_SCAFFOLD_LENGTH - fences.length)}${fences}`,
+    promptScaffold: `${body.slice(0, MAX_SCAFFOLD_LENGTH - fences.length)}${fences}`,
   };
 };
 
@@ -131,7 +130,7 @@ export function resolvePipelineRole(
   }
   /* Mirrors the store's isEffectiveRole bounds so a bad override fails the
      create with a 400 instead of surfacing as a persist-time 500. */
-  if (model && engine === "codex" && (!model.startsWith("gpt-") || model.length > 128 || /[\u0000-\u001f\u007f]/.test(model))) {
+  if (model && engine === "codex" && !isCodexLaunchModel(model)) {
     return { error: "stage model is not supported by codex; provide a compatible model override" };
   }
   if (effort && !isEngineEffort(engine, effort)) {

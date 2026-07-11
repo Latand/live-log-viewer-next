@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { resolveRole } from "@/lib/roles/registry";
 import { MAX_SCAFFOLD_LENGTH, saveRoleOverrides } from "@/lib/roles/store";
 
 import { pipelineRoleLookup, resolvePipelineRole, validatePipelineRoleParams } from "./roles";
@@ -170,6 +171,18 @@ test("blank role params fall back to the registry default token value", () => {
   /* lens defaults to the first registry option rather than an empty token. */
   expect(resolved.role?.promptScaffold).toContain("lens correctness");
   expect(resolved.role?.promptScaffold).not.toContain("lens .");
+});
+
+test("Builder domain=frontend keeps the canonical frontend scaffold guidance (parity with resolveRole)", () => {
+  const pipeline = pipelineRoleLookup("builder", { domain: "frontend" });
+  const canonical = resolveRole("builder", { domain: "frontend" });
+  expect(canonical.ok).toBe(true);
+  /* The pipeline lookup must carry the same frontend guidance the spawn path
+     emits, not a hand-rolled substitution that silently drops it. */
+  expect(pipeline?.promptScaffold).toContain("UI/frontend implementation guidance");
+  if (canonical.ok) expect(pipeline?.promptScaffold).toBe(canonical.value.prompt);
+  /* Without domain=frontend the guidance is absent, so the two selections differ. */
+  expect(pipelineRoleLookup("builder", {})?.promptScaffold).not.toContain("UI/frontend implementation guidance");
 });
 
 test("codex model overrides mirror the store bounds at create time", () => {

@@ -4,7 +4,9 @@ import { Plus, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { createPortal } from "react-dom";
 
-import { CODEX_SOL_MODEL, normalizeClaudeLaunchModel } from "@/lib/agent/models";
+import { isEngineEffort } from "@/lib/agent/efforts";
+import { CODEX_SOL_MODEL, isCodexLaunchModel, normalizeClaudeLaunchModel } from "@/lib/agent/models";
+import type { FlowEngine } from "@/lib/flows/types";
 import { useLocale, type MessageKey, type TFunction } from "@/lib/i18n";
 import { MAX_ROLE_PARAM_TEXT_LENGTH, MAX_SPEC_LENGTH, MAX_STAGE_PROMPT_LENGTH, MAX_TASK_LENGTH } from "@/lib/pipelines/limits";
 import { PIPELINE_DISALLOWED_ROLE_IDS, type PipelineRoleId } from "@/lib/pipelines/types";
@@ -34,13 +36,53 @@ function draftKey(project: string): string {
 
 type DraftSnapshot = { task: string; spec: string; repoDir: string; stages: DraftStage[] };
 
+/** Coerces one persisted (or half-written) stage into a well-formed DraftStage.
+    A stale draft from an older builder may miss `model`/`roleParams` or carry a
+    wrong-typed field; restoring it verbatim later crashes on `.trim()` or a
+    property access. Every field is defaulted/typed here so restoration is safe. */
+export function coerceStage(raw: unknown): DraftStage {
+  const s = (raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {}) as Record<string, unknown>;
+  const str = (value: unknown): string => (typeof value === "string" ? value : "");
+  const engine: FlowEngine = s.engine === "claude" || s.engine === "codex" ? s.engine : FALLBACK_RUNTIME.engine;
+  const roleParams: Record<string, string | number> = {};
+  if (s.roleParams && typeof s.roleParams === "object" && !Array.isArray(s.roleParams)) {
+    for (const [key, value] of Object.entries(s.roleParams as Record<string, unknown>)) {
+      if (typeof value === "string" || typeof value === "number") roleParams[key] = value;
+    }
+  }
+  return {
+    key: nextStageKey(),
+    kind: s.kind === "review-loop" ? "review-loop" : "run",
+    roleId: str(s.roleId),
+    engine,
+    model: str(s.model),
+    effort: str(s.effort),
+    access: s.access === "read-only" ? "read-only" : "read-write",
+    prompt: str(s.prompt),
+    roleParams,
+    ...(typeof s.runtimeOverridden === "boolean" ? { runtimeOverridden: s.runtimeOverridden } : {}),
+  };
+}
+
+/** Reads and fully validates the persisted draft. Anything malformed — a
+    non-object, a non-array `stages`, or individual stages with missing/wrong
+    fields — degrades to a clean, well-typed snapshot rather than reaching the
+    render (crash) or the API (400). Stages beyond the 4-stage cap are dropped. */
 function readDraft(project: string): DraftSnapshot {
   const empty: DraftSnapshot = { task: "", spec: "", repoDir: "", stages: [] };
   if (typeof window === "undefined") return empty;
   try {
     const raw = sessionStorage.getItem(draftKey(project));
-    const parsed = raw ? (JSON.parse(raw) as DraftSnapshot) : null;
-    if (parsed && Array.isArray(parsed.stages)) return parsed;
+    const parsed = raw ? (JSON.parse(raw) as unknown) : null;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return empty;
+    const p = parsed as Record<string, unknown>;
+    const str = (value: unknown): string => (typeof value === "string" ? value : "");
+    return {
+      task: str(p.task),
+      spec: str(p.spec),
+      repoDir: str(p.repoDir),
+      stages: Array.isArray(p.stages) ? p.stages.slice(0, 4).map(coerceStage) : [],
+    };
   } catch {
     /* private mode / malformed draft: start clean */
   }
@@ -136,7 +178,14 @@ export function pipelineValidationError(
        cross-engine check so a Claude stage never ships a codex model (400). */
     const effModel = stage.model.trim() || (role ? roleRuntime(role, stage.roleParams).model : "") || defaultRuntime.model;
     if (stage.engine === "claude" && effModel && !normalizeClaudeLaunchModel(effModel)) return t("pipelineDialog.errors.modelEngineMismatch", { engine: "Claude" });
-    if (stage.engine === "codex" && effModel && !effModel.startsWith("gpt-")) return t("pipelineDialog.errors.modelEngineMismatch", { engine: "Codex" });
+    /* isCodexLaunchModel is the same predicate the API applies (gpt- prefix,
+       ≤128 chars, printable), so a length/control-char violation is caught here
+       instead of as a 400. */
+    if (stage.engine === "codex" && effModel && !isCodexLaunchModel(effModel)) return t("pipelineDialog.errors.modelEngineMismatch", { engine: "Codex" });
+    /* Effort mirrors the API's isEngineEffort check: an effective effort the
+       engine doesn't accept (e.g. max on codex) would otherwise 400. */
+    const effEffort = stage.effort || (role ? roleRuntime(role, stage.roleParams).effort : "") || defaultRuntime.effort;
+    if (effEffort && !isEngineEffort(stage.engine, effEffort)) return t("pipelineDialog.errors.effortEngineMismatch", { engine: stage.engine === "claude" ? "Claude" : "Codex" });
     if (!role) continue;
     /* Absent/blank params resolve to registry defaults server-side, so — like
        the API — they are not required; only supplied values are checked. */
@@ -186,11 +235,38 @@ export function PipelineDialog({
   const [error, setError] = useState<string | null>(null);
   const isClient = useSyncExternalStore(noopSubscribe, clientSnapshot, serverSnapshot);
   const taskRef = useRef<HTMLInputElement>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const overlayRef = useRef<HTMLDivElement>(null);
+  /* This instance is alive between mount and unmount; a POST that resolves after
+     the operator closed (and maybe reopened) this dialog must not drive the new
+     instance's onClose/onCreated (finding: stale submission closes new dialog). */
+  const alive = useRef(true);
 
   const defaultRuntime = useMemo<RoleConfig>(() => roles.find((role) => role.id === "builder")?.config ?? FALLBACK_RUNTIME, [roles]);
 
+  /* Modal focus discipline: focus the task field on open, restore focus to the
+     opener on close, and mark the rest of the body inert so Tab/AT cannot reach
+     the board or dashboard controls behind the overlay (only when portaled to
+     body — an inline SSR/static render must not inert its own ancestors). */
   useEffect(() => {
+    alive.current = true;
+    const opener = typeof document !== "undefined" && document.activeElement instanceof HTMLElement ? document.activeElement : null;
     taskRef.current?.focus();
+    const root = overlayRef.current?.parentElement === document.body ? overlayRef.current : null;
+    const inerted: HTMLElement[] = [];
+    if (root) {
+      for (const child of Array.from(document.body.children)) {
+        if (child !== root && child instanceof HTMLElement && !child.hasAttribute("inert")) {
+          child.setAttribute("inert", "");
+          inerted.push(child);
+        }
+      }
+    }
+    return () => {
+      alive.current = false;
+      for (const el of inerted) el.removeAttribute("inert");
+      opener?.focus();
+    };
   }, []);
 
   /* Role catalog fetch, retryable via the rolesReload bump. A non-2xx, network
@@ -267,6 +343,11 @@ export function PipelineDialog({
       stages: draftStagesToInput(stages),
       ...(src ? { src } : {}),
     });
+    /* If this dialog was dismissed (and perhaps reopened) while the POST was in
+       flight, its success must not close/clear the fresh instance. The pipeline
+       still created server-side; the reopened dialog stays as the operator left
+       it and picks it up on the next PIPELINES_CHANGED refresh. */
+    if (!alive.current) return;
     setBusy(false);
     if (result.pipeline) {
       try {
@@ -281,8 +362,32 @@ export function PipelineDialog({
     setError(result.error ?? t("pipelineModel.failed", { status: 0 }));
   };
 
+  /* Keep Tab within the dialog: an aria-modal that lets Tab escape reaches the
+     board/dashboard controls behind it (the inert pass covers AT + programmatic
+     focus; this covers keyboard order in browsers without inert). */
+  const trapTab = (event: React.KeyboardEvent) => {
+    if (event.key !== "Tab") return;
+    const scope = dialogRef.current;
+    if (!scope) return;
+    const focusable = Array.from(
+      scope.querySelectorAll<HTMLElement>('a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'),
+    ).filter((el) => el.offsetWidth > 0 || el.offsetHeight > 0 || el === document.activeElement);
+    if (!focusable.length) return;
+    const first = focusable[0]!;
+    const last = focusable[focusable.length - 1]!;
+    const active = document.activeElement;
+    if (event.shiftKey && active === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && active === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  };
+
   const overlay = (
     <div
+      ref={overlayRef}
       className="fixed inset-0 z-[60] flex items-start justify-center overflow-y-auto bg-black/30 p-4 sm:p-8"
       role="presentation"
       onClick={(event) => {
@@ -290,9 +395,11 @@ export function PipelineDialog({
       }}
       onKeyDown={(event) => {
         if (event.key === "Escape") onClose();
+        else trapTab(event);
       }}
     >
       <div
+        ref={dialogRef}
         data-scheme-ui
         role="dialog"
         aria-modal="true"

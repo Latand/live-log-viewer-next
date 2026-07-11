@@ -94,26 +94,26 @@ function threeStagePipeline(overrides: Partial<Pipeline> = {}): Pipeline {
     cursor: { stageId: "build", state: "running" },
     stages: [
       { id: "plan", kind: "run", next: "build" },
-      { id: "build", kind: "run", next: "review" },
-      { id: "review", kind: "review-loop", next: null },
+      { id: "build", kind: "run", next: "verify" },
+      { id: "verify", kind: "run", next: null },
     ],
     runs: [
       { stageId: "plan", attempts: [{ agentPath: "/plan", state: "passed", verdict: { status: "pass" } }] },
       { stageId: "build", attempts: [{ agentPath: "/build", state: "running" }] },
-      { stageId: "review", attempts: [{ agentPath: "/review", state: "pending" }] },
+      { stageId: "verify", attempts: [{ agentPath: "/verify", state: "pending" }] },
     ],
     ...overrides,
   } as unknown as Pipeline;
 }
 
 describe("derivePipelineLinks tones and hub", () => {
-  const anchor = (key: string) => (["/plan", "/build", "/review"].includes(key) ? key : null);
+  const anchor = (key: string) => (["/plan", "/build", "/verify"].includes(key) ? key : null);
 
   test("each edge is toned by its target stage's latest attempt", () => {
     const links = derivePipelineLinks([threeStagePipeline()], anchor);
     expect(links.map((link) => [link.pipeline!.toStageId, link.pipeline!.tone])).toEqual([
       ["build", "active"],
-      ["review", "dim"],
+      ["verify", "dim"],
     ]);
   });
 
@@ -129,7 +129,7 @@ describe("derivePipelineLinks tones and hub", () => {
       runs: [
         { stageId: "plan", attempts: [{ agentPath: "/plan", state: "passed" }] },
         { stageId: "build", attempts: [{ agentPath: "/build", state: "needs_decision" }] },
-        { stageId: "review", attempts: [{ agentPath: "/review", state: "pending" }] },
+        { stageId: "verify", attempts: [{ agentPath: "/verify", state: "pending" }] },
       ],
     } as unknown as Partial<Pipeline>);
     const edge = derivePipelineLinks([parked], anchor).find((link) => link.pipeline!.toStageId === "build");
@@ -156,10 +156,57 @@ describe("derivePipelineLinks tones and hub", () => {
       runs: [
         { stageId: "plan", attempts: [{ agentPath: "/plan", state: "passed" }] },
         { stageId: "build", attempts: [] },
-        { stageId: "review", attempts: [] },
+        { stageId: "verify", attempts: [] },
       ],
     } as unknown as Partial<Pipeline>);
     expect(derivePipelineLinks([partial], anchor)).toEqual([]);
+  });
+});
+
+describe("derivePipelineLinks review-loop vertices (no duplicate hub on the flow deck)", () => {
+  /* build (run) → review (review-loop) → verify (run). The review attempt's
+     agentPath is the reviewer transcript, which the board folds into flow
+     f-rev's deck; the flow's implementer is the build node. */
+  const reviewPipeline = {
+    id: "p-rev",
+    state: "running",
+    cursor: { stageId: "review", state: "reviewing" },
+    stages: [
+      { id: "build", kind: "run", next: "review" },
+      { id: "review", kind: "review-loop", next: "verify" },
+      { id: "verify", kind: "run", next: null },
+    ],
+    runs: [
+      { stageId: "build", attempts: [{ agentPath: "/build", state: "passed" }] },
+      { stageId: "review", attempts: [{ agentPath: "/reviewer", flowId: "f-rev", state: "reviewing" }] },
+      { stageId: "verify", attempts: [{ agentPath: "/verify", state: "pending" }] },
+    ],
+  } as unknown as Pipeline;
+  /* The reviewer path resolves to the deck; build/verify to their nodes. */
+  const anchor = (key: string) =>
+    key === "/build" || key === "/verify" ? key : key === "/reviewer" || key === deckKey("f-rev") ? deckKey("f-rev") : null;
+  const flowImpl = (flowId: string) => (flowId === "f-rev" ? "/build" : null);
+
+  test("the review-loop's incoming edge collapses into the implementer node, never the deck", () => {
+    const links = derivePipelineLinks([reviewPipeline], anchor, flowImpl);
+    /* build→review suppressed (both resolve to /build); the rail resumes from the
+       implementer node to verify. No endpoint is ever the flow deck. */
+    expect(links.map((link) => [link.from, link.to, link.pipeline!.toStageId])).toEqual([["/build", "/verify", "verify"]]);
+    expect(links.some((link) => link.from === deckKey("f-rev") || link.to === deckKey("f-rev"))).toBe(false);
+  });
+
+  test("exactly one hub is placed, and not on the flow deck", () => {
+    const links = derivePipelineLinks([reviewPipeline], anchor, flowImpl);
+    const hubs = links.filter((link) => link.pipeline!.hub);
+    expect(hubs.length).toBe(1);
+    expect(hubs.every((link) => link.to !== deckKey("f-rev"))).toBe(true);
+  });
+
+  test("without a flow resolver a review-loop stage anchors nowhere (its edge is skipped)", () => {
+    /* Defaulting the resolver to null (older callers) must not fall back to the
+       reviewer path — the review vertex is simply unresolved and skipped. */
+    const links = derivePipelineLinks([reviewPipeline], anchor);
+    expect(links.some((link) => link.to === deckKey("f-rev"))).toBe(false);
   });
 });
 
