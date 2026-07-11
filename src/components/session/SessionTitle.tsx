@@ -82,12 +82,19 @@ export function SessionTitle({ file, displayMax = 90, titleClassName = "", class
         input.select();
       }
     } else if (restoreFocus.current) {
+      // Restore focus to the launcher when the editor closes. The launcher is
+      // never disabled (a save in flight is guarded inside openEditor instead),
+      // so focus always lands on an enabled control, never on <body>.
       restoreFocus.current = false;
       launcherRef.current?.focus();
     }
   }, [editing]);
 
   const openEditor = () => {
+    // A save is optimistic and brief; ignore a re-open while one is in flight
+    // rather than disabling the launcher (a disabled launcher can't receive the
+    // post-save focus restore).
+    if (busy) return;
     // Clear any suppression left armed by a prior close: removing a focused
     // input does not reliably emit blur, so a stale flag could otherwise make
     // the next genuine blur a no-op that silently drops the edit.
@@ -284,7 +291,6 @@ export function SessionTitle({ file, displayMax = 90, titleClassName = "", class
         }`}
         aria-label={t("rename.editAria", { title: cleanTitle(effectiveTitle, 60) })}
         title={t("rename.edit")}
-        disabled={busy}
         onPointerDown={stop}
         onClick={openEditor}
       >

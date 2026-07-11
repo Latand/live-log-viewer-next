@@ -252,6 +252,21 @@ test("returns focus to the launcher after Escape closes the editor", async () =>
   expect(document.activeElement).toBe(view.host.querySelector('button[aria-label^="Rename"]'));
 });
 
+test("returns focus to the launcher after a keyboard save (never onto a disabled control)", () => {
+  const view = mount(entry());
+  flushSync(() => (view.host.querySelector('button[aria-label^="Rename"]') as HTMLButtonElement).click());
+  const input = view.host.querySelector('input[aria-label="Session title"]') as HTMLInputElement;
+  flushSync(() => typeInto(input, "renamed by keyboard"));
+  // Enter closes the editor and starts the save; focus restores on close, and
+  // the launcher is never disabled, so focus lands on it — not on <body>.
+  flushSync(() => dispatch(input, new dom.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true })));
+
+  const launcher = view.host.querySelector('button[aria-label^="Rename"]') as HTMLButtonElement;
+  expect(calls).toHaveLength(1);
+  expect(launcher.disabled).toBe(false);
+  expect(document.activeElement).toBe(launcher);
+});
+
 test("an external rename request opens the editor (scheme-board F2)", async () => {
   const view = mount(entry());
   expect(view.host.querySelector('input[aria-label="Session title"]')).toBeNull();
