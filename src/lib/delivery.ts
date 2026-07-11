@@ -10,7 +10,7 @@ import {
   buildImagePayload,
   deleteInboxImages,
   forgetResumePane,
-  killPane,
+  killTmuxHostIfMatches,
   knownLivePids,
   paneScreen,
   resolveTarget,
@@ -211,28 +211,36 @@ export async function resumeConversation(filePath: string): Promise<DeliveryOutc
   }
 }
 
-/* Closing a chat card also puts out its tmux pane. A missing pane is fine —
-   the conversation may have never had one or it died already; the close is
-   then a pure UI removal and still succeeds. */
-export async function killConversation(filePath: string): Promise<DeliveryOutcome> {
-  if (!filePath || !pathAllowed(filePath)) {
+interface KillConversationOverrides {
+  pathAllowed?: typeof pathAllowed;
+  listFiles?: typeof listFiles;
+  registrySnapshot?: () => ReturnType<ReturnType<typeof agentRegistry>["snapshot"]>;
+  killHost?: typeof killTmuxHostIfMatches;
+}
+
+/** Closes the registry-owned pane for one root conversation. The registry
+    supplies the stable pane id and the complete process identity fence. */
+export async function killConversation(filePath: string, overrides: KillConversationOverrides = {}): Promise<DeliveryOutcome> {
+  if (!filePath || !(overrides.pathAllowed ?? pathAllowed)(filePath)) {
     return failure("the conversation path is required to close", 400);
   }
-  const entry = (await listFiles()).find((item) => item.path === filePath);
+  const entry = (await (overrides.listFiles ?? listFiles)()).find((item) => item.path === filePath);
   /* A branch column shares the root conversation's pane: killing it from a
      branch close would take the whole agent down along with the root card
      that is still on screen. Only a root conversation may kill a pane. */
   if (entry && entry.parent) {
-    return { ok: true, target: "" };
+    return failure("a branch shares its root conversation pane and cannot be closed independently", 409);
   }
-  const host = await livePaneHost(filePath);
-  if (host === null) {
-    return { ok: true, target: "" };
-  }
+  const snapshot = (overrides.registrySnapshot ?? (() => agentRegistry().snapshot()))();
+  const registered = Object.values(snapshot.entries)
+    .filter((candidate) => candidate.artifactPath === filePath && candidate.host !== null)
+    .sort((left, right) => right.claimEpoch - left.claimEpoch || right.updatedAt.localeCompare(left.updatedAt))[0];
+  if (!registered?.host) return failure("no registered agent pane for this conversation", 404);
   try {
-    await killPane(host.paneId);
+    const killed = await (overrides.killHost ?? killTmuxHostIfMatches)(registered.host);
+    if (!killed) return failure("the registered pane changed or its process did not exit", 409);
     forgetResumePane(filePath);
-    return { ok: true, target: host.display };
+    return { ok: true, target: registered.host.paneId };
   } catch (error) {
     return failure(error);
   }

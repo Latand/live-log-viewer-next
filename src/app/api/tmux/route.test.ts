@@ -26,6 +26,7 @@ let delivery: (message: unknown) => Promise<{ ok: true; outcome: "delivered-to-l
   outcome: "delivered-to-live",
   target: "agents:4.0",
 });
+let killOutcome: { ok: true; target: string } | { ok: false; outcome: "failed"; error: string; status: number } = { ok: true, target: "agents:4.0" };
 
 const host = {
   paneId: "%1",
@@ -60,7 +61,7 @@ mock.module("@/lib/delivery", () => ({
   compactConversation: async () => ({ ok: true, target: "" }),
   deliverConversationMessage: (message: unknown) => delivery(message),
   interruptConversation: async () => ({ ok: true, target: "" }),
-  killConversation: async () => ({ ok: true, target: "" }),
+  killConversation: async () => killOutcome,
   resumeConversation: async () => ({ ok: true, target: "" }),
 }));
 mock.module("@/lib/resources", () => ({
@@ -186,4 +187,14 @@ test("/api/tmux POST carries concurrent sends through the delivery seam", async 
     { pid: null, path: PATHNAME, text: "first", images: [] },
     { pid: null, path: PATHNAME, text: "second", images: [] },
   ]);
+});
+
+test("/api/tmux POST kill never reports success with an empty target", async () => {
+  killOutcome = { ok: true, target: "" };
+
+  const response = await POST(post({ path: PATHNAME, action: "kill" }));
+
+  expect(response.status).toBe(409);
+  expect(await response.json()).toEqual({ ok: false, outcome: "failed", error: "kill resolved no registered pane" });
+  killOutcome = { ok: true, target: "agents:4.0" };
 });

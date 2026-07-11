@@ -414,12 +414,48 @@ export async function verifyTmuxHostEvidence(host: TmuxHostEvidence): Promise<bo
 }
 
 /** Closes a pane after full host verification and an in-command server/pane fence. */
-export async function killTmuxHostIfMatches(host: TmuxHostEvidence): Promise<boolean> {
-  if (!await verifyTmuxHostEvidence(host)) return false;
+interface KillTmuxHostDeps extends TmuxRunnerDeps {
+  pidAlive(pid: number): boolean;
+  parentPid(pid: number): number | null;
+  sleep(milliseconds: number): Promise<void>;
+  maxVerifyAttempts: number;
+}
+
+function processIsGone(expected: ProcessIdentity, deps: Pick<KillTmuxHostDeps, "pidAlive" | "processIdentity">): boolean {
+  if (!deps.pidAlive(expected.pid)) return true;
+  return expected.startIdentity !== null && deps.processIdentity(expected.pid) !== expected.startIdentity;
+}
+
+/** Applies a registry host identity fence, kills its stable pane id, then
+    waits for both the pane shell and agent process identities to disappear. */
+export async function killTmuxHostIfMatches(
+  host: TmuxHostEvidence,
+  overrides: Partial<KillTmuxHostDeps> = {},
+): Promise<boolean> {
+  const deps: KillTmuxHostDeps = {
+    runTmux,
+    processIdentity: (pid) => procBackend.processIdentity(pid),
+    pidAlive,
+    parentPid: readPpid,
+    sleep: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
+    maxVerifyAttempts: 20,
+    ...overrides,
+  };
   const endpoint = createTmuxEndpointDescriptor(host.endpoint, process.getuid?.() ?? 0);
+  const binding: TmuxSpawnBinding = {
+    endpoint: host.endpoint,
+    server: host.server,
+    paneId: host.paneId,
+    panePid: host.panePid,
+    target: host.paneId,
+  };
+  const pane = await verifyTmuxSpawnBinding(binding, endpoint, deps);
+  if (!pane || pane.windowName !== host.windowName || !deps.pidAlive(host.agent.pid)) return false;
+  if (host.agent.startIdentity !== null && deps.processIdentity(host.agent.pid) !== host.agent.startIdentity) return false;
+  if (ancestryDistance(host.agent.pid, host.panePid.pid, deps.parentPid) === null) return false;
   const condition = `#{&&:#{==:#{pid},${host.server.pid}},#{&&:#{==:#{pane_id},${host.paneId}},#{==:#{pane_pid},${host.panePid.pid}}}}`;
   const mismatch = `llv-host-mismatch-${crypto.randomUUID()}`;
-  const result = await runTmux([
+  const result = await deps.runTmux([
     "if-shell",
     "-t",
     host.paneId,
@@ -429,7 +465,13 @@ export async function killTmuxHostIfMatches(host: TmuxHostEvidence): Promise<boo
     `display-message -p ${mismatch}`,
   ], undefined, endpoint);
   if (result.code !== 0) return false;
-  return !result.stdout.includes(mismatch);
+  if (result.stdout.includes(mismatch)) return false;
+  for (let attempt = 0; attempt < deps.maxVerifyAttempts; attempt += 1) {
+    const currentPane = await inspectTmuxPane(host.paneId, endpoint, deps);
+    if (currentPane === null && processIsGone(host.panePid, deps) && processIsGone(host.agent, deps)) return true;
+    if (attempt + 1 < deps.maxVerifyAttempts) await deps.sleep(25);
+  }
+  return false;
 }
 
 export type TmuxHostCleanupResult = "cancelled" | "absent" | "unverifiable";

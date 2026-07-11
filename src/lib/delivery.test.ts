@@ -3,10 +3,10 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { AgentRegistry, setAgentRegistryForTests, type ConversationObservation } from "./agent/registry";
+import { AgentRegistry, setAgentRegistryForTests, type ConversationObservation, type RegistryFile, type TmuxHostEvidence } from "./agent/registry";
 import { emptyLaunchProfile } from "./accounts/migration/contracts";
 import { drainHeldDeliveries } from "./accounts/migration/coordinator";
-import { cleanupFailedImageDelivery, deliverConversationMessage, migrationDeliveryOutcome, type DeliveryFailure } from "./delivery";
+import { cleanupFailedImageDelivery, deliverConversationMessage, killConversation, migrationDeliveryOutcome, type DeliveryFailure } from "./delivery";
 import { TmuxDeliveryUncertainError } from "./tmux";
 
 const SANDBOX = fs.mkdtempSync(path.join(os.tmpdir(), "llv-delivery-test-"));
@@ -54,6 +54,74 @@ test("migration delivery keeps an internally held result recoverable", () => {
   expect(migrationDeliveryOutcome({ ok: true, target: "pane" })).toBe("delivered");
   expect(migrationDeliveryOutcome(failure)).toBe("failed");
   expect(migrationDeliveryOutcome({ ...failure, actuation: "started" as const })).toBe("delivery-uncertain");
+});
+
+const KILL_HOST: TmuxHostEvidence = {
+  kind: "tmux",
+  endpoint: "/run/user/1000/agent-log-viewer",
+  server: { pid: 900, startIdentity: "900:one" },
+  paneId: "%7",
+  panePid: { pid: 107, startIdentity: "107:one" },
+  windowName: "worker",
+  agent: { pid: 207, startIdentity: "207:one" },
+  argv: ["codex", "resume", "session"],
+};
+
+function killSnapshot(pathname: string, host: TmuxHostEvidence | null): RegistryFile {
+  const registry = new AgentRegistry(path.join(SANDBOX, "kill-registry.json"));
+  registry.upsert({
+    key: { engine: "codex", sessionId: "019f4e76-66b4-7f87-94b2-cfa9bf711111" },
+    artifactPath: pathname,
+    cwd: "/repo",
+    accountId: "default",
+    launchProfile: emptyLaunchProfile({ cwd: "/repo", role: "worker" }),
+    status: "idle",
+    host,
+    claimEpoch: 3,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  return registry.snapshot();
+}
+
+test("conversation kill resolves the registry pane id and reports verified success", async () => {
+  const pathname = "/transcripts/worker.jsonl";
+  const killed: string[] = [];
+
+  const outcome = await killConversation(pathname, {
+    pathAllowed: () => true,
+    listFiles: async () => [],
+    registrySnapshot: () => killSnapshot(pathname, KILL_HOST),
+    killHost: async (host) => { killed.push(host.paneId); return true; },
+  });
+
+  expect(outcome).toEqual({ ok: true, target: "%7" });
+  expect(killed).toEqual(["%7"]);
+});
+
+test("conversation kill fails clearly when the registry has no pane", async () => {
+  const pathname = "/transcripts/missing.jsonl";
+
+  const outcome = await killConversation(pathname, {
+    pathAllowed: () => true,
+    listFiles: async () => [],
+    registrySnapshot: () => killSnapshot(pathname, null),
+  });
+
+  expect(outcome).toEqual({ ok: false, outcome: "failed", error: "no registered agent pane for this conversation", status: 404 });
+});
+
+test("conversation kill rejects success when process-death verification fails", async () => {
+  const pathname = "/transcripts/stubborn.jsonl";
+
+  const outcome = await killConversation(pathname, {
+    pathAllowed: () => true,
+    listFiles: async () => [],
+    registrySnapshot: () => killSnapshot(pathname, KILL_HOST),
+    killHost: async () => false,
+  });
+
+  expect(outcome).toEqual({ ok: false, outcome: "failed", error: "the registered pane changed or its process did not exit", status: 409 });
 });
 
 test("image-only reservations stay request-local and never drain without the client payload", async () => {

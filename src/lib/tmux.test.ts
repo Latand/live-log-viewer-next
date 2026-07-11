@@ -8,6 +8,7 @@ import {
   cleanupTmuxHostIfMatches,
   createSpawnWindow,
   createTmuxEndpointDescriptor,
+  killTmuxHostIfMatches,
   resolveTmuxAttach,
   resolveTmuxEndpointContract,
   selectSpawnedAgentProcess,
@@ -367,5 +368,58 @@ describe("cleanupTmuxHostIfMatches", () => {
       expect(result).toBe("unverifiable");
       expect(calls).toBe(missingIdentityPid === 900 ? 1 : 2);
     }
+  });
+});
+
+describe("killTmuxHostIfMatches", () => {
+  const host = {
+    kind: "tmux" as const,
+    endpoint: "/run/user/1000/agent-log-viewer",
+    server: { pid: 900, startIdentity: "900:one" },
+    paneId: "%11",
+    panePid: { pid: 100, startIdentity: "100:one" },
+    windowName: "worker",
+    agent: { pid: 101, startIdentity: "101:one" },
+    argv: ["codex"],
+  };
+
+  test("kills by stable pane id and waits for the pane process tree to exit", async () => {
+    let killed = false;
+    const calls: string[][] = [];
+    const result = await killTmuxHostIfMatches(host, {
+      runTmux: async (args) => {
+        calls.push(args);
+        if (args[0] === "display-message") {
+          return killed
+            ? { code: 1, stdout: "", stderr: "can't find pane: %11" }
+            : { code: 0, stdout: "900\t%11\t100\tagents:2.0\tworker\tzsh\n", stderr: "" };
+        }
+        killed = true;
+        return { code: 0, stdout: "", stderr: "" };
+      },
+      processIdentity: (pid) => `${pid}:one`,
+      pidAlive: (pid) => !killed && (pid === 100 || pid === 101),
+      parentPid: (pid) => pid === 101 ? 100 : pid === 100 ? 900 : null,
+      sleep: async () => {},
+      maxVerifyAttempts: 2,
+    });
+
+    expect(result).toBe(true);
+    expect(calls.find((args) => args[0] === "if-shell")).toContain("%11");
+  });
+
+  test("reports failure while the killed pane's agent process remains alive", async () => {
+    const result = await killTmuxHostIfMatches(host, {
+      runTmux: async (args) => args[0] === "display-message"
+        ? { code: 0, stdout: "900\t%11\t100\tagents:2.0\tworker\tzsh\n", stderr: "" }
+        : { code: 0, stdout: "", stderr: "" },
+      processIdentity: (pid) => `${pid}:one`,
+      pidAlive: () => true,
+      parentPid: (pid) => pid === 101 ? 100 : pid === 100 ? 900 : null,
+      sleep: async () => {},
+      maxVerifyAttempts: 2,
+    });
+
+    expect(result).toBe(false);
   });
 });
