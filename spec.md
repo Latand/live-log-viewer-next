@@ -28,7 +28,9 @@ or omit a `remap-paths` mutation.
 - AC9: Pending continuity paths cannot create aliases from a future successor
   back to the current predecessor during initial or repeated migrations;
   committed continuity paths keep carrying tombstones during later migrations.
-- AC10: `bun test` passes.
-- AC11: `bunx tsc --noEmit` passes.
-- AC12: The live board state and production Viewer on port 8898 remain
+- AC10: Scanner discovery, observed spawn settlement, provider persistence, and
+  explicit continuity callbacks all record pending succession provenance.
+- AC11: `bun test` passes.
+- AC12: `bunx tsc --noEmit` passes.
+- AC13: The live board state and production Viewer on port 8898 remain
   unchanged during implementation and verification.

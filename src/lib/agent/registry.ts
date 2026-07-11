@@ -543,6 +543,15 @@ function conversationOwnsPath(conversation: RegistryConversation, artifactPath: 
     || conversation.continuityPaths.includes(artifactPath);
 }
 
+function addConversationContinuityPath(conversation: RegistryConversation, pathname: string): void {
+  if (conversation.generations.some((generation) => generation.path === pathname)) return;
+  if (!conversation.continuityPaths.includes(pathname)) conversation.continuityPaths.push(pathname);
+  if (conversation.migration && conversation.migration.phase !== "committed"
+    && !conversation.migration.pendingContinuityPaths.includes(pathname)) {
+    conversation.migration.pendingContinuityPaths.push(pathname);
+  }
+}
+
 function scannerAllocatedProvisionalOwner(conversation: RegistryConversation, pathname: string): boolean {
   const generation = conversation.generations[0];
   return conversation.migration === null
@@ -984,10 +993,7 @@ export class AgentRegistry {
       if (provisionalOwner && !adoptProvisionalOwner(file, provisionalOwner, conversation, entry.artifactPath)) {
         return conflict("spawn_artifact_conflict");
       }
-      if (!conversation.continuityPaths.includes(entry.artifactPath)
-        && !conversation.generations.some((generation) => generation.path === entry.artifactPath)) {
-        conversation.continuityPaths.push(entry.artifactPath);
-      }
+      addConversationContinuityPath(conversation, entry.artifactPath);
     }
     if (receipt.purpose !== "migration-successor" && !conversation.generations.some((generation) => generation.path === entry.artifactPath)) {
       conversation.generations.push({
@@ -1241,7 +1247,7 @@ export class AgentRegistry {
           const migrationOwner = migrationReceipt ? file.conversations[migrationReceipt.conversationId] : null;
           if (migrationOwner) {
             conversation = migrationOwner;
-            if (!conversation.continuityPaths.includes(observation.path)) conversation.continuityPaths.push(observation.path);
+            addConversationContinuityPath(conversation, observation.path);
             conversation.updatedAt = observation.observedAt;
             scopeChanged.add(observation.engine);
           }
@@ -1608,13 +1614,12 @@ export class AgentRegistry {
       if (migration.phase === "successor-starting") {
         const receiptPaths = [...new Set([...receipt.continuityPaths, receipt.path])];
         for (const pathname of receiptPaths) {
-          if (!conversation.continuityPaths.includes(pathname)) conversation.continuityPaths.push(pathname);
+          addConversationContinuityPath(conversation, pathname);
         }
         conversation.migration = {
           ...migration,
           phase: "verifying",
           providerReceipt: receipt,
-          pendingContinuityPaths: [...new Set([...migration.pendingContinuityPaths, ...receiptPaths])],
           updatedAt: now(),
         };
         conversation.updatedAt = now();
@@ -1641,11 +1646,7 @@ export class AgentRegistry {
           throw new Error("migration continuity path has another durable owner");
         }
       }
-      if (!conversation.continuityPaths.includes(pathname)) conversation.continuityPaths.push(pathname);
-      if (conversation.migration && conversation.migration.phase !== "committed"
-        && !conversation.migration.pendingContinuityPaths.includes(pathname)) {
-        conversation.migration.pendingContinuityPaths.push(pathname);
-      }
+      addConversationContinuityPath(conversation, pathname);
       conversation.updatedAt = now();
       return clone(conversation);
     });

@@ -5,6 +5,7 @@ import path from "node:path";
 
 import { NextRequest } from "next/server";
 
+import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
 import { AgentRegistry, setAgentRegistryForTests } from "@/lib/agent/registry";
 import { setBoardFileForTests } from "@/lib/board/store";
 
@@ -271,6 +272,94 @@ test("a repeated migration cannot alias its pending successor backward", async (
   const reconciled = await PATCH(patch({
     schemaVersion: 1,
     project: "repeated-migration",
+    baseRevision: 2,
+    mutations: [{ kind: "reconcile-roots", roots: [third], removeManual: [] }],
+  }));
+  expect(reconciled.status).toBe(200);
+  expect(await reconciled.json()).toMatchObject({
+    ok: true,
+    board: {
+      revision: 3,
+      pathAliases: { [first]: third, [second]: third },
+      prefs: { manual: [], hidden: [third] },
+    },
+  });
+});
+
+test("a scanner-discovered repeated successor stays pending before its provider callback", async () => {
+  const registry = new AgentRegistry(path.join(path.dirname(testFile), "agent-registry.json"));
+  setAgentRegistryForTests(registry);
+  const first = "/scanner-generation-a.jsonl";
+  const second = "/scanner-generation-b.jsonl";
+  const third = "/scanner-generation-c.jsonl";
+  const conversation = registry.ensureConversation("codex", first, "account-a");
+
+  registry.commitMigrationIntent({
+    engine: "codex",
+    targetId: "account-b",
+    origin: "manual",
+    requestId: "scanner-first-migration",
+    expectedRevision: registry.engineRouting("codex").revision,
+  });
+  const firstRevision = registry.conversation(conversation.id)!.migration!.revision;
+  registry.transitionConversationMigration(conversation.id, firstRevision, ["requested", "waiting-turn"], { phase: "preparing" });
+  registry.transitionConversationMigration(conversation.id, firstRevision, ["preparing"], { phase: "successor-starting" });
+  registry.transitionConversationMigration(conversation.id, firstRevision, ["successor-starting"], { phase: "verifying" });
+  registry.commitSuccessor(conversation.id, { id: "scanner-generation-b", path: second, accountId: "account-b" }, firstRevision);
+
+  const placed = await PATCH(patch({
+    schemaVersion: 1,
+    project: "scanner-successor",
+    baseRevision: 0,
+    mutations: [{ kind: "restore", path: second, placement: "manual" }],
+  }));
+  expect(placed.status).toBe(200);
+
+  registry.commitMigrationIntent({
+    engine: "codex",
+    targetId: "account-c",
+    origin: "manual",
+    requestId: "scanner-second-migration",
+    expectedRevision: registry.engineRouting("codex").revision,
+  });
+  const secondRevision = registry.conversation(conversation.id)!.migration!.revision;
+  registry.beginSpawnRequest({
+    engine: "codex",
+    cwd: "/repo",
+    accountId: "account-c",
+    conversationId: conversation.id,
+    purpose: "migration-successor",
+    expectedArtifactPath: third,
+  });
+  registry.reconcileConversations([{
+    engine: "codex",
+    path: third,
+    accountId: "account-c",
+    launchProfile: emptyLaunchProfile({ cwd: "/repo" }),
+    turn: { state: "idle", source: "assistant", terminalAt: null },
+    observedAt: "2026-07-11T09:00:00.000Z",
+  }]);
+  expect(registry.conversation(conversation.id)?.migration?.pendingContinuityPaths).toEqual([third]);
+
+  const closed = await PATCH(patch({
+    schemaVersion: 1,
+    project: "scanner-successor",
+    baseRevision: 1,
+    mutations: [{ kind: "close", path: third }],
+  }));
+  expect(closed.status).toBe(200);
+  const closedBody = await closed.json() as { board: { pathAliases: Record<string, string> } };
+  expect(closedBody).toMatchObject({ board: { revision: 2, prefs: { hidden: [third] } } });
+  expect(closedBody.board.pathAliases).toEqual({ [first]: second });
+
+  registry.transitionConversationMigration(conversation.id, secondRevision, ["requested", "waiting-turn"], { phase: "preparing" });
+  registry.transitionConversationMigration(conversation.id, secondRevision, ["preparing"], { phase: "successor-starting" });
+  registry.transitionConversationMigration(conversation.id, secondRevision, ["successor-starting"], { phase: "verifying" });
+  registry.commitSuccessor(conversation.id, { id: "scanner-generation-c", path: third, accountId: "account-c" }, secondRevision);
+
+  const reconciled = await PATCH(patch({
+    schemaVersion: 1,
+    project: "scanner-successor",
     baseRevision: 2,
     mutations: [{ kind: "reconcile-roots", roots: [third], removeManual: [] }],
   }));
