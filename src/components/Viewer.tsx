@@ -76,7 +76,8 @@ export function Viewer() {
      per-tab snapshot to the server. Renders nothing. */
   useViewPresence();
   const [project, setProject] = useState<string>(() => initialProject());
-  const { files: allFiles, projectCatalog, flows: polledFlows, pipelines, pipelinesError, workflows, tasks, systemHealth, loaded } = useFiles(project === OVERVIEW ? null : project);
+  const [pendingHash, setPendingHash] = useState<ConversationHash | null>(null);
+  const { files: allFiles, projectCatalog, flows: polledFlows, pipelines, pipelinesError, workflows, tasks, systemHealth, loaded } = useFiles(project === OVERVIEW ? null : project, pendingHash?.filePath ?? null);
   /* A committed account migration keeps the archived predecessor entry in the
      payload (for chain history) but it must never render as a second standalone
      card — every surface below sees only current generations. A no-op (same
@@ -90,7 +91,6 @@ export function Viewer() {
   const catalogProjects = useMemo(() => new Set(projectCatalog.map((entry) => entry.project)), [projectCatalog]);
   const isMobile = useIsMobile();
   const [drawerOpen, setDrawerOpen] = useState(false);
-  const [pendingHash, setPendingHash] = useState<ConversationHash | null>(null);
   const [toastPath, setToastPath] = useState<string | null>(null);
   const seenQuestionsRef = useRef<Set<string> | null>(null);
   /* Reopening a file whose project is already selected does not change
@@ -162,8 +162,14 @@ export function Viewer() {
        predecessor visible long enough to redirect the link to its current
        generation; the canonical `#c=` id resolves the same way. */
     const hit = resolveConversationTarget(allFiles, pendingHash);
-    if (hit) openFile(hit);
-    setPendingHash(null);
+    /* A miss keeps the request pending: the pinned `path` param asks the
+       scanner to include the exact transcript on the next poll, so a fresh
+       `#f=` link to a demoted archived predecessor resolves once that poll
+       lands instead of being cleared after the first cap-limited payload. */
+    if (hit) {
+      openFile(hit);
+      setPendingHash(null);
+    }
   }, [pendingHash, allFiles, openFile]);
   /* eslint-enable react-hooks/set-state-in-effect */
 

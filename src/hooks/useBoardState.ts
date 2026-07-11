@@ -160,11 +160,17 @@ type WriteAttempt =
      failures (401/403) and other transient 4xx keep the queued intent and
      take the backoff path. */
   | { status: "rejected" }
+  /* The request envelope is refused (client/server schema skew): every
+     bisected prefix would draw the same verdict, so shedding is wrong — the
+     outbox survives and the board reports unavailable until versions align. */
+  | { status: "envelope" }
   | { status: "error" };
 
-/* Validation verdicts that no retry can change; every other failure keeps the
-   outbox for the backoff retry. */
-const PERMANENT_REJECTION_CODES = new Set(["INVALID_REQUEST", "PAYLOAD_TOO_LARGE", "UNSUPPORTED_SCHEMA_VERSION", "SCOPE_TOO_LARGE"]);
+/* Mutation-content verdicts that no retry can change; bisection isolates the
+   offending mutation. Envelope-level failures (schema-version skew) apply to
+   every request equally, so they keep the outbox and surface as unavailable. */
+const PERMANENT_REJECTION_CODES = new Set(["INVALID_REQUEST", "PAYLOAD_TOO_LARGE"]);
+const ENVELOPE_REJECTION_CODES = new Set(["UNSUPPORTED_SCHEMA_VERSION"]);
 
 /** Two boards carry the same durable arrangement when their prefs and aliases
     match — the same comparison the server uses to treat a mutation as a no-op. */
@@ -282,6 +288,7 @@ export function createBoardStore(options: BoardStoreOptions): BoardStore {
       if (res.status >= 400 && res.status < 500) {
         const body = (await res.json().catch(() => null)) as { error?: string } | null;
         if (body?.error !== undefined && PERMANENT_REJECTION_CODES.has(body.error)) return { status: "rejected" };
+        if (body?.error !== undefined && ENVELOPE_REJECTION_CODES.has(body.error)) return { status: "envelope" };
         /* Expired auth (403 from the proxy), rate limiting, unknown codes:
            the queued intent survives and drains once access heals. */
         return { status: "error" };
@@ -394,6 +401,7 @@ export function createBoardStore(options: BoardStoreOptions): BoardStore {
       cancelRetry();
       conflictStreak = 0;
       rejectCap = null;
+      unavailable = false;
       confirmed = result.board;
       outbox = outbox.slice(prefix.length);
       refresh();
@@ -418,6 +426,16 @@ export function createBoardStore(options: BoardStoreOptions): BoardStore {
       }
       refresh();
       if (outbox.length) void drain();
+      return;
+    }
+    if (result.status === "envelope") {
+      /* Schema skew: hold every queued mutation, tell the UI the board is
+         unavailable, and probe again on the backoff timer — a redeploy plus
+         tab reload resolves the skew and the intent then drains. */
+      rejectCap = null;
+      unavailable = true;
+      refresh();
+      scheduleRetry();
       return;
     }
     if (result.status === "conflict") {

@@ -554,11 +554,15 @@ test("the drain chunks by serialized bytes under the server body cap", async () 
   store.dispose();
 });
 
-test("patchPrefix always yields at least one mutation, even over budget", () => {
+test("patchPrefix ships a byte-heavy mutation alone", () => {
   const oversized: BoardMutationV1 = { kind: "reconcile-roots", roots: Array.from({ length: 60 }, (_, index) => `/${String(index)}${"y".repeat(4000)}`), removeManual: [] };
+  const second: BoardMutationV1 = { kind: "reconcile-roots", roots: Array.from({ length: 60 }, (_, index) => `/second-${String(index)}${"z".repeat(4000)}`), removeManual: [] };
   const small: BoardMutationV1 = { kind: "close", path: "/small" };
   expect(patchPrefix([oversized, small])).toEqual([oversized]);
   expect(patchPrefix([small, oversized])).toEqual([small]);
+  /* Two byte-heavy mutations travel in separate PATCHes, which is what keeps
+     the server body cap sufficient for every client-emittable request. */
+  expect(patchPrefix([oversized, second])).toEqual([oversized]);
 });
 
 test("a validator-accepted reconciliation past the body cap splits and lands whole", async () => {
@@ -676,6 +680,39 @@ test("a batch whose optimistic replay throws is enqueued for the server verdict"
   /* Bisection isolates the cyclic remap; the close lands durably. */
   expect(attempts).toEqual([["close", "remap-paths"], ["close"], ["remap-paths"]]);
   expect(backing.projects.proj.prefs.hidden).toEqual(["/a"]);
+  expect(store.getSnapshot().sync).toBe("current");
+  store.dispose();
+});
+
+test("schema-version skew holds the outbox and reports unavailable until it heals", async () => {
+  const backing = fakeServer({ proj: boardOf(1) });
+  let skew = true;
+  let patchAttempts = 0;
+  const fetcher = async (input: string, init?: RequestInit) => {
+    if (init && (init.method ?? "GET") !== "GET") {
+      patchAttempts += 1;
+      if (skew) return { ok: false, status: 400, json: async () => ({ error: "UNSUPPORTED_SCHEMA_VERSION" }) };
+    }
+    return backing.fetcher(input, init);
+  };
+  const sched = idleScheduler();
+  const store = createBoardStore({ project: "proj", fetcher, storage: null, scheduler: sched.scheduler });
+  await settle();
+
+  store.mutate([{ kind: "close", path: "/a" }, { kind: "close", path: "/b" }]);
+  await settle();
+  /* An envelope verdict hits every bisected prefix identically, so nothing is
+     shed: one attempt, the intent held, the board reported unavailable. */
+  expect(patchAttempts).toBe(1);
+  expect(store.getSnapshot().sync).toBe("unavailable");
+  expect(store.getSnapshot().prefs.hidden).toEqual(["/a", "/b"]);
+  expect(sched.pendingTimeouts()).toBe(1);
+
+  /* The skew resolves (server redeployed); the held closes drain intact. */
+  skew = false;
+  sched.runTimeouts();
+  await settle();
+  expect(backing.projects.proj.prefs.hidden).toEqual(["/a", "/b"]);
   expect(store.getSnapshot().sync).toBe("current");
   store.dispose();
 });

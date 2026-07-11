@@ -74,6 +74,8 @@ async function forEachEntryBatchYielding(
 
 export interface FileScanOptions {
   persist?: boolean;
+  /** Exact transcript path a deep link asked for; survives the recency cap. */
+  pin?: string;
 }
 
 export async function listFiles(options: FileScanOptions = {}): Promise<FileEntry[]> {
@@ -119,7 +121,7 @@ async function listFilesInternal(
   const persist = options.persist === true;
   const demote = archivedTranscriptPaths();
   const scan = includeProjectCatalog
-    ? await discoverFilesWithProjectCatalog(undefined, selectedProject, { persist, demote })
+    ? await discoverFilesWithProjectCatalog(undefined, selectedProject, { persist, demote, pin: options.pin })
     : { files: await discoverFiles(undefined, demote), projectCatalog: [] };
   const entries = scan.files;
   // The /proc fd scan is only needed to attribute background-task outputs to a

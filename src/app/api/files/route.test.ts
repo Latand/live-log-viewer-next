@@ -93,7 +93,7 @@ test("concurrent cold files reads share one scan", async () => {
 
 test("an expired snapshot schedules its refresh after the response", async () => {
   await cachedFileScan();
-  const stale = await cachedFileScan(undefined, Number.MAX_SAFE_INTEGER);
+  const stale = await cachedFileScan(undefined, undefined, Number.MAX_SAFE_INTEGER);
 
   expect(scans).toBe(1);
   expect(stale.refreshAfterResponse).toBeFunction();

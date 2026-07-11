@@ -20,12 +20,14 @@ predecessor transcripts with recent mtimes):
 
 ## Acceptance criteria
 
-- AC1: A board PATCH refused with a structured permanent validation code
-  (INVALID_REQUEST, PAYLOAD_TOO_LARGE, UNSUPPORTED_SCHEMA_VERSION) sheds the
-  offending mutation after bisection: no backoff timer stays armed, sync
+- AC1: A board PATCH refused with a structured mutation-content code
+  (INVALID_REQUEST, PAYLOAD_TOO_LARGE) sheds the offending mutation after
+  bisection: no backoff timer stays armed, sync
   returns to "current", and mutations queued behind it still drain to the
   server. Access failures (401/403) and other transient 4xx preserve the
-  queued intent and take the backoff path until access heals.
+  queued intent and take the backoff path until access heals; an
+  envelope-level verdict (UNSUPPORTED_SCHEMA_VERSION) holds the whole outbox
+  and surfaces the board as unavailable until versions align.
 - AC2: Semantics-coupled mutations (`reconcile-roots`, `remap-paths`) always
   travel as ONE mutation each; transport therefore preserves reducer
   atomicity by construction. Independent mutations batch into PATCHes bounded by
@@ -33,10 +35,11 @@ predecessor transcripts with recent mtimes):
   rejected multi-mutation batch is bisected until the offender stands alone;
   only the lone rejected mutation is shed, so valid mutations on either side
   of the poison still land.
-- AC3: `MAX_BOARD_BODY_BYTES` is derived from the largest legal request
-  shape under full JSON escaping: the legacy-seed patch form carries three
-  512-path lists of 4096-char control-heavy paths ≈ 37.7 MB → 48 MB cap, so
-  no validator-legal request is ever size-refused mid-transport; lists past
+- AC3: `MAX_BOARD_BODY_BYTES` is derived from the largest request shape the
+  client transport emits under full JSON escaping: `patchPrefix` ships a
+  byte-heavy mutation alone, so the bound covers one maximal mutation
+  (~25.2 MB) and the three-list legacy-seed patch (~37.7 MB) → 48 MB cap.
+  No client-emittable request is ever size-refused mid-transport; lists past
   the item-level caps draw the server's atomic validation error. The
   per-item limits (512 paths, 4096 chars each) remain the real guard.
 - AC4: A conversation identity that leaves the capped feed and returns later

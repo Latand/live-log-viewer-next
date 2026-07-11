@@ -102,7 +102,7 @@ async function discoverRaw(roots: Roots | RootEntries, limit: Limit): Promise<Ra
   }))).flat();
 }
 
-function entriesFromRaw(raw: RawEntry[], selectedProject?: string, projectByPath?: ReadonlyMap<string, string>, demoted?: ReadonlySet<string>): FileEntry[] {
+function entriesFromRaw(raw: RawEntry[], selectedProject?: string, projectByPath?: ReadonlyMap<string, string>, demoted?: ReadonlySet<string>, pin?: string): FileEntry[] {
   raw.sort((a, b) => b.st.mtimeMs - a.st.mtimeMs);
   const rawByCodexThread = new Map<string, RawEntry>();
   for (const entry of raw) {
@@ -130,6 +130,16 @@ function entriesFromRaw(raw: RawEntry[], selectedProject?: string, projectByPath
       if (project !== selectedProject) continue;
       selectedPaths.add(entry.path);
       selected.push(entry);
+    }
+  }
+  /* A deep-link target rides along even when demotion or the cap excluded
+     it: the client needs that exact entry once to resolve its conversation
+     id and redirect onto the current generation. */
+  if (pin && !selectedPaths.has(pin)) {
+    const pinned = raw.find((entry) => entry.path === pin);
+    if (pinned) {
+      selectedPaths.add(pinned.path);
+      selected.push(pinned);
     }
   }
   for (let index = 0; index < selected.length; index += 1) {
@@ -170,7 +180,7 @@ function entriesFromRaw(raw: RawEntry[], selectedProject?: string, projectByPath
 export async function discoverFilesWithProjectCatalog(
   roots: Roots | RootEntries = scanRootEntries(),
   selectedProject?: string,
-  options: { persist?: boolean; demote?: ReadonlySet<string> } = {},
+  options: { persist?: boolean; demote?: ReadonlySet<string>; pin?: string } = {},
 ): Promise<{
   files: FileEntry[];
   projectCatalog: ProjectCatalogEntry[];
@@ -178,7 +188,7 @@ export async function discoverFilesWithProjectCatalog(
   const limit = createLimiter(48);
   const raw = await discoverRaw(roots, limit);
   const { projectCatalog, projectByPath } = projectCatalogSnapshotFromRaw(raw, options);
-  return { files: entriesFromRaw(raw, selectedProject, projectByPath, options.demote), projectCatalog };
+  return { files: entriesFromRaw(raw, selectedProject, projectByPath, options.demote, options.pin), projectCatalog };
 }
 
 export async function discoverFiles(roots: Roots | RootEntries = scanRootEntries(), demote?: ReadonlySet<string>): Promise<FileEntry[]> {

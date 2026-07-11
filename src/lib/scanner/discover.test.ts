@@ -559,6 +559,12 @@ test("demoted archived predecessors rank below live transcripts for the recency 
     const withSlack = await discoverFiles(roots, new Set([archivedPath, oldestLivePath]));
     expect(withSlack.some((entry) => entry.path === archivedPath)).toBe(true);
 
+    /* A fresh `#f=` deep link carries no selected project; pinning the exact
+       path keeps the demoted predecessor in the capped feed so the link can
+       resolve its conversation id. */
+    const pinnedScan = await discoverFilesWithProjectCatalog(roots, undefined, { demote: new Set([archivedPath]), pin: archivedPath });
+    expect(pinnedScan.files.some((entry) => entry.path === archivedPath)).toBe(true);
+
     /* Selected-project hydration ignores demotion: a legacy #f= deep link
        resolves the archived predecessor from the hydrated feed to redirect
        onto its successor, so the selected project must stay complete. */

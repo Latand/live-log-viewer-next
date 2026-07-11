@@ -23,8 +23,8 @@ function fileScanCache(): Map<string, FileScanCacheSlot> {
   return fileScanCacheStore.__llvFilesRouteScans;
 }
 
-function beginFileScanRefresh(slot: FileScanCacheSlot, selectedProject?: string): Promise<FileScanSnapshot> {
-  const refresh = listFilesWithProjectCatalog(selectedProject, { persist: false }).then((snapshot) => {
+function beginFileScanRefresh(slot: FileScanCacheSlot, selectedProject?: string, pinnedPath?: string): Promise<FileScanSnapshot> {
+  const refresh = listFilesWithProjectCatalog(selectedProject, { persist: false, pin: pinnedPath }).then((snapshot) => {
     slot.snapshot = snapshot;
     slot.refreshedAt = Date.now();
     return snapshot;
@@ -35,8 +35,8 @@ function beginFileScanRefresh(slot: FileScanCacheSlot, selectedProject?: string)
   return refresh;
 }
 
-export async function cachedFileScan(selectedProject?: string, now = Date.now()): Promise<CachedFileScan> {
-  const key = selectedProject ?? "";
+export async function cachedFileScan(selectedProject?: string, pinnedPath?: string, now = Date.now()): Promise<CachedFileScan> {
+  const key = `${selectedProject ?? ""}\u0000${pinnedPath ?? ""}`;
   const cache = fileScanCache();
   let slot = cache.get(key);
   if (!slot) {
@@ -45,7 +45,7 @@ export async function cachedFileScan(selectedProject?: string, now = Date.now())
   }
 
   if (!slot.snapshot) {
-    const snapshot = await (slot.refresh ?? beginFileScanRefresh(slot, selectedProject));
+    const snapshot = await (slot.refresh ?? beginFileScanRefresh(slot, selectedProject, pinnedPath));
     return { snapshot: structuredClone(snapshot) };
   }
 
@@ -54,7 +54,7 @@ export async function cachedFileScan(selectedProject?: string, now = Date.now())
     slot.refreshScheduled = true;
     refreshAfterResponse = async () => {
       try {
-        await (slot.refresh ?? beginFileScanRefresh(slot, selectedProject));
+        await (slot.refresh ?? beginFileScanRefresh(slot, selectedProject, pinnedPath));
       } catch (error) {
         console.error("[files] background scan refresh failed", error);
       } finally {
