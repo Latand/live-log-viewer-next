@@ -13,13 +13,14 @@ export interface ViewerComposeVolume {
 
 export interface ViewerComposeService {
   build: unknown;
-  command: null;
+  command: string[] | null;
   entrypoint: null;
   environment: Record<string, string>;
   image: string;
   labels: Record<string, string>;
   network_mode: string;
   pid: string;
+  profiles: string[];
   privileged: boolean;
   restart: string;
   user: string;
@@ -35,7 +36,7 @@ export interface ViewerCandidateContainerOverrides {
 
 const SERVICE_KEYS = new Set([
   "build", "command", "entrypoint", "environment", "image", "labels", "network_mode",
-  "pid", "privileged", "restart", "user", "volumes", "working_dir",
+  "pid", "privileged", "profiles", "restart", "user", "volumes", "working_dir",
 ]);
 const VOLUME_KEYS = new Set(["bind", "read_only", "source", "target", "type"]);
 
@@ -55,6 +56,11 @@ function stringRecord(value: unknown, label: string): Record<string, string> {
     if (typeof item !== "string") throw new Error(`${label}.${key} is invalid`);
   }
   return record as Record<string, string>;
+}
+
+function stringArray(value: unknown, label: string): string[] {
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) throw new Error(`${label} is invalid`);
+  return value as string[];
 }
 
 function assertCoveredKeys(record: Record<string, unknown>, supported: Set<string>, label: string): void {
@@ -83,19 +89,19 @@ export function viewerComposeServiceFromConfig(configJson: string): ViewerCompos
   const services = objectValue(config.services, "Compose services");
   const viewer = objectValue(services.viewer, "Viewer Compose service");
   assertCoveredKeys(viewer, SERVICE_KEYS, "Viewer Compose service");
-  if (viewer.command !== null) throw new Error("Viewer Compose command is unsupported");
   if (viewer.entrypoint !== null) throw new Error("Viewer Compose entrypoint is unsupported");
   if (typeof viewer.privileged !== "boolean") throw new Error("Viewer Compose privileged is invalid");
   if (!Array.isArray(viewer.volumes)) throw new Error("Viewer Compose volumes are invalid");
   return {
     build: viewer.build,
-    command: null,
+    command: viewer.command === null ? null : stringArray(viewer.command, "Viewer Compose command"),
     entrypoint: null,
     environment: stringRecord(viewer.environment, "Viewer Compose environment"),
     image: stringValue(viewer.image, "Viewer Compose image"),
     labels: viewer.labels === undefined ? {} : stringRecord(viewer.labels, "Viewer Compose labels"),
     network_mode: stringValue(viewer.network_mode, "Viewer Compose network_mode"),
     pid: stringValue(viewer.pid, "Viewer Compose pid"),
+    profiles: viewer.profiles === undefined ? [] : stringArray(viewer.profiles, "Viewer Compose profiles"),
     privileged: viewer.privileged,
     restart: stringValue(viewer.restart, "Viewer Compose restart"),
     user: stringValue(viewer.user, "Viewer Compose user"),
@@ -113,12 +119,13 @@ export function viewerComposeServiceUid(service: ViewerComposeService): string {
 export function viewerCandidateTmuxEnvironment(
   stateDir: string,
   uid: string,
+  configured: Pick<ViewerCandidateContainerOverrides, "legacyTmuxExternal" | "tmuxTmpdir">,
   exists: (filename: string) => boolean = fs.existsSync,
 ): Pick<ViewerCandidateContainerOverrides, "legacyTmuxExternal" | "tmuxTmpdir"> {
   const migrationComplete = exists(path.join(stateDir, "legacy-tmux-migration-complete"));
   return migrationComplete
     ? { legacyTmuxExternal: "1", tmuxTmpdir: `/run/user/${uid}/agent-log-viewer` }
-    : { legacyTmuxExternal: "0", tmuxTmpdir: "/tmp" };
+    : configured;
 }
 
 export function viewerCandidateDockerArgs(
@@ -133,6 +140,7 @@ export function viewerCandidateDockerArgs(
     LLV_RUNTIME_EVENTS: "1",
     LLV_RUNTIME_HOST_SOCKET: overrides.runtimeSocket,
     LLV_LEGACY_TMUX_EXTERNAL: overrides.legacyTmuxExternal,
+    LLV_ALLOW_LEGACY_VIEWER: "1",
     TMUX_TMPDIR: overrides.tmuxTmpdir,
   };
   const labels = {
@@ -156,6 +164,7 @@ export function viewerCandidateDockerArgs(
       `type=bind,source=${volume.source},target=${volume.target}${volume.read_only ? ",readonly" : ""}`,
     ]),
     candidate.image,
+    ...(service.command ?? []),
   ];
   return args;
 }

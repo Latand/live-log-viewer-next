@@ -91,12 +91,14 @@ file-watch limit for large home directories).
 ### Docker (reproducible runtime)
 
 For a pinned, reproducible deployment the repo ships a `Dockerfile` and
-`docker-compose.yml` that build `.next` inside the image and run the viewer
-with host parity (the container reuses your real `tmux`, `claude`, `codex` and
-home directory). This is how the maintainer's own prod instance runs.
+`docker-compose.yml` that build `.next` inside the image and run the Viewer
+with host parity. The container reuses your real `tmux`, `claude`, `codex`, and
+home directory. Runtime-host owns production releases and the listener.
 
 ```bash
-docker compose up -d viewer          # prod on 127.0.0.1:8898, restarts on reboot
+export LLV_DOCKER_GID="$(stat -c %g /var/run/docker.sock)"
+LLV_RUNTIME_EVENTS=1 LLV_VIEWER_DEPLOYMENTS=1 docker compose --profile runtime-host up -d runtime-host
+scripts/rebuild.sh
 LLV_TEST_PORT=8901 docker compose --profile test up -d viewer-test
 ```
 

@@ -41,6 +41,7 @@ const composeService = {
   labels: { "compose.viewer": "production" },
   network_mode: "host",
   pid: "host",
+  profiles: [],
   privileged: true,
   restart: "unless-stopped",
   user: "1000:1000",
@@ -62,6 +63,29 @@ function environmentFromArgs(args: string[]): Record<string, string> {
   }));
 }
 
+interface ResolvedComposeService {
+  command: string[] | null;
+  environment: Record<string, string>;
+  profiles?: string[];
+  user: string;
+  volumes: Array<{ source: string; target: string }>;
+}
+
+function resolvedCompose(overrides: Record<string, string> = {}): { services: Record<string, ResolvedComposeService> } {
+  const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "llv-compose-config-"));
+  const envFile = overrides.LLV_ENV_FILE ?? path.join(fixtureDir, "service.env");
+  fs.writeFileSync(envFile, "");
+  const result = Bun.spawnSync(["docker", "compose", "--profile", "*", "config", "--format", "json"], {
+    cwd: process.cwd(),
+    env: { ...process.env, LLV_ENV_FILE: envFile, ...overrides },
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  fs.rmSync(fixtureDir, { recursive: true, force: true });
+  if (result.exitCode !== 0) throw new Error(result.stderr.toString());
+  return JSON.parse(result.stdout.toString()) as { services: Record<string, ResolvedComposeService> };
+}
+
 test("promoted candidate derives its runtime contract from Compose", () => {
   const args = viewerCandidateDockerArgs(candidate, composeService, {
     runtimeSocket: "/state/runtime-host.sock",
@@ -78,6 +102,7 @@ test("promoted candidate derives its runtime contract from Compose", () => {
   expect(environment.LLV_TRANSCRIBE_BACKEND).toBe("chatgpt");
   expect(environment.LLV_DOCKER_NSENTER_SHIMS).toBe("1");
   expect(environment.GIT_SSH_COMMAND).toBe("ssh compose-config");
+  expect(environment.LLV_ALLOW_LEGACY_VIEWER).toBe("1");
   expect(valuesAfter(args, "--label")).toEqual([
     "compose.viewer=production",
     "dev.live-log-viewer.managed=1",
@@ -99,7 +124,7 @@ test("actual Viewer Compose keys remain covered by the candidate generator", () 
   const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "llv-compose-parity-"));
   const envFile = path.join(fixtureDir, "service.env");
   fs.writeFileSync(envFile, "");
-  const config = Bun.spawnSync(["docker", "compose", "config", "--format", "json"], {
+  const config = Bun.spawnSync(["docker", "compose", "--profile", "*", "config", "--format", "json"], {
     cwd: process.cwd(),
     env: { ...process.env, LLV_ENV_FILE: envFile },
     stdout: "pipe",
@@ -119,6 +144,8 @@ test("actual Viewer Compose keys remain covered by the candidate generator", () 
   ].sort());
   expect(valuesAfter(args, "--mount")).toHaveLength(service.volumes.length);
   expect(args[args.indexOf("--restart") + 1]).toBe(service.restart);
+  expect(environment.LLV_ALLOW_LEGACY_VIEWER).toBe("1");
+  expect(args.slice(args.indexOf(candidate.image) + 1)).toEqual(service.command ?? []);
   expect(valuesAfter(args, "--label").map((label) => label.split("=", 1)[0]).sort()).toEqual([
     ...Object.keys(service.labels),
     "dev.live-log-viewer.managed",
@@ -126,18 +153,41 @@ test("actual Viewer Compose keys remain covered by the candidate generator", () 
   ].sort());
 });
 
+test("runtime-host propagates every Viewer Compose interpolation input", () => {
+  const config = resolvedCompose({
+    LLV_UID: "1201",
+    LLV_GID: "1202",
+    LLV_TMUX_TMPDIR: "/run/user/1201/agent-log-viewer",
+  });
+  expect(config.services["runtime-host"].environment).toMatchObject({
+    LLV_UID: "1201",
+    LLV_GID: "1202",
+    LLV_TMUX_TMPDIR: "/run/user/1201/agent-log-viewer",
+    LLV_ENV_FILE: expect.any(String),
+  });
+  expect(config.services.viewer.user).toBe("1201:1202");
+  expect(config.services.viewer.environment.TMUX_TMPDIR).toBe("/run/user/1201/agent-log-viewer");
+  expect(config.services.viewer.volumes.map((volume) => volume.source)).toContain("/tmp/tmux-1201");
+});
+
+test("legacy Viewer requires a migration profile and launch grant", () => {
+  const viewer = resolvedCompose().services.viewer;
+  if (viewer.command === null) throw new Error("legacy Viewer guard command is missing");
+  expect(viewer.profiles).toEqual(["legacy-viewer-migration"]);
+  expect(viewer.environment.LLV_ALLOW_LEGACY_VIEWER).toBe("0");
+  expect(viewer.command.join(" ")).toContain("LLV_ALLOW_LEGACY_VIEWER");
+});
+
 test("candidate tmux environment follows the durable migration marker", () => {
   const checked: string[] = [];
-  expect(viewerCandidateTmuxEnvironment("/state", "1000", (filename) => {
+  const configured = { legacyTmuxExternal: "0", tmuxTmpdir: "/custom/tmux" };
+  expect(viewerCandidateTmuxEnvironment("/state", "1000", configured, (filename) => {
     checked.push(filename);
     return true;
   })).toEqual({ legacyTmuxExternal: "1", tmuxTmpdir: "/run/user/1000/agent-log-viewer" });
   expect(checked).toEqual(["/state/legacy-tmux-migration-complete"]);
 
-  expect(viewerCandidateTmuxEnvironment("/state", "1000", () => false)).toEqual({
-    legacyTmuxExternal: "0",
-    tmuxTmpdir: "/tmp",
-  });
+  expect(viewerCandidateTmuxEnvironment("/state", "1000", configured, () => false)).toEqual(configured);
 });
 
 test("container retention keeps the serving and immediate rollback releases", () => {

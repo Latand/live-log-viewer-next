@@ -33,8 +33,8 @@ x-viewer-common: &viewer-common
     - /tmp/claude-${LLV_UID:-1000}:/tmp/claude-${LLV_UID:-1000}
 
 services:
-  # Explicit activation only. This service is deliberately independent of the
-  # Viewer replacement lifecycle; deployment and cutover remain operator work.
+  # Explicit activation only. This service owns the Viewer replacement
+  # lifecycle after the listener migration.
   runtime-host:
     <<: *viewer-common
     group_add:
@@ -49,6 +49,15 @@ services:
       HOME: /home/latand
       XDG_CONFIG_HOME: /home/latand/.config
       XDG_CACHE_HOME: /home/latand/.cache
+      # Nested `docker compose config` must see the same interpolation inputs
+      # that produced this runtime-host container.
+      LLV_UID: ${LLV_UID:-1000}
+      LLV_GID: ${LLV_GID:-1000}
+      LLV_ENV_FILE: ${LLV_ENV_FILE:-/home/latand/.config/agent-log-viewer/service.env}
+      LLV_TMUX_TMPDIR: ${LLV_TMUX_TMPDIR:-/tmp}
+      LLV_LEGACY_TMUX_EXTERNAL: ${LLV_LEGACY_TMUX_EXTERNAL:-0}
+      LLV_TRANSCRIBE_BACKEND: ${LLV_TRANSCRIBE_BACKEND:-}
+      LLV_ALLOW_LEGACY_VIEWER: ${LLV_ALLOW_LEGACY_VIEWER:-0}
       # The profile gate is the activation switch; a started runtime-host is
       # always an events host (main.ts refuses to boot without the flag).
       LLV_RUNTIME_EVENTS: ${LLV_RUNTIME_EVENTS:-1}
@@ -62,7 +71,20 @@ services:
 
   viewer:
     <<: *viewer-common
+    # The launch grant below also fences explicit service targeting, which
+    # automatically enables a service profile in Docker Compose.
+    profiles:
+      - legacy-viewer-migration
     restart: unless-stopped
+    command:
+      - sh
+      - -c
+      - |
+        if [ "$${LLV_ALLOW_LEGACY_VIEWER:-0}" != "1" ]; then
+          echo "legacy Viewer launch requires LLV_ALLOW_LEGACY_VIEWER=1 and profile legacy-viewer-migration" >&2
+          exit 78
+        fi
+        exec node_modules/.bin/next start --port "$${PORT:-8898}" --hostname "$${HOSTNAME:-127.0.0.1}"
     environment:
       HOME: /home/latand
       HOSTNAME: 127.0.0.1
@@ -75,6 +97,7 @@ services:
       HF_HOME: /home/latand/.cache/huggingface
       LLV_WHISPER_VENV: /opt/llv-whisper-venv
       LLV_TRANSCRIBE_BACKEND: ${LLV_TRANSCRIBE_BACKEND:-}
+      LLV_ALLOW_LEGACY_VIEWER: ${LLV_ALLOW_LEGACY_VIEWER:-0}
       LLV_DOCKER_NSENTER_SHIMS: "1"
       GIT_SSH_COMMAND: ssh -F /home/latand/.ssh/config -o UserKnownHostsFile=/home/latand/.ssh/known_hosts -o IdentityFile=/home/latand/.ssh/id_ed25519
 

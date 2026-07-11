@@ -85,7 +85,7 @@ async function buildCandidate(deploymentId: string, revision: string): Promise<V
   try {
     const composeConfig = await command([
       "docker", "compose", "--project-directory", sourceDir, "-f", path.join(sourceDir, "docker-compose.yml"),
-      "config", "--format", "json",
+      "--profile", "*", "config", "--format", "json",
     ]);
     writeComposeConfig(revision, composeConfig);
     await command(["docker", "build", "--pull", "--label", `dev.live-log-viewer.revision=${revision}`, "-t", image, sourceDir]);
@@ -113,7 +113,10 @@ async function startCandidate(candidate: ViewerReleaseIdentity): Promise<void> {
   }
   const composeService = viewerComposeServiceFromConfig(fs.readFileSync(composeConfigFile(candidate.revision), "utf8"));
   const uid = viewerComposeServiceUid(composeService);
-  const tmuxEnvironment = viewerCandidateTmuxEnvironment(stateDir, uid);
+  const tmuxEnvironment = viewerCandidateTmuxEnvironment(stateDir, uid, {
+    legacyTmuxExternal: composeService.environment.LLV_LEGACY_TMUX_EXTERNAL || "0",
+    tmuxTmpdir: composeService.environment.TMUX_TMPDIR || "/tmp",
+  });
   await command(viewerCandidateDockerArgs(candidate, composeService, {
     runtimeSocket,
     ...tmuxEnvironment,

@@ -8,13 +8,36 @@ Host developer CLIs run through `nsenter` shims in `/usr/local/bin`, ahead of mo
 
 ## Production instance
 
-The `viewer` service is the production runtime on `127.0.0.1:8898`. It replaced the old `agent-log-viewer.service` systemd user unit, which is now disabled and inactive.
+Runtime-host owns production releases and the stable listener on
+`127.0.0.1:8898`. Docker owns the current and rollback Viewer containers on
+candidate ports. Activate runtime-host after completing the listener migration
+described in [RELEASING.md](RELEASING.md):
 
 ```bash
-docker compose up -d --build viewer
+export LLV_DOCKER_GID="$(stat -c %g /var/run/docker.sock)"
+LLV_RUNTIME_EVENTS=1 LLV_VIEWER_DEPLOYMENTS=1 docker compose --profile runtime-host up -d runtime-host
+scripts/rebuild.sh
 ```
 
-`restart: unless-stopped` gives reboot survival (it replaces the systemd `Restart=always`). Manage the viewer with `docker compose` — `docker compose restart viewer`, `docker compose logs -f viewer` — not `systemctl`. If you ever re-enable the old systemd unit, stop the container first: both bind `127.0.0.1:8898` and only one process can own the port.
+Use `scripts/rebuild.sh` for every production Viewer release. Runtime-host
+serializes the request, verifies the candidate, and switches its listener
+target. Inspect the owner with
+`docker compose --profile runtime-host logs -f runtime-host`.
+
+The Compose `viewer` service exists for the one-time listener migration. Its
+`legacy-viewer-migration` profile and `LLV_ALLOW_LEGACY_VIEWER=1` launch grant
+must both be present:
+
+```bash
+LLV_ALLOW_LEGACY_VIEWER=1 docker compose --profile legacy-viewer-migration up -d --build viewer
+```
+
+Stop and remove that migration container before activating runtime-host:
+
+```bash
+docker compose --profile legacy-viewer-migration stop viewer
+docker compose --profile legacy-viewer-migration rm -f viewer
+```
 
 ## Legacy tmux supervisor migration
 
