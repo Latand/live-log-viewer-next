@@ -623,6 +623,232 @@ test("merge probes are concurrent and a stalled probe times out fail closed", as
   expect(stalled.mergeEvidence?.mergedAt).toBeNull();
 });
 
+test("merge evidence persistence cannot roll back a concurrent flow transition", async () => {
+  const now = Date.parse("2026-07-12T12:00:00.000Z");
+  const reviewedSha = "1".repeat(40);
+  const stale = {
+    ...headlessFlow(now),
+    id: "flow-store-race",
+    rounds: [{ ...headlessFlow(now).rounds[0]!, reviewHeadSha: reviewedSha }],
+    mergeEvidence: {
+      repository: "Latand/live-log-viewer-next",
+      headRef: "feature/store-race",
+      headSha: reviewedSha,
+      prNumber: null,
+      mergedAt: null,
+      checkedAt: null,
+      source: null,
+    },
+  } satisfies Flow;
+  let stored: Flow[] = structuredClone([stale]);
+
+  await refreshMergedFlowIds([structuredClone(stale)], {
+    now: () => now,
+    resolveMergeIdentity: () => null,
+    probePullRequest: async () => {
+      stored[0]!.state = "fixing";
+      stored[0]!.closedAt = null;
+      return { number: 601, mergedAt: new Date(now - 60_000).toISOString(), headRefOid: reviewedSha };
+    },
+    localBranchMerged: () => false,
+    loadFlows: () => structuredClone(stored),
+    saveFlows: (flows) => { stored = structuredClone(flows); },
+  });
+
+  expect(stored[0]).toMatchObject({ state: "fixing", closedAt: null });
+  expect(stored[0]?.mergeEvidence?.mergedAt).toBeNull();
+});
+
+test("an existing checkout with unverified cleanliness loses merge authorization", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-reaper-unverified-checkout-"));
+  const now = Date.parse("2026-07-12T12:00:00.000Z");
+  const reviewedSha = "2".repeat(40);
+  const flow = {
+    ...headlessFlow(now),
+    id: "flow-unverified-checkout",
+    cwd: directory,
+    rounds: [{ ...headlessFlow(now).rounds[0]!, reviewHeadSha: reviewedSha }],
+    mergeEvidence: {
+      repository: "Latand/live-log-viewer-next",
+      headRef: "feature/unverified",
+      headSha: reviewedSha,
+      prNumber: 602,
+      mergedAt: new Date(now - 60_000).toISOString(),
+      checkedAt: new Date(now - 60_000).toISOString(),
+      source: "github-pr",
+    },
+  } satisfies Flow;
+  try {
+    expect(await refreshMergedFlowIds([flow], {
+      now: () => now,
+      checkoutClean: () => null,
+      resolveMergeIdentity: () => ({ repository: "Latand/live-log-viewer-next", headRef: "feature/unverified", headSha: reviewedSha }),
+      saveFlows: () => {},
+    })).toEqual(new Set());
+    expect(flow.mergeEvidence?.mergedAt).toBeNull();
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("local merge evidence persists the reviewed SHA without GitHub identity", async () => {
+  const now = Date.parse("2026-07-12T12:00:00.000Z");
+  const reviewedSha = "3".repeat(40);
+  const flow = {
+    ...headlessFlow(now),
+    id: "flow-local-merge",
+    rounds: [{ ...headlessFlow(now).rounds[0]!, reviewHeadSha: reviewedSha }],
+    mergeEvidence: null,
+  } satisfies Flow;
+
+  expect(await refreshMergedFlowIds([flow], {
+    now: () => now,
+    resolveMergeIdentity: () => null,
+    localBranchMerged: () => true,
+    saveFlows: () => {},
+  })).toEqual(new Set([flow.id]));
+  expect(flow.mergeEvidence).toMatchObject({ headSha: reviewedSha, source: "git-ancestor" });
+});
+
+test("Viewer flow deliveries are discounted from transcript authorship", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-reaper-flow-authorship-"));
+  const sessionId = "019f4906-3f67-7b72-9fbc-9ec3b5ad1350";
+  const pathname = path.join(directory, `rollout-${sessionId}.jsonl`);
+  const now = Date.parse("2026-07-12T12:00:00.000Z");
+  const messages = ["launch prompt", "flow kickoff", "review findings"].map((message) => JSON.stringify({
+    type: "event_msg",
+    timestamp: new Date(now - 2 * 60 * 60_000).toISOString(),
+    payload: { type: "user_message", message },
+  })).join("\n") + "\n";
+  fs.writeFileSync(pathname, messages);
+  process.env.LLV_STATE_DIR = directory;
+  delete process.env.LLV_REAPER_ENABLED;
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const profile = emptyLaunchProfile({ cwd: "/repo", role: "worker" });
+  const receipt = registry.beginSpawn("codex", "/repo", profile);
+  registry.completeSpawn(receipt.launchId, {
+    key: { engine: "codex", sessionId },
+    artifactPath: pathname,
+    cwd: "/repo",
+    accountId: "default",
+    launchProfile: profile,
+    status: "idle",
+    host: null,
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  registry.reconcileConversations([{
+    engine: "codex",
+    path: pathname,
+    accountId: "default",
+    launchProfile: profile,
+    turn: { state: "idle", source: "assistant", terminalAt: new Date(now - 2 * 60 * 60_000).toISOString() },
+    observedAt: new Date(now - 2 * 60 * 60_000).toISOString(),
+  }]);
+  const reviewedSha = "4".repeat(40);
+  const flow = {
+    ...headlessFlow(now),
+    id: "flow-viewer-authorship",
+    cwd: "/deleted/flow-worktree",
+    implementerPath: pathname,
+    closedAt: new Date(now - 31 * 60_000).toISOString(),
+    kickoffDelivery: { path: pathname, deliveredAt: new Date(now - 3 * 60 * 60_000).toISOString() },
+    rounds: [{
+      ...headlessFlow(now).rounds[0]!,
+      reviewHeadSha: reviewedSha,
+      relayDelivery: { path: pathname, deliveredAt: new Date(now - 31 * 60_000).toISOString() },
+    }],
+    mergeEvidence: {
+      repository: "Latand/live-log-viewer-next",
+      headRef: "feature/authorship",
+      headSha: reviewedSha,
+      prNumber: 603,
+      mergedAt: new Date(now - 32 * 60_000).toISOString(),
+      checkedAt: new Date(now - 32 * 60_000).toISOString(),
+      source: "github-pr",
+    },
+  } satisfies Flow;
+  try {
+    const report = await runReaperCycle({
+      registry,
+      hosts: [runtimeHost(pathname)],
+      files: [runtimeFile(pathname, now / 1000 - 2 * 60 * 60)],
+      now,
+      actuation: { loadFlows: () => [flow], now: () => now },
+    });
+
+    expect(report.agents[0]).toMatchObject({ class: "flow-worker", eligible: true, protectedReasons: [] });
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("actuation rejects a replacement host that reused the candidate pane", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-reaper-reused-pane-"));
+  const sessionId = "019f4906-3f67-7b72-9fbc-9ec3b5ad1351";
+  const pathname = path.join(directory, `rollout-${sessionId}.jsonl`);
+  const now = Date.parse("2026-07-12T12:00:00.000Z");
+  fs.writeFileSync(pathname, JSON.stringify({
+    type: "event_msg",
+    timestamp: new Date(now - 2 * 60 * 60_000).toISOString(),
+    payload: { type: "user_message", message: "launch prompt" },
+  }) + "\n");
+  process.env.LLV_STATE_DIR = directory;
+  process.env.LLV_REAPER_ENABLED = "1";
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const profile = emptyLaunchProfile({ cwd: "/repo", role: "worker", title: "probe" });
+  const receipt = registry.beginSpawn("codex", "/repo", profile);
+  registry.completeSpawn(receipt.launchId, {
+    key: { engine: "codex", sessionId },
+    artifactPath: pathname,
+    cwd: "/repo",
+    accountId: "default",
+    launchProfile: profile,
+    status: "idle",
+    host: null,
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  registry.reconcileConversations([{
+    engine: "codex",
+    path: pathname,
+    accountId: "default",
+    launchProfile: profile,
+    turn: { state: "idle", source: "assistant", terminalAt: new Date(now - 2 * 60 * 60_000).toISOString() },
+    observedAt: new Date(now - 2 * 60 * 60_000).toISOString(),
+  }]);
+  const original = runtimeHost(pathname);
+  const replacement = { ...original, panePid: 1042, agentPid: 2042, agentIdentity: "2042:replacement" };
+  const replacementSnapshot: TranscriptHostSnapshot = {
+    hosts: [replacement],
+    observation: "available",
+    canonicalFor: (candidate) => candidate === pathname ? replacement : null,
+  };
+  let observations = 0;
+  let kills = 0;
+  try {
+    const report = await runReaperCycle({
+      registry,
+      hosts: [original],
+      files: [runtimeFile(pathname, now / 1000 - 2 * 60 * 60)],
+      now,
+      actuation: {
+        readHosts: async () => { observations += 1; return replacementSnapshot; },
+        kill: async () => { kills += 1; return true; },
+        now: () => now,
+      },
+    });
+
+    expect(report.agents[0]).toMatchObject({ eligible: true, action: "kill-failed" });
+    expect(observations).toBe(1);
+    expect(kills).toBe(0);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("a delivery completed before reaper actuation fences the stale idle turn", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-reaper-delivery-fence-"));
   const pathname = path.join(directory, "missing-019f4906-3f67-7b72-9fbc-9ec3b5ad1342.jsonl");

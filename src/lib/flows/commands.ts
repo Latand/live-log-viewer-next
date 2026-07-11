@@ -95,6 +95,7 @@ export async function createFlowFromRequest(req: CreateFlowRequest, entries: Fil
       const identity = resolveFlowMergeIdentity(cwd);
       return identity ? { ...identity, prNumber: null, mergedAt: null, checkedAt: null, source: null } : null;
     })(),
+    kickoffDelivery: null,
     rounds: [],
     createdAt: isoNow(),
     closedAt: null,
@@ -102,7 +103,9 @@ export async function createFlowFromRequest(req: CreateFlowRequest, entries: Fil
   flows.push(flow);
   saveFlows(flows);
   try {
-    await sendToImplementer(flow, new Map(entries.map((item) => [item.path, item])), kickoffPrompt(flow.spec));
+    const deliveryPath = await sendToImplementer(flow, new Map(entries.map((item) => [item.path, item])), kickoffPrompt(flow.spec));
+    flow.kickoffDelivery = { path: deliveryPath, deliveredAt: isoNow() };
+    saveFlows(flows);
   } catch (error) {
     flow.state = "paused";
     flow.pausedState = "waiting_ready";
@@ -241,6 +244,7 @@ export function patchFlow(id: string, req: PatchFlowRequest): { flow?: Flow; err
       startedAt: isoNow(),
       spawnStartedAt: null,
       relayStartedAt: null,
+      relayDelivery: null,
       reviewedAt: null,
       relayedAt: null,
       error: null,

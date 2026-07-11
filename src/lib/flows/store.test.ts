@@ -118,7 +118,7 @@ test("flow specs persist in the versioned state file and legacy flow entries loa
     });
 
     fs.writeFileSync(path.join(sandbox, "flows.json"), JSON.stringify({ flows: [flow] }));
-    expect(loadFlows()).toEqual([{ ...flow, implementerConversationId: null, pausedState: null }]);
+    expect(loadFlows()).toEqual([{ ...flow, implementerConversationId: null, pausedState: null, kickoffDelivery: null }]);
   } finally {
     if (previousState === undefined) delete process.env.LLV_STATE_DIR;
     else process.env.LLV_STATE_DIR = previousState;

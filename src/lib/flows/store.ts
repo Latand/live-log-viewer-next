@@ -167,6 +167,7 @@ export function loadFlows(): Flow[] {
     ...flow,
     implementerConversationId: flow.implementerConversationId ?? null,
     pausedState: flow.pausedState ?? null,
+    kickoffDelivery: flow.kickoffDelivery ?? null,
     rounds: flow.rounds.map((round) => ({
       ...round,
       reviewerConversationId: round.reviewerConversationId ?? null,
@@ -176,6 +177,7 @@ export function loadFlows(): Flow[] {
       reviewHeadSha: round.reviewHeadSha ?? null,
       spawnStartedAt: round.spawnStartedAt ?? null,
       relayStartedAt: round.relayStartedAt ?? null,
+      relayDelivery: round.relayDelivery ?? null,
       error: round.error ?? null,
     })),
   }));

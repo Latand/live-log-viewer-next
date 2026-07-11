@@ -170,21 +170,51 @@ async function mapWithConcurrency<T>(items: T[], concurrency: number, task: (ite
   await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, worker));
 }
 
+function flowTransitionRevision(flow: Flow): string {
+  const { mergeEvidence: _mergeEvidence, ...transition } = flow;
+  return JSON.stringify(transition);
+}
+
+function cloneMergeEvidence(evidence: FlowMergeEvidence | null | undefined): FlowMergeEvidence | null {
+  return evidence ? { ...evidence } : null;
+}
+
+function persistRefreshedMergeEvidence(
+  flows: Flow[],
+  changedFlowIds: ReadonlySet<string>,
+  initialRevisions: ReadonlyMap<string, string>,
+  overrides: ReaperActuationOverrides,
+): void {
+  if (changedFlowIds.size === 0 || (overrides.loadFlows && !overrides.saveFlows)) return;
+  const latest = overrides.loadFlows ? overrides.loadFlows() : overrides.saveFlows ? flows : loadFlows();
+  let applied = false;
+  for (const candidate of flows) {
+    if (!changedFlowIds.has(candidate.id)) continue;
+    const current = latest.find((flow) => flow.id === candidate.id);
+    if (!current || flowTransitionRevision(current) !== initialRevisions.get(candidate.id)) continue;
+    current.mergeEvidence = cloneMergeEvidence(candidate.mergeEvidence);
+    applied = true;
+  }
+  if (applied) (overrides.saveFlows ?? saveFlows)(latest);
+}
+
 export async function refreshMergedFlowIds(flows: Flow[], overrides: ReaperActuationOverrides = {}): Promise<Set<string>> {
   const now = (overrides.now ?? Date.now)();
   const merged = new Set<string>();
-  let changed = false;
+  const initialRevisions = new Map(flows.map((flow) => [flow.id, flowTransitionRevision(flow)]));
+  const changedFlowIds = new Set<string>();
+  const markChanged = (flow: Flow) => { changedFlowIds.add(flow.id); };
   const timeoutMs = overrides.mergeProbeTimeoutMs ?? MERGE_PROBE_TIMEOUT_MS;
   const concurrency = Math.max(1, overrides.mergeProbeConcurrency ?? MERGE_PROBE_CONCURRENCY);
   await mapWithConcurrency(flows, concurrency, async (flow) => {
     let evidence = flow.mergeEvidence ?? null;
     const clean = (overrides.checkoutClean ?? checkoutClean)(flow);
-    if (clean === false) {
+    if (clean === false || (clean === null && fs.existsSync(flow.cwd))) {
       if (evidence?.mergedAt || evidence?.source) {
         evidence.mergedAt = null;
         evidence.checkedAt = null;
         evidence.source = null;
-        changed = true;
+        markChanged(flow);
       }
       return;
     }
@@ -197,19 +227,19 @@ export async function refreshMergedFlowIds(flows: Flow[], overrides: ReaperActua
           evidence.mergedAt = null;
           evidence.checkedAt = null;
           evidence.source = null;
-          changed = true;
+          markChanged(flow);
         }
         return;
       }
       if (!evidence || evidence.repository !== identity.repository || evidence.headRef !== identity.headRef || evidence.headSha !== reviewedSha) {
         evidence = { ...identity, headSha: reviewedSha, prNumber: null, mergedAt: null, checkedAt: null, source: null };
         flow.mergeEvidence = evidence;
-        changed = true;
+        markChanged(flow);
       }
     } else if (evidence?.headSha !== reviewedSha) {
       evidence = evidence ? { ...evidence, headSha: reviewedSha, prNumber: null, mergedAt: null, checkedAt: null, source: null } : null;
       flow.mergeEvidence = evidence;
-      changed = true;
+      markChanged(flow);
     }
     if (evidence?.mergedAt) {
       merged.add(flow.id);
@@ -235,14 +265,14 @@ export async function refreshMergedFlowIds(flows: Flow[], overrides: ReaperActua
       } else {
         if (pullRequest) evidence.prNumber = pullRequest.number;
         evidence.checkedAt = new Date(now).toISOString();
-        changed = true;
+        markChanged(flow);
       }
     }
     if (!confirmed && (overrides.localBranchMerged ?? localBranchMerged)(flow, reviewedSha)) {
       confirmed = {
         repository: evidence?.repository ?? null,
         headRef: evidence?.headRef ?? null,
-        headSha: evidence?.headSha ?? null,
+        headSha: reviewedSha,
         prNumber: evidence?.prNumber ?? null,
         mergedAt: new Date(now).toISOString(),
         checkedAt: new Date(now).toISOString(),
@@ -252,10 +282,10 @@ export async function refreshMergedFlowIds(flows: Flow[], overrides: ReaperActua
     if (confirmed) {
       flow.mergeEvidence = confirmed;
       merged.add(flow.id);
-      changed = true;
+      markChanged(flow);
     }
   });
-  if (changed) (overrides.saveFlows ?? saveFlows)(flows);
+  persistRefreshedMergeEvidence(flows, changedFlowIds, initialRevisions, overrides);
   return merged;
 }
 
@@ -275,7 +305,16 @@ function hasViewerWorkerLaunchPrompt(snapshot: ReturnType<AgentRegistry["snapsho
     && receipt.state === "completed");
 }
 
-function authorshipEvidence(snapshot: ReturnType<AgentRegistry["snapshot"]>, hosts: TranscriptHost[]): {
+function viewerFlowMessageAllowance(flows: Flow[], pathname: string): number {
+  let count = 0;
+  for (const flow of flows) {
+    if (flow.kickoffDelivery?.path === pathname) count += 1;
+    count += flow.rounds.filter((round) => round.relayDelivery?.path === pathname).length;
+  }
+  return count;
+}
+
+function authorshipEvidence(snapshot: ReturnType<AgentRegistry["snapshot"]>, hosts: TranscriptHost[], flows: Flow[]): {
   userAuthoredPaths: Set<string>;
   unverifiedPaths: Set<string>;
 } {
@@ -284,9 +323,10 @@ function authorshipEvidence(snapshot: ReturnType<AgentRegistry["snapshot"]>, hos
   for (const host of hosts) {
     const pathname = host.primaryPath;
     if (!pathname || userAuthoredPaths.has(pathname) || unverifiedPaths.has(pathname)) continue;
-    const launchPromptAllowance = hasViewerWorkerLaunchPrompt(snapshot, pathname) ? 1 : 0;
-    const scan = scanUserAuthoredMessages(pathname, host.engine, launchPromptAllowance + 1);
-    if (scan.count > launchPromptAllowance) userAuthoredPaths.add(pathname);
+    const viewerMessageAllowance = (hasViewerWorkerLaunchPrompt(snapshot, pathname) ? 1 : 0)
+      + viewerFlowMessageAllowance(flows, pathname);
+    const scan = scanUserAuthoredMessages(pathname, host.engine, viewerMessageAllowance + 1);
+    if (scan.count > viewerMessageAllowance) userAuthoredPaths.add(pathname);
     else if (!scan.complete) unverifiedPaths.add(pathname);
   }
   return { userAuthoredPaths, unverifiedPaths };
@@ -355,7 +395,7 @@ async function makeInput(
   const flows = (overrides.loadFlows ?? loadFlows)();
   const missingTranscriptPaths = new Set(hosts.flatMap((host) =>
     host.primaryPath && !fs.existsSync(host.primaryPath) ? [host.primaryPath] : []));
-  const authorship = authorshipEvidence(snapshot, hosts);
+  const authorship = authorshipEvidence(snapshot, hosts, flows);
   return {
     now,
     registry: snapshot,
@@ -435,6 +475,24 @@ export async function killHeadlessReviewerIfMatches(
   return false;
 }
 
+function hostMatchesCandidate(host: TranscriptHost, candidate: ReaperAgentReport): boolean {
+  return candidate.targetKind === "tmux"
+    && host.paneId === candidate.paneId
+    && host.panePid === candidate.panePid
+    && host.agentPid === candidate.agentPid
+    && host.agentIdentity === candidate.processIdentity
+    && host.primaryPath === candidate.path;
+}
+
+function reportMatchesCandidate(current: ReaperAgentReport, expected: ReaperAgentReport): boolean {
+  return current.targetKind === "tmux"
+    && current.paneId === expected.paneId
+    && current.panePid === expected.panePid
+    && current.agentPid === expected.agentPid
+    && current.processIdentity === expected.processIdentity
+    && current.path === expected.path;
+}
+
 async function actuateCandidate(
   registry: AgentRegistry,
   files: FileEntry[],
@@ -458,9 +516,9 @@ async function actuateCandidate(
   const observeHosts = overrides.readHosts ?? readTranscriptHosts;
   const killHost = overrides.kill ?? killTmuxHostIfMatches;
   const currentTime = overrides.now ?? Date.now;
-  const initialHost = (await observeHosts(true)).hosts.find((host) => host.paneId === paneId);
+  const initialHost = (await observeHosts(true)).hosts.find((host) => hostMatchesCandidate(host, agent));
   if (!initialHost?.primaryPath) return false;
-  const entry = Object.values(registry.snapshot().entries).find((candidate) => candidate.artifactPath === initialHost.primaryPath);
+  const entry = Object.values(registry.snapshot().entries).find((candidate) => candidate.artifactPath === agent.path);
   if (!entry) return false;
   const owner = { pid: process.pid, startIdentity: procBackend.processIdentity(process.pid) };
   return registry.withOperationLock(entry.key, owner, async () => {
@@ -468,14 +526,10 @@ async function actuateCandidate(
     try {
       registry.claim(entry.key, claimOwner);
       const freshSnapshot: TranscriptHostSnapshot = await observeHosts(true);
-      const freshHost = freshSnapshot.hosts.find((host) =>
-        host.paneId === paneId
-        && host.agentPid === initialHost.agentPid
-        && host.agentIdentity === initialHost.agentIdentity
-        && host.primaryPath === initialHost.primaryPath);
+      const freshHost = freshSnapshot.hosts.find((host) => hostMatchesCandidate(host, agent));
       if (!freshHost) return false;
       const current = evaluateReaper(await makeInput(registry, freshSnapshot.hosts, refreshFileTimes(files), state, currentTime(), overrides));
-      const candidate = current.agents.find((item) => item.targetKind === "tmux" && item.paneId === paneId);
+      const candidate = current.agents.find((item) => reportMatchesCandidate(item, agent));
       if (!candidate?.eligible) return false;
       const killed = await killHost(evidenceFor(freshHost));
       if (killed && registry.snapshot().entries[`${entry.key.engine}:${entry.key.sessionId}`]?.host?.paneId === paneId) {

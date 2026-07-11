@@ -30,6 +30,11 @@ export type FlowState =
 
 export type ReviewVerdict = "APPROVE" | "REQUEST_CHANGES" | "COMMENT";
 
+export type ViewerFlowDelivery = {
+  path: string;
+  deliveredAt: string;
+};
+
 export type FlowBlock = {
   reason: "rate_limited";
   /** Stable address for a future continue-on-account action. */
@@ -82,6 +87,8 @@ export type Round = {
   startedAt: string;
   spawnStartedAt?: string | null; // reviewer launch started
   relayStartedAt?: string | null; // findings delivery started
+  /** Exact transcript generation that received Viewer-generated findings. */
+  relayDelivery?: ViewerFlowDelivery | null;
   reviewedAt: string | null; // verdict detected
   relayedAt: string | null; // findings delivered to implementer
   error: string | null;
@@ -111,6 +118,8 @@ export type Flow = {
   /** Durable positive merge evidence and the repository identity needed to
       refresh it after the originating worktree disappears. */
   mergeEvidence?: FlowMergeEvidence | null;
+  /** Exact transcript generation that received the Viewer-generated kickoff. */
+  kickoffDelivery?: ViewerFlowDelivery | null;
   rounds: Round[];
   createdAt: string;
   closedAt: string | null;

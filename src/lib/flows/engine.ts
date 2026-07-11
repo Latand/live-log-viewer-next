@@ -92,6 +92,7 @@ export function newRound(flow: Flow, triggeredBy: Round["triggeredBy"], readyNot
     startedAt: isoNow(),
     spawnStartedAt: null,
     relayStartedAt: null,
+    relayDelivery: null,
     reviewedAt: null,
     relayedAt: null,
     error: null,
@@ -114,13 +115,14 @@ function currentConversationPath(conversationId: string | null | undefined, fall
   return agentRegistry().canonicalPath(fallback);
 }
 
-export async function sendToImplementer(flow: Flow, entriesByPath: Map<string, FileEntry>, text: string): Promise<void> {
+export async function sendToImplementer(flow: Flow, entriesByPath: Map<string, FileEntry>, text: string): Promise<string> {
   const entry = entriesByPath.get(currentConversationPath(flow.implementerConversationId, flow.implementerPath));
   if (!entry) throw new Error("implementer transcript is missing from scanner");
   const spec = resumeSpecFor(entry.root, entry.path, { model: entry.launchModel ?? entry.model, effort: entry.effort });
   if (!spec) throw new Error("implementer session cannot be resumed");
   const outcome = await deliverToTranscriptHost({ entry, spec, payload: text });
   if (!outcome.ok) throw new Error(outcome.error);
+  return entry.path;
 }
 
 function sessionIdFromHeadlessStdout(stdout: string): string | null {
@@ -229,8 +231,10 @@ async function relayFindings(flow: Flow, entriesByPath: Map<string, FileEntry>, 
   if (!round.findingsPath) throw new Error("round has no findings artifact");
   const findings = fs.readFileSync(round.findingsPath, "utf8");
   flow.state = "relaying";
-  await sendToImplementer(flow, entriesByPath, relayPrompt(round, findings));
-  round.relayedAt = isoNow();
+  const deliveryPath = await sendToImplementer(flow, entriesByPath, relayPrompt(round, findings));
+  const deliveredAt = isoNow();
+  round.relayDelivery = { path: deliveryPath, deliveredAt };
+  round.relayedAt = deliveredAt;
   if (round.verdict === "APPROVE") {
     flow.state = "approved";
     flow.closedAt = isoNow();
