@@ -9,6 +9,7 @@ export type ReaperProtection =
   | "user-authored-message"
   | "mid-turn"
   | "manual-board-placement"
+  | "migration-in-progress"
   | "newest-duplicate"
   | "flow-in-progress"
   | "flow-not-merged"
@@ -126,26 +127,36 @@ function probeProfile(profile: LaunchProfile | null, host: TranscriptHost): bool
   return /\b(?:probe|soak)\b/i.test(text);
 }
 
-function duplicateGroups(hosts: TranscriptHost[], registry: RegistryFile): Map<string, TranscriptHost[]> {
+function duplicateGroups(hosts: TranscriptHost[]): Map<string, TranscriptHost[]> {
   const groups = new Map<string, TranscriptHost[]>();
   for (const host of hosts) {
     if (!host.primaryPath) continue;
-    const conversation = conversationForPath(registry, host.primaryPath);
-    const key = conversation?.id ?? `${host.engine}:${host.primaryPath}`;
+    const key = `${host.engine}:${host.primaryPath}`;
     groups.set(key, [...(groups.get(key) ?? []), host]);
   }
   return groups;
 }
 
+function deliveryFencesTurn(registry: RegistryFile, conversation: RegistryConversation): boolean {
+  const observedAt = conversation.turn.observedAt ? Date.parse(conversation.turn.observedAt) : Number.NaN;
+  return Object.values(registry.heldDeliveries).some((delivery) => {
+    if (delivery.conversationId !== conversation.id) return false;
+    if (delivery.state === "held" || delivery.state === "assigned" || delivery.state === "delivery-uncertain") return true;
+    if (delivery.state !== "delivered" || !delivery.deliveredAt) return false;
+    const deliveredAt = Date.parse(delivery.deliveredAt);
+    return Number.isFinite(deliveredAt) && (!Number.isFinite(observedAt) || deliveredAt >= observedAt);
+  });
+}
+
 export function evaluateReaper(input: ReaperInput): ReaperReport {
   const files = new Map(input.files.map((entry) => [entry.path, entry]));
-  const groups = duplicateGroups(input.hosts, input.registry);
+  const groups = duplicateGroups(input.hosts);
   const agents = input.hosts.map((host): ReaperAgentReport => {
     const pathname = host.primaryPath;
     const conversation = pathname ? conversationForPath(input.registry, pathname) : null;
     const profile = pathname ? profileForPath(input.registry, pathname) : null;
     const flowMatch = pathname ? flowForPath(input.flows, pathname) : null;
-    const group = pathname ? groups.get(conversation?.id ?? `${host.engine}:${pathname}`) ?? [] : [];
+    const group = pathname ? groups.get(`${host.engine}:${pathname}`) ?? [] : [];
     const newestDuplicate = group.length > 1
       ? [...group].sort((left, right) => paneNumber(right.paneId) - paneNumber(left.paneId))[0]
       : null;
@@ -176,7 +187,12 @@ export function evaluateReaper(input: ReaperInput): ReaperReport {
     }
 
     if (pathname && input.userAuthoredPaths.has(pathname)) protectedReasons.unshift("user-authored-message");
-    if (conversation?.turn.state === "busy" || conversation?.turn.state === "unknown") protectedReasons.unshift("mid-turn");
+    if (conversation && (conversation.turn.state === "busy" || conversation.turn.state === "unknown" || deliveryFencesTurn(input.registry, conversation))) {
+      protectedReasons.unshift("mid-turn");
+    }
+    if (conversation?.migration && !["committed", "rolled-back"].includes(conversation.migration.phase)) {
+      protectedReasons.unshift("migration-in-progress");
+    }
     if (pathname && input.manualPaths.has(pathname)) protectedReasons.unshift("manual-board-placement");
 
     const ttlSeconds = agentClass ? TTL_SECONDS[agentClass] : null;

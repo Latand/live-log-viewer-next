@@ -145,6 +145,48 @@ test("hard exemptions protect user conversations, mid-turn agents, and manual bo
   ]);
 });
 
+test("live migration generations are independent hosts and remain protected through handoff", () => {
+  const source = transcript(14);
+  const successor = transcript(114);
+  const profile = emptyLaunchProfile({ cwd: "/repo", role: "worker", title: "soak probe" });
+  const registry = registryFor(new Map([[source, profile]]));
+  const conversation = Object.values(registry.conversations)[0]!;
+  const sourceGeneration = conversation.generations[0]!;
+  conversation.generations.push({
+    ...sourceGeneration,
+    id: "codex:successor-generation",
+    path: successor,
+    accountId: "target",
+    createdAt: new Date(NOW - 5 * 60_000).toISOString(),
+  });
+  conversation.migration = {
+    intentId: "intent-1",
+    phase: "verifying",
+    targetId: "target",
+    revision: 1,
+    error: null,
+    errorCode: null,
+    operationId: "operation-1",
+    sourceGenerationId: sourceGeneration.id,
+    providerReceipt: null,
+    pendingContinuityPaths: [],
+    boardProject: null,
+    boardOperationId: null,
+    boardPlacementProject: null,
+    updatedAt: new Date(NOW - 5 * 60_000).toISOString(),
+  };
+
+  const report = evaluateReaper(input({
+    registry,
+    hosts: [host(14, source, 14), host(114, successor, 114)],
+    files: [file(source, 120), file(successor, 120)],
+  }));
+
+  expect(report.agents.map((agent) => agent.class)).toEqual(["probe", "probe"]);
+  expect(report.agents.every((agent) => agent.protectedReasons.includes("migration-in-progress"))).toBe(true);
+  expect(report.agents.every((agent) => !agent.eligible)).toBe(true);
+});
+
 test("a transcript omitted by the recency-capped scanner is not classified as missing", () => {
   const pathname = transcript(15);
   const report = evaluateReaper(input({

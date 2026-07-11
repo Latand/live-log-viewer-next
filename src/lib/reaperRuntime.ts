@@ -76,14 +76,21 @@ function profileForPath(snapshot: ReturnType<AgentRegistry["snapshot"]>, pathnam
     ?? null;
 }
 
+function hasViewerWorkerLaunchPrompt(snapshot: ReturnType<AgentRegistry["snapshot"]>, pathname: string): boolean {
+  return Object.values(snapshot.receipts).some((receipt) =>
+    receipt.purpose === "launch"
+    && receipt.artifactPath === pathname
+    && receipt.launchProfile.role === "worker"
+    && receipt.state === "completed");
+}
+
 function userAuthoredPaths(snapshot: ReturnType<AgentRegistry["snapshot"]>, hosts: TranscriptHost[]): Set<string> {
   const protectedPaths = new Set<string>();
   for (const host of hosts) {
     const pathname = host.primaryPath;
     if (!pathname || protectedPaths.has(pathname) || !fs.existsSync(pathname)) continue;
-    const profile = profileForPath(snapshot, pathname);
     const count = readSession(pathname, host.engine).messages.filter((message) => message.role === "user").length;
-    const launchPromptAllowance = profile?.role === "worker" ? 1 : 0;
+    const launchPromptAllowance = hasViewerWorkerLaunchPrompt(snapshot, pathname) ? 1 : 0;
     if (count > launchPromptAllowance) protectedPaths.add(pathname);
   }
   return protectedPaths;
@@ -165,8 +172,12 @@ async function actuateCandidate(
   files: FileEntry[],
   state: ReaperState,
   paneId: string,
+  overrides: ReaperActuationOverrides = {},
 ): Promise<boolean> {
-  const initialHost = (await readTranscriptHosts(true)).hosts.find((host) => host.paneId === paneId);
+  const observeHosts = overrides.readHosts ?? readTranscriptHosts;
+  const killHost = overrides.kill ?? killTmuxHostIfMatches;
+  const currentTime = overrides.now ?? Date.now;
+  const initialHost = (await observeHosts(true)).hosts.find((host) => host.paneId === paneId);
   if (!initialHost?.primaryPath) return false;
   const entry = Object.values(registry.snapshot().entries).find((candidate) => candidate.artifactPath === initialHost.primaryPath);
   if (!entry) return false;
@@ -175,17 +186,17 @@ async function actuateCandidate(
     const claimOwner = `reaper:${crypto.randomUUID()}`;
     try {
       registry.claim(entry.key, claimOwner);
-      const freshSnapshot: TranscriptHostSnapshot = await readTranscriptHosts(true);
+      const freshSnapshot: TranscriptHostSnapshot = await observeHosts(true);
       const freshHost = freshSnapshot.hosts.find((host) =>
         host.paneId === paneId
         && host.agentPid === initialHost.agentPid
         && host.agentIdentity === initialHost.agentIdentity
         && host.primaryPath === initialHost.primaryPath);
       if (!freshHost) return false;
-      const current = evaluateReaper(makeInput(registry, freshSnapshot.hosts, refreshFileTimes(files), state, Date.now()));
+      const current = evaluateReaper(makeInput(registry, freshSnapshot.hosts, refreshFileTimes(files), state, currentTime()));
       const candidate = current.agents.find((agent) => agent.paneId === paneId);
       if (!candidate?.eligible) return false;
-      const killed = await killTmuxHostIfMatches(evidenceFor(freshHost));
+      const killed = await killHost(evidenceFor(freshHost));
       if (killed && registry.snapshot().entries[`${entry.key.engine}:${entry.key.sessionId}`]?.host?.paneId === paneId) {
         registry.markUnhosted(entry.key);
       }
@@ -196,18 +207,25 @@ async function actuateCandidate(
   });
 }
 
+export interface ReaperActuationOverrides {
+  readHosts?: (fresh?: boolean) => Promise<TranscriptHostSnapshot>;
+  kill?: typeof killTmuxHostIfMatches;
+  now?: () => number;
+}
+
 export async function runReaperCycle(options: {
   registry?: AgentRegistry;
   hosts: TranscriptHost[];
   files: FileEntry[];
   now?: number;
+  actuation?: ReaperActuationOverrides;
 }): Promise<ReaperReport> {
   const registry = options.registry ?? agentRegistry();
   const now = options.now ?? Date.now();
   const state = updateObservationState(options.hosts, now);
   const report = evaluateReaper(makeInput(registry, options.hosts, options.files, state, now));
   const completed = await runEvaluatedReaper(report, {
-    actuate: (agent) => actuateCandidate(registry, options.files, state, agent.paneId),
+    actuate: (agent) => actuateCandidate(registry, options.files, state, agent.paneId, options.actuation),
     journal: appendJournal,
   });
   atomicWrite(REPORT_FILE(), completed);

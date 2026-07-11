@@ -1,15 +1,17 @@
-# Issue 121: deployment proxy request forwarding
+# Issues 31 and 113: deterministic agent reaping and verified tmux kills
 
 ## Task statement
 
-Investigate the first managed Viewer cutover failure where `serveViewerDeploymentProxy` accepted connections on the stable listener while returning zero response bytes. Repair request forwarding for the production `bun-container` runtime, preserve the target-file listener-switch design, cover the failure with a real TCP regression test, and remove the public-repository SSH bootstrap papercut.
+Implement deterministic lifecycle cleanup for stale agent conversations and a reliable conversation-kill primitive. Resolve kills through registry-owned tmux pane identities, verify termination of the pane shell and recorded agent processes, apply policy TTLs to eligible automated conversations, protect active or user-managed conversations, schedule cleanup through the durable controller, journal active attempts, and expose a dry-run lifecycle report.
 
 ## Acceptance criteria
 
-- AC1: The deployment proxy forwards a request sent immediately after downstream TCP connection and returns the candidate Viewer response.
-- AC2: The proxy preserves request bytes while its upstream connection is being established under production-image Bun 1.2.18.
-- AC3: A regression test drives an external TCP client through an in-process proxy and upstream listener.
-- AC4: Missing, invalid, or recursive release targets continue to receive the existing `503 Service Unavailable` response.
-- AC5: The default canonical remote for the public repository uses HTTPS and remains configurable through `LLV_VIEWER_CANONICAL_REMOTE`.
-- AC6: `bun test` and `bunx tsc --noEmit` pass.
-- AC7: Investigation and verification use unused high ports and leave the production listener, runtime-host, legacy Viewer, and managed candidate lifecycle unchanged.
+- AC1: Conversation kills resolve the target from registry-owned pane IDs and return a clear error when the target cannot be resolved.
+- AC2: A successful kill verifies termination of the tmux pane shell and every recorded agent-process identity.
+- AC3: Reaper classification covers flow workers, headless reviewers, probes, resume duplicates, and agents whose transcripts are missing, using the policy TTL assigned to each class.
+- AC4: Automatic cleanup protects user-authored conversations, agents in the middle of a turn, and conversations manually placed on the board.
+- AC5: Reaper evaluation runs through the durable controller and journals active reap attempts.
+- AC6: `GET /api/lifecycle/reaper` exposes the dry-run report without actuating cleanup.
+- AC7: Automatic reap actuation requires `LLV_REAPER_ENABLED=1`.
+- AC8: Focused tests cover kill resolution, process-death verification, classification, protection rules, scheduling, journaling, and the lifecycle API.
+- AC9: `bun test` and `bunx tsc --noEmit` pass.
