@@ -131,6 +131,30 @@ test("a provisional Codex fork projects as archived history of its stable conver
   expect(withoutArchivedPredecessors(body.files).map((entry) => entry.path)).toEqual([targetPath]);
 });
 
+test("migration projection counts pending deliveries and omits delivered tombstones", async () => {
+  const registry = agentRegistry();
+  const sourcePath = "/sessions/pending-delivery-019f4906-3f67-7b72-9fbc-9ec3b5ad1303.jsonl";
+  const conversation = registry.ensureConversation("codex", sourcePath, "source");
+  const delivered = registry.holdDelivery(conversation.id, "already sent", "delivered-message");
+  registry.beginDeliveryAttempt(delivered.id, conversation.generations.at(-1)!.id);
+  registry.recordDeliveryOutcome(delivered.id, "delivered");
+  registry.setConversationMigration(conversation.id, {
+    intentId: "files-route-deliveries",
+    phase: "requested",
+    targetId: "target",
+    revision: 1,
+    error: null,
+    updatedAt: "2026-07-11T12:00:00.000Z",
+  });
+  registry.holdDelivery(conversation.id, "send after switch", "pending-message");
+  scannedFiles = [file(sourcePath)];
+
+  const response = await GET(new Request("http://127.0.0.1/api/files"));
+  const body = await response.json() as { files: FileEntry[] };
+
+  expect(body.files[0]?.migration?.heldDeliveries).toBe(1);
+});
+
 test("spawn-time lineage keeps the child grouped after its tmux host disappears", async () => {
   const registry = agentRegistry();
   const parentPath = "/sessions/parent-019f4906-3f67-7b72-9fbc-9ec3b5ad1325.jsonl";

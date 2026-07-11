@@ -470,6 +470,9 @@ function normalizeHeldDelivery(value: HeldDelivery): HeldDelivery {
     text: state === "delivered" ? "" : value.text,
     clientMessageId: value.clientMessageId ?? null,
     payloadKind: value.payloadKind ?? "text",
+    artifactPaths: Array.isArray(value.artifactPaths)
+      ? value.artifactPaths.filter((pathname): pathname is string => typeof pathname === "string")
+      : [],
     state,
     generationId: value.generationId ?? null,
     attempts: Number.isInteger(value.attempts) ? value.attempts : 0,
@@ -479,21 +482,38 @@ function normalizeHeldDelivery(value: HeldDelivery): HeldDelivery {
   };
 }
 
-function compactDeliveredReservations(file: RegistryFile, onlyConversationId?: ViewerConversationId): number {
-  const groups = new Map<ViewerConversationId, HeldDelivery[]>();
+function compactDeliveryReservations(file: RegistryFile, onlyConversationId?: ViewerConversationId): number {
+  const deliveredGroups = new Map<ViewerConversationId, HeldDelivery[]>();
+  const failedGroups = new Map<ViewerConversationId, HeldDelivery[]>();
   for (const delivery of Object.values(file.heldDeliveries)) {
-    if (delivery.state !== "delivered") continue;
     const canonicalId = resolveConversationAlias(file, delivery.conversationId);
     if (onlyConversationId && canonicalId !== resolveConversationAlias(file, onlyConversationId)) continue;
-    delivery.text = "";
-    const group = groups.get(canonicalId) ?? [];
-    group.push(delivery);
-    groups.set(canonicalId, group);
+    if (delivery.state === "delivered") {
+      delivery.text = "";
+      const group = deliveredGroups.get(canonicalId) ?? [];
+      group.push(delivery);
+      deliveredGroups.set(canonicalId, group);
+    } else if (delivery.state === "failed") {
+      const group = failedGroups.get(canonicalId) ?? [];
+      group.push(delivery);
+      failedGroups.set(canonicalId, group);
+    }
   }
   let removed = 0;
-  for (const deliveries of groups.values()) {
+  for (const deliveries of deliveredGroups.values()) {
     deliveries.sort((left, right) => (right.deliveredAt ?? right.createdAt).localeCompare(left.deliveredAt ?? left.createdAt) || right.id.localeCompare(left.id));
     for (const expired of deliveries.slice(100)) {
+      delete file.heldDeliveries[expired.id];
+      removed += 1;
+    }
+  }
+  for (const [conversationId, deliveries] of failedGroups) {
+    const activeCount = Object.values(file.heldDeliveries).filter((delivery) =>
+      resolveConversationAlias(file, delivery.conversationId) === conversationId
+      && ["held", "assigned", "delivery-uncertain"].includes(delivery.state)).length;
+    const retainedFailed = Math.max(0, Math.min(50, 99 - activeCount));
+    deliveries.sort((left, right) => right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id));
+    for (const expired of deliveries.slice(retainedFailed)) {
       delete file.heldDeliveries[expired.id];
       removed += 1;
     }
@@ -1804,7 +1824,7 @@ export class AgentRegistry {
     clientMessageId: string | null = null,
     payloadKind: HeldDelivery["payloadKind"] = "text",
   ): HeldDelivery {
-    if (text.length > 32_000 || payloadKind === "text" && !text) throw new Error("held delivery must contain at most 32000 characters");
+    if (payloadKind === "text" && (!text || text.length > 32_000)) throw new Error("held delivery must contain at most 32000 characters");
     return this.mutate((file) => {
       const canonicalId = resolveConversationAlias(file, conversationId);
       const existing = clientMessageId ? Object.values(file.heldDeliveries).find((item) => item.conversationId === canonicalId && item.clientMessageId === clientMessageId) : undefined;
@@ -1843,6 +1863,7 @@ export class AgentRegistry {
         createdAt: now(),
         clientMessageId,
         payloadKind,
+        artifactPaths: [],
         state: "held",
         generationId: null,
         attempts: 0,
@@ -1850,6 +1871,7 @@ export class AgentRegistry {
         deliveredAt: null,
         error: null,
       };
+      compactDeliveryReservations(file, canonicalId);
       const count = Object.values(file.heldDeliveries).filter((item) => item.conversationId === canonicalId && item.state !== "delivered").length;
       if (count >= 100) throw new Error("held delivery limit reached for conversation");
       file.heldDeliveries[held.id] = held;
@@ -1865,8 +1887,8 @@ export class AgentRegistry {
       .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id));
   }
 
-  compactDeliveredReservations(): number {
-    return this.mutate((file) => compactDeliveredReservations(file));
+  compactDeliveryReservations(): number {
+    return this.mutate((file) => compactDeliveryReservations(file));
   }
 
   queueSuccessorCleanup(conversationId: ViewerConversationId, receipt: ProviderReceipt): void {
@@ -1907,6 +1929,16 @@ export class AgentRegistry {
     });
   }
 
+  recordDeliveryArtifacts(id: string, artifactPaths: string[]): HeldDelivery {
+    return this.mutate((file) => {
+      const delivery = file.heldDeliveries[id];
+      if (!delivery) throw new Error("held delivery is unknown");
+      if (delivery.state !== "delivery-uncertain") throw new Error("delivery attempt has not started");
+      delivery.artifactPaths = [...new Set(artifactPaths)];
+      return clone(delivery);
+    });
+  }
+
   restoreSnapshot(expectedCurrent: RegistryFile, replacement: RegistryFile): void {
     this.mutate((file) => {
       Object.assign(file, restoreOwnedChanges(file, expectedCurrent, replacement) as RegistryFile);
@@ -1931,7 +1963,7 @@ export class AgentRegistry {
       if (state === "delivered") delivery.text = "";
       if (conversation) advanceMigrationScopeRevision(file, conversation.engine, signature, paths);
       const settled = clone(delivery);
-      if (state === "delivered") compactDeliveredReservations(file, delivery.conversationId);
+      if (state === "delivered" || state === "failed") compactDeliveryReservations(file, delivery.conversationId);
       return settled;
     });
   }
@@ -1948,10 +1980,28 @@ export class AgentRegistry {
   }
 
   requeueHeldDelivery(id: string): HeldDelivery {
+    return this.placeDeliveryForRetry(id, false);
+  }
+
+  retryUncertainDelivery(id: string): HeldDelivery {
+    return this.placeDeliveryForRetry(id, true);
+  }
+
+  requeueUnactuatedDelivery(id: string): HeldDelivery {
+    return this.placeDeliveryForRetry(id, true);
+  }
+
+  private placeDeliveryForRetry(id: string, allowUncertain: boolean): HeldDelivery {
     return this.mutate((file) => {
       const delivery = file.heldDeliveries[id];
       if (!delivery) throw new Error("held delivery is unknown");
       if (delivery.state === "delivered") return clone(delivery);
+      if (delivery.state === "delivery-uncertain" && !allowUncertain) {
+        throw new Error("uncertain delivery requires an explicit client retry");
+      }
+      if (allowUncertain && delivery.state !== "delivery-uncertain") {
+        throw new Error("delivery outcome is already resolved");
+      }
       const conversation = file.conversations[resolveConversationAlias(file, delivery.conversationId)];
       const paths = new Set([conversation?.generations.at(-1)?.path].filter((pathname): pathname is string => Boolean(pathname)));
       const signature = conversation ? migrationReadinessSignature(file, conversation.engine, paths) : "";

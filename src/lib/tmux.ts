@@ -639,6 +639,13 @@ export async function sendText(target: TmuxTarget, text: string): Promise<void> 
   });
 }
 
+export class TmuxDeliveryUncertainError extends Error {
+  constructor(error: unknown) {
+    super(error instanceof Error ? error.message : String(error), { cause: error });
+    this.name = "TmuxDeliveryUncertainError";
+  }
+}
+
 /** The raw paste+Enter sequence; callers must hold the pane lock. */
 async function sendTextUnlocked(
   target: TmuxTarget,
@@ -647,28 +654,36 @@ async function sendTextUnlocked(
   guard: () => Promise<void>,
 ): Promise<void> {
   const bufferName = `viewer-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
-  await guard();
-  const load = await runTmux(["load-buffer", "-b", bufferName, "-"], Buffer.from(text, "utf8"), endpoint);
-  if (load.code !== 0) throw new Error(load.stderr.trim() || "could not load tmux buffer");
-
-  await guard();
-  const paste = await runTmux(["paste-buffer", "-d", "-p", "-b", bufferName, "-t", target], undefined, endpoint);
-  if (paste.code !== 0) throw new Error(paste.stderr.trim() || "could not paste text into pane");
-
-  await sleep(PASTE_SETTLE_MS);
-  await guard();
-  const enter = await runTmux(["send-keys", "-t", target, "Enter"], undefined, endpoint);
-  if (enter.code !== 0) throw new Error(enter.stderr.trim() || "could not press Enter");
-
-  const head = text.split("\n").map((line) => line.trim()).find(Boolean)?.slice(0, 32) ?? "";
-  for (let round = 0; round < SUBMIT_VERIFY_TRIES; round += 1) {
-    await sleep(SUBMIT_VERIFY_DELAY_MS);
+  let pasted = false;
+  try {
     await guard();
-    const line = composerLine(await paneScreen(target, endpoint));
-    const stillUnsent = (head !== "" && line.includes(head)) || line.includes("[Pasted text");
-    if (!stillUnsent) return;
+    const load = await runTmux(["load-buffer", "-b", bufferName, "-"], Buffer.from(text, "utf8"), endpoint);
+    if (load.code !== 0) throw new Error(load.stderr.trim() || "could not load tmux buffer");
+
     await guard();
-    await runTmux(["send-keys", "-t", target, "Enter"], undefined, endpoint);
+    const paste = await runTmux(["paste-buffer", "-d", "-p", "-b", bufferName, "-t", target], undefined, endpoint);
+    if (paste.code !== 0) throw new Error(paste.stderr.trim() || "could not paste text into pane");
+    pasted = true;
+
+    await sleep(PASTE_SETTLE_MS);
+    await guard();
+    const enter = await runTmux(["send-keys", "-t", target, "Enter"], undefined, endpoint);
+    if (enter.code !== 0) throw new Error(enter.stderr.trim() || "could not press Enter");
+
+    const head = text.split("\n").map((line) => line.trim()).find(Boolean)?.slice(0, 32) ?? "";
+    for (let round = 0; round < SUBMIT_VERIFY_TRIES; round += 1) {
+      await sleep(SUBMIT_VERIFY_DELAY_MS);
+      await guard();
+      const line = composerLine(await paneScreen(target, endpoint));
+      const stillUnsent = (head !== "" && line.includes(head)) || line.includes("[Pasted text");
+      if (!stillUnsent) return;
+      await guard();
+      const retry = await runTmux(["send-keys", "-t", target, "Enter"], undefined, endpoint);
+      if (retry.code !== 0) throw new Error(retry.stderr.trim() || "could not press Enter");
+    }
+  } catch (error) {
+    if (pasted) throw new TmuxDeliveryUncertainError(error);
+    throw error;
   }
 }
 

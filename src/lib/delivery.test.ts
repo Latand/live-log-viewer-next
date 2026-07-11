@@ -40,6 +40,14 @@ test("removes a relayed-delivery inbox image before returning its host failure",
   expect(fs.existsSync(imagePath)).toBe(false);
 });
 
+test("retains an inbox image when transcript-host actuation became ambiguous", () => {
+  const imagePath = inboxImage("ambiguous-host.png");
+  const ambiguous: DeliveryFailure = { ...failure, actuation: "started" };
+
+  expect(cleanupFailedImageDelivery(ambiguous, [imagePath])).toEqual(ambiguous);
+  expect(fs.existsSync(imagePath)).toBe(true);
+});
+
 test("migration delivery keeps an internally held result recoverable", () => {
   expect(migrationDeliveryOutcome({ ok: true, target: "conversation_held", outcome: "held" })).toBe("held");
   expect(migrationDeliveryOutcome({ ok: true, target: "pane" })).toBe("delivered");
@@ -66,8 +74,45 @@ test("image-only reservations stay request-local and never drain without the cli
 
   expect(delivered).toBe(0);
   expect(registry.pendingDeliveries(conversation.id)).toMatchObject([
-    { state: "failed", text: "", payloadKind: "ephemeral-images", error: "image delivery requires client retry" },
+    { state: "failed", text: "", payloadKind: "ephemeral-images", error: "request-local delivery requires client retry" },
   ]);
+});
+
+test("large text uses a request-local reservation and still reaches ordinary delivery", async () => {
+  const registry = new AgentRegistry(path.join(SANDBOX, "large-text-registry.json"));
+  setAgentRegistryForTests(registry);
+  const conversation = registry.ensureConversation("codex", "", "default");
+  const text = "x".repeat(32_001);
+  let delivered = "";
+  const outcome = await deliverConversationMessage({
+    pid: 1, path: "", conversationId: conversation.id, text, images: [], clientMessageId: "large-text",
+  }, {
+    targetForKnownPid: async () => "%1",
+    sendText: async (_target, payload) => { delivered = payload; },
+  });
+
+  expect(outcome.ok).toBe(true);
+  expect(delivered).toBe(text);
+  expect(registry.holdDelivery(conversation.id, "", "large-text", "ephemeral-text")).toMatchObject({ state: "delivered", text: "" });
+});
+
+test("ordinary delivery on the active account skips the lazy-migration registry write", async () => {
+  const registry = new AgentRegistry(path.join(SANDBOX, "active-account-registry.json"));
+  setAgentRegistryForTests(registry);
+  registry.setEngineRouting("codex", "default");
+  const conversation = registry.ensureConversation("codex", "", "default");
+  registry.requestConversationMigrationToActiveAccount = (() => {
+    throw new Error("active account should skip migration mutation");
+  }) as typeof registry.requestConversationMigrationToActiveAccount;
+
+  const outcome = await deliverConversationMessage({
+    pid: 1, path: "", conversationId: conversation.id, text: "fast path", images: [], clientMessageId: "fast-path",
+  }, {
+    targetForKnownPid: async () => "%1",
+    sendText: async () => {},
+  });
+
+  expect(outcome.ok).toBe(true);
 });
 
 test("delivered reservations retain only a bounded idempotency window", () => {
@@ -139,7 +184,7 @@ test("pre-actuation payload failure discards the reservation for retry", async (
   expect(Object.values(registry.snapshot().heldDeliveries)).toHaveLength(0);
 });
 
-test("ambiguous actuation keeps images and fences automatic replay", async () => {
+test("ambiguous actuation keeps images and retries only after the same client request returns", async () => {
   const registry = new AgentRegistry(path.join(SANDBOX, "ambiguous-actuation-registry.json"));
   setAgentRegistryForTests(registry);
   const conversation = registry.ensureConversation("codex", "", "default");
@@ -157,9 +202,15 @@ test("ambiguous actuation keeps images and fences automatic replay", async () =>
   expect(outcome).toMatchObject({ ok: false, error: "transport lost" });
   expect(fs.existsSync(imagePath)).toBe(true);
   expect(registry.pendingDeliveries(conversation.id)).toMatchObject([{ state: "delivery-uncertain" }]);
-  const replay = await deliverConversationMessage(message, { sendText: async () => { sends += 1; } });
-  expect(replay).toMatchObject({ ok: false, status: 409 });
-  expect(sends).toBe(1);
+  expect(() => registry.requeueHeldDelivery(registry.pendingDeliveries(conversation.id)[0]!.id)).toThrow("explicit client retry");
+  const replay = await deliverConversationMessage(message, {
+    targetForKnownPid: async () => "%1",
+    buildImagePayload: () => { throw new Error("retained image should be reused"); },
+    sendText: async (_target, payload) => { sends += 1; expect(payload).toBe(imagePath); },
+  });
+  expect(replay.ok).toBe(true);
+  expect(sends).toBe(2);
+  expect(registry.pendingDeliveries(conversation.id)).toEqual([]);
 });
 
 test("successful actuation retains images when settlement persistence fails", async () => {

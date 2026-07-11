@@ -420,8 +420,8 @@ export async function drainHeldDeliveries(
   if (!current) return;
   for (const item of registry.pendingDeliveries(conversationId)) {
     if (item.state !== "assigned" || item.generationId !== current.id) continue;
-    if (item.payloadKind === "ephemeral-images") {
-      registry.recordDeliveryOutcome(item.id, "failed", "image delivery requires client retry");
+    if (item.payloadKind !== "text") {
+      registry.recordDeliveryOutcome(item.id, "failed", "request-local delivery requires client retry");
       continue;
     }
     const claimed = registry.beginDeliveryAttempt(item.id, current.id);
@@ -429,7 +429,7 @@ export async function drainHeldDeliveries(
     const clientMessageId = claimed.clientMessageId ?? `migration:${claimed.id}`;
     try {
       const outcome = await delivery.deliver({ delivery: claimed, path: current.path, clientMessageId });
-      if (outcome === "held") registry.requeueHeldDelivery(claimed.id);
+      if (outcome === "held") registry.requeueUnactuatedDelivery(claimed.id);
       else registry.recordDeliveryOutcome(claimed.id, outcome, outcome === "failed" ? "delivery failed and remains recoverable" : null);
     } catch {
       registry.recordDeliveryOutcome(claimed.id, "delivery-uncertain", "delivery result is uncertain and remains recoverable");

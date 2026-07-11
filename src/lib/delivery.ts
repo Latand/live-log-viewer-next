@@ -33,6 +33,7 @@ export interface DeliveryFailure {
   outcome: "failed";
   error: string;
   status: number;
+  actuation?: "started";
 }
 
 export interface DeliverySuccess {
@@ -65,7 +66,7 @@ async function hostOutcome(result: Promise<HostDeliveryOutcome>): Promise<Delive
     beside the returned outcome so direct and root-relayed delivery share the
     same no-orphan contract. */
 export function cleanupFailedImageDelivery(outcome: DeliveryOutcome, imagePaths: string[]): DeliveryOutcome {
-  if (!outcome.ok) deleteInboxImages(imagePaths);
+  if (!outcome.ok && outcome.actuation !== "started") deleteInboxImages(imagePaths);
   return outcome;
 }
 
@@ -256,43 +257,58 @@ interface DeliveryOverrides {
 export async function deliverConversationMessage(message: ConversationMessage, overrides: DeliveryOverrides = {}): Promise<DeliveryOutcome> {
   const { pid, images } = message;
   const text = message.text.trim();
+  const requestLocalPayload = images.length > 0 || text.length > 32_000;
 
   const registry = agentRegistry();
   let conversation = message.conversationId?.startsWith("conversation_")
     ? registry.conversation(message.conversationId as `conversation_${string}`)
     : registry.conversationForPath(message.path);
   if (conversation && !message.reservedDeliveryId && deliveryFence(conversation) === "deliver") {
-    conversation = registry.requestConversationMigrationToActiveAccount(conversation.id);
+    const currentAccountId = conversation.generations.at(-1)?.accountId;
+    const activeAccountId = registry.engineRouting(conversation.engine).activeAccountId;
+    if (currentAccountId && activeAccountId && currentAccountId !== activeAccountId
+      && conversation.migrationOptOut?.targetId !== activeAccountId) {
+      conversation = registry.requestConversationMigrationToActiveAccount(conversation.id);
+    }
   }
   let filePath = conversation?.generations.at(-1)?.path ?? message.path;
   let deliveryId: string | null = null;
+  let retryArtifactPaths: string[] = [];
   if (conversation && !message.reservedDeliveryId) {
-    if (deliveryFence(conversation) === "held" && images.length) return failure("image delivery waits for migration completion", 409);
-    const queued = registry.holdDelivery(
-      conversation.id,
-      text,
-      message.clientMessageId ?? null,
-      images.length ? "ephemeral-images" : "text",
-    );
+    if (deliveryFence(conversation) === "held" && requestLocalPayload) return failure("request-local delivery waits for migration completion", 409);
+    let queued;
+    try {
+      queued = registry.holdDelivery(
+        conversation.id,
+        text.length > 32_000 ? "" : text,
+        message.clientMessageId ?? null,
+        images.length ? "ephemeral-images" : text.length > 32_000 ? "ephemeral-text" : "text",
+      );
+    } catch (error) {
+      return failure(error, 409);
+    }
     if (queued.state === "delivered") return { ok: true, target: conversation.id };
-    if (queued.state === "delivery-uncertain") return failure("delivery outcome is uncertain and requires recovery", 409);
+    if (queued.state === "delivery-uncertain") {
+      retryArtifactPaths = queued.artifactPaths;
+      queued = registry.retryUncertainDelivery(queued.id);
+    }
     if (queued.state === "held") {
-      if (images.length) {
+      if (requestLocalPayload) {
         registry.discardDelivery(queued.id);
-        return failure("image delivery waits for migration completion", 409);
+        return failure("request-local delivery waits for migration completion", 409);
       }
       requestAccountMigrationTick();
       return { ok: true, target: conversation.id, outcome: "held" };
     }
     if (queued.state !== "assigned" || !queued.generationId) {
-      if (images.length) registry.discardDelivery(queued.id);
+      if (requestLocalPayload) registry.discardDelivery(queued.id);
       return failure("delivery target is unavailable", 409);
     }
     const claimed = registry.beginDeliveryAttempt(queued.id, queued.generationId);
     if (!claimed) {
-      if (images.length) {
+      if (requestLocalPayload) {
         registry.discardDelivery(queued.id);
-        return failure("image delivery waits for migration completion", 409);
+        return failure("request-local delivery waits for migration completion", 409);
       }
       registry.requeueHeldDelivery(queued.id);
       requestAccountMigrationTick();
@@ -307,7 +323,7 @@ export async function deliverConversationMessage(message: ConversationMessage, o
     try {
       if (deliveryId) {
         if (outcome.ok) registry.recordDeliveryOutcome(deliveryId, "delivered");
-        else registry.discardDelivery(deliveryId);
+        else if (outcome.actuation !== "started") registry.discardDelivery(deliveryId);
       }
       return outcome;
     } catch (error) {
@@ -318,6 +334,15 @@ export async function deliverConversationMessage(message: ConversationMessage, o
   /* Saved paths stay visible to the catch-all: a delivery that fails after
      the images hit disk deletes them so a retry cannot duplicate files. */
   let imagePaths: string[] = [];
+  const materializePayload = () => {
+    if (retryArtifactPaths.length > 0) {
+      return { payload: [text, ...retryArtifactPaths].filter(Boolean).join("\n"), imagePaths: retryArtifactPaths };
+    }
+    return (overrides.buildImagePayload ?? buildImagePayload)(text, images);
+  };
+  const recordArtifacts = () => {
+    if (deliveryId && imagePaths.length > 0) registry.recordDeliveryArtifacts(deliveryId, imagePaths);
+  };
   try {
     let target: string | null = null;
     if (!filePath && pid !== null) {
@@ -329,8 +354,9 @@ export async function deliverConversationMessage(message: ConversationMessage, o
        confirmed below — every early 409/403 return above and below happens
        before any file touches disk, so a rejected request never orphans one. */
     if (target !== null) {
-      const bundle = (overrides.buildImagePayload ?? buildImagePayload)(text, images);
+      const bundle = materializePayload();
       imagePaths = bundle.imagePaths;
+      recordArtifacts();
       actuation = "started";
       await (overrides.sendText ?? sendText)(target, bundle.payload);
       actuation = "completed";
@@ -349,11 +375,12 @@ export async function deliverConversationMessage(message: ConversationMessage, o
     }
     const spec = resumeSpecFor(entry.root, entry.path, { model: entry.launchModel ?? entry.model, effort: entry.effort });
     if (spec) {
-      const bundle = buildImagePayload(text, images);
+      const bundle = materializePayload();
       imagePaths = bundle.imagePaths;
+      recordArtifacts();
       actuation = "started";
       const outcome = await hostOutcome(deliverToTranscriptHost({ entry, spec, payload: bundle.payload }));
-      if (!outcome.ok) { actuation = "none"; return settle(cleanupFailedImageDelivery(outcome, imagePaths)); }
+      if (!outcome.ok) { actuation = outcome.actuation === "started" ? "started" : "none"; return settle(cleanupFailedImageDelivery(outcome, imagePaths)); }
       actuation = "completed";
       return settle({ ...outcome, ...(imagePaths.length ? { imagePaths } : {}) });
     }
@@ -374,13 +401,14 @@ export async function deliverConversationMessage(message: ConversationMessage, o
     if (!rootSpec) {
       return settle(failure("root session is unavailable for messaging", 409));
     }
-    const bundle = buildImagePayload(text, images);
+    const bundle = materializePayload();
     imagePaths = bundle.imagePaths;
+    recordArtifacts();
     const relayText = `User message for your branch «${entry.title.slice(0, 100)}» — forward it or handle it yourself:\n${bundle.payload}`;
     const imageField = imagePaths.length ? { imagePaths } : {};
     actuation = "started";
     const outcome = await hostOutcome(deliverToTranscriptHost({ entry: root, spec: rootSpec, payload: relayText }));
-    if (!outcome.ok) { actuation = "none"; return settle(cleanupFailedImageDelivery(outcome, imagePaths)); }
+    if (!outcome.ok) { actuation = outcome.actuation === "started" ? "started" : "none"; return settle(cleanupFailedImageDelivery(outcome, imagePaths)); }
     actuation = "completed";
     return settle({ ...outcome, ...imageField });
   } catch (error) {
