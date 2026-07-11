@@ -61,9 +61,11 @@ predecessor transcripts with recent mtimes):
   registry-current generation, `#c=` canonicalizes the conversation id
   through durable aliases and pins the current generation; the payload
   carries the alias map so the client resolver matches links copied before
-  provisional-id adoption. Pinned scans bypass the shared cache (no per-path
-  cache slots), and every user-driven navigation or focus action cancels the
-  pending intent.
+  provisional-id adoption, following chained aliases with cycle protection.
+  Pinned scans bypass the shared cache (no per-path cache slots), and every
+  user-driven navigation or focus action — project selection, hash changes,
+  attention jumps, N/Shift-N, and dashboard-local opens/drafts/pipeline/task
+  jumps — cancels the pending intent.
 - AC7: Existing behavior preserved: first-poll chime baseline stays silent,
   spawn blips ring once per child, revision-conflict replay and network-error
   backoff in the board store are unchanged. Full `bun test` suite passes and

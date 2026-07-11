@@ -119,3 +119,12 @@ test("resolveConversationTarget canonicalizes an aliased conversation id", () =>
   expect(resolveConversationTarget([current], hash)).toBeNull();
   expect(resolveConversationTarget([current], hash, { "conversation_old-alias": "conversation_canonical" })).toBe(current);
 });
+
+test("resolveConversationTarget follows chained aliases and survives cycles", () => {
+  const current = { path: "/repo/current.jsonl", conversationId: "conversation_C" } as unknown as FileEntry;
+  const hash = { conversationId: "conversation_A", filePath: null, project: null };
+  /* Repeated provisional-id adoptions chain aliases A → B → C. */
+  expect(resolveConversationTarget([current], hash, { conversation_A: "conversation_B", conversation_B: "conversation_C" })).toBe(current);
+  /* A malformed cyclic map terminates at the last unvisited id. */
+  expect(resolveConversationTarget([current], hash, { conversation_A: "conversation_B", conversation_B: "conversation_A" })).toBeNull();
+});

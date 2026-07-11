@@ -242,6 +242,7 @@ export function Viewer() {
   /* The jump channel into the board: nonce so repeated jumps to the same node
      re-flash (D9); consumed by ProjectDashboard's pendingFocusRef path. */
   const [focusRequest, setFocusRequest] = useState<{ path: string; nonce: number } | null>(null);
+  const cancelPendingIntent = useCallback(() => setPendingHash(null), []);
   const requestFocus = useCallback((path: string) => {
     /* A user-driven focus (N/Shift-N cycle, attention jump) supersedes any
        unresolved deep-link intent; a stale pin must never re-steal focus when
@@ -485,6 +486,7 @@ export function Viewer() {
             onUnarchive={unarchiveProject}
             onMenu={isMobile ? () => setDrawerOpen(true) : undefined}
             attention={isMobile ? attentionBadge : undefined}
+            onUserNavigate={cancelPendingIntent}
           />
         )}
       </main>
