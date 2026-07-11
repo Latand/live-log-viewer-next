@@ -1,3 +1,4 @@
+import { effortMeter as meterOf } from "@/lib/agent/efforts";
 import { getLocale, translate } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
 import { cleanTitle } from "@/lib/title";
@@ -77,6 +78,7 @@ const EFFORT_RAMP: Record<string, { dl: number; ds: number }> = {
   high: { dl: -8, ds: 12 },
   xhigh: { dl: -14, ds: 22 },
   max: { dl: -19, ds: 30 },
+  ultra: { dl: -24, ds: 36 },
 };
 
 function hexToHsl(hex: string): [number, number, number] {
@@ -118,25 +120,12 @@ export function effortTitle(file: FileEntry): string | undefined {
   return file.effort ? translate(getLocale(), "util.effortTitle", { effort: file.effort }) : undefined;
 }
 
-/* Both CLI scales share this order, minimal through max, so the six-slot meter reads
-   the same regardless of engine. */
-const EFFORT_LEVELS: Record<string, number> = {
-  minimal: 1,
-  low: 2,
-  medium: 3,
-  high: 4,
-  xhigh: 5,
-  max: 6,
-};
-
-/** Reasoning tier of an entry as a 1-6 meter level. Callers hide the indicator
-    entirely on 0. */
-export function effortLevel(file: FileEntry): number {
-  return EFFORT_LEVELS[file.effort ?? ""] ?? 0;
+/** Meter reading of the entry's reasoning tier within its own engine+model
+    scale: lowest tier = 1 bar, top tier fills all `slots`. Callers hide the
+    indicator entirely on level 0. */
+export function effortMeter(file: FileEntry): { level: number; slots: number } {
+  return meterOf(file.engine, file.model, file.effort);
 }
-
-/** The full meter height, so pill renderers agree on how many slots to draw. */
-export const EFFORT_LEVEL_MAX = 6;
 
 /** Engine base tint for UI that has no FileEntry yet (e.g. the spawn dialog). */
 export function engineTintOf(engine: string): ModelTint {

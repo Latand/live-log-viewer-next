@@ -8,8 +8,8 @@ import { readArgv } from "./process";
 
 const effortCache = globalCache<[number, string | null]>("effort");
 
-/** Union of both CLI scales: codex minimal…xhigh, claude low…max. */
-const TIERS = new Set(["minimal", "low", "medium", "high", "xhigh", "max"]);
+/** Union of both CLI scales: codex minimal…ultra, claude low…max. */
+const TIERS = new Set(["minimal", "low", "medium", "high", "xhigh", "max", "ultra"]);
 
 function normalizeEffort(value: string | null | undefined): string | null {
   const tier = value?.trim().toLowerCase() ?? "";
