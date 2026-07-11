@@ -552,10 +552,10 @@ test("reviewNote fits the flow-note cap while preserving the directive and safet
   expect(note).toContain("scaffold body");
 });
 
-test("reviewNote parks a too-long directive instead of silently truncating it (raw + role-backed)", () => {
+test("reviewNote parks a too-long directive for raw and role-backed review stages", () => {
   const longDirective = `${"X".repeat(3_000)} {{task}}`;
   /* Raw review stage (no role scaffold): a 3,000-char directive can't be
-     delivered whole, so it parks with an actionable error, not a 1,967-char slice. */
+     delivered whole, so it parks with an actionable error and never a 1,967-char slice. */
   const raw = reviewNote(reviewPipeline, reviewStage(longDirective), {
     engine: "codex", model: "gpt-5.6-sol", effort: "high", roleId: null, access: "read-only", promptScaffold: null,
   } as unknown as Parameters<typeof reviewNote>[2]);

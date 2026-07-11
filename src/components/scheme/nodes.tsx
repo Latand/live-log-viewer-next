@@ -852,8 +852,8 @@ export const NodesLayer = memo(function NodesLayer({
      implementer is unplaced. */
   const renderableFlows = useMemo(() => renderableFlowIds(flows, new Set(layout.nodes.map((node) => node.file.path))), [flows, layout]);
   /* A review-loop stage's reviewer transcript is folded into the flow's round
-     deck, so focus the deck's latest round (revealing that reviewer) rather than
-     the removed node — the same round-focus channel FlowStrip drives (#93 §2.2). */
+     deck, so focus the deck's latest round to reveal that reviewer; the node is
+     removed. This is the same round-focus channel FlowStrip drives (#93 §2.2). */
   const openPipelineFlow = (flowId: string) => {
     const flow = flows.find((candidate) => candidate.id === flowId);
     if (flow) onFocusRound(flow.id, flow.rounds.at(-1)?.n ?? 1);

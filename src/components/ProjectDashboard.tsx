@@ -526,8 +526,8 @@ export function ProjectDashboard({
     openSwitchboardFile(file);
   };
   /* A review-loop stage's reviewer transcript is folded into the flow's round
-     deck, so glide to that deck (a byPath key) rather than the removed node —
-     openPipelinePath on the reviewer path would reveal nothing (#93 §2.2). */
+     deck, so glide to that deck (a byPath key); the reviewer node is removed, so
+     openPipelinePath on its path would reveal nothing (#93 §2.2). */
   const openPipelineFlow = (flowId: string) => {
     revealOnScheme();
     flashNode(deckKey(flowId));
@@ -685,8 +685,8 @@ export function ProjectDashboard({
 
       {pipelineDialogOpen ? (
         /* Keyed by project: this dashboard survives project switches, so a
-           key remount drops project A's task/repo/stages instead of writing
-           them into project B's draft (or submitting A's repo from B). */
+           key remount drops project A's task/repo/stages, which keeps them out of
+           project B's draft (and stops A's repo from submitting under B). */
         <PipelineDialog key={project} project={project} onClose={() => setPipelineDialogOpen(false)} />
       ) : null}
 

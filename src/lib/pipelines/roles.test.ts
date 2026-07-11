@@ -168,7 +168,7 @@ test("blank role params fall back to the registry default token value", () => {
     "review-loop",
     pipelineRoleLookup,
   );
-  /* lens defaults to the first registry option rather than an empty token. */
+  /* lens defaults to the first registry option, so no empty token is substituted. */
   expect(resolved.role?.promptScaffold).toContain("lens correctness");
   expect(resolved.role?.promptScaffold).not.toContain("lens .");
 });
@@ -178,7 +178,7 @@ test("Builder domain=frontend keeps the canonical frontend scaffold guidance (pa
   const canonical = resolveRole("builder", { domain: "frontend" });
   expect(canonical.ok).toBe(true);
   /* The pipeline lookup must carry the same frontend guidance the spawn path
-     emits, not a hand-rolled substitution that silently drops it. */
+     emits; a hand-rolled substitution would silently drop it. */
   expect(pipeline?.promptScaffold).toContain("UI/frontend implementation guidance");
   if (canonical.ok) expect(pipeline?.promptScaffold).toBe(canonical.value.prompt);
   /* Without domain=frontend the guidance is absent, so the two selections differ. */

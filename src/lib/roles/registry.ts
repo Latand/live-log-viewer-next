@@ -64,7 +64,7 @@ function renderScaffold(template: string, params: RoleParamValues): string {
  * guidance (Builder's domain=frontend contract) — with the safety-fence block
  * kept separate so a length-capped caller (the pipeline lookup) can trim the
  * body without ever cutting a fence. This is the single source of the frontend
- * guidance; the pipeline reuses it rather than re-rendering (and dropping it).
+ * guidance; the pipeline reuses it, so a re-render can't drop it.
  */
 export function roleScaffoldBody(definition: RoleDefinition, params: RoleParamValues): string {
   const frontendGuidance = definition.id === "builder" && params.domain === "frontend"

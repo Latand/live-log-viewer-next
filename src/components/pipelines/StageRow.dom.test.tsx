@@ -75,7 +75,7 @@ test("selecting a role then No role returns the runtime to the pipeline default"
   host.remove();
 });
 
-test("clearing a role's model override shows the role runtime, not the Builder fallback", () => {
+test("clearing a role's model override shows the role runtime", () => {
   const host = document.createElement("div");
   document.body.append(host);
   const root: Root = createRoot(host);
@@ -90,7 +90,7 @@ test("clearing a role's model override shows the role runtime, not the Builder f
   expect(summary().textContent).toContain("fable");
 
   /* Open the runtime editor and clear the model. The collapsed summary must fall
-     back through Architect's own runtime (fable), not the Builder default (sol). */
+     back through Architect's own runtime (fable); the Builder default (sol) applies only to role-less rows. */
   const edit = host.querySelector('[aria-label="Edit runtime for stage 1"]') as HTMLElement;
   flushSync(() => { edit.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event); });
   const modelInput = host.querySelector('input[aria-label="Model"]') as HTMLInputElement;

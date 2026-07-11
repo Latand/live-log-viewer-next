@@ -60,7 +60,7 @@ test("a first attempt shows no earlier-attempts section", () => {
   expect(html).not.toContain("Earlier attempts");
 });
 
-test("a verdict-less prior attempt renders a translated state label, not a raw identifier", () => {
+test("a verdict-less prior attempt renders a translated state label", () => {
   /* Prior attempt #1 has no structured verdict and state needs_decision; the audit
      must show the localized label, never the English identifier "needs_decision". */
   const priorNoVerdict = attempt(1, { state: "needs_decision", verdict: null });
@@ -88,7 +88,7 @@ test("an oversized retry history bounds the popover and scrolls the audit", () =
   expect(html).toContain("Attempt 24:");
 });
 
-test("a review-loop verdict offers Open flow, not the folded reviewer transcript", () => {
+test("a review-loop verdict offers Open flow and hides the folded-transcript action", () => {
   const reviewStage: PipelineStage = { ...stage, id: "review", kind: "review-loop" };
   /* agentPath is the reviewer transcript the board folds into the deck, so
      "Open transcript" must be withheld; only the flow route is offered. */

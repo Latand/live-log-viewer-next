@@ -43,8 +43,8 @@ export const pipelineRoleLookup: PipelineRoleLookup = (roleId, params) => {
   const parameters = Object.fromEntries(
     definition.parameters.map((parameter) => {
       /* Operator overrides win over registry defaults, but only for a known,
-         non-empty value — a blank field keeps the default rather than erasing
-         the scaffold token. */
+         non-empty value; a blank field keeps the default, so the scaffold token
+         stays intact. */
       const chosen = params?.[parameter.key];
       const value = chosen !== undefined && chosen !== "" ? chosen : defaultParameterValue(parameter);
       return [parameter.key, value];

@@ -160,10 +160,10 @@ function StageChip({
   const attemptCount = stageAttempts(pipeline, stage.id).length;
   const chipState = t(`pipelineChipState.${state}`);
   const title = [stage.role?.roleId ?? stage.id, t(access === "read-only" ? "pipelineStrip.readOnly" : "pipelineStrip.readWrite"), attempt?.sessionId].filter(Boolean).join(" · ");
-  /* Review-loop chips open their flow's round deck, not the reviewer transcript
-     path (which the board folds away); a closed/missing flow has no deck and a
-     vanished run transcript is not in the scan, so renderableFlows/renderablePaths
-     disable the action rather than dead-ending (#93 §2.2, AC4). */
+  /* Review-loop chips open their flow's round deck (the board folds the reviewer
+     transcript away). A closed/missing flow has no deck, and a vanished run
+     transcript has left the scan, so renderableFlows/renderablePaths disable the
+     action and keep it from dead-ending (#93 §2.2, AC4). */
   const openTarget = stageOpenTarget(stage, attempt, renderableFlows, renderablePaths);
   const canOpen = openTarget ? (openTarget.kind === "flow" ? Boolean(onOpenFlow) : Boolean(onOpenPath)) : false;
   const openStage = () => {

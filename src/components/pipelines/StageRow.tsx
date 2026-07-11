@@ -171,10 +171,10 @@ export function StageRow({
   };
 
   /* A blank override resolves server-side through the selected role's
-     parameter-aware runtime (Architect → claude · fable · high), not the Builder
-     default — so the collapsed summary and the model placeholder must fall back
-     through that same runtime, or they would show a launch config the API won't
-     use (e.g. gpt-5.6-sol under a Claude role). */
+     parameter-aware runtime (Architect → claude · fable · high). The collapsed
+     summary and the model placeholder fall back through that same runtime; the
+     Builder default applies only to role-less rows. Skipping this would show a
+     launch config the API won't use (e.g. gpt-5.6-sol under a Claude role). */
   const roleRuntimeConfig = selectedRole ? roleRuntime(selectedRole, stage.roleParams) : null;
   const fallbackModel = roleRuntimeConfig?.model || defaultRuntime.model;
   const fallbackEffort = roleRuntimeConfig?.effort || defaultRuntime.effort;

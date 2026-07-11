@@ -39,7 +39,7 @@ describe("verdictPlacement (#93 finding: popover never renders off-screen)", () 
   test("keeps the popover above when both sides are cramped but above has more room", () => {
     const anchor = { top: 300, bottom: 780, left: 470, width: 60 };
     const p = verdictPlacement(anchor, content, viewport);
-    /* roomAbove 292 > roomBelow 12, so it stays above rather than flipping into a
+    /* roomAbove 292 > roomBelow 12, so it stays above and does not flip into a
        worse spot. */
     expect(p.below).toBe(false);
   });

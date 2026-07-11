@@ -29,7 +29,7 @@ afterEach(() => {
   document.body.replaceChildren();
 });
 
-test("a failed role catalog fetch surfaces an error with a retry, not a silent empty picker", async () => {
+test("a failed role catalog fetch surfaces an error with a retry", async () => {
   let roleFetches = 0;
   /* /api/roles rejects; /api/spawn resolves empty so only the role path fails. */
   globalThis.fetch = (async (input: string) => {

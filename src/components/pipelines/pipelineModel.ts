@@ -194,8 +194,8 @@ export function renderableFlowIds(flows: Flow[], placedPaths: ReadonlySet<string
  * to the embedded flow (deck + round focus) instead; a plain run stage opens its
  * own node by path. `renderableFlows` disables the flow target for a
  * closed/missing flow, and `renderablePaths` disables the run target for a
- * transcript that is no longer in the scanned file set — either way the action
- * is disabled rather than silently doing nothing (AC4).
+ * transcript that has left the scanned file set, so every unreachable action is
+ * disabled and none silently no-ops (AC4).
  */
 export function stageOpenTarget(
   stage: PipelineStage,
@@ -214,7 +214,7 @@ export function stageOpenTarget(
   }
   if (!attempt.agentPath) return null;
   /* A run transcript that has vanished from the scan can't be revealed, so the
-     chip/Open-transcript is disabled instead of no-opping on a missing file. */
+     chip/Open-transcript stays disabled and never no-ops on a missing file. */
   if (renderablePaths && !renderablePaths.has(attempt.agentPath)) return null;
   return { kind: "path", path: attempt.agentPath };
 }
@@ -376,7 +376,12 @@ function sanitizeRoleParams(params: Record<string, string | number>): Record<str
   return out;
 }
 
-/** Folds the builder's draft stages into the ordered, id/next-derived POST body. */
+/** Folds the builder's draft stages into the ordered, id/next-derived POST body.
+    Runtime fields (engine/model/effort) are the operator's only when
+    `runtimeOverridden` is set; otherwise they are catalog autofill for display,
+    so they are omitted and the server resolves the current role/Builder defaults.
+    Emitting them would freeze stale values across registry changes and can pair a
+    stale engine with a fresh default model into a 400. */
 export function draftStagesToInput(drafts: DraftStage[]): PipelineStageInput[] {
   const taken = new Set<string>();
   const ids = drafts.map((draft) => deriveStageId(draft.kind, draft.roleId, taken));
@@ -388,9 +393,13 @@ export function draftStagesToInput(drafts: DraftStage[]): PipelineStageInput[] {
       ...(draft.roleId
         ? { role: { roleId: draft.roleId as PipelineRoleId, ...(Object.keys(params).length ? { params } : {}) } }
         : {}),
-      engine: draft.engine,
-      ...(draft.model.trim() ? { model: draft.model.trim() } : {}),
-      ...(draft.effort ? { effort: draft.effort } : {}),
+      ...(draft.runtimeOverridden
+        ? {
+            engine: draft.engine,
+            ...(draft.model.trim() ? { model: draft.model.trim() } : {}),
+            ...(draft.effort ? { effort: draft.effort } : {}),
+          }
+        : {}),
       ...(draft.kind === "review-loop" ? {} : { access: draft.access }),
       prompt: draft.prompt,
       next: ids[index + 1] ?? null,

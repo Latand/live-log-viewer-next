@@ -218,7 +218,7 @@ describe("draftStagesToInput", () => {
       draft({ roleId: "", prompt: "raw", roleParams: { ignored: "x" } }),
     ]);
     expect(withParams!.role).toEqual({ roleId: "reviewer", params: { diffSource: "PR#100", lens: "correctness" } });
-    /* A role with only blank params drops the params key rather than shipping empties. */
+    /* A role with only blank params drops the params key, so no empties ship. */
     expect(blank!.role).toEqual({ roleId: "builder" });
     /* Params without a chosen role are never serialized. */
     expect(noRole!.role).toBeUndefined();
@@ -233,16 +233,20 @@ describe("draftStagesToInput", () => {
     expect(stage!.role).toEqual({ roleId: "reviewer", params: { diffSource: "PR#7" } });
   });
 
-  test("only sends model/effort overrides when set", () => {
+  test("sends engine/model/effort only when the runtime is overridden", () => {
     const [a, b] = draftStagesToInput([
-      draft({ prompt: "a", model: "  ", effort: "" }),
-      draft({ prompt: "b", model: "opus", effort: "high", engine: "claude" }),
+      /* Autofilled row (not overridden): omit runtime so the server resolves the
+         current role/Builder default, so a catalog value can't freeze. */
+      draft({ prompt: "a", engine: "claude", model: "fable", effort: "high" }),
+      /* Hand-overridden row ships its explicit runtime. */
+      draft({ prompt: "b", model: "opus", effort: "high", engine: "claude", runtimeOverridden: true }),
     ]);
+    expect(a!.engine).toBeUndefined();
     expect(a!.model).toBeUndefined();
     expect(a!.effort).toBeUndefined();
+    expect(b!.engine).toBe("claude");
     expect(b!.model).toBe("opus");
     expect(b!.effort).toBe("high");
-    expect(b!.engine).toBe("claude");
   });
 });
 
@@ -258,7 +262,7 @@ test("templates are all 2–4 stages with a run before any review-loop", () => {
   }
 });
 
-describe("stageOpenTarget (reviewer paths route to the flow, not the folded node)", () => {
+describe("stageOpenTarget (reviewer paths route to the flow deck, never the folded node)", () => {
   const runStage = stage("build");
   const reviewStage = stage("review", "review-loop");
   const attempt = (over: Record<string, unknown>) => ({ n: 1, state: "running", agentPath: null, flowId: null, ...over }) as never;
@@ -283,7 +287,7 @@ describe("stageOpenTarget (reviewer paths route to the flow, not the folded node
 
   test("a review-loop whose flow is not renderable (closed/missing) has no open target", () => {
     /* renderableFlows excludes closed/absent flows, so the action is disabled
-       rather than routing to a deck the board never draws. */
+       so it never routes to a deck the board never draws. */
     const renderable = new Set<string>(["f1"]);
     expect(stageOpenTarget(reviewStage, attempt({ flowId: "f1" }), renderable)).toEqual({ kind: "flow", flowId: "f1" });
     expect(stageOpenTarget(reviewStage, attempt({ flowId: "gone" }), renderable)).toBeNull();
@@ -293,7 +297,7 @@ describe("stageOpenTarget (reviewer paths route to the flow, not the folded node
 
   test("a run stage whose transcript left the scan has no open target (AC4)", () => {
     /* renderablePaths gates run targets: a present path opens, a vanished one
-       disables the action rather than no-opping on a missing file. */
+       disables the action, so it never no-ops on a missing file. */
     const present = new Set<string>(["/build"]);
     expect(stageOpenTarget(runStage, attempt({ agentPath: "/build" }), undefined, present)).toEqual({ kind: "path", path: "/build" });
     expect(stageOpenTarget(runStage, attempt({ agentPath: "/gone" }), undefined, present)).toBeNull();
@@ -307,9 +311,9 @@ describe("renderableFlowIds (a deck exists only when the implementer is placed)"
 
   test("a scanned-but-unplaced implementer is excluded (present-in-scan, absent-from-layout)", () => {
     const flows = [flow("f1", "/impl-1"), flow("f2", "/impl-2"), flow("closed", "/impl-3", "closed")];
-    /* placedPaths is the layout's node paths, NOT the scan. /impl-2 is still
-       scanned but its node was not placed (hidden/tombstoned), so f2 has zero
-       decks despite being active and must be excluded. */
+    /* placedPaths carries the layout's node paths; the scan is broader. /impl-2 is
+       still scanned while its node stays unplaced (hidden/tombstoned), so f2 has
+       zero decks despite being active and must be excluded. */
     const placedLayoutNodes = new Set<string>(["/impl-1", "/impl-3"]);
     const ids = renderableFlowIds(flows, placedLayoutNodes);
     expect(ids.has("f1")).toBe(true);

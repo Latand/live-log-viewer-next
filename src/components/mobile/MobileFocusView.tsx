@@ -168,8 +168,8 @@ export function MobileFocusView({ project, groups, manual, files, flows, pipelin
   const activeFlowId = activeDeck ? activeDeck.flow.id : null;
   const pipelineFocus = findPipelineStage(pipelines, activePath, activeFlowId);
   /* Run transcripts still in the scan can be opened; a review-loop only if its
-     flow has a rendered deck — which exists only for a placed implementer node,
-     so derive that from the layout's nodes, not mere scan membership. */
+     flow has a rendered deck, which exists only for a placed implementer node —
+     so the availability set comes from the layout's placed nodes. */
   const renderablePaths = useMemo(() => new Set(files.map((entry) => entry.path)), [files]);
   const renderableFlows = useMemo(() => renderableFlowIds(flows, new Set(layout.nodes.map((node) => node.file.path))), [flows, layout]);
 
@@ -187,8 +187,8 @@ export function MobileFocusView({ project, groups, manual, files, flows, pipelin
     if (!stage) return;
     const target = stageOpenTarget(stage, latestAttempt(pipelineFocus.pipeline, stage.id), renderableFlows, renderablePaths);
     if (!target) return;
-    /* Review-loop targets land on the flow's round deck (an entry key), not the
-       folded reviewer transcript; run stages open their own node by path. */
+    /* Review-loop targets land on the flow's round deck (an entry key), since the
+       reviewer transcript is folded away; run stages open their own node by path. */
     if (target.kind === "flow") {
       const key = deckKey(target.flowId);
       if (byKey.has(key)) setFocusPath(key);
@@ -371,7 +371,7 @@ export function MobileFocusView({ project, groups, manual, files, flows, pipelin
 
 /** The pipeline + stage index a focused transcript path — or a focused round
     deck's flow — belongs to, if any. Review-loop stages match by flow id, since
-    their reviewer transcript is folded into the deck rather than a board node. */
+    the board folds their reviewer transcript into the deck. */
 function findPipelineStage(pipelines: Pipeline[], path: string | null, flowId: string | null): { pipeline: Pipeline; index: number } | null {
   if (!path && !flowId) return null;
   for (const pipeline of pipelines) {
@@ -407,7 +407,7 @@ function PipelineFocusRow({ pipeline, index, renderableFlows, renderablePaths, o
   const nextHopEnabled = next ? Boolean(stageOpenTarget(next, latestAttempt(pipeline, next.id), renderableFlows, renderablePaths)) : false;
   const attempt = latestAttempt(pipeline, stage.id);
   /* Match the desktop evidence predicate: a running attempt has no verdict sheet
-     to open, so the button stays disabled instead of showing "no findings". */
+     to open, so the button stays disabled and never shows an empty "no findings". */
   const canOpenVerdict = stageHasEvidence(pipeline, stage, attempt);
   const canOpenFlow = Boolean(attempt?.flowId && renderableFlows.has(attempt.flowId));
   const canOpenPath = Boolean(attempt?.agentPath && renderablePaths.has(attempt.agentPath));

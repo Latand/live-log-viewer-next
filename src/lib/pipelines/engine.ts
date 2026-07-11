@@ -489,13 +489,12 @@ const FENCE_MARKER = "\n\nSafety fences:\n";
 
 /**
  * Fits the review-loop stage's directive + role scaffold into the flow note's
- * transmissible cap (MAX_FLOW_NOTE_LENGTH — the flow layer truncates anything
- * longer). The operator's directive and the role's safety fences must survive
- * whole: only the scaffold *body* (supplementary role guidance) is trimmed to
- * make room. When the directive and fences together already exceed the cap there
- * is no safe truncation — no character of the directive can be dropped without
- * losing acceptance criteria — so this returns an actionable error for the
- * caller to park on rather than silently slicing the directive.
+ * transmissible cap (MAX_FLOW_NOTE_LENGTH; the flow layer truncates anything
+ * longer). The operator's directive and the role's safety fences always survive
+ * whole; the scaffold *body* (supplementary role guidance) is what gets trimmed
+ * to make room. When the directive and fences together already exceed the cap,
+ * any truncation would drop acceptance criteria, so this returns an actionable
+ * error for the caller to park on.
  */
 export function reviewNote(pipeline: Pipeline, stage: PipelineStage, role: EffectivePipelineRole): { note: string } | { error: string } {
   const prompt = renderNoteTemplate(stage.prompt, pipeline);

@@ -421,8 +421,8 @@ export function SchemeBoard({
      otherwise silent to screen readers — the spatial-nav live region only speaks
      on arrow moves. Track each pipeline's state+cursor signature and, when one
      changes, write the new position straight into its own live region. Writing
-     the DOM node in an effect (rather than via setState) is the sanctioned way to
-     push the latest state into an external system without a cascading render. */
+     the DOM node in an effect is the sanctioned way to push the latest state into
+     an external system without a cascading render. */
   const pipelineLiveRef = useRef<HTMLDivElement>(null);
   const pipelineSigs = useRef(new Map<string, string>());
   useEffect(() => {

@@ -81,7 +81,7 @@ export function PipelineHub({
     el.scrollIntoView({ behavior: "smooth", block: "center" });
     el.focus({ preventScroll: true });
     /* Focus now lives on the strip; suppress the close effect's trigger restore so
-       it isn't yanked back to the hub. */
+       it stays on the strip. */
     focusTransferred.current = true;
     setOpen(false);
   };

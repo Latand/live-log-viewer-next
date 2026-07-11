@@ -6,8 +6,8 @@ import type { RoleConfig } from "@/lib/roles/types";
 import type { TFunction } from "@/lib/i18n";
 import type { RoleParameter } from "@/lib/roles/types";
 
-import { PipelineDialog, coerceStage, pipelineValidationError, rebaseFallbackStages, roleParamError, stagesFromTemplate, templateReady } from "./PipelineDialog";
-import { PIPELINE_TEMPLATES, type DraftStage } from "./pipelineModel";
+import { PipelineDialog, coerceStage, pipelineValidationError, rebaseStagesToCatalog, roleParamError, stagesFromTemplate, templateReady } from "./PipelineDialog";
+import { PIPELINE_TEMPLATES, type DraftStage, draftStagesToInput } from "./pipelineModel";
 import type { RoleCatalogItem } from "./StageRow";
 
 const fakeT = ((key: string, vars?: Record<string, unknown>) => (vars ? `${key}:${JSON.stringify(vars)}` : key)) as unknown as TFunction;
@@ -78,7 +78,7 @@ test("the start and cancel controls are present", () => {
   expect(html).toContain("Cancel");
 });
 
-test("a template seeds each role's own resolved runtime, not the Builder fallback", () => {
+test("a template seeds each role's own resolved runtime", () => {
   const [architect, builder, reviewer] = stagesFromTemplate(planBuildReview, CATALOG, FALLBACK);
   /* The architect stage keeps its own model/effort so its runtime line is right. */
   expect(architect).toMatchObject({ roleId: "architect", engine: "claude", model: "fable", effort: "high" });
@@ -106,7 +106,7 @@ test("pipelineValidationError mirrors the API's codex bounds and effort check", 
   /* A codex model over 128 chars would 400; the client must catch it too. */
   const longModel = pipelineValidationError(fakeT, { ...base, stages: [stage({ engine: "codex", model: `gpt-${"x".repeat(200)}` }), stage({ key: "k2" })] });
   expect(longModel).toContain("modelEngineMismatch");
-  /* max effort is valid on claude but not codex — the API rejects it, so does this. */
+  /* max effort is valid on claude and rejected on codex; the API rejects it, so does this. */
   const badEffort = pipelineValidationError(fakeT, { ...base, stages: [stage({ engine: "codex", effort: "max" }), stage({ key: "k2" })] });
   expect(badEffort).toContain("effortEngineMismatch");
   /* A codex-legal effort passes. */
@@ -121,14 +121,14 @@ test("pipelineValidationError rejects an unresolved role and unknown role params
   const staleRole = pipelineValidationError(fakeT, { ...base, roles: CATALOG, stages: [stage({ roleId: "ghost" }), stage({ key: "k2" })] });
   expect(staleRole).toContain("roleUnavailable");
   /* While the catalog is still loading (empty, no error yet) a role-bearing draft
-     is gated on the catalog rather than submitting an unvalidated role. */
+     is gated on the catalog, so it can't submit an unvalidated role. */
   const loading = pipelineValidationError(fakeT, { ...base, roles: [], stages: [stage({ roleId: "ghost" }), stage({ key: "k2" })] });
   expect(loading).toContain("rolesLoading");
   /* A role-less draft still submits fine while the catalog is loading. */
   const rawWhileLoading = pipelineValidationError(fakeT, { ...base, roles: [], stages: [stage({}), stage({ key: "k2" })] });
   expect(rawWhileLoading).toBeNull();
   /* Once the catalog fails to load (rolesError, still empty), a role-bearing
-     restored draft is blocked as unavailable rather than submitting a stale
+     restored draft is blocked as unavailable, so it can't submit a stale
      roleId → 400. */
   const failed = pipelineValidationError(fakeT, { ...base, roles: [], rolesError: true, stages: [stage({ roleId: "ghost" }), stage({ key: "k2" })] });
   expect(failed).toContain("roleUnavailable");
@@ -141,24 +141,39 @@ test("pipelineValidationError rejects an unresolved role and unknown role params
   expect(staleParam).toContain("paramUnknown");
 });
 
-test("rebaseFallbackStages moves pristine rows to the settled engine but keeps role/edited/restored rows", () => {
+test("rebaseStagesToCatalog re-derives non-overridden rows from the catalog, keeping pinned rows", () => {
   const s = (over: Partial<DraftStage>): DraftStage => ({ key: "k", kind: "run", roleId: "", engine: "codex", model: "", effort: "", access: "read-write", prompt: "", roleParams: {}, ...over });
-  const pristine = s({ key: "p" });
-  const withRole = s({ key: "r", roleId: "architect", engine: "codex" });
-  const overridden = s({ key: "o", engine: "codex", runtimeOverridden: true });
-  const explicitModel = s({ key: "m", engine: "codex", model: "gpt-5.6-terra" });
-  const out = rebaseFallbackStages([pristine, withRole, overridden, explicitModel], "claude");
-  /* Only the pristine role-less row rebases to Claude. */
-  expect(out[0]!.engine).toBe("claude");
-  expect(out[1]!.engine).toBe("codex");
-  expect(out[2]!.engine).toBe("codex");
-  expect(out[3]!.engine).toBe("codex");
-  /* Same reference when nothing needs changing (already on the settled engine). */
-  const already = [s({ key: "a", engine: "claude" })];
-  expect(rebaseFallbackStages(already, "claude")).toBe(already);
+  const roleLess = s({ key: "l", engine: "codex", model: "stale", effort: "low" });
+  /* A restored Architect row with stale Codex runtime (registry moved). */
+  const staleRole = s({ key: "r", roleId: "architect", engine: "codex", model: "gpt-5.6-sol", effort: "medium" });
+  const pinned = s({ key: "o", roleId: "architect", engine: "codex", model: "gpt-5.6-terra", runtimeOverridden: true });
+  const out = rebaseStagesToCatalog([roleLess, staleRole, pinned], CATALOG, FALLBACK);
+  /* Role-less row → default engine, blank model/effort (resolves to Builder default). */
+  expect(out[0]).toMatchObject({ engine: "codex", model: "", effort: "" });
+  /* Architect row → its current Claude/Fable runtime, dropping the stale values. */
+  expect(out[1]).toMatchObject({ roleId: "architect", engine: "claude", model: "fable", effort: "high" });
+  /* The pinned row is untouched. */
+  expect(out[2]).toMatchObject({ engine: "codex", model: "gpt-5.6-terra", runtimeOverridden: true });
+  /* Same reference when nothing needs changing. */
+  const settled = [s({ key: "a", roleId: "architect", engine: "claude", model: "fable", effort: "high" })];
+  expect(rebaseStagesToCatalog(settled, CATALOG, FALLBACK)).toBe(settled);
 });
 
-test("coerceStage repairs a malformed persisted stage instead of crashing on restore", () => {
+test("draftStagesToInput emits runtime only when the operator overrode it (no stale catalog defaults)", () => {
+  const s = (over: Partial<DraftStage>): DraftStage => ({ key: "k", kind: "run", roleId: "", engine: "codex", model: "", effort: "", access: "read-write", prompt: "do it", roleParams: {}, ...over });
+  /* An autofilled Architect row (not overridden) omits engine/model/effort so the
+     server resolves the current role default — a registry change can't be frozen. */
+  const autofilled = draftStagesToInput([s({ roleId: "architect", engine: "claude", model: "fable", effort: "high" }), s({ key: "k2" })])[0]!;
+  expect(autofilled.engine).toBeUndefined();
+  expect(autofilled.model).toBeUndefined();
+  expect(autofilled.effort).toBeUndefined();
+  expect(autofilled.role).toEqual({ roleId: "architect" });
+  /* A hand-overridden row ships its explicit runtime. */
+  const overridden = draftStagesToInput([s({ engine: "claude", model: "opus", effort: "high", runtimeOverridden: true }), s({ key: "k2" })])[0]!;
+  expect(overridden).toMatchObject({ engine: "claude", model: "opus", effort: "high" });
+});
+
+test("coerceStage repairs a malformed persisted stage so restore never crashes", () => {
   /* A stale draft missing model/roleParams and carrying wrong-typed fields must
      become a well-formed DraftStage, not blow up later on .trim()/property access. */
   const repaired = coerceStage({ kind: "bogus", engine: "nope", access: "sideways", model: 5, roleId: 7, roleParams: [1, 2] });
@@ -184,7 +199,7 @@ test("roleParamError mirrors the API: values checked, absent allowed", () => {
   expect(roleParamError(integer, 4)).toBeNull();
   expect(roleParamError(text, "x".repeat(2_001))).toBe("pipelineDialog.errors.paramInvalid");
   /* Whitespace-only text trims to empty → treated as absent (serializer drops
-     it), matching the server rather than sneaking a value it would reject. */
+     it), matching the server so no value it would reject sneaks through. */
   expect(roleParamError(text, "   ")).toBeNull();
 });
 

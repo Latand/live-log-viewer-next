@@ -66,7 +66,7 @@ export function coerceStage(raw: unknown): DraftStage {
 
 /** Reads and fully validates the persisted draft. Anything malformed — a
     non-object, a non-array `stages`, or individual stages with missing/wrong
-    fields — degrades to a clean, well-typed snapshot rather than reaching the
+    fields — degrades to a clean, well-typed snapshot, so it never reaches the
     render (crash) or the API (400). Stages beyond the 4-stage cap are dropped. */
 function readDraft(project: string): DraftSnapshot {
   const empty: DraftSnapshot = { task: "", spec: "", repoDir: "", stages: [] };
@@ -93,18 +93,29 @@ function blankStage(runtime: RoleConfig): DraftStage {
   return { key: nextStageKey(), kind: "run", roleId: "", engine: runtime.engine, model: "", effort: "", access: "read-write", prompt: "", roleParams: {} };
 }
 
-/** Rebase still-pristine role-less rows onto the settled default engine. A row is
-    pristine when it has no role, no manual runtime override, and no explicit
-    model/effort — so restored and hand-edited stages are left untouched. Returns
-    the same array reference when nothing changes, so callers can skip a render. */
-export function rebaseFallbackStages(stages: DraftStage[], engine: FlowEngine): DraftStage[] {
+/** Re-derive the runtime of every non-overridden row from the freshly settled
+    catalog. A restored or autofilled row tracks the current role runtime (or the
+    Builder default when role-less), so a registry change moves it too; a row the
+    operator pinned (`runtimeOverridden`) is left untouched. Returns the same array
+    reference when nothing changes, so callers can skip a render. A row whose role
+    is unknown to the catalog is left for the
+    validator to flag. */
+export function rebaseStagesToCatalog(stages: DraftStage[], roles: RoleCatalogItem[], defaultRuntime: RoleConfig): DraftStage[] {
   let changed = false;
   const next = stages.map((stage) => {
-    if (!stage.roleId && !stage.runtimeOverridden && !stage.model.trim() && !stage.effort && stage.engine !== engine) {
-      changed = true;
-      return { ...stage, engine };
-    }
-    return stage;
+    if (stage.runtimeOverridden) return stage;
+    const role = stage.roleId ? roles.find((item) => item.id === stage.roleId) ?? null : null;
+    if (stage.roleId && !role) return stage;
+    /* A role row mirrors the role's parameter-aware runtime; a role-less row
+       carries the default engine and blank model/effort so the server resolves
+       the current Builder default. */
+    const runtime = role ? roleRuntime(role, stage.roleParams) : defaultRuntime;
+    const nextEngine = runtime.engine;
+    const nextModel = role ? runtime.model : "";
+    const nextEffort = role ? runtime.effort : "";
+    if (stage.engine === nextEngine && stage.model === nextModel && stage.effort === nextEffort) return stage;
+    changed = true;
+    return { ...stage, engine: nextEngine, model: nextModel, effort: nextEffort };
   });
   return changed ? next : stages;
 }
@@ -142,9 +153,9 @@ export function roleParamError(parameter: RoleParameter, value: string | number 
 /** Turns a client template into draft stages, resolving each role's runtime from
     the loaded catalog so the runtime line and access match the +Agent draft.
     Seeds carry concrete model/effort exactly as {@link StageRow.selectRole}
-    would, so an architect stage shows its own runtime, not the Builder fallback.
-    Callers gate role-bearing templates on a loaded catalog (see below), so a
-    seeded roleId always resolves here. */
+    would, so an architect stage shows its own runtime and the Builder fallback
+    stays for role-less seeds only. Callers gate role-bearing templates on a
+    loaded catalog (see below), so a seeded roleId always resolves here. */
 export function stagesFromTemplate(template: PipelineTemplate, roles: RoleCatalogItem[], runtime: RoleConfig): DraftStage[] {
   return template.stages.map((seed) => {
     const role = seed.roleId ? roles.find((item) => item.id === seed.roleId) ?? null : null;
@@ -205,7 +216,7 @@ export function pipelineValidationError(
     if (stage.engine === "claude" && effModel && !normalizeClaudeLaunchModel(effModel)) return t("pipelineDialog.errors.modelEngineMismatch", { engine: "Claude" });
     /* isCodexLaunchModel is the same predicate the API applies (gpt- prefix,
        ≤128 chars, printable), so a length/control-char violation is caught here
-       instead of as a 400. */
+       and never surfaces as a 400. */
     if (stage.engine === "codex" && effModel && !isCodexLaunchModel(effModel)) return t("pipelineDialog.errors.modelEngineMismatch", { engine: "Codex" });
     /* Effort mirrors the API's isEngineEffort check: an effective effort the
        engine doesn't accept (e.g. max on codex) would otherwise 400. */
@@ -311,7 +322,7 @@ export function PipelineDialog({
   }, []);
 
   /* Role catalog fetch, retryable via the rolesReload bump. A non-2xx, network
-     error, or malformed body surfaces `rolesError` instead of failing silently —
+     error, or malformed body surfaces `rolesError` so the failure is visible;
      otherwise the templates stay disabled under a permanent loading tooltip and
      the role picker only ever offers "No role". */
   useEffect(() => {
@@ -327,17 +338,14 @@ export function PipelineDialog({
         const catalog = body.roles.filter((role) => !PIPELINE_DISALLOWED_ROLE_IDS.includes(role.id as PipelineRoleId));
         setRoles(catalog);
         setRolesError(false);
-        /* The initial rows were seeded with FALLBACK_RUNTIME's engine before the
-           catalog loaded. If the Builder default resolves to a different engine
-           (a customized Claude/Fable Builder), rebase the still-pristine role-less
-           rows to it — otherwise an untouched row stays Codex while its resolved
-           model is Fable, which the client validator and the API both reject as an
-           engine mismatch. Only rows with no role, no manual override, and no
-           explicit model/effort are touched, so restored and edited stages stand.
-           Done here (in the async resolve) rather than an effect to avoid a
-           synchronous setState-in-effect. */
-        const settledEngine = catalog.find((role) => role.id === "builder")?.config.engine ?? FALLBACK_RUNTIME.engine;
-        setStages((prev) => rebaseFallbackStages(prev, settledEngine));
+        /* The initial and restored rows may carry runtime values from before the
+           catalog settled (FALLBACK_RUNTIME's engine, or a role runtime the
+           registry has since moved). Re-derive every non-overridden row from the
+           freshly loaded catalog so its display and the client validator match
+           what the API will resolve. Done in the async resolve to avoid a
+           synchronous setState-in-effect; rows the operator pinned are untouched. */
+        const settledDefault = catalog.find((role) => role.id === "builder")?.config ?? FALLBACK_RUNTIME;
+        setStages((prev) => rebaseStagesToCatalog(prev, catalog, settledDefault));
       })
       .catch(() => {
         if (!cancelled) setRolesError(true);
