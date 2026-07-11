@@ -24,6 +24,7 @@ const { activeCodexAccountId, createManagedCodexAccount, listCodexAccounts, setA
 const { selectAccount } = await import("@/lib/accounts/manager");
 const { CodexAppServerClient } = await import("@/lib/accounts/codexAppServer");
 const { ManagedCodexRuntime, setManagedCodexRuntimeForTests } = await import("@/lib/accounts/codexRuntime");
+const { setClaudeLoginSupervisorForTests } = await import("@/lib/accounts/claudeLogin");
 const { AgentRegistry, agentRegistry } = await import("@/lib/agent/registry");
 const { emptyLaunchProfile } = await import("@/lib/accounts/migration/contracts");
 
@@ -54,6 +55,7 @@ beforeEach(() => {
   installRuntime(false);
 });
 afterAll(() => {
+  setClaudeLoginSupervisorForTests(null);
   setManagedCodexRuntimeForTests(null);
   if (OLD_STATE === undefined) delete process.env.LLV_STATE_DIR;
   else process.env.LLV_STATE_DIR = OLD_STATE;
@@ -307,6 +309,41 @@ test("active routes reject signed-out accounts before changing either routing st
   expect(activeCodexAccountId()).toBe("default");
   expect(activeClaudeAccountId()).toBe("default");
   expect(agentRegistry().snapshot()).toEqual(before);
+});
+
+test("active routes reject authenticated accounts while login is in progress", async () => {
+  const codex = createManagedCodexAccount("Logging-in Codex");
+  const claude = createManagedClaudeAccount("Logging-in Claude");
+  authenticateCodex(codex);
+  authenticateClaude(claude);
+  setCodexAccountLoginPane(codex.id, { paneId: "%login", windowName: "codex-login", startedAt: Date.now() });
+  setClaudeLoginSupervisorForTests({
+    forAccount: (accountId: string) => accountId === claude.id ? {
+      operationId: "claude-login-pending",
+      phase: "verifying",
+      loginUrl: null,
+      acceptsCode: false,
+      deadlineAt: new Date(Date.now() + 60_000).toISOString(),
+      result: null,
+    } : null,
+  } as never);
+  const before = agentRegistry().snapshot();
+
+  try {
+    const codexResponse = await POST(activeRequest({ id: codex.id, mode: "select" }));
+    const claudeResponse = await setClaudeActive(activeRequest({ id: claude.id, mode: "select" }));
+
+    expect(codexResponse.status).toBe(409);
+    expect(await codexResponse.json()).toMatchObject({ code: "login_pending" });
+    expect(claudeResponse.status).toBe(409);
+    expect(await claudeResponse.json()).toMatchObject({ code: "login_pending" });
+    expect(activeCodexAccountId()).toBe("default");
+    expect(activeClaudeAccountId()).toBe("default");
+    expect(agentRegistry().snapshot()).toEqual(before);
+  } finally {
+    setCodexAccountLoginPane(codex.id, null);
+    setClaudeLoginSupervisorForTests(null);
+  }
 });
 
 test("a routing-store write failure restores both active-account values", () => {

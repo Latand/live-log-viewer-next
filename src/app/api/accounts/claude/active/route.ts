@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import { CorruptClaudeAccountsError, UnknownClaudeAccountError } from "@/lib/accounts/claude";
-import { AccountAuthenticationRequiredError, accountManager } from "@/lib/accounts/manager";
+import { AccountAuthenticationRequiredError, AccountLoginPendingError, accountManager } from "@/lib/accounts/manager";
 import { agentRegistry } from "@/lib/agent/registry";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
 
@@ -18,6 +18,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ active: account.id, account, revision: agentRegistry().engineRouting("claude").revision });
   }
   catch (error) {
+    if (error instanceof AccountLoginPendingError) return NextResponse.json({ error: error.message, code: "login_pending" }, { status: 409 });
     if (error instanceof AccountAuthenticationRequiredError) return NextResponse.json({ error: error.message, code: "authentication_required" }, { status: 409 });
     const known = error instanceof UnknownClaudeAccountError || error instanceof CorruptClaudeAccountsError;
     return NextResponse.json({ error: known ? error.message : "Claude account selection failed" }, { status: known ? 400 : 500 });

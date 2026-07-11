@@ -1,5 +1,7 @@
 import { accountForSpawn, activeCodexAccountId, codexAccountsMutationLocked, codexHomeOwningSessionPath, CorruptCodexAccountsError, createManagedCodexAccount, listCodexAccounts, setActiveCodexAccount, UnknownAccountError } from "./codex";
 import { activeClaudeAccountId, claudeAccountForSpawn, claudeAccountsMutationLocked, claudeHomeOwningTranscript, claudeManagedEnvironment, CorruptClaudeAccountsError, createManagedClaudeAccount, listClaudeAccounts, setActiveClaudeAccount, UnknownClaudeAccountError } from "./claude";
+import { claudeLoginSupervisor } from "./claudeLogin";
+import { managedCodexRuntime } from "./codexRuntime";
 import type { AccountManager, AccountSummary } from "./contracts";
 import { unavailableLimits } from "./contracts";
 import { agentRegistry, type AgentRegistry } from "@/lib/agent/registry";
@@ -17,6 +19,15 @@ export class AccountAuthenticationRequiredError extends Error {
   }
 }
 
+export class AccountLoginPendingError extends Error {
+  constructor(readonly engine: "claude" | "codex", readonly accountId: string) {
+    super(`${engine} account login is in progress`);
+    this.name = "AccountLoginPendingError";
+  }
+}
+
+const LIVE_CLAUDE_LOGIN_PHASES = new Set(["starting", "awaiting_browser", "awaiting_code", "verifying", "canceling"]);
+
 type RoutingStore = Pick<AgentRegistry, "engineRouting" | "setEngineRouting">;
 
 /** Keeps the compatibility catalog and launch-routing registry aligned. */
@@ -31,6 +42,16 @@ export function selectAccount(engine: "claude" | "codex", id: string, routing: R
     if (engine === "claude") throw new UnknownClaudeAccountError(id);
     throw new UnknownAccountError(id);
   }
+  const loginPending = engine === "claude"
+    ? (() => {
+        const login = claudeLoginSupervisor.forAccount(id);
+        return login !== null && LIVE_CLAUDE_LOGIN_PHASES.has(login.phase);
+      })()
+    : (() => {
+        const codexAccount = listCodexAccounts().find((candidate) => candidate.id === id)!;
+        return codexAccount.loginPane !== null || managedCodexRuntime().peekLogin(codexAccount).attemptState === "pending";
+      })();
+  if (loginPending) throw new AccountLoginPendingError(engine, id);
   if (!account.authPresent) throw new AccountAuthenticationRequiredError(engine, id);
 
   const previousCatalogId = engine === "claude" ? activeClaudeAccountId() : activeCodexAccountId();
