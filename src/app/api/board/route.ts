@@ -40,9 +40,12 @@ function mutationsWithConversationAliases(mutations: readonly BoardMutationV1[])
   const pairedSources = new Set(suppliedRemapSources);
   for (const conversation of Object.values(conversations)) {
     if (conversation.generations.length < 2) continue;
+    const continuityPaths = conversation.migration === null || conversation.migration.phase === "committed"
+      ? conversation.continuityPaths
+      : [];
     const paths = [
       ...conversation.generations.map((generation) => generation.path),
-      ...conversation.continuityPaths,
+      ...continuityPaths,
     ];
     if (!paths.some((pathname) => mentionedPaths.has(pathname))) continue;
     const target = conversation.generations.at(-1)?.path;

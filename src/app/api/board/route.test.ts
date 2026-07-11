@@ -208,6 +208,83 @@ test("a pre-commit continuity path cannot create a reverse board alias", async (
   });
 });
 
+test("a repeated migration cannot alias its pending successor backward", async () => {
+  const registry = new AgentRegistry(path.join(path.dirname(testFile), "agent-registry.json"));
+  setAgentRegistryForTests(registry);
+  const first = "/generation-one.jsonl";
+  const second = "/generation-two.jsonl";
+  const third = "/generation-three.jsonl";
+  const conversation = registry.ensureConversation("codex", first, "account-a");
+
+  registry.commitMigrationIntent({
+    engine: "codex",
+    targetId: "account-b",
+    origin: "manual",
+    requestId: "first-migration",
+    expectedRevision: registry.engineRouting("codex").revision,
+  });
+  const firstRevision = registry.conversation(conversation.id)!.migration!.revision;
+  registry.transitionConversationMigration(conversation.id, firstRevision, ["requested", "waiting-turn"], { phase: "preparing" });
+  registry.transitionConversationMigration(conversation.id, firstRevision, ["preparing"], { phase: "successor-starting" });
+  registry.transitionConversationMigration(conversation.id, firstRevision, ["successor-starting"], { phase: "verifying" });
+  registry.commitSuccessor(conversation.id, { id: "generation-two", path: second, accountId: "account-b" }, firstRevision);
+
+  const placed = await PATCH(patch({
+    schemaVersion: 1,
+    project: "repeated-migration",
+    baseRevision: 0,
+    mutations: [{ kind: "restore", path: second, placement: "manual" }],
+  }));
+  expect(placed.status).toBe(200);
+  expect(await placed.json()).toMatchObject({
+    board: { revision: 1, pathAliases: { [first]: second }, prefs: { manual: [second] } },
+  });
+
+  registry.commitMigrationIntent({
+    engine: "codex",
+    targetId: "account-c",
+    origin: "manual",
+    requestId: "second-migration",
+    expectedRevision: registry.engineRouting("codex").revision,
+  });
+  const secondRevision = registry.conversation(conversation.id)!.migration!.revision;
+  registry.recordConversationContinuityPath(conversation.id, third);
+
+  const closed = await PATCH(patch({
+    schemaVersion: 1,
+    project: "repeated-migration",
+    baseRevision: 1,
+    mutations: [{ kind: "close", path: second }],
+  }));
+  expect(closed.status).toBe(200);
+  const closedBody = await closed.json() as { board: { pathAliases: Record<string, string> } };
+  expect(closedBody).toMatchObject({
+    board: { revision: 2, prefs: { hidden: [second] } },
+  });
+  expect(closedBody.board.pathAliases).toEqual({ [first]: second });
+
+  registry.transitionConversationMigration(conversation.id, secondRevision, ["requested", "waiting-turn"], { phase: "preparing" });
+  registry.transitionConversationMigration(conversation.id, secondRevision, ["preparing"], { phase: "successor-starting" });
+  registry.transitionConversationMigration(conversation.id, secondRevision, ["successor-starting"], { phase: "verifying" });
+  registry.commitSuccessor(conversation.id, { id: "generation-three", path: third, accountId: "account-c" }, secondRevision);
+
+  const reconciled = await PATCH(patch({
+    schemaVersion: 1,
+    project: "repeated-migration",
+    baseRevision: 2,
+    mutations: [{ kind: "reconcile-roots", roots: [third], removeManual: [] }],
+  }));
+  expect(reconciled.status).toBe(200);
+  expect(await reconciled.json()).toMatchObject({
+    ok: true,
+    board: {
+      revision: 3,
+      pathAliases: { [first]: third, [second]: third },
+      prefs: { manual: [], hidden: [third] },
+    },
+  });
+});
+
 test("a corrupt conversation registry cannot block a valid close", async () => {
   fs.writeFileSync(path.join(path.dirname(testFile), "agent-registry.json"), "{ corrupt", "utf8");
 
