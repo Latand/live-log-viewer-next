@@ -32,7 +32,13 @@ or omit a `remap-paths` mutation.
   explicit continuity callbacks all record pending succession provenance.
 - AC11: Return-to-source routing and target retirement preserve an abandoned
   successor fence after clearing the active migration.
-- AC12: `bun test` passes.
-- AC13: `bunx tsc --noEmit` passes.
-- AC14: The live board state and production Viewer on port 8898 remain
+- AC12: A table-driven route regression covers commit, return-to-source,
+  target retirement, chained succession, deferred board repair, and queued
+  cleanup receipts across close-before/during/after timing and alias
+  enrichment, root reconciliation, and client remap mutations.
+- AC13: Fenced successor paths can trigger committed alias repair while
+  remaining ineligible for root reconciliation and client remaps.
+- AC14: `bun test` passes.
+- AC15: `bunx tsc --noEmit` passes.
+- AC16: The live board state and production Viewer on port 8898 remain
   unchanged during implementation and verification.

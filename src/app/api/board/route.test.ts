@@ -7,7 +7,9 @@ import { NextRequest } from "next/server";
 
 import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
 import { AgentRegistry, setAgentRegistryForTests } from "@/lib/agent/registry";
-import { setBoardFileForTests } from "@/lib/board/store";
+import type { BoardMutationV1 } from "@/lib/board/mutations";
+import { boardFor, setBoardFileForTests } from "@/lib/board/store";
+import type { BoardProjectStateV1 } from "@/lib/view/types";
 
 const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-board-route-test-"));
 const { PATCH } = await import("./route");
@@ -31,6 +33,49 @@ function patch(body: unknown): NextRequest {
     headers: { host: "127.0.0.1", "content-type": "application/json" },
     body: JSON.stringify(body),
   });
+}
+
+async function mutateProject(project: string, mutations: BoardMutationV1[]): Promise<BoardProjectStateV1> {
+  const response = await PATCH(patch({
+    schemaVersion: 1,
+    project,
+    baseRevision: boardFor(project).revision,
+    mutations,
+  }));
+  expect(response.status).toBe(200);
+  const body = await response.json() as { board: BoardProjectStateV1 };
+  return body.board;
+}
+
+function beginMigration(
+  registry: AgentRegistry,
+  conversationId: Parameters<AgentRegistry["conversation"]>[0],
+  targetId: string,
+  successorPath: string,
+  requestId: string,
+): number {
+  registry.commitMigrationIntent({
+    engine: "codex",
+    targetId,
+    origin: "manual",
+    requestId,
+    expectedRevision: registry.engineRouting("codex").revision,
+  });
+  const revision = registry.conversation(conversationId)!.migration!.revision;
+  registry.recordConversationContinuityPath(conversationId, successorPath);
+  registry.transitionConversationMigration(conversationId, revision, ["requested", "waiting-turn"], { phase: "preparing" });
+  registry.transitionConversationMigration(conversationId, revision, ["preparing"], { phase: "successor-starting" });
+  return revision;
+}
+
+function commitMigration(
+  registry: AgentRegistry,
+  conversationId: Parameters<AgentRegistry["conversation"]>[0],
+  revision: number,
+  successor: { id: string; path: string; accountId: string },
+): void {
+  registry.transitionConversationMigration(conversationId, revision, ["successor-starting"], { phase: "verifying" });
+  registry.commitSuccessor(conversationId, successor, revision);
 }
 
 test("board route accepts revision-fenced mutations and converges an identical stale replay", async () => {
@@ -98,6 +143,158 @@ test("a retried legacy hidden list cannot erase a concurrent close", async () =>
     ok: true,
     board: { revision: 3, prefs: { manual: [], hidden: ["/card"], taskPanelOpen: true } },
   });
+});
+
+const lifecycleTransitions = [
+  "commit",
+  "cancel-return-to-source",
+  "target-retirement",
+  "chained-a-b-c",
+  "deferred-board-repair",
+  "queued-cleanup-receipt",
+] as const;
+const lifecycleCloseTimings = ["before", "during", "after"] as const;
+const lifecycleBoardOperations = ["alias-enrichment", "reconcile-roots", "remap-paths"] as const;
+const lifecycleMatrix = lifecycleTransitions.flatMap((lifecycle) =>
+  lifecycleCloseTimings.flatMap((closeTiming) =>
+    lifecycleBoardOperations.map((boardOperation) => [
+      `${lifecycle} / close-${closeTiming} / ${boardOperation}`,
+      lifecycle,
+      closeTiming,
+      boardOperation,
+    ] as const)));
+
+test.each(lifecycleMatrix)("migration lifecycle matrix: %s", async (_name, lifecycle, closeTiming, boardOperation) => {
+  const registry = new AgentRegistry(path.join(path.dirname(testFile), "agent-registry.json"));
+  setAgentRegistryForTests(registry);
+  const project = `lifecycle-${lifecycle}-${closeTiming}-${boardOperation}`;
+  const first = `/${project}-a.jsonl`;
+  const second = `/${project}-b.jsonl`;
+  const third = `/${project}-c.jsonl`;
+  const conversation = registry.ensureConversation("codex", first, "account-a");
+  let closedPath = first;
+  let finalPath = first;
+  let excludedPaths: string[] = [];
+  let expectedAliases: Record<string, string> = {};
+
+  await mutateProject(project, [{ kind: "restore", path: first, placement: "manual" }]);
+  const close = async (pathname: string): Promise<void> => {
+    closedPath = pathname;
+    await mutateProject(project, [{ kind: "close", path: pathname }]);
+  };
+  if (closeTiming === "before") await close(first);
+
+  if (lifecycle === "commit") {
+    const revision = beginMigration(registry, conversation.id, "account-b", second, `${project}-commit`);
+    if (closeTiming === "during") await close(second);
+    commitMigration(registry, conversation.id, revision, { id: `${project}-b`, path: second, accountId: "account-b" });
+    finalPath = second;
+    expectedAliases = { [first]: second };
+    if (closeTiming === "after") await close(second);
+  }
+
+  if (lifecycle === "cancel-return-to-source") {
+    const firstRevision = beginMigration(registry, conversation.id, "account-b", second, `${project}-first`);
+    commitMigration(registry, conversation.id, firstRevision, { id: `${project}-b`, path: second, accountId: "account-b" });
+    beginMigration(registry, conversation.id, "account-c", third, `${project}-pending`);
+    if (closeTiming === "during") await close(third);
+    registry.commitMigrationIntent({
+      engine: "codex",
+      targetId: "account-b",
+      origin: "manual",
+      requestId: `${project}-return`,
+      expectedRevision: registry.engineRouting("codex").revision,
+    });
+    finalPath = second;
+    excludedPaths = [third];
+    expectedAliases = { [first]: second };
+    if (closeTiming === "after") await close(second);
+  }
+
+  if (lifecycle === "target-retirement") {
+    const firstRevision = beginMigration(registry, conversation.id, "account-b", second, `${project}-first`);
+    commitMigration(registry, conversation.id, firstRevision, { id: `${project}-b`, path: second, accountId: "account-b" });
+    beginMigration(registry, conversation.id, "account-c", third, `${project}-pending`);
+    if (closeTiming === "during") await close(third);
+    registry.retireAccount("codex", "account-c", "account-b");
+    finalPath = second;
+    excludedPaths = [third];
+    expectedAliases = { [first]: second };
+    if (closeTiming === "after") await close(second);
+  }
+
+  if (lifecycle === "chained-a-b-c") {
+    const firstRevision = beginMigration(registry, conversation.id, "account-b", second, `${project}-first`);
+    commitMigration(registry, conversation.id, firstRevision, { id: `${project}-b`, path: second, accountId: "account-b" });
+    const secondRevision = beginMigration(registry, conversation.id, "account-c", third, `${project}-second`);
+    if (closeTiming === "during") await close(third);
+    commitMigration(registry, conversation.id, secondRevision, { id: `${project}-c`, path: third, accountId: "account-c" });
+    finalPath = third;
+    expectedAliases = { [first]: third, [second]: third };
+    if (closeTiming === "after") await close(third);
+  }
+
+  if (lifecycle === "deferred-board-repair") {
+    const firstRevision = beginMigration(registry, conversation.id, "account-b", second, `${project}-first`);
+    commitMigration(registry, conversation.id, firstRevision, { id: `${project}-b`, path: second, accountId: "account-b" });
+    beginMigration(registry, conversation.id, "account-c", third, `${project}-deferred`);
+    if (closeTiming === "during") await close(third);
+    finalPath = second;
+    excludedPaths = [third];
+    expectedAliases = { [first]: second };
+    if (closeTiming === "after") await close(second);
+  }
+
+  if (lifecycle === "queued-cleanup-receipt") {
+    const firstRevision = beginMigration(registry, conversation.id, "account-b", second, `${project}-first`);
+    commitMigration(registry, conversation.id, firstRevision, { id: `${project}-b`, path: second, accountId: "account-b" });
+    registry.recordConversationContinuityPath(conversation.id, third);
+    registry.queueSuccessorCleanup(conversation.id, {
+      operationId: `${project}-cleanup`,
+      nativeId: `${project}-c`,
+      path: third,
+      continuityPaths: [third],
+      historyHash: `${project}-history`,
+      host: {
+        kind: "codex-app-server",
+        identity: `${project}-host`,
+        epoch: 1,
+        verifiedAt: "2026-07-11T10:00:00.000Z",
+      },
+    });
+    if (closeTiming === "during") await close(third);
+    finalPath = second;
+    excludedPaths = [third];
+    expectedAliases = { [first]: second };
+    if (closeTiming === "after") await close(second);
+  }
+
+  let mutations: BoardMutationV1[];
+  if (boardOperation === "alias-enrichment") {
+    mutations = [{ kind: "close", path: closedPath }];
+  } else if (boardOperation === "reconcile-roots") {
+    mutations = [{ kind: "reconcile-roots", roots: [finalPath, ...excludedPaths], removeManual: [] }];
+  } else {
+    mutations = [{
+      kind: "remap-paths",
+      pairs: [
+        ...Object.entries(expectedAliases).map(([from, to]) => ({ from, to })),
+        ...excludedPaths.map((from) => ({ from, to: finalPath })),
+      ],
+    }];
+  }
+  const board = await mutateProject(project, mutations);
+
+  const resolveExpectedPath = (pathname: string): string => {
+    let resolved = pathname;
+    while (expectedAliases[resolved]) resolved = expectedAliases[resolved]!;
+    return resolved;
+  };
+  const expectedHidden = resolveExpectedPath(closedPath);
+  const expectedManual = resolveExpectedPath(first) === expectedHidden ? [] : [resolveExpectedPath(first)];
+  expect(board.pathAliases).toEqual(expectedAliases);
+  expect(board.prefs.hidden).toEqual([expectedHidden]);
+  expect(board.prefs.manual).toEqual(expectedManual);
 });
 
 test("a closed conversation stays hidden when a registry successor arrives without a client remap", async () => {
