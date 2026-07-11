@@ -9,6 +9,7 @@ import { reconcileFlowConversationOwnership } from "@/lib/flows/store";
 import { reconcileHandoffConversationOwnership } from "@/lib/handoffLineage";
 import { listFilesWithProjectCatalog, reconcileFileControllers } from "@/lib/scanner";
 import { pidAlive, readPpid } from "@/lib/scanner/process";
+import { runReaperCycle } from "@/lib/reaperRuntime";
 import { pathForPanePid, reconcileTasks } from "@/lib/tasks/reconcile";
 import { mutateTasks } from "@/lib/tasks/store";
 import { reconcileWorkflowConversationOwnership } from "@/lib/workflows/store";
@@ -133,7 +134,12 @@ export class AccountMigrationController {
     await reconcileFileControllers(files);
     await yieldToRuntime();
     await reconcileAccountLogins();
-    await readTranscriptHosts(true);
+    const transcriptHosts = await readTranscriptHosts(true);
+    try {
+      await runReaperCycle({ registry: this.registry, hosts: transcriptHosts.hosts, files });
+    } catch {
+      console.error("[agent reaper] lifecycle reconciliation failed");
+    }
     await yieldToRuntime();
     const currentLookup = conversationLookupFromSnapshot(this.registry.snapshot());
     mutateTasks((current) => {
