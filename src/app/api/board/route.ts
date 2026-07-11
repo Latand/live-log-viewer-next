@@ -39,6 +39,7 @@ function mutationsWithConversationAliases(mutations: readonly BoardMutationV1[])
   const pairs: Array<{ from: string; to: string }> = [];
   const pairedSources = new Set(suppliedRemapSources);
   for (const conversation of Object.values(conversations)) {
+    if (conversation.generations.length < 2) continue;
     const paths = [
       ...conversation.generations.map((generation) => generation.path),
       ...conversation.continuityPaths,

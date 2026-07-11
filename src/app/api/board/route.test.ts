@@ -150,6 +150,64 @@ test("a closed conversation stays hidden when a registry successor arrives witho
   });
 });
 
+test("a pre-commit continuity path cannot create a reverse board alias", async () => {
+  const registry = new AgentRegistry(path.join(path.dirname(testFile), "agent-registry.json"));
+  setAgentRegistryForTests(registry);
+  const source = "/continuity-predecessor.jsonl";
+  const successor = "/continuity-successor.jsonl";
+  const conversation = registry.ensureConversation("codex", source, "account-a");
+  registry.recordConversationContinuityPath(conversation.id, successor);
+
+  const seeded = await PATCH(patch({
+    schemaVersion: 1,
+    project: "pre-commit-continuity",
+    baseRevision: 0,
+    patch: { manual: [source] },
+  }));
+  expect(seeded.status).toBe(200);
+  const closed = await PATCH(patch({
+    schemaVersion: 1,
+    project: "pre-commit-continuity",
+    baseRevision: 1,
+    mutations: [{ kind: "close", path: source }],
+  }));
+  expect(closed.status).toBe(200);
+  const closedBody = await closed.json() as { board: { pathAliases: Record<string, string> } };
+  expect(closedBody).toMatchObject({
+    board: { revision: 2, pathAliases: {}, prefs: { hidden: [source] } },
+  });
+  expect(closedBody.board.pathAliases).toEqual({});
+
+  registry.commitMigrationIntent({
+    engine: "codex",
+    targetId: "account-b",
+    origin: "manual",
+    requestId: "pre-commit-continuity",
+    expectedRevision: registry.engineRouting("codex").revision,
+  });
+  const revision = registry.conversation(conversation.id)!.migration!.revision;
+  registry.transitionConversationMigration(conversation.id, revision, ["requested", "waiting-turn"], { phase: "preparing" });
+  registry.transitionConversationMigration(conversation.id, revision, ["preparing"], { phase: "successor-starting" });
+  registry.transitionConversationMigration(conversation.id, revision, ["successor-starting"], { phase: "verifying" });
+  registry.commitSuccessor(conversation.id, { id: "continuity-successor", path: successor, accountId: "account-b" }, revision);
+
+  const reconciled = await PATCH(patch({
+    schemaVersion: 1,
+    project: "pre-commit-continuity",
+    baseRevision: 2,
+    mutations: [{ kind: "reconcile-roots", roots: [successor], removeManual: [] }],
+  }));
+  expect(reconciled.status).toBe(200);
+  expect(await reconciled.json()).toMatchObject({
+    ok: true,
+    board: {
+      revision: 3,
+      pathAliases: { [source]: successor },
+      prefs: { manual: [], hidden: [successor] },
+    },
+  });
+});
+
 test("a corrupt conversation registry cannot block a valid close", async () => {
   fs.writeFileSync(path.join(path.dirname(testFile), "agent-registry.json"), "{ corrupt", "utf8");
 
