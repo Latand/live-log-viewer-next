@@ -132,3 +132,39 @@ test("the kind radiogroup follows the ARIA contract: roving tabIndex + arrow key
   flushSync(() => { root.unmount(); });
   host.remove();
 });
+
+test("re-selecting a role preserves the operator's pinned runtime override", () => {
+  let latest: DraftStage = baseStage;
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root: Root = createRoot(host);
+  flushSync(() => { root.render(<Host onStage={(s) => { latest = s; }} />); });
+
+  const select = host.querySelector("select") as HTMLSelectElement;
+  /* Pick Architect → Claude/Fable/high autofills (no pin yet). */
+  flushSync(() => {
+    Object.getOwnPropertyDescriptor(dom.HTMLSelectElement.prototype, "value")!.set!.call(select, "architect");
+    select.dispatchEvent(new dom.Event("change", { bubbles: true }) as unknown as Event);
+  });
+  expect(latest).toMatchObject({ engine: "claude", model: "fable" });
+
+  /* Open the runtime editor and pin the effort to low (runtimeOverridden). */
+  const edit = host.querySelector('[aria-label="Edit runtime for stage 1"]') as HTMLElement;
+  flushSync(() => { edit.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event); });
+  const effortSelect = host.querySelector('select[aria-label="Effort"]') as HTMLSelectElement;
+  flushSync(() => {
+    Object.getOwnPropertyDescriptor(dom.HTMLSelectElement.prototype, "value")!.set!.call(effortSelect, "low");
+    effortSelect.dispatchEvent(new dom.Event("change", { bubbles: true }) as unknown as Event);
+  });
+  expect(latest).toMatchObject({ effort: "low", runtimeOverridden: true });
+
+  /* Re-select Architect: the pinned runtime survives (design §1.3). */
+  flushSync(() => {
+    Object.getOwnPropertyDescriptor(dom.HTMLSelectElement.prototype, "value")!.set!.call(select, "architect");
+    select.dispatchEvent(new dom.Event("change", { bubbles: true }) as unknown as Event);
+  });
+  expect(latest).toMatchObject({ roleId: "architect", effort: "low", engine: "claude", runtimeOverridden: true });
+
+  flushSync(() => { root.unmount(); });
+  host.remove();
+});

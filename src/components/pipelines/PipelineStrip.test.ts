@@ -25,7 +25,7 @@ describe("verdictPlacement (#93 finding: popover never renders off-screen)", () 
   test("clamps a chip near the left edge so the box stays on-screen", () => {
     const anchor = { top: 400, bottom: 424, left: 0, width: 20 };
     const p = verdictPlacement(anchor, content, viewport);
-    /* center would be 10, but half-width 130 + 8 margin forces left = 138. */
+    /* center would be 10; half-width 130 + 8 margin forces left = 138. */
     expect(p.left).toBe(138);
   });
 
@@ -36,7 +36,7 @@ describe("verdictPlacement (#93 finding: popover never renders off-screen)", () 
     expect(p.left).toBe(862);
   });
 
-  test("keeps the popover above when both sides are cramped but above has more room", () => {
+  test("keeps the popover above when both sides are cramped and above has more room", () => {
     const anchor = { top: 300, bottom: 780, left: 470, width: 60 };
     const p = verdictPlacement(anchor, content, viewport);
     /* roomAbove 292 > roomBelow 12, so it stays above and does not flip into a

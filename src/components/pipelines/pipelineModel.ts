@@ -188,10 +188,10 @@ export function renderableFlowIds(flows: Flow[], placedPaths: ReadonlySet<string
 
 /**
  * How a stage chip / "open transcript" reveals an attempt on the board. A
- * review-loop stage stores the reviewer transcript in `agentPath`, but
- * foldClaimedReviewers removes that transcript from the board and folds it into
- * the flow's round deck — so opening the raw path reveals nothing. Route those
- * to the embedded flow (deck + round focus) instead; a plain run stage opens its
+ * review-loop stage stores the reviewer transcript in `agentPath`;
+ * foldClaimedReviewers then removes that transcript from the board and folds it
+ * into the flow's round deck, so opening the raw path reveals nothing. Route
+ * those to the embedded flow (deck + round focus); a plain run stage opens its
  * own node by path. `renderableFlows` disables the flow target for a
  * closed/missing flow, and `renderablePaths` disables the run target for a
  * transcript that has left the scanned file set, so every unreachable action is

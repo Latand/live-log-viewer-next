@@ -233,14 +233,14 @@ export function pipelineValidationError(
       continue;
     }
     if (!role) continue;
-    /* Reject role params the role does not declare: the API rejects unknown keys,
-       but roleParamError only checks declared params, so a stale key left over
-       from a prior role selection would pass here and 400 there (AC1). */
+    /* Reject role params the role does not declare. The API rejects unknown keys;
+       roleParamError checks only declared params, so a stale key left over from a
+       prior role selection would pass here and 400 there (AC1). */
     const known = new Set(role.parameters.map((parameter) => parameter.key));
     const unknown = Object.keys(stage.roleParams).find((key) => !known.has(key));
     if (unknown) return t("pipelineDialog.errors.paramUnknown", { key: unknown });
-    /* Absent/blank params resolve to registry defaults server-side, so — like
-       the API — they are not required; only supplied values are checked. */
+    /* Absent/blank params resolve to registry defaults server-side, matching the
+       API, so they stay optional and the check covers supplied values. */
     for (const parameter of role.parameters) {
       const invalid = roleParamError(parameter, stage.roleParams[parameter.key]);
       if (invalid) return t(invalid, { label: parameter.label });

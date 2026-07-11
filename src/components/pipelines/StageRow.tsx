@@ -120,6 +120,14 @@ export function StageRow({
       return;
     }
     const params = defaultRoleParams(role);
+    const access = isReview ? "read-only" : roleAccess(role);
+    if (stage.runtimeOverridden) {
+      /* The operator pinned engine/model/effort by hand, and those edits win over
+         role autofill (design §1.3). A role (re)selection refreshes the role, its
+         params, and access, and the pinned runtime survives. */
+      patch({ roleId, roleParams: params, access });
+      return;
+    }
     const runtime = roleRuntime(role, params);
     patch({
       roleId,
@@ -127,9 +135,7 @@ export function StageRow({
       engine: runtime.engine,
       model: runtime.model,
       effort: runtime.effort,
-      access: isReview ? "read-only" : roleAccess(role),
-      /* A freshly selected role owns the runtime again, discarding any prior
-         hand override — the runtime line reflects the new role's preset. */
+      access,
       runtimeOverridden: false,
     });
   };
