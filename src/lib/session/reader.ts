@@ -98,6 +98,10 @@ function hasToolResult(content: unknown): boolean {
   return contentParts(content).some((part) => part.type === "tool_result");
 }
 
+function isClaudeTaskNotification(record: Record<string, unknown>): boolean {
+  return record.promptSource === "system" && rec(record.origin).kind === "task-notification";
+}
+
 function push(out: SessionReadResult, item: SessionRecord): void {
   if (!item.text.trim()) return;
   if (item.kind === "message") out.messages.push(item);
@@ -112,6 +116,10 @@ function readClaude(pathname: string): SessionReadResult {
     const ts = tsOf(obj);
     if (obj.type === "user") {
       const content = rec(obj.message).content;
+      if (isClaudeTaskNotification(obj)) {
+        push(out, { kind: "trace", role: "system", ts, name: "task-notification", text: textFromContent(content) });
+        continue;
+      }
       if (hasToolResult(content)) {
         for (const part of contentParts(content)) {
           if (part.type === "tool_result") {
@@ -203,7 +211,7 @@ const AUTHORSHIP_SCAN_MAX_RECORD_CHARS = 8 * 1024 * 1024;
 
 function recordHasUserMessage(record: Record<string, unknown>, engine: Extract<Engine, "claude" | "codex">): boolean {
   if (engine === "claude") {
-    if (record.type !== "user") return false;
+    if (record.type !== "user" || isClaudeTaskNotification(record)) return false;
     const content = rec(record.message).content;
     return !hasToolResult(content) && Boolean(textFromContent(content).trim());
   }

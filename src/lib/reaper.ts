@@ -1,5 +1,5 @@
 import type { LaunchProfile } from "@/lib/accounts/migration/contracts";
-import type { RegistryConversation, RegistryFile } from "@/lib/agent/registry";
+import type { RegistryConversation, RegistryFile, TmuxHostEvidence } from "@/lib/agent/registry";
 import type { TranscriptHost } from "@/lib/agent/transcriptHost";
 import type { Flow, Round } from "@/lib/flows/types";
 import type { FileEntry } from "@/lib/types";
@@ -33,6 +33,7 @@ export interface ReaperAgentReport {
   panePid: number | null;
   agentPid: number;
   processIdentity: string | null;
+  tmuxEvidence: TmuxHostEvidence | null;
   flowId: string | null;
   round: number | null;
   path: string | null;
@@ -57,6 +58,7 @@ export interface ReaperInput {
   now: number;
   registry: RegistryFile;
   hosts: TranscriptHost[];
+  tmuxEvidenceByHost?: ReadonlyMap<string, TmuxHostEvidence>;
   reviewerProcesses: HeadlessReviewerProcess[];
   viewerOwnedPaths: ReadonlySet<string>;
   authorshipUnverifiedPaths: ReadonlySet<string>;
@@ -227,6 +229,7 @@ export function evaluateReaper(input: ReaperInput): ReaperReport {
       panePid: host.panePid,
       agentPid: host.agentPid,
       processIdentity: host.agentIdentity,
+      tmuxEvidence: input.tmuxEvidenceByHost?.get(observedKey(host)) ?? null,
       flowId: flowMatch?.flow.id ?? null,
       round: flowMatch?.round?.n ?? null,
       path: pathname,
@@ -255,6 +258,7 @@ export function evaluateReaper(input: ReaperInput): ReaperReport {
       panePid: null,
       agentPid: process.pid,
       processIdentity: process.identity,
+      tmuxEvidence: null,
       flowId: process.flowId,
       round: process.round,
       path: process.path,

@@ -7,9 +7,9 @@ Implement deterministic lifecycle cleanup for stale agent conversations and a re
 ## Acceptance criteria
 
 - AC1: Conversation kills resolve the target from registry-owned pane IDs and return a clear error when the target cannot be resolved.
-- AC2: A successful kill requires every process start identity, matches the original pane, pane PID, agent PID, agent identity, and transcript path through both re-observations, verifies the tmux pane shell and live argv, and applies persisted identity to detached-reviewer signaling.
+- AC2: A successful kill carries the original complete tmux evidence through both re-observations and requires exact endpoint, server identity, pane identity, window name, agent identity, argv, and transcript path equality through actuation and post-kill registry cleanup.
 - AC3: Reaper classification covers flow workers, headless reviewers, Viewer-launched probes, resume duplicates, and agents whose transcripts are missing, using the policy TTL assigned to each class.
-- AC4: Automatic cleanup protects human-authored conversations while discounting every path-bound Viewer launch, flow kickoff, and findings relay with durable delivery provenance; incomplete scans, mid-turn agents, external probes, and manual board placements remain protected.
+- AC4: Automatic cleanup protects human-authored conversations while discounting path-bound Viewer deliveries and known Claude system task notifications; unknown Claude provenance, incomplete scans, mid-turn agents, external probes, and manual board placements remain protected.
 - AC5: Reaper evaluation runs through the durable controller and journals active reap attempts.
 - AC6: `GET /api/lifecycle/reaper` exposes the dry-run report without actuating cleanup.
 - AC7: Automatic reap actuation requires `LLV_REAPER_ENABLED=1`.

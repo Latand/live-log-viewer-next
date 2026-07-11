@@ -361,13 +361,16 @@ function refreshFileTimes(files: FileEntry[]): FileEntry[] {
   });
 }
 
-function evidenceFor(host: TranscriptHost): TmuxHostEvidence {
+function evidenceFor(
+  host: TranscriptHost,
+  processIdentity: (pid: number) => string | null = (pid) => procBackend.processIdentity(pid),
+): TmuxHostEvidence {
   return {
     kind: "tmux",
     endpoint: tmuxEndpoint(),
-    server: { pid: host.tmuxServerPid, startIdentity: procBackend.processIdentity(host.tmuxServerPid) },
+    server: { pid: host.tmuxServerPid, startIdentity: processIdentity(host.tmuxServerPid) },
     paneId: host.paneId,
-    panePid: { pid: host.panePid, startIdentity: procBackend.processIdentity(host.panePid) },
+    panePid: { pid: host.panePid, startIdentity: processIdentity(host.panePid) },
     windowName: host.windowName ?? "",
     agent: { pid: host.agentPid, startIdentity: host.agentIdentity },
     argv: host.agentArgv,
@@ -393,6 +396,7 @@ async function makeInput(
 ): Promise<ReaperInput> {
   const snapshot = registry.snapshot();
   const flows = (overrides.loadFlows ?? loadFlows)();
+  const processIdentity = overrides.processIdentity ?? ((pid: number) => procBackend.processIdentity(pid));
   const missingTranscriptPaths = new Set(hosts.flatMap((host) =>
     host.primaryPath && !fs.existsSync(host.primaryPath) ? [host.primaryPath] : []));
   const authorship = authorshipEvidence(snapshot, hosts, flows);
@@ -400,6 +404,7 @@ async function makeInput(
     now,
     registry: snapshot,
     hosts,
+    tmuxEvidenceByHost: new Map(hosts.map((host) => [hostKey(host), evidenceFor(host, processIdentity)])),
     reviewerProcesses: observeHeadlessReviewers(flows, overrides),
     viewerOwnedPaths: viewerOwnedPaths(snapshot, hosts),
     authorshipUnverifiedPaths: new Set([...missingTranscriptPaths, ...authorship.unverifiedPaths]),
@@ -475,12 +480,35 @@ export async function killHeadlessReviewerIfMatches(
   return false;
 }
 
-function hostMatchesCandidate(host: TranscriptHost, candidate: ReaperAgentReport): boolean {
+function sameTmuxEvidence(left: TmuxHostEvidence, right: TmuxHostEvidence): boolean {
+  return left.kind === right.kind
+    && left.endpoint === right.endpoint
+    && left.server.pid === right.server.pid
+    && left.server.startIdentity === right.server.startIdentity
+    && left.paneId === right.paneId
+    && left.panePid.pid === right.panePid.pid
+    && left.panePid.startIdentity === right.panePid.startIdentity
+    && left.windowName === right.windowName
+    && left.agent.pid === right.agent.pid
+    && left.agent.startIdentity === right.agent.startIdentity
+    && left.argv.length === right.argv.length
+    && left.argv.every((argument, index) => argument === right.argv[index]);
+}
+
+function completeTmuxEvidence(evidence: TmuxHostEvidence): boolean {
+  return evidence.server.startIdentity !== null
+    && evidence.panePid.startIdentity !== null
+    && evidence.agent.startIdentity !== null;
+}
+
+function hostMatchesCandidate(
+  host: TranscriptHost,
+  candidate: ReaperAgentReport,
+  processIdentity: (pid: number) => string | null,
+): boolean {
   return candidate.targetKind === "tmux"
-    && host.paneId === candidate.paneId
-    && host.panePid === candidate.panePid
-    && host.agentPid === candidate.agentPid
-    && host.agentIdentity === candidate.processIdentity
+    && candidate.tmuxEvidence !== null
+    && sameTmuxEvidence(evidenceFor(host, processIdentity), candidate.tmuxEvidence)
     && host.primaryPath === candidate.path;
 }
 
@@ -490,7 +518,10 @@ function reportMatchesCandidate(current: ReaperAgentReport, expected: ReaperAgen
     && current.panePid === expected.panePid
     && current.agentPid === expected.agentPid
     && current.processIdentity === expected.processIdentity
-    && current.path === expected.path;
+    && current.path === expected.path
+    && current.tmuxEvidence !== null
+    && expected.tmuxEvidence !== null
+    && sameTmuxEvidence(current.tmuxEvidence, expected.tmuxEvidence);
 }
 
 async function actuateCandidate(
@@ -512,11 +543,13 @@ async function actuateCandidate(
     return (overrides.killProcess ?? killHeadlessReviewerIfMatches)({ pid: agent.agentPid, identity: agent.processIdentity });
   }
   const paneId = agent.paneId;
-  if (paneId === null) return false;
+  const expectedEvidence = agent.tmuxEvidence;
+  if (paneId === null || !expectedEvidence || !completeTmuxEvidence(expectedEvidence)) return false;
   const observeHosts = overrides.readHosts ?? readTranscriptHosts;
   const killHost = overrides.kill ?? killTmuxHostIfMatches;
   const currentTime = overrides.now ?? Date.now;
-  const initialHost = (await observeHosts(true)).hosts.find((host) => hostMatchesCandidate(host, agent));
+  const processIdentity = overrides.processIdentity ?? ((pid: number) => procBackend.processIdentity(pid));
+  const initialHost = (await observeHosts(true)).hosts.find((host) => hostMatchesCandidate(host, agent, processIdentity));
   if (!initialHost?.primaryPath) return false;
   const entry = Object.values(registry.snapshot().entries).find((candidate) => candidate.artifactPath === agent.path);
   if (!entry) return false;
@@ -526,13 +559,14 @@ async function actuateCandidate(
     try {
       registry.claim(entry.key, claimOwner);
       const freshSnapshot: TranscriptHostSnapshot = await observeHosts(true);
-      const freshHost = freshSnapshot.hosts.find((host) => hostMatchesCandidate(host, agent));
+      const freshHost = freshSnapshot.hosts.find((host) => hostMatchesCandidate(host, agent, processIdentity));
       if (!freshHost) return false;
       const current = evaluateReaper(await makeInput(registry, freshSnapshot.hosts, refreshFileTimes(files), state, currentTime(), overrides));
       const candidate = current.agents.find((item) => reportMatchesCandidate(item, agent));
       if (!candidate?.eligible) return false;
-      const killed = await killHost(evidenceFor(freshHost));
-      if (killed && registry.snapshot().entries[`${entry.key.engine}:${entry.key.sessionId}`]?.host?.paneId === paneId) {
+      const killed = await killHost(expectedEvidence);
+      const registeredHost = registry.snapshot().entries[`${entry.key.engine}:${entry.key.sessionId}`]?.host;
+      if (killed && registeredHost && sameTmuxEvidence(registeredHost, expectedEvidence)) {
         registry.markUnhosted(entry.key);
       }
       return killed;

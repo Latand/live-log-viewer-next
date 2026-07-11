@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
-import { AgentRegistry } from "@/lib/agent/registry";
+import { AgentRegistry, type TmuxHostEvidence } from "@/lib/agent/registry";
 import type { TranscriptHost, TranscriptHostSnapshot } from "@/lib/agent/transcriptHost";
 import type { Flow } from "@/lib/flows/types";
 import type { FileEntry } from "@/lib/types";
@@ -68,6 +68,19 @@ function runtimeHost(pathname: string): TranscriptHost {
     launchId: null,
     claimedPaths: [pathname],
     primaryPath: pathname,
+  };
+}
+
+function runtimeEvidence(host: TranscriptHost, suffix = "original"): TmuxHostEvidence {
+  return {
+    kind: "tmux",
+    endpoint: "/tmp/llv-test-tmux.sock",
+    server: { pid: host.tmuxServerPid, startIdentity: `${host.tmuxServerPid}:${suffix}` },
+    paneId: host.paneId,
+    panePid: { pid: host.panePid, startIdentity: `${host.panePid}:${suffix}` },
+    windowName: host.windowName ?? "",
+    agent: { pid: host.agentPid, startIdentity: host.agentIdentity },
+    argv: host.agentArgv,
   };
 }
 
@@ -820,7 +833,7 @@ test("actuation rejects a replacement host that reused the candidate pane", asyn
     observedAt: new Date(now - 2 * 60 * 60_000).toISOString(),
   }]);
   const original = runtimeHost(pathname);
-  const replacement = { ...original, panePid: 1042, agentPid: 2042, agentIdentity: "2042:replacement" };
+  const replacement = { ...original, windowName: "replacement-window", agentArgv: ["codex", "exec", "replacement"] };
   const replacementSnapshot: TranscriptHostSnapshot = {
     hosts: [replacement],
     observation: "available",
@@ -836,6 +849,7 @@ test("actuation rejects a replacement host that reused the candidate pane", asyn
       now,
       actuation: {
         readHosts: async () => { observations += 1; return replacementSnapshot; },
+        processIdentity: (pid) => pid === 900 ? "900:original" : pid === 1041 ? "1041:original" : null,
         kill: async () => { kills += 1; return true; },
         now: () => now,
       },
@@ -844,6 +858,81 @@ test("actuation rejects a replacement host that reused the candidate pane", asyn
     expect(report.agents[0]).toMatchObject({ eligible: true, action: "kill-failed" });
     expect(observations).toBe(1);
     expect(kills).toBe(0);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("post-kill cleanup preserves a same-pane replacement registry host", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-reaper-registry-replacement-"));
+  const sessionId = "019f4906-3f67-7b72-9fbc-9ec3b5ad1352";
+  const pathname = path.join(directory, `rollout-${sessionId}.jsonl`);
+  const now = Date.parse("2026-07-12T12:00:00.000Z");
+  fs.writeFileSync(pathname, JSON.stringify({
+    type: "event_msg",
+    timestamp: new Date(now - 2 * 60 * 60_000).toISOString(),
+    payload: { type: "user_message", message: "launch prompt" },
+  }) + "\n");
+  process.env.LLV_STATE_DIR = directory;
+  process.env.LLV_REAPER_ENABLED = "1";
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const profile = emptyLaunchProfile({ cwd: "/repo", role: "worker", title: "probe" });
+  const host = runtimeHost(pathname);
+  const originalEvidence = runtimeEvidence(host);
+  const replacementEvidence = {
+    ...originalEvidence,
+    server: { ...originalEvidence.server, startIdentity: "900:replacement" },
+    panePid: { ...originalEvidence.panePid, startIdentity: "1041:replacement" },
+    windowName: "replacement-window",
+    argv: ["codex", "exec", "replacement"],
+  } satisfies TmuxHostEvidence;
+  const key = { engine: "codex" as const, sessionId };
+  const receipt = registry.beginSpawn("codex", "/repo", profile);
+  registry.completeSpawn(receipt.launchId, {
+    key,
+    artifactPath: pathname,
+    cwd: "/repo",
+    accountId: "default",
+    launchProfile: profile,
+    status: "idle",
+    host: originalEvidence,
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  registry.reconcileConversations([{
+    engine: "codex",
+    path: pathname,
+    accountId: "default",
+    launchProfile: profile,
+    turn: { state: "idle", source: "assistant", terminalAt: new Date(now - 2 * 60 * 60_000).toISOString() },
+    observedAt: new Date(now - 2 * 60 * 60_000).toISOString(),
+  }]);
+  const snapshot: TranscriptHostSnapshot = {
+    hosts: [host],
+    observation: "available",
+    canonicalFor: (candidate) => candidate === pathname ? host : null,
+  };
+  try {
+    const report = await runReaperCycle({
+      registry,
+      hosts: [host],
+      files: [runtimeFile(pathname, now / 1000 - 2 * 60 * 60)],
+      now,
+      actuation: {
+        readHosts: async () => snapshot,
+        processIdentity: (pid) => pid === 900 ? "900:original" : pid === 1041 ? "1041:original" : null,
+        kill: async () => {
+          const entry = registry.snapshot().entries[`codex:${sessionId}`]!;
+          registry.upsert({ ...entry, host: replacementEvidence, status: "live" });
+          return true;
+        },
+        now: () => now,
+      },
+    });
+
+    expect(report.agents[0]).toMatchObject({ eligible: true, action: "reaped" });
+    expect(registry.snapshot().entries[`codex:${sessionId}`]?.host).toEqual(replacementEvidence);
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }
@@ -910,6 +999,7 @@ test("a delivery completed before reaper actuation fences the stale idle turn", 
           }
           return snapshot;
         },
+        processIdentity: (pid) => pid === 900 ? "900:original" : pid === 1041 ? "1041:original" : null,
         kill: async () => { kills += 1; return true; },
         now: () => now,
       },

@@ -76,3 +76,22 @@ test("authorship scan reports malformed and oversized records as incomplete", ()
   fs.writeFileSync(oversized, JSON.stringify({ type: "event_msg", payload: { type: "agent_message", message: "x".repeat(8 * 1024 * 1024 + 1) } }) + "\n");
   expect(scanUserAuthoredMessages(oversized, "codex", 1)).toEqual({ count: 0, complete: false });
 });
+
+test("Claude task notifications stay outside human authorship", () => {
+  const pathname = writeJsonl("claude-task-notification-authorship.jsonl", [
+    {
+      type: "user",
+      promptSource: "system",
+      origin: { kind: "task-notification" },
+      message: { content: "Automated task completed" },
+    },
+    {
+      type: "user",
+      promptSource: "future-source",
+      origin: { kind: "unknown" },
+      message: { content: "Conservatively treated as human" },
+    },
+  ]);
+
+  expect(scanUserAuthoredMessages(pathname, "claude", 2)).toEqual({ count: 1, complete: true });
+});
