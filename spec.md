@@ -1,15 +1,20 @@
-# Issue 121: deployment proxy request forwarding
+# Issue 117: reliable headless reviewer spawning
 
 ## Task statement
 
-Investigate the first managed Viewer cutover failure where `serveViewerDeploymentProxy` accepted connections on the stable listener while returning zero response bytes. Repair request forwarding for the production `bun-container` runtime, preserve the target-file listener-switch design, cover the failure with a real TCP regression test, and remove the public-repository SSH bootstrap papercut.
+Repair headless review rounds started by the flow engine so Codex receives its prompt with a deterministic EOF, reviewer launches avoid exhausted accounts, a configured Claude/Fable reviewer can take over when Codex quota is exhausted, and transient no-verdict exits recover without manual retry-round babysitting.
 
 ## Acceptance criteria
 
-- AC1: The deployment proxy forwards a request sent immediately after downstream TCP connection and returns the candidate Viewer response.
-- AC2: The proxy preserves request bytes while its upstream connection is being established under production-image Bun 1.2.18.
-- AC3: A regression test drives an external TCP client through an in-process proxy and upstream listener.
-- AC4: Missing, invalid, or recursive release targets continue to receive the existing `503 Service Unavailable` response.
-- AC5: The default canonical remote for the public repository uses HTTPS and remains configurable through `LLV_VIEWER_CANONICAL_REMOTE`.
-- AC6: `bun test` and `bunx tsc --noEmit` pass.
-- AC7: Investigation and verification use unused high ports and leave the production listener, runtime-host, legacy Viewer, and managed candidate lifecycle unchanged.
+- AC1: `codex exec` receives the complete reviewer prompt through stdin and observes EOF after the payload flushes.
+- AC2: Headless Codex launches select an authenticated account with fresh session and weekly headroom when one is available.
+- AC3: A retry prefers an untried eligible account, then the configured Claude/Fable fallback, before reusing a failed account.
+- AC4: Effective reviewer role and account identity are persisted before process launch.
+- AC5: PID, session id, and reviewer transcript receipt are persisted immediately after launch.
+- AC6: Restart recovery interprets file-backed output with the persisted effective reviewer engine, including Claude fallback attempts.
+- AC7: A headless reviewer exit without a verdict triggers one automatic retry inside the logical round.
+- AC8: Repeated no-verdict failure parks in `needs_decision` with captured diagnostics.
+- AC9: Confirmed exhaustion across primary and fallback reviewer accounts parks with a dedicated rate-limit `stateDetail` that surfaces `resetsAt`.
+- AC10: Legacy persisted flows load with compatible defaults for fallback and retry fields.
+- AC11: `bun test` and `bunx tsc --noEmit` pass before each review-ready push.
+- AC12: Work remains inside this checkout and leaves production services on port 8898 unchanged.

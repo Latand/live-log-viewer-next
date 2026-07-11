@@ -3,6 +3,7 @@ import path from "node:path";
 
 import { freshSpecFor, resumeSpecFor } from "@/lib/agent/cli";
 import { accountManager } from "@/lib/accounts/manager";
+import type { AccountContext } from "@/lib/accounts/contracts";
 import { deliverToTranscriptHost } from "@/lib/agent/transcriptHost";
 import { agentRegistry } from "@/lib/agent/registry";
 import { resolveSpawnedTranscriptPath } from "@/lib/agent/spawnedTranscript";
@@ -189,15 +190,41 @@ function applyVerdict(flow: Flow, round: Round, parsed: ParsedFindings): void {
   flow.stateDetail = null;
 }
 
-async function launchReviewer(flow: Flow, round: Round): Promise<void> {
-  const prompt = reviewerPrompt(flow, round);
-  flow.state = "reviewing";
-  flow.stateDetail = null;
+interface PreparedReviewerLaunch {
+  role: Flow["roles"]["reviewer"];
+  account: AccountContext;
+}
+
+function prepareReviewerLaunch(flow: Flow, round: Round): PreparedReviewerLaunch {
   if (flow.reviewerMode === "pane") {
     const role = flow.roles.reviewer;
     const account = accountManager.resolveSpawn(role.engine, round.accountId);
-    round.accountId ??= account.accountId;
-    round.reviewerRole = role;
+    round.accountId = account.accountId;
+    round.reviewerRole = { ...role };
+    return { role, account };
+  }
+  const decision = chooseHeadlessReviewer(
+    flow.roles.reviewer,
+    flow.reviewerFallback,
+    round.attemptedAccounts ?? [],
+    (engine, requestedId, excludedIds) => accountManager.resolveHeadlessSpawn(engine, requestedId, excludedIds),
+  );
+  if (decision.kind === "exhausted") throw new ReviewerAccountsExhaustedError(decision.resetsAt);
+  if (decision.kind === "unavailable") throw new Error("no authenticated reviewer account is available");
+  const { role, account } = decision;
+  round.reviewerRole = { ...role };
+  round.accountId = account.accountId;
+  const accountKey = `${account.engine}:${account.accountId}`;
+  round.attemptedAccounts = [...new Set([...(round.attemptedAccounts ?? []), accountKey])];
+  return { role, account };
+}
+
+async function launchReviewer(flow: Flow, round: Round, prepared: PreparedReviewerLaunch): Promise<void> {
+  const prompt = reviewerPrompt(flow, round);
+  const { role, account } = prepared;
+  flow.state = "reviewing";
+  flow.stateDetail = null;
+  if (flow.reviewerMode === "pane") {
     const spec = freshSpecFor(role.engine, flow.cwd, {
       model: role.model,
       effort: role.effort,
@@ -222,19 +249,6 @@ async function launchReviewer(flow: Flow, round: Round): Promise<void> {
     if (!round.reviewerPath && pane.panePid) round.error = null;
     return;
   }
-  const decision = chooseHeadlessReviewer(
-    flow.roles.reviewer,
-    flow.reviewerFallback,
-    round.attemptedAccounts ?? [],
-    (engine, requestedId, excludedIds) => accountManager.resolveHeadlessSpawn(engine, requestedId, excludedIds),
-  );
-  if (decision.kind === "exhausted") throw new ReviewerAccountsExhaustedError(decision.resetsAt);
-  if (decision.kind === "unavailable") throw new Error("no authenticated reviewer account is available");
-  const { role, account } = decision;
-  round.reviewerRole = { ...role };
-  round.accountId = account.accountId;
-  const accountKey = `${account.engine}:${account.accountId}`;
-  round.attemptedAccounts = [...new Set([...(round.attemptedAccounts ?? []), accountKey])];
   const launched = startHeadlessReview(
     flow.id,
     round.n,
@@ -343,9 +357,11 @@ async function tickFlow(
       return JSON.stringify(flow) !== before;
     }
     try {
+      const prepared = prepareReviewerLaunch(flow, round);
       round.spawnStartedAt = isoNow();
       persistCheckpoint();
-      await launchReviewer(flow, round);
+      await launchReviewer(flow, round, prepared);
+      persistCheckpoint();
     } catch (error) {
       if (error instanceof ReviewerAccountsExhaustedError) {
         round.error = null;

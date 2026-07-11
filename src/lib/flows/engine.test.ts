@@ -181,3 +181,68 @@ test("headless review retries once after an exit without a verdict, then parks o
   expect(parked.state).toBe("needs_decision");
   expect(parked.stateDetail).toContain("reviewer verdict was unparseable");
 });
+
+test("restart recovery keeps a launched Claude fallback bound to its persisted effective role", async () => {
+  const startedAt = new Date().toISOString();
+  const cwd = "/repo";
+  const implementer = writeCodexEntry("fallback-restart-implementer.jsonl", { id: "019f421e-02e1-73e0-9b77-bebde063f118", cwd }, Date.now() / 1_000);
+  const flow: Flow = {
+    id: "flow-fallback-restart",
+    template: "implement-review-loop",
+    project: "repo",
+    cwd,
+    implementerPath: implementer.path,
+    roles: {
+      implementer: { engine: "codex", model: null, effort: "high" },
+      reviewer: { engine: "codex", model: "gpt-5.6-sol", effort: "xhigh" },
+    },
+    reviewerFallback: { engine: "claude", model: "fable", effort: "high" },
+    baseRef: "base",
+    baseMode: "head",
+    mode: "auto",
+    reviewerMode: "headless",
+    roundLimit: 5,
+    state: "spawning",
+    pausedState: null,
+    stateDetail: null,
+    rounds: [{
+      n: 1,
+      reviewerPath: null,
+      reviewerRole: { engine: "claude", model: "fable", effort: "high" },
+      accountId: "fable-main",
+      attemptedAccounts: ["codex:default", "claude:fable-main"],
+      autoRetryCount: 1,
+      sessionId: null,
+      reviewerPid: 999_999_999,
+      reviewerPane: null,
+      findingsPath: null,
+      triggeredBy: "marker",
+      readyNote: null,
+      verdict: null,
+      findingsCount: null,
+      startedAt,
+      spawnStartedAt: startedAt,
+      relayStartedAt: null,
+      reviewedAt: null,
+      relayedAt: null,
+      error: null,
+    }],
+    createdAt: startedAt,
+    closedAt: null,
+  };
+  fs.mkdirSync(path.dirname(stdoutPathFor(flow.id, 1)), { recursive: true });
+  fs.writeFileSync(stdoutPathFor(flow.id, 1), "VERDICT: APPROVE\n\nFallback review completed.\n");
+  saveFlows([flow]);
+
+  await tickFlows([implementer]);
+  expect(loadFlows()[0]).toMatchObject({
+    state: "reviewing",
+    rounds: [{ reviewerRole: { engine: "claude", model: "fable", effort: "high" }, accountId: "fable-main" }],
+  });
+
+  await tickFlows([implementer]);
+  expect(loadFlows()[0]).toMatchObject({
+    state: "relaying",
+    rounds: [{ verdict: "APPROVE", reviewerRole: { engine: "claude" } }],
+  });
+});
