@@ -13,7 +13,7 @@ import {
   viewerComposeServiceUid,
 } from "../src/runtime-host/candidateContainer";
 import { ensureCanonicalMirror } from "../src/runtime-host/canonicalMirror";
-import { candidatePortsFromEnvironmentLists, isCandidatePortAvailable, selectCandidatePort } from "../src/runtime-host/candidatePort";
+import { allocateBuiltCandidatePort, candidatePortsFromEnvironmentLists, isCandidatePortAvailable } from "../src/runtime-host/candidatePort";
 import { hasViewerDeploymentCapability, viewerHealthRequestPlan, waitForViewerReadiness, type ViewerCandidateContainerState } from "../src/runtime-host/deploymentHealth";
 
 const stateDir = process.env.LLV_STATE_DIR || "/home/latand/.config/agent-log-viewer/state";
@@ -105,11 +105,13 @@ async function buildCandidate(deploymentId: string, revision: string): Promise<V
     try { await command(["git", "--git-dir", mirrorDir, "worktree", "remove", "--force", sourceDir]); }
     catch { fs.rmSync(sourceDir, { recursive: true, force: true }); }
   }
-  const reservedPorts = await managedCandidatePorts();
-  const port = await selectCandidatePort(deploymentId, {
+  const port = await allocateBuiltCandidatePort(deploymentId, {
     base: Number(process.env.LLV_VIEWER_CANDIDATE_PORT_BASE || 18_000),
     slots: 2_000,
-    isAvailable: async (candidate) => !reservedPorts.has(candidate) && await isCandidatePortAvailable(candidate),
+    reservedPorts: managedCandidatePorts,
+    isAvailable: isCandidatePortAvailable,
+    removeImage: async () => { await command(["docker", "image", "rm", image]); },
+    removeComposeSnapshot: () => { fs.rmSync(composeConfigFile(revision), { force: true }); },
   });
   return { revision, image, container: `llv-deploy-${deploymentId.replace(/[^a-zA-Z0-9_.-]/g, "-")}`, endpoint: `http://127.0.0.1:${port}` };
 }

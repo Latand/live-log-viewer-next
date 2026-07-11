@@ -7,6 +7,15 @@ export interface CandidatePortSelectionOptions {
   isAvailable?(port: number): Promise<boolean>;
 }
 
+export interface BuiltCandidatePortAllocationOptions {
+  base: number;
+  slots: number;
+  reservedPorts(): Promise<ReadonlySet<number>>;
+  isAvailable(port: number): Promise<boolean>;
+  removeImage(): Promise<void>;
+  removeComposeSnapshot(): void | Promise<void>;
+}
+
 export function candidatePortsFromEnvironmentLists(environments: string[][]): Set<number> {
   const ports = new Set<number>();
   for (const environment of environments) {
@@ -42,4 +51,26 @@ export async function selectCandidatePort(deploymentId: string, options: Candida
     if (await isAvailable(port)) return port;
   }
   throw new Error("no candidate Viewer port is available");
+}
+
+export async function allocateBuiltCandidatePort(
+  deploymentId: string,
+  options: BuiltCandidatePortAllocationOptions,
+): Promise<number> {
+  try {
+    const reserved = await options.reservedPorts();
+    return await selectCandidatePort(deploymentId, {
+      base: options.base,
+      slots: options.slots,
+      isAvailable: async (port) => !reserved.has(port) && await options.isAvailable(port),
+    });
+  } catch (allocationError) {
+    const cleanupErrors: unknown[] = [];
+    try { await options.removeImage(); } catch (error) { cleanupErrors.push(error); }
+    try { await options.removeComposeSnapshot(); } catch (error) { cleanupErrors.push(error); }
+    if (cleanupErrors.length > 0) {
+      throw new AggregateError([allocationError, ...cleanupErrors], "candidate port allocation and build cleanup failed");
+    }
+    throw allocationError;
+  }
 }

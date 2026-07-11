@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 
-import { candidatePortsFromEnvironmentLists, selectCandidatePort } from "./candidatePort";
+import { allocateBuiltCandidatePort, candidatePortsFromEnvironmentLists, selectCandidatePort } from "./candidatePort";
 
 test("managed container environments reserve stopped rollback ports", () => {
   expect(candidatePortsFromEnvironmentLists([
@@ -34,4 +34,18 @@ test("candidate port selection fails after checking the bounded range", async ()
     isAvailable: async () => { probes += 1; return false; },
   })).rejects.toThrow("no candidate Viewer port is available");
   expect(probes).toBe(3);
+});
+
+test("post-build allocation failure removes the image and Compose snapshot", async () => {
+  const cleanup: string[] = [];
+  await expect(allocateBuiltCandidatePort("deploy-inspect-failure", {
+    base: 18_000,
+    slots: 3,
+    reservedPorts: async () => { throw new Error("container inspection failed"); },
+    isAvailable: async () => true,
+    removeImage: async () => { cleanup.push("image"); },
+    removeComposeSnapshot: () => { cleanup.push("compose"); },
+  })).rejects.toThrow("container inspection failed");
+
+  expect(cleanup).toEqual(["image", "compose"]);
 });
