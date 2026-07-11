@@ -31,13 +31,23 @@ test("reports the configured tmux endpoint", () => {
 });
 
 describe("tmux endpoint ownership", () => {
-  test("requires the external supervisor endpoint after migration", () => {
-    expect(() => resolveTmuxEndpointContract({
+  test("keeps legacy delivery available and reports a stale migration marker", () => {
+    expect(resolveTmuxEndpointContract({
       configuredTmpdir: "/tmp",
       externalFlag: "0",
       migrationComplete: true,
       uid: 1000,
-    })).toThrow("migration marker requires the external tmux supervisor");
+    })).toEqual({
+      external: false,
+      tmuxTmpdir: "/tmp",
+      health: {
+        status: "degraded",
+        code: "migration-marker-endpoint-mismatch",
+        configuredTmpdir: "/tmp",
+        expectedTmpdir: "/run/user/1000/agent-log-viewer",
+        message: "A migration completion marker exists while the Viewer is using /tmp. Legacy tmux delivery remains active; remove the stale marker or complete the supervisor migration.",
+      },
+    });
 
     expect(resolveTmuxEndpointContract({
       configuredTmpdir: "/run/user/1000/agent-log-viewer",
@@ -47,6 +57,7 @@ describe("tmux endpoint ownership", () => {
     })).toEqual({
       external: true,
       tmuxTmpdir: "/run/user/1000/agent-log-viewer",
+      health: { status: "healthy" },
     });
   });
 });

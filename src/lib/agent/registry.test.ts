@@ -118,6 +118,19 @@ describe("agent registry", () => {
     expect(store.snapshot().receipts[receipt.launchId]?.state).toBe("completed");
   });
 
+  test("route settlement recovers when observation completed the same spawn first", () => {
+    const store = registry();
+    const receipt = store.beginSpawn("codex", "/repo");
+    const entry = spawnEntry("/sessions/rollout-019f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl");
+
+    expect(store.completeObservedSpawn(receipt.launchId, entry).kind).toBe("settled");
+    const route = store.settleSpawn(receipt.launchId, entry);
+
+    expect(route.kind).toBe("settled");
+    expect(route.receipt.state).toBe("completed");
+    expect(route.receipt.completionMode).toBe("route-recovered");
+  });
+
   test("serializes durable operations", async () => {
     const store = registry();
     store.upsert({ key: KEY, artifactPath: "/a", cwd: "/repo", accountId: null, status: "live", host: null, claimEpoch: 0, claimOwner: null, pendingAction: null });

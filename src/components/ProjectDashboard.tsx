@@ -18,8 +18,11 @@ import { TaskStrip } from "./BranchPane";
 import { clearDraftStorage, draftSrc, setDraftSrc, setDraftText } from "./DraftAgentPane";
 import { planBoardConvergence, planClose } from "./projectBoardMutations";
 import { claimedReviewerDescendantPaths, foldClaimedReviewers, isActiveFlow } from "./flows/flowModel";
+import { PipelineDialog } from "./pipelines/PipelineDialog";
 import { PipelineStrip } from "./pipelines/PipelineStrip";
-import { pipelinesForProject } from "./pipelines/pipelineModel";
+import { pipelinesForProject, pipelineStripDomId, renderableFlowIds } from "./pipelines/pipelineModel";
+import { buildSchemeLayout } from "./scheme/layout";
+import { deckKey } from "./scheme/agentLinks";
 import { clearWorkflowDraftStorage } from "./workflows/WorkflowDraftPane";
 import { WorkflowStrip } from "./workflows/WorkflowStrip";
 import { isWorkflowDraftId, workflowsForProject } from "./workflows/workflowModel";
@@ -183,6 +186,7 @@ export function ProjectDashboard({
   );
   const taskPanelOpen = board.prefs.taskPanelOpen;
   const [drafts, setDrafts] = useState<string[]>([]);
+  const [pipelineDialogOpen, setPipelineDialogOpen] = useState(false);
   const [highlight, setHighlight] = useState<string | null>(null);
   /* Jump targets the scheme would otherwise skip (a stalled root builds no
      automatic group; a stalled branch hides inside a mini stack) materialize
@@ -226,6 +230,9 @@ export function ProjectDashboard({
   }, [expandedFlowConversations, prefs.expanded]);
   const groupFiles = useMemo(() => foldClaimedReviewers(files, flows), [files, flows]);
   const projectPipelines = useMemo(() => pipelinesForProject(pipelines, project, files), [pipelines, project, files]);
+  /* Stage actions that route to a transcript are disabled once it leaves the
+     scan, so gate them on the current file paths (AC4). */
+  const renderablePaths = useMemo(() => new Set(files.map((entry) => entry.path)), [files]);
   const projectWorkflows = useMemo(() => workflowsForProject(workflows, project, files), [workflows, project, files]);
   const groups = useMemo(
     () => buildBranchGroups(groupFiles, project, { expandedConversationPaths: expandedConversations }),
@@ -503,6 +510,29 @@ export function ProjectDashboard({
     pendingFocusRef.current = file.path;
   };
 
+  /* The pipeline strip renders in the header of both views, but its focus targets
+     only exist on the scheme; from the list view the board is unmounted and the
+     flash/restore would silently no-op. Switch to the scheme first so the
+     scheduled focus actually lands. */
+  const revealOnScheme = () => {
+    if (board.prefs.viewMode !== "scheme") board.setViewMode("scheme");
+  };
+  /* Pipeline strip/verdict "open transcript": a run stage owns a board node, so
+     route its agent path through the same board open. */
+  const openPipelinePath = (path: string) => {
+    const file = files.find((entry) => entry.path === path);
+    if (!file) return;
+    revealOnScheme();
+    openSwitchboardFile(file);
+  };
+  /* A review-loop stage's reviewer transcript is folded into the flow's round
+     deck, so glide to that deck (a byPath key); the reviewer node is removed, so
+     openPipelinePath on its path would reveal nothing (#93 §2.2). */
+  const openPipelineFlow = (flowId: string) => {
+    revealOnScheme();
+    flashNode(deckKey(flowId));
+  };
+
   const statusBits: string[] = [];
   if (liveCount) {
     statusBits.push(
@@ -538,6 +568,12 @@ export function ProjectDashboard({
   );
   const hasArchiveNodes = archiveGroups.length > 0;
   const schemeAvailable = hasNodes || hasArchiveNodes;
+  /* A review-loop action only lands if its flow has a rendered deck, and a deck
+     exists only for an implementer placed as a board node — the same layout the
+     scheme draws. Derive availability from that layout's nodes, so a scanned but
+     unplaced (hidden/tombstoned) implementer disables the action (#93 finding). */
+  const pipelineLayout = buildSchemeLayout(hasNodes ? schemeGroups : archiveGroups, hasNodes ? schemeManual : [], files, flows, hasNodes ? drafts : [], pipelines);
+  const renderableFlows = renderableFlowIds(flows, new Set(pipelineLayout.nodes.map((node) => node.file.path)));
   const listAvailable = historyRows.length > 0;
   const projectView = resolveProjectView({
     preferredView: board.prefs.viewMode,
@@ -631,6 +667,14 @@ export function ProjectDashboard({
         )}
         <button
           type="button"
+          onClick={() => setPipelineDialogOpen(true)}
+          aria-label={t("dash.newPipeline")}
+          className="flex shrink-0 items-center gap-1 rounded-[8px] border border-line bg-panel px-2.5 py-1 text-[11.5px] font-bold text-ink shadow-card hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+        >
+          <span className="text-[13px] leading-none text-accent">+</span> {t("dash.pipeline")}
+        </button>
+        <button
+          type="button"
           onClick={addWorkflowDraft}
           aria-label={t("dash.newWorkflow")}
           className="flex shrink-0 items-center gap-1 rounded-[8px] border border-line bg-panel px-2.5 py-1 text-[11.5px] font-bold text-ink shadow-card hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
@@ -638,6 +682,13 @@ export function ProjectDashboard({
           <span className="text-[13px] leading-none text-accent">+</span> {t("dash.workflow")}
         </button>
       </div>
+
+      {pipelineDialogOpen ? (
+        /* Keyed by project: this dashboard survives project switches, so a
+           key remount drops project A's task/repo/stages, which keeps them out of
+           project B's draft (and stops A's repo from submitting under B). */
+        <PipelineDialog key={project} project={project} onClose={() => setPipelineDialogOpen(false)} />
+      ) : null}
 
       {pipelinesError ? (
         <div className="shrink-0 border-b border-line bg-[#fdf6ec] px-3 py-1.5 text-[11.5px] text-[#8a5b00]" role="alert">
@@ -648,7 +699,9 @@ export function ProjectDashboard({
       {projectPipelines.length || projectWorkflows.length ? (
         <div className="flex shrink-0 flex-col gap-1.5 border-b border-line bg-[#fbfbfd] px-3 py-1.5">
           {projectPipelines.map((pipeline) => (
-            <PipelineStrip key={pipeline.id} pipeline={pipeline} />
+            <div key={pipeline.id} id={pipelineStripDomId(pipeline.id)} tabIndex={-1} className="scroll-mt-2 rounded-[14px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50">
+              <PipelineStrip pipeline={pipeline} flows={flows} renderablePaths={renderablePaths} renderableFlows={renderableFlows} onOpenPath={openPipelinePath} onOpenFlow={openPipelineFlow} />
+            </div>
           ))}
           {projectWorkflows.map((wf) => (
             <WorkflowStrip key={wf.id} wf={wf} />
@@ -747,6 +800,14 @@ export function ProjectDashboard({
                 className="pointer-events-auto flex shrink-0 items-center gap-1 rounded-[8px] border border-line bg-panel px-3 py-1.5 text-[11.5px] font-bold text-ink shadow-card hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
               >
                 <span className="text-[13px] leading-none text-accent">+</span> {t("dash.agent")}
+              </button>
+              <button
+                type="button"
+                onClick={() => setPipelineDialogOpen(true)}
+                aria-label={t("board.newPipeline")}
+                className="pointer-events-auto flex shrink-0 items-center gap-1 rounded-[8px] border border-line bg-panel px-3 py-1.5 text-[11.5px] font-bold text-ink shadow-card hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+              >
+                <span className="text-[13px] leading-none text-accent">+</span> {t("board.pipeline")}
               </button>
             </div>
           </div>

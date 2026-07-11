@@ -7,7 +7,7 @@ import type { Flow } from "@/lib/flows/types";
 import type { FileEntry } from "@/lib/types";
 
 process.env.LLV_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "llv-pipeline-engine-"));
-const { createPipelineFromRequest, patchPipeline, tickPipelines } = await import("./engine");
+const { createPipelineFromRequest, patchPipeline, reviewNote, tickPipelines } = await import("./engine");
 const { loadPipelines, savePipelines } = await import("./store");
 type PipelinePorts = import("./engine").PipelinePorts;
 
@@ -116,6 +116,53 @@ test("creation validates linear 2–4 stage chains and optional roles", async ()
     { id: "a", kind: "run", role: { roleId: "builder" }, prompt: "a", next: "b" },
     { id: "b", kind: "run", role: { roleId: "builder", engine: "codex" }, prompt: "b", next: null },
   ] as never }, ports)).error).toContain("role only accepts roleId");
+});
+
+test("role params are accepted, persisted on the stage, and type-checked", async () => {
+  const { ports } = harness();
+  savePipelines([]);
+  const ok = await createPipelineFromRequest({ task: "x", spec: "AC", repoDir: "/repo", stages: [
+    { id: "build", kind: "run", role: { roleId: "builder", params: { mode: "tdd" } }, engine: "codex", prompt: "a", next: "review" },
+    { id: "review", kind: "review-loop", role: { roleId: "reviewer" }, prompt: "b", next: null },
+  ] as never }, ports);
+  expect(ok.pipeline?.stages[0]?.role).toEqual({ roleId: "builder", params: { mode: "tdd" } });
+
+  savePipelines([]);
+  const bad = await createPipelineFromRequest({ task: "x", spec: "AC", repoDir: "/repo", stages: [
+    { id: "build", kind: "run", role: { roleId: "builder", params: { mode: { nested: true } } }, engine: "codex", prompt: "a", next: "review" },
+    { id: "review", kind: "review-loop", role: { roleId: "reviewer" }, prompt: "b", next: null },
+  ] as never }, ports);
+  expect(bad.error).toContain("params must be strings or numbers");
+});
+
+test("a deployer stage is rejected at create with a 400", async () => {
+  const { ports } = harness();
+  savePipelines([]);
+  const result = await createPipelineFromRequest({ task: "x", spec: "AC", repoDir: "/repo", stages: [
+    { id: "build", kind: "run", role: { roleId: "builder" }, engine: "codex", prompt: "a", next: "ship" },
+    { id: "ship", kind: "run", role: { roleId: "deployer" }, engine: "codex", prompt: "b", next: null },
+  ] as never }, ports);
+  expect(result.status).toBe(400);
+  expect(result.error).toContain("not allowed in a pipeline");
+});
+
+test("invalid role param values fail canonical validation with a 400", async () => {
+  const { ports } = harness();
+  savePipelines([]);
+  const badSelect = await createPipelineFromRequest({ task: "x", spec: "AC", repoDir: "/repo", stages: [
+    { id: "build", kind: "run", role: { roleId: "builder", params: { mode: "bananas" } }, engine: "codex", prompt: "a", next: "review" },
+    { id: "review", kind: "review-loop", role: { roleId: "reviewer" }, prompt: "b", next: null },
+  ] as never }, ports);
+  expect(badSelect.status).toBe(400);
+  expect(badSelect.error).toContain("invalid role parameter: mode");
+
+  savePipelines([]);
+  const unknownKey = await createPipelineFromRequest({ task: "x", spec: "AC", repoDir: "/repo", stages: [
+    { id: "build", kind: "run", role: { roleId: "builder", params: { bogus: "x" } }, engine: "codex", prompt: "a", next: "review" },
+    { id: "review", kind: "review-loop", role: { roleId: "reviewer" }, prompt: "b", next: null },
+  ] as never }, ports);
+  expect(unknownKey.status).toBe(400);
+  expect(unknownKey.error).toContain("unknown role parameter: bogus");
 });
 
 test("linear run stages persist sessions, structured outputs, commits, and lineage", async () => {
@@ -477,4 +524,55 @@ test("creation caps task, spec, and stage prompt sizes", async () => {
     { id: "a", kind: "run", prompt: "p".repeat(8_001), next: "b" },
     { id: "b", kind: "run", prompt: "b", next: null },
   ] }, ports)).error).toContain("prompt exceeds");
+});
+
+const reviewPipeline = { task: "ship the widget", cursor: null, stages: [], runs: [] } as unknown as Parameters<typeof reviewNote>[0];
+const reviewStage = (prompt: string) => ({ id: "review", kind: "review-loop", prompt, next: null } as unknown as Parameters<typeof reviewNote>[1]);
+const noteOf = (result: ReturnType<typeof reviewNote>) => ("note" in result ? result.note : "");
+
+test("reviewNote fits the flow-note cap while preserving the directive and safety fences", () => {
+  /* A long role scaffold + fences would blow past the flow note's 2,000-char cap.
+     The directive and the fences must survive; only the scaffold body is trimmed. */
+  const fences = "\n\nSafety fences:\n- never delete production data\n- keep read-only when reviewing";
+  const role = {
+    engine: "codex" as const, model: "gpt-5.6-sol", effort: "high",
+    roleId: "reviewer" as const, access: "read-only" as const,
+    promptScaffold: `${"scaffold body ".repeat(400)}${fences}`,
+  };
+  const result = reviewNote(reviewPipeline, reviewStage("Review the diff for {{task}} carefully."), role);
+  const note = noteOf(result);
+  expect("note" in result).toBe(true);
+  expect(note.length).toBeLessThanOrEqual(2_000);
+  /* The operator's directive (with {{task}} substituted) is kept whole. */
+  expect(note).toContain("Review the diff for ship the widget carefully.");
+  /* Both safety fences survive the trim. */
+  expect(note).toContain("never delete production data");
+  expect(note).toContain("keep read-only when reviewing");
+  /* The scaffold body was trimmed (it did not all fit). */
+  expect(note).toContain("scaffold body");
+});
+
+test("reviewNote parks a too-long directive for raw and role-backed review stages", () => {
+  const longDirective = `${"X".repeat(3_000)} {{task}}`;
+  /* Raw review stage (no role scaffold): a 3,000-char directive can't be
+     delivered whole, so it parks with an actionable error and never a 1,967-char slice. */
+  const raw = reviewNote(reviewPipeline, reviewStage(longDirective), {
+    engine: "codex", model: "gpt-5.6-sol", effort: "high", roleId: null, access: "read-only", promptScaffold: null,
+  } as unknown as Parameters<typeof reviewNote>[2]);
+  expect("error" in raw).toBe(true);
+  if ("error" in raw) expect(raw.error).toContain("too long");
+
+  /* Role-backed review stage: same over-cap directive still parks (the scaffold
+     body trims, but the directive itself cannot be dropped). */
+  const backed = reviewNote(reviewPipeline, reviewStage(longDirective), {
+    engine: "codex", model: "gpt-5.6-sol", effort: "high", roleId: "reviewer", access: "read-only",
+    promptScaffold: "guidance\n\nSafety fences:\n- stay read-only",
+  } as unknown as Parameters<typeof reviewNote>[2]);
+  expect("error" in backed).toBe(true);
+
+  /* A directive that fits is delivered whole. */
+  const ok = reviewNote(reviewPipeline, reviewStage("Check {{task}} against the ACs."), {
+    engine: "codex", model: "gpt-5.6-sol", effort: "high", roleId: null, access: "read-only", promptScaffold: null,
+  } as unknown as Parameters<typeof reviewNote>[2]);
+  expect(noteOf(ok)).toBe("Check ship the widget against the ACs.");
 });

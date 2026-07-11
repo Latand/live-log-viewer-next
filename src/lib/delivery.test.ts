@@ -7,6 +7,7 @@ import { AgentRegistry, setAgentRegistryForTests, type ConversationObservation }
 import { emptyLaunchProfile } from "./accounts/migration/contracts";
 import { drainHeldDeliveries } from "./accounts/migration/coordinator";
 import { cleanupFailedImageDelivery, deliverConversationMessage, migrationDeliveryOutcome, type DeliveryFailure } from "./delivery";
+import { TmuxDeliveryUncertainError } from "./tmux";
 
 const SANDBOX = fs.mkdtempSync(path.join(os.tmpdir(), "llv-delivery-test-"));
 const failure: DeliveryFailure = { ok: false, outcome: "failed", error: "resume unavailable", status: 503 };
@@ -197,7 +198,7 @@ test("ambiguous actuation keeps images and retries only after the same client re
   const outcome = await deliverConversationMessage(message, {
     targetForKnownPid: async () => "%1",
     buildImagePayload: () => ({ payload: imagePath, imagePaths: [imagePath] }),
-    sendText: async () => { sends += 1; throw new Error("transport lost"); },
+    sendText: async () => { sends += 1; throw new TmuxDeliveryUncertainError(new Error("transport lost")); },
   });
 
   expect(outcome).toMatchObject({ ok: false, error: "transport lost" });
@@ -212,6 +213,51 @@ test("ambiguous actuation keeps images and retries only after the same client re
   expect(replay.ok).toBe(true);
   expect(sends).toBe(2);
   expect(registry.pendingDeliveries(conversation.id)).toEqual([]);
+});
+
+test("reserved delivery reports uncertainty when direct tmux send fails after actuation starts", async () => {
+  const registry = new AgentRegistry(path.join(SANDBOX, "reserved-actuation-registry.json"));
+  setAgentRegistryForTests(registry);
+  const conversation = registry.ensureConversation("codex", "", "default");
+  const reserved = registry.holdDelivery(conversation.id, "migration payload", "reserved-actuation");
+
+  const outcome = await deliverConversationMessage({
+    pid: 1,
+    path: "",
+    conversationId: conversation.id,
+    reservedDeliveryId: reserved.id,
+    text: reserved.text,
+    images: [],
+  }, {
+    targetForKnownPid: async () => "%1",
+    sendText: async () => { throw new TmuxDeliveryUncertainError(new Error("post-paste transport lost")); },
+  });
+
+  expect(outcome).toMatchObject({ ok: false, error: "post-paste transport lost", actuation: "started" });
+  expect(migrationDeliveryOutcome(outcome)).toBe("delivery-uncertain");
+});
+
+test("reserved delivery reports a definite failure when tmux rejects before paste", async () => {
+  const registry = new AgentRegistry(path.join(SANDBOX, "reserved-pre-paste-registry.json"));
+  setAgentRegistryForTests(registry);
+  const conversation = registry.ensureConversation("codex", "", "default");
+  const reserved = registry.holdDelivery(conversation.id, "migration payload", "reserved-pre-paste");
+
+  const outcome = await deliverConversationMessage({
+    pid: 1,
+    path: "",
+    conversationId: conversation.id,
+    reservedDeliveryId: reserved.id,
+    text: reserved.text,
+    images: [],
+  }, {
+    targetForKnownPid: async () => "%1",
+    sendText: async () => { throw new Error("pane rejected before paste"); },
+  });
+
+  expect(outcome).toMatchObject({ ok: false, error: "pane rejected before paste" });
+  expect(outcome).not.toHaveProperty("actuation");
+  expect(migrationDeliveryOutcome(outcome)).toBe("failed");
 });
 
 test("successful actuation retains images when settlement persistence fails", async () => {
@@ -229,7 +275,8 @@ test("successful actuation retains images when settlement persistence fails", as
       buildImagePayload: () => ({ payload: imagePath, imagePaths: [imagePath] }),
       sendText: async () => {},
     });
-    expect(outcome).toMatchObject({ ok: false, error: "registry unavailable" });
+    expect(outcome).toMatchObject({ ok: false, error: "registry unavailable", actuation: "started" });
+    expect(migrationDeliveryOutcome(outcome)).toBe("delivery-uncertain");
     expect(fs.existsSync(imagePath)).toBe(true);
     expect(registry.pendingDeliveries(conversation.id)).toMatchObject([{ state: "delivery-uncertain" }]);
   } finally {

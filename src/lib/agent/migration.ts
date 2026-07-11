@@ -24,7 +24,21 @@ export interface MigrationActions {
   stopOldRoot(): Promise<void>;
   startSuccessor(): Promise<boolean>;
   verifySuccessor(nonce: string): Promise<boolean>;
+  verifyCompletion(): Promise<LegacyMigrationCompletionEvidence>;
+  commitCompletionMarker(evidence: LegacyMigrationCompletionEvidence): Promise<void>;
+  rollbackCompletionMarker(): Promise<void>;
   rollback(): Promise<void>;
+}
+
+export interface LegacyMigrationCompletionEvidence {
+  supervisorReachable: boolean;
+  sessionsMoved: boolean;
+}
+
+export function assertLegacyMigrationCompletion(evidence: LegacyMigrationCompletionEvidence): void {
+  if (!evidence.supervisorReachable || !evidence.sessionsMoved) {
+    throw new Error("migration completion verification failed: supervisor reachability and moved sessions are required");
+  }
 }
 
 function stamp(): string { return new Date().toISOString(); }
@@ -63,7 +77,11 @@ export async function runLegacyCutover(
   actions: MigrationActions,
   persist: (next: LegacyMigration) => void,
 ): Promise<LegacyMigration> {
-  if (migration.phase === "successor-confirmed" || migration.phase === "rolled-back" || migration.phase === "failed") return migration;
+  if (migration.phase === "successor-confirmed") return migration;
+  if (migration.phase === "rolled-back" || migration.phase === "failed") {
+    await actions.rollbackCompletionMarker();
+    return migration;
+  }
   if (!crypto.timingSafeEqual(Buffer.from(migration.approvalToken), Buffer.from(approvalToken))) {
     throw new Error("migration approval token is invalid");
   }
@@ -82,13 +100,23 @@ export async function runLegacyCutover(
       persist(next);
     }
     if (next.phase !== "successor-started" || !(await actions.verifySuccessor(next.nonce))) throw new Error("successor root verification failed");
+    const completion = await actions.verifyCompletion();
+    assertLegacyMigrationCompletion(completion);
+    await actions.commitCompletionMarker(completion);
     next = transition(next, "successor-confirmed");
     persist(next);
     return next;
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
+    let markerRollbackError: unknown = null;
+    try {
+      await actions.rollbackCompletionMarker();
+    } catch (rollbackError) {
+      markerRollbackError = rollbackError;
+    }
     try {
       await actions.rollback();
+      if (markerRollbackError) throw markerRollbackError;
       const rolledBack = transition(migration, "rolled-back", detail);
       persist(rolledBack);
       return rolledBack;

@@ -145,7 +145,18 @@ export interface TmuxEndpointContractInput {
 export interface TmuxEndpointContract {
   external: boolean;
   tmuxTmpdir: string;
+  health: TmuxEndpointHealth;
 }
+
+export type TmuxEndpointHealth =
+  | { status: "healthy" }
+  | {
+      status: "degraded";
+      code: "migration-marker-endpoint-mismatch" | "external-endpoint-mismatch";
+      configuredTmpdir: string;
+      expectedTmpdir: string;
+      message: string;
+    };
 
 interface ResolveTmuxAttachDeps {
   runTmux(args: string[], input?: Buffer | string, endpoint?: TmuxEndpointDescriptor): Promise<RunResult>;
@@ -158,14 +169,32 @@ export function resolveTmuxEndpointContract(input: TmuxEndpointContractInput): T
   const supervisorTmpdir = `/run/user/${input.uid}/agent-log-viewer`;
   const external = input.externalFlag === "1";
   if (input.migrationComplete && (!external || input.configuredTmpdir !== supervisorTmpdir)) {
-    throw new Error(
-      `legacy tmux migration marker requires the external tmux supervisor at ${supervisorTmpdir}; configured endpoint is ${input.configuredTmpdir}`,
-    );
+    return {
+      external,
+      tmuxTmpdir: input.configuredTmpdir,
+      health: {
+        status: "degraded",
+        code: "migration-marker-endpoint-mismatch",
+        configuredTmpdir: input.configuredTmpdir,
+        expectedTmpdir: supervisorTmpdir,
+        message: `A migration completion marker exists while the Viewer is using ${input.configuredTmpdir}. Legacy tmux delivery remains active; remove the stale marker or complete the supervisor migration.`,
+      },
+    };
   }
   if (external && input.configuredTmpdir !== supervisorTmpdir) {
-    throw new Error(`external tmux supervisor requires TMUX_TMPDIR=${supervisorTmpdir}`);
+    return {
+      external,
+      tmuxTmpdir: input.configuredTmpdir,
+      health: {
+        status: "degraded",
+        code: "external-endpoint-mismatch",
+        configuredTmpdir: input.configuredTmpdir,
+        expectedTmpdir: supervisorTmpdir,
+        message: `External tmux mode is enabled with ${input.configuredTmpdir}. Set TMUX_TMPDIR=${supervisorTmpdir} and redeploy the Viewer.`,
+      },
+    };
   }
-  return { external, tmuxTmpdir: input.configuredTmpdir };
+  return { external, tmuxTmpdir: input.configuredTmpdir, health: { status: "healthy" } };
 }
 
 function tmuxEndpointContract(): TmuxEndpointContract {
@@ -183,6 +212,10 @@ export function externalTmuxMode(): boolean {
 
 export function tmuxEndpoint(): string {
   return tmuxEndpointContract().tmuxTmpdir;
+}
+
+export function tmuxEndpointHealth(): TmuxEndpointHealth {
+  return tmuxEndpointContract().health;
 }
 
 /** Builds the descriptor from values supplied by the host process. The small

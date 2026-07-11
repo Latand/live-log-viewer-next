@@ -20,6 +20,7 @@ import { OverviewBoard } from "./OverviewBoard";
 import { ProjectDashboard, queueColumnOpen } from "./ProjectDashboard";
 import { isChildConversation, OVERVIEW, projectKey } from "./projectModel";
 import { ProjectRail } from "./ProjectRail";
+import { SupervisorHealthAlert } from "./SupervisorHealthAlert";
 import { cleanTitle, fmtAge } from "./utils";
 
 const PROJECT_KEY = "llvProject";
@@ -75,7 +76,7 @@ export function Viewer() {
      per-tab snapshot to the server. Renders nothing. */
   useViewPresence();
   const [project, setProject] = useState<string>(() => initialProject());
-  const { files: allFiles, projectCatalog, flows: polledFlows, pipelines, pipelinesError, workflows, tasks, loaded } = useFiles(project === OVERVIEW ? null : project);
+  const { files: allFiles, projectCatalog, flows: polledFlows, pipelines, pipelinesError, workflows, tasks, systemHealth, loaded } = useFiles(project === OVERVIEW ? null : project);
   /* A committed account migration keeps the archived predecessor entry in the
      payload (for chain history) but it must never render as a second standalone
      card — every surface below sees only current generations. A no-op (same
@@ -392,6 +393,7 @@ export function Viewer() {
 
   return (
     <div className="flex h-full">
+      <SupervisorHealthAlert health={systemHealth.tmux} />
       {isMobile ? null : (
         <ProjectRail files={files} projectCatalog={projectCatalog} pipelines={pipelines} workflows={workflows} archivedProjects={archivedProjects} selected={project} now={clock} loaded={loaded} onSelect={selectProject} />
       )}

@@ -1,6 +1,7 @@
 import type { Flow, FlowAnnotation } from "@/lib/flows/types";
 import type { Pipeline } from "@/lib/pipelines/types";
 import type { BoardTask } from "@/lib/tasks/types";
+import type { TmuxEndpointHealth } from "@/lib/tmux";
 import type { Workflow } from "@/lib/workflows/types";
 
 export type RootKey =
@@ -54,8 +55,8 @@ export interface FileEntry {
       display-normalized `model` because resuming a pinned Claude model needs
       the original identifier. */
   launchModel?: string | null;
-  /** Reasoning-effort tier (minimal|low|medium|high|xhigh|max) or null when
-      no reliable source exists (claude transcripts carry none). */
+  /** Reasoning-effort tier (minimal|low|medium|high|xhigh|max|ultra) or null
+      when no reliable source exists (claude transcripts carry none). */
   effort?: string | null;
   /** Structured Claude prompt that is currently blocking the live agent. */
   pendingQuestion: PendingQuestion | null;
@@ -142,6 +143,7 @@ export interface FilesResponse {
   pipelinesError?: string;
   workflows: Workflow[];
   tasks: BoardTask[];
+  systemHealth: { tmux: TmuxEndpointHealth };
 }
 
 export type PlanStepStatus = "pending" | "in_progress" | "completed";

@@ -21,6 +21,7 @@ import { pushTaskToast } from "@/components/tasks/taskToast";
 import { cleanTitle } from "@/components/utils";
 import { taskDeliveryText } from "@/lib/tasks/helpers";
 
+import { pipelineAnnouncement, pipelineStripByPath } from "@/components/pipelines/pipelineModel";
 import { BulkActionBar } from "./BulkActionBar";
 import { nodesInRect, pruneSelection, selectionBBox } from "./lasso";
 import { buildSchemeLayout } from "./layout";
@@ -206,6 +207,10 @@ export function SchemeBoard({
     [layout, clearSession],
   );
   const flowsByImpl = useMemo(() => flowByImplementer(flows), [flows]);
+  /* Which node hosts each pipeline's compact strip (§2.2): the current run
+     stage's node. Review-loop current stages resolve to null here — their
+     FlowStrip owns that slot — so the two controls never stack. */
+  const pipelineStrips = useMemo(() => pipelineStripByPath(pipelines), [pipelines]);
 
   /* One conversation expanded full-window at a time. React state only — never
      persisted, gone on reload; the board underneath stays mounted, so camera,
@@ -412,6 +417,27 @@ export function SchemeBoard({
     navZoomRef.current = onZoomKey;
   }, [onArrow, onZoomKey]);
 
+  /* Pipeline transitions (a stage advancing, parking, pausing, completing) are
+     otherwise silent to screen readers — the spatial-nav live region only speaks
+     on arrow moves. Track each pipeline's state+cursor signature and, when one
+     changes, write the new position straight into its own live region. Writing
+     the DOM node in an effect is the sanctioned way to push the latest state into
+     an external system without a cascading render. */
+  const pipelineLiveRef = useRef<HTMLDivElement>(null);
+  const pipelineSigs = useRef(new Map<string, string>());
+  useEffect(() => {
+    const next = new Map<string, string>();
+    const changed: string[] = [];
+    for (const pipeline of pipelines) {
+      const sig = `${pipeline.state}:${pipeline.cursor?.stageId ?? ""}:${pipeline.cursor?.state ?? ""}`;
+      next.set(pipeline.id, sig);
+      const before = pipelineSigs.current.get(pipeline.id);
+      if (before !== undefined && before !== sig) changed.push(pipelineAnnouncement(t, pipeline));
+    }
+    pipelineSigs.current = next;
+    if (changed.length && pipelineLiveRef.current) pipelineLiveRef.current.textContent = changed.join(". ");
+  }, [pipelines, t]);
+
   const commitMarquee = useCallback((paths: string[], additive: boolean) => {
     marqueeClickGuard.current = true;
     setSelected(null);
@@ -585,6 +611,9 @@ export function SchemeBoard({
       <div className="sr-only" aria-live="polite" role="status">
         {announcement}
       </div>
+      {/* Separate region so a pipeline transition never races the nav message;
+          its text is written imperatively by the effect above. */}
+      <div ref={pipelineLiveRef} className="sr-only" aria-live="polite" role="status" />
       {/* Dot grid on its own composited layer: panning moves it with a
           transform (modulo one tile) instead of repainting the viewport
           background every frame. */}
@@ -617,7 +646,10 @@ export function SchemeBoard({
       >
         <EdgesLayer edges={layout.edges} width={layout.width} height={layout.height} />
         <LoopsLayer loops={layout.loops} width={layout.width} height={layout.height} />
-        <AgentLinksLayer links={layout.links} byPath={layout.byPath} interactive={!mapMode && !handLike && !session} />
+        {/* Rails/badges stay passive on the map, but the pipeline hub keeps its
+            tap target there — the mobile lite map reaches pipeline controls only
+            through it (#93 §2.3). */}
+        <AgentLinksLayer links={layout.links} byPath={layout.byPath} interactive={!mapMode && !handLike && !session} hubInteractive={!handLike && !session} width={layout.width} height={layout.height} />
         <NodesLayer
           layout={layout}
           project={project}
@@ -631,6 +663,8 @@ export function SchemeBoard({
           focus={visualFocus}
           attentionPaths={attentionPaths ?? null}
           flowsByImpl={flowsByImpl}
+          flows={flows}
+          pipelineStrips={pipelineStrips}
           deckFocus={deckFocus}
           onSelect={stableSelect}
           onClose={stableClose}

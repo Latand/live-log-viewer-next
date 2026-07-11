@@ -12,6 +12,7 @@ let scans = 0;
 let scanOptions: unknown;
 let scannedFiles: FileEntry[] = [];
 let registryRoot = "";
+let tmuxHealth: unknown = { status: "healthy" };
 
 beforeEach(() => {
   registryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "llv-files-route-"));
@@ -19,6 +20,7 @@ beforeEach(() => {
   resetFilesRouteCacheForTests();
   scans = 0;
   scannedFiles = [];
+  tmuxHealth = { status: "healthy" };
 });
 
 afterEach(() => {
@@ -44,6 +46,7 @@ mock.module("@/lib/tasks/store", () => ({
 }));
 mock.module("@/lib/workflows/store", () => ({ loadWorkflows: () => [] }));
 mock.module("@/lib/workflows/visibility", () => ({ filterWorkflowsForFileScan: () => [] }));
+mock.module("@/lib/tmux", () => ({ tmuxEndpointHealth: () => tmuxHealth }));
 
 const { cachedFileScan, resetFilesRouteCacheForTests } = await import("./scanCache");
 const { GET } = await import("./route");
@@ -54,10 +57,27 @@ test("repeated files reads reuse the pure read snapshot and retain ETag behavior
   const etag = first.headers.get("etag");
   const second = await GET(new Request("http://127.0.0.1/api/files", { headers: { "if-none-match": etag! } }));
   expect(first.status).toBe(200);
-  expect(await first.json()).toEqual({ files: [], projectCatalog: [], flows: [], pipelines: [], workflows: [], tasks: [] });
+  expect(await first.json()).toEqual({ files: [], projectCatalog: [], flows: [], pipelines: [], workflows: [], tasks: [], systemHealth: { tmux: { status: "healthy" } } });
   expect(second.status).toBe(304);
   expect(scans).toBe(1);
   expect(scanOptions).toEqual({ persist: false });
+});
+
+test("files API surfaces degraded tmux endpoint health", async () => {
+  tmuxHealth = {
+    status: "degraded",
+    code: "migration-marker-endpoint-mismatch",
+    configuredTmpdir: "/tmp",
+    expectedTmpdir: "/run/user/1000/agent-log-viewer",
+    message: "stale migration marker",
+  };
+  try {
+    const response = await GET(new Request("http://127.0.0.1/api/files"));
+    expect(response.status).toBe(200);
+    expect((await response.json()).systemHealth.tmux).toEqual(tmuxHealth);
+  } finally {
+    tmuxHealth = { status: "healthy" };
+  }
 });
 
 test("concurrent cold files reads share one scan", async () => {

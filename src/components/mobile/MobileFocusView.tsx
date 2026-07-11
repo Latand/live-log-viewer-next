@@ -24,6 +24,9 @@ import { paneState, type PaneState } from "@/components/paneState";
 import type { BranchGroup } from "@/components/projectModel";
 import { activityDot, cleanTitle, engineBadge, engineColor } from "@/components/utils";
 
+import { STAGE_GLYPH, STAGE_TONES, latestAttempt, renderableFlowIds, stageChipLabel, stageChipState, stageHasEvidence, stageOpenTarget } from "@/components/pipelines/pipelineModel";
+import { VerdictPopover } from "@/components/pipelines/VerdictPopover";
+import { deckKey } from "@/components/scheme/agentLinks";
 import { buildSchemeLayout, type SchemeLayout } from "@/components/scheme/layout";
 import { SchemeBoard } from "@/components/scheme/SchemeBoard";
 import { TASK_W, taskCardHeight } from "@/components/scheme/taskGeometry";
@@ -156,6 +159,44 @@ export function MobileFocusView({ project, groups, manual, files, flows, pipelin
     viewBus.reportSlice({ mode: mapOpen ? "mobile-map" : "mobile-focus", focusedPath, selectedPaths: [], visiblePaths, camera: null });
   }, [activeNode, mapOpen, layout]);
 
+  /* When the focused pane is a pipeline stage, a compact chain row rides above
+     it: position, current stage/state, and prev/next stage chips to hop along
+     the chain (#93 §2.3). A review-loop stage is represented on the board by its
+     round deck, so match the focused deck's flow too — otherwise focusing a
+     reviewer session would hide the row entirely. */
+  const activePath = activeNode ? activeNode.file.path : null;
+  const activeFlowId = activeDeck ? activeDeck.flow.id : null;
+  const pipelineFocus = findPipelineStage(pipelines, activePath, activeFlowId);
+  /* Run transcripts still in the scan can be opened; a review-loop only if its
+     flow has a rendered deck, which exists only for a placed implementer node —
+     so the availability set comes from the layout's placed nodes. */
+  const renderablePaths = useMemo(() => new Set(files.map((entry) => entry.path)), [files]);
+  const renderableFlows = useMemo(() => renderableFlowIds(flows, new Set(layout.nodes.map((node) => node.file.path))), [flows, layout]);
+
+  const openStagePath = useCallback(
+    (path: string) => {
+      const file = files.find((entry) => entry.path === path);
+      if (file) onSelect(file);
+    },
+    [files, onSelect],
+  );
+
+  const hopToStage = (index: number) => {
+    if (!pipelineFocus) return;
+    const stage = pipelineFocus.pipeline.stages[index];
+    if (!stage) return;
+    const target = stageOpenTarget(stage, latestAttempt(pipelineFocus.pipeline, stage.id), renderableFlows, renderablePaths);
+    if (!target) return;
+    /* Review-loop targets land on the flow's round deck (an entry key), since the
+       reviewer transcript is folded away; run stages open their own node by path. */
+    if (target.kind === "flow") {
+      const key = deckKey(target.flowId);
+      if (byKey.has(key)) setFocusPath(key);
+      return;
+    }
+    openStagePath(target.path);
+  };
+
   const step = useCallback(
     (dir: number) => {
       if (!entries.length) return;
@@ -223,6 +264,10 @@ export function MobileFocusView({ project, groups, manual, files, flows, pipelin
             />
           ))}
         </div>
+      ) : null}
+
+      {pipelineFocus ? (
+        <PipelineFocusRow pipeline={pipelineFocus.pipeline} index={pipelineFocus.index} renderableFlows={renderableFlows} renderablePaths={renderablePaths} onHop={hopToStage} onOpenPath={openStagePath} />
       ) : null}
 
       <div className="relative flex min-h-0 flex-1 flex-col p-1.5 pb-[max(0.375rem,env(safe-area-inset-bottom))]">
@@ -319,6 +364,110 @@ export function MobileFocusView({ project, groups, manual, files, flows, pipelin
 
       {taskSheet ? (
         <TaskSheet project={project} tasks={tasks} files={files} initialView={taskSheet} onClose={() => setTaskSheet(null)} />
+      ) : null}
+    </div>
+  );
+}
+
+/** The pipeline + stage index a focused transcript path — or a focused round
+    deck's flow — belongs to, if any. Review-loop stages match by flow id, since
+    the board folds their reviewer transcript into the deck. */
+function findPipelineStage(pipelines: Pipeline[], path: string | null, flowId: string | null): { pipeline: Pipeline; index: number } | null {
+  if (!path && !flowId) return null;
+  for (const pipeline of pipelines) {
+    if (pipeline.state === "closed") continue;
+    const index = pipeline.stages.findIndex((stage) => {
+      const attempt = latestAttempt(pipeline, stage.id);
+      if (!attempt) return false;
+      if (path && attempt.agentPath === path) return true;
+      return Boolean(flowId && attempt.flowId === flowId);
+    });
+    if (index >= 0) return { pipeline, index };
+  }
+  return null;
+}
+
+/** Compact pipeline chain row over a focused stage pane: position, current
+    stage/state, and prev/next stage chips as hop targets along the chain. The
+    current-stage chip opens a verdict bottom sheet (#93 §2.3) when its stage has
+    run, surfacing findings/confidence and parked Retry/Skip on mobile. */
+function PipelineFocusRow({ pipeline, index, renderableFlows, renderablePaths, onHop, onOpenPath }: { pipeline: Pipeline; index: number; renderableFlows: ReadonlySet<string>; renderablePaths: ReadonlySet<string>; onHop: (index: number) => void; onOpenPath: (path: string) => void }) {
+  const { t } = useLocale();
+  const [sheetOpen, setSheetOpen] = useState(false);
+  const total = pipeline.stages.length;
+  const stage = pipeline.stages[index]!;
+  const state = stageChipState(pipeline, stage);
+  const tone = STAGE_TONES[state];
+  const prev = index > 0 ? pipeline.stages[index - 1]! : null;
+  const next = index < total - 1 ? pipeline.stages[index + 1]! : null;
+  /* A hop resolves through stageOpenTarget, so a neighbor is reachable only while
+     its flow still has a deck (renderableFlows) or its run transcript is still in
+     the scan (renderablePaths). */
+  const prevHopEnabled = prev ? Boolean(stageOpenTarget(prev, latestAttempt(pipeline, prev.id), renderableFlows, renderablePaths)) : false;
+  const nextHopEnabled = next ? Boolean(stageOpenTarget(next, latestAttempt(pipeline, next.id), renderableFlows, renderablePaths)) : false;
+  const attempt = latestAttempt(pipeline, stage.id);
+  /* Match the desktop evidence predicate: a running attempt has no verdict sheet
+     to open, so the button stays disabled and never shows an empty "no findings". */
+  const canOpenVerdict = stageHasEvidence(pipeline, stage, attempt);
+  const canOpenFlow = Boolean(attempt?.flowId && renderableFlows.has(attempt.flowId));
+  const canOpenPath = Boolean(attempt?.agentPath && renderablePaths.has(attempt.agentPath));
+  return (
+    <div className="flex shrink-0 items-center gap-1.5 overflow-x-auto border-b border-line bg-[#fbfbfd] px-2 py-1.5" role="group" aria-label={t("pipelineMobile.chipAria", { task: pipeline.task })}>
+      <span className="shrink-0 rounded-full bg-chip px-1.5 py-0.5 text-[10px] font-bold text-dim" aria-hidden>⇢ {t("pipelineMobile.position", { k: index + 1, n: total })}</span>
+      <button
+        type="button"
+        disabled={!prevHopEnabled}
+        onClick={() => onHop(index - 1)}
+        aria-label={t("pipelineMobile.prevStage")}
+        className="shrink-0 rounded-full border border-line bg-panel px-2 py-0.5 text-[10px] font-bold text-dim focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-30"
+      >
+        ‹ {prev ? stageChipLabel(t, prev) : ""}
+      </button>
+      <button
+        type="button"
+        disabled={!canOpenVerdict}
+        onClick={() => setSheetOpen(true)}
+        aria-haspopup="dialog"
+        aria-label={t("pipelineMobile.openVerdict", { label: stageChipLabel(t, stage) })}
+        className="inline-flex shrink-0 items-center gap-1 rounded-full px-2 py-0.5 text-[10.5px] font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:cursor-default"
+        style={{ backgroundColor: tone.soft, color: tone.color }}
+      >
+        <span aria-hidden>{stage.kind === "review-loop" ? "⟳" : "▸"}</span>
+        {stageChipLabel(t, stage)}
+        {STAGE_GLYPH[state] ? <span aria-hidden>{STAGE_GLYPH[state]}</span> : null}
+        <span className="text-[9px] font-semibold opacity-80">{t(`pipelineChipState.${state}`)}</span>
+        {attempt?.verdict ? <span aria-hidden>{attempt.verdict.status === "pass" ? "✓" : attempt.verdict.status === "fail" ? "✕" : "●"}</span> : null}
+      </button>
+      <button
+        type="button"
+        disabled={!nextHopEnabled}
+        onClick={() => onHop(index + 1)}
+        aria-label={t("pipelineMobile.nextStage")}
+        className="shrink-0 rounded-full border border-line bg-panel px-2 py-0.5 text-[10px] font-bold text-dim focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-30"
+      >
+        {next ? stageChipLabel(t, next) : ""} ›
+      </button>
+      {sheetOpen && attempt ? (
+        <div
+          className="fixed inset-0 z-[70] flex items-end justify-center bg-black/40"
+          role="presentation"
+          onClick={(event) => {
+            if (event.target === event.currentTarget) setSheetOpen(false);
+          }}
+        >
+          <div className="mb-0 w-full max-w-[420px] rounded-t-[16px] bg-panel p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] shadow-[0_-8px_36px_rgb(20_20_30/0.24)]">
+            <div className="mx-auto mb-2 h-1 w-10 rounded-full bg-line" aria-hidden />
+            <VerdictPopover
+              pipeline={pipeline}
+              stage={stage}
+              attempt={attempt}
+              canOpenFlow={canOpenFlow}
+              canOpenPath={canOpenPath}
+              onClose={() => setSheetOpen(false)}
+              onOpenPath={(path) => { setSheetOpen(false); onOpenPath(path); }}
+            />
+          </div>
+        </div>
       ) : null}
     </div>
   );

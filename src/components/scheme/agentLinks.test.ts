@@ -3,7 +3,8 @@ import { describe, expect, test } from "bun:test";
 import type { Flow, FlowState, Round } from "@/lib/flows/types";
 import type { Pipeline } from "@/lib/pipelines/types";
 
-import { buildAnchorIndex, currentRound, deckKey, deriveFlowLinks, derivePipelineLinks, flowLinkKey, flowLinkPhase } from "./agentLinks";
+import { buildAnchorIndex, currentRound, deckKey, deriveFlowLinks, derivePipelineLinks, flowLinkKey, flowLinkPhase, pipelineRailSegment } from "./agentLinks";
+import type { SchemeRect } from "./layout";
 
 const roleConfig = { engine: "claude" as const, model: null, effort: null };
 
@@ -84,6 +85,189 @@ test("pipeline links connect adjacent resolved stage sessions", () => {
     pipeline: { fromStageId: "plan", toStageId: "build" },
   }]);
   expect(derivePipelineLinks([pipeline], (key) => key === "/plan" ? key : null)).toEqual([]);
+});
+
+function threeStagePipeline(overrides: Partial<Pipeline> = {}): Pipeline {
+  return {
+    id: "pipeline-2",
+    state: "running",
+    cursor: { stageId: "build", state: "running" },
+    stages: [
+      { id: "plan", kind: "run", next: "build" },
+      { id: "build", kind: "run", next: "verify" },
+      { id: "verify", kind: "run", next: null },
+    ],
+    runs: [
+      { stageId: "plan", attempts: [{ agentPath: "/plan", state: "passed", verdict: { status: "pass" } }] },
+      { stageId: "build", attempts: [{ agentPath: "/build", state: "running" }] },
+      { stageId: "verify", attempts: [{ agentPath: "/verify", state: "pending" }] },
+    ],
+    ...overrides,
+  } as unknown as Pipeline;
+}
+
+describe("derivePipelineLinks tones and hub", () => {
+  const anchor = (key: string) => (["/plan", "/build", "/verify"].includes(key) ? key : null);
+
+  test("each edge is toned by its target stage's latest attempt", () => {
+    const links = derivePipelineLinks([threeStagePipeline()], anchor);
+    expect(links.map((link) => [link.pipeline!.toStageId, link.pipeline!.tone])).toEqual([
+      ["build", "active"],
+      ["verify", "dim"],
+    ]);
+  });
+
+  test("exactly one edge — the one into the current stage — carries the hub", () => {
+    const links = derivePipelineLinks([threeStagePipeline()], anchor);
+    expect(links.filter((link) => link.pipeline!.hub).map((link) => link.pipeline!.toStageId)).toEqual(["build"]);
+  });
+
+  test("a parked stage tones its incoming edge amber, reserving red for chips", () => {
+    const parked = threeStagePipeline({
+      state: "needs_decision",
+      cursor: { stageId: "build", state: "running" },
+      runs: [
+        { stageId: "plan", attempts: [{ agentPath: "/plan", state: "passed" }] },
+        { stageId: "build", attempts: [{ agentPath: "/build", state: "needs_decision" }] },
+        { stageId: "verify", attempts: [{ agentPath: "/verify", state: "pending" }] },
+      ],
+    } as unknown as Partial<Pipeline>);
+    const edge = derivePipelineLinks([parked], anchor).find((link) => link.pipeline!.toStageId === "build");
+    expect(edge?.pipeline!.tone).toBe("amber");
+  });
+
+  test("pausing mid-run keeps the active tone but freezes the chevron drift", () => {
+    /* pausedState carries the pre-pause busy state, so the cursor edge stays
+       active; the paused flag freezes the animation (nodes.tsx gates on it). */
+    const links = derivePipelineLinks([threeStagePipeline({ state: "paused", pausedState: "running" })], anchor);
+    expect(links.every((link) => link.pipeline!.paused)).toBe(true);
+    const build = links.find((link) => link.pipeline!.toStageId === "build");
+    expect(build?.pipeline!.tone).toBe("active");
+  });
+
+  test("a pause with no busy pre-state leaves the edge un-animated", () => {
+    /* pausedState null (paused while idle/pending) must not fabricate motion. */
+    const links = derivePipelineLinks([threeStagePipeline({ state: "paused", pausedState: null })], anchor);
+    expect(links.some((link) => link.pipeline!.tone === "active")).toBe(false);
+  });
+
+  test("a partially spawned chain draws only its materialized prefix", () => {
+    const partial = threeStagePipeline({
+      runs: [
+        { stageId: "plan", attempts: [{ agentPath: "/plan", state: "passed" }] },
+        { stageId: "build", attempts: [] },
+        { stageId: "verify", attempts: [] },
+      ],
+    } as unknown as Partial<Pipeline>);
+    expect(derivePipelineLinks([partial], anchor)).toEqual([]);
+  });
+});
+
+describe("derivePipelineLinks review-loop vertices (no duplicate hub on the flow deck)", () => {
+  /* build (run) → review (review-loop) → verify (run). The review attempt's
+     agentPath is the reviewer transcript, which the board folds into flow
+     f-rev's deck; the flow's implementer is the build node. */
+  const reviewPipeline = {
+    id: "p-rev",
+    state: "running",
+    cursor: { stageId: "review", state: "reviewing" },
+    stages: [
+      { id: "build", kind: "run", next: "review" },
+      { id: "review", kind: "review-loop", next: "verify" },
+      { id: "verify", kind: "run", next: null },
+    ],
+    runs: [
+      { stageId: "build", attempts: [{ agentPath: "/build", state: "passed" }] },
+      { stageId: "review", attempts: [{ agentPath: "/reviewer", flowId: "f-rev", state: "reviewing" }] },
+      { stageId: "verify", attempts: [{ agentPath: "/verify", state: "pending" }] },
+    ],
+  } as unknown as Pipeline;
+  /* The reviewer path resolves to the deck; build/verify to their nodes. */
+  const anchor = (key: string) =>
+    key === "/build" || key === "/verify" ? key : key === "/reviewer" || key === deckKey("f-rev") ? deckKey("f-rev") : null;
+  const flowImpl = (flowId: string) => (flowId === "f-rev" ? "/build" : null);
+
+  test("the review-loop's incoming edge collapses into the implementer node, never the deck", () => {
+    const links = derivePipelineLinks([reviewPipeline], anchor, flowImpl);
+    /* build→review suppressed (both resolve to /build); the rail resumes from the
+       implementer node to verify. No endpoint is ever the flow deck. */
+    expect(links.map((link) => [link.from, link.to, link.pipeline!.toStageId])).toEqual([["/build", "/verify", "verify"]]);
+    expect(links.some((link) => link.from === deckKey("f-rev") || link.to === deckKey("f-rev"))).toBe(false);
+  });
+
+  test("exactly one hub is placed, clear of the flow deck", () => {
+    const links = derivePipelineLinks([reviewPipeline], anchor, flowImpl);
+    const hubs = links.filter((link) => link.pipeline!.hub);
+    expect(hubs.length).toBe(1);
+    expect(hubs.every((link) => link.to !== deckKey("f-rev"))).toBe(true);
+  });
+
+  test("without a flow resolver a review-loop stage anchors nowhere (its edge is skipped)", () => {
+    /* Defaulting the resolver to null (older callers) must not fall back to the
+       reviewer path — the review vertex is simply unresolved and skipped. */
+    const links = derivePipelineLinks([reviewPipeline], anchor);
+    expect(links.some((link) => link.to === deckKey("f-rev"))).toBe(false);
+  });
+
+  test("a 2-stage build→review whose only edge collapses still keeps a control hub (AC6)", () => {
+    /* build (run) → review (review-loop): the single edge folds into the
+       implementer, leaving no drawn rail. An anchor-only hub must still be
+       emitted on the implementer node so the pipeline keeps board controls. */
+    const twoStage = {
+      id: "p2", state: "running", cursor: { stageId: "review", state: "reviewing" },
+      stages: [
+        { id: "build", kind: "run", next: "review" },
+        { id: "review", kind: "review-loop", next: null },
+      ],
+      runs: [
+        { stageId: "build", attempts: [{ agentPath: "/build", state: "passed" }] },
+        { stageId: "review", attempts: [{ agentPath: "/reviewer", flowId: "f-rev", state: "reviewing" }] },
+      ],
+    } as unknown as Pipeline;
+    const links = derivePipelineLinks([twoStage], anchor, flowImpl);
+    expect(links.length).toBe(1);
+    const hub = links[0]!;
+    expect(hub.pipeline!.hub).toBe(true);
+    expect(hub.pipeline!.anchorOnly).toBe(true);
+    /* Anchored on the implementer node, never the flow deck. */
+    expect([hub.from, hub.to]).toEqual(["/build", "/build"]);
+    expect(hub.from === deckKey("f-rev") || hub.to === deckKey("f-rev")).toBe(false);
+  });
+
+  test("a chain still spawning (only one stage materialized) draws nothing", () => {
+    /* No adjacent pair exists yet, so nothing collapsed — no anchor hub, matching
+       the prior behavior for a partially spawned chain. */
+    const spawning = {
+      id: "p3", state: "provisioning", cursor: { stageId: "build", state: "running" },
+      stages: [
+        { id: "build", kind: "run", next: "review" },
+        { id: "review", kind: "review-loop", next: null },
+      ],
+      runs: [{ stageId: "build", attempts: [{ agentPath: "/build", state: "running" }] }],
+    } as unknown as Pipeline;
+    expect(derivePipelineLinks([spawning], anchor, flowImpl)).toEqual([]);
+  });
+});
+
+describe("pipelineRailSegment", () => {
+  const from: SchemeRect = { x: 0, y: 0, w: 100, h: 60 };
+  const to: SchemeRect = { x: 300, y: 0, w: 100, h: 60 };
+
+  test("connects facing edges along the dominant axis with an off-center offset", () => {
+    const seg = pipelineRailSegment(from, to);
+    /* Horizontal handoff: leaves from's right edge, enters to's left edge. */
+    expect(seg.x1).toBe(100);
+    expect(seg.x2).toBe(300);
+    /* Both endpoints share the 14px vertical offset so the rail clears the bezier. */
+    expect(seg.y1).toBe(44);
+    expect(seg.y2).toBe(44);
+  });
+
+  test("emits repeating chevron marks pointing along the handoff", () => {
+    const seg = pipelineRailSegment(from, to);
+    expect(seg.chevrons.length).toBeGreaterThan(1);
+    expect(seg.chevrons.every((mark) => mark.startsWith("M "))).toBe(true);
+  });
 });
 
 describe("buildAnchorIndex", () => {

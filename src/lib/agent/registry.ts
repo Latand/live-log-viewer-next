@@ -141,6 +141,8 @@ export interface RegistryConversation {
   /** Provider-created transcript artifacts that retain this conversation's
       identity while the canonical generation path advances. */
   continuityPaths: string[];
+  /** Continuity artifacts from canceled successions that must stay outside board aliases. */
+  abandonedContinuityPaths: string[];
   migration: ConversationMigration | null;
   /** Explicit Stop/Keep decision for one target at one routing revision. */
   migrationOptOut: { targetId: string; updatedAt: string } | null;
@@ -177,8 +179,8 @@ export interface ConversationLookup {
   conversation(id: ViewerConversationId): RegistryConversation | null;
 }
 
-type ConversationMigrationInput = Omit<ConversationMigration, "errorCode" | "operationId" | "sourceGenerationId" | "providerReceipt" | "boardProject" | "boardOperationId" | "boardPlacementProject"> &
-  Partial<Pick<ConversationMigration, "errorCode" | "operationId" | "sourceGenerationId" | "providerReceipt" | "boardProject" | "boardOperationId" | "boardPlacementProject">>;
+type ConversationMigrationInput = Omit<ConversationMigration, "errorCode" | "operationId" | "sourceGenerationId" | "providerReceipt" | "pendingContinuityPaths" | "boardProject" | "boardOperationId" | "boardPlacementProject"> &
+  Partial<Pick<ConversationMigration, "errorCode" | "operationId" | "sourceGenerationId" | "providerReceipt" | "pendingContinuityPaths" | "boardProject" | "boardOperationId" | "boardPlacementProject">>;
 type SuccessorGenerationInput = Omit<NativeGeneration, "createdAt" | "archivedAt" | "launchProfile" | "historyHash" | "host"> &
   Partial<Pick<NativeGeneration, "launchProfile" | "historyHash" | "host">>;
 
@@ -290,6 +292,9 @@ function conversationMigrationForIntent(
   changedAt: string,
 ): ConversationMigration {
   const boardProject = conversation.migration?.boardProject ?? null;
+  const pendingContinuityPaths = conversation.migration && conversation.migration.phase !== "committed"
+    ? conversation.migration.pendingContinuityPaths
+    : [];
   return {
     intentId: intent.id,
     phase,
@@ -300,6 +305,7 @@ function conversationMigrationForIntent(
     operationId: crypto.randomUUID(),
     sourceGenerationId: source.id,
     providerReceipt: null,
+    pendingContinuityPaths,
     boardProject,
     boardOperationId: conversation.migration?.boardOperationId ?? null,
     boardPlacementProject: conversation.migration?.boardPlacementProject
@@ -422,13 +428,20 @@ function normalizeConversation(value: RegistryConversation): RegistryConversatio
   const generations = Array.isArray(value.generations) ? value.generations.map(normalizeGeneration) : [];
   const current = generations.at(-1);
   const legacyContinuity = (value.migration as (ConversationMigration & { continuityPaths?: unknown }) | null)?.continuityPaths;
+  const providerReceipt = normalizeProviderReceipt(value.migration?.providerReceipt);
+  const pendingContinuityPaths = Array.isArray(value.migration?.pendingContinuityPaths)
+    ? value.migration.pendingContinuityPaths.filter((pathname): pathname is string => typeof pathname === "string")
+    : value.migration?.phase !== "committed" && providerReceipt
+      ? [...new Set([...providerReceipt.continuityPaths, providerReceipt.path])]
+      : [];
   const migration = value.migration && typeof value.migration === "object"
     ? {
       ...value.migration,
       errorCode: value.migration.errorCode ?? null,
       operationId: value.migration.operationId ?? `${value.migration.intentId}:${value.id}:${value.migration.revision}`,
       sourceGenerationId: value.migration.sourceGenerationId ?? current?.id ?? "",
-      providerReceipt: normalizeProviderReceipt(value.migration.providerReceipt),
+      providerReceipt,
+      pendingContinuityPaths,
       boardProject: typeof value.migration.boardProject === "string" ? value.migration.boardProject : null,
       boardOperationId: typeof value.migration.boardOperationId === "string" ? value.migration.boardOperationId : null,
       boardPlacementProject: typeof value.migration.boardPlacementProject === "string" ? value.migration.boardPlacementProject : null,
@@ -439,6 +452,9 @@ function normalizeConversation(value: RegistryConversation): RegistryConversatio
     ...(Array.isArray(legacyContinuity) ? legacyContinuity.filter((pathname): pathname is string => typeof pathname === "string") : []),
     ...(migration?.providerReceipt?.continuityPaths ?? []),
   ])];
+  const abandonedContinuityPaths = Array.isArray(value.abandonedContinuityPaths)
+    ? [...new Set(value.abandonedContinuityPaths.filter((pathname): pathname is string => typeof pathname === "string"))]
+    : [];
   const rawOptOut = (value as Partial<RegistryConversation>).migrationOptOut;
   const migrationOptOut = rawOptOut
     && typeof rawOptOut.targetId === "string"
@@ -449,6 +465,7 @@ function normalizeConversation(value: RegistryConversation): RegistryConversatio
     ...value,
     generations,
     continuityPaths,
+    abandonedContinuityPaths,
     migration,
     migrationOptOut,
     turn: value.turn && typeof value.turn === "object"
@@ -530,6 +547,21 @@ function compactDeliveryReservations(file: RegistryFile, onlyConversationId?: Vi
 function conversationOwnsPath(conversation: RegistryConversation, artifactPath: string): boolean {
   return conversation.generations.some((generation) => generation.path === artifactPath)
     || conversation.continuityPaths.includes(artifactPath);
+}
+
+function addConversationContinuityPath(conversation: RegistryConversation, pathname: string): void {
+  if (conversation.generations.some((generation) => generation.path === pathname)) return;
+  if (!conversation.continuityPaths.includes(pathname)) conversation.continuityPaths.push(pathname);
+  if (conversation.migration && conversation.migration.phase !== "committed"
+    && !conversation.migration.pendingContinuityPaths.includes(pathname)) {
+    conversation.migration.pendingContinuityPaths.push(pathname);
+  }
+}
+
+function abandonPendingContinuityPaths(conversation: RegistryConversation): void {
+  const pending = conversation.migration?.pendingContinuityPaths ?? [];
+  if (pending.length === 0) return;
+  conversation.abandonedContinuityPaths = [...new Set([...conversation.abandonedContinuityPaths, ...pending])];
 }
 
 function scannerAllocatedProvisionalOwner(conversation: RegistryConversation, pathname: string): boolean {
@@ -960,6 +992,7 @@ export class AgentRegistry {
       engine: receipt.engine as Extract<AgentEngine, "claude" | "codex">,
       generations: [],
       continuityPaths: [],
+      abandonedContinuityPaths: [],
       migration: null,
       migrationOptOut: null,
       turn: { state: "unknown" as const, source: "empty" as const, terminalAt: null, observedAt: null },
@@ -973,10 +1006,7 @@ export class AgentRegistry {
       if (provisionalOwner && !adoptProvisionalOwner(file, provisionalOwner, conversation, entry.artifactPath)) {
         return conflict("spawn_artifact_conflict");
       }
-      if (!conversation.continuityPaths.includes(entry.artifactPath)
-        && !conversation.generations.some((generation) => generation.path === entry.artifactPath)) {
-        conversation.continuityPaths.push(entry.artifactPath);
-      }
+      addConversationContinuityPath(conversation, entry.artifactPath);
     }
     if (receipt.purpose !== "migration-successor" && !conversation.generations.some((generation) => generation.path === entry.artifactPath)) {
       conversation.generations.push({
@@ -1008,6 +1038,7 @@ export class AgentRegistry {
         operationId: crypto.randomUUID(),
         sourceGenerationId: source.id,
         providerReceipt: null,
+        pendingContinuityPaths: [],
         boardProject: null,
         boardOperationId: null,
         boardPlacementProject: source.launchProfile.project,
@@ -1199,6 +1230,7 @@ export class AgentRegistry {
           archivedAt: null,
         }],
         continuityPaths: [],
+        abandonedContinuityPaths: [],
         migration: null,
         migrationOptOut: null,
         turn: { state: "unknown", source: "empty", terminalAt: null, observedAt: null },
@@ -1229,7 +1261,7 @@ export class AgentRegistry {
           const migrationOwner = migrationReceipt ? file.conversations[migrationReceipt.conversationId] : null;
           if (migrationOwner) {
             conversation = migrationOwner;
-            if (!conversation.continuityPaths.includes(observation.path)) conversation.continuityPaths.push(observation.path);
+            addConversationContinuityPath(conversation, observation.path);
             conversation.updatedAt = observation.observedAt;
             scopeChanged.add(observation.engine);
           }
@@ -1250,6 +1282,7 @@ export class AgentRegistry {
               archivedAt: null,
             }],
             continuityPaths: [],
+            abandonedContinuityPaths: [],
             migration: null,
             migrationOptOut: null,
             turn: { ...observation.turn, observedAt: observation.observedAt },
@@ -1369,6 +1402,7 @@ export class AgentRegistry {
       if (retiredIntentIds.size === 0) return;
       for (const conversation of Object.values(file.conversations)) {
         if (!conversation.migration || !retiredIntentIds.has(conversation.migration.intentId)) continue;
+        abandonPendingContinuityPaths(conversation);
         queueAbandonedMigrationCleanup(file, conversation, changedAt);
         const source = conversation.generations.find((generation) => generation.id === conversation.migration?.sourceGenerationId)
           ?? conversation.generations.at(-1);
@@ -1442,6 +1476,7 @@ export class AgentRegistry {
         const source = conversation.generations.at(-1);
         if (!source || source.accountId === null || source.accountId === input.targetId) {
           if (source && conversation.migration && conversation.migration.phase !== "committed") {
+            abandonPendingContinuityPaths(conversation);
             queueAbandonedMigrationCleanup(file, conversation, changedAt);
             for (const delivery of Object.values(file.heldDeliveries)) {
               if (delivery.conversationId !== conversation.id
@@ -1553,6 +1588,7 @@ export class AgentRegistry {
         operationId: migration.operationId ?? `${migration.intentId}:${canonicalId}:${migration.revision}`,
         sourceGenerationId: migration.sourceGenerationId ?? source?.id ?? "",
         providerReceipt: migration.providerReceipt ?? null,
+        pendingContinuityPaths: migration.pendingContinuityPaths ?? [],
         boardProject: migration.boardProject ?? null,
         boardOperationId: migration.boardOperationId ?? null,
         boardPlacementProject: migration.boardPlacementProject ?? migration.boardProject ?? null,
@@ -1593,7 +1629,16 @@ export class AgentRegistry {
         throw new Error("migration provider receipt is stale");
       }
       if (migration.phase === "successor-starting") {
-        conversation.migration = { ...migration, phase: "verifying", providerReceipt: receipt, updatedAt: now() };
+        const receiptPaths = [...new Set([...receipt.continuityPaths, receipt.path])];
+        for (const pathname of receiptPaths) {
+          addConversationContinuityPath(conversation, pathname);
+        }
+        conversation.migration = {
+          ...migration,
+          phase: "verifying",
+          providerReceipt: receipt,
+          updatedAt: now(),
+        };
         conversation.updatedAt = now();
         return clone(conversation);
       }
@@ -1618,7 +1663,7 @@ export class AgentRegistry {
           throw new Error("migration continuity path has another durable owner");
         }
       }
-      if (!conversation.continuityPaths.includes(pathname)) conversation.continuityPaths.push(pathname);
+      addConversationContinuityPath(conversation, pathname);
       conversation.updatedAt = now();
       return clone(conversation);
     });
@@ -1678,6 +1723,7 @@ export class AgentRegistry {
         operationId: current.errorCode === "codex-fork-outcome-unknown" ? current.operationId : crypto.randomUUID(),
         sourceGenerationId: source.id,
         providerReceipt: null,
+        pendingContinuityPaths: current.phase === "committed" ? [] : current.pendingContinuityPaths,
         boardProject: current.boardProject,
         boardOperationId: current.boardOperationId,
         boardPlacementProject: current.boardPlacementProject,
@@ -1714,6 +1760,10 @@ export class AgentRegistry {
       };
       conversation.generations.push(generation);
       conversation.continuityPaths = conversation.continuityPaths.filter((pathname) => pathname !== generation.path);
+      const committedContinuityPaths = new Set(conversation.migration.pendingContinuityPaths);
+      conversation.abandonedContinuityPaths = conversation.abandonedContinuityPaths.filter(
+        (pathname) => !committedContinuityPaths.has(pathname),
+      );
       conversation.migration = { ...conversation.migration, phase: "committed", updatedAt: now() };
       conversation.updatedAt = now();
       for (const delivery of Object.values(file.heldDeliveries)) {

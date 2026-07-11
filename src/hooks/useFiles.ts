@@ -9,6 +9,7 @@ import { WORKFLOWS_CHANGED_EVENT } from "@/components/workflows/workflowModel";
 import type { Flow } from "@/lib/flows/types";
 import type { Pipeline } from "@/lib/pipelines/types";
 import type { BoardTask } from "@/lib/tasks/types";
+import type { TmuxEndpointHealth } from "@/lib/tmux";
 import type { FileEntry, FilesResponse, ProjectCatalogEntry } from "@/lib/types";
 import type { Workflow } from "@/lib/workflows/types";
 
@@ -28,10 +29,12 @@ export interface FilesData {
   tasks: BoardTask[];
   /** Set when the server's pipelines store failed closed for this poll. */
   pipelinesError?: string;
+  systemHealth: { tmux: TmuxEndpointHealth };
   loaded: boolean;
 }
 
-const EMPTY: FilesData = { files: [], projectCatalog: [], flows: [], pipelines: [], workflows: [], tasks: [], loaded: false };
+const HEALTHY_SYSTEM = { tmux: { status: "healthy" as const } };
+const EMPTY: FilesData = { files: [], projectCatalog: [], flows: [], pipelines: [], workflows: [], tasks: [], systemHealth: HEALTHY_SYSTEM, loaded: false };
 
 export function filesApiUrl(project?: string | null): string {
   return project ? "/api/files?project=" + encodeURIComponent(project) : "/api/files";
@@ -69,7 +72,7 @@ export function useFiles(project?: string | null): FilesData {
         /* The flows rollout changes the payload from a bare array to
            {files, flows}; accept both so client and server can deploy in
            either order. */
-        if (Array.isArray(parsed)) setData({ files: parsed, projectCatalog: [], flows: [], pipelines: [], workflows: [], tasks: [], loaded: true });
+        if (Array.isArray(parsed)) setData({ files: parsed, projectCatalog: [], flows: [], pipelines: [], workflows: [], tasks: [], systemHealth: HEALTHY_SYSTEM, loaded: true });
         else {
           setData({
             files: parsed.files ?? [],
@@ -79,6 +82,7 @@ export function useFiles(project?: string | null): FilesData {
             workflows: parsed.workflows ?? [],
             tasks: parsed.tasks ?? [],
             pipelinesError: parsed.pipelinesError,
+            systemHealth: parsed.systemHealth ?? HEALTHY_SYSTEM,
             loaded: true,
           });
         }

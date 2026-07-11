@@ -8,7 +8,7 @@ import { agentRegistry } from "@/lib/agent/registry";
 import { sessionKeyFromTranscript } from "@/lib/agent/sessionKey";
 import { resolveSpawnedTranscriptPath } from "@/lib/agent/spawnedTranscript";
 import { headCwd } from "@/lib/agent/transcript";
-import { closeFlow, createFlowFromRequest, patchFlow } from "@/lib/flows/commands";
+import { MAX_FLOW_NOTE_LENGTH, closeFlow, createFlowFromRequest, patchFlow } from "@/lib/flows/commands";
 import { lastAssistantMessage } from "@/lib/flows/findings";
 import { loadFlows } from "@/lib/flows/store";
 import type { CreateFlowRequest, Flow, RoleConfig } from "@/lib/flows/types";
@@ -21,8 +21,9 @@ import type { FileEntry } from "@/lib/types";
 import { realExec, type ExecPort } from "@/lib/workflows/provision";
 
 import { commitPipelineStage, provisionPipelineWorktree, resetPipelineStage } from "./git";
+import { MAX_SPEC_LENGTH, MAX_STAGE_PROMPT_LENGTH, MAX_TASK_LENGTH } from "./limits";
 import { renderStagePrompt } from "./prompts";
-import { pipelineRoleLookup, resolvePipelineRole, type PipelineRoleLookup } from "./roles";
+import { pipelineRoleLookup, resolvePipelineRole, validatePipelineRoleParams, type PipelineRoleLookup } from "./roles";
 import { buildPipeline, loadPipelines, PipelineStoreError, withPipelineMutation } from "./store";
 import type {
   CreatePipelineRequest,
@@ -231,11 +232,6 @@ export function defaultPipelinePorts(): PipelinePorts {
 const spawnsThisProcess = new Set<string>();
 const TERMINAL_STATES = new Set<Pipeline["state"]>(["completed", "closed"]);
 
-/* Everything created here rides every 10s files poll, so unbounded
-   create-time strings become permanent payload weight. */
-const MAX_TASK_LENGTH = 4_000;
-const MAX_SPEC_LENGTH = 16_000;
-const MAX_STAGE_PROMPT_LENGTH = 8_000;
 
 function attemptKey(pipeline: Pipeline, stage: PipelineStage, attempt: PipelineStageAttempt): string {
   return `${pipeline.id}:${stage.id}:${attempt.n}`;
@@ -481,18 +477,44 @@ async function tickRunStage(
   commitPassedStage(pipeline, stage, attempt, ports);
 }
 
-function reviewNote(pipeline: Pipeline, stage: PipelineStage, role: EffectivePipelineRole): string {
-  const prompt = stage.prompt
+/** Substitute the {{task}}/{{prev.output}} placeholders and trim. */
+function renderNoteTemplate(text: string, pipeline: Pipeline): string {
+  return text
     .split("{{task}}").join(pipeline.task)
     .split("{{prev.output}}").join(normalizedOutput(pipeline))
     .trim();
-  const scaffold = role.roleId && role.promptScaffold
-    ? role.promptScaffold
-      .split("{{task}}").join(pipeline.task)
-      .split("{{prev.output}}").join(normalizedOutput(pipeline))
-      .trim()
-    : "";
-  return [prompt, ...(scaffold ? ["", `Reviewer role scaffold (${role.roleId}):`, scaffold] : [])].join("\n").slice(0, 2_000);
+}
+
+const FENCE_MARKER = "\n\nSafety fences:\n";
+
+/**
+ * Fits the review-loop stage's directive + role scaffold into the flow note's
+ * transmissible cap (MAX_FLOW_NOTE_LENGTH; the flow layer truncates anything
+ * longer). The operator's directive and the role's safety fences always survive
+ * whole; the scaffold *body* (supplementary role guidance) is what gets trimmed
+ * to make room. When the directive and fences together already exceed the cap,
+ * any truncation would drop acceptance criteria, so this returns an actionable
+ * error for the caller to park on.
+ */
+export function reviewNote(pipeline: Pipeline, stage: PipelineStage, role: EffectivePipelineRole): { note: string } | { error: string } {
+  const prompt = renderNoteTemplate(stage.prompt, pipeline);
+  const scaffold = role.roleId && role.promptScaffold ? renderNoteTemplate(role.promptScaffold, pipeline) : "";
+  const fenceIndex = scaffold ? scaffold.lastIndexOf(FENCE_MARKER) : -1;
+  const body = fenceIndex >= 0 ? scaffold.slice(0, fenceIndex) : scaffold;
+  const fences = fenceIndex >= 0 ? scaffold.slice(fenceIndex) : "";
+
+  /* The directive + fences are non-negotiable; if they don't both fit, park. */
+  if (prompt.length + fences.length > MAX_FLOW_NOTE_LENGTH) {
+    return {
+      error: `review directive is too long for the reviewer note (${prompt.length + fences.length} chars after expansion; the reviewer receives at most ${MAX_FLOW_NOTE_LENGTH}). Shorten this stage's prompt.`,
+    };
+  }
+  if (!scaffold) return { note: prompt };
+
+  const header = `\n\nReviewer role scaffold (${role.roleId}):\n`;
+  const bodyBudget = MAX_FLOW_NOTE_LENGTH - prompt.length - header.length - fences.length;
+  const trimmedBody = bodyBudget > 0 ? body.slice(0, bodyBudget) : "";
+  return { note: trimmedBody ? `${prompt}${header}${trimmedBody}${fences}` : `${prompt}${fences}` };
 }
 
 async function tickReviewStage(
@@ -557,7 +579,12 @@ async function tickReviewStage(
       park(pipeline, `review flow startup paused: ${created.flow.stateDetail ?? "kickoff delivery failed"}`, attempt);
       return;
     }
-    const advanced = ports.patchFlow(created.flow.id, "advance", reviewNote(pipeline, stage, attempt.effectiveRole));
+    const note = reviewNote(pipeline, stage, attempt.effectiveRole);
+    if ("error" in note) {
+      park(pipeline, note.error, attempt);
+      return;
+    }
+    const advanced = ports.patchFlow(created.flow.id, "advance", note.note);
     if (advanced.error) park(pipeline, `advancing the review flow failed: ${advanced.error}`, attempt);
     return;
   }
@@ -576,7 +603,12 @@ async function tickReviewStage(
      patch) — without a re-issue the flow waits forever for a ready marker a
      verdict-terminated stage transcript will not produce. */
   if (flow.state === "waiting_ready" && flow.rounds.length === 0) {
-    const advanced = ports.patchFlow(flow.id, "advance", reviewNote(pipeline, stage, attempt.effectiveRole));
+    const note = reviewNote(pipeline, stage, attempt.effectiveRole);
+    if ("error" in note) {
+      park(pipeline, note.error, attempt);
+      return;
+    }
+    const advanced = ports.patchFlow(flow.id, "advance", note.note);
     if (advanced.error) park(pipeline, `advancing the review flow failed: ${advanced.error}`, attempt);
     return;
   }
@@ -664,19 +696,34 @@ function normalizeStages(value: unknown, lookup?: PipelineRoleLookup | null): { 
     if (roleValue !== undefined && (!roleValue || typeof roleValue !== "object" || Array.isArray(roleValue))) {
       return { error: `stage ${id} role must be an object` };
     }
-    if (roleValue && Object.keys(roleValue).some((key) => key !== "roleId")) {
-      return { error: `stage ${id} role only accepts roleId; place overrides on the stage` };
+    if (roleValue && Object.keys(roleValue).some((key) => key !== "roleId" && key !== "params")) {
+      return { error: `stage ${id} role only accepts roleId and params; place runtime overrides on the stage` };
     }
     const roleId = roleValue && typeof (roleValue as { roleId?: unknown }).roleId === "string"
       ? (roleValue as { roleId: string }).roleId.trim()
       : "";
     if (roleValue && !roleId) return { error: `stage ${id} roleId is required when role is present` };
+    const rawParams = (roleValue as { params?: unknown } | undefined)?.params;
+    if (rawParams !== undefined && (!rawParams || typeof rawParams !== "object" || Array.isArray(rawParams))) {
+      return { error: `stage ${id} role params must be an object` };
+    }
+    const roleParams = rawParams as Record<string, unknown> | undefined;
+    if (roleParams && Object.values(roleParams).some((value) => typeof value !== "string" && typeof value !== "number")) {
+      return { error: `stage ${id} role params must be strings or numbers` };
+    }
+    if (roleParams && !roleId) return { error: `stage ${id} role params require a roleId` };
+    if (roleId && roleParams) {
+      /* Canonical value checks (options, integer bounds, text length, unknown
+         keys) so an invalid param can't freeze into the stored scaffold. */
+      const paramError = validatePipelineRoleParams(roleId, roleParams as Record<string, string | number>);
+      if (paramError) return { error: `stage ${id} ${paramError}` };
+    }
     if (stage.model !== undefined && stage.model !== null && typeof stage.model !== "string") return { error: `stage ${id} model must be a string or null` };
     if (stage.effort !== undefined && stage.effort !== null && typeof stage.effort !== "string") return { error: `stage ${id} effort must be a string or null` };
     const input: PipelineStageInput = {
       id,
       kind: stage.kind,
-      ...(roleId ? { role: { roleId: roleId as PipelineRoleId } } : {}),
+      ...(roleId ? { role: { roleId: roleId as PipelineRoleId, ...(roleParams && Object.keys(roleParams).length ? { params: roleParams as Record<string, string | number> } : {}) } } : {}),
       ...(stage.engine !== undefined ? { engine: stage.engine } : {}),
       ...(stage.model !== undefined ? { model: typeof stage.model === "string" ? stage.model.trim() || null : null } : {}),
       ...(stage.effort !== undefined ? { effort: typeof stage.effort === "string" ? stage.effort.trim() || null : null } : {}),

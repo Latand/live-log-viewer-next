@@ -3,9 +3,10 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { resolveRole } from "@/lib/roles/registry";
 import { MAX_SCAFFOLD_LENGTH, saveRoleOverrides } from "@/lib/roles/store";
 
-import { pipelineRoleLookup, resolvePipelineRole } from "./roles";
+import { pipelineRoleLookup, resolvePipelineRole, validatePipelineRoleParams } from "./roles";
 
 const REGISTRY_LOOKUP = (roleId: string) => {
   if (roleId === "builder") return { engine: "codex" as const, model: "gpt-5.6-sol", effort: "medium", access: "read-write" as const, promptScaffold: "Builder guidance" };
@@ -124,6 +125,64 @@ test("a referenced role with an empty scaffold fails the create instead of persi
     : null;
   expect(resolvePipelineRole({ role: { roleId: "builder" } }, "run", lookup).error)
     .toContain("empty prompt scaffold");
+});
+
+test("the deployer role is refused in pipelines (no interactive confirm gate)", () => {
+  expect(resolvePipelineRole({ role: { roleId: "deployer" } }, "run", pipelineRoleLookup).error)
+    .toContain("not allowed in a pipeline");
+});
+
+test("Builder domain=frontend resolves to the Claude/Opus config", () => {
+  const resolved = resolvePipelineRole({ role: { roleId: "builder", params: { domain: "frontend" } } }, "run", pipelineRoleLookup).role;
+  expect(resolved).toMatchObject({ roleId: "builder", engine: "claude", model: "opus" });
+});
+
+test("Builder mode=apply-fixes resolves to the Terra config", () => {
+  const resolved = resolvePipelineRole({ role: { roleId: "builder", params: { mode: "apply-fixes" } } }, "run", pipelineRoleLookup).role;
+  expect(resolved).toMatchObject({ roleId: "builder", engine: "codex", model: "gpt-5.6-terra" });
+});
+
+test("validatePipelineRoleParams enforces canonical value rules and skips required-when-absent", () => {
+  /* Absent required params are fine — a pipeline reviewer reviews its branch. */
+  expect(validatePipelineRoleParams("reviewer", {})).toBeNull();
+  expect(validatePipelineRoleParams("reviewer", { diffSource: "PR#1", lens: "scope" })).toBeNull();
+  /* Supplied invalid values are rejected exactly as the shared registry would. */
+  expect(validatePipelineRoleParams("reviewer", { lens: "bogus" })).toContain("invalid role parameter: lens");
+  expect(validatePipelineRoleParams("reviewer", { parallelN: 999 })).toContain("invalid role parameter: parallelN");
+  expect(validatePipelineRoleParams("reviewer", { unknownKey: "x" })).toContain("unknown role parameter: unknownKey");
+});
+
+test("operator role params substitute into the resolved prompt scaffold", () => {
+  const resolved = resolvePipelineRole(
+    { role: { roleId: "reviewer", params: { diffSource: "PR#100", lens: "scope" } } },
+    "review-loop",
+    pipelineRoleLookup,
+  );
+  expect(resolved.role?.promptScaffold).toContain("PR#100");
+  expect(resolved.role?.promptScaffold).toContain("lens scope");
+});
+
+test("blank role params fall back to the registry default token value", () => {
+  const resolved = resolvePipelineRole(
+    { role: { roleId: "reviewer", params: { diffSource: "", lens: "" } } },
+    "review-loop",
+    pipelineRoleLookup,
+  );
+  /* lens defaults to the first registry option, so no empty token is substituted. */
+  expect(resolved.role?.promptScaffold).toContain("lens correctness");
+  expect(resolved.role?.promptScaffold).not.toContain("lens .");
+});
+
+test("Builder domain=frontend keeps the canonical frontend scaffold guidance (parity with resolveRole)", () => {
+  const pipeline = pipelineRoleLookup("builder", { domain: "frontend" });
+  const canonical = resolveRole("builder", { domain: "frontend" });
+  expect(canonical.ok).toBe(true);
+  /* The pipeline lookup must carry the same frontend guidance the spawn path
+     emits; a hand-rolled substitution would silently drop it. */
+  expect(pipeline?.promptScaffold).toContain("UI/frontend implementation guidance");
+  if (canonical.ok) expect(pipeline?.promptScaffold).toBe(canonical.value.prompt);
+  /* Without domain=frontend the guidance is absent, so the two selections differ. */
+  expect(pipelineRoleLookup("builder", {})?.promptScaffold).not.toContain("UI/frontend implementation guidance");
 });
 
 test("codex model overrides mirror the store bounds at create time", () => {

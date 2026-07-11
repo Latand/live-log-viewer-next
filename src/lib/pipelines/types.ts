@@ -12,9 +12,20 @@ export type PipelineRoleId =
   | "prod-auditor"
   | "deployer";
 
+/**
+ * Roles a pipeline stage may not use. Deployer demands an explicit
+ * `confirm: "deploy"` gate (resolveSpawnRole / DraftAgentPane) that a pipeline —
+ * which spawns its stages automatically, without a per-stage confirmation — has
+ * no way to honor, so it is excluded from the builder and rejected by the API.
+ */
+export const PIPELINE_DISALLOWED_ROLE_IDS: readonly PipelineRoleId[] = ["deployer"];
+
 /** Durable reference to the shared role registry introduced by issue #35. */
 export type PipelineRoleRef = {
   roleId: PipelineRoleId;
+  /** Typed parameter values the operator chose; substituted into the role's
+      prompt scaffold at create time (falling back to registry defaults). */
+  params?: Record<string, string | number>;
 };
 
 export type EffectivePipelineRole = RoleConfig & {

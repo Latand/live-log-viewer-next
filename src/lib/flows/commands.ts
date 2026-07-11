@@ -108,9 +108,13 @@ export async function createFlowFromRequest(req: CreateFlowRequest, entries: Fil
   return { flow };
 }
 
+/** The transmissible cap for a round's ready note: anything longer is truncated
+    here, so producers (e.g. the pipeline's reviewNote) must fit within it. */
+export const MAX_FLOW_NOTE_LENGTH = 2_000;
+
 /** Trimmed user note from a PATCH body, or null when absent/blank. */
 function noteFromRequest(req: PatchFlowRequest): string | null {
-  return typeof req.note === "string" && req.note.trim() ? req.note.trim().slice(0, 2000) : null;
+  return typeof req.note === "string" && req.note.trim() ? req.note.trim().slice(0, MAX_FLOW_NOTE_LENGTH) : null;
 }
 
 /**

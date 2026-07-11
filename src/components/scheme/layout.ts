@@ -381,7 +381,11 @@ export function buildSchemeLayout(
     loops,
     links: [
       ...deriveFlowLinks(flows, (key) => anchors.get(key) ?? null),
-      ...derivePipelineLinks(pipelines, (key) => anchors.get(key) ?? null),
+      ...derivePipelineLinks(
+        pipelines,
+        (key) => anchors.get(key) ?? null,
+        (flowId) => flows.find((flow) => flow.id === flowId)?.implementerPath ?? null,
+      ),
     ],
     drafts,
     byPath: new Map<string, SchemeRect>([

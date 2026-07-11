@@ -16,7 +16,11 @@ import { DraftAgentPane } from "@/components/DraftAgentPane";
 import { FlowDialog } from "@/components/flows/FlowDialog";
 import { activeLoopLeg, activeLoopRole, canStartFlow, verdictTone } from "@/components/flows/flowModel";
 import { FlowHub } from "@/components/flows/FlowHub";
+import { PipelineDialog } from "@/components/pipelines/PipelineDialog";
 import { PipelineHub } from "@/components/pipelines/PipelineHub";
+import { PipelineStrip } from "@/components/pipelines/PipelineStrip";
+import { canSourcePipeline, renderableFlowIds } from "@/components/pipelines/pipelineModel";
+import type { Pipeline } from "@/lib/pipelines/types";
 import { FlowStrip } from "@/components/flows/FlowStrip";
 import { RoleTag } from "@/components/flows/RoleTag";
 import { RateLimitBadge } from "@/components/RateLimitBadge";
@@ -28,6 +32,7 @@ import { WorkflowDraftPane } from "@/components/workflows/WorkflowDraftPane";
 import { activityDot, cleanTitle, engineBadge, engineEdge, fmtAge } from "@/components/utils";
 
 import type { AgentLink } from "./agentLinks";
+import { PIPELINE_RAIL_COLOR, pipelineRailSegment } from "./agentLinks";
 import {
   LOOP_GAP,
   NODE_W,
@@ -188,22 +193,67 @@ export const AgentLinksLayer = memo(function AgentLinksLayer({
   links,
   byPath,
   interactive,
+  hubInteractive = interactive,
+  width,
+  height,
 }: {
   links: AgentLink[];
   byPath: Map<string, SchemeRect>;
   interactive: boolean;
+  /** Pipeline control hub stays tappable even where the rest of the layer is
+      passive — the mobile lite map is pick-only for nodes but its PipelineHub
+      opens the same controls as desktop (#93 §2.3). Defaults to `interactive`. */
+  hubInteractive?: boolean;
+  width: number;
+  height: number;
 }) {
   if (!links.length) return null;
+  /* Anchor-only pipeline links carry a hub but no rail (from === to), so they are
+     excluded from the drawn-rail pass. */
+  const pipelineLinks = links.filter((link) => link.pipeline && !link.pipeline.anchorOnly && byPath.has(link.from) && byPath.has(link.to));
   return (
     <>
+      {pipelineLinks.length ? (
+        <svg width={width} height={height} className="absolute left-0 top-0" aria-hidden>
+          {pipelineLinks.map((link) => {
+            const seg = pipelineRailSegment(byPath.get(link.from)!, byPath.get(link.to)!);
+            const color = PIPELINE_RAIL_COLOR[link.pipeline!.tone];
+            const line = `M ${seg.x1} ${seg.y1} L ${seg.x2} ${seg.y2}`;
+            const active = link.pipeline!.tone === "active" && !link.pipeline!.paused;
+            return (
+              <g key={link.key}>
+                <path
+                  d={line}
+                  className={active ? "pipeline-rail-live" : undefined}
+                  style={{ d: `path("${line}")`, transition: `d ${MOVE_MS}ms ${MOVE_EASE}` } as React.CSSProperties}
+                  fill="none"
+                  stroke={color}
+                  strokeWidth={2.5}
+                  strokeLinecap="round"
+                  strokeDasharray={link.pipeline!.tone === "dim" ? "5 7" : undefined}
+                />
+                {seg.chevrons.map((chevron, index) => (
+                  <path key={index} d={chevron} fill="none" stroke={color} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" opacity={0.9} />
+                ))}
+              </g>
+            );
+          })}
+        </svg>
+      ) : null}
       {links.map((link) => {
         const from = byPath.get(link.from);
         const to = byPath.get(link.to);
         if (!from || !to) return null;
         if (link.pipeline) {
-          const x = (from.x + from.w / 2 + to.x + to.w / 2) / 2;
-          const y = (from.y + from.h / 2 + to.y + to.h / 2) / 2;
-          return <PipelineHub key={link.key} pipeline={link.pipeline.pipeline} x={x} y={y} moveTransition={MOVE_TRANSITION} />;
+          /* Rail midpoint, nudged onto the same off-center offset as the line;
+             an anchor-only hub (no rail) sits at the top-center of its node. */
+          const seg = pipelineRailSegment(from, to);
+          const x = link.pipeline.anchorOnly ? from.x + from.w / 2 : (seg.x1 + seg.x2) / 2;
+          const y = link.pipeline.anchorOnly ? from.y : (seg.y1 + seg.y2) / 2;
+          if (link.pipeline.hub) {
+            return <PipelineHub key={link.key} pipeline={link.pipeline.pipeline} x={x} y={y} interactive={hubInteractive} moveTransition={MOVE_TRANSITION} />;
+          }
+          return <PipelineEdgeBadge key={link.key} index={link.pipeline.index} total={link.pipeline.total} color={PIPELINE_RAIL_COLOR[link.pipeline.tone]} x={x} y={y} moveTransition={MOVE_TRANSITION} />;
         }
         if (!link.flow) return null;
         /* Corridor midpoint of the pair, level with the cycle arcs' center. */
@@ -216,6 +266,21 @@ export const AgentLinksLayer = memo(function AgentLinksLayer({
     </>
   );
 });
+
+/** A non-hub pipeline edge's marker: the stage index it hands off into. */
+function PipelineEdgeBadge({ index, total, color, x, y, moveTransition }: { index: number; total: number; color: string; x: number; y: number; moveTransition: string }) {
+  return (
+    <div
+      data-scheme-ui
+      className="pointer-events-none absolute left-0 top-0 z-[4] inline-flex h-[18px] -translate-x-1/2 -translate-y-1/2 items-center gap-0.5 rounded-full border bg-panel px-1.5 text-[9.5px] font-bold shadow-card"
+      style={{ transform: `translate(${x}px, ${y}px) translate(-50%, -50%)`, transition: moveTransition, borderColor: color, color }}
+      aria-hidden
+    >
+      <span>›</span>
+      <span>{index}/{total}</span>
+    </div>
+  );
+}
 
 /** Quiet history chip inside an expanded under-deck panel. */
 function UnderRow({ file, onSelect }: { file: FileEntry; onSelect: (file: FileEntry) => void }) {
@@ -450,8 +515,15 @@ function NodeShell({
   dimmed,
   dormant,
   flow,
+  pipeline,
+  flows,
+  renderablePaths,
+  renderableFlows,
   canFlow,
+  canPipeline,
   onSelect,
+  onOpenPath,
+  onOpenFlow,
   onClose,
   onFocusRound,
   onHandoff,
@@ -467,9 +539,26 @@ function NodeShell({
   dormant: boolean;
   /** Active review-loop flow attached to this conversation, if any. */
   flow: Flow | null;
+  /** Active pipeline whose compact strip mounts over this node — the node is its
+      current run stage (§2.2). Null when none, or the current stage is a
+      review-loop (the FlowStrip owns that slot). */
+  pipeline: Pipeline | null;
+  /** All flows, for the strip's review-loop round counters + open-review. */
+  flows: Flow[];
+  /** Transcript paths still in the scan; gates the strip's run-stage actions. */
+  renderablePaths: ReadonlySet<string>;
+  /** Flow ids with a rendered deck; gates the strip's review-loop actions. */
+  renderableFlows: ReadonlySet<string>;
   /** This node may host a new flow (root claude/codex conversation without one). */
   canFlow: boolean;
+  /** This conversation may seed a pipeline — broader than canFlow: children and
+      flow-hosting roots qualify too (#93 AC3). */
+  canPipeline: boolean;
   onSelect: (file: FileEntry) => void;
+  /** Focus a transcript path on the board (pipeline strip chip / open-transcript). */
+  onOpenPath: (path: string) => void;
+  /** Focus an embedded flow's implementer (pipeline strip open-review). */
+  onOpenFlow: (flowId: string) => void;
   onClose: (path: string) => void;
   onFocusRound: (flowId: string, round: number) => void;
   onHandoff?: (file: FileEntry) => void;
@@ -479,6 +568,11 @@ function NodeShell({
   const { t } = useLocale();
   const [underOpen, setUnderOpen] = useState(false);
   const [flowOpen, setFlowOpen] = useState(false);
+  const [pipelineOpen, setPipelineOpen] = useState(false);
+  /* The compact board strip sits in FlowStrip's slot; a review-loop current
+     stage never reaches here (its node carries the flow, and the strip map
+     already excludes it), but gate on !flow so the two can never stack. */
+  const boardStrip = pipeline && !flow ? pipeline : null;
   return (
     <div
       data-scheme-node={node.file.path}
@@ -500,23 +594,57 @@ function NodeShell({
         <div className="absolute -top-[60px] left-0 z-[4]" style={{ width: PAIR_W }}>
           <FlowStrip flow={flow} onFocusRound={(round) => onFocusRound(flow.id, round)} />
         </div>
-      ) : canFlow ? (
-        <div className="absolute -top-11 left-0 z-[4]">
-          <button
-            data-scheme-ui
-            className="inline-flex h-7 items-center gap-1 rounded-full border border-line bg-panel px-2.5 text-[11px] font-semibold text-dim shadow-card hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
-            aria-expanded={flowOpen}
-            title={t("scheme.flowTitle")}
-            onClick={() => setFlowOpen((value) => !value)}
-          >
-            <span className="text-[13px] leading-none text-accent">⟳</span> {t("scheme.flow")}
-          </button>
+      ) : null}
+      {/* §2.2 board strip rule: the pipeline's controls mount over its current
+          run stage, in the same slot FlowStrip uses (a review-loop stage yields
+          the slot to FlowStrip, so the two never coexist here). */}
+      {boardStrip ? (
+        <div className="absolute -top-[60px] left-0 z-[5]" style={{ width: node.w }}>
+          <PipelineStrip pipeline={boardStrip} flows={flows} renderablePaths={renderablePaths} renderableFlows={renderableFlows} compact onOpenPath={onOpenPath} onOpenFlow={onOpenFlow} />
+        </div>
+      ) : null}
+      {/* Flow + pipeline entry buttons. The pipeline button is decoupled from
+          flow eligibility (#93 AC3): it appears on any pipeline-source
+          conversation — children and flow-hosting roots included — sitting in
+          the controls row when free, or above the flow/pipeline strip when one is up. */}
+      {canFlow || canPipeline ? (
+        <div className={`absolute left-0 z-[4] flex items-center gap-1.5 ${flow || boardStrip ? "-top-[92px]" : "-top-11"}`}>
+          {canFlow ? (
+            <button
+              data-scheme-ui
+              className="inline-flex h-7 items-center gap-1 rounded-full border border-line bg-panel px-2.5 text-[11px] font-semibold text-dim shadow-card hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+              aria-expanded={flowOpen}
+              title={t("scheme.flowTitle")}
+              onClick={() => setFlowOpen((value) => !value)}
+            >
+              <span className="text-[13px] leading-none text-accent">⟳</span> {t("scheme.flow")}
+            </button>
+          ) : null}
+          {canPipeline ? (
+            <button
+              data-scheme-ui
+              className="inline-flex h-7 items-center gap-1 rounded-full border border-line bg-panel px-2.5 text-[11px] font-semibold text-dim shadow-card hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+              aria-expanded={pipelineOpen}
+              title={t("scheme.pipelineTitle")}
+              onClick={() => setPipelineOpen(true)}
+            >
+              <span className="text-[13px] leading-none text-accent">⇢</span> {t("scheme.pipeline")}
+            </button>
+          ) : null}
         </div>
       ) : null}
       {flowOpen ? (
         <div className="absolute left-0 top-[-8px] z-40 -translate-y-full">
           <FlowDialog file={node.file} onClose={() => setFlowOpen(false)} />
         </div>
+      ) : null}
+      {pipelineOpen ? (
+        <PipelineDialog
+          project={node.file.project}
+          src={node.file.path}
+          srcLabel={cleanTitle(node.file.title, 48)}
+          onClose={() => setPipelineOpen(false)}
+        />
       ) : null}
       {/* The hidden stack peeking from under the card: previous chats and
           finished tasks lie beneath the conversation, deck-style. */}
@@ -648,6 +776,8 @@ export const NodesLayer = memo(function NodesLayer({
   focus,
   attentionPaths,
   flowsByImpl,
+  flows,
+  pipelineStrips,
   deckFocus,
   onSelect,
   onClose,
@@ -675,6 +805,10 @@ export const NodesLayer = memo(function NodesLayer({
       Identity is stable while membership is, so camera frames never see it move. */
   attentionPaths: ReadonlySet<string> | null;
   flowsByImpl: Map<string, Flow>;
+  /** All flows, for a pipeline strip's review-loop round counters + open-review. */
+  flows: Flow[];
+  /** Node path → the pipeline whose compact strip mounts over it (§2.2). */
+  pipelineStrips: Map<string, Pipeline>;
   deckFocus: DeckFocus | null;
   onSelect: (file: FileEntry) => void;
   onClose: (path: string) => void;
@@ -702,6 +836,27 @@ export const NodesLayer = memo(function NodesLayer({
   const withRuntimeActivity = (node: SchemeNode): SchemeNode => {
     const activity = runtimeActivityByPath.get(node.file.path);
     return activity ? { ...node, file: { ...node.file, activity } } : node;
+  };
+
+  /* Board pipeline strip actions: a run stage chip / verdict opens the stage's
+     own node by path; a review-loop chip routes through openPipelineFlow. */
+  const openPipelinePath = (path: string) => {
+    const file = files.find((entry) => entry.path === path);
+    if (file) onSelect(file);
+  };
+  /* Paths still in the scan; a run stage action is disabled once its transcript
+     leaves the file set (AC4). */
+  const renderablePaths = useMemo(() => new Set(files.map((entry) => entry.path)), [files]);
+  /* Flow ids with a rendered deck: a deck exists only for a placed implementer
+     node, so derive from the layout's nodes to disable review actions whose
+     implementer is unplaced. */
+  const renderableFlows = useMemo(() => renderableFlowIds(flows, new Set(layout.nodes.map((node) => node.file.path))), [flows, layout]);
+  /* A review-loop stage's reviewer transcript is folded into the flow's round
+     deck, so focus the deck's latest round to reveal that reviewer; the node is
+     removed. This is the same round-focus channel FlowStrip drives (#93 §2.2). */
+  const openPipelineFlow = (flowId: string) => {
+    const flow = flows.find((candidate) => candidate.id === flowId);
+    if (flow) onFocusRound(flow.id, flow.rounds.at(-1)?.n ?? 1);
   };
 
   /* A stack or deck stays lit when any conversation inside it is in the
@@ -771,8 +926,15 @@ export const NodesLayer = memo(function NodesLayer({
             dimmed={attentionPaths !== null && !attentionPaths.has(node.file.path)}
             dormant={dormant}
             flow={flowsByImpl.get(node.file.path) ?? null}
+            pipeline={pipelineStrips.get(node.file.path) ?? null}
+            flows={flows}
+            renderablePaths={renderablePaths}
+            renderableFlows={renderableFlows}
             canFlow={canStartFlow(node.file, flowsByImpl)}
+            canPipeline={canSourcePipeline(node.file)}
             onSelect={onSelect}
+            onOpenPath={openPipelinePath}
+            onOpenFlow={openPipelineFlow}
             onClose={onClose}
             onFocusRound={onFocusRound}
             onHandoff={onHandoff}
