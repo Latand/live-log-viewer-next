@@ -11,6 +11,7 @@ export interface ViewerCandidateContainerOptions {
   runtimeSocket: string;
   legacyTmuxExternal: string;
   tmuxTmpdir: string;
+  transcribeBackend: string;
 }
 
 export function viewerCandidateTmuxEnvironment(
@@ -32,7 +33,11 @@ export function viewerCandidateDockerArgs(candidate: ViewerReleaseIdentity, opti
     "--label", `dev.live-log-viewer.revision=${candidate.revision}`,
     "--network", "host", "--pid", "host", "--privileged", "--user", `${options.uid}:${options.gid}`,
     "-e", "HOME=/home/latand", "-e", "HOSTNAME=127.0.0.1", "-e", `PORT=${endpoint.port}`,
+    "-e", "PATH=/usr/local/bin:/home/latand/.bun/bin:/home/latand/.npm-global/bin:/home/latand/.local/bin:/usr/bin:/bin",
     "-e", "XDG_CONFIG_HOME=/home/latand/.config", "-e", "XDG_CACHE_HOME=/home/latand/.cache",
+    "-e", "HF_HOME=/home/latand/.cache/huggingface", "-e", "LLV_WHISPER_VENV=/opt/llv-whisper-venv",
+    "-e", `LLV_TRANSCRIBE_BACKEND=${options.transcribeBackend}`, "-e", "LLV_DOCKER_NSENTER_SHIMS=1",
+    "-e", "GIT_SSH_COMMAND=ssh -F /home/latand/.ssh/config -o UserKnownHostsFile=/home/latand/.ssh/known_hosts -o IdentityFile=/home/latand/.ssh/id_ed25519",
     "-e", "LLV_RUNTIME_EVENTS=1", "-e", `LLV_RUNTIME_HOST_SOCKET=${options.runtimeSocket}`,
     "-e", `LLV_LEGACY_TMUX_EXTERNAL=${options.legacyTmuxExternal}`, "-e", `TMUX_TMPDIR=${options.tmuxTmpdir}`,
     "-v", "/home/latand:/home/latand", "-v", `/tmp/tmux-${options.uid}:/tmp/tmux-${options.uid}`, "-v", `/tmp/claude-${options.uid}:/tmp/claude-${options.uid}`,

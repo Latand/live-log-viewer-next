@@ -95,6 +95,7 @@ async function startCandidate(candidate: ViewerReleaseIdentity): Promise<void> {
     envFile,
     envFileExists: fs.existsSync(envFile),
     runtimeSocket,
+    transcribeBackend: process.env.LLV_TRANSCRIBE_BACKEND || "",
     ...tmuxEnvironment,
   }));
 }
@@ -126,9 +127,13 @@ function serviceToken(): string | null {
   }
 }
 
-async function fetchStatus(url: string, headers: Record<string, string> = {}): Promise<{ status: number; text: string }> {
+async function fetchStatus(
+  url: string,
+  headers: Record<string, string> = {},
+  init: Pick<RequestInit, "method" | "body"> = {},
+): Promise<{ status: number; text: string }> {
   try {
-    const response = await fetch(url, { headers, redirect: "manual", signal: AbortSignal.timeout(5_000) });
+    const response = await fetch(url, { ...init, headers, redirect: "manual", signal: AbortSignal.timeout(5_000) });
     return { status: response.status, text: await response.text() };
   } catch {
     return { status: 0, text: "" };
@@ -155,7 +160,10 @@ async function probeRoutes(endpoint: string, expectedAssetsEndpoint?: string): P
   const root = await fetchStatus(requests.root.url, requests.root.headers);
   const authenticated = requests.authenticated ? await fetchStatus(requests.authenticated.url, requests.authenticated.headers) : null;
   const unauthorized = requests.unauthorized ? await fetchStatus(requests.unauthorized.url, requests.unauthorized.headers) : null;
-  const capability = await fetchStatus(requests.capability.url, requests.capability.headers);
+  const capability = await fetchStatus(requests.capability.url, requests.capability.headers, {
+    method: requests.capability.method,
+    body: requests.capability.body,
+  });
   const deploymentCapable = hasViewerDeploymentCapability(capability.status, capability.text);
   const html = authenticated?.status === 200 ? authenticated.text : root.text;
   const paths = referencedAssets(html);

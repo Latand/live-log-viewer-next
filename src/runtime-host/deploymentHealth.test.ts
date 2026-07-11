@@ -3,13 +3,20 @@ import { NextRequest } from "next/server";
 
 import type { ViewerHealthEvidence } from "@/lib/runtime/contracts";
 import { proxy } from "@/proxy";
+import { POST as deploymentAdmission } from "@/app/api/runtime/deployments/route";
 
 import { hasViewerDeploymentCapability, viewerHealthRequestPlan, waitForViewerReadiness } from "./deploymentHealth";
 
 const originalToken = process.env.LLV_TOKEN;
+const originalRuntimeEvents = process.env.LLV_RUNTIME_EVENTS;
+const originalRuntimeSocket = process.env.LLV_RUNTIME_HOST_SOCKET;
 afterEach(() => {
   if (originalToken === undefined) delete process.env.LLV_TOKEN;
   else process.env.LLV_TOKEN = originalToken;
+  if (originalRuntimeEvents === undefined) delete process.env.LLV_RUNTIME_EVENTS;
+  else process.env.LLV_RUNTIME_EVENTS = originalRuntimeEvents;
+  if (originalRuntimeSocket === undefined) delete process.env.LLV_RUNTIME_HOST_SOCKET;
+  else process.env.LLV_RUNTIME_HOST_SOCKET = originalRuntimeSocket;
 });
 
 function evidence(ok: boolean): ViewerHealthEvidence {
@@ -67,15 +74,28 @@ test("health request plan exercises remote authorization and rejection", () => {
 
   expect(plan.root.headers).toEqual({});
   expect(plan.capability).toEqual({
-    url: "http://127.0.0.1:18001/api/runtime/snapshot",
-    headers: plan.authenticated.headers,
+    url: "http://127.0.0.1:18001/api/runtime/deployments",
+    headers: { ...plan.authenticated.headers, "content-type": "application/json" },
+    method: "POST",
+    body: "{}",
   });
   expect(authorized.headers.get("x-middleware-next")).toBe("1");
   expect(unauthorized.status).toBe(403);
 });
 
-test("deployment capability requires a runtime snapshot deployment projection", () => {
+test("deployment capability requires the candidate admission route", async () => {
+  process.env.LLV_RUNTIME_EVENTS = "1";
+  process.env.LLV_RUNTIME_HOST_SOCKET = "/state/runtime-host.sock";
+  const plan = viewerHealthRequestPlan("http://127.0.0.1:18001", "viewer-token");
+  const response = await deploymentAdmission(new NextRequest(plan.capability.url, {
+    method: plan.capability.method,
+    headers: { ...plan.capability.headers, host: "127.0.0.1:18001" },
+    body: plan.capability.body,
+  }));
+
   expect(hasViewerDeploymentCapability(404, "")).toBe(false);
-  expect(hasViewerDeploymentCapability(200, JSON.stringify({ schemaVersion: 1 }))).toBe(false);
-  expect(hasViewerDeploymentCapability(200, JSON.stringify({ schemaVersion: 1, deployments: [] }))).toBe(true);
+  expect(hasViewerDeploymentCapability(200, JSON.stringify({ deployments: [] }))).toBe(false);
+  expect(hasViewerDeploymentCapability(400, JSON.stringify({ error: "invalid JSON" }))).toBe(false);
+  expect(response.status).toBe(400);
+  expect(hasViewerDeploymentCapability(response.status, await response.text())).toBe(true);
 });

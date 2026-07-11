@@ -20,6 +20,7 @@ test("promoted candidate receives the runtime deployment control plane", () => {
     runtimeSocket: "/state/runtime-host.sock",
     legacyTmuxExternal: "1",
     tmuxTmpdir: "/run/user/1000/agent-log-viewer",
+    transcribeBackend: "chatgpt",
   });
   const environment = {} as NodeJS.ProcessEnv;
   for (let index = 0; index < args.length; index += 1) {
@@ -32,6 +33,12 @@ test("promoted candidate receives the runtime deployment control plane", () => {
   expect(runtimeHostSocket(environment)).toBe("/state/runtime-host.sock");
   expect(environment.LLV_LEGACY_TMUX_EXTERNAL).toBe("1");
   expect(environment.TMUX_TMPDIR).toBe("/run/user/1000/agent-log-viewer");
+  expect(environment.PATH).toBe("/usr/local/bin:/home/latand/.bun/bin:/home/latand/.npm-global/bin:/home/latand/.local/bin:/usr/bin:/bin");
+  expect(environment.HF_HOME).toBe("/home/latand/.cache/huggingface");
+  expect(environment.LLV_WHISPER_VENV).toBe("/opt/llv-whisper-venv");
+  expect(environment.LLV_TRANSCRIBE_BACKEND).toBe("chatgpt");
+  expect(environment.LLV_DOCKER_NSENTER_SHIMS).toBe("1");
+  expect(environment.GIT_SSH_COMMAND).toBe("ssh -F /home/latand/.ssh/config -o UserKnownHostsFile=/home/latand/.ssh/known_hosts -o IdentityFile=/home/latand/.ssh/id_ed25519");
   expect(args).toContain("dev.live-log-viewer.managed=1");
   expect(args).toContain("--env-file");
   expect(args).toContain("--restart");
