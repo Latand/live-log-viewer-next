@@ -34,6 +34,7 @@ export interface HeadlessCodexAccount {
   managed: boolean;
 }
 export interface HeadlessClaudeAccount { home: string; projectsDir: string; managed: boolean; }
+export interface HeadlessReviewRuntime { command?: string; }
 
 /* The reviewer runs detached with file-backed stdio, so it survives a viewer
    restart. This in-memory record only adds what disk cannot know: the exact
@@ -190,6 +191,7 @@ export function startHeadlessReview(
   timeoutMs = DEFAULT_TIMEOUT_MS,
   codexAccount?: HeadlessCodexAccount | null,
   claudeAccount?: HeadlessClaudeAccount | null,
+  runtime?: HeadlessReviewRuntime,
 ): HeadlessReviewLaunch {
   const key = runKey(flowId, round);
   if (runs.has(key)) return { pid: null, sessionId: null, reviewerPath: null };
@@ -205,7 +207,7 @@ export function startHeadlessReview(
   const stderrFd = fs.openSync(stderrPathFor(flowId, round), "w");
   let child: ChildProcess;
   try {
-    child = spawn(built.command, built.args, {
+    child = spawn(runtime?.command ?? built.command, built.args, {
       cwd,
       env: built.env,
       detached: true,
