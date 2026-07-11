@@ -2,9 +2,9 @@ import { describe, expect, test } from "bun:test";
 
 import type { FileEntry } from "@/lib/types";
 
-import { EFFORT_LEVEL_MAX, effortLevel } from "./utils";
+import { effortMeter } from "./utils";
 
-function entry(effort: string | null | undefined): FileEntry {
+function entry(overrides: Partial<FileEntry>): FileEntry {
   return {
     path: "/x.jsonl",
     root: "codex-sessions",
@@ -20,28 +20,29 @@ function entry(effort: string | null | undefined): FileEntry {
     activity: "idle",
     proc: null,
     pid: null,
-    model: "gpt-5.6",
-    effort,
+    model: "gpt-5.6-sol",
+    effort: null,
     pendingQuestion: null,
     waitingInput: null,
+    ...overrides,
   };
 }
 
-describe("effortLevel", () => {
-  test("maps the full minimal through max scale onto 1 through 6", () => {
-    expect(effortLevel(entry("minimal"))).toBe(1);
-    expect(effortLevel(entry("low"))).toBe(2);
-    expect(effortLevel(entry("medium"))).toBe(3);
-    expect(effortLevel(entry("high"))).toBe(4);
-    expect(effortLevel(entry("xhigh"))).toBe(5);
-    expect(effortLevel(entry("max"))).toBe(6);
-    expect(EFFORT_LEVEL_MAX).toBe(6);
+describe("effortMeter", () => {
+  test("reads the entry's engine and model, so claude low is one bar of five", () => {
+    const meter = effortMeter(entry({ root: "claude-projects", engine: "claude", fmt: "claude", model: "fable-5", effort: "low" }));
+    expect(meter).toEqual({ level: 1, slots: 5 });
   });
 
-  test("returns 0 for unknown, empty, or absent effort so the indicator hides", () => {
-    expect(effortLevel(entry(null))).toBe(0);
-    expect(effortLevel(entry(undefined))).toBe(0);
-    expect(effortLevel(entry(""))).toBe(0);
-    expect(effortLevel(entry("bogus"))).toBe(0);
+  test("codex tiers position within the model's own scale", () => {
+    expect(effortMeter(entry({ model: "gpt-5.6-sol", effort: "xhigh" }))).toEqual({ level: 4, slots: 6 });
+    expect(effortMeter(entry({ model: "gpt-5.5", effort: "xhigh" }))).toEqual({ level: 4, slots: 4 });
+  });
+
+  test("returns level 0 for unknown, empty, or absent effort so the indicator hides", () => {
+    expect(effortMeter(entry({ effort: null })).level).toBe(0);
+    expect(effortMeter(entry({ effort: undefined })).level).toBe(0);
+    expect(effortMeter(entry({ effort: "" })).level).toBe(0);
+    expect(effortMeter(entry({ effort: "bogus" })).level).toBe(0);
   });
 });
