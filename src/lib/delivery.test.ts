@@ -214,6 +214,28 @@ test("ambiguous actuation keeps images and retries only after the same client re
   expect(registry.pendingDeliveries(conversation.id)).toEqual([]);
 });
 
+test("reserved delivery reports uncertainty when direct tmux send fails after actuation starts", async () => {
+  const registry = new AgentRegistry(path.join(SANDBOX, "reserved-actuation-registry.json"));
+  setAgentRegistryForTests(registry);
+  const conversation = registry.ensureConversation("codex", "", "default");
+  const reserved = registry.holdDelivery(conversation.id, "migration payload", "reserved-actuation");
+
+  const outcome = await deliverConversationMessage({
+    pid: 1,
+    path: "",
+    conversationId: conversation.id,
+    reservedDeliveryId: reserved.id,
+    text: reserved.text,
+    images: [],
+  }, {
+    targetForKnownPid: async () => "%1",
+    sendText: async () => { throw new Error("post-paste transport lost"); },
+  });
+
+  expect(outcome).toMatchObject({ ok: false, error: "post-paste transport lost", actuation: "started" });
+  expect(migrationDeliveryOutcome(outcome)).toBe("delivery-uncertain");
+});
+
 test("successful actuation retains images when settlement persistence fails", async () => {
   const registry = new AgentRegistry(path.join(SANDBOX, "settlement-failure-registry.json"));
   setAgentRegistryForTests(registry);
@@ -229,7 +251,8 @@ test("successful actuation retains images when settlement persistence fails", as
       buildImagePayload: () => ({ payload: imagePath, imagePaths: [imagePath] }),
       sendText: async () => {},
     });
-    expect(outcome).toMatchObject({ ok: false, error: "registry unavailable" });
+    expect(outcome).toMatchObject({ ok: false, error: "registry unavailable", actuation: "started" });
+    expect(migrationDeliveryOutcome(outcome)).toBe("delivery-uncertain");
     expect(fs.existsSync(imagePath)).toBe(true);
     expect(registry.pendingDeliveries(conversation.id)).toMatchObject([{ state: "delivery-uncertain" }]);
   } finally {

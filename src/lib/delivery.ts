@@ -52,8 +52,14 @@ export function migrationDeliveryOutcome(outcome: DeliveryOutcome): "delivered" 
   return outcome.outcome === "held" ? "held" : "delivered";
 }
 
-function failure(error: unknown, status = 500): DeliveryFailure {
-  return { ok: false, outcome: "failed", error: error instanceof Error ? error.message : String(error), status };
+function failure(error: unknown, status = 500, actuation?: "started"): DeliveryFailure {
+  return {
+    ok: false,
+    outcome: "failed",
+    error: error instanceof Error ? error.message : String(error),
+    status,
+    ...(actuation ? { actuation } : {}),
+  };
 }
 
 async function hostOutcome(result: Promise<HostDeliveryOutcome>): Promise<DeliveryOutcome> {
@@ -327,7 +333,7 @@ export async function deliverConversationMessage(message: ConversationMessage, o
       }
       return outcome;
     } catch (error) {
-      return failure(error);
+      return failure(error, 500, actuation === "none" ? undefined : "started");
     }
   };
 
@@ -416,6 +422,6 @@ export async function deliverConversationMessage(message: ConversationMessage, o
       if (deliveryId) try { registry.discardDelivery(deliveryId); } catch { /* the original registry failure remains actionable */ }
       deleteInboxImages(imagePaths);
     }
-    return failure(error);
+    return failure(error, 500, actuation === "none" ? undefined : "started");
   }
 }
