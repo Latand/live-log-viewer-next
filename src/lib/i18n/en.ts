@@ -641,6 +641,7 @@ export const en = {
   "pipelineStrip.chipAria": "Stage {label}: {state}",
 
   "pipelineChipState.pending": "pending",
+  "pipelineChipState.spawning": "spawning",
   "pipelineChipState.running": "running",
   "pipelineChipState.reviewing": "reviewing",
   "pipelineChipState.committing": "committing",
@@ -728,6 +729,7 @@ export const en = {
   "pipelineDialog.errors.paramInvalid": "{label} has an invalid value",
   "pipelineDialog.errors.modelEngineMismatch": "pick a model supported by {engine}",
   "pipelineDialog.errors.effortEngineMismatch": "pick an effort supported by {engine}",
+  "pipelineDialog.errors.rolesLoading": "loading the role catalog — one moment before starting",
   "pipelineDialog.errors.roleUnavailable": "role \"{role}\" is no longer available — pick another",
   "pipelineDialog.errors.paramUnknown": "remove the unknown role setting \"{key}\"",
 

@@ -1,11 +1,12 @@
 import { getLocale, translate, type MessageKey, type TFunction } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
-import type { FlowEngine } from "@/lib/flows/types";
+import type { Flow, FlowEngine } from "@/lib/flows/types";
 import type {
   CreatePipelineRequest,
   Pipeline,
   PipelineAccess,
   PipelineAction,
+  PipelineAttemptState,
   PipelineStage,
   PipelineStageAttempt,
   PipelineRoleId,
@@ -174,25 +175,56 @@ export function stageAccess(pipeline: Pipeline, stage: PipelineStage): PipelineA
   return attempt?.effectiveRole.access ?? stage.access ?? (stage.kind === "review-loop" ? "read-only" : "read-write");
 }
 
+/** Ids of flows that still occupy a board deck: present and not closed
+    (isActiveFlow). A review-loop action that routes to a closed or missing flow
+    reveals nothing, so callers pass this to gate those actions. */
+export function renderableFlowIds(flows: Flow[]): Set<string> {
+  return new Set(flows.filter((flow) => flow.state !== "closed").map((flow) => flow.id));
+}
+
 /**
  * How a stage chip / "open transcript" reveals an attempt on the board. A
  * review-loop stage stores the reviewer transcript in `agentPath`, but
  * foldClaimedReviewers removes that transcript from the board and folds it into
  * the flow's round deck — so opening the raw path reveals nothing. Route those
  * to the embedded flow (deck + round focus) instead; a plain run stage opens its
- * own node by path.
+ * own node by path. `renderableFlows`, when supplied, disables the flow target
+ * for a closed/missing flow that has no deck to reveal.
  */
 export function stageOpenTarget(
   stage: PipelineStage,
   attempt: PipelineStageAttempt | null,
+  renderableFlows?: ReadonlySet<string>,
 ): { kind: "flow"; flowId: string } | { kind: "path"; path: string } | null {
   if (!attempt) return null;
   /* A review-loop stage's agentPath is always the reviewer transcript the board
      folds into the round deck, so never route to it — the flow (or nothing) is
      the only valid target. Only a run stage opens its own node by path. */
-  if (stage.kind === "review-loop") return attempt.flowId ? { kind: "flow", flowId: attempt.flowId } : null;
+  if (stage.kind === "review-loop") {
+    if (!attempt.flowId) return null;
+    if (renderableFlows && !renderableFlows.has(attempt.flowId)) return null;
+    return { kind: "flow", flowId: attempt.flowId };
+  }
   if (attempt.agentPath) return { kind: "path", path: attempt.agentPath };
   return null;
+}
+
+/**
+ * Does a stage attempt have something the verdict popover can show — a
+ * structured verdict, an error, or a park on this stage (inline Retry/Skip)? A
+ * plain running/spawning attempt has none, so its trigger stays disabled rather
+ * than opening a misleading "no findings" sheet (shared desktop + mobile).
+ */
+export function stageHasEvidence(pipeline: Pipeline, stage: PipelineStage, attempt: PipelineStageAttempt | null): boolean {
+  if (!attempt) return false;
+  if (attempt.verdict || attempt.error) return true;
+  return pipeline.state === "needs_decision" && pipeline.cursor?.stageId === stage.id;
+}
+
+/** Localized label for a raw attempt state (the prior-attempt audit), so a
+    verdict-less attempt never shows an English identifier in the uk UI. */
+export function attemptStateLabel(t: TFunction, state: PipelineAttemptState): string {
+  return t(`pipelineChipState.${state}`);
 }
 
 /** Short label a chip shows: the role's registry id, or the stage id for raw stages. */

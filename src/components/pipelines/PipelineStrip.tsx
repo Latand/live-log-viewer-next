@@ -18,10 +18,12 @@ import {
   latestAttempt,
   patchPipeline,
   pipelineStateLabel,
+  renderableFlowIds,
   stageAccess,
   stageAttempts,
   stageChipLabel,
   stageChipState,
+  stageHasEvidence,
   stageOpenTarget,
 } from "./pipelineModel";
 import { VerdictPopover } from "./VerdictPopover";
@@ -121,6 +123,7 @@ function StageChip({
   stage,
   index,
   flows,
+  renderableFlows,
   open,
   onToggleVerdict,
   onCloseVerdict,
@@ -131,6 +134,8 @@ function StageChip({
   stage: PipelineStage;
   index: number;
   flows: Flow[];
+  /** Ids of flows that still have a board deck; gates review-loop actions. */
+  renderableFlows: ReadonlySet<string>;
   open: boolean;
   onToggleVerdict: () => void;
   onCloseVerdict: () => void;
@@ -152,8 +157,9 @@ function StageChip({
   const chipState = t(`pipelineChipState.${state}`);
   const title = [stage.role?.roleId ?? stage.id, t(access === "read-only" ? "pipelineStrip.readOnly" : "pipelineStrip.readWrite"), attempt?.sessionId].filter(Boolean).join(" · ");
   /* Review-loop chips open their flow's round deck, not the reviewer transcript
-     path (which the board folds away), so the chip never dead-ends (#93 §2.2). */
-  const openTarget = stageOpenTarget(stage, attempt);
+     path (which the board folds away); a closed/missing flow has no deck, so
+     renderableFlows disables the action rather than dead-ending (#93 §2.2). */
+  const openTarget = stageOpenTarget(stage, attempt, renderableFlows);
   const canOpen = openTarget ? (openTarget.kind === "flow" ? Boolean(onOpenFlow) : Boolean(onOpenPath)) : false;
   const openStage = () => {
     if (!openTarget) return;
@@ -161,12 +167,12 @@ function StageChip({
     else onOpenPath?.(openTarget.path);
   };
   const chipRef = useRef<HTMLSpanElement>(null);
-  /* The verdict popover also carries verdict-less evidence: a spawn/tick error
-     and, when the pipeline is parked here, inline Retry/Skip. So the trigger
-     appears for a verdict OR an errored/parked attempt — otherwise a failed
-     stage with no parsed verdict would have no way to surface its detail. */
-  const parkedHere = pipeline.state === "needs_decision" && pipeline.cursor?.stageId === stage.id;
-  const evidence = attempt ? (attempt.verdict ? "verdict" : attempt.error || parkedHere ? "issue" : null) : null;
+  /* The verdict popover also carries verdict-less evidence (a spawn/tick error,
+     or parked Retry/Skip), but a plain running attempt has none — the shared
+     predicate keeps the trigger from opening a misleading "no findings" sheet. */
+  const evidence = stageHasEvidence(pipeline, stage, attempt);
+  /* Only offer the popover's "Open review" for a flow that still has a deck. */
+  const canOpenFlow = Boolean(attempt?.flowId && renderableFlows.has(attempt.flowId));
 
   return (
     <span ref={chipRef} className="relative flex shrink-0 items-center gap-1.5">
@@ -202,7 +208,7 @@ function StageChip({
       </span>
       {open && attempt ? (
         <AnchoredVerdict anchorRef={chipRef}>
-          <VerdictPopover pipeline={pipeline} stage={stage} attempt={attempt} onClose={onCloseVerdict} onOpenPath={onOpenPath} onOpenFlow={onOpenFlow} />
+          <VerdictPopover pipeline={pipeline} stage={stage} attempt={attempt} canOpenFlow={canOpenFlow} onClose={onCloseVerdict} onOpenPath={onOpenPath} onOpenFlow={onOpenFlow} />
         </AnchoredVerdict>
       ) : null}
     </span>
@@ -238,6 +244,7 @@ export function PipelineStrip({
   const attention = PIPELINE_ATTENTION_STATES.has(pipeline.state);
   const finished = pipeline.state === "completed" || pipeline.state === "closed";
   const detail = parkedDetail(pipeline);
+  const renderableFlows = renderableFlowIds(flows);
   return (
     <div
       data-scheme-ui
@@ -274,6 +281,7 @@ export function PipelineStrip({
             stage={stage}
             index={index}
             flows={flows}
+            renderableFlows={renderableFlows}
             open={openVerdict === stage.id}
             onToggleVerdict={() => setOpenVerdict((prev) => (prev === stage.id ? null : stage.id))}
             onCloseVerdict={() => setOpenVerdict(null)}

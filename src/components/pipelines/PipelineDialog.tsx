@@ -186,6 +186,11 @@ export function pipelineValidationError(
   if (!task.trim()) return t("pipelineDialog.errors.taskRequired");
   if (!repoDir.trim()) return t("pipelineDialog.errors.repoRequired");
   if (stages.some((stage) => !stage.prompt.trim())) return t("pipelineDialog.errors.promptRequired");
+  /* A role-bearing draft can't be validated (or its runtime rebased) until the
+     catalog settles, so block submission meanwhile — otherwise a restored stale
+     role passes unflagged and the API 400s, and an untouched customized-Builder
+     row can still be mid-rebase. A role-less draft submits fine while loading. */
+  if (!catalogSettled && stages.some((stage) => stage.roleId)) return t("pipelineDialog.errors.rolesLoading");
   if (task.trim().length > MAX_TASK_LENGTH) return t("pipelineDialog.errors.tooLong", { field: t("pipelineDialog.task"), max: MAX_TASK_LENGTH });
   if (spec.trim().length > MAX_SPEC_LENGTH) return t("pipelineDialog.errors.tooLong", { field: t("pipelineDialog.spec"), max: MAX_SPEC_LENGTH });
   if (stages.some((stage) => stage.prompt.trim().length > MAX_STAGE_PROMPT_LENGTH)) {

@@ -9,6 +9,7 @@ import {
   PIPELINE_TEMPLATES,
   STAGE_GLYPH,
   type DraftStage,
+  attemptStateLabel,
   canSourcePipeline,
   deriveStageId,
   draftStagesToInput,
@@ -19,6 +20,7 @@ import {
   pipelineNeedsAttention,
   pipelineStripByPath,
   stageChipState,
+  stageHasEvidence,
   stageOpenTarget,
 } from "./pipelineModel";
 
@@ -276,6 +278,41 @@ describe("stageOpenTarget (reviewer paths route to the flow, not the folded node
     expect(stageOpenTarget(runStage, null)).toBeNull();
     expect(stageOpenTarget(runStage, attempt({ agentPath: null }))).toBeNull();
   });
+
+  test("a review-loop whose flow is not renderable (closed/missing) has no open target", () => {
+    /* renderableFlows excludes closed/absent flows, so the action is disabled
+       rather than routing to a deck the board never draws. */
+    const renderable = new Set<string>(["f1"]);
+    expect(stageOpenTarget(reviewStage, attempt({ flowId: "f1" }), renderable)).toEqual({ kind: "flow", flowId: "f1" });
+    expect(stageOpenTarget(reviewStage, attempt({ flowId: "gone" }), renderable)).toBeNull();
+    /* A run stage is unaffected by the flow set. */
+    expect(stageOpenTarget(runStage, attempt({ agentPath: "/build" }), renderable)).toEqual({ kind: "path", path: "/build" });
+  });
+});
+
+describe("stageHasEvidence (running attempts have no verdict sheet)", () => {
+  const runStage = stage("build");
+  const p = (over: Partial<Pipeline>) => pipeline({ stages: [runStage], ...over });
+  const att = (over: Record<string, unknown>) => ({ n: 1, state: "running", verdict: null, error: null, ...over }) as never;
+
+  test("a running attempt with no verdict/error/park has no evidence", () => {
+    expect(stageHasEvidence(p({ state: "running" }), runStage, att({ state: "running" }))).toBe(false);
+  });
+  test("a verdict, an error, or a park on this stage each count as evidence", () => {
+    expect(stageHasEvidence(p({}), runStage, att({ verdict: { status: "fail" } }))).toBe(true);
+    expect(stageHasEvidence(p({}), runStage, att({ error: "spawn failed" }))).toBe(true);
+    expect(stageHasEvidence(p({ state: "needs_decision", cursor: { stageId: "build", state: "running" } }), runStage, att({}))).toBe(true);
+  });
+  test("no attempt is no evidence", () => {
+    expect(stageHasEvidence(p({}), runStage, null)).toBe(false);
+  });
+});
+
+test("attemptStateLabel maps every raw attempt state through a translated key", () => {
+  const states = ["pending", "spawning", "running", "reviewing", "committing", "passed", "failed", "needs_decision", "skipped"] as const;
+  for (const state of states) {
+    expect(attemptStateLabel(fakeT, state)).toBe(`pipelineChipState.${state}`);
+  }
 });
 
 test("every stage-chip state carries a distinct, non-empty glyph (AC4/AC8)", () => {

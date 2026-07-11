@@ -60,6 +60,18 @@ test("a first attempt shows no earlier-attempts section", () => {
   expect(html).not.toContain("Earlier attempts");
 });
 
+test("a verdict-less prior attempt renders a translated state label, not a raw identifier", () => {
+  /* Prior attempt #1 has no structured verdict and state needs_decision; the audit
+     must show the localized label, never the English identifier "needs_decision". */
+  const priorNoVerdict = attempt(1, { state: "needs_decision", verdict: null });
+  const current = attempt(2, { verdict: { status: "pass", findings: [] } });
+  const html = renderToStaticMarkup(
+    <VerdictPopover pipeline={pipeline([priorNoVerdict, current])} stage={stage} attempt={current} onClose={() => {}} />,
+  );
+  expect(html).toContain("Attempt 1: needs a decision");
+  expect(html).not.toContain("Attempt 1: needs_decision");
+});
+
 test("an oversized retry history bounds the popover and scrolls the audit", () => {
   /* Many retries would otherwise grow the popover past the viewport and push the
      Retry/Skip footer off-screen; the root is capped and the audit scrolls. */
@@ -86,4 +98,16 @@ test("a review-loop verdict offers Open flow, not the folded reviewer transcript
   );
   expect(html).not.toContain("Open transcript");
   expect(html).toContain("Open review");
+});
+
+test("Open review is withheld when the flow no longer has a board deck", () => {
+  const reviewStage: PipelineStage = { ...stage, id: "review", kind: "review-loop" };
+  /* A closed/missing flow (canOpenFlow=false) has no deck to reveal, so the
+     action is not offered — it would route to an absent board entry. */
+  const only = attempt(1, { agentPath: "/reviewer.jsonl", flowId: "f1", verdict: { status: "fail", findings: [] } });
+  const html = renderToStaticMarkup(
+    <VerdictPopover pipeline={pipeline([only])} stage={reviewStage} attempt={only} canOpenFlow={false} onClose={() => {}} onOpenPath={() => {}} onOpenFlow={() => {}} />,
+  );
+  expect(html).not.toContain("Open review");
+  expect(html).not.toContain("Open transcript");
 });

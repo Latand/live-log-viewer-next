@@ -6,7 +6,7 @@ import { useEffect, useRef, useState } from "react";
 import { useLocale } from "@/lib/i18n";
 import type { Pipeline, PipelineStage, PipelineStageAttempt } from "@/lib/pipelines/types";
 
-import { VERDICT_TONES, patchPipeline, stageAttempts, stageChipLabel, verdictStatusLabel } from "./pipelineModel";
+import { VERDICT_TONES, attemptStateLabel, patchPipeline, stageAttempts, stageChipLabel, verdictStatusLabel } from "./pipelineModel";
 
 const MAX_COLLAPSED_FINDINGS = 8;
 
@@ -21,6 +21,7 @@ export function VerdictPopover({
   pipeline,
   stage,
   attempt,
+  canOpenFlow = true,
   onClose,
   onOpenPath,
   onOpenFlow,
@@ -28,6 +29,9 @@ export function VerdictPopover({
   pipeline: Pipeline;
   stage: PipelineStage;
   attempt: PipelineStageAttempt;
+  /** Whether the embedded flow still has a board deck; a closed/missing flow
+      hides "Open review" so it never routes to an absent entry (default true). */
+  canOpenFlow?: boolean;
   onClose: () => void;
   onOpenPath?: (path: string) => void;
   onOpenFlow?: (flowId: string) => void;
@@ -131,7 +135,7 @@ export function VerdictPopover({
           <div className="flex max-h-24 flex-col gap-0.5 overflow-y-auto">
             {priorAttempts.map((prior) => (
               <span key={prior.n} className="font-mono text-[9.5px] text-dim">
-                {t("pipelineVerdict.attemptLine", { n: prior.n, status: prior.verdict ? verdictStatusLabel(t, prior.verdict.status) : prior.state })}
+                {t("pipelineVerdict.attemptLine", { n: prior.n, status: prior.verdict ? verdictStatusLabel(t, prior.verdict.status) : attemptStateLabel(t, prior.state) })}
               </span>
             ))}
           </div>
@@ -149,7 +153,7 @@ export function VerdictPopover({
             {t("pipelineVerdict.openTranscript")}
           </button>
         ) : null}
-        {attempt.flowId && onOpenFlow ? (
+        {attempt.flowId && onOpenFlow && canOpenFlow ? (
           <button type="button" className="rounded-full border border-line bg-bg px-2.5 py-1 text-[10px] font-bold text-dim hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40" onClick={() => onOpenFlow(attempt.flowId!)}>
             {t("pipelineVerdict.openFlow")}
           </button>

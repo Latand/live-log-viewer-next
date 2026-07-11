@@ -614,6 +614,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "pipelineStrip.chipAria": "Етап {label}: {state}",
 
   "pipelineChipState.pending": "очікує",
+  "pipelineChipState.spawning": "запускається",
   "pipelineChipState.running": "виконується",
   "pipelineChipState.reviewing": "рев’ю",
   "pipelineChipState.committing": "коміт",
@@ -701,6 +702,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "pipelineDialog.errors.paramInvalid": "{label} має недопустиме значення",
   "pipelineDialog.errors.modelEngineMismatch": "виберіть модель, сумісну з {engine}",
   "pipelineDialog.errors.effortEngineMismatch": "виберіть зусилля, сумісне з {engine}",
+  "pipelineDialog.errors.rolesLoading": "завантажується каталог ролей — зачекайте мить перед запуском",
   "pipelineDialog.errors.roleUnavailable": "роль «{role}» більше недоступна — виберіть іншу",
   "pipelineDialog.errors.paramUnknown": "приберіть невідоме налаштування ролі «{key}»",
 
