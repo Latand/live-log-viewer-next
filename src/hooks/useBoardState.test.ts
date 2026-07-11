@@ -9,6 +9,7 @@ import {
   isEmptyPrefs,
   isMeaningfulPrefs,
   mergePatch,
+  patchPrefix,
   queueColumnOpen,
   readLegacyPrefs,
   resetPendingOpensForTest,
@@ -471,4 +472,60 @@ test("an outbox longer than the server's per-PATCH cap drains in bounded chunks"
   expect(batchSizes.length).toBeGreaterThan(1);
   expect(server.projects.proj.prefs.hidden).toHaveLength(200);
   store.dispose();
+});
+
+test("a close sharing the rejected batch with a poisoned mutation still lands", async () => {
+  const backing = fakeServer({ proj: boardOf(1, { manual: ["/a"] }) });
+  let patchAttempts = 0;
+  const fetcher = async (input: string, init?: RequestInit) => {
+    if (init && (init.method ?? "GET") !== "GET") {
+      patchAttempts += 1;
+      const body = JSON.parse(String(init.body)) as { mutations?: BoardMutationV1[] };
+      if (body.mutations?.some((mutation) => mutation.kind === "reconcile-roots")) {
+        return { ok: false, status: 400, json: async () => ({ error: "INVALID_REQUEST" }) };
+      }
+    }
+    return backing.fetcher(input, init);
+  };
+  const store = createBoardStore({ project: "proj", fetcher, storage: null, scheduler: idleScheduler().scheduler });
+  await settle();
+
+  /* One batch: the refused reconcile rides together with the user's close. */
+  store.mutate([{ kind: "reconcile-roots", roots: ["/a", "/b"], removeManual: [] }, { kind: "close", path: "/a" }]);
+  await settle();
+
+  /* Rejection sheds only the poisoned head; the close retries alone and lands. */
+  expect(patchAttempts).toBe(2);
+  expect(backing.projects.proj.prefs.hidden).toEqual(["/a"]);
+  store.dispose();
+});
+
+test("the drain chunks by serialized bytes, never exceeding the server body cap", async () => {
+  const server = fakeServer({ proj: boardOf(1) });
+  const bodyBytes: number[] = [];
+  const fetcher = async (input: string, init?: RequestInit) => {
+    if (init && (init.method ?? "GET") !== "GET") bodyBytes.push(new TextEncoder().encode(String(init.body)).length);
+    return server.fetcher(input, init);
+  };
+  const store = createBoardStore({ project: "proj", fetcher, storage: null, scheduler: idleScheduler().scheduler });
+  await settle();
+
+  /* 100 closes × ~4 KB paths ≈ 410 KB of mutations — far past one request. */
+  for (let index = 0; index < 100; index += 1) {
+    store.mutate([{ kind: "close", path: `/${String(index).padStart(4, "0")}${"x".repeat(4000)}` }]);
+  }
+  await settle();
+  await settle();
+
+  expect(bodyBytes.length).toBeGreaterThan(1);
+  expect(Math.max(...bodyBytes)).toBeLessThanOrEqual(256 * 1024);
+  expect(server.projects.proj.prefs.hidden).toHaveLength(100);
+  store.dispose();
+});
+
+test("patchPrefix always yields at least one mutation, even over budget", () => {
+  const oversized: BoardMutationV1 = { kind: "reconcile-roots", roots: Array.from({ length: 60 }, (_, index) => `/${String(index)}${"y".repeat(4000)}`), removeManual: [] };
+  const small: BoardMutationV1 = { kind: "close", path: "/small" };
+  expect(patchPrefix([oversized, small])).toEqual([oversized]);
+  expect(patchPrefix([small, oversized])).toEqual([small]);
 });

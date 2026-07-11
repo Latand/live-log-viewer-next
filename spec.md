@@ -24,8 +24,10 @@ predecessor transcripts with recent mtimes):
   retrying it: no backoff timer armed, sync returns to "current", and
   mutations queued behind the dropped batch still drain to the server.
 - AC2: The board store never sends more mutations in one PATCH than the
-  server's per-request validation cap (128); an oversized outbox drains across
-  consecutive requests and fully lands.
+  server's per-request validation cap (128), and never a batch whose
+  serialized bytes exceed the server body cap; an oversized outbox drains
+  across consecutive requests and fully lands. A rejected batch sheds only its
+  head mutation, so acceptable mutations sharing the batch still land.
 - AC3: `MAX_BOARD_BODY_BYTES` admits a realistic large root reconciliation
   (hundreds of roots × ~120-char paths); the per-item limits (512 paths,
   4096 chars each) remain enforced.
@@ -39,7 +41,9 @@ predecessor transcripts with recent mtimes):
   generation/continuity path except the conversation's current one, per the
   agent registry) below live transcripts when applying `FILE_CAP`, so a
   migration wave cannot evict live conversations from the feed; with slack
-  under the cap they still appear.
+  under the cap they still appear, and selected-project hydration stays
+  complete (archived predecessors included) so legacy `#f=` deep links keep
+  resolving to their successor.
 - AC7: Existing behavior preserved: first-poll chime baseline stays silent,
   spawn blips ring once per child, revision-conflict replay and network-error
   backoff in the board store are unchanged. Full `bun test` suite passes and

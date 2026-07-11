@@ -119,9 +119,13 @@ function entriesFromRaw(raw: RawEntry[], selectedProject?: string, projectByPath
     : raw;
   const selected = ranked.slice(0, FILE_CAP);
   const selectedPaths = new Set(selected.map((entry) => entry.path));
+  /* Selected-project hydration deliberately ignores demotion: legacy `#f=`
+     deep links resolve an archived predecessor from the hydrated feed to
+     redirect onto its successor, so the selected project must stay complete —
+     demotion only shapes the global recency ranking. */
   if (selectedProject) {
     for (const entry of raw) {
-      if (selectedPaths.has(entry.path) || demoted?.has(entry.path)) continue;
+      if (selectedPaths.has(entry.path)) continue;
       const project = projectByPath?.get(entry.path) ?? (describe(entry.rootName, entry.root, entry.path, entry.st).project || "other");
       if (project !== selectedProject) continue;
       selectedPaths.add(entry.path);

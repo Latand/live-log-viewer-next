@@ -26,6 +26,31 @@ const MAX_CONFLICT_RETRIES = 8;
    an outbox that grew past it during an outage drains in accepted chunks
    instead of one oversized batch the server would reject. */
 const MAX_MUTATIONS_PER_PATCH = 128;
+/* Serialized-bytes budget per PATCH, safely under the server's
+   MAX_BOARD_BODY_BYTES (256 KB) with headroom for the request envelope. Large
+   mutations (a reconcile carrying hundreds of root paths) chunk by bytes long
+   before the 128-count cap, so a batch is never refused for size alone. */
+const MAX_PATCH_BYTES = 192 * 1024;
+
+function mutationBytes(mutation: BoardMutationV1): number {
+  const json = JSON.stringify(mutation);
+  return typeof TextEncoder === "undefined" ? json.length : new TextEncoder().encode(json).length;
+}
+
+/** The longest outbox prefix that fits both per-PATCH caps. Always at least
+    one mutation, so a single over-budget mutation is attempted (and, refused,
+    dropped) rather than wedging the queue. */
+export function patchPrefix(outbox: readonly BoardMutationV1[]): BoardMutationV1[] {
+  const prefix: BoardMutationV1[] = [];
+  let bytes = 0;
+  for (const mutation of outbox) {
+    const size = mutationBytes(mutation);
+    if (prefix.length > 0 && (prefix.length >= MAX_MUTATIONS_PER_PATCH || bytes + size > MAX_PATCH_BYTES)) break;
+    prefix.push(mutation);
+    bytes += size;
+  }
+  return prefix;
+}
 
 export const EMPTY_BOARD_PREFS: BoardPrefs = { manual: [], hidden: [], expanded: [], viewMode: null, taskPanelOpen: false };
 
@@ -323,8 +348,9 @@ export function createBoardStore(options: BoardStoreOptions): BoardStore {
     /* Send the outbox as a stable prefix: mutations appended while this request
        is inflight stay queued and flush on the next drain, so an earlier response
        never drops a later optimistic action. Bounded to the server's per-PATCH
-       mutation cap; a longer outbox drains over consecutive requests. */
-    const prefix = outbox.slice(0, MAX_MUTATIONS_PER_PATCH);
+       mutation and body-size caps; a longer outbox drains over consecutive
+       requests. */
+    const prefix = patchPrefix(outbox);
     const result = await attemptMutations(prefix, confirmed.revision);
     inflight = false;
     if (disposed) return;
@@ -338,13 +364,15 @@ export function createBoardStore(options: BoardStoreOptions): BoardStore {
       return;
     }
     if (result.status === "rejected") {
-      /* Unacceptable batch: drop it so the mutations queued behind it (a user's
-         close, a restore) still reach the server instead of starving forever
-         behind a payload the server will never take. The dropped intent reverts
-         optimistically to the confirmed board on the next refresh. */
+      /* The server refused the batch as a unit without naming the offender.
+         Shed only the first mutation and retry the rest: every acceptable
+         mutation riding in the same batch (a user's close next to a poisoned
+         reconcile) still lands on a later attempt, and the loop terminates
+         because each rejection shrinks the outbox by one. The dropped intent
+         reverts optimistically to the confirmed board on the next refresh. */
       cancelRetry();
       conflictStreak = 0;
-      outbox = outbox.slice(prefix.length);
+      outbox = outbox.slice(1);
       refresh();
       if (outbox.length) void drain();
       return;

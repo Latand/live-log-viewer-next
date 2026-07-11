@@ -558,6 +558,13 @@ test("demoted archived predecessors rank below live transcripts for the recency 
     /* With slack under the cap the archived predecessor still rides along. */
     const withSlack = await discoverFiles(roots, new Set([archivedPath, oldestLivePath]));
     expect(withSlack.some((entry) => entry.path === archivedPath)).toBe(true);
+
+    /* Selected-project hydration ignores demotion: a legacy #f= deep link
+       resolves the archived predecessor from the hydrated feed to redirect
+       onto its successor, so the selected project must stay complete. */
+    const project = withSlack.find((entry) => entry.path === archivedPath)?.project ?? "other";
+    const hydrated = await discoverFilesWithProjectCatalog(roots, project, { demote: new Set([archivedPath]) });
+    expect(hydrated.files.some((entry) => entry.path === archivedPath)).toBe(true);
   } finally {
     await rm(base, { recursive: true, force: true });
   }
