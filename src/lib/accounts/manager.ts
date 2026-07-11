@@ -1,3 +1,7 @@
+import crypto from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
+
 import { accountForSpawn, activeCodexAccountId, codexAccountsMutationLocked, codexHomeOwningSessionPath, CorruptCodexAccountsError, createManagedCodexAccount, listCodexAccounts, setActiveCodexAccount, UnknownAccountError } from "./codex";
 import { activeClaudeAccountId, claudeAccountForSpawn, claudeAccountsMutationLocked, claudeHomeOwningTranscript, claudeManagedEnvironment, CorruptClaudeAccountsError, createManagedClaudeAccount, listClaudeAccounts, setActiveClaudeAccount, UnknownClaudeAccountError } from "./claude";
 import { claudeLoginSupervisor } from "./claudeLogin";
@@ -5,6 +9,8 @@ import { managedCodexRuntime } from "./codexRuntime";
 import type { AccountManager, AccountSummary } from "./contracts";
 import { unavailableLimits } from "./contracts";
 import { agentRegistry, type AgentRegistry } from "@/lib/agent/registry";
+import { statePath } from "@/lib/configDir";
+import { procBackend } from "@/lib/proc";
 
 function summary(engine: "claude" | "codex", id: string): AccountSummary {
   const account = (engine === "claude" ? listClaudeAccounts() : listCodexAccounts()).find((item) => item.id === id);
@@ -30,8 +36,78 @@ const LIVE_CLAUDE_LOGIN_PHASES = new Set(["starting", "awaiting_browser", "await
 
 type RoutingStore = Pick<AgentRegistry, "engineRouting" | "setEngineRouting">;
 
+const ACCOUNT_SELECTION_LOCK_ATTEMPTS = 2_000;
+const ACCOUNT_SELECTION_LOCK_WAIT_MS = 5;
+const ACCOUNT_SELECTION_LOCK_STALE_MS = 30_000;
+
+type AccountSelectionLockOwner = {
+  pid: number;
+  startIdentity: string | null;
+  token: string;
+};
+
+function sleep(milliseconds: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
+}
+
+function accountSelectionLockOwnerIsStale(lock: string): boolean {
+  try {
+    const owner = JSON.parse(fs.readFileSync(lock, "utf8")) as Partial<AccountSelectionLockOwner>;
+    if (typeof owner.pid === "number" && Number.isInteger(owner.pid) && owner.pid > 0) {
+      if (!procBackend.pidAlive(owner.pid)) return true;
+      if (typeof owner.startIdentity !== "string") return false;
+      const currentIdentity = procBackend.processIdentity(owner.pid);
+      return currentIdentity !== null && currentIdentity !== owner.startIdentity;
+    }
+    return Date.now() - fs.statSync(lock).mtimeMs > ACCOUNT_SELECTION_LOCK_STALE_MS;
+  } catch {
+    try {
+      return Date.now() - fs.statSync(lock).mtimeMs > ACCOUNT_SELECTION_LOCK_STALE_MS;
+    } catch {
+      return false;
+    }
+  }
+}
+
+function removeAccountSelectionLockIfOwned(lock: string, token: string): void {
+  try {
+    const owner = JSON.parse(fs.readFileSync(lock, "utf8")) as { token?: unknown };
+    if (owner.token === token) fs.rmSync(lock, { force: true });
+  } catch { /* the lock was already recovered */ }
+}
+
+function withAccountSelectionLock<T>(operation: () => T): T {
+  const lock = statePath("account-selection.lock");
+  fs.mkdirSync(path.dirname(lock), { recursive: true, mode: 0o700 });
+  const owner: AccountSelectionLockOwner = {
+    pid: process.pid,
+    startIdentity: procBackend.processIdentity(process.pid),
+    token: crypto.randomUUID(),
+  };
+  for (let attempt = 0; attempt < ACCOUNT_SELECTION_LOCK_ATTEMPTS; attempt += 1) {
+    let descriptor: number;
+    try {
+      descriptor = fs.openSync(lock, "wx", 0o600);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      if (accountSelectionLockOwnerIsStale(lock)) fs.rmSync(lock, { force: true });
+      sleep(ACCOUNT_SELECTION_LOCK_WAIT_MS);
+      continue;
+    }
+    try {
+      fs.writeFileSync(descriptor, JSON.stringify(owner), "utf8");
+      fs.fsyncSync(descriptor);
+      return operation();
+    } finally {
+      fs.closeSync(descriptor);
+      removeAccountSelectionLockIfOwned(lock, owner.token);
+    }
+  }
+  throw new Error("account selection is busy; retry shortly");
+}
+
 /** Keeps the compatibility catalog and launch-routing registry aligned. */
-export function selectAccount(engine: "claude" | "codex", id: string, routing: RoutingStore = agentRegistry()): AccountSummary {
+function selectAccountLocked(engine: "claude" | "codex", id: string, routing: RoutingStore): AccountSummary {
   if (engine === "claude" ? claudeAccountsMutationLocked() : codexAccountsMutationLocked()) {
     if (engine === "claude") throw new CorruptClaudeAccountsError();
     throw new CorruptCodexAccountsError();
@@ -76,6 +152,10 @@ export function selectAccount(engine: "claude" | "codex", id: string, routing: R
     throw error;
   }
   return summary(engine, id);
+}
+
+export function selectAccount(engine: "claude" | "codex", id: string, routing: RoutingStore = agentRegistry()): AccountSummary {
+  return withAccountSelectionLock(() => selectAccountLocked(engine, id, routing));
 }
 
 /** Narrow boundary used by all launch paths. Filesystem account details remain behind it. */
