@@ -117,6 +117,7 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
     workflows,
     tasks: tasks.tasks,
     systemHealth: { tmux: tmuxEndpointHealth() },
+    conversationAliases: registrySnapshot.conversationAliases,
     ...(pipelinesError ? { pipelinesError } : {}),
   } satisfies FilesResponse);
   /* The client re-polls every 10 s and this ~410 KB payload is usually

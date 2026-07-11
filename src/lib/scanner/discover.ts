@@ -102,7 +102,7 @@ async function discoverRaw(roots: Roots | RootEntries, limit: Limit): Promise<Ra
   }))).flat();
 }
 
-function entriesFromRaw(raw: RawEntry[], selectedProject?: string, projectByPath?: ReadonlyMap<string, string>, demoted?: ReadonlySet<string>, pin?: string): FileEntry[] {
+function entriesFromRaw(raw: RawEntry[], selectedProject?: string, projectByPath?: ReadonlyMap<string, string>, demoted?: ReadonlySet<string>, pin?: ReadonlySet<string>): FileEntry[] {
   raw.sort((a, b) => b.st.mtimeMs - a.st.mtimeMs);
   const rawByCodexThread = new Map<string, RawEntry>();
   for (const entry of raw) {
@@ -132,11 +132,12 @@ function entriesFromRaw(raw: RawEntry[], selectedProject?: string, projectByPath
       selected.push(entry);
     }
   }
-  /* A deep-link target rides along even when demotion or the cap excluded
-     it: the client needs that exact entry once to resolve its conversation
-     id and redirect onto the current generation. */
-  if (pin && !selectedPaths.has(pin)) {
-    const pinned = raw.find((entry) => entry.path === pin);
+  /* Deep-link targets ride along even when demotion or the cap excluded
+     them: the client needs the requested entry and its current generation in
+     one payload to resolve the conversation id and redirect the link. */
+  for (const pinnedPath of pin ?? []) {
+    if (selectedPaths.has(pinnedPath)) continue;
+    const pinned = raw.find((entry) => entry.path === pinnedPath);
     if (pinned) {
       selectedPaths.add(pinned.path);
       selected.push(pinned);
@@ -180,7 +181,7 @@ function entriesFromRaw(raw: RawEntry[], selectedProject?: string, projectByPath
 export async function discoverFilesWithProjectCatalog(
   roots: Roots | RootEntries = scanRootEntries(),
   selectedProject?: string,
-  options: { persist?: boolean; demote?: ReadonlySet<string>; pin?: string } = {},
+  options: { persist?: boolean; demote?: ReadonlySet<string>; pin?: ReadonlySet<string> } = {},
 ): Promise<{
   files: FileEntry[];
   projectCatalog: ProjectCatalogEntry[];

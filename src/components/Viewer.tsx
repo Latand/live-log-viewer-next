@@ -77,7 +77,7 @@ export function Viewer() {
   useViewPresence();
   const [project, setProject] = useState<string>(() => initialProject());
   const [pendingHash, setPendingHash] = useState<ConversationHash | null>(null);
-  const { files: allFiles, projectCatalog, flows: polledFlows, pipelines, pipelinesError, workflows, tasks, systemHealth, loaded } = useFiles(project === OVERVIEW ? null : project, pendingHash?.filePath ?? pendingHash?.conversationId ?? null);
+  const { files: allFiles, projectCatalog, flows: polledFlows, pipelines, pipelinesError, workflows, tasks, systemHealth, conversationAliases, loaded } = useFiles(project === OVERVIEW ? null : project, pendingHash?.filePath ?? pendingHash?.conversationId ?? null);
   /* A committed account migration keeps the archived predecessor entry in the
      payload (for chain history) but it must never render as a second standalone
      card — every surface below sees only current generations. A no-op (same
@@ -169,7 +169,7 @@ export function Viewer() {
        has already folded out of `files`. Resolving against `allFiles` keeps that
        predecessor visible long enough to redirect the link to its current
        generation; the canonical `#c=` id resolves the same way. */
-    const hit = resolveConversationTarget(allFiles, pendingHash);
+    const hit = resolveConversationTarget(allFiles, pendingHash, conversationAliases);
     /* A miss keeps the request pending: the pinned `path` param asks the
        scanner to include the exact transcript on the next poll, so a fresh
        `#f=` link to a demoted archived predecessor resolves once that poll
@@ -178,7 +178,7 @@ export function Viewer() {
       openFile(hit);
       setPendingHash(null);
     }
-  }, [pendingHash, allFiles, openFile]);
+  }, [pendingHash, allFiles, conversationAliases, openFile]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
   /* The one queue every counter shows: badge, popover and the tab title all
@@ -243,6 +243,10 @@ export function Viewer() {
      re-flash (D9); consumed by ProjectDashboard's pendingFocusRef path. */
   const [focusRequest, setFocusRequest] = useState<{ path: string; nonce: number } | null>(null);
   const requestFocus = useCallback((path: string) => {
+    /* A user-driven focus (N/Shift-N cycle, attention jump) supersedes any
+       unresolved deep-link intent; a stale pin must never re-steal focus when
+       its target shows up in a later poll. */
+    setPendingHash(null);
     setFocusRequest((prev) => ({ path, nonce: (prev?.nonce ?? 0) + 1 }));
   }, []);
 

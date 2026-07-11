@@ -144,6 +144,9 @@ export interface FilesResponse {
   workflows: Workflow[];
   tasks: BoardTask[];
   systemHealth: { tmux: TmuxEndpointHealth };
+  /** Durable conversation-id aliases (old id → canonical id), so a deep link
+      copied before provisional-id adoption still resolves its card. */
+  conversationAliases?: Record<string, string>;
 }
 
 export type PlanStepStatus = "pending" | "in_progress" | "completed";

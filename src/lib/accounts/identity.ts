@@ -93,8 +93,13 @@ function currentByConversation(files: FileEntry[], conversationId: string): File
  * a chain walk). Returns `null` when nothing matches yet (the caller keeps the
  * request pending until the next `/api/files` poll).
  */
-export function resolveConversationTarget(files: FileEntry[], hash: ConversationHash): FileEntry | null {
-  if (hash.conversationId) return currentByConversation(files, hash.conversationId);
+export function resolveConversationTarget(files: FileEntry[], hash: ConversationHash, conversationAliases: Readonly<Record<string, string>> = {}): FileEntry | null {
+  if (hash.conversationId) {
+    /* A link copied before provisional-id adoption carries the old alias;
+       files annotate the canonical id, so canonicalize before matching. */
+    const canonical = conversationAliases[hash.conversationId] ?? hash.conversationId;
+    return currentByConversation(files, canonical);
+  }
   if (hash.filePath) {
     const direct = files.find((file) => file.path === hash.filePath) ?? null;
     if (direct && isArchivedPredecessor(direct) && direct.conversationId) {

@@ -30,11 +30,12 @@ export interface FilesData {
   /** Set when the server's pipelines store failed closed for this poll. */
   pipelinesError?: string;
   systemHealth: { tmux: TmuxEndpointHealth };
+  conversationAliases: Record<string, string>;
   loaded: boolean;
 }
 
 const HEALTHY_SYSTEM = { tmux: { status: "healthy" as const } };
-const EMPTY: FilesData = { files: [], projectCatalog: [], flows: [], pipelines: [], workflows: [], tasks: [], systemHealth: HEALTHY_SYSTEM, loaded: false };
+const EMPTY: FilesData = { files: [], projectCatalog: [], flows: [], pipelines: [], workflows: [], tasks: [], systemHealth: HEALTHY_SYSTEM, conversationAliases: {}, loaded: false };
 
 export function filesApiUrl(project?: string | null, pinnedPath?: string | null): string {
   const params: string[] = [];
@@ -78,7 +79,7 @@ export function useFiles(project?: string | null, pinnedPath?: string | null): F
         /* The flows rollout changes the payload from a bare array to
            {files, flows}; accept both so client and server can deploy in
            either order. */
-        if (Array.isArray(parsed)) setData({ files: parsed, projectCatalog: [], flows: [], pipelines: [], workflows: [], tasks: [], systemHealth: HEALTHY_SYSTEM, loaded: true });
+        if (Array.isArray(parsed)) setData({ files: parsed, projectCatalog: [], flows: [], pipelines: [], workflows: [], tasks: [], systemHealth: HEALTHY_SYSTEM, conversationAliases: {}, loaded: true });
         else {
           setData({
             files: parsed.files ?? [],
@@ -89,6 +90,7 @@ export function useFiles(project?: string | null, pinnedPath?: string | null): F
             tasks: parsed.tasks ?? [],
             pipelinesError: parsed.pipelinesError,
             systemHealth: parsed.systemHealth ?? HEALTHY_SYSTEM,
+            conversationAliases: parsed.conversationAliases ?? {},
             loaded: true,
           });
         }

@@ -79,16 +79,28 @@ export interface FileScanOptions {
   pin?: string;
 }
 
-/** Current transcript path for a pin value. A conversation id maps through
-    the registry to its latest generation; unknown ids and an unreadable
-    registry leave the scan unpinned. */
-export function pinnedPathFor(pin: string | undefined): string | undefined {
-  if (!pin || !pin.startsWith("conversation_")) return pin;
+/** Transcript paths a pin value requires in the feed. A conversation id is
+    canonicalized through the registry's durable aliases and maps to its
+    latest generation. A plain path also brings the registry-current
+    generation of its owning conversation, so an archived `#f=` target always
+    ships together with the successor the client must redirect to. An
+    unreadable registry keeps a path pin as itself and drops an id pin. */
+export function pinnedPathsFor(pin: string | undefined): ReadonlySet<string> {
+  if (!pin) return new Set();
   try {
-    const conversation = agentRegistry().snapshot().conversations[pin];
-    return conversation?.generations.at(-1)?.path ?? undefined;
+    const registry = agentRegistry();
+    const snapshot = registry.snapshot();
+    if (pin.startsWith("conversation_")) {
+      const canonical = registry.canonicalConversationId(pin as `conversation_${string}`) ?? pin;
+      const latest = snapshot.conversations[canonical]?.generations.at(-1)?.path;
+      return new Set(latest ? [latest] : []);
+    }
+    const owner = Object.values(snapshot.conversations).find((conversation) =>
+      conversation.generations.some((generation) => generation.path === pin) || conversation.continuityPaths.includes(pin));
+    const latest = owner?.generations.at(-1)?.path;
+    return new Set(latest && latest !== pin ? [pin, latest] : [pin]);
   } catch (error) {
-    if (error instanceof RegistryReadError) return undefined;
+    if (error instanceof RegistryReadError) return new Set(pin.startsWith("conversation_") ? [] : [pin]);
     throw error;
   }
 }
@@ -136,7 +148,7 @@ async function listFilesInternal(
   const persist = options.persist === true;
   const demote = archivedTranscriptPaths();
   const scan = includeProjectCatalog
-    ? await discoverFilesWithProjectCatalog(undefined, selectedProject, { persist, demote, pin: pinnedPathFor(options.pin) })
+    ? await discoverFilesWithProjectCatalog(undefined, selectedProject, { persist, demote, pin: pinnedPathsFor(options.pin) })
     : { files: await discoverFiles(undefined, demote), projectCatalog: [] };
   const entries = scan.files;
   // The /proc fd scan is only needed to attribute background-task outputs to a

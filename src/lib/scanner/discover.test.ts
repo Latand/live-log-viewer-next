@@ -562,7 +562,7 @@ test("demoted archived predecessors rank below live transcripts for the recency 
     /* A fresh `#f=` deep link carries no selected project; pinning the exact
        path keeps the demoted predecessor in the capped feed so the link can
        resolve its conversation id. */
-    const pinnedScan = await discoverFilesWithProjectCatalog(roots, undefined, { demote: new Set([archivedPath]), pin: archivedPath });
+    const pinnedScan = await discoverFilesWithProjectCatalog(roots, undefined, { demote: new Set([archivedPath]), pin: new Set([archivedPath]) });
     expect(pinnedScan.files.some((entry) => entry.path === archivedPath)).toBe(true);
 
     /* Selected-project hydration ignores demotion: a legacy #f= deep link

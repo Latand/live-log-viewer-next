@@ -111,3 +111,11 @@ describe("legacy deep links must resolve against the UNFILTERED payload (finding
     expect(resolveConversationTarget(folded, { conversationId: null, filePath: "/gen1", project: null })).toBeNull();
   });
 });
+
+test("resolveConversationTarget canonicalizes an aliased conversation id", () => {
+  const current = { path: "/repo/current.jsonl", conversationId: "conversation_canonical" } as unknown as FileEntry;
+  const hash = { conversationId: "conversation_old-alias", filePath: null, project: null };
+  /* Without the alias map the stale id matches nothing. */
+  expect(resolveConversationTarget([current], hash)).toBeNull();
+  expect(resolveConversationTarget([current], hash, { "conversation_old-alias": "conversation_canonical" })).toBe(current);
+});
