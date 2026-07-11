@@ -36,9 +36,9 @@ const LIVE_CLAUDE_LOGIN_PHASES = new Set(["starting", "awaiting_browser", "await
 
 type RoutingStore = Pick<AgentRegistry, "engineRouting" | "setEngineRouting">;
 
-const ACCOUNT_SELECTION_LOCK_ATTEMPTS = 2_000;
-const ACCOUNT_SELECTION_LOCK_WAIT_MS = 5;
-const ACCOUNT_SELECTION_LOCK_STALE_MS = 30_000;
+const ACCOUNT_MUTATION_LOCK_ATTEMPTS = 2_000;
+const ACCOUNT_MUTATION_LOCK_WAIT_MS = 5;
+const ACCOUNT_MUTATION_LOCK_STALE_MS = 30_000;
 
 type AccountSelectionLockOwner = {
   pid: number;
@@ -50,7 +50,7 @@ function sleep(milliseconds: number): void {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
 }
 
-function accountSelectionLockOwnerIsStale(lock: string): boolean {
+function accountMutationLockOwnerIsStale(lock: string): boolean {
   try {
     const owner = JSON.parse(fs.readFileSync(lock, "utf8")) as Partial<AccountSelectionLockOwner>;
     if (typeof owner.pid === "number" && Number.isInteger(owner.pid) && owner.pid > 0) {
@@ -59,51 +59,89 @@ function accountSelectionLockOwnerIsStale(lock: string): boolean {
       const currentIdentity = procBackend.processIdentity(owner.pid);
       return currentIdentity !== null && currentIdentity !== owner.startIdentity;
     }
-    return Date.now() - fs.statSync(lock).mtimeMs > ACCOUNT_SELECTION_LOCK_STALE_MS;
+    return Date.now() - fs.statSync(lock).mtimeMs > ACCOUNT_MUTATION_LOCK_STALE_MS;
   } catch {
     try {
-      return Date.now() - fs.statSync(lock).mtimeMs > ACCOUNT_SELECTION_LOCK_STALE_MS;
+      return Date.now() - fs.statSync(lock).mtimeMs > ACCOUNT_MUTATION_LOCK_STALE_MS;
     } catch {
       return false;
     }
   }
 }
 
-function removeAccountSelectionLockIfOwned(lock: string, token: string): void {
+function removeAccountMutationLockIfOwned(lock: string, token: string): void {
   try {
     const owner = JSON.parse(fs.readFileSync(lock, "utf8")) as { token?: unknown };
     if (owner.token === token) fs.rmSync(lock, { force: true });
   } catch { /* the lock was already recovered */ }
 }
 
-function withAccountSelectionLock<T>(operation: () => T): T {
+function acquireAccountMutationLock(): () => void {
   const lock = statePath("account-selection.lock");
-  fs.mkdirSync(path.dirname(lock), { recursive: true, mode: 0o700 });
+  const queue = `${lock}.queue`;
+  fs.mkdirSync(queue, { recursive: true, mode: 0o700 });
   const owner: AccountSelectionLockOwner = {
     pid: process.pid,
     startIdentity: procBackend.processIdentity(process.pid),
     token: crypto.randomUUID(),
   };
-  for (let attempt = 0; attempt < ACCOUNT_SELECTION_LOCK_ATTEMPTS; attempt += 1) {
-    let descriptor: number;
-    try {
-      descriptor = fs.openSync(lock, "wx", 0o600);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      if (accountSelectionLockOwnerIsStale(lock)) fs.rmSync(lock, { force: true });
-      sleep(ACCOUNT_SELECTION_LOCK_WAIT_MS);
-      continue;
-    }
-    try {
+  const ticket = path.join(queue, `${String(Date.now()).padStart(16, "0")}-${process.pid}-${crypto.randomUUID()}.json`);
+  fs.writeFileSync(ticket, JSON.stringify(owner), { encoding: "utf8", flag: "wx", mode: 0o600 });
+  try {
+    for (let attempt = 0; attempt < ACCOUNT_MUTATION_LOCK_ATTEMPTS; attempt += 1) {
+      const liveTickets: string[] = [];
+      for (const entry of fs.readdirSync(queue).filter((candidate) => candidate.endsWith(".json")).sort()) {
+        const candidate = path.join(queue, entry);
+        if (accountMutationLockOwnerIsStale(candidate)) {
+          fs.rmSync(candidate, { force: true });
+          continue;
+        }
+        if (fs.existsSync(candidate)) liveTickets.push(candidate);
+      }
+      if (liveTickets[0] !== ticket) {
+        sleep(ACCOUNT_MUTATION_LOCK_WAIT_MS);
+        continue;
+      }
+      let descriptor: number;
+      try {
+        descriptor = fs.openSync(lock, "wx", 0o600);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        if (accountMutationLockOwnerIsStale(lock)) fs.rmSync(lock, { force: true });
+        sleep(ACCOUNT_MUTATION_LOCK_WAIT_MS);
+        continue;
+      }
       fs.writeFileSync(descriptor, JSON.stringify(owner), "utf8");
       fs.fsyncSync(descriptor);
-      return operation();
-    } finally {
-      fs.closeSync(descriptor);
-      removeAccountSelectionLockIfOwned(lock, owner.token);
+      return () => {
+        fs.closeSync(descriptor);
+        removeAccountMutationLockIfOwned(lock, owner.token);
+        removeAccountMutationLockIfOwned(ticket, owner.token);
+      };
     }
+    throw new Error("account mutation is busy; retry shortly");
+  } catch (error) {
+    removeAccountMutationLockIfOwned(ticket, owner.token);
+    throw error;
   }
-  throw new Error("account selection is busy; retry shortly");
+}
+
+export function withAccountMutationLock<T>(operation: () => T): T {
+  const release = acquireAccountMutationLock();
+  try {
+    return operation();
+  } finally {
+    release();
+  }
+}
+
+export async function withAccountMutationLockAsync<T>(operation: () => Promise<T>): Promise<T> {
+  const release = acquireAccountMutationLock();
+  try {
+    return await operation();
+  } finally {
+    release();
+  }
 }
 
 /** Keeps the compatibility catalog and launch-routing registry aligned. */
@@ -155,7 +193,7 @@ function selectAccountLocked(engine: "claude" | "codex", id: string, routing: Ro
 }
 
 export function selectAccount(engine: "claude" | "codex", id: string, routing: RoutingStore = agentRegistry()): AccountSummary {
-  return withAccountSelectionLock(() => selectAccountLocked(engine, id, routing));
+  return withAccountMutationLock(() => selectAccountLocked(engine, id, routing));
 }
 
 /** Narrow boundary used by all launch paths. Filesystem account details remain behind it. */

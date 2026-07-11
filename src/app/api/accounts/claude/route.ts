@@ -4,6 +4,7 @@ import { CorruptClaudeAccountsError, InvalidClaudeAccountLabelError, UnknownClau
 import { claudeLoginSupervisor } from "@/lib/accounts/claudeLogin";
 import { accountRemovalBlockers } from "@/lib/accounts/removal";
 import { requestAccountMigrationTick } from "@/lib/accounts/migration/controllerSignal";
+import { withAccountMutationLockAsync } from "@/lib/accounts/manager";
 import { agentRegistry } from "@/lib/agent/registry";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
 
@@ -79,35 +80,41 @@ export async function DELETE(req: NextRequest) {
   if (typeof body.id !== "string" || typeof body.force !== "undefined" && typeof body.force !== "boolean") {
     return failure(400, "invalid_request", "Account id and force flag are invalid");
   }
-  if (claudeAccountsMutationLocked()) return failure(409, "accounts_locked", "Claude accounts require registry repair");
-  const account = listClaudeAccounts().find((candidate) => candidate.id === body.id);
-  if (!account || account.kind !== "managed") return failure(404, "unknown_account", "Claude account is unavailable");
-  const login = claudeLoginSupervisor.forAccount(account.id);
-  const blockers = [
-    ...accountRemovalBlockers("claude", account.id),
-    ...(login && LIVE_CLAUDE_LOGIN_PHASES.has(login.phase) ? ["login_pending"] : []),
-  ];
-  if (blockers.includes("current_conversations") || blockers.length && body.force !== true) {
-    return NextResponse.json({ error: "Claude account has active sessions, conversations, or sign-in", code: "account_removal_blocked", blockers }, { status: 409 });
-  }
-  const registry = agentRegistry();
-  const beforeRetirement = registry.snapshot();
   try {
-    if (login && LIVE_CLAUDE_LOGIN_PHASES.has(login.phase)) await claudeLoginSupervisor.cancel(login.operationId);
-    registry.retireAccount("claude", account.id, "default");
-    const retired = registry.snapshot();
-    try {
-      const removal = removeManagedClaudeAccount(account.id);
-      requestAccountMigrationTick();
-      return NextResponse.json({ removed: { id: account.id }, cleanupPending: removal.cleanupPending });
-    } catch (error) {
-      registry.restoreSnapshot(retired, beforeRetirement);
-      throw error;
-    }
-  } catch (error) {
-    if (error instanceof UnknownClaudeAccountError) return failure(404, "unknown_account", "Claude account is unavailable");
-    if (error instanceof CorruptClaudeAccountsError) return failure(409, "accounts_locked", "Claude accounts require registry repair");
-    if (error instanceof UnsafeClaudeHomeError) return failure(409, "unsafe_home", "Claude account home failed safety checks");
+    return await withAccountMutationLockAsync(async () => {
+      if (claudeAccountsMutationLocked()) return failure(409, "accounts_locked", "Claude accounts require registry repair");
+      const account = listClaudeAccounts().find((candidate) => candidate.id === body.id);
+      if (!account || account.kind !== "managed") return failure(404, "unknown_account", "Claude account is unavailable");
+      const login = claudeLoginSupervisor.forAccount(account.id);
+      const blockers = [
+        ...accountRemovalBlockers("claude", account.id),
+        ...(login && LIVE_CLAUDE_LOGIN_PHASES.has(login.phase) ? ["login_pending"] : []),
+      ];
+      if (blockers.includes("current_conversations") || blockers.length && body.force !== true) {
+        return NextResponse.json({ error: "Claude account has active sessions, conversations, or sign-in", code: "account_removal_blocked", blockers }, { status: 409 });
+      }
+      const registry = agentRegistry();
+      const beforeRetirement = registry.snapshot();
+      try {
+        if (login && LIVE_CLAUDE_LOGIN_PHASES.has(login.phase)) await claudeLoginSupervisor.cancel(login.operationId);
+        registry.retireAccount("claude", account.id, "default");
+        const retired = registry.snapshot();
+        try {
+          const removal = removeManagedClaudeAccount(account.id);
+          requestAccountMigrationTick();
+          return NextResponse.json({ removed: { id: account.id }, cleanupPending: removal.cleanupPending });
+        } catch (error) {
+          registry.restoreSnapshot(retired, beforeRetirement);
+          throw error;
+        }
+      } catch (error) {
+        if (error instanceof UnknownClaudeAccountError) return failure(404, "unknown_account", "Claude account is unavailable");
+        if (error instanceof CorruptClaudeAccountsError) return failure(409, "accounts_locked", "Claude accounts require registry repair");
+        if (error instanceof UnsafeClaudeHomeError) return failure(409, "unsafe_home", "Claude account home failed safety checks");
+        return failure(500, "removal_failed", "Claude account could not be removed");
+      }
+    });
+  } catch {
     return failure(500, "removal_failed", "Claude account could not be removed");
   }
 }
