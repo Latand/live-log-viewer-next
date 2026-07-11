@@ -47,8 +47,8 @@ export interface DeliverySuccess {
 
 export type DeliveryOutcome = DeliverySuccess | DeliveryFailure;
 
-export function migrationDeliveryOutcome(outcome: DeliveryOutcome): "delivered" | "failed" | "held" {
-  if (!outcome.ok) return "failed";
+export function migrationDeliveryOutcome(outcome: DeliveryOutcome): "delivered" | "failed" | "delivery-uncertain" | "held" {
+  if (!outcome.ok) return outcome.actuation === "started" ? "delivery-uncertain" : "failed";
   return outcome.outcome === "held" ? "held" : "delivered";
 }
 
