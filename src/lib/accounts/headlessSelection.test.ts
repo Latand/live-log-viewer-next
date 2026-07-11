@@ -51,6 +51,24 @@ test("headless selection reports the earliest account recovery when every accoun
   });
 });
 
+test("headless selection keeps reset unknown when any exhausted governing window lacks a reset", () => {
+  const reset = Math.floor(NOW / 1_000) + 900;
+  const mixedReset = observation("default", 100, reset);
+  mixedReset.limits!.weekly = { usedPercent: 100, resetsAt: null };
+  expect(selectHeadlessAccount([accounts[0]!], [mixedReset], "default", [], NOW)).toEqual({
+    kind: "exhausted",
+    resetsAt: null,
+  });
+});
+
+test("headless selection keeps reset unknown when exhausted evidence names an expired reset", () => {
+  const expiredReset = Math.floor(NOW / 1_000) - 1;
+  expect(selectHeadlessAccount([accounts[0]!], [observation("default", 100, expiredReset)], "default", [], NOW)).toEqual({
+    kind: "exhausted",
+    resetsAt: null,
+  });
+});
+
 test("headless retry prefers an eligible account that has not already failed", () => {
   expect(selectHeadlessAccount(accounts, [observation("default", 20), observation("spare", 30)], "default", ["default"], NOW)).toEqual({
     kind: "available",

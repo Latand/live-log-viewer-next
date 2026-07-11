@@ -30,8 +30,10 @@ function capacity(observation: DurableQuotaObservation | undefined, now: number)
   }
   const remaining = Math.min(...windows.map((window) => 100 - window.usedPercent));
   if (remaining > 0) return { kind: "available", remaining };
-  const knownResets = windows.flatMap((window) => window.usedPercent >= 100 && window.resetsAt !== null ? [window.resetsAt] : []);
-  return { kind: "exhausted", resetsAt: knownResets.length ? Math.max(...knownResets) : null };
+  const exhaustedWindows = windows.filter((window) => window.usedPercent >= 100);
+  const nowSeconds = Math.floor(now / 1_000);
+  if (exhaustedWindows.some((window) => window.resetsAt === null || window.resetsAt <= nowSeconds)) return { kind: "exhausted", resetsAt: null };
+  return { kind: "exhausted", resetsAt: Math.max(...exhaustedWindows.map((window) => window.resetsAt!)) };
 }
 
 /**
