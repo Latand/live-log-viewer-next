@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { describe, expect, test } from "bun:test";
 
-import { AgentRegistry } from "@/lib/agent/registry";
+import { AgentRegistry, conversationLookupFromSnapshot } from "@/lib/agent/registry";
 import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
 
 const KEY = { engine: "codex" as const, sessionId: "019f4906-3f67-7b72-9fbc-9ec3b5ad1326" };
@@ -28,6 +28,21 @@ function spawnEntry(pathname: string, accountId = "terra") {
 }
 
 describe("agent registry", () => {
+  test("snapshot lookup preserves aliases and first path ownership without disk reads", () => {
+    const store = registry();
+    const first = store.ensureConversation("codex", "/shared.jsonl", "default");
+    const second = store.ensureConversation("codex", "/second.jsonl", "default");
+    const snapshot = store.snapshot();
+    snapshot.conversations[second.id]!.continuityPaths.push("/shared.jsonl");
+    snapshot.conversationAliases["conversation_alias"] = first.id;
+
+    const lookup = conversationLookupFromSnapshot(snapshot);
+
+    expect(lookup.conversationForPath("/shared.jsonl")?.id).toBe(first.id);
+    expect(lookup.canonicalConversationId("conversation_alias")).toBe(first.id);
+    expect(lookup.conversation("conversation_alias")?.id).toBe(first.id);
+  });
+
   test("startup compaction bounds legacy delivered reservations per conversation", () => {
     const store = registry();
     const conversation = store.ensureConversation("codex", "/legacy-deliveries.jsonl", "default");

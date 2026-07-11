@@ -1,7 +1,7 @@
 import { activeClaudeAccountId, setActiveClaudeAccount } from "@/lib/accounts/claude";
 import { activeCodexAccountId, codexAccountsMutationLocked, codexLoginPaneStatus, listCodexAccounts, setActiveCodexAccount, setCodexAccountLoginPane } from "@/lib/accounts/codex";
 import { managedCodexRuntime } from "@/lib/accounts/codexRuntime";
-import { agentRegistry, type AgentRegistry } from "@/lib/agent/registry";
+import { agentRegistry, conversationLookupFromSnapshot, type AgentRegistry } from "@/lib/agent/registry";
 import { readTranscriptHosts } from "@/lib/agent/transcriptHost";
 import { deliverConversationMessage, migrationDeliveryOutcome } from "@/lib/delivery";
 import { reconcileFlowConversationOwnership } from "@/lib/flows/store";
@@ -19,7 +19,12 @@ import type { SuccessorProviderPort } from "./contracts";
 import { RegisteredSuccessorProvider } from "./provider";
 import { QuotaController } from "./quotaController";
 
-const CONTROLLER_INTERVAL_MS = 10_000;
+const CONTROLLER_INTERVAL_MS = 60_000;
+const INITIAL_INVENTORY_DELAY_MS = 1_000;
+
+function yieldToRuntime(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
+}
 
 const deliveryPort: HeldDeliveryPort = {
   async deliver({ delivery, path, clientMessageId }) {
@@ -35,10 +40,13 @@ export async function reconcileAccountMigrationCycle(
   delivery: HeldDeliveryPort = deliveryPort,
 ): Promise<void> {
   registry.compactDeliveryReservations();
+  await yieldToRuntime();
   await reconcileMigrations(provider, delivery, registry);
+  await yieldToRuntime();
   for (const conversation of Object.values(registry.snapshot().conversations)) {
     if (conversation.migration?.phase === "rolled-back") await drainHeldDeliveries(conversation.id, delivery, registry);
   }
+  await yieldToRuntime();
   await Promise.all([quota.tick("claude"), quota.tick("codex")]);
 }
 
@@ -84,6 +92,11 @@ export class AccountMigrationController {
     return this.running;
   }
 
+  poll(): Promise<void> {
+    if (this.running) return this.running;
+    return this.tick();
+  }
+
   private async runRequestedCycles(): Promise<void> {
     let failure: unknown = null;
     do {
@@ -96,27 +109,35 @@ export class AccountMigrationController {
 
   private async run(): Promise<void> {
     const { files } = await listFilesWithProjectCatalog(undefined, { persist: true });
-    await reconcileMigrationInventory(this.registry, files);
-    reconcileFlowConversationOwnership(this.registry);
-    reconcileWorkflowConversationOwnership(this.registry);
-    reconcileHandoffConversationOwnership(this.registry);
+    await yieldToRuntime();
+    const inventorySnapshot = await reconcileMigrationInventory(this.registry, files);
+    await yieldToRuntime();
+    const inventoryLookup = conversationLookupFromSnapshot(inventorySnapshot);
+    reconcileFlowConversationOwnership(inventoryLookup);
+    reconcileWorkflowConversationOwnership(inventoryLookup);
+    reconcileHandoffConversationOwnership(inventoryLookup);
+    await yieldToRuntime();
     await reconcileFileControllers(files);
+    await yieldToRuntime();
     await reconcileAccountLogins();
     await readTranscriptHosts(true);
+    await yieldToRuntime();
+    const currentLookup = conversationLookupFromSnapshot(this.registry.snapshot());
     mutateTasks((current) => {
       const reconciled = reconcileTasks(files, current, {
         pathForPanePid: (panePid, entries) => pathForPanePid(entries, panePid, readPpid),
         panePidAlive: pidAlive,
-        conversationIdForPath: (pathname) => this.registry.conversationForPath(pathname)?.id ?? null,
+        conversationIdForPath: (pathname) => currentLookup.conversationForPath(pathname)?.id ?? null,
         canonicalConversationId: (conversationId) => conversationId.startsWith("conversation_")
-          ? this.registry.canonicalConversationId(conversationId as `conversation_${string}`)
+          ? currentLookup.canonicalConversationId(conversationId as `conversation_${string}`)
           : null,
         pathForConversationId: (conversationId) => conversationId.startsWith("conversation_")
-          ? this.registry.conversation(conversationId as `conversation_${string}`)?.generations.at(-1)?.path ?? null
+          ? currentLookup.conversation(conversationId as `conversation_${string}`)?.generations.at(-1)?.path ?? null
           : null,
       });
       return { tasks: reconciled.dirty ? reconciled.tasks : undefined, result: undefined };
     });
+    await yieldToRuntime();
     syncCompatibilityRouting(this.registry);
     await reconcileAccountMigrationCycle(this.registry, this.quota);
   }
@@ -124,18 +145,42 @@ export class AccountMigrationController {
 
 const globalController = globalThis as unknown as {
   __llvAccountMigrationController?: AccountMigrationController;
+  __llvAccountMigrationFastController?: AccountMigrationController;
   __llvAccountMigrationTimer?: ReturnType<typeof setInterval>;
+  __llvAccountMigrationInitialTimer?: ReturnType<typeof setTimeout>;
+  __llvAccountMigrationBootstrapStarted?: boolean;
 };
 
 export async function startAccountMigrationController(): Promise<void> {
-  const controller = globalController.__llvAccountMigrationController ??= new AccountMigrationController();
-  registerAccountMigrationTick(() => controller.tick());
+  const registry = agentRegistry();
+  const quota = new QuotaController(registry);
+  const controller = globalController.__llvAccountMigrationController ??= new AccountMigrationController(registry, quota);
+  const fastController = globalController.__llvAccountMigrationFastController ??= new AccountMigrationController(
+    registry,
+    quota,
+    () => reconcileAccountMigrationCycle(registry, quota),
+  );
+  registerAccountMigrationTick(() => fastController.tick());
   if (!globalController.__llvAccountMigrationTimer) {
-    const timer = setInterval(() => void controller.tick().catch(() => {
+    const timer = setInterval(() => void controller.poll().catch(() => {
       console.error("[account migration controller] durable reconciliation tick failed");
     }), CONTROLLER_INTERVAL_MS);
     timer.unref?.();
     globalController.__llvAccountMigrationTimer = timer;
   }
-  await controller.tick();
+  if (!globalController.__llvAccountMigrationBootstrapStarted) {
+    globalController.__llvAccountMigrationBootstrapStarted = true;
+    void fastController.tick().catch(() => {
+      console.error("[account migration controller] initial durable reconciliation failed");
+    }).finally(() => {
+      const timer = setTimeout(() => {
+        globalController.__llvAccountMigrationInitialTimer = undefined;
+        void controller.poll().catch(() => {
+          console.error("[account migration controller] initial inventory reconciliation failed");
+        });
+      }, INITIAL_INVENTORY_DELAY_MS);
+      timer.unref?.();
+      globalController.__llvAccountMigrationInitialTimer = timer;
+    });
+  }
 }

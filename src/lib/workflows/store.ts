@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { statePath } from "@/lib/configDir";
-import { agentRegistry, type AgentRegistry } from "@/lib/agent/registry";
+import { agentRegistry, type ConversationLookup } from "@/lib/agent/registry";
 import type { RoleConfig } from "@/lib/flows/types";
 import { atomicWriteText } from "@/lib/flows/store";
 import { ROLE_DEFAULTS } from "@/lib/roles/defaults";
@@ -311,7 +311,7 @@ export function loadWorkflows(): Workflow[] {
   }));
 }
 
-export function reconcileWorkflowConversationOwnership(registry: AgentRegistry = agentRegistry()): void {
+export function reconcileWorkflowConversationOwnership(registry: ConversationLookup = agentRegistry()): void {
   const workflows = loadWorkflows();
   let dirty = false;
   for (const workflow of workflows) {

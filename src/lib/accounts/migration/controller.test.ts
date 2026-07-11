@@ -72,6 +72,24 @@ test("controller runs a trailing cycle when a signal arrives during reconciliati
   expect(maxActiveCycles).toBe(1);
 });
 
+test("periodic polling joins a running cycle without scheduling another full inventory", async () => {
+  let release = () => {};
+  const blocked = new Promise<void>((resolve) => { release = resolve; });
+  let cycles = 0;
+  const controller = new AccountMigrationController(
+    new AgentRegistry(path.join(stateDir, "poll-coalescing-registry.json")),
+    { tick: async () => {} } as never,
+    async () => { cycles += 1; await blocked; },
+  );
+
+  const running = controller.tick();
+  const periodic = controller.poll();
+  release();
+  await Promise.all([running, periodic]);
+
+  expect(cycles).toBe(1);
+});
+
 test("controller preserves one trailing cycle when the running cycle fails", async () => {
   let release = () => {};
   const blocked = new Promise<void>((resolve) => { release = resolve; });

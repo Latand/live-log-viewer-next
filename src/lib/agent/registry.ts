@@ -171,6 +171,12 @@ export interface RegistryFile {
   pendingSuccessorCleanups: Record<string, { conversationId: ViewerConversationId; receipt: ProviderReceipt; createdAt: string; lastError: string | null }>;
 }
 
+export interface ConversationLookup {
+  conversationForPath(artifactPath: string): RegistryConversation | null;
+  canonicalConversationId(id: ViewerConversationId): ViewerConversationId;
+  conversation(id: ViewerConversationId): RegistryConversation | null;
+}
+
 type ConversationMigrationInput = Omit<ConversationMigration, "errorCode" | "operationId" | "sourceGenerationId" | "providerReceipt" | "boardProject" | "boardOperationId" | "boardPlacementProject"> &
   Partial<Pick<ConversationMigration, "errorCode" | "operationId" | "sourceGenerationId" | "providerReceipt" | "boardProject" | "boardOperationId" | "boardPlacementProject">>;
 type SuccessorGenerationInput = Omit<NativeGeneration, "createdAt" | "archivedAt" | "launchProfile" | "historyHash" | "host"> &
@@ -544,6 +550,31 @@ function resolveConversationAlias(file: Pick<RegistryFile, "conversationAliases"
     current = next;
   }
   return current;
+}
+
+export function conversationLookupFromSnapshot(snapshot: RegistryFile): ConversationLookup {
+  const byPath = new Map<string, RegistryConversation>();
+  for (const conversation of Object.values(snapshot.conversations)) {
+    for (const generation of conversation.generations) {
+      if (!byPath.has(generation.path)) byPath.set(generation.path, conversation);
+    }
+    for (const pathname of conversation.continuityPaths) {
+      if (!byPath.has(pathname)) byPath.set(pathname, conversation);
+    }
+  }
+  return {
+    conversationForPath(artifactPath) {
+      const conversation = byPath.get(artifactPath);
+      return conversation ? clone(conversation) : null;
+    },
+    canonicalConversationId(id) {
+      return resolveConversationAlias(snapshot, id);
+    },
+    conversation(id) {
+      const conversation = snapshot.conversations[resolveConversationAlias(snapshot, id)];
+      return conversation ? clone(conversation) : null;
+    },
+  };
 }
 
 function adoptProvisionalOwner(
