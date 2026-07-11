@@ -7,7 +7,7 @@ import type { Flow } from "@/lib/flows/types";
 import type { FileEntry } from "@/lib/types";
 
 process.env.LLV_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "llv-pipeline-engine-"));
-const { createPipelineFromRequest, patchPipeline, tickPipelines } = await import("./engine");
+const { createPipelineFromRequest, patchPipeline, reviewNote, tickPipelines } = await import("./engine");
 const { loadPipelines, savePipelines } = await import("./store");
 type PipelinePorts = import("./engine").PipelinePorts;
 
@@ -524,4 +524,27 @@ test("creation caps task, spec, and stage prompt sizes", async () => {
     { id: "a", kind: "run", prompt: "p".repeat(8_001), next: "b" },
     { id: "b", kind: "run", prompt: "b", next: null },
   ] }, ports)).error).toContain("prompt exceeds");
+});
+
+test("reviewNote fits the flow-note cap while preserving the directive and safety fences", () => {
+  /* A long role scaffold + fences would blow past the flow note's 2,000-char cap.
+     The directive and the fences must survive; only the scaffold body is trimmed. */
+  const fences = "\n\nSafety fences:\n- never delete production data\n- keep read-only when reviewing";
+  const role = {
+    engine: "codex" as const, model: "gpt-5.6-sol", effort: "high",
+    roleId: "reviewer" as const, access: "read-only" as const,
+    promptScaffold: `${"scaffold body ".repeat(400)}${fences}`,
+  };
+  const pipeline = { task: "ship the widget", cursor: null, stages: [], runs: [] } as unknown as Parameters<typeof reviewNote>[0];
+  const stage = { id: "review", kind: "review-loop", prompt: "Review the diff for {{task}} carefully.", next: null } as unknown as Parameters<typeof reviewNote>[1];
+
+  const note = reviewNote(pipeline, stage, role);
+  expect(note.length).toBeLessThanOrEqual(2_000);
+  /* The operator's directive (with {{task}} substituted) is kept whole. */
+  expect(note).toContain("Review the diff for ship the widget carefully.");
+  /* Both safety fences survive the trim. */
+  expect(note).toContain("never delete production data");
+  expect(note).toContain("keep read-only when reviewing");
+  /* The scaffold body was trimmed (it did not all fit). */
+  expect(note).toContain("scaffold body");
 });

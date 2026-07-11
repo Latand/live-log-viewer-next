@@ -509,16 +509,26 @@ export function ProjectDashboard({
     pendingFocusRef.current = file.path;
   };
 
+  /* The pipeline strip renders in the header of both views, but its focus targets
+     only exist on the scheme; from the list view the board is unmounted and the
+     flash/restore would silently no-op. Switch to the scheme first so the
+     scheduled focus actually lands. */
+  const revealOnScheme = () => {
+    if (board.prefs.viewMode !== "scheme") board.setViewMode("scheme");
+  };
   /* Pipeline strip/verdict "open transcript": a run stage owns a board node, so
      route its agent path through the same board open. */
   const openPipelinePath = (path: string) => {
     const file = files.find((entry) => entry.path === path);
-    if (file) openSwitchboardFile(file);
+    if (!file) return;
+    revealOnScheme();
+    openSwitchboardFile(file);
   };
   /* A review-loop stage's reviewer transcript is folded into the flow's round
      deck, so glide to that deck (a byPath key) rather than the removed node —
      openPipelinePath on the reviewer path would reveal nothing (#93 §2.2). */
   const openPipelineFlow = (flowId: string) => {
+    revealOnScheme();
     flashNode(deckKey(flowId));
   };
 

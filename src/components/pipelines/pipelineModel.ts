@@ -175,11 +175,15 @@ export function stageAccess(pipeline: Pipeline, stage: PipelineStage): PipelineA
   return attempt?.effectiveRole.access ?? stage.access ?? (stage.kind === "review-loop" ? "read-only" : "read-write");
 }
 
-/** Ids of flows that still occupy a board deck: present and not closed
-    (isActiveFlow). A review-loop action that routes to a closed or missing flow
-    reveals nothing, so callers pass this to gate those actions. */
-export function renderableFlowIds(flows: Flow[]): Set<string> {
-  return new Set(flows.filter((flow) => flow.state !== "closed").map((flow) => flow.id));
+/** Ids of flows that actually have a board deck to reveal. A deck is created only
+    when the flow's implementer is placed (buildSchemeLayout), so a not-closed
+    flow whose implementer transcript is absent from the current scan has no deck —
+    gate on `placedPaths` (the current node/file paths), not just the closed state,
+    or Open-review/hops enable an action that finds no target. */
+export function renderableFlowIds(flows: Flow[], placedPaths: ReadonlySet<string>): Set<string> {
+  return new Set(
+    flows.filter((flow) => flow.state !== "closed" && placedPaths.has(flow.implementerPath)).map((flow) => flow.id),
+  );
 }
 
 /**

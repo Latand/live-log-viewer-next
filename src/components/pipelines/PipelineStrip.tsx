@@ -28,6 +28,8 @@ import {
 } from "./pipelineModel";
 import { VerdictPopover } from "./VerdictPopover";
 
+const EMPTY_PATHS: ReadonlySet<string> = new Set();
+
 const VERDICT_MARGIN = 8;
 
 /**
@@ -253,7 +255,7 @@ export function PipelineStrip({
   const attention = PIPELINE_ATTENTION_STATES.has(pipeline.state);
   const finished = pipeline.state === "completed" || pipeline.state === "closed";
   const detail = parkedDetail(pipeline);
-  const renderableFlows = renderableFlowIds(flows);
+  const renderableFlows = renderableFlowIds(flows, renderablePaths ?? EMPTY_PATHS);
   return (
     <div
       data-scheme-ui

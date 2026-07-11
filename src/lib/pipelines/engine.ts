@@ -8,7 +8,7 @@ import { agentRegistry } from "@/lib/agent/registry";
 import { sessionKeyFromTranscript } from "@/lib/agent/sessionKey";
 import { resolveSpawnedTranscriptPath } from "@/lib/agent/spawnedTranscript";
 import { headCwd } from "@/lib/agent/transcript";
-import { closeFlow, createFlowFromRequest, patchFlow } from "@/lib/flows/commands";
+import { MAX_FLOW_NOTE_LENGTH, closeFlow, createFlowFromRequest, patchFlow } from "@/lib/flows/commands";
 import { lastAssistantMessage } from "@/lib/flows/findings";
 import { loadFlows } from "@/lib/flows/store";
 import type { CreateFlowRequest, Flow, RoleConfig } from "@/lib/flows/types";
@@ -477,18 +477,42 @@ async function tickRunStage(
   commitPassedStage(pipeline, stage, attempt, ports);
 }
 
-function reviewNote(pipeline: Pipeline, stage: PipelineStage, role: EffectivePipelineRole): string {
-  const prompt = stage.prompt
+/** Substitute the {{task}}/{{prev.output}} placeholders and trim. */
+function renderNoteTemplate(text: string, pipeline: Pipeline): string {
+  return text
     .split("{{task}}").join(pipeline.task)
     .split("{{prev.output}}").join(normalizedOutput(pipeline))
     .trim();
-  const scaffold = role.roleId && role.promptScaffold
-    ? role.promptScaffold
-      .split("{{task}}").join(pipeline.task)
-      .split("{{prev.output}}").join(normalizedOutput(pipeline))
-      .trim()
-    : "";
-  return [prompt, ...(scaffold ? ["", `Reviewer role scaffold (${role.roleId}):`, scaffold] : [])].join("\n").slice(0, 2_000);
+}
+
+const FENCE_MARKER = "\n\nSafety fences:\n";
+
+/**
+ * The review-loop stage's directive + role scaffold, fitted into the flow note's
+ * transmissible cap (MAX_FLOW_NOTE_LENGTH — the flow layer truncates anything
+ * longer). A blind slice would drop the scaffold and its safety fences, so only
+ * the scaffold *body* is trimmed: the operator's directive and the fence block
+ * are kept whole. If the directive + fences alone overflow (pathological), the
+ * fences win (safety) and the directive is fitted before them.
+ */
+export function reviewNote(pipeline: Pipeline, stage: PipelineStage, role: EffectivePipelineRole): string {
+  const prompt = renderNoteTemplate(stage.prompt, pipeline);
+  const scaffold = role.roleId && role.promptScaffold ? renderNoteTemplate(role.promptScaffold, pipeline) : "";
+  if (!scaffold) return prompt.slice(0, MAX_FLOW_NOTE_LENGTH);
+
+  const header = `\n\nReviewer role scaffold (${role.roleId}):\n`;
+  const fenceIndex = scaffold.lastIndexOf(FENCE_MARKER);
+  const body = fenceIndex >= 0 ? scaffold.slice(0, fenceIndex) : scaffold;
+  const fences = fenceIndex >= 0 ? scaffold.slice(fenceIndex) : "";
+
+  const full = `${prompt}${header}${body}${fences}`;
+  if (full.length <= MAX_FLOW_NOTE_LENGTH) return full;
+
+  const bodyBudget = MAX_FLOW_NOTE_LENGTH - prompt.length - header.length - fences.length;
+  if (bodyBudget > 0) return `${prompt}${header}${body.slice(0, bodyBudget)}${fences}`;
+  /* Even the directive + fences overflow: keep the fences whole and fit the
+     directive ahead of them. */
+  return `${prompt.slice(0, Math.max(0, MAX_FLOW_NOTE_LENGTH - fences.length))}${fences}`;
 }
 
 async function tickReviewStage(

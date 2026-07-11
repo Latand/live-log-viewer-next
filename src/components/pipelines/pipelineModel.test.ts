@@ -19,10 +19,12 @@ import {
   pipelineCursorActive,
   pipelineNeedsAttention,
   pipelineStripByPath,
+  renderableFlowIds,
   stageChipState,
   stageHasEvidence,
   stageOpenTarget,
 } from "./pipelineModel";
+import type { Flow } from "@/lib/flows/types";
 
 /** A structural stand-in for the locale function: echoes the key and its vars. */
 const fakeT = ((key: string, vars?: Record<string, unknown>) => (vars ? `${key}:${JSON.stringify(vars)}` : key)) as unknown as TFunction;
@@ -297,6 +299,25 @@ describe("stageOpenTarget (reviewer paths route to the flow, not the folded node
     expect(stageOpenTarget(runStage, attempt({ agentPath: "/gone" }), undefined, present)).toBeNull();
     /* Without the set (no gating) the path opens as before. */
     expect(stageOpenTarget(runStage, attempt({ agentPath: "/gone" }))).toEqual({ kind: "path", path: "/gone" });
+  });
+});
+
+describe("renderableFlowIds (a deck exists only when the implementer is placed)", () => {
+  const flow = (id: string, implementerPath: string, state = "running"): Flow => ({ id, implementerPath, state } as unknown as Flow);
+
+  test("includes an active flow only when its implementer is a placed path", () => {
+    const flows = [flow("f1", "/impl-1"), flow("f2", "/impl-2"), flow("closed", "/impl-3", "closed")];
+    /* /impl-2 vanished from the scan, so f2 has no deck despite being active. */
+    const placed = new Set<string>(["/impl-1", "/impl-3"]);
+    const ids = renderableFlowIds(flows, placed);
+    expect(ids.has("f1")).toBe(true);
+    expect(ids.has("f2")).toBe(false);
+    /* A closed flow is excluded even though its implementer is placed. */
+    expect(ids.has("closed")).toBe(false);
+  });
+
+  test("no placed paths means no rendered decks", () => {
+    expect(renderableFlowIds([flow("f1", "/impl-1")], new Set()).size).toBe(0);
   });
 });
 

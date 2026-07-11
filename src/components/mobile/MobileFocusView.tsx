@@ -167,10 +167,10 @@ export function MobileFocusView({ project, groups, manual, files, flows, pipelin
   const activePath = activeNode ? activeNode.file.path : null;
   const activeFlowId = activeDeck ? activeDeck.flow.id : null;
   const pipelineFocus = findPipelineStage(pipelines, activePath, activeFlowId);
-  /* Only flows that still have a board deck — and run transcripts still in the
-     scan — can be hopped/opened to. */
-  const renderableFlows = useMemo(() => renderableFlowIds(flows), [flows]);
+  /* Only flows whose implementer is still placed (so a deck exists) — and run
+     transcripts still in the scan — can be hopped/opened to. */
   const renderablePaths = useMemo(() => new Set(files.map((entry) => entry.path)), [files]);
+  const renderableFlows = useMemo(() => renderableFlowIds(flows, renderablePaths), [flows, renderablePaths]);
 
   const openStagePath = useCallback(
     (path: string) => {
