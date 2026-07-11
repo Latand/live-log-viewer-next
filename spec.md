@@ -30,7 +30,10 @@ predecessor transcripts with recent mtimes):
   exceed the per-list validation cap (512) or the byte budget is split into
   equivalent transport pieces before entering the outbox; all byte budgets
   measure the JSON-serialized form (escaping included), matching how the
-  server enforces its cap. A rejected
+  server enforces its cap. Splitting never changes reducer semantics:
+  remap pairs are partitioned by connected components (an alias chain never
+  spans two mutations) and reconcile pieces apply every removal before any
+  addition, both proven equal to the atomic reducer result by regression. A rejected
   multi-mutation batch is bisected until the offender stands alone; only the
   lone rejected mutation is shed, so valid mutations on either side of the
   poison still land.
@@ -40,6 +43,8 @@ predecessor transcripts with recent mtimes):
 - AC4: A conversation identity that leaves the capped feed and returns later
   in an unchanged attention state rings no chime; a genuine transition
   (live → waiting, or a truly new finished agent) still rings exactly once.
+  The bounded history evicts by observation recency (LRU), so an identity
+  that skipped a single poll is never evicted ahead of long-unseen entries.
 - AC5: Archived migration predecessors (`migratedTo` set / non-current
   generations) never ring chimes and never clobber the tracked state of their
   successor (same stable conversation identity).

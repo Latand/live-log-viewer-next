@@ -66,6 +66,31 @@ function chunkByBudget<T>(items: readonly T[], bytesOf: (item: T) => number): T[
   return chunks;
 }
 
+/** Connected components of remap pairs over shared endpoints, preserving the
+    original pair order inside each chain. */
+function remapChains(pairs: readonly { from: string; to: string }[]): { from: string; to: string }[][] {
+  const parent = new Map<string, string>();
+  const find = (start: string): string => {
+    let root = start;
+    while ((parent.get(root) ?? root) !== root) root = parent.get(root)!;
+    parent.set(start, root);
+    return root;
+  };
+  for (const pair of pairs) {
+    const from = find(pair.from);
+    const to = find(pair.to);
+    if (from !== to) parent.set(from, to);
+  }
+  const groups = new Map<string, { from: string; to: string }[]>();
+  for (const pair of pairs) {
+    const root = find(pair.from);
+    const group = groups.get(root) ?? [];
+    group.push(pair);
+    groups.set(root, group);
+  }
+  return [...groups.values()];
+}
+
 /**
  * Break a validator-oversized mutation into transport-sized pieces. The two
  * list-carrying kinds are safe to split: `reconcile-roots` is additive on
@@ -80,19 +105,41 @@ export function splitMutationForTransport(mutation: BoardMutationV1): BoardMutat
       || mutation.removeManual.length > MAX_PATHS_PER_MUTATION
       || serializedBytes(mutation) > MAX_PATCH_BYTES;
     if (!oversized) return [mutation];
-    const rootChunks = chunkByBudget(mutation.roots, serializedBytes);
-    const removeChunks = chunkByBudget(mutation.removeManual, serializedBytes);
-    const pieces: BoardMutationV1[] = [];
-    for (let index = 0; index < Math.max(rootChunks.length, removeChunks.length); index += 1) {
-      pieces.push({ kind: "reconcile-roots", roots: rootChunks[index] ?? [], removeManual: removeChunks[index] ?? [] });
-    }
-    return pieces;
+    /* All removals precede all additions, mirroring the reducer's atomic
+       order (it filters removeManual before seeding roots): interleaving the
+       chunks would let a later removal chunk delete a root a preceding chunk
+       just added when the two lists overlap. */
+    return [
+      ...chunkByBudget(mutation.removeManual, serializedBytes)
+        .map((removeManual): BoardMutationV1 => ({ kind: "reconcile-roots", roots: [], removeManual })),
+      ...chunkByBudget(mutation.roots, serializedBytes)
+        .map((roots): BoardMutationV1 => ({ kind: "reconcile-roots", roots, removeManual: [] })),
+    ];
   }
   if (mutation.kind === "remap-paths") {
     const oversized = mutation.pairs.length > MAX_PATHS_PER_MUTATION || serializedBytes(mutation) > MAX_PATCH_BYTES;
     if (!oversized) return [mutation];
-    return chunkByBudget(mutation.pairs, serializedBytes)
-      .map((pairs): BoardMutationV1 => ({ kind: "remap-paths", pairs }));
+    /* Pack whole chains: pairs sharing an endpoint must ride in one piece,
+       because the reducer computes source/target sets per call — a chain cut
+       at a piece boundary turns an intermediate hop into a bare target and
+       deletes its manual placement. Chains are disjoint, so pieces holding
+       complete chains replay to the same board as the atomic remap. A single
+       chain past the budgets stays whole: correctness over transport size. */
+    const pieces: BoardMutationV1[] = [];
+    let current: { from: string; to: string }[] = [];
+    let bytes = 0;
+    for (const chain of remapChains(mutation.pairs)) {
+      const chainBytes = chain.reduce((sum, pair) => sum + serializedBytes(pair) + 1, 0);
+      if (current.length > 0 && (current.length + chain.length > MAX_PATHS_PER_MUTATION || bytes + chainBytes > SPLIT_PATH_BYTES)) {
+        pieces.push({ kind: "remap-paths", pairs: current });
+        current = [];
+        bytes = 0;
+      }
+      current.push(...chain);
+      bytes += chainBytes;
+    }
+    if (current.length) pieces.push({ kind: "remap-paths", pairs: current });
+    return pieces;
   }
   return [mutation];
 }

@@ -99,11 +99,17 @@ export function planAgentChimes(
       if (!finished) chimes.push({ kind: "spawned", id });
     }
   }
-  /* Re-inserting an existing key keeps its original Map position, so eviction
-     walks first-seen order: the oldest identities not in the current feed go
-     first. `linked` is trimmed to the survivors — an evicted child that ever
-     returns is treated as new anyway. */
-  const tracked = new Map([...prev, ...next]);
+  /* Last-seen (LRU) order: entries present in this poll are re-inserted at
+     the tail, so eviction walks least-recently-observed first. A plain merge
+     would keep first-seen positions and could evict an identity that merely
+     skipped one poll while truly ancient entries survived — recreating the
+     phantom chime on its return. `linked` is trimmed to the survivors — an
+     evicted child that ever returns is treated as new anyway. */
+  const tracked = new Map(prev);
+  for (const [id, cur] of next) {
+    tracked.delete(id);
+    tracked.set(id, cur);
+  }
   if (tracked.size > MAX_TRACKED_IDENTITIES) {
     for (const id of tracked.keys()) {
       if (tracked.size <= MAX_TRACKED_IDENTITIES) break;

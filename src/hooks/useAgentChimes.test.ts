@@ -123,3 +123,36 @@ test("a current feed larger than the cap stays bounded on every return path", ()
   const again = planAgentChimes(files, seed.tracked, seed.linked);
   expect(again.tracked.size).toBe(MAX_TRACKED_IDENTITIES);
 });
+
+test("full-cap tail churn: a recently seen identity survives eviction and stays silent on return", () => {
+  /* Fill the cap: C is a waiting conversation observed from the start,
+     alongside MAX-1 ancient identities never seen again. */
+  const seed = planAgentChimes(
+    [waiting("/C"), ...Array.from({ length: MAX_TRACKED_IDENTITIES - 1 }, (_, index) => live(`/ancient-${index}`))],
+    null,
+    new Set(),
+  );
+  /* C is refreshed by this poll (LRU moves it to the tail); ten fresh
+     identities push the map over the cap, evicting ancients. */
+  const p2 = planAgentChimes(
+    [waiting("/C"), ...Array.from({ length: 10 }, (_, index) => live(`/fresh-${index}`))],
+    seed.tracked,
+    seed.linked,
+  );
+  /* C skips exactly one poll while a new identity forces another eviction.
+     First-seen ordering would evict C here; recency ordering must not. */
+  const p3 = planAgentChimes(
+    [...Array.from({ length: 10 }, (_, index) => live(`/fresh-${index}`)), waiting("/B")],
+    p2.tracked,
+    p2.linked,
+  );
+  expect(p3.tracked.size).toBe(MAX_TRACKED_IDENTITIES);
+  expect(p3.tracked.has("/C")).toBe(true);
+  /* C returns in its unchanged waiting state: remembered, so no phantom chime. */
+  const p4 = planAgentChimes(
+    [...Array.from({ length: 10 }, (_, index) => live(`/fresh-${index}`)), waiting("/C")],
+    p3.tracked,
+    p3.linked,
+  );
+  expect(p4.chimes).toEqual([]);
+});

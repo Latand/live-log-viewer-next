@@ -632,3 +632,56 @@ test("escaping-heavy paths stay under the body cap after splitting", async () =>
   expect(store.getSnapshot().sync).toBe("current");
   store.dispose();
 });
+
+/* ── Split-equivalence regressions: transport pieces must replay to the same
+   board as the atomic mutation. */
+
+test("a split remap chain keeps its alias-chain atomicity and manual placement", () => {
+  /* 40-pair chain /p0→/p1→…→/p40 with 4 KB hops: oversized, but one connected
+     component — it must never span two mutations. */
+  const hop = (index: number) => `/p${String(index).padStart(2, "0")}${"c".repeat(4000)}`;
+  const pairs = Array.from({ length: 40 }, (_, index) => ({ from: hop(index), to: hop(index + 1) }));
+  const mutation: BoardMutationV1 = { kind: "remap-paths", pairs };
+  const pieces = splitMutationForTransport(mutation);
+  for (const piece of pieces) {
+    if (piece.kind !== "remap-paths") throw new Error("unexpected kind");
+  }
+  /* The reviewer's probe: manual /p12 must transform to /p40, not vanish. */
+  const board = boardOf(1, { manual: [hop(12)] });
+  const atomic = applyBoardMutations(board, [mutation]);
+  const split = applyBoardMutations(board, pieces);
+  expect(atomic.prefs.manual).toEqual([hop(40)]);
+  expect(split.prefs).toEqual(atomic.prefs);
+  expect(split.pathAliases).toEqual(atomic.pathAliases);
+});
+
+test("disjoint remap pairs still split and replay to the atomic result", () => {
+  const pairs = Array.from({ length: 40 }, (_, index) => ({
+    from: `/from-${index}${"f".repeat(4000)}`,
+    to: `/to-${index}${"t".repeat(4000)}`,
+  }));
+  const mutation: BoardMutationV1 = { kind: "remap-paths", pairs };
+  const pieces = splitMutationForTransport(mutation);
+  expect(pieces.length).toBeGreaterThan(1);
+  const board = boardOf(1, { manual: [pairs[0]!.from, pairs[39]!.from] });
+  const atomic = applyBoardMutations(board, [mutation]);
+  const split = applyBoardMutations(board, pieces);
+  expect(split.prefs).toEqual(atomic.prefs);
+  expect(split.pathAliases).toEqual(atomic.pathAliases);
+});
+
+test("split reconcile applies every removal before any addition, matching the atomic order", () => {
+  /* The overlap trap: a path in both lists. Atomically the removal filters
+     manual first and the root is re-seeded; interleaved chunks would add it
+     first and then delete it. */
+  const shared = `/shared${"s".repeat(4000)}`;
+  const roots = [shared, ...Array.from({ length: 69 }, (_, index) => `/r${String(index).padStart(3, "0")}${"r".repeat(4000)}`)];
+  const mutation: BoardMutationV1 = { kind: "reconcile-roots", roots, removeManual: [shared] };
+  const pieces = splitMutationForTransport(mutation);
+  expect(pieces.length).toBeGreaterThan(1);
+  const board = boardOf(1, { manual: [shared] });
+  const atomic = applyBoardMutations(board, [mutation]);
+  const split = applyBoardMutations(board, pieces);
+  expect(atomic.prefs.manual).toContain(shared);
+  expect(split.prefs).toEqual(atomic.prefs);
+});
