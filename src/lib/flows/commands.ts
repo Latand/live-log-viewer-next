@@ -148,9 +148,17 @@ export async function createFlowFromRequest(req: CreateFlowRequest, entries: Fil
     here, so producers (e.g. the pipeline's reviewNote) must fit within it. */
 export const MAX_FLOW_NOTE_LENGTH = 2_000;
 
-/** Trimmed user note from a PATCH body, or null when absent/blank. */
-function noteFromRequest(req: PatchFlowRequest): string | null {
-  return typeof req.note === "string" && req.note.trim() ? req.note.trim().slice(0, MAX_FLOW_NOTE_LENGTH) : null;
+/**
+ * The next-round note from a PATCH body as a THREE-state value (issue #118
+ * review): `undefined` = the field was omitted, so leave the round's note
+ * untouched; `null` = an explicit empty string, so CLEAR the note; a trimmed
+ * string = set it. This lets an operator actually erase a previously-set note
+ * instead of the old blank-becomes-omitted behavior that silently kept it.
+ */
+function noteFieldFromRequest(req: PatchFlowRequest): string | null | undefined {
+  if (typeof req.note !== "string") return undefined;
+  const trimmed = req.note.trim();
+  return trimmed ? trimmed.slice(0, MAX_FLOW_NOTE_LENGTH) : null;
 }
 
 /**
@@ -244,16 +252,18 @@ export function patchFlow(id: string, req: PatchFlowRequest): { flow?: Flow; err
     if (req.mode !== "auto" && req.mode !== "manual") return { error: "mode must be auto or manual", status: 400 };
     flow.mode = req.mode;
   } else if (req.action === "advance") {
+    const note = noteFieldFromRequest(req);
     if (flow.state === "waiting_ready") {
-      flow.rounds.push(newRound(flow, "button", noteFromRequest(req)));
+      /* A brand-new round: an omitted or cleared note both mean "no note". */
+      flow.rounds.push(newRound(flow, "button", note ?? null));
       flow.state = flow.mode === "manual" ? "spawn_pending" : "spawning";
     } else if (flow.state === "spawn_pending") {
       /* The round exists but has not spawned yet, so a freshly edited note must
          still reach the next reviewer (issue #118 Finding 4): manual mode creates
          the round at waiting_ready→spawn_pending, then the operator can revise the
-         note before the spawn. Only overwrite when a note was actually sent. */
-      const note = noteFromRequest(req);
-      if (note !== null && round) round.readyNote = note;
+         note before the spawn. `undefined` (field omitted) leaves it; a string sets
+         it; `null` (explicit empty) clears it (issue #118 review Finding 2). */
+      if (note !== undefined && round) round.readyNote = note;
       flow.state = "spawning";
     } else if (flow.state === "relay_pending") {
       flow.state = "relaying";
@@ -264,6 +274,9 @@ export function patchFlow(id: string, req: PatchFlowRequest): { flow?: Flow; err
   } else if (req.action === "retry-round") {
     if (flow.state !== "needs_decision" || !round) return { error: "flow cannot retry from its current state", status: 409 };
     forgetHeadlessReview(flow.id, round.n, round.reviewerPid ?? null);
+    /* The note travels to the fresh reviewer. An omitted field keeps the round's
+       existing note; a string replaces it; an explicit empty clears it. */
+    const noteField = noteFieldFromRequest(req);
     Object.assign(round, {
       reviewerPath: null,
       sessionId: null,
@@ -275,8 +288,7 @@ export function patchFlow(id: string, req: PatchFlowRequest): { flow?: Flow; err
       /* A retry launches a fresh reviewer, so it re-freezes the current reviewer
          role — this is where a prior set-roles override takes effect. */
       reviewerRole: { ...flow.roles.reviewer },
-      /* A user note travels to the fresh reviewer as the round's ready note. */
-      readyNote: noteFromRequest(req) ?? round.readyNote,
+      readyNote: noteField === undefined ? round.readyNote : noteField,
       startedAt: isoNow(),
       spawnStartedAt: null,
       relayStartedAt: null,

@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import { GroupsLayer } from "./nodes";
+import { GroupsLayer, groupLabelScreenPx, groupLabelFontSize } from "./nodes";
 import type { SchemeGroup } from "./layout";
 
 const flowGroup: SchemeGroup = {
@@ -46,9 +46,21 @@ test("each group draws a named, hue-tinted halo region (issue #118)", () => {
   expect(html).toContain('data-scheme-group="pipeline"');
 });
 
-test("the label chip stays readable at map zoom via the inverse-zoom var", () => {
-  /* The chip counter-scales with --inv-z so it does not shrink into the board. */
-  expect(render([flowGroup], true)).toContain("min(var(--inv-z, 1), 2.6)");
+test("the label chip fully counter-scales so it stays readable at minimum zoom (issue #118 review)", () => {
+  const html = render([flowGroup], true);
+  /* Uncapped inverse-zoom scaling: constant on-screen size, no min(…) ceiling
+     that would shrink the label to a few px at the 0.12 map minimum. */
+  expect(html).toContain("var(--inv-z, 1)");
+  expect(html).not.toContain("min(");
+  expect(html).toContain(groupLabelFontSize());
+});
+
+test("the label holds its on-screen size at the 0.12 minimum zoom", () => {
+  /* World font × zoom is constant across zoom → always ~11px on screen, never the
+     ~3.4px the old min(…, 2.6) cap produced at z=0.12. */
+  expect(groupLabelScreenPx(0.12)).toBeCloseTo(11, 6);
+  expect(groupLabelScreenPx(1)).toBeCloseTo(11, 6);
+  expect(groupLabelScreenPx(0.12)).toBeGreaterThanOrEqual(11);
 });
 
 test("the label chip is a live control when interactive and inert otherwise", () => {

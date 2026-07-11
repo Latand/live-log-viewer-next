@@ -128,3 +128,28 @@ test("advancing spawn_pending without a note keeps the existing round note", () 
   const result = patchFlow("f1", { action: "advance" });
   expect(result.flow!.rounds[0]!.readyNote).toBe("keep me");
 });
+
+function pendingRound(readyNote: string | null) {
+  return {
+    n: 1, reviewerPath: null, findingsPath: null, triggeredBy: "button", readyNote,
+    verdict: null, findingsCount: null, startedAt: "2026-07-05T00:00:00Z", reviewedAt: null, relayedAt: null, error: null,
+  };
+}
+
+test("an explicit empty note clears the round note; an omitted note keeps it (issue #118 review Finding 2)", () => {
+  /* spawn_pending advance: "" clears. */
+  seed({ mode: "manual", state: "spawn_pending", rounds: [pendingRound("stale note")] as never });
+  expect(patchFlow("f1", { action: "advance", note: "" }).flow!.rounds[0]!.readyNote).toBeNull();
+  /* spawn_pending advance: whitespace-only is also an explicit clear. */
+  seed({ mode: "manual", state: "spawn_pending", rounds: [pendingRound("stale note")] as never });
+  expect(patchFlow("f1", { action: "advance", note: "   " }).flow!.rounds[0]!.readyNote).toBeNull();
+});
+
+test("retry-round clears with an empty note and keeps the note when omitted (issue #118 review Finding 2)", () => {
+  seed({ state: "needs_decision", rounds: [pendingRound("stale note")] as never });
+  expect(patchFlow("f1", { action: "retry-round", note: "" }).flow!.rounds[0]!.readyNote).toBeNull();
+  seed({ state: "needs_decision", rounds: [pendingRound("stale note")] as never });
+  expect(patchFlow("f1", { action: "retry-round" }).flow!.rounds[0]!.readyNote).toBe("stale note");
+  seed({ state: "needs_decision", rounds: [pendingRound("stale note")] as never });
+  expect(patchFlow("f1", { action: "retry-round", note: "fresh" }).flow!.rounds[0]!.readyNote).toBe("fresh");
+});

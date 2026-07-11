@@ -102,6 +102,28 @@ test("starting the next round from the panel submits the note via advance, not o
   host.remove();
 });
 
+test("an empty note field is still sent so a cleared note reaches the backend (issue #118 review Finding 2)", async () => {
+  /* The round has no note; the editor is empty. The advance must carry note:""
+     (field present) rather than omitting it, so the backend reads an explicit
+     clear instead of preserving a stale note. */
+  const empty: SchemeGroup = {
+    ...flowGroup,
+    flow: { ...flowGroup.flow!, state: "waiting_ready", rounds: [{ n: 1, readyNote: null }] } as unknown as Flow,
+  };
+  const { host, root } = mount(<GroupOverridePanel group={empty} onClose={() => undefined} />);
+  const textarea = host.querySelector("textarea") as HTMLTextAreaElement;
+  expect(textarea.value).toBe("");
+  const start = Array.from(host.querySelectorAll("button")).find((b) => b.textContent?.includes("Start review")) as HTMLButtonElement;
+  flushSync(() => start.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event));
+  await Promise.resolve();
+
+  const patch = calls.find((call) => call.url.includes("/api/flows/f1"));
+  expect(patch?.body).toEqual({ action: "advance", note: "" });
+
+  flushSync(() => root.unmount());
+  host.remove();
+});
+
 const pipelineGroup: SchemeGroup = {
   key: "group::pipeline::p1", kind: "pipeline", id: "p1", hue: 24, members: ["/plan"],
   label: "Pipe one", x: 0, y: 0, w: 10, h: 10,

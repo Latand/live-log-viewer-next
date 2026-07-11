@@ -244,7 +244,10 @@ function FlowOverride({ group, onClose }: { group: SchemeGroup; onClose: () => v
               void run(pending.action === "retry-round" ? t("groupOverride.savedRetry") : t(pending.labelKey), () =>
                 patchFlow(flow.id, {
                   action: pending.action,
-                  ...(pendingCarriesNote ? { note: note.trim() || undefined } : {}),
+                  /* Send the field even when empty so clearing the editor actually
+                     clears the round's note; the backend reads "" as an explicit
+                     clear and an absent field as "no change" (issue #118 review). */
+                  ...(pendingCarriesNote ? { note: note.trim() } : {}),
                 }),
               )
             }

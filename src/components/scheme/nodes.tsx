@@ -57,6 +57,33 @@ export const MOVE_TRANSITION = `transform ${MOVE_MS}ms ${MOVE_EASE}`;
    plus transform for the detached override panel. */
 export const GROUP_MOVE_TRANSITION = `left ${MOVE_MS}ms ${MOVE_EASE}, top ${MOVE_MS}ms ${MOVE_EASE}, width ${MOVE_MS}ms ${MOVE_EASE}, height ${MOVE_MS}ms ${MOVE_EASE}, transform ${MOVE_MS}ms ${MOVE_EASE}`;
 
+/* The group label counter-scales with the inverse zoom so it holds a CONSTANT
+   on-screen size at ANY zoom — including the 0.12 map minimum, where the old
+   min(…, 2.6) cap shrank it to ~3px (issue #118 AC3 / review). Uncapped on
+   purpose: group halos are few and spread across the board, so the far-zoom
+   overlap that node FarLabels cap for is not a concern here. Padding, border and
+   max-width are expressed in em below so they scale with the font too. */
+export const GROUP_LABEL_BASE_PX = 11;
+/** Inverse-zoom ceiling on the counter-scaling. Infinity = never cap, so the
+    label stays a fixed on-screen size down to the minimum zoom. A finite value
+    would let it shrink below readability — kept here so the render string and the
+    on-screen computation below can never disagree. */
+export const GROUP_LABEL_INV_Z_CAP = Number.POSITIVE_INFINITY;
+/** The CSS `font-size` the label renders at, derived from the cap. */
+export function groupLabelFontSize(): string {
+  const scale = Number.isFinite(GROUP_LABEL_INV_Z_CAP)
+    ? `min(var(--inv-z, 1), ${GROUP_LABEL_INV_Z_CAP})`
+    : "var(--inv-z, 1)";
+  return `calc(${GROUP_LABEL_BASE_PX}px * ${scale})`;
+}
+/** On-screen px the label renders at for a given camera zoom (world font ×
+    zoom). Constant at GROUP_LABEL_BASE_PX while uncapped — proving map
+    readability; a re-added finite cap makes this drop at low zoom and fails the
+    test. */
+export function groupLabelScreenPx(zoom: number): number {
+  return GROUP_LABEL_BASE_PX * Math.min(1 / zoom, GROUP_LABEL_INV_Z_CAP) * zoom;
+}
+
 /** Round-chip click on a strip, delivered to that flow's deck. */
 export interface DeckFocus {
   flowId: string;
@@ -322,10 +349,12 @@ export const GroupsLayer = memo(function GroupsLayer({
             />
             <button
               data-scheme-ui
-              className={`absolute -top-3 left-5 z-[8] inline-flex max-w-[240px] items-center gap-1 rounded-full border-2 bg-panel px-2.5 py-0.5 font-bold shadow-card hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:cursor-default ${
+              className={`absolute -top-3 left-5 z-[8] inline-flex max-w-[22em] items-center gap-[0.4em] rounded-full bg-panel px-[0.7em] py-[0.15em] font-bold shadow-card hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:cursor-default ${
                 interactive ? "pointer-events-auto" : ""
               }`}
-              style={{ borderColor: color, color, fontSize: "calc(11px * min(var(--inv-z, 1), 2.6))" }}
+              /* Font fully counter-scaled (constant on-screen at any zoom); border
+                 and padding are in em so the whole chip holds its on-screen size. */
+              style={{ borderColor: color, color, borderWidth: "0.18em", borderStyle: "solid", fontSize: groupLabelFontSize() }}
               aria-expanded={open}
               aria-haspopup="dialog"
               disabled={!interactive}
