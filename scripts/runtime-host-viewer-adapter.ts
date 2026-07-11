@@ -5,8 +5,8 @@ import fs from "node:fs";
 import path from "node:path";
 
 import type { ViewerHealthEvidence, ViewerReleaseIdentity } from "../src/lib/runtime/contracts";
-import { obsoleteManagedViewerContainers, viewerCandidateDockerArgs } from "../src/runtime-host/candidateContainer";
-import { viewerHealthRequestPlan, waitForViewerReadiness, type ViewerCandidateContainerState } from "../src/runtime-host/deploymentHealth";
+import { obsoleteManagedViewerContainers, viewerCandidateDockerArgs, viewerCandidateTmuxEnvironment } from "../src/runtime-host/candidateContainer";
+import { hasViewerDeploymentCapability, viewerHealthRequestPlan, waitForViewerReadiness, type ViewerCandidateContainerState } from "../src/runtime-host/deploymentHealth";
 
 const stateDir = process.env.LLV_STATE_DIR || "/home/latand/.config/agent-log-viewer/state";
 const deploymentDir = path.join(stateDir, "deployments");
@@ -88,7 +88,15 @@ async function startCandidate(candidate: ViewerReleaseIdentity): Promise<void> {
   }
   const uid = String(process.getuid?.() ?? 1000);
   const gid = String(process.getgid?.() ?? 1000);
-  await command(viewerCandidateDockerArgs(candidate, { uid, gid, envFile, envFileExists: fs.existsSync(envFile), runtimeSocket }));
+  const tmuxEnvironment = viewerCandidateTmuxEnvironment(stateDir, uid);
+  await command(viewerCandidateDockerArgs(candidate, {
+    uid,
+    gid,
+    envFile,
+    envFileExists: fs.existsSync(envFile),
+    runtimeSocket,
+    ...tmuxEnvironment,
+  }));
 }
 
 async function retireRelease(candidate: ViewerReleaseIdentity): Promise<void> {
@@ -147,6 +155,8 @@ async function probeRoutes(endpoint: string, expectedAssetsEndpoint?: string): P
   const root = await fetchStatus(requests.root.url, requests.root.headers);
   const authenticated = requests.authenticated ? await fetchStatus(requests.authenticated.url, requests.authenticated.headers) : null;
   const unauthorized = requests.unauthorized ? await fetchStatus(requests.unauthorized.url, requests.unauthorized.headers) : null;
+  const capability = await fetchStatus(requests.capability.url, requests.capability.headers);
+  const deploymentCapable = hasViewerDeploymentCapability(capability.status, capability.text);
   const html = authenticated?.status === 200 ? authenticated.text : root.text;
   const paths = referencedAssets(html);
   const assets = await Promise.all(paths.map(async (asset) => ({ path: asset, status: (await fetchStatus(`${endpoint}${asset}`)).status })));
@@ -163,11 +173,18 @@ async function probeRoutes(endpoint: string, expectedAssetsEndpoint?: string): P
     && (unauthorized === null || unauthorized.status === 403)
     && assets.length > 0
     && assets.every((asset) => asset.status === 200)
+    && deploymentCapable
     && expectedAssetsMatch;
   return {
     checkedAt: new Date().toISOString(), endpoint, processReady, rootStatus: root.status,
     authenticatedStatus: authenticated?.status ?? null, unauthorizedStatus: unauthorized?.status ?? null, assets, ok,
-    ...(ok ? {} : { detail: expectedAssetsMatch ? "Viewer health or referenced asset gate failed" : "stable listener does not serve the candidate asset set" }),
+    ...(ok ? {} : {
+      detail: !deploymentCapable
+        ? "Viewer deployment capability gate failed"
+        : expectedAssetsMatch
+          ? "Viewer health or referenced asset gate failed"
+          : "stable listener does not serve the candidate asset set",
+    }),
   };
 }
 

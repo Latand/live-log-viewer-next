@@ -4,7 +4,7 @@ import { NextRequest } from "next/server";
 import type { ViewerHealthEvidence } from "@/lib/runtime/contracts";
 import { proxy } from "@/proxy";
 
-import { viewerHealthRequestPlan, waitForViewerReadiness } from "./deploymentHealth";
+import { hasViewerDeploymentCapability, viewerHealthRequestPlan, waitForViewerReadiness } from "./deploymentHealth";
 
 const originalToken = process.env.LLV_TOKEN;
 afterEach(() => {
@@ -66,6 +66,16 @@ test("health request plan exercises remote authorization and rejection", () => {
   const unauthorized = proxy(new NextRequest(plan.unauthorized.url, { headers: plan.unauthorized.headers }));
 
   expect(plan.root.headers).toEqual({});
+  expect(plan.capability).toEqual({
+    url: "http://127.0.0.1:18001/api/runtime/snapshot",
+    headers: plan.authenticated.headers,
+  });
   expect(authorized.headers.get("x-middleware-next")).toBe("1");
   expect(unauthorized.status).toBe(403);
+});
+
+test("deployment capability requires a runtime snapshot deployment projection", () => {
+  expect(hasViewerDeploymentCapability(404, "")).toBe(false);
+  expect(hasViewerDeploymentCapability(200, JSON.stringify({ schemaVersion: 1 }))).toBe(false);
+  expect(hasViewerDeploymentCapability(200, JSON.stringify({ schemaVersion: 1, deployments: [] }))).toBe(true);
 });

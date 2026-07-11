@@ -11,17 +11,30 @@ export interface ViewerHealthRequestPlan {
   root: ViewerHealthRequest;
   authenticated: ViewerHealthRequest | null;
   unauthorized: ViewerHealthRequest | null;
+  capability: ViewerHealthRequest;
 }
 
 export function viewerHealthRequestPlan(endpoint: string, token: string | null): ViewerHealthRequestPlan {
   const remoteHeaders = { "x-forwarded-for": "203.0.113.10" };
+  const authenticatedHeaders = token ? { ...remoteHeaders, authorization: `Bearer ${token}` } : {};
   return {
     root: { url: `${endpoint}/`, headers: {} },
     authenticated: token
-      ? { url: `${endpoint}/`, headers: { ...remoteHeaders, authorization: `Bearer ${token}` } }
+      ? { url: `${endpoint}/`, headers: authenticatedHeaders }
       : null,
     unauthorized: token ? { url: `${endpoint}/`, headers: remoteHeaders } : null,
+    capability: { url: `${endpoint}/api/runtime/snapshot`, headers: authenticatedHeaders },
   };
+}
+
+export function hasViewerDeploymentCapability(status: number, body: string): boolean {
+  if (status !== 200) return false;
+  try {
+    const snapshot = JSON.parse(body) as { deployments?: unknown };
+    return !!snapshot && typeof snapshot === "object" && Array.isArray(snapshot.deployments);
+  } catch {
+    return false;
+  }
 }
 
 export interface ViewerReadinessProbe {

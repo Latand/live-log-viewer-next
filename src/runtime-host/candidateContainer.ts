@@ -1,3 +1,6 @@
+import fs from "node:fs";
+import path from "node:path";
+
 import type { ViewerReleaseIdentity } from "@/lib/runtime/contracts";
 
 export interface ViewerCandidateContainerOptions {
@@ -6,6 +9,19 @@ export interface ViewerCandidateContainerOptions {
   envFile: string;
   envFileExists: boolean;
   runtimeSocket: string;
+  legacyTmuxExternal: string;
+  tmuxTmpdir: string;
+}
+
+export function viewerCandidateTmuxEnvironment(
+  stateDir: string,
+  uid: string,
+  exists: (filename: string) => boolean = fs.existsSync,
+): Pick<ViewerCandidateContainerOptions, "legacyTmuxExternal" | "tmuxTmpdir"> {
+  const migrationComplete = exists(path.join(stateDir, "legacy-tmux-migration-complete"));
+  return migrationComplete
+    ? { legacyTmuxExternal: "1", tmuxTmpdir: `/run/user/${uid}/agent-log-viewer` }
+    : { legacyTmuxExternal: "0", tmuxTmpdir: "/tmp" };
 }
 
 export function viewerCandidateDockerArgs(candidate: ViewerReleaseIdentity, options: ViewerCandidateContainerOptions): string[] {
@@ -18,6 +34,7 @@ export function viewerCandidateDockerArgs(candidate: ViewerReleaseIdentity, opti
     "-e", "HOME=/home/latand", "-e", "HOSTNAME=127.0.0.1", "-e", `PORT=${endpoint.port}`,
     "-e", "XDG_CONFIG_HOME=/home/latand/.config", "-e", "XDG_CACHE_HOME=/home/latand/.cache",
     "-e", "LLV_RUNTIME_EVENTS=1", "-e", `LLV_RUNTIME_HOST_SOCKET=${options.runtimeSocket}`,
+    "-e", `LLV_LEGACY_TMUX_EXTERNAL=${options.legacyTmuxExternal}`, "-e", `TMUX_TMPDIR=${options.tmuxTmpdir}`,
     "-v", "/home/latand:/home/latand", "-v", `/tmp/tmux-${options.uid}:/tmp/tmux-${options.uid}`, "-v", `/tmp/claude-${options.uid}:/tmp/claude-${options.uid}`,
   ];
   if (options.envFileExists) args.push("--env-file", options.envFile);
