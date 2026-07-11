@@ -17,7 +17,6 @@ import { BranchPane } from "@/components/BranchPane";
 import { flowByImplementer } from "@/components/flows/flowModel";
 import type { BranchGroup } from "@/components/projectModel";
 import { createTask, deleteTask, handoffTask, unassignTask, updateTask } from "@/components/tasks/taskApi";
-import { requestSessionRename } from "@/components/session/sessionTitleApi";
 import { pushTaskToast } from "@/components/tasks/taskToast";
 import { cleanTitle } from "@/components/utils";
 import { taskDeliveryText } from "@/lib/tasks/helpers";
@@ -242,8 +241,11 @@ export function SchemeBoard({
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
   }, [overlayOpen]);
-  /* F2 renames the selected node: expand it (so its BranchPane mounts) and ask
-     that pane's SessionTitle to open its editor. Ignored inside text fields. */
+  /* F2 renames the selected node: expand it and open exactly that overlay pane's
+     editor via a token (a broadcast would also open the node's still-mounted
+     board pane, whose blur would persist an unintended rename). Ignored inside
+     text fields. */
+  const [renameRequest, setRenameRequest] = useState<{ path: string; token: number } | null>(null);
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.key !== "F2") return;
@@ -255,7 +257,7 @@ export function SchemeBoard({
       if (!node?.file.renamable) return;
       event.preventDefault();
       setExpanded(path);
-      requestSessionRename(path);
+      setRenameRequest((prev) => ({ path, token: (prev?.token ?? 0) + 1 }));
     };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
@@ -830,6 +832,7 @@ export function SchemeBoard({
           isRoot={expandedNode.isRoot}
           expanded
           onToggleExpand={() => setExpanded(null)}
+          autoEditToken={renameRequest?.path === expandedNode.file.path ? renameRequest.token : undefined}
         />
       </div>
     ) : null}

@@ -7,7 +7,7 @@ import { useLocale } from "@/lib/i18n";
 import { cleanTitle } from "@/lib/title";
 import type { FileEntry } from "@/lib/types";
 
-import { consumePendingRename, SESSION_RENAME_REQUEST_EVENT, saveSessionTitle } from "./sessionTitleApi";
+import { saveSessionTitle } from "./sessionTitleApi";
 
 /** Local, pre-poll view of a rename: `title === null` means the override was
     just cleared (revert to auto). `null` optimistic state means "trust the
@@ -25,6 +25,11 @@ interface SessionTitleProps {
   /** Keep the rename control always visible with a 44px touch target (mobile),
       instead of the desktop focus/hover reveal. */
   alwaysVisible?: boolean;
+  /** Opens the editor when this changes to a new defined value. Used by the
+      scheme board's F2 to open exactly the overlay instance it expanded — a
+      broadcast would also open the node's still-mounted board pane and its blur
+      would persist an unintended rename. */
+  autoEditToken?: number;
 }
 
 /**
@@ -35,7 +40,7 @@ interface SessionTitleProps {
  * auto-derived title. Saves are optimistic: a revision conflict adopts the
  * server record and retries once, a network failure reverts and offers retry.
  */
-export function SessionTitle({ file, displayMax = 90, titleClassName = "", className = "", alwaysVisible = false }: SessionTitleProps) {
+export function SessionTitle({ file, displayMax = 90, titleClassName = "", className = "", alwaysVisible = false, autoEditToken }: SessionTitleProps) {
   const { t } = useLocale();
   const [editing, setEditing] = useState(false);
   const [value, setValue] = useState("");
@@ -45,6 +50,7 @@ export function SessionTitle({ file, displayMax = 90, titleClassName = "", class
   const [retryTitle, setRetryTitle] = useState<string | null | undefined>(undefined);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const launcherRef = useRef<HTMLButtonElement | null>(null);
+  const editorRef = useRef<HTMLSpanElement | null>(null);
   /* Set whenever the editor closes through an explicit action (Enter, Escape,
      Save/Reset/Cancel). The input then unmounts and fires a blur we must not
      treat as a second, plain "save the field" save. */
@@ -103,23 +109,18 @@ export function SessionTitle({ file, displayMax = 90, titleClassName = "", class
     setRetryTitle(undefined);
     setEditing(true);
   };
-  // Latest openEditor for the request listener, which must not re-subscribe on
-  // every render (openEditor closes over the changing effective title).
+  // Latest openEditor for the token effect, which fires on token change only —
+  // openEditor closes over the changing effective title, so read it via a ref.
   const openEditorRef = useRef(openEditor);
   useEffect(() => {
     openEditorRef.current = openEditor;
   });
 
-  // Open on an external rename request (scheme-board F2). Handles both an
-  // already-mounted editor and a just-mounted one (pending-request replay).
+  // Open when an external caller (scheme-board F2) bumps the token. Only the
+  // instance handed a token opens, so the node's other board pane stays closed.
   useEffect(() => {
-    if (consumePendingRename(file.path)) openEditorRef.current();
-    const onRequest = (event: Event) => {
-      if ((event as CustomEvent<{ path?: string }>).detail?.path === file.path) openEditorRef.current();
-    };
-    window.addEventListener(SESSION_RENAME_REQUEST_EVENT, onRequest);
-    return () => window.removeEventListener(SESSION_RENAME_REQUEST_EVENT, onRequest);
-  }, [file.path]);
+    if (autoEditToken !== undefined) openEditorRef.current();
+  }, [autoEditToken]);
 
   const attemptSave = async (title: string | null, allowRetry: boolean) => {
     setBusy(true);
@@ -193,12 +194,16 @@ export function SessionTitle({ file, displayMax = 90, titleClassName = "", class
     }
   };
 
-  const onBlur = () => {
+  const onEditorBlur = (event: React.FocusEvent<HTMLElement>) => {
     if (suppressBlur.current) {
       suppressBlur.current = false;
       return;
     }
-    // A genuine focus loss while still editing saves the current field value.
+    // Focus moving to another control inside the editor (Tab to Save/Reset/
+    // Cancel) is internal — keep the editor open so those buttons are reachable
+    // by keyboard. Only a focus loss that leaves the whole editor saves.
+    const next = event.relatedTarget as Node | null;
+    if (next && editorRef.current?.contains(next)) return;
     // Read the live input rather than `value` state so a save triggered in the
     // same tick as the last keystroke never persists a stale value.
     const latest = inputRef.current?.value ?? value;
@@ -217,7 +222,12 @@ export function SessionTitle({ file, displayMax = 90, titleClassName = "", class
 
   if (editing) {
     return (
-      <span className={`inline-flex min-w-0 flex-1 items-center gap-1 ${className}`} onPointerDown={stop}>
+      <span
+        ref={editorRef}
+        className={`inline-flex min-w-0 flex-1 items-center gap-1 ${className}`}
+        onPointerDown={stop}
+        onBlur={onEditorBlur}
+      >
         <input
           ref={inputRef}
           type="text"
@@ -227,15 +237,13 @@ export function SessionTitle({ file, displayMax = 90, titleClassName = "", class
           aria-label={t("rename.inputAria")}
           onChange={(event) => setValue(event.target.value)}
           onKeyDown={onKeyDown}
-          onBlur={onBlur}
         />
         <button
           type="button"
           className="inline-flex shrink-0 items-center rounded-[6px] border border-line bg-bg px-1 py-0.5 text-dim hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
           aria-label={t("rename.save")}
           title={t("rename.save")}
-          onMouseDown={(event) => event.preventDefault()}
-          onClick={() => commit(value)}
+          onClick={() => commit(inputRef.current?.value ?? value)}
         >
           <Check className="h-3 w-3" aria-hidden />
         </button>
@@ -245,7 +253,6 @@ export function SessionTitle({ file, displayMax = 90, titleClassName = "", class
             className="inline-flex shrink-0 items-center rounded-[6px] border border-line bg-bg px-1 py-0.5 text-dim hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
             aria-label={t("rename.reset")}
             title={t("rename.resetHint", { title: cleanTitle(autoTitle, 60) })}
-            onMouseDown={(event) => event.preventDefault()}
             onClick={() => commit(null)}
           >
             <RotateCw className="h-3 w-3" aria-hidden />
@@ -256,7 +263,6 @@ export function SessionTitle({ file, displayMax = 90, titleClassName = "", class
           className="inline-flex shrink-0 items-center rounded-[6px] border border-line bg-bg px-1 py-0.5 text-dim hover:border-err/40 hover:text-err focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
           aria-label={t("rename.cancel")}
           title={t("rename.cancel")}
-          onMouseDown={(event) => event.preventDefault()}
           onClick={cancel}
         >
           <X className="h-3 w-3" aria-hidden />

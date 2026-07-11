@@ -5,7 +5,6 @@ import { flushSync } from "react-dom";
 
 import type { FileEntry } from "@/lib/types";
 
-import { requestSessionRename } from "./sessionTitleApi";
 import { SessionTitle } from "./SessionTitle";
 
 const dom = new Window({ url: "http://127.0.0.1/" });
@@ -18,6 +17,7 @@ Object.assign(globalThis, {
   HTMLInputElement: dom.HTMLInputElement,
   Event: dom.Event,
   CustomEvent: dom.CustomEvent,
+  FocusEvent: dom.FocusEvent,
   KeyboardEvent: dom.KeyboardEvent,
   MouseEvent: dom.MouseEvent,
   PointerEvent: dom.MouseEvent,
@@ -80,12 +80,12 @@ afterEach(() => {
   document.body.replaceChildren();
 });
 
-function mount(file: FileEntry): { host: HTMLElement; rerender(next: FileEntry): void } {
+function mount(file: FileEntry, autoEditToken?: number): { host: HTMLElement; rerender(next: FileEntry, token?: number): void } {
   const host = document.createElement("div");
   document.body.append(host);
   const root: Root = createRoot(host);
-  const rerender = (next: FileEntry) => flushSync(() => root.render(<SessionTitle file={next} />));
-  rerender(file);
+  const rerender = (next: FileEntry, token?: number) => flushSync(() => root.render(<SessionTitle file={next} autoEditToken={token} />));
+  rerender(file, autoEditToken);
   mounted.push(() => {
     flushSync(() => root.unmount());
     host.remove();
@@ -267,20 +267,49 @@ test("returns focus to the launcher after a keyboard save (never onto a disabled
   expect(document.activeElement).toBe(launcher);
 });
 
-test("an external rename request opens the editor (scheme-board F2)", async () => {
+test("Tab to Reset stays open (internal focus), then Reset clears via keyboard activation", async () => {
+  // An override is in effect so the Reset control renders.
+  const view = mount(entry({ title: "Custom name", autoTitle: "Fix the login bug", titleRevision: 2 }));
+  flushSync(() => (view.host.querySelector('button[aria-label^="Rename"]') as HTMLButtonElement).click());
+  const input = view.host.querySelector('input[aria-label="Session title"]') as HTMLInputElement;
+  const reset = view.host.querySelector('button[aria-label="Reset to auto title"]') as HTMLButtonElement;
+  expect(reset).toBeTruthy();
+
+  // Tab from the input to Reset: focus stays inside the editor, so it must not
+  // save/close — otherwise Reset would be unmounted before it can be reached.
+  flushSync(() => dispatch(input, new dom.FocusEvent("focusout", { bubbles: true, relatedTarget: reset } as never)));
+  expect(view.host.querySelector('input[aria-label="Session title"]')).toBeTruthy();
+  expect(calls).toHaveLength(0);
+
+  // Reset is now keyboard-reachable; activating it clears the override.
+  flushSync(() => reset.click());
+  await settle();
+  expect(calls).toHaveLength(1);
+  expect(calls[0]!.body.title).toBeNull();
+});
+
+test("a bumped autoEditToken opens the editor (scheme-board F2 targeting)", async () => {
   const view = mount(entry());
   expect(view.host.querySelector('input[aria-label="Session title"]')).toBeNull();
-  flushSync(() => requestSessionRename(entry().path));
+  view.rerender(entry(), 1);
+  await settle();
   expect(view.host.querySelector('input[aria-label="Session title"]')).toBeTruthy();
 });
 
-test("a request that fires before mount is replayed on mount (pending rename)", async () => {
-  // The scheme board expands a node and requests the rename before that node's
-  // SessionTitle has mounted; the pending entry must still open it.
-  requestSessionRename(entry().path);
-  const view = mount(entry());
+test("mounting with an autoEditToken already set opens the editor (just-expanded overlay)", async () => {
+  // The scheme board expands the node with the token already set; the overlay's
+  // SessionTitle must open on mount (passive effect runs just after mount).
+  const view = mount(entry(), 7);
   await settle();
   expect(view.host.querySelector('input[aria-label="Session title"]')).toBeTruthy();
+});
+
+test("an instance with no autoEditToken never auto-opens (the node's board pane stays closed)", () => {
+  // The still-mounted board pane gets no token, so an F2 targeting the overlay
+  // must not open it (its blur would otherwise persist an unintended rename).
+  const view = mount(entry());
+  view.rerender(entry());
+  expect(view.host.querySelector('input[aria-label="Session title"]')).toBeNull();
 });
 
 test("the mobile variant renders an always-visible 44px launcher", () => {
