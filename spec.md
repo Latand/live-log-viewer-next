@@ -1,44 +1,53 @@
-# Issue #60 — durable board closes
+# Issue #102 — runtime-host deployment ownership
 
 ## Task statement
 
-Fix closed scheme cards resurfacing after reload. The server must preserve close
-tombstones across concurrent board writers and carry them across transcript
-succession paths, including clients that retry a stale whole-list `hidden` patch
-or omit a `remap-paths` mutation.
+Make the durable runtime host the single serialized authority for Viewer
+production deployments. Every admitted deployment must resolve a clean pinned
+revision from the canonical repository, build and verify an isolated candidate,
+promote it through an atomic listener switch, retain rollback capability, and
+reach a deterministic journaled result across Viewer or runtime-host restarts.
 
 ## Acceptance criteria
 
-- AC1: A legacy whole-list board PATCH retried with a current revision cannot
-  erase hidden entries committed by another writer.
-- AC2: Legacy board PATCH requests remain schema-compatible, and revision-zero
-  preference seeding continues to work.
-- AC3: Hidden tombstones take precedence over stale manual and expanded
-  membership supplied by whole-list clients.
-- AC4: Server-side board mutations derive aliases from durable conversation
-  generations and continuity paths.
-- AC5: A closed predecessor remains hidden when its successor appears and root
-  reconciliation arrives without a client-provided remap.
-- AC6: Root reconciliation preserves hidden entries when conversation identity
-  remains stable.
-- AC7: Regression tests reproduce the concurrent stale-list retry and the
-  successor-without-remap scenarios through the board route.
-- AC8: A malformed or unreadable conversation registry leaves validated board
-  mutations available and skips alias enrichment for that request.
-- AC9: Pending continuity paths cannot create aliases from a future successor
-  back to the current predecessor during initial or repeated migrations;
-  committed continuity paths keep carrying tombstones during later migrations.
-- AC10: Scanner discovery, observed spawn settlement, provider persistence, and
-  explicit continuity callbacks all record pending succession provenance.
-- AC11: Return-to-source routing and target retirement preserve an abandoned
-  successor fence after clearing the active migration.
-- AC12: A table-driven route regression covers commit, return-to-source,
-  target retirement, chained succession, deferred board repair, and queued
-  cleanup receipts across close-before/during/after timing and alias
-  enrichment, root reconciliation, and client remap mutations.
-- AC13: Fenced successor paths can trigger committed alias repair while
-  remaining ineligible for root reconciliation and client remaps.
-- AC14: `bun test` passes.
-- AC15: `bunx tsc --noEmit` passes.
-- AC16: The live board state and production Viewer on port 8898 remain
-  unchanged during implementation and verification.
+- AC1: Deployment requests default to `origin/main`, resolve through a clean
+  canonical repository mirror, and build from the resulting immutable commit.
+- AC2: The request interface accepts `origin/main` or a full lowercase commit
+  SHA and rejects shell fragments, Compose arguments, and mutable checkout state.
+- AC3: One durable deployment lease serializes execution; concurrent requests
+  receive a stable busy receipt, and idempotency-key replay returns the original
+  deployment receipt and pinned revision.
+- AC4: A versioned candidate image and distinct candidate container start on an
+  alternate loopback endpoint while the serving release remains available.
+- AC5: Candidate health requires process readiness, the root route,
+  authenticated routing when configured, and every HTML-referenced CSS and
+  JavaScript asset.
+- AC6: Promotion uses an atomic stable-listener target switch and preserves
+  existing connections on their selected release.
+- AC7: Promotion errors and post-promotion health failures restore the retained
+  previous healthy release automatically.
+- AC8: The runtime journal persists receipts, phases, ownership identity,
+  candidate and previous release identities, errors, and health evidence.
+- AC9: Runtime-host restart recovery verifies the lease PID and process-start
+  identity before reclaiming, then resumes build, candidate, promotion, or
+  rollback work toward a deterministic terminal phase.
+- AC10: The runtime socket and Viewer routes expose request and read operations;
+  snapshot and SSE projection carry progress and terminal deployment events.
+- AC11: The Viewer renders a minimal current deployment status surface while
+  runtime-host retains execution ownership.
+- AC12: Docker and privileged host operations stay behind a fixed host adapter;
+  browser-controlled data cannot select executables, shell text, Docker
+  arguments, or Compose projects.
+- AC13: The supported production release script submits an idempotent runtime
+  request and follows its durable status.
+- AC14: Structured agent sessions remain hosted by runtime-host throughout
+  Viewer candidate replacement and cutover.
+- AC15: Deployment execution contains zero tmux calls and has zero dependency on
+  the legacy tmux supervisor.
+- AC16: Focused fake-backed tests cover serialization, replay, candidate health,
+  asset consistency, promotion, rollback, process identity, socket receipts,
+  journal restart recovery, and one staged end-to-end sequence.
+- AC17: Implementation and verification leave the live Viewer stack on port
+  8898 unchanged.
+- AC18: `bun test` passes.
+- AC19: `bunx tsc --noEmit` passes.
