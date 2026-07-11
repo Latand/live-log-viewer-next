@@ -61,3 +61,11 @@ test("headless retry prefers an eligible account that has not already failed", (
 test("headless selection distinguishes missing authentication from exhausted quota", () => {
   expect(selectHeadlessAccount([{ id: "default", authPresent: false }], [], "default", [], NOW)).toEqual({ kind: "unavailable" });
 });
+
+test("headless selection excludes fresh live signed-out evidence even when credentials remain on disk", () => {
+  const signedOut = { ...observation("default", 20), authenticated: false };
+  expect(selectHeadlessAccount(accounts, [signedOut], "default", [], NOW)).toEqual({
+    kind: "available",
+    accountId: "spare",
+  });
+});

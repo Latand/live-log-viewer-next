@@ -12,15 +12,18 @@ type SelectableAccount = { id: string; authPresent: boolean };
 type Capacity =
   | { kind: "available"; remaining: number }
   | { kind: "exhausted"; resetsAt: number | null }
+  | { kind: "unavailable" }
   | { kind: "unknown" };
 
 function capacity(observation: DurableQuotaObservation | undefined, now: number): Capacity {
-  if (!observation || !observation.authenticated || observation.provenance.source !== "live" || !observation.limits) return { kind: "unknown" };
+  if (!observation || observation.provenance.source !== "live") return { kind: "unknown" };
   const observedAt = Date.parse(observation.observedAt);
   const authCheckedAt = Date.parse(observation.authCheckedAt);
   if (!Number.isFinite(observedAt) || !Number.isFinite(authCheckedAt) || now < observedAt || now < authCheckedAt || now - observedAt > FRESH_QUOTA_MS || now - authCheckedAt > FRESH_QUOTA_MS) {
     return { kind: "unknown" };
   }
+  if (!observation.authenticated) return { kind: "unavailable" };
+  if (!observation.limits) return { kind: "unknown" };
   const windows = [observation.limits.session, observation.limits.weekly].filter((window) => window !== null);
   if (!windows.length || windows.some((window) => !Number.isFinite(window.usedPercent) || window.usedPercent < 0 || window.usedPercent > 100 || (window.resetsAt !== null && (!Number.isSafeInteger(window.resetsAt) || window.resetsAt < 0)))) {
     return { kind: "unknown" };
@@ -47,7 +50,8 @@ export function selectHeadlessAccount(
   const excluded = new Set(excludedIds);
   const candidates = accounts
     .filter((account) => account.authPresent)
-    .map((account) => ({ account, capacity: capacity(byAccount.get(account.id), now) }));
+    .map((account) => ({ account, capacity: capacity(byAccount.get(account.id), now) }))
+    .filter((candidate) => candidate.capacity.kind !== "unavailable");
   if (!candidates.length) return { kind: "unavailable" };
   const rank = (accountId: string): number => excluded.has(accountId) ? 1 : 0;
   const available = candidates
