@@ -13,6 +13,7 @@ process.env.LLV_CLAUDE_HOME = path.join(sandbox, "legacy-claude");
 
 const { activeCodexAccountId, createManagedCodexAccount } = await import("./codex");
 const { activeClaudeAccountId, createManagedClaudeAccount, listClaudeAccounts } = await import("./claude");
+const { accountMutationRevision, withAccountMutationLock } = await import("./accountMutation");
 const { AgentRegistry } = await import("@/lib/agent/registry");
 
 beforeEach(() => {
@@ -114,14 +115,6 @@ async function selectionRemovalRace(engine: "claude" | "codex"): Promise<void> {
     expect(listClaudeAccounts().some((candidate) => candidate.id === account.id)).toBeFalse();
   }
 }
-
-test("Codex removal serializes with selection across processes", async () => {
-  await selectionRemovalRace("codex");
-});
-
-test("Claude removal serializes with selection across processes", async () => {
-  await selectionRemovalRace("claude");
-});
 
 test("simultaneous stale-lock recovery admits one account mutation at a time", async () => {
   const accountB = createManagedCodexAccount("Recovery B");
@@ -266,4 +259,140 @@ test("overlapping selections keep catalog and launch routing aligned across proc
   expect({ exitB, exitC, errors }).toEqual({ exitB: 0, exitC: 0, errors: ["", ""] });
   expect(activeCodexAccountId()).toBe(accountC.id);
   expect(JSON.parse(fs.readFileSync(routingPath, "utf8")).activeAccountId).toBe(accountC.id);
+});
+
+async function controllerSelectionRace(): Promise<void> {
+  const account = createManagedCodexAccount("Controller race");
+  fs.writeFileSync(path.join(account.home, "auth.json"), "{}", { mode: 0o600 });
+  const registry = new AgentRegistry();
+  registry.setEngineRouting("codex", "default");
+  const caseDir = path.join(sandbox, "controller-sync");
+  fs.rmSync(caseDir, { recursive: true, force: true });
+  fs.mkdirSync(caseDir, { recursive: true });
+  const readyPath = path.join(caseDir, "snapshot-ready");
+  const releasePath = path.join(caseDir, "snapshot-release");
+  const selectorDonePath = path.join(caseDir, "selector-done");
+  const controllerPath = path.join(import.meta.dir, "migration/controller.ts");
+  const managerPath = path.join(import.meta.dir, "manager.ts");
+  const registryPath = path.join(import.meta.dir, "../agent/registry.ts");
+  const env = {
+    ...process.env,
+    LLV_STATE_DIR: process.env.LLV_STATE_DIR!,
+    LLV_CODEX_HOME: process.env.LLV_CODEX_HOME!,
+    LLV_CLAUDE_HOME: process.env.LLV_CLAUDE_HOME!,
+  };
+  const controller = Bun.spawn({
+    cmd: [process.execPath, "-e", `
+      const fs = await import("node:fs");
+      const { AgentRegistry } = await import(${JSON.stringify(registryPath)});
+      const { syncCompatibilityRouting } = await import(${JSON.stringify(controllerPath)});
+      const registry = new AgentRegistry();
+      const snapshot = registry.snapshot.bind(registry);
+      registry.snapshot = () => {
+        const value = snapshot();
+        fs.writeFileSync(${JSON.stringify(readyPath)}, "ready");
+        while (!fs.existsSync(${JSON.stringify(releasePath)})) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+        return value;
+      };
+      syncCompatibilityRouting(registry);
+    `],
+    env,
+    stdout: "ignore",
+    stderr: "pipe",
+  });
+  expect(await waitForFile(readyPath, 3_000)).toBeTrue();
+  const selector = Bun.spawn({
+    cmd: [process.execPath, "-e", `
+      const fs = await import("node:fs");
+      const manager = await import(${JSON.stringify(managerPath)});
+      manager.selectAccount("codex", ${JSON.stringify(account.id)});
+      fs.writeFileSync(${JSON.stringify(selectorDonePath)}, "done");
+    `],
+    env,
+    stdout: "ignore",
+    stderr: "pipe",
+  });
+  await waitForFile(selectorDonePath, 500);
+  fs.writeFileSync(releasePath, "release");
+
+  const results = await Promise.all([childResult(controller), childResult(selector)]);
+  expect(results).toEqual([{ exit: 0, error: "" }, { exit: 0, error: "" }]);
+  expect(activeCodexAccountId()).toBe(account.id);
+  expect(registry.engineRouting("codex").activeAccountId).toBe(account.id);
+}
+
+async function persistedLoginFence(engine: "claude" | "codex"): Promise<void> {
+  fs.rmSync(process.env.LLV_STATE_DIR!, { recursive: true, force: true });
+  const account = engine === "codex" ? createManagedCodexAccount("Pending login") : createManagedClaudeAccount("Pending login");
+  fs.writeFileSync(path.join(account.home, engine === "codex" ? "auth.json" : ".credentials.json"), "{}", { mode: 0o600 });
+  const caseDir = path.join(sandbox, `pending-${engine}`);
+  fs.rmSync(caseDir, { recursive: true, force: true });
+  fs.mkdirSync(caseDir, { recursive: true });
+  const readyPath = path.join(caseDir, "ready");
+  const releasePath = path.join(caseDir, "release");
+  const resultPath = path.join(caseDir, "result");
+  const managerPath = path.join(import.meta.dir, "manager.ts");
+  const env = {
+    ...process.env,
+    LLV_STATE_DIR: process.env.LLV_STATE_DIR!,
+    LLV_CODEX_HOME: process.env.LLV_CODEX_HOME!,
+    LLV_CLAUDE_HOME: process.env.LLV_CLAUDE_HOME!,
+  };
+  const selector = Bun.spawn({
+    cmd: [process.execPath, "-e", `
+      const fs = await import("node:fs");
+      const manager = await import(${JSON.stringify(managerPath)});
+      if (${JSON.stringify(engine)} === "codex") {
+        const runtime = await import(${JSON.stringify(path.join(import.meta.dir, "codexRuntime.ts"))});
+        runtime.managedCodexRuntime();
+      }
+      fs.writeFileSync(${JSON.stringify(readyPath)}, "ready");
+      while (!fs.existsSync(${JSON.stringify(releasePath)})) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+      try {
+        manager.selectAccount(${JSON.stringify(engine)}, ${JSON.stringify(account.id)});
+        fs.writeFileSync(${JSON.stringify(resultPath)}, "selected");
+      } catch (error) {
+        fs.writeFileSync(${JSON.stringify(resultPath)}, error?.name ?? "error");
+      }
+    `],
+    env,
+    stdout: "ignore",
+    stderr: "pipe",
+  });
+  expect(await waitForFile(readyPath, 3_000)).toBeTrue();
+  const now = Date.now();
+  withAccountMutationLock(() => {
+    if (engine === "codex") {
+      fs.writeFileSync(path.join(process.env.LLV_STATE_DIR!, "codex-login-attempts.json"), JSON.stringify({
+        version: 1,
+        attempts: {
+          [account.home]: { accountId: account.id, generation: 1, state: "pending", startedAt: now, updatedAt: now, reason: null },
+        },
+      }));
+    } else {
+      fs.writeFileSync(path.join(process.env.LLV_STATE_DIR!, "claude-auth-operations.json"), JSON.stringify([{
+        operationId: "other-process-login",
+        accountId: account.id,
+        phase: "awaiting_code",
+        pid: null,
+        startToken: null,
+        generation: 1,
+        startedAt: new Date(now).toISOString(),
+        deadlineAt: new Date(now + 60_000).toISOString(),
+      }]));
+    }
+  });
+  fs.writeFileSync(releasePath, "release");
+  expect(await childResult(selector)).toEqual({ exit: 0, error: "" });
+  expect(fs.readFileSync(resultPath, "utf8")).toBe("AccountLoginPendingError");
+}
+
+test("interprocess mutation matrix covers selection, controller sync, login state, and removal", async () => {
+  const initialRevision = accountMutationRevision();
+  await controllerSelectionRace();
+  for (const engine of ["codex", "claude"] as const) {
+    await persistedLoginFence(engine);
+    await selectionRemovalRace(engine);
+  }
+  expect(accountMutationRevision()).toBeGreaterThan(initialRevision);
 });

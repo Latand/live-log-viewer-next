@@ -5,6 +5,7 @@ import path from "node:path";
 
 import { resolveBinary } from "@/lib/agent/cli";
 import { statePath } from "@/lib/configDir";
+import { withAccountMutationLock } from "./accountMutation";
 
 import type { LoginOperationSummary, LoginPhase, LoginResult } from "./contracts";
 import { claudeAccountForSpawn, claudeManagedEnvironment, isManagedClaudeHome, managedClaudeCredentialIsSafe } from "./claude";
@@ -198,7 +199,24 @@ export class ClaudeLoginSupervisor {
     const data = [...this.operations.values()]
       .filter((item) => !terminal(item.phase))
       .map(({ operationId, accountId, phase, pid, startToken, generation, startedAt, deadlineAt }) => ({ operationId, accountId, phase, pid, startToken, generation, startedAt, deadlineAt }));
-    this.store.save(data);
+    withAccountMutationLock(() => this.store.save(data));
+  }
+
+  private refreshDurableOperations(): void {
+    let rows: PersistedOperation[];
+    try { rows = this.store.load(); } catch { return; }
+    for (const row of rows) {
+      if (!validPersistedOperation(row)) continue;
+      this.generation = Math.max(this.generation, row.generation);
+      if (this.operations.has(row.operationId)) continue;
+      this.operations.set(row.operationId, {
+        ...row,
+        loginUrl: null,
+        acceptsCode: false,
+        result: null,
+        submitted: row.phase === "verifying",
+      });
+    }
   }
 
   private summary(item: LoginOperation): LoginOperationSummary {
@@ -216,6 +234,7 @@ export class ClaudeLoginSupervisor {
   }
 
   reserve(): LoginOperationSummary {
+    this.refreshDurableOperations();
     if ([...this.operations.values()].some((item) => !terminal(item.phase))) throw new Error("a Claude login operation is already running");
     const now = this.ports.now();
     const item: LoginOperation = {
@@ -312,6 +331,7 @@ export class ClaudeLoginSupervisor {
   }
 
   async input(operationId: string, code: string): Promise<LoginOperationSummary> {
+    this.refreshDurableOperations();
     const item = this.operations.get(operationId);
     if (!item || terminal(item.phase)) throw new Error("login operation is unavailable");
     if (item.submitted) throw new Error("login code was already submitted");
@@ -380,6 +400,7 @@ export class ClaudeLoginSupervisor {
   }
 
   async cancel(operationId: string): Promise<LoginOperationSummary> {
+    this.refreshDurableOperations();
     const item = this.operations.get(operationId);
     if (!item) throw new Error("unknown Claude login operation");
     if (terminal(item.phase) || item.phase === "canceling") return this.summary(item);
@@ -439,12 +460,30 @@ export class ClaudeLoginSupervisor {
   }
 
   get(id: string): LoginOperationSummary | null {
+    this.refreshDurableOperations();
     const item = this.operations.get(id);
     return item ? this.summary(item) : null;
   }
 
   forAccount(accountId: string): LoginOperationSummary | null {
-    const item = [...this.operations.values()].filter((candidate) => candidate.accountId === accountId).sort((a, b) => b.generation - a.generation)[0];
+    let durable: PersistedOperation[] = [];
+    try { durable = this.store.load().filter(validPersistedOperation); } catch { /* in-memory terminal results remain readable */ }
+    const persisted = durable.filter((candidate) => candidate.accountId === accountId).sort((a, b) => b.generation - a.generation)[0];
+    if (persisted) {
+      const local = this.operations.get(persisted.operationId);
+      if (local) return this.summary(local);
+      return {
+        operationId: persisted.operationId,
+        phase: persisted.phase,
+        loginUrl: null,
+        acceptsCode: false,
+        deadlineAt: persisted.deadlineAt,
+        result: null,
+      };
+    }
+    const item = [...this.operations.values()]
+      .filter((candidate) => candidate.accountId === accountId && terminal(candidate.phase))
+      .sort((a, b) => b.generation - a.generation)[0];
     return item ? this.summary(item) : null;
   }
 

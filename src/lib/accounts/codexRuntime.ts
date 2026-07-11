@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import type { CodexAccount } from "./codex";
+import { withAccountMutationLock } from "./accountMutation";
 import { statePath } from "../configDir";
 import {
   CodexAppServerClient,
@@ -98,7 +99,7 @@ function readStoredAttempts(file: string): Map<string, PersistedAttempt> {
  */
 export class ManagedCodexRuntime {
   private readonly active = new Map<string, ActiveAttempt>();
-  private readonly records: Map<string, PersistedAttempt>;
+  private records: Map<string, PersistedAttempt>;
   private readonly startClient: (home: string) => Promise<CodexAppServerClient>;
   private readonly now: () => number;
   private readonly stateFile: string;
@@ -121,6 +122,7 @@ export class ManagedCodexRuntime {
 
   private beginLogin(account: CodexAccount, replace: boolean): Promise<ManagedLoginAttempt> {
     if (account.kind !== "managed") return Promise.reject(new Error("only managed Codex accounts can start an app-server login"));
+    this.records = readStoredAttempts(this.stateFile);
     const home = canonicalHome(account.home);
     const existing = this.active.get(home);
     if (existing && !replace) return existing.startPromise;
@@ -188,6 +190,7 @@ export class ManagedCodexRuntime {
       await this.cancelAttempt(active, "cancelled");
       return true;
     }
+    this.records = readStoredAttempts(this.stateFile);
     const stored = [...this.records.entries()].find(([, attempt]) => attempt.accountId === accountId);
     if (!stored) return false;
     this.record(stored[0], { ...stored[1], state: "cancelled", updatedAt: this.now(), reason: "cancelled" });
@@ -228,7 +231,7 @@ export class ManagedCodexRuntime {
     if (account.kind !== "managed") return { state: account.authPresent ? "authenticated" : "idle", attemptState: null, deviceAuth: null };
     const home = canonicalHome(account.home);
     const active = this.active.get(home);
-    const stored = this.records.get(home);
+    const stored = readStoredAttempts(this.stateFile).get(home);
     try {
       const status = await this.readAccount(active?.client ?? null, account.home);
       if (isSupportedChatGptAccount(status)) {
@@ -263,12 +266,14 @@ export class ManagedCodexRuntime {
     if (account.kind !== "managed") return { state: account.authPresent ? "authenticated" : "idle", attemptState: null, deviceAuth: null };
     const home = canonicalHome(account.home);
     const active = this.active.get(home);
-    if (active?.state === "pending" && active.verificationUrl && active.userCode) {
+    const stored = readStoredAttempts(this.stateFile).get(home);
+    if (stored?.state === "pending" && active?.state === "pending" && active.verificationUrl && active.userCode) {
       return { state: "pending", attemptState: "pending", deviceAuth: { url: active.verificationUrl, code: active.userCode } };
     }
-    const stored = this.records.get(home);
     return stored
       ? { state: stored.state, attemptState: stored.state, deviceAuth: null }
+      : active?.state === "pending"
+        ? { state: "pending", attemptState: "pending", deviceAuth: null }
       : { state: "idle", attemptState: null, deviceAuth: null };
   }
 
@@ -315,24 +320,29 @@ export class ManagedCodexRuntime {
   }
 
   private record(home: string, attempt: PersistedAttempt): void {
-    this.records.set(home, {
-      accountId: attempt.accountId,
-      generation: attempt.generation,
-      state: attempt.state,
-      startedAt: attempt.startedAt,
-      updatedAt: attempt.updatedAt,
-      reason: attempt.reason,
+    withAccountMutationLock(() => {
+      this.records = readStoredAttempts(this.stateFile);
+      const previous = this.records.get(home);
+      if (previous && previous.generation > attempt.generation) return;
+      this.records.set(home, {
+        accountId: attempt.accountId,
+        generation: attempt.generation,
+        state: attempt.state,
+        startedAt: attempt.startedAt,
+        updatedAt: attempt.updatedAt,
+        reason: attempt.reason,
+      });
+      const stored: StoredAttempts = { version: 1, attempts: Object.fromEntries(this.records) };
+      const dir = path.dirname(this.stateFile);
+      const tmp = path.join(dir, `.${path.basename(this.stateFile)}.${process.pid}.${Date.now()}.tmp`);
+      try {
+        fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+        fs.writeFileSync(tmp, JSON.stringify(stored, null, 2) + "\n", { mode: 0o600 });
+        fs.renameSync(tmp, this.stateFile);
+      } finally {
+        fs.rmSync(tmp, { force: true });
+      }
     });
-    const stored: StoredAttempts = { version: 1, attempts: Object.fromEntries(this.records) };
-    const dir = path.dirname(this.stateFile);
-    const tmp = path.join(dir, `.${path.basename(this.stateFile)}.${process.pid}.${Date.now()}.tmp`);
-    try {
-      fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-      fs.writeFileSync(tmp, JSON.stringify(stored, null, 2) + "\n", { mode: 0o600 });
-      fs.renameSync(tmp, this.stateFile);
-    } finally {
-      fs.rmSync(tmp, { force: true });
-    }
   }
 }
 
