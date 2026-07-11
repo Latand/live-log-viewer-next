@@ -178,33 +178,36 @@ export function createManagedClaudeAccount(label: string): ClaudeAccount {
   });
 }
 
-export function removeManagedClaudeAccount(id: string): void {
-  withRegistryLock(() => {
+export function removeManagedClaudeAccount(id: string): { cleanupPending: boolean } {
+  return withRegistryLock(() => {
     cached = null; const registry = mutable(); const existing = registry.accounts.find((item) => item.id === id); if (!existing) throw new UnknownClaudeAccountError(id);
     const home = managedHome(id);
     const exists = fs.existsSync(home);
     if (exists && !managedClaudeHomeIsSafe(id, true)) throw new UnsafeClaudeHomeError();
-    if (exists) fs.rmSync(home, { recursive: true, force: true });
     write({ ...registry, active: registry.active === id ? DEFAULT_ID : registry.active, accounts: registry.accounts.filter((item) => item.id !== id) });
+    if (exists) try { fs.rmSync(home, { recursive: true, force: true }); } catch { return { cleanupPending: true }; }
+    return { cleanupPending: false };
   });
 }
 
 /** Removes failed-login homes that have no registry owner. Only safe direct children qualify. */
-export function cleanupOrphanedClaudeHomes(): string[] {
+export function cleanupOrphanedClaudeHomes(): { removed: string[]; unresolved: string[] } {
   return withRegistryLock(() => {
     cached = null;
     const registry = mutable();
     const registered = new Set(registry.accounts.map((account) => account.id));
     let entries: fs.Dirent[];
     try { entries = fs.readdirSync(claudeAccountsRoot(), { withFileTypes: true }); }
-    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return []; throw error; }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return { removed: [], unresolved: [] }; throw error; }
     const removed: string[] = [];
+    const unresolved: string[] = [];
     for (const entry of entries) {
-      if (!entry.isDirectory() || registered.has(entry.name) || !managedClaudeHomeIsSafe(entry.name, true)) continue;
-      fs.rmSync(managedHome(entry.name), { recursive: true, force: true });
-      removed.push(entry.name);
+      if (registered.has(entry.name)) continue;
+      if (!entry.isDirectory() || !managedClaudeHomeIsSafe(entry.name, true)) { unresolved.push(entry.name); continue; }
+      try { fs.rmSync(managedHome(entry.name), { recursive: true, force: true }); removed.push(entry.name); }
+      catch { unresolved.push(entry.name); }
     }
-    return removed.sort();
+    return { removed: removed.sort(), unresolved: unresolved.sort() };
   });
 }
 

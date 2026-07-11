@@ -39,3 +39,12 @@ test("an unresolved live launch blocks removal of every managed account for its 
   expect(accountRemovalBlockers("codex", "work")).toEqual(["live_sessions"]);
   expect(accountRemovalBlockers("claude", "work")).toEqual([]);
 });
+
+test("a current conversation blocks removal even after its host becomes inactive", () => {
+  const registry = new AgentRegistry(path.join(process.env.LLV_STATE_DIR!, "agent-registry.json"));
+  setAgentRegistryForTests(registry);
+  registry.ensureConversation("codex", "/history.jsonl", "work");
+
+  expect(accountRemovalBlockers("codex", "work")).toEqual(["current_conversations"]);
+  expect(accountRemovalBlockers("codex", "other")).toEqual([]);
+});

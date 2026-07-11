@@ -71,7 +71,8 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
         targetAccountId: conversation.migration.targetId,
         targetLabel: conversation.migration.targetId,
         sourceLabel: source?.accountId ?? undefined,
-        heldDeliveries: Object.values(registrySnapshot.heldDeliveries).filter((delivery) => delivery.conversationId === conversation.id).length,
+        heldDeliveries: Object.values(registrySnapshot.heldDeliveries).filter((delivery) =>
+          delivery.conversationId === conversation.id && delivery.state !== "delivered").length,
         failure: conversation.migration.error,
         revision: conversation.migration.revision,
       };

@@ -37,6 +37,9 @@ export type EngineMigrationState = "draining" | "stopped" | "complete";
     the banner and drives the panel/audit trail. */
 export type MigrationOrigin = "manual" | "auto";
 
+/** Conversation scope selected when committing an account routing change. */
+export type AccountMigrationScope = "active" | "all";
+
 /** Quota window that bound the effective-remaining minimum. */
 export type QuotaWindow = "session" | "weekly";
 
@@ -50,12 +53,14 @@ export interface MigrationCounts {
   total: number;
 }
 
-/** Pre-migration scope counts shown in the confirm step: how many move now
-    (idle) vs after their current turn (busy). */
+/** Pre-migration scope counts shown in the confirm step: active idle sessions
+    move now, busy sessions move after their turn, and inactive history waits
+    for its next message. */
 export interface PreviewCounts {
   total: number;
   idle: number;
   busy: number;
+  deferred: number;
 }
 
 export interface MigrationReason {
@@ -151,7 +156,7 @@ export function migrationHoldsSends(state: CardMigrationState | null): boolean {
 /** What selecting an account should do, given the preview result. Every switch
     surface starts with a preview and continues through a durable migration intent.
     `recoverable-error` keeps preview failures visible for retry. Empty scope uses
-    the revision-fenced migration intent path and adopts the target durably. */
+    the revision-fenced routing path and adopts the target durably. */
 export type AccountSelectOutcome = "migrate" | "confirm" | "recoverable-error";
 export function accountSelectOutcome(preview: MigrationPreview | null): AccountSelectOutcome {
   if (preview === null) return "recoverable-error";
@@ -426,7 +431,7 @@ export function parseMigrationPreview(
   return {
     targetId,
     targetLabel: str(record.targetLabel ?? intent?.targetLabel) ?? fallback?.targetLabel ?? targetId,
-    counts: { total: num(counts.total), idle: num(counts.idle), busy: num(counts.busy) },
+    counts: { total: num(counts.total), idle: num(counts.idle), busy: num(counts.busy), deferred: num(counts.deferred) },
     previewRevision: num(record.previewRevision ?? record.revision ?? intent?.revision),
   };
 }

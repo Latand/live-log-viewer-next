@@ -1,7 +1,7 @@
 import { agentRegistry } from "@/lib/agent/registry";
 
 export type ManagedAccountEngine = "claude" | "codex";
-export type AccountRemovalBlocker = "live_sessions";
+export type AccountRemovalBlocker = "live_sessions" | "current_conversations";
 
 const LIVE_ENTRY_STATUSES = new Set(["starting", "live", "idle", "handoff"]);
 const LIVE_RECEIPT_STATES = new Set(["starting", "pane-bound", "host-verified", "prompt-delivered", "path-pending"]);
@@ -18,5 +18,10 @@ export function accountRemovalBlockers(engine: ManagedAccountEngine, accountId: 
     entry.key.engine === engine && (entry.accountId === accountId || entry.accountId === null) && LIVE_ENTRY_STATUSES.has(entry.status));
   const liveReceipt = Object.values(snapshot.receipts).some((receipt) =>
     receipt.engine === engine && (receipt.accountId === accountId || receipt.accountId === null) && LIVE_RECEIPT_STATES.has(receipt.state));
-  return liveEntry || liveReceipt ? ["live_sessions"] : [];
+  const currentConversation = Object.values(snapshot.conversations).some((conversation) =>
+    conversation.engine === engine && conversation.generations.at(-1)?.accountId === accountId);
+  return [
+    ...(liveEntry || liveReceipt ? ["live_sessions" as const] : []),
+    ...(currentConversation ? ["current_conversations" as const] : []),
+  ];
 }

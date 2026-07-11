@@ -139,10 +139,42 @@ test("managed Codex removal retires routing and migration intents targeting the 
   expect(registry.snapshot().migrationIntents[intent.id]?.state).toBe("stopped");
 });
 
+test("managed Codex removal reports pending cleanup when local data survives", async () => {
+  const account = createManagedCodexAccount("Cleanup pending");
+  const originalRm = fs.rmSync;
+  fs.rmSync = ((target: fs.PathLike, options?: fs.RmDirOptions) => {
+    if (path.resolve(String(target)) === path.resolve(account.home)) throw Object.assign(new Error("denied"), { code: "EACCES" });
+    return originalRm(target, options);
+  }) as typeof fs.rmSync;
+  try {
+    const response = await remove(new NextRequest("http://127.0.0.1/api/accounts/codex", {
+      method: "DELETE", headers: { host: "127.0.0.1", "content-type": "application/json" }, body: JSON.stringify({ id: account.id }),
+    }));
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({ removed: { id: account.id }, cleanupPending: true });
+  } finally {
+    fs.rmSync = originalRm;
+  }
+});
+
+test("managed Codex removal stays blocked while a current conversation depends on the account", async () => {
+  const account = createManagedCodexAccount("Current history");
+  const registry = agentRegistry();
+  registry.ensureConversation("codex", "/current-codex.jsonl", account.id);
+
+  const response = await remove(new NextRequest("http://127.0.0.1/api/accounts/codex", {
+    method: "DELETE", headers: { host: "127.0.0.1", "content-type": "application/json" }, body: JSON.stringify({ id: account.id, force: true }),
+  }));
+
+  expect(response.status).toBe(409);
+  await expect(response.json()).resolves.toEqual(expect.objectContaining({ blockers: ["current_conversations"] }));
+});
+
 test("managed Codex removal restores routing when the underlying deletion fails after routing was retired", async () => {
   const account = createManagedCodexAccount("Unsafe home");
   const registry = agentRegistry();
   registry.setEngineRouting("codex", account.id);
+  const before = registry.snapshot();
   // Simulates the home becoming unsafe in the window between the route's
   // initial listCodexAccounts() check and removeManagedCodexAccount's own
   // re-read: retireAccount is the last synchronous step before that re-read,
@@ -159,7 +191,7 @@ test("managed Codex removal restores routing when the underlying deletion fails 
     }));
     expect(response.status).toBe(409);
     await expect(response.json()).resolves.toEqual(expect.objectContaining({ code: "accounts_locked" }));
-    expect(registry.engineRouting("codex").activeAccountId).toBe(account.id);
+    expect(registry.snapshot()).toEqual(before);
   } finally {
     registry.retireAccount = originalRetire;
   }

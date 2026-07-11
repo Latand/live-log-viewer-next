@@ -18,11 +18,12 @@ const { GET } = await import("./route");
 const { POST } = await import("./codex/active/route");
 const { POST: setClaudeActive } = await import("./claude/active/route");
 const { POST: createClaude } = await import("./claude/route");
+const { updateMigrationAction } = await import("../account-migrations/[intentId]/action");
 const { createManagedClaudeAccount } = await import("@/lib/accounts/claude");
 const { createManagedCodexAccount, listCodexAccounts, setCodexAccountLoginPane } = await import("@/lib/accounts/codex");
 const { CodexAppServerClient } = await import("@/lib/accounts/codexAppServer");
 const { ManagedCodexRuntime, setManagedCodexRuntimeForTests } = await import("@/lib/accounts/codexRuntime");
-const { agentRegistry } = await import("@/lib/agent/registry");
+const { AgentRegistry, agentRegistry } = await import("@/lib/agent/registry");
 const { emptyLaunchProfile } = await import("@/lib/accounts/migration/contracts");
 
 class FakeChild extends EventEmitter {
@@ -93,6 +94,43 @@ test("accounts GET is secret-free and leaves login reconciliation to the control
   expect(body.codex.accounts.find((item) => item.id === account.id)?.loginPending).toBe(true);
   expect(body.codex.accounts.find((item) => item.id === account.id)).toEqual(expect.objectContaining({ loginState: "pending", deviceAuth: null }));
   expect(listCodexAccounts().find((item) => item.id === account.id)?.loginPane).not.toBeNull();
+});
+
+test("retrying failed migrations requests one immediate reconciliation cycle", async () => {
+  const registry = new AgentRegistry(path.join(SANDBOX, "retry-action-registry.json"));
+  const conversation = registry.ensureConversation("codex", "/retry-now.jsonl", "source");
+  const intent = registry.commitMigrationIntent({
+    engine: "codex",
+    targetId: "target",
+    origin: "manual",
+    requestId: "retry-now",
+    expectedRevision: registry.engineRouting("codex").revision,
+    scope: "all",
+  });
+  const migration = registry.conversation(conversation.id)!.migration!;
+  registry.transitionConversationMigration(conversation.id, migration.revision, [migration.phase], {
+    phase: "failed-recoverable",
+    error: "retry",
+    errorCode: "provider-failed",
+  });
+  let ticks = 0;
+  const requestTick = () => { ticks += 1; };
+  const response = await updateMigrationAction(new NextRequest(`http://127.0.0.1/api/account-migrations/${intent.id}`, {
+    method: "POST",
+    headers: { host: "127.0.0.1", "content-type": "application/json" },
+    body: JSON.stringify({ action: "retry-failed", expectedRevision: intent.revision }),
+  }), { params: Promise.resolve({ intentId: intent.id }) }, registry, requestTick);
+  expect(response.status).toBe(200);
+  expect(await response.json()).toMatchObject({ retried: 1 });
+  expect(ticks).toBe(1);
+
+  const stale = await updateMigrationAction(new NextRequest(`http://127.0.0.1/api/account-migrations/${intent.id}`, {
+    method: "POST",
+    headers: { host: "127.0.0.1", "content-type": "application/json" },
+    body: JSON.stringify({ action: "retry-failed", expectedRevision: intent.revision + 1 }),
+  }), { params: Promise.resolve({ intentId: intent.id }) }, registry, requestTick);
+  expect(stale.status).toBe(409);
+  expect(ticks).toBe(1);
 });
 
 test("managed authentication projects only a durable live controller observation", async () => {
@@ -223,9 +261,9 @@ test("active route returns a target-aware preview and idempotent revision-fenced
   }]);
   const previewResponse = await POST(migrationRequest({ id: target.id, mode: "preview" }));
   expect(previewResponse.status).toBe(200);
-  const preview = await previewResponse.json() as { targetId: string; targetLabel: string; counts: { total: number; idle: number; busy: number; alreadyTarget: number }; previewRevision: number };
+  const preview = await previewResponse.json() as { targetId: string; targetLabel: string; counts: { total: number; idle: number; busy: number; deferred: number; alreadyTarget: number }; previewRevision: number };
   expect(preview).toMatchObject({ targetId: target.id, targetLabel: "Migration target" });
-  expect(preview.counts).toEqual({ total: 1, idle: 1, busy: 0, alreadyTarget: 0 });
+  expect(preview.counts).toEqual({ total: 1, idle: 0, busy: 0, deferred: 1, alreadyTarget: 0 });
   expect(preview).not.toHaveProperty("excludedRoots");
   expect(preview).not.toHaveProperty("rootWarning");
 
@@ -237,6 +275,34 @@ test("active route returns a target-aware preview and idempotent revision-fenced
   const firstBody = await first.json() as { intent: { id: string; targetId: string } };
   const repeatedBody = await repeated.json() as { intent: { id: string; targetId: string } };
   expect(repeatedBody.intent).toEqual(firstBody.intent);
+});
+
+test("an explicit all scope migrates deferred history", async () => {
+  const target = createManagedCodexAccount("Bulk target");
+  agentRegistry().reconcileConversations([{
+    engine: "codex",
+    path: "/bulk-history.jsonl",
+    accountId: "default",
+    launchProfile: emptyLaunchProfile({ title: "Bulk history" }),
+    turn: { state: "idle", source: "empty", terminalAt: null },
+    observedAt: "2026-07-11T10:00:00.000Z",
+  }]);
+  const preview = await (await POST(migrationRequest({ id: target.id, mode: "preview" }))).json() as {
+    counts: { deferred: number };
+    previewRevision: number;
+  };
+
+  const response = await POST(migrationRequest({
+    id: target.id,
+    mode: "migrate",
+    scope: "all",
+    previewRevision: preview.previewRevision,
+    requestId: "explicit-bulk",
+  }));
+
+  expect(preview.counts.deferred).toBeGreaterThanOrEqual(1);
+  expect(response.status).toBe(202);
+  expect(agentRegistry().conversationForPath("/bulk-history.jsonl")?.migration).toMatchObject({ targetId: target.id, phase: "requested" });
 });
 
 test("migrate repairs generations on another account when routing already names the target", async () => {
@@ -252,7 +318,7 @@ test("migrate repairs generations on another account when routing already names 
   agentRegistry().setEngineRouting("codex", target.id);
 
   const preview = await (await POST(migrationRequest({ id: target.id, mode: "preview" }))).json() as { counts: { total: number }; previewRevision: number };
-  const response = await POST(migrationRequest({ id: target.id, mode: "migrate", previewRevision: preview.previewRevision, requestId: "same-active-repair" }));
+  const response = await POST(migrationRequest({ id: target.id, mode: "migrate", scope: "all", previewRevision: preview.previewRevision, requestId: "same-active-repair" }));
 
   expect(preview.counts.total).toBeGreaterThanOrEqual(1);
   expect(response.status).toBe(202);

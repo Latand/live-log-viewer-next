@@ -3,7 +3,7 @@ import { activeCodexAccountId, codexAccountsMutationLocked, codexLoginPaneStatus
 import { managedCodexRuntime } from "@/lib/accounts/codexRuntime";
 import { agentRegistry, type AgentRegistry } from "@/lib/agent/registry";
 import { readTranscriptHosts } from "@/lib/agent/transcriptHost";
-import { deliverConversationMessage } from "@/lib/delivery";
+import { deliverConversationMessage, migrationDeliveryOutcome } from "@/lib/delivery";
 import { reconcileFlowConversationOwnership } from "@/lib/flows/store";
 import { reconcileHandoffConversationOwnership } from "@/lib/handoffLineage";
 import { listFilesWithProjectCatalog, reconcileFileControllers } from "@/lib/scanner";
@@ -14,6 +14,7 @@ import { reconcileWorkflowConversationOwnership } from "@/lib/workflows/store";
 import { paneInfo } from "@/lib/tmux";
 
 import { drainHeldDeliveries, reconcileMigrationInventory, reconcileMigrations, type HeldDeliveryPort } from "./coordinator";
+import { registerAccountMigrationTick } from "./controllerSignal";
 import type { SuccessorProviderPort } from "./contracts";
 import { RegisteredSuccessorProvider } from "./provider";
 import { QuotaController } from "./quotaController";
@@ -22,9 +23,8 @@ const CONTROLLER_INTERVAL_MS = 10_000;
 
 const deliveryPort: HeldDeliveryPort = {
   async deliver({ delivery, path, clientMessageId }) {
-    const result = await deliverConversationMessage({ pid: null, path, text: delivery.text, images: [], clientMessageId });
-    if (!result.ok) return "failed";
-    return "delivered";
+    const result = await deliverConversationMessage({ pid: null, path, text: delivery.text, images: [], clientMessageId, reservedDeliveryId: delivery.id });
+    return migrationDeliveryOutcome(result);
   },
 };
 
@@ -34,6 +34,7 @@ export async function reconcileAccountMigrationCycle(
   provider: SuccessorProviderPort = new RegisteredSuccessorProvider(),
   delivery: HeldDeliveryPort = deliveryPort,
 ): Promise<void> {
+  registry.compactDeliveryReservations();
   await reconcileMigrations(provider, delivery, registry);
   for (const conversation of Object.values(registry.snapshot().conversations)) {
     if (conversation.migration?.phase === "rolled-back") await drainHeldDeliveries(conversation.id, delivery, registry);
@@ -66,16 +67,31 @@ async function reconcileAccountLogins(): Promise<void> {
 
 export class AccountMigrationController {
   private running: Promise<void> | null = null;
+  private trailingCycleRequested = false;
 
   constructor(
     private readonly registry: AgentRegistry = agentRegistry(),
     private readonly quota = new QuotaController(registry),
+    private readonly cycle: (() => Promise<void>) | null = null,
   ) {}
 
   tick(): Promise<void> {
-    if (this.running) return this.running;
-    this.running = this.run().finally(() => { this.running = null; });
+    if (this.running) {
+      this.trailingCycleRequested = true;
+      return this.running;
+    }
+    this.running = this.runRequestedCycles().finally(() => { this.running = null; });
     return this.running;
+  }
+
+  private async runRequestedCycles(): Promise<void> {
+    let failure: unknown = null;
+    do {
+      this.trailingCycleRequested = false;
+      try { await (this.cycle?.() ?? this.run()); }
+      catch (error) { failure ??= error; }
+    } while (this.trailingCycleRequested);
+    if (failure) throw failure;
   }
 
   private async run(): Promise<void> {
@@ -113,6 +129,7 @@ const globalController = globalThis as unknown as {
 
 export async function startAccountMigrationController(): Promise<void> {
   const controller = globalController.__llvAccountMigrationController ??= new AccountMigrationController();
+  registerAccountMigrationTick(() => controller.tick());
   if (!globalController.__llvAccountMigrationTimer) {
     const timer = setInterval(() => void controller.tick().catch(() => {
       console.error("[account migration controller] durable reconciliation tick failed");

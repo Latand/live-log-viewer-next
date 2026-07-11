@@ -28,6 +28,70 @@ function spawnEntry(pathname: string, accountId = "terra") {
 }
 
 describe("agent registry", () => {
+  test("startup compaction bounds legacy delivered reservations per conversation", () => {
+    const store = registry();
+    const conversation = store.ensureConversation("codex", "/legacy-deliveries.jsonl", "default");
+    const snapshot = store.snapshot();
+    for (let index = 0; index < 105; index += 1) {
+      const id = `legacy-${String(index).padStart(3, "0")}`;
+      snapshot.heldDeliveries[id] = {
+        id,
+        conversationId: conversation.id,
+        text: `legacy body ${index}`,
+        createdAt: `2026-07-11T00:${String(Math.floor(index / 60)).padStart(2, "0")}:${String(index % 60).padStart(2, "0")}.000Z`,
+        clientMessageId: id,
+        payloadKind: "text",
+        artifactPaths: [],
+        state: "delivered",
+        generationId: conversation.generations.at(-1)!.id,
+        attempts: 1,
+        assignedAt: null,
+        deliveredAt: `2026-07-11T00:${String(Math.floor(index / 60)).padStart(2, "0")}:${String(index % 60).padStart(2, "0")}.000Z`,
+        error: null,
+      };
+    }
+    fs.writeFileSync(store.filename, JSON.stringify(snapshot));
+
+    const upgraded = new AgentRegistry(store.filename);
+    expect(upgraded.compactDeliveryReservations()).toBe(5);
+    const restarted = new AgentRegistry(store.filename);
+    const retained = Object.values(restarted.snapshot().heldDeliveries);
+    expect(retained).toHaveLength(100);
+    expect(retained.every((delivery) => delivery.text === "")).toBe(true);
+    expect(retained.map((delivery) => delivery.id)).not.toContain("legacy-000");
+    expect(retained.map((delivery) => delivery.id)).toContain("legacy-104");
+  });
+
+  test("startup compaction bounds abandoned failed reservations and leaves capacity", () => {
+    const store = registry();
+    const conversation = store.ensureConversation("codex", "/failed-deliveries.jsonl", "default");
+    const generationId = conversation.generations.at(-1)!.id;
+    for (let index = 0; index < 105; index += 1) {
+      const queued = store.holdDelivery(conversation.id, `failed body ${index}`, `failed-${index}`);
+      store.beginDeliveryAttempt(queued.id, generationId);
+      store.recordDeliveryOutcome(queued.id, "failed", "host unavailable");
+    }
+
+    const failed = store.pendingDeliveries(conversation.id);
+    expect(failed).toHaveLength(50);
+    expect(failed.every((delivery) => delivery.state === "failed")).toBe(true);
+    expect(store.holdDelivery(conversation.id, "new body", "new-after-failures")).toMatchObject({ state: "assigned" });
+  });
+
+  test("account-retirement compensation preserves unrelated concurrent mutations", () => {
+    const store = registry();
+    store.setEngineRouting("codex", "work");
+    const before = store.snapshot();
+    store.retireAccount("codex", "work", "default");
+    const retired = store.snapshot();
+    store.setAutoBalancePolicy("claude", false, store.autoBalancePolicy("claude").revision);
+
+    store.restoreSnapshot(retired, before);
+
+    expect(store.engineRouting("codex").activeAccountId).toBe("work");
+    expect(store.autoBalancePolicy("claude").enabled).toBeFalse();
+  });
+
   test("writes receipts and a canonical atomic entry", () => {
     const store = registry();
     const receipt = store.beginSpawn("codex", "/repo");
@@ -248,11 +312,12 @@ describe("agent registry", () => {
       host: { kind: "tmux", endpoint: "/tmp", server: { pid: 9, startIdentity: "9:a" }, paneId: "%9", panePid: { pid: 99, startIdentity: "99:a" }, windowName: "codex", agent: { pid: 100, startIdentity: "100:a" }, argv: ["codex"] },
     });
     expect(observed.kind).toBe("settled");
+    const revisionAfterObservedSettlement = store.snapshot().conversationRevision.codex;
     const route = store.settleSpawn(receipt.launchId, spawnEntry(path));
     expect(route).toMatchObject({ kind: "settled", receipt: { completionMode: "route-recovered", accountId: "terra", conversationId: begun.receipt.conversationId } });
     const snapshot = store.snapshot();
     expect(snapshot.conversations[begun.receipt.conversationId]?.generations).toHaveLength(1);
-    expect(snapshot.conversationRevision.codex).toBe(1);
+    expect(snapshot.conversationRevision.codex).toBe(revisionAfterObservedSettlement);
     expect(snapshot.entries["codex:019f4906-3f67-7b72-9fbc-9ec3b5ad1326"]?.launchProfile?.parentConversationId).toBe("conversation_parent");
     expect(snapshot.lineageEdges[begun.receipt.conversationId]).toMatchObject({
       childSessionKey: { engine: "codex", sessionId: "019f4906-3f67-7b72-9fbc-9ec3b5ad1326" },

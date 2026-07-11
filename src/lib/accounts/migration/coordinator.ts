@@ -3,7 +3,7 @@ import crypto from "node:crypto";
 import { accountManager } from "@/lib/accounts/manager";
 import { listClaudeAccounts } from "@/lib/accounts/claude";
 import { listCodexAccounts } from "@/lib/accounts/codex";
-import { agentRegistry, type AgentRegistry, type ConversationObservation, type RegistryConversation } from "@/lib/agent/registry";
+import { agentRegistry, type AgentRegistry, type ConversationObservation, type MigrationScope, type RegistryConversation } from "@/lib/agent/registry";
 import { headCwd } from "@/lib/agent/transcript";
 import {
   remapBoardPaths as remapDurableBoardPaths,
@@ -34,12 +34,12 @@ import { AUTO_BALANCE_COOLDOWN_MS } from "./quotaPolicy";
 export interface MigrationPreview {
   targetId: string;
   targetLabel: string;
-  counts: { total: number; idle: number; busy: number; alreadyTarget: number };
+  counts: { total: number; idle: number; busy: number; deferred: number; alreadyTarget: number };
   previewRevision: number;
 }
 
 export interface HeldDeliveryPort {
-  deliver(input: { delivery: HeldDelivery; path: string; clientMessageId: string }): Promise<"delivered" | "failed" | "delivery-uncertain">;
+  deliver(input: { delivery: HeldDelivery; path: string; clientMessageId: string }): Promise<"delivered" | "failed" | "delivery-uncertain" | "held">;
 }
 
 function engineOf(entry: FileEntry): MigrationEngine | null {
@@ -93,22 +93,10 @@ function previewFromSnapshot(engine: MigrationEngine, targetId: string, registry
   const snapshot = registry.snapshot();
   const target = (engine === "claude" ? accountManager.resolveSpawn("claude", targetId) : accountManager.resolveSpawn("codex", targetId));
   const targetLabel = (engine === "claude" ? listClaudeAccounts() : listCodexAccounts()).find((account) => account.id === target.accountId)?.label ?? target.accountId;
-  let idle = 0;
-  let busy = 0;
-  let alreadyTarget = 0;
-  for (const conversation of Object.values(snapshot.conversations)) {
-    if (conversation.engine !== engine) continue;
-    const generation = conversation.generations.at(-1);
-    if (!generation) continue;
-    if (generation.accountId === null) continue;
-    if (generation.accountId === targetId) { alreadyTarget += 1; continue; }
-    if (conversation.turn.state === "busy" || conversation.turn.state === "unknown") busy += 1;
-    else idle += 1;
-  }
   return {
     targetId,
     targetLabel,
-    counts: { total: idle + busy, idle, busy, alreadyTarget },
+    counts: registry.migrationScope(engine, targetId),
     previewRevision: snapshot.engineRouting[engine].revision,
   };
 }
@@ -129,6 +117,7 @@ export async function createMigrationIntent(
   origin: MigrationOrigin,
   requestId: string = crypto.randomUUID(),
   previewRevision?: number,
+  scope: MigrationScope = "active",
   registry: AgentRegistry = agentRegistry(),
   evidence: MigrationIntent["evidence"] = null,
 ): Promise<{ intent: MigrationIntent; preview: MigrationPreview }> {
@@ -142,6 +131,7 @@ export async function createMigrationIntent(
     requestId,
     expectedRevision: previewRevision ?? preview.previewRevision,
     evidence,
+    scope,
   });
   return { intent, preview };
 }
@@ -314,6 +304,7 @@ export async function advanceConversationMigration(
   let migration = conversation.migration;
   if (migration.phase === "waiting-turn") {
     if (conversation.turn.state !== "terminal" && conversation.turn.state !== "idle") return conversation;
+    if (registry.pendingDeliveries(conversation.id).some((delivery) => delivery.state === "delivery-uncertain")) return conversation;
     conversation = registry.transitionConversationMigration(conversation.id, migration.revision, ["waiting-turn"], { phase: "requested" });
     migration = conversation.migration!;
   }
@@ -429,12 +420,17 @@ export async function drainHeldDeliveries(
   if (!current) return;
   for (const item of registry.pendingDeliveries(conversationId)) {
     if (item.state !== "assigned" || item.generationId !== current.id) continue;
+    if (item.payloadKind !== "text") {
+      registry.recordDeliveryOutcome(item.id, "failed", "request-local delivery requires client retry");
+      continue;
+    }
     const claimed = registry.beginDeliveryAttempt(item.id, current.id);
     if (!claimed) continue;
     const clientMessageId = claimed.clientMessageId ?? `migration:${claimed.id}`;
     try {
       const outcome = await delivery.deliver({ delivery: claimed, path: current.path, clientMessageId });
-      registry.recordDeliveryOutcome(claimed.id, outcome, outcome === "failed" ? "delivery failed and remains recoverable" : null);
+      if (outcome === "held") registry.requeueUnactuatedDelivery(claimed.id);
+      else registry.recordDeliveryOutcome(claimed.id, outcome, outcome === "failed" ? "delivery failed and remains recoverable" : null);
     } catch {
       registry.recordDeliveryOutcome(claimed.id, "delivery-uncertain", "delivery result is uncertain and remains recoverable");
     }
@@ -456,7 +452,10 @@ export async function reconcileMigrations(
     .filter((item) => item.state !== "delivered" && item.state !== "delivery-uncertain")
     .map((item) => item.conversationId));
   for (const conversation of Object.values(before.conversations)) {
-    if (!conversation.migration || conversation.migration.phase === "rolled-back") continue;
+    if (!conversation.migration || conversation.migration.phase === "rolled-back") {
+      if (pendingDeliveries.has(conversation.id)) await drainHeldDeliveries(conversation.id, delivery, registry);
+      continue;
+    }
     if (conversation.migration.phase === "committed") {
       if (pendingDeliveries.has(conversation.id)) await drainHeldDeliveries(conversation.id, delivery, registry);
       continue;

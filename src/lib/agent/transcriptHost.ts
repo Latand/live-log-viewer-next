@@ -16,6 +16,7 @@ import {
   spawnAgentWithPrompt,
   tmuxEndpoint,
   tmuxServerPid,
+  TmuxDeliveryUncertainError,
   type PaneRef,
   type PaneObservation,
   type SpawnedPane,
@@ -70,7 +71,7 @@ export function canonicalTranscriptTarget(snapshot: TranscriptHostSnapshot, path
 export type HostDeliveryOutcome =
   | { ok: true; outcome: "delivered-to-live"; target: string }
   | { ok: true; outcome: "resumed"; target: string }
-  | { ok: false; outcome: "failed"; error: string; status: number };
+  | { ok: false; outcome: "failed"; error: string; status: number; actuation?: "started" };
 
 export interface TranscriptHostResolver {
   readTranscriptHosts(fresh?: boolean): Promise<TranscriptHostSnapshot>;
@@ -212,8 +213,8 @@ function isDescendantOf(pid: number, ancestor: number, parentPid: (pid: number) 
   return false;
 }
 
-function failure(error: unknown, status = 500): HostDeliveryOutcome {
-  return { ok: false, outcome: "failed", error: error instanceof Error ? error.message : String(error), status };
+function failure(error: unknown, status = 500, actuation?: "started"): HostDeliveryOutcome {
+  return { ok: false, outcome: "failed", error: error instanceof Error ? error.message : String(error), status, ...(actuation ? { actuation } : {}) };
 }
 
 /**
@@ -377,6 +378,7 @@ export function createTranscriptHostResolver(
             target: decision.host.display,
           };
         } catch (error) {
+          if (error instanceof TmuxDeliveryUncertainError) return failure(error, 500, "started");
           if (attempt === 1) return failure(error);
           try {
             const retry = joinDecision(input);

@@ -487,9 +487,15 @@ function ConfirmStep({
       <p className="mt-1 text-[11px] leading-snug text-dim">
         {retarget
           ? t("migrate.retargetBody", { current: state.migration!.targetLabel, label })
-          : t("migrate.confirmBody", { total: preview.counts.total, idle: preview.counts.idle, busy: preview.counts.busy, label })}
+          : t("migrate.confirmBody", {
+            total: preview.counts.total,
+            idle: preview.counts.idle,
+            busy: preview.counts.busy,
+            deferred: preview.counts.deferred,
+            label,
+          })}
       </p>
-      <div className="mt-2.5 flex items-center justify-end gap-2">
+      <div className="mt-2.5 flex flex-wrap items-center justify-end gap-2">
         <button
           type="button"
           onClick={onCancel}
@@ -497,11 +503,24 @@ function ConfirmStep({
         >
           {t("migrate.confirmCancel")}
         </button>
+        {preview.counts.deferred > 0 ? (
+          <button
+            type="button"
+            disabled={state.mutation !== null}
+            onClick={() => {
+              void state.selectAndMigrate(targetId, preview.previewRevision, "all");
+              onDone();
+            }}
+            className="rounded-[8px] border border-line bg-chip px-2.5 py-1 text-[11px] font-semibold text-ink hover:border-accent/50 hover:bg-accent/10 disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+          >
+            {t("migrate.confirmAllCta", { total: preview.counts.total })}
+          </button>
+        ) : null}
         <button
           type="button"
           disabled={state.mutation !== null}
           onClick={() => {
-            void state.selectAndMigrate(targetId, preview.previewRevision);
+            void state.selectAndMigrate(targetId, preview.previewRevision, "active");
             onDone();
           }}
           className="rounded-[8px] border border-accent bg-accent px-2.5 py-1 text-[11px] font-bold text-white hover:opacity-90 disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
@@ -722,7 +741,11 @@ export function AccountsPanel({
                     })}
                     className="shrink-0 rounded-[7px] border border-line bg-bg px-2 py-0.5 text-[11px] font-semibold hover:bg-chip focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
                   >
-                    {notice.action.kind === "forceRemove" ? t("accounts.forceRemove") : t("accounts.retry")}
+                    {notice.action.kind === "forceRemove"
+                      ? t("accounts.forceRemove")
+                      : notice.action.kind === "cleanupOrphans"
+                        ? t("accounts.cleanupOrphans")
+                        : t("accounts.retry")}
                   </button>
                 ) : null}
               </div>

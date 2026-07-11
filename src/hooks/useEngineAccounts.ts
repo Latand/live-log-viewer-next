@@ -4,6 +4,7 @@ import { useSyncExternalStore } from "react";
 
 import {
   type AccountEffective,
+  type AccountMigrationScope,
   type AutoBalance,
   type EngineMigration,
   type MigrationPreview,
@@ -120,16 +121,17 @@ export type AccountOperation = "refresh" | "add" | "migrate" | "policy" | "login
 export type AccountRetryAction =
   | { type: "retry"; kind: "refresh" }
   | { type: "retry"; kind: "add"; label: string }
-  | { type: "retry"; kind: "migrate"; accountId: string }
+  | { type: "retry"; kind: "migrate"; accountId: string; scope: AccountMigrationScope }
   | { type: "retry"; kind: "stop"; intentId: string }
   | { type: "retry"; kind: "retryFailed"; intentId: string }
   | { type: "retry"; kind: "loginRetry"; accountId: string }
-  | { type: "retry"; kind: "forceRemove"; accountId: string };
+  | { type: "retry"; kind: "forceRemove"; accountId: string }
+  | { type: "retry"; kind: "cleanupOrphans" };
 
 export type AccountNoticeKey =
   | "accounts.refreshFailed" | "accounts.switchFailed" | "accounts.addFailed" | "accounts.loginOpened"
   | "accounts.claudeLoginStarted"
-  | "accounts.removeBlocked" | "accounts.removeFailed" | "accounts.cleanupFailed"
+  | "accounts.removeBlocked" | "accounts.removeHistoryBlocked" | "accounts.removeFailed" | "accounts.cleanupPending" | "accounts.cleanupManual" | "accounts.cleanupFailed"
   | ClaudeLoginErrKey;
 
 export interface AccountNotice {
@@ -190,9 +192,9 @@ export interface EngineAccountsState extends EngineAccountsSnapshot {
   /** Non-mutating scope preview for the confirm step; null when it fails. Every
       switch surface previews first — there is no mode-less bare switch anymore. */
   preview: (id: string) => Promise<MigrationPreview | null>;
-  /** Confirmed engine-wide migration to `id`; coalesces to the latest target.
-      Also the zero-scope path when a preview finds nothing live to move. */
-  selectAndMigrate: (id: string, previewRevision?: number) => Promise<boolean>;
+  /** Confirms routing to `id` and selects active or full conversation scope.
+      Also handles the zero-eager path when only deferred history exists. */
+  selectAndMigrate: (id: string, previewRevision?: number, scope?: AccountMigrationScope) => Promise<boolean>;
   /** Halts a draining intent (idempotent). */
   stopMigration: () => Promise<boolean>;
   /** Re-runs the failed sessions of the current intent (idempotent). */
@@ -285,8 +287,8 @@ function claudeAddFailure(code: string | null | undefined, label: string): Accou
 
 /** A failed account switch retries by re-previewing the account target and
     committing a fresh, revision-fenced migration. */
-function migrateFailure(accountId: string): AccountNotice {
-  return { kind: "error", operation: "migrate", messageKey: "accounts.switchFailed", action: { type: "retry", kind: "migrate", accountId } };
+function migrateFailure(accountId: string, scope: AccountMigrationScope): AccountNotice {
+  return { kind: "error", operation: "migrate", messageKey: "accounts.switchFailed", action: { type: "retry", kind: "migrate", accountId, scope } };
 }
 
 /** Stop and retry-failed retries address the durable intent by its id and read a
@@ -504,7 +506,7 @@ export function createEngineAccountsStore(
     }
   };
 
-  const selectAndMigrate = (id: string, previewRevision?: number): Promise<boolean> => {
+  const selectAndMigrate = (id: string, previewRevision?: number, scope: AccountMigrationScope = "active"): Promise<boolean> => {
     if (!id) return Promise.resolve(false);
     return runMutation("migrate", async () => {
       const previous = snapshot.active;
@@ -514,11 +516,11 @@ export function createEngineAccountsStore(
         const response = await fetcher(activeUrl, {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ id, mode: "migrate", migrate: true, previewRevision, requestId: mintRequestId() }),
+          body: JSON.stringify({ id, mode: "migrate", migrate: true, scope, previewRevision, requestId: mintRequestId() }),
         });
         if (!response.ok) throw new Error("migration request failed");
       } catch {
-        patchSnapshot({ active: previous, identityVersion: snapshot.identityVersion + 1, notice: migrateFailure(id) });
+        patchSnapshot({ active: previous, identityVersion: snapshot.identityVersion + 1, notice: migrateFailure(id, scope) });
         await refresh();
         return false;
       }
@@ -707,22 +709,31 @@ export function createEngineAccountsStore(
           body: JSON.stringify({ id: accountId, force }),
         });
         if (!response.ok) {
-          const body = await response.json().catch(() => null) as { code?: unknown } | null;
+          const body = await response.json().catch(() => null) as { code?: unknown; blockers?: unknown } | null;
           const blocked = body?.code === "account_removal_blocked";
+          const historyBlocked = blocked && Array.isArray(body?.blockers) && body.blockers.includes("current_conversations");
           patchSnapshot({
             notice: {
               kind: "error",
               operation: "remove",
-              messageKey: blocked ? "accounts.removeBlocked" : "accounts.removeFailed",
+              messageKey: historyBlocked ? "accounts.removeHistoryBlocked" : blocked ? "accounts.removeBlocked" : "accounts.removeFailed",
               target: label,
-              action: blocked ? { type: "retry", kind: "forceRemove", accountId } : null,
+              action: blocked && !historyBlocked ? { type: "retry", kind: "forceRemove", accountId } : null,
             },
           });
           await refresh();
           return false;
         }
+        const body = await response.json().catch(() => null) as { cleanupPending?: unknown } | null;
         const accounts = snapshot.accounts.filter((account) => account.id !== accountId);
-        patchSnapshot({ accounts, challenge: pendingDeviceAuth(accounts), identityVersion: snapshot.identityVersion + 1, notice: null });
+        patchSnapshot({
+          accounts,
+          challenge: pendingDeviceAuth(accounts),
+          identityVersion: snapshot.identityVersion + 1,
+          notice: body?.cleanupPending === true
+            ? { kind: "error", operation: "remove", messageKey: "accounts.cleanupPending", target: label, action: { type: "retry", kind: "cleanupOrphans" } }
+            : null,
+        });
       } catch {
         patchSnapshot({ notice: { kind: "error", operation: "remove", messageKey: "accounts.removeFailed", target: label, action: null } });
         await refresh();
@@ -742,6 +753,11 @@ export function createEngineAccountsStore(
           body: JSON.stringify({ cleanupOrphans: true }),
         });
         if (!response.ok) throw new Error("orphan cleanup failed");
+        const body = await response.json().catch(() => null) as { unresolved?: unknown } | null;
+        const unresolved = Array.isArray(body?.unresolved) ? body.unresolved.filter((item): item is string => typeof item === "string") : [];
+        patchSnapshot({ notice: unresolved.length
+          ? { kind: "error", operation: "remove", messageKey: "accounts.cleanupManual", action: null }
+          : null });
       } catch {
         patchSnapshot({ notice: { kind: "error", operation: "remove", messageKey: "accounts.cleanupFailed", action: null } });
         await refresh();
@@ -762,6 +778,8 @@ export function createEngineAccountsStore(
         return add(action.label);
       case "loginRetry":
         return retryLogin(action.accountId);
+      case "cleanupOrphans":
+        return cleanupOrphans();
       case "forceRemove":
         return remove(action.accountId, true);
       case "migrate": {
@@ -770,7 +788,7 @@ export function createEngineAccountsStore(
         // would 409. Fail closed when the preview cannot be obtained.
         const fresh = await preview(action.accountId);
         if (!fresh) return false;
-        return selectAndMigrate(action.accountId, fresh.previewRevision);
+        return selectAndMigrate(action.accountId, fresh.previewRevision, action.scope);
       }
       case "stop":
         // Re-issues the stop against the durable intent; stopMigration reads the

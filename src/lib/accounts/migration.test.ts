@@ -169,7 +169,7 @@ describe("tolerant parsers", () => {
     expect(parseMigrationPreview(flat, { targetId: "work", targetLabel: "Work" })).toEqual({
       targetId: "work",
       targetLabel: "Work",
-      counts: { total: 4, idle: 3, busy: 1 },
+      counts: { total: 4, idle: 3, busy: 1, deferred: 0 },
       previewRevision: 9,
     });
     // A rich server DTO provides its own target identity.
@@ -178,7 +178,7 @@ describe("tolerant parsers", () => {
 });
 
 describe("accountSelectOutcome preview failure guard", () => {
-  const preview = (total: number): MigrationPreview => ({ targetId: "work", targetLabel: "Work", counts: { total, idle: total, busy: 0 }, previewRevision: 1 });
+  const preview = (total: number): MigrationPreview => ({ targetId: "work", targetLabel: "Work", counts: { total, idle: total, busy: 0, deferred: 0 }, previewRevision: 1 });
   test("a preview failure yields a recoverable error", () => {
     expect(accountSelectOutcome(null)).toBe("recoverable-error");
   });

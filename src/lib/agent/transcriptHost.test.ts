@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import type { ResumeSpec } from "@/lib/agent/cli";
 import { createTranscriptHostResolver } from "@/lib/agent/transcriptHost";
+import { TmuxDeliveryUncertainError } from "@/lib/tmux";
 import type { AgentProcess } from "@/lib/scanner/process";
 import type { PaneRef, SpawnedPane } from "@/lib/tmux";
 import type { FileEntry } from "@/lib/types";
@@ -47,6 +48,8 @@ interface FakeHostState {
   ppids: Map<number, number>;
   records: Map<string, { paneId: string; panePid: number; windowName: string; engine: "claude" | "codex" }>;
   delivered: string[];
+  deliverAttempts: number;
+  deliverError: unknown | null;
   spawnCalls: number;
   failSpawn: boolean;
   panePidOverride: number | null;
@@ -72,6 +75,8 @@ function fakeHost(existing = true) {
     ppids: existing ? new Map([[200, 100]]) : new Map(),
     records: new Map(),
     delivered: [],
+    deliverAttempts: 0,
+    deliverError: null,
     spawnCalls: 0,
     failSpawn: false,
     panePidOverride: null,
@@ -139,6 +144,8 @@ function fakeHost(existing = true) {
       state.records.set(pathname, { paneId: pane.paneId, panePid: pane.panePid, windowName: resumeSpec.windowName, engine: resumeSpec.engine });
     },
     deliver: async (paneId: string, text: string) => {
+      state.deliverAttempts += 1;
+      if (state.deliverError) throw state.deliverError;
       state.delivered.push(`${paneId}:${text}`);
     },
   });
@@ -275,6 +282,23 @@ describe("transcript host resolver", () => {
       target: "agents:5.0",
     });
     expect(state.spawnCalls).toBe(2);
+  });
+
+  test("reports post-paste delivery ambiguity without retyping the payload", async () => {
+    const { resolver, state } = fakeHost();
+    state.deliverError = new TmuxDeliveryUncertainError("Enter failed after paste");
+
+    const outcome = await resolver.deliverToTranscriptHost({ entry: state.entry, spec, payload: "send once" });
+
+    expect(outcome).toEqual({
+      ok: false,
+      outcome: "failed",
+      error: "Enter failed after paste",
+      status: 500,
+      actuation: "started",
+    });
+    expect(state.deliverAttempts).toBe(1);
+    expect(state.delivered).toHaveLength(0);
   });
 
   test("fails closed on tmux observation errors without spawning a replacement", async () => {

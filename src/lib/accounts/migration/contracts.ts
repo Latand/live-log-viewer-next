@@ -198,6 +198,10 @@ export interface HeldDelivery {
   text: string;
   createdAt: string;
   clientMessageId: string | null;
+  /** Image payload bytes stay request-local; these reservations can only be retried by the client. */
+  payloadKind: "text" | "ephemeral-images" | "ephemeral-text";
+  /** Inbox files already materialized for an ambiguous request-local attempt. */
+  artifactPaths: string[];
   state: "held" | "assigned" | "delivered" | "failed" | "delivery-uncertain";
   generationId: string | null;
   attempts: number;

@@ -3,6 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { CorruptClaudeAccountsError, InvalidClaudeAccountLabelError, UnknownClaudeAccountError, UnsafeClaudeHomeError, cleanupOrphanedClaudeHomes, claudeAccountsMutationLocked, createManagedClaudeAccount, listClaudeAccounts, removeManagedClaudeAccount } from "@/lib/accounts/claude";
 import { claudeLoginSupervisor } from "@/lib/accounts/claudeLogin";
 import { accountRemovalBlockers } from "@/lib/accounts/removal";
+import { requestAccountMigrationTick } from "@/lib/accounts/migration/controllerSignal";
 import { agentRegistry } from "@/lib/agent/registry";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
 
@@ -69,7 +70,7 @@ export async function DELETE(req: NextRequest) {
   try { body = await req.json() as { id?: unknown; force?: unknown; cleanupOrphans?: unknown }; } catch { return failure(400, "invalid_json", "Invalid JSON"); }
   if (body.cleanupOrphans === true) {
     if (body.id !== undefined) return failure(400, "invalid_request", "Cleanup accepts no account id");
-    try { return NextResponse.json({ removed: cleanupOrphanedClaudeHomes() }); }
+    try { return NextResponse.json(cleanupOrphanedClaudeHomes()); }
     catch (error) {
       if (error instanceof CorruptClaudeAccountsError) return failure(409, "accounts_locked", "Claude accounts require registry repair");
       return failure(500, "cleanup_failed", "Claude orphan cleanup failed");
@@ -86,20 +87,23 @@ export async function DELETE(req: NextRequest) {
     ...accountRemovalBlockers("claude", account.id),
     ...(login && LIVE_CLAUDE_LOGIN_PHASES.has(login.phase) ? ["login_pending"] : []),
   ];
-  if (blockers.length && body.force !== true) {
-    return NextResponse.json({ error: "Claude account has active sessions or sign-in", code: "account_removal_blocked", blockers }, { status: 409 });
+  if (blockers.includes("current_conversations") || blockers.length && body.force !== true) {
+    return NextResponse.json({ error: "Claude account has active sessions, conversations, or sign-in", code: "account_removal_blocked", blockers }, { status: 409 });
   }
-  const wasActive = agentRegistry().engineRouting("claude").activeAccountId === account.id;
+  const registry = agentRegistry();
+  const beforeRetirement = registry.snapshot();
   try {
     if (login && LIVE_CLAUDE_LOGIN_PHASES.has(login.phase)) await claudeLoginSupervisor.cancel(login.operationId);
-    agentRegistry().retireAccount("claude", account.id, "default");
+    registry.retireAccount("claude", account.id, "default");
+    const retired = registry.snapshot();
     try {
-      removeManagedClaudeAccount(account.id);
+      const removal = removeManagedClaudeAccount(account.id);
+      requestAccountMigrationTick();
+      return NextResponse.json({ removed: { id: account.id }, cleanupPending: removal.cleanupPending });
     } catch (error) {
-      if (wasActive) agentRegistry().setEngineRouting("claude", account.id);
+      registry.restoreSnapshot(retired, beforeRetirement);
       throw error;
     }
-    return NextResponse.json({ removed: { id: account.id } });
   } catch (error) {
     if (error instanceof UnknownClaudeAccountError) return failure(404, "unknown_account", "Claude account is unavailable");
     if (error instanceof CorruptClaudeAccountsError) return failure(409, "accounts_locked", "Claude accounts require registry repair");
