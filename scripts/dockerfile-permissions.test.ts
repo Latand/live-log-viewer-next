@@ -20,6 +20,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const dockerfile = readFileSync(join(import.meta.dir, "..", "Dockerfile"), "utf8");
+const compose = readFileSync(join(import.meta.dir, "..", "docker-compose.yml"), "utf8");
 const runtimeStageStart = dockerfile.indexOf("AS runtime");
 const buildStage = dockerfile.slice(dockerfile.indexOf("AS build"), runtimeStageStart);
 const runtimeStage = dockerfile.slice(runtimeStageStart);
@@ -74,5 +75,18 @@ describe("runtime image permission determinism (#76)", () => {
     expect(runtimeStage).toContain("! -readable");
     expect(runtimeStage).toContain("-type d ! -executable");
     expect(runtimeStage).toContain("cat /app/tsconfig.json /app/next.config.ts");
+  });
+});
+
+describe("runtime-host Docker credentials (#102)", () => {
+  test("runtime UID 1000 retains the host Docker socket group through nsenter", () => {
+    expect(compose).toContain('user: "${LLV_UID:-1000}:${LLV_GID:-1000}"');
+    expect(compose).toContain('group_add:\n      - "${LLV_DOCKER_GID:-957}"');
+    const wrapper = dockerfile.match(/cat > \/usr\/local\/bin\/docker <<'WRAPPER'([\s\S]*?)WRAPPER/)?.[1];
+    expect(wrapper).toBeDefined();
+    expect(wrapper).toContain("nsenter -t 1 -m -p --");
+    expect(wrapper).toContain('/usr/bin/setpriv --reuid="$uid" --regid="$gid" --groups="$groups" --');
+    expect(wrapper).not.toContain("--setgid");
+    expect(wrapper).not.toContain("--setuid");
   });
 });

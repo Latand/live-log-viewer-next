@@ -88,8 +88,23 @@ make_nsenter_shim codex /home/latand/.bun/bin/codex
 make_nsenter_shim bun /home/latand/.bun/bin/bun
 make_nsenter_shim uv /home/latand/.local/bin/uv
 make_nsenter_shim just /usr/bin/just
-make_nsenter_shim docker /usr/bin/docker
 make_nsenter_shim tmux /usr/bin/tmux
+cat > /usr/local/bin/docker <<'WRAPPER'
+#!/bin/sh
+wd=$PWD
+case "$wd" in
+  /home/latand|/home/latand/*) ;;
+  *) wd=$HOME ;;
+esac
+# Preserve the runtime-host supplementary Docker socket group while entering
+# the host mount and PID namespaces, then restore the configured runtime UID,
+# primary GID, and full supplementary group list before invoking Docker.
+uid=$(id -u)
+gid=$(id -g)
+groups=$(id -G | tr ' ' ',')
+exec nsenter -t 1 -m -p -- /usr/bin/setpriv --reuid="$uid" --regid="$gid" --groups="$groups" -- /bin/sh -c 'cd "$1" || exit; shift; exec "$@"' sh "$wd" /usr/bin/docker "$@"
+WRAPPER
+chmod +x /usr/local/bin/docker
 cat > /usr/local/bin/tmux <<'WRAPPER'
 #!/bin/sh
 state_dir=/tmp/llv-tmux-cwd

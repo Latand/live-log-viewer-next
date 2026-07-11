@@ -5,6 +5,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import type { ViewerHealthEvidence, ViewerReleaseIdentity } from "../src/lib/runtime/contracts";
+import { waitForViewerReadiness, type ViewerCandidateContainerState } from "../src/runtime-host/deploymentHealth";
 
 const stateDir = process.env.LLV_STATE_DIR || "/home/latand/.config/agent-log-viewer/state";
 const deploymentDir = path.join(stateDir, "deployments");
@@ -116,12 +117,12 @@ function referencedAssets(html: string): string[] {
   return [...assets].sort();
 }
 
-async function containerRunning(container: string): Promise<boolean> {
-  if (!await containerExists(container)) return false;
-  return await command(["docker", "inspect", "--format", "{{.State.Running}}", container]) === "true";
+async function containerState(container: string): Promise<ViewerCandidateContainerState> {
+  if (!await containerExists(container)) return "missing";
+  return await command(["docker", "inspect", "--format", "{{.State.Status}}", container]) === "running" ? "running" : "exited";
 }
 
-async function verify(candidate: ViewerReleaseIdentity, endpoint: string, expectedAssetsEndpoint?: string): Promise<ViewerHealthEvidence> {
+async function probeRoutes(endpoint: string, expectedAssetsEndpoint?: string): Promise<ViewerHealthEvidence> {
   const token = serviceToken();
   const root = await fetchStatus(`${endpoint}/`);
   const authenticated = token ? await fetchStatus(`${endpoint}/?k=${encodeURIComponent(token)}`) : null;
@@ -133,9 +134,8 @@ async function verify(candidate: ViewerReleaseIdentity, endpoint: string, expect
     const expectedRoot = await fetchStatus(`${expectedAssetsEndpoint}/${token ? `?k=${encodeURIComponent(token)}` : ""}`);
     expectedAssetsMatch = JSON.stringify(referencedAssets(expectedRoot.text)) === JSON.stringify(paths);
   }
-  const processReady = await containerRunning(candidate.container);
-  const ok = processReady
-    && root.status === 200
+  const processReady = true;
+  const ok = root.status === 200
     && (authenticated === null || authenticated.status === 200)
     && assets.length > 0
     && assets.every((asset) => asset.status === 200)
@@ -145,6 +145,14 @@ async function verify(candidate: ViewerReleaseIdentity, endpoint: string, expect
     authenticatedStatus: authenticated?.status ?? null, assets, ok,
     ...(ok ? {} : { detail: expectedAssetsMatch ? "Viewer health or referenced asset gate failed" : "stable listener does not serve the candidate asset set" }),
   };
+}
+
+async function verify(candidate: ViewerReleaseIdentity, endpoint: string, expectedAssetsEndpoint?: string): Promise<ViewerHealthEvidence> {
+  return waitForViewerReadiness({
+    endpoint,
+    inspect: () => containerState(candidate.container),
+    probe: () => probeRoutes(endpoint, expectedAssetsEndpoint),
+  });
 }
 
 function readCurrentRelease(): ViewerReleaseIdentity | null {

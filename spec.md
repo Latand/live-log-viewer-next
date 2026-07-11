@@ -19,9 +19,9 @@ reach a deterministic journaled result across Viewer or runtime-host restarts.
   deployment receipt and pinned revision.
 - AC4: A versioned candidate image and distinct candidate container start on an
   alternate loopback endpoint while the serving release remains available.
-- AC5: Candidate health requires process readiness, the root route,
-  authenticated routing when configured, and every HTML-referenced CSS and
-  JavaScript asset.
+- AC5: Bounded candidate readiness polling stops early after container exit;
+  success requires process readiness, the root route, authenticated routing
+  when configured, and every HTML-referenced CSS and JavaScript asset.
 - AC6: Promotion uses an atomic stable-listener target switch and preserves
   existing connections on their selected release.
 - AC7: Promotion errors and post-promotion health failures restore the retained

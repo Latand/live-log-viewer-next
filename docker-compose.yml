@@ -37,6 +37,8 @@ services:
   # Viewer replacement lifecycle; deployment and cutover remain operator work.
   runtime-host:
     <<: *viewer-common
+    group_add:
+      - "${LLV_DOCKER_GID:-957}"
     restart: unless-stopped
     profiles:
       - runtime-host

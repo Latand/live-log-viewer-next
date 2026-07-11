@@ -38,6 +38,7 @@ function safeError(error: unknown): string {
 
 export class ViewerDeploymentCoordinator {
   private readonly tasks = new Map<string, Promise<void>>();
+  private admissionQueue: Promise<void> = Promise.resolve();
   private readonly defaultRevision: string;
   private readonly ownerAlive: (owner: ViewerDeploymentOwner) => boolean;
 
@@ -54,6 +55,10 @@ export class ViewerDeploymentCoordinator {
   }
 
   async requestViewerDeployment(request: ViewerDeploymentRequest): Promise<ViewerDeploymentReceipt> {
+    return this.runAdmissionExclusive(() => this.admit(request));
+  }
+
+  private async admit(request: ViewerDeploymentRequest): Promise<ViewerDeploymentReceipt> {
     if (!request.idempotencyKey || request.idempotencyKey.length > 200 || /[\r\n]/.test(request.idempotencyKey)) {
       throw new Error("deployment idempotencyKey is invalid");
     }
@@ -76,6 +81,12 @@ export class ViewerDeploymentCoordinator {
       }
     }
     return receipt;
+  }
+
+  private runAdmissionExclusive<T>(work: () => Promise<T>): Promise<T> {
+    const run = this.admissionQueue.then(work);
+    this.admissionQueue = run.then(() => undefined, () => undefined);
+    return run;
   }
 
   readViewerDeployment(deploymentId: string): ViewerDeploymentStatus | null {

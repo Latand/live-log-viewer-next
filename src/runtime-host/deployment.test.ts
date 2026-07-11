@@ -46,6 +46,7 @@ function healthy(endpoint: string): ViewerHealthEvidence {
 
 class FakeDeploymentAdapter implements ViewerDeploymentAdapter {
   current = release("old", "old");
+  resolveGate: Promise<void> | null = null;
   buildGate: Promise<void> | null = null;
   candidateHealth = healthy("http://127.0.0.1/candidate");
   promotedHealth = healthy("http://127.0.0.1:8898");
@@ -53,6 +54,7 @@ class FakeDeploymentAdapter implements ViewerDeploymentAdapter {
 
   async resolveRevision(revision: string): Promise<string> {
     this.calls.push(`resolve:${revision}`);
+    await this.resolveGate;
     return revision === "origin/main" ? "a".repeat(40) : revision;
   }
   async buildCandidate(deploymentId: string, revision: string): Promise<ViewerReleaseIdentity> {
@@ -87,6 +89,27 @@ test("deployment admission is serialized and idempotent", async () => {
   expect(adapter.calls.filter((call) => call.startsWith("build:"))).toHaveLength(1);
 
   releaseBuild();
+  await coordinator.waitForDeployment(first.deploymentId);
+  store.close();
+});
+
+test("genuinely concurrent requests serialize revision resolution and return busy", async () => {
+  const store = journal("concurrent-admission");
+  const adapter = new FakeDeploymentAdapter();
+  let releaseResolve!: () => void;
+  adapter.resolveGate = new Promise<void>((resolve) => { releaseResolve = resolve; });
+  const coordinator = new ViewerDeploymentCoordinator(store, adapter, { pid: 10, startIdentity: "10:1" });
+
+  const firstPromise = coordinator.requestViewerDeployment({ idempotencyKey: "concurrent-one" });
+  await Promise.resolve();
+  const secondPromise = coordinator.requestViewerDeployment({ idempotencyKey: "concurrent-two" });
+  await Promise.resolve();
+
+  expect(adapter.calls.filter((call) => call.startsWith("resolve:"))).toEqual(["resolve:origin/main"]);
+  releaseResolve();
+  const [first, second] = await Promise.all([firstPromise, secondPromise]);
+  if (first.state !== "accepted") throw new Error("first deployment was not accepted");
+  expect(second).toEqual({ state: "busy", deploymentId: first.deploymentId, revision: first.revision });
   await coordinator.waitForDeployment(first.deploymentId);
   store.close();
 });
