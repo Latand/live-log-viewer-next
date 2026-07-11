@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import { CorruptClaudeAccountsError, InvalidClaudeAccountLabelError, UnknownClaudeAccountError, UnsafeClaudeHomeError, cleanupOrphanedClaudeHomes, claudeAccountsMutationLocked, createManagedClaudeAccount, listClaudeAccounts, removeManagedClaudeAccount } from "@/lib/accounts/claude";
-import { claudeLoginSupervisor } from "@/lib/accounts/claudeLogin";
+import { claudeLoginSupervisor, LIVE_CLAUDE_LOGIN_PHASES } from "@/lib/accounts/claudeLogin";
 import { accountRemovalBlockers } from "@/lib/accounts/removal";
 import { requestAccountMigrationTick } from "@/lib/accounts/migration/controllerSignal";
 import { withAccountMutationLockAsync } from "@/lib/accounts/accountMutation";
@@ -68,8 +68,6 @@ export async function POST(req: NextRequest) {
     return failure(503, "login_unavailable", "Claude login is temporarily unavailable");
   }
 }
-
-const LIVE_CLAUDE_LOGIN_PHASES = new Set(["starting", "awaiting_browser", "awaiting_code", "verifying", "canceling"]);
 
 export async function DELETE(req: NextRequest) {
   const rejected = rejectCrossOrigin(req); if (rejected) return rejected;

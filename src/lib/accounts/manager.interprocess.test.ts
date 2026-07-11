@@ -13,7 +13,7 @@ process.env.LLV_CLAUDE_HOME = path.join(sandbox, "legacy-claude");
 
 const { activeCodexAccountId, createManagedCodexAccount } = await import("./codex");
 const { activeClaudeAccountId, createManagedClaudeAccount, listClaudeAccounts } = await import("./claude");
-const { accountMutationRevision, withAccountMutationLock } = await import("./accountMutation");
+const { accountMutationRevisionForTests, withAccountMutationLock } = await import("./accountMutation");
 const { AgentRegistry } = await import("@/lib/agent/registry");
 
 beforeEach(() => {
@@ -388,11 +388,11 @@ async function persistedLoginFence(engine: "claude" | "codex"): Promise<void> {
 }
 
 test("interprocess mutation matrix covers selection, controller sync, login state, and removal", async () => {
-  const initialRevision = accountMutationRevision();
+  const initialRevision = accountMutationRevisionForTests();
   await controllerSelectionRace();
   for (const engine of ["codex", "claude"] as const) {
     await persistedLoginFence(engine);
     await selectionRemovalRace(engine);
   }
-  expect(accountMutationRevision()).toBeGreaterThan(initialRevision);
+  expect(accountMutationRevisionForTests()).toBeGreaterThan(initialRevision);
 });

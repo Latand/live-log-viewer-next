@@ -157,14 +157,14 @@ function terminal(phase: LoginPhase): boolean {
   return phase === "authenticated" || phase === "canceled" || phase === "timed_out" || phase === "failed" || phase === "interrupted";
 }
 
-const PERSISTED_NONTERMINAL_PHASES = new Set<LoginPhase>(["starting", "awaiting_browser", "awaiting_code", "verifying", "canceling"]);
+export const LIVE_CLAUDE_LOGIN_PHASES: ReadonlySet<LoginPhase> = new Set(["starting", "awaiting_browser", "awaiting_code", "verifying", "canceling"]);
 
 function validPersistedOperation(value: unknown): value is PersistedOperation {
   if (!value || typeof value !== "object") return false;
   const row = value as Partial<PersistedOperation>;
   return typeof row.operationId === "string" && row.operationId.length > 0
     && (typeof row.accountId === "string" || row.accountId === null)
-    && typeof row.phase === "string" && PERSISTED_NONTERMINAL_PHASES.has(row.phase as LoginPhase)
+    && typeof row.phase === "string" && LIVE_CLAUDE_LOGIN_PHASES.has(row.phase as LoginPhase)
     && (typeof row.pid === "number" && Number.isInteger(row.pid) && row.pid > 0 || row.pid === null)
     && (typeof row.startToken === "string" || row.startToken === null)
     && typeof row.generation === "number" && Number.isInteger(row.generation) && row.generation >= 0

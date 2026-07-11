@@ -1,6 +1,6 @@
 import { accountForSpawn, activeCodexAccountId, codexAccountsMutationLocked, codexHomeOwningSessionPath, CorruptCodexAccountsError, createManagedCodexAccount, listCodexAccounts, setActiveCodexAccount, UnknownAccountError } from "./codex";
 import { activeClaudeAccountId, claudeAccountForSpawn, claudeAccountsMutationLocked, claudeHomeOwningTranscript, claudeManagedEnvironment, CorruptClaudeAccountsError, createManagedClaudeAccount, listClaudeAccounts, setActiveClaudeAccount, UnknownClaudeAccountError } from "./claude";
-import { claudeLoginSupervisor } from "./claudeLogin";
+import { claudeLoginSupervisor, LIVE_CLAUDE_LOGIN_PHASES } from "./claudeLogin";
 import { managedCodexRuntime } from "./codexRuntime";
 import type { AccountManager, AccountSummary } from "./contracts";
 import { unavailableLimits } from "./contracts";
@@ -26,8 +26,6 @@ export class AccountLoginPendingError extends Error {
     this.name = "AccountLoginPendingError";
   }
 }
-
-const LIVE_CLAUDE_LOGIN_PHASES = new Set(["starting", "awaiting_browser", "awaiting_code", "verifying", "canceling"]);
 
 type RoutingStore = Pick<AgentRegistry, "engineRouting" | "setEngineRouting">;
 

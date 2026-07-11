@@ -86,14 +86,6 @@ function authenticateClaude(account: { home: string }): void {
   fs.writeFileSync(path.join(account.home, ".credentials.json"), "{}", { mode: 0o600 });
 }
 
-function claudeActiveRequest(id: string): NextRequest {
-  return new NextRequest("http://127.0.0.1/api/accounts/claude/active", {
-    method: "POST",
-    headers: { host: "127.0.0.1", "content-type": "application/json" },
-    body: JSON.stringify({ id }),
-  });
-}
-
 test("accounts GET is secret-free and leaves login reconciliation to the controller", async () => {
   const account = createManagedCodexAccount("Work");
   setCodexAccountLoginPane(account.id, { paneId: "%does-not-exist", windowName: "codex-login", startedAt: 0 });
