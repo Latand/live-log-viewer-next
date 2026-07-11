@@ -1451,6 +1451,65 @@ describe("durable account migration coordinator", () => {
     }
   });
 
+  test("retiring a migration target cleans its successor and drains held input once after restart", async () => {
+    for (const engine of ["claude", "codex"] as const) {
+      const store = registry();
+      const sourcePath = `/retired-target-${engine}.jsonl`;
+      store.reconcileConversations([{ ...observation(sourcePath, "a", "idle"), engine }]);
+      const conversation = store.conversationForPath(sourcePath)!;
+      const intent = store.commitMigrationIntent({
+        engine,
+        targetId: "b",
+        origin: "manual",
+        requestId: `retire-target-${engine}`,
+        expectedRevision: store.engineRouting(engine).revision,
+      });
+      const revision = store.conversation(conversation.id)!.migration!.revision;
+      store.transitionConversationMigration(conversation.id, revision, ["requested"], { phase: "preparing" });
+      store.transitionConversationMigration(conversation.id, revision, ["preparing"], { phase: "successor-starting" });
+      const receipt: ProviderReceipt = {
+        operationId: store.conversation(conversation.id)!.migration!.operationId,
+        nativeId: `retired-successor-${engine}`,
+        path: `/retired-successor-${engine}.jsonl`,
+        continuityPaths: [],
+        historyHash: `retired-hash-${engine}`,
+        host: engine === "codex"
+          ? { kind: "codex-app-server", identity: `retired-${engine}`, epoch: 1, verifiedAt: "2026-07-10T12:01:00.000Z" }
+          : { kind: "claude-stream", identity: `retired-${engine}`, epoch: 1, verifiedAt: "2026-07-10T12:01:00.000Z" },
+      };
+      store.transitionConversationMigration(conversation.id, revision, ["successor-starting"], { phase: "verifying", providerReceipt: receipt });
+      store.holdDelivery(conversation.id, `continue-${engine}`, `client-${engine}`);
+
+      store.retireAccount(engine, "b", "default");
+
+      const restarted = new AgentRegistry(store.filename);
+      expect(restarted.snapshot().migrationIntents[intent.id]?.state).toBe("stopped");
+      expect(restarted.conversation(conversation.id)?.migration).toBeNull();
+      expect(Object.values(restarted.snapshot().pendingSuccessorCleanups)).toMatchObject([{ receipt: { nativeId: `retired-successor-${engine}` } }]);
+      expect(restarted.pendingDeliveries(conversation.id)).toMatchObject([{ state: "assigned", generationId: conversation.generations[0]!.id }]);
+
+      const cleaned: string[] = [];
+      const delivered: string[] = [];
+      const cleanupProvider: SuccessorProviderPort = {
+        async create() { throw new SuccessorPendingError(); },
+        async verify() {},
+        async cleanup(value) { cleaned.push(value.nativeId); },
+      };
+      const delivery = {
+        async deliver({ delivery: item }: { delivery: { text: string } }) {
+          delivered.push(item.text);
+          return "delivered" as const;
+        },
+      };
+      await reconcileMigrations(cleanupProvider, delivery, restarted);
+      await reconcileMigrations(cleanupProvider, delivery, restarted);
+
+      expect(cleaned).toEqual([`retired-successor-${engine}`]);
+      expect(delivered).toEqual([`continue-${engine}`]);
+      expect(restarted.pendingDeliveries(conversation.id)).toEqual([]);
+    }
+  });
+
   test("a return-to-source retarget cleans a stale successor after clearing migration state", async () => {
     const store = registry();
     store.reconcileConversations([observation("/source.jsonl", "a", "idle")]);

@@ -3,6 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { CorruptClaudeAccountsError, InvalidClaudeAccountLabelError, UnknownClaudeAccountError, UnsafeClaudeHomeError, cleanupOrphanedClaudeHomes, claudeAccountsMutationLocked, createManagedClaudeAccount, listClaudeAccounts, removeManagedClaudeAccount } from "@/lib/accounts/claude";
 import { claudeLoginSupervisor } from "@/lib/accounts/claudeLogin";
 import { accountRemovalBlockers } from "@/lib/accounts/removal";
+import { requestAccountMigrationTick } from "@/lib/accounts/migration/controllerSignal";
 import { agentRegistry } from "@/lib/agent/registry";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
 
@@ -95,6 +96,7 @@ export async function DELETE(req: NextRequest) {
     agentRegistry().retireAccount("claude", account.id, "default");
     try {
       removeManagedClaudeAccount(account.id);
+      requestAccountMigrationTick();
     } catch (error) {
       if (wasActive) agentRegistry().setEngineRouting("claude", account.id);
       throw error;

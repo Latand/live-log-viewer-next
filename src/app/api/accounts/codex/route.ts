@@ -3,6 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { CorruptCodexAccountsError, InvalidAccountLabelError, UnknownAccountError, UnsafeCodexHomeError, cleanupOrphanedCodexHomes, codexAccountsMutationLocked, createManagedCodexAccount, listCodexAccounts, removeManagedCodexAccount, setCodexAccountLoginPane } from "@/lib/accounts/codex";
 import { managedCodexRuntime } from "@/lib/accounts/codexRuntime";
 import { accountRemovalBlockers } from "@/lib/accounts/removal";
+import { requestAccountMigrationTick } from "@/lib/accounts/migration/controllerSignal";
 import { agentRegistry } from "@/lib/agent/registry";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
 
@@ -79,6 +80,7 @@ export async function DELETE(req: NextRequest) {
     agentRegistry().retireAccount("codex", account.id, "default");
     try {
       removeManagedCodexAccount(account.id);
+      requestAccountMigrationTick();
     } catch (error) {
       if (wasActive) agentRegistry().setEngineRouting("codex", account.id);
       throw error;

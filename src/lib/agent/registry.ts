@@ -1261,6 +1261,18 @@ export class AgentRegistry {
       if (retiredIntentIds.size === 0) return;
       for (const conversation of Object.values(file.conversations)) {
         if (!conversation.migration || !retiredIntentIds.has(conversation.migration.intentId)) continue;
+        queueAbandonedMigrationCleanup(file, conversation, changedAt);
+        const source = conversation.generations.find((generation) => generation.id === conversation.migration?.sourceGenerationId)
+          ?? conversation.generations.at(-1);
+        if (source) {
+          for (const delivery of Object.values(file.heldDeliveries)) {
+            if (delivery.conversationId !== conversation.id || delivery.state === "delivered" || delivery.state === "delivery-uncertain") continue;
+            delivery.state = "assigned";
+            delivery.generationId = source.id;
+            delivery.assignedAt = changedAt;
+            delivery.error = null;
+          }
+        }
         conversation.migration = null;
         conversation.updatedAt = changedAt;
         file.conversationRevision[conversation.engine] += 1;
