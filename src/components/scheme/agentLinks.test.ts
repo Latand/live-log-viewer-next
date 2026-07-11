@@ -122,7 +122,7 @@ describe("derivePipelineLinks tones and hub", () => {
     expect(links.filter((link) => link.pipeline!.hub).map((link) => link.pipeline!.toStageId)).toEqual(["build"]);
   });
 
-  test("a parked stage tones its incoming edge amber, not red", () => {
+  test("a parked stage tones its incoming edge amber, reserving red for chips", () => {
     const parked = threeStagePipeline({
       state: "needs_decision",
       cursor: { stageId: "build", state: "running" },
@@ -195,7 +195,7 @@ describe("derivePipelineLinks review-loop vertices (no duplicate hub on the flow
     expect(links.some((link) => link.from === deckKey("f-rev") || link.to === deckKey("f-rev"))).toBe(false);
   });
 
-  test("exactly one hub is placed, and not on the flow deck", () => {
+  test("exactly one hub is placed, clear of the flow deck", () => {
     const links = derivePipelineLinks([reviewPipeline], anchor, flowImpl);
     const hubs = links.filter((link) => link.pipeline!.hub);
     expect(hubs.length).toBe(1);

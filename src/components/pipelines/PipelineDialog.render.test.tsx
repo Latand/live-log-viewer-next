@@ -161,7 +161,7 @@ test("rebaseStagesToCatalog re-derives non-overridden rows from the catalog, kee
 
 test("draftStagesToInput emits runtime only when the operator overrode it (no stale catalog defaults)", () => {
   const s = (over: Partial<DraftStage>): DraftStage => ({ key: "k", kind: "run", roleId: "", engine: "codex", model: "", effort: "", access: "read-write", prompt: "do it", roleParams: {}, ...over });
-  /* An autofilled Architect row (not overridden) omits engine/model/effort so the
+  /* An autofilled Architect row with no override omits engine/model/effort so the
      server resolves the current role default — a registry change can't be frozen. */
   const autofilled = draftStagesToInput([s({ roleId: "architect", engine: "claude", model: "fable", effort: "high" }), s({ key: "k2" })])[0]!;
   expect(autofilled.engine).toBeUndefined();
@@ -175,7 +175,7 @@ test("draftStagesToInput emits runtime only when the operator overrode it (no st
 
 test("coerceStage repairs a malformed persisted stage so restore never crashes", () => {
   /* A stale draft missing model/roleParams and carrying wrong-typed fields must
-     become a well-formed DraftStage, not blow up later on .trim()/property access. */
+     become a well-formed DraftStage, so it never blows up later on .trim()/property access. */
   const repaired = coerceStage({ kind: "bogus", engine: "nope", access: "sideways", model: 5, roleId: 7, roleParams: [1, 2] });
   expect(repaired).toMatchObject({ kind: "run", engine: "codex", access: "read-write", model: "", roleId: "", roleParams: {} });
   expect(() => repaired.model.trim()).not.toThrow();

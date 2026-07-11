@@ -97,7 +97,7 @@ describe("stageChipState", () => {
     expect(stageChipState(skipped, stages[0]!)).toBe("skipped");
   });
 
-  test("pausing a running pipeline keeps the cursor stage active, not pending", () => {
+  test("pausing a running pipeline keeps the cursor stage active while unreached stages stay pending", () => {
     const p = pipeline({
       stages,
       state: "paused",
@@ -235,7 +235,7 @@ describe("draftStagesToInput", () => {
 
   test("sends engine/model/effort only when the runtime is overridden", () => {
     const [a, b] = draftStagesToInput([
-      /* Autofilled row (not overridden): omit runtime so the server resolves the
+      /* Autofilled row with no override: omit runtime so the server resolves the
          current role/Builder default, so a catalog value can't freeze. */
       draft({ prompt: "a", engine: "claude", model: "fable", effort: "high" }),
       /* Hand-overridden row ships its explicit runtime. */
@@ -361,7 +361,7 @@ test("every stage-chip state carries a distinct, non-empty glyph (AC4/AC8)", () 
   expect(new Set(glyphs).size).toBe(glyphs.length);
 });
 
-test("pipelineNeedsAttention flags parked and paused, not closed", () => {
+test("pipelineNeedsAttention flags parked and paused while a closed pipeline clears it", () => {
   expect(pipelineNeedsAttention(pipeline({ state: "needs_decision" }))).toBe(true);
   expect(pipelineNeedsAttention(pipeline({ state: "paused" }))).toBe(true);
   expect(pipelineNeedsAttention(pipeline({ state: "running" }))).toBe(false);

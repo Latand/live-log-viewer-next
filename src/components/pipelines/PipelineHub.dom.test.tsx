@@ -33,7 +33,7 @@ const pipeline = {
 afterEach(() => document.body.replaceChildren());
 process.on("exit", () => { globalThis.fetch = realFetch; });
 
-test("opening the dashboard strip keeps focus there, not yanked back to the hub", async () => {
+test("opening the dashboard strip keeps focus on the strip after the popover closes", async () => {
   /* The sibling strip the hub navigates to. */
   const strip = document.createElement("div");
   strip.id = pipelineStripDomId("p1");

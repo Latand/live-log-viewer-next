@@ -64,7 +64,7 @@ test("selecting a role then No role returns the runtime to the pipeline default"
   });
   expect(latest).toMatchObject({ roleId: "architect", engine: "claude", model: "fable", effort: "high" });
 
-  /* Back to No role: engine/model/effort must reset to the default, not keep Claude/Fable. */
+  /* Back to No role: engine/model/effort reset to the default and drop Claude/Fable. */
   flushSync(() => {
     Object.getOwnPropertyDescriptor(dom.HTMLSelectElement.prototype, "value")!.set!.call(select, "");
     select.dispatchEvent(new dom.Event("change", { bubbles: true }) as unknown as Event);

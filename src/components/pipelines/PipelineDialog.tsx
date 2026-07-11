@@ -128,7 +128,7 @@ const clientSnapshot = () => true;
 const serverSnapshot = () => false;
 
 /** Client mirror of the registry's per-parameter value checks. Absent/blank
-    resolves to a registry default (not required here, matching the API), so only
+    resolves to a registry default (optional here, matching the API), so only
     supplied values are checked. Returns an i18n key on failure, else null. */
 export function roleParamError(parameter: RoleParameter, value: string | number | undefined): MessageKey | null {
   if (parameter.kind === "integer") {
@@ -183,8 +183,8 @@ export function templateReady(template: PipelineTemplate, roles: RoleCatalogItem
 
 /** Inline validation that mirrors the create API, so a completed dialog does not
     bounce off a 400: required fields, size limits, cross-engine model
-    compatibility, and canonical role-param value checks. A module function (not
-    an inline useMemo) so the React compiler can memoize it. Returns the first
+    compatibility, and canonical role-param value checks. A module function kept
+    out of an inline useMemo so the React compiler can memoize it. Returns the first
     error message, or null when the request would be accepted. */
 export function pipelineValidationError(
   t: TFunction,
