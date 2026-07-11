@@ -1,5 +1,5 @@
 import type { FileEntry, ProjectCatalogEntry } from "../types";
-import { agentRegistry } from "../agent/registry";
+import { agentRegistry, RegistryReadError } from "../agent/registry";
 import { tickFlows } from "../flows/engine";
 import { tickPipelines } from "../pipelines/engine";
 import { notifyQuestion } from "../push";
@@ -89,9 +89,19 @@ export async function listFilesWithProjectCatalog(selectedProject?: string, opti
    `migratedTo` annotation in the files response — these entries are folded
    into their successor's card, so they rank below live transcripts for the
    recency cap instead of crowding it out. */
-function archivedTranscriptPaths(): ReadonlySet<string> {
+export function archivedTranscriptPaths(): ReadonlySet<string> {
   const archived = new Set<string>();
-  const snapshot = agentRegistry().snapshot();
+  let snapshot: ReturnType<ReturnType<typeof agentRegistry>["snapshot"]>;
+  try {
+    snapshot = agentRegistry().snapshot();
+  } catch (error) {
+    /* Demotion only shapes the recency ranking; a corrupt or unsupported
+       registry must degrade to "no demotion", never take file discovery (and
+       with it timeline/spawn/tasks/tmux) down. Mirrors the board route's
+       RegistryReadError handling. */
+    if (error instanceof RegistryReadError) return archived;
+    throw error;
+  }
   for (const conversation of Object.values(snapshot.conversations)) {
     const latest = conversation.generations.at(-1);
     if (!latest) continue;
