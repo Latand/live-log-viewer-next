@@ -12,7 +12,7 @@ The default request resolves `origin/main` in the adapter's canonical mirror. A 
 
 The runtime host serializes deployment requests and journals every phase before invoking the host adapter. Its stable listener reads `state/viewer-release.json` for each new connection, so promotion and rollback use an atomic target-file rename. Candidate and previous Viewer containers stay under Docker ownership on alternate loopback ports.
 
-Enable this mode only after the one-time listener migration has placed the current healthy release identity in `state/viewer-release.json` and freed `127.0.0.1:8898` for runtime-host:
+Enable this mode only after the [bootstrap listener migration](docker.md#bootstrap-listener-ownership) has health-gated an alternate managed release, placed its identity in `state/viewer-release.json`, and freed `127.0.0.1:8898` for runtime-host:
 
 ```bash
 export LLV_DOCKER_GID="$(stat -c %g /var/run/docker.sock)"

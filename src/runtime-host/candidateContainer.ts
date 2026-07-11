@@ -110,6 +110,11 @@ export function viewerComposeServiceFromConfig(configJson: string): ViewerCompos
   };
 }
 
+export function viewerAuthenticationTokenFromConfig(configJson: string): string | null {
+  const token = viewerComposeServiceFromConfig(configJson).environment.LLV_TOKEN;
+  return token || null;
+}
+
 export function viewerComposeServiceUid(service: ViewerComposeService): string {
   const uid = service.user.split(":", 1)[0];
   if (!uid || !/^\d+$/.test(uid)) throw new Error("Viewer Compose user must begin with a numeric uid");

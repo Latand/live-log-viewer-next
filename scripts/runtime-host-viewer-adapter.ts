@@ -7,6 +7,7 @@ import path from "node:path";
 import type { ViewerHealthEvidence, ViewerReleaseIdentity } from "../src/lib/runtime/contracts";
 import {
   obsoleteManagedViewerContainers,
+  viewerAuthenticationTokenFromConfig,
   viewerCandidateDockerArgs,
   viewerCandidateTmuxEnvironment,
   viewerComposeServiceFromConfig,
@@ -14,6 +15,7 @@ import {
 } from "../src/runtime-host/candidateContainer";
 import { ensureCanonicalMirror } from "../src/runtime-host/canonicalMirror";
 import { allocateBuiltCandidatePort, candidatePortsFromEnvironmentLists, isCandidatePortAvailable } from "../src/runtime-host/candidatePort";
+import { bootstrapViewerRelease } from "../src/runtime-host/deploymentBootstrap";
 import { hasViewerDeploymentCapability, viewerHealthRequestPlan, waitForViewerReadiness, type ViewerCandidateContainerState } from "../src/runtime-host/deploymentHealth";
 
 const stateDir = process.env.LLV_STATE_DIR || "/home/latand/.config/agent-log-viewer/state";
@@ -21,7 +23,6 @@ const deploymentDir = path.join(stateDir, "deployments");
 const mirrorDir = path.join(deploymentDir, "canonical.git");
 const targetFile = process.env.LLV_VIEWER_DEPLOY_TARGET || path.join(stateDir, "viewer-release.json");
 const canonicalRemote = process.env.LLV_VIEWER_CANONICAL_REMOTE || "git@github.com:Latand/live-log-viewer-next.git";
-const envFile = process.env.LLV_ENV_FILE || "/home/latand/.config/agent-log-viewer/service.env";
 const runtimeSocket = process.env.LLV_RUNTIME_HOST_SOCKET || path.join(stateDir, "runtime-host.sock");
 const stableEndpoint = `http://127.0.0.1:${Number(process.env.LLV_VIEWER_PORT || 8898)}`;
 
@@ -165,13 +166,8 @@ async function retainOnly(releases: ViewerReleaseIdentity[]): Promise<void> {
   }
 }
 
-function serviceToken(): string | null {
-  try {
-    const match = fs.readFileSync(envFile, "utf8").match(/^LLV_TOKEN=(.*)$/m);
-    return match?.[1]?.trim() || null;
-  } catch {
-    return null;
-  }
+function serviceToken(candidate: ViewerReleaseIdentity): string | null {
+  return viewerAuthenticationTokenFromConfig(fs.readFileSync(composeConfigFile(candidate.revision), "utf8"));
 }
 
 async function fetchStatus(url: string, headers: Record<string, string> = {}): Promise<{ status: number; text: string }> {
@@ -197,8 +193,8 @@ async function containerState(container: string): Promise<ViewerCandidateContain
   return await command(["docker", "inspect", "--format", "{{.State.Status}}", container]) === "running" ? "running" : "exited";
 }
 
-async function probeRoutes(endpoint: string, expectedAssetsEndpoint?: string): Promise<ViewerHealthEvidence> {
-  const token = serviceToken();
+async function probeRoutes(candidate: ViewerReleaseIdentity, endpoint: string, expectedAssetsEndpoint?: string): Promise<ViewerHealthEvidence> {
+  const token = serviceToken(candidate);
   const requests = viewerHealthRequestPlan(endpoint, token);
   const root = await fetchStatus(requests.root.url, requests.root.headers);
   const authenticated = requests.authenticated ? await fetchStatus(requests.authenticated.url, requests.authenticated.headers) : null;
@@ -240,7 +236,7 @@ async function verify(candidate: ViewerReleaseIdentity, endpoint: string, expect
   return waitForViewerReadiness({
     endpoint,
     inspect: () => containerState(candidate.container),
-    probe: () => probeRoutes(endpoint, expectedAssetsEndpoint),
+    probe: () => probeRoutes(candidate, endpoint, expectedAssetsEndpoint),
   });
 }
 
@@ -268,6 +264,17 @@ async function main(): Promise<unknown> {
   if (process.env.LLV_DEPLOYMENT_ADAPTER_PROTOCOL !== "1") throw new Error("deployment adapter protocol is required");
   const action = process.argv[2];
   const input = JSON.parse(await Bun.stdin.text()) as Record<string, unknown>;
+  if (action === "bootstrap-release") {
+    return bootstrapViewerRelease(String(input.revision ?? "origin/main"), `bootstrap-${randomUUID()}`, {
+      targetExists: () => fs.existsSync(targetFile),
+      resolveRevision,
+      buildCandidate,
+      startCandidate,
+      verifyCandidate: (candidate) => verify(candidate, candidate.endpoint),
+      publishTarget: async (candidate) => { switchTarget(candidate); },
+      retireCandidate: retireRelease,
+    });
+  }
   if (action === "resolve-revision") return { revision: await resolveRevision(String(input.revision ?? "")) };
   if (action === "build-candidate") return buildCandidate(String(input.deploymentId ?? ""), String(input.revision ?? ""));
   if (action === "start-candidate") { await startCandidate(release(input.candidate)); return {}; }

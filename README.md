@@ -94,6 +94,8 @@ For a pinned, reproducible deployment the repo ships a `Dockerfile` and
 `docker-compose.yml` that build `.next` inside the image and run the Viewer
 with host parity. The container reuses your real `tmux`, `claude`, `codex`, and
 home directory. Runtime-host owns production releases and the listener.
+Complete the [bootstrap listener migration](docs/docker.md#bootstrap-listener-ownership)
+before the first runtime-host activation.
 
 ```bash
 export LLV_DOCKER_GID="$(stat -c %g /var/run/docker.sock)"

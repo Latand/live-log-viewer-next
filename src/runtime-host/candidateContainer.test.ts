@@ -7,6 +7,7 @@ import { runtimeEventsEnabled, runtimeHostSocket } from "@/lib/runtime/flags";
 
 import {
   obsoleteManagedViewerContainers,
+  viewerAuthenticationTokenFromConfig,
   viewerCandidateDockerArgs,
   viewerCandidateTmuxEnvironment,
   viewerComposeServiceFromConfig,
@@ -221,4 +222,20 @@ test("container retention keeps the serving and immediate rollback releases", ()
     ["viewer-current", "viewer-rollback", "viewer-old-a", "viewer-old-b"],
     ["viewer-current", "viewer-rollback"],
   )).toEqual(["viewer-old-a", "viewer-old-b"]);
+});
+
+test("candidate authentication requirement comes from its persisted Compose config", () => {
+  const authenticated = {
+    ...composeService,
+    environment: { ...composeService.environment, LLV_TOKEN: "candidate-token" },
+  };
+  expect(viewerAuthenticationTokenFromConfig(JSON.stringify({ services: { viewer: authenticated } }))).toBe("candidate-token");
+  expect(viewerAuthenticationTokenFromConfig(JSON.stringify({ services: { viewer: composeService } }))).toBeNull();
+  expect(viewerAuthenticationTokenFromConfig(JSON.stringify({
+    services: { viewer: { ...composeService, environment: { ...composeService.environment, LLV_TOKEN: "" } } },
+  }))).toBeNull();
+  expect(viewerAuthenticationTokenFromConfig(JSON.stringify({
+    services: { viewer: { ...composeService, environment: { ...composeService.environment, LLV_TOKEN: "token with spaces" } } },
+  }))).toBe("token with spaces");
+  expect(() => viewerAuthenticationTokenFromConfig("{broken")).toThrow();
 });

@@ -10,12 +10,50 @@ Host developer CLIs run through `nsenter` shims in `/usr/local/bin`, ahead of mo
 
 Runtime-host owns production releases and the stable listener on
 `127.0.0.1:8898`. Docker owns the current and rollback Viewer containers on
-candidate ports. Activate runtime-host after completing the listener migration
-described in [RELEASING.md](RELEASING.md):
+candidate ports. Complete the bootstrap migration below before activating
+runtime-host.
+
+### Bootstrap listener ownership
+
+Keep the legacy Viewer serving port 8898 while the first managed release is
+prepared. Skip this command when the legacy service is already running:
+
+```bash
+LLV_ALLOW_LEGACY_VIEWER=1 docker compose --profile legacy-viewer-migration up -d --build viewer
+```
+
+Build the runtime-host image and run its one-time bootstrap action. The action
+resolves `origin/main` from the canonical mirror, builds and starts a candidate
+on an available alternate port, runs the full health gate, and atomically
+writes `state/viewer-release.json`. It retires the candidate when verification
+fails and leaves the legacy listener in place.
 
 ```bash
 export LLV_DOCKER_GID="$(stat -c %g /var/run/docker.sock)"
+docker compose --profile runtime-host build runtime-host
+printf '%s\n' '{"revision":"origin/main"}' | \
+  docker compose --profile runtime-host run --rm -T \
+    -e LLV_DEPLOYMENT_ADAPTER_PROTOCOL=1 \
+    runtime-host \
+    bun-container run scripts/runtime-host-viewer-adapter.ts bootstrap-release
+test -s "${LLV_VIEWER_DEPLOY_TARGET:-$HOME/.config/agent-log-viewer/state/viewer-release.json}"
+```
+
+The bootstrap action refuses to replace an existing target. After it returns a
+healthy candidate and the target-file check succeeds, stop and remove the
+legacy container. This frees port 8898 for runtime-host while the managed
+candidate continues serving on its alternate port.
+
+```bash
+docker compose --profile legacy-viewer-migration stop viewer
+docker compose --profile legacy-viewer-migration rm -f viewer
+```
+
+Activate runtime-host and verify the stable listener:
+
+```bash
 LLV_RUNTIME_EVENTS=1 LLV_VIEWER_DEPLOYMENTS=1 docker compose --profile runtime-host up -d runtime-host
+curl --fail --silent --show-error http://127.0.0.1:8898/ >/dev/null
 scripts/rebuild.sh
 ```
 
@@ -24,20 +62,9 @@ serializes the request, verifies the candidate, and switches its listener
 target. Inspect the owner with
 `docker compose --profile runtime-host logs -f runtime-host`.
 
-The Compose `viewer` service exists for the one-time listener migration. Its
+The Compose `viewer` service exists only for the one-time listener migration. Its
 `legacy-viewer-migration` profile and `LLV_ALLOW_LEGACY_VIEWER=1` launch grant
-must both be present:
-
-```bash
-LLV_ALLOW_LEGACY_VIEWER=1 docker compose --profile legacy-viewer-migration up -d --build viewer
-```
-
-Stop and remove that migration container before activating runtime-host:
-
-```bash
-docker compose --profile legacy-viewer-migration stop viewer
-docker compose --profile legacy-viewer-migration rm -f viewer
-```
+must both be present.
 
 ## Legacy tmux supervisor migration
 
