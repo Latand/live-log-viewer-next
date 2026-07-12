@@ -183,24 +183,53 @@ export function flowIdForPath(file: FileEntry, flows: readonly Flow[]): string |
   return flowMembership(file, flows)?.flow.id ?? null;
 }
 
+export interface ProtectedReviewerNodesInput {
+  files: readonly FileEntry[];
+  flows: readonly Flow[];
+  /** Paths the scheme is already drawing as nodes (group columns, manual nodes,
+      ephemeral jumps). Used both to skip an already-rendered reviewer and to
+      decide whether a flow's implementer is placed (hence has a round deck). */
+  renderedNodePaths: ReadonlySet<string>;
+  /** Closed/tombstoned paths — a manual close still wins over materialization. */
+  hiddenPaths: ReadonlySet<string>;
+}
+
 /**
- * Reviewer transcripts of INACTIVE flows that carry owner-authorship protection
- * (a real user message, or unconfirmed authorship that fails closed). An active
- * flow's reviewer lives in its round deck, but a closed flow has none — and the
- * switchboard filters every claimed reviewer — so without special handling a
- * protected closed-flow reviewer would vanish from every surface, violating the
- * hard exemption. The board keeps these unfolded AND materializes them as
- * standalone nodes so an owner-touched reviewer stays visible (issue #112).
+ * Protected reviewer transcripts that must be materialized as standalone board
+ * nodes because their owning flow has NO rendered round deck (issue #112).
+ *
+ * A reviewer carrying owner-authorship protection (a real user message, or
+ * unconfirmed authorship that fails closed) must never vanish. An active flow
+ * normally renders it in its round deck — but a deck exists ONLY when the flow's
+ * implementer is itself a placed node. The dashboard may hide or leave the
+ * implementer unplaced (a closed flow never has a deck at all), leaving the
+ * reviewer with no deck, excluded from worker stacks (authorship-exempt), and
+ * filtered from the switchboard (a claimed reviewer). Deck presence therefore
+ * cannot be read off the flow's state alone — it is derived from whether the
+ * implementer is in `renderedNodePaths`. Reviewers whose deck is absent, are not
+ * already drawn, and are not manually closed are returned for materialization,
+ * resolved from the full (unfolded) file set.
  */
-export function protectedInactiveReviewerPaths(files: readonly FileEntry[], flows: readonly Flow[]): Set<string> {
-  const byPath = new Map(files.map((file) => [file.path, file] as const));
-  const out = new Set<string>();
-  for (const flow of flows) {
-    if (flow.state !== "closed") continue; // active flows render the reviewer in their deck
+export function protectedReviewerNodes(input: ProtectedReviewerNodesInput): FileEntry[] {
+  const byPath = new Map(input.files.map((file) => [file.path, file] as const));
+  const decked = new Set<string>();
+  for (const flow of input.flows) {
+    if (flow.state === "closed") continue;
+    if (!input.renderedNodePaths.has(flow.implementerPath) || input.hiddenPaths.has(flow.implementerPath)) continue;
+    for (const round of flow.rounds) if (round.reviewerPath) decked.add(round.reviewerPath);
+  }
+  const out: FileEntry[] = [];
+  const seen = new Set<string>();
+  for (const flow of input.flows) {
     for (const round of flow.rounds) {
-      if (!round.reviewerPath) continue;
-      const file = byPath.get(round.reviewerPath);
-      if (file && (file.userAuthored || file.authorshipUnverified)) out.add(round.reviewerPath);
+      const path = round.reviewerPath;
+      if (!path || seen.has(path) || decked.has(path)) continue;
+      if (input.renderedNodePaths.has(path) || input.hiddenPaths.has(path)) continue;
+      const file = byPath.get(path);
+      if (file && (file.userAuthored || file.authorshipUnverified)) {
+        out.push(file);
+        seen.add(path);
+      }
     }
   }
   return out;

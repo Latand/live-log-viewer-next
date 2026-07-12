@@ -10,7 +10,7 @@ import {
   DEFAULT_WORKER_COLLAPSE_IDLE_MS,
   isCollapseExempt,
   pipelineStageAgentPaths,
-  protectedInactiveReviewerPaths,
+  protectedReviewerNodes,
   reviewerRoundFinished,
   shouldCollapseWorker,
 } from "./workerCollapse";
@@ -357,11 +357,12 @@ describe("computeWorkerStacks", () => {
   });
 });
 
-describe("protectedInactiveReviewerPaths", () => {
+describe("protectedReviewerNodes", () => {
   const closed = (over: Partial<Flow> & { id: string; implementerPath: string }) =>
     flow({ state: "closed", closedAt: "2026-07-05T02:00:00Z", ...over });
+  const nodes = (input: Parameters<typeof protectedReviewerNodes>[0]) => protectedReviewerNodes(input).map((file) => file.path);
 
-  test("returns owner-authored / unverified reviewers of closed flows", () => {
+  test("materializes owner-authored / unverified reviewers of closed flows, not clean ones", () => {
     const authored = entry({ path: "/rev-authored", userAuthored: true });
     const unverified = entry({ path: "/rev-unverified", authorshipUnverified: true });
     const clean = entry({ path: "/rev-clean" });
@@ -370,14 +371,35 @@ describe("protectedInactiveReviewerPaths", () => {
       closed({ id: "f2", implementerPath: "/i2", rounds: [round({ reviewerPath: "/rev-unverified" })] }),
       closed({ id: "f3", implementerPath: "/i3", rounds: [round({ reviewerPath: "/rev-clean" })] }),
     ];
-    expect(protectedInactiveReviewerPaths([authored, unverified, clean], flows)).toEqual(
+    expect(new Set(nodes({ files: [authored, unverified, clean], flows, renderedNodePaths: new Set(), hiddenPaths: new Set() }))).toEqual(
       new Set(["/rev-authored", "/rev-unverified"]),
     );
   });
 
-  test("ignores protected reviewers of ACTIVE flows (their deck renders them)", () => {
+  test("HARD CONSTRAINT: materializes a protected reviewer of an ACTIVE flow whose implementer is UNPLACED", () => {
     const authored = entry({ path: "/rev", userAuthored: true });
-    const flows = [flow({ id: "f1", implementerPath: "/i1", state: "reviewing", rounds: [round({ reviewerPath: "/rev" })] })];
-    expect(protectedInactiveReviewerPaths([authored], flows).size).toBe(0);
+    const flows = [flow({ id: "f1", implementerPath: "/impl", state: "reviewing", rounds: [round({ reviewerPath: "/rev" })] })];
+    // Implementer not in renderedNodePaths → the active flow has zero decks.
+    expect(nodes({ files: [authored], flows, renderedNodePaths: new Set(), hiddenPaths: new Set() })).toEqual(["/rev"]);
+  });
+
+  test("HARD CONSTRAINT: materializes a protected reviewer of an ACTIVE flow whose implementer is HIDDEN", () => {
+    const authored = entry({ path: "/rev", userAuthored: true });
+    const flows = [flow({ id: "f1", implementerPath: "/impl", state: "reviewing", rounds: [round({ reviewerPath: "/rev" })] })];
+    // Implementer is a placed column but hidden → its deck is not drawn.
+    expect(nodes({ files: [authored], flows, renderedNodePaths: new Set(["/impl"]), hiddenPaths: new Set(["/impl"]) })).toEqual(["/rev"]);
+  });
+
+  test("skips a protected reviewer whose active flow HAS a rendered deck (placed implementer)", () => {
+    const authored = entry({ path: "/rev", userAuthored: true });
+    const flows = [flow({ id: "f1", implementerPath: "/impl", state: "reviewing", rounds: [round({ reviewerPath: "/rev" })] })];
+    expect(nodes({ files: [authored], flows, renderedNodePaths: new Set(["/impl"]), hiddenPaths: new Set() })).toEqual([]);
+  });
+
+  test("skips a reviewer already drawn as a node, or manually closed", () => {
+    const authored = entry({ path: "/rev", userAuthored: true });
+    const flows = [closed({ id: "f1", implementerPath: "/impl", rounds: [round({ reviewerPath: "/rev" })] })];
+    expect(nodes({ files: [authored], flows, renderedNodePaths: new Set(["/rev"]), hiddenPaths: new Set() })).toEqual([]);
+    expect(nodes({ files: [authored], flows, renderedNodePaths: new Set(), hiddenPaths: new Set(["/rev"]) })).toEqual([]);
   });
 });

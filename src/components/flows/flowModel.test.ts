@@ -4,7 +4,7 @@ import type { Flow } from "@/lib/flows/types";
 import type { FileEntry } from "@/lib/types";
 
 import { buildBranchGroups } from "@/components/projectModel";
-import { protectedInactiveReviewerPaths } from "@/components/scheme/workerCollapse";
+import { protectedReviewerNodes } from "@/components/scheme/workerCollapse";
 
 import { claimedReviewerDescendantPaths, flowPresentation, foldClaimedReviewers, isActiveFlow } from "./flowModel";
 
@@ -134,23 +134,26 @@ describe("reviewer folding", () => {
     expect(columns).toContain("/reviewer");
   });
 
-  test("an owner-authored closed-flow reviewer is kept unfolded and stays materializable (issue #112 finding)", () => {
-    /* Not manually pinned, but userAuthored — it must never vanish. The dashboard
-       keeps it unfolded via protectedInactiveReviewerPaths and materializes it as
-       a standalone node; here we prove fold-keep leaves it resolvable. */
+  test("an owner-authored reviewer folded off the board is still materialized from the full file set (issue #112 finding)", () => {
+    /* Not manually pinned, but userAuthored — it must never vanish. Folding drops
+       it from groupFiles, yet protectedReviewerNodes recovers it from the full
+       file set (deck absent: closed flow, or here an active flow with an unplaced
+       implementer), so the dashboard can materialize a standalone node. */
     const implementer = entry({ path: "/implementer", activity: "idle" });
     const reviewer = entry({ path: "/reviewer", parent: "/implementer", activity: "idle", userAuthored: true });
-    const closed = flow({ implementerPath: "/implementer", reviewerPath: "/reviewer", state: "closed", closedAt: "2026-07-06T00:00:00Z" });
+    const closedFlow = flow({ implementerPath: "/implementer", reviewerPath: "/reviewer", state: "closed", closedAt: "2026-07-06T00:00:00Z" });
+    const activeFlow = flow({ implementerPath: "/implementer", reviewerPath: "/reviewer", state: "reviewing" });
 
-    const protectedPaths = protectedInactiveReviewerPaths([implementer, reviewer], [closed]);
-    expect(protectedPaths).toEqual(new Set(["/reviewer"]));
+    // Folding removes the reviewer from the board's group file set…
+    const folded = foldClaimedReviewers([implementer, reviewer], [closedFlow]);
+    expect(folded.map((file) => file.path)).toEqual(["/implementer"]);
 
-    // With no manual pin, plain folding would drop it; keeping the protected set
-    // unfolded leaves it in the file set so a node can be materialized from it.
-    expect(foldClaimedReviewers([implementer, reviewer], [closed]).map((file) => file.path)).toEqual(["/implementer"]);
-    const kept = foldClaimedReviewers([implementer, reviewer], [closed], protectedPaths);
-    expect(kept.map((file) => file.path)).toContain("/reviewer");
-    expect(new Map(kept.map((file) => [file.path, file])).get("/reviewer")).toBeDefined();
+    // …but it is recovered from the FULL file set for both a closed flow and an
+    // active flow whose implementer is unplaced (renderedNodePaths empty).
+    const fromClosed = protectedReviewerNodes({ files: [implementer, reviewer], flows: [closedFlow], renderedNodePaths: new Set(), hiddenPaths: new Set() });
+    expect(fromClosed.map((file) => file.path)).toEqual(["/reviewer"]);
+    const fromActiveUnplaced = protectedReviewerNodes({ files: [implementer, reviewer], flows: [activeFlow], renderedNodePaths: new Set(), hiddenPaths: new Set() });
+    expect(fromActiveUnplaced.map((file) => file.path)).toEqual(["/reviewer"]);
   });
 });
 

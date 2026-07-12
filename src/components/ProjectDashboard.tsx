@@ -23,7 +23,7 @@ import { PipelineStrip } from "./pipelines/PipelineStrip";
 import { pipelinesForProject, pipelineStripDomId, renderableFlowIds } from "./pipelines/pipelineModel";
 import { buildSchemeLayout } from "./scheme/layout";
 import { deckKey } from "./scheme/agentLinks";
-import { collapsibleWorkerFiles, groupWorkerStacks, protectedInactiveReviewerPaths } from "./scheme/workerCollapse";
+import { collapsibleWorkerFiles, groupWorkerStacks, protectedReviewerNodes } from "./scheme/workerCollapse";
 import { WorkerStacks } from "./WorkerStacks";
 import { clearWorkflowDraftStorage } from "./workflows/WorkflowDraftPane";
 import { WorkflowStrip } from "./workflows/WorkflowStrip";
@@ -254,18 +254,12 @@ export function ProjectDashboard({
     () => new Set([...board.explicitManual, ...prefs.expanded]),
     [board.explicitManual, prefs.expanded],
   );
-  /* Owner-touched (or authorship-unconfirmed) reviewers of CLOSED flows have no
-     round deck and are filtered from the switchboard, so they must be kept on the
-     board as standalone nodes or they vanish from every surface (issue #112). */
-  const protectedReviewerPaths = useMemo(() => protectedInactiveReviewerPaths(files, flows), [files, flows]);
-  /* Fold reviewer transcripts into their round decks — EXCEPT an inactive-flow
-     reviewer the owner pinned OR one carrying authorship protection, which has no
-     deck and must stay on the board as a node (issue #112). */
-  const keepUnfolded = useMemo(
-    () => (protectedReviewerPaths.size ? new Set([...pinnedPaths, ...protectedReviewerPaths]) : pinnedPaths),
-    [pinnedPaths, protectedReviewerPaths],
-  );
-  const groupFiles = useMemo(() => foldClaimedReviewers(files, flows, keepUnfolded), [files, flows, keepUnfolded]);
+  /* Fold reviewer transcripts into their round decks — EXCEPT one the owner
+     pinned out of a worker stack, which (for an inactive flow) has no deck and
+     must stay on the board as a node (issue #112). Protected reviewers with no
+     deck are handled separately via protectedReviewerNodes, materialized from
+     the full file set, so they do not need to be kept unfolded here. */
+  const groupFiles = useMemo(() => foldClaimedReviewers(files, flows, pinnedPaths), [files, flows, pinnedPaths]);
   /* Collapse-eligible worker conversations, derived BEFORE layout so their
      quiet full columns are removed from the scheme rather than left as
      full-size cards (a spawned worker stays a column under an active parent
@@ -335,23 +329,17 @@ export function ProjectDashboard({
           !manualPaths.has(file.path) &&
           (!autoPaths.has(file.path) || hiddenSet.has(file.path)),
       );
-    /* Protected closed-flow reviewers render as standalone nodes so an
-       owner-touched reviewer is always on the board. A manual close still wins
-       (hiddenSet excluded); one already drawn as a column is skipped. */
-    const protectedNodes = [...protectedReviewerPaths]
-      .map((path) => byPath.get(path))
-      .filter(
-        (file): file is FileEntry =>
-          file !== undefined &&
-          projectKey(file) === project &&
-          !manualPaths.has(file.path) &&
-          !autoPaths.has(file.path) &&
-          !hiddenSet.has(file.path) &&
-          !extra.some((item) => item.path === file.path),
-      );
+    /* Protected reviewers whose flow has NO rendered deck (a closed flow, or an
+       active flow whose implementer is hidden/unplaced) render as standalone
+       nodes so an owner-touched reviewer is always on the board. Resolved from
+       the full file set (they are folded out of groupFiles), and skipped when a
+       deck already shows them. `renderedNodePaths` decides deck presence. */
+    const renderedNodePaths = new Set<string>([...autoPaths, ...manualPaths, ...extra.map((file) => file.path)]);
+    const protectedNodes = protectedReviewerNodes({ files, flows, renderedNodePaths, hiddenPaths: hiddenSet })
+      .filter((file) => projectKey(file) === project);
     const extras = [...extra, ...protectedNodes];
     return extras.length ? [...manualNodes, ...extras] : manualNodes;
-  }, [ephemeral, groupFiles, project, autoPaths, hiddenSet, manualNodes, protectedReviewerPaths]);
+  }, [ephemeral, groupFiles, files, flows, project, autoPaths, hiddenSet, manualNodes]);
   const liveCount = useMemo(
     () =>
       groups.reduce(
