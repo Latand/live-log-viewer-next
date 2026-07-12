@@ -232,6 +232,13 @@ function resumeCanRebaseMigration(migration: ConversationMigration | null): bool
     || ((migration.phase === "waiting-turn" || migration.phase === "requested") && migration.providerReceipt === null);
 }
 
+function receiptStillAwaitsResumeSuccessor(receipt: SpawnReceipt): boolean {
+  if (receipt.purpose !== "resume-successor" || receipt.state === "failed") return false;
+  return receipt.state !== "completed"
+    || receipt.resumeSourcePath === null
+    || receipt.artifactPath === receipt.resumeSourcePath;
+}
+
 function mergeResumeLaunchProfile(current: LaunchProfile, requested: LaunchProfile): LaunchProfile {
   return {
     cwd: requested.cwd || current.cwd,
@@ -1425,15 +1432,20 @@ export class AgentRegistry {
         if (nativeSessionId && firstObservedPath === undefined) firstPathByNativeSession.set(nativeSessionId, observation.path);
         const nativeOwner = nativeId ? preferredConversationOwner(file, Object.values(file.conversations).filter((candidate) =>
           candidate.engine === observation.engine && candidate.generations.some((generation) => generation.id === nativeId))) : null;
+        const resumeInventoryFenced = nativeOwner !== null
+          && !resumeCanRebaseMigration(nativeOwner.migration)
+          && Object.values(file.receipts).some((receipt) =>
+            resolveConversationAlias(file, receipt.conversationId) === nativeOwner.id
+            && receiptStillAwaitsResumeSuccessor(receipt));
         let conversation = exactOwner ?? nativeOwner ?? null;
         let adoptedSuccessorPath = false;
-        if (exactOwner && nativeOwner && exactOwner.id !== nativeOwner.id
+        if (!resumeInventoryFenced && exactOwner && nativeOwner && exactOwner.id !== nativeOwner.id
           && adoptProvisionalOwner(file, exactOwner, nativeOwner, observation.path)) {
           exactOwner = nativeOwner;
           conversation = nativeOwner;
           adoptedSuccessorPath = true;
         }
-        if ((!exactOwner || adoptedSuccessorPath) && nativeOwner && nativeId) {
+        if (!resumeInventoryFenced && (!exactOwner || adoptedSuccessorPath) && nativeOwner && nativeId) {
           const generation = nativeOwner.generations.find((candidate) => candidate.id === nativeId);
           if (generation && generation.path !== observation.path) {
             if (firstObservedPath === undefined || firstObservedPath === observation.path) {

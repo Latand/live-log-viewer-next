@@ -689,6 +689,54 @@ describe("agent registry", () => {
     expect(store.conversation(conversation.id)?.generations.map((generation) => generation.path)).toEqual([firstPath]);
   });
 
+  test("inventory cannot canonicalize a same-session resume after migration provider work starts", () => {
+    const store = registry();
+    const nativeId = "019f4906-3f67-7b72-9fbc-9ec3b5ad1326";
+    const sourcePath = `/sessions/2026/07/11/rollout-2026-07-11T10-00-00-${nativeId}.jsonl`;
+    const resumedPath = `/sessions/2026/07/12/rollout-2026-07-12T10-00-00-${nativeId}.jsonl`;
+    const conversation = store.ensureConversation("codex", sourcePath, "terra");
+    const begun = store.beginSpawnRequest({
+      engine: "codex",
+      cwd: "/repo",
+      accountId: "terra",
+      conversationId: conversation.id,
+      purpose: "resume-successor",
+    });
+    if (begun.kind !== "created") throw new Error("expected create");
+    store.setConversationMigration(conversation.id, {
+      intentId: "inventory-resume-fence",
+      phase: "successor-starting",
+      targetId: "work",
+      revision: 1,
+      error: null,
+      sourceGenerationId: conversation.generations[0]!.id,
+      updatedAt: "2026-07-12T12:00:00.000Z",
+    });
+
+    store.reconcileConversations([{
+      engine: "codex",
+      path: resumedPath,
+      accountId: "terra",
+      launchProfile: emptyLaunchProfile({ cwd: "/repo" }),
+      turn: { state: "idle", source: "empty", terminalAt: null },
+      observedAt: "2026-07-12T12:01:00.000Z",
+    }]);
+
+    expect(store.conversation(conversation.id)).toMatchObject({
+      continuityPaths: [],
+      generations: [{ id: nativeId, path: sourcePath }],
+    });
+    expect(store.conversationForPath(resumedPath)).toBeNull();
+    expect(store.settleSpawn(begun.receipt.launchId, spawnEntry(resumedPath))).toMatchObject({
+      kind: "conflict",
+      code: "spawn_identity_conflict",
+    });
+    expect(store.conversation(conversation.id)).toMatchObject({
+      continuityPaths: [],
+      generations: [{ id: nativeId, path: sourcePath }],
+    });
+  });
+
   test("treats a second rollout path with the same native session key as one conversation", () => {
     const store = registry();
     const nativeId = "019f4906-3f67-7b72-9fbc-9ec3b5ad1326";
