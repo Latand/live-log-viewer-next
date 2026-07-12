@@ -226,6 +226,9 @@ describe("surface pipelines — memberless active pipelines keep a scheme surfac
     const halo = layout.groups.find((group) => group.kind === "pipeline" && group.id === "p1");
     expect(halo).toBeTruthy();
     expect(halo!.pipeline?.id).toBe("p1");
+    /* Memberless: the empty members list is the contract the mobile dock filters
+       on to surface a nodeless pipeline (MobileFocusView `dockedPipelines`). */
+    expect(halo!.members).toHaveLength(0);
     /* The placeholder is inside the world box so the camera/minimap can reach it. */
     expect(halo!.x + halo!.w).toBeLessThanOrEqual(layout.width);
     expect(halo!.y + halo!.h).toBeLessThanOrEqual(layout.height);
