@@ -1,4 +1,3 @@
-import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -14,6 +13,7 @@ import { agentRegistry } from "@/lib/agent/registry";
 import { reasoningFromBody } from "@/lib/agent/efforts";
 import { modelFromBody } from "@/lib/agent/models";
 import { resolveSpawnRole } from "@/lib/roles/registry";
+import { spawnContentDigest, spawnParentSelector, spawnRequestDigest } from "@/lib/agent/spawnIdentity";
 import { sessionKeyFromTranscript } from "@/lib/agent/sessionKey";
 import { resolveSpawnParent, SpawnParentError, transcriptAllowed } from "@/lib/agent/spawnParent";
 import { spawnResponseForReceipt, type SpawnResponse } from "@/lib/agent/spawnResponse";
@@ -102,10 +102,6 @@ export async function GET(req: NextRequest): Promise<NextResponse<SuggestRespons
   return NextResponse.json({ dirs, cwd: srcCwd });
 }
 
-function spawnDigest(input: Record<string, unknown>): string {
-  return crypto.createHash("sha256").update(JSON.stringify(input)).digest("hex");
-}
-
 export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse | ApiError>> {
   const rejection = rejectCrossOrigin(req);
   if (rejection) return rejection;
@@ -164,7 +160,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse
     const parentConversationId = parent?.conversationId ?? null;
     const parentSessionKey = parent?.sessionKey ?? null;
     const parentArtifactPath = parent?.artifactPath ?? null;
-    const digest = spawnDigest({
+    const digest = spawnRequestDigest({
       engine,
       cwd,
       model: selectedModel.model,
@@ -172,11 +168,9 @@ export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse
       fast: reasoning.fast,
       accountId: account.accountId,
       role: role.value?.role ?? null,
-      parentConversationId,
-      parentSessionKey,
-      parentArtifactPath,
+      parent: spawnParentSelector(body),
       prompt,
-      images: images.map((image) => ({ mime: image.mime, digest: spawnDigest({ image: image.base64 }) })),
+      images: images.map((image) => ({ mime: image.mime, digest: spawnContentDigest({ image: image.base64 }) })),
     });
     const specBase = freshSpecFor(engine, cwd, {
       model: selectedModel.model,
