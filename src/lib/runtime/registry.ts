@@ -148,6 +148,8 @@ export async function adoptCodexRegistryHosts(
             endpoint: "stdio:released",
             process: null,
             activeTurnRef: null,
+            pendingAttention: [],
+            activeFlags: [],
           }, "dead", claimed.claimOwner!, claimed.claimEpoch, true);
         }
       });

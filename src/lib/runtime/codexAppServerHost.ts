@@ -451,6 +451,7 @@ export class CodexAppServerHost implements EngineHost {
     this.activeTurnId = null;
     this.attentions.clear();
     this.setSessionStatus("unhosted", []);
+    if (this.ledgerFailed) this.notifyStateListeners();
     this.closeSubscribers();
   }
 

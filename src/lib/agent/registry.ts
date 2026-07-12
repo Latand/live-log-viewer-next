@@ -1565,11 +1565,12 @@ export class AgentRegistry {
     this.mutate((file) => {
       const entry = file.entries[sessionKeyId(key)];
       if (!entry) return;
-      const replacement = { ...entry, host: null, status: "unhosted" as const };
+      const status = entry.structuredHost?.process ? entry.status : "unhosted";
+      const replacement = { ...entry, host: null, status };
       const changedHostPaths = activeHostPathsChangedByEntry(file, sessionKeyId(key), replacement);
       const readinessBefore = migrationReadinessSignature(file, key.engine, changedHostPaths);
       entry.host = null;
-      entry.status = "unhosted";
+      entry.status = status;
       entry.updatedAt = now();
       advanceMigrationScopeRevision(file, key.engine, readinessBefore, changedHostPaths);
     });

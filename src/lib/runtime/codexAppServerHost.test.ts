@@ -557,6 +557,49 @@ describe("CodexAppServerHost", () => {
     await host.release();
   });
 
+  test("a shutdown ledger failure still releases the bound registry claim", async () => {
+    const store = new FailingEventStore();
+    const server = new FakeAppServer("release-ledger-thread");
+    const host = await CodexAppServerHost.start({
+      cwd: "/repo",
+      eventStore: store,
+      spawnProcess: fakeSpawn(server),
+    });
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-release-ledger-"));
+    const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+    const key = { engine: "codex" as const, sessionId: "release-ledger-thread" };
+    registry.upsert({
+      key,
+      artifactPath: "/sessions/release-ledger-thread.jsonl",
+      cwd: "/repo",
+      accountId: null,
+      status: "idle",
+      host: null,
+      structuredHost: {
+        kind: "codex-app-server",
+        endpoint: "stdio:4242",
+        process: { pid: 4242, startIdentity: null },
+        eventCursor: 1,
+        protocolVersion: "0.144.1",
+        writerClaimEpoch: 4,
+        activeTurnRef: null,
+        pendingAttention: [],
+        activeFlags: [],
+      },
+      claimEpoch: 4,
+      claimOwner: "release-owner",
+      pendingAction: null,
+    });
+    await bindCodexHostPersistence(registry, key, host, "release-owner", 4);
+    await host.release();
+    expect(store.appendAttempts).toBe(2);
+    expect(registry.snapshot().entries["codex:release-ledger-thread"]).toMatchObject({
+      status: "unhosted",
+      claimOwner: null,
+      structuredHost: { process: null, endpoint: "stdio:released", activeTurnRef: null, pendingAttention: [], activeFlags: [] },
+    });
+  });
+
   test("diagnostics redact credential labels, cookies, JWTs, and provider key prefixes", () => {
     const secrets = [
       "oauth-secret-value",
@@ -674,6 +717,54 @@ describe("CodexAppServerHost", () => {
     expect(registry.claimStructuredHost(key, replacementOwner)).toBeNull();
     const reclaimed = registry.claimStructuredHost(key, replacementOwner, { allowUnhosted: true });
     expect(reclaimed?.claimEpoch).toBe(5);
+  });
+
+  test("failed adoption clears connection-scoped attention and activity", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-failed-adoption-"));
+    const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+    const key = { engine: "codex" as const, sessionId: "failed-adoption-thread" };
+    registry.upsert({
+      key,
+      artifactPath: "/sessions/failed-adoption-thread.jsonl",
+      cwd: "/repo",
+      accountId: null,
+      status: "dead",
+      host: null,
+      structuredHost: {
+        kind: "codex-app-server",
+        endpoint: "stdio:old",
+        process: null,
+        eventCursor: 9,
+        protocolVersion: "0.144.1",
+        writerClaimEpoch: 2,
+        activeTurnRef: "turn-old",
+        pendingAttention: ["approval-old"],
+        activeFlags: ["waitingForApproval"],
+      },
+      claimEpoch: 2,
+      claimOwner: null,
+      pendingAction: null,
+    });
+    const adopted = await adoptCodexRegistryHosts(
+      registry,
+      () => ({
+        cwd: "/repo",
+        eventStore: new MemoryEventStore(),
+        spawnProcess: fakeSpawn(new FakeAppServer("failed-adoption-thread", "different-thread")),
+      }),
+      { NODE_ENV: "test", LLV_STRUCTURED_HOSTS: "1" },
+    );
+    expect(adopted).toEqual([]);
+    expect(registry.snapshot().entries["codex:failed-adoption-thread"]).toMatchObject({
+      status: "dead",
+      claimOwner: null,
+      structuredHost: {
+        process: null,
+        activeTurnRef: null,
+        pendingAttention: [],
+        activeFlags: [],
+      },
+    });
   });
 
   test("concurrent startup adoption creates one writer and advances its claim epoch", async () => {
@@ -878,5 +969,11 @@ describe("CodexAppServerHost", () => {
     });
     expect(registry.snapshot().entries["codex:coexisting-thread"]?.structuredHost).toEqual(structuredHost);
     expect(registry.ownsStructuredHostClaim(key, "structured-owner", 3)).toBeTrue();
+    registry.markUnhosted(key);
+    expect(registry.snapshot().entries["codex:coexisting-thread"]).toMatchObject({
+      status: "live",
+      host: null,
+      structuredHost,
+    });
   });
 });
