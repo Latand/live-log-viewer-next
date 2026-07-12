@@ -52,6 +52,7 @@ export interface StructuredHostColumns {
   writerClaimEpoch: number;
   activeTurnRef: string | null;
   pendingAttention: string[];
+  activeFlags: string[];
 }
 
 const STRUCTURED_CLAIM_PREFIX = "structured-host:";
@@ -597,6 +598,9 @@ function normalizeStructuredHost(value: unknown): StructuredHostColumns | null {
     activeTurnRef: typeof host.activeTurnRef === "string" ? host.activeTurnRef : null,
     pendingAttention: Array.isArray(host.pendingAttention)
       ? host.pendingAttention.filter((item): item is string => typeof item === "string")
+      : [],
+    activeFlags: Array.isArray(host.activeFlags)
+      ? host.activeFlags.filter((item): item is string => typeof item === "string")
       : [],
   };
 }
@@ -1483,6 +1487,36 @@ export class AgentRegistry {
       const readinessBefore = migrationReadinessSignature(file, key.engine, changedHostPaths);
       entry.structuredHost = structuredHost ? normalizeStructuredHost(structuredHost) : null;
       if (status) entry.status = status;
+      entry.updatedAt = now();
+      advanceMigrationScopeRevision(file, key.engine, readinessBefore, changedHostPaths);
+      return clone(entry);
+    });
+  }
+
+  /** Writes mutable host state only while the caller still owns its writer fence. */
+  setStructuredHostClaimed(
+    key: SessionKey,
+    structuredHost: StructuredHostColumns,
+    status: AgentHostStatus,
+    claimOwner: string,
+    claimEpoch: number,
+  ): AgentRegistryEntry | null {
+    return this.mutate((file) => {
+      const keyId = sessionKeyId(key);
+      const entry = file.entries[keyId];
+      if (!entry?.structuredHost
+        || entry.claimOwner !== claimOwner
+        || entry.claimEpoch !== claimEpoch
+        || entry.structuredHost.writerClaimEpoch !== claimEpoch) return null;
+      const replacement = {
+        ...entry,
+        structuredHost: normalizeStructuredHost(structuredHost),
+        status,
+      };
+      const changedHostPaths = activeHostPathsChangedByEntry(file, keyId, replacement);
+      const readinessBefore = migrationReadinessSignature(file, key.engine, changedHostPaths);
+      entry.structuredHost = replacement.structuredHost;
+      entry.status = status;
       entry.updatedAt = now();
       advanceMigrationScopeRevision(file, key.engine, readinessBefore, changedHostPaths);
       return clone(entry);

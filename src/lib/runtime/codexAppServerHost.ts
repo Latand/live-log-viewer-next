@@ -26,6 +26,10 @@ type Subscriber = {
   closed: boolean;
 };
 type PendingAttention = { rpcId: string | number; method: string };
+type ThreadStatus = {
+  type: "active" | "idle" | "notLoaded" | "systemError";
+  activeFlags: string[];
+};
 type UnsequencedEvent = RuntimeEvent extends infer Event
   ? Event extends RuntimeEvent ? Omit<Event, "seq"> : never
   : never;
@@ -146,6 +150,18 @@ function resumedTurns(value: unknown): JsonObject[] {
   return Array.isArray(page?.data) ? page.data.map(record).filter((turn): turn is JsonObject => turn !== null) : [];
 }
 
+function threadStatus(value: unknown): ThreadStatus | null {
+  const outer = record(value);
+  const thread = record(outer?.thread);
+  const status = record(outer?.status) ?? record(thread?.status);
+  const type = stringField(status, "type");
+  if (type !== "active" && type !== "idle" && type !== "notLoaded" && type !== "systemError") return null;
+  const activeFlags = Array.isArray(status?.activeFlags)
+    ? status.activeFlags.filter((flag): flag is string => typeof flag === "string")
+    : [];
+  return { type, activeFlags };
+}
+
 /** One stdio app-server owner with replayable, multi-subscriber event fan-out. */
 export class CodexAppServerHost implements EngineHost {
   readonly identity: CodexThreadIdentity;
@@ -166,6 +182,8 @@ export class CodexAppServerHost implements EngineHost {
   private activeTurnId: string | null = null;
   private protocolVersion: string | null = null;
   private account: HostState["account"] = null;
+  private engineStatus: "active" | "idle" | "unhosted" | "dead" = "idle";
+  private activeFlags: string[] = [];
   private releasing = false;
   private released = false;
   private dead = false;
@@ -247,7 +265,7 @@ export class CodexAppServerHost implements EngineHost {
       const restored = provisional.restoreEvents();
       if (threadId && restored === 0) provisional.restoreThreadHistory(result);
       provisional.flushPreIdentityEvents();
-      provisional.emit({ kind: "session-status", status: "idle" });
+      provisional.reconcileAfterOpen(threadStatus(result));
       return provisional;
     } catch (error) {
       await provisional.release();
@@ -268,7 +286,7 @@ export class CodexAppServerHost implements EngineHost {
     return {
       async *[Symbol.asyncIterator]() {
         try {
-          while (!subscriber.closed) {
+          while (true) {
             const event = subscriber.queue.shift();
             if (event) {
               if (event.seq > subscriber.afterSeq) {
@@ -277,6 +295,7 @@ export class CodexAppServerHost implements EngineHost {
               }
               continue;
             }
+            if (subscriber.closed) break;
             await new Promise<void>((resolve) => { subscriber.wake = resolve; });
             subscriber.wake = null;
           }
@@ -335,7 +354,7 @@ export class CodexAppServerHost implements EngineHost {
     if (!attention) throw new Error("attention request is missing or already answered");
     this.write({ jsonrpc: "2.0", id: attention.rpcId, result: value ?? {} });
     this.attentions.delete(attentionRef);
-    this.notifyStateListeners();
+    this.emit({ kind: "attention-resolved", id: attentionRef, resolution: "answered" });
   }
 
   async health(): Promise<HostState> {
@@ -355,7 +374,7 @@ export class CodexAppServerHost implements EngineHost {
       : this.released ? "unhosted"
       : this.attentions.size > 0 ? "attention"
       : this.activeTurnId ? "active"
-      : "idle";
+      : this.engineStatus;
     return {
       status,
       sessionKey: this.identity.threadId,
@@ -366,6 +385,7 @@ export class CodexAppServerHost implements EngineHost {
       protocolVersion: this.protocolVersion,
       activeTurnRef: this.activeTurnId,
       pendingAttention: [...this.attentions.keys()],
+      activeFlags: [...this.activeFlags],
       account: this.account,
     };
   }
@@ -382,7 +402,6 @@ export class CodexAppServerHost implements EngineHost {
       request.reject(new Error("Codex app-server host released"));
     }
     this.pending.clear();
-    this.closeSubscribers();
     this.startTermination();
     if (!await this.waitForReap(this.shutdownGraceMs)) {
       try { this.child.kill("SIGKILL"); } catch { /* already closed */ }
@@ -394,7 +413,8 @@ export class CodexAppServerHost implements EngineHost {
     this.releasing = false;
     this.activeTurnId = null;
     this.attentions.clear();
-    this.emit({ kind: "session-status", status: "unhosted" });
+    this.setSessionStatus("unhosted", []);
+    this.closeSubscribers();
   }
 
   private startTermination(): void {
@@ -446,7 +466,37 @@ export class CodexAppServerHost implements EngineHost {
     const stored = this.eventStore.load(this.identity.threadId);
     this.events.splice(0, this.events.length, ...stored);
     this.cursor = Math.max(this.cursor, stored.at(-1)?.seq ?? 0);
+    for (const event of stored) {
+      if (event.kind === "turn-started") this.activeTurnId = event.turnId;
+      if (event.kind === "turn-ended" && event.turnId === this.activeTurnId) this.activeTurnId = null;
+      if (event.kind === "attention") {
+        this.attentions.set(event.id, { rpcId: "restored", method: event.method });
+      }
+      if (event.kind === "attention-resolved") this.attentions.delete(event.id);
+      if (event.kind === "session-status") {
+        this.engineStatus = event.status;
+        this.activeFlags = [...(event.activeFlags ?? [])];
+        if (event.status === "unhosted" || event.status === "dead") {
+          this.activeTurnId = null;
+          this.attentions.clear();
+        }
+      }
+    }
     return stored.length;
+  }
+
+  private reconcileAfterOpen(status: ThreadStatus | null): void {
+    const resumedStatus = status ?? { type: "idle" as const, activeFlags: [] };
+    if (this.activeTurnId && resumedStatus.type !== "active") {
+      const turnId = this.activeTurnId;
+      this.activeTurnId = null;
+      this.emit({ kind: "turn-ended", turnId, status: "error" });
+    }
+    for (const attentionId of [...this.attentions.keys()]) {
+      this.attentions.delete(attentionId);
+      this.emit({ kind: "attention-resolved", id: attentionId, resolution: "host-restarted" });
+    }
+    this.emitThreadStatus(resumedStatus);
   }
 
   private restoreThreadHistory(result: unknown): void {
@@ -481,6 +531,21 @@ export class CodexAppServerHost implements EngineHost {
       subscriber.wake?.();
     }
     this.subscribers.clear();
+  }
+
+  private setSessionStatus(status: "active" | "idle" | "unhosted" | "dead", activeFlags: string[]): void {
+    this.engineStatus = status;
+    this.activeFlags = [...activeFlags];
+    this.emit({ kind: "session-status", status, ...(activeFlags.length > 0 ? { activeFlags: [...activeFlags] } : {}) });
+  }
+
+  private emitThreadStatus(status: ThreadStatus): void {
+    if (status.type === "systemError") {
+      this.fail(new Error("Codex app-server reported a system error"), status.activeFlags);
+      return;
+    }
+    const mapped = status.type === "notLoaded" ? "unhosted" : status.type;
+    this.setSessionStatus(mapped, status.activeFlags);
   }
 
   private rpc(method: string, params: JsonObject = {}): Promise<unknown> {
@@ -577,12 +642,12 @@ export class CodexAppServerHost implements EngineHost {
       return;
     }
     if (method === "thread/status/changed") {
-      const status = stringField(params, "status") ?? stringField(record(params.thread), "status");
-      this.emit({ kind: "session-status", status: status === "active" ? "active" : "idle" });
+      const status = threadStatus(params);
+      if (status) this.emitThreadStatus(status);
     }
   }
 
-  private fail(error: Error): void {
+  private fail(error: Error, activeFlags: string[] = []): void {
     if (this.dead || this.released) return;
     this.dead = true;
     for (const request of this.pending.values()) {
@@ -590,7 +655,7 @@ export class CodexAppServerHost implements EngineHost {
       request.reject(new Error(safeError(error)));
     }
     this.pending.clear();
-    this.emit({ kind: "session-status", status: "dead" });
+    this.setSessionStatus("dead", activeFlags);
     this.closeSubscribers();
     this.startTermination();
   }

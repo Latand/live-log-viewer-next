@@ -16,8 +16,9 @@ export type RuntimeEvent =
   | { kind: "item"; turnId: string | null; item: unknown; phase: "started" | "completed"; seq: number }
   | { kind: "turn-ended"; turnId: string; status: "completed" | "interrupted" | "error"; seq: number }
   | { kind: "attention"; id: string; method: string; attention: unknown; seq: number }
+  | { kind: "attention-resolved"; id: string; resolution: "answered" | "host-restarted"; seq: number }
   | { kind: "limits"; snapshot: unknown; seq: number }
-  | { kind: "session-status"; status: "active" | "idle" | "unhosted" | "dead"; seq: number };
+  | { kind: "session-status"; status: "active" | "idle" | "unhosted" | "dead"; activeFlags?: string[]; seq: number };
 
 export interface HostState {
   status: "active" | "attention" | "idle" | "unhosted" | "dead";
@@ -29,6 +30,7 @@ export interface HostState {
   protocolVersion: string | null;
   activeTurnRef: string | null;
   pendingAttention: string[];
+  activeFlags: string[];
   account: { type: string | null; planType: string | null } | null;
 }
 

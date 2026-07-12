@@ -12,7 +12,7 @@ import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
 import { CodexAppServerHost } from "./codexAppServerHost";
 import type { RuntimeEventStore } from "./eventStore";
 import type { RuntimeEvent } from "./engineHost";
-import { adoptCodexRegistryHosts, persistCodexHost, startCodexStructuredHost, structuredHostsEnabled } from "./registry";
+import { adoptCodexRegistryHosts, bindCodexHostPersistence, persistCodexHost, startCodexStructuredHost, structuredHostsEnabled } from "./registry";
 
 class MemoryEventStore implements RuntimeEventStore {
   private readonly events = new Map<string, RuntimeEvent[]>();
@@ -42,6 +42,7 @@ class FakeAppServer extends EventEmitter {
     private readonly resumedThreadId = threadId,
     private readonly ignoreTerm = false,
     private readonly turns: unknown[] = [],
+    private readonly resumeStatus: unknown = undefined,
   ) {
     super();
     let buffer = "";
@@ -80,7 +81,14 @@ class FakeAppServer extends EventEmitter {
     if (method === "account/read") return this.respond(message.id, { account: { type: "chatgpt", planType: "pro" }, requiresOpenaiAuth: false });
     if (method === "thread/start" || method === "thread/resume") {
       const id = method === "thread/resume" ? this.resumedThreadId : this.threadId;
-      return this.respond(message.id, { thread: { id, path: `/sessions/${id}.jsonl`, turns: this.turns } });
+      return this.respond(message.id, {
+        thread: {
+          id,
+          path: `/sessions/${id}.jsonl`,
+          turns: this.turns,
+          ...(this.resumeStatus ? { status: this.resumeStatus } : {}),
+        },
+      });
     }
     if (method === "turn/start") {
       const turnId = `turn-${++this.turn}`;
@@ -159,15 +167,26 @@ describe("CodexAppServerHost", () => {
       accountId: null,
       status: "live",
       host: null,
+      structuredHost: {
+        kind: "codex-app-server",
+        endpoint: "stdio:pending",
+        process: null,
+        eventCursor: 0,
+        protocolVersion: null,
+        writerClaimEpoch: 7,
+        activeTurnRef: null,
+        pendingAttention: [],
+        activeFlags: [],
+      },
       claimEpoch: 7,
       claimOwner: "viewer",
       pendingAction: null,
     });
-    await persistCodexHost(registry, key, host, 7);
+    await persistCodexHost(registry, key, host, "viewer", 7);
     expect(registry.snapshot().entries["codex:thread-149"]?.structuredHost).toMatchObject({
       kind: "codex-app-server",
       endpoint: "stdio:4242",
-      eventCursor: 3,
+      eventCursor: 4,
       protocolVersion: "0.144.1",
       writerClaimEpoch: 7,
       activeTurnRef: "turn-1",
@@ -233,6 +252,86 @@ describe("CodexAppServerHost", () => {
     await host.release();
   });
 
+  test("closes an unresolved ledger turn when resume reports idle", async () => {
+    const eventStore = new MemoryEventStore();
+    eventStore.append("crashed-turn", { kind: "turn-started", turnId: "turn-active", seq: 1 });
+    eventStore.append("crashed-turn", { kind: "session-status", status: "active", seq: 2 });
+    const server = new FakeAppServer("crashed-turn", "crashed-turn", false, [], { type: "idle" });
+    const host = await CodexAppServerHost.adopt("crashed-turn", {
+      cwd: "/repo",
+      eventStore,
+      initialEventCursor: 2,
+      spawnProcess: fakeSpawn(server),
+    });
+    const replay = host.attach(2)[Symbol.asyncIterator]();
+    expect((await replay.next()).value).toEqual({ kind: "turn-ended", turnId: "turn-active", status: "error", seq: 3 });
+    expect((await replay.next()).value).toEqual({ kind: "session-status", status: "idle", seq: 4 });
+    expect(await host.health()).toMatchObject({ status: "idle", activeTurnRef: null });
+    await host.release();
+  });
+
+  test("resolves ledger attention during adoption and preserves resumed active flags", async () => {
+    const eventStore = new MemoryEventStore();
+    eventStore.append("crashed-attention", {
+      kind: "attention",
+      id: "item/commandExecution/requestApproval:approval-crash",
+      method: "item/commandExecution/requestApproval",
+      attention: { command: "date" },
+      seq: 1,
+    });
+    const server = new FakeAppServer("crashed-attention", "crashed-attention", false, [], {
+      type: "active",
+      activeFlags: ["waitingForApproval"],
+    });
+    const host = await CodexAppServerHost.adopt("crashed-attention", {
+      cwd: "/repo",
+      eventStore,
+      initialEventCursor: 1,
+      spawnProcess: fakeSpawn(server),
+    });
+    const replay = host.attach(1)[Symbol.asyncIterator]();
+    expect((await replay.next()).value).toEqual({
+      kind: "attention-resolved",
+      id: "item/commandExecution/requestApproval:approval-crash",
+      resolution: "host-restarted",
+      seq: 2,
+    });
+    expect((await replay.next()).value).toEqual({
+      kind: "session-status",
+      status: "active",
+      activeFlags: ["waitingForApproval"],
+      seq: 3,
+    });
+    expect(await host.health()).toMatchObject({
+      status: "active",
+      pendingAttention: [],
+      activeFlags: ["waitingForApproval"],
+    });
+    await host.release();
+  });
+
+  test("parses generated-schema thread status notifications", async () => {
+    const server = new FakeAppServer("status-thread");
+    const host = await CodexAppServerHost.start({
+      cwd: "/repo",
+      eventStore: new MemoryEventStore(),
+      spawnProcess: fakeSpawn(server),
+    });
+    const stream = host.attach((await host.health()).eventCursor)[Symbol.asyncIterator]();
+    const fixtures = fs.readFileSync(path.join(import.meta.dir, "fixtures/codex-thread-status-v0.144.1.jsonl"), "utf8")
+      .trim().split("\n");
+    for (const [index, fixture] of fixtures.entries()) {
+      server.stdout.write(`${fixture}\n`);
+      const event = (await stream.next()).value as RuntimeEvent;
+      if (index === 0) expect(event).toMatchObject({ kind: "session-status", status: "active", activeFlags: ["waitingForApproval"] });
+      if (index === 1) expect(event).toMatchObject({ kind: "session-status", status: "idle" });
+      if (index === 2) expect(event).toMatchObject({ kind: "session-status", status: "unhosted" });
+      if (index === 3) expect(event).toMatchObject({ kind: "session-status", status: "dead", activeFlags: ["recovering"] });
+    }
+    expect((await stream.next()).done).toBeTrue();
+    await host.release();
+  });
+
   test("release awaits TERM and escalates to KILL before resolving", async () => {
     const server = new FakeAppServer("reap-thread", "reap-thread", true);
     const host = await CodexAppServerHost.start({
@@ -241,8 +340,11 @@ describe("CodexAppServerHost", () => {
       eventStore: new MemoryEventStore(),
       spawnProcess: fakeSpawn(server),
     });
+    const stream = host.attach((await host.health()).eventCursor)[Symbol.asyncIterator]();
     await host.release();
     expect(server.signals).toEqual(["SIGTERM", "SIGKILL"]);
+    expect((await stream.next()).value).toMatchObject({ kind: "session-status", status: "unhosted" });
+    expect((await stream.next()).done).toBeTrue();
   });
 
   test("protocol failure starts bounded TERM and KILL cleanup", async () => {
@@ -253,9 +355,12 @@ describe("CodexAppServerHost", () => {
       eventStore: new MemoryEventStore(),
       spawnProcess: fakeSpawn(server),
     });
+    const stream = host.attach((await host.health()).eventCursor)[Symbol.asyncIterator]();
     server.stdout.write("malformed\n");
     await Bun.sleep(10);
     expect(server.signals).toEqual(["SIGTERM", "SIGKILL"]);
+    expect((await stream.next()).value).toMatchObject({ kind: "session-status", status: "dead" });
+    expect((await stream.next()).done).toBeTrue();
     await host.release();
   });
 
@@ -289,6 +394,7 @@ describe("CodexAppServerHost", () => {
         writerClaimEpoch: 3,
         activeTurnRef: null,
         pendingAttention: [],
+        activeFlags: [],
       },
       claimEpoch: 3,
       claimOwner: null,
@@ -331,7 +437,7 @@ describe("CodexAppServerHost", () => {
     await adopted[0]!.host.release();
     expect(registry.snapshot().entries["codex:adopted-thread"]).toMatchObject({
       status: "unhosted",
-      structuredHost: { eventCursor: 16, process: null, activeTurnRef: null, pendingAttention: [] },
+      structuredHost: { eventCursor: 17, process: null, activeTurnRef: null, pendingAttention: [] },
     });
   });
 
@@ -355,6 +461,7 @@ describe("CodexAppServerHost", () => {
         writerClaimEpoch: 8,
         activeTurnRef: null,
         pendingAttention: [],
+        activeFlags: [],
       },
       claimEpoch: 8,
       claimOwner: null,
@@ -378,6 +485,61 @@ describe("CodexAppServerHost", () => {
       structuredHost: { writerClaimEpoch: 9 },
     });
     await [...first, ...second][0]!.host.release();
+  });
+
+  test("late state from an old host cannot cross an advanced writer epoch", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-structured-fence-"));
+    const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+    const key = { engine: "codex" as const, sessionId: "fenced-thread" };
+    registry.upsert({
+      key,
+      artifactPath: "/sessions/fenced-thread.jsonl",
+      cwd: "/repo",
+      accountId: null,
+      status: "idle",
+      host: null,
+      structuredHost: {
+        kind: "codex-app-server",
+        endpoint: "stdio:old",
+        process: null,
+        eventCursor: 0,
+        protocolVersion: "0.144.1",
+        writerClaimEpoch: 1,
+        activeTurnRef: null,
+        pendingAttention: [],
+        activeFlags: [],
+      },
+      claimEpoch: 1,
+      claimOwner: "old-owner",
+      pendingAction: null,
+    });
+    const server = new FakeAppServer("fenced-thread");
+    const host = await CodexAppServerHost.adopt("fenced-thread", {
+      cwd: "/repo",
+      eventStore: new MemoryEventStore(),
+      spawnProcess: fakeSpawn(server),
+    });
+    await bindCodexHostPersistence(registry, key, host, "old-owner", 1);
+    const current = registry.snapshot().entries["codex:fenced-thread"]!;
+    registry.upsert({
+      ...current,
+      structuredHost: {
+        ...current.structuredHost!,
+        endpoint: "stdio:new",
+        eventCursor: 99,
+        writerClaimEpoch: 2,
+      },
+      claimEpoch: 2,
+      claimOwner: "new-owner",
+    });
+    server.notify("thread/status/changed", { threadId: "fenced-thread", status: { type: "active", activeFlags: ["running"] } });
+    await Bun.sleep(0);
+    expect(registry.snapshot().entries["codex:fenced-thread"]).toMatchObject({
+      claimEpoch: 2,
+      claimOwner: "new-owner",
+      structuredHost: { endpoint: "stdio:new", eventCursor: 99, writerClaimEpoch: 2 },
+    });
+    await host.release();
   });
 
   test("structured status transitions advance migration readiness revisions", () => {
@@ -414,6 +576,7 @@ describe("CodexAppServerHost", () => {
       writerClaimEpoch: 1,
       activeTurnRef: null,
       pendingAttention: [],
+      activeFlags: [],
     }, "idle");
     const after = registry.snapshot();
     expect(after.conversationRevision.codex).toBe(before.conversationRevision.codex + 1);

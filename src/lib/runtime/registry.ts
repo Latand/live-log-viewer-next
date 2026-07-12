@@ -39,6 +39,7 @@ export function codexHostColumns(state: HostState, writerClaimEpoch: number): St
     writerClaimEpoch,
     activeTurnRef: state.activeTurnRef,
     pendingAttention: state.pendingAttention,
+    activeFlags: state.activeFlags,
   };
 }
 
@@ -46,25 +47,47 @@ export async function persistCodexHost(
   registry: AgentRegistry,
   key: SessionKey,
   host: CodexAppServerHost,
+  claimOwner: string,
   writerClaimEpoch: number,
 ): Promise<AgentRegistryEntry> {
   const state = await host.health();
-  return registry.setStructuredHost(key, codexHostColumns(state, writerClaimEpoch), registryStatus(state));
+  const persisted = registry.setStructuredHostClaimed(
+    key,
+    codexHostColumns(state, writerClaimEpoch),
+    registryStatus(state),
+    claimOwner,
+    writerClaimEpoch,
+  );
+  if (!persisted) throw new Error("structured host writer claim is stale");
+  return persisted;
 }
 
 export async function bindCodexHostPersistence(
   registry: AgentRegistry,
   key: SessionKey,
   host: CodexAppServerHost,
+  claimOwner: string,
   writerClaimEpoch: number,
 ): Promise<() => void> {
-  await persistCodexHost(registry, key, host, writerClaimEpoch);
+  try {
+    await persistCodexHost(registry, key, host, claimOwner, writerClaimEpoch);
+  } catch (error) {
+    await host.release();
+    throw error;
+  }
   let failed = false;
   let unsubscribe = () => {};
   unsubscribe = host.onStateChange((state) => {
     if (failed) return;
     try {
-      registry.setStructuredHost(key, codexHostColumns(state, writerClaimEpoch), registryStatus(state));
+      const persisted = registry.setStructuredHostClaimed(
+        key,
+        codexHostColumns(state, writerClaimEpoch),
+        registryStatus(state),
+        claimOwner,
+        writerClaimEpoch,
+      );
+      if (!persisted) throw new Error("structured host writer claim is stale");
     } catch {
       failed = true;
       unsubscribe();
@@ -100,15 +123,15 @@ export async function adoptCodexRegistryHosts(
             ...optionsFor(claimed),
             initialEventCursor: claimed.structuredHost.eventCursor,
           });
-          await bindCodexHostPersistence(registry, entry.key, host, claimed.claimEpoch);
+          await bindCodexHostPersistence(registry, entry.key, host, claimed.claimOwner!, claimed.claimEpoch);
           adopted.push({ key: entry.key, host });
         } catch {
-          registry.setStructuredHost(entry.key, {
+          registry.setStructuredHostClaimed(entry.key, {
             ...claimed.structuredHost,
             endpoint: "stdio:released",
             process: null,
             activeTurnRef: null,
-          }, "dead");
+          }, "dead", claimed.claimOwner!, claimed.claimEpoch);
           registry.releaseClaim(entry.key, claimed.claimOwner!);
         }
       });
