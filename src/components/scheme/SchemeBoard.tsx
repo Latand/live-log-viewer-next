@@ -24,6 +24,7 @@ import { taskDeliveryText } from "@/lib/tasks/helpers";
 import { pipelineAnnouncement, pipelineStripByPath } from "@/components/pipelines/pipelineModel";
 import { BulkActionBar } from "./BulkActionBar";
 import { nodesInRect, pruneSelection, selectionBBox } from "./lasso";
+import { resolveExpandedNode } from "./expandedNode";
 import { autoEditTokenFor, clearStaleRename, requestRename, type RenameRequest } from "./renameRequest";
 import { buildSchemeLayout } from "./layout";
 import { Minimap } from "./Minimap";
@@ -223,9 +224,19 @@ export function SchemeBoard({
   }, [project]);
   /* eslint-enable react-hooks/set-state-in-effect */
   /* The overlay pane re-derives from the layout each poll, so its feed stays
-     live; a node that left the layout (closed, deleted) drops the overlay. */
-  const expandedNode = expanded ? (layout.nodes.find((node) => node.file.path === expanded) ?? null) : null;
+     live; a node that left the layout (closed, deleted) drops the overlay. A
+     succession is not a close: the predecessor entry is replaced by a successor
+     under a new path (same conversation), matched via `predecessorPath` so the
+     overlay — and its rename draft — survives. */
+  const expandedNode = resolveExpandedNode(layout.nodes, expanded);
   const overlayOpen = expandedNode !== null;
+  /* Track the successor's current path so the overlay stays open across a
+     succession (and further successions chain from the new path). */
+  /* eslint-disable react-hooks/set-state-in-effect */
+  useEffect(() => {
+    if (expandedNode && expandedNode.file.path !== expanded) setExpanded(expandedNode.file.path);
+  }, [expandedNode, expanded]);
+  /* eslint-enable react-hooks/set-state-in-effect */
   /* Esc collapses the overlay. Capture phase, so the camera's own Escape
      handler never sees the press and the board selection stays. Presses
      inside text fields keep their meaning for the field. */
