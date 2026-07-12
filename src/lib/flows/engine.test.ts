@@ -1,15 +1,16 @@
 import { afterAll, expect, test } from "bun:test";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
 import type { FileEntry } from "@/lib/types";
+import { procBackend } from "@/lib/proc";
 
 import type { Flow } from "./types";
 
 process.env.LLV_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "llv-flow-engine-test-"));
-const { captureReviewHead, newRound, tickFlows, persistTickFlows, flowTickBase, reviewerLaunchPersisted, abandonLaunch, relayFixOrPark } = await import("./engine");
+const { captureReviewHead, newRound, tickFlows, persistTickFlows, flowTickBase, reviewerLaunchPersisted, abandonLaunch, adoptSyntheticLaunchTakeover, recordHeadlessLaunch, relayFixOrPark } = await import("./engine");
 const { loadFlows, outputPathFor, saveFlows, stderrPathFor, stdoutPathFor } = await import("./store");
 
 afterAll(() => {
@@ -214,7 +215,7 @@ test("headless review retries once after an exit without a verdict, then parks o
   await tickFlows([implementer]);
   const interrupted = loadFlows()[0]!;
   expect(interrupted.state).toBe("needs_decision");
-  expect(interrupted.stateDetail).toBe("reviewer spawn was interrupted by a restart");
+  expect(interrupted.stateDetail).toBe("reviewer tracking was lost before a verdict could be recovered");
 
   interrupted.state = "reviewing";
   interrupted.rounds[0]!.reviewerPid = 999_999_999;
@@ -226,6 +227,537 @@ test("headless review retries once after an exit without a verdict, then parks o
   const parked = loadFlows()[0]!;
   expect(parked.state).toBe("needs_decision");
   expect(parked.stateDetail).toContain("reviewer verdict was unparseable");
+});
+
+test("headless review recovers the rollout verdict before consuming an automatic retry", async () => {
+  const startedAt = "2026-07-12T08:35:59.000Z";
+  const cwd = "/repo";
+  const implementer = writeCodexEntry("recoverable-implementer.jsonl", { id: "019f421e-02e1-73e0-9b77-bebde063f119", cwd }, Date.now() / 1_000);
+  const reviewerPath = path.join(import.meta.dir, "fixtures", "codex-review-2026-07-12.jsonl");
+  const reviewer = entryFor(reviewerPath, Date.now() / 1_000);
+  const flow: Flow = {
+    id: "flow-recoverable",
+    template: "implement-review-loop",
+    project: "repo",
+    cwd,
+    implementerPath: implementer.path,
+    roles: {
+      implementer: { engine: "codex", model: null, effort: "high" },
+      reviewer: { engine: "codex", model: null, effort: "xhigh" },
+    },
+    reviewerFallback: { engine: "claude", model: "fable", effort: "high" },
+    baseRef: "base",
+    baseMode: "head",
+    mode: "manual",
+    reviewerMode: "headless",
+    roundLimit: 5,
+    state: "reviewing",
+    pausedState: null,
+    stateDetail: null,
+    rounds: [{
+      n: 1,
+      reviewerPath,
+      reviewerRole: { engine: "codex", model: null, effort: "xhigh" },
+      accountId: "default",
+      attemptedAccounts: ["codex:default"],
+      autoRetryCount: 0,
+      sessionId: "11111111-2222-4333-8444-555555555555",
+      reviewerPid: 999_999_999,
+      reviewerIdentity: "999999999:gone",
+      reviewerPane: null,
+      findingsPath: null,
+      triggeredBy: "marker",
+      readyNote: null,
+      reviewHeadSha: null,
+      verdict: null,
+      findingsCount: null,
+      startedAt,
+      spawnStartedAt: startedAt,
+      relayStartedAt: null,
+      relayDelivery: null,
+      reviewedAt: null,
+      terminalAt: null,
+      relayedAt: null,
+      error: null,
+    }],
+    createdAt: startedAt,
+    closedAt: null,
+  };
+  fs.mkdirSync(path.dirname(stdoutPathFor(flow.id, 1)), { recursive: true });
+  fs.writeFileSync(stdoutPathFor(flow.id, 1), JSON.stringify({
+    type: "item.completed",
+    item: { type: "agent_message", text: "Review completed; the structured verdict is in the rollout." },
+  }) + "\n");
+  saveFlows([flow]);
+
+  await tickFlows([implementer, reviewer]);
+
+  expect(loadFlows()[0]).toMatchObject({
+    state: "relay_pending",
+    rounds: [{ verdict: "REQUEST_CHANGES", findingsCount: 2, autoRetryCount: 0 }],
+  });
+});
+
+test("lost reviewer tracking parks with an accurate cause and does not spawn a duplicate", async () => {
+  const startedAt = "2026-07-12T08:35:59.000Z";
+  const cwd = "/repo";
+  const implementer = writeCodexEntry("lost-tracking-implementer.jsonl", { id: "019f421e-02e1-73e0-9b77-bebde063f120", cwd }, Date.now() / 1_000);
+  const flow: Flow = {
+    id: "flow-lost-tracking",
+    template: "implement-review-loop",
+    project: "repo",
+    cwd,
+    implementerPath: implementer.path,
+    roles: {
+      implementer: { engine: "codex", model: null, effort: "high" },
+      reviewer: { engine: "codex", model: null, effort: "xhigh" },
+    },
+    reviewerFallback: null,
+    baseRef: "base",
+    baseMode: "head",
+    mode: "auto",
+    reviewerMode: "headless",
+    roundLimit: 5,
+    state: "reviewing",
+    pausedState: null,
+    stateDetail: null,
+    rounds: [{
+      n: 1,
+      reviewerPath: null,
+      reviewerRole: { engine: "codex", model: null, effort: "xhigh" },
+      accountId: "default",
+      attemptedAccounts: ["codex:default"],
+      autoRetryCount: 0,
+      sessionId: null,
+      reviewerPid: null,
+      reviewerIdentity: null,
+      reviewerPane: null,
+      findingsPath: null,
+      triggeredBy: "marker",
+      readyNote: null,
+      reviewHeadSha: null,
+      verdict: null,
+      findingsCount: null,
+      startedAt,
+      spawnStartedAt: startedAt,
+      relayStartedAt: null,
+      relayDelivery: null,
+      reviewedAt: null,
+      terminalAt: null,
+      relayedAt: null,
+      error: null,
+    }],
+    createdAt: startedAt,
+    closedAt: null,
+  };
+  saveFlows([flow]);
+
+  await tickFlows([implementer]);
+
+  expect(loadFlows()[0]).toMatchObject({
+    state: "needs_decision",
+    stateDetail: "reviewer tracking was lost before a verdict could be recovered",
+    rounds: [{ autoRetryCount: 0 }],
+  });
+});
+
+test("pane restart during the pre-handle checkpoint parks before launching another reviewer", async () => {
+  const startedAt = "2026-07-12T09:30:00.000Z";
+  const cwd = "/missing-pane-review-worktree";
+  const implementer = writeCodexEntry("pane-pre-handle-implementer.jsonl", { id: "019f421e-02e1-73e0-9b77-bebde063f121", cwd }, Date.now() / 1_000);
+  const flow: Flow = {
+    id: "flow-pane-pre-handle",
+    template: "implement-review-loop",
+    project: "repo",
+    cwd,
+    implementerPath: implementer.path,
+    roles: {
+      implementer: { engine: "codex", model: null, effort: "high" },
+      reviewer: { engine: "codex", model: null, effort: "xhigh" },
+    },
+    reviewerFallback: null,
+    baseRef: "base",
+    baseMode: "head",
+    mode: "auto",
+    reviewerMode: "pane",
+    roundLimit: 5,
+    state: "spawning",
+    pausedState: null,
+    stateDetail: null,
+    rounds: [{
+      n: 1,
+      reviewerPath: null,
+      reviewerRole: { engine: "codex", model: null, effort: "xhigh" },
+      accountId: "default",
+      attemptedAccounts: [],
+      autoRetryCount: 0,
+      sessionId: null,
+      reviewerPid: null,
+      reviewerIdentity: null,
+      reviewerPane: null,
+      findingsPath: null,
+      triggeredBy: "marker",
+      readyNote: null,
+      reviewHeadSha: null,
+      verdict: null,
+      findingsCount: null,
+      startedAt,
+      spawnStartedAt: startedAt,
+      relayStartedAt: null,
+      relayDelivery: null,
+      reviewedAt: null,
+      terminalAt: null,
+      relayedAt: null,
+      error: null,
+    }],
+    createdAt: startedAt,
+    closedAt: null,
+  };
+  saveFlows([flow]);
+
+  await tickFlows([implementer]);
+
+  expect(loadFlows()[0]).toMatchObject({
+    state: "needs_decision",
+    stateDetail: "reviewer launch tracking is unavailable",
+    rounds: [{ reviewerPane: null, reviewerPid: null, reviewerPath: null }],
+  });
+});
+
+test("overlapping ticks preserve an active pre-handle launch and adopt its reviewer after a synthetic takeover", async () => {
+  const startedAt = new Date().toISOString();
+  const leaseUntil = new Date(Date.now() + 60_000).toISOString();
+  const cwd = "/repo";
+  const implementer = writeCodexEntry("overlap-launch-implementer.jsonl", { id: "019f421e-02e1-73e0-9b77-bebde063f123", cwd }, Date.now() / 1_000);
+  const flow: Flow = {
+    id: "flow-overlap-launch",
+    template: "implement-review-loop",
+    project: "repo",
+    cwd,
+    implementerPath: implementer.path,
+    roles: {
+      implementer: { engine: "codex", model: null, effort: "high" },
+      reviewer: { engine: "codex", model: null, effort: "xhigh" },
+    },
+    reviewerFallback: null,
+    baseRef: "base",
+    baseMode: "head",
+    mode: "auto",
+    reviewerMode: "pane",
+    roundLimit: 5,
+    state: "spawning",
+    pausedState: null,
+    stateDetail: null,
+    rounds: [{
+      n: 1,
+      reviewerPath: null,
+      reviewerRole: { engine: "codex", model: null, effort: "xhigh" },
+      accountId: "default",
+      attemptedAccounts: [],
+      autoRetryCount: 0,
+      sessionId: null,
+      reviewerPid: null,
+      reviewerIdentity: null,
+      reviewerPane: null,
+      findingsPath: null,
+      triggeredBy: "marker",
+      readyNote: null,
+      reviewHeadSha: null,
+      verdict: null,
+      findingsCount: null,
+      startedAt,
+      spawnStartedAt: startedAt,
+      launchId: "launch-overlap",
+      launchLeaseUntil: leaseUntil,
+      relayStartedAt: null,
+      relayDelivery: null,
+      reviewedAt: null,
+      terminalAt: null,
+      relayedAt: null,
+      error: null,
+    }],
+    createdAt: startedAt,
+    closedAt: null,
+  };
+  saveFlows([flow]);
+
+  await tickFlows([implementer]);
+  expect(loadFlows()[0]).toMatchObject({
+    state: "spawning",
+    stateDetail: null,
+    rounds: [{ launchId: "launch-overlap", reviewerPane: null }],
+  });
+
+  const staleTakeover = loadFlows()[0]!;
+  staleTakeover.state = "needs_decision";
+  staleTakeover.stateDetail = "reviewer tracking was lost before a verdict could be recovered";
+  saveFlows([staleTakeover]);
+  const launchedRound = {
+    ...flow.rounds[0]!,
+    reviewerPane: { paneId: "%77", windowName: "codex-review" },
+    launchLeaseUntil: null,
+  };
+
+  expect(adoptSyntheticLaunchTakeover(flow.id, launchedRound)).toBeTrue();
+  expect(loadFlows()[0]).toMatchObject({
+    state: "reviewing",
+    stateDetail: null,
+    rounds: [{ launchId: "launch-overlap", launchLeaseUntil: null, reviewerPane: { paneId: "%77" } }],
+  });
+});
+
+test("synthetic takeover preserves an identity-less headless launch lease for the next Viewer", async () => {
+  const startedAt = new Date().toISOString();
+  const leaseUntil = new Date(Date.now() + 60_000).toISOString();
+  const cwd = "/repo";
+  const implementer = writeCodexEntry("adopt-identity-lease-implementer.jsonl", { id: "019f421e-02e1-73e0-9b77-bebde063f125", cwd }, Date.now() / 1_000);
+  const reviewer = spawn("sleep", ["30"], { detached: true, stdio: "ignore" });
+  reviewer.unref();
+  const flow: Flow = {
+    id: "flow-adopt-identity-lease",
+    template: "implement-review-loop",
+    project: "repo",
+    cwd,
+    implementerPath: implementer.path,
+    roles: {
+      implementer: { engine: "codex", model: null, effort: "high" },
+      reviewer: { engine: "codex", model: null, effort: "xhigh" },
+    },
+    reviewerFallback: null,
+    baseRef: "base",
+    baseMode: "head",
+    mode: "auto",
+    reviewerMode: "headless",
+    roundLimit: 5,
+    state: "needs_decision",
+    pausedState: null,
+    stateDetail: "reviewer tracking was lost before a verdict could be recovered",
+    rounds: [{
+      n: 1,
+      reviewerPath: null,
+      reviewerRole: { engine: "codex", model: null, effort: "xhigh" },
+      accountId: "default",
+      attemptedAccounts: ["codex:default"],
+      autoRetryCount: 0,
+      sessionId: null,
+      reviewerPid: null,
+      reviewerIdentity: null,
+      reviewerPane: null,
+      findingsPath: null,
+      triggeredBy: "marker",
+      readyNote: null,
+      reviewHeadSha: null,
+      verdict: null,
+      findingsCount: null,
+      startedAt,
+      spawnStartedAt: startedAt,
+      launchId: "launch-adopt-identity-lease",
+      launchLeaseUntil: leaseUntil,
+      relayStartedAt: null,
+      relayDelivery: null,
+      reviewedAt: null,
+      terminalAt: null,
+      relayedAt: null,
+      error: null,
+    }],
+    createdAt: startedAt,
+    closedAt: null,
+  };
+  saveFlows([flow]);
+  const launchedRound = {
+    ...flow.rounds[0]!,
+    reviewerPid: reviewer.pid ?? null,
+    reviewerIdentity: null,
+  };
+
+  try {
+    expect(adoptSyntheticLaunchTakeover(flow.id, launchedRound)).toBeTrue();
+    expect(loadFlows()[0]).toMatchObject({
+      state: "reviewing",
+      stateDetail: null,
+      rounds: [{ reviewerPid: reviewer.pid, reviewerIdentity: null, launchLeaseUntil: leaseUntil, autoRetryCount: 0 }],
+    });
+
+    await tickFlows([implementer]);
+    expect(loadFlows()[0]).toMatchObject({
+      state: "reviewing",
+      stateDetail: null,
+      rounds: [{ reviewerPid: reviewer.pid, reviewerIdentity: null, launchLeaseUntil: leaseUntil, autoRetryCount: 0 }],
+    });
+
+    const recovered = loadFlows()[0]!;
+    recovered.rounds[0]!.reviewerIdentity = procBackend.processIdentity(reviewer.pid!);
+    saveFlows([recovered]);
+    await tickFlows([implementer]);
+    expect(loadFlows()[0]).toMatchObject({
+      state: "reviewing",
+      rounds: [{ reviewerPid: reviewer.pid, reviewerIdentity: expect.any(String), launchLeaseUntil: null, autoRetryCount: 0 }],
+    });
+  } finally {
+    if (reviewer.pid) {
+      try { process.kill(reviewer.pid, "SIGKILL"); } catch { /* already gone */ }
+    }
+  }
+});
+
+test("identity-less headless post-spawn checkpoint keeps its cross-Viewer lease until identity recovery", async () => {
+  const startedAt = new Date().toISOString();
+  const leaseUntil = new Date(Date.now() + 60_000).toISOString();
+  const cwd = "/repo";
+  const implementer = writeCodexEntry("identity-lease-implementer.jsonl", { id: "019f421e-02e1-73e0-9b77-bebde063f124", cwd }, Date.now() / 1_000);
+  const reviewer = spawn("sleep", ["30"], { detached: true, stdio: "ignore" });
+  reviewer.unref();
+  const flow: Flow = {
+    id: "flow-identity-lease",
+    template: "implement-review-loop",
+    project: "repo",
+    cwd,
+    implementerPath: implementer.path,
+    roles: {
+      implementer: { engine: "codex", model: null, effort: "high" },
+      reviewer: { engine: "codex", model: null, effort: "xhigh" },
+    },
+    reviewerFallback: null,
+    baseRef: "base",
+    baseMode: "head",
+    mode: "auto",
+    reviewerMode: "headless",
+    roundLimit: 5,
+    state: "reviewing",
+    pausedState: null,
+    stateDetail: null,
+    rounds: [{
+      n: 1,
+      reviewerPath: null,
+      reviewerRole: { engine: "codex", model: null, effort: "xhigh" },
+      accountId: "default",
+      attemptedAccounts: ["codex:default"],
+      autoRetryCount: 0,
+      sessionId: null,
+      reviewerPid: null,
+      reviewerIdentity: null,
+      reviewerPane: null,
+      findingsPath: null,
+      triggeredBy: "marker",
+      readyNote: null,
+      reviewHeadSha: null,
+      verdict: null,
+      findingsCount: null,
+      startedAt,
+      spawnStartedAt: startedAt,
+      launchId: "launch-identity-lease",
+      launchLeaseUntil: leaseUntil,
+      relayStartedAt: null,
+      relayDelivery: null,
+      reviewedAt: null,
+      terminalAt: null,
+      relayedAt: null,
+      error: null,
+    }],
+    createdAt: startedAt,
+    closedAt: null,
+  };
+  recordHeadlessLaunch(flow.rounds[0]!, {
+    pid: reviewer.pid ?? null,
+    identity: null,
+    sessionId: null,
+    reviewerPath: null,
+  });
+  saveFlows([flow]);
+
+  try {
+    expect(loadFlows()[0]!.rounds[0]!.launchLeaseUntil).toBe(leaseUntil);
+    await tickFlows([implementer]);
+    expect(loadFlows()[0]).toMatchObject({
+      state: "reviewing",
+      stateDetail: null,
+      rounds: [{ reviewerPid: reviewer.pid, reviewerIdentity: null, launchLeaseUntil: leaseUntil, autoRetryCount: 0 }],
+    });
+
+    const recovered = loadFlows()[0]!;
+    recovered.rounds[0]!.reviewerIdentity = procBackend.processIdentity(reviewer.pid!);
+    saveFlows([recovered]);
+    await tickFlows([implementer]);
+    expect(loadFlows()[0]).toMatchObject({
+      state: "reviewing",
+      rounds: [{ reviewerIdentity: expect.any(String), launchLeaseUntil: null }],
+    });
+  } finally {
+    if (reviewer.pid) {
+      try { process.kill(reviewer.pid, "SIGKILL"); } catch { /* already gone */ }
+    }
+  }
+});
+
+test("restart recovery accepts a conclusive Codex artifact without process identity or scanner entry", async () => {
+  const startedAt = "2026-07-12T09:35:00.000Z";
+  const cwd = "/repo";
+  const implementer = writeCodexEntry("artifact-recovery-implementer.jsonl", { id: "019f421e-02e1-73e0-9b77-bebde063f122", cwd }, Date.now() / 1_000);
+  const reviewer = spawn("sleep", ["30"], { detached: true, stdio: "ignore" });
+  reviewer.unref();
+  const flow: Flow = {
+    id: "flow-artifact-recovery",
+    template: "implement-review-loop",
+    project: "repo",
+    cwd,
+    implementerPath: implementer.path,
+    roles: {
+      implementer: { engine: "codex", model: null, effort: "high" },
+      reviewer: { engine: "codex", model: null, effort: "xhigh" },
+    },
+    reviewerFallback: null,
+    baseRef: "base",
+    baseMode: "head",
+    mode: "manual",
+    reviewerMode: "headless",
+    roundLimit: 5,
+    state: "reviewing",
+    pausedState: null,
+    stateDetail: null,
+    rounds: [{
+      n: 1,
+      reviewerPath: null,
+      reviewerRole: { engine: "codex", model: null, effort: "xhigh" },
+      accountId: "default",
+      attemptedAccounts: ["codex:default"],
+      autoRetryCount: 0,
+      sessionId: null,
+      reviewerPid: reviewer.pid ?? null,
+      reviewerIdentity: null,
+      reviewerPane: null,
+      findingsPath: null,
+      triggeredBy: "marker",
+      readyNote: null,
+      reviewHeadSha: null,
+      verdict: null,
+      findingsCount: null,
+      startedAt,
+      spawnStartedAt: startedAt,
+      relayStartedAt: null,
+      relayDelivery: null,
+      reviewedAt: null,
+      terminalAt: null,
+      relayedAt: null,
+      error: null,
+    }],
+    createdAt: startedAt,
+    closedAt: null,
+  };
+  fs.mkdirSync(path.dirname(outputPathFor(flow.id, 1)), { recursive: true });
+  fs.writeFileSync(outputPathFor(flow.id, 1), "VERDICT: APPROVE\n\nReview completed.");
+  saveFlows([flow]);
+
+  try {
+    await tickFlows([implementer]);
+    expect(loadFlows()[0]).toMatchObject({
+      state: "relay_pending",
+      rounds: [{ verdict: "APPROVE", findingsCount: 0, autoRetryCount: 0 }],
+    });
+  } finally {
+    if (reviewer.pid) {
+      try { process.kill(reviewer.pid, "SIGKILL"); } catch { /* already gone */ }
+    }
+  }
 });
 
 test("restart recovery keeps a launched Claude fallback bound to its persisted effective role", async () => {

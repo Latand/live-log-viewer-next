@@ -20,6 +20,8 @@ export interface ReviewCardItem {
 export const RAW_DEBUG_KEEP = 24_000;
 export const VERDICT_LINE_RE = /^\s*(?:VERDICT:\s*)?(REQUEST_CHANGES|APPROVE|COMMENT)\b/m;
 const FINDING_ITEM_RE = /^\s*(\d+)[.)]\s+(.*)$/;
+const FINDING_HEADING_RE = /^\s*#{1,6}\s+finding\s+\d+\s*$/i;
+const FINDING_FIELD_RE = /^\s*[-*]\s+\*\*(severity|file|line|title|explanation):\*\*\s*(.*)$/i;
 const SEVERITY_RE = /(?:\[(P[0-3])\]|\b(Critical|High|Medium|Low|Info|P[0-3])\b)/i;
 const PATH_RE =
   /((?:\.{1,2}\/|\/|~\/)?[\w@.+-][\w@.+\-/]*\.(?:tsx?|jsx?|mjs|cjs|mts|cts|py|go|rs|md|json|ya?ml|toml|css|scss|html|sql|sh|env|ftl|txt))(?::(\d+))?/i;
@@ -88,10 +90,64 @@ function makeFinding(body: string): ReviewFinding {
   return { severity, file: target.file, line: target.line, title, body: debugRaw(body).raw };
 }
 
+type StructuredFinding = Partial<Record<"severity" | "file" | "line" | "title" | "explanation", string>>;
+
+function inlineValue(value: string): string {
+  return value.trim().replace(/^`([^`]*)`$/, "$1");
+}
+
+/** Current Codex reviewers emit labelled Markdown bullets, optionally grouped
+    under `### Finding N` headings. Parse that stable field contract directly so
+    the flow engine and review cards share the same finding count and metadata. */
+function parseStructuredFindings(text: string): ReviewFinding[] {
+  const findings: ReviewFinding[] = [];
+  let current: StructuredFinding | null = null;
+  let activeField: keyof StructuredFinding | null = null;
+  const flush = () => {
+    if (current?.severity && current.title && current.explanation) {
+      const linked = current.file ? parseLinkedTarget(current.file) : {};
+      const explicitLine = current.line ? Number.parseInt(current.line, 10) : undefined;
+      findings.push({
+        severity: normalizeSeverity(current.severity),
+        file: linked.file ?? (current.file ? inlineValue(current.file) : undefined),
+        line: Number.isFinite(explicitLine) ? explicitLine : linked.line,
+        title: inlineValue(current.title).slice(0, 200),
+        body: debugRaw(current.explanation).raw,
+      });
+    }
+    current = null;
+    activeField = null;
+  };
+
+  for (const rawLine of text.split("\n")) {
+    if (FINDING_HEADING_RE.test(rawLine)) {
+      flush();
+      current = {};
+      continue;
+    }
+    const field = rawLine.match(FINDING_FIELD_RE);
+    if (field) {
+      const key = field[1]!.toLowerCase() as keyof StructuredFinding;
+      if (key === "severity" && current?.severity) flush();
+      current ??= {};
+      current[key] = field[2]?.trim() ?? "";
+      activeField = key;
+      continue;
+    }
+    const continuation = rawLine.trim();
+    if (current && activeField === "explanation" && continuation) {
+      current.explanation = `${current.explanation ?? ""}\n${continuation}`.trim();
+    }
+  }
+  flush();
+  return findings;
+}
+
 export function parseReview(text: string, ts: unknown): ReviewCardItem | null {
   const verdict = text.match(VERDICT_LINE_RE)?.[1] as ReviewCardItem["verdict"] | undefined;
   if (!verdict) return null;
-  const findings: ReviewFinding[] = [];
+  const findings = parseStructuredFindings(text);
+  const hasStructuredFindings = findings.length > 0;
   const summary: string[] = [];
   let buffer: string | null = null;
   const flush = () => {
@@ -103,7 +159,7 @@ export function parseReview(text: string, ts: unknown): ReviewCardItem | null {
   for (const rawLine of text.split("\n")) {
     const line = rawLine.trimEnd();
     const item = line.match(FINDING_ITEM_RE);
-    if (item) {
+    if (!hasStructuredFindings && item) {
       flush();
       buffer = item[2] ?? "";
       continue;
@@ -114,12 +170,12 @@ export function parseReview(text: string, ts: unknown): ReviewCardItem | null {
       else flush();
       continue;
     }
-    if (!trimmed || VERDICT_LINE_RE.test(line) || /^(findings?|summary|open questions?|tests?|residual risk)\s*:?\s*$/i.test(trimmed)) {
+    if (!trimmed || VERDICT_LINE_RE.test(line) || FINDING_HEADING_RE.test(line) || FINDING_FIELD_RE.test(line) || /^(findings?|summary|open questions?|tests?|residual risk)\s*:?\s*$/i.test(trimmed)) {
       continue;
     }
     if (findings.length === 0 && summary.length < 3 && trimmed.length <= 240) summary.push(trimmed);
   }
-  flush();
+  if (!hasStructuredFindings) flush();
 
   const severe = findings.filter((finding) => SEVERITY_RE.test(finding.body)).length;
   const reviewish =

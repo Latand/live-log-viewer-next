@@ -14,12 +14,14 @@ import { outputPathFor, stderrPathFor, stdoutPathFor } from "./store";
 const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;
 
 export interface HeadlessRunResult {
-  status: "running" | "done" | "failed" | "timeout";
+  status: "running" | "done" | "failed" | "timeout" | "lost";
   stdout: string;
   stderr: string;
   finalOutput: string;
   /** Session/thread id parsed from the run's `--json` event stream. */
   sessionId: string | null;
+  /** Refreshed process start identity, persisted by the engine once /proc is ready. */
+  processIdentity: string | null;
   code: number | null;
   signal: NodeJS.Signals | null;
 }
@@ -36,7 +38,11 @@ export interface HeadlessCodexAccount {
   managed: boolean;
 }
 export interface HeadlessClaudeAccount { home: string; projectsDir: string; managed: boolean; }
-export interface HeadlessReviewRuntime { command?: string; }
+export interface HeadlessReviewRuntime {
+  command?: string;
+  /** Test seam for the brief spawn-to-/proc visibility race. */
+  processIdentity?: (pid: number) => string | null;
+}
 
 /* The reviewer runs detached with file-backed stdio, so it survives a viewer
    restart. This in-memory record only adds what disk cannot know: the exact
@@ -45,6 +51,7 @@ export interface HeadlessReviewRuntime { command?: string; }
 interface LiveRun {
   child: ChildProcess;
   identity: string | null;
+  identityOf: (pid: number) => string | null;
   startedAt: number;
   exit: { code: number | null; signal: NodeJS.Signals | null } | null;
   timer: NodeJS.Timeout;
@@ -90,6 +97,35 @@ function killTree(pid: number, identity: string | null, escalateMs = 3_000): voi
   setTimeout(() => {
     if (processMatches(pid, identity)) signalTree("SIGKILL");
   }, escalateMs).unref();
+}
+
+function refreshRunIdentity(run: LiveRun, pid: number): string | null {
+  if (run.identity) return run.identity;
+  run.identity = run.identityOf(pid);
+  return run.identity;
+}
+
+/** A live ChildProcess handle proves ownership even during the short interval
+    before Linux exposes a stable process start identity. Identity-backed tree
+    killing remains the restart-safe path; the identity-less path sends one
+    SIGTERM and skips delayed escalation to avoid a PID-reuse hazard. */
+function killOwnedRun(run: LiveRun): void {
+  const pid = run.child.pid;
+  if (!pid || run.exit !== null || !pidAlive(pid)) return;
+  const identity = refreshRunIdentity(run, pid);
+  if (identity) {
+    killTree(pid, identity);
+    return;
+  }
+  try {
+    process.kill(-pid, "SIGTERM");
+  } catch {
+    try {
+      run.child.kill("SIGTERM");
+    } catch {
+      /* already gone */
+    }
+  }
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -219,14 +255,16 @@ export function startHeadlessReview(
     fs.closeSync(stderrFd);
   }
   child.unref();
-  const identity = child.pid ? procBackend.processIdentity(child.pid) : null;
+  const identityOf = runtime?.processIdentity ?? procBackend.processIdentity;
+  const identity = child.pid ? identityOf(child.pid) : null;
   const run: LiveRun = {
     child,
     identity,
+    identityOf,
     startedAt: Date.now(),
     exit: null,
     timer: setTimeout(() => {
-      if (!run.exit && child.pid) killTree(child.pid, run.identity);
+      killOwnedRun(run);
     }, timeoutMs),
   };
   run.timer.unref();
@@ -279,26 +317,50 @@ export function headlessReviewStatus(
   const run = runs.get(runKey(flowId, round));
   const stdout = readOptional(stdoutPathFor(flowId, round));
   const pid = run?.child.pid ?? persisted.reviewerPid ?? null;
+  if (run && pid && !run.identity && pidAlive(pid)) refreshRunIdentity(run, pid);
   const identity = run?.identity ?? persisted.reviewerIdentity ?? null;
-  if (!run && pid === null && !stdout) return null;
   const stderr = readOptional(stderrPathFor(flowId, round));
   const scanned = scanEventStream(stdout);
+  const outputPath = engine === "codex" ? outputPathFor(flowId, round) : null;
+  const artifactOutput = readOptional(outputPath).trim();
+  if (!run && pid === null && !stdout && !stderr && !artifactOutput && !persisted.spawnStartedAt) return null;
   const startedAt = run?.startedAt ?? Date.parse(persisted.spawnStartedAt ?? "");
   const elapsed = Number.isFinite(startedAt) ? Date.now() - startedAt : 0;
-  const alive = run ? run.exit === null && processMatches(pid, identity) : processMatches(pid, identity);
+  const finalOutput = artifactOutput || scanned.lastAgentMessage || (engine === "claude" ? stdout.trim() : "");
+  /* Codex writes --output-last-message only when the turn completes. Launch
+     cleanup removes stale copies before every attempt, so a populated artifact
+     is conclusive even when restart recovery cannot prove pid ownership. */
+  if (artifactOutput) {
+    return { status: "done", stdout, stderr, finalOutput, sessionId: scanned.sessionId, processIdentity: identity, code: run?.exit?.code ?? null, signal: run?.exit?.signal ?? null };
+  }
+  /* A restart loses the ChildProcess handle. When the pid is still live and its
+     start identity was never checkpointed, ownership cannot be reconstructed
+     safely: the pid may belong to the reviewer or may have been reused. Park
+     this round before interim stdout can make it look completed and retryable. */
+  if (!run && pid !== null && !identity && pidAlive(pid)) {
+    return { status: "lost", stdout, stderr, finalOutput, sessionId: scanned.sessionId, processIdentity: null, code: null, signal: null };
+  }
+  /* The in-memory ChildProcess handle is authoritative until its close/error
+     event. A null identity here is a transient /proc race, so it cannot turn a
+     running reviewer into a completed no-verdict attempt. */
+  const alive = run ? run.exit === null && pidAlive(pid) : processMatches(pid, identity);
   if (alive) {
     /* Re-arm the timeout across restarts: the in-memory timer died with the
        old process, so the reconstruction path enforces the budget itself. */
     if (!run && elapsed >= timeoutMs && pid) killTree(pid, identity);
-    return { status: "running", stdout, stderr, finalOutput: "", sessionId: scanned.sessionId, code: null, signal: null };
+    return { status: "running", stdout, stderr, finalOutput: "", sessionId: scanned.sessionId, processIdentity: identity, code: null, signal: null };
   }
-  const outputPath = engine === "codex" ? outputPathFor(flowId, round) : null;
-  const finalOutput = readOptional(outputPath).trim() || scanned.lastAgentMessage || (engine === "claude" ? stdout.trim() : "");
+  /* A persisted launch with no owned process handle can still belong to a live
+     reviewer whose pid checkpoint was lost. Only a completed last-message
+     artifact proves Codex exited; interim stdout must never authorize retry. */
+  if (!run && pid === null && !artifactOutput) {
+    return { status: "lost", stdout, stderr, finalOutput, sessionId: scanned.sessionId, processIdentity: identity, code: null, signal: null };
+  }
   const exit = run?.exit ?? null;
   const timedOut = !finalOutput && elapsed >= timeoutMs;
   const status: HeadlessRunResult["status"] =
     exit?.code === 0 || finalOutput ? "done" : timedOut ? "timeout" : "failed";
-  return { status, stdout, stderr, finalOutput, sessionId: scanned.sessionId, code: exit?.code ?? null, signal: exit?.signal ?? null };
+  return { status, stdout, stderr, finalOutput, sessionId: scanned.sessionId, processIdentity: identity, code: exit?.code ?? null, signal: exit?.signal ?? null };
 }
 
 export function forgetHeadlessReview(
@@ -312,6 +374,10 @@ export function forgetHeadlessReview(
   const pid = run?.child.pid ?? persisted.reviewerPid ?? null;
   const identity = run?.identity ?? persisted.reviewerIdentity ?? null;
   if (run) clearTimeout(run.timer);
+  if (run) {
+    killOwnedRun(run);
+    return;
+  }
   if (pid) {
     killTree(pid, identity);
     return;

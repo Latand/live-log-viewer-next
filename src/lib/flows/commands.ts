@@ -311,6 +311,8 @@ export function patchFlow(id: string, req: PatchFlowRequest): { flow?: Flow; err
       reviewHeadSha: null,
       startedAt: isoNow(),
       spawnStartedAt: null,
+      launchId: null,
+      launchLeaseUntil: null,
       relayStartedAt: null,
       relayDelivery: null,
       reviewedAt: null,

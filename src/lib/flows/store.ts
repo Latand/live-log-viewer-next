@@ -190,6 +190,8 @@ export function loadFlows(): Flow[] {
       reviewerIdentity: round.reviewerIdentity ?? null,
       reviewHeadSha: round.reviewHeadSha ?? null,
       spawnStartedAt: round.spawnStartedAt ?? null,
+      launchId: round.launchId ?? null,
+      launchLeaseUntil: round.launchLeaseUntil ?? null,
       relayStartedAt: round.relayStartedAt ?? null,
       relayDelivery: round.relayDelivery ?? null,
       terminalAt: round.terminalAt ?? null,
