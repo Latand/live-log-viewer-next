@@ -772,6 +772,50 @@ describe("routeTaskEdges — edge-to-edge crossing handling (Finding 1)", () => 
   });
 });
 
+describe("routeTaskEdges — busy fan-out corridor deconfliction (Finding)", () => {
+  function geom(key: string, x1: number, y1: number, x2: number, y2: number): TaskEdgeGeom {
+    return { key, taskId: "t", relation: "assignment", path: "/" + key, x1, y1, x2, y2, status: "assigned", failed: false, error: null };
+  }
+  /* One task fanning out to six targets on the far side of a 600×680 pane: every
+     straight line crosses the pane, so all six detour around it. The bug: they all
+     took the identical central corridor, five faded, compounding into an opaque
+     rail — the exact tangle #17 targets. Deconfliction must spread them onto
+     distinct corridors. */
+  function fanOut(): { edges: TaskEdgeGeom[]; pane: SchemeRect } {
+    const pane: SchemeRect = { x: 0, y: 300, w: 600, h: 680 };
+    const src = { x: 300, y: 0 };
+    const targets = [-100, 50, 200, 400, 550, 700];
+    const edges = targets.map((tx, i) => geom("t::" + i, src.x, src.y, tx, 1200));
+    return { edges, pane };
+  }
+
+  test("six fan-out detours land on distinct corridors, not one opaque rail", () => {
+    const { edges, pane } = fanOut();
+    const routes = routeTaskEdges(edges, [], [pane]);
+    expect(routes.size).toBe(6);
+    const corridorX = edges.map((e) => Math.round(routes.get(e.key)!.mid.x));
+    /* No corridor is shared by more than two edges — the old bug put all six on one. */
+    const perCorridor = new Map<number, number>();
+    for (const x of corridorX) perCorridor.set(x, (perCorridor.get(x) ?? 0) + 1);
+    expect(Math.max(...perCorridor.values())).toBeLessThanOrEqual(2);
+    /* The fan really spreads: several distinct corridors, not a single rail. */
+    expect(new Set(corridorX).size).toBeGreaterThanOrEqual(4);
+    /* And they mostly draw solid — the old collapse faded five of the six. */
+    const faded = edges.filter((e) => routes.get(e.key)!.crosses).length;
+    expect(faded).toBeLessThanOrEqual(2);
+  });
+
+  test("fan-out deconfliction is order-independent", () => {
+    const { edges, pane } = fanOut();
+    const forward = routeTaskEdges(edges, [], [pane]);
+    const reversed = routeTaskEdges([...edges].reverse(), [], [pane]);
+    for (const e of edges) {
+      expect(reversed.get(e.key)!.d).toBe(forward.get(e.key)!.d);
+      expect(reversed.get(e.key)!.crosses).toBe(forward.get(e.key)!.crosses);
+    }
+  });
+});
+
 describe("routeTaskEdges — render-thread cost (Finding 2)", () => {
   /* A star of edges through a shared centre: every route's bounds overlap, so the
      broad phase can't cull the edge-vs-edge pass — the pathological shape for the

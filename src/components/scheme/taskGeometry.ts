@@ -265,12 +265,25 @@ export function buildTaskEdges(tasks: readonly BoardTask[], index: ReadonlyMap<s
 
 /** A routed task edge: the cubic `d`, its on-curve midpoint (where the failed
     ⚠ badge lands), and whether it still grazes an unrelated card after routing. */
+/** The straight run of an orthogonal detour (its middle segment): the part that
+    superimposes when several detours land on the same track. `axis: "h"` is a
+    horizontal corridor at y=`pos` spanning x∈[lo,hi]; `"v"` is vertical at
+    x=`pos` spanning y∈[lo,hi]. */
+export interface RouteCorridor {
+  axis: "h" | "v";
+  pos: number;
+  lo: number;
+  hi: number;
+}
+
 export interface TaskEdgeRoute {
   d: string;
   mid: { x: number; y: number };
   /** True when no bow could clear every obstacle — the layer fades the edge so
       an unavoidable crossing at least reads as passing *behind* the card. */
   crosses: boolean;
+  /** Present only for a detour: its corridor, for routed-corridor deconfliction. */
+  corridor?: RouteCorridor;
 }
 
 /* How far a routing bow may push the control handles before giving up, and the
@@ -429,7 +442,10 @@ function segsMid(segs: readonly RouteSeg[]): { x: number; y: number } {
    the whole path staying to one side of a box that spans the edge vertically. */
 function verticalDetour(edge: { x1: number; y1: number; x2: number; y2: number }, box: SchemeRect, side: number, off: number, laneOff: number): RouteSeg[] {
   const { x1, y1, x2, y2 } = edge;
-  const X = (side < 0 ? box.x - off : box.x + box.w + off) + laneOff;
+  /* laneOff always stacks *outward* from the box (away from side), so successive
+     corridor lanes separate monotonically instead of being pushed back through
+     the obstacle and corrected onto a colliding track. */
+  const X = side < 0 ? box.x - off - laneOff : box.x + box.w + off + laneOff;
   const ya = box.y - off;
   const yb = box.y + box.h + off;
   const yStart = y1 <= y2 ? ya : yb;
@@ -444,7 +460,8 @@ function verticalDetour(edge: { x1: number; y1: number; x2: number; y2: number }
 /* Mirror of {@link verticalDetour} for a box that spans the edge horizontally. */
 function horizontalDetour(edge: { x1: number; y1: number; x2: number; y2: number }, box: SchemeRect, side: number, off: number, laneOff: number): RouteSeg[] {
   const { x1, y1, x2, y2 } = edge;
-  const Y = (side < 0 ? box.y - off : box.y + box.h + off) + laneOff;
+  /* Outward-stacking laneOff — see {@link verticalDetour}. */
+  const Y = side < 0 ? box.y - off - laneOff : box.y + box.h + off + laneOff;
   const xa = box.x - off;
   const xb = box.x + box.w + off;
   const xStart = x1 <= x2 ? xa : xb;
@@ -491,7 +508,13 @@ function detourRoute(
   for (const side of sides) {
     for (let off = DETOUR_MARGIN; off <= DETOUR_MARGIN + DETOUR_MAX_EXTRA; off += DETOUR_EXTRA_STEP) {
       const segs = vertical ? verticalDetour(edge, box, side, off, laneOff) : horizontalDetour(edge, box, side, off, laneOff);
-      if (!segsHitAny(segs, obstacles)) return { d: segsToD(segs), mid: segsMid(segs), crosses: false };
+      if (!segsHitAny(segs, obstacles)) {
+        const run = segs[1]!; // middle segment is the corridor
+        const corridor: RouteCorridor = vertical
+          ? { axis: "v", pos: run.x1, lo: Math.min(run.y1, run.y2), hi: Math.max(run.y1, run.y2) }
+          : { axis: "h", pos: run.y1, lo: Math.min(run.x1, run.x2), hi: Math.max(run.x1, run.x2) };
+        return { d: segsToD(segs), mid: segsMid(segs), crosses: false, corridor };
+      }
     }
   }
   return null;
@@ -852,6 +875,12 @@ function routesCross(a: readonly RoutePoint[], b: readonly RoutePoint[], shared:
   return false;
 }
 
+/* Lane steps a routed-corridor mate tries — growing outward from the box (the
+   detour stacks laneOff away from the obstacle) — until its corridor clears the
+   ones already placed. Bounded so placement always terminates; a member that
+   can't clear keeps its last try. */
+const CORRIDOR_LANES = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+
 /* Extra perpendicular bows a crossing edge may try, on top of its lane, to slip
    past another edge. Bounded so the pass is cheap and always terminates. */
 const CROSS_BOWS = [1, -1, 2, -2, 3, -3];
@@ -923,11 +952,14 @@ export function routeTaskEdges(
 
   const byKey = new Map<string, TaskEdgeGeom>(edges.map((edge) => [edge.key, edge]));
   const state = new Map<string, { route: TaskEdgeRoute; pts: RoutePoint[]; box: Bounds }>();
-  for (const edge of edges) {
-    const route = routeTaskEdge(edge, edgeObstacles(edge, cards, containers), lanes.get(edge.key) ?? 0);
+  const routeInto = (edge: TaskEdgeGeom, lane: number) => {
+    const route = routeTaskEdge(edge, edgeObstacles(edge, cards, containers), lane);
     const pts = sampleRoutePoints(route.d);
     state.set(edge.key, { route, pts, box: boundsOf(pts) });
-  }
+  };
+  for (const edge of edges) routeInto(edge, lanes.get(edge.key) ?? 0);
+
+  const order = [...edges].sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
 
   /* How many *other* edges this route tangles with — a boolean per pair, robust
      to the exact crossing point, so a symmetric dead-centre crossing counts. The
@@ -943,7 +975,6 @@ export function routeTaskEdges(
     return total;
   };
 
-  const order = [...edges].sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
   /* The reduction re-routes candidate bows per crossing edge — the pass's real
      cost. Bound it: above the cap, only the cheaper broad-phased fade runs. */
   if (edges.length <= CROSS_REDUCE_MAX) {
