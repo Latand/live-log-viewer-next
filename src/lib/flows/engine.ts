@@ -14,7 +14,13 @@ import { isShellCommand } from "@/lib/status";
 import { killPane, paneInfo, spawnAgentWithPrompt } from "@/lib/tmux";
 import type { FileEntry } from "@/lib/types";
 
-import { clearHeadlessReviewArtifacts, forgetHeadlessReview, headlessReviewStatus, startHeadlessReview } from "./exec";
+import {
+  clearHeadlessReviewArtifacts,
+  forgetHeadlessReview,
+  headlessReviewStatus,
+  startHeadlessReview,
+  type HeadlessReviewLaunch,
+} from "./exec";
 import { resolveCleanFlowHead } from "./git";
 import {
   fallbackReviewFromTranscript,
@@ -420,13 +426,7 @@ async function launchReviewer(flow: Flow, round: Round, prepared: PreparedReview
     account.engine === "codex" ? { home: account.home, managed: account.kind === "managed" } : null,
     account.engine === "claude" ? { home: account.home, projectsDir: account.transcriptRoot, managed: account.kind === "managed" } : null,
   );
-  if (launched.pid) {
-    round.reviewerPid = launched.pid;
-    round.reviewerIdentity = launched.identity;
-  }
-  if (launched.sessionId) round.sessionId = launched.sessionId;
-  if (launched.reviewerPath) round.reviewerPath = launched.reviewerPath;
-  round.launchLeaseUntil = null;
+  recordHeadlessLaunch(round, launched);
   /* Same ownership guard as the pane branch: persist the pid, and if a concurrent
      close/pause/retry took the flow over, terminate the orphan (forgetHeadlessReview
      SIGTERM/SIGKILLs the detached group) and clear the abandoned spawn markers so
@@ -438,6 +438,16 @@ async function launchReviewer(flow: Flow, round: Round, prepared: PreparedReview
     forgetHeadlessReview(flow.id, round.n, round);
     if (headlessDisk && headlessDisk.state !== "closed") abandonLaunch(flow.id, round.n);
   }
+}
+
+export function recordHeadlessLaunch(round: Round, launched: HeadlessReviewLaunch): void {
+  if (launched.pid) {
+    round.reviewerPid = launched.pid;
+    round.reviewerIdentity = launched.identity;
+  }
+  if (launched.sessionId) round.sessionId = launched.sessionId;
+  if (launched.reviewerPath) round.reviewerPath = launched.reviewerPath;
+  if (launched.identity) round.launchLeaseUntil = null;
 }
 
 function retryHeadlessRound(flow: Flow, round: Round): void {
@@ -607,9 +617,13 @@ async function tickFlow(
       if (!round.sessionId) {
         round.sessionId = status?.sessionId ?? sessionIdFromHeadlessStdout(status?.stdout ?? "");
       }
-      if (!round.reviewerIdentity && status?.processIdentity) round.reviewerIdentity = status.processIdentity;
+      if (status?.processIdentity) {
+        round.reviewerIdentity = status.processIdentity;
+        round.launchLeaseUntil = null;
+      }
       maybeClaimReviewerPathBySession(entries, round, round.sessionId ?? null);
       if (!round.reviewerPath && !round.sessionId) maybeClaimReviewerPathByHeuristic(flow, entries, round);
+      if (status?.status === "lost" && launchLeaseActive(round)) return JSON.stringify(flow) !== before;
       if (status?.status === "running") return JSON.stringify(flow) !== before;
       if (status?.status === "lost") {
         const fallback = fallbackReviewFromTranscript(round, entriesByPath, reviewerRoleFor(flow, round).engine);

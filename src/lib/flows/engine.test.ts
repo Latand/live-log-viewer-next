@@ -5,11 +5,12 @@ import os from "node:os";
 import path from "node:path";
 
 import type { FileEntry } from "@/lib/types";
+import { procBackend } from "@/lib/proc";
 
 import type { Flow } from "./types";
 
 process.env.LLV_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "llv-flow-engine-test-"));
-const { captureReviewHead, newRound, tickFlows, persistTickFlows, flowTickBase, reviewerLaunchPersisted, abandonLaunch, adoptSyntheticLaunchTakeover, relayFixOrPark } = await import("./engine");
+const { captureReviewHead, newRound, tickFlows, persistTickFlows, flowTickBase, reviewerLaunchPersisted, abandonLaunch, adoptSyntheticLaunchTakeover, recordHeadlessLaunch, relayFixOrPark } = await import("./engine");
 const { loadFlows, outputPathFor, saveFlows, stderrPathFor, stdoutPathFor } = await import("./store");
 
 afterAll(() => {
@@ -503,6 +504,95 @@ test("overlapping ticks preserve an active pre-handle launch and adopt its revie
     stateDetail: null,
     rounds: [{ launchId: "launch-overlap", launchLeaseUntil: null, reviewerPane: { paneId: "%77" } }],
   });
+});
+
+test("identity-less headless post-spawn checkpoint keeps its cross-Viewer lease until identity recovery", async () => {
+  const startedAt = new Date().toISOString();
+  const leaseUntil = new Date(Date.now() + 60_000).toISOString();
+  const cwd = "/repo";
+  const implementer = writeCodexEntry("identity-lease-implementer.jsonl", { id: "019f421e-02e1-73e0-9b77-bebde063f124", cwd }, Date.now() / 1_000);
+  const reviewer = spawn("sleep", ["30"], { detached: true, stdio: "ignore" });
+  reviewer.unref();
+  const flow: Flow = {
+    id: "flow-identity-lease",
+    template: "implement-review-loop",
+    project: "repo",
+    cwd,
+    implementerPath: implementer.path,
+    roles: {
+      implementer: { engine: "codex", model: null, effort: "high" },
+      reviewer: { engine: "codex", model: null, effort: "xhigh" },
+    },
+    reviewerFallback: null,
+    baseRef: "base",
+    baseMode: "head",
+    mode: "auto",
+    reviewerMode: "headless",
+    roundLimit: 5,
+    state: "reviewing",
+    pausedState: null,
+    stateDetail: null,
+    rounds: [{
+      n: 1,
+      reviewerPath: null,
+      reviewerRole: { engine: "codex", model: null, effort: "xhigh" },
+      accountId: "default",
+      attemptedAccounts: ["codex:default"],
+      autoRetryCount: 0,
+      sessionId: null,
+      reviewerPid: null,
+      reviewerIdentity: null,
+      reviewerPane: null,
+      findingsPath: null,
+      triggeredBy: "marker",
+      readyNote: null,
+      reviewHeadSha: null,
+      verdict: null,
+      findingsCount: null,
+      startedAt,
+      spawnStartedAt: startedAt,
+      launchId: "launch-identity-lease",
+      launchLeaseUntil: leaseUntil,
+      relayStartedAt: null,
+      relayDelivery: null,
+      reviewedAt: null,
+      terminalAt: null,
+      relayedAt: null,
+      error: null,
+    }],
+    createdAt: startedAt,
+    closedAt: null,
+  };
+  recordHeadlessLaunch(flow.rounds[0]!, {
+    pid: reviewer.pid ?? null,
+    identity: null,
+    sessionId: null,
+    reviewerPath: null,
+  });
+  saveFlows([flow]);
+
+  try {
+    expect(loadFlows()[0]!.rounds[0]!.launchLeaseUntil).toBe(leaseUntil);
+    await tickFlows([implementer]);
+    expect(loadFlows()[0]).toMatchObject({
+      state: "reviewing",
+      stateDetail: null,
+      rounds: [{ reviewerPid: reviewer.pid, reviewerIdentity: null, launchLeaseUntil: leaseUntil, autoRetryCount: 0 }],
+    });
+
+    const recovered = loadFlows()[0]!;
+    recovered.rounds[0]!.reviewerIdentity = procBackend.processIdentity(reviewer.pid!);
+    saveFlows([recovered]);
+    await tickFlows([implementer]);
+    expect(loadFlows()[0]).toMatchObject({
+      state: "reviewing",
+      rounds: [{ reviewerIdentity: expect.any(String), launchLeaseUntil: null }],
+    });
+  } finally {
+    if (reviewer.pid) {
+      try { process.kill(reviewer.pid, "SIGKILL"); } catch { /* already gone */ }
+    }
+  }
 });
 
 test("restart recovery accepts a conclusive Codex artifact without process identity or scanner entry", async () => {
