@@ -391,6 +391,78 @@ describe("durable account migration coordinator", () => {
     expect(pending.migration).toMatchObject({ phase: "successor-starting", error: null, errorCode: null });
   });
 
+  test("resume settlement between migration read and fence migrates the resumed generation", async () => {
+    const store = registry();
+    const sourceId = "019f4906-3f67-7b72-9fbc-9ec3b5ad1326";
+    const resumedId = "019f4906-3f67-7b72-9fbc-9ec3b5ad1327";
+    const sourcePath = `/sessions/rollout-${sourceId}.jsonl`;
+    const resumedPath = `/sessions/rollout-${resumedId}.jsonl`;
+    store.reconcileConversations([observation(sourcePath, "a", "idle")]);
+    const conversation = store.conversationForPath(sourcePath)!;
+    const resume = store.beginSpawnRequest({
+      engine: "codex",
+      cwd: "/repo",
+      accountId: "a",
+      conversationId: conversation.id,
+      purpose: "resume-successor",
+      launchProfile: emptyLaunchProfile({ cwd: "/repo", title: "Resumed source" }),
+    });
+    if (resume.kind !== "created") throw new Error("expected resume create");
+    store.commitMigrationIntent({
+      engine: "codex",
+      targetId: "b",
+      origin: "manual",
+      requestId: "resume-during-migration-read",
+      expectedRevision: store.engineRouting("codex").revision,
+    });
+    const originalTransition = store.transitionConversationMigration.bind(store);
+    let resumedDuringTransition = false;
+    store.transitionConversationMigration = ((...args: Parameters<AgentRegistry["transitionConversationMigration"]>) => {
+      if (!resumedDuringTransition && args[2].includes("requested")) {
+        resumedDuringTransition = true;
+        expect(store.settleSpawn(resume.receipt.launchId, {
+          key: { engine: "codex", sessionId: resumedId },
+          artifactPath: resumedPath,
+          cwd: "/repo",
+          accountId: "a",
+          status: "unhosted",
+          host: null,
+          claimEpoch: 0,
+          claimOwner: null,
+          pendingAction: null,
+        }).kind).toBe("settled");
+      }
+      return originalTransition(...args);
+    }) as typeof store.transitionConversationMigration;
+    const copiedSourcePaths: string[] = [];
+    const successorProvider: SuccessorProviderPort = {
+      async create(input) {
+        copiedSourcePaths.push(input.source.path);
+        return {
+          operationId: input.operationId,
+          nativeId: "resume-race-successor",
+          path: "/sessions/resume-race-successor.jsonl",
+          continuityPaths: [],
+          historyHash: "resumed-history",
+          host: { kind: "codex-app-server", identity: "resume-race", epoch: 1, verifiedAt: "2026-07-10T12:01:00.000Z" },
+        };
+      },
+      async verify() {},
+    };
+
+    const committed = await advanceConversationMigration(conversation.id, store, successorProvider);
+
+    expect(resumedDuringTransition).toBe(true);
+    expect(copiedSourcePaths).toEqual([resumedPath]);
+    expect(committed.migration).toMatchObject({ phase: "committed", sourceGenerationId: resumedId });
+    expect(committed.generations.map((generation) => generation.path)).toEqual([
+      sourcePath,
+      resumedPath,
+      "/sessions/resume-race-successor.jsonl",
+    ]);
+    expect(committed.generations.at(-2)?.archivedAt).not.toBeNull();
+  });
+
   test("concurrent same-operation advances commit one matching provider receipt", async () => {
     const store = registry();
     store.reconcileConversations([observation("/concurrent-source.jsonl", "a", "idle")]);

@@ -921,6 +921,8 @@ export const uk: Record<keyof typeof en, Message> = {
   "resources.total": "Σ {amount}",
   "resources.empty": "у tmux немає сесій агентів",
   "resources.orphan": "осиротілий пейн",
+  "resources.hostConflict": "дублікат пейна розмови",
+  "resources.hostConflictHint": "кілька активних пейнів належать цій розмові",
   "resources.procs": {
     one: "{count} процес",
     few: "{count} процеси",
@@ -1003,6 +1005,8 @@ export const uk: Record<keyof typeof en, Message> = {
   "branch.lastActivityQuiet": "Позначений активним, але транскрипт мовчить: остання активність {age}",
   "branch.handoffTitle": "агент, породжений хендоффом цієї розмови",
   "branch.branchTitle": "гілка цієї розмови",
+  "lineage.parentRemoved": "батьківську розмову видалено",
+  "lineage.parentRemovedTitle": "Транскрипт батьківської розмови видалено",
   "branch.removeColumn": "Прибрати колонку {title}",
   "branch.toggleBackground": "{action} фонову задачу {title}",
   "branch.collapse": "Згорнути",

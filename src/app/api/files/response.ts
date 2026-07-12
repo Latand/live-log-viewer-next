@@ -1,10 +1,11 @@
 import { createHash } from "node:crypto";
 import fs from "node:fs";
+import path from "node:path";
 
 import { NextResponse } from "next/server";
 
 import { listFilesWithProjectCatalog } from "@/lib/scanner";
-import { agentRegistry } from "@/lib/agent/registry";
+import { agentRegistry, conversationLookupFromSnapshot } from "@/lib/agent/registry";
 import { pidAlive, readPpid } from "@/lib/scanner/process";
 import { loadFlows } from "@/lib/flows/store";
 import { loadPipelines } from "@/lib/pipelines/store";
@@ -18,6 +19,7 @@ import { projectRateLimitReadModel } from "@/lib/rateLimit";
 import { readAuthorshipEvidence } from "@/lib/reaperAuthorship";
 import { overlaySessionTitles } from "@/lib/session/titleProjection";
 import { tmuxEndpointHealth } from "@/lib/tmux";
+import { claudeProjectRootFor, codexSessionRootFor } from "@/lib/scanner/roots";
 import type { FilesResponse } from "@/lib/types";
 
 interface FilesRouteDependencies {
@@ -36,6 +38,60 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
   // the external scheduler, keeping repeated GETs byte-stable for state files.
   const registry = agentRegistry();
   const registrySnapshot = registry.snapshot();
+  const conversationLookup = conversationLookupFromSnapshot(registrySnapshot);
+  const conversationForPath = (pathname: string) => conversationLookup.conversationForPath(pathname);
+  const filesByPath = new Map(files.map((file) => [file.path, file]));
+  for (let index = 0; index < files.length; index += 1) {
+    const child = files[index]!;
+    const childConversation = conversationForPath(child.path);
+    const current = childConversation?.generations.at(-1);
+    if (!childConversation || current?.path !== child.path) continue;
+    const rawParentId = registrySnapshot.lineageEdges[childConversation.id]?.parentConversationId
+      ?? current.launchProfile.parentConversationId;
+    if (!rawParentId) continue;
+    const parentId = conversationLookup.canonicalConversationId(rawParentId);
+    const parentConversation = registrySnapshot.conversations[parentId];
+    const parentGeneration = parentConversation?.generations.at(-1);
+    const parentPath = parentGeneration?.path;
+    if (!parentConversation || !parentGeneration || !parentPath || filesByPath.has(parentPath)) continue;
+    let stat: fs.Stats;
+    try {
+      stat = fs.statSync(parentPath);
+    } catch {
+      continue;
+    }
+    if (!stat.isFile()) continue;
+    const rootPath = parentConversation.engine === "codex"
+      ? codexSessionRootFor(parentPath)
+      : claudeProjectRootFor(parentPath);
+    const placeholder = {
+      path: parentPath,
+      root: parentConversation.engine === "codex" ? "codex-sessions" as const : "claude-projects" as const,
+      name: rootPath ? path.relative(rootPath, parentPath) : path.basename(parentPath),
+      project: parentGeneration.launchProfile.project ?? child.project,
+      title: parentGeneration.launchProfile.title ?? path.basename(parentPath, path.extname(parentPath)),
+      engine: parentConversation.engine,
+      kind: "session",
+      fmt: parentConversation.engine,
+      parent: null,
+      mtime: stat.mtimeMs / 1000,
+      size: stat.size,
+      activity: "idle" as const,
+      activityReason: "lineage_placeholder",
+      proc: null,
+      pid: null,
+      model: parentGeneration.launchProfile.model,
+      launchModel: parentGeneration.launchProfile.model,
+      effort: parentGeneration.launchProfile.effort,
+      pendingQuestion: null,
+      plan: parentGeneration.launchProfile.plan,
+      goal: parentGeneration.launchProfile.goal,
+      waitingInput: null,
+    };
+    files.push(placeholder);
+    filesByPath.set(parentPath, placeholder);
+  }
+  const scannedPaths = new Set(files.map((file) => file.path));
   const ownsPath = (conversation: (typeof registrySnapshot.conversations)[keyof typeof registrySnapshot.conversations], pathname: string) =>
     conversation.generations.some((generation) => generation.path === pathname)
     || conversation.continuityPaths.includes(pathname);
@@ -66,7 +122,15 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
       file.plan = profile.plan ?? file.plan;
       const parentConversationId = registrySnapshot.lineageEdges[conversation.id]?.parentConversationId ?? profile.parentConversationId;
       if (parentConversationId) {
-        file.parent = registrySnapshot.conversations[parentConversationId]?.generations.at(-1)?.path ?? file.parent;
+        const canonicalParentId = conversationLookup.canonicalConversationId(parentConversationId);
+        const parentPath = registrySnapshot.conversations[canonicalParentId]?.generations.at(-1)?.path ?? null;
+        if (parentPath && scannedPaths.has(parentPath)) {
+          file.parent = parentPath;
+          delete file.parentRemoved;
+        } else if (!parentPath || !fs.existsSync(parentPath)) {
+          file.parent = null;
+          file.parentRemoved = { conversationId: canonicalParentId, path: parentPath };
+        }
       }
     }
     if (conversation.migration && conversation.migration.phase !== "committed") {
@@ -116,7 +180,6 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
     for (const generation of conversation.generations) conversationByPath.set(generation.path, conversation);
     for (const continuityPath of conversation.continuityPaths) conversationByPath.set(continuityPath, conversation);
   }
-  const filesByPath = new Map(files.map((file) => [file.path, file] as const));
   const { userAuthoredPaths, scannedAt } = readAuthorshipEvidence();
   /* Live on-disk mtime probe, memoized per request. A clean stamp must be
      checked against the LIVE filesystem, not the scan snapshot's mtime: the
@@ -170,13 +233,12 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
   const tasks = reconcileTasks(files, loadTasks(), {
     pathForPanePid: (panePid, entries) => pathForPanePid(entries, panePid, readPpid),
     panePidAlive: pidAlive,
-    conversationIdForPath: (pathname) => Object.values(registrySnapshot.conversations).find((conversation) =>
-      ownsPath(conversation, pathname))?.id ?? null,
+    conversationIdForPath: (pathname) => conversationLookup.conversationForPath(pathname)?.id ?? null,
     canonicalConversationId: (conversationId) => conversationId.startsWith("conversation_")
-      ? registry.canonicalConversationId(conversationId as `conversation_${string}`)
+      ? conversationLookup.canonicalConversationId(conversationId as `conversation_${string}`)
       : null,
     pathForConversationId: (conversationId) => conversationId.startsWith("conversation_")
-      ? registry.conversation(conversationId as `conversation_${string}`)?.generations.at(-1)?.path ?? null
+      ? conversationLookup.conversation(conversationId as `conversation_${string}`)?.generations.at(-1)?.path ?? null
       : null,
   });
   const workflows = filterWorkflowsForFileScan(loadWorkflows(), files);

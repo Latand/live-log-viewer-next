@@ -1,4 +1,3 @@
-import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -14,7 +13,9 @@ import { agentRegistry } from "@/lib/agent/registry";
 import { reasoningFromBody } from "@/lib/agent/efforts";
 import { modelFromBody } from "@/lib/agent/models";
 import { resolveSpawnRole } from "@/lib/roles/registry";
+import { spawnContentDigest, spawnParentSelector, spawnRequestDigest } from "@/lib/agent/spawnIdentity";
 import { sessionKeyFromTranscript } from "@/lib/agent/sessionKey";
+import { resolveSpawnParent, SpawnParentError, transcriptAllowed } from "@/lib/agent/spawnParent";
 import { spawnResponseForReceipt, type SpawnResponse } from "@/lib/agent/spawnResponse";
 import { resolveSpawnedTranscriptPath } from "@/lib/agent/spawnedTranscript";
 import { headCwd } from "@/lib/agent/transcript";
@@ -25,7 +26,6 @@ import { runtimeScope } from "@/lib/runtime/contracts";
 import { runtimeEventsEnabled } from "@/lib/runtime/flags";
 import { listFiles } from "@/lib/scanner";
 import { projectForCwd } from "@/lib/scanner/describe";
-import { claudeProjectRootFor, codexSessionRootFor } from "@/lib/scanner/roots";
 import { buildImagePayload, collectImagePayloads, deleteInboxImages, spawnAgentWithPrompt, verifyTmuxHostEvidence } from "@/lib/tmux";
 import type { ApiError } from "@/lib/types";
 
@@ -40,23 +40,6 @@ interface SuggestResponse {
   dirs: string[];
   /** Working directory of the `src` transcript when one was requested. */
   cwd: string | null;
-}
-
-/** Security gate for `?src=`: the resolved real path must be a regular .jsonl
-    transcript inside one of the two conversation roots — the server-side
-    mirror of the client's canHandoff gate. */
-function transcriptAllowed(candidate: string): boolean {
-  let real: string;
-  let stat: fs.Stats;
-  try {
-    real = fs.realpathSync(candidate);
-    stat = fs.statSync(real);
-  } catch {
-    return false;
-  }
-  if (!stat.isFile() || !real.endsWith(".jsonl")) return false;
-  if (codexSessionRootFor(real)) return true;
-  return Boolean(claudeProjectRootFor(real));
 }
 
 function addDir(dirs: string[], cwd: string | null, project: string): void {
@@ -119,27 +102,11 @@ export async function GET(req: NextRequest): Promise<NextResponse<SuggestRespons
   return NextResponse.json({ dirs, cwd: srcCwd });
 }
 
-function parentFromBody(body: { src?: unknown; parent?: unknown }): string {
-  if (typeof body.parent === "string") return body.parent;
-  return typeof body.src === "string" ? body.src : "";
-}
-
-function conversationForTranscript(transcript: string): `conversation_${string}` {
-  const registry = agentRegistry();
-  const existing = registry.conversationForPath(transcript);
-  if (existing) return existing.id;
-  return registry.ensureConversation(codexSessionRootFor(transcript) ? "codex" : "claude", transcript, null).id;
-}
-
-function spawnDigest(input: Record<string, unknown>): string {
-  return crypto.createHash("sha256").update(JSON.stringify(input)).digest("hex");
-}
-
 export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse | ApiError>> {
   const rejection = rejectCrossOrigin(req);
   if (rejection) return rejection;
 
-  let body: { engine?: unknown; model?: unknown; cwd?: unknown; prompt?: unknown; images?: unknown; src?: unknown; parent?: unknown; effort?: unknown; fast?: unknown; accountId?: unknown; clientAttemptId?: unknown; role?: unknown; roleParams?: unknown; confirm?: unknown };
+  let body: { engine?: unknown; model?: unknown; cwd?: unknown; prompt?: unknown; images?: unknown; src?: unknown; parent?: unknown; parentConversationId?: unknown; effort?: unknown; fast?: unknown; accountId?: unknown; clientAttemptId?: unknown; role?: unknown; roleParams?: unknown; confirm?: unknown };
   try {
     body = (await req.json()) as typeof body;
   } catch {
@@ -189,11 +156,11 @@ export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse
   let launchId: string | null = null;
   try {
     const account = accountManager.resolveSpawn(engine, body.accountId);
-    const src = parentFromBody(body);
-    const parentConversationId = src && transcriptAllowed(src) ? conversationForTranscript(src) : null;
-    const parentEngine = parentConversationId ? (codexSessionRootFor(src) ? "codex" : "claude") : null;
-    const parentSessionKey = parentEngine ? sessionKeyFromTranscript(parentEngine, src) : null;
-    const digest = spawnDigest({
+    const parent = resolveSpawnParent(body);
+    const parentConversationId = parent?.conversationId ?? null;
+    const parentSessionKey = parent?.sessionKey ?? null;
+    const parentArtifactPath = parent?.artifactPath ?? null;
+    const digest = spawnRequestDigest({
       engine,
       cwd,
       model: selectedModel.model,
@@ -201,11 +168,9 @@ export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse
       fast: reasoning.fast,
       accountId: account.accountId,
       role: role.value?.role ?? null,
-      parentConversationId,
-      parentSessionKey,
-      parentArtifactPath: parentConversationId ? src : null,
+      parent: spawnParentSelector(body),
       prompt,
-      images: images.map((image) => ({ mime: image.mime, digest: spawnDigest({ image: image.base64 }) })),
+      images: images.map((image) => ({ mime: image.mime, digest: spawnContentDigest({ image: image.base64 }) })),
     });
     const specBase = freshSpecFor(engine, cwd, {
       model: selectedModel.model,
@@ -222,7 +187,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse
       accountId: account.accountId,
       parentConversationId,
       parentSessionKey,
-      parentArtifactPath: parentConversationId ? src : null,
+      parentArtifactPath,
       launchProfile: spec.launchProfile,
       clientAttemptId: body.clientAttemptId ?? null,
       requestDigest: digest,
@@ -305,8 +270,8 @@ export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse
         console.warn("[runtime] spawned agent is healthy; lineage bookkeeping will reconcile later");
       }
     }
-    if (src && transcriptAllowed(src)) {
-      if (childPath) rememberHandoffChild(childPath, src);
+    if (parentArtifactPath) {
+      if (childPath) rememberHandoffChild(childPath, parentArtifactPath);
       persistHandoffLineage();
     }
     if (!await verifyTmuxHostEvidence(pane.host)) {
@@ -321,6 +286,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse
       if (receipt) agentRegistry().failSpawn(receipt.launchId, "spawn failed before pane binding");
       deleteInboxImages(imagePaths);
     }
+    if (error instanceof SpawnParentError) return NextResponse.json({ error: error.message }, { status: error.status });
     if (error instanceof UnknownAccountError || error instanceof UnknownClaudeAccountError) return NextResponse.json({ error: error.message }, { status: 400 });
     if (receipt?.pane) {
       if (receipt.state === "prompt-delivered" || receipt.state === "host-verified") agentRegistry().markSpawnPathPending(receipt.launchId);

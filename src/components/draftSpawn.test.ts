@@ -219,6 +219,23 @@ describe("durable request recovery", () => {
     expect(replay.clientAttemptId).toBe("attempt_transport_1");
   });
 
+  test("handoff replay retains stable parent identity after the source generation disappears", () => {
+    const attempt = createSpawnAttempt("attempt_handoff_1", 2_000_000_000_123, {
+      ...baseAttempt.request!,
+      src: "/sessions/deleted-parent-generation.jsonl",
+      parentConversationId: "conversation_019f4906-3f67-7b72-9fbc-9ec3b5ad1325",
+    });
+    const initial = spawnRequestBody(attempt);
+    const replay = spawnRequestBody(attempt);
+
+    expect(initial).toMatchObject({
+      src: "/sessions/deleted-parent-generation.jsonl",
+      parentConversationId: "conversation_019f4906-3f67-7b72-9fbc-9ec3b5ad1325",
+    });
+    expect(replay).toEqual(initial);
+    expect(hasRecoverableRequest(attempt)).toBe(true);
+  });
+
   test("a selected role and its parameters survive recovery and reach the spawn route", () => {
     const attempt = createSpawnAttempt("attempt_role_1", 2_000_000_000_123, {
       ...baseAttempt.request!,

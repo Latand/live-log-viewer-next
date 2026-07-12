@@ -180,6 +180,73 @@ test("flow bindings follow active conversation generations", () => {
   }
 });
 
+test("a path-only flow resolves every resume generation in one reconciliation", () => {
+  const previousState = process.env.LLV_STATE_DIR;
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-flow-resume-chain-"));
+  process.env.LLV_STATE_DIR = sandbox;
+  try {
+    const registry = new AgentRegistry(path.join(sandbox, "registry.json"));
+    const paths = [
+      "/sessions/rollout-019f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl",
+      "/sessions/rollout-019f4906-3f67-7b72-9fbc-9ec3b5ad1327.jsonl",
+      "/sessions/rollout-019f4906-3f67-7b72-9fbc-9ec3b5ad1328.jsonl",
+    ];
+    const conversation = registry.ensureConversation("codex", paths[0]!, "a");
+    for (const pathname of paths.slice(1)) {
+      const begun = registry.beginSpawnRequest({
+        engine: "codex",
+        cwd: "/repo",
+        accountId: "a",
+        conversationId: conversation.id,
+        purpose: "resume-successor",
+      });
+      if (begun.kind !== "created") throw new Error("expected create");
+      registry.settleSpawn(begun.receipt.launchId, {
+        key: { engine: "codex", sessionId: pathname.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i)![0]! },
+        artifactPath: pathname,
+        cwd: "/repo",
+        accountId: "a",
+        status: "live",
+        host: null,
+        claimEpoch: 0,
+        claimOwner: null,
+        pendingAction: null,
+      });
+    }
+    saveFlows([{
+      id: "resume-chain-flow",
+      template: "implement-review-loop",
+      project: "repo",
+      cwd: "/repo",
+      implementerPath: paths[0]!,
+      implementerConversationId: null,
+      roles: { implementer: { engine: "codex", model: null, effort: "high" }, reviewer: { engine: "codex", model: null, effort: "xhigh" } },
+      baseRef: "base",
+      baseMode: "head",
+      mode: "manual",
+      reviewerMode: "headless",
+      roundLimit: 1,
+      state: "waiting_ready",
+      pausedState: null,
+      stateDetail: null,
+      rounds: [],
+      createdAt: "now",
+      closedAt: null,
+    } as Flow]);
+
+    reconcileFlowConversationOwnership(registry);
+
+    expect(loadFlows()[0]).toMatchObject({
+      implementerConversationId: conversation.id,
+      implementerPath: paths[2],
+    });
+  } finally {
+    if (previousState === undefined) delete process.env.LLV_STATE_DIR;
+    else process.env.LLV_STATE_DIR = previousState;
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  }
+});
+
 test("seed presets survive an unreadable role overrides file", () => {
   const previous = process.env.LLV_STATE_DIR;
   const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-flow-seed-corrupt-"));

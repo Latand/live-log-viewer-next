@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { claudeTranscriptPath, headCwd, slugifyCwd } from "./transcript";
+import { claudeTranscriptPath, headCwd, headSessionStartedAt, slugifyCwd } from "./transcript";
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "llv-transcript-"));
 afterAll(() => fs.rmSync(tmp, { recursive: true, force: true }));
@@ -62,5 +62,19 @@ describe("headCwd", () => {
     const file = write("deep.jsonl", [JSON.stringify({ a: 1 }), JSON.stringify({ b: 2 }), JSON.stringify({ cwd: "/deep" })]);
     expect(headCwd(file, { maxLines: 2 })).toBeNull();
     expect(headCwd(file, { maxLines: 3 })).toBe("/deep");
+  });
+});
+
+describe("headSessionStartedAt", () => {
+  test("reads a Codex session timestamp from the transcript header", () => {
+    const file = write("codex-started-at.jsonl", [
+      JSON.stringify({ type: "session_meta", payload: { timestamp: "2026-07-12T12:34:56.789Z" } }),
+    ]);
+    expect(headSessionStartedAt(file)).toBe("2026-07-12T12:34:56.789Z");
+  });
+
+  test("returns null when the transcript header has no valid timestamp", () => {
+    const file = write("invalid-started-at.jsonl", [JSON.stringify({ payload: { timestamp: "unknown" } })]);
+    expect(headSessionStartedAt(file)).toBeNull();
   });
 });

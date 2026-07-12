@@ -15,7 +15,7 @@ import { MAX_VISIBLE_PATHS } from "@/lib/view/types";
 import type { Workflow } from "@/lib/workflows/types";
 
 import { TaskStrip } from "./BranchPane";
-import { clearDraftStorage, draftSrc, setDraftSrc, setDraftText } from "./DraftAgentPane";
+import { clearDraftStorage, draftParentConversationId, draftSrc, setDraftSrc, setDraftText } from "./DraftAgentPane";
 import { planBoardConvergence, planClose } from "./projectBoardMutations";
 import { claimedReviewerDescendantPaths, foldClaimedReviewers, isActiveFlow } from "./flows/flowModel";
 import { PipelineDialog } from "./pipelines/PipelineDialog";
@@ -477,13 +477,15 @@ export function ProjectDashboard({
      repeat click refocuses the existing draft instead of stacking duplicates. */
   const addHandoffDraft = (file: FileEntry) => {
     onUserNavigate?.();
-    const existing = drafts.find((id) => draftSrc(id) === file.path);
+    const existing = drafts.find((id) => (file.conversationId
+      && draftParentConversationId(id) === file.conversationId)
+      || draftSrc(id) === file.path);
     if (existing) {
       flashNode("draft::" + existing);
       return;
     }
     const id = newDraftId();
-    setDraftSrc(id, file.path);
+    setDraftSrc(id, file.path, file.conversationId);
     persistDrafts([...drafts, id]);
     pendingFocusRef.current = "draft::" + id;
   };

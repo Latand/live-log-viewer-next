@@ -42,6 +42,8 @@ export interface RecoverableSpawnRequest {
   prompt: string;
   images: SpawnImage[];
   src: string;
+  /** Stable handoff parent identity captured when the draft is created. */
+  parentConversationId?: string;
   /** Optional role registry reference. Omitted for the unchanged blank draft. */
   role?: string;
   roleParams?: Record<string, string | number>;
@@ -113,6 +115,7 @@ export function hasRecoverableRequest(attempt: SpawnAttempt): attempt is SpawnAt
     typeof request.accountId === "string" &&
     typeof request.prompt === "string" &&
     typeof request.src === "string" && request.src === attempt.src &&
+    (request.parentConversationId === undefined || typeof request.parentConversationId === "string") &&
     (request.role === undefined || typeof request.role === "string") &&
     (request.roleParams === undefined || (typeof request.roleParams === "object" && request.roleParams !== null && !Array.isArray(request.roleParams))) &&
     (request.confirm === undefined || typeof request.confirm === "string") &&
@@ -134,6 +137,7 @@ export function spawnRequestBody(attempt: SpawnAttempt & { request: RecoverableS
     images: request.images,
     clientAttemptId: attempt.clientAttemptId,
     ...(request.src ? { src: request.src } : {}),
+    ...(request.parentConversationId ? { parentConversationId: request.parentConversationId } : {}),
     ...(request.role ? { role: request.role, roleParams: request.roleParams ?? {} } : {}),
     ...(request.confirm ? { confirm: request.confirm } : {}),
   };

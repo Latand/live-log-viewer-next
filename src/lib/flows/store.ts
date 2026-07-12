@@ -209,7 +209,12 @@ export function reconcileFlowConversationOwnership(registry: ConversationLookup 
       if (current && current !== flow.implementerPath) { flow.implementerPath = current; dirty = true; }
     } else {
       const owner = registry.conversationForPath(flow.implementerPath);
-      if (owner) { flow.implementerConversationId = owner.id; dirty = true; }
+      if (owner) {
+        flow.implementerConversationId = owner.id;
+        const current = owner.generations.at(-1)?.path;
+        if (current) flow.implementerPath = current;
+        dirty = true;
+      }
     }
     for (const round of flow.rounds) {
       if (round.reviewerConversationId?.startsWith("conversation_")) {
@@ -217,7 +222,12 @@ export function reconcileFlowConversationOwnership(registry: ConversationLookup 
         if (current && current !== round.reviewerPath) { round.reviewerPath = current; dirty = true; }
       } else if (round.reviewerPath) {
         const owner = registry.conversationForPath(round.reviewerPath);
-        if (owner) { round.reviewerConversationId = owner.id; dirty = true; }
+        if (owner) {
+          round.reviewerConversationId = owner.id;
+          const current = owner.generations.at(-1)?.path;
+          if (current) round.reviewerPath = current;
+          dirty = true;
+        }
       }
     }
   }

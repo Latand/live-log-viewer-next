@@ -1,5 +1,5 @@
 import type { ResumeSpec } from "@/lib/agent/cli";
-import { agentRegistry, type TmuxHostEvidence } from "@/lib/agent/registry";
+import { agentRegistry, type SpawnReceipt, type TmuxHostEvidence } from "@/lib/agent/registry";
 import { sessionKeyFromTranscript } from "@/lib/agent/sessionKey";
 import { procBackend } from "@/lib/proc";
 import { descendantPids } from "@/lib/proc/memory";
@@ -59,7 +59,15 @@ export interface TranscriptHostSnapshot {
   hosts: TranscriptHost[];
   observation: "available" | "no-server" | "failure";
   observationError?: string;
+  conflicts?: TranscriptHostConflict[];
   canonicalFor(pathname: string): TranscriptHost | null;
+}
+
+export interface TranscriptHostConflict {
+  conversationId: string | null;
+  paths: string[];
+  paneIds: string[];
+  quarantinedPaneIds?: string[];
 }
 
 /** Display target exposed by resource observation and route lookup for one
@@ -95,12 +103,18 @@ interface HostDependencies {
   argv: (pid: number) => string[];
   parentPid: (pid: number) => number | null;
   identity: (pid: number) => string | null;
-  spawn: (spec: ResumeSpec, text: string) => Promise<SpawnedPane>;
+  spawn: (spec: ResumeSpec, text: string, receipt?: SpawnReceipt) => Promise<SpawnedPane>;
+  beginResume?: (entry: FileEntry, spec: ResumeSpec) => SpawnReceipt | null;
   remember: (pathname: string, spec: ResumeSpec, pane: SpawnedPane) => Promise<void>;
   deliver: (paneId: string, text: string) => Promise<void>;
   launchId?: (paneId: string) => Promise<string | null>;
-  reconcile?: (hosts: TranscriptHost[]) => void | Promise<void>;
+  conversationIdForPath?: (pathname: string) => string | null;
+  reconcile?: (hosts: TranscriptHost[]) => HostReconciliation | void | Promise<HostReconciliation | void>;
   serializeDelivery?: (entry: FileEntry, task: () => Promise<HostDeliveryOutcome>) => Promise<HostDeliveryOutcome>;
+}
+
+interface HostReconciliation {
+  quarantinedPaneIds: string[];
 }
 
 interface HostClaim {
@@ -201,6 +215,51 @@ function canonicalFrom(hosts: ObservedHost[], pathname: string): TranscriptHost 
   return candidates[0]?.host ?? null;
 }
 
+function hostConflicts(
+  hosts: ObservedHost[],
+  conversationIdForPath: (pathname: string) => string | null,
+  quarantinedPaneIds = new Set<string>(),
+): TranscriptHostConflict[] {
+  const groups = new Map<string, { conversationId: string | null; paths: Set<string>; paneIds: Set<string>; quarantinedPaneIds: Set<string> }>();
+  for (const host of hosts) {
+    const paths = new Set(host.claims.map((claim) => claim.pathname));
+    const conversationIds = [...new Set([...paths].map(conversationIdForPath).filter((value): value is string => value !== null))];
+    const keys = conversationIds.length > 0 ? conversationIds.map((id) => `conversation:${id}`) : [...paths].map((pathname) => `path:${pathname}`);
+    for (const key of keys) {
+      const conversationId = key.startsWith("conversation:") ? key.slice("conversation:".length) : null;
+      const group = groups.get(key) ?? { conversationId, paths: new Set<string>(), paneIds: new Set<string>(), quarantinedPaneIds: new Set<string>() };
+      for (const pathname of paths) group.paths.add(pathname);
+      group.paneIds.add(host.paneId);
+      if (quarantinedPaneIds.has(host.paneId)) group.quarantinedPaneIds.add(host.paneId);
+      groups.set(key, group);
+    }
+  }
+  return [...groups.values()]
+    .filter((group) => group.paneIds.size > 1 || group.quarantinedPaneIds.size > 0)
+    .map((group) => ({
+      conversationId: group.conversationId,
+      paths: [...group.paths].sort(),
+      paneIds: [...group.paneIds].sort((left, right) => paneNumber(left) - paneNumber(right)),
+      ...(group.quarantinedPaneIds.size > 0
+        ? { quarantinedPaneIds: [...group.quarantinedPaneIds].sort((left, right) => paneNumber(left) - paneNumber(right)) }
+        : {}),
+    }))
+    .sort((left, right) => (left.conversationId ?? left.paths[0] ?? "").localeCompare(right.conversationId ?? right.paths[0] ?? ""));
+}
+
+function conflictForPath(snapshot: TranscriptHostSnapshot, pathname: string, conversationIdForPath: (pathname: string) => string | null): TranscriptHostConflict | null {
+  const conversationId = conversationIdForPath(pathname);
+  return snapshot.conflicts?.find((conflict) =>
+    (conversationId !== null && conflict.conversationId === conversationId) || conflict.paths.includes(pathname)) ?? null;
+}
+
+class TranscriptHostConflictError extends Error {
+  constructor(conflict: TranscriptHostConflict) {
+    super(conflict.quarantinedPaneIds?.length ? "conversation has a quarantined live pane" : "conversation has multiple live panes");
+    this.name = "TranscriptHostConflictError";
+  }
+}
+
 function isDescendantOf(pid: number, ancestor: number, parentPid: (pid: number) => number | null): boolean {
   const seen = new Set<number>();
   let cursor: number | null = pid;
@@ -214,7 +273,8 @@ function isDescendantOf(pid: number, ancestor: number, parentPid: (pid: number) 
 }
 
 function failure(error: unknown, status = 500, actuation?: "started"): HostDeliveryOutcome {
-  return { ok: false, outcome: "failed", error: error instanceof Error ? error.message : String(error), status, ...(actuation ? { actuation } : {}) };
+  const resolvedStatus = error instanceof TranscriptHostConflictError ? 409 : status;
+  return { ok: false, outcome: "failed", error: error instanceof Error ? error.message : String(error), status: resolvedStatus, ...(actuation ? { actuation } : {}) };
 }
 
 /**
@@ -228,18 +288,19 @@ export function createTranscriptHostResolver(
 ): TranscriptHostResolver {
 
   async function observe(fresh: boolean): Promise<TranscriptHostSnapshot> {
+    const conversationIdForPath = dependencies.conversationIdForPath ?? (() => null);
     const [entries, paneObservation, records] = await Promise.all([dependencies.listFiles(), dependencies.panes(fresh), dependencies.resumeRecords()]);
     const serverPid = records?.serverPid ?? (await dependencies.serverPid());
     if (paneObservation.kind === "failure" && serverPid !== null) {
-      return { hosts: [], observation: "failure", observationError: paneObservation.error, canonicalFor: () => null };
+      return { hosts: [], observation: "failure", observationError: paneObservation.error, conflicts: [], canonicalFor: () => null };
     }
     if (serverPid === null || paneObservation.kind === "no-server") {
       await dependencies.reconcile?.([]);
-      return { hosts: [], observation: "no-server", canonicalFor: () => null };
+      return { hosts: [], observation: "no-server", conflicts: [], canonicalFor: () => null };
     }
     if (paneObservation.kind !== "available" || paneObservation.panes.size === 0) {
       await dependencies.reconcile?.([]);
-      return { hosts: [], observation: "available", canonicalFor: () => null };
+      return { hosts: [], observation: "available", conflicts: [], canonicalFor: () => null };
     }
     const { panes } = paneObservation;
 
@@ -274,13 +335,18 @@ export function createTranscriptHostResolver(
       }
     }
 
-    await dependencies.reconcile?.(hosts);
+    const reconciliation = await dependencies.reconcile?.(hosts);
+    const quarantinedPaneIds = new Set(reconciliation?.quarantinedPaneIds ?? []);
+    const eligibleHosts = hosts.filter((host) => !quarantinedPaneIds.has(host.paneId));
 
-    return {
+    const conflicts = hostConflicts(hosts, conversationIdForPath, quarantinedPaneIds);
+    const snapshot: TranscriptHostSnapshot = {
       hosts,
       observation: "available",
-      canonicalFor: (pathname: string) => canonicalFrom(hosts, pathname),
+      conflicts,
+      canonicalFor: (pathname: string) => conflictForPath(snapshot, pathname, conversationIdForPath) ? null : canonicalFrom(eligibleHosts, pathname),
     };
+    return snapshot;
   }
 
   async function revalidate(host: TranscriptHost, entry: FileEntry): Promise<boolean> {
@@ -298,8 +364,11 @@ export function createTranscriptHostResolver(
   }
 
   async function decide(input: { entry: FileEntry; spec: ResumeSpec }): Promise<Decision> {
+    const conversationIdForPath = dependencies.conversationIdForPath ?? (() => null);
     let snapshot = await observe(true);
     if (snapshot.observation === "failure") throw new Error(`tmux pane observation failed: ${snapshot.observationError}`);
+    const initialConflict = conflictForPath(snapshot, input.entry.path, conversationIdForPath);
+    if (initialConflict) throw new TranscriptHostConflictError(initialConflict);
     let host = snapshot.canonicalFor(input.entry.path);
     if (host && (await revalidate(host, input.entry))) return { host, resumed: false };
 
@@ -309,6 +378,8 @@ export function createTranscriptHostResolver(
        closes that race before a controlled resume is allowed. */
     snapshot = await observe(true);
     if (snapshot.observation === "failure") throw new Error(`tmux pane observation failed: ${snapshot.observationError}`);
+    const refreshedConflict = conflictForPath(snapshot, input.entry.path, conversationIdForPath);
+    if (refreshedConflict) throw new TranscriptHostConflictError(refreshedConflict);
     host = snapshot.canonicalFor(input.entry.path);
     /* A PID that changed process identity in the same pane slot can be a
        recycled scanner claim for another conversation. The fresh observation
@@ -324,10 +395,13 @@ export function createTranscriptHostResolver(
       host.agentIdentity !== rejectedHost.agentIdentity;
     if (host && !identityReplaced && (await revalidate(host, input.entry))) return { host, resumed: false };
 
-    const spawned = await dependencies.spawn(input.spec, "");
+    const receipt = dependencies.beginResume?.(input.entry, input.spec) ?? undefined;
+    const spawned = await dependencies.spawn(input.spec, "", receipt);
     await dependencies.remember(input.entry.path, input.spec, spawned);
     snapshot = await observe(true);
     if (snapshot.observation === "failure") throw new Error(`tmux pane observation failed: ${snapshot.observationError}`);
+    const resumedConflict = conflictForPath(snapshot, input.entry.path, conversationIdForPath);
+    if (resumedConflict) throw new TranscriptHostConflictError(resumedConflict);
     host = snapshot.canonicalFor(input.entry.path);
     if (!host || !(await revalidate(host, input.entry))) {
       throw new Error("resumed agent host could not be identified safely");
@@ -401,9 +475,10 @@ export function createTranscriptHostResolver(
   };
 }
 
-async function reconcileRegistry(hosts: TranscriptHost[]): Promise<void> {
+async function reconcileRegistry(hosts: TranscriptHost[]): Promise<HostReconciliation> {
   const registry = agentRegistry();
   const seen = new Set<string>();
+  const quarantinedPaneIds = new Set<string>();
   for (const host of hosts) {
     if (!host.primaryPath) continue;
     const key = sessionKeyFromTranscript(host.engine, host.primaryPath);
@@ -437,6 +512,7 @@ async function reconcileRegistry(hosts: TranscriptHost[]): Promise<void> {
         seen.add(`${key.engine}:${key.sessionId}`);
         continue;
       }
+      quarantinedPaneIds.add(host.paneId);
       continue;
     }
     const existing = registry.snapshot().entries[`${key.engine}:${key.sessionId}`];
@@ -460,6 +536,7 @@ async function reconcileRegistry(hosts: TranscriptHost[]): Promise<void> {
     const [engine, sessionId] = id.split(":");
     return { engine: engine as "claude" | "codex", sessionId };
   }));
+  return { quarantinedPaneIds: [...quarantinedPaneIds] };
 }
 
 async function registryResumeRecords(): ReturnType<typeof resumePaneRecords> {
@@ -479,6 +556,23 @@ async function rememberRegistryResume(pathname: string, spec: ResumeSpec, pane: 
   if (!pane.panePid) return;
   const serverPid = await tmuxServerPid();
   if (serverPid !== null) agentRegistry().rememberResumePane(serverPid, pathname, { paneId: pane.paneId, panePid: pane.panePid, windowName: spec.windowName, engine: spec.engine });
+}
+
+function beginRegistryResume(entry: FileEntry, spec: ResumeSpec): SpawnReceipt | null {
+  if (entry.engine !== "claude" && entry.engine !== "codex") return null;
+  const registry = agentRegistry();
+  const conversation = registry.conversationForPath(entry.path)
+    ?? registry.ensureConversation(entry.engine, entry.path, null);
+  const current = conversation.generations.at(-1);
+  const begun = registry.beginSpawnRequest({
+    engine: entry.engine,
+    cwd: spec.cwd,
+    accountId: current?.accountId ?? null,
+    conversationId: conversation.id,
+    purpose: "resume-successor",
+    launchProfile: spec.launchProfile ?? current?.launchProfile,
+  });
+  return begun.receipt;
 }
 
 async function serializeRegistryDelivery(entry: FileEntry, task: () => Promise<HostDeliveryOutcome>): Promise<HostDeliveryOutcome> {
@@ -507,6 +601,8 @@ const runtimeResolver = createTranscriptHostResolver({
   parentPid: readPpid,
   identity: procBackend.processIdentity,
   launchId: paneLaunchId,
+  conversationIdForPath: (pathname) => agentRegistry().conversationForPath(pathname)?.id ?? null,
+  beginResume: beginRegistryResume,
   spawn: spawnAgentWithPrompt,
   remember: rememberRegistryResume,
   deliver: sendText,

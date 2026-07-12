@@ -22,7 +22,7 @@ import {
 } from "@/lib/accounts/migration/contracts";
 
 import type { AgentEngine } from "./cli";
-import { sessionKeyId, type SessionKey } from "./sessionKey";
+import { sessionKeyFromTranscript, sessionKeyId, type SessionKey } from "./sessionKey";
 import type { ResumePaneRecord } from "@/lib/resumePanesFile";
 
 export type AgentHostStatus = "starting" | "live" | "idle" | "handoff" | "unhosted" | "dead";
@@ -79,7 +79,13 @@ export interface SpawnReceipt {
   requestDigest: string | null;
   /** Reserved at receipt birth so path discovery cannot choose the identity. */
   conversationId: ViewerConversationId;
-  purpose: "launch" | "migration-successor";
+  purpose: "launch" | "migration-successor" | "resume-successor";
+  /** Generation current when a resume receipt was created. A completed
+      source observation may advance from this path exactly once. */
+  resumeSourcePath: string | null;
+  /** Disk-backed Codex session metadata can recover this receipt after its
+      pane disappears before transcript discovery completes. */
+  pathCorrelation: { cwd: string; startedAt: string } | null;
   engine: AgentEngine;
   cwd: string;
   accountId: string | null;
@@ -103,9 +109,9 @@ export interface SpawnLineageEdge {
   parentSessionKey: SessionKey | null;
   childArtifactPath: string | null;
   parentArtifactPath: string | null;
-  source: "viewer-spawn";
+  source: "viewer-spawn" | "engine-native";
   evidence: {
-    launchId: string;
+    launchId: string | null;
     clientAttemptId: string | null;
   };
   createdAt: string;
@@ -191,6 +197,7 @@ export interface ConversationObservation {
   accountId: string | null;
   launchProfile: LaunchProfile;
   turn: TurnState;
+  startedAt?: string | null;
   observedAt: string;
 }
 
@@ -220,6 +227,132 @@ function migrationReadiness(
   const hasPendingDelivery = Object.values(file.heldDeliveries).some((delivery) =>
     delivery.conversationId === conversation.id && delivery.state !== "delivered");
   return hasPendingDelivery ? "idle" : "deferred";
+}
+
+function resumeCanRebaseMigration(migration: ConversationMigration | null): boolean {
+  return migration === null
+    || migration.phase === "committed"
+    || migration.phase === "rolled-back"
+    || ((migration.phase === "waiting-turn" || migration.phase === "requested") && migration.providerReceipt === null);
+}
+
+function receiptStillAwaitsResumeSuccessor(receipt: SpawnReceipt): boolean {
+  if (receipt.purpose !== "resume-successor" || receipt.state === "failed") return false;
+  return receipt.state !== "completed"
+    || receipt.resumeSourcePath === null
+    || receipt.artifactPath === receipt.resumeSourcePath;
+}
+
+const PATH_CORRELATION_WINDOW_MS = 30_000;
+
+function correlatePathPendingReceipts(file: RegistryFile, observations: ConversationObservation[]): Map<string, string> {
+  type PendingReceipt = { launchId: string; cwd: string; accountId: string | null; expectedStart: number };
+  type PendingObservation = { path: string; cwd: string; accountId: string | null; observedStart: number };
+  type Pair = [string, string];
+  type Correlation = { count: number; distance: number; assignments: Pair[][] };
+  const receipts: PendingReceipt[] = Object.values(file.receipts).flatMap((receipt) => {
+    if (receipt.engine !== "codex" || receipt.state !== "path-pending" || receipt.artifactPath !== null || !receipt.pathCorrelation) return [];
+    const expectedStart = Date.parse(receipt.pathCorrelation.startedAt);
+    return Number.isFinite(expectedStart)
+      ? [{ launchId: receipt.launchId, cwd: receipt.pathCorrelation.cwd, accountId: receipt.accountId, expectedStart }]
+      : [];
+  });
+  const pendingObservations: PendingObservation[] = [];
+  for (const observation of observations) {
+    if (observation.engine !== "codex" || !observation.startedAt) continue;
+    const observedStart = Date.parse(observation.startedAt);
+    if (!Number.isFinite(observedStart)) continue;
+    const nativeId = sessionKeyFromTranscript(observation.engine, observation.path)?.sessionId ?? null;
+    const knownOwners = Object.values(file.conversations).filter((conversation) =>
+      conversation.engine === observation.engine
+      && (conversationOwnsPath(conversation, observation.path)
+        || (nativeId !== null && conversation.generations.some((generation) => generation.id === nativeId))));
+    if (knownOwners.some((owner) => !scannerAllocatedProvisionalOwner(owner, observation.path))) continue;
+    pendingObservations.push({ path: observation.path, cwd: observation.launchProfile.cwd, accountId: observation.accountId, observedStart });
+  }
+  const matches = new Map<string, string>();
+  const partitionKey = (value: { cwd: string; accountId: string | null }) => JSON.stringify([value.cwd, value.accountId]);
+  const partitions = new Set([...receipts.map(partitionKey), ...pendingObservations.map(partitionKey)]);
+  const advance = (table: Array<Array<Correlation | undefined>>, observationIndex: number, receiptIndex: number, candidate: Correlation) => {
+    const current = table[observationIndex]![receiptIndex];
+    if (!current || candidate.count > current.count || (candidate.count === current.count && candidate.distance < current.distance)) {
+      table[observationIndex]![receiptIndex] = {
+        ...candidate,
+        assignments: candidate.assignments.map((assignment) => [...assignment]),
+      };
+      return;
+    }
+    if (candidate.count !== current.count || candidate.distance !== current.distance) return;
+    const signatures = new Set(current.assignments.map((assignment) => JSON.stringify(assignment)));
+    for (const assignment of candidate.assignments) {
+      const signature = JSON.stringify(assignment);
+      if (!signatures.has(signature)) {
+        current.assignments.push(assignment);
+        signatures.add(signature);
+        if (current.assignments.length === 2) break;
+      }
+    }
+  };
+  for (const partition of partitions) {
+    const cwdReceipts = receipts.filter((receipt) => partitionKey(receipt) === partition)
+      .sort((left, right) => left.expectedStart - right.expectedStart || left.launchId.localeCompare(right.launchId));
+    const cwdObservations = pendingObservations.filter((observation) => partitionKey(observation) === partition)
+      .sort((left, right) => left.observedStart - right.observedStart || left.path.localeCompare(right.path));
+    const compatible = (observation: PendingObservation, receipt: PendingReceipt) =>
+      observation.observedStart >= receipt.expectedStart - 1_000
+      && observation.observedStart <= receipt.expectedStart + PATH_CORRELATION_WINDOW_MS;
+    if (cwdReceipts.length > 1 && cwdObservations.length > 1) {
+      const ambiguousObservation = cwdObservations.some((observation) =>
+        cwdReceipts.filter((receipt) => compatible(observation, receipt)).length > 1);
+      const ambiguousReceipt = cwdReceipts.some((receipt) =>
+        cwdObservations.filter((observation) => compatible(observation, receipt)).length > 1);
+      if (ambiguousObservation || ambiguousReceipt) continue;
+    }
+    const table: Array<Array<Correlation | undefined>> = Array.from(
+      { length: cwdObservations.length + 1 },
+      () => Array<Correlation | undefined>(cwdReceipts.length + 1),
+    );
+    table[0]![0] = { count: 0, distance: 0, assignments: [[]] };
+    for (let observationIndex = 0; observationIndex <= cwdObservations.length; observationIndex += 1) {
+      for (let receiptIndex = 0; receiptIndex <= cwdReceipts.length; receiptIndex += 1) {
+        const current = table[observationIndex]![receiptIndex];
+        if (!current) continue;
+        if (observationIndex < cwdObservations.length) advance(table, observationIndex + 1, receiptIndex, current);
+        if (receiptIndex < cwdReceipts.length) advance(table, observationIndex, receiptIndex + 1, current);
+        if (observationIndex >= cwdObservations.length || receiptIndex >= cwdReceipts.length) continue;
+        const observation = cwdObservations[observationIndex]!;
+        const receipt = cwdReceipts[receiptIndex]!;
+        if (!compatible(observation, receipt)) continue;
+        advance(table, observationIndex + 1, receiptIndex + 1, {
+          count: current.count + 1,
+          distance: current.distance + Math.abs(observation.observedStart - receipt.expectedStart),
+          assignments: current.assignments.map((assignment) => [...assignment, [observation.path, receipt.launchId]]),
+        });
+      }
+    }
+    const assignment = table.at(-1)?.at(-1)?.assignments;
+    if (assignment?.length === 1) {
+      for (const [pathname, launchId] of assignment[0]!) matches.set(pathname, launchId);
+    }
+  }
+  return matches;
+}
+
+function mergeResumeLaunchProfile(current: LaunchProfile, requested: LaunchProfile): LaunchProfile {
+  return {
+    cwd: requested.cwd || current.cwd,
+    model: requested.model ?? current.model,
+    effort: requested.effort ?? current.effort,
+    fast: requested.fast ?? current.fast,
+    permissionMode: requested.permissionMode ?? current.permissionMode,
+    readOnly: requested.readOnly ?? current.readOnly,
+    title: requested.title ?? current.title,
+    project: requested.project ?? current.project,
+    parentConversationId: requested.parentConversationId ?? current.parentConversationId,
+    role: current.role === "root" || requested.role === "root" ? "root" : "worker",
+    goal: requested.goal ?? current.goal,
+    plan: requested.plan ?? current.plan,
+  };
 }
 
 function migrationReadinessSignature(
@@ -573,6 +706,55 @@ function scannerAllocatedProvisionalOwner(conversation: RegistryConversation, pa
     && conversation.continuityPaths.length === 0;
 }
 
+function conversationDurabilityScore(file: RegistryFile, conversation: RegistryConversation): number {
+  let score = conversation.generations.length > 1 || conversation.migration !== null ? 100 : 0;
+  for (const receipt of Object.values(file.receipts)) {
+    if (receipt.conversationId === conversation.id) score += 20;
+    if (receipt.parentConversationId === conversation.id) score += 5;
+  }
+  if (file.lineageEdges[conversation.id]) score += 10;
+  for (const edge of Object.values(file.lineageEdges)) if (edge.parentConversationId === conversation.id) score += 5;
+  for (const delivery of Object.values(file.heldDeliveries)) if (delivery.conversationId === conversation.id) score += 5;
+  return score;
+}
+
+function preferredConversationOwner(file: RegistryFile, candidates: RegistryConversation[]): RegistryConversation | null {
+  return [...candidates].sort((left, right) =>
+    conversationDurabilityScore(file, right) - conversationDurabilityScore(file, left)
+    || left.createdAt.localeCompare(right.createdAt)
+    || left.id.localeCompare(right.id))[0] ?? null;
+}
+
+function recordObservedLineage(
+  file: RegistryFile,
+  conversation: RegistryConversation,
+  artifactPath: string,
+  observedAt: string,
+): void {
+  const generation = conversation.generations.find((candidate) => candidate.path === artifactPath)
+    ?? conversation.generations.at(-1);
+  const existing = file.lineageEdges[conversation.id];
+  const parentConversationId = existing?.source === "viewer-spawn"
+    ? existing.parentConversationId
+    : generation?.launchProfile.parentConversationId;
+  if (!generation || !parentConversationId || parentConversationId === conversation.id) return;
+  const canonicalParentId = resolveConversationAlias(file, parentConversationId);
+  const parent = file.conversations[canonicalParentId];
+  if (!parent) return;
+  const parentGeneration = parent.generations.at(-1);
+  file.lineageEdges[conversation.id] = {
+    childConversationId: conversation.id,
+    parentConversationId: canonicalParentId,
+    childSessionKey: sessionKeyFromTranscript(conversation.engine, artifactPath),
+    parentSessionKey: parentGeneration ? sessionKeyFromTranscript(parent.engine, parentGeneration.path) : null,
+    childArtifactPath: artifactPath,
+    parentArtifactPath: parentGeneration?.path ?? null,
+    source: existing?.source ?? "engine-native",
+    evidence: existing?.evidence ?? { launchId: null, clientAttemptId: null },
+    createdAt: existing?.createdAt ?? observedAt,
+  };
+}
+
 function resolveConversationAlias(file: Pick<RegistryFile, "conversationAliases">, id: ViewerConversationId): ViewerConversationId {
   const seen = new Set<ViewerConversationId>();
   let current = id;
@@ -617,6 +799,10 @@ function adoptProvisionalOwner(
   pathname: string,
 ): boolean {
   if (!scannerAllocatedProvisionalOwner(owner, pathname)) return false;
+  if (owner.migrationOptOut
+    && (!target.migrationOptOut || owner.migrationOptOut.updatedAt > target.migrationOptOut.updatedAt)) {
+    target.migrationOptOut = { ...owner.migrationOptOut };
+  }
   for (const receipt of Object.values(file.receipts)) {
     if (receipt.conversationId === owner.id) receipt.conversationId = target.id;
     if (receipt.parentConversationId === owner.id) receipt.parentConversationId = target.id;
@@ -631,6 +817,7 @@ function adoptProvisionalOwner(
       childConversationId: edge.childConversationId === owner.id ? target.id : edge.childConversationId,
       parentConversationId: edge.parentConversationId === owner.id ? target.id : edge.parentConversationId,
     };
+    if (reassigned.childConversationId === reassigned.parentConversationId) continue;
     const existing = reassignedEdges[reassigned.childConversationId];
     if (!existing || edge.childConversationId === target.id) reassignedEdges[reassigned.childConversationId] = reassigned;
   }
@@ -674,7 +861,13 @@ function normalizeReceipt(value: SpawnReceipt): SpawnReceipt {
     conversationId: typeof value.conversationId === "string" && value.conversationId.startsWith("conversation_")
       ? value.conversationId as ViewerConversationId
       : `conversation_${crypto.randomUUID()}`,
-    purpose: value.purpose === "migration-successor" ? "migration-successor" : "launch",
+    purpose: value.purpose === "migration-successor" || value.purpose === "resume-successor" ? value.purpose : "launch",
+    resumeSourcePath: typeof value.resumeSourcePath === "string" ? value.resumeSourcePath : null,
+    pathCorrelation: value.pathCorrelation
+      && typeof value.pathCorrelation.cwd === "string"
+      && typeof value.pathCorrelation.startedAt === "string"
+      ? value.pathCorrelation
+      : null,
     accountId: typeof value.accountId === "string" ? value.accountId : null,
     parentConversationId: typeof value.parentConversationId === "string" && value.parentConversationId.startsWith("conversation_")
       ? value.parentConversationId as ViewerConversationId
@@ -830,10 +1023,17 @@ export class AgentRegistry {
     return this.mutate((file) => {
       const conversationId = input.conversationId ? resolveConversationAlias(file, input.conversationId) : null;
       const parentConversationId = input.parentConversationId ? resolveConversationAlias(file, input.parentConversationId) : null;
-      const profile = emptyLaunchProfile({ cwd: input.cwd, ...(input.launchProfile ?? {}), parentConversationId });
       const existingConversation = conversationId ? file.conversations[conversationId] : null;
+      const requestedProfile = emptyLaunchProfile({ cwd: input.cwd, ...(input.launchProfile ?? {}), parentConversationId });
+      const currentProfile = existingConversation?.generations.at(-1)?.launchProfile;
+      const profile = input.purpose === "resume-successor" && currentProfile
+        ? mergeResumeLaunchProfile(currentProfile, requestedProfile)
+        : requestedProfile;
       if (existingConversation && existingConversation.engine !== input.engine) {
         throw new Error("spawn conversation ownership is invalid");
+      }
+      if (input.purpose === "resume-successor" && existingConversation && !resumeCanRebaseMigration(existingConversation.migration)) {
+        throw new Error("conversation migration prevents resume succession");
       }
       if (input.clientAttemptId) {
         const existing = Object.values(file.receipts).find((receipt) => receipt.clientAttemptId === input.clientAttemptId);
@@ -842,17 +1042,22 @@ export class AgentRegistry {
           return { kind: compatible ? "replay" : "conflict", receipt: clone(existing) };
         }
       }
+      const createdAt = now();
       const receipt: SpawnReceipt = {
         launchId: crypto.randomUUID(),
         clientAttemptId: input.clientAttemptId ?? null,
         requestDigest: input.requestDigest ?? null,
         conversationId: conversationId ?? `conversation_${crypto.randomUUID()}`,
         purpose: input.purpose ?? "launch",
+        resumeSourcePath: input.purpose === "resume-successor" ? existingConversation?.generations.at(-1)?.path ?? null : null,
+        pathCorrelation: input.engine === "codex" && (input.purpose ?? "launch") === "launch"
+          ? { cwd: input.cwd, startedAt: createdAt }
+          : null,
         engine: input.engine,
         cwd: input.cwd,
         accountId: input.accountId ?? null,
         parentConversationId,
-        createdAt: now(),
+        createdAt,
         state: "starting",
         artifactPath: input.expectedArtifactPath ?? null,
         key: null,
@@ -960,8 +1165,10 @@ export class AgentRegistry {
     if (!receipt) throw new Error("unknown spawn receipt");
     const prior = receipt.key ? file.entries[sessionKeyId(receipt.key)] : null;
     const conflict = (code: "spawn_artifact_conflict" | "spawn_pane_conflict" | "spawn_identity_conflict"): SpawnSettlement => {
-      receipt.state = "conflicted";
-      receipt.error = code;
+      if (receipt.state !== "completed") {
+        receipt.state = "conflicted";
+        receipt.error = code;
+      }
       return { kind: "conflict", receipt: clone(receipt), code };
     };
     if (receipt.state === "failed" || receipt.state === "conflicted") {
@@ -981,12 +1188,38 @@ export class AgentRegistry {
       (receipt.pane.panePid.pid > 0 && receipt.pane.panePid.pid !== entry.host.panePid.pid) ||
       (receipt.pane.panePid.startIdentity !== null && entry.host.panePid.startIdentity !== receipt.pane.panePid.startIdentity)
     )) return conflict("spawn_pane_conflict");
-    if (receipt.artifactPath && receipt.artifactPath !== entry.artifactPath) return conflict("spawn_artifact_conflict");
+    const existingConversation = file.conversations[receipt.conversationId];
+    const ownedGeneration = existingConversation?.generations.find((generation) => generation.id === entry.key.sessionId);
+    const successorNativeId = existingConversation
+      ? sessionKeyFromTranscript(existingConversation.engine, entry.artifactPath)?.sessionId ?? nativeGenerationId(entry.artifactPath)
+      : null;
+    const advancesCompletedResume = receipt.state === "completed"
+      && receipt.purpose === "resume-successor"
+      && receipt.resumeSourcePath !== null
+      && receipt.artifactPath === receipt.resumeSourcePath
+      && receipt.artifactPath !== null
+      && receipt.key !== null
+      && existingConversation !== undefined
+      && conversationOwnsPath(existingConversation, receipt.artifactPath)
+      && conversationOwnsPath(existingConversation, entry.artifactPath)
+      && sessionKeyId(receipt.key) === sessionKeyId(entry.key)
+      && ownedGeneration?.id === entry.key.sessionId
+      && successorNativeId === entry.key.sessionId;
+    if (receipt.artifactPath && receipt.artifactPath !== entry.artifactPath && !advancesCompletedResume) return conflict("spawn_artifact_conflict");
     if (receipt.key && sessionKeyId(receipt.key) !== sessionKeyId(entry.key)) return conflict("spawn_identity_conflict");
     const occupied = file.entries[sessionKeyId(entry.key)];
-    if (occupied && occupied.artifactPath !== entry.artifactPath && (!prior || sessionKeyId(prior.key) !== sessionKeyId(entry.key))) return conflict("spawn_artifact_conflict");
+    const occupiedPathOwned = occupied && existingConversation
+      ? existingConversation.generations.some((generation) => generation.path === occupied.artifactPath)
+        || existingConversation.continuityPaths.includes(occupied.artifactPath)
+      : false;
+    const replacesOwnedGeneration = receipt.purpose === "resume-successor"
+      && occupiedPathOwned
+      && ownedGeneration?.id === entry.key.sessionId
+      && successorNativeId === entry.key.sessionId;
+    if (occupied && occupied.artifactPath !== entry.artifactPath
+      && (!prior || sessionKeyId(prior.key) !== sessionKeyId(entry.key))
+      && !replacesOwnedGeneration) return conflict("spawn_artifact_conflict");
 
-    const existingConversation = file.conversations[receipt.conversationId];
     const createdAt = now();
     const conversation = existingConversation ?? {
       id: receipt.conversationId,
@@ -1001,6 +1234,9 @@ export class AgentRegistry {
       updatedAt: createdAt,
     };
     if (conversation.engine !== receipt.engine) return conflict("spawn_identity_conflict");
+    if (receipt.purpose === "resume-successor" && !resumeCanRebaseMigration(conversation.migration)) {
+      return conflict("spawn_identity_conflict");
+    }
     if (receipt.purpose === "migration-successor") {
       const provisionalOwner = Object.values(file.conversations).find((candidate) => candidate.id !== conversation.id
         && candidate.engine === conversation.engine && conversationOwnsPath(candidate, entry.artifactPath));
@@ -1008,6 +1244,53 @@ export class AgentRegistry {
         return conflict("spawn_artifact_conflict");
       }
       addConversationContinuityPath(conversation, entry.artifactPath);
+    }
+    if (receipt.purpose === "launch" && receipt.state === "path-pending") {
+      const provisionalOwner = Object.values(file.conversations).find((candidate) => candidate.id !== conversation.id
+        && candidate.engine === conversation.engine && conversationOwnsPath(candidate, entry.artifactPath));
+      if (provisionalOwner && !adoptProvisionalOwner(file, provisionalOwner, conversation, entry.artifactPath)) {
+        return conflict("spawn_artifact_conflict");
+      }
+    }
+    if (receipt.purpose === "resume-successor" && !conversationOwnsPath(conversation, entry.artifactPath)) {
+      const provisionalOwner = Object.values(file.conversations).find((candidate) => candidate.id !== conversation.id
+        && candidate.engine === conversation.engine && conversationOwnsPath(candidate, entry.artifactPath));
+      if (provisionalOwner && !adoptProvisionalOwner(file, provisionalOwner, conversation, entry.artifactPath)) {
+        return conflict("spawn_artifact_conflict");
+      }
+      const nativeId = sessionKeyFromTranscript(conversation.engine, entry.artifactPath)?.sessionId ?? nativeGenerationId(entry.artifactPath);
+      const continued = conversation.generations.find((generation) => generation.id === nativeId);
+      if (continued) {
+        if (!conversation.continuityPaths.includes(continued.path)) conversation.continuityPaths.push(continued.path);
+        continued.path = entry.artifactPath;
+        continued.accountId = receipt.accountId ?? continued.accountId;
+        continued.launchProfile = { ...continued.launchProfile, ...receipt.launchProfile };
+      } else {
+        const previous = conversation.generations.at(-1);
+        if (previous && previous.archivedAt === null) previous.archivedAt = createdAt;
+        conversation.generations.push({
+          id: nativeId,
+          path: entry.artifactPath,
+          accountId: receipt.accountId,
+          launchProfile: receipt.launchProfile,
+          historyHash: null,
+          host: null,
+          createdAt,
+          archivedAt: null,
+        });
+      }
+      file.conversationRevision[conversation.engine] += 1;
+      file.engineRouting[conversation.engine].revision += 1;
+      if (conversation.migration && (conversation.migration.phase === "waiting-turn" || conversation.migration.phase === "requested")) {
+        const resumedSource = conversation.generations.at(-1);
+        if (resumedSource) {
+          conversation.migration = {
+            ...conversation.migration,
+            sourceGenerationId: resumedSource.id,
+            updatedAt: createdAt,
+          };
+        }
+      }
     }
     if (receipt.purpose !== "migration-successor" && !conversation.generations.some((generation) => generation.path === entry.artifactPath)) {
       conversation.generations.push({
@@ -1250,9 +1533,67 @@ export class AgentRegistry {
   reconcileConversations(observations: ConversationObservation[]): RegistryFile {
     return this.mutate((file) => {
       const scopeChanged = new Set<Extract<AgentEngine, "claude" | "codex">>();
+      const firstPathByNativeSession = new Map<string, string>();
+      const pathPendingLaunches = correlatePathPendingReceipts(file, observations);
       for (const observation of observations) {
-        let conversation = Object.values(file.conversations).find((candidate) =>
+        const nativeId = sessionKeyFromTranscript(observation.engine, observation.path)?.sessionId ?? null;
+        const pathPendingLaunchId = pathPendingLaunches.get(observation.path);
+        if (nativeId && pathPendingLaunchId) {
+          const pathPendingReceipt = file.receipts[pathPendingLaunchId];
+          const recovered = pathPendingReceipt ? this.settleSpawnInFile(file, pathPendingLaunchId, {
+            key: { engine: observation.engine, sessionId: nativeId },
+            artifactPath: observation.path,
+            cwd: pathPendingReceipt.cwd,
+            accountId: pathPendingReceipt.accountId,
+            status: "unhosted",
+            host: null,
+            claimEpoch: 0,
+            claimOwner: null,
+            pendingAction: null,
+          }, "observed-completed") : null;
+          if (recovered?.kind === "settled") scopeChanged.add(observation.engine);
+        }
+        const exactOwners = Object.values(file.conversations).filter((candidate) =>
           candidate.engine === observation.engine && conversationOwnsPath(candidate, observation.path));
+        let exactOwner = preferredConversationOwner(file, exactOwners);
+        if (exactOwner) {
+          for (const duplicate of exactOwners) {
+            if (duplicate.id !== exactOwner.id && scannerAllocatedProvisionalOwner(duplicate, observation.path)) {
+              adoptProvisionalOwner(file, duplicate, exactOwner, observation.path);
+            }
+          }
+        }
+        const nativeSessionId = nativeId ? `${observation.engine}:${nativeId}` : null;
+        const firstObservedPath = nativeSessionId ? firstPathByNativeSession.get(nativeSessionId) : undefined;
+        if (nativeSessionId && firstObservedPath === undefined) firstPathByNativeSession.set(nativeSessionId, observation.path);
+        const nativeOwner = nativeId ? preferredConversationOwner(file, Object.values(file.conversations).filter((candidate) =>
+          candidate.engine === observation.engine && candidate.generations.some((generation) => generation.id === nativeId))) : null;
+        const resumeInventoryFenced = nativeOwner !== null
+          && !resumeCanRebaseMigration(nativeOwner.migration)
+          && Object.values(file.receipts).some((receipt) =>
+            resolveConversationAlias(file, receipt.conversationId) === nativeOwner.id
+            && receiptStillAwaitsResumeSuccessor(receipt));
+        let conversation = exactOwner ?? nativeOwner ?? null;
+        let adoptedSuccessorPath = false;
+        if (!resumeInventoryFenced && exactOwner && nativeOwner && exactOwner.id !== nativeOwner.id
+          && adoptProvisionalOwner(file, exactOwner, nativeOwner, observation.path)) {
+          exactOwner = nativeOwner;
+          conversation = nativeOwner;
+          adoptedSuccessorPath = true;
+        }
+        if (!resumeInventoryFenced && (!exactOwner || adoptedSuccessorPath) && nativeOwner && nativeId) {
+          const generation = nativeOwner.generations.find((candidate) => candidate.id === nativeId);
+          if (generation && generation.path !== observation.path) {
+            if (firstObservedPath === undefined || firstObservedPath === observation.path) {
+              if (!nativeOwner.continuityPaths.includes(generation.path)) nativeOwner.continuityPaths.push(generation.path);
+              generation.path = observation.path;
+            } else if (!nativeOwner.continuityPaths.includes(observation.path)) {
+              nativeOwner.continuityPaths.push(observation.path);
+            }
+            nativeOwner.updatedAt = observation.observedAt;
+            scopeChanged.add(observation.engine);
+          }
+        }
         if (!conversation) {
           const migrationReceipt = Object.values(file.receipts).find((receipt) => receipt.engine === observation.engine
             && receipt.purpose === "migration-successor"
@@ -1291,6 +1632,7 @@ export class AgentRegistry {
             updatedAt: createdAt,
           };
           file.conversations[conversation.id] = conversation;
+          recordObservedLineage(file, conversation, observation.path, observation.observedAt);
           scopeChanged.add(observation.engine);
           continue;
         }
@@ -1299,6 +1641,8 @@ export class AgentRegistry {
         const priorAccountId = generation.accountId;
         const priorRole = generation.launchProfile.role;
         const priorTurnState = conversation.turn.state;
+        const lineage = file.lineageEdges[conversation.id];
+        const observedParentConversationId = observation.launchProfile.parentConversationId;
         generation.accountId = observation.accountId ?? generation.accountId;
         generation.launchProfile = {
           ...generation.launchProfile,
@@ -1311,11 +1655,14 @@ export class AgentRegistry {
           readOnly: generation.launchProfile.readOnly ?? observation.launchProfile.readOnly,
           title: generation.launchProfile.title ?? observation.launchProfile.title,
           project: observation.launchProfile.project ?? generation.launchProfile.project,
-          parentConversationId: generation.launchProfile.parentConversationId ?? observation.launchProfile.parentConversationId,
+          parentConversationId: lineage?.source === "viewer-spawn"
+            ? lineage.parentConversationId
+            : observedParentConversationId ?? generation.launchProfile.parentConversationId,
           role: generation.launchProfile.role === "root" || observation.launchProfile.role === "root" ? "root" : "worker",
           goal: observation.launchProfile.goal ?? generation.launchProfile.goal,
           plan: observation.launchProfile.plan ?? generation.launchProfile.plan,
         };
+        recordObservedLineage(file, conversation, observation.path, observation.observedAt);
         conversation.turn = { ...observation.turn, observedAt: observation.observedAt };
         conversation.updatedAt = observation.observedAt;
         if (priorAccountId !== generation.accountId || priorRole !== generation.launchProfile.role || priorTurnState !== conversation.turn.state) {

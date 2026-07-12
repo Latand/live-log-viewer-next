@@ -3,7 +3,7 @@ import { describe, expect, test } from "bun:test";
 import type { TranscriptHost } from "@/lib/agent/transcriptHost";
 import type { FileEntry } from "@/lib/types";
 
-import { allowedKillTarget, canonicalResourceEntry, consumeKillTarget, noteSessionTargets } from "./resources";
+import { allowedKillTarget, canonicalResourceEntry, conflictingResourceHost, consumeKillTarget, noteSessionTargets } from "./resources";
 
 const PATHNAME = "/home/user/.codex/sessions/2026/07/10/rollout-2026-07-10-019f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl";
 
@@ -66,6 +66,18 @@ describe("resource observation", () => {
 
     expect(canonicalResourceEntry(snapshot, [duplicate], new Map([[PATHNAME, entry]]))).toBeNull();
     expect(canonicalResourceEntry(snapshot, [canonical], new Map([[PATHNAME, entry]]))).toEqual(entry);
+  });
+
+  test("marks every pane in a stable-conversation host conflict", () => {
+    const snapshot = {
+      hosts: [duplicate, canonical],
+      observation: "available" as const,
+      conflicts: [{ conversationId: "conversation_test", paths: [PATHNAME], paneIds: ["%1", "%2"] }],
+      canonicalFor: () => null,
+    };
+
+    expect(conflictingResourceHost(snapshot, duplicate)).toBeTrue();
+    expect(conflictingResourceHost(snapshot, canonical)).toBeTrue();
   });
 });
 

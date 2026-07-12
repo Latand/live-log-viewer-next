@@ -51,6 +51,8 @@ export interface FileEntry {
   fmt: Fmt;
   /** Absolute path of the parent node (tree link) or null for roots. */
   parent: string | null;
+  /** Durable lineage tombstone when the parent conversation transcript is gone. */
+  parentRemoved?: { conversationId: string; path: string | null };
   /** Unix seconds. */
   mtime: number;
   size: number;
@@ -406,6 +408,8 @@ export interface ResourceSession {
   panePid: number;
   path: string | null;
   engine: "claude" | "codex" | null;
+  /** Several live panes claim the same stable conversation identity. */
+  hostConflict?: boolean;
   title: string | null;
   project: string | null;
   activity: Activity | null;

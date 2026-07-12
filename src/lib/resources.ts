@@ -75,6 +75,10 @@ export function canonicalResourceEntry(
   return null;
 }
 
+export function conflictingResourceHost(snapshot: TranscriptHostSnapshot, host: TranscriptHost): boolean {
+  return snapshot.conflicts?.some((conflict) => conflict.paneIds.includes(host.paneId)) ?? false;
+}
+
 function isoFromUnix(seconds: number): string {
   return new Date(seconds * 1000).toISOString();
 }
@@ -130,6 +134,7 @@ async function buildResources(fresh: boolean): Promise<ResourcesPayload> {
         panePid: host.panePid,
         path: entry?.path ?? null,
         engine: host.engine,
+        hostConflict: conflictingResourceHost(hosts, host),
         title: entry?.title ?? null,
         project: entry?.project || null,
         activity: entry?.activity ?? null,

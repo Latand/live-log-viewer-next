@@ -67,7 +67,7 @@ function scaffoldPreview(scaffold: string, params: Record<string, string | numbe
 
 /** Everything a draft keeps in sessionStorage; called when the draft leaves the scheme. */
 export function clearDraftStorage(id: string) {
-  for (const name of ["engine", "model", "cwd", "text", "boot", "src", "effort", "speed", "accountId", "role", "roleParams", "confirm"]) sessionStorage.removeItem(field(id, name));
+  for (const name of ["engine", "model", "cwd", "text", "boot", "src", "parentConversationId", "effort", "speed", "accountId", "role", "roleParams", "confirm"]) sessionStorage.removeItem(field(id, name));
 }
 
 /** Source transcript a handoff draft continues; empty for a plain draft. */
@@ -75,9 +75,14 @@ export function draftSrc(id: string): string {
   return readField(id, "src");
 }
 
+export function draftParentConversationId(id: string): string {
+  return readField(id, "parentConversationId");
+}
+
 /** Marks a fresh draft as a handoff of the given transcript, before it mounts. */
-export function setDraftSrc(id: string, src: string) {
+export function setDraftSrc(id: string, src: string, parentConversationId?: string) {
   writeField(id, "src", src);
+  writeField(id, "parentConversationId", parentConversationId ?? "");
 }
 
 /** Seeds a fresh draft's first prompt, before it mounts — the «send a task to
@@ -131,6 +136,7 @@ export function DraftAgentPane({
   /* A handoff draft carries the transcript it continues; set by the opener
      before the draft lands on the scheme, immutable for the draft's life. */
   const [src] = useState(() => readField(draftId, "src"));
+  const [parentConversationId] = useState(() => readField(draftId, "parentConversationId"));
   const srcFile = src ? (files.find((entry) => entry.path === src) ?? null) : null;
   const [engine, setEngineState] = useState<Engine>(() => {
     const stored = readField(draftId, "engine");
@@ -410,6 +416,7 @@ export function DraftAgentPane({
       prompt: payloadText,
       images: attachments.images.map((image) => ({ base64: image.base64, mime: image.mime })),
       src,
+      ...(parentConversationId ? { parentConversationId } : {}),
       ...(roleId ? { role: roleId, roleParams, ...(deployConfirm ? { confirm: deployConfirm } : {}) } : {}),
     });
     /* Persist before POST: a navigation now has the launch id, timestamp, and

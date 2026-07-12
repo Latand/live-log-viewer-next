@@ -954,6 +954,8 @@ export const en = {
   "resources.total": "Σ {amount}",
   "resources.empty": "no agent sessions in tmux",
   "resources.orphan": "orphan pane",
+  "resources.hostConflict": "duplicate conversation pane",
+  "resources.hostConflictHint": "multiple live panes claim this conversation",
   "resources.procs": {
     one: "{count} process",
     other: "{count} processes",
@@ -1036,6 +1038,8 @@ export const en = {
   "branch.lastActivityQuiet": "Marked active, but the transcript is quiet: last activity {age}",
   "branch.handoffTitle": "agent spawned by this conversation's handoff",
   "branch.branchTitle": "branch of this conversation",
+  "lineage.parentRemoved": "parent removed",
+  "lineage.parentRemovedTitle": "The parent conversation transcript was removed",
   "branch.removeColumn": "Remove column {title}",
   "branch.toggleBackground": "{action} background task {title}",
   "branch.collapse": "Collapse",

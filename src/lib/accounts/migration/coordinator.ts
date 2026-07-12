@@ -4,7 +4,7 @@ import { accountManager } from "@/lib/accounts/manager";
 import { listClaudeAccounts } from "@/lib/accounts/claude";
 import { listCodexAccounts } from "@/lib/accounts/codex";
 import { agentRegistry, type AgentRegistry, type ConversationObservation, type MigrationScope, type RegistryConversation } from "@/lib/agent/registry";
-import { headCwd } from "@/lib/agent/transcript";
+import { headCwd, headSessionStartedAt } from "@/lib/agent/transcript";
 import {
   remapBoardPaths as remapDurableBoardPaths,
   transferBoardPathPlacements as transferDurableBoardPathPlacements,
@@ -98,6 +98,7 @@ function inventory(files: FileEntry[], registry: AgentRegistry): ConversationObs
         plan: entry.plan ?? currentProfile?.plan ?? null,
       }),
       turn,
+      startedAt: headSessionStartedAt(entry.path),
       observedAt: new Date(Math.max(entry.mtime * 1000, Date.now())).toISOString(),
     }];
   });
@@ -337,9 +338,6 @@ export async function advanceConversationMigration(
     return registry.conversation(conversation.id) ?? conversation;
   }
   if (migration.phase === "rolled-back" || migration.phase === "failed-recoverable") return conversation;
-  const source = conversation.generations.find((generation) => generation.id === migration.sourceGenerationId)
-    ?? conversation.generations.at(-1);
-  if (!source) throw new Error("conversation has no source generation");
   const successorProvider = isCopyOnly(provider) ? copyAdapter(provider) : provider;
   let receipt: ProviderReceipt | null = migration.providerReceipt;
   try {
@@ -354,6 +352,9 @@ export async function advanceConversationMigration(
         conversation = registry.transitionConversationMigration(conversation.id, migration.revision, ["preparing"], { phase: "successor-starting" });
         migration = conversation.migration!;
       }
+      const source = conversation.generations.find((generation) => generation.id === migration.sourceGenerationId)
+        ?? conversation.generations.at(-1);
+      if (!source) throw new Error("conversation has no source generation");
       const conversationId = conversation.id;
       receipt = await successorProvider.create({
         engine: conversation.engine,
@@ -370,6 +371,9 @@ export async function advanceConversationMigration(
       migration = conversation.migration!;
       receipt = migration.providerReceipt ?? receipt;
     }
+    const source = conversation.generations.find((generation) => generation.id === migration.sourceGenerationId)
+      ?? conversation.generations.at(-1);
+    if (!source) throw new Error("conversation has no source generation");
     if (!receipt || receipt.operationId !== migration.operationId) throw new Error("persisted successor receipt operation does not match");
     await successorProvider.verify(receipt, { engine: conversation.engine, targetAccountId: migration.targetId, launchProfile: source.launchProfile });
     const committed = registry.commitSuccessor(conversation.id, {
