@@ -1,11 +1,12 @@
 import { resumeSpecFor } from "@/lib/agent/cli";
+import type { AgentReconfiguration } from "@/lib/agent/reconfigure";
 import { agentRegistry } from "@/lib/agent/registry";
 import { deliveryFence } from "@/lib/accounts/migration/coordinator";
 import { requestAccountMigrationTick } from "@/lib/accounts/migration/controllerSignal";
 import { deliverToTranscriptHost, readTranscriptHosts, type HostDeliveryOutcome } from "@/lib/agent/transcriptHost";
 import { listFiles } from "@/lib/scanner";
 import { pathAllowed } from "@/lib/scanner/roots";
-import { detectBlockingGate, parseScreenMenu, screenWaitsForInput } from "@/lib/status";
+import { detectBlockingGate, parseScreenMenu, screenAtIdleComposer, screenWaitsForInput } from "@/lib/status";
 import {
   buildImagePayload,
   deleteInboxImages,
@@ -40,10 +41,36 @@ export interface DeliveryFailure {
 export interface DeliverySuccess {
   ok: true;
   target: string;
-  outcome?: "delivered-to-live" | "resumed" | "held";
+  outcome?: "delivered-to-live" | "resumed" | "held" | "pending" | "reconfigured";
   imagePaths?: string[];
   /** Set when the message booted a fresh agent window instead of an existing pane. */
   spawned?: boolean;
+}
+
+export async function reconfigureConversation(filePath: string, config: AgentReconfiguration): Promise<DeliveryOutcome> {
+  if (!filePath || !pathAllowed(filePath)) return failure("the conversation path is required", 400);
+  const entry = (await listFiles()).find((item) => item.path === filePath);
+  if (!entry || (entry.engine !== "claude" && entry.engine !== "codex")) return failure("conversation is unavailable", 403);
+  const spec = resumeSpecFor(entry.root, entry.path, config);
+  if (!spec) return failure("this conversation cannot be resumed", 409);
+  const host = await livePaneHost(filePath);
+  if (host === null) {
+    const resumed = await hostOutcome(deliverToTranscriptHost({ entry, spec, payload: "" }));
+    return resumed.ok ? { ...resumed, outcome: "reconfigured" } : resumed;
+  }
+  try {
+    return await withPaneLock(host.paneId, async () => {
+      if (!screenAtIdleComposer(await paneScreen(host.paneId))) {
+        return { ok: true, target: host.display, outcome: "pending" } as DeliverySuccess;
+      }
+      await killPane(host.paneId);
+      forgetResumePane(filePath);
+      const resumed = await hostOutcome(deliverToTranscriptHost({ entry: { ...entry, pid: null, proc: "done" }, spec, payload: "" }));
+      return resumed.ok ? { ...resumed, outcome: "reconfigured" } : resumed;
+    });
+  } catch (error) {
+    return failure(error);
+  }
 }
 
 export type DeliveryOutcome = DeliverySuccess | DeliveryFailure;

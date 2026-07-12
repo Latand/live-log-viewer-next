@@ -58,6 +58,8 @@ export interface FileEntry {
   /** Reasoning-effort tier (minimal|low|medium|high|xhigh|max|ultra) or null
       when no reliable source exists (claude transcripts carry none). */
   effort?: string | null;
+  /** Codex service tier read from the live argv; null when unavailable. */
+  fast?: boolean | null;
   /** Structured Claude prompt that is currently blocking the live agent. */
   pendingQuestion: PendingQuestion | null;
   /** Newest TodoWrite/update_plan state — the agent's plan and current goal. */

@@ -89,6 +89,8 @@ export function claudeEnvPrefix(home: string): string { return `env ${CLAUDE_SHA
 export interface ResumeSpecOptions {
   model?: string | null;
   effort?: string | null;
+  /** Codex only: override the service tier when reopening a conversation. */
+  fast?: boolean | null;
 }
 
 /** Boot spec for a brand-new agent (no prior conversation) in a chosen directory. */
@@ -244,13 +246,14 @@ export function resumeSpecFor(root: string, pathname: string, options: ResumeSpe
     if (isManagedCodexHome(home)) command += " -c cli_auth_credentials_store=file";
     if (options.model) command += ` -m ${shellQuote(options.model)}`;
     if (options.effort) command += ` -c ${shellQuote(`model_reasoning_effort=${options.effort}`)}`;
+    if (options.fast != null) command += ` -c ${shellQuote(`service_tier=${options.fast ? "priority" : "standard"}`)}`;
     command += ` resume ${id}`;
     return {
       command: `CODEX_HOME=${shellQuote(home)} ${command}`,
       cwd: resumeCwd(pathname),
       windowName: "codex-resume",
       engine: "codex",
-      launchProfile: emptyLaunchProfileForResume(resumeCwd(pathname), options.model ?? null, options.effort ?? null),
+      launchProfile: { ...emptyLaunchProfileForResume(resumeCwd(pathname), options.model ?? null, options.effort ?? null), fast: options.fast ?? null },
     };
   }
   return null;

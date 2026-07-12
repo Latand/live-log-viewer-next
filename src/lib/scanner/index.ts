@@ -9,7 +9,7 @@ import { tickWorkflows } from "../workflows/engine";
 import { activityVerdict } from "./activity";
 import { ctxFor } from "./context";
 import { discoverFiles, discoverFilesWithProjectCatalog } from "./discover";
-import { entryEffort } from "./effort";
+import { entryEffort, entryFast } from "./effort";
 import { linkEntries } from "./links";
 import { entryModels } from "./model";
 import { outputHolders } from "./process";
@@ -171,6 +171,7 @@ async function listFilesInternal(
   // After pid assignment: the claude effort source is the live process argv.
   await forEachEntryYielding(entries, (entry) => {
     entry.effort = entryEffort(entry);
+    entry.fast = entryFast(entry);
   });
   await forEachEntryBatchYielding(entries, async (entry) => {
     const pending = pendingQuestionFor(entry);

@@ -2,7 +2,7 @@ import type { FileEntry } from "../types";
 import { resolveTarget } from "../tmux";
 import { ctxFor } from "./context";
 import { discoverFiles } from "./discover";
-import { entryEffort } from "./effort";
+import { entryEffort, entryFast } from "./effort";
 import { linkEntries } from "./links";
 import { entryModels } from "./model";
 import { outputHolders } from "./process";
@@ -37,7 +37,7 @@ export async function observeFiles(): Promise<FileEntry[]> {
     }
   });
   assignTranscriptPids(entries);
-  await each(entries, (entry) => { entry.effort = entryEffort(entry); });
+  await each(entries, (entry) => { entry.effort = entryEffort(entry); entry.fast = entryFast(entry); });
   await each(entries, async (entry) => {
     const pending = pendingQuestionFor(entry);
     entry.pendingQuestion = pending && entry.pid !== null ? { ...pending, paneTarget: await resolveTarget(entry.pid) } : pending;
