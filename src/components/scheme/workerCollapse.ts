@@ -2,7 +2,7 @@ import type { Flow, Round } from "@/lib/flows/types";
 import type { Pipeline } from "@/lib/pipelines/types";
 import type { FileEntry } from "@/lib/types";
 
-import { activityBand, isChildConversation, projectKey } from "@/components/projectModel";
+import { activityBand, isChildConversation, kidsIndex, projectKey, subtree } from "@/components/projectModel";
 
 /*
  * Worker-class auto-collapse (issue #112).
@@ -106,6 +106,10 @@ export interface CollapseContext extends WorkerLineage {
  */
 export function isCollapseExempt(file: FileEntry, context: CollapseContext): boolean {
   if (file.userAuthored) return true;
+  /* Fail closed on unconfirmed authorship: the reaper has not scanned this
+     transcript since its latest write, so we cannot yet rule out an owner
+     message. Treat it as pinned until a cycle clears it (issue #112). */
+  if (file.authorshipUnverified) return true;
   if (file.activity === "live" || file.activity === "stalled") return true;
   if (file.proc === "running") return true;
   if (file.pendingQuestion || file.waitingInput) return true;
@@ -124,8 +128,19 @@ export function shouldCollapseWorker(file: FileEntry, context: CollapseContext):
   if (!klass) return false;
   if (isCollapseExempt(file, context)) return false;
   if (klass === "flow-reviewer") {
+    /* Reviewers collapse exactly on verdict, never on the idle window: a
+       still-reviewing round stays put (it is the live loop), and a finished
+       round folds immediately. */
     const round = roundForReviewer(file, context.flows);
-    if (round && reviewerRoundFinished(round)) return true;
+    return Boolean(round && reviewerRoundFinished(round));
+  }
+  if (klass === "flow-implementer") {
+    /* The implementer anchors its flow on the board. While the flow is open —
+       spawning, reviewing, or awaiting the owner's decision — it must stay
+       expanded even if its own transcript is momentarily idle. Only a closed
+       flow's implementer is a candidate, and then only past the idle window. */
+    const flow = context.flows.find((candidate) => candidate.id === file.flow!.flowId);
+    if (!flow || flow.state !== "closed") return false;
   }
   return context.nowMs - file.mtime * 1000 >= context.idleMs;
 }
@@ -146,49 +161,87 @@ function stackKeyFor(file: FileEntry): { key: string; kind: "flow" | "worktree";
   return { key: "wstack::worktree::" + worktree, kind: "worktree", id: worktree };
 }
 
-export interface WorkerStacksInput {
+export interface CollapsibleInput {
   files: readonly FileEntry[];
   project: string;
   flows: readonly Flow[];
   pipelines?: readonly Pipeline[];
-  /** Conversations already drawn on the scheme (nodes, mini-stack rows, reviewer
-      decks): excluded so a card is never rendered in two places at once. */
-  renderedPaths: ReadonlySet<string>;
   /** Durable manual placements/expansions — pinned against collapse. */
   pinnedPaths: ReadonlySet<string>;
   nowMs: number;
   idleMs?: number;
 }
 
-/**
- * Derive the per-flow / per-worktree worker stacks for a project: every
- * collapse-eligible worker conversation that the scheme is not already drawing,
- * grouped by its flow (preferred) or its worktree. Flow stacks lead, then
- * worktree stacks; within each, and between stacks, freshest first.
- */
-export function computeWorkerStacks(input: WorkerStacksInput): WorkerStack[] {
-  const context: CollapseContext = {
+function collapseContext(input: CollapsibleInput): CollapseContext {
+  return {
     flows: input.flows,
     pipelineStagePaths: pipelineStageAgentPaths(input.pipelines ?? []),
     nowMs: input.nowMs,
     idleMs: input.idleMs ?? workerCollapseIdleMs(),
     pinnedPaths: input.pinnedPaths,
   };
-  const byKey = new Map<string, WorkerStack>();
+}
+
+/**
+ * The worker conversations of a project that should fold off the board now.
+ *
+ * A worker is collapsible only when it {@link shouldCollapseWorker} AND nothing
+ * in its subtree is exempt — no live/mid-turn descendant, and no owner-authored
+ * or pinned one. That subtree guard is the safety net for removing the card
+ * from the scheme: folding a parent must never bury a child that is still
+ * working or that the owner has touched (the hard exemption applies to the
+ * whole subtree, not just the root).
+ */
+export function collapsibleWorkerFiles(input: CollapsibleInput): FileEntry[] {
+  const context = collapseContext(input);
+  const kids = kidsIndex(input.files as FileEntry[]);
+  const out: FileEntry[] = [];
   for (const file of input.files) {
     if (projectKey(file) !== input.project) continue;
-    if (input.renderedPaths.has(file.path)) continue;
     if (!shouldCollapseWorker(file, context)) continue;
+    if (subtree(file, kids).some((descendant) => isCollapseExempt(descendant, context))) continue;
+    out.push(file);
+  }
+  return out;
+}
+
+const freshness = (file: FileEntry) => activityBand(file) * 1e13 - file.mtime;
+
+/**
+ * Group already-selected collapsible worker files into per-flow / per-worktree
+ * stacks. Flow stacks lead, then worktree stacks; within each, and between
+ * stacks, freshest first. `exclude` drops anything the scheme still draws in a
+ * retained form (an active flow's reviewer round deck) so a card never appears
+ * twice.
+ */
+export function groupWorkerStacks(files: readonly FileEntry[], exclude: ReadonlySet<string> = new Set()): WorkerStack[] {
+  const byKey = new Map<string, WorkerStack>();
+  for (const file of files) {
+    if (exclude.has(file.path)) continue;
     const { key, kind, id } = stackKeyFor(file);
     const stack = byKey.get(key) ?? { key, kind, id, items: [] };
     stack.items.push(file);
     byKey.set(key, stack);
   }
-  const freshness = (file: FileEntry) => activityBand(file) * 1e13 - file.mtime;
   const stacks = [...byKey.values()];
   for (const stack of stacks) stack.items.sort((a, b) => freshness(a) - freshness(b));
   return stacks.sort((a, b) => {
     if (a.kind !== b.kind) return a.kind === "flow" ? -1 : 1;
     return freshness(a.items[0]!) - freshness(b.items[0]!);
   });
+}
+
+export interface WorkerStacksInput extends CollapsibleInput {
+  /** Conversations already drawn on the scheme (nodes, mini-stack rows, reviewer
+      decks): excluded so a card is never rendered in two places at once. */
+  renderedPaths: ReadonlySet<string>;
+}
+
+/**
+ * Convenience composition: the per-flow / per-worktree stacks of every
+ * collapse-eligible worker the scheme is not already drawing. Equivalent to
+ * grouping {@link collapsibleWorkerFiles} minus `renderedPaths`.
+ */
+export function computeWorkerStacks(input: WorkerStacksInput): WorkerStack[] {
+  return groupWorkerStacks(collapsibleWorkerFiles(input), input.renderedPaths);
 }

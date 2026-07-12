@@ -68,6 +68,13 @@ export interface FileEntry {
       hard pin against worker-class auto-collapse — an owner-touched card never
       collapses. Absent when unknown (no reaper observation yet). */
   userAuthored?: boolean;
+  /** The reaper has NOT scanned this transcript since its latest activity, so
+      its authorship is unconfirmed (issue #112). The board's worker
+      auto-collapse fails closed on this — an unverified worker is pinned like an
+      owner-authored one until a reaper cycle clears it. Set for claude/codex
+      transcripts whose mtime is newer than the reaper's last run (or when the
+      reaper has never run). */
+  authorshipUnverified?: boolean;
   /** Short model name (fable, gpt-5.5, sonnet…) or null when unknown. */
   model: string | null;
   /** Exact model identifier recorded by the agent CLI. Kept separate from the

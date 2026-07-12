@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { statePath } from "@/lib/configDir";
-import { readUserAuthoredPaths } from "@/lib/reaperAuthorship";
+import { readAuthorshipEvidence, readUserAuthoredPaths } from "@/lib/reaperAuthorship";
 
 const stateFile = () => statePath("reaper-state.json");
 
@@ -33,6 +33,22 @@ test("corrupt or shapeless state yields an empty set", () => {
   expect(readUserAuthoredPaths()).toEqual(new Set());
   writeState({ version: 1 });
   expect(readUserAuthoredPaths()).toEqual(new Set());
+});
+
+test("evidence exposes the reaper's last-run time from the state file mtime", () => {
+  writeState({ version: 1, firstObservedAt: {}, userAuthoredPaths: { "/a": true } });
+  const before = fs.statSync(stateFile()).mtimeMs / 1000;
+  const evidence = readAuthorshipEvidence();
+  expect(evidence.userAuthoredPaths).toEqual(new Set(["/a"]));
+  expect(evidence.observedAtSec).not.toBeNull();
+  expect(Math.abs(evidence.observedAtSec! - before)).toBeLessThan(2);
+});
+
+test("missing state file reports no observation time (fail closed)", () => {
+  fs.rmSync(stateFile(), { force: true });
+  const evidence = readAuthorshipEvidence();
+  expect(evidence.observedAtSec).toBeNull();
+  expect(evidence.userAuthoredPaths.size).toBe(0);
 });
 
 test("does not touch the caller's temp dir isolation", () => {

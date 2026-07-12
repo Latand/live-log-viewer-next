@@ -23,7 +23,7 @@ import { PipelineStrip } from "./pipelines/PipelineStrip";
 import { pipelinesForProject, pipelineStripDomId, renderableFlowIds } from "./pipelines/pipelineModel";
 import { buildSchemeLayout } from "./scheme/layout";
 import { deckKey } from "./scheme/agentLinks";
-import { computeWorkerStacks } from "./scheme/workerCollapse";
+import { collapsibleWorkerFiles, groupWorkerStacks } from "./scheme/workerCollapse";
 import { WorkerStacks } from "./WorkerStacks";
 import { clearWorkflowDraftStorage } from "./workflows/WorkflowDraftPane";
 import { WorkflowStrip } from "./workflows/WorkflowStrip";
@@ -248,24 +248,48 @@ export function ProjectDashboard({
     return paths;
   }, [expandedFlowConversations, prefs.expanded]);
   const groupFiles = useMemo(() => foldClaimedReviewers(files, flows), [files, flows]);
+  /* Worker-class auto-collapse (issue #112): a card is pinned against collapse
+     by a GENUINE user placement (`explicitManual`, not the roots reconcile-roots
+     auto-seeds into `prefs.manual`) or a manual expansion. */
+  const pinnedPaths = useMemo(
+    () => new Set([...board.explicitManual, ...prefs.expanded]),
+    [board.explicitManual, prefs.expanded],
+  );
+  /* Collapse-eligible worker conversations, derived BEFORE layout so their
+     quiet full columns are removed from the scheme rather than left as
+     full-size cards (a spawned worker stays a column under an active parent
+     otherwise). Reviewers of active flows stay in their round deck and are
+     kept out of the stacks after layout via deckReviewerPaths. */
+  const collapsibleWorkers = useMemo(
+    () => collapsibleWorkerFiles({ files, project, flows, pipelines, pinnedPaths, nowMs }),
+    [files, project, flows, pipelines, pinnedPaths, nowMs],
+  );
+  const collapsedPaths = useMemo(() => new Set(collapsibleWorkers.map((file) => file.path)), [collapsibleWorkers]);
+  /* The board layout's file set with collapsed workers removed. Kept separate
+     from `groupFiles` so board-membership reconciliation still sees the full
+     catalog and never retires a collapsed worker's durable placement. */
+  const sceneFiles = useMemo(
+    () => (collapsedPaths.size ? groupFiles.filter((file) => !collapsedPaths.has(file.path)) : groupFiles),
+    [groupFiles, collapsedPaths],
+  );
   const projectPipelines = useMemo(() => pipelinesForProject(pipelines, project, files), [pipelines, project, files]);
   /* Stage actions that route to a transcript are disabled once it leaves the
      scan, so gate them on the current file paths (AC4). */
   const renderablePaths = useMemo(() => new Set(files.map((entry) => entry.path)), [files]);
   const projectWorkflows = useMemo(() => workflowsForProject(workflows, project, files), [workflows, project, files]);
   const groups = useMemo(
-    () => buildBranchGroups(groupFiles, project, { expandedConversationPaths: expandedConversations }),
-    [groupFiles, project, expandedConversations],
+    () => buildBranchGroups(sceneFiles, project, { expandedConversationPaths: expandedConversations }),
+    [sceneFiles, project, expandedConversations],
   );
   const activeRoots = useMemo(() => new Set(groups.map((group) => group.key)), [groups]);
-  const cards = useMemo(() => collapsedTrees(groupFiles, project, activeRoots), [groupFiles, project, activeRoots]);
+  const cards = useMemo(() => collapsedTrees(sceneFiles, project, activeRoots), [sceneFiles, project, activeRoots]);
   const quietActiveRoots = useMemo(
-    () => quietRootsWithActiveDescendants(groupFiles, project, activeRoots),
-    [groupFiles, project, activeRoots],
+    () => quietRootsWithActiveDescendants(sceneFiles, project, activeRoots),
+    [sceneFiles, project, activeRoots],
   );
   const residual = useMemo(
-    () => residualItems(groupFiles, project, activeRoots, quietActiveRoots),
-    [groupFiles, project, activeRoots, quietActiveRoots],
+    () => residualItems(sceneFiles, project, activeRoots, quietActiveRoots),
+    [sceneFiles, project, activeRoots, quietActiveRoots],
   );
   const autoPaths = useMemo(
     () => new Set(groups.flatMap((group) => group.columns.map((column) => column.file.path))),
@@ -274,16 +298,18 @@ export function ProjectDashboard({
   const hiddenSet = useMemo(() => new Set(prefs.hidden), [prefs.hidden]);
   const projectTasks = useMemo(() => tasks.filter((task) => task.project === project), [tasks, project]);
   const manualNodes = useMemo(() => {
-    const byPath = new Map(groupFiles.map((file) => [file.path, file]));
+    const byPath = new Map(sceneFiles.map((file) => [file.path, file]));
     return prefs.manual
       .map((path) => byPath.get(path))
       .filter(
         (file): file is FileEntry =>
           file !== undefined && projectKey(file) === project && !autoPaths.has(file.path) && !hiddenSet.has(file.path),
       );
-  }, [prefs.manual, groupFiles, project, autoPaths, hiddenSet]);
+  }, [prefs.manual, sceneFiles, project, autoPaths, hiddenSet]);
   /* Ephemeral jump targets render exactly like manual nodes; paths the scheme
-     already draws (auto columns, manual entries) filter out. */
+     already draws (auto columns, manual entries) filter out. Resolved against
+     the full catalog (not sceneFiles) so an explicit jump can still reveal a
+     collapsed worker as a transient node (#112). */
   const schemeManual = useMemo(() => {
     const byPath = new Map(groupFiles.map((file) => [file.path, file]));
     const manualPaths = new Set(manualNodes.map((file) => file.path));
@@ -599,20 +625,15 @@ export function ProjectDashboard({
      unplaced (hidden/tombstoned) implementer disables the action (#93 finding). */
   const pipelineLayout = buildSchemeLayout(hasNodes ? schemeGroups : archiveGroups, hasNodes ? schemeManual : [], files, flows, hasNodes ? drafts : [], pipelines);
   const renderableFlows = renderableFlowIds(flows, new Set(pipelineLayout.nodes.map((node) => node.file.path)));
-  /* Everything the scheme already draws — full nodes, mini-stack rows, reviewer
-     round decks: worker auto-collapse must never fold a card that is still
-     visible on the canvas, so these are excluded up front (issue #112). Derived
-     inline (like pipelineLayout above) so the React Compiler owns the caching —
-     a manual useMemo over the non-memoized pipelineLayout can't be preserved. */
-  const renderedPaths = new Set<string>();
-  for (const node of pipelineLayout.nodes) renderedPaths.add(node.file.path);
-  for (const stack of pipelineLayout.stacks) for (const item of stack.items) renderedPaths.add(item.file.path);
-  for (const deck of pipelineLayout.decks) for (const round of deck.rounds) if (round.file) renderedPaths.add(round.file.path);
-  /* Durable manual placements/expansions pin a card against auto-collapse; a
-     hand-opened worker survives reloads through these same board lists. */
-  const pinnedPaths = new Set([...prefs.manual, ...prefs.expanded]);
-  const workerStacks = computeWorkerStacks({ files, project, flows, pipelines, renderedPaths, pinnedPaths, nowMs });
-  const workerStackPaths = new Set(workerStacks.flatMap((stack) => stack.items.map((file) => file.path)));
+  /* Worker rows the scheme still draws in a retained form — an active flow's
+     reviewer round deck keeps its finished rounds as deck tabs. Those are
+     re-admitted here so a folded reviewer is never listed twice (its deck AND a
+     worker stack). Derived inline (like pipelineLayout above) so the React
+     Compiler owns the caching — a manual useMemo over the non-memoized
+     pipelineLayout can't be preserved. */
+  const deckReviewerPaths = new Set<string>();
+  for (const deck of pipelineLayout.decks) for (const round of deck.rounds) if (round.file) deckReviewerPaths.add(round.file.path);
+  const workerStacks = hasNodes ? groupWorkerStacks(collapsibleWorkers, deckReviewerPaths) : [];
   const listAvailable = historyRows.length > 0;
   const projectView = resolveProjectView({
     preferredView: board.prefs.viewMode,
@@ -863,16 +884,11 @@ export function ProjectDashboard({
           switchboard; owner-touched and live cards are never included. */}
       <WorkerStacks stacks={workerStacks} files={files} flows={flows} onSelect={openSwitchboardFile} />
 
-      {(() => {
-        /* A collapsed worker already lives in its stack above; keep it out of
-           the residual strip so a card is never listed twice. */
-        const residualItems = workerStackPaths.size
-          ? residual.filter((file) => !workerStackPaths.has(file.path))
-          : residual;
-        return !hasArchiveNodes && residualItems.length ? (
-          <ResidualStrip items={residualItems} activeRootPaths={quietActiveRoots} onSelect={openSwitchboardFile} />
-        ) : null;
-      })()}
+      {/* `residual` is derived from `sceneFiles`, which already excludes every
+          collapsed worker, so a card never appears in both a stack and here. */}
+      {!hasArchiveNodes && residual.length ? (
+        <ResidualStrip items={residual} activeRootPaths={quietActiveRoots} onSelect={openSwitchboardFile} />
+      ) : null}
 
       <TaskToastHost />
     </div>

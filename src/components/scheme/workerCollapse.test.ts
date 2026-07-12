@@ -5,6 +5,7 @@ import type { FileEntry } from "@/lib/types";
 
 import {
   classifyWorker,
+  collapsibleWorkerFiles,
   computeWorkerStacks,
   DEFAULT_WORKER_COLLAPSE_IDLE_MS,
   isCollapseExempt,
@@ -167,6 +168,18 @@ describe("isCollapseExempt — hard exemptions", () => {
     const file = entry({ path: "/w", kind: "subagent", parent: "/r" });
     expect(shouldCollapseWorker(file, ctx({ pinnedPaths: new Set(["/w"]) }))).toBe(false);
   });
+
+  test("HARD CONSTRAINT: unverified authorship fails closed", () => {
+    /* The reaper has not scanned since the last write, so authorship is
+       unconfirmed — pin the card until a cycle clears it. */
+    const file = entry({ path: "/w", kind: "subagent", parent: "/r", authorshipUnverified: true });
+    expect(isCollapseExempt(file, ctx())).toBe(true);
+    expect(shouldCollapseWorker(file, ctx())).toBe(false);
+    /* Even a finished reviewer round is held while authorship is unverified. */
+    const reviewer = entry({ path: "/rev", authorshipUnverified: true, flow: { flowId: "f1", flowRole: "reviewer", round: 1 } });
+    const flows = [flow({ id: "f1", implementerPath: "/impl", rounds: [round({ reviewerPath: "/rev", verdict: "APPROVE" })] })];
+    expect(shouldCollapseWorker(reviewer, ctx({ flows }))).toBe(false);
+  });
 });
 
 describe("shouldCollapseWorker", () => {
@@ -206,15 +219,24 @@ describe("shouldCollapseWorker", () => {
     expect(shouldCollapseWorker(impl, ctx())).toBe(false);
   });
 
-  test("a reviewer still reviewing is not collapsed while fresh", () => {
-    const reviewer = entry({
-      path: "/rev",
-      activity: "recent",
-      mtime: NOW_SEC - 5,
-      flow: { flowId: "f1", flowRole: "reviewer", round: 1 },
-    });
+  test("a reviewer still reviewing is not collapsed, fresh or idle", () => {
     const flows = [flow({ id: "f1", implementerPath: "/impl", rounds: [round({ reviewerPath: "/rev" })] })];
-    expect(shouldCollapseWorker(reviewer, ctx({ flows }))).toBe(false);
+    const fresh = entry({ path: "/rev", activity: "recent", mtime: NOW_SEC - 5, flow: { flowId: "f1", flowRole: "reviewer", round: 1 } });
+    const idle = entry({ path: "/rev", mtime: NOW_SEC - 60 * 60, flow: { flowId: "f1", flowRole: "reviewer", round: 1 } });
+    expect(shouldCollapseWorker(fresh, ctx({ flows }))).toBe(false);
+    /* An unfinished round never folds on the idle window alone. */
+    expect(shouldCollapseWorker(idle, ctx({ flows }))).toBe(false);
+  });
+
+  test("a flow implementer stays while its flow is open, collapses once closed", () => {
+    const impl = entry({ path: "/impl", mtime: NOW_SEC - 60 * 60, flow: { flowId: "f1", flowRole: "implementer", round: null } });
+    const active = [flow({ id: "f1", implementerPath: "/impl", state: "needs_decision" })];
+    const closed = [flow({ id: "f1", implementerPath: "/impl", state: "closed", closedAt: "2026-07-05T02:00:00Z" })];
+    /* Awaiting the owner's decision — the anchor stays even though its own
+       transcript is an hour idle. */
+    expect(shouldCollapseWorker(impl, ctx({ flows: active }))).toBe(false);
+    /* Closed and idle past the window — now a candidate. */
+    expect(shouldCollapseWorker(impl, ctx({ flows: closed }))).toBe(true);
   });
 
   test("a non-reviewer worker collapses only past the idle window", () => {
@@ -239,6 +261,33 @@ describe("pipelineStageAgentPaths", () => {
       },
     ] as unknown as Parameters<typeof pipelineStageAgentPaths>[0];
     expect(pipelineStageAgentPaths(pipelines)).toEqual(new Set(["/a", "/b"]));
+  });
+});
+
+describe("collapsibleWorkerFiles — subtree guard", () => {
+  const stale = (over: Partial<FileEntry> & { path: string }) => entry({ mtime: NOW_SEC - 30 * 60, ...over });
+
+  test("does not fold a worker whose subtree holds a live descendant", () => {
+    const parent = stale({ path: "/p", kind: "subagent", parent: "/root" });
+    const liveChild = entry({ path: "/p/c", kind: "subagent", parent: "/p", activity: "live" });
+    const paths = collapsibleWorkerFiles({ files: [parent, liveChild], project: "demo", flows: [], pinnedPaths: new Set(), nowMs: NOW }).map((f) => f.path);
+    expect(paths).not.toContain("/p");
+  });
+
+  test("does not fold a worker whose subtree holds a user-authored descendant", () => {
+    const parent = stale({ path: "/p", kind: "subagent", parent: "/root" });
+    const touchedChild = stale({ path: "/p/c", kind: "subagent", parent: "/p", userAuthored: true });
+    const paths = collapsibleWorkerFiles({ files: [parent, touchedChild], project: "demo", flows: [], pinnedPaths: new Set(), nowMs: NOW }).map((f) => f.path);
+    /* Folding the parent off the board would bury the owner-touched child. */
+    expect(paths).not.toContain("/p");
+    expect(paths).not.toContain("/p/c");
+  });
+
+  test("folds a worker whose entire subtree is quiet", () => {
+    const parent = stale({ path: "/p", kind: "subagent", parent: "/root" });
+    const quietChild = stale({ path: "/p/c", kind: "subagent", parent: "/p" });
+    const paths = collapsibleWorkerFiles({ files: [parent, quietChild], project: "demo", flows: [], pinnedPaths: new Set(), nowMs: NOW }).map((f) => f.path);
+    expect(new Set(paths)).toEqual(new Set(["/p", "/p/c"]));
   });
 });
 

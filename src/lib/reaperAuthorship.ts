@@ -22,17 +22,38 @@ const STATE_FILE = () => statePath("reaper-state.json");
  * viewer/spawn-injected messages (its message allowance) and only records a
  * path once a genuine human message clears it — exactly the pin we want.
  *
- * Missing/corrupt state is treated as "no evidence yet" — an empty set. The
- * exemption is applied on top of the live/mid-turn guards, so an unobserved
- * conversation is never wrongly collapsed while it is still doing work.
+ * Missing/corrupt state is treated as "no evidence yet". `observedAtSec` is the
+ * wall time of the reaper's last cycle (the state file's mtime — `runReaperCycle`
+ * rewrites it every pass), or null when the reaper has never run. The board
+ * fails CLOSED against it: a worker is only collapse-eligible when the reaper
+ * has scanned it AFTER its latest activity, so a transcript that changed since
+ * the last cycle (a fresh owner message, a cold start) is never collapsed on
+ * unverified authorship — the hard exemption holds even in the persistence gap.
  */
-export function readUserAuthoredPaths(): Set<string> {
+export interface AuthorshipEvidence {
+  userAuthoredPaths: Set<string>;
+  observedAtSec: number | null;
+}
+
+export function readAuthorshipEvidence(): AuthorshipEvidence {
+  const file = STATE_FILE();
+  let observedAtSec: number | null = null;
   try {
-    const parsed = JSON.parse(fs.readFileSync(STATE_FILE(), "utf8")) as { userAuthoredPaths?: unknown };
-    const map = parsed.userAuthoredPaths;
-    if (!map || typeof map !== "object" || Array.isArray(map)) return new Set();
-    return new Set(Object.keys(map as Record<string, unknown>));
+    observedAtSec = fs.statSync(file).mtimeMs / 1000;
   } catch {
-    return new Set();
+    return { userAuthoredPaths: new Set(), observedAtSec: null };
   }
+  try {
+    const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as { userAuthoredPaths?: unknown };
+    const map = parsed.userAuthoredPaths;
+    if (!map || typeof map !== "object" || Array.isArray(map)) return { userAuthoredPaths: new Set(), observedAtSec };
+    return { userAuthoredPaths: new Set(Object.keys(map as Record<string, unknown>)), observedAtSec };
+  } catch {
+    return { userAuthoredPaths: new Set(), observedAtSec };
+  }
+}
+
+/** Back-compat convenience: just the confirmed-authorship path set. */
+export function readUserAuthoredPaths(): Set<string> {
+  return readAuthorshipEvidence().userAuthoredPaths;
 }
