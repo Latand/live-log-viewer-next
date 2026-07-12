@@ -15,6 +15,34 @@ describe("family, icon, and summary per table row", () => {
     expect(sum("Bash", { command: "cd /repo && ls" }).summary).toContain("ls");
   });
 
+  test("write_stdin — shows the keys sent and the session, as a shell card (#141)", () => {
+    /* session_id arrives as a NUMBER; chars carries the actual bytes (^C here). */
+    const s = sum("write_stdin", { session_id: 8479, chars: "" }, "codex");
+    expect(s.family).toBe("shell");
+    expect(s.icon).toBe("shell");
+    expect(s.summary).toContain("8479");
+    expect(s.summary).toContain("^C");
+    expect(s.chips.some((c) => c.value === "8479")).toBe(true);
+  });
+
+  test("write_stdin — empty chars is labeled a poll, not an Enter keystroke (#141)", () => {
+    const s = sum("write_stdin", { session_id: 12, chars: "" }, "codex");
+    expect(s.summary).toContain("poll");
+    expect(s.summary).not.toContain("⏎");
+  });
+
+  test("write_stdin — a space-only keystroke is shown, never mislabeled a poll (finding 2)", () => {
+    const s = sum("write_stdin", { session_id: 12, chars: " " }, "codex");
+    expect(s.summary).toContain("␠");
+    expect(s.summary).not.toContain("poll");
+  });
+
+  test("wait — names the session/cell it is tailing, as a shell card (#141)", () => {
+    const s = sum("wait", { cell_id: "46", yield_time_ms: 30000 }, "codex");
+    expect(s.family).toBe("shell");
+    expect(s.summary).toContain("46");
+  });
+
   test("read", () => {
     const s = sum("Read", { file_path: "/repo/src/config.ts", offset: 10, limit: 30 });
     expect(s.family).toBe("read");

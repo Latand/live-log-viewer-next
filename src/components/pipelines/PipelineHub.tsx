@@ -6,7 +6,7 @@ import { useEffect, useRef, useState } from "react";
 import { useLocale } from "@/lib/i18n";
 import type { Pipeline, PipelineAction } from "@/lib/pipelines/types";
 
-import { latestAttempt, patchPipeline, pipelineStateLabel, pipelineStripDomId, stageChipLabel } from "./pipelineModel";
+import { latestAttempt, patchPipeline, pipelineStateLabel, stageChipLabel } from "./pipelineModel";
 
 const TONES: Record<Pipeline["state"], string> = {
   provisioning: "#5a51e0",
@@ -43,10 +43,6 @@ export function PipelineHub({
   const triggerRef = useRef<HTMLButtonElement>(null);
   const popoverRef = useRef<HTMLDivElement>(null);
   const wasOpen = useRef(false);
-  /* Set when the popover closes because focus was intentionally moved elsewhere
-     (e.g. "open dashboard strip"); the close effect then skips restoring focus to
-     the hub trigger, so keyboard focus actually lands on the transfer target. */
-  const focusTransferred = useRef(false);
 
   /* Focus enters the control popover on open and returns to the hub chip when it
      closes (Escape, close action, or toggle), matching the verdict popover. The
@@ -56,8 +52,7 @@ export function PipelineHub({
       popoverRef.current?.focus();
       wasOpen.current = true;
     } else if (wasOpen.current) {
-      if (!focusTransferred.current) triggerRef.current?.focus();
-      focusTransferred.current = false;
+      triggerRef.current?.focus();
       wasOpen.current = false;
     }
   }, [open]);
@@ -72,19 +67,6 @@ export function PipelineHub({
   const attempt = cursorStageId ? latestAttempt(pipeline, cursorStageId) : null;
   const finished = pipeline.state === "completed" || pipeline.state === "closed";
   const parked = pipeline.state === "needs_decision";
-
-  /* Reveal the always-available detailed surface (#93 §2.2): the dashboard strip
-     is a sibling view, so a DOM-id scroll + focus is the lightest coupling. */
-  const openDashboardStrip = () => {
-    const el = typeof document !== "undefined" ? document.getElementById(pipelineStripDomId(pipeline.id)) : null;
-    if (!el) return;
-    el.scrollIntoView({ behavior: "smooth", block: "center" });
-    el.focus({ preventScroll: true });
-    /* Focus now lives on the strip; suppress the close effect's trigger restore so
-       it stays on the strip. */
-    focusTransferred.current = true;
-    setOpen(false);
-  };
 
   const run = async (action: PipelineAction) => {
     if (busy) return;
@@ -159,12 +141,6 @@ export function PipelineHub({
               <X className="h-3 w-3" aria-hidden /> {t("pipelineStrip.close")}
             </button>
           </span>
-          <button
-            className="rounded-full border border-line bg-bg px-3 py-1 text-[10.5px] font-semibold text-dim hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
-            onClick={openDashboardStrip}
-          >
-            {t("pipelineHub.openDashboard")}
-          </button>
         </div>
       ) : null}
     </div>

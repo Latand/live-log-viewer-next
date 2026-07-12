@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import type { Flow, Round } from "@/lib/flows/types";
+import type { Pipeline } from "@/lib/pipelines/types";
 import type { FileEntry } from "@/lib/types";
 
 import {
@@ -8,8 +9,11 @@ import {
   collapsibleWorkerFiles,
   computeWorkerStacks,
   DEFAULT_WORKER_COLLAPSE_IDLE_MS,
+  groupWorkerStacks,
   isCollapseExempt,
+  pipelineOriginOf,
   pipelineStageAgentPaths,
+  pipelineStagePipelineIds,
   protectedReviewerNodes,
   reviewerRoundFinished,
   shouldCollapseWorker,
@@ -135,6 +139,50 @@ describe("classifyWorker", () => {
   test("an owner-started root conversation is not worker-class", () => {
     const root = entry({ path: "/root" });
     expect(classifyWorker(root, lineage())).toBeNull();
+  });
+
+  test("FAIL TOWARD COLLAPSED: a parented conversation the specific classes miss is still worker-class (#136)", () => {
+    /* A spawned claude *main* session (kind "session", not "subagent"), or any
+       worker whose flow/pipeline attachment can't be resolved by path, must still
+       fold — a classification miss defaults to collapsed, not to a full node. */
+    const spawnedMain = entry({ path: "/spawned", parent: "/root" });
+    expect(spawnedMain.kind).toBe("session");
+    expect(classifyWorker(spawnedMain, lineage())).toBe("spawned-descendant");
+  });
+
+  test("fail-toward-collapsed never overrides the parentless-root exemption (#136)", () => {
+    const root = entry({ path: "/root", parent: null });
+    expect(classifyWorker(root, lineage())).toBeNull();
+  });
+});
+
+describe("pipelineOriginOf — ancestor-chain pipeline ownership (#136)", () => {
+  test("a stage resolves directly; its spawned descendant resolves through the chain", () => {
+    const stage = entry({ path: "/stage", parent: "/orch" });
+    const child = entry({ path: "/stage/child", parent: "/stage", kind: "subagent" });
+    const grandchild = entry({ path: "/stage/child/leaf", parent: "/stage/child", kind: "subagent" });
+    const filesByPath = new Map([[stage.path, stage], [child.path, child], [grandchild.path, grandchild]]);
+    const pipelineIds = new Map([["/stage", "pipe1"]]);
+    expect(pipelineOriginOf(stage, filesByPath, pipelineIds)).toBe("pipe1");
+    expect(pipelineOriginOf(child, filesByPath, pipelineIds)).toBe("pipe1");
+    expect(pipelineOriginOf(grandchild, filesByPath, pipelineIds)).toBe("pipe1");
+  });
+
+  test("a worker with no pipeline ancestor resolves to null", () => {
+    const a = entry({ path: "/a" });
+    const b = entry({ path: "/a/b", parent: "/a", kind: "subagent" });
+    const filesByPath = new Map([[a.path, a], [b.path, b]]);
+    expect(pipelineOriginOf(b, filesByPath, new Map())).toBeNull();
+  });
+
+  test("ownership map covers a stage agentPath AND an embedded flow's implementer + reviewers (#136)", () => {
+    const flows = [flow({ id: "flow1", implementerPath: "/builder", rounds: [round({ reviewerPath: "/reviewer" })] })];
+    const pipelines = [
+      { id: "pipe1", runs: [{ stageId: "review", attempts: [{ agentPath: "/reviewer", flowId: "flow1" }] }] } as unknown as Pipeline,
+    ];
+    const map = pipelineStagePipelineIds(pipelines, flows);
+    expect(map.get("/reviewer")).toBe("pipe1");
+    expect(map.get("/builder")).toBe("pipe1");
   });
 });
 
@@ -364,6 +412,96 @@ describe("computeWorkerStacks", () => {
       nowMs: NOW,
     });
     expect(stacks).toHaveLength(0);
+  });
+});
+
+describe("groupWorkerStacks — one stack per origin (#136)", () => {
+  const stale = (over: Partial<FileEntry> & { path: string }) => entry({ mtime: NOW_SEC - 30 * 60, ...over });
+
+  test("a pipeline's stage workers fold into one pipeline stack", () => {
+    const s1 = stale({ path: "/s1", parent: "/root" });
+    const s2 = stale({ path: "/s2", parent: "/root" });
+    const pipelineIdOf = (p: string) => (p === "/s1" || p === "/s2" ? "pipe1" : null);
+    const stacks = groupWorkerStacks([s1, s2], [], new Set(), { pipelineIdOf });
+    expect(stacks).toHaveLength(1);
+    expect(stacks[0]!.kind).toBe("pipeline");
+    expect(stacks[0]!.id).toBe("pipe1");
+    expect(stacks[0]!.items.map((f) => f.path).sort()).toEqual(["/s1", "/s2"]);
+  });
+
+  test("workers from one spawner fold into one origin stack, regardless of worktree", () => {
+    const a = stale({ path: "/a", kind: "subagent", parent: "/originX", worktree: "wt1" });
+    const b = stale({ path: "/b", kind: "subagent", parent: "/originX", worktree: "wt2" });
+    const stacks = groupWorkerStacks([a, b], [], new Set(), { originOf: () => "/originX" });
+    expect(stacks).toHaveLength(1);
+    expect(stacks[0]!.kind).toBe("origin");
+    expect(stacks[0]!.id).toBe("/originX");
+    expect(stacks[0]!.items).toHaveLength(2);
+  });
+
+  test("a pipeline stage and its spawned child fold into ONE pipeline stack, not a second origin stack (#136)", () => {
+    /* The stage is owned by agentPath; its child has a different path. Ancestor
+       resolution keeps both in the same pipeline stack. */
+    const stage = stale({ path: "/stage", parent: "/orch" });
+    const child = stale({ path: "/stage/child", parent: "/stage", kind: "subagent" });
+    const filesByPath = new Map([[stage.path, stage], [child.path, child]]);
+    const pipelineIds = new Map([["/stage", "pipe1"]]);
+    const stacks = groupWorkerStacks([stage, child], [], new Set(), {
+      pipelineIdOf: (path) => {
+        const file = filesByPath.get(path);
+        return file ? pipelineOriginOf(file, filesByPath, pipelineIds) : null;
+      },
+      /* Without the pipeline resolver both would fall here — proving the split. */
+      originOf: () => "/orch",
+    });
+    expect(stacks).toHaveLength(1);
+    expect(stacks[0]!.kind).toBe("pipeline");
+    expect(stacks[0]!.id).toBe("pipe1");
+    expect(stacks[0]!.items.map((f) => f.path).sort()).toEqual(["/stage", "/stage/child"]);
+  });
+
+  test("an embedded review-loop pipeline folds architect + builder + reviewer into ONE pipeline stack (#136)", () => {
+    /* architect run stage, plus a review-loop stage whose flow's implementer
+       (builder) and reviewer are pipeline-owned — all one pipeline, one stack,
+       never split into a pipeline stack + a flow stack. */
+    const architect = stale({ path: "/architect", parent: "/orch" });
+    const builder = stale({ path: "/builder", parent: "/orch" });
+    const reviewer = stale({ path: "/reviewer", parent: "/builder" });
+    const flows = [flow({ id: "flow1", implementerPath: "/builder", rounds: [round({ reviewerPath: "/reviewer", verdict: "APPROVE" })] })];
+    const pipelines = [
+      {
+        id: "pipe1", runs: [
+          { stageId: "arch", attempts: [{ agentPath: "/architect", flowId: null }] },
+          { stageId: "review", attempts: [{ agentPath: "/reviewer", flowId: "flow1" }] },
+        ],
+      } as unknown as Pipeline,
+    ];
+    const ownership = pipelineStagePipelineIds(pipelines, flows);
+    const filesByPath = new Map([[architect.path, architect], [builder.path, builder], [reviewer.path, reviewer]]);
+    const stacks = groupWorkerStacks([architect, builder, reviewer], flows, new Set(), {
+      pipelineIdOf: (path) => {
+        const file = filesByPath.get(path);
+        return file ? pipelineOriginOf(file, filesByPath, ownership) : null;
+      },
+      originOf: () => "/orch",
+    });
+    expect(stacks).toHaveLength(1);
+    expect(stacks[0]!.kind).toBe("pipeline");
+    expect(stacks[0]!.id).toBe("pipe1");
+    expect(stacks[0]!.items).toHaveLength(3);
+  });
+
+  test("origin precedence: flow → pipeline → spawner → worktree", () => {
+    const flowWorker = stale({ path: "/rev" });
+    const pipeWorker = stale({ path: "/pw", parent: "/root" });
+    const spawnWorker = stale({ path: "/sw", kind: "subagent", parent: "/origin" });
+    const bareWorker = stale({ path: "/bw", kind: "subagent", parent: "/root", worktree: "wt" });
+    const flows = [flow({ id: "f1", implementerPath: "/impl", rounds: [round({ reviewerPath: "/rev", verdict: "APPROVE" })] })];
+    const stacks = groupWorkerStacks([bareWorker, spawnWorker, pipeWorker, flowWorker], flows, new Set(), {
+      pipelineIdOf: (p) => (p === "/pw" ? "pipe1" : null),
+      originOf: (file) => (file.path === "/sw" ? "/origin" : null),
+    });
+    expect(stacks.map((s) => s.kind)).toEqual(["flow", "pipeline", "origin", "worktree"]);
   });
 });
 

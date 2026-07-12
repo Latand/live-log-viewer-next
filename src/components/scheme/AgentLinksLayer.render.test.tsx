@@ -37,3 +37,24 @@ test("without the hub override a passive layer leaves the hub untappable", () =>
   /* Default hubInteractive = interactive, so the old behavior (passive) holds. */
   expect(render(false)).toContain("pointer-events-none");
 });
+
+test("a pipeline rail routes around an unrelated card between two stages (#136 finding 2)", () => {
+  const from: SchemeRect = { x: 0, y: 0, w: 600, h: 680 };
+  const to: SchemeRect = { x: 2000, y: 0, w: 600, h: 680 };
+  /* An unrelated card straddling the straight rail (which runs at y≈354). */
+  const mid: SchemeRect = { x: 1000, y: 0, w: 600, h: 680 };
+  const bp = new Map<string, SchemeRect>([["/a", from], ["/b", to]]);
+  const STRAIGHT = 'd="M 600 354 L 2000 354"';
+
+  /* With nothing in the way the rail is the direct segment. */
+  const clear = renderToStaticMarkup(
+    <AgentLinksLayer links={[hubLink]} byPath={bp} obstacles={[from, to]} interactive width={2600} height={680} />,
+  );
+  expect(clear).toContain(STRAIGHT);
+
+  /* With the card between the stages the rail is rerouted — no longer straight. */
+  const routed = renderToStaticMarkup(
+    <AgentLinksLayer links={[hubLink]} byPath={bp} obstacles={[from, mid, to]} interactive width={2600} height={680} />,
+  );
+  expect(routed).not.toContain(STRAIGHT);
+});

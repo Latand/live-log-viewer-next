@@ -14,6 +14,17 @@ export function isWorkflowDraftId(id: string): boolean {
   return id.startsWith(WORKFLOW_DRAFT_PREFIX);
 }
 
+/**
+ * Drop legacy workflow-draft ids (issue #136): the +Workflow surface is fenced,
+ * but a `wf-*` draft persisted in a tab's sessionStorage survives a deploy reload
+ * and would otherwise re-instantiate WorkflowDraftPane (and let the operator POST
+ * a new legacy workflow). Filtering them on restore is the inert dismissal — the
+ * removed surface can never relaunch from saved tab state.
+ */
+export function dropLegacyWorkflowDrafts(ids: readonly string[]): string[] {
+  return ids.filter((id) => !isWorkflowDraftId(id));
+}
+
 /** Workflows a project's dashboard shows. The server stamps each workflow
     with the scanner's own project key for its repoDir, so the strip appears
     in the right group from the provisioning moment on, before any transcript

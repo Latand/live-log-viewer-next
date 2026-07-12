@@ -5,6 +5,7 @@ import { useMemo, useState } from "react";
 import { ChevronRight, Layers } from "@/components/icons";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import type { Flow } from "@/lib/flows/types";
+import type { Pipeline } from "@/lib/pipelines/types";
 import { useLocale } from "@/lib/i18n";
 import { cleanTitle } from "@/lib/title";
 import type { FileEntry } from "@/lib/types";
@@ -92,25 +93,36 @@ export function WorkerStacks({
   stacks,
   files,
   flows,
+  pipelines = [],
   onSelect,
 }: {
   stacks: WorkerStack[];
   files: FileEntry[];
   flows: Flow[];
+  /** Pipelines, for naming a per-pipeline origin stack by its task (issue #136). */
+  pipelines?: Pipeline[];
   onSelect: (file: FileEntry) => void;
 }) {
   const { t } = useLocale();
   const isMobile = useIsMobile();
   const [open, setOpen] = useState(false);
   const total = useMemo(() => stacks.reduce((sum, stack) => sum + stack.items.length, 0), [stacks]);
-  const titleByImplementer = useMemo(() => new Map(files.map((file) => [file.path, file.title] as const)), [files]);
+  const titleByPath = useMemo(() => new Map(files.map((file) => [file.path, file.title] as const)), [files]);
   if (!stacks.length) return null;
 
   const labelFor = (stack: WorkerStack): string => {
     if (stack.kind === "flow") {
       const flow = flows.find((candidate) => candidate.id === stack.id);
-      const implTitle = flow ? titleByImplementer.get(flow.implementerPath) : undefined;
+      const implTitle = flow ? titleByPath.get(flow.implementerPath) : undefined;
       return cleanTitle(implTitle ?? t("workerStack.flow"), 60);
+    }
+    if (stack.kind === "pipeline") {
+      const pipeline = pipelines.find((candidate) => candidate.id === stack.id);
+      return cleanTitle(pipeline?.task ?? t("workerStack.pipeline"), 60);
+    }
+    if (stack.kind === "origin") {
+      /* A spawner group: the root-ancestor conversation's own title names it. */
+      return cleanTitle(titleByPath.get(stack.id) ?? t("workerStack.origin"), 60);
     }
     return stack.id ? cleanTitle(stack.id, 60) : t("workerStack.worktree");
   };
