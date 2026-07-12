@@ -99,6 +99,11 @@ export type Round = {
   findingsCount: number | null;
   startedAt: string;
   spawnStartedAt?: string | null; // reviewer launch started
+  /** Durable ownership of the pre-handle launch window. Concurrent Viewer
+      processes wait for this lease; the launcher uses the id to adopt a handle
+      after an older process records a synthetic tracking-loss decision. */
+  launchId?: string | null;
+  launchLeaseUntil?: string | null;
   relayStartedAt?: string | null; // findings delivery started
   /** Exact transcript generation that received Viewer-generated findings. */
   relayDelivery?: ViewerFlowDelivery | null;

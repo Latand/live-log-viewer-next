@@ -90,9 +90,13 @@ export function readFindingsFile(round: Round): ParsedFindings | null {
   }
 }
 
-export function fallbackReviewFromTranscript(round: Round, entriesByPath: Map<string, FileEntry>): ParsedFindings | null {
+export function fallbackReviewFromTranscript(
+  round: Round,
+  entriesByPath: Map<string, FileEntry>,
+  engine: FlowEngine | null = round.reviewerRole?.engine ?? null,
+): ParsedFindings | null {
   if (!round.reviewerPath) return null;
-  const entry = entriesByPath.get(round.reviewerPath) ?? transcriptEntryFromPath(round.reviewerPath, round.reviewerRole?.engine ?? null);
+  const entry = entriesByPath.get(round.reviewerPath) ?? transcriptEntryFromPath(round.reviewerPath, engine);
   if (!entry) return null;
   const message = lastAssistantMessage(entry);
   if (!message) return null;

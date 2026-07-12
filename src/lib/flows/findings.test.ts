@@ -102,3 +102,27 @@ test("recovers a managed Claude verdict from the frozen reviewer engine when sca
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("recovers a legacy managed Claude verdict from the engine resolved by its flow", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "llv-legacy-managed-claude-review-"));
+  const transcriptPath = path.join(root, "accounts", "claude", "legacy", "projects", "-repo", "review.jsonl");
+  fs.mkdirSync(path.dirname(transcriptPath), { recursive: true });
+  fs.writeFileSync(transcriptPath, JSON.stringify({
+    type: "assistant",
+    timestamp: "2026-07-12T10:50:00.000Z",
+    message: { content: [{ type: "text", text: "VERDICT: APPROVE\n\nLegacy managed Claude review completed." }] },
+  }) + "\n");
+  const round = fixtureRound();
+  round.reviewerPath = transcriptPath;
+  round.reviewerRole = null;
+  round.accountId = "legacy";
+
+  try {
+    expect(fallbackReviewFromTranscript(round, new Map(), "claude")).toMatchObject({
+      verdict: "APPROVE",
+      findingsCount: 0,
+    });
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -33,6 +34,13 @@ const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
 const store = globalThis as unknown as { __llvFlowTick?: boolean };
 const relayStartedThisProcess = new Set<string>();
 const MAX_HEADLESS_NO_VERDICT_RETRIES = 1;
+const REVIEWER_LAUNCH_LEASE_MS = 60_000;
+const SYNTHETIC_LAUNCH_LOSS_DETAILS = new Set([
+  "reviewer tracking was lost before a verdict could be recovered",
+  "reviewer launch tracking is unavailable",
+  "reviewer process is missing after server restart",
+  "reviewer spawn was interrupted by a restart",
+]);
 
 class ReviewerAccountsExhaustedError extends Error {
   constructor(readonly resetsAt: number | null) {
@@ -121,6 +129,8 @@ export function newRound(flow: Flow, triggeredBy: Round["triggeredBy"], readyNot
     findingsCount: null,
     startedAt: isoNow(),
     spawnStartedAt: null,
+    launchId: null,
+    launchLeaseUntil: null,
     relayStartedAt: null,
     relayDelivery: null,
     reviewedAt: null,
@@ -240,6 +250,52 @@ export function reviewerLaunchPersisted(diskFlow: Flow | undefined, round: Round
   return diskFlow.state !== "closed";
 }
 
+function launchLeaseActive(round: Round, now = Date.now()): boolean {
+  const until = Date.parse(round.launchLeaseUntil ?? "");
+  return Boolean(round.launchId && Number.isFinite(until) && until > now);
+}
+
+function launchHasHandle(round: Round): boolean {
+  return Boolean(round.reviewerPane || round.reviewerPid != null || round.reviewerPath || round.sessionId);
+}
+
+/** Reclaims a reviewer handle when an overlapping older Viewer tick parked the
+    exact leased launch during its pre-handle checkpoint. Operator lifecycle
+    actions and different launch ids remain authoritative. */
+export function adoptSyntheticLaunchTakeover(flowId: string, launchedRound: Round): boolean {
+  if (!launchedRound.launchId || !launchHasHandle(launchedRound)) return false;
+  const flows = loadFlows();
+  const diskFlow = flows.find((item) => item.id === flowId);
+  const diskRound = diskFlow?.rounds.find((item) => item.n === launchedRound.n);
+  if (
+    !diskFlow ||
+    !diskRound ||
+    diskFlow.state !== "needs_decision" ||
+    !SYNTHETIC_LAUNCH_LOSS_DETAILS.has(diskFlow.stateDetail ?? "") ||
+    diskRound.launchId !== launchedRound.launchId
+  ) return false;
+
+  Object.assign(diskRound, {
+    reviewerPath: launchedRound.reviewerPath,
+    reviewerConversationId: launchedRound.reviewerConversationId ?? null,
+    reviewerRole: launchedRound.reviewerRole ?? null,
+    accountId: launchedRound.accountId ?? null,
+    attemptedAccounts: [...(launchedRound.attemptedAccounts ?? [])],
+    sessionId: launchedRound.sessionId ?? null,
+    reviewerPid: launchedRound.reviewerPid ?? null,
+    reviewerIdentity: launchedRound.reviewerIdentity ?? null,
+    reviewerPane: launchedRound.reviewerPane ?? null,
+    reviewHeadSha: launchedRound.reviewHeadSha ?? null,
+    spawnStartedAt: launchedRound.spawnStartedAt ?? null,
+    launchLeaseUntil: null,
+    error: launchedRound.error,
+  });
+  diskFlow.state = "reviewing";
+  diskFlow.stateDetail = null;
+  saveFlows(flows);
+  return true;
+}
+
 /**
  * Clear the abandoned launch's spawn markers on disk so a resume/retry re-spawns
  * a fresh reviewer instead of parking as "interrupted" (issue #118 review): a
@@ -257,6 +313,8 @@ export function abandonLaunch(flowId: string, roundNumber: number): void {
   round.reviewerPath = null;
   round.reviewerPid = null;
   round.sessionId = null;
+  round.launchId = null;
+  round.launchLeaseUntil = null;
   saveFlows(flows);
 }
 
@@ -338,6 +396,7 @@ async function launchReviewer(flow: Flow, round: Round, prepared: PreparedReview
     });
     if (transcript) round.reviewerPath = transcript;
     if (!round.reviewerPath && pane.panePid) round.error = null;
+    round.launchLeaseUntil = null;
     /* Persist the pane handle NOW so a close that races the tail of this spawn can
        find and stop it. If a concurrent close/pause/retry took the flow over, the
        merge dropped our handle — the pane is an orphan, so kill it, and let a
@@ -345,6 +404,7 @@ async function launchReviewer(flow: Flow, round: Round, prepared: PreparedReview
     persistCheckpoint();
     const paneDisk = loadFlows().find((item) => item.id === flow.id);
     if (!reviewerLaunchPersisted(paneDisk, round)) {
+      if (adoptSyntheticLaunchTakeover(flow.id, round)) return;
       await stopOrphanPane(round);
       if (paneDisk && paneDisk.state !== "closed") abandonLaunch(flow.id, round.n);
     }
@@ -366,6 +426,7 @@ async function launchReviewer(flow: Flow, round: Round, prepared: PreparedReview
   }
   if (launched.sessionId) round.sessionId = launched.sessionId;
   if (launched.reviewerPath) round.reviewerPath = launched.reviewerPath;
+  round.launchLeaseUntil = null;
   /* Same ownership guard as the pane branch: persist the pid, and if a concurrent
      close/pause/retry took the flow over, terminate the orphan (forgetHeadlessReview
      SIGTERM/SIGKILLs the detached group) and clear the abandoned spawn markers so
@@ -373,6 +434,7 @@ async function launchReviewer(flow: Flow, round: Round, prepared: PreparedReview
   persistCheckpoint();
   const headlessDisk = loadFlows().find((item) => item.id === flow.id);
   if (!reviewerLaunchPersisted(headlessDisk, round)) {
+    if (adoptSyntheticLaunchTakeover(flow.id, round)) return;
     forgetHeadlessReview(flow.id, round.n, round);
     if (headlessDisk && headlessDisk.state !== "closed") abandonLaunch(flow.id, round.n);
   }
@@ -397,6 +459,8 @@ function retryHeadlessRound(flow: Flow, round: Round): void {
     autoRetryCount: (round.autoRetryCount ?? 0) + 1,
     startedAt: isoNow(),
     spawnStartedAt: null,
+    launchId: null,
+    launchLeaseUntil: null,
     relayStartedAt: null,
     reviewedAt: null,
     relayedAt: null,
@@ -481,6 +545,16 @@ async function tickFlow(
     const status = flow.reviewerMode === "headless"
       ? headlessReviewStatus(flow.id, round.n, round, reviewerRoleFor(flow, round).engine)
       : null;
+    const preHandleLaunch = Boolean(
+      round.spawnStartedAt &&
+      !round.reviewerPane &&
+      round.reviewerPid == null &&
+      !round.reviewerPath &&
+      !round.sessionId,
+    );
+    if (preHandleLaunch && launchLeaseActive(round) && (flow.reviewerMode === "pane" || status?.status === "lost")) {
+      return JSON.stringify(flow) !== before;
+    }
     /* A restart can land here with the round already launched (state was
        persisted before launchReviewer finished). The detached reviewer is
        still out there — adopt it instead of spawning a duplicate. */
@@ -500,6 +574,8 @@ async function tickFlow(
     try {
       const prepared = prepareReviewerLaunch(flow, round);
       round.spawnStartedAt = isoNow();
+      round.launchId = crypto.randomUUID();
+      round.launchLeaseUntil = new Date(Date.now() + REVIEWER_LAUNCH_LEASE_MS).toISOString();
       persistCheckpoint();
       /* launchReviewer persists again after spawning (for the ownership/orphan
          check), so no extra checkpoint is needed here. */
@@ -536,7 +612,7 @@ async function tickFlow(
       if (!round.reviewerPath && !round.sessionId) maybeClaimReviewerPathByHeuristic(flow, entries, round);
       if (status?.status === "running") return JSON.stringify(flow) !== before;
       if (status?.status === "lost") {
-        const fallback = fallbackReviewFromTranscript(round, entriesByPath);
+        const fallback = fallbackReviewFromTranscript(round, entriesByPath, reviewerRoleFor(flow, round).engine);
         if (fallback) applyVerdict(flow, round, fallback);
         else markNeedsDecision(flow, "reviewer tracking was lost before a verdict could be recovered");
         return JSON.stringify(flow) !== before;
@@ -546,7 +622,7 @@ async function tickFlow(
         /* The last-message artifact can lag or contain only an interim Codex
            message. The persisted rollout is authoritative once it carries a
            verdict, and consulting it before retry prevents duplicate reviewers. */
-        const parsed = parseFindings(status.finalOutput) ?? fallbackReviewFromTranscript(round, entriesByPath);
+        const parsed = parseFindings(status.finalOutput) ?? fallbackReviewFromTranscript(round, entriesByPath, reviewerRoleFor(flow, round).engine);
         if (parsed) {
           applyVerdict(flow, round, parsed);
         } else if ((round.autoRetryCount ?? 0) < MAX_HEADLESS_NO_VERDICT_RETRIES) {
@@ -559,7 +635,7 @@ async function tickFlow(
         }
         return JSON.stringify(flow) !== before;
       }
-      const fallback = fallbackReviewFromTranscript(round, entriesByPath);
+      const fallback = fallbackReviewFromTranscript(round, entriesByPath, reviewerRoleFor(flow, round).engine);
       if (fallback) {
         applyVerdict(flow, round, fallback);
       } else {
@@ -570,7 +646,7 @@ async function tickFlow(
     maybeClaimReviewerPathByHeuristic(flow, entries, round);
     if (round.reviewerPath) {
       const reviewer = entriesByPath.get(round.reviewerPath);
-      const fallback = fallbackReviewFromTranscript(round, entriesByPath);
+      const fallback = fallbackReviewFromTranscript(round, entriesByPath, reviewerRoleFor(flow, round).engine);
       if (fallback) {
         applyVerdict(flow, round, fallback);
       } else if (reviewer && reviewer.activity !== "live" && reviewer.activity !== "stalled") {

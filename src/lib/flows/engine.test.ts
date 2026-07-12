@@ -9,7 +9,7 @@ import type { FileEntry } from "@/lib/types";
 import type { Flow } from "./types";
 
 process.env.LLV_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "llv-flow-engine-test-"));
-const { captureReviewHead, newRound, tickFlows, persistTickFlows, flowTickBase, reviewerLaunchPersisted, abandonLaunch, relayFixOrPark } = await import("./engine");
+const { captureReviewHead, newRound, tickFlows, persistTickFlows, flowTickBase, reviewerLaunchPersisted, abandonLaunch, adoptSyntheticLaunchTakeover, relayFixOrPark } = await import("./engine");
 const { loadFlows, outputPathFor, saveFlows, stderrPathFor, stdoutPathFor } = await import("./store");
 
 afterAll(() => {
@@ -420,6 +420,88 @@ test("pane restart during the pre-handle checkpoint parks before launching anoth
     state: "needs_decision",
     stateDetail: "reviewer launch tracking is unavailable",
     rounds: [{ reviewerPane: null, reviewerPid: null, reviewerPath: null }],
+  });
+});
+
+test("overlapping ticks preserve an active pre-handle launch and adopt its reviewer after a synthetic takeover", async () => {
+  const startedAt = new Date().toISOString();
+  const leaseUntil = new Date(Date.now() + 60_000).toISOString();
+  const cwd = "/repo";
+  const implementer = writeCodexEntry("overlap-launch-implementer.jsonl", { id: "019f421e-02e1-73e0-9b77-bebde063f123", cwd }, Date.now() / 1_000);
+  const flow: Flow = {
+    id: "flow-overlap-launch",
+    template: "implement-review-loop",
+    project: "repo",
+    cwd,
+    implementerPath: implementer.path,
+    roles: {
+      implementer: { engine: "codex", model: null, effort: "high" },
+      reviewer: { engine: "codex", model: null, effort: "xhigh" },
+    },
+    reviewerFallback: null,
+    baseRef: "base",
+    baseMode: "head",
+    mode: "auto",
+    reviewerMode: "pane",
+    roundLimit: 5,
+    state: "spawning",
+    pausedState: null,
+    stateDetail: null,
+    rounds: [{
+      n: 1,
+      reviewerPath: null,
+      reviewerRole: { engine: "codex", model: null, effort: "xhigh" },
+      accountId: "default",
+      attemptedAccounts: [],
+      autoRetryCount: 0,
+      sessionId: null,
+      reviewerPid: null,
+      reviewerIdentity: null,
+      reviewerPane: null,
+      findingsPath: null,
+      triggeredBy: "marker",
+      readyNote: null,
+      reviewHeadSha: null,
+      verdict: null,
+      findingsCount: null,
+      startedAt,
+      spawnStartedAt: startedAt,
+      launchId: "launch-overlap",
+      launchLeaseUntil: leaseUntil,
+      relayStartedAt: null,
+      relayDelivery: null,
+      reviewedAt: null,
+      terminalAt: null,
+      relayedAt: null,
+      error: null,
+    }],
+    createdAt: startedAt,
+    closedAt: null,
+  };
+  saveFlows([flow]);
+
+  await tickFlows([implementer]);
+  expect(loadFlows()[0]).toMatchObject({
+    state: "spawning",
+    stateDetail: null,
+    rounds: [{ launchId: "launch-overlap", reviewerPane: null }],
+  });
+
+  const staleTakeover = loadFlows()[0]!;
+  staleTakeover.state = "needs_decision";
+  staleTakeover.stateDetail = "reviewer tracking was lost before a verdict could be recovered";
+  saveFlows([staleTakeover]);
+  const launchedRound = {
+    ...flow.rounds[0]!,
+    reviewerPane: { paneId: "%77", windowName: "codex-review" },
+    launchLeaseUntil: null,
+  };
+
+  expect(adoptSyntheticLaunchTakeover(flow.id, launchedRound)).toBeTrue();
+  expect(loadFlows()[0]).toMatchObject({
+    state: "reviewing",
+    stateDetail: null,
+    rounds: [{ launchId: "launch-overlap", launchLeaseUntil: null, reviewerPane: { paneId: "%77" } }],
   });
 });
 
