@@ -5,10 +5,9 @@ import { useRef } from "react";
 import { TASK_TONES } from "@/components/tasks/taskModel";
 import { engineColor } from "@/components/utils";
 import { useLocale } from "@/lib/i18n";
-import type { BoardTask } from "@/lib/tasks/types";
 
 import type { SchemeLayout } from "./layout";
-import { TASK_W, taskCardHeight } from "./taskGeometry";
+import { TASK_W, taskCardHeight, type PlacedTask } from "./taskGeometry";
 
 export interface Camera {
   x: number;
@@ -32,7 +31,7 @@ export function Minimap({
 }: {
   layout: SchemeLayout;
   /** Tasks render as 3 px status-colored dots; their edges never show here. */
-  tasks?: BoardTask[];
+  tasks?: PlacedTask[];
   cam: Camera;
   vp: { w: number; h: number };
   onJump: (wx: number, wy: number) => void;

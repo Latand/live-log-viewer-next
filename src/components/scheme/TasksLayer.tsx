@@ -9,12 +9,13 @@ import type { FileEntry } from "@/lib/types";
 import { TASK_TONES, taskTitle } from "@/components/tasks/taskModel";
 
 import type { Camera } from "./Minimap";
-import { NewTaskCard, TaskCard, type TaskCardHandlers } from "./TaskCard";
-import { TASK_W, taskCardHeight } from "./taskGeometry";
+import { TaskCard, type TaskCardHandlers } from "./TaskCard";
+import { TaskStickyComposer } from "./TaskStickyComposer";
+import { TASK_W, taskCardHeight, type PlacedTask } from "./taskGeometry";
 
 /** Static tinted mini-card for the phone's full-screen map: a tap resolves
     through the camera's geometry pick, so the card itself stays inert. */
-function LiteTaskCard({ task }: { task: BoardTask }) {
+function LiteTaskCard({ task }: { task: PlacedTask }) {
   const { t } = useLocale();
   const tone = TASK_TONES[task.status];
   return (
@@ -46,24 +47,27 @@ function LiteTaskCard({ task }: { task: BoardTask }) {
 export const TasksLayer = memo(function TasksLayer({
   tasks,
   files,
+  project,
   interactive,
   lite,
   camRef,
   handlers,
   pending,
-  onCreate,
+  onStickyCreated,
   onCreateCancel,
 }: {
-  tasks: BoardTask[];
+  tasks: PlacedTask[];
   files: FileEntry[];
+  project: string;
   interactive: boolean;
   /** Map mode: static tinted mini-cards, taps resolve by geometry. */
   lite: boolean;
   camRef: React.RefObject<Camera>;
   handlers: TaskCardHandlers;
-  /** World point where the «task» tool dropped a not-yet-saved card. */
+  /** World point where the «task» tool / double-click / `+ Task` dropped a
+      not-yet-saved sticky composer. */
   pending: { x: number; y: number } | null;
-  onCreate: (text: string) => void;
+  onStickyCreated: (task: BoardTask) => void;
   onCreateCancel: () => void;
 }) {
   return (
@@ -75,7 +79,9 @@ export const TasksLayer = memo(function TasksLayer({
           <TaskCard key={task.id} task={task} files={files} camRef={camRef} handlers={handlers} />
         ),
       )}
-      {pending && !lite ? <NewTaskCard pos={pending} onCommit={onCreate} onCancel={onCreateCancel} /> : null}
+      {pending && !lite ? (
+        <TaskStickyComposer project={project} pos={pending} onCreated={onStickyCreated} onCancel={onCreateCancel} />
+      ) : null}
     </div>
   );
 });

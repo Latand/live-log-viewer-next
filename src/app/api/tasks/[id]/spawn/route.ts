@@ -10,6 +10,7 @@ import { reasoningFromBody } from "@/lib/agent/efforts";
 import { modelFromBody } from "@/lib/agent/models";
 import { resolveSpawnedTranscriptPath } from "@/lib/agent/spawnedTranscript";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
+import { attachmentPath } from "@/lib/tasks/attachments";
 import { applyAssignmentPatches, pinnedAccountId, type AssignmentPatch } from "@/lib/tasks/commands";
 import { isoNow } from "@/lib/tasks/helpers";
 import { loadTasks, mutateTasks } from "@/lib/tasks/store";
@@ -76,7 +77,11 @@ export async function POST(req: NextRequest, ctx: TaskRouteContext): Promise<Nex
     const account = accountManager.resolveSpawn(engine, previous);
     const spec = freshSpecFor(engine, cwdResult.cwd, { model: selectedModel.model, effort: reasoning.effort, fast: reasoning.fast, codexHome: engine === "codex" ? account.home : null, claudeConfigDir: engine === "claude" ? account.home : null, claudeProjectsDir: engine === "claude" ? account.transcriptRoot : null });
     const startedAtMs = Date.now();
-    const pane = await spawnAgentWithPrompt(spec, task.text);
+    /* The brief carries the task's durable attachment paths (one per line), so
+       a spawned agent receives the images the same way a send does. */
+    const attachmentPaths = (task.attachments ?? []).map((att) => attachmentPath(att));
+    const prompt = [task.text, ...attachmentPaths].join("\n");
+    const pane = await spawnAgentWithPrompt(spec, prompt);
     const transcript = await resolveSpawnedTranscriptPath({
       engine,
       knownTranscript: spec.transcript ?? null,
