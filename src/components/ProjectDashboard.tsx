@@ -191,6 +191,12 @@ export function ProjectDashboard({
   );
   const taskPanelOpen = board.prefs.taskPanelOpen;
   const [drafts, setDrafts] = useState<string[]>([]);
+  /* `+ Task`: opens the panel and arms its inline composer (bump = open). */
+  const [composeNonce, setComposeNonce] = useState(0);
+  /* Mobile `+ Task`: bump opens the TaskSheet's create view. */
+  const [taskSheetNonce, setTaskSheetNonce] = useState(0);
+  /* Place-on-map: the unplaced task whose next board click pins it. */
+  const [placeTask, setPlaceTask] = useState<BoardTask | null>(null);
   const [pipelineDialogOpen, setPipelineDialogOpen] = useState(false);
   const [highlight, setHighlight] = useState<string | null>(null);
   /* Jump targets the scheme would otherwise skip (a stalled root builds no
@@ -353,6 +359,25 @@ export function ProjectDashboard({
       return;
     }
     flashNode("task::" + task.id);
+  };
+
+  /* Desktop `+ Task`: open the task panel and start a new (unplaced) task in
+     its inline composer — voice, images and a deadline all live there. */
+  const addTask = () => {
+    onUserNavigate?.();
+    board.setTaskPanelOpen(true);
+    setComposeNonce((n) => n + 1);
+  };
+  /* Mobile `+ Task`: open the full-screen sheet's create view. */
+  const addTaskMobile = () => {
+    onUserNavigate?.();
+    setTaskSheetNonce((n) => n + 1);
+  };
+  /* `place on map`: close the panel focus into board placement mode; the next
+     canvas click pins the card exactly where clicked (identity unchanged). */
+  const placeOnMap = (task: BoardTask) => {
+    board.setTaskPanelOpen(false);
+    setPlaceTask(task);
   };
 
   const persistDrafts = (next: string[]) => {
@@ -657,6 +682,14 @@ export function ProjectDashboard({
             >
               <span className="text-[13px] leading-none text-accent">+</span> {t("dash.agent")}
             </button>
+            <button
+              type="button"
+              onClick={addTaskMobile}
+              aria-label={t("dash.newTask")}
+              className="flex shrink-0 items-center gap-1 rounded-[8px] border border-line bg-panel px-2.5 py-1 text-[11.5px] font-bold text-ink shadow-card hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            >
+              <span className="text-[13px] leading-none text-accent">+</span> {t("dash.task")}
+            </button>
           </>
         ) : (
           <button
@@ -753,6 +786,7 @@ export function ProjectDashboard({
               onDraftClose={removeDraft}
               onDraftSpawned={draftSpawned}
               onHandoff={addHandoffDraft}
+              taskSheetNonce={taskSheetNonce}
             />
           ) : listAvailable ? (
             <QuietFileList files={historyRows} activeRootPaths={quietActiveRoots} onOpen={openSwitchboardFile} />
@@ -789,6 +823,8 @@ export function ProjectDashboard({
                 onDraftSpawned={draftSpawned}
                 onHandoff={addHandoffDraft}
                 onTaskDraft={openTaskDraft}
+                placeTaskId={placeTask?.id ?? null}
+                onTaskPlaced={() => setPlaceTask(null)}
               />
             ) : listAvailable ? (
               <QuietFileList files={historyRows} activeRootPaths={quietActiveRoots} onOpen={openSwitchboardFile} />
@@ -814,6 +850,14 @@ export function ProjectDashboard({
               </button>
               <button
                 type="button"
+                onClick={addTask}
+                aria-label={t("dash.newTask")}
+                className="pointer-events-auto flex shrink-0 items-center gap-1 rounded-[8px] border border-line bg-panel px-3 py-1.5 text-[11.5px] font-bold text-ink shadow-card hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+              >
+                <span className="text-[13px] leading-none text-accent">+</span> {t("dash.task")}
+              </button>
+              <button
+                type="button"
                 onClick={() => setPipelineDialogOpen(true)}
                 aria-label={t("board.newPipeline")}
                 className="pointer-events-auto flex shrink-0 items-center gap-1 rounded-[8px] border border-line bg-panel px-3 py-1.5 text-[11.5px] font-bold text-ink shadow-card hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
@@ -822,7 +866,9 @@ export function ProjectDashboard({
               </button>
             </div>
           </div>
-          {taskPanelOpen ? <TaskPanel tasks={tasks} project={project} onOpenTask={openTask} onClose={toggleTaskPanel} /> : null}
+          {taskPanelOpen ? (
+            <TaskPanel tasks={tasks} project={project} composeNonce={composeNonce} onOpenTask={openTask} onPlaceOnMap={placeOnMap} onClose={toggleTaskPanel} />
+          ) : null}
         </div>
       )}
 

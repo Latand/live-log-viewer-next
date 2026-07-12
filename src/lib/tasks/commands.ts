@@ -1,26 +1,58 @@
 import crypto from "node:crypto";
 
+import { isTaskAttachment } from "./attachments";
 import { isoNow } from "./helpers";
-import type { BoardTask, TaskAssignment, TaskSource, TaskStatus } from "./types";
+import type { BoardTask, TaskAttachment, TaskAssignment, TaskSource, TaskStatus } from "./types";
 
 export const TASK_TEXT_LIMIT = 6000;
 export const TASKS_PER_PROJECT_LIMIT = 300;
+/** How many recent create receipts are kept for `clientRequestId` replay. Sized
+    to the double-tap / retry-after-timeout window; a replay older than the cap
+    can mint a twin (documented, durability beyond the cap is deferred). */
+export const RECENT_CREATES_CAP = 100;
 
 export type TaskCommandResult =
   | { ok: true; tasks: BoardTask[]; task: BoardTask }
   | { ok: false; error: string; status: number };
 
+/** A `clientRequestId → taskId` receipt, persisted in `tasks.json` so a replay
+    survives a server restart. Oldest entries evict past {@link RECENT_CREATES_CAP}. */
+export interface RecentCreate {
+  clientRequestId: string;
+  taskId: string;
+}
+
+export type CreateTaskResult =
+  | { ok: true; tasks: BoardTask[]; task: BoardTask; recentCreates: RecentCreate[]; replay: boolean }
+  | { ok: false; error: string; status: number };
+
 export interface CreateTaskInput {
   project?: unknown;
   text?: unknown;
+  placement?: unknown;
   pos?: unknown;
+  dueAt?: unknown;
+  dueTz?: unknown;
+  attachments?: unknown;
+  clientRequestId?: unknown;
   source?: unknown;
 }
 
 export interface PatchTaskInput {
   text?: unknown;
   status?: unknown;
+  placement?: unknown;
   pos?: unknown;
+  dueAt?: unknown;
+  dueTz?: unknown;
+}
+
+/** Injected so the pure command can ask the store whether an attachment ref's
+    bytes actually exist; defaults to "trust the ref" for unit tests. */
+export interface TaskCommandDeps {
+  now?: () => string;
+  id?: () => string;
+  attachmentExists?: (att: TaskAttachment) => boolean;
 }
 
 export type SpawnEngine = "claude" | "codex";
@@ -37,9 +69,9 @@ function normalizeProject(value: unknown): string | null {
   return project ? project : null;
 }
 
-function normalizePos(value: unknown): BoardTask["pos"] | null {
+function normalizePos(value: unknown): { x: number; y: number } | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  const pos = value as Partial<BoardTask["pos"]>;
+  const pos = value as { x?: unknown; y?: unknown };
   if (typeof pos.x !== "number" || !Number.isFinite(pos.x)) return null;
   if (typeof pos.y !== "number" || !Number.isFinite(pos.y)) return null;
   return { x: pos.x, y: pos.y };
@@ -47,6 +79,52 @@ function normalizePos(value: unknown): BoardTask["pos"] | null {
 
 function normalizeStatus(value: unknown): TaskStatus | null {
   return value === "inbox" || value === "assigned" || value === "blocked" || value === "done" ? value : null;
+}
+
+/** Client-writable placement values; `auto` is server-reserved (#17). */
+function normalizePlacement(value: unknown): "pinned" | "unplaced" | null {
+  return value === "pinned" || value === "unplaced" ? value : null;
+}
+
+/** True when the IANA zone is one `Intl` accepts without throwing. */
+function isValidTimeZone(tz: string): boolean {
+  try {
+    new Intl.DateTimeFormat(undefined, { timeZone: tz });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+type DueResult = { ok: true; dueAt?: string; dueTz?: string } | { ok: false; error: string };
+
+/** `dueAt`/`dueTz` are both-or-neither. `dueAt` must round-trip `Date.parse`
+    and `dueTz` must be a real IANA zone. Returns the canonical UTC instant. */
+function normalizeDue(dueAt: unknown, dueTz: unknown): DueResult {
+  const hasAt = dueAt !== undefined && dueAt !== null;
+  const hasTz = dueTz !== undefined && dueTz !== null;
+  if (!hasAt && !hasTz) return { ok: true };
+  if (hasAt !== hasTz) return { ok: false, error: "dueAt and dueTz must be set together" };
+  if (typeof dueAt !== "string" || typeof dueTz !== "string") return { ok: false, error: "invalid deadline" };
+  const parsed = Date.parse(dueAt);
+  if (!Number.isFinite(parsed)) return { ok: false, error: "invalid dueAt" };
+  if (!isValidTimeZone(dueTz)) return { ok: false, error: "invalid dueTz" };
+  return { ok: true, dueAt: new Date(parsed).toISOString(), dueTz };
+}
+
+type AttachmentsResult = { ok: true; attachments?: TaskAttachment[] } | { ok: false; error: string; status: number };
+
+function normalizeAttachments(value: unknown, exists: (att: TaskAttachment) => boolean): AttachmentsResult {
+  if (value === undefined || value === null) return { ok: true };
+  if (!Array.isArray(value)) return { ok: false, error: "invalid attachments", status: 400 };
+  if (value.length === 0) return { ok: true };
+  const attachments: TaskAttachment[] = [];
+  for (const item of value) {
+    if (!isTaskAttachment(item)) return { ok: false, error: "invalid attachment ref", status: 400 };
+    if (!exists(item)) return { ok: false, error: "attachment not found in store", status: 400 };
+    attachments.push(item);
+  }
+  return { ok: true, attachments };
 }
 
 function normalizeSource(value: unknown): TaskSource | undefined | null {
@@ -67,22 +145,53 @@ function normalizeSource(value: unknown): TaskSource | undefined | null {
   };
 }
 
-function textLimitError(): TaskCommandResult {
+function textLimitError(): { ok: false; error: string; status: number } {
   return { ok: false, error: `Task text must be no longer than ${TASK_TEXT_LIMIT} characters`, status: 400 };
 }
 
 export function createTask(
   existing: BoardTask[],
   input: CreateTaskInput,
-  deps: { now?: () => string; id?: () => string } = {},
-): TaskCommandResult {
+  recentCreates: RecentCreate[] = [],
+  deps: TaskCommandDeps = {},
+): CreateTaskResult {
   const project = normalizeProject(input.project);
   if (!project) return { ok: false, error: "project is required", status: 400 };
   const text = normalizeText(input.text);
   if (!text) return { ok: false, error: "task text is required", status: 400 };
   if (text.length > TASK_TEXT_LIMIT) return textLimitError();
+
+  /* Idempotency: a replayed create (double-tap, retry after a lost response)
+     returns the task the first attempt made instead of minting a twin. */
+  const clientRequestId = typeof input.clientRequestId === "string" && input.clientRequestId.trim() ? input.clientRequestId.trim() : null;
+  if (clientRequestId) {
+    const prior = recentCreates.find((entry) => entry.clientRequestId === clientRequestId);
+    if (prior) {
+      const task = existing.find((item) => item.id === prior.taskId);
+      /* The task may have been deleted since; a replay then behaves as a fresh
+         create rather than resurrecting a phantom. */
+      if (task) return { ok: true, tasks: existing, task, recentCreates, replay: true };
+    }
+  }
+
   const pos = normalizePos(input.pos);
-  if (!pos) return { ok: false, error: "task position is required", status: 400 };
+  const posGiven = input.pos !== undefined && input.pos !== null;
+  if (posGiven && !pos) return { ok: false, error: "invalid task position", status: 400 };
+  /* Placement omitted stays back-compatible: a `pos` means `pinned`, none is an
+     error (the legacy create path always sent a pos). */
+  const placement = normalizePlacement(input.placement) ?? (pos ? "pinned" : null);
+  if (input.placement !== undefined && placement === null) {
+    return { ok: false, error: "invalid placement", status: 400 };
+  }
+  if (placement === "pinned" && !pos) return { ok: false, error: "task position is required", status: 400 };
+  if (placement === "unplaced" && pos) return { ok: false, error: "unplaced task must not carry a position", status: 400 };
+  if (placement === null) return { ok: false, error: "task position is required", status: 400 };
+
+  const due = normalizeDue(input.dueAt, input.dueTz);
+  if (!due.ok) return { ok: false, error: due.error, status: 400 };
+  const attachments = normalizeAttachments(input.attachments, deps.attachmentExists ?? (() => true));
+  if (!attachments.ok) return attachments;
+
   const source = normalizeSource(input.source);
   if (source === null) return { ok: false, error: "invalid task source", status: 400 };
   const count = existing.filter((task) => task.project === project).length;
@@ -91,18 +200,25 @@ export function createTask(
   }
 
   const now = deps.now?.() ?? isoNow();
+  const id = deps.id?.() ?? crypto.randomUUID();
   const task: BoardTask = {
-    id: deps.id?.() ?? crypto.randomUUID(),
+    id,
     project,
     status: "inbox",
     text,
-    pos,
+    placement,
+    ...(placement === "pinned" && pos ? { pos } : {}),
+    ...(due.dueAt ? { dueAt: due.dueAt, dueTz: due.dueTz } : {}),
+    ...(attachments.attachments ? { attachments: attachments.attachments } : {}),
     assignments: [],
     ...(source ? { source } : {}),
     createdAt: now,
     updatedAt: now,
   };
-  return { ok: true, tasks: [...existing, task], task };
+  const nextRecent = clientRequestId
+    ? [...recentCreates, { clientRequestId, taskId: id }].slice(-RECENT_CREATES_CAP)
+    : recentCreates;
+  return { ok: true, tasks: [...existing, task], task, recentCreates: nextRecent, replay: false };
 }
 
 export function patchTask(existing: BoardTask[], id: string, input: PatchTaskInput, now = isoNow()): TaskCommandResult {
@@ -125,10 +241,42 @@ export function patchTask(existing: BoardTask[], id: string, input: PatchTaskInp
   if (Object.hasOwn(input, "pos")) {
     const pos = normalizePos(input.pos);
     if (!pos) return { ok: false, error: "invalid task position", status: 400 };
+    /* A pos always pins: place-on-map and free drags both land here, so an
+       unplaced task that gets a position becomes pinned in the same PATCH. */
     patch.pos = pos;
+    patch.placement = "pinned";
+  }
+  if (Object.hasOwn(input, "placement")) {
+    const placement = normalizePlacement(input.placement);
+    if (!placement) return { ok: false, error: "invalid placement", status: 400 };
+    /* Pinned needs a position: either supplied in this PATCH or already held. */
+    if (placement === "pinned" && !patch.pos && !task.pos) {
+      return { ok: false, error: "task position is required", status: 400 };
+    }
+    patch.placement = placement;
+  }
+  /* Deadline: `{dueAt:null}` clears both fields; `{dueAt,dueTz}` sets them
+     (both-or-neither, validated). Touching only one is a 400. */
+  if (Object.hasOwn(input, "dueAt") || Object.hasOwn(input, "dueTz")) {
+    if (input.dueAt === null && input.dueTz === undefined) {
+      patch.dueAt = undefined;
+      patch.dueTz = undefined;
+    } else {
+      const due = normalizeDue(input.dueAt, input.dueTz);
+      if (!due.ok) return { ok: false, error: due.error, status: 400 };
+      patch.dueAt = due.dueAt;
+      patch.dueTz = due.dueTz;
+    }
   }
 
   const updated: BoardTask = { ...task, ...patch, updatedAt: now };
+  /* An explicit clear leaves `undefined` fields on the spread; drop them so the
+     persisted row and its validator agree that the deadline is gone. */
+  if (Object.hasOwn(patch, "dueAt") && patch.dueAt === undefined) {
+    delete updated.dueAt;
+    delete updated.dueTz;
+  }
+  if (updated.placement === "unplaced") delete updated.pos;
   const tasks = existing.slice();
   tasks[index] = updated;
   return { ok: true, tasks, task: updated };

@@ -4,11 +4,19 @@ import path from "node:path";
 
 import { statePath } from "@/lib/configDir";
 
-import type { AssignmentState, BoardTask, TaskAssignment, TaskSource, TaskStatus } from "./types";
+import { isTaskAttachment } from "./attachments";
+import type { RecentCreate } from "./commands";
+import type { AssignmentState, BoardTask, TaskAssignment, TaskPlacement, TaskSource, TaskStatus } from "./types";
 
 export const TASKS_FILE = statePath("tasks.json");
 
-type TasksFile = { tasks?: unknown };
+type TasksFile = { tasks?: unknown; recentCreates?: unknown };
+
+/** The whole persisted state: the task list plus the create-idempotency map. */
+export interface TasksFileState {
+  tasks: BoardTask[];
+  recentCreates: RecentCreate[];
+}
 
 function atomicWriteJson(filePath: string, value: unknown): void {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
@@ -33,9 +41,9 @@ function isAssignmentState(value: unknown): value is AssignmentState {
   return value === "delivered" || value === "failed" || value === "spawning" || value === "handoff";
 }
 
-function isFinitePos(value: unknown): value is BoardTask["pos"] {
+function isFinitePos(value: unknown): value is { x: number; y: number } {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  const pos = value as Partial<BoardTask["pos"]>;
+  const pos = value as { x?: unknown; y?: unknown };
   return typeof pos.x === "number" && Number.isFinite(pos.x) && typeof pos.y === "number" && Number.isFinite(pos.y);
 }
 
@@ -65,30 +73,99 @@ export function isTaskSource(value: unknown): value is TaskSource {
   );
 }
 
+function isPlacement(value: unknown): value is TaskPlacement {
+  return value === "pinned" || value === "unplaced" || value === "auto";
+}
+
+/** Optional deadline is both-or-neither and both strings. */
+function validDue(task: Partial<BoardTask>): boolean {
+  const hasAt = task.dueAt !== undefined;
+  const hasTz = task.dueTz !== undefined;
+  if (!hasAt && !hasTz) return true;
+  return typeof task.dueAt === "string" && typeof task.dueTz === "string";
+}
+
+function validAttachments(value: unknown): boolean {
+  return value === undefined || (Array.isArray(value) && value.every(isTaskAttachment));
+}
+
+/**
+ * Validates a raw row and coerces it into a {@link BoardTask}, filling the
+ * placement a legacy row (a `pos`, no `placement`) lacks: it loads as `pinned`.
+ * A pinned row with no usable position is downgraded to `unplaced` so the board
+ * never tries to render a positionless card. Returns null for unusable rows.
+ */
+function coerceTask(value: unknown): BoardTask | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const raw = value as Partial<BoardTask>;
+  const structural =
+    typeof raw.id === "string" &&
+    typeof raw.project === "string" &&
+    isTaskStatus(raw.status) &&
+    typeof raw.text === "string" &&
+    (raw.placement === undefined || isPlacement(raw.placement)) &&
+    (raw.pos === undefined || isFinitePos(raw.pos)) &&
+    validDue(raw) &&
+    validAttachments(raw.attachments) &&
+    Array.isArray(raw.assignments) &&
+    raw.assignments.every(isTaskAssignment) &&
+    (raw.source === undefined || isTaskSource(raw.source)) &&
+    typeof raw.createdAt === "string" &&
+    typeof raw.updatedAt === "string";
+  if (!structural) return null;
+
+  const hasPos = isFinitePos(raw.pos);
+  const placement: TaskPlacement = isPlacement(raw.placement) ? raw.placement : hasPos ? "pinned" : "unplaced";
+  const pinned = placement === "pinned" && hasPos;
+  return {
+    id: raw.id!,
+    project: raw.project!,
+    status: raw.status!,
+    text: raw.text!,
+    placement: placement === "pinned" && !hasPos ? "unplaced" : placement,
+    ...(pinned ? { pos: raw.pos } : {}),
+    ...(raw.dueAt !== undefined ? { dueAt: raw.dueAt, dueTz: raw.dueTz } : {}),
+    ...(raw.attachments !== undefined ? { attachments: raw.attachments } : {}),
+    assignments: raw.assignments!,
+    ...(raw.source !== undefined ? { source: raw.source } : {}),
+    createdAt: raw.createdAt!,
+    updatedAt: raw.updatedAt!,
+  };
+}
+
 export function isTask(value: unknown): value is BoardTask {
+  return coerceTask(value) !== null;
+}
+
+function isRecentCreate(value: unknown): value is RecentCreate {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  const task = value as Partial<BoardTask>;
-  return (
-    typeof task.id === "string" &&
-    typeof task.project === "string" &&
-    isTaskStatus(task.status) &&
-    typeof task.text === "string" &&
-    isFinitePos(task.pos) &&
-    Array.isArray(task.assignments) &&
-    task.assignments.every(isTaskAssignment) &&
-    (task.source === undefined || isTaskSource(task.source)) &&
-    typeof task.createdAt === "string" &&
-    typeof task.updatedAt === "string"
-  );
+  const entry = value as Partial<RecentCreate>;
+  return typeof entry.clientRequestId === "string" && typeof entry.taskId === "string";
 }
 
 export function loadTasks(filePath = TASKS_FILE): BoardTask[] {
+  return loadTasksFile(filePath).tasks;
+}
+
+/** The whole persisted file, with legacy rows coerced and receipts filtered. */
+export function loadTasksFile(filePath = TASKS_FILE): TasksFileState {
   const raw = readJson(filePath) as TasksFile | null;
-  return Array.isArray(raw?.tasks) ? raw.tasks.filter(isTask) : [];
+  const tasks = Array.isArray(raw?.tasks)
+    ? raw.tasks.map(coerceTask).filter((task): task is BoardTask => task !== null)
+    : [];
+  const recentCreates = Array.isArray(raw?.recentCreates) ? raw.recentCreates.filter(isRecentCreate) : [];
+  return { tasks, recentCreates };
 }
 
 export function saveTasks(tasks: BoardTask[], filePath = TASKS_FILE): void {
-  atomicWriteJson(filePath, { tasks });
+  /* Preserve the idempotency receipts a tasks-only save (patch/delete/send)
+     doesn't touch, so a create replay still resolves after them. */
+  const { recentCreates } = loadTasksFile(filePath);
+  saveTasksFile({ tasks, recentCreates }, filePath);
+}
+
+export function saveTasksFile(state: TasksFileState, filePath = TASKS_FILE): void {
+  atomicWriteJson(filePath, state.recentCreates.length ? { tasks: state.tasks, recentCreates: state.recentCreates } : { tasks: state.tasks });
 }
 
 /**
@@ -109,5 +186,20 @@ export function mutateTasks<R>(
 ): R {
   const outcome = mutate(loadTasks(filePath));
   if (outcome.tasks) saveTasks(outcome.tasks, filePath);
+  return outcome.result;
+}
+
+/**
+ * The create-path variant of {@link mutateTasks} that carries the idempotency
+ * receipts through the same serialized read-modify-write, so a `clientRequestId`
+ * replay is resolved against the freshest persisted map. Return `state: undefined`
+ * to skip the write (validation failures, and replays that changed nothing).
+ */
+export function mutateTasksFile<R>(
+  mutate: (state: TasksFileState) => { state: TasksFileState | undefined; result: R },
+  filePath = TASKS_FILE,
+): R {
+  const outcome = mutate(loadTasksFile(filePath));
+  if (outcome.state) saveTasksFile(outcome.state, filePath);
   return outcome.result;
 }

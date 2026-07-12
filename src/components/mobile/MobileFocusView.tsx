@@ -29,7 +29,7 @@ import { VerdictPopover } from "@/components/pipelines/VerdictPopover";
 import { deckKey } from "@/components/scheme/agentLinks";
 import { buildSchemeLayout, type SchemeLayout } from "@/components/scheme/layout";
 import { SchemeBoard } from "@/components/scheme/SchemeBoard";
-import { TASK_W, taskCardHeight } from "@/components/scheme/taskGeometry";
+import { isPlacedTask, TASK_W, taskCardHeight } from "@/components/scheme/taskGeometry";
 import { TASK_TONES } from "@/components/tasks/taskModel";
 
 const focusKey = (project: string) => "llvFocus:" + project;
@@ -67,6 +67,8 @@ interface Props {
   onDraftClose: (id: string) => void;
   onDraftSpawned: (id: string, file: FileEntry) => void;
   onHandoff?: (file: FileEntry) => void;
+  /** Bumped by the header `+ Task` button to open the sheet's create view. */
+  taskSheetNonce?: number;
 }
 
 /**
@@ -76,11 +78,17 @@ interface Props {
  * data the scheme draws — nothing on the diagram is unreachable, it is just
  * shown one pane at a time.
  */
-export function MobileFocusView({ project, groups, manual, files, flows, pipelines, tasks, drafts, loaded, focus, onSelect, onClose, onDraftClose, onDraftSpawned, onHandoff }: Props) {
+export function MobileFocusView({ project, groups, manual, files, flows, pipelines, tasks, drafts, loaded, focus, onSelect, onClose, onDraftClose, onDraftSpawned, onHandoff, taskSheetNonce = 0 }: Props) {
   const { t } = useLocale();
   const [focusPath, setFocusPath] = useState<string | null>(null);
   const [mapOpen, setMapOpen] = useState(false);
   const [taskSheet, setTaskSheet] = useState<TaskSheetView | null>(null);
+  /* The header `+ Task` button opens the create view; the first render's nonce
+     of 0 never triggers it. */
+  useEffect(() => {
+    /* eslint-disable-next-line react-hooks/set-state-in-effect -- opens the sheet once per `+ Task` press */
+    if (taskSheetNonce > 0) setTaskSheet("new");
+  }, [taskSheetNonce]);
   const swipeRef = useRef<{ x: number; y: number } | null>(null);
   const activeChipRef = useRef<HTMLButtonElement | null>(null);
 
@@ -604,7 +612,7 @@ function MapChip({
               strokeWidth={node.file.path === current ? 5 / scale : undefined}
             />
           ))}
-          {tasks.map((task) => (
+          {tasks.filter(isPlacedTask).map((task) => (
             <circle
               key={task.id}
               cx={task.pos.x + TASK_W / 2}

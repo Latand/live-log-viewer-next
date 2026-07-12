@@ -14,7 +14,7 @@ import { activityDot, cleanTitle, engineBadge, engineBadgeFor } from "@/componen
 
 import type { Camera } from "./Minimap";
 import { MOVE_EASE, MOVE_MS } from "./nodes";
-import { TASK_BODY_MAX, TASK_W, taskRect, type SchemeRect } from "./taskGeometry";
+import { TASK_BODY_MAX, TASK_W, taskRect, type PlacedTask, type SchemeRect } from "./taskGeometry";
 
 /* Below this zoom the card text is unreadable: an edit click glides first. */
 const EDIT_MIN_Z = 0.55;
@@ -146,7 +146,7 @@ export const TaskCard = memo(function TaskCard({
   camRef,
   handlers,
 }: {
-  task: BoardTask;
+  task: PlacedTask;
   files: FileEntry[];
   camRef: React.RefObject<Camera>;
   handlers: TaskCardHandlers;

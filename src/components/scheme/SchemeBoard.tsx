@@ -30,7 +30,7 @@ import { AgentLinksLayer, EdgesLayer, LoopsLayer, MOVE_EASE, NodesLayer, type De
 import type { TaskCardHandlers } from "./TaskCard";
 import { TaskEdgesLayer } from "./TaskEdgesLayer";
 import { TasksLayer } from "./TasksLayer";
-import { buildTaskEdges, buildTaskTargetIndex, TASK_W, taskRect, type SchemeRect } from "./taskGeometry";
+import { buildTaskEdges, buildTaskTargetIndex, isPlacedTask, TASK_W, taskRect, type SchemeRect } from "./taskGeometry";
 import { useLasso } from "./useLasso";
 import { useSchemeCamera } from "./useSchemeCamera";
 import { useSpatialNav } from "./useSpatialNav";
@@ -75,6 +75,10 @@ interface Props {
   /** «Send» on a task card with no aimed agent: seed a fresh draft conversation
       with the task text. Absent in map mode. */
   onTaskDraft?: (task: BoardTask) => void;
+  /** Place-on-map: an unplaced task armed by the panel. The next canvas click
+      pins it where clicked; `onTaskPlaced` fires to disarm the caller. */
+  placeTaskId?: string | null;
+  onTaskPlaced?: () => void;
 }
 
 function ToolButton({
@@ -132,6 +136,8 @@ export function SchemeBoard({
   onDraftSpawned,
   onHandoff,
   onTaskDraft,
+  placeTaskId,
+  onTaskPlaced,
 }: Props) {
   const { t } = useLocale();
   const mapMode = Boolean(onNodePick);
@@ -337,16 +343,42 @@ export function SchemeBoard({
     const fresh = localTasks.filter((task) => !have.has(task.id) && task.project === project);
     return fresh.length ? [...tasks, ...fresh] : tasks;
   }, [tasks, localTasks, project]);
+  /* Only pinned tasks have a board position; unplaced ones (panel/mobile
+     creation) live in the list until place-on-map pins them. Everything the
+     board draws or measures runs over this narrowed set. */
+  const placedTasks = useMemo(() => mergedTasks.filter(isPlacedTask), [mergedTasks]);
   /* Camera-facing rects: focus glides and map taps resolve task keys. */
   const taskRects = useMemo(
-    () => new Map(mergedTasks.map((task) => ["task::" + task.id, taskRect(task)] as const)),
-    [mergedTasks],
+    () => new Map(placedTasks.map((task) => ["task::" + task.id, taskRect(task)] as const)),
+    [placedTasks],
   );
-  const taskEdges = useMemo(() => buildTaskEdges(mergedTasks, buildTaskTargetIndex(layout)), [mergedTasks, layout]);
+  const taskEdges = useMemo(() => buildTaskEdges(placedTasks, buildTaskTargetIndex(layout)), [placedTasks, layout]);
 
-  const onPlaceTask = useCallback((wx: number, wy: number) => {
-    setPendingTask({ x: Math.round(wx - TASK_W / 2), y: Math.round(wy - 14) });
-  }, []);
+  /* Place-on-map arms this ref with the id of an existing unplaced task; the
+     next canvas click pins it instead of dropping a fresh sticky. */
+  const placingRef = useRef<string | null>(placeTaskId ?? null);
+  useEffect(() => {
+    placingRef.current = placeTaskId ?? null;
+  }, [placeTaskId]);
+
+  const onPlaceTask = useCallback(
+    (wx: number, wy: number) => {
+      const pos = { x: Math.round(wx - TASK_W / 2), y: Math.round(wy - 14) };
+      const placing = placingRef.current;
+      if (placing) {
+        placingRef.current = null;
+        /* A concurrent DELETE resolves to a 404 → treated as gone (no resurrect),
+           the refetch drops the row; success pins the card exactly where clicked. */
+        void updateTask(placing, { placement: "pinned", pos }).then((error) => {
+          if (error) pushTaskToast("err", error);
+        });
+        onTaskPlaced?.();
+        return;
+      }
+      setPendingTask(pos);
+    },
+    [onTaskPlaced],
+  );
 
   /* Spatial-nav handlers behind refs: the camera's keydown listener reads these
      while useSpatialNav (created below) needs the camera's own outputs — the
@@ -396,6 +428,13 @@ export function SchemeBoard({
     onArrowNav: navArrowRef,
     onZoomKey: navZoomRef,
   });
+
+  /* Place-on-map requested from the panel: arm the crosshair so the next click
+     pins the task (the camera reverts to select once it lands). */
+  useEffect(() => {
+    if (placeTaskId && !mapMode) setTaskTool(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- fires only when a new placement is requested
+  }, [placeTaskId]);
 
   /* Spatial keyboard navigation: live only on the desktop board — a selection
      session, an expanded overlay, or map mode all suspend it. */
@@ -567,7 +606,7 @@ export function SchemeBoard({
     (text: string) => {
       const pos = pendingTask;
       if (!pos) return;
-      void createTask({ project, text, pos }).then((res) => {
+      void createTask({ project, text, placement: "pinned", pos }).then((res) => {
         if ("error" in res) {
           pushTaskToast("err", res.error);
           return;
@@ -676,7 +715,7 @@ export function SchemeBoard({
         />
         <TaskEdgesLayer edges={taskEdges} width={layout.width} height={layout.height} onRetry={retryEdge} />
         <TasksLayer
-          tasks={mergedTasks}
+          tasks={placedTasks}
           files={files}
           interactive={!handLike && !session}
           lite={mapMode}
@@ -792,7 +831,7 @@ export function SchemeBoard({
         />
       ) : null}
 
-      <Minimap layout={layout} tasks={mergedTasks} cam={cam} vp={vp} onJump={jump} />
+      <Minimap layout={layout} tasks={placedTasks} cam={cam} vp={vp} onJump={jump} />
     </div>
     {/* The full-window conversation: the same pane component over the whole
         viewport, with the live feed and the composer of exactly this

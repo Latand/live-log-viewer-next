@@ -24,6 +24,7 @@ function task(overrides: Partial<BoardTask> = {}): BoardTask {
     project: "proj",
     status: "inbox",
     text: "First line\nbody",
+    placement: "pinned",
     pos: { x: 10, y: 20 },
     assignments: [],
     createdAt: "2026-07-05T10:00:00.000Z",
@@ -166,6 +167,7 @@ describe("task command helpers", () => {
         pos: { x: 0, y: 0 },
         source: { path: "/session.jsonl", ts: null, text: "Fix the dashboard", fingerprint: "fp", engine: "claude" },
       },
+      [],
       { now: () => "now", id: () => "id" },
     );
     expect(result.ok).toBe(true);

@@ -12,6 +12,7 @@ import { useLocale } from "@/lib/i18n";
 
 import { canBulkFlow, canBulkInterrupt, canBulkKill, runBulk, withPresenceGuard, type BulkItemResult, type BulkRunner } from "./bulkActions";
 import type { SchemeNode } from "./layout";
+import { findFreeSlot } from "./findFreeSlot";
 import { TASK_W } from "./taskGeometry";
 
 type ActionId = "message" | "interrupt" | "kill" | "remove" | "flow";
@@ -156,7 +157,10 @@ export const BulkActionBar = memo(function BulkActionBar({
       cx += node.x + node.w / 2;
       cy += node.y + node.h / 2;
     }
-    return { x: Math.round(cx / list.length - TASK_W / 2), y: Math.round(cy / list.length - 60) };
+    const anchor = { x: Math.round(cx / list.length - TASK_W / 2), y: Math.round(cy / list.length - 60) };
+    /* Route the centroid through the shared free-slot search so a card never
+       stacks straight on top of the selection it was made from. */
+    return findFreeSlot(anchor, { w: TASK_W, h: 140 }, list);
   };
 
   const composer = useComposer({
@@ -174,7 +178,7 @@ export const BulkActionBar = memo(function BulkActionBar({
             composer.setStatus({ kind: "err", text: t("tasks.composerNeedsText") });
             return;
           }
-          const created = await createTask({ project, text, pos: taskPos() });
+          const created = await createTask({ project, text, placement: "pinned", pos: taskPos() });
           if ("error" in created) {
             composer.setStatus({ kind: "err", text: created.error });
             return;
