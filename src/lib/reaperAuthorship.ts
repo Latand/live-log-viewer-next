@@ -22,16 +22,23 @@ const STATE_FILE = () => statePath("reaper-state.json");
  * viewer/spawn-injected messages (its message allowance) and only records a
  * path once a genuine human message clears it — exactly the pin we want.
  *
- * Missing/corrupt state is treated as "no evidence yet". `observedAtSec` is the
- * wall time of the reaper's last cycle (the state file's mtime — `runReaperCycle`
- * rewrites it every pass), or null when the reaper has never run. The board
- * fails CLOSED against it: a worker is only collapse-eligible when the reaper
- * has scanned it AFTER its latest activity, so a transcript that changed since
- * the last cycle (a fresh owner message, a cold start) is never collapsed on
- * unverified authorship — the hard exemption holds even in the persistence gap.
+ * Missing/corrupt state is treated as "no evidence yet". `scannedAt` is the
+ * PATH-SCOPED freshness map: for each transcript the reaper scanned to
+ * completion and cleared, the transcript mtime (seconds) it observed. The board
+ * fails CLOSED against it: a claude/codex worker is only collapse-eligible when
+ * `scannedAt[path]` is at least as fresh as the file's current mtime — the
+ * reaper actually looked at this exact content. A path the reaper never scanned
+ * (a worker that exited before any cycle reached it) has no stamp and stays
+ * pinned, so an unobserved user-authored transcript can never collapse. A single
+ * global "last cycle" timestamp could not express this: it advances every cycle
+ * regardless of which paths were scanned, and would certify the unscanned.
+ *
+ * `observedAtSec` (the state file's mtime, or null before the reaper's first
+ * run) is retained only as a coarse "has the reaper ever run" signal.
  */
 export interface AuthorshipEvidence {
   userAuthoredPaths: Set<string>;
+  scannedAt: Map<string, number>;
   observedAtSec: number | null;
 }
 
@@ -41,15 +48,24 @@ export function readAuthorshipEvidence(): AuthorshipEvidence {
   try {
     observedAtSec = fs.statSync(file).mtimeMs / 1000;
   } catch {
-    return { userAuthoredPaths: new Set(), observedAtSec: null };
+    return { userAuthoredPaths: new Set(), scannedAt: new Map(), observedAtSec: null };
   }
   try {
-    const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as { userAuthoredPaths?: unknown };
-    const map = parsed.userAuthoredPaths;
-    if (!map || typeof map !== "object" || Array.isArray(map)) return { userAuthoredPaths: new Set(), observedAtSec };
-    return { userAuthoredPaths: new Set(Object.keys(map as Record<string, unknown>)), observedAtSec };
+    const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as { userAuthoredPaths?: unknown; scannedAt?: unknown };
+    const authored = parsed.userAuthoredPaths;
+    const userAuthoredPaths = authored && typeof authored === "object" && !Array.isArray(authored)
+      ? new Set(Object.keys(authored as Record<string, unknown>))
+      : new Set<string>();
+    const scannedAt = new Map<string, number>();
+    const rawScanned = parsed.scannedAt;
+    if (rawScanned && typeof rawScanned === "object" && !Array.isArray(rawScanned)) {
+      for (const [pathname, value] of Object.entries(rawScanned as Record<string, unknown>)) {
+        if (typeof value === "number" && Number.isFinite(value)) scannedAt.set(pathname, value);
+      }
+    }
+    return { userAuthoredPaths, scannedAt, observedAtSec };
   } catch {
-    return { userAuthoredPaths: new Set(), observedAtSec };
+    return { userAuthoredPaths: new Set(), scannedAt: new Map(), observedAtSec };
   }
 }
 

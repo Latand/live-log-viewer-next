@@ -613,9 +613,20 @@ export function ProjectDashboard({
     [files, project],
   );
   const historyRows = useMemo(() => quietHistoryRows(files, project), [files, project]);
+  /* The archive fallback rebuilds from the full catalog, so it must honor the
+     same two removals the live scene does — closed columns (`hiddenSet`) AND
+     auto-collapsed workers (`collapsedPaths`). Without the collapse filter a
+     quiet worker-only or closed-flow project would resurrect every folded
+     worker as a full archive card, undoing the collapse the stacks promise. */
   const archiveGroups = useMemo(
-    () => (hasNodes ? [] : buildArchiveBranchGroups(groupFiles.filter((file) => !hiddenSet.has(file.path)), project, 100)),
-    [hasNodes, groupFiles, hiddenSet, project],
+    () => (hasNodes
+      ? []
+      : buildArchiveBranchGroups(
+        groupFiles.filter((file) => !hiddenSet.has(file.path) && !collapsedPaths.has(file.path)),
+        project,
+        100,
+      )),
+    [hasNodes, groupFiles, hiddenSet, collapsedPaths, project],
   );
   const hasArchiveNodes = archiveGroups.length > 0;
   const schemeAvailable = hasNodes || hasArchiveNodes;
@@ -633,7 +644,13 @@ export function ProjectDashboard({
      pipelineLayout can't be preserved. */
   const deckReviewerPaths = new Set<string>();
   for (const deck of pipelineLayout.decks) for (const round of deck.rounds) if (round.file) deckReviewerPaths.add(round.file.path);
-  const workerStacks = hasNodes ? groupWorkerStacks(collapsibleWorkers, deckReviewerPaths) : [];
+  /* Stacks render regardless of `hasNodes` (the WorkerStacks strip sits outside
+     the scheme/list switch), so a worker-only or fully-closed project still
+     shows its folded workers instead of an empty board. `hiddenSet` joins the
+     exclude set: a closed worker is a tombstone — it must not resurface as a
+     stack member (its manual/expanded pin was dropped on close, so it would
+     otherwise re-qualify as a plain collapse candidate). */
+  const workerStacks = groupWorkerStacks(collapsibleWorkers, new Set([...deckReviewerPaths, ...hiddenSet]));
   const listAvailable = historyRows.length > 0;
   const projectView = resolveProjectView({
     preferredView: board.prefs.viewMode,

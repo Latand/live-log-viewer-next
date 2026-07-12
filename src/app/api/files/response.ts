@@ -100,15 +100,21 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
      `authorshipUnverified` fails the exemption CLOSED — a claude/codex worker
      the reaper has not scanned since its latest write (fresh owner message, or
      a cold start before the reaper ever ran) is pinned until a cycle confirms
-     it, so a just-finished reviewer never collapses on stale evidence. */
-  const { userAuthoredPaths, observedAtSec } = readAuthorshipEvidence();
+     it, so a just-finished reviewer never collapses on stale evidence. The
+     freshness is PATH-SCOPED (`scannedAt[path]`), not a single global cycle
+     timestamp: a global stamp advances every cycle regardless of which paths
+     were scanned, so a worker that exited before the reaper ever reached it
+     would be falsely certified clean and its user-authored conversation could
+     collapse. A path with no per-path stamp stays unverified. */
+  const { userAuthoredPaths, scannedAt } = readAuthorshipEvidence();
   for (const file of files) {
     if (userAuthoredPaths.has(file.path) || (file.predecessorPath && userAuthoredPaths.has(file.predecessorPath))) {
       file.userAuthored = true;
       continue;
     }
-    if ((file.engine === "claude" || file.engine === "codex") && (observedAtSec === null || observedAtSec < file.mtime)) {
-      file.authorshipUnverified = true;
+    if (file.engine === "claude" || file.engine === "codex") {
+      const scannedMtime = scannedAt.get(file.path);
+      if (scannedMtime === undefined || scannedMtime < file.mtime) file.authorshipUnverified = true;
     }
   }
   const tasks = reconcileTasks(files, loadTasks(), {

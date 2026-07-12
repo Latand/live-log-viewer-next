@@ -423,6 +423,50 @@ test("authorship at the beginning of a transcript survives a tail larger than th
   }
 });
 
+test("a clean authorship scan persists a path-scoped scannedAt stamp (issue #112)", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-reaper-scannedat-"));
+  const pathname = path.join(directory, "rollout-019f4906-3f67-7b72-9fbc-9ec3b5ad1399.jsonl");
+  const now = Date.parse("2026-07-12T12:00:00.000Z");
+  // A worker transcript with only agent output — no owner message.
+  fs.writeFileSync(pathname, JSON.stringify({
+    type: "event_msg",
+    timestamp: new Date(now - 60 * 60_000).toISOString(),
+    payload: { type: "agent_message", message: "just working" },
+  }) + "\n");
+  process.env.LLV_STATE_DIR = directory;
+  delete process.env.LLV_REAPER_ENABLED;
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const profile = emptyLaunchProfile({ cwd: "/repo", role: "worker", title: "clean probe" });
+  registry.reconcileConversations([{
+    engine: "codex",
+    path: pathname,
+    accountId: "default",
+    launchProfile: profile,
+    turn: { state: "idle", source: "assistant", terminalAt: new Date(now - 60 * 60_000).toISOString() },
+    observedAt: new Date(now - 60 * 60_000).toISOString(),
+  }]);
+
+  try {
+    await runReaperCycle({
+      registry,
+      hosts: [runtimeHost(pathname)],
+      files: [runtimeFile(pathname, now / 1000 - 60 * 60)],
+      now,
+    });
+
+    const state = JSON.parse(fs.readFileSync(path.join(directory, "reaper-state.json"), "utf8")) as {
+      scannedAt?: Record<string, number>;
+      userAuthoredPaths?: Record<string, true>;
+    };
+    const observedMtime = fs.statSync(pathname).mtimeMs / 1000;
+    expect(state.userAuthoredPaths?.[pathname]).toBeUndefined();
+    expect(state.scannedAt?.[pathname]).toBeDefined();
+    expect(Math.abs((state.scannedAt![pathname]! ) - observedMtime)).toBeLessThan(2);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 function headlessFlow(now: number): Flow {
   return {
     id: "flow-headless",

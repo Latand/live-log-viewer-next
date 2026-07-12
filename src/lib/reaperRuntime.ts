@@ -36,6 +36,14 @@ interface ReaperState {
   version: 1;
   firstObservedAt: Record<string, string>;
   userAuthoredPaths: Record<string, true>;
+  /* Path-scoped authorship freshness (issue #112). For every transcript the
+     reaper has scanned to completion and found NOT owner-authored, the observed
+     transcript mtime (seconds) at that scan. The board clears
+     `authorshipUnverified` only when this per-path stamp is at least as fresh as
+     the file's current mtime — a global "last cycle" timestamp would falsely
+     certify a worker that exited before it was ever scanned, letting an
+     unobserved user-authored transcript collapse. */
+  scannedAt: Record<string, number>;
 }
 
 function hostKey(host: TranscriptHost): string {
@@ -52,10 +60,13 @@ function readState(): ReaperState {
         userAuthoredPaths: parsed.userAuthoredPaths && typeof parsed.userAuthoredPaths === "object"
           ? parsed.userAuthoredPaths as Record<string, true>
           : {},
+        scannedAt: parsed.scannedAt && typeof parsed.scannedAt === "object" && !Array.isArray(parsed.scannedAt)
+          ? parsed.scannedAt as Record<string, number>
+          : {},
       };
     }
   } catch { /* first run or invalid state */ }
-  return { version: 1, firstObservedAt: {}, userAuthoredPaths: {} };
+  return { version: 1, firstObservedAt: {}, userAuthoredPaths: {}, scannedAt: {} };
 }
 
 function atomicWrite(filename: string, value: unknown): void {
@@ -72,7 +83,12 @@ function updateObservationState(hosts: TranscriptHost[], now: number): ReaperSta
     const key = hostKey(host);
     firstObservedAt[key] = previous.firstObservedAt[key] ?? new Date(now).toISOString();
   }
-  const state = { version: 1 as const, firstObservedAt, userAuthoredPaths: previous.userAuthoredPaths };
+  const state = {
+    version: 1 as const,
+    firstObservedAt,
+    userAuthoredPaths: previous.userAuthoredPaths,
+    scannedAt: previous.scannedAt,
+  };
   atomicWrite(STATE_FILE(), state);
   return state;
 }
@@ -339,20 +355,38 @@ function authorshipEvidence(
 ): {
   userAuthoredPaths: Set<string>;
   unverifiedPaths: Set<string>;
+  /* Path → observed transcript mtime (seconds) for every host scanned to
+     completion and found NOT owner-authored. This is the path-scoped freshness
+     the board needs to clear `authorshipUnverified` without falsely certifying
+     an unscanned worker (issue #112). */
+  verifiedCleanAt: Map<string, number>;
 } {
   const userAuthoredPaths = new Set<string>();
   const unverifiedPaths = new Set<string>();
+  const verifiedCleanAt = new Map<string, number>();
   for (const host of hosts) {
     const pathname = host.primaryPath;
     if (!pathname || userAuthoredPaths.has(pathname) || unverifiedPaths.has(pathname)) continue;
     if (missingTranscriptPaths.has(pathname)) continue;
     const viewerMessageAllowance = (hasViewerWorkerLaunchPrompt(snapshot, pathname) ? 1 : 0)
       + viewerFlowMessageAllowance(flows, pathname);
+    /* Stamp the mtime BEFORE reading: a transcript that grows during the scan
+       ends up with a newer on-disk mtime than we record, so the board re-pins it
+       as unverified until the next cycle rather than certifying content the
+       reaper never saw. */
+    let observedMtime: number | null = null;
+    try {
+      observedMtime = fs.statSync(pathname).mtimeMs / 1000;
+    } catch {
+      unverifiedPaths.add(pathname);
+      continue;
+    }
     const scan = scanUserAuthoredMessages(pathname, host.engine, viewerMessageAllowance + 1);
     if (scan.count > viewerMessageAllowance) userAuthoredPaths.add(pathname);
     else if (!scan.complete) unverifiedPaths.add(pathname);
+    else verifiedCleanAt.set(pathname, observedMtime);
   }
-  return { userAuthoredPaths, unverifiedPaths };
+  return { userAuthoredPaths, unverifiedPaths, verifiedCleanAt };
 }
 
 function viewerOwnedPaths(snapshot: ReturnType<AgentRegistry["snapshot"]>, hosts: TranscriptHost[]): Set<string> {
@@ -433,6 +467,11 @@ async function makeInput(
   for (const pathname of authorship.userAuthoredPaths) {
     if (state.userAuthoredPaths[pathname]) continue;
     state.userAuthoredPaths[pathname] = true;
+    stateChanged = true;
+  }
+  for (const [pathname, observedMtime] of authorship.verifiedCleanAt) {
+    if (state.scannedAt[pathname] === observedMtime) continue;
+    state.scannedAt[pathname] = observedMtime;
     stateChanged = true;
   }
   if (stateChanged) atomicWrite(STATE_FILE(), state);

@@ -51,6 +51,26 @@ test("missing state file reports no observation time (fail closed)", () => {
   expect(evidence.userAuthoredPaths.size).toBe(0);
 });
 
+test("reads the path-scoped scannedAt freshness map, dropping non-number stamps", () => {
+  writeState({
+    version: 1,
+    firstObservedAt: {},
+    userAuthoredPaths: {},
+    scannedAt: { "/a": 1000, "/b": 2000.5, "/bad": "nope", "/nan": Number.NaN },
+  });
+  const evidence = readAuthorshipEvidence();
+  expect(evidence.scannedAt).toEqual(new Map([["/a", 1000], ["/b", 2000.5]]));
+});
+
+test("missing or shapeless scannedAt yields an empty freshness map (fail closed)", () => {
+  fs.rmSync(stateFile(), { force: true });
+  expect(readAuthorshipEvidence().scannedAt).toEqual(new Map());
+  writeState({ version: 1, firstObservedAt: {}, userAuthoredPaths: {}, scannedAt: ["/a"] });
+  expect(readAuthorshipEvidence().scannedAt).toEqual(new Map());
+  writeState({ version: 1, firstObservedAt: {}, userAuthoredPaths: {} });
+  expect(readAuthorshipEvidence().scannedAt).toEqual(new Map());
+});
+
 test("does not touch the caller's temp dir isolation", () => {
   /* The suite pins LLV_STATE_DIR to a throwaway temp dir; confirm the reader
      resolves under it and never falls back to the real config dir. */

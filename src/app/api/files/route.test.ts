@@ -364,3 +364,55 @@ test("an unreadable pipelines store degrades to pipelinesError without failing t
     pipelinesStore = () => [];
   }
 });
+
+test("authorship freshness is path-scoped: an unscanned worker never certifies clean (issue #112)", async () => {
+  /* The reaper's state file mtime (its coarse "last cycle" time) is fresh, yet
+     `scannedAt` only carries the paths the reaper actually looked at. A worker
+     that exited before any cycle scanned it is absent from `scannedAt`, so even
+     with a stale on-disk mtime it must fail CLOSED to `authorshipUnverified` —
+     a global cycle timestamp would falsely certify it and let a user-authored
+     conversation collapse. */
+  const authoredPath = "/sessions/authored-worker.jsonl";
+  const scannedPath = "/sessions/scanned-clean-worker.jsonl";
+  const unscannedPath = "/sessions/unscanned-worker.jsonl";
+  fs.writeFileSync(path.join(stateDir, "reaper-state.json"), JSON.stringify({
+    version: 1,
+    firstObservedAt: {},
+    userAuthoredPaths: { [authoredPath]: true },
+    scannedAt: { [scannedPath]: 5000 },
+  }));
+  scannedFiles = [
+    { ...file(authoredPath), engine: "claude", mtime: 5000 },
+    { ...file(scannedPath), engine: "codex", mtime: 4000 },
+    { ...file(unscannedPath), engine: "codex", mtime: 1 },
+  ];
+
+  const response = await GET(new Request("http://127.0.0.1/api/files"));
+  const body = await response.json() as { files: FileEntry[] };
+  const byPath = new Map(body.files.map((entry) => [entry.path, entry]));
+
+  // Sticky user-authorship pins the card regardless of freshness.
+  expect(byPath.get(authoredPath)?.userAuthored).toBe(true);
+  expect(byPath.get(authoredPath)?.authorshipUnverified).toBeUndefined();
+  // A path the reaper scanned clean at or after its current mtime is collapse-eligible.
+  expect(byPath.get(scannedPath)?.userAuthored).toBeUndefined();
+  expect(byPath.get(scannedPath)?.authorshipUnverified).toBeUndefined();
+  // The hard constraint: an unscanned worker stays pinned even though the
+  // state file's global mtime is newer than the transcript's.
+  expect(byPath.get(unscannedPath)?.authorshipUnverified).toBe(true);
+});
+
+test("a worker whose transcript changed after its last clean scan re-pins as unverified (issue #112)", async () => {
+  const stalePath = "/sessions/grew-after-scan.jsonl";
+  fs.writeFileSync(path.join(stateDir, "reaper-state.json"), JSON.stringify({
+    version: 1,
+    firstObservedAt: {},
+    userAuthoredPaths: {},
+    scannedAt: { [stalePath]: 3000 },
+  }));
+  scannedFiles = [{ ...file(stalePath), engine: "codex", mtime: 3600 }];
+
+  const response = await GET(new Request("http://127.0.0.1/api/files"));
+  const body = await response.json() as { files: FileEntry[] };
+  expect(body.files[0]?.authorshipUnverified).toBe(true);
+});
