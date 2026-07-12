@@ -20,6 +20,7 @@ import { FlipRow } from "./FlipRow";
 import { LogFeed } from "./LogFeed";
 import { paneState, type PaneState } from "./paneState";
 import { CtxChip, GoalChip, PlanChip } from "./PlanChip";
+import { SessionTitle } from "./session/SessionTitle";
 import { ProcessStatusControls } from "./TaskHeader";
 import { TmuxComposer } from "./TmuxComposer";
 import { RateLimitBadge } from "./RateLimitBadge";
@@ -93,9 +94,12 @@ interface Props {
   /** Far-zoom board state: pane content is unreadable behind the identity
       labels, so feeds and composer polling go to sleep until zoom returns. */
   dormant?: boolean;
+  /** Bumped to open this pane's rename editor (scheme-board F2 targets the
+      expanded overlay, not the node's board pane). */
+  autoEditToken?: number;
 }
 
-export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noComposer, banner, onToggleExpand, expanded, dormant }: Props) {
+export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noComposer, banner, onToggleExpand, expanded, dormant, autoEditToken }: Props) {
   const { t } = useLocale();
   const isMobile = useIsMobile();
   const paneRef = useRef<HTMLElement | null>(null);
@@ -182,9 +186,13 @@ export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noCompose
         >
           <div className="flex min-w-0 items-center gap-1.5">
             <span className={`h-2 w-2 shrink-0 rounded-full ${activityDot(file.activity)}`} title={t(`branch.${state}`)} />
-            <span className="min-w-0 flex-1 truncate text-[12px] font-semibold" title={cleanTitle(file.title)}>
-              {cleanTitle(file.title, 90)}
-            </span>
+            {file.renamable ? (
+              <SessionTitle file={file} displayMax={90} titleClassName="text-[12px] font-semibold" alwaysVisible={isMobile} autoEditToken={autoEditToken} />
+            ) : (
+              <span className="min-w-0 flex-1 truncate text-[12px] font-semibold" title={cleanTitle(file.title)}>
+                {cleanTitle(file.title, 90)}
+              </span>
+            )}
             <ProcessStatusControls file={file} compact hideChip={isMobile} />
             {onToggleExpand ? (
               <button

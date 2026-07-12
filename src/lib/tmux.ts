@@ -552,6 +552,24 @@ export async function resolveRequestedTmuxTarget(pid: number | null): Promise<Tm
   return null;
 }
 
+/**
+ * Renames the tmux window hosting a conversation's pane to `name` (issue #33 —
+ * a custom session title propagates to the window name so `tmux` listings read
+ * the human label too). Best-effort: a session with no live pane, a pid the
+ * scanner does not vouch for, or a tmux error is a silent no-op — the durable
+ * override on disk is the source of truth and the window catches up on the next
+ * rename. Returns the target it renamed, or null when nothing was touched.
+ */
+export async function renameTmuxWindowForPid(pid: number, name: string): Promise<TmuxTarget | null> {
+  if (!Number.isInteger(pid) || pid <= 0) return null;
+  const trimmed = name.replace(/\s+/g, " ").trim().slice(0, 80);
+  if (!trimmed) return null;
+  const target = await resolveRequestedTmuxTarget(pid);
+  if (!target) return null;
+  const result = await runTmux(["rename-window", "-t", target, trimmed]).catch(() => null);
+  return result && result.code === 0 ? target : null;
+}
+
 const PASTE_SETTLE_MS = 250;
 const SUBMIT_VERIFY_TRIES = 4;
 const SUBMIT_VERIFY_DELAY_MS = 400;

@@ -1,60 +1,62 @@
-# Issue #118 — Scheme: running flow/pipeline as a visual GROUP with on-canvas stage override
+# Issue #33 — User-set custom session titles
 
 ## Task statement
 
-On the scheme board, every session belonging to a running flow or pipeline
-(implementer, headless reviewer rounds, run-stage children) must read as ONE
-marked visual group — a distinct outline/halo/tinted region carrying the
-flow/pipeline name, readable at map zoom. From that group (or the existing
-PipelineHub) the operator opens on-canvas stage-override controls that steer a
-running flow/pipeline WITHOUT recreating it: change the next-stage/round
-model·effort·engine, edit the next-round prompt note / next-stage prompt,
-extend/limit rounds, and drive retry/cancel/skip/pause/resume/close. Controls
-wire to the existing `PATCH /api/flows` actions (extend, set-round-limit,
-retry-round, cancel-round, pause, resume) and the pipelines API, with small
-backend additions only where an action is missing. The group dissolves when the
-flow/pipeline closes. Build on `src/components/scheme/agentLinks.ts`
-(FlowLink/PipelineHub rails from PR #100/#93). Respect existing board placement
-and PR #115 tombstone/close semantics (do NOT touch them).
+Let a user rename any Claude/Codex agent conversation from the viewer UI. The
+custom name overrides the auto-derived prompt title everywhere it appears (pane
+header, board cards, tree, browser tab, overview, rail tooltips, push/attention
+labels), persists durably keyed by stable conversation identity (registry
+identity — not the transcript path), survives restarts/resumes/archive-revive and
+account-migration path changes, and propagates to the tmux window name where a
+live pane exists. A clear/reset control returns to the auto-derived title. The
+editing UX is inline and consistent with existing UI idioms.
+
+Scope: main Claude and Codex sessions are renameable. Subagents, background
+tasks, and workflow/task cards remain follow-ons.
+
+## Design summary
+
+- Overlay store `state/session-titles.json`: atomic write, per-key revision,
+  capped. Key precedence: Viewer conversation id → session UUID (compat) →
+  transcript path (bounded fallback). (`src/lib/session/titleStore.ts`)
+- Applied as the final word on `FileEntry.title` in the files response, after
+  the registry stamps `conversationId`; derived title kept on `autoTitle`,
+  `titleRevision` carries the concurrency token.
+  (`src/app/api/files/response.ts`)
+- `PATCH /api/session/title`: validates an allowed session, title bounds, base
+  revision; empty/null clears; mismatch → structured 409. Resolution + tmux
+  propagation behind `@/lib/session/titleTarget`.
+- tmux window rename via `renameTmuxWindowForPid` (best-effort).
+- Inline rename affordance `SessionTitle` in the pane header (also backs board
+  cards through `BranchPane`). English/Ukrainian parity.
 
 ## Acceptance criteria
 
-- AC1: A running flow renders one group halo enclosing its implementer node and
-  its reviewer round deck; a running pipeline renders one halo enclosing every
-  materialized stage session (run-stage agent nodes; a review-loop stage's flow
-  implementer + folded deck) and their placed children.
-- AC2: Each group's halo is visually distinct per flow/pipeline (a stable,
-  reload-deterministic hue derived from its id) and shows the flow/pipeline name.
-- AC3: The group label stays readable when the board is zoomed out to the map
-  (counter-scaled via `--inv-z`), and the halo still renders on the lite map.
-- AC4: The halo region is inert (never intercepts clicks on the cards it frames);
-  only the label chip (and its open panel) take pointer events, and the chip is
-  passive on the hand tool / during a selection session / on the lite map.
-- AC5: A flow embedded in a pipeline via a review-loop stage is drawn inside the
-  pipeline's halo only — it does not also get its own standalone flow halo.
-- AC6: A group dissolves when its flow/pipeline closes (closed entities produce
-  no group). Board placement logic and PR #115 tombstone/close semantics are
-  unchanged.
-- AC7: The group label opens on-canvas override controls. For a flow: reconfigure
-  the next reviewer engine/model/effort, edit the next-round note, extend rounds,
-  set the round limit, retry-round, cancel-round, pause/resume, close. For a
-  pipeline: reconfigure a not-yet-started stage's engine/model/effort/prompt,
-  retry-stage, skip-stage, pause/resume, close.
-- AC8: Override controls wire to existing PATCH actions; new backend additions are
-  minimal and future-only — flows `set-roles` (partial reviewer/implementer role
-  override that a running round does not adopt) and pipelines `override-stage`
-  (edits a stage with no attempt yet; 409 once it has started; keeps the stage
-  input fields consistent with `effectiveRole` and re-validates the combination
-  so an invalid model is a 400, not a 500).
-- AC9: Membership derivation reuses the same anchor resolution as the links, so a
-  halo can never enclose a board key the layout does not draw.
-- AC10: DOM regression tests cover grouping (membership, embedded-flow
-  subsumption, dissolve-on-close, geometry, label/hue rendering, interactive vs
-  passive chip) and the override panel (flow controls + next-unstarted-stage
-  editing). Backend tests cover `set-roles` and `override-stage`. `bun test` and
-  `bunx tsc --noEmit` pass.
-
-## Non-goals / out of scope
-
-- Group collapse when idle-approved (#112): groups dissolve on close only here.
-- Conveyor/orchestrator UI reuse (#114) is a downstream consumer, not built here.
+- AC1: A user can rename a Claude or Codex session from the pane header (pencil,
+  double-click, or F2) with an inline editor that preselects the current title.
+- AC2: The custom title overrides the auto-derived title on every surface,
+  because it is applied once to `FileEntry.title` in the files response.
+- AC3: The override is persisted to `state/session-titles.json` and survives a
+  restart (reload from disk yields the same title).
+- AC4: The override is keyed by stable conversation identity — Viewer
+  conversation id when known, session UUID as the compatibility key, transcript
+  path only as a bounded fallback — so it survives archive/revive/move and
+  account/compaction succession (successors adopt via the UUID/registry seam).
+- AC5: `PATCH /api/session/title` sets a non-empty title and clears on
+  empty/null (reset to auto); the derived title remains reachable via
+  `autoTitle`.
+- AC6: Concurrent edits are guarded by a per-key revision; a base-revision
+  mismatch returns a structured 409 carrying the current server record, and the
+  client adopts it and retries once.
+- AC7: On a successful mutation with a live pid, the tmux window name is renamed
+  to match; a missing pane / unvouched pid / tmux error is a silent no-op that
+  never fails the durable rename.
+- AC8: Editing semantics — Enter and blur save, Escape cancels, empty save and a
+  Reset-to-auto control clear the override.
+- AC9: Only Claude/Codex sessions are renameable; subagents/background tasks are
+  not given the affordance.
+- AC10: User-visible strings have English/Ukrainian parity; the editor exposes
+  aria labels and a polite live region.
+- AC11: DOM tests cover rename, persistence (optimistic display), reset, and
+  409 adopt-and-retry; store/route/overlay/tmux-guard tests cover the backend.
+- AC12: `bun test` and `bunx tsc --noEmit` pass.

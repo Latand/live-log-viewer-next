@@ -14,6 +14,7 @@ import { loadTasks } from "@/lib/tasks/store";
 import { loadWorkflows } from "@/lib/workflows/store";
 import { filterWorkflowsForFileScan } from "@/lib/workflows/visibility";
 import { projectRateLimitReadModel } from "@/lib/rateLimit";
+import { overlaySessionTitles } from "@/lib/session/titleProjection";
 import { tmuxEndpointHealth } from "@/lib/tmux";
 import type { FilesResponse } from "@/lib/types";
 
@@ -83,6 +84,14 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
       };
     }
   }
+  /* Custom session titles (issue #33) are the last word on `title`. The shared
+     projection runs after the registry has stamped `conversationId` and the
+     launch profile, so an override filed under the stable conversation identity
+     wins over the launch-profile title, the derived title, and everything
+     downstream (cards, lists, attention, push). The pre-override title survives
+     on `autoTitle`; the `renamable` flag is projected too so the client never
+     imports the Node-only store. */
+  overlaySessionTitles(files);
   const tasks = reconcileTasks(files, loadTasks(), {
     pathForPanePid: (panePid, entries) => pathForPanePid(entries, panePid, readPpid),
     panePidAlive: pidAlive,

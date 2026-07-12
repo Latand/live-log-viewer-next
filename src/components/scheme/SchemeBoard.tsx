@@ -24,6 +24,8 @@ import { taskDeliveryText } from "@/lib/tasks/helpers";
 import { pipelineAnnouncement, pipelineStripByPath } from "@/components/pipelines/pipelineModel";
 import { BulkActionBar } from "./BulkActionBar";
 import { nodesInRect, pruneSelection, selectionBBox } from "./lasso";
+import { resolveExpandedNode } from "./expandedNode";
+import { autoEditTokenFor, clearStaleRename, requestRename, type RenameRequest } from "./renameRequest";
 import { buildSchemeLayout } from "./layout";
 import { Minimap } from "./Minimap";
 import { AgentLinksLayer, EdgesLayer, GroupsLayer, LoopsLayer, MOVE_EASE, NodesLayer, type DeckFocus } from "./nodes";
@@ -222,9 +224,19 @@ export function SchemeBoard({
   }, [project]);
   /* eslint-enable react-hooks/set-state-in-effect */
   /* The overlay pane re-derives from the layout each poll, so its feed stays
-     live; a node that left the layout (closed, deleted) drops the overlay. */
-  const expandedNode = expanded ? (layout.nodes.find((node) => node.file.path === expanded) ?? null) : null;
+     live; a node that left the layout (closed, deleted) drops the overlay. A
+     succession is not a close: the predecessor entry is replaced by a successor
+     under a new path (same conversation), matched via `predecessorPath` so the
+     overlay — and its rename draft — survives. */
+  const expandedNode = resolveExpandedNode(layout.nodes, expanded);
   const overlayOpen = expandedNode !== null;
+  /* Track the successor's current path so the overlay stays open across a
+     succession (and further successions chain from the new path). */
+  /* eslint-disable react-hooks/set-state-in-effect */
+  useEffect(() => {
+    if (expandedNode && expandedNode.file.path !== expanded) setExpanded(expandedNode.file.path);
+  }, [expandedNode, expanded]);
+  /* eslint-enable react-hooks/set-state-in-effect */
   /* Esc collapses the overlay. Capture phase, so the camera's own Escape
      handler never sees the press and the board selection stays. Presses
      inside text fields keep their meaning for the field. */
@@ -241,6 +253,36 @@ export function SchemeBoard({
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
   }, [overlayOpen]);
+  /* F2 renames the selected node: expand it and open exactly that overlay pane's
+     editor via a token (a broadcast would also open the node's still-mounted
+     board pane, whose blur would persist an unintended rename). Ignored inside
+     text fields. */
+  const [renameRequest, setRenameRequest] = useState<RenameRequest>(null);
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "F2") return;
+      const el = event.target as HTMLElement | null;
+      if (el && (["INPUT", "TEXTAREA", "SELECT"].includes(el.tagName) || el.isContentEditable)) return;
+      const path = selectedRef.current;
+      if (!path) return;
+      const node = layout.nodes.find((candidate) => candidate.file.path === path);
+      if (!node?.file.renamable) return;
+      event.preventDefault();
+      setExpanded(path);
+      setRenameRequest((prev) => requestRename(prev, path));
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [layout]);
+  /* Drop a consumed request once its overlay closes (or the expanded node
+     changes), so an ordinary re-expand of the same node does not replay the
+     stale token and reopen the editor (whose Collapse blur would persist an
+     unintended override). */
+  /* eslint-disable react-hooks/set-state-in-effect */
+  useEffect(() => {
+    setRenameRequest((prev) => clearStaleRename(prev, expanded));
+  }, [expanded]);
+  /* eslint-enable react-hooks/set-state-in-effect */
   const [deckFocus, setDeckFocus] = useState<DeckFocus | null>(null);
   const focusRound = useCallback((flowId: string, round: number) => {
     setDeckFocus((prev) => ({ flowId, round, nonce: (prev?.nonce ?? 0) + 1 }));
@@ -809,11 +851,16 @@ export function SchemeBoard({
         aria-label={cleanTitle(expandedNode.file.title, 90)}
       >
         <BranchPane
+          /* Not keyed by identity: SessionTitle resets its own edit state on a
+             real A→B switch (and preserves it across conversation-id enrichment
+             or succession), so a key here would only cause spurious remounts —
+             and replay a retained F2 token — when a poll fills in identity. */
           file={expandedNode.file}
           tasks={expandedNode.tasks}
           isRoot={expandedNode.isRoot}
           expanded
           onToggleExpand={() => setExpanded(null)}
+          autoEditToken={autoEditTokenFor(renameRequest, expandedNode.file.path)}
         />
       </div>
     ) : null}

@@ -351,6 +351,20 @@ export const uk: Record<keyof typeof en, Message> = {
   "delFile.confirm": "Видалити з диска?",
   "delFile.aria": "Видалити розмову з диска",
 
+  // SessionTitle (rename)
+  "rename.edit": "Перейменувати",
+  "rename.editAria": "Перейменувати «{title}»",
+  "rename.inputAria": "Назва сесії",
+  "rename.save": "Зберегти назву",
+  "rename.cancel": "Скасувати",
+  "rename.reset": "Повернути автоназву",
+  "rename.resetHint": "Повернути автоназву: {title}",
+  "rename.autoHint": "Автоназва: {title}",
+  "rename.retry": "Повторити",
+  "rename.saved": "Перейменовано на {title}",
+  "rename.conflict": "Назву змінили деінде — застосовано найновішу та повторено",
+  "rename.failed": "Не вдалося зберегти назву",
+
   "img.readFailed": "не вдалося прочитати картинку",
   "img.readAborted": "читання картинки перервано",
   "img.unsupported": "непідтримуваний формат картинки: {name}",

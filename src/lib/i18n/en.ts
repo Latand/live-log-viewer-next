@@ -367,6 +367,20 @@ export const en = {
   "delFile.confirm": "Delete from disk?",
   "delFile.aria": "Delete the conversation from disk",
 
+  // SessionTitle (rename)
+  "rename.edit": "Rename",
+  "rename.editAria": "Rename “{title}”",
+  "rename.inputAria": "Session title",
+  "rename.save": "Save name",
+  "rename.cancel": "Cancel",
+  "rename.reset": "Reset to auto title",
+  "rename.resetHint": "Reset to the auto title: {title}",
+  "rename.autoHint": "Auto title: {title}",
+  "rename.retry": "Retry",
+  "rename.saved": "Renamed to {title}",
+  "rename.conflict": "Name changed elsewhere — adopted the latest and retried",
+  "rename.failed": "Couldn't save the name",
+
   // imageAttachments
   "img.readFailed": "couldn't read the image",
   "img.readAborted": "image reading aborted",
