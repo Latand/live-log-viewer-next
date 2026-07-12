@@ -48,39 +48,60 @@ export interface DeliverySuccess {
   spawned?: boolean;
 }
 
-export async function reconfigureConversation(filePath: string, config: AgentReconfiguration): Promise<DeliveryOutcome> {
-  if (!filePath || !pathAllowed(filePath)) return failure("the conversation path is required", 400);
-  const entry = (await listFiles()).find((item) => item.path === filePath);
+interface ReconfigureConversationOverrides {
+  pathAllowed?: typeof pathAllowed;
+  listFiles?: typeof listFiles;
+  resumeSpecFor?: typeof resumeSpecFor;
+  livePaneHost?: typeof livePaneHost;
+  registry?: AgentRegistry;
+  paneScreen?: typeof paneScreen;
+  killHost?: typeof killTmuxHostIfMatches;
+  deliver?: typeof deliverToTranscriptHost;
+}
+
+export async function reconfigureConversation(
+  filePath: string,
+  config: AgentReconfiguration,
+  overrides: ReconfigureConversationOverrides = {},
+): Promise<DeliveryOutcome> {
+  if (!filePath || !(overrides.pathAllowed ?? pathAllowed)(filePath)) return failure("the conversation path is required", 400);
+  const entry = (await (overrides.listFiles ?? listFiles)()).find((item) => item.path === filePath);
   if (!entry || (entry.engine !== "claude" && entry.engine !== "codex")) return failure("conversation is unavailable", 403);
-  const spec = resumeSpecFor(entry.root, entry.path, config);
+  const spec = (overrides.resumeSpecFor ?? resumeSpecFor)(entry.root, entry.path, config);
   if (!spec) return failure("this conversation cannot be resumed", 409);
-  const host = await livePaneHost(filePath);
+  const deliver = overrides.deliver ?? deliverToTranscriptHost;
+  const host = await (overrides.livePaneHost ?? livePaneHost)(filePath);
   if (host === null) {
-    const resumed = await hostOutcome(deliverToTranscriptHost({ entry, spec, payload: "" }));
+    const resumed = await hostOutcome(deliver({ entry, spec, payload: "" }));
     return resumed.ok ? { ...resumed, outcome: "reconfigured" } : resumed;
   }
-  const registry = agentRegistry();
+  const registry = overrides.registry ?? agentRegistry();
   const registered = registeredHostForPath(registry.snapshot(), filePath);
   if (!registered?.host) return failure("no registered agent pane for this conversation", 404);
   const owner = { pid: process.pid, startIdentity: procBackend.processIdentity(process.pid) };
   try {
-    return await registry.withOperationLock(registered.key, owner, async () => {
+    const prepared = await registry.withOperationLock(registered.key, owner, async () => {
       const refreshed = registeredHostForPath(registry.snapshot(), filePath);
       if (!refreshed?.host || refreshed.host.paneId !== host.paneId) {
         return failure("the registered pane changed", 409);
       }
       const refreshedHost = refreshed.host;
       return withPaneLock(host.paneId, async () => {
-        if (!screenAtIdleComposer(await paneScreen(host.paneId))) {
-          return { ok: true, target: host.display, outcome: "pending" } as DeliverySuccess;
+        if (!screenAtIdleComposer(await (overrides.paneScreen ?? paneScreen)(host.paneId))) {
+          return "pending" as const;
         }
-        if (!await killTmuxHostIfMatches(refreshedHost)) return failure("the registered pane changed or its process did not exit", 409);
+        if (!await (overrides.killHost ?? killTmuxHostIfMatches)(refreshedHost)) return failure("the registered pane changed or its process did not exit", 409);
         registry.markUnhosted(refreshed.key);
         forgetResumePane(filePath);
-        const resumed = await hostOutcome(deliverToTranscriptHost({ entry: { ...entry, pid: null, proc: "done" }, spec, payload: "" }));
-        return resumed.ok ? { ...resumed, outcome: "reconfigured" } : resumed;
+        return "prepared" as const;
       });
     });
+    if (prepared === "pending") return { ok: true, target: host.display, outcome: "pending" };
+    if (prepared !== "prepared") return prepared;
+    /* Resume acquires the same per-session serialization lock through the
+       transcript-host adapter. The termination lock must be released first. */
+    const resumed = await hostOutcome(deliver({ entry: { ...entry, pid: null, proc: "done" }, spec, payload: "" }));
+    return resumed.ok ? { ...resumed, outcome: "reconfigured" } : resumed;
   } catch (error) {
     return failure(error);
   }

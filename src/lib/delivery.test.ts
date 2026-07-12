@@ -6,7 +6,9 @@ import path from "node:path";
 import { AgentRegistry, setAgentRegistryForTests, type ConversationObservation, type RegistryFile, type TmuxHostEvidence } from "./agent/registry";
 import { emptyLaunchProfile } from "./accounts/migration/contracts";
 import { drainHeldDeliveries } from "./accounts/migration/coordinator";
-import { cleanupFailedImageDelivery, deliverConversationMessage, killConversation, migrationDeliveryOutcome, type DeliveryFailure } from "./delivery";
+import { cleanupFailedImageDelivery, deliverConversationMessage, killConversation, migrationDeliveryOutcome, reconfigureConversation, type DeliveryFailure } from "./delivery";
+import type { TranscriptHost } from "./agent/transcriptHost";
+import type { FileEntry } from "./types";
 import { TmuxDeliveryUncertainError } from "./tmux";
 
 const SANDBOX = fs.mkdtempSync(path.join(os.tmpdir(), "llv-delivery-test-"));
@@ -54,6 +56,49 @@ test("migration delivery keeps an internally held result recoverable", () => {
   expect(migrationDeliveryOutcome({ ok: true, target: "pane" })).toBe("delivered");
   expect(migrationDeliveryOutcome(failure)).toBe("failed");
   expect(migrationDeliveryOutcome({ ...failure, actuation: "started" as const })).toBe("delivery-uncertain");
+});
+
+test("idle reconfiguration releases the real session lock before serialized resume", async () => {
+  const sessionId = "019f4e76-66b4-7f87-94b2-cfa9bf733333";
+  const pathname = path.join(SANDBOX, `${sessionId}.jsonl`);
+  fs.writeFileSync(pathname, "");
+  const registry = new AgentRegistry(path.join(SANDBOX, "reconfigure-registry.json"));
+  const key = { engine: "codex" as const, sessionId };
+  registry.upsert({
+    key, artifactPath: pathname, cwd: SANDBOX, accountId: "default",
+    launchProfile: emptyLaunchProfile({ cwd: SANDBOX, role: "worker" }), status: "idle",
+    host: KILL_HOST, claimEpoch: 1, claimOwner: null, pendingAction: null,
+  });
+  const entry: FileEntry = {
+    path: pathname, root: "codex-sessions", name: path.basename(pathname), project: "viewer", title: "worker",
+    engine: "codex", kind: "session", fmt: "codex", parent: null, mtime: 1, size: 0, activity: "idle",
+    proc: "running", pid: KILL_HOST.agent.pid, model: "gpt-5.6-sol", effort: "high", fast: false,
+    pendingQuestion: null, waitingInput: null,
+  };
+  const liveHost: TranscriptHost = {
+    tmuxServerPid: KILL_HOST.server.pid, paneId: KILL_HOST.paneId, panePid: KILL_HOST.panePid.pid,
+    agentPid: KILL_HOST.agent.pid, display: KILL_HOST.paneId, windowName: KILL_HOST.windowName,
+    engine: "codex", cwd: SANDBOX, agentArgv: KILL_HOST.argv, agentIdentity: KILL_HOST.agent.startIdentity,
+    launchId: null, claimedPaths: [pathname], primaryPath: pathname,
+  };
+  let resumed = 0;
+
+  const outcome = await reconfigureConversation(pathname, { model: "gpt-5.6-terra", effort: "medium", fast: true }, {
+    pathAllowed: () => true,
+    listFiles: async () => [entry],
+    resumeSpecFor: () => ({ command: "codex resume", cwd: SANDBOX, windowName: "codex-resume", engine: "codex" }),
+    livePaneHost: async () => liveHost,
+    registry,
+    paneScreen: async () => "›\n? for shortcuts",
+    killHost: async () => true,
+    deliver: async () => registry.withOperationLock(key, { pid: process.pid, startIdentity: null }, async () => {
+      resumed += 1;
+      return { ok: true, outcome: "resumed", target: "%8" };
+    }),
+  });
+
+  expect(outcome).toMatchObject({ ok: true, outcome: "reconfigured", target: "%8" });
+  expect(resumed).toBe(1);
 });
 
 const KILL_HOST: TmuxHostEvidence = {

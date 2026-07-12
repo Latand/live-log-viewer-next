@@ -1,7 +1,7 @@
 "use client";
 
 import { Check, Loader2 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { conversationIdentity } from "@/lib/accounts/identity";
 import { effortScale } from "@/lib/agent/efforts";
@@ -48,7 +48,14 @@ export function AgentRuntimeControls({ file }: { file: FileEntry }) {
   const [draft, setDraft] = useState<Draft>(() => defaults(file));
   const [state, setState] = useState<ApplyState>("idle");
   const [error, setError] = useState("");
+  const revisionRef = useRef(0);
   const efforts = useMemo(() => effortScale(engine, draft.model) ?? [], [engine, draft.model]);
+  const editDraft = (update: (current: Draft) => Draft) => {
+    revisionRef.current += 1;
+    localStorage.removeItem(storageKey(file) + ":phase");
+    setDraft(update);
+    setState("idle");
+  };
 
   useEffect(() => {
     const stored = readDraft(file);
@@ -63,6 +70,7 @@ export function AgentRuntimeControls({ file }: { file: FileEntry }) {
 
   const apply = async () => {
     if (state === "saving") return;
+    const revision = revisionRef.current;
     setState("saving");
     setError("");
     try {
@@ -72,12 +80,14 @@ export function AgentRuntimeControls({ file }: { file: FileEntry }) {
         body: JSON.stringify({ action: "reconfigure", path: file.path, ...draft, fast: engine === "codex" ? draft.fast : undefined }),
       });
       const body = await response.json() as { ok?: boolean; outcome?: string; error?: string };
+      if (revision !== revisionRef.current) return;
       if (!response.ok || !body.ok) throw new Error(body.error ?? t("runtimeConfig.failed"));
       const pending = body.outcome === "pending";
       const phase = pending ? "pending" : "confirming";
       localStorage.setItem(storageKey(file) + ":phase", phase);
       setState(phase);
     } catch (cause) {
+      if (revision !== revisionRef.current) return;
       setError(cause instanceof Error ? cause.message : t("runtimeConfig.failed"));
       setState("error");
     }
@@ -110,18 +120,17 @@ export function AgentRuntimeControls({ file }: { file: FileEntry }) {
         onChange={(event) => {
           const model = event.target.value;
           const scale = effortScale(engine, model) ?? [];
-          setDraft((current) => ({ ...current, model, effort: scale.includes(current.effort) ? current.effort : scale[0]! }));
-          setState("idle");
+          editDraft((current) => ({ ...current, model, effort: scale.includes(current.effort) ? current.effort : scale[0]! }));
         }}
       >
         {ENGINE_MODELS[engine].map((model) => <option key={model.id} value={model.id}>{model.label}</option>)}
       </select>
-      <select className={selectClass} aria-label={t("runtimeConfig.effort")} value={draft.effort} onChange={(event) => { setDraft((current) => ({ ...current, effort: event.target.value })); setState("idle"); }}>
+      <select className={selectClass} aria-label={t("runtimeConfig.effort")} value={draft.effort} onChange={(event) => editDraft((current) => ({ ...current, effort: event.target.value }))}>
         {efforts.map((effort) => <option key={effort} value={effort}>{effort}</option>)}
       </select>
       {engine === "codex" ? (
         <label className="inline-flex h-6 items-center gap-1 rounded-full border border-line bg-bg px-1.5 font-mono text-[9.5px] font-semibold text-[#555]" title={t("runtimeConfig.speedTitle")}>
-          <input type="checkbox" checked={draft.fast} onChange={(event) => { setDraft((current) => ({ ...current, fast: event.target.checked })); setState("idle"); }} /> fast
+          <input type="checkbox" checked={draft.fast} onChange={(event) => editDraft((current) => ({ ...current, fast: event.target.checked }))} /> fast
         </label>
       ) : null}
       <button type="button" className="inline-flex h-6 items-center gap-1 rounded-full border border-line bg-bg px-1.5 text-[9.5px] font-semibold text-dim hover:border-accent/45 hover:text-accent disabled:opacity-60" disabled={state === "saving"} onClick={() => void apply()} aria-label={t("runtimeConfig.apply")}>
