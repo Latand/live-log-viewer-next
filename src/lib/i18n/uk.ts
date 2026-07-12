@@ -807,6 +807,22 @@ export const uk: Record<keyof typeof en, Message> = {
   "limits.accountsOpenAria": "Акаунти Codex — змінити або додати",
   "limits.noDataYet": "поки немає даних",
 
+  // Burndown chart (issue #36)
+  "burndown.title": "витрати",
+  "burndown.openAria": "Відкрити графік витрати квоти {engine}",
+  "burndown.close": "Закрити графік",
+  "burndown.windowAria": "Вікно графіка",
+  "burndown.ideal": "рівний темп",
+  "burndown.actual": "лишок",
+  "burndown.loading": "Завантаження історії…",
+  "burndown.failed": "Не вдалося завантажити історію.",
+  "burndown.empty": "Історії ще немає — графік заповнюється в міру збору даних.",
+  "burndown.buildsFrom": "історія від {date}",
+  "burndown.fast": "на {pct}% швидше за рівний темп — витрачаєте зашвидко",
+  "burndown.slow": "на {pct}% повільніше за рівний темп — є запас",
+  "burndown.even": "рівний темп",
+  "burndown.emptyBy": "за таким темпом 0% до {at}",
+
   // ResourcesFooter
   "resources.ram": "RAM",
   "resources.swap": "Swap",

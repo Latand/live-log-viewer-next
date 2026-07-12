@@ -840,6 +840,22 @@ export const en = {
   "limits.accountsOpenAria": "Codex accounts — switch or add",
   "limits.noDataYet": "no data yet",
 
+  // Burndown chart (issue #36)
+  "burndown.title": "burndown",
+  "burndown.openAria": "Open {engine} burndown chart",
+  "burndown.close": "Close chart",
+  "burndown.windowAria": "Chart window",
+  "burndown.ideal": "even pace",
+  "burndown.actual": "remaining",
+  "burndown.loading": "Loading history…",
+  "burndown.failed": "Couldn't load history.",
+  "burndown.empty": "No history yet — the chart fills in as quota is sampled.",
+  "burndown.buildsFrom": "history builds from {date}",
+  "burndown.fast": "{pct}% ahead of pace — burning fast",
+  "burndown.slow": "{pct}% under pace — room to spare",
+  "burndown.even": "on even pace",
+  "burndown.emptyBy": "at this rate, 0% by {at}",
+
   // ResourcesFooter
   "resources.ram": "RAM",
   "resources.swap": "Swap",

@@ -7,6 +7,7 @@ import { getLocale, type Locale, translate, useLocale } from "@/lib/i18n";
 import type { EngineLimits, LimitsPayload, LimitWindow } from "@/lib/types";
 
 import { AccountsPanel } from "./AccountsPanel";
+import { BurndownPanel } from "./BurndownPanel";
 import { ChevronDown, Loader2 } from "./icons";
 import { engineTintOf, fmtAge } from "./utils";
 
@@ -196,6 +197,7 @@ function EngineLimitsBlock({
   const { t } = useLocale();
   const accounts = useEngineAccounts(engine);
   const [open, setOpen] = useState(false);
+  const [chartOpen, setChartOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const identityVersion = useRef(accounts.identityVersion);
@@ -217,6 +219,25 @@ function EngineLimitsBlock({
     window.addEventListener("pointerdown", onDown);
     return () => window.removeEventListener("pointerdown", onDown);
   }, [open]);
+
+  // The burndown chart owns its own dismissal (Esc + outside pointer), mirroring
+  // ResourcesFooter's cleanup panel. It renders inside containerRef, so clicks
+  // inside the chart are "contained" and never self-close it.
+  useEffect(() => {
+    if (!chartOpen) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setChartOpen(false);
+    };
+    const onDown = (event: PointerEvent) => {
+      if (containerRef.current && !containerRef.current.contains(event.target as Node)) setChartOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    window.addEventListener("pointerdown", onDown);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("pointerdown", onDown);
+    };
+  }, [chartOpen]);
 
   // Every mounted account surface of this engine shares one store. A version
   // bump arrives for both the compact Switchboard selector and the footer panel,
@@ -241,49 +262,65 @@ function EngineLimitsBlock({
 
   return (
     <div ref={containerRef} className="relative">
-      <button
-        ref={triggerRef}
-        type="button"
-        aria-expanded={open}
-        aria-haspopup="dialog"
-        aria-label={t("accounts.triggerAria", { engine: label })}
-        onClick={() => setOpen((value) => !value)}
-        className={`block w-full px-3.5 pb-3 pt-2.5 text-left hover:bg-bg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${staleHint ? "opacity-60" : ""}`}
-      >
-        <div className="flex items-center gap-1.5">
-          <span className="text-[11.5px] font-bold" style={{ color: tint.color }}>{label}</span>
-          {accountLimits?.plan ? <span className="truncate text-[10px] text-dim">{accountLimits.plan}</span> : null}
-          {staleHint ? <span className="truncate text-[10px] text-dim">{staleHint}</span> : null}
-          {stale ? <span className="h-1.5 w-1.5 shrink-0 self-center rounded-full bg-[#d29a2f]" title={t("limits.stale", { stale })} /> : null}
-          <span className="ml-auto flex shrink-0 items-center gap-1">
-            {effective && effective.freshness !== "unavailable" ? (
-              <span
-                className={`rounded-full border border-line bg-bg px-1.5 py-0.5 text-[9.5px] font-bold tabular-nums ${effective.freshness === "stale" ? "opacity-55" : ""}`}
-                style={{ color: barColor(effective.percent, tint.color) }}
-              >
-                {t("accounts.effective", { pct: Math.round(effective.percent) })}
+      <div className={staleHint ? "opacity-60" : ""}>
+        <button
+          ref={triggerRef}
+          type="button"
+          aria-expanded={open}
+          aria-haspopup="dialog"
+          aria-label={t("accounts.triggerAria", { engine: label })}
+          onClick={() => {
+            setChartOpen(false);
+            setOpen((value) => !value);
+          }}
+          className="block w-full px-3.5 pb-1.5 pt-2.5 text-left hover:bg-bg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+        >
+          <div className="flex items-center gap-1.5">
+            <span className="text-[11.5px] font-bold" style={{ color: tint.color }}>{label}</span>
+            {accountLimits?.plan ? <span className="truncate text-[10px] text-dim">{accountLimits.plan}</span> : null}
+            {staleHint ? <span className="truncate text-[10px] text-dim">{staleHint}</span> : null}
+            {stale ? <span className="h-1.5 w-1.5 shrink-0 self-center rounded-full bg-[#d29a2f]" title={t("limits.stale", { stale })} /> : null}
+            <span className="ml-auto flex shrink-0 items-center gap-1">
+              {effective && effective.freshness !== "unavailable" ? (
+                <span
+                  className={`rounded-full border border-line bg-bg px-1.5 py-0.5 text-[9.5px] font-bold tabular-nums ${effective.freshness === "stale" ? "opacity-55" : ""}`}
+                  style={{ color: barColor(effective.percent, tint.color) }}
+                >
+                  {t("accounts.effective", { pct: Math.round(effective.percent) })}
+                </span>
+              ) : null}
+              <span className="flex items-center gap-0.5 rounded-full border border-line bg-bg px-1.5 py-0.5 text-[10px] font-semibold text-ink">
+                <span className="max-w-24 truncate">{activeLabel}</span>
+                {draining ? (
+                  <Loader2 className="h-3 w-3 animate-spin motion-reduce:animate-none text-accent" aria-hidden />
+                ) : (
+                  <ChevronDown className="h-3 w-3 text-dim" aria-hidden />
+                )}
               </span>
-            ) : null}
-            <span className="flex items-center gap-0.5 rounded-full border border-line bg-bg px-1.5 py-0.5 text-[10px] font-semibold text-ink">
-              <span className="max-w-24 truncate">{activeLabel}</span>
-              {draining ? (
-                <Loader2 className="h-3 w-3 animate-spin motion-reduce:animate-none text-accent" aria-hidden />
-              ) : (
-                <ChevronDown className="h-3 w-3 text-dim" aria-hidden />
-              )}
             </span>
-          </span>
-        </div>
+          </div>
+        </button>
         {hasWindows ? (
-          <>
+          <button
+            type="button"
+            aria-expanded={chartOpen}
+            aria-haspopup="dialog"
+            aria-label={t("burndown.openAria", { engine: label })}
+            onClick={() => {
+              setOpen(false);
+              setChartOpen((value) => !value);
+            }}
+            className="block w-full px-3.5 pb-3 pt-0.5 text-left hover:bg-bg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+          >
             <LimitRow label={t("limits.5h")} window={accountLimits!.session} engineColor={tint.color} now={now} />
             <LimitRow label={t("limits.week")} window={accountLimits!.weekly} engineColor={tint.color} now={now} />
-          </>
+          </button>
         ) : (
-          <div className="mt-1.5 text-[10px] text-dim">{accounts.status === "loading" || identityPending ? t("limits.accountLoading") : t("limits.noDataYet")}</div>
+          <div className="px-3.5 pb-3 pt-0.5 text-[10px] text-dim">{accounts.status === "loading" || identityPending ? t("limits.accountLoading") : t("limits.noDataYet")}</div>
         )}
-      </button>
+      </div>
       {open ? <AccountsPanel state={accounts} onClose={close} /> : null}
+      {chartOpen ? <BurndownPanel engine={engine} label={label} plan={accountLimits?.plan ?? null} onClose={() => setChartOpen(false)} /> : null}
     </div>
   );
 }

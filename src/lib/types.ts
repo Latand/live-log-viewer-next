@@ -305,6 +305,45 @@ export interface LimitsPayload {
   staleSince?: string | null;
 }
 
+/** One remaining-quota sample of the burndown series: `remaining` is the
+    percent of quota left (0–100 = 100 − usedPercent) at unix second `t`. */
+export interface LimitSample {
+  t: number;
+  remaining: number;
+}
+
+/** A burndown series for one engine window (5h session or weekly). The ideal
+    even-pace diagonal runs 100% at `windowStart` → 0% at `resetsAt`; the actual
+    curve is `samples`, filtered to the current window. */
+export interface BurndownSeries {
+  /** Unix seconds at the window's opening (resetsAt − windowSeconds), or null
+      when the reset moment is unknown. */
+  windowStart: number | null;
+  /** Unix seconds when the window resets, or null when unknown. */
+  resetsAt: number | null;
+  /** Window length in seconds (5h = 18000, weekly = 604800; Codex may differ). */
+  windowSeconds: number;
+  /** Remaining-quota samples inside the current window, oldest first. */
+  samples: LimitSample[];
+}
+
+/** Both windows' burndown series for one engine. */
+export interface EngineBurndown {
+  session: BurndownSeries;
+  weekly: BurndownSeries;
+}
+
+/** Burndown history for both engines, returned by GET /api/limits/history. */
+export interface BurndownPayload {
+  claude: EngineBurndown | null;
+  codex: EngineBurndown | null;
+  claudeAccountId: string | null;
+  codexAccountId: string | null;
+  /** ISO time the forward poll history began accruing, for the sparse-state
+      hint on engines (Claude) that can only be sampled going forward. */
+  historySince: string | null;
+}
+
 /** Host memory pressure for the rail block, all byte fields absolute.
     swapTotal 0 means "no swap (or the swap probe failed)" — hide the row. */
 export interface ResourcesSystem {
