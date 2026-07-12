@@ -5,6 +5,7 @@ import { expect, test } from "bun:test";
 
 import { AgentRegistry } from "@/lib/agent/registry";
 import { spawnResponseForReceipt } from "@/lib/agent/spawnResponse";
+import { resolveSpawnParent } from "./route";
 
 function registry(): AgentRegistry {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "llv-spawn-route-"));
@@ -34,5 +35,18 @@ test("spawn route projects a launched path-pending receipt as a truthful success
     target: "%9",
     launchId: begun.receipt.launchId,
     conversationId: begun.receipt.conversationId,
+  });
+});
+
+test("spawn route accepts an explicit stable parent conversation identity", () => {
+  const store = registry();
+  const parentPath = "/sessions/rollout-019f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl";
+  const parent = store.ensureConversation("codex", parentPath, "terra");
+
+  expect(resolveSpawnParent({ parentConversationId: parent.id }, store)).toEqual({
+    conversationId: parent.id,
+    engine: "codex",
+    artifactPath: parentPath,
+    sessionKey: { engine: "codex", sessionId: "019f4906-3f67-7b72-9fbc-9ec3b5ad1326" },
   });
 });

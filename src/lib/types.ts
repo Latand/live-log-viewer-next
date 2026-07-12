@@ -337,6 +337,8 @@ export interface ResourceSession {
   panePid: number;
   path: string | null;
   engine: "claude" | "codex" | null;
+  /** Several live panes claim the same stable conversation identity. */
+  hostConflict?: boolean;
   title: string | null;
   project: string | null;
   activity: Activity | null;

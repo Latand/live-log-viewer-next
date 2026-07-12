@@ -123,6 +123,7 @@ function fakeHost(existing = true) {
       return identity;
     },
     launchId: async () => state.launchId,
+    conversationIdForPath: (pathname: string) => pathname === PATHNAME ? "conversation_test" : null,
     spawn: async (resumeSpec: ResumeSpec, payload: string): Promise<SpawnedPane> => {
       state.spawnCalls += 1;
       state.spawnSpecs.push({ spec: resumeSpec, payload });
@@ -187,6 +188,30 @@ describe("transcript host resolver", () => {
     expect(first).toEqual({ ok: true, outcome: "resumed", target: "agents:5.0" });
     expect(second).toEqual({ ok: true, outcome: "delivered-to-live", target: "agents:5.0" });
     expect(state.delivered.sort()).toEqual(["%9:first", "%9:second"]);
+  });
+
+  test("surfaces duplicate live panes for one conversation and refuses a third resume", async () => {
+    const { resolver, state } = fakeHost();
+    state.panes.set(101, { paneId: "%2", target: "agents:6.0" });
+    state.agents.push({ pid: 201, engine: "codex", argv: ["codex", "resume", SESSION], cwd: "/repo", tty: 1 });
+    state.ppids.set(201, 101);
+    state.identities.set(201, "201:one");
+
+    const snapshot = await resolver.readTranscriptHosts(true);
+
+    expect(snapshot.canonicalFor(PATHNAME)).toBeNull();
+    expect(snapshot.conflicts).toEqual([{
+      conversationId: "conversation_test",
+      paths: [PATHNAME],
+      paneIds: ["%1", "%2"],
+    }]);
+    expect(await resolver.deliverToTranscriptHost({ entry: state.entry, spec, payload: "single owner required" })).toEqual({
+      ok: false,
+      outcome: "failed",
+      error: "conversation has multiple live panes",
+      status: 409,
+    });
+    expect(state.spawnCalls).toBe(0);
   });
 
   test("reports resumed to a joined sender that owns recovery after the live host exits", async () => {

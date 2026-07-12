@@ -893,6 +893,8 @@ export const en = {
   "resources.total": "Σ {amount}",
   "resources.empty": "no agent sessions in tmux",
   "resources.orphan": "orphan pane",
+  "resources.hostConflict": "duplicate conversation pane",
+  "resources.hostConflictHint": "multiple live panes claim this conversation",
   "resources.procs": {
     one: "{count} process",
     other: "{count} processes",

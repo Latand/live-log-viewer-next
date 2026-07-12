@@ -124,11 +124,54 @@ function parentFromBody(body: { src?: unknown; parent?: unknown }): string {
   return typeof body.src === "string" ? body.src : "";
 }
 
-function conversationForTranscript(transcript: string): `conversation_${string}` {
-  const registry = agentRegistry();
+function conversationForTranscript(transcript: string, registry = agentRegistry()): `conversation_${string}` {
   const existing = registry.conversationForPath(transcript);
   if (existing) return existing.id;
   return registry.ensureConversation(codexSessionRootFor(transcript) ? "codex" : "claude", transcript, null).id;
+}
+
+export interface ResolvedSpawnParent {
+  conversationId: `conversation_${string}`;
+  engine: "claude" | "codex";
+  artifactPath: string;
+  sessionKey: ReturnType<typeof sessionKeyFromTranscript>;
+}
+
+class SpawnParentError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message);
+    this.name = "SpawnParentError";
+  }
+}
+
+export function resolveSpawnParent(
+  body: { src?: unknown; parent?: unknown; parentConversationId?: unknown },
+  registry = agentRegistry(),
+): ResolvedSpawnParent | null {
+  if (body.parentConversationId !== undefined) {
+    if (typeof body.parentConversationId !== "string" || !/^conversation_[0-9a-f-]{36}$/i.test(body.parentConversationId)) {
+      throw new SpawnParentError("parentConversationId is invalid", 400);
+    }
+    const conversation = registry.conversation(body.parentConversationId as `conversation_${string}`);
+    if (!conversation) throw new SpawnParentError("parent conversation is unknown", 404);
+    const artifactPath = conversation.generations.at(-1)?.path;
+    if (!artifactPath) throw new SpawnParentError("parent conversation has no active generation", 409);
+    return {
+      conversationId: conversation.id,
+      engine: conversation.engine,
+      artifactPath,
+      sessionKey: sessionKeyFromTranscript(conversation.engine, artifactPath),
+    };
+  }
+  const artifactPath = parentFromBody(body);
+  if (!artifactPath || !transcriptAllowed(artifactPath)) return null;
+  const engine = codexSessionRootFor(artifactPath) ? "codex" : "claude";
+  return {
+    conversationId: conversationForTranscript(artifactPath, registry),
+    engine,
+    artifactPath,
+    sessionKey: sessionKeyFromTranscript(engine, artifactPath),
+  };
 }
 
 function spawnDigest(input: Record<string, unknown>): string {
@@ -139,7 +182,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse
   const rejection = rejectCrossOrigin(req);
   if (rejection) return rejection;
 
-  let body: { engine?: unknown; model?: unknown; cwd?: unknown; prompt?: unknown; images?: unknown; src?: unknown; parent?: unknown; effort?: unknown; fast?: unknown; accountId?: unknown; clientAttemptId?: unknown; role?: unknown; roleParams?: unknown; confirm?: unknown };
+  let body: { engine?: unknown; model?: unknown; cwd?: unknown; prompt?: unknown; images?: unknown; src?: unknown; parent?: unknown; parentConversationId?: unknown; effort?: unknown; fast?: unknown; accountId?: unknown; clientAttemptId?: unknown; role?: unknown; roleParams?: unknown; confirm?: unknown };
   try {
     body = (await req.json()) as typeof body;
   } catch {
@@ -189,10 +232,10 @@ export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse
   let launchId: string | null = null;
   try {
     const account = accountManager.resolveSpawn(engine, body.accountId);
-    const src = parentFromBody(body);
-    const parentConversationId = src && transcriptAllowed(src) ? conversationForTranscript(src) : null;
-    const parentEngine = parentConversationId ? (codexSessionRootFor(src) ? "codex" : "claude") : null;
-    const parentSessionKey = parentEngine ? sessionKeyFromTranscript(parentEngine, src) : null;
+    const parent = resolveSpawnParent(body);
+    const parentConversationId = parent?.conversationId ?? null;
+    const parentSessionKey = parent?.sessionKey ?? null;
+    const parentArtifactPath = parent?.artifactPath ?? null;
     const digest = spawnDigest({
       engine,
       cwd,
@@ -203,7 +246,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse
       role: role.value?.role ?? null,
       parentConversationId,
       parentSessionKey,
-      parentArtifactPath: parentConversationId ? src : null,
+      parentArtifactPath,
       prompt,
       images: images.map((image) => ({ mime: image.mime, digest: spawnDigest({ image: image.base64 }) })),
     });
@@ -222,7 +265,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse
       accountId: account.accountId,
       parentConversationId,
       parentSessionKey,
-      parentArtifactPath: parentConversationId ? src : null,
+      parentArtifactPath,
       launchProfile: spec.launchProfile,
       clientAttemptId: body.clientAttemptId ?? null,
       requestDigest: digest,
@@ -305,8 +348,8 @@ export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse
         console.warn("[runtime] spawned agent is healthy; lineage bookkeeping will reconcile later");
       }
     }
-    if (src && transcriptAllowed(src)) {
-      if (childPath) rememberHandoffChild(childPath, src);
+    if (parentArtifactPath) {
+      if (childPath) rememberHandoffChild(childPath, parentArtifactPath);
       persistHandoffLineage();
     }
     if (!await verifyTmuxHostEvidence(pane.host)) {
@@ -321,6 +364,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse
       if (receipt) agentRegistry().failSpawn(receipt.launchId, "spawn failed before pane binding");
       deleteInboxImages(imagePaths);
     }
+    if (error instanceof SpawnParentError) return NextResponse.json({ error: error.message }, { status: error.status });
     if (error instanceof UnknownAccountError || error instanceof UnknownClaudeAccountError) return NextResponse.json({ error: error.message }, { status: 400 });
     if (receipt?.pane) {
       if (receipt.state === "prompt-delivered" || receipt.state === "host-verified") agentRegistry().markSpawnPathPending(receipt.launchId);

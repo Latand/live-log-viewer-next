@@ -15,7 +15,7 @@ function registry(ownerAlive: (owner: { pid: number; startIdentity: string | nul
 
 function spawnEntry(pathname: string, accountId = "terra") {
   return {
-    key: { engine: "codex" as const, sessionId: pathname.match(/[0-9a-f-]{36}/)?.[0] ?? "019f4906-3f67-7b72-9fbc-9ec3b5ad1326" },
+    key: { engine: "codex" as const, sessionId: pathname.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i)?.[0] ?? "019f4906-3f67-7b72-9fbc-9ec3b5ad1326" },
     artifactPath: pathname,
     cwd: "/repo",
     accountId,
@@ -350,6 +350,114 @@ describe("agent registry", () => {
     expect(snapshot.lineageEdges[begun.receipt.conversationId]).toMatchObject({
       childSessionKey: { engine: "codex", sessionId: "019f4906-3f67-7b72-9fbc-9ec3b5ad1326" },
       childArtifactPath: path,
+    });
+  });
+
+  test("keeps one conversation identity through a controlled resume chain", () => {
+    const store = registry();
+    const firstPath = "/sessions/rollout-019f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl";
+    const secondPath = "/sessions/rollout-019f4906-3f67-7b72-9fbc-9ec3b5ad1327.jsonl";
+    const thirdPath = "/sessions/rollout-019f4906-3f67-7b72-9fbc-9ec3b5ad1328.jsonl";
+    const conversation = store.ensureConversation("codex", firstPath, "terra");
+
+    for (const pathname of [secondPath, thirdPath]) {
+      const begun = store.beginSpawnRequest({
+        engine: "codex",
+        cwd: "/repo",
+        accountId: "terra",
+        conversationId: conversation.id,
+        purpose: "resume-successor",
+      });
+      if (begun.kind !== "created") throw new Error("expected create");
+      expect(store.settleSpawn(begun.receipt.launchId, spawnEntry(pathname))).toMatchObject({
+        kind: "settled",
+        conversation: { id: conversation.id },
+      });
+    }
+
+    const resumed = store.conversation(conversation.id)!;
+    expect(resumed.generations.map((generation) => generation.path)).toEqual([firstPath, secondPath, thirdPath]);
+    expect(Object.values(store.snapshot().conversations)).toHaveLength(1);
+    for (const pathname of [firstPath, secondPath, thirdPath]) {
+      expect(store.conversationForPath(pathname)?.id).toBe(conversation.id);
+    }
+  });
+
+  test("treats a second rollout path with the same native session key as one conversation", () => {
+    const store = registry();
+    const nativeId = "019f4906-3f67-7b72-9fbc-9ec3b5ad1326";
+    const firstPath = `/sessions/2026/07/11/rollout-2026-07-11T10-00-00-${nativeId}.jsonl`;
+    const secondPath = `/sessions/2026/07/12/rollout-2026-07-12T10-00-00-${nativeId}.jsonl`;
+    const conversation = store.ensureConversation("codex", firstPath, "terra");
+
+    store.reconcileConversations([{
+      engine: "codex",
+      path: secondPath,
+      accountId: "terra",
+      launchProfile: emptyLaunchProfile({ cwd: "/repo" }),
+      turn: { state: "idle", source: "empty", terminalAt: null },
+      observedAt: "2026-07-12T10:00:00.000Z",
+    }]);
+
+    expect(store.conversationForPath(firstPath)?.id).toBe(conversation.id);
+    expect(store.conversationForPath(secondPath)?.id).toBe(conversation.id);
+    expect(store.conversation(conversation.id)?.generations.at(-1)?.path).toBe(secondPath);
+    expect(Object.values(store.snapshot().conversations)).toHaveLength(1);
+  });
+
+  test("repairs an exact-path provisional owner split in favor of receipt-owned identity", () => {
+    const store = registry();
+    const pathname = "/sessions/rollout-019f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl";
+    const begun = store.beginSpawnRequest({ engine: "codex", cwd: "/repo", accountId: "terra" });
+    if (begun.kind !== "created") throw new Error("expected create");
+    const settled = store.settleSpawn(begun.receipt.launchId, spawnEntry(pathname));
+    if (settled.kind !== "settled") throw new Error("expected settlement");
+    const snapshot = store.snapshot();
+    const provisionalId = "conversation_00000000-0000-4000-8000-000000000001";
+    snapshot.conversations[provisionalId] = {
+      ...structuredClone(settled.conversation),
+      id: provisionalId,
+      createdAt: "2026-07-12T11:00:00.000Z",
+      updatedAt: "2026-07-12T11:00:00.000Z",
+    };
+    fs.writeFileSync(store.filename, JSON.stringify(snapshot));
+
+    store.reconcileConversations([{
+      engine: "codex",
+      path: pathname,
+      accountId: "terra",
+      launchProfile: emptyLaunchProfile({ cwd: "/repo" }),
+      turn: { state: "idle", source: "empty", terminalAt: null },
+      observedAt: "2026-07-12T12:00:00.000Z",
+    }]);
+
+    expect(Object.values(store.snapshot().conversations)).toHaveLength(1);
+    expect(store.conversationForPath(pathname)?.id).toBe(settled.conversation.id);
+    expect(store.canonicalConversationId(provisionalId)).toBe(settled.conversation.id);
+  });
+
+  test("persists engine-native lineage by stable conversation identity", () => {
+    const store = registry();
+    const parentPath = "/sessions/rollout-019f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl";
+    const childPath = "/sessions/rollout-019f4906-3f67-7b72-9fbc-9ec3b5ad1327.jsonl";
+    const parent = store.ensureConversation("codex", parentPath, "terra");
+
+    store.reconcileConversations([{
+      engine: "codex",
+      path: childPath,
+      accountId: "terra",
+      launchProfile: emptyLaunchProfile({ cwd: "/repo", parentConversationId: parent.id }),
+      turn: { state: "busy", source: "assistant", terminalAt: null },
+      observedAt: "2026-07-12T12:00:00.000Z",
+    }]);
+
+    const child = store.conversationForPath(childPath)!;
+    expect(new AgentRegistry(store.filename).snapshot().lineageEdges[child.id]).toMatchObject({
+      childConversationId: child.id,
+      parentConversationId: parent.id,
+      childArtifactPath: childPath,
+      parentArtifactPath: parentPath,
+      source: "engine-native",
     });
   });
 

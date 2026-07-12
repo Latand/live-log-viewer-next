@@ -860,6 +860,8 @@ export const uk: Record<keyof typeof en, Message> = {
   "resources.total": "Σ {amount}",
   "resources.empty": "у tmux немає сесій агентів",
   "resources.orphan": "осиротілий пейн",
+  "resources.hostConflict": "дублікат пейна розмови",
+  "resources.hostConflictHint": "кілька активних пейнів належать цій розмові",
   "resources.procs": {
     one: "{count} процес",
     few: "{count} процеси",
