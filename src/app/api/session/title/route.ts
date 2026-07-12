@@ -55,9 +55,10 @@ export async function PATCH(req: NextRequest): Promise<NextResponse<PatchTitleRe
   const target = resolveTitleTarget(body);
   if (!target) return NextResponse.json({ error: "unknown or unsupported session" }, { status: 400 });
 
-  // Candidate keys include the target's alias conversation ids so a title filed
-  // under a provisional id is found and migrated onto the canonical key.
-  const candidateKeys = titleKeysForEntry(target, target.aliasConversationIds);
+  // Candidate keys include the target's alias conversation ids and every owned
+  // transcript path, so a title filed under a provisional id or a predecessor
+  // generation is found and migrated onto the canonical key.
+  const candidateKeys = titleKeysForEntry(target, target.aliasConversationIds, target.ownedPaths);
   const outcome = writeSessionTitle(candidateKeys, candidateKeys[0]!, body.title as string | null, body.baseRevision as number | undefined, isoNow());
   if (!outcome.ok) {
     // Structured 409: the editor adopts the current server record and retries.

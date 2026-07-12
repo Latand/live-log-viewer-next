@@ -33,10 +33,12 @@ export function overlaySessionTitles(entries: FileEntry[]): void {
 
   const conversationByPath = new Map<string, string>();
   const aliasesByCanonical = new Map<string, string[]>();
+  const ownedPathsByConversation = new Map<string, string[]>();
   if (snapshot) {
     for (const conversation of Object.values(snapshot.conversations)) {
-      for (const generation of conversation.generations) if (!conversationByPath.has(generation.path)) conversationByPath.set(generation.path, conversation.id);
-      for (const pathname of conversation.continuityPaths) if (!conversationByPath.has(pathname)) conversationByPath.set(pathname, conversation.id);
+      const owned = [...conversation.generations.map((generation) => generation.path), ...conversation.continuityPaths];
+      ownedPathsByConversation.set(conversation.id, owned);
+      for (const pathname of owned) if (!conversationByPath.has(pathname)) conversationByPath.set(pathname, conversation.id);
     }
     for (const alias of Object.keys(snapshot.conversationAliases)) {
       const canonical = registry.canonicalConversationId(alias as ViewerConversationId);
@@ -53,6 +55,10 @@ export function overlaySessionTitles(entries: FileEntry[]): void {
       if (owner) entry.conversationId = owner;
     }
     entry.renamable = isRenameableSessionEntry(entry);
-    if (index.size > 0) applyTitleOverride(entry, index, entry.conversationId ? aliasesByCanonical.get(entry.conversationId) ?? [] : []);
+    if (index.size > 0) {
+      const aliases = entry.conversationId ? aliasesByCanonical.get(entry.conversationId) ?? [] : [];
+      const ownedPaths = entry.conversationId ? ownedPathsByConversation.get(entry.conversationId) ?? [] : [];
+      applyTitleOverride(entry, index, aliases, ownedPaths);
+    }
   }
 }

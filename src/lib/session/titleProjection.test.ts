@@ -75,6 +75,26 @@ test("applies a UUID-keyed override when the registry does not own the path", ()
   expect(file.renamable).toBe(true);
 });
 
+test("a title filed under a predecessor/continuity path survives onto the successor", () => {
+  const registry = new AgentRegistry(path.join(registryRoot, "registry.json"));
+  const conversation = registry.ensureConversation("claude", SESSION_PATH, null);
+  // A prior transcript the conversation still owns (e.g. an account-migration
+  // predecessor), with its own UUID/path.
+  const predUuid = "22222222-2222-4333-8444-555555555555";
+  const predPath = `/home/u/.claude/projects/proj/${predUuid}.jsonl`;
+  registry.recordConversationContinuityPath(conversation.id, predPath);
+  setAgentRegistryForTests(registry);
+  // The title was filed under the predecessor's UUID key.
+  writeSessionTitle([`uuid:claude:${predUuid}`], `uuid:claude:${predUuid}`, "Kept name", undefined, "t1");
+
+  // Overlaying the current (successor) transcript still finds the title.
+  const successor = entry();
+  overlaySessionTitles([successor]);
+  expect(successor.conversationId).toBe(conversation.id);
+  expect(successor.title).toBe("Kept name");
+  expect(successor.autoTitle).toBe("Auto derived");
+});
+
 test("a subagent is not renamable and receives no override affordance", () => {
   const subPath = "/home/u/.claude/projects/proj/abc/subagents/agent-9.jsonl";
   const file = entry({ path: subPath, kind: "subagent" });

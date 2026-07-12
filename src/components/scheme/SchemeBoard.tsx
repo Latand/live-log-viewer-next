@@ -24,6 +24,7 @@ import { taskDeliveryText } from "@/lib/tasks/helpers";
 import { pipelineAnnouncement, pipelineStripByPath } from "@/components/pipelines/pipelineModel";
 import { BulkActionBar } from "./BulkActionBar";
 import { nodesInRect, pruneSelection, selectionBBox } from "./lasso";
+import { autoEditTokenFor, clearStaleRename, requestRename, type RenameRequest } from "./renameRequest";
 import { buildSchemeLayout } from "./layout";
 import { Minimap } from "./Minimap";
 import { AgentLinksLayer, EdgesLayer, LoopsLayer, MOVE_EASE, NodesLayer, type DeckFocus } from "./nodes";
@@ -245,7 +246,7 @@ export function SchemeBoard({
      editor via a token (a broadcast would also open the node's still-mounted
      board pane, whose blur would persist an unintended rename). Ignored inside
      text fields. */
-  const [renameRequest, setRenameRequest] = useState<{ path: string; token: number } | null>(null);
+  const [renameRequest, setRenameRequest] = useState<RenameRequest>(null);
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.key !== "F2") return;
@@ -257,11 +258,20 @@ export function SchemeBoard({
       if (!node?.file.renamable) return;
       event.preventDefault();
       setExpanded(path);
-      setRenameRequest((prev) => ({ path, token: (prev?.token ?? 0) + 1 }));
+      setRenameRequest((prev) => requestRename(prev, path));
     };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
   }, [layout]);
+  /* Drop a consumed request once its overlay closes (or the expanded node
+     changes), so an ordinary re-expand of the same node does not replay the
+     stale token and reopen the editor (whose Collapse blur would persist an
+     unintended override). */
+  /* eslint-disable react-hooks/set-state-in-effect */
+  useEffect(() => {
+    setRenameRequest((prev) => clearStaleRename(prev, expanded));
+  }, [expanded]);
+  /* eslint-enable react-hooks/set-state-in-effect */
   const [deckFocus, setDeckFocus] = useState<DeckFocus | null>(null);
   const focusRound = useCallback((flowId: string, round: number) => {
     setDeckFocus((prev) => ({ flowId, round, nonce: (prev?.nonce ?? 0) + 1 }));
@@ -832,7 +842,7 @@ export function SchemeBoard({
           isRoot={expandedNode.isRoot}
           expanded
           onToggleExpand={() => setExpanded(null)}
-          autoEditToken={renameRequest?.path === expandedNode.file.path ? renameRequest.token : undefined}
+          autoEditToken={autoEditTokenFor(renameRequest, expandedNode.file.path)}
         />
       </div>
     ) : null}

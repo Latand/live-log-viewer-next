@@ -102,17 +102,30 @@ export function isRenameableSessionPath(pathname: string): boolean {
 export function titleKeysForEntry(
   entry: Pick<FileEntry, "engine" | "path" | "conversationId">,
   aliasConversationIds: readonly string[] = [],
+  ownedPaths: readonly string[] = [],
 ): string[] {
   const keys: string[] = [];
-  if (entry.conversationId?.startsWith("conversation_")) keys.push(`conversation:${entry.conversationId}`);
+  const seen = new Set<string>();
+  const add = (key: string) => {
+    if (!seen.has(key)) { seen.add(key); keys.push(key); }
+  };
+  if (entry.conversationId?.startsWith("conversation_")) add(`conversation:${entry.conversationId}`);
   for (const alias of aliasConversationIds) {
-    if (alias.startsWith("conversation_") && alias !== entry.conversationId) keys.push(`conversation:${alias}`);
+    if (alias.startsWith("conversation_") && alias !== entry.conversationId) add(`conversation:${alias}`);
   }
-  if (entry.engine === "claude" || entry.engine === "codex") {
-    const sessionKey = sessionKeyFromTranscript(entry.engine, entry.path);
-    if (sessionKey) keys.push(`uuid:${sessionKeyId(sessionKey)}`);
-  }
-  keys.push(`path:${entry.path}`);
+  const addTranscript = (pathname: string) => {
+    if (entry.engine === "claude" || entry.engine === "codex") {
+      const sessionKey = sessionKeyFromTranscript(entry.engine, pathname);
+      if (sessionKey) add(`uuid:${sessionKeyId(sessionKey)}`);
+    }
+    add(`path:${pathname}`);
+  };
+  // The current transcript first (its keys stay the fallback preference), then
+  // every other path the conversation owns — predecessor generations and
+  // continuity paths — so a title filed under an earlier UUID/path survives a
+  // succession to a new transcript and migrates onto the conversation key.
+  addTranscript(entry.path);
+  for (const pathname of ownedPaths) addTranscript(pathname);
   return keys;
 }
 
@@ -133,8 +146,9 @@ export function overrideForEntry(
   entry: Pick<FileEntry, "engine" | "path" | "conversationId">,
   index: Map<string, SessionTitleOverride>,
   aliasConversationIds: readonly string[] = [],
+  ownedPaths: readonly string[] = [],
 ): SessionTitleOverride | null {
-  for (const key of titleKeysForEntry(entry, aliasConversationIds)) {
+  for (const key of titleKeysForEntry(entry, aliasConversationIds, ownedPaths)) {
     const hit = index.get(key);
     if (hit) return hit;
   }
@@ -152,8 +166,9 @@ export function applyTitleOverride(
   entry: FileEntry,
   index: Map<string, SessionTitleOverride>,
   aliasConversationIds: readonly string[] = [],
+  ownedPaths: readonly string[] = [],
 ): void {
-  const record = overrideForEntry(entry, index, aliasConversationIds);
+  const record = overrideForEntry(entry, index, aliasConversationIds, ownedPaths);
   if (!record) return;
   entry.titleRevision = record.revision;
   if (record.title === null) return;

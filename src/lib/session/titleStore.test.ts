@@ -176,6 +176,34 @@ test("alias conversation ids keep a title reachable and migrate it onto the cano
   expect(after).toHaveLength(1);
 });
 
+test("a title filed under a predecessor generation is reachable and migrates via ownedPaths", () => {
+  // The title was filed under a predecessor transcript's UUID key.
+  const predUuid = "22222222-2222-4333-8444-555555555555";
+  const predPath = `/home/u/.claude/projects/proj/${predUuid}.jsonl`;
+  const predKey = `uuid:claude:${predUuid}`;
+  write(predKey, "Kept", undefined, "t1");
+
+  // The conversation has since succeeded onto a new transcript (the default
+  // entry's UUID differs); it still owns the predecessor path.
+  const successor = entry({ conversationId: "conversation_x" });
+  const owned = [predPath];
+  const keys = titleKeysForEntry(successor, [], owned);
+  expect(keys[0]).toBe("conversation:conversation_x");
+  expect(keys).toContain(predKey);
+
+  const index = indexSessionTitles(loadSessionTitles(file));
+  expect(overrideForEntry(successor, index, [], owned)?.title).toBe("Kept");
+  const applied = entry({ conversationId: "conversation_x" });
+  applyTitleOverride(applied, index, [], owned);
+  expect(applied.title).toBe("Kept");
+  expect(applied.autoTitle).toBe("Auto derived title");
+
+  // A write collapses the predecessor-keyed record onto the conversation key.
+  const updated = writeSessionTitle(keys, keys[0]!, "Renamed", 1, "t2", file);
+  expect(updated).toMatchObject({ ok: true, override: { key: "conversation:conversation_x", revision: 2 } });
+  expect(loadSessionTitles(file).some((record) => record.key === predKey)).toBe(false);
+});
+
 test("an override equal to the derived title keeps its autoTitle provenance and Reset marker", () => {
   const key = preferredTitleKey(entry());
   write(key, "Auto derived title", undefined, "t1"); // identical to the derived title

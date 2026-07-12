@@ -16,6 +16,10 @@ export interface TitleTarget {
       title lookups/writes include them so a title filed under a provisional id
       stays reachable and migrates onto the canonical one. */
   aliasConversationIds: string[];
+  /** Every transcript path the conversation owns (predecessor generations and
+      continuity paths), so a title filed under an earlier UUID/path survives a
+      succession and migrates onto the conversation key. */
+  ownedPaths: string[];
 }
 
 export interface TitleTargetInput {
@@ -27,6 +31,12 @@ function engineForPath(pathname: string): "claude" | "codex" | null {
   if (codexSessionRootFor(pathname)) return "codex";
   if (claudeProjectRootFor(pathname)) return "claude";
   return null;
+}
+
+/** Every transcript path a conversation owns — all generations plus continuity
+    paths — so a title filed under a predecessor's UUID/path is still found. */
+function ownedPaths(conversation: { generations: readonly { path: string }[]; continuityPaths: readonly string[] }): string[] {
+  return [...conversation.generations.map((generation) => generation.path), ...conversation.continuityPaths];
 }
 
 /** Every conversation id the registry currently resolves to `canonicalId`
@@ -57,7 +67,7 @@ export function resolveTitleTarget(input: TitleTargetInput): TitleTarget | null 
     const path = conversation?.generations.at(-1)?.path;
     if (conversation && path && (conversation.engine === "claude" || conversation.engine === "codex") && isRenameableTranscriptPath(conversation.engine, path)) {
       // `conversation.id` is the canonical id even when `requested` was an alias.
-      return { engine: conversation.engine, path, conversationId: conversation.id, aliasConversationIds: aliasConversationIds(conversation.id) };
+      return { engine: conversation.engine, path, conversationId: conversation.id, aliasConversationIds: aliasConversationIds(conversation.id), ownedPaths: ownedPaths(conversation) };
     }
     return null;
   }
@@ -66,7 +76,7 @@ export function resolveTitleTarget(input: TitleTargetInput): TitleTarget | null 
   const engine = engineForPath(path);
   if (!engine || !isRenameableTranscriptPath(engine, path)) return null;
   const owner = agentRegistry().conversationForPath(path);
-  return { engine, path, conversationId: owner?.id, aliasConversationIds: owner ? aliasConversationIds(owner.id) : [] };
+  return { engine, path, conversationId: owner?.id, aliasConversationIds: owner ? aliasConversationIds(owner.id) : [], ownedPaths: owner ? ownedPaths(owner) : [] };
 }
 
 /**

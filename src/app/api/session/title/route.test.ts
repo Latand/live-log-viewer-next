@@ -5,7 +5,7 @@ import path from "node:path";
 
 import { NextRequest } from "next/server";
 
-import { loadSessionTitles } from "@/lib/session/titleStore";
+import { loadSessionTitles, writeSessionTitle } from "@/lib/session/titleStore";
 import type { TitleTarget, TitleTargetInput } from "@/lib/session/titleTarget";
 
 const UUID = "11111111-2222-4333-8444-555555555555";
@@ -16,7 +16,7 @@ const SESSION_PATH = `/home/u/.claude/projects/proj/${UUID}.jsonl`;
    @/lib/tmux — modules that sibling suites replace through bun's shared module
    registry. `target` drives what resolveTitleTarget returns; `renamed` records
    propagation calls. */
-let target: TitleTarget | null = { engine: "claude", path: SESSION_PATH, conversationId: "conversation_owner", aliasConversationIds: [] };
+let target: TitleTarget | null = { engine: "claude", path: SESSION_PATH, conversationId: "conversation_owner", aliasConversationIds: [], ownedPaths: [] };
 let renamed: { path: string; name: string }[] = [];
 
 mock.module("@/lib/session/titleTarget", () => ({
@@ -42,7 +42,7 @@ const previousState = process.env.LLV_STATE_DIR;
 beforeEach(() => {
   stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "llv-title-state-"));
   process.env.LLV_STATE_DIR = stateDir;
-  target = { engine: "claude", path: SESSION_PATH, conversationId: "conversation_owner", aliasConversationIds: [] };
+  target = { engine: "claude", path: SESSION_PATH, conversationId: "conversation_owner", aliasConversationIds: [], ownedPaths: [] };
   renamed = [];
 });
 
@@ -74,7 +74,7 @@ test("sets a custom title keyed by the stable conversation identity and persists
 });
 
 test("falls back to the session UUID key when the registry does not own the session", async () => {
-  target = { engine: "claude", path: SESSION_PATH, aliasConversationIds: [] };
+  target = { engine: "claude", path: SESSION_PATH, aliasConversationIds: [], ownedPaths: [] };
   const res = await patch({ path: SESSION_PATH, title: "Named" });
   const json = (await res.json()) as { override: { key: string } };
   expect(json.override.key).toBe(`uuid:claude:${UUID}`);
@@ -82,13 +82,13 @@ test("falls back to the session UUID key when the registry does not own the sess
 
 test("a title filed under a coalesced alias id migrates onto the canonical key", async () => {
   // A rename lands while the session's provisional id is current.
-  target = { engine: "claude", path: SESSION_PATH, conversationId: "conversation_prov", aliasConversationIds: [] };
+  target = { engine: "claude", path: SESSION_PATH, conversationId: "conversation_prov", aliasConversationIds: [], ownedPaths: [] };
   await patch({ conversationId: "conversation_prov", title: "Sticky" });
   expect(loadSessionTitles().find((record) => record.key === "conversation:conversation_prov")?.title).toBe("Sticky");
 
   // The registry coalesces it into the canonical id; the target now carries the
   // former id as an alias. An update must find and migrate the stored record.
-  target = { engine: "claude", path: SESSION_PATH, conversationId: "conversation_canon", aliasConversationIds: ["conversation_prov"] };
+  target = { engine: "claude", path: SESSION_PATH, conversationId: "conversation_canon", aliasConversationIds: ["conversation_prov"], ownedPaths: [] };
   const res = await patch({ conversationId: "conversation_canon", title: "Renamed", baseRevision: 1 });
   expect(res.status).toBe(200);
   const json = (await res.json()) as { override: { key: string; title: string; revision: number } };
@@ -96,6 +96,24 @@ test("a title filed under a coalesced alias id migrates onto the canonical key",
   expect(json.override.title).toBe("Renamed");
   const records = loadSessionTitles();
   expect(records.some((record) => record.key === "conversation:conversation_prov")).toBe(false);
+  expect(records).toHaveLength(1);
+});
+
+test("a rename finds and migrates a title filed under a predecessor generation", async () => {
+  // A title was filed under a predecessor transcript's UUID before succession.
+  const predUuid = "22222222-2222-4333-8444-555555555555";
+  const predPath = `/home/u/.claude/projects/proj/${predUuid}.jsonl`;
+  writeSessionTitle([`uuid:claude:${predUuid}`], `uuid:claude:${predUuid}`, "Kept", undefined, "t1");
+
+  // The current target owns that predecessor path; the rename must find and
+  // migrate the stored record onto the conversation key.
+  target = { engine: "claude", path: SESSION_PATH, conversationId: "conversation_owner", aliasConversationIds: [], ownedPaths: [predPath] };
+  const res = await patch({ conversationId: "conversation_owner", title: "Renamed", baseRevision: 1 });
+  expect(res.status).toBe(200);
+  const json = (await res.json()) as { override: { key: string } };
+  expect(json.override.key).toBe("conversation:conversation_owner");
+  const records = loadSessionTitles();
+  expect(records.some((record) => record.key === `uuid:claude:${predUuid}`)).toBe(false);
   expect(records).toHaveLength(1);
 });
 
@@ -147,14 +165,14 @@ test("a reset sanitizes the client-provided window name before it reaches tmux",
 
 test("clearing after the registry claims ownership migrates and clears the fallback-key override", async () => {
   // Filed under the session UUID before the conversation id existed.
-  target = { engine: "claude", path: SESSION_PATH, aliasConversationIds: [] };
+  target = { engine: "claude", path: SESSION_PATH, aliasConversationIds: [], ownedPaths: [] };
   await patch({ path: SESSION_PATH, title: "Sticky" });
   expect(loadSessionTitles().find((record) => record.key === `uuid:claude:${UUID}`)?.title).toBe("Sticky");
 
   // The registry now owns the session; a reset routed through the conversation
   // key must still clear the UUID-filed record (finding: fallback-key overrides
   // couldn't be cleared and got restored on the next poll).
-  target = { engine: "claude", path: SESSION_PATH, conversationId: "conversation_owner", aliasConversationIds: [] };
+  target = { engine: "claude", path: SESSION_PATH, conversationId: "conversation_owner", aliasConversationIds: [], ownedPaths: [] };
   const res = await patch({ conversationId: "conversation_owner", title: "", baseRevision: 1 });
   expect(res.status).toBe(200);
   const records = loadSessionTitles();
