@@ -68,6 +68,23 @@ test("resume preserves the transcript model and reasoning effort for both engine
   expect(claude?.command).toContain("--effort 'max'");
 });
 
+test("resume preserves read-only execution policy for both engines", () => {
+  const codexTranscript = path.join(SANDBOX, "legacy", "sessions", "2026", "07", "09", "rollout-019f423a-d6e9-7903-b597-3e676b6ff3d4.jsonl");
+  const claudeTranscript = path.join(process.env.LLV_CLAUDE_HOME!, "projects", "-repo", "019f423a-d6e9-7903-b597-3e676b6ff3d4.jsonl");
+  fs.mkdirSync(path.dirname(claudeTranscript), { recursive: true });
+  fs.writeFileSync(claudeTranscript, JSON.stringify({ cwd: SANDBOX }) + "\n");
+
+  const codex = resumeSpecFor("codex-sessions", codexTranscript, { readOnly: true, permissionMode: "never" });
+  const claude = resumeSpecFor("claude-projects", claudeTranscript, { readOnly: true, permissionMode: "plan" });
+
+  expect(codex?.command).toContain("--sandbox read-only");
+  expect(codex?.command).toContain("--ask-for-approval 'never'");
+  expect(codex?.launchProfile).toMatchObject({ readOnly: true, permissionMode: "never" });
+  expect(claude?.command).toContain("--permission-mode plan --disallowedTools Edit,Write,NotebookEdit");
+  expect(claude?.command).not.toContain("--dangerously-skip-permissions");
+  expect(claude?.launchProfile).toMatchObject({ readOnly: true, permissionMode: "plan" });
+});
+
 test("Claude resume normalizes transcript families and omits unknown model overrides", () => {
   const transcript = path.join(process.env.LLV_CLAUDE_HOME!, "projects", "-repo", "019f423a-d6e9-7903-b597-3e676b6ff3d4.jsonl");
   fs.mkdirSync(path.dirname(transcript), { recursive: true });

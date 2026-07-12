@@ -1,20 +1,21 @@
-# Issue #22: provenance-aware context windows and current memory snapshots
+# Issue 23: change model, reasoning effort, and speed of a running agent
 
 ## Task statement
 
-Resolve context capacity from in-band runtime metadata or a versioned exact-model registry, preserve raw usage when capacity is unknown, expose provenance in the shared context chip, and keep RAM/swap snapshots current and timestamped.
+Allow an operator to change the model, reasoning-effort level, and Codex speed tier of a running conversation from its pane header. Apply the selection to subsequent turns through the engine-specific resume flags while preserving the active turn.
 
 ## Acceptance criteria
 
-- AC1: Codex uses `token_count.info.model_context_window` as exact runtime capacity; records without that field preserve the prior hidden-chip behavior.
-- AC2: Claude model aliases normalize provider prefixes, dates, Bedrock versions, Vertex versions, and explicit `[1m]` mode before exact registry lookup.
-- AC3: The bundled registry is versioned `2026-07-10`; unknown and future model keys stay unresolved.
-- AC4: Every visible context result carries `source`, `confidence`, `observedAt`, and registry-derived results carry `registryVersion`.
-- AC5: Runtime percentages may reach 100; registry percentages cap at 99; registry overflow demotes to unknown capacity with raw usage retained.
-- AC6: Unknown capacity renders `ctx <used>` with a neutral tone, no denominator, withheld percentage copy, and stays hidden in mobile pane headers.
-- AC7: Known tooltips show the actual window and its runtime or registry provenance; registry tooltips disclose the registry version.
-- AC8: Capacity resolves from the same transcript record as usage, so model changes and post-compaction usage select the current record.
-- AC9: Context scanning remains synchronous and performs no provider/network polling.
-- AC10: RAM uses `MemAvailable`, swap uses `SwapTotal - SwapFree`, host memory is captured on every resources request, and the sidebar labels capture age.
-- AC11: Regression tests cover provenance math, registry overflow, exact aliases, future ids, Codex suppression, compaction/model change, and known/unknown chip rendering.
-- AC12: `bun test`, `bunx tsc --noEmit`, and `git diff --check` pass before push.
+- AC1: A running root conversation exposes editable model and reasoning-effort controls in its pane header.
+- AC2: A running Codex conversation also exposes the Fast speed toggle; Claude conversations omit that control.
+- AC3: Model and effort choices are constrained to the known models and valid effort scale for the selected engine/model pair.
+- AC4: A request made during a busy or uncertain turn leaves the live pane untouched, displays a pending state, and retries after the turn reaches a positively identified idle composer.
+- AC5: An idle change resumes the existing conversation with the selected model and effort flags plus Codex `service_tier=priority|standard`.
+- AC6: Pane termination uses registry-owned tmux host evidence, the per-session operation lock, exact process identity checks, and verified process death before resuming.
+- AC7: The selected values and pending/confirmation phase survive a browser reload for the stable Viewer conversation identity.
+- AC8: The control reports completion only after scanner-observed model, effort, and Codex speed match the requested values; the existing header identity and effort bars continue to use scanner evidence.
+- AC9: Existing spawn-time model, effort, and speed selection remains unchanged.
+- AC10: Focused tests cover per-engine validation and rendering, including the Claude speed omission.
+- AC11: `bun test` passes.
+- AC12: `bunx tsc --noEmit` passes.
+- AC13: `git diff --check` passes.

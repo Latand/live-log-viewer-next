@@ -7,9 +7,12 @@ import {
   interruptConversation,
   killConversation,
   resumeConversation,
+  reconfigureConversation,
   type DeliveryOutcome,
 } from "@/lib/delivery";
 import { canonicalTranscriptTarget, readTranscriptHosts } from "@/lib/agent/transcriptHost";
+import { reconfigurationFromBody } from "@/lib/agent/reconfigure";
+import { listFiles } from "@/lib/scanner";
 import { pathAllowed } from "@/lib/scanner/roots";
 import { allowedKillTarget, consumeKillTarget } from "@/lib/resources";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
@@ -47,7 +50,7 @@ interface SendResponse {
   imagePaths?: string[];
   /** Set when the message booted a fresh agent window instead of an existing pane. */
   spawned?: boolean;
-  outcome?: "delivered-to-live" | "resumed" | "held";
+  outcome?: "delivered-to-live" | "resumed" | "held" | "pending" | "reconfigured";
 }
 
 function respond(outcome: DeliveryOutcome): NextResponse<SendResponse | ApiError | { ok: false; outcome: "failed"; error: string }> {
@@ -124,7 +127,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<SendResponse 
   const rejection = rejectCrossOrigin(req);
   if (rejection) return rejection;
 
-  let body: { pid?: unknown; path?: unknown; conversationId?: unknown; clientMessageId?: unknown; text?: unknown; image?: unknown; images?: unknown; action?: unknown; key?: unknown; label?: unknown; question?: unknown; target?: unknown };
+  let body: { pid?: unknown; path?: unknown; conversationId?: unknown; clientMessageId?: unknown; text?: unknown; image?: unknown; images?: unknown; action?: unknown; key?: unknown; label?: unknown; question?: unknown; target?: unknown; model?: unknown; effort?: unknown; fast?: unknown };
   try {
     body = (await req.json()) as {
       pid?: unknown;
@@ -139,6 +142,9 @@ export async function POST(req: NextRequest): Promise<NextResponse<SendResponse 
       label?: unknown;
       question?: unknown;
       target?: unknown;
+      model?: unknown;
+      effort?: unknown;
+      fast?: unknown;
     };
   } catch {
     return NextResponse.json({ error: "invalid JSON" }, { status: 400 });
@@ -193,6 +199,15 @@ export async function POST(req: NextRequest): Promise<NextResponse<SendResponse 
       return NextResponse.json({ ok: false, outcome: "failed", error: "kill resolved no registered pane" }, { status: 409 });
     }
     return respond(outcome);
+  }
+  if (body.action === "reconfigure") {
+    const file = (await listFiles()).find((item) => item.path === filePath);
+    if (!file || (file.engine !== "claude" && file.engine !== "codex")) {
+      return NextResponse.json({ error: "conversation is unavailable" }, { status: 403 });
+    }
+    const parsed = reconfigurationFromBody(file.engine, body);
+    if (!parsed.value) return NextResponse.json({ error: parsed.error ?? "invalid configuration" }, { status: 400 });
+    return respond(await reconfigureConversation(filePath, parsed.value));
   }
 
   const text = typeof body.text === "string" ? body.text : "";

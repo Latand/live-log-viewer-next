@@ -34,6 +34,14 @@ export const en = {
 
   // Age / time helpers (utils.ts)
   "util.effortTitle": "Reasoning effort: {effort}",
+  "runtimeConfig.model": "Running agent model",
+  "runtimeConfig.effort": "Running agent reasoning effort",
+  "runtimeConfig.speedTitle": "Fast uses the Codex priority service tier",
+  "runtimeConfig.apply": "Apply",
+  "runtimeConfig.pending": "After turn",
+  "runtimeConfig.confirming": "Next turn",
+  "runtimeConfig.applied": "Applied",
+  "runtimeConfig.failed": "Could not change the running agent configuration",
   "time.agoSec": "{n}s ago",
   "time.agoMin": "{n}m ago",
   "time.agoHour": "{n}h ago",

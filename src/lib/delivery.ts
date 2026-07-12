@@ -1,4 +1,5 @@
 import { resumeSpecFor } from "@/lib/agent/cli";
+import type { AgentReconfiguration } from "@/lib/agent/reconfigure";
 import { agentRegistry, type AgentRegistry, type AgentRegistryEntry, type TmuxHostEvidence } from "@/lib/agent/registry";
 import { deliveryFence } from "@/lib/accounts/migration/coordinator";
 import { requestAccountMigrationTick } from "@/lib/accounts/migration/controllerSignal";
@@ -6,7 +7,7 @@ import { deliverToTranscriptHost, readTranscriptHosts, type HostDeliveryOutcome 
 import { listFiles } from "@/lib/scanner";
 import { pathAllowed } from "@/lib/scanner/roots";
 import { procBackend } from "@/lib/proc";
-import { detectBlockingGate, parseScreenMenu, screenWaitsForInput } from "@/lib/status";
+import { detectBlockingGate, parseScreenMenu, screenAtIdleComposer, screenWaitsForInput } from "@/lib/status";
 import {
   buildImagePayload,
   deleteInboxImages,
@@ -41,10 +42,72 @@ export interface DeliveryFailure {
 export interface DeliverySuccess {
   ok: true;
   target: string;
-  outcome?: "delivered-to-live" | "resumed" | "held";
+  outcome?: "delivered-to-live" | "resumed" | "held" | "pending" | "reconfigured";
   imagePaths?: string[];
   /** Set when the message booted a fresh agent window instead of an existing pane. */
   spawned?: boolean;
+}
+
+interface ReconfigureConversationOverrides {
+  pathAllowed?: typeof pathAllowed;
+  listFiles?: typeof listFiles;
+  resumeSpecFor?: typeof resumeSpecFor;
+  livePaneHost?: typeof livePaneHost;
+  registry?: AgentRegistry;
+  paneScreen?: typeof paneScreen;
+  killHost?: typeof killTmuxHostIfMatches;
+  deliver?: typeof deliverToTranscriptHost;
+}
+
+export async function reconfigureConversation(
+  filePath: string,
+  config: AgentReconfiguration,
+  overrides: ReconfigureConversationOverrides = {},
+): Promise<DeliveryOutcome> {
+  if (!filePath || !(overrides.pathAllowed ?? pathAllowed)(filePath)) return failure("the conversation path is required", 400);
+  const entry = (await (overrides.listFiles ?? listFiles)()).find((item) => item.path === filePath);
+  if (!entry || (entry.engine !== "claude" && entry.engine !== "codex")) return failure("conversation is unavailable", 403);
+  const registry = overrides.registry ?? agentRegistry();
+  const registered = registeredHostForPath(registry.snapshot(), filePath);
+  if (!registered?.host) return failure("no registered agent pane for this conversation", 404);
+  const buildSpec = (profile: AgentRegistryEntry["launchProfile"]) => (overrides.resumeSpecFor ?? resumeSpecFor)(entry.root, entry.path, {
+    ...config,
+    readOnly: profile?.readOnly ?? null,
+    permissionMode: profile?.permissionMode ?? null,
+  });
+  const deliver = overrides.deliver ?? deliverToTranscriptHost;
+  const observedHost = await (overrides.livePaneHost ?? livePaneHost)(filePath);
+  const paneId = observedHost?.paneId ?? registered.host.paneId;
+  const target = observedHost?.display ?? registered.host.paneId;
+  const owner = { pid: process.pid, startIdentity: procBackend.processIdentity(process.pid) };
+  try {
+    const prepared = await registry.withOperationLock(registered.key, owner, async () => {
+      const refreshed = registeredHostForPath(registry.snapshot(), filePath);
+      if (!refreshed?.host || refreshed.host.paneId !== paneId) {
+        return failure("the registered pane changed", 409);
+      }
+      const spec = buildSpec(refreshed.launchProfile);
+      if (!spec) return failure("this conversation cannot be resumed", 409);
+      const refreshedHost = refreshed.host;
+      return withPaneLock(paneId, async () => {
+        if (!screenAtIdleComposer(await (overrides.paneScreen ?? paneScreen)(paneId))) {
+          return "pending" as const;
+        }
+        if (!await (overrides.killHost ?? killTmuxHostIfMatches)(refreshedHost)) return failure("the registered pane changed or its process did not exit", 409);
+        registry.markUnhosted(refreshed.key);
+        forgetResumePane(filePath);
+        return { state: "prepared" as const, spec };
+      });
+    });
+    if (prepared === "pending") return { ok: true, target, outcome: "pending" };
+    if (!("state" in prepared)) return prepared;
+    /* Resume acquires the same per-session serialization lock through the
+       transcript-host adapter. The termination lock must be released first. */
+    const resumed = await hostOutcome(deliver({ entry: { ...entry, pid: null, proc: "done" }, spec: prepared.spec, payload: "" }));
+    return resumed.ok ? { ...resumed, outcome: "reconfigured" } : resumed;
+  } catch (error) {
+    return failure(error);
+  }
 }
 
 export type DeliveryOutcome = DeliverySuccess | DeliveryFailure;

@@ -16,6 +16,7 @@ import { registerLinkTarget } from "./AgentLink";
 import { DeleteFileButton } from "./DeleteFileButton";
 import { MigrationDivider, MigrationRibbon } from "./MigrationRibbon";
 import { EffortPills } from "./EffortPills";
+import { AgentRuntimeControls } from "./AgentRuntimeControls";
 import { FlipRow } from "./FlipRow";
 import { LogFeed } from "./LogFeed";
 import { paneState, type PaneState } from "./paneState";
@@ -233,6 +234,7 @@ export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noCompose
               </span>
             )}
             <EffortPills file={file} />
+            {file.proc === "running" && !file.parent && (file.engine === "claude" || file.engine === "codex") ? <AgentRuntimeControls file={file} /> : null}
             <RateLimitBadge rateLimit={file.rateLimit} />
             {/* The phone header keeps only actionable or alarming chips: ctx
                 appears once it nears the limit, the worktree name and the
