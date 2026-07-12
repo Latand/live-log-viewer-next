@@ -74,3 +74,23 @@ export function headCwd(pathname: string, options: HeadCwdOptions = {}): string 
   }
   return null;
 }
+
+/** Session creation time persisted in the transcript header. Codex stores it
+    under session_meta.payload while Claude uses the top-level timestamp. */
+export function headSessionStartedAt(pathname: string): string | null {
+  const head = readTranscriptHead(pathname);
+  if (!head) return null;
+  for (const line of head.split("\n").slice(0, 10)) {
+    if (!line.trim()) continue;
+    try {
+      const obj = JSON.parse(line) as { timestamp?: unknown; payload?: { timestamp?: unknown } };
+      const timestamp = typeof obj.payload?.timestamp === "string"
+        ? obj.payload.timestamp
+        : typeof obj.timestamp === "string" ? obj.timestamp : null;
+      if (timestamp && Number.isFinite(Date.parse(timestamp))) return new Date(timestamp).toISOString();
+    } catch {
+      /* partial or non-JSON head row */
+    }
+  }
+  return null;
+}

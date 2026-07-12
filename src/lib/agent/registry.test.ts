@@ -312,6 +312,68 @@ describe("agent registry", () => {
     expect(conflict.kind).toBe("conflict");
   });
 
+  test("restart inventory recovers a path-pending Codex receipt after its pane exits", () => {
+    const store = registry();
+    const parentPath = "/sessions/parent-019f4906-3f67-7b72-9fbc-9ec3b5ad1325.jsonl";
+    const childPath = "/sessions/child-019f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl";
+    const parent = store.ensureConversation("codex", parentPath, "terra");
+    const begun = store.beginSpawnRequest({
+      engine: "codex",
+      cwd: "/repo",
+      accountId: "terra",
+      parentConversationId: parent.id,
+      parentSessionKey: { engine: "codex", sessionId: "019f4906-3f67-7b72-9fbc-9ec3b5ad1325" },
+      parentArtifactPath: parentPath,
+      launchProfile: emptyLaunchProfile({ cwd: "/repo", parentConversationId: parent.id }),
+    });
+    if (begun.kind !== "created") throw new Error("expected create");
+    store.bindSpawnPane(begun.receipt.launchId, {
+      endpoint: "/tmp",
+      server: { pid: 9, startIdentity: "9:a" },
+      paneId: "%9",
+      panePid: { pid: 99, startIdentity: "99:a" },
+      target: "agents:9.0",
+    });
+    store.markSpawnHostVerified(begun.receipt.launchId, {
+      kind: "tmux",
+      endpoint: "/tmp",
+      server: { pid: 9, startIdentity: "9:a" },
+      paneId: "%9",
+      panePid: { pid: 99, startIdentity: "99:a" },
+      windowName: "codex-new",
+      agent: { pid: 100, startIdentity: "100:a" },
+      argv: ["codex"],
+    });
+    store.markSpawnPromptDelivered(begun.receipt.launchId);
+    const pending = store.markSpawnPathPending(begun.receipt.launchId);
+    const startedAt = new Date(Date.parse(pending.pathCorrelation!.startedAt) + 1_000).toISOString();
+
+    const restarted = new AgentRegistry(store.filename);
+    restarted.reconcileConversations([{
+      engine: "codex",
+      path: childPath,
+      accountId: "terra",
+      launchProfile: emptyLaunchProfile({ cwd: "/repo", parentConversationId: parent.id }),
+      turn: { state: "idle", source: "empty", terminalAt: null },
+      startedAt,
+      observedAt: "2026-07-12T12:00:00.000Z",
+    }]);
+
+    expect(restarted.conversationForPath(childPath)?.id).toBe(begun.receipt.conversationId);
+    expect(restarted.snapshot().receipts[begun.receipt.launchId]).toMatchObject({
+      state: "completed",
+      artifactPath: childPath,
+      completionMode: "observed-completed",
+    });
+    expect(restarted.snapshot().lineageEdges[begun.receipt.conversationId]).toMatchObject({
+      childConversationId: begun.receipt.conversationId,
+      parentConversationId: parent.id,
+      childArtifactPath: childPath,
+      parentArtifactPath: parentPath,
+      evidence: { launchId: begun.receipt.launchId },
+    });
+  });
+
   test("settles observer then route exactly once with receipt-owned account and profile", () => {
     const store = registry();
     const begun = store.beginSpawnRequest({

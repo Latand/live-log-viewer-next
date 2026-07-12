@@ -83,6 +83,9 @@ export interface SpawnReceipt {
   /** Generation current when a resume receipt was created. A completed
       source observation may advance from this path exactly once. */
   resumeSourcePath: string | null;
+  /** Disk-backed Codex session metadata can recover this receipt after its
+      pane disappears before transcript discovery completes. */
+  pathCorrelation: { cwd: string; startedAt: string } | null;
   engine: AgentEngine;
   cwd: string;
   accountId: string | null;
@@ -194,6 +197,7 @@ export interface ConversationObservation {
   accountId: string | null;
   launchProfile: LaunchProfile;
   turn: TurnState;
+  startedAt?: string | null;
   observedAt: string;
 }
 
@@ -237,6 +241,23 @@ function receiptStillAwaitsResumeSuccessor(receipt: SpawnReceipt): boolean {
   return receipt.state !== "completed"
     || receipt.resumeSourcePath === null
     || receipt.artifactPath === receipt.resumeSourcePath;
+}
+
+const PATH_CORRELATION_WINDOW_MS = 30_000;
+
+function pathPendingReceiptForObservation(file: RegistryFile, observation: ConversationObservation): SpawnReceipt | null {
+  if (observation.engine !== "codex" || !observation.startedAt) return null;
+  const observedStart = Date.parse(observation.startedAt);
+  if (!Number.isFinite(observedStart)) return null;
+  const candidates = Object.values(file.receipts).filter((receipt) => {
+    if (receipt.engine !== "codex" || receipt.state !== "path-pending" || receipt.artifactPath !== null || !receipt.pathCorrelation) return false;
+    if (receipt.pathCorrelation.cwd !== observation.launchProfile.cwd) return false;
+    const expectedStart = Date.parse(receipt.pathCorrelation.startedAt);
+    return Number.isFinite(expectedStart)
+      && observedStart >= expectedStart - 1_000
+      && observedStart <= expectedStart + PATH_CORRELATION_WINDOW_MS;
+  });
+  return candidates.length === 1 ? candidates[0]! : null;
 }
 
 function mergeResumeLaunchProfile(current: LaunchProfile, requested: LaunchProfile): LaunchProfile {
@@ -760,6 +781,11 @@ function normalizeReceipt(value: SpawnReceipt): SpawnReceipt {
       : `conversation_${crypto.randomUUID()}`,
     purpose: value.purpose === "migration-successor" || value.purpose === "resume-successor" ? value.purpose : "launch",
     resumeSourcePath: typeof value.resumeSourcePath === "string" ? value.resumeSourcePath : null,
+    pathCorrelation: value.pathCorrelation
+      && typeof value.pathCorrelation.cwd === "string"
+      && typeof value.pathCorrelation.startedAt === "string"
+      ? value.pathCorrelation
+      : null,
     accountId: typeof value.accountId === "string" ? value.accountId : null,
     parentConversationId: typeof value.parentConversationId === "string" && value.parentConversationId.startsWith("conversation_")
       ? value.parentConversationId as ViewerConversationId
@@ -934,6 +960,7 @@ export class AgentRegistry {
           return { kind: compatible ? "replay" : "conflict", receipt: clone(existing) };
         }
       }
+      const createdAt = now();
       const receipt: SpawnReceipt = {
         launchId: crypto.randomUUID(),
         clientAttemptId: input.clientAttemptId ?? null,
@@ -941,11 +968,14 @@ export class AgentRegistry {
         conversationId: conversationId ?? `conversation_${crypto.randomUUID()}`,
         purpose: input.purpose ?? "launch",
         resumeSourcePath: input.purpose === "resume-successor" ? existingConversation?.generations.at(-1)?.path ?? null : null,
+        pathCorrelation: input.engine === "codex" && (input.purpose ?? "launch") === "launch"
+          ? { cwd: input.cwd, startedAt: createdAt }
+          : null,
         engine: input.engine,
         cwd: input.cwd,
         accountId: input.accountId ?? null,
         parentConversationId,
-        createdAt: now(),
+        createdAt,
         state: "starting",
         artifactPath: input.expectedArtifactPath ?? null,
         key: null,
@@ -1456,6 +1486,26 @@ export class AgentRegistry {
             }
             nativeOwner.updatedAt = observation.observedAt;
             scopeChanged.add(observation.engine);
+          }
+        }
+        if (!conversation && nativeId) {
+          const pathPendingReceipt = pathPendingReceiptForObservation(file, observation);
+          if (pathPendingReceipt) {
+            const recovered = this.settleSpawnInFile(file, pathPendingReceipt.launchId, {
+              key: { engine: observation.engine, sessionId: nativeId },
+              artifactPath: observation.path,
+              cwd: pathPendingReceipt.cwd,
+              accountId: pathPendingReceipt.accountId,
+              status: "unhosted",
+              host: null,
+              claimEpoch: 0,
+              claimOwner: null,
+              pendingAction: null,
+            }, "observed-completed");
+            if (recovered.kind === "settled") {
+              conversation = file.conversations[pathPendingReceipt.conversationId] ?? null;
+              scopeChanged.add(observation.engine);
+            }
           }
         }
         if (!conversation) {

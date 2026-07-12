@@ -4,7 +4,7 @@ import { accountManager } from "@/lib/accounts/manager";
 import { listClaudeAccounts } from "@/lib/accounts/claude";
 import { listCodexAccounts } from "@/lib/accounts/codex";
 import { agentRegistry, type AgentRegistry, type ConversationObservation, type MigrationScope, type RegistryConversation } from "@/lib/agent/registry";
-import { headCwd } from "@/lib/agent/transcript";
+import { headCwd, headSessionStartedAt } from "@/lib/agent/transcript";
 import {
   remapBoardPaths as remapDurableBoardPaths,
   transferBoardPathPlacements as transferDurableBoardPathPlacements,
@@ -98,6 +98,7 @@ function inventory(files: FileEntry[], registry: AgentRegistry): ConversationObs
         plan: entry.plan ?? currentProfile?.plan ?? null,
       }),
       turn,
+      startedAt: headSessionStartedAt(entry.path),
       observedAt: new Date(Math.max(entry.mtime * 1000, Date.now())).toISOString(),
     }];
   });
