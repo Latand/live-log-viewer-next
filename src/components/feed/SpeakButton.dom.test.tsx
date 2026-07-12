@@ -1,7 +1,7 @@
 import { afterEach, expect, mock, test } from "bun:test";
 import { Window } from "happy-dom";
 import { createRoot, type Root } from "react-dom/client";
-import { act } from "react-dom/test-utils";
+import { flushSync } from "react-dom";
 
 import { MAX_TTS_TEXT_LENGTH } from "@/lib/tts";
 
@@ -16,7 +16,6 @@ Object.assign(globalThis, {
   HTMLElement: dom.HTMLElement,
   Event: dom.Event,
   MouseEvent: dom.MouseEvent,
-  IS_REACT_ACT_ENVIRONMENT: true,
 });
 
 const originalFetch = globalThis.fetch;
@@ -24,11 +23,18 @@ const originalAudio = globalThis.Audio;
 const originalCreateObjectURL = URL.createObjectURL;
 const originalRevokeObjectURL = URL.revokeObjectURL;
 
+async function drainUpdates(): Promise<void> {
+  await Promise.resolve();
+  await Promise.resolve();
+  await new Promise<void>((resolve) => setTimeout(resolve, 0));
+}
+
 async function mount(text: string): Promise<{ button: HTMLButtonElement; root: Root; host: HTMLDivElement }> {
   const host = document.createElement("div");
   document.body.append(host);
   const root = createRoot(host);
-  await act(async () => { root.render(<SpeakButton text={text} />); });
+  flushSync(() => { root.render(<SpeakButton text={text} />); });
+  await drainUpdates();
   return { button: host.querySelector("button")!, root, host };
 }
 
@@ -52,15 +58,16 @@ test("a second click cancels pending synthesis and ignores its stale response", 
   URL.createObjectURL = createObjectURL;
 
   const view = await mount("Read me");
-  await act(async () => { view.button.click(); });
+  flushSync(() => { view.button.click(); });
   expect(view.button.getAttribute("aria-label")).toContain("Stop");
-  await act(async () => { view.button.click(); });
+  flushSync(() => { view.button.click(); });
   expect(postSignal?.aborted).toBe(true);
   expect(view.button.getAttribute("aria-label")).toContain("Read answer");
 
-  await act(async () => { resolvePost(new Response(new Blob(["late"]))); await Promise.resolve(); });
+  resolvePost(new Response(new Blob(["late"])));
+  await drainUpdates();
   expect(createObjectURL).not.toHaveBeenCalled();
-  await act(async () => { view.root.unmount(); });
+  flushSync(() => { view.root.unmount(); });
   view.host.remove();
 });
 
@@ -82,9 +89,10 @@ test("long answers are bounded before synthesis", async () => {
   } as unknown as typeof Audio;
 
   const view = await mount("x".repeat(MAX_TTS_TEXT_LENGTH + 100));
-  await act(async () => { view.button.click(); await Promise.resolve(); });
+  flushSync(() => { view.button.click(); });
+  await drainUpdates();
   expect(sentText).toHaveLength(MAX_TTS_TEXT_LENGTH);
-  await act(async () => { view.button.click(); view.root.unmount(); });
+  flushSync(() => { view.button.click(); view.root.unmount(); });
   expect(revokeObjectURL).toHaveBeenCalledWith("blob:tts");
   view.host.remove();
 });
