@@ -582,6 +582,7 @@ export const en = {
   "groupOverride.applyRole": "Update reviewer",
   "groupOverride.nextRoundNote": "Next-round note",
   "groupOverride.notePlaceholder": "What the next reviewer should focus on…",
+  "groupOverride.noteUnavailable": "Editable when you start, spawn, or retry a round.",
   "groupOverride.roundLimit": "Round limit",
   "groupOverride.setLimit": "Set",
   "groupOverride.extend": "+1 round",

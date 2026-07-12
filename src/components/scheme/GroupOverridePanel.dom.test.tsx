@@ -124,6 +124,23 @@ test("an empty note field is still sent so a cleared note reaches the backend (i
   host.remove();
 });
 
+test("the next-round note editor is disabled where no action can save it (issue #118 review)", () => {
+  /* auto-mode fixing: the next round is created by the engine's marker, which
+     never reads this field — the editor must be disabled, not silently discard. */
+  const fixing: SchemeGroup = { ...flowGroup, flow: { ...flowGroup.flow!, state: "fixing", rounds: [{ n: 1, readyNote: null }] } as unknown as Flow };
+  const a = mount(<GroupOverridePanel group={fixing} onClose={() => undefined} />);
+  expect((a.host.querySelector("textarea") as HTMLTextAreaElement).disabled).toBe(true);
+  flushSync(() => a.root.unmount());
+  a.host.remove();
+
+  /* waiting_ready: Start review will persist the note, so the editor is live. */
+  const ready: SchemeGroup = { ...flowGroup, flow: { ...flowGroup.flow!, state: "waiting_ready", rounds: [] } as unknown as Flow };
+  const b = mount(<GroupOverridePanel group={ready} onClose={() => undefined} />);
+  expect((b.host.querySelector("textarea") as HTMLTextAreaElement).disabled).toBe(false);
+  flushSync(() => b.root.unmount());
+  b.host.remove();
+});
+
 const pipelineGroup: SchemeGroup = {
   key: "group::pipeline::p1", kind: "pipeline", id: "p1", hue: 24, members: ["/plan"],
   label: "Pipe one", x: 0, y: 0, w: 10, h: 10,

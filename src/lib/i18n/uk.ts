@@ -557,6 +557,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "groupOverride.applyRole": "Оновити рев'юера",
   "groupOverride.nextRoundNote": "Нотатка на наступний раунд",
   "groupOverride.notePlaceholder": "На чому зосередити наступного рев'юера…",
+  "groupOverride.noteUnavailable": "Можна редагувати під час старту, запуску або повтору раунду.",
   "groupOverride.roundLimit": "Ліміт раундів",
   "groupOverride.setLimit": "Задати",
   "groupOverride.extend": "+1 раунд",

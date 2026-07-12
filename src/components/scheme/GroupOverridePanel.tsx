@@ -195,12 +195,21 @@ function FlowOverride({ group, onClose }: { group: SchemeGroup; onClose: () => v
 
       <label className="flex flex-col gap-1">
         <span className={fieldLabel}>{t("groupOverride.nextRoundNote")}</span>
+        {/* Editable only where a panel action actually persists it (Start review /
+            Spawn / Retry round). In every other state the next round is created by
+            the engine (an auto-mode marker, etc.), which never reads this field —
+            so the editor is disabled instead of silently discarding edits
+            (issue #118 review). */}
         <textarea
-          className="min-h-[52px] w-full resize-y rounded-[8px] border border-line bg-bg px-2 py-1.5 text-[11.5px] font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+          className="min-h-[52px] w-full resize-y rounded-[8px] border border-line bg-bg px-2 py-1.5 text-[11.5px] font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:cursor-not-allowed disabled:opacity-50"
           value={note}
           placeholder={t("groupOverride.notePlaceholder")}
+          disabled={!pendingCarriesNote || busy}
           onChange={(event) => setNote(event.target.value)}
         />
+        {!pendingCarriesNote ? (
+          <span className="text-[10px] font-semibold text-dim">{t("groupOverride.noteUnavailable")}</span>
+        ) : null}
       </label>
 
       <div className="flex items-end gap-1.5">
