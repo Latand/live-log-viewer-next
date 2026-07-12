@@ -475,8 +475,9 @@ export function collectCodexRateLimitSeries(sessionsDir: string, sinceUnix: numb
 }
 
 /** Assemble one window's burndown from forward poll samples, an optional
-    transcript backfill and the current live value, scoped to the current window. */
-function buildSeries(
+    transcript backfill and the current live value, scoped to the current window.
+    Exported for the window-scoping regression test. */
+export function buildSeries(
   forward: LimitSample[],
   backfill: LimitSample[],
   live: LimitWindow | null,
@@ -488,8 +489,12 @@ function buildSeries(
   const windowStart = resetsAt !== null ? resetsAt - windowSeconds : null;
   const livePoint: LimitSample[] = live && typeof live.usedPercent === "number" ? [{ t: now, remaining: clampPercent(100 - live.usedPercent) }] : [];
   const merged = mergeSamples(forward, backfill, livePoint);
-  // A 60s grace before windowStart keeps the point that straddles the reset.
-  const samples = windowStart !== null ? merged.filter((s) => s.t >= windowStart - 60) : merged;
+  // Strictly scope to the current window: a sample from before windowStart
+  // belongs to the previous window, and after a rollover it would sit in the
+  // series as a low pre-reset value ahead of the ~100% post-reset point. That
+  // boundary rise reads as a refill and would suppress the pace projection for
+  // the whole new window, so those pre-window samples are dropped here.
+  const samples = windowStart !== null ? merged.filter((s) => s.t >= windowStart) : merged;
   return { windowStart, resetsAt, windowSeconds, samples };
 }
 

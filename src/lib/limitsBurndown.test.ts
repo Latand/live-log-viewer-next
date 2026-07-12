@@ -3,7 +3,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { collectCodexRateLimitSeries } from "./limits";
+import { computePace } from "./burndown";
+import { buildSeries, collectCodexRateLimitSeries } from "./limits";
 
 let root: string;
 
@@ -68,4 +69,23 @@ test("returns empty series for a sessions dir with no transcripts", () => {
   expect(series.session).toEqual([]);
   expect(series.weekly).toEqual([]);
   expect(series.sessionResetsAt).toBeNull();
+});
+
+test("buildSeries drops pre-reset samples so a draining window after a rollover still projects", () => {
+  const windowSeconds = 18_000; // 5h
+  const now = 10_000_000;
+  const resetsAt = now + 9_000;
+  const windowStart = resetsAt - windowSeconds; // now - 9000
+  // A low pre-reset sample inside the old 60s grace, then a normal rollover to
+  // ~100% and a draining new window.
+  const forward = [
+    { t: windowStart - 30, remaining: 5 }, // previous window — must be excluded
+    { t: windowStart + 100, remaining: 100 },
+    { t: windowStart + 4_500, remaining: 90 },
+  ];
+  const series = buildSeries(forward, [], { usedPercent: 15, resetsAt }, now, windowSeconds, null);
+  // The pre-reset value is gone, so there is no boundary rise.
+  expect(series.samples.some((s) => s.remaining === 5)).toBe(false);
+  expect(series.samples[0].remaining).toBe(100);
+  expect(computePace(series, now)!.zeroCrossing).not.toBeNull();
 });
