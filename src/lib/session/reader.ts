@@ -99,7 +99,11 @@ function hasToolResult(content: unknown): boolean {
 }
 
 function isClaudeTaskNotification(record: Record<string, unknown>): boolean {
-  return record.promptSource === "system" && rec(record.origin).kind === "task-notification";
+  const origin = record.origin;
+  if (record.promptSource === "system" && rec(origin).kind === "task-notification") return true;
+  if (origin === "task" || rec(origin).kind === "task") return true;
+  const content = textFromContent(rec(record.message).content).trim();
+  return /^<task-notification(?:\s[^>]*)?>[\s\S]*<\/task-notification>$/.test(content);
 }
 
 function push(out: SessionReadResult, item: SessionRecord): void {

@@ -230,7 +230,7 @@ test("a dashboard-reconciled root remains eligible while an explicit standalone 
   expect(mutateBoard("repo", 0, [{ kind: "reconcile-roots", roots: [reconciledPath], removeManual: [] }], boardFile).ok).toBe(true);
   expect(mutateBoard("repo", 1, [{ kind: "restore", path: explicitPath, placement: "manual" }], boardFile).ok).toBe(true);
   const reconciledFile = runtimeFile(reconciledPath, now / 1000 - 2 * 60 * 60);
-  const explicitFile = { ...runtimeFile(explicitPath, now / 1000 - 2 * 60 * 60), proc: null };
+  const explicitFile = runtimeFile(explicitPath, now / 1000 - 2 * 60 * 60);
 
   try {
     const report = await runReaperCycle({

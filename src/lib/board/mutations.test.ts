@@ -70,8 +70,19 @@ describe("board mutations", () => {
       removeManual: ["/transient-child"],
     }]);
     expect(first.prefs.manual).toEqual(roots);
+    expect(first.explicitManual).toEqual([]);
     expect(first.prefs.hidden).toEqual(["/closed-root"]);
     expect(applyBoardMutations(first, [{ kind: "reconcile-roots", roots, removeManual: ["/transient-child"] }])).toEqual(first);
+  });
+
+  test("manual restore records durable provenance for a reconciled root until its placement changes", () => {
+    const seeded = applyBoardMutations(board(), [{ kind: "reconcile-roots", roots: ["/root"], removeManual: [] }]);
+    const pinned = applyBoardMutations(seeded, [{ kind: "restore", path: "/root", placement: "manual" }]);
+
+    expect(pinned.prefs.manual).toEqual(["/root"]);
+    expect(pinned.explicitManual).toEqual(["/root"]);
+    expect(applyBoardMutations(pinned, [{ kind: "reconcile-roots", roots: ["/root"], removeManual: [] }]).explicitManual).toEqual(["/root"]);
+    expect(applyBoardMutations(pinned, [{ kind: "close", path: "/root" }]).explicitManual).toEqual([]);
   });
 
   test("explicit role-aware restore survives reconciliation", () => {

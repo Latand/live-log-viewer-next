@@ -87,11 +87,20 @@ test("Claude task notifications stay outside human authorship", () => {
     },
     {
       type: "user",
+      origin: "task",
+      message: { content: "Legacy automated task completed" },
+    },
+    {
+      type: "user",
+      message: { content: "<task-notification>\nWrapper automated task completed\n</task-notification>" },
+    },
+    {
+      type: "user",
       promptSource: "future-source",
       origin: { kind: "unknown" },
       message: { content: "Conservatively treated as human" },
     },
   ]);
 
-  expect(scanUserAuthoredMessages(pathname, "claude", 2)).toEqual({ count: 1, complete: true });
+  expect(scanUserAuthoredMessages(pathname, "claude", 4)).toEqual({ count: 1, complete: true });
 });

@@ -40,10 +40,13 @@ function normalize(board: BoardProjectStateV1, aliases = aliasesOf(board)): Boar
   const hidden = unique(board.prefs.hidden.map((item) => resolvePath(item, canonicalAliases)));
   const hiddenSet = new Set(hidden);
   const visible = (paths: readonly string[]) => unique(paths.map((item) => resolvePath(item, canonicalAliases)).filter((item) => !hiddenSet.has(item)));
+  const manual = visible(board.prefs.manual);
+  const manualSet = new Set(manual);
   return {
     ...board,
     pathAliases: canonicalAliases,
-    prefs: { ...board.prefs, manual: visible(board.prefs.manual), hidden, expanded: visible(board.prefs.expanded) },
+    explicitManual: visible(board.explicitManual ?? []).filter((item) => manualSet.has(item)),
+    prefs: { ...board.prefs, manual, hidden, expanded: visible(board.prefs.expanded) },
   };
 }
 
@@ -57,15 +60,20 @@ function remapPaths(board: BoardProjectStateV1, pairs: readonly { from: string; 
     const resolved = resolvePath(pathname, currentAliases);
     return !targets.has(resolved) || sources.has(resolved);
   });
+  const explicitManual = (board.explicitManual ?? []).filter((pathname) => {
+    const resolved = resolvePath(pathname, currentAliases);
+    return !targets.has(resolved) || sources.has(resolved);
+  });
   const aliases = { ...currentAliases };
   for (const { from, to } of activePairs) aliases[from] = to;
-  return normalize({ ...board, prefs: { ...board.prefs, manual } }, aliases);
+  return normalize({ ...board, explicitManual, prefs: { ...board.prefs, manual } }, aliases);
 }
 
 function reconcileRoots(board: BoardProjectStateV1, roots: readonly string[], removeManual: readonly string[]): BoardProjectStateV1 {
   const aliases = aliasesOf(board);
   const removed = new Set(removeManual.map((item) => resolvePath(item, aliases)));
   const manual = board.prefs.manual.filter((item) => !removed.has(item));
+  const explicitManual = (board.explicitManual ?? []).filter((item) => !removed.has(item));
   const present = new Set([
     ...manual,
     ...board.prefs.hidden,
@@ -77,12 +85,13 @@ function reconcileRoots(board: BoardProjectStateV1, roots: readonly string[], re
       present.add(root);
     }
   }
-  return normalize({ ...board, prefs: { ...board.prefs, manual } });
+  return normalize({ ...board, explicitManual, prefs: { ...board.prefs, manual } });
 }
 
 function restore(board: BoardProjectStateV1, path: string, placement: "auto" | "manual" | "expanded"): BoardProjectStateV1 {
   const visible = { ...board.prefs, hidden: board.prefs.hidden.filter((item) => item !== path) };
-  if (placement === "auto") return normalize({ ...board, prefs: visible });
+  const withoutExplicitManual = (board.explicitManual ?? []).filter((item) => item !== path);
+  if (placement === "auto") return normalize({ ...board, explicitManual: withoutExplicitManual, prefs: visible });
   const withoutExplicitRole = {
     ...visible,
     manual: visible.manual.filter((item) => item !== path),
@@ -90,6 +99,7 @@ function restore(board: BoardProjectStateV1, path: string, placement: "auto" | "
   };
   return normalize({
     ...board,
+    explicitManual: placement === "manual" ? [...withoutExplicitManual, path] : withoutExplicitManual,
     prefs: placement === "manual"
       ? { ...withoutExplicitRole, manual: [...withoutExplicitRole.manual, path] }
       : { ...withoutExplicitRole, expanded: [...withoutExplicitRole.expanded, path] },
@@ -125,6 +135,7 @@ export function applyBoardMutations(board: BoardProjectStateV1, mutations: reado
     const path = resolvePath(mutation.path, aliasesOf(next));
     next = normalize({
       ...next,
+      explicitManual: (next.explicitManual ?? []).filter((item) => item !== path),
       prefs: {
         ...next.prefs,
         manual: next.prefs.manual.filter((item) => item !== path),
