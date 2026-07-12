@@ -722,6 +722,60 @@ test("a genuine owner message on a headless reviewer still trips authorship (iss
   }
 });
 
+test("a pane reviewer with an owner follow-up keeps authorship (no double allowance) (issue #112 finding)", async () => {
+  /* A PANE reviewer launches through spawnAgentWithPrompt, so its worker-launch
+     receipt already covers the automated prompt. It must NOT also get the
+     headless reviewer allowance, or one automated prompt + one genuine owner
+     message (count 2) would fall under a total allowance of 2 and clean-stamp an
+     owner-touched card. */
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-reaper-pane-reviewer-"));
+  const sessionId = "019f4906-3f67-7b72-9fbc-9ec3b5ad13bc";
+  const reviewerPath = path.join(directory, `rollout-${sessionId}.jsonl`);
+  const now = Date.parse("2026-07-12T12:00:00.000Z");
+  reviewerMessages(reviewerPath, now, ["Review the changes on this branch", "please also cover the migration path"]);
+  process.env.LLV_STATE_DIR = directory;
+  delete process.env.LLV_REAPER_ENABLED;
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const profile = emptyLaunchProfile({ cwd: directory, role: "worker", title: "reviewer" });
+  const receipt = registry.beginSpawn("codex", directory, profile);
+  registry.completeSpawn(receipt.launchId, {
+    key: { engine: "codex", sessionId },
+    artifactPath: reviewerPath,
+    cwd: directory,
+    accountId: "default",
+    launchProfile: profile,
+    status: "idle",
+    host: null,
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  const flow = {
+    ...headlessFlow(now),
+    cwd: directory,
+    reviewerMode: "pane" as const,
+    rounds: [{ ...headlessFlow(now).rounds[0]!, reviewerPath }],
+  } satisfies Flow;
+
+  try {
+    await runReaperCycle({
+      registry,
+      hosts: [],
+      files: [runtimeFile(reviewerPath, now / 1000 - 10 * 60)],
+      now,
+      actuation: { loadFlows: () => [flow], now: () => now },
+    });
+    const state = JSON.parse(fs.readFileSync(path.join(directory, "reaper-state.json"), "utf8")) as {
+      scannedAt?: Record<string, number>;
+      userAuthoredPaths?: Record<string, true>;
+    };
+    expect(state.userAuthoredPaths?.[reviewerPath]).toBe(true);
+    expect(state.scannedAt?.[reviewerPath]).toBeUndefined();
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("a detached headless reviewer is observed and reaped by verified process identity", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-reaper-headless-"));
   const now = Date.parse("2026-07-12T12:00:00.000Z");

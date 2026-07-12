@@ -347,17 +347,23 @@ function viewerFlowMessageAllowance(flows: Flow[], pathname: string): number {
   return count;
 }
 
-/* A headless reviewer is launched straight through the CLI (startHeadlessReview),
+/* A HEADLESS reviewer is launched straight through the CLI (startHeadlessReview),
    not a Viewer spawn receipt, so its automated review instruction lands in the
    transcript as one user-role message that no launch/delivery allowance covers.
-   Left uncounted, that single automated prompt would mark every finished
+   Left uncounted, that single automated prompt would mark every finished headless
    reviewer owner-authored and pin it forever — the exact opposite of the
    immediate reviewer collapse #112 exists for. Grant the round's reviewer
    transcript one allowance for that startup prompt; a genuine owner message on
-   top is the second and still trips the exemption. */
+   top is the second and still trips the exemption.
+
+   PANE reviewers are excluded: they launch through `spawnAgentWithPrompt`, whose
+   completed worker receipt already grants the launch allowance via
+   `hasViewerWorkerLaunchPrompt`. Adding a second allowance would let a pane
+   reviewer carrying one automated prompt AND one genuine owner follow-up scan
+   clean, collapsing an owner-touched card — a hard-constraint violation. */
 function viewerReviewerLaunchAllowance(flows: Flow[], pathname: string): number {
   for (const flow of flows) {
-    if (flow.rounds.some((round) => round.reviewerPath === pathname)) return 1;
+    if (flow.reviewerMode === "headless" && flow.rounds.some((round) => round.reviewerPath === pathname)) return 1;
   }
   return 0;
 }
