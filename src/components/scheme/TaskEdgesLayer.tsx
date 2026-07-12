@@ -6,7 +6,7 @@ import { TASK_TONES } from "@/components/tasks/taskModel";
 
 import type { SchemeRect } from "./layout";
 import { MOVE_EASE, MOVE_MS } from "./nodes";
-import { routeTaskEdge, type TaskEdgeGeom } from "./taskGeometry";
+import { assignEdgeLanes, edgeObstacles, routeTaskEdge, type TaskEdgeGeom, type TaskEdgeObstacle } from "./taskGeometry";
 
 /* Coral of a failed delivery beats the task's own status tone. */
 const FAILED_COLOR = "#d97757";
@@ -16,25 +16,21 @@ const SOURCE_COLOR = "#0d8a72";
    opacity — it then reads as running *behind* the card it must pass. */
 const CROSS_FADE = 0.4;
 
-/** A task card the edges must not run through, tagged with its owning task so an
-    edge is never treated as crossing the very card it starts from. */
-export interface TaskEdgeObstacle extends SchemeRect {
-  id: string;
-}
-
 /**
  * Dashed status-colored beziers from task cards to their assigned agents.
  * Rides the transformed world div; geometry animates via style-level `d`
  * transitions exactly like EdgesLayer, so layout reshuffles glide. Each curve
- * routes around unrelated task cards (issue #17); an unavoidable crossing is
- * faded so it reads as passing behind. The svg itself is click-through — only
- * failed edges carry a widened invisible hit path whose click retries that one
- * delivery.
+ * routes around unrelated task cards *and* panes/decks/stacks (issue #17), and
+ * coincident edges are fanned into parallel lanes so they never overdraw; an
+ * unavoidable crossing is faded so it reads as passing behind. The svg itself is
+ * click-through — only failed edges carry a widened invisible hit path whose
+ * click retries that one delivery.
  */
 export const TaskEdgesLayer = memo(function TaskEdgesLayer({
   edges,
   world,
   cards = [],
+  containers = [],
   onRetry,
 }: {
   edges: TaskEdgeGeom[];
@@ -45,17 +41,22 @@ export const TaskEdgesLayer = memo(function TaskEdgesLayer({
   /** Every placed task card; each edge routes around the ones it neither starts
       nor ends on. */
   cards?: readonly TaskEdgeObstacle[];
+  /** Visible containers — panes, review decks, quiet stacks, drafts — an edge
+      must not cross on its way to a target it does not land on. */
+  containers?: readonly SchemeRect[];
   /** Ref-stable: retries one failed target of one task. */
   onRetry: (taskId: string, path: string) => void;
 }) {
-  /* Route once per edge/card change: each edge avoids all cards but its own. */
+  const lanes = useMemo(() => assignEdgeLanes(edges), [edges]);
+  /* Route once per edge/obstacle change: each edge avoids every other card and
+     every container but the ones it starts or ends on, on its own lane. */
   const routed = useMemo(
     () =>
       edges.map((edge) => ({
         edge,
-        route: routeTaskEdge(edge, cards.filter((card) => card.id !== edge.taskId)),
+        route: routeTaskEdge(edge, edgeObstacles(edge, cards, containers), lanes.get(edge.key) ?? 0),
       })),
-    [edges, cards],
+    [edges, cards, containers, lanes],
   );
   if (!edges.length) return null;
   return (

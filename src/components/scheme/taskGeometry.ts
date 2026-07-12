@@ -286,20 +286,32 @@ function cubicHitsAny(
   return false;
 }
 
+/* Perpendicular spacing between coincident edges fanned into parallel lanes. */
+const LANE_BOW = 26;
+
 /**
- * Routes one task edge around unrelated cards (issue #17). The base curve is the
- * same axis-following cubic the layer drew before — vertical handles for a
- * mostly-vertical hop, horizontal for a mostly-horizontal one. When that base
- * would run through a card the edge neither starts nor ends on, the control
- * handles are bowed perpendicular to the endpoint line in growing steps (both
- * sides) until a clear path is found. If nothing clears within `ROUTE_MAX_BOW`,
- * the base curve is kept and `crosses` is set so the layer can fade it.
+ * Routes one task edge around unrelated cards and panes (issue #17). The base
+ * curve is the same axis-following cubic the layer drew before — vertical
+ * handles for a mostly-vertical hop, horizontal for a mostly-horizontal one.
  *
- * Pure and deterministic — depends only on the endpoints and the obstacle rects.
+ * `lane` fans coincident edges apart: edges that share endpoints (a task's
+ * source and assignment landing on the same session) would otherwise draw as a
+ * single overdrawn stroke, so a non-zero lane bows this one's handles onto its
+ * own parallel track before any obstacle routing.
+ *
+ * When the (lane-adjusted) base would run through an obstacle the edge neither
+ * starts nor ends on, the handles are bowed perpendicular to the endpoint line
+ * in growing steps (both sides) until a clear path is found. If nothing clears
+ * within `ROUTE_MAX_BOW`, the base curve is kept and `crosses` is set so the
+ * layer can fade it.
+ *
+ * Pure and deterministic — depends only on the endpoints, the lane, and the
+ * obstacle rects.
  */
 export function routeTaskEdge(
   edge: { x1: number; y1: number; x2: number; y2: number },
   obstacles: readonly SchemeRect[],
+  lane = 0,
 ): TaskEdgeRoute {
   const { x1, y1, x2, y2 } = edge;
   const dx = x2 - x1;
@@ -307,10 +319,18 @@ export function routeTaskEdge(
   const vertical = Math.abs(dy) > Math.abs(dx);
   const midX = (x1 + x2) / 2;
   const midY = (y1 + y2) / 2;
-  /* Base handles, matching the original axis-following curve. */
+  /* Perpendicular to the endpoint line, normalized; a degenerate zero-length
+     edge falls back to a horizontal push. */
+  const len = Math.hypot(dx, dy) || 1;
+  const perpX = -dy / len;
+  const perpY = dx / len;
+  /* Base handles, matching the original axis-following curve, offset onto this
+     edge's lane so coincident edges never coincide. Endpoints stay pinned to
+     their card/target, so only the mid of the curve fans out. */
+  const laneOff = lane * LANE_BOW;
   const base = vertical
-    ? { c1x: x1, c1y: midY, c2x: x2, c2y: midY }
-    : { c1x: midX, c1y: y1, c2x: midX, c2y: y2 };
+    ? { c1x: x1 + perpX * laneOff, c1y: midY + perpY * laneOff, c2x: x2 + perpX * laneOff, c2y: midY + perpY * laneOff }
+    : { c1x: midX + perpX * laneOff, c1y: y1 + perpY * laneOff, c2x: midX + perpX * laneOff, c2y: y2 + perpY * laneOff };
 
   const build = (h: { c1x: number; c1y: number; c2x: number; c2y: number }): TaskEdgeRoute => ({
     d: `M ${x1} ${y1} C ${h.c1x} ${h.c1y}, ${h.c2x} ${h.c2y}, ${x2} ${y2}`,
@@ -322,11 +342,6 @@ export function routeTaskEdge(
     return build(base);
   }
 
-  /* Perpendicular to the endpoint line, normalized; degenerate zero-length
-     edges fall back to a horizontal push. */
-  const len = Math.hypot(dx, dy) || 1;
-  const perpX = -dy / len;
-  const perpY = dx / len;
   for (let bow = ROUTE_BOW_STEP; bow <= ROUTE_MAX_BOW; bow += ROUTE_BOW_STEP) {
     for (const sign of [1, -1]) {
       const off = bow * sign;
@@ -343,4 +358,64 @@ export function routeTaskEdge(
   }
 
   return { ...build(base), crosses: true };
+}
+
+/** A task card the edges must not run through, tagged with its owning task so an
+    edge is never treated as crossing the very card it starts from. */
+export interface TaskEdgeObstacle extends SchemeRect {
+  id: string;
+}
+
+function rectOwnsEndpoint(rect: SchemeRect, edge: Pick<TaskEdgeGeom, "x1" | "y1" | "x2" | "y2">): boolean {
+  const inside = (x: number, y: number) => x >= rect.x && x <= rect.x + rect.w && y >= rect.y && y <= rect.y + rect.h;
+  return inside(edge.x1, edge.y1) || inside(edge.x2, edge.y2);
+}
+
+/**
+ * The obstacle set one task edge must route around (issue #17): every other task
+ * card plus every visible container (panes, decks, quiet stacks, drafts), minus
+ * whichever container or card owns an endpoint — the card the edge leaves and
+ * the pane/deck/node it arrives on can never be "crossed", and an obstacle the
+ * source card sits inside can't be routed around at the start either. Pure, so
+ * the router's inputs are unit-testable without a DOM.
+ */
+export function edgeObstacles(
+  edge: Pick<TaskEdgeGeom, "taskId" | "x1" | "y1" | "x2" | "y2">,
+  cards: readonly TaskEdgeObstacle[],
+  containers: readonly SchemeRect[],
+): SchemeRect[] {
+  const out: SchemeRect[] = [];
+  for (const card of cards) {
+    if (card.id !== edge.taskId && !rectOwnsEndpoint(card, edge)) out.push({ x: card.x, y: card.y, w: card.w, h: card.h });
+  }
+  for (const rect of containers) {
+    if (!rectOwnsEndpoint(rect, edge)) out.push({ x: rect.x, y: rect.y, w: rect.w, h: rect.h });
+  }
+  return out;
+}
+
+/**
+ * Deterministic lane index per edge so coincident edges never overdraw (issue
+ * #17). A task's source and an assignment resolving to the same session produce
+ * byte-identical endpoints; grouped by their (rounded) endpoints, the group's
+ * first edge by key keeps lane 0 and the rest alternate to either side (+1, −1,
+ * +2, …), which {@link routeTaskEdge} turns into parallel bowed tracks. A lone
+ * edge is lane 0. Order-independent — grouping and ordering read only edge data.
+ */
+export function assignEdgeLanes(edges: readonly TaskEdgeGeom[]): Map<string, number> {
+  const groups = new Map<string, TaskEdgeGeom[]>();
+  for (const edge of edges) {
+    const sig = `${Math.round(edge.x1)}:${Math.round(edge.y1)}:${Math.round(edge.x2)}:${Math.round(edge.y2)}`;
+    const list = groups.get(sig);
+    if (list) list.push(edge);
+    else groups.set(sig, [edge]);
+  }
+  const lanes = new Map<string, number>();
+  for (const list of groups.values()) {
+    const ordered = [...list].sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+    ordered.forEach((edge, i) => {
+      lanes.set(edge.key, i === 0 ? 0 : i % 2 === 1 ? (i + 1) / 2 : -(i / 2));
+    });
+  }
+  return lanes;
 }

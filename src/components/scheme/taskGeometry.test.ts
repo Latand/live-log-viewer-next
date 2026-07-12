@@ -3,8 +3,10 @@ import { describe, expect, test } from "bun:test";
 import type { BoardTask, TaskAssignment } from "@/lib/tasks/types";
 
 import {
+  assignEdgeLanes,
   buildTaskEdges,
   buildTaskTargetIndex,
+  edgeObstacles,
   rectAnchor,
   routeTaskEdge,
   TASK_BODY_MAX,
@@ -13,6 +15,7 @@ import {
   taskCardHeight,
   taskRect,
   taskWorldBounds,
+  type TaskEdgeGeom,
   type TaskTargetSource,
 } from "./taskGeometry";
 import type { SchemeRect } from "./layout";
@@ -296,5 +299,76 @@ describe("buildTaskEdges", () => {
     expect(edges[0]!.key).toBe("t4::source::/node");
     expect(edges[0]!.relation).toBe("source");
     expect(edges[0]!.failed).toBe(false);
+  });
+});
+
+function edgeGeom(key: string, x1: number, y1: number, x2: number, y2: number, over: Partial<TaskEdgeGeom> = {}): TaskEdgeGeom {
+  return { key, taskId: "t", relation: "assignment", path: "/p", x1, y1, x2, y2, status: "assigned", failed: false, error: null, ...over };
+}
+
+describe("assignEdgeLanes", () => {
+  test("coincident source + assignment edges land on distinct lanes", () => {
+    /* The Finding-2 case: a task whose source and assignment resolve to the same
+       session give byte-identical endpoints — they must not share a lane. */
+    const src = edgeGeom("t::source::/p", 0, 0, 100, 100, { relation: "source" });
+    const asn = edgeGeom("t::/p", 0, 0, 100, 100);
+    const lanes = assignEdgeLanes([src, asn]);
+    expect(new Set(lanes.values()).size).toBe(2);
+    expect([...lanes.values()]).toContain(0);
+  });
+
+  test("three coincident edges spread symmetrically to 0, +1, −1", () => {
+    const es = [edgeGeom("k3", 0, 0, 10, 10), edgeGeom("k1", 0, 0, 10, 10), edgeGeom("k2", 0, 0, 10, 10)];
+    expect([...assignEdgeLanes(es).values()].sort((a, b) => a - b)).toEqual([-1, 0, 1]);
+  });
+
+  test("edges with distinct endpoints all stay on lane 0", () => {
+    const lanes = assignEdgeLanes([edgeGeom("a", 0, 0, 10, 10), edgeGeom("b", 0, 0, 10, 20)]);
+    expect([...lanes.values()]).toEqual([0, 0]);
+  });
+
+  test("deterministic under input permutation", () => {
+    const es = [edgeGeom("k1", 0, 0, 5, 5), edgeGeom("k2", 0, 0, 5, 5), edgeGeom("k3", 0, 0, 5, 5)];
+    const forward = assignEdgeLanes(es);
+    const reversed = assignEdgeLanes([...es].reverse());
+    for (const e of es) expect(reversed.get(e.key)).toBe(forward.get(e.key));
+  });
+});
+
+describe("routeTaskEdge lanes", () => {
+  test("a non-zero lane fans the curve off the straight track but keeps endpoints", () => {
+    const e = { x1: 0, y1: 0, x2: 0, y2: 400 };
+    const straight = routeTaskEdge(e, []);
+    const laned = routeTaskEdge(e, [], 1);
+    expect(laned.d).not.toBe(straight.d);
+    expect(laned.d.startsWith("M 0 0 ")).toBe(true);
+    expect(laned.d.endsWith("0 400")).toBe(true);
+    expect(Math.abs(laned.mid.x)).toBeGreaterThan(10); // pushed off the x=0 line
+  });
+
+  test("coincident edges on opposite lanes never overdraw", () => {
+    const e = { x1: 0, y1: 0, x2: 200, y2: 0 };
+    const up = routeTaskEdge(e, [], 1);
+    const down = routeTaskEdge(e, [], -1);
+    expect(up.d).not.toBe(down.d);
+    expect(up.mid.y).not.toBe(down.mid.y);
+  });
+});
+
+describe("edgeObstacles", () => {
+  const edge = { taskId: "t1", x1: 0, y1: 0, x2: 0, y2: 400 };
+
+  test("a pane between the endpoints is an obstacle (Finding 1)", () => {
+    const pane: SchemeRect = { x: -200, y: 150, w: 400, h: 100 };
+    expect(edgeObstacles(edge, [], [pane])).toHaveLength(1);
+  });
+
+  test("the source card and the target container are excluded", () => {
+    const source = { id: "t1", x: -130, y: -64, w: 260, h: 64 }; // the edge's own card
+    const target: SchemeRect = { x: -300, y: 400, w: 600, h: 200 }; // owns the (0,400) endpoint
+    const other = { id: "t2", x: -130, y: 180, w: 260, h: 64 }; // an unrelated card in the way
+    const obs = edgeObstacles(edge, [source, other], [target]);
+    expect(obs).toHaveLength(1);
+    expect(obs[0]).toMatchObject({ x: -130, y: 180 });
   });
 });

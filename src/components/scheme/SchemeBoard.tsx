@@ -755,7 +755,7 @@ export function SchemeBoard({
           onHandoff={handoffForNodes}
           onExpand={stableExpand}
         />
-        <TaskEdgesLayer edges={taskEdges} world={world} cards={taskCardObstacles} onRetry={retryEdge} />
+        <TaskEdgesLayer edges={taskEdges} world={world} cards={taskCardObstacles} containers={taskObstacles} onRetry={retryEdge} />
         <TasksLayer
           tasks={placedTasks}
           files={files}
