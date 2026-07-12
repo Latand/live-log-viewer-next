@@ -193,7 +193,13 @@ export async function POST(req: NextRequest): Promise<NextResponse<SendResponse 
     return respond(await answerDialogKey(filePath, key, body.label, body.question));
   }
   if (body.action === "resume") return respond(await resumeConversation(filePath));
-  if (body.action === "kill") return respond(await killConversation(filePath));
+  if (body.action === "kill") {
+    const outcome = await killConversation(filePath);
+    if (outcome.ok && !outcome.target) {
+      return NextResponse.json({ ok: false, outcome: "failed", error: "kill resolved no registered pane" }, { status: 409 });
+    }
+    return respond(outcome);
+  }
   if (body.action === "reconfigure") {
     const file = (await listFiles()).find((item) => item.path === filePath);
     if (!file || (file.engine !== "claude" && file.engine !== "codex")) {

@@ -1,6 +1,7 @@
 import { procBackend } from "@/lib/proc";
 import { descendantPids } from "@/lib/proc/memory";
 import { listFiles } from "@/lib/scanner";
+import { overlaySessionTitles } from "@/lib/session/titleProjection";
 import { readTranscriptHosts, type TranscriptHost, type TranscriptHostSnapshot } from "@/lib/agent/transcriptHost";
 import { captureTmuxAttachReference, type TmuxAttachReference } from "@/lib/tmux";
 
@@ -85,6 +86,7 @@ async function buildResources(fresh: boolean): Promise<ResourcesPayload> {
   if (hosts.hosts.length > 0) {
     const ppids = procBackend.ppidMap();
     const files = await listFiles();
+    overlaySessionTitles(files);
     const byPath = new Map(files.map((entry) => [entry.path, entry]));
     const byPane = new Map<string, TranscriptHost[]>();
     for (const host of hosts.hosts) {

@@ -30,6 +30,11 @@ export type FlowState =
 
 export type ReviewVerdict = "APPROVE" | "REQUEST_CHANGES" | "COMMENT";
 
+export type ViewerFlowDelivery = {
+  path: string;
+  deliveredAt: string;
+};
+
 export type FlowBlock = {
   reason: "rate_limited";
   /** Stable address for a future continue-on-account action. */
@@ -39,13 +44,36 @@ export type FlowBlock = {
   resetAt: number | null;
 };
 
+export type FlowMergeEvidence = {
+  repository: string | null;
+  headRef: string | null;
+  headSha: string | null;
+  prNumber: number | null;
+  mergedAt: string | null;
+  checkedAt: string | null;
+  source: "github-pr" | "git-ancestor" | null;
+};
+
 export type Round = {
   n: number; // 1-based
   reviewerPath: string | null; // reviewer run's transcript path once known
   reviewerConversationId?: string | null;
+  /** Reviewer role frozen when this round is created/retried and re-frozen at
+      launch (issue #118 + #117). The engine launches, recovers and polls the
+      reviewer through this snapshot, so a mid-flight `set-roles` (which mutates
+      flow.roles.reviewer) can never change the engine/model of a round already
+      spawning or reviewing. A Codex-configured flow may persist its configured
+      Claude fallback here when every Codex account is exhausted. Absent on rounds
+      persisted before this field existed — the engine falls back to
+      flow.roles.reviewer for those. */
+  reviewerRole?: RoleConfig | null;
   /** Engine account frozen when this round starts; subsequent polling and retry
       must never silently adopt a newly selected active account. */
   accountId?: string | null;
+  /** Engine-qualified accounts already tried for this logical round. */
+  attemptedAccounts?: string[];
+  /** Automatic no-verdict retries already consumed by this logical round. */
+  autoRetryCount?: number;
   /** Reviewer session/thread id, persisted as soon as it is known: claude
       pre-chooses it at spawn, codex reports it in the first `--json` event.
       Survives viewer restarts so the transcript claim stays deterministic. */
@@ -55,6 +83,9 @@ export type Round = {
       stdio), so after a restart the engine re-attaches through this pid and
       the on-disk stdout/last-message artifacts instead of giving up. */
   reviewerPid?: number | null;
+  /** Process start identity captured with reviewerPid. Reaper actuation
+      requires both values so PID reuse cannot inherit reviewer ownership. */
+  reviewerIdentity?: string | null;
   /** Pane-mode reviewers: the tmux pane the round booted, captured at spawn
       so cancel-round can stop it even before the scanner attributes the
       transcript. The window name guards against pane-id reuse. */
@@ -62,12 +93,18 @@ export type Round = {
   findingsPath: string | null; // round artifact file once written
   triggeredBy: "marker" | "button";
   readyNote: string | null; // text after REVIEW_READY:
+  /** Clean commit reviewed in this round. Null prevents merge-authorized cleanup. */
+  reviewHeadSha?: string | null;
   verdict: ReviewVerdict | null;
   findingsCount: number | null;
   startedAt: string;
   spawnStartedAt?: string | null; // reviewer launch started
   relayStartedAt?: string | null; // findings delivery started
+  /** Exact transcript generation that received Viewer-generated findings. */
+  relayDelivery?: ViewerFlowDelivery | null;
   reviewedAt: string | null; // verdict detected
+  /** Reviewer process reached a verdict or terminal error. */
+  terminalAt?: string | null;
   relayedAt: string | null; // findings delivered to implementer
   error: string | null;
 };
@@ -80,6 +117,8 @@ export type Flow = {
   implementerPath: string; // transcript path of the attached session
   implementerConversationId?: string | null;
   roles: Record<FlowRoleKey, RoleConfig>;
+  /** Configured cross-engine fallback for unattended reviewer launches. */
+  reviewerFallback?: RoleConfig | null;
   baseRef: string; // resolved git SHA captured at creation
   /** Pinned task specification and acceptance criteria shown to every reviewer. */
   spec?: string;
@@ -93,6 +132,11 @@ export type Flow = {
   stateDetail: string | null;
   /** Ephemeral read-model block derived from the attached implementer. */
   block?: FlowBlock | null;
+  /** Durable positive merge evidence and the repository identity needed to
+      refresh it after the originating worktree disappears. */
+  mergeEvidence?: FlowMergeEvidence | null;
+  /** Exact transcript generation that received the Viewer-generated kickoff. */
+  kickoffDelivery?: ViewerFlowDelivery | null;
   rounds: Round[];
   createdAt: string;
   closedAt: string | null;
@@ -131,6 +175,7 @@ export type FlowAction =
   | "set-round-limit"
   | "extend"
   | "another-round"
+  | "set-roles"
   | "close";
 
 export type PatchFlowRequest = {
@@ -143,6 +188,14 @@ export type PatchFlowRequest = {
   /** for advance/retry-round: a user note the next reviewer sees as the
       round's ready note */
   note?: string;
+  /** for set-roles: a partial override of the REVIEWER role config, applied to
+      the next round without recreating the flow (issue #118). Only the provided
+      fields change, and a round already in flight keeps the role it froze at
+      spawn (see Round.reviewerRole). The implementer is intentionally not
+      overridable: it is an already-attached live session whose engine/account
+      cannot be reseated in place, so accepting an implementer override would be a
+      no-op reported as success. Reseating the implementer is a separate feature. */
+  roles?: { reviewer?: Partial<RoleConfig> };
 };
 
 /** Per-transcript annotation piggybacked on /api/files entries. */

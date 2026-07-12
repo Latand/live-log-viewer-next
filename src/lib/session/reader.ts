@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { StringDecoder } from "node:string_decoder";
 
 import type { Engine } from "@/lib/types";
 
@@ -97,6 +98,14 @@ function hasToolResult(content: unknown): boolean {
   return contentParts(content).some((part) => part.type === "tool_result");
 }
 
+function isClaudeTaskNotification(record: Record<string, unknown>): boolean {
+  const origin = record.origin;
+  if (record.promptSource === "system" && rec(origin).kind === "task-notification") return true;
+  if (origin === "task" || rec(origin).kind === "task") return true;
+  const content = textFromContent(rec(record.message).content).trim();
+  return /^<task-notification(?:\s[^>]*)?>[\s\S]*<\/task-notification>$/.test(content);
+}
+
 function push(out: SessionReadResult, item: SessionRecord): void {
   if (!item.text.trim()) return;
   if (item.kind === "message") out.messages.push(item);
@@ -111,6 +120,10 @@ function readClaude(pathname: string): SessionReadResult {
     const ts = tsOf(obj);
     if (obj.type === "user") {
       const content = rec(obj.message).content;
+      if (isClaudeTaskNotification(obj)) {
+        push(out, { kind: "trace", role: "system", ts, name: "task-notification", text: textFromContent(content) });
+        continue;
+      }
       if (hasToolResult(content)) {
         for (const part of contentParts(content)) {
           if (part.type === "tool_result") {
@@ -195,4 +208,103 @@ function readCodex(pathname: string): SessionReadResult {
 
 export function readSession(pathname: string, engine: Extract<Engine, "claude" | "codex">): SessionReadResult {
   return engine === "claude" ? readClaude(pathname) : readCodex(pathname);
+}
+
+const AUTHORSHIP_SCAN_CHUNK_BYTES = 64 * 1024;
+const AUTHORSHIP_SCAN_MAX_RECORD_CHARS = 8 * 1024 * 1024;
+
+function recordHasUserMessage(record: Record<string, unknown>, engine: Extract<Engine, "claude" | "codex">): boolean {
+  if (engine === "claude") {
+    if (record.type !== "user" || isClaudeTaskNotification(record)) return false;
+    const content = rec(record.message).content;
+    return !hasToolResult(content) && Boolean(textFromContent(content).trim());
+  }
+  const message = codexMessageFromPayload(rec(record.payload));
+  return message?.role === "user" && Boolean(message.text.trim());
+}
+
+/** Scans every JSONL record with bounded memory and stops at the first human
+    message. Oversized individual records are skipped while later records
+    remain observable. */
+export interface AuthorshipScanResult {
+  count: number;
+  complete: boolean;
+}
+
+export function scanUserAuthoredMessages(
+  pathname: string,
+  engine: Extract<Engine, "claude" | "codex">,
+  limit = Number.MAX_SAFE_INTEGER,
+): AuthorshipScanResult {
+  let fd: number | null = null;
+  let count = 0;
+  let complete = true;
+  try {
+    fd = fs.openSync(pathname, "r");
+    const chunk = Buffer.allocUnsafe(AUTHORSHIP_SCAN_CHUNK_BYTES);
+    const decoder = new StringDecoder("utf8");
+    let pending = "";
+    let skippingRecord = false;
+    const consume = (line: string): boolean => {
+      const text = line.trim();
+      if (!text) return false;
+      try {
+        const parsed = JSON.parse(text) as unknown;
+        return Boolean(parsed && typeof parsed === "object" && !Array.isArray(parsed)
+          && recordHasUserMessage(parsed as Record<string, unknown>, engine));
+      } catch {
+        complete = false;
+        return false;
+      }
+    };
+    const consumeChunk = (decoded: string): boolean => {
+      let cursor = 0;
+      while (cursor < decoded.length) {
+        const newline = decoded.indexOf("\n", cursor);
+        const end = newline === -1 ? decoded.length : newline;
+        if (!skippingRecord) {
+          pending += decoded.slice(cursor, end);
+          if (pending.length > AUTHORSHIP_SCAN_MAX_RECORD_CHARS) {
+            pending = "";
+            skippingRecord = true;
+            complete = false;
+          }
+        }
+        if (newline === -1) return false;
+        if (!skippingRecord && consume(pending)) {
+          count += 1;
+          if (count >= limit) return true;
+        }
+        pending = "";
+        skippingRecord = false;
+        cursor = newline + 1;
+      }
+      return false;
+    };
+    for (;;) {
+      const bytes = fs.readSync(fd, chunk, 0, chunk.length, null);
+      if (bytes === 0) break;
+      if (consumeChunk(decoder.write(chunk.subarray(0, bytes)))) return { count, complete };
+    }
+    const tail = decoder.end();
+    if (tail && consumeChunk(tail)) return { count, complete };
+    if (!skippingRecord && Boolean(pending) && consume(pending)) count += 1;
+    return { count, complete };
+  } catch {
+    return { count, complete: false };
+  } finally {
+    if (fd !== null) fs.closeSync(fd);
+  }
+}
+
+export function countUserAuthoredMessages(
+  pathname: string,
+  engine: Extract<Engine, "claude" | "codex">,
+  limit = Number.MAX_SAFE_INTEGER,
+): number {
+  return scanUserAuthoredMessages(pathname, engine, limit).count;
+}
+
+export function hasUserAuthoredMessage(pathname: string, engine: Extract<Engine, "claude" | "codex">): boolean {
+  return countUserAuthoredMessages(pathname, engine, 1) > 0;
 }

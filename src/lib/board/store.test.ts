@@ -53,6 +53,7 @@ describe("board store", () => {
       prefs: { manual: ["/a"], hidden: [], expanded: [], viewMode: null, taskPanelOpen: false },
     } } }), "utf8");
     expect(boardFor("viewer", file).pathAliases).toEqual({});
+    expect(boardFor("viewer", file).explicitManual).toEqual(["/a"]);
   });
   test("a semantic no-op preserves revision and durable inode", () => {
     const file = temporaryFile();

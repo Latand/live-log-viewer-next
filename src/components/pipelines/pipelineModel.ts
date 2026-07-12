@@ -1,6 +1,7 @@
 import { getLocale, translate, type MessageKey, type TFunction } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
 import type { Flow, FlowEngine } from "@/lib/flows/types";
+import { PIPELINE_DISALLOWED_ROLE_IDS } from "@/lib/pipelines/types";
 import type {
   CreatePipelineRequest,
   Pipeline,
@@ -13,10 +14,38 @@ import type {
   PipelineStageInput,
   PipelineStageKind,
   PipelineState,
+  PatchPipelineRequest,
   StageVerdictStatus,
 } from "@/lib/pipelines/types";
 
 export const PIPELINES_CHANGED_EVENT = "llv:pipelines-changed";
+
+/** Client-safe list of the pipeline role ids an operator may assign to a stage,
+    minus the ones a pipeline may not use (deployer needs interactive deploy
+    confirmation). Mirrors the server's PIPELINE_ROLE_IDS; the API re-validates. */
+export const PIPELINE_ROLE_OPTIONS: readonly PipelineRoleId[] = (
+  ["orchestrator", "reviewer", "verifier", "builder", "architect", "cleaner", "prod-auditor", "deployer"] as const
+).filter((roleId) => !PIPELINE_DISALLOWED_ROLE_IDS.includes(roleId));
+
+/** The stage-override form's raw values (issue #118 on-canvas controls). */
+export type StageOverrideForm = { roleId: string; engine: FlowEngine; model: string; effort: string; prompt: string };
+
+/**
+ * Builds an override-stage PATCH body that carries ONLY the fields the operator
+ * actually changed from the stage's current config (issue #118 Finding 4).
+ * Sending an unchanged engine/model/effort would pin the previous role's runtime
+ * as an explicit override and defeat the backend's "changing the role resets
+ * unpinned runtime to its defaults" rule — so a role-only change must omit them.
+ * Prompt is always sent (it is required and the primary edit).
+ */
+export function stageOverrideBody(stage: PipelineStage, form: StageOverrideForm): Omit<PatchPipelineRequest, "action"> {
+  const body: Omit<PatchPipelineRequest, "action"> = { stageId: stage.id, prompt: form.prompt.trim() };
+  if (form.roleId !== (stage.role?.roleId ?? "")) body.role = form.roleId ? { roleId: form.roleId as PipelineRoleId } : null;
+  if (form.engine !== stage.effectiveRole.engine) body.engine = form.engine;
+  if (form.model.trim() !== (stage.effectiveRole.model ?? "")) body.model = form.model.trim() || null;
+  if (form.effort !== (stage.effectiveRole.effort ?? "")) body.effort = form.effort || null;
+  return body;
+}
 
 /**
  * A node can seed a pipeline (its transcript becomes the src lineage of stage 0)
@@ -426,12 +455,16 @@ export async function createPipeline(req: CreatePipelineRequest): Promise<{ pipe
   }
 }
 
-export async function patchPipeline(id: string, action: PipelineAction): Promise<string | null> {
+export async function patchPipeline(
+  id: string,
+  action: PipelineAction,
+  extra?: Omit<PatchPipelineRequest, "action">,
+): Promise<string | null> {
   try {
     const response = await fetch(`/api/pipelines/${encodeURIComponent(id)}`, {
       method: "PATCH",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ action }),
+      body: JSON.stringify({ action, ...extra }),
     });
     if (response.ok) {
       window.dispatchEvent(new Event(PIPELINES_CHANGED_EVENT));

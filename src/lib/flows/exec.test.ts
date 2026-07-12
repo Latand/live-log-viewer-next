@@ -4,10 +4,12 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { procBackend } from "@/lib/proc";
+
 /* The state dir must point at a sandbox before store.ts computes its
    module-level constants, so exec/store load dynamically after the env set. */
 process.env.LLV_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "llv-exec-test-"));
-const { headlessReviewStatus, reviewerCommand, scanEventStream } = await import("./exec");
+const { forgetHeadlessReview, headlessReviewStatus, reviewerCommand, scanEventStream, startHeadlessReview } = await import("./exec");
 const { reviewerPrompt } = await import("./prompts");
 const { outputPathFor, stdoutPathFor } = await import("./store");
 
@@ -47,6 +49,14 @@ async function waitForDeath(pid: number): Promise<void> {
   throw new Error(`pid ${pid} refused to die`);
 }
 
+async function waitForFile(filePath: string): Promise<void> {
+  for (let i = 0; i < 200; i++) {
+    if (fs.existsSync(filePath)) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`file ${filePath} was not created`);
+}
+
 test("scanEventStream extracts session id and last agent message", () => {
   const scanned = scanEventStream(EVENTS);
   expect(scanned.sessionId).toBe("11111111-2222-3333-4444-555555555555");
@@ -57,8 +67,38 @@ test("headless codex reviewer launches without CLI sandbox blocking", () => {
   const built = reviewerCommand({ engine: "codex", model: null, effort: "xhigh" }, "review prompt", "/out/review.md", "/repo");
 
   expect(built.args).toContain("--dangerously-bypass-approvals-and-sandbox");
+  expect(built.args).toContain("-");
+  expect(built.args).not.toContain("review prompt");
+  expect(built.stdin).toBe("review prompt");
   expect(built.args).not.toContain("--sandbox");
   expect(built.args).not.toContain("read-only");
+});
+
+test("headless Codex launch flushes the complete prompt and closes stdin", async () => {
+  const capturePath = path.join(process.env.LLV_STATE_DIR!, "stdin-capture.json");
+  const executablePath = path.join(process.env.LLV_STATE_DIR!, "fake-codex");
+  const prompt = "Review line one.\nReview line two with unicode: Привіт.\n";
+  fs.writeFileSync(
+    executablePath,
+    `#!${process.execPath}\nconst prompt = await Bun.stdin.text();\nawait Bun.write(${JSON.stringify(capturePath)}, JSON.stringify({ prompt, eof: true }));\n`,
+    { mode: 0o700 },
+  );
+
+  startHeadlessReview(
+    "flow-stdin-eof",
+    1,
+    { engine: "codex", model: null, effort: null },
+    process.cwd(),
+    prompt,
+    5_000,
+    null,
+    null,
+    { command: executablePath },
+  );
+  await waitForFile(capturePath);
+
+  expect(JSON.parse(fs.readFileSync(capturePath, "utf8"))).toEqual({ prompt, eof: true });
+  forgetHeadlessReview("flow-stdin-eof", 1);
 });
 
 test("headless managed Codex reviewer fixes its account home and file credential store at launch", () => {
@@ -137,7 +177,7 @@ test("status is null when the round never left a trace", () => {
 test("restart reconstruction: alive pid reports running, dead pid yields the artifact verdict", async () => {
   const pid = spawnSleeper();
   writeArtifacts("flow-b", 1, EVENTS);
-  const round = { reviewerPid: pid, spawnStartedAt: new Date().toISOString() };
+  const round = { reviewerPid: pid, reviewerIdentity: procBackend.processIdentity(pid), spawnStartedAt: new Date().toISOString() };
 
   const running = headlessReviewStatus("flow-b", 1, round, "codex");
   expect(running?.status).toBe("running");
@@ -151,19 +191,43 @@ test("restart reconstruction: alive pid reports running, dead pid yields the art
   expect(done?.finalOutput).toBe("VERDICT: APPROVE\n\nShip it.");
 });
 
+test("restart reconstruction rejects a live pid whose process identity changed", () => {
+  const pid = spawnSleeper();
+  try {
+    const status = headlessReviewStatus("flow-reused", 1, {
+      reviewerPid: pid,
+      reviewerIdentity: `${pid}:stale`,
+      spawnStartedAt: new Date().toISOString(),
+    }, "codex");
+    expect(status?.status).not.toBe("running");
+  } finally {
+    process.kill(pid, "SIGKILL");
+  }
+});
+
+test("cancel leaves a reused persisted reviewer pid untouched", () => {
+  const pid = spawnSleeper();
+  try {
+    forgetHeadlessReview("flow-cancel-reused", 1, { reviewerPid: pid, reviewerIdentity: `${pid}:stale` });
+    expect(() => process.kill(pid, 0)).not.toThrow();
+  } finally {
+    process.kill(pid, "SIGKILL");
+  }
+});
+
 test("restart reconstruction: dead codex run without artifact falls back to the event-stream message", async () => {
   const pid = spawnSleeper();
   writeArtifacts("flow-c", 2, EVENTS);
   process.kill(pid, "SIGKILL");
   await waitForDeath(pid);
-  const status = headlessReviewStatus("flow-c", 2, { reviewerPid: pid, spawnStartedAt: new Date().toISOString() }, "codex");
+  const status = headlessReviewStatus("flow-c", 2, { reviewerPid: pid, reviewerIdentity: procBackend.processIdentity(pid), spawnStartedAt: new Date().toISOString() }, "codex");
   expect(status?.status).toBe("done");
   expect(status?.finalOutput).toContain("VERDICT: APPROVE");
 });
 
 test("restart reconstruction: claude reviewer's verdict is its captured stdout", () => {
   writeArtifacts("flow-d", 1, "VERDICT: REQUEST_CHANGES\n\n- fix the thing\n");
-  const status = headlessReviewStatus("flow-d", 1, { reviewerPid: 999_999_999, spawnStartedAt: new Date().toISOString() }, "claude");
+  const status = headlessReviewStatus("flow-d", 1, { reviewerPid: 999_999_999, reviewerIdentity: "999999999:gone", spawnStartedAt: new Date().toISOString() }, "claude");
   expect(status?.status).toBe("done");
   expect(status?.finalOutput).toBe("VERDICT: REQUEST_CHANGES\n\n- fix the thing");
 });
@@ -171,6 +235,6 @@ test("restart reconstruction: claude reviewer's verdict is its captured stdout",
 test("restart reconstruction: dead run with no output at all times out past the budget", () => {
   writeArtifacts("flow-e", 1, "");
   const started = new Date(Date.now() - 60 * 60 * 1000).toISOString();
-  const status = headlessReviewStatus("flow-e", 1, { reviewerPid: 999_999_999, spawnStartedAt: started }, "codex");
+  const status = headlessReviewStatus("flow-e", 1, { reviewerPid: 999_999_999, reviewerIdentity: "999999999:gone", spawnStartedAt: started }, "codex");
   expect(status?.status).toBe("timeout");
 });

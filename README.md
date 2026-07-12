@@ -247,6 +247,7 @@ All optional. Transcription variables are documented in full in
 | `LLV_WHISPER_VENV` | Path to the whisper virtualenv (default `~/.cache/agent-log-viewer/whisper-venv`). |
 | `LLV_ELEVENLABS_STT_MODEL` | ElevenLabs batch model override. |
 | `ELEVENLABS_API_KEY` | ElevenLabs API key for the ElevenLabs backend. |
+| `LLV_REAPER_ENABLED` | `1` enables verified pane and detached-reviewer process cleanup by the deterministic agent reaper. Unset keeps dry-run mode and exposes its latest report at `GET /api/lifecycle/reaper`. |
 | `LLV_DOCKER_NSENTER_SHIMS` | `1` makes the agent CLI resolver prefer the container's `/usr/local/bin` nsenter shims for host CLIs. Set automatically by the Docker image; leave unset on a host runtime. See [docs/docker.md](docs/docker.md). |
 
 ## Config paths
