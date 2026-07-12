@@ -13,6 +13,7 @@ import type { Flow, FlowMergeEvidence } from "@/lib/flows/types";
 import { reconcileMigrationInventory } from "@/lib/accounts/migration/coordinator";
 import { procBackend } from "@/lib/proc";
 import { listFiles } from "@/lib/scanner";
+import { isNativeCodexSubagentTranscript } from "@/lib/scanner/codexNative";
 import { scanUserAuthoredMessages } from "@/lib/session/reader";
 import { killTmuxHostIfMatches, tmuxEndpoint } from "@/lib/tmux";
 import type { FileEntry } from "@/lib/types";
@@ -36,6 +37,14 @@ interface ReaperState {
   version: 1;
   firstObservedAt: Record<string, string>;
   userAuthoredPaths: Record<string, true>;
+  /* Path-scoped authorship freshness (issue #112). For every transcript the
+     reaper has scanned to completion and found NOT owner-authored, the observed
+     transcript mtime (seconds) at that scan. The board clears
+     `authorshipUnverified` only when this per-path stamp is at least as fresh as
+     the file's current mtime — a global "last cycle" timestamp would falsely
+     certify a worker that exited before it was ever scanned, letting an
+     unobserved user-authored transcript collapse. */
+  scannedAt: Record<string, number>;
 }
 
 function hostKey(host: TranscriptHost): string {
@@ -52,10 +61,13 @@ function readState(): ReaperState {
         userAuthoredPaths: parsed.userAuthoredPaths && typeof parsed.userAuthoredPaths === "object"
           ? parsed.userAuthoredPaths as Record<string, true>
           : {},
+        scannedAt: parsed.scannedAt && typeof parsed.scannedAt === "object" && !Array.isArray(parsed.scannedAt)
+          ? parsed.scannedAt as Record<string, number>
+          : {},
       };
     }
   } catch { /* first run or invalid state */ }
-  return { version: 1, firstObservedAt: {}, userAuthoredPaths: {} };
+  return { version: 1, firstObservedAt: {}, userAuthoredPaths: {}, scannedAt: {} };
 }
 
 function atomicWrite(filename: string, value: unknown): void {
@@ -72,7 +84,12 @@ function updateObservationState(hosts: TranscriptHost[], now: number): ReaperSta
     const key = hostKey(host);
     firstObservedAt[key] = previous.firstObservedAt[key] ?? new Date(now).toISOString();
   }
-  const state = { version: 1 as const, firstObservedAt, userAuthoredPaths: previous.userAuthoredPaths };
+  const state = {
+    version: 1 as const,
+    firstObservedAt,
+    userAuthoredPaths: previous.userAuthoredPaths,
+    scannedAt: previous.scannedAt,
+  };
   atomicWrite(STATE_FILE(), state);
   return state;
 }
@@ -331,28 +348,121 @@ function viewerFlowMessageAllowance(flows: Flow[], pathname: string): number {
   return count;
 }
 
+/* A HEADLESS reviewer is launched straight through the CLI (startHeadlessReview),
+   not a Viewer spawn receipt, so its automated review instruction lands in the
+   transcript as one user-role message that no launch/delivery allowance covers.
+   Left uncounted, that single automated prompt would mark every finished headless
+   reviewer owner-authored and pin it forever — the exact opposite of the
+   immediate reviewer collapse #112 exists for. Grant the round's reviewer
+   transcript one allowance for that startup prompt; a genuine owner message on
+   top is the second and still trips the exemption.
+
+   PANE reviewers are excluded: they launch through `spawnAgentWithPrompt`, whose
+   completed worker receipt already grants the launch allowance via
+   `hasViewerWorkerLaunchPrompt`. Adding a second allowance would let a pane
+   reviewer carrying one automated prompt AND one genuine owner follow-up scan
+   clean, collapsing an owner-touched card — a hard-constraint violation.
+
+   The allowance is granted only with DETERMINISTIC launch provenance: the
+   round's reviewer transcript basename must contain the round's own sessionId
+   (claude pre-chooses it at spawn, codex reports it in the first event). A
+   reviewerPath claimed by the same-CWD/latest-mtime heuristic
+   (`maybeClaimReviewerPathByHeuristic`) can misattribute an owner-created
+   transcript; discounting there would eat that owner's first genuine message.
+   Absent/mismatched sessionId → no allowance → the automated prompt counts and
+   the path stays protected (the safe side). */
+function viewerReviewerLaunchAllowance(flows: Flow[], pathname: string): number {
+  for (const flow of flows) {
+    if (flow.reviewerMode !== "headless") continue;
+    for (const round of flow.rounds) {
+      if (round.reviewerPath !== pathname || !round.sessionId) continue;
+      if (path.basename(pathname).includes(round.sessionId)) return 1;
+    }
+  }
+  return 0;
+}
+
+/* A native subagent (a Claude `agent-*` session, or a Codex thread with a
+   parent_thread_id) is spawned by its parent AGENT, not the owner, and its first
+   turn is the parent's automated assignment — serialized as a user-role message
+   with no Viewer receipt or flow delivery to cover it. Left uncounted, that one
+   automated prompt marks every agent-spawned subtask owner-authored and pins it
+   forever, so the spawned workers #112 targets never collapse. Provenance is
+   deterministic from the scan entry (the `subagent` kind / native codex parent),
+   so grant exactly one allowance for the assignment; a genuine owner message on
+   top is the second and still trips the exemption. */
+function viewerNativeSubagentAllowance(file: FileEntry | undefined): number {
+  if (!file) return 0;
+  if (file.root === "claude-projects" && file.kind === "subagent") return 1;
+  if (file.root === "codex-sessions" && file.engine === "codex" && isNativeCodexSubagentTranscript(file.path, file.size)) return 1;
+  return 0;
+}
+
 function authorshipEvidence(
   snapshot: ReturnType<AgentRegistry["snapshot"]>,
   hosts: TranscriptHost[],
   flows: Flow[],
+  files: FileEntry[],
   missingTranscriptPaths: ReadonlySet<string>,
+  priorScannedAt: Record<string, number>,
 ): {
   userAuthoredPaths: Set<string>;
   unverifiedPaths: Set<string>;
+  /* Path → observed transcript mtime (seconds) for every transcript scanned to
+     completion and found NOT owner-authored. This is the path-scoped freshness
+     the board needs to clear `authorshipUnverified` without falsely certifying
+     an unscanned worker (issue #112). */
+  verifiedCleanAt: Map<string, number>;
 } {
   const userAuthoredPaths = new Set<string>();
   const unverifiedPaths = new Set<string>();
+  const verifiedCleanAt = new Map<string, number>();
+  /* Authorship scanning cannot ride live host discovery alone: a finished
+     headless reviewer is a detached process (never a tmux host) and an exited
+     worker has no host at all, so those paths would never earn a clean stamp and
+     the board would pin them unverified forever — defeating the immediate
+     reviewer collapse central to #112. Cover every quiet claude/codex transcript
+     the scan sees, in addition to the live hosts. A live file is skipped: it is
+     board-exempt regardless and its mtime advances every write, so scanning it
+     would churn without ever producing a usable stamp. */
+  const fileByPath = new Map(files.map((file) => [file.path, file] as const));
+  const targets = new Map<string, "claude" | "codex">();
   for (const host of hosts) {
-    const pathname = host.primaryPath;
-    if (!pathname || userAuthoredPaths.has(pathname) || unverifiedPaths.has(pathname)) continue;
+    if (host.primaryPath) targets.set(host.primaryPath, host.engine);
+  }
+  for (const file of files) {
+    if (file.engine !== "claude" && file.engine !== "codex") continue;
+    if (file.activity === "live" || targets.has(file.path)) continue;
+    /* Already clean-stamped at or past the current mtime — no need to re-scan;
+       the persisted stamp still stands (the caller keeps prior state entries). */
+    const stamp = priorScannedAt[file.path];
+    if (stamp !== undefined && stamp >= file.mtime) continue;
+    targets.set(file.path, file.engine);
+  }
+  for (const [pathname, engine] of targets) {
+    if (userAuthoredPaths.has(pathname) || unverifiedPaths.has(pathname)) continue;
     if (missingTranscriptPaths.has(pathname)) continue;
     const viewerMessageAllowance = (hasViewerWorkerLaunchPrompt(snapshot, pathname) ? 1 : 0)
-      + viewerFlowMessageAllowance(flows, pathname);
-    const scan = scanUserAuthoredMessages(pathname, host.engine, viewerMessageAllowance + 1);
+      + viewerFlowMessageAllowance(flows, pathname)
+      + viewerReviewerLaunchAllowance(flows, pathname)
+      + viewerNativeSubagentAllowance(fileByPath.get(pathname));
+    /* Stamp the mtime BEFORE reading: a transcript that grows during the scan
+       ends up with a newer on-disk mtime than we record, so the board re-pins it
+       as unverified until the next cycle rather than certifying content the
+       reaper never saw. */
+    let observedMtime: number | null = null;
+    try {
+      observedMtime = fs.statSync(pathname).mtimeMs / 1000;
+    } catch {
+      unverifiedPaths.add(pathname);
+      continue;
+    }
+    const scan = scanUserAuthoredMessages(pathname, engine, viewerMessageAllowance + 1);
     if (scan.count > viewerMessageAllowance) userAuthoredPaths.add(pathname);
     else if (!scan.complete) unverifiedPaths.add(pathname);
+    else verifiedCleanAt.set(pathname, observedMtime);
   }
-  return { userAuthoredPaths, unverifiedPaths };
+  return { userAuthoredPaths, unverifiedPaths, verifiedCleanAt };
 }
 
 function viewerOwnedPaths(snapshot: ReturnType<AgentRegistry["snapshot"]>, hosts: TranscriptHost[]): Set<string> {
@@ -428,11 +538,16 @@ async function makeInput(
   const snapshot = registry.snapshot();
   const missingTranscriptPaths = new Set(hosts.flatMap((host) =>
     host.primaryPath && !fs.existsSync(host.primaryPath) ? [host.primaryPath] : []));
-  const authorship = authorshipEvidence(snapshot, hosts, flows, missingTranscriptPaths);
+  const authorship = authorshipEvidence(snapshot, hosts, flows, files, missingTranscriptPaths, state.scannedAt);
   let stateChanged = false;
   for (const pathname of authorship.userAuthoredPaths) {
     if (state.userAuthoredPaths[pathname]) continue;
     state.userAuthoredPaths[pathname] = true;
+    stateChanged = true;
+  }
+  for (const [pathname, observedMtime] of authorship.verifiedCleanAt) {
+    if (state.scannedAt[pathname] === observedMtime) continue;
+    state.scannedAt[pathname] = observedMtime;
     stateChanged = true;
   }
   if (stateChanged) atomicWrite(STATE_FILE(), state);

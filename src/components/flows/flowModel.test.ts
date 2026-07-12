@@ -3,6 +3,8 @@ import { describe, expect, test } from "bun:test";
 import type { Flow } from "@/lib/flows/types";
 import type { FileEntry } from "@/lib/types";
 
+import { protectedReviewerNodes } from "@/components/scheme/workerCollapse";
+
 import { claimedReviewerDescendantPaths, flowPresentation, foldClaimedReviewers, isActiveFlow } from "./flowModel";
 
 function entry(overrides: Partial<FileEntry> & { path: string }): FileEntry {
@@ -100,6 +102,33 @@ describe("reviewer folding", () => {
     expect(claimedReviewerDescendantPaths(files, active).size).toBe(0);
     // …but folding still consumes the full list, so the reviewer is re-homed.
     expect(foldClaimedReviewers(files, [closed]).map((file) => file.path)).toEqual(["/implementer", "/subtask"]);
+  });
+
+  test("a folded reviewer that must stay visible is recovered from the full file set (issue #112 finding)", () => {
+    /* Folding is unconditional; an owner-authored reviewer OR one the owner
+       opened out of a stack (a pin) is recovered by protectedReviewerNodes when
+       its flow has no deck — a closed flow, or an active flow whose implementer
+       is unplaced. */
+    const implementer = entry({ path: "/implementer", activity: "idle" });
+    const authored = entry({ path: "/reviewer", parent: "/implementer", activity: "idle", userAuthored: true });
+    const closedFlow = flow({ implementerPath: "/implementer", reviewerPath: "/reviewer", state: "closed", closedAt: "2026-07-06T00:00:00Z" });
+    const activeFlow = flow({ implementerPath: "/implementer", reviewerPath: "/reviewer", state: "reviewing" });
+
+    // Folding removes the reviewer from the board's group file set…
+    expect(foldClaimedReviewers([implementer, authored], [closedFlow]).map((file) => file.path)).toEqual(["/implementer"]);
+
+    // …but it is recovered from the FULL file set for a closed flow, and for an
+    // active flow with an unplaced implementer (renderedNodePaths empty).
+    const base = { renderedNodePaths: new Set<string>(), hiddenPaths: new Set<string>(), pinnedPaths: new Set<string>() };
+    expect(protectedReviewerNodes({ ...base, files: [implementer, authored], flows: [closedFlow] }).map((f) => f.path)).toEqual(["/reviewer"]);
+    expect(protectedReviewerNodes({ ...base, files: [implementer, authored], flows: [activeFlow] }).map((f) => f.path)).toEqual(["/reviewer"]);
+
+    // An unprotected reviewer the owner opened (pinned) of a deckless active flow
+    // is recovered the same way — otherwise the click would make it vanish.
+    const clean = entry({ path: "/reviewer", parent: "/implementer", activity: "idle" });
+    expect(
+      protectedReviewerNodes({ ...base, files: [implementer, clean], flows: [activeFlow], pinnedPaths: new Set(["/reviewer"]) }).map((f) => f.path),
+    ).toEqual(["/reviewer"]);
   });
 });
 

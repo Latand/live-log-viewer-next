@@ -1046,6 +1046,12 @@ export const en = {
   // TreeAside
   "tree.quiet": "Quiet conversations and tasks",
 
+  // WorkerStacks (issue #112): auto-collapsed worker-class cards
+  "workerStack.title": "Collapsed workers",
+  "workerStack.aria": "Collapsed worker conversations",
+  "workerStack.flow": "Flow",
+  "workerStack.worktree": "Workers",
+
   // CornerStatus
   "corner.waitingCount": "· {count} waiting",
   "corner.openSwitchboard": "Open the agent switchboard",

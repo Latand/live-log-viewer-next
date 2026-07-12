@@ -423,6 +423,281 @@ test("authorship at the beginning of a transcript survives a tail larger than th
   }
 });
 
+test("a clean authorship scan persists a path-scoped scannedAt stamp (issue #112)", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-reaper-scannedat-"));
+  const pathname = path.join(directory, "rollout-019f4906-3f67-7b72-9fbc-9ec3b5ad1399.jsonl");
+  const now = Date.parse("2026-07-12T12:00:00.000Z");
+  // A worker transcript with only agent output — no owner message.
+  fs.writeFileSync(pathname, JSON.stringify({
+    type: "event_msg",
+    timestamp: new Date(now - 60 * 60_000).toISOString(),
+    payload: { type: "agent_message", message: "just working" },
+  }) + "\n");
+  process.env.LLV_STATE_DIR = directory;
+  delete process.env.LLV_REAPER_ENABLED;
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const profile = emptyLaunchProfile({ cwd: "/repo", role: "worker", title: "clean probe" });
+  registry.reconcileConversations([{
+    engine: "codex",
+    path: pathname,
+    accountId: "default",
+    launchProfile: profile,
+    turn: { state: "idle", source: "assistant", terminalAt: new Date(now - 60 * 60_000).toISOString() },
+    observedAt: new Date(now - 60 * 60_000).toISOString(),
+  }]);
+
+  try {
+    await runReaperCycle({
+      registry,
+      hosts: [runtimeHost(pathname)],
+      files: [runtimeFile(pathname, now / 1000 - 60 * 60)],
+      now,
+    });
+
+    const state = JSON.parse(fs.readFileSync(path.join(directory, "reaper-state.json"), "utf8")) as {
+      scannedAt?: Record<string, number>;
+      userAuthoredPaths?: Record<string, true>;
+    };
+    const observedMtime = fs.statSync(pathname).mtimeMs / 1000;
+    expect(state.userAuthoredPaths?.[pathname]).toBeUndefined();
+    expect(state.scannedAt?.[pathname]).toBeDefined();
+    expect(Math.abs((state.scannedAt![pathname]! ) - observedMtime)).toBeLessThan(2);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("a non-host worker transcript still earns a clean scannedAt stamp (issue #112 finding)", async () => {
+  /* A finished headless reviewer / exited worker has no live tmux host, yet its
+     transcript must be scanned so the board can clear authorshipUnverified and
+     let it collapse. It reaches the reaper only through `files`, never `hosts`. */
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-reaper-nonhost-"));
+  const pathname = path.join(directory, "rollout-019f4906-3f67-7b72-9fbc-9ec3b5ad13aa.jsonl");
+  const now = Date.parse("2026-07-12T12:00:00.000Z");
+  fs.writeFileSync(pathname, JSON.stringify({
+    type: "event_msg",
+    timestamp: new Date(now - 60 * 60_000).toISOString(),
+    payload: { type: "agent_message", message: "verdict: APPROVE" },
+  }) + "\n");
+  process.env.LLV_STATE_DIR = directory;
+  delete process.env.LLV_REAPER_ENABLED;
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+
+  try {
+    await runReaperCycle({
+      registry,
+      hosts: [], // no live host for this exited worker
+      files: [runtimeFile(pathname, now / 1000 - 60 * 60)],
+      now,
+    });
+
+    const state = JSON.parse(fs.readFileSync(path.join(directory, "reaper-state.json"), "utf8")) as {
+      scannedAt?: Record<string, number>;
+      userAuthoredPaths?: Record<string, true>;
+    };
+    expect(state.userAuthoredPaths?.[pathname]).toBeUndefined();
+    expect(state.scannedAt?.[pathname]).toBeDefined();
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("a non-host worker with an owner message is recorded user-authored (issue #112 finding)", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-reaper-nonhost-user-"));
+  const pathname = path.join(directory, "rollout-019f4906-3f67-7b72-9fbc-9ec3b5ad13ab.jsonl");
+  const now = Date.parse("2026-07-12T12:00:00.000Z");
+  fs.writeFileSync(pathname, JSON.stringify({
+    type: "event_msg",
+    timestamp: new Date(now - 60 * 60_000).toISOString(),
+    payload: { type: "user_message", message: "please also handle the edge case" },
+  }) + "\n");
+  process.env.LLV_STATE_DIR = directory;
+  delete process.env.LLV_REAPER_ENABLED;
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+
+  try {
+    await runReaperCycle({ registry, hosts: [], files: [runtimeFile(pathname, now / 1000 - 60 * 60)], now });
+    const state = JSON.parse(fs.readFileSync(path.join(directory, "reaper-state.json"), "utf8")) as {
+      scannedAt?: Record<string, number>;
+      userAuthoredPaths?: Record<string, true>;
+    };
+    expect(state.userAuthoredPaths?.[pathname]).toBe(true);
+    expect(state.scannedAt?.[pathname]).toBeUndefined();
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+function claudeSubagentFile(pathname: string, mtime: number): FileEntry {
+  return { ...runtimeFile(pathname, mtime), root: "claude-projects", engine: "claude", kind: "subagent", fmt: "claude", name: path.basename(pathname) };
+}
+
+function claudeUserRecord(now: number, offsetMinutes: number, text: string): string {
+  return JSON.stringify({ type: "user", timestamp: new Date(now - offsetMinutes * 60_000).toISOString(), message: { content: text } });
+}
+
+test("a native Claude subagent's automated assignment scans clean (issue #112 finding)", async () => {
+  /* A native `agent-*` subagent's first turn is its parent agent's automated
+     assignment, serialized as one user-role message with no receipt/delivery.
+     The native-subagent allowance covers it so the spawned subtask can collapse. */
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-reaper-subagent-"));
+  const pathname = path.join(directory, "agent-019f4906-3f67-7b72-9fbc-9ec3b5ad13ca.jsonl");
+  const now = Date.parse("2026-07-12T12:00:00.000Z");
+  fs.writeFileSync(pathname, claudeUserRecord(now, 60, "Investigate the failing test and report back.") + "\n");
+  process.env.LLV_STATE_DIR = directory;
+  delete process.env.LLV_REAPER_ENABLED;
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+
+  try {
+    await runReaperCycle({ registry, hosts: [], files: [claudeSubagentFile(pathname, now / 1000 - 60 * 60)], now });
+    const state = JSON.parse(fs.readFileSync(path.join(directory, "reaper-state.json"), "utf8")) as {
+      scannedAt?: Record<string, number>;
+      userAuthoredPaths?: Record<string, true>;
+    };
+    expect(state.userAuthoredPaths?.[pathname]).toBeUndefined();
+    expect(state.scannedAt?.[pathname]).toBeDefined();
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("an owner message on a native Claude subagent still trips authorship (issue #112 finding)", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-reaper-subagent-owner-"));
+  const pathname = path.join(directory, "agent-019f4906-3f67-7b72-9fbc-9ec3b5ad13cb.jsonl");
+  const now = Date.parse("2026-07-12T12:00:00.000Z");
+  // Automated assignment PLUS a real owner interjection.
+  fs.writeFileSync(pathname, claudeUserRecord(now, 60, "Do the assigned subtask.") + "\n" + claudeUserRecord(now, 30, "wait — skip the migration path") + "\n");
+  process.env.LLV_STATE_DIR = directory;
+  delete process.env.LLV_REAPER_ENABLED;
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+
+  try {
+    await runReaperCycle({ registry, hosts: [], files: [claudeSubagentFile(pathname, now / 1000 - 30 * 60)], now });
+    const state = JSON.parse(fs.readFileSync(path.join(directory, "reaper-state.json"), "utf8")) as {
+      userAuthoredPaths?: Record<string, true>;
+    };
+    expect(state.userAuthoredPaths?.[pathname]).toBe(true);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("a native Codex subagent's automated assignment scans clean (issue #112 finding)", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-reaper-codex-subagent-"));
+  const pathname = path.join(directory, "rollout-019f4906-3f67-7b72-9fbc-9ec3b5ad13cc.jsonl");
+  const now = Date.parse("2026-07-12T12:00:00.000Z");
+  // session_meta carries the parent_thread_id that marks a native codex subagent.
+  fs.writeFileSync(pathname, [
+    JSON.stringify({ type: "session_meta", payload: { parent_thread_id: "019f4906-3f67-7b72-9fbc-9ec3b5ad0000" } }),
+    JSON.stringify({ type: "event_msg", timestamp: new Date(now - 60 * 60_000).toISOString(), payload: { type: "user_message", message: "Run the assigned subtask." } }),
+  ].join("\n") + "\n");
+  process.env.LLV_STATE_DIR = directory;
+  delete process.env.LLV_REAPER_ENABLED;
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  // The native-codex detection reads the transcript head up to `size`, so the
+  // entry must carry the real on-disk size, not runtimeFile's placeholder.
+  const codexFile = { ...runtimeFile(pathname, now / 1000 - 60 * 60), size: fs.statSync(pathname).size };
+
+  try {
+    await runReaperCycle({ registry, hosts: [], files: [codexFile], now });
+    const state = JSON.parse(fs.readFileSync(path.join(directory, "reaper-state.json"), "utf8")) as {
+      scannedAt?: Record<string, number>;
+      userAuthoredPaths?: Record<string, true>;
+    };
+    expect(state.userAuthoredPaths?.[pathname]).toBeUndefined();
+    expect(state.scannedAt?.[pathname]).toBeDefined();
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("a headless reviewer's automated startup prompt alone is not owner-authored (issue #112 finding)", async () => {
+  /* startHeadlessReview injects the review instruction as one user-role message
+     with no launch/delivery allowance. Without the reviewer allowance it would
+     be recorded owner-authored and pinned forever, defeating immediate reviewer
+     collapse. The round's reviewer transcript earns exactly one allowance. */
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-reaper-reviewer-allow-"));
+  const sessionId = "019f4906-3f67-7b72-9fbc-9ec3b5ad13ac";
+  const pathname = path.join(directory, `rollout-${sessionId}.jsonl`);
+  const now = Date.parse("2026-07-12T12:00:00.000Z");
+  fs.writeFileSync(pathname, JSON.stringify({
+    type: "event_msg",
+    timestamp: new Date(now - 20 * 60_000).toISOString(),
+    payload: { type: "user_message", message: "Review the diff on this branch and return a verdict." },
+  }) + "\n");
+  process.env.LLV_STATE_DIR = directory;
+  delete process.env.LLV_REAPER_ENABLED;
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const flow = {
+    ...headlessFlow(now),
+    id: "flow-reviewer-allowance",
+    rounds: [{ ...headlessFlow(now).rounds[0]!, reviewerPath: pathname, sessionId }],
+  } satisfies Flow;
+
+  try {
+    await runReaperCycle({
+      registry,
+      hosts: [],
+      files: [runtimeFile(pathname, now / 1000 - 20 * 60)],
+      now,
+      actuation: { loadFlows: () => [flow], now: () => now },
+    });
+    const state = JSON.parse(fs.readFileSync(path.join(directory, "reaper-state.json"), "utf8")) as {
+      scannedAt?: Record<string, number>;
+      userAuthoredPaths?: Record<string, true>;
+    };
+    expect(state.userAuthoredPaths?.[pathname]).toBeUndefined();
+    expect(state.scannedAt?.[pathname]).toBeDefined();
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("a genuine owner message on top of a reviewer's startup prompt trips the exemption (issue #112 finding)", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-reaper-reviewer-owner-"));
+  const sessionId = "019f4906-3f67-7b72-9fbc-9ec3b5ad13ad";
+  const pathname = path.join(directory, `rollout-${sessionId}.jsonl`);
+  const now = Date.parse("2026-07-12T12:00:00.000Z");
+  fs.writeFileSync(pathname, [
+    JSON.stringify({
+      type: "event_msg",
+      timestamp: new Date(now - 20 * 60_000).toISOString(),
+      payload: { type: "user_message", message: "Review the diff on this branch and return a verdict." },
+    }),
+    JSON.stringify({
+      type: "event_msg",
+      timestamp: new Date(now - 10 * 60_000).toISOString(),
+      payload: { type: "user_message", message: "Actually, focus on the auth path — I care about that most." },
+    }),
+  ].join("\n") + "\n");
+  process.env.LLV_STATE_DIR = directory;
+  delete process.env.LLV_REAPER_ENABLED;
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const flow = {
+    ...headlessFlow(now),
+    id: "flow-reviewer-owner",
+    rounds: [{ ...headlessFlow(now).rounds[0]!, reviewerPath: pathname, sessionId }],
+  } satisfies Flow;
+
+  try {
+    await runReaperCycle({
+      registry,
+      hosts: [],
+      files: [runtimeFile(pathname, now / 1000 - 10 * 60)],
+      now,
+      actuation: { loadFlows: () => [flow], now: () => now },
+    });
+    const state = JSON.parse(fs.readFileSync(path.join(directory, "reaper-state.json"), "utf8")) as {
+      scannedAt?: Record<string, number>;
+      userAuthoredPaths?: Record<string, true>;
+    };
+    expect(state.userAuthoredPaths?.[pathname]).toBe(true);
+    expect(state.scannedAt?.[pathname]).toBeUndefined();
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 function headlessFlow(now: number): Flow {
   return {
     id: "flow-headless",
@@ -462,6 +737,166 @@ function headlessFlow(now: number): Flow {
     closedAt: new Date(now - 5 * 60_000).toISOString(),
   };
 }
+
+function reviewerMessages(pathname: string, now: number, messages: string[]): void {
+  fs.writeFileSync(pathname, messages.map((message) => JSON.stringify({
+    type: "event_msg",
+    timestamp: new Date(now - 10 * 60_000).toISOString(),
+    payload: { type: "user_message", message },
+  })).join("\n") + "\n");
+}
+
+test("a headless reviewer's automated startup prompt is not owner authorship (issue #112 finding)", async () => {
+  /* startHeadlessReview delivers the review instructions straight through the
+     CLI, so they land as one user-role message with no viewer receipt. Without a
+     reviewer-launch allowance that single automated prompt would pin the finished
+     reviewer forever; with it, the reviewer scans clean and can collapse. */
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-reaper-reviewer-prompt-"));
+  const sessionId = "019f4906-3f67-7b72-9fbc-9ec3b5ad13ba";
+  const reviewerPath = path.join(directory, `rollout-${sessionId}.jsonl`);
+  const now = Date.parse("2026-07-12T12:00:00.000Z");
+  reviewerMessages(reviewerPath, now, ["Review the changes on this branch and reply REVIEW_READY"]);
+  process.env.LLV_STATE_DIR = directory;
+  delete process.env.LLV_REAPER_ENABLED;
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const flow = { ...headlessFlow(now), cwd: directory, rounds: [{ ...headlessFlow(now).rounds[0]!, reviewerPath, sessionId }] } satisfies Flow;
+
+  try {
+    await runReaperCycle({
+      registry,
+      hosts: [],
+      files: [runtimeFile(reviewerPath, now / 1000 - 10 * 60)],
+      now,
+      actuation: { loadFlows: () => [flow], now: () => now },
+    });
+    const state = JSON.parse(fs.readFileSync(path.join(directory, "reaper-state.json"), "utf8")) as {
+      scannedAt?: Record<string, number>;
+      userAuthoredPaths?: Record<string, true>;
+    };
+    expect(state.userAuthoredPaths?.[reviewerPath]).toBeUndefined();
+    expect(state.scannedAt?.[reviewerPath]).toBeDefined();
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("a genuine owner message on a headless reviewer still trips authorship (issue #112 finding)", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-reaper-reviewer-owner-"));
+  const sessionId = "019f4906-3f67-7b72-9fbc-9ec3b5ad13bb";
+  const reviewerPath = path.join(directory, `rollout-${sessionId}.jsonl`);
+  const now = Date.parse("2026-07-12T12:00:00.000Z");
+  // The automated startup prompt PLUS a real owner interjection.
+  reviewerMessages(reviewerPath, now, ["Review the changes on this branch", "actually, focus on the auth path please"]);
+  process.env.LLV_STATE_DIR = directory;
+  delete process.env.LLV_REAPER_ENABLED;
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const flow = { ...headlessFlow(now), cwd: directory, rounds: [{ ...headlessFlow(now).rounds[0]!, reviewerPath, sessionId }] } satisfies Flow;
+
+  try {
+    await runReaperCycle({
+      registry,
+      hosts: [],
+      files: [runtimeFile(reviewerPath, now / 1000 - 10 * 60)],
+      now,
+      actuation: { loadFlows: () => [flow], now: () => now },
+    });
+    const state = JSON.parse(fs.readFileSync(path.join(directory, "reaper-state.json"), "utf8")) as {
+      userAuthoredPaths?: Record<string, true>;
+    };
+    expect(state.userAuthoredPaths?.[reviewerPath]).toBe(true);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("a heuristically-claimed reviewer path gets no allowance and keeps authorship (issue #112 finding)", async () => {
+  /* When no session id is available, maybeClaimReviewerPathByHeuristic can attach
+     the round to an owner conversation by same-CWD/latest-mtime. Its basename does
+     NOT contain the round's sessionId (or none was ever captured), so the reviewer
+     allowance must not fire — the owner's first genuine message stays counted. */
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-reaper-reviewer-heuristic-"));
+  // An owner-created transcript wrongly claimed as the reviewer path.
+  const ownerPath = path.join(directory, "rollout-019f4906-3f67-7b72-9fbc-9ec3b5ad13bd.jsonl");
+  const now = Date.parse("2026-07-12T12:00:00.000Z");
+  reviewerMessages(ownerPath, now, ["can you take a look at the failing test?"]);
+  process.env.LLV_STATE_DIR = directory;
+  delete process.env.LLV_REAPER_ENABLED;
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  // Heuristic claim: reviewerPath set, but sessionId is null (never resolved).
+  const flow = { ...headlessFlow(now), cwd: directory, rounds: [{ ...headlessFlow(now).rounds[0]!, reviewerPath: ownerPath, sessionId: null }] } satisfies Flow;
+
+  try {
+    await runReaperCycle({
+      registry,
+      hosts: [],
+      files: [runtimeFile(ownerPath, now / 1000 - 10 * 60)],
+      now,
+      actuation: { loadFlows: () => [flow], now: () => now },
+    });
+    const state = JSON.parse(fs.readFileSync(path.join(directory, "reaper-state.json"), "utf8")) as {
+      scannedAt?: Record<string, number>;
+      userAuthoredPaths?: Record<string, true>;
+    };
+    expect(state.userAuthoredPaths?.[ownerPath]).toBe(true);
+    expect(state.scannedAt?.[ownerPath]).toBeUndefined();
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("a pane reviewer with an owner follow-up keeps authorship (no double allowance) (issue #112 finding)", async () => {
+  /* A PANE reviewer launches through spawnAgentWithPrompt, so its worker-launch
+     receipt already covers the automated prompt. It must NOT also get the
+     headless reviewer allowance, or one automated prompt + one genuine owner
+     message (count 2) would fall under a total allowance of 2 and clean-stamp an
+     owner-touched card. */
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-reaper-pane-reviewer-"));
+  const sessionId = "019f4906-3f67-7b72-9fbc-9ec3b5ad13bc";
+  const reviewerPath = path.join(directory, `rollout-${sessionId}.jsonl`);
+  const now = Date.parse("2026-07-12T12:00:00.000Z");
+  reviewerMessages(reviewerPath, now, ["Review the changes on this branch", "please also cover the migration path"]);
+  process.env.LLV_STATE_DIR = directory;
+  delete process.env.LLV_REAPER_ENABLED;
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const profile = emptyLaunchProfile({ cwd: directory, role: "worker", title: "reviewer" });
+  const receipt = registry.beginSpawn("codex", directory, profile);
+  registry.completeSpawn(receipt.launchId, {
+    key: { engine: "codex", sessionId },
+    artifactPath: reviewerPath,
+    cwd: directory,
+    accountId: "default",
+    launchProfile: profile,
+    status: "idle",
+    host: null,
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  const flow = {
+    ...headlessFlow(now),
+    cwd: directory,
+    reviewerMode: "pane" as const,
+    rounds: [{ ...headlessFlow(now).rounds[0]!, reviewerPath }],
+  } satisfies Flow;
+
+  try {
+    await runReaperCycle({
+      registry,
+      hosts: [],
+      files: [runtimeFile(reviewerPath, now / 1000 - 10 * 60)],
+      now,
+      actuation: { loadFlows: () => [flow], now: () => now },
+    });
+    const state = JSON.parse(fs.readFileSync(path.join(directory, "reaper-state.json"), "utf8")) as {
+      scannedAt?: Record<string, number>;
+      userAuthoredPaths?: Record<string, true>;
+    };
+    expect(state.userAuthoredPaths?.[reviewerPath]).toBe(true);
+    expect(state.scannedAt?.[reviewerPath]).toBeUndefined();
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
 
 test("a detached headless reviewer is observed and reaped by verified process identity", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-reaper-headless-"));

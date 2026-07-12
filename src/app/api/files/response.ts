@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import fs from "node:fs";
 
 import { NextResponse } from "next/server";
 
@@ -14,6 +15,7 @@ import { loadTasks } from "@/lib/tasks/store";
 import { loadWorkflows } from "@/lib/workflows/store";
 import { filterWorkflowsForFileScan } from "@/lib/workflows/visibility";
 import { projectRateLimitReadModel } from "@/lib/rateLimit";
+import { readAuthorshipEvidence } from "@/lib/reaperAuthorship";
 import { overlaySessionTitles } from "@/lib/session/titleProjection";
 import { tmuxEndpointHealth } from "@/lib/tmux";
 import type { FilesResponse } from "@/lib/types";
@@ -92,6 +94,79 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
      on `autoTitle`; the `renamable` flag is projected too so the client never
      imports the Node-only store. */
   overlaySessionTitles(files);
+  /* Human-authorship pin for the board's worker-class auto-collapse (issue
+     #112): the reaper's sticky evidence (PR #125) marks any transcript that
+     carries a real user message. Both authorship and fail-closed freshness span
+     the WHOLE stable conversation — every native generation and continuity path,
+     not just the current transcript and one predecessor. After a migration
+     A → B → C a user message recorded on A must still pin C, and an unscanned
+     predecessor must hold C unverified, or the owner's message would be lost the
+     moment the historical entries leave the rendered board.
+     `authorshipUnverified` fails the exemption CLOSED — a claude/codex worker the
+     reaper has not scanned since its latest write (fresh owner message, cold
+     start, or an unstamped generation) is pinned until a cycle confirms it, so a
+     just-finished reviewer never collapses on stale evidence. The freshness is
+     PATH-SCOPED (`scannedAt[path]`), not a single global cycle timestamp: a
+     global stamp advances every cycle regardless of which paths were scanned, so
+     a worker that exited before the reaper ever reached it would be falsely
+     certified clean. A generation with no stamp stays unverified; an archived
+     (out-of-scan) generation is immutable, so any stamp certifies it. */
+  const conversationByPath = new Map<string, (typeof registrySnapshot.conversations)[keyof typeof registrySnapshot.conversations]>();
+  for (const conversation of Object.values(registrySnapshot.conversations)) {
+    for (const generation of conversation.generations) conversationByPath.set(generation.path, conversation);
+    for (const continuityPath of conversation.continuityPaths) conversationByPath.set(continuityPath, conversation);
+  }
+  const filesByPath = new Map(files.map((file) => [file.path, file] as const));
+  const { userAuthoredPaths, scannedAt } = readAuthorshipEvidence();
+  /* Live on-disk mtime probe, memoized per request. A clean stamp must be
+     checked against the LIVE filesystem, not the scan snapshot's mtime: the
+     files scan is a cache that a GET may reuse (scanCache) while a user appends a
+     message, so a stamp taken before the append would look fresh against the
+     stale cached mtime and falsely certify a now-owner-authored transcript. A
+     `mtime` probe sees the append and re-pins it unverified. A CONFIRMED absence
+     (ENOENT) means the transcript is gone — immutable and off the board — so the
+     snapshot mtime stands. Any OTHER stat error (EACCES, EIO, transient
+     exhaustion) leaves freshness UNKNOWN, and the hard exemption fails closed:
+     unknown → unverified. Bounded — only paths that carry a stamp reach here. */
+  type MtimeProbe = { kind: "mtime"; value: number } | { kind: "gone" } | { kind: "uncertain" };
+  const mtimeProbes = new Map<string, MtimeProbe>();
+  const probeMtime = (pathname: string): MtimeProbe => {
+    const cached = mtimeProbes.get(pathname);
+    if (cached) return cached;
+    let probe: MtimeProbe;
+    try {
+      probe = { kind: "mtime", value: fs.statSync(pathname).mtimeMs / 1000 };
+    } catch (error) {
+      probe = (error as NodeJS.ErrnoException).code === "ENOENT" ? { kind: "gone" } : { kind: "uncertain" };
+    }
+    mtimeProbes.set(pathname, probe);
+    return probe;
+  };
+  for (const file of files) {
+    if (file.engine !== "claude" && file.engine !== "codex") continue;
+    const conversation = conversationByPath.get(file.path);
+    const lineage = new Set<string>([file.path]);
+    if (file.predecessorPath) lineage.add(file.predecessorPath);
+    if (conversation) {
+      for (const generation of conversation.generations) lineage.add(generation.path);
+      for (const continuityPath of conversation.continuityPaths) lineage.add(continuityPath);
+    }
+    if ([...lineage].some((pathname) => userAuthoredPaths.has(pathname))) {
+      file.userAuthored = true;
+      continue;
+    }
+    const unverified = [...lineage].some((pathname) => {
+      const stamp = scannedAt.get(pathname);
+      if (stamp === undefined) return true;
+      const probe = probeMtime(pathname);
+      if (probe.kind === "uncertain") return true; // fail closed on an unreadable transcript
+      if (probe.kind === "mtime") return stamp < probe.value;
+      /* Confirmed gone: immutable, so the last-known snapshot mtime certifies it. */
+      const cachedMtime = filesByPath.get(pathname)?.mtime;
+      return cachedMtime !== undefined && stamp < cachedMtime;
+    });
+    if (unverified) file.authorshipUnverified = true;
+  }
   const tasks = reconcileTasks(files, loadTasks(), {
     pathForPanePid: (panePid, entries) => pathForPanePid(entries, panePid, readPpid),
     panePidAlive: pidAlive,

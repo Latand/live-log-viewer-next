@@ -68,6 +68,10 @@ const LEGACY_TASK_PANEL_KEY = "llvTaskPanel";
 
 export interface BoardSnapshot {
   prefs: BoardPrefs;
+  /* Genuine user placements only — the subset of `prefs.manual` the owner
+     actually pinned, kept apart from the roots `reconcile-roots` auto-seeds so
+     consumers can tell an intentional pin from board bookkeeping (issue #112). */
+  explicitManual: string[];
   revision: number;
   sync: BoardSync;
   loaded: boolean;
@@ -243,7 +247,7 @@ export function createBoardStore(options: BoardStoreOptions): BoardStore {
     prefs: EMPTY_BOARD_PREFS,
   });
 
-  let snapshot: BoardSnapshot = { prefs: EMPTY_BOARD_PREFS, revision: 0, sync: "unavailable", loaded: false };
+  let snapshot: BoardSnapshot = { prefs: EMPTY_BOARD_PREFS, explicitManual: [], revision: 0, sync: "unavailable", loaded: false };
   /* Last board the server acknowledged, and the semantic mutations not yet
      acknowledged. The optimistic arrangement is the outbox replayed over the
      confirmed board. */
@@ -273,7 +277,7 @@ export function createBoardStore(options: BoardStoreOptions): BoardStore {
      revision the server has not assigned. */
   const refresh = () => {
     const board = optimisticBoard(confirmed, outbox);
-    snapshot = { prefs: board.prefs, revision: confirmed.revision, sync: syncFor(), loaded };
+    snapshot = { prefs: board.prefs, explicitManual: board.explicitManual ?? [], revision: confirmed.revision, sync: syncFor(), loaded };
     emit();
   };
 
@@ -540,7 +544,7 @@ export function createBoardStore(options: BoardStoreOptions): BoardStore {
   };
 }
 
-const UNAVAILABLE_SNAPSHOT: BoardSnapshot = { prefs: EMPTY_BOARD_PREFS, revision: 0, sync: "unavailable", loaded: false };
+const UNAVAILABLE_SNAPSHOT: BoardSnapshot = { prefs: EMPTY_BOARD_PREFS, explicitManual: [], revision: 0, sync: "unavailable", loaded: false };
 
 export interface BoardState extends BoardSnapshot {
   /** Dispatch a semantic mutation batch (close/restore/reconcile/remap/

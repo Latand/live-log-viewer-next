@@ -126,6 +126,10 @@ export function claimedReviewerDescendantPaths(files: FileEntry[], flows: Flow[]
  * the reviewer itself and re-home its direct children onto the flow's
  * implementer — a node that stays visible — so the subtasks render as connected
  * children of the flow instead of floating loose.
+ *
+ * Explicitly-opened and authorship-protected reviewers that have no round deck
+ * are recovered separately by `protectedReviewerNodes` and materialized as
+ * standalone nodes (issue #112), so folding here stays unconditional.
  */
 export function foldClaimedReviewers(files: FileEntry[], flows: Flow[]): FileEntry[] {
   const anchorByReviewer = new Map<string, string>();

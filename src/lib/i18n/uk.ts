@@ -1012,6 +1012,11 @@ export const uk: Record<keyof typeof en, Message> = {
 
   "tree.quiet": "Тихі розмови й задачі",
 
+  "workerStack.title": "Згорнуті воркери",
+  "workerStack.aria": "Згорнуті розмови воркерів",
+  "workerStack.flow": "Потік",
+  "workerStack.worktree": "Воркери",
+
   "corner.waitingCount": "· {count} чекають",
   "corner.openSwitchboard": "Відкрити пульт агентів",
 

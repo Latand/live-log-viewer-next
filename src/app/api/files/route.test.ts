@@ -364,3 +364,184 @@ test("an unreadable pipelines store degrades to pipelinesError without failing t
     pipelinesStore = () => [];
   }
 });
+
+test("authorship freshness is path-scoped: an unscanned worker never certifies clean (issue #112)", async () => {
+  /* The reaper's state file mtime (its coarse "last cycle" time) is fresh, yet
+     `scannedAt` only carries the paths the reaper actually looked at. A worker
+     that exited before any cycle scanned it is absent from `scannedAt`, so even
+     with a stale on-disk mtime it must fail CLOSED to `authorshipUnverified` —
+     a global cycle timestamp would falsely certify it and let a user-authored
+     conversation collapse. */
+  const authoredPath = "/sessions/authored-worker.jsonl";
+  const scannedPath = "/sessions/scanned-clean-worker.jsonl";
+  const unscannedPath = "/sessions/unscanned-worker.jsonl";
+  fs.writeFileSync(path.join(stateDir, "reaper-state.json"), JSON.stringify({
+    version: 1,
+    firstObservedAt: {},
+    userAuthoredPaths: { [authoredPath]: true },
+    scannedAt: { [scannedPath]: 5000 },
+  }));
+  scannedFiles = [
+    { ...file(authoredPath), engine: "claude", mtime: 5000 },
+    { ...file(scannedPath), engine: "codex", mtime: 4000 },
+    { ...file(unscannedPath), engine: "codex", mtime: 1 },
+  ];
+
+  const response = await GET(new Request("http://127.0.0.1/api/files"));
+  const body = await response.json() as { files: FileEntry[] };
+  const byPath = new Map(body.files.map((entry) => [entry.path, entry]));
+
+  // Sticky user-authorship pins the card regardless of freshness.
+  expect(byPath.get(authoredPath)?.userAuthored).toBe(true);
+  expect(byPath.get(authoredPath)?.authorshipUnverified).toBeUndefined();
+  // A path the reaper scanned clean at or after its current mtime is collapse-eligible.
+  expect(byPath.get(scannedPath)?.userAuthored).toBeUndefined();
+  expect(byPath.get(scannedPath)?.authorshipUnverified).toBeUndefined();
+  // The hard constraint: an unscanned worker stays pinned even though the
+  // state file's global mtime is newer than the transcript's.
+  expect(byPath.get(unscannedPath)?.authorshipUnverified).toBe(true);
+});
+
+test("a worker whose transcript changed after its last clean scan re-pins as unverified (issue #112)", async () => {
+  const stalePath = "/sessions/grew-after-scan.jsonl";
+  fs.writeFileSync(path.join(stateDir, "reaper-state.json"), JSON.stringify({
+    version: 1,
+    firstObservedAt: {},
+    userAuthoredPaths: {},
+    scannedAt: { [stalePath]: 3000 },
+  }));
+  scannedFiles = [{ ...file(stalePath), engine: "codex", mtime: 3600 }];
+
+  const response = await GET(new Request("http://127.0.0.1/api/files"));
+  const body = await response.json() as { files: FileEntry[] };
+  expect(body.files[0]?.authorshipUnverified).toBe(true);
+});
+
+test("a message appended after a cached clean scan re-pins as unverified against live mtime (issue #112 finding)", async () => {
+  /* The scan is a cache: a GET can reuse a snapshot whose mtime predates a
+     just-appended owner message. A clean stamp taken before the append would
+     look fresh against that stale cached mtime, so freshness must be checked
+     against the LIVE filesystem, not the snapshot. */
+  const workerPath = path.join(stateDir, "appended-worker.jsonl");
+  fs.writeFileSync(workerPath, "line\n");
+  const stampMtime = 4000;
+  const liveMtime = 5000; // the real file grew after the clean scan
+  fs.utimesSync(workerPath, liveMtime, liveMtime);
+  fs.writeFileSync(path.join(stateDir, "reaper-state.json"), JSON.stringify({
+    version: 1,
+    firstObservedAt: {},
+    userAuthoredPaths: {},
+    scannedAt: { [workerPath]: stampMtime },
+  }));
+  // The cached snapshot still carries the pre-append mtime.
+  scannedFiles = [{ ...file(workerPath), engine: "codex", mtime: stampMtime }];
+
+  const response = await GET(new Request("http://127.0.0.1/api/files"));
+  const body = await response.json() as { files: FileEntry[] };
+  const worker = body.files.find((entry) => entry.path === workerPath);
+  expect(worker?.authorshipUnverified).toBe(true);
+});
+
+test("an unreadable transcript (non-ENOENT stat failure) fails closed to unverified (issue #112 finding)", async () => {
+  /* Only a CONFIRMED absence lets a clean stamp stand on the cached mtime. A
+     stat that fails for any other reason (EACCES/EIO/ENOTDIR) leaves freshness
+     unknown, so the hard exemption must fail closed rather than trust the cache. */
+  const blocker = path.join(stateDir, "blocker"); // a regular file...
+  fs.writeFileSync(blocker, "x");
+  const workerPath = path.join(blocker, "worker.jsonl"); // ...so statSync here throws ENOTDIR, not ENOENT
+  fs.writeFileSync(path.join(stateDir, "reaper-state.json"), JSON.stringify({
+    version: 1,
+    firstObservedAt: {},
+    userAuthoredPaths: {},
+    scannedAt: { [workerPath]: 3000 }, // a clean stamp that the cached mtime alone would certify
+  }));
+  scannedFiles = [{ ...file(workerPath), engine: "codex", mtime: 3000 }];
+
+  const response = await GET(new Request("http://127.0.0.1/api/files"));
+  const body = await response.json() as { files: FileEntry[] };
+  const worker = body.files.find((entry) => entry.path === workerPath);
+  expect(worker?.authorshipUnverified).toBe(true);
+});
+
+test("authorship aggregates across the whole conversation lineage (issue #112 finding)", async () => {
+  /* A user message recorded on an earlier generation/continuity path must pin
+     the current generation even after the historical entry leaves the board. */
+  const registry = agentRegistry();
+  const currentPath = "/sessions/current-019f4906-3f67-7b72-9fbc-9ec3b5ad1401.jsonl";
+  const priorPath = "/sessions/prior-019f4906-3f67-7b72-9fbc-9ec3b5ad1400.jsonl";
+  const conversation = registry.ensureConversation("codex", currentPath, "acc");
+  registry.recordConversationContinuityPath(conversation.id, priorPath);
+  fs.writeFileSync(path.join(stateDir, "reaper-state.json"), JSON.stringify({
+    version: 1,
+    firstObservedAt: {},
+    userAuthoredPaths: { [priorPath]: true }, // the owner message lives on the prior generation
+    scannedAt: { [currentPath]: 5000 },
+  }));
+  scannedFiles = [{ ...file(currentPath), engine: "codex", mtime: 4000 }];
+
+  const response = await GET(new Request("http://127.0.0.1/api/files"));
+  const body = await response.json() as { files: FileEntry[] };
+  const current = body.files.find((entry) => entry.path === currentPath);
+  expect(current?.userAuthored).toBe(true);
+});
+
+test("fail-closed freshness spans the lineage: an unscanned predecessor pins the successor (issue #112 finding)", async () => {
+  const registry = agentRegistry();
+  const currentPath = "/sessions/succ-019f4906-3f67-7b72-9fbc-9ec3b5ad1403.jsonl";
+  const priorPath = "/sessions/pred-019f4906-3f67-7b72-9fbc-9ec3b5ad1402.jsonl";
+  const conversation = registry.ensureConversation("codex", currentPath, "acc");
+  registry.recordConversationContinuityPath(conversation.id, priorPath);
+  fs.writeFileSync(path.join(stateDir, "reaper-state.json"), JSON.stringify({
+    version: 1,
+    firstObservedAt: {},
+    userAuthoredPaths: {},
+    scannedAt: { [currentPath]: 5000 }, // current is clean+fresh, but the predecessor was never scanned
+  }));
+  scannedFiles = [{ ...file(currentPath), engine: "codex", mtime: 4000 }];
+
+  const response = await GET(new Request("http://127.0.0.1/api/files"));
+  const body = await response.json() as { files: FileEntry[] };
+  const current = body.files.find((entry) => entry.path === currentPath);
+  expect(current?.authorshipUnverified).toBe(true);
+});
+
+test("an uncertain live-mtime read (not ENOENT) fails closed to unverified (issue #112 finding)", async () => {
+  /* A stamp is only trustworthy against a KNOWN live mtime. EACCES/EIO/ENOTDIR
+     leave freshness unknown — mapping every stat error to the cached snapshot
+     mtime would falsely certify a transcript that may have grown since. Force a
+     non-ENOENT stat failure by nesting the transcript path under a regular file
+     (statSync → ENOTDIR) and confirm it stays pinned despite a fresh stamp. */
+  const blocker = path.join(stateDir, "blocker");
+  fs.writeFileSync(blocker, "not a directory\n");
+  const workerPath = path.join(blocker, "worker.jsonl"); // statSync(workerPath) → ENOTDIR
+  fs.writeFileSync(path.join(stateDir, "reaper-state.json"), JSON.stringify({
+    version: 1,
+    firstObservedAt: {},
+    userAuthoredPaths: {},
+    scannedAt: { [workerPath]: 5000 }, // stamp is fresh against the cached mtime below
+  }));
+  scannedFiles = [{ ...file(workerPath), engine: "codex", mtime: 4000 }];
+
+  const response = await GET(new Request("http://127.0.0.1/api/files"));
+  const body = await response.json() as { files: FileEntry[] };
+  const worker = body.files.find((entry) => entry.path === workerPath);
+  expect(worker?.authorshipUnverified).toBe(true);
+});
+
+test("a confirmed-gone transcript (ENOENT) is certified by its immutable snapshot mtime (issue #112 finding)", async () => {
+  /* A deleted transcript is immutable and off the board — a clean stamp at or
+     past its last-known mtime certifies it, so it is not needlessly pinned. */
+  const gonePath = "/sessions/gone-019f4906-3f67-7b72-9fbc-9ec3b5ad1404.jsonl"; // never created → ENOENT
+  fs.writeFileSync(path.join(stateDir, "reaper-state.json"), JSON.stringify({
+    version: 1,
+    firstObservedAt: {},
+    userAuthoredPaths: {},
+    scannedAt: { [gonePath]: 5000 },
+  }));
+  scannedFiles = [{ ...file(gonePath), engine: "codex", mtime: 4000 }];
+
+  const response = await GET(new Request("http://127.0.0.1/api/files"));
+  const body = await response.json() as { files: FileEntry[] };
+  const gone = body.files.find((entry) => entry.path === gonePath);
+  expect(gone?.authorshipUnverified).toBeUndefined();
+});
