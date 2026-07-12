@@ -1046,12 +1046,17 @@ export class AgentRegistry {
     if (receipt.key && sessionKeyId(receipt.key) !== sessionKeyId(entry.key)) return conflict("spawn_identity_conflict");
     const existingConversation = file.conversations[receipt.conversationId];
     const occupied = file.entries[sessionKeyId(entry.key)];
-    const occupiedGeneration = occupied && existingConversation?.generations.find((generation) => generation.path === occupied.artifactPath);
+    const occupiedPathOwned = occupied && existingConversation
+      ? existingConversation.generations.some((generation) => generation.path === occupied.artifactPath)
+        || existingConversation.continuityPaths.includes(occupied.artifactPath)
+      : false;
+    const ownedGeneration = existingConversation?.generations.find((generation) => generation.id === entry.key.sessionId);
     const successorNativeId = existingConversation
       ? sessionKeyFromTranscript(existingConversation.engine, entry.artifactPath)?.sessionId ?? nativeGenerationId(entry.artifactPath)
       : null;
     const replacesOwnedGeneration = receipt.purpose === "resume-successor"
-      && occupiedGeneration?.id === entry.key.sessionId
+      && occupiedPathOwned
+      && ownedGeneration?.id === entry.key.sessionId
       && successorNativeId === entry.key.sessionId;
     if (occupied && occupied.artifactPath !== entry.artifactPath
       && (!prior || sessionKeyId(prior.key) !== sessionKeyId(entry.key))

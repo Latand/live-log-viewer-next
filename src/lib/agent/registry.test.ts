@@ -446,6 +446,51 @@ describe("agent registry", () => {
     });
   });
 
+  test("settles a same-session successor after inventory moves the generation first", () => {
+    const store = registry();
+    const nativeId = "019f4906-3f67-7b72-9fbc-9ec3b5ad1326";
+    const firstPath = `/sessions/2026/07/11/rollout-2026-07-11T10-00-00-${nativeId}.jsonl`;
+    const secondPath = `/sessions/2026/07/12/rollout-2026-07-12T10-00-00-${nativeId}.jsonl`;
+    const conversation = store.ensureConversation("codex", firstPath, "terra");
+    store.upsert({
+      ...spawnEntry(firstPath),
+      status: "unhosted",
+      host: null,
+    });
+    const begun = store.beginSpawnRequest({
+      engine: "codex",
+      cwd: "/repo",
+      accountId: "terra",
+      conversationId: conversation.id,
+      purpose: "resume-successor",
+    });
+    if (begun.kind !== "created") throw new Error("expected create");
+    store.reconcileConversations([{
+      engine: "codex",
+      path: secondPath,
+      accountId: "terra",
+      launchProfile: emptyLaunchProfile({ cwd: "/repo" }),
+      turn: { state: "idle", source: "empty", terminalAt: null },
+      observedAt: "2026-07-12T12:00:00.000Z",
+    }]);
+
+    expect(store.snapshot()).toMatchObject({
+      entries: { [`codex:${nativeId}`]: { artifactPath: firstPath } },
+      conversations: {
+        [conversation.id]: {
+          continuityPaths: [firstPath],
+          generations: [{ id: nativeId, path: secondPath }],
+        },
+      },
+    });
+    expect(store.settleSpawn(begun.receipt.launchId, spawnEntry(secondPath))).toMatchObject({
+      kind: "settled",
+      conversation: { id: conversation.id },
+      receipt: { state: "completed", artifactPath: secondPath },
+    });
+    expect(store.snapshot().entries[`codex:${nativeId}`]?.artifactPath).toBe(secondPath);
+  });
+
   test("resume succession rebases a migration before provider work", () => {
     const store = registry();
     const firstPath = "/sessions/rollout-019f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl";
