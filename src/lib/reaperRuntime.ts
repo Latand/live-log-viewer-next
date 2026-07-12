@@ -378,10 +378,8 @@ function authorshipEvidence(
   for (const host of hosts) {
     if (host.primaryPath) targets.set(host.primaryPath, host.engine);
   }
-  const mtimeByPath = new Map<string, number>();
   for (const file of files) {
     if (file.engine !== "claude" && file.engine !== "codex") continue;
-    mtimeByPath.set(file.path, file.mtime);
     if (file.activity === "live" || targets.has(file.path)) continue;
     /* Already clean-stamped at or past the current mtime — no need to re-scan;
        the persisted stamp still stands (the caller keeps prior state entries). */
