@@ -86,3 +86,17 @@ export function entryEffort(entry: FileEntry): string | null {
   effortCache.set(entry.path, [entry.size, effort]);
   return effort ?? argv;
 }
+
+/** Codex speed tier from the live process argv. Transcript records currently
+    do not carry a stable service-tier field, so unknown and stopped sessions
+    remain null. */
+export function entryFast(entry: FileEntry): boolean | null {
+  if (entry.engine !== "codex" || entry.pid === null) return null;
+  const argv = readArgv(entry.pid);
+  for (let i = 0; i < argv.length - 1; i++) {
+    if (argv[i] !== "-c" && argv[i] !== "--config") continue;
+    const match = argv[i + 1].match(/^service_tier\s*=\s*"?(priority|standard)"?$/i);
+    if (match) return match[1].toLowerCase() === "priority";
+  }
+  return null;
+}

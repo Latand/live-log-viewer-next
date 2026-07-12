@@ -88,6 +88,7 @@ export interface BoardProjectStateV1 {
   revision: number;
   updatedAt: string;
   pathAliases?: Record<string, string>;
+  explicitManual?: string[];
   prefs: { manual: string[]; hidden: string[]; expanded: string[]; viewMode: "scheme" | "list" | null; taskPanelOpen: boolean };
 }
 

@@ -1,16 +1,18 @@
 import { resumeSpecFor } from "@/lib/agent/cli";
-import { agentRegistry } from "@/lib/agent/registry";
+import type { AgentReconfiguration } from "@/lib/agent/reconfigure";
+import { agentRegistry, type AgentRegistry, type AgentRegistryEntry, type TmuxHostEvidence } from "@/lib/agent/registry";
 import { deliveryFence } from "@/lib/accounts/migration/coordinator";
 import { requestAccountMigrationTick } from "@/lib/accounts/migration/controllerSignal";
 import { deliverToTranscriptHost, readTranscriptHosts, type HostDeliveryOutcome } from "@/lib/agent/transcriptHost";
 import { listFiles } from "@/lib/scanner";
 import { pathAllowed } from "@/lib/scanner/roots";
-import { detectBlockingGate, parseScreenMenu, screenWaitsForInput } from "@/lib/status";
+import { procBackend } from "@/lib/proc";
+import { detectBlockingGate, parseScreenMenu, screenAtIdleComposer, screenWaitsForInput } from "@/lib/status";
 import {
   buildImagePayload,
   deleteInboxImages,
   forgetResumePane,
-  killPane,
+  killTmuxHostIfMatches,
   knownLivePids,
   paneScreen,
   resolveTarget,
@@ -40,10 +42,72 @@ export interface DeliveryFailure {
 export interface DeliverySuccess {
   ok: true;
   target: string;
-  outcome?: "delivered-to-live" | "resumed" | "held";
+  outcome?: "delivered-to-live" | "resumed" | "held" | "pending" | "reconfigured";
   imagePaths?: string[];
   /** Set when the message booted a fresh agent window instead of an existing pane. */
   spawned?: boolean;
+}
+
+interface ReconfigureConversationOverrides {
+  pathAllowed?: typeof pathAllowed;
+  listFiles?: typeof listFiles;
+  resumeSpecFor?: typeof resumeSpecFor;
+  livePaneHost?: typeof livePaneHost;
+  registry?: AgentRegistry;
+  paneScreen?: typeof paneScreen;
+  killHost?: typeof killTmuxHostIfMatches;
+  deliver?: typeof deliverToTranscriptHost;
+}
+
+export async function reconfigureConversation(
+  filePath: string,
+  config: AgentReconfiguration,
+  overrides: ReconfigureConversationOverrides = {},
+): Promise<DeliveryOutcome> {
+  if (!filePath || !(overrides.pathAllowed ?? pathAllowed)(filePath)) return failure("the conversation path is required", 400);
+  const entry = (await (overrides.listFiles ?? listFiles)()).find((item) => item.path === filePath);
+  if (!entry || (entry.engine !== "claude" && entry.engine !== "codex")) return failure("conversation is unavailable", 403);
+  const registry = overrides.registry ?? agentRegistry();
+  const registered = registeredHostForPath(registry.snapshot(), filePath);
+  if (!registered?.host) return failure("no registered agent pane for this conversation", 404);
+  const buildSpec = (profile: AgentRegistryEntry["launchProfile"]) => (overrides.resumeSpecFor ?? resumeSpecFor)(entry.root, entry.path, {
+    ...config,
+    readOnly: profile?.readOnly ?? null,
+    permissionMode: profile?.permissionMode ?? null,
+  });
+  const deliver = overrides.deliver ?? deliverToTranscriptHost;
+  const observedHost = await (overrides.livePaneHost ?? livePaneHost)(filePath);
+  const paneId = observedHost?.paneId ?? registered.host.paneId;
+  const target = observedHost?.display ?? registered.host.paneId;
+  const owner = { pid: process.pid, startIdentity: procBackend.processIdentity(process.pid) };
+  try {
+    const prepared = await registry.withOperationLock(registered.key, owner, async () => {
+      const refreshed = registeredHostForPath(registry.snapshot(), filePath);
+      if (!refreshed?.host || refreshed.host.paneId !== paneId) {
+        return failure("the registered pane changed", 409);
+      }
+      const spec = buildSpec(refreshed.launchProfile);
+      if (!spec) return failure("this conversation cannot be resumed", 409);
+      const refreshedHost = refreshed.host;
+      return withPaneLock(paneId, async () => {
+        if (!screenAtIdleComposer(await (overrides.paneScreen ?? paneScreen)(paneId))) {
+          return "pending" as const;
+        }
+        if (!await (overrides.killHost ?? killTmuxHostIfMatches)(refreshedHost)) return failure("the registered pane changed or its process did not exit", 409);
+        registry.markUnhosted(refreshed.key);
+        forgetResumePane(filePath);
+        return { state: "prepared" as const, spec };
+      });
+    });
+    if (prepared === "pending") return { ok: true, target, outcome: "pending" };
+    if (!("state" in prepared)) return prepared;
+    /* Resume acquires the same per-session serialization lock through the
+       transcript-host adapter. The termination lock must be released first. */
+    const resumed = await hostOutcome(deliver({ entry: { ...entry, pid: null, proc: "done" }, spec: prepared.spec, payload: "" }));
+    return resumed.ok ? { ...resumed, outcome: "reconfigured" } : resumed;
+  } catch (error) {
+    return failure(error);
+  }
 }
 
 export type DeliveryOutcome = DeliverySuccess | DeliveryFailure;
@@ -211,28 +275,75 @@ export async function resumeConversation(filePath: string): Promise<DeliveryOutc
   }
 }
 
-/* Closing a chat card also puts out its tmux pane. A missing pane is fine —
-   the conversation may have never had one or it died already; the close is
-   then a pure UI removal and still succeeds. */
-export async function killConversation(filePath: string): Promise<DeliveryOutcome> {
-  if (!filePath || !pathAllowed(filePath)) {
+interface KillConversationOverrides {
+  pathAllowed?: typeof pathAllowed;
+  listFiles?: typeof listFiles;
+  registrySnapshot?: () => ReturnType<ReturnType<typeof agentRegistry>["snapshot"]>;
+  registry?: Pick<AgentRegistry, "snapshot" | "withOperationLock" | "markUnhosted">;
+  killHost?: typeof killTmuxHostIfMatches;
+}
+
+function registeredHostForPath(
+  snapshot: ReturnType<AgentRegistry["snapshot"]>,
+  filePath: string,
+): AgentRegistryEntry | null {
+  return Object.values(snapshot.entries)
+    .filter((candidate) => candidate.artifactPath === filePath && candidate.host !== null)
+    .sort((left, right) => right.claimEpoch - left.claimEpoch || right.updatedAt.localeCompare(left.updatedAt))[0] ?? null;
+}
+
+function sameRegisteredHost(left: TmuxHostEvidence | null, right: TmuxHostEvidence): boolean {
+  return Boolean(left
+    && left.kind === right.kind
+    && left.endpoint === right.endpoint
+    && left.paneId === right.paneId
+    && left.server.pid === right.server.pid
+    && left.server.startIdentity === right.server.startIdentity
+    && left.panePid.pid === right.panePid.pid
+    && left.panePid.startIdentity === right.panePid.startIdentity
+    && left.agent.pid === right.agent.pid
+    && left.agent.startIdentity === right.agent.startIdentity
+    && left.windowName === right.windowName
+    && left.argv.length === right.argv.length
+    && left.argv.every((argument, index) => argument === right.argv[index]));
+}
+
+/** Closes the registry-owned pane for one root conversation. The registry
+    supplies the stable pane id and the complete process identity fence. */
+export async function killConversation(filePath: string, overrides: KillConversationOverrides = {}): Promise<DeliveryOutcome> {
+  if (!filePath || !(overrides.pathAllowed ?? pathAllowed)(filePath)) {
     return failure("the conversation path is required to close", 400);
   }
-  const entry = (await listFiles()).find((item) => item.path === filePath);
+  const entry = (await (overrides.listFiles ?? listFiles)()).find((item) => item.path === filePath);
   /* A branch column shares the root conversation's pane: killing it from a
      branch close would take the whole agent down along with the root card
      that is still on screen. Only a root conversation may kill a pane. */
   if (entry && entry.parent) {
-    return { ok: true, target: "" };
+    return failure("a branch shares its root conversation pane and cannot be closed independently", 409);
   }
-  const host = await livePaneHost(filePath);
-  if (host === null) {
-    return { ok: true, target: "" };
-  }
+  const registry = overrides.registry ?? agentRegistry();
+  const readSnapshot = overrides.registry
+    ? () => registry.snapshot()
+    : overrides.registrySnapshot ?? (() => registry.snapshot());
+  const registered = registeredHostForPath(readSnapshot(), filePath);
+  if (!registered?.host) return failure("no registered agent pane for this conversation", 404);
+  const owner = { pid: process.pid, startIdentity: procBackend.processIdentity(process.pid) };
+  const runLocked = overrides.registry || !overrides.registrySnapshot
+    ? <T>(task: () => Promise<T>) => registry.withOperationLock(registered.key, owner, task)
+    : <T>(task: () => Promise<T>) => task();
   try {
-    await killPane(host.paneId);
-    forgetResumePane(filePath);
-    return { ok: true, target: host.display };
+    return await runLocked(async () => {
+      const refreshed = registeredHostForPath(readSnapshot(), filePath);
+      if (!refreshed?.host) return failure("no registered agent pane for this conversation", 404);
+      const killed = await (overrides.killHost ?? killTmuxHostIfMatches)(refreshed.host);
+      if (!killed) return failure("the registered pane changed or its process did not exit", 409);
+      if (overrides.registry || !overrides.registrySnapshot) {
+        const current = registry.snapshot().entries[`${refreshed.key.engine}:${refreshed.key.sessionId}`];
+        if (current?.artifactPath === filePath && sameRegisteredHost(current.host, refreshed.host)) registry.markUnhosted(refreshed.key);
+      }
+      forgetResumePane(filePath);
+      return { ok: true, target: refreshed.host.paneId };
+    });
   } catch (error) {
     return failure(error);
   }

@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 
 import { FLOWS_CHANGED_EVENT } from "@/components/flows/flowModel";
 import { PIPELINES_CHANGED_EVENT } from "@/components/pipelines/pipelineModel";
+import { SESSION_TITLES_CHANGED_EVENT } from "@/components/session/sessionTitleApi";
 import { TASKS_CHANGED_EVENT } from "@/components/tasks/taskApi";
 import { WORKFLOWS_CHANGED_EVENT } from "@/components/workflows/workflowModel";
 import type { Flow } from "@/lib/flows/types";
@@ -145,6 +146,7 @@ export function useFiles(project?: string | null, pinnedPath?: string | null): F
     window.addEventListener(PIPELINES_CHANGED_EVENT, onChanged);
     window.addEventListener(WORKFLOWS_CHANGED_EVENT, onChanged);
     window.addEventListener(TASKS_CHANGED_EVENT, onChanged);
+    window.addEventListener(SESSION_TITLES_CHANGED_EVENT, onChanged);
 
     let unsubBus = () => {};
     let unsubFiles = () => {};
@@ -193,6 +195,7 @@ export function useFiles(project?: string | null, pinnedPath?: string | null): F
       window.removeEventListener(PIPELINES_CHANGED_EVENT, onChanged);
       window.removeEventListener(WORKFLOWS_CHANGED_EVENT, onChanged);
       window.removeEventListener(TASKS_CHANGED_EVENT, onChanged);
+      window.removeEventListener(SESSION_TITLES_CHANGED_EVENT, onChanged);
     };
   }, [project, pinnedPath]);
   return data;

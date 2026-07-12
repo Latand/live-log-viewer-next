@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { readSession } from "./reader";
+import { readSession, scanUserAuthoredMessages } from "./reader";
 
 const SANDBOX = fs.mkdtempSync(path.join(os.tmpdir(), "llv-session-reader-"));
 
@@ -65,4 +65,42 @@ describe("readSession", () => {
     expect(result.messages.map((item) => item.text)).toEqual(["Fix the tests", "Fixed."]);
     expect(result.traces[0]?.name).toBe("turn_complete");
   });
+});
+
+test("authorship scan reports malformed and oversized records as incomplete", () => {
+  const malformed = writeJsonl("malformed-authorship.jsonl", [{ type: "event_msg", payload: { type: "agent_message", message: "ok" } }]);
+  fs.appendFileSync(malformed, "{broken\n");
+  expect(scanUserAuthoredMessages(malformed, "codex", 1)).toEqual({ count: 0, complete: false });
+
+  const oversized = path.join(SANDBOX, "oversized-authorship.jsonl");
+  fs.writeFileSync(oversized, JSON.stringify({ type: "event_msg", payload: { type: "agent_message", message: "x".repeat(8 * 1024 * 1024 + 1) } }) + "\n");
+  expect(scanUserAuthoredMessages(oversized, "codex", 1)).toEqual({ count: 0, complete: false });
+});
+
+test("Claude task notifications stay outside human authorship", () => {
+  const pathname = writeJsonl("claude-task-notification-authorship.jsonl", [
+    {
+      type: "user",
+      promptSource: "system",
+      origin: { kind: "task-notification" },
+      message: { content: "Automated task completed" },
+    },
+    {
+      type: "user",
+      origin: "task",
+      message: { content: "Legacy automated task completed" },
+    },
+    {
+      type: "user",
+      message: { content: "<task-notification>\nWrapper automated task completed\n</task-notification>" },
+    },
+    {
+      type: "user",
+      promptSource: "future-source",
+      origin: { kind: "unknown" },
+      message: { content: "Conservatively treated as human" },
+    },
+  ]);
+
+  expect(scanUserAuthoredMessages(pathname, "claude", 4)).toEqual({ count: 1, complete: true });
 });

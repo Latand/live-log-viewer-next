@@ -1,7 +1,7 @@
 "use client";
 
 import { getLocale, translate } from "@/lib/i18n";
-import type { BoardTask, TaskStatus } from "@/lib/tasks/types";
+import type { BoardTask, TaskAttachment, TaskStatus } from "@/lib/tasks/types";
 
 /** Fired after any successful task mutation so pollers refresh immediately. */
 export const TASKS_CHANGED_EVENT = "llv:tasks-changed";
@@ -55,13 +55,54 @@ async function request<T>(url: string, method: string, body?: unknown): Promise<
   }
 }
 
-export async function createTask(input: {
+/** A create fully described by the shared draft: text plus placement, optional
+    deadline and attachment refs, and a `clientRequestId` so a double-tap or a
+    retry-after-timeout resolves to one task instead of a twin. */
+export interface CreateTaskInput {
   project: string;
   text: string;
-  pos: { x: number; y: number };
-}): Promise<{ task: BoardTask } | { error: string }> {
+  placement: "pinned" | "unplaced";
+  pos?: { x: number; y: number };
+  dueAt?: string;
+  dueTz?: string;
+  attachments?: TaskAttachment[];
+  clientRequestId?: string;
+}
+
+/** A per-commit-gesture id: stable across retries of one gesture (so two rapid
+    clicks dedup to one task server-side) and regenerated once a task lands.
+    randomUUID needs a secure context; LAN http gets the fallback. */
+export function newClientRequestId(): string {
+  return typeof crypto?.randomUUID === "function" ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
+}
+
+export async function createTask(input: CreateTaskInput): Promise<{ task: BoardTask } | { error: string }> {
   const res = await request<{ task: BoardTask }>("/api/tasks", "POST", input);
   return res.ok ? { task: res.data.task } : { error: res.error };
+}
+
+/** The GET URL that serves a stored attachment's bytes — used for draft/card
+    thumbnails that must survive reload from the durable ref alone. */
+export function attachmentPreviewUrl(att: TaskAttachment): string {
+  return `/api/task-attachments?sha=${encodeURIComponent(att.sha256)}&ext=${encodeURIComponent(att.ext)}`;
+}
+
+/** Uploads one image to the content-addressed store and returns its durable
+    ref, which a later create attaches to the task (the task then owns the bytes
+    for every delivery — no post-send hop that can silently drop them). */
+export async function uploadTaskAttachment(file: File): Promise<{ attachment: TaskAttachment } | { error: string }> {
+  const form = new FormData();
+  form.set("file", file);
+  try {
+    const res = await fetch("/api/task-attachments", { method: "POST", body: form });
+    const json = (await res.json().catch(() => null)) as { attachment?: TaskAttachment; error?: string } | null;
+    if (!res.ok || !json?.attachment) {
+      return { error: json?.error ?? translate(getLocale(), "tasks.failed", { status: res.status }) };
+    }
+    return { attachment: json.attachment };
+  } catch {
+    return { error: translate(getLocale(), "common.serverUnavailable") };
+  }
 }
 
 /*
@@ -87,7 +128,15 @@ async function pendingTextError(id: string): Promise<string | null> {
  */
 export function updateTask(
   id: string,
-  patch: { text?: string; status?: TaskStatus; pos?: { x: number; y: number } },
+  patch: {
+    text?: string;
+    status?: TaskStatus;
+    placement?: "pinned" | "unplaced";
+    pos?: { x: number; y: number };
+    /** `null` clears the deadline; a value must come paired with `dueTz`. */
+    dueAt?: string | null;
+    dueTz?: string;
+  },
 ): Promise<string | null> {
   /* Text patches chain behind the previous in-flight one: an autosave and a
      blur commit racing over two connections could otherwise reach the LWW

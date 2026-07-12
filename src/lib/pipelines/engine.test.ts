@@ -576,3 +576,106 @@ test("reviewNote parks a too-long directive for raw and role-backed review stage
   } as unknown as Parameters<typeof reviewNote>[2]);
   expect(noteOf(ok)).toBe("Check ship the widget against the ACs.");
 });
+
+test("override-stage re-configures an unstarted stage and rejects a started one (issue #118)", async () => {
+  const { ports } = harness();
+  const created = await create(ports);
+  /* The trailing "build" stage has not run yet, so its config is still editable. */
+  const res = await patchPipeline(
+    created.id,
+    { action: "override-stage", stageId: "build", engine: "claude", model: "opus", effort: "high", prompt: "New build prompt" },
+    ports,
+  );
+  expect(res.error).toBeUndefined();
+  const build = loadPipelines()[0]!.stages.find((stage) => stage.id === "build")!;
+  expect(build.effectiveRole).toMatchObject({ engine: "claude", model: "opus", effort: "high" });
+  expect(build.prompt).toBe("New build prompt");
+
+  /* A blank model resolves to the engine default (null), not the literal "". */
+  const cleared = await patchPipeline(created.id, { action: "override-stage", stageId: "build", model: "  " }, ports);
+  expect(cleared.error).toBeUndefined();
+  expect(loadPipelines()[0]!.stages.find((stage) => stage.id === "build")!.effectiveRole.model).toBeNull();
+
+  /* Once the stage has an attempt it is frozen: the override 409s. */
+  const started = loadPipelines()[0]!;
+  const buildStage = started.stages.find((stage) => stage.id === "build")!;
+  started.runs.find((run) => run.stageId === "build")!.attempts.push({
+    n: 1, state: "running", effectiveRole: structuredClone(buildStage.effectiveRole), launchId: null,
+    conversationId: null, sessionId: null, agentPath: null, paneId: null, flowId: null,
+    startedAt: null, completedAt: null, output: null, verdict: null, error: null,
+  });
+  savePipelines([started]);
+  expect((await patchPipeline(started.id, { action: "override-stage", stageId: "build", prompt: "x" }, ports)).status).toBe(409);
+});
+
+test("override-stage validates the target and requires a change", async () => {
+  const { ports } = harness();
+  const created = await create(ports);
+  expect((await patchPipeline(created.id, { action: "override-stage", stageId: "ghost", prompt: "x" }, ports)).status).toBe(404);
+  expect((await patchPipeline(created.id, { action: "override-stage", stageId: "build" }, ports)).status).toBe(400);
+  expect((await patchPipeline(created.id, { action: "override-stage", stageId: "build", engine: "gemini" as never }, ports)).status).toBe(400);
+  expect((await patchPipeline(created.id, { action: "override-stage", stageId: "build", prompt: "  " }, ports)).status).toBe(400);
+});
+
+test("override-stage swaps the stage role through the registry and resets unpinned runtime (issue #118 review F3)", async () => {
+  const { ports } = harness();
+  const created = await create(ports);
+  /* build was builder/codex; switch it to architect with no runtime pins → the
+     new role's registry defaults (claude/fable/high + scaffold) apply. */
+  const res = await patchPipeline(created.id, { action: "override-stage", stageId: "build", role: { roleId: "architect" } }, ports);
+  expect(res.error).toBeUndefined();
+  const build = loadPipelines()[0]!.stages.find((stage) => stage.id === "build")!;
+  expect(build.role).toEqual({ roleId: "architect" });
+  expect(build.effectiveRole).toMatchObject({ roleId: "architect", engine: "claude", model: "fable", effort: "high", promptScaffold: "Architect guidance" });
+  /* Input fields stay consistent with the effectiveRole so the record persists. */
+  expect(build.engine).toBe("claude");
+  expect(build.model).toBe("fable");
+
+  /* An explicit runtime pin still wins over the role default. */
+  const pinned = await patchPipeline(created.id, { action: "override-stage", stageId: "build", role: { roleId: "reviewer" }, effort: "low" }, ports);
+  expect(pinned.error).toBeUndefined();
+  expect(loadPipelines()[0]!.stages.find((stage) => stage.id === "build")!.effectiveRole).toMatchObject({ roleId: "reviewer", effort: "low" });
+
+  /* Clearing the role falls back to the Builder default. */
+  const cleared = await patchPipeline(created.id, { action: "override-stage", stageId: "build", role: null }, ports);
+  expect(cleared.error).toBeUndefined();
+  const roleless = loadPipelines()[0]!.stages.find((stage) => stage.id === "build")!;
+  expect(roleless.role).toBeUndefined();
+  expect(roleless.effectiveRole).toMatchObject({ roleId: null, engine: "codex" });
+});
+
+test("override-stage rejects an unknown/disallowed role and an incompatible role+model (issue #118 review F3)", async () => {
+  const { ports } = harness();
+  const created = await create(ports);
+  expect((await patchPipeline(created.id, { action: "override-stage", stageId: "build", role: { roleId: "wizard" as never } }, ports)).status).toBe(400);
+  expect((await patchPipeline(created.id, { action: "override-stage", stageId: "build", role: { roleId: "deployer" } }, ports)).error).toContain("not allowed in a pipeline");
+  /* architect resolves to claude; a codex-only model must fail canonical bounds. */
+  const bad = await patchPipeline(created.id, { action: "override-stage", stageId: "build", role: { roleId: "architect" }, model: "gpt-5.6-sol" }, ports);
+  expect(bad.status).toBe(400);
+});
+
+test("override-stage rejects non-string model/effort instead of silently ignoring them (issue #118 review F3)", async () => {
+  const { ports } = harness();
+  const created = await create(ports);
+  /* resolvePipelineRole would treat these as absent and 200 with the old config;
+     the type guards must 400 instead, and never mutate the stage. */
+  expect((await patchPipeline(created.id, { action: "override-stage", stageId: "build", model: 123 as never }, ports)).status).toBe(400);
+  expect((await patchPipeline(created.id, { action: "override-stage", stageId: "build", effort: false as never }, ports)).status).toBe(400);
+  expect((await patchPipeline(created.id, { action: "override-stage", stageId: "build", engine: 7 as never }, ports)).status).toBe(400);
+  const build = loadPipelines()[0]!.stages.find((stage) => stage.id === "build")!;
+  expect(build.prompt).toBe("Build from {{prev.output}}");
+});
+
+test("override-stage enforces the same prompt-size ceiling as creation (issue #118 review F5)", async () => {
+  const { ports } = harness();
+  const { MAX_STAGE_PROMPT_LENGTH } = await import("./limits");
+  const created = await create(ports);
+  /* Over the ceiling is rejected with a 400, not persisted as an oversized record. */
+  const over = await patchPipeline(created.id, { action: "override-stage", stageId: "build", prompt: "x".repeat(MAX_STAGE_PROMPT_LENGTH + 1) }, ports);
+  expect(over.status).toBe(400);
+  expect(over.error).toContain(String(MAX_STAGE_PROMPT_LENGTH));
+  expect(loadPipelines()[0]!.stages.find((stage) => stage.id === "build")!.prompt).toBe("Build from {{prev.output}}");
+  /* Exactly at the ceiling is accepted. */
+  const atLimit = await patchPipeline(created.id, { action: "override-stage", stageId: "build", prompt: "y".repeat(MAX_STAGE_PROMPT_LENGTH) }, ports);
+  expect(atLimit.error).toBeUndefined();
+});

@@ -14,7 +14,7 @@ import { activityDot, cleanTitle, engineBadge, engineBadgeFor } from "@/componen
 
 import type { Camera } from "./Minimap";
 import { MOVE_EASE, MOVE_MS } from "./nodes";
-import { TASK_BODY_MAX, TASK_W, taskRect, type SchemeRect } from "./taskGeometry";
+import { TASK_BODY_MAX, TASK_W, taskRect, type PlacedTask, type SchemeRect } from "./taskGeometry";
 
 /* Below this zoom the card text is unreadable: an edit click glides first. */
 const EDIT_MIN_Z = 0.55;
@@ -146,7 +146,7 @@ export const TaskCard = memo(function TaskCard({
   camRef,
   handlers,
 }: {
-  task: BoardTask;
+  task: PlacedTask;
   files: FileEntry[];
   camRef: React.RefObject<Camera>;
   handlers: TaskCardHandlers;
@@ -409,60 +409,3 @@ export const TaskCard = memo(function TaskCard({
     </div>
   );
 });
-
-/**
- * The not-yet-persisted card the «task» tool drops: a focused textarea at
- * the clicked world point. Blur/Esc with text creates the task; empty text
- * discards the card.
- */
-export function NewTaskCard({
-  pos,
-  onCommit,
-  onCancel,
-}: {
-  pos: { x: number; y: number };
-  onCommit: (text: string) => void;
-  onCancel: () => void;
-}) {
-  const { t } = useLocale();
-  const [text, setText] = useState("");
-  const ref = useRef<HTMLTextAreaElement | null>(null);
-  useEffect(() => {
-    ref.current?.focus();
-  }, []);
-  const commit = () => {
-    if (text.trim()) onCommit(text);
-    else onCancel();
-  };
-  return (
-    <div
-      data-scheme-task="new"
-      className="absolute z-30"
-      style={{ transform: `translate(${pos.x}px, ${pos.y}px)`, width: TASK_W }}
-    >
-      <div
-        className="flex flex-col overflow-hidden rounded-[8px] border border-line shadow-card ring-2 ring-accent/50"
-        style={{ backgroundColor: TASK_TONES.inbox.soft }}
-      >
-        <div aria-hidden className="h-1 w-full shrink-0" style={{ backgroundColor: TASK_TONES.inbox.color }} />
-        <textarea
-          ref={ref}
-          value={text}
-          onChange={(event) => setText(event.target.value)}
-          onBlur={() => commitUnlessWindowBlur(ref.current, commit)}
-          onKeyDown={(event) => {
-            if (event.key === "Escape") {
-              event.preventDefault();
-              commit();
-            }
-          }}
-          placeholder={t("tasks.newPlaceholder")}
-          aria-label={t("tasks.editAria")}
-          rows={4}
-          className="w-full resize-none bg-transparent px-3 py-2 text-[12.5px] leading-[17px] text-[#26262c] placeholder:text-dim focus-visible:outline-none"
-          maxLength={6000}
-        />
-      </div>
-    </div>
-  );
-}

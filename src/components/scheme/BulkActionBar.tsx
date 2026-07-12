@@ -4,7 +4,8 @@ import { CircleCheck, CircleX, Focus, Loader2, OctagonMinus, Repeat2, RotateCcw,
 import { memo, useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import { ComposerBar } from "@/components/ComposerBar";
-import { createTask, sendTask } from "@/components/tasks/taskApi";
+import { createTask, newClientRequestId, sendTask, uploadTaskAttachment } from "@/components/tasks/taskApi";
+import type { TaskAttachment } from "@/lib/tasks/types";
 import { cleanTitle } from "@/components/utils";
 import { useComposer } from "@/hooks/useComposer";
 import type { Flow, FlowsResponse, RoleConfig } from "@/lib/flows/types";
@@ -12,6 +13,7 @@ import { useLocale } from "@/lib/i18n";
 
 import { canBulkFlow, canBulkInterrupt, canBulkKill, runBulk, withPresenceGuard, type BulkItemResult, type BulkRunner } from "./bulkActions";
 import type { SchemeNode } from "./layout";
+import { findFreeSlot } from "./findFreeSlot";
 import { TASK_W } from "./taskGeometry";
 
 type ActionId = "message" | "interrupt" | "kill" | "remove" | "flow";
@@ -156,7 +158,10 @@ export const BulkActionBar = memo(function BulkActionBar({
       cx += node.x + node.w / 2;
       cy += node.y + node.h / 2;
     }
-    return { x: Math.round(cx / list.length - TASK_W / 2), y: Math.round(cy / list.length - 60) };
+    const anchor = { x: Math.round(cx / list.length - TASK_W / 2), y: Math.round(cy / list.length - 60) };
+    /* Route the centroid through the shared free-slot search so a card never
+       stacks straight on top of the selection it was made from. */
+    return findFreeSlot(anchor, { w: TASK_W, h: 140 }, list);
   };
 
   const composer = useComposer({
@@ -174,27 +179,37 @@ export const BulkActionBar = memo(function BulkActionBar({
             composer.setStatus({ kind: "err", text: t("tasks.composerNeedsText") });
             return;
           }
-          const created = await createTask({ project, text, pos: taskPos() });
+          /* Upload the picked images to durable, content-addressed refs BEFORE
+             the task exists, so the task owns them: delivery carries their paths
+             in the send text (replayable on retry), an armed-but-empty session
+             keeps them on the card, and nothing is stranded on a failed target. */
+          const attachments: TaskAttachment[] = [];
+          for (const image of composer.attachments.images) {
+            const bytes = Uint8Array.from(atob(image.base64), (c) => c.charCodeAt(0));
+            const up = await uploadTaskAttachment(new File([bytes], "attachment", { type: image.mime }));
+            if ("error" in up) {
+              composer.setStatus({ kind: "err", text: up.error });
+              return;
+            }
+            attachments.push(up.attachment);
+          }
+          const created = await createTask({ project, text, placement: "pinned", pos: taskPos(), attachments, clientRequestId: newClientRequestId() });
           if ("error" in created) {
             composer.setStatus({ kind: "err", text: created.error });
             return;
           }
           const taskId = created.task.id;
-          /* Per-target task delivery through the same report/retry machinery
-             as the broadcast; images ride the plain message route only to
-             targets whose task delivery succeeded. */
+          /* Per-target task delivery through the same report/retry machinery as
+             the broadcast; the images ride in the delivery text as durable
+             paths, so no separate post-send image hop is needed. */
           const items = await execute("message", [...byPath.keys()], async (path) => {
             const sent = await sendTask(taskId, [path]);
             if ("error" in sent) return { ok: false as const, error: sent.error };
             const result = sent.results[0];
             if (!result?.ok) return { ok: false as const, error: result?.error ?? t("common.failedSend") };
-            if (images.length) {
-              const node = byPath.get(path);
-              return postJson("/api/tmux", { pid: node?.file.pid ?? undefined, path, text: "", images });
-            }
             return { ok: true as const };
           });
-          /* An armed-but-empty session still captures the card. */
+          /* An armed-but-empty session still captures the card (with its images). */
           if (!byPath.size || (items.length && items.every((item) => item.ok))) {
             composer.setText("");
             composer.attachments.clear();

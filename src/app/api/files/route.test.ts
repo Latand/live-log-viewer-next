@@ -6,6 +6,7 @@ import path from "node:path";
 import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
 import { withoutArchivedPredecessors } from "@/lib/accounts/identity";
 import { agentRegistry, AgentRegistry, setAgentRegistryForTests } from "@/lib/agent/registry";
+import { writeSessionTitle } from "@/lib/session/titleStore";
 import type { FileEntry } from "@/lib/types";
 
 let scans = 0;
@@ -14,9 +15,15 @@ let scannedFiles: FileEntry[] = [];
 let scanGates: Promise<void>[] = [];
 let registryRoot = "";
 let tmuxHealth: unknown = { status: "healthy" };
+let stateDir = "";
+const previousState = process.env.LLV_STATE_DIR;
 
 beforeEach(() => {
   registryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "llv-files-route-"));
+  // Sandbox the title store so the integration test's writeSessionTitle never
+  // touches the real ~/.config/agent-log-viewer state.
+  stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "llv-files-route-state-"));
+  process.env.LLV_STATE_DIR = stateDir;
   setAgentRegistryForTests(new AgentRegistry(path.join(registryRoot, "registry.json")));
   resetFilesRouteCacheForTests();
   scans = 0;
@@ -27,7 +34,10 @@ beforeEach(() => {
 
 afterEach(() => {
   setAgentRegistryForTests(null);
+  if (previousState === undefined) delete process.env.LLV_STATE_DIR;
+  else process.env.LLV_STATE_DIR = previousState;
   fs.rmSync(registryRoot, { recursive: true, force: true });
+  fs.rmSync(stateDir, { recursive: true, force: true });
 });
 
 mock.module("@/lib/scanner", () => ({
@@ -320,6 +330,25 @@ test("spawn-time lineage keeps the child grouped after its tmux host disappears"
 
   expect(child?.parent).toBe(parentPath);
   expect(child?.conversationId).toBe(begun.receipt.conversationId);
+});
+
+test("a custom session title (issue #33) overrides the derived title and keeps it as autoTitle", async () => {
+  const sessionUuid = "019f4906-3f67-7b72-9fbc-9ec3b5ad1399";
+  const sessionPath = `/sessions/rollout-2026-07-12T00-00-00-${sessionUuid}.jsonl`;
+  writeSessionTitle([`uuid:codex:${sessionUuid}`], `uuid:codex:${sessionUuid}`, "My human name", undefined, "2026-07-12T00:00:00.000Z");
+  const derived = file(sessionPath);
+  derived.title = "auto derived from first prompt";
+  scannedFiles = [derived];
+
+  const response = await GET(new Request("http://127.0.0.1/api/files"));
+  const body = await response.json() as { files: FileEntry[] };
+  const entry = body.files.find((candidate) => candidate.path === sessionPath);
+
+  expect(entry?.title).toBe("My human name");
+  expect(entry?.autoTitle).toBe("auto derived from first prompt");
+  expect(entry?.titleRevision).toBe(1);
+  // A main session projects the rename-eligibility flag for the client gate.
+  expect(entry?.renamable).toBe(true);
 });
 
 test("an unreadable pipelines store degrades to pipelinesError without failing the poll", async () => {

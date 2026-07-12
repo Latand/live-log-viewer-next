@@ -176,8 +176,8 @@ const ENVELOPE_REJECTION_CODES = new Set(["UNSUPPORTED_SCHEMA_VERSION"]);
     match — the same comparison the server uses to treat a mutation as a no-op. */
 function sameArrangement(left: BoardProjectStateV1, right: BoardProjectStateV1): boolean {
   return (
-    JSON.stringify({ prefs: left.prefs, pathAliases: left.pathAliases ?? {} }) ===
-    JSON.stringify({ prefs: right.prefs, pathAliases: right.pathAliases ?? {} })
+    JSON.stringify({ prefs: left.prefs, pathAliases: left.pathAliases ?? {}, explicitManual: left.explicitManual ?? [] }) ===
+    JSON.stringify({ prefs: right.prefs, pathAliases: right.pathAliases ?? {}, explicitManual: right.explicitManual ?? [] })
   );
 }
 
@@ -239,6 +239,7 @@ export function createBoardStore(options: BoardStoreOptions): BoardStore {
     revision: 0,
     updatedAt: new Date(0).toISOString(),
     pathAliases: {},
+    explicitManual: [],
     prefs: EMPTY_BOARD_PREFS,
   });
 

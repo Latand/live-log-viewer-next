@@ -17,11 +17,12 @@ function assignment(overrides: Partial<TaskAssignment>): TaskAssignment {
   return { path: "/a", panePid: null, state: "delivered", error: null, at: "2026-07-05T00:00:00Z", ...overrides };
 }
 
-function task(overrides: Partial<BoardTask> & { id: string }): BoardTask {
+function task(overrides: Partial<BoardTask> & { id: string }): BoardTask & { pos: { x: number; y: number } } {
   return {
     project: "demo",
     status: "assigned",
     text: "title\nbody",
+    placement: "pinned",
     pos: { x: 0, y: 0 },
     assignments: [],
     createdAt: "2026-07-05T00:00:00Z",

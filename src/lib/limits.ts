@@ -7,9 +7,16 @@ import { managedCodexRuntime } from "@/lib/accounts/codexRuntime";
 import type { AppServerRateLimits } from "@/lib/accounts/codexAppServer";
 import { redactAppServerDetail } from "@/lib/accounts/codexAppServerProtocol";
 import { statePath } from "@/lib/configDir";
-import type { EngineLimits, LimitsPayload, LimitsProvenance, LimitWindow } from "./types";
+import { WINDOW_SECONDS, clampPercent, mergeSamples, type WindowKey } from "@/lib/burndown";
+import { historySamples, historySince, recordLimitSample, RETENTION_S } from "@/lib/limitsHistoryStore";
+import type { BurndownPayload, BurndownSeries, EngineBurndown, EngineLimits, LimitSample, LimitsPayload, LimitsProvenance, LimitWindow } from "./types";
 
-const LIMITS_CACHE_FILE = statePath("limits-cache.json");
+/** Resolved at call time (not module load) so LLV_STATE_DIR set after this
+    module is first evaluated — e.g. in tests importing it statically — still
+    points reads and writes at the right state dir. */
+function limitsCacheFile(): string {
+  return statePath("limits-cache.json");
+}
 const OAUTH_USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
 
 /** How far back into a session file to look for the last rate-limit event. */
@@ -57,7 +64,7 @@ function safeCacheEntry(value: unknown): EngineCacheEntry | null {
 
 function readDiskCache(): LimitsCache {
   try {
-    const raw = JSON.parse(fs.readFileSync(LIMITS_CACHE_FILE, "utf8")) as Partial<LimitsCache> & { at?: unknown; accountId?: unknown; data?: LimitsPayload };
+    const raw = JSON.parse(fs.readFileSync(limitsCacheFile(), "utf8")) as Partial<LimitsCache> & { at?: unknown; accountId?: unknown; data?: LimitsPayload };
     if (raw.version === 2 && raw.engines && typeof raw.engines === "object") {
       const cache = emptyCache();
       for (const engine of ["claude", "codex"] as const) {
@@ -88,7 +95,7 @@ function cache(): LimitsCache {
 
 function writeDiskCache(value: LimitsCache): void {
   try {
-    fs.mkdirSync(path.dirname(LIMITS_CACHE_FILE), { recursive: true });
+    fs.mkdirSync(path.dirname(limitsCacheFile()), { recursive: true });
     const latest = (engine: EngineName): [string, EngineCacheEntry] | null => Object.entries(value.engines[engine]).sort(([, a], [, b]) => b.at - a.at)[0] ?? null;
     const claude = latest("claude"); const codex = latest("codex");
     // Keep a read-only v1 projection during the cache migration so a rolling
@@ -108,7 +115,7 @@ function writeDiskCache(value: LimitsCache): void {
         staleSince: claude?.[1].provenance.staleSince ?? codex[1].provenance.staleSince,
       },
     } : {};
-    fs.writeFileSync(LIMITS_CACHE_FILE, JSON.stringify({ ...value, ...projection }, null, 2) + "\n", "utf8");
+    fs.writeFileSync(limitsCacheFile(), JSON.stringify({ ...value, ...projection }, null, 2) + "\n", "utf8");
   } catch (err) {
     console.warn("[limits] failed to persist cache", err);
   }
@@ -122,6 +129,13 @@ function remember(engine: EngineName, accountId: string, resolved: { data: Engin
   if (!resolved.data || resolved.meta.source === "cache" || resolved.meta.source === "unavailable") return;
   cache().engines[engine][accountId] = { at: Date.now(), data: resolved.data, provenance: resolved.meta };
   writeDiskCache(cache());
+  // A fresh live/transcript value is also a burndown sample. The browser's 60s
+  // poll drives this, so forward history accrues without a separate sampler.
+  try {
+    recordLimitSample(engine, accountId, resolved.data);
+  } catch (err) {
+    console.warn("[limits] failed to record burndown sample", err);
+  }
 }
 
 function safeReason(reason: string): string {
@@ -236,6 +250,7 @@ interface CodexWindow {
   used_percent?: unknown;
   resets_at?: unknown;
   resets_in_seconds?: unknown;
+  window_minutes?: unknown;
 }
 
 interface CodexRateLimits {
@@ -294,8 +309,9 @@ function listDesc(dir: string): string[] {
   }
 }
 
-/** Session transcripts for one Codex account home, newest first. */
-function* latestSessionFiles(sessionsDir: string): Generator<string> {
+/** Session transcripts for one Codex account home, newest first, each with its
+    mtime so callers can stop once files fall outside their window. */
+function* sessionFiles(sessionsDir: string, max: number): Generator<{ p: string; m: number }> {
   let yielded = 0;
   for (const year of listDesc(sessionsDir)) {
     for (const month of listDesc(path.join(sessionsDir, year))) {
@@ -313,12 +329,16 @@ function* latestSessionFiles(sessionsDir: string): Generator<string> {
         }
         entries.sort((a, b) => b.m - a.m);
         for (const entry of entries) {
-          yield entry.p;
-          if (++yielded >= MAX_FILES) return;
+          yield entry;
+          if (++yielded >= max) return;
         }
       }
     }
   }
+}
+
+function* latestSessionFiles(sessionsDir: string): Generator<string> {
+  for (const entry of sessionFiles(sessionsDir, MAX_FILES)) yield entry.p;
 }
 
 function readTail(file: string, bytes: number): string | null {
@@ -373,4 +393,158 @@ function codexWindow(w: CodexWindow | undefined, capturedAt: number | null): Lim
   if (typeof w.resets_at === "number") resetsAt = w.resets_at;
   else if (typeof w.resets_in_seconds === "number" && capturedAt !== null) resetsAt = capturedAt + w.resets_in_seconds;
   return { usedPercent: w.used_percent, resetsAt };
+}
+
+/* ----------------------------- Burndown series ----------------------------- */
+
+/** Newest files to scan for the weekly series — a backstop far above a normal
+    week's worth of Codex sessions. */
+const SERIES_MAX_FILES = 400;
+/** Whole-file read cap; larger transcripts fall back to a tail read. */
+const SERIES_MAX_BYTES = 8 * 1024 * 1024;
+
+function windowSecondsOf(w: CodexWindow | undefined): number | null {
+  if (w && typeof w.window_minutes === "number" && w.window_minutes > 0) return Math.round(w.window_minutes * 60);
+  return null;
+}
+
+function readAll(file: string): string | null {
+  try {
+    if (fs.statSync(file).size > SERIES_MAX_BYTES) return readTail(file, SERIES_MAX_BYTES);
+    return fs.readFileSync(file, "utf8");
+  } catch {
+    return readTail(file, SERIES_MAX_BYTES);
+  }
+}
+
+export interface CodexTranscriptSeries {
+  session: LimitSample[];
+  weekly: LimitSample[];
+  /** Window definition from the newest event, for the ideal diagonal. */
+  sessionWindowSeconds: number | null;
+  weeklyWindowSeconds: number | null;
+  sessionResetsAt: number | null;
+  weeklyResetsAt: number | null;
+}
+
+/** All `rate_limits` events across the Codex session transcripts touched since
+    `sinceUnix`, reconstructing the weekly/5h remaining-quota curves retroactively
+    so the chart is populated on first open. Files whose mtime predates the
+    window are skipped unread; the newest event fixes each window's diagonal. */
+export function collectCodexRateLimitSeries(sessionsDir: string, sinceUnix: number): CodexTranscriptSeries {
+  const session: LimitSample[] = [];
+  const weekly: LimitSample[] = [];
+  const seen = new Set<number>();
+  let latestT = -Infinity;
+  let sessionWindowSeconds: number | null = null;
+  let weeklyWindowSeconds: number | null = null;
+  let sessionResetsAt: number | null = null;
+  let weeklyResetsAt: number | null = null;
+  for (const { p, m } of sessionFiles(sessionsDir, SERIES_MAX_FILES)) {
+    if (m / 1000 < sinceUnix) continue;
+    const text = readAll(p);
+    if (!text) continue;
+    for (const line of text.split("\n")) {
+      if (!line.includes('"rate_limits"')) continue;
+      try {
+        const row = JSON.parse(line) as { timestamp?: unknown; payload?: { rate_limits?: CodexRateLimits } };
+        const rl = row.payload?.rate_limits;
+        if (!rl) continue;
+        const ts = typeof row.timestamp === "string" ? Date.parse(row.timestamp) : NaN;
+        if (!Number.isFinite(ts)) continue;
+        const t = Math.round(ts / 1000);
+        if (t < sinceUnix || seen.has(t)) continue;
+        seen.add(t);
+        const prim = codexWindow(rl.primary, t);
+        const sec = codexWindow(rl.secondary, t);
+        if (prim) session.push({ t, remaining: clampPercent(100 - prim.usedPercent) });
+        if (sec) weekly.push({ t, remaining: clampPercent(100 - sec.usedPercent) });
+        if (t > latestT) {
+          latestT = t;
+          if (prim) { sessionResetsAt = prim.resetsAt; sessionWindowSeconds = windowSecondsOf(rl.primary); }
+          if (sec) { weeklyResetsAt = sec.resetsAt; weeklyWindowSeconds = windowSecondsOf(rl.secondary); }
+        }
+      } catch {
+        /* partial or non-JSON line */
+      }
+    }
+  }
+  session.sort((a, b) => a.t - b.t);
+  weekly.sort((a, b) => a.t - b.t);
+  return { session, weekly, sessionWindowSeconds, weeklyWindowSeconds, sessionResetsAt, weeklyResetsAt };
+}
+
+/** Assemble one window's burndown from forward poll samples, an optional
+    transcript backfill and the current live value, scoped to the current window.
+    Exported for the window-scoping regression test. */
+export function buildSeries(
+  forward: LimitSample[],
+  backfill: LimitSample[],
+  live: LimitWindow | null,
+  now: number,
+  windowSeconds: number,
+  backfillResetsAt: number | null,
+): BurndownSeries {
+  const resetsAt = live?.resetsAt ?? backfillResetsAt ?? null;
+  const windowStart = resetsAt !== null ? resetsAt - windowSeconds : null;
+  const livePoint: LimitSample[] = live && typeof live.usedPercent === "number" ? [{ t: now, remaining: clampPercent(100 - live.usedPercent) }] : [];
+  const merged = mergeSamples(forward, backfill, livePoint);
+  // Strictly scope to the current window: a sample from before windowStart
+  // belongs to the previous window, and after a rollover it would sit in the
+  // series as a low pre-reset value ahead of the ~100% post-reset point. That
+  // boundary rise reads as a refill and would suppress the pace projection for
+  // the whole new window, so those pre-window samples are dropped here.
+  const samples = windowStart !== null ? merged.filter((s) => s.t >= windowStart) : merged;
+  return { windowStart, resetsAt, windowSeconds, samples };
+}
+
+function buildEngineBurndown(
+  engine: EngineName,
+  accountId: string,
+  limits: EngineLimits | null,
+  now: number,
+  backfill: CodexTranscriptSeries | null,
+): EngineBurndown {
+  const forward = (window: WindowKey) => historySamples(engine, accountId, window, now);
+  const session = buildSeries(
+    forward("session"),
+    backfill?.session ?? [],
+    limits?.session ?? null,
+    now,
+    backfill?.sessionWindowSeconds ?? WINDOW_SECONDS.session,
+    backfill?.sessionResetsAt ?? null,
+  );
+  const weekly = buildSeries(
+    forward("weekly"),
+    backfill?.weekly ?? [],
+    limits?.weekly ?? null,
+    now,
+    backfill?.weeklyWindowSeconds ?? WINDOW_SECONDS.weekly,
+    backfill?.weeklyResetsAt ?? null,
+  );
+  return { session, weekly };
+}
+
+/** Burndown history for both engines. Reads the current live snapshot (which
+    also records a forward sample), merges the persisted poll history, and
+    backfills the Codex curve from transcripts so it is never empty. */
+export async function readBurndown(options: { codexLiveReader?: CodexLiveLimitsReader } = {}): Promise<BurndownPayload> {
+  const payload = await readLimits(options);
+  const now = Math.round(Date.now() / 1000);
+  const since = now - RETENTION_S;
+  const claude = payload.claudeAccountId
+    ? buildEngineBurndown("claude", payload.claudeAccountId, payload.claude, now, null)
+    : null;
+  let codex: EngineBurndown | null = null;
+  if (payload.codexAccountId) {
+    const backfill = collectCodexRateLimitSeries(accountForSpawn().sessionsDir, since);
+    codex = buildEngineBurndown("codex", payload.codexAccountId, payload.codex, now, backfill);
+  }
+  return {
+    claude,
+    codex,
+    claudeAccountId: payload.claudeAccountId,
+    codexAccountId: payload.codexAccountId,
+    historySince: historySince(),
+  };
 }

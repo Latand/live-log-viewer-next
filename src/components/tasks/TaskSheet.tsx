@@ -3,26 +3,23 @@
 import { ChevronLeft, Loader2, Send, Trash2 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import { ComposerBar } from "@/components/ComposerBar";
 import { X } from "@/components/icons";
 import { MicButtonView } from "@/components/MicButton";
-import { activityDot, cleanTitle, engineBadge, fmtAge, syntheticFile } from "@/components/utils";
+import { activityDot, cleanTitle, engineBadge, fmtAge } from "@/components/utils";
 import { useAutosizePinned } from "@/hooks/useAutosizePinned";
-import { useComposer } from "@/hooks/useComposer";
 import { useDictation } from "@/hooks/useDictation";
+import { useTaskDraft } from "@/hooks/useTaskDraft";
 import { useLocale } from "@/lib/i18n";
 import type { BoardTask, TaskStatus } from "@/lib/tasks/types";
 import type { FileEntry } from "@/lib/types";
 
-import { broadcastSummary, tmuxSend } from "./broadcast";
 import { createTask, deleteTask, sendTask, updateTask } from "./taskApi";
+import { TaskComposer } from "./TaskComposer";
 import { TASK_STATUS_CYCLE, TASK_TONES, taskTitle } from "./taskModel";
 import { TargetChecklist } from "./TargetChecklist";
 import { pushTaskToast, sendSummary } from "./taskToast";
 
 export type TaskSheetView = "list" | "new" | { taskId: string };
-
-const sheetDraftKey = (project: string) => "llvTaskSheetDraft:" + project;
 
 function StatusRow({ value, onPick }: { value: TaskStatus; onPick: (status: TaskStatus) => void }) {
   const { t } = useLocale();
@@ -52,7 +49,9 @@ function StatusRow({ value, onPick }: { value: TaskStatus; onPick: (status: Task
   );
 }
 
-/** Create view: the full composer (dictation + images) plus target checkboxes. */
+/** Create view: the shared task composer (text, voice, images, deadline) plus
+    the target checkboxes. Commits an `unplaced` task — placement is a board
+    gesture the phone defers to `place on map`. */
 function NewTaskView({
   project,
   files,
@@ -64,85 +63,72 @@ function NewTaskView({
 }) {
   const { t } = useLocale();
   const [checked, setChecked] = useState<ReadonlySet<string>>(() => new Set());
-  const composer = useComposer({
-    initialText: () => (typeof window === "undefined" ? "" : (sessionStorage.getItem(sheetDraftKey(project)) ?? "")),
-    persistText: (value) => {
-      if (value) sessionStorage.setItem(sheetDraftKey(project), value);
-      else sessionStorage.removeItem(sheetDraftKey(project));
-    },
-    submit: (overrideText) => save(overrideText),
-  });
-  const { text, setText, setStatus, busy, setBusy, voiceSending, attachments } = composer;
+  /* The composer needs its `submit` at construction, before `save` exists; a
+     ref (updated in an effect) bridges the two without a forward reference. */
+  const saveRef = useRef<(text?: string) => void | Promise<void>>(() => {});
+  const draft = useTaskDraft(project, (overrideText) => saveRef.current(overrideText));
+  const { composer } = draft;
 
   const save = async (overrideText?: string) => {
-    const payloadText = overrideText ?? text;
-    if (busy || voiceSending) return;
-    if (!payloadText.trim()) {
-      setStatus({ kind: "err", text: t("tasks.composerNeedsText") });
+    const payloadText = (overrideText ?? composer.textRef.current).trim();
+    if (composer.busy || composer.voiceSending) return;
+    if (!payloadText) {
+      composer.setStatus({ kind: "err", text: t("tasks.composerNeedsText") });
       return;
     }
-    setBusy(true);
-    setStatus(null);
+    composer.setBusy(true);
+    composer.setStatus(null);
     try {
-      const created = await createTask({ project, text: payloadText, pos: { x: 120, y: 120 } });
+      /* Images were uploaded to durable, task-ownable refs the moment they were
+         picked, so a create-with-images (even without targets) can never drop
+         them and the refs already survived any reload. */
+      const created = await createTask({
+        project,
+        text: payloadText,
+        placement: "unplaced",
+        dueAt: draft.dueAt,
+        dueTz: draft.dueTz,
+        attachments: draft.stagedAttachments(),
+        clientRequestId: draft.getRequestId(),
+      });
       if ("error" in created) {
-        setStatus({ kind: "err", text: created.error });
+        composer.setStatus({ kind: "err", text: created.error });
         return;
       }
       const targets = [...checked];
       if (targets.length) {
+        /* Send carries the durable attachment paths in the delivery text —
+           no separate image hop that could strand images on a failed target. */
         const sent = await sendTask(created.task.id, targets);
-        if ("error" in sent) {
-          /* Nothing was delivered — keep the images out of unreachable panes. */
-          pushTaskToast("err", sent.error);
-        } else {
+        if ("error" in sent) pushTaskToast("err", sent.error);
+        else {
           const summary = sendSummary(sent, files);
           pushTaskToast(summary.kind, summary.text);
-          const images = attachments.images.map((image) => ({ base64: image.base64, mime: image.mime }));
-          if (images.length) {
-            /* Images ride the plain message route, but only to targets whose
-               task delivery succeeded — a failed target must not get detached
-               images with no task context. Failures show the «Delivered N of
-               M» breakdown before the attachments clear, so a lost image is
-               never silent. */
-            const byPath = new Map(files.map((file) => [file.path, file]));
-            const okEntries = sent.results
-              .filter((result) => result.ok)
-              .map((result) => byPath.get(result.path) ?? syntheticFile(result.path));
-            const errors: (string | null)[] = [];
-            for (const entry of okEntries) errors.push(await tmuxSend(entry, "", images));
-            if (errors.some((error) => error !== null)) {
-              const imageSummary = broadcastSummary(okEntries, errors);
-              pushTaskToast(imageSummary.kind, imageSummary.text);
-            }
-          }
         }
       }
-      setText("");
-      attachments.clear();
+      draft.reset();
       onCreated(created.task);
     } finally {
-      setBusy(false);
+      composer.setBusy(false);
     }
   };
+  useEffect(() => {
+    saveRef.current = save;
+  });
 
   return (
     <form
       onSubmit={(event) => {
         event.preventDefault();
-        void save();
+        void draft.composer.submit();
       }}
       className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto p-3"
     >
       <div className="flex flex-col gap-1.5">
-        <ComposerBar
-          composer={composer}
+        <TaskComposer
+          draft={draft}
           placeholder={t("tasks.newPlaceholder")}
-          textareaAriaLabel={t("tasks.editAria")}
-          imageAriaLabel={t("composer.addImages")}
-          sendLabelIdle={t("tasks.sheetCreate")}
-          sendLabelRecording={t("composer.stopAndSend")}
-          sendIdleClassName="border-accent bg-accent hover:opacity-90"
+          createLabel={t("tasks.sheetCreate")}
           leftSlot={
             <span className="inline-flex min-w-0 items-center gap-1 rounded-full bg-chip px-1.5 py-1 text-[9.5px] font-semibold text-[#555]">
               {t("tasks.sheetTargets", { count: checked.size })}

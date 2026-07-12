@@ -42,6 +42,11 @@ export interface ComposerBarProps {
   /** The phone composer moves the image picker behind the leftSlot toggle;
       this hides the inline one so the picker exists only once. */
   showImage?: boolean;
+  /** Overrides both the inline picker and the paste target — the task composer
+      routes images to its durable, upload-on-add store instead of the in-memory
+      `useImageAttachments`. When set, the in-memory preview strip is suppressed
+      (the caller renders its own from staged refs). */
+  onImageFiles?: (files: File[]) => void;
   /** Durable runtime receipt chips for the last sends on this target (issue
       #25). Rendered under the status line; absent while the runtime bus is off,
       so the composer is unchanged on the landing-disabled path. */
@@ -121,6 +126,7 @@ export function ComposerBar({
   sendMenuLabel,
   sendMenuActions = [],
   showImage = true,
+  onImageFiles,
   receipts,
 }: ComposerBarProps) {
   const {
@@ -154,7 +160,20 @@ export function ComposerBar({
         /* Focusing the composer often precedes a dictation; minting the live
            token here hides its round-trip from the eventual mic press. */
         onFocus={prewarmLiveToken}
-        onPaste={attachments.handlePaste}
+        onPaste={(event) => {
+          if (onImageFiles) {
+            const picks = Array.from(event.clipboardData.items)
+              .filter((entry) => entry.type.startsWith("image/"))
+              .map((entry) => entry.getAsFile())
+              .filter((entry): entry is File => entry !== null);
+            if (picks.length) {
+              event.preventDefault();
+              onImageFiles(picks);
+            }
+            return;
+          }
+          attachments.handlePaste(event);
+        }}
         onKeyDown={(event) => {
           /* Enter sends like the old single-line input; Shift+Enter makes a
              new line. Composition guard keeps IME confirms from sending.
@@ -180,7 +199,7 @@ export function ComposerBar({
               <ImagePickerButton
                 ariaLabel={imageAriaLabel}
                 className="inline-flex shrink-0 items-center justify-center rounded-[8px] border border-line bg-panel p-2 text-dim hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
-                onFiles={attachments.addFiles}
+                onFiles={onImageFiles ?? attachments.addFiles}
               />
             </Hint>
           ) : null}
@@ -222,7 +241,9 @@ export function ComposerBar({
           </span>
         </div>
       </div>
-      <ImagePreviewStrip images={attachments.images} onRemove={attachments.removeAt} />
+      {/* The task composer renders its own durable-ref strip; the in-memory one
+          stays for the pane/draft composers that still upload at send time. */}
+      {onImageFiles ? null : <ImagePreviewStrip images={attachments.images} onRemove={attachments.removeAt} />}
       {status ? (
         <span
           role="status"

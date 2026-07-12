@@ -3,10 +3,11 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { AgentRegistry, setAgentRegistryForTests, type ConversationObservation } from "./agent/registry";
+import { AgentRegistry, setAgentRegistryForTests, type ConversationObservation, type RegistryFile, type TmuxHostEvidence } from "./agent/registry";
 import { emptyLaunchProfile } from "./accounts/migration/contracts";
 import { drainHeldDeliveries } from "./accounts/migration/coordinator";
-import { cleanupFailedImageDelivery, deliverConversationMessage, migrationDeliveryOutcome, type DeliveryFailure } from "./delivery";
+import { cleanupFailedImageDelivery, deliverConversationMessage, killConversation, migrationDeliveryOutcome, reconfigureConversation, type DeliveryFailure } from "./delivery";
+import type { FileEntry } from "./types";
 import { TmuxDeliveryUncertainError } from "./tmux";
 
 const SANDBOX = fs.mkdtempSync(path.join(os.tmpdir(), "llv-delivery-test-"));
@@ -54,6 +55,196 @@ test("migration delivery keeps an internally held result recoverable", () => {
   expect(migrationDeliveryOutcome({ ok: true, target: "pane" })).toBe("delivered");
   expect(migrationDeliveryOutcome(failure)).toBe("failed");
   expect(migrationDeliveryOutcome({ ...failure, actuation: "started" as const })).toBe("delivery-uncertain");
+});
+
+test("idle reconfiguration survives a transient host miss and resumes after verified termination", async () => {
+  const sessionId = "019f4e76-66b4-7f87-94b2-cfa9bf733333";
+  const pathname = path.join(SANDBOX, `${sessionId}.jsonl`);
+  fs.writeFileSync(pathname, "");
+  const registry = new AgentRegistry(path.join(SANDBOX, "reconfigure-registry.json"));
+  const key = { engine: "codex" as const, sessionId };
+  registry.upsert({
+    key, artifactPath: pathname, cwd: SANDBOX, accountId: "default",
+    launchProfile: emptyLaunchProfile({ cwd: SANDBOX, role: "worker", readOnly: true, permissionMode: "never" }), status: "idle",
+    host: KILL_HOST, claimEpoch: 1, claimOwner: null, pendingAction: null,
+  });
+  const entry: FileEntry = {
+    path: pathname, root: "codex-sessions", name: path.basename(pathname), project: "viewer", title: "worker",
+    engine: "codex", kind: "session", fmt: "codex", parent: null, mtime: 1, size: 0, activity: "idle",
+    proc: "running", pid: KILL_HOST.agent.pid, model: "gpt-5.6-sol", effort: "high", fast: false,
+    pendingQuestion: null, waitingInput: null,
+  };
+  let resumed = 0;
+  let killed = false;
+  let resumePolicy: { readOnly?: boolean | null; permissionMode?: string | null } = {};
+
+  const outcome = await reconfigureConversation(pathname, { model: "gpt-5.6-terra", effort: "medium", fast: true }, {
+    pathAllowed: () => true,
+    listFiles: async () => [entry],
+    resumeSpecFor: (_root, _path, options) => {
+      resumePolicy = options ?? {};
+      return { command: "codex resume", cwd: SANDBOX, windowName: "codex-resume", engine: "codex" };
+    },
+    livePaneHost: async () => null,
+    registry,
+    paneScreen: async () => "›\n? for shortcuts",
+    killHost: async () => { killed = true; return true; },
+    deliver: async () => registry.withOperationLock(key, { pid: process.pid, startIdentity: null }, async () => {
+      resumed += 1;
+      return killed
+        ? { ok: true, outcome: "resumed", target: "%8" }
+        : { ok: true, outcome: "delivered-to-live", target: KILL_HOST.paneId };
+    }),
+  });
+
+  expect(outcome).toMatchObject({ ok: true, outcome: "reconfigured", target: "%8" });
+  expect(resumed).toBe(1);
+  expect(killed).toBe(true);
+  expect(resumePolicy).toMatchObject({ readOnly: true, permissionMode: "never" });
+});
+
+const KILL_HOST: TmuxHostEvidence = {
+  kind: "tmux",
+  endpoint: "/run/user/1000/agent-log-viewer",
+  server: { pid: 900, startIdentity: "900:one" },
+  paneId: "%7",
+  panePid: { pid: 107, startIdentity: "107:one" },
+  windowName: "worker",
+  agent: { pid: 207, startIdentity: "207:one" },
+  argv: ["codex", "resume", "session"],
+};
+
+function killSnapshot(pathname: string, host: TmuxHostEvidence | null): RegistryFile {
+  const registry = new AgentRegistry(path.join(SANDBOX, "kill-registry.json"));
+  registry.upsert({
+    key: { engine: "codex", sessionId: "019f4e76-66b4-7f87-94b2-cfa9bf711111" },
+    artifactPath: pathname,
+    cwd: "/repo",
+    accountId: "default",
+    launchProfile: emptyLaunchProfile({ cwd: "/repo", role: "worker" }),
+    status: "idle",
+    host,
+    claimEpoch: 3,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  return registry.snapshot();
+}
+
+test("conversation kill resolves the registry pane id and reports verified success", async () => {
+  const pathname = "/transcripts/worker.jsonl";
+  const killed: string[] = [];
+
+  const outcome = await killConversation(pathname, {
+    pathAllowed: () => true,
+    listFiles: async () => [],
+    registrySnapshot: () => killSnapshot(pathname, KILL_HOST),
+    killHost: async (host) => { killed.push(host.paneId); return true; },
+  });
+
+  expect(outcome).toEqual({ ok: true, target: "%7" });
+  expect(killed).toEqual(["%7"]);
+});
+
+test("conversation kill fails clearly when the registry has no pane", async () => {
+  const pathname = "/transcripts/missing.jsonl";
+
+  const outcome = await killConversation(pathname, {
+    pathAllowed: () => true,
+    listFiles: async () => [],
+    registrySnapshot: () => killSnapshot(pathname, null),
+  });
+
+  expect(outcome).toEqual({ ok: false, outcome: "failed", error: "no registered agent pane for this conversation", status: 404 });
+});
+
+test("conversation kill rejects success when process-death verification fails", async () => {
+  const pathname = "/transcripts/stubborn.jsonl";
+
+  const outcome = await killConversation(pathname, {
+    pathAllowed: () => true,
+    listFiles: async () => [],
+    registrySnapshot: () => killSnapshot(pathname, KILL_HOST),
+    killHost: async () => false,
+  });
+
+  expect(outcome).toEqual({ ok: false, outcome: "failed", error: "the registered pane changed or its process did not exit", status: 409 });
+});
+
+test("conversation kill refreshes the registry host inside the session lock", async () => {
+  const pathname = "/transcripts/racing.jsonl";
+  const oldSnapshot = killSnapshot(pathname, KILL_HOST);
+  const replacement: TmuxHostEvidence = {
+    ...KILL_HOST,
+    paneId: "%8",
+    panePid: { pid: 108, startIdentity: "108:one" },
+    agent: { pid: 208, startIdentity: "208:one" },
+  };
+  const freshSnapshot = structuredClone(oldSnapshot);
+  freshSnapshot.entries["codex:019f4e76-66b4-7f87-94b2-cfa9bf711111"]!.host = replacement;
+  let snapshots = 0;
+  const killed: string[] = [];
+  const unhosted: string[] = [];
+  const registry = {
+    snapshot: () => snapshots++ === 0 ? oldSnapshot : freshSnapshot,
+    withOperationLock: async (_key: unknown, _owner: unknown, task: () => Promise<unknown>) => task(),
+    markUnhosted: (key: { sessionId: string }) => { unhosted.push(key.sessionId); },
+  };
+
+  const outcome = await killConversation(pathname, {
+    pathAllowed: () => true,
+    listFiles: async () => [],
+    registrySnapshot: () => oldSnapshot,
+    registry: registry as never,
+    killHost: async (host) => { killed.push(host.paneId); return true; },
+  });
+
+  expect(outcome).toEqual({ ok: true, target: "%8" });
+  expect(killed).toEqual(["%8"]);
+  expect(unhosted).toHaveLength(1);
+});
+
+test("conversation kill preserves replacement ownership with matching process fields", async () => {
+  const pathname = "/transcripts/owned-before-kill.jsonl";
+  const replacementPath = "/transcripts/replacement-owner.jsonl";
+  const registry = new AgentRegistry(path.join(SANDBOX, "kill-replacement-registry.json"));
+  const key = { engine: "codex" as const, sessionId: "019f4e76-66b4-7f87-94b2-cfa9bf722222" };
+  registry.upsert({
+    key,
+    artifactPath: pathname,
+    cwd: "/repo",
+    accountId: "default",
+    launchProfile: emptyLaunchProfile({ cwd: "/repo", role: "worker" }),
+    status: "idle",
+    host: KILL_HOST,
+    claimEpoch: 3,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  const replacement: TmuxHostEvidence = {
+    ...KILL_HOST,
+    endpoint: "/run/user/1000/replacement-tmux",
+    windowName: "replacement-worker",
+    argv: ["codex", "exec", "replacement"],
+  };
+
+  const outcome = await killConversation(pathname, {
+    pathAllowed: () => true,
+    listFiles: async () => [],
+    registry,
+    killHost: async () => {
+      const entry = registry.snapshot().entries[`codex:${key.sessionId}`]!;
+      registry.upsert({ ...entry, artifactPath: replacementPath, host: replacement, status: "live" });
+      return true;
+    },
+  });
+
+  expect(outcome).toEqual({ ok: true, target: "%7" });
+  expect(registry.snapshot().entries[`codex:${key.sessionId}`]).toMatchObject({
+    artifactPath: replacementPath,
+    status: "live",
+    host: replacement,
+  });
 });
 
 test("image-only reservations stay request-local and never drain without the client payload", async () => {

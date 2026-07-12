@@ -26,3 +26,40 @@ function defaultBranch(cwd: string): string | null {
   }
   return null;
 }
+
+export function githubRepositoryFromRemote(remote: string): string | null {
+  const trimmed = remote.trim().replace(/\.git$/, "");
+  const ssh = /^(?:ssh:\/\/)?git@github\.com[:/]([^/]+\/[^/]+)$/.exec(trimmed);
+  if (ssh) return ssh[1] ?? null;
+  try {
+    const url = new URL(trimmed);
+    if (url.hostname !== "github.com") return null;
+    const repository = url.pathname.replace(/^\//, "");
+    return /^[^/]+\/[^/]+$/.test(repository) ? repository : null;
+  } catch {
+    return null;
+  }
+}
+
+export function resolveFlowMergeIdentity(cwd: string): { repository: string; headRef: string; headSha: string } | null {
+  const remote = spawnSync("git", ["remote", "get-url", "origin"], { cwd, encoding: "utf8" });
+  const branch = spawnSync("git", ["branch", "--show-current"], { cwd, encoding: "utf8" });
+  const head = spawnSync("git", ["rev-parse", "HEAD"], { cwd, encoding: "utf8" });
+  if (remote.status !== 0 || branch.status !== 0 || head.status !== 0) return null;
+  const repository = githubRepositoryFromRemote(remote.stdout);
+  const headRef = branch.stdout.trim();
+  const headSha = head.stdout.trim();
+  return repository && headRef && /^[0-9a-f]{40}$/i.test(headSha) ? { repository, headRef, headSha } : null;
+}
+
+export function resolveCleanFlowHead(cwd: string): string | null {
+  const status = spawnSync("git", ["status", "--porcelain=v1", "--untracked-files=all"], {
+    cwd,
+    encoding: "utf8",
+    timeout: 2_000,
+  });
+  if (status.status !== 0 || status.stdout.trim()) return null;
+  const head = spawnSync("git", ["rev-parse", "HEAD"], { cwd, encoding: "utf8", timeout: 2_000 });
+  const sha = head.stdout.trim();
+  return head.status === 0 && /^[0-9a-f]{40}$/i.test(sha) ? sha : null;
+}

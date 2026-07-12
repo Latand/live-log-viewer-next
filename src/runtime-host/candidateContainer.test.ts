@@ -76,9 +76,15 @@ function resolvedCompose(overrides: Record<string, string> = {}): { services: Re
   const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "llv-compose-config-"));
   const envFile = overrides.LLV_ENV_FILE ?? path.join(fixtureDir, "service.env");
   fs.writeFileSync(envFile, "");
+  /* The Compose file interpolates ${LLV_ALLOW_LEGACY_VIEWER:-0}; a developer or
+     CI shell that exports it would leak into `docker compose config` and break
+     the default-value assertions. Drop it from the inherited env so the test is
+     hermetic — an override still sets it explicitly when a case needs it. */
+  const baseEnv = { ...process.env };
+  delete baseEnv.LLV_ALLOW_LEGACY_VIEWER;
   const result = Bun.spawnSync(["docker", "compose", "--profile", "*", "config", "--format", "json"], {
     cwd: process.cwd(),
-    env: { ...process.env, LLV_ENV_FILE: envFile, ...overrides },
+    env: { ...baseEnv, LLV_ENV_FILE: envFile, ...overrides },
     stdout: "pipe",
     stderr: "pipe",
   });

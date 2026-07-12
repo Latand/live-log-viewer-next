@@ -70,6 +70,46 @@ test("renders a capacity chip per account and dims the stale one", () => {
   expect(html).toContain("opacity-55"); // the stale Work chip
 });
 
+test("breaks out each account's session and weekly windows with reset times", () => {
+  const nowS = Math.floor(Date.now() / 1000);
+  const html = render(base({
+    accounts: [
+      {
+        id: "main", label: "Main", kind: "legacy", authPresent: true, loginPending: false, loginState: "authenticated", deviceAuth: null,
+        effective: { percent: 45, window: "session", freshness: "fresh" },
+        limits: { freshness: "fresh", session: { usedPercent: 55, resetsAt: nowS + 7200 }, weekly: { usedPercent: 8, resetsAt: nowS + 259200 } },
+      },
+    ],
+    active: "main",
+  }));
+  expect(html).toContain('aria-label="Quota windows for Main"');
+  expect(html).toContain(translate("en", "limits.5h"));
+  expect(html).toContain(translate("en", "limits.week"));
+  expect(html).toContain("45%"); // session remaining (100 − 55)
+  expect(html).toContain("92%"); // weekly remaining (100 − 8)
+  expect(html).toContain("reset"); // both windows carry a reset time
+});
+
+test("dims and labels a stale account limits read and omits a missing reset time", () => {
+  const html = render(base({
+    accounts: [
+      {
+        id: "main", label: "Main", kind: "legacy", authPresent: true, loginPending: false, loginState: "authenticated", deviceAuth: null,
+        limits: { freshness: "stale", session: { usedPercent: 20, resetsAt: null }, weekly: null },
+      },
+    ],
+    active: "main",
+  }));
+  const detail = html.match(/<dl[^>]*Quota windows[^>]*>[\s\S]*?<\/dl>/)?.[0] ?? "";
+  expect(detail).not.toBe("");
+  // Freshness is a visible, AT-readable caption, not opacity/title alone.
+  expect(detail).toContain("Last known values");
+  expect(detail).toContain("opacity-70"); // values stay legible; text carries the meaning
+  expect(html).toContain('title="Last known values — not a live read"');
+  expect(detail).toContain("80%"); // 100 − 20 with no reset line
+  expect(detail).not.toContain("reset"); // resetsAt null → no reset text
+});
+
 test("automatic transcript migration controls stay outside the account panel", () => {
   const withAuto = render(base({ autoBalance: { enabled: true, thresholdPercent: 25, state: "idle", cooldownUntil: null, lastCheckAt: "2026-07-10T14:32:00.000Z", lastOutcome: null } }));
   expect(withAuto).not.toContain('role="switch"');

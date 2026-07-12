@@ -34,12 +34,13 @@ function projectState(value: unknown): value is BoardProjectStateV1 {
   const prefs = state.prefs;
   return state.schemaVersion === 1 && Number.isInteger(state.revision) && state.revision! >= 0 && typeof state.updatedAt === "string" && Boolean(prefs) &&
     stringArray(prefs!.manual) && stringArray(prefs!.hidden) && stringArray(prefs!.expanded) &&
+    (state.explicitManual === undefined || stringArray(state.explicitManual)) &&
     (state.pathAliases === undefined || aliases(state.pathAliases)) &&
     (prefs!.viewMode === null || prefs!.viewMode === "scheme" || prefs!.viewMode === "list") && typeof prefs!.taskPanelOpen === "boolean";
 }
 
 function emptyBoard(): BoardProjectStateV1 {
-  return { schemaVersion: 1, revision: 0, updatedAt: new Date(0).toISOString(), pathAliases: {}, prefs: { ...EMPTY_PREFS, manual: [], hidden: [], expanded: [] } };
+  return { schemaVersion: 1, revision: 0, updatedAt: new Date(0).toISOString(), pathAliases: {}, explicitManual: [], prefs: { ...EMPTY_PREFS, manual: [], hidden: [], expanded: [] } };
 }
 
 function read(filePath: string): BoardFileV1 {
@@ -47,7 +48,11 @@ function read(filePath: string): BoardFileV1 {
     const parsed = JSON.parse(fs.readFileSync(filePath, "utf8")) as Partial<BoardFileV1>;
     if (!parsed || typeof parsed.projects !== "object" || parsed.projects === null || Array.isArray(parsed.projects)) throw new BoardStoreError("invalid board state");
     if (!Object.values(parsed.projects).every(projectState)) throw new BoardStoreError("invalid board project state");
-    return { projects: Object.fromEntries(Object.entries(parsed.projects).map(([project, state]) => [project, { ...state, pathAliases: state.pathAliases ?? {} }])) };
+    return { projects: Object.fromEntries(Object.entries(parsed.projects).map(([project, state]) => [project, {
+      ...state,
+      pathAliases: state.pathAliases ?? {},
+      explicitManual: state.explicitManual ?? state.prefs.manual,
+    }])) };
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return { projects: {} };
     if (error instanceof BoardStoreError) throw error;
@@ -164,12 +169,14 @@ function applyLegacyPatch(current: BoardProjectStateV1, patch: BoardPatch): Boar
     : [...new Set([...current.prefs.hidden, ...patch.hidden])];
   return applyBoardMutations({
     ...current,
+    explicitManual: patch.manual === undefined ? current.explicitManual : patch.manual,
     prefs: { ...current.prefs, ...patch, hidden },
   }, []);
 }
 
 function sameReduced(left: BoardProjectStateV1, right: BoardProjectStateV1): boolean {
-  return JSON.stringify({ prefs: left.prefs, pathAliases: left.pathAliases ?? {} }) === JSON.stringify({ prefs: right.prefs, pathAliases: right.pathAliases ?? {} });
+  return JSON.stringify({ prefs: left.prefs, pathAliases: left.pathAliases ?? {}, explicitManual: left.explicitManual ?? [] })
+    === JSON.stringify({ prefs: right.prefs, pathAliases: right.pathAliases ?? {}, explicitManual: right.explicitManual ?? [] });
 }
 
 function writeReduced(project: string, baseRevision: number, reduce: (current: BoardProjectStateV1) => BoardProjectStateV1, filePath: string): BoardWriteResult {
@@ -281,8 +288,11 @@ export function transferBoardPathPlacements(
           : destinationPlacement !== "auto"
             ? destinationPlacement
             : sourcePlacement;
+        const explicitManual = (source.explicitManual ?? []).includes(pathname)
+          || (target.explicitManual ?? []).includes(pathname);
         source = {
           ...source,
+          explicitManual: (source.explicitManual ?? []).filter((item) => item !== pathname),
           pathAliases: Object.fromEntries(
             Object.entries(source.pathAliases ?? {}).filter(([, targetPath]) => targetPath !== pathname),
           ),
@@ -301,6 +311,9 @@ export function transferBoardPathPlacements(
         };
         target = {
           ...target,
+          explicitManual: placement === "manual" && explicitManual
+            ? [...(target.explicitManual ?? []).filter((item) => item !== pathname), pathname]
+            : (target.explicitManual ?? []).filter((item) => item !== pathname),
           prefs: placement === "hidden"
             ? { ...targetPrefs, hidden: [...targetPrefs.hidden, pathname] }
             : placement === "expanded"
@@ -369,7 +382,11 @@ function mergedBoards(states: readonly BoardProjectStateV1[]): BoardProjectState
     taskPanelOpen,
   };
   for (const [pathname, role] of roles) prefs[role].push(pathname);
-  return { ...ordered.at(-1)!, pathAliases: normalizedAliases, prefs };
+  const manualSet = new Set(prefs.manual);
+  const explicitManual = [...new Set(ordered.flatMap((state) => state.explicitManual ?? []))]
+    .map((pathname) => normalizedAliases[pathname] ?? pathname)
+    .filter((pathname) => manualSet.has(pathname));
+  return { ...ordered.at(-1)!, pathAliases: normalizedAliases, explicitManual, prefs };
 }
 
 /** Move durable board preferences along with catalog project-key repairs.

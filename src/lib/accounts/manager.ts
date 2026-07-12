@@ -6,6 +6,12 @@ import type { AccountManager, AccountSummary } from "./contracts";
 import { unavailableLimits } from "./contracts";
 import { withAccountMutationLockAsync } from "./accountMutation";
 import { agentRegistry, type AgentRegistry } from "@/lib/agent/registry";
+import { selectHeadlessAccount } from "./headlessSelection";
+
+function contextForSpawn(engine: "claude" | "codex", requested?: string | null) {
+  if (engine === "claude") { const item = claudeAccountForSpawn(requested); return { engine, accountId: item.id, kind: item.kind, home: item.home, transcriptRoot: item.projectsDir, env: item.kind === "managed" ? claudeManagedEnvironment(item.home) : process.env }; }
+  const item = accountForSpawn(requested); return { engine, accountId: item.id, kind: item.kind, home: item.home, transcriptRoot: item.sessionsDir, env: { ...process.env, CODEX_HOME: item.home } };
+}
 
 function summary(engine: "claude" | "codex", id: string): AccountSummary {
   const account = (engine === "claude" ? listClaudeAccounts() : listCodexAccounts()).find((item) => item.id === id);
@@ -94,10 +100,13 @@ export const accountManager: AccountManager = {
   async status(engine, id) { return summary(engine, id); },
   async submitLoginInput() { throw new Error("login input is Claude-operation specific"); },
   async cancelLogin() { throw new Error("login cancellation is Claude-operation specific"); },
-  resolveSpawn(engine, requested) {
-    const routed = requested ?? agentRegistry().engineRouting(engine).activeAccountId ?? undefined;
-    if (engine === "claude") { const item = claudeAccountForSpawn(routed); return { engine, accountId: item.id, kind: item.kind, home: item.home, transcriptRoot: item.projectsDir, env: item.kind === "managed" ? claudeManagedEnvironment(item.home) : process.env }; }
-    const item = accountForSpawn(routed); return { engine, accountId: item.id, kind: item.kind, home: item.home, transcriptRoot: item.sessionsDir, env: { ...process.env, CODEX_HOME: item.home } };
+  resolveSpawn(engine, requested) { return contextForSpawn(engine, requested ?? agentRegistry().engineRouting(engine).activeAccountId ?? undefined); },
+  resolveHeadlessSpawn(engine, requested, excludedIds = []) {
+    const accounts = engine === "claude" ? listClaudeAccounts() : listCodexAccounts();
+    const selected = selectHeadlessAccount(accounts, agentRegistry().quotaObservations(engine), requested ?? agentRegistry().engineRouting(engine).activeAccountId, excludedIds);
+    return selected.kind === "available"
+      ? { kind: "available", account: contextForSpawn(engine, selected.accountId) }
+      : selected;
   },
   resolveTranscriptOwner(engine, transcript) {
     if (engine === "claude") { const home = claudeHomeOwningTranscript(transcript); if (!home) return null; const item = listClaudeAccounts().find((candidate) => candidate.home === home); return item ? { engine, accountId: item.id, kind: item.kind, home, transcriptRoot: item.projectsDir, env: item.kind === "managed" ? claudeManagedEnvironment(home) : process.env } : null; }

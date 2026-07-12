@@ -295,7 +295,7 @@ async function inspectTmuxPane(
 }
 
 function sameProcess(expected: ProcessIdentity, pid: number, startIdentity: string | null): boolean {
-  return expected.pid === pid && (expected.startIdentity === null || expected.startIdentity === startIdentity);
+  return expected.startIdentity !== null && startIdentity !== null && expected.pid === pid && expected.startIdentity === startIdentity;
 }
 
 export async function verifyTmuxSpawnBinding(
@@ -399,6 +399,7 @@ export function selectSpawnedAgentProcess(
 }
 
 export async function verifyTmuxHostEvidence(host: TmuxHostEvidence): Promise<boolean> {
+  if (host.server.startIdentity === null || host.panePid.startIdentity === null || host.agent.startIdentity === null) return false;
   const endpoint = createTmuxEndpointDescriptor(host.endpoint, process.getuid?.() ?? 0);
   const binding: TmuxSpawnBinding = {
     endpoint: host.endpoint,
@@ -409,17 +410,62 @@ export async function verifyTmuxHostEvidence(host: TmuxHostEvidence): Promise<bo
   };
   const pane = await verifyTmuxSpawnBinding(binding, endpoint);
   if (!pane || pane.windowName !== host.windowName || !pidAlive(host.agent.pid)) return false;
-  if (host.agent.startIdentity !== null && procBackend.processIdentity(host.agent.pid) !== host.agent.startIdentity) return false;
+  if (procBackend.processIdentity(host.agent.pid) !== host.agent.startIdentity) return false;
+  if (!sameArgv(readArgv(host.agent.pid), host.argv)) return false;
   return ancestryDistance(host.agent.pid, host.panePid.pid, readPpid) !== null;
 }
 
 /** Closes a pane after full host verification and an in-command server/pane fence. */
-export async function killTmuxHostIfMatches(host: TmuxHostEvidence): Promise<boolean> {
-  if (!await verifyTmuxHostEvidence(host)) return false;
+interface KillTmuxHostDeps extends TmuxRunnerDeps {
+  pidAlive(pid: number): boolean;
+  argv(pid: number): string[];
+  parentPid(pid: number): number | null;
+  sleep(milliseconds: number): Promise<void>;
+  maxVerifyAttempts: number;
+}
+
+function sameArgv(left: string[], right: string[]): boolean {
+  return left.length === right.length && left.every((argument, index) => argument === right[index]);
+}
+
+function processIsGone(expected: ProcessIdentity, deps: Pick<KillTmuxHostDeps, "pidAlive" | "processIdentity">): boolean {
+  if (!deps.pidAlive(expected.pid)) return true;
+  return expected.startIdentity !== null && deps.processIdentity(expected.pid) !== expected.startIdentity;
+}
+
+/** Applies a registry host identity fence, kills its stable pane id, then
+    waits for both the pane shell and agent process identities to disappear. */
+export async function killTmuxHostIfMatches(
+  host: TmuxHostEvidence,
+  overrides: Partial<KillTmuxHostDeps> = {},
+): Promise<boolean> {
+  if (host.server.startIdentity === null || host.panePid.startIdentity === null || host.agent.startIdentity === null) return false;
+  const deps: KillTmuxHostDeps = {
+    runTmux,
+    processIdentity: (pid) => procBackend.processIdentity(pid),
+    pidAlive,
+    argv: readArgv,
+    parentPid: readPpid,
+    sleep: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
+    maxVerifyAttempts: 20,
+    ...overrides,
+  };
   const endpoint = createTmuxEndpointDescriptor(host.endpoint, process.getuid?.() ?? 0);
+  const binding: TmuxSpawnBinding = {
+    endpoint: host.endpoint,
+    server: host.server,
+    paneId: host.paneId,
+    panePid: host.panePid,
+    target: host.paneId,
+  };
+  const pane = await verifyTmuxSpawnBinding(binding, endpoint, deps);
+  if (!pane || pane.windowName !== host.windowName || !deps.pidAlive(host.agent.pid)) return false;
+  if (deps.processIdentity(host.agent.pid) !== host.agent.startIdentity) return false;
+  if (!sameArgv(deps.argv(host.agent.pid), host.argv)) return false;
+  if (ancestryDistance(host.agent.pid, host.panePid.pid, deps.parentPid) === null) return false;
   const condition = `#{&&:#{==:#{pid},${host.server.pid}},#{&&:#{==:#{pane_id},${host.paneId}},#{==:#{pane_pid},${host.panePid.pid}}}}`;
   const mismatch = `llv-host-mismatch-${crypto.randomUUID()}`;
-  const result = await runTmux([
+  const result = await deps.runTmux([
     "if-shell",
     "-t",
     host.paneId,
@@ -429,7 +475,13 @@ export async function killTmuxHostIfMatches(host: TmuxHostEvidence): Promise<boo
     `display-message -p ${mismatch}`,
   ], undefined, endpoint);
   if (result.code !== 0) return false;
-  return !result.stdout.includes(mismatch);
+  if (result.stdout.includes(mismatch)) return false;
+  for (let attempt = 0; attempt < deps.maxVerifyAttempts; attempt += 1) {
+    const currentPane = await inspectTmuxPane(host.paneId, endpoint, deps);
+    if (currentPane === null && processIsGone(host.panePid, deps) && processIsGone(host.agent, deps)) return true;
+    if (attempt + 1 < deps.maxVerifyAttempts) await deps.sleep(25);
+  }
+  return false;
 }
 
 export type TmuxHostCleanupResult = "cancelled" | "absent" | "unverifiable";
@@ -550,6 +602,24 @@ export async function resolveRequestedTmuxTarget(pid: number | null): Promise<Tm
     if (target !== "unknown" && target !== null) return target;
   }
   return null;
+}
+
+/**
+ * Renames the tmux window hosting a conversation's pane to `name` (issue #33 —
+ * a custom session title propagates to the window name so `tmux` listings read
+ * the human label too). Best-effort: a session with no live pane, a pid the
+ * scanner does not vouch for, or a tmux error is a silent no-op — the durable
+ * override on disk is the source of truth and the window catches up on the next
+ * rename. Returns the target it renamed, or null when nothing was touched.
+ */
+export async function renameTmuxWindowForPid(pid: number, name: string): Promise<TmuxTarget | null> {
+  if (!Number.isInteger(pid) || pid <= 0) return null;
+  const trimmed = name.replace(/\s+/g, " ").trim().slice(0, 80);
+  if (!trimmed) return null;
+  const target = await resolveRequestedTmuxTarget(pid);
+  if (!target) return null;
+  const result = await runTmux(["rename-window", "-t", target, trimmed]).catch(() => null);
+  return result && result.code === 0 ? target : null;
 }
 
 const PASTE_SETTLE_MS = 250;

@@ -4,6 +4,15 @@ import type { SchemeRect } from "./layout";
 
 export type { SchemeRect } from "./layout";
 
+/** A task that owns a board position — `unplaced` tasks are filtered out before
+    any geometry runs, so every card the board draws is a `PlacedTask`. */
+export type PlacedTask = BoardTask & { pos: { x: number; y: number } };
+
+/** True for tasks the board should render (pinned with a usable position). */
+export function isPlacedTask(task: BoardTask): task is PlacedTask {
+  return task.placement !== "unplaced" && task.pos !== undefined;
+}
+
 /* Task card geometry in world pixels (docs/design/sticky-notes.md). */
 export const TASK_W = 260;
 /** Body height cap; past it the card body scrolls internally. */
@@ -33,7 +42,7 @@ export function taskCardHeight(task: Pick<BoardTask, "text" | "assignments" | "s
 }
 
 /** World-space box of a task card, derived from its owned position. */
-export function taskRect(task: Pick<BoardTask, "pos" | "text" | "assignments" | "source">): SchemeRect {
+export function taskRect(task: Pick<PlacedTask, "pos" | "text" | "assignments" | "source">): SchemeRect {
   return { x: task.pos.x, y: task.pos.y, w: TASK_W, h: taskCardHeight(task) };
 }
 
@@ -111,7 +120,7 @@ export interface TaskEdgeGeom {
  * Spawning assignments without a transcript and dead assignments (path
  * absent from the index) draw no edge — they stay chips on the card.
  */
-export function buildTaskEdges(tasks: readonly BoardTask[], index: ReadonlyMap<string, SchemeRect>): TaskEdgeGeom[] {
+export function buildTaskEdges(tasks: readonly PlacedTask[], index: ReadonlyMap<string, SchemeRect>): TaskEdgeGeom[] {
   const edges: TaskEdgeGeom[] = [];
   for (const task of tasks) {
     const card = taskRect(task);

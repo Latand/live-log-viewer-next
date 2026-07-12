@@ -89,6 +89,11 @@ export function claudeEnvPrefix(home: string): string { return `env ${CLAUDE_SHA
 export interface ResumeSpecOptions {
   model?: string | null;
   effort?: string | null;
+  /** Codex only: override the service tier when reopening a conversation. */
+  fast?: boolean | null;
+  /** Execution policy inherited from the generation being replaced. */
+  readOnly?: boolean | null;
+  permissionMode?: string | null;
 }
 
 /** Boot spec for a brand-new agent (no prior conversation) in a chosen directory. */
@@ -221,7 +226,14 @@ export function resumeSpecFor(root: string, pathname: string, options: ResumeSpe
     if (!home) return null;
     const managed = isManagedClaudeHome(home);
     const settings = managed ? claudeSettingsPath() : null;
-    let command = `${shellQuote(resolveBinary("claude"))} --dangerously-skip-permissions`;
+    let command = shellQuote(resolveBinary("claude"));
+    if (options.readOnly || options.permissionMode === "plan") {
+      command += " --permission-mode plan --disallowedTools Edit,Write,NotebookEdit";
+    } else if (options.permissionMode && options.permissionMode !== "bypassPermissions" && /^[a-zA-Z-]+$/.test(options.permissionMode)) {
+      command += ` --permission-mode ${shellQuote(options.permissionMode)}`;
+    } else {
+      command += " --dangerously-skip-permissions";
+    }
     if (settings) command += ` --settings ${shellQuote(settings)}`;
     const launchModel = normalizeClaudeLaunchModel(options.model);
     if (launchModel) command += ` --model ${shellQuote(launchModel)}`;
@@ -232,7 +244,7 @@ export function resumeSpecFor(root: string, pathname: string, options: ResumeSpe
       cwd: resumeCwd(pathname),
       windowName: "claude-resume",
       engine: "claude",
-      launchProfile: emptyLaunchProfileForResume(resumeCwd(pathname), launchModel, options.effort ?? null),
+      launchProfile: { ...emptyLaunchProfileForResume(resumeCwd(pathname), launchModel, options.effort ?? null), readOnly: options.readOnly ?? null, permissionMode: options.permissionMode ?? null },
     };
   }
   if (root === "codex-sessions" && base.endsWith(".jsonl")) {
@@ -244,13 +256,18 @@ export function resumeSpecFor(root: string, pathname: string, options: ResumeSpe
     if (isManagedCodexHome(home)) command += " -c cli_auth_credentials_store=file";
     if (options.model) command += ` -m ${shellQuote(options.model)}`;
     if (options.effort) command += ` -c ${shellQuote(`model_reasoning_effort=${options.effort}`)}`;
+    if (options.fast != null) command += ` -c ${shellQuote(`service_tier=${options.fast ? "priority" : "standard"}`)}`;
+    if (options.readOnly) command += " --sandbox read-only";
+    if (options.permissionMode && ["untrusted", "on-request", "never"].includes(options.permissionMode)) {
+      command += ` --ask-for-approval ${shellQuote(options.permissionMode)}`;
+    }
     command += ` resume ${id}`;
     return {
       command: `CODEX_HOME=${shellQuote(home)} ${command}`,
       cwd: resumeCwd(pathname),
       windowName: "codex-resume",
       engine: "codex",
-      launchProfile: emptyLaunchProfileForResume(resumeCwd(pathname), options.model ?? null, options.effort ?? null),
+      launchProfile: { ...emptyLaunchProfileForResume(resumeCwd(pathname), options.model ?? null, options.effort ?? null), fast: options.fast ?? null, readOnly: options.readOnly ?? null, permissionMode: options.permissionMode ?? null },
     };
   }
   return null;

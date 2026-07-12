@@ -619,14 +619,22 @@ export function useSchemeCamera({
     };
   }, []);
 
-  /* Double-click: empty canvas fits everything; a node in hand mode zooms in
-     on that conversation (in select mode double-click keeps selecting text). */
+  /* Double-click: empty canvas drops an inline task composer at the click point
+     (fit() stays on the toolbar button and the «0» key); a node in hand mode
+     zooms in on that conversation (in select mode double-click keeps selecting
+     text). Map mode and a running selection session keep the old no-op. */
   const onDoubleClick = (event: React.MouseEvent<HTMLDivElement>) => {
     const target = event.target as HTMLElement;
-    if (target.closest("[data-scheme-ui]")) return;
+    if (target.closest("[data-scheme-ui]") || target.closest("[data-scheme-task]")) return;
     const nodeEl = target.closest("[data-scheme-node]");
     if (!nodeEl) {
-      fit();
+      if (mapMode || !placeTaskRef.current) {
+        fit();
+        return;
+      }
+      const rect = viewportRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      placeTaskRef.current((event.clientX - rect.left - cam.x) / cam.z, (event.clientY - rect.top - cam.y) / cam.z);
       return;
     }
     if (mode !== "hand" && !spacePan) return;

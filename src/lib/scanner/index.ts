@@ -3,13 +3,14 @@ import { agentRegistry, RegistryReadError } from "../agent/registry";
 import { tickFlows } from "../flows/engine";
 import { tickPipelines } from "../pipelines/engine";
 import { notifyQuestion } from "../push";
+import { overlaySessionTitles } from "../session/titleProjection";
 import { tickTaskInbox } from "../tasks/inboxScanner";
 import { resolveTarget } from "../tmux";
 import { tickWorkflows } from "../workflows/engine";
 import { activityVerdict } from "./activity";
 import { ctxFor } from "./context";
 import { discoverFiles, discoverFilesWithProjectCatalog } from "./discover";
-import { entryEffort } from "./effort";
+import { entryEffort, entryFast } from "./effort";
 import { linkEntries } from "./links";
 import { entryModels } from "./model";
 import { outputHolders } from "./process";
@@ -171,6 +172,7 @@ async function listFilesInternal(
   // After pid assignment: the claude effort source is the live process argv.
   await forEachEntryYielding(entries, (entry) => {
     entry.effort = entryEffort(entry);
+    entry.fast = entryFast(entry);
   });
   await forEachEntryBatchYielding(entries, async (entry) => {
     const pending = pendingQuestionFor(entry);
@@ -197,6 +199,9 @@ async function listFilesInternal(
     stable: workflows observe the flow state from the same controller tick. */
 export async function reconcileFileControllers(entries: FileEntry[]): Promise<void> {
   await linkEntries(entries, { persist: true });
+  // Custom session titles (issue #33) must reach push bodies too, so overlay
+  // them before notifying — a rename shows the human name in notifications.
+  overlaySessionTitles(entries);
   for (const entry of entries) if (entry.pendingQuestion || entry.waitingInput) void notifyQuestion(entry);
   await tickFlows(entries);
   await tickPipelines(entries);

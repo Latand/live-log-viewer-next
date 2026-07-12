@@ -1,5 +1,7 @@
 import crypto from "node:crypto";
 
+import { isEngineEffort } from "@/lib/agent/efforts";
+import { isCodexLaunchModel, normalizeClaudeLaunchModel } from "@/lib/agent/models";
 import { agentRegistry } from "@/lib/agent/registry";
 import { headCwd } from "@/lib/agent/transcript";
 import { livePaneTarget } from "@/lib/delivery";
@@ -8,10 +10,10 @@ import { killPane, paneInfo } from "@/lib/tmux";
 import type { FileEntry } from "@/lib/types";
 
 import { isoNow, lastRound, newRound, sendToImplementer } from "./engine";
-import { forgetHeadlessReview } from "./exec";
-import { resolveBaseRef } from "./git";
+import { clearHeadlessReviewArtifacts, forgetHeadlessReview } from "./exec";
+import { resolveBaseRef, resolveFlowMergeIdentity } from "./git";
 import { kickoffPrompt } from "./prompts";
-import { loadFlows, loadPresets, saveFlows } from "./store";
+import { configuredReviewerFallback, loadFlows, loadPresets, saveFlows } from "./store";
 import type { CreateFlowRequest, Flow, PatchFlowRequest, RoleConfig, Round } from "./types";
 
 /**
@@ -29,6 +31,40 @@ function validateRole(value: unknown): RoleConfig | null {
     model: typeof role.model === "string" && role.model.trim() ? role.model.trim() : null,
     effort: typeof role.effort === "string" && role.effort.trim() ? role.effort.trim() : null,
   };
+}
+
+/**
+ * Merges a partial role override (issue #118 on-canvas stage controls) onto the
+ * flow's current role config, field by field: engine must stay claude/codex,
+ * model/effort blank out to the engine default. Returns null on an invalid
+ * engine so the caller can 400 instead of silently keeping the old value.
+ */
+export function applyRoleOverride(current: RoleConfig, patch: unknown): RoleConfig | null {
+  if (!patch || typeof patch !== "object" || Array.isArray(patch)) return null;
+  const p = patch as Partial<RoleConfig>;
+  const next: RoleConfig = { ...current };
+  if (p.engine !== undefined) {
+    if (p.engine !== "claude" && p.engine !== "codex") return null;
+    next.engine = p.engine;
+  }
+  if (p.model !== undefined) {
+    if (p.model !== null && typeof p.model !== "string") return null;
+    next.model = typeof p.model === "string" && p.model.trim() ? p.model.trim() : null;
+  }
+  if (p.effort !== undefined) {
+    if (p.effort !== null && typeof p.effort !== "string") return null;
+    next.effort = typeof p.effort === "string" && p.effort.trim() ? p.effort.trim() : null;
+  }
+  /* Validate the MERGED config through the canonical launch validators, not just
+     primitive shapes (issue #118 Finding 3): a claude+gpt / codex+fable / bad
+     effort combination must be rejected here rather than persisting and failing at
+     the next reviewer launch. */
+  if (next.model) {
+    if (next.engine === "claude" && !normalizeClaudeLaunchModel(next.model)) return null;
+    if (next.engine === "codex" && !isCodexLaunchModel(next.model)) return null;
+  }
+  if (next.effort && !isEngineEffort(next.engine, next.effort)) return null;
+  return next;
 }
 
 export function rolesFromRequest(req: CreateFlowRequest): Record<"implementer" | "reviewer", RoleConfig> | null {
@@ -82,6 +118,7 @@ export async function createFlowFromRequest(req: CreateFlowRequest, entries: Fil
     implementerPath: entry.path,
     implementerConversationId: entry.conversationId ?? null,
     roles,
+    reviewerFallback: roles.reviewer.engine === "codex" ? configuredReviewerFallback() : null,
     baseRef: base.sha,
     ...(normalizedSpec.spec ? { spec: normalizedSpec.spec } : {}),
     baseMode,
@@ -91,6 +128,11 @@ export async function createFlowFromRequest(req: CreateFlowRequest, entries: Fil
     state: "waiting_ready",
     pausedState: null,
     stateDetail: null,
+    mergeEvidence: (() => {
+      const identity = resolveFlowMergeIdentity(cwd);
+      return identity ? { ...identity, prNumber: null, mergedAt: null, checkedAt: null, source: null } : null;
+    })(),
+    kickoffDelivery: null,
     rounds: [],
     createdAt: isoNow(),
     closedAt: null,
@@ -98,7 +140,9 @@ export async function createFlowFromRequest(req: CreateFlowRequest, entries: Fil
   flows.push(flow);
   saveFlows(flows);
   try {
-    await sendToImplementer(flow, new Map(entries.map((item) => [item.path, item])), kickoffPrompt(flow.spec));
+    const deliveryPath = await sendToImplementer(flow, new Map(entries.map((item) => [item.path, item])), kickoffPrompt(flow.spec));
+    flow.kickoffDelivery = { path: deliveryPath, deliveredAt: isoNow() };
+    saveFlows(flows);
   } catch (error) {
     flow.state = "paused";
     flow.pausedState = "waiting_ready";
@@ -112,9 +156,17 @@ export async function createFlowFromRequest(req: CreateFlowRequest, entries: Fil
     here, so producers (e.g. the pipeline's reviewNote) must fit within it. */
 export const MAX_FLOW_NOTE_LENGTH = 2_000;
 
-/** Trimmed user note from a PATCH body, or null when absent/blank. */
-function noteFromRequest(req: PatchFlowRequest): string | null {
-  return typeof req.note === "string" && req.note.trim() ? req.note.trim().slice(0, MAX_FLOW_NOTE_LENGTH) : null;
+/**
+ * The next-round note from a PATCH body as a THREE-state value (issue #118
+ * review): `undefined` = the field was omitted, so leave the round's note
+ * untouched; `null` = an explicit empty string, so CLEAR the note; a trimmed
+ * string = set it. This lets an operator actually erase a previously-set note
+ * instead of the old blank-becomes-omitted behavior that silently kept it.
+ */
+function noteFieldFromRequest(req: PatchFlowRequest): string | null | undefined {
+  if (typeof req.note !== "string") return undefined;
+  const trimmed = req.note.trim();
+  return trimmed ? trimmed.slice(0, MAX_FLOW_NOTE_LENGTH) : null;
 }
 
 /**
@@ -127,7 +179,7 @@ function noteFromRequest(req: PatchFlowRequest): string | null {
  * the handle existed.
  */
 async function stopReviewer(flow: Flow, round: Round): Promise<void> {
-  forgetHeadlessReview(flow.id, round.n, round.reviewerPid ?? null);
+  forgetHeadlessReview(flow.id, round.n, round);
   if (flow.reviewerMode !== "pane") return;
   try {
     const pane = round.reviewerPane;
@@ -163,6 +215,7 @@ export async function cancelRound(id: string): Promise<{ flow?: Flow; error?: st
   }
   await stopReviewer(flow, round);
   round.error = "cancelled by user";
+  round.terminalAt = isoNow();
   flow.state = "needs_decision";
   flow.stateDetail = "round cancelled by user";
   saveFlows(flows);
@@ -179,7 +232,11 @@ export async function closeFlow(id: string): Promise<{ flow?: Flow; error?: stri
   const flow = flows.find((item) => item.id === id);
   if (!flow) return { error: "flow not found", status: 404 };
   const round = lastRound(flow);
-  if (round && round.verdict === null && !round.error) await stopReviewer(flow, round);
+  if (round && round.verdict === null && !round.error) {
+    await stopReviewer(flow, round);
+    round.error = "flow closed by user";
+    round.terminalAt = isoNow();
+  }
   flow.state = "closed";
   flow.closedAt = isoNow();
   flow.stateDetail = null;
@@ -208,10 +265,18 @@ export function patchFlow(id: string, req: PatchFlowRequest): { flow?: Flow; err
     if (req.mode !== "auto" && req.mode !== "manual") return { error: "mode must be auto or manual", status: 400 };
     flow.mode = req.mode;
   } else if (req.action === "advance") {
+    const note = noteFieldFromRequest(req);
     if (flow.state === "waiting_ready") {
-      flow.rounds.push(newRound(flow, "button", noteFromRequest(req)));
+      /* A brand-new round: an omitted or cleared note both mean "no note". */
+      flow.rounds.push(newRound(flow, "button", note ?? null));
       flow.state = flow.mode === "manual" ? "spawn_pending" : "spawning";
     } else if (flow.state === "spawn_pending") {
+      /* The round exists but has not spawned yet, so a freshly edited note must
+         still reach the next reviewer (issue #118 Finding 4): manual mode creates
+         the round at waiting_ready→spawn_pending, then the operator can revise the
+         note before the spawn. `undefined` (field omitted) leaves it; a string sets
+         it; `null` (explicit empty) clears it (issue #118 review Finding 2). */
+      if (note !== undefined && round) round.readyNote = note;
       flow.state = "spawning";
     } else if (flow.state === "relay_pending") {
       flow.state = "relaying";
@@ -221,21 +286,35 @@ export function patchFlow(id: string, req: PatchFlowRequest): { flow?: Flow; err
     flow.stateDetail = null;
   } else if (req.action === "retry-round") {
     if (flow.state !== "needs_decision" || !round) return { error: "flow cannot retry from its current state", status: 409 };
-    forgetHeadlessReview(flow.id, round.n, round.reviewerPid ?? null);
+    forgetHeadlessReview(flow.id, round.n, round);
+    clearHeadlessReviewArtifacts(flow.id, round.n);
+    /* The note travels to the fresh reviewer. An omitted field keeps the round's
+       existing note; a string replaces it; an explicit empty clears it. */
+    const noteField = noteFieldFromRequest(req);
     Object.assign(round, {
       reviewerPath: null,
+      reviewerConversationId: null,
+      accountId: null,
+      attemptedAccounts: [],
+      autoRetryCount: 0,
       sessionId: null,
       reviewerPid: null,
+      reviewerIdentity: null,
       reviewerPane: null,
       findingsPath: null,
       verdict: null,
       findingsCount: null,
-      /* A user note travels to the fresh reviewer as the round's ready note. */
-      readyNote: noteFromRequest(req) ?? round.readyNote,
+      /* A retry launches a fresh reviewer, so it re-freezes the current reviewer
+         role — this is where a prior set-roles override takes effect. */
+      reviewerRole: { ...flow.roles.reviewer },
+      readyNote: noteField === undefined ? round.readyNote : noteField,
+      reviewHeadSha: null,
       startedAt: isoNow(),
       spawnStartedAt: null,
       relayStartedAt: null,
+      relayDelivery: null,
       reviewedAt: null,
+      terminalAt: null,
       relayedAt: null,
       error: null,
     });
@@ -271,6 +350,25 @@ export function patchFlow(id: string, req: PatchFlowRequest): { flow?: Flow; err
     flow.closedAt = null;
     flow.state = "waiting_ready";
     flow.stateDetail = null;
+  } else if (req.action === "set-roles") {
+    if (flow.state === "closed") return { error: "flow is closed", status: 409 };
+    /* Reviewer-only: the implementer is an attached live session that cannot be
+       reseated in place, so it is not overridable here (see PatchFlowRequest). */
+    const patch = req.roles && typeof req.roles === "object" && !Array.isArray(req.roles) ? req.roles.reviewer : undefined;
+    if (patch === undefined) return { error: "reviewer role override is required", status: 400 };
+    const merged = applyRoleOverride(flow.roles.reviewer, patch);
+    if (!merged) return { error: "invalid reviewer role override", status: 400 };
+    flow.roles = { ...flow.roles, reviewer: merged };
+    /* Manual mode parks a created-but-unspawned round at spawn_pending with its
+       role already frozen (newRound/retry snapshot it). The override must reach
+       THAT round too, or the imminent Spawn launches with the old config while the
+       UI reports success (issue #118 review). A round already spawning/reviewing
+       kept its frozen snapshot — spawnStartedAt is set there, so it is left alone;
+       only a genuinely unstarted pending round is re-snapshotted. */
+    const pending = flow.state === "spawn_pending" || (flow.state === "paused" && flow.pausedState === "spawn_pending")
+      ? round
+      : null;
+    if (pending && pending.spawnStartedAt == null) pending.reviewerRole = { ...merged };
   }
   /* "close" and "cancel-round" never reach this function — the route sends
      them to closeFlow/cancelRound, which also stop a running reviewer. */
