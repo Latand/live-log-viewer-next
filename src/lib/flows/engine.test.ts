@@ -1,5 +1,5 @@
 import { afterAll, expect, test } from "bun:test";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -358,6 +358,140 @@ test("lost reviewer tracking parks with an accurate cause and does not spawn a d
     stateDetail: "reviewer tracking was lost before a verdict could be recovered",
     rounds: [{ autoRetryCount: 0 }],
   });
+});
+
+test("pane restart during the pre-handle checkpoint parks before launching another reviewer", async () => {
+  const startedAt = "2026-07-12T09:30:00.000Z";
+  const cwd = "/missing-pane-review-worktree";
+  const implementer = writeCodexEntry("pane-pre-handle-implementer.jsonl", { id: "019f421e-02e1-73e0-9b77-bebde063f121", cwd }, Date.now() / 1_000);
+  const flow: Flow = {
+    id: "flow-pane-pre-handle",
+    template: "implement-review-loop",
+    project: "repo",
+    cwd,
+    implementerPath: implementer.path,
+    roles: {
+      implementer: { engine: "codex", model: null, effort: "high" },
+      reviewer: { engine: "codex", model: null, effort: "xhigh" },
+    },
+    reviewerFallback: null,
+    baseRef: "base",
+    baseMode: "head",
+    mode: "auto",
+    reviewerMode: "pane",
+    roundLimit: 5,
+    state: "spawning",
+    pausedState: null,
+    stateDetail: null,
+    rounds: [{
+      n: 1,
+      reviewerPath: null,
+      reviewerRole: { engine: "codex", model: null, effort: "xhigh" },
+      accountId: "default",
+      attemptedAccounts: [],
+      autoRetryCount: 0,
+      sessionId: null,
+      reviewerPid: null,
+      reviewerIdentity: null,
+      reviewerPane: null,
+      findingsPath: null,
+      triggeredBy: "marker",
+      readyNote: null,
+      reviewHeadSha: null,
+      verdict: null,
+      findingsCount: null,
+      startedAt,
+      spawnStartedAt: startedAt,
+      relayStartedAt: null,
+      relayDelivery: null,
+      reviewedAt: null,
+      terminalAt: null,
+      relayedAt: null,
+      error: null,
+    }],
+    createdAt: startedAt,
+    closedAt: null,
+  };
+  saveFlows([flow]);
+
+  await tickFlows([implementer]);
+
+  expect(loadFlows()[0]).toMatchObject({
+    state: "needs_decision",
+    stateDetail: "reviewer launch tracking is unavailable",
+    rounds: [{ reviewerPane: null, reviewerPid: null, reviewerPath: null }],
+  });
+});
+
+test("restart recovery accepts a conclusive Codex artifact without process identity or scanner entry", async () => {
+  const startedAt = "2026-07-12T09:35:00.000Z";
+  const cwd = "/repo";
+  const implementer = writeCodexEntry("artifact-recovery-implementer.jsonl", { id: "019f421e-02e1-73e0-9b77-bebde063f122", cwd }, Date.now() / 1_000);
+  const reviewer = spawn("sleep", ["30"], { detached: true, stdio: "ignore" });
+  reviewer.unref();
+  const flow: Flow = {
+    id: "flow-artifact-recovery",
+    template: "implement-review-loop",
+    project: "repo",
+    cwd,
+    implementerPath: implementer.path,
+    roles: {
+      implementer: { engine: "codex", model: null, effort: "high" },
+      reviewer: { engine: "codex", model: null, effort: "xhigh" },
+    },
+    reviewerFallback: null,
+    baseRef: "base",
+    baseMode: "head",
+    mode: "manual",
+    reviewerMode: "headless",
+    roundLimit: 5,
+    state: "reviewing",
+    pausedState: null,
+    stateDetail: null,
+    rounds: [{
+      n: 1,
+      reviewerPath: null,
+      reviewerRole: { engine: "codex", model: null, effort: "xhigh" },
+      accountId: "default",
+      attemptedAccounts: ["codex:default"],
+      autoRetryCount: 0,
+      sessionId: null,
+      reviewerPid: reviewer.pid ?? null,
+      reviewerIdentity: null,
+      reviewerPane: null,
+      findingsPath: null,
+      triggeredBy: "marker",
+      readyNote: null,
+      reviewHeadSha: null,
+      verdict: null,
+      findingsCount: null,
+      startedAt,
+      spawnStartedAt: startedAt,
+      relayStartedAt: null,
+      relayDelivery: null,
+      reviewedAt: null,
+      terminalAt: null,
+      relayedAt: null,
+      error: null,
+    }],
+    createdAt: startedAt,
+    closedAt: null,
+  };
+  fs.mkdirSync(path.dirname(outputPathFor(flow.id, 1)), { recursive: true });
+  fs.writeFileSync(outputPathFor(flow.id, 1), "VERDICT: APPROVE\n\nReview completed.");
+  saveFlows([flow]);
+
+  try {
+    await tickFlows([implementer]);
+    expect(loadFlows()[0]).toMatchObject({
+      state: "relay_pending",
+      rounds: [{ verdict: "APPROVE", findingsCount: 0, autoRetryCount: 0 }],
+    });
+  } finally {
+    if (reviewer.pid) {
+      try { process.kill(reviewer.pid, "SIGKILL"); } catch { /* already gone */ }
+    }
+  }
 });
 
 test("restart recovery keeps a launched Claude fallback bound to its persisted effective role", async () => {

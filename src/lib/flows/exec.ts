@@ -327,6 +327,12 @@ export function headlessReviewStatus(
   const startedAt = run?.startedAt ?? Date.parse(persisted.spawnStartedAt ?? "");
   const elapsed = Number.isFinite(startedAt) ? Date.now() - startedAt : 0;
   const finalOutput = artifactOutput || scanned.lastAgentMessage || (engine === "claude" ? stdout.trim() : "");
+  /* Codex writes --output-last-message only when the turn completes. Launch
+     cleanup removes stale copies before every attempt, so a populated artifact
+     is conclusive even when restart recovery cannot prove pid ownership. */
+  if (artifactOutput) {
+    return { status: "done", stdout, stderr, finalOutput, sessionId: scanned.sessionId, processIdentity: identity, code: run?.exit?.code ?? null, signal: run?.exit?.signal ?? null };
+  }
   /* A restart loses the ChildProcess handle. When the pid is still live and its
      start identity was never checkpointed, ownership cannot be reconstructed
      safely: the pid may belong to the reviewer or may have been reused. Park

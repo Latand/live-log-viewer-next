@@ -478,7 +478,9 @@ async function tickFlow(
   if (!round) return JSON.stringify(flow) !== before;
 
   if (flow.state === "spawning") {
-    const status = headlessReviewStatus(flow.id, round.n, round, reviewerRoleFor(flow, round).engine);
+    const status = flow.reviewerMode === "headless"
+      ? headlessReviewStatus(flow.id, round.n, round, reviewerRoleFor(flow, round).engine)
+      : null;
     /* A restart can land here with the round already launched (state was
        persisted before launchReviewer finished). The detached reviewer is
        still out there — adopt it instead of spawning a duplicate. */

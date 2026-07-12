@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
 import type { FileEntry } from "@/lib/types";
@@ -76,4 +77,28 @@ test("recovers a verdict directly from the persisted rollout path when the scann
     verdict: "REQUEST_CHANGES",
     findingsCount: 2,
   });
+});
+
+test("recovers a managed Claude verdict from the frozen reviewer engine when scanner metadata is gone", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "llv-managed-claude-review-"));
+  const transcriptPath = path.join(root, "accounts", "claude", "fable", "projects", "-repo", "review.jsonl");
+  fs.mkdirSync(path.dirname(transcriptPath), { recursive: true });
+  fs.writeFileSync(transcriptPath, JSON.stringify({
+    type: "assistant",
+    timestamp: "2026-07-12T09:40:00.000Z",
+    message: { content: [{ type: "text", text: "VERDICT: APPROVE\n\nManaged Claude review completed." }] },
+  }) + "\n");
+  const round = fixtureRound();
+  round.reviewerPath = transcriptPath;
+  round.reviewerRole = { engine: "claude", model: "fable", effort: "high" };
+  round.accountId = "fable";
+
+  try {
+    expect(fallbackReviewFromTranscript(round, new Map())).toMatchObject({
+      verdict: "APPROVE",
+      findingsCount: 0,
+    });
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });

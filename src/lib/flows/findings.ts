@@ -6,7 +6,7 @@ import { recordValue, recordsValue, stringValue } from "@/lib/scanner/json";
 import type { FileEntry } from "@/lib/types";
 
 import { normalizeFindings } from "./store";
-import type { ReviewVerdict, Round } from "./types";
+import type { FlowEngine, ReviewVerdict, Round } from "./types";
 
 /**
  * How a round's verdict is obtained: from the findings artifact file when the
@@ -54,12 +54,14 @@ export function lastAssistantMessage(entry: TranscriptEntry): { text: string; ts
   return null;
 }
 
-function transcriptEntryFromPath(transcriptPath: string): TranscriptEntry | null {
+function transcriptEntryFromPath(transcriptPath: string, engine: FlowEngine | null): TranscriptEntry | null {
   try {
     const stat = fs.statSync(transcriptPath);
     return {
       path: transcriptPath,
-      root: transcriptPath.includes("/.claude/projects/") ? "claude-projects" : "codex-sessions",
+      root: engine === "claude" || (!engine && transcriptPath.includes("/.claude/projects/"))
+        ? "claude-projects"
+        : "codex-sessions",
       size: stat.size,
       mtime: stat.mtimeMs / 1_000,
     };
@@ -90,7 +92,7 @@ export function readFindingsFile(round: Round): ParsedFindings | null {
 
 export function fallbackReviewFromTranscript(round: Round, entriesByPath: Map<string, FileEntry>): ParsedFindings | null {
   if (!round.reviewerPath) return null;
-  const entry = entriesByPath.get(round.reviewerPath) ?? transcriptEntryFromPath(round.reviewerPath);
+  const entry = entriesByPath.get(round.reviewerPath) ?? transcriptEntryFromPath(round.reviewerPath, round.reviewerRole?.engine ?? null);
   if (!entry) return null;
   const message = lastAssistantMessage(entry);
   if (!message) return null;
