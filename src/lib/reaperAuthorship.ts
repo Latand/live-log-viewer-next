@@ -14,6 +14,14 @@ const STATE_FILE = () => statePath("reaper-state.json");
  * map (rather than re-scanning every transcript on the hot files poll) to pin
  * owner-touched cards against worker-class auto-collapse (issue #112).
  *
+ * The reaper's viewer-aware count is the RIGHT source here, not a raw
+ * transcript scan: a headless reviewer is spawned with an engine prompt and a
+ * flow implementer receives viewer-relayed findings as user-role records, so a
+ * naive "has a user message" scan would mark both as owner-touched and defeat
+ * the very collapse this feature exists for. The reaper discounts those
+ * viewer/spawn-injected messages (its message allowance) and only records a
+ * path once a genuine human message clears it — exactly the pin we want.
+ *
  * Missing/corrupt state is treated as "no evidence yet" — an empty set. The
  * exemption is applied on top of the live/mid-turn guards, so an unobserved
  * conversation is never wrongly collapsed while it is still doing work.

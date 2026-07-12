@@ -181,6 +181,31 @@ describe("shouldCollapseWorker", () => {
     expect(shouldCollapseWorker(reviewer, ctx({ flows }))).toBe(true);
   });
 
+  test("HARD CONSTRAINT: a user-authored message overrides reviewer immediate-collapse", () => {
+    /* The exemption is checked before the reviewer verdict short-circuit, so a
+       reviewer round that somehow carries a human message never folds — even
+       with an APPROVE verdict on the board. */
+    const reviewer = entry({
+      path: "/rev",
+      activity: "recent",
+      mtime: NOW_SEC - 5,
+      userAuthored: true,
+      flow: { flowId: "f1", flowRole: "reviewer", round: 1 },
+    });
+    const flows = [flow({ id: "f1", implementerPath: "/impl", rounds: [round({ reviewerPath: "/rev", verdict: "APPROVE" })] })];
+    expect(shouldCollapseWorker(reviewer, ctx({ flows }))).toBe(false);
+  });
+
+  test("HARD CONSTRAINT: a user-authored implementer never collapses however idle", () => {
+    const impl = entry({
+      path: "/impl",
+      mtime: NOW_SEC - 24 * 3600, // a day idle
+      userAuthored: true,
+      flow: { flowId: "f1", flowRole: "implementer", round: null },
+    });
+    expect(shouldCollapseWorker(impl, ctx())).toBe(false);
+  });
+
   test("a reviewer still reviewing is not collapsed while fresh", () => {
     const reviewer = entry({
       path: "/rev",
