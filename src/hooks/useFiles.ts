@@ -24,6 +24,8 @@ const FILES_REVISION_RETRY_MS = 1_000;
 
 export interface FilesData {
   files: FileEntry[];
+  /** Successful request URL that produced `files`; used for scope-aware effects. */
+  requestScope: string | null;
   projectCatalog: ProjectCatalogEntry[];
   flows: Flow[];
   pipelines: Pipeline[];
@@ -37,7 +39,7 @@ export interface FilesData {
 }
 
 const HEALTHY_SYSTEM = { tmux: { status: "healthy" as const } };
-const EMPTY: FilesData = { files: [], projectCatalog: [], flows: [], pipelines: [], workflows: [], tasks: [], systemHealth: HEALTHY_SYSTEM, conversationAliases: {}, loaded: false };
+const EMPTY: FilesData = { files: [], requestScope: null, projectCatalog: [], flows: [], pipelines: [], workflows: [], tasks: [], systemHealth: HEALTHY_SYSTEM, conversationAliases: {}, loaded: false };
 
 export function filesApiUrl(project?: string | null, pinnedPath?: string | null): string {
   const params: string[] = [];
@@ -89,10 +91,11 @@ export function useFiles(project?: string | null, pinnedPath?: string | null): F
         /* The flows rollout changes the payload from a bare array to
            {files, flows}; accept both so client and server can deploy in
            either order. */
-        if (Array.isArray(parsed)) setData({ files: parsed, projectCatalog: [], flows: [], pipelines: [], workflows: [], tasks: [], systemHealth: HEALTHY_SYSTEM, conversationAliases: {}, loaded: true });
+        if (Array.isArray(parsed)) setData({ files: parsed, requestScope: url, projectCatalog: [], flows: [], pipelines: [], workflows: [], tasks: [], systemHealth: HEALTHY_SYSTEM, conversationAliases: {}, loaded: true });
         else {
           setData({
             files: parsed.files ?? [],
+            requestScope: url,
             projectCatalog: parsed.projectCatalog ?? [],
             flows: parsed.flows ?? [],
             pipelines: parsed.pipelines ?? [],

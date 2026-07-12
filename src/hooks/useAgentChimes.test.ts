@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 
 import type { FileEntry } from "@/lib/types";
 
-import { MAX_TRACKED_IDENTITIES, planAgentChimes, type TrackedConversation } from "./useAgentChimes";
+import { MAX_TRACKED_IDENTITIES, planAgentChimes, planScopedAgentChimes, type TrackedConversation } from "./useAgentChimes";
 
 /* Deterministic fixtures: `waitingInput` forces paneState "waiting" without
    touching the wall clock; `activity: "live"` forces "live"; everything else
@@ -62,6 +62,28 @@ test("a genuinely new conversation that appears already finished rings", () => {
   const seed = planAgentChimes([live("/a")], null, new Set());
   const plan = planAgentChimes([live("/a"), waiting("/new")], seed.tracked, seed.linked);
   expect(plan.chimes).toEqual([{ kind: "question", id: "/new" }]);
+});
+
+test("project hydration seeds unseen finished conversations without queuing a chime cascade", () => {
+  const seed = planScopedAgentChimes([live("/project-a")], null, "/api/files?project=project-a");
+  const hydrated = Array.from({ length: 464 }, (_, index) => waiting(`/project-b-${index}`));
+  const switched = planScopedAgentChimes(hydrated, seed, "/api/files?project=project-b");
+  expect(switched.chimes).toEqual([]);
+
+  const settled = planScopedAgentChimes(hydrated, switched, "/api/files?project=project-b");
+  expect(settled.chimes).toEqual([]);
+  const newQuestion = planScopedAgentChimes([...hydrated, waiting("/project-b-new")], settled, "/api/files?project=project-b");
+  expect(newQuestion.chimes).toEqual([{ kind: "question", id: "/project-b-new" }]);
+});
+
+test("project hydration keeps a known live to waiting transition audible", () => {
+  const seed = planScopedAgentChimes([live("/shared")], null, "/api/files?project=project-a");
+  const switched = planScopedAgentChimes(
+    [waiting("/shared"), waiting("/already-finished")],
+    seed,
+    "/api/files?project=project-b",
+  );
+  expect(switched.chimes).toEqual([{ kind: "question", id: "/shared" }]);
 });
 
 test("archived migration predecessors neither ring nor clobber the successor's state", () => {
