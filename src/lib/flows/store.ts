@@ -178,6 +178,9 @@ export function loadFlows(): Flow[] {
     rounds: flow.rounds.map((round) => ({
       ...round,
       reviewerConversationId: round.reviewerConversationId ?? null,
+      /* A null snapshot is meaningful (issue #117 retry resets it so the launch
+         re-picks a fresh account/role), so it is preserved rather than backfilled;
+         reviewerRoleFor falls back to flow.roles.reviewer for a null/absent value. */
       reviewerRole: round.reviewerRole ?? null,
       attemptedAccounts: round.attemptedAccounts ?? [],
       autoRetryCount: round.autoRetryCount ?? 0,

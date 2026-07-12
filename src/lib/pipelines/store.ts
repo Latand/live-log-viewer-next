@@ -39,7 +39,7 @@ function readJson(filePath: string): unknown | null {
   }
 }
 
-function isEffectiveRole(value: unknown): value is EffectivePipelineRole {
+export function isEffectiveRole(value: unknown): value is EffectivePipelineRole {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const role = value as Partial<EffectivePipelineRole>;
   if (role.engine !== "claude" && role.engine !== "codex") return false;

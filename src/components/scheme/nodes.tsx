@@ -33,6 +33,7 @@ import { activityDot, cleanTitle, engineBadge, engineEdge, fmtAge } from "@/comp
 
 import type { AgentLink } from "./agentLinks";
 import { PIPELINE_RAIL_COLOR, pipelineRailSegment } from "./agentLinks";
+import { GroupOverridePanel } from "./GroupOverridePanel";
 import { stableDomOrder, stableNodeDomOrder } from "./domOrder";
 import {
   LOOP_GAP,
@@ -42,6 +43,7 @@ import {
   type FlowLoop,
   type MiniStack,
   type SchemeEdge,
+  type SchemeGroup,
   type SchemeLayout,
   type SchemeNode,
   type SchemeRect,
@@ -51,6 +53,37 @@ import {
 export const MOVE_MS = 380;
 export const MOVE_EASE = `cubic-bezier(.22,.8,.36,1)`;
 export const MOVE_TRANSITION = `transform ${MOVE_MS}ms ${MOVE_EASE}`;
+/* Group halos position with left/top (to avoid a transform stacking context that
+   would trap the label chip); their glide transitions those instead of transform,
+   plus transform for the detached override panel. */
+export const GROUP_MOVE_TRANSITION = `left ${MOVE_MS}ms ${MOVE_EASE}, top ${MOVE_MS}ms ${MOVE_EASE}, width ${MOVE_MS}ms ${MOVE_EASE}, height ${MOVE_MS}ms ${MOVE_EASE}, transform ${MOVE_MS}ms ${MOVE_EASE}`;
+
+/* The group label counter-scales with the inverse zoom so it holds a CONSTANT
+   on-screen size at ANY zoom — including the 0.12 map minimum, where the old
+   min(…, 2.6) cap shrank it to ~3px (issue #118 AC3 / review). Uncapped on
+   purpose: group halos are few and spread across the board, so the far-zoom
+   overlap that node FarLabels cap for is not a concern here. Padding, border and
+   max-width are expressed in em below so they scale with the font too. */
+export const GROUP_LABEL_BASE_PX = 11;
+/** Inverse-zoom ceiling on the counter-scaling. Infinity = never cap, so the
+    label stays a fixed on-screen size down to the minimum zoom. A finite value
+    would let it shrink below readability — kept here so the render string and the
+    on-screen computation below can never disagree. */
+export const GROUP_LABEL_INV_Z_CAP = Number.POSITIVE_INFINITY;
+/** The CSS `font-size` the label renders at, derived from the cap. */
+export function groupLabelFontSize(): string {
+  const scale = Number.isFinite(GROUP_LABEL_INV_Z_CAP)
+    ? `min(var(--inv-z, 1), ${GROUP_LABEL_INV_Z_CAP})`
+    : "var(--inv-z, 1)";
+  return `calc(${GROUP_LABEL_BASE_PX}px * ${scale})`;
+}
+/** On-screen px the label renders at for a given camera zoom (world font ×
+    zoom). Constant at GROUP_LABEL_BASE_PX while uncapped — proving map
+    readability; a re-added finite cap makes this drop at low zoom and fails the
+    test. */
+export function groupLabelScreenPx(zoom: number): number {
+  return GROUP_LABEL_BASE_PX * Math.min(1 / zoom, GROUP_LABEL_INV_Z_CAP) * zoom;
+}
 
 /** Round-chip click on a strip, delivered to that flow's deck. */
 export interface DeckFocus {
@@ -265,6 +298,93 @@ export const AgentLinksLayer = memo(function AgentLinksLayer({
         );
       })}
     </>
+  );
+});
+
+/**
+ * Flow/pipeline GROUP overlay (issue #118): draws each running flow/pipeline as
+ * one tinted, dashed region enclosing all of its board occupants, with a colored
+ * label chip naming it. The chip is the on-canvas entry point to the stage
+ * override controls (GroupOverridePanel). The region itself is inert
+ * (pointer-events-none) so it never blocks the cards it frames; only the chip
+ * (and its open panel) take pointer events. The label sizes off `--inv-z` so it
+ * stays readable when the board is zoomed out to the map. A group appears only
+ * while its flow/pipeline is open, so it dissolves on close with no extra state.
+ */
+export const GroupsLayer = memo(function GroupsLayer({
+  groups,
+  interactive,
+}: {
+  groups: SchemeGroup[];
+  /** Passive on the hand-tool, during a selection session and on the lite map:
+      the halos still render, but the label chip stops opening the panel. */
+  interactive: boolean;
+}) {
+  const [openId, setOpenId] = useState<string | null>(null);
+  if (!groups.length) return null;
+  const openGroup = interactive ? groups.find((group) => group.id === openId) ?? null : null;
+  return (
+    /* A plain (static) root: it creates no stacking context, so the chip's and
+       panel's z-indexes below participate directly in the board's world layer
+       and can paint above the cards. */
+    <div aria-hidden={false}>
+      {groups.map((group) => {
+        const color = `hsl(${group.hue} 62% 42%)`;
+        const soft = `hsl(${group.hue} 62% 42% / 0.055)`;
+        const open = openGroup?.id === group.id;
+        return (
+          /* Positioned with left/top rather than a transform: a transform would
+             create a stacking context that traps the chip beneath the later
+             NodesLayer (and its strips). left/top with no z-index keeps this
+             wrapper stacking-context-free, so the chip's z-index escapes it. */
+          <div
+            key={group.key}
+            data-scheme-group={group.kind}
+            className="pointer-events-none absolute"
+            style={{ left: group.x, top: group.y, width: group.w, height: group.h, transition: GROUP_MOVE_TRANSITION }}
+          >
+            <div
+              aria-hidden
+              className="absolute inset-0 rounded-[20px] border-2 border-dashed"
+              style={{ borderColor: color, backgroundColor: soft }}
+            />
+            <button
+              data-scheme-ui
+              className={`absolute -top-3 left-5 z-[8] inline-flex max-w-[22em] items-center gap-[0.4em] rounded-full bg-panel px-[0.7em] py-[0.15em] font-bold shadow-card hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:cursor-default ${
+                interactive ? "pointer-events-auto" : ""
+              }`}
+              /* Font fully counter-scaled (constant on-screen at any zoom); border
+                 and padding are in em so the whole chip holds its on-screen size. */
+              style={{ borderColor: color, color, borderWidth: "0.18em", borderStyle: "solid", fontSize: groupLabelFontSize() }}
+              aria-expanded={open}
+              aria-haspopup="dialog"
+              disabled={!interactive}
+              onClick={() => setOpenId((value) => (value === group.id ? null : group.id))}
+            >
+              <span aria-hidden>{group.kind === "pipeline" ? "⇢" : "⟳"}</span>
+              <span className="truncate">{group.label}</span>
+            </button>
+          </div>
+        );
+      })}
+      {/* The open panel is a foreground sibling — outside every halo's wrapper —
+          so its high z-index paints above the scheme cards (issue #118 review:
+          the panel must never open beneath a card). Positioned in world space
+          just under its group's label chip. */}
+      {openGroup ? (
+        <div
+          className="pointer-events-auto absolute left-0 top-0 z-[45]"
+          style={{ transform: `translate(${openGroup.x + 20}px, ${openGroup.y + 16}px)`, transition: GROUP_MOVE_TRANSITION }}
+          onKeyDown={(event) => {
+            if (event.key !== "Escape") return;
+            event.stopPropagation();
+            setOpenId(null);
+          }}
+        >
+          <GroupOverridePanel group={openGroup} onClose={() => setOpenId(null)} />
+        </div>
+      ) : null}
+    </div>
   );
 });
 
