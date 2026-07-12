@@ -127,21 +127,15 @@ export function claimedReviewerDescendantPaths(files: FileEntry[], flows: Flow[]
  * implementer — a node that stays visible — so the subtasks render as connected
  * children of the flow instead of floating loose.
  *
- * `keepUnfolded` (issue #112) exempts explicitly-opened reviewers: when the owner
- * clicks a folded reviewer out of a worker stack, it becomes a pinned board
- * placement, but an INACTIVE flow has no round deck to host it — folding it away
- * would leave the click with nothing to render. A pinned reviewer of an inactive
- * flow therefore stays in the file set so it renders as its own node. Active
- * flows still fold (their deck is the destination), so a pinned active reviewer
- * never double-renders.
+ * Explicitly-opened and authorship-protected reviewers that have no round deck
+ * are recovered separately by `protectedReviewerNodes` and materialized as
+ * standalone nodes (issue #112), so folding here stays unconditional.
  */
-export function foldClaimedReviewers(files: FileEntry[], flows: Flow[], keepUnfolded: ReadonlySet<string> = new Set()): FileEntry[] {
+export function foldClaimedReviewers(files: FileEntry[], flows: Flow[]): FileEntry[] {
   const anchorByReviewer = new Map<string, string>();
   for (const flow of flows) {
     for (const round of flow.rounds) {
-      if (!round.reviewerPath) continue;
-      if (keepUnfolded.has(round.reviewerPath) && !isActiveFlow(flow)) continue; // stays on the board as a node
-      anchorByReviewer.set(round.reviewerPath, flow.implementerPath);
+      if (round.reviewerPath) anchorByReviewer.set(round.reviewerPath, flow.implementerPath);
     }
   }
   if (!anchorByReviewer.size) return files;

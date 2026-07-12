@@ -254,12 +254,12 @@ export function ProjectDashboard({
     () => new Set([...board.explicitManual, ...prefs.expanded]),
     [board.explicitManual, prefs.expanded],
   );
-  /* Fold reviewer transcripts into their round decks — EXCEPT one the owner
-     pinned out of a worker stack, which (for an inactive flow) has no deck and
-     must stay on the board as a node (issue #112). Protected reviewers with no
-     deck are handled separately via protectedReviewerNodes, materialized from
-     the full file set, so they do not need to be kept unfolded here. */
-  const groupFiles = useMemo(() => foldClaimedReviewers(files, flows, pinnedPaths), [files, flows, pinnedPaths]);
+  /* Fold every reviewer transcript into its round deck. Reviewers with no deck
+     that must stay visible — an owner-pinned one opened from a worker stack, or
+     one carrying authorship protection — are recovered by protectedReviewerNodes
+     and materialized as standalone nodes (issue #112), so folding is
+     unconditional here. */
+  const groupFiles = useMemo(() => foldClaimedReviewers(files, flows), [files, flows]);
   /* Collapse-eligible worker conversations, derived BEFORE layout so their
      quiet full columns are removed from the scheme rather than left as
      full-size cards (a spawned worker stays a column under an active parent
@@ -329,17 +329,24 @@ export function ProjectDashboard({
           !manualPaths.has(file.path) &&
           (!autoPaths.has(file.path) || hiddenSet.has(file.path)),
       );
-    /* Protected reviewers whose flow has NO rendered deck (a closed flow, or an
-       active flow whose implementer is hidden/unplaced) render as standalone
-       nodes so an owner-touched reviewer is always on the board. Resolved from
-       the full file set (they are folded out of groupFiles), and skipped when a
-       deck already shows them. `renderedNodePaths` decides deck presence. */
-    const renderedNodePaths = new Set<string>([...autoPaths, ...manualPaths, ...extra.map((file) => file.path)]);
-    const protectedNodes = protectedReviewerNodes({ files, flows, renderedNodePaths, hiddenPaths: hiddenSet })
+    /* Reviewers whose flow has NO rendered deck (a closed flow, or an active flow
+       whose implementer is hidden/unplaced) render as standalone nodes so an
+       owner-pinned or owner-touched reviewer is always on the board. Resolved
+       from the full file set (they are folded out of groupFiles) and skipped when
+       a deck already shows them. `placedNodePaths` is what the layout actually
+       draws — a hidden group column is NOT placed (so it has no deck), but a
+       hidden implementer revealed by an ephemeral jump IS placed (its deck
+       renders, so its reviewer must not be duplicated here). */
+    const placedNodePaths = new Set<string>([
+      ...[...autoPaths].filter((path) => !hiddenSet.has(path)),
+      ...manualPaths,
+      ...extra.map((file) => file.path),
+    ]);
+    const protectedNodes = protectedReviewerNodes({ files, flows, renderedNodePaths: placedNodePaths, hiddenPaths: hiddenSet, pinnedPaths })
       .filter((file) => projectKey(file) === project);
     const extras = [...extra, ...protectedNodes];
     return extras.length ? [...manualNodes, ...extras] : manualNodes;
-  }, [ephemeral, groupFiles, files, flows, project, autoPaths, hiddenSet, manualNodes]);
+  }, [ephemeral, groupFiles, files, flows, project, autoPaths, hiddenSet, manualNodes, pinnedPaths]);
   const liveCount = useMemo(
     () =>
       groups.reduce(

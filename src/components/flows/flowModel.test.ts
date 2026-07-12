@@ -3,7 +3,6 @@ import { describe, expect, test } from "bun:test";
 import type { Flow } from "@/lib/flows/types";
 import type { FileEntry } from "@/lib/types";
 
-import { buildBranchGroups } from "@/components/projectModel";
 import { protectedReviewerNodes } from "@/components/scheme/workerCollapse";
 
 import { claimedReviewerDescendantPaths, flowPresentation, foldClaimedReviewers, isActiveFlow } from "./flowModel";
@@ -105,55 +104,31 @@ describe("reviewer folding", () => {
     expect(foldClaimedReviewers(files, [closed]).map((file) => file.path)).toEqual(["/implementer", "/subtask"]);
   });
 
-  test("a pinned reviewer of an inactive flow stays on the board; an active one still folds (issue #112)", () => {
-    const implementer = entry({ path: "/implementer" });
-    const reviewer = entry({ path: "/reviewer", parent: "/implementer" });
-    const closed = flow({ implementerPath: "/implementer", reviewerPath: "/reviewer", state: "closed", closedAt: "2026-07-06T00:00:00Z" });
-    const active = flow({ implementerPath: "/implementer", reviewerPath: "/reviewer" }); // reviewing
-    const pinned = new Set(["/reviewer"]);
-    // Inactive flow + pinned → the reviewer survives folding (it has no deck).
-    expect(foldClaimedReviewers([implementer, reviewer], [closed], pinned).map((file) => file.path)).toEqual(["/implementer", "/reviewer"]);
-    // Not pinned → still folded off the board.
-    expect(foldClaimedReviewers([implementer, reviewer], [closed]).map((file) => file.path)).toEqual(["/implementer"]);
-    // Active flow + pinned → still folded; its round deck is the destination.
-    expect(foldClaimedReviewers([implementer, reviewer], [active], pinned).map((file) => file.path)).toEqual(["/implementer"]);
-  });
-
-  test("an opened closed-flow reviewer has a renderable node destination (issue #112 finding)", () => {
-    /* The dashboard integration the DOM test missed: after a click pins the
-       reviewer, fold-keep leaves it in the file set, and buildBranchGroups
-       promotes the expanded reviewer into a real column instead of dropping it. */
+  test("a folded reviewer that must stay visible is recovered from the full file set (issue #112 finding)", () => {
+    /* Folding is unconditional; an owner-authored reviewer OR one the owner
+       opened out of a stack (a pin) is recovered by protectedReviewerNodes when
+       its flow has no deck — a closed flow, or an active flow whose implementer
+       is unplaced. */
     const implementer = entry({ path: "/implementer", activity: "idle" });
-    const reviewer = entry({ path: "/reviewer", parent: "/implementer", activity: "idle" });
-    const closed = flow({ implementerPath: "/implementer", reviewerPath: "/reviewer", state: "closed", closedAt: "2026-07-06T00:00:00Z" });
-    const pinned = new Set(["/reviewer"]);
-
-    const kept = foldClaimedReviewers([implementer, reviewer], [closed], pinned);
-    const groups = buildBranchGroups(kept, "demo", { expandedConversationPaths: new Set(["/reviewer"]) });
-    const columns = groups.flatMap((group) => group.columns.map((column) => column.file.path));
-    expect(columns).toContain("/reviewer");
-  });
-
-  test("an owner-authored reviewer folded off the board is still materialized from the full file set (issue #112 finding)", () => {
-    /* Not manually pinned, but userAuthored — it must never vanish. Folding drops
-       it from groupFiles, yet protectedReviewerNodes recovers it from the full
-       file set (deck absent: closed flow, or here an active flow with an unplaced
-       implementer), so the dashboard can materialize a standalone node. */
-    const implementer = entry({ path: "/implementer", activity: "idle" });
-    const reviewer = entry({ path: "/reviewer", parent: "/implementer", activity: "idle", userAuthored: true });
+    const authored = entry({ path: "/reviewer", parent: "/implementer", activity: "idle", userAuthored: true });
     const closedFlow = flow({ implementerPath: "/implementer", reviewerPath: "/reviewer", state: "closed", closedAt: "2026-07-06T00:00:00Z" });
     const activeFlow = flow({ implementerPath: "/implementer", reviewerPath: "/reviewer", state: "reviewing" });
 
     // Folding removes the reviewer from the board's group file set…
-    const folded = foldClaimedReviewers([implementer, reviewer], [closedFlow]);
-    expect(folded.map((file) => file.path)).toEqual(["/implementer"]);
+    expect(foldClaimedReviewers([implementer, authored], [closedFlow]).map((file) => file.path)).toEqual(["/implementer"]);
 
-    // …but it is recovered from the FULL file set for both a closed flow and an
-    // active flow whose implementer is unplaced (renderedNodePaths empty).
-    const fromClosed = protectedReviewerNodes({ files: [implementer, reviewer], flows: [closedFlow], renderedNodePaths: new Set(), hiddenPaths: new Set() });
-    expect(fromClosed.map((file) => file.path)).toEqual(["/reviewer"]);
-    const fromActiveUnplaced = protectedReviewerNodes({ files: [implementer, reviewer], flows: [activeFlow], renderedNodePaths: new Set(), hiddenPaths: new Set() });
-    expect(fromActiveUnplaced.map((file) => file.path)).toEqual(["/reviewer"]);
+    // …but it is recovered from the FULL file set for a closed flow, and for an
+    // active flow with an unplaced implementer (renderedNodePaths empty).
+    const base = { renderedNodePaths: new Set<string>(), hiddenPaths: new Set<string>(), pinnedPaths: new Set<string>() };
+    expect(protectedReviewerNodes({ ...base, files: [implementer, authored], flows: [closedFlow] }).map((f) => f.path)).toEqual(["/reviewer"]);
+    expect(protectedReviewerNodes({ ...base, files: [implementer, authored], flows: [activeFlow] }).map((f) => f.path)).toEqual(["/reviewer"]);
+
+    // An unprotected reviewer the owner opened (pinned) of a deckless active flow
+    // is recovered the same way — otherwise the click would make it vanish.
+    const clean = entry({ path: "/reviewer", parent: "/implementer", activity: "idle" });
+    expect(
+      protectedReviewerNodes({ ...base, files: [implementer, clean], flows: [activeFlow], pinnedPaths: new Set(["/reviewer"]) }).map((f) => f.path),
+    ).toEqual(["/reviewer"]);
   });
 });
 

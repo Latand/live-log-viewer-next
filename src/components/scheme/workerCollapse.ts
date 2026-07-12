@@ -96,8 +96,15 @@ function flowMembership(file: FileEntry, flows: readonly Flow[]): FlowMembership
  * of the authorship discount — an owner's first composer prompt can be discounted
  * as an automated launch, so topology, not message-counting, decides ownership
  * here. Then pipeline stage ownership, then generic spawned lineage.
+ *
+ * A HANDOFF is never a worker: it is the owner continuing a conversation from
+ * the composer (agents spawn through the spawn API, not the handoff flow). Its
+ * first composer prompt is the owner's, yet the generic worker-launch allowance
+ * would discount it — so, as with a parentless implementer, topology (the
+ * `handoff` flag) decides ownership rather than the fragile message count.
  */
 export function classifyWorker(file: FileEntry, lineage: WorkerLineage): WorkerClass | null {
+  if (file.handoff) return null;
   const membership = flowMembership(file, lineage.flows);
   if (membership?.role === "reviewer") return "flow-reviewer";
   if (membership?.role === "implementer") return file.parent ? "flow-implementer" : null;
@@ -186,36 +193,43 @@ export function flowIdForPath(file: FileEntry, flows: readonly Flow[]): string |
 export interface ProtectedReviewerNodesInput {
   files: readonly FileEntry[];
   flows: readonly Flow[];
-  /** Paths the scheme is already drawing as nodes (group columns, manual nodes,
-      ephemeral jumps). Used both to skip an already-rendered reviewer and to
-      decide whether a flow's implementer is placed (hence has a round deck). */
+  /** Paths the scheme actually PLACES as nodes (visible group columns, manual
+      nodes, ephemeral-revealed nodes) — hidden group columns already excluded by
+      the caller. Both skips an already-drawn reviewer and decides whether a
+      flow's implementer is placed (hence renders a round deck). */
   renderedNodePaths: ReadonlySet<string>;
   /** Closed/tombstoned paths — a manual close still wins over materialization. */
   hiddenPaths: ReadonlySet<string>;
+  /** Durable manual placements/expansions — a reviewer the owner opened out of a
+      worker stack must render even though it carries no authorship protection. */
+  pinnedPaths: ReadonlySet<string>;
 }
 
 /**
- * Protected reviewer transcripts that must be materialized as standalone board
- * nodes because their owning flow has NO rendered round deck (issue #112).
+ * Reviewer transcripts that must be materialized as standalone board nodes
+ * because their owning flow has NO rendered round deck (issue #112).
  *
- * A reviewer carrying owner-authorship protection (a real user message, or
- * unconfirmed authorship that fails closed) must never vanish. An active flow
- * normally renders it in its round deck — but a deck exists ONLY when the flow's
- * implementer is itself a placed node. The dashboard may hide or leave the
- * implementer unplaced (a closed flow never has a deck at all), leaving the
- * reviewer with no deck, excluded from worker stacks (authorship-exempt), and
- * filtered from the switchboard (a claimed reviewer). Deck presence therefore
- * cannot be read off the flow's state alone — it is derived from whether the
- * implementer is in `renderedNodePaths`. Reviewers whose deck is absent, are not
- * already drawn, and are not manually closed are returned for materialization,
- * resolved from the full (unfolded) file set.
+ * A reviewer the owner must keep — one carrying authorship protection (a real
+ * user message, or unconfirmed authorship that fails closed) OR one the owner
+ * explicitly opened out of a worker stack (a durable pin) — must never vanish.
+ * An active flow normally renders it in its round deck, but a deck exists ONLY
+ * when the flow's implementer is itself a PLACED node. The dashboard may hide or
+ * leave the implementer unplaced (a closed flow never has a deck at all),
+ * leaving the reviewer with no deck, excluded from worker stacks, and filtered
+ * from the switchboard (a claimed reviewer). Deck presence is therefore read
+ * from `renderedNodePaths` — the set the caller has already reduced to what is
+ * actually drawn, so a hidden-but-ephemerally-revealed implementer counts as
+ * decked (its reviewer stays in that deck and is NOT duplicated here), while a
+ * hidden-and-unrevealed implementer does not. Reviewers whose deck is absent,
+ * that are not already drawn, and are not manually closed are returned for
+ * materialization, resolved from the full (unfolded) file set.
  */
 export function protectedReviewerNodes(input: ProtectedReviewerNodesInput): FileEntry[] {
   const byPath = new Map(input.files.map((file) => [file.path, file] as const));
   const decked = new Set<string>();
   for (const flow of input.flows) {
     if (flow.state === "closed") continue;
-    if (!input.renderedNodePaths.has(flow.implementerPath) || input.hiddenPaths.has(flow.implementerPath)) continue;
+    if (!input.renderedNodePaths.has(flow.implementerPath)) continue;
     for (const round of flow.rounds) if (round.reviewerPath) decked.add(round.reviewerPath);
   }
   const out: FileEntry[] = [];
@@ -226,7 +240,7 @@ export function protectedReviewerNodes(input: ProtectedReviewerNodesInput): File
       if (!path || seen.has(path) || decked.has(path)) continue;
       if (input.renderedNodePaths.has(path) || input.hiddenPaths.has(path)) continue;
       const file = byPath.get(path);
-      if (file && (file.userAuthored || file.authorshipUnverified)) {
+      if (file && (file.userAuthored || file.authorshipUnverified || input.pinnedPaths.has(path))) {
         out.push(file);
         seen.add(path);
       }
