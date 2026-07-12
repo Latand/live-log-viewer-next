@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
 
 import { Loader2, Play } from "@/components/icons";
+import { useIsMobile } from "@/hooks/useIsMobile";
 import type { UseComposerReturn } from "@/hooks/useComposer";
 import { prewarmLiveToken } from "@/hooks/useDictation";
 
@@ -145,9 +146,12 @@ export function ComposerBar({
     busy,
     status,
   } = composer;
+  const isMobile = useIsMobile();
   const [sendMenuOpen, setSendMenuOpen] = useState(false);
   const hasSendMenu = sendMenuActions.length > 0;
   const sendDisabled = !canSend && !hasSendMenu;
+  /* Phone action buttons meet the 44px minimum; desktop keeps the compact p-2. */
+  const iconBtn = isMobile ? "h-11 w-11" : "p-2";
 
   return (
     <>
@@ -198,7 +202,7 @@ export function ComposerBar({
             <Hint label={imageAriaLabel}>
               <ImagePickerButton
                 ariaLabel={imageAriaLabel}
-                className="inline-flex shrink-0 items-center justify-center rounded-[8px] border border-line bg-panel p-2 text-dim hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                className={`inline-flex shrink-0 items-center justify-center rounded-[8px] border border-line bg-panel text-dim hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${iconBtn}`}
                 onFiles={onImageFiles ?? attachments.addFiles}
               />
             </Hint>
@@ -228,7 +232,7 @@ export function ComposerBar({
                 aria-disabled={!canSend}
                 aria-label={dictationRecording ? sendLabelRecording : sendLabelIdle}
                 style={dictationRecording ? undefined : sendIdleStyle}
-                className={`inline-flex shrink-0 items-center justify-center rounded-[8px] border p-2 text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 disabled:opacity-40 aria-disabled:opacity-40 ${
+                className={`inline-flex shrink-0 items-center justify-center rounded-[8px] border text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 disabled:opacity-40 aria-disabled:opacity-40 ${iconBtn} ${
                   dictationRecording ? "border-err bg-err hover:opacity-90" : sendIdleClassName
                 }`}
               >

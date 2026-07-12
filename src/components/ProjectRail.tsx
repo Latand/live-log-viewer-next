@@ -2,6 +2,7 @@
 
 import { useMemo, useState } from "react";
 
+import { useIsMobile } from "@/hooks/useIsMobile";
 import { useLocale } from "@/lib/i18n";
 import type { FileEntry, ProjectCatalogEntry } from "@/lib/types";
 import type { Pipeline } from "@/lib/pipelines/types";
@@ -36,6 +37,7 @@ interface Props {
 
 export function ProjectRail({ files, projectCatalog, pipelines, workflows, archivedProjects, selected, loaded, now, onSelect }: Props) {
   const { t } = useLocale();
+  const isMobile = useIsMobile();
   const [query, setQuery] = useState("");
   const [archiveOpen, setArchiveOpen] = useState(false);
   const summaries = useMemo(() => buildProjectSummaries(files, now, workflows, projectCatalog, pipelines), [files, now, workflows, projectCatalog, pipelines]);
@@ -69,7 +71,9 @@ export function ProjectRail({ files, projectCatalog, pipelines, workflows, archi
       </header>
       <div className="px-2.5 pb-1 pt-2.5">
         <input
-          className="w-full rounded-[9px] border border-line bg-bg px-2.5 py-1.5 text-[12px] outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+          className={`w-full rounded-[9px] border border-line bg-bg px-2.5 text-[12px] outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+            isMobile ? "min-h-11" : "py-1.5"
+          }`}
           placeholder={t("rail.filter")}
           value={query}
           onChange={(event) => setQuery(event.target.value)}
@@ -109,7 +113,9 @@ export function ProjectRail({ files, projectCatalog, pipelines, workflows, archi
             <div className="mx-2.5 my-1.5 border-t border-line" />
             <button
               type="button"
-              className="mb-0.5 flex w-full items-center gap-1.5 rounded-[10px] px-2.5 py-1.5 text-left text-[11.5px] font-bold text-dim hover:bg-bg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+              className={`mb-0.5 flex w-full items-center gap-1.5 rounded-[10px] px-2.5 text-left text-[11.5px] font-bold text-dim hover:bg-bg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+                isMobile ? "min-h-11" : "py-1.5"
+              }`}
               aria-expanded={archiveOpen}
               onClick={() => setArchiveOpen((value) => !value)}
             >
@@ -174,10 +180,12 @@ function RailRow({
   muted?: boolean;
   onClick: () => void;
 }) {
+  const isMobile = useIsMobile();
   return (
     <button
       className={[
-        "mb-0.5 flex w-full items-center gap-2 rounded-[10px] border px-2.5 py-2 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40",
+        "mb-0.5 flex w-full items-center gap-2 rounded-[10px] border px-2.5 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40",
+        isMobile ? "min-h-11" : "py-2",
         active ? "border-line bg-bg shadow-card" : "border-transparent hover:bg-bg",
         muted ? "opacity-65" : "",
       ].join(" ")}

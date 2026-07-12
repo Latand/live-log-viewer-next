@@ -3,6 +3,7 @@
 import { Bell, BellOff } from "lucide-react";
 import { useEffect, useState } from "react";
 
+import { useIsMobile } from "@/hooks/useIsMobile";
 import { useLocale } from "@/lib/i18n";
 
 function b64ToBytes(value: string): ArrayBuffer {
@@ -15,6 +16,7 @@ function b64ToBytes(value: string): ArrayBuffer {
 
 export function PushBell() {
   const { t } = useLocale();
+  const isMobile = useIsMobile();
   const [enabled, setEnabled] = useState(false);
   const [supported, setSupported] = useState(false);
 
@@ -56,7 +58,9 @@ export function PushBell() {
 
   return (
     <button
-      className="inline-flex h-[26px] w-[26px] shrink-0 items-center justify-center rounded-full border border-line bg-panel text-dim hover:text-ink disabled:opacity-45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+      className={`inline-flex shrink-0 items-center justify-center rounded-full border border-line bg-panel text-dim hover:text-ink disabled:opacity-45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+        isMobile ? "h-11 w-11" : "h-[26px] w-[26px]"
+      }`}
       title={supported ? (enabled ? t("push.enabled") : t("push.enable")) : t("push.needsHttps")}
       aria-label={supported ? (enabled ? t("push.disable") : t("push.enable")) : t("push.needsHttps")}
       aria-pressed={enabled}

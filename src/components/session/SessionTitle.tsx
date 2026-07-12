@@ -361,7 +361,9 @@ export function SessionTitle({ file, displayMax = 90, titleClassName = "", class
       {retryTitle !== undefined ? (
         <button
           type="button"
-          className="inline-flex shrink-0 items-center rounded-[6px] border border-err/40 bg-bg px-1.5 py-0.5 text-[10px] font-semibold text-err focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+          className={`inline-flex shrink-0 items-center rounded-[6px] border border-err/40 bg-bg font-semibold text-err focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+            isMobile ? "min-h-11 px-3 text-[12px]" : "px-1.5 py-0.5 text-[10px]"
+          }`}
           onPointerDown={stop}
           onClick={() => void attemptSave(retryTitle, true)}
         >
