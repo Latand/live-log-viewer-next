@@ -609,38 +609,55 @@ export function edgeObstacles(
   return out;
 }
 
-/* Collinearity tolerances (px): endpoints within LINE_EPS of a shared line count
-   as on it, and the projections must overlap by more than CORRIDOR_MIN so a mere
-   shared endpoint (fan-in/out) is not treated as a shared corridor. */
+/* Collinearity tolerances: endpoints within LINE_EPS (px) of the shared line
+   count as on it, unit-direction cross within DIR_EPS counts as parallel, and
+   the projections must overlap by more than CORRIDOR_MIN (px) so a mere shared
+   endpoint (fan-in/out) is not treated as a shared corridor. */
 const LINE_EPS = 1.5;
+const DIR_EPS = 0.02;
 const CORRIDOR_MIN = 8;
+
+/* Perpendicular distance of point (px,py) from the line through (ox,oy) with
+   unit direction (ux,uy). */
+function perpDist(px: number, py: number, ox: number, oy: number, ux: number, uy: number): number {
+  return Math.abs((px - ox) * uy - (py - oy) * ux);
+}
 
 /**
  * Do two edges share a collinear corridor — lie on the same line and overlap
- * along it by a visible run? Direction-agnostic, so a segment and its reverse
- * count. Coincident (identical-endpoint) edges are the fully-overlapping case.
+ * along it by a visible run? Symmetric in a and b: parallelism is the unit-vector
+ * cross (fixed tolerance, not length-scaled), collinearity checks each edge's
+ * endpoints against *both* lines, and the projection overlap is a 1-D interval
+ * length, invariant to which edge or direction is the reference. Direction-
+ * agnostic, so a segment and its reverse count; coincident edges are the
+ * fully-overlapping case.
  */
 function shareCorridor(a: TaskEdgeGeom, b: TaskEdgeGeom): boolean {
   const adx = a.x2 - a.x1;
   const ady = a.y2 - a.y1;
   const alen = Math.hypot(adx, ady);
-  if (alen === 0) return false;
-  const ux = adx / alen;
-  const uy = ady / alen;
-  /* b's direction parallel to a's (cross of unit vectors ≈ 0)? */
   const bdx = b.x2 - b.x1;
   const bdy = b.y2 - b.y1;
   const blen = Math.hypot(bdx, bdy);
-  if (blen === 0) return false;
-  if (Math.abs(ux * (bdy / blen) - uy * (bdx / blen)) > LINE_EPS / alen + 1e-9) return false;
-  /* b's endpoints on a's infinite line (perpendicular distance)? */
-  const perp = (px: number, py: number) => Math.abs((px - a.x1) * uy - (py - a.y1) * ux);
-  if (perp(b.x1, b.y1) > LINE_EPS || perp(b.x2, b.y2) > LINE_EPS) return false;
-  /* Overlap of the two 1-D projections onto a's direction. */
-  const proj = (px: number, py: number) => (px - a.x1) * ux + (py - a.y1) * uy;
+  if (alen === 0 || blen === 0) return false;
+  const aux = adx / alen;
+  const auy = ady / alen;
+  const bux = bdx / blen;
+  const buy = bdy / blen;
+  if (Math.abs(aux * buy - auy * bux) > DIR_EPS) return false; // not parallel (symmetric)
+  /* Every endpoint near both lines — a symmetric collinearity test. */
+  if (perpDist(b.x1, b.y1, a.x1, a.y1, aux, auy) > LINE_EPS) return false;
+  if (perpDist(b.x2, b.y2, a.x1, a.y1, aux, auy) > LINE_EPS) return false;
+  if (perpDist(a.x1, a.y1, b.x1, b.y1, bux, buy) > LINE_EPS) return false;
+  if (perpDist(a.x2, a.y2, b.x1, b.y1, bux, buy) > LINE_EPS) return false;
+  /* Overlap of the two 1-D projections onto a's axis (length is orientation- and
+     origin-invariant for collinear segments). */
+  const proj = (px: number, py: number) => (px - a.x1) * aux + (py - a.y1) * auy;
+  const pa0 = Math.min(0, alen);
+  const pa1 = Math.max(0, alen);
   const b0 = Math.min(proj(b.x1, b.y1), proj(b.x2, b.y2));
   const b1 = Math.max(proj(b.x1, b.y1), proj(b.x2, b.y2));
-  return Math.min(alen, b1) - Math.max(0, b0) > CORRIDOR_MIN;
+  return Math.min(pa1, b1) - Math.max(pa0, b0) > CORRIDOR_MIN;
 }
 
 /**
@@ -673,24 +690,52 @@ export function corridorGroups(edges: readonly TaskEdgeGeom[]): TaskEdgeGeom[][]
   return [...byRoot.values()].map((group) => group.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0)));
 }
 
-/** Symmetric spread within a corridor group: first edge holds lane 0, the rest
+/** Symmetric spread of the i-th group member: first holds track 0, the rest
     alternate to either side (+1, −1, +2, …). */
 function laneAt(index: number): number {
   return index === 0 ? 0 : index % 2 === 1 ? (index + 1) / 2 : -(index / 2);
+}
+
+/* A corridor's canonical unit direction, independent of any member's stored
+   orientation: the dominant axis is forced positive so an edge and its reverse
+   yield the same reference. */
+function canonicalCorridorDir(edge: TaskEdgeGeom): { x: number; y: number } {
+  let dx = edge.x2 - edge.x1;
+  let dy = edge.y2 - edge.y1;
+  const len = Math.hypot(dx, dy) || 1;
+  dx /= len;
+  dy /= len;
+  const flip = Math.abs(dx) >= Math.abs(dy) ? dx < 0 : dy < 0;
+  return flip ? { x: -dx, y: -dy } : { x: dx, y: dy };
+}
+
+/* Lane index that renders on a consistent *physical* side of the corridor. The
+   bow in routeTaskEdge is perpendicular to the edge's own direction, which flips
+   for a reversed edge — so a lane is signed by whether the edge runs with or
+   against the canonical direction, cancelling that flip. Without this, a forward
+   +1 and a reverse −1 bow to the very same curve (issue #17). */
+function corridorLane(edge: TaskEdgeGeom, index: number, canon: { x: number; y: number }): number {
+  const dot = (edge.x2 - edge.x1) * canon.x + (edge.y2 - edge.y1) * canon.y;
+  return laneAt(index) * (dot >= 0 ? 1 : -1);
+}
+
+function assignCorridorLanes(group: readonly TaskEdgeGeom[], lanes: Map<string, number>): void {
+  const canon = canonicalCorridorDir(group[0]!);
+  group.forEach((edge, i) => lanes.set(edge.key, corridorLane(edge, i, canon)));
 }
 
 /**
  * Deterministic lane index per edge so overlapping edges never overdraw (issue
  * #17). Edges sharing a collinear corridor — coincident source/assignment pairs,
  * or partially-overlapping connectors on the same line — are grouped and fanned
- * onto parallel bowed tracks by {@link routeTaskEdge}. A lone edge is lane 0.
- * Order-independent — grouping and ordering read only edge data.
+ * onto parallel bowed tracks by {@link routeTaskEdge}, each lane oriented against
+ * the corridor's canonical direction so mixed-direction edges never collapse onto
+ * one curve. A lone edge is lane 0. Order-independent — grouping, canonical
+ * direction and lane signs read only edge data.
  */
 export function assignEdgeLanes(edges: readonly TaskEdgeGeom[]): Map<string, number> {
   const lanes = new Map<string, number>();
-  for (const group of corridorGroups(edges)) {
-    group.forEach((edge, i) => lanes.set(edge.key, laneAt(i)));
-  }
+  for (const group of corridorGroups(edges)) assignCorridorLanes(group, lanes);
   return lanes;
 }
 
@@ -872,7 +917,7 @@ export function routeTaskEdges(
   const lanes = new Map<string, number>();
   const corridorMate = new Set<string>();
   for (const group of corridorGroups(edges)) {
-    group.forEach((edge, i) => lanes.set(edge.key, laneAt(i)));
+    assignCorridorLanes(group, lanes);
     if (group.length > 1) for (const edge of group) corridorMate.add(edge.key);
   }
 

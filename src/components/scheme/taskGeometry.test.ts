@@ -510,6 +510,22 @@ describe("assignEdgeLanes", () => {
     expect([...lanes.values()]).toEqual([0, 0]);
   });
 
+  test("near-collinear corridor grouping is symmetric under input order (Finding)", () => {
+    /* Two slightly-off-collinear (±0.5px) overlapping edges of different length:
+       the corridor test must not depend on which is the first argument, or
+       visibility flips with ordering. */
+    const a = edgeGeom("A", 0, 0, 1000, 0.5);
+    const b = edgeGeom("B", 400, 0, 1400, -0.5);
+    const key = (es: TaskEdgeGeom[]) =>
+      corridorGroups(es)
+        .map((g) => g.map((e) => e.key).join("+"))
+        .sort()
+        .join(",");
+    expect(key([a, b])).toBe(key([b, a]));
+    /* And they do land in one group (the overlap is real). */
+    expect(corridorGroups([a, b]).some((g) => g.length === 2)).toBe(true);
+  });
+
   test("deterministic under input permutation", () => {
     const es = [edgeGeom("k1", 0, 0, 5, 5), edgeGeom("k2", 0, 0, 5, 5), edgeGeom("k3", 0, 0, 5, 5)];
     const forward = assignEdgeLanes(es);
@@ -705,6 +721,22 @@ describe("routeTaskEdges — edge-to-edge crossing handling (Finding 1)", () => 
     const asn = geom("t::/p", 0, 0, 300, 300);
     const routes = routeTaskEdges([src, asn], [], []);
     expect(routes.get(src.key)!.d).not.toBe(routes.get(asn.key)!.d);
+  });
+
+  test("a mixed-direction corridor fans to distinct curves, none overdrawn (Finding)", () => {
+    /* Three edges on one line — two forward, one reversed. A lane bow is
+       perpendicular to the edge's own direction, so without orientation
+       normalization the reversed edge collapses onto a forward one. Every routed
+       curve must be distinct. */
+    const a = geom("A", 0, 0, 200, 0);
+    const b = geom("B", 200, 0, 0, 0); // reversed
+    const c = geom("C", 0, 0, 200, 0);
+    const routes = routeTaskEdges([a, b, c], [], []);
+    const ds = [routes.get("A")!.d, routes.get("B")!.d, routes.get("C")!.d];
+    expect(new Set(ds).size).toBe(3);
+    /* Order-independent. */
+    const rev = routeTaskEdges([c, b, a], [], []);
+    for (const k of ["A", "B", "C"]) expect(rev.get(k)!.d).toBe(routes.get(k)!.d);
   });
 
   test("stays within the render budget at the 300-task ceiling (Finding 2)", () => {
