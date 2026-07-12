@@ -344,7 +344,9 @@ export function Viewer() {
       <div className="flex items-center overflow-hidden rounded-full border border-[#e0ae45]/45 bg-[#fff9ed] shadow-card">
         <button
           type="button"
-          className="px-3 py-1 text-[12px] font-bold text-[#8a5a00] hover:bg-[#e0ae45]/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent/40"
+          className={`text-[12px] font-bold text-[#8a5a00] hover:bg-[#e0ae45]/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent/40 ${
+            isMobile ? "inline-flex min-h-11 items-center px-3.5" : "px-3 py-1"
+          }`}
           aria-expanded={queueOpen}
           aria-label={t("attention.badge", { count: queue.length })}
           title={t("attention.openQueue")}
@@ -429,32 +431,61 @@ export function Viewer() {
         </div>
       ) : null}
       <main className="flex min-w-0 flex-1 flex-col">
-        {/* The corner attention anchor: the badge pill sits where the toast
-            appears, so a new toast visually docks into it (D7). */}
-        <div className="pointer-events-none fixed right-4 top-4 z-50 flex flex-col items-end gap-2">
-          {isMobile ? null : attentionBadge}
-          {toastFile ? (
-          <div className="pointer-events-auto flex max-w-[360px] gap-2 rounded-[8px] border border-[#e0ae45]/45 bg-[#fff9ed] px-4 py-3 text-[13px] font-semibold text-ink shadow-card">
+        {/* Desktop: the corner attention anchor — the badge pill sits where the
+            toast appears, so a new toast visually docks into it (D7). On the
+            phone the badge lives in the board header and the toast docks in flow
+            below (see the mobile banner), so this fixed anchor is desktop-only. */}
+        {isMobile ? null : (
+          <div className="pointer-events-none fixed right-4 top-4 z-50 flex flex-col items-end gap-2">
+            {attentionBadge}
+            {toastFile ? (
+              <div className="pointer-events-auto flex max-w-[360px] gap-2 rounded-[8px] border border-[#e0ae45]/45 bg-[#fff9ed] px-4 py-3 text-[13px] font-semibold text-ink shadow-card">
+                <button
+                  className="min-w-0 flex-1 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                  onClick={() => {
+                    openFile(toastFile);
+                    setToastPath(null);
+                  }}
+                >
+                  <span className="block text-[11px] font-bold text-[#8a5a00]">{t("viewer.agentWaiting")}</span>
+                  <span className="line-clamp-2">{toastFile.title}</span>
+                </button>
+                <button
+                  className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full border border-line bg-bg text-dim hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                  aria-label={t("viewer.closeNotification")}
+                  onClick={() => setToastPath(null)}
+                >
+                  <X className="h-3.5 w-3.5" aria-hidden />
+                </button>
+              </div>
+            ) : null}
+          </div>
+        )}
+        {/* Mobile (finding 3): the agent-waiting notification docks as an in-flow
+            banner above the board instead of a fixed overlay, so it reserves its
+            own space and never covers the toolbar. Its open target and 44px close
+            are both full tap-height. */}
+        {isMobile && toastFile ? (
+          <div className="flex shrink-0 items-stretch gap-2 border-b border-[#e0ae45]/45 bg-[#fff9ed] pl-3 pr-1.5 py-1.5">
             <button
-              className="min-w-0 flex-1 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+              className="flex min-h-11 min-w-0 flex-1 flex-col justify-center text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
               onClick={() => {
                 openFile(toastFile);
                 setToastPath(null);
               }}
             >
               <span className="block text-[11px] font-bold text-[#8a5a00]">{t("viewer.agentWaiting")}</span>
-              <span className="line-clamp-2">{toastFile.title}</span>
+              <span className="truncate text-[13px] font-semibold text-ink">{toastFile.title}</span>
             </button>
             <button
-              className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full border border-line bg-bg text-dim hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+              className="flex h-11 w-11 shrink-0 items-center justify-center self-center rounded-full border border-line bg-bg text-dim hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
               aria-label={t("viewer.closeNotification")}
               onClick={() => setToastPath(null)}
             >
-              <X className="h-3.5 w-3.5" aria-hidden />
+              <X className="h-5 w-5" aria-hidden />
             </button>
           </div>
-          ) : null}
-        </div>
+        ) : null}
         {project === OVERVIEW ? (
           <OverviewBoard
             files={files}

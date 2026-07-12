@@ -33,7 +33,7 @@ function StatusRow({ value, onPick }: { value: TaskStatus; onPick: (status: Task
             key={status}
             type="button"
             aria-pressed={active}
-            className="rounded-full border px-2 py-0.5 text-[10.5px] font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            className="inline-flex min-h-11 items-center rounded-full border px-3 text-[11px] font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
             style={
               active
                 ? { backgroundColor: tone.soft, color: tone.color, borderColor: tone.color }
@@ -307,17 +307,17 @@ function TaskDetailView({
         <button
           type="button"
           disabled={!checked.size || sending}
-          className="mt-1 inline-flex h-8 items-center justify-center gap-1.5 rounded-[8px] border border-accent bg-accent text-[11.5px] font-bold text-white hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 disabled:opacity-40"
+          className="mt-1 inline-flex min-h-11 items-center justify-center gap-1.5 rounded-[8px] border border-accent bg-accent text-[12px] font-bold text-white hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 disabled:opacity-40"
           onClick={() => void send()}
         >
-          {sending ? <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden /> : <Send className="h-3.5 w-3.5" aria-hidden />}
+          {sending ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : <Send className="h-4 w-4" aria-hidden />}
           {t("tasks.pickerSend", { count: checked.size })}
         </button>
       </div>
 
       <button
         type="button"
-        className={`inline-flex h-8 items-center justify-center gap-1.5 rounded-[8px] border text-[11.5px] font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+        className={`inline-flex min-h-11 items-center justify-center gap-1.5 rounded-[8px] border text-[12px] font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
           armDelete ? "border-err bg-err text-white" : "border-line bg-panel text-dim hover:border-err/40 hover:text-err"
         }`}
         onClick={() => {

@@ -61,8 +61,10 @@ export function TargetChecklist({
         const childCount = subtree(file, kids).filter((entry) => convPaths.has(entry.path)).length;
         return (
           <div key={file.path} className="flex items-center gap-1">
-            <label className="flex h-7 min-w-0 flex-1 cursor-pointer items-center gap-1.5 rounded-[6px] px-1.5 hover:bg-bg">
-              <input type="checkbox" checked={checked.has(file.path)} onChange={() => toggle(file.path)} className="accent-accent" />
+            {/* Full-height 44px tap targets — this checklist is the phone task
+                sheet's target picker (finding 1). */}
+            <label className="flex min-h-11 min-w-0 flex-1 cursor-pointer items-center gap-1.5 rounded-[6px] px-1.5 hover:bg-bg">
+              <input type="checkbox" checked={checked.has(file.path)} onChange={() => toggle(file.path)} className="h-5 w-5 accent-accent" />
               <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${activityDot(file.activity)}`} />
               <span className="shrink-0 rounded-full px-1.5 text-[9px] font-bold" style={badge.style}>
                 {badge.label}
@@ -74,11 +76,11 @@ export function TargetChecklist({
             {childCount ? (
               <button
                 type="button"
-                className="inline-flex h-6 shrink-0 items-center gap-0.5 rounded-[6px] px-1 text-[10px] font-semibold text-dim hover:bg-bg hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                className="inline-flex h-11 min-w-11 shrink-0 items-center justify-center gap-0.5 rounded-[6px] px-1.5 text-[10px] font-semibold text-dim hover:bg-bg hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
                 title={t("tasks.pickerAllChildren")}
                 onClick={() => checkChildren(file)}
               >
-                <CornerDownRight className="h-3 w-3" aria-hidden /> {childCount}
+                <CornerDownRight className="h-3.5 w-3.5" aria-hidden /> {childCount}
               </button>
             ) : null}
           </div>
