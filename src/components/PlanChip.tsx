@@ -53,7 +53,8 @@ function goalTooltip(goal: AgentGoal): string {
 }
 
 /* Same escalation points as the sidebar limit bars: calm, then amber, then red. */
-function ctxTone(pct: number): string {
+function ctxTone(pct: number | null): string {
+  if (pct === null) return "bg-chip text-dim";
   if (pct >= 90) return "bg-[#fbeaea] text-err";
   if (pct >= 70) return "bg-[#fff7e6] text-[#b07d18]";
   return "bg-chip text-dim";
@@ -75,15 +76,32 @@ function fmtTokens(n: number): string {
     tooltip. Rendered wherever the agent is shown (pane header, switch cards). */
 export function CtxChip({ ctx }: { ctx: CtxUsage }) {
   const { t } = useLocale();
+  const used = ctx.usedTokens.toLocaleString(bcp47());
+  let title: string;
+  let ariaLabel: string;
+  if (ctx.windowTokens !== null && ctx.pct !== null) {
+    const source = ctx.source === "registry"
+      ? t("plan.ctxSourceRegistry", { version: ctx.registryVersion ?? "?" })
+      : t("plan.ctxSourceRuntime");
+    title = `${t("plan.ctxTitle", { pct: ctx.pct, used, window: ctx.windowTokens.toLocaleString(bcp47()) })}\n${source}`;
+    ariaLabel = t("plan.ctxAria", { pct: ctx.pct });
+  } else {
+    title = t("plan.ctxTitleUnknown", { used });
+    ariaLabel = t("plan.ctxAriaUnknown", { used });
+  }
   return (
     <span
       className={`inline-flex shrink-0 items-center gap-0.5 rounded-full px-1.5 py-0.5 font-mono text-[9.5px] font-semibold ${ctxTone(ctx.pct)}`}
-      title={t("plan.ctxTitle", { pct: ctx.pct, used: ctx.usedTokens.toLocaleString(bcp47()), window: ctx.windowTokens.toLocaleString(bcp47()) })}
-      aria-label={t("plan.ctxAria", { pct: ctx.pct })}
+      title={title}
+      aria-label={ariaLabel}
     >
       ctx {fmtTokens(ctx.usedTokens)}
-      <span className="opacity-50">/</span>
-      {fmtTokens(ctx.windowTokens)}
+      {ctx.windowTokens === null ? null : (
+        <>
+          <span className="opacity-50">/</span>
+          {fmtTokens(ctx.windowTokens)}
+        </>
+      )}
     </span>
   );
 }

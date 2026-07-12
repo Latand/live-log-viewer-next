@@ -1,24 +1,20 @@
-# Issues 31 and 113: deterministic agent reaping and verified tmux kills
+# Issue #22: provenance-aware context windows and current memory snapshots
 
 ## Task statement
 
-Implement deterministic lifecycle cleanup for stale agent conversations and a reliable conversation-kill primitive. Resolve kills through registry-owned tmux pane identities, verify termination of the pane shell and recorded agent processes, apply policy TTLs to eligible automated conversations, protect active or user-managed conversations, schedule cleanup through the durable controller, journal active attempts, and expose a dry-run lifecycle report.
+Resolve context capacity from in-band runtime metadata or a versioned exact-model registry, preserve raw usage when capacity is unknown, expose provenance in the shared context chip, and keep RAM/swap snapshots current and timestamped.
 
 ## Acceptance criteria
 
-- AC1: Conversation kills resolve the target from registry-owned pane IDs and return a clear error when the target cannot be resolved.
-- AC2: A successful kill carries the original complete tmux evidence through both re-observations and requires exact endpoint, server identity, pane identity, window name, agent identity, argv, and transcript path equality through actuation and post-kill registry cleanup.
-- AC3: Reaper classification covers flow workers, headless reviewers, Viewer-launched probes, resume duplicates, and agents whose transcripts are missing, using the policy TTL assigned to each class.
-- AC4: Automatic cleanup durably remembers positive human authorship, discounts path-bound Viewer deliveries and known Claude system task notifications, protects unverifiable live transcripts, and allows unknown missing transcripts to age through the explicit dead-transcript TTL.
-- AC5: Reaper evaluation runs through the durable controller and journals active reap attempts.
-- AC6: `GET /api/lifecycle/reaper` exposes the dry-run report without actuating cleanup.
-- AC7: Automatic reap actuation requires `LLV_REAPER_ENABLED=1`.
-- AC8: Focused tests cover pane and detached-process kill resolution, process-death verification, classification, protection rules, scheduling, journaling, and the lifecycle API.
-- AC9: `bun test` and `bunx tsc --noEmit` pass.
-- AC10: Flow cleanup captures and checkpoints the clean commit SHA immediately before reviewer launch, binds merge evidence to that immutable SHA, fails closed for dirty, changed, detached, remote-less, or otherwise unverifiable live checkouts, and preserves verified evidence after checkout deletion.
-- AC11: One candidate actuation failure is journaled and leaves later eligible candidates available for the same sweep.
-- AC12: Conversation kill acquires the per-session operation lock, refreshes registry host evidence inside the lock, and marks the entry unhosted only when artifact path and complete endpoint/server/pane/window/agent/argv evidence remain unchanged after termination.
-- AC13: GitHub merge probes run asynchronously with a per-probe timeout and bounded concurrency so a stalled lookup cannot freeze the Viewer or delay independent flows indefinitely.
-- AC14: Merge-probe results update only merge evidence in a freshly loaded flow store and are discarded when the flow transition revision changed during the probe.
-- AC15: Reap actuation refreshes scanner lifecycle signals and registry turn state inside the session lock after asynchronous probes, then rejects busy, questioning, waiting, or delivery-revised candidates immediately before actuation.
-- AC16: Reviewer verdicts and terminal errors persist a terminal timestamp; legacy errored rounds use their latest durable activity timestamp for the headless-reviewer TTL.
+- AC1: Codex uses `token_count.info.model_context_window` as exact runtime capacity; records without that field preserve the prior hidden-chip behavior.
+- AC2: Claude model aliases normalize provider prefixes, dates, Bedrock versions, Vertex versions, and explicit `[1m]` mode before exact registry lookup.
+- AC3: The bundled registry is versioned `2026-07-10`; unknown and future model keys stay unresolved.
+- AC4: Every visible context result carries `source`, `confidence`, `observedAt`, and registry-derived results carry `registryVersion`.
+- AC5: Runtime percentages may reach 100; registry percentages cap at 99; registry overflow demotes to unknown capacity with raw usage retained.
+- AC6: Unknown capacity renders `ctx <used>` with a neutral tone, no denominator, withheld percentage copy, and stays hidden in mobile pane headers.
+- AC7: Known tooltips show the actual window and its runtime or registry provenance; registry tooltips disclose the registry version.
+- AC8: Capacity resolves from the same transcript record as usage, so model changes and post-compaction usage select the current record.
+- AC9: Context scanning remains synchronous and performs no provider/network polling.
+- AC10: RAM uses `MemAvailable`, swap uses `SwapTotal - SwapFree`, host memory is captured on every resources request, and the sidebar labels capture age.
+- AC11: Regression tests cover provenance math, registry overflow, exact aliases, future ids, Codex suppression, compaction/model change, and known/unknown chip rendering.
+- AC12: `bun test`, `bunx tsc --noEmit`, and `git diff --check` pass before push.

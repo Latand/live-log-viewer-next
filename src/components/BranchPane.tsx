@@ -237,7 +237,7 @@ export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noCompose
             {/* The phone header keeps only actionable or alarming chips: ctx
                 appears once it nears the limit, the worktree name and the
                 branch-kind label yield their room to the rest of the row. */}
-            {file.ctx && (!isMobile || file.ctx.pct >= 70) ? <CtxChip ctx={file.ctx} /> : null}
+            {file.ctx && (!isMobile || (file.ctx.pct !== null && file.ctx.pct >= 70)) ? <CtxChip ctx={file.ctx} /> : null}
             {file.worktree && !isMobile ? (
               <span
                 className="inline-flex shrink-0 items-center gap-0.5 rounded-full border border-line/80 px-1.5 py-0.5 font-mono text-[9.5px] text-dim"
