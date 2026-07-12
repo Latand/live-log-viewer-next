@@ -157,6 +157,20 @@ describe("taskRect / taskCardHeight", () => {
     expect(wideRun).toBeGreaterThan(oneChar);
   });
 
+  test("standalone carriage returns each count as a rendered line (Finding 2)", () => {
+    /* `whitespace-pre-wrap` breaks on a lone \r, so 100 of them are 101 rendered
+       rows (body hits its 340px cap ≈ 346px card). A LF-only split would keep
+       them in one line and undercount to ~230px, overlapping the next card. */
+    const h = taskCardHeight(task({ id: "t", text: "x\r".repeat(100) + "x" }));
+    expect(h).toBeGreaterThanOrEqual(346);
+    /* CRLF and lone LF still count identically — the split treats all three the same. */
+    const lf = taskCardHeight(task({ id: "t", text: "ab\ncd\nef" }));
+    const crlf = taskCardHeight(task({ id: "t", text: "ab\r\ncd\r\nef" }));
+    const cr = taskCardHeight(task({ id: "t", text: "ab\rcd\ref" }));
+    expect(crlf).toBe(lf);
+    expect(cr).toBe(lf);
+  });
+
   test("bounds a large multi-target chip stack (Finding 2)", () => {
     /* The rendered chip block is 28m + 4 (h-6 = 24 per row, gap-1 = 4 between,
        pb-2 = 8 under the last). A multi-target delivery can stack a dozen rows,

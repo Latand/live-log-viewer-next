@@ -41,7 +41,10 @@ const CHIP_PAD = 8;
  */
 export function taskCardHeight(task: Pick<BoardTask, "text" | "assignments" | "source">): number {
   let lines = 0;
-  for (const raw of task.text.split(/\r?\n/)) {
+  /* Split on every hard break `whitespace-pre-wrap` renders — CRLF, a lone CR,
+     or a lone LF — so a string of standalone `\r`s can't hide extra rendered
+     rows inside one counted line and undercount the height. */
+  for (const raw of task.text.split(/\r\n?|\n/)) {
     lines += Math.max(1, Math.ceil(raw.length / CHARS_PER_LINE));
   }
   const bodyH = Math.min(lines * LINE_H, TASK_BODY_MAX) + PAD_Y;
