@@ -9,6 +9,7 @@ import {
   edgeObstacles,
   rectAnchor,
   routeTaskEdge,
+  routeTaskEdges,
   TASK_BODY_MAX,
   TASK_W,
   TASK_WORLD_MARGIN,
@@ -115,6 +116,22 @@ describe("taskRect / taskCardHeight", () => {
       task({ id: "t", source: { path: "/node", ts: null, text: "Fix it", fingerprint: "fp", engine: "codex" } }),
     );
     expect(sourced).toBeGreaterThan(bare);
+  });
+
+  test("height is a conservative upper bound for wide-glyph titles (Finding 2)", () => {
+    /* 300 'W's (the widest glyph) with two assignment chips renders ~337px in
+       Chromium. The estimate must not fall short of that, or the collision pass
+       leaves the next card overlapping the rendered one. */
+    const h = taskCardHeight(task({ id: "t", text: "W".repeat(300), assignments: [assignment({}), assignment({ path: "/b" })] }));
+    expect(h).toBeGreaterThanOrEqual(337);
+  });
+
+  test("wrap width assumes the widest glyphs, never an average", () => {
+    /* The content box is only 236px, so a run of the widest glyphs cannot fit
+       on one line — the estimate counts more than a single line for them. */
+    const oneChar = taskCardHeight(task({ id: "t", text: "x" }));
+    const wideRun = taskCardHeight(task({ id: "t", text: "W".repeat(40) }));
+    expect(wideRun).toBeGreaterThan(oneChar);
   });
 });
 
@@ -408,5 +425,96 @@ describe("edgeObstacles", () => {
     const obs = edgeObstacles(edge, [source, other], [target]);
     expect(obs).toHaveLength(1);
     expect(obs[0]).toMatchObject({ x: -130, y: 180 });
+  });
+});
+
+describe("routeTaskEdges — edge-to-edge crossing handling (Finding 1)", () => {
+  function geom(key: string, x1: number, y1: number, x2: number, y2: number, over: Partial<TaskEdgeGeom> = {}): TaskEdgeGeom {
+    return { key, taskId: key, relation: "assignment", path: "/" + key, x1, y1, x2, y2, status: "assigned", failed: false, error: null, ...over };
+  }
+  /* Sample a routed path (multi-segment aware) and count proper crossings. */
+  function points(d: string, per = 61): Array<{ x: number; y: number }> {
+    const n = d
+      .replace(/[MC,]/g, " ")
+      .trim()
+      .split(/\s+/)
+      .map(Number);
+    const cub = (t: number, a: number, b: number, c: number, e: number) => {
+      const u = 1 - t;
+      return u * u * u * a + 3 * u * u * t * b + 3 * u * t * t * c + t * t * t * e;
+    };
+    const pts = [{ x: n[0]!, y: n[1]! }];
+    let x0 = n[0]!;
+    let y0 = n[1]!;
+    for (let i = 2; i + 6 <= n.length; i += 6) {
+      const [c1x, c1y, c2x, c2y, x2, y2] = n.slice(i, i + 6);
+      for (let k = 1; k <= per; k++) {
+        const t = k / per;
+        pts.push({ x: cub(t, x0, c1x!, c2x!, x2!), y: cub(t, y0, c1y!, c2y!, y2!) });
+      }
+      x0 = x2!;
+      y0 = y2!;
+    }
+    return pts;
+  }
+  function crossings(dA: string, dB: string): number {
+    const a = points(dA);
+    const b = points(dB);
+    const o = (ax: number, ay: number, bx: number, by: number, cx: number, cy: number) => (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
+    let c = 0;
+    for (let i = 0; i + 1 < a.length; i++) {
+      for (let j = 0; j + 1 < b.length; j++) {
+        const d1 = o(b[j]!.x, b[j]!.y, b[j + 1]!.x, b[j + 1]!.y, a[i]!.x, a[i]!.y);
+        const d2 = o(b[j]!.x, b[j]!.y, b[j + 1]!.x, b[j + 1]!.y, a[i + 1]!.x, a[i + 1]!.y);
+        const d3 = o(a[i]!.x, a[i]!.y, a[i + 1]!.x, a[i + 1]!.y, b[j]!.x, b[j]!.y);
+        const d4 = o(a[i]!.x, a[i]!.y, a[i + 1]!.x, a[i + 1]!.y, b[j + 1]!.x, b[j + 1]!.y);
+        if (((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) && ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0))) c++;
+      }
+    }
+    return c;
+  }
+
+  test("reduces an avoidable crossing that per-edge routing leaves tangled", () => {
+    /* An obstacle bows edge A down through edge B (two crossings); the pass
+       nudges A onto a lane that clears B. */
+    const card = { id: "A", x: 180, y: -140, w: 40, h: 280 };
+    const a = geom("A", 0, 0, 400, 0);
+    const b = geom("B", 0, 110, 400, 110);
+    const naive = crossings(routeTaskEdge(a, [card], 0).d, routeTaskEdge(b, [card], 0).d);
+    expect(naive).toBeGreaterThan(0);
+    const routes = routeTaskEdges([a, b], [card], []);
+    expect(crossings(routes.get("A")!.d, routes.get("B")!.d)).toBeLessThan(naive);
+  });
+
+  test("never increases crossings versus per-edge routing", () => {
+    const edges = [geom("A", 0, 0, 400, 0), geom("B", 0, 110, 400, 110), geom("C", 0, 220, 400, 40)];
+    const card = { id: "A", x: 180, y: -140, w: 40, h: 280 };
+    const routes = routeTaskEdges(edges, [card], []);
+    const naive = new Map(edges.map((e) => [e.key, routeTaskEdge(e, [card], 0).d]));
+    const total = (get: (k: string) => string) =>
+      crossings(get("A"), get("B")) + crossings(get("A"), get("C")) + crossings(get("B"), get("C"));
+    expect(total((k) => routes.get(k)!.d)).toBeLessThanOrEqual(total((k) => naive.get(k)!));
+  });
+
+  test("a topologically forced crossing settles to a single deterministic crossing", () => {
+    /* The two diagonals of a box interleave, so no planar route removes the
+       crossing without a board-spanning detour — the honest outcome is one
+       clean crossing, produced deterministically for any input order. */
+    const a = geom("A", 0, 0, 1000, 1000);
+    const b = geom("B", 0, 1000, 1000, 0);
+    const forward = routeTaskEdges([a, b], [], []);
+    const reversed = routeTaskEdges([b, a], [], []);
+    expect(forward.get("A")!.d).toBe(reversed.get("A")!.d);
+    expect(forward.get("B")!.d).toBe(reversed.get("B")!.d);
+    expect(crossings(forward.get("A")!.d, forward.get("B")!.d)).toBe(1);
+  });
+
+  test("coincident edges stay fanned onto separate lanes", () => {
+    /* Source + assignment to the same session: the pass must keep them on
+       distinct lanes, never collapse them chasing a crossing. */
+    const src = geom("t::source::/p", 0, 0, 300, 300, { relation: "source" });
+    const asn = geom("t::/p", 0, 0, 300, 300);
+    const routes = routeTaskEdges([src, asn], [], []);
+    expect(routes.get(src.key)!.d).not.toBe(routes.get(asn.key)!.d);
   });
 });

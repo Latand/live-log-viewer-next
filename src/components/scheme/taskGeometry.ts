@@ -9,18 +9,29 @@ export const TASK_W = 260;
 /** Body height cap; past it the card body scrolls internally. */
 export const TASK_BODY_MAX = 340;
 const TASK_MIN_H = 64;
-/* Estimation metrics for the card body: 12.5px text on 17px lines inside
-   12px horizontal padding. The estimate feeds edge anchors and camera
-   glides, so a small drift against the DOM height is fine. */
+/* Card body geometry: 12.5px text on 17px lines inside 12px (px-3) horizontal
+   padding, so the wrap width is TASK_W − 24 = 236px. This estimate must be an
+   *upper* bound on the rendered height — underestimating lets a tall card render
+   past its computed box and overlap its neighbour (issue #17) — so line count is
+   figured against the widest glyphs a proportional bold font produces (W/M run
+   ~13px), never an average. Real text of the same length wraps to fewer lines,
+   so the estimate is conservative, and the body is capped either way. */
 const STRIP_H = 6;
 const PAD_Y = 20;
 const LINE_H = 17;
-const CHARS_PER_LINE = 34;
+const BODY_CONTENT_W = TASK_W - 24;
+/* Widest bold glyph advance at 12.5px; the fewest characters a full line can
+   hold, so the most lines a given length can wrap to. */
+const MAX_GLYPH_W = 13;
+const CHARS_PER_LINE = Math.max(1, Math.floor(BODY_CONTENT_W / MAX_GLYPH_W));
 const CHIP_ROW_H = 26;
 
 /**
  * Estimated on-board height of a task card: status strip + wrapped text
  * (capped at the internal-scroll threshold) + one chip row per assignment.
+ * Deliberately conservative — see the wrap-width note above — so the returned
+ * box always contains the rendered card and the collision pass never lets two
+ * cards overlap on screen.
  */
 export function taskCardHeight(task: Pick<BoardTask, "text" | "assignments" | "source">): number {
   let lines = 0;
@@ -542,4 +553,190 @@ export function assignEdgeLanes(edges: readonly TaskEdgeGeom[]): Map<string, num
     });
   }
   return lanes;
+}
+
+function endpointSig(edge: TaskEdgeGeom): string {
+  return `${Math.round(edge.x1)}:${Math.round(edge.y1)}:${Math.round(edge.x2)}:${Math.round(edge.y2)}`;
+}
+
+type RoutePoint = { x: number; y: number };
+
+/* Sample a routed path (one or several cubics) into a polyline for edge-vs-edge
+   crossing tests. */
+function sampleRoutePoints(d: string, per = 12): RoutePoint[] {
+  const n = d.replace(/[MC,]/g, " ").trim().split(/\s+/).map(Number);
+  const pts: RoutePoint[] = [{ x: n[0]!, y: n[1]! }];
+  let x0 = n[0]!;
+  let y0 = n[1]!;
+  for (let i = 2; i + 6 <= n.length; i += 6) {
+    const c1x = n[i]!;
+    const c1y = n[i + 1]!;
+    const c2x = n[i + 2]!;
+    const c2y = n[i + 3]!;
+    const x2 = n[i + 4]!;
+    const y2 = n[i + 5]!;
+    for (let k = 1; k <= per; k++) {
+      const t = k / per;
+      pts.push({ x: cubicAt(t, x0, c1x, c2x, x2), y: cubicAt(t, y0, c1y, c2y, y2) });
+    }
+    x0 = x2;
+    y0 = y2;
+  }
+  return pts;
+}
+
+/* Parametric intersection of segments a–b and c–d, or null when they miss or are
+   parallel. Inclusive of the segment ends, so a crossing that lands exactly on a
+   shared sample vertex (two box diagonals meeting dead-centre) is still found —
+   the degenerate case a strict orientation test silently drops. */
+function segIntersection(a: RoutePoint, b: RoutePoint, c: RoutePoint, d: RoutePoint): RoutePoint | null {
+  const rx = b.x - a.x;
+  const ry = b.y - a.y;
+  const sx = d.x - c.x;
+  const sy = d.y - c.y;
+  const den = rx * sy - ry * sx;
+  if (den === 0) return null; // parallel or collinear — never a transversal cross
+  const qx = c.x - a.x;
+  const qy = c.y - a.y;
+  const t = (qx * sy - qy * sx) / den;
+  const u = (qx * ry - qy * rx) / den;
+  if (t < 0 || t > 1 || u < 0 || u > 1) return null;
+  return { x: a.x + t * rx, y: a.y + t * ry };
+}
+
+/* A crossing within this many px of a point the two edges legitimately share
+   (a fan-in/out endpoint) is not a tangle — ignore it. */
+const SHARED_ENDPOINT_EPS = 2;
+
+/* The endpoints two edges have in common: fan-in edges meeting at one target, or
+   fan-out edges leaving one card, touch there by design and must not be read as
+   crossing. */
+function sharedEndpoints(a: TaskEdgeGeom, b: TaskEdgeGeom): RoutePoint[] {
+  const ends = (e: TaskEdgeGeom): RoutePoint[] => [
+    { x: e.x1, y: e.y1 },
+    { x: e.x2, y: e.y2 },
+  ];
+  const out: RoutePoint[] = [];
+  for (const p of ends(a)) {
+    for (const q of ends(b)) {
+      if (Math.round(p.x) === Math.round(q.x) && Math.round(p.y) === Math.round(q.y)) out.push(p);
+    }
+  }
+  return out;
+}
+
+/* Do two routed polylines cross anywhere other than a point they legitimately
+   share? Robust to the crossing landing exactly on a sample vertex. */
+function routesCross(a: readonly RoutePoint[], b: readonly RoutePoint[], shared: readonly RoutePoint[]): boolean {
+  for (let i = 0; i + 1 < a.length; i++) {
+    for (let j = 0; j + 1 < b.length; j++) {
+      const p = segIntersection(a[i]!, a[i + 1]!, b[j]!, b[j + 1]!);
+      if (!p) continue;
+      if (shared.some((s) => Math.abs(s.x - p.x) <= SHARED_ENDPOINT_EPS && Math.abs(s.y - p.y) <= SHARED_ENDPOINT_EPS)) continue;
+      return true;
+    }
+  }
+  return false;
+}
+
+/* Extra perpendicular bows a crossing edge may try, on top of its lane, to slip
+   past another edge. Bounded so the pass is cheap and always terminates. */
+const CROSS_BOWS = [1, -1, 2, -2, 3, -3];
+const CROSS_PASSES = 2;
+
+/**
+ * Routes every task edge together (issue #17): lanes fan coincident edges apart
+ * (see {@link assignEdgeLanes}), each edge routes around cards and panes (see
+ * {@link edgeObstacles} / {@link routeTaskEdge}), and a bounded, deterministic
+ * pass then reduces edge-to-edge crossings. For each lone edge still crossing
+ * another, it tries a few extra perpendicular bows and keeps whichever crosses
+ * the *fewest* other edges without re-entering an obstacle. Coincident edges are
+ * left on their assigned lanes so the pass never collapses a fanned pair.
+ *
+ * Any crossing that survives the pass — the diagonals of a box interleave, so no
+ * bounded planar route separates them — is not left silent: of each still-crossing
+ * pair the higher-key edge is marked `crosses`, so the layer fades it and it reads
+ * as passing *behind* the other rather than tangling with it.
+ *
+ * Pure and order-independent: the crossing test is symmetric, the pass walks
+ * edges in key order, and the fade always picks the higher key, so the result is
+ * identical for any input ordering.
+ */
+export function routeTaskEdges(
+  edges: readonly TaskEdgeGeom[],
+  cards: readonly TaskEdgeObstacle[],
+  containers: readonly SchemeRect[],
+): Map<string, TaskEdgeRoute> {
+  const lanes = assignEdgeLanes(edges);
+  const sigCount = new Map<string, number>();
+  for (const edge of edges) sigCount.set(endpointSig(edge), (sigCount.get(endpointSig(edge)) ?? 0) + 1);
+
+  const byKey = new Map<string, TaskEdgeGeom>(edges.map((edge) => [edge.key, edge]));
+  const state = new Map<string, { route: TaskEdgeRoute; pts: RoutePoint[] }>();
+  for (const edge of edges) {
+    const route = routeTaskEdge(edge, edgeObstacles(edge, cards, containers), lanes.get(edge.key) ?? 0);
+    state.set(edge.key, { route, pts: sampleRoutePoints(route.d) });
+  }
+
+  /* How many *other* edges this route tangles with — a boolean per pair, robust
+     to the exact crossing point, so a symmetric dead-centre crossing counts. */
+  const crossingsAgainstOthers = (key: string, pts: readonly RoutePoint[]): number => {
+    const edge = byKey.get(key)!;
+    let total = 0;
+    for (const [otherKey, other] of state) {
+      if (otherKey === key) continue;
+      if (routesCross(pts, other.pts, sharedEndpoints(edge, byKey.get(otherKey)!))) total++;
+    }
+    return total;
+  };
+
+  const order = [...edges].sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+  for (let pass = 0; pass < CROSS_PASSES; pass++) {
+    let improved = false;
+    for (const edge of order) {
+      /* Never perturb a coincident edge — its lane is what keeps a fanned pair
+         from overdrawing, and parallel tracks never register as crossing. */
+      if ((sigCount.get(endpointSig(edge)) ?? 0) > 1) continue;
+      const current = state.get(edge.key)!;
+      let bestCrossings = crossingsAgainstOthers(edge.key, current.pts);
+      if (bestCrossings === 0) continue;
+      const obstacles = edgeObstacles(edge, cards, containers);
+      const laneBase = lanes.get(edge.key) ?? 0;
+      let best = current;
+      for (const bow of CROSS_BOWS) {
+        const route = routeTaskEdge(edge, obstacles, laneBase + bow);
+        const pts = sampleRoutePoints(route.d);
+        const crossings = crossingsAgainstOthers(edge.key, pts);
+        if (crossings < bestCrossings) {
+          best = { route, pts };
+          bestCrossings = crossings;
+        }
+      }
+      if (best !== current) {
+        state.set(edge.key, best);
+        improved = true;
+      }
+    }
+    if (!improved) break;
+  }
+
+  /* Fade the residual: for every pair still crossing after the pass, mark the
+     higher-key edge so it reads as passing behind — a crossing is never left
+     silently solid (issue #17). Deterministic: the pair is symmetric and the
+     higher key is a stable choice. */
+  const faded = new Set<string>();
+  for (let i = 0; i < order.length; i++) {
+    for (let j = i + 1; j < order.length; j++) {
+      const a = order[i]!;
+      const b = order[j]!;
+      if (!routesCross(state.get(a.key)!.pts, state.get(b.key)!.pts, sharedEndpoints(a, b))) continue;
+      faded.add(a.key < b.key ? b.key : a.key);
+    }
+  }
+
+  const out = new Map<string, TaskEdgeRoute>();
+  for (const [key, value] of state) {
+    out.set(key, faded.has(key) && !value.route.crosses ? { ...value.route, crosses: true } : value.route);
+  }
+  return out;
 }

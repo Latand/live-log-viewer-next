@@ -6,7 +6,7 @@ import { TASK_TONES } from "@/components/tasks/taskModel";
 
 import type { SchemeRect } from "./layout";
 import { MOVE_EASE, MOVE_MS } from "./nodes";
-import { assignEdgeLanes, edgeObstacles, routeTaskEdge, type TaskEdgeGeom, type TaskEdgeObstacle } from "./taskGeometry";
+import { routeTaskEdges, type TaskEdgeGeom, type TaskEdgeObstacle } from "./taskGeometry";
 
 /* Coral of a failed delivery beats the task's own status tone. */
 const FAILED_COLOR = "#d97757";
@@ -47,17 +47,12 @@ export const TaskEdgesLayer = memo(function TaskEdgesLayer({
   /** Ref-stable: retries one failed target of one task. */
   onRetry: (taskId: string, path: string) => void;
 }) {
-  const lanes = useMemo(() => assignEdgeLanes(edges), [edges]);
-  /* Route once per edge/obstacle change: each edge avoids every other card and
-     every container but the ones it starts or ends on, on its own lane. */
-  const routed = useMemo(
-    () =>
-      edges.map((edge) => ({
-        edge,
-        route: routeTaskEdge(edge, edgeObstacles(edge, cards, containers), lanes.get(edge.key) ?? 0),
-      })),
-    [edges, cards, containers, lanes],
-  );
+  /* Route all edges together so they fan off coincident tracks, avoid every card
+     and container but their own endpoints, and untangle edge-to-edge crossings. */
+  const routed = useMemo(() => {
+    const routes = routeTaskEdges(edges, cards, containers);
+    return edges.map((edge) => ({ edge, route: routes.get(edge.key)! }));
+  }, [edges, cards, containers]);
   if (!edges.length) return null;
   return (
     <svg
