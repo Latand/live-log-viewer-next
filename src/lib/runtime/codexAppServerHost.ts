@@ -151,6 +151,11 @@ function resumedTurns(value: unknown): JsonObject[] {
   return Array.isArray(page?.data) ? page.data.map(record).filter((turn): turn is JsonObject => turn !== null) : [];
 }
 
+function resumedActiveTurnId(value: unknown): string | null {
+  const activeTurn = resumedTurns(value).findLast((turn) => stringField(turn, "status") === "inProgress");
+  return activeTurn ? stringField(activeTurn, "id") : null;
+}
+
 function threadStatus(value: unknown): ThreadStatus | null {
   const outer = record(value);
   const thread = record(outer?.thread);
@@ -271,7 +276,7 @@ export class CodexAppServerHost implements EngineHost {
       const restored = provisional.restoreEvents();
       if (threadId && restored === 0) provisional.restoreThreadHistory(result);
       provisional.flushPreIdentityEvents();
-      provisional.reconcileAfterOpen(threadStatus(result));
+      provisional.reconcileAfterOpen(threadStatus(result), resumedActiveTurnId(result));
       return provisional;
     } catch (error) {
       await provisional.release();
@@ -492,8 +497,16 @@ export class CodexAppServerHost implements EngineHost {
     return stored.length;
   }
 
-  private reconcileAfterOpen(status: ThreadStatus | null): void {
+  private reconcileAfterOpen(status: ThreadStatus | null, resumedTurnId: string | null): void {
     const resumedStatus = status ?? { type: "idle" as const, activeFlags: [] };
+    if (resumedStatus.type === "active" && !resumedTurnId) {
+      throw new Error("thread/resume returned active status without an active turn id");
+    }
+    if (resumedStatus.type === "active" && resumedTurnId && this.activeTurnId !== resumedTurnId) {
+      if (this.activeTurnId) this.emit({ kind: "turn-ended", turnId: this.activeTurnId, status: "error" });
+      this.activeTurnId = resumedTurnId;
+      this.emit({ kind: "turn-started", turnId: resumedTurnId });
+    }
     if (this.activeTurnId && resumedStatus.type !== "active") {
       const turnId = this.activeTurnId;
       this.activeTurnId = null;

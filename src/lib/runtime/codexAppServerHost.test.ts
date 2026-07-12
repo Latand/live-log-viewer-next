@@ -304,6 +304,41 @@ describe("CodexAppServerHost", () => {
     await host.release();
   });
 
+  test("restores the resumed active turn after a dead ledger", async () => {
+    const eventStore = new MemoryEventStore();
+    eventStore.append("active-after-crash", { kind: "turn-started", turnId: "stale-turn", seq: 1 });
+    eventStore.append("active-after-crash", { kind: "session-status", status: "dead", seq: 2 });
+    const server = new FakeAppServer("active-after-crash", "active-after-crash", false, [{
+      id: "resumed-turn",
+      status: "inProgress",
+      items: [],
+    }], { type: "active", activeFlags: ["running"] });
+    const host = await CodexAppServerHost.adopt("active-after-crash", {
+      cwd: "/repo",
+      eventStore,
+      initialEventCursor: 2,
+      spawnProcess: fakeSpawn(server),
+    });
+    const replay = host.attach(2)[Symbol.asyncIterator]();
+    expect((await replay.next()).value).toEqual({ kind: "turn-started", turnId: "resumed-turn", seq: 3 });
+    expect((await replay.next()).value).toEqual({
+      kind: "session-status",
+      status: "active",
+      activeFlags: ["running"],
+      seq: 4,
+    });
+    expect(await host.health()).toMatchObject({ status: "active", activeTurnRef: "resumed-turn" });
+    expect(await host.send({ id: "steer-resumed", text: "continue", expectedTurnId: "resumed-turn" }))
+      .toEqual({ outcome: "steered", turnId: "resumed-turn" });
+    await host.interrupt("resumed-turn");
+    expect(server.requests.some((request) => request.method === "turn/start")).toBeFalse();
+    expect(server.requests.find((request) => request.method === "turn/steer")?.params)
+      .toMatchObject({ expectedTurnId: "resumed-turn" });
+    expect(server.requests.find((request) => request.method === "turn/interrupt")?.params)
+      .toMatchObject({ turnId: "resumed-turn" });
+    await host.release();
+  });
+
   test("resolves ledger attention during adoption and preserves resumed active flags", async () => {
     const eventStore = new MemoryEventStore();
     eventStore.append("crashed-attention", {
@@ -313,7 +348,11 @@ describe("CodexAppServerHost", () => {
       attention: { command: "date" },
       seq: 1,
     });
-    const server = new FakeAppServer("crashed-attention", "crashed-attention", false, [], {
+    const server = new FakeAppServer("crashed-attention", "crashed-attention", false, [{
+      id: "approval-turn",
+      status: "inProgress",
+      items: [],
+    }], {
       type: "active",
       activeFlags: ["waitingForApproval"],
     });
@@ -324,20 +363,22 @@ describe("CodexAppServerHost", () => {
       spawnProcess: fakeSpawn(server),
     });
     const replay = host.attach(1)[Symbol.asyncIterator]();
+    expect((await replay.next()).value).toEqual({ kind: "turn-started", turnId: "approval-turn", seq: 2 });
     expect((await replay.next()).value).toEqual({
       kind: "attention-resolved",
       id: "item/commandExecution/requestApproval:approval-crash",
       resolution: "host-restarted",
-      seq: 2,
+      seq: 3,
     });
     expect((await replay.next()).value).toEqual({
       kind: "session-status",
       status: "active",
       activeFlags: ["waitingForApproval"],
-      seq: 3,
+      seq: 4,
     });
     expect(await host.health()).toMatchObject({
       status: "active",
+      activeTurnRef: "approval-turn",
       pendingAttention: [],
       activeFlags: ["waitingForApproval"],
     });
