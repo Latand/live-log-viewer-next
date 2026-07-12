@@ -6,8 +6,10 @@ import {
   assignEdgeLanes,
   buildTaskEdges,
   buildTaskTargetIndex,
+  corridorGroups,
   edgeObstacles,
   rectAnchor,
+  routePathsBounds,
   routeTaskEdge,
   routeTaskEdges,
   TASK_BODY_MAX,
@@ -235,6 +237,33 @@ describe("taskWorldBounds", () => {
     expect(bounds.x + bounds.w).toBe(1000);
     expect(bounds.y + bounds.h).toBe(800);
   });
+
+  test("a detour that escapes the layout is covered once route bounds are folded in (Finding 1)", () => {
+    /* An edge routes around a pane at the right world edge, so its corridor sits
+       past x=2000. The world box (viewBox for the edge SVG, camera and minimap)
+       must grow to it or the connector and its marker clip out. */
+    const pane: SchemeRect = { x: 1400, y: 100, w: 600, h: 680 };
+    const edge: TaskEdgeGeom = { key: "A", taskId: "A", relation: "assignment", path: "/n", x1: 1900, y1: 0, x2: 1900, y2: 900, status: "assigned", failed: false, error: null };
+    const routes = routeTaskEdges([edge], [], [pane]);
+    const routeBox = routePathsBounds(routes.values())!;
+    expect(routeBox.x + routeBox.w).toBeGreaterThan(2000); // detour truly escapes the layout width
+    /* Without the route bounds the world clips the layout at 2000. */
+    expect(taskWorldBounds(2000, 1000, []).x + taskWorldBounds(2000, 1000, []).w).toBeLessThan(routeBox.x + routeBox.w);
+    /* Folding the route bounds in covers the whole detour. */
+    const world = taskWorldBounds(2000, 1000, [routeBox]);
+    expect(world.x + world.w).toBeGreaterThanOrEqual(routeBox.x + routeBox.w);
+    expect(world.x).toBeLessThanOrEqual(routeBox.x);
+  });
+
+  test("routePathsBounds is null with no edges and pads the markers otherwise", () => {
+    expect(routePathsBounds([])).toBeNull();
+    const box = routePathsBounds([{ d: "M 0 0 C 50 0, 50 100, 100 100", mid: { x: 50, y: 50 }, crosses: false }])!;
+    /* Control-point hull is x∈[0,100], y∈[0,100], padded outward for the markers. */
+    expect(box.x).toBeLessThan(0);
+    expect(box.y).toBeLessThan(0);
+    expect(box.x + box.w).toBeGreaterThan(100);
+    expect(box.y + box.h).toBeGreaterThan(100);
+  });
 });
 
 describe("routeTaskEdge", () => {
@@ -453,6 +482,31 @@ describe("assignEdgeLanes", () => {
 
   test("edges with distinct endpoints all stay on lane 0", () => {
     const lanes = assignEdgeLanes([edgeGeom("a", 0, 0, 10, 10), edgeGeom("b", 0, 0, 10, 20)]);
+    expect([...lanes.values()]).toEqual([0, 0]);
+  });
+
+  test("partially collinear edges sharing a corridor get separate lanes (Finding)", () => {
+    /* (0,0)→(1000,0) and (500,0)→(1500,0) overlap on a 500px run of the same
+       line — distinct endpoints, so the old endpoint-signature grouping left
+       both on lane 0 and they drew as one merged stroke. The corridor grouping
+       fans them apart. */
+    const a = edgeGeom("A", 0, 0, 1000, 0);
+    const b = edgeGeom("B", 500, 0, 1500, 0);
+    expect(corridorGroups([a, b]).some((g) => g.length === 2)).toBe(true);
+    expect(new Set(assignEdgeLanes([a, b]).values()).size).toBe(2);
+    const routes = routeTaskEdges([a, b], [], []);
+    expect(routes.get("A")!.d).not.toBe(routes.get("B")!.d);
+  });
+
+  test("reverse-direction coincident edges are one corridor (direction-agnostic)", () => {
+    const groups = corridorGroups([edgeGeom("A", 0, 0, 200, 0), edgeGeom("B", 200, 0, 0, 0)]);
+    expect(groups.some((g) => g.length === 2)).toBe(true);
+  });
+
+  test("collinear edges that do not overlap stay on lane 0", () => {
+    /* Same line, but their spans (0–100 and 500–600) do not touch — no overdraw,
+       so they must not be needlessly fanned. */
+    const lanes = assignEdgeLanes([edgeGeom("a", 0, 0, 100, 0), edgeGeom("b", 500, 0, 600, 0)]);
     expect([...lanes.values()]).toEqual([0, 0]);
   });
 

@@ -4,9 +4,8 @@ import { memo, useMemo } from "react";
 
 import { TASK_TONES } from "@/components/tasks/taskModel";
 
-import type { SchemeRect } from "./layout";
 import { MOVE_EASE, MOVE_MS } from "./nodes";
-import { routeTaskEdges, taskEdgesSignature, type TaskEdgeGeom, type TaskEdgeObstacle } from "./taskGeometry";
+import { type TaskEdgeGeom, type TaskEdgeRoute } from "./taskGeometry";
 
 /* Coral of a failed delivery beats the task's own status tone. */
 const FAILED_COLOR = "#d97757";
@@ -29,36 +28,20 @@ const CROSS_FADE = 0.4;
 export const TaskEdgesLayer = memo(function TaskEdgesLayer({
   edges,
   world,
-  cards = [],
-  containers = [],
+  routes,
   onRetry,
 }: {
   edges: TaskEdgeGeom[];
   /** World box to span — origin (world.x/world.y) may be negative, so the svg
-      is positioned and view-boxed to it rather than pinned to (0,0). Task cards
-      relocated beyond the layout bounds keep their edges inside the canvas. */
+      is positioned and view-boxed to it rather than pinned to (0,0). The world
+      box already includes routed detours, so no path or marker is clipped. */
   world: { x: number; y: number; w: number; h: number };
-  /** Every placed task card; each edge routes around the ones it neither starts
-      nor ends on. */
-  cards?: readonly TaskEdgeObstacle[];
-  /** Visible containers — panes, review decks, quiet stacks, drafts — an edge
-      must not cross on its way to a target it does not land on. */
-  containers?: readonly SchemeRect[];
+  /** Routed geometry per edge key — computed once in SchemeBoard so the world
+      box can grow to contain it. */
+  routes: ReadonlyMap<string, TaskEdgeRoute>;
   /** Ref-stable: retries one failed target of one task. */
   onRetry: (taskId: string, path: string) => void;
 }) {
-  /* Route all edges together so they fan off coincident tracks, avoid every card
-     and container but their own endpoints, and untangle edge-to-edge crossings.
-     The global pass is the layer's one heavy computation, and the 10 s poll hands
-     us fresh arrays every tick, so it is cached on a geometry signature: an
-     unchanged board reuses the routes instead of recomputing them on the render
-     thread, and only a real move re-runs the pass (issue #17). */
-  const sig = useMemo(() => taskEdgesSignature(edges, cards, containers), [edges, cards, containers]);
-  const routes = useMemo(
-    () => routeTaskEdges(edges, cards, containers),
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed on the geometry signature; edges/cards/containers change identity every poll but not content
-    [sig],
-  );
   const routed = useMemo(() => edges.map((edge) => ({ edge, route: routes.get(edge.key)! })), [edges, routes]);
   if (!edges.length) return null;
   return (

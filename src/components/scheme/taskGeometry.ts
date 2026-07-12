@@ -609,34 +609,89 @@ export function edgeObstacles(
   return out;
 }
 
+/* Collinearity tolerances (px): endpoints within LINE_EPS of a shared line count
+   as on it, and the projections must overlap by more than CORRIDOR_MIN so a mere
+   shared endpoint (fan-in/out) is not treated as a shared corridor. */
+const LINE_EPS = 1.5;
+const CORRIDOR_MIN = 8;
+
 /**
- * Deterministic lane index per edge so coincident edges never overdraw (issue
- * #17). A task's source and an assignment resolving to the same session produce
- * byte-identical endpoints; grouped by their (rounded) endpoints, the group's
- * first edge by key keeps lane 0 and the rest alternate to either side (+1, −1,
- * +2, …), which {@link routeTaskEdge} turns into parallel bowed tracks. A lone
- * edge is lane 0. Order-independent — grouping and ordering read only edge data.
+ * Do two edges share a collinear corridor — lie on the same line and overlap
+ * along it by a visible run? Direction-agnostic, so a segment and its reverse
+ * count. Coincident (identical-endpoint) edges are the fully-overlapping case.
  */
-export function assignEdgeLanes(edges: readonly TaskEdgeGeom[]): Map<string, number> {
-  const groups = new Map<string, TaskEdgeGeom[]>();
-  for (const edge of edges) {
-    const sig = `${Math.round(edge.x1)}:${Math.round(edge.y1)}:${Math.round(edge.x2)}:${Math.round(edge.y2)}`;
-    const list = groups.get(sig);
-    if (list) list.push(edge);
-    else groups.set(sig, [edge]);
-  }
-  const lanes = new Map<string, number>();
-  for (const list of groups.values()) {
-    const ordered = [...list].sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
-    ordered.forEach((edge, i) => {
-      lanes.set(edge.key, i === 0 ? 0 : i % 2 === 1 ? (i + 1) / 2 : -(i / 2));
-    });
-  }
-  return lanes;
+function shareCorridor(a: TaskEdgeGeom, b: TaskEdgeGeom): boolean {
+  const adx = a.x2 - a.x1;
+  const ady = a.y2 - a.y1;
+  const alen = Math.hypot(adx, ady);
+  if (alen === 0) return false;
+  const ux = adx / alen;
+  const uy = ady / alen;
+  /* b's direction parallel to a's (cross of unit vectors ≈ 0)? */
+  const bdx = b.x2 - b.x1;
+  const bdy = b.y2 - b.y1;
+  const blen = Math.hypot(bdx, bdy);
+  if (blen === 0) return false;
+  if (Math.abs(ux * (bdy / blen) - uy * (bdx / blen)) > LINE_EPS / alen + 1e-9) return false;
+  /* b's endpoints on a's infinite line (perpendicular distance)? */
+  const perp = (px: number, py: number) => Math.abs((px - a.x1) * uy - (py - a.y1) * ux);
+  if (perp(b.x1, b.y1) > LINE_EPS || perp(b.x2, b.y2) > LINE_EPS) return false;
+  /* Overlap of the two 1-D projections onto a's direction. */
+  const proj = (px: number, py: number) => (px - a.x1) * ux + (py - a.y1) * uy;
+  const b0 = Math.min(proj(b.x1, b.y1), proj(b.x2, b.y2));
+  const b1 = Math.max(proj(b.x1, b.y1), proj(b.x2, b.y2));
+  return Math.min(alen, b1) - Math.max(0, b0) > CORRIDOR_MIN;
 }
 
-function endpointSig(edge: TaskEdgeGeom): string {
-  return `${Math.round(edge.x1)}:${Math.round(edge.y1)}:${Math.round(edge.x2)}:${Math.round(edge.y2)}`;
+/**
+ * Groups of edges that would overdraw one another — each maximal set sharing a
+ * collinear corridor (issue #17), coincident edges being the fully-overlapping
+ * special case. Union-find over {@link shareCorridor} pairs, so a chain of
+ * overlaps lands in one group. Order-independent; every group is key-sorted.
+ */
+export function corridorGroups(edges: readonly TaskEdgeGeom[]): TaskEdgeGeom[][] {
+  const parent = edges.map((_, i) => i);
+  const find = (i: number): number => {
+    while (parent[i] !== i) {
+      parent[i] = parent[parent[i]!]!;
+      i = parent[i]!;
+    }
+    return i;
+  };
+  for (let i = 0; i < edges.length; i++) {
+    for (let j = i + 1; j < edges.length; j++) {
+      if (shareCorridor(edges[i]!, edges[j]!)) parent[find(i)] = find(j);
+    }
+  }
+  const byRoot = new Map<number, TaskEdgeGeom[]>();
+  edges.forEach((edge, i) => {
+    const root = find(i);
+    const list = byRoot.get(root);
+    if (list) list.push(edge);
+    else byRoot.set(root, [edge]);
+  });
+  return [...byRoot.values()].map((group) => group.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0)));
+}
+
+/** Symmetric spread within a corridor group: first edge holds lane 0, the rest
+    alternate to either side (+1, −1, +2, …). */
+function laneAt(index: number): number {
+  return index === 0 ? 0 : index % 2 === 1 ? (index + 1) / 2 : -(index / 2);
+}
+
+/**
+ * Deterministic lane index per edge so overlapping edges never overdraw (issue
+ * #17). Edges sharing a collinear corridor — coincident source/assignment pairs,
+ * or partially-overlapping connectors on the same line — are grouped and fanned
+ * onto parallel bowed tracks by {@link routeTaskEdge}. A lone edge is lane 0.
+ * Order-independent — grouping and ordering read only edge data.
+ */
+export function assignEdgeLanes(edges: readonly TaskEdgeGeom[]): Map<string, number> {
+  const lanes = new Map<string, number>();
+  for (const group of corridorGroups(edges)) {
+    group.forEach((edge, i) => lanes.set(edge.key, laneAt(i)));
+  }
+  return lanes;
 }
 
 type RoutePoint = { x: number; y: number };
@@ -811,9 +866,15 @@ export function routeTaskEdges(
   cards: readonly TaskEdgeObstacle[],
   containers: readonly SchemeRect[],
 ): Map<string, TaskEdgeRoute> {
-  const lanes = assignEdgeLanes(edges);
-  const sigCount = new Map<string, number>();
-  for (const edge of edges) sigCount.set(endpointSig(edge), (sigCount.get(endpointSig(edge)) ?? 0) + 1);
+  /* Corridor groups drive both the lanes (fan overlapping edges apart) and the
+     set of edges the reduction must not perturb — moving a fanned edge off its
+     lane would let it overdraw its corridor-mate again. */
+  const lanes = new Map<string, number>();
+  const corridorMate = new Set<string>();
+  for (const group of corridorGroups(edges)) {
+    group.forEach((edge, i) => lanes.set(edge.key, laneAt(i)));
+    if (group.length > 1) for (const edge of group) corridorMate.add(edge.key);
+  }
 
   const byKey = new Map<string, TaskEdgeGeom>(edges.map((edge) => [edge.key, edge]));
   const state = new Map<string, { route: TaskEdgeRoute; pts: RoutePoint[]; box: Bounds }>();
@@ -844,9 +905,9 @@ export function routeTaskEdges(
     for (let pass = 0; pass < CROSS_PASSES; pass++) {
       let improved = false;
       for (const edge of order) {
-        /* Never perturb a coincident edge — its lane is what keeps a fanned pair
+        /* Never perturb a corridor-mate — its lane is what keeps a fanned pair
            from overdrawing, and parallel tracks never register as crossing. */
-        if ((sigCount.get(endpointSig(edge)) ?? 0) > 1) continue;
+        if (corridorMate.has(edge.key)) continue;
         const current = state.get(edge.key)!;
         let bestCrossings = crossingsAgainstOthers(edge.key, current.pts, current.box);
         if (bestCrossings === 0 || bestCrossings > CROSS_BUSY) continue;
@@ -902,4 +963,38 @@ export function routeTaskEdges(
     out.set(key, faded.has(key) && !value.route.crosses ? { ...value.route, crosses: true } : value.route);
   }
   return out;
+}
+
+/* Pad around a route's control-point hull covering the endpoint dot and the
+   retry-badge disc so neither is clipped at the world edge. */
+const ROUTE_MARKER_PAD = 14;
+
+/**
+ * Union bounding box of every routed edge path and its markers (issue #17). The
+ * world box must include this: a valid obstacle detour can swing a connector — or
+ * its retry badge — past the card/layout extent, and the task-edge SVG, camera
+ * clamp and minimap all read the world box, so anything outside it is clipped and
+ * unreachable. The cubic control points bound the curve (convex-hull property),
+ * and `mid` is where the badge sits. Null when there are no edges.
+ */
+export function routePathsBounds(routes: Iterable<TaskEdgeRoute>): SchemeRect | null {
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  let any = false;
+  const grow = (x: number, y: number) => {
+    if (x < minX) minX = x;
+    if (x > maxX) maxX = x;
+    if (y < minY) minY = y;
+    if (y > maxY) maxY = y;
+  };
+  for (const route of routes) {
+    any = true;
+    const n = route.d.replace(/[MC,]/g, " ").trim().split(/\s+/).map(Number);
+    for (let i = 0; i + 1 < n.length; i += 2) grow(n[i]!, n[i + 1]!);
+    grow(route.mid.x, route.mid.y);
+  }
+  if (!any) return null;
+  return { x: minX - ROUTE_MARKER_PAD, y: minY - ROUTE_MARKER_PAD, w: maxX - minX + 2 * ROUTE_MARKER_PAD, h: maxY - minY + 2 * ROUTE_MARKER_PAD };
 }

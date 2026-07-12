@@ -32,7 +32,17 @@ import { AgentLinksLayer, EdgesLayer, GroupsLayer, LoopsLayer, MOVE_EASE, NodesL
 import type { TaskCardHandlers } from "./TaskCard";
 import { TaskEdgesLayer } from "./TaskEdgesLayer";
 import { TasksLayer } from "./TasksLayer";
-import { buildTaskEdges, buildTaskTargetIndex, TASK_W, taskRect, taskWorldBounds, type SchemeRect } from "./taskGeometry";
+import {
+  buildTaskEdges,
+  buildTaskTargetIndex,
+  routePathsBounds,
+  routeTaskEdges,
+  TASK_W,
+  taskEdgesSignature,
+  taskRect,
+  taskWorldBounds,
+  type SchemeRect,
+} from "./taskGeometry";
 import { resolveTaskPlacements } from "./taskPlacement";
 import { useLasso } from "./useLasso";
 import { useSchemeCamera } from "./useSchemeCamera";
@@ -405,14 +415,6 @@ export function SchemeBoard({
     () => new Map(placedTasks.map((task) => ["task::" + task.id, taskRect(task)] as const)),
     [placedTasks],
   );
-  /* World bounds the camera, minimap and task-edge SVG all read: the node-derived
-     layout box grown to swallow any card the placement pass (or a hand drag) put
-     beyond or left/above it, so relocated cards and their edges stay reachable
-     and on the map instead of clipping out (issue #17). */
-  const world = useMemo(
-    () => taskWorldBounds(layout.width, layout.height, [...taskRects.values()]),
-    [layout.width, layout.height, taskRects],
-  );
   const taskEdges = useMemo(() => buildTaskEdges(placedTasks, buildTaskTargetIndex(layout)), [placedTasks, layout]);
   /* Card rects the edge router steers around, each tagged with its task so an
      edge is never counted as crossing the card it leaves from (issue #17). */
@@ -420,6 +422,30 @@ export function SchemeBoard({
     () => placedTasks.map((task) => ({ id: task.id, ...taskRect(task) })),
     [placedTasks],
   );
+  /* Route all task edges here (not in the layer) so the world box below can grow
+     to include the routed geometry. Cached on a rounded geometry signature: the
+     10s poll hands fresh arrays every tick, so an unchanged board reuses routes
+     instead of re-running the pass on the render thread (issue #17). */
+  const taskRoutesSig = useMemo(
+    () => taskEdgesSignature(taskEdges, taskCardObstacles, taskObstacles),
+    [taskEdges, taskCardObstacles, taskObstacles],
+  );
+  const taskRoutes = useMemo(
+    () => routeTaskEdges(taskEdges, taskCardObstacles, taskObstacles),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed on the geometry signature; the arrays change identity every poll but not content
+    [taskRoutesSig],
+  );
+  /* World bounds the camera, minimap and task-edge SVG all read: the node-derived
+     layout box grown to swallow any card the placement pass (or a hand drag) put
+     beyond or left/above it — AND every routed path/marker, since an obstacle
+     detour can swing a connector or its retry badge past the card extent, so both
+     stay reachable and on the map instead of clipping out (issue #17). */
+  const world = useMemo(() => {
+    const rects = [...taskRects.values()];
+    const routeBox = routePathsBounds(taskRoutes.values());
+    if (routeBox) rects.push(routeBox);
+    return taskWorldBounds(layout.width, layout.height, rects);
+  }, [layout.width, layout.height, taskRects, taskRoutes]);
 
   const onPlaceTask = useCallback((wx: number, wy: number) => {
     setPendingTask({ x: Math.round(wx - TASK_W / 2), y: Math.round(wy - 14) });
@@ -757,7 +783,7 @@ export function SchemeBoard({
           onHandoff={handoffForNodes}
           onExpand={stableExpand}
         />
-        <TaskEdgesLayer edges={taskEdges} world={world} cards={taskCardObstacles} containers={taskObstacles} onRetry={retryEdge} />
+        <TaskEdgesLayer edges={taskEdges} world={world} routes={taskRoutes} onRetry={retryEdge} />
         <TasksLayer
           tasks={placedTasks}
           files={files}
