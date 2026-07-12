@@ -28,13 +28,24 @@ export class FileRuntimeEventStore implements RuntimeEventStore {
       throw error;
     }
     const events: RuntimeEvent[] = [];
-    for (const line of contents.split("\n")) {
-      if (!line) continue;
+    const lines = contents.split("\n");
+    const hasTerminatingNewline = contents.endsWith("\n");
+    for (const [index, line] of lines.entries()) {
+      if (!line && index === lines.length - 1 && hasTerminatingNewline) continue;
+      if (!line) throw new Error("runtime event ledger contains an empty record");
       let parsed: unknown;
-      try { parsed = JSON.parse(line); } catch { continue; }
-      if (!validEvent(parsed)) continue;
+      try { parsed = JSON.parse(line); } catch {
+        if (index === lines.length - 1 && !hasTerminatingNewline) break;
+        throw new Error("runtime event ledger contains malformed JSON");
+      }
+      if (!validEvent(parsed)) {
+        if (index === lines.length - 1 && !hasTerminatingNewline) break;
+        throw new Error("runtime event ledger contains an invalid event");
+      }
       const previous = events.at(-1);
-      if (previous && parsed.seq <= previous.seq) continue;
+      if (previous && parsed.seq !== previous.seq + 1) {
+        throw new Error(`runtime event ledger sequence gap after ${previous.seq}`);
+      }
       events.push(parsed);
     }
     return events;
@@ -42,14 +53,25 @@ export class FileRuntimeEventStore implements RuntimeEventStore {
 
   append(threadId: string, event: RuntimeEvent): void {
     fs.mkdirSync(this.directory, { recursive: true, mode: 0o700 });
-    const fd = fs.openSync(this.filename(threadId), "a+", 0o600);
+    const filename = this.filename(threadId);
+    const previous = this.load(threadId).at(-1);
+    if (previous && event.seq !== previous.seq + 1) {
+      throw new Error(`runtime event ledger sequence gap after ${previous.seq}`);
+    }
+    const fd = fs.openSync(filename, "a+", 0o600);
     try {
       fs.fchmodSync(fd, 0o600);
       const size = fs.fstatSync(fd).size;
       if (size > 0) {
-        const tail = Buffer.alloc(1);
-        fs.readSync(fd, tail, 0, 1, size - 1);
-        if (tail[0] !== 0x0a) fs.writeSync(fd, "\n");
+        const contents = fs.readFileSync(filename, "utf8");
+        if (!contents.endsWith("\n")) {
+          const boundary = contents.lastIndexOf("\n") + 1;
+          const tail = contents.slice(boundary);
+          let parsed: unknown;
+          try { parsed = JSON.parse(tail); } catch { parsed = null; }
+          if (validEvent(parsed)) fs.writeSync(fd, "\n");
+          else fs.ftruncateSync(fd, Buffer.byteLength(contents.slice(0, boundary)));
+        }
       }
       fs.writeSync(fd, `${JSON.stringify(event)}\n`);
       fs.fsyncSync(fd);

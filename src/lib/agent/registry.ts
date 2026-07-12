@@ -1500,6 +1500,7 @@ export class AgentRegistry {
     status: AgentHostStatus,
     claimOwner: string,
     claimEpoch: number,
+    releaseClaim = false,
   ): AgentRegistryEntry | null {
     return this.mutate((file) => {
       const keyId = sessionKeyId(key);
@@ -1517,6 +1518,7 @@ export class AgentRegistry {
       const readinessBefore = migrationReadinessSignature(file, key.engine, changedHostPaths);
       entry.structuredHost = replacement.structuredHost;
       entry.status = status;
+      if (releaseClaim) entry.claimOwner = null;
       entry.updatedAt = now();
       advanceMigrationScopeRevision(file, key.engine, readinessBefore, changedHostPaths);
       return clone(entry);
@@ -1576,6 +1578,20 @@ export class AgentRegistry {
         entry.claimOwner = null;
         entry.updatedAt = now();
       }
+    });
+  }
+
+  /** Releases a structured writer only while both ownership fences still match. */
+  releaseStructuredHostClaim(key: SessionKey, owner: string, claimEpoch: number): boolean {
+    return this.mutate((file) => {
+      const entry = file.entries[sessionKeyId(key)];
+      if (!entry?.structuredHost
+        || entry.claimOwner !== owner
+        || entry.claimEpoch !== claimEpoch
+        || entry.structuredHost.writerClaimEpoch !== claimEpoch) return false;
+      entry.claimOwner = null;
+      entry.updatedAt = now();
+      return true;
     });
   }
 

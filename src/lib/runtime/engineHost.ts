@@ -16,7 +16,7 @@ export type RuntimeEvent =
   | { kind: "item"; turnId: string | null; item: unknown; phase: "started" | "completed"; seq: number }
   | { kind: "turn-ended"; turnId: string; status: "completed" | "interrupted" | "error"; seq: number }
   | { kind: "attention"; id: string; method: string; attention: unknown; seq: number }
-  | { kind: "attention-resolved"; id: string; resolution: "answered" | "host-restarted"; seq: number }
+  | { kind: "attention-resolved"; id: string; resolution: "answered" | "host-restarted" | "server-resolved"; seq: number }
   | { kind: "limits"; snapshot: unknown; seq: number }
   | { kind: "session-status"; status: "active" | "idle" | "unhosted" | "dead"; activeFlags?: string[]; seq: number };
 

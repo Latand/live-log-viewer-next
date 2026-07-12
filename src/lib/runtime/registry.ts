@@ -76,25 +76,39 @@ export async function bindCodexHostPersistence(
     throw error;
   }
   let failed = false;
+  let stopped = false;
   let unsubscribe = () => {};
+  const stop = () => {
+    if (stopped) return;
+    stopped = true;
+    unsubscribe();
+    registry.releaseStructuredHostClaim(key, claimOwner, writerClaimEpoch);
+  };
   unsubscribe = host.onStateChange((state) => {
-    if (failed) return;
+    if (failed || stopped) return;
     try {
+      const terminal = state.status === "unhosted" || (state.status === "dead" && state.pid === null);
       const persisted = registry.setStructuredHostClaimed(
         key,
         codexHostColumns(state, writerClaimEpoch),
         registryStatus(state),
         claimOwner,
         writerClaimEpoch,
+        terminal,
       );
       if (!persisted) throw new Error("structured host writer claim is stale");
+      if (terminal) {
+        stopped = true;
+        unsubscribe();
+      }
     } catch {
       failed = true;
-      unsubscribe();
+      stop();
       void host.release();
     }
   });
-  return unsubscribe;
+  if (stopped) unsubscribe();
+  return stop;
 }
 
 export interface AdoptedCodexHost {
@@ -131,8 +145,7 @@ export async function adoptCodexRegistryHosts(
             endpoint: "stdio:released",
             process: null,
             activeTurnRef: null,
-          }, "dead", claimed.claimOwner!, claimed.claimEpoch);
-          registry.releaseClaim(entry.key, claimed.claimOwner!);
+          }, "dead", claimed.claimOwner!, claimed.claimEpoch, true);
         }
       });
     } catch (error) {

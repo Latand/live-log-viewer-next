@@ -21,3 +21,34 @@ test("runtime event store durably replays ordered events and ignores a partial t
   ]);
   expect(fs.statSync(filename).mode & 0o777).toBe(0o600);
 });
+
+test("runtime event store fails closed on gaps, duplicates, and malformed middle records", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-event-gaps-"));
+  const filename = path.join(directory, "gap-thread.jsonl");
+  fs.writeFileSync(filename, [
+    JSON.stringify({ kind: "session-status", status: "idle", seq: 1 }),
+    JSON.stringify({ kind: "turn-ended", turnId: "turn-1", status: "completed", seq: 3 }),
+    "",
+  ].join("\n"));
+  const store = new FileRuntimeEventStore(directory);
+  expect(() => store.load("gap-thread")).toThrow("sequence gap after 1");
+
+  fs.writeFileSync(filename, [
+    JSON.stringify({ kind: "session-status", status: "idle", seq: 1 }),
+    JSON.stringify({ kind: "session-status", status: "active", seq: 1 }),
+    "",
+  ].join("\n"));
+  expect(() => store.load("gap-thread")).toThrow("sequence gap after 1");
+
+  fs.writeFileSync(filename, `${JSON.stringify({ kind: "session-status", status: "idle", seq: 1 })}\n{broken}\n`);
+  expect(() => store.load("gap-thread")).toThrow("malformed JSON");
+});
+
+test("runtime event store rejects a non-contiguous append", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-event-append-"));
+  const store = new FileRuntimeEventStore(directory);
+  store.append("append-thread", { kind: "session-status", status: "idle", seq: 1 });
+  expect(() => store.append("append-thread", { kind: "turn-started", turnId: "turn-3", seq: 3 }))
+    .toThrow("sequence gap after 1");
+  expect(store.load("append-thread")).toEqual([{ kind: "session-status", status: "idle", seq: 1 }]);
+});

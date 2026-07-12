@@ -156,6 +156,16 @@ describe("CodexAppServerHost", () => {
     expect(attention).toBe("item/commandExecution/requestApproval:approval-1");
     await host.answer(attention, { decision: "accept" });
     expect(server.requests.at(-1)).toMatchObject({ id: "approval-1", result: { decision: "accept" } });
+    server.request("approval-2", "item/commandExecution/requestApproval", { command: "echo resolved" });
+    await Bun.sleep(0);
+    const resolvedStream = host.attach((await host.health()).eventCursor)[Symbol.asyncIterator]();
+    server.notify("serverRequest/resolved", { threadId: "thread-149", requestId: "approval-2" });
+    expect((await resolvedStream.next()).value).toMatchObject({
+      kind: "attention-resolved",
+      id: "item/commandExecution/requestApproval:approval-2",
+      resolution: "server-resolved",
+    });
+    expect((await host.health()).pendingAttention).toEqual([]);
 
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-structured-registry-"));
     const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
@@ -186,7 +196,7 @@ describe("CodexAppServerHost", () => {
     expect(registry.snapshot().entries["codex:thread-149"]?.structuredHost).toMatchObject({
       kind: "codex-app-server",
       endpoint: "stdio:4242",
-      eventCursor: 4,
+      eventCursor: 6,
       protocolVersion: "0.144.1",
       writerClaimEpoch: 7,
       activeTurnRef: "turn-1",
@@ -437,8 +447,11 @@ describe("CodexAppServerHost", () => {
     await adopted[0]!.host.release();
     expect(registry.snapshot().entries["codex:adopted-thread"]).toMatchObject({
       status: "unhosted",
+      claimOwner: null,
       structuredHost: { eventCursor: 17, process: null, activeTurnRef: null, pendingAttention: [] },
     });
+    const reclaimed = registry.claimStructuredHost(key, { pid: process.pid, startIdentity: "replacement-viewer" });
+    expect(reclaimed?.claimEpoch).toBe(5);
   });
 
   test("concurrent startup adoption creates one writer and advances its claim epoch", async () => {

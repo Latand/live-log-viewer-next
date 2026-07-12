@@ -618,6 +618,16 @@ export class CodexAppServerHost implements EngineHost {
 
   private acceptNotification(method: string, params: JsonObject): void {
     const turnId = turnIdFromParams(params);
+    if (method === "serverRequest/resolved") {
+      const requestId = params.requestId;
+      if (typeof requestId !== "number" && typeof requestId !== "string") return;
+      const resolved = [...this.attentions.entries()].find(([, attention]) =>
+        String(attention.rpcId) === String(requestId));
+      if (!resolved) return;
+      this.attentions.delete(resolved[0]);
+      this.emit({ kind: "attention-resolved", id: resolved[0], resolution: "server-resolved" });
+      return;
+    }
     if (method === "turn/started" && turnId) {
       this.activeTurnId = turnId;
       this.emit({ kind: "turn-started", turnId });
