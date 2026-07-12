@@ -1019,8 +1019,10 @@ export class AgentRegistry {
     if (!receipt) throw new Error("unknown spawn receipt");
     const prior = receipt.key ? file.entries[sessionKeyId(receipt.key)] : null;
     const conflict = (code: "spawn_artifact_conflict" | "spawn_pane_conflict" | "spawn_identity_conflict"): SpawnSettlement => {
-      receipt.state = "conflicted";
-      receipt.error = code;
+      if (receipt.state !== "completed") {
+        receipt.state = "conflicted";
+        receipt.error = code;
+      }
       return { kind: "conflict", receipt: clone(receipt), code };
     };
     if (receipt.state === "failed" || receipt.state === "conflicted") {
@@ -1040,8 +1042,8 @@ export class AgentRegistry {
       (receipt.pane.panePid.pid > 0 && receipt.pane.panePid.pid !== entry.host.panePid.pid) ||
       (receipt.pane.panePid.startIdentity !== null && entry.host.panePid.startIdentity !== receipt.pane.panePid.startIdentity)
     )) return conflict("spawn_pane_conflict");
-    if (receipt.purpose !== "resume-successor" && receipt.artifactPath && receipt.artifactPath !== entry.artifactPath) return conflict("spawn_artifact_conflict");
-    if (receipt.purpose !== "resume-successor" && receipt.key && sessionKeyId(receipt.key) !== sessionKeyId(entry.key)) return conflict("spawn_identity_conflict");
+    if (receipt.artifactPath && receipt.artifactPath !== entry.artifactPath) return conflict("spawn_artifact_conflict");
+    if (receipt.key && sessionKeyId(receipt.key) !== sessionKeyId(entry.key)) return conflict("spawn_identity_conflict");
     const occupied = file.entries[sessionKeyId(entry.key)];
     if (occupied && occupied.artifactPath !== entry.artifactPath && (!prior || sessionKeyId(prior.key) !== sessionKeyId(entry.key))) return conflict("spawn_artifact_conflict");
 

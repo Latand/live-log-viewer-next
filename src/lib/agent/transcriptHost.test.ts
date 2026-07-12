@@ -63,6 +63,8 @@ interface FakeHostState {
   aliveReads: number;
   retireOnAliveRead: number | null;
   launchId: string | null;
+  resumeBegan: boolean;
+  quarantineAfterResumeBegin: boolean;
 }
 
 function fakeHost(existing = true) {
@@ -90,6 +92,8 @@ function fakeHost(existing = true) {
     aliveReads: 0,
     retireOnAliveRead: null,
     launchId: null,
+    resumeBegan: false,
+    quarantineAfterResumeBegin: false,
   };
 
   const resolver = createTranscriptHostResolver({
@@ -123,6 +127,10 @@ function fakeHost(existing = true) {
       return identity;
     },
     launchId: async () => state.launchId,
+    beginResume: () => {
+      state.resumeBegan = true;
+      return null;
+    },
     conversationIdForPath: (pathname: string) => pathname === PATHNAME ? "conversation_test" : null,
     spawn: async (resumeSpec: ResumeSpec, payload: string): Promise<SpawnedPane> => {
       state.spawnCalls += 1;
@@ -144,6 +152,11 @@ function fakeHost(existing = true) {
       if (!pane.panePid) return;
       state.records.set(pathname, { paneId: pane.paneId, panePid: pane.panePid, windowName: resumeSpec.windowName, engine: resumeSpec.engine });
     },
+    reconcile: async (hosts) => ({
+      quarantinedPaneIds: state.quarantineAfterResumeBegin && state.resumeBegan
+        ? hosts.filter((host) => host.launchId === state.launchId).map((host) => host.paneId)
+        : [],
+    }),
     deliver: async (paneId: string, text: string) => {
       state.deliverAttempts += 1;
       if (state.deliverError) throw state.deliverError;
@@ -188,6 +201,25 @@ describe("transcript host resolver", () => {
     expect(first).toEqual({ ok: true, outcome: "resumed", target: "agents:5.0" });
     expect(second).toEqual({ ok: true, outcome: "delivered-to-live", target: "agents:5.0" });
     expect(state.delivered.sort()).toEqual(["%9:first", "%9:second"]);
+  });
+
+  test("stops delivery when migration advancement rejects the observed successor", async () => {
+    const { resolver, state } = fakeHost(false);
+    state.launchId = "resume-launch";
+    state.quarantineAfterResumeBegin = true;
+
+    const outcome = await resolver.deliverToTranscriptHost({ entry: state.entry, spec, payload: "must stay canonical" });
+
+    expect(outcome).toEqual({
+      ok: false,
+      outcome: "failed",
+      error: "resumed agent host could not be identified safely",
+      status: 500,
+    });
+    expect(state.resumeBegan).toBe(true);
+    expect(state.spawnCalls).toBe(1);
+    expect(state.deliverAttempts).toBe(0);
+    expect(state.delivered).toEqual([]);
   });
 
   test("surfaces duplicate live panes for one conversation and refuses a third resume", async () => {

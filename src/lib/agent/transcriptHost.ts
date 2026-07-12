@@ -108,8 +108,12 @@ interface HostDependencies {
   deliver: (paneId: string, text: string) => Promise<void>;
   launchId?: (paneId: string) => Promise<string | null>;
   conversationIdForPath?: (pathname: string) => string | null;
-  reconcile?: (hosts: TranscriptHost[]) => void | Promise<void>;
+  reconcile?: (hosts: TranscriptHost[]) => HostReconciliation | void | Promise<HostReconciliation | void>;
   serializeDelivery?: (entry: FileEntry, task: () => Promise<HostDeliveryOutcome>) => Promise<HostDeliveryOutcome>;
+}
+
+interface HostReconciliation {
+  quarantinedPaneIds: string[];
 }
 
 interface HostClaim {
@@ -322,14 +326,16 @@ export function createTranscriptHostResolver(
       }
     }
 
-    await dependencies.reconcile?.(hosts);
+    const reconciliation = await dependencies.reconcile?.(hosts);
+    const quarantinedPaneIds = new Set(reconciliation?.quarantinedPaneIds ?? []);
+    const eligibleHosts = hosts.filter((host) => !quarantinedPaneIds.has(host.paneId));
 
-    const conflicts = hostConflicts(hosts, conversationIdForPath);
+    const conflicts = hostConflicts(eligibleHosts, conversationIdForPath);
     const snapshot: TranscriptHostSnapshot = {
-      hosts,
+      hosts: eligibleHosts,
       observation: "available",
       conflicts,
-      canonicalFor: (pathname: string) => conflictForPath(snapshot, pathname, conversationIdForPath) ? null : canonicalFrom(hosts, pathname),
+      canonicalFor: (pathname: string) => conflictForPath(snapshot, pathname, conversationIdForPath) ? null : canonicalFrom(eligibleHosts, pathname),
     };
     return snapshot;
   }
@@ -457,9 +463,10 @@ export function createTranscriptHostResolver(
   };
 }
 
-async function reconcileRegistry(hosts: TranscriptHost[]): Promise<void> {
+async function reconcileRegistry(hosts: TranscriptHost[]): Promise<HostReconciliation> {
   const registry = agentRegistry();
   const seen = new Set<string>();
+  const quarantinedPaneIds = new Set<string>();
   for (const host of hosts) {
     if (!host.primaryPath) continue;
     const key = sessionKeyFromTranscript(host.engine, host.primaryPath);
@@ -493,6 +500,7 @@ async function reconcileRegistry(hosts: TranscriptHost[]): Promise<void> {
         seen.add(`${key.engine}:${key.sessionId}`);
         continue;
       }
+      quarantinedPaneIds.add(host.paneId);
       continue;
     }
     const existing = registry.snapshot().entries[`${key.engine}:${key.sessionId}`];
@@ -516,6 +524,7 @@ async function reconcileRegistry(hosts: TranscriptHost[]): Promise<void> {
     const [engine, sessionId] = id.split(":");
     return { engine: engine as "claude" | "codex", sessionId };
   }));
+  return { quarantinedPaneIds: [...quarantinedPaneIds] };
 }
 
 async function registryResumeRecords(): ReturnType<typeof resumePaneRecords> {
