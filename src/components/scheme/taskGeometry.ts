@@ -51,7 +51,7 @@ const CHIP_PAD = 8;
  * whole row breaks at character boundaries. Because the widths are upper bounds,
  * real text packs at least this tightly, so the result never undercounts the
  * rendered rows — closing the word-boundary gap a plain length÷chars estimate
- * misses (twenty wide words wrap to twenty rows, not the packed count).
+ * misses (twenty wide words wrap to twenty rows, above the char-packed count).
  */
 function hardLineRows(line: string): number {
   let rows = 1;
@@ -310,7 +310,7 @@ function cubicAt(t: number, p0: number, c1: number, c2: number, p3: number): num
 
 /* Does segment a→b touch `rect` inflated by `pad`? Liang–Barsky clipping —
    exact for a straight segment, so a card lying between two curve samples is
-   caught, not just one that happens to contain a sample point. */
+   caught even when no sample point lands inside it. */
 function segHitsRect(ax: number, ay: number, bx: number, by: number, rect: SchemeRect, pad: number): boolean {
   const minX = rect.x - pad;
   const minY = rect.y - pad;
@@ -393,8 +393,8 @@ function cubicHitsAny(
 /* Perpendicular spacing between coincident edges fanned into parallel lanes. */
 const LANE_BOW = 26;
 
-/* A single cubic bow escapes cards (≤ TASK_W) but not a 600×680 pane; when it
-   can't, an orthogonal detour routes around the obstacle's side. The corridor
+/* A single cubic bow escapes a card (≤ TASK_W); a 600×680 pane is far too large
+   for any bow, so an orthogonal detour routes around the obstacle's side. The corridor
    sits `DETOUR_MARGIN` past the obstacle edge (> ROUTE_CLEARANCE, so the router
    reads it as clear), and may be pushed a further `DETOUR_MAX_EXTRA` out in
    steps when a second obstacle blocks the first corridor. */
@@ -649,7 +649,7 @@ function perpDist(px: number, py: number, ox: number, oy: number, ux: number, uy
 /**
  * Do two edges share a collinear corridor — lie on the same line and overlap
  * along it by a visible run? Symmetric in a and b: parallelism is the unit-vector
- * cross (fixed tolerance, not length-scaled), collinearity checks each edge's
+ * cross against a fixed, length-independent tolerance, collinearity checks each edge's
  * endpoints against *both* lines, and the projection overlap is a 1-D interval
  * length, invariant to which edge or direction is the reference. Direction-
  * agnostic, so a segment and its reverse count; coincident edges are the
@@ -907,8 +907,8 @@ const CROSS_BUSY = 4;
  * left on their assigned lanes so the pass never collapses a fanned pair.
  *
  * Any crossing that survives the pass — the diagonals of a box interleave, so no
- * bounded planar route separates them — is not left silent: of each still-crossing
- * pair the higher-key edge is marked `crosses`, so the layer fades it and it reads
+ * bounded planar route separates them — is surfaced: of each still-crossing pair
+ * the higher-key edge is marked `crosses`, so the layer fades it and it reads
  * as passing *behind* the other rather than tangling with it.
  *
  * Pure and order-independent: the crossing test is symmetric, the pass walks
@@ -1023,10 +1023,10 @@ export function routeTaskEdges(
      reduction has settled, so it has the final say: walk edges in key order on
      their exact corridors (the detour's straight middle run), and when one sits
      within a lane of an already-placed corridor on the same axis and overlaps its
-     extent, step its lane out until it clears. This is NOT gated by the
-     reduction cap — a busy board is exactly where fan-out rails form — and stays
-     cheap because only the (usually few) detoured edges are compared, and only a
-     clashing one re-routes. Deterministic and bounded. */
+     extent, step its lane out until it clears. It runs on every board — a busy
+     board is exactly where fan-out rails form — and stays cheap because only the
+     (usually few) detoured edges are compared, and only a clashing one re-routes.
+     Deterministic and bounded. */
   {
     const placed: RouteCorridor[] = [];
     const clashes = (c: RouteCorridor): boolean =>

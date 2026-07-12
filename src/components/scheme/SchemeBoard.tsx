@@ -432,7 +432,7 @@ export function SchemeBoard({
   );
   const taskRoutes = useMemo(
     () => routeTaskEdges(taskEdges, taskCardObstacles, taskObstacles),
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed on the geometry signature; the arrays change identity every poll but not content
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed on the geometry signature; each poll gives the arrays a new identity while their content is unchanged
     [taskRoutesSig],
   );
   /* World bounds the camera, minimap and task-edge SVG all read: the node-derived

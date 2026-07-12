@@ -161,7 +161,7 @@ describe("taskRect / taskCardHeight", () => {
     expect(wideRun).toBeGreaterThan(oneChar);
   });
 
-  test("word-boundary wrapping is bounded, not just character packing (Finding)", () => {
+  test("word-boundary wrapping is included in the height bound (Finding)", () => {
     /* Twenty 10-'W' words wrap one-per-row in the 236px box (each word is ~118px,
        two don't fit), so the body hits its 340px cap (~378px card with a source
        chip). A length÷chars estimate packs them and undercounts to ~283px; the
@@ -173,7 +173,7 @@ describe("taskRect / taskCardHeight", () => {
     expect(h).toBeGreaterThanOrEqual(378);
   });
 
-  test("tabs are counted at a full tab stop, not one space (Finding 2)", () => {
+  test("tabs are counted at a full tab stop (Finding 2)", () => {
     /* `whitespace-pre-wrap` expands each tab to the next 8-space stop, so a
        `W\t`×50 run wraps to ~6 rows (~128px body); counting a tab as a single
        space undercounts to ~94px and overlaps the following card. */
@@ -372,9 +372,9 @@ describe("routeTaskEdge", () => {
   });
 
   test("routes around a production-sized pane on a vertical edge (Finding 2)", () => {
-    /* A real agent pane is 600×680 — far more clearance than any single-cubic
-       bow can produce, so the old router faded a centreline straight through it.
-       The detour goes around the pane's side and comes out clear. */
+    /* A real agent pane is 600×680; no single-cubic bow can produce that much
+       clearance, so the old router faded a centreline straight through it. The
+       detour goes around the pane's side and comes out clear. */
     const pane: SchemeRect = { x: -300, y: 100, w: 600, h: 680 };
     const edge = { x1: 0, y1: 0, x2: 0, y2: 900 };
     expect(curveEntersRect(routeTaskEdge(edge, []).d, pane)).toBe(true);
@@ -725,7 +725,7 @@ describe("routeTaskEdges — edge-to-edge crossing handling (Finding 1)", () => 
     /* Deterministic for any input order. */
     expect(forward.get("A")!.d).toBe(reversed.get("A")!.d);
     expect(forward.get("B")!.crosses).toBe(reversed.get("B")!.crosses);
-    /* The geometry still crosses once, but it is now flagged, not silent. */
+    /* The geometry still crosses once, and it is now flagged for the layer to fade. */
     expect(crossings(forward.get("A")!.d, forward.get("B")!.d)).toBe(1);
     expect([forward.get("A")!.crosses, forward.get("B")!.crosses].filter(Boolean)).toHaveLength(1);
     expect(forward.get("B")!.crosses).toBe(true); // higher key fades
@@ -839,7 +839,7 @@ describe("routeTaskEdges — busy fan-out corridor deconfliction (Finding)", () 
     return { edges, pane };
   }
 
-  test("six fan-out detours land on distinct corridors, not one opaque rail", () => {
+  test("six fan-out detours land on distinct corridors (Finding)", () => {
     const { edges, pane } = fanOut();
     const routes = routeTaskEdges(edges, [], [pane]);
     expect(routes.size).toBe(6);
@@ -848,7 +848,7 @@ describe("routeTaskEdges — busy fan-out corridor deconfliction (Finding)", () 
     const perCorridor = new Map<number, number>();
     for (const x of corridorX) perCorridor.set(x, (perCorridor.get(x) ?? 0) + 1);
     expect(Math.max(...perCorridor.values())).toBeLessThanOrEqual(2);
-    /* The fan really spreads: several distinct corridors, not a single rail. */
+    /* The fan really spreads across several distinct corridors. */
     expect(new Set(corridorX).size).toBeGreaterThanOrEqual(4);
     /* And they mostly draw solid — the old collapse faded five of the six. */
     const faded = edges.filter((e) => routes.get(e.key)!.crosses).length;

@@ -101,7 +101,7 @@ describe("resolveTaskPlacements", () => {
     expect(placement.get("t00")).toEqual({ x: 740, y: 120 });
   });
 
-  test("a relocated auto card clears pane obstacles, not just other cards", () => {
+  test("a relocated auto card clears pane obstacles as well as other cards", () => {
     /* A pinned anchor ("a") the user dropped holds its exact spot; the colliding
        auto card ("b", sourced + on the lattice) relocates and must clear both
        the anchor and the pane. */
@@ -117,7 +117,7 @@ describe("resolveTaskPlacements", () => {
 
   test("a lone auto card on a pane is nudged off, even with no card collision", () => {
     /* A sourced lattice card that lands inside a pane must clear it on its own —
-       the early-out demands pane clearance, not just card clearance. */
+       the early-out demands pane clearance in addition to card clearance. */
     const pane: SchemeRect = { x: 700, y: 60, w: 600, h: 680 };
     const tasks = [task("solo", 740, 120, { source: SRC })];
     const spot = resolveTaskPlacements(tasks, [pane]).get("solo")!;
@@ -144,8 +144,8 @@ describe("resolveTaskPlacements", () => {
 
   test("legacy manual card (no pinned, no source) is never relocated", () => {
     /* Pre-`pinned` hand-created cards carry neither flag. They must hold their
-       operator-chosen spot — even parked over a pane — not be flung across the
-       board on the first render after upgrade. */
+       operator-chosen spot — even parked over a pane — through the first render
+       after upgrade, staying where the operator left them. */
     const pane: SchemeRect = { x: 0, y: 0, w: 600, h: 680 };
     const tasks = [task("legacy", 100, 100)];
     expect(isAutoPlaceable(tasks[0]!)).toBe(false);

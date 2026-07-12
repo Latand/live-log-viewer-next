@@ -104,6 +104,16 @@ export interface SchemeCamera {
  * persists per project in sessionStorage. Selection lives in the caller; this
  * hook drives it through `setSelected` from the pointer and keyboard handlers.
  */
+/** Whether the board has anything to frame: nodes, drafts, or task cards. Task
+    cards count (issue #17) — a project with only cards must still init and fit
+    the camera, so both the fit guard and the one-time init effect read this. */
+export function hasBoardContent(
+  layout: Pick<SchemeLayout, "nodes" | "drafts">,
+  taskRects?: ReadonlyMap<string, SchemeRect>,
+): boolean {
+  return layout.nodes.length > 0 || layout.drafts.length > 0 || (taskRects?.size ?? 0) > 0;
+}
+
 export function useSchemeCamera({
   project,
   layout,
@@ -264,10 +274,13 @@ export function useSchemeCamera({
 
   const fitCam = useCallback((): Camera | null => {
     const rect = viewportRef.current?.getBoundingClientRect();
-    if (!rect || (!layout.nodes.length && !layout.drafts.length)) return null;
+    /* Task cards are board content too (issue #17): a project with only task
+       cards and no nodes/drafts must still fit, or Fit sits inert and a
+       relocated card can stay off-screen. `world` already spans the cards. */
+    if (!rect || !hasBoardContent(layout, taskRects)) return null;
     const z = Math.min(MAX_Z, Math.max(MIN_Z, Math.min((rect.width - 48) / world.w, (rect.height - 48) / world.h, 1)));
     return { z, x: (rect.width - world.w * z) / 2 - world.x * z, y: (rect.height - world.h * z) / 2 - world.y * z };
-  }, [layout.nodes.length, layout.drafts.length, world]);
+  }, [layout.nodes.length, layout.drafts.length, taskRects, world]);
 
   const glideTo = useCallback((next: Camera | ((c: Camera) => Camera)) => {
     /* Reduced motion: skip the CSS transition — the move lands instantly. */
@@ -346,7 +359,7 @@ export function useSchemeCamera({
   /* First layout of a project: restore the saved camera or fit everything.
      The map always opens fitted — its job is the whole picture. */
   useEffect(() => {
-    if (initedFor.current === project || (!layout.nodes.length && !layout.drafts.length)) return;
+    if (initedFor.current === project || !hasBoardContent(layout, taskRects)) return;
     initedFor.current = project;
     if (!mapMode) {
       try {
@@ -365,10 +378,9 @@ export function useSchemeCamera({
     }
     const c = fitCam();
     if (c) {
-
       setCam(c);
     }
-  }, [project, layout, fitCam, mapMode]);
+  }, [project, layout, taskRects, fitCam, mapMode]);
 
   /* Debounced: a pan produces hundreds of camera frames, storage needs only
      the resting position. The map never writes — the desktop camera survives. */
