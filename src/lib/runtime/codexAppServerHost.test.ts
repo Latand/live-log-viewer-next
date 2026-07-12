@@ -560,7 +560,9 @@ describe("CodexAppServerHost", () => {
     );
     expect(releasedRows).toEqual([]);
     expect(restarted).toBeFalse();
-    const reclaimed = registry.claimStructuredHost(key, { pid: process.pid, startIdentity: "replacement-viewer" });
+    const replacementOwner = { pid: process.pid, startIdentity: "replacement-viewer" };
+    expect(registry.claimStructuredHost(key, replacementOwner)).toBeNull();
+    const reclaimed = registry.claimStructuredHost(key, replacementOwner, { allowUnhosted: true });
     expect(reclaimed?.claimEpoch).toBe(5);
   });
 

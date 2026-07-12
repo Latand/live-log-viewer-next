@@ -60,13 +60,18 @@ test("runtime event store rejects every structurally invalid event variant", () 
   const invalid = [
     { kind: "unknown", seq: 1 },
     { kind: "turn-started", seq: 1 },
+    { kind: "turn-started", turnId: "", seq: 1 },
     { kind: "delta", turnId: "turn-1", seq: 1 },
+    { kind: "delta", turnId: "", text: "chunk", seq: 1 },
     { kind: "item", turnId: "turn-1", phase: "completed", seq: 1 },
+    { kind: "item", turnId: "", item: {}, phase: "completed", seq: 1 },
     { kind: "turn-ended", turnId: "turn-1", status: "success", seq: 1 },
     { kind: "attention", id: "approval-1", attention: {}, seq: 1 },
+    { kind: "attention", id: "", method: "approval", attention: {}, seq: 1 },
     { kind: "attention-resolved", id: "approval-1", resolution: "unknown", seq: 1 },
     { kind: "limits", seq: 1 },
     { kind: "session-status", status: "active", activeFlags: [42], seq: 1 },
+    { kind: "session-status", status: "active", activeFlags: [""], seq: 1 },
   ];
   for (const event of invalid) {
     fs.writeFileSync(filename, `${JSON.stringify(event)}\n`);

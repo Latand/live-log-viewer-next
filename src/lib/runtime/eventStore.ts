@@ -14,29 +14,30 @@ function validEvent(value: unknown): value is RuntimeEvent {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const event = value as Record<string, unknown>;
   if (!Number.isSafeInteger(event.seq) || (event.seq as number) <= 0) return false;
+  const nonEmptyString = (field: unknown): field is string => typeof field === "string" && field.length > 0;
   switch (event.kind) {
     case "turn-started":
-      return typeof event.turnId === "string";
+      return nonEmptyString(event.turnId);
     case "delta":
-      return typeof event.turnId === "string" && typeof event.text === "string";
+      return nonEmptyString(event.turnId) && typeof event.text === "string";
     case "item":
-      return (typeof event.turnId === "string" || event.turnId === null)
+      return (nonEmptyString(event.turnId) || event.turnId === null)
         && (event.phase === "started" || event.phase === "completed")
         && Object.hasOwn(event, "item");
     case "turn-ended":
-      return typeof event.turnId === "string"
+      return nonEmptyString(event.turnId)
         && (event.status === "completed" || event.status === "interrupted" || event.status === "error");
     case "attention":
-      return typeof event.id === "string" && typeof event.method === "string" && Object.hasOwn(event, "attention");
+      return nonEmptyString(event.id) && nonEmptyString(event.method) && Object.hasOwn(event, "attention");
     case "attention-resolved":
-      return typeof event.id === "string"
+      return nonEmptyString(event.id)
         && (event.resolution === "answered" || event.resolution === "host-restarted" || event.resolution === "server-resolved");
     case "limits":
       return Object.hasOwn(event, "snapshot");
     case "session-status":
       return (event.status === "active" || event.status === "idle" || event.status === "unhosted" || event.status === "dead")
         && (event.activeFlags === undefined
-          || (Array.isArray(event.activeFlags) && event.activeFlags.every((flag) => typeof flag === "string")));
+          || (Array.isArray(event.activeFlags) && event.activeFlags.every(nonEmptyString)));
     default:
       return false;
   }

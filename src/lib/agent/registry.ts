@@ -1526,10 +1526,15 @@ export class AgentRegistry {
   }
 
   /** Atomically claims a stale structured row and advances its writer fence. */
-  claimStructuredHost(key: SessionKey, owner: ProcessIdentity): AgentRegistryEntry | null {
+  claimStructuredHost(
+    key: SessionKey,
+    owner: ProcessIdentity,
+    options: { allowUnhosted?: boolean } = {},
+  ): AgentRegistryEntry | null {
     return this.mutate((file) => {
       const entry = file.entries[sessionKeyId(key)];
       if (!entry?.structuredHost) return null;
+      if (entry.status === "unhosted" && options.allowUnhosted !== true) return null;
       const liveHost = entry.structuredHost.process;
       if (liveHost && this.ownerAlive(liveHost)) return null;
       const requestedOwner = structuredClaimOwner(owner);
