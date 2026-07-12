@@ -397,6 +397,8 @@ export const uk: Record<keyof typeof en, Message> = {
   "feed.agentEnded": "агент завершився",
   "feed.copyCode": "Скопіювати код",
   "feed.copyMd": "Скопіювати повідомлення (Markdown)",
+  "feed.speak": "Прочитати відповідь уголос (голос згенеровано ШІ)",
+  "feed.stopSpeaking": "Зупинити озвучення",
   "feed.running": "виконує {tool}…",
   "feed.tool": "інструмент",
   "feed.thinking": "думає…",

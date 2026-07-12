@@ -418,6 +418,8 @@ export const en = {
   "feed.agentEnded": "agent finished",
   "feed.copyCode": "Copy code",
   "feed.copyMd": "Copy message (Markdown)",
+  "feed.speak": "Read answer aloud (AI-generated voice)",
+  "feed.stopSpeaking": "Stop reading aloud",
   "feed.running": "running {tool}…",
   "feed.tool": "tool",
   "feed.thinking": "thinking…",

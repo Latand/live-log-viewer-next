@@ -17,6 +17,8 @@ import { ProtocolMessageBody, parseProtocolPayload } from "./cards/ProtocolMessa
 import { ReviewCard } from "./cards/ReviewCard";
 import { SysMsgCard } from "./cards/SysMsgCard";
 import { ToolCard } from "./cards/ToolCard";
+import { SpeakButton } from "./SpeakButton";
+import { spokenAnswerText } from "@/lib/tts";
 
 /* Memoized: feed items are immutable after buildFeed, so a pane re-render
    (poll tick, camera state, files refresh) skips re-parsing markdown for
@@ -39,11 +41,14 @@ export const FeedItem = memo(function FeedItem({ item }: { item: Item }) {
         </div>
         <div className="relative min-w-0 flex-1 whitespace-pre-wrap break-words">
           {hhmm(item.ts) ? <div className="mb-0.5 text-[11px] text-dim">{hhmm(item.ts)}</div> : null}
-          <CopyButton
-            text={item.text}
-            label={tr("feed.copyMd")}
-            className="absolute right-0 top-0 opacity-0 transition-opacity focus-visible:opacity-100 group-hover/msg:opacity-100 [@media(hover:none)]:opacity-60"
-          />
+          <div className="absolute right-0 top-0 flex items-center gap-0.5">
+            <SpeakButton text={spokenAnswerText(item.text)} />
+            <CopyButton
+              text={item.text}
+              label={tr("feed.copyMd")}
+              className="opacity-0 transition-opacity focus-visible:opacity-100 group-hover/msg:opacity-100 [@media(hover:none)]:opacity-60"
+            />
+          </div>
           {mdBlocks(item.text)}
         </div>
       </div>
