@@ -3,35 +3,17 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { accountEntryPointVisible, type Engine, useEngineAccounts } from "@/hooks/useEngineAccounts";
-import { getLocale, type Locale, translate, useLocale } from "@/lib/i18n";
+import { type Locale, translate, useLocale } from "@/lib/i18n";
 import type { EngineLimits, LimitsPayload, LimitWindow } from "@/lib/types";
 
 import { AccountsPanel } from "./AccountsPanel";
 import { ChevronDown, Loader2 } from "./icons";
+import { formatResetClock as fmtResetAt, formatResetEta as fmtEta, localeBcp47 as bcp47 } from "./rateLimit";
 import { engineTintOf, fmtAge } from "./utils";
 
 const POLL_MS = 60_000;
 /** Codex numbers come from the last transcript event; flag them past this age. */
 const STALE_S = 20 * 60;
-
-const bcp47 = (locale = getLocale()) => (locale === "uk" ? "uk-UA" : "en-US");
-
-function fmtEta(resetsAt: number, now: number): string {
-  const locale = getLocale();
-  const s = resetsAt - now;
-  if (s <= 60) return translate(locale, "limits.now");
-  if (s < 5400) return translate(locale, "limits.inMin", { n: Math.round(s / 60) });
-  if (s < 129600) return translate(locale, "limits.inHour", { n: Math.round(s / 3600) });
-  return translate(locale, "limits.inDay", { n: Math.round(s / 86400) });
-}
-
-/** Absolute reset moment: today's resets show the hour, later ones the date too. */
-function fmtResetAt(resetsAt: number, now: number): string {
-  const d = new Date(resetsAt * 1000);
-  const time = d.toLocaleTimeString(bcp47(), { hour: "2-digit", minute: "2-digit", hour12: false });
-  if (resetsAt - now < 86400) return time;
-  return d.toLocaleDateString(bcp47(), { day: "numeric", month: "short" }) + " " + time;
-}
 
 /** Human "as of HH:MM" hint for a stale snapshot. The Codex block renders this
     text alongside the dimming, giving that state a readable reason. */

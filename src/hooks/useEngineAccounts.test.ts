@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 
-import { claudeLoginErrKey, createEngineAccountsStore, NONTERMINAL_CLAUDE_LOGIN_PHASES, parseClaudeLogin, type ClaudeLoginPhase } from "./useEngineAccounts";
+import { claudeLoginErrKey, createEngineAccountsStore, NONTERMINAL_CLAUDE_LOGIN_PHASES, parseAccountLimits, parseClaudeLogin, type ClaudeLoginPhase } from "./useEngineAccounts";
 
 const advance = async () => {
   for (let tick = 0; tick < 8; tick += 1) await Promise.resolve();
@@ -51,6 +51,45 @@ test("a claude store reads body.claude, its engine endpoints, and parses migrati
   expect(store.accounts[0]?.effective).toEqual({ percent: 12, window: "session", freshness: "fresh" });
   expect(store.migration).toMatchObject({ intentId: "i1", origin: "auto", state: "draining", counts: { done: 1, total: 3 } });
   expect(store.autoBalance).toMatchObject({ enabled: true, state: "draining" });
+  unsub();
+});
+
+test("parseAccountLimits keeps fresh/stale reads with their windows and drops the rest", () => {
+  // Unavailable, absent, and non-object reads carry no window to show.
+  expect(parseAccountLimits(null)).toBeNull();
+  expect(parseAccountLimits({ state: "unavailable", session: null, weekly: null })).toBeNull();
+  expect(parseAccountLimits({ state: "fresh", session: null, weekly: null })).toBeNull();
+  // A malformed window is dropped; a valid sibling survives. resetsAt is optional.
+  expect(parseAccountLimits({ state: "fresh", session: { usedPercent: "nope" }, weekly: { usedPercent: 40, resetsAt: 1_700_000_000 } }))
+    .toEqual({ freshness: "fresh", session: null, weekly: { usedPercent: 40, resetsAt: 1_700_000_000 } });
+  expect(parseAccountLimits({ state: "stale", session: { usedPercent: 88, resetsAt: null }, weekly: null }))
+    .toEqual({ freshness: "stale", session: { usedPercent: 88, resetsAt: null }, weekly: null });
+});
+
+test("a store parses per-account session/weekly limit windows for the panel", async () => {
+  const { fetcher } = scripted((url) => {
+    if (url === "/api/accounts") {
+      return claudePayload({
+        accounts: [
+          {
+            id: "main", label: "Main", authPresent: true, loginPending: false, loginState: "authenticated", deviceAuth: null,
+            effective: { percent: 12, window: "session", freshness: "fresh" },
+            limits: { state: "fresh", session: { usedPercent: 88, resetsAt: 1_700_000_000 }, weekly: { usedPercent: 30, resetsAt: 1_700_500_000 } },
+          },
+          {
+            id: "work", label: "Work", authPresent: true, loginPending: false, loginState: "authenticated", deviceAuth: null,
+            limits: { state: "unavailable", session: null, weekly: null },
+          },
+        ],
+      });
+    }
+    return new Response(null, { status: 204 });
+  });
+  const store = createEngineAccountsStore("claude", { fetcher });
+  const unsub = store.subscribe(() => {});
+  await advance();
+  expect(store.accounts[0]?.limits).toEqual({ freshness: "fresh", session: { usedPercent: 88, resetsAt: 1_700_000_000 }, weekly: { usedPercent: 30, resetsAt: 1_700_500_000 } });
+  expect(store.accounts[1]?.limits).toBeNull();
   unsub();
 });
 
