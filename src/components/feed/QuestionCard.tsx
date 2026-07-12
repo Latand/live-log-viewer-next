@@ -3,6 +3,8 @@
 import { Check, Loader2, Pause, Send, X } from "lucide-react";
 import { useMemo, useState } from "react";
 
+import { useIsMobile } from "@/hooks/useIsMobile";
+
 import { type TFunction, useLocale } from "@/lib/i18n";
 import type { FileEntry, PendingQuestionItem } from "@/lib/types";
 
@@ -21,6 +23,9 @@ function elapsed(t: TFunction, since: number): string {
 
 export function QuestionCard({ file }: { file: FileEntry }) {
   const { t } = useLocale();
+  const isMobile = useIsMobile();
+  /* Phone transcript question actions meet the 44px minimum. */
+  const mob = isMobile ? "min-h-11" : "";
   const pending = file.pendingQuestion;
   const [state, setState] = useState<CardState>("pending");
   const [message, setMessage] = useState("");
@@ -100,7 +105,7 @@ export function QuestionCard({ file }: { file: FileEntry }) {
               {menu.options.map((option) => (
                 <button
                   key={option.value}
-                  className={`flex w-full items-start gap-2 rounded-[8px] border px-3 py-2 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/35 disabled:opacity-60 ${
+                  className={`flex w-full items-start gap-2 rounded-[8px] border px-3 py-2 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/35 disabled:opacity-60 ${mob} ${
                     option.recommended ? "border-[#e0ae45]/45 bg-[#fff5dc]" : "border-line bg-bg"
                   }`}
                   disabled={busy || option.value > 9}
@@ -126,7 +131,9 @@ export function QuestionCard({ file }: { file: FileEntry }) {
           {(["Tab", "Enter", "Escape"] as const).map((key) => (
             <button
               key={key}
-              className="rounded-[8px] border border-line bg-bg px-2.5 py-1 text-[12px] font-semibold text-dim disabled:opacity-60"
+              className={`inline-flex items-center justify-center rounded-[8px] border border-line bg-bg text-[12px] font-semibold text-dim disabled:opacity-60 ${
+                isMobile ? "min-h-11 min-w-11 px-3" : "px-2.5 py-1"
+              }`}
               disabled={busy}
               onClick={() => void sendDialogKey(key, key === "Escape" ? "Esc" : key)}
             >
@@ -269,10 +276,10 @@ export function QuestionCard({ file }: { file: FileEntry }) {
             onChange={(event) => setComment(event.target.value)}
           />
           <div className="mt-3 flex flex-wrap gap-2">
-            <button className="inline-flex items-center gap-1.5 rounded-[8px] bg-ok px-3 py-1.5 text-[13px] font-bold text-white disabled:opacity-60" disabled={disabled} onClick={() => submit({ approve: true }, t("question.approved"))}>
+            <button className={`inline-flex items-center gap-1.5 rounded-[8px] bg-ok px-3 py-1.5 text-[13px] font-bold text-white disabled:opacity-60 ${mob}`} disabled={disabled} onClick={() => submit({ approve: true }, t("question.approved"))}>
               <Check className="h-4 w-4" aria-hidden /> {t("question.approve")}
             </button>
-            <button className="inline-flex items-center gap-1.5 rounded-[8px] bg-err px-3 py-1.5 text-[13px] font-bold text-white disabled:opacity-60" disabled={disabled} onClick={() => submit({ approve: false, text: comment }, t("question.rejected"))}>
+            <button className={`inline-flex items-center gap-1.5 rounded-[8px] bg-err px-3 py-1.5 text-[13px] font-bold text-white disabled:opacity-60 ${mob}`} disabled={disabled} onClick={() => submit({ approve: false, text: comment }, t("question.rejected"))}>
               <X className="h-4 w-4" aria-hidden /> {t("question.reject")}
             </button>
           </div>
@@ -289,7 +296,7 @@ export function QuestionCard({ file }: { file: FileEntry }) {
                   return (
                     <button
                       key={index}
-                      className={`flex w-full items-start gap-2 rounded-[8px] border px-3 py-2 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/35 ${
+                      className={`flex w-full items-start gap-2 rounded-[8px] border px-3 py-2 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/35 ${mob} ${
                         selected ? "border-accent/45 bg-accent/10" : option.recommended ? "border-[#e0ae45]/45 bg-[#fff5dc]" : "border-line bg-bg"
                       }`}
                       disabled={disabled}
@@ -315,18 +322,18 @@ export function QuestionCard({ file }: { file: FileEntry }) {
           {questionCount <= 1 ? (
             <div className="mt-3 flex gap-2">
               <input
-                className="min-w-0 flex-1 rounded-[8px] border border-line bg-bg px-3 py-1.5 text-[13px] outline-none focus-visible:ring-2 focus-visible:ring-accent/35"
+                className={`min-w-0 flex-1 rounded-[8px] border border-line bg-bg px-3 py-1.5 text-[13px] outline-none focus-visible:ring-2 focus-visible:ring-accent/35 ${mob}`}
                 placeholder={t("question.ownAnswer")}
                 value={text}
                 onChange={(event) => setText(event.target.value)}
               />
-              <button className="inline-flex items-center gap-1.5 rounded-[8px] bg-accent px-3 py-1.5 text-[13px] font-bold text-white disabled:opacity-60" disabled={disabled || !text.trim()} onClick={() => submit({ text }, text)}>
+              <button className={`inline-flex items-center gap-1.5 rounded-[8px] bg-accent px-3 py-1.5 text-[13px] font-bold text-white disabled:opacity-60 ${mob}`} disabled={disabled || !text.trim()} onClick={() => submit({ text }, text)}>
                 <Send className="h-4 w-4" aria-hidden /> {t("common.send")}
               </button>
             </div>
           ) : null}
           {needsExplicitSubmit ? (
-            <button className="mt-3 inline-flex items-center gap-1.5 rounded-[8px] bg-accent px-3 py-1.5 text-[13px] font-bold text-white disabled:opacity-60" disabled={disabled || !allAnswered} onClick={() => submit({ answers: packedAnswers() }, selectedLabel)}>
+            <button className={`mt-3 inline-flex items-center gap-1.5 rounded-[8px] bg-accent px-3 py-1.5 text-[13px] font-bold text-white disabled:opacity-60 ${mob}`} disabled={disabled || !allAnswered} onClick={() => submit({ answers: packedAnswers() }, selectedLabel)}>
               <Send className="h-4 w-4" aria-hidden /> {t("common.send")}
             </button>
           ) : null}

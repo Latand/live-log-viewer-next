@@ -52,8 +52,12 @@ export function ProjectRail({ files, projectCatalog, pipelines, workflows, archi
 
   return (
     <aside className="flex w-[248px] shrink-0 flex-col border-r border-line bg-panel">
-      <header className="flex h-10 shrink-0 items-center gap-2 border-b border-line px-4 text-[13.5px] font-bold">
-        {t("rail.title")}
+      <header
+        className={`flex shrink-0 items-center gap-2 border-b border-line text-[13.5px] font-bold ${
+          isMobile ? "min-h-[52px] gap-1.5 px-2 py-1.5" : "h-10 px-4"
+        }`}
+      >
+        <span className={isMobile ? "min-w-0 truncate" : ""}>{t("rail.title")}</span>
         {totalLive ? (
           <span className="inline-flex items-center gap-1 rounded-full bg-[#e5f6ea] px-2 py-0.5 text-[10.5px] font-bold text-ok">
             <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-ok" />

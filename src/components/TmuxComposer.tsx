@@ -474,12 +474,14 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
                   aria-label={t("composer.retrySend")}
                   title={t("composer.retrySend")}
                   disabled={busy || voiceSending}
-                  className="inline-flex shrink-0 items-center rounded px-0.5 text-dim hover:text-accent disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                  className={`inline-flex shrink-0 items-center justify-center rounded text-dim hover:text-accent disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+                    isMobile ? "h-11 w-11" : "px-0.5"
+                  }`}
                   onClick={() => {
                     void send(entry.text, { receiptId: entry.id, clientMessageId: entry.clientMessageId });
                   }}
                 >
-                  <RotateCcw className="h-3 w-3" aria-hidden />
+                  <RotateCcw className={isMobile ? "h-4 w-4" : "h-3 w-3"} aria-hidden />
                 </button>
               ) : null}
               <span
@@ -495,10 +497,12 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
               <button
                 type="button"
                 aria-label={t("composer.removeFromQueue")}
-                className="inline-flex shrink-0 items-center rounded px-0.5 text-dim hover:text-err focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                className={`inline-flex shrink-0 items-center justify-center rounded text-dim hover:text-err focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+                  isMobile ? "h-11 w-11" : "px-0.5"
+                }`}
                 onClick={() => persistSent(sent.filter((item) => item.id !== entry.id))}
               >
-                <X className="h-3 w-3" aria-hidden />
+                <X className={isMobile ? "h-4 w-4" : "h-3 w-3"} aria-hidden />
               </button>
             </div>
             );
