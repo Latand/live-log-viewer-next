@@ -143,20 +143,23 @@ export function Minimap({
         </g>
       </svg>
       {/* Collapsed worker stacks live off-canvas, so they get a compact legend
-          here — one dot per origin — making "reflect stacks, not a flood" literal
-          on the map (issue #136). Capped so the row itself never floods. */}
+          here — ONE dot per origin, all of them (issue #136): the acceptance
+          contract is one dot per stack, so no stack identity is ever hidden
+          behind a counter. The legend wraps and the dots shrink a touch past a
+          dozen so a busy board stays inside the corner without dropping any. */}
       {stackDots.length ? (
         <div
-          className="pointer-events-none absolute bottom-1 left-1 flex max-w-[140px] flex-wrap items-center gap-1"
+          className="pointer-events-none absolute bottom-1 left-1 flex max-h-[70%] max-w-[150px] flex-wrap content-end items-center gap-[3px]"
           title={t("minimap.stacks", { count: stackDots.length })}
           aria-hidden
         >
-          {stackDots.slice(0, 14).map((dot) => (
-            <span key={dot.key} className="h-1.5 w-1.5 rounded-full" style={{ backgroundColor: dot.color }} />
+          {stackDots.map((dot) => (
+            <span
+              key={dot.key}
+              className={`shrink-0 rounded-full ${stackDots.length > 24 ? "h-1 w-1" : "h-1.5 w-1.5"}`}
+              style={{ backgroundColor: dot.color }}
+            />
           ))}
-          {stackDots.length > 14 ? (
-            <span className="text-[8px] font-bold leading-none text-dim">+{stackDots.length - 14}</span>
-          ) : null}
         </div>
       ) : null}
     </div>

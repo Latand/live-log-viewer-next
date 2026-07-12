@@ -33,6 +33,7 @@ import { activityDot, cleanTitle, engineBadge, engineEdge, fmtAge } from "@/comp
 
 import type { AgentLink } from "./agentLinks";
 import { PIPELINE_RAIL_COLOR, pipelineRailSegment } from "./agentLinks";
+import { routeTaskEdge, segHitsRect } from "./taskGeometry";
 import { GroupOverridePanel } from "./GroupOverridePanel";
 import { stableDomOrder, stableNodeDomOrder } from "./domOrder";
 import {
@@ -223,9 +224,13 @@ export const LoopsLayer = memo(function LoopsLayer({ loops, width, height }: { l
  * endpoints come pre-resolved to board rects, so this layer never repositions
  * anything — it only decorates geometry the layout already owns.
  */
+/* Clearance a pipeline rail keeps off any card it routes around (issue #136). */
+const RAIL_CLEARANCE = 10;
+
 export const AgentLinksLayer = memo(function AgentLinksLayer({
   links,
   byPath,
+  obstacles = [],
   interactive,
   hubInteractive = interactive,
   width,
@@ -233,6 +238,10 @@ export const AgentLinksLayer = memo(function AgentLinksLayer({
 }: {
   links: AgentLink[];
   byPath: Map<string, SchemeRect>;
+  /** Card rects the pipeline rails must not cross — nodes, decks, stacks, drafts
+      (issue #136). A rail excludes its own two endpoints and routes around the
+      rest, reusing the task-edge obstacle router (PR #130). */
+  obstacles?: readonly SchemeRect[];
   interactive: boolean;
   /** Pipeline control hub stays tappable even where the rest of the layer is
       passive — the mobile lite map is pick-only for nodes but its PipelineHub
@@ -245,14 +254,35 @@ export const AgentLinksLayer = memo(function AgentLinksLayer({
   /* Anchor-only pipeline links carry a hub but no rail (from === to), so they are
      excluded from the drawn-rail pass. */
   const pipelineLinks = links.filter((link) => link.pipeline && !link.pipeline.anchorOnly && byPath.has(link.from) && byPath.has(link.to));
+
+  /* Rail geometry per link: the straight edge-to-edge segment, or — when an
+     unrelated card lies across it — an obstacle-avoiding route around every card
+     but its own two endpoints. Shared by the drawn-rail pass and the hub/badge
+     placement so the control never floats off a rerouted rail. */
+  const railGeom = (link: AgentLink): { d: string; mid: { x: number; y: number }; chevrons: string[] } => {
+    const from = byPath.get(link.from)!;
+    const to = byPath.get(link.to)!;
+    const seg = pipelineRailSegment(from, to);
+    const near = obstacles.filter((rect) => rect !== from && rect !== to);
+    const blocked = near.some((rect) => segHitsRect(seg.x1, seg.y1, seg.x2, seg.y2, rect, RAIL_CLEARANCE));
+    if (!blocked) {
+      return { d: `M ${seg.x1} ${seg.y1} L ${seg.x2} ${seg.y2}`, mid: { x: (seg.x1 + seg.x2) / 2, y: (seg.y1 + seg.y2) / 2 }, chevrons: seg.chevrons };
+    }
+    /* Routed around a card: a curved/detoured path replaces the straight rail; the
+       marching chevrons are dropped there (the hub arrow keeps the direction). */
+    const route = routeTaskEdge({ x1: seg.x1, y1: seg.y1, x2: seg.x2, y2: seg.y2 }, near);
+    return { d: route.d, mid: route.mid, chevrons: [] };
+  };
+  const railByKey = new Map(pipelineLinks.map((link) => [link.key, railGeom(link)] as const));
+
   return (
     <>
       {pipelineLinks.length ? (
         <svg width={width} height={height} className="absolute left-0 top-0" aria-hidden>
           {pipelineLinks.map((link) => {
-            const seg = pipelineRailSegment(byPath.get(link.from)!, byPath.get(link.to)!);
+            const geom = railByKey.get(link.key)!;
             const color = PIPELINE_RAIL_COLOR[link.pipeline!.tone];
-            const line = `M ${seg.x1} ${seg.y1} L ${seg.x2} ${seg.y2}`;
+            const line = geom.d;
             const active = link.pipeline!.tone === "active" && !link.pipeline!.paused;
             return (
               <g key={link.key}>
@@ -266,7 +296,7 @@ export const AgentLinksLayer = memo(function AgentLinksLayer({
                   strokeLinecap="round"
                   strokeDasharray={link.pipeline!.tone === "dim" ? "5 7" : undefined}
                 />
-                {seg.chevrons.map((chevron, index) => (
+                {geom.chevrons.map((chevron, index) => (
                   <path key={index} d={chevron} fill="none" stroke={color} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" opacity={0.9} />
                 ))}
               </g>
@@ -279,11 +309,12 @@ export const AgentLinksLayer = memo(function AgentLinksLayer({
         const to = byPath.get(link.to);
         if (!from || !to) return null;
         if (link.pipeline) {
-          /* Rail midpoint, nudged onto the same off-center offset as the line;
-             an anchor-only hub (no rail) sits at the top-center of its node. */
-          const seg = pipelineRailSegment(from, to);
-          const x = link.pipeline.anchorOnly ? from.x + from.w / 2 : (seg.x1 + seg.x2) / 2;
-          const y = link.pipeline.anchorOnly ? from.y : (seg.y1 + seg.y2) / 2;
+          /* Rail midpoint (routed or straight), nudged onto the same off-center
+             offset as the line; an anchor-only hub (no rail) sits at the
+             top-center of its node. */
+          const geom = railByKey.get(link.key);
+          const x = link.pipeline.anchorOnly ? from.x + from.w / 2 : geom?.mid.x ?? from.x + from.w / 2;
+          const y = link.pipeline.anchorOnly ? from.y : geom?.mid.y ?? from.y;
           if (link.pipeline.hub) {
             return <PipelineHub key={link.key} pipeline={link.pipeline.pipeline} x={x} y={y} interactive={hubInteractive} moveTransition={MOVE_TRANSITION} />;
           }

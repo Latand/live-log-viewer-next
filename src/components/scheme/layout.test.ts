@@ -243,3 +243,31 @@ describe("surface pipelines — memberless active pipelines keep a scheme surfac
     expect(halos).toHaveLength(1);
   });
 });
+
+describe("sibling pipeline halos never overlap (#136 finding 1)", () => {
+  const pipe = (id: string, agentPath: string): Pipeline =>
+    ({
+      id, task: id, project: "demo", repoDir: "/r", worktreeDir: "/w", branch: "b", baseBranch: "main",
+      baseRef: "a", lastPassedCommit: "a", stages: [{ id: "build", kind: "run", prompt: "", next: null }],
+      runs: [{ stageId: "build", attempts: [{ n: 1, state: "running", agentPath, flowId: null }] }],
+      cursor: { stageId: "build", state: "running" }, state: "running", pausedState: null, stateDetail: null,
+      srcPath: null, srcConversationId: null, createdAt: "1970", closedAt: null,
+    }) as unknown as Pipeline;
+
+  test("two pipelines spawned from one origin keep disjoint dashed outlines", () => {
+    /* The origin conversation spawns two pipelines; their stage-0 nodes are
+       adjacent siblings. With only GAP_X (48) between them each halo's 46px pad
+       overlapped by 44px — group-aware spacing must separate them. */
+    const origin = entry({ path: "/origin", activity: "live" });
+    const a = entry({ path: "/origin/a", parent: "/origin", kind: "subagent" });
+    const b = entry({ path: "/origin/b", parent: "/origin", kind: "subagent" });
+    const files = [origin, a, b];
+    const groups = buildBranchGroups(files, "demo");
+    const layout = buildSchemeLayout(groups, [], files, [], [], [pipe("p1", "/origin/a"), pipe("p2", "/origin/b")]);
+    const halos = layout.groups.filter((group) => group.kind === "pipeline");
+    expect(halos).toHaveLength(2);
+    const [left, right] = [...halos].sort((x, y) => x.x - y.x);
+    /* The right halo starts at or past the left halo's outer edge — no overlap. */
+    expect(left!.x + left!.w).toBeLessThanOrEqual(right!.x);
+  });
+});

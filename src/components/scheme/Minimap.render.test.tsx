@@ -29,6 +29,18 @@ test("collapsed worker stacks render one minimap dot per origin (#136 finding 2)
   expect(html).toContain("3 collapsed stacks");
 });
 
+test("every collapsed stack gets a dot — none hidden behind a counter past 14 (finding 3)", () => {
+  const stackDots: StackDot[] = Array.from({ length: 20 }, (_, i) => ({ key: "s" + i, color: i % 2 ? "#5a51e0" : "#9a9aa4" }));
+  const html = renderToStaticMarkup(
+    <Minimap layout={emptyLayout} world={world} stackDots={stackDots} cam={cam} vp={vp} onJump={() => {}} />,
+  );
+  /* All 20 origins render a dot; no "+N" counter swallows any stack identity. */
+  const dots = html.match(/h-1\.5 w-1\.5/g) ?? [];
+  expect(dots.length).toBe(20);
+  expect(html).not.toContain("+6");
+  expect(html).toContain("20 collapsed stacks");
+});
+
 test("no worker stacks → no legend dots", () => {
   const html = renderToStaticMarkup(
     <Minimap layout={emptyLayout} world={world} stackDots={[]} cam={cam} vp={vp} onJump={() => {}} />,

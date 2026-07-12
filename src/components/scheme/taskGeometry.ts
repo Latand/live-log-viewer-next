@@ -320,7 +320,7 @@ function cubicAt(t: number, p0: number, c1: number, c2: number, p3: number): num
 /* Does segment a→b touch `rect` inflated by `pad`? Liang–Barsky clipping —
    exact for a straight segment, so a card lying between two curve samples is
    caught even when no sample point lands inside it. */
-function segHitsRect(ax: number, ay: number, bx: number, by: number, rect: SchemeRect, pad: number): boolean {
+export function segHitsRect(ax: number, ay: number, bx: number, by: number, rect: SchemeRect, pad: number): boolean {
   const minX = rect.x - pad;
   const minY = rect.y - pad;
   const maxX = rect.x + rect.w + pad;

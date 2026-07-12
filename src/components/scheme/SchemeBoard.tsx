@@ -463,6 +463,13 @@ export function SchemeBoard({
     () => [...layout.nodes, ...layout.decks, ...layout.stacks, ...layout.drafts].map(({ x, y, w, h }) => ({ x, y, w, h })),
     [layout],
   );
+  /* Card rects the pipeline rails route around (issue #136). Unlike taskObstacles
+     these stay the SAME objects byPath holds, so a rail can exclude its own two
+     endpoints by identity before routing around the rest. */
+  const railObstacles = useMemo<SchemeRect[]>(
+    () => [...layout.nodes, ...layout.decks, ...layout.stacks, ...layout.drafts],
+    [layout],
+  );
   /* Only placed tasks have a board position; unplaced ones (panel/mobile creation)
      live in the list until place-on-map pins them. */
   const boardTasks = useMemo(() => mergedTasks.filter(isPlacedTask), [mergedTasks]);
@@ -858,7 +865,7 @@ export function SchemeBoard({
         {/* Rails/badges stay passive on the map, but the pipeline hub keeps its
             tap target there — the mobile lite map reaches pipeline controls only
             through it (#93 §2.3). */}
-        <AgentLinksLayer links={layout.links} byPath={layout.byPath} interactive={!mapMode && !handLike && !session} hubInteractive={!handLike && !session} width={layout.width} height={layout.height} />
+        <AgentLinksLayer links={layout.links} byPath={layout.byPath} obstacles={railObstacles} interactive={!mapMode && !handLike && !session} hubInteractive={!handLike && !session} width={layout.width} height={layout.height} />
         <NodesLayer
           layout={layout}
           project={project}

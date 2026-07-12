@@ -44,6 +44,11 @@ export const GROUP_PAD = 46;
    frame is lifted to enclose that control band and read as one clean region.
    Bottom/left/right stay at GROUP_PAD, so the enclosure geometry is unchanged. */
 export const GROUP_STRIP_HEADROOM = 44;
+/* Horizontal gap between two adjacent sibling subtrees that belong to DIFFERENT
+   flow/pipeline groups (issue #136): wide enough that each halo's GROUP_PAD on
+   both facing sides clears, plus a lane of breathing room, so the two dashed
+   outlines never overlap. GAP_X alone (48) leaves a 44px overlap. */
+export const GROUP_SIBLING_GAP = GROUP_PAD * 2 + GAP_X;
 /* Quiet-branch mini cards stacked under their parent pane. */
 const MINI_W = 360;
 const MINI_H = 52;
@@ -202,6 +207,43 @@ export function buildSchemeLayout(
   const claimed = claimedReviewerPaths(flows);
   let cursor = PAD;
 
+  /* Which flow/pipeline group owns each placed path (issue #136 spacing). Two
+     sibling subtrees that belong to DIFFERENT groups must sit far enough apart
+     that their padded halos never overlap; same-group and ungrouped siblings keep
+     the tight gap. Membership mirrors deriveGroups: a pipeline owns its run-stage
+     agent paths and its embedded review-loop implementer; a standalone flow owns
+     its implementer + reviewers. */
+  const groupKeyOfPath = new Map<string, string>();
+  const implOfFlow = (flowId: string) => flows.find((flow) => flow.id === flowId)?.implementerPath ?? null;
+  for (const pipeline of pipelines) {
+    if (pipeline.state === "closed") continue;
+    const key = "pipe:" + pipeline.id;
+    for (const run of pipeline.runs) {
+      for (const attempt of run.attempts) {
+        if (attempt.agentPath) groupKeyOfPath.set(attempt.agentPath, key);
+        if (attempt.flowId) {
+          const impl = implOfFlow(attempt.flowId);
+          if (impl) groupKeyOfPath.set(impl, key);
+        }
+      }
+    }
+  }
+  for (const flow of flows) {
+    const key = "flow:" + flow.id;
+    if (!groupKeyOfPath.has(flow.implementerPath)) groupKeyOfPath.set(flow.implementerPath, key);
+    for (const round of flow.rounds) {
+      if (round.reviewerPath && !groupKeyOfPath.has(round.reviewerPath)) groupKeyOfPath.set(round.reviewerPath, key);
+    }
+  }
+  /* A boundary between two adjacent sibling subtrees whose (both non-null) group
+     keys differ: exactly the case two padded halos would collide. A grouped node
+     beside an ungrouped one is fine — GAP_X already clears a single GROUP_PAD. */
+  const isGroupBoundary = (aPath: string, bPath: string): boolean => {
+    const ga = groupKeyOfPath.get(aPath) ?? null;
+    const gb = groupKeyOfPath.get(bPath) ?? null;
+    return Boolean(ga && gb && ga !== gb);
+  };
+
   /* Handoff drafts hang under their source pane like a child; drafts whose
      source is not on the scheme (or plain «+ Agent» ones) trail the row. */
   const drafts: DraftNode[] = [];
@@ -266,7 +308,8 @@ export function buildSchemeLayout(
       const childTop = y + rowH + GAP_Y;
       const children = childrenOf.get(col.file.path) ?? [];
       let cx = x + INDENT;
-      for (const child of children) {
+      for (let i = 0; i < children.length; i += 1) {
+        const child = children[i]!;
         edges.push({
           to: child.file.path,
           x1: x + 40,
@@ -276,7 +319,12 @@ export function buildSchemeLayout(
           color: engineColor(child.file),
           live: child.file.activity === "live",
         });
-        cx += place(child, cx, childTop, depth + 1) + GAP_X;
+        /* Widen the gap only at a flow/pipeline group boundary so two sibling
+           halos never overlap (issue #136); the last slot keeps GAP_X, which the
+           `used` width below subtracts back off. */
+        const nextChild = children[i + 1];
+        const gap = nextChild && isGroupBoundary(child.file.path, nextChild.file.path) ? GROUP_SIBLING_GAP : GAP_X;
+        cx += place(child, cx, childTop, depth + 1) + gap;
       }
       const quiet = stackFor.get(col.file.path)?.filter((entry) => !claimed.has(entry.path));
       if (quiet?.length) {
