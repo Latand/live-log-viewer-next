@@ -168,11 +168,21 @@ export type PlanStepStatus = "pending" | "in_progress" | "completed";
 
 /** How full an agent's context window is (codex token_count events; claude
     assistant usage vs the model's window). */
+export type CtxSource = "runtime" | "provider" | "registry" | "unknown";
+export type CtxConfidence = "exact" | "approximate" | "unknown";
+
 export interface CtxUsage {
   usedTokens: number;
-  windowTokens: number;
-  /** Rounded 0–100. */
-  pct: number;
+  /** Null when the transcript and known-model table cannot establish it. */
+  windowTokens: number | null;
+  /** Rounded 0–100, or null along with an unknown window. */
+  pct: number | null;
+  source: CtxSource;
+  confidence: CtxConfidence;
+  /** Bundled snapshot id, present for registry-derived capacity. */
+  registryVersion?: string;
+  /** ISO timestamp of the transcript usage record, with scan time fallback. */
+  observedAt: string;
 }
 
 /** Codex thread goal (update_goal tool / thread_goal_updated events): the

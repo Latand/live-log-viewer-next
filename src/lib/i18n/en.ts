@@ -153,6 +153,9 @@ export const en = {
   "accounts.effective": "{pct}%",
   "accounts.effectiveTip": "{window} binds",
   "accounts.effectiveStale": "{window} binds · stale",
+  "accounts.limitsAria": "Quota windows for {label}",
+  "accounts.limitsStale": "Last known values",
+  "accounts.limitsStaleTip": "Last known values — not a live read",
   // Claude sign-in slice (#61)
   "accounts.claudeLoginStarted": "Sign-in started for {label}",
   "accounts.claudeLogin.starting": "Starting sign-in…",
@@ -873,7 +876,11 @@ export const en = {
   "plan.tokens": "tokens: {n}",
   "plan.time": "time: {n} min",
   "plan.ctxTitle": "Context window: {pct}% used\n{used} of {window} tokens",
+  "plan.ctxSourceRuntime": "Window reported by the agent runtime",
+  "plan.ctxSourceRegistry": "Window from the bundled model registry ({version}) — approximate",
+  "plan.ctxTitleUnknown": "Context usage: {used} tokens\nWindow unknown for this model — percentage withheld",
   "plan.ctxAria": "Context: {pct} percent of the window used",
+  "plan.ctxAriaUnknown": "Context: {used} tokens used, window size unknown",
   "plan.goalAria": "Session goal: {status}",
 
   // LimitsFooter
@@ -896,6 +903,7 @@ export const en = {
   "resources.free": "{amount} free",
   "resources.used": "{amount} used",
   "resources.stale": "resource data is stale: {stale}",
+  "resources.captured": "captured {age}",
   "resources.openAria": "Agent sessions and memory",
   "resources.title": "Agent sessions",
   "resources.total": "Σ {amount}",

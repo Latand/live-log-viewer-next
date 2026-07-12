@@ -159,6 +159,9 @@ export function ResourcesFooter() {
                 note={t("resources.used", { amount: fmtBytes(system.swapUsed) })}
               />
             ) : null}
+            <span className="mt-1.5 block text-right text-[9.5px] tabular-nums text-dim">
+              {t("resources.captured", { age: fmtAge(Date.parse(system.capturedAt) / 1000) })}
+            </span>
           </>
         ) : (
           <span className="text-[11px] font-semibold text-ink">{t("resources.title")}</span>

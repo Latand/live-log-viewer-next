@@ -14,6 +14,7 @@ import { type TFunction, useLocale } from "@/lib/i18n";
 import { handleOverlayEscape } from "@/lib/overlay";
 
 import { Check, Loader2, X } from "./icons";
+import { formatResetClock, formatResetEta } from "./rateLimit";
 import { engineTintOf } from "./utils";
 
 /** Amber that clears contrast on the panel background — state legibility never
@@ -48,6 +49,54 @@ function CapacityChip({ account, engine }: { account: AccountOption; engine: "cl
     >
       {t("accounts.effective", { pct: Math.round(effective.percent) })}
     </span>
+  );
+}
+
+/** Per-account quota detail (issue #40): the session and weekly windows with
+    remaining capacity and reset times, so the switch decision reads without
+    leaving the panel. The collapsed {@link CapacityChip} is the min-window
+    summary of this; here both windows are broken out. Renders nothing when no
+    live/stale read exists; a stale read is dimmed and labeled. Time formatting is
+    shared with the limits footer so both read identically. */
+function AccountLimitsDetail({ account }: { account: AccountOption }) {
+  const { t } = useLocale();
+  // A single reference `now` for the open panel keeps the two windows' reset
+  // ETAs consistent and stable across re-renders (they don't tick live here).
+  const [now] = useState(() => Math.floor(Date.now() / 1000));
+  const limits = account.limits;
+  if (!limits) return null;
+  const windows = [
+    { key: "session", label: t("limits.5h"), window: limits.session },
+    { key: "weekly", label: t("limits.week"), window: limits.weekly },
+  ].filter((row): row is { key: string; label: string; window: NonNullable<typeof row.window> } => row.window != null);
+  if (windows.length === 0) return null;
+  const stale = limits.freshness === "stale";
+  return (
+    <dl
+      aria-label={t("accounts.limitsAria", { label: account.label })}
+      title={stale ? t("accounts.limitsStaleTip") : undefined}
+      className={`flex flex-col gap-0.5 px-3 pb-1.5 pl-[26px] ${stale ? "opacity-70" : ""}`}
+    >
+      {/* Freshness is a visible, screen-reader-readable line — not opacity or a
+          title tooltip alone (touch has no hover, and `title` AT support is
+          spotty), so historical numbers never read as current. */}
+      {stale ? <div className="text-[9.5px] font-semibold uppercase tracking-wide text-dim">{t("accounts.limitsStale")}</div> : null}
+      {windows.map(({ key, label, window: w }) => {
+        const left = Math.max(0, Math.min(100, 100 - w.usedPercent));
+        return (
+          <div key={key} className="flex items-baseline gap-1.5 text-[10px] leading-snug text-dim">
+            <dt className="w-8 shrink-0 font-semibold">{label}</dt>
+            <dd className="flex min-w-0 flex-1 items-baseline gap-1">
+              <span className="font-bold tabular-nums text-ink">{Math.round(left)}%</span>
+              <span>{t("limits.left")}</span>
+              {w.resetsAt ? (
+                <span className="truncate">· {t("limits.reset", { eta: formatResetEta(w.resetsAt, now), at: formatResetClock(w.resetsAt, now) })}</span>
+              ) : null}
+            </dd>
+          </div>
+        );
+      })}
+    </dl>
   );
 }
 
@@ -443,6 +492,7 @@ export function AccountsPanel({
               {accounts.map((account) => (
                 <Fragment key={account.id}>
                   <AccountRow account={account} engine={engine} activeId={active} disabled={mutation !== null} onSelect={() => void onSelect(account.id)} onRemove={() => void state.remove(account.id)} />
+                  <AccountLimitsDetail account={account} />
                   {engine === "claude" ? <ClaudeLoginRow key={account.login?.operationId ?? account.id} account={account} state={state} loginBusy={loginBusy} /> : null}
                 </Fragment>
               ))}
