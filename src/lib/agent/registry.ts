@@ -245,19 +245,71 @@ function receiptStillAwaitsResumeSuccessor(receipt: SpawnReceipt): boolean {
 
 const PATH_CORRELATION_WINDOW_MS = 30_000;
 
-function pathPendingReceiptForObservation(file: RegistryFile, observation: ConversationObservation): SpawnReceipt | null {
-  if (observation.engine !== "codex" || !observation.startedAt) return null;
-  const observedStart = Date.parse(observation.startedAt);
-  if (!Number.isFinite(observedStart)) return null;
-  const candidates = Object.values(file.receipts).filter((receipt) => {
-    if (receipt.engine !== "codex" || receipt.state !== "path-pending" || receipt.artifactPath !== null || !receipt.pathCorrelation) return false;
-    if (receipt.pathCorrelation.cwd !== observation.launchProfile.cwd) return false;
+function correlatePathPendingReceipts(file: RegistryFile, observations: ConversationObservation[]): Map<string, string> {
+  type PendingReceipt = { launchId: string; cwd: string; expectedStart: number };
+  type PendingObservation = { path: string; cwd: string; observedStart: number };
+  type Correlation = { count: number; distance: number; pairs: Array<[string, string]> };
+  const receipts: PendingReceipt[] = Object.values(file.receipts).flatMap((receipt) => {
+    if (receipt.engine !== "codex" || receipt.state !== "path-pending" || receipt.artifactPath !== null || !receipt.pathCorrelation) return [];
     const expectedStart = Date.parse(receipt.pathCorrelation.startedAt);
     return Number.isFinite(expectedStart)
-      && observedStart >= expectedStart - 1_000
-      && observedStart <= expectedStart + PATH_CORRELATION_WINDOW_MS;
+      ? [{ launchId: receipt.launchId, cwd: receipt.pathCorrelation.cwd, expectedStart }]
+      : [];
   });
-  return candidates.length === 1 ? candidates[0]! : null;
+  const pendingObservations: PendingObservation[] = [];
+  for (const observation of observations) {
+    if (observation.engine !== "codex" || !observation.startedAt) continue;
+    const observedStart = Date.parse(observation.startedAt);
+    if (!Number.isFinite(observedStart)) continue;
+    const nativeId = sessionKeyFromTranscript(observation.engine, observation.path)?.sessionId ?? null;
+    const knownOwners = Object.values(file.conversations).filter((conversation) =>
+      conversation.engine === observation.engine
+      && (conversationOwnsPath(conversation, observation.path)
+        || (nativeId !== null && conversation.generations.some((generation) => generation.id === nativeId))));
+    if (knownOwners.some((owner) => !scannerAllocatedProvisionalOwner(owner, observation.path))) continue;
+    pendingObservations.push({ path: observation.path, cwd: observation.launchProfile.cwd, observedStart });
+  }
+  const matches = new Map<string, string>();
+  const cwdValues = new Set([...receipts.map((receipt) => receipt.cwd), ...pendingObservations.map((observation) => observation.cwd)]);
+  const prefer = (candidate: Correlation, current: Correlation | undefined): boolean => {
+    if (!current || candidate.count !== current.count) return !current || candidate.count > current.count;
+    if (candidate.distance !== current.distance) return candidate.distance < current.distance;
+    return JSON.stringify(candidate.pairs) < JSON.stringify(current.pairs);
+  };
+  for (const cwd of cwdValues) {
+    const cwdReceipts = receipts.filter((receipt) => receipt.cwd === cwd)
+      .sort((left, right) => left.expectedStart - right.expectedStart || left.launchId.localeCompare(right.launchId));
+    const cwdObservations = pendingObservations.filter((observation) => observation.cwd === cwd)
+      .sort((left, right) => left.observedStart - right.observedStart || left.path.localeCompare(right.path));
+    const table: Array<Array<Correlation | undefined>> = Array.from(
+      { length: cwdObservations.length + 1 },
+      () => Array<Correlation | undefined>(cwdReceipts.length + 1),
+    );
+    table[0]![0] = { count: 0, distance: 0, pairs: [] };
+    for (let observationIndex = 0; observationIndex <= cwdObservations.length; observationIndex += 1) {
+      for (let receiptIndex = 0; receiptIndex <= cwdReceipts.length; receiptIndex += 1) {
+        const current = table[observationIndex]![receiptIndex];
+        if (!current) continue;
+        const advance = (nextObservation: number, nextReceipt: number, candidate: Correlation) => {
+          if (prefer(candidate, table[nextObservation]![nextReceipt])) table[nextObservation]![nextReceipt] = candidate;
+        };
+        if (observationIndex < cwdObservations.length) advance(observationIndex + 1, receiptIndex, current);
+        if (receiptIndex < cwdReceipts.length) advance(observationIndex, receiptIndex + 1, current);
+        if (observationIndex >= cwdObservations.length || receiptIndex >= cwdReceipts.length) continue;
+        const observation = cwdObservations[observationIndex]!;
+        const receipt = cwdReceipts[receiptIndex]!;
+        if (observation.observedStart < receipt.expectedStart - 1_000
+          || observation.observedStart > receipt.expectedStart + PATH_CORRELATION_WINDOW_MS) continue;
+        advance(observationIndex + 1, receiptIndex + 1, {
+          count: current.count + 1,
+          distance: current.distance + Math.abs(observation.observedStart - receipt.expectedStart),
+          pairs: [...current.pairs, [observation.path, receipt.launchId]],
+        });
+      }
+    }
+    for (const [pathname, launchId] of table.at(-1)?.at(-1)?.pairs ?? []) matches.set(pathname, launchId);
+  }
+  return matches;
 }
 
 function mergeResumeLaunchProfile(current: LaunchProfile, requested: LaunchProfile): LaunchProfile {
@@ -1163,6 +1215,13 @@ export class AgentRegistry {
       }
       addConversationContinuityPath(conversation, entry.artifactPath);
     }
+    if (receipt.purpose === "launch" && receipt.state === "path-pending") {
+      const provisionalOwner = Object.values(file.conversations).find((candidate) => candidate.id !== conversation.id
+        && candidate.engine === conversation.engine && conversationOwnsPath(candidate, entry.artifactPath));
+      if (provisionalOwner && !adoptProvisionalOwner(file, provisionalOwner, conversation, entry.artifactPath)) {
+        return conflict("spawn_artifact_conflict");
+      }
+    }
     if (receipt.purpose === "resume-successor" && !conversationOwnsPath(conversation, entry.artifactPath)) {
       const provisionalOwner = Object.values(file.conversations).find((candidate) => candidate.id !== conversation.id
         && candidate.engine === conversation.engine && conversationOwnsPath(candidate, entry.artifactPath));
@@ -1445,7 +1504,25 @@ export class AgentRegistry {
     return this.mutate((file) => {
       const scopeChanged = new Set<Extract<AgentEngine, "claude" | "codex">>();
       const firstPathByNativeSession = new Map<string, string>();
+      const pathPendingLaunches = correlatePathPendingReceipts(file, observations);
       for (const observation of observations) {
+        const nativeId = sessionKeyFromTranscript(observation.engine, observation.path)?.sessionId ?? null;
+        const pathPendingLaunchId = pathPendingLaunches.get(observation.path);
+        if (nativeId && pathPendingLaunchId) {
+          const pathPendingReceipt = file.receipts[pathPendingLaunchId];
+          const recovered = pathPendingReceipt ? this.settleSpawnInFile(file, pathPendingLaunchId, {
+            key: { engine: observation.engine, sessionId: nativeId },
+            artifactPath: observation.path,
+            cwd: pathPendingReceipt.cwd,
+            accountId: pathPendingReceipt.accountId,
+            status: "unhosted",
+            host: null,
+            claimEpoch: 0,
+            claimOwner: null,
+            pendingAction: null,
+          }, "observed-completed") : null;
+          if (recovered?.kind === "settled") scopeChanged.add(observation.engine);
+        }
         const exactOwners = Object.values(file.conversations).filter((candidate) =>
           candidate.engine === observation.engine && conversationOwnsPath(candidate, observation.path));
         let exactOwner = preferredConversationOwner(file, exactOwners);
@@ -1456,7 +1533,6 @@ export class AgentRegistry {
             }
           }
         }
-        const nativeId = sessionKeyFromTranscript(observation.engine, observation.path)?.sessionId ?? null;
         const nativeSessionId = nativeId ? `${observation.engine}:${nativeId}` : null;
         const firstObservedPath = nativeSessionId ? firstPathByNativeSession.get(nativeSessionId) : undefined;
         if (nativeSessionId && firstObservedPath === undefined) firstPathByNativeSession.set(nativeSessionId, observation.path);
@@ -1486,26 +1562,6 @@ export class AgentRegistry {
             }
             nativeOwner.updatedAt = observation.observedAt;
             scopeChanged.add(observation.engine);
-          }
-        }
-        if (!conversation && nativeId) {
-          const pathPendingReceipt = pathPendingReceiptForObservation(file, observation);
-          if (pathPendingReceipt) {
-            const recovered = this.settleSpawnInFile(file, pathPendingReceipt.launchId, {
-              key: { engine: observation.engine, sessionId: nativeId },
-              artifactPath: observation.path,
-              cwd: pathPendingReceipt.cwd,
-              accountId: pathPendingReceipt.accountId,
-              status: "unhosted",
-              host: null,
-              claimEpoch: 0,
-              claimOwner: null,
-              pendingAction: null,
-            }, "observed-completed");
-            if (recovered.kind === "settled") {
-              conversation = file.conversations[pathPendingReceipt.conversationId] ?? null;
-              scopeChanged.add(observation.engine);
-            }
           }
         }
         if (!conversation) {
