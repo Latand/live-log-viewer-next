@@ -528,6 +528,89 @@ test("a non-host worker with an owner message is recorded user-authored (issue #
   }
 });
 
+function claudeSubagentFile(pathname: string, mtime: number): FileEntry {
+  return { ...runtimeFile(pathname, mtime), root: "claude-projects", engine: "claude", kind: "subagent", fmt: "claude", name: path.basename(pathname) };
+}
+
+function claudeUserRecord(now: number, offsetMinutes: number, text: string): string {
+  return JSON.stringify({ type: "user", timestamp: new Date(now - offsetMinutes * 60_000).toISOString(), message: { content: text } });
+}
+
+test("a native Claude subagent's automated assignment scans clean (issue #112 finding)", async () => {
+  /* A native `agent-*` subagent's first turn is its parent agent's automated
+     assignment, serialized as one user-role message with no receipt/delivery.
+     The native-subagent allowance covers it so the spawned subtask can collapse. */
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-reaper-subagent-"));
+  const pathname = path.join(directory, "agent-019f4906-3f67-7b72-9fbc-9ec3b5ad13ca.jsonl");
+  const now = Date.parse("2026-07-12T12:00:00.000Z");
+  fs.writeFileSync(pathname, claudeUserRecord(now, 60, "Investigate the failing test and report back.") + "\n");
+  process.env.LLV_STATE_DIR = directory;
+  delete process.env.LLV_REAPER_ENABLED;
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+
+  try {
+    await runReaperCycle({ registry, hosts: [], files: [claudeSubagentFile(pathname, now / 1000 - 60 * 60)], now });
+    const state = JSON.parse(fs.readFileSync(path.join(directory, "reaper-state.json"), "utf8")) as {
+      scannedAt?: Record<string, number>;
+      userAuthoredPaths?: Record<string, true>;
+    };
+    expect(state.userAuthoredPaths?.[pathname]).toBeUndefined();
+    expect(state.scannedAt?.[pathname]).toBeDefined();
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("an owner message on a native Claude subagent still trips authorship (issue #112 finding)", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-reaper-subagent-owner-"));
+  const pathname = path.join(directory, "agent-019f4906-3f67-7b72-9fbc-9ec3b5ad13cb.jsonl");
+  const now = Date.parse("2026-07-12T12:00:00.000Z");
+  // Automated assignment PLUS a real owner interjection.
+  fs.writeFileSync(pathname, claudeUserRecord(now, 60, "Do the assigned subtask.") + "\n" + claudeUserRecord(now, 30, "wait — skip the migration path") + "\n");
+  process.env.LLV_STATE_DIR = directory;
+  delete process.env.LLV_REAPER_ENABLED;
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+
+  try {
+    await runReaperCycle({ registry, hosts: [], files: [claudeSubagentFile(pathname, now / 1000 - 30 * 60)], now });
+    const state = JSON.parse(fs.readFileSync(path.join(directory, "reaper-state.json"), "utf8")) as {
+      userAuthoredPaths?: Record<string, true>;
+    };
+    expect(state.userAuthoredPaths?.[pathname]).toBe(true);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("a native Codex subagent's automated assignment scans clean (issue #112 finding)", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-reaper-codex-subagent-"));
+  const pathname = path.join(directory, "rollout-019f4906-3f67-7b72-9fbc-9ec3b5ad13cc.jsonl");
+  const now = Date.parse("2026-07-12T12:00:00.000Z");
+  // session_meta carries the parent_thread_id that marks a native codex subagent.
+  fs.writeFileSync(pathname, [
+    JSON.stringify({ type: "session_meta", payload: { parent_thread_id: "019f4906-3f67-7b72-9fbc-9ec3b5ad0000" } }),
+    JSON.stringify({ type: "event_msg", timestamp: new Date(now - 60 * 60_000).toISOString(), payload: { type: "user_message", message: "Run the assigned subtask." } }),
+  ].join("\n") + "\n");
+  process.env.LLV_STATE_DIR = directory;
+  delete process.env.LLV_REAPER_ENABLED;
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  // The native-codex detection reads the transcript head up to `size`, so the
+  // entry must carry the real on-disk size, not runtimeFile's placeholder.
+  const codexFile = { ...runtimeFile(pathname, now / 1000 - 60 * 60), size: fs.statSync(pathname).size };
+
+  try {
+    await runReaperCycle({ registry, hosts: [], files: [codexFile], now });
+    const state = JSON.parse(fs.readFileSync(path.join(directory, "reaper-state.json"), "utf8")) as {
+      scannedAt?: Record<string, number>;
+      userAuthoredPaths?: Record<string, true>;
+    };
+    expect(state.userAuthoredPaths?.[pathname]).toBeUndefined();
+    expect(state.scannedAt?.[pathname]).toBeDefined();
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("a headless reviewer's automated startup prompt alone is not owner-authored (issue #112 finding)", async () => {
   /* startHeadlessReview injects the review instruction as one user-role message
      with no launch/delivery allowance. Without the reviewer allowance it would

@@ -13,6 +13,7 @@ import type { Flow, FlowMergeEvidence } from "@/lib/flows/types";
 import { reconcileMigrationInventory } from "@/lib/accounts/migration/coordinator";
 import { procBackend } from "@/lib/proc";
 import { listFiles } from "@/lib/scanner";
+import { isNativeCodexSubagentTranscript } from "@/lib/scanner/codexNative";
 import { scanUserAuthoredMessages } from "@/lib/session/reader";
 import { killTmuxHostIfMatches, tmuxEndpoint } from "@/lib/tmux";
 import type { FileEntry } from "@/lib/types";
@@ -381,6 +382,22 @@ function viewerReviewerLaunchAllowance(flows: Flow[], pathname: string): number 
   return 0;
 }
 
+/* A native subagent (a Claude `agent-*` session, or a Codex thread with a
+   parent_thread_id) is spawned by its parent AGENT, not the owner, and its first
+   turn is the parent's automated assignment — serialized as a user-role message
+   with no Viewer receipt or flow delivery to cover it. Left uncounted, that one
+   automated prompt marks every agent-spawned subtask owner-authored and pins it
+   forever, so the spawned workers #112 targets never collapse. Provenance is
+   deterministic from the scan entry (the `subagent` kind / native codex parent),
+   so grant exactly one allowance for the assignment; a genuine owner message on
+   top is the second and still trips the exemption. */
+function viewerNativeSubagentAllowance(file: FileEntry | undefined): number {
+  if (!file) return 0;
+  if (file.root === "claude-projects" && file.kind === "subagent") return 1;
+  if (file.root === "codex-sessions" && file.engine === "codex" && isNativeCodexSubagentTranscript(file.path, file.size)) return 1;
+  return 0;
+}
+
 function authorshipEvidence(
   snapshot: ReturnType<AgentRegistry["snapshot"]>,
   hosts: TranscriptHost[],
@@ -408,6 +425,7 @@ function authorshipEvidence(
      the scan sees, in addition to the live hosts. A live file is skipped: it is
      board-exempt regardless and its mtime advances every write, so scanning it
      would churn without ever producing a usable stamp. */
+  const fileByPath = new Map(files.map((file) => [file.path, file] as const));
   const targets = new Map<string, "claude" | "codex">();
   for (const host of hosts) {
     if (host.primaryPath) targets.set(host.primaryPath, host.engine);
@@ -426,7 +444,8 @@ function authorshipEvidence(
     if (missingTranscriptPaths.has(pathname)) continue;
     const viewerMessageAllowance = (hasViewerWorkerLaunchPrompt(snapshot, pathname) ? 1 : 0)
       + viewerFlowMessageAllowance(flows, pathname)
-      + viewerReviewerLaunchAllowance(flows, pathname);
+      + viewerReviewerLaunchAllowance(flows, pathname)
+      + viewerNativeSubagentAllowance(fileByPath.get(pathname));
     /* Stamp the mtime BEFORE reading: a transcript that grows during the scan
        ends up with a newer on-disk mtime than we record, so the board re-pins it
        as unverified until the next cycle rather than certifying content the
