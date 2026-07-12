@@ -84,10 +84,15 @@ export function seededPresetsFromRoles(): FlowPreset[] {
   return presets.map((preset) => ({ ...preset, managed: "role-registry" }));
 }
 
+/** The role-registry-backed fallback captured into new and legacy Codex flows. */
+export function configuredReviewerFallback(): FlowPreset["reviewer"] {
+  return flowRole(loadRoleDefinitionsOrDefaults(), "architect");
+}
+
 /** Compatibility export for consumers that render the initial seed list. */
 export const SEEDED_PRESETS: FlowPreset[] = seededPresetsFromRoles();
 
-export const FLOWS_SCHEMA_VERSION = 2;
+export const FLOWS_SCHEMA_VERSION = 3;
 
 type FlowFile = { schemaVersion?: unknown; flows?: unknown };
 type PresetFile = { presets?: unknown };
@@ -166,10 +171,19 @@ export function loadFlows(): Flow[] {
   return flows.map((flow) => ({
     ...flow,
     implementerConversationId: flow.implementerConversationId ?? null,
+    reviewerFallback: flow.reviewerFallback === undefined && flow.roles.reviewer.engine === "codex"
+      ? configuredReviewerFallback()
+      : flow.reviewerFallback ?? null,
     pausedState: flow.pausedState ?? null,
     rounds: flow.rounds.map((round) => ({
       ...round,
       reviewerConversationId: round.reviewerConversationId ?? null,
+      /* A null snapshot is meaningful (issue #117 retry resets it so the launch
+         re-picks a fresh account/role), so it is preserved rather than backfilled;
+         reviewerRoleFor falls back to flow.roles.reviewer for a null/absent value. */
+      reviewerRole: round.reviewerRole ?? null,
+      attemptedAccounts: round.attemptedAccounts ?? [],
+      autoRetryCount: round.autoRetryCount ?? 0,
       sessionId: round.sessionId ?? null,
       reviewerPid: round.reviewerPid ?? null,
       spawnStartedAt: round.spawnStartedAt ?? null,

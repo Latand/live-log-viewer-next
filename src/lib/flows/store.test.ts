@@ -6,7 +6,7 @@ import path from "node:path";
 import { AgentRegistry } from "@/lib/agent/registry";
 import { CODEX_SOL_MODEL, CODEX_TERRA_MODEL } from "@/lib/agent/models";
 
-import { FLOWS_SCHEMA_VERSION, loadFlows, mergeSeededPresets, reconcileFlowConversationOwnership, saveFlows, seededPresetsFromRoles } from "./store";
+import { configuredReviewerFallback, FLOWS_SCHEMA_VERSION, loadFlows, mergeSeededPresets, reconcileFlowConversationOwnership, saveFlows, seededPresetsFromRoles } from "./store";
 import type { Flow, FlowPreset } from "./types";
 
 const LEGACY_DEFAULT: FlowPreset = {
@@ -118,7 +118,12 @@ test("flow specs persist in the versioned state file and legacy flow entries loa
     });
 
     fs.writeFileSync(path.join(sandbox, "flows.json"), JSON.stringify({ flows: [flow] }));
-    expect(loadFlows()).toEqual([{ ...flow, implementerConversationId: null, pausedState: null }]);
+    expect(loadFlows()).toEqual([{
+      ...flow,
+      implementerConversationId: null,
+      reviewerFallback: configuredReviewerFallback(),
+      pausedState: null,
+    }]);
   } finally {
     if (previousState === undefined) delete process.env.LLV_STATE_DIR;
     else process.env.LLV_STATE_DIR = previousState;

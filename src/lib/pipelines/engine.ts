@@ -24,7 +24,7 @@ import { commitPipelineStage, provisionPipelineWorktree, resetPipelineStage } fr
 import { MAX_SPEC_LENGTH, MAX_STAGE_PROMPT_LENGTH, MAX_TASK_LENGTH } from "./limits";
 import { renderStagePrompt } from "./prompts";
 import { pipelineRoleLookup, resolvePipelineRole, validatePipelineRoleParams, type PipelineRoleLookup } from "./roles";
-import { buildPipeline, loadPipelines, PipelineStoreError, withPipelineMutation } from "./store";
+import { buildPipeline, isEffectiveRole, loadPipelines, PipelineStoreError, withPipelineMutation } from "./store";
 import type {
   CreatePipelineRequest,
   EffectivePipelineRole,
@@ -848,6 +848,89 @@ export async function patchPipeline(
         attempt.output = "Skipped by operator.";
       }
       advancePipeline(pipeline, stage, ports);
+    } else if (req.action === "override-stage") {
+      if (TERMINAL_STATES.has(pipeline.state)) return { error: "pipeline is closed or completed", status: 409 };
+      const targetId = typeof req.stageId === "string" ? req.stageId : null;
+      const target = targetId ? pipeline.stages.find((item) => item.id === targetId) ?? null : null;
+      if (!target) return { error: "stage not found", status: 404 };
+      /* Every attempt snapshots the stage's effectiveRole/prompt when it is
+         created (newAttempt), so an override only takes effect on a stage that
+         has not started; editing a stage mid-attempt would silently no-op. */
+      const run = pipeline.runs.find((item) => item.stageId === target.id);
+      if (run && run.attempts.length > 0) return { error: "stage has already started", status: 409 };
+      const changesRoleOrRuntime = req.role !== undefined || req.engine !== undefined || req.model !== undefined || req.effort !== undefined;
+      if (!changesRoleOrRuntime && req.prompt === undefined) return { error: "override-stage needs at least one field to change", status: 400 };
+      /* Validate the runtime types up front: resolvePipelineRole treats a
+         non-string, non-null model/effort as absent and silently uses the
+         fallback, so a raw `model: 123` / `effort: false` would 200 with the old
+         config instead of the required 400 (issue #118 Finding 3). */
+      if (req.engine !== undefined && req.engine !== "claude" && req.engine !== "codex") return { error: "engine must be claude or codex", status: 400 };
+      if (req.model !== undefined && req.model !== null && typeof req.model !== "string") return { error: "model must be a string or null", status: 400 };
+      if (req.effort !== undefined && req.effort !== null && typeof req.effort !== "string") return { error: "effort must be a string or null", status: 400 };
+
+      /* Resolve the role/runtime combination through the same path creation uses
+         (resolvePipelineRole), so a stage override honors canonical role
+         resolution, param validation, disallowed-role and engine/model/effort
+         bounds — never persisting a record the create path would have rejected.
+         Skipped for a prompt-only edit so it can't drift the runtime on a registry
+         change unrelated to what the operator touched. */
+      if (changesRoleOrRuntime) {
+        let roleRef = target.role;
+        if (req.role !== undefined) {
+          if (req.role === null) {
+            roleRef = undefined;
+          } else {
+            if (typeof req.role !== "object" || Array.isArray(req.role)) return { error: "role must be an object or null", status: 400 };
+            const roleId = typeof req.role.roleId === "string" ? req.role.roleId.trim() : "";
+            if (!roleId) return { error: "role requires a roleId", status: 400 };
+            const params = req.role.params;
+            if (params !== undefined && (!params || typeof params !== "object" || Array.isArray(params))) return { error: "role params must be an object", status: 400 };
+            if (params && Object.values(params).some((value) => typeof value !== "string" && typeof value !== "number")) return { error: "role params must be strings or numbers", status: 400 };
+            const paramError = params ? validatePipelineRoleParams(roleId, params as Record<string, string | number>) : null;
+            if (paramError) return { error: paramError, status: 400 };
+            roleRef = { roleId: roleId as PipelineRoleId, ...(params && Object.keys(params).length ? { params: params as Record<string, string | number> } : {}) };
+          }
+        }
+        /* Changing the role drops any unpinned runtime so the new role's defaults
+           apply; an explicit engine/model/effort in the request still wins. When
+           the role is unchanged, unpinned fields keep the stage's existing values. */
+        const resetRuntime = req.role !== undefined;
+        const resolved = resolvePipelineRole(
+          {
+            role: roleRef,
+            engine: req.engine !== undefined ? req.engine : resetRuntime ? undefined : target.engine,
+            model: req.model !== undefined ? req.model : resetRuntime ? undefined : target.model,
+            effort: req.effort !== undefined ? req.effort : resetRuntime ? undefined : target.effort,
+            access: target.access,
+          },
+          target.kind,
+          ports.roleLookup,
+        );
+        if (!resolved.role) return { error: resolved.error ?? "invalid stage role", status: 400 };
+        /* The store keeps a stage's input-level role/engine/model/effort
+           consistent with its effectiveRole (isStage), so mirror the resolution
+           onto both: the effectiveRole is what a fresh attempt snapshots, the
+           input fields keep the persisted record valid. */
+        target.effectiveRole = resolved.role;
+        target.role = roleRef;
+        target.engine = resolved.role.engine;
+        target.model = resolved.role.model;
+        target.effort = resolved.role.effort;
+        target.access = resolved.role.access;
+        /* Belt-and-braces: resolvePipelineRole already enforces these bounds, but
+           re-check so a future resolver change can never persist a poisoned record. */
+        if (!isEffectiveRole(target.effectiveRole)) return { error: "stage role is not a valid engine/model/effort combination", status: 400 };
+      }
+
+      if (req.prompt !== undefined) {
+        if (typeof req.prompt !== "string" || !req.prompt.trim()) return { error: "prompt must be a non-empty string", status: 400 };
+        const prompt = req.prompt.trim();
+        /* Same ceiling creation enforces (normalizeStages), so an override can
+           never persist a record larger than the create path would accept and
+           later balloon a run prompt / park review-loop delivery. */
+        if (prompt.length > MAX_STAGE_PROMPT_LENGTH) return { error: `stage prompt exceeds ${MAX_STAGE_PROMPT_LENGTH} characters`, status: 400 };
+        target.prompt = prompt;
+      }
     } else if (req.action === "close") {
       if (flow && flow.state !== "closed") await ports.closeFlow(flow.id);
       pipeline.state = "closed";

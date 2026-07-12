@@ -7,7 +7,7 @@ import path from "node:path";
 /* The state dir must point at a sandbox before store.ts computes its
    module-level constants, so exec/store load dynamically after the env set. */
 process.env.LLV_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "llv-exec-test-"));
-const { headlessReviewStatus, reviewerCommand, scanEventStream } = await import("./exec");
+const { forgetHeadlessReview, headlessReviewStatus, reviewerCommand, scanEventStream, startHeadlessReview } = await import("./exec");
 const { reviewerPrompt } = await import("./prompts");
 const { outputPathFor, stdoutPathFor } = await import("./store");
 
@@ -47,6 +47,14 @@ async function waitForDeath(pid: number): Promise<void> {
   throw new Error(`pid ${pid} refused to die`);
 }
 
+async function waitForFile(filePath: string): Promise<void> {
+  for (let i = 0; i < 200; i++) {
+    if (fs.existsSync(filePath)) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`file ${filePath} was not created`);
+}
+
 test("scanEventStream extracts session id and last agent message", () => {
   const scanned = scanEventStream(EVENTS);
   expect(scanned.sessionId).toBe("11111111-2222-3333-4444-555555555555");
@@ -57,8 +65,38 @@ test("headless codex reviewer launches without CLI sandbox blocking", () => {
   const built = reviewerCommand({ engine: "codex", model: null, effort: "xhigh" }, "review prompt", "/out/review.md", "/repo");
 
   expect(built.args).toContain("--dangerously-bypass-approvals-and-sandbox");
+  expect(built.args).toContain("-");
+  expect(built.args).not.toContain("review prompt");
+  expect(built.stdin).toBe("review prompt");
   expect(built.args).not.toContain("--sandbox");
   expect(built.args).not.toContain("read-only");
+});
+
+test("headless Codex launch flushes the complete prompt and closes stdin", async () => {
+  const capturePath = path.join(process.env.LLV_STATE_DIR!, "stdin-capture.json");
+  const executablePath = path.join(process.env.LLV_STATE_DIR!, "fake-codex");
+  const prompt = "Review line one.\nReview line two with unicode: Привіт.\n";
+  fs.writeFileSync(
+    executablePath,
+    `#!${process.execPath}\nconst prompt = await Bun.stdin.text();\nawait Bun.write(${JSON.stringify(capturePath)}, JSON.stringify({ prompt, eof: true }));\n`,
+    { mode: 0o700 },
+  );
+
+  startHeadlessReview(
+    "flow-stdin-eof",
+    1,
+    { engine: "codex", model: null, effort: null },
+    process.cwd(),
+    prompt,
+    5_000,
+    null,
+    null,
+    { command: executablePath },
+  );
+  await waitForFile(capturePath);
+
+  expect(JSON.parse(fs.readFileSync(capturePath, "utf8"))).toEqual({ prompt, eof: true });
+  forgetHeadlessReview("flow-stdin-eof", 1);
 });
 
 test("headless managed Codex reviewer fixes its account home and file credential store at launch", () => {

@@ -28,7 +28,7 @@ import { resolveExpandedNode } from "./expandedNode";
 import { autoEditTokenFor, clearStaleRename, requestRename, type RenameRequest } from "./renameRequest";
 import { buildSchemeLayout } from "./layout";
 import { Minimap } from "./Minimap";
-import { AgentLinksLayer, EdgesLayer, LoopsLayer, MOVE_EASE, NodesLayer, type DeckFocus } from "./nodes";
+import { AgentLinksLayer, EdgesLayer, GroupsLayer, LoopsLayer, MOVE_EASE, NodesLayer, type DeckFocus } from "./nodes";
 import type { TaskCardHandlers } from "./TaskCard";
 import { TaskEdgesLayer } from "./TaskEdgesLayer";
 import { TasksLayer } from "./TasksLayer";
@@ -686,6 +686,9 @@ export function SchemeBoard({
           } as React.CSSProperties
         }
       >
+        {/* Group halos sit behind every edge and card so a running flow/pipeline
+            reads as one framed region; the label chip stays live off the map. */}
+        <GroupsLayer groups={layout.groups} interactive={!mapMode && !handLike && !session} />
         <EdgesLayer edges={layout.edges} width={layout.width} height={layout.height} />
         <LoopsLayer loops={layout.loops} width={layout.width} height={layout.height} />
         {/* Rails/badges stay passive on the map, but the pipeline hub keeps its

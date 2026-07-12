@@ -34,6 +34,7 @@ export interface HeadlessCodexAccount {
   managed: boolean;
 }
 export interface HeadlessClaudeAccount { home: string; projectsDir: string; managed: boolean; }
+export interface HeadlessReviewRuntime { command?: string; }
 
 /* The reviewer runs detached with file-backed stdio, so it survives a viewer
    restart. This in-memory record only adds what disk cannot know: the exact
@@ -145,7 +146,7 @@ export function reviewerCommand(
   cwd: string,
   codexAccount?: HeadlessCodexAccount | null,
   claudeAccount?: HeadlessClaudeAccount | null,
-): { command: string; args: string[]; env: NodeJS.ProcessEnv; outputPath: string | null; sessionId: string | null; reviewerPath: string | null } {
+): { command: string; args: string[]; env: NodeJS.ProcessEnv; stdin: string | null; outputPath: string | null; sessionId: string | null; reviewerPath: string | null } {
   if (role.engine === "claude") {
     const sessionId = crypto.randomUUID();
     /* Headless reviewers need approval-free command access for tests, builds,
@@ -161,12 +162,12 @@ export function reviewerCommand(
     if (role.effort) args.push("--effort", role.effort);
     const settings = claudeAccount?.managed ? claudeSettingsPath() : null;
     if (settings) args.push("--settings", settings);
-    return { command: resolveBinary("claude"), args, env: claudeAccount?.managed ? claudeManagedEnvironment(claudeAccount.home) : process.env, outputPath: null, sessionId, reviewerPath: claudeTranscriptPath(cwd, sessionId, claudeAccount?.projectsDir) };
+    return { command: resolveBinary("claude"), args, env: claudeAccount?.managed ? claudeManagedEnvironment(claudeAccount.home) : process.env, stdin: null, outputPath: null, sessionId, reviewerPath: claudeTranscriptPath(cwd, sessionId, claudeAccount?.projectsDir) };
   }
   /* --json turns stdout into a JSONL event stream whose first events carry
      the session/thread id — a structured contract instead of parsing the
      human banner. The verdict itself still arrives via --output-last-message. */
-  const args = ["exec", prompt, "--json", "--output-last-message", outputPath, "--dangerously-bypass-approvals-and-sandbox"];
+  const args = ["exec", "-", "--json", "--output-last-message", outputPath, "--dangerously-bypass-approvals-and-sandbox"];
   if (codexAccount?.managed) args.unshift("-c", "cli_auth_credentials_store=file");
   if (role.model) args.push("-m", role.model);
   if (role.effort) args.push("-c", `model_reasoning_effort=${role.effort}`);
@@ -174,6 +175,7 @@ export function reviewerCommand(
     command: resolveBinary("codex"),
     args,
     env: codexAccount?.home ? { ...process.env, CODEX_HOME: codexAccount.home } : process.env,
+    stdin: prompt,
     outputPath,
     sessionId: null,
     reviewerPath: null,
@@ -189,11 +191,13 @@ export function startHeadlessReview(
   timeoutMs = DEFAULT_TIMEOUT_MS,
   codexAccount?: HeadlessCodexAccount | null,
   claudeAccount?: HeadlessClaudeAccount | null,
+  runtime?: HeadlessReviewRuntime,
 ): HeadlessReviewLaunch {
   const key = runKey(flowId, round);
   if (runs.has(key)) return { pid: null, sessionId: null, reviewerPath: null };
   const outputPath = outputPathFor(flowId, round);
   fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+  clearHeadlessReviewArtifacts(flowId, round);
   const built = reviewerCommand(role, prompt, outputPath, cwd, codexAccount, claudeAccount);
   /* Detached + file-backed stdio: the reviewer must not die with the viewer.
      A plain child shares the dev server's process group, so Ctrl+C on the
@@ -203,12 +207,16 @@ export function startHeadlessReview(
   const stderrFd = fs.openSync(stderrPathFor(flowId, round), "w");
   let child: ChildProcess;
   try {
-    child = spawn(built.command, built.args, {
+    child = spawn(runtime?.command ?? built.command, built.args, {
       cwd,
       env: built.env,
       detached: true,
-      stdio: ["ignore", stdoutFd, stderrFd],
+      stdio: [built.stdin === null ? "ignore" : "pipe", stdoutFd, stderrFd],
     });
+    if (built.stdin !== null && child.stdin) {
+      child.stdin.on("error", () => {});
+      child.stdin.end(built.stdin, "utf8");
+    }
   } finally {
     fs.closeSync(stdoutFd);
     fs.closeSync(stderrFd);
@@ -233,6 +241,13 @@ export function startHeadlessReview(
     run.exit = { code, signal };
   });
   return { pid: child.pid ?? null, sessionId: built.sessionId, reviewerPath: built.reviewerPath };
+}
+
+/** Removes attempt-scoped process output before a logical round is relaunched. */
+export function clearHeadlessReviewArtifacts(flowId: string, round: number): void {
+  for (const artifact of [outputPathFor(flowId, round), stdoutPathFor(flowId, round), stderrPathFor(flowId, round)]) {
+    fs.rmSync(artifact, { force: true });
+  }
 }
 
 function readOptional(filePath: string | null): string {
