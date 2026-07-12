@@ -506,6 +506,100 @@ test("overlapping ticks preserve an active pre-handle launch and adopt its revie
   });
 });
 
+test("synthetic takeover preserves an identity-less headless launch lease for the next Viewer", async () => {
+  const startedAt = new Date().toISOString();
+  const leaseUntil = new Date(Date.now() + 60_000).toISOString();
+  const cwd = "/repo";
+  const implementer = writeCodexEntry("adopt-identity-lease-implementer.jsonl", { id: "019f421e-02e1-73e0-9b77-bebde063f125", cwd }, Date.now() / 1_000);
+  const reviewer = spawn("sleep", ["30"], { detached: true, stdio: "ignore" });
+  reviewer.unref();
+  const flow: Flow = {
+    id: "flow-adopt-identity-lease",
+    template: "implement-review-loop",
+    project: "repo",
+    cwd,
+    implementerPath: implementer.path,
+    roles: {
+      implementer: { engine: "codex", model: null, effort: "high" },
+      reviewer: { engine: "codex", model: null, effort: "xhigh" },
+    },
+    reviewerFallback: null,
+    baseRef: "base",
+    baseMode: "head",
+    mode: "auto",
+    reviewerMode: "headless",
+    roundLimit: 5,
+    state: "needs_decision",
+    pausedState: null,
+    stateDetail: "reviewer tracking was lost before a verdict could be recovered",
+    rounds: [{
+      n: 1,
+      reviewerPath: null,
+      reviewerRole: { engine: "codex", model: null, effort: "xhigh" },
+      accountId: "default",
+      attemptedAccounts: ["codex:default"],
+      autoRetryCount: 0,
+      sessionId: null,
+      reviewerPid: null,
+      reviewerIdentity: null,
+      reviewerPane: null,
+      findingsPath: null,
+      triggeredBy: "marker",
+      readyNote: null,
+      reviewHeadSha: null,
+      verdict: null,
+      findingsCount: null,
+      startedAt,
+      spawnStartedAt: startedAt,
+      launchId: "launch-adopt-identity-lease",
+      launchLeaseUntil: leaseUntil,
+      relayStartedAt: null,
+      relayDelivery: null,
+      reviewedAt: null,
+      terminalAt: null,
+      relayedAt: null,
+      error: null,
+    }],
+    createdAt: startedAt,
+    closedAt: null,
+  };
+  saveFlows([flow]);
+  const launchedRound = {
+    ...flow.rounds[0]!,
+    reviewerPid: reviewer.pid ?? null,
+    reviewerIdentity: null,
+  };
+
+  try {
+    expect(adoptSyntheticLaunchTakeover(flow.id, launchedRound)).toBeTrue();
+    expect(loadFlows()[0]).toMatchObject({
+      state: "reviewing",
+      stateDetail: null,
+      rounds: [{ reviewerPid: reviewer.pid, reviewerIdentity: null, launchLeaseUntil: leaseUntil, autoRetryCount: 0 }],
+    });
+
+    await tickFlows([implementer]);
+    expect(loadFlows()[0]).toMatchObject({
+      state: "reviewing",
+      stateDetail: null,
+      rounds: [{ reviewerPid: reviewer.pid, reviewerIdentity: null, launchLeaseUntil: leaseUntil, autoRetryCount: 0 }],
+    });
+
+    const recovered = loadFlows()[0]!;
+    recovered.rounds[0]!.reviewerIdentity = procBackend.processIdentity(reviewer.pid!);
+    saveFlows([recovered]);
+    await tickFlows([implementer]);
+    expect(loadFlows()[0]).toMatchObject({
+      state: "reviewing",
+      rounds: [{ reviewerPid: reviewer.pid, reviewerIdentity: expect.any(String), launchLeaseUntil: null, autoRetryCount: 0 }],
+    });
+  } finally {
+    if (reviewer.pid) {
+      try { process.kill(reviewer.pid, "SIGKILL"); } catch { /* already gone */ }
+    }
+  }
+});
+
 test("identity-less headless post-spawn checkpoint keeps its cross-Viewer lease until identity recovery", async () => {
   const startedAt = new Date().toISOString();
   const leaseUntil = new Date(Date.now() + 60_000).toISOString();

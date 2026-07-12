@@ -293,7 +293,9 @@ export function adoptSyntheticLaunchTakeover(flowId: string, launchedRound: Roun
     reviewerPane: launchedRound.reviewerPane ?? null,
     reviewHeadSha: launchedRound.reviewHeadSha ?? null,
     spawnStartedAt: launchedRound.spawnStartedAt ?? null,
-    launchLeaseUntil: null,
+    launchLeaseUntil: diskFlow.reviewerMode === "headless" && launchedRound.reviewerPid != null && !launchedRound.reviewerIdentity
+      ? launchedRound.launchLeaseUntil
+      : null,
     error: launchedRound.error,
   });
   diskFlow.state = "reviewing";
