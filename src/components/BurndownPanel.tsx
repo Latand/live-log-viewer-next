@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 
-import { computePace, idealRemaining, type WindowKey } from "@/lib/burndown";
+import { burndownForActiveAccount, computePace, idealRemaining, type WindowKey } from "@/lib/burndown";
 import { getLocale, useLocale } from "@/lib/i18n";
 import { handleOverlayEscape } from "@/lib/overlay";
 import type { BurndownPayload, BurndownSeries } from "@/lib/types";
@@ -85,11 +85,15 @@ export function BurndownPanel({
   engine,
   label,
   plan,
+  activeAccountId,
   onClose,
 }: {
   engine: "claude" | "codex";
   label: string;
   plan: string | null;
+  /** The account the footer block is showing; a history response for any other
+      account is discarded so a switch never charts the previous account. */
+  activeAccountId: string;
   onClose: () => void;
 }) {
   const { t, locale } = useLocale();
@@ -103,6 +107,10 @@ export function BurndownPanel({
     closeRef.current?.focus();
   }, []);
 
+  // One fetch per mount. LimitsFooter keys this panel by the active account, so a
+  // switch remounts it and re-fetches with fresh state; the cleanup's `alive`
+  // flag drops a response that arrives after that switch. The render-time
+  // ownership gate below is the second guard for an in-flight account race.
   useEffect(() => {
     let alive = true;
     fetch("/api/limits/history")
@@ -118,7 +126,10 @@ export function BurndownPanel({
     };
   }, []);
 
-  const engineData = engine === "claude" ? data?.claude ?? null : data?.codex ?? null;
+  const engineData = burndownForActiveAccount(data, engine, activeAccountId);
+  // A response whose account stamp no longer matches is treated as not-yet-loaded
+  // so a stale-account curve never shows; the effect above will refetch.
+  const ownershipPending = Boolean(data && !engineData);
   const series = engineData ? engineData[window] : null;
   const tint = engineTintOf(engine).color;
   const hasData = Boolean(series && series.samples.length > 0);
@@ -178,7 +189,7 @@ export function BurndownPanel({
       <div className="px-3 py-2.5">
         {failed ? (
           <div className="py-6 text-center text-[12px] text-dim">{t("burndown.failed")}</div>
-        ) : !data ? (
+        ) : !data || ownershipPending ? (
           <div className="py-6 text-center text-[12px] text-dim">{t("burndown.loading")}</div>
         ) : hasData && series ? (
           <>

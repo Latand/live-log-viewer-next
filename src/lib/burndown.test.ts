@@ -1,11 +1,43 @@
 import { expect, test } from "bun:test";
 
-import { computePace, idealRemaining, mergeSamples, WINDOW_SECONDS } from "./burndown";
-import type { BurndownSeries } from "./types";
+import { burndownForActiveAccount, computePace, idealRemaining, mergeSamples, WINDOW_SECONDS } from "./burndown";
+import type { BurndownPayload, BurndownSeries, EngineBurndown } from "./types";
 
 const start = 1_000_000;
 const week = WINDOW_SECONDS.weekly;
 const reset = start + week;
+
+const emptyEngine = (): EngineBurndown => ({
+  session: { windowStart: null, resetsAt: null, windowSeconds: WINDOW_SECONDS.session, samples: [] },
+  weekly: { windowStart: null, resetsAt: null, windowSeconds: WINDOW_SECONDS.weekly, samples: [] },
+});
+
+const burndownPayload = (over: Partial<BurndownPayload> = {}): BurndownPayload => ({
+  claude: emptyEngine(),
+  codex: emptyEngine(),
+  claudeAccountId: "claude-a",
+  codexAccountId: "codex-a",
+  historySince: null,
+  ...over,
+});
+
+test("burndownForActiveAccount returns the engine series when the account stamp matches", () => {
+  const payload = burndownPayload();
+  expect(burndownForActiveAccount(payload, "claude", "claude-a")).toBe(payload.claude);
+  expect(burndownForActiveAccount(payload, "codex", "codex-a")).toBe(payload.codex);
+});
+
+test("burndownForActiveAccount masks a response whose account stamp changed (post-switch race)", () => {
+  const payload = burndownPayload();
+  expect(burndownForActiveAccount(payload, "claude", "claude-b")).toBeNull();
+  expect(burndownForActiveAccount(payload, "codex", "codex-b")).toBeNull();
+});
+
+test("burndownForActiveAccount masks on a null payload or empty active id", () => {
+  expect(burndownForActiveAccount(null, "claude", "claude-a")).toBeNull();
+  expect(burndownForActiveAccount(burndownPayload({ claudeAccountId: null }), "claude", "claude-a")).toBeNull();
+  expect(burndownForActiveAccount(burndownPayload(), "claude", "")).toBeNull();
+});
 
 test("idealRemaining runs a straight 100→0 line across the window", () => {
   expect(idealRemaining(start, reset, start)).toBe(100);

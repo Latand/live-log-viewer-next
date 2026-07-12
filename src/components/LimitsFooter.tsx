@@ -322,7 +322,7 @@ function EngineLimitsBlock({
         )}
       </div>
       {open ? <AccountsPanel state={accounts} onClose={close} /> : null}
-      {chartOpen ? <BurndownPanel engine={engine} label={label} plan={accountLimits?.plan ?? null} onClose={closeChart} /> : null}
+      {chartOpen ? <BurndownPanel key={accounts.active} engine={engine} label={label} plan={accountLimits?.plan ?? null} activeAccountId={accounts.active} onClose={closeChart} /> : null}
     </div>
   );
 }

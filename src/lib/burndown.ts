@@ -1,10 +1,22 @@
-import type { BurndownSeries, LimitSample } from "./types";
+import type { BurndownPayload, BurndownSeries, EngineBurndown, LimitSample } from "./types";
 
 /** Standard window lengths in seconds. Codex transcripts can carry an exact
     `window_minutes`, which overrides these when present. */
 export const WINDOW_SECONDS = { session: 5 * 3600, weekly: 7 * 24 * 3600 } as const;
 
 export type WindowKey = keyof typeof WINDOW_SECONDS;
+
+/** Ownership gate for the burndown chart, mirroring LimitsFooter's
+    `limitsForActiveAccount`: an account switch can let a history request started
+    for the previous account resolve after the switch, so its series is used only
+    when the payload's account stamp still matches the active account. A mismatch
+    (or a null/empty stamp) masks the data instead of charting the wrong account. */
+export function burndownForActiveAccount(payload: BurndownPayload | null, engine: "claude" | "codex", activeAccountId: string): EngineBurndown | null {
+  if (!payload || !activeAccountId) return null;
+  const payloadAccountId = engine === "claude" ? payload.claudeAccountId : payload.codexAccountId;
+  if (payloadAccountId !== activeAccountId) return null;
+  return engine === "claude" ? payload.claude : payload.codex;
+}
 
 /** Clamp a percentage into the drawable 0–100 range. */
 export function clampPercent(value: number): number {
