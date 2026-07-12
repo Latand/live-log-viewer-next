@@ -77,6 +77,38 @@ function findSlot(card: SchemeRect, placedCards: readonly SchemeRect[], obstacle
   return cardClearFallback ?? { x: card.x, y: card.y };
 }
 
+/* The historical autoPos lattice both curator.ts and inboxScanner.ts write:
+   x ∈ {740, 1040} (740 + (i%2)·300), y = 120 + k·120. Used only to classify
+   cards saved before the `pinned` field existed — a sourced card still resting
+   on the lattice was never touched by a human and is fair game to spread;
+   anything nudged off it reads as a deliberate placement and is held. */
+function onAutoLattice(pos: { x: number; y: number }): boolean {
+  const col = pos.x - 740;
+  if (col !== 0 && col !== 300) return false;
+  const row = pos.y - 120;
+  return row >= 0 && row % 120 === 0;
+}
+
+/**
+ * Is this card the pass's to move? Only auto-lattice cards (curator/inbox) are.
+ *
+ * The signals, in order:
+ *  - `pinned === true` — a human placed or dragged it: law, never moved.
+ *  - no `source` — the «task» tool never records a source, so a source-less
+ *    card was hand-created and is held. This also rescues *legacy* manual cards
+ *    saved before `pinned` existed (they carry neither flag): without it a card
+ *    a user parked at, say, (100,100) would be flung across the board on the
+ *    first render after upgrade.
+ *  - a sourced card is auto only while it still sits on the autoPos lattice.
+ *    A new inbox/curator card satisfies this; a legacy sourced card a user had
+ *    dragged off the lattice (also missing `pinned`) is preserved.
+ */
+export function isAutoPlaceable(task: PlaceableTask): boolean {
+  if (task.pinned === true) return false;
+  if (!task.source) return false;
+  return onAutoLattice(task.pos);
+}
+
 /**
  * Collision-aware placement for the board's task cards (issue #17). Cards piled
  * at the same auto-position — the curator/inbox lattice packs them 120px apart
@@ -84,31 +116,32 @@ function findSlot(card: SchemeRect, placedCards: readonly SchemeRect[], obstacle
  * so their text and dashed edges stay readable, and an auto card that lands on a
  * pane is nudged into the gap beside it.
  *
- * Pure and deterministic: the result depends only on card geometry, the pinned
- * flags, and the pane obstacles, never on input order. A pinned card (one a
- * human placed or dragged) holds its exact coordinates untouched and anchors
- * the pass as an immovable obstacle, so hand-arranged boards pass through
- * unchanged. An auto card keeps its stored spot only while it clears every other
- * card and every pane; otherwise it relocates in reading order — top-to-bottom
- * then left-to-right, id as the final tiebreak — so the topmost card of a pileup
+ * Pure and deterministic: the result depends only on card geometry, each card's
+ * classification (see {@link isAutoPlaceable}), and the pane obstacles, never on
+ * input order. A held card — pinned, hand-created, or a legacy card off the
+ * lattice — keeps its exact coordinates untouched and anchors the pass as an
+ * immovable obstacle, so hand-arranged boards pass through unchanged. An auto
+ * card keeps its stored spot only while it clears every other card and every
+ * pane; otherwise it relocates in reading order — top-to-bottom then
+ * left-to-right, id as the final tiebreak — so the topmost card of a pileup
  * settles first and the rest flow down around it.
  */
 export function resolveTaskPlacements(tasks: readonly PlaceableTask[], obstacles: readonly SchemeRect[]): Map<string, { x: number; y: number }> {
-  const cards = tasks.map((task) => ({ id: task.id, x: task.pos.x, y: task.pos.y, w: TASK_W, h: taskCardHeight(task), pinned: task.pinned === true }));
+  const cards = tasks.map((task) => ({ id: task.id, x: task.pos.x, y: task.pos.y, w: TASK_W, h: taskCardHeight(task), auto: isAutoPlaceable(task) }));
 
   const placed: SchemeRect[] = [];
   const result = new Map<string, { x: number; y: number }>();
-  /* Pinned cards land first at their exact spot and join `placed` as anchors,
-     so auto cards flow around them no matter the input order. */
+  /* Held cards land first at their exact spot and join `placed` as anchors, so
+     auto cards flow around them no matter the input order. */
   for (const card of cards) {
-    if (!card.pinned) continue;
+    if (card.auto) continue;
     const spot = { x: card.x, y: card.y };
     result.set(card.id, spot);
     placed.push({ x: spot.x, y: spot.y, w: card.w, h: card.h });
   }
 
   const order = cards
-    .filter((card) => !card.pinned)
+    .filter((card) => card.auto)
     .sort((a, b) => a.y - b.y || a.x - b.x || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   for (const card of order) {
     const spot = findSlot(card, placed, obstacles);

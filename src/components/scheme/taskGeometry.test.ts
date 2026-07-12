@@ -202,6 +202,34 @@ describe("routeTaskEdge", () => {
     expect(route.crosses).toBe(false);
     expect(parse(route.d)).toEqual([0, 0, 0, 200, 0, 200, 0, 400]);
   });
+
+  test("a card near a long edge's start is not silently missed", () => {
+    /* The Finding-2 regression: on a 2000px edge, a card just past the start
+       falls between fixed parameter samples, so the old sampler returned a
+       clear (crosses:false) curve that ran straight through it. Adaptive
+       segment sampling walks the whole curve, so this can never happen: the
+       router must either route clear or admit the crossing — never claim a
+       clear edge whose returned curve still enters the card. */
+    const nearStart: SchemeRect = { x: -130, y: 16, w: 260, h: 64 };
+    const straight = routeTaskEdge({ x1: 0, y1: 0, x2: 0, y2: 2000 }, []);
+    expect(curveEntersRect(straight.d, nearStart)).toBe(true); // a real crossing exists
+    const route = routeTaskEdge({ x1: 0, y1: 0, x2: 0, y2: 2000 }, [nearStart]);
+    expect(route.crosses || !curveEntersRect(route.d, nearStart)).toBe(true);
+    /* This card hugs the (0,0) endpoint, so no bow can pull the curve clear of
+       it — the honest outcome is an admitted, faded crossing. */
+    expect(route.crosses).toBe(true);
+  });
+
+  test("a mid-span card on a long edge is detected and routed clear", () => {
+    /* Further from the endpoints the crossing is avoidable — the denser sampler
+       still finds it (fixed samples straddled it) and a bow clears it. */
+    const midSpan: SchemeRect = { x: -130, y: 900, w: 260, h: 120 };
+    const straight = routeTaskEdge({ x1: 0, y1: 0, x2: 0, y2: 2000 }, []);
+    expect(curveEntersRect(straight.d, midSpan)).toBe(true);
+    const route = routeTaskEdge({ x1: 0, y1: 0, x2: 0, y2: 2000 }, [midSpan]);
+    expect(route.crosses).toBe(false);
+    expect(curveEntersRect(route.d, midSpan)).toBe(false);
+  });
 });
 
 describe("rectAnchor", () => {

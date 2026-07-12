@@ -201,9 +201,15 @@ export interface TaskEdgeRoute {
    step it grows by. Symmetric: each magnitude is tried to both sides. */
 const ROUTE_MAX_BOW = 260;
 const ROUTE_BOW_STEP = 40;
-/* Sampled t values along the cubic — endpoints are skipped, they sit on the
-   card/target boundary by construction. */
-const ROUTE_SAMPLES = [0.15, 0.3, 0.45, 0.6, 0.75, 0.9];
+/* Max pixel gap between adjacent samples along a routed curve. Kept well under
+   the shortest card side (a card is ≥ TASK_MIN_H = 64 tall, TASK_W = 260 wide)
+   so no card can hide entirely between two samples, and each pair of samples is
+   tested as a segment (not two points) to close the gap completely. */
+const ROUTE_STEP = 24;
+const ROUTE_MIN_SEGMENTS = 8;
+/* Cap the sample count so a very long edge stays cheap; the segment test keeps
+   accuracy even when the cap makes the step coarser than ROUTE_STEP. */
+const ROUTE_MAX_SEGMENTS = 128;
 /* A little slack around each card so a curve routes with visible clearance,
    not flush against the edge. */
 const ROUTE_CLEARANCE = 10;
@@ -213,10 +219,44 @@ function cubicAt(t: number, p0: number, c1: number, c2: number, p3: number): num
   return u * u * u * p0 + 3 * u * u * t * c1 + 3 * u * t * t * c2 + t * t * t * p3;
 }
 
-function pointInRect(x: number, y: number, rect: SchemeRect, pad: number): boolean {
-  return x >= rect.x - pad && x <= rect.x + rect.w + pad && y >= rect.y - pad && y <= rect.y + rect.h + pad;
+/* Does segment a→b touch `rect` inflated by `pad`? Liang–Barsky clipping —
+   exact for a straight segment, so a card lying between two curve samples is
+   caught, not just one that happens to contain a sample point. */
+function segHitsRect(ax: number, ay: number, bx: number, by: number, rect: SchemeRect, pad: number): boolean {
+  const minX = rect.x - pad;
+  const minY = rect.y - pad;
+  const maxX = rect.x + rect.w + pad;
+  const maxY = rect.y + rect.h + pad;
+  const dx = bx - ax;
+  const dy = by - ay;
+  const p = [-dx, dx, -dy, dy];
+  const q = [ax - minX, maxX - ax, ay - minY, maxY - ay];
+  let t0 = 0;
+  let t1 = 1;
+  for (let i = 0; i < 4; i++) {
+    if (p[i] === 0) {
+      if (q[i]! < 0) return false; // parallel and outside this slab
+    } else {
+      const r = q[i]! / p[i]!;
+      if (p[i]! < 0) {
+        if (r > t1) return false;
+        if (r > t0) t0 = r;
+      } else {
+        if (r < t0) return false;
+        if (r < t1) t1 = r;
+      }
+    }
+  }
+  return t0 <= t1;
 }
 
+/**
+ * Does the cubic cross any obstacle? The sample count scales with the curve's
+ * control-polygon length, so a long edge is walked as finely as a short one —
+ * a fixed set of parameter samples skips right past a card sitting near a long
+ * edge's endpoint (issue #17). Adjacent samples are tested as a segment, so a
+ * card thinner than the step is still caught.
+ */
 function cubicHitsAny(
   x1: number,
   y1: number,
@@ -228,12 +268,20 @@ function cubicHitsAny(
   y2: number,
   obstacles: readonly SchemeRect[],
 ): boolean {
-  for (const t of ROUTE_SAMPLES) {
-    const px = cubicAt(t, x1, c1x, c2x, x2);
-    const py = cubicAt(t, y1, c1y, c2y, y2);
+  if (!obstacles.length) return false;
+  const polyLen = Math.hypot(c1x - x1, c1y - y1) + Math.hypot(c2x - c1x, c2y - c1y) + Math.hypot(x2 - c2x, y2 - c2y);
+  const segments = Math.max(ROUTE_MIN_SEGMENTS, Math.min(ROUTE_MAX_SEGMENTS, Math.ceil(polyLen / ROUTE_STEP)));
+  let px = x1;
+  let py = y1;
+  for (let i = 1; i <= segments; i++) {
+    const t = i / segments;
+    const nx = cubicAt(t, x1, c1x, c2x, x2);
+    const ny = cubicAt(t, y1, c1y, c2y, y2);
     for (const rect of obstacles) {
-      if (pointInRect(px, py, rect, ROUTE_CLEARANCE)) return true;
+      if (segHitsRect(px, py, nx, ny, rect, ROUTE_CLEARANCE)) return true;
     }
+    px = nx;
+    py = ny;
   }
   return false;
 }

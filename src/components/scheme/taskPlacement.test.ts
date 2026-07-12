@@ -3,8 +3,13 @@ import { describe, expect, test } from "bun:test";
 import type { BoardTask } from "@/lib/tasks/types";
 
 import type { SchemeRect } from "./layout";
-import { resolveTaskPlacements, TASK_GUTTER, type PlaceableTask } from "./taskPlacement";
+import { isAutoPlaceable, resolveTaskPlacements, TASK_GUTTER, type PlaceableTask } from "./taskPlacement";
 import { TASK_W, taskCardHeight, taskRect } from "./taskGeometry";
+
+/* A prompt-captured source — what curator.ts and inboxScanner.ts stamp on every
+   card they create. A card with one is auto-placeable only while it also rests
+   on the autoPos lattice; without one the card was hand-created and is held. */
+const SRC = { path: "/src", ts: null, text: "", fingerprint: "f", engine: "claude" as const };
 
 function task(id: string, x: number, y: number, over: Partial<PlaceableTask> = {}): PlaceableTask {
   return { id, pos: { x, y }, text: "Investigate the flaky login test\nthat fails on CI", assignments: [], source: undefined, ...over };
@@ -96,26 +101,27 @@ describe("resolveTaskPlacements", () => {
     expect(placement.get("t00")).toEqual({ x: 740, y: 120 });
   });
 
-  test("a relocated card clears pane obstacles, not just other cards", () => {
-    /* A pinned anchor ("a") the user dropped on the pane holds its exact spot;
-       the colliding auto card ("b") relocates and must clear both the anchor
-       and the pane. */
-    const pane: SchemeRect = { x: 700, y: 100, w: 600, h: 680 };
-    const tasks = [task("a", 740, 140, { pinned: true }), task("b", 740, 150)];
+  test("a relocated auto card clears pane obstacles, not just other cards", () => {
+    /* A pinned anchor ("a") the user dropped holds its exact spot; the colliding
+       auto card ("b", sourced + on the lattice) relocates and must clear both
+       the anchor and the pane. */
+    const pane: SchemeRect = { x: 700, y: 60, w: 600, h: 680 };
+    const tasks = [task("a", 740, 130, { pinned: true }), task("b", 740, 120, { source: SRC })];
+    expect(isAutoPlaceable(tasks[1]!)).toBe(true);
     const placement = resolveTaskPlacements(tasks, [pane]);
-    expect(placement.get("a")).toEqual({ x: 740, y: 140 });
+    expect(placement.get("a")).toEqual({ x: 740, y: 130 });
     const moved = rectAt(tasks[1]!, placement.get("b")!);
     expect(clash(moved, pane, 0)).toBe(false);
     expect(clash(moved, rectAt(tasks[0]!, placement.get("a")!), TASK_GUTTER - 1)).toBe(false);
   });
 
   test("a lone auto card on a pane is nudged off, even with no card collision", () => {
-    /* An auto-lattice card that lands inside a pane must clear it on its own —
-       the early-out now demands pane clearance, not just card clearance. */
-    const pane: SchemeRect = { x: 0, y: 0, w: 600, h: 680 };
-    const tasks = [task("solo", 100, 100)];
+    /* A sourced lattice card that lands inside a pane must clear it on its own —
+       the early-out demands pane clearance, not just card clearance. */
+    const pane: SchemeRect = { x: 700, y: 60, w: 600, h: 680 };
+    const tasks = [task("solo", 740, 120, { source: SRC })];
     const spot = resolveTaskPlacements(tasks, [pane]).get("solo")!;
-    expect(spot).not.toEqual({ x: 100, y: 100 });
+    expect(spot).not.toEqual({ x: 740, y: 120 });
     expect(clash(rectAt(tasks[0]!, spot), pane, 0)).toBe(false);
   });
 
@@ -123,7 +129,7 @@ describe("resolveTaskPlacements", () => {
     /* An explicit hand placement over a pane (allowed by design) survives — a
        pinned card is law and is never nudged, colliding pane or not. */
     const pane: SchemeRect = { x: 0, y: 0, w: 600, h: 680 };
-    const tasks = [task("solo", 100, 100, { pinned: true })];
+    const tasks = [task("solo", 100, 100, { pinned: true, source: SRC })];
     expect(resolveTaskPlacements(tasks, [pane]).get("solo")).toEqual({ x: 100, y: 100 });
   });
 
@@ -134,6 +140,34 @@ describe("resolveTaskPlacements", () => {
     const placement = resolveTaskPlacements(tasks, []);
     expect(placement.get("a")).toEqual({ x: 200, y: 200 });
     expect(placement.get("b")).toEqual({ x: 210, y: 205 });
+  });
+
+  test("legacy manual card (no pinned, no source) is never relocated", () => {
+    /* Pre-`pinned` hand-created cards carry neither flag. They must hold their
+       operator-chosen spot — even parked over a pane — not be flung across the
+       board on the first render after upgrade. */
+    const pane: SchemeRect = { x: 0, y: 0, w: 600, h: 680 };
+    const tasks = [task("legacy", 100, 100)];
+    expect(isAutoPlaceable(tasks[0]!)).toBe(false);
+    expect(resolveTaskPlacements(tasks, [pane]).get("legacy")).toEqual({ x: 100, y: 100 });
+  });
+
+  test("legacy sourced card dragged off the lattice is preserved", () => {
+    /* A pre-`pinned` inbox card the user had dragged sits off the autoPos
+       lattice; with no flag to read, being off the lattice is the signal that a
+       human moved it, so it holds even overlapping a pane. */
+    const pane: SchemeRect = { x: 0, y: 0, w: 600, h: 680 };
+    const tasks = [task("dragged", 315, 402, { source: SRC })];
+    expect(isAutoPlaceable(tasks[0]!)).toBe(false);
+    expect(resolveTaskPlacements(tasks, [pane]).get("dragged")).toEqual({ x: 315, y: 402 });
+  });
+
+  test("only sourced lattice cards are auto — the classifier is the seam", () => {
+    expect(isAutoPlaceable(task("a", 740, 120, { source: SRC }))).toBe(true); // new inbox/curator card
+    expect(isAutoPlaceable(task("b", 1040, 360, { source: SRC }))).toBe(true); // other column, deeper row
+    expect(isAutoPlaceable(task("c", 741, 120, { source: SRC }))).toBe(false); // one px off the lattice
+    expect(isAutoPlaceable(task("d", 740, 120, { source: SRC, pinned: true }))).toBe(false); // dragged onto lattice
+    expect(isAutoPlaceable(task("e", 740, 120))).toBe(false); // no source = hand-created
   });
 
   test("resolves a large burst without exploding out of bounds", () => {
