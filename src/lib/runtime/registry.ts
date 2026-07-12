@@ -69,6 +69,7 @@ export async function bindCodexHostPersistence(
   claimOwner: string,
   writerClaimEpoch: number,
 ): Promise<() => void> {
+  host.setWriterFence(() => registry.ownsStructuredHostClaim(key, claimOwner, writerClaimEpoch));
   try {
     await persistCodexHost(registry, key, host, claimOwner, writerClaimEpoch);
   } catch (error) {

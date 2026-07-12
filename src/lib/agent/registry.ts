@@ -1460,9 +1460,13 @@ export class AgentRegistry {
   upsert(entry: Omit<AgentRegistryEntry, "updatedAt">): AgentRegistryEntry {
     return this.mutate((file) => {
       const keyId = sessionKeyId(entry.key);
-      const changedHostPaths = activeHostPathsChangedByEntry(file, keyId, entry);
+      const existing = file.entries[keyId];
+      const replacement = entry.structuredHost === undefined && existing?.structuredHost !== undefined
+        ? { ...entry, structuredHost: existing.structuredHost }
+        : entry;
+      const changedHostPaths = activeHostPathsChangedByEntry(file, keyId, replacement);
       const readinessBefore = migrationReadinessSignature(file, entry.key.engine, changedHostPaths);
-      const full = { ...entry, updatedAt: now() };
+      const full = { ...replacement, updatedAt: now() };
       file.entries[keyId] = full;
       advanceMigrationScopeRevision(file, entry.key.engine, readinessBefore, changedHostPaths);
       return clone(full);
@@ -1523,6 +1527,13 @@ export class AgentRegistry {
       advanceMigrationScopeRevision(file, key.engine, readinessBefore, changedHostPaths);
       return clone(entry);
     });
+  }
+
+  ownsStructuredHostClaim(key: SessionKey, claimOwner: string, claimEpoch: number): boolean {
+    const entry = this.snapshot().entries[sessionKeyId(key)];
+    return entry?.claimOwner === claimOwner
+      && entry.claimEpoch === claimEpoch
+      && entry.structuredHost?.writerClaimEpoch === claimEpoch;
   }
 
   /** Atomically claims a stale structured row and advances its writer fence. */

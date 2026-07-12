@@ -25,7 +25,7 @@ type Subscriber = {
   wake: (() => void) | null;
   closed: boolean;
 };
-type PendingAttention = { rpcId: string | number; method: string };
+type PendingAttention = { rpcId: string | number; method: string; origin: "current" | "restored" };
 type ThreadStatus = {
   type: "active" | "idle" | "notLoaded" | "systemError";
   activeFlags: string[];
@@ -204,6 +204,7 @@ export class CodexAppServerHost implements EngineHost {
   private terminationStarted = false;
   private terminationTimer: ReturnType<typeof setTimeout> | null = null;
   private releasePromise: Promise<void> | null = null;
+  private writerFence: (() => boolean) | null = null;
   private readonly reapedPromise: Promise<void>;
   private resolveReaped!: () => void;
 
@@ -325,7 +326,9 @@ export class CodexAppServerHost implements EngineHost {
   }
 
   async send(entry: QueueEntry): Promise<DeliveryReceipt> {
-    if (this.dead || this.releasing || this.released) return { outcome: "rejected", reason: "dead-host" };
+    if (this.dead || this.releasing || this.released || !this.writerFenceAllowsActuation()) {
+      return { outcome: "rejected", reason: "dead-host" };
+    }
     if (!entry.id || !entry.text) throw new Error("queue entry id and text are required");
     const currentTurn = this.activeTurnId;
     if (entry.expectedTurnId !== undefined && entry.expectedTurnId !== currentTurn) {
@@ -361,13 +364,17 @@ export class CodexAppServerHost implements EngineHost {
   }
 
   async interrupt(turnRef: string): Promise<void> {
-    if (this.dead || this.releasing || this.released) throw new Error("Codex app-server host is unavailable");
+    if (this.dead || this.releasing || this.released || !this.writerFenceAllowsActuation()) {
+      throw new Error("Codex app-server host is unavailable");
+    }
     if (!turnRef || this.activeTurnId !== turnRef) throw new Error("active turn fence is stale");
     await this.rpc("turn/interrupt", { threadId: this.identity.threadId, turnId: turnRef });
   }
 
   async answer(attentionRef: string, value: unknown): Promise<void> {
-    if (this.dead || this.releasing || this.released) throw new Error("Codex app-server host is unavailable");
+    if (this.dead || this.releasing || this.released || !this.writerFenceAllowsActuation()) {
+      throw new Error("Codex app-server host is unavailable");
+    }
     const attention = this.attentions.get(attentionRef);
     if (!attention) throw new Error("attention request is missing or already answered");
     this.write({ jsonrpc: "2.0", id: attention.rpcId, result: value ?? {} });
@@ -383,6 +390,15 @@ export class CodexAppServerHost implements EngineHost {
     this.stateListeners.add(listener);
     listener(this.currentState());
     return () => this.stateListeners.delete(listener);
+  }
+
+  setWriterFence(fence: () => boolean): void {
+    this.writerFence = fence;
+  }
+
+  private writerFenceAllowsActuation(): boolean {
+    try { return this.writerFence?.() ?? true; }
+    catch { return false; }
   }
 
   private currentState(): HostState {
@@ -482,13 +498,15 @@ export class CodexAppServerHost implements EngineHost {
 
   private restoreEvents(): number {
     const stored = this.eventStore.load(this.identity.threadId);
+    const currentAttentions = new Map([...this.attentions].filter(([, attention]) => attention.origin === "current"));
+    this.attentions.clear();
     this.events.splice(0, this.events.length, ...stored);
     this.cursor = Math.max(this.cursor, stored.at(-1)?.seq ?? 0);
     for (const event of stored) {
       if (event.kind === "turn-started") this.activeTurnId = event.turnId;
       if (event.kind === "turn-ended" && event.turnId === this.activeTurnId) this.activeTurnId = null;
       if (event.kind === "attention") {
-        this.attentions.set(event.id, { rpcId: "restored", method: event.method });
+        this.attentions.set(event.id, { rpcId: "restored", method: event.method, origin: "restored" });
       }
       if (event.kind === "attention-resolved") this.attentions.delete(event.id);
       if (event.kind === "session-status") {
@@ -500,6 +518,7 @@ export class CodexAppServerHost implements EngineHost {
         }
       }
     }
+    for (const [id, attention] of currentAttentions) this.attentions.set(id, attention);
     return stored.length;
   }
 
@@ -518,7 +537,8 @@ export class CodexAppServerHost implements EngineHost {
       this.activeTurnId = null;
       this.emit({ kind: "turn-ended", turnId, status: "error" });
     }
-    for (const attentionId of [...this.attentions.keys()]) {
+    for (const [attentionId, attention] of [...this.attentions]) {
+      if (attention.origin !== "restored") continue;
       this.attentions.delete(attentionId);
       this.emit({ kind: "attention-resolved", id: attentionId, resolution: "host-restarted" });
     }
@@ -657,7 +677,7 @@ export class CodexAppServerHost implements EngineHost {
     const params = record(message.params) ?? {};
     if (typeof id === "number" || typeof id === "string") {
       const attentionId = `${method}:${String(id)}`;
-      this.attentions.set(attentionId, { rpcId: id, method });
+      this.attentions.set(attentionId, { rpcId: id, method, origin: "current" });
       this.emit({ kind: "attention", id: attentionId, method, attention: params });
       return;
     }

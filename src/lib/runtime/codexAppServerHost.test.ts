@@ -43,6 +43,7 @@ class FakeAppServer extends EventEmitter {
     private readonly ignoreTerm = false,
     private readonly turns: unknown[] = [],
     private readonly resumeStatus: unknown = undefined,
+    private readonly resumeRequest: { id: string; method: string; params: Record<string, unknown> } | null = null,
   ) {
     super();
     let buffer = "";
@@ -81,6 +82,9 @@ class FakeAppServer extends EventEmitter {
     if (method === "account/read") return this.respond(message.id, { account: { type: "chatgpt", planType: "pro" }, requiresOpenaiAuth: false });
     if (method === "thread/start" || method === "thread/resume") {
       const id = method === "thread/resume" ? this.resumedThreadId : this.threadId;
+      if (method === "thread/resume" && this.resumeRequest) {
+        this.request(this.resumeRequest.id, this.resumeRequest.method, this.resumeRequest.params);
+      }
       return this.respond(message.id, {
         thread: {
           id,
@@ -419,6 +423,32 @@ describe("CodexAppServerHost", () => {
     await host.release();
   });
 
+  test("preserves a live approval delivered by the resumed process", async () => {
+    const attentionId = "item/commandExecution/requestApproval:live-approval";
+    const server = new FakeAppServer("live-attention", "live-attention", false, [{
+      id: "live-turn",
+      status: "inProgress",
+      items: [],
+    }], { type: "active", activeFlags: ["waitingForApproval"] }, {
+      id: "live-approval",
+      method: "item/commandExecution/requestApproval",
+      params: { command: "date" },
+    });
+    const host = await CodexAppServerHost.adopt("live-attention", {
+      cwd: "/repo",
+      eventStore: new MemoryEventStore(),
+      spawnProcess: fakeSpawn(server),
+    });
+    expect(await host.health()).toMatchObject({
+      status: "attention",
+      activeTurnRef: "live-turn",
+      pendingAttention: [attentionId],
+    });
+    await host.answer(attentionId, { decision: "accept" });
+    expect(server.requests.at(-1)).toMatchObject({ id: "live-approval", result: { decision: "accept" } });
+    await host.release();
+  });
+
   test("parses generated-schema thread status notifications", async () => {
     const server = new FakeAppServer("status-thread");
     const host = await CodexAppServerHost.start({
@@ -645,6 +675,10 @@ describe("CodexAppServerHost", () => {
       spawnProcess: fakeSpawn(server),
     });
     await bindCodexHostPersistence(registry, key, host, "old-owner", 1);
+    const started = await host.send({ id: "before-fence", text: "start" });
+    expect(started).toEqual({ outcome: "turn-started", turnId: "turn-1" });
+    server.request("stale-approval", "item/commandExecution/requestApproval", { command: "date" });
+    await Bun.sleep(0);
     const current = registry.snapshot().entries["codex:fenced-thread"]!;
     registry.upsert({
       ...current,
@@ -657,6 +691,13 @@ describe("CodexAppServerHost", () => {
       claimEpoch: 2,
       claimOwner: "new-owner",
     });
+    const requestCount = server.requests.length;
+    expect(await host.send({ id: "stale-send", text: "blocked", expectedTurnId: "turn-1" }))
+      .toEqual({ outcome: "rejected", reason: "dead-host" });
+    await expect(host.interrupt("turn-1")).rejects.toThrow("unavailable");
+    await expect(host.answer("item/commandExecution/requestApproval:stale-approval", { decision: "accept" }))
+      .rejects.toThrow("unavailable");
+    expect(server.requests).toHaveLength(requestCount);
     server.notify("thread/status/changed", { threadId: "fenced-thread", status: { type: "active", activeFlags: ["running"] } });
     await Bun.sleep(0);
     expect(registry.snapshot().entries["codex:fenced-thread"]).toMatchObject({
@@ -706,5 +747,56 @@ describe("CodexAppServerHost", () => {
     const after = registry.snapshot();
     expect(after.conversationRevision.codex).toBe(before.conversationRevision.codex + 1);
     expect(after.engineRouting.codex.revision).toBe(before.engineRouting.codex.revision + 1);
+  });
+
+  test("legacy host upserts preserve coexisting structured columns", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-structured-coexistence-"));
+    const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+    const key = { engine: "codex" as const, sessionId: "coexisting-thread" };
+    const structuredHost = {
+      kind: "codex-app-server" as const,
+      endpoint: "stdio:42",
+      process: { pid: 42, startIdentity: "42:start" },
+      eventCursor: 8,
+      protocolVersion: "0.144.1",
+      writerClaimEpoch: 3,
+      activeTurnRef: "turn-live",
+      pendingAttention: ["approval-live"],
+      activeFlags: ["running"],
+    };
+    registry.upsert({
+      key,
+      artifactPath: "/sessions/coexisting-thread.jsonl",
+      cwd: "/repo",
+      accountId: null,
+      status: "live",
+      host: null,
+      structuredHost,
+      claimEpoch: 3,
+      claimOwner: "structured-owner",
+      pendingAction: null,
+    });
+    registry.upsert({
+      key,
+      artifactPath: "/sessions/coexisting-thread.jsonl",
+      cwd: "/repo",
+      accountId: null,
+      status: "live",
+      host: {
+        kind: "tmux",
+        endpoint: "/tmp/tmux.sock",
+        server: { pid: 10, startIdentity: "10:start" },
+        paneId: "%1",
+        panePid: { pid: 11, startIdentity: "11:start" },
+        windowName: "codex",
+        agent: { pid: 12, startIdentity: "12:start" },
+        argv: ["codex"],
+      },
+      claimEpoch: 3,
+      claimOwner: "structured-owner",
+      pendingAction: null,
+    });
+    expect(registry.snapshot().entries["codex:coexisting-thread"]?.structuredHost).toEqual(structuredHost);
+    expect(registry.ownsStructuredHostClaim(key, "structured-owner", 3)).toBeTrue();
   });
 });
