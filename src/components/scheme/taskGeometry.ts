@@ -41,6 +41,33 @@ export function rectCenter(rect: SchemeRect): { x: number; y: number } {
   return { x: rect.x + rect.w / 2, y: rect.y + rect.h / 2 };
 }
 
+/* Breathing room between the outermost card and the world edge, so a card's
+   dashed edge and status dot never sit flush against the clip / minimap frame. */
+export const TASK_WORLD_MARGIN = 140;
+
+/**
+ * World box that encloses both the node-derived layout region ([0,0] →
+ * width×height) and every placed task card (issue #17). A card relocated by the
+ * collision pass — or dragged by hand — can land beyond the layout's right/bottom
+ * edge, or left/above its origin, so the camera clamp, fit, minimap and task-edge
+ * SVG must grow to reach it; otherwise it clips out, drops from the minimap, or
+ * becomes unreachable by panning. The origin may go negative when a card sits
+ * left of or above (0,0).
+ */
+export function taskWorldBounds(width: number, height: number, taskRects: readonly SchemeRect[]): SchemeRect {
+  let minX = 0;
+  let minY = 0;
+  let maxX = width;
+  let maxY = height;
+  for (const rect of taskRects) {
+    minX = Math.min(minX, rect.x - TASK_WORLD_MARGIN);
+    minY = Math.min(minY, rect.y - TASK_WORLD_MARGIN);
+    maxX = Math.max(maxX, rect.x + rect.w + TASK_WORLD_MARGIN);
+    maxY = Math.max(maxY, rect.y + rect.h + TASK_WORLD_MARGIN);
+  }
+  return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
+}
+
 /**
  * Point where the line from the rect's center toward `toward` crosses the
  * rect boundary — the edge anchor. Falls back to the center for degenerate
@@ -158,4 +185,114 @@ export function buildTaskEdges(tasks: readonly BoardTask[], index: ReadonlyMap<s
     }
   }
   return edges;
+}
+
+/** A routed task edge: the cubic `d`, its on-curve midpoint (where the failed
+    ⚠ badge lands), and whether it still grazes an unrelated card after routing. */
+export interface TaskEdgeRoute {
+  d: string;
+  mid: { x: number; y: number };
+  /** True when no bow could clear every obstacle — the layer fades the edge so
+      an unavoidable crossing at least reads as passing *behind* the card. */
+  crosses: boolean;
+}
+
+/* How far a routing bow may push the control handles before giving up, and the
+   step it grows by. Symmetric: each magnitude is tried to both sides. */
+const ROUTE_MAX_BOW = 260;
+const ROUTE_BOW_STEP = 40;
+/* Sampled t values along the cubic — endpoints are skipped, they sit on the
+   card/target boundary by construction. */
+const ROUTE_SAMPLES = [0.15, 0.3, 0.45, 0.6, 0.75, 0.9];
+/* A little slack around each card so a curve routes with visible clearance,
+   not flush against the edge. */
+const ROUTE_CLEARANCE = 10;
+
+function cubicAt(t: number, p0: number, c1: number, c2: number, p3: number): number {
+  const u = 1 - t;
+  return u * u * u * p0 + 3 * u * u * t * c1 + 3 * u * t * t * c2 + t * t * t * p3;
+}
+
+function pointInRect(x: number, y: number, rect: SchemeRect, pad: number): boolean {
+  return x >= rect.x - pad && x <= rect.x + rect.w + pad && y >= rect.y - pad && y <= rect.y + rect.h + pad;
+}
+
+function cubicHitsAny(
+  x1: number,
+  y1: number,
+  c1x: number,
+  c1y: number,
+  c2x: number,
+  c2y: number,
+  x2: number,
+  y2: number,
+  obstacles: readonly SchemeRect[],
+): boolean {
+  for (const t of ROUTE_SAMPLES) {
+    const px = cubicAt(t, x1, c1x, c2x, x2);
+    const py = cubicAt(t, y1, c1y, c2y, y2);
+    for (const rect of obstacles) {
+      if (pointInRect(px, py, rect, ROUTE_CLEARANCE)) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Routes one task edge around unrelated cards (issue #17). The base curve is the
+ * same axis-following cubic the layer drew before — vertical handles for a
+ * mostly-vertical hop, horizontal for a mostly-horizontal one. When that base
+ * would run through a card the edge neither starts nor ends on, the control
+ * handles are bowed perpendicular to the endpoint line in growing steps (both
+ * sides) until a clear path is found. If nothing clears within `ROUTE_MAX_BOW`,
+ * the base curve is kept and `crosses` is set so the layer can fade it.
+ *
+ * Pure and deterministic — depends only on the endpoints and the obstacle rects.
+ */
+export function routeTaskEdge(
+  edge: { x1: number; y1: number; x2: number; y2: number },
+  obstacles: readonly SchemeRect[],
+): TaskEdgeRoute {
+  const { x1, y1, x2, y2 } = edge;
+  const dx = x2 - x1;
+  const dy = y2 - y1;
+  const vertical = Math.abs(dy) > Math.abs(dx);
+  const midX = (x1 + x2) / 2;
+  const midY = (y1 + y2) / 2;
+  /* Base handles, matching the original axis-following curve. */
+  const base = vertical
+    ? { c1x: x1, c1y: midY, c2x: x2, c2y: midY }
+    : { c1x: midX, c1y: y1, c2x: midX, c2y: y2 };
+
+  const build = (h: { c1x: number; c1y: number; c2x: number; c2y: number }): TaskEdgeRoute => ({
+    d: `M ${x1} ${y1} C ${h.c1x} ${h.c1y}, ${h.c2x} ${h.c2y}, ${x2} ${y2}`,
+    mid: { x: cubicAt(0.5, x1, h.c1x, h.c2x, x2), y: cubicAt(0.5, y1, h.c1y, h.c2y, y2) },
+    crosses: false,
+  });
+
+  if (!obstacles.length || !cubicHitsAny(x1, y1, base.c1x, base.c1y, base.c2x, base.c2y, x2, y2, obstacles)) {
+    return build(base);
+  }
+
+  /* Perpendicular to the endpoint line, normalized; degenerate zero-length
+     edges fall back to a horizontal push. */
+  const len = Math.hypot(dx, dy) || 1;
+  const perpX = -dy / len;
+  const perpY = dx / len;
+  for (let bow = ROUTE_BOW_STEP; bow <= ROUTE_MAX_BOW; bow += ROUTE_BOW_STEP) {
+    for (const sign of [1, -1]) {
+      const off = bow * sign;
+      const handles = {
+        c1x: base.c1x + perpX * off,
+        c1y: base.c1y + perpY * off,
+        c2x: base.c2x + perpX * off,
+        c2y: base.c2y + perpY * off,
+      };
+      if (!cubicHitsAny(x1, y1, handles.c1x, handles.c1y, handles.c2x, handles.c2y, x2, y2, obstacles)) {
+        return build(handles);
+      }
+    }
+  }
+
+  return { ...build(base), crosses: true };
 }

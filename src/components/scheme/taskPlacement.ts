@@ -15,7 +15,7 @@ const MAX_RING = 48;
 
 /** Everything the placement pass needs from a task — kept structural so the
     module tests with plain literals instead of full BoardTask fixtures. */
-export type PlaceableTask = Pick<BoardTask, "id" | "pos" | "text" | "assignments" | "source">;
+export type PlaceableTask = Pick<BoardTask, "id" | "pos" | "text" | "assignments" | "source" | "pinned">;
 
 /** Do two rects come within `gap` of each other? Touching or closer counts;
     exactly `gap` apart does not, so a resolved slot keeps a real gutter. */
@@ -50,14 +50,16 @@ function spiralOffsets(): ReadonlyArray<readonly [number, number]> {
 }
 
 /**
- * Find a display slot for one card. It keeps its stored position whenever that
- * spot is clear of every already-placed card — so a layout the user arranged
- * without overlaps is returned untouched. Only a card that would collide with
- * another card is relocated, spiralling outward to the nearest slot that clears
- * both cards and panes (falling back to a card-clear slot if panes box it in).
+ * Find a display slot for one auto-positioned card. It keeps its stored
+ * position only when that spot is clear of every already-placed card *and*
+ * every pane obstacle — so an untidy lattice card sitting inside a pane is
+ * nudged out even when no other card contends for the spot. Any card that
+ * would collide is relocated, spiralling outward to the nearest slot that
+ * clears both cards and panes (falling back to a card-clear slot if panes box
+ * it in). Pinned cards never reach here — they hold their exact spot.
  */
 function findSlot(card: SchemeRect, placedCards: readonly SchemeRect[], obstacles: readonly SchemeRect[]): { x: number; y: number } {
-  if (!clashesAny(card, placedCards, TASK_GUTTER)) return { x: card.x, y: card.y };
+  if (!clashesAny(card, placedCards, TASK_GUTTER) && !clashesAny(card, obstacles, TASK_GUTTER)) return { x: card.x, y: card.y };
 
   const stepX = card.w + TASK_GUTTER;
   const stepY = card.h + TASK_GUTTER;
@@ -79,21 +81,35 @@ function findSlot(card: SchemeRect, placedCards: readonly SchemeRect[], obstacle
  * Collision-aware placement for the board's task cards (issue #17). Cards piled
  * at the same auto-position — the curator/inbox lattice packs them 120px apart
  * while a card runs well over that tall — are spread into non-overlapping slots
- * so their text and dashed edges stay readable.
+ * so their text and dashed edges stay readable, and an auto card that lands on a
+ * pane is nudged into the gap beside it.
  *
- * Pure and deterministic: the result depends only on card geometry and the pane
- * obstacles, never on input order. A card keeps its stored coordinates unless it
- * collides with a higher-priority card, so already-tidy (including hand-dragged)
- * arrangements pass through unchanged. Priority is reading order — top-to-bottom
+ * Pure and deterministic: the result depends only on card geometry, the pinned
+ * flags, and the pane obstacles, never on input order. A pinned card (one a
+ * human placed or dragged) holds its exact coordinates untouched and anchors
+ * the pass as an immovable obstacle, so hand-arranged boards pass through
+ * unchanged. An auto card keeps its stored spot only while it clears every other
+ * card and every pane; otherwise it relocates in reading order — top-to-bottom
  * then left-to-right, id as the final tiebreak — so the topmost card of a pileup
- * holds its ground and the rest flow down around it.
+ * settles first and the rest flow down around it.
  */
 export function resolveTaskPlacements(tasks: readonly PlaceableTask[], obstacles: readonly SchemeRect[]): Map<string, { x: number; y: number }> {
-  const cards = tasks.map((task) => ({ id: task.id, x: task.pos.x, y: task.pos.y, w: TASK_W, h: taskCardHeight(task) }));
-  const order = [...cards].sort((a, b) => a.y - b.y || a.x - b.x || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  const cards = tasks.map((task) => ({ id: task.id, x: task.pos.x, y: task.pos.y, w: TASK_W, h: taskCardHeight(task), pinned: task.pinned === true }));
 
   const placed: SchemeRect[] = [];
   const result = new Map<string, { x: number; y: number }>();
+  /* Pinned cards land first at their exact spot and join `placed` as anchors,
+     so auto cards flow around them no matter the input order. */
+  for (const card of cards) {
+    if (!card.pinned) continue;
+    const spot = { x: card.x, y: card.y };
+    result.set(card.id, spot);
+    placed.push({ x: spot.x, y: spot.y, w: card.w, h: card.h });
+  }
+
+  const order = cards
+    .filter((card) => !card.pinned)
+    .sort((a, b) => a.y - b.y || a.x - b.x || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   for (const card of order) {
     const spot = findSlot(card, placed, obstacles);
     result.set(card.id, spot);

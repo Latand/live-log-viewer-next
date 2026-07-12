@@ -97,8 +97,12 @@ export function createTask(
     status: "inbox",
     text,
     pos,
+    /* A user-placed card (no auto-capture source) owns its exact spot from
+       birth — the operator dropped it there deliberately. Auto-captured
+       inbox/curator cards land on the lattice unpinned so the board's
+       collision pass may spread and clear them off panes. */
+    ...(source ? { source } : { pinned: true }),
     assignments: [],
-    ...(source ? { source } : {}),
     createdAt: now,
     updatedAt: now,
   };
@@ -126,6 +130,9 @@ export function patchTask(existing: BoardTask[], id: string, input: PatchTaskInp
     const pos = normalizePos(input.pos);
     if (!pos) return { ok: false, error: "invalid task position", status: 400 };
     patch.pos = pos;
+    /* A drag is an explicit placement: the card is now pinned and the board's
+       collision pass leaves it exactly where the user dropped it. */
+    patch.pinned = true;
   }
 
   const updated: BoardTask = { ...task, ...patch, updatedAt: now };

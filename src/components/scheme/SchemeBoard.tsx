@@ -32,7 +32,7 @@ import { AgentLinksLayer, EdgesLayer, GroupsLayer, LoopsLayer, MOVE_EASE, NodesL
 import type { TaskCardHandlers } from "./TaskCard";
 import { TaskEdgesLayer } from "./TaskEdgesLayer";
 import { TasksLayer } from "./TasksLayer";
-import { buildTaskEdges, buildTaskTargetIndex, TASK_W, taskRect, type SchemeRect } from "./taskGeometry";
+import { buildTaskEdges, buildTaskTargetIndex, TASK_W, taskRect, taskWorldBounds, type SchemeRect } from "./taskGeometry";
 import { resolveTaskPlacements } from "./taskPlacement";
 import { useLasso } from "./useLasso";
 import { useSchemeCamera } from "./useSchemeCamera";
@@ -405,7 +405,21 @@ export function SchemeBoard({
     () => new Map(placedTasks.map((task) => ["task::" + task.id, taskRect(task)] as const)),
     [placedTasks],
   );
+  /* World bounds the camera, minimap and task-edge SVG all read: the node-derived
+     layout box grown to swallow any card the placement pass (or a hand drag) put
+     beyond or left/above it, so relocated cards and their edges stay reachable
+     and on the map instead of clipping out (issue #17). */
+  const world = useMemo(
+    () => taskWorldBounds(layout.width, layout.height, [...taskRects.values()]),
+    [layout.width, layout.height, taskRects],
+  );
   const taskEdges = useMemo(() => buildTaskEdges(placedTasks, buildTaskTargetIndex(layout)), [placedTasks, layout]);
+  /* Card rects the edge router steers around, each tagged with its task so an
+     edge is never counted as crossing the card it leaves from (issue #17). */
+  const taskCardObstacles = useMemo(
+    () => placedTasks.map((task) => ({ id: task.id, ...taskRect(task) })),
+    [placedTasks],
+  );
 
   const onPlaceTask = useCallback((wx: number, wy: number) => {
     setPendingTask({ x: Math.round(wx - TASK_W / 2), y: Math.round(wy - 14) });
@@ -443,6 +457,7 @@ export function SchemeBoard({
   } = useSchemeCamera({
     project,
     layout,
+    world,
     mapMode,
     focus,
     onNodePick,
@@ -740,7 +755,7 @@ export function SchemeBoard({
           onHandoff={handoffForNodes}
           onExpand={stableExpand}
         />
-        <TaskEdgesLayer edges={taskEdges} width={layout.width} height={layout.height} onRetry={retryEdge} />
+        <TaskEdgesLayer edges={taskEdges} world={world} cards={taskCardObstacles} onRetry={retryEdge} />
         <TasksLayer
           tasks={placedTasks}
           files={files}
@@ -858,7 +873,7 @@ export function SchemeBoard({
         />
       ) : null}
 
-      <Minimap layout={layout} tasks={placedTasks} cam={cam} vp={vp} onJump={jump} />
+      <Minimap layout={layout} world={world} tasks={placedTasks} cam={cam} vp={vp} onJump={jump} />
     </div>
     {/* The full-window conversation: the same pane component over the whole
         viewport, with the live feed and the composer of exactly this

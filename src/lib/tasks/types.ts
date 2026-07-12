@@ -36,6 +36,11 @@ export interface BoardTask {
   text: string;
   /** Own world position on the board — the card is dragged freely. */
   pos: { x: number; y: number };
+  /** True once a human chose this exact spot — placed the card by hand or
+      dragged it. The board's collision pass treats a pinned card as law and
+      never nudges it, even atop a pane; auto-lattice cards (curator/inbox)
+      leave this unset and get collision + obstacle clearance. */
+  pinned?: boolean;
   assignments: TaskAssignment[];
   /** User prompt that produced an auto-captured inbox card. */
   source?: TaskSource;

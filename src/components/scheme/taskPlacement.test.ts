@@ -97,11 +97,11 @@ describe("resolveTaskPlacements", () => {
   });
 
   test("a relocated card clears pane obstacles, not just other cards", () => {
-    /* Two cards stacked on the same spot on top of a pane. The anchor ("a",
-       reading-order winner) keeps its spot; the colliding card ("b") relocates
-       and must clear both the anchor and the pane. */
+    /* A pinned anchor ("a") the user dropped on the pane holds its exact spot;
+       the colliding auto card ("b") relocates and must clear both the anchor
+       and the pane. */
     const pane: SchemeRect = { x: 700, y: 100, w: 600, h: 680 };
-    const tasks = [task("a", 740, 140), task("b", 740, 150)];
+    const tasks = [task("a", 740, 140, { pinned: true }), task("b", 740, 150)];
     const placement = resolveTaskPlacements(tasks, [pane]);
     expect(placement.get("a")).toEqual({ x: 740, y: 140 });
     const moved = rectAt(tasks[1]!, placement.get("b")!);
@@ -109,13 +109,31 @@ describe("resolveTaskPlacements", () => {
     expect(clash(moved, rectAt(tasks[0]!, placement.get("a")!), TASK_GUTTER - 1)).toBe(false);
   });
 
-  test("cards deliberately left on a pane are not disturbed when they don't collide", () => {
-    /* A single non-overlapping card sitting over a pane keeps its spot — the
-       pass only ever moves cards that collide with another card, so hand
-       placements over panes (allowed by design) survive. */
+  test("a lone auto card on a pane is nudged off, even with no card collision", () => {
+    /* An auto-lattice card that lands inside a pane must clear it on its own —
+       the early-out now demands pane clearance, not just card clearance. */
     const pane: SchemeRect = { x: 0, y: 0, w: 600, h: 680 };
     const tasks = [task("solo", 100, 100)];
+    const spot = resolveTaskPlacements(tasks, [pane]).get("solo")!;
+    expect(spot).not.toEqual({ x: 100, y: 100 });
+    expect(clash(rectAt(tasks[0]!, spot), pane, 0)).toBe(false);
+  });
+
+  test("a pinned card the user placed on a pane is preserved exactly", () => {
+    /* An explicit hand placement over a pane (allowed by design) survives — a
+       pinned card is law and is never nudged, colliding pane or not. */
+    const pane: SchemeRect = { x: 0, y: 0, w: 600, h: 680 };
+    const tasks = [task("solo", 100, 100, { pinned: true })];
     expect(resolveTaskPlacements(tasks, [pane]).get("solo")).toEqual({ x: 100, y: 100 });
+  });
+
+  test("pinned cards hold their exact spot even when they overlap", () => {
+    /* Two pinned cards the user stacked stay put — the pass never overrides an
+       explicit placement, so a deliberate overlap is the user's to keep. */
+    const tasks = [task("a", 200, 200, { pinned: true }), task("b", 210, 205, { pinned: true })];
+    const placement = resolveTaskPlacements(tasks, []);
+    expect(placement.get("a")).toEqual({ x: 200, y: 200 });
+    expect(placement.get("b")).toEqual({ x: 210, y: 205 });
   });
 
   test("resolves a large burst without exploding out of bounds", () => {

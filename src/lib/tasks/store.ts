@@ -74,6 +74,7 @@ export function isTask(value: unknown): value is BoardTask {
     isTaskStatus(task.status) &&
     typeof task.text === "string" &&
     isFinitePos(task.pos) &&
+    (task.pinned === undefined || typeof task.pinned === "boolean") &&
     Array.isArray(task.assignments) &&
     task.assignments.every(isTaskAssignment) &&
     (task.source === undefined || isTaskSource(task.source)) &&

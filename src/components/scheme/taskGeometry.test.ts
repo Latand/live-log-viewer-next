@@ -6,12 +6,16 @@ import {
   buildTaskEdges,
   buildTaskTargetIndex,
   rectAnchor,
+  routeTaskEdge,
   TASK_BODY_MAX,
   TASK_W,
+  TASK_WORLD_MARGIN,
   taskCardHeight,
   taskRect,
+  taskWorldBounds,
   type TaskTargetSource,
 } from "./taskGeometry";
+import type { SchemeRect } from "./layout";
 
 function assignment(overrides: Partial<TaskAssignment>): TaskAssignment {
   return { path: "/a", panePid: null, state: "delivered", error: null, at: "2026-07-05T00:00:00Z", ...overrides };
@@ -108,6 +112,95 @@ describe("taskRect / taskCardHeight", () => {
       task({ id: "t", source: { path: "/node", ts: null, text: "Fix it", fingerprint: "fp", engine: "codex" } }),
     );
     expect(sourced).toBeGreaterThan(bare);
+  });
+});
+
+describe("taskWorldBounds", () => {
+  test("no cards leaves the layout box untouched", () => {
+    expect(taskWorldBounds(2000, 1500, [])).toEqual({ x: 0, y: 0, w: 2000, h: 1500 });
+  });
+
+  test("a card inside the layout box does not shrink or move it", () => {
+    expect(taskWorldBounds(2000, 1500, [{ x: 500, y: 500, w: TASK_W, h: 100 }])).toEqual({ x: 0, y: 0, w: 2000, h: 1500 });
+  });
+
+  test("a card past the right/bottom edge grows width and height with a margin", () => {
+    const bounds = taskWorldBounds(1000, 800, [{ x: 1200, y: 900, w: TASK_W, h: 100 }]);
+    expect(bounds.x).toBe(0);
+    expect(bounds.y).toBe(0);
+    expect(bounds.w).toBe(1200 + TASK_W + TASK_WORLD_MARGIN);
+    expect(bounds.h).toBe(900 + 100 + TASK_WORLD_MARGIN);
+  });
+
+  test("a card left of/above the origin pushes the origin negative and keeps the far edge", () => {
+    const bounds = taskWorldBounds(1000, 800, [{ x: -276, y: -50, w: TASK_W, h: 120 }]);
+    expect(bounds.x).toBe(-276 - TASK_WORLD_MARGIN);
+    expect(bounds.y).toBe(-50 - TASK_WORLD_MARGIN);
+    /* Far edges stay at least the layout box: width spans from the new negative
+       origin to the old right edge. */
+    expect(bounds.x + bounds.w).toBe(1000);
+    expect(bounds.y + bounds.h).toBe(800);
+  });
+});
+
+describe("routeTaskEdge", () => {
+  /* Parse `M x1 y1 C c1x c1y, c2x c2y, x2 y2` back into its eight numbers. */
+  function parse(d: string): number[] {
+    return d
+      .replace(/[MC,]/g, " ")
+      .trim()
+      .split(/\s+/)
+      .map(Number);
+  }
+  function cubic(t: number, p0: number, c1: number, c2: number, p3: number): number {
+    const u = 1 - t;
+    return u * u * u * p0 + 3 * u * u * t * c1 + 3 * u * t * t * c2 + t * t * t * p3;
+  }
+  function inRect(x: number, y: number, r: SchemeRect): boolean {
+    return x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h;
+  }
+  function curveEntersRect(d: string, r: SchemeRect): boolean {
+    const [x1, y1, c1x, c1y, c2x, c2y, x2, y2] = parse(d);
+    for (let i = 0; i <= 40; i++) {
+      const t = i / 40;
+      const px = cubic(t, x1!, c1x!, c2x!, x2!);
+      const py = cubic(t, y1!, c1y!, c2y!, y2!);
+      if (inRect(px, py, r)) return true;
+    }
+    return false;
+  }
+
+  test("with no obstacles the base axis-following curve is kept", () => {
+    const route = routeTaskEdge({ x1: 0, y1: 0, x2: 0, y2: 400 }, []);
+    expect(route.crosses).toBe(false);
+    /* Vertical hop → vertical control handles at the endpoints' x. */
+    expect(parse(route.d)).toEqual([0, 0, 0, 200, 0, 200, 0, 400]);
+    expect(route.mid).toEqual({ x: 0, y: 200 });
+  });
+
+  test("a card straddling the straight path is routed around", () => {
+    /* A vertical edge whose base curve would run straight down through a card
+       parked on the midline. */
+    const blocker: SchemeRect = { x: -130, y: 150, w: 260, h: 100 };
+    const straight = routeTaskEdge({ x1: 0, y1: 0, x2: 0, y2: 400 }, []);
+    expect(curveEntersRect(straight.d, blocker)).toBe(true); // base really is blocked
+    const route = routeTaskEdge({ x1: 0, y1: 0, x2: 0, y2: 400 }, [blocker]);
+    expect(route.crosses).toBe(false);
+    expect(curveEntersRect(route.d, blocker)).toBe(false);
+  });
+
+  test("a card boxing in the whole corridor is flagged as an unavoidable crossing", () => {
+    /* An obstacle so wide no bow within the cap can clear it. */
+    const wall: SchemeRect = { x: -5000, y: 150, w: 10000, h: 100 };
+    const route = routeTaskEdge({ x1: 0, y1: 0, x2: 0, y2: 400 }, [wall]);
+    expect(route.crosses).toBe(true);
+  });
+
+  test("an obstacle nowhere near the path leaves the base curve and does not fade", () => {
+    const far: SchemeRect = { x: 2000, y: 2000, w: 100, h: 100 };
+    const route = routeTaskEdge({ x1: 0, y1: 0, x2: 0, y2: 400 }, [far]);
+    expect(route.crosses).toBe(false);
+    expect(parse(route.d)).toEqual([0, 0, 0, 200, 0, 200, 0, 400]);
   });
 });
 

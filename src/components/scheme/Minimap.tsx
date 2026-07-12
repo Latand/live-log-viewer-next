@@ -7,7 +7,7 @@ import { engineColor } from "@/components/utils";
 import { useLocale } from "@/lib/i18n";
 import type { BoardTask } from "@/lib/tasks/types";
 
-import type { SchemeLayout } from "./layout";
+import type { SchemeLayout, SchemeRect } from "./layout";
 import { TASK_W, taskCardHeight } from "./taskGeometry";
 
 export interface Camera {
@@ -25,12 +25,17 @@ const MAP_H = 148;
  */
 export function Minimap({
   layout,
+  world,
   tasks = [],
   cam,
   vp,
   onJump,
 }: {
   layout: SchemeLayout;
+  /** World box to scale down — the layout box grown to include off-layout task
+      cards (issue #17), origin possibly negative. Everything is drawn in world
+      coordinates and shifted by this origin so a relocated card still shows. */
+  world: SchemeRect;
   /** Tasks render as 3 px status-colored dots; their edges never show here. */
   tasks?: BoardTask[];
   cam: Camera;
@@ -40,14 +45,14 @@ export function Minimap({
   const { t } = useLocale();
   const ref = useRef<HTMLDivElement | null>(null);
   const dragRef = useRef(false);
-  const scale = Math.min(MAP_W / layout.width, MAP_H / layout.height);
-  const ox = (MAP_W - layout.width * scale) / 2;
-  const oy = (MAP_H - layout.height * scale) / 2;
+  const scale = Math.min(MAP_W / world.w, MAP_H / world.h);
+  const ox = (MAP_W - world.w * scale) / 2;
+  const oy = (MAP_H - world.h * scale) / 2;
 
   const jumpTo = (event: React.PointerEvent) => {
     const rect = ref.current?.getBoundingClientRect();
     if (!rect) return;
-    onJump((event.clientX - rect.left - ox) / scale, (event.clientY - rect.top - oy) / scale);
+    onJump((event.clientX - rect.left - ox) / scale + world.x, (event.clientY - rect.top - oy) / scale + world.y);
   };
 
   return (
@@ -83,7 +88,7 @@ export function Minimap({
       }}
     >
       <svg width={MAP_W} height={MAP_H} aria-hidden>
-        <g transform={`translate(${ox} ${oy}) scale(${scale})`}>
+        <g transform={`translate(${ox - world.x * scale} ${oy - world.y * scale}) scale(${scale})`}>
           {layout.stacks.map((stack) => (
             <rect key={stack.key} x={stack.x} y={stack.y} width={stack.w} height={stack.h} rx={18} fill="#c9c9d1" opacity={0.45} />
           ))}
