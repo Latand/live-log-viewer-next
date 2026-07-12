@@ -1023,8 +1023,11 @@ export function routeTaskEdges(
      reduction has settled, so it has the final say: walk edges in key order on
      their exact corridors (the detour's straight middle run), and when one sits
      within a lane of an already-placed corridor on the same axis and overlaps its
-     extent, step its lane out until it clears. Deterministic and bounded. */
-  if (edges.length <= CROSS_REDUCE_MAX) {
+     extent, step its lane out until it clears. This is NOT gated by the
+     reduction cap — a busy board is exactly where fan-out rails form — and stays
+     cheap because only the (usually few) detoured edges are compared, and only a
+     clashing one re-routes. Deterministic and bounded. */
+  {
     const placed: RouteCorridor[] = [];
     const clashes = (c: RouteCorridor): boolean =>
       placed.some((p) => p.axis === c.axis && Math.abs(p.pos - c.pos) < LANE_BOW - 1 && Math.min(p.hi, c.hi) > Math.max(p.lo, c.lo));

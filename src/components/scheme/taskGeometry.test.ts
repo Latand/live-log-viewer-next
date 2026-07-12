@@ -663,6 +663,32 @@ describe("routeTaskEdges — edge-to-edge crossing handling (Finding 1)", () => 
     for (const e of edges) expect(rev.get(e.key)!.d).toBe(routes.get(e.key)!.d);
   });
 
+  test("fan-out deconfliction is not gated by the reduction cap (Finding)", () => {
+    /* The same six-edge fan-out plus 43 unrelated far-away edges — 49 total,
+       past CROSS_REDUCE_MAX. Corridor deconfliction must still run, or the six
+       collapse back onto shared rails. */
+    const pane: SchemeRect = { x: -300, y: 100, w: 600, h: 680 };
+    const fan = Array.from({ length: 6 }, (_, i) => geom("fan" + i, -450, 400 + i * 10, 450, 200 + i * 80));
+    const filler = Array.from({ length: 43 }, (_, i) => {
+      const cx = 4000 + (i % 10) * 700;
+      const cy = Math.floor(i / 10) * 240;
+      return geom("z" + String(i).padStart(2, "0"), cx, cy, cx + 320, cy + 400);
+    });
+    expect(fan.length + filler.length).toBeGreaterThan(48);
+    const routes = routeTaskEdges([...fan, ...filler], [], [pane]);
+    const corridors = fan.map((e) => routes.get(e.key)!.corridor);
+    expect(corridors.every((c) => c)).toBe(true);
+    for (let i = 0; i < corridors.length; i++) {
+      for (let j = i + 1; j < corridors.length; j++) {
+        const a = corridors[i]!;
+        const b = corridors[j]!;
+        if (a.axis === b.axis && Math.min(a.hi, b.hi) > Math.max(a.lo, b.lo)) {
+          expect(Math.abs(a.pos - b.pos)).toBeGreaterThanOrEqual(25);
+        }
+      }
+    }
+  });
+
   test("reduces an avoidable crossing that per-edge routing leaves tangled", () => {
     /* An obstacle bows edge A down through edge B (two crossings); the pass
        nudges A onto a lane that clears B. */
