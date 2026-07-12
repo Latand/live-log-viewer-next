@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import fs from "node:fs";
+import path from "node:path";
 
 import { NextResponse } from "next/server";
 
@@ -17,6 +18,7 @@ import { filterWorkflowsForFileScan } from "@/lib/workflows/visibility";
 import { projectRateLimitReadModel } from "@/lib/rateLimit";
 import { overlaySessionTitles } from "@/lib/session/titleProjection";
 import { tmuxEndpointHealth } from "@/lib/tmux";
+import { claudeProjectRootFor, codexSessionRootFor } from "@/lib/scanner/roots";
 import type { FilesResponse } from "@/lib/types";
 
 interface FilesRouteDependencies {
@@ -35,6 +37,60 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
   // the external scheduler, keeping repeated GETs byte-stable for state files.
   const registry = agentRegistry();
   const registrySnapshot = registry.snapshot();
+  const conversationForPath = (pathname: string) => Object.values(registrySnapshot.conversations).find((conversation) =>
+    conversation.generations.some((generation) => generation.path === pathname)
+    || conversation.continuityPaths.includes(pathname));
+  const filesByPath = new Map(files.map((file) => [file.path, file]));
+  for (let index = 0; index < files.length; index += 1) {
+    const child = files[index]!;
+    const childConversation = conversationForPath(child.path);
+    const current = childConversation?.generations.at(-1);
+    if (!childConversation || current?.path !== child.path) continue;
+    const rawParentId = registrySnapshot.lineageEdges[childConversation.id]?.parentConversationId
+      ?? current.launchProfile.parentConversationId;
+    if (!rawParentId) continue;
+    const parentId = registry.canonicalConversationId(rawParentId);
+    const parentConversation = registrySnapshot.conversations[parentId];
+    const parentGeneration = parentConversation?.generations.at(-1);
+    const parentPath = parentGeneration?.path;
+    if (!parentConversation || !parentGeneration || !parentPath || filesByPath.has(parentPath)) continue;
+    let stat: fs.Stats;
+    try {
+      stat = fs.statSync(parentPath);
+    } catch {
+      continue;
+    }
+    if (!stat.isFile()) continue;
+    const rootPath = parentConversation.engine === "codex"
+      ? codexSessionRootFor(parentPath)
+      : claudeProjectRootFor(parentPath);
+    const placeholder = {
+      path: parentPath,
+      root: parentConversation.engine === "codex" ? "codex-sessions" as const : "claude-projects" as const,
+      name: rootPath ? path.relative(rootPath, parentPath) : path.basename(parentPath),
+      project: parentGeneration.launchProfile.project ?? child.project,
+      title: parentGeneration.launchProfile.title ?? path.basename(parentPath, path.extname(parentPath)),
+      engine: parentConversation.engine,
+      kind: "session",
+      fmt: parentConversation.engine,
+      parent: null,
+      mtime: stat.mtimeMs / 1000,
+      size: stat.size,
+      activity: "idle" as const,
+      activityReason: "lineage_placeholder",
+      proc: null,
+      pid: null,
+      model: parentGeneration.launchProfile.model,
+      launchModel: parentGeneration.launchProfile.model,
+      effort: parentGeneration.launchProfile.effort,
+      pendingQuestion: null,
+      plan: parentGeneration.launchProfile.plan,
+      goal: parentGeneration.launchProfile.goal,
+      waitingInput: null,
+    };
+    files.push(placeholder);
+    filesByPath.set(parentPath, placeholder);
+  }
   const scannedPaths = new Set(files.map((file) => file.path));
   const ownsPath = (conversation: (typeof registrySnapshot.conversations)[keyof typeof registrySnapshot.conversations], pathname: string) =>
     conversation.generations.some((generation) => generation.path === pathname)

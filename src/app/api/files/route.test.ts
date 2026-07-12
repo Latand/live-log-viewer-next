@@ -366,6 +366,48 @@ test("deleted parent lineage projects a tombstone and leaves no missing tree pat
   expect(child?.parentRemoved).toEqual({ conversationId: parent.id, path: parentPath });
 });
 
+test("an existing durable parent omitted from the scan enters the response closure", async () => {
+  const registry = agentRegistry();
+  const parentPath = path.join(registryRoot, "parent-019f4906-3f67-7b72-9fbc-9ec3b5ad1325.jsonl");
+  const childPath = "/sessions/child-019f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl";
+  fs.writeFileSync(parentPath, "{}\n");
+  const parent = registry.ensureConversation("codex", parentPath, null);
+  const begun = registry.beginSpawnRequest({
+    engine: "codex",
+    cwd: "/repo",
+    parentConversationId: parent.id,
+    parentArtifactPath: parentPath,
+    launchProfile: emptyLaunchProfile({ cwd: "/repo", parentConversationId: parent.id }),
+  });
+  if (begun.kind !== "created") throw new Error("expected a fresh spawn receipt");
+  registry.settleSpawn(begun.receipt.launchId, {
+    key: { engine: "codex", sessionId: "019f4906-3f67-7b72-9fbc-9ec3b5ad1326" },
+    artifactPath: childPath,
+    cwd: "/repo",
+    accountId: null,
+    status: "unhosted",
+    host: null,
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  scannedFiles = [file(childPath)];
+
+  const response = await GET(new Request("http://127.0.0.1/api/files"));
+  const body = await response.json() as { files: FileEntry[] };
+  const child = body.files.find((entry) => entry.path === childPath);
+  const projectedParent = body.files.find((entry) => entry.path === parentPath);
+
+  expect(child?.parent).toBe(parentPath);
+  expect(child?.parentRemoved).toBeUndefined();
+  expect(projectedParent).toMatchObject({
+    path: parentPath,
+    conversationId: parent.id,
+    project: "repo",
+    activityReason: "lineage_placeholder",
+  });
+});
+
 test("a custom session title (issue #33) overrides the derived title and keeps it as autoTitle", async () => {
   const sessionUuid = "019f4906-3f67-7b72-9fbc-9ec3b5ad1399";
   const sessionPath = `/sessions/rollout-2026-07-12T00-00-00-${sessionUuid}.jsonl`;
