@@ -27,6 +27,12 @@ const BODY_CONTENT_W = TASK_W - 24;
    of what Chromium renders. */
 const MAX_GLYPH_W = 13;
 const MAX_SPACE_W = 5;
+/* `whitespace-pre-wrap` preserves tabs and the browser expands each to the next
+   tab stop. With no CSS override the default `tab-size` is 8, so one tab advances
+   at most 8 space-widths — model it at that ceiling (upper bound, since a tab from
+   mid-stop advances less) or a `W\t…` run undercounts its rendered rows. */
+const TAB_STOP = 8;
+const MAX_TAB_W = TAB_STOP * MAX_SPACE_W;
 /* Characters that fit on one full row at the widest glyph — the break-words wrap
    width for an over-long single word. */
 const CHARS_PER_LINE = Math.max(1, Math.floor(BODY_CONTENT_W / MAX_GLYPH_W));
@@ -52,7 +58,9 @@ function hardLineRows(line: string): number {
   let used = 0; // px consumed on the current row
   for (const token of line.match(/\s+|\S+/g) ?? []) {
     if (/\s/.test(token)) {
-      used += token.length * MAX_SPACE_W;
+      /* A tab consumes a whole tab stop, far more than a space — count each at
+         its upper-bound advance so a tab-laden line isn't undercounted. */
+      for (const ch of token) used += ch === "\t" ? MAX_TAB_W : MAX_SPACE_W;
       while (used > BODY_CONTENT_W) {
         rows++;
         used -= BODY_CONTENT_W;
@@ -633,9 +641,19 @@ function endpointSig(edge: TaskEdgeGeom): string {
 
 type RoutePoint = { x: number; y: number };
 
+/* Polyline sampling density: one vertex roughly every SAMPLE_STEP px of curve so
+   the chord approximation stays tight regardless of length — a fixed count would
+   under-sample a long edge and miss a genuine crossing (issue #17). Bounded both
+   ways so short curves still get a few segments and a very long one stays cheap. */
+const SAMPLE_STEP = 22;
+const SAMPLE_MIN = 12;
+const SAMPLE_MAX = 32;
+
 /* Sample a routed path (one or several cubics) into a polyline for edge-vs-edge
-   crossing tests. */
-function sampleRoutePoints(d: string, per = 12): RoutePoint[] {
+   crossing tests. Each cubic's segment count scales with its control-polygon
+   length, so the crossing detector never misses a transversal cross on a long
+   connector that fixed sampling would step over. */
+function sampleRoutePoints(d: string): RoutePoint[] {
   const n = d.replace(/[MC,]/g, " ").trim().split(/\s+/).map(Number);
   const pts: RoutePoint[] = [{ x: n[0]!, y: n[1]! }];
   let x0 = n[0]!;
@@ -647,6 +665,8 @@ function sampleRoutePoints(d: string, per = 12): RoutePoint[] {
     const c2y = n[i + 3]!;
     const x2 = n[i + 4]!;
     const y2 = n[i + 5]!;
+    const polyLen = Math.hypot(c1x - x0, c1y - y0) + Math.hypot(c2x - c1x, c2y - c1y) + Math.hypot(x2 - c2x, y2 - c2y);
+    const per = Math.max(SAMPLE_MIN, Math.min(SAMPLE_MAX, Math.ceil(polyLen / SAMPLE_STEP)));
     for (let k = 1; k <= per; k++) {
       const t = k / per;
       pts.push({ x: cubicAt(t, x0, c1x, c2x, x2), y: cubicAt(t, y0, c1y, c2y, y2) });

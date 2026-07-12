@@ -171,6 +171,16 @@ describe("taskRect / taskCardHeight", () => {
     expect(h).toBeGreaterThanOrEqual(378);
   });
 
+  test("tabs are counted at a full tab stop, not one space (Finding 2)", () => {
+    /* `whitespace-pre-wrap` expands each tab to the next 8-space stop, so a
+       `W\t`×50 run wraps to ~6 rows (~128px body); counting a tab as a single
+       space undercounts to ~94px and overlaps the following card. */
+    const tabbed = taskCardHeight(task({ id: "t", text: "W\t".repeat(50) }));
+    const spaced = taskCardHeight(task({ id: "t", text: "W ".repeat(50) }));
+    expect(tabbed).toBeGreaterThanOrEqual(128);
+    expect(tabbed).toBeGreaterThanOrEqual(spaced);
+  });
+
   test("standalone carriage returns each count as a rendered line (Finding 2)", () => {
     /* `whitespace-pre-wrap` breaks on a lone \r, so 100 of them are 101 rendered
        rows (body hits its 340px cap ≈ 346px card). A LF-only split would keep
@@ -599,6 +609,21 @@ describe("routeTaskEdges — edge-to-edge crossing handling (Finding 1)", () => 
     expect(crossings(forward.get("A")!.d, forward.get("B")!.d)).toBe(1);
     expect([forward.get("A")!.crosses, forward.get("B")!.crosses].filter(Boolean)).toHaveLength(1);
     expect(forward.get("B")!.crosses).toBe(true); // higher key fades
+  });
+
+  test("a genuine crossing on long connectors is never silently missed (Finding)", () => {
+    /* Two ~2400px cubics cross near (1533,1309). A fixed 12-segment sampling
+       stepped right over it and left BOTH crosses:false — an opaque tangle.
+       Adaptive-density sampling catches it: the routed geometry is either
+       separated or the crossing is flagged, never solid-and-crossing. */
+    const a = geom("A", 970, 950, 2753, 2533);
+    const b = geom("B", 2156, 2163, 1444, 995);
+    const routes = routeTaskEdges([a, b], [], []);
+    const stillCross = crossings(routes.get("A")!.d, routes.get("B")!.d) > 0;
+    const eitherFaded = routes.get("A")!.crosses || routes.get("B")!.crosses;
+    /* The failing state the finding reported: a real crossing with both edges
+       reporting clear. It must never occur. */
+    expect(stillCross && !eitherFaded).toBe(false);
   });
 
   test("distinct edges that do not cross are never faded", () => {
