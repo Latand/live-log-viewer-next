@@ -126,6 +126,29 @@ describe("taskRect / taskCardHeight", () => {
     expect(h).toBeGreaterThanOrEqual(337);
   });
 
+  test("estimate bounds a worst-case rendered model at every length (Finding 2)", () => {
+    /* Independent upper-bound model: the 236px content box wraps the widest bold
+       glyph (≤13px advance — Chromium measured ~11.8 for 'W') into
+       ceil(n·13/236) lines of 17px, plus the 6px strip, 20px body padding and
+       26px per chip row (+6px gutter). The character-count estimate must never
+       come in under this, or a tall card overruns its box and overlaps a
+       neighbour. */
+    const CONTENT_W = 260 - 24;
+    const model = (chars: number, chips: number): number => {
+      const lines = Math.ceil((chars * 13) / CONTENT_W);
+      const body = Math.min(lines * 17, 340) + 20;
+      const chipsH = chips ? chips * 26 + 6 : 0;
+      return 6 + body + chipsH;
+    };
+    for (const chars of [1, 40, 120, 250, 340]) {
+      for (const chips of [0, 1, 3]) {
+        const chipList = Array.from({ length: chips }, (_, i) => assignment({ path: "/c" + i }));
+        const h = taskCardHeight(task({ id: "t", text: "W".repeat(chars), assignments: chipList }));
+        expect(h).toBeGreaterThanOrEqual(model(chars, chips));
+      }
+    }
+  });
+
   test("wrap width assumes the widest glyphs, never an average", () => {
     /* The content box is only 236px, so a run of the widest glyphs cannot fit
        on one line — the estimate counts more than a single line for them. */
@@ -496,17 +519,42 @@ describe("routeTaskEdges — edge-to-edge crossing handling (Finding 1)", () => 
     expect(total((k) => routes.get(k)!.d)).toBeLessThanOrEqual(total((k) => naive.get(k)!));
   });
 
-  test("a topologically forced crossing settles to a single deterministic crossing", () => {
-    /* The two diagonals of a box interleave, so no planar route removes the
-       crossing without a board-spanning detour — the honest outcome is one
-       clean crossing, produced deterministically for any input order. */
+  test("a forced crossing is never left silently solid — one side is faded", () => {
+    /* The Finding-1 example: the two diagonals of a box interleave, so no
+       bounded planar route removes the crossing. The old code detected nothing
+       here (the crossing lands dead-centre on a shared sample vertex) and left
+       BOTH edges `crosses:false`. The robust test now catches it, and since it
+       can't be routed away, exactly one edge — the higher key, deterministically
+       — is faded so it reads as passing behind. */
     const a = geom("A", 0, 0, 1000, 1000);
     const b = geom("B", 0, 1000, 1000, 0);
     const forward = routeTaskEdges([a, b], [], []);
     const reversed = routeTaskEdges([b, a], [], []);
+    /* Deterministic for any input order. */
     expect(forward.get("A")!.d).toBe(reversed.get("A")!.d);
-    expect(forward.get("B")!.d).toBe(reversed.get("B")!.d);
+    expect(forward.get("B")!.crosses).toBe(reversed.get("B")!.crosses);
+    /* The geometry still crosses once, but it is now flagged, not silent. */
     expect(crossings(forward.get("A")!.d, forward.get("B")!.d)).toBe(1);
+    expect([forward.get("A")!.crosses, forward.get("B")!.crosses].filter(Boolean)).toHaveLength(1);
+    expect(forward.get("B")!.crosses).toBe(true); // higher key fades
+  });
+
+  test("distinct edges that do not cross are never faded", () => {
+    const a = geom("A", 0, 0, 100, 100);
+    const b = geom("B", 2000, 0, 2100, 100);
+    const routes = routeTaskEdges([a, b], [], []);
+    expect(routes.get("A")!.crosses).toBe(false);
+    expect(routes.get("B")!.crosses).toBe(false);
+  });
+
+  test("fan-in edges meeting at one target are not treated as crossing", () => {
+    /* Two edges landing on the same session share that endpoint by design; the
+       shared-endpoint filter keeps them off the fade list. */
+    const a = geom("A", 0, 0, 500, 500);
+    const b = geom("B", 1000, 0, 500, 500);
+    const routes = routeTaskEdges([a, b], [], []);
+    expect(routes.get("A")!.crosses).toBe(false);
+    expect(routes.get("B")!.crosses).toBe(false);
   });
 
   test("coincident edges stay fanned onto separate lanes", () => {
