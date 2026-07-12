@@ -353,7 +353,7 @@ export function ProjectDashboard({
      rounds it bred. Pipeline ownership resolves through the ancestor chain so a
      stage's spawned child stays in the pipeline stack, not a second origin one. */
   const filesByPath = useMemo(() => new Map(files.map((file) => [file.path, file] as const)), [files]);
-  const pipelineIdByPath = useMemo(() => pipelineStagePipelineIds(pipelines), [pipelines]);
+  const pipelineIdByPath = useMemo(() => pipelineStagePipelineIds(pipelines, flows), [pipelines, flows]);
   const pipelineIdOf = useMemo(
     () => (path: string): string | null => {
       const file = filesByPath.get(path);

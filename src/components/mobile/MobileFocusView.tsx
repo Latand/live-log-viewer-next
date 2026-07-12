@@ -20,6 +20,7 @@ import { isWorkflowDraftId } from "@/components/workflows/workflowModel";
 import { WorkflowDraftPane } from "@/components/workflows/WorkflowDraftPane";
 import { RoundDeck } from "@/components/flows/RoundDeck";
 import { canHandoff, HandoffHandle } from "@/components/HandoffHandle";
+import { mapReachable } from "./mapGate";
 import { paneState, type PaneState } from "@/components/paneState";
 import type { BranchGroup } from "@/components/projectModel";
 import { activityDot, cleanTitle, engineBadge } from "@/components/utils";
@@ -319,7 +320,10 @@ export function MobileFocusView({ project, groups, manual, files, flows, pipelin
           <span className="min-w-0 flex-1" aria-hidden />
         )}
         <div className="flex shrink-0 items-center gap-1 border-l border-line px-1.5">
-          {layout.nodes.length > 1 ? (
+          {/* Collapsed worker stacks count toward map availability (issue #136):
+              a worker-heavy board is often one visible root plus several stacks,
+              and the map is the only place their per-origin dots can be seen. */}
+          {mapReachable(layout.nodes.length, workerStacks.length) ? (
             <button
               type="button"
               className="inline-flex h-11 min-w-11 items-center justify-center gap-1 rounded-[8px] text-dim hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"

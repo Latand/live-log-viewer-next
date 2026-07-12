@@ -270,4 +270,20 @@ describe("sibling pipeline halos never overlap (#136 finding 1)", () => {
     /* The right halo starts at or past the left halo's outer edge — no overlap. */
     expect(left!.x + left!.w).toBeLessThanOrEqual(right!.x);
   });
+
+  test("a pipeline nested deep under an ungrouped sibling still clears an adjacent pipeline (#136 finding 2)", () => {
+    /* p1's stage sits DEEP inside an otherwise-ungrouped child; the boundary must
+       see the group carried by the whole subtree, not just the child's own path. */
+    const origin = entry({ path: "/o", activity: "live" });
+    const ungrouped = entry({ path: "/o/u", parent: "/o", kind: "subagent" });
+    const p1stage = entry({ path: "/o/u/s1", parent: "/o/u", kind: "subagent" });
+    const p2stage = entry({ path: "/o/s2", parent: "/o", kind: "subagent" });
+    const files = [origin, ungrouped, p1stage, p2stage];
+    const groups = buildBranchGroups(files, "demo");
+    const layout = buildSchemeLayout(groups, [], files, [], [], [pipe("p1", "/o/u/s1"), pipe("p2", "/o/s2")]);
+    const halos = layout.groups.filter((group) => group.kind === "pipeline");
+    expect(halos).toHaveLength(2);
+    const [left, right] = [...halos].sort((x, y) => x.x - y.x);
+    expect(left!.x + left!.w).toBeLessThanOrEqual(right!.x);
+  });
 });

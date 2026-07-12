@@ -205,14 +205,27 @@ export function flowIdForPath(file: FileEntry, flows: readonly Flow[]): string |
   return flowMembership(file, flows)?.flow.id ?? null;
 }
 
-/** Transcript path → the id of the pipeline whose stage attempt owns it, so a
-    pipeline's stage workers fold into one chip (issue #136). */
-export function pipelineStagePipelineIds(pipelines: readonly Pipeline[]): Map<string, string> {
+/** Transcript path → the id of the pipeline that owns it, so a pipeline's stage
+    workers fold into ONE chip (issue #136). A stage's own `agentPath` is owned;
+    for a review-loop stage the embedded flow's implementer + reviewer paths are
+    owned too, otherwise the flow bucket would split them off into a second stack
+    (a build stage in the pipeline stack, its reviewer in a flow stack). */
+export function pipelineStagePipelineIds(pipelines: readonly Pipeline[], flows: readonly Flow[] = []): Map<string, string> {
+  const flowById = new Map(flows.map((flow) => [flow.id, flow] as const));
   const map = new Map<string, string>();
   for (const pipeline of pipelines) {
     for (const run of pipeline.runs) {
       for (const attempt of run.attempts) {
         if (attempt.agentPath && !map.has(attempt.agentPath)) map.set(attempt.agentPath, pipeline.id);
+        if (attempt.flowId) {
+          const flow = flowById.get(attempt.flowId);
+          if (flow) {
+            if (!map.has(flow.implementerPath)) map.set(flow.implementerPath, pipeline.id);
+            for (const round of flow.rounds) {
+              if (round.reviewerPath && !map.has(round.reviewerPath)) map.set(round.reviewerPath, pipeline.id);
+            }
+          }
+        }
       }
     }
   }
@@ -318,10 +331,15 @@ function stackKeyFor(
   flows: readonly Flow[],
   resolvers: StackOriginResolvers = {},
 ): { key: string; kind: WorkerStack["kind"]; id: string } {
-  const flowId = flowIdForPath(file, flows);
-  if (flowId) return { key: "wstack::flow::" + flowId, kind: "flow", id: flowId };
+  /* Pipeline ownership wins over the flow bucket (issue #136): a pipeline that
+     embeds a review-loop owns that flow's implementer + reviewers, so a whole
+     architect→builder→review pipeline is ONE stack instead of splitting into a
+     pipeline stack (architect) plus a flow stack (builder/reviewer). The
+     resolver covers pipeline-owned paths AND their ancestors. */
   const pipelineId = resolvers.pipelineIdOf?.(file.path) ?? null;
   if (pipelineId) return { key: "wstack::pipeline::" + pipelineId, kind: "pipeline", id: pipelineId };
+  const flowId = flowIdForPath(file, flows);
+  if (flowId) return { key: "wstack::flow::" + flowId, kind: "flow", id: flowId };
   const origin = resolvers.originOf?.(file) ?? null;
   if (origin) return { key: "wstack::origin::" + origin, kind: "origin", id: origin };
   const worktree = file.worktree ?? "";

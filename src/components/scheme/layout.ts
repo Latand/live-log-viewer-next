@@ -235,13 +235,36 @@ export function buildSchemeLayout(
       if (round.reviewerPath && !groupKeyOfPath.has(round.reviewerPath)) groupKeyOfPath.set(round.reviewerPath, key);
     }
   }
-  /* A boundary between two adjacent sibling subtrees whose (both non-null) group
-     keys differ: exactly the case two padded halos would collide. A grouped node
-     beside an ungrouped one is fine — GAP_X already clears a single GROUP_PAD. */
-  const isGroupBoundary = (aPath: string, bPath: string): boolean => {
-    const ga = groupKeyOfPath.get(aPath) ?? null;
-    const gb = groupKeyOfPath.get(bPath) ?? null;
-    return Boolean(ga && gb && ga !== gb);
+  /* The set of flow/pipeline groups a sibling SUBTREE carries — the root plus
+     every descendant, not just the root path (issue #136 finding 2): a group
+     stage nested deep inside an otherwise-ungrouped child still grows a halo out
+     to that child's edge, so the boundary must see it. Memoized per root. */
+  const subtreeGroupsCache = new Map<string, Set<string>>();
+  const subtreeGroups = (root: FileEntry): Set<string> => {
+    const cached = subtreeGroupsCache.get(root.path);
+    if (cached) return cached;
+    const keys = new Set<string>();
+    const own = groupKeyOfPath.get(root.path);
+    if (own) keys.add(own);
+    for (const row of descendantsOf(root, files)) {
+      const key = groupKeyOfPath.get(row.file.path);
+      if (key) keys.add(key);
+    }
+    subtreeGroupsCache.set(root.path, keys);
+    return keys;
+  };
+  /* A boundary between two adjacent sibling subtrees that both carry a group and
+     don't carry the SAME set — exactly when two padded halos would collide. A
+     grouped subtree beside an ungrouped one is fine (GAP_X clears a single
+     GROUP_PAD); two subtrees of one group span into a single halo, so they stay
+     tight. */
+  const isGroupBoundary = (a: FileEntry, b: FileEntry): boolean => {
+    const ga = subtreeGroups(a);
+    const gb = subtreeGroups(b);
+    if (ga.size === 0 || gb.size === 0) return false;
+    if (ga.size !== gb.size) return true;
+    for (const key of ga) if (!gb.has(key)) return true;
+    return false;
   };
 
   /* Handoff drafts hang under their source pane like a child; drafts whose
@@ -323,7 +346,7 @@ export function buildSchemeLayout(
            halos never overlap (issue #136); the last slot keeps GAP_X, which the
            `used` width below subtracts back off. */
         const nextChild = children[i + 1];
-        const gap = nextChild && isGroupBoundary(child.file.path, nextChild.file.path) ? GROUP_SIBLING_GAP : GAP_X;
+        const gap = nextChild && isGroupBoundary(child.file, nextChild.file) ? GROUP_SIBLING_GAP : GAP_X;
         cx += place(child, cx, childTop, depth + 1) + gap;
       }
       const quiet = stackFor.get(col.file.path)?.filter((entry) => !claimed.has(entry.path));

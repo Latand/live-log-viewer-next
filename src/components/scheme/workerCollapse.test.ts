@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import type { Flow, Round } from "@/lib/flows/types";
+import type { Pipeline } from "@/lib/pipelines/types";
 import type { FileEntry } from "@/lib/types";
 
 import {
@@ -12,6 +13,7 @@ import {
   isCollapseExempt,
   pipelineOriginOf,
   pipelineStageAgentPaths,
+  pipelineStagePipelineIds,
   protectedReviewerNodes,
   reviewerRoundFinished,
   shouldCollapseWorker,
@@ -171,6 +173,16 @@ describe("pipelineOriginOf — ancestor-chain pipeline ownership (#136)", () => 
     const b = entry({ path: "/a/b", parent: "/a", kind: "subagent" });
     const filesByPath = new Map([[a.path, a], [b.path, b]]);
     expect(pipelineOriginOf(b, filesByPath, new Map())).toBeNull();
+  });
+
+  test("ownership map covers a stage agentPath AND an embedded flow's implementer + reviewers (#136)", () => {
+    const flows = [flow({ id: "flow1", implementerPath: "/builder", rounds: [round({ reviewerPath: "/reviewer" })] })];
+    const pipelines = [
+      { id: "pipe1", runs: [{ stageId: "review", attempts: [{ agentPath: "/reviewer", flowId: "flow1" }] }] } as unknown as Pipeline,
+    ];
+    const map = pipelineStagePipelineIds(pipelines, flows);
+    expect(map.get("/reviewer")).toBe("pipe1");
+    expect(map.get("/builder")).toBe("pipe1");
   });
 });
 
@@ -446,6 +458,37 @@ describe("groupWorkerStacks — one stack per origin (#136)", () => {
     expect(stacks[0]!.kind).toBe("pipeline");
     expect(stacks[0]!.id).toBe("pipe1");
     expect(stacks[0]!.items.map((f) => f.path).sort()).toEqual(["/stage", "/stage/child"]);
+  });
+
+  test("an embedded review-loop pipeline folds architect + builder + reviewer into ONE pipeline stack (#136)", () => {
+    /* architect run stage, plus a review-loop stage whose flow's implementer
+       (builder) and reviewer are pipeline-owned — all one pipeline, one stack,
+       never split into a pipeline stack + a flow stack. */
+    const architect = stale({ path: "/architect", parent: "/orch" });
+    const builder = stale({ path: "/builder", parent: "/orch" });
+    const reviewer = stale({ path: "/reviewer", parent: "/builder" });
+    const flows = [flow({ id: "flow1", implementerPath: "/builder", rounds: [round({ reviewerPath: "/reviewer", verdict: "APPROVE" })] })];
+    const pipelines = [
+      {
+        id: "pipe1", runs: [
+          { stageId: "arch", attempts: [{ agentPath: "/architect", flowId: null }] },
+          { stageId: "review", attempts: [{ agentPath: "/reviewer", flowId: "flow1" }] },
+        ],
+      } as unknown as Pipeline,
+    ];
+    const ownership = pipelineStagePipelineIds(pipelines, flows);
+    const filesByPath = new Map([[architect.path, architect], [builder.path, builder], [reviewer.path, reviewer]]);
+    const stacks = groupWorkerStacks([architect, builder, reviewer], flows, new Set(), {
+      pipelineIdOf: (path) => {
+        const file = filesByPath.get(path);
+        return file ? pipelineOriginOf(file, filesByPath, ownership) : null;
+      },
+      originOf: () => "/orch",
+    });
+    expect(stacks).toHaveLength(1);
+    expect(stacks[0]!.kind).toBe("pipeline");
+    expect(stacks[0]!.id).toBe("pipe1");
+    expect(stacks[0]!.items).toHaveLength(3);
   });
 
   test("origin precedence: flow → pipeline → spawner → worktree", () => {
