@@ -1,7 +1,7 @@
 import { afterEach, expect, mock, test } from "bun:test";
 import { Window } from "happy-dom";
 import { createRoot, type Root } from "react-dom/client";
-import { act } from "react";
+import { act } from "react-dom/test-utils";
 
 import { MAX_TTS_TEXT_LENGTH } from "@/lib/tts";
 

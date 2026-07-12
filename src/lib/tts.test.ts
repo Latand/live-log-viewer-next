@@ -17,4 +17,9 @@ describe("spokenAnswerText", () => {
     expect(spokenAnswerText("Before\n```\n```\nAfter")).toBe("Before\n\nAfter");
     expect(spokenAnswerText("Before\n```ts\nconst hidden = true;")).toBe("Before");
   });
+
+  test("preserves prose after a longer Markdown fence", () => {
+    expect(spokenAnswerText("Before\n````ts\ncode\n````\nAfter")).toBe("Before\n\nAfter");
+    expect(spokenAnswerText("Before\n~~~~sh\ncode\n~~~~~\nAfter")).toBe("Before\n\nAfter");
+  });
 });

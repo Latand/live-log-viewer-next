@@ -4,15 +4,16 @@ export const MAX_TTS_TEXT_LENGTH = 4096;
 
 function stripFencedCodeBlocks(markdown: string): string {
   const kept: string[] = [];
-  let fence: "```" | "~~~" | null = null;
+  let fence: { char: "`" | "~"; length: number } | null = null;
   for (const line of markdown.split("\n")) {
     if (fence) {
-      if (new RegExp(`^[ \\t]*${fence}[ \\t]*$`).test(line)) fence = null;
+      const closer = line.match(/^[ \t]*(`{3,}|~{3,})[ \t]*$/)?.[1];
+      if (closer?.[0] === fence.char && closer.length >= fence.length) fence = null;
       continue;
     }
-    const opener = line.match(/^[ \t]*(```|~~~)/)?.[1] as "```" | "~~~" | undefined;
+    const opener = line.match(/^[ \t]*(`{3,}|~{3,})/)?.[1];
     if (opener) {
-      fence = opener;
+      fence = { char: opener[0] as "`" | "~", length: opener.length };
       kept.push("");
       continue;
     }
