@@ -1,8 +1,10 @@
 "use client";
 
-import { Check, Loader2 } from "lucide-react";
+import { Check, Loader2, SlidersHorizontal } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
+import { X } from "@/components/icons";
+import { useIsMobile } from "@/hooks/useIsMobile";
 import { conversationIdentity } from "@/lib/accounts/identity";
 import { effortScale } from "@/lib/agent/efforts";
 import { ENGINE_MODELS, normalizeClaudeLaunchModel } from "@/lib/agent/models";
@@ -44,10 +46,14 @@ function readDraft(file: FileEntry): Draft {
 
 export function AgentRuntimeControls({ file }: { file: FileEntry }) {
   const { t } = useLocale();
+  const isMobile = useIsMobile();
   const engine = file.engine as "claude" | "codex";
   const [draft, setDraft] = useState<Draft>(() => defaults(file));
   const [state, setState] = useState<ApplyState>("idle");
   const [error, setError] = useState("");
+  /* The phone folds the model/effort/apply cluster behind one 44px pill that
+     opens a bottom sheet with thumb-sized controls (finding 6). */
+  const [sheetOpen, setSheetOpen] = useState(false);
   const revisionRef = useRef(0);
   const efforts = useMemo(() => effortScale(engine, draft.model) ?? [], [engine, draft.model]);
   const editDraft = (update: (current: Draft) => Draft) => {
@@ -109,6 +115,106 @@ export function AgentRuntimeControls({ file }: { file: FileEntry }) {
     localStorage.removeItem(storageKey(file) + ":phase");
     setState("applied");
   }, [draft, engine, file, state]);
+
+  const applyBusy = state === "saving" || state === "pending" || state === "confirming";
+  const applyLabel = state === "pending"
+    ? t("runtimeConfig.pending")
+    : state === "confirming"
+      ? t("runtimeConfig.confirming")
+      : state === "applied"
+        ? t("runtimeConfig.applied")
+        : t("runtimeConfig.apply");
+  const modelLabel = ENGINE_MODELS[engine].find((model) => model.id === draft.model)?.label ?? draft.model;
+
+  if (isMobile) {
+    return (
+      <span onPointerDown={(event) => event.stopPropagation()}>
+        <button
+          type="button"
+          onClick={() => setSheetOpen(true)}
+          aria-haspopup="dialog"
+          aria-label={t("runtimeConfig.openSheet")}
+          className="inline-flex h-11 shrink-0 items-center gap-1.5 rounded-full border border-line bg-bg px-2.5 text-[11px] font-semibold text-[#555] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+        >
+          <SlidersHorizontal className="h-3.5 w-3.5 shrink-0 text-accent" aria-hidden />
+          <span className="max-w-[38vw] truncate font-mono">{modelLabel} · {draft.effort}</span>
+          {applyBusy ? <Loader2 className="h-3 w-3 animate-spin" aria-hidden /> : state === "applied" ? <Check className="h-3 w-3 text-ok" aria-hidden /> : null}
+        </button>
+        {sheetOpen ? (
+          <div
+            className="fixed inset-0 z-[70] flex items-end justify-center bg-black/40"
+            role="presentation"
+            onClick={(event) => { if (event.target === event.currentTarget) setSheetOpen(false); }}
+          >
+            <div role="dialog" aria-label={t("runtimeConfig.openSheet")} className="max-h-[80vh] w-full max-w-[440px] overflow-y-auto rounded-t-[16px] bg-panel p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] shadow-[0_-8px_36px_rgb(20_20_30/0.24)]">
+              <div className="mb-2 flex items-center gap-2">
+                <div className="mx-auto h-1 w-10 rounded-full bg-line" aria-hidden />
+                <button
+                  type="button"
+                  onClick={() => setSheetOpen(false)}
+                  aria-label={t("common.close")}
+                  className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-line bg-bg text-dim hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                >
+                  <X className="h-4 w-4" aria-hidden />
+                </button>
+              </div>
+              <div className="mb-1 text-[11px] font-bold uppercase tracking-wide text-dim">{t("runtimeConfig.model")}</div>
+              <div className="mb-3 flex flex-wrap gap-1.5">
+                {ENGINE_MODELS[engine].map((model) => (
+                  <button
+                    key={model.id}
+                    type="button"
+                    aria-pressed={draft.model === model.id}
+                    onClick={() => {
+                      const scale = effortScale(engine, model.id) ?? [];
+                      editDraft((current) => ({ ...current, model: model.id, effort: scale.includes(current.effort) ? current.effort : scale[0]! }));
+                    }}
+                    className={`inline-flex min-h-11 items-center rounded-[10px] border px-3 font-mono text-[13px] font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+                      draft.model === model.id ? "border-accent bg-accent/10 text-accent" : "border-line bg-bg text-ink"
+                    }`}
+                  >
+                    {model.label}
+                  </button>
+                ))}
+              </div>
+              <div className="mb-1 text-[11px] font-bold uppercase tracking-wide text-dim">{t("runtimeConfig.effort")}</div>
+              <div className="mb-3 flex flex-wrap gap-1.5">
+                {efforts.map((effort) => (
+                  <button
+                    key={effort}
+                    type="button"
+                    aria-pressed={draft.effort === effort}
+                    onClick={() => editDraft((current) => ({ ...current, effort }))}
+                    className={`inline-flex min-h-11 items-center rounded-[10px] border px-3 font-mono text-[13px] font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+                      draft.effort === effort ? "border-accent bg-accent/10 text-accent" : "border-line bg-bg text-ink"
+                    }`}
+                  >
+                    {effort}
+                  </button>
+                ))}
+              </div>
+              {engine === "codex" ? (
+                <label className="mb-3 flex min-h-11 items-center gap-2 rounded-[10px] border border-line bg-bg px-3 text-[13px] font-semibold text-ink">
+                  <input type="checkbox" className="h-4 w-4" checked={draft.fast} onChange={(event) => editDraft((current) => ({ ...current, fast: event.target.checked }))} />
+                  {t("runtimeConfig.speedTitle")}
+                </label>
+              ) : null}
+              {error ? <div className="mb-2 text-[12px] font-semibold text-err">{error}</div> : null}
+              <button
+                type="button"
+                disabled={state === "saving"}
+                onClick={() => void apply()}
+                className="flex min-h-12 w-full items-center justify-center gap-1.5 rounded-[10px] border border-accent bg-accent text-[14px] font-bold text-white disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
+              >
+                {applyBusy ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : <Check className="h-4 w-4" aria-hidden />}
+                {applyLabel}
+              </button>
+            </div>
+          </div>
+        ) : null}
+      </span>
+    );
+  }
 
   const selectClass = "h-6 rounded-full border border-line bg-bg px-1.5 font-mono text-[9.5px] font-semibold text-[#555] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40";
   return (

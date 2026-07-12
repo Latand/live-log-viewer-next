@@ -209,22 +209,26 @@ export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noCompose
             <ProcessStatusControls file={file} compact hideChip={isMobile} />
             {onToggleExpand ? (
               <button
-                className="inline-flex shrink-0 items-center rounded-[8px] border border-line bg-bg px-1.5 py-0.5 text-dim hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                className={`inline-flex shrink-0 items-center justify-center rounded-[8px] border border-line bg-bg text-dim hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+                  isMobile ? "h-11 w-11" : "px-1.5 py-0.5"
+                }`}
                 aria-label={expanded ? t("branch.collapseFull") : t("branch.expandFull", { title: cleanTitle(file.title, 60) })}
                 title={expanded ? t("branch.collapseFull") : t("branch.expandFull", { title: cleanTitle(file.title, 60) })}
                 onClick={onToggleExpand}
               >
-                {expanded ? <Minimize2 className="h-3 w-3" aria-hidden /> : <Maximize2 className="h-3 w-3" aria-hidden />}
+                {expanded ? <Minimize2 className={isMobile ? "h-4 w-4" : "h-3 w-3"} aria-hidden /> : <Maximize2 className={isMobile ? "h-4 w-4" : "h-3 w-3"} aria-hidden />}
               </button>
             ) : null}
             <DeleteFileButton file={file} onDeleted={onClose} />
             {onClose ? (
               <button
-                className="inline-flex shrink-0 items-center rounded-[8px] border border-line bg-bg px-1.5 py-0.5 text-dim hover:border-err/40 hover:text-err focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                className={`inline-flex shrink-0 items-center justify-center rounded-[8px] border border-line bg-bg text-dim hover:border-err/40 hover:text-err focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+                  isMobile ? "h-11 w-11" : "px-1.5 py-0.5"
+                }`}
                 aria-label={t("branch.removeColumn", { title: cleanTitle(file.title, 60) })}
                 onClick={onClose}
               >
-                <X className="h-3 w-3" aria-hidden />
+                <X className={isMobile ? "h-4 w-4" : "h-3 w-3"} aria-hidden />
               </button>
             ) : null}
           </div>

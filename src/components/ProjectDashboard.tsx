@@ -1,6 +1,6 @@
 "use client";
 
-import { List, ListTodo, Menu, MessageSquarePlus, Network } from "lucide-react";
+import { List, ListTodo, Menu, MessageSquarePlus, MoreHorizontal, Network, Plus } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { queueColumnOpen, useBoardState } from "@/hooks/useBoardState";
@@ -128,16 +128,20 @@ function ProjectViewTabs({
   value,
   onChange,
   floating = false,
+  header = false,
 }: {
   value: ProjectView;
   onChange: (next: ProjectView) => void;
   floating?: boolean;
+  /** Compact, unpositioned pill for the mobile toolbar row (finding 7): the
+      scheme/list toggle rides in the header instead of its own stacked row. */
+  header?: boolean;
 }) {
   const { t } = useLocale();
   return (
     <div
-      className={`z-30 inline-flex items-center gap-0.5 rounded-full border border-line bg-panel p-0.5 shadow-card ${
-        floating ? "absolute left-3 top-3" : "mx-3 mt-3 self-start"
+      className={`z-30 inline-flex shrink-0 items-center gap-0.5 rounded-full border border-line bg-panel p-0.5 shadow-card ${
+        header ? "" : floating ? "absolute left-3 top-3" : "mx-3 mt-3 self-start"
       }`}
     >
       {(["scheme", "list"] as const).map((mode) => (
@@ -146,15 +150,85 @@ function ProjectViewTabs({
           type="button"
           aria-pressed={value === mode}
           onClick={() => onChange(mode)}
-          className={`inline-flex items-center gap-1 rounded-full px-2 py-1 text-[11px] font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
-            value === mode ? "bg-accent/10 text-accent" : "text-dim hover:text-ink"
-          }`}
+          aria-label={t(mode === "scheme" ? "dash.viewScheme" : "dash.viewList")}
+          className={`inline-flex items-center justify-center gap-1 rounded-full text-[11px] font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+            header ? "h-9 w-9" : "px-2 py-1"
+          } ${value === mode ? "bg-accent/10 text-accent" : "text-dim hover:text-ink"}`}
         >
-          {mode === "scheme" ? <Network className="h-3 w-3" aria-hidden /> : <List className="h-3 w-3" aria-hidden />}
-          {t(mode === "scheme" ? "dash.viewScheme" : "dash.viewList")}
+          {mode === "scheme" ? <Network className={header ? "h-3.5 w-3.5" : "h-3 w-3"} aria-hidden /> : <List className={header ? "h-3.5 w-3.5" : "h-3 w-3"} aria-hidden />}
+          {header ? null : t(mode === "scheme" ? "dash.viewScheme" : "dash.viewList")}
         </button>
       ))}
     </div>
+  );
+}
+
+/** A tap-triggered popover anchored to its trigger button — the phone toolbar
+    folds its secondary and create actions into these so the row never overflows
+    (finding 1). Closes on outside-tap or Escape. */
+function HeaderMenu({
+  triggerLabel,
+  icon,
+  children,
+}: {
+  triggerLabel: string;
+  icon: React.ReactNode;
+  children: (close: () => void) => React.ReactNode;
+}) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (event: PointerEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    window.addEventListener("pointerdown", onDown);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("pointerdown", onDown);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+  return (
+    <div ref={rootRef} className="relative shrink-0">
+      <button
+        type="button"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-label={triggerLabel}
+        title={triggerLabel}
+        onClick={() => setOpen((value) => !value)}
+        className="flex h-11 w-11 items-center justify-center rounded-[8px] border border-line bg-panel text-ink shadow-card hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+      >
+        {icon}
+      </button>
+      {open ? (
+        <div
+          role="menu"
+          className="absolute right-0 top-[calc(100%+6px)] z-50 flex w-[210px] max-w-[calc(100vw-1.5rem)] flex-col gap-0.5 rounded-[12px] border border-line bg-panel p-1.5 shadow-[0_10px_36px_rgb(20_20_30/0.18)]"
+        >
+          {children(() => setOpen(false))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+/** One 44px-tall row inside a HeaderMenu popover. */
+function HeaderMenuItem({ icon, label, onSelect }: { icon: React.ReactNode; label: string; onSelect: () => void }) {
+  return (
+    <button
+      type="button"
+      role="menuitem"
+      onClick={onSelect}
+      className="flex min-h-11 w-full items-center gap-2 rounded-[9px] px-2.5 text-left text-[13px] font-semibold text-ink hover:bg-bg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+    >
+      <span className="flex h-5 w-5 shrink-0 items-center justify-center text-accent">{icon}</span>
+      {label}
+    </button>
   );
 }
 
@@ -730,99 +804,116 @@ export function ProjectDashboard({
 
   return (
     <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
-      <div className="flex h-10 shrink-0 items-center gap-2.5 border-b border-line bg-panel px-4">
+      <div
+        className={
+          isMobile
+            ? "flex min-h-[52px] shrink-0 items-center gap-1.5 border-b border-line bg-panel px-2 py-1.5"
+            : "flex h-10 shrink-0 items-center gap-2.5 border-b border-line bg-panel px-4"
+        }
+      >
         {onMenu ? (
           <button
             type="button"
-            className="-ml-1.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-[8px] border border-line bg-bg text-dim hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            className={`flex shrink-0 items-center justify-center rounded-[8px] border border-line bg-bg text-dim hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+              isMobile ? "h-11 w-11" : "-ml-1.5 h-7 w-7"
+            }`}
             aria-label={t("dash.openProjects")}
             onClick={onMenu}
           >
-            <Menu className="h-4 w-4" aria-hidden />
+            <Menu className={isMobile ? "h-5 w-5" : "h-4 w-4"} aria-hidden />
           </button>
         ) : null}
-        <h1 className="truncate text-[13.5px] font-bold">{project}</h1>
-        {/* The phone header hosts the create buttons and the attention badge;
-            the status summary is the first thing to give up its room. */}
-        {isMobile ? null : (
-          <span className="truncate text-[11.5px] text-dim">{statusBits.length ? statusBits.join(" · ") : t("common.nothingRunning")}</span>
-        )}
-        <SoundToggle />
-        {archived ? (
-          <button
-            type="button"
-            className="inline-flex shrink-0 items-center gap-1 rounded-full border border-line bg-bg px-2 py-0.5 text-[11px] font-semibold text-dim hover:border-accent/40 hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
-            onClick={() => onUnarchive(project)}
-          >
-            <ArchiveRestore className="h-3 w-3" aria-hidden /> {t("dash.unarchive")}
-          </button>
-        ) : (
-          <ArchiveProjectButton files={projectFiles} allowEmpty={catalogKnown} onArchive={() => onArchive(project)} compact={isMobile} />
-        )}
-        <DeleteProjectButton files={projectFiles} />
+        <h1 className={`truncate text-[13.5px] font-bold ${isMobile ? "min-w-0 flex-1" : ""}`}>{project}</h1>
         {isMobile ? (
           <>
-            {/* Order: ml-auto → attention → + Agent → + Task. Both keep ≥40px
-                touch targets; below 380px they collapse to icon-only (a `+`
-                glyph plus the icon) while the aria-labels stay, and the
-                attention pill truncates first so the buttons stay reachable. */}
-            <span className="ml-auto min-w-0" aria-hidden />
-            <span className="min-w-0 shrink truncate">{attention}</span>
-            <button
-              type="button"
-              onClick={addDraft}
-              aria-label={t("dash.newConvo")}
-              className="flex min-h-[40px] shrink-0 items-center gap-1 rounded-[8px] border border-line bg-panel px-2.5 py-1 text-[11.5px] font-bold text-ink shadow-card hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
-            >
-              <span className="text-[13px] leading-none text-accent">+</span>
-              <MessageSquarePlus className="h-3.5 w-3.5" aria-hidden />
-              <span className="max-[379px]:hidden">{t("dash.agent")}</span>
-            </button>
-            <button
-              type="button"
-              onClick={addTaskMobile}
-              aria-label={t("dash.newTask")}
-              className="flex min-h-[40px] shrink-0 items-center gap-1 rounded-[8px] border border-line bg-panel px-2.5 py-1 text-[11.5px] font-bold text-ink shadow-card hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
-            >
-              <span className="text-[13px] leading-none text-accent">+</span>
-              <ListTodo className="h-3.5 w-3.5" aria-hidden />
-              <span className="max-[379px]:hidden">{t("dash.task")}</span>
-            </button>
+            {/* Toolbar folds to a single row (findings 1, 7): the scheme/list
+                toggle rides here instead of its own stacked row, all create
+                actions collapse into one `+` menu, and the secondary project
+                actions into a `⋯` menu — every control is a 44px hit target. */}
+            {viewToggle ? <ProjectViewTabs value={projectView} onChange={chooseEmptyView} header /> : null}
+            <span className="min-w-0 max-w-[42vw] shrink truncate">{attention}</span>
+            <HeaderMenu triggerLabel={t("dash.createMenu")} icon={<Plus className="h-5 w-5" aria-hidden />}>
+              {(close) => (
+                <>
+                  <HeaderMenuItem icon={<MessageSquarePlus className="h-4 w-4" aria-hidden />} label={t("dash.agent")} onSelect={() => { close(); addDraft(); }} />
+                  <HeaderMenuItem icon={<ListTodo className="h-4 w-4" aria-hidden />} label={t("dash.task")} onSelect={() => { close(); addTaskMobile(); }} />
+                  <HeaderMenuItem icon={<span className="text-[15px] font-bold leading-none">≡</span>} label={t("dash.pipeline")} onSelect={() => { close(); setPipelineDialogOpen(true); }} />
+                  <HeaderMenuItem icon={<Network className="h-4 w-4" aria-hidden />} label={t("dash.workflow")} onSelect={() => { close(); addWorkflowDraft(); }} />
+                </>
+              )}
+            </HeaderMenu>
+            <HeaderMenu triggerLabel={t("dash.moreMenu")} icon={<MoreHorizontal className="h-5 w-5" aria-hidden />}>
+              {() => (
+                <>
+                  <div className="flex min-h-11 items-center gap-2 px-1.5"><span className="text-[13px] font-semibold text-ink">{t("dash.soundMenu")}</span><SoundToggle /></div>
+                  <div className="flex min-h-11 items-center px-1.5">
+                    {archived ? (
+                      <button
+                        type="button"
+                        className="inline-flex shrink-0 items-center gap-1 rounded-full border border-line bg-bg px-2 py-1 text-[12px] font-semibold text-dim hover:border-accent/40 hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                        onClick={() => onUnarchive(project)}
+                      >
+                        <ArchiveRestore className="h-3.5 w-3.5" aria-hidden /> {t("dash.unarchive")}
+                      </button>
+                    ) : (
+                      <ArchiveProjectButton files={projectFiles} allowEmpty={catalogKnown} onArchive={() => onArchive(project)} />
+                    )}
+                  </div>
+                  <div className="flex min-h-11 items-center px-1.5"><DeleteProjectButton files={projectFiles} /></div>
+                </>
+              )}
+            </HeaderMenu>
           </>
         ) : (
-          <button
-            type="button"
-            onClick={toggleTaskPanel}
-            aria-pressed={taskPanelOpen}
-            aria-label={t("tasks.panelToggleAria")}
-            className={`ml-auto flex shrink-0 items-center gap-1 rounded-[8px] border px-2.5 py-1 text-[11.5px] font-bold shadow-card focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
-              taskPanelOpen ? "border-accent/45 bg-accent/10 text-accent" : "border-line bg-panel text-ink hover:border-accent/45 hover:text-accent"
-            }`}
-          >
-            <ListTodo className="h-3.5 w-3.5" aria-hidden /> {t("tasks.panelTitle")}
-            {projectTasks.filter((task) => task.status !== "done").length ? (
-              <span className="rounded-full bg-accent/10 px-1.5 text-[10px] font-bold text-accent">
-                {projectTasks.filter((task) => task.status !== "done").length}
-              </span>
-            ) : null}
-          </button>
+          <>
+            <span className="truncate text-[11.5px] text-dim">{statusBits.length ? statusBits.join(" · ") : t("common.nothingRunning")}</span>
+            <SoundToggle />
+            {archived ? (
+              <button
+                type="button"
+                className="inline-flex shrink-0 items-center gap-1 rounded-full border border-line bg-bg px-2 py-0.5 text-[11px] font-semibold text-dim hover:border-accent/40 hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                onClick={() => onUnarchive(project)}
+              >
+                <ArchiveRestore className="h-3 w-3" aria-hidden /> {t("dash.unarchive")}
+              </button>
+            ) : (
+              <ArchiveProjectButton files={projectFiles} allowEmpty={catalogKnown} onArchive={() => onArchive(project)} />
+            )}
+            <DeleteProjectButton files={projectFiles} />
+            <button
+              type="button"
+              onClick={toggleTaskPanel}
+              aria-pressed={taskPanelOpen}
+              aria-label={t("tasks.panelToggleAria")}
+              className={`ml-auto flex shrink-0 items-center gap-1 rounded-[8px] border px-2.5 py-1 text-[11.5px] font-bold shadow-card focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+                taskPanelOpen ? "border-accent/45 bg-accent/10 text-accent" : "border-line bg-panel text-ink hover:border-accent/45 hover:text-accent"
+              }`}
+            >
+              <ListTodo className="h-3.5 w-3.5" aria-hidden /> {t("tasks.panelTitle")}
+              {projectTasks.filter((task) => task.status !== "done").length ? (
+                <span className="rounded-full bg-accent/10 px-1.5 text-[10px] font-bold text-accent">
+                  {projectTasks.filter((task) => task.status !== "done").length}
+                </span>
+              ) : null}
+            </button>
+            <button
+              type="button"
+              onClick={() => setPipelineDialogOpen(true)}
+              aria-label={t("dash.newPipeline")}
+              className="flex shrink-0 items-center gap-1 rounded-[8px] border border-line bg-panel px-2.5 py-1 text-[11.5px] font-bold text-ink shadow-card hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            >
+              <span className="text-[13px] leading-none text-accent">+</span> {t("dash.pipeline")}
+            </button>
+            <button
+              type="button"
+              onClick={addWorkflowDraft}
+              aria-label={t("dash.newWorkflow")}
+              className="flex shrink-0 items-center gap-1 rounded-[8px] border border-line bg-panel px-2.5 py-1 text-[11.5px] font-bold text-ink shadow-card hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            >
+              <span className="text-[13px] leading-none text-accent">+</span> {t("dash.workflow")}
+            </button>
+          </>
         )}
-        <button
-          type="button"
-          onClick={() => setPipelineDialogOpen(true)}
-          aria-label={t("dash.newPipeline")}
-          className="flex shrink-0 items-center gap-1 rounded-[8px] border border-line bg-panel px-2.5 py-1 text-[11.5px] font-bold text-ink shadow-card hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
-        >
-          <span className="text-[13px] leading-none text-accent">+</span> {t("dash.pipeline")}
-        </button>
-        <button
-          type="button"
-          onClick={addWorkflowDraft}
-          aria-label={t("dash.newWorkflow")}
-          className="flex shrink-0 items-center gap-1 rounded-[8px] border border-line bg-panel px-2.5 py-1 text-[11.5px] font-bold text-ink shadow-card hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
-        >
-          <span className="text-[13px] leading-none text-accent">+</span> {t("dash.workflow")}
-        </button>
       </div>
 
       {pipelineDialogOpen ? (
@@ -866,7 +957,8 @@ export function ProjectDashboard({
 
       {isMobile ? (
         <>
-          {viewToggle ? <ProjectViewTabs value={projectView} onChange={chooseEmptyView} /> : null}
+          {/* The scheme/list toggle moved into the header row (finding 7), so the
+              phone shell is two nav rows at most: header + the focus-view strip. */}
           {projectView === "scheme" && schemeAvailable ? (
             <MobileFocusView
               project={project}

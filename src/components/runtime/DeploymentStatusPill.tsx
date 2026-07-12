@@ -33,8 +33,12 @@ export function DeploymentStatusPill() {
       ? "border-[#d06b5d]/45 text-[#a33d31]"
       : "border-accent/45 text-accent";
   return (
+    /* Purely informational — never a hit-target. `pointer-events-none` lets taps
+       fall through to whatever it visually overlaps (on the phone that is the
+       collapsed-worker / quiet-conversation section toggles docked at the bottom
+       of the board), and the safe-area inset lifts it clear of the home bar. */
     <div
-      className={`fixed bottom-3 left-1/2 z-40 -translate-x-1/2 rounded-full border bg-panel/95 px-3 py-1 text-[11px] font-semibold shadow-card backdrop-blur ${tone}`}
+      className={`pointer-events-none fixed bottom-[max(0.75rem,env(safe-area-inset-bottom))] left-1/2 z-40 max-w-[calc(100vw-1.5rem)] -translate-x-1/2 truncate rounded-full border bg-panel/95 px-3 py-1 text-[11px] font-semibold shadow-card backdrop-blur ${tone}`}
       role="status"
       title={deployment.error ?? `Revision ${deployment.revision.slice(0, 12)}`}
     >
