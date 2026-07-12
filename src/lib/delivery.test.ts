@@ -7,7 +7,6 @@ import { AgentRegistry, setAgentRegistryForTests, type ConversationObservation, 
 import { emptyLaunchProfile } from "./accounts/migration/contracts";
 import { drainHeldDeliveries } from "./accounts/migration/coordinator";
 import { cleanupFailedImageDelivery, deliverConversationMessage, killConversation, migrationDeliveryOutcome, reconfigureConversation, type DeliveryFailure } from "./delivery";
-import type { TranscriptHost } from "./agent/transcriptHost";
 import type { FileEntry } from "./types";
 import { TmuxDeliveryUncertainError } from "./tmux";
 
@@ -58,7 +57,7 @@ test("migration delivery keeps an internally held result recoverable", () => {
   expect(migrationDeliveryOutcome({ ...failure, actuation: "started" as const })).toBe("delivery-uncertain");
 });
 
-test("idle reconfiguration releases the real session lock before serialized resume", async () => {
+test("idle reconfiguration survives a transient host miss and resumes after verified termination", async () => {
   const sessionId = "019f4e76-66b4-7f87-94b2-cfa9bf733333";
   const pathname = path.join(SANDBOX, `${sessionId}.jsonl`);
   fs.writeFileSync(pathname, "");
@@ -75,13 +74,8 @@ test("idle reconfiguration releases the real session lock before serialized resu
     proc: "running", pid: KILL_HOST.agent.pid, model: "gpt-5.6-sol", effort: "high", fast: false,
     pendingQuestion: null, waitingInput: null,
   };
-  const liveHost: TranscriptHost = {
-    tmuxServerPid: KILL_HOST.server.pid, paneId: KILL_HOST.paneId, panePid: KILL_HOST.panePid.pid,
-    agentPid: KILL_HOST.agent.pid, display: KILL_HOST.paneId, windowName: KILL_HOST.windowName,
-    engine: "codex", cwd: SANDBOX, agentArgv: KILL_HOST.argv, agentIdentity: KILL_HOST.agent.startIdentity,
-    launchId: null, claimedPaths: [pathname], primaryPath: pathname,
-  };
   let resumed = 0;
+  let killed = false;
   let resumePolicy: { readOnly?: boolean | null; permissionMode?: string | null } = {};
 
   const outcome = await reconfigureConversation(pathname, { model: "gpt-5.6-terra", effort: "medium", fast: true }, {
@@ -91,18 +85,21 @@ test("idle reconfiguration releases the real session lock before serialized resu
       resumePolicy = options ?? {};
       return { command: "codex resume", cwd: SANDBOX, windowName: "codex-resume", engine: "codex" };
     },
-    livePaneHost: async () => liveHost,
+    livePaneHost: async () => null,
     registry,
     paneScreen: async () => "›\n? for shortcuts",
-    killHost: async () => true,
+    killHost: async () => { killed = true; return true; },
     deliver: async () => registry.withOperationLock(key, { pid: process.pid, startIdentity: null }, async () => {
       resumed += 1;
-      return { ok: true, outcome: "resumed", target: "%8" };
+      return killed
+        ? { ok: true, outcome: "resumed", target: "%8" }
+        : { ok: true, outcome: "delivered-to-live", target: KILL_HOST.paneId };
     }),
   });
 
   expect(outcome).toMatchObject({ ok: true, outcome: "reconfigured", target: "%8" });
   expect(resumed).toBe(1);
+  expect(killed).toBe(true);
   expect(resumePolicy).toMatchObject({ readOnly: true, permissionMode: "never" });
 });
 

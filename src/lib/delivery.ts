@@ -76,25 +76,21 @@ export async function reconfigureConversation(
     permissionMode: profile?.permissionMode ?? null,
   });
   const deliver = overrides.deliver ?? deliverToTranscriptHost;
-  const host = await (overrides.livePaneHost ?? livePaneHost)(filePath);
-  if (host === null) {
-    const spec = buildSpec(registered.launchProfile);
-    if (!spec) return failure("this conversation cannot be resumed", 409);
-    const resumed = await hostOutcome(deliver({ entry, spec, payload: "" }));
-    return resumed.ok ? { ...resumed, outcome: "reconfigured" } : resumed;
-  }
+  const observedHost = await (overrides.livePaneHost ?? livePaneHost)(filePath);
+  const paneId = observedHost?.paneId ?? registered.host.paneId;
+  const target = observedHost?.display ?? registered.host.paneId;
   const owner = { pid: process.pid, startIdentity: procBackend.processIdentity(process.pid) };
   try {
     const prepared = await registry.withOperationLock(registered.key, owner, async () => {
       const refreshed = registeredHostForPath(registry.snapshot(), filePath);
-      if (!refreshed?.host || refreshed.host.paneId !== host.paneId) {
+      if (!refreshed?.host || refreshed.host.paneId !== paneId) {
         return failure("the registered pane changed", 409);
       }
       const spec = buildSpec(refreshed.launchProfile);
       if (!spec) return failure("this conversation cannot be resumed", 409);
       const refreshedHost = refreshed.host;
-      return withPaneLock(host.paneId, async () => {
-        if (!screenAtIdleComposer(await (overrides.paneScreen ?? paneScreen)(host.paneId))) {
+      return withPaneLock(paneId, async () => {
+        if (!screenAtIdleComposer(await (overrides.paneScreen ?? paneScreen)(paneId))) {
           return "pending" as const;
         }
         if (!await (overrides.killHost ?? killTmuxHostIfMatches)(refreshedHost)) return failure("the registered pane changed or its process did not exit", 409);
@@ -103,7 +99,7 @@ export async function reconfigureConversation(
         return { state: "prepared" as const, spec };
       });
     });
-    if (prepared === "pending") return { ok: true, target: host.display, outcome: "pending" };
+    if (prepared === "pending") return { ok: true, target, outcome: "pending" };
     if (!("state" in prepared)) return prepared;
     /* Resume acquires the same per-session serialization lock through the
        transcript-host adapter. The termination lock must be released first. */
