@@ -16,6 +16,7 @@ import { FeedItem } from "./feed/FeedItem";
 import { RawLineProvider, type RawLineLookup } from "./feed/rawLine";
 import { BoundedLru } from "./feed/scrollMemory";
 import { QuestionCard } from "./feed/QuestionCard";
+import { speakableAnswer } from "./feed/speakableAnswer";
 import { isSubagent } from "./projectModel";
 import { TaskHeader } from "./TaskHeader";
 
@@ -270,6 +271,7 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
   );
   const hiddenLocal = Math.max(0, feed.items.length - visibleCount);
   const visibleItems = hiddenLocal ? feed.items.slice(-visibleCount) : feed.items;
+  const visibleStartIndex = feed.items.length - visibleItems.length;
 
   /* Lazy raw-record provenance: a tool card resolves its source line(s) from
      the retained window, client-side, with no server round-trip. A line that
@@ -467,14 +469,18 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
             {compact ? null : <TaskHeader file={file} />}
             {feed.items.length ? (
               <>
-                {visibleItems.map(({ anchorKey, key, item }) =>
-                  /* Session-stable keys: a row keeps its DOM node while the
-                     window slides. Compact panes live on the zoomable canvas:
-                     off-screen rows skip layout/paint via content-visibility. */
-                  <div key={key} data-feed-key={anchorKey ?? undefined} className={compact ? "feed-cv" : undefined}>
-                    <FeedItem item={item} />
-                  </div>,
-                )}
+                {visibleItems.map(({ anchorKey, key, item }, visibleIndex) => {
+                  const answer = speakableAnswer(feed.items, visibleStartIndex + visibleIndex);
+                  const speakText = answer?.firstIndex === visibleStartIndex + visibleIndex ? answer.text : undefined;
+                  return (
+                    /* Session-stable keys: a row keeps its DOM node while the
+                       window slides. Compact panes live on the zoomable canvas:
+                       off-screen rows skip layout/paint via content-visibility. */
+                    <div key={key} data-feed-key={anchorKey ?? undefined} className={compact ? "feed-cv" : undefined}>
+                      <FeedItem item={item} speakText={speakText} />
+                    </div>
+                  );
+                })}
                 {file.pendingQuestion || file.waitingInput ? <QuestionCard key={file.pendingQuestion?.toolUseId ?? "waiting"} file={file} /> : null}
                 {!file.pendingQuestion && !file.waitingInput && endedQuestion ? (
                   <div className="my-4 rounded-[8px] border border-line bg-chip px-4 py-3 text-[13px] font-semibold text-dim">{endedQuestion}</div>
