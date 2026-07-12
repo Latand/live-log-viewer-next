@@ -33,6 +33,19 @@ export interface FileEntry {
   /** Git worktree name when cwd lives under <repo>/.claude/worktrees/<name>. */
   worktree?: string;
   title: string;
+  /** The scanner-derived title, kept as provenance when a user rename
+      (issue #33) overrode `title`. Absent when no override is in effect. */
+  autoTitle?: string;
+  /** Revision of the active custom-title override, echoed back as the
+      base revision on the next `PATCH /api/session/title` for optimistic
+      concurrency. Absent when the session has no override. */
+  titleRevision?: number;
+  /** Whether this entry may be renamed (issue #33): only main Claude/Codex
+      sessions qualify — subagents (Claude `agent-*`, native Codex threads with a
+      parent) and background/shell tasks do not. Computed server-side because
+      Codex subagent detection needs transcript metadata; the client reads this
+      flag rather than importing the Node-only eligibility logic. */
+  renamable?: boolean;
   engine: Engine;
   kind: string;
   fmt: Fmt;

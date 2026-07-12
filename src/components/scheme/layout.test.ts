@@ -161,6 +161,35 @@ describe("buildSchemeLayout byPath", () => {
     expect(implementerNode.under.map((file) => file.path)).toEqual([]);
   });
 
+  test("a standalone flow halo encloses the implementer + deck but not unrelated descendants (issue #118 review F3)", () => {
+    const root = entry({ path: "/implementer", activity: "live" });
+    /* A quiet child of the implementer, unrelated to the flow's review loop. */
+    const child = entry({ path: "/implementer/child", parent: "/implementer", kind: "subagent", activity: "idle" });
+    const group: BranchGroup = {
+      key: "/implementer",
+      columns: [
+        { file: root, tasks: [] },
+        { file: child, tasks: [] },
+      ],
+      returnable: [],
+      finished: [],
+      smt: root.mtime,
+      orphanTask: false,
+    };
+    const layout = buildSchemeLayout([group], [], [root, child], [flow({ id: "f1", implementerPath: "/implementer" })], []);
+    const halo = layout.groups.find((g) => g.kind === "flow")!;
+    const implementer = layout.nodes.find((node) => node.file.path === "/implementer")!;
+    const deck = layout.decks[0]!;
+    const childNode = layout.nodes.find((node) => node.file.path === "/implementer/child")!;
+
+    /* The halo covers the implementer and its reviewer deck (the pair). */
+    expect(halo.x).toBeLessThanOrEqual(implementer.x);
+    expect(halo.x + halo.w).toBeGreaterThanOrEqual(deck.x + deck.w);
+    /* …but stops above the descendant child — the flow region is not stretched
+       across the board by an unrelated agent spawned below the implementer. */
+    expect(halo.y + halo.h).toBeLessThan(childNode.y);
+  });
+
   test("a plain subagent of a live session renders as a connected node below it, not a mini-stack", () => {
     /* End-to-end for the "Verify MVP" case: a live claude session with an idle
        Task-tool subagent and no flow. buildBranchGroups must promote the

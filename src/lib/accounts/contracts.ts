@@ -50,6 +50,11 @@ export type AccountContext = {
   env: NodeJS.ProcessEnv;
 };
 
+export type HeadlessSpawnAvailability =
+  | { kind: "available"; account: AccountContext }
+  | { kind: "exhausted"; resetsAt: number | null }
+  | { kind: "unavailable" };
+
 export interface AccountManager {
   list(): Promise<AccountCatalog>;
   add(engine: "claude" | "codex", label: string): Promise<AccountSummary>;
@@ -58,6 +63,7 @@ export interface AccountManager {
   submitLoginInput(operationId: string, code: string): Promise<LoginOperationSummary>;
   cancelLogin(operationId: string): Promise<LoginOperationSummary>;
   resolveSpawn(engine: "claude" | "codex", requestedId?: string | null): AccountContext;
+  resolveHeadlessSpawn(engine: "claude" | "codex", requestedId?: string | null, excludedIds?: string[]): HeadlessSpawnAvailability;
   resolveTranscriptOwner(engine: "claude" | "codex", transcript: string): AccountContext | null;
 }
 

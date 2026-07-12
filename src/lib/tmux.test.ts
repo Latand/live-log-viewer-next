@@ -9,6 +9,7 @@ import {
   createSpawnWindow,
   createTmuxEndpointDescriptor,
   killTmuxHostIfMatches,
+  renameTmuxWindowForPid,
   resolveTmuxAttach,
   resolveTmuxEndpointContract,
   selectSpawnedAgentProcess,
@@ -16,6 +17,17 @@ import {
   tmuxEndpoint,
   verifyTmuxSpawnBinding,
 } from "@/lib/tmux";
+
+describe("renameTmuxWindowForPid guards", () => {
+  test("a non-positive pid never touches tmux", async () => {
+    expect(await renameTmuxWindowForPid(0, "Name")).toBeNull();
+    expect(await renameTmuxWindowForPid(-1, "Name")).toBeNull();
+  });
+
+  test("a title that collapses to blank never touches tmux", async () => {
+    expect(await renameTmuxWindowForPid(1234, "   ")).toBeNull();
+  });
+});
 
 describe("cdCommandForCwd", () => {
   test("quotes paths with spaces for a shell cd command", () => {

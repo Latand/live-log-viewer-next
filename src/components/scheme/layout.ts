@@ -6,9 +6,18 @@ import type { DeckRound } from "@/components/flows/RoundDeck";
 import { draftSrc } from "@/components/DraftAgentPane";
 import { claimedReviewerPaths, flowByImplementer } from "@/components/flows/flowModel";
 
-import { buildAnchorIndex, deckKey, deriveFlowLinks, derivePipelineLinks, type AgentLink } from "./agentLinks";
+import {
+  buildAnchorIndex,
+  deckKey,
+  deriveFlowLinks,
+  deriveGroups,
+  derivePipelineLinks,
+  groupRect,
+  type AgentLink,
+  type SchemeGroupSpec,
+} from "./agentLinks";
 import { type BranchGroup, descendantsOf, isChildConversation, kidsIndex } from "@/components/projectModel";
-import { engineColor } from "@/components/utils";
+import { cleanTitle, engineColor } from "@/components/utils";
 
 /* World geometry of the scheme canvas, in unscaled pixels. */
 export const NODE_W = 600;
@@ -26,6 +35,9 @@ const PAD = 100;
    two cycle arcs and the ⟳ hub between the cards. Exported so the flow strip
    can span the whole pair. */
 export const LOOP_GAP = 170;
+/* Slack between a group halo and the cards it encloses (issue #118): wide
+   enough to clear the flow/pipeline strips that hover above each member. */
+export const GROUP_PAD = 46;
 /* Quiet-branch mini cards stacked under their parent pane. */
 const MINI_W = 360;
 const MINI_H = 52;
@@ -99,6 +111,14 @@ export interface DeckNode {
   h: number;
 }
 
+/** A flow/pipeline group halo on the scheme (issue #118): the union region of
+    every session belonging to one running flow or pipeline, plus its label. */
+export interface SchemeGroup extends SchemeGroupSpec, SchemeRect {
+  /** Display name shown on the halo's label chip (flow: implementer title;
+      pipeline: task), pre-cleaned so the component only sizes and tints it. */
+  label: string;
+}
+
 /** Implement↔review pair on the scheme: the corridor the cycle arcs live in. */
 export interface FlowLoop {
   key: string;
@@ -117,6 +137,9 @@ export interface SchemeLayout {
   stacks: MiniStack[];
   decks: DeckNode[];
   loops: FlowLoop[];
+  /** Flow/pipeline group halos (issue #118), each a padded region enclosing all
+      of one running flow/pipeline's board occupants. */
+  groups: SchemeGroup[];
   /** Agent-to-agent links between board occupants (flow links today, message
       links from #12 later), endpoints resolved against byPath keys. */
   links: AgentLink[];
@@ -373,27 +396,57 @@ export function buildSchemeLayout(
     decks.map((deck) => ({ key: deck.key, flow: deck.flow })),
     stacks.map((stack) => ({ key: stack.key, paths: stack.items.map((item) => item.file.path) })),
   );
+  const byPath = new Map<string, SchemeRect>([
+    ...nodes.map((node) => [node.file.path, node] as const),
+    ...drafts.map((draft) => [draft.key, draft] as const),
+    ...stacks.map((stack) => [stack.key, stack] as const),
+    ...decks.map((deck) => [deck.key, deck] as const),
+  ]);
+  const flowImplementerPath = (flowId: string) => flows.find((flow) => flow.id === flowId)?.implementerPath ?? null;
+
+  /* A pipeline halo also encloses the children hanging below its run stages, so a
+     spawned stage subtree reads as part of the same region. Expansion is limited
+     to pipeline stage roots on purpose: a standalone flow's halo stays the
+     implementer + reviewer deck, so an unrelated agent spawned below the
+     implementer never stretches the flow region across the board. */
+  const placedNodePaths = new Set(nodes.map((node) => node.file.path));
+  const expandMembers = (members: string[]): string[] => {
+    const out = new Set(members);
+    for (const key of members) {
+      const file = byAll.get(key);
+      if (!file) continue; // deck/stack/draft keys aren't transcript files
+      for (const row of descendantsOf(file, files)) {
+        if (placedNodePaths.has(row.file.path)) out.add(row.file.path);
+      }
+    }
+    return [...out];
+  };
+  const groupLabel = (spec: SchemeGroupSpec): string => {
+    if (spec.pipeline) return cleanTitle(spec.pipeline.task, 60);
+    if (spec.flow) return cleanTitle(byAll.get(spec.flow.implementerPath)?.title ?? spec.flow.project, 60);
+    return spec.key;
+  };
+  const groupHalos: SchemeGroup[] = [];
+  for (const spec of deriveGroups(flows, pipelines, (key) => anchors.get(key) ?? null, flowImplementerPath)) {
+    const members = spec.kind === "pipeline" ? expandMembers(spec.members) : spec.members;
+    const rect = groupRect(members, (key) => byPath.get(key) ?? null, GROUP_PAD);
+    if (!rect) continue;
+    groupHalos.push({ ...spec, ...rect, label: groupLabel(spec) });
+  }
+
   return {
     nodes,
     edges,
     stacks,
     decks,
     loops,
+    groups: groupHalos,
     links: [
       ...deriveFlowLinks(flows, (key) => anchors.get(key) ?? null),
-      ...derivePipelineLinks(
-        pipelines,
-        (key) => anchors.get(key) ?? null,
-        (flowId) => flows.find((flow) => flow.id === flowId)?.implementerPath ?? null,
-      ),
+      ...derivePipelineLinks(pipelines, (key) => anchors.get(key) ?? null, flowImplementerPath),
     ],
     drafts,
-    byPath: new Map<string, SchemeRect>([
-      ...nodes.map((node) => [node.file.path, node] as const),
-      ...drafts.map((draft) => [draft.key, draft] as const),
-      ...stacks.map((stack) => [stack.key, stack] as const),
-      ...decks.map((deck) => [deck.key, deck] as const),
-    ]),
+    byPath,
     width: Math.max(cursor - GROUP_GAP + PAD, PAD * 2 + NODE_W),
     /* Extra room under the last generation for decks and expanded panels. */
     height: bottom + PAD + 140,

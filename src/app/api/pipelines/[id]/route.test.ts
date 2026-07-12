@@ -11,8 +11,8 @@ mock.module("@/lib/pipelines/engine", () => ({
 
 const { PATCH } = await import("./route");
 
-test("pipeline PATCH accepts the five control actions", async () => {
-  for (const action of ["pause", "resume", "retry-stage", "skip-stage", "close"]) {
+test("pipeline PATCH accepts the control actions including override-stage", async () => {
+  for (const action of ["pause", "resume", "retry-stage", "skip-stage", "override-stage", "close"]) {
     const response = await PATCH(
       new NextRequest("http://127.0.0.1/api/pipelines/pipeline-1", { method: "PATCH", headers: { host: "127.0.0.1" }, body: JSON.stringify({ action }) }),
       { params: Promise.resolve({ id: "pipeline-1" }) },

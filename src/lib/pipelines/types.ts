@@ -130,10 +130,23 @@ export type CreatePipelineRequest = {
   src?: string;
 };
 
-export type PipelineAction = "pause" | "resume" | "retry-stage" | "skip-stage" | "close";
+export type PipelineAction = "pause" | "resume" | "retry-stage" | "skip-stage" | "override-stage" | "close";
 
 export type PatchPipelineRequest = {
   action: PipelineAction;
+  /** for override-stage: the not-yet-started stage to re-configure (issue #118
+      on-canvas stage controls). Only fields present are changed; a stage that
+      already ran an attempt is rejected so the override always targets the future.
+      `role` swaps the canonical role (resolved through the registry like create,
+      with the same param + disallowed-role validation); `null` clears it back to
+      the Builder default. Changing the role resets any unpinned engine/model/
+      effort to the new role's defaults; an explicit engine/model/effort still wins. */
+  stageId?: string;
+  role?: PipelineRoleRef | null;
+  engine?: FlowEngine;
+  model?: string | null;
+  effort?: string | null;
+  prompt?: string;
 };
 
 export type PipelinesResponse = {

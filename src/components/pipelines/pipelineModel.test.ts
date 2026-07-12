@@ -23,6 +23,7 @@ import {
   stageChipState,
   stageHasEvidence,
   stageOpenTarget,
+  stageOverrideBody,
 } from "./pipelineModel";
 import type { Flow } from "@/lib/flows/types";
 
@@ -406,3 +407,38 @@ describe("pipelineBoardStripPath (§2.2 board strip anchor)", () => {
     expect(map.has("/r")).toBe(false);
   });
 });
+
+describe("stageOverrideBody sends only changed fields (issue #118 Finding 4)", () => {
+  function editable(): PipelineStage {
+    return {
+      id: "build",
+      kind: "run",
+      role: { roleId: "builder" },
+      prompt: "Build it",
+      next: null,
+      effectiveRole: { roleId: "builder", engine: "codex", model: "gpt-5.6", effort: "high", access: "read-write", promptScaffold: null },
+    } as PipelineStage;
+  }
+  const base = { roleId: "builder", engine: "codex" as const, model: "gpt-5.6", effort: "high", prompt: "Build it" };
+
+  test("an unchanged form sends only stageId + prompt — no stale runtime or role", () => {
+    expect(stageOverrideBody(editable(), base)).toEqual({ stageId: "build", prompt: "Build it" });
+  });
+
+  test("a role-only change omits engine/model/effort so the new role's defaults apply", () => {
+    expect(stageOverrideBody(editable(), { ...base, roleId: "architect" })).toEqual({
+      stageId: "build",
+      prompt: "Build it",
+      role: { roleId: "architect" },
+    });
+  });
+
+  test("clearing the role sends role: null", () => {
+    expect(stageOverrideBody(editable(), { ...base, roleId: "" })).toMatchObject({ role: null });
+  });
+
+  test("a runtime-only change sends just that field, keeping the role untouched", () => {
+    expect(stageOverrideBody(editable(), { ...base, effort: "low" })).toEqual({ stageId: "build", prompt: "Build it", effort: "low" });
+    expect(stageOverrideBody(editable(), { ...base, model: "" })).toEqual({ stageId: "build", prompt: "Build it", model: null });
+  });
+})

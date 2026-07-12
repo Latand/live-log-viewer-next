@@ -65,6 +65,7 @@ export {
   Mail,
   MessageCircle,
   Mic,
+  PencilLine,
   Play,
   Power,
   RotateCw,
