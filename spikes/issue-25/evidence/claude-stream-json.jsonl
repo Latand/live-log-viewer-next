@@ -1,0 +1,12 @@
+{"at":"2026-07-12T16:42:15.412Z","source":"demo","event":"environment","data":{"anthropicApiKey":"unset","claudeCodeOauthToken":"unset","processModel":"one long-lived stream-json child"}}
+{"at":"2026-07-12T16:42:15.779Z","source":"demo","event":"subscription_status","data":{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","subscriptionType":"max"}}
+{"at":"2026-07-12T16:42:15.797Z","source":"broker","event":"ready","data":{"pid":3617646,"url":"ws://127.0.0.1:8987/events","resume":false}}
+{"at":"2026-07-12T16:42:17.936Z","source":"owner","event":"subscription_auth","data":{"sessionId":"83e572a6-cd2d-45c3-bcfb-46fc8269b683","apiKeySource":"none","model":"claude-haiku-4-5-20251001"}}
+{"at":"2026-07-12T16:42:17.936Z","source":"owner","event":"turn_in_flight","data":{"sessionId":"83e572a6-cd2d-45c3-bcfb-46fc8269b683","trigger":"partial_message"}}
+{"at":"2026-07-12T16:42:25.304Z","source":"late-viewer-process","event":"late_attach","data":{"active":true,"replayCount":6,"replaySeq":[1,6]}}
+{"at":"2026-07-12T16:42:25.304Z","source":"late-viewer-process","event":"stdin_injected","data":{"kind":"send_ack","clientMessageId":"issue-25-claude-injected","disposition":"queued","active":true}}
+{"at":"2026-07-12T16:42:25.304Z","source":"late-viewer-process","event":"queued_turn_completed","data":{"result":"INJECTED-OK","liveEventCount":68,"eventTypes":["rate_limit_event","system","stream_event","user","assistant","result"]}}
+{"at":"2026-07-12T16:42:25.854Z","source":"demo","event":"broker_stopped","data":{"sessionId":"83e572a6-cd2d-45c3-bcfb-46fc8269b683"}}
+{"at":"2026-07-12T16:42:25.873Z","source":"broker","event":"ready","data":{"pid":3618457,"url":"ws://127.0.0.1:8987/events","resume":true}}
+{"at":"2026-07-12T16:42:28.200Z","source":"recovery","event":"context_recalled","data":{"sessionId":"83e572a6-cd2d-45c3-bcfb-46fc8269b683","result":"ORCHID-25"}}
+{"at":"2026-07-12T16:42:28.745Z","source":"demo","event":"verified","data":{"oneLongLivedProcess":true,"lateAttachReplay":true,"liveFanout":true,"midSessionStdinInjection":"queued-next-turn","restartResume":true}}
