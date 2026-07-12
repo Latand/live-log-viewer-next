@@ -180,7 +180,6 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
     for (const generation of conversation.generations) conversationByPath.set(generation.path, conversation);
     for (const continuityPath of conversation.continuityPaths) conversationByPath.set(continuityPath, conversation);
   }
-  const filesByPath = new Map(files.map((file) => [file.path, file] as const));
   const { userAuthoredPaths, scannedAt } = readAuthorshipEvidence();
   /* Live on-disk mtime probe, memoized per request. A clean stamp must be
      checked against the LIVE filesystem, not the scan snapshot's mtime: the
