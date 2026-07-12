@@ -156,6 +156,19 @@ describe("taskRect / taskCardHeight", () => {
     const wideRun = taskCardHeight(task({ id: "t", text: "W".repeat(40) }));
     expect(wideRun).toBeGreaterThan(oneChar);
   });
+
+  test("bounds a large multi-target chip stack (Finding 2)", () => {
+    /* The rendered chip block is 28m + 4 (h-6 = 24 per row, gap-1 = 4 between,
+       pb-2 = 8 under the last). A multi-target delivery can stack a dozen rows,
+       so the estimate must cover that or the gutter is eaten and cards overlap.
+       Assert the whole card height clears strip + one body line + 28m + 4 at
+       every stack size, including a 12-target card. */
+    for (const m of [1, 2, 3, 6, 9, 12]) {
+      const assignments = Array.from({ length: m }, (_, i) => assignment({ path: "/t" + i }));
+      const h = taskCardHeight(task({ id: "t", text: "one line", assignments }));
+      expect(h).toBeGreaterThanOrEqual(28 * m + 4);
+    }
+  });
 });
 
 describe("taskWorldBounds", () => {
@@ -496,6 +509,27 @@ describe("routeTaskEdges — edge-to-edge crossing handling (Finding 1)", () => 
     }
     return c;
   }
+
+  /* Does any sampled point of a routed path fall strictly inside `r`? */
+  function enters(d: string, r: SchemeRect): boolean {
+    return points(d, 60).some((p) => p.x > r.x && p.x < r.x + r.w && p.y > r.y && p.y < r.y + r.h);
+  }
+
+  test("crossing reduction never re-enters a container to untangle edges (Finding 1)", () => {
+    /* Two connectors cross beside a pane both must detour around. Every bow that
+       would reduce the crossing routes back through the pane, so obstacle
+       clearance — the higher-priority invariant — must win: both stay clear even
+       though the crossing survives. */
+    const pane: SchemeRect = { x: -300, y: 100, w: 600, h: 680 };
+    const paneObstacle = { id: "pane", ...pane };
+    const a = geom("A", -500, 0, 500, 900);
+    const b = geom("B", 500, 0, -500, 900);
+    expect(enters(routeTaskEdge(a, [pane], 0).d, pane)).toBe(false); // a clear route exists
+    expect(crossings(routeTaskEdge(a, [pane], 0).d, routeTaskEdge(b, [pane], 0).d)).toBeGreaterThan(0); // reduction engaged
+    const routes = routeTaskEdges([a, b], [paneObstacle], [pane]);
+    expect(enters(routes.get("A")!.d, pane)).toBe(false);
+    expect(enters(routes.get("B")!.d, pane)).toBe(false);
+  });
 
   test("reduces an avoidable crossing that per-edge routing leaves tangled", () => {
     /* An obstacle bows edge A down through edge B (two crossings); the pass

@@ -24,7 +24,13 @@ const BODY_CONTENT_W = TASK_W - 24;
    hold, so the most lines a given length can wrap to. */
 const MAX_GLYPH_W = 13;
 const CHARS_PER_LINE = Math.max(1, Math.floor(BODY_CONTENT_W / MAX_GLYPH_W));
-const CHIP_ROW_H = 26;
+/* Rendered chip block is 28m + 4 (each chip h-6 = 24, gap-1 = 4 between rows,
+   pb-2 = 8 under the last), so the per-row budget must be the full 24 + 4 gap =
+   28; a smaller figure undercounts a tall multi-target stack and eats the
+   placement gutter. Paired with CHIP_PAD below (≥ the 8px pb) to stay an upper
+   bound for any row count. */
+const CHIP_ROW_H = 28;
+const CHIP_PAD = 8;
 
 /**
  * Estimated on-board height of a task card: status strip + wrapped text
@@ -39,7 +45,8 @@ export function taskCardHeight(task: Pick<BoardTask, "text" | "assignments" | "s
     lines += Math.max(1, Math.ceil(raw.length / CHARS_PER_LINE));
   }
   const bodyH = Math.min(lines * LINE_H, TASK_BODY_MAX) + PAD_Y;
-  const chipsH = (task.assignments.length + (task.source ? 1 : 0)) * CHIP_ROW_H + (task.assignments.length || task.source ? 6 : 0);
+  const chipRows = task.assignments.length + (task.source ? 1 : 0);
+  const chipsH = chipRows ? chipRows * CHIP_ROW_H + CHIP_PAD : 0;
   return Math.max(TASK_MIN_H, STRIP_H + bodyH + chipsH);
 }
 
@@ -703,12 +710,20 @@ export function routeTaskEdges(
       const obstacles = edgeObstacles(edge, cards, containers);
       const laneBase = lanes.get(edge.key) ?? 0;
       let best = current;
+      /* Obstacle clearance outranks edge-crossing count: a route that clears
+         every card and pane (`crosses === false`) is never traded for one that
+         re-enters a container just to untangle edges. Selection is lexicographic
+         on (obstacle-crossing?, edge-crossings). */
+      let bestObstacle = current.route.crosses ? 1 : 0;
       for (const bow of CROSS_BOWS) {
         const route = routeTaskEdge(edge, obstacles, laneBase + bow);
+        const candObstacle = route.crosses ? 1 : 0;
+        if (candObstacle > bestObstacle) continue; // would re-enter an obstacle — reject
         const pts = sampleRoutePoints(route.d);
         const crossings = crossingsAgainstOthers(edge.key, pts);
-        if (crossings < bestCrossings) {
+        if (candObstacle < bestObstacle || crossings < bestCrossings) {
           best = { route, pts };
+          bestObstacle = candObstacle;
           bestCrossings = crossings;
         }
       }
