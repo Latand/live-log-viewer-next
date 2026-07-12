@@ -799,6 +799,10 @@ function adoptProvisionalOwner(
   pathname: string,
 ): boolean {
   if (!scannerAllocatedProvisionalOwner(owner, pathname)) return false;
+  if (owner.migrationOptOut
+    && (!target.migrationOptOut || owner.migrationOptOut.updatedAt > target.migrationOptOut.updatedAt)) {
+    target.migrationOptOut = { ...owner.migrationOptOut };
+  }
   for (const receipt of Object.values(file.receipts)) {
     if (receipt.conversationId === owner.id) receipt.conversationId = target.id;
     if (receipt.parentConversationId === owner.id) receipt.parentConversationId = target.id;

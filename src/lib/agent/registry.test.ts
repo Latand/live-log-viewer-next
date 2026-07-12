@@ -449,6 +449,59 @@ describe("agent registry", () => {
     expect(Object.keys(restarted.snapshot().conversations)).not.toContain(provisionalIds[1]);
   });
 
+  test("path-pending adoption preserves a provisional owner's stopped-migration opt-out", () => {
+    const store = registry();
+    const begun = store.beginSpawnRequest({ engine: "codex", cwd: "/repo", accountId: "source" });
+    if (begun.kind !== "created") throw new Error("expected create");
+    const persisted = store.snapshot();
+    persisted.receipts[begun.receipt.launchId]!.state = "path-pending";
+    persisted.receipts[begun.receipt.launchId]!.pathCorrelation = {
+      cwd: "/repo",
+      startedAt: "2026-07-12T12:00:00.000Z",
+    };
+    fs.writeFileSync(store.filename, JSON.stringify(persisted));
+    const childPath = "/sessions/child-019f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl";
+    const observation = {
+      engine: "codex" as const,
+      path: childPath,
+      accountId: "source",
+      launchProfile: emptyLaunchProfile({ cwd: "/repo" }),
+      turn: { state: "idle" as const, source: "empty" as const, terminalAt: null },
+      observedAt: "2026-07-12T12:01:00.000Z",
+    };
+
+    store.reconcileConversations([observation]);
+    const provisional = store.conversationForPath(childPath)!;
+    const intent = store.commitMigrationIntent({
+      engine: "codex",
+      targetId: "target",
+      origin: "auto",
+      requestId: "auto-before-correlation",
+      expectedRevision: store.engineRouting("codex").revision,
+      scope: "active",
+    });
+    store.setMigrationIntentState(intent.id, "stopped", intent.revision);
+    expect(store.conversation(provisional.id)?.migrationOptOut).toMatchObject({ targetId: "target" });
+
+    store.reconcileConversations([{ ...observation, startedAt: "2026-07-12T12:00:01.000Z" }]);
+
+    expect(store.conversationForPath(childPath)?.id).toBe(begun.receipt.conversationId);
+    expect(store.conversation(begun.receipt.conversationId)?.migrationOptOut).toMatchObject({ targetId: "target" });
+    const later = store.commitMigrationIntent({
+      engine: "codex",
+      targetId: "target",
+      origin: "auto",
+      requestId: "auto-after-correlation",
+      expectedRevision: store.engineRouting("codex").revision,
+      scope: "all",
+    });
+    expect(later.state).toBe("complete");
+    expect(store.conversation(begun.receipt.conversationId)).toMatchObject({
+      migration: null,
+      migrationOptOut: { targetId: "target" },
+    });
+  });
+
   test("path-pending recovery partitions reversed Codex startup by birth account", () => {
     const store = registry();
     const first = store.beginSpawnRequest({ engine: "codex", cwd: "/repo", accountId: "a" });
