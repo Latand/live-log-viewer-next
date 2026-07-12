@@ -32,6 +32,13 @@ export interface HostState {
   account: { type: string | null; planType: string | null } | null;
 }
 
+export class RuntimeReplayGapError extends Error {
+  constructor(readonly requestedAfterSeq: number, readonly firstAvailableSeq: number) {
+    super(`runtime replay begins at sequence ${firstAvailableSeq}; requested after ${requestedAfterSeq}`);
+    this.name = "RuntimeReplayGapError";
+  }
+}
+
 /** Shared structured-host boundary from the issue 25 spike. */
 export interface EngineHost {
   attach(afterSeq: number): AsyncIterable<RuntimeEvent>;

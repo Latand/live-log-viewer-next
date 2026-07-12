@@ -52,6 +52,28 @@ export async function persistCodexHost(
   return registry.setStructuredHost(key, codexHostColumns(state, writerClaimEpoch), registryStatus(state));
 }
 
+export async function bindCodexHostPersistence(
+  registry: AgentRegistry,
+  key: SessionKey,
+  host: CodexAppServerHost,
+  writerClaimEpoch: number,
+): Promise<() => void> {
+  await persistCodexHost(registry, key, host, writerClaimEpoch);
+  let failed = false;
+  let unsubscribe = () => {};
+  unsubscribe = host.onStateChange((state) => {
+    if (failed) return;
+    try {
+      registry.setStructuredHost(key, codexHostColumns(state, writerClaimEpoch), registryStatus(state));
+    } catch {
+      failed = true;
+      unsubscribe();
+      void host.release();
+    }
+  });
+  return unsubscribe;
+}
+
 export interface AdoptedCodexHost {
   key: SessionKey;
   host: CodexAppServerHost;
@@ -78,7 +100,7 @@ export async function adoptCodexRegistryHosts(
             ...optionsFor(claimed),
             initialEventCursor: claimed.structuredHost.eventCursor,
           });
-          await persistCodexHost(registry, entry.key, host, claimed.claimEpoch);
+          await bindCodexHostPersistence(registry, entry.key, host, claimed.claimEpoch);
           adopted.push({ key: entry.key, host });
         } catch {
           registry.setStructuredHost(entry.key, {

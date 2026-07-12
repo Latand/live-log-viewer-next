@@ -10,6 +10,8 @@ import type {
   QueueEntry,
   RuntimeEvent,
 } from "./engineHost";
+import { RuntimeReplayGapError } from "./engineHost";
+import { FileRuntimeEventStore, type RuntimeEventStore } from "./eventStore";
 
 type JsonObject = Record<string, unknown>;
 type PendingRpc = {
@@ -41,6 +43,7 @@ export interface CodexAppServerHostOptions {
   shutdownGraceMs?: number;
   initialEventCursor?: number;
   spawnProcess?: (command: string, args: string[], options: SpawnOptionsWithoutStdio) => ChildProcessWithoutNullStreams;
+  eventStore?: RuntimeEventStore;
 }
 
 export interface CodexThreadIdentity {
@@ -48,10 +51,29 @@ export interface CodexThreadIdentity {
   path: string | null;
 }
 
-const SECRET_ENV_NAMES = [
-  "OPENAI_API_KEY",
-  "ANTHROPIC_API_KEY",
-  "CLAUDE_CODE_OAUTH_TOKEN",
+const CHILD_ENV_ALLOWLIST = [
+  "PATH",
+  "HOME",
+  "USER",
+  "LOGNAME",
+  "SHELL",
+  "TMPDIR",
+  "TMP",
+  "TEMP",
+  "LANG",
+  "LC_ALL",
+  "LC_CTYPE",
+  "TERM",
+  "COLORTERM",
+  "NO_COLOR",
+  "XDG_CONFIG_HOME",
+  "XDG_CACHE_HOME",
+  "XDG_DATA_HOME",
+  "XDG_STATE_HOME",
+  "XDG_RUNTIME_DIR",
+  "DBUS_SESSION_BUS_ADDRESS",
+  "SSL_CERT_FILE",
+  "SSL_CERT_DIR",
 ] as const;
 const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_SHUTDOWN_GRACE_MS = 1_000;
@@ -76,8 +98,10 @@ function safeError(value: unknown): string {
 }
 
 function subscriptionEnv(source: NodeJS.ProcessEnv, codexHome?: string): NodeJS.ProcessEnv {
-  const env = { ...source };
-  for (const name of SECRET_ENV_NAMES) delete env[name];
+  const env: NodeJS.ProcessEnv = { NODE_ENV: source.NODE_ENV };
+  for (const name of CHILD_ENV_ALLOWLIST) {
+    if (source[name] !== undefined) env[name] = source[name];
+  }
   if (codexHome) env.CODEX_HOME = codexHome;
   return env;
 }
@@ -114,6 +138,14 @@ function terminalStatus(value: unknown): "completed" | "interrupted" | "error" {
   return value === "completed" ? "completed" : value === "interrupted" ? "interrupted" : "error";
 }
 
+function resumedTurns(value: unknown): JsonObject[] {
+  const outer = record(value);
+  const thread = record(outer?.thread) ?? outer;
+  if (Array.isArray(thread?.turns)) return thread.turns.map(record).filter((turn): turn is JsonObject => turn !== null);
+  const page = record(thread?.initialTurnsPage);
+  return Array.isArray(page?.data) ? page.data.map(record).filter((turn): turn is JsonObject => turn !== null) : [];
+}
+
 /** One stdio app-server owner with replayable, multi-subscriber event fan-out. */
 export class CodexAppServerHost implements EngineHost {
   readonly identity: CodexThreadIdentity;
@@ -121,16 +153,20 @@ export class CodexAppServerHost implements EngineHost {
   private readonly child: ChildProcessWithoutNullStreams;
   private readonly requestTimeoutMs: number;
   private readonly shutdownGraceMs: number;
+  private readonly eventStore: RuntimeEventStore;
   private readonly pending = new Map<number, PendingRpc>();
   private readonly subscribers = new Set<Subscriber>();
   private readonly events: RuntimeEvent[] = [];
   private readonly attentions = new Map<string, PendingAttention>();
+  private readonly stateListeners = new Set<(state: HostState) => void>();
+  private readonly preIdentityEvents: UnsequencedEvent[] = [];
   private nextRpcId = 1;
   private stdoutBuffer = "";
   private cursor: number;
   private activeTurnId: string | null = null;
   private protocolVersion: string | null = null;
   private account: HostState["account"] = null;
+  private releasing = false;
   private released = false;
   private dead = false;
   private reaped = false;
@@ -145,6 +181,7 @@ export class CodexAppServerHost implements EngineHost {
     this.identity = identity;
     this.requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.shutdownGraceMs = options.shutdownGraceMs ?? DEFAULT_SHUTDOWN_GRACE_MS;
+    this.eventStore = options.eventStore ?? new FileRuntimeEventStore();
     this.cursor = options.initialEventCursor ?? 0;
     this.reapedPromise = new Promise((resolve) => { this.resolveReaped = resolve; });
     child.stdout.on("data", (chunk: Buffer | string) => this.acceptStdout(String(chunk)));
@@ -157,7 +194,10 @@ export class CodexAppServerHost implements EngineHost {
         this.terminationTimer = null;
       }
       this.resolveReaped();
-      if (!this.released) this.fail(new Error("Codex app-server child exited"));
+      if (!this.releasing && !this.released) {
+        if (this.dead) this.notifyStateListeners();
+        else this.fail(new Error("Codex app-server child exited"));
+      }
     });
   }
 
@@ -204,6 +244,9 @@ export class CodexAppServerHost implements EngineHost {
       }
       provisional.identity.threadId = identity.threadId;
       provisional.identity.path = identity.path;
+      const restored = provisional.restoreEvents();
+      if (threadId && restored === 0) provisional.restoreThreadHistory(result);
+      provisional.flushPreIdentityEvents();
       provisional.emit({ kind: "session-status", status: "idle" });
       return provisional;
     } catch (error) {
@@ -215,6 +258,10 @@ export class CodexAppServerHost implements EngineHost {
   attach(afterSeq: number): AsyncIterable<RuntimeEvent> {
     if (!Number.isSafeInteger(afterSeq) || afterSeq < 0) throw new Error("afterSeq must be a non-negative integer");
     const subscriber: Subscriber = { afterSeq, queue: [], wake: null, closed: false };
+    const firstAvailable = this.events[0]?.seq;
+    if (firstAvailable !== undefined && afterSeq + 1 < firstAvailable) {
+      throw new RuntimeReplayGapError(afterSeq, firstAvailable);
+    }
     for (const event of this.events) if (event.seq > afterSeq) subscriber.queue.push(event);
     this.subscribers.add(subscriber);
     const subscribers = this.subscribers;
@@ -242,7 +289,7 @@ export class CodexAppServerHost implements EngineHost {
   }
 
   async send(entry: QueueEntry): Promise<DeliveryReceipt> {
-    if (this.dead || this.released) return { outcome: "rejected", reason: "dead-host" };
+    if (this.dead || this.releasing || this.released) return { outcome: "rejected", reason: "dead-host" };
     if (!entry.id || !entry.text) throw new Error("queue entry id and text are required");
     const currentTurn = this.activeTurnId;
     if (entry.expectedTurnId !== undefined && entry.expectedTurnId !== currentTurn) {
@@ -272,25 +319,37 @@ export class CodexAppServerHost implements EngineHost {
     });
     const turnId = turnIdFromResult(result, "turn/start");
     this.activeTurnId = turnId;
+    this.notifyStateListeners();
     return { outcome: "turn-started", turnId };
   }
 
   async interrupt(turnRef: string): Promise<void> {
-    if (this.dead || this.released) throw new Error("Codex app-server host is unavailable");
+    if (this.dead || this.releasing || this.released) throw new Error("Codex app-server host is unavailable");
     if (!turnRef || this.activeTurnId !== turnRef) throw new Error("active turn fence is stale");
     await this.rpc("turn/interrupt", { threadId: this.identity.threadId, turnId: turnRef });
   }
 
   async answer(attentionRef: string, value: unknown): Promise<void> {
-    if (this.dead || this.released) throw new Error("Codex app-server host is unavailable");
+    if (this.dead || this.releasing || this.released) throw new Error("Codex app-server host is unavailable");
     const attention = this.attentions.get(attentionRef);
     if (!attention) throw new Error("attention request is missing or already answered");
     this.write({ jsonrpc: "2.0", id: attention.rpcId, result: value ?? {} });
     this.attentions.delete(attentionRef);
+    this.notifyStateListeners();
   }
 
   async health(): Promise<HostState> {
-    const pid = this.dead || this.released ? null : this.child.pid ?? null;
+    return this.currentState();
+  }
+
+  onStateChange(listener: (state: HostState) => void): () => void {
+    this.stateListeners.add(listener);
+    listener(this.currentState());
+    return () => this.stateListeners.delete(listener);
+  }
+
+  private currentState(): HostState {
+    const pid = this.reaped || this.released ? null : this.child.pid ?? null;
     const processStartIdentity = pid ? procBackend.processIdentity(pid) : null;
     const status: HostState["status"] = this.dead ? "dead"
       : this.released ? "unhosted"
@@ -317,7 +376,7 @@ export class CodexAppServerHost implements EngineHost {
   }
 
   private async releaseAndReap(): Promise<void> {
-    this.released = true;
+    this.releasing = true;
     for (const request of this.pending.values()) {
       clearTimeout(request.timer);
       request.reject(new Error("Codex app-server host released"));
@@ -325,11 +384,17 @@ export class CodexAppServerHost implements EngineHost {
     this.pending.clear();
     this.closeSubscribers();
     this.startTermination();
-    if (await this.waitForReap(this.shutdownGraceMs)) return;
-    try { this.child.kill("SIGKILL"); } catch { /* already closed */ }
     if (!await this.waitForReap(this.shutdownGraceMs)) {
-      throw new Error("Codex app-server child could not be reaped");
+      try { this.child.kill("SIGKILL"); } catch { /* already closed */ }
+      if (!await this.waitForReap(this.shutdownGraceMs)) {
+        throw new Error("Codex app-server child could not be reaped");
+      }
     }
+    this.released = true;
+    this.releasing = false;
+    this.activeTurnId = null;
+    this.attentions.clear();
+    this.emit({ kind: "session-status", status: "unhosted" });
   }
 
   private startTermination(): void {
@@ -358,12 +423,56 @@ export class CodexAppServerHost implements EngineHost {
   }
 
   private emit(event: UnsequencedEvent): void {
+    if (this.identity.threadId === "pending") {
+      this.preIdentityEvents.push(event);
+      return;
+    }
     const sequenced = { ...event, seq: ++this.cursor } as RuntimeEvent;
+    try {
+      this.eventStore.append(this.identity.threadId, sequenced);
+    } catch (error) {
+      this.startTermination();
+      throw error;
+    }
     this.events.push(sequenced);
     for (const subscriber of this.subscribers) {
       subscriber.queue.push(sequenced);
       subscriber.wake?.();
     }
+    this.notifyStateListeners();
+  }
+
+  private restoreEvents(): number {
+    const stored = this.eventStore.load(this.identity.threadId);
+    this.events.splice(0, this.events.length, ...stored);
+    this.cursor = Math.max(this.cursor, stored.at(-1)?.seq ?? 0);
+    return stored.length;
+  }
+
+  private restoreThreadHistory(result: unknown): void {
+    for (const turn of resumedTurns(result)) {
+      const turnId = stringField(turn, "id");
+      if (!turnId) continue;
+      this.activeTurnId = turnId;
+      this.emit({ kind: "turn-started", turnId });
+      if (Array.isArray(turn.items)) {
+        for (const item of turn.items) this.emit({ kind: "item", turnId, item, phase: "completed" });
+      }
+      const status = stringField(turn, "status");
+      if (status === "completed" || status === "interrupted" || status === "failed" || status === "error") {
+        this.activeTurnId = null;
+        this.emit({ kind: "turn-ended", turnId, status: terminalStatus(status) });
+      }
+    }
+  }
+
+  private flushPreIdentityEvents(): void {
+    for (const event of this.preIdentityEvents.splice(0)) this.emit(event);
+  }
+
+  private notifyStateListeners(): void {
+    const state = this.currentState();
+    for (const listener of this.stateListeners) listener(state);
   }
 
   private closeSubscribers(): void {
@@ -375,7 +484,7 @@ export class CodexAppServerHost implements EngineHost {
   }
 
   private rpc(method: string, params: JsonObject = {}): Promise<unknown> {
-    if (this.dead || this.released) return Promise.reject(new Error("Codex app-server host is unavailable"));
+    if (this.dead || this.releasing || this.released) return Promise.reject(new Error("Codex app-server host is unavailable"));
     const id = this.nextRpcId++;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {

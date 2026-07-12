@@ -67,6 +67,7 @@ test.skipIf(!codexPresent)("real Codex subscription supports late attach, steeri
 
     const threadId = host.identity.threadId;
     await host.release();
+    const releasedCursor = (await host.health()).eventCursor;
     host = null;
     recovered = await CodexAppServerHost.adopt(threadId, {
       cwd: process.cwd(),
@@ -74,8 +75,12 @@ test.skipIf(!codexPresent)("real Codex subscription supports late attach, steeri
       sandbox: "read-only",
       approvalPolicy: "never",
       requestTimeoutMs: 60_000,
+      initialEventCursor: releasedCursor,
     });
-    const recoveryEvents = recovered.attach(0)[Symbol.asyncIterator]();
+    const restartReplay = recovered.attach(releasedCursor - 1)[Symbol.asyncIterator]();
+    expect((await restartReplay.next()).value).toEqual({ kind: "session-status", status: "unhosted", seq: releasedCursor });
+    expect((await restartReplay.next()).value).toEqual({ kind: "session-status", status: "idle", seq: releasedCursor + 1 });
+    const recoveryEvents = recovered.attach(releasedCursor + 1)[Symbol.asyncIterator]();
     const recall = await recovered.send({
       id: `issue-149-recall-${crypto.randomUUID()}`,
       text: "Reply with only the marker I asked you to remember.",

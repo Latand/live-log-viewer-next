@@ -10,7 +10,23 @@ import { AgentRegistry } from "@/lib/agent/registry";
 import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
 
 import { CodexAppServerHost } from "./codexAppServerHost";
+import type { RuntimeEventStore } from "./eventStore";
+import type { RuntimeEvent } from "./engineHost";
 import { adoptCodexRegistryHosts, persistCodexHost, startCodexStructuredHost, structuredHostsEnabled } from "./registry";
+
+class MemoryEventStore implements RuntimeEventStore {
+  private readonly events = new Map<string, RuntimeEvent[]>();
+
+  load(threadId: string): RuntimeEvent[] {
+    return structuredClone(this.events.get(threadId) ?? []);
+  }
+
+  append(threadId: string, event: RuntimeEvent): void {
+    const events = this.events.get(threadId) ?? [];
+    events.push(structuredClone(event));
+    this.events.set(threadId, events);
+  }
+}
 
 class FakeAppServer extends EventEmitter {
   readonly stdin = new PassThrough();
@@ -25,6 +41,7 @@ class FakeAppServer extends EventEmitter {
     private readonly threadId = "thread-149",
     private readonly resumedThreadId = threadId,
     private readonly ignoreTerm = false,
+    private readonly turns: unknown[] = [],
   ) {
     super();
     let buffer = "";
@@ -63,7 +80,7 @@ class FakeAppServer extends EventEmitter {
     if (method === "account/read") return this.respond(message.id, { account: { type: "chatgpt", planType: "pro" }, requiresOpenaiAuth: false });
     if (method === "thread/start" || method === "thread/resume") {
       const id = method === "thread/resume" ? this.resumedThreadId : this.threadId;
-      return this.respond(message.id, { thread: { id, path: `/sessions/${id}.jsonl` } });
+      return this.respond(message.id, { thread: { id, path: `/sessions/${id}.jsonl`, turns: this.turns } });
     }
     if (method === "turn/start") {
       const turnId = `turn-${++this.turn}`;
@@ -97,10 +114,20 @@ describe("CodexAppServerHost", () => {
     const captured: { options?: SpawnOptionsWithoutStdio } = {};
     const host = await CodexAppServerHost.start({
       cwd: "/repo",
-      env: { NODE_ENV: "test", PATH: process.env.PATH, OPENAI_API_KEY: "must-not-cross" },
+      codexHome: "/codex-home",
+      env: {
+        NODE_ENV: "test",
+        PATH: process.env.PATH,
+        OPENAI_API_KEY: "must-not-cross",
+        LLV_TOKEN: "must-not-cross",
+        ANTHROPIC_AUTH_TOKEN: "must-not-cross",
+        AWS_SESSION_TOKEN: "must-not-cross",
+        PRIVATE_SERVICE_API_KEY: "must-not-cross",
+      },
+      eventStore: new MemoryEventStore(),
       spawnProcess: fakeSpawn(server, captured),
     });
-    expect((captured.options?.env as NodeJS.ProcessEnv).OPENAI_API_KEY).toBeUndefined();
+    expect(captured.options?.env).toEqual({ NODE_ENV: "test", PATH: process.env.PATH, CODEX_HOME: "/codex-home" });
     expect(host.identity).toEqual({ threadId: "thread-149", path: "/sessions/thread-149.jsonl" });
 
     const first = host.attach(0);
@@ -150,12 +177,23 @@ describe("CodexAppServerHost", () => {
   });
 
   test("resumes the same engine thread after a host-process replacement", async () => {
-    const first = await CodexAppServerHost.start({ cwd: "/repo", spawnProcess: fakeSpawn(new FakeAppServer("durable-thread")) });
+    const eventStore = new MemoryEventStore();
+    const first = await CodexAppServerHost.start({ cwd: "/repo", eventStore, spawnProcess: fakeSpawn(new FakeAppServer("durable-thread")) });
+    await first.send({ id: "before-restart", text: "remember" });
     await first.release();
     const replacementServer = new FakeAppServer("durable-thread");
-    const replacement = await CodexAppServerHost.adopt("durable-thread", { cwd: "/repo", spawnProcess: fakeSpawn(replacementServer) });
+    const replacement = await CodexAppServerHost.adopt("durable-thread", {
+      cwd: "/repo",
+      eventStore,
+      initialEventCursor: 3,
+      spawnProcess: fakeSpawn(replacementServer),
+    });
     expect(replacement.identity.threadId).toBe("durable-thread");
     expect(replacementServer.requests.some((request) => request.method === "thread/resume")).toBeTrue();
+    const replay = replacement.attach(1)[Symbol.asyncIterator]();
+    expect((await replay.next()).value).toEqual({ kind: "turn-started", turnId: "turn-1", seq: 2 });
+    expect((await replay.next()).value).toEqual({ kind: "session-status", status: "unhosted", seq: 3 });
+    expect((await replay.next()).value).toEqual({ kind: "session-status", status: "idle", seq: 4 });
     await replacement.release();
   });
 
@@ -163,9 +201,36 @@ describe("CodexAppServerHost", () => {
     const server = new FakeAppServer("server-default", "different-thread");
     await expect(CodexAppServerHost.adopt("requested-thread", {
       cwd: "/repo",
+      eventStore: new MemoryEventStore(),
       spawnProcess: fakeSpawn(server),
     })).rejects.toThrow("thread/resume returned a different thread id");
     expect(server.signals).toContain("SIGTERM");
+  });
+
+  test("rebuilds replay from resume history when a legacy host has no event ledger", async () => {
+    const server = new FakeAppServer("history-thread", "history-thread", false, [{
+      id: "history-turn",
+      status: "completed",
+      items: [{ type: "agentMessage", text: "persisted" }],
+    }]);
+    const host = await CodexAppServerHost.adopt("history-thread", {
+      cwd: "/repo",
+      initialEventCursor: 5,
+      eventStore: new MemoryEventStore(),
+      spawnProcess: fakeSpawn(server),
+    });
+    const replay = host.attach(5)[Symbol.asyncIterator]();
+    expect((await replay.next()).value).toEqual({ kind: "turn-started", turnId: "history-turn", seq: 6 });
+    expect((await replay.next()).value).toEqual({
+      kind: "item",
+      turnId: "history-turn",
+      item: { type: "agentMessage", text: "persisted" },
+      phase: "completed",
+      seq: 7,
+    });
+    expect((await replay.next()).value).toEqual({ kind: "turn-ended", turnId: "history-turn", status: "completed", seq: 8 });
+    expect(() => host.attach(0)).toThrow("runtime replay begins at sequence 6");
+    await host.release();
   });
 
   test("release awaits TERM and escalates to KILL before resolving", async () => {
@@ -173,6 +238,7 @@ describe("CodexAppServerHost", () => {
     const host = await CodexAppServerHost.start({
       cwd: "/repo",
       shutdownGraceMs: 5,
+      eventStore: new MemoryEventStore(),
       spawnProcess: fakeSpawn(server),
     });
     await host.release();
@@ -184,6 +250,7 @@ describe("CodexAppServerHost", () => {
     const host = await CodexAppServerHost.start({
       cwd: "/repo",
       shutdownGraceMs: 5,
+      eventStore: new MemoryEventStore(),
       spawnProcess: fakeSpawn(server),
     });
     server.stdout.write("malformed\n");
@@ -197,7 +264,7 @@ describe("CodexAppServerHost", () => {
     expect(structuredHostsEnabled({ NODE_ENV: "test", LLV_STRUCTURED_HOSTS: "true" })).toBeFalse();
     expect(structuredHostsEnabled({ NODE_ENV: "test", LLV_STRUCTURED_HOSTS: "1" })).toBeTrue();
     await expect(startCodexStructuredHost(
-      { cwd: "/repo", spawnProcess: fakeSpawn(new FakeAppServer()) },
+      { cwd: "/repo", eventStore: new MemoryEventStore(), spawnProcess: fakeSpawn(new FakeAppServer()) },
       { NODE_ENV: "test" },
     )).rejects.toThrow("structured hosts are disabled");
   });
@@ -229,15 +296,16 @@ describe("CodexAppServerHost", () => {
     });
     const disabled = await adoptCodexRegistryHosts(
       registry,
-      () => ({ cwd: "/repo", spawnProcess: fakeSpawn(new FakeAppServer("adopted-thread")) }),
+      () => ({ cwd: "/repo", eventStore: new MemoryEventStore(), spawnProcess: fakeSpawn(new FakeAppServer("adopted-thread")) }),
       { NODE_ENV: "test" },
     );
     expect(disabled).toEqual([]);
 
     const server = new FakeAppServer("adopted-thread");
+    const eventStore = new MemoryEventStore();
     const adopted = await adoptCodexRegistryHosts(
       registry,
-      () => ({ cwd: "/repo", spawnProcess: fakeSpawn(server) }),
+      () => ({ cwd: "/repo", eventStore, spawnProcess: fakeSpawn(server) }),
       { NODE_ENV: "test", LLV_STRUCTURED_HOSTS: "1" },
     );
     expect(adopted).toHaveLength(1);
@@ -247,7 +315,24 @@ describe("CodexAppServerHost", () => {
       writerClaimEpoch: 4,
       endpoint: "stdio:4242",
     });
+    const receipt = await adopted[0]!.host.send({ id: "persist-turn", text: "start" });
+    expect(receipt.outcome).toBe("turn-started");
+    expect(registry.snapshot().entries["codex:adopted-thread"]?.structuredHost).toMatchObject({
+      eventCursor: 14,
+      activeTurnRef: "turn-1",
+    });
+    server.request("persist-attention", "item/commandExecution/requestApproval", { command: "date" });
+    await Bun.sleep(0);
+    expect(registry.snapshot().entries["codex:adopted-thread"]?.structuredHost?.pendingAttention).toEqual([
+      "item/commandExecution/requestApproval:persist-attention",
+    ]);
+    await adopted[0]!.host.answer("item/commandExecution/requestApproval:persist-attention", { decision: "decline" });
+    expect(registry.snapshot().entries["codex:adopted-thread"]?.structuredHost?.pendingAttention).toEqual([]);
     await adopted[0]!.host.release();
+    expect(registry.snapshot().entries["codex:adopted-thread"]).toMatchObject({
+      status: "unhosted",
+      structuredHost: { eventCursor: 16, process: null, activeTurnRef: null, pendingAttention: [] },
+    });
   });
 
   test("concurrent startup adoption creates one writer and advances its claim epoch", async () => {
@@ -281,7 +366,7 @@ describe("CodexAppServerHost", () => {
       () => {
         const server = new FakeAppServer("claimed-thread");
         servers.push(server);
-        return { cwd: "/repo", spawnProcess: fakeSpawn(server) };
+        return { cwd: "/repo", eventStore: new MemoryEventStore(), spawnProcess: fakeSpawn(server) };
       },
       { NODE_ENV: "test", LLV_STRUCTURED_HOSTS: "1" },
     );
