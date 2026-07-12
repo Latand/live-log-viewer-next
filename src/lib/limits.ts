@@ -498,7 +498,6 @@ function buildEngineBurndown(
   accountId: string,
   limits: EngineLimits | null,
   now: number,
-  since: number,
   backfill: CodexTranscriptSeries | null,
 ): EngineBurndown {
   const forward = (window: WindowKey) => historySamples(engine, accountId, window, now);
@@ -529,12 +528,12 @@ export async function readBurndown(options: { codexLiveReader?: CodexLiveLimitsR
   const now = Math.round(Date.now() / 1000);
   const since = now - RETENTION_S;
   const claude = payload.claudeAccountId
-    ? buildEngineBurndown("claude", payload.claudeAccountId, payload.claude, now, since, null)
+    ? buildEngineBurndown("claude", payload.claudeAccountId, payload.claude, now, null)
     : null;
   let codex: EngineBurndown | null = null;
   if (payload.codexAccountId) {
     const backfill = collectCodexRateLimitSeries(accountForSpawn().sessionsDir, since);
-    codex = buildEngineBurndown("codex", payload.codexAccountId, payload.codex, now, since, backfill);
+    codex = buildEngineBurndown("codex", payload.codexAccountId, payload.codex, now, backfill);
   }
   return {
     claude,
