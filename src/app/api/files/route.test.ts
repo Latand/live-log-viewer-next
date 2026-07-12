@@ -416,3 +416,45 @@ test("a worker whose transcript changed after its last clean scan re-pins as unv
   const body = await response.json() as { files: FileEntry[] };
   expect(body.files[0]?.authorshipUnverified).toBe(true);
 });
+
+test("authorship aggregates across the whole conversation lineage (issue #112 finding)", async () => {
+  /* A user message recorded on an earlier generation/continuity path must pin
+     the current generation even after the historical entry leaves the board. */
+  const registry = agentRegistry();
+  const currentPath = "/sessions/current-019f4906-3f67-7b72-9fbc-9ec3b5ad1401.jsonl";
+  const priorPath = "/sessions/prior-019f4906-3f67-7b72-9fbc-9ec3b5ad1400.jsonl";
+  const conversation = registry.ensureConversation("codex", currentPath, "acc");
+  registry.recordConversationContinuityPath(conversation.id, priorPath);
+  fs.writeFileSync(path.join(stateDir, "reaper-state.json"), JSON.stringify({
+    version: 1,
+    firstObservedAt: {},
+    userAuthoredPaths: { [priorPath]: true }, // the owner message lives on the prior generation
+    scannedAt: { [currentPath]: 5000 },
+  }));
+  scannedFiles = [{ ...file(currentPath), engine: "codex", mtime: 4000 }];
+
+  const response = await GET(new Request("http://127.0.0.1/api/files"));
+  const body = await response.json() as { files: FileEntry[] };
+  const current = body.files.find((entry) => entry.path === currentPath);
+  expect(current?.userAuthored).toBe(true);
+});
+
+test("fail-closed freshness spans the lineage: an unscanned predecessor pins the successor (issue #112 finding)", async () => {
+  const registry = agentRegistry();
+  const currentPath = "/sessions/succ-019f4906-3f67-7b72-9fbc-9ec3b5ad1403.jsonl";
+  const priorPath = "/sessions/pred-019f4906-3f67-7b72-9fbc-9ec3b5ad1402.jsonl";
+  const conversation = registry.ensureConversation("codex", currentPath, "acc");
+  registry.recordConversationContinuityPath(conversation.id, priorPath);
+  fs.writeFileSync(path.join(stateDir, "reaper-state.json"), JSON.stringify({
+    version: 1,
+    firstObservedAt: {},
+    userAuthoredPaths: {},
+    scannedAt: { [currentPath]: 5000 }, // current is clean+fresh, but the predecessor was never scanned
+  }));
+  scannedFiles = [{ ...file(currentPath), engine: "codex", mtime: 4000 }];
+
+  const response = await GET(new Request("http://127.0.0.1/api/files"));
+  const body = await response.json() as { files: FileEntry[] };
+  const current = body.files.find((entry) => entry.path === currentPath);
+  expect(current?.authorshipUnverified).toBe(true);
+});

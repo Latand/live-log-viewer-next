@@ -467,6 +467,67 @@ test("a clean authorship scan persists a path-scoped scannedAt stamp (issue #112
   }
 });
 
+test("a non-host worker transcript still earns a clean scannedAt stamp (issue #112 finding)", async () => {
+  /* A finished headless reviewer / exited worker has no live tmux host, yet its
+     transcript must be scanned so the board can clear authorshipUnverified and
+     let it collapse. It reaches the reaper only through `files`, never `hosts`. */
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-reaper-nonhost-"));
+  const pathname = path.join(directory, "rollout-019f4906-3f67-7b72-9fbc-9ec3b5ad13aa.jsonl");
+  const now = Date.parse("2026-07-12T12:00:00.000Z");
+  fs.writeFileSync(pathname, JSON.stringify({
+    type: "event_msg",
+    timestamp: new Date(now - 60 * 60_000).toISOString(),
+    payload: { type: "agent_message", message: "verdict: APPROVE" },
+  }) + "\n");
+  process.env.LLV_STATE_DIR = directory;
+  delete process.env.LLV_REAPER_ENABLED;
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+
+  try {
+    await runReaperCycle({
+      registry,
+      hosts: [], // no live host for this exited worker
+      files: [runtimeFile(pathname, now / 1000 - 60 * 60)],
+      now,
+    });
+
+    const state = JSON.parse(fs.readFileSync(path.join(directory, "reaper-state.json"), "utf8")) as {
+      scannedAt?: Record<string, number>;
+      userAuthoredPaths?: Record<string, true>;
+    };
+    expect(state.userAuthoredPaths?.[pathname]).toBeUndefined();
+    expect(state.scannedAt?.[pathname]).toBeDefined();
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("a non-host worker with an owner message is recorded user-authored (issue #112 finding)", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-reaper-nonhost-user-"));
+  const pathname = path.join(directory, "rollout-019f4906-3f67-7b72-9fbc-9ec3b5ad13ab.jsonl");
+  const now = Date.parse("2026-07-12T12:00:00.000Z");
+  fs.writeFileSync(pathname, JSON.stringify({
+    type: "event_msg",
+    timestamp: new Date(now - 60 * 60_000).toISOString(),
+    payload: { type: "user_message", message: "please also handle the edge case" },
+  }) + "\n");
+  process.env.LLV_STATE_DIR = directory;
+  delete process.env.LLV_REAPER_ENABLED;
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+
+  try {
+    await runReaperCycle({ registry, hosts: [], files: [runtimeFile(pathname, now / 1000 - 60 * 60)], now });
+    const state = JSON.parse(fs.readFileSync(path.join(directory, "reaper-state.json"), "utf8")) as {
+      scannedAt?: Record<string, number>;
+      userAuthoredPaths?: Record<string, true>;
+    };
+    expect(state.userAuthoredPaths?.[pathname]).toBe(true);
+    expect(state.scannedAt?.[pathname]).toBeUndefined();
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 function headlessFlow(now: number): Flow {
   return {
     id: "flow-headless",

@@ -90,11 +90,18 @@ const ctx = (over: Partial<Parameters<typeof shouldCollapseWorker>[1]> = {}) => 
 });
 
 describe("classifyWorker", () => {
-  test("flow reviewer and implementer annotations win", () => {
+  test("flow reviewer and agent-spawned implementer annotations win", () => {
     const reviewer = entry({ path: "/rev", flow: { flowId: "f1", flowRole: "reviewer", round: 1 } });
-    const impl = entry({ path: "/impl", flow: { flowId: "f1", flowRole: "implementer", round: null } });
+    const impl = entry({ path: "/impl", parent: "/orchestrator", flow: { flowId: "f1", flowRole: "implementer", round: null } });
     expect(classifyWorker(reviewer, lineage())).toBe("flow-reviewer");
     expect(classifyWorker(impl, lineage())).toBe("flow-implementer");
+  });
+
+  test("a parentless flow implementer is an owner root, never worker-class", () => {
+    /* The owner started a top-level conversation and then a flow on it; keep it
+       out of scope (and off the fragile authorship discount). */
+    const impl = entry({ path: "/impl", parent: null, flow: { flowId: "f1", flowRole: "implementer", round: null } });
+    expect(classifyWorker(impl, lineage())).toBeNull();
   });
 
   test("pipeline stage ownership is worker-class", () => {
@@ -212,6 +219,7 @@ describe("shouldCollapseWorker", () => {
   test("HARD CONSTRAINT: a user-authored implementer never collapses however idle", () => {
     const impl = entry({
       path: "/impl",
+      parent: "/orchestrator",
       mtime: NOW_SEC - 24 * 3600, // a day idle
       userAuthored: true,
       flow: { flowId: "f1", flowRole: "implementer", round: null },
@@ -229,7 +237,7 @@ describe("shouldCollapseWorker", () => {
   });
 
   test("a flow implementer stays while its flow is open, collapses once closed", () => {
-    const impl = entry({ path: "/impl", mtime: NOW_SEC - 60 * 60, flow: { flowId: "f1", flowRole: "implementer", round: null } });
+    const impl = entry({ path: "/impl", parent: "/orchestrator", mtime: NOW_SEC - 60 * 60, flow: { flowId: "f1", flowRole: "implementer", round: null } });
     const active = [flow({ id: "f1", implementerPath: "/impl", state: "needs_decision" })];
     const closed = [flow({ id: "f1", implementerPath: "/impl", state: "closed", closedAt: "2026-07-05T02:00:00Z" })];
     /* Awaiting the owner's decision — the anchor stays even though its own

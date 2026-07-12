@@ -61,13 +61,18 @@ export interface WorkerLineage {
 
 /**
  * Worker lineage of a conversation, or null for an owner-started root. Order
- * matters: a flow annotation is the strongest signal (a flow implementer is a
- * root conversation, but a managed one), then pipeline stage ownership, then
- * generic agent-spawned lineage.
+ * matters: a reviewer annotation is unambiguous automation (the flow engine
+ * spawns it), then a flow implementer — but ONLY when it was itself spawned by
+ * an agent (`file.parent` set). A parentless flow implementer is a top-level
+ * conversation the OWNER created and then started a flow on; the issue keeps
+ * "root conversations the owner started" out of scope, and this is also the safe
+ * side of the authorship discount — an owner's first composer prompt can be
+ * discounted as an automated launch, so topology, not message-counting, decides
+ * ownership here. Then pipeline stage ownership, then generic spawned lineage.
  */
 export function classifyWorker(file: FileEntry, lineage: WorkerLineage): WorkerClass | null {
   if (file.flow?.flowRole === "reviewer") return "flow-reviewer";
-  if (file.flow?.flowRole === "implementer") return "flow-implementer";
+  if (file.flow?.flowRole === "implementer") return file.parent ? "flow-implementer" : null;
   if (lineage.pipelineStagePaths.has(file.path)) return "pipeline-stage";
   if (isChildConversation(file)) return "spawned-worker";
   return null;

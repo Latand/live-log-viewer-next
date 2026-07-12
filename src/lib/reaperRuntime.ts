@@ -351,11 +351,13 @@ function authorshipEvidence(
   snapshot: ReturnType<AgentRegistry["snapshot"]>,
   hosts: TranscriptHost[],
   flows: Flow[],
+  files: FileEntry[],
   missingTranscriptPaths: ReadonlySet<string>,
+  priorScannedAt: Record<string, number>,
 ): {
   userAuthoredPaths: Set<string>;
   unverifiedPaths: Set<string>;
-  /* Path → observed transcript mtime (seconds) for every host scanned to
+  /* Path → observed transcript mtime (seconds) for every transcript scanned to
      completion and found NOT owner-authored. This is the path-scoped freshness
      the board needs to clear `authorshipUnverified` without falsely certifying
      an unscanned worker (issue #112). */
@@ -364,9 +366,31 @@ function authorshipEvidence(
   const userAuthoredPaths = new Set<string>();
   const unverifiedPaths = new Set<string>();
   const verifiedCleanAt = new Map<string, number>();
+  /* Authorship scanning cannot ride live host discovery alone: a finished
+     headless reviewer is a detached process (never a tmux host) and an exited
+     worker has no host at all, so those paths would never earn a clean stamp and
+     the board would pin them unverified forever — defeating the immediate
+     reviewer collapse central to #112. Cover every quiet claude/codex transcript
+     the scan sees, in addition to the live hosts. A live file is skipped: it is
+     board-exempt regardless and its mtime advances every write, so scanning it
+     would churn without ever producing a usable stamp. */
+  const targets = new Map<string, "claude" | "codex">();
   for (const host of hosts) {
-    const pathname = host.primaryPath;
-    if (!pathname || userAuthoredPaths.has(pathname) || unverifiedPaths.has(pathname)) continue;
+    if (host.primaryPath) targets.set(host.primaryPath, host.engine);
+  }
+  const mtimeByPath = new Map<string, number>();
+  for (const file of files) {
+    if (file.engine !== "claude" && file.engine !== "codex") continue;
+    mtimeByPath.set(file.path, file.mtime);
+    if (file.activity === "live" || targets.has(file.path)) continue;
+    /* Already clean-stamped at or past the current mtime — no need to re-scan;
+       the persisted stamp still stands (the caller keeps prior state entries). */
+    const stamp = priorScannedAt[file.path];
+    if (stamp !== undefined && stamp >= file.mtime) continue;
+    targets.set(file.path, file.engine);
+  }
+  for (const [pathname, engine] of targets) {
+    if (userAuthoredPaths.has(pathname) || unverifiedPaths.has(pathname)) continue;
     if (missingTranscriptPaths.has(pathname)) continue;
     const viewerMessageAllowance = (hasViewerWorkerLaunchPrompt(snapshot, pathname) ? 1 : 0)
       + viewerFlowMessageAllowance(flows, pathname);
@@ -381,7 +405,7 @@ function authorshipEvidence(
       unverifiedPaths.add(pathname);
       continue;
     }
-    const scan = scanUserAuthoredMessages(pathname, host.engine, viewerMessageAllowance + 1);
+    const scan = scanUserAuthoredMessages(pathname, engine, viewerMessageAllowance + 1);
     if (scan.count > viewerMessageAllowance) userAuthoredPaths.add(pathname);
     else if (!scan.complete) unverifiedPaths.add(pathname);
     else verifiedCleanAt.set(pathname, observedMtime);
@@ -462,7 +486,7 @@ async function makeInput(
   const snapshot = registry.snapshot();
   const missingTranscriptPaths = new Set(hosts.flatMap((host) =>
     host.primaryPath && !fs.existsSync(host.primaryPath) ? [host.primaryPath] : []));
-  const authorship = authorshipEvidence(snapshot, hosts, flows, missingTranscriptPaths);
+  const authorship = authorshipEvidence(snapshot, hosts, flows, files, missingTranscriptPaths, state.scannedAt);
   let stateChanged = false;
   for (const pathname of authorship.userAuthoredPaths) {
     if (state.userAuthoredPaths[pathname]) continue;
