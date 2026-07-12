@@ -517,6 +517,34 @@ describe("CodexAppServerHost", () => {
     expect(server.signals).toEqual(["SIGTERM", "SIGKILL"]);
     expect((await stream.next()).value).toMatchObject({ kind: "session-status", status: "dead" });
     expect((await stream.next()).done).toBeTrue();
+    const terminal = await host.health();
+    server.notify("turn/started", { threadId: "failed-thread", turn: { id: "late-turn" } });
+    server.request("late-approval", "item/commandExecution/requestApproval", { command: "date" });
+    server.notify("thread/status/changed", { threadId: "failed-thread", status: { type: "active", activeFlags: ["running"] } });
+    expect(await host.health()).toMatchObject({
+      status: "dead",
+      eventCursor: terminal.eventCursor,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    });
+    await host.release();
+  });
+
+  test("an asynchronous stdin EPIPE fails and reaps the host", async () => {
+    const server = new FakeAppServer("epipe-thread", "epipe-thread", false, [], undefined, null, ["turn/start"]);
+    const host = await CodexAppServerHost.start({
+      cwd: "/repo",
+      requestTimeoutMs: 1_000,
+      eventStore: new MemoryEventStore(),
+      spawnProcess: fakeSpawn(server),
+    });
+    const pendingSend = host.send({ id: "epipe-send", text: "start" });
+    const error = Object.assign(new Error("broken pipe"), { code: "EPIPE" });
+    server.stdin.emit("error", error);
+    await expect(pendingSend).rejects.toThrow("stdin failed: broken pipe");
+    expect(await host.health()).toMatchObject({ status: "dead", activeTurnRef: null, pendingAttention: [] });
+    expect(server.signals).toContain("SIGTERM");
     await host.release();
   });
 
@@ -532,6 +560,9 @@ describe("CodexAppServerHost", () => {
     expect(await host.send({ id: "retry", text: "duplicate" })).toEqual({ outcome: "rejected", reason: "dead-host" });
     expect(server.requests.filter((request) => request.method === "turn/start")).toHaveLength(1);
     expect(server.signals).toContain("SIGTERM");
+    const terminal = await host.health();
+    server.notify("turn/started", { threadId: "timeout-thread", turn: { id: "late-timeout-turn" } });
+    expect(await host.health()).toMatchObject({ status: "dead", eventCursor: terminal.eventCursor, activeTurnRef: null });
     await host.release();
   });
 

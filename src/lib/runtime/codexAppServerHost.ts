@@ -222,6 +222,9 @@ export class CodexAppServerHost implements EngineHost {
     this.reapedPromise = new Promise((resolve) => { this.resolveReaped = resolve; });
     child.stdout.on("data", (chunk: Buffer | string) => this.acceptStdout(String(chunk)));
     child.stderr.on("data", () => { /* stderr can contain authentication details; keep it out of output */ });
+    child.stdin.on("error", (error) => {
+      if (!this.releasing && !this.released) this.fail(new Error(`Codex app-server stdin failed: ${safeError(error)}`));
+    });
     child.on("error", (error) => this.fail(new Error(`Codex app-server child failed: ${safeError(error)}`)));
     child.on("close", () => {
       this.reaped = true;
@@ -643,10 +646,12 @@ export class CodexAppServerHost implements EngineHost {
   }
 
   private write(message: JsonObject): void {
-    this.child.stdin.write(`${JSON.stringify(message)}\n`);
+    try { this.child.stdin.write(`${JSON.stringify(message)}\n`); }
+    catch (error) { this.fail(new Error(`Codex app-server stdin failed: ${safeError(error)}`)); }
   }
 
   private acceptStdout(chunk: string): void {
+    if (this.dead || this.releasing || this.released) return;
     this.stdoutBuffer += chunk;
     let newline = this.stdoutBuffer.indexOf("\n");
     while (newline >= 0) {
@@ -657,6 +662,10 @@ export class CodexAppServerHost implements EngineHost {
         return;
       }
       if (line) this.acceptMessage(line);
+      if (this.dead || this.releasing || this.released) {
+        this.stdoutBuffer = "";
+        return;
+      }
       newline = this.stdoutBuffer.indexOf("\n");
     }
     if (Buffer.byteLength(this.stdoutBuffer) > MAX_LINE_BYTES) this.fail(new Error("Codex app-server emitted an oversized JSONL frame"));
@@ -737,6 +746,8 @@ export class CodexAppServerHost implements EngineHost {
   private fail(error: Error, activeFlags: string[] = []): void {
     if (this.dead || this.released) return;
     this.dead = true;
+    this.activeTurnId = null;
+    this.attentions.clear();
     for (const request of this.pending.values()) {
       clearTimeout(request.timer);
       request.reject(new Error(safeError(error)));
@@ -752,6 +763,8 @@ export class CodexAppServerHost implements EngineHost {
     this.dead = true;
     this.engineStatus = "dead";
     this.activeFlags = [];
+    this.activeTurnId = null;
+    this.attentions.clear();
     for (const request of this.pending.values()) {
       clearTimeout(request.timer);
       request.reject(new Error(safeError(error)));
