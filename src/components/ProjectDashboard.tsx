@@ -23,7 +23,7 @@ import { PipelineStrip } from "./pipelines/PipelineStrip";
 import { pipelinesForProject, pipelineStripDomId, renderableFlowIds } from "./pipelines/pipelineModel";
 import { buildSchemeLayout } from "./scheme/layout";
 import { deckKey } from "./scheme/agentLinks";
-import { collapsibleWorkerFiles, groupWorkerStacks } from "./scheme/workerCollapse";
+import { collapsibleWorkerFiles, groupWorkerStacks, protectedInactiveReviewerPaths } from "./scheme/workerCollapse";
 import { WorkerStacks } from "./WorkerStacks";
 import { clearWorkflowDraftStorage } from "./workflows/WorkflowDraftPane";
 import { WorkflowStrip } from "./workflows/WorkflowStrip";
@@ -254,10 +254,18 @@ export function ProjectDashboard({
     () => new Set([...board.explicitManual, ...prefs.expanded]),
     [board.explicitManual, prefs.expanded],
   );
-  /* Fold reviewer transcripts into their round decks — EXCEPT a pinned reviewer
-     of an inactive flow, which has no deck and must stay on the board as a node
-     so an explicit open from a worker stack has something to render (issue #112). */
-  const groupFiles = useMemo(() => foldClaimedReviewers(files, flows, pinnedPaths), [files, flows, pinnedPaths]);
+  /* Owner-touched (or authorship-unconfirmed) reviewers of CLOSED flows have no
+     round deck and are filtered from the switchboard, so they must be kept on the
+     board as standalone nodes or they vanish from every surface (issue #112). */
+  const protectedReviewerPaths = useMemo(() => protectedInactiveReviewerPaths(files, flows), [files, flows]);
+  /* Fold reviewer transcripts into their round decks — EXCEPT an inactive-flow
+     reviewer the owner pinned OR one carrying authorship protection, which has no
+     deck and must stay on the board as a node (issue #112). */
+  const keepUnfolded = useMemo(
+    () => (protectedReviewerPaths.size ? new Set([...pinnedPaths, ...protectedReviewerPaths]) : pinnedPaths),
+    [pinnedPaths, protectedReviewerPaths],
+  );
+  const groupFiles = useMemo(() => foldClaimedReviewers(files, flows, keepUnfolded), [files, flows, keepUnfolded]);
   /* Collapse-eligible worker conversations, derived BEFORE layout so their
      quiet full columns are removed from the scheme rather than left as
      full-size cards (a spawned worker stays a column under an active parent
@@ -327,8 +335,23 @@ export function ProjectDashboard({
           !manualPaths.has(file.path) &&
           (!autoPaths.has(file.path) || hiddenSet.has(file.path)),
       );
-    return extra.length ? [...manualNodes, ...extra] : manualNodes;
-  }, [ephemeral, groupFiles, project, autoPaths, hiddenSet, manualNodes]);
+    /* Protected closed-flow reviewers render as standalone nodes so an
+       owner-touched reviewer is always on the board. A manual close still wins
+       (hiddenSet excluded); one already drawn as a column is skipped. */
+    const protectedNodes = [...protectedReviewerPaths]
+      .map((path) => byPath.get(path))
+      .filter(
+        (file): file is FileEntry =>
+          file !== undefined &&
+          projectKey(file) === project &&
+          !manualPaths.has(file.path) &&
+          !autoPaths.has(file.path) &&
+          !hiddenSet.has(file.path) &&
+          !extra.some((item) => item.path === file.path),
+      );
+    const extras = [...extra, ...protectedNodes];
+    return extras.length ? [...manualNodes, ...extras] : manualNodes;
+  }, [ephemeral, groupFiles, project, autoPaths, hiddenSet, manualNodes, protectedReviewerPaths]);
   const liveCount = useMemo(
     () =>
       groups.reduce(

@@ -10,6 +10,7 @@ import {
   DEFAULT_WORKER_COLLAPSE_IDLE_MS,
   isCollapseExempt,
   pipelineStageAgentPaths,
+  protectedInactiveReviewerPaths,
   reviewerRoundFinished,
   shouldCollapseWorker,
 } from "./workerCollapse";
@@ -353,5 +354,30 @@ describe("computeWorkerStacks", () => {
       nowMs: NOW,
     });
     expect(stacks).toHaveLength(0);
+  });
+});
+
+describe("protectedInactiveReviewerPaths", () => {
+  const closed = (over: Partial<Flow> & { id: string; implementerPath: string }) =>
+    flow({ state: "closed", closedAt: "2026-07-05T02:00:00Z", ...over });
+
+  test("returns owner-authored / unverified reviewers of closed flows", () => {
+    const authored = entry({ path: "/rev-authored", userAuthored: true });
+    const unverified = entry({ path: "/rev-unverified", authorshipUnverified: true });
+    const clean = entry({ path: "/rev-clean" });
+    const flows = [
+      closed({ id: "f1", implementerPath: "/i1", rounds: [round({ reviewerPath: "/rev-authored" })] }),
+      closed({ id: "f2", implementerPath: "/i2", rounds: [round({ reviewerPath: "/rev-unverified" })] }),
+      closed({ id: "f3", implementerPath: "/i3", rounds: [round({ reviewerPath: "/rev-clean" })] }),
+    ];
+    expect(protectedInactiveReviewerPaths([authored, unverified, clean], flows)).toEqual(
+      new Set(["/rev-authored", "/rev-unverified"]),
+    );
+  });
+
+  test("ignores protected reviewers of ACTIVE flows (their deck renders them)", () => {
+    const authored = entry({ path: "/rev", userAuthored: true });
+    const flows = [flow({ id: "f1", implementerPath: "/i1", state: "reviewing", rounds: [round({ reviewerPath: "/rev" })] })];
+    expect(protectedInactiveReviewerPaths([authored], flows).size).toBe(0);
   });
 });

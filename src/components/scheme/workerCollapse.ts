@@ -183,6 +183,29 @@ export function flowIdForPath(file: FileEntry, flows: readonly Flow[]): string |
   return flowMembership(file, flows)?.flow.id ?? null;
 }
 
+/**
+ * Reviewer transcripts of INACTIVE flows that carry owner-authorship protection
+ * (a real user message, or unconfirmed authorship that fails closed). An active
+ * flow's reviewer lives in its round deck, but a closed flow has none — and the
+ * switchboard filters every claimed reviewer — so without special handling a
+ * protected closed-flow reviewer would vanish from every surface, violating the
+ * hard exemption. The board keeps these unfolded AND materializes them as
+ * standalone nodes so an owner-touched reviewer stays visible (issue #112).
+ */
+export function protectedInactiveReviewerPaths(files: readonly FileEntry[], flows: readonly Flow[]): Set<string> {
+  const byPath = new Map(files.map((file) => [file.path, file] as const));
+  const out = new Set<string>();
+  for (const flow of flows) {
+    if (flow.state !== "closed") continue; // active flows render the reviewer in their deck
+    for (const round of flow.rounds) {
+      if (!round.reviewerPath) continue;
+      const file = byPath.get(round.reviewerPath);
+      if (file && (file.userAuthored || file.authorshipUnverified)) out.add(round.reviewerPath);
+    }
+  }
+  return out;
+}
+
 function stackKeyFor(file: FileEntry, flows: readonly Flow[]): { key: string; kind: "flow" | "worktree"; id: string } {
   const flowId = flowIdForPath(file, flows);
   if (flowId) return { key: "wstack::flow::" + flowId, kind: "flow", id: flowId };

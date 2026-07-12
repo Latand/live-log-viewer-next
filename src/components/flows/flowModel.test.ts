@@ -4,6 +4,7 @@ import type { Flow } from "@/lib/flows/types";
 import type { FileEntry } from "@/lib/types";
 
 import { buildBranchGroups } from "@/components/projectModel";
+import { protectedInactiveReviewerPaths } from "@/components/scheme/workerCollapse";
 
 import { claimedReviewerDescendantPaths, flowPresentation, foldClaimedReviewers, isActiveFlow } from "./flowModel";
 
@@ -131,6 +132,25 @@ describe("reviewer folding", () => {
     const groups = buildBranchGroups(kept, "demo", { expandedConversationPaths: new Set(["/reviewer"]) });
     const columns = groups.flatMap((group) => group.columns.map((column) => column.file.path));
     expect(columns).toContain("/reviewer");
+  });
+
+  test("an owner-authored closed-flow reviewer is kept unfolded and stays materializable (issue #112 finding)", () => {
+    /* Not manually pinned, but userAuthored — it must never vanish. The dashboard
+       keeps it unfolded via protectedInactiveReviewerPaths and materializes it as
+       a standalone node; here we prove fold-keep leaves it resolvable. */
+    const implementer = entry({ path: "/implementer", activity: "idle" });
+    const reviewer = entry({ path: "/reviewer", parent: "/implementer", activity: "idle", userAuthored: true });
+    const closed = flow({ implementerPath: "/implementer", reviewerPath: "/reviewer", state: "closed", closedAt: "2026-07-06T00:00:00Z" });
+
+    const protectedPaths = protectedInactiveReviewerPaths([implementer, reviewer], [closed]);
+    expect(protectedPaths).toEqual(new Set(["/reviewer"]));
+
+    // With no manual pin, plain folding would drop it; keeping the protected set
+    // unfolded leaves it in the file set so a node can be materialized from it.
+    expect(foldClaimedReviewers([implementer, reviewer], [closed]).map((file) => file.path)).toEqual(["/implementer"]);
+    const kept = foldClaimedReviewers([implementer, reviewer], [closed], protectedPaths);
+    expect(kept.map((file) => file.path)).toContain("/reviewer");
+    expect(new Map(kept.map((file) => [file.path, file])).get("/reviewer")).toBeDefined();
   });
 });
 
