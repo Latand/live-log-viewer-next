@@ -200,11 +200,17 @@ function EngineLimitsBlock({
   const [chartOpen, setChartOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
+  const chartTriggerRef = useRef<HTMLButtonElement>(null);
   const identityVersion = useRef(accounts.identityVersion);
 
   const close = () => {
     setOpen(false);
     triggerRef.current?.focus();
+  };
+
+  const closeChart = () => {
+    setChartOpen(false);
+    chartTriggerRef.current?.focus();
   };
 
   // Outside-pointer close only. Escape is owned by the panel's dialog subtree
@@ -220,23 +226,18 @@ function EngineLimitsBlock({
     return () => window.removeEventListener("pointerdown", onDown);
   }, [open]);
 
-  // The burndown chart owns its own dismissal (Esc + outside pointer), mirroring
-  // ResourcesFooter's cleanup panel. It renders inside containerRef, so clicks
-  // inside the chart are "contained" and never self-close it.
+  // Outside-pointer close only. Escape is owned by the chart's own dialog subtree
+  // (BurndownPanel routes it through handleOverlayEscape), so it never races the
+  // project drawer's window Escape handler — one press closes only the chart.
+  // The panel renders inside containerRef, so clicks inside it are "contained"
+  // and never self-close it.
   useEffect(() => {
     if (!chartOpen) return;
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setChartOpen(false);
-    };
     const onDown = (event: PointerEvent) => {
       if (containerRef.current && !containerRef.current.contains(event.target as Node)) setChartOpen(false);
     };
-    window.addEventListener("keydown", onKey);
     window.addEventListener("pointerdown", onDown);
-    return () => {
-      window.removeEventListener("keydown", onKey);
-      window.removeEventListener("pointerdown", onDown);
-    };
+    return () => window.removeEventListener("pointerdown", onDown);
   }, [chartOpen]);
 
   // Every mounted account surface of this engine shares one store. A version
@@ -302,6 +303,7 @@ function EngineLimitsBlock({
         </button>
         {hasWindows ? (
           <button
+            ref={chartTriggerRef}
             type="button"
             aria-expanded={chartOpen}
             aria-haspopup="dialog"
@@ -320,7 +322,7 @@ function EngineLimitsBlock({
         )}
       </div>
       {open ? <AccountsPanel state={accounts} onClose={close} /> : null}
-      {chartOpen ? <BurndownPanel engine={engine} label={label} plan={accountLimits?.plan ?? null} onClose={() => setChartOpen(false)} /> : null}
+      {chartOpen ? <BurndownPanel engine={engine} label={label} plan={accountLimits?.plan ?? null} onClose={closeChart} /> : null}
     </div>
   );
 }

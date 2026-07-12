@@ -46,8 +46,22 @@ export interface PaceSummary {
   zeroCrossing: number | null;
 }
 
+/** Projects when the quota hits 0% from the slope of the *observed* samples
+    (first → latest of the window), not an assumed full start. Returns null when
+    the series is flat or the quota is climbing (a refill), so a steady 50%→50%
+    or a mid-window reset never produces a bogus "empty by …" forecast. */
+function projectZeroCrossing(samples: LimitSample[], actual: number): number | null {
+  if (samples.length < 2) return null;
+  const first = samples[0];
+  const last = samples[samples.length - 1];
+  const dt = last.t - first.t;
+  const drop = first.remaining - last.remaining; // positive = quota being spent
+  if (dt <= 0 || drop <= 0) return null;
+  return last.t + actual / (drop / dt);
+}
+
 /** Pace read for the current window: compares the latest actual sample against
-    the ideal diagonal and projects the observed slope to zero. */
+    the ideal diagonal and projects the observed consumption slope to zero. */
 export function computePace(series: BurndownSeries, now: number): PaceSummary | null {
   const { windowStart, resetsAt, samples } = series;
   if (windowStart === null || resetsAt === null || samples.length === 0) return null;
@@ -55,12 +69,5 @@ export function computePace(series: BurndownSeries, now: number): PaceSummary | 
   const actual = clampPercent(latest.remaining);
   const clampedNow = Math.min(Math.max(now, windowStart), resetsAt);
   const ideal = idealRemaining(windowStart, resetsAt, clampedNow);
-  const elapsed = latest.t - windowStart;
-  const consumed = 100 - actual;
-  let zeroCrossing: number | null = null;
-  if (elapsed > 0 && consumed > 0) {
-    const ratePerSecond = consumed / elapsed;
-    zeroCrossing = latest.t + actual / ratePerSecond;
-  }
-  return { ideal, actual, delta: actual - ideal, zeroCrossing };
+  return { ideal, actual, delta: actual - ideal, zeroCrossing: projectZeroCrossing(samples, actual) };
 }

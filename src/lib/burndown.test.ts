@@ -67,3 +67,23 @@ test("computePace leaves zeroCrossing null when nothing has been consumed", () =
   const pace = computePace(series([{ t: start, remaining: 100 }]), start);
   expect(pace!.zeroCrossing).toBeNull();
 });
+
+test("computePace suppresses the projection for a flat series", () => {
+  const now = start + week / 2;
+  const pace = computePace(series([{ t: start, remaining: 50 }, { t: now, remaining: 50 }]), now);
+  expect(pace!.zeroCrossing).toBeNull();
+});
+
+test("computePace suppresses the projection when the quota is climbing (a refill)", () => {
+  const now = start + week / 2;
+  const pace = computePace(series([{ t: start, remaining: 30 }, { t: now, remaining: 60 }]), now);
+  expect(pace!.zeroCrossing).toBeNull();
+});
+
+test("computePace projects from the observed slope, not an assumed full start", () => {
+  // Never hit 100%: 60% → 40% over a day → 2%/half-day, so ~20 half-days to 0.
+  const day = 86_400;
+  const pace = computePace(series([{ t: start, remaining: 60 }, { t: start + day, remaining: 40 }]), start + day);
+  // 40% remaining at 20%/day → 2 more days.
+  expect(pace!.zeroCrossing! - (start + day)).toBeCloseTo(2 * day, 0);
+});
