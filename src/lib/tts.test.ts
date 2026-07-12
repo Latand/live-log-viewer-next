@@ -22,4 +22,16 @@ describe("spokenAnswerText", () => {
     expect(spokenAnswerText("Before\n````ts\ncode\n````\nAfter")).toBe("Before\n\nAfter");
     expect(spokenAnswerText("Before\n~~~~sh\ncode\n~~~~~\nAfter")).toBe("Before\n\nAfter");
   });
+
+  test("normalizes rich Markdown and redacts secrets before speech", () => {
+    const text = "# Result\n\n![chart](data:image/png;base64,AAAA)\n[Docs](https://example.com/private)\n\n| key | value |\n| --- | --- |\n\napi_key=super-secret\n<!-- hidden -->\n<oai-mem-citation><citation_entries>private</citation_entries><rollout_ids>x</rollout_ids></oai-mem-citation>";
+    const spoken = spokenAnswerText(text);
+    expect(spoken).toContain("Result");
+    expect(spoken).toContain("chart");
+    expect(spoken).toContain("Docs");
+    expect(spoken).toContain("api_key=[redacted]");
+    expect(spoken).not.toContain("example.com");
+    expect(spoken).not.toContain("base64");
+    expect(spoken).not.toContain("private");
+  });
 });

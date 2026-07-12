@@ -1,6 +1,8 @@
+import { redactSecrets } from "@/lib/review";
+
 const INDENTED_CODE_BLOCK = /(?:^|\n)(?:(?: {4}|\t)[^\n]*(?:\n|$))+/g;
 
-export const MAX_TTS_TEXT_LENGTH = 4096;
+export const MAX_TTS_TEXT_LENGTH = 4000;
 
 function stripFencedCodeBlocks(markdown: string): string {
   const kept: string[] = [];
@@ -24,8 +26,18 @@ function stripFencedCodeBlocks(markdown: string): string {
 
 /** Leaves only the prose that is useful when an assistant answer is spoken. */
 export function spokenAnswerText(markdown: string): string {
-  return stripFencedCodeBlocks(markdown)
+  const normalized = stripFencedCodeBlocks(markdown)
     .replace(INDENTED_CODE_BLOCK, "\n")
+    .replace(/<oai-mem-citation>[\s\S]*?<\/oai-mem-citation>/gi, "\n")
+    .replace(/<!--[\s\S]*?-->/g, " ")
+    .replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+    .replace(/^\s*\|.*\|\s*$/gm, " table omitted ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/https?:\/\/\S+/g, " ")
+    .replace(/^\s{0,3}(?:#{1,6}\s+|[-*+]\s+|\d+[.)]\s+)/gm, "")
+    .replace(/[*~]{1,3}/g, "")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
+  return redactSecrets(normalized);
 }
