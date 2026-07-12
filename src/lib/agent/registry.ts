@@ -232,6 +232,23 @@ function resumeCanRebaseMigration(migration: ConversationMigration | null): bool
     || ((migration.phase === "waiting-turn" || migration.phase === "requested") && migration.providerReceipt === null);
 }
 
+function mergeResumeLaunchProfile(current: LaunchProfile, requested: LaunchProfile): LaunchProfile {
+  return {
+    cwd: requested.cwd || current.cwd,
+    model: requested.model ?? current.model,
+    effort: requested.effort ?? current.effort,
+    fast: requested.fast ?? current.fast,
+    permissionMode: requested.permissionMode ?? current.permissionMode,
+    readOnly: requested.readOnly ?? current.readOnly,
+    title: requested.title ?? current.title,
+    project: requested.project ?? current.project,
+    parentConversationId: requested.parentConversationId ?? current.parentConversationId,
+    role: current.role === "root" || requested.role === "root" ? "root" : "worker",
+    goal: requested.goal ?? current.goal,
+    plan: requested.plan ?? current.plan,
+  };
+}
+
 function migrationReadinessSignature(
   file: RegistryFile,
   engine: Extract<AgentEngine, "claude" | "codex">,
@@ -891,8 +908,12 @@ export class AgentRegistry {
     return this.mutate((file) => {
       const conversationId = input.conversationId ? resolveConversationAlias(file, input.conversationId) : null;
       const parentConversationId = input.parentConversationId ? resolveConversationAlias(file, input.parentConversationId) : null;
-      const profile = emptyLaunchProfile({ cwd: input.cwd, ...(input.launchProfile ?? {}), parentConversationId });
       const existingConversation = conversationId ? file.conversations[conversationId] : null;
+      const requestedProfile = emptyLaunchProfile({ cwd: input.cwd, ...(input.launchProfile ?? {}), parentConversationId });
+      const currentProfile = existingConversation?.generations.at(-1)?.launchProfile;
+      const profile = input.purpose === "resume-successor" && currentProfile
+        ? mergeResumeLaunchProfile(currentProfile, requestedProfile)
+        : requestedProfile;
       if (existingConversation && existingConversation.engine !== input.engine) {
         throw new Error("spawn conversation ownership is invalid");
       }

@@ -446,6 +446,63 @@ describe("agent registry", () => {
     });
   });
 
+  test("same-session resume preserves durable launch metadata through default overrides", () => {
+    const store = registry();
+    const nativeId = "019f4906-3f67-7b72-9fbc-9ec3b5ad1326";
+    const firstPath = `/sessions/2026/07/11/rollout-2026-07-11T10-00-00-${nativeId}.jsonl`;
+    const secondPath = `/sessions/2026/07/12/rollout-2026-07-12T10-00-00-${nativeId}.jsonl`;
+    const parent = store.ensureConversation("codex", "/sessions/parent-019f4906-3f67-7b72-9fbc-9ec3b5ad1325.jsonl", "terra");
+    const conversation = store.ensureConversation("codex", firstPath, "terra");
+    store.reconcileConversations([{
+      engine: "codex",
+      path: firstPath,
+      accountId: "terra",
+      launchProfile: emptyLaunchProfile({
+        cwd: "/repo/original",
+        model: "gpt-original",
+        effort: "medium",
+        title: "Durable title",
+        project: "durable-project",
+        parentConversationId: parent.id,
+        role: "root",
+        goal: { objective: "Preserve lineage", status: "active", tokensUsed: null, timeUsedSeconds: null },
+      }),
+      turn: { state: "idle", source: "empty", terminalAt: null },
+      observedAt: "2026-07-12T12:00:00.000Z",
+    }]);
+    const begun = store.beginSpawnRequest({
+      engine: "codex",
+      cwd: "/repo/resumed",
+      accountId: "terra",
+      conversationId: conversation.id,
+      purpose: "resume-successor",
+      launchProfile: emptyLaunchProfile({ cwd: "/repo/resumed", model: "gpt-resumed", effort: "high" }),
+    });
+    if (begun.kind !== "created") throw new Error("expected create");
+
+    expect(begun.receipt.launchProfile).toMatchObject({
+      cwd: "/repo/resumed",
+      model: "gpt-resumed",
+      effort: "high",
+      title: "Durable title",
+      project: "durable-project",
+      parentConversationId: parent.id,
+      role: "root",
+      goal: { objective: "Preserve lineage", status: "active" },
+    });
+    expect(store.settleSpawn(begun.receipt.launchId, { ...spawnEntry(secondPath), cwd: "/repo/resumed" })).toMatchObject({ kind: "settled" });
+    expect(store.conversation(conversation.id)?.generations[0]?.launchProfile).toMatchObject({
+      cwd: "/repo/resumed",
+      model: "gpt-resumed",
+      effort: "high",
+      title: "Durable title",
+      project: "durable-project",
+      parentConversationId: parent.id,
+      role: "root",
+      goal: { objective: "Preserve lineage", status: "active" },
+    });
+  });
+
   test("settles a same-session successor after inventory moves the generation first", () => {
     const store = registry();
     const nativeId = "019f4906-3f67-7b72-9fbc-9ec3b5ad1326";
