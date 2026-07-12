@@ -105,9 +105,12 @@ class FakeAppServer extends EventEmitter {
   }
 }
 
-function fakeSpawn(server: FakeAppServer, captured?: { options?: SpawnOptionsWithoutStdio }) {
-  return (_command: string, _args: string[], options: SpawnOptionsWithoutStdio) => {
-    if (captured) captured.options = options;
+function fakeSpawn(server: FakeAppServer, captured?: { args?: string[]; options?: SpawnOptionsWithoutStdio }) {
+  return (_command: string, args: string[], options: SpawnOptionsWithoutStdio) => {
+    if (captured) {
+      captured.args = args;
+      captured.options = options;
+    }
     return server as unknown as ChildProcessWithoutNullStreams;
   };
 }
@@ -207,12 +210,15 @@ describe("CodexAppServerHost", () => {
 
   test("resumes the same engine thread after a host-process replacement", async () => {
     const eventStore = new MemoryEventStore();
-    const first = await CodexAppServerHost.start({ cwd: "/repo", eventStore, spawnProcess: fakeSpawn(new FakeAppServer("durable-thread")) });
+    const firstServer = new FakeAppServer("durable-thread");
+    const first = await CodexAppServerHost.start({ cwd: "/repo", effort: "xhigh", eventStore, spawnProcess: fakeSpawn(firstServer) });
     await first.send({ id: "before-restart", text: "remember" });
+    expect(firstServer.requests.find((request) => request.method === "turn/start")?.params).toMatchObject({ effort: "xhigh" });
     await first.release();
     const replacementServer = new FakeAppServer("durable-thread");
     const replacement = await CodexAppServerHost.adopt("durable-thread", {
       cwd: "/repo",
+      effort: "xhigh",
       eventStore,
       initialEventCursor: 3,
       spawnProcess: fakeSpawn(replacementServer),
@@ -223,7 +229,25 @@ describe("CodexAppServerHost", () => {
     expect((await replay.next()).value).toEqual({ kind: "turn-started", turnId: "turn-1", seq: 2 });
     expect((await replay.next()).value).toEqual({ kind: "session-status", status: "unhosted", seq: 3 });
     expect((await replay.next()).value).toEqual({ kind: "session-status", status: "idle", seq: 4 });
+    await replacement.send({ id: "after-restart", text: "recall" });
+    expect(replacementServer.requests.find((request) => request.method === "turn/start")?.params).toMatchObject({ effort: "xhigh" });
     await replacement.release();
+  });
+
+  test("managed-home adoption pins file-backed Codex credentials", async () => {
+    const server = new FakeAppServer("managed-thread");
+    const captured: { args?: string[]; options?: SpawnOptionsWithoutStdio } = {};
+    const host = await CodexAppServerHost.adopt("managed-thread", {
+      cwd: "/repo",
+      codexHome: "/managed-codex-home",
+      fileAuthCredentials: true,
+      eventStore: new MemoryEventStore(),
+      spawnProcess: fakeSpawn(server, captured),
+    });
+    expect(captured.args).toEqual(["-c", "cli_auth_credentials_store=file", "app-server"]);
+    expect(captured.options?.env?.CODEX_HOME).toBe("/managed-codex-home");
+    expect(server.requests.some((request) => request.method === "thread/resume")).toBeTrue();
+    await host.release();
   });
 
   test("rejects a resume response for a different durable thread", async () => {

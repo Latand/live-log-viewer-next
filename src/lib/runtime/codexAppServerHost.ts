@@ -40,6 +40,7 @@ export interface CodexAppServerHostOptions {
   binary?: string;
   model?: string;
   effort?: string;
+  fileAuthCredentials?: boolean;
   sandbox?: string;
   approvalPolicy?: string;
   env?: NodeJS.ProcessEnv;
@@ -170,6 +171,7 @@ export class CodexAppServerHost implements EngineHost {
   private readonly requestTimeoutMs: number;
   private readonly shutdownGraceMs: number;
   private readonly eventStore: RuntimeEventStore;
+  private readonly effort: string | undefined;
   private readonly pending = new Map<number, PendingRpc>();
   private readonly subscribers = new Set<Subscriber>();
   private readonly events: RuntimeEvent[] = [];
@@ -200,6 +202,7 @@ export class CodexAppServerHost implements EngineHost {
     this.requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.shutdownGraceMs = options.shutdownGraceMs ?? DEFAULT_SHUTDOWN_GRACE_MS;
     this.eventStore = options.eventStore ?? new FileRuntimeEventStore();
+    this.effort = options.effort;
     this.cursor = options.initialEventCursor ?? 0;
     this.reapedPromise = new Promise((resolve) => { this.resolveReaped = resolve; });
     child.stdout.on("data", (chunk: Buffer | string) => this.acceptStdout(String(chunk)));
@@ -231,7 +234,10 @@ export class CodexAppServerHost implements EngineHost {
   private static async open(options: CodexAppServerHostOptions, threadId: string | null): Promise<CodexAppServerHost> {
     const spawnProcess = options.spawnProcess ?? ((command, args, spawnOptions) =>
       spawn(command, args, { ...spawnOptions, stdio: ["pipe", "pipe", "pipe"] }));
-    const child = spawnProcess(options.binary ?? process.env.LLV_CODEX_BINARY ?? "codex", ["app-server"], {
+    const args = options.fileAuthCredentials
+      ? ["-c", "cli_auth_credentials_store=file", "app-server"]
+      : ["app-server"];
+    const child = spawnProcess(options.binary ?? process.env.LLV_CODEX_BINARY ?? "codex", args, {
       cwd: options.cwd,
       env: subscriptionEnv(options.env ?? process.env, options.codexHome),
     });
@@ -333,6 +339,7 @@ export class CodexAppServerHost implements EngineHost {
     }
     const result = await this.rpc("turn/start", {
       threadId: this.identity.threadId,
+      ...(this.effort ? { effort: this.effort } : {}),
       input,
       clientUserMessageId: entry.id,
     });
