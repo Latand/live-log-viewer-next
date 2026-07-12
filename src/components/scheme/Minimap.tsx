@@ -8,6 +8,7 @@ import { useLocale } from "@/lib/i18n";
 
 import type { SchemeLayout, SchemeRect } from "./layout";
 import { TASK_W, taskCardHeight, type PlacedTask } from "./taskGeometry";
+import type { WorkerStack } from "./workerCollapse";
 
 export interface Camera {
   x: number;
@@ -22,6 +23,20 @@ const MAP_H = 148;
 export interface StackDot {
   key: string;
   color: string;
+}
+
+/** Minimap dot tone per collapsed worker-stack origin (issue #136): orchestration
+    origins (flow/pipeline) in accent, spawner/worktree origins in gray. */
+export const STACK_DOT_COLOR: Record<WorkerStack["kind"], string> = {
+  flow: "#5a51e0",
+  pipeline: "#5a51e0",
+  origin: "#9a9aa4",
+  worktree: "#c9c9d1",
+};
+
+/** One minimap dot per collapsed worker stack (issue #136), tinted by origin. */
+export function stackDotsFor(stacks: readonly WorkerStack[]): StackDot[] {
+  return stacks.map((stack) => ({ key: stack.key, color: STACK_DOT_COLOR[stack.kind] }));
 }
 
 /**

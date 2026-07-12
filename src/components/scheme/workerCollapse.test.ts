@@ -10,6 +10,7 @@ import {
   DEFAULT_WORKER_COLLAPSE_IDLE_MS,
   groupWorkerStacks,
   isCollapseExempt,
+  pipelineOriginOf,
   pipelineStageAgentPaths,
   protectedReviewerNodes,
   reviewerRoundFinished,
@@ -150,6 +151,26 @@ describe("classifyWorker", () => {
   test("fail-toward-collapsed never overrides the parentless-root exemption (#136)", () => {
     const root = entry({ path: "/root", parent: null });
     expect(classifyWorker(root, lineage())).toBeNull();
+  });
+});
+
+describe("pipelineOriginOf — ancestor-chain pipeline ownership (#136)", () => {
+  test("a stage resolves directly; its spawned descendant resolves through the chain", () => {
+    const stage = entry({ path: "/stage", parent: "/orch" });
+    const child = entry({ path: "/stage/child", parent: "/stage", kind: "subagent" });
+    const grandchild = entry({ path: "/stage/child/leaf", parent: "/stage/child", kind: "subagent" });
+    const filesByPath = new Map([[stage.path, stage], [child.path, child], [grandchild.path, grandchild]]);
+    const pipelineIds = new Map([["/stage", "pipe1"]]);
+    expect(pipelineOriginOf(stage, filesByPath, pipelineIds)).toBe("pipe1");
+    expect(pipelineOriginOf(child, filesByPath, pipelineIds)).toBe("pipe1");
+    expect(pipelineOriginOf(grandchild, filesByPath, pipelineIds)).toBe("pipe1");
+  });
+
+  test("a worker with no pipeline ancestor resolves to null", () => {
+    const a = entry({ path: "/a" });
+    const b = entry({ path: "/a/b", parent: "/a", kind: "subagent" });
+    const filesByPath = new Map([[a.path, a], [b.path, b]]);
+    expect(pipelineOriginOf(b, filesByPath, new Map())).toBeNull();
   });
 });
 
@@ -404,6 +425,27 @@ describe("groupWorkerStacks — one stack per origin (#136)", () => {
     expect(stacks[0]!.kind).toBe("origin");
     expect(stacks[0]!.id).toBe("/originX");
     expect(stacks[0]!.items).toHaveLength(2);
+  });
+
+  test("a pipeline stage and its spawned child fold into ONE pipeline stack, not a second origin stack (#136)", () => {
+    /* The stage is owned by agentPath; its child has a different path. Ancestor
+       resolution keeps both in the same pipeline stack. */
+    const stage = stale({ path: "/stage", parent: "/orch" });
+    const child = stale({ path: "/stage/child", parent: "/stage", kind: "subagent" });
+    const filesByPath = new Map([[stage.path, stage], [child.path, child]]);
+    const pipelineIds = new Map([["/stage", "pipe1"]]);
+    const stacks = groupWorkerStacks([stage, child], [], new Set(), {
+      pipelineIdOf: (path) => {
+        const file = filesByPath.get(path);
+        return file ? pipelineOriginOf(file, filesByPath, pipelineIds) : null;
+      },
+      /* Without the pipeline resolver both would fall here — proving the split. */
+      originOf: () => "/orch",
+    });
+    expect(stacks).toHaveLength(1);
+    expect(stacks[0]!.kind).toBe("pipeline");
+    expect(stacks[0]!.id).toBe("pipe1");
+    expect(stacks[0]!.items.map((f) => f.path).sort()).toEqual(["/stage", "/stage/child"]);
   });
 
   test("origin precedence: flow → pipeline → spawner → worktree", () => {

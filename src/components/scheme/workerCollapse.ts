@@ -219,6 +219,30 @@ export function pipelineStagePipelineIds(pipelines: readonly Pipeline[]): Map<st
   return map;
 }
 
+/**
+ * The pipeline a worker belongs to, resolved through its ANCESTOR chain (issue
+ * #136). A pipeline records ownership only for each stage attempt's `agentPath`;
+ * a conversation that stage spawns has its own path, so a path-only lookup would
+ * miss it and split it into a separate origin stack while the stage stays in the
+ * pipeline stack — one pipeline reading as two chips. Walking up `parent` to the
+ * nearest pipeline-owned ancestor keeps the whole subtree in one pipeline stack.
+ */
+export function pipelineOriginOf(
+  file: FileEntry,
+  filesByPath: ReadonlyMap<string, FileEntry>,
+  pipelineIds: ReadonlyMap<string, string>,
+): string | null {
+  let cursor: FileEntry | undefined = file;
+  const seen = new Set<string>();
+  while (cursor && !seen.has(cursor.path)) {
+    const id = pipelineIds.get(cursor.path);
+    if (id) return id;
+    seen.add(cursor.path);
+    cursor = cursor.parent ? filesByPath.get(cursor.parent) : undefined;
+  }
+  return null;
+}
+
 /** Resolvers that place a worker under its origin (issue #136). Both are pure
     path lookups computed once per render by the caller from the full file set /
     pipeline list, so grouping stays a deterministic function of the scan. */

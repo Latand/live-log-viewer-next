@@ -27,7 +27,7 @@ import { nodesInRect, pruneSelection, selectionBBox } from "./lasso";
 import { resolveExpandedNode } from "./expandedNode";
 import { autoEditTokenFor, clearStaleRename, requestRename, type RenameRequest } from "./renameRequest";
 import { buildSchemeLayout } from "./layout";
-import { Minimap, type StackDot } from "./Minimap";
+import { Minimap, stackDotsFor, type StackDot } from "./Minimap";
 import type { WorkerStack } from "./workerCollapse";
 import { AgentLinksLayer, EdgesLayer, GroupsLayer, LoopsLayer, MOVE_EASE, NodesLayer, type DeckFocus, type PipelineGroupControls } from "./nodes";
 import type { TaskCardHandlers } from "./TaskCard";
@@ -60,14 +60,6 @@ const DORMANT_ENTER_Z = LABEL_Z * 0.95;
 const DORMANT_EXIT_Z = LABEL_Z * 1.1;
 
 const EMPTY_PATHS: ReadonlySet<string> = new Set();
-
-/* Minimap dot tone per collapsed worker-stack origin (issue #136). */
-const STACK_DOT_COLOR: Record<WorkerStack["kind"], string> = {
-  flow: "#5a51e0",
-  pipeline: "#5a51e0",
-  origin: "#9a9aa4",
-  worktree: "#c9c9d1",
-};
 
 interface Props {
   project: string;
@@ -394,10 +386,7 @@ export function SchemeBoard({
   );
   /* One minimap dot per collapsed worker-stack origin (issue #136): orchestration
      origins (flow/pipeline) in accent, spawner/worktree origins in gray. */
-  const stackDots = useMemo<StackDot[]>(
-    () => workerStacks.map((stack) => ({ key: stack.key, color: STACK_DOT_COLOR[stack.kind] })),
-    [workerStacks],
-  );
+  const stackDots = useMemo<StackDot[]>(() => stackDotsFor(workerStacks), [workerStacks]);
 
   /* A stationary background tap: inside the session it toggles the node under
      the cursor (panes are click-through, so the DOM can't answer) or exits on

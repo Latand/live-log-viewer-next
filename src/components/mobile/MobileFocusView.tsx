@@ -29,6 +29,7 @@ import { VerdictPopover } from "@/components/pipelines/VerdictPopover";
 import { deckKey } from "@/components/scheme/agentLinks";
 import { buildSchemeLayout } from "@/components/scheme/layout";
 import { SchemeBoard } from "@/components/scheme/SchemeBoard";
+import type { WorkerStack } from "@/components/scheme/workerCollapse";
 
 const focusKey = (project: string) => "llvFocus:" + project;
 
@@ -56,6 +57,9 @@ interface Props {
   /** Active project pipelines needing a scheme surface with no placed stage node
       yet (issue #136): docked as placeholder groups in the map layout. */
   surfacePipelines?: Pipeline[];
+  /** Collapsed worker stacks (issue #136): one dot per origin on the full-map
+      minimap, so folded workers read as a handful of dots there too. */
+  workerStacks?: WorkerStack[];
   /** This project's board tasks: mini-cards on the map, editable in the sheet. */
   tasks: BoardTask[];
   /** Ids of not-yet-spawned conversation drafts, focusable like nodes. */
@@ -79,7 +83,7 @@ interface Props {
  * data the scheme draws — nothing on the diagram is unreachable, it is just
  * shown one pane at a time.
  */
-export function MobileFocusView({ project, groups, manual, files, flows, pipelines, surfacePipelines = [], tasks, drafts, loaded, focus, onSelect, onClose, onDraftClose, onDraftSpawned, onHandoff, taskSheetNonce = 0 }: Props) {
+export function MobileFocusView({ project, groups, manual, files, flows, pipelines, surfacePipelines = [], workerStacks = [], tasks, drafts, loaded, focus, onSelect, onClose, onDraftClose, onDraftSpawned, onHandoff, taskSheetNonce = 0 }: Props) {
   const { t } = useLocale();
   const [focusPath, setFocusPath] = useState<string | null>(null);
   const [mapOpen, setMapOpen] = useState(false);
@@ -435,6 +439,7 @@ export function MobileFocusView({ project, groups, manual, files, flows, pipelin
             flows={flows}
             pipelines={pipelines}
             surfacePipelines={surfacePipelines}
+            workerStacks={workerStacks}
             tasks={tasks}
             drafts={drafts}
             focus={null}

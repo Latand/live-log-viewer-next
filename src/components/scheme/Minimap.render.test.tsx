@@ -1,8 +1,9 @@
 import { expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import { Minimap, type StackDot } from "./Minimap";
+import { Minimap, stackDotsFor, type StackDot } from "./Minimap";
 import type { SchemeLayout, SchemeRect } from "./layout";
+import type { WorkerStack } from "./workerCollapse";
 
 const emptyLayout: SchemeLayout = {
   nodes: [], edges: [], stacks: [], decks: [], loops: [], groups: [], links: [], drafts: [],
@@ -39,6 +40,19 @@ test("every collapsed stack gets a dot — none hidden behind a counter past 14 
   expect(dots.length).toBe(20);
   expect(html).not.toContain("+6");
   expect(html).toContain("20 collapsed stacks");
+});
+
+test("stackDotsFor maps each worker stack to one origin-toned dot (#136)", () => {
+  const stacks = [
+    { key: "wstack::flow::f1", kind: "flow", id: "f1", items: [] },
+    { key: "wstack::pipeline::p1", kind: "pipeline", id: "p1", items: [] },
+    { key: "wstack::origin::/root", kind: "origin", id: "/root", items: [] },
+    { key: "wstack::worktree::wt", kind: "worktree", id: "wt", items: [] },
+  ] as unknown as WorkerStack[];
+  const dots = stackDotsFor(stacks);
+  expect(dots).toHaveLength(4);
+  expect(dots.map((d) => d.color)).toEqual(["#5a51e0", "#5a51e0", "#9a9aa4", "#c9c9d1"]);
+  expect(dots.map((d) => d.key)).toEqual(stacks.map((s) => s.key));
 });
 
 test("no worker stacks → no legend dots", () => {

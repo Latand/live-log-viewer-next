@@ -21,7 +21,7 @@ import { claimedReviewerDescendantPaths, foldClaimedReviewers, isActiveFlow } fr
 import { PipelineDialog } from "./pipelines/PipelineDialog";
 import { pipelinesForProject } from "./pipelines/pipelineModel";
 import { buildSchemeLayout } from "./scheme/layout";
-import { collapsibleWorkerFiles, groupWorkerStacks, pipelineStagePipelineIds, protectedReviewerNodes } from "./scheme/workerCollapse";
+import { collapsibleWorkerFiles, groupWorkerStacks, pipelineOriginOf, pipelineStagePipelineIds, protectedReviewerNodes } from "./scheme/workerCollapse";
 import { WorkerStacks } from "./WorkerStacks";
 import { clearWorkflowDraftStorage } from "./workflows/WorkflowDraftPane";
 import { isWorkflowDraftId } from "./workflows/workflowModel";
@@ -350,22 +350,31 @@ export function ProjectDashboard({
   /* Per-origin stack grouping inputs (issue #136): a worker folds under its
      pipeline, else its spawner — the topmost resolvable ancestor of its
      `parent` chain — so one origin is one chip regardless of how many workers or
-     rounds it bred. */
+     rounds it bred. Pipeline ownership resolves through the ancestor chain so a
+     stage's spawned child stays in the pipeline stack, not a second origin one. */
+  const filesByPath = useMemo(() => new Map(files.map((file) => [file.path, file] as const)), [files]);
   const pipelineIdByPath = useMemo(() => pipelineStagePipelineIds(pipelines), [pipelines]);
-  const spawnerRootOf = useMemo(() => {
-    const byPath = new Map(files.map((file) => [file.path, file] as const));
-    return (file: FileEntry): string | null => {
+  const pipelineIdOf = useMemo(
+    () => (path: string): string | null => {
+      const file = filesByPath.get(path);
+      return file ? pipelineOriginOf(file, filesByPath, pipelineIdByPath) : null;
+    },
+    [filesByPath, pipelineIdByPath],
+  );
+  const spawnerRootOf = useMemo(
+    () => (file: FileEntry): string | null => {
       let cursor = file;
       const seen = new Set<string>([file.path]);
       for (;;) {
-        const parent = cursor.parent ? byPath.get(cursor.parent) : undefined;
+        const parent = cursor.parent ? filesByPath.get(cursor.parent) : undefined;
         if (!parent || seen.has(parent.path)) break;
         seen.add(parent.path);
         cursor = parent;
       }
       return cursor.path === file.path ? null : cursor.path;
-    };
-  }, [files]);
+    },
+    [filesByPath],
+  );
   /* The board layout's file set with collapsed workers removed. Kept separate
      from `groupFiles` so board-membership reconciliation still sees the full
      catalog and never retires a collapsed worker's durable placement. */
@@ -757,7 +766,7 @@ export function ProjectDashboard({
      stack member (its manual/expanded pin was dropped on close, so it would
      otherwise re-qualify as a plain collapse candidate). */
   const workerStacks = groupWorkerStacks(collapsibleWorkers, flows, new Set([...deckReviewerPaths, ...hiddenSet]), {
-    pipelineIdOf: (path) => pipelineIdByPath.get(path) ?? null,
+    pipelineIdOf,
     originOf: spawnerRootOf,
   });
   const listAvailable = historyRows.length > 0;
@@ -932,6 +941,7 @@ export function ProjectDashboard({
               flows={flows}
               pipelines={pipelines}
               surfacePipelines={activePipelines}
+              workerStacks={workerStacks}
               tasks={hasNodes ? projectTasks : []}
               drafts={hasNodes ? drafts : []}
               loaded={loaded}
