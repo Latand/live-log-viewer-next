@@ -6,7 +6,7 @@ import { newClientRequestId, uploadTaskAttachment } from "@/components/tasks/tas
 import { useComposer } from "@/hooks/useComposer";
 import { getLocale, translate } from "@/lib/i18n";
 import { inboxImageExt, MAX_INBOX_IMAGE_BYTES } from "@/lib/imagePolicy";
-import { isTaskAttachment } from "@/lib/tasks/attachments";
+import { isTaskAttachment } from "@/lib/tasks/attachmentModel";
 import type { TaskAttachment } from "@/lib/tasks/types";
 
 /** One draft per project, shared by every creation entry point. */
