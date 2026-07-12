@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import type { ChildProcessWithoutNullStreams, SpawnOptionsWithoutStdio } from "node:child_process";
 
 import { procBackend } from "@/lib/proc";
+import { hardenedRedact } from "@/lib/view/compactText";
 
 import type {
   DeliveryReceipt,
@@ -83,6 +84,7 @@ const CHILD_ENV_ALLOWLIST = [
 const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_SHUTDOWN_GRACE_MS = 1_000;
 const MAX_LINE_BYTES = 4 * 1024 * 1024;
+const MUTATING_RPC_METHODS = new Set(["thread/start", "thread/resume", "turn/start", "turn/steer", "turn/interrupt"]);
 
 function record(value: unknown): JsonObject | null {
   return value && typeof value === "object" && !Array.isArray(value) ? value as JsonObject : null;
@@ -93,14 +95,14 @@ function stringField(value: unknown, key: string): string | null {
   return object && typeof object[key] === "string" ? object[key] as string : null;
 }
 
-function safeError(value: unknown): string {
+export function redactCodexHostDiagnostic(value: unknown): string {
   const message = value instanceof Error ? value.message : String(value);
-  return message
-    .replace(/(bearer\s+)[^\s,;]+/gi, "$1[REDACTED]")
-    .replace(/(["']?(?:access|refresh|id)[_-]?token["']?\s*[:=]\s*["']?)[^\s,"'}]+/gi, "$1[REDACTED]")
-    .replace(/(["']?(?:api[_-]?key|authorization)["']?\s*[:=]\s*["']?)[^\s,"'}]+/gi, "$1[REDACTED]")
+  return hardenedRedact(message)
+    .replace(/(["']?(?:cookie|set-cookie)["']?\s*[:=]\s*["']?)[^\s,"'}]+/gi, "$1[redacted]")
     .slice(0, 500);
 }
+
+const safeError = redactCodexHostDiagnostic;
 
 function subscriptionEnv(source: NodeJS.ProcessEnv, codexHome?: string): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { NODE_ENV: source.NODE_ENV };
@@ -205,6 +207,7 @@ export class CodexAppServerHost implements EngineHost {
   private terminationTimer: ReturnType<typeof setTimeout> | null = null;
   private releasePromise: Promise<void> | null = null;
   private writerFence: (() => boolean) | null = null;
+  private ledgerFailed = false;
   private readonly reapedPromise: Promise<void>;
   private resolveReaped!: () => void;
 
@@ -477,6 +480,7 @@ export class CodexAppServerHost implements EngineHost {
   }
 
   private emit(event: UnsequencedEvent): void {
+    if (this.ledgerFailed) return;
     if (this.identity.threadId === "pending") {
       this.preIdentityEvents.push(event);
       return;
@@ -485,8 +489,10 @@ export class CodexAppServerHost implements EngineHost {
     try {
       this.eventStore.append(this.identity.threadId, sequenced);
     } catch (error) {
-      this.startTermination();
-      throw error;
+      this.ledgerFailed = true;
+      this.cursor = this.events.at(-1)?.seq ?? Math.max(0, this.cursor - 1);
+      this.failWithoutLedger(new Error(`runtime event ledger failed: ${safeError(error)}`));
+      return;
     }
     this.events.push(sequenced);
     for (const subscriber of this.subscribers) {
@@ -622,7 +628,9 @@ export class CodexAppServerHost implements EngineHost {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
-        reject(new Error(`${method} timed out`));
+        const error = new Error(`${method} timed out${MUTATING_RPC_METHODS.has(method) ? "; outcome is uncertain" : ""}`);
+        reject(error);
+        if (MUTATING_RPC_METHODS.has(method)) this.fail(error);
       }, this.requestTimeoutMs);
       this.pending.set(id, { resolve, reject, timer });
       this.write({ jsonrpc: "2.0", id, method, params });
@@ -734,6 +742,21 @@ export class CodexAppServerHost implements EngineHost {
     }
     this.pending.clear();
     this.setSessionStatus("dead", activeFlags);
+    this.closeSubscribers();
+    this.startTermination();
+  }
+
+  private failWithoutLedger(error: Error): void {
+    if (this.dead || this.released) return;
+    this.dead = true;
+    this.engineStatus = "dead";
+    this.activeFlags = [];
+    for (const request of this.pending.values()) {
+      clearTimeout(request.timer);
+      request.reject(new Error(safeError(error)));
+    }
+    this.pending.clear();
+    this.notifyStateListeners();
     this.closeSubscribers();
     this.startTermination();
   }

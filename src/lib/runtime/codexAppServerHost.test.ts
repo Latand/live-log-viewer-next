@@ -9,7 +9,7 @@ import { describe, expect, test } from "bun:test";
 import { AgentRegistry } from "@/lib/agent/registry";
 import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
 
-import { CodexAppServerHost } from "./codexAppServerHost";
+import { CodexAppServerHost, redactCodexHostDiagnostic } from "./codexAppServerHost";
 import type { RuntimeEventStore } from "./eventStore";
 import type { RuntimeEvent } from "./engineHost";
 import { adoptCodexRegistryHosts, bindCodexHostPersistence, persistCodexHost, startCodexStructuredHost, structuredHostsEnabled } from "./registry";
@@ -25,6 +25,21 @@ class MemoryEventStore implements RuntimeEventStore {
     const events = this.events.get(threadId) ?? [];
     events.push(structuredClone(event));
     this.events.set(threadId, events);
+  }
+}
+
+class FailingEventStore implements RuntimeEventStore {
+  readonly stored: RuntimeEvent[] = [];
+  appendAttempts = 0;
+
+  load(): RuntimeEvent[] {
+    return structuredClone(this.stored);
+  }
+
+  append(_threadId: string, event: RuntimeEvent): void {
+    this.appendAttempts += 1;
+    if (this.appendAttempts >= 2) throw new Error("ENOSPC oauth_token=must-stay-private");
+    this.stored.push(structuredClone(event));
   }
 }
 
@@ -44,6 +59,7 @@ class FakeAppServer extends EventEmitter {
     private readonly turns: unknown[] = [],
     private readonly resumeStatus: unknown = undefined,
     private readonly resumeRequest: { id: string; method: string; params: Record<string, unknown> } | null = null,
+    private readonly ignoredMethods: string[] = [],
   ) {
     super();
     let buffer = "";
@@ -78,6 +94,7 @@ class FakeAppServer extends EventEmitter {
     this.requests.push(message);
     if (typeof message.id !== "number") return;
     const method = message.method;
+    if (typeof method === "string" && this.ignoredMethods.includes(method)) return;
     if (method === "initialize") return this.respond(message.id, { userAgent: "codex_desktop_app/0.144.1 (Linux)" });
     if (method === "account/read") return this.respond(message.id, { account: { type: "chatgpt", planType: "pro" }, requiresOpenaiAuth: false });
     if (method === "thread/start" || method === "thread/resume") {
@@ -501,6 +518,69 @@ describe("CodexAppServerHost", () => {
     expect((await stream.next()).value).toMatchObject({ kind: "session-status", status: "dead" });
     expect((await stream.next()).done).toBeTrue();
     await host.release();
+  });
+
+  test("a mutating RPC timeout poisons the writer before retry", async () => {
+    const server = new FakeAppServer("timeout-thread", "timeout-thread", false, [], undefined, null, ["turn/start"]);
+    const host = await CodexAppServerHost.start({
+      cwd: "/repo",
+      requestTimeoutMs: 5,
+      eventStore: new MemoryEventStore(),
+      spawnProcess: fakeSpawn(server),
+    });
+    await expect(host.send({ id: "ambiguous-send", text: "start" })).rejects.toThrow("outcome is uncertain");
+    expect(await host.send({ id: "retry", text: "duplicate" })).toEqual({ outcome: "rejected", reason: "dead-host" });
+    expect(server.requests.filter((request) => request.method === "turn/start")).toHaveLength(1);
+    expect(server.signals).toContain("SIGTERM");
+    await host.release();
+  });
+
+  test("ledger failures are contained, reject pending work, and close subscribers", async () => {
+    const store = new FailingEventStore();
+    const server = new FakeAppServer("ledger-thread", "ledger-thread", false, [], undefined, null, ["turn/start"]);
+    const host = await CodexAppServerHost.start({
+      cwd: "/repo",
+      requestTimeoutMs: 1_000,
+      eventStore: store,
+      spawnProcess: fakeSpawn(server),
+    });
+    const stream = host.attach((await host.health()).eventCursor)[Symbol.asyncIterator]();
+    const pendingSend = host.send({ id: "pending-ledger-send", text: "start" });
+    server.notify("account/rateLimits/updated", { rateLimits: {} });
+    await expect(pendingSend).rejects.toThrow("runtime event ledger failed");
+    expect(await host.health()).toMatchObject({ status: "dead", eventCursor: 1 });
+    expect(store.appendAttempts).toBe(2);
+    server.notify("account/rateLimits/updated", { rateLimits: { retry: true } });
+    expect(store.appendAttempts).toBe(2);
+    expect((await stream.next()).done).toBeTrue();
+    expect(server.signals).toContain("SIGTERM");
+    await host.release();
+  });
+
+  test("diagnostics redact credential labels, cookies, JWTs, and provider key prefixes", () => {
+    const secrets = [
+      "oauth-secret-value",
+      "auth-secret-value",
+      "session-secret-value",
+      "client-secret-value",
+      "cookie-secret-value",
+      "generic-secret-value",
+      "eyJabcdefghijk.abcdefghijk.abcdefghijk",
+      "sk-ant-abcdefghijklmnopqrstuvwxyz",
+      "ghp_abcdefghijklmnopqrstuvwxyz1234567890",
+    ];
+    const redacted = redactCodexHostDiagnostic([
+      `oauth_token=${secrets[0]}`,
+      `auth_token=${secrets[1]}`,
+      `session_token=${secrets[2]}`,
+      `client_secret=${secrets[3]}`,
+      `cookie=${secrets[4]}`,
+      `token=${secrets[5]}`,
+      secrets[6],
+      secrets[7],
+      secrets[8],
+    ].join(" "));
+    for (const secret of secrets) expect(redacted).not.toContain(secret);
   });
 
   test("requires an exact opt-in value", async () => {
