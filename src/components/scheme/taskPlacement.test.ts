@@ -12,7 +12,15 @@ import { TASK_W, taskCardHeight, taskRect } from "./taskGeometry";
 const SRC = { path: "/src", ts: null, text: "", fingerprint: "f", engine: "claude" as const };
 
 function task(id: string, x: number, y: number, over: Partial<PlaceableTask> = {}): PlaceableTask {
-  return { id, pos: { x, y }, text: "Investigate the flaky login test\nthat fails on CI", assignments: [], source: undefined, ...over };
+  return {
+    id,
+    pos: { x, y },
+    text: "Investigate the flaky login test\nthat fails on CI",
+    assignments: [],
+    source: undefined,
+    createdAt: "2026-01-01T00:00:00.000Z",
+    ...over,
+  };
 }
 
 /* The autoPos lattice both curator.ts and inboxScanner.ts write: two columns
@@ -181,6 +189,26 @@ describe("resolveTaskPlacements", () => {
     ];
     const placement = resolveTaskPlacements(tasks, []);
     const rects = tasks.map((t) => rectAt(t, placement.get(t.id)!));
+    for (let a = 0; a < rects.length; a++) {
+      for (let b = a + 1; b < rects.length; b++) {
+        expect(clash(rects[a]!, rects[b]!, TASK_GUTTER - 1)).toBe(false);
+      }
+    }
+  });
+
+  test("adding a task never reshuffles the cards that predate it (Finding)", () => {
+    /* Two panel cards at the shared seed, then a third added later whose UUID
+       sorts *before* both. Ordering by creation time (not id) keeps the two
+       existing cards exactly where they were; only the newcomer flows around. */
+    const old1 = task("zzz-1", 120, 120, { pinned: false, createdAt: "2026-07-01T00:00:00.000Z" });
+    const old2 = task("zzz-2", 120, 120, { pinned: false, createdAt: "2026-07-02T00:00:00.000Z" });
+    const before = resolveTaskPlacements([old1, old2], []);
+    const newer = task("aaa-3", 120, 120, { pinned: false, createdAt: "2026-07-03T00:00:00.000Z" });
+    const after = resolveTaskPlacements([old1, old2, newer], []);
+    expect(after.get("zzz-1")).toEqual(before.get("zzz-1"));
+    expect(after.get("zzz-2")).toEqual(before.get("zzz-2"));
+    /* And the newcomer still clears them. */
+    const rects = [old1, old2, newer].map((t) => rectAt(t, after.get(t.id)!));
     for (let a = 0; a < rects.length; a++) {
       for (let b = a + 1; b < rects.length; b++) {
         expect(clash(rects[a]!, rects[b]!, TASK_GUTTER - 1)).toBe(false);

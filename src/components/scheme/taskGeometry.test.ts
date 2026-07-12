@@ -938,6 +938,28 @@ describe("routeTaskEdges — busy fan-out corridor deconfliction (Finding)", () 
       expect(reversed.get(e.key)!.crosses).toBe(forward.get(e.key)!.crosses);
     }
   });
+
+  test("a dense 20-edge fan-out never reuses an occupied corridor (Finding)", () => {
+    /* The fixed ten-lane list ran out and later edges fell back onto an occupied
+       rail (three shared h:84). The lane search now steps until free, and an edge
+       that can't find a corridor bows off the rail entirely — so no two routes
+       ever share a corridor. */
+    const pane: SchemeRect = { x: -300, y: 100, w: 600, h: 680 };
+    const edges = Array.from({ length: 20 }, (_, i) => geom("a" + String(i).padStart(2, "0"), -450, 400 + i * 8, 450, 200 + i * 70));
+    const routes = routeTaskEdges(edges, [], [pane]);
+    const corridors = edges.map((e) => routes.get(e.key)!.corridor);
+    for (let i = 0; i < corridors.length; i++) {
+      for (let j = i + 1; j < corridors.length; j++) {
+        const a = corridors[i];
+        const b = corridors[j];
+        if (a && b && a.axis === b.axis && Math.min(a.hi, b.hi) > Math.max(a.lo, b.lo)) {
+          /* Shared axis and overlapping extent — their positions must be at least
+             a lane apart, never the same rail. */
+          expect(Math.abs(a.pos - b.pos)).toBeGreaterThanOrEqual(25);
+        }
+      }
+    }
+  });
 });
 
 describe("routeTaskEdges — render-thread cost (Finding 2)", () => {

@@ -927,7 +927,11 @@ function routesCross(a: readonly RouteSeg[], b: readonly RouteSeg[], shared: rea
    detour stacks laneOff away from the obstacle) — until its corridor clears the
    ones already placed. Bounded so placement always terminates; a member that
    can't clear keeps its last try. */
-const CORRIDOR_LANES = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+/* Corridor-lane search bound. A step is one LANE_BOW further out, so with N
+   corridors already placed a free lane exists within N+1 steps (pigeonhole);
+   the search runs up to this many, enough for any realistic fan-out while
+   keeping the pass bounded on a pathological all-through-one-pane board. */
+const CORRIDOR_LANE_MAX = 48;
 
 /* Extra perpendicular bows a crossing edge may try, on top of its lane, to slip
    past another edge. Bounded so the pass is cheap and always terminates. */
@@ -1084,9 +1088,15 @@ export function routeTaskEdges(
       if (corridor && clashes(corridor)) {
         const laneBase = lanes.get(edge.key) ?? 0;
         const obstacles = edgeObstacles(edge, cards, containers);
-        for (const step of CORRIDOR_LANES) {
+        /* Keep stepping the lane outward until the route clears the corridors
+           already placed — the fixed ten-lane list left a dense fan-out reusing
+           occupied rails (issue #17). Accept the first obstacle-clear route that
+           either lands on a free corridor or has bowed far enough to leave the
+           corridor entirely (no rail to share); the outward stack guarantees one
+           within a lane per placed corridor. Bounded by CORRIDOR_LANE_MAX. */
+        for (let step = 1; step <= CORRIDOR_LANE_MAX; step++) {
           const route = routeTaskEdge(edge, obstacles, laneBase + step);
-          if (route.corridor && !clashes(route.corridor)) {
+          if (!route.crosses && (!route.corridor || !clashes(route.corridor))) {
             const cubics = parseCubics(route.d);
             state.set(edge.key, { route, cubics, box: cubicsBounds(cubics) });
             corridor = route.corridor;

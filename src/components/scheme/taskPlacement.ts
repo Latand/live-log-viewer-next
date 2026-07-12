@@ -15,7 +15,7 @@ const MAX_RING = 48;
 
 /** Everything the placement pass needs from a task — kept structural so the
     module tests with plain literals; no full BoardTask fixtures are needed. */
-export type PlaceableTask = Pick<BoardTask, "id" | "pos" | "text" | "assignments" | "source" | "pinned">;
+export type PlaceableTask = Pick<BoardTask, "id" | "pos" | "text" | "assignments" | "source" | "pinned" | "createdAt">;
 
 /** Do two rects come within `gap` of each other? Touching or closer counts;
     exactly `gap` apart does not, so a resolved slot keeps a real gutter. */
@@ -126,12 +126,21 @@ export function isAutoPlaceable(task: PlaceableTask): boolean {
  * lattice — keeps its exact coordinates untouched and anchors the pass as an
  * immovable obstacle, so hand-arranged boards pass through unchanged. An auto
  * card keeps its stored spot only while it clears every other card and every
- * pane; otherwise it relocates in reading order — top-to-bottom then
- * left-to-right, id as the final tiebreak — so the topmost card of a pileup
- * settles first and the rest flow down around it.
+ * pane; otherwise it relocates. Auto cards settle in creation order (oldest
+ * first, id as the final tiebreak), so the oldest card of a pileup holds the
+ * anchor and each new one flows around those already there — adding a task can
+ * never reshuffle the cards that predate it.
  */
 export function resolveTaskPlacements(tasks: readonly PlaceableTask[], obstacles: readonly SchemeRect[]): Map<string, { x: number; y: number }> {
-  const cards = tasks.map((task) => ({ id: task.id, x: task.pos.x, y: task.pos.y, w: TASK_W, h: taskCardHeight(task), auto: isAutoPlaceable(task) }));
+  const cards = tasks.map((task) => ({
+    id: task.id,
+    createdAt: task.createdAt,
+    x: task.pos.x,
+    y: task.pos.y,
+    w: TASK_W,
+    h: taskCardHeight(task),
+    auto: isAutoPlaceable(task),
+  }));
 
   const placed: SchemeRect[] = [];
   const result = new Map<string, { x: number; y: number }>();
@@ -146,7 +155,7 @@ export function resolveTaskPlacements(tasks: readonly PlaceableTask[], obstacles
 
   const order = cards
     .filter((card) => card.auto)
-    .sort((a, b) => a.y - b.y || a.x - b.x || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+    .sort((a, b) => (a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   for (const card of order) {
     const spot = findSlot(card, placed, obstacles);
     result.set(card.id, spot);
