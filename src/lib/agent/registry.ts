@@ -600,7 +600,10 @@ function recordObservedLineage(
 ): void {
   const generation = conversation.generations.find((candidate) => candidate.path === artifactPath)
     ?? conversation.generations.at(-1);
-  const parentConversationId = generation?.launchProfile.parentConversationId;
+  const existing = file.lineageEdges[conversation.id];
+  const parentConversationId = existing?.source === "viewer-spawn"
+    ? existing.parentConversationId
+    : generation?.launchProfile.parentConversationId;
   if (!generation || !parentConversationId || parentConversationId === conversation.id) return;
   const canonicalParentId = resolveConversationAlias(file, parentConversationId);
   const parent = file.conversations[canonicalParentId];
@@ -613,9 +616,9 @@ function recordObservedLineage(
     parentSessionKey: parentGeneration ? sessionKeyFromTranscript(parent.engine, parentGeneration.path) : null,
     childArtifactPath: artifactPath,
     parentArtifactPath: parentGeneration?.path ?? null,
-    source: "engine-native",
-    evidence: { launchId: null, clientAttemptId: null },
-    createdAt: file.lineageEdges[conversation.id]?.createdAt ?? observedAt,
+    source: existing?.source ?? "engine-native",
+    evidence: existing?.evidence ?? { launchId: null, clientAttemptId: null },
+    createdAt: existing?.createdAt ?? observedAt,
   };
 }
 
@@ -1341,12 +1344,14 @@ export class AgentRegistry {
         const nativeOwner = nativeId ? preferredConversationOwner(file, Object.values(file.conversations).filter((candidate) =>
           candidate.engine === observation.engine && candidate.generations.some((generation) => generation.id === nativeId))) : null;
         let conversation = exactOwner ?? nativeOwner ?? null;
+        let adoptedSuccessorPath = false;
         if (exactOwner && nativeOwner && exactOwner.id !== nativeOwner.id
           && adoptProvisionalOwner(file, exactOwner, nativeOwner, observation.path)) {
           exactOwner = nativeOwner;
           conversation = nativeOwner;
+          adoptedSuccessorPath = true;
         }
-        if (!exactOwner && nativeOwner && nativeId) {
+        if ((!exactOwner || adoptedSuccessorPath) && nativeOwner && nativeId) {
           const generation = nativeOwner.generations.find((candidate) => candidate.id === nativeId);
           if (generation && generation.path !== observation.path) {
             if (!nativeOwner.continuityPaths.includes(generation.path)) nativeOwner.continuityPaths.push(generation.path);

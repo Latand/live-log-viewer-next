@@ -15,6 +15,7 @@ import { reasoningFromBody } from "@/lib/agent/efforts";
 import { modelFromBody } from "@/lib/agent/models";
 import { resolveSpawnRole } from "@/lib/roles/registry";
 import { sessionKeyFromTranscript } from "@/lib/agent/sessionKey";
+import { resolveSpawnParent, SpawnParentError, transcriptAllowed } from "@/lib/agent/spawnParent";
 import { spawnResponseForReceipt, type SpawnResponse } from "@/lib/agent/spawnResponse";
 import { resolveSpawnedTranscriptPath } from "@/lib/agent/spawnedTranscript";
 import { headCwd } from "@/lib/agent/transcript";
@@ -25,7 +26,7 @@ import { runtimeScope } from "@/lib/runtime/contracts";
 import { runtimeEventsEnabled } from "@/lib/runtime/flags";
 import { listFiles } from "@/lib/scanner";
 import { projectForCwd } from "@/lib/scanner/describe";
-import { claudeProjectRootFor, codexSessionRootFor } from "@/lib/scanner/roots";
+import { codexSessionRootFor } from "@/lib/scanner/roots";
 import { buildImagePayload, collectImagePayloads, deleteInboxImages, spawnAgentWithPrompt, verifyTmuxHostEvidence } from "@/lib/tmux";
 import type { ApiError } from "@/lib/types";
 
@@ -40,23 +41,6 @@ interface SuggestResponse {
   dirs: string[];
   /** Working directory of the `src` transcript when one was requested. */
   cwd: string | null;
-}
-
-/** Security gate for `?src=`: the resolved real path must be a regular .jsonl
-    transcript inside one of the two conversation roots — the server-side
-    mirror of the client's canHandoff gate. */
-function transcriptAllowed(candidate: string): boolean {
-  let real: string;
-  let stat: fs.Stats;
-  try {
-    real = fs.realpathSync(candidate);
-    stat = fs.statSync(real);
-  } catch {
-    return false;
-  }
-  if (!stat.isFile() || !real.endsWith(".jsonl")) return false;
-  if (codexSessionRootFor(real)) return true;
-  return Boolean(claudeProjectRootFor(real));
 }
 
 function addDir(dirs: string[], cwd: string | null, project: string): void {
@@ -117,61 +101,6 @@ export async function GET(req: NextRequest): Promise<NextResponse<SuggestRespons
   }
   if (!dirs.length) dirs.push(os.homedir());
   return NextResponse.json({ dirs, cwd: srcCwd });
-}
-
-function parentFromBody(body: { src?: unknown; parent?: unknown }): string {
-  if (typeof body.parent === "string") return body.parent;
-  return typeof body.src === "string" ? body.src : "";
-}
-
-function conversationForTranscript(transcript: string, registry = agentRegistry()): `conversation_${string}` {
-  const existing = registry.conversationForPath(transcript);
-  if (existing) return existing.id;
-  return registry.ensureConversation(codexSessionRootFor(transcript) ? "codex" : "claude", transcript, null).id;
-}
-
-export interface ResolvedSpawnParent {
-  conversationId: `conversation_${string}`;
-  engine: "claude" | "codex";
-  artifactPath: string;
-  sessionKey: ReturnType<typeof sessionKeyFromTranscript>;
-}
-
-class SpawnParentError extends Error {
-  constructor(message: string, readonly status: number) {
-    super(message);
-    this.name = "SpawnParentError";
-  }
-}
-
-export function resolveSpawnParent(
-  body: { src?: unknown; parent?: unknown; parentConversationId?: unknown },
-  registry = agentRegistry(),
-): ResolvedSpawnParent | null {
-  if (body.parentConversationId !== undefined) {
-    if (typeof body.parentConversationId !== "string" || !/^conversation_[0-9a-f-]{36}$/i.test(body.parentConversationId)) {
-      throw new SpawnParentError("parentConversationId is invalid", 400);
-    }
-    const conversation = registry.conversation(body.parentConversationId as `conversation_${string}`);
-    if (!conversation) throw new SpawnParentError("parent conversation is unknown", 404);
-    const artifactPath = conversation.generations.at(-1)?.path;
-    if (!artifactPath) throw new SpawnParentError("parent conversation has no active generation", 409);
-    return {
-      conversationId: conversation.id,
-      engine: conversation.engine,
-      artifactPath,
-      sessionKey: sessionKeyFromTranscript(conversation.engine, artifactPath),
-    };
-  }
-  const artifactPath = parentFromBody(body);
-  if (!artifactPath || !transcriptAllowed(artifactPath)) return null;
-  const engine = codexSessionRootFor(artifactPath) ? "codex" : "claude";
-  return {
-    conversationId: conversationForTranscript(artifactPath, registry),
-    engine,
-    artifactPath,
-    sessionKey: sessionKeyFromTranscript(engine, artifactPath),
-  };
 }
 
 function spawnDigest(input: Record<string, unknown>): string {

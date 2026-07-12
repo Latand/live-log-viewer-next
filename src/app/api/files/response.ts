@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import fs from "node:fs";
 
 import { NextResponse } from "next/server";
 
@@ -34,6 +35,7 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
   // the external scheduler, keeping repeated GETs byte-stable for state files.
   const registry = agentRegistry();
   const registrySnapshot = registry.snapshot();
+  const scannedPaths = new Set(files.map((file) => file.path));
   const ownsPath = (conversation: (typeof registrySnapshot.conversations)[keyof typeof registrySnapshot.conversations], pathname: string) =>
     conversation.generations.some((generation) => generation.path === pathname)
     || conversation.continuityPaths.includes(pathname);
@@ -64,7 +66,15 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
       file.plan = profile.plan ?? file.plan;
       const parentConversationId = registrySnapshot.lineageEdges[conversation.id]?.parentConversationId ?? profile.parentConversationId;
       if (parentConversationId) {
-        file.parent = registrySnapshot.conversations[parentConversationId]?.generations.at(-1)?.path ?? file.parent;
+        const canonicalParentId = registry.canonicalConversationId(parentConversationId);
+        const parentPath = registrySnapshot.conversations[canonicalParentId]?.generations.at(-1)?.path ?? null;
+        if (parentPath && scannedPaths.has(parentPath)) {
+          file.parent = parentPath;
+          delete file.parentRemoved;
+        } else if (!parentPath || !fs.existsSync(parentPath)) {
+          file.parent = null;
+          file.parentRemoved = { conversationId: canonicalParentId, path: parentPath };
+        }
       }
     }
     if (conversation.migration && conversation.migration.phase !== "committed") {

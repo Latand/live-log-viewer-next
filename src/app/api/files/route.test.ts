@@ -332,6 +332,40 @@ test("spawn-time lineage keeps the child grouped after its tmux host disappears"
   expect(child?.conversationId).toBe(begun.receipt.conversationId);
 });
 
+test("deleted parent lineage projects a tombstone and leaves no missing tree path", async () => {
+  const registry = agentRegistry();
+  const parentPath = "/sessions/removed-parent-019f4906-3f67-7b72-9fbc-9ec3b5ad1325.jsonl";
+  const childPath = "/sessions/child-019f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl";
+  const parent = registry.ensureConversation("codex", parentPath, null);
+  const begun = registry.beginSpawnRequest({
+    engine: "codex",
+    cwd: "/repo",
+    parentConversationId: parent.id,
+    parentArtifactPath: parentPath,
+    launchProfile: emptyLaunchProfile({ cwd: "/repo", parentConversationId: parent.id }),
+  });
+  if (begun.kind !== "created") throw new Error("expected a fresh spawn receipt");
+  registry.settleSpawn(begun.receipt.launchId, {
+    key: { engine: "codex", sessionId: "019f4906-3f67-7b72-9fbc-9ec3b5ad1326" },
+    artifactPath: childPath,
+    cwd: "/repo",
+    accountId: null,
+    status: "unhosted",
+    host: null,
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  scannedFiles = [file(childPath)];
+
+  const response = await GET(new Request("http://127.0.0.1/api/files"));
+  const body = await response.json() as { files: FileEntry[] };
+  const child = body.files.find((entry) => entry.path === childPath);
+
+  expect(child?.parent).toBeNull();
+  expect(child?.parentRemoved).toEqual({ conversationId: parent.id, path: parentPath });
+});
+
 test("a custom session title (issue #33) overrides the derived title and keeps it as autoTitle", async () => {
   const sessionUuid = "019f4906-3f67-7b72-9fbc-9ec3b5ad1399";
   const sessionPath = `/sessions/rollout-2026-07-12T00-00-00-${sessionUuid}.jsonl`;

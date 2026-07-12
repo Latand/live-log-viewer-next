@@ -977,6 +977,8 @@ export const en = {
   "branch.lastActivityQuiet": "Marked active, but the transcript is quiet: last activity {age}",
   "branch.handoffTitle": "agent spawned by this conversation's handoff",
   "branch.branchTitle": "branch of this conversation",
+  "lineage.parentRemoved": "parent removed",
+  "lineage.parentRemovedTitle": "The parent conversation transcript was removed",
   "branch.removeColumn": "Remove column {title}",
   "branch.toggleBackground": "{action} background task {title}",
   "branch.collapse": "Collapse",

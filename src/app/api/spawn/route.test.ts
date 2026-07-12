@@ -5,7 +5,7 @@ import { expect, test } from "bun:test";
 
 import { AgentRegistry } from "@/lib/agent/registry";
 import { spawnResponseForReceipt } from "@/lib/agent/spawnResponse";
-import { resolveSpawnParent } from "./route";
+import { resolveSpawnParent } from "@/lib/agent/spawnParent";
 
 function registry(): AgentRegistry {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "llv-spawn-route-"));
