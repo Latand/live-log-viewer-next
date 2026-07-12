@@ -24,7 +24,7 @@ export interface SaveTitleInput {
 }
 
 export type SaveTitleResult =
-  | { ok: true; override: SessionTitleOverride | null }
+  | { ok: true; override: SessionTitleOverride | null; revision: number }
   | { ok: false; status: number; error: string; conflict?: SessionTitleOverride | null };
 
 export async function saveSessionTitle(input: SaveTitleInput): Promise<SaveTitleResult> {
@@ -47,6 +47,7 @@ export async function saveSessionTitle(input: SaveTitleInput): Promise<SaveTitle
   let json: {
     ok?: boolean;
     override?: SessionTitleOverride | null;
+    revision?: number;
     error?: string;
     conflict?: SessionTitleOverride | null;
   };
@@ -57,7 +58,7 @@ export async function saveSessionTitle(input: SaveTitleInput): Promise<SaveTitle
   }
   if (res.ok && json.ok) {
     fireSessionTitlesChanged();
-    return { ok: true, override: json.override ?? null };
+    return { ok: true, override: json.override ?? null, revision: json.revision ?? 0 };
   }
   return { ok: false, status: res.status, error: json.error ?? "save failed", conflict: json.conflict ?? null };
 }

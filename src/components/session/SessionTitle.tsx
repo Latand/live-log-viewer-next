@@ -134,10 +134,10 @@ export function SessionTitle({ file, displayMax = 90, titleClassName = "", class
       windowName: trimmed ?? autoTitle,
     });
     if (result.ok) {
-      // A clear returns no record; its tombstone lands at baseRevision + 1, so
-      // the overlay waits for exactly that revision instead of settling early.
-      const revision = result.override?.revision ?? baseRevision + 1;
-      setOptimistic({ title: result.override?.title ?? null, revision });
+      // The server reports the effective store revision (active record's or the
+      // tombstone's), so the overlay waits for exactly that revision — even a
+      // no-op clear against an existing tombstone never fabricates N+1.
+      setOptimistic({ title: result.override?.title ?? null, revision: result.revision });
       setAnnounce(trimmed === null ? t("rename.reset") : t("rename.saved", { title: cleanTitle(trimmed, 60) }));
       setBusy(false);
       return;
@@ -154,8 +154,9 @@ export function SessionTitle({ file, displayMax = 90, titleClassName = "", class
         windowName: trimmed ?? autoTitle,
       });
       if (retried.ok) {
-        const revision = retried.override?.revision ?? serverRevision + 1;
-        setOptimistic({ title: retried.override?.title ?? null, revision });
+        // Use the server-reported effective revision, so a retry that resolved
+        // to a no-op tombstone records N (not a fabricated N+1) and settles.
+        setOptimistic({ title: retried.override?.title ?? null, revision: retried.revision });
         setAnnounce(trimmed === null ? t("rename.reset") : t("rename.saved", { title: cleanTitle(trimmed, 60) }));
         setBusy(false);
         return;

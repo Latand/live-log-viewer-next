@@ -65,12 +65,22 @@ function patch(body: unknown): Promise<Response> {
 test("sets a custom title keyed by the stable conversation identity and persists it", async () => {
   const res = await patch({ conversationId: "conversation_owner", title: "My name" });
   expect(res.status).toBe(200);
-  const json = (await res.json()) as { ok: boolean; override: { key: string; title: string; revision: number } };
+  const json = (await res.json()) as { ok: boolean; override: { key: string; title: string; revision: number }; revision: number };
   expect(json.ok).toBe(true);
   expect(json.override.key).toBe("conversation:conversation_owner");
   expect(json.override.title).toBe("My name");
   expect(json.override.revision).toBe(1);
+  expect(json.revision).toBe(1);
   expect(loadSessionTitles()).toHaveLength(1);
+});
+
+test("a corrupt store fails with 503 and never erases the existing bytes", async () => {
+  const corrupt = "{ not valid json";
+  fs.writeFileSync(path.join(stateDir, "session-titles.json"), corrupt);
+  const res = await patch({ conversationId: "conversation_owner", title: "My name" });
+  expect(res.status).toBe(503);
+  // The rename aborted; the (recoverable) file was left intact.
+  expect(fs.readFileSync(path.join(stateDir, "session-titles.json"), "utf8")).toBe(corrupt);
 });
 
 test("falls back to the session UUID key when the registry does not own the session", async () => {

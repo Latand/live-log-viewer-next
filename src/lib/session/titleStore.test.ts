@@ -13,9 +13,11 @@ import {
   MAX_TITLE_OVERRIDES,
   overrideForEntry,
   preferredTitleKey,
+  readSessionTitles,
   sanitizeCustomTitle,
   saveSessionTitles,
   titleKeysForEntry,
+  TitleStoreUnreadableError,
   writeSessionTitle,
   type SessionTitleOverride,
 } from "./titleStore";
@@ -96,7 +98,7 @@ test("isRenameableSessionPath rejects Claude subagent transcripts", () => {
 test("set then clear leaves a tombstone and the label survives a reload (persistence)", () => {
   const key = preferredTitleKey(entry());
   const set = write(key, "My name", undefined, "2026-07-12T00:00:00.000Z");
-  expect(set).toEqual({ ok: true, override: { key, title: "My name", revision: 1, updatedAt: "2026-07-12T00:00:00.000Z" } });
+  expect(set).toEqual({ ok: true, override: { key, title: "My name", revision: 1, updatedAt: "2026-07-12T00:00:00.000Z" }, revision: 1 });
 
   // A fresh load from disk sees the override — the label survives a restart.
   const reloaded = loadSessionTitles(file);
@@ -104,7 +106,7 @@ test("set then clear leaves a tombstone and the label survives a reload (persist
   expect(reloaded[0]!.title).toBe("My name");
 
   const cleared = write(key, null, undefined, "2026-07-12T00:01:00.000Z");
-  expect(cleared).toEqual({ ok: true, override: null });
+  expect(cleared).toEqual({ ok: true, override: null, revision: 2 });
   // The record persists as a tombstone (title null) preserving the revision.
   const afterClear = loadSessionTitles(file);
   expect(afterClear).toHaveLength(1);
@@ -142,7 +144,7 @@ test("revision increments on each set and empty save clears", () => {
   const key = preferredTitleKey(entry());
   expect(write(key, "one", undefined, "t1")).toMatchObject({ ok: true, override: { revision: 1 } });
   expect(write(key, "two", undefined, "t2")).toMatchObject({ ok: true, override: { revision: 2, title: "two" } });
-  expect(write(key, "   ", undefined, "t3")).toEqual({ ok: true, override: null });
+  expect(write(key, "   ", undefined, "t3")).toEqual({ ok: true, override: null, revision: 3 });
 });
 
 test("base revision mismatch is a conflict carrying current server state", () => {
@@ -237,7 +239,7 @@ test("a fallback-key override migrates onto the conversation key and stays clear
   const withId = entry({ conversationId: "conversation_new" });
   const keys = titleKeysForEntry(withId);
   const cleared = writeSessionTitle(keys, keys[0]!, null, 1, "t2", file);
-  expect(cleared).toEqual({ ok: true, override: null });
+  expect(cleared).toEqual({ ok: true, override: null, revision: 2 });
 
   // No active override survives, and the stale UUID record is gone — the next
   // poll cannot restore the old custom title.
@@ -266,6 +268,51 @@ test("no override leaves the entry untouched", () => {
   expect(file0.title).toBe("Auto derived title");
   expect(file0.autoTitle).toBeUndefined();
   expect(file0.titleRevision).toBeUndefined();
+});
+
+test("a missing store is a legitimately empty store that a write then creates", () => {
+  expect(readSessionTitles(file)).toEqual([]);
+  write("path:/x", "New", undefined, "t1");
+  expect(loadSessionTitles(file)).toHaveLength(1);
+});
+
+test("a mutation aborts on a corrupt store and never erases the existing bytes", () => {
+  fs.writeFileSync(file, "{ not valid json");
+  expect(() => write("path:/x", "New", undefined, "t1")).toThrow(TitleStoreUnreadableError);
+  // The corrupt bytes are preserved — a blind rewrite would have destroyed the
+  // real (recoverable) file.
+  expect(fs.readFileSync(file, "utf8")).toBe("{ not valid json");
+});
+
+test("an unsupported schema version aborts a mutation", () => {
+  fs.writeFileSync(file, JSON.stringify({ version: 2, titles: [] }));
+  expect(() => write("path:/x", "New", undefined, "t1")).toThrow(TitleStoreUnreadableError);
+});
+
+test("a malformed record aborts a mutation instead of silently dropping it", () => {
+  fs.writeFileSync(file, JSON.stringify({ version: 1, titles: [
+    { key: "path:/a", title: "ok", revision: 1, updatedAt: "t" },
+    { key: "path:/b", garbage: true },
+  ] }));
+  expect(() => write("path:/x", "New", undefined, "t1")).toThrow(TitleStoreUnreadableError);
+  expect(JSON.parse(fs.readFileSync(file, "utf8")).titles).toHaveLength(2);
+});
+
+test("read consumers degrade to no overrides on a corrupt store", () => {
+  fs.writeFileSync(file, "garbage");
+  expect(loadSessionTitles(file)).toEqual([]);
+  expect(() => readSessionTitles(file)).toThrow(TitleStoreUnreadableError);
+});
+
+test("clearing an already-tombstoned record reports its revision, not a fabricated one", () => {
+  const key = preferredTitleKey(entry());
+  write(key, "temp", undefined, "t1"); // rev 1
+  write(key, null, 1, "t2"); // tombstone rev 2
+  // A second clear is a no-op: it must report the existing tombstone's revision
+  // (2), so an optimistic client does not record a phantom rev 3 that never
+  // settles against polls at 2.
+  expect(write(key, null, 2, "t3")).toEqual({ ok: true, override: null, revision: 2 });
+  expect(loadSessionTitles(file)[0]!.revision).toBe(2);
 });
 
 test("store is capped to the newest records", () => {

@@ -41,11 +41,13 @@ function atomicWriteJson(filePath: string, value: unknown): void {
   fs.renameSync(tmp, filePath);
 }
 
-function readJson(filePath: string): unknown {
-  try {
-    return JSON.parse(fs.readFileSync(filePath, "utf8")) as unknown;
-  } catch {
-    return null;
+/** The store exists but cannot be trusted (unreadable, invalid JSON, unknown
+    schema, or malformed records). Mutations must abort on this rather than
+    persist over it — a blind rewrite would erase every existing title. */
+export class TitleStoreUnreadableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "TitleStoreUnreadableError";
   }
 }
 
@@ -63,9 +65,53 @@ function isRecord(value: unknown): value is SessionTitleOverride {
   );
 }
 
+/**
+ * Reads the store, distinguishing "not there yet" from "there but broken". A
+ * missing file (ENOENT) is a legitimately empty store; anything else — an I/O
+ * error, invalid JSON, an unknown schema version, or a malformed record —
+ * throws {@link TitleStoreUnreadableError} so a mutation aborts instead of
+ * overwriting existing titles.
+ */
+export function readSessionTitles(filePath = titlesFile()): SessionTitleOverride[] {
+  let text: string;
+  try {
+    text = fs.readFileSync(filePath, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw new TitleStoreUnreadableError(`session titles store is unreadable: ${(error as Error).message}`);
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw new TitleStoreUnreadableError("session titles store is not valid JSON");
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new TitleStoreUnreadableError("session titles store has an unexpected shape");
+  }
+  const file = parsed as TitlesFile;
+  if (file.version !== undefined && file.version !== 1) {
+    throw new TitleStoreUnreadableError(`session titles store schema version ${String(file.version)} is unsupported`);
+  }
+  if (!Array.isArray(file.titles)) {
+    throw new TitleStoreUnreadableError("session titles store is missing its titles array");
+  }
+  const records = file.titles.filter(isRecord);
+  if (records.length !== file.titles.length) {
+    throw new TitleStoreUnreadableError("session titles store contains malformed records");
+  }
+  return records;
+}
+
+/** Read consumers (overlay, projection) degrade to no overrides when the store
+    is unreadable — a broken file must not break rendering. Mutations use the
+    strict {@link readSessionTitles} so they never persist over broken bytes. */
 export function loadSessionTitles(filePath = titlesFile()): SessionTitleOverride[] {
-  const raw = readJson(filePath) as TitlesFile | null;
-  return Array.isArray(raw?.titles) ? raw.titles.filter(isRecord) : [];
+  try {
+    return readSessionTitles(filePath);
+  } catch {
+    return [];
+  }
 }
 
 export function saveSessionTitles(records: SessionTitleOverride[], filePath = titlesFile()): void {
@@ -226,14 +272,17 @@ function withTitlesLock<T>(lockPath: string, operation: () => T): T {
  * to persist a rename. The load→transform→save runs synchronously inside an
  * interprocess lock, so neither a concurrent request handler nor a second
  * Viewer process can save a snapshot that predates another writer's write
- * (mirrors {@link import("@/lib/tasks/store").mutateTasks}).
+ * (mirrors {@link import("@/lib/tasks/store").mutateTasks}). The **strict**
+ * {@link readSessionTitles} aborts the whole mutation (throwing
+ * {@link TitleStoreUnreadableError}) when the store is corrupt/unreadable, so a
+ * rename never silently overwrites existing titles with an empty snapshot.
  */
 export function mutateSessionTitles<R>(
   mutate: (records: SessionTitleOverride[]) => { records: SessionTitleOverride[] | undefined; result: R },
   filePath = titlesFile(),
 ): R {
   return withTitlesLock(`${filePath}.lock`, () => {
-    const outcome = mutate(loadSessionTitles(filePath));
+    const outcome = mutate(readSessionTitles(filePath));
     if (outcome.records) saveSessionTitles(capRecords(outcome.records), filePath);
     return outcome.result;
   });
@@ -249,7 +298,12 @@ function capRecords(records: SessionTitleOverride[]): SessionTitleOverride[] {
 }
 
 export type SetTitleOutcome =
-  | { ok: true; override: SessionTitleOverride | null }
+  /** `override` is the active record, or null once cleared. `revision` is the
+      effective store revision after the write — the active record's, the
+      tombstone's, or 0 when no record exists — so an optimistic client always
+      knows the real base (a no-op clear against an existing tombstone must not
+      report a fabricated N+1). */
+  | { ok: true; override: SessionTitleOverride | null; revision: number }
   | { ok: false; conflict: SessionTitleOverride | null };
 
 /**
@@ -294,12 +348,15 @@ export function writeSessionTitle(
     const rest = records.filter((record) => !keySet.has(record.key));
     if (sanitized === null) {
       // Nothing set, or already a tombstone: clearing again is a no-op that must
-      // not bump the revision (and must not create a tombstone from nothing).
-      if (!current || current.title === null) return { records: undefined, result: { ok: true, override: null } };
+      // not bump the revision (and must not create a tombstone from nothing). It
+      // still reports the effective revision so a retry after a tombstone
+      // conflict records the real base, not a fabricated one.
+      if (!current) return { records: undefined, result: { ok: true, override: null, revision: 0 } };
+      if (current.title === null) return { records: undefined, result: { ok: true, override: null, revision: current.revision } };
       const tombstone: SessionTitleOverride = { key: preferredKey, title: null, revision: current.revision + 1, updatedAt: now };
-      return { records: [...rest, tombstone], result: { ok: true, override: null } };
+      return { records: [...rest, tombstone], result: { ok: true, override: null, revision: tombstone.revision } };
     }
     const record: SessionTitleOverride = { key: preferredKey, title: sanitized, revision: (current?.revision ?? 0) + 1, updatedAt: now };
-    return { records: [...rest, record], result: { ok: true, override: record } };
+    return { records: [...rest, record], result: { ok: true, override: record, revision: record.revision } };
   }, filePath);
 }

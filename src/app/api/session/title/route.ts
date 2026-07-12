@@ -6,6 +6,7 @@ import {
   MAX_CUSTOM_TITLE,
   sanitizeCustomTitle,
   titleKeysForEntry,
+  TitleStoreUnreadableError,
   writeSessionTitle,
   type SessionTitleOverride,
 } from "@/lib/session/titleStore";
@@ -28,7 +29,7 @@ interface PatchTitleBody {
 }
 
 type PatchTitleResponse =
-  | { ok: true; override: SessionTitleOverride | null }
+  | { ok: true; override: SessionTitleOverride | null; revision: number }
   | (ApiError & { conflict?: SessionTitleOverride | null });
 
 export async function PATCH(req: NextRequest): Promise<NextResponse<PatchTitleResponse>> {
@@ -59,7 +60,17 @@ export async function PATCH(req: NextRequest): Promise<NextResponse<PatchTitleRe
   // transcript path, so a title filed under a provisional id or a predecessor
   // generation is found and migrated onto the canonical key.
   const candidateKeys = titleKeysForEntry(target, target.aliasConversationIds, target.ownedPaths);
-  const outcome = writeSessionTitle(candidateKeys, candidateKeys[0]!, body.title as string | null, body.baseRevision as number | undefined, isoNow());
+  let outcome;
+  try {
+    outcome = writeSessionTitle(candidateKeys, candidateKeys[0]!, body.title as string | null, body.baseRevision as number | undefined, isoNow());
+  } catch (error) {
+    // The store is corrupt/unreadable: the mutation aborted without touching the
+    // existing bytes. Surface it instead of silently erasing every title.
+    if (error instanceof TitleStoreUnreadableError) {
+      return NextResponse.json({ error: "session titles store is unreadable" }, { status: 503 });
+    }
+    throw error;
+  }
   if (!outcome.ok) {
     // Structured 409: the editor adopts the current server record and retries.
     return NextResponse.json(
@@ -80,5 +91,5 @@ export async function PATCH(req: NextRequest): Promise<NextResponse<PatchTitleRe
   // tabs/devices converge even when SSE has disabled their fallback poll.
   await publishTitleUpdate(candidateKeys[0]!, outcome.override === null);
 
-  return NextResponse.json({ ok: true, override: outcome.override });
+  return NextResponse.json({ ok: true, override: outcome.override, revision: outcome.revision });
 }

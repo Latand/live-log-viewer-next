@@ -60,10 +60,11 @@ beforeEach(() => {
   calls = [];
   respond = (call) => {
     const title = call.body.title as string | null;
-    return {
-      status: 200,
-      json: { ok: true, override: title === null ? null : { key: `uuid:claude:${UUID}`, title, revision: 1, updatedAt: "t" } },
-    };
+    const base = (call.body.baseRevision as number | undefined) ?? 0;
+    // Mirror the server: a set returns the active record at rev 1; a clear
+    // returns no record and the tombstone revision (baseRevision + 1).
+    if (title === null) return { status: 200, json: { ok: true, override: null, revision: base + 1 } };
+    return { status: 200, json: { ok: true, override: { key: `uuid:claude:${UUID}`, title, revision: 1, updatedAt: "t" }, revision: 1 } };
   };
   (globalThis as { fetch?: unknown }).fetch = async (url: string, init?: { body?: string }) => {
     const body = init?.body ? (JSON.parse(init.body) as Record<string, unknown>) : {};
@@ -222,7 +223,7 @@ test("a revision conflict adopts the server record and retries once", async () =
     if (calls.length === 1) {
       return { status: 409, json: { error: "revision conflict", conflict: { key: `uuid:claude:${UUID}`, title: "other device", revision: 5, updatedAt: "t" } } };
     }
-    return { status: 200, json: { ok: true, override: { key: `uuid:claude:${UUID}`, title: call.body.title, revision: 6, updatedAt: "t" } } };
+    return { status: 200, json: { ok: true, override: { key: `uuid:claude:${UUID}`, title: call.body.title, revision: 6, updatedAt: "t" }, revision: 6 } };
   };
   const view = mount(entry());
   flushSync(() => (view.host.querySelector('button[aria-label^="Rename"]') as HTMLButtonElement).click());
@@ -236,6 +237,34 @@ test("a revision conflict adopts the server record and retries once", async () =
   // The retry carries the server's revision (5) as the new base.
   expect(calls[1]!.body.baseRevision).toBe(5);
   expect(calls[1]!.body.title).toBe("my rename");
+});
+
+test("a clear conflicting with a server tombstone retries and records the real tombstone revision", async () => {
+  // Clear → 409 with a tombstone at rev 5; retry → no-op tombstone still at 5;
+  // a later edit must base on 5, not a fabricated 6.
+  respond = (call) => {
+    if (calls.length === 1) return { status: 409, json: { error: "revision conflict", conflict: { key: `uuid:claude:${UUID}`, title: null, revision: 5, updatedAt: "t" } } };
+    if (calls.length === 2) return { status: 200, json: { ok: true, override: null, revision: 5 } };
+    return { status: 200, json: { ok: true, override: { key: `uuid:claude:${UUID}`, title: call.body.title, revision: 6, updatedAt: "t" }, revision: 6 } };
+  };
+  // An override is in effect so Reset renders; server is at revision 4 locally.
+  const view = mount(entry({ title: "Custom", autoTitle: "Auto derived", titleRevision: 4 }));
+  flushSync(() => (view.host.querySelector('button[aria-label^="Rename"]') as HTMLButtonElement).click());
+  flushSync(() => (view.host.querySelector('button[aria-label="Reset to auto title"]') as HTMLButtonElement).click());
+  await settle();
+  await settle();
+  expect(calls).toHaveLength(2);
+  expect(calls[1]!.body.baseRevision).toBe(5);
+
+  // A subsequent rename bases on the tombstone revision (5), proving the
+  // optimistic state recorded the real revision rather than a phantom 6.
+  flushSync(() => (view.host.querySelector('button[aria-label^="Rename"]') as HTMLButtonElement).click());
+  const input = view.host.querySelector('input[aria-label="Session title"]') as HTMLInputElement;
+  flushSync(() => typeInto(input, "next"));
+  flushSync(() => dispatch(input, new dom.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true })));
+  await settle();
+  expect(calls).toHaveLength(3);
+  expect(calls[2]!.body.baseRevision).toBe(5);
 });
 
 test("returns focus to the launcher after Escape closes the editor", async () => {
