@@ -15,6 +15,11 @@ export interface CreateTaskInput {
   text?: unknown;
   pos?: unknown;
   source?: unknown;
+  /** Explicit placement intent. `true` when the operator dropped the card at a
+      chosen board spot (it owns that spot); `false` when `pos` is only a default
+      seed (the task panel / bulk bar) so the board's collision pass may spread
+      it. Absent falls back to the source heuristic below. */
+  pinned?: unknown;
 }
 
 export interface PatchTaskInput {
@@ -90,6 +95,13 @@ export function createTask(
     return { ok: false, error: `The project already has ${TASKS_PER_PROJECT_LIMIT} tasks. Close or delete extra tasks.`, status: 409 };
   }
 
+  /* Placement intent: an explicit flag wins; otherwise a source-less card is a
+     deliberate hand placement (pinned) and an auto-captured one stays unpinned
+     for the collision pass. The task panel and bulk bar seed cards at a shared
+     default point, so they pass `pinned: false` — without that these would pin
+     on top of one another and never spread (issue #17). */
+  const pinned = typeof input.pinned === "boolean" ? input.pinned : source ? undefined : true;
+
   const now = deps.now?.() ?? isoNow();
   const task: BoardTask = {
     id: deps.id?.() ?? crypto.randomUUID(),
@@ -97,11 +109,8 @@ export function createTask(
     status: "inbox",
     text,
     pos,
-    /* A user-placed card (no auto-capture source) owns its exact spot from
-       birth — the operator dropped it there deliberately. Auto-captured
-       inbox/curator cards land on the lattice unpinned so the board's
-       collision pass may spread and clear them off panes. */
-    ...(source ? { source } : { pinned: true }),
+    ...(source ? { source } : {}),
+    ...(pinned !== undefined ? { pinned } : {}),
     assignments: [],
     createdAt: now,
     updatedAt: now,

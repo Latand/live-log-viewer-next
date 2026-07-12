@@ -94,6 +94,9 @@ function onAutoLattice(pos: { x: number; y: number }): boolean {
  *
  * The signals, in order:
  *  - `pinned === true` — a human placed or dragged it: law, never moved.
+ *  - `pinned === false` — an explicit *default* placement (the task panel / bulk
+ *    bar seed every card at one shared point), so the pass may spread it even
+ *    though it has no source.
  *  - no `source` — the «task» tool never records a source, so a source-less
  *    card was hand-created and is held. This also rescues *legacy* manual cards
  *    saved before `pinned` existed (they carry neither flag): without it a card
@@ -105,6 +108,7 @@ function onAutoLattice(pos: { x: number; y: number }): boolean {
  */
 export function isAutoPlaceable(task: PlaceableTask): boolean {
   if (task.pinned === true) return false;
+  if (task.pinned === false) return true;
   if (!task.source) return false;
   return onAutoLattice(task.pos);
 }

@@ -168,6 +168,24 @@ describe("resolveTaskPlacements", () => {
     expect(isAutoPlaceable(task("c", 741, 120, { source: SRC }))).toBe(false); // one px off the lattice
     expect(isAutoPlaceable(task("d", 740, 120, { source: SRC, pinned: true }))).toBe(false); // dragged onto lattice
     expect(isAutoPlaceable(task("e", 740, 120))).toBe(false); // no source = hand-created
+    expect(isAutoPlaceable(task("f", 120, 120, { pinned: false }))).toBe(true); // panel default seed
+  });
+
+  test("panel-created cards (pinned:false at a shared default) are spread apart", () => {
+    /* The task sheet and bulk bar seed every card at one point with pinned:false.
+       Without spreading they'd stack forever unreadable (issue #17). */
+    const tasks = [
+      task("p1", 120, 120, { pinned: false }),
+      task("p2", 120, 120, { pinned: false }),
+      task("p3", 120, 120, { pinned: false }),
+    ];
+    const placement = resolveTaskPlacements(tasks, []);
+    const rects = tasks.map((t) => rectAt(t, placement.get(t.id)!));
+    for (let a = 0; a < rects.length; a++) {
+      for (let b = a + 1; b < rects.length; b++) {
+        expect(clash(rects[a]!, rects[b]!, TASK_GUTTER - 1)).toBe(false);
+      }
+    }
   });
 
   test("resolves a large burst without exploding out of bounds", () => {

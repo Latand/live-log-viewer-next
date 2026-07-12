@@ -59,6 +59,10 @@ export async function createTask(input: {
   project: string;
   text: string;
   pos: { x: number; y: number };
+  /** `true` when the user chose this exact spot (board «task» tool), `false`
+      when `pos` is only a default seed (panel / bulk bar) the collision pass may
+      spread. Omitted lets the server apply its source heuristic. */
+  pinned?: boolean;
 }): Promise<{ task: BoardTask } | { error: string }> {
   const res = await request<{ task: BoardTask }>("/api/tasks", "POST", input);
   return res.ok ? { task: res.data.task } : { error: res.error };

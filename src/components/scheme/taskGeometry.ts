@@ -289,6 +289,123 @@ function cubicHitsAny(
 /* Perpendicular spacing between coincident edges fanned into parallel lanes. */
 const LANE_BOW = 26;
 
+/* A single cubic bow escapes cards (≤ TASK_W) but not a 600×680 pane; when it
+   can't, an orthogonal detour routes around the obstacle's side. The corridor
+   sits `DETOUR_MARGIN` past the obstacle edge (> ROUTE_CLEARANCE, so the router
+   reads it as clear), and may be pushed a further `DETOUR_MAX_EXTRA` out in
+   steps when a second obstacle blocks the first corridor. */
+const DETOUR_MARGIN = ROUTE_CLEARANCE + 6;
+const DETOUR_MAX_EXTRA = 240;
+const DETOUR_EXTRA_STEP = 40;
+
+/* One cubic of a routed path, carrying its own start so a detour can be a chain
+   of them. */
+interface RouteSeg {
+  x1: number;
+  y1: number;
+  c1x: number;
+  c1y: number;
+  c2x: number;
+  c2y: number;
+  x2: number;
+  y2: number;
+}
+
+const lerp = (a: number, b: number, t: number): number => a + (b - a) * t;
+
+function segsToD(segs: readonly RouteSeg[]): string {
+  const first = segs[0]!;
+  let d = `M ${first.x1} ${first.y1}`;
+  for (const s of segs) d += ` C ${s.c1x} ${s.c1y}, ${s.c2x} ${s.c2y}, ${s.x2} ${s.y2}`;
+  return d;
+}
+
+function segsHitAny(segs: readonly RouteSeg[], obstacles: readonly SchemeRect[]): boolean {
+  for (const s of segs) {
+    if (cubicHitsAny(s.x1, s.y1, s.c1x, s.c1y, s.c2x, s.c2y, s.x2, s.y2, obstacles)) return true;
+  }
+  return false;
+}
+
+/* Badge/mid point: the middle of the centre segment (the corridor run), which is
+   the clear, readable part of a detour. */
+function segsMid(segs: readonly RouteSeg[]): { x: number; y: number } {
+  const s = segs[Math.floor(segs.length / 2)]!;
+  return { x: cubicAt(0.5, s.x1, s.c1x, s.c2x, s.x2), y: cubicAt(0.5, s.y1, s.c1y, s.c2y, s.y2) };
+}
+
+/* Out to a corridor at x = `X`, down/up it past the box, then in to the target —
+   the whole path staying to one side of a box that spans the edge vertically. */
+function verticalDetour(edge: { x1: number; y1: number; x2: number; y2: number }, box: SchemeRect, side: number, off: number, laneOff: number): RouteSeg[] {
+  const { x1, y1, x2, y2 } = edge;
+  const X = (side < 0 ? box.x - off : box.x + box.w + off) + laneOff;
+  const ya = box.y - off;
+  const yb = box.y + box.h + off;
+  const yStart = y1 <= y2 ? ya : yb;
+  const yEnd = y1 <= y2 ? yb : ya;
+  return [
+    { x1, y1, c1x: X, c1y: y1, c2x: X, c2y: yStart, x2: X, y2: yStart },
+    { x1: X, y1: yStart, c1x: X, c1y: lerp(yStart, yEnd, 1 / 3), c2x: X, c2y: lerp(yStart, yEnd, 2 / 3), x2: X, y2: yEnd },
+    { x1: X, y1: yEnd, c1x: X, c1y: y2, c2x: x2, c2y: y2, x2, y2 },
+  ];
+}
+
+/* Mirror of {@link verticalDetour} for a box that spans the edge horizontally. */
+function horizontalDetour(edge: { x1: number; y1: number; x2: number; y2: number }, box: SchemeRect, side: number, off: number, laneOff: number): RouteSeg[] {
+  const { x1, y1, x2, y2 } = edge;
+  const Y = (side < 0 ? box.y - off : box.y + box.h + off) + laneOff;
+  const xa = box.x - off;
+  const xb = box.x + box.w + off;
+  const xStart = x1 <= x2 ? xa : xb;
+  const xEnd = x1 <= x2 ? xb : xa;
+  return [
+    { x1, y1, c1x: x1, c1y: Y, c2x: xStart, c2y: Y, x2: xStart, y2: Y },
+    { x1: xStart, y1: Y, c1x: lerp(xStart, xEnd, 1 / 3), c1y: Y, c2x: lerp(xStart, xEnd, 2 / 3), c2y: Y, x2: xEnd, y2: Y },
+    { x1: xEnd, y1: Y, c1x: x2, c1y: Y, c2x: x2, c2y: y2, x2, y2 },
+  ];
+}
+
+/**
+ * When bowing a single cubic can't clear the obstacles — a production pane is
+ * 600×680, far larger than any bow escapes — route an orthogonal detour around
+ * the union of the obstacles the straight path crosses. The nearer side is tried
+ * first, then the far side, pushing the corridor out in steps; the first path
+ * clear of *every* obstacle wins, or null if genuinely boxed in.
+ */
+function detourRoute(
+  edge: { x1: number; y1: number; x2: number; y2: number },
+  obstacles: readonly SchemeRect[],
+  lane: number,
+): TaskEdgeRoute | null {
+  const { x1, y1, x2, y2 } = edge;
+  const hit = obstacles.filter((r) => segHitsRect(x1, y1, x2, y2, r, ROUTE_CLEARANCE));
+  if (!hit.length) return null;
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const r of hit) {
+    minX = Math.min(minX, r.x);
+    minY = Math.min(minY, r.y);
+    maxX = Math.max(maxX, r.x + r.w);
+    maxY = Math.max(maxY, r.y + r.h);
+  }
+  const box: SchemeRect = { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
+  const vertical = Math.abs(y2 - y1) >= Math.abs(x2 - x1);
+  const laneOff = lane * LANE_BOW;
+  /* Go around whichever side the endpoints already lean toward — the shorter way. */
+  const endMid = vertical ? (x1 + x2) / 2 : (y1 + y2) / 2;
+  const boxMid = vertical ? box.x + box.w / 2 : box.y + box.h / 2;
+  const sides = endMid <= boxMid ? [-1, 1] : [1, -1];
+  for (const side of sides) {
+    for (let off = DETOUR_MARGIN; off <= DETOUR_MARGIN + DETOUR_MAX_EXTRA; off += DETOUR_EXTRA_STEP) {
+      const segs = vertical ? verticalDetour(edge, box, side, off, laneOff) : horizontalDetour(edge, box, side, off, laneOff);
+      if (!segsHitAny(segs, obstacles)) return { d: segsToD(segs), mid: segsMid(segs), crosses: false };
+    }
+  }
+  return null;
+}
+
 /**
  * Routes one task edge around unrelated cards and panes (issue #17). The base
  * curve is the same axis-following cubic the layer drew before — vertical
@@ -301,9 +418,10 @@ const LANE_BOW = 26;
  *
  * When the (lane-adjusted) base would run through an obstacle the edge neither
  * starts nor ends on, the handles are bowed perpendicular to the endpoint line
- * in growing steps (both sides) until a clear path is found. If nothing clears
- * within `ROUTE_MAX_BOW`, the base curve is kept and `crosses` is set so the
- * layer can fade it.
+ * in growing steps (both sides) until a clear path is found. If no bow within
+ * `ROUTE_MAX_BOW` clears it — a full-size pane is far too big to bow around — an
+ * orthogonal detour routes around the obstacle's side instead. Only if even that
+ * is boxed in is the base kept with `crosses` set, so the layer can fade it.
  *
  * Pure and deterministic — depends only on the endpoints, the lane, and the
  * obstacle rects.
@@ -356,6 +474,12 @@ export function routeTaskEdge(
       }
     }
   }
+
+  /* No bow cleared it — a pane is too large to escape with a single cubic. Route
+     an orthogonal detour around it; only if that is boxed in do we admit the
+     crossing and let the layer fade the base curve. */
+  const detour = detourRoute(edge, obstacles, lane);
+  if (detour) return detour;
 
   return { ...build(base), crosses: true };
 }

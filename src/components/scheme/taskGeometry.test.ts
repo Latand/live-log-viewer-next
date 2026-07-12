@@ -162,16 +162,24 @@ describe("routeTaskEdge", () => {
   function inRect(x: number, y: number, r: SchemeRect): boolean {
     return x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h;
   }
-  function curveEntersRect(d: string, r: SchemeRect): boolean {
-    const [x1, y1, c1x, c1y, c2x, c2y, x2, y2] = parse(d);
-    for (let i = 0; i <= 40; i++) {
-      const t = i / 40;
-      const px = cubic(t, x1!, c1x!, c2x!, x2!);
-      const py = cubic(t, y1!, c1y!, c2y!, y2!);
-      if (inRect(px, py, r)) return true;
+  /* Enters any segment of a routed path — handles multi-segment detours, not
+     just a single cubic. */
+  function pathEntersRect(d: string, r: SchemeRect): boolean {
+    const n = parse(d);
+    let x0 = n[0]!;
+    let y0 = n[1]!;
+    for (let i = 2; i + 6 <= n.length; i += 6) {
+      const [c1x, c1y, c2x, c2y, x2, y2] = n.slice(i, i + 6);
+      for (let k = 0; k <= 40; k++) {
+        const t = k / 40;
+        if (inRect(cubic(t, x0, c1x!, c2x!, x2!), cubic(t, y0, c1y!, c2y!, y2!), r)) return true;
+      }
+      x0 = x2!;
+      y0 = y2!;
     }
     return false;
   }
+  const curveEntersRect = pathEntersRect;
 
   test("with no obstacles the base axis-following curve is kept", () => {
     const route = routeTaskEdge({ x1: 0, y1: 0, x2: 0, y2: 400 }, []);
@@ -192,10 +200,22 @@ describe("routeTaskEdge", () => {
     expect(curveEntersRect(route.d, blocker)).toBe(false);
   });
 
-  test("a card boxing in the whole corridor is flagged as an unavoidable crossing", () => {
-    /* An obstacle so wide no bow within the cap can clear it. */
+  test("a wide wall no bow can clear is routed around its end by a detour", () => {
+    /* Too wide for any bow, but the detour goes around its side. */
     const wall: SchemeRect = { x: -5000, y: 150, w: 10000, h: 100 };
     const route = routeTaskEdge({ x1: 0, y1: 0, x2: 0, y2: 400 }, [wall]);
+    expect(route.crosses).toBe(false);
+    expect(pathEntersRect(route.d, wall)).toBe(false);
+  });
+
+  test("obstacles blocking both detour sides are flagged as an unavoidable crossing", () => {
+    /* Centre wall blocks the straight path; flanking walls sit exactly where
+       either detour corridor would run, so nothing clears — the honest outcome
+       is an admitted, faded crossing. */
+    const centre: SchemeRect = { x: -300, y: 150, w: 600, h: 100 };
+    const leftWall: SchemeRect = { x: -700, y: 110, w: 400, h: 180 };
+    const rightWall: SchemeRect = { x: 300, y: 110, w: 400, h: 180 };
+    const route = routeTaskEdge({ x1: 0, y1: 0, x2: 0, y2: 400 }, [centre, leftWall, rightWall]);
     expect(route.crosses).toBe(true);
   });
 
@@ -207,20 +227,17 @@ describe("routeTaskEdge", () => {
   });
 
   test("a card near a long edge's start is not silently missed", () => {
-    /* The Finding-2 regression: on a 2000px edge, a card just past the start
-       falls between fixed parameter samples, so the old sampler returned a
-       clear (crosses:false) curve that ran straight through it. Adaptive
-       segment sampling walks the whole curve, so this can never happen: the
-       router must either route clear or admit the crossing — never claim a
-       clear edge whose returned curve still enters the card. */
+    /* On a 2000px edge, a card just past the start falls between fixed parameter
+       samples, so the old sampler returned a clear (crosses:false) curve that ran
+       straight through it. Adaptive segment sampling walks the whole curve and a
+       detour routes around the card: the returned path is clear and never claims
+       a clear edge whose curve still enters the card. */
     const nearStart: SchemeRect = { x: -130, y: 16, w: 260, h: 64 };
     const straight = routeTaskEdge({ x1: 0, y1: 0, x2: 0, y2: 2000 }, []);
     expect(curveEntersRect(straight.d, nearStart)).toBe(true); // a real crossing exists
     const route = routeTaskEdge({ x1: 0, y1: 0, x2: 0, y2: 2000 }, [nearStart]);
-    expect(route.crosses || !curveEntersRect(route.d, nearStart)).toBe(true);
-    /* This card hugs the (0,0) endpoint, so no bow can pull the curve clear of
-       it — the honest outcome is an admitted, faded crossing. */
-    expect(route.crosses).toBe(true);
+    expect(route.crosses).toBe(false);
+    expect(pathEntersRect(route.d, nearStart)).toBe(false);
   });
 
   test("a mid-span card on a long edge is detected and routed clear", () => {
@@ -232,6 +249,27 @@ describe("routeTaskEdge", () => {
     const route = routeTaskEdge({ x1: 0, y1: 0, x2: 0, y2: 2000 }, [midSpan]);
     expect(route.crosses).toBe(false);
     expect(curveEntersRect(route.d, midSpan)).toBe(false);
+  });
+
+  test("routes around a production-sized pane on a vertical edge (Finding 2)", () => {
+    /* A real agent pane is 600×680 — far more clearance than any single-cubic
+       bow can produce, so the old router faded a centreline straight through it.
+       The detour goes around the pane's side and comes out clear. */
+    const pane: SchemeRect = { x: -300, y: 100, w: 600, h: 680 };
+    const edge = { x1: 0, y1: 0, x2: 0, y2: 900 };
+    expect(curveEntersRect(routeTaskEdge(edge, []).d, pane)).toBe(true);
+    const route = routeTaskEdge(edge, [pane]);
+    expect(route.crosses).toBe(false);
+    expect(pathEntersRect(route.d, pane)).toBe(false);
+  });
+
+  test("routes around a production-sized pane on a horizontal edge (Finding 2)", () => {
+    const pane: SchemeRect = { x: 100, y: -340, w: 680, h: 600 };
+    const edge = { x1: 0, y1: 0, x2: 900, y2: 0 };
+    expect(curveEntersRect(routeTaskEdge(edge, []).d, pane)).toBe(true);
+    const route = routeTaskEdge(edge, [pane]);
+    expect(route.crosses).toBe(false);
+    expect(pathEntersRect(route.d, pane)).toBe(false);
   });
 });
 

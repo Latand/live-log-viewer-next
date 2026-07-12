@@ -645,7 +645,9 @@ export function SchemeBoard({
     (text: string) => {
       const pos = pendingTask;
       if (!pos) return;
-      void createTask({ project, text, pos }).then((res) => {
+      /* The «task» tool drop is a deliberate board placement — pin it so the
+         collision pass leaves it exactly where the user clicked. */
+      void createTask({ project, text, pos, pinned: true }).then((res) => {
         if ("error" in res) {
           pushTaskToast("err", res.error);
           return;

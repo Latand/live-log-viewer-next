@@ -174,6 +174,26 @@ describe("task command helpers", () => {
     expect(result.task.status).toBe("inbox");
   });
 
+  test("placement intent: source heuristic, board drop, and default panel seed", () => {
+    const create = (over: Record<string, unknown>) =>
+      createTask([], { project: "proj", text: "t", pos: { x: 120, y: 120 }, ...over }, { now: () => "n", id: () => "i" });
+    /* A source-less card with no explicit intent is a deliberate hand placement. */
+    const heuristic = create({});
+    expect(heuristic.ok && heuristic.task.pinned).toBe(true);
+    /* The board «task» tool passes pinned:true — the user chose the spot. */
+    const dropped = create({ pinned: true });
+    expect(dropped.ok && dropped.task.pinned).toBe(true);
+    /* The task panel / bulk bar seed a shared default point with pinned:false, so
+       the board's collision pass spreads them instead of stacking (issue #17). */
+    const panelA = create({ pinned: false });
+    const panelB = create({ pinned: false });
+    expect(panelA.ok && panelA.task.pinned).toBe(false);
+    expect(panelB.ok && panelB.task.pinned).toBe(false);
+    /* An auto-captured source card stays unpinned (undefined) for the lattice. */
+    const sourced = create({ source: { path: "/s.jsonl", ts: null, text: "t", fingerprint: "fp", engine: "claude" } });
+    expect(sourced.ok && sourced.task.pinned).toBeUndefined();
+  });
+
   test("patch is last-write-wins and delete wins late patches", () => {
     const initial = [task()];
     const first = patchTask(initial, "task-1", { text: "one" }, "2026-07-05T10:01:00.000Z");

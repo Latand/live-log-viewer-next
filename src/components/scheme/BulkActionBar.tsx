@@ -174,7 +174,9 @@ export const BulkActionBar = memo(function BulkActionBar({
             composer.setStatus({ kind: "err", text: t("tasks.composerNeedsText") });
             return;
           }
-          const created = await createTask({ project, text, pos: taskPos() });
+          /* A selection-centroid seed, not a per-card drop — unpinned so the
+             board's collision pass spreads bulk-created cards. */
+          const created = await createTask({ project, text, pos: taskPos(), pinned: false });
           if ("error" in created) {
             composer.setStatus({ kind: "err", text: created.error });
             return;
