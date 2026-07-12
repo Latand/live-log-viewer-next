@@ -101,6 +101,49 @@ test("headless Codex launch flushes the complete prompt and closes stdin", async
   forgetHeadlessReview("flow-stdin-eof", 1);
 });
 
+test("an owned reviewer stays running when process identity is briefly unavailable at spawn", async () => {
+  const executablePath = path.join(process.env.LLV_STATE_DIR!, "fake-long-codex");
+  fs.writeFileSync(
+    executablePath,
+    `#!${process.execPath}\nawait Bun.stdin.text();\nconsole.log(JSON.stringify({ type: "thread.started", thread_id: "11111111-2222-3333-4444-555555555556" }));\nsetInterval(() => {}, 1_000);\n`,
+    { mode: 0o700 },
+  );
+  let identityReads = 0;
+  const launched = startHeadlessReview(
+    "flow-delayed-identity",
+    1,
+    { engine: "codex", model: null, effort: null },
+    process.cwd(),
+    "review prompt",
+    5_000,
+    null,
+    null,
+    {
+      command: executablePath,
+      processIdentity: (pid) => {
+        identityReads += 1;
+        return identityReads === 1 ? null : procBackend.processIdentity(pid);
+      },
+    },
+  );
+
+  try {
+    expect(launched.identity).toBeNull();
+    const status = headlessReviewStatus("flow-delayed-identity", 1, {
+      reviewerPid: launched.pid,
+      reviewerIdentity: launched.identity,
+      spawnStartedAt: new Date().toISOString(),
+    }, "codex");
+    expect(status?.status).toBe("running");
+    expect(status?.processIdentity).toBeString();
+  } finally {
+    forgetHeadlessReview("flow-delayed-identity", 1, {
+      reviewerPid: launched.pid,
+      reviewerIdentity: launched.identity,
+    });
+  }
+});
+
 test("headless managed Codex reviewer fixes its account home and file credential store at launch", () => {
   const built = reviewerCommand(
     { engine: "codex", model: null, effort: null },
@@ -172,6 +215,14 @@ test("reviewer prompt carries the read-only contract while allowing validation c
 
 test("status is null when the round never left a trace", () => {
   expect(headlessReviewStatus("flow-a", 1, { reviewerPid: null, spawnStartedAt: null }, "codex")).toBeNull();
+});
+
+test("a persisted launch marker without a process or artifacts reports lost tracking", () => {
+  expect(headlessReviewStatus("flow-lost", 1, {
+    reviewerPid: null,
+    reviewerIdentity: null,
+    spawnStartedAt: "2026-07-12T08:35:59.000Z",
+  }, "codex")?.status).toBe("lost");
 });
 
 test("restart reconstruction: alive pid reports running, dead pid yields the artifact verdict", async () => {

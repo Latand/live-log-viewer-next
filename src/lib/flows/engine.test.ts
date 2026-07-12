@@ -214,7 +214,7 @@ test("headless review retries once after an exit without a verdict, then parks o
   await tickFlows([implementer]);
   const interrupted = loadFlows()[0]!;
   expect(interrupted.state).toBe("needs_decision");
-  expect(interrupted.stateDetail).toBe("reviewer spawn was interrupted by a restart");
+  expect(interrupted.stateDetail).toBe("reviewer tracking was lost before a verdict could be recovered");
 
   interrupted.state = "reviewing";
   interrupted.rounds[0]!.reviewerPid = 999_999_999;
@@ -226,6 +226,138 @@ test("headless review retries once after an exit without a verdict, then parks o
   const parked = loadFlows()[0]!;
   expect(parked.state).toBe("needs_decision");
   expect(parked.stateDetail).toContain("reviewer verdict was unparseable");
+});
+
+test("headless review recovers the rollout verdict before consuming an automatic retry", async () => {
+  const startedAt = "2026-07-12T08:35:59.000Z";
+  const cwd = "/repo";
+  const implementer = writeCodexEntry("recoverable-implementer.jsonl", { id: "019f421e-02e1-73e0-9b77-bebde063f119", cwd }, Date.now() / 1_000);
+  const reviewerPath = path.join(import.meta.dir, "fixtures", "codex-review-2026-07-12.jsonl");
+  const reviewer = entryFor(reviewerPath, Date.now() / 1_000);
+  const flow: Flow = {
+    id: "flow-recoverable",
+    template: "implement-review-loop",
+    project: "repo",
+    cwd,
+    implementerPath: implementer.path,
+    roles: {
+      implementer: { engine: "codex", model: null, effort: "high" },
+      reviewer: { engine: "codex", model: null, effort: "xhigh" },
+    },
+    reviewerFallback: { engine: "claude", model: "fable", effort: "high" },
+    baseRef: "base",
+    baseMode: "head",
+    mode: "manual",
+    reviewerMode: "headless",
+    roundLimit: 5,
+    state: "reviewing",
+    pausedState: null,
+    stateDetail: null,
+    rounds: [{
+      n: 1,
+      reviewerPath,
+      reviewerRole: { engine: "codex", model: null, effort: "xhigh" },
+      accountId: "default",
+      attemptedAccounts: ["codex:default"],
+      autoRetryCount: 0,
+      sessionId: "11111111-2222-4333-8444-555555555555",
+      reviewerPid: 999_999_999,
+      reviewerIdentity: "999999999:gone",
+      reviewerPane: null,
+      findingsPath: null,
+      triggeredBy: "marker",
+      readyNote: null,
+      reviewHeadSha: null,
+      verdict: null,
+      findingsCount: null,
+      startedAt,
+      spawnStartedAt: startedAt,
+      relayStartedAt: null,
+      relayDelivery: null,
+      reviewedAt: null,
+      terminalAt: null,
+      relayedAt: null,
+      error: null,
+    }],
+    createdAt: startedAt,
+    closedAt: null,
+  };
+  fs.mkdirSync(path.dirname(stdoutPathFor(flow.id, 1)), { recursive: true });
+  fs.writeFileSync(stdoutPathFor(flow.id, 1), JSON.stringify({
+    type: "item.completed",
+    item: { type: "agent_message", text: "Review completed; the structured verdict is in the rollout." },
+  }) + "\n");
+  saveFlows([flow]);
+
+  await tickFlows([implementer, reviewer]);
+
+  expect(loadFlows()[0]).toMatchObject({
+    state: "relay_pending",
+    rounds: [{ verdict: "REQUEST_CHANGES", findingsCount: 2, autoRetryCount: 0 }],
+  });
+});
+
+test("lost reviewer tracking parks with an accurate cause and does not spawn a duplicate", async () => {
+  const startedAt = "2026-07-12T08:35:59.000Z";
+  const cwd = "/repo";
+  const implementer = writeCodexEntry("lost-tracking-implementer.jsonl", { id: "019f421e-02e1-73e0-9b77-bebde063f120", cwd }, Date.now() / 1_000);
+  const flow: Flow = {
+    id: "flow-lost-tracking",
+    template: "implement-review-loop",
+    project: "repo",
+    cwd,
+    implementerPath: implementer.path,
+    roles: {
+      implementer: { engine: "codex", model: null, effort: "high" },
+      reviewer: { engine: "codex", model: null, effort: "xhigh" },
+    },
+    reviewerFallback: null,
+    baseRef: "base",
+    baseMode: "head",
+    mode: "auto",
+    reviewerMode: "headless",
+    roundLimit: 5,
+    state: "reviewing",
+    pausedState: null,
+    stateDetail: null,
+    rounds: [{
+      n: 1,
+      reviewerPath: null,
+      reviewerRole: { engine: "codex", model: null, effort: "xhigh" },
+      accountId: "default",
+      attemptedAccounts: ["codex:default"],
+      autoRetryCount: 0,
+      sessionId: null,
+      reviewerPid: null,
+      reviewerIdentity: null,
+      reviewerPane: null,
+      findingsPath: null,
+      triggeredBy: "marker",
+      readyNote: null,
+      reviewHeadSha: null,
+      verdict: null,
+      findingsCount: null,
+      startedAt,
+      spawnStartedAt: startedAt,
+      relayStartedAt: null,
+      relayDelivery: null,
+      reviewedAt: null,
+      terminalAt: null,
+      relayedAt: null,
+      error: null,
+    }],
+    createdAt: startedAt,
+    closedAt: null,
+  };
+  saveFlows([flow]);
+
+  await tickFlows([implementer]);
+
+  expect(loadFlows()[0]).toMatchObject({
+    state: "needs_decision",
+    stateDetail: "reviewer tracking was lost before a verdict could be recovered",
+    rounds: [{ autoRetryCount: 0 }],
+  });
 });
 
 test("restart recovery keeps a launched Claude fallback bound to its persisted effective role", async () => {

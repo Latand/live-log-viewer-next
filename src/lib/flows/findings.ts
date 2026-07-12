@@ -20,13 +20,19 @@ export interface ParsedFindings {
   content: string;
 }
 
-export function lastAssistantMessage(entry: FileEntry): { text: string; ts: number } | null {
+type TranscriptEntry = Pick<FileEntry, "path" | "root" | "size" | "mtime">;
+
+export function lastAssistantMessage(entry: TranscriptEntry): { text: string; ts: number } | null {
   const records = tailRecords(entry.path, entry.size);
   for (const obj of records.reverse()) {
     const ts = Date.parse(String(obj.timestamp ?? "")) || entry.mtime * 1000;
     if (entry.root === "codex-sessions") {
       const payload = recordValue(obj.payload) ?? {};
       const type = stringValue(payload.type);
+      if (type === "task_complete") {
+        const text = stringValue(payload.last_agent_message)?.trim();
+        if (text) return { text, ts };
+      }
       if (type === "agent_message") return { text: stringValue(payload.message) ?? "", ts };
       if (type === "message" && payload.role === "assistant") {
         const text = recordsValue(payload.content)
@@ -46,6 +52,20 @@ export function lastAssistantMessage(entry: FileEntry): { text: string; ts: numb
     }
   }
   return null;
+}
+
+function transcriptEntryFromPath(transcriptPath: string): TranscriptEntry | null {
+  try {
+    const stat = fs.statSync(transcriptPath);
+    return {
+      path: transcriptPath,
+      root: transcriptPath.includes("/.claude/projects/") ? "claude-projects" : "codex-sessions",
+      size: stat.size,
+      mtime: stat.mtimeMs / 1_000,
+    };
+  } catch {
+    return null;
+  }
 }
 
 export function parseFindings(text: string): ParsedFindings | null {
@@ -70,7 +90,7 @@ export function readFindingsFile(round: Round): ParsedFindings | null {
 
 export function fallbackReviewFromTranscript(round: Round, entriesByPath: Map<string, FileEntry>): ParsedFindings | null {
   if (!round.reviewerPath) return null;
-  const entry = entriesByPath.get(round.reviewerPath);
+  const entry = entriesByPath.get(round.reviewerPath) ?? transcriptEntryFromPath(round.reviewerPath);
   if (!entry) return null;
   const message = lastAssistantMessage(entry);
   if (!message) return null;

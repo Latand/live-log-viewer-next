@@ -482,13 +482,17 @@ async function tickFlow(
     /* A restart can land here with the round already launched (state was
        persisted before launchReviewer finished). The detached reviewer is
        still out there — adopt it instead of spawning a duplicate. */
+    if (round.spawnStartedAt && flow.reviewerMode === "headless" && status?.status === "lost") {
+      markNeedsDecision(flow, "reviewer tracking was lost before a verdict could be recovered");
+      return JSON.stringify(flow) !== before;
+    }
     if (round.spawnStartedAt && flow.reviewerMode === "headless" && status) {
       flow.state = "reviewing";
       flow.stateDetail = null;
       return JSON.stringify(flow) !== before;
     }
     if (round.spawnStartedAt && !status && round.reviewerPath === null) {
-      markNeedsDecision(flow, "reviewer spawn was interrupted by a restart");
+      markNeedsDecision(flow, "reviewer launch tracking is unavailable");
       return JSON.stringify(flow) !== before;
     }
     try {
@@ -525,12 +529,22 @@ async function tickFlow(
       if (!round.sessionId) {
         round.sessionId = status?.sessionId ?? sessionIdFromHeadlessStdout(status?.stdout ?? "");
       }
+      if (!round.reviewerIdentity && status?.processIdentity) round.reviewerIdentity = status.processIdentity;
       maybeClaimReviewerPathBySession(entries, round, round.sessionId ?? null);
       if (!round.reviewerPath && !round.sessionId) maybeClaimReviewerPathByHeuristic(flow, entries, round);
       if (status?.status === "running") return JSON.stringify(flow) !== before;
+      if (status?.status === "lost") {
+        const fallback = fallbackReviewFromTranscript(round, entriesByPath);
+        if (fallback) applyVerdict(flow, round, fallback);
+        else markNeedsDecision(flow, "reviewer tracking was lost before a verdict could be recovered");
+        return JSON.stringify(flow) !== before;
+      }
       if (status) {
         forgetHeadlessReview(flow.id, round.n, round);
-        const parsed = parseFindings(status.finalOutput);
+        /* The last-message artifact can lag or contain only an interim Codex
+           message. The persisted rollout is authoritative once it carries a
+           verdict, and consulting it before retry prevents duplicate reviewers. */
+        const parsed = parseFindings(status.finalOutput) ?? fallbackReviewFromTranscript(round, entriesByPath);
         if (parsed) {
           applyVerdict(flow, round, parsed);
         } else if ((round.autoRetryCount ?? 0) < MAX_HEADLESS_NO_VERDICT_RETRIES) {
@@ -547,7 +561,7 @@ async function tickFlow(
       if (fallback) {
         applyVerdict(flow, round, fallback);
       } else {
-        markNeedsDecision(flow, "reviewer process is missing after server restart");
+        markNeedsDecision(flow, "reviewer tracking is unavailable and no verdict could be recovered");
       }
       return JSON.stringify(flow) !== before;
     }
