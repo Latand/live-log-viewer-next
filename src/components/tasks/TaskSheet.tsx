@@ -33,7 +33,7 @@ function StatusRow({ value, onPick }: { value: TaskStatus; onPick: (status: Task
             key={status}
             type="button"
             aria-pressed={active}
-            className="rounded-full border px-2 py-0.5 text-[10.5px] font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            className="inline-flex min-h-11 items-center rounded-full border px-3 text-[11px] font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
             style={
               active
                 ? { backgroundColor: tone.soft, color: tone.color, borderColor: tone.color }
@@ -259,7 +259,7 @@ function TaskDetailView({
             return (
               <div
                 key={(assignment.path ?? "spawning") + index}
-                className={`flex h-7 items-center gap-1.5 rounded-[6px] px-1.5 ${
+                className={`flex min-h-11 items-center gap-1.5 rounded-[6px] px-1.5 ${
                   failed ? "bg-[#faeee9] text-[#a04a2e]" : file ? "bg-bg" : "bg-bg opacity-60"
                 }`}
                 title={failed ? t("tasks.chipFailedTitle", { error: assignment.error ?? "" }) : undefined}
@@ -275,7 +275,7 @@ function TaskDetailView({
                 {assignment.path && (failed || !file) ? (
                   <button
                     type="button"
-                    className="shrink-0 rounded px-1 text-[10px] font-bold text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                    className="inline-flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded px-2 text-[11px] font-bold text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
                     onClick={() => {
                       void (async () => {
                         if (!draft.trim()) {
@@ -307,17 +307,17 @@ function TaskDetailView({
         <button
           type="button"
           disabled={!checked.size || sending}
-          className="mt-1 inline-flex h-8 items-center justify-center gap-1.5 rounded-[8px] border border-accent bg-accent text-[11.5px] font-bold text-white hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 disabled:opacity-40"
+          className="mt-1 inline-flex min-h-11 items-center justify-center gap-1.5 rounded-[8px] border border-accent bg-accent text-[12px] font-bold text-white hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 disabled:opacity-40"
           onClick={() => void send()}
         >
-          {sending ? <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden /> : <Send className="h-3.5 w-3.5" aria-hidden />}
+          {sending ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : <Send className="h-4 w-4" aria-hidden />}
           {t("tasks.pickerSend", { count: checked.size })}
         </button>
       </div>
 
       <button
         type="button"
-        className={`inline-flex h-8 items-center justify-center gap-1.5 rounded-[8px] border text-[11.5px] font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+        className={`inline-flex min-h-11 items-center justify-center gap-1.5 rounded-[8px] border text-[12px] font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
           armDelete ? "border-err bg-err text-white" : "border-line bg-panel text-dim hover:border-err/40 hover:text-err"
         }`}
         onClick={() => {
@@ -371,28 +371,28 @@ export function TaskSheet({
 
   return (
     <div className="fixed inset-0 z-[60] flex flex-col bg-bg pb-[env(safe-area-inset-bottom)]">
-      <div className="flex h-10 shrink-0 items-center gap-2 border-b border-line bg-panel px-3">
+      <div className="flex min-h-[52px] shrink-0 items-center gap-2 border-b border-line bg-panel px-2 py-1.5">
         {view !== "list" ? (
           <button
             type="button"
-            className="flex h-7 w-7 shrink-0 items-center justify-center rounded-[8px] border border-line bg-bg text-dim hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            className="flex h-11 w-11 shrink-0 items-center justify-center rounded-[8px] border border-line bg-bg text-dim hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
             aria-label={t("tasks.sheetBack")}
             onClick={() => setView("list")}
           >
-            <ChevronLeft className="h-4 w-4" aria-hidden />
+            <ChevronLeft className="h-5 w-5" aria-hidden />
           </button>
         ) : null}
-        <span className="shrink-0 text-[13px] font-bold">
+        <span className="shrink-0 pl-1 text-[13px] font-bold">
           {view === "new" ? t("tasks.sheetNew") : openTask ? taskTitle(openTask.text) || t("tasks.untitled") : t("tasks.panelTitle")}
         </span>
         <span className="min-w-0 flex-1 truncate text-[11.5px] text-dim">{project}</span>
         <button
           type="button"
-          className="flex h-7 w-7 shrink-0 items-center justify-center rounded-[8px] border border-line bg-bg text-dim hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+          className="flex h-11 w-11 shrink-0 items-center justify-center rounded-[8px] border border-line bg-bg text-dim hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
           aria-label={t("common.close")}
           onClick={onClose}
         >
-          <X className="h-4 w-4" aria-hidden />
+          <X className="h-5 w-5" aria-hidden />
         </button>
       </div>
 
@@ -400,7 +400,7 @@ export function TaskSheet({
         <div className="flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto p-2">
           <button
             type="button"
-            className="flex h-9 shrink-0 items-center justify-center gap-1 rounded-[10px] border border-dashed border-accent/50 text-[12px] font-bold text-accent hover:bg-accent/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            className="flex min-h-11 shrink-0 items-center justify-center gap-1 rounded-[10px] border border-dashed border-accent/50 text-[13px] font-bold text-accent hover:bg-accent/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
             onClick={() => setView("new")}
           >
             + {t("tasks.sheetNew")}

@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import { Check, PencilLine, RotateCw, X } from "@/components/icons";
+import { useIsMobile } from "@/hooks/useIsMobile";
 import { useLocale } from "@/lib/i18n";
 import { cleanTitle } from "@/lib/title";
 import type { FileEntry } from "@/lib/types";
@@ -56,6 +57,7 @@ interface SessionTitleProps {
  */
 export function SessionTitle({ file, displayMax = 90, titleClassName = "", className = "", alwaysVisible = false, autoEditToken }: SessionTitleProps) {
   const { t } = useLocale();
+  const isMobile = useIsMobile();
   const [editing, setEditing] = useState(false);
   const [value, setValue] = useState("");
   const [optimistic, setOptimistic] = useState<Optimistic>(null);
@@ -288,32 +290,38 @@ export function SessionTitle({ file, displayMax = 90, titleClassName = "", class
         />
         <button
           type="button"
-          className="inline-flex shrink-0 items-center rounded-[6px] border border-line bg-bg px-1 py-0.5 text-dim hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+          className={`inline-flex shrink-0 items-center justify-center rounded-[6px] border border-line bg-bg text-dim hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+            isMobile ? "h-11 w-11" : "px-1 py-0.5"
+          }`}
           aria-label={t("rename.save")}
           title={t("rename.save")}
           onClick={() => commit(inputRef.current?.value ?? value)}
         >
-          <Check className="h-3 w-3" aria-hidden />
+          <Check className={isMobile ? "h-4 w-4" : "h-3 w-3"} aria-hidden />
         </button>
         {hasOverride ? (
           <button
             type="button"
-            className="inline-flex shrink-0 items-center rounded-[6px] border border-line bg-bg px-1 py-0.5 text-dim hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            className={`inline-flex shrink-0 items-center justify-center rounded-[6px] border border-line bg-bg text-dim hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+              isMobile ? "h-11 w-11" : "px-1 py-0.5"
+            }`}
             aria-label={t("rename.reset")}
             title={t("rename.resetHint", { title: cleanTitle(autoTitle, 60) })}
             onClick={() => commit(null)}
           >
-            <RotateCw className="h-3 w-3" aria-hidden />
+            <RotateCw className={isMobile ? "h-4 w-4" : "h-3 w-3"} aria-hidden />
           </button>
         ) : null}
         <button
           type="button"
-          className="inline-flex shrink-0 items-center rounded-[6px] border border-line bg-bg px-1 py-0.5 text-dim hover:border-err/40 hover:text-err focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+          className={`inline-flex shrink-0 items-center justify-center rounded-[6px] border border-line bg-bg text-dim hover:border-err/40 hover:text-err focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+            isMobile ? "h-11 w-11" : "px-1 py-0.5"
+          }`}
           aria-label={t("rename.cancel")}
           title={t("rename.cancel")}
           onClick={cancel}
         >
-          <X className="h-3 w-3" aria-hidden />
+          <X className={isMobile ? "h-4 w-4" : "h-3 w-3"} aria-hidden />
         </button>
         <span className="sr-only" role="status" aria-live="polite">
           {announce}
@@ -353,7 +361,9 @@ export function SessionTitle({ file, displayMax = 90, titleClassName = "", class
       {retryTitle !== undefined ? (
         <button
           type="button"
-          className="inline-flex shrink-0 items-center rounded-[6px] border border-err/40 bg-bg px-1.5 py-0.5 text-[10px] font-semibold text-err focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+          className={`inline-flex shrink-0 items-center rounded-[6px] border border-err/40 bg-bg font-semibold text-err focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+            isMobile ? "min-h-11 px-3 text-[12px]" : "px-1.5 py-0.5 text-[10px]"
+          }`}
           onPointerDown={stop}
           onClick={() => void attemptSave(retryTitle, true)}
         >

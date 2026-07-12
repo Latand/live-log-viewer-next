@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 
 import { Archive, GitBranch, Trash2 } from "@/components/icons";
+import { useIsMobile } from "@/hooks/useIsMobile";
 import { useLocale } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
 
@@ -128,12 +129,13 @@ export function ArchiveProjectButton({
   compact?: boolean;
 }) {
   const { t } = useLocale();
+  const isMobile = useIsMobile();
   if ((!files.length && !allowEmpty) || files.some((file) => file.proc === "running" || file.activity === "live")) return null;
   return (
     <button
       type="button"
-      className={`inline-flex shrink-0 items-center gap-1 rounded-full border border-line bg-bg text-[11px] font-semibold text-dim hover:border-accent/40 hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
-        compact ? "p-1" : "px-2 py-0.5"
+      className={`inline-flex shrink-0 items-center gap-1.5 rounded-full border border-line bg-bg font-semibold text-dim hover:border-accent/40 hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+        isMobile ? "min-h-11 px-3 text-[13px]" : compact ? "p-1 text-[11px]" : "px-2 py-0.5 text-[11px]"
       }`}
       aria-label={t("trash.toArchive")}
       title={t("trash.toArchive")}
@@ -142,7 +144,7 @@ export function ArchiveProjectButton({
         gotoOverview();
       }}
     >
-      <Archive className="h-3 w-3" aria-hidden /> {compact ? null : t("trash.toArchive")}
+      <Archive className={isMobile ? "h-4 w-4" : "h-3 w-3"} aria-hidden /> {compact && !isMobile ? null : t("trash.toArchive")}
     </button>
   );
 }
@@ -154,6 +156,7 @@ export function ArchiveProjectButton({
  */
 export function DeleteProjectButton({ files }: { files: FileEntry[] }) {
   const { t } = useLocale();
+  const isMobile = useIsMobile();
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -196,7 +199,9 @@ export function DeleteProjectButton({ files }: { files: FileEntry[] }) {
         </span>
         <button
           type="button"
-          className="rounded-lg bg-err px-2 py-0.5 font-bold text-white disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-err/50"
+          className={`inline-flex items-center rounded-lg bg-err font-bold text-white disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-err/50 ${
+            isMobile ? "min-h-11 px-3" : "px-2 py-0.5"
+          }`}
           disabled={busy}
           onClick={removeAll}
         >
@@ -204,7 +209,9 @@ export function DeleteProjectButton({ files }: { files: FileEntry[] }) {
         </button>
         <button
           type="button"
-          className="rounded-lg border border-line bg-panel px-2 py-0.5 font-semibold text-dim focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+          className={`inline-flex items-center rounded-lg border border-line bg-panel font-semibold text-dim focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+            isMobile ? "min-h-11 px-3" : "px-2 py-0.5"
+          }`}
           onClick={() => setConfirming(false)}
         >
           {t("common.cancel")}
@@ -216,12 +223,14 @@ export function DeleteProjectButton({ files }: { files: FileEntry[] }) {
     <span className="inline-flex shrink-0 items-center gap-1.5">
       <button
         type="button"
-        className="inline-flex items-center rounded-full border border-line bg-bg p-1 text-dim hover:border-err/40 hover:text-err focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+        className={`inline-flex items-center justify-center rounded-full border border-line bg-bg text-dim hover:border-err/40 hover:text-err focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+          isMobile ? "h-11 w-11" : "p-1"
+        }`}
         aria-label={t("trash.deleteProject")}
         title={t("trash.deleteProject")}
         onClick={() => setConfirming(true)}
       >
-        <Trash2 className="h-3 w-3" aria-hidden />
+        <Trash2 className={isMobile ? "h-4 w-4" : "h-3 w-3"} aria-hidden />
       </button>
       {error ? <span className="max-w-[180px] truncate text-[10.5px] font-semibold text-err">{error}</span> : null}
     </span>

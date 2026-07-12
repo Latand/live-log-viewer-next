@@ -384,6 +384,8 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
     </span>
   );
 
+  /* Phone composer controls meet the 44px minimum; desktop keeps the compact p-2. */
+  const iconBtn = isMobile ? "h-11 w-11" : "p-2";
   const liveControls = !spawnMode ? (
     <>
       <Hint label={t("composer.interruptTitle")}>
@@ -392,7 +394,7 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
           aria-label={t("composer.interruptAria")}
           disabled={interrupting}
           onClick={() => void interrupt()}
-          className="inline-flex shrink-0 items-center justify-center rounded-[8px] border border-line bg-panel p-2 text-dim hover:border-err/40 hover:text-err focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-50"
+          className={`inline-flex shrink-0 items-center justify-center rounded-[8px] border border-line bg-panel text-dim hover:border-err/40 hover:text-err focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-50 ${iconBtn}`}
         >
           {interrupting ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : <Square className="h-4 w-4" fill="currentColor" aria-hidden />}
         </button>
@@ -410,7 +412,9 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
             setCompactArmed(false);
             void compact();
           }}
-          className={`inline-flex shrink-0 items-center justify-center gap-1 rounded-[8px] border p-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-50 ${
+          className={`inline-flex shrink-0 items-center justify-center gap-1 rounded-[8px] border focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-50 ${
+            isMobile ? "min-h-11 px-2.5" : "p-2"
+          } ${
             compactArmed
               ? "border-[#0d9488] bg-[#e3f4f0] text-[#0b7c72]"
               : "border-line bg-panel text-dim hover:border-[#0d9488]/50 hover:text-[#0b7c72]"
@@ -470,12 +474,14 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
                   aria-label={t("composer.retrySend")}
                   title={t("composer.retrySend")}
                   disabled={busy || voiceSending}
-                  className="inline-flex shrink-0 items-center rounded px-0.5 text-dim hover:text-accent disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                  className={`inline-flex shrink-0 items-center justify-center rounded text-dim hover:text-accent disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+                    isMobile ? "h-11 w-11" : "px-0.5"
+                  }`}
                   onClick={() => {
                     void send(entry.text, { receiptId: entry.id, clientMessageId: entry.clientMessageId });
                   }}
                 >
-                  <RotateCcw className="h-3 w-3" aria-hidden />
+                  <RotateCcw className={isMobile ? "h-4 w-4" : "h-3 w-3"} aria-hidden />
                 </button>
               ) : null}
               <span
@@ -491,10 +497,12 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
               <button
                 type="button"
                 aria-label={t("composer.removeFromQueue")}
-                className="inline-flex shrink-0 items-center rounded px-0.5 text-dim hover:text-err focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                className={`inline-flex shrink-0 items-center justify-center rounded text-dim hover:text-err focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+                  isMobile ? "h-11 w-11" : "px-0.5"
+                }`}
                 onClick={() => persistSent(sent.filter((item) => item.id !== entry.id))}
               >
-                <X className="h-3 w-3" aria-hidden />
+                <X className={isMobile ? "h-4 w-4" : "h-3 w-3"} aria-hidden />
               </button>
             </div>
             );
@@ -540,7 +548,7 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
                 aria-label={t("composer.moreTools")}
                 title={t("composer.moreTools")}
                 onClick={() => setToolsOpen((value) => !value)}
-                className="inline-flex shrink-0 items-center justify-center rounded-[8px] border border-line bg-panel p-2 text-dim hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                className={`inline-flex shrink-0 items-center justify-center rounded-[8px] border border-line bg-panel text-dim hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${iconBtn}`}
               >
                 <Plus className={`h-4 w-4 transition-transform ${toolsOpen ? "rotate-45" : ""}`} aria-hidden />
               </button>
@@ -550,7 +558,7 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
                   {liveControls}
                   <ImagePickerButton
                     ariaLabel={t("composer.addImages")}
-                    className="inline-flex shrink-0 items-center justify-center rounded-[8px] border border-line bg-panel p-2 text-dim hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                    className={`inline-flex shrink-0 items-center justify-center rounded-[8px] border border-line bg-panel text-dim hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${iconBtn}`}
                     onFiles={attachments.addFiles}
                   />
                 </>

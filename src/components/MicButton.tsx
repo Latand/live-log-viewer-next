@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import { Check, Copy, Loader2, Mic, Square, X } from "@/components/icons";
+import { useIsMobile } from "@/hooks/useIsMobile";
 import { fmtElapsed, METER_HEIGHT, METER_WIDTH, prewarmLiveToken, type UseDictationResult } from "@/hooks/useDictation";
 import { micVisual } from "@/lib/dictationTimer";
 import { translate, useLocale } from "@/lib/i18n";
@@ -216,6 +217,7 @@ export function MicButtonView({
   busy = false,
 }: MicButtonViewProps) {
   const { t } = useLocale();
+  const isMobile = useIsMobile();
   const [menuOpen, setMenuOpen] = useState(false);
   const visual = micVisual({ phase, elapsed, maxSeconds, capStopped });
   const handleMain = () => {
@@ -248,7 +250,9 @@ export function MicButtonView({
           aria-label={t("mic.stopRecognize")}
           title={warn ? t("mic.timeLeft", { time: fmtElapsed(remaining) }) : undefined}
           onClick={handleMain}
-          className={`flex items-center gap-1.5 rounded-[8px] border px-2 py-2 text-[11px] font-bold tabular-nums focus-visible:outline-none focus-visible:ring-2 ${
+          className={`flex items-center gap-1.5 rounded-[8px] border px-2 text-[11px] font-bold tabular-nums focus-visible:outline-none focus-visible:ring-2 ${
+            isMobile ? "min-h-11" : "py-2"
+          } ${
             warn
               ? "border-[#e0ae45]/70 bg-[#fdf3dd] text-[#b07d1f] focus-visible:ring-[#e0ae45]/50"
               : "border-err/50 bg-[#fff2f2] text-err focus-visible:ring-err/40"
@@ -261,7 +265,9 @@ export function MicButtonView({
           type="button"
           aria-label={t("mic.cancel")}
           onClick={discard}
-          className="inline-flex items-center justify-center rounded-[8px] border border-line bg-panel p-2 text-dim hover:text-err focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+          className={`inline-flex items-center justify-center rounded-[8px] border border-line bg-panel text-dim hover:text-err focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+            isMobile ? "h-11 w-11" : "p-2"
+          }`}
         >
           <X className="h-3.5 w-3.5" aria-hidden />
         </button>
@@ -304,9 +310,9 @@ export function MicButtonView({
           event.preventDefault();
           setMenuOpen((open) => !open);
         }}
-        className={`inline-flex shrink-0 items-center justify-center rounded-[8px] border p-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60 ${
-          phase === "starting" ? "border-accent/40 bg-accent/10 text-accent" : "border-line bg-panel text-dim hover:text-accent"
-        }`}
+        className={`inline-flex shrink-0 items-center justify-center rounded-[8px] border focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60 ${
+          isMobile ? "h-11 w-11" : "p-2"
+        } ${phase === "starting" ? "border-accent/40 bg-accent/10 text-accent" : "border-line bg-panel text-dim hover:text-accent"}`}
       >
         {phase === "busy" ? (
           <Loader2 className="h-4 w-4 animate-spin" aria-hidden />

@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { Check, Copy, QrCode } from "lucide-react";
 
+import { useIsMobile } from "@/hooks/useIsMobile";
 import { useLocale } from "@/lib/i18n";
 
 interface AccessResponse {
@@ -20,6 +21,7 @@ type LoadState = { status: "idle" } | { status: "ready"; url: string } | { statu
  */
 export function AccessQrButton() {
   const { t } = useLocale();
+  const isMobile = useIsMobile();
   const [open, setOpen] = useState(false);
   const [state, setState] = useState<LoadState>({ status: "idle" });
   // Keyed by url so a stale QR from a previous render never flashes for the
@@ -106,7 +108,9 @@ export function AccessQrButton() {
           if (!open) setState({ status: "idle" });
           setOpen(!open);
         }}
-        className="flex items-center justify-center rounded-[8px] border border-line bg-panel p-1.5 text-dim hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+        className={`flex items-center justify-center rounded-[8px] border border-line bg-panel text-dim hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+          isMobile ? "h-11 w-11" : "p-1.5"
+        }`}
       >
         <QrCode className="h-4 w-4" aria-hidden />
       </button>

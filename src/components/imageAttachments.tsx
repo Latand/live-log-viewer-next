@@ -3,6 +3,7 @@
 import { useRef, useState } from "react";
 
 import { ArrowRight, ImageIcon, X } from "@/components/icons";
+import { useIsMobile } from "@/hooks/useIsMobile";
 import { getLocale, translate, useLocale } from "@/lib/i18n";
 import { inboxImageExt, MAX_INBOX_IMAGE_BYTES } from "@/lib/imagePolicy";
 
@@ -92,7 +93,34 @@ export function useImageAttachments(handlers: { onError: (message: string) => vo
 
 export function ImagePreviewStrip({ images, onRemove }: { images: PendingImage[]; onRemove: (idx: number) => void }) {
   const { t } = useLocale();
+  const isMobile = useIsMobile();
   if (!images.length) return null;
+  /* Touch has no hover, so on the phone (finding 3) each pending image is a row
+     with a persistent 44px remove target; desktop keeps the compact hover grid. */
+  if (isMobile) {
+    return (
+      <div className="flex flex-col gap-1.5">
+        {images.map((image, idx) => (
+          <div key={idx} className="flex items-center gap-2 rounded-[8px] border border-line bg-panel p-1.5">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src={image.preview} alt={t("img.previewAlt", { n: idx + 1 })} className="h-11 w-11 shrink-0 rounded border border-line object-cover" />
+            <span className="min-w-0 flex-1 truncate text-[12px] font-semibold text-dim">{t("img.previewAlt", { n: idx + 1 })}</span>
+            <button
+              type="button"
+              onClick={() => onRemove(idx)}
+              aria-label={t("img.removeAria", { n: idx + 1 })}
+              className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full border border-line bg-bg text-dim hover:text-err focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            >
+              <X className="h-4 w-4" aria-hidden />
+            </button>
+          </div>
+        ))}
+        <span className="inline-flex items-center gap-1 text-[10.5px] font-semibold text-dim">
+          {t("composer.imagesCount", { count: images.length })} <ArrowRight className="h-3 w-3" aria-hidden /> {t("img.toFilePaths")}
+        </span>
+      </div>
+    );
+  }
   return (
     <div className="flex flex-wrap items-center gap-1.5">
       {images.map((image, idx) => (

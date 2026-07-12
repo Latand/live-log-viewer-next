@@ -1,6 +1,6 @@
 "use client";
 
-import { ListTodo } from "lucide-react";
+import { ListTodo, Map as MapIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { Loader2, X } from "@/components/icons";
@@ -22,15 +22,13 @@ import { RoundDeck } from "@/components/flows/RoundDeck";
 import { canHandoff, HandoffHandle } from "@/components/HandoffHandle";
 import { paneState, type PaneState } from "@/components/paneState";
 import type { BranchGroup } from "@/components/projectModel";
-import { activityDot, cleanTitle, engineBadge, engineColor } from "@/components/utils";
+import { activityDot, cleanTitle, engineBadge } from "@/components/utils";
 
 import { STAGE_GLYPH, STAGE_TONES, latestAttempt, renderableFlowIds, stageChipLabel, stageChipState, stageHasEvidence, stageOpenTarget } from "@/components/pipelines/pipelineModel";
 import { VerdictPopover } from "@/components/pipelines/VerdictPopover";
 import { deckKey } from "@/components/scheme/agentLinks";
-import { buildSchemeLayout, type SchemeLayout } from "@/components/scheme/layout";
+import { buildSchemeLayout } from "@/components/scheme/layout";
 import { SchemeBoard } from "@/components/scheme/SchemeBoard";
-import { isPlacedTask, TASK_W, taskCardHeight } from "@/components/scheme/taskGeometry";
-import { TASK_TONES } from "@/components/tasks/taskModel";
 
 const focusKey = (project: string) => "llvFocus:" + project;
 
@@ -91,6 +89,16 @@ export function MobileFocusView({ project, groups, manual, files, flows, pipelin
   }, [taskSheetNonce]);
   const swipeRef = useRef<{ x: number; y: number } | null>(null);
   const activeChipRef = useRef<HTMLButtonElement | null>(null);
+  /* Fade hints on the chip strip: which clipped edge still has content to reveal. */
+  const chipScrollRef = useRef<HTMLDivElement | null>(null);
+  const [chipFade, setChipFade] = useState({ left: false, right: false });
+  const syncChipFade = useCallback(() => {
+    const el = chipScrollRef.current;
+    if (!el) return;
+    const left = el.scrollLeft > 4;
+    const right = el.scrollLeft + el.clientWidth < el.scrollWidth - 4;
+    setChipFade((prev) => (prev.left === left && prev.right === right ? prev : { left, right }));
+  }, []);
 
   const layout = useMemo(() => buildSchemeLayout(groups, manual, files, flows, drafts, pipelines), [groups, manual, files, flows, drafts, pipelines]);
   /* Scheme order (depth-first, groups left to right) becomes the strip order,
@@ -147,7 +155,8 @@ export function MobileFocusView({ project, groups, manual, files, flows, pipelin
 
   useEffect(() => {
     activeChipRef.current?.scrollIntoView({ block: "nearest", inline: "nearest" });
-  }, [resolvedKey]);
+    syncChipFade();
+  }, [resolvedKey, entries, syncChipFade]);
 
   const activeNode = useMemo(() => layout.nodes.find((node) => node.file.path === resolvedKey) ?? null, [layout, resolvedKey]);
   const activeDeck = useMemo(() => layout.decks.find((deck) => deck.key === resolvedKey) ?? null, [layout, resolvedKey]);
@@ -260,35 +269,86 @@ export function MobileFocusView({ project, groups, manual, files, flows, pipelin
       {/* Same runtime connection pill as desktop, compact, one thumb away.
           Renders nothing while slice-one is disabled. */}
       <ConnectionPill compact />
-      {entries.length > 1 ? (
-        <div className="flex shrink-0 items-center gap-1.5 overflow-x-auto border-b border-line bg-panel px-2 py-1.5">
-          {entries.map((entry) => (
-            <StripChip
-              key={entry.key}
-              entry={entry}
-              active={entry.key === resolvedKey}
-              chipRef={entry.key === resolvedKey ? activeChipRef : undefined}
-              onClick={() => setFocusPath(entry.key)}
-            />
-          ))}
+      {/* One docked navigation strip, two rows total (findings 4, 7): the pipeline
+          chain hop chips (when a stage is focused) and the conversation chips share
+          this single scrolling row with a fade hint at the clipped edge (finding
+          5); the map + tasks controls dock on the right so they never float over
+          the transcript (findings 2, 3). No separate third pipeline row. */}
+      <div className="flex shrink-0 items-stretch border-b border-line bg-panel">
+        {entries.length > 1 || pipelineFocus ? (
+          <div className="relative min-w-0 flex-1">
+            <div ref={chipScrollRef} onScroll={syncChipFade} className="no-scrollbar flex items-center gap-1.5 overflow-x-auto px-2 py-1.5">
+              {pipelineFocus ? (
+                <>
+                  <PipelineFocusRow pipeline={pipelineFocus.pipeline} index={pipelineFocus.index} renderableFlows={renderableFlows} renderablePaths={renderablePaths} onHop={hopToStage} onOpenPath={openStagePath} />
+                  {entries.length > 1 ? <span aria-hidden className="mx-0.5 h-7 w-px shrink-0 bg-line" /> : null}
+                </>
+              ) : null}
+              {entries.length > 1
+                ? entries.map((entry) => (
+                    <StripChip
+                      key={entry.key}
+                      entry={entry}
+                      active={entry.key === resolvedKey}
+                      chipRef={entry.key === resolvedKey ? activeChipRef : undefined}
+                      onClick={() => setFocusPath(entry.key)}
+                    />
+                  ))
+                : null}
+            </div>
+            {/* Scroll affordance: a soft panel-colored fade over each clipped
+                edge, shown only while there is more to scroll that way. */}
+            <span aria-hidden className={`pointer-events-none absolute inset-y-0 left-0 w-6 bg-gradient-to-r from-panel to-transparent transition-opacity ${chipFade.left ? "opacity-100" : "opacity-0"}`} />
+            <span aria-hidden className={`pointer-events-none absolute inset-y-0 right-0 w-6 bg-gradient-to-l from-panel to-transparent transition-opacity ${chipFade.right ? "opacity-100" : "opacity-0"}`} />
+          </div>
+        ) : (
+          <span className="min-w-0 flex-1" aria-hidden />
+        )}
+        <div className="flex shrink-0 items-center gap-1 border-l border-line px-1.5">
+          {layout.nodes.length > 1 ? (
+            <button
+              type="button"
+              className="inline-flex h-11 min-w-11 items-center justify-center gap-1 rounded-[8px] text-dim hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+              aria-label={t("mobile.openMap")}
+              onClick={() => setMapOpen(true)}
+            >
+              <MapIcon className="h-4 w-4" aria-hidden />
+            </button>
+          ) : null}
+          <button
+            type="button"
+            className="inline-flex h-11 min-w-11 items-center justify-center gap-1 rounded-[8px] text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            aria-label={t("tasks.panelToggleAria")}
+            onClick={() => setTaskSheet("list")}
+          >
+            <ListTodo className="h-4 w-4 text-accent" aria-hidden />
+            {tasks.filter((task) => task.status !== "done").length ? (
+              <span className="rounded-full bg-accent/10 px-1 text-[10px] font-bold text-accent">
+                {tasks.filter((task) => task.status !== "done").length}
+              </span>
+            ) : null}
+          </button>
         </div>
-      ) : null}
+      </div>
 
-      {pipelineFocus ? (
-        <PipelineFocusRow pipeline={pipelineFocus.pipeline} index={pipelineFocus.index} renderableFlows={renderableFlows} renderablePaths={renderablePaths} onHop={hopToStage} onOpenPath={openStagePath} />
-      ) : null}
-
-      <div className="relative flex min-h-0 flex-1 flex-col p-1.5 pb-[max(0.375rem,env(safe-area-inset-bottom))]">
+      {/* Even card gutters that also clear the notch/rounded corners (finding 8):
+          the safe-area insets keep the pane off the screen edges symmetrically. */}
+      <div className="relative flex min-h-0 flex-1 flex-col py-1.5 pl-[max(0.375rem,env(safe-area-inset-left))] pr-[max(0.375rem,env(safe-area-inset-right))] pb-[max(0.375rem,env(safe-area-inset-bottom))]">
         {activeNode ? (
-          <div key={activeNode.file.path} className="relative flex min-h-0 flex-1">
-            <BranchPane
-              file={activeNode.file}
-              tasks={activeNode.tasks}
-              isRoot={activeNode.isRoot}
-              onClose={() => onClose(activeNode.file.path)}
-              dragHandle={swipeHandle}
-            />
-            {onHandoff && canHandoff(activeNode.file) ? <HandoffHandle file={activeNode.file} onHandoff={() => onHandoff(activeNode.file)} /> : null}
+          <div key={activeNode.file.path} className="flex min-h-0 flex-1 flex-col">
+            <div className="relative flex min-h-0 flex-1">
+              <BranchPane
+                file={activeNode.file}
+                tasks={activeNode.tasks}
+                isRoot={activeNode.isRoot}
+                onClose={() => onClose(activeNode.file.path)}
+                dragHandle={swipeHandle}
+              />
+            </div>
+            {/* Docked in flow below the pane (finding 1): reserves its own 44px
+                row instead of the scheme's floating handle, so it never overlaps
+                the WorkerStacks footer under the focus view. */}
+            {onHandoff && canHandoff(activeNode.file) ? <HandoffHandle file={activeNode.file} onHandoff={() => onHandoff(activeNode.file)} docked /> : null}
           </div>
         ) : activeDeck ? (
           <div key={activeDeck.key} className="relative min-h-0 flex-1">
@@ -321,30 +381,20 @@ export function MobileFocusView({ project, groups, manual, files, flows, pipelin
             {t("common.loading")}
           </div>
         )}
-        <MapChip layout={layout} tasks={tasks} current={resolvedKey} onOpen={() => setMapOpen(true)} />
-        <button
-          type="button"
-          className="absolute bottom-[168px] right-4 z-30 inline-flex h-9 items-center gap-1 rounded-full border border-line bg-panel/95 px-2.5 text-[11px] font-bold text-ink shadow-card focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
-          aria-label={t("tasks.panelToggleAria")}
-          onClick={() => setTaskSheet("list")}
-        >
-          <ListTodo className="h-4 w-4 text-accent" aria-hidden />
-          {tasks.filter((task) => task.status !== "done").length || null}
-        </button>
       </div>
 
       {mapOpen ? (
         <div className="fixed inset-0 z-50 flex flex-col bg-bg pb-[env(safe-area-inset-bottom)]">
-          <div className="flex h-10 shrink-0 items-center gap-2 border-b border-line bg-panel px-3">
-            <span className="shrink-0 text-[13px] font-bold">{t("mobile.map")}</span>
+          <div className="flex min-h-[52px] shrink-0 items-center gap-2 border-b border-line bg-panel px-2 py-1.5">
+            <span className="shrink-0 pl-1 text-[13px] font-bold">{t("mobile.map")}</span>
             <span className="min-w-0 flex-1 truncate text-[11.5px] text-dim">{project}</span>
             <button
               type="button"
-              className="flex h-7 w-7 shrink-0 items-center justify-center rounded-[8px] border border-line bg-bg text-dim hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+              className="flex h-11 w-11 shrink-0 items-center justify-center rounded-[8px] border border-line bg-bg text-dim hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
               aria-label={t("mobile.closeMap")}
               onClick={() => setMapOpen(false)}
             >
-              <X className="h-4 w-4" aria-hidden />
+              <X className="h-5 w-5" aria-hidden />
             </button>
           </div>
           <SchemeBoard
@@ -420,14 +470,16 @@ function PipelineFocusRow({ pipeline, index, renderableFlows, renderablePaths, o
   const canOpenFlow = Boolean(attempt?.flowId && renderableFlows.has(attempt.flowId));
   const canOpenPath = Boolean(attempt?.agentPath && renderablePaths.has(attempt.agentPath));
   return (
-    <div className="flex shrink-0 items-center gap-1.5 overflow-x-auto border-b border-line bg-[#fbfbfd] px-2 py-1.5" role="group" aria-label={t("pipelineMobile.chipAria", { task: pipeline.task })}>
-      <span className="shrink-0 rounded-full bg-chip px-1.5 py-0.5 text-[10px] font-bold text-dim" aria-hidden>⇢ {t("pipelineMobile.position", { k: index + 1, n: total })}</span>
+    /* Inline chip group living inside the shared conversation-chip strip (finding
+       4): no separate row. Every hop/verdict control is a 44px tap target. */
+    <div className="flex shrink-0 items-center gap-1.5" role="group" aria-label={t("pipelineMobile.chipAria", { task: pipeline.task })}>
+      <span className="shrink-0 rounded-full bg-chip px-1.5 py-1 text-[10px] font-bold text-dim" aria-hidden>⇢ {t("pipelineMobile.position", { k: index + 1, n: total })}</span>
       <button
         type="button"
         disabled={!prevHopEnabled}
         onClick={() => onHop(index - 1)}
         aria-label={t("pipelineMobile.prevStage")}
-        className="shrink-0 rounded-full border border-line bg-panel px-2 py-0.5 text-[10px] font-bold text-dim focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-30"
+        className="inline-flex h-11 shrink-0 items-center rounded-full border border-line bg-panel px-3 text-[11px] font-bold text-dim focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-30"
       >
         ‹ {prev ? stageChipLabel(t, prev) : ""}
       </button>
@@ -437,7 +489,7 @@ function PipelineFocusRow({ pipeline, index, renderableFlows, renderablePaths, o
         onClick={() => setSheetOpen(true)}
         aria-haspopup="dialog"
         aria-label={t("pipelineMobile.openVerdict", { label: stageChipLabel(t, stage) })}
-        className="inline-flex shrink-0 items-center gap-1 rounded-full px-2 py-0.5 text-[10.5px] font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:cursor-default"
+        className="inline-flex h-11 shrink-0 items-center gap-1 rounded-full px-3 text-[11px] font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:cursor-default"
         style={{ backgroundColor: tone.soft, color: tone.color }}
       >
         <span aria-hidden>{stage.kind === "review-loop" ? "⟳" : "▸"}</span>
@@ -451,7 +503,7 @@ function PipelineFocusRow({ pipeline, index, renderableFlows, renderablePaths, o
         disabled={!nextHopEnabled}
         onClick={() => onHop(index + 1)}
         aria-label={t("pipelineMobile.nextStage")}
-        className="shrink-0 rounded-full border border-line bg-panel px-2 py-0.5 text-[10px] font-bold text-dim focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-30"
+        className="inline-flex h-11 shrink-0 items-center rounded-full border border-line bg-panel px-3 text-[11px] font-bold text-dim focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-30"
       >
         {next ? stageChipLabel(t, next) : ""} ›
       </button>
@@ -501,7 +553,7 @@ function StripChip({
       <button
         ref={chipRef}
         type="button"
-        className={`flex h-7 shrink-0 items-center gap-1 rounded-full border px-2.5 text-[11px] font-semibold ${
+        className={`flex h-11 shrink-0 items-center gap-1 rounded-full border px-3 text-[11px] font-semibold ${
           active ? "border-accent/60 bg-accent/10 text-ink" : "border-dashed border-line bg-bg text-dim"
         }`}
         onClick={onClick}
@@ -519,7 +571,7 @@ function StripChip({
     <button
       ref={chipRef}
       type="button"
-      className={`flex h-7 shrink-0 items-center gap-1.5 rounded-full border px-2.5 text-[11px] font-semibold ${
+      className={`flex h-11 shrink-0 items-center gap-1.5 rounded-full border px-3 text-[11px] font-semibold ${
         active
           ? "border-accent/60 bg-accent/10 text-ink"
           : waiting
@@ -532,98 +584,6 @@ function StripChip({
       <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${activityDot(file.activity)}`} />
       {entry.isRoot ? null : <span aria-hidden>⤷</span>}
       {active ? <span className="max-w-[52vw] truncate">{title}</span> : <span>{waiting ? "⏸ " : ""}{badge.label}</span>}
-    </button>
-  );
-}
-
-const CHIP_W = 96;
-const CHIP_H = 64;
-
-/** Live thumbnail of the whole scheme floating over the focused pane: every
-    node as an engine-colored block, the pinned one framed. A tap unfolds the
-    full map. */
-function MapChip({
-  layout,
-  tasks,
-  current,
-  onOpen,
-}: {
-  layout: SchemeLayout;
-  tasks: BoardTask[];
-  current: string | null;
-  onOpen: () => void;
-}) {
-  const { t } = useLocale();
-  const scale = Math.min(CHIP_W / layout.width, CHIP_H / layout.height);
-  const ox = (CHIP_W - layout.width * scale) / 2;
-  const oy = (CHIP_H - layout.height * scale) / 2;
-  return (
-    <button
-      type="button"
-      className="absolute bottom-[92px] right-4 z-30 overflow-hidden rounded-[10px] border border-line bg-panel/95 shadow-card focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
-      style={{ width: CHIP_W, height: CHIP_H }}
-      aria-label={t("mobile.openMap")}
-      onClick={onOpen}
-    >
-      <svg width={CHIP_W} height={CHIP_H} aria-hidden>
-        <g transform={`translate(${ox} ${oy}) scale(${scale})`}>
-          {layout.stacks.map((stack) => (
-            <rect key={stack.key} x={stack.x} y={stack.y} width={stack.w} height={stack.h} rx={24} fill="#c9c9d1" opacity={0.45} />
-          ))}
-          {layout.drafts.map((draft) => (
-            <rect
-              key={draft.key}
-              x={draft.x}
-              y={draft.y}
-              width={draft.w}
-              height={draft.h}
-              rx={24}
-              fill="#9a9aa4"
-              opacity={0.3}
-              stroke={draft.key === current ? "#5a51e0" : undefined}
-              strokeWidth={draft.key === current ? 5 / scale : undefined}
-            />
-          ))}
-          {layout.decks.map((deck) => (
-            <rect
-              key={deck.key}
-              x={deck.x}
-              y={deck.y}
-              width={deck.w}
-              height={deck.h}
-              rx={24}
-              fill="#5a51e0"
-              opacity={0.35}
-              stroke={deck.key === current ? "#5a51e0" : undefined}
-              strokeWidth={deck.key === current ? 5 / scale : undefined}
-            />
-          ))}
-          {layout.nodes.map((node) => (
-            <rect
-              key={node.file.path}
-              x={node.x}
-              y={node.y}
-              width={node.w}
-              height={node.h}
-              rx={24}
-              fill={engineColor(node.file)}
-              opacity={node.file.activity === "live" ? 0.85 : 0.35}
-              stroke={node.file.path === current ? "#5a51e0" : undefined}
-              strokeWidth={node.file.path === current ? 5 / scale : undefined}
-            />
-          ))}
-          {tasks.filter(isPlacedTask).map((task) => (
-            <circle
-              key={task.id}
-              cx={task.pos.x + TASK_W / 2}
-              cy={task.pos.y + taskCardHeight(task) / 2}
-              r={3 / scale}
-              fill={TASK_TONES[task.status].color}
-              opacity={task.status === "done" ? 0.5 : 0.95}
-            />
-          ))}
-        </g>
-      </svg>
     </button>
   );
 }

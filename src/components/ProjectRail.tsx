@@ -2,6 +2,7 @@
 
 import { useMemo, useState } from "react";
 
+import { useIsMobile } from "@/hooks/useIsMobile";
 import { useLocale } from "@/lib/i18n";
 import type { FileEntry, ProjectCatalogEntry } from "@/lib/types";
 import type { Pipeline } from "@/lib/pipelines/types";
@@ -36,6 +37,7 @@ interface Props {
 
 export function ProjectRail({ files, projectCatalog, pipelines, workflows, archivedProjects, selected, loaded, now, onSelect }: Props) {
   const { t } = useLocale();
+  const isMobile = useIsMobile();
   const [query, setQuery] = useState("");
   const [archiveOpen, setArchiveOpen] = useState(false);
   const summaries = useMemo(() => buildProjectSummaries(files, now, workflows, projectCatalog, pipelines), [files, now, workflows, projectCatalog, pipelines]);
@@ -50,8 +52,12 @@ export function ProjectRail({ files, projectCatalog, pipelines, workflows, archi
 
   return (
     <aside className="flex w-[248px] shrink-0 flex-col border-r border-line bg-panel">
-      <header className="flex h-10 shrink-0 items-center gap-2 border-b border-line px-4 text-[13.5px] font-bold">
-        {t("rail.title")}
+      <header
+        className={`flex shrink-0 items-center gap-2 border-b border-line text-[13.5px] font-bold ${
+          isMobile ? "min-h-[52px] gap-1.5 px-2 py-1.5" : "h-10 px-4"
+        }`}
+      >
+        <span className={isMobile ? "min-w-0 truncate" : ""}>{t("rail.title")}</span>
         {totalLive ? (
           <span className="inline-flex items-center gap-1 rounded-full bg-[#e5f6ea] px-2 py-0.5 text-[10.5px] font-bold text-ok">
             <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-ok" />
@@ -69,7 +75,9 @@ export function ProjectRail({ files, projectCatalog, pipelines, workflows, archi
       </header>
       <div className="px-2.5 pb-1 pt-2.5">
         <input
-          className="w-full rounded-[9px] border border-line bg-bg px-2.5 py-1.5 text-[12px] outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+          className={`w-full rounded-[9px] border border-line bg-bg px-2.5 text-[12px] outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+            isMobile ? "min-h-11" : "py-1.5"
+          }`}
           placeholder={t("rail.filter")}
           value={query}
           onChange={(event) => setQuery(event.target.value)}
@@ -109,7 +117,9 @@ export function ProjectRail({ files, projectCatalog, pipelines, workflows, archi
             <div className="mx-2.5 my-1.5 border-t border-line" />
             <button
               type="button"
-              className="mb-0.5 flex w-full items-center gap-1.5 rounded-[10px] px-2.5 py-1.5 text-left text-[11.5px] font-bold text-dim hover:bg-bg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+              className={`mb-0.5 flex w-full items-center gap-1.5 rounded-[10px] px-2.5 text-left text-[11.5px] font-bold text-dim hover:bg-bg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+                isMobile ? "min-h-11" : "py-1.5"
+              }`}
               aria-expanded={archiveOpen}
               onClick={() => setArchiveOpen((value) => !value)}
             >
@@ -174,10 +184,12 @@ function RailRow({
   muted?: boolean;
   onClick: () => void;
 }) {
+  const isMobile = useIsMobile();
   return (
     <button
       className={[
-        "mb-0.5 flex w-full items-center gap-2 rounded-[10px] border px-2.5 py-2 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40",
+        "mb-0.5 flex w-full items-center gap-2 rounded-[10px] border px-2.5 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40",
+        isMobile ? "min-h-11" : "py-2",
         active ? "border-line bg-bg shadow-card" : "border-transparent hover:bg-bg",
         muted ? "opacity-65" : "",
       ].join(" ")}
