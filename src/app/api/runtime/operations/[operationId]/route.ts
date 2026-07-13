@@ -1,7 +1,8 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 
 import { runtimeHostClient } from "@/lib/runtime/client";
 import { runtimeEventsEnabled } from "@/lib/runtime/flags";
+import { handleRuntimeRetry } from "@/lib/runtime/http";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -22,4 +23,9 @@ export async function GET(_request: Request, context: OperationRouteContext): Pr
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : "runtime host is unavailable" }, { status: 503 });
   }
+}
+
+export async function POST(request: NextRequest, context: OperationRouteContext): Promise<NextResponse> {
+  const { operationId } = await context.params;
+  return handleRuntimeRetry(request, operationId);
 }

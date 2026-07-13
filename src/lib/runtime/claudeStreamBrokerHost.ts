@@ -28,6 +28,7 @@ type PendingDelivery = {
   promise: Promise<DeliveryReceipt>;
   resolve(receipt: DeliveryReceipt): void;
   reject(error: Error): void;
+  timer: ReturnType<typeof setTimeout>;
 };
 type PendingAnswer = {
   resolve(): void;
@@ -497,13 +498,19 @@ export class ClaudeStreamBrokerHost implements EngineHost {
     if (!duplicate) this.deliveries.push(delivery);
     let resolveDelivery!: PendingDelivery["resolve"];
     let rejectDelivery!: PendingDelivery["reject"];
+    const promise = new Promise<DeliveryReceipt>((resolve, reject) => {
+      resolveDelivery = resolve;
+      rejectDelivery = reject;
+    });
+    const timer = setTimeout(() => {
+      if (this.pendingDeliveries.get(entry.id)?.promise !== promise) return;
+      this.fail(new Error("Claude delivery confirmation timed out; outcome is uncertain"));
+    }, this.requestTimeoutMs);
     const pending: PendingDelivery = {
-      promise: new Promise<DeliveryReceipt>((resolve, reject) => {
-        resolveDelivery = resolve;
-        rejectDelivery = reject;
-      }),
+      promise,
       resolve: (receipt) => resolveDelivery(receipt),
       reject: (error) => rejectDelivery(error),
+      timer,
     };
     this.pendingDeliveries.set(entry.id, pending);
     this.write({
@@ -696,6 +703,7 @@ export class ClaudeStreamBrokerHost implements EngineHost {
           const pending = this.pendingDeliveries.get(delivery.entry.id);
           if (pending) {
             this.pendingDeliveries.delete(delivery.entry.id);
+            clearTimeout(pending.timer);
             pending.resolve({ outcome: delivery.disposition, turnId: delivery.entry.id });
           }
         } catch (error) {
@@ -873,7 +881,10 @@ export class ClaudeStreamBrokerHost implements EngineHost {
   }
 
   private rejectPending(error: Error): void {
-    for (const pending of this.pendingDeliveries.values()) pending.reject(new Error(safeError(error)));
+    for (const pending of this.pendingDeliveries.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(new Error(safeError(error)));
+    }
     this.pendingDeliveries.clear();
     for (const pending of this.pendingControls.values()) {
       clearTimeout(pending.timer);

@@ -41,6 +41,7 @@ export type RuntimeAttentionState = "open" | "resolving" | "resolved" | "expired
 export type RuntimeOperationKind = "send" | "steer" | "interrupt" | "answer" | "spawn";
 export type RuntimeReceiptStatus =
   | "pending"
+  | "delivering"
   | "turn-started"
   | "steered"
   | "queued"
@@ -81,6 +82,10 @@ export interface RuntimeEffect {
   id: string;
   kind: string;
   payload: Record<string, unknown>;
+}
+
+export interface RuntimePendingEffect extends RuntimeEffect {
+  eventSeq: number;
 }
 
 export interface RuntimeEventInput {
@@ -336,7 +341,7 @@ export interface RuntimeReplay {
 
 export interface RuntimeSocketRequest {
   id: string;
-  method: "snapshot" | "events" | "wait" | "append" | "operation" | "command" | "operation-status" | "viewer-deployment-request" | "viewer-deployment-read";
+  method: "snapshot" | "events" | "wait" | "append" | "operation" | "command" | "operation-status" | "operation-retry" | "effect-batch" | "operation-transition" | "viewer-deployment-request" | "viewer-deployment-read";
   params?: Record<string, unknown>;
 }
 

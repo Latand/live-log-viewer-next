@@ -176,12 +176,14 @@ function baseSession(id: string, payload: Record<string, unknown>, revision: num
 export interface RuntimeJournalOptions {
   maxEvents?: number;
   now?: () => number;
+  structuredHosts?: boolean;
 }
 
 export class RuntimeJournal {
   private readonly db: Database;
   private readonly maxEvents: number;
   private readonly now: () => number;
+  private readonly structuredHosts: boolean;
   private readonly secretKey: Buffer;
   private readonly waiters = new Set<() => void>();
   private fault: string | null = null;
@@ -190,6 +192,7 @@ export class RuntimeJournal {
     this.db = new Database(filename, { create: true, strict: true });
     this.maxEvents = options.maxEvents ?? 20_000;
     this.now = options.now ?? (() => Date.now());
+    this.structuredHosts = options.structuredHosts ?? process.env.LLV_STRUCTURED_HOSTS === "1";
     this.secretKey = loadSecretKey(filename);
     this.db.exec("PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000; PRAGMA auto_vacuum = INCREMENTAL;");
     if (filename !== ":memory:") {
@@ -292,7 +295,15 @@ export class RuntimeJournal {
       const receipt = this.operationReceipt(command, operationId);
       const effectPayload = command.kind === "answer"
         ? { ...command, operationId, resolution: this.encryptSecret(command.resolution) }
-        : { ...command, operationId };
+        : {
+            ...command,
+            operationId,
+            ...(this.structuredHosts
+              && (command.kind === "send" || command.kind === "steer")
+              && typeof receipt.turnId === "string"
+              ? { turnId: receipt.turnId }
+              : {}),
+          };
       const effect = receipt.status === "pending" || receipt.status === "queued"
         ? { id: `effect:${operationId}`, kind: `runtime.${command.kind}`, payload: effectPayload }
         : undefined;
@@ -327,6 +338,14 @@ export class RuntimeJournal {
 
   completeOperation(
     operationId: string,
+    status: Exclude<RuntimeReceiptStatus, "pending" | "delivering">,
+    details: Partial<Pick<RuntimeOperationReceipt, "turnId" | "queuePosition" | "reason">> = {},
+  ): RuntimeOperationResult {
+    return this.transitionOperation(operationId, status, details);
+  }
+
+  transitionOperation(
+    operationId: string,
     status: Exclude<RuntimeReceiptStatus, "pending">,
     details: Partial<Pick<RuntimeOperationReceipt, "turnId" | "queuePosition" | "reason">> = {},
   ): RuntimeOperationResult {
@@ -340,12 +359,31 @@ export class RuntimeJournal {
         this.db.exec("COMMIT");
         return { operationId, receipt: previous, replayed: true };
       }
-      if (previous.status !== "pending" && previous.status !== "queued") throw new Error("runtime operation is already terminal");
+      const queueing = status === "queued"
+        && (previous.status === "delivering" || (this.structuredHosts && previous.status === "pending"));
+      const beginning = (previous.status === "pending" || previous.status === "queued") && status === "delivering";
+      const completing = (previous.status === "pending" || previous.status === "queued" || previous.status === "delivering")
+        && status !== "delivering" && status !== "queued";
+      if (!queueing && !beginning && !completing) throw new Error("runtime operation transition is invalid");
       const command = JSON.parse(row.request_json) as RuntimeOperationCommand;
+      if (beginning && (command.kind === "send" || command.kind === "steer") && details.turnId !== undefined) {
+        const effect = this.db.query<{ payload_json: string }, [string]>("SELECT payload_json FROM outbox WHERE id = ?")
+          .get(`effect:${operationId}`);
+        if (!effect) throw new Error("runtime operation effect is missing");
+        const payload = JSON.parse(effect.payload_json) as Record<string, unknown>;
+        if (payload.turnId !== undefined && payload.turnId !== details.turnId) {
+          throw new Error("runtime operation turn fence conflicts with its durable effect");
+        }
+        if (payload.turnId === undefined) {
+          this.db.query("UPDATE outbox SET payload_json = ? WHERE id = ?")
+            .run(stableJson({ ...payload, turnId: details.turnId }), `effect:${operationId}`);
+        }
+      }
       const next: RuntimeOperationReceipt = {
         ...previous,
         ...details,
         status,
+        reason: details.reason !== undefined ? details.reason : status === "queued" ? previous.reason : null,
         at: new Date(this.now()).toISOString(),
         revision: previous.revision + 1,
       };
@@ -353,14 +391,77 @@ export class RuntimeJournal {
         scope: { type: "operation", id: operationId },
         kind: "receipt",
         operationId,
-        producer: { kind: "runtime-effect", eventKey: `operation:${operationId}:completion:${status}`, hostEpoch: Number(this.meta("host_epoch")) },
+        producer: { kind: "runtime-effect", eventKey: `operation:${operationId}:receipt:${previous.revision + 1}:${status}`, hostEpoch: Number(this.meta("host_epoch")) },
         payload: next as unknown as Record<string, unknown>,
       }));
       const committed = { ...next, revision: event.revision };
       this.upsertEntity("operation", operationId, event.revision, committed, event.seq);
-      this.appendCompletionConsequences(command, committed, operationId);
+      if (completing) this.appendCompletionConsequences(command, committed, operationId);
       this.db.query("UPDATE operations SET receipt_json = ?, event_seq = ? WHERE operation_id = ?").run(stableJson(committed), event.seq, operationId);
-      this.db.query("UPDATE outbox SET state = 'completed', payload_json = '{}' WHERE id = ?").run(`effect:${operationId}`);
+      if (completing) this.db.query("UPDATE outbox SET state = 'completed', payload_json = '{}' WHERE id = ?").run(`effect:${operationId}`);
+      this.db.exec("COMMIT");
+      this.compactIfNeeded();
+      this.notifyWaiters();
+      return { operationId, receipt: committed, replayed: false };
+    } catch (error) {
+      try { this.db.exec("ROLLBACK"); } catch { /* transaction already closed */ }
+      throw error;
+    }
+  }
+
+  retryOperation(operationId: string): RuntimeOperationResult {
+    this.assertHealthy();
+    if (!this.structuredHosts) throw new Error("structured hosts are disabled");
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const row = this.db.query<{ request_json: string; receipt_json: string }, [string]>(
+        "SELECT request_json, receipt_json FROM operations WHERE operation_id = ?",
+      ).get(operationId);
+      if (!row) throw new Error("runtime operation is unknown");
+      const previous = JSON.parse(row.receipt_json) as RuntimeOperationReceipt;
+      const command = JSON.parse(row.request_json) as RuntimeOperationCommand;
+      if (previous.status !== "failed") throw new Error("only failed runtime operations can retry");
+      if (command.kind !== "send" && command.kind !== "steer") throw new Error("runtime operation does not support retry");
+      const next: RuntimeOperationReceipt = {
+        ...previous,
+        status: "queued",
+        turnId: previous.turnId ?? null,
+        queuePosition: this.queuedSendCount(command.conversationId) + 1,
+        reason: null,
+        at: new Date(this.now()).toISOString(),
+        revision: previous.revision + 1,
+      };
+      const event = this.appendInTransaction(normalizeRuntimeEventInput({
+        scope: { type: "operation", id: operationId },
+        kind: "receipt",
+        operationId,
+        producer: { kind: "viewer-command", eventKey: `operation:${operationId}:receipt:${next.revision}:queued`, hostEpoch: Number(this.meta("host_epoch")) },
+        payload: next as unknown as Record<string, unknown>,
+      }));
+      const committed = { ...next, revision: event.revision };
+      this.upsertEntity("operation", operationId, event.revision, committed, event.seq);
+      this.db.query("UPDATE operations SET receipt_json = ?, event_seq = ? WHERE operation_id = ?")
+        .run(stableJson(committed), event.seq, operationId);
+      this.db.query(`
+        INSERT INTO outbox(id, kind, payload_json, event_seq, state)
+        VALUES (?, ?, ?, ?, 'pending')
+        ON CONFLICT(id) DO UPDATE SET
+          kind = excluded.kind,
+          payload_json = excluded.payload_json,
+          event_seq = excluded.event_seq,
+          state = 'pending'
+      `).run(
+        `effect:${operationId}`,
+        `runtime.${command.kind}`,
+        stableJson({
+          ...command,
+          operationId,
+          ...(typeof previous.turnId === "string" || previous.turnId === null
+            ? { turnId: previous.turnId }
+            : {}),
+        }),
+        event.seq,
+      );
       this.db.exec("COMMIT");
       this.compactIfNeeded();
       this.notifyWaiters();
@@ -598,8 +699,14 @@ export class RuntimeJournal {
     });
   }
 
-  effectBatch(limit = 100): Array<RuntimeEffect & { eventSeq: number }> {
-    return this.db.query<{ id: string; kind: string; payload_json: string; event_seq: number }, [number]>("SELECT id, kind, payload_json, event_seq FROM outbox WHERE state = 'pending' ORDER BY event_seq LIMIT ?").all(limit).map((row) => {
+  effectBatch(limit = 100, kinds?: readonly string[], afterEventSeq = 0): Array<RuntimeEffect & { eventSeq: number }> {
+    if (kinds?.length === 0) return [];
+    if (!Number.isSafeInteger(afterEventSeq) || afterEventSeq < 0) throw new Error("runtime effect cursor is invalid");
+    const kindFilter = kinds ? ` AND kind IN (${kinds.map(() => "?").join(", ")})` : "";
+    const rows = this.db.query<{ id: string; kind: string; payload_json: string; event_seq: number }, Array<string | number>>(
+      `SELECT id, kind, payload_json, event_seq FROM outbox WHERE state = 'pending'${kindFilter} AND event_seq > ? ORDER BY event_seq LIMIT ?`,
+    ).all(...(kinds ?? []), afterEventSeq, limit);
+    return rows.map((row) => {
       const payload = JSON.parse(row.payload_json) as Record<string, unknown>;
       if (row.kind === "runtime.answer") payload.resolution = this.decryptSecret(payload.resolution);
       return { id: row.id, kind: row.kind, payload, eventSeq: row.event_seq };
@@ -712,7 +819,21 @@ export class RuntimeJournal {
     let reason: string | null = null;
     let turnId = "turnId" in command && typeof command.turnId === "string" ? command.turnId : session?.activeTurnId ?? null;
     let queuePosition: number | null = null;
-    if (command.kind === "send" || command.kind === "steer") {
+    if (this.structuredHosts
+      && command.kind === "send"
+      && (session?.hostKind === "codex-app-server" || session?.hostKind === "claude-broker")) {
+      if (!session || session.host !== "hosted") {
+        status = "rejected";
+        reason = session?.host === "dead" || session?.host === "unhosted" ? "dead-host" : "no-claim";
+      } else if (command.turnId && command.turnId !== session.activeTurnId) {
+        status = "rejected";
+        reason = "stale-turn";
+      } else {
+        status = "queued";
+        queuePosition = this.queuedSendCount(command.conversationId) + 1;
+        turnId = null;
+      }
+    } else if (command.kind === "send" || command.kind === "steer") {
       if (!session || session.host !== "hosted") {
         status = "rejected";
         reason = session?.host === "dead" || session?.host === "unhosted" ? "dead-host" : "no-claim";
@@ -782,6 +903,15 @@ export class RuntimeJournal {
       at: new Date(this.now()).toISOString(),
       revision,
     };
+  }
+
+  private queuedSendCount(conversationId: string): number {
+    return this.db.query<{ receipt_json: string }, []>("SELECT receipt_json FROM operations ORDER BY event_seq").all()
+      .map((row) => JSON.parse(row.receipt_json) as RuntimeOperationReceipt)
+      .filter((receipt) => receipt.conversationId === conversationId
+        && receipt.kind === "send"
+        && (receipt.status === "pending" || receipt.status === "queued" || receipt.status === "delivering"))
+      .length;
   }
 
   private appendOperationConsequences(command: RuntimeOperationCommand, receipt: RuntimeOperationReceipt, operationId: string): void {

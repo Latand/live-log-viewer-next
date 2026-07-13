@@ -212,6 +212,173 @@ test("send operations converge by idempotency key and persist one receipt and ef
   journal.close();
 });
 
+test("structured send receipts advance through the durable delivery lifecycle", () => {
+  const dir = sandbox("structured-delivery-lifecycle");
+  const journal = new RuntimeJournal(path.join(dir, "events.sqlite"), {
+    maxEvents: 100,
+    now: () => 100,
+    structuredHosts: true,
+  });
+  journal.append({
+    scope: runtimeScope("session", "conv-one"),
+    kind: "session-status",
+    payload: {
+      conversationId: "conv-one",
+      sessionKey: { engine: "codex", sessionId: "thread-one" },
+      hostKind: "codex-app-server",
+      host: "hosted",
+      turn: "idle",
+      provenance: "structured",
+      artifactPath: "/sessions/one.jsonl",
+      capabilities: { steer: true, structuredAttention: true },
+    },
+  });
+
+  const queued = journal.executeOperation({
+    kind: "send",
+    operationId: "op-lifecycle",
+    idempotencyKey: "key-lifecycle",
+    conversationId: "conv-one",
+    text: "hello",
+    policy: "queue",
+  });
+  expect(queued.receipt.status).toBe("queued");
+  expect(journal.effectBatch()).toHaveLength(1);
+
+  const delivering = journal.transitionOperation("op-lifecycle", "delivering");
+  expect(delivering.receipt.status).toBe("delivering");
+  expect(journal.effectBatch()).toHaveLength(1);
+
+  const retryQueued = journal.transitionOperation("op-lifecycle", "queued", { reason: "dead-host" });
+  expect(retryQueued.receipt).toMatchObject({ status: "queued", reason: "dead-host", revision: 3 });
+  const retryDelivering = journal.transitionOperation("op-lifecycle", "delivering");
+  expect(retryDelivering.receipt).toMatchObject({ status: "delivering", reason: null, revision: 4 });
+
+  const delivered = journal.transitionOperation("op-lifecycle", "delivered", { turnId: "turn-one" });
+  expect(delivered.receipt).toMatchObject({ status: "delivered", turnId: "turn-one", revision: 5 });
+  expect(journal.effectBatch()).toEqual([]);
+  expect(journal.snapshot().sessions[0]?.recentReceipts[0]).toMatchObject({ status: "delivered" });
+  journal.close();
+});
+
+test("a terminal structured send retries from its full journaled request", () => {
+  const dir = sandbox("structured-delivery-retry");
+  const journal = new RuntimeJournal(path.join(dir, "events.sqlite"), { structuredHosts: true });
+  journal.append({
+    scope: runtimeScope("session", "conv-retry"),
+    kind: "session-status",
+    payload: {
+      conversationId: "conv-retry",
+      sessionKey: { engine: "codex", sessionId: "thread-retry" },
+      hostKind: "codex-app-server",
+      host: "hosted",
+      turn: "idle",
+      provenance: "structured",
+      capabilities: { steer: true, structuredAttention: true },
+    },
+  });
+  const text = "retry the complete payload ".repeat(20);
+  journal.executeOperation({
+    kind: "send",
+    operationId: "op-retry-failed",
+    idempotencyKey: "key-retry-failed",
+    conversationId: "conv-retry",
+    text,
+    policy: "queue",
+  });
+  journal.transitionOperation("op-retry-failed", "delivering");
+  journal.transitionOperation("op-retry-failed", "failed", { reason: "engine write failed" });
+  expect(journal.effectBatch()).toEqual([]);
+
+  const retried = journal.retryOperation("op-retry-failed");
+
+  expect(retried.receipt).toMatchObject({ status: "queued", reason: null, revision: 4 });
+  expect(journal.effectBatch()).toEqual([
+    expect.objectContaining({
+      id: "effect:op-retry-failed",
+      kind: "runtime.send",
+      payload: expect.objectContaining({ operationId: "op-retry-failed", text }),
+    }),
+  ]);
+  journal.close();
+});
+
+test("filtered effect batches skip a full page of unrelated pending work", () => {
+  const dir = sandbox("filtered-effect-batch");
+  const journal = new RuntimeJournal(path.join(dir, "events.sqlite"), { structuredHosts: true });
+  for (let index = 0; index < 100; index += 1) {
+    journal.append({
+      scope: runtimeScope("operation", `spawn-${index}`),
+      kind: "receipt",
+      payload: { operationId: `spawn-${index}` },
+      effect: { id: `effect:spawn-${index}`, kind: "runtime.spawn", payload: { operationId: `spawn-${index}` } },
+    });
+  }
+  journal.append({
+    scope: runtimeScope("operation", "send-after-spawns"),
+    kind: "receipt",
+    payload: { operationId: "send-after-spawns" },
+    effect: {
+      id: "effect:send-after-spawns",
+      kind: "runtime.send",
+      payload: { operationId: "send-after-spawns", conversationId: "conv-one", text: "deliver me" },
+    },
+  });
+
+  expect(journal.effectBatch()).toHaveLength(100);
+  expect(journal.effectBatch(100, ["runtime.send", "runtime.steer"])).toEqual([
+    expect.objectContaining({ id: "effect:send-after-spawns", kind: "runtime.send" }),
+  ]);
+  journal.close();
+});
+
+test("a delivering transition persists its derived turn fence in the outbox", () => {
+  const dir = sandbox("structured-delivery-fence");
+  const journal = new RuntimeJournal(path.join(dir, "events.sqlite"), { structuredHosts: true });
+  journal.append({
+    scope: runtimeScope("session", "conv-fence"),
+    kind: "session-status",
+    payload: {
+      conversationId: "conv-fence",
+      sessionKey: { engine: "codex", sessionId: "thread-fence" },
+      hostKind: "codex-app-server",
+      host: "hosted",
+      turn: "running",
+      activeTurnId: "turn-old",
+      provenance: "structured",
+      capabilities: { steer: true, structuredAttention: true },
+    },
+  });
+  journal.executeOperation({
+    kind: "send",
+    operationId: "op-fenced-send",
+    idempotencyKey: "key-fenced-send",
+    conversationId: "conv-fence",
+    text: "amend",
+    policy: "steer-if-active",
+  });
+
+  journal.transitionOperation("op-fenced-send", "delivering", { turnId: "turn-old" });
+
+  expect(journal.effectBatch()).toEqual([
+    expect.objectContaining({
+      id: "effect:op-fenced-send",
+      payload: expect.objectContaining({ turnId: "turn-old" }),
+    }),
+  ]);
+
+  journal.transitionOperation("op-fenced-send", "failed", { reason: "engine write failed" });
+  journal.retryOperation("op-fenced-send");
+
+  expect(journal.effectBatch()).toEqual([
+    expect.objectContaining({
+      id: "effect:op-fenced-send",
+      payload: expect.objectContaining({ turnId: "turn-old" }),
+    }),
+  ]);
+  journal.close();
+});
+
 test("answer and interrupt operations update projected attention and turn axes", () => {
   const dir = sandbox("answer-interrupt");
   const filename = path.join(dir, "events.sqlite");
@@ -713,6 +880,50 @@ test("Unix socket host isolates a singleton writer and serves a fake Viewer clie
   await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   journal.close();
   fence.release();
+});
+
+test("structured queue controls cross the local runtime socket", async () => {
+  const dir = sandbox("structured-socket");
+  const socketPath = path.join(dir, "runtime.sock");
+  const journal = new RuntimeJournal(path.join(dir, "events.sqlite"), { structuredHosts: true });
+  journal.append({
+    scope: runtimeScope("session", "one"),
+    kind: "session-status",
+    payload: {
+      hostKind: "codex-app-server",
+      host: "hosted",
+      turn: "idle",
+      capabilities: { steer: true, structuredAttention: true },
+    },
+  });
+  const server = serveRuntimeHost(socketPath, new RuntimeHost(journal, undefined, undefined, true));
+  await new Promise<void>((resolve) => server.once("listening", resolve));
+  const client = new UnixRuntimeHostClient(socketPath);
+  const operation = await client.command({
+    kind: "send",
+    conversationId: "one",
+    operationId: "op-socket-queue",
+    idempotencyKey: "socket-queue-key",
+    text: "continue",
+    policy: "queue",
+  });
+
+  expect(operation.receipt.status).toBe("queued");
+  const initialEffects = await client.effectBatch();
+  expect(initialEffects).toHaveLength(1);
+  expect(await client.effectBatch(undefined, initialEffects[0]!.eventSeq)).toEqual([]);
+  await expect(client.effectBatch(undefined, -1)).rejects.toThrow("runtime effect cursor is invalid");
+  expect((await client.transitionOperation("op-socket-queue", "delivering")).receipt.status).toBe("delivering");
+  expect((await client.transitionOperation("op-socket-queue", "failed", { reason: "write failed" })).receipt.status).toBe("failed");
+  expect(await client.effectBatch()).toEqual([]);
+  expect((await client.retryOperation("op-socket-queue")).receipt.status).toBe("queued");
+  expect(await client.effectBatch(["runtime.send", "runtime.steer"])).toHaveLength(1);
+  expect((await client.transitionOperation("op-socket-queue", "delivering")).receipt.status).toBe("delivering");
+  expect((await client.transitionOperation("op-socket-queue", "delivered", { turnId: "turn-one" })).receipt.status).toBe("delivered");
+  expect(await client.effectBatch()).toEqual([]);
+
+  await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  journal.close();
 });
 
 test("runtime host fencing reclaims a stale process identity", () => {

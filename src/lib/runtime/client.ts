@@ -1,6 +1,6 @@
 import net from "node:net";
 
-import type { RuntimeEventInput, RuntimeOperationCommand, RuntimeOperationResult, RuntimeReplay, RuntimeSnapshot, RuntimeSocketRequest, RuntimeSocketResponse, ViewerDeploymentReceipt, ViewerDeploymentRequest, ViewerDeploymentStatus } from "./contracts";
+import type { RuntimeEventInput, RuntimeOperationCommand, RuntimeOperationResult, RuntimePendingEffect, RuntimeReceiptStatus, RuntimeReplay, RuntimeSnapshot, RuntimeSocketRequest, RuntimeSocketResponse, ViewerDeploymentReceipt, ViewerDeploymentRequest, ViewerDeploymentStatus } from "./contracts";
 import { runtimeHostSocket } from "./flags";
 
 const MAX_RESPONSE_FRAME_BYTES = 8 * 1024 * 1024;
@@ -20,6 +20,13 @@ export interface RuntimeHostClient {
   operation(event: RuntimeEventInput): Promise<unknown>;
   command(command: RuntimeOperationCommand): Promise<RuntimeOperationResult>;
   operationStatus(operationId: string): Promise<RuntimeOperationResult | null>;
+  retryOperation(operationId: string): Promise<RuntimeOperationResult>;
+  effectBatch(kinds?: readonly string[], afterEventSeq?: number): Promise<RuntimePendingEffect[]>;
+  transitionOperation(
+    operationId: string,
+    status: Exclude<RuntimeReceiptStatus, "pending">,
+    details?: { turnId?: string | null; queuePosition?: number | null; reason?: string | null },
+  ): Promise<RuntimeOperationResult>;
   requestViewerDeployment(request: ViewerDeploymentRequest): Promise<ViewerDeploymentReceipt>;
   readViewerDeployment(deploymentId: string): Promise<ViewerDeploymentStatus | null>;
 }
@@ -38,6 +45,21 @@ export class UnixRuntimeHostClient implements RuntimeHostClient {
   operation(event: RuntimeEventInput): Promise<unknown> { return this.call("operation", { event }); }
   command(command: RuntimeOperationCommand): Promise<RuntimeOperationResult> { return this.call("command", { command }) as Promise<RuntimeOperationResult>; }
   operationStatus(operationId: string): Promise<RuntimeOperationResult | null> { return this.call("operation-status", { operationId }) as Promise<RuntimeOperationResult | null>; }
+  retryOperation(operationId: string): Promise<RuntimeOperationResult> { return this.call("operation-retry", { operationId }) as Promise<RuntimeOperationResult>; }
+  effectBatch(kinds?: readonly string[], afterEventSeq = 0): Promise<RuntimePendingEffect[]> {
+    const params = {
+      ...(kinds ? { kinds: [...kinds] } : {}),
+      ...(afterEventSeq !== 0 ? { afterEventSeq } : {}),
+    };
+    return this.call("effect-batch", Object.keys(params).length > 0 ? params : undefined) as Promise<RuntimePendingEffect[]>;
+  }
+  transitionOperation(
+    operationId: string,
+    status: Exclude<RuntimeReceiptStatus, "pending">,
+    details?: { turnId?: string | null; queuePosition?: number | null; reason?: string | null },
+  ): Promise<RuntimeOperationResult> {
+    return this.call("operation-transition", { operationId, status, ...(details ? { details } : {}) }) as Promise<RuntimeOperationResult>;
+  }
   requestViewerDeployment(request: ViewerDeploymentRequest): Promise<ViewerDeploymentReceipt> { return this.call("viewer-deployment-request", request as unknown as Record<string, unknown>, this.deploymentTimeoutMs) as Promise<ViewerDeploymentReceipt>; }
   readViewerDeployment(deploymentId: string): Promise<ViewerDeploymentStatus | null> { return this.call("viewer-deployment-read", { deploymentId }) as Promise<ViewerDeploymentStatus | null>; }
 

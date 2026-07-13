@@ -80,6 +80,99 @@ test("provider receipt identity ignores timestamp and object key order", () => {
   expect(sameProviderReceiptOutcome(left, right)).toBeTrue();
 });
 
+test("Codex successor host publication is single-owner and cleanup releases that owner", async () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "llv-provider-published-host-"));
+  roots.push(base);
+  const source = accountRoot("codex", base, "source");
+  const target = accountRoot("codex", base, "target");
+  let publications = 0;
+  let cleanups = 0;
+  const provider = new RegisteredSuccessorProvider({
+    accounts: { resolveSpawn: () => target, resolveTranscriptOwner: () => source },
+    startCodex: async () => { throw new Error("unexpected Codex client"); },
+    claudeStatus: async () => ({ loggedIn: true }),
+    spawnClaude: async () => { throw new Error("unexpected Claude spawn"); },
+    publishCodexHost: async () => {
+      publications += 1;
+      await Promise.resolve();
+      return async () => { cleanups += 1; };
+    },
+    now: () => "2026-07-13T12:00:00.000Z",
+  });
+  const receipt: ProviderReceipt = {
+    operationId: "publish-operation",
+    nativeId: "22222222-2222-4222-8222-222222222222",
+    path: path.join(target.transcriptRoot, "22222222-2222-4222-8222-222222222222.jsonl"),
+    continuityPaths: [],
+    historyHash: "history",
+    host: {
+      kind: "codex-app-server",
+      identity: "22222222-2222-4222-8222-222222222222",
+      epoch: 1,
+      verifiedAt: "2026-07-13T12:00:00.000Z",
+    },
+  };
+  const input = {
+    engine: "codex" as const,
+    conversationId: "conversation_published_host" as const,
+    targetAccountId: "target",
+    launchProfile: emptyLaunchProfile({ cwd: base }),
+  };
+
+  await Promise.all([provider.publishHost(receipt, input), provider.publishHost(receipt, input)]);
+  expect(publications).toBe(1);
+  await provider.cleanup(receipt);
+  expect(cleanups).toBe(1);
+});
+
+test("Claude successor cleanup releases its published broker owner", async () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "llv-provider-published-claude-host-"));
+  roots.push(base);
+  const source = accountRoot("claude", base, "source");
+  const target = accountRoot("claude", base, "target");
+  let publications = 0;
+  let cleanups = 0;
+  let legacyCancellations = 0;
+  const provider = new RegisteredSuccessorProvider({
+    accounts: { resolveSpawn: () => target, resolveTranscriptOwner: () => source },
+    startCodex: async () => { throw new Error("unexpected Codex client"); },
+    claudeStatus: async () => ({ loggedIn: true }),
+    spawnClaude: async () => { throw new Error("unexpected Claude spawn"); },
+    cancelClaude: async () => { legacyCancellations += 1; return true; },
+    publishClaudeHost: async () => {
+      publications += 1;
+      return async () => { cleanups += 1; };
+    },
+    now: () => "2026-07-13T12:00:00.000Z",
+  });
+  const tmux = claudeHost("%45", 4545);
+  const receipt: ProviderReceipt = {
+    operationId: "publish-claude-operation",
+    nativeId: "45454545-4545-4545-8545-454545454545",
+    path: path.join(target.transcriptRoot, "45454545-4545-4545-8545-454545454545.jsonl"),
+    continuityPaths: [],
+    historyHash: "history",
+    host: {
+      kind: "claude-stream",
+      identity: "%45:4545",
+      epoch: 1,
+      verifiedAt: "2026-07-13T12:00:00.000Z",
+      tmuxHost: tmux,
+    },
+  };
+  await provider.publishHost(receipt, {
+    engine: "claude",
+    conversationId: "conversation_published_claude_host",
+    targetAccountId: "target",
+    launchProfile: emptyLaunchProfile({ cwd: base }),
+  });
+  await provider.cleanup(receipt);
+
+  expect(publications).toBe(1);
+  expect(cleanups).toBe(1);
+  expect(legacyCancellations).toBe(0);
+});
+
 test("Claude successor provider uses registered homes and shared model normalization", async () => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), "llv-provider-claude-"));
   roots.push(base);
@@ -227,6 +320,19 @@ test("Claude cleanup cancels only the pane PID recorded by the losing receipt", 
     host: { kind: "claude-stream" as const, identity: "%7:77", epoch: 1, verifiedAt: "2026-07-10T12:00:00.000Z", tmuxHost: claudeHost("%7", 77) },
   };
 
+  const structuredFlag = process.env.LLV_STRUCTURED_HOSTS;
+  delete process.env.LLV_STRUCTURED_HOSTS;
+  try {
+    await provider.publishHost(receipt, {
+      engine: "claude",
+      conversationId: "conversation_cleanup_fence",
+      targetAccountId: "target",
+      launchProfile: emptyLaunchProfile({ cwd: base }),
+    });
+  } finally {
+    if (structuredFlag === undefined) delete process.env.LLV_STRUCTURED_HOSTS;
+    else process.env.LLV_STRUCTURED_HOSTS = structuredFlag;
+  }
   await expect(provider.cleanup(receipt)).rejects.toThrow("cleanup is still pending");
   expect(cancelled).toEqual([]);
   observedPid = 77;
