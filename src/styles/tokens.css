@@ -1,0 +1,119 @@
+/* Viewer design system — issue #155, Slice 1 token set.
+
+   The single source of truth for type, spacing, radius, surfaces, color roles,
+   and motion (design doc §1). Imported first from globals.css so every Tailwind
+   `@theme` utility (bg-*, text-*, rounded-*, shadow-*) is generated from here.
+
+   Migration note: the legacy `--color-*` names the codebase already uses stay
+   defined as aliases of the new roles, so components not yet migrated keep
+   rendering unchanged. They are deleted in Slice 3, once the raw-hex sweep and
+   dark theme land. This file holds the light-theme role table and the
+   structural tokens; dark values arrive in Slice 3. */
+
+/* Use `@theme static` because a production `next build` prunes unused custom
+   properties from a plain `@theme`, which would drop the tokens later slices
+   reference by name before any utility uses them (e.g. `--surface-raised`,
+   `--color-warning-soft`). `static` emits the whole token contract to `:root`
+   unconditionally. */
+@theme static {
+  /* ── §1.1 Type ─────────────────────────────────────────────────────────── */
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto,
+    sans-serif;
+  --font-mono: ui-monospace, "JetBrains Mono", Menlo, monospace;
+
+  --text-caption: 10px; /* counters, badge text, receipt chips   */
+  --text-label: 11px; /*   meta rows, chips, section headers    */
+  --text-ui: 12px; /*      buttons, inputs, secondary content */
+  --text-body: 13px; /*    feed prose, card titles, list rows  */
+  --text-title: 15px; /*   page/project title, sheet headers    */
+
+  /* ── §1.2 Spacing — 4px grid + three semantic paddings ─────────────────────
+     The allowed step scale (2,4,6,8,12,16,24,32) is Tailwind's default; only the
+     semantic paddings need tokens. Shorthand values (`y x`) so a card header and
+     a list row read as one rule each. */
+  --pad-card: 10px 12px; /*  card header / composer padding        */
+  --pad-row: 6px 12px; /*    list & strip rows                     */
+  --gutter-feed: 12px; /*    feed horizontal gutter (compact pane) */
+
+  /* ── §1.3 Radius — exactly two values ──────────────────────────────────── */
+  --radius-control: 8px; /* buttons, inputs, menu items, chips-as-rect */
+  --radius-surface: 12px; /* cards, panes, menus, sheets, tool bodies   */
+
+  /* ── §1.4 Surfaces & elevation ─────────────────────────────────────────── */
+  /* The doc-canonical `--surface-*` names carry the literal values (design doc
+     §1.4); the `--color-*` forms below alias them so Tailwind still emits
+     bg-canvas/bg-card/bg-sunken/bg-raised utilities from the color namespace. */
+  --surface-canvas: #f3f3f6; /* app background; darker than before so cards lift */
+  --surface-card: #ffffff; /*   the ONE primary surface (panes, rows, composer) */
+  --surface-sunken: #f7f7fa; /* code blocks, collapsed strips, canvas bands     */
+  --surface-raised: #ffffff; /* menus, popovers, sheets, toasts                 */
+
+  --color-canvas: var(--surface-canvas);
+  --color-card: var(--surface-card);
+  --color-sunken: var(--surface-sunken);
+  --color-raised: var(--surface-raised);
+
+  --shadow-1: 0 1px 2px rgb(20 20 30 / 0.05); /* card  */
+  --shadow-2: 0 8px 32px rgb(20 20 30 / 0.16), 0 1px 2px rgb(20 20 30 / 0.06); /* raised */
+
+  /* ── §1.5 Color roles ──────────────────────────────────────────────────── */
+  --color-primary: #1c1c22; /*   text-primary  */
+  --color-secondary: #55555f; /* text-secondary */
+  --color-muted: #8b8b95; /*     text-muted     */
+  /* Border roles: literals on the doc-canonical `--border-*` names (design doc
+     §1.5); `--color-*` aliases keep border-border/border-strong utilities. */
+  --border-default: #e6e6ea;
+  --border-strong: #c9c9d1;
+  --color-border: var(--border-default);
+  --color-strong: var(--border-strong);
+
+  --color-accent: #5a51e0;
+  --color-accent-soft: #ecebfb;
+  --color-success: #1a8a3e;
+  --color-success-soft: #e5f6ea;
+  --color-warning: #9a6b00;
+  --color-warning-soft: #fff4dd;
+  --color-danger: #c62828;
+  --color-danger-soft: #fdeeee;
+  --color-info: #0d9488; /* link / handoff teal */
+
+  /* Engine identity tints (kept; model-family shifts live in utils.ts). */
+  --color-codex: #2f6fd0;
+  --color-codex-soft: #e8f0fb;
+  --color-claude: #d97757;
+  --color-claude-soft: #faeee9;
+
+  /* ── §1.6 Motion ───────────────────────────────────────────────────────── */
+  --motion-fast: 120ms; /* hover, press, chip state         */
+  --motion-base: 200ms; /* expand/collapse, fades, popovers */
+  --motion-slow: 320ms; /* sheets, overlays, deck moves     */
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+
+  /* ── Legacy aliases (deleted in Slice 3) ───────────────────────────────────
+     Untouched components reference these names; they resolve to the new roles
+     so the whole app keeps rendering while slices land independently. */
+  --color-bg: var(--color-canvas);
+  --color-panel: var(--color-card);
+  --color-line: var(--color-border);
+  --color-ink: var(--color-primary);
+  --color-fg: var(--color-primary);
+  --color-dim: var(--color-muted);
+  --color-faint: var(--color-secondary);
+  --color-ok: var(--color-success);
+  --color-err: var(--color-danger);
+  --color-err-soft: #fff4f4;
+  --color-chip: #efeff3;
+  --color-user: #e9e9ef;
+  --color-panel-alt: #fafafc;
+  --color-tmsg: #f8f8fd;
+  --shadow-card: var(--shadow-1);
+
+  /* ── Diff / syntax structural tokens (issue #9 §4) — unchanged, dark values
+        land in Slice 3, out of scope here. */
+  --color-diff-add: #1a7f37;
+  --color-diff-add-soft: #e6ffec;
+  --color-diff-add-strong: #b7ebc6;
+  --color-diff-del: #cf222e;
+  --color-diff-del-soft: #ffebe9;
+  --color-diff-del-strong: #ffd1cf;
+}
