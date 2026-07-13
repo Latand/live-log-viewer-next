@@ -158,7 +158,7 @@ export function AgentRuntimeControls({ file }: { file: FileEntry }) {
                   <X className="h-4 w-4" aria-hidden />
                 </button>
               </div>
-              <div className="mb-1 text-[11px] font-semibold text-secondary">{t("runtimeConfig.model")}</div>
+              <div className="mb-1 text-label font-semibold text-secondary">{t("runtimeConfig.model")}</div>
               <div className="mb-3 flex flex-wrap gap-1.5">
                 {ENGINE_MODELS[engine].map((model) => (
                   <button
@@ -177,7 +177,7 @@ export function AgentRuntimeControls({ file }: { file: FileEntry }) {
                   </button>
                 ))}
               </div>
-              <div className="mb-1 text-[11px] font-semibold text-secondary">{t("runtimeConfig.effort")}</div>
+              <div className="mb-1 text-label font-semibold text-secondary">{t("runtimeConfig.effort")}</div>
               <div className="mb-3 flex flex-wrap gap-1.5">
                 {efforts.map((effort) => (
                   <button

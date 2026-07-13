@@ -97,9 +97,7 @@ export function OverviewBoard({ files, projectCatalog, pipelines, workflows, arc
                 <span className={`h-2 w-2 shrink-0 rounded-full ${summary.liveCount ? "animate-pulse bg-success" : "bg-strong"}`} />
                 <span className="min-w-0 flex-1 truncate text-[13px] font-bold">{summary.project}</span>
                 {summary.liveCount ? (
-                  <span className="shrink-0 rounded-full bg-success-soft px-1.5 py-0.5 text-[10.5px] font-bold text-success">
-                    {summary.liveCount}
-                  </span>
+                  <span className="shrink-0 text-caption font-semibold tabular-nums text-muted">{summary.liveCount}</span>
                 ) : null}
                 <span className="shrink-0 text-[11px] font-semibold text-muted">{summary.conversations}</span>
               </span>

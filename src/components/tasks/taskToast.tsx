@@ -74,7 +74,7 @@ export function TaskToastHost() {
       {toasts.map((toast) => (
         <div
           key={toast.id}
-          className={`pointer-events-auto flex items-start gap-2 overflow-hidden rounded-[12px] border-l-[3px] bg-raised py-2 pl-3 pr-2 text-[12px] text-primary shadow-2 ${
+          className={`pointer-events-auto flex items-start gap-2 overflow-hidden rounded-surface border-l-[3px] bg-raised py-2 pl-3 pr-2 text-ui text-primary shadow-2 ${
             isMobile ? "w-full" : "max-w-[560px]"
           } ${toast.kind === "ok" ? "border-l-success" : "border-l-danger"}`}
           role="status"

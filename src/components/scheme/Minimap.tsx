@@ -151,7 +151,7 @@ export function Minimap({
             y={-cam.y / cam.z}
             width={vp.w / cam.z}
             height={vp.h / cam.z}
-            fill="rgba(90,81,224,0.08)"
+            fill="color-mix(in srgb, var(--color-accent) 8%, transparent)"
             stroke="var(--color-accent)"
             strokeWidth={2.5 / scale}
           />
