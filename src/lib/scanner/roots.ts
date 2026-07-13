@@ -57,8 +57,11 @@ export const EXTS = [".log", ".jsonl", ".output", ".txt"] as const;
 
 export const MAX_CHUNK = 768 * 1024;
 
-/** Max entries returned by /api/files (most recent first). */
-export const FILE_CAP = 400;
+/** Base target for entries returned by /api/files (most recent first). */
+export const FILE_CAP = 800;
+
+/** Recent entries reserved for every project before the global recency fill. */
+export const PROJECT_FILE_FLOOR = 10;
 
 function realpathSafe(p: string): string | null {
   try {

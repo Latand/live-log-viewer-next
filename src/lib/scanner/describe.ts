@@ -503,8 +503,7 @@ function scanJsonlTitle(pathname: string, size: number, wantCodex: boolean): str
   return title;
 }
 
-export function describe(rootName: RootKey, root: string, pathname: string, st: fs.Stats): Meta {
-  const stateKey = projectResolutionStateKey();
+export function describe(rootName: RootKey, root: string, pathname: string, st: fs.Stats, stateKey = projectResolutionStateKey()): Meta {
   const cached = metaCache.get(pathname);
   if (cached?.[0] === st.size && cached[1] === stateKey) return cached[2];
   const rel = path.relative(root, pathname);
