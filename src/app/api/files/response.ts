@@ -28,14 +28,15 @@ interface FilesRouteDependencies {
   listFilesWithProjectCatalog: (
     selectedProject: string | undefined,
     pinnedPath: string | undefined,
-  ) => ReturnType<typeof listFilesWithProjectCatalog>;
+  ) => Promise<Awaited<ReturnType<typeof listFilesWithProjectCatalog>> & { pinOverlayPaths?: string[] }>;
 }
 
 export async function buildFilesResponse(request: Request, dependencies: FilesRouteDependencies): Promise<NextResponse> {
   const url = new URL(request.url);
   const selectedProject = url.searchParams.get("project")?.trim() || undefined;
   const pinnedPath = url.searchParams.get("path")?.trim() || undefined;
-  const { files, projectCatalog } = await dependencies.listFilesWithProjectCatalog(selectedProject, pinnedPath);
+  const { files, projectCatalog, pinOverlayPaths } = await dependencies.listFilesWithProjectCatalog(selectedProject, pinnedPath);
+  const responsePinOverlayPaths = new Set(pinOverlayPaths ?? []);
   // A scan is a read model. Runtime reconciliation and notifications belong to
   // the external scheduler, keeping repeated GETs byte-stable for state files.
   const registry = agentRegistry();
@@ -94,6 +95,7 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
     };
     files.push(placeholder);
     filesByPath.set(parentPath, placeholder);
+    if (responsePinOverlayPaths.has(child.path)) responsePinOverlayPaths.add(parentPath);
   }
   const scannedPaths = new Set(files.map((file) => file.path));
   const ownsPath = (conversation: (typeof registrySnapshot.conversations)[keyof typeof registrySnapshot.conversations], pathname: string) =>
@@ -269,6 +271,7 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
   ]);
   const body = JSON.stringify({
     files: projected.files,
+    ...(responsePinOverlayPaths.size ? { pinOverlayPaths: [...responsePinOverlayPaths] } : {}),
     projectCatalog,
     ...(Object.keys(projectCwds).length ? { projectCwds } : {}),
     flows: projected.flows,

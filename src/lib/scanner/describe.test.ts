@@ -170,6 +170,18 @@ test("conversation metadata carries the exact cwd and its canonical project root
   });
 });
 
+test("conversation metadata marks an unresolved deleted scratchpad root explicitly", () => {
+  const missingSlug = path.join(SANDBOX, "removed-external-repo").replace(/[^a-zA-Z0-9]/g, "-");
+  const cwd = path.join(os.tmpdir(), `claude-${process.getuid?.() ?? 1000}`, missingSlug, "deleted-session", "scratchpad");
+  const root = path.join(SANDBOX, "unresolved-scratchpad-transcripts");
+  const transcript = path.join(root, "removed-external-repo", "session.jsonl");
+  fs.mkdirSync(path.dirname(transcript), { recursive: true });
+  fs.writeFileSync(transcript, JSON.stringify({ type: "user", cwd, message: { content: "Prefill cwd" } }) + "\n");
+
+  expect(fs.existsSync(cwd)).toBe(false);
+  expect(describe("claude-projects", root, transcript, fs.statSync(transcript))).toMatchObject({ cwd, projectRoot: null });
+});
+
 test("growing Codex transcripts retain cwd metadata after the project cache warms", () => {
   const repo = path.join(SANDBOX, "codex-cwd-project");
   const cwd = path.join(repo, ".worktrees", "issue-174");

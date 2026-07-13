@@ -14,14 +14,14 @@ interface Meta {
   project: string;
   worktree?: string;
   cwd?: string;
-  projectRoot?: string;
+  projectRoot?: string | null;
   title: string;
   engine: Engine;
   kind: string;
   fmt: Fmt;
 }
 
-const metaCache = globalCache<[number, string, Meta]>("meta-v4");
+const metaCache = globalCache<[number, string, Meta]>("meta-v5");
 // Title and codex project live in the immutable head of a growing transcript,
 // so both are keyed by path and kept for good once resolved. A live file grows
 // on every poll, so a size-keyed meta cache would re-read the whole file each
@@ -663,7 +663,7 @@ export function describe(rootName: RootKey, root: string, pathname: string, st: 
     project,
     worktree,
     cwd,
-    projectRoot: cwd ? projectRootForCwd(cwd) : undefined,
+    projectRoot: cwd ? projectRootForCwd(cwd) ?? null : undefined,
     title: cleanTitle(title ?? fn, 120),
     engine,
     kind,

@@ -172,6 +172,8 @@ export interface ProjectCatalogEntry {
 
 export interface FilesResponse {
   files: FileEntry[];
+  /** Rows added only to resolve the current deep-link pin, including closure. */
+  pinOverlayPaths?: string[];
   projectCatalog?: ProjectCatalogEntry[];
   /** Existing local repository fallback for projects whose conversations lack cwd metadata. */
   projectCwds?: Record<string, string>;

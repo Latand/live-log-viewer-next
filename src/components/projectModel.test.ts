@@ -126,6 +126,21 @@ describe("draftWorkingDirectory", () => {
       "/home/user/Projects/legacy",
     );
   });
+
+  test("excludes an unresolved deleted scratchpad cwd from ordinary draft root voting", () => {
+    const deletedScratchpad = "/tmp/claude-1000/-outside-repos-legacy/deleted-session/scratchpad";
+    const files = [entry({
+      path: "/sessions/deleted-scratchpad.jsonl",
+      project: "legacy",
+      cwd: deletedScratchpad,
+      projectRoot: null,
+      mtime: 900,
+    })];
+
+    expect(projectDraftWorkingDirectory(files, "legacy", [], undefined, [], "/home/user/Projects/legacy")).toBe(
+      "/home/user/Projects/legacy",
+    );
+  });
 });
 
 describe("buildBranchGroups", () => {

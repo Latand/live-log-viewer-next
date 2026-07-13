@@ -117,6 +117,19 @@ export function requireDraftCwdConfirmation(id: string, cwd: string) {
   writeField(id, "cwdUnverified", "1");
 }
 
+const DRAFT_CWD_VERIFIED_EVENT = "llv:draft-cwd-verified";
+
+/** Replaces a system-provided fallback after project metadata identifies the
+    canonical root. User edits clear the marker and remain untouched. */
+export function replaceUnverifiedDraftCwd(id: string, cwd: string): boolean {
+  const next = cwd.trim();
+  if (!next || readField(id, "cwdUnverified") !== "1") return false;
+  writeField(id, "cwd", next);
+  writeField(id, "cwdUnverified", "");
+  window.dispatchEvent(new window.CustomEvent(DRAFT_CWD_VERIFIED_EVENT, { detail: { id, cwd: next } }));
+  return true;
+}
+
 /** Reads back the durable spawn attempt persisted across reload. Its presence
     means a worker may exist, so the composer stays frozen and send disabled. */
 function readAttempt(id: string): SpawnAttempt | null {
@@ -192,6 +205,18 @@ export function DraftAgentPane({
   /* Records launched from this mount are already in flight. Reloaded records
      are replayed once with their own idempotency key to fetch the same receipt. */
   const replayedAttemptIds = useRef(new Set<string>());
+
+  useEffect(() => {
+    const applyVerifiedCwd = (event: Event) => {
+      const detail = (event as CustomEvent<{ id?: string; cwd?: string }>).detail;
+      if (detail?.id !== draftId || typeof detail.cwd !== "string") return;
+      awaitingInheritedCwdRef.current = false;
+      setCwdState(detail.cwd);
+      setCwdNeedsConfirmation(false);
+    };
+    window.addEventListener(DRAFT_CWD_VERIFIED_EVENT, applyVerifiedCwd);
+    return () => window.removeEventListener(DRAFT_CWD_VERIFIED_EVENT, applyVerifiedCwd);
+  }, [draftId]);
 
   const setModel = (value: string) => {
     setModelState(value);

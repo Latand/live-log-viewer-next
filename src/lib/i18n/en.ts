@@ -287,7 +287,7 @@ export const en = {
   "draft.dismiss": "Dismiss the draft conversation",
   "draft.directory": "directory",
   "draft.dirAria": "Agent working directory",
-  "draft.confirmRecoveredDir": "The source working directory is unavailable. Edit this directory to confirm where the handoff should launch.",
+  "draft.confirmRecoveredDir": "Confirm the working directory. Edit this field before launching the agent.",
   "draft.reasoning": "reasoning",
   "draft.role": "role",
   "draft.roleAria": "Agent role preset",

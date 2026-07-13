@@ -75,6 +75,7 @@ export function draftWorkingDirectory(
   const candidates = new Map<string, { count: number; newest: number }>();
   for (const file of files) {
     if (projectKey(file) !== project) continue;
+    if (file.projectRoot === null) continue;
     const cwd = file.projectRoot?.trim() || file.cwd?.trim();
     if (!cwd) continue;
     const current = candidates.get(cwd) ?? { count: 0, newest: 0 };
@@ -102,7 +103,7 @@ export function projectDraftWorkingDirectory(
   }
   const catalogRoot = projectCatalog.find((entry) => entry.project === project)?.projectRoot?.trim() ?? "";
   if (catalogRoot) return catalogRoot;
-  return draftWorkingDirectory(files, project, undefined, [...fallbacks, deterministicFallback]) || "/";
+  return draftWorkingDirectory(files, project, undefined, [...fallbacks, deterministicFallback]) || deterministicFallback;
 }
 
 export interface ProjectSummary {

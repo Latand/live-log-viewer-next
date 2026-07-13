@@ -225,6 +225,51 @@ test("a restored handoff draft renders with the source conversation cwd", async 
   expect(directory?.value).toBe(sourceCwd);
 });
 
+test("a fresh handoff replaces its provisional project root with the resolved source cwd", async () => {
+  const project = "fresh-handoff-project";
+  const sourcePath = "/sessions/fresh-source.jsonl";
+  const projectRoot = "/repos/fresh-handoff";
+  const sourceCwd = `${projectRoot}/.worktrees/source-branch`;
+  const source: FileEntry = {
+    path: sourcePath,
+    root: "codex-sessions",
+    name: "fresh-source.jsonl",
+    project,
+    cwd: "",
+    projectRoot,
+    title: "Fresh source conversation",
+    engine: "codex",
+    kind: "session",
+    fmt: "codex",
+    parent: null,
+    mtime: 1,
+    size: 1,
+    activity: "recent",
+    proc: null,
+    pid: null,
+    model: null,
+    pendingQuestion: null,
+    waitingInput: null,
+  };
+  G.fetch = (async (input: string | URL | Request) => {
+    if (String(input).startsWith("/api/spawn?")) {
+      return { ok: true, status: 200, json: async () => ({ dirs: [projectRoot, sourceCwd], cwd: sourceCwd }), text: async () => "" };
+    }
+    return { ok: true, status: 200, json: async () => ({}), text: async () => "" };
+  }) as unknown as typeof fetch;
+
+  roots.push(mount(<ProjectDashboard {...dashboardProps(project)} files={[source]} projectCwd={projectRoot} />));
+
+  expect(await waitFor(() => dom.document.querySelector('[aria-label="Hand the conversation to a new agent — a draft appears below"]') !== null)).toBe(true);
+  const handoff = dom.document.querySelector('[aria-label="Hand the conversation to a new agent — a draft appears below"]') as unknown as HTMLElement;
+  handoff.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event);
+  expect(await waitFor(() => {
+    const directory = dom.document.querySelector('input[aria-label="Agent working directory"]') as unknown as HTMLInputElement | null;
+    return directory?.value === sourceCwd;
+  })).toBe(true);
+  expect(dom.document.querySelector('p[role="alert"]')).toBeNull();
+});
+
 test("a restored handoff waits for its out-of-snapshot source cwd before exposing the composer", async () => {
   const project = "archived-handoff-project";
   const sourcePath = "/archive/source.jsonl";
@@ -325,6 +370,42 @@ test("the desktop agent control stays disabled until project metadata hydrates",
   }
 });
 
+test("an unmatched metadata-poor project opens a guarded nonempty draft", async () => {
+  const project = "unmatched-task-only-project";
+  roots.push(mount(<ProjectDashboard {...dashboardProps(project)} projectCwd={undefined} />));
+
+  const create = dom.document.querySelector('[aria-label="New conversation with an agent"]') as unknown as HTMLButtonElement | null;
+  create?.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event);
+  expect(await waitFor(() => dom.document.querySelector(AGENT_PANE) !== null)).toBe(true);
+  const directory = dom.document.querySelector('input[aria-label="Agent working directory"]') as unknown as HTMLInputElement | null;
+  expect(directory?.value).toBe("/");
+  expect(dom.document.querySelector('p[role="alert"]')?.textContent).toContain("Confirm the working directory");
+});
+
+test("an untouched provisional project draft adopts a canonical root after catalog hydration", async () => {
+  const project = "hydrating-catalog-project";
+  const canonicalRoot = "/repos/hydrated-canonical-root";
+  const root = mount(<ProjectDashboard {...dashboardProps(project)} projectCwd={undefined} />);
+  roots.push(root);
+
+  const create = dom.document.querySelector('[aria-label="New conversation with an agent"]') as unknown as HTMLButtonElement | null;
+  create?.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event);
+  expect(await waitFor(() => dom.document.querySelector(AGENT_PANE) !== null)).toBe(true);
+  const directory = () => dom.document.querySelector('input[aria-label="Agent working directory"]') as unknown as HTMLInputElement | null;
+  expect(directory()?.value).toBe("/");
+
+  flushSync(() => root.render(
+    <ProjectDashboard
+      {...dashboardProps(project)}
+      projectCwd={undefined}
+      projectCatalog={[{ project, projectRoot: canonicalRoot, smt: 2, conversations: 1 }]}
+    />,
+  ));
+
+  expect(await waitFor(() => directory()?.value === canonicalRoot)).toBe(true);
+  expect(dom.document.querySelector('p[role="alert"]')).toBeNull();
+});
+
 test("a missing restored handoff reaches an editable bounded recovery card", async () => {
   const project = "missing-handoff-project";
   const sourcePath = "/archive/deleted-source.jsonl";
@@ -356,7 +437,7 @@ test("a missing restored handoff reaches an editable bounded recovery card", asy
   const directory = dom.document.querySelector('input[aria-label="Agent working directory"]') as unknown as HTMLInputElement | null;
   expect(directory?.value).toBe(`/home/tester/Projects/${project}`);
   expect(directory?.disabled).toBe(false);
-  expect(dom.document.querySelector('p[role="alert"]')?.textContent).toContain("source working directory");
+  expect(dom.document.querySelector('p[role="alert"]')?.textContent).toContain("Confirm the working directory");
   const launch = dom.document.querySelector('[aria-label="Launch the agent"]') as unknown as HTMLButtonElement | null;
   launch?.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event);
   await settle();

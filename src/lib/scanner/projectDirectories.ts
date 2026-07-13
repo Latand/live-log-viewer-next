@@ -45,6 +45,5 @@ export function projectDirectoryFallbacks(projects: Iterable<string>): Record<st
   for (const entry of localProjectDirectories()) {
     if (wanted.has(entry.project) && !fallbacks[entry.project]) fallbacks[entry.project] = entry.projectRoot;
   }
-  for (const project of wanted) fallbacks[project] ??= os.homedir();
   return fallbacks;
 }

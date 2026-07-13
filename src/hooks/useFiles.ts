@@ -24,6 +24,8 @@ const FILES_REVISION_RETRY_MS = 1_000;
 
 export interface FilesData {
   files: FileEntry[];
+  /** Membership added by the current deep-link request above the global cap. */
+  pinOverlayPaths: string[];
   /** Successful request URL that produced `files`; used for scope-aware effects. */
   requestScope: string | null;
   projectCatalog: ProjectCatalogEntry[];
@@ -40,7 +42,7 @@ export interface FilesData {
 }
 
 const HEALTHY_SYSTEM = { tmux: { status: "healthy" as const } };
-const EMPTY: FilesData = { files: [], requestScope: null, projectCatalog: [], projectCwds: {}, flows: [], pipelines: [], workflows: [], tasks: [], systemHealth: HEALTHY_SYSTEM, conversationAliases: {}, loaded: false };
+const EMPTY: FilesData = { files: [], pinOverlayPaths: [], requestScope: null, projectCatalog: [], projectCwds: {}, flows: [], pipelines: [], workflows: [], tasks: [], systemHealth: HEALTHY_SYSTEM, conversationAliases: {}, loaded: false };
 
 export function filesApiUrl(pinnedPath?: string | null): string {
   const params: string[] = [];
@@ -72,10 +74,11 @@ function patchRows<T>(previous: readonly T[], incoming: readonly T[], keyOf: (va
 
 function parsedFilesData(parsed: FilesResponse | FileEntry[], requestScope: string): FilesData {
   if (Array.isArray(parsed)) {
-    return { files: parsed, requestScope, projectCatalog: [], projectCwds: {}, flows: [], pipelines: [], workflows: [], tasks: [], systemHealth: HEALTHY_SYSTEM, conversationAliases: {}, loaded: true };
+    return { files: parsed, pinOverlayPaths: [], requestScope, projectCatalog: [], projectCwds: {}, flows: [], pipelines: [], workflows: [], tasks: [], systemHealth: HEALTHY_SYSTEM, conversationAliases: {}, loaded: true };
   }
   return {
     files: parsed.files ?? [],
+    pinOverlayPaths: parsed.pinOverlayPaths ?? [],
     requestScope,
     projectCatalog: parsed.projectCatalog ?? [],
     projectCwds: parsed.projectCwds ?? {},
@@ -107,28 +110,28 @@ function patchFilesData(previous: FilesData, incoming: FilesData): FilesData {
   };
 }
 
-function pinnedPathFromScope(scope: string | null): string | null {
-  if (!scope) return null;
-  const query = scope.indexOf("?");
-  return query < 0 ? null : new URLSearchParams(scope.slice(query + 1)).get("path");
-}
-
 /** Apply the membership change represented by a scoped 304 while retaining
     fresher shared data already learned through another request scope. */
 function restoreNotModified(current: FilesData, representation: FilesData, requestScope: string): FilesData {
   if (!current.loaded) return representation;
-  const previousPin = pinnedPathFromScope(current.requestScope);
-  const nextPin = pinnedPathFromScope(requestScope);
-  let files = current.files;
-
-  if (previousPin && previousPin !== nextPin && !representation.files.some((file) => file.path === previousPin)) {
-    files = files.filter((file) => file.path !== previousPin);
+  const previousOverlay = new Set(current.pinOverlayPaths);
+  let files = current.files.filter((file) => !previousOverlay.has(file.path));
+  const retainedPaths = new Set(files.map((file) => file.path));
+  const representedPaths = new Set(representation.files.map((file) => file.path));
+  for (const file of current.files) {
+    if (!previousOverlay.has(file.path) || !representedPaths.has(file.path) || retainedPaths.has(file.path)) continue;
+    files = [...files, file];
+    retainedPaths.add(file.path);
   }
-  if (nextPin && !files.some((file) => file.path === nextPin)) {
-    const pinned = representation.files.find((file) => file.path === nextPin);
-    if (pinned) files = [...files, pinned];
+  for (const overlayPath of representation.pinOverlayPaths) {
+    if (retainedPaths.has(overlayPath)) continue;
+    const overlay = representation.files.find((file) => file.path === overlayPath);
+    if (overlay) {
+      files = [...files, overlay];
+      retainedPaths.add(overlayPath);
+    }
   }
-  return { ...current, files, requestScope };
+  return { ...current, files, pinOverlayPaths: representation.pinOverlayPaths, requestScope };
 }
 
 /** Session-wide stale-while-revalidate cache over the global scan snapshot. */
@@ -179,7 +182,12 @@ export function createFilesClientCache(fetcher: FilesFetcher): FilesClientCache 
   };
 }
 
-const filesClientCache = createFilesClientCache((input, init) => fetch(input, init));
+const defaultFilesFetcher: FilesFetcher = (input, init) => fetch(input, init);
+let filesClientCache = createFilesClientCache(defaultFilesFetcher);
+
+export function resetFilesClientCacheForTests(): void {
+  filesClientCache = createFilesClientCache(defaultFilesFetcher);
+}
 
 export function filesRequestHeaders(etag: string, revision?: number): Record<string, string> | undefined {
   const headers: Record<string, string> = {};
@@ -211,8 +219,6 @@ export function useFiles(pinnedPath?: string | null): FilesData {
       } catch {
         /* keep previous list */
         return false;
-      } finally {
-        if (alive) setData((d) => (d.loaded ? d : { ...d, loaded: true }));
       }
     };
     let loadQueue: Promise<void> = Promise.resolve();
@@ -221,7 +227,16 @@ export function useFiles(pinnedPath?: string | null): FilesData {
       loadQueue = result.then(() => undefined);
       return result;
     };
-    void load();
+    let initialRetryTimer: ReturnType<typeof setTimeout> | null = null;
+    const hydrateInitial = async () => {
+      const hydrated = await load();
+      if (!alive || hydrated) return;
+      initialRetryTimer = setTimeout(() => {
+        initialRetryTimer = null;
+        void hydrateInitial();
+      }, FILES_REVISION_RETRY_MS);
+    };
+    void hydrateInitial();
 
     /*
      * Recurring poll cadence. With the runtime bus off (the default,
@@ -289,6 +304,7 @@ export function useFiles(pinnedPath?: string | null): FilesData {
     return () => {
       alive = false;
       if (timer) clearInterval(timer);
+      if (initialRetryTimer) clearTimeout(initialRetryTimer);
       if (revisionTimer) clearTimeout(revisionTimer);
       unsubBus();
       unsubFiles();

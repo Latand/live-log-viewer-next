@@ -15,7 +15,7 @@ import { MAX_VISIBLE_PATHS } from "@/lib/view/types";
 import type { Workflow } from "@/lib/workflows/types";
 
 import { TaskStrip } from "./BranchPane";
-import { clearDraftStorage, draftCwd, draftParentConversationId, draftSrc, requireDraftCwdConfirmation, seedDraftCwd, setDraftCwd, setDraftSrc, setDraftText } from "./DraftAgentPane";
+import { clearDraftStorage, draftCwd, draftParentConversationId, draftSrc, replaceUnverifiedDraftCwd, requireDraftCwdConfirmation, seedDraftCwd, setDraftCwd, setDraftSrc, setDraftText } from "./DraftAgentPane";
 import { planBoardConvergence, planClose } from "./projectBoardMutations";
 import { claimedReviewerDescendantPaths, foldClaimedReviewers, isActiveFlow } from "./flows/flowModel";
 import { PipelineDialog } from "./pipelines/PipelineDialog";
@@ -255,7 +255,7 @@ export function ProjectDashboard({
   workflows,
   tasks,
   projectCatalog: projectCatalogEntries = [],
-  projectCwd = "/",
+  projectCwd,
   project,
   loaded,
   openNonce,
@@ -309,11 +309,14 @@ export function ProjectDashboard({
   const projectCwdFallbacks = useMemo(() => [
     ...pipelines.filter((pipeline) => pipeline.project === project).map((pipeline) => pipeline.repoDir),
     ...workflows.filter((workflow) => workflow.project === project).map((workflow) => workflow.repoDir),
-  ], [pipelines, project, workflows]);
-  const initialDraftCwd = useMemo(
-    () => projectDraftWorkingDirectory(files, project, projectCatalogEntries, undefined, projectCwdFallbacks, projectCwd),
-    [files, project, projectCatalogEntries, projectCwdFallbacks, projectCwd],
+    ...(projectCwd ? [projectCwd] : []),
+  ], [pipelines, project, projectCwd, workflows]);
+  const resolvedDraftCwd = useMemo(
+    () => projectDraftWorkingDirectory(files, project, projectCatalogEntries, undefined, projectCwdFallbacks, ""),
+    [files, project, projectCatalogEntries, projectCwdFallbacks],
   );
+  const initialDraftCwd = resolvedDraftCwd || "/";
+  const initialDraftCwdVerified = Boolean(resolvedDraftCwd);
 
   useEffect(() => {
     const tick = () => setNowMs(Date.now());
@@ -330,14 +333,18 @@ export function ProjectDashboard({
     const unresolved: Array<{ id: string; sourcePath: string }> = [];
     for (const id of restored) {
       if (!isWorkflowDraftId(id)) {
-        if (draftCwd(id)) continue;
         const sourcePath = draftSrc(id) || undefined;
+        if (draftCwd(id)) {
+          if (!sourcePath && initialDraftCwdVerified) replaceUnverifiedDraftCwd(id, initialDraftCwd);
+          continue;
+        }
         const sourceCwd = sourcePath
           ? files.find((file) => file.path === sourcePath)?.cwd?.trim()
           : undefined;
         if (sourceCwd) seedDraftCwd(id, sourceCwd);
         else if (sourcePath) unresolved.push({ id, sourcePath });
-        else seedDraftCwd(id, initialDraftCwd);
+        else if (initialDraftCwdVerified) seedDraftCwd(id, initialDraftCwd);
+        else requireDraftCwdConfirmation(id, initialDraftCwd);
       }
     }
     /* eslint-disable-next-line react-hooks/set-state-in-effect */
@@ -393,7 +400,7 @@ export function ProjectDashboard({
   /* Source rows are sampled when restoration starts; the dedicated lookup
      retries independently and `initialDraftCwd` carries ordinary root changes. */
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [project, openNonce, loaded, initialDraftCwd]);
+  }, [project, openNonce, loaded, initialDraftCwd, initialDraftCwdVerified]);
   const toggleTaskPanel = () => board.setTaskPanelOpen(!taskPanelOpen);
   useEffect(
     () => () => {
@@ -651,7 +658,8 @@ export function ProjectDashboard({
     if (!loaded) return;
     onUserNavigate?.();
     const id = newDraftId();
-    setDraftCwd(id, projectDraftWorkingDirectory(files, project, projectCatalogEntries, undefined, projectCwdFallbacks, projectCwd));
+    if (initialDraftCwdVerified) setDraftCwd(id, initialDraftCwd);
+    else requireDraftCwdConfirmation(id, initialDraftCwd);
     persistDrafts([...drafts, id]);
     pendingFocusRef.current = "draft::" + id;
   };
@@ -670,7 +678,9 @@ export function ProjectDashboard({
     }
     const id = newDraftId();
     setDraftSrc(id, file.path, file.conversationId);
-    setDraftCwd(id, projectDraftWorkingDirectory(files, project, projectCatalogEntries, file.path, projectCwdFallbacks, projectCwd));
+    const handoffCwd = projectDraftWorkingDirectory(files, project, projectCatalogEntries, file.path, projectCwdFallbacks, initialDraftCwd);
+    if (file.cwd?.trim()) setDraftCwd(id, handoffCwd);
+    else requireDraftCwdConfirmation(id, handoffCwd);
     persistDrafts([...drafts, id]);
     pendingFocusRef.current = "draft::" + id;
   };
@@ -688,7 +698,8 @@ export function ProjectDashboard({
     onUserNavigate?.();
     const id = newDraftId();
     setDraftText(id, task.text);
-    setDraftCwd(id, projectDraftWorkingDirectory(files, project, projectCatalogEntries, undefined, projectCwdFallbacks, projectCwd));
+    if (initialDraftCwdVerified) setDraftCwd(id, initialDraftCwd);
+    else requireDraftCwdConfirmation(id, initialDraftCwd);
     persistDrafts([...drafts, id]);
     pendingFocusRef.current = "draft::" + id;
   };

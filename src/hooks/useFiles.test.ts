@@ -54,7 +54,10 @@ test("URL-specific 304 responses restore the matching cached representation", as
         headers: { ETag: '"global"' },
       });
     }
-    return new Response(JSON.stringify({ files: [file("/global", "Global"), file("/pinned", "Pinned")] }), {
+    return new Response(JSON.stringify({
+      files: [file("/global", "Global"), file("/pinned", "Pinned")],
+      pinOverlayPaths: ["/pinned"],
+    }), {
       headers: { ETag: '"pinned"' },
     });
   });
@@ -83,6 +86,7 @@ test("a global 304 keeps fresher shared rows learned by a pinned refresh", async
     }
     return new Response(JSON.stringify({
       files: [file("/global", "Global 2"), file("/new", "New shared row"), file("/archive/pinned", "Pinned")],
+      pinOverlayPaths: ["/archive/pinned"],
     }), { headers: { ETag: '"pinned-2"' } });
   });
 
@@ -93,6 +97,72 @@ test("a global 304 keeps fresher shared rows learned by a pinned refresh", async
   const restored = await cache.revalidate();
   expect(restored.files.map((entry) => entry.title)).toEqual(["Global 2", "New shared row"]);
   expect(restored.requestScope).toBe("/api/files");
+});
+
+test("releasing a migrated deep-link pin removes every pin-only closure row on a global 304", async () => {
+  const predecessor = "/archive/predecessor.jsonl";
+  const current = "/sessions/current.jsonl";
+  const closure = "/sessions/closure-parent.jsonl";
+  let globalRequests = 0;
+  const cache = createFilesClientCache(async (input, init) => {
+    if (input === "/api/files") {
+      globalRequests += 1;
+      if (globalRequests === 2) {
+        expect(new Headers(init?.headers).get("If-None-Match")).toBe('"global"');
+        return new Response(null, { status: 304 });
+      }
+      return new Response(JSON.stringify({ files: [file("/global", "Global")] }), {
+        headers: { ETag: '"global"' },
+      });
+    }
+    return new Response(JSON.stringify({
+      files: [
+        file("/global", "Global"),
+        file(predecessor, "Predecessor"),
+        file(current, "Current"),
+        file(closure, "Closure parent"),
+      ],
+      pinOverlayPaths: [predecessor, current, closure],
+    }), { headers: { ETag: '"pinned"' } });
+  });
+
+  await cache.revalidate();
+  await cache.revalidate(predecessor);
+  const released = await cache.revalidate();
+
+  expect(released.files.map((entry) => entry.path)).toEqual(["/global"]);
+  expect(released.requestScope).toBe("/api/files");
+});
+
+test("a global 304 retains an ordinary lineage row that a pinned response also marked as overlay", async () => {
+  const globalChild = "/sessions/global-child.jsonl";
+  const pinnedChild = "/archive/pinned-child.jsonl";
+  const sharedParent = "/sessions/shared-parent.jsonl";
+  let globalRequests = 0;
+  const cache = createFilesClientCache(async (input) => {
+    if (input === "/api/files") {
+      globalRequests += 1;
+      if (globalRequests === 2) return new Response(null, { status: 304 });
+      return new Response(JSON.stringify({
+        files: [file(globalChild, "Global child"), file(sharedParent, "Shared parent")],
+      }), { headers: { ETag: '"global"' } });
+    }
+    return new Response(JSON.stringify({
+      files: [
+        file(globalChild, "Global child fresh"),
+        file(pinnedChild, "Pinned child"),
+        file(sharedParent, "Shared parent fresh"),
+      ],
+      pinOverlayPaths: [pinnedChild, sharedParent],
+    }), { headers: { ETag: '"pinned"' } });
+  });
+
+  await cache.revalidate();
+  await cache.revalidate(pinnedChild);
+  const released = await cache.revalidate();
+
+  expect(released.files.map((entry) => entry.path)).toEqual([globalChild, sharedParent]);
+  expect(released.files.find((entry) => entry.path === sharedParent)?.title).toBe("Shared parent fresh");
 });
 
 test("an out-of-cap #f target keeps its pinned representation through background revalidation", async () => {
