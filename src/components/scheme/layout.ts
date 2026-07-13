@@ -54,7 +54,7 @@ export const GROUP_SIBLING_GAP = GROUP_PAD * 2 + GAP_X;
    stage's live chat window later takes the same footprint in place. The gap
    between two slots carries the handoff arrow badge. */
 export const SLOT_W = NODE_W;
-export const SLOT_H = 460;
+export const SLOT_H = 620;
 export const SLOT_GAP = 72;
 /* Quiet-branch mini cards stacked under their parent pane. */
 const MINI_W = 360;

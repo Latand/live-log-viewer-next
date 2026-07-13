@@ -19,7 +19,6 @@ import { ConversationList } from "./ConversationList";
 import { clearDraftStorage, draftParentConversationId, draftSrc, setDraftSrc, setDraftText } from "./DraftAgentPane";
 import { planBoardConvergence, planClose } from "./projectBoardMutations";
 import { claimedReviewerDescendantPaths, foldClaimedReviewers, isActiveFlow } from "./flows/flowModel";
-import { PipelineDialog } from "./pipelines/PipelineDialog";
 import { createDraftPipeline, pipelinesForProject, type PipelineTemplate } from "./pipelines/pipelineModel";
 import { PipelineTemplatePicker } from "./pipelines/PipelineTemplatePicker";
 import { buildSchemeLayout } from "./scheme/layout";
@@ -29,7 +28,7 @@ import { MobileBottomShelf } from "./MobileBottomShelf";
 import { clearWorkflowDraftStorage } from "./workflows/WorkflowDraftPane";
 import { dropLegacyWorkflowDrafts, isWorkflowDraftId } from "./workflows/workflowModel";
 import { TaskPanel } from "./tasks/TaskPanel";
-import { TaskToastHost } from "./tasks/taskToast";
+import { TaskToastHost, pushTaskToast } from "./tasks/taskToast";
 import { MobileFocusView } from "./mobile/MobileFocusView";
 import { canHandoff, HandoffHandle } from "./HandoffHandle";
 import { SchemeBoard } from "./scheme/SchemeBoard";
@@ -301,7 +300,6 @@ export function ProjectDashboard({
   const [taskSheetNonce, setTaskSheetNonce] = useState(0);
   /* Place-on-map: the unplaced task whose next board click pins it. */
   const [placeTask, setPlaceTask] = useState<BoardTask | null>(null);
-  const [pipelineDialogOpen, setPipelineDialogOpen] = useState(false);
   /* Template-first pipeline entry (#196): `+ Пайплайн` opens this picker; the
      chosen template lands as a draft with its whole role chain on the canvas. */
   const [templatePickerOpen, setTemplatePickerOpen] = useState(false);
@@ -598,9 +596,9 @@ export function ProjectDashboard({
 
   /* `+ Пайплайн` (#136, #196): the picker's template lands as a DRAFT whose
      whole role chain renders as dashed placeholder windows on the canvas; the
-     blank choice drops an empty draft and opens its builder panel. If the repo
-     can't be resolved (or the POST fails), fall back to the creation dialog so
-     the operator can fix it there. */
+     blank choice drops an empty draft and opens its builder panel. The legacy
+     creation form is gone — a failed POST (unresolvable repo etc.) surfaces as
+     a toast and the operator fixes the repo on the draft itself. */
   const addPipelineDraft = async (template: PipelineTemplate | null) => {
     if (draftBusy) return;
     onUserNavigate?.();
@@ -608,7 +606,7 @@ export function ProjectDashboard({
     const result = await createDraftPipeline(project, undefined, template ?? undefined);
     setDraftBusy(false);
     if (result.pipeline) setBuilderPipelineId(result.pipeline.id);
-    else setPipelineDialogOpen(true);
+    else if (result.error) pushTaskToast("err", result.error);
   };
 
   /* The handoff handle under a pane: a draft that continues this conversation
@@ -955,7 +953,7 @@ export function ProjectDashboard({
             </button>
             <button
               type="button"
-              onClick={() => setPipelineDialogOpen(true)}
+              onClick={() => setTemplatePickerOpen(true)}
               aria-label={t("dash.newPipeline")}
               className="flex shrink-0 items-center gap-1 rounded-[8px] border border-line bg-panel px-2.5 py-1 text-[11.5px] font-bold text-ink shadow-card hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
             >
@@ -964,13 +962,6 @@ export function ProjectDashboard({
           </>
         )}
       </div>
-
-      {pipelineDialogOpen ? (
-        /* Keyed by project: this dashboard survives project switches, so a
-           key remount drops project A's task/repo/stages, which keeps them out of
-           project B's draft (and stops A's repo from submitting under B). */
-        <PipelineDialog key={project} project={project} onClose={() => setPipelineDialogOpen(false)} />
-      ) : null}
 
       {templatePickerOpen ? (
         <PipelineTemplatePicker

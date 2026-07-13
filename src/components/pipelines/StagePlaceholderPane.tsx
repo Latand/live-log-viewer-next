@@ -3,6 +3,8 @@
 import { Check, Loader2 } from "lucide-react";
 import { useState } from "react";
 
+import { EngineRadioGroup, RoleSection, useRoleCatalog } from "@/components/DraftAgentPane";
+import { X } from "@/components/icons";
 import { ReasoningControls } from "@/components/ReasoningControls";
 import type { StageSlot } from "@/components/scheme/layout";
 import { engineTintOf } from "@/components/utils";
@@ -10,38 +12,54 @@ import { isEngineEffort } from "@/lib/agent/efforts";
 import { ENGINE_MODELS } from "@/lib/agent/models";
 import type { FlowEngine } from "@/lib/flows/types";
 import { useLocale } from "@/lib/i18n";
+import type { PatchPipelineRequest, PipelineRoleId } from "@/lib/pipelines/types";
 
 import {
+  PIPELINE_ROLE_OPTIONS,
   STAGE_TONES,
   patchPipeline,
+  reviewLoopChainValid,
   stageAttempts,
   stageChipLabel,
   stageChipState,
-  stageOverrideBody,
 } from "./pipelineModel";
 
-const ENGINES: { key: FlowEngine; label: string }[] = [
-  { key: "claude", label: "Claude" },
-  { key: "codex", label: "Codex" },
-];
+const PIPELINE_ROLE_ID_SET: ReadonlySet<string> = new Set(PIPELINE_ROLE_OPTIONS);
+
+/** Trimmed, non-empty param values — matches the server's boundedText gate. */
+function sanitizeParams(params: Record<string, string | number>): Record<string, string | number> {
+  const out: Record<string, string | number> = {};
+  for (const [key, value] of Object.entries(params)) {
+    if (typeof value === "string") {
+      const trimmed = value.trim();
+      if (trimmed) out[key] = trimmed;
+    } else if (value !== undefined && value !== null) {
+      out[key] = value;
+    }
+  }
+  return out;
+}
 
 /**
- * A planned pipeline stage as a dashed placeholder chat window on the canvas
- * (issue #196): the same footprint the stage's live window will take, labeled
- * with its role, visible from the moment a template lands as a draft. Carries
- * the per-role engine + model + reasoning pickers — the SAME ReasoningControls
- * every agent-launch surface uses, at the full 44px recipe — and each edit is
- * an `override-stage` PATCH against the draft, so the config the stage spawns
- * with is exactly what the placeholder shows. When the stage materializes a
- * node/deck, the layout dissolves this slot and the live window takes over.
+ * A planned pipeline stage as the SAME window a new agent gets (issue #196):
+ * the DraftAgentPane recipe — engine chips in the header, the shared
+ * RoleSection (role select, params, scaffold preview), the shared
+ * ReasoningControls row, and the prompt editor at the bottom — just dashed,
+ * because no agent is attached yet. Every edit is an `override-stage` PATCH
+ * against the draft; server echoes re-seed the controls in place (render-phase
+ * adjustment), so the pane never remounts under the operator's cursor. When
+ * the stage materializes a node/deck, the layout dissolves this slot and the
+ * live chat window takes over the footprint.
  */
 export function StagePlaceholderPane({ slot, interactive }: { slot: StageSlot; interactive: boolean }) {
   const { t } = useLocale();
   const { pipeline, stage } = slot;
+  const roles = useRoleCatalog();
   const state = stageChipState(pipeline, stage);
   const tone = STAGE_TONES[state];
   const label = stageChipLabel(t, stage);
   const review = stage.kind === "review-loop";
+  const draft = pipeline.state === "draft";
   /* Only a stage that has never run can be re-configured — the engine snapshots
      a stage's config at its first attempt (same guard as the builder panel). */
   const editable =
@@ -49,31 +67,48 @@ export function StagePlaceholderPane({ slot, interactive }: { slot: StageSlot; i
     stageAttempts(pipeline, stage.id).length === 0 &&
     pipeline.state !== "completed" &&
     pipeline.state !== "closed";
+
   const [engine, setEngine] = useState<FlowEngine>(stage.effectiveRole.engine);
   const [model, setModel] = useState(stage.effectiveRole.model ?? "");
   const [effort, setEffort] = useState(stage.effectiveRole.effort ?? "");
+  const [roleId, setRoleId] = useState(stage.role?.roleId ?? "");
+  const [roleParams, setRoleParams] = useState<Record<string, string | number>>(stage.role?.params ?? {});
+  const [prompt, setPrompt] = useState(stage.prompt);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
 
-  /* Every picker change lands immediately as an override-stage PATCH carrying
-     only the changed fields (stageOverrideBody), so a role's registry defaults
-     stay live until the operator actually pins something. */
-  const save = async (next: { engine: FlowEngine; model: string; effort: string }) => {
+  /* Server echoes (the PATCH round-trips through the poll) re-seed the controls
+     in place. Render-phase adjustments — no remount, so an in-progress prompt
+     edit survives an unrelated echo: the prompt only adopts the server value
+     while the local copy is not dirty. */
+  const runtimeSig = `${stage.effectiveRole.engine}:${stage.effectiveRole.model ?? ""}:${stage.effectiveRole.effort ?? ""}`;
+  const [seenRuntime, setSeenRuntime] = useState(runtimeSig);
+  if (seenRuntime !== runtimeSig) {
+    setSeenRuntime(runtimeSig);
+    setEngine(stage.effectiveRole.engine);
+    setModel(stage.effectiveRole.model ?? "");
+    setEffort(stage.effectiveRole.effort ?? "");
+  }
+  const roleSig = `${stage.role?.roleId ?? ""}:${JSON.stringify(stage.role?.params ?? {})}`;
+  const [seenRole, setSeenRole] = useState(roleSig);
+  if (seenRole !== roleSig) {
+    setSeenRole(roleSig);
+    setRoleId(stage.role?.roleId ?? "");
+    setRoleParams(stage.role?.params ?? {});
+  }
+  const [seenPrompt, setSeenPrompt] = useState(stage.prompt);
+  if (seenPrompt !== stage.prompt) {
+    const previous = seenPrompt;
+    setSeenPrompt(stage.prompt);
+    setPrompt((current) => (current === previous ? stage.prompt : current));
+  }
+
+  const save = async (body: Omit<PatchPipelineRequest, "action" | "stageId">) => {
     setBusy(true);
     setError(null);
     setSaved(false);
-    const fail = await patchPipeline(
-      pipeline.id,
-      "override-stage",
-      stageOverrideBody(stage, {
-        roleId: stage.role?.roleId ?? "",
-        engine: next.engine,
-        model: next.model,
-        effort: next.effort,
-        prompt: stage.prompt,
-      }),
-    );
+    const fail = await patchPipeline(pipeline.id, "override-stage", { stageId: stage.id, ...body });
     if (fail) setError(fail);
     else setSaved(true);
     setBusy(false);
@@ -81,24 +116,62 @@ export function StagePlaceholderPane({ slot, interactive }: { slot: StageSlot; i
   const changeEngine = (next: FlowEngine) => {
     if (next === engine) return;
     /* Switching the engine invalidates the model and can invalidate the effort
-       tier, so both reset together (mirrors resetRuntimeForEngine). */
-    const nextEffort = effort && isEngineEffort(next, effort) ? effort : "";
+       tier; clearing the pins hands both back to the engine/role defaults. */
+    const keepEffort = Boolean(effort && isEngineEffort(next, effort));
     setEngine(next);
     setModel("");
-    setEffort(nextEffort);
-    void save({ engine: next, model: "", effort: nextEffort });
+    if (!keepEffort) setEffort("");
+    void save({ engine: next, model: null, ...(keepEffort ? {} : { effort: null }) });
   };
   const changeModel = (value: string) => {
     setModel(value);
-    void save({ engine, model: value, effort });
+    void save({ model: value.trim() || null });
   };
   const changeEffort = (value: string) => {
     setEffort(value);
-    void save({ engine, model, effort: value });
+    void save({ effort: value || null });
+  };
+  const selectRole = (next: string) => {
+    setRoleId(next);
+    const selected = roles.find((role) => role.id === next);
+    const params = selected
+      ? Object.fromEntries(selected.parameters.map((parameter) => [
+          parameter.key,
+          parameter.kind === "integer" ? parameter.min ?? 1 : parameter.options?.[0] ?? "",
+        ]))
+      : {};
+    setRoleParams(params);
+    /* A role change hands unpinned runtime back to the new role's defaults
+       server-side; the echo re-seeds the pickers above. */
+    void save({ role: next ? { roleId: next as PipelineRoleId, ...(Object.keys(sanitizeParams(params)).length ? { params: sanitizeParams(params) } : {}) } : null });
+  };
+  const setParam = (key: string, value: string | number) => {
+    const next = { ...roleParams, [key]: value };
+    setRoleParams(next);
+    if (!roleId) return;
+    const params = sanitizeParams(next);
+    void save({ role: { roleId: roleId as PipelineRoleId, ...(Object.keys(params).length ? { params } : {}) } });
+  };
+  const promptDirty = prompt !== stage.prompt;
+  const savePrompt = () => {
+    if (!promptDirty || !prompt.trim()) return;
+    void save({ prompt: prompt.trim() });
+  };
+  /* Removing this stage must keep the chain startable: a removal that would
+     orphan a review loop is disabled (same guard as the builder panel). */
+  const canRemove =
+    draft && interactive && reviewLoopChainValid(pipeline.stages.filter((item) => item.id !== stage.id).map((item) => item.kind));
+  const removeStage = () => {
+    setBusy(true);
+    void patchPipeline(pipeline.id, "remove-stage", { stageId: stage.id }).then((fail) => {
+      if (fail) setError(fail);
+      setBusy(false);
+    });
   };
 
-  const pulse = (state === "running" || state === "reviewing" || state === "committing") && pipeline.state !== "paused";
+  const tint = engineTintOf(engine);
   const active = state !== "pending" && state !== "skipped";
+  const pulse = (state === "running" || state === "reviewing" || state === "committing") && pipeline.state !== "paused";
   const hint = review
     ? t("pipelineSlot.reviewHint")
     : state === "running" || state === "reviewing" || state === "committing"
@@ -110,100 +183,127 @@ export function StagePlaceholderPane({ slot, interactive }: { slot: StageSlot; i
     <section
       data-pan-ignore
       aria-label={t("pipelineSlot.paneAria", { role: label })}
-      className="relative flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-[10px] border-2 border-dashed bg-panel/85"
+      className="relative flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-[10px] border-2 border-dashed bg-panel shadow-card"
       style={{ borderColor: active ? tone.color : "var(--border-strong)" }}
     >
-      <header className="flex min-h-11 shrink-0 flex-wrap items-center gap-2 border-b border-dashed border-line px-3 py-1.5">
-        <span aria-hidden className="text-[15px] leading-none" style={{ color: tone.color }}>
-          {review ? "⟳" : "▸"}
-        </span>
-        <span className="min-w-0 truncate text-[15px] font-bold text-ink">{label}</span>
-        <span className="shrink-0 rounded-full border border-line px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-dim">
-          {t(review ? "groupOverride.reviewKind" : "groupOverride.runKind")}
-        </span>
+      <span aria-hidden className="h-1 w-full shrink-0 opacity-60" style={{ backgroundColor: tint.color }} />
+      <header className="flex h-10 shrink-0 items-center gap-1.5 border-b border-line px-2.5" style={{ backgroundColor: tint.soft }}>
         <span
-          className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-semibold ${pulse ? "animate-pulse" : ""}`}
-          style={{ backgroundColor: tone.soft, color: tone.color }}
-        >
-          {t(`pipelineChipState.${state}`)}
+          className={`h-2 w-2 shrink-0 rounded-full ${pulse ? "animate-pulse" : ""}`}
+          style={{ backgroundColor: tone.color }}
+          title={t(`pipelineChipState.${state}`)}
+        />
+        <EngineRadioGroup engine={engine as "claude" | "codex"} disabled={!editable || busy} onChange={changeEngine} />
+        <span className="min-w-0 flex-1 truncate text-[12px] font-semibold text-dim" title={label}>
+          {label} · {t("pipelineSlot.stageOf", { k: slot.index + 1, n: slot.total })}
         </span>
-        <span className="ml-auto shrink-0 text-[11px] font-semibold tabular-nums text-dim">
-          {t("pipelineSlot.stageOf", { k: slot.index + 1, n: slot.total })}
+        <span className="shrink-0 rounded-full border border-line bg-panel/70 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide text-dim">
+          {review ? `⟳ ${t("groupOverride.reviewKind")}` : t("groupOverride.runKind")}
         </span>
+        {canRemove ? (
+          <button
+            className="inline-flex shrink-0 items-center rounded-[8px] border border-line bg-bg px-1.5 py-0.5 text-dim hover:border-err/40 hover:text-err focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40"
+            aria-label={t("groupOverride.removeStage")}
+            disabled={busy}
+            onClick={removeStage}
+          >
+            <X className="h-3 w-3" aria-hidden />
+          </button>
+        ) : null}
       </header>
 
       {interactive ? (
-        <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-dashed border-line bg-sunken px-3 py-2">
-          <div className="flex shrink-0 items-center gap-1" role="radiogroup" aria-label={t("draft.engineAria")}>
-            {ENGINES.map(({ key, label: engineLabel }) => {
-              const isActive = engine === key;
-              const chip = engineTintOf(key);
-              return (
-                <button
-                  key={key}
-                  type="button"
-                  role="radio"
-                  aria-checked={isActive}
-                  disabled={!editable || busy}
-                  onClick={() => changeEngine(key)}
-                  style={isActive ? { backgroundColor: "#fff", color: chip.color, borderColor: chip.color } : undefined}
-                  className={`min-h-11 rounded-[8px] border px-3 text-[12px] font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60 ${
-                    isActive ? "" : "border-transparent bg-transparent text-dim hover:text-ink"
-                  }`}
-                >
-                  {engineLabel}
-                </button>
-              );
-            })}
-          </div>
-          <ReasoningControls
-            engine={engine as "claude" | "codex"}
-            model={model}
-            effort={effort}
-            speed=""
-            size="tall"
-            disabled={!editable || busy}
-            onModel={changeModel}
-            onEffort={changeEffort}
-            onSpeed={() => undefined}
-          />
-          {busy ? (
-            <Loader2 className="h-4 w-4 shrink-0 animate-spin text-dim" aria-hidden />
-          ) : saved ? (
-            <Check className="h-4 w-4 shrink-0 text-ok" role="img" aria-label={t("pipelineSlot.saved")} />
-          ) : null}
-        </div>
-      ) : (
-        <div className="flex shrink-0 items-center gap-2 border-b border-dashed border-line bg-sunken px-3 py-2 text-[12px] font-semibold text-secondary">
-          <span className="rounded-full px-2 py-0.5 text-[11px] font-bold" style={{ backgroundColor: engineTintOf(engine).soft, color: engineTintOf(engine).color }}>
-            {engine === "claude" ? "Claude" : "Codex"}
+        <RoleSection
+          idPrefix={slot.key}
+          roles={roles}
+          roleId={roleId}
+          roleParams={roleParams}
+          disabled={!editable || busy}
+          allowedRoleIds={PIPELINE_ROLE_ID_SET}
+          compactPreview
+          onSelectRole={selectRole}
+          onSetParam={setParam}
+        />
+      ) : null}
+
+      <div className="flex shrink-0 flex-wrap items-center gap-1.5 border-b border-line bg-[#fbfbfd] px-2.5 py-1.5">
+        <span className="shrink-0 text-[10px] font-semibold text-dim">{t("draft.reasoning")}</span>
+        {interactive ? (
+          <>
+            <ReasoningControls
+              engine={engine as "claude" | "codex"}
+              model={model}
+              effort={effort}
+              speed=""
+              showSpeed={false}
+              disabled={!editable || busy}
+              onModel={changeModel}
+              onEffort={changeEffort}
+              onSpeed={() => undefined}
+            />
+            {busy ? (
+              <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-dim" aria-hidden />
+            ) : saved ? (
+              <Check className="h-3.5 w-3.5 shrink-0 text-ok" role="img" aria-label={t("pipelineSlot.saved")} />
+            ) : null}
+          </>
+        ) : (
+          <span className="min-w-0 truncate text-[11px] font-semibold text-dim">
+            {modelLabel}
+            {effort ? ` · ${effort}` : ""}
           </span>
-          <span className="min-w-0 truncate">{modelLabel}{effort ? ` · ${effort}` : ""}</span>
-        </div>
-      )}
+        )}
+      </div>
       {error ? (
-        <div className="shrink-0 px-3 py-1 text-[11px] font-semibold text-err" role="alert">
+        <div className="shrink-0 px-2.5 py-1 text-[10.5px] font-semibold text-err" role="alert">
           {error}
         </div>
       ) : null}
       {interactive && !editable ? (
-        <div className="shrink-0 px-3 py-1 text-[11px] font-semibold text-dim">{t("pipelineSlot.frozen")}</div>
+        <div className="shrink-0 px-2.5 py-1 text-[10.5px] font-semibold text-dim">{t("pipelineSlot.frozen")}</div>
       ) : null}
 
-      <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-hidden px-4 py-3">
-        <div className="shrink-0 rounded-[8px] bg-sunken px-3 py-2">
-          <span className="block text-[10px] font-semibold uppercase tracking-wide text-dim">{t("pipelineSlot.promptLabel")}</span>
-          <span className="mt-1 line-clamp-4 whitespace-pre-wrap text-[12px] leading-5 text-secondary">
-            {stage.prompt || t("pipelineSlot.noPrompt")}
-          </span>
-        </div>
-        <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-2 text-center">
-          <span className="rounded-full px-3 py-1 text-[13px] font-bold" style={{ backgroundColor: tone.soft, color: tone.color }}>
-            {label}
-          </span>
-          <span className="max-w-[400px] text-[12px] leading-5 text-dim">{hint}</span>
-        </div>
+      <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-2 overflow-y-auto px-4 py-3 text-center">
+        <span className="rounded-full px-3 py-1 text-[13px] font-bold" style={{ backgroundColor: tone.soft, color: tone.color }}>
+          {label}
+        </span>
+        <span className="max-w-[380px] text-[12px] leading-5 text-dim">{hint}</span>
       </div>
+
+      {interactive ? (
+        <form
+          onSubmit={(event) => {
+            event.preventDefault();
+            savePrompt();
+          }}
+          className="flex shrink-0 flex-col gap-1 border-t border-border bg-card px-2.5 py-2"
+          aria-label={t("pipelineSlot.promptAria")}
+        >
+          <label className="text-[10px] font-semibold text-dim" htmlFor={`slot-prompt-${slot.key}`}>
+            {t("pipelineSlot.promptLabel")}
+          </label>
+          <textarea
+            id={`slot-prompt-${slot.key}`}
+            value={prompt}
+            disabled={!editable || busy}
+            onChange={(event) => setPrompt(event.target.value)}
+            onBlur={savePrompt}
+            placeholder={t("pipelineSlot.noPrompt")}
+            className="min-h-[52px] w-full resize-y rounded-[8px] border border-line bg-bg px-2 py-1.5 text-[11.5px] text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60"
+          />
+          {promptDirty ? (
+            <div className="flex items-center justify-end">
+              <button
+                type="submit"
+                disabled={!editable || busy || !prompt.trim()}
+                className="inline-flex h-7 items-center gap-1 rounded-[8px] border border-accent bg-accent px-2.5 text-[10.5px] font-bold text-white hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 disabled:opacity-40"
+              >
+                {t("pipelineSlot.savePrompt")}
+              </button>
+            </div>
+          ) : null}
+        </form>
+      ) : null}
     </section>
   );
 }

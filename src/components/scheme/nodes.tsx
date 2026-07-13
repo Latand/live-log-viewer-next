@@ -16,11 +16,12 @@ import { DraftAgentPane } from "@/components/DraftAgentPane";
 import { FlowDialog } from "@/components/flows/FlowDialog";
 import { activeLoopLeg, activeLoopRole, canStartFlow, verdictTone } from "@/components/flows/flowModel";
 import { FlowHub } from "@/components/flows/FlowHub";
-import { PipelineDialog } from "@/components/pipelines/PipelineDialog";
 import { PipelineHub } from "@/components/pipelines/PipelineHub";
 import { PipelineStrip } from "@/components/pipelines/PipelineStrip";
+import { PipelineTemplatePicker } from "@/components/pipelines/PipelineTemplatePicker";
 import { StagePlaceholderPane } from "@/components/pipelines/StagePlaceholderPane";
-import { STAGE_TONES, canSourcePipeline, renderableFlowIds, stageChipState } from "@/components/pipelines/pipelineModel";
+import { STAGE_TONES, canSourcePipeline, createDraftPipeline, patchPipeline, renderableFlowIds, reviewLoopChainValid, stageChipState } from "@/components/pipelines/pipelineModel";
+import { pushTaskToast } from "@/components/tasks/taskToast";
 import type { Pipeline } from "@/lib/pipelines/types";
 import { FlowStrip } from "@/components/flows/FlowStrip";
 import { RoleTag } from "@/components/flows/RoleTag";
@@ -811,6 +812,7 @@ function NodeShell({
   const [underOpen, setUnderOpen] = useState(false);
   const [flowOpen, setFlowOpen] = useState(false);
   const [pipelineOpen, setPipelineOpen] = useState(false);
+  const [pipelineBusy, setPipelineBusy] = useState(false);
   /* The compact board strip sits in FlowStrip's slot; a review-loop current
      stage never reaches here (its node carries the flow, and the strip map
      already excludes it), but gate on !flow so the two can never stack. */
@@ -880,12 +882,22 @@ function NodeShell({
           <FlowDialog file={node.file} onClose={() => setFlowOpen(false)} />
         </div>
       ) : null}
+      {/* The node's `⇢ pipeline` entry (#196): the template picker replaces the
+          deleted creation form. A pick drops a draft wired to this conversation
+          (src lineage + its cwd as the repo); a failure lands as a toast. */}
       {pipelineOpen ? (
-        <PipelineDialog
-          project={node.file.project}
-          src={node.file.path}
-          srcLabel={cleanTitle(node.file.title, 48)}
+        <PipelineTemplatePicker
+          busy={pipelineBusy}
           onClose={() => setPipelineOpen(false)}
+          onPick={(template) => {
+            if (pipelineBusy) return;
+            setPipelineBusy(true);
+            void createDraftPipeline(node.file.project, undefined, template ?? undefined, node.file.path).then((result) => {
+              setPipelineBusy(false);
+              setPipelineOpen(false);
+              if (result.error) pushTaskToast("err", result.error);
+            });
+          }}
         />
       ) : null}
       {/* The hidden stack peeking from under the card: previous chats and
@@ -982,14 +994,42 @@ function DraftShell({
 
 /**
  * A planned pipeline stage's dashed placeholder window as a scheme citizen
- * (issue #196), plus the handoff badge riding the gap to its left when the
- * previous stage's slot sits directly beside it — so the staging (which role
- * runs after which, where the review cycles sit) reads off the canvas before
- * anything spawns. Remounted on the stage's resolved runtime so a saved
- * override re-seeds the pickers (same key strategy as the builder's StageForm).
+ * (issue #196): the SAME draft-agent window recipe, plus the handoff badge
+ * riding the gap to its left when the previous stage's slot sits directly
+ * beside it — so the staging (which role runs after which, where the hard
+ * review cycles sit) reads off the canvas before anything spawns. On a draft,
+ * connection chips under the window extend the chain: `＋ agent` inserts the
+ * next run handoff after this stage, `＋ ⟳` attaches the hard review-cycle
+ * link — every one an add-stage PATCH on the same draft contract.
  */
 function StageSlotShell({ slot, lite, dimmed }: { slot: StageSlot; lite: boolean; dimmed: boolean }) {
+  const { t } = useLocale();
+  const [busy, setBusy] = useState(false);
   const tone = STAGE_TONES[stageChipState(slot.pipeline, slot.stage)];
+  const { pipeline } = slot;
+  const draft = pipeline.state === "draft";
+  const kinds = pipeline.stages.map((item) => item.kind);
+  const kindsWithInsert = (kind: "run" | "review-loop") => {
+    const next = [...kinds];
+    next.splice(slot.index + 1, 0, kind);
+    return next;
+  };
+  const canAddRun = draft && !lite && pipeline.stages.length < 4;
+  const canAddReview = canAddRun && reviewLoopChainValid(kindsWithInsert("review-loop"));
+  const addAfter = (kind: "run" | "review-loop") => {
+    if (busy) return;
+    setBusy(true);
+    const ids = new Set(pipeline.stages.map((item) => item.id));
+    let n = pipeline.stages.length + 1;
+    while (ids.has(`stage-${n}`)) n += 1;
+    void patchPipeline(pipeline.id, "add-stage", {
+      index: slot.index + 1,
+      stage: { id: `stage-${n}`, kind, prompt: pipeline.task || "{{task}}", next: null },
+    }).then((fail) => {
+      if (fail) pushTaskToast("err", fail);
+      setBusy(false);
+    });
+  };
   return (
     <div
       data-scheme-node={slot.key}
@@ -999,19 +1039,37 @@ function StageSlotShell({ slot, lite, dimmed }: { slot: StageSlot; lite: boolean
       {slot.incoming ? (
         <span
           aria-hidden
-          className="absolute top-[110px] z-[2] inline-flex h-7 -translate-x-1/2 -translate-y-1/2 items-center rounded-full border-2 bg-panel px-2 text-[14px] font-bold shadow-card"
+          className="absolute top-[110px] z-[2] inline-flex h-6 -translate-x-1/2 -translate-y-1/2 items-center rounded-full border bg-panel px-1.5 text-[12px] font-bold shadow-card"
           style={{ left: -SLOT_GAP / 2, borderColor: tone.color, color: tone.color }}
         >
           {slot.incoming === "review-loop" ? "⟳" : "→"}
         </span>
       ) : null}
       <div className="flex h-full">
-        <StagePlaceholderPane
-          key={`${slot.stage.id}:${slot.stage.effectiveRole.engine}:${slot.stage.effectiveRole.model ?? ""}:${slot.stage.effectiveRole.effort ?? ""}`}
-          slot={slot}
-          interactive={!lite}
-        />
+        <StagePlaceholderPane slot={slot} interactive={!lite} />
       </div>
+      {canAddRun ? (
+        <div className="absolute -bottom-10 left-0 z-[2] flex items-center gap-1.5">
+          <button
+            data-scheme-ui
+            className="inline-flex h-7 items-center gap-1 rounded-full border border-line bg-panel px-2.5 text-[11px] font-semibold text-dim shadow-card hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40"
+            disabled={busy}
+            title={t("pipelineSlot.addAgentTitle")}
+            onClick={() => addAfter("run")}
+          >
+            <span className="text-[13px] leading-none text-accent">＋</span> {t("pipelineSlot.addAgent")}
+          </button>
+          <button
+            data-scheme-ui
+            className="inline-flex h-7 items-center gap-1 rounded-full border border-line bg-panel px-2.5 text-[11px] font-semibold text-dim shadow-card hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40"
+            disabled={busy || !canAddReview}
+            title={t("pipelineSlot.addReviewTitle")}
+            onClick={() => addAfter("review-loop")}
+          >
+            <span className="text-[13px] leading-none text-accent">⟳</span> {t("pipelineSlot.addReview")}
+          </button>
+        </div>
+      ) : null}
     </div>
   );
 }

@@ -17,6 +17,7 @@ Object.assign(globalThis, {
   HTMLElement: dom.HTMLElement,
   HTMLSelectElement: dom.HTMLSelectElement,
   HTMLInputElement: dom.HTMLInputElement,
+  HTMLTextAreaElement: dom.HTMLTextAreaElement,
   Event: dom.Event,
   MouseEvent: dom.MouseEvent,
   KeyboardEvent: dom.KeyboardEvent,
@@ -77,32 +78,35 @@ function mount(node: React.ReactNode): { host: HTMLElement; root: Root } {
   return { host, root };
 }
 
-test("a placeholder names its role, marks the stage position, and carries the shared model+effort pickers", () => {
+test("a placeholder IS the draft-agent window recipe: engine radiogroup, role select, shared model+effort pickers, prompt editor", () => {
   const { host, root } = mount(<StagePlaceholderPane slot={slot()} interactive />);
   expect(host.textContent).toContain("architect");
   expect(host.textContent).toContain("stage 1/3");
-  expect(host.textContent).toContain("Plan the work");
-  /* The SAME ReasoningControls the agent draft windows use: a model select
-     seeded from the stage's resolved runtime, plus the effort tiers. */
-  const selects = [...host.querySelectorAll("select")] as HTMLSelectElement[];
-  expect(selects.length).toBe(2);
-  expect(selects[0]!.value).toBe("fable");
-  expect(selects[1]!.value).toBe("high");
-  /* Both engines are offered as a radiogroup, like the agent draft pane. */
+  /* Same window anatomy as DraftAgentPane: engine radiogroup in the header… */
   expect(host.querySelector('[role="radiogroup"]')).toBeTruthy();
+  /* …a role select (pipeline-allowed roles), then the SAME ReasoningControls
+     model + effort selects seeded from the stage's resolved runtime… */
+  const selects = [...host.querySelectorAll("select")] as HTMLSelectElement[];
+  expect(selects.length).toBe(3);
+  expect(selects[1]!.value).toBe("fable");
+  expect(selects[2]!.value).toBe("high");
+  /* …and the stage prompt as the editable footer. */
+  const textarea = host.querySelector("textarea") as HTMLTextAreaElement;
+  expect(textarea.value).toBe("Plan the work");
   flushSync(() => root.unmount());
   host.remove();
 });
 
-test("changing the effort PATCHes override-stage with ONLY the changed field (+ prompt), stageId pinned", async () => {
+test("changing the effort PATCHes override-stage with ONLY the changed field, stageId pinned", async () => {
   const patches: Array<{ url: string; body: Record<string, unknown> }> = [];
-  globalThis.fetch = (async (url: string, init?: { body?: string }) => {
-    patches.push({ url, body: JSON.parse(init?.body ?? "{}") as Record<string, unknown> });
+  globalThis.fetch = (async (url: string, init?: { method?: string; body?: string }) => {
+    if (!init?.method || init.method !== "PATCH") return { ok: true, json: async () => ({ roles: [] }) };
+    patches.push({ url, body: JSON.parse(init.body ?? "{}") as Record<string, unknown> });
     return { ok: true, json: async () => ({}) };
   }) as unknown as typeof fetch;
 
   const { host, root } = mount(<StagePlaceholderPane slot={slot()} interactive />);
-  const effortSelect = [...host.querySelectorAll("select")][1] as HTMLSelectElement;
+  const effortSelect = [...host.querySelectorAll("select")].at(-1) as HTMLSelectElement;
   flushSync(() => {
     Object.getOwnPropertyDescriptor(dom.HTMLSelectElement.prototype, "value")!.set!.call(effortSelect, "max");
     effortSelect.dispatchEvent(new dom.Event("change", { bubbles: true }) as unknown as Event);
@@ -110,7 +114,31 @@ test("changing the effort PATCHes override-stage with ONLY the changed field (+ 
   await Bun.sleep(0);
   expect(patches).toHaveLength(1);
   expect(patches[0]!.url).toBe("/api/pipelines/p1");
-  expect(patches[0]!.body).toEqual({ action: "override-stage", stageId: "architect", prompt: "Plan the work", effort: "max" });
+  expect(patches[0]!.body).toEqual({ action: "override-stage", stageId: "architect", effort: "max" });
+  flushSync(() => root.unmount());
+  host.remove();
+});
+
+test("editing the prompt saves on blur with ONLY the prompt", async () => {
+  const patches: Array<Record<string, unknown>> = [];
+  globalThis.fetch = (async (url: string, init?: { method?: string; body?: string }) => {
+    if (!init?.method || init.method !== "PATCH") return { ok: true, json: async () => ({ roles: [] }) };
+    patches.push(JSON.parse(init.body ?? "{}") as Record<string, unknown>);
+    return { ok: true, json: async () => ({}) };
+  }) as unknown as typeof fetch;
+
+  const { host, root } = mount(<StagePlaceholderPane slot={slot()} interactive />);
+  const textarea = host.querySelector("textarea") as HTMLTextAreaElement;
+  /* happy-dom input events don't reach React's synthetic onChange in this
+     harness, so type + blur through the element's React props directly. */
+  const propsKey = Object.keys(textarea).find((key) => key.startsWith("__reactProps$"))!;
+  const propsOf = () =>
+    (textarea as unknown as Record<string, { onChange: (e: unknown) => void; onBlur: (e: unknown) => void }>)[propsKey]!;
+  flushSync(() => propsOf().onChange({ target: { value: "Plan the rework carefully" } }));
+  /* Re-read after the commit: onBlur must close over the fresh prompt state. */
+  flushSync(() => propsOf().onBlur({}));
+  await Bun.sleep(0);
+  expect(patches).toEqual([{ action: "override-stage", stageId: "architect", prompt: "Plan the rework carefully" }]);
   flushSync(() => root.unmount());
   host.remove();
 });

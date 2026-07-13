@@ -331,7 +331,7 @@ export type PipelineTemplate = {
 export const PIPELINE_TEMPLATES: readonly PipelineTemplate[] = [
   {
     id: "planBuildReview",
-    labelKey: "pipelineDialog.templates.planBuildReview",
+    labelKey: "pipelineTemplates.planBuildReview",
     stages: [
       { kind: "run", roleId: "architect", access: "read-only", prompt: "Plan {{task}}" },
       { kind: "run", roleId: "builder", access: "read-write", prompt: "{{prev.output}}" },
@@ -340,7 +340,7 @@ export const PIPELINE_TEMPLATES: readonly PipelineTemplate[] = [
   },
   {
     id: "buildReview",
-    labelKey: "pipelineDialog.templates.buildReview",
+    labelKey: "pipelineTemplates.buildReview",
     stages: [
       { kind: "run", roleId: "builder", access: "read-write", prompt: "{{task}}" },
       { kind: "review-loop", roleId: "reviewer", access: "read-only", prompt: "Review the implementation against {{task}}." },
@@ -348,7 +348,7 @@ export const PIPELINE_TEMPLATES: readonly PipelineTemplate[] = [
   },
   {
     id: "buildVerify",
-    labelKey: "pipelineDialog.templates.buildVerify",
+    labelKey: "pipelineTemplates.buildVerify",
     stages: [
       { kind: "run", roleId: "builder", access: "read-write", prompt: "{{task}}" },
       { kind: "run", roleId: "verifier", access: "read-only", prompt: "Verify {{prev.output}} satisfies {{task}}." },
@@ -356,7 +356,7 @@ export const PIPELINE_TEMPLATES: readonly PipelineTemplate[] = [
   },
   {
     id: "blank",
-    labelKey: "pipelineDialog.templates.blank",
+    labelKey: "pipelineTemplates.blank",
     stages: [
       { kind: "run", roleId: "", access: "read-write", prompt: "" },
       { kind: "run", roleId: "", access: "read-write", prompt: "" },
@@ -504,11 +504,16 @@ export async function createDraftPipeline(
   project: string,
   repoPrefill?: string,
   template?: PipelineTemplate,
+  /** Source transcript wired as stage 0's lineage (the node `⇢ pipeline` entry);
+      its cwd also wins the repo resolution, like a handoff draft's does. */
+  src?: string,
 ): Promise<{ pipeline?: Pipeline; error?: string }> {
   let repoDir = (repoPrefill ?? "").trim();
   if (!repoDir) {
     try {
-      const res = await fetch("/api/spawn?project=" + encodeURIComponent(project));
+      const res = await fetch(
+        "/api/spawn?project=" + encodeURIComponent(project) + (src ? "&src=" + encodeURIComponent(src) : ""),
+      );
       const json = (await res.json().catch(() => null)) as { dirs?: string[]; cwd?: string | null } | null;
       repoDir = (typeof json?.cwd === "string" ? json.cwd : "") || json?.dirs?.[0] || "";
     } catch {
@@ -520,6 +525,7 @@ export async function createDraftPipeline(
     task: translate(getLocale(), "pipelineBuilder.untitledTask"),
     repoDir,
     stages: template ? templateStageInputs(template) : [],
+    ...(src ? { src } : {}),
     autoStart: false,
   });
 }
