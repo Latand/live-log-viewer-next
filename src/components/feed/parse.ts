@@ -9,7 +9,7 @@ import {
 import { getLocale, translate } from "@/lib/i18n";
 import { inboxImageExt, MAX_INBOX_IMAGE_BYTES } from "@/lib/imagePolicy";
 import type { FileEntry } from "@/lib/types";
-import { harnessKind, parseScheduleWakeup, refineWakeupFromResult, type WakeupInfo } from "@/lib/wakeup";
+import { parseScheduleWakeup, refineWakeupFromResult, type WakeupInfo } from "@/lib/wakeup";
 
 import type { GlyphName } from "../icons";
 import { hhmm } from "../utils";

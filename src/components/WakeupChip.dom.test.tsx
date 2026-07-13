@@ -6,7 +6,7 @@ import { createRoot, type Root } from "react-dom/client";
 
 import type { PendingWakeup } from "@/lib/types";
 
-import { WakeupChip } from "./WakeupChip";
+import { WakeupChip, wakeupChipKey } from "./WakeupChip";
 
 const dom = new Window();
 Object.assign(globalThis, {
@@ -35,18 +35,20 @@ test("a wakeup scheduled after a long null period renders against the current cl
   const container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
-  // Mount long-lived with no wakeup — this seeds `now` at 06:00 and runs the
-  // fire-time effect for the initial (null) fire time.
-  await act(async () => root!.render(<WakeupChip wakeup={null} />));
+  // Rendered with no wakeup at 06:00; callers key the chip so the null → pending
+  // transition remounts it (a fresh key), the same reset the scheme cards apply.
+  const keyed = (wakeup: PendingWakeup | null) => <WakeupChip key={wakeupChipKey(wakeup)} wakeup={wakeup} />;
+  await act(async () => root!.render(keyed(null)));
 
-  // Hours pass, then a 12-minute wakeup is scheduled at 08:00.
+  // Hours pass, then a 12-minute wakeup is scheduled at 08:00. The changed key
+  // remounts the chip, so its fresh `now` seed is read from the 08:00 clock.
   const later = t0 + 2 * 60 * 60 * 1000;
   setSystemTime(new Date(later));
   const wakeup: PendingWakeup = { fireAt: later + 12 * 60 * 1000, reason: "r" };
-  await act(async () => root!.render(<WakeupChip wakeup={wakeup} />));
+  await act(async () => root!.render(keyed(wakeup)));
 
   const text = container.textContent ?? "";
-  // The fire-time-change refresh rebased `now`, so it reads ~12 min, not ~2 h.
+  // The remount reseeded `now` at 08:00, so the countdown reads ~12 min.
   expect(text).toContain("12 min");
   expect(text).not.toContain("2 h");
 });

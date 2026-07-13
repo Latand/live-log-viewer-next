@@ -8,30 +8,35 @@ import type { PendingWakeup } from "@/lib/types";
 import { AlarmClock } from "./icons";
 import { fmtWakeClock, fmtWakeMagnitude } from "./wakeupFormat";
 
+/** React `key` for a {@link WakeupChip}. Keying by the fire time remounts the
+    chip whenever the wakeup changes (a fresh schedule or a reschedule), so its
+    `now` seed is re-read from the current clock (issue #161 review). */
+export function wakeupChipKey(wakeup?: PendingWakeup | null): string {
+  return wakeup ? `wake-${wakeup.fireAt}` : "wake-none";
+}
+
 /* The board timer chip (issue #161 §3): "⏰ 12 min" on a conversation card /
    scheme node, so an idle-looking orchestrator reads as sleeping until a known
-   time. It re-reads the clock every 30 seconds and removes itself on the first
-   tick at or after the fire time, so a stale server snapshot clears from the
-   board within one cadence instead of lingering as a phantom countdown.
+   time. It seeds `now` at mount and re-reads the clock every 30 seconds; on the
+   first tick at or after the fire time it removes itself, so a stale server
+   snapshot clears from the board within one cadence.
+
+   Callers key this chip by `pendingWakeup?.fireAt` (see {@link wakeupChipKey}).
+   A changed fire time then remounts the chip, so the freshly seeded `now`
+   reflects the current clock — the mount-time seed on a long-lived instance
+   would otherwise stay hours old before the first 30s tick (issue #161 review).
 
    Interactive (default): a real button carrying the reason behind a hover title
    AND a tap disclosure, with an invisible 44px hit area so touch users can
-   reveal it on a comfortable target. It stops its own key/pointer events from
-   reaching the surrounding card so activating the chip never opens the
-   conversation (issue #161 review). `interactive={false}` renders a passive,
+   reveal it on a comfortable target. It stops its own key/pointer events at the
+   chip so activating it leaves the surrounding card closed and the conversation
+   unopened (issue #161 review). `interactive={false}` renders a passive,
    focus-free visual chip for always-hidden hosts like the far-zoom label. */
 export function WakeupChip({ wakeup, className, interactive = true }: { wakeup?: PendingWakeup | null; className?: string; interactive?: boolean }) {
   const { locale, t } = useLocale();
   const [now, setNow] = useState(() => Date.now());
   const [open, setOpen] = useState(false);
   const fireAt = wakeup?.fireAt ?? 0;
-  // This chip is long-lived (it lives on a card that persists as `wakeup` goes
-  // null → pending over hours), so the mount-time `now` seed goes stale. Refresh
-  // it whenever the fire time changes so a freshly scheduled wakeup renders its
-  // true countdown from the current clock (issue #161 review).
-  useEffect(() => {
-    setNow(Date.now());
-  }, [fireAt]);
   const pending = Boolean(wakeup) && fireAt > now;
   useEffect(() => {
     if (!pending) return;
@@ -75,9 +80,9 @@ export function WakeupChip({ wakeup, className, interactive = true }: { wakeup?:
         onKeyDown={(e) => e.stopPropagation()}
         onKeyUp={(e) => e.stopPropagation()}
         /* Camera-event guard: the scheme board resolves taps/drags through a
-           window pointer listener (pickAt), so a chip press must not bubble to
-           it — otherwise tapping the chip on the mobile map would open the
-           conversation instead of revealing the reason (issue #161 review). */
+           window pointer listener (pickAt). Stopping the chip's pointer events
+           at the chip keeps that listener idle, so a tap on the mobile map
+           reveals the reason and leaves the conversation closed (issue #161). */
         onPointerDown={(e) => e.stopPropagation()}
         onPointerUp={(e) => e.stopPropagation()}
         onBlur={() => setOpen(false)}

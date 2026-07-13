@@ -10,7 +10,7 @@ import { EffortPills } from "./EffortPills";
 import { CtxChip } from "./PlanChip";
 import { ProcessStatusControls } from "./TaskHeader";
 import { RateLimitBadge } from "./RateLimitBadge";
-import { WakeupChip } from "./WakeupChip";
+import { WakeupChip, wakeupChipKey } from "./WakeupChip";
 import { activityDot, cleanTitle, effortTint, effortTitle, engineBadge, fmtAge } from "./utils";
 
 export type SwitchCardSize = "large" | "small";
@@ -82,7 +82,7 @@ export function SwitchCard({ file, title, project, currentProject, descendants, 
         )}
         <EffortPills file={file} />
         <RateLimitBadge rateLimit={file.rateLimit} />
-        <WakeupChip wakeup={file.pendingWakeup} />
+        <WakeupChip key={wakeupChipKey(file.pendingWakeup)} wakeup={file.pendingWakeup} />
         <span
           className={`ml-auto min-w-0 truncate rounded-full border border-line bg-bg px-1.5 py-0.5 text-[9.5px] font-semibold ${
             project === currentProject ? "text-dim" : "text-ink"
