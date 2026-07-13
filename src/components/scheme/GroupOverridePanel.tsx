@@ -53,7 +53,7 @@ export function GroupOverridePanel({ group, onClose }: { group: SchemeGroup; onC
       data-group-override={group.kind}
       role="dialog"
       aria-label={group.label}
-      className="flex w-[268px] flex-col gap-2 rounded-[12px] border border-border bg-card p-3 shadow-[0_10px_36px_rgb(20_20_30/0.18)]"
+      className="flex w-[268px] flex-col gap-2 rounded-[12px] border border-border bg-card p-3 shadow-2"
     >
       {group.flow ? <FlowOverride group={group} onClose={onClose} /> : null}
       {group.pipeline ? <PipelineOverride group={group} onClose={onClose} /> : null}

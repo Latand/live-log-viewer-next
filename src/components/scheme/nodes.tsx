@@ -511,7 +511,7 @@ function FarLabel({ file }: { file: FileEntry }) {
       aria-hidden
     >
       <div
-        className="flex max-w-[94%] items-center gap-[0.5em] rounded-[0.55em] border border-border bg-card/95 px-[0.75em] py-[0.45em] shadow-[0_2px_14px_rgb(20_20_30/0.14)]"
+        className="flex max-w-[94%] items-center gap-[0.5em] rounded-[0.55em] border border-border bg-card/95 px-[0.75em] py-[0.45em] shadow-2"
         /* Constant on-screen size until ~2.6× (z≈0.38); further out it shrinks
            with the world so neighboring labels never overlap. */
         style={{ fontSize: "calc(13px * min(var(--inv-z, 1), 2.6))" }}
@@ -878,7 +878,7 @@ function NodeShell({
         </button>
       ) : null}
       {underOpen ? (
-        <div className="absolute left-0 top-[calc(100%+52px)] z-30 max-h-[280px] w-full overflow-y-auto rounded-[10px] border border-border bg-card p-1.5 shadow-[0_10px_36px_rgb(20_20_30/0.18)]">
+        <div className="absolute left-0 top-[calc(100%+52px)] z-30 max-h-[280px] w-full overflow-y-auto rounded-[10px] border border-border bg-card p-1.5 shadow-2">
           {node.under.map((file) => (
             <UnderRow key={file.path} file={file} onSelect={onSelect} />
           ))}

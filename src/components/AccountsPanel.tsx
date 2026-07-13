@@ -462,7 +462,7 @@ export function AccountsPanel({
         aria-label={t("accounts.titleFor", { engine: engineName })}
         aria-busy={mutation !== null}
         onKeyDown={(event) => handleOverlayEscape(event, onClose)}
-        className={`fixed bottom-3 left-1/2 z-50 flex w-[min(360px,calc(100vw-16px))] -translate-x-1/2 flex-col rounded-[12px] border border-border bg-card shadow-[0_8px_28px_rgba(20,20,30,0.14)] ${placementClass}`}
+        className={`fixed bottom-3 left-1/2 z-50 flex w-[min(360px,calc(100vw-16px))] -translate-x-1/2 flex-col rounded-[12px] border border-border bg-card shadow-2 ${placementClass}`}
       >
         <header className="flex items-center gap-2 border-b border-border px-3 py-2">
           <span className="text-[12.5px] font-bold">{t("accounts.titleFor", { engine: engineName })}</span>

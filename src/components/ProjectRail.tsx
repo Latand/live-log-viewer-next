@@ -2,6 +2,7 @@
 
 import { useMemo, useState } from "react";
 
+import { Badge } from "@/components/ui/Badge";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useLocale } from "@/lib/i18n";
 import type { FileEntry, ProjectCatalogEntry } from "@/lib/types";
@@ -69,16 +70,8 @@ export function ProjectRail({ files, projectCatalog, pipelines, workflows, archi
           <>
             <div className="flex min-w-0 flex-1 items-center gap-1 overflow-hidden">
               <span className="min-w-0 truncate">{t("rail.title")}</span>
-              {totalLive ? (
-                <span className="inline-flex shrink-0 items-center rounded-full bg-success-soft px-1.5 py-0.5 text-[10.5px] font-bold tabular-nums text-success">
-                  {totalLive > 99 ? "99+" : totalLive}
-                </span>
-              ) : null}
-              {totalAttention ? (
-                <span className="inline-flex shrink-0 items-center rounded-full bg-warning-soft px-1.5 py-0.5 text-[10.5px] font-bold tabular-nums text-warning">
-                  ⏸{totalAttention > 99 ? "99+" : totalAttention}
-                </span>
-              ) : null}
+              {totalLive ? <Badge tone="success">{totalLive > 99 ? "99+" : totalLive}</Badge> : null}
+              {totalAttention ? <Badge tone="warning">⏸{totalAttention > 99 ? "99+" : totalAttention}</Badge> : null}
             </div>
             <div className="flex shrink-0 items-center gap-1">
               <LanguageToggle />
@@ -90,16 +83,12 @@ export function ProjectRail({ files, projectCatalog, pipelines, workflows, archi
           <>
             <span>{t("rail.title")}</span>
             {totalLive ? (
-              <span className="inline-flex items-center gap-1 rounded-full bg-success-soft px-2 py-0.5 text-[10.5px] font-bold text-success">
+              <Badge tone="success">
                 <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-success" />
                 {totalLive}
-              </span>
+              </Badge>
             ) : null}
-            {totalAttention ? (
-              <span className="inline-flex items-center gap-1 rounded-full bg-warning-soft px-2 py-0.5 text-[10.5px] font-bold text-warning">
-                ⏸ {totalAttention}
-              </span>
-            ) : null}
+            {totalAttention ? <Badge tone="warning">⏸ {totalAttention}</Badge> : null}
             <LanguageToggle />
             <AccessQrButton />
             <PushBell />
@@ -239,12 +228,8 @@ function RailRow({
         <span className={`block truncate text-[13px] ${active ? "font-bold" : "font-semibold"} ${muted ? "text-muted" : ""}`}>{label}</span>
         {age ? <span className="block text-[10.5px] text-muted">{age}</span> : null}
       </span>
-      {live > 0 ? (
-        <span className="shrink-0 rounded-full bg-success-soft px-1.5 py-0.5 text-[10.5px] font-bold text-success">{live}</span>
-      ) : null}
-      {attention > 0 ? (
-        <span className="shrink-0 rounded-full bg-warning-soft px-1.5 py-0.5 text-[10.5px] font-bold text-warning">⏸ {attention}</span>
-      ) : null}
+      {live > 0 ? <Badge tone="success">{live}</Badge> : null}
+      {attention > 0 ? <Badge tone="warning">⏸ {attention}</Badge> : null}
       {total !== null ? <span className="shrink-0 text-[11px] font-semibold text-muted">{total}</span> : null}
     </button>
   );

@@ -29,7 +29,7 @@ interface Props {
 }
 
 function toneClass(tone: SwitchCardTone): string {
-  if (tone === "working") return "border-success/40 bg-success-soft shadow-[0_0_0_3px_rgba(26,138,62,0.12)]";
+  if (tone === "working") return "border-success/40 bg-success-soft shadow-[0_0_0_3px_color-mix(in_srgb,var(--color-success)_16%,transparent)]";
   if (tone === "stalled") return "border-danger/35 bg-danger-soft";
   if (tone === "waiting") return "border-warning/45 bg-warning-soft";
   return "border-border bg-card";

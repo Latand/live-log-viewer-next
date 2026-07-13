@@ -465,7 +465,7 @@ export function PipelineDialog({
         role="dialog"
         aria-modal="true"
         aria-label={t("pipelineDialog.title")}
-        className="my-auto flex w-full max-w-[680px] flex-col gap-2.5 rounded-[14px] border border-border bg-card p-4 shadow-[0_18px_60px_rgb(20_20_30/0.28)]"
+        className="my-auto flex w-full max-w-[680px] flex-col gap-2.5 rounded-[14px] border border-border bg-card p-4 shadow-2"
       >
         <div className="flex items-start gap-2">
           <div className="flex min-w-0 flex-col">

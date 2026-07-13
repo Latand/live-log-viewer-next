@@ -63,27 +63,40 @@ const CODEX_MODEL_COLORS: [RegExp, string][] = [
   [/codex/, "#1d55ab"],
 ];
 
-/** Translucent tint of an identity color for chip/badge backgrounds. Alpha is
-    tuned so the result over white matches the previous opaque soft hexes while
-    staying dark-aware over the dark card surface. Accepts a `#rrggbb` hex. */
-function softOf(hexColor: string): string {
-  const [h, s, l] = hexToHsl(hexColor);
-  return `hsl(${Math.round(h)} ${Math.round(s)}% ${Math.round(l)}% / 0.14)`;
+/** Model tint from HSL parts. `color` reads on either theme via `light-dark()`:
+    the light value is the identity hue, the dark value lifts the same hue to a
+    lightness readable on the dark card/soft tint (the deep light-theme hues fall
+    to ~2.5:1 otherwise). `soft` is a translucent tint of the same hue, so the
+    chip background composites over whatever surface is active (design doc §1.5).
+    `color-scheme` is set on :root, and every consumer is a CSS/SVG color context
+    (inline style, SVG `fill`), so both values resolve per theme with no JS. */
+function themedTint(h: number, s: number, l: number): ModelTint {
+  const H = Math.round(h);
+  const S = Math.round(s);
+  const L = Math.round(l);
+  const light = `hsl(${H} ${S}% ${L}%)`;
+  const dark = `hsl(${H} ${Math.min(S, 78)}% 72%)`;
+  return { color: `light-dark(${light}, ${dark})`, soft: `hsl(${H} ${S}% ${L}% / 0.14)` };
 }
 
-function tintOf(color: string): ModelTint {
-  return { color, soft: softOf(color) };
+function tintOf(hex: string): ModelTint {
+  return themedTint(...hexToHsl(hex));
+}
+
+/** Raw identity hex before theming — the shift input for {@link effortTint}. */
+function modelBaseHex(file: FileEntry): string {
+  const base = ENGINE_COLORS[file.engine];
+  if (!base) return NEUTRAL_COLOR;
+  const model = (file.model ?? "").toLowerCase();
+  for (const [re, color] of file.engine === "codex" ? CODEX_MODEL_COLORS : CLAUDE_MODEL_COLORS) {
+    if (re.test(model)) return color;
+  }
+  return base;
 }
 
 /** Identity color tinted by model family (Terra green, Sol amber, Fable deep orange…). */
 export function modelTint(file: FileEntry): ModelTint {
-  const base = ENGINE_COLORS[file.engine];
-  if (!base) return tintOf(NEUTRAL_COLOR);
-  const model = (file.model ?? "").toLowerCase();
-  for (const [re, color] of file.engine === "codex" ? CODEX_MODEL_COLORS : CLAUDE_MODEL_COLORS) {
-    if (re.test(model)) return tintOf(color);
-  }
-  return tintOf(base);
+  return tintOf(modelBaseHex(file));
 }
 
 /* Reasoning-effort ramp: lightness/saturation deltas applied on top of the
@@ -115,27 +128,17 @@ function hexToHsl(hex: string): [number, number, number] {
   return [h * 60, s * 100, l * 100];
 }
 
-function shiftTone(hex: string, dl: number, ds: number): string {
-  const [h, s, l] = hexToHsl(hex);
-  const clamp = (v: number) => Math.min(100, Math.max(0, v));
-  return `hsl(${Math.round(h)} ${Math.round(clamp(s + ds))}% ${Math.round(clamp(l + dl))}%)`;
-}
-
-/** Append the standard soft alpha to an `hsl(h s% l%)` string from shiftTone. */
-function softFromHsl(hsl: string): string {
-  return hsl.replace(/\)$/, " / 0.14)");
-}
-
-/** Model tint dimmed or deepened by the entry's reasoning-effort tier.
-    Unknown/absent effort returns the plain model tint — renders as today. */
+/** Model tint dimmed or deepened by the entry's reasoning-effort tier. The ramp
+    shifts the light-theme lightness/saturation; the dark sibling and translucent
+    soft are derived by {@link themedTint}, so both themes stay readable and track
+    the ramp. Unknown/absent effort returns the plain model tint. */
 export function effortTint(file: FileEntry): ModelTint {
-  const base = modelTint(file);
+  const baseHex = modelBaseHex(file);
   const ramp = EFFORT_RAMP[file.effort ?? ""];
-  if (!ramp) return base;
-  const color = shiftTone(base.color, ramp.dl, ramp.ds);
-  // The chip background is a translucent tint of the shifted color, so it stays
-  // dark-aware and tracks the effort ramp without a second per-theme literal.
-  return { color, soft: softFromHsl(color) };
+  if (!ramp) return tintOf(baseHex);
+  const [h, s, l] = hexToHsl(baseHex);
+  const clamp = (v: number) => Math.min(100, Math.max(0, v));
+  return themedTint(h, clamp(s + ramp.ds), clamp(l + ramp.dl));
 }
 
 /** Chip tooltip carrying the raw effort value; empty keeps the chip as-is. */

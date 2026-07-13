@@ -31,10 +31,10 @@ const noop = () => undefined;
 
 /* Card treatment per lifecycle state; `glow` also feeds the orbiting border. */
 const PANE_TONES: Record<PaneState, { section: string; header: string; glow?: string }> = {
-  live: { section: "border-success/60 shadow-[0_0_0_3px_rgba(47,158,68,0.16)]", header: "bg-success-soft" },
-  waiting: { section: "border-warning/60 shadow-[0_0_0_3px_rgba(224,174,69,0.2)]", header: "bg-warning-soft", glow: "var(--color-warning)" },
-  returned: { section: "border-accent/50 shadow-[0_0_0_3px_rgba(90,81,224,0.15)]", header: "bg-accent-soft", glow: "var(--color-accent)" },
-  stalled: { section: "border-danger/50 shadow-[0_0_0_3px_rgba(198,40,40,0.13)]", header: "bg-danger-soft", glow: "var(--color-danger)" },
+  live: { section: "border-success/60 shadow-[0_0_0_3px_color-mix(in_srgb,var(--color-success)_20%,transparent)]", header: "bg-success-soft" },
+  waiting: { section: "border-warning/60 shadow-[0_0_0_3px_color-mix(in_srgb,var(--color-warning)_26%,transparent)]", header: "bg-warning-soft", glow: "var(--color-warning)" },
+  returned: { section: "border-accent/50 shadow-[0_0_0_3px_color-mix(in_srgb,var(--color-accent)_20%,transparent)]", header: "bg-accent-soft", glow: "var(--color-accent)" },
+  stalled: { section: "border-danger/50 shadow-[0_0_0_3px_color-mix(in_srgb,var(--color-danger)_18%,transparent)]", header: "bg-danger-soft", glow: "var(--color-danger)" },
   done: { section: "border-border", header: "bg-sunken text-muted opacity-80 saturate-50" },
 };
 

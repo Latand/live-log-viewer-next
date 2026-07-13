@@ -292,7 +292,7 @@ function CleanupPanel({
   const bulkCount = bulkTargets(bulkHours).length;
 
   return (
-    <div className="fixed bottom-3 left-1/2 z-50 flex w-[min(430px,calc(100vw-16px))] -translate-x-1/2 flex-col rounded-[12px] border border-border bg-card shadow-[0_8px_28px_rgba(20,20,30,0.14)] sm:absolute sm:bottom-1 sm:left-full sm:ml-2 sm:translate-x-0">
+    <div className="fixed bottom-3 left-1/2 z-50 flex w-[min(430px,calc(100vw-16px))] -translate-x-1/2 flex-col rounded-[12px] border border-border bg-card shadow-2 sm:absolute sm:bottom-1 sm:left-full sm:ml-2 sm:translate-x-0">
       <header className="flex items-center gap-2 border-b border-border px-3 py-2">
         <span className="text-[12.5px] font-bold">{t("resources.title")}</span>
         {sessions.length ? (

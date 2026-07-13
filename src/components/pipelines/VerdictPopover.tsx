@@ -3,6 +3,7 @@
 import { RefreshCw } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
+import { Badge } from "@/components/ui/Badge";
 import { useLocale } from "@/lib/i18n";
 import type { Pipeline, PipelineStage, PipelineStageAttempt } from "@/lib/pipelines/types";
 
@@ -82,7 +83,7 @@ export function VerdictPopover({
       tabIndex={-1}
       role="dialog"
       aria-label={t("pipelineVerdict.title", { label })}
-      className="flex max-h-[80vh] w-[260px] flex-col gap-2 overflow-y-auto rounded-[12px] border border-border bg-card p-2.5 shadow-[0_10px_36px_rgb(20_20_30/0.18)] focus-visible:outline-none"
+      className="flex max-h-[80vh] w-[260px] flex-col gap-2 overflow-y-auto rounded-[12px] border border-border bg-card p-2.5 shadow-2 focus-visible:outline-none"
       onKeyDown={(event) => {
         if (event.key === "Escape") {
           event.stopPropagation();
@@ -92,9 +93,9 @@ export function VerdictPopover({
     >
       <div className="flex items-center gap-2">
         {verdict && tone ? (
-          <span className="rounded-full px-2 py-0.5 text-[10.5px] font-bold" style={{ backgroundColor: tone.soft, color: tone.color }}>
+          <Badge style={{ backgroundColor: tone.soft, color: tone.color }}>
             {verdictStatusLabel(t, verdict.status)}
-          </span>
+          </Badge>
         ) : (
           /* No verdict: surface the attempt's own error (a spawn/tick failure)
              first, then the pipeline-level detail, so a verdict-less chip still

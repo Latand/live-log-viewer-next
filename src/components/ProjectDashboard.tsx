@@ -214,7 +214,7 @@ function HeaderMenu({
       {open ? (
         <div
           role="menu"
-          className="absolute right-0 top-[calc(100%+6px)] z-50 flex w-[210px] max-w-[calc(100vw-1.5rem)] flex-col gap-0.5 rounded-[12px] border border-border bg-card p-1.5 shadow-[0_10px_36px_rgb(20_20_30/0.18)]"
+          className="absolute right-0 top-[calc(100%+6px)] z-50 flex w-[210px] max-w-[calc(100vw-1.5rem)] flex-col gap-0.5 rounded-[12px] border border-border bg-card p-1.5 shadow-2"
         >
           {children(() => setOpen(false))}
         </div>

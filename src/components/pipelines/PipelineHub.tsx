@@ -108,7 +108,7 @@ export function PipelineHub({
           role="dialog"
           tabIndex={-1}
           aria-label={t("pipelineHub.controls")}
-          className="absolute bottom-[24px] left-0 z-30 flex w-[224px] -translate-x-1/2 flex-col gap-1.5 rounded-[12px] border border-border bg-card p-2.5 shadow-[0_10px_36px_rgb(20_20_30/0.18)] focus-visible:outline-none"
+          className="absolute bottom-[24px] left-0 z-30 flex w-[224px] -translate-x-1/2 flex-col gap-1.5 rounded-[12px] border border-border bg-card p-2.5 shadow-2 focus-visible:outline-none"
         >
           <span className="flex min-w-0 items-center gap-1.5">
             <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: tone }} aria-hidden />

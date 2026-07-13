@@ -7,7 +7,7 @@ export function SupervisorHealthAlert({ health }: { health: TmuxEndpointHealth }
   return (
     <div
       role="alert"
-      className="fixed left-1/2 top-3 z-50 flex max-w-[min(92vw,760px)] -translate-x-1/2 items-start gap-2 rounded-xl border border-warning/60 bg-warning-soft px-3 py-2 text-xs font-semibold text-warning shadow-card"
+      className="fixed left-1/2 top-3 z-50 flex max-w-[min(92vw,760px)] -translate-x-1/2 items-start gap-2 rounded-xl border border-warning/60 bg-warning-soft px-3 py-2 text-xs font-semibold text-warning shadow-1"
       data-system-health="tmux-degraded"
     >
       <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />

@@ -15,23 +15,23 @@ const vp = { w: 800, h: 600 };
 
 test("collapsed worker stacks render one minimap dot per origin (#136 finding 2)", () => {
   const stackDots: StackDot[] = [
-    { key: "wstack::flow::f1", color: "#5a51e0" },
-    { key: "wstack::pipeline::p1", color: "#5a51e0" },
-    { key: "wstack::origin::/root", color: "#9a9aa4" },
+    { key: "wstack::flow::f1", color: "var(--color-accent)" },
+    { key: "wstack::pipeline::p1", color: "var(--color-accent)" },
+    { key: "wstack::origin::/root", color: "var(--color-muted)" },
   ];
   const html = renderToStaticMarkup(
     <Minimap layout={emptyLayout} world={world} stackDots={stackDots} cam={cam} vp={vp} onJump={() => {}} />,
   );
   /* One dot per stack, tinted by origin kind (orchestration accent / spawner gray). */
-  const dots = html.match(/background-color:\s*#5a51e0/g) ?? [];
+  const dots = html.match(/background-color:\s*var\(--color-accent\)/g) ?? [];
   expect(dots.length).toBe(2);
-  expect(html).toContain("#9a9aa4");
+  expect(html).toContain("var(--color-muted)");
   /* The legend is titled with the stack count. */
   expect(html).toContain("3 collapsed stacks");
 });
 
 test("every collapsed stack gets a dot — none hidden behind a counter past 14 (finding 3)", () => {
-  const stackDots: StackDot[] = Array.from({ length: 20 }, (_, i) => ({ key: "s" + i, color: i % 2 ? "#5a51e0" : "#9a9aa4" }));
+  const stackDots: StackDot[] = Array.from({ length: 20 }, (_, i) => ({ key: "s" + i, color: i % 2 ? "var(--color-accent)" : "var(--color-muted)" }));
   const html = renderToStaticMarkup(
     <Minimap layout={emptyLayout} world={world} stackDots={stackDots} cam={cam} vp={vp} onJump={() => {}} />,
   );

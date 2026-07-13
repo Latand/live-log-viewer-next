@@ -53,7 +53,7 @@ export function DeploymentStatusPill() {
        room; `pointer-events-none` is a belt-and-braces guard, and the safe-area
        inset lifts it clear of the home bar. */
     <div
-      className={`pointer-events-none fixed bottom-[max(0.75rem,env(safe-area-inset-bottom))] left-1/2 z-40 max-w-[calc(100vw-1.5rem)] -translate-x-1/2 truncate rounded-full border bg-card/95 px-3 py-1 text-[11px] font-semibold shadow-1 backdrop-blur ${tone}`}
+      className={`pointer-events-none fixed bottom-[max(0.75rem,env(safe-area-inset-bottom))] left-1/2 z-40 max-w-[calc(100vw-1.5rem)] -translate-x-1/2 truncate rounded-full border bg-raised px-3 py-1 text-[11px] font-semibold shadow-2 backdrop-blur ${tone}`}
       role="status"
       title={deployment.error ?? `Revision ${deployment.revision.slice(0, 12)}`}
     >

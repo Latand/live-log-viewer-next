@@ -8,7 +8,7 @@ import { ChevronRight } from "@/components/icons";
    UPPERCASE +.6px tracking treatment was pure shout. Row height stays 44px on
    mobile / 32px desktop so #145/#146 touch acceptance holds. */
 
-export const SECTION_LABEL_CLASS = "text-[11px] font-semibold text-secondary";
+export const SECTION_LABEL_CLASS = "text-label font-semibold text-secondary";
 
 export function SectionHeader({
   open,
@@ -44,7 +44,7 @@ export function SectionHeader({
       {icon}
       <span className="truncate">{label}</span>
       {count != null ? (
-        <span className="text-[10px] font-normal tabular-nums text-muted">· {count}</span>
+        <span className="text-caption font-normal tabular-nums text-muted">· {count}</span>
       ) : null}
     </button>
   );

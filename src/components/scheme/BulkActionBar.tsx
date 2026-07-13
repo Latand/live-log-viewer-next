@@ -240,7 +240,7 @@ export const BulkActionBar = memo(function BulkActionBar({
   return (
     <div
       data-scheme-ui
-      className="absolute bottom-3 left-1/2 z-40 flex w-[640px] max-w-[94%] -translate-x-1/2 flex-col gap-1.5 rounded-[12px] border border-border bg-card/95 p-2.5 shadow-[0_10px_36px_rgb(20_20_30/0.18)]"
+      className="absolute bottom-3 left-1/2 z-40 flex w-[640px] max-w-[94%] -translate-x-1/2 flex-col gap-1.5 rounded-[12px] border border-border bg-card/95 p-2.5 shadow-2"
     >
       {flowOpen ? (
         <BulkFlowPopover
@@ -432,7 +432,7 @@ function BulkFlowPopover({
 
   return (
     <div
-      className="absolute bottom-[calc(100%+8px)] left-1/2 flex w-[420px] max-w-[94%] -translate-x-1/2 flex-col gap-2 rounded-[12px] border border-border bg-card p-2.5 shadow-[0_10px_36px_rgb(20_20_30/0.18)]"
+      className="absolute bottom-[calc(100%+8px)] left-1/2 flex w-[420px] max-w-[94%] -translate-x-1/2 flex-col gap-2 rounded-[12px] border border-border bg-card p-2.5 shadow-2"
       onKeyDown={(event) => {
         if (event.key === "Escape") onClose();
       }}

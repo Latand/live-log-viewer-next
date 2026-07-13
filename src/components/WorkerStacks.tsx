@@ -129,7 +129,7 @@ export function WorkerStacks({
   };
 
   return (
-    <div className="shrink-0 border-t border-border bg-card" data-testid="worker-stacks">
+    <div className="shrink-0 border-t border-border bg-canvas" data-testid="worker-stacks">
       <SectionHeader
         open={open}
         onToggle={() => setOpen((value) => !value)}

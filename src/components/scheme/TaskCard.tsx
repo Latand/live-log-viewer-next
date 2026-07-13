@@ -84,7 +84,7 @@ function AssignmentChip({
   return (
     <span
       className={`flex h-6 w-full min-w-0 items-center gap-1.5 rounded-[6px] px-1.5 ${
-        failed ? "bg-danger-soft text-danger" : dead ? "bg-sunken text-muted opacity-70" : "bg-white/55"
+        failed ? "bg-danger-soft text-danger" : dead ? "bg-sunken text-muted opacity-70" : "bg-sunken"
       }`}
       title={wrapTitle}
     >

@@ -263,7 +263,7 @@ export function PipelineStrip({
       data-scheme-ui
       role="group"
       aria-label={t("pipelineStrip.groupAria", { task: pipeline.task })}
-      className={`pointer-events-auto flex min-h-11 w-full flex-wrap items-center gap-3 rounded-[14px] border bg-card/95 py-1 shadow-[0_2px_10px_rgb(20_20_30/0.08)] ${compact ? "px-2.5" : "px-4"} ${attention ? "border-warning/70" : "border-border"}`}
+      className={`pointer-events-auto flex min-h-11 w-full flex-wrap items-center gap-3 rounded-[14px] border bg-card/95 py-1 shadow-1 ${compact ? "px-2.5" : "px-4"} ${attention ? "border-warning/70" : "border-border"}`}
     >
       <span className="flex min-w-0 max-w-[42%] shrink-0 items-center gap-2">
         {/* Tone matrix (§3), matching the hub + rail: busy → accent (pulse),
@@ -281,7 +281,7 @@ export function PipelineStrip({
           }`}
           aria-hidden
         />
-        {compact ? null : <span className="shrink-0 text-[10.5px] font-bold tracking-[0.08em] text-muted">{t("pipelineStrip.pipeline")}</span>}
+        {compact ? null : <span className="shrink-0 text-label font-semibold text-secondary">{t("pipelineStrip.pipeline")}</span>}
         <span className="min-w-0 truncate text-[12px] font-bold" title={pipeline.task}>{pipeline.task}</span>
         <span className="shrink-0 text-[11.5px] font-semibold text-muted">{pipelineStateLabel(t, pipeline.state)}</span>
         {detail ? <span className={`min-w-0 truncate text-[11.5px] font-semibold ${attention ? "text-warning" : "text-danger"}`} title={detail}>{detail}</span> : null}

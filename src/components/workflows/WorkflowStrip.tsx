@@ -62,14 +62,14 @@ export function WorkflowStrip({ wf }: { wf: Workflow }) {
   return (
     <div
       data-scheme-ui
-      className={`pointer-events-auto flex min-h-11 w-full items-center gap-3 rounded-[14px] border bg-card/95 px-4 py-1 shadow-[0_2px_10px_rgb(20_20_30/0.08)] ${
+      className={`pointer-events-auto flex min-h-11 w-full items-center gap-3 rounded-[14px] border bg-card/95 px-4 py-1 shadow-1 ${
         attention ? "border-warning/70" : "border-border"
       }`}
     >
       {/* State cluster: dot, the WF mark, the name, current state and detail. */}
       <span className="flex min-w-0 max-w-[46%] shrink-0 items-center gap-2">
         <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${stateDot(wf)}`} aria-hidden />
-        <span className="shrink-0 text-[10.5px] font-bold tracking-[0.08em] text-muted">{t("wfStrip.workflow")}</span>
+        <span className="shrink-0 text-label font-semibold text-secondary">{t("wfStrip.workflow")}</span>
         <span className="shrink-0 text-[12px] font-bold">{wf.name}</span>
         <span className="shrink-0 text-[11.5px] font-semibold text-muted">{workflowStateLabel(t, wf.state)}</span>
         {wf.stateDetail ? (

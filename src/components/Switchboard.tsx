@@ -134,7 +134,7 @@ export function Switchboard({ files, flows, project, loaded, onOpenFile }: Props
       {open ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-primary/28 p-[2.5vh]" onMouseDown={() => setOpen(false)}>
           <div
-            className="flex h-[95vh] w-[95vw] flex-col overflow-hidden rounded-[8px] border border-border bg-canvas shadow-[0_18px_70px_rgb(20_20_30/0.28)]"
+            className="flex h-[95vh] w-[95vw] flex-col overflow-hidden rounded-[8px] border border-border bg-canvas shadow-2"
             role="dialog"
             aria-modal="true"
             aria-label={t("switch.aria")}

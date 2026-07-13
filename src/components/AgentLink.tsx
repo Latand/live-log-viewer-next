@@ -282,7 +282,7 @@ function DropFlash({ drop }: { drop: DropState }) {
   const top = Math.max(8, Math.min(drop.to.y + 12, window.innerHeight - 44));
   return (
     <div
-      className="fixed flex max-w-[280px] items-center gap-1.5 rounded-full px-3 py-1.5 text-[11.5px] font-semibold text-white shadow-card"
+      className="fixed flex max-w-[280px] items-center gap-1.5 rounded-full px-3 py-1.5 text-[11.5px] font-semibold text-white shadow-1"
       style={{ left, top, backgroundColor: LINK_COLOR }}
     >
       <Link2 className="h-3.5 w-3.5 shrink-0" aria-hidden />

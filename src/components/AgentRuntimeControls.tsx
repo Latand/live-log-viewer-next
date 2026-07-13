@@ -146,7 +146,7 @@ export function AgentRuntimeControls({ file }: { file: FileEntry }) {
             role="presentation"
             onClick={(event) => { if (event.target === event.currentTarget) setSheetOpen(false); }}
           >
-            <div role="dialog" aria-label={t("runtimeConfig.openSheet")} className="max-h-[80vh] w-full max-w-[440px] overflow-y-auto rounded-t-[16px] bg-card p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] shadow-[0_-8px_36px_rgb(20_20_30/0.24)]">
+            <div role="dialog" aria-label={t("runtimeConfig.openSheet")} className="max-h-[80vh] w-full max-w-[440px] overflow-y-auto rounded-t-[16px] bg-card p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] shadow-2">
               <div className="mb-2 flex items-center gap-2">
                 <div className="mx-auto h-1 w-10 rounded-full bg-border" aria-hidden />
                 <button

@@ -109,6 +109,12 @@
   --color-diff-del-strong: #ffd1cf;
 }
 
+/* Default light scheme so `light-dark()` (model-tint foregrounds, utils.ts)
+   resolves to its light value; the dark selectors below flip it to `dark`. */
+:root {
+  color-scheme: light;
+}
+
 /* ── Dark palette (design doc §1.5) ─────────────────────────────────────────
    Overrides the same custom properties the light theme set. Applied when the OS
    asks for dark AND the app hasn't been pinned light, or when `data-theme=dark`

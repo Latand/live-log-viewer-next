@@ -63,14 +63,14 @@ export function FlowStrip({ flow: polledFlow, onFocusRound }: { flow: Flow; onFo
   return (
     <div
       data-scheme-ui
-      className={`pointer-events-auto flex h-11 w-full items-center gap-3 rounded-[14px] border bg-card/95 px-4 shadow-[0_2px_10px_rgb(20_20_30/0.08)] ${
+      className={`pointer-events-auto flex h-11 w-full items-center gap-3 rounded-[14px] border bg-card/95 px-4 shadow-1 ${
         attention ? "border-warning/70" : "border-border"
       }`}
     >
       {/* State cluster: dot, the FLOW mark, current state and its detail. */}
       <span className="flex min-w-0 max-w-[38%] shrink-0 items-center gap-2">
         <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${stateDot(flow)}`} aria-hidden />
-        <span className="shrink-0 text-[10.5px] font-bold tracking-[0.08em] text-muted">{t("flowStrip.flow")}</span>
+        <span className="shrink-0 text-label font-semibold text-secondary">{t("flowStrip.flow")}</span>
         <span className="shrink-0 text-[12px] font-bold">{presentation.label}</span>
         {presentation.detail ? (
           <span className="min-w-0 truncate text-[11.5px] font-semibold text-muted" title={presentation.detail}>

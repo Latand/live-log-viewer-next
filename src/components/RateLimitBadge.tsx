@@ -11,7 +11,7 @@ export function RateLimitBadge({ rateLimit }: { rateLimit?: RateLimitState | nul
   if (!rateLimit) return null;
   const label = rateLimitText(t, locale, rateLimit);
   return (
-    <Badge tone="danger" dataAttr="data-rate-limited" title={label}>
+    <Badge tone="danger" data-rate-limited="" title={label}>
       {label}
     </Badge>
   );

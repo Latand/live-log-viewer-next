@@ -824,7 +824,7 @@ export function SchemeBoard({
         className="pointer-events-none absolute"
         style={{
           inset: -tile,
-          backgroundImage: "radial-gradient(rgba(28,28,34,0.09) 1px, transparent 1px)",
+          backgroundImage: "radial-gradient(color-mix(in srgb, var(--color-primary) 9%, transparent) 1px, transparent 1px)",
           backgroundSize: `${tile}px ${tile}px`,
           transform: `translate(${((cam.x % tile) + tile) % tile}px, ${((cam.y % tile) + tile) % tile}px)`,
           willChange: "transform",

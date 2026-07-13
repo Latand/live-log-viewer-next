@@ -25,7 +25,7 @@ export function ResidualStrip({
   const isMobile = useIsMobile();
   const [open, setOpen] = useState(false);
   return (
-    <div className="shrink-0 border-t border-border bg-card">
+    <div className="shrink-0 border-t border-border bg-canvas">
       <SectionHeader
         open={open}
         onToggle={() => setOpen((value) => !value)}

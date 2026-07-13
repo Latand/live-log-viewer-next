@@ -119,7 +119,7 @@ export function AccessQrButton() {
            a right-aligned panel would run past the left viewport edge. On sm+
            the panel opens rightward over the content area; below sm it is
            fixed and centered. */
-        <div className="fixed left-1/2 top-12 z-50 flex w-[260px] -translate-x-1/2 flex-col gap-2.5 rounded-[12px] border border-border bg-card p-3 shadow-[0_8px_28px_rgba(20,20,30,0.14)] sm:absolute sm:left-0 sm:right-auto sm:top-full sm:mt-1.5 sm:translate-x-0">
+        <div className="fixed left-1/2 top-12 z-50 flex w-[260px] -translate-x-1/2 flex-col gap-2.5 rounded-[12px] border border-border bg-card p-3 shadow-2 sm:absolute sm:left-0 sm:right-auto sm:top-full sm:mt-1.5 sm:translate-x-0">
           {state.status === "idle" ? (
             <span className="text-[12px] text-primary">{t("common.loading")}</span>
           ) : state.status === "error" ? (

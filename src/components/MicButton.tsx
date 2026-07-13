@@ -109,7 +109,7 @@ function BackendMenu({ onClose }: { onClose: () => void }) {
       ref={rootRef}
       role="menu"
       aria-label={t("mic.menuTitle")}
-      className="absolute bottom-[calc(100%+6px)] right-0 z-40 w-[300px] rounded-[12px] border border-border bg-card p-1.5 shadow-[0_10px_36px_rgb(20_20_30/0.18)]"
+      className="absolute bottom-[calc(100%+6px)] right-0 z-40 w-[300px] rounded-[12px] border border-border bg-card p-1.5 shadow-2"
     >
       {keyOption ? (
         <div className="flex flex-col gap-2 p-2">

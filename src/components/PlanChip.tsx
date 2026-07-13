@@ -1,5 +1,6 @@
 "use client";
 
+import { Badge, type BadgeTone } from "@/components/ui/Badge";
 import { getLocale, translate, useLocale } from "@/lib/i18n";
 import type { AgentGoal, AgentPlan, CtxUsage } from "@/lib/types";
 
@@ -38,10 +39,10 @@ export function PlanChip({ plan }: { plan: AgentPlan }) {
   );
 }
 
-const GOAL_TONES: Record<AgentGoal["status"], { labelKey: "plan.goal" | "plan.goalDone" | "plan.goalBlocked"; className: string }> = {
-  active: { labelKey: "plan.goal", className: "bg-accent-soft text-accent" },
-  complete: { labelKey: "plan.goalDone", className: "bg-success-soft text-success" },
-  blocked: { labelKey: "plan.goalBlocked", className: "bg-danger-soft text-danger" },
+const GOAL_TONES: Record<AgentGoal["status"], { labelKey: "plan.goal" | "plan.goalDone" | "plan.goalBlocked"; tone: BadgeTone }> = {
+  active: { labelKey: "plan.goal", tone: "accent" },
+  complete: { labelKey: "plan.goalDone", tone: "success" },
+  blocked: { labelKey: "plan.goalBlocked", tone: "danger" },
 };
 
 function goalTooltip(goal: AgentGoal): string {
@@ -53,11 +54,11 @@ function goalTooltip(goal: AgentGoal): string {
 }
 
 /* Same escalation points as the sidebar limit bars: calm, then amber, then red. */
-function ctxTone(pct: number | null): string {
-  if (pct === null) return "bg-sunken text-muted";
-  if (pct >= 90) return "bg-danger-soft text-danger";
-  if (pct >= 70) return "bg-warning-soft text-warning";
-  return "bg-sunken text-muted";
+function ctxTone(pct: number | null): BadgeTone {
+  if (pct === null) return "neutral";
+  if (pct >= 90) return "danger";
+  if (pct >= 70) return "warning";
+  return "neutral";
 }
 
 /* Token counts shortened for the chip face: 176_000 → «176K», 1_000_000 → «1M»,
@@ -90,11 +91,7 @@ export function CtxChip({ ctx }: { ctx: CtxUsage }) {
     ariaLabel = t("plan.ctxAriaUnknown", { used });
   }
   return (
-    <span
-      className={`inline-flex shrink-0 items-center gap-0.5 rounded-full px-1.5 py-0.5 font-mono text-[9.5px] font-semibold ${ctxTone(ctx.pct)}`}
-      title={title}
-      aria-label={ariaLabel}
-    >
+    <Badge tone={ctxTone(ctx.pct)} title={title} aria-label={ariaLabel}>
       ctx {fmtTokens(ctx.usedTokens)}
       {ctx.windowTokens === null ? null : (
         <>
@@ -102,7 +99,7 @@ export function CtxChip({ ctx }: { ctx: CtxUsage }) {
           {fmtTokens(ctx.windowTokens)}
         </>
       )}
-    </span>
+    </Badge>
   );
 }
 
@@ -110,14 +107,14 @@ export function CtxChip({ ctx }: { ctx: CtxUsage }) {
     objective and usage numbers in the tooltip. */
 export function GoalChip({ goal }: { goal: AgentGoal }) {
   const { t } = useLocale();
-  const tone = GOAL_TONES[goal.status];
+  const goalTone = GOAL_TONES[goal.status];
   return (
-    <span
-      className={`inline-flex shrink-0 items-center rounded-full px-1.5 py-0.5 text-[9.5px] font-semibold ${tone.className}`}
+    <Badge
+      tone={goalTone.tone}
       title={goalTooltip(goal)}
-      aria-label={t("plan.goalAria", { status: t(tone.labelKey) }) + (goal.objective ? ` — ${goal.objective.slice(0, 120)}` : "")}
+      aria-label={t("plan.goalAria", { status: t(goalTone.labelKey) }) + (goal.objective ? ` — ${goal.objective.slice(0, 120)}` : "")}
     >
-      {t(tone.labelKey)}
-    </span>
+      {t(goalTone.labelKey)}
+    </Badge>
   );
 }

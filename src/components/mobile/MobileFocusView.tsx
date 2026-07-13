@@ -580,7 +580,7 @@ function PipelineFocusRow({ pipeline, index, renderableFlows, renderablePaths, o
             if (event.target === event.currentTarget) setSheetOpen(false);
           }}
         >
-          <div className="mb-0 w-full max-w-[420px] rounded-t-[16px] bg-card p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] shadow-[0_-8px_36px_rgb(20_20_30/0.24)]">
+          <div className="mb-0 w-full max-w-[420px] rounded-t-[16px] bg-card p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] shadow-2">
             <div className="mx-auto mb-2 h-1 w-10 rounded-full bg-border" aria-hidden />
             <VerdictPopover
               pipeline={pipeline}

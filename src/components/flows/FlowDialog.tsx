@@ -141,7 +141,7 @@ export function FlowDialog({ file, onClose }: { file: FileEntry; onClose: () => 
   return (
     <div
       data-scheme-ui
-      className="flex w-[420px] flex-col gap-2.5 rounded-[12px] border border-border bg-card p-3 shadow-[0_10px_36px_rgb(20_20_30/0.18)]"
+      className="flex w-[420px] flex-col gap-2.5 rounded-[12px] border border-border bg-card p-3 shadow-2"
       onKeyDown={(event) => {
         if (event.key === "Escape") onClose();
       }}
