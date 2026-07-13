@@ -24,14 +24,14 @@ export function MobileBottomShelf({ total, leading, children }: { total: number;
         {total > 0 ? (
           <button
             type="button"
-            className="flex min-h-11 flex-1 items-center gap-2 px-4 text-[10px] font-bold uppercase tracking-[.6px] text-muted hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            className="flex min-h-11 flex-1 items-center gap-2 px-4 text-label font-semibold text-secondary hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
             aria-expanded={open}
             onClick={() => setOpen((value) => !value)}
           >
             <ChevronRight className={`h-3.5 w-3.5 shrink-0 transition-transform ${open ? "rotate-90" : ""}`} aria-hidden />
             <Layers className="h-3 w-3 shrink-0" aria-hidden />
             {t("dash.hiddenShelf")}
-            <span className="font-semibold normal-case tracking-normal">{total}</span>
+            <span className="text-caption font-semibold tabular-nums text-muted">{total}</span>
           </button>
         ) : (
           <span className="min-h-11 flex-1" aria-hidden />

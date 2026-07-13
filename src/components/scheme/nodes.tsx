@@ -415,8 +415,8 @@ export const GroupsLayer = memo(function GroupsLayer({
     <div aria-hidden={false}>
       {groups.map((group) => {
         const draft = group.pipeline?.state === "draft";
-        const color = draft ? "#a06a15" : `hsl(${group.hue} 62% 42%)`;
-        const soft = draft ? "#fff7df" : `hsl(${group.hue} 62% 42% / 0.055)`;
+        const color = draft ? "var(--color-warning)" : `hsl(${group.hue} 62% 42%)`;
+        const soft = draft ? "var(--color-warning-soft)" : `hsl(${group.hue} 62% 42% / 0.055)`;
         const open = openGroup?.id === group.id;
         return (
           /* Positioned with left/top rather than a transform: a transform would
@@ -436,7 +436,7 @@ export const GroupsLayer = memo(function GroupsLayer({
               style={{
                 borderColor: color,
                 backgroundColor: soft,
-                ...(draft ? { backgroundImage: "repeating-linear-gradient(135deg, transparent 0 12px, rgb(160 106 21 / 0.07) 12px 14px)" } : {}),
+                ...(draft ? { backgroundImage: "repeating-linear-gradient(135deg, transparent 0 12px, color-mix(in srgb, var(--color-warning) 7%, transparent) 12px 14px)" } : {}),
               }}
             />
             {/* The pipeline's full planned stage graph on the halo itself, shown
