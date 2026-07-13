@@ -51,6 +51,7 @@ class FakeAppServer extends EventEmitter {
   readonly requests: Array<Record<string, unknown>> = [];
   readonly signals: NodeJS.Signals[] = [];
   autoResolveServerRequests = true;
+  autoCompleteUserMessage = true;
   readTurns: unknown[] | null = null;
   readError: string | null = null;
   private readonly serverRequestIds = new Set<string | number>();
@@ -145,9 +146,15 @@ class FakeAppServer extends EventEmitter {
       const turnId = `turn-${++this.turn}`;
       this.respond(message.id, { turn: { id: turnId } });
       this.notify("turn/started", { threadId: this.threadId, turn: { id: turnId } });
+      this.completeUserMessage(message, turnId);
       return;
     }
-    if (method === "turn/steer") return this.respond(message.id, { turnId: (message.params as { expectedTurnId: string }).expectedTurnId });
+    if (method === "turn/steer") {
+      const turnId = (message.params as { expectedTurnId: string }).expectedTurnId;
+      this.respond(message.id, { turnId });
+      this.completeUserMessage(message, turnId);
+      return;
+    }
     if (method === "turn/interrupt") return this.respond(message.id, {});
   }
 
@@ -157,6 +164,17 @@ class FakeAppServer extends EventEmitter {
 
   private respondError(id: number, message: string): void {
     this.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id, error: { message } })}\n`);
+  }
+
+  private completeUserMessage(message: Record<string, unknown>, turnId: string): void {
+    if (!this.autoCompleteUserMessage) return;
+    const params = message.params as { clientUserMessageId?: string; input?: unknown };
+    if (!params.clientUserMessageId) return;
+    this.notify("item/completed", {
+      threadId: this.threadId,
+      turnId,
+      item: { type: "userMessage", clientId: params.clientUserMessageId, content: params.input },
+    });
   }
 }
 
@@ -254,7 +272,7 @@ describe("CodexAppServerHost", () => {
     expect(registry.snapshot().entries["codex:thread-149"]?.structuredHost).toMatchObject({
       kind: "codex-app-server",
       endpoint: "stdio:4242",
-      eventCursor: 6,
+      eventCursor: 8,
       protocolVersion: "0.144.1",
       writerClaimEpoch: 7,
       activeTurnRef: "turn-1",
@@ -282,8 +300,9 @@ describe("CodexAppServerHost", () => {
     expect(replacementServer.requests.some((request) => request.method === "thread/resume")).toBeTrue();
     const replay = replacement.attach(1)[Symbol.asyncIterator]();
     expect((await replay.next()).value).toEqual({ kind: "turn-started", turnId: "turn-1", seq: 2 });
-    expect((await replay.next()).value).toEqual({ kind: "session-status", status: "unhosted", seq: 3 });
-    expect((await replay.next()).value).toEqual({ kind: "session-status", status: "idle", seq: 4 });
+    expect((await replay.next()).value).toMatchObject({ kind: "item", phase: "completed", seq: 3 });
+    expect((await replay.next()).value).toEqual({ kind: "session-status", status: "unhosted", seq: 4 });
+    expect((await replay.next()).value).toEqual({ kind: "session-status", status: "idle", seq: 5 });
     await replacement.send({ id: "after-restart", text: "recall" });
     expect(replacementServer.requests.find((request) => request.method === "turn/start")?.params).toMatchObject({ effort: "xhigh" });
     await replacement.release();
@@ -371,6 +390,37 @@ describe("CodexAppServerHost", () => {
       turnId: "persisted-turn",
     });
     expect(server.requests.some((request) => request.method === "turn/start" || request.method === "turn/steer")).toBeFalse();
+    await host.release();
+  });
+
+  test("keeps a send pending until the matching user item is persisted", async () => {
+    const server = new FakeAppServer("confirm-after-rpc");
+    server.autoCompleteUserMessage = false;
+    const host = await CodexAppServerHost.start({
+      cwd: "/repo",
+      eventStore: new MemoryEventStore(),
+      spawnProcess: fakeSpawn(server),
+    });
+
+    let settled = false;
+    const delivery = host.send({ id: "operation-confirmed", text: "hello" })
+      .finally(() => { settled = true; });
+    await Bun.sleep(0);
+
+    expect(server.requests.some((request) => request.method === "turn/start")).toBeTrue();
+    expect(settled).toBeFalse();
+
+    server.notify("item/completed", {
+      threadId: "confirm-after-rpc",
+      turnId: "turn-1",
+      item: {
+        type: "userMessage",
+        clientId: "operation-confirmed",
+        content: [{ type: "text", text: "hello" }],
+      },
+    });
+
+    expect(await delivery).toEqual({ outcome: "turn-started", turnId: "turn-1" });
     await host.release();
   });
 
@@ -936,7 +986,7 @@ describe("CodexAppServerHost", () => {
     const receipt = await adopted[0]!.host.send({ id: "persist-turn", text: "start" });
     expect(receipt.outcome).toBe("turn-started");
     expect(registry.snapshot().entries["codex:adopted-thread"]?.structuredHost).toMatchObject({
-      eventCursor: 14,
+      eventCursor: 15,
       activeTurnRef: "turn-1",
     });
     server.request("persist-attention", "item/commandExecution/requestApproval", { command: "date" });
@@ -950,7 +1000,7 @@ describe("CodexAppServerHost", () => {
     expect(registry.snapshot().entries["codex:adopted-thread"]).toMatchObject({
       status: "unhosted",
       claimOwner: null,
-      structuredHost: { eventCursor: 17, process: null, activeTurnRef: null, pendingAttention: [] },
+      structuredHost: { eventCursor: 18, process: null, activeTurnRef: null, pendingAttention: [] },
     });
     let restarted = false;
     const releasedRows = await adoptCodexRegistryHosts(

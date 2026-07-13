@@ -72,6 +72,46 @@ test("a delivering entry resumes after restart through the host ledger without a
   reopenedJournal.close();
 });
 
+test("ledger recovery drains every entry beyond one effect batch", async () => {
+  const filename = path.join(sandbox, "batch-continuation.sqlite");
+  const journal = new RuntimeJournal(filename, { structuredHosts: true });
+  journal.append({
+    scope: { type: "session", id: "conversation-batch" },
+    kind: "session-status",
+    payload: {
+      conversationId: "conversation-batch",
+      sessionKey: { engine: "codex", sessionId: "session-batch" },
+      hostKind: "codex-app-server",
+      host: "hosted",
+      turn: "idle",
+      provenance: "structured",
+      artifactPath: "/sessions/batch.jsonl",
+      capabilities: { steer: true, structuredAttention: true },
+    },
+  });
+  for (let index = 0; index < 101; index += 1) {
+    journal.executeOperation({
+      kind: "send",
+      operationId: `operation-${index}`,
+      idempotencyKey: `message-${index}`,
+      conversationId: "conversation-batch",
+      text: `message ${index}`,
+      policy: "queue",
+    });
+  }
+  const ledger = createFakeDeliveryLedger();
+  const queue = new StructuredDeliveryQueue(journalPort(journal), () => new FakeEngineHost(ledger));
+
+  await queue.drain();
+
+  expect(ledger.writes).toHaveLength(101);
+  expect(ledger.writes.map((entry) => entry.id)).toEqual(
+    Array.from({ length: 101 }, (_, index) => `operation-${index}`),
+  );
+  expect(journal.effectBatch()).toEqual([]);
+  journal.close();
+});
+
 test("an explicit steer keeps its admission turn fence through unavailable-host recovery", async () => {
   const filename = path.join(sandbox, "explicit-steer-fence.sqlite");
   const journal = new RuntimeJournal(filename, { structuredHosts: true });

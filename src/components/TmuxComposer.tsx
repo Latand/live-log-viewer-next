@@ -55,6 +55,18 @@ export function deliveryAttemptKey(current: string, stored?: string): string {
   return stored || current;
 }
 
+export function mergeRuntimeReceipts(
+  runtimeReceipts: RuntimeReceipt[],
+  immediateReceipts: RuntimeReceipt[],
+): RuntimeReceipt[] {
+  const merged = new Map<string, RuntimeReceipt>();
+  for (const receipt of [...runtimeReceipts, ...immediateReceipts]) {
+    const current = merged.get(receipt.operationId);
+    if (!current || receipt.revision > current.revision) merged.set(receipt.operationId, receipt);
+  }
+  return [...merged.values()];
+}
+
 export function RuntimeComposerReceipts({
   receipts,
   actionsDisabled = false,
@@ -206,11 +218,7 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
   /* Durable receipts for this session from the runtime bus (empty while the bus
      is disabled or the session is legacy/unhosted). */
   const runtimeReceipts = useRuntimeReceiptsForArtifact(file.path, cardId);
-  const displayedRuntimeReceipts = [
-    ...runtimeReceipts,
-    ...immediateRuntimeReceipts.filter((receipt) =>
-      !runtimeReceipts.some((current) => current.operationId === receipt.operationId)),
-  ];
+  const displayedRuntimeReceipts = mergeRuntimeReceipts(runtimeReceipts, immediateRuntimeReceipts);
 
   useEffect(() => {
     if (!compactArmed) return;

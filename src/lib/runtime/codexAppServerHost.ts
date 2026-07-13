@@ -33,6 +33,14 @@ type PendingAnswer = {
   reject(error: Error): void;
   timer: ReturnType<typeof setTimeout>;
 };
+type PendingDelivery = {
+  text: string;
+  receipt: DeliveryReceipt;
+  promise: Promise<DeliveryReceipt>;
+  resolve(receipt: DeliveryReceipt): void;
+  reject(error: Error): void;
+  timer: ReturnType<typeof setTimeout>;
+};
 type PendingAttention = {
   rpcId: string | number;
   method: string;
@@ -220,6 +228,7 @@ export class CodexAppServerHost implements EngineHost {
   private readonly subscribers = new Set<Subscriber>();
   private readonly events: RuntimeEvent[] = [];
   private readonly confirmedDeliveries = new Map<string, { receipt: DeliveryReceipt; text: string | null }>();
+  private readonly pendingDeliveries = new Map<string, PendingDelivery>();
   private readonly attentions = new Map<string, PendingAttention>();
   private readonly stateListeners = new Set<(state: HostState) => void>();
   private readonly preIdentityEvents: UnsequencedEvent[] = [];
@@ -388,7 +397,10 @@ export class CodexAppServerHost implements EngineHost {
           input,
           clientUserMessageId: entry.id,
         });
-        return { outcome: "steered", turnId: turnIdFromResult(result, "turn/steer") };
+        return this.awaitDeliveryConfirmation(entry, {
+          outcome: "steered",
+          turnId: turnIdFromResult(result, "turn/steer"),
+        });
       } catch (error) {
         if (/expectedTurnId|active turn|stale/i.test(safeError(error))) {
           return { outcome: "rejected", reason: "stale-turn" };
@@ -405,7 +417,7 @@ export class CodexAppServerHost implements EngineHost {
     const turnId = turnIdFromResult(result, "turn/start");
     this.activeTurnId = turnId;
     this.notifyStateListeners();
-    return { outcome: "turn-started", turnId };
+    return this.awaitDeliveryConfirmation(entry, { outcome: "turn-started", turnId });
   }
 
   async interrupt(turnRef: string): Promise<void> {
@@ -485,6 +497,7 @@ export class CodexAppServerHost implements EngineHost {
   private async releaseAndReap(): Promise<void> {
     this.releasing = true;
     this.rejectPendingAnswers(new Error("Codex app-server host released"));
+    this.rejectPendingDeliveries(new Error("Codex app-server host released"));
     for (const request of this.pending.values()) {
       clearTimeout(request.timer);
       request.reject(new Error("Codex app-server host released"));
@@ -669,6 +682,33 @@ export class CodexAppServerHost implements EngineHost {
     return recovered ? this.confirmedReceipt(entry, recovered) : null;
   }
 
+  private awaitDeliveryConfirmation(entry: QueueEntry, receipt: DeliveryReceipt): Promise<DeliveryReceipt> {
+    const confirmed = this.confirmedDeliveries.get(entry.id);
+    if (confirmed) {
+      this.confirmedReceipt(entry, confirmed);
+      confirmed.receipt = receipt;
+      return Promise.resolve(receipt);
+    }
+    const existing = this.pendingDeliveries.get(entry.id);
+    if (existing) {
+      if (existing.text !== entry.text) return Promise.reject(new Error("Codex queue entry id belongs to a different payload"));
+      return existing.promise;
+    }
+    let resolveDelivery!: (confirmed: DeliveryReceipt) => void;
+    let rejectDelivery!: (error: Error) => void;
+    const promise = new Promise<DeliveryReceipt>((resolve, reject) => {
+      resolveDelivery = resolve;
+      rejectDelivery = reject;
+    });
+    const timer = setTimeout(() => {
+      if (this.pendingDeliveries.get(entry.id)?.promise !== promise) return;
+      this.fail(new Error("Codex delivery confirmation timed out; outcome is uncertain"));
+    }, this.requestTimeoutMs);
+    const pending = { text: entry.text, receipt, promise, resolve: resolveDelivery, reject: rejectDelivery, timer };
+    this.pendingDeliveries.set(entry.id, pending);
+    return promise;
+  }
+
   private confirmedReceipt(
     entry: QueueEntry,
     confirmed: { receipt: DeliveryReceipt; text: string | null },
@@ -686,10 +726,20 @@ export class CodexAppServerHost implements EngineHost {
     if (!clientId) return;
     const text = userMessageText(item);
     const previous = this.confirmedDeliveries.get(clientId);
-    this.confirmedDeliveries.set(clientId, {
-      receipt: previous?.receipt ?? { outcome: "turn-started", turnId },
+    const pending = this.pendingDeliveries.get(clientId);
+    const confirmed = {
+      receipt: previous?.receipt ?? pending?.receipt ?? { outcome: "turn-started" as const, turnId },
       text: previous && previous.text !== text ? null : text,
-    });
+    };
+    this.confirmedDeliveries.set(clientId, confirmed);
+    if (!pending) return;
+    this.pendingDeliveries.delete(clientId);
+    clearTimeout(pending.timer);
+    try {
+      pending.resolve(this.confirmedReceipt({ id: clientId, text: pending.text }, confirmed));
+    } catch (error) {
+      pending.reject(error instanceof Error ? error : new Error(safeError(error)));
+    }
   }
 
   private flushPreIdentityEvents(): void {
@@ -853,6 +903,7 @@ export class CodexAppServerHost implements EngineHost {
     this.failure = error;
     this.activeTurnId = null;
     this.rejectPendingAnswers(error);
+    this.rejectPendingDeliveries(error);
     this.attentions.clear();
     for (const request of this.pending.values()) {
       clearTimeout(request.timer);
@@ -872,6 +923,7 @@ export class CodexAppServerHost implements EngineHost {
     this.activeFlags = [];
     this.activeTurnId = null;
     this.rejectPendingAnswers(error);
+    this.rejectPendingDeliveries(error);
     this.attentions.clear();
     for (const request of this.pending.values()) {
       clearTimeout(request.timer);
@@ -891,5 +943,14 @@ export class CodexAppServerHost implements EngineHost {
       attention.answer.reject(rejection);
       attention.answer = undefined;
     }
+  }
+
+  private rejectPendingDeliveries(error: Error): void {
+    const rejection = new Error(safeError(error));
+    for (const delivery of this.pendingDeliveries.values()) {
+      clearTimeout(delivery.timer);
+      delivery.reject(rejection);
+    }
+    this.pendingDeliveries.clear();
   }
 }

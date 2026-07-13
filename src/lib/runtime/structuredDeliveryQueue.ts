@@ -21,6 +21,8 @@ export interface StructuredDeliveryQueuePort {
 
 export type StructuredHostResolver = (conversationId: string) => EngineHost | null;
 
+const STRUCTURED_DELIVERY_BATCH_SIZE = 100;
+
 export function runtimeClientDeliveryPort(client: RuntimeHostClient): StructuredDeliveryQueuePort {
   return {
     effects: (kinds) => client.effectBatch(kinds),
@@ -93,13 +95,15 @@ export class StructuredDeliveryQueue {
   private async drainUntilSettled(): Promise<void> {
     do {
       this.rerun = false;
-      await this.drainBatch();
+      const batch = await this.drainBatch();
+      if (batch.full && batch.progressed) this.rerun = true;
     } while (this.rerun);
   }
 
-  private async drainBatch(): Promise<void> {
+  private async drainBatch(): Promise<{ full: boolean; progressed: boolean }> {
     const grouped = new Map<string, SendEffect[]>();
-    const effects = (await this.port.effects(["runtime.send", "runtime.steer"]))
+    const rawEffects = await this.port.effects(["runtime.send", "runtime.steer"]);
+    const effects = rawEffects
       .map(sendEffect)
       .filter((effect): effect is SendEffect => effect !== null)
       .sort((left, right) => left.eventSeq - right.eventSeq);
@@ -108,25 +112,31 @@ export class StructuredDeliveryQueue {
       target.push(effect);
       grouped.set(effect.conversationId, target);
     }
-    await Promise.all([...grouped.values()].map((target) => this.drainTarget(target)));
+    const results = await Promise.all([...grouped.values()].map((target) => this.drainTarget(target)));
+    return {
+      full: rawEffects.length >= STRUCTURED_DELIVERY_BATCH_SIZE,
+      progressed: results.some(Boolean),
+    };
   }
 
-  private async drainTarget(effects: SendEffect[]): Promise<void> {
+  private async drainTarget(effects: SendEffect[]): Promise<boolean> {
+    let progressed = false;
     for (const effect of effects) {
       if (effect.hasImages) {
         await this.port.transition(effect.operationId, "failed", { reason: "structured host image delivery is unavailable" });
+        progressed = true;
         continue;
       }
       const host = this.resolveHost(effect.conversationId);
-      if (!host) return;
+      if (!host) return progressed;
       const health = await host.health();
       if (health.status === "dead" || health.status === "unhosted") {
         await this.port.transition(effect.operationId, "queued", { reason: "dead-host" });
-        return;
+        return progressed;
       }
       const maySteer = health.status === "active"
         && (effect.kind === "steer" || effect.policy === "steer-if-active");
-      if (health.status !== "idle" && !maySteer) return;
+      if (health.status !== "idle" && !maySteer) return progressed;
       const mustFenceTurn = effect.kind === "steer" || effect.turnId !== undefined || maySteer;
       const entry: QueueEntry = {
         id: effect.operationId,
@@ -146,20 +156,24 @@ export class StructuredDeliveryQueue {
         const afterFailure = await host.health().catch(() => null);
         if (!afterFailure || afterFailure.status === "dead" || afterFailure.status === "unhosted") {
           await this.port.transition(effect.operationId, "queued", { reason });
-          return;
+          return progressed;
         }
         await this.port.transition(effect.operationId, "failed", { reason });
+        progressed = true;
         continue;
       }
       if (receipt.outcome === "rejected") {
         if (receipt.reason === "stale-turn") {
           await this.port.transition(effect.operationId, "failed", { reason: receipt.reason });
+          progressed = true;
           continue;
         }
         await this.port.transition(effect.operationId, "queued", { reason: receipt.reason });
-        return;
+        return progressed;
       }
       await this.port.transition(effect.operationId, "delivered", { turnId: receipt.turnId });
+      progressed = true;
     }
+    return progressed;
   }
 }

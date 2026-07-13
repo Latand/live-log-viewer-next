@@ -2,11 +2,28 @@ import { expect, test } from "bun:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import { deliveryAttemptKey, RuntimeComposerReceipts } from "./TmuxComposer";
+import { deliveryAttemptKey, mergeRuntimeReceipts, RuntimeComposerReceipts } from "./TmuxComposer";
 
 test("a failed durable receipt retries with its original delivery key", () => {
   expect(deliveryAttemptKey("fresh-key", "held-key")).toBe("held-key");
   expect(deliveryAttemptKey("fresh-key")).toBe("fresh-key");
+});
+
+test("an immediate retry receipt supersedes an older failed bus receipt", () => {
+  const failed = {
+    operationId: "op-retry",
+    idempotencyKey: "key-retry",
+    conversationId: "conv-one",
+    kind: "send" as const,
+    status: "failed" as const,
+    reason: "engine write failed",
+    text: "try this again",
+    at: "2026-07-13T00:00:00.000Z",
+    revision: 3,
+  };
+  const queued = { ...failed, status: "queued" as const, reason: null, revision: 4 };
+
+  expect(mergeRuntimeReceipts([failed], [queued])).toEqual([queued]);
 });
 
 test("the production runtime receipt list exposes recovery actions for failures", () => {
