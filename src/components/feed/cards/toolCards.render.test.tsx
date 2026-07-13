@@ -8,6 +8,7 @@ import type { CmdGroupItem, ToolEvent } from "../parse";
 import { CmdGroupCard } from "./CmdGroupCard";
 import { DiffCard } from "./DiffCard";
 import { OutputPreview } from "./OutputPreview";
+import { SysMsgCard } from "./SysMsgCard";
 import { ToolCard } from "./ToolCard";
 
 const en = (key: Parameters<typeof translate>[1], params?: Parameters<typeof translate>[2]) => translate("en", key, params);
@@ -198,6 +199,14 @@ test("a cmd-group carrying an error opens and mounts the failing child's full bo
   // raw-record control a standalone line does.
   expect(html).toContain("boom");
   expect(html).toContain(en("tools.rawRecord"));
+});
+
+test("a system message collapses to the compact per-1000 size, not chars/kB (§3.4)", () => {
+  const html = renderToStaticMarkup(<SysMsgCard label="system-reminder" text={"x".repeat(1402)} />);
+  expect(html).toContain("1.4k");
+  // The verbose "1402 chars" / "1.4 kB" forms are gone.
+  expect(html).not.toContain("1402 ");
+  expect(html).not.toContain(en("common.kb"));
 });
 
 test("an orchestration row renders nested children and the meaningful outer summary", () => {

@@ -79,7 +79,9 @@ function SendMenu({ label, actions, onClose }: { label: string; actions: SendMen
       aria-label={label}
       className="absolute bottom-[calc(100%+6px)] right-0 z-40 w-[220px] rounded-surface border border-border bg-raised p-1.5 shadow-2"
     >
-      <div className="px-2 pb-1 pt-1.5 text-label font-semibold text-secondary">
+      {/* Menu group-label typography (uppercase/tracking → sentence-case §3.6)
+          is Slice 3; kept as-is here to hold the slice boundary. */}
+      <div className="px-2 pb-1 pt-1.5 text-[10.5px] font-bold uppercase tracking-wide text-dim">
         {label}
       </div>
       {actions.map((action) => (
@@ -150,8 +152,11 @@ export function ComposerBar({
   const [sendMenuOpen, setSendMenuOpen] = useState(false);
   const hasSendMenu = sendMenuActions.length > 0;
   const sendDisabled = !canSend && !hasSendMenu;
-  /* Phone action buttons meet the 44px minimum; desktop keeps the compact p-2. */
-  const iconBtn = isMobile ? "h-11 w-11" : "p-2";
+  /* Composer action buttons (send, image) are a 32px visual control with a 44px
+     touch hit area via a pseudo-element (design doc §3.5, matching the anchored
+     mic), so the accent send never renders as a full 44×44 block on a phone;
+     desktop keeps the compact p-2. */
+  const iconBtn = isMobile ? "relative h-8 w-8 before:absolute before:-inset-1.5 before:content-['']" : "p-2";
 
   return (
     <>

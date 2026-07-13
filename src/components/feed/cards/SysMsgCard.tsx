@@ -4,13 +4,15 @@ import { tr } from "../parse";
 /** Harness/system turn folded into one quiet line — `› системне · 1.4k`
     (design doc §3.4). The label chip and full text appear only when expanded. */
 export function SysMsgCard({ label, text }: { label: string; text: string }) {
-  const kb = text.length >= 2048 ? `${(text.length / 1024).toFixed(1)} ${tr("common.kb")}` : tr("common.chars", { n: text.length });
+  /* Compact per-1000 size (design doc §3.4: `› системне · 1.4k`) — a 1,402-char
+     turn reads `1.4k`, not `1402 chars` / `1.4 kB`. Small turns keep a bare count. */
+  const size = text.length >= 1000 ? `${(text.length / 1000).toFixed(1)}k` : String(text.length);
   return (
     <details className="group ml-9">
       <summary className="flex cursor-pointer list-none items-center gap-1.5 rounded-control py-0.5 text-label text-muted hover:bg-sunken [@media(pointer:coarse)]:min-h-11 [&::-webkit-details-marker]:hidden">
         <ChevronRight className="h-3.5 w-3.5 shrink-0 transition-transform group-open:rotate-90" aria-hidden />
         <span className="truncate text-secondary">
-          {tr("render.system")} · {kb}
+          {tr("render.system")} · {size}
         </span>
       </summary>
       <div className="mb-1 mt-1">
