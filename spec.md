@@ -1,28 +1,24 @@
-# Issue #150: Durable Claude stream broker host
+# Issue #166: Isolate real-CLI integration-test sessions
 
-Productize the issue #25 Claude stream-json prototype as `ClaudeStreamBrokerHost`, an `EngineHost` adapter that owns one long-lived Claude process per hosted session and preserves queue, replay, and resume state durably.
+Run the Codex app-server and Claude broker integration suites with fresh temporary homes so their real session artifacts never enter the user's scanned roots.
 
 ## Acceptance criteria
 
-AC1: Every runtime implementation change lives under `src/lib/runtime/`. Structured Claude hosting activates only when `LLV_STRUCTURED_HOSTS=1`; the default remains disabled and existing tmux behavior stays unchanged.
+AC1: Every Codex integration run sets `CODEX_HOME` to a fresh temporary directory, uses only the minimal copied file credential, and removes the directory during teardown.
 
-AC2: Every outbound user queue entry is fsynced to the Claude delivery ledger before the first corresponding stdin write. A crash after the ledger append and before actuation leaves a safely retryable entry.
+AC2: Every Claude integration run sets both `HOME` and `CLAUDE_CONFIG_DIR` to a fresh temporary directory, uses only the minimal copied subscription credential, and removes the directory during teardown.
 
-AC3: A ledger entry becomes delivered only after its matching replayed user message appears on the Claude stream or in the durable Claude transcript during adoption.
+AC3: A missing binary, missing credential, unsafe credential source, or failed isolated-home authentication probe keeps the existing graceful-skip behavior.
 
-AC4: `ClaudeStreamBrokerHost` conforms to `EngineHost`: `attach(afterSeq)`, `send`, `interrupt`, `answer`, `health`, and `release`. Replay is monotonic and durable for late viewers, regular active-turn sends queue for the following turn, and interruption uses an explicit control request.
+AC4: Each real integration test asserts that its produced rollout or transcript exists beneath its temporary home.
 
-AC5: A fresh broker resumes the same Claude session through `--resume <session_id>`. Registry adoption persists the broker process identity, event cursor, CLI version, writer epoch, active turn, and pending attention state.
+AC5: Codex late attach, steering, and restart resume coverage remains unchanged; Claude late attach, restart resume, and permission-answer coverage remains unchanged.
 
-AC6: Claude children use the local `claude.ai` subscription login. Provider API-key and OAuth-token environment variables never cross into the child process or diagnostic output.
-
-AC7: The real CLI integration test skips cleanly when the Claude binary or subscription login is unavailable and verifies late attach plus restart resume when available.
-
-AC8: No tmux delivery, flow-engine, scanner, or UI source is changed.
+AC6: Running the focused integration suites creates zero new fixture files containing the ZEBRA-149, ORCHID-150, or ACK-150 markers under `~/.codex/sessions`, `~/.claude/projects`, and the managed Codex and Claude account roots.
 
 ## Validation gates
 
 - `bun test`
 - `bunx tsc --noEmit`
-- ESLint for every changed TypeScript file
-- Real local Claude subscription integration when the authenticated CLI is available
+- `bun test src/lib/runtime/codexAppServerHost.integration.test.ts src/lib/runtime/claudeStreamBrokerHost.integration.test.ts`
+- marker-file comparison under the legacy session roots and managed account roots

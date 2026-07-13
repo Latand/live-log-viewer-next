@@ -101,7 +101,7 @@ interface ColumnPrefs {
    per-tab in sessionStorage and do not sync (#38). */
 const draftsKey = (project: string) => `llvDrafts:${project}`;
 
-function loadDrafts(project: string): string[] {
+export function loadDrafts(project: string): string[] {
   try {
     const raw = JSON.parse(sessionStorage.getItem(draftsKey(project)) ?? "[]") as unknown;
     const ids = Array.isArray(raw) ? raw.filter((id): id is string => typeof id === "string") : [];

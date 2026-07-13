@@ -2,6 +2,8 @@ import { spawn } from "node:child_process";
 import type { ChildProcessWithoutNullStreams, SpawnOptionsWithoutStdio } from "node:child_process";
 
 import { procBackend } from "@/lib/proc";
+import { signalDetachedProcessGroup, signalProcessGroup, type ProcessSignal } from "@/lib/processGroup";
+import { headlessCodexThreadConfig } from "@/lib/codexHeadlessConfig";
 import { hardenedRedact } from "@/lib/view/compactText";
 
 import type {
@@ -60,6 +62,7 @@ export interface CodexAppServerHostOptions {
   initialEventCursor?: number;
   spawnProcess?: (command: string, args: string[], options: SpawnOptionsWithoutStdio) => ChildProcessWithoutNullStreams;
   eventStore?: RuntimeEventStore;
+  signalProcess?: ProcessSignal;
 }
 
 export interface CodexThreadIdentity {
@@ -212,6 +215,7 @@ export class CodexAppServerHost implements EngineHost {
   private readonly shutdownGraceMs: number;
   private readonly eventStore: RuntimeEventStore;
   private readonly effort: string | undefined;
+  private readonly signalProcess: ProcessSignal;
   private readonly pending = new Map<number, PendingRpc>();
   private readonly subscribers = new Set<Subscriber>();
   private readonly events: RuntimeEvent[] = [];
@@ -247,6 +251,7 @@ export class CodexAppServerHost implements EngineHost {
     this.shutdownGraceMs = options.shutdownGraceMs ?? DEFAULT_SHUTDOWN_GRACE_MS;
     this.eventStore = options.eventStore ?? new FileRuntimeEventStore();
     this.effort = options.effort;
+    this.signalProcess = options.signalProcess ?? process.kill;
     this.cursor = options.initialEventCursor ?? 0;
     this.reapedPromise = new Promise((resolve) => { this.resolveReaped = resolve; });
     child.stdout.on("data", (chunk: Buffer | string) => this.acceptStdout(String(chunk)));
@@ -257,10 +262,6 @@ export class CodexAppServerHost implements EngineHost {
     child.on("error", (error) => this.fail(new Error(`Codex app-server child failed: ${safeError(error)}`)));
     child.on("close", () => {
       this.reaped = true;
-      if (this.terminationTimer) {
-        clearTimeout(this.terminationTimer);
-        this.terminationTimer = null;
-      }
       this.resolveReaped();
       if (!this.releasing && !this.released) {
         if (this.dead) this.notifyStateListeners();
@@ -281,12 +282,16 @@ export class CodexAppServerHost implements EngineHost {
   private static async open(options: CodexAppServerHostOptions, threadId: string | null): Promise<CodexAppServerHost> {
     const spawnProcess = options.spawnProcess ?? ((command, args, spawnOptions) =>
       spawn(command, args, { ...spawnOptions, stdio: ["pipe", "pipe", "pipe"] }));
-    const args = options.fileAuthCredentials
-      ? ["-c", "cli_auth_credentials_store=file", "app-server"]
-      : ["app-server"];
+    const args = [
+      ...(options.fileAuthCredentials ? ["-c", "cli_auth_credentials_store=file"] : []),
+      "-c",
+      "mcp_servers={}",
+      "app-server",
+    ];
     const child = spawnProcess(options.binary ?? process.env.LLV_CODEX_BINARY ?? "codex", args, {
       cwd: options.cwd,
       env: subscriptionEnv(options.env ?? process.env, options.codexHome),
+      detached: true,
     });
     const provisional = new CodexAppServerHost(child, { threadId: threadId ?? "pending", path: null }, options);
     try {
@@ -301,13 +306,15 @@ export class CodexAppServerHost implements EngineHost {
       const accountType = stringField(account, "type");
       if (accountType !== "chatgpt") throw new Error("Codex app-server requires a ChatGPT subscription login");
       provisional.account = { type: accountType, planType: stringField(account, "planType") };
+      const config = headlessCodexThreadConfig(await provisional.rpc("config/read", { cwd: options.cwd, includeLayers: false }));
       const result = threadId
-        ? await provisional.rpc("thread/resume", { threadId })
+        ? await provisional.rpc("thread/resume", { threadId, config })
         : await provisional.rpc("thread/start", {
           cwd: options.cwd,
           ...(options.model ? { model: options.model } : {}),
           sandbox: options.sandbox ?? "read-only",
           approvalPolicy: options.approvalPolicy ?? "never",
+          config,
         });
       const identity = threadFromResult(result, threadId ? "thread/resume" : "thread/start");
       if (threadId && identity.threadId !== threadId) {
@@ -485,7 +492,8 @@ export class CodexAppServerHost implements EngineHost {
     this.pending.clear();
     this.startTermination();
     if (!await this.waitForReap(this.shutdownGraceMs)) {
-      try { this.child.kill("SIGKILL"); } catch { /* already closed */ }
+      if (this.reaped) signalProcessGroup(this.child.pid, "SIGKILL", this.signalProcess);
+      else signalDetachedProcessGroup(this.child, "SIGKILL", this.signalProcess);
       if (!await this.waitForReap(this.shutdownGraceMs)) {
         throw new Error("Codex app-server child could not be reaped");
       }
@@ -500,14 +508,15 @@ export class CodexAppServerHost implements EngineHost {
   }
 
   private startTermination(): void {
-    if (this.terminationStarted || this.reaped) return;
+    if (this.terminationStarted) return;
     this.terminationStarted = true;
     try { this.child.stdin.end(); } catch { /* already closed */ }
-    try { this.child.kill("SIGTERM"); } catch { /* already closed */ }
+    if (this.reaped) signalProcessGroup(this.child.pid, "SIGTERM", this.signalProcess);
+    else signalDetachedProcessGroup(this.child, "SIGTERM", this.signalProcess);
     this.terminationTimer = setTimeout(() => {
       this.terminationTimer = null;
-      if (this.reaped) return;
-      try { this.child.kill("SIGKILL"); } catch { /* already closed */ }
+      if (this.reaped) signalProcessGroup(this.child.pid, "SIGKILL", this.signalProcess);
+      else signalDetachedProcessGroup(this.child, "SIGKILL", this.signalProcess);
     }, this.shutdownGraceMs);
   }
 

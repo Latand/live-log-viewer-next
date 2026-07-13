@@ -26,6 +26,7 @@ const MAX_FILES = 12;
 const CACHE_MS = 30_000;
 const FAILURE_COOLDOWN_MS = 60_000;
 const MAX_RATE_LIMIT_BACKOFF_MS = 15 * 60_000;
+const CODEX_INITIALIZE_TIMEOUT_REASON = "app-server-initialize-timeout";
 
 type EngineName = "claude" | "codex";
 type EngineCacheEntry = {
@@ -34,6 +35,7 @@ type EngineCacheEntry = {
   provenance: LimitsProvenance;
   retryAt?: number | null;
   consecutive429s?: number;
+  consecutiveInitializeTimeouts?: number;
 };
 type LimitsCache = { version: 2; engines: Record<EngineName, Record<string, EngineCacheEntry>> };
 export type LimitRead = {
@@ -41,6 +43,7 @@ export type LimitRead = {
   reason: string | null;
   source: "live" | "transcript" | "unavailable";
   retryAt?: number;
+  backoffReason?: typeof CODEX_INITIALIZE_TIMEOUT_REASON;
 };
 export type CodexLiveLimitsReader = (account: Pick<CodexAccount, "id" | "kind" | "home" | "sessionsDir">) => Promise<AppServerRateLimits>;
 
@@ -76,7 +79,8 @@ function safeCacheEntry(value: unknown): EngineCacheEntry | null {
       (typeof provenance.staleSince !== "string" && provenance.staleSince !== null) ||
       (provenance.retryAt !== undefined && typeof provenance.retryAt !== "string" && provenance.retryAt !== null) ||
       (entry.retryAt !== undefined && entry.retryAt !== null && typeof entry.retryAt !== "number") ||
-      (entry.consecutive429s !== undefined && (!Number.isInteger(entry.consecutive429s) || entry.consecutive429s < 0))) return null;
+      (entry.consecutive429s !== undefined && (!Number.isInteger(entry.consecutive429s) || entry.consecutive429s < 0)) ||
+      (entry.consecutiveInitializeTimeouts !== undefined && (!Number.isInteger(entry.consecutiveInitializeTimeouts) || entry.consecutiveInitializeTimeouts < 0))) return null;
   return entry as EngineCacheEntry;
 }
 
@@ -148,6 +152,7 @@ type ResolvedRead = {
   meta: LimitsProvenance;
   retryAt: number | null;
   consecutive429s: number;
+  consecutiveInitializeTimeouts: number;
 };
 
 function remember(engine: EngineName, accountId: string, resolved: ResolvedRead, now: number): void {
@@ -157,6 +162,7 @@ function remember(engine: EngineName, accountId: string, resolved: ResolvedRead,
     provenance: resolved.meta,
     retryAt: resolved.retryAt,
     consecutive429s: resolved.consecutive429s,
+    consecutiveInitializeTimeouts: resolved.consecutiveInitializeTimeouts,
   };
   writeDiskCache(cache());
   if (!resolved.data || (resolved.meta.source !== "live" && resolved.meta.source !== "transcript")) return;
@@ -174,11 +180,26 @@ function safeReason(reason: string): string {
 }
 
 function resolveRead(read: LimitRead, cached: EngineCacheEntry | null, staleSince: string, now: number): ResolvedRead {
+  const initializeTimedOut = read.backoffReason === CODEX_INITIALIZE_TIMEOUT_REASON || read.reason === CODEX_INITIALIZE_TIMEOUT_REASON;
+  const consecutiveInitializeTimeouts = initializeTimedOut ? (cached?.consecutiveInitializeTimeouts ?? 0) + 1 : 0;
+  const initializeBackoffMs = Math.min(
+    FAILURE_COOLDOWN_MS * (2 ** Math.max(0, consecutiveInitializeTimeouts - 1)),
+    MAX_RATE_LIMIT_BACKOFF_MS,
+  );
   if (read.data) {
-    return { data: read.data, meta: { source: read.source, reason: read.reason, staleSince: read.reason ? staleSince : null, retryAt: null }, retryAt: null, consecutive429s: 0 };
+    const retryAt = initializeTimedOut ? now + initializeBackoffMs : null;
+    return {
+      data: read.data,
+      meta: { source: read.source, reason: read.reason, staleSince: read.reason ? staleSince : null, retryAt: retryAt ? new Date(retryAt).toISOString() : null },
+      retryAt,
+      consecutive429s: 0,
+      consecutiveInitializeTimeouts,
+    };
   }
   const consecutive429s = read.reason === LIMITS_RATE_LIMITED_REASON ? (cached?.consecutive429s ?? 0) + 1 : 0;
-  const exponentialMs = consecutive429s > 0
+  const exponentialMs = consecutiveInitializeTimeouts > 0
+    ? initializeBackoffMs
+    : consecutive429s > 0
     ? Math.min(FAILURE_COOLDOWN_MS * (2 ** (consecutive429s - 1)), MAX_RATE_LIMIT_BACKOFF_MS)
     : FAILURE_COOLDOWN_MS;
   const retryAt = Math.max(now + exponentialMs, read.retryAt ?? 0);
@@ -188,7 +209,7 @@ function resolveRead(read: LimitRead, cached: EngineCacheEntry | null, staleSinc
     staleSince: cached?.provenance.staleSince ?? staleSince,
     retryAt: new Date(retryAt).toISOString(),
   };
-  return { data: cached?.data ?? null, meta, retryAt, consecutive429s };
+  return { data: cached?.data ?? null, meta, retryAt, consecutive429s, consecutiveInitializeTimeouts };
 }
 
 function cachedRead(entry: EngineCacheEntry): ResolvedRead {
@@ -197,6 +218,7 @@ function cachedRead(entry: EngineCacheEntry): ResolvedRead {
     meta: entry.provenance,
     retryAt: entry.retryAt ?? null,
     consecutive429s: entry.consecutive429s ?? 0,
+    consecutiveInitializeTimeouts: entry.consecutiveInitializeTimeouts ?? 0,
   };
 }
 
@@ -368,10 +390,16 @@ export async function readCodexLimits(options: {
     return { data: mapAppServerRateLimits(rateLimits), reason: null, source: "live" };
   } catch (error) {
     const detail = redactAppServerDetail(error instanceof Error ? error.message : String(error));
+    const initializeTimedOut = /request timed out:\s*initialize\b/i.test(detail);
     console.warn(`[limits] Codex app-server probe for ${account.id} failed: ${detail}`);
     const fallback = readCodexTranscriptLimits(account.sessionsDir);
-    if (fallback.data) return { data: fallback.data, reason: "transcript-fallback", source: "transcript" };
-    return { data: null, reason: "app-server-unavailable", source: "unavailable" };
+    if (fallback.data) return {
+      data: fallback.data,
+      reason: "transcript-fallback",
+      source: "transcript",
+      ...(initializeTimedOut ? { backoffReason: CODEX_INITIALIZE_TIMEOUT_REASON } : {}),
+    };
+    return { data: null, reason: initializeTimedOut ? CODEX_INITIALIZE_TIMEOUT_REASON : "app-server-unavailable", source: "unavailable" };
   }
 }
 

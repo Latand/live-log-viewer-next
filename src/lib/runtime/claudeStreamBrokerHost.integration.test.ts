@@ -1,37 +1,21 @@
-import { spawnSync } from "node:child_process";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
-import { expect, test } from "bun:test";
+import { afterAll, expect, test } from "bun:test";
 
+import { claudeTranscriptPath } from "@/lib/agent/transcript";
 import { ClaudeStreamBrokerHost, FileClaudeDeliveryLedger } from "./claudeStreamBrokerHost";
 import { FileRuntimeEventStore } from "./eventStore";
 import type { RuntimeEvent } from "./engineHost";
+import { pathIsInside, prepareClaudeIntegrationTestHome } from "./integrationTestHome";
 
-function subscriptionEnvironment(): NodeJS.ProcessEnv {
-  const env = { ...process.env };
-  delete env.ANTHROPIC_API_KEY;
-  delete env.CLAUDE_CODE_OAUTH_TOKEN;
-  return env;
-}
+const claudeBinary = process.env.LLV_CLAUDE_BINARY ?? "claude";
+const resumeHome = prepareClaudeIntegrationTestHome(claudeBinary);
+const permissionHome = prepareClaudeIntegrationTestHome(claudeBinary);
 
-function localSubscriptionAvailable(): boolean {
-  const binary = process.env.LLV_CLAUDE_BINARY ?? "claude";
-  const version = spawnSync(binary, ["--version"], { env: subscriptionEnvironment(), stdio: "ignore" });
-  if (version.status !== 0) return false;
-  const auth = spawnSync(binary, ["auth", "status"], {
-    env: subscriptionEnvironment(),
-    encoding: "utf8",
-    timeout: 10_000,
-  });
-  if (auth.status !== 0) return false;
-  try {
-    const value = JSON.parse(auth.stdout) as Record<string, unknown>;
-    return value.loggedIn === true && value.authMethod === "claude.ai" && typeof value.subscriptionType === "string";
-  } catch {
-    return false;
-  }
-}
+afterAll(() => {
+  resumeHome?.cleanup();
+  permissionHome?.cleanup();
+});
 
 async function waitFor(
   iterator: AsyncIterator<RuntimeEvent>,
@@ -63,8 +47,9 @@ function containsText(event: RuntimeEvent, expected: string): boolean {
   return JSON.stringify(event.item).includes(expected);
 }
 
-test.skipIf(!localSubscriptionAvailable())("real Claude subscription supports late attach and restart resume", async () => {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-claude-integration-"));
+test.skipIf(!resumeHome)("real Claude subscription supports late attach and restart resume", async () => {
+  if (!resumeHome) throw new Error("isolated Claude subscription home is unavailable");
+  const directory = resumeHome.directory;
   const eventStore = new FileRuntimeEventStore(path.join(directory, "events"));
   const deliveryLedger = new FileClaudeDeliveryLedger(path.join(directory, "deliveries"));
   let host: ClaudeStreamBrokerHost | null = null;
@@ -72,6 +57,10 @@ test.skipIf(!localSubscriptionAvailable())("real Claude subscription supports la
   try {
     host = await ClaudeStreamBrokerHost.start({
       cwd: process.cwd(),
+      binary: claudeBinary,
+      claudeConfigDir: resumeHome.claudeConfigDir,
+      claudeProjectsDir: resumeHome.claudeProjectsDir,
+      env: resumeHome.env,
       model: "haiku",
       permissionMode: "dontAsk",
       tools: [],
@@ -89,12 +78,19 @@ test.skipIf(!localSubscriptionAvailable())("real Claude subscription supports la
     await waitFor(owner, (event) => containsText(event, "ACK-150"));
     await waitFor(late, (event) => containsText(event, "ACK-150"));
     const sessionId = host.identity.sessionId;
+    const sessionPath = claudeTranscriptPath(process.cwd(), sessionId, resumeHome.claudeProjectsDir);
+    expect(pathIsInside(resumeHome.directory, sessionPath)).toBeTrue();
+    expect(fs.existsSync(sessionPath)).toBeTrue();
     await host.release();
     const releasedCursor = (await host.health()).eventCursor;
     host = null;
 
     recovered = await ClaudeStreamBrokerHost.adopt(sessionId, {
       cwd: process.cwd(),
+      binary: claudeBinary,
+      claudeConfigDir: resumeHome.claudeConfigDir,
+      claudeProjectsDir: resumeHome.claudeProjectsDir,
+      env: resumeHome.env,
       model: "haiku",
       permissionMode: "dontAsk",
       tools: [],
@@ -114,17 +110,23 @@ test.skipIf(!localSubscriptionAvailable())("real Claude subscription supports la
   } finally {
     await host?.release();
     await recovered?.release();
+    resumeHome.cleanup();
   }
 }, 180_000);
 
-test.skipIf(!localSubscriptionAvailable())("real Claude permission requests reach EngineHost.answer", async () => {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-claude-permission-integration-"));
+test.skipIf(!permissionHome)("real Claude permission requests reach EngineHost.answer", async () => {
+  if (!permissionHome) throw new Error("isolated Claude subscription home is unavailable");
+  const directory = permissionHome.directory;
   const eventStore = new FileRuntimeEventStore(path.join(directory, "events"));
   const deliveryLedger = new FileClaudeDeliveryLedger(path.join(directory, "deliveries"));
   let host: ClaudeStreamBrokerHost | null = null;
   try {
     host = await ClaudeStreamBrokerHost.start({
       cwd: process.cwd(),
+      binary: claudeBinary,
+      claudeConfigDir: permissionHome.claudeConfigDir,
+      claudeProjectsDir: permissionHome.claudeProjectsDir,
+      env: permissionHome.env,
       model: "haiku",
       permissionMode: "default",
       tools: ["Bash"],
@@ -141,9 +143,13 @@ test.skipIf(!localSubscriptionAvailable())("real Claude permission requests reac
     expect(sent.outcome).toBe("turn-started");
     const attention = await waitFor(events, (event) => event.kind === "attention" && event.method === "can_use_tool");
     if (attention.kind !== "attention") throw new Error("expected Claude permission attention");
+    const sessionPath = claudeTranscriptPath(process.cwd(), host.identity.sessionId, permissionHome.claudeProjectsDir);
+    expect(pathIsInside(permissionHome.directory, sessionPath)).toBeTrue();
+    expect(fs.existsSync(sessionPath)).toBeTrue();
     await host.answer(attention.id, { behavior: "deny", message: "Denied by the runtime integration test." });
     await waitFor(events, (event) => event.kind === "turn-ended");
   } finally {
     await host?.release();
+    permissionHome.cleanup();
   }
 }, 180_000);
