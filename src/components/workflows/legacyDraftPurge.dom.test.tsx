@@ -1,24 +1,24 @@
 import { afterAll, afterEach, beforeAll, beforeEach, expect, mock, test } from "bun:test";
 import { Window } from "happy-dom";
-import { useState } from "react";
+import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { flushSync } from "react-dom";
 
 import { emptyStore } from "@/components/runtime/runtimeModel";
 
 /* A mounted behavioral test for the shared desktop/mobile legacy-draft purge
-   (#136/#156). It seeds sessionStorage the way a pre-fencing tab left it, drives
-   the real restore path (loadDrafts — the function ProjectDashboard calls on
-   mount) through the real mobile surface (MobileFocusView), and asserts the real
-   WorkflowDraftPane never mounts while an ordinary agent draft's pane does. The
-   desktop scheme (DraftShell) and this surface route drafts by the same
-   isWorkflowDraftId gate, so exercising the mobile surface proves the routing. */
+   (#136/#156). It seeds sessionStorage the way a pre-fencing tab left it, mounts
+   the real ProjectDashboard so ITS restoration effect (ProjectDashboard.tsx:303,
+   `setDrafts(loadDrafts(project))` — the production wiring, not a stand-in) runs,
+   and asserts the real WorkflowDraftPane never mounts while the ordinary agent
+   draft's pane does. Removing that effect leaves drafts `[]`, so the agent pane
+   would vanish and this test fails — exactly the regression the review asks for. */
 
-/* The surface renders ConnectionPill, which subscribes to the runtime bus; a
-   sibling suite (useFiles.dom.test) leaves a `./runtimeBus` mock installed whose
-   stub bus lacks `.start`. Mock the hooks inert — the same shape nodes.dom.test
-   uses — and dynamic-import the surface afterward so it binds to the inert hooks.
-   Restored in afterAll so no sibling suite inherits it. */
+/* The dashboard's mobile surface renders ConnectionPill, which subscribes to the
+   runtime bus; a sibling suite (useFiles.dom.test) leaves a `./runtimeBus` mock
+   installed whose stub bus lacks `.start`. Mock the hooks inert — the shape
+   nodes.dom.test uses — and dynamic-import the components afterward so they bind
+   to the inert hooks. Restored in afterAll so no sibling suite inherits it. */
 const actualRuntimeHooks = await import("@/hooks/useRuntime");
 const inertRuntime = { enabled: false, connection: "offline" as const, resyncedAt: null, store: emptyStore() };
 mock.module("@/hooks/useRuntime", () => ({
@@ -30,15 +30,26 @@ mock.module("@/hooks/useRuntime", () => ({
   useRuntimeFlow: () => null,
 }));
 
+const { ProjectDashboard } = await import("@/components/ProjectDashboard");
 const { MobileFocusView } = await import("@/components/mobile/MobileFocusView");
-const { loadDrafts } = await import("@/components/ProjectDashboard");
 
 const dom = new Window({ url: "http://localhost/" });
 
 /* Every global this file overrides is installed in beforeAll and restored in
    afterAll — bun shares one process across test files, so a leaked `fetch`/
-   `document` here would break sibling DOM suites. */
+   `document` here would break sibling DOM suites. matchMedia reports mobile so
+   the dashboard renders its phone surface (MobileFocusView). */
 const G = globalThis as Record<string, unknown>;
+const mobileMatchMedia = (query: string) => ({
+  matches: /max-width/.test(String(query)),
+  media: String(query),
+  onchange: null,
+  addEventListener() {},
+  removeEventListener() {},
+  addListener() {},
+  removeListener() {},
+  dispatchEvent() { return false; },
+});
 const OVERRIDES: Record<string, unknown> = {
   window: dom,
   document: dom.document,
@@ -49,13 +60,14 @@ const OVERRIDES: Record<string, unknown> = {
   MouseEvent: dom.MouseEvent,
   sessionStorage: dom.sessionStorage,
   localStorage: dom.localStorage,
-  matchMedia: dom.matchMedia?.bind(dom) ?? (() => ({ matches: false, addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {} })),
+  matchMedia: mobileMatchMedia,
   requestAnimationFrame: (cb: (t: number) => void) => setTimeout(() => cb(0), 0) as unknown as number,
   cancelAnimationFrame: (id: number) => clearTimeout(id),
   ResizeObserver: class { observe() {} unobserve() {} disconnect() {} },
   IntersectionObserver: class { observe() {} unobserve() {} disconnect() {} takeRecords() { return []; } },
-  // The draft panes lazily fetch templates/dirs on mount; keep those inert.
+  // The board store and draft panes fetch on mount; keep those inert.
   fetch: (async () => ({ ok: true, status: 200, json: async () => ({}), text: async () => "" })) as unknown as typeof fetch,
+  IS_REACT_ACT_ENVIRONMENT: true,
 };
 const HAS: Record<string, boolean> = {};
 const SAVED: Record<string, unknown> = {};
@@ -93,37 +105,35 @@ const wfField = (id: string, name: string) => `llvWfDraft:${id}:${name}`;
 const WF_FIELDS = ["template", "dir", "task", "mode"];
 const agentA = "3f2504e0-4f89-41d3-9a0c-0305e82c3301";
 
-const surfaceProps = (project: string, drafts: string[]) => ({
-  project,
-  groups: [],
-  manual: [],
+const dashboardProps = (project: string) => ({
   files: [],
   flows: [],
   pipelines: [],
+  workflows: [],
   tasks: [],
-  drafts,
+  project,
   loaded: true,
-  focus: null,
-  onSelect: () => {},
-  onClose: () => {},
-  onDraftClose: () => {},
-  onDraftSpawned: () => {},
+  openNonce: 0,
+  archived: false,
+  catalogKnown: true,
+  onArchive: () => {},
+  onUnarchive: () => {},
 });
 
-function mount(node: React.ReactElement): { root: Root } {
+async function mountAct(node: React.ReactElement): Promise<Root> {
   const host = dom.document.createElement("div");
   dom.document.body.appendChild(host);
   const root = createRoot(host as unknown as Element);
-  flushSync(() => root.render(node));
-  return { root };
-}
-
-/* Mirrors ProjectDashboard: restore the persisted draft list on mount, then hand
-   it to the real surface. useState's lazy initializer runs the purge during the
-   first render, exactly like the dashboard's restore effect. */
-function RestoredSurface({ project }: { project: string }) {
-  const [drafts] = useState(() => loadDrafts(project));
-  return <MobileFocusView {...surfaceProps(project, drafts)} />;
+  // act flushes the mount's passive effects — including the dashboard's
+  // restoration effect — synchronously; a second act drains the async board
+  // fetch's state updates so no update lands outside act.
+  await act(async () => {
+    root.render(node);
+  });
+  await act(async () => {
+    await settle();
+  });
+  return root;
 }
 
 let roots: Root[] = [];
@@ -138,18 +148,18 @@ afterEach(async () => {
   dom.sessionStorage.clear();
 });
 
-test("restoring a pre-fencing tab purges the legacy draft and never mounts WorkflowDraftPane (#136/#156)", () => {
+test("the dashboard's restoration effect purges the legacy draft and never mounts WorkflowDraftPane (#136/#156)", async () => {
   const project = "restore-demo";
   /* The pre-fencing tab state: an agent draft interleaved with a legacy wf-*
      draft that still has all its pane fields persisted. */
   dom.sessionStorage.setItem(draftsKey(project), JSON.stringify([agentA, "wf-legacy"]));
   for (const name of WF_FIELDS) dom.sessionStorage.setItem(wfField("wf-legacy", name), `wf-legacy-${name}`);
 
-  const { root } = mount(<RestoredSurface project={project} />);
-  roots.push(root);
+  roots.push(await mountAct(<ProjectDashboard {...dashboardProps(project)} />));
 
-  /* The surface actually rendered: the ordinary agent draft mounted its real
-     pane — so the WorkflowDraftPane's absence below is meaningful, not vacuous. */
+  /* The dashboard's restoration effect populated `drafts` from storage and the
+     phone surface mounted the ordinary agent draft's real pane — so the
+     WorkflowDraftPane's absence below is meaningful, not vacuous. */
   expect(dom.document.querySelector(AGENT_PANE)).not.toBeNull();
   /* The legacy workflow pane never mounts — restoration dropped its id. */
   expect(dom.document.querySelector(WF_PANE)).toBeNull();
@@ -160,12 +170,31 @@ test("restoring a pre-fencing tab purges the legacy draft and never mounts Workf
   for (const name of WF_FIELDS) expect(dom.sessionStorage.getItem(wfField("wf-legacy", name))).toBeNull();
 });
 
-test("the same surface DOES mount the real WorkflowDraftPane for a live wf draft (routing is real)", () => {
-  /* Positive control: fed a workflow draft directly (no purge), the surface
-     mounts the genuine WorkflowDraftPane — proving the previous test's absence
-     is the purge at work, not a surface that can't render the pane at all. */
-  const { root } = mount(<MobileFocusView {...surfaceProps("control", ["wf-control"])} />);
-  roots.push(root);
+test("the phone surface DOES mount the real WorkflowDraftPane for a live wf draft (routing is real)", async () => {
+  /* Positive control: fed a workflow draft directly (no purge), the same surface
+     the dashboard renders mounts the genuine WorkflowDraftPane — proving the
+     previous test's absence is the purge at work, not a surface that can't render
+     the pane at all. */
+  roots.push(
+    await mountAct(
+      <MobileFocusView
+        project="control"
+        groups={[]}
+        manual={[]}
+        files={[]}
+        flows={[]}
+        pipelines={[]}
+        tasks={[]}
+        drafts={["wf-control"]}
+        loaded
+        focus={null}
+        onSelect={() => {}}
+        onClose={() => {}}
+        onDraftClose={() => {}}
+        onDraftSpawned={() => {}}
+      />,
+    ),
+  );
   expect(dom.document.querySelector(WF_PANE)).not.toBeNull();
   expect(dom.document.querySelector(AGENT_PANE)).toBeNull();
 });

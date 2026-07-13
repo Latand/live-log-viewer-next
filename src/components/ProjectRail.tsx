@@ -60,21 +60,23 @@ export function ProjectRail({ files, projectCatalog, pipelines, workflows, archi
         {isMobile ? (
           /* The 248px drawer header must hold three 44px controls no matter how
              wide the badges grow (issue #148). Title + both status badges live in
-             one min-w-0 flex-1 group that shrinks (the title truncates first, the
-             tabular-nums badges keep their multi-digit counts); the controls sit
-             in a shrink-0 group so they can never be pushed outside the drawer. */
+             one min-w-0 flex-1 group that shrinks (title truncates first); the
+             controls sit in a shrink-0 group so they can never be pushed outside.
+             The group is overflow-hidden so even the capped `99+`/`99+` maximum can
+             only clip within its own share, never bleed into the controls — and
+             the badges are compact (no live dot, tight padding, tabular-nums) so
+             that maximum still fits without clipping in the ~86px it is allotted. */
           <>
-            <div className="flex min-w-0 flex-1 items-center gap-1.5">
+            <div className="flex min-w-0 flex-1 items-center gap-1 overflow-hidden">
               <span className="min-w-0 truncate">{t("rail.title")}</span>
               {totalLive ? (
-                <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-[#e5f6ea] px-1.5 py-0.5 text-[10.5px] font-bold tabular-nums text-ok">
-                  <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-ok" />
+                <span className="inline-flex shrink-0 items-center rounded-full bg-[#e5f6ea] px-1.5 py-0.5 text-[10.5px] font-bold tabular-nums text-ok">
                   {totalLive > 99 ? "99+" : totalLive}
                 </span>
               ) : null}
               {totalAttention ? (
                 <span className="inline-flex shrink-0 items-center rounded-full bg-[#fff1ca] px-1.5 py-0.5 text-[10.5px] font-bold tabular-nums text-[#8a5a00]">
-                  ⏸ {totalAttention > 99 ? "99+" : totalAttention}
+                  ⏸{totalAttention > 99 ? "99+" : totalAttention}
                 </span>
               ) : null}
             </div>

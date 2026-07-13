@@ -466,6 +466,19 @@ export function MobileFocusView({ project, groups, manual, files, flows, pipelin
             onDraftSpawned={onDraftSpawned}
             onNodePick={pickFromMap}
           />
+          {/* The lite map is pick-only and cannot paint a readable stage strip at
+              its zoom, so it never surfaces a pipeline's full plan on its own
+              (SchemeBoard passes no pipelineControls in map mode). The dock cards
+              ride below it here too — otherwise opening the map would hide the
+              only full-plan surface for every active pipeline, memberful ones
+              included (issue #156). */}
+          {dockedPipelines.length ? (
+            <div className="max-h-[38vh] shrink-0 divide-y divide-line overflow-y-auto border-t border-line bg-panel">
+              {dockedPipelines.map((pipeline) => (
+                <MobilePipelineDock key={pipeline.id} pipeline={pipeline} />
+              ))}
+            </div>
+          ) : null}
           <div className="shrink-0 border-t border-line bg-panel px-3 py-1.5 text-center text-[11px] text-dim">
             {t("mobile.tapNode")}
           </div>
