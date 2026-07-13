@@ -87,6 +87,21 @@ test("a main-checkout scratchpad cwd groups under its encoded project", () => {
   expect(projectForCwd(dead)).toBe(projectForCwd(repo));
 });
 
+test("a deleted scratchpad encoded from an external repository keeps its canonical root", () => {
+  const repo = path.join(SANDBOX, "external-root", "repo.with-hyphen");
+  fs.mkdirSync(path.join(repo, ".git"), { recursive: true });
+  const slug = repo.replace(/[^a-zA-Z0-9]/g, "-");
+  const dead = path.join(os.tmpdir(), `claude-${process.getuid?.() ?? 1000}`, slug, "deleted-session", "scratchpad", "probes");
+
+  expect(fs.existsSync(dead)).toBe(false);
+  expect(projectForCwd(dead)).toBe(projectForCwd(repo));
+  expect(projectRootForCwd(dead)).toBe(repo);
+
+  const missingSlug = path.join(SANDBOX, "removed-external-repo").replace(/[^a-zA-Z0-9]/g, "-");
+  const missing = path.join(os.tmpdir(), `claude-${process.getuid?.() ?? 1000}`, missingSlug, "deleted-session", "scratchpad");
+  expect(projectRootForCwd(missing)).toBeUndefined();
+});
+
 test("the outer nested worktree wins over a later specialized container", () => {
   const repo = path.join(SANDBOX, "outer-repo");
   const dead = path.join(repo, "worktrees", "outer", ".codex", "worktrees", "inner-hash", "InnerRepo");

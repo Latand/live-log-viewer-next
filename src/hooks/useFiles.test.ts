@@ -68,6 +68,33 @@ test("URL-specific 304 responses restore the matching cached representation", as
   expect(cache.read()).toBe(restored);
 });
 
+test("a global 304 keeps fresher shared rows learned by a pinned refresh", async () => {
+  let globalRequests = 0;
+  const cache = createFilesClientCache(async (input, init) => {
+    if (input === "/api/files") {
+      globalRequests += 1;
+      if (globalRequests === 2) {
+        expect(new Headers(init?.headers).get("If-None-Match")).toBe('"global-1"');
+        return new Response(null, { status: 304 });
+      }
+      return new Response(JSON.stringify({ files: [file("/global", "Global 1")] }), {
+        headers: { ETag: '"global-1"' },
+      });
+    }
+    return new Response(JSON.stringify({
+      files: [file("/global", "Global 2"), file("/new", "New shared row"), file("/archive/pinned", "Pinned")],
+    }), { headers: { ETag: '"pinned-2"' } });
+  });
+
+  await cache.revalidate();
+  const pinned = await cache.revalidate("/archive/pinned");
+  expect(pinned.files.map((entry) => entry.title)).toEqual(["Global 2", "New shared row", "Pinned"]);
+
+  const restored = await cache.revalidate();
+  expect(restored.files.map((entry) => entry.title)).toEqual(["Global 2", "New shared row"]);
+  expect(restored.requestScope).toBe("/api/files");
+});
+
 test("an out-of-cap #f target keeps its pinned representation through background revalidation", async () => {
   const targetPath = "/archive/out-of-cap.jsonl";
   const intent = parseConversationHash(`#f=${encodeURIComponent(targetPath)}`);

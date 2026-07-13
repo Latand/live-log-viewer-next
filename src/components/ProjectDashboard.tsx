@@ -15,7 +15,7 @@ import { MAX_VISIBLE_PATHS } from "@/lib/view/types";
 import type { Workflow } from "@/lib/workflows/types";
 
 import { TaskStrip } from "./BranchPane";
-import { clearDraftStorage, draftParentConversationId, draftSrc, seedDraftCwd, setDraftCwd, setDraftSrc, setDraftText } from "./DraftAgentPane";
+import { clearDraftStorage, draftCwd, draftParentConversationId, draftSrc, seedDraftCwd, setDraftCwd, setDraftSrc, setDraftText } from "./DraftAgentPane";
 import { planBoardConvergence, planClose } from "./projectBoardMutations";
 import { claimedReviewerDescendantPaths, foldClaimedReviewers, isActiveFlow } from "./flows/flowModel";
 import { PipelineDialog } from "./pipelines/PipelineDialog";
@@ -281,6 +281,7 @@ export function ProjectDashboard({
   );
   const taskPanelOpen = board.prefs.taskPanelOpen;
   const [drafts, setDrafts] = useState<string[]>([]);
+  const [pendingRestoredHandoffs, setPendingRestoredHandoffs] = useState<Set<string>>(() => new Set());
   /* Desktop `+ Task`: bump drops the inline sticky composer in a free slot on
      the board (pinned near the button). */
   const [newTaskNonce, setNewTaskNonce] = useState(0);
@@ -319,18 +320,46 @@ export function ProjectDashboard({
 
   useEffect(() => {
     if (!loaded) return;
+    let cancelled = false;
     const restored = loadDrafts(project);
+    const unresolved: Array<{ id: string; sourcePath: string }> = [];
     for (const id of restored) {
       if (!isWorkflowDraftId(id)) {
+        if (draftCwd(id)) continue;
         const sourcePath = draftSrc(id) || undefined;
         const sourceCwd = sourcePath
           ? files.find((file) => file.path === sourcePath)?.cwd?.trim()
           : undefined;
-        if (!sourcePath || sourceCwd) seedDraftCwd(id, sourceCwd || initialDraftCwd);
+        if (sourceCwd) seedDraftCwd(id, sourceCwd);
+        else if (sourcePath) unresolved.push({ id, sourcePath });
+        else seedDraftCwd(id, initialDraftCwd);
       }
     }
     /* eslint-disable-next-line react-hooks/set-state-in-effect */
     setDrafts(restored);
+    setPendingRestoredHandoffs(new Set(unresolved.map(({ id }) => id)));
+    for (const { id, sourcePath } of unresolved) {
+      void fetch("/api/spawn?project=" + encodeURIComponent(project) + "&src=" + encodeURIComponent(sourcePath))
+        .then(async (response) => {
+          if (!response.ok) throw new Error(`spawn suggestions failed: ${response.status}`);
+          return response.json() as Promise<{ cwd?: string | null }>;
+        })
+        .then((body) => typeof body.cwd === "string" ? body.cwd.trim() : "")
+        .catch(() => "")
+        .then((sourceCwd) => {
+          if (cancelled) return;
+          seedDraftCwd(id, sourceCwd || initialDraftCwd);
+          setPendingRestoredHandoffs((current) => {
+            if (!current.has(id)) return current;
+            const next = new Set(current);
+            next.delete(id);
+            return next;
+          });
+        });
+    }
+    return () => {
+      cancelled = true;
+    };
   }, [project, openNonce, loaded, initialDraftCwd]);
   const toggleTaskPanel = () => board.setTaskPanelOpen(!taskPanelOpen);
   useEffect(
@@ -758,8 +787,9 @@ export function ProjectDashboard({
      lands or after every stage node is hidden, now the persistent band is gone.
      They dock as placeholder groups in the layout (buildSchemeLayout). */
   const activePipelines = useMemo(() => pipelinesForProject(pipelines, project, files), [pipelines, project, files]);
+  const visibleDrafts = drafts.filter((id) => !pendingRestoredHandoffs.has(id));
   const hasNodes =
-    schemeGroups.length > 0 || schemeManual.length > 0 || drafts.length > 0 || projectTasks.length > 0 || activePipelines.length > 0;
+    schemeGroups.length > 0 || schemeManual.length > 0 || visibleDrafts.length > 0 || projectTasks.length > 0 || activePipelines.length > 0;
   /* Everything the project has on disk, freshest first. Powers the
      delete-project button and the fallback list of an empty scheme —
      transcripts whose tree lives elsewhere (scratchpad one-offs) build no
@@ -790,7 +820,7 @@ export function ProjectDashboard({
      exists only for an implementer placed as a board node — the same layout the
      scheme draws. Derive availability from that layout's nodes, so a scanned but
      unplaced (hidden/tombstoned) implementer disables the action (#93 finding). */
-  const pipelineLayout = buildSchemeLayout(hasNodes ? schemeGroups : archiveGroups, hasNodes ? schemeManual : [], files, flows, hasNodes ? drafts : [], pipelines);
+  const pipelineLayout = buildSchemeLayout(hasNodes ? schemeGroups : archiveGroups, hasNodes ? schemeManual : [], files, flows, hasNodes ? visibleDrafts : [], pipelines);
   /* Worker rows the scheme still draws in a retained form — an active flow's
      reviewer round deck keeps its finished rounds as deck tabs. Those are
      re-admitted here so a folded reviewer is never listed twice (its deck AND a
@@ -983,7 +1013,7 @@ export function ProjectDashboard({
               surfacePipelines={activePipelines}
               workerStacks={workerStacks}
               tasks={hasNodes ? projectTasks : []}
-              drafts={hasNodes ? drafts : []}
+              drafts={hasNodes ? visibleDrafts : []}
               loaded={loaded}
               focus={highlight}
               onSelect={openSwitchboardFile}
@@ -1021,7 +1051,7 @@ export function ProjectDashboard({
                 surfacePipelines={activePipelines}
                 tasks={hasNodes ? projectTasks : []}
                 workerStacks={workerStacks}
-                drafts={hasNodes ? drafts : []}
+                drafts={hasNodes ? visibleDrafts : []}
                 focus={highlight}
                 attentionPaths={attentionPaths}
                 onSelect={openSwitchboardFile}

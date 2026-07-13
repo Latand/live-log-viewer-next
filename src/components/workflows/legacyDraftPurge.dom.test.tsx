@@ -181,6 +181,7 @@ test("the dashboard's restoration effect purges the legacy draft and never mount
 test("a restored project draft renders with its deterministic project directory on the first pane render", async () => {
   const project = "legacy-project";
   dom.sessionStorage.setItem(draftsKey(project), JSON.stringify([agentA]));
+  dom.sessionStorage.setItem(agentField(agentA, "cwd"), "   ");
 
   roots.push(mount(<ProjectDashboard {...dashboardProps(project)} />));
 
@@ -224,14 +225,19 @@ test("a restored handoff draft renders with the source conversation cwd", async 
   expect(directory?.value).toBe(sourceCwd);
 });
 
-test("a restored handoff adopts the source cwd when its transcript is outside the snapshot", async () => {
+test("a restored handoff waits for its out-of-snapshot source cwd before exposing the composer", async () => {
   const project = "archived-handoff-project";
   const sourcePath = "/archive/source.jsonl";
   const sourceCwd = "/repos/archived/.worktrees/source-branch";
+  let releaseSpawn!: () => void;
+  const spawnGate = new Promise<void>((resolve) => { releaseSpawn = resolve; });
+  let spawnRequested = false;
   dom.sessionStorage.setItem(draftsKey(project), JSON.stringify([agentA]));
   dom.sessionStorage.setItem(agentField(agentA, "src"), sourcePath);
   G.fetch = (async (input: string | URL | Request) => {
     if (String(input).startsWith("/api/spawn?")) {
+      spawnRequested = true;
+      await spawnGate;
       return { ok: true, status: 200, json: async () => ({ dirs: [sourceCwd], cwd: sourceCwd }), text: async () => "" };
     }
     return { ok: true, status: 200, json: async () => ({}), text: async () => "" };
@@ -239,6 +245,9 @@ test("a restored handoff adopts the source cwd when its transcript is outside th
 
   roots.push(mount(<ProjectDashboard {...dashboardProps(project)} />));
 
+  expect(await waitFor(() => spawnRequested)).toBe(true);
+  expect(dom.document.querySelector(AGENT_PANE)).toBeNull();
+  releaseSpawn();
   expect(await waitFor(() => {
     const directory = dom.document.querySelector('input[aria-label="Agent working directory"]') as unknown as HTMLInputElement | null;
     return directory?.value === sourceCwd;

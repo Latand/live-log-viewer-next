@@ -107,6 +107,30 @@ function patchFilesData(previous: FilesData, incoming: FilesData): FilesData {
   };
 }
 
+function pinnedPathFromScope(scope: string | null): string | null {
+  if (!scope) return null;
+  const query = scope.indexOf("?");
+  return query < 0 ? null : new URLSearchParams(scope.slice(query + 1)).get("path");
+}
+
+/** Apply the membership change represented by a scoped 304 while retaining
+    fresher shared data already learned through another request scope. */
+function restoreNotModified(current: FilesData, representation: FilesData, requestScope: string): FilesData {
+  if (!current.loaded) return representation;
+  const previousPin = pinnedPathFromScope(current.requestScope);
+  const nextPin = pinnedPathFromScope(requestScope);
+  let files = current.files;
+
+  if (previousPin && previousPin !== nextPin && !representation.files.some((file) => file.path === previousPin)) {
+    files = files.filter((file) => file.path !== previousPin);
+  }
+  if (nextPin && !files.some((file) => file.path === nextPin)) {
+    const pinned = representation.files.find((file) => file.path === nextPin);
+    if (pinned) files = [...files, pinned];
+  }
+  return { ...current, files, requestScope };
+}
+
 /** Session-wide stale-while-revalidate cache over the global scan snapshot. */
 export function createFilesClientCache(fetcher: FilesFetcher): FilesClientCache {
   let snapshot = EMPTY;
@@ -133,7 +157,7 @@ export function createFilesClientCache(fetcher: FilesFetcher): FilesClientCache 
     if (response.status === 304) {
       if (!representation) throw new Error("files request returned 304 without a cached representation");
       if (generation < appliedGeneration) return snapshot;
-      snapshot = representation.data;
+      snapshot = restoreNotModified(snapshot, representation.data, url);
       appliedGeneration = generation;
       rememberRepresentation(url, snapshot, representation.etag);
       return snapshot;

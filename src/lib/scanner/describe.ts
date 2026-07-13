@@ -30,6 +30,7 @@ const metaCache = globalCache<[number, string, Meta]>("meta-v4");
 // open so growth can still yield one.
 const titleCache = globalCache<[number, string | null]>("title");
 const codexProjectCache = globalCache<{ stateKey: string; project: string; worktree?: string }>("codex-project-v3");
+const repoSlugCache = globalCache<[number, string | null]>("repo-path-from-slug-v1");
 /* The cwd sits in the immutable head, so it follows the title-cache rule:
    keyed by path, re-read only while unresolved and the head still short. */
 const cwdCache = globalCache<[number, string | null]>("claude-cwd");
@@ -128,7 +129,51 @@ function repoPathFromSlug(slug: string): string | null {
     }
     return path.join(root, encodedName);
   }
-  return slug === encodedHome ? home : null;
+  if (slug === encodedHome) return home;
+  const cached = repoSlugCache.get(slug);
+  if (cached && cached[0] > Date.now()) return cached[1];
+
+  /* Slugs for repositories outside the two conventional roots are lossy:
+     separators, dots, and spaces all become dashes. Walk only filesystem
+     branches whose encoded prefix can still match, then accept a unique
+     existing directory (preferring a git root when ambiguity remains). */
+  if (!slug.startsWith("-")) return null;
+  const matches: string[] = [];
+  let frontier: Array<{ pathname: string; encoded: string }> = [{ pathname: path.parse(home).root, encoded: "" }];
+  for (let depth = 0; depth < 32 && frontier.length > 0 && matches.length < 16; depth += 1) {
+    const next: Array<{ pathname: string; encoded: string }> = [];
+    for (const parent of frontier) {
+      let entries: fs.Dirent[];
+      try {
+        entries = fs.readdirSync(parent.pathname, { withFileTypes: true });
+      } catch {
+        continue;
+      }
+      for (const entry of entries) {
+        const encoded = parent.encoded + "-" + entry.name.replace(/[^a-zA-Z0-9]/g, "-");
+        if (encoded !== slug && !slug.startsWith(encoded + "-")) continue;
+        const pathname = path.join(parent.pathname, entry.name);
+        let directory = entry.isDirectory();
+        if (!directory && entry.isSymbolicLink()) {
+          try {
+            directory = fs.statSync(pathname).isDirectory();
+          } catch {
+            directory = false;
+          }
+        }
+        if (!directory) continue;
+        if (encoded === slug) matches.push(pathname);
+        else next.push({ pathname, encoded });
+      }
+    }
+    frontier = next.slice(0, 64);
+  }
+  const repositories = matches.filter(hasGitMarker);
+  const resolved = repositories.length === 1
+    ? repositories[0]!
+    : matches.length === 1 ? matches[0]! : null;
+  repoSlugCache.set(slug, [Date.now() + 10_000, resolved]);
+  return resolved;
 }
 
 /** Codex creates ephemeral worktrees at `~/.codex/worktrees/<hash>/<RepoName>`
@@ -375,9 +420,9 @@ export function projectForCwd(cwd: string): string | null {
 }
 
 /** Resolve a conversation cwd to the repository root shared by its worktrees. */
-export function projectRootForCwd(cwd: string): string {
+export function projectRootForCwd(cwd: string): string | undefined {
   const scratchpad = projectInfoFromClaudeTaskCwd(cwd);
-  if (scratchpad) return scratchpad.repo ?? os.homedir();
+  if (scratchpad) return scratchpad.repo;
   const worktree =
     worktreeFromPath(cwd) ??
     worktreeFromNested(cwd) ??

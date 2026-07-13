@@ -76,6 +76,11 @@ export function draftSrc(id: string): string {
   return readField(id, "src");
 }
 
+/** Persisted editable directory, used to restore a draft before its pane mounts. */
+export function draftCwd(id: string): string {
+  return readField(id, "cwd").trim();
+}
+
 export function draftParentConversationId(id: string): string {
   return readField(id, "parentConversationId");
 }
@@ -99,7 +104,8 @@ export function setDraftCwd(id: string, cwd: string) {
 
 /** Fills a missing directory while preserving a restored draft's edited value. */
 export function seedDraftCwd(id: string, cwd: string) {
-  if (!readField(id, "cwd") && cwd.trim()) writeField(id, "cwd", cwd);
+  const next = cwd.trim();
+  if (!readField(id, "cwd").trim() && next) writeField(id, "cwd", next);
 }
 
 /** Reads back the durable spawn attempt persisted across reload. Its presence

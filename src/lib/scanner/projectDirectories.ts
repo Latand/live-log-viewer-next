@@ -24,7 +24,8 @@ function localProjectDirectories(): Array<{ cwd: string; project: string; projec
         continue;
       }
       const project = projectForCwd(cwd);
-      if (project) directories.push({ cwd, project, projectRoot: projectRootForCwd(cwd) });
+      const projectRoot = projectRootForCwd(cwd);
+      if (project && projectRoot) directories.push({ cwd, project, projectRoot });
     }
   }
   return directories;
