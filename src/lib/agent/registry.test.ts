@@ -433,6 +433,62 @@ describe("agent registry", () => {
     expect(replacementMoved).toBe(false);
   });
 
+  test("interrupted recovery preserves a replacement acquired during the liveness check", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-interrupted-recovery-race-"));
+    const filename = path.join(dir, "agent-registry.json");
+    const publishedToken = "88888888-8888-4888-8888-888888888888";
+    const recoveryToken = "99999999-9999-4999-8999-999999999999";
+    const replacementToken = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const lock = `${filename}.locks/${encodeURIComponent("codex:interrupted-recovery-race")}`;
+    const recovery = `${lock}.recovering`;
+    let raced = false;
+    const store = new AgentRegistry(filename, (owner) => {
+      if (owner.startIdentity === "42:published" && !raced) {
+        raced = true;
+        fs.rmSync(lock, { recursive: true, force: true });
+        fs.mkdirSync(lock);
+        fs.writeFileSync(path.join(lock, "owner.json"), JSON.stringify({
+          pid: 43,
+          startIdentity: "43:replacement",
+          token: replacementToken,
+        }));
+        return false;
+      }
+      return owner.startIdentity === "43:replacement";
+    }, {
+      now: () => Date.now(),
+      wait: async () => {
+        expect(JSON.parse(fs.readFileSync(path.join(lock, "owner.json"), "utf8")).token).toBe(replacementToken);
+        fs.rmSync(lock, { recursive: true, force: true });
+      },
+    });
+    fs.mkdirSync(lock, { recursive: true });
+    fs.writeFileSync(path.join(lock, "owner.json"), JSON.stringify({
+      pid: 42,
+      startIdentity: "42:published",
+      token: publishedToken,
+    }));
+    fs.mkdirSync(recovery);
+    fs.writeFileSync(path.join(recovery, "owner.json"), JSON.stringify({
+      pid: 41,
+      startIdentity: "41:recovery",
+      token: recoveryToken,
+    }));
+
+    await store.withOperationLock(
+      { engine: "codex", sessionId: "interrupted-recovery-race" },
+      { pid: process.pid, startIdentity: null },
+      async () => undefined,
+    );
+
+    const retired = `${lock}.retired-${publishedToken}`;
+    const replacementMoved = fs.existsSync(retired)
+      && JSON.parse(fs.readFileSync(path.join(retired, "owner.json"), "utf8")).token === replacementToken;
+    expect(raced).toBe(true);
+    expect(replacementMoved).toBe(false);
+    fs.rmSync(retired, { recursive: true, force: true });
+  });
+
   test("an old claim cannot release a replacement lock", async () => {
     const store = registry();
     const lock = `${store.filename}.locks/${encodeURIComponent("codex:replacement")}`;

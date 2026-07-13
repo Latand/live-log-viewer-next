@@ -1280,8 +1280,10 @@ export class AgentRegistry {
         && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(publishedToken)
         ? publishedToken
         : `abandoned-${publishedStat.dev}-${publishedStat.ino}-${publishedStat.ctimeMs}`;
-      this.finishRetirement(lock, `${lock}.retired-${publishedFingerprint}`);
-      if (fs.existsSync(lock)) return;
+      if (this.sameLock(lock, { dev: publishedStat.dev, ino: publishedStat.ino })
+        && this.lockToken(lock) === publishedToken) {
+        this.finishRetirement(lock, `${lock}.retired-${publishedFingerprint}`);
+      }
     }
     let stat: fs.Stats;
     let owner: (ProcessIdentity & { token?: unknown }) | null = null;
@@ -1294,6 +1296,7 @@ export class AgentRegistry {
       return;
     }
     if (Number.isInteger(owner.pid) && owner.pid > 0 && this.ownerAlive(owner)) {
+      if (fs.existsSync(lock)) return;
       this.restoreRecovery(lock, recovery);
       return;
     }
