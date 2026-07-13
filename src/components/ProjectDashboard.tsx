@@ -19,8 +19,8 @@ import { ConversationList } from "./ConversationList";
 import { clearDraftStorage, draftCwd, draftParentConversationId, draftSrc, replaceUnverifiedDraftCwd, requireDraftCwdConfirmation, seedDraftCwd, setDraftCwd, setDraftSrc, setDraftText } from "./DraftAgentPane";
 import { planBoardConvergence, planClose } from "./projectBoardMutations";
 import { claimedReviewerDescendantPaths, foldClaimedReviewers, isActiveFlow } from "./flows/flowModel";
-import { PipelineDialog } from "./pipelines/PipelineDialog";
-import { createDraftPipeline, pipelinesForProject } from "./pipelines/pipelineModel";
+import { createDraftPipeline, pipelinesForProject, type PipelineTemplate } from "./pipelines/pipelineModel";
+import { PipelineTemplatePicker } from "./pipelines/PipelineTemplatePicker";
 import { buildSchemeLayout } from "./scheme/layout";
 import { collapsibleWorkerFiles, groupWorkerStacks, pipelineOriginOf, pipelineStagePipelineIds, protectedReviewerNodes } from "./scheme/workerCollapse";
 import { WorkerStacks } from "./WorkerStacks";
@@ -28,7 +28,7 @@ import { MobileBottomShelf } from "./MobileBottomShelf";
 import { clearWorkflowDraftStorage } from "./workflows/WorkflowDraftPane";
 import { dropLegacyWorkflowDrafts, isWorkflowDraftId } from "./workflows/workflowModel";
 import { TaskPanel } from "./tasks/TaskPanel";
-import { TaskToastHost } from "./tasks/taskToast";
+import { TaskToastHost, pushTaskToast } from "./tasks/taskToast";
 import { MobileFocusView } from "./mobile/MobileFocusView";
 import { canHandoff, HandoffHandle } from "./HandoffHandle";
 import { SchemeBoard } from "./scheme/SchemeBoard";
@@ -166,7 +166,7 @@ function ProjectViewTabs({
   const { t } = useLocale();
   return (
     <div
-      className={`z-30 inline-flex shrink-0 items-center gap-0.5 rounded-full border border-line bg-panel p-0.5 shadow-card ${
+      className={`z-30 inline-flex shrink-0 items-center gap-0.5 rounded-full border border-border bg-card p-0.5 shadow-1 ${
         header ? "" : floating ? "absolute left-3 top-3" : "mx-3 mt-3 self-start"
       }`}
     >
@@ -179,7 +179,7 @@ function ProjectViewTabs({
           aria-label={t(mode === "scheme" ? "dash.viewScheme" : "dash.viewList")}
           className={`inline-flex items-center justify-center gap-1 rounded-full text-[11px] font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
             header ? "h-11 w-11" : "px-2 py-1"
-          } ${value === mode ? "bg-accent/10 text-accent" : "text-dim hover:text-ink"}`}
+          } ${value === mode ? "bg-accent/10 text-accent" : "text-muted hover:text-primary"}`}
         >
           {mode === "scheme" ? <Network className={header ? "h-3.5 w-3.5" : "h-3 w-3"} aria-hidden /> : <List className={header ? "h-3.5 w-3.5" : "h-3 w-3"} aria-hidden />}
           {header ? null : t(mode === "scheme" ? "dash.viewScheme" : "dash.viewList")}
@@ -227,14 +227,14 @@ function HeaderMenu({
         aria-label={triggerLabel}
         title={triggerLabel}
         onClick={() => setOpen((value) => !value)}
-        className="flex h-11 w-11 items-center justify-center rounded-[8px] border border-line bg-panel text-ink shadow-card hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+        className="flex h-11 w-11 items-center justify-center rounded-[8px] border border-border bg-card text-primary shadow-1 hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
       >
         {icon}
       </button>
       {open ? (
         <div
           role="menu"
-          className="absolute right-0 top-[calc(100%+6px)] z-50 flex w-[210px] max-w-[calc(100vw-1.5rem)] flex-col gap-0.5 rounded-[12px] border border-line bg-panel p-1.5 shadow-[0_10px_36px_rgb(20_20_30/0.18)]"
+          className="absolute right-0 top-[calc(100%+6px)] z-50 flex w-[210px] max-w-[calc(100vw-1.5rem)] flex-col gap-0.5 rounded-[12px] border border-border bg-card p-1.5 shadow-2"
         >
           {children(() => setOpen(false))}
         </div>
@@ -251,7 +251,7 @@ function HeaderMenuItem({ icon, label, onSelect, disabled = false }: { icon: Rea
       role="menuitem"
       onClick={onSelect}
       disabled={disabled}
-      className="flex min-h-11 w-full items-center gap-2 rounded-[9px] px-2.5 text-left text-[13px] font-semibold text-ink hover:bg-bg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:cursor-not-allowed disabled:opacity-45"
+      className="flex min-h-11 w-full items-center gap-2 rounded-[9px] px-2.5 text-left text-[13px] font-semibold text-primary hover:bg-canvas focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:cursor-not-allowed disabled:opacity-45"
     >
       <span className="flex h-5 w-5 shrink-0 items-center justify-center text-accent">{icon}</span>
       {label}
@@ -311,7 +311,9 @@ export function ProjectDashboard({
   const [taskSheetNonce, setTaskSheetNonce] = useState(0);
   /* Place-on-map: the unplaced task whose next board click pins it. */
   const [placeTask, setPlaceTask] = useState<BoardTask | null>(null);
-  const [pipelineDialogOpen, setPipelineDialogOpen] = useState(false);
+  /* Template-first pipeline entry (#196): `+ Пайплайн` opens this picker; the
+     chosen template lands as a draft with its whole role chain on the canvas. */
+  const [templatePickerOpen, setTemplatePickerOpen] = useState(false);
   /* The canvas builder (#136): the draft pipeline whose group panel auto-opens
      right after `+ Пайплайн` drops it, so the operator lands in the builder with
      no hunting for its chip. */
@@ -689,17 +691,19 @@ export function ProjectDashboard({
     pendingFocusRef.current = "draft::" + id;
   };
 
-  /* `+ Пайплайн` on the canvas (#136): drop an empty DRAFT group and open its
-     builder panel — no form. If the repo can't be resolved (or the POST fails),
-     fall back to the creation dialog so the operator can fix it there. */
-  const addPipelineDraft = async () => {
+  /* `+ Пайплайн` (#136, #196): the picker's template lands as a DRAFT whose
+     whole role chain renders as dashed placeholder windows on the canvas; the
+     blank choice drops an empty draft and opens its builder panel. The legacy
+     creation form is gone — a failed POST (unresolvable repo etc.) surfaces as
+     a toast and the operator fixes the repo on the draft itself. */
+  const addPipelineDraft = async (template: PipelineTemplate | null) => {
     if (draftBusy) return;
     onUserNavigate?.();
     setDraftBusy(true);
-    const result = await createDraftPipeline(project);
+    const result = await createDraftPipeline(project, undefined, template ?? undefined);
     setDraftBusy(false);
     if (result.pipeline) setBuilderPipelineId(result.pipeline.id);
-    else setPipelineDialogOpen(true);
+    else if (result.error) pushTaskToast("err", result.error);
   };
 
   /* The handoff handle under a pane: a draft that continues this conversation
@@ -961,14 +965,14 @@ export function ProjectDashboard({
       <div
         className={
           isMobile
-            ? "flex min-h-[52px] shrink-0 items-center gap-1.5 border-b border-line bg-panel px-2 py-1.5"
-            : "flex h-10 shrink-0 items-center gap-2.5 border-b border-line bg-panel px-4"
+            ? "flex min-h-[52px] shrink-0 items-center gap-1.5 border-b border-border bg-card px-2 py-1.5"
+            : "flex h-10 shrink-0 items-center gap-2.5 border-b border-border bg-card px-4"
         }
       >
         {onMenu ? (
           <button
             type="button"
-            className={`flex shrink-0 items-center justify-center rounded-[8px] border border-line bg-bg text-dim hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+            className={`flex shrink-0 items-center justify-center rounded-[8px] border border-border bg-canvas text-muted hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
               isMobile ? "h-11 w-11" : "-ml-1.5 h-7 w-7"
             }`}
             aria-label={t("dash.openProjects")}
@@ -991,19 +995,19 @@ export function ProjectDashboard({
                 <>
                   <HeaderMenuItem icon={<MessageSquarePlus className="h-4 w-4" aria-hidden />} label={t("dash.agent")} disabled={!loaded} onSelect={() => { close(); addDraft(); }} />
                   <HeaderMenuItem icon={<ListTodo className="h-4 w-4" aria-hidden />} label={t("dash.task")} onSelect={() => { close(); addTaskMobile(); }} />
-                  <HeaderMenuItem icon={<span className="text-[15px] font-bold leading-none">≡</span>} label={t("dash.pipeline")} onSelect={() => { close(); setPipelineDialogOpen(true); }} />
+                  <HeaderMenuItem icon={<span className="text-[15px] font-bold leading-none">≡</span>} label={t("dash.pipeline")} onSelect={() => { close(); setTemplatePickerOpen(true); }} />
                 </>
               )}
             </HeaderMenu>
             <HeaderMenu triggerLabel={t("dash.moreMenu")} icon={<MoreHorizontal className="h-5 w-5" aria-hidden />}>
               {() => (
                 <>
-                  <div className="flex min-h-11 items-center gap-2 px-1.5"><span className="text-[13px] font-semibold text-ink">{t("dash.soundMenu")}</span><SoundToggle /></div>
+                  <div className="flex min-h-11 items-center gap-2 px-1.5"><span className="text-[13px] font-semibold text-primary">{t("dash.soundMenu")}</span><SoundToggle /></div>
                   <div className="flex min-h-11 items-center px-1.5">
                     {archived ? (
                       <button
                         type="button"
-                        className="inline-flex min-h-11 shrink-0 items-center gap-1.5 rounded-full border border-line bg-bg px-3 text-[13px] font-semibold text-dim hover:border-accent/40 hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                        className="inline-flex min-h-11 shrink-0 items-center gap-1.5 rounded-full border border-border bg-canvas px-3 text-[13px] font-semibold text-muted hover:border-accent/40 hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
                         onClick={() => onUnarchive(project)}
                       >
                         <ArchiveRestore className="h-4 w-4" aria-hidden /> {t("dash.unarchive")}
@@ -1019,12 +1023,12 @@ export function ProjectDashboard({
           </>
         ) : (
           <>
-            <span className="truncate text-[11.5px] text-dim">{statusBits.length ? statusBits.join(" · ") : t("common.nothingRunning")}</span>
+            <span className="truncate text-[11.5px] text-muted">{statusBits.length ? statusBits.join(" · ") : t("common.nothingRunning")}</span>
             <SoundToggle />
             {archived ? (
               <button
                 type="button"
-                className="inline-flex shrink-0 items-center gap-1 rounded-full border border-line bg-bg px-2 py-0.5 text-[11px] font-semibold text-dim hover:border-accent/40 hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                className="inline-flex shrink-0 items-center gap-1 rounded-full border border-border bg-canvas px-2 py-0.5 text-[11px] font-semibold text-muted hover:border-accent/40 hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
                 onClick={() => onUnarchive(project)}
               >
                 <ArchiveRestore className="h-3 w-3" aria-hidden /> {t("dash.unarchive")}
@@ -1038,8 +1042,8 @@ export function ProjectDashboard({
               onClick={toggleTaskPanel}
               aria-pressed={taskPanelOpen}
               aria-label={t("tasks.panelToggleAria")}
-              className={`ml-auto flex shrink-0 items-center gap-1 rounded-[8px] border px-2.5 py-1 text-[11.5px] font-bold shadow-card focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
-                taskPanelOpen ? "border-accent/45 bg-accent/10 text-accent" : "border-line bg-panel text-ink hover:border-accent/45 hover:text-accent"
+              className={`ml-auto flex shrink-0 items-center gap-1 rounded-[8px] border px-2.5 py-1 text-[11.5px] font-bold shadow-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+                taskPanelOpen ? "border-accent/45 bg-accent/10 text-accent" : "border-border bg-card text-primary hover:border-accent/45 hover:text-accent"
               }`}
             >
               <ListTodo className="h-3.5 w-3.5" aria-hidden /> {t("tasks.panelTitle")}
@@ -1051,9 +1055,9 @@ export function ProjectDashboard({
             </button>
             <button
               type="button"
-              onClick={() => setPipelineDialogOpen(true)}
+              onClick={() => setTemplatePickerOpen(true)}
               aria-label={t("dash.newPipeline")}
-              className="flex shrink-0 items-center gap-1 rounded-[8px] border border-line bg-panel px-2.5 py-1 text-[11.5px] font-bold text-ink shadow-card hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+              className="flex shrink-0 items-center gap-1 rounded-[8px] border border-border bg-card px-2.5 py-1 text-[11.5px] font-bold text-primary shadow-1 hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
             >
               <span className="text-[13px] leading-none text-accent">+</span> {t("dash.pipeline")}
             </button>
@@ -1061,25 +1065,29 @@ export function ProjectDashboard({
         )}
       </div>
 
-      {pipelineDialogOpen ? (
-        /* Keyed by project: this dashboard survives project switches, so a
-           key remount drops project A's task/repo/stages, which keeps them out of
-           project B's draft (and stops A's repo from submitting under B). */
-        <PipelineDialog key={project} project={project} onClose={() => setPipelineDialogOpen(false)} />
+      {templatePickerOpen ? (
+        <PipelineTemplatePicker
+          busy={draftBusy}
+          onClose={() => setTemplatePickerOpen(false)}
+          onPick={(template) => {
+            setTemplatePickerOpen(false);
+            void addPipelineDraft(template);
+          }}
+        />
       ) : null}
 
       {pipelinesError ? (
-        <div className="shrink-0 border-b border-line bg-[#fdf6ec] px-3 py-1.5 text-[11.5px] text-[#8a5b00]" role="alert">
+        <div className="shrink-0 border-b border-border bg-warning-soft px-3 py-1.5 text-[11.5px] text-warning" role="alert">
           {t("dash.pipelinesUnavailable")}
         </div>
       ) : null}
 
       {dockedTasks.length ? (
-        <div className="shrink-0 border-b border-line bg-[#fbfbfd]">
+        <div className="shrink-0 border-b border-border bg-sunken">
           {dockedTasks.map((task) => (
             <div
               key={task.path}
-              className={`border-l-4 ${task.activity === "live" ? "border-l-ok bg-[#f2faf4]" : "border-l-[#9a9aa4]"}`}
+              className={`border-l-4 ${task.activity === "live" ? "border-l-success bg-success-soft" : "border-l-muted"}`}
             >
               <TaskStrip file={task} />
             </div>
@@ -1117,8 +1125,8 @@ export function ProjectDashboard({
           ) : (
             <div className="flex flex-1 items-center justify-center px-4 py-5 text-center">
               <div>
-                <div className="text-[13.5px] font-semibold text-dim">{t("dash.emptyTitle")}</div>
-                <div className="mt-0.5 text-[12px] text-dim">{t("dash.emptyHint")}</div>
+                <div className="text-[13.5px] font-semibold text-muted">{t("dash.emptyTitle")}</div>
+                <div className="mt-0.5 text-[12px] text-muted">{t("dash.emptyHint")}</div>
               </div>
             </div>
           )}
@@ -1160,8 +1168,8 @@ export function ProjectDashboard({
             ) : (
               <div className="flex flex-1 items-center justify-center px-4 py-5 text-center">
                 <div>
-                  <div className="text-[13.5px] font-semibold text-dim">{t("dash.emptyTitle")}</div>
-                  <div className="mt-0.5 text-[12px] text-dim">{t("dash.emptyHint")}</div>
+                  <div className="text-[13.5px] font-semibold text-muted">{t("dash.emptyTitle")}</div>
+                  <div className="mt-0.5 text-[12px] text-muted">{t("dash.emptyHint")}</div>
                 </div>
               </div>
             )}
@@ -1174,7 +1182,7 @@ export function ProjectDashboard({
                 onClick={addDraft}
                 disabled={!loaded}
                 aria-label={t("dash.newConvo")}
-                className="pointer-events-auto flex shrink-0 items-center gap-1 rounded-[8px] border border-line bg-panel px-3 py-1.5 text-[11.5px] font-bold text-ink shadow-card hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:cursor-not-allowed disabled:opacity-45"
+                className="pointer-events-auto flex shrink-0 items-center gap-1 rounded-[8px] border border-border bg-card px-3 py-1.5 text-[11.5px] font-bold text-primary shadow-1 hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:cursor-not-allowed disabled:opacity-45"
               >
                 <span className="text-[13px] leading-none text-accent">+</span> {t("dash.agent")}
               </button>
@@ -1182,16 +1190,16 @@ export function ProjectDashboard({
                 type="button"
                 onClick={addTask}
                 aria-label={t("dash.newTask")}
-                className="pointer-events-auto flex shrink-0 items-center gap-1 rounded-[8px] border border-line bg-panel px-3 py-1.5 text-[11.5px] font-bold text-ink shadow-card hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                className="pointer-events-auto flex shrink-0 items-center gap-1 rounded-[8px] border border-border bg-card px-3 py-1.5 text-[11.5px] font-bold text-primary shadow-1 hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
               >
                 <span className="text-[13px] leading-none text-accent">+</span> {t("dash.task")}
               </button>
               <button
                 type="button"
-                onClick={() => void addPipelineDraft()}
+                onClick={() => setTemplatePickerOpen(true)}
                 disabled={draftBusy}
                 aria-label={t("pipelineBuilder.createDraftAria")}
-                className="pointer-events-auto flex shrink-0 items-center gap-1 rounded-[8px] border border-line bg-panel px-3 py-1.5 text-[11.5px] font-bold text-ink shadow-card hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-50"
+                className="pointer-events-auto flex shrink-0 items-center gap-1 rounded-[8px] border border-border bg-card px-3 py-1.5 text-[11.5px] font-bold text-primary shadow-1 hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-50"
               >
                 <span className="text-[13px] leading-none text-accent">+</span> {t("board.pipeline")}
               </button>

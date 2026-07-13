@@ -1,13 +1,13 @@
 @import "tailwindcss";
 
 /* The design system's token set (issue #155 §1): type, spacing, radius,
-   surfaces, color roles, motion — plus legacy `--color-*` aliases so untouched
-   components render unchanged during the slice migration. */
+   surfaces, color roles, motion, and the dark palette. Slice 3 removed the
+   legacy `--color-*` aliases — every component now names a role directly. */
 @import "../styles/tokens.css";
 
 body {
-  background: var(--color-bg);
-  color: var(--color-ink);
+  background: var(--color-canvas);
+  color: var(--color-primary);
 }
 
 /* Native <button> ships with `cursor: default`, so every custom control in the
@@ -77,9 +77,9 @@ body {
     var(--pane-glow) 280deg,
     transparent 350deg 360deg
   );
-  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask: linear-gradient(black 0 0) content-box, linear-gradient(black 0 0);
   -webkit-mask-composite: xor;
-  mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  mask: linear-gradient(black 0 0) content-box, linear-gradient(black 0 0);
   mask-composite: exclude;
   animation: pane-orbit 3.4s linear infinite;
 }
@@ -95,7 +95,7 @@ body {
    in a single source of truth. */
 .hljs-comment,
 .hljs-quote {
-  color: var(--color-dim);
+  color: var(--color-muted);
   font-style: italic;
 }
 .hljs-keyword,
@@ -109,7 +109,7 @@ body {
 .hljs-attr,
 .hljs-template-tag,
 .hljs-addition {
-  color: var(--color-ok);
+  color: var(--color-success);
 }
 .hljs-number,
 .hljs-literal,
@@ -121,7 +121,7 @@ body {
 }
 .hljs-deletion,
 .hljs-meta {
-  color: var(--color-err);
+  color: var(--color-danger);
 }
 
 /* Scrollable chip rows inside pill-shaped controls (the flow strip): the
@@ -201,7 +201,7 @@ body {
 /* The live round breathing behind an older card pulled to the front. */
 @keyframes deck-live {
   50% {
-    box-shadow: 0 0 0 3px rgb(26 138 62 / 0.25);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-success) 25%, transparent);
   }
 }
 
@@ -257,8 +257,8 @@ body {
    border switches to the gesture's own teal, overriding whatever lifecycle
    tone the pane wears — hence the !important against the utility classes. */
 [data-link-hover] {
-  border-color: #0d9488 !important;
+  border-color: var(--color-info) !important;
   box-shadow:
-    0 0 0 3px rgb(13 148 136 / 0.25),
-    0 1px 2px rgb(20 20 30 / 0.05) !important;
+    0 0 0 3px color-mix(in srgb, var(--color-info) 25%, transparent),
+    var(--shadow-1) !important;
 }

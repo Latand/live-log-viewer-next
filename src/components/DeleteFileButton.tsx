@@ -49,11 +49,11 @@ export function DeleteFileButton({ file, onDeleted }: { file: FileEntry; onDelet
 
   if (confirming) {
     return (
-      <span className="inline-flex shrink-0 items-center gap-1 rounded-[10px] border border-err/30 bg-[#fff5f5] px-1.5 py-0.5 text-[11px]">
-        <span className="px-0.5 font-semibold text-err">{t("delFile.confirm")}</span>
+      <span className="inline-flex shrink-0 items-center gap-1 rounded-[10px] border border-danger/30 bg-danger-soft px-1.5 py-0.5 text-[11px]">
+        <span className="px-0.5 font-semibold text-danger">{t("delFile.confirm")}</span>
         <button
           type="button"
-          className={`inline-flex items-center rounded-lg bg-err font-bold text-white disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-err/50 ${
+          className={`inline-flex items-center rounded-lg bg-danger font-bold text-white disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-danger/50 ${
             isMobile ? "min-h-11 px-3" : "px-2 py-0.5"
           }`}
           disabled={deleting}
@@ -63,7 +63,7 @@ export function DeleteFileButton({ file, onDeleted }: { file: FileEntry; onDelet
         </button>
         <button
           type="button"
-          className={`inline-flex items-center rounded-lg border border-line bg-panel font-semibold text-dim focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+          className={`inline-flex items-center rounded-lg border border-border bg-card font-semibold text-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
             isMobile ? "min-h-11 px-3" : "px-2 py-0.5"
           }`}
           onClick={() => setConfirming(false)}
@@ -77,7 +77,7 @@ export function DeleteFileButton({ file, onDeleted }: { file: FileEntry; onDelet
     <span className="inline-flex shrink-0 items-center gap-1">
       <button
         type="button"
-        className={`inline-flex items-center justify-center rounded-[8px] border border-line bg-bg text-dim hover:border-err/40 hover:text-err focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+        className={`inline-flex items-center justify-center rounded-[8px] border border-border bg-canvas text-muted hover:border-danger/40 hover:text-danger focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
           isMobile ? "h-11 w-11" : "px-1.5 py-0.5"
         }`}
         aria-label={t("delFile.aria")}
@@ -87,7 +87,7 @@ export function DeleteFileButton({ file, onDeleted }: { file: FileEntry; onDelet
         <Trash2 className={isMobile ? "h-4 w-4" : "h-3 w-3"} aria-hidden />
       </button>
       {error ? (
-        <span className="max-w-[160px] truncate text-[10.5px] font-semibold text-err" title={error}>
+        <span className="max-w-[160px] truncate text-[10.5px] font-semibold text-danger" title={error}>
           {error}
         </span>
       ) : null}

@@ -56,7 +56,7 @@ function Section({
     <section className="shrink-0">
       <div className="mb-2 flex items-baseline gap-2">
         <h2 className="text-[13px] font-bold">{title}</h2>
-        <span className="text-[11px] font-semibold text-dim">{items.length}</span>
+        <span className="text-[11px] font-semibold text-muted">{items.length}</span>
       </div>
       <FlipRow className="flex flex-wrap gap-2.5" enter="fade">
         {items.map((item) => {
@@ -135,15 +135,15 @@ export function Switchboard({ files, flows, project, loaded, onOpenFile, onOpenC
     <>
       <CornerStatus data={cornerData} onOpen={() => setOpen(true)} />
       {open ? (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink/28 p-[2.5vh]" onMouseDown={() => setOpen(false)}>
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-primary/28 p-[2.5vh]" onMouseDown={() => setOpen(false)}>
           <div
-            className="flex h-[95vh] w-[95vw] flex-col overflow-hidden rounded-[8px] border border-line bg-bg shadow-[0_18px_70px_rgb(20_20_30/0.28)]"
+            className="flex h-[95vh] w-[95vw] flex-col overflow-hidden rounded-[8px] border border-border bg-canvas shadow-2"
             role="dialog"
             aria-modal="true"
             aria-label={t("switch.aria")}
             onMouseDown={(event) => event.stopPropagation()}
           >
-            <header className="flex h-14 shrink-0 items-center gap-3 border-b border-line bg-panel px-4">
+            <header className="flex h-14 shrink-0 items-center gap-3 border-b border-border bg-card px-4">
               <div className="text-[15px] font-bold">{t("switch.title")}</div>
               <CodexAccountSwitch />
               <input
@@ -151,11 +151,11 @@ export function Switchboard({ files, flows, project, loaded, onOpenFile, onOpenC
                 value={query}
                 onChange={(event) => setQuery(event.target.value)}
                 placeholder={t("switch.search")}
-                className="h-9 min-w-0 flex-1 rounded-[8px] border border-line bg-bg px-3 text-[13px] outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                className="h-9 min-w-0 flex-1 rounded-[8px] border border-border bg-canvas px-3 text-[13px] outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
               />
-              {timeline.loading ? <span className="text-[11px] font-semibold text-dim">{t("switch.updating")}</span> : null}
+              {timeline.loading ? <span className="text-[11px] font-semibold text-muted">{t("switch.updating")}</span> : null}
               <button
-                className="inline-flex h-8 w-8 items-center justify-center rounded-[8px] border border-line bg-bg text-dim hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                className="inline-flex h-8 w-8 items-center justify-center rounded-[8px] border border-border bg-canvas text-muted hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
                 aria-label={t("switch.close")}
                 onClick={() => setOpen(false)}
               >
@@ -167,35 +167,35 @@ export function Switchboard({ files, flows, project, loaded, onOpenFile, onOpenC
                 <section className="mx-auto w-full max-w-[900px]">
                   <div className="mb-2 flex items-baseline gap-2">
                     <h2 className="text-[13px] font-bold">{t("switch.results")}</h2>
-                    <span className="text-[11px] font-semibold text-dim">{catalogSearch.total}</span>
+                    <span className="text-[11px] font-semibold text-muted">{catalogSearch.total}</span>
                   </div>
                   <div className="space-y-1.5">
                     {catalogSearch.items.map((file) => (
                       <button
                         key={file.path}
                         type="button"
-                        className="flex min-h-11 w-full min-w-0 items-center gap-2 rounded-[8px] border border-line bg-panel px-3 text-left shadow-card hover:border-accent/40 hover:bg-bg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                        className="flex min-h-11 w-full min-w-0 items-center gap-2 rounded-[8px] border border-border bg-card px-3 text-left shadow-1 hover:border-accent/40 hover:bg-canvas focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
                         onClick={() => {
                           onOpenCatalogFile(file);
                           setOpen(false);
                         }}
                       >
-                        <span className="min-w-0 flex-1 truncate text-[12.5px] font-semibold text-ink">{cleanTitle(file.title, 100)}</span>
-                        <span className="max-w-[240px] shrink-0 truncate rounded-full border border-line bg-bg px-2 py-0.5 text-[10.5px] font-semibold text-dim">{file.project}</span>
+                        <span className="min-w-0 flex-1 truncate text-[12.5px] font-semibold text-primary">{cleanTitle(file.title, 100)}</span>
+                        <span className="max-w-[240px] shrink-0 truncate rounded-full border border-border bg-canvas px-2 py-0.5 text-[10.5px] font-semibold text-muted">{file.project}</span>
                       </button>
                     ))}
                   </div>
                   {catalogSearch.loading && !catalogSearch.items.length ? (
-                    <div className="flex items-center justify-center gap-2 pt-[18vh] text-[13px] font-semibold text-dim">
+                    <div className="flex items-center justify-center gap-2 pt-[18vh] text-[13px] font-semibold text-muted">
                       <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> {t("common.loading")}
                     </div>
                   ) : null}
                   {catalogSearch.error ? (
-                    <div className="flex min-h-11 items-center justify-center gap-3 pt-4 text-[13px] font-semibold text-err">
+                    <div className="flex min-h-11 items-center justify-center gap-3 pt-4 text-[13px] font-semibold text-danger">
                       <span>{t("list.failed")}</span>
                       <button
                         type="button"
-                        className="min-h-11 rounded-[8px] border border-line bg-panel px-4 font-bold text-ink hover:border-accent/40 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                        className="min-h-11 rounded-[8px] border border-border bg-card px-4 font-bold text-primary hover:border-accent/40 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
                         onClick={catalogSearch.retry}
                       >
                         {t("list.retry")}
@@ -203,12 +203,12 @@ export function Switchboard({ files, flows, project, loaded, onOpenFile, onOpenC
                     </div>
                   ) : null}
                   {!catalogSearch.loading && !catalogSearch.error && !catalogSearch.items.length ? (
-                    <div className="pt-[18vh] text-center text-[13px] font-semibold text-dim">{t("common.nothingFound")}</div>
+                    <div className="pt-[18vh] text-center text-[13px] font-semibold text-muted">{t("common.nothingFound")}</div>
                   ) : null}
                   {catalogSearch.nextCursor && !catalogSearch.error ? (
                     <button
                       type="button"
-                      className="mt-3 flex min-h-11 w-full items-center justify-center rounded-[8px] border border-line bg-panel px-4 text-[12.5px] font-bold text-ink hover:border-accent/40 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60"
+                      className="mt-3 flex min-h-11 w-full items-center justify-center rounded-[8px] border border-border bg-card px-4 text-[12.5px] font-bold text-primary hover:border-accent/40 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60"
                       disabled={catalogSearch.loading}
                       onClick={catalogSearch.loadMore}
                     >
@@ -223,12 +223,12 @@ export function Switchboard({ files, flows, project, loaded, onOpenFile, onOpenC
               <Section title={t("switch.recent")} items={data.recent} size="small" currentProject={project} onOpenFile={openFile} onArchive={archiveFile} />
               <section className="shrink-0">
                 <button
-                  className="flex h-10 w-full items-center justify-between rounded-[8px] border border-line bg-panel px-3 text-left text-[12.5px] font-bold hover:border-accent/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                  className="flex h-10 w-full items-center justify-between rounded-[8px] border border-border bg-card px-3 text-left text-[12.5px] font-bold hover:border-accent/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
                   aria-expanded={olderOpen}
                   onClick={() => setOlderOpen((value) => !value)}
                 >
                   <span>{t("switch.older")}</span>
-                  <span className="text-dim">{data.older.length}</span>
+                  <span className="text-muted">{data.older.length}</span>
                 </button>
                 {olderOpen ? (
                   <div className="mt-2">
@@ -238,9 +238,9 @@ export function Switchboard({ files, flows, project, loaded, onOpenFile, onOpenC
               </section>
               {!data.waiting.length && !data.working.length && !data.recent.length && !data.older.length ? (
                 loaded ? (
-                  <div className="pt-[18vh] text-center text-[13px] font-semibold text-dim">{t("common.nothingFound")}</div>
+                  <div className="pt-[18vh] text-center text-[13px] font-semibold text-muted">{t("common.nothingFound")}</div>
                 ) : (
-                  <div className="flex items-center justify-center gap-2 pt-[18vh] text-[13px] font-semibold text-dim">
+                  <div className="flex items-center justify-center gap-2 pt-[18vh] text-[13px] font-semibold text-muted">
                     <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
                     {t("common.loading")}
                   </div>
@@ -249,7 +249,7 @@ export function Switchboard({ files, flows, project, loaded, onOpenFile, onOpenC
               {archivedItems.length ? (
                 <section className="shrink-0">
                   <button
-                    className="flex h-9 w-full items-center justify-between rounded-[8px] border border-line bg-panel px-3 text-left text-[12px] font-bold text-dim hover:border-accent/40 hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                    className="flex h-9 w-full items-center justify-between rounded-[8px] border border-border bg-card px-3 text-left text-[12px] font-bold text-muted hover:border-accent/40 hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
                     aria-expanded={archivedOpen}
                     onClick={() => setArchivedOpen((value) => !value)}
                   >
@@ -261,12 +261,12 @@ export function Switchboard({ files, flows, project, loaded, onOpenFile, onOpenC
                       {archivedItems.map((item) => (
                         <div
                           key={conversationIdentity(item.file)}
-                          className="flex min-w-0 items-center gap-2 rounded-[8px] border border-line bg-panel/60 px-3 py-1.5 text-[11.5px] text-dim"
+                          className="flex min-w-0 items-center gap-2 rounded-[8px] border border-border bg-card/60 px-3 py-1.5 text-[11.5px] text-muted"
                         >
                           <span className="min-w-0 flex-1 truncate">{item.title}</span>
                           <span className="shrink-0 truncate text-[10.5px]">{item.project}</span>
                           <button
-                            className="shrink-0 rounded-full border border-line bg-bg px-2 py-0.5 text-[10.5px] font-semibold text-ink hover:border-accent/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                            className="shrink-0 rounded-full border border-border bg-canvas px-2 py-0.5 text-[10.5px] font-semibold text-primary hover:border-accent/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
                             onClick={() => unarchive(item.file.path)}
                           >
                             {t("switch.restore")}

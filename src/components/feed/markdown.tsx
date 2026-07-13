@@ -37,7 +37,7 @@ function InlineCode({ text }: { text: string }) {
           timer.current = window.setTimeout(() => setCopied(false), 1_400);
         });
       }}
-      className={`cursor-copy rounded-md px-1.5 py-0.5 font-mono ${copied ? "bg-ok/15 text-ok" : "bg-chip"}`}
+      className={`cursor-copy rounded-md px-1.5 py-0.5 font-mono ${copied ? "bg-success/15 text-success" : "bg-sunken"}`}
     >
       {text}
     </span>
@@ -55,11 +55,11 @@ export function CodeBlock({ code, lang }: { code: string; lang?: string | null }
     <div className="group/code relative my-1.5 max-w-full">
       {highlighted ? (
         <pre
-          className="hljs max-w-full overflow-x-auto rounded-[10px] border border-line bg-bg px-3 py-2 font-mono text-[11.5px]"
+          className="hljs max-w-full overflow-x-auto rounded-[10px] border border-border bg-canvas px-3 py-2 font-mono text-[11.5px]"
           dangerouslySetInnerHTML={{ __html: highlighted }}
         />
       ) : (
-        <pre className="max-w-full overflow-x-auto rounded-[10px] border border-line bg-bg px-3 py-2 font-mono text-[11.5px]">{code}</pre>
+        <pre className="max-w-full overflow-x-auto rounded-[10px] border border-border bg-canvas px-3 py-2 font-mono text-[11.5px]">{code}</pre>
       )}
       <CopyButton
         text={code}
@@ -120,7 +120,7 @@ function MdImage({ alt, src }: { alt: string; src: string }) {
         loading="lazy"
         onClick={() => setFull(true)}
         onError={() => setFailed(true)}
-        className="my-1 max-h-[240px] max-w-full cursor-zoom-in rounded-[10px] border border-line align-top"
+        className="my-1 max-h-[240px] max-w-full cursor-zoom-in rounded-[10px] border border-border align-top"
       />
       {full ? <Lightbox src={resolved} alt={alt} caption={alt || undefined} onClose={() => setFull(false)} /> : null}
     </>
@@ -191,7 +191,7 @@ function MdTable({ rows }: { rows: string[] }) {
           <thead>
             <tr>
               {head.map((cell, i) => (
-                <th key={i} className="border border-line bg-chip px-2.5 py-1 text-left font-semibold">
+                <th key={i} className="border border-border bg-sunken px-2.5 py-1 text-left font-semibold">
                   {md(cell)}
                 </th>
               ))}
@@ -202,7 +202,7 @@ function MdTable({ rows }: { rows: string[] }) {
           {body.map((row, i) => (
             <tr key={i}>
               {row.map((cell, j) => (
-                <td key={j} className="border border-line px-2.5 py-1 align-top">
+                <td key={j} className="border border-border px-2.5 py-1 align-top">
                   {md(cell)}
                 </td>
               ))}
@@ -269,7 +269,7 @@ export function mdBlocks(text: string): ReactNode {
       );
     } else if (quote) {
       out.push(
-        <span key={i} className="border-l-2 border-line pl-2 text-dim">
+        <span key={i} className="border-l-2 border-border pl-2 text-muted">
           {md(quote[1])}
         </span>,
       );

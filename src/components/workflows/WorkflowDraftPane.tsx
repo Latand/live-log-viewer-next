@@ -144,16 +144,16 @@ export function WorkflowDraftPane({
   return (
     <section
       data-pan-ignore
-      className="relative flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-[10px] border border-line bg-panel shadow-card"
+      className="relative flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-[10px] border border-border bg-card shadow-1"
       aria-label={t("wfDraft.paneAria")}
     >
       <span aria-hidden className="h-1 w-full shrink-0 bg-accent" />
-      <header className="flex h-10 shrink-0 items-center gap-2 border-b border-line bg-[#ecebfb] px-2.5">
-        <span className="h-2 w-2 shrink-0 rounded-full bg-[#c9c9d1]" title={t("wfDraft.notStarted")} />
+      <header className="flex h-10 shrink-0 items-center gap-2 border-b border-border bg-accent-soft px-2.5">
+        <span className="h-2 w-2 shrink-0 rounded-full bg-strong" title={t("wfDraft.notStarted")} />
         <span className="shrink-0 text-[10.5px] font-bold tracking-[0.08em] text-accent">{t("wfStrip.workflow")}</span>
-        <span className="min-w-0 flex-1 truncate text-[12px] font-semibold text-dim">{t("wfDraft.newWorkflow")}</span>
+        <span className="min-w-0 flex-1 truncate text-[12px] font-semibold text-muted">{t("wfDraft.newWorkflow")}</span>
         <button
-          className="inline-flex shrink-0 items-center rounded-[8px] border border-line bg-bg px-1.5 py-0.5 text-dim hover:border-err/40 hover:text-err focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+          className="inline-flex shrink-0 items-center rounded-[8px] border border-border bg-canvas px-1.5 py-0.5 text-muted hover:border-danger/40 hover:text-danger focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
           aria-label={t("wfDraft.dismiss")}
           onClick={onClose}
         >
@@ -161,15 +161,15 @@ export function WorkflowDraftPane({
         </button>
       </header>
 
-      <div className="flex shrink-0 flex-col gap-1.5 border-b border-line bg-[#fbfbfd] px-2.5 py-2">
+      <div className="flex shrink-0 flex-col gap-1.5 border-b border-border bg-sunken px-2.5 py-2">
         <label className="flex items-center gap-1.5">
-          <span className="w-[72px] shrink-0 text-[10px] font-semibold text-dim">{t("wfDraft.template")}</span>
+          <span className="w-[72px] shrink-0 text-[10px] font-semibold text-muted">{t("wfDraft.template")}</span>
           <select
             value={template}
             disabled={busy}
             onChange={(event) => setTemplate(event.target.value)}
             aria-label={t("wfDraft.templateAria")}
-            className="min-w-0 flex-1 rounded-[6px] border border-line bg-panel px-2 py-1 text-[11.5px] text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60"
+            className="min-w-0 flex-1 rounded-[6px] border border-border bg-card px-2 py-1 text-[11.5px] text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60"
           >
             {templates.map((item) => (
               <option key={item.name} value={item.name}>
@@ -179,7 +179,7 @@ export function WorkflowDraftPane({
           </select>
         </label>
         <label className="flex items-center gap-1.5">
-          <span className="w-[72px] shrink-0 text-[10px] font-semibold text-dim">{t("wfDraft.repo")}</span>
+          <span className="w-[72px] shrink-0 text-[10px] font-semibold text-muted">{t("wfDraft.repo")}</span>
           <input
             value={dir}
             disabled={busy}
@@ -187,7 +187,7 @@ export function WorkflowDraftPane({
             list={dirListId}
             placeholder="/home/…/Projects/…"
             aria-label={t("wfDraft.repoAria")}
-            className="min-w-0 flex-1 rounded-[6px] border border-line bg-panel px-2 py-1 font-mono text-[11px] text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60"
+            className="min-w-0 flex-1 rounded-[6px] border border-border bg-card px-2 py-1 font-mono text-[11px] text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60"
           />
           <datalist id={dirListId}>
             {dirs.map((item) => (
@@ -195,8 +195,8 @@ export function WorkflowDraftPane({
             ))}
           </datalist>
         </label>
-        <label className="flex items-center gap-1.5 text-[10.5px] font-semibold text-dim">
-          <input type="checkbox" checked={manual} disabled={busy} onChange={(event) => setManual(event.target.checked)} className="accent-[#5a51e0]" />
+        <label className="flex items-center gap-1.5 text-[10.5px] font-semibold text-muted">
+          <input type="checkbox" checked={manual} disabled={busy} onChange={(event) => setManual(event.target.checked)} className="accent-accent" />
           {t("wfDraft.manualMode")}
         </label>
       </div>
@@ -207,23 +207,23 @@ export function WorkflowDraftPane({
             {picked.stages.map((stage, index) => (
               <span key={index} className="flex items-center gap-1.5">
                 {index > 0 ? (
-                  <span className="text-[10px] font-bold text-[#c9c9d1]" aria-hidden>
+                  <span className="text-[10px] font-bold text-strong" aria-hidden>
                     →
                   </span>
                 ) : null}
-                <span className="inline-flex h-6 max-w-[200px] items-center truncate rounded-full bg-chip px-2 text-[10.5px] font-bold text-[#555]">
+                <span className="inline-flex h-6 max-w-[200px] items-center truncate rounded-full bg-sunken px-2 text-[10.5px] font-bold text-secondary">
                   {stage.kind === "review-loop"
                     ? `${t("wfStrip.reviewStage")} · ${stage.reviewer.engine}${stage.reviewer.model ? " " + stage.reviewer.model : ""}${stage.reviewer.effort ? " " + stage.reviewer.effort : ""}`
                     : `${stage.scope.split(/[.:\n]/)[0]} · ${stage.agent.engine}${stage.agent.model ? " " + stage.agent.model : ""}${stage.agent.effort ? " " + stage.agent.effort : ""}`}
                 </span>
               </span>
             ))}
-            <span className="inline-flex h-6 items-center rounded-full bg-chip px-2 text-[10.5px] font-bold text-[#555]">
+            <span className="inline-flex h-6 items-center rounded-full bg-sunken px-2 text-[10.5px] font-bold text-secondary">
               → {picked.finish === "merge" ? t("wfDraft.finishMerge") : "PR"}
             </span>
           </div>
         ) : (
-          <div className="text-[12px] text-dim">{t("wfDraft.hint")}</div>
+          <div className="text-[12px] text-muted">{t("wfDraft.hint")}</div>
         )}
         <textarea
           value={task}
@@ -231,17 +231,17 @@ export function WorkflowDraftPane({
           onChange={(event) => setTask(event.target.value)}
           placeholder={t("wfDraft.taskPlaceholder")}
           aria-label={t("wfDraft.taskAria")}
-          className="min-h-[160px] flex-1 resize-none rounded-[8px] border border-line bg-panel px-2.5 py-2 text-[12.5px] leading-snug text-ink placeholder:text-dim/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60"
+          className="min-h-[160px] flex-1 resize-none rounded-[8px] border border-border bg-card px-2.5 py-2 text-[12.5px] leading-snug text-primary placeholder:text-muted/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60"
         />
       </div>
 
-      <div className="flex shrink-0 items-center gap-2 border-t border-line bg-[#fbfbfd] px-2.5 py-2">
+      <div className="flex shrink-0 items-center gap-2 border-t border-border bg-sunken px-2.5 py-2">
         {error ? (
-          <span className="min-w-0 flex-1 truncate text-[11px] font-semibold text-err" title={error}>
+          <span className="min-w-0 flex-1 truncate text-[11px] font-semibold text-danger" title={error}>
             {error}
           </span>
         ) : (
-          <span className="min-w-0 flex-1 truncate text-[10.5px] text-dim">{t("wfDraft.footerHint")}</span>
+          <span className="min-w-0 flex-1 truncate text-[10.5px] text-muted">{t("wfDraft.footerHint")}</span>
         )}
         <button
           className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-accent bg-accent px-3.5 py-1.5 text-[11.5px] font-bold text-white hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 disabled:opacity-40"

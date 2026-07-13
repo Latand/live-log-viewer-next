@@ -67,7 +67,7 @@ export const SHOTS: DemoShot[] = [
     frame: {
       visible: [
         { selector: "section[data-link-path]", text: "Ship a deterministic demo capture", minWidth: 640, minHeight: 420 },
-        { selector: "details[open]", text: "src/capture.ts", minWidth: 360, minHeight: 80 },
+        { selector: "details[open]", text: "src/capture.ts", minWidth: 280, minHeight: 80 },
       ],
       absentText: [],
       pixels: FRAME_PIXELS,

@@ -41,7 +41,147 @@ const ENGINES: { key: Engine; label: string }[] = [
 
 const field = (id: string, name: string) => `llvDraftPane:${id}:${name}`;
 
-type RoleCatalogItem = RoleDefinition & { promptPreview: string };
+export type RoleCatalogItem = RoleDefinition & { promptPreview: string };
+
+/**
+ * The engine picker chips every draft-style window shares — the agent draft
+ * pane and the pipeline stage placeholders render the exact same control
+ * (issue #196: one window recipe, no lookalikes).
+ */
+export function EngineRadioGroup({
+  engine,
+  disabled,
+  onChange,
+}: {
+  engine: Engine;
+  disabled?: boolean;
+  onChange: (engine: Engine) => void;
+}) {
+  const { t } = useLocale();
+  return (
+    <div className="flex shrink-0 items-center gap-1" role="radiogroup" aria-label={t("draft.engineAria")}>
+      {ENGINES.map(({ key, label }) => {
+        const active = engine === key;
+        const chip = engineTintOf(key);
+        return (
+          <button
+            key={key}
+            type="button"
+            role="radio"
+            aria-checked={active}
+            disabled={disabled}
+            onClick={() => onChange(key)}
+            style={active ? { backgroundColor: "var(--color-card)", color: chip.color, borderColor: chip.color } : undefined}
+            className={`rounded-full border px-2 py-0.5 text-[10.5px] font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60 ${
+              active ? "" : "border-transparent bg-transparent text-muted hover:text-primary"
+            }`}
+          >
+            {label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+/** The shared /api/roles catalog fetch (agent drafts + stage placeholders). */
+export function useRoleCatalog(): RoleCatalogItem[] {
+  const [roles, setRoles] = useState<RoleCatalogItem[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    void fetch("/api/roles").then(async (res) => {
+      if (!res.ok) return;
+      const body = await res.json() as { roles?: RoleCatalogItem[] };
+      if (!cancelled && Array.isArray(body.roles)) setRoles(body.roles);
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
+  return roles;
+}
+
+/**
+ * The role block every draft-style window shares: role select, description,
+ * typed parameters, and the scaffold + safety-fences preview. `allowedRoleIds`
+ * narrows the catalog (a pipeline stage may not use deployer); `children`
+ * renders extra fields between the params and the preview (the agent draft's
+ * deploy confirm). `compactPreview` caps the scaffold preview's height for
+ * fixed-height hosts (stage placeholder windows).
+ */
+export function RoleSection({
+  idPrefix,
+  roles,
+  roleId,
+  roleParams,
+  disabled,
+  allowedRoleIds,
+  compactPreview,
+  onSelectRole,
+  onSetParam,
+  children,
+}: {
+  idPrefix: string;
+  roles: RoleCatalogItem[];
+  roleId: string;
+  roleParams: Record<string, string | number>;
+  disabled?: boolean;
+  allowedRoleIds?: ReadonlySet<string>;
+  compactPreview?: boolean;
+  onSelectRole: (roleId: string) => void;
+  onSetParam: (key: string, value: string | number) => void;
+  children?: React.ReactNode;
+}) {
+  const { t } = useLocale();
+  const offered = allowedRoleIds ? roles.filter((role) => allowedRoleIds.has(role.id)) : roles;
+  const selectedRole = offered.find((role) => role.id === roleId) ?? null;
+  return (
+    <div className="flex shrink-0 flex-col gap-1.5 border-b border-border bg-sunken px-2.5 py-1.5">
+      <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+        <label className="shrink-0 text-[10px] font-semibold text-muted" htmlFor={`draft-role-${idPrefix}`}>{t("draft.role")}</label>
+        <select
+          id={`draft-role-${idPrefix}`}
+          value={roleId}
+          disabled={disabled}
+          onChange={(event) => onSelectRole(event.target.value)}
+          aria-label={t("draft.roleAria")}
+          className="h-7 min-w-0 flex-1 rounded-[8px] border border-border bg-card px-1.5 text-[11px] text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60"
+        >
+          <option value="">{t("draft.noRole")}</option>
+          {offered.map((role) => <option key={role.id} value={role.id}>{role.name}</option>)}
+        </select>
+      </div>
+      {selectedRole ? (
+        <>
+          <p className="text-[10px] leading-4 text-muted">{selectedRole.description}</p>
+          {selectedRole.parameters.length ? (
+            <div className="flex flex-wrap gap-1.5" role="group" aria-label={t("draft.roleParameters")}>
+              {selectedRole.parameters.map((parameter) => (
+                <label key={parameter.key} className="flex min-w-28 flex-1 flex-col gap-0.5 text-[10px] text-muted">
+                  <span>{parameter.label}{parameter.required ? " *" : ""}</span>
+                  {parameter.kind === "select" ? (
+                    <select value={String(roleParams[parameter.key] ?? "")} disabled={disabled} onChange={(event) => onSetParam(parameter.key, event.target.value)} className="h-7 rounded-[7px] border border-border bg-card px-1 text-[11px] text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60">
+                      {parameter.options?.map((option) => <option key={option} value={option}>{option}</option>)}
+                    </select>
+                  ) : (
+                    <input type={parameter.kind === "integer" ? "number" : "text"} min={parameter.min} max={parameter.max} value={String(roleParams[parameter.key] ?? "")} disabled={disabled} onChange={(event) => onSetParam(parameter.key, parameter.kind === "integer" && event.target.value ? Number(event.target.value) : event.target.value)} aria-label={parameter.label} className="h-7 min-w-0 rounded-[7px] border border-border bg-card px-1.5 text-[11px] text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60" />
+                  )}
+                  <span className="leading-3">{parameter.description}</span>
+                </label>
+              ))}
+            </div>
+          ) : null}
+          {children}
+          <div className="rounded-[7px] border border-border bg-sunken px-2 py-1.5 text-[10px] leading-4 text-muted">
+            <span className="font-semibold text-primary">{t("draft.scaffoldPreview")}</span>
+            <pre className={`mt-1 whitespace-pre-wrap font-sans ${compactPreview ? "max-h-24 overflow-y-auto" : ""}`}>{scaffoldPreview(selectedRole.promptPreview, roleParams)}</pre>
+            <ul className={`mt-1 list-disc pl-4 ${compactPreview ? "max-h-16 overflow-y-auto" : ""}`} aria-label={t("draft.safetyFences")}>
+              {selectedRole.safetyFences.map((fence) => <li key={fence}>{fence}</li>)}
+            </ul>
+          </div>
+        </>
+      ) : null}
+    </div>
+  );
+}
 
 function readField(id: string, name: string): string {
   if (typeof window === "undefined") return "";
@@ -194,7 +334,7 @@ export function DraftAgentPane({
     return stored === "fast" || stored === "standard" ? stored : "";
   });
   const [accountId, setAccountIdState] = useState(() => readField(draftId, "accountId"));
-  const [roles, setRoles] = useState<RoleCatalogItem[]>([]);
+  const roles = useRoleCatalog();
   const [roleId, setRoleIdState] = useState(() => readField(draftId, "role"));
   const [roleParams, setRoleParamsState] = useState(() => readRoleParams(draftId));
   const [reviews, setReviewsState] = useState(() => readField(draftId, "reviews"));
@@ -356,16 +496,6 @@ export function DraftAgentPane({
     }).catch(() => {});
   }, []);
 
-  useEffect(() => {
-    let cancelled = false;
-    void fetch("/api/roles").then(async (res) => {
-      if (!res.ok) return;
-      const body = await res.json() as { roles?: RoleCatalogItem[] };
-      if (!cancelled && Array.isArray(body.roles)) setRoles(body.roles);
-    }).catch(() => {});
-    return () => { cancelled = true; };
-  }, []);
-
   /* The handover uses the exact receipt path or conversation id. A nearby
      transcript can be a simultaneous draft, so it cannot establish ownership. */
   useEffect(() => {
@@ -525,43 +655,22 @@ export function DraftAgentPane({
   return (
     <section
       data-pan-ignore
-      className="relative flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-[10px] border border-line bg-panel shadow-card"
+      className="relative flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-[10px] border border-border bg-card shadow-1"
       aria-label={t("draft.paneAria")}
     >
       <span aria-hidden className="h-1 w-full shrink-0" style={{ backgroundColor: tint.color }} />
-      <header className="flex h-10 shrink-0 items-center gap-1.5 border-b border-line px-2.5" style={{ backgroundColor: tint.soft }}>
-        {engine === "codex" && accounts.length ? <select value={accountId} onChange={(event) => { setAccountIdState(event.target.value); writeField(draftId, "accountId", event.target.value); }} className="h-6 max-w-28 rounded border border-line bg-bg px-1 text-[10px] font-semibold" aria-label={t("accounts.activeAria")}>{accounts.map((account) => <option key={account.id} value={account.id}>{account.label}</option>)}</select> : null}
-        <span className="h-2 w-2 shrink-0 rounded-full bg-[#c9c9d1]" title={t("draft.notStarted")} />
-        <div className="flex shrink-0 items-center gap-1" role="radiogroup" aria-label={t("draft.engineAria")}>
-          {ENGINES.map(({ key, label }) => {
-            const active = engine === key;
-            const chip = engineTintOf(key);
-            return (
-              <button
-                key={key}
-                type="button"
-                role="radio"
-                aria-checked={active}
-                disabled={fieldsDisabled}
-                onClick={() => setEngine(key)}
-                style={active ? { backgroundColor: "#fff", color: chip.color, borderColor: chip.color } : undefined}
-                className={`rounded-full border px-2 py-0.5 text-[10.5px] font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60 ${
-                  active ? "" : "border-transparent bg-transparent text-dim hover:text-ink"
-                }`}
-              >
-                {label}
-              </button>
-            );
-          })}
-        </div>
+      <header className="flex h-10 shrink-0 items-center gap-1.5 border-b border-border px-2.5" style={{ backgroundColor: tint.soft }}>
+        {engine === "codex" && accounts.length ? <select value={accountId} onChange={(event) => { setAccountIdState(event.target.value); writeField(draftId, "accountId", event.target.value); }} className="h-6 max-w-28 rounded border border-border bg-canvas px-1 text-[10px] font-semibold" aria-label={t("accounts.activeAria")}>{accounts.map((account) => <option key={account.id} value={account.id}>{account.label}</option>)}</select> : null}
+        <span className="h-2 w-2 shrink-0 rounded-full bg-strong" title={t("draft.notStarted")} />
+        <EngineRadioGroup engine={engine} disabled={fieldsDisabled} onChange={setEngine} />
         <span
-          className="min-w-0 flex-1 truncate text-[12px] font-semibold text-dim"
+          className="min-w-0 flex-1 truncate text-[12px] font-semibold text-muted"
           title={srcFile ? cleanTitle(srcFile.title) : undefined}
         >
           {src ? t("draft.handoffLabel", { title: srcFile ? cleanTitle(srcFile.title, 60) : t("draft.conversation") }) : t("draft.newConvo")}
         </span>
         <button
-          className="inline-flex shrink-0 items-center rounded-[8px] border border-line bg-bg px-1.5 py-0.5 text-dim hover:border-err/40 hover:text-err focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+          className="inline-flex shrink-0 items-center rounded-[8px] border border-border bg-canvas px-1.5 py-0.5 text-muted hover:border-danger/40 hover:text-danger focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
           aria-label={t("draft.dismiss")}
           onClick={onClose}
         >
@@ -569,8 +678,8 @@ export function DraftAgentPane({
         </button>
       </header>
 
-      <div className="flex shrink-0 items-center gap-1.5 border-b border-line bg-[#fbfbfd] px-2.5 py-1.5">
-        <span className="shrink-0 text-[10px] font-semibold text-dim">{t("draft.directory")}</span>
+      <div className="flex shrink-0 items-center gap-1.5 border-b border-border bg-sunken px-2.5 py-1.5">
+        <span className="shrink-0 text-[10px] font-semibold text-muted">{t("draft.directory")}</span>
         <input
           value={cwd}
           disabled={fieldsDisabled}
@@ -578,7 +687,7 @@ export function DraftAgentPane({
           list={dirListId}
           placeholder="/home/…/Projects/…"
           aria-label={t("draft.dirAria")}
-          className="min-h-11 min-w-0 flex-1 rounded-[6px] border border-line bg-panel px-2 py-1 font-mono text-[11px] text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60 sm:min-h-0"
+          className="min-h-11 min-w-0 flex-1 rounded-[6px] border border-border bg-card px-2 py-1 font-mono text-[11px] text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60 sm:min-h-0"
         />
         <datalist id={dirListId}>
           {dirs.map((dir) => (
@@ -592,81 +701,46 @@ export function DraftAgentPane({
         </p>
       ) : null}
 
-      <div className="flex shrink-0 flex-col gap-1.5 border-b border-line bg-[#fbfbfd] px-2.5 py-1.5">
-        <div className="flex min-w-0 flex-wrap items-center gap-1.5">
-          <label className="shrink-0 text-[10px] font-semibold text-dim" htmlFor={`draft-role-${draftId}`}>{t("draft.role")}</label>
-          <select
-            id={`draft-role-${draftId}`}
-            value={roleId}
-            disabled={fieldsDisabled}
-            onChange={(event) => selectRole(event.target.value)}
-            aria-label={t("draft.roleAria")}
-            className="h-7 min-w-0 flex-1 rounded-[8px] border border-line bg-panel px-1.5 text-[11px] text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60"
-          >
-            <option value="">{t("draft.noRole")}</option>
-            {roles.map((role) => <option key={role.id} value={role.id}>{role.name}</option>)}
-          </select>
-        </div>
-        {selectedRole ? (
-          <>
-            <p className="text-[10px] leading-4 text-dim">{selectedRole.description}</p>
-            {selectedRole.parameters.length ? (
-              <div className="flex flex-wrap gap-1.5" role="group" aria-label={t("draft.roleParameters")}>
-                {selectedRole.parameters.map((parameter) => (
-                  <label key={parameter.key} className="flex min-w-28 flex-1 flex-col gap-0.5 text-[10px] text-dim">
-                    <span>{parameter.label}{parameter.required ? " *" : ""}</span>
-                    {parameter.kind === "select" ? (
-                      <select value={String(roleParams[parameter.key] ?? "")} disabled={fieldsDisabled} onChange={(event) => setRoleParam(parameter.key, event.target.value)} className="h-7 rounded-[7px] border border-line bg-panel px-1 text-[11px] text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60">
-                        {parameter.options?.map((option) => <option key={option} value={option}>{option}</option>)}
-                      </select>
-                    ) : (
-                      <input type={parameter.kind === "integer" ? "number" : "text"} min={parameter.min} max={parameter.max} value={String(roleParams[parameter.key] ?? "")} disabled={fieldsDisabled} onChange={(event) => setRoleParam(parameter.key, parameter.kind === "integer" && event.target.value ? Number(event.target.value) : event.target.value)} aria-label={parameter.label} className="h-7 min-w-0 rounded-[7px] border border-line bg-panel px-1.5 text-[11px] text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60" />
-                    )}
-                    <span className="leading-3">{parameter.description}</span>
-                  </label>
-                ))}
-              </div>
-            ) : null}
-            {selectedRole.id === "reviewer" ? (
-              <label className="flex max-w-full flex-col gap-0.5 text-[10px] text-dim">
-                <span>{t("draft.reviews")}</span>
-                <select
-                  value={reviews}
-                  disabled={fieldsDisabled}
-                  onChange={(event) => setReviews(event.target.value)}
-                  aria-label={t("draft.reviewsAria")}
-                  className="h-7 min-w-0 rounded-[7px] border border-line bg-panel px-1.5 text-[11px] text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60"
-                >
-                  <option value="">{t("draft.reviewsPlaceholder")}</option>
-                  {reviews && !reviewCandidates.some((file) => (file.conversationId ?? file.path) === reviews) ? (
-                    <option value={reviews}>{reviews}</option>
-                  ) : null}
-                  {reviewCandidates.map((file) => {
-                    const value = file.conversationId ?? file.path;
-                    return <option key={value} value={value}>{cleanTitle(file.title, 80)}</option>;
-                  })}
-                </select>
-              </label>
-            ) : null}
-            {selectedRole.id === "deployer" ? (
-              <label className="flex max-w-52 flex-col gap-0.5 text-[10px] text-dim">
-                <span>{t("draft.deployConfirm")}</span>
-                <input value={deployConfirm} disabled={fieldsDisabled} onChange={(event) => setDeployConfirm(event.target.value)} aria-label={t("draft.deployConfirm")} placeholder="deploy" className="h-7 rounded-[7px] border border-line bg-panel px-1.5 text-[11px] text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60" />
-              </label>
-            ) : null}
-            <div className="rounded-[7px] border border-line bg-chip px-2 py-1.5 text-[10px] leading-4 text-dim">
-              <span className="font-semibold text-ink">{t("draft.scaffoldPreview")}</span>
-              <pre className="mt-1 whitespace-pre-wrap font-sans">{scaffoldPreview(selectedRole.promptPreview, roleParams)}</pre>
-              <ul className="mt-1 list-disc pl-4" aria-label={t("draft.safetyFences")}>
-                {selectedRole.safetyFences.map((fence) => <li key={fence}>{fence}</li>)}
-              </ul>
-            </div>
-          </>
+      <RoleSection
+        idPrefix={draftId}
+        roles={roles}
+        roleId={roleId}
+        roleParams={roleParams}
+        disabled={fieldsDisabled}
+        onSelectRole={selectRole}
+        onSetParam={setRoleParam}
+      >
+        {selectedRole?.id === "reviewer" ? (
+          <label className="flex max-w-full flex-col gap-0.5 text-[10px] text-muted">
+            <span>{t("draft.reviews")}</span>
+            <select
+              value={reviews}
+              disabled={fieldsDisabled}
+              onChange={(event) => setReviews(event.target.value)}
+              aria-label={t("draft.reviewsAria")}
+              className="h-7 min-w-0 rounded-[7px] border border-border bg-card px-1.5 text-[11px] text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60"
+            >
+              <option value="">{t("draft.reviewsPlaceholder")}</option>
+              {reviews && !reviewCandidates.some((file) => (file.conversationId ?? file.path) === reviews) ? (
+                <option value={reviews}>{reviews}</option>
+              ) : null}
+              {reviewCandidates.map((file) => {
+                const value = file.conversationId ?? file.path;
+                return <option key={value} value={value}>{cleanTitle(file.title, 80)}</option>;
+              })}
+            </select>
+          </label>
         ) : null}
-      </div>
+        {selectedRole?.id === "deployer" ? (
+          <label className="flex max-w-52 flex-col gap-0.5 text-[10px] text-muted">
+            <span>{t("draft.deployConfirm")}</span>
+            <input value={deployConfirm} disabled={fieldsDisabled} onChange={(event) => setDeployConfirm(event.target.value)} aria-label={t("draft.deployConfirm")} placeholder="deploy" className="h-7 rounded-[7px] border border-border bg-card px-1.5 text-[11px] text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60" />
+          </label>
+        ) : null}
+      </RoleSection>
 
-      <div className="flex shrink-0 flex-wrap items-center gap-1.5 border-b border-line bg-[#fbfbfd] px-2.5 py-1.5">
-        <span className="shrink-0 text-[10px] font-semibold text-dim">{t("draft.reasoning")}</span>
+      <div className="flex shrink-0 flex-wrap items-center gap-1.5 border-b border-border bg-sunken px-2.5 py-1.5">
+        <span className="shrink-0 text-[10px] font-semibold text-muted">{t("draft.reasoning")}</span>
         <ReasoningControls
           engine={engine}
           model={model}
@@ -683,7 +757,7 @@ export function DraftAgentPane({
         {attempt ? (
           <div className="flex flex-1 flex-col justify-end gap-3">
             <div className="flex justify-end">
-              <span className="min-w-0 max-w-[85%] whitespace-pre-wrap rounded-[10px] rounded-br-[3px] bg-[#ecebfb] px-2.5 py-1.5 text-[12px] text-[#333]">
+              <span className="min-w-0 max-w-[85%] whitespace-pre-wrap rounded-[10px] rounded-br-[3px] bg-accent-soft px-2.5 py-1.5 text-[12px] text-secondary">
                 {attempt.prompt || t("draft.imagesOnly")}
               </span>
             </div>
@@ -694,11 +768,11 @@ export function DraftAgentPane({
             <span className="rounded-full px-3 py-1 text-[13px] font-bold" style={{ backgroundColor: tint.soft, color: tint.color }}>
               {engine === "claude" ? "Claude" : "Codex"}
             </span>
-            <div className="max-w-[360px] text-[12px] text-dim">
+            <div className="max-w-[360px] text-[12px] text-muted">
               {src ? t("draft.hintRelay") : t("draft.hintNew")}
             </div>
             {src ? (
-              <div className="max-w-[420px] truncate font-mono text-[10px] text-dim" title={src}>
+              <div className="max-w-[420px] truncate font-mono text-[10px] text-muted" title={src}>
                 {src}
               </div>
             ) : null}

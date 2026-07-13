@@ -41,7 +41,7 @@ export const DraftLaunchStatus = forwardRef<HTMLDivElement, { phase: DraftPhase;
         tabIndex={attention ? -1 : undefined}
         role="status"
         aria-live={attention ? "assertive" : "polite"}
-        className={`flex items-center gap-2 text-[11.5px] font-semibold outline-none ${attention ? "text-err" : "text-dim"}`}
+        className={`flex items-center gap-2 text-[11.5px] font-semibold outline-none ${attention ? "text-danger" : "text-muted"}`}
       >
         {attention ? (
           <Ban className="h-3.5 w-3.5 shrink-0" aria-hidden />
@@ -50,7 +50,7 @@ export const DraftLaunchStatus = forwardRef<HTMLDivElement, { phase: DraftPhase;
         )}
         <span>{statusText}</span>
       </div>
-      {phase === "booting-slow" ? <div className="text-[11px] text-dim">{t("draft.slow", { target })}</div> : null}
+      {phase === "booting-slow" ? <div className="text-[11px] text-muted">{t("draft.slow", { target })}</div> : null}
     </>
   );
 });

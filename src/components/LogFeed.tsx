@@ -88,11 +88,11 @@ function rowForAnchor(scroller: HTMLElement, key: string): HTMLElement | null {
 /** Animated presence row: the agent of a live transcript is mid-turn right now. */
 function WorkingRow({ icon: Icon, label }: { icon: LucideIcon; label: string }) {
   return (
-    <div className="mt-2 flex items-center gap-2 text-[12px] font-semibold text-ok">
+    <div className="mt-2 flex items-center gap-2 text-[12px] font-semibold text-success">
       <span className="flex items-center gap-0.5" aria-hidden>
-        <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-ok" />
-        <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-ok [animation-delay:150ms]" />
-        <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-ok [animation-delay:300ms]" />
+        <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-success" />
+        <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-success [animation-delay:150ms]" />
+        <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-success [animation-delay:300ms]" />
       </span>
       <Icon className="h-3.5 w-3.5" aria-hidden />
       {label}
@@ -386,7 +386,7 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
         magnet ? (
           file.activity === "live" ? (
             <div
-              className={`pointer-events-none absolute bottom-2 ${pillPos} z-10 inline-flex items-center gap-1 rounded-full bg-ok px-2 py-0.5 text-[10px] font-bold text-white shadow-card transition-transform duration-200 ${
+              className={`pointer-events-none absolute bottom-2 ${pillPos} z-10 inline-flex items-center gap-1 rounded-full bg-success px-2 py-0.5 text-[10px] font-bold text-white shadow-1 transition-transform duration-200 ${
                 pulse ? "scale-125" : "scale-100"
               }`}
             >
@@ -432,7 +432,7 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
       >
       <div ref={content} className={compact ? "px-3 pb-3 text-body" : "mx-auto w-full max-w-[1060px] px-6 pb-4"}>
         {!file ? (
-          <div className="mt-[20vh] text-center text-dim">{t("feed.pickLog")}</div>
+          <div className="mt-[20vh] text-center text-muted">{t("feed.pickLog")}</div>
         ) : (
           <>
             {compact && canRevealOlder ? (
@@ -464,7 +464,7 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
               </button>
             ) : null}
             {!compact && !canRevealOlder && feed.items.length ? (
-              <div className="mb-3 text-center text-[11px] text-dim">{t("feed.startOfConvo")}</div>
+              <div className="mb-3 text-center text-[11px] text-muted">{t("feed.startOfConvo")}</div>
             ) : null}
             {compact ? null : <TaskHeader file={file} />}
             {feed.items.length ? (
@@ -483,12 +483,12 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
                 })}
                 {file.pendingQuestion || file.waitingInput ? <QuestionCard key={file.pendingQuestion?.toolUseId ?? "waiting"} file={file} /> : null}
                 {!file.pendingQuestion && !file.waitingInput && endedQuestion ? (
-                  <div className="my-4 rounded-[8px] border border-line bg-chip px-4 py-3 text-[13px] font-semibold text-dim">{endedQuestion}</div>
+                  <div className="my-4 rounded-[8px] border border-border bg-sunken px-4 py-3 text-[13px] font-semibold text-muted">{endedQuestion}</div>
                 ) : null}
                 {file.activity === "live" ? <WorkingRow icon={working.icon} label={working.label} /> : null}
                 {file.activity === "recent" && isAwaitingUser(file) ? (
-                  <div className="mt-2 flex items-center gap-1.5 text-[11.5px] font-semibold text-[#b8860b]">
-                    <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-[#d29a2f]" aria-hidden /> {t("feed.finishedTurn")}
+                  <div className="mt-2 flex items-center gap-1.5 text-[11.5px] font-semibold text-warning">
+                    <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-warning" aria-hidden /> {t("feed.finishedTurn")}
                   </div>
                 ) : file.activity === "recent" && isSubagent(file) && file.proc !== "running" ? (
                   <div className="mt-2 flex items-center gap-1 text-[11.5px] font-semibold text-accent">
@@ -497,7 +497,7 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
                 ) : null}
               </>
             ) : (
-              <div className="mt-[14vh] text-center text-dim">
+              <div className="mt-[14vh] text-center text-muted">
                 {tail.loading
                   ? t("common.loadingCap")
                   : tail.size === 0
@@ -507,9 +507,9 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
                       : t("feed.empty")}
                 {!tail.loading && (file.cmdDesc || file.cmd) ? (
                   <div className="mx-auto mt-3 max-w-[560px]">
-                    {file.cmdDesc ? <div className="text-[12.5px] font-semibold text-ink">{file.cmdDesc}</div> : null}
+                    {file.cmdDesc ? <div className="text-[12.5px] font-semibold text-primary">{file.cmdDesc}</div> : null}
                     {file.cmd ? (
-                      <pre className="mt-1.5 overflow-x-auto whitespace-pre-wrap break-words rounded-[10px] border border-line bg-bg px-3 py-2 text-left font-mono text-[11.5px] text-ink">
+                      <pre className="mt-1.5 overflow-x-auto whitespace-pre-wrap break-words rounded-[10px] border border-border bg-canvas px-3 py-2 text-left font-mono text-[11.5px] text-primary">
                         {file.cmd}
                       </pre>
                     ) : null}

@@ -3,6 +3,7 @@
 import { RefreshCw } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
+import { Badge } from "@/components/ui/Badge";
 import { useLocale } from "@/lib/i18n";
 import type { Pipeline, PipelineStage, PipelineStageAttempt } from "@/lib/pipelines/types";
 
@@ -82,7 +83,7 @@ export function VerdictPopover({
       tabIndex={-1}
       role="dialog"
       aria-label={t("pipelineVerdict.title", { label })}
-      className="flex max-h-[80vh] w-[260px] flex-col gap-2 overflow-y-auto rounded-[12px] border border-line bg-panel p-2.5 shadow-[0_10px_36px_rgb(20_20_30/0.18)] focus-visible:outline-none"
+      className="flex max-h-[80vh] w-[260px] flex-col gap-2 overflow-y-auto rounded-[12px] border border-border bg-card p-2.5 shadow-2 focus-visible:outline-none"
       onKeyDown={(event) => {
         if (event.key === "Escape") {
           event.stopPropagation();
@@ -92,34 +93,34 @@ export function VerdictPopover({
     >
       <div className="flex items-center gap-2">
         {verdict && tone ? (
-          <span className="rounded-full px-2 py-0.5 text-[10.5px] font-bold" style={{ backgroundColor: tone.soft, color: tone.color }}>
+          <Badge style={{ backgroundColor: tone.soft, color: tone.color }}>
             {verdictStatusLabel(t, verdict.status)}
-          </span>
+          </Badge>
         ) : (
           /* No verdict: surface the attempt's own error (a spawn/tick failure)
              first, then the pipeline-level detail, so a verdict-less chip still
              explains itself. */
-          <span className="text-[11px] font-semibold text-dim">{attempt.error ?? pipeline.stateDetail ?? t("pipelineVerdict.noFindings")}</span>
+          <span className="text-[11px] font-semibold text-muted">{attempt.error ?? pipeline.stateDetail ?? t("pipelineVerdict.noFindings")}</span>
         )}
-        {busy ? <RefreshCw className="ml-auto h-3 w-3 animate-spin text-dim" aria-hidden /> : null}
+        {busy ? <RefreshCw className="ml-auto h-3 w-3 animate-spin text-muted" aria-hidden /> : null}
       </div>
 
       {verdict && typeof verdict.confidence === "number" ? (
         <div className="flex items-center gap-1.5">
-          <span className="shrink-0 text-[9.5px] font-semibold uppercase tracking-wide text-dim">{t("pipelineVerdict.confidence")}</span>
-          <span className="h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-line" aria-hidden>
-            <span className="block h-full rounded-full" style={{ width: `${Math.round(Math.max(0, Math.min(1, verdict.confidence)) * 100)}%`, backgroundColor: tone?.color ?? "#5a51e0" }} />
+          <span className="shrink-0 text-label font-semibold text-secondary">{t("pipelineVerdict.confidence")}</span>
+          <span className="h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-border" aria-hidden>
+            <span className="block h-full rounded-full" style={{ width: `${Math.round(Math.max(0, Math.min(1, verdict.confidence)) * 100)}%`, backgroundColor: tone?.color ?? "var(--color-accent)" }} />
           </span>
-          <span className="shrink-0 font-mono text-[10px] text-ink">{verdict.confidence.toFixed(2)}</span>
+          <span className="shrink-0 font-mono text-[10px] text-primary">{verdict.confidence.toFixed(2)}</span>
         </div>
       ) : null}
 
       {findings.length ? (
         <div className="flex max-h-40 flex-col gap-1 overflow-y-auto">
-          <span className="text-[9.5px] font-semibold uppercase tracking-wide text-dim">{t("pipelineVerdict.findings", { count: findings.length })}</span>
+          <span className="text-label font-semibold text-secondary">{t("pipelineVerdict.findings", { count: findings.length })}</span>
           <ul className="flex flex-col gap-1">
             {shown.map((finding, index) => (
-              <li key={index} className="rounded-[7px] bg-bg px-2 py-1 text-[10.5px] leading-4 text-ink">{finding}</li>
+              <li key={index} className="rounded-[7px] bg-canvas px-2 py-1 text-[10.5px] leading-4 text-primary">{finding}</li>
             ))}
           </ul>
           {!expanded && findings.length > MAX_COLLAPSED_FINDINGS ? (
@@ -131,14 +132,14 @@ export function VerdictPopover({
       ) : null}
 
       {priorAttempts.length ? (
-        <div className="flex shrink-0 flex-col gap-0.5 border-t border-line pt-1.5">
-          <span className="text-[9.5px] font-semibold uppercase tracking-wide text-dim">{t("pipelineVerdict.priorAttempts")}</span>
+        <div className="flex shrink-0 flex-col gap-0.5 border-t border-border pt-1.5">
+          <span className="text-label font-semibold text-secondary">{t("pipelineVerdict.priorAttempts")}</span>
           {/* Retries append attempts without bound, so the audit scrolls within a
               fixed height — otherwise a long history grows the popover past the
               viewport and pushes the Retry/Skip footer off-screen. */}
           <div className="flex max-h-24 flex-col gap-0.5 overflow-y-auto">
             {priorAttempts.map((prior) => (
-              <span key={prior.n} className="font-mono text-[9.5px] text-dim">
+              <span key={prior.n} className="font-mono text-[9.5px] text-muted">
                 {t("pipelineVerdict.attemptLine", { n: prior.n, status: prior.verdict ? verdictStatusLabel(t, prior.verdict.status) : attemptStateLabel(t, prior.state) })}
               </span>
             ))}
@@ -146,19 +147,19 @@ export function VerdictPopover({
         </div>
       ) : null}
 
-      {error ? <span className="truncate text-[10px] font-semibold text-err" title={error}>{error}</span> : null}
+      {error ? <span className="truncate text-[10px] font-semibold text-danger" title={error}>{error}</span> : null}
 
-      <div className="flex shrink-0 flex-wrap items-center gap-1.5 border-t border-line pt-2">
+      <div className="flex shrink-0 flex-wrap items-center gap-1.5 border-t border-border pt-2">
         {/* A review-loop's agentPath is the reviewer transcript the board folds
             into the round deck — opening it reveals nothing, so offer only the
             flow route below. A run stage opens its own node here (#93 §2.2). */}
         {stage.kind !== "review-loop" && attempt.agentPath && onOpenPath && canOpenPath ? (
-          <button type="button" className="rounded-full border border-line bg-bg px-2.5 py-1 text-[10px] font-bold text-dim hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40" onClick={() => onOpenPath(attempt.agentPath!)}>
+          <button type="button" className="rounded-full border border-border bg-canvas px-2.5 py-1 text-[10px] font-bold text-muted hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40" onClick={() => onOpenPath(attempt.agentPath!)}>
             {t("pipelineVerdict.openTranscript")}
           </button>
         ) : null}
         {attempt.flowId && onOpenFlow && canOpenFlow ? (
-          <button type="button" className="rounded-full border border-line bg-bg px-2.5 py-1 text-[10px] font-bold text-dim hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40" onClick={() => onOpenFlow(attempt.flowId!)}>
+          <button type="button" className="rounded-full border border-border bg-canvas px-2.5 py-1 text-[10px] font-bold text-muted hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40" onClick={() => onOpenFlow(attempt.flowId!)}>
             {t("pipelineVerdict.openFlow")}
           </button>
         ) : null}
@@ -167,7 +168,7 @@ export function VerdictPopover({
             <button type="button" className="ml-auto rounded-full border border-accent bg-accent px-2.5 py-1 text-[10px] font-bold text-white hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 disabled:opacity-40" disabled={busy} onClick={() => void act("retry-stage")}>
               {t("pipelineVerdict.retry")}
             </button>
-            <button type="button" className="rounded-full border border-line bg-bg px-2.5 py-1 text-[10px] font-bold text-dim hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40" disabled={busy} onClick={() => void act("skip-stage")}>
+            <button type="button" className="rounded-full border border-border bg-canvas px-2.5 py-1 text-[10px] font-bold text-muted hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40" disabled={busy} onClick={() => void act("skip-stage")}>
               {t("pipelineVerdict.skip")}
             </button>
           </>

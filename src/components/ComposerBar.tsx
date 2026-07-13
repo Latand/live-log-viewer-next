@@ -79,9 +79,8 @@ function SendMenu({ label, actions, onClose }: { label: string; actions: SendMen
       aria-label={label}
       className="absolute bottom-[calc(100%+6px)] right-0 z-40 w-[220px] rounded-surface border border-border bg-raised p-1.5 shadow-2"
     >
-      {/* Menu group-label typography (uppercase/tracking → sentence-case §3.6)
-          is Slice 3; kept as-is here to hold the slice boundary. */}
-      <div className="px-2 pb-1 pt-1.5 text-[10.5px] font-bold uppercase tracking-wide text-dim">
+      {/* Menu group-label: sentence-case label recipe (design doc §3.6). */}
+      <div className="px-2 pb-1 pt-1.5 text-label font-semibold text-secondary">
         {label}
       </div>
       {actions.map((action) => (

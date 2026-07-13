@@ -40,7 +40,7 @@ export const FeedItem = memo(function FeedItem({ item, speakText }: { item: Item
           <AvatarIcon className="h-3.5 w-3.5" aria-hidden />
         </div>
         <div className="relative min-w-0 flex-1 whitespace-pre-wrap break-words">
-          {hhmm(item.ts) ? <div className="mb-0.5 text-label tabular-nums text-dim">{hhmm(item.ts)}</div> : null}
+          {hhmm(item.ts) ? <div className="mb-0.5 text-label tabular-nums text-muted">{hhmm(item.ts)}</div> : null}
           <div className="absolute right-0 top-0 flex items-center gap-0.5">
             {speakText ? <SpeakButton text={speakText} /> : null}
             <CopyButton
@@ -70,7 +70,7 @@ export const FeedItem = memo(function FeedItem({ item, speakText }: { item: Item
                 <span className="group-open/usr:hidden">
                   {item.text.slice(0, 180)}… <span className="font-semibold text-accent">({tr("common.chars", { n: item.text.length })})</span>
                 </span>
-                <span className="hidden items-center gap-1 text-[11px] font-semibold text-dim group-open/usr:inline-flex">
+                <span className="hidden items-center gap-1 text-[11px] font-semibold text-muted group-open/usr:inline-flex">
                   {tr("common.collapse")} <ChevronUp className="h-3 w-3" aria-hidden />
                 </span>
               </summary>
@@ -90,23 +90,23 @@ export const FeedItem = memo(function FeedItem({ item, speakText }: { item: Item
     const protocol = parseProtocolPayload(item.text);
     const long = item.text.length > 420 || item.text.split("\n").length > 6;
     return (
-      <div className="my-3 ml-9 overflow-hidden rounded-surface border border-accent/25 bg-tmsg shadow-1">
+      <div className="my-3 ml-9 overflow-hidden rounded-surface border border-accent/25 bg-accent-soft shadow-1">
         <div className="flex items-center gap-2 px-3.5 pt-2">
           <span className="flex h-6.5 w-6.5 shrink-0 items-center justify-center rounded-lg bg-accent-soft text-accent">
             <Mail className="h-3.5 w-3.5" aria-hidden />
           </span>
-          <span className="text-[11px] font-semibold text-dim">{item.dir === "out" ? tr("render.toDir") : tr("render.fromDir")}</span>
+          <span className="text-[11px] font-semibold text-muted">{item.dir === "out" ? tr("render.toDir") : tr("render.fromDir")}</span>
           <span className="rounded-full bg-accent/10 px-2 py-0.5 text-[11px] font-bold text-accent">{item.peer}</span>
           {item.delivery ? (
             <span
-              className={`inline-flex shrink-0 items-center gap-1 text-[10.5px] font-semibold ${item.delivery === "ok" ? "text-ok" : "text-err"}`}
+              className={`inline-flex shrink-0 items-center gap-1 text-[10.5px] font-semibold ${item.delivery === "ok" ? "text-success" : "text-danger"}`}
               title={item.msgId ? `msg_id: ${item.msgId}` : undefined}
             >
               {item.delivery === "ok" ? <Check className="h-3 w-3" aria-hidden /> : <X className="h-3 w-3" aria-hidden />}
               {item.delivery === "ok" ? tr("render.delivered") : tr("render.notDelivered")}
             </span>
           ) : null}
-          {hhmm(item.ts) ? <span className="ml-auto shrink-0 text-label tabular-nums text-dim">{hhmm(item.ts)}</span> : null}
+          {hhmm(item.ts) ? <span className="ml-auto shrink-0 text-label tabular-nums text-muted">{hhmm(item.ts)}</span> : null}
         </div>
         <div className="px-3.5 pb-2.5 pt-1">
           {protocol ? (
@@ -116,11 +116,11 @@ export const FeedItem = memo(function FeedItem({ item, speakText }: { item: Item
               {item.summary ? <div className="text-[13px] font-bold">{md(item.summary)}</div> : null}
               {long ? (
                 <details className="group/tmsg mt-0.5 whitespace-pre-wrap break-words text-[13px]">
-                  <summary className="cursor-pointer list-none text-[12.5px] text-faint [&::-webkit-details-marker]:hidden">
+                  <summary className="cursor-pointer list-none text-[12.5px] text-secondary [&::-webkit-details-marker]:hidden">
                     <span className="group-open/tmsg:hidden">
                       {item.text.slice(0, 260).trimEnd()}… <span className="font-semibold text-accent">{tr("common.showAll")}</span>
                     </span>
-                    <span className="hidden items-center gap-1 text-[11px] font-semibold text-dim group-open/tmsg:inline-flex">
+                    <span className="hidden items-center gap-1 text-[11px] font-semibold text-muted group-open/tmsg:inline-flex">
                       {tr("common.collapse")} <ChevronUp className="h-3 w-3" aria-hidden />
                     </span>
                   </summary>
@@ -158,7 +158,7 @@ export const FeedItem = memo(function FeedItem({ item, speakText }: { item: Item
       </details>
     );
   }
-  if (item.kind === "svc") return <div className="my-1 break-words text-[11.5px] text-dim">{item.text}</div>;
-  if (item.kind === "note") return <div className="my-2 break-words text-[12.5px] text-dim">{md(item.text)}</div>;
-  return <div className={`my-0.5 break-words text-[12.5px] ${item.err ? "text-err" : "text-faint"}`}>{item.text}</div>;
+  if (item.kind === "svc") return <div className="my-1 break-words text-[11.5px] text-muted">{item.text}</div>;
+  if (item.kind === "note") return <div className="my-2 break-words text-[12.5px] text-muted">{md(item.text)}</div>;
+  return <div className={`my-0.5 break-words text-[12.5px] ${item.err ? "text-danger" : "text-secondary"}`}>{item.text}</div>;
 });

@@ -37,7 +37,7 @@ function StatusRow({ value, onPick }: { value: TaskStatus; onPick: (status: Task
             style={
               active
                 ? { backgroundColor: tone.soft, color: tone.color, borderColor: tone.color }
-                : { borderColor: "transparent", color: "#8b8b95" }
+                : { borderColor: "transparent", color: "var(--color-muted)" }
             }
             onClick={() => onPick(status)}
           >
@@ -130,14 +130,14 @@ function NewTaskView({
           placeholder={t("tasks.newPlaceholder")}
           createLabel={t("tasks.sheetCreate")}
           leftSlot={
-            <span className="inline-flex min-w-0 items-center gap-1 rounded-full bg-chip px-1.5 py-1 text-[9.5px] font-semibold text-[#555]">
+            <span className="inline-flex min-w-0 items-center gap-1 rounded-full bg-sunken px-1.5 py-1 text-[9.5px] font-semibold text-secondary">
               {t("tasks.sheetTargets", { count: checked.size })}
             </span>
           }
         />
       </div>
-      <div className="flex flex-col gap-1 rounded-[10px] border border-line bg-panel p-1.5">
-        <div className="px-1 text-[10.5px] font-bold text-dim">{t("tasks.pickerTitle")}</div>
+      <div className="flex flex-col gap-1 rounded-[10px] border border-border bg-card p-1.5">
+        <div className="px-1 text-[10.5px] font-bold text-muted">{t("tasks.pickerTitle")}</div>
         <TargetChecklist files={files} project={project} checked={checked} onChange={setChecked} maxHeight={9999} />
       </div>
     </form>
@@ -218,7 +218,7 @@ function TaskDetailView({
   const byPath = new Map(files.map((file) => [file.path, file]));
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto p-3">
-      <div className="flex flex-col gap-1.5 rounded-[10px] border border-line bg-panel p-2">
+      <div className="flex flex-col gap-1.5 rounded-[10px] border border-border bg-card p-2">
         <textarea
           ref={editRef}
           value={displayText}
@@ -228,7 +228,7 @@ function TaskDetailView({
           rows={4}
           aria-label={t("tasks.editAria")}
           maxLength={6000}
-          className="w-full resize-none overflow-y-auto rounded-[8px] border border-line bg-panel px-2.5 py-1.5 text-[12.5px] leading-[18px] text-[#222] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+          className="w-full resize-none overflow-y-auto rounded-[8px] border border-border bg-card px-2.5 py-1.5 text-[12.5px] leading-[18px] text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
         />
         <div className="flex items-center justify-between gap-1.5">
           <StatusRow
@@ -245,8 +245,8 @@ function TaskDetailView({
       </div>
 
       {task.assignments.length ? (
-        <div className="flex flex-col gap-1 rounded-[10px] border border-line bg-panel p-2">
-          <div className="text-[10.5px] font-bold text-dim">{t("tasks.sheetAssignments")}</div>
+        <div className="flex flex-col gap-1 rounded-[10px] border border-border bg-card p-2">
+          <div className="text-[10.5px] font-bold text-muted">{t("tasks.sheetAssignments")}</div>
           {task.assignments.map((assignment, index) => {
             const file = assignment.path ? (byPath.get(assignment.path) ?? null) : null;
             const failed = assignment.state === "failed";
@@ -260,7 +260,7 @@ function TaskDetailView({
               <div
                 key={(assignment.path ?? "spawning") + index}
                 className={`flex min-h-11 items-center gap-1.5 rounded-[6px] px-1.5 ${
-                  failed ? "bg-[#faeee9] text-[#a04a2e]" : file ? "bg-bg" : "bg-bg opacity-60"
+                  failed ? "bg-danger-soft text-danger" : file ? "bg-canvas" : "bg-canvas opacity-60"
                 }`}
                 title={failed ? t("tasks.chipFailedTitle", { error: assignment.error ?? "" }) : undefined}
               >
@@ -301,8 +301,8 @@ function TaskDetailView({
         </div>
       ) : null}
 
-      <div className="flex flex-col gap-1 rounded-[10px] border border-line bg-panel p-1.5">
-        <div className="px-1 text-[10.5px] font-bold text-dim">{t("tasks.pickerTitle")}</div>
+      <div className="flex flex-col gap-1 rounded-[10px] border border-border bg-card p-1.5">
+        <div className="px-1 text-[10.5px] font-bold text-muted">{t("tasks.pickerTitle")}</div>
         <TargetChecklist files={files} project={task.project} checked={checked} onChange={setChecked} maxHeight={9999} />
         <button
           type="button"
@@ -318,7 +318,7 @@ function TaskDetailView({
       <button
         type="button"
         className={`inline-flex min-h-11 items-center justify-center gap-1.5 rounded-[8px] border text-[12px] font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
-          armDelete ? "border-err bg-err text-white" : "border-line bg-panel text-dim hover:border-err/40 hover:text-err"
+          armDelete ? "border-danger bg-danger text-white" : "border-border bg-card text-muted hover:border-danger/40 hover:text-danger"
         }`}
         onClick={() => {
           if (!armDelete) {
@@ -370,12 +370,12 @@ export function TaskSheet({
   const openTask = typeof view === "object" ? (tasks.find((task) => task.id === view.taskId) ?? null) : null;
 
   return (
-    <div className="fixed inset-0 z-[60] flex flex-col bg-bg pb-[env(safe-area-inset-bottom)]">
-      <div className="flex min-h-[52px] shrink-0 items-center gap-2 border-b border-line bg-panel px-2 py-1.5">
+    <div className="fixed inset-0 z-[60] flex flex-col bg-canvas pb-[env(safe-area-inset-bottom)]">
+      <div className="flex min-h-[52px] shrink-0 items-center gap-2 border-b border-border bg-card px-2 py-1.5">
         {view !== "list" ? (
           <button
             type="button"
-            className="flex h-11 w-11 shrink-0 items-center justify-center rounded-[8px] border border-line bg-bg text-dim hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            className="flex h-11 w-11 shrink-0 items-center justify-center rounded-[8px] border border-border bg-canvas text-muted hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
             aria-label={t("tasks.sheetBack")}
             onClick={() => setView("list")}
           >
@@ -385,10 +385,10 @@ export function TaskSheet({
         <span className="shrink-0 pl-1 text-[13px] font-bold">
           {view === "new" ? t("tasks.sheetNew") : openTask ? taskTitle(openTask.text) || t("tasks.untitled") : t("tasks.panelTitle")}
         </span>
-        <span className="min-w-0 flex-1 truncate text-[11.5px] text-dim">{project}</span>
+        <span className="min-w-0 flex-1 truncate text-[11.5px] text-muted">{project}</span>
         <button
           type="button"
-          className="flex h-11 w-11 shrink-0 items-center justify-center rounded-[8px] border border-line bg-bg text-dim hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+          className="flex h-11 w-11 shrink-0 items-center justify-center rounded-[8px] border border-border bg-canvas text-muted hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
           aria-label={t("common.close")}
           onClick={onClose}
         >
@@ -411,7 +411,7 @@ export function TaskSheet({
               <button
                 key={task.id}
                 type="button"
-                className={`flex w-full min-w-0 flex-col gap-0.5 rounded-[10px] border border-line bg-panel px-2.5 py-2 text-left shadow-card focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+                className={`flex w-full min-w-0 flex-col gap-0.5 rounded-[10px] border border-border bg-card px-2.5 py-2 text-left shadow-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
                   task.status === "done" ? "opacity-60" : ""
                 }`}
                 onClick={() => setView({ taskId: task.id })}
@@ -427,21 +427,21 @@ export function TaskSheet({
                     {taskTitle(task.text) || t("tasks.untitled")}
                   </span>
                 </span>
-                <span className="flex items-center gap-2 pl-0.5 text-[10.5px] text-dim">
+                <span className="flex items-center gap-2 pl-0.5 text-[10.5px] text-muted">
                   {task.assignments.length ? <span>⤷ {task.assignments.length}</span> : null}
                   <span>{fmtAge(new Date(task.updatedAt).getTime() / 1000)}</span>
                 </span>
               </button>
             );
           })}
-          {!rows.length ? <div className="px-2 py-4 text-center text-[11.5px] text-dim">{t("tasks.sheetEmpty")}</div> : null}
+          {!rows.length ? <div className="px-2 py-4 text-center text-[11.5px] text-muted">{t("tasks.sheetEmpty")}</div> : null}
         </div>
       ) : view === "new" ? (
         <NewTaskView project={project} files={files} onCreated={(task) => setView({ taskId: task.id })} />
       ) : openTask ? (
         <TaskDetailView key={openTask.id} task={openTask} files={files} onDeleted={() => setView("list")} />
       ) : (
-        <div className="flex flex-1 items-center justify-center text-[12px] text-dim">{t("tasks.sheetGone")}</div>
+        <div className="flex flex-1 items-center justify-center text-[12px] text-muted">{t("tasks.sheetGone")}</div>
       )}
     </div>
   );

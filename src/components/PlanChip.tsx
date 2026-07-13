@@ -1,5 +1,6 @@
 "use client";
 
+import { Badge, type BadgeTone } from "@/components/ui/Badge";
 import { getLocale, translate, useLocale } from "@/lib/i18n";
 import type { AgentGoal, AgentPlan, CtxUsage } from "@/lib/types";
 
@@ -26,7 +27,7 @@ export function PlanChip({ plan }: { plan: AgentPlan }) {
   const percent = plan.total ? Math.round((plan.done / plan.total) * 100) : 0;
   return (
     <span
-      className="inline-flex shrink-0 items-center gap-1 rounded-full bg-[#f1f0fc] px-1.5 py-0.5 font-mono text-[9.5px] font-semibold text-accent"
+      className="inline-flex shrink-0 items-center gap-1 rounded-full bg-accent-soft px-1.5 py-0.5 font-mono text-[9.5px] font-semibold text-accent"
       title={planTooltip(plan)}
       aria-label={t("plan.stepsAria", { done: plan.done, total: plan.total }) + (plan.current ? t("plan.nowSuffix", { current: plan.current }) : "")}
     >
@@ -38,10 +39,10 @@ export function PlanChip({ plan }: { plan: AgentPlan }) {
   );
 }
 
-const GOAL_TONES: Record<AgentGoal["status"], { labelKey: "plan.goal" | "plan.goalDone" | "plan.goalBlocked"; className: string }> = {
-  active: { labelKey: "plan.goal", className: "bg-[#f1f0fc] text-accent" },
-  complete: { labelKey: "plan.goalDone", className: "bg-[#e7f4ea] text-ok" },
-  blocked: { labelKey: "plan.goalBlocked", className: "bg-[#fbeaea] text-err" },
+const GOAL_TONES: Record<AgentGoal["status"], { labelKey: "plan.goal" | "plan.goalDone" | "plan.goalBlocked"; tone: BadgeTone }> = {
+  active: { labelKey: "plan.goal", tone: "accent" },
+  complete: { labelKey: "plan.goalDone", tone: "success" },
+  blocked: { labelKey: "plan.goalBlocked", tone: "danger" },
 };
 
 function goalTooltip(goal: AgentGoal): string {
@@ -53,11 +54,11 @@ function goalTooltip(goal: AgentGoal): string {
 }
 
 /* Same escalation points as the sidebar limit bars: calm, then amber, then red. */
-function ctxTone(pct: number | null): string {
-  if (pct === null) return "bg-chip text-dim";
-  if (pct >= 90) return "bg-[#fbeaea] text-err";
-  if (pct >= 70) return "bg-[#fff7e6] text-[#b07d18]";
-  return "bg-chip text-dim";
+function ctxTone(pct: number | null): BadgeTone {
+  if (pct === null) return "neutral";
+  if (pct >= 90) return "danger";
+  if (pct >= 70) return "warning";
+  return "neutral";
 }
 
 /* Token counts shortened for the chip face: 176_000 → «176K», 1_000_000 → «1M»,
@@ -90,11 +91,7 @@ export function CtxChip({ ctx }: { ctx: CtxUsage }) {
     ariaLabel = t("plan.ctxAriaUnknown", { used });
   }
   return (
-    <span
-      className={`inline-flex shrink-0 items-center gap-0.5 rounded-full px-1.5 py-0.5 font-mono text-[9.5px] font-semibold ${ctxTone(ctx.pct)}`}
-      title={title}
-      aria-label={ariaLabel}
-    >
+    <Badge tone={ctxTone(ctx.pct)} title={title} aria-label={ariaLabel}>
       {/* The percentage leads the chip face whenever it is known (issue #177
           item 1), giving the phone header the exact context % at a glance. When
           the model's window is unknown the percentage is undefined, so the chip
@@ -107,7 +104,7 @@ export function CtxChip({ ctx }: { ctx: CtxUsage }) {
           {fmtTokens(ctx.windowTokens)}
         </>
       )}
-    </span>
+    </Badge>
   );
 }
 
@@ -115,14 +112,14 @@ export function CtxChip({ ctx }: { ctx: CtxUsage }) {
     objective and usage numbers in the tooltip. */
 export function GoalChip({ goal }: { goal: AgentGoal }) {
   const { t } = useLocale();
-  const tone = GOAL_TONES[goal.status];
+  const goalTone = GOAL_TONES[goal.status];
   return (
-    <span
-      className={`inline-flex shrink-0 items-center rounded-full px-1.5 py-0.5 text-[9.5px] font-semibold ${tone.className}`}
+    <Badge
+      tone={goalTone.tone}
       title={goalTooltip(goal)}
-      aria-label={t("plan.goalAria", { status: t(tone.labelKey) }) + (goal.objective ? ` — ${goal.objective.slice(0, 120)}` : "")}
+      aria-label={t("plan.goalAria", { status: t(goalTone.labelKey) }) + (goal.objective ? ` — ${goal.objective.slice(0, 120)}` : "")}
     >
-      {t(tone.labelKey)}
-    </span>
+      {t(goalTone.labelKey)}
+    </Badge>
   );
 }

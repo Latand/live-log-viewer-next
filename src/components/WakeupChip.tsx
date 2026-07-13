@@ -53,7 +53,7 @@ export function WakeupChip({ wakeup, className, interactive = true }: { wakeup?:
       {magnitude}
     </>
   );
-  const chrome = "inline-flex items-center gap-1 rounded-full border border-[#e4c789] bg-[#fdf5e3] px-2 py-0.5 text-[10px] font-bold text-[#8a5d12]";
+  const chrome = "inline-flex items-center gap-1 rounded-full border border-warning/45 bg-warning-soft px-2 py-0.5 text-[10px] font-bold text-warning";
 
   /* A passive chip for always-hidden hosts (far-zoom label): no button, no
      focus, no handlers — a purely visual token. */
@@ -91,7 +91,7 @@ export function WakeupChip({ wakeup, className, interactive = true }: { wakeup?:
         {face}
       </button>
       {open ? (
-        <span role="tooltip" className="absolute left-0 top-full z-20 mt-1 max-w-[240px] whitespace-normal rounded-lg border border-line bg-panel px-2.5 py-1.5 text-[11px] font-normal leading-snug text-ink shadow-card">
+        <span role="tooltip" className="absolute left-0 top-full z-20 mt-1 max-w-[240px] whitespace-normal rounded-lg border border-border bg-card px-2.5 py-1.5 text-[11px] font-normal leading-snug text-primary shadow-1">
           {label}
         </span>
       ) : null}

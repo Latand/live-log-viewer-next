@@ -23,7 +23,9 @@ import {
   stageChipState,
   stageHasEvidence,
   stageOpenTarget,
+  pipelinePlaceholderStages,
   stageOverrideBody,
+  templateStageInputs,
 } from "./pipelineModel";
 import type { Flow } from "@/lib/flows/types";
 
@@ -440,5 +442,62 @@ describe("stageOverrideBody sends only changed fields (issue #118 Finding 4)", (
   test("a runtime-only change sends just that field, keeping the role untouched", () => {
     expect(stageOverrideBody(editable(), { ...base, effort: "low" })).toEqual({ stageId: "build", prompt: "Build it", effort: "low" });
     expect(stageOverrideBody(editable(), { ...base, model: "" })).toEqual({ stageId: "build", prompt: "Build it", model: null });
+  });
+})
+;
+
+describe("template-first drafts + stage placeholders (issue #196)", () => {
+  test("templateStageInputs folds a template into POSTable stages with roles and no pinned runtime", () => {
+    const template = PIPELINE_TEMPLATES.find((candidate) => candidate.id === "planBuildReview")!;
+    const inputs = templateStageInputs(template);
+    expect(inputs.map((input) => input.role?.roleId)).toEqual(["architect", "builder", "reviewer"]);
+    expect(inputs.map((input) => input.kind)).toEqual(["run", "run", "review-loop"]);
+    /* The chain is linear and closed. */
+    expect(inputs.map((input) => input.next)).toEqual([inputs[1]!.id, inputs[2]!.id, null]);
+    /* No engine/model/effort pins: the server resolves each role's current defaults. */
+    for (const input of inputs) {
+      expect(input.engine).toBeUndefined();
+      expect(input.model).toBeUndefined();
+      expect(input.effort).toBeUndefined();
+    }
+  });
+
+  test("pipelinePlaceholderStages lists every stage without a live board surface, in order", () => {
+    const stages = [stage("plan"), stage("build"), stage("review", "review-loop")];
+    const draft = pipeline({ state: "draft", stages });
+    expect(pipelinePlaceholderStages(draft, new Set(), new Set()).map((item) => item.id)).toEqual(["plan", "build", "review"]);
+
+    /* Stage 1 materialized a placed node → only the later stages keep slots. */
+    const running = pipeline({
+      state: "running",
+      stages,
+      cursor: { stageId: "plan", state: "running" },
+      runs: [{ stageId: "plan", attempts: [{ n: 1, state: "running", agentPath: "/plan" } as never] }],
+    });
+    expect(pipelinePlaceholderStages(running, new Set(["/plan"]), new Set()).map((item) => item.id)).toEqual(["build", "review"]);
+    /* An unplaced attempt path is NOT presence — the transcript must be on the board. */
+    expect(pipelinePlaceholderStages(running, new Set(), new Set()).map((item) => item.id)).toEqual(["plan", "build", "review"]);
+  });
+
+  test("a review-loop stage is present through its flow's deck, never its reviewer transcript", () => {
+    const stages = [stage("build"), stage("review", "review-loop")];
+    const p = pipeline({
+      state: "running",
+      stages,
+      runs: [
+        { stageId: "build", attempts: [{ n: 1, state: "passed", agentPath: "/build" } as never] },
+        { stageId: "review", attempts: [{ n: 1, state: "reviewing", agentPath: "/reviewer", flowId: "f1" } as never] },
+      ],
+    });
+    /* Reviewer transcript placed but the flow has no deck → still a placeholder. */
+    expect(pipelinePlaceholderStages(p, new Set(["/build", "/reviewer"]), new Set()).map((item) => item.id)).toEqual(["review"]);
+    /* The flow's deck placed → the review stage is materialized. */
+    expect(pipelinePlaceholderStages(p, new Set(["/build"]), new Set(["f1"]))).toEqual([]);
+  });
+
+  test("completed and closed pipelines never grow placeholders", () => {
+    const stages = [stage("build"), stage("verify")];
+    expect(pipelinePlaceholderStages(pipeline({ state: "completed", stages }), new Set(), new Set())).toEqual([]);
+    expect(pipelinePlaceholderStages(pipeline({ state: "closed", stages }), new Set(), new Set())).toEqual([]);
   });
 })

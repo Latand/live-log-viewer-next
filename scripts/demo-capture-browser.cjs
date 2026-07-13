@@ -81,41 +81,60 @@ function measurePixelMetrics(data, width, height, tileSize) {
   };
 }
 
+function inspectVisibleElements(frame, includeFailures) {
+  const problems = [];
+  for (const expected of frame.visible) {
+    const candidates = Array.from(document.querySelectorAll(expected.selector));
+    const element = candidates
+      .filter((candidate) => (candidate.innerText || "").includes(expected.text))
+      .sort((left, right) => {
+        const leftBox = left.getBoundingClientRect();
+        const rightBox = right.getBoundingClientRect();
+        return rightBox.width * rightBox.height - leftBox.width * leftBox.height;
+      })[0];
+    if (!(element instanceof HTMLElement)) {
+      problems.push(`missing ${expected.selector} containing ${JSON.stringify(expected.text)}`);
+      continue;
+    }
+    const style = getComputedStyle(element);
+    const box = element.getBoundingClientRect();
+    const rendered = style.display !== "none" && style.visibility !== "hidden" && Number(style.opacity) > 0;
+    if (!rendered) problems.push(`${expected.selector} containing ${JSON.stringify(expected.text)} is hidden`);
+    if (box.width < expected.minWidth || box.height < expected.minHeight) {
+      problems.push(
+        `${expected.selector} containing ${JSON.stringify(expected.text)} is ${box.width.toFixed(1)}x${box.height.toFixed(1)}`,
+      );
+    }
+    if (box.left < -0.5 || box.top < -0.5 || box.right > innerWidth + 0.5 || box.bottom > innerHeight + 0.5) {
+      problems.push(`${expected.selector} containing ${JSON.stringify(expected.text)} leaves the viewport`);
+    }
+  }
+  for (const text of frame.absentText) {
+    if (document.body.innerText.includes(text)) problems.push(`unexpected text ${JSON.stringify(text)}`);
+  }
+  return includeFailures ? problems : problems.length === 0;
+}
+
 async function assertVisibleElements(page, shot) {
-  const failures = await page.evaluate((frame) => {
-    const problems = [];
-    for (const expected of frame.visible) {
-      const candidates = Array.from(document.querySelectorAll(expected.selector));
-      const element = candidates
-        .filter((candidate) => (candidate.innerText || "").includes(expected.text))
-        .sort((left, right) => {
-          const leftBox = left.getBoundingClientRect();
-          const rightBox = right.getBoundingClientRect();
-          return rightBox.width * rightBox.height - leftBox.width * leftBox.height;
-        })[0];
-      if (!(element instanceof HTMLElement)) {
-        problems.push(`missing ${expected.selector} containing ${JSON.stringify(expected.text)}`);
-        continue;
-      }
-      const style = getComputedStyle(element);
-      const box = element.getBoundingClientRect();
-      const rendered = style.display !== "none" && style.visibility !== "hidden" && Number(style.opacity) > 0;
-      if (!rendered) problems.push(`${expected.selector} containing ${JSON.stringify(expected.text)} is hidden`);
-      if (box.width < expected.minWidth || box.height < expected.minHeight) {
-        problems.push(
-          `${expected.selector} containing ${JSON.stringify(expected.text)} is ${box.width.toFixed(1)}x${box.height.toFixed(1)}`,
-        );
-      }
-      if (box.left < -0.5 || box.top < -0.5 || box.right > innerWidth + 0.5 || box.bottom > innerHeight + 0.5) {
-        problems.push(`${expected.selector} containing ${JSON.stringify(expected.text)} leaves the viewport`);
-      }
-    }
-    for (const text of frame.absentText) {
-      if (document.body.innerText.includes(text)) problems.push(`unexpected text ${JSON.stringify(text)}`);
-    }
-    return problems;
-  }, shot.frame);
+  const failures = await page.evaluate(inspectVisibleElements, shot.frame, true);
   if (failures.length) throw new Error(`${shot.id} final element assertions failed:\n${failures.join("\n")}`);
+}
+
+async function waitForVisibleElements(page, shot) {
+  try {
+    await page.waitForFunction(
+      inspectVisibleElements,
+      { polling: "raf", timeout: 30_000 },
+      shot.frame,
+      false,
+    );
+    await page.evaluate(() => new Promise((resolve) => {
+      requestAnimationFrame(() => requestAnimationFrame(resolve));
+    }));
+  } catch (error) {
+    const failures = await page.evaluate(inspectVisibleElements, shot.frame, true);
+    throw new Error(`${shot.id} readiness timed out:\n${failures.join("\n")}`, { cause: error });
+  }
 }
 
 async function assertPngFrame(png, shot) {
@@ -233,7 +252,7 @@ async function render(browser, config, shot, capturePng) {
       if (close instanceof HTMLElement) close.click();
     });
   }
-  await new Promise((resolve) => setTimeout(resolve, 350));
+  await waitForVisibleElements(page, shot);
   const text = await page.evaluate(() => document.body.innerText);
   try {
     await assertVisibleElements(page, shot);
@@ -255,7 +274,7 @@ async function main() {
   const browser = await puppeteer.launch({
     executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || "/usr/bin/chromium",
     headless: true,
-    args: ["--disable-dev-shm-usage", "--font-render-hinting=none", "--no-sandbox"],
+    args: ["--disable-dev-shm-usage", "--disable-gpu", "--font-render-hinting=none", "--no-sandbox"],
   });
   try {
     for (const shot of config.shots) {
@@ -279,7 +298,7 @@ async function main() {
   }
 }
 
-module.exports = { assertPixelMetrics, measurePixelMetrics };
+module.exports = { assertPixelMetrics, measurePixelMetrics, waitForVisibleElements };
 
 if (require.main === module) {
   main().catch((error) => {

@@ -13,7 +13,7 @@ import { cleanTitle } from "./utils";
 
 /** Accent of the agent-link gesture: the arrow, the target border highlight
     (see the [data-link-hover] rule in globals.css) and the drop chip. */
-const LINK_COLOR = "#0d9488";
+const LINK_COLOR = "var(--color-info)";
 /** Pointer travel that turns a pill press into a link drag instead of a click. */
 const DRAG_THRESHOLD = 7;
 /** How long the arrow and its confirmation chip linger after a drop. */
@@ -282,7 +282,7 @@ function DropFlash({ drop }: { drop: DropState }) {
   const top = Math.max(8, Math.min(drop.to.y + 12, window.innerHeight - 44));
   return (
     <div
-      className="fixed flex max-w-[280px] items-center gap-1.5 rounded-full px-3 py-1.5 text-[11.5px] font-semibold text-white shadow-card"
+      className="fixed flex max-w-[280px] items-center gap-1.5 rounded-full px-3 py-1.5 text-[11.5px] font-semibold text-white shadow-1"
       style={{ left, top, backgroundColor: LINK_COLOR }}
     >
       <Link2 className="h-3.5 w-3.5 shrink-0" aria-hidden />

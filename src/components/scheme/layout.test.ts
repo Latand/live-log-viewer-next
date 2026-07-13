@@ -7,7 +7,7 @@ import type { FileEntry } from "@/lib/types";
 import { type BranchGroup, buildBranchGroups } from "@/components/projectModel";
 
 import { deckKey, flowLinkKey } from "./agentLinks";
-import { buildSchemeLayout } from "./layout";
+import { INDENT, buildSchemeLayout } from "./layout";
 
 function entry(overrides: Partial<FileEntry> & { path: string }): FileEntry {
   return {
@@ -277,14 +277,19 @@ describe("surface pipelines — memberless active pipelines keep a scheme surfac
       srcConversationId: null, createdAt: "1970", closedAt: null, ...over,
     }) as unknown as Pipeline;
 
-  test("a provisioning pipeline with no stage node yet gets a placeholder group carrying its plan", () => {
+  test("a provisioning pipeline with no stage node yet gets placeholder slots and a halo enclosing them (#196)", () => {
     const layout = buildSchemeLayout([], [], [], [], [], [], [pipeline({})]);
     const halo = layout.groups.find((group) => group.kind === "pipeline" && group.id === "p1");
     expect(halo).toBeTruthy();
     expect(halo!.pipeline?.id).toBe("p1");
-    /* Memberless: the empty members list is the contract the mobile dock filters
-       on to surface a nodeless pipeline (MobileFocusView `dockedPipelines`). */
-    expect(halo!.members).toHaveLength(0);
+    /* Every planned stage renders as a dashed placeholder window (#196), and the
+       halo members ARE those slots, so the region wraps the whole staged row. */
+    expect(layout.slots.map((slot) => slot.stage.id)).toEqual(["build"]);
+    const slot = layout.slots[0]!;
+    expect(halo!.members).toEqual([slot.key]);
+    expect(slot.x).toBeGreaterThanOrEqual(halo!.x);
+    expect(slot.x + slot.w).toBeLessThanOrEqual(halo!.x + halo!.w);
+    expect(slot.y + slot.h).toBeLessThanOrEqual(halo!.y + halo!.h);
     /* The placeholder is inside the world box so the camera/minimap can reach it. */
     expect(halo!.x + halo!.w).toBeLessThanOrEqual(layout.width);
     expect(halo!.y + halo!.h).toBeLessThanOrEqual(layout.height);
@@ -341,5 +346,118 @@ describe("sibling pipeline halos never overlap (#136 finding 1)", () => {
     expect(halos).toHaveLength(2);
     const [left, right] = [...halos].sort((x, y) => x.x - y.x);
     expect(left!.x + left!.w).toBeLessThanOrEqual(right!.x);
+  });
+});
+
+describe("pipeline stage placeholder slots (issue #196)", () => {
+  const staged = (over: Record<string, unknown>): Pipeline =>
+    ({
+      id: "p9", task: "Template draft", project: "demo", repoDir: "/r", worktreeDir: "/w", branch: "b",
+      baseBranch: "main", baseRef: "a", lastPassedCommit: "a",
+      stages: [
+        { id: "architect", kind: "run", role: { roleId: "architect" }, prompt: "plan", next: "builder" },
+        { id: "builder", kind: "run", role: { roleId: "builder" }, prompt: "build", next: "review" },
+        { id: "review", kind: "review-loop", role: { roleId: "reviewer" }, prompt: "review", next: null },
+      ],
+      runs: [], cursor: null, state: "draft", pausedState: null, stateDetail: null, srcPath: null,
+      srcConversationId: null, createdAt: "1970", closedAt: null, ...over,
+    }) as unknown as Pipeline;
+
+  test("a template draft renders EVERY role stage as a placeholder slot, in stage order, under one halo", () => {
+    const layout = buildSchemeLayout([], [], [], [], [], [staged({})], [staged({})]);
+    expect(layout.slots.map((slot) => slot.stage.id)).toEqual(["architect", "builder", "review"]);
+    /* Left-to-right in stage order, node-width footprints. */
+    const [a, b, c] = layout.slots;
+    expect(a!.x).toBeLessThan(b!.x);
+    expect(b!.x).toBeLessThan(c!.x);
+    expect(a!.y).toBe(b!.y);
+    /* Chain-adjacent slots carry the incoming handoff badge; the head does not. */
+    expect(a!.incoming).toBeUndefined();
+    expect(b!.incoming).toBe("run");
+    expect(c!.incoming).toBe("review-loop");
+    /* One halo wraps the full dashed row. */
+    const halo = layout.groups.find((group) => group.kind === "pipeline" && group.id === "p9")!;
+    for (const slot of layout.slots) {
+      expect(slot.x).toBeGreaterThanOrEqual(halo.x);
+      expect(slot.x + slot.w).toBeLessThanOrEqual(halo.x + halo.w);
+      expect(slot.y + slot.h).toBeLessThanOrEqual(halo.y + halo.h);
+    }
+    /* Slots are camera-reachable board citizens. */
+    for (const slot of layout.slots) expect(layout.byPath.get(slot.key)).toBe(slot);
+    expect(layout.width).toBeGreaterThanOrEqual(c!.x + c!.w);
+    expect(layout.height).toBeGreaterThanOrEqual(c!.y + c!.h);
+  });
+
+  test("a materialized stage dissolves exactly its slot; the next slot sits where the tree drops the tip's child (attach IN PLACE)", () => {
+    const root = entry({ path: "/arch" });
+    const group: BranchGroup = { key: "/arch", columns: [{ file: root, tasks: [] }], returnable: [], finished: [], smt: root.mtime, orphanTask: false };
+    const running = staged({
+      state: "running",
+      cursor: { stageId: "builder", state: "spawning" },
+      runs: [{ stageId: "architect", attempts: [{ n: 1, state: "passed", agentPath: "/arch", flowId: null }] }],
+    });
+    const layout = buildSchemeLayout([group], [], [root], [], [], [running], [running]);
+    /* The architect window is live — only builder + review keep placeholders. */
+    expect(layout.slots.map((slot) => slot.stage.id)).toEqual(["builder", "review"]);
+    const node = layout.nodes.find((candidate) => candidate.file.path === "/arch")!;
+    /* Review round-1 finding 3: the next stage's live window lands as the tip's
+       child at (tip.x + INDENT, one generation below) — the slot must sit on
+       EXACTLY those coordinates so the dashed card becomes the solid window in
+       place, with no relocation. */
+    const next = layout.slots[0]!;
+    expect(next.x).toBe(node.x + INDENT);
+    expect(next.y).toBeGreaterThanOrEqual(node.y + node.h);
+    const attached = buildSchemeLayout(
+      [
+        group,
+        {
+          key: "/builder",
+          columns: [{ file: entry({ path: "/builder", parent: "/arch" }), tasks: [] }],
+          returnable: [],
+          finished: [],
+          smt: 1_000,
+          orphanTask: false,
+        },
+      ],
+      [],
+      [root, entry({ path: "/builder", parent: "/arch" })],
+      [],
+      [],
+      [staged({
+        state: "running",
+        cursor: { stageId: "review", state: "spawning" },
+        runs: [
+          { stageId: "architect", attempts: [{ n: 1, state: "passed", agentPath: "/arch", flowId: null }] },
+          { stageId: "builder", attempts: [{ n: 1, state: "running", agentPath: "/builder", flowId: null }] },
+        ],
+      })],
+      [],
+    );
+    /* Note: whether the builder lands as /arch's tree child or its own column,
+       the invariant under test is positional: its window must take the slot's
+       coordinates from the previous poll's layout when the topology matches
+       (child-of-tip), which the INDENT/GAP_Y anchor above encodes. */
+    expect(attached.slots.map((slot) => slot.stage.id)).toEqual(["review"]);
+    /* Exactly one halo encloses both the live node and the remaining slots. */
+    const halos = layout.groups.filter((candidate) => candidate.kind === "pipeline" && candidate.id === "p9");
+    expect(halos).toHaveLength(1);
+    const halo = halos[0]!;
+    expect(node.x).toBeGreaterThanOrEqual(halo.x);
+    for (const slot of layout.slots) {
+      expect(slot.x + slot.w).toBeLessThanOrEqual(halo.x + halo.w);
+      expect(slot.y + slot.h).toBeLessThanOrEqual(halo.y + halo.h);
+    }
+  });
+
+  test("a foreign project's memberless draft never grows slots or a halo on this canvas (round-1 finding 2)", () => {
+    /* Global list carries another project's draft; the project-scoped surface
+       list does not include it — nothing of it may render here. */
+    const foreign = staged({ id: "px", project: "other" });
+    const layout = buildSchemeLayout([], [], [], [], [], [foreign], []);
+    expect(layout.slots).toHaveLength(0);
+    expect(layout.groups.filter((group) => group.kind === "pipeline")).toHaveLength(0);
+    /* The same pipeline offered through the surface list (this project) renders. */
+    const local = buildSchemeLayout([], [], [], [], [], [foreign], [foreign]);
+    expect(local.slots.length).toBeGreaterThan(0);
   });
 });

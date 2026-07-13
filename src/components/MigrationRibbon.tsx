@@ -43,7 +43,7 @@ export function MigrationDivider({ predecessorLabel }: { predecessorLabel?: stri
   const { t } = useLocale();
   if (!predecessorLabel) return null;
   return (
-    <div className="flex shrink-0 items-center gap-1.5 border-b border-line bg-[#f4f4f6] px-2.5 py-1 text-[10.5px] font-semibold text-dim">
+    <div className="flex shrink-0 items-center gap-1.5 border-b border-border bg-sunken px-2.5 py-1 text-[10.5px] font-semibold text-muted">
       <span aria-hidden>⇄</span>
       <span className="min-w-0 truncate">{t("migrate.divider", { label: predecessorLabel })}</span>
     </div>
@@ -51,9 +51,9 @@ export function MigrationDivider({ predecessorLabel }: { predecessorLabel?: stri
 }
 
 const TONE: Record<"pending" | "switching" | "failed", string> = {
-  pending: "border-[#e0ae45]/45 bg-[#fff9ed] text-[#7a5300]",
+  pending: "border-warning/45 bg-warning-soft text-warning",
   switching: "border-accent/35 bg-accent/5 text-accent",
-  failed: "border-err/40 bg-[#fff5f5] text-err",
+  failed: "border-danger/40 bg-danger-soft text-danger",
 };
 
 export function MigrationRibbon({ state, targetLabel, currentLabel, error, actionError, onRetry, onKeep }: MigrationRibbonProps) {
@@ -94,7 +94,7 @@ export function MigrationRibbon({ state, targetLabel, currentLabel, error, actio
               <button
                 type="button"
                 onClick={onRetry}
-                className="inline-flex items-center gap-1 rounded-[7px] border border-line bg-bg px-2 py-0.5 text-[11px] font-semibold text-ink hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                className="inline-flex items-center gap-1 rounded-[7px] border border-border bg-canvas px-2 py-0.5 text-[11px] font-semibold text-primary hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
               >
                 <RotateCcw className="h-3 w-3" aria-hidden /> {t("migrate.cardRetry")}
               </button>
@@ -103,7 +103,7 @@ export function MigrationRibbon({ state, targetLabel, currentLabel, error, actio
               <button
                 type="button"
                 onClick={onKeep}
-                className="inline-flex items-center rounded-[7px] border border-line bg-bg px-2 py-0.5 text-[11px] font-semibold text-ink hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                className="inline-flex items-center rounded-[7px] border border-border bg-canvas px-2 py-0.5 text-[11px] font-semibold text-primary hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
               >
                 {t("migrate.cardKeep", { label: currentLabel })}
               </button>
@@ -113,7 +113,7 @@ export function MigrationRibbon({ state, targetLabel, currentLabel, error, actio
       ) : null}
 
       {actionError ? (
-        <span role="alert" aria-live="assertive" className="w-full text-[10.5px] font-semibold text-err" title={actionError}>
+        <span role="alert" aria-live="assertive" className="w-full text-[10.5px] font-semibold text-danger" title={actionError}>
           {t("migrate.recoveryFailed", { detail: actionError })}
         </span>
       ) : null}

@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
 import { Window } from "happy-dom";
 
-import { createDraftPipeline } from "./pipelineModel";
+import { PIPELINE_TEMPLATES, createDraftPipeline } from "./pipelineModel";
 
 /* createDraftPipeline resolves the repo from /api/spawn and POSTs a draft; it uses
    getLocale() and dispatches a window event, so it needs a browser-ish env. */
@@ -62,4 +62,25 @@ test("surfaces an error and never POSTs when no repo can be resolved (#136)", as
   expect(result.pipeline).toBeUndefined();
   expect(result.error).toBeTruthy();
   expect(posted).toBe(false);
+});
+
+test("a template POSTs the draft WITH the template's full role chain (#196 template-first)", async () => {
+  const requests: Array<{ url: string; body?: unknown }> = [];
+  globalThis.fetch = (async (url: string, init?: { body?: string }) => {
+    requests.push({ url, body: init?.body ? JSON.parse(init.body) : undefined });
+    if (url.startsWith("/api/spawn")) return { ok: true, json: async () => ({ cwd: "/home/me/repo", dirs: [] }) };
+    return { ok: true, json: async () => ({ pipeline: { id: "p11" } }) };
+  }) as unknown as typeof fetch;
+
+  const template = PIPELINE_TEMPLATES.find((candidate) => candidate.id === "planBuildReview")!;
+  const result = await createDraftPipeline("demo", undefined, template);
+  expect(result.pipeline?.id).toBe("p11");
+  const post = requests.find((request) => request.url === "/api/pipelines");
+  const body = post?.body as { autoStart?: boolean; stages?: Array<{ kind: string; role?: { roleId: string }; next: string | null }> };
+  /* Still a DRAFT — nothing spawns; but every role stage is already in the plan,
+     so the canvas renders the whole chain as placeholders immediately. */
+  expect(body?.autoStart).toBe(false);
+  expect(body?.stages?.map((s) => s.role?.roleId)).toEqual(["architect", "builder", "reviewer"]);
+  expect(body?.stages?.map((s) => s.kind)).toEqual(["run", "run", "review-loop"]);
+  expect(body?.stages?.at(-1)?.next).toBeNull();
 });

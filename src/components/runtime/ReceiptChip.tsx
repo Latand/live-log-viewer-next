@@ -1,15 +1,16 @@
 "use client";
 
+import { Badge, type BadgeTone } from "@/components/ui/Badge";
 import { useLocale, type TFunction } from "@/lib/i18n";
 
 import { receiptIsTerminal, type ReceiptStatus, type RuntimeReceipt } from "./runtimeModel";
 
-/** Tone per receipt status. Text carries the meaning; color only reinforces. */
-function tone(status: ReceiptStatus): string {
-  if (status === "rejected" || status === "failed") return "border-err/30 bg-err/10 text-err";
-  if (status === "delivered" || status === "answered") return "border-ok/25 bg-ok/10 text-ok";
-  if (status === "uncertain") return "border-[#e0ae45]/45 bg-[#fff5dc] text-[#8a5a00]";
-  return "border-line bg-chip text-dim";
+/** Badge tone per receipt status. Text carries the meaning; color reinforces. */
+function tone(status: ReceiptStatus): BadgeTone {
+  if (status === "rejected" || status === "failed") return "danger";
+  if (status === "delivered" || status === "answered") return "success";
+  if (status === "uncertain") return "warning";
+  return "neutral";
 }
 
 function statusText(t: TFunction, receipt: RuntimeReceipt): string {
@@ -47,18 +48,18 @@ export function ReceiptChip({ receipt, actionsDisabled = false, onRetry, onEdit 
   const failed = receipt.status === "rejected" || receipt.status === "failed";
   return (
     <span className="inline-flex flex-wrap items-center gap-1.5 text-[11px] font-semibold" data-operation={receipt.operationId}>
-      <span
-        className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 ${tone(receipt.status)}`}
+      <Badge
+        tone={tone(receipt.status)}
         data-receipt-status={receipt.status}
         {...(failed ? { role: "status", "aria-live": "polite" as const } : {})}
       >
         {statusText(t, receipt)}
-      </span>
+      </Badge>
       {failed && onRetry ? (
         <button
           type="button"
           disabled={actionsDisabled}
-          className="min-h-11 rounded-full border border-line bg-bg px-3 py-0.5 text-dim hover:border-accent/45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-50 sm:min-h-0 sm:px-2"
+          className="min-h-11 rounded-full border border-border bg-canvas px-3 py-0.5 text-muted hover:border-accent/45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-50 sm:min-h-0 sm:px-2"
           onClick={onRetry}
         >
           {t("runtime.receipt.retry")}
@@ -68,14 +69,14 @@ export function ReceiptChip({ receipt, actionsDisabled = false, onRetry, onEdit 
         <button
           type="button"
           disabled={actionsDisabled}
-          className="min-h-11 rounded-full border border-line bg-bg px-3 py-0.5 text-dim hover:border-accent/45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-50 sm:min-h-0 sm:px-2"
+          className="min-h-11 rounded-full border border-border bg-canvas px-3 py-0.5 text-muted hover:border-accent/45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-50 sm:min-h-0 sm:px-2"
           onClick={onEdit}
         >
           {t("runtime.receipt.edit")}
         </button>
       ) : null}
       {!receiptIsTerminal(receipt.status) && receipt.status !== "pending" ? (
-        <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-dim motion-reduce:animate-none" aria-hidden />
+        <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-muted motion-reduce:animate-none" aria-hidden />
       ) : null}
     </span>
   );

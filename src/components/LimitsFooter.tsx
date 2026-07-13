@@ -40,8 +40,8 @@ export function fmtLimitsFailureReason(meta: LimitsProvenance, locale: Locale): 
 
 /** Bar keeps the engine identity color while there is headroom, then warns. */
 function barColor(leftPercent: number, engineColor: string): string {
-  if (leftPercent <= 10) return "#c62828";
-  if (leftPercent <= 30) return "#d29a2f";
+  if (leftPercent <= 10) return "var(--color-danger)";
+  if (leftPercent <= 30) return "var(--color-warning)";
   return engineColor;
 }
 
@@ -63,19 +63,19 @@ function LimitRow({
   return (
     <div className="mt-1.5">
       <div className="flex items-baseline justify-between">
-        <span className="text-[11px] font-semibold text-ink">{label}</span>
-        <span className="text-[11px] text-dim">
-          {t("limits.left")} <span className={`font-bold tabular-nums ${left <= 30 ? "" : "text-ink"}`} style={left <= 30 ? { color } : undefined}>{Math.round(left)}%</span>
+        <span className="text-[11px] font-semibold text-primary">{label}</span>
+        <span className="text-[11px] text-muted">
+          {t("limits.left")} <span className={`font-bold tabular-nums ${left <= 30 ? "" : "text-primary"}`} style={left <= 30 ? { color } : undefined}>{Math.round(left)}%</span>
         </span>
       </div>
-      <div className="mt-1 h-[4px] overflow-hidden rounded-full bg-chip">
+      <div className="mt-1 h-[4px] overflow-hidden rounded-full bg-sunken">
         <div
           className="h-full rounded-full transition-[width] duration-700 ease-out"
           style={{ width: Math.max(left, 1.5) + "%", backgroundColor: color }}
         />
       </div>
       {w.resetsAt ? (
-        <div className="mt-[3px] text-[10px] leading-none text-dim">
+        <div className="mt-[3px] text-[10px] leading-none text-muted">
           {t("limits.reset", { eta: fmtEta(w.resetsAt, now), at: fmtResetAt(w.resetsAt, now) })}
         </div>
       ) : null}
@@ -271,28 +271,28 @@ function EngineLimitsBlock({
             setChartOpen(false);
             setOpen((value) => !value);
           }}
-          className="block w-full px-3.5 pb-1.5 pt-2.5 text-left hover:bg-bg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+          className="block w-full px-3.5 pb-1.5 pt-2.5 text-left hover:bg-canvas focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
         >
           <div className="flex items-center gap-1.5">
             <span className="text-[11.5px] font-bold" style={{ color: tint.color }}>{label}</span>
-            {accountLimits?.plan ? <span className="truncate text-[10px] text-dim">{accountLimits.plan}</span> : null}
-            {staleHint ? <span className="truncate text-[10px] text-dim">{staleHint}</span> : null}
-            {stale ? <span className="h-1.5 w-1.5 shrink-0 self-center rounded-full bg-[#d29a2f]" title={t("limits.stale", { stale })} /> : null}
+            {accountLimits?.plan ? <span className="truncate text-[10px] text-muted">{accountLimits.plan}</span> : null}
+            {staleHint ? <span className="truncate text-[10px] text-muted">{staleHint}</span> : null}
+            {stale ? <span className="h-1.5 w-1.5 shrink-0 self-center rounded-full bg-warning" title={t("limits.stale", { stale })} /> : null}
             <span className="ml-auto flex shrink-0 items-center gap-1">
               {effective && effective.freshness !== "unavailable" ? (
                 <span
-                  className={`rounded-full border border-line bg-bg px-1.5 py-0.5 text-[9.5px] font-bold tabular-nums ${effective.freshness === "stale" ? "opacity-55" : ""}`}
+                  className={`rounded-full border border-border bg-canvas px-1.5 py-0.5 text-[9.5px] font-bold tabular-nums ${effective.freshness === "stale" ? "opacity-55" : ""}`}
                   style={{ color: barColor(effective.percent, tint.color) }}
                 >
                   {t("accounts.effective", { pct: Math.round(effective.percent) })}
                 </span>
               ) : null}
-              <span className="flex items-center gap-0.5 rounded-full border border-line bg-bg px-1.5 py-0.5 text-[10px] font-semibold text-ink">
+              <span className="flex items-center gap-0.5 rounded-full border border-border bg-canvas px-1.5 py-0.5 text-[10px] font-semibold text-primary">
                 <span className="max-w-24 truncate">{activeLabel}</span>
                 {draining ? (
                   <Loader2 className="h-3 w-3 animate-spin motion-reduce:animate-none text-accent" aria-hidden />
                 ) : (
-                  <ChevronDown className="h-3 w-3 text-dim" aria-hidden />
+                  <ChevronDown className="h-3 w-3 text-muted" aria-hidden />
                 )}
               </span>
             </span>
@@ -309,15 +309,15 @@ function EngineLimitsBlock({
               setOpen(false);
               setChartOpen((value) => !value);
             }}
-            className={`block w-full px-3.5 pt-0.5 text-left hover:bg-bg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${visibleFailureReason ? "pb-1.5" : "pb-3"}`}
+            className={`block w-full px-3.5 pt-0.5 text-left hover:bg-canvas focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${visibleFailureReason ? "pb-1.5" : "pb-3"}`}
           >
             <LimitRow label={t("limits.5h")} window={accountLimits!.session} engineColor={tint.color} now={now} />
             <LimitRow label={t("limits.week")} window={accountLimits!.weekly} engineColor={tint.color} now={now} />
           </button>
         ) : visibleFailureReason ? null : (
-          <div className="px-3.5 pb-3 pt-0.5 text-[10px] text-dim">{accounts.status === "loading" || identityPending ? t("limits.accountLoading") : t("limits.noDataYet")}</div>
+          <div className="px-3.5 pb-3 pt-0.5 text-[10px] text-muted">{accounts.status === "loading" || identityPending ? t("limits.accountLoading") : t("limits.noDataYet")}</div>
         )}
-        {visibleFailureReason ? <div className="px-3.5 pb-3 pt-0.5 text-[10px] text-dim">{visibleFailureReason}</div> : null}
+        {visibleFailureReason ? <div className="px-3.5 pb-3 pt-0.5 text-[10px] text-muted">{visibleFailureReason}</div> : null}
       </div>
       {open ? <AccountsPanel state={accounts} onClose={close} /> : null}
       {chartOpen ? <BurndownPanel key={accounts.active} engine={engine} label={label} plan={accountLimits?.plan ?? null} activeAccountId={accounts.active} onClose={closeChart} /> : null}
@@ -356,7 +356,7 @@ export function LimitsFooter() {
   const codexStaleHint = snap ? fmtStaleSince(snap.data.provenance.codex.staleSince, locale) : null;
   const now = snap?.at ?? 0;
   return (
-    <div className="shrink-0 border-t border-line empty:hidden">
+    <div className="shrink-0 border-t border-border empty:hidden">
       <EngineLimitsBlock engine="claude" label="Claude" limits={snap?.data.claude ?? null} payloadAccountId={snap?.data.claudeAccountId ?? null} now={now} staleHint={claudeStaleHint} provenance={snap?.data.provenance.claude ?? { source: "unavailable", reason: null, staleSince: null }} onSwitched={invalidateLimits} />
       <EngineLimitsBlock engine="codex" label="Codex" limits={snap?.data.codex ?? null} payloadAccountId={snap?.data.codexAccountId ?? null} now={now} staleHint={codexStaleHint} provenance={snap?.data.provenance.codex ?? { source: "unavailable", reason: null, staleSince: null }} onSwitched={invalidateLimits} />
     </div>

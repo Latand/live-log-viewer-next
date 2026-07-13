@@ -175,6 +175,7 @@ function layout(parts: Partial<SchemeLayout> = {}): SchemeLayout {
     groups: [],
     links: [],
     drafts: [],
+    slots: [],
     byPath: new Map(),
     width: 2000,
     height: 1000,
