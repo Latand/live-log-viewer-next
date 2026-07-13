@@ -693,6 +693,21 @@ export const en = {
   "groupOverride.savedRetry": "Retrying the round",
   "groupOverride.savedCancel": "Reviewer stopped",
   "groupOverride.savedStage": "Stage updated for its next run",
+  "groupOverride.stagesHeading": "Stages · execution order",
+  "groupOverride.stagesHint": "Drag cards to reorder. The order is the execution chain.",
+  "groupOverride.addRunStage": "Add stage",
+  "groupOverride.addReviewStage": "Add review loop",
+  "groupOverride.dragHandle": "Drag to reorder this stage",
+  "groupOverride.runKind": "run",
+  "groupOverride.reviewKind": "review loop",
+  "groupOverride.reordered": "Stages reordered",
+  "groupOverride.stageAdded": "Stage added",
+  "groupOverride.stageRemoved": "Stage removed",
+
+  // canvas pipeline builder (#136)
+  "pipelineBuilder.untitledTask": "New pipeline",
+  "pipelineBuilder.createDraft": "Pipeline",
+  "pipelineBuilder.createDraftAria": "Add a draft pipeline to the canvas",
 
   // flows/RoundDeck
   "roundDeck.roundAborted": "Round {n} · aborted",

@@ -455,6 +455,48 @@ export async function createPipeline(req: CreatePipelineRequest): Promise<{ pipe
   }
 }
 
+/**
+ * Creates a DRAFT pipeline straight on the canvas (#136), with no form: it
+ * resolves the project's repo directory from the spawn endpoint (the same source
+ * the dialog seeds from), then POSTs `autoStart:false` with two blank run stages —
+ * the API's 2-stage minimum. The draft renders as a scheme group the operator then
+ * assembles visually (add/reorder stage cards, edit role/model/effort/prompt) and
+ * Starts. Runs entirely on the #189 draft machinery — no second data path.
+ */
+export async function createDraftPipeline(
+  project: string,
+  repoPrefill?: string,
+): Promise<{ pipeline?: Pipeline; error?: string }> {
+  let repoDir = (repoPrefill ?? "").trim();
+  if (!repoDir) {
+    try {
+      const res = await fetch("/api/spawn?project=" + encodeURIComponent(project));
+      const json = (await res.json().catch(() => null)) as { dirs?: string[]; cwd?: string | null } | null;
+      repoDir = (typeof json?.cwd === "string" ? json.cwd : "") || json?.dirs?.[0] || "";
+    } catch {
+      /* fall through to the empty-repo error below */
+    }
+  }
+  if (!repoDir) return { error: translate(getLocale(), "common.serverUnavailable") };
+  const seed: PipelineStageInput[] = draftStagesToInput([
+    blankBuilderStage(),
+    blankBuilderStage(),
+  ]);
+  return createPipeline({
+    task: translate(getLocale(), "pipelineBuilder.untitledTask"),
+    repoDir,
+    stages: seed,
+    autoStart: false,
+  });
+}
+
+/** A blank run stage row for the canvas seed: no role, a `{{task}}` prompt so it
+    clears the server's non-empty-prompt guard while staying obviously a placeholder
+    the operator overwrites. */
+function blankBuilderStage(): DraftStage {
+  return { key: "", kind: "run", roleId: "", engine: "claude", model: "", effort: "", access: "read-write", prompt: "{{task}}", roleParams: {} };
+}
+
 export async function patchPipeline(
   id: string,
   action: PipelineAction,

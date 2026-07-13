@@ -5,7 +5,7 @@ import { useMemo, useState } from "react";
 
 import { ENGINE_EFFORTS } from "@/lib/agent/efforts";
 import type { FlowEngine } from "@/lib/flows/types";
-import type { PipelineStage } from "@/lib/pipelines/types";
+import type { PipelineStage, PipelineStageKind } from "@/lib/pipelines/types";
 import { useLocale } from "@/lib/i18n";
 
 import { flowPresentation, patchFlow } from "@/components/flows/flowModel";
@@ -390,6 +390,155 @@ function StageForm({
   );
 }
 
+/**
+ * The on-canvas draft BUILDER (issue #136): the draft's stages as a vertical stack
+ * of cards, each the same {@link StageForm} the override-stage editor renders
+ * (role·engine·model·effort·prompt). The stack order IS the execution chain — drag
+ * a card (or use the move buttons) to reorder, which PATCHes `reorder-stage`; the
+ * per-card trash removes (`remove-stage`); the footer adds a run or review-loop
+ * stage (`add-stage`). Every action is a #189 draft PATCH — no second data path,
+ * no form. A draft's stages have never run, so all of them are editable.
+ */
+function DraftStageCards({
+  group,
+  busy,
+  run,
+}: {
+  group: SchemeGroup;
+  busy: boolean;
+  run: (label: string, action: () => Promise<string | null>) => Promise<void>;
+}) {
+  const { t } = useLocale();
+  const pipeline = group.pipeline!;
+  const stages = pipeline.stages;
+  const [dragId, setDragId] = useState<string | null>(null);
+  const [overId, setOverId] = useState<string | null>(null);
+
+  const moveTo = (stageId: string, toIndex: number) => {
+    if (toIndex < 0 || toIndex >= stages.length) return;
+    void run(t("groupOverride.reordered"), () => patchPipeline(pipeline.id, "reorder-stage", { stageId, toIndex }));
+  };
+  const addStage = (kind: PipelineStageKind) => {
+    const ids = new Set(stages.map((item) => item.id));
+    let n = stages.length + 1;
+    while (ids.has(`stage-${n}`)) n += 1;
+    void run(t("groupOverride.stageAdded"), () =>
+      patchPipeline(pipeline.id, "add-stage", {
+        index: stages.length,
+        stage: { id: `stage-${n}`, kind, prompt: pipeline.task || "{{task}}", next: null },
+      }),
+    );
+  };
+  const removeStage = (stageId: string) =>
+    void run(t("groupOverride.stageRemoved"), () => patchPipeline(pipeline.id, "remove-stage", { stageId }));
+
+  /* Drop resolves against React state (dragId), not dataTransfer, so it works in
+     environments where the drag payload is unavailable (and stays unit-testable).
+     Splice semantics: the dragged stage lands at the drop target's current slot. */
+  const onDrop = (targetId: string) => {
+    const from = dragId;
+    setDragId(null);
+    setOverId(null);
+    if (!from || from === targetId) return;
+    const toIndex = stages.findIndex((item) => item.id === targetId);
+    if (toIndex >= 0) moveTo(from, toIndex);
+  };
+
+  return (
+    <div className="flex flex-col gap-1.5">
+      <span className="text-[10.5px] font-bold text-ink">{t("groupOverride.stagesHeading")}</span>
+      <span className="text-[10px] font-semibold text-dim">{t("groupOverride.stagesHint")}</span>
+      <div className="flex max-h-[46vh] flex-col gap-2 overflow-y-auto pr-0.5">
+        {stages.map((stage, index) => (
+          <div
+            key={stage.id}
+            data-stage-card={stage.id}
+            draggable={!busy}
+            onDragStart={(event) => {
+              setDragId(stage.id);
+              event.dataTransfer?.setData?.("text/plain", stage.id);
+            }}
+            onDragEnd={() => {
+              setDragId(null);
+              setOverId(null);
+            }}
+            onDragOver={(event) => {
+              event.preventDefault();
+              if (overId !== stage.id) setOverId(stage.id);
+            }}
+            onDrop={(event) => {
+              event.preventDefault();
+              onDrop(stage.id);
+            }}
+            className={`flex flex-col gap-1.5 rounded-[10px] border bg-panel p-2 ${
+              overId === stage.id && dragId && dragId !== stage.id ? "border-accent" : "border-line"
+            } ${dragId === stage.id ? "opacity-60" : ""}`}
+          >
+            <div className="flex items-center gap-1.5">
+              <span
+                className="cursor-grab select-none text-[13px] leading-none text-dim"
+                aria-label={t("groupOverride.dragHandle")}
+                title={t("groupOverride.dragHandle")}
+              >
+                ⠿
+              </span>
+              <span className="inline-flex h-5 min-w-5 items-center justify-center rounded-full bg-chip px-1.5 text-[10px] font-black text-dim">
+                {index + 1}
+              </span>
+              <span className="min-w-0 flex-1 truncate text-[10.5px] font-bold text-ink">{stage.role?.roleId ?? stage.id}</span>
+              <span className="shrink-0 rounded-full border border-line px-1.5 py-[1px] text-[9px] font-bold uppercase tracking-wide text-dim">
+                {t(stage.kind === "review-loop" ? "groupOverride.reviewKind" : "groupOverride.runKind")}
+              </span>
+              <button
+                className="inline-flex h-6 w-6 items-center justify-center rounded-full border border-line bg-bg text-dim hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-30"
+                disabled={busy || index === 0}
+                aria-label={t("groupOverride.moveStageUp")}
+                onClick={() => moveTo(stage.id, index - 1)}
+              >
+                <ArrowUp className="h-3 w-3" aria-hidden />
+              </button>
+              <button
+                className="inline-flex h-6 w-6 items-center justify-center rounded-full border border-line bg-bg text-dim hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-30"
+                disabled={busy || index === stages.length - 1}
+                aria-label={t("groupOverride.moveStageDown")}
+                onClick={() => moveTo(stage.id, index + 1)}
+              >
+                <ArrowDown className="h-3 w-3" aria-hidden />
+              </button>
+              <button
+                className="inline-flex h-6 w-6 items-center justify-center rounded-full border border-line bg-bg text-dim hover:text-err focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-30"
+                disabled={busy || stages.length <= 2}
+                aria-label={t("groupOverride.removeStage")}
+                onClick={() => removeStage(stage.id)}
+              >
+                <Trash2 className="h-3 w-3" aria-hidden />
+              </button>
+            </div>
+            {/* Same key strategy as the override editor: remount when the resolved
+                runtime/prompt changes so the inputs re-seed after a save. */}
+            <StageForm
+              key={`${stage.id}:${stage.role?.roleId ?? ""}:${stage.effectiveRole.engine}:${stage.effectiveRole.model ?? ""}:${stage.effectiveRole.effort ?? ""}:${stage.prompt}`}
+              group={group}
+              stage={stage}
+              busy={busy}
+              disabled={false}
+              run={run}
+            />
+          </div>
+        ))}
+      </div>
+      <div className="grid grid-cols-2 gap-1.5">
+        <button className={ghostBtn} disabled={busy || stages.length >= 4} onClick={() => addStage("run")}>
+          <Plus className="h-3 w-3" aria-hidden /> {t("groupOverride.addRunStage")}
+        </button>
+        <button className={ghostBtn} disabled={busy || stages.length >= 4} onClick={() => addStage("review-loop")}>
+          <Plus className="h-3 w-3" aria-hidden /> {t("groupOverride.addReviewStage")}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function PipelineOverride({ group, onClose }: { group: SchemeGroup; onClose: () => void }) {
   const { t } = useLocale();
   const pipeline = group.pipeline!;
@@ -453,10 +602,12 @@ function PipelineOverride({ group, onClose }: { group: SchemeGroup; onClose: () 
         </div>
       ) : null}
 
-      {stage ? (
+      {draft ? (
+        <DraftStageCards group={group} busy={busy} run={run} />
+      ) : stage ? (
         <>
           <label className="flex flex-col gap-1">
-            <span className={fieldLabel}>{t(draft ? "groupOverride.draftStage" : "groupOverride.nextStage")}</span>
+            <span className={fieldLabel}>{t("groupOverride.nextStage")}</span>
             <select className={inputBase} value={stage.id} onChange={(event) => setStageId(event.target.value)}>
               {editable.map((item) => (
                 <option key={item.id} value={item.id}>
@@ -465,46 +616,6 @@ function PipelineOverride({ group, onClose }: { group: SchemeGroup; onClose: () 
               ))}
             </select>
           </label>
-          {draft ? (
-            <div className="grid grid-cols-2 gap-1.5">
-              <button
-                className={ghostBtn}
-                disabled={busy || pipeline.stages.findIndex((item) => item.id === stage.id) === 0}
-                onClick={() => void run(t("groupOverride.moveStageUp"), () => patchPipeline(pipeline.id, "reorder-stage", { stageId: stage.id, toIndex: pipeline.stages.findIndex((item) => item.id === stage.id) - 1 }))}
-              >
-                <ArrowUp className="h-3 w-3" aria-hidden /> {t("groupOverride.moveStageUp")}
-              </button>
-              <button
-                className={ghostBtn}
-                disabled={busy || pipeline.stages.findIndex((item) => item.id === stage.id) === pipeline.stages.length - 1}
-                onClick={() => void run(t("groupOverride.moveStageDown"), () => patchPipeline(pipeline.id, "reorder-stage", { stageId: stage.id, toIndex: pipeline.stages.findIndex((item) => item.id === stage.id) + 1 }))}
-              >
-                <ArrowDown className="h-3 w-3" aria-hidden /> {t("groupOverride.moveStageDown")}
-              </button>
-              <button
-                className={ghostBtn}
-                disabled={busy || pipeline.stages.length >= 4}
-                onClick={() => {
-                  const ids = new Set(pipeline.stages.map((item) => item.id));
-                  let n = pipeline.stages.length + 1;
-                  while (ids.has(`stage-${n}`)) n += 1;
-                  void run(t("groupOverride.addStage"), () => patchPipeline(pipeline.id, "add-stage", {
-                    index: pipeline.stages.length,
-                    stage: { id: `stage-${n}`, kind: "run", prompt: pipeline.task, next: null },
-                  }));
-                }}
-              >
-                <Plus className="h-3 w-3" aria-hidden /> {t("groupOverride.addStage")}
-              </button>
-              <button
-                className={ghostBtn}
-                disabled={busy || pipeline.stages.length <= 2}
-                onClick={() => void run(t("groupOverride.removeStage"), () => patchPipeline(pipeline.id, "remove-stage", { stageId: stage.id }))}
-              >
-                <Trash2 className="h-3 w-3" aria-hidden /> {t("groupOverride.removeStage")}
-              </button>
-            </div>
-          ) : null}
           {/* Keyed on the stage id so switching stages remounts the form with the
               picked stage's config — no reset-in-effect. */}
           {/* Key on the effective role/runtime + prompt, not just the id, so once

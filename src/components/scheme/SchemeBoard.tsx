@@ -105,6 +105,11 @@ interface Props {
       slot near the button's world anchor (bottom-left quadrant), avoiding cards
       and panes via `findFreeSlot`. */
   newTaskNonce?: number;
+  /** The canvas pipeline builder (#136): a draft pipeline whose group panel should
+      open as soon as it renders, so `+ Пайплайн` lands the operator in the builder.
+      `onBuilderOpened` fires once consumed so the caller can clear it. */
+  builderPipelineId?: string | null;
+  onBuilderOpened?: () => void;
 }
 
 function ToolButton({
@@ -167,6 +172,8 @@ export function SchemeBoard({
   placeTaskId,
   onTaskPlaced,
   newTaskNonce,
+  builderPipelineId,
+  onBuilderOpened,
 }: Props) {
   const { t } = useLocale();
   const mapMode = Boolean(onNodePick);
@@ -848,7 +855,7 @@ export function SchemeBoard({
       >
         {/* Group halos sit behind every edge and card so a running flow/pipeline
             reads as one framed region; the label chip stays live off the map. */}
-        <GroupsLayer groups={layout.groups} interactive={!mapMode && !handLike && !session} pipelineControls={mapMode ? undefined : pipelineControls} />
+        <GroupsLayer groups={layout.groups} interactive={!mapMode && !handLike && !session} pipelineControls={mapMode ? undefined : pipelineControls} autoOpenGroupId={builderPipelineId} onAutoOpen={onBuilderOpened} />
         <EdgesLayer edges={layout.edges} width={layout.width} height={layout.height} />
         <LoopsLayer loops={layout.loops} width={layout.width} height={layout.height} />
         {/* Rails/badges stay passive on the map, but the pipeline hub keeps its
