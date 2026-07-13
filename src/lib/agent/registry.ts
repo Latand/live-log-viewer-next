@@ -277,8 +277,19 @@ function receiptStillAwaitsResumeSuccessor(receipt: SpawnReceipt): boolean {
 
 const PATH_CORRELATION_WINDOW_MS = 30_000;
 const REGISTRY_WRITE_LOCK_WAIT_MS = 8_000;
-const REGISTRY_OPERATION_LOCK_WAIT_MS = 30_000;
+/** Spawn readiness polling may hold an operation lock for 60 seconds. */
+const REGISTRY_OPERATION_LOCK_WAIT_MS = 120_000;
 const REGISTRY_LOCK_BACKOFF_MAX_MS = 50;
+
+interface RegistryLockTiming {
+  now(): number;
+  wait(delayMs: number): Promise<void>;
+}
+
+const SYSTEM_LOCK_TIMING: RegistryLockTiming = {
+  now: () => Date.now(),
+  wait: async (delayMs) => { await new Promise((resolve) => setTimeout(resolve, delayMs)); },
+};
 
 function correlatePathPendingReceipts(file: RegistryFile, observations: ConversationObservation[]): Map<string, string> {
   type PendingReceipt = { launchId: string; cwd: string; accountId: string | null; expectedStart: number };
@@ -1075,6 +1086,7 @@ export class AgentRegistry {
     readonly filename = statePath("agent-registry.json"),
     private readonly ownerAlive: (owner: ProcessIdentity) => boolean = (owner) =>
       procBackend.pidAlive(owner.pid) && (owner.startIdentity === null || procBackend.processIdentity(owner.pid) === owner.startIdentity),
+    private readonly lockTiming: RegistryLockTiming = SYSTEM_LOCK_TIMING,
   ) {
     this.cleanupStaleTempFiles();
     this.compactAtStartup();
@@ -1160,10 +1172,10 @@ export class AgentRegistry {
 
   private acquireLock(lock: string, owner: ProcessIdentity): void {
     fs.mkdirSync(path.dirname(lock), { recursive: true, mode: 0o700 });
-    const deadline = Date.now() + REGISTRY_WRITE_LOCK_WAIT_MS;
+    const deadline = this.lockTiming.now() + REGISTRY_WRITE_LOCK_WAIT_MS;
     for (let attempt = 0; ; attempt += 1) {
       if (this.tryAcquireLock(lock, owner)) return;
-      const remaining = deadline - Date.now();
+      const remaining = deadline - this.lockTiming.now();
       if (remaining <= 0) break;
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, this.lockBackoff(attempt, remaining));
     }
@@ -1172,12 +1184,12 @@ export class AgentRegistry {
 
   private async acquireLockAsync(lock: string, owner: ProcessIdentity): Promise<void> {
     fs.mkdirSync(path.dirname(lock), { recursive: true, mode: 0o700 });
-    const deadline = Date.now() + REGISTRY_OPERATION_LOCK_WAIT_MS;
+    const deadline = this.lockTiming.now() + REGISTRY_OPERATION_LOCK_WAIT_MS;
     for (let attempt = 0; ; attempt += 1) {
       if (this.tryAcquireLock(lock, owner)) return;
-      const remaining = deadline - Date.now();
+      const remaining = deadline - this.lockTiming.now();
       if (remaining <= 0) break;
-      await new Promise((resolve) => setTimeout(resolve, this.lockBackoff(attempt, remaining)));
+      await this.lockTiming.wait(this.lockBackoff(attempt, remaining));
     }
     throw new Error("agent registry is busy");
   }

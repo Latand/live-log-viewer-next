@@ -192,6 +192,32 @@ describe("agent registry", () => {
     expect(events).toEqual(["first-started", "first-finished", "second-started"]);
   });
 
+  test("waits through a sixty-second valid operation holder", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-long-lock-"));
+    const filename = path.join(dir, "agent-registry.json");
+    let elapsedMs = 0;
+    let lock = "";
+    const store = new AgentRegistry(filename, () => true, {
+      now: () => elapsedMs,
+      wait: async (delayMs) => {
+        elapsedMs += delayMs;
+        if (elapsedMs >= 60_000) fs.rmSync(lock, { recursive: true, force: true });
+      },
+    });
+    lock = `${store.filename}.locks/${encodeURIComponent("codex:long-holder")}`;
+    fs.mkdirSync(lock, { recursive: true });
+    fs.writeFileSync(path.join(lock, "owner.json"), JSON.stringify({ pid: 42, startIdentity: "42:holder" }));
+
+    const result = await store.withOperationLock(
+      { engine: "codex", sessionId: "long-holder" },
+      { pid: process.pid, startIdentity: null },
+      async () => "completed",
+    );
+
+    expect(result).toBe("completed");
+    expect(elapsedMs).toBeGreaterThanOrEqual(60_000);
+  });
+
   test("reclaims a lock only after its recorded process identity is stale", () => {
     const store = registry(() => false);
     const lock = `${store.filename}.write-lock`;
