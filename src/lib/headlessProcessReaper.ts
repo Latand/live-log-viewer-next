@@ -120,6 +120,34 @@ function packageOperand(args: string[], start: number): string | undefined {
   return undefined;
 }
 
+const UV_GLOBAL_OPTIONS_WITH_VALUE = new Set([
+  "--cache-dir",
+  "--color",
+  "--config-file",
+  "--directory",
+  "--project",
+  "--python",
+]);
+
+function uvMcpPackage(args: string[]): boolean {
+  let index = 1;
+  while (index < args.length) {
+    const arg = args[index]!;
+    if (arg === "run") return isMcpPackageSpec(packageOperand(args, index + 1));
+    if (arg === "tool" && args[index + 1] === "run") return isMcpPackageSpec(packageOperand(args, index + 2));
+    if (UV_GLOBAL_OPTIONS_WITH_VALUE.has(arg)) {
+      index += 2;
+      continue;
+    }
+    if (arg.startsWith("-")) {
+      index += 1;
+      continue;
+    }
+    return false;
+  }
+  return false;
+}
+
 function isMcpServer(process: Pick<ReaperProcess, "argv" | "tty">): boolean {
   if (process.tty !== 0) return false;
   const args = process.argv;
@@ -131,7 +159,7 @@ function isMcpServer(process: Pick<ReaperProcess, "argv" | "tty">): boolean {
     return isMcpPackageSpec(packageOperand(args, 2));
   }
   if (runner === "bun" && args[1] === "x") return isMcpPackageSpec(packageOperand(args, 2));
-  return runner === "uv" && args[1] === "tool" && args[2] === "run" && isMcpPackageSpec(packageOperand(args, 3));
+  return runner === "uv" && uvMcpPackage(args);
 }
 
 function ancestry(pid: number, byPid: Map<number, ReaperProcess>): number[] {

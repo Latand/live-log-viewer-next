@@ -122,6 +122,22 @@ test("headless process reaper ignores MCP text in generic command arguments", ()
   })).toEqual([]);
 });
 
+test("headless process reaper selects the deployed uv run Telegram MCP root", () => {
+  const processes = [
+    process(820, 1, ["uv", "--directory", "/srv/codex-telegram-mcp", "run", "codex-telegram-mcp"]),
+    process(821, 820, ["codex-telegram-mcp"]),
+  ];
+
+  expect(selectHeadlessProcessCandidates({
+    processes,
+    flows: [],
+    hosts: [],
+    panePids: [],
+    flowArtifactsRoot,
+    thresholdMs: 2 * 60 * 60_000,
+  })).toEqual([{ pid: 820, identity: "820:start", kind: "orphan-mcp" }]);
+});
+
 test("headless reaper revalidates ownership and applies TERM then KILL to the stale group", async () => {
   const viewerExec = process(900, 1, ["codex", "exec", "--json", "--output-last-message", viewerOutput("flow-900", 1)]);
   const signals: Array<{ pid: number; signal: NodeJS.Signals }> = [];
