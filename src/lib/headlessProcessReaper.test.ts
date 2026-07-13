@@ -104,6 +104,24 @@ test("headless process reaper selects stale viewer exec groups and orphaned MCP 
   ]);
 });
 
+test("headless process reaper ignores MCP text in generic command arguments", () => {
+  const processes = [
+    process(810, 1, ["bash", "-c", "sleep 99999 # investigate mcp startup"]),
+    process(811, 1, ["sleep", "99999", "--log", "/var/log/mcp-startup.log"]),
+    process(812, 1, ["python", "/opt/audit/mcp/report.py"]),
+    process(813, 1, ["node", "server.js", "--description", "MCP server audit"]),
+  ];
+
+  expect(selectHeadlessProcessCandidates({
+    processes,
+    flows: [],
+    hosts: [],
+    panePids: [],
+    flowArtifactsRoot,
+    thresholdMs: 2 * 60 * 60_000,
+  })).toEqual([]);
+});
+
 test("headless reaper revalidates ownership and applies TERM then KILL to the stale group", async () => {
   const viewerExec = process(900, 1, ["codex", "exec", "--json", "--output-last-message", viewerOutput("flow-900", 1)]);
   const signals: Array<{ pid: number; signal: NodeJS.Signals }> = [];
@@ -223,7 +241,7 @@ test("orphan cleanup aborts when the root identity changes before TERM", async (
 
 test("orphan cleanup skips a descendant whose identity changes before TERM", async () => {
   const root = process(930, 1, ["npm", "exec", "context7-mcp"]);
-  const child = process(931, 930, ["uv", "run", "child-mcp"]);
+  const child = process(931, 930, ["child-mcp"]);
   const signals: Array<{ pid: number; signal: NodeJS.Signals }> = [];
   const timers: Array<() => void> = [];
   const identityReads = new Map<number, number>();
@@ -298,6 +316,129 @@ test("orphan cleanup captures and kills an unrecognized descendant", async () =>
     { pid: 950, signal: "SIGTERM" },
     { pid: 951, signal: "SIGKILL" },
     { pid: 950, signal: "SIGKILL" },
+  ]);
+});
+
+test("orphan cleanup aborts when its tree contains an active flow reviewer", async () => {
+  const root = process(970, 1, ["npm", "exec", "chrome-devtools-mcp"]);
+  const reviewer = process(971, 970, ["codex", "exec", "-"]);
+  const signals: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+  const report = await runHeadlessProcessReaper({
+    hosts: [],
+    flows: [activeFlow(971)],
+    thresholdMs: 2 * 60 * 60_000,
+    flowArtifactsRoot,
+    dependencies: {
+      listProcesses: () => [root, reviewer],
+      ppidMap: () => new Map([[970, 1], [971, 970]]),
+      processIdentity: (pid) => `${pid}:start`,
+      processAgeMs: () => old,
+      loadFlows: () => [activeFlow(971)],
+      readHosts: async () => [],
+      readPanePids: async () => [],
+      signalProcess: (pid, signal) => { signals.push({ pid, signal }); },
+    },
+  });
+
+  expect(report).toEqual({ candidates: 1, signaled: 0 });
+  expect(signals).toEqual([]);
+});
+
+test("orphan cleanup aborts when its tree contains a Claude owner", async () => {
+  const root = process(980, 1, ["npm", "exec", "chrome-devtools-mcp"]);
+  const claude = process(981, 980, ["claude", "--print", "continue"]);
+  const signals: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+  const report = await runHeadlessProcessReaper({
+    hosts: [],
+    flows: [],
+    thresholdMs: 2 * 60 * 60_000,
+    flowArtifactsRoot,
+    dependencies: {
+      listProcesses: () => [root, claude],
+      ppidMap: () => new Map([[980, 1], [981, 980]]),
+      processIdentity: (pid) => `${pid}:start`,
+      processAgeMs: () => old,
+      loadFlows: () => [],
+      readHosts: async () => [],
+      readPanePids: async () => [],
+      signalProcess: (pid, signal) => { signals.push({ pid, signal }); },
+    },
+  });
+
+  expect(report).toEqual({ candidates: 1, signaled: 0 });
+  expect(signals).toEqual([]);
+});
+
+test("orphan cleanup aborts when its root becomes a Claude owner before TERM", async () => {
+  const root = process(985, 1, ["npm", "exec", "chrome-devtools-mcp"]);
+  const claude = process(985, 1, ["claude", "--print", "continue"]);
+  const signals: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+  let processScans = 0;
+  const report = await runHeadlessProcessReaper({
+    hosts: [],
+    flows: [],
+    thresholdMs: 2 * 60 * 60_000,
+    flowArtifactsRoot,
+    dependencies: {
+      listProcesses: () => {
+        processScans += 1;
+        return processScans >= 3 ? [claude] : [root];
+      },
+      ppidMap: () => new Map([[985, 1]]),
+      processIdentity: () => "985:start",
+      processAgeMs: () => old,
+      loadFlows: () => [],
+      readHosts: async () => [],
+      readPanePids: async () => [],
+      signalProcess: (pid, signal) => { signals.push({ pid, signal }); },
+    },
+  });
+
+  expect(report).toEqual({ candidates: 1, signaled: 0 });
+  expect(signals).toEqual([]);
+});
+
+test("orphan cleanup protects a descendant that becomes a Claude owner before KILL", async () => {
+  const root = process(990, 1, ["npm", "exec", "chrome-devtools-mcp"]);
+  const child = process(991, 990, ["node", "server.js"]);
+  const claude = process(991, 990, ["claude", "--print", "continue"]);
+  const signals: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+  const timers: Array<() => void> = [];
+  let processScans = 0;
+  const report = await runHeadlessProcessReaper({
+    hosts: [],
+    flows: [],
+    thresholdMs: 2 * 60 * 60_000,
+    flowArtifactsRoot,
+    dependencies: {
+      listProcesses: () => {
+        processScans += 1;
+        return processScans >= 4 ? [root, claude] : [root, child];
+      },
+      ppidMap: () => new Map([[990, 1], [991, 990]]),
+      processIdentity: (pid) => `${pid}:start`,
+      processAgeMs: () => old,
+      loadFlows: () => [],
+      readHosts: async () => [],
+      readPanePids: async () => [],
+      signalProcess: (pid, signal) => { signals.push({ pid, signal }); },
+      setTimeout: (callback) => {
+        timers.push(callback);
+        return { unref() {} } as unknown as ReturnType<typeof setTimeout>;
+      },
+    },
+  });
+
+  expect(report).toEqual({ candidates: 1, signaled: 1 });
+  expect(signals).toEqual([
+    { pid: 991, signal: "SIGTERM" },
+    { pid: 990, signal: "SIGTERM" },
+  ]);
+  timers[0]!();
+  expect(signals).toEqual([
+    { pid: 991, signal: "SIGTERM" },
+    { pid: 990, signal: "SIGTERM" },
+    { pid: 990, signal: "SIGKILL" },
   ]);
 });
 

@@ -95,12 +95,43 @@ function isClaudeOwner(process: Pick<ReaperProcess, "argv">): boolean {
   return process.argv.some((arg) => /(^|[/\\])claude(?:-[^/\\]+)?$/i.test(arg));
 }
 
+const MCP_NAME = /(?:^|[-_.])mcp(?:[-_.]|$)/i;
+const PACKAGE_SPEC = /^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*(?:@[^\s/]+)?$/i;
+
+function isMcpExecutable(command: string | undefined): boolean {
+  return Boolean(command && MCP_NAME.test(path.basename(command)));
+}
+
+function isMcpPackageSpec(spec: string | undefined): boolean {
+  if (!spec || !PACKAGE_SPEC.test(spec)) return false;
+  const versionAt = spec.startsWith("@") ? spec.indexOf("@", spec.indexOf("/") + 1) : spec.indexOf("@");
+  const packageName = versionAt > 0 ? spec.slice(0, versionAt) : spec;
+  return MCP_NAME.test(packageName.split("/").at(-1) ?? "");
+}
+
+function packageOperand(args: string[], start: number): string | undefined {
+  for (let index = start; index < args.length; index += 1) {
+    const arg = args[index]!;
+    if (arg === "--") return undefined;
+    if (arg === "--package" || arg === "-p") return args[index + 1];
+    if (arg.startsWith("--package=")) return arg.slice("--package=".length);
+    if (!arg.startsWith("-")) return arg;
+  }
+  return undefined;
+}
+
 function isMcpServer(process: Pick<ReaperProcess, "argv" | "tty">): boolean {
   if (process.tty !== 0) return false;
-  const command = process.argv.join(" ").toLowerCase();
-  return /(?:^|[\s/@_-])mcp(?:[\s/@_.-]|$)/.test(command)
-    || command.includes("chrome-devtools-mcp")
-    || command.includes("codex-telegram-mcp");
+  const args = process.argv;
+  if (isMcpExecutable(args[0])) return true;
+  const runner = path.basename(args[0] ?? "").toLowerCase();
+  if (runner === "npx" || runner === "bunx" || runner === "uvx") return isMcpPackageSpec(packageOperand(args, 1));
+  if (runner === "npm" && (args[1] === "exec" || args[1] === "x")) return isMcpPackageSpec(packageOperand(args, 2));
+  if ((runner === "pnpm" || runner === "yarn") && (args[1] === "dlx" || args[1] === "exec")) {
+    return isMcpPackageSpec(packageOperand(args, 2));
+  }
+  if (runner === "bun" && args[1] === "x") return isMcpPackageSpec(packageOperand(args, 2));
+  return runner === "uv" && args[1] === "tool" && args[2] === "run" && isMcpPackageSpec(packageOperand(args, 3));
 }
 
 function ancestry(pid: number, byPid: Map<number, ReaperProcess>): number[] {
@@ -135,6 +166,16 @@ function protectedRoots(input: SelectionInput, byPid: Map<number, ReaperProcess>
   const protectedPids = new Set<number>();
   const ppids = new Map(input.processes.map((process) => [process.pid, process.ppid]));
   for (const root of roots) for (const pid of descendantPids(root, ppids)) protectedPids.add(pid);
+  return protectedPids;
+}
+
+function orphanProtectedPids(input: SelectionInput, byPid: Map<number, ReaperProcess>): Set<number> {
+  const protectedPids = protectedRoots(input, byPid);
+  const ppids = new Map(input.processes.map((process) => [process.pid, process.ppid]));
+  for (const process of input.processes) {
+    if (!isCodexOwner(process) && !isClaudeOwner(process)) continue;
+    for (const pid of descendantPids(process.pid, ppids)) protectedPids.add(pid);
+  }
   return protectedPids;
 }
 
@@ -206,6 +247,23 @@ function activeFlowReviewerPids(flows: Flow[]): Set<number> {
   return pids;
 }
 
+function currentOrphanProtection(input: SelectionInput, dependencies: ReaperDependencies): {
+  protectedPids: Set<number>;
+  ppids: Map<number, number>;
+} {
+  const flows = dependencies.loadFlows();
+  const identityPids = activeFlowReviewerPids(flows);
+  const ppids = dependencies.ppidMap();
+  const processes = dependencies.listProcesses().map((process) => ({
+    ...process,
+    ppid: ppids.get(process.pid) ?? 0,
+    identity: identityPids.has(process.pid) ? dependencies.processIdentity(process.pid) : null,
+    ageMs: 0,
+  }));
+  const byPid = new Map(processes.map((process) => [process.pid, process]));
+  return { protectedPids: orphanProtectedPids({ ...input, flows, processes }, byPid), ppids };
+}
+
 function snapshot(dependencies: ReaperDependencies, flowArtifactsRoot: string, identityPids: ReadonlySet<number> = new Set()): ReaperProcess[] {
   const ppids = dependencies.ppidMap();
   return dependencies.listProcesses().map((process) => {
@@ -235,9 +293,16 @@ function signalGroup(candidate: HeadlessProcessCandidate, dependencies: ReaperDe
   return true;
 }
 
-function signalOrphanTree(candidate: HeadlessProcessCandidate, processes: ReaperProcess[], dependencies: ReaperDependencies, graceMs: number): boolean {
+function signalOrphanTree(candidate: HeadlessProcessCandidate, input: SelectionInput, dependencies: ReaperDependencies, graceMs: number): boolean {
+  const processes = input.processes;
   const observed = new Map(processes.map((process) => [process.pid, process.identity]));
-  const tree = descendantPids(candidate.pid, dependencies.ppidMap()).reverse().map((pid) => {
+  let protection: ReturnType<typeof currentOrphanProtection>;
+  try { protection = currentOrphanProtection(input, dependencies); }
+  catch { return false; }
+  const { ppids, protectedPids } = protection;
+  const treePids = descendantPids(candidate.pid, ppids).reverse();
+  if (treePids.some((pid) => protectedPids.has(pid))) return false;
+  const tree = treePids.map((pid) => {
     const observedIdentity = observed.get(pid) ?? null;
     const expectedIdentity = dependencies.processIdentity(pid);
     const eligible = Boolean(expectedIdentity && (!observedIdentity || observedIdentity === expectedIdentity));
@@ -251,7 +316,11 @@ function signalOrphanTree(candidate: HeadlessProcessCandidate, processes: Reaper
     try { dependencies.signalProcess(process.pid, "SIGTERM"); } catch { /* process has exited */ }
   }
   const timer = dependencies.setTimeout(() => {
+    let protectedAtKill: Set<number>;
+    try { protectedAtKill = currentOrphanProtection(input, dependencies).protectedPids; }
+    catch { return; }
     for (const process of tree) {
+      if (protectedAtKill.has(process.pid)) continue;
       if (!process.eligible || !process.expectedIdentity || dependencies.processIdentity(process.pid) !== process.expectedIdentity) continue;
       try { dependencies.signalProcess(process.pid, "SIGKILL"); } catch { /* process has exited */ }
     }
@@ -292,12 +361,13 @@ export async function runHeadlessProcessReaper(options: {
     ]);
     if (freshPanePids === null) continue;
     const fresh = snapshot(dependencies, flowArtifactsRoot, activeFlowReviewerPids(flows));
-    const verified = selectHeadlessProcessCandidates({ processes: fresh, flows, hosts, panePids: freshPanePids, flowArtifactsRoot, thresholdMs })
+    const freshInput = { processes: fresh, flows, hosts, panePids: freshPanePids, flowArtifactsRoot, thresholdMs };
+    const verified = selectHeadlessProcessCandidates(freshInput)
       .find((current) => current.pid === candidate.pid && current.identity === candidate.identity && current.kind === candidate.kind);
     if (!verified) continue;
     if (verified.kind === "codex-exec") {
       if (!signalGroup(verified, dependencies, options.shutdownGraceMs ?? DEFAULT_SHUTDOWN_GRACE_MS)) continue;
-    } else if (!signalOrphanTree(verified, fresh, dependencies, options.shutdownGraceMs ?? DEFAULT_SHUTDOWN_GRACE_MS)) {
+    } else if (!signalOrphanTree(verified, freshInput, dependencies, options.shutdownGraceMs ?? DEFAULT_SHUTDOWN_GRACE_MS)) {
       continue;
     }
     signaled += 1;
