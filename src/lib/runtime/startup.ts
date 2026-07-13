@@ -7,6 +7,7 @@ import {
   type AdoptedClaudeHost,
   type AdoptedCodexHost,
 } from "./registry";
+import { bindStructuredDeliveryQueue } from "./structuredDeliveryController";
 
 type AdoptedStructuredHost = AdoptedCodexHost | AdoptedClaudeHost;
 let adoptedHosts: AdoptedStructuredHost[] = [];
@@ -61,6 +62,7 @@ export async function adoptStructuredHostsAtStartup(
     },
   );
   adoptedHosts = [...codex, ...claude];
+  await bindStructuredDeliveryQueue(adoptedHosts, { registry: dependencies.registry });
   return adoptedHosts;
 }
 

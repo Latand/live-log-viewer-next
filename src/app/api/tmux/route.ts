@@ -16,6 +16,7 @@ import { listFiles } from "@/lib/scanner";
 import { pathAllowed } from "@/lib/scanner/roots";
 import { allowedKillTarget, consumeKillTarget } from "@/lib/resources";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
+import { enqueueStructuredMessage } from "@/lib/runtime/structuredMessageDelivery";
 import {
   captureTmuxAttachReference,
   collectImagePayloads,
@@ -50,7 +51,10 @@ interface SendResponse {
   imagePaths?: string[];
   /** Set when the message booted a fresh agent window instead of an existing pane. */
   spawned?: boolean;
-  outcome?: "delivered-to-live" | "resumed" | "held" | "pending" | "reconfigured";
+  outcome?: "delivered-to-live" | "resumed" | "held" | "pending" | "reconfigured" | "queued" | "delivering" | "delivered";
+  structured?: true;
+  operationId?: string;
+  receipt?: { operationId: string; status: string };
 }
 
 function respond(outcome: DeliveryOutcome): NextResponse<SendResponse | ApiError | { ok: false; outcome: "failed"; error: string }> {
@@ -217,6 +221,20 @@ export async function POST(req: NextRequest): Promise<NextResponse<SendResponse 
   }
   if (!text.trim() && !images.length) {
     return NextResponse.json({ error: "empty message" }, { status: 400 });
+  }
+
+  if (process.env.LLV_STRUCTURED_HOSTS === "1") {
+    const structured = await enqueueStructuredMessage({
+      path: filePath,
+      ...(conversationId ? { conversationId } : {}),
+      ...(typeof body.clientMessageId === "string" ? { clientMessageId: body.clientMessageId.slice(0, 128) } : {}),
+      text: text.trim(),
+      hasImages: images.length > 0,
+    });
+    if (structured) {
+      const { status, ...response } = structured.ok ? { ...structured, status: 200 } : structured;
+      return NextResponse.json(response, { status });
+    }
   }
 
   return respond(await deliverConversationMessage({

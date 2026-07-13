@@ -55,7 +55,7 @@ export function ReceiptChip({ receipt, onRetry, onEdit }: ReceiptChipProps) {
       </span>
       {failed && onRetry ? (
         <button
-          className="rounded-full border border-line bg-bg px-2 py-0.5 text-dim hover:border-accent/45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+          className="min-h-11 rounded-full border border-line bg-bg px-3 py-0.5 text-dim hover:border-accent/45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 sm:min-h-0 sm:px-2"
           onClick={onRetry}
         >
           {t("runtime.receipt.retry")}
@@ -63,7 +63,7 @@ export function ReceiptChip({ receipt, onRetry, onEdit }: ReceiptChipProps) {
       ) : null}
       {failed && onEdit ? (
         <button
-          className="rounded-full border border-line bg-bg px-2 py-0.5 text-dim hover:border-accent/45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+          className="min-h-11 rounded-full border border-line bg-bg px-3 py-0.5 text-dim hover:border-accent/45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 sm:min-h-0 sm:px-2"
           onClick={onEdit}
         >
           {t("runtime.receipt.edit")}

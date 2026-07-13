@@ -176,12 +176,14 @@ function baseSession(id: string, payload: Record<string, unknown>, revision: num
 export interface RuntimeJournalOptions {
   maxEvents?: number;
   now?: () => number;
+  structuredHosts?: boolean;
 }
 
 export class RuntimeJournal {
   private readonly db: Database;
   private readonly maxEvents: number;
   private readonly now: () => number;
+  private readonly structuredHosts: boolean;
   private readonly secretKey: Buffer;
   private readonly waiters = new Set<() => void>();
   private fault: string | null = null;
@@ -190,6 +192,7 @@ export class RuntimeJournal {
     this.db = new Database(filename, { create: true, strict: true });
     this.maxEvents = options.maxEvents ?? 20_000;
     this.now = options.now ?? (() => Date.now());
+    this.structuredHosts = options.structuredHosts ?? process.env.LLV_STRUCTURED_HOSTS === "1";
     this.secretKey = loadSecretKey(filename);
     this.db.exec("PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000; PRAGMA auto_vacuum = INCREMENTAL;");
     if (filename !== ":memory:") {
@@ -327,6 +330,14 @@ export class RuntimeJournal {
 
   completeOperation(
     operationId: string,
+    status: Exclude<RuntimeReceiptStatus, "pending" | "delivering">,
+    details: Partial<Pick<RuntimeOperationReceipt, "turnId" | "queuePosition" | "reason">> = {},
+  ): RuntimeOperationResult {
+    return this.transitionOperation(operationId, status, details);
+  }
+
+  transitionOperation(
+    operationId: string,
     status: Exclude<RuntimeReceiptStatus, "pending">,
     details: Partial<Pick<RuntimeOperationReceipt, "turnId" | "queuePosition" | "reason">> = {},
   ): RuntimeOperationResult {
@@ -340,12 +351,17 @@ export class RuntimeJournal {
         this.db.exec("COMMIT");
         return { operationId, receipt: previous, replayed: true };
       }
-      if (previous.status !== "pending" && previous.status !== "queued") throw new Error("runtime operation is already terminal");
+      const retrying = previous.status === "delivering" && status === "queued";
+      const beginning = (previous.status === "pending" || previous.status === "queued") && status === "delivering";
+      const completing = (previous.status === "pending" || previous.status === "queued" || previous.status === "delivering")
+        && status !== "delivering" && status !== "queued";
+      if (!retrying && !beginning && !completing) throw new Error("runtime operation transition is invalid");
       const command = JSON.parse(row.request_json) as RuntimeOperationCommand;
       const next: RuntimeOperationReceipt = {
         ...previous,
         ...details,
         status,
+        reason: details.reason !== undefined ? details.reason : status === "queued" ? previous.reason : null,
         at: new Date(this.now()).toISOString(),
         revision: previous.revision + 1,
       };
@@ -353,14 +369,14 @@ export class RuntimeJournal {
         scope: { type: "operation", id: operationId },
         kind: "receipt",
         operationId,
-        producer: { kind: "runtime-effect", eventKey: `operation:${operationId}:completion:${status}`, hostEpoch: Number(this.meta("host_epoch")) },
+        producer: { kind: "runtime-effect", eventKey: `operation:${operationId}:receipt:${previous.revision + 1}:${status}`, hostEpoch: Number(this.meta("host_epoch")) },
         payload: next as unknown as Record<string, unknown>,
       }));
       const committed = { ...next, revision: event.revision };
       this.upsertEntity("operation", operationId, event.revision, committed, event.seq);
-      this.appendCompletionConsequences(command, committed, operationId);
+      if (completing) this.appendCompletionConsequences(command, committed, operationId);
       this.db.query("UPDATE operations SET receipt_json = ?, event_seq = ? WHERE operation_id = ?").run(stableJson(committed), event.seq, operationId);
-      this.db.query("UPDATE outbox SET state = 'completed', payload_json = '{}' WHERE id = ?").run(`effect:${operationId}`);
+      if (completing) this.db.query("UPDATE outbox SET state = 'completed', payload_json = '{}' WHERE id = ?").run(`effect:${operationId}`);
       this.db.exec("COMMIT");
       this.compactIfNeeded();
       this.notifyWaiters();
@@ -712,7 +728,21 @@ export class RuntimeJournal {
     let reason: string | null = null;
     let turnId = "turnId" in command && typeof command.turnId === "string" ? command.turnId : session?.activeTurnId ?? null;
     let queuePosition: number | null = null;
-    if (command.kind === "send" || command.kind === "steer") {
+    if (this.structuredHosts
+      && command.kind === "send"
+      && (session?.hostKind === "codex-app-server" || session?.hostKind === "claude-broker")) {
+      if (!session || session.host !== "hosted") {
+        status = "rejected";
+        reason = session?.host === "dead" || session?.host === "unhosted" ? "dead-host" : "no-claim";
+      } else if (command.turnId && command.turnId !== session.activeTurnId) {
+        status = "rejected";
+        reason = "stale-turn";
+      } else {
+        status = "queued";
+        queuePosition = this.queuedSendCount(command.conversationId) + 1;
+        turnId = null;
+      }
+    } else if (command.kind === "send" || command.kind === "steer") {
       if (!session || session.host !== "hosted") {
         status = "rejected";
         reason = session?.host === "dead" || session?.host === "unhosted" ? "dead-host" : "no-claim";
@@ -782,6 +812,15 @@ export class RuntimeJournal {
       at: new Date(this.now()).toISOString(),
       revision,
     };
+  }
+
+  private queuedSendCount(conversationId: string): number {
+    return this.db.query<{ receipt_json: string }, []>("SELECT receipt_json FROM operations ORDER BY event_seq").all()
+      .map((row) => JSON.parse(row.receipt_json) as RuntimeOperationReceipt)
+      .filter((receipt) => receipt.conversationId === conversationId
+        && receipt.kind === "send"
+        && (receipt.status === "pending" || receipt.status === "queued" || receipt.status === "delivering"))
+      .length;
   }
 
   private appendOperationConsequences(command: RuntimeOperationCommand, receipt: RuntimeOperationReceipt, operationId: string): void {

@@ -65,6 +65,12 @@ test("queued receipt shows its position", () => {
   expect(html).toContain(translate("en", "runtime.receipt.queuedPos", { position: 3 }));
 });
 
+test("delivering receipt is localized in English and Ukrainian", () => {
+  const html = renderToStaticMarkup(<ReceiptChip receipt={receipt({ status: "delivering" })} />);
+  expect(html).toContain(translate("en", "runtime.receipt.delivering"));
+  expect(translate("uk", "runtime.receipt.delivering")).toBe("доставляється…");
+});
+
 test("failed receipt is announced politely, shows the reason verbatim, and offers retry/edit", () => {
   const html = renderToStaticMarkup(
     <ReceiptChip receipt={receipt({ status: "failed", reason: "dead-host" })} onRetry={() => {}} onEdit={() => {}} />,
@@ -74,6 +80,7 @@ test("failed receipt is announced politely, shows the reason verbatim, and offer
   expect(html).toContain("dead-host");
   expect(html).toContain(translate("en", "runtime.receipt.retry"));
   expect(html).toContain("resend"); // "Edit & resend" — the & is HTML-escaped in static markup
+  expect(html.match(/min-h-11/g)?.length).toBe(2);
 });
 
 /* ------------------------------ AttentionCard ------------------------------ */

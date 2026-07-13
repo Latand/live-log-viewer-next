@@ -16,6 +16,7 @@ import { conversationIdentity } from "@/lib/accounts/identity";
 import { cardMigrationState, migrationHoldsSends } from "@/lib/accounts/migration";
 import { getLocale, useLocale } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
+import type { RuntimeReceipt } from "@/components/runtime/runtimeModel";
 
 import { ComposerBar } from "./ComposerBar";
 import { ImagePickerButton } from "./imageAttachments";
@@ -163,6 +164,7 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
      /compact — a stray click must never condense a live agent's context. */
   const [compactArmed, setCompactArmed] = useState(false);
   const [sent, setSent] = useState<SentEntry[]>([]);
+  const [immediateRuntimeReceipts, setImmediateRuntimeReceipts] = useState<RuntimeReceipt[]>([]);
   /* One idempotency key per message draft: reused verbatim on a retry (never a
      second send) and re-minted after a successful delivery. Passed to the send
      so the runtime host can round-trip it once the structured plane is on; the
@@ -170,7 +172,12 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
   const idempotencyKey = useRef<string>(mintIdempotencyKey());
   /* Durable receipts for this session from the runtime bus (empty while the bus
      is disabled or the session is legacy/unhosted). */
-  const runtimeReceipts = useRuntimeReceiptsForArtifact(file.path);
+  const runtimeReceipts = useRuntimeReceiptsForArtifact(file.path, cardId);
+  const displayedRuntimeReceipts = [
+    ...runtimeReceipts,
+    ...immediateRuntimeReceipts.filter((receipt) =>
+      !runtimeReceipts.some((current) => current.operationId === receipt.operationId)),
+  ];
 
   useEffect(() => {
     if (!compactArmed) return;
@@ -178,8 +185,12 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
     return () => window.clearTimeout(timer);
   }, [compactArmed]);
 
-  /* eslint-disable-next-line react-hooks/set-state-in-effect */
-  useEffect(() => setSent(readSent(cardId)), [cardId]);
+  /* eslint-disable react-hooks/set-state-in-effect */
+  useEffect(() => {
+    setSent(readSent(cardId));
+    setImmediateRuntimeReceipts([]);
+  }, [cardId]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   /* A link-arrow drop appended to the stored draft; reload it and put the
      caret at the end so the ask can be typed straight away. Goes through the
@@ -260,16 +271,30 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
       });
       const json = (await res.json()) as {
         ok?: boolean;
+        structured?: boolean;
         error?: string;
         imagePaths?: string[];
         target?: string;
         spawned?: boolean;
-        outcome?: "delivered-to-live" | "resumed" | "held" | "queued" | "recovering" | "failed";
+        outcome?: "delivered-to-live" | "resumed" | "held" | "queued" | "delivering" | "delivered" | "recovering" | "failed";
+        receipt?: RuntimeReceipt;
       };
       if (!res.ok || !json.ok) {
         // A hard failure keeps the draft text (never cleared) so the message is
         // not lost; the error is announced by the composer's live status region.
         setStatus({ kind: "err", text: json.error ?? t("common.failedSend") });
+        return;
+      }
+      if (json.structured && json.receipt) {
+        setImmediateRuntimeReceipts((current) => [
+          json.receipt!,
+          ...current.filter((receipt) => receipt.operationId !== json.receipt!.operationId),
+        ].slice(0, 8));
+        idempotencyKey.current = mintIdempotencyKey();
+        setText("");
+        attachments.clear();
+        setStatus({ kind: "info", text: t("composer.deliveryQueued") });
+        inputRef.current?.focus();
         return;
       }
       const imgCount = attachments.images.length;
@@ -535,8 +560,8 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
         }
         showImage={!isMobile}
         receipts={
-          runtimeReceipts.length
-            ? runtimeReceipts.map((receipt) => <ReceiptChip key={receipt.operationId} receipt={receipt} />)
+          displayedRuntimeReceipts.length
+            ? displayedRuntimeReceipts.map((receipt) => <ReceiptChip key={receipt.operationId} receipt={receipt} />)
             : undefined
         }
         leftSlot={
