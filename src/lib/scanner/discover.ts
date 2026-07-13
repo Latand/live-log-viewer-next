@@ -6,7 +6,8 @@ import type { FileEntry, ProjectCatalogEntry, RootKey } from "../types";
 import { codexThreadIdFromPath, nativeCodexParentThreadId } from "./codexNative";
 import { describe } from "./describe";
 import { projectCatalogSnapshotFromRaw } from "./projectCatalog";
-import { EXTS, FILE_CAP, ROOTS, scanRootEntries } from "./roots";
+import { projectResolutionStateKey } from "./projectState";
+import { EXTS, FILE_CAP, PROJECT_FILE_FLOOR, ROOTS, scanRootEntries } from "./roots";
 
 export function taskParts(root: string, pathname: string): [string, string, string] | null {
   const parts = path.relative(root, pathname).split(path.sep);
@@ -96,13 +97,49 @@ function rootEntries(roots: Roots | RootEntries): RootEntries {
 
 async function discoverRaw(roots: Roots | RootEntries, limit: Limit): Promise<RawEntry[]> {
   const staticRoots = Array.isArray(roots) ? ROOTS : roots;
-  return (await Promise.all(rootEntries(roots).map(async ([rootName, root]) => {
+  const raw = (await Promise.all(rootEntries(roots).map(async ([rootName, root]) => {
     if (!(await rootExists(root, limit))) return [];
     return walk(rootName, staticRoots, root, root, limit);
   }))).flat();
+  /* Codex account roots follow the legacy root in registry order. A copied
+     rollout therefore resolves to its managed-account copy before ranking. */
+  const codexRollouts = new Map<string, RawEntry>();
+  for (const entry of raw) {
+    const filename = path.basename(entry.path);
+    if (entry.rootName !== "codex-sessions" || !filename.startsWith("rollout-") || !filename.endsWith(".jsonl")) continue;
+    const current = codexRollouts.get(filename);
+    if (!current || current.root !== entry.root) codexRollouts.set(filename, entry);
+  }
+  return raw.filter((entry) => {
+    const filename = path.basename(entry.path);
+    if (entry.rootName !== "codex-sessions" || !filename.startsWith("rollout-") || !filename.endsWith(".jsonl")) return true;
+    return codexRollouts.get(filename) === entry;
+  });
+}
+
+function cappedEntries(ranked: RawEntry[], projectByPath: ReadonlyMap<string, string>): RawEntry[] {
+  /* The per-project floor can exceed the base cap when the project count is
+     unusually large. Keeping every project represented takes precedence;
+     parent closure and selected-project hydration already make the cap a base
+     target. */
+  const selectedPaths = new Set<string>();
+  const projectCounts = new Map<string, number>();
+  for (const entry of ranked) {
+    const project = projectByPath.get(entry.path) ?? "other";
+    const count = projectCounts.get(project) ?? 0;
+    if (count >= PROJECT_FILE_FLOOR) continue;
+    projectCounts.set(project, count + 1);
+    selectedPaths.add(entry.path);
+  }
+  for (const entry of ranked) {
+    if (selectedPaths.size >= FILE_CAP) break;
+    selectedPaths.add(entry.path);
+  }
+  return ranked.filter((entry) => selectedPaths.has(entry.path));
 }
 
 function entriesFromRaw(raw: RawEntry[], selectedProject?: string, projectByPath?: ReadonlyMap<string, string>, demoted?: ReadonlySet<string>, pin?: ReadonlySet<string>): FileEntry[] {
+  const stateKey = projectResolutionStateKey();
   raw.sort((a, b) => b.st.mtimeMs - a.st.mtimeMs);
   const rawByCodexThread = new Map<string, RawEntry>();
   for (const entry of raw) {
@@ -117,7 +154,7 @@ function entriesFromRaw(raw: RawEntry[], selectedProject?: string, projectByPath
   const ranked = demoted?.size
     ? [...raw.filter((entry) => !demoted.has(entry.path)), ...raw.filter((entry) => demoted.has(entry.path))]
     : raw;
-  const selected = ranked.slice(0, FILE_CAP);
+  const selected = cappedEntries(ranked, projectByPath ?? new Map());
   const selectedPaths = new Set(selected.map((entry) => entry.path));
   /* Selected-project hydration deliberately ignores demotion: legacy `#f=`
      deep links resolve an archived predecessor from the hydrated feed to
@@ -126,7 +163,7 @@ function entriesFromRaw(raw: RawEntry[], selectedProject?: string, projectByPath
   if (selectedProject) {
     for (const entry of raw) {
       if (selectedPaths.has(entry.path)) continue;
-      const project = projectByPath?.get(entry.path) ?? (describe(entry.rootName, entry.root, entry.path, entry.st).project || "other");
+      const project = projectByPath?.get(entry.path) ?? (describe(entry.rootName, entry.root, entry.path, entry.st, stateKey).project || "other");
       if (project !== selectedProject) continue;
       selectedPaths.add(entry.path);
       selected.push(entry);
@@ -154,7 +191,7 @@ function entriesFromRaw(raw: RawEntry[], selectedProject?: string, projectByPath
     }
   }
   return selected.map((entry) => {
-    const meta = describe(entry.rootName, entry.root, entry.path, entry.st);
+    const meta = describe(entry.rootName, entry.root, entry.path, entry.st, stateKey);
     return {
       path: entry.path,
       root: entry.rootName,
@@ -195,7 +232,6 @@ export async function discoverFilesWithProjectCatalog(
 export async function discoverFiles(roots: Roots | RootEntries = scanRootEntries(), demote?: ReadonlySet<string>): Promise<FileEntry[]> {
   const limit = createLimiter(48);
   const raw = await discoverRaw(roots, limit);
-  // describe() reads file heads, so it runs only on the capped shortlist plus
-  // parent closure; the walk stays a cheap stat pass over every candidate.
-  return entriesFromRaw(raw, undefined, undefined, demote);
+  const { projectByPath } = projectCatalogSnapshotFromRaw(raw, { persist: false });
+  return entriesFromRaw(raw, undefined, projectByPath, demote);
 }

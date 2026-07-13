@@ -98,7 +98,7 @@ function cachedFile(raw: RawEntry, state: ProjectCatalogState, stateKey: string)
   ) {
     return { path: raw.path, ...cached };
   }
-  const meta = describe(raw.rootName, raw.root, raw.path, raw.st);
+  const meta = describe(raw.rootName, raw.root, raw.path, raw.st, stateKey);
   const file: ProjectCatalogFile = {
     path: raw.path,
     rootName: raw.rootName,
