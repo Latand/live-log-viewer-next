@@ -14,11 +14,11 @@ AC4: Each real integration test asserts that its produced rollout or transcript 
 
 AC5: Codex late attach, steering, and restart resume coverage remains unchanged; Claude late attach, restart resume, and permission-answer coverage remains unchanged.
 
-AC6: Running the focused integration suites creates zero new files containing the ZEBRA-149, ORCHID-150, or ACK-150 markers under `~/.codex/sessions` and `~/.claude/projects`.
+AC6: Running the focused integration suites creates zero new fixture files containing the ZEBRA-149, ORCHID-150, or ACK-150 markers under `~/.codex/sessions`, `~/.claude/projects`, and the managed Codex and Claude account roots.
 
 ## Validation gates
 
 - `bun test`
 - `bunx tsc --noEmit`
 - `bun test src/lib/runtime/codexAppServerHost.integration.test.ts src/lib/runtime/claudeStreamBrokerHost.integration.test.ts`
-- marker-file comparison under `~/.codex/sessions` and `~/.claude/projects`
+- marker-file comparison under the legacy session roots and managed account roots

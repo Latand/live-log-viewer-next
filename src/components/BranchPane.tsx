@@ -333,9 +333,12 @@ export function TaskStrip({
   const title = cleanTitle(file.cmdDesc || file.title, 80);
   return (
     <div className="border-t border-line first:border-t-0">
-      <div className="flex min-h-7 flex-wrap items-center gap-1.5 pl-2 pr-2.5">
+      {/* 44px expand target on the phone (issue #148); desktop keeps its compact
+          28px row via the sm: reset. These rows ride inside conversation panes
+          and the docked-task section, both reachable by ordinary taps at 390px. */}
+      <div className="flex min-h-11 flex-wrap items-center gap-1.5 pl-2 pr-2.5 sm:min-h-7">
         <button
-          className="flex min-h-7 min-w-0 flex-1 items-center gap-1.5 rounded-[6px] text-left hover:bg-bg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+          className="flex min-h-11 min-w-0 flex-1 items-center gap-1.5 rounded-[6px] text-left hover:bg-bg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 sm:min-h-7"
           aria-expanded={open}
           aria-label={t("branch.toggleBackground", { action: open ? t("branch.collapse") : t("branch.expand"), title })}
           onClick={() => setOpen((value) => !value)}

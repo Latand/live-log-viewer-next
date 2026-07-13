@@ -302,7 +302,7 @@ function CleanupPanel({
           type="button"
           aria-label={t("resources.close")}
           onClick={onClose}
-          className="ml-auto rounded-[6px] p-1 text-dim hover:bg-bg hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+          className="ml-auto inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded-[6px] p-1 text-dim hover:bg-bg hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 sm:min-h-0 sm:min-w-0"
         >
           <X className="h-3.5 w-3.5" aria-hidden />
         </button>
@@ -329,7 +329,7 @@ function CleanupPanel({
         <select
           value={bulkHours}
           onChange={(event) => setBulkHours(Number(event.target.value) as (typeof BULK_HOURS)[number])}
-          className="rounded-[8px] border border-line bg-bg px-1.5 py-1 text-[11px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+          className="min-h-[44px] min-w-[44px] rounded-[8px] border border-line bg-bg px-1.5 py-1 text-[11px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 sm:min-h-0 sm:min-w-0"
         >
           {BULK_HOURS.map((hours) => (
             <option key={hours} value={hours}>
@@ -342,7 +342,7 @@ function CleanupPanel({
           disabled={bulkBusy || bulkCount === 0}
           title={bulkCount === 0 ? t("resources.bulkNone") : undefined}
           onClick={() => void killBulk()}
-          className="ml-auto rounded-[8px] border border-err/40 px-2.5 py-1 text-[11px] font-semibold text-err hover:bg-err/10 disabled:cursor-not-allowed disabled:opacity-45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-err/40"
+          className="ml-auto inline-flex min-h-[44px] items-center rounded-[8px] border border-err/40 px-2.5 py-1 text-[11px] font-semibold text-err hover:bg-err/10 disabled:cursor-not-allowed disabled:opacity-45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-err/40 sm:min-h-0"
         >
           {t("resources.bulkKill")}
           {bulkCount ? ` (${bulkCount})` : ""}
@@ -361,7 +361,7 @@ function CleanupPanel({
           title={sessions.length === 0 ? t("resources.killAllNone") : t("resources.killAllHint")}
           onClick={() => (killAllArmed ? void killAll() : setKillAllArmed(true))}
           className={[
-            "shrink-0 rounded-[8px] border px-2.5 py-1 text-[11px] font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-err/40 disabled:cursor-not-allowed disabled:opacity-45",
+            "inline-flex min-h-[44px] shrink-0 items-center rounded-[8px] border px-2.5 py-1 text-[11px] font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-err/40 disabled:cursor-not-allowed disabled:opacity-45 sm:min-h-0",
             killAllArmed ? "border-err bg-err text-white" : "border-err/40 text-err hover:bg-err/10",
           ].join(" ")}
         >
@@ -443,7 +443,7 @@ function SessionRow({
           title={live ? t("resources.killLiveHint") : t("resources.killHint")}
           onClick={() => (needsArm ? onArm() : onKill())}
           className={[
-            "shrink-0 rounded-[8px] border px-2 py-1 text-[11px] font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-err/40",
+            "inline-flex min-h-[44px] min-w-[44px] shrink-0 items-center justify-center rounded-[8px] border px-2 py-1 text-[11px] font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-err/40 sm:min-h-0 sm:min-w-0",
             busy ? "cursor-wait opacity-50" : "",
             armed
               ? "border-err bg-err text-white"

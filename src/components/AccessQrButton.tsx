@@ -145,13 +145,13 @@ export function AccessQrButton() {
                   value={state.url}
                   aria-label={t("qr.linkAria")}
                   onFocus={(event) => event.currentTarget.select()}
-                  className="min-w-0 flex-1 truncate rounded-[8px] border border-line bg-bg px-2 py-1.5 font-mono text-[10.5px] text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                  className="min-h-[44px] min-w-0 flex-1 truncate rounded-[8px] border border-line bg-bg px-2 py-1.5 font-mono text-[10.5px] text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 sm:min-h-0"
                 />
                 <button
                   type="button"
                   aria-label={t("qr.copy")}
                   onClick={copy}
-                  className="flex shrink-0 items-center gap-1 rounded-[8px] border border-line bg-panel px-2 py-1.5 text-[11px] font-semibold text-dim hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                  className="flex min-h-[44px] min-w-[44px] shrink-0 items-center justify-center gap-1 rounded-[8px] border border-line bg-panel px-2 py-1.5 text-[11px] font-semibold text-dim hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 sm:min-h-0 sm:min-w-0"
                 >
                   {copied ? <Check className="h-3.5 w-3.5" aria-hidden /> : <Copy className="h-3.5 w-3.5" aria-hidden />}
                 </button>

@@ -54,6 +54,7 @@ interface LiveRun {
   identityOf: (pid: number) => string | null;
   startedAt: number;
   exit: { code: number | null; signal: NodeJS.Signals | null } | null;
+  terminationStarted: boolean;
   timer: NodeJS.Timeout;
 }
 
@@ -77,26 +78,56 @@ function processMatches(pid: number | null | undefined, identity: string | null 
   return Boolean(pid && identity && pidAlive(pid) && procBackend.processIdentity(pid) === identity);
 }
 
+interface HeadlessProcessGroupRuntime {
+  pidAlive(pid: number): boolean;
+  processIdentity(pid: number): string | null;
+  signalProcess(pid: number, signal: NodeJS.Signals): void;
+  setTimeout(callback: () => void, ms: number): ReturnType<typeof setTimeout>;
+}
+
+const defaultProcessGroupRuntime: HeadlessProcessGroupRuntime = {
+  pidAlive,
+  processIdentity: (pid) => procBackend.processIdentity(pid),
+  signalProcess: (pid, signal) => { process.kill(pid, signal); },
+  setTimeout: (callback, ms) => setTimeout(callback, ms),
+};
+
+/** Preserves the owned process-group id through the TERM-to-KILL grace period. */
+export function terminateHeadlessReviewerGroup(
+  pid: number,
+  identity: string | null,
+  options: {
+    ownedByLiveHandle?: boolean;
+    leaderExited?: boolean;
+    graceMs?: number;
+    fallbackLeader?: (signal: NodeJS.Signals) => void;
+    runtime?: Partial<HeadlessProcessGroupRuntime>;
+  } = {},
+): void {
+  const runtime = { ...defaultProcessGroupRuntime, ...options.runtime };
+  const owned = identity
+    ? runtime.pidAlive(pid) && runtime.processIdentity(pid) === identity
+    : options.ownedByLiveHandle === true;
+  if (!owned) return;
+  try {
+    runtime.signalProcess(-pid, "SIGTERM");
+  } catch {
+    if (!options.leaderExited) {
+      try { (options.fallbackLeader ?? ((signal) => runtime.signalProcess(pid, signal)))("SIGTERM"); }
+      catch { /* group leader has exited */ }
+    }
+  }
+  const timer = runtime.setTimeout(() => {
+    try { runtime.signalProcess(-pid, "SIGKILL"); }
+    catch { /* process group has exited */ }
+  }, options.graceMs ?? 3_000);
+  timer.unref?.();
+}
+
 /** SIGTERM the reviewer's process group (detached spawn = group leader),
     escalating to SIGKILL; falls back to the single pid when no group exists. */
 function killTree(pid: number, identity: string | null, escalateMs = 3_000): void {
-  if (!processMatches(pid, identity)) return;
-  const signalTree = (sig: NodeJS.Signals) => {
-    if (!processMatches(pid, identity)) return;
-    try {
-      process.kill(-pid, sig);
-    } catch {
-      try {
-        process.kill(pid, sig);
-      } catch {
-        /* already gone */
-      }
-    }
-  };
-  signalTree("SIGTERM");
-  setTimeout(() => {
-    if (processMatches(pid, identity)) signalTree("SIGKILL");
-  }, escalateMs).unref();
+  terminateHeadlessReviewerGroup(pid, identity, { graceMs: escalateMs });
 }
 
 function refreshRunIdentity(run: LiveRun, pid: number): string | null {
@@ -105,27 +136,17 @@ function refreshRunIdentity(run: LiveRun, pid: number): string | null {
   return run.identity;
 }
 
-/** A live ChildProcess handle proves ownership even during the short interval
-    before Linux exposes a stable process start identity. Identity-backed tree
-    killing remains the restart-safe path; the identity-less path sends one
-    SIGTERM and skips delayed escalation to avoid a PID-reuse hazard. */
+/** A live ChildProcess handle proves ownership during the short interval
+    before Linux exposes a stable process start identity. */
 function killOwnedRun(run: LiveRun): void {
   const pid = run.child.pid;
-  if (!pid || run.exit !== null || !pidAlive(pid)) return;
-  const identity = refreshRunIdentity(run, pid);
-  if (identity) {
-    killTree(pid, identity);
-    return;
-  }
-  try {
-    process.kill(-pid, "SIGTERM");
-  } catch {
-    try {
-      run.child.kill("SIGTERM");
-    } catch {
-      /* already gone */
-    }
-  }
+  if (!pid || run.terminationStarted) return;
+  run.terminationStarted = true;
+  terminateHeadlessReviewerGroup(pid, null, {
+    ownedByLiveHandle: true,
+    leaderExited: run.exit !== null,
+    fallbackLeader: (signal) => { run.child.kill(signal); },
+  });
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -200,7 +221,7 @@ export function reviewerCommand(
   /* --json turns stdout into a JSONL event stream whose first events carry
      the session/thread id — a structured contract instead of parsing the
      human banner. The verdict itself still arrives via --output-last-message. */
-  const args = ["exec", "-", "--json", "--output-last-message", outputPath, "--dangerously-bypass-approvals-and-sandbox"];
+  const args = ["exec", "--ignore-user-config", "-", "--json", "--output-last-message", outputPath, "--dangerously-bypass-approvals-and-sandbox"];
   if (codexAccount?.managed) args.unshift("-c", "cli_auth_credentials_store=file");
   if (role.model) args.push("-m", role.model);
   if (role.effort) args.push("-c", `model_reasoning_effort=${role.effort}`);
@@ -263,6 +284,7 @@ export function startHeadlessReview(
     identityOf,
     startedAt: Date.now(),
     exit: null,
+    terminationStarted: false,
     timer: setTimeout(() => {
       killOwnedRun(run);
     }, timeoutMs),
@@ -272,10 +294,12 @@ export function startHeadlessReview(
   child.on("error", () => {
     clearTimeout(run.timer);
     run.exit = { code: null, signal: null };
+    killOwnedRun(run);
   });
   child.on("close", (code, signal) => {
     clearTimeout(run.timer);
     run.exit = { code, signal };
+    killOwnedRun(run);
   });
   return { pid: child.pid ?? null, identity, sessionId: built.sessionId, reviewerPath: built.reviewerPath };
 }

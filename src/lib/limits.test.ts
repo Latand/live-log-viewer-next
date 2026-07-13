@@ -194,6 +194,34 @@ test("consecutive Claude 429s back off and suppress a third fetch inside the coo
   }
 });
 
+test("consecutive Codex initialize timeouts back off exponentially", async () => {
+  resetLimitsCache();
+  const account = createManagedCodexAccount("Initialize timeout backoff");
+  setActiveCodexAccount(account.id);
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async () => claudeUsage()) as unknown as typeof fetch;
+  let probes = 0;
+  const timedOutProbe = async () => {
+    probes += 1;
+    throw new Error("Codex app-server request timed out: initialize");
+  };
+  try {
+    const first = await readLimits({ codexLiveReader: timedOutProbe, now: () => 6_000_000 });
+    expect(first.provenance.codex).toMatchObject({
+      source: "unavailable",
+      reason: "app-server-initialize-timeout",
+      retryAt: new Date(6_060_000).toISOString(),
+    });
+    const second = await readLimits({ codexLiveReader: timedOutProbe, now: () => 6_060_001 });
+    expect(second.provenance.codex.retryAt).toBe(new Date(6_180_001).toISOString());
+    const suppressed = await readLimits({ codexLiveReader: timedOutProbe, now: () => 6_120_000 });
+    expect(suppressed.provenance.codex).toEqual(second.provenance.codex);
+    expect(probes).toBe(2);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
 test("Claude 429 honors Retry-After when it exceeds the exponential delay", async () => {
   resetLimitsCache();
   const realFetch = globalThis.fetch;
