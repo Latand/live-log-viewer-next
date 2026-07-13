@@ -1,20 +1,28 @@
-# PR #152: EngineHost interface and CodexAppServerHost
+# Issue #150: Durable Claude stream broker host
 
-## Task statement
-
-Implement issue #149 from the issue #25 runtime spike: define the shared structured-host contract, add the Codex app-server adapter on ChatGPT subscription authentication, persist its mutable host state beside the durable engine thread identity, and support restart adoption through `thread/resume`.
+Productize the issue #25 Claude stream-json prototype as `ClaudeStreamBrokerHost`, an `EngineHost` adapter that owns one long-lived Claude process per hosted session and preserves queue, replay, and resume state durably.
 
 ## Acceptance criteria
 
-- AC1: `EngineHost` exposes `attach(afterSeq)`, `send`, `interrupt`, `answer`, `health`, and `release` with the spike contract semantics.
-- AC2: `CodexAppServerHost` maps the contract to app-server JSON-RPC over stdio and uses the Codex thread ID as durable session identity.
-- AC3: Structured hosting activates only when `LLV_STRUCTURED_HOSTS=1`; the default state remains disabled.
-- AC4: Existing tmux delivery paths, flow engines, and UI remain unchanged.
-- AC5: Registry state persists host kind, endpoint, PID plus process-start identity, event cursor, protocol version, writer-claim epoch, active turn reference, and pending attention.
-- AC6: Viewer restart adoption resumes every eligible Codex registry row through `thread/resume`.
-- AC7: Delivery maps queue entry IDs to `clientUserMessageId`, active turns use `expectedTurnId`, interruption stays explicit, and structured attention can be answered.
-- AC8: The real Codex CLI integration starts a thread, attaches a late client, steers the active turn, restarts the host process, and resumes the same thread on the ChatGPT subscription.
-- AC9: The real integration skips gracefully when the Codex CLI is unavailable.
-- AC10: API keys and authentication tokens never cross into the child environment or diagnostic output.
-- AC11: `bun test`, touched-file ESLint, and `bunx tsc --noEmit` pass.
-- AC12: A fresh independent review reaches a clean APPROVE verdict.
+AC1: Every runtime implementation change lives under `src/lib/runtime/`. Structured Claude hosting activates only when `LLV_STRUCTURED_HOSTS=1`; the default remains disabled and existing tmux behavior stays unchanged.
+
+AC2: Every outbound user queue entry is fsynced to the Claude delivery ledger before the first corresponding stdin write. A crash after the ledger append and before actuation leaves a safely retryable entry.
+
+AC3: A ledger entry becomes delivered only after its matching replayed user message appears on the Claude stream or in the durable Claude transcript during adoption.
+
+AC4: `ClaudeStreamBrokerHost` conforms to `EngineHost`: `attach(afterSeq)`, `send`, `interrupt`, `answer`, `health`, and `release`. Replay is monotonic and durable for late viewers, regular active-turn sends queue for the following turn, and interruption uses an explicit control request.
+
+AC5: A fresh broker resumes the same Claude session through `--resume <session_id>`. Registry adoption persists the broker process identity, event cursor, CLI version, writer epoch, active turn, and pending attention state.
+
+AC6: Claude children use the local `claude.ai` subscription login. Provider API-key and OAuth-token environment variables never cross into the child process or diagnostic output.
+
+AC7: The real CLI integration test skips cleanly when the Claude binary or subscription login is unavailable and verifies late attach plus restart resume when available.
+
+AC8: No tmux delivery, flow-engine, scanner, or UI source is changed.
+
+## Validation gates
+
+- `bun test`
+- `bunx tsc --noEmit`
+- ESLint for every changed TypeScript file
+- Real local Claude subscription integration when the authenticated CLI is available
