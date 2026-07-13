@@ -255,12 +255,12 @@ describe("agent registry", () => {
         fs.rmSync(lock, { recursive: true, force: true });
       },
     });
-    const originalOpen = fs.openSync;
+    const originalLink = fs.linkSync;
     let injected = false;
-    fs.openSync = ((target: fs.PathLike, flags: fs.OpenMode, mode?: fs.Mode) => {
-      if (!injected && String(target).startsWith(lock) && String(target).includes("owner")) {
+    fs.linkSync = ((existingPath: fs.PathLike, newPath: fs.PathLike) => {
+      if (!injected && String(existingPath).startsWith(lock) && String(newPath).endsWith("/owner.json")) {
         injected = true;
-        if (fs.existsSync(lock)) fs.renameSync(lock, `${lock}.retired-probe`);
+        fs.renameSync(lock, `${lock}.retired-probe`);
         fs.mkdirSync(lock);
         fs.writeFileSync(path.join(lock, "owner.json"), JSON.stringify({
           pid: 43,
@@ -268,8 +268,8 @@ describe("agent registry", () => {
           token: replacementToken,
         }));
       }
-      return originalOpen(target, flags, mode);
-    }) as typeof fs.openSync;
+      return originalLink(existingPath, newPath);
+    }) as typeof fs.linkSync;
 
     try {
       await store.withOperationLock(
@@ -278,7 +278,8 @@ describe("agent registry", () => {
         async () => undefined,
       );
     } finally {
-      fs.openSync = originalOpen;
+      fs.linkSync = originalLink;
+      fs.rmSync(`${lock}.retired-probe`, { recursive: true, force: true });
     }
 
     expect(observedReplacement).toBe(true);
@@ -319,6 +320,28 @@ describe("agent registry", () => {
     }
 
     expect(observedLegacyLock).toBe(true);
+  });
+
+  test("a pinned-base reader can inspect a newly published lock owner", async () => {
+    const store = registry();
+    const lock = `${store.filename}.locks/${encodeURIComponent("codex:legacy-reader")}`;
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const operation = store.withOperationLock(
+      { engine: "codex", sessionId: "legacy-reader" },
+      { pid: process.pid, startIdentity: null },
+      async () => { await held; },
+    );
+    await Bun.sleep(0);
+
+    expect(fs.statSync(lock).isDirectory()).toBe(true);
+    expect(JSON.parse(fs.readFileSync(path.join(lock, "owner.json"), "utf8"))).toEqual(expect.objectContaining({
+      pid: process.pid,
+      token: expect.any(String),
+    }));
+
+    release();
+    await operation;
   });
 
   test("a delayed stale contender preserves the replacement lock", async () => {

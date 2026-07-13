@@ -1316,7 +1316,7 @@ export class AgentRegistry {
     try {
       previous = JSON.parse(fs.readFileSync(this.lockOwnerFile(lock), "utf8")) as ProcessIdentity & { token?: unknown };
     } catch {
-      // Current file claims publish complete; legacy directories may still await owner.json.
+      // Directory claims may still await descriptor-bound owner publication.
     }
     if (previous && Number.isInteger(previous.pid) && previous.pid > 0) {
       if (!this.ownerAlive(previous)) {
@@ -1341,15 +1341,17 @@ export class AgentRegistry {
     const token = crypto.randomUUID();
     const staging = `${lock}.owner.pending-${token}`;
     let fd: number | null = null;
+    let directoryFd: number | null = null;
+    let identity: RegistryLockClaim["identity"] | null = null;
+    let ownerPublished = false;
     try {
       fd = fs.openSync(staging, "wx", 0o600);
       fs.writeFileSync(fd, JSON.stringify({ ...owner, token }), "utf8");
       fs.fsyncSync(fd);
       fs.closeSync(fd);
       fd = null;
-      const stat = fs.statSync(staging);
       try {
-        fs.linkSync(staging, lock);
+        fs.mkdirSync(lock, 0o700);
       } catch (error) {
         const code = (error as NodeJS.ErrnoException).code;
         if (code !== "EEXIST") throw error;
@@ -1357,18 +1359,30 @@ export class AgentRegistry {
         this.recoverContendedLock(lock);
         return null;
       }
+      directoryFd = fs.openSync(lock, "r");
+      const stat = fs.fstatSync(directoryFd);
+      identity = { dev: stat.dev, ino: stat.ino };
+      fs.linkSync(staging, `/proc/self/fd/${directoryFd}/owner.json`);
+      ownerPublished = true;
+      fs.fsyncSync(directoryFd);
+      fs.closeSync(directoryFd);
+      directoryFd = null;
       fs.rmSync(staging, { force: true });
-      const claim = { lock, token, identity: { dev: stat.dev, ino: stat.ino } };
+      const claim = { lock, token, identity };
+      if (!this.sameLock(lock, claim.identity) || this.lockToken(lock) !== token) return null;
       if (fs.existsSync(`${lock}.recovering`) || fs.existsSync(`${lock}.releasing`)) {
-        if (this.sameLock(lock, claim.identity) && this.lockToken(lock) === token) {
-          fs.rmSync(lock, { force: true });
-        }
+        this.releaseLock(claim);
         return null;
       }
       return claim;
     } catch (error) {
       if (fd !== null) fs.closeSync(fd);
+      if (directoryFd !== null) fs.closeSync(directoryFd);
       fs.rmSync(staging, { force: true });
+      if (identity) {
+        if (ownerPublished) this.releaseLock({ lock, token, identity });
+        else this.retireObservedLock(lock, { ...identity, isDirectory: true }, null, `failed-${token}`);
+      }
       throw error;
     }
   }
@@ -1377,6 +1391,28 @@ export class AgentRegistry {
     const releasing = `${claim.lock}.releasing`;
     this.resolveInterruptedRelease(claim.lock);
     if (fs.existsSync(releasing)) return false;
+    let candidateIsDirectory: boolean;
+    try {
+      candidateIsDirectory = fs.statSync(candidate).isDirectory();
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+      throw error;
+    }
+    if (candidateIsDirectory) {
+      try {
+        fs.renameSync(candidate, releasing);
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code === "ENOENT" || code === "EEXIST" || code === "ENOTEMPTY") return false;
+        throw error;
+      }
+      if (!this.sameLock(releasing, claim.identity) || this.lockToken(releasing) !== claim.token) {
+        this.restoreRecovery(candidate, releasing);
+        return false;
+      }
+      fs.rmSync(releasing, { recursive: true, force: true });
+      return true;
+    }
     try {
       fs.linkSync(candidate, releasing);
     } catch (error) {
