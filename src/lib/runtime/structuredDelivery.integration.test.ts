@@ -11,7 +11,7 @@ import { RegisteredSuccessorProvider } from "@/lib/accounts/migration/provider";
 import { RuntimeJournal } from "@/runtime-host/journal";
 
 import type { RuntimeHostClient } from "./client";
-import type { EngineHost, QueueEntry } from "./engineHost";
+import type { EngineHost, HostState, QueueEntry } from "./engineHost";
 import { FakeEngineHost, createFakeDeliveryLedger } from "./fixtures/fakeEngineHost";
 import { bindStructuredDeliveryQueue, publishStructuredDeliveryHost } from "./structuredDeliveryController";
 import { StructuredDeliveryQueue, type StructuredDeliveryQueuePort } from "./structuredDeliveryQueue";
@@ -624,7 +624,7 @@ test("a migration-held delivery switches from the source host to the published C
   journal.close();
 });
 
-test("successor cleanup republishes the rolled-back source for path-only composer delivery", async () => {
+test("successor cleanup drains a delayed publication before restoring path-only rollback delivery", async () => {
   const sourceId = "55555555-5555-4555-8555-555555555555";
   const successorId = "66666666-6666-4666-8666-666666666666";
   const sourcePath = path.join(sandbox, `${sourceId}.jsonl`);
@@ -665,7 +665,26 @@ test("successor cleanup republishes the rolled-back source for path-only compose
     pendingAction: null,
   });
   const journal = new RuntimeJournal(path.join(sandbox, "rollback-projection-runtime.sqlite"), { structuredHosts: true });
-  const client = runtimeJournalClient(journal);
+  const journalClient = runtimeJournalClient(journal);
+  let releaseDelayedPublication = () => {};
+  const delayedPublicationGate = new Promise<void>((resolve) => { releaseDelayedPublication = resolve; });
+  let markDelayedPublicationStarted = () => {};
+  const delayedPublicationStarted = new Promise<void>((resolve) => { markDelayedPublicationStarted = resolve; });
+  let markDelayedPublicationFinished = () => {};
+  const delayedPublicationFinished = new Promise<void>((resolve) => { markDelayedPublicationFinished = resolve; });
+  const client = {
+    ...journalClient,
+    append: async (event: Parameters<RuntimeHostClient["append"]>[0]) => {
+      if (event.kind === "session-status" && event.payload.activeTurnId === "turn:late-successor") {
+        markDelayedPublicationStarted();
+        await delayedPublicationGate;
+        const result = await journalClient.append(event);
+        markDelayedPublicationFinished();
+        return result;
+      }
+      return journalClient.append(event);
+    },
+  } as RuntimeHostClient;
   const sourceLedger = createFakeDeliveryLedger();
   await bindStructuredDeliveryQueue([{
     key: { engine: "codex", sessionId: sourceId },
@@ -694,15 +713,33 @@ test("successor cleanup republishes the rolled-back source for path-only compose
     claimOwner: null,
     pendingAction: null,
   });
+  let successorStateListener: ((state: HostState) => void) | null = null;
+  const emitSuccessorState = (state: HostState) => successorStateListener?.(state);
+  const successorHost = Object.assign(new FakeEngineHost(), {
+    onStateChange(listener: (state: HostState) => void) {
+      successorStateListener = listener;
+      return () => {
+        if (successorStateListener === listener) successorStateListener = null;
+      };
+    },
+  });
   await publishStructuredDeliveryHost({
     key: { engine: "codex", sessionId: successorId },
-    host: observableFakeHost(new FakeEngineHost()),
+    host: successorHost,
   });
   expect(journal.snapshot().sessions.find((session) => session.conversationId === conversation.id)?.artifactPath)
     .toBe(successorPath);
 
+  emitSuccessorState({
+    ...await successorHost.health(),
+    status: "active",
+    eventCursor: 1,
+    activeTurnRef: "turn:late-successor",
+  });
+  await delayedPublicationStarted;
+
   registry.rollbackConversationMigration(conversation.id, revision);
-  await cleanupOnlyProvider().cleanup({
+  const cleanup = cleanupOnlyProvider().cleanup({
     operationId: "discarded-rollback-successor",
     nativeId: successorId,
     path: successorPath,
@@ -710,6 +747,12 @@ test("successor cleanup republishes the rolled-back source for path-only compose
     historyHash: "discarded-history",
     host: { kind: "codex-app-server", identity: successorId, epoch: 1, verifiedAt: "2026-07-13T12:01:00.000Z" },
   });
+  await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  releaseDelayedPublication();
+  await cleanup;
+  await delayedPublicationFinished;
+  expect(journal.snapshot().sessions.find((session) => session.conversationId === conversation.id)?.artifactPath)
+    .toBe(sourcePath);
   const result = await enqueueStructuredMessage({
     path: sourcePath,
     text: "continue after rollback",

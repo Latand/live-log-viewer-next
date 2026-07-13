@@ -132,6 +132,11 @@ export async function bindStructuredDeliveryQueue(
     registered.unsubscribe();
     registrations.delete(key);
     hosts.delete(key);
+    const pendingPublications = publishChains.get(key);
+    if (pendingPublications) {
+      await pendingPublications;
+      if (publishChains.get(key) === pendingPublications) publishChains.delete(key);
+    }
     await republishCurrentHosts();
   };
   const register = async (item: StructuredDeliveryHost): Promise<() => Promise<void>> => {
