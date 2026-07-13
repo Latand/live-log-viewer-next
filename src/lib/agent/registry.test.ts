@@ -68,7 +68,7 @@ describe("agent registry", () => {
     fs.writeFileSync(store.filename, JSON.stringify(snapshot));
 
     const upgraded = new AgentRegistry(store.filename);
-    expect(upgraded.compactDeliveryReservations()).toBe(5);
+    expect(upgraded.compactDeliveryReservations()).toBe(0);
     const restarted = new AgentRegistry(store.filename);
     const retained = Object.values(restarted.snapshot().heldDeliveries);
     expect(retained).toHaveLength(100);
@@ -91,6 +91,37 @@ describe("agent registry", () => {
     expect(failed).toHaveLength(50);
     expect(failed.every((delivery) => delivery.state === "failed")).toBe(true);
     expect(store.holdDelivery(conversation.id, "new body", "new-after-failures")).toMatchObject({ state: "assigned" });
+  });
+
+  test("startup compaction stores normalized snapshots sparsely without changing durable state", () => {
+    const store = registry();
+    store.ensureConversation("codex", "/sessions/compact-a.jsonl", "default");
+    store.ensureConversation("claude", "/sessions/compact-b.jsonl", "work");
+    const expected = store.snapshot();
+    fs.writeFileSync(store.filename, JSON.stringify(expected, null, 2) + "\n");
+    const verboseBytes = fs.statSync(store.filename).size;
+
+    const restarted = new AgentRegistry(store.filename);
+    const compactPayload = fs.readFileSync(store.filename, "utf8");
+
+    expect(fs.statSync(store.filename).size).toBeLessThan(verboseBytes);
+    expect(compactPayload).not.toContain("\n  \"entries\"");
+    expect(compactPayload).not.toContain("\"model\":null");
+    expect(restarted.snapshot()).toEqual(expected);
+  });
+
+  test("startup removes registry temp files only after their writer exits", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-tmp-"));
+    const filename = path.join(dir, "agent-registry.json");
+    const deadWriter = `${filename}.42.11111111-1111-4111-8111-111111111111.tmp`;
+    const liveWriter = `${filename}.43.22222222-2222-4222-8222-222222222222.tmp`;
+    fs.writeFileSync(deadWriter, "dead writer");
+    fs.writeFileSync(liveWriter, "live writer");
+
+    new AgentRegistry(filename, (owner) => owner.pid === 43);
+
+    expect(fs.existsSync(deadWriter)).toBeFalse();
+    expect(fs.existsSync(liveWriter)).toBeTrue();
   });
 
   test("account-retirement compensation preserves unrelated concurrent mutations", () => {
@@ -138,6 +169,389 @@ describe("agent registry", () => {
     await expect(store.withOperationLock(KEY, { pid: 1, startIdentity: "1:one" }, async () => { throw new Error("boom"); })).rejects.toThrow("boom");
   });
 
+  test("queues a transiently contended operation lock", async () => {
+    const store = registry();
+    const owner = { pid: process.pid, startIdentity: null };
+    const events: string[] = [];
+    let releaseFirst!: () => void;
+    const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    const first = store.withOperationLock(KEY, owner, async () => {
+      events.push("first-started");
+      await firstGate;
+      events.push("first-finished");
+    });
+    await Bun.sleep(0);
+    const second = store.withOperationLock(KEY, owner, async () => {
+      events.push("second-started");
+    });
+
+    await Bun.sleep(10);
+    expect(events).toEqual(["first-started"]);
+    releaseFirst();
+    await Promise.all([first, second]);
+    expect(events).toEqual(["first-started", "first-finished", "second-started"]);
+  });
+
+  test("waits beyond the complete delivery retry budget for a valid operation holder", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-long-lock-"));
+    const filename = path.join(dir, "agent-registry.json");
+    let elapsedMs = 0;
+    let lock = "";
+    const store = new AgentRegistry(filename, () => true, {
+      now: () => elapsedMs,
+      wait: async (delayMs) => {
+        elapsedMs += delayMs;
+        if (elapsedMs >= 180_000) fs.rmSync(lock, { recursive: true, force: true });
+      },
+    });
+    lock = `${store.filename}.locks/${encodeURIComponent("codex:long-holder")}`;
+    fs.mkdirSync(lock, { recursive: true });
+    fs.writeFileSync(path.join(lock, "owner.json"), JSON.stringify({ pid: 42, startIdentity: "42:holder" }));
+
+    const result = await store.withOperationLock(
+      { engine: "codex", sessionId: "long-holder" },
+      { pid: process.pid, startIdentity: null },
+      async () => "completed",
+    );
+
+    expect(result).toBe("completed");
+    expect(elapsedMs).toBeGreaterThanOrEqual(180_000);
+  });
+
+  test("preserves an ownerless legacy publisher beyond the former grace period", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-paused-legacy-publisher-"));
+    const filename = path.join(dir, "agent-registry.json");
+    let nowMs = Date.now();
+    let waits = 0;
+    const store = new AgentRegistry(filename, (owner) => owner.startIdentity === "42:legacy", {
+      now: () => nowMs,
+      wait: async (delayMs) => {
+        nowMs += delayMs;
+        waits += 1;
+        expect(fs.statSync(lock).ino).toBe(legacyIdentity.ino);
+        if (waits === 1) {
+          fs.writeFileSync(path.join(lock, "owner.json"), JSON.stringify({ pid: 42, startIdentity: "42:legacy" }));
+        } else {
+          fs.rmSync(lock, { recursive: true, force: true });
+        }
+      },
+    });
+    const lock = `${store.filename}.locks/${encodeURIComponent("codex:paused-legacy-publisher")}`;
+    fs.mkdirSync(lock, { recursive: true });
+    const legacyIdentity = fs.statSync(lock);
+    const pausedAt = new Date(nowMs - 2_000);
+    fs.utimesSync(lock, pausedAt, pausedAt);
+
+    const result = await store.withOperationLock(
+      { engine: "codex", sessionId: "paused-legacy-publisher" },
+      { pid: process.pid, startIdentity: null },
+      async () => "completed",
+    );
+
+    expect(result).toBe("completed");
+    expect(waits).toBe(2);
+  });
+
+  test("publishes a macOS-compatible lock owner without Linux procfs", async () => {
+    const store = registry();
+    const lock = `${store.filename}.locks/${encodeURIComponent("codex:portable-publication")}`;
+    const originalLink = fs.linkSync;
+    fs.linkSync = ((existingPath: fs.PathLike, newPath: fs.PathLike) => {
+      if (String(newPath).startsWith("/proc/self/fd/")) {
+        const error = new Error("procfs is unavailable") as NodeJS.ErrnoException;
+        error.code = "ENOENT";
+        throw error;
+      }
+      return originalLink(existingPath, newPath);
+    }) as typeof fs.linkSync;
+
+    try {
+      await expect(store.withOperationLock(
+        { engine: "codex", sessionId: "portable-publication" },
+        { pid: process.pid, startIdentity: null },
+        async () => {
+          expect(fs.lstatSync(lock).isSymbolicLink()).toBe(true);
+          expect(fs.statSync(lock).isDirectory()).toBe(true);
+          expect(JSON.parse(fs.readFileSync(path.join(lock, "owner.json"), "utf8")).pid).toBe(process.pid);
+          return "completed";
+        },
+      )).resolves.toBe("completed");
+    } finally {
+      fs.linkSync = originalLink;
+    }
+    expect(fs.readdirSync(path.dirname(lock)).filter((entry) => entry.includes(".owner.pending-"))).toEqual([]);
+  });
+
+  test("a delayed publisher cannot overwrite a replacement owner", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-delayed-publisher-"));
+    const filename = path.join(dir, "agent-registry.json");
+    const lock = `${filename}.locks/${encodeURIComponent("codex:delayed-publisher")}`;
+    const replacementToken = "44444444-4444-4444-8444-444444444444";
+    let observedReplacement = false;
+    const store = new AgentRegistry(filename, (owner) => owner.startIdentity === "43:replacement", {
+      now: () => Date.now(),
+      wait: async () => {
+        const owner = JSON.parse(fs.readFileSync(path.join(lock, "owner.json"), "utf8"));
+        expect(owner.token).toBe(replacementToken);
+        observedReplacement = true;
+        fs.rmSync(lock, { recursive: true, force: true });
+      },
+    });
+    const originalSymlink = fs.symlinkSync;
+    let injected = false;
+    fs.symlinkSync = ((target: fs.PathLike, newPath: fs.PathLike, type?: fs.symlink.Type) => {
+      if (!injected && String(newPath) === lock) {
+        injected = true;
+        fs.mkdirSync(lock);
+        fs.writeFileSync(path.join(lock, "owner.json"), JSON.stringify({
+          pid: 43,
+          startIdentity: "43:replacement",
+          token: replacementToken,
+        }));
+      }
+      return originalSymlink(target, newPath, type);
+    }) as typeof fs.symlinkSync;
+
+    try {
+      await store.withOperationLock(
+        { engine: "codex", sessionId: "delayed-publisher" },
+        { pid: process.pid, startIdentity: null },
+        async () => undefined,
+      );
+    } finally {
+      fs.symlinkSync = originalSymlink;
+    }
+
+    expect(observedReplacement).toBe(true);
+  });
+
+  test("publication preserves an empty lock directory owned by a delayed legacy writer", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-legacy-publisher-"));
+    const filename = path.join(dir, "agent-registry.json");
+    const lock = `${filename}.locks/${encodeURIComponent("codex:legacy-publisher")}`;
+    let observedLegacyLock = false;
+    const store = new AgentRegistry(filename, () => true, {
+      now: () => Date.now(),
+      wait: async () => {
+        expect(fs.statSync(lock).isDirectory()).toBe(true);
+        expect(fs.readdirSync(lock)).toEqual([]);
+        observedLegacyLock = true;
+        fs.rmSync(lock, { recursive: true, force: true });
+      },
+    });
+    const originalOpen = fs.openSync;
+    let injected = false;
+    fs.openSync = ((target: fs.PathLike, flags: fs.OpenMode, mode?: fs.Mode) => {
+      if (!injected && String(target).startsWith(lock) && String(target).includes("owner")) {
+        injected = true;
+        fs.mkdirSync(lock);
+      }
+      return originalOpen(target, flags, mode);
+    }) as typeof fs.openSync;
+
+    try {
+      await store.withOperationLock(
+        { engine: "codex", sessionId: "legacy-publisher" },
+        { pid: process.pid, startIdentity: null },
+        async () => undefined,
+      );
+    } finally {
+      fs.openSync = originalOpen;
+    }
+
+    expect(observedLegacyLock).toBe(true);
+  });
+
+  test("a pinned-base reader can inspect a newly published lock owner", async () => {
+    const store = registry();
+    const lock = `${store.filename}.locks/${encodeURIComponent("codex:legacy-reader")}`;
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const operation = store.withOperationLock(
+      { engine: "codex", sessionId: "legacy-reader" },
+      { pid: process.pid, startIdentity: null },
+      async () => { await held; },
+    );
+    await Bun.sleep(0);
+
+    expect(fs.statSync(lock).isDirectory()).toBe(true);
+    expect(JSON.parse(fs.readFileSync(path.join(lock, "owner.json"), "utf8"))).toEqual(expect.objectContaining({
+      pid: process.pid,
+      token: expect.any(String),
+    }));
+
+    release();
+    await operation;
+  });
+
+  test("a delayed stale contender preserves the replacement lock", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-stale-race-"));
+    const filename = path.join(dir, "agent-registry.json");
+    const staleToken = "11111111-1111-4111-8111-111111111111";
+    const replacementToken = "22222222-2222-4222-8222-222222222222";
+    const lock = `${filename}.locks/${encodeURIComponent("codex:stale-race")}`;
+    let raced = false;
+    const store = new AgentRegistry(filename, (owner) => {
+      if (owner.startIdentity === "42:stale" && !raced) {
+        raced = true;
+        fs.renameSync(lock, `${lock}.retired-${staleToken}`);
+        fs.mkdirSync(lock);
+        fs.writeFileSync(path.join(lock, "owner.json"), JSON.stringify({
+          pid: 43,
+          startIdentity: "43:replacement",
+          token: replacementToken,
+        }));
+        return false;
+      }
+      return owner.startIdentity === "43:replacement";
+    }, {
+      now: () => Date.now(),
+      wait: async () => {
+        expect(JSON.parse(fs.readFileSync(path.join(lock, "owner.json"), "utf8")).token).toBe(replacementToken);
+        fs.rmSync(lock, { recursive: true, force: true });
+      },
+    });
+    fs.mkdirSync(lock, { recursive: true });
+    fs.writeFileSync(path.join(lock, "owner.json"), JSON.stringify({
+      pid: 42,
+      startIdentity: "42:stale",
+      token: staleToken,
+    }));
+
+    await expect(store.withOperationLock(
+      { engine: "codex", sessionId: "stale-race" },
+      { pid: process.pid, startIdentity: null },
+      async () => "completed",
+    )).resolves.toBe("completed");
+  });
+
+  test("stale recovery preserves a replacement acquired during the liveness check", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-liveness-race-"));
+    const filename = path.join(dir, "agent-registry.json");
+    const staleToken = "66666666-6666-4666-8666-666666666666";
+    const replacementToken = "77777777-7777-4777-8777-777777777777";
+    const lock = `${filename}.locks/${encodeURIComponent("codex:liveness-race")}`;
+    let raced = false;
+    let replacementMoved = false;
+    const store = new AgentRegistry(filename, (owner) => {
+      if (owner.startIdentity === "42:stale" && !raced) {
+        raced = true;
+        fs.rmSync(lock, { recursive: true, force: true });
+        fs.mkdirSync(lock);
+        fs.writeFileSync(path.join(lock, "owner.json"), JSON.stringify({
+          pid: 43,
+          startIdentity: "43:replacement",
+          token: replacementToken,
+        }));
+        return false;
+      }
+      return owner.startIdentity === "43:replacement";
+    }, {
+      now: () => Date.now(),
+      wait: async () => {
+        const retired = `${lock}.retired-${staleToken}`;
+        replacementMoved = !fs.existsSync(lock) && fs.existsSync(retired);
+        const replacementPath = replacementMoved ? retired : lock;
+        expect(JSON.parse(fs.readFileSync(path.join(replacementPath, "owner.json"), "utf8")).token).toBe(replacementToken);
+        fs.rmSync(replacementPath, { recursive: true, force: true });
+      },
+    });
+    fs.mkdirSync(lock, { recursive: true });
+    fs.writeFileSync(path.join(lock, "owner.json"), JSON.stringify({
+      pid: 42,
+      startIdentity: "42:stale",
+      token: staleToken,
+    }));
+
+    await store.withOperationLock(
+      { engine: "codex", sessionId: "liveness-race" },
+      { pid: process.pid, startIdentity: null },
+      async () => undefined,
+    );
+
+    expect(raced).toBe(true);
+    expect(replacementMoved).toBe(false);
+  });
+
+  test("interrupted recovery preserves a replacement acquired during the liveness check", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-interrupted-recovery-race-"));
+    const filename = path.join(dir, "agent-registry.json");
+    const publishedToken = "88888888-8888-4888-8888-888888888888";
+    const recoveryToken = "99999999-9999-4999-8999-999999999999";
+    const replacementToken = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const lock = `${filename}.locks/${encodeURIComponent("codex:interrupted-recovery-race")}`;
+    const recovery = `${lock}.recovering`;
+    let raced = false;
+    const store = new AgentRegistry(filename, (owner) => {
+      if (owner.startIdentity === "42:published" && !raced) {
+        raced = true;
+        fs.rmSync(lock, { recursive: true, force: true });
+        fs.mkdirSync(lock);
+        fs.writeFileSync(path.join(lock, "owner.json"), JSON.stringify({
+          pid: 43,
+          startIdentity: "43:replacement",
+          token: replacementToken,
+        }));
+        return false;
+      }
+      return owner.startIdentity === "43:replacement";
+    }, {
+      now: () => Date.now(),
+      wait: async () => {
+        expect(JSON.parse(fs.readFileSync(path.join(lock, "owner.json"), "utf8")).token).toBe(replacementToken);
+        fs.rmSync(lock, { recursive: true, force: true });
+      },
+    });
+    fs.mkdirSync(lock, { recursive: true });
+    fs.writeFileSync(path.join(lock, "owner.json"), JSON.stringify({
+      pid: 42,
+      startIdentity: "42:published",
+      token: publishedToken,
+    }));
+    fs.mkdirSync(recovery);
+    fs.writeFileSync(path.join(recovery, "owner.json"), JSON.stringify({
+      pid: 41,
+      startIdentity: "41:recovery",
+      token: recoveryToken,
+    }));
+
+    await store.withOperationLock(
+      { engine: "codex", sessionId: "interrupted-recovery-race" },
+      { pid: process.pid, startIdentity: null },
+      async () => undefined,
+    );
+
+    const retired = `${lock}.retired-${publishedToken}`;
+    const replacementMoved = fs.existsSync(retired)
+      && JSON.parse(fs.readFileSync(path.join(retired, "owner.json"), "utf8")).token === replacementToken;
+    expect(raced).toBe(true);
+    expect(replacementMoved).toBe(false);
+    fs.rmSync(retired, { recursive: true, force: true });
+  });
+
+  test("an old claim cannot release a replacement lock", async () => {
+    const store = registry();
+    const lock = `${store.filename}.locks/${encodeURIComponent("codex:replacement")}`;
+    const replacementToken = "33333333-3333-4333-8333-333333333333";
+
+    await store.withOperationLock(
+      { engine: "codex", sessionId: "replacement" },
+      { pid: process.pid, startIdentity: null },
+      async () => {
+        fs.rmSync(lock, { recursive: true, force: true });
+        fs.mkdirSync(lock);
+        fs.writeFileSync(path.join(lock, "owner.json"), JSON.stringify({
+          pid: process.pid,
+          startIdentity: null,
+          token: replacementToken,
+        }));
+      },
+    );
+
+    expect(JSON.parse(fs.readFileSync(path.join(lock, "owner.json"), "utf8")).token).toBe(replacementToken);
+    fs.rmSync(lock, { recursive: true, force: true });
+  });
+
   test("reclaims a lock only after its recorded process identity is stale", () => {
     const store = registry(() => false);
     const lock = `${store.filename}.write-lock`;
@@ -145,6 +559,59 @@ describe("agent registry", () => {
     fs.writeFileSync(path.join(lock, "owner.json"), JSON.stringify({ pid: 42, startIdentity: "42:old" }));
     expect(() => store.beginSpawn("codex", "/repo")).not.toThrow();
   });
+
+  test("waits through transient write-lock contention", () => {
+    let livenessChecks = 0;
+    const store = registry(() => {
+      livenessChecks += 1;
+      return livenessChecks <= 100;
+    });
+    const lock = `${store.filename}.write-lock`;
+    fs.mkdirSync(lock, { recursive: true });
+    fs.writeFileSync(path.join(lock, "owner.json"), JSON.stringify({ pid: 42, startIdentity: "42:writer" }));
+
+    expect(() => store.setEngineRouting("codex", "work")).not.toThrow();
+    expect(livenessChecks).toBeGreaterThan(100);
+    expect(store.engineRouting("codex").activeAccountId).toBe("work");
+  });
+
+  test("waits for an interprocess write owner beyond the former deadline", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-interprocess-lock-"));
+    const filename = path.join(dir, "agent-registry.json");
+    const lock = `${filename}.write-lock`;
+    const store = new AgentRegistry(filename);
+    const child = Bun.spawn([process.execPath, "-e", `
+      const fs = require("node:fs");
+      const path = require("node:path");
+      const lock = process.env.LOCK_PATH;
+      fs.mkdirSync(lock, { recursive: true });
+      fs.writeFileSync(path.join(lock, "owner.json"), JSON.stringify({
+        pid: process.pid,
+        startIdentity: null,
+        token: "55555555-5555-4555-8555-555555555555",
+      }));
+      process.stdout.write("ready\\n");
+      setTimeout(() => fs.rmSync(lock, { recursive: true, force: true }), 8_500);
+    `], {
+      env: { ...process.env, LOCK_PATH: lock },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const reader = child.stdout.getReader();
+    const ready = await reader.read();
+    reader.releaseLock();
+    expect(new TextDecoder().decode(ready.value)).toContain("ready");
+
+    try {
+      const startedAt = Date.now();
+      expect(() => store.setEngineRouting("codex", "work")).not.toThrow();
+      expect(Date.now() - startedAt).toBeGreaterThanOrEqual(8_400);
+    } finally {
+      child.kill();
+      await child.exited;
+    }
+    expect(store.engineRouting("codex").activeAccountId).toBe("work");
+  }, 15_000);
 
   test("preserves corrupt registry bytes and rejects mutation", () => {
     const store = registry();

@@ -1,7 +1,7 @@
 "use client";
 
 import { Check, Layers } from "lucide-react";
-import { memo, useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useState } from "react";
 
 import { ChevronRight } from "@/components/icons";
 import type { Flow } from "@/lib/flows/types";
@@ -364,6 +364,8 @@ export const GroupsLayer = memo(function GroupsLayer({
   groups,
   interactive,
   pipelineControls,
+  autoOpenGroupId,
+  onAutoOpen,
 }: {
   groups: SchemeGroup[];
   /** Passive on the hand-tool, during a selection session and on the lite map:
@@ -374,9 +376,36 @@ export const GroupsLayer = memo(function GroupsLayer({
       stage graph on the halo itself, so the group is always the pipeline surface
       (issue #136). */
   pipelineControls?: PipelineGroupControls | null;
+  /** A group id whose override/builder panel should open on its own as soon as it
+      arrives — the canvas builder lands the operator straight in a fresh draft's
+      panel (#136). `onAutoOpen` fires once consumed so the caller clears it. */
+  autoOpenGroupId?: string | null;
+  onAutoOpen?: () => void;
 }) {
   const { t } = useLocale();
   const [openId, setOpenId] = useState<string | null>(null);
+  /* Open the requested group once it appears (the draft POST → refetch → layout
+     round-trip means its halo may not exist on the render that first receives the
+     id). Adjusted render-phase — React's endorsed idiom, no setState-in-effect
+     cascade — and guarded by a ref so it fires a single time per distinct id even
+     while the prop lingers. Only while interactive, so the map/hand-tool never
+     force a panel open. */
+  const [autoOpened, setAutoOpened] = useState<string | null>(null);
+  if (
+    autoOpenGroupId &&
+    interactive &&
+    autoOpenGroupId !== autoOpened &&
+    groups.some((group) => group.id === autoOpenGroupId)
+  ) {
+    setAutoOpened(autoOpenGroupId);
+    setOpenId(autoOpenGroupId);
+  }
+  /* Tell the caller it can drop the request. This effect only calls the parent
+     callback and runs no local setState, so it stays off the cascading-render path
+     the lint rule guards. */
+  useEffect(() => {
+    if (autoOpenGroupId && autoOpenGroupId === autoOpened) onAutoOpen?.();
+  }, [autoOpenGroupId, autoOpened, onAutoOpen]);
   if (!groups.length) return null;
   const openGroup = interactive ? groups.find((group) => group.id === openId) ?? null : null;
   return (

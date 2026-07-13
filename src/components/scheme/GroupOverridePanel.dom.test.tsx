@@ -19,6 +19,8 @@ Object.assign(globalThis, {
   HTMLElement: dom.HTMLElement,
   HTMLButtonElement: dom.HTMLButtonElement,
   HTMLTextAreaElement: dom.HTMLTextAreaElement,
+  HTMLInputElement: dom.HTMLInputElement,
+  HTMLSelectElement: dom.HTMLSelectElement,
   Event: dom.Event,
   MouseEvent: dom.MouseEvent,
 });
@@ -215,6 +217,154 @@ test("draft plan controls send additive stage and Start actions", async () => {
 
   flushSync(() => startMount.root.unmount());
   startMount.host.remove();
+});
+
+function draftFixture(): SchemeGroup {
+  return {
+    ...pipelineGroup,
+    pipeline: {
+      ...pipelineGroup.pipeline!,
+      state: "draft",
+      repoDir: "/repo",
+      cursor: { stageId: "plan", state: "pending" },
+      runs: pipelineGroup.pipeline!.stages.map((stage) => ({ stageId: stage.id, attempts: [] })),
+    } as Pipeline,
+  };
+}
+
+function emptyDraftFixture(): SchemeGroup {
+  return {
+    ...pipelineGroup,
+    pipeline: {
+      ...pipelineGroup.pipeline!,
+      state: "draft",
+      repoDir: "/repo",
+      stages: [],
+      runs: [],
+      cursor: null,
+    } as unknown as Pipeline,
+  };
+}
+
+function reviewDraftFixture(): SchemeGroup {
+  const stages = [
+    { id: "build", kind: "run", role: { roleId: "builder" }, prompt: "Build", next: "review", effectiveRole: { engine: "claude", model: "fable", effort: "high", access: "read-write", roleId: "builder", promptScaffold: null } },
+    { id: "review", kind: "review-loop", role: { roleId: "reviewer" }, prompt: "Review", next: null, effectiveRole: { engine: "claude", model: "fable", effort: "high", access: "read-only", roleId: "reviewer", promptScaffold: null } },
+  ];
+  return {
+    ...pipelineGroup,
+    pipeline: {
+      ...pipelineGroup.pipeline!,
+      state: "draft",
+      repoDir: "/repo",
+      stages,
+      runs: stages.map((stage) => ({ stageId: stage.id, attempts: [] })),
+      cursor: { stageId: "build", state: "pending" },
+    } as unknown as Pipeline,
+  };
+}
+
+test("canvas builder: an empty draft shows no cards, disables Start and add-review (#136)", () => {
+  const { host, root } = mount(<GroupOverridePanel group={emptyDraftFixture()} onClose={() => undefined} />);
+  expect(host.querySelectorAll("[data-stage-card]").length).toBe(0);
+  const start = Array.from(host.querySelectorAll("button")).find((b) => b.textContent?.includes("Start pipeline")) as HTMLButtonElement;
+  expect(start.disabled).toBe(true);
+  /* A review loop needs a preceding run, so it cannot be the first stage added. */
+  const addReview = Array.from(host.querySelectorAll("button")).find((b) => b.textContent?.includes("Add review loop")) as HTMLButtonElement;
+  expect(addReview.disabled).toBe(true);
+  const addRun = Array.from(host.querySelectorAll("button")).find((b) => b.textContent === "Add stage" || /Add stage/.test(b.textContent || "")) as HTMLButtonElement;
+  expect(addRun.disabled).toBe(false);
+  flushSync(() => root.unmount());
+  host.remove();
+});
+
+test("canvas builder: controls that would orphan a review loop are disabled, and a bad drop is a no-op (#136)", async () => {
+  const { host, root } = mount(<GroupOverridePanel group={reviewDraftFixture()} onClose={() => undefined} />);
+  const reviewCard = host.querySelector('[data-stage-card="review"]') as HTMLElement;
+  const buildCard = host.querySelector('[data-stage-card="build"]') as HTMLElement;
+  /* Moving the review loop above its only run would break the chain → disabled. */
+  const reviewUp = Array.from(reviewCard.querySelectorAll("button")).find((b) => b.getAttribute("aria-label") === "Move up") as HTMLButtonElement;
+  expect(reviewUp.disabled).toBe(true);
+  /* Removing the sole preceding run would orphan the review loop → disabled. */
+  const buildRemove = Array.from(buildCard.querySelectorAll("button")).find((b) => b.getAttribute("aria-label") === "Remove stage") as HTMLButtonElement;
+  expect(buildRemove.disabled).toBe(true);
+  /* Dragging the review card onto the run card (index 0) must not PATCH. */
+  flushSync(() => reviewCard.dispatchEvent(new dom.Event("dragstart", { bubbles: true }) as unknown as Event));
+  flushSync(() => buildCard.dispatchEvent(new dom.Event("drop", { bubbles: true }) as unknown as Event));
+  await Promise.resolve();
+  expect(calls.some((call) => (call.body as { action?: string })?.action === "reorder-stage")).toBe(false);
+  flushSync(() => root.unmount());
+  host.remove();
+});
+
+test("canvas builder: adding a review loop posts add-stage with the review-loop kind (#136)", async () => {
+  const { host, root } = mount(<GroupOverridePanel group={draftFixture()} onClose={() => undefined} />);
+  const add = Array.from(host.querySelectorAll("button")).find((b) => b.textContent?.includes("Add review loop")) as HTMLButtonElement;
+  expect(add).toBeTruthy();
+  flushSync(() => add.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event));
+  await Promise.resolve();
+  expect(calls.at(-1)?.body).toMatchObject({ action: "add-stage", index: 2, stage: { id: "stage-3", kind: "review-loop" } });
+  flushSync(() => root.unmount());
+  host.remove();
+});
+
+test("canvas builder: dragging a stage card onto another posts reorder-stage to that slot (#136)", async () => {
+  const { host, root } = mount(<GroupOverridePanel group={draftFixture()} onClose={() => undefined} />);
+  const planCard = host.querySelector('[data-stage-card="plan"]') as HTMLElement;
+  const buildCard = host.querySelector('[data-stage-card="build"]') as HTMLElement;
+  expect(planCard && buildCard).toBeTruthy();
+  /* Drag the first card (plan, index 0) and drop it on the second (build, index 1). */
+  flushSync(() => planCard.dispatchEvent(new dom.Event("dragstart", { bubbles: true }) as unknown as Event));
+  flushSync(() => buildCard.dispatchEvent(new dom.Event("drop", { bubbles: true }) as unknown as Event));
+  await Promise.resolve();
+  expect(calls.at(-1)?.body).toEqual({ action: "reorder-stage", stageId: "plan", toIndex: 1 });
+  flushSync(() => root.unmount());
+  host.remove();
+});
+
+test("canvas builder: the move-down button posts reorder-stage to the next slot (#136)", async () => {
+  const { host, root } = mount(<GroupOverridePanel group={draftFixture()} onClose={() => undefined} />);
+  const planCard = host.querySelector('[data-stage-card="plan"]') as HTMLElement;
+  const down = Array.from(planCard.querySelectorAll("button")).find((b) => b.getAttribute("aria-label") === "Move down") as HTMLButtonElement;
+  flushSync(() => down.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event));
+  await Promise.resolve();
+  expect(calls.at(-1)?.body).toEqual({ action: "reorder-stage", stageId: "plan", toIndex: 1 });
+  flushSync(() => root.unmount());
+  host.remove();
+});
+
+test("canvas builder: editing a stage card inline posts override-stage for that stage (#136)", async () => {
+  const { host, root } = mount(<GroupOverridePanel group={draftFixture()} onClose={() => undefined} />);
+  const planCard = host.querySelector('[data-stage-card="plan"]') as HTMLElement;
+  /* Change the plan card's role architect → builder. The override must be scoped
+     to this exact card's stage id, carrying only the changed role plus the
+     always-sent prompt — proving each card is its own StageForm editor. */
+  const roleSelect = Array.from(planCard.querySelectorAll("select")).find((select) =>
+    Array.from(select.options).some((option) => option.value === "builder"),
+  ) as HTMLSelectElement;
+  expect(roleSelect.value).toBe("architect");
+  flushSync(() => {
+    Object.getOwnPropertyDescriptor(dom.HTMLSelectElement.prototype, "value")!.set!.call(roleSelect, "builder");
+    roleSelect.dispatchEvent(new dom.Event("change", { bubbles: true }) as unknown as Event);
+  });
+  const apply = Array.from(planCard.querySelectorAll("button")).find((b) => b.textContent?.includes("Update stage")) as HTMLButtonElement;
+  flushSync(() => apply.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event));
+  await Promise.resolve();
+  const patch = calls.find((call) => call.url.includes("/api/pipelines/p1"));
+  expect(patch?.body).toEqual({ action: "override-stage", stageId: "plan", prompt: "Plan", role: { roleId: "builder" } });
+  flushSync(() => root.unmount());
+  host.remove();
+});
+
+test("canvas builder: Discard posts delete on the draft (#136)", async () => {
+  const { host, root } = mount(<GroupOverridePanel group={draftFixture()} onClose={() => undefined} />);
+  const discard = Array.from(host.querySelectorAll("button")).find((b) => b.textContent?.includes("Discard")) as HTMLButtonElement;
+  expect(discard).toBeTruthy();
+  flushSync(() => discard.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event));
+  await Promise.resolve();
+  expect(calls.at(-1)?.body).toEqual({ action: "delete" });
+  flushSync(() => root.unmount());
+  host.remove();
 });
 
 test("an unchanged stage override submits no stale runtime or role (issue #118 review F4)", async () => {

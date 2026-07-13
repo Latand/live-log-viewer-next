@@ -681,8 +681,14 @@ function normalizeStages(
   value: unknown,
   lookup?: PipelineRoleLookup | null,
   preservedStages?: ReadonlyMap<string, PipelineStage>,
+  /* Drafts assemble from zero on the canvas (#136), so their edit path accepts
+     0–4 stages; the run path (create-and-start) keeps the 2-stage floor. The
+     review-loop-needs-a-preceding-run and linear-chain rules apply either way. */
+  minStages = 2,
 ): { stages?: PipelineStage[]; error?: string } {
-  if (!Array.isArray(value) || value.length < 2 || value.length > 4) return { error: "pipelines require 2–4 stages" };
+  if (!Array.isArray(value) || value.length < minStages || value.length > 4) {
+    return { error: minStages === 0 ? "pipelines require at most 4 stages" : "pipelines require 2–4 stages" };
+  }
   const stages: PipelineStage[] = [];
   const ids = new Set<string>();
   let hasRun = false;
@@ -771,11 +777,13 @@ function replaceDraftStages(
 ): { error?: string } {
   const relinked = inputs.map((stage, index) => ({ ...stage, next: inputs[index + 1]?.id ?? null }));
   const preserved = new Map(pipeline.stages.map((stage) => [stage.id, stage]));
-  const normalized = normalizeStages(relinked, lookup, preserved);
+  /* Draft edits may empty the plan entirely (remove down to zero); the 2-stage
+     floor is enforced only at Start (#136). */
+  const normalized = normalizeStages(relinked, lookup, preserved, 0);
   if (!normalized.stages) return { error: normalized.error ?? "invalid stages" };
   pipeline.stages = normalized.stages;
   pipeline.runs = normalized.stages.map((stage) => ({ stageId: stage.id, attempts: [] }));
-  pipeline.cursor = { stageId: normalized.stages[0]!.id, state: "pending" };
+  pipeline.cursor = normalized.stages.length ? { stageId: normalized.stages[0]!.id, state: "pending" } : null;
   return {};
 }
 
@@ -794,7 +802,9 @@ export async function createPipelineFromRequest(
   if (!repoDir) return { error: "repoDir is required", status: 400 };
   const git = ports.exec("git", ["rev-parse", "--git-dir"], repoDir);
   if (git.code !== 0) return { error: `not a git repository: ${repoDir}`, status: 400 };
-  const normalized = normalizeStages(req.stages, ports.roleLookup);
+  /* A draft (autoStart:false) may be created empty and assembled on the canvas
+     (#136); an immediately-started pipeline still needs its full 2–4 stage plan. */
+  const normalized = normalizeStages(req.stages, ports.roleLookup, undefined, req.autoStart === false ? 0 : 2);
   if (!normalized.stages) return { error: normalized.error ?? "invalid stages", status: 400 };
   const srcPath = typeof req.src === "string" && req.src.trim() ? req.src.trim() : null;
   const pipeline = buildPipeline({
@@ -844,6 +854,10 @@ export async function patchPipeline(
 
     if (req.action === "start") {
       if (pipeline.state !== "draft") return { error: "pipeline is not a draft", status: 409 };
+      /* Start enforces the 2–4 stage floor (#136): a draft may hold zero stages
+         while it is assembled on the canvas, and it needs a full stage plan to run.
+         The review-loop-needs-a-preceding-run rule already held on every draft edit. */
+      if (pipeline.stages.length < 2) return { error: "add at least 2 stages before starting", status: 409 };
       pipeline.state = "provisioning";
       pipeline.stateDetail = null;
     } else if (req.action === "update-draft") {
@@ -878,7 +892,10 @@ export async function patchPipeline(
       if (replaced.error) return { error: replaced.error, status: 400 };
     } else if (req.action === "remove-stage") {
       if (pipeline.state !== "draft") return { error: "pipeline is not a draft", status: 409 };
-      if (pipeline.stages.length <= 2) return { error: "pipelines require at least 2 stages", status: 409 };
+      /* A draft can be emptied entirely on the canvas (#136); the 2-stage floor is
+         a Start-time gate. remove that would orphan a review-loop (drop its only
+         preceding run) is still rejected by replaceDraftStages' normalization. */
+      if (pipeline.stages.length === 0) return { error: "no stage to remove", status: 409 };
       const index = pipeline.stages.findIndex((stage) => stage.id === req.stageId);
       if (index < 0) return { error: "stage not found", status: 404 };
       const inputs = draftStageInputs(pipeline.stages);

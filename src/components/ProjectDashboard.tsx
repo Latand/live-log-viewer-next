@@ -20,7 +20,7 @@ import { clearDraftStorage, draftCwd, draftParentConversationId, draftSrc, repla
 import { planBoardConvergence, planClose } from "./projectBoardMutations";
 import { claimedReviewerDescendantPaths, foldClaimedReviewers, isActiveFlow } from "./flows/flowModel";
 import { PipelineDialog } from "./pipelines/PipelineDialog";
-import { pipelinesForProject } from "./pipelines/pipelineModel";
+import { createDraftPipeline, pipelinesForProject } from "./pipelines/pipelineModel";
 import { buildSchemeLayout } from "./scheme/layout";
 import { collapsibleWorkerFiles, groupWorkerStacks, pipelineOriginOf, pipelineStagePipelineIds, protectedReviewerNodes } from "./scheme/workerCollapse";
 import { WorkerStacks } from "./WorkerStacks";
@@ -312,6 +312,11 @@ export function ProjectDashboard({
   /* Place-on-map: the unplaced task whose next board click pins it. */
   const [placeTask, setPlaceTask] = useState<BoardTask | null>(null);
   const [pipelineDialogOpen, setPipelineDialogOpen] = useState(false);
+  /* The canvas builder (#136): the draft pipeline whose group panel auto-opens
+     right after `+ Пайплайн` drops it, so the operator lands in the builder with
+     no hunting for its chip. */
+  const [builderPipelineId, setBuilderPipelineId] = useState<string | null>(null);
+  const [draftBusy, setDraftBusy] = useState(false);
   const [highlight, setHighlight] = useState<string | null>(null);
   /* Jump targets the scheme would otherwise skip (a stalled root builds no
      automatic group; a stalled branch hides inside a mini stack) materialize
@@ -682,6 +687,19 @@ export function ProjectDashboard({
     else requireDraftCwdConfirmation(id, initialDraftCwd);
     persistDrafts([...drafts, id]);
     pendingFocusRef.current = "draft::" + id;
+  };
+
+  /* `+ Пайплайн` on the canvas (#136): drop an empty DRAFT group and open its
+     builder panel — no form. If the repo can't be resolved (or the POST fails),
+     fall back to the creation dialog so the operator can fix it there. */
+  const addPipelineDraft = async () => {
+    if (draftBusy) return;
+    onUserNavigate?.();
+    setDraftBusy(true);
+    const result = await createDraftPipeline(project);
+    setDraftBusy(false);
+    if (result.pipeline) setBuilderPipelineId(result.pipeline.id);
+    else setPipelineDialogOpen(true);
   };
 
   /* The handoff handle under a pane: a draft that continues this conversation
@@ -1134,6 +1152,8 @@ export function ProjectDashboard({
                 placeTaskId={placeTask?.id ?? null}
                 onTaskPlaced={() => setPlaceTask(null)}
                 newTaskNonce={newTaskNonce}
+                builderPipelineId={builderPipelineId}
+                onBuilderOpened={() => setBuilderPipelineId(null)}
               />
             ) : listAvailable ? (
               <ConversationList project={project} enabled={loaded && projectView === "list"} onOpen={openFullCatalogFile} />
@@ -1168,9 +1188,10 @@ export function ProjectDashboard({
               </button>
               <button
                 type="button"
-                onClick={() => setPipelineDialogOpen(true)}
-                aria-label={t("board.newPipeline")}
-                className="pointer-events-auto flex shrink-0 items-center gap-1 rounded-[8px] border border-line bg-panel px-3 py-1.5 text-[11.5px] font-bold text-ink shadow-card hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                onClick={() => void addPipelineDraft()}
+                disabled={draftBusy}
+                aria-label={t("pipelineBuilder.createDraftAria")}
+                className="pointer-events-auto flex shrink-0 items-center gap-1 rounded-[8px] border border-line bg-panel px-3 py-1.5 text-[11.5px] font-bold text-ink shadow-card hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-50"
               >
                 <span className="text-[13px] leading-none text-accent">+</span> {t("board.pipeline")}
               </button>

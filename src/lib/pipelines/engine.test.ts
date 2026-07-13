@@ -732,6 +732,72 @@ test("draft stages can be added, reordered, and removed while keeping a linear p
   expect(removed.pipeline?.runs.map((run) => run.stageId)).toEqual(["plan", "build"]);
 });
 
+test("an empty draft is created, assembled from zero, and cannot start until it has 2 stages (#136)", async () => {
+  const h = harness();
+  const { ports } = h;
+  savePipelines([]);
+  /* The canvas builder POSTs a stageless draft — no 2-stage minimum at creation. */
+  const created = await createPipelineFromRequest({ task: "Build on canvas", repoDir: "/repo", stages: [], autoStart: false }, ports);
+  expect(created.pipeline?.state).toBe("draft");
+  expect(created.pipeline?.stages).toEqual([]);
+  expect(created.pipeline?.cursor).toBeNull();
+  const id = created.pipeline!.id;
+
+  /* Start is refused while under two stages, on the draft, without side effects. */
+  const tooFew = await patchPipeline(id, { action: "start" }, ports);
+  expect(tooFew.status).toBe(409);
+  expect(loadPipelines()[0]!.state).toBe("draft");
+
+  const one = await patchPipeline(id, { action: "add-stage", stage: { id: "plan", kind: "run", role: { roleId: "builder" }, prompt: "Plan it", next: null } }, ports);
+  expect(one.pipeline?.stages.map((stage) => stage.id)).toEqual(["plan"]);
+  expect(one.pipeline?.cursor).toEqual({ stageId: "plan", state: "pending" });
+  expect((await patchPipeline(id, { action: "start" }, ports)).status).toBe(409);
+
+  await patchPipeline(id, { action: "add-stage", stage: { id: "build", kind: "run", role: { roleId: "builder" }, prompt: "Build it", next: null } }, ports);
+  const started = await patchPipeline(id, { action: "start" }, ports);
+  expect(started.pipeline?.state).toBe("provisioning");
+});
+
+test("a draft can be emptied stage by stage on the canvas (#136)", async () => {
+  const h = harness();
+  const { ports } = h;
+  savePipelines([]);
+  const created = await createPipelineFromRequest({ task: "Empty me", repoDir: "/repo", stages: RUN_STAGES as never, autoStart: false }, ports);
+  const id = created.pipeline!.id;
+  await patchPipeline(id, { action: "remove-stage", stageId: "build" }, ports);
+  const oneLeft = await patchPipeline(id, { action: "remove-stage", stageId: "plan" }, ports);
+  expect(oneLeft.pipeline?.stages).toEqual([]);
+  expect(oneLeft.pipeline?.cursor).toBeNull();
+  /* Removing from an already-empty draft returns a clean 409. */
+  expect((await patchPipeline(id, { action: "remove-stage", stageId: "plan" }, ports)).status).toBe(409);
+});
+
+test("draft edits that would orphan a review-loop are rejected (#136)", async () => {
+  const h = harness();
+  const { ports } = h;
+  savePipelines([]);
+  const created = await createPipelineFromRequest({
+    task: "Guard the chain",
+    repoDir: "/repo",
+    stages: [
+      { id: "build", kind: "run", role: { roleId: "builder" }, prompt: "Build", next: "review" },
+      { id: "review", kind: "review-loop", role: { roleId: "reviewer" }, prompt: "Review", next: null },
+    ] as never,
+    autoStart: false,
+  }, ports);
+  const id = created.pipeline!.id;
+  /* Moving the review loop ahead of its only run stage — the API must refuse. */
+  const reordered = await patchPipeline(id, { action: "reorder-stage", stageIds: ["review", "build"] }, ports);
+  expect(reordered.pipeline).toBeUndefined();
+  expect(reordered.status).toBe(400);
+  /* Removing the sole preceding run leaves a review loop with nothing to review. */
+  const removed = await patchPipeline(id, { action: "remove-stage", stageId: "build" }, ports);
+  expect(removed.pipeline).toBeUndefined();
+  expect(removed.status).toBe(400);
+  /* The draft survived both rejections unchanged. */
+  expect(loadPipelines()[0]!.stages.map((stage) => stage.id)).toEqual(["build", "review"]);
+});
+
 test("discarding a draft deletes its persisted record", async () => {
   const { ports } = harness();
   savePipelines([]);

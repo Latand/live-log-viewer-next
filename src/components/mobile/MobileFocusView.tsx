@@ -669,7 +669,7 @@ export function MobilePipelineDock({ pipeline }: { pipeline: Pipeline }) {
       {pipeline.state === "closed" ? null : (
         <div className="flex flex-wrap items-center gap-1.5">
           {draft ? (
-            <button type="button" className="inline-flex h-11 items-center gap-1 rounded-full border border-[#9a6410] bg-[#9a6410] px-3.5 text-[11px] font-bold text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#c88719]/50 disabled:opacity-40" disabled={busy} onClick={() => void mutate("start")}>
+            <button type="button" className="inline-flex h-11 items-center gap-1 rounded-full border border-[#9a6410] bg-[#9a6410] px-3.5 text-[11px] font-bold text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#c88719]/50 disabled:opacity-40" disabled={busy || pipeline.stages.length < 2} onClick={() => void mutate("start")}>
               <Play className="h-4 w-4" aria-hidden /> {t("pipelineStrip.start")}
             </button>
           ) : parked ? (
