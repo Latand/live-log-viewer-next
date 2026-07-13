@@ -48,6 +48,18 @@ export function transcriptEngine(pathname: string): AgentEngine | null {
   return null;
 }
 
+/** Returns the top-level Claude session that owns a direct subagent
+ * transcript. Claude writes the child through this session's process. */
+export function claudeSubagentOwnerPath(pathname: string, knownRoot?: string | null): string | null {
+  const root = knownRoot === undefined ? claudeProjectRootFor(pathname) : knownRoot;
+  if (!root) return null;
+  const relative = path.relative(root, pathname);
+  if (relative.startsWith("..") || path.isAbsolute(relative)) return null;
+  const parts = relative.split(path.sep);
+  if (parts.length !== 4 || parts[2] !== "subagents" || !pathname.endsWith(".jsonl")) return null;
+  return path.join(root, parts[0], `${parts[1]}.jsonl`);
+}
+
 /**
  * Subagent transcripts are written by their parent session's process; pointing
  * the composer at that pid would type into the parent REPL, so only top-level

@@ -37,7 +37,16 @@ mock.module("./process", () => ({
   },
 }));
 
-const { assignTranscriptPids } = await import("./transcripts");
+const { assignTranscriptPids, claudeSubagentOwnerPath } = await import("./transcripts");
+
+test("a Claude subagent resolves to the top-level session that owns its writer", () => {
+  const root = "/home/u/.claude/projects";
+  expect(claudeSubagentOwnerPath(
+    "/home/u/.claude/projects/project/session-1/subagents/agent-child.jsonl",
+    root,
+  )).toBe("/home/u/.claude/projects/project/session-1.jsonl");
+  expect(claudeSubagentOwnerPath("/home/u/.claude/projects/project/session-1.jsonl", root)).toBeNull();
+});
 
 function entry(pathname: string, overrides: Partial<FileEntry> = {}): FileEntry {
   return {

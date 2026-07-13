@@ -1,7 +1,8 @@
-import { catalogEntryToFileEntry, conversationCatalogReady, conversationCatalogSnapshot, loadConversationCatalogPage } from "@/lib/scanner/conversationCatalog";
+import { catalogEntryToFileEntry, conversationCatalogReady, conversationCatalogSnapshot, ExpiredConversationCatalogCursorError, loadConversationCatalogPage } from "@/lib/scanner/conversationCatalog";
+import { indexConversationCatalog } from "@/lib/scanner/conversationSearchIndex";
 import { searchTextForTranscript } from "@/lib/scanner/describe";
 import { refreshConversationCatalog } from "@/lib/scanner/discover";
-import { overlaySessionTitles } from "@/lib/session/titleProjection";
+import { overlaySessionProjects, overlaySessionTitles, overlaySessionTitlesYielding } from "@/lib/session/titleProjection";
 import { cleanTitle } from "@/lib/title";
 
 export const runtime = "nodejs";
@@ -32,20 +33,31 @@ export async function GET(request: Request): Promise<Response> {
     cursor: url.searchParams.get("cursor"),
     limit: pageLimit(url.searchParams.get("limit")),
   };
-  let page;
-  if (query) {
-    const indexed = source.map(hydrateSearchText);
-    const displayed = indexed.map(catalogEntryToFileEntry);
-    overlaySessionTitles(displayed);
-    const displayedByPath = new Map(displayed.map((entry) => [entry.path, entry]));
-    const projected = indexed.map((entry) => {
-      const display = displayedByPath.get(entry.path);
-      return display ? { ...entry, title: display.title, project: display.project } : entry;
-    });
-    page = await loadConversationCatalogPage(projected, options);
-  } else {
-    page = await loadConversationCatalogPage(source, options, undefined, hydrateSearchText);
-    overlaySessionTitles(page.items);
+  try {
+    let page;
+    if (query) {
+      const indexed = await indexConversationCatalog(source);
+      const displayed = indexed.map(catalogEntryToFileEntry);
+      await overlaySessionTitlesYielding(displayed);
+      const displayedByPath = new Map(displayed.map((entry) => [entry.path, entry]));
+      const projected = indexed.map((entry) => {
+        const display = displayedByPath.get(entry.path);
+        return display ? { ...entry, title: display.title, project: display.project } : entry;
+      });
+      page = await loadConversationCatalogPage(projected, options);
+    } else {
+      const projectEntries = source.map(catalogEntryToFileEntry);
+      overlaySessionProjects(projectEntries);
+      const projectByPath = new Map(projectEntries.map((entry) => [entry.path, entry.project]));
+      const projected = source.map((entry) => ({ ...entry, project: projectByPath.get(entry.path) ?? entry.project }));
+      page = await loadConversationCatalogPage(projected, options, undefined, hydrateSearchText);
+      overlaySessionTitles(page.items);
+    }
+    return Response.json(page);
+  } catch (error) {
+    if (error instanceof ExpiredConversationCatalogCursorError) {
+      return Response.json({ error: "conversation catalog cursor expired" }, { status: 409 });
+    }
+    throw error;
   }
-  return Response.json(page);
 }

@@ -148,6 +148,43 @@ test("search finds a capped-out conversation by its registry launch title", asyn
   })]);
 });
 
+test("an empty-query project list uses the registry launch project", async () => {
+  const transcript = path.join(sandbox, "launch-project.jsonl");
+  fs.writeFileSync(transcript, JSON.stringify({ type: "user", message: { content: "Launch project prompt" } }) + "\n");
+  const stat = fs.statSync(transcript);
+  replaceConversationCatalog([{
+    path: transcript,
+    root: "claude-projects",
+    name: "launch-project.jsonl",
+    project: "scanner-project",
+    title: "Scanner title",
+    firstPrompt: "",
+    engine: "claude",
+    kind: "session",
+    fmt: "claude",
+    mtime: stat.mtimeMs / 1000,
+    size: stat.size,
+  }]);
+  registry.reconcileConversations([{
+    engine: "claude",
+    path: transcript,
+    accountId: null,
+    launchProfile: emptyLaunchProfile({ cwd: sandbox, title: "Launch title", project: "launch-project" }),
+    turn: { state: "idle", source: "empty", terminalAt: null },
+    observedAt: "2026-07-13T00:00:00.000Z",
+  }]);
+
+  const response = await GET(new Request("http://127.0.0.1/api/conversations?project=launch-project"));
+  const body = await response.json() as { items: Array<{ path: string; title: string; project: string }> };
+
+  expect(response.status).toBe(200);
+  expect(body.items).toEqual([expect.objectContaining({
+    path: transcript,
+    title: "Launch title",
+    project: "launch-project",
+  })]);
+});
+
 test("a primitive JSON line in one transcript does not break global search", async () => {
   const malformed = path.join(sandbox, "primitive.jsonl");
   const target = path.join(sandbox, "search-target.jsonl");

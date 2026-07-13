@@ -46,13 +46,22 @@ export function ConversationList({
             <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> {t("common.loading")}
           </div>
         ) : null}
-        {catalog.error && !catalog.items.length ? (
-          <div className="min-h-32 pt-10 text-center text-[13px] font-semibold text-err">{t("list.failed")}</div>
+        {catalog.error ? (
+          <div className="flex min-h-32 flex-col items-center justify-center gap-2 text-center text-[13px] font-semibold text-err">
+            <span>{t("list.failed")}</span>
+            <button
+              type="button"
+              className="min-h-11 rounded-[8px] border border-line bg-panel px-4 font-bold text-ink hover:border-accent/40 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+              onClick={catalog.retry}
+            >
+              {t("list.retry")}
+            </button>
+          </div>
         ) : null}
         {!catalog.loading && !catalog.error && !catalog.items.length ? (
           <div className="min-h-32 pt-10 text-center text-[13px] font-semibold text-dim">{t("common.nothingFound")}</div>
         ) : null}
-        {catalog.nextCursor ? (
+        {catalog.nextCursor && !catalog.error ? (
           <button
             type="button"
             className="mt-3 flex min-h-11 w-full items-center justify-center rounded-[8px] border border-line bg-panel px-4 text-[12.5px] font-bold text-ink hover:border-accent/40 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60"

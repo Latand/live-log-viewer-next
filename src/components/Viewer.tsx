@@ -41,19 +41,21 @@ export function filesRequestPin(pendingHash: ConversationHash | null, retainedPa
   return pendingHash?.filePath ?? pendingHash?.conversationId ?? retainedPath;
 }
 
-export type CatalogPinState = { path: string; hydrated: boolean } | null;
+export type CatalogPinState = { path: string; hydrated: boolean; conversationId: string | null } | null;
 export type CatalogPinEvent =
-  | { kind: "open"; path: string }
-  | { kind: "resolve"; path: string }
+  | { kind: "open"; path: string; conversationId?: string }
+  | { kind: "resolve"; path: string; conversationId?: string }
   | { kind: "release"; path?: string }
-  | { kind: "files"; paths: ReadonlySet<string>; pending: boolean };
+  | { kind: "files"; paths: ReadonlySet<string>; pending: boolean; currentPath?: string };
 
 export function reduceCatalogPin(state: CatalogPinState, event: CatalogPinEvent): CatalogPinState {
-  if (event.kind === "open") return { path: event.path, hydrated: false };
-  if (event.kind === "resolve") return { path: event.path, hydrated: true };
+  if (event.kind === "open") return { path: event.path, hydrated: false, conversationId: event.conversationId ?? null };
+  if (event.kind === "resolve") return { path: event.path, hydrated: true, conversationId: event.conversationId ?? null };
   if (event.kind === "release") return !event.path || state?.path === event.path ? null : state;
-  if (state?.hydrated && !event.pending && !event.paths.has(state.path)) return null;
-  return state;
+  if (!state) return state;
+  const current = event.currentPath && event.currentPath !== state.path ? { ...state, path: event.currentPath } : state;
+  if (current.hydrated && !event.pending && !event.paths.has(current.path)) return null;
+  return current;
 }
 
 function initialProject(): string {
@@ -199,7 +201,7 @@ export function Viewer() {
   const openPinnedFile = useCallback((file: FileEntry, hydrated = false) => {
     const key = projectKey(file);
     queueColumnOpen(key, file.path, isChildConversation(file));
-    dispatchCatalogPin({ kind: hydrated ? "resolve" : "open", path: file.path });
+    dispatchCatalogPin({ kind: hydrated ? "resolve" : "open", path: file.path, conversationId: file.conversationId });
     setProject(key);
     localStorage.setItem(PROJECT_KEY, key);
     setDrawerOpen(false);
@@ -238,12 +240,21 @@ export function Viewer() {
   const releaseCatalogFile = useCallback((path: string) => {
     dispatchCatalogPin({ kind: "release", path });
     setFocusRequest((current) => current?.path === path ? null : current);
-  }, []);
+    if (catalogPin?.path === path) writeHash(project);
+  }, [catalogPin, project]);
 
   useEffect(() => {
-    if (!catalogPin?.hydrated || pendingHash || allFiles.some((file) => file.path === catalogPin.path)) return;
-    dispatchCatalogPin({ kind: "files", paths: new Set(allFiles.map((file) => file.path)), pending: false });
-  }, [catalogPin, pendingHash, allFiles]);
+    if (!catalogPin?.hydrated || pendingHash) return;
+    const currentPath = catalogPin.conversationId
+      ? files.find((file) => file.conversationId === catalogPin.conversationId)?.path
+      : undefined;
+    dispatchCatalogPin({
+      kind: "files",
+      paths: new Set(allFiles.map((file) => file.path)),
+      pending: false,
+      currentPath,
+    });
+  }, [catalogPin, pendingHash, allFiles, files]);
 
   /* The one queue every counter shows: badge, popover and the tab title all
      read the same list, stalled tail included (D10). The clock advances when

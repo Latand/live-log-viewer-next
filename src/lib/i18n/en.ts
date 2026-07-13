@@ -106,6 +106,7 @@ export const en = {
   "list.searchHint": "Searching every conversation stored across all projects.",
   "list.loadMore": "Load more conversations",
   "list.failed": "Could not load conversations",
+  "list.retry": "Retry",
 
   // Switchboard
   "switch.aria": "Agent switchboard",

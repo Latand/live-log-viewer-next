@@ -41,15 +41,30 @@ export interface ConversationCatalogQuery {
 }
 
 interface Cursor {
-  mtime: number;
-  path: string;
+  snapshot: number;
+  offset: number;
+}
+
+interface CatalogPaginationSnapshot {
+  items: ConversationCatalogEntry[];
+  total: number;
 }
 
 const DEFAULT_PAGE_SIZE = 40;
 const MAX_PAGE_SIZE = 100;
 const catalogStore = globalThis as typeof globalThis & {
   __llvConversationCatalog?: ConversationCatalogEntry[];
+  __llvConversationPagination?: Map<number, CatalogPaginationSnapshot>;
+  __llvConversationPaginationSequence?: number;
 };
+const MAX_PAGINATION_SNAPSHOTS = 64;
+
+export class ExpiredConversationCatalogCursorError extends Error {
+  constructor() {
+    super("conversation catalog cursor expired");
+    this.name = "ExpiredConversationCatalogCursorError";
+  }
+}
 
 export function replaceConversationCatalog(entries: ConversationCatalogEntry[]): void {
   catalogStore.__llvConversationCatalog = entries;
@@ -63,23 +78,32 @@ export function conversationCatalogReady(): boolean {
   return catalogStore.__llvConversationCatalog !== undefined;
 }
 
-function encodeCursor(entry: ConversationCatalogEntry): string {
-  return Buffer.from(JSON.stringify({ mtime: entry.mtime, path: entry.path } satisfies Cursor)).toString("base64url");
+function paginationSnapshots(): Map<number, CatalogPaginationSnapshot> {
+  return catalogStore.__llvConversationPagination ??= new Map();
+}
+
+function encodeCursor(cursor: Cursor): string {
+  return Buffer.from(JSON.stringify(cursor)).toString("base64url");
 }
 
 function decodeCursor(value: string | null | undefined): Cursor | null {
   if (!value) return null;
   try {
     const parsed = JSON.parse(Buffer.from(value, "base64url").toString("utf8")) as Partial<Cursor>;
-    if (typeof parsed.mtime !== "number" || !Number.isFinite(parsed.mtime) || typeof parsed.path !== "string") return null;
-    return { mtime: parsed.mtime, path: parsed.path };
+    if (!Number.isSafeInteger(parsed.snapshot) || !Number.isSafeInteger(parsed.offset) || parsed.offset! < 1) return null;
+    return { snapshot: parsed.snapshot!, offset: parsed.offset! };
   } catch {
     return null;
   }
 }
 
-function afterCursor(entry: ConversationCatalogEntry, cursor: Cursor): boolean {
-  return entry.mtime < cursor.mtime || (entry.mtime === cursor.mtime && entry.path > cursor.path);
+function rememberPagination(items: ConversationCatalogEntry[]): number {
+  const snapshots = paginationSnapshots();
+  const snapshot = (catalogStore.__llvConversationPaginationSequence ?? 0) + 1;
+  catalogStore.__llvConversationPaginationSequence = snapshot;
+  snapshots.set(snapshot, { items: [...items], total: items.length });
+  while (snapshots.size > MAX_PAGINATION_SNAPSHOTS) snapshots.delete(snapshots.keys().next().value!);
+  return snapshot;
 }
 
 function matchesQuery(entry: ConversationCatalogEntry, query: string): boolean {
@@ -101,17 +125,36 @@ export function paginateConversationCatalog(
 ): ConversationCatalogPage {
   const limit = Math.min(MAX_PAGE_SIZE, Math.max(1, Math.floor(options.limit ?? DEFAULT_PAGE_SIZE)));
   const cursor = decodeCursor(options.cursor);
-  const matching = catalog
-    .filter((entry) => !options.project || entry.project === options.project)
-    .filter((entry) => matchesQuery(entry, options.query ?? ""))
-    .sort((left, right) => right.mtime - left.mtime || left.path.localeCompare(right.path));
-  const page = (cursor ? matching.filter((entry) => afterCursor(entry, cursor)) : matching).slice(0, limit + 1);
-  const hasMore = page.length > limit;
-  const items = hasMore ? page.slice(0, limit) : page;
+  if (options.cursor && !cursor) throw new ExpiredConversationCatalogCursorError();
+  let snapshotId: number;
+  let offset: number;
+  let snapshot: CatalogPaginationSnapshot;
+  if (cursor) {
+    const remembered = paginationSnapshots().get(cursor.snapshot);
+    if (remembered) {
+      snapshotId = cursor.snapshot;
+      offset = cursor.offset;
+      snapshot = remembered;
+    } else {
+      throw new ExpiredConversationCatalogCursorError();
+    }
+  } else {
+    const matching = catalog
+      .filter((entry) => !options.project || entry.project === options.project)
+      .filter((entry) => matchesQuery(entry, options.query ?? ""))
+      .sort((left, right) => right.mtime - left.mtime || left.path.localeCompare(right.path));
+    snapshotId = rememberPagination(matching);
+    offset = 0;
+    snapshot = paginationSnapshots().get(snapshotId)!;
+  }
+  const items = snapshot.items.slice(offset, offset + limit);
+  const nextOffset = offset + items.length;
+  const hasMore = nextOffset < snapshot.total;
+  if (!hasMore) paginationSnapshots().delete(snapshotId);
   return {
     items,
-    nextCursor: hasMore && items.length ? encodeCursor(items.at(-1)!) : null,
-    total: matching.length,
+    nextCursor: hasMore ? encodeCursor({ snapshot: snapshotId, offset: nextOffset }) : null,
+    total: snapshot.total,
   };
 }
 
@@ -151,16 +194,17 @@ export async function loadConversationCatalogPage(
 ): Promise<ConversationListPage> {
   const page = paginateConversationCatalog(catalog, options);
   const items = await Promise.all(page.items.map(async (entry) => {
+    const hydrated = hydrateMetadata ? await hydrateMetadata(entry) : entry;
     try {
-      const hydrated = hydrateMetadata ? await hydrateMetadata(entry) : entry;
       const current = await statFile(hydrated.path);
       return catalogEntryToFileEntry({
         ...hydrated,
         mtime: current.mtimeMs / 1000,
         size: current.size,
       });
-    } catch {
-      return null;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+      throw error;
     }
   }));
   return {

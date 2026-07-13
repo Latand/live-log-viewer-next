@@ -190,10 +190,22 @@ export function Switchboard({ files, flows, project, loaded, onOpenFile, onOpenC
                       <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> {t("common.loading")}
                     </div>
                   ) : null}
-                  {!catalogSearch.loading && !catalogSearch.items.length ? (
+                  {catalogSearch.error ? (
+                    <div className="flex min-h-11 items-center justify-center gap-3 pt-4 text-[13px] font-semibold text-err">
+                      <span>{t("list.failed")}</span>
+                      <button
+                        type="button"
+                        className="min-h-11 rounded-[8px] border border-line bg-panel px-4 font-bold text-ink hover:border-accent/40 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                        onClick={catalogSearch.retry}
+                      >
+                        {t("list.retry")}
+                      </button>
+                    </div>
+                  ) : null}
+                  {!catalogSearch.loading && !catalogSearch.error && !catalogSearch.items.length ? (
                     <div className="pt-[18vh] text-center text-[13px] font-semibold text-dim">{t("common.nothingFound")}</div>
                   ) : null}
-                  {catalogSearch.nextCursor ? (
+                  {catalogSearch.nextCursor && !catalogSearch.error ? (
                     <button
                       type="button"
                       className="mt-3 flex min-h-11 w-full items-center justify-center rounded-[8px] border border-line bg-panel px-4 text-[12.5px] font-bold text-ink hover:border-accent/40 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60"

@@ -101,6 +101,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "list.searchHint": "Пошук у всіх розмовах на диску в усіх проєктах.",
   "list.loadMore": "Завантажити більше розмов",
   "list.failed": "Не вдалося завантажити розмови",
+  "list.retry": "Повторити",
 
   "switch.aria": "Пульт агентів",
   "switch.title": "Пульт",

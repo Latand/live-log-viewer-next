@@ -6,11 +6,19 @@ import { NextRequest, NextResponse } from "next/server";
 import { readTailChunk } from "@/lib/logRead";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
 import { listFiles } from "@/lib/scanner";
+import { ownerTranscriptMayExist, transcriptDeletionBlocker, type DeletionSafetyDependencies } from "@/lib/scanner/deleteSafety";
 import { claudeProjectRootFor, MAX_CHUNK, pathAllowed, scanRootEntries } from "@/lib/scanner/roots";
+import { claudeSubagentOwnerPath } from "@/lib/scanner/transcripts";
 import type { ApiError, LogChunk } from "@/lib/types";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+
+const deletionSafetyDependencies: DeletionSafetyDependencies = {
+  list: (pin) => listFiles({ pin }),
+  ownerPath: (target) => claudeSubagentOwnerPath(target),
+  ownerExists: (ownerPath) => ownerTranscriptMayExist(ownerPath, fs.stat),
+};
 
 /**
  * Chunked log reads. Two modes:
@@ -118,10 +126,8 @@ export async function DELETE(req: NextRequest): Promise<NextResponse<{ ok: true 
   if (!target || !stat?.isFile() || !pathAllowed(target)) {
     return NextResponse.json({ error: "path not allowed" }, { status: 403 });
   }
-  const entry = (await listFiles({ pin: target })).find((item) => item.path === target);
-  if (entry?.proc === "running") {
-    return NextResponse.json({ error: "agent is still running — stop the process first" }, { status: 409 });
-  }
+  const blocker = await transcriptDeletionBlocker(target, deletionSafetyDependencies);
+  if (blocker) return NextResponse.json({ error: blocker }, { status: 409 });
   try {
     await fs.unlink(target);
   } catch (error) {
