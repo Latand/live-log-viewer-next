@@ -25,6 +25,7 @@ import { SessionTitle } from "./session/SessionTitle";
 import { ProcessStatusControls } from "./TaskHeader";
 import { TmuxComposer } from "./TmuxComposer";
 import { RateLimitBadge } from "./RateLimitBadge";
+import { WakeupChip, wakeupChipKey } from "./WakeupChip";
 import { activityDot, cleanTitle, effortTint, effortTitle, engineBadge, engineEdge, fmtAge } from "./utils";
 
 const noop = () => undefined;
@@ -323,6 +324,9 @@ export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noCompose
                 </>
               )}
               <RateLimitBadge rateLimit={file.rateLimit} />
+              {/* Scheduled-wakeup chip (#165): a pending self-wake shows on every
+                  surface, phone included, since it is actionable status. */}
+              <WakeupChip key={wakeupChipKey(file.pendingWakeup)} wakeup={file.pendingWakeup} />
               {file.parentRemoved ? <ParentRemovedChip /> : null}
               {/* Desktop keeps ctx inline here; on mobile it is pinned ahead of
                   this scroller. */}

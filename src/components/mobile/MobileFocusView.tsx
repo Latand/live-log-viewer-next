@@ -605,6 +605,7 @@ function PipelineFocusRow({ pipeline, index, renderableFlows, renderablePaths, o
 
 /** Pipeline state → the header dot tone (busy accent, attention amber, done ok). */
 function pipelineDotColor(pipeline: Pipeline): string {
+  if (pipeline.state === "draft") return "#a06a15";
   if (PIPELINE_BUSY_STATES.has(pipeline.state)) return "#5a51e0";
   if (PIPELINE_ATTENTION_STATES.has(pipeline.state)) return "#e0ae45";
   if (pipeline.state === "completed") return "#1a8a3e";
@@ -633,13 +634,15 @@ export function MobilePipelineDock({ pipeline }: { pipeline: Pipeline }) {
     if (fail) setError(fail);
     setBusy(false);
   };
+  const draft = pipeline.state === "draft";
   const finished = pipeline.state === "completed" || pipeline.state === "closed";
   const parked = pipeline.state === "needs_decision";
   return (
-    <div className="flex flex-col gap-2 px-3 py-2" data-testid="mobile-pipeline-dock" role="group" aria-label={t("pipelineMobile.chipAria", { task: pipeline.task })}>
+    <div className={`flex flex-col gap-2 px-3 py-2 ${draft ? "border-y border-dashed border-[#c88719]/70 bg-[#fff9ea]" : ""}`} data-testid="mobile-pipeline-dock" data-pipeline-draft={draft || undefined} role="group" aria-label={t("pipelineMobile.chipAria", { task: pipeline.task })}>
       <div className="flex items-center gap-2">
         <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: pipelineDotColor(pipeline) }} aria-hidden />
         <span className="min-w-0 flex-1 truncate text-[12.5px] font-bold text-ink">{cleanTitle(pipeline.task, 60)}</span>
+        {draft ? <span className="shrink-0 rounded-full border border-dashed border-[#c88719] bg-[#fff1c9] px-2 py-0.5 text-[9px] font-black tracking-[0.08em] text-[#8a5700]">{t("pipelineStrip.draftBadge")}</span> : null}
         <span className="shrink-0 text-[11px] font-semibold text-dim">{pipelineStateLabel(t, pipeline.state)}</span>
       </div>
       {/* The whole planned stage graph, scrolled horizontally — past/current/ghost. */}
@@ -665,13 +668,17 @@ export function MobilePipelineDock({ pipeline }: { pipeline: Pipeline }) {
           PipelineStrip). Fixes the completed-pipeline dead end (review round 4). */}
       {pipeline.state === "closed" ? null : (
         <div className="flex flex-wrap items-center gap-1.5">
-          {parked ? (
+          {draft ? (
+            <button type="button" className="inline-flex h-11 items-center gap-1 rounded-full border border-[#9a6410] bg-[#9a6410] px-3.5 text-[11px] font-bold text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#c88719]/50 disabled:opacity-40" disabled={busy} onClick={() => void mutate("start")}>
+              <Play className="h-4 w-4" aria-hidden /> {t("pipelineStrip.start")}
+            </button>
+          ) : parked ? (
             <>
               <button type="button" className="inline-flex h-11 items-center rounded-full border border-accent bg-accent px-3.5 text-[11px] font-bold text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40" disabled={busy} onClick={() => void mutate("retry-stage")}>{t("pipelineStrip.retryStage")}</button>
               <button type="button" className="inline-flex h-11 items-center rounded-full border border-line bg-bg px-3.5 text-[11px] font-bold text-dim focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40" disabled={busy} onClick={() => void mutate("skip-stage")}>{t("pipelineStrip.skipStage")}</button>
             </>
           ) : null}
-          {finished ? null : pipeline.state === "paused" ? (
+          {draft || finished ? null : pipeline.state === "paused" ? (
             <button type="button" className="inline-flex h-11 items-center gap-1 rounded-full border border-ok/40 bg-[#eef8f0] px-3.5 text-[11px] font-bold text-ok focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40" disabled={busy} aria-label={t("pipelineStrip.resume")} onClick={() => void mutate("resume")}>
               <Play className="h-4 w-4" aria-hidden /> {t("pipelineStrip.resume")}
             </button>
@@ -680,8 +687,8 @@ export function MobilePipelineDock({ pipeline }: { pipeline: Pipeline }) {
               <Pause className="h-4 w-4" aria-hidden /> {t("pipelineStrip.pause")}
             </button>
           )}
-          <button type="button" className="inline-flex h-11 items-center gap-1 rounded-full border border-line bg-bg px-3.5 text-[11px] font-bold text-dim hover:text-err focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40" disabled={busy} aria-label={t("pipelineStrip.close")} onClick={() => void mutate("close")}>
-            <X className="h-4 w-4" aria-hidden /> {t("pipelineStrip.close")}
+          <button type="button" className="inline-flex h-11 items-center gap-1 rounded-full border border-line bg-bg px-3.5 text-[11px] font-bold text-dim hover:text-err focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40" disabled={busy} aria-label={t(draft ? "pipelineStrip.discard" : "pipelineStrip.close")} onClick={() => void mutate(draft ? "delete" : "close")}>
+            <X className="h-4 w-4" aria-hidden /> {t(draft ? "pipelineStrip.discard" : "pipelineStrip.close")}
           </button>
         </div>
       )}

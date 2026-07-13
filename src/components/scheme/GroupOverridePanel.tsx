@@ -1,6 +1,6 @@
 "use client";
 
-import { Pause, Play, RefreshCw, Square, X } from "lucide-react";
+import { ArrowDown, ArrowUp, Pause, Play, Plus, RefreshCw, Square, Trash2, X } from "lucide-react";
 import { useMemo, useState } from "react";
 
 import { ENGINE_EFFORTS } from "@/lib/agent/efforts";
@@ -53,7 +53,7 @@ export function GroupOverridePanel({ group, onClose }: { group: SchemeGroup; onC
       data-group-override={group.kind}
       role="dialog"
       aria-label={group.label}
-      className="flex w-[268px] flex-col gap-2 rounded-[12px] border border-line bg-panel p-3 shadow-[0_10px_36px_rgb(20_20_30/0.18)]"
+      className={`flex flex-col gap-2 rounded-[12px] border border-line bg-panel p-3 shadow-[0_10px_36px_rgb(20_20_30/0.18)] ${group.pipeline?.state === "draft" ? "w-[320px]" : "w-[268px]"}`}
     >
       {group.flow ? <FlowOverride group={group} onClose={onClose} /> : null}
       {group.pipeline ? <PipelineOverride group={group} onClose={onClose} /> : null}
@@ -393,6 +393,7 @@ function StageForm({
 function PipelineOverride({ group, onClose }: { group: SchemeGroup; onClose: () => void }) {
   const { t } = useLocale();
   const pipeline = group.pipeline!;
+  const draft = pipeline.state === "draft";
   /* Only stages that have not run yet can be re-configured — the engine snapshots
      a stage's config the moment its first attempt starts. */
   const editable = useMemo(
@@ -404,6 +405,9 @@ function PipelineOverride({ group, onClose }: { group: SchemeGroup; onClose: () 
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState<string | null>(null);
+  const [task, setTask] = useState(pipeline.task);
+  const [spec, setSpec] = useState(pipeline.spec ?? "");
+  const [repoDir, setRepoDir] = useState(pipeline.repoDir);
 
   const closed = pipeline.state === "completed" || pipeline.state === "closed";
   const parked = pipeline.state === "needs_decision";
@@ -421,14 +425,38 @@ function PipelineOverride({ group, onClose }: { group: SchemeGroup; onClose: () 
 
   return (
     <>
-      <PanelHeader title={t("groupOverride.pipelineTitle", { name: group.label })} onClose={onClose} />
+      <PanelHeader title={t(draft ? "groupOverride.draftTitle" : "groupOverride.pipelineTitle", { name: group.label })} onClose={onClose} />
       {error ? <span className="truncate text-[10.5px] font-semibold text-err" title={error}>{error}</span> : null}
       {saved ? <span className="truncate text-[10.5px] font-semibold text-ok">{saved}</span> : null}
+
+      {draft ? (
+        <div className="flex flex-col gap-1.5 rounded-[9px] border border-dashed border-[#c88719]/60 bg-[#fff9ea] p-2">
+          <label className="flex flex-col gap-1">
+            <span className={fieldLabel}>{t("groupOverride.task")}</span>
+            <input className={inputBase} value={task} onChange={(event) => setTask(event.target.value)} />
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className={fieldLabel}>{t("groupOverride.spec")}</span>
+            <textarea className="min-h-[52px] w-full resize-y rounded-[8px] border border-line bg-bg px-2 py-1.5 text-[11.5px] font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#c88719]/40" value={spec} onChange={(event) => setSpec(event.target.value)} />
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className={fieldLabel}>{t("groupOverride.repoDir")}</span>
+            <input className={inputBase} value={repoDir} onChange={(event) => setRepoDir(event.target.value)} />
+          </label>
+          <button
+            className={primaryBtn}
+            disabled={busy || !task.trim() || !repoDir.trim()}
+            onClick={() => void run(t("groupOverride.savedDraft"), () => patchPipeline(pipeline.id, "update-draft", { task, spec, repoDir }))}
+          >
+            {t("groupOverride.saveDraft")}
+          </button>
+        </div>
+      ) : null}
 
       {stage ? (
         <>
           <label className="flex flex-col gap-1">
-            <span className={fieldLabel}>{t("groupOverride.nextStage")}</span>
+            <span className={fieldLabel}>{t(draft ? "groupOverride.draftStage" : "groupOverride.nextStage")}</span>
             <select className={inputBase} value={stage.id} onChange={(event) => setStageId(event.target.value)}>
               {editable.map((item) => (
                 <option key={item.id} value={item.id}>
@@ -437,6 +465,46 @@ function PipelineOverride({ group, onClose }: { group: SchemeGroup; onClose: () 
               ))}
             </select>
           </label>
+          {draft ? (
+            <div className="grid grid-cols-2 gap-1.5">
+              <button
+                className={ghostBtn}
+                disabled={busy || pipeline.stages.findIndex((item) => item.id === stage.id) === 0}
+                onClick={() => void run(t("groupOverride.moveStageUp"), () => patchPipeline(pipeline.id, "reorder-stage", { stageId: stage.id, toIndex: pipeline.stages.findIndex((item) => item.id === stage.id) - 1 }))}
+              >
+                <ArrowUp className="h-3 w-3" aria-hidden /> {t("groupOverride.moveStageUp")}
+              </button>
+              <button
+                className={ghostBtn}
+                disabled={busy || pipeline.stages.findIndex((item) => item.id === stage.id) === pipeline.stages.length - 1}
+                onClick={() => void run(t("groupOverride.moveStageDown"), () => patchPipeline(pipeline.id, "reorder-stage", { stageId: stage.id, toIndex: pipeline.stages.findIndex((item) => item.id === stage.id) + 1 }))}
+              >
+                <ArrowDown className="h-3 w-3" aria-hidden /> {t("groupOverride.moveStageDown")}
+              </button>
+              <button
+                className={ghostBtn}
+                disabled={busy || pipeline.stages.length >= 4}
+                onClick={() => {
+                  const ids = new Set(pipeline.stages.map((item) => item.id));
+                  let n = pipeline.stages.length + 1;
+                  while (ids.has(`stage-${n}`)) n += 1;
+                  void run(t("groupOverride.addStage"), () => patchPipeline(pipeline.id, "add-stage", {
+                    index: pipeline.stages.length,
+                    stage: { id: `stage-${n}`, kind: "run", prompt: pipeline.task, next: null },
+                  }));
+                }}
+              >
+                <Plus className="h-3 w-3" aria-hidden /> {t("groupOverride.addStage")}
+              </button>
+              <button
+                className={ghostBtn}
+                disabled={busy || pipeline.stages.length <= 2}
+                onClick={() => void run(t("groupOverride.removeStage"), () => patchPipeline(pipeline.id, "remove-stage", { stageId: stage.id }))}
+              >
+                <Trash2 className="h-3 w-3" aria-hidden /> {t("groupOverride.removeStage")}
+              </button>
+            </div>
+          ) : null}
           {/* Keyed on the stage id so switching stages remounts the form with the
               picked stage's config — no reset-in-effect. */}
           {/* Key on the effective role/runtime + prompt, not just the id, so once
@@ -475,7 +543,15 @@ function PipelineOverride({ group, onClose }: { group: SchemeGroup; onClose: () 
       ) : null}
 
       <div className="flex items-center gap-1.5">
-        {closed ? null : pipeline.state === "paused" ? (
+        {draft ? (
+          <button
+            className="inline-flex min-h-11 flex-1 items-center justify-center gap-1 rounded-full border border-[#9a6410] bg-[#9a6410] px-3 text-[11px] font-bold text-white hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#c88719]/50 disabled:opacity-40"
+            disabled={busy}
+            onClick={() => void run(t("pipelineStrip.start"), () => patchPipeline(pipeline.id, "start"))}
+          >
+            <Play className="h-3.5 w-3.5" aria-hidden /> {t("pipelineStrip.start")}
+          </button>
+        ) : closed ? null : pipeline.state === "paused" ? (
           <button
             className="inline-flex flex-1 items-center justify-center gap-1 rounded-full border border-ok/40 bg-[#eef8f0] px-3 py-1 text-[11px] font-bold text-ok hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40"
             disabled={busy}
@@ -495,9 +571,9 @@ function PipelineOverride({ group, onClose }: { group: SchemeGroup; onClose: () 
         <button
           className="inline-flex flex-1 items-center justify-center gap-1 rounded-full border border-line bg-bg px-3 py-1 text-[11px] font-bold text-dim hover:text-err focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40"
           disabled={busy}
-          onClick={() => void run(t("pipelineStrip.close"), () => patchPipeline(pipeline.id, "close"))}
+          onClick={() => void run(t(draft ? "pipelineStrip.discard" : "pipelineStrip.close"), () => patchPipeline(pipeline.id, draft ? "delete" : "close"))}
         >
-          <X className="h-3 w-3" aria-hidden /> {t("pipelineStrip.close")}
+          <X className="h-3 w-3" aria-hidden /> {t(draft ? "pipelineStrip.discard" : "pipelineStrip.close")}
         </button>
       </div>
     </>

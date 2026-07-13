@@ -188,6 +188,35 @@ const pipelineGroup: SchemeGroup = {
   } as unknown as Pipeline,
 };
 
+test("draft plan controls send additive stage and Start actions", async () => {
+  const draftGroup: SchemeGroup = {
+    ...pipelineGroup,
+    pipeline: {
+      ...pipelineGroup.pipeline!,
+      state: "draft",
+      repoDir: "/repo",
+      runs: pipelineGroup.pipeline!.stages.map((stage) => ({ stageId: stage.id, attempts: [] })),
+    } as Pipeline,
+  };
+  const addMount = mount(<GroupOverridePanel group={draftGroup} onClose={() => undefined} />);
+
+  const add = Array.from(addMount.host.querySelectorAll("button")).find((button) => button.textContent?.includes("Add stage")) as HTMLButtonElement;
+  flushSync(() => add.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event));
+  await Promise.resolve();
+  expect(calls.at(-1)?.body).toMatchObject({ action: "add-stage", index: 2, stage: { id: "stage-3", kind: "run" } });
+  flushSync(() => addMount.root.unmount());
+  addMount.host.remove();
+
+  const startMount = mount(<GroupOverridePanel group={draftGroup} onClose={() => undefined} />);
+  const start = Array.from(startMount.host.querySelectorAll("button")).find((button) => button.textContent?.includes("Start pipeline")) as HTMLButtonElement;
+  flushSync(() => start.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event));
+  await Promise.resolve();
+  expect(calls.at(-1)?.body).toEqual({ action: "start" });
+
+  flushSync(() => startMount.root.unmount());
+  startMount.host.remove();
+});
+
 test("an unchanged stage override submits no stale runtime or role (issue #118 review F4)", async () => {
   const { host, root } = mount(<GroupOverridePanel group={pipelineGroup} onClose={() => undefined} />);
   /* The role select (the one offering "No role") seeds from the stage's role. */
