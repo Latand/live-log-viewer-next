@@ -110,28 +110,11 @@ function patchFilesData(previous: FilesData, incoming: FilesData): FilesData {
   };
 }
 
-/** Apply the membership change represented by a scoped 304 while retaining
-    fresher shared data already learned through another request scope. */
+/** Restore the exact URL-specific representation certified by a strong ETag.
+    Structural patching keeps unchanged row identities without carrying rows
+    that only appeared in another request scope. */
 function restoreNotModified(current: FilesData, representation: FilesData, requestScope: string): FilesData {
-  if (!current.loaded) return representation;
-  const previousOverlay = new Set(current.pinOverlayPaths);
-  let files = current.files.filter((file) => !previousOverlay.has(file.path));
-  const retainedPaths = new Set(files.map((file) => file.path));
-  const representedPaths = new Set(representation.files.map((file) => file.path));
-  for (const file of current.files) {
-    if (!previousOverlay.has(file.path) || !representedPaths.has(file.path) || retainedPaths.has(file.path)) continue;
-    files = [...files, file];
-    retainedPaths.add(file.path);
-  }
-  for (const overlayPath of representation.pinOverlayPaths) {
-    if (retainedPaths.has(overlayPath)) continue;
-    const overlay = representation.files.find((file) => file.path === overlayPath);
-    if (overlay) {
-      files = [...files, overlay];
-      retainedPaths.add(overlayPath);
-    }
-  }
-  return { ...current, files, pinOverlayPaths: representation.pinOverlayPaths, requestScope };
+  return patchFilesData(current, { ...representation, requestScope });
 }
 
 /** Session-wide stale-while-revalidate cache over the global scan snapshot. */
@@ -140,6 +123,7 @@ export function createFilesClientCache(fetcher: FilesFetcher): FilesClientCache 
   const representations = new Map<string, { data: FilesData; etag?: string }>();
   let requestedGeneration = 0;
   let appliedGeneration = 0;
+  let requestQueue: Promise<void> = Promise.resolve();
 
   const rememberRepresentation = (url: string, data: FilesData, etag?: string) => {
     representations.delete(url);
@@ -176,10 +160,13 @@ export function createFilesClientCache(fetcher: FilesFetcher): FilesClientCache 
     return snapshot;
   };
 
-  return {
-    read: () => snapshot,
-    revalidate: performRevalidate,
+  const revalidate = (pinnedPath?: string | null, revision?: number): Promise<FilesData> => {
+    const result = requestQueue.then(() => performRevalidate(pinnedPath, revision));
+    requestQueue = result.then(() => undefined, () => undefined);
+    return result;
   };
+
+  return { read: () => snapshot, revalidate };
 }
 
 const defaultFilesFetcher: FilesFetcher = (input, init) => fetch(input, init);

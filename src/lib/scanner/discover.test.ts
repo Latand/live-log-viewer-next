@@ -54,19 +54,26 @@ test("project catalog carries the canonical root for projects outside the capped
     await Promise.all(Object.values(roots).map((root) => mkdir(root, { recursive: true })));
     const repo = path.join(base, "catalog-project");
     const cwd = path.join(repo, ".worktrees", "issue-173");
+    const targetPath = path.join(roots["codex-sessions"], "catalog-project.jsonl");
     await writeFixture(
-      path.join(roots["codex-sessions"], "catalog-project.jsonl"),
+      targetPath,
       JSON.stringify({ type: "session_meta", payload: { cwd } }) + "\n",
       1_700_000_000,
     );
+    await Promise.all(Array.from({ length: DEFAULT_SCHEME_CARDS_PER_PROJECT }, (_, index) => writeFixture(
+      path.join(roots["codex-sessions"], `newer-${index}.jsonl`),
+      JSON.stringify({ type: "session_meta", payload: { cwd: repo } }) + "\n",
+      1_700_000_001 + index,
+    )));
 
     const scan = await discoverFilesWithProjectCatalog(roots, undefined, { persist: false });
 
+    expect(scan.files.some((file) => file.path === targetPath)).toBe(false);
     expect(scan.projectCatalog).toEqual([{
       project: projectForCwd(repo)!,
       projectRoot: repo,
-      smt: 1_700_000_000,
-      conversations: 1,
+      smt: 1_700_000_000 + DEFAULT_SCHEME_CARDS_PER_PROJECT,
+      conversations: DEFAULT_SCHEME_CARDS_PER_PROJECT + 1,
     }]);
   } finally {
     if (previousStateDir === undefined) delete process.env.LLV_STATE_DIR;

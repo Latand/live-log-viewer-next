@@ -45,6 +45,38 @@ test("global client cache serves stale rows while revalidation patches changed f
   expect(second.files[1]).not.toBe(first.files[1]);
 });
 
+test("an ordinary hydration waits for an in-flight forced revision refresh", async () => {
+  let calls = 0;
+  let forcedResolved = false;
+  let releaseForced!: () => void;
+  const forcedGate = new Promise<void>((resolve) => { releaseForced = resolve; });
+  const cache = createFilesClientCache(async () => {
+    calls += 1;
+    if (calls === 1) {
+      return new Response(JSON.stringify({ files: [file("/initial", "Initial")] }));
+    }
+    if (calls === 2) {
+      await forcedGate;
+      forcedResolved = true;
+      return new Response(JSON.stringify({ files: [file("/fresh", "Fresh")] }));
+    }
+    const path = forcedResolved ? "/fresh" : "/stale";
+    return new Response(JSON.stringify({ files: [file(path, path)] }));
+  });
+
+  await cache.revalidate();
+  const forced = cache.revalidate(undefined, 17);
+  const ordinary = cache.revalidate();
+  await Promise.resolve();
+  await Promise.resolve();
+  expect(calls).toBe(2);
+
+  releaseForced();
+  await Promise.all([forced, ordinary]);
+  expect(calls).toBe(3);
+  expect(cache.read().files.map((entry) => entry.path)).toEqual(["/fresh"]);
+});
+
 test("URL-specific 304 responses restore the matching cached representation", async () => {
   const cache = createFilesClientCache(async (input, init) => {
     const headers = new Headers(init?.headers);
@@ -73,7 +105,7 @@ test("URL-specific 304 responses restore the matching cached representation", as
   expect(cache.read()).toBe(restored);
 });
 
-test("a global 304 keeps fresher shared rows learned by a pinned refresh", async () => {
+test("a global 304 restores its exact cached membership and values", async () => {
   let globalRequests = 0;
   const cache = createFilesClientCache(async (input, init) => {
     if (input === "/api/files") {
@@ -82,22 +114,30 @@ test("a global 304 keeps fresher shared rows learned by a pinned refresh", async
         expect(new Headers(init?.headers).get("If-None-Match")).toBe('"global-1"');
         return new Response(null, { status: 304 });
       }
-      return new Response(JSON.stringify({ files: [file("/global", "Global 1")] }), {
+      return new Response(JSON.stringify({
+        files: [file("/global", "Global 1"), file("/restored", "Restored")],
+        flows: [{ id: "flow-restored" }],
+        tasks: [{ id: "task-restored" }],
+      }), {
         headers: { ETag: '"global-1"' },
       });
     }
     return new Response(JSON.stringify({
-      files: [file("/global", "Global 2"), file("/new", "New shared row"), file("/archive/pinned", "Pinned")],
+      files: [file("/global", "Global 2"), file("/removed", "Removed"), file("/archive/pinned", "Pinned")],
       pinOverlayPaths: ["/archive/pinned"],
+      flows: [{ id: "flow-removed" }],
+      tasks: [{ id: "task-removed" }],
     }), { headers: { ETag: '"pinned-2"' } });
   });
 
   await cache.revalidate();
   const pinned = await cache.revalidate("/archive/pinned");
-  expect(pinned.files.map((entry) => entry.title)).toEqual(["Global 2", "New shared row", "Pinned"]);
+  expect(pinned.files.map((entry) => entry.title)).toEqual(["Global 2", "Removed", "Pinned"]);
 
   const restored = await cache.revalidate();
-  expect(restored.files.map((entry) => entry.title)).toEqual(["Global 2", "New shared row"]);
+  expect(restored.files.map((entry) => entry.title)).toEqual(["Global 1", "Restored"]);
+  expect(restored.flows.map((flow) => flow.id)).toEqual(["flow-restored"]);
+  expect(restored.tasks.map((task) => task.id)).toEqual(["task-restored"]);
   expect(restored.requestScope).toBe("/api/files");
 });
 
@@ -136,7 +176,7 @@ test("releasing a migrated deep-link pin removes every pin-only closure row on a
   expect(released.requestScope).toBe("/api/files");
 });
 
-test("a global 304 retains an ordinary lineage row that a pinned response also marked as overlay", async () => {
+test("a global 304 restores an ordinary lineage row from its cached representation", async () => {
   const globalChild = "/sessions/global-child.jsonl";
   const pinnedChild = "/archive/pinned-child.jsonl";
   const sharedParent = "/sessions/shared-parent.jsonl";
@@ -164,7 +204,7 @@ test("a global 304 retains an ordinary lineage row that a pinned response also m
   const released = await cache.revalidate();
 
   expect(released.files.map((entry) => entry.path)).toEqual([globalChild, sharedParent]);
-  expect(released.files.find((entry) => entry.path === sharedParent)?.title).toBe("Shared parent fresh");
+  expect(released.files.find((entry) => entry.path === sharedParent)?.title).toBe("Shared parent");
 });
 
 test("an out-of-cap #f target keeps its pinned representation through background revalidation", async () => {

@@ -158,7 +158,7 @@ test("a delayed ordinary refresh cannot overwrite a newer revision hydration", a
   expect(host.textContent).toBe("/sessions/initial.jsonl");
 
   window.dispatchEvent(new dom.Event(FLOWS_CHANGED_EVENT) as unknown as Event);
-  await Promise.resolve();
+  await Bun.sleep(10);
   expect(calls).toBe(2);
   revisionListener?.(8);
   await Bun.sleep(450);

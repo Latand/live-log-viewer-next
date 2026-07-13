@@ -4,6 +4,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { flushSync } from "react-dom";
 
 import { emptyStore } from "@/components/runtime/runtimeModel";
+import type { BoardTask } from "@/lib/tasks/types";
 import type { FileEntry } from "@/lib/types";
 
 /* A mounted behavioral test for the shared desktop/mobile legacy-draft purge
@@ -209,9 +210,10 @@ test("a restored project draft renders with its deterministic project directory 
 
 test("the 390px draft working-directory editor keeps a 44px touch target", async () => {
   const project = "mobile-cwd-target-project";
-  const previousMatchMedia = dom.matchMedia;
+  const windowWithMatchMedia = dom as unknown as { matchMedia: typeof mobileMatchMedia };
+  const previousMatchMedia = windowWithMatchMedia.matchMedia;
   const previousInnerWidth = dom.innerWidth;
-  dom.matchMedia = mobileMatchMedia;
+  windowWithMatchMedia.matchMedia = mobileMatchMedia;
   (dom as unknown as { innerWidth: number }).innerWidth = 390;
   try {
     roots.push(mount(<ProjectDashboard {...dashboardProps(project)} />));
@@ -227,8 +229,42 @@ test("the 390px draft working-directory editor keeps a 44px touch target", async
     expect(directory?.className).toContain("min-h-11");
     expect(directory?.className).toContain("sm:min-h-0");
   } finally {
-    dom.matchMedia = previousMatchMedia;
+    windowWithMatchMedia.matchMedia = previousMatchMedia;
     (dom as unknown as { innerWidth: number }).innerWidth = previousInnerWidth;
+  }
+});
+
+test("a task card agent action seeds the task prompt and canonical project directory", async () => {
+  const project = "task-agent-project";
+  const projectRoot = `/home/tester/Projects/${project}`;
+  const task: BoardTask = {
+    id: "task-agent-draft",
+    project,
+    status: "inbox",
+    text: "Investigate the cache race\nand add a regression test.",
+    placement: "pinned",
+    pos: { x: 120, y: 120 },
+    assignments: [],
+    createdAt: "2026-07-13T10:00:00.000Z",
+    updatedAt: "2026-07-13T10:00:00.000Z",
+  };
+  const previousMatchMedia = G.matchMedia;
+  G.matchMedia = (query: string) => ({ ...mobileMatchMedia(query), matches: false });
+  try {
+    roots.push(mount(<ProjectDashboard {...dashboardProps(project)} projectCwd={projectRoot} tasks={[task]} />));
+
+    expect(await waitFor(() => dom.document.querySelector(`[data-scheme-task="${task.id}"]`) !== null)).toBe(true);
+    const card = dom.document.querySelector(`[data-scheme-task="${task.id}"]`);
+    const send = Array.from(card?.querySelectorAll("button") ?? []).find((button) => button.textContent?.trim() === "send");
+    send?.click();
+
+    expect(await waitFor(() => dom.document.querySelector(AGENT_PANE) !== null)).toBe(true);
+    const directory = dom.document.querySelector('input[aria-label="Agent working directory"]') as unknown as HTMLInputElement | null;
+    const prompt = dom.document.querySelector('textarea[aria-label="First prompt text"]') as unknown as HTMLTextAreaElement | null;
+    expect(directory?.value).toBe(projectRoot);
+    expect(prompt?.value).toBe(task.text);
+  } finally {
+    G.matchMedia = previousMatchMedia;
   }
 });
 
