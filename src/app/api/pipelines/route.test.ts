@@ -26,10 +26,32 @@ test("pipeline collection route mirrors flow GET and POST shapes", async () => {
   });
   const response = await POST(request);
   expect(response.status).toBe(201);
-  const body = await response.json() as { ok: boolean; pipeline: { id: string; stages: { id: string; effectiveRole: { effort: string } }[] } };
+  const body = await response.json() as { ok: boolean; pipeline: { id: string; state: string; stages: { id: string; effectiveRole: { effort: string } }[] } };
   expect(body.ok).toBe(true);
+  expect(body.pipeline.state).toBe("provisioning");
   expect(body.pipeline.stages.map((stage) => stage.id)).toEqual(["build", "verify"]);
   expect(body.pipeline.stages[0]!.effectiveRole.effort).toBe("medium");
+});
+
+test("pipeline POST returns a persisted draft id for autoStart false", async () => {
+  const request = new NextRequest("http://127.0.0.1/api/pipelines", {
+    method: "POST",
+    headers: { host: "127.0.0.1", "content-type": "application/json" },
+    body: JSON.stringify({
+      task: "review before start",
+      repoDir: process.cwd(),
+      autoStart: false,
+      stages: [
+        { id: "build", kind: "run", prompt: "build", next: "verify" },
+        { id: "verify", kind: "run", prompt: "verify", next: null },
+      ],
+    }),
+  });
+  const response = await POST(request);
+  const body = await response.json() as { ok: boolean; pipeline: { id: string; state: string } };
+  expect(response.status).toBe(201);
+  expect(body).toMatchObject({ ok: true, pipeline: { state: "draft" } });
+  expect(body.pipeline.id.length).toBeGreaterThan(0);
 });
 
 test("pipeline POST rejects malformed JSON", async () => {

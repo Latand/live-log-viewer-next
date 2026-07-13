@@ -136,7 +136,7 @@ function isPipeline(value: unknown): value is Pipeline {
     pipeline.stages.every(isStage) &&
     Array.isArray(pipeline.runs) &&
     pipeline.runs.every(isRun) &&
-    ["provisioning", "running", "needs_decision", "paused", "completed", "closed"].includes(String(pipeline.state)) &&
+    ["draft", "provisioning", "running", "needs_decision", "paused", "completed", "closed"].includes(String(pipeline.state)) &&
     (pipeline.pausedState === null || ["provisioning", "running", "needs_decision", "completed", "closed"].includes(String(pipeline.pausedState))) &&
     isNullableString(pipeline.stateDetail) &&
     isNullableString(pipeline.srcPath) &&
@@ -157,6 +157,11 @@ function isPipeline(value: unknown): value is Pipeline {
   const cursor = pipeline.cursor;
   if (cursor !== null && (!cursor || typeof cursor !== "object" || !ids.includes(cursor.stageId) || !["pending", "spawning", "running", "reviewing", "committing"].includes(cursor.state))) return false;
   if ((pipeline.state === "completed" || pipeline.state === "closed") && cursor !== null) return false;
+  if (pipeline.state === "draft") {
+    if (cursor?.stageId !== stages[0]!.id || cursor.state !== "pending") return false;
+    if (runs.some((run) => run.attempts.length > 0)) return false;
+    if (pipeline.baseBranch || pipeline.baseRef || pipeline.lastPassedCommit || pipeline.closedAt) return false;
+  }
   return true;
 }
 
@@ -236,6 +241,14 @@ function slugify(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9]+/gi, "-").replace(/^-+|-+$/g, "").slice(0, 40).replace(/-+$/, "") || "task";
 }
 
+export function pipelineIdentity(id: string, task: string, repoDir: string): Pick<Pipeline, "worktreeDir" | "branch"> {
+  const repoName = path.basename(repoDir);
+  return {
+    worktreeDir: path.join(path.dirname(repoDir), `${repoName}-pipeline-${id}`),
+    branch: `pipeline/${slugify(task)}-${id}`,
+  };
+}
+
 export function buildPipeline(input: {
   id: string;
   task: string;
@@ -246,23 +259,23 @@ export function buildPipeline(input: {
   srcPath: string | null;
   srcConversationId: string | null;
   now: string;
+  state?: "draft" | "provisioning";
 }): Pipeline {
-  const repoName = path.basename(input.repoDir);
+  const identity = pipelineIdentity(input.id, input.task, input.repoDir);
   return {
     id: input.id,
     task: input.task,
     ...(input.spec ? { spec: input.spec } : {}),
     project: input.project,
     repoDir: input.repoDir,
-    worktreeDir: path.join(path.dirname(input.repoDir), `${repoName}-pipeline-${input.id}`),
-    branch: `pipeline/${slugify(input.task)}-${input.id}`,
+    ...identity,
     baseBranch: "",
     baseRef: "",
     lastPassedCommit: "",
     stages: JSON.parse(JSON.stringify(input.stages)) as PipelineStage[],
     runs: input.stages.map((stage) => ({ stageId: stage.id, attempts: [] })),
     cursor: { stageId: input.stages[0]!.id, state: "pending" },
-    state: "provisioning",
+    state: input.state ?? "provisioning",
     pausedState: null,
     stateDetail: null,
     srcPath: input.srcPath,
