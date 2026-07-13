@@ -16,8 +16,8 @@ Codex CLI 0.144.1 treats `-c mcp_servers={}` as a merge, so configured MCP entri
 - AC4: Every Viewer-owned headless Codex child uses `detached: true` and receives group-wide SIGTERM followed by group-wide SIGKILL after the existing grace period, including when the group leader exits during grace.
 - AC5: Interactive tmux agent spawn behavior remains unchanged.
 - AC6: A periodic Viewer tick finds stale Viewer review commands whose exact flow-artifact path, PID, and process-start identity match a persisted Viewer flow round, plus orphaned MCP roots at or above a configurable age threshold; the default is two hours.
-- AC7: Reaper selection protects every fresh tmux pane ancestry, every active flow-round identity, every live Codex app-server tree, and every Claude ancestry.
-- AC8: Reaper actuation refreshes tmux, flow, process, and process-start evidence immediately before signaling, then checks an orphan root identity again at the TERM boundary. A failed tmux observation suppresses the cleanup tick.
+- AC7: Reaper selection protects every fresh tmux pane ancestry, every active flow-round identity, every Codex or Claude owner row, every live Codex app-server tree, and every Claude ancestry.
+- AC8: Reaper actuation refreshes tmux, flow, process, and process-start evidence immediately before signaling, captures identities for every orphan descendant, then fences each identity at TERM and KILL. A failed tmux observation suppresses the cleanup tick.
 - AC9: Consecutive Codex app-server initialize timeouts use persisted exponential cooldowns starting at one minute and capped at fifteen minutes.
 - AC10: Transcript quota data remains available during initialize-timeout cooldowns, and a successful live probe clears the timeout streak.
 - AC11: Unit tests cover group signaling, stale-process selection and revalidation, tmux/flow/Claude protections, and initialize-timeout backoff.

@@ -152,6 +152,7 @@ export function selectHeadlessProcessCandidates(input: SelectionInput): Headless
       candidates.push({ pid: process.pid, identity: process.identity, kind: "codex-exec" });
       continue;
     }
+    if (isCodexOwner(process) || isClaudeOwner(process)) continue;
     if (!isMcpServer(process)) continue;
     const parents = ancestry(process.pid, byPid);
     if (parents.some((pid) => staleViewerExecs.has(pid) || isMcpServer(byPid.get(pid) ?? { argv: [], tty: 0 }))) continue;
@@ -235,22 +236,23 @@ function signalGroup(candidate: HeadlessProcessCandidate, dependencies: ReaperDe
 }
 
 function signalOrphanTree(candidate: HeadlessProcessCandidate, processes: ReaperProcess[], dependencies: ReaperDependencies, graceMs: number): boolean {
-  const ppids = new Map(processes.map((process) => [process.pid, process.ppid]));
   const observed = new Map(processes.map((process) => [process.pid, process.identity]));
-  const tree = descendantPids(candidate.pid, ppids).reverse().map((pid) => ({
-    pid,
-    expectedIdentity: observed.get(pid) ?? null,
-    identity: dependencies.processIdentity(pid),
-  }));
+  const tree = descendantPids(candidate.pid, dependencies.ppidMap()).reverse().map((pid) => {
+    const observedIdentity = observed.get(pid) ?? null;
+    const expectedIdentity = dependencies.processIdentity(pid);
+    const eligible = Boolean(expectedIdentity && (!observedIdentity || observedIdentity === expectedIdentity));
+    return { pid, observedIdentity, expectedIdentity, eligible };
+  });
   const root = tree.find((process) => process.pid === candidate.pid);
-  if (root?.expectedIdentity !== candidate.identity || root.identity !== candidate.identity) return false;
+  if (root?.observedIdentity !== candidate.identity || root.expectedIdentity !== candidate.identity) return false;
   for (const process of tree) {
-    if (!process.expectedIdentity || process.identity !== process.expectedIdentity) continue;
+    if (!process.eligible || !process.expectedIdentity) continue;
+    if (dependencies.processIdentity(process.pid) !== process.expectedIdentity) continue;
     try { dependencies.signalProcess(process.pid, "SIGTERM"); } catch { /* process has exited */ }
   }
   const timer = dependencies.setTimeout(() => {
     for (const process of tree) {
-      if (!process.expectedIdentity || dependencies.processIdentity(process.pid) !== process.expectedIdentity) continue;
+      if (!process.eligible || !process.expectedIdentity || dependencies.processIdentity(process.pid) !== process.expectedIdentity) continue;
       try { dependencies.signalProcess(process.pid, "SIGKILL"); } catch { /* process has exited */ }
     }
   }, graceMs);

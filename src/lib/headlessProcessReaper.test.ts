@@ -80,6 +80,9 @@ test("headless process reaper selects stale viewer exec groups and orphaned MCP 
     process(500, 1, ["uv", "tool", "run", "codex-telegram-mcp"]),
     process(600, 1, ["npm", "exec", "context7-mcp"], 30_000),
     process(700, 1, ["codex", "exec", "Write a summary"]),
+    process(710, 1, ["claude", "-p", "audit MCP servers"]),
+    process(711, 1, ["codex", "exec", "investigate mcp startup"]),
+    process(712, 1, ["codex", "-c", "mcp_servers={}", "app-server"]),
     process(750, 1, ["codex", "exec", "--json", "--output-last-message", "/home/user/manual-review.md"]),
     process(760, 1, ["codex", "exec", "--json", "--output-last-message", viewerOutput("untracked-flow", 1)]),
     process(800, 1, ["codex", "app-server"]),
@@ -255,6 +258,90 @@ test("orphan cleanup skips a descendant whose identity changes before TERM", asy
   expect(signals).toEqual([
     { pid: 930, signal: "SIGTERM" },
     { pid: 930, signal: "SIGKILL" },
+  ]);
+});
+
+test("orphan cleanup captures and kills an unrecognized descendant", async () => {
+  const root = process(950, 1, ["npm", "exec", "chrome-devtools-mcp"]);
+  const child = process(951, 950, ["node", "server.js"]);
+  const signals: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+  const timers: Array<() => void> = [];
+  const report = await runHeadlessProcessReaper({
+    hosts: [],
+    flows: [],
+    thresholdMs: 2 * 60 * 60_000,
+    flowArtifactsRoot,
+    dependencies: {
+      listProcesses: () => [root, child],
+      ppidMap: () => new Map([[950, 1], [951, 950]]),
+      processIdentity: (pid) => `${pid}:start`,
+      processAgeMs: () => old,
+      loadFlows: () => [],
+      readHosts: async () => [],
+      readPanePids: async () => [],
+      signalProcess: (pid, signal) => { signals.push({ pid, signal }); },
+      setTimeout: (callback) => {
+        timers.push(callback);
+        return { unref() {} } as unknown as ReturnType<typeof setTimeout>;
+      },
+    },
+  });
+
+  expect(report).toEqual({ candidates: 1, signaled: 1 });
+  expect(signals).toEqual([
+    { pid: 951, signal: "SIGTERM" },
+    { pid: 950, signal: "SIGTERM" },
+  ]);
+  timers[0]!();
+  expect(signals).toEqual([
+    { pid: 951, signal: "SIGTERM" },
+    { pid: 950, signal: "SIGTERM" },
+    { pid: 951, signal: "SIGKILL" },
+    { pid: 950, signal: "SIGKILL" },
+  ]);
+});
+
+test("orphan cleanup skips an unrecognized descendant whose identity changes before KILL", async () => {
+  const root = process(960, 1, ["npm", "exec", "chrome-devtools-mcp"]);
+  const child = process(961, 960, ["node", "server.js"]);
+  const signals: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+  const timers: Array<() => void> = [];
+  const identityReads = new Map<number, number>();
+  const report = await runHeadlessProcessReaper({
+    hosts: [],
+    flows: [],
+    thresholdMs: 2 * 60 * 60_000,
+    flowArtifactsRoot,
+    dependencies: {
+      listProcesses: () => [root, child],
+      ppidMap: () => new Map([[960, 1], [961, 960]]),
+      processIdentity: (pid) => {
+        const reads = (identityReads.get(pid) ?? 0) + 1;
+        identityReads.set(pid, reads);
+        return pid === 961 && reads >= 3 ? "961:replacement" : `${pid}:start`;
+      },
+      processAgeMs: () => old,
+      loadFlows: () => [],
+      readHosts: async () => [],
+      readPanePids: async () => [],
+      signalProcess: (pid, signal) => { signals.push({ pid, signal }); },
+      setTimeout: (callback) => {
+        timers.push(callback);
+        return { unref() {} } as unknown as ReturnType<typeof setTimeout>;
+      },
+    },
+  });
+
+  expect(report).toEqual({ candidates: 1, signaled: 1 });
+  expect(signals).toEqual([
+    { pid: 961, signal: "SIGTERM" },
+    { pid: 960, signal: "SIGTERM" },
+  ]);
+  timers[0]!();
+  expect(signals).toEqual([
+    { pid: 961, signal: "SIGTERM" },
+    { pid: 960, signal: "SIGTERM" },
+    { pid: 960, signal: "SIGKILL" },
   ]);
 });
 
