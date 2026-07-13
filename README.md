@@ -5,26 +5,59 @@ logs into a readable, live-updating chat feed. It discovers every session,
 subagent and background shell task on your machine, links them into a
 parent→child tree, and tails the selected one in real time.
 
+![From the overview board into a session and its live tail](docs/media/board-to-live-tail.gif)
+
 Everything runs locally against files already on disk. There is no database and
 no external service — the app reads `~/.claude` and `~/.codex` and renders what
-it finds.
+it finds:
+
+```bash
+bunx agent-log-viewer   # or: npx agent-log-viewer
+```
+
+Prefer video? A 45-second cut of the full flow lives at
+[docs/media/demo.mp4](docs/media/demo.mp4).
+
+## The tour
+
+### Read any session as a chat
+
+User bubbles, assistant prose, tool-call cards with ✓/✗ statuses, expandable
+command output and diffs — for **Claude Code** sessions and their subagents
+(`~/.claude/projects/**/*.jsonl`), **Codex CLI** rollouts
+(`~/.codex/sessions/**/rollout-*.jsonl`) with command cards, patches and
+service events, and **background shell tasks** (recovered from the transcript
+and shown above the terminal output).
 
 ![The chat feed: user bubbles, assistant prose, and tool-call cards with
 statuses and expandable output](docs/media/chat-feed.png)
 
-## What it shows
+### Spawn agents from the board
 
-- **Claude Code sessions** (`~/.claude/projects/**/*.jsonl`) and their
-  subagents, rendered as a chat: user bubbles, assistant prose, tool-call
-  cards with ✓/✗ statuses and expandable output.
-- **Codex CLI sessions** (`~/.codex/sessions/**/rollout-*.jsonl`) with command
-  cards, patches and service events.
-- **Background shell tasks** (`claude-<uid>/**/tasks/*.output` under the OS
-  temp dir — `/tmp` on Linux, `$TMPDIR` on macOS) — the originating Bash
-  command is recovered from the session transcript and shown above the
-  terminal output.
+Each project is a pannable, zoomable scheme — root conversations on top,
+spawned agents one generation below, arrows colored by engine. Draft a new
+agent right on the board: pick Claude or Codex, a model and reasoning effort,
+type the first prompt, and it launches into tmux.
 
-## Highlights
+![Drafting and configuring a new agent on the project board](docs/media/spawn-agent.gif)
+
+### Run implement → review loops
+
+The viewer orchestrates review cycles: a long-lived implementer in tmux, a
+fresh read-only reviewer each round over the full diff, findings relayed
+automatically, and a verdict deck in the scheme view.
+
+![A review loop: round 1 requested changes, round 2 re-checks live](docs/media/review-loop.gif)
+
+### Answer a blocked agent from the browser
+
+When an agent stops on an `AskUserQuestion`, the question surfaces as a card
+with clickable options. The answer is delivered into the agent's tmux pane and
+confirmed against the transcript — the agent just keeps going.
+
+![Answering a pending AskUserQuestion from the feed](docs/media/pending-question.gif)
+
+### And everything around it
 
 - **Parentage tree**: session → subagents → rollouts → background tasks, built
   server-side by scanning transcripts (append-only incremental,
@@ -33,14 +66,9 @@ statuses and expandable output](docs/media/chat-feed.png)
   it is mid-turn and *done* once the final assistant message lands.
 - **Deep links**: every selection is reflected in the URL (`#f=<path>`), so a
   link opens that exact log.
-- **Project scheme**: each project is a pannable, zoomable diagram — the root
-  conversation on top, spawned agents one generation below, arrows colored by
-  engine. Quiet branches and tasks collapse under their nearest ancestor.
 - **English or Ukrainian UI**, model chips (`fable`, `gpt-5.5`, `sonnet`…),
   collapsible tree with persisted state, follow-mode autoscroll, service-event
   toggle, and a line filter.
-
-## Screenshots
 
 The session parentage tree, wiring root conversations to their spawned agents:
 
@@ -50,9 +78,12 @@ The session parentage tree, wiring root conversations to their spawned agents:
 | --- | --- |
 | ![Codex session with command cards and patches](docs/media/codex-session.png) | ![Overview board across projects](docs/media/overview-board.png) |
 
+All media above is regenerated deterministically from a synthetic fixture —
+see [docs/media/README.md](docs/media/README.md).
+
 ## Run
 
-The package is published to npm, so the quickstart needs no clone:
+The package is published to npm, so the quickstart above needs no clone:
 
 ```bash
 bunx agent-log-viewer

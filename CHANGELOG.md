@@ -6,6 +6,14 @@ versions follow [SemVer](https://semver.org/) (0.x — the API may still move).
 
 ## [Unreleased]
 
+### Added
+- Demo motion pipeline (`bun run demo:motion`, stage B of the demo media
+  effort): storyboard-as-data recordings of the four key flows rendered as
+  loopable GIFs plus a stitched `docs/media/demo.mp4`, reusing the stage A
+  fixture, browser image, and pixel gates. The README now leads with the hero
+  GIF and a feature tour; regeneration commands live in
+  `docs/media/README.md`.
+
 ### Changed
 - Current product prose, static page metadata, and the CLI startup banner use
   the `Agent Log Viewer` display name. Compatibility identifiers stay stable:

@@ -51,8 +51,10 @@ const FRAME_PIXELS = {
   minColorCount: 100,
 };
 
-const claudePath = (project: string, session: string) =>
+export const claudePath = (project: string, session: string) =>
   `${DEMO_TOKEN}/.claude/projects/__DEMO_HOME_SLUG__-Projects-${project}/${session}`;
+
+export const PENDING_QUESTION_FILE = claudePath("atlas", "22222222-2222-4222-8222-222222222222.jsonl");
 
 export const SHOTS: DemoShot[] = [
   {
@@ -344,14 +346,12 @@ function shellQuote(value: string): string {
   return `'${value.replaceAll("'", `'\\''`)}'`;
 }
 
-async function startPendingQuestionPane(root: string, pendingPath: string, env: NodeJS.ProcessEnv): Promise<void> {
+async function startPendingQuestionPane(root: string, pendingPath: string, env: NodeJS.ProcessEnv, paneScript?: { source: string; args: string[] }): Promise<void> {
   const holderPath = path.join(root, "pending-question-holder.cjs");
-  fs.writeFileSync(
-    holderPath,
-    'const fs = require("node:fs"); fs.openSync(process.argv[2], "a"); setInterval(() => {}, 60_000);\n',
-    "utf8",
-  );
-  const holderCommand = `exec ${shellQuote(process.execPath)} ${shellQuote(holderPath)} ${shellQuote(pendingPath)}`;
+  const source = paneScript?.source ?? 'const fs = require("node:fs"); fs.openSync(process.argv[2], "a"); setInterval(() => {}, 60_000);\n';
+  fs.writeFileSync(holderPath, source, "utf8");
+  const args = [pendingPath, ...(paneScript?.args ?? [])];
+  const holderCommand = `exec ${shellQuote(process.execPath)} ${shellQuote(holderPath)} ${args.map(shellQuote).join(" ")}`;
   await runProcess(
     "tmux",
     ["new-session", "-d", "-s", "demo-capture", "-n", "pending-question", holderCommand],
@@ -374,12 +374,33 @@ async function stop(child: ChildProcess | null): Promise<void> {
   }
 }
 
-async function main(): Promise<void> {
-  const repoRoot = path.resolve(import.meta.dir, "..");
-  const uid = process.getuid?.() ?? 1000;
-  const port = Number(process.env.DEMO_CAPTURE_PORT ?? DEFAULT_PORT);
-  if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error("DEMO_CAPTURE_PORT must be a valid non-privileged port");
+export type DemoRuntime = {
+  root: string;
+  env: NodeJS.ProcessEnv;
+  port: number;
+  serverLogs: () => string;
+  /** Resolves when the dev server answers /api/files. */
+  waitUntilReady: () => Promise<void>;
+  shutdown: () => Promise<void>;
+};
 
+export function demoPort(raw: string | undefined, fallback: number, name: string): number {
+  const port = Number(raw ?? fallback);
+  if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error(`${name} must be a valid non-privileged port`);
+  return port;
+}
+
+/**
+ * Materialize the disposable fixture home, start the pending-question tmux
+ * pane, and boot the isolated Next.js dev server. Shared by the stills
+ * capture and the stage B motion capture.
+ */
+export async function bootstrapDemoRuntime(
+  repoRoot: string,
+  port: number,
+  questionPaneScript?: { source: string; args: string[] },
+): Promise<DemoRuntime> {
+  const uid = process.getuid?.() ?? 1000;
   const root = captureRoot(repoRoot);
   removeGeneratedRuntime(root);
   const env = buildDemoEnvironment(repoRoot, uid);
@@ -389,17 +410,45 @@ async function main(): Promise<void> {
   ensureRuntimeDirectories(env, uid);
   setStableTimes(env.HOME!);
 
-  const pendingPath = renderFixtureTemplate(
-    claudePath("atlas", "22222222-2222-4222-8222-222222222222.jsonl"),
-    env.HOME!,
-  );
-  await startPendingQuestionPane(root, pendingPath, env);
+  const pendingPath = renderFixtureTemplate(PENDING_QUESTION_FILE, env.HOME!);
+  await startPendingQuestionPane(root, pendingPath, env, questionPaneScript);
   const server = spawn(
     "bunx",
     ["next", "dev", "--hostname", "0.0.0.0", "--port", String(port)],
     { cwd: repoRoot, env, stdio: ["ignore", "pipe", "pipe"] },
   );
   const serverLogs = outputLines(server, "demo server output");
+
+  let shutdownPromise: Promise<void> | null = null;
+  const shutdown = () => {
+    shutdownPromise ??= Promise.all([stop(server), stopFixtureTmux(env)]).then(() => undefined);
+    return shutdownPromise;
+  };
+  return {
+    root,
+    env,
+    port,
+    serverLogs,
+    waitUntilReady: () => waitForServer(`http://127.0.0.1:${port}`, server, serverLogs),
+    shutdown,
+  };
+}
+
+/** Rebuild the route type manifest the dev server left behind. */
+export async function regenerateNextTypes(repoRoot: string, env: NodeJS.ProcessEnv): Promise<void> {
+  fs.rmSync(path.join(repoRoot, ".next/dev/types"), { recursive: true, force: true });
+  await runProcess("bunx", ["next", "typegen"], {
+    cwd: repoRoot,
+    env: { ...env, NODE_ENV: "production" },
+    stdio: "inherit",
+  });
+}
+
+async function main(): Promise<void> {
+  const repoRoot = path.resolve(import.meta.dir, "..");
+  const port = demoPort(process.env.DEMO_CAPTURE_PORT, DEFAULT_PORT, "DEMO_CAPTURE_PORT");
+  const runtime = await bootstrapDemoRuntime(repoRoot, port);
+  const { root, env, serverLogs, shutdown } = runtime;
 
   const configPath = path.join(root, "capture-config.json");
   const config = {
@@ -413,16 +462,11 @@ async function main(): Promise<void> {
   };
   fs.writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
 
-  let shutdownPromise: Promise<void> | null = null;
-  const shutdown = () => {
-    shutdownPromise ??= Promise.all([stop(server), stopFixtureTmux(env)]).then(() => undefined);
-    return shutdownPromise;
-  };
   process.once("SIGINT", () => { void shutdown(); process.exitCode = 130; });
   process.once("SIGTERM", () => { void shutdown(); process.exitCode = 143; });
 
   try {
-    await waitForServer(`http://127.0.0.1:${port}`, server, serverLogs);
+    await runtime.waitUntilReady();
     fs.mkdirSync(path.join(repoRoot, "docs/media"), { recursive: true });
     const configInContainer = `/workspace/${path.relative(repoRoot, configPath)}`;
     try {
@@ -431,6 +475,7 @@ async function main(): Promise<void> {
         "-v", `${repoRoot}:/workspace:ro`,
         "-v", `${path.join(repoRoot, "docs/media")}:/output`,
         "-e", "NODE_PATH=/project/node_modules",
+        ...(process.env.DEMO_CAPTURE_DEBUG ? ["-e", "DEMO_CAPTURE_DEBUG=1"] : []),
         "--entrypoint", "node",
         PUPPETEER_IMAGE,
         "/workspace/scripts/demo-capture-browser.cjs",
@@ -441,13 +486,8 @@ async function main(): Promise<void> {
     }
   } finally {
     await shutdown();
-    fs.rmSync(path.join(repoRoot, ".next/dev/types"), { recursive: true, force: true });
   }
-  await runProcess("bunx", ["next", "typegen"], {
-    cwd: repoRoot,
-    env: { ...env, NODE_ENV: "production" },
-    stdio: "inherit",
-  });
+  await regenerateNextTypes(repoRoot, env);
 }
 
 if (import.meta.main) await main();

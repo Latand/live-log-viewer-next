@@ -205,12 +205,14 @@ async function render(browser, config, shot, capturePng) {
     }, shot.file);
   }
   if (shot.id === "chat-feed") {
+    // The compact scheme card renders the same transcript in miniature, so the
+    // command group must be toggled inside the expanded dialog specifically.
     await page.waitForFunction(
-      () => Array.from(document.querySelectorAll("summary")).some((summary) => summary.innerText.includes("2 actions")),
+      () => Array.from(document.querySelectorAll('[role="dialog"] summary')).some((summary) => summary.innerText.includes("2 actions")),
       { timeout: 30_000 },
     );
     await page.evaluate(() => {
-      const actions = Array.from(document.querySelectorAll("summary")).find((summary) => summary.innerText.includes("2 actions"));
+      const actions = Array.from(document.querySelectorAll('[role="dialog"] summary')).find((summary) => summary.innerText.includes("2 actions"));
       if (!(actions instanceof HTMLElement)) throw new Error("missing command group");
       actions.click();
     });
@@ -233,7 +235,14 @@ async function render(browser, config, shot, capturePng) {
   }
   await new Promise((resolve) => setTimeout(resolve, 350));
   const text = await page.evaluate(() => document.body.innerText);
-  await assertVisibleElements(page, shot);
+  try {
+    await assertVisibleElements(page, shot);
+  } catch (error) {
+    if (process.env.DEMO_CAPTURE_DEBUG) {
+      fs.writeFileSync(path.join(config.outputDir, `debug-${shot.id}.png`), Buffer.from(await page.screenshot({ type: "png" })));
+    }
+    throw error;
+  }
   const png = capturePng ? Buffer.from(await page.screenshot({ type: "png" })) : null;
   const pixelMetrics = png ? await assertPngFrame(png, shot) : null;
   await page.close();

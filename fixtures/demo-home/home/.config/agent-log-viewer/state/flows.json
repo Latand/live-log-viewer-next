@@ -87,7 +87,7 @@
       "rounds": [
         {
           "n": 1,
-          "reviewerPath": null,
+          "reviewerPath": "__DEMO_HOME__/.claude/projects/__DEMO_HOME_SLUG__-Projects-forge/66666666-6666-4666-8666-666666666666.jsonl",
           "findingsPath": "__DEMO_HOME__/.config/agent-log-viewer/state/flows/demo-media-review/round-1-review.md",
           "triggeredBy": "marker",
           "readyNote": "first deterministic pass",
