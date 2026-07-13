@@ -1,9 +1,9 @@
 "use client";
 
 import { Filter, TriangleAlert, X } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 
-import { parseConversationHash, resolveConversationTarget, withoutArchivedPredecessors, type ConversationHash } from "@/lib/accounts/identity";
+import { formatConversationHash, parseConversationHash, resolveConversationTarget, withoutArchivedPredecessors, type ConversationHash } from "@/lib/accounts/identity";
 import { useAgentChimes } from "@/hooks/useAgentChimes";
 import { useArchivedProjects } from "@/hooks/useArchivedProjects";
 import { useEffectiveFlows } from "@/components/flows/flowModel";
@@ -35,6 +35,27 @@ function readHash(): ConversationHash {
 
 export function initialProjectFromState(hash: string, storedProject: string | null): string {
   return parseConversationHash(hash).project ?? storedProject ?? OVERVIEW;
+}
+
+export function filesRequestPin(pendingHash: ConversationHash | null, retainedPath: string | null): string | null {
+  return pendingHash?.filePath ?? pendingHash?.conversationId ?? retainedPath;
+}
+
+export type CatalogPinState = { path: string; hydrated: boolean; conversationId: string | null } | null;
+export type CatalogPinEvent =
+  | { kind: "open"; path: string; conversationId?: string }
+  | { kind: "resolve"; path: string; conversationId?: string }
+  | { kind: "release"; path?: string }
+  | { kind: "files"; paths: ReadonlySet<string>; pending: boolean; currentPath?: string };
+
+export function reduceCatalogPin(state: CatalogPinState, event: CatalogPinEvent): CatalogPinState {
+  if (event.kind === "open") return { path: event.path, hydrated: false, conversationId: event.conversationId ?? null };
+  if (event.kind === "resolve") return { path: event.path, hydrated: true, conversationId: event.conversationId ?? null };
+  if (event.kind === "release") return !event.path || state?.path === event.path ? null : state;
+  if (!state) return state;
+  const current = event.currentPath && event.currentPath !== state.path ? { ...state, path: event.currentPath } : state;
+  if (current.hydrated && !event.pending && !event.paths.has(current.path)) return null;
+  return current;
 }
 
 function initialProject(): string {
@@ -78,7 +99,8 @@ export function Viewer() {
   useViewPresence();
   const [project, setProject] = useState<string>(() => initialProject());
   const [pendingHash, setPendingHash] = useState<ConversationHash | null>(null);
-  const { files: allFiles, requestScope, projectCatalog, flows: polledFlows, pipelines, pipelinesError, workflows, tasks, systemHealth, conversationAliases, loaded } = useFiles(project === OVERVIEW ? null : project, pendingHash?.filePath ?? pendingHash?.conversationId ?? null);
+  const [catalogPin, dispatchCatalogPin] = useReducer(reduceCatalogPin, null);
+  const { files: allFiles, requestScope, projectCatalog, projectCwds, flows: polledFlows, pipelines, pipelinesError, workflows, tasks, systemHealth, conversationAliases, loaded } = useFiles(null, filesRequestPin(pendingHash, catalogPin?.path ?? null));
   /* A committed account migration keeps the archived predecessor entry in the
      payload (for chain history) but it must never render as a second standalone
      card — every surface below sees only current generations. A no-op (same
@@ -90,6 +112,10 @@ export function Viewer() {
   useAgentChimes(files, requestScope);
   const { archivedProjects, archiveProject, unarchiveProject } = useArchivedProjects(files);
   const catalogProjects = useMemo(() => new Set(projectCatalog.map((entry) => entry.project)), [projectCatalog]);
+  const catalogConversationCounts = useMemo(
+    () => new Map(projectCatalog.map((entry) => [entry.project, entry.conversations])),
+    [projectCatalog],
+  );
   const isMobile = useIsMobile();
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [toastPath, setToastPath] = useState<string | null>(null);
@@ -98,6 +124,9 @@ export function Viewer() {
      `project`, so ProjectDashboard would never remount or re-read prefs.
      Bumping this on every same-project open gives it an explicit signal. */
   const [openNonce, setOpenNonce] = useState(0);
+  /* The jump channel into the board: nonce so repeated jumps to the same node
+     re-flash (D9); consumed by ProjectDashboard's pendingFocusRef path. */
+  const [focusRequest, setFocusRequest] = useState<{ path: string; nonce: number; catalog: boolean } | null>(null);
 
   /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
@@ -110,11 +139,17 @@ export function Viewer() {
   useEffect(() => {
     const onHash = () => {
       const next = readHash();
-      if (next.filePath || next.conversationId) setPendingHash(next);
+      if (next.filePath || next.conversationId) {
+        dispatchCatalogPin({ kind: "release" });
+        setFocusRequest(null);
+        setPendingHash(next);
+      }
       else {
         /* Navigation moved off the conversation link: the old target must
            stop pinning polls and must not open later out of nowhere. */
         setPendingHash(null);
+        dispatchCatalogPin({ kind: "release" });
+        setFocusRequest(null);
         if (next.project) setProject(next.project);
       }
     };
@@ -128,6 +163,8 @@ export function Viewer() {
     /* Explicit project navigation replaces the hash without a hashchange
        event, so any unresolved conversation intent is cancelled here. */
     setPendingHash(null);
+    dispatchCatalogPin({ kind: "release" });
+    setFocusRequest(null);
     localStorage.setItem(PROJECT_KEY, nextProject);
     writeHash(nextProject);
     setDrawerOpen(false);
@@ -162,6 +199,28 @@ export function Viewer() {
     [selectProject],
   );
 
+  /* Full-catalog list/search rows can sit beyond the scheme window. Their path
+     stays pinned for the displayed conversation so recurring polls preserve
+     the node after the transient hash intent resolves. */
+  const openPinnedFile = useCallback((file: FileEntry, hydrated = false) => {
+    const key = projectKey(file);
+    queueColumnOpen(key, file.path, isChildConversation(file));
+    dispatchCatalogPin({ kind: hydrated ? "resolve" : "open", path: file.path, conversationId: file.conversationId });
+    setProject(key);
+    localStorage.setItem(PROJECT_KEY, key);
+    setDrawerOpen(false);
+    setOpenNonce((value) => value + 1);
+    setFocusRequest((previous) => ({ path: file.path, nonce: (previous?.nonce ?? 0) + 1, catalog: true }));
+    const hash = formatConversationHash(file);
+    history.replaceState(null, "", hash);
+  }, []);
+
+  const openCatalogFile = useCallback((file: FileEntry) => {
+    openPinnedFile(file);
+    const hash = formatConversationHash(file);
+    setPendingHash(parseConversationHash(hash));
+  }, [openPinnedFile]);
+
   /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
     if (!pendingHash || allFiles.length === 0) return;
@@ -176,11 +235,30 @@ export function Viewer() {
        `#f=` link to a demoted archived predecessor resolves once that poll
        lands instead of being cleared after the first cap-limited payload. */
     if (hit) {
-      openFile(hit);
+      openPinnedFile(hit, true);
       setPendingHash(null);
     }
-  }, [pendingHash, allFiles, conversationAliases, openFile]);
+  }, [pendingHash, allFiles, conversationAliases, openPinnedFile]);
   /* eslint-enable react-hooks/set-state-in-effect */
+
+  const releaseCatalogFile = useCallback((path: string) => {
+    dispatchCatalogPin({ kind: "release", path });
+    setFocusRequest((current) => current?.path === path ? null : current);
+    if (catalogPin?.path === path) writeHash(project);
+  }, [catalogPin, project]);
+
+  useEffect(() => {
+    if (!catalogPin?.hydrated || pendingHash) return;
+    const currentPath = catalogPin.conversationId
+      ? files.find((file) => file.conversationId === catalogPin.conversationId)?.path
+      : undefined;
+    dispatchCatalogPin({
+      kind: "files",
+      paths: new Set(allFiles.map((file) => file.path)),
+      pending: false,
+      currentPath,
+    });
+  }, [catalogPin, pendingHash, allFiles, files]);
 
   /* The one queue every counter shows: badge, popover and the tab title all
      read the same list, stalled tail included (D10). The clock advances when
@@ -240,16 +318,13 @@ export function Viewer() {
   }, [queue.length]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
-  /* The jump channel into the board: nonce so repeated jumps to the same node
-     re-flash (D9); consumed by ProjectDashboard's pendingFocusRef path. */
-  const [focusRequest, setFocusRequest] = useState<{ path: string; nonce: number } | null>(null);
   const cancelPendingIntent = useCallback(() => setPendingHash(null), []);
   const requestFocus = useCallback((path: string) => {
     /* A user-driven focus (N/Shift-N cycle, attention jump) supersedes any
        unresolved deep-link intent; a stale pin must never re-steal focus when
        its target shows up in a later poll. */
     setPendingHash(null);
-    setFocusRequest((prev) => ({ path, nonce: (prev?.nonce ?? 0) + 1 }));
+    setFocusRequest((prev) => ({ path, nonce: (prev?.nonce ?? 0) + 1, catalog: false }));
   }, []);
 
   /* The N-cycle position anchors to an id: an item answered elsewhere drops
@@ -507,18 +582,23 @@ export function Viewer() {
             pipelinesError={pipelinesError}
             workflows={workflows}
             tasks={tasks}
+            projectCatalog={projectCatalog}
+            projectCwd={projectCwds[project]}
             project={project}
             loaded={loaded}
             openNonce={openNonce}
-            focusRequest={focusRequest}
+            focusRequest={focusRequest?.catalog && catalogPin?.path !== focusRequest.path ? null : focusRequest}
             attentionPaths={attentionPaths}
             archived={archivedProjects.has(project)}
             catalogKnown={catalogProjects.has(project)}
+            catalogConversationCount={catalogConversationCounts.get(project) ?? 0}
             onArchive={archiveProject}
             onUnarchive={unarchiveProject}
             onMenu={isMobile ? () => setDrawerOpen(true) : undefined}
             attention={isMobile ? attentionBadge : undefined}
             onUserNavigate={cancelPendingIntent}
+            onOpenCatalogFile={openCatalogFile}
+            onCloseFile={releaseCatalogFile}
           />
         )}
       </main>

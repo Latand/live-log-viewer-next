@@ -22,21 +22,23 @@ export interface RootGroupLike {
  *   fix for the 40-entry churn where every column (children included) piled into
  *   `manual` and oscillated under the old positional cap.
  * - `removeManual` retires a manual entry that is a child/subagent conversation
- *   (pollution) or has left the project catalog, while never touching a current
- *   root. The server reducer preserves hidden tombstones, so a closed root that
- *   left `manual` cannot be resurrected here.
+ *   (pollution), plus a missing path when the caller has complete catalog
+ *   membership. A capped catalog preserves missing paths because they can still
+ *   exist on disk. The server reducer preserves hidden tombstones, so a closed
+ *   root that left `manual` cannot be resurrected here.
  */
 export function planRootReconciliation(input: {
   groups: readonly RootGroupLike[];
   manual: readonly string[];
   catalog: ReadonlyMap<string, FileEntry>;
+  catalogComplete?: boolean;
 }): Extract<BoardMutationV1, { kind: "reconcile-roots" }> {
   const roots = input.groups.filter((group) => !group.orphanTask).map((group) => group.key);
   const rootSet = new Set(roots);
   const removeManual = input.manual.filter((path) => {
     if (rootSet.has(path)) return false;
     const file = input.catalog.get(path);
-    if (!file) return true;
+    if (!file) return input.catalogComplete !== false && path.endsWith(".jsonl");
     return isChildConversation(file);
   });
   return { kind: "reconcile-roots", roots, removeManual };
@@ -78,12 +80,18 @@ export function planBoardConvergence(input: {
   groups: readonly RootGroupLike[];
   manual: readonly string[];
   catalog: ReadonlyMap<string, FileEntry>;
+  catalogComplete?: boolean;
   project: string;
 }): BoardMutationV1[] {
   const batch: BoardMutationV1[] = [];
   const remap = planSuccessionRemap(input.files, input.project);
   if (remap) batch.push(remap);
-  batch.push(planRootReconciliation({ groups: input.groups, manual: input.manual, catalog: input.catalog }));
+  batch.push(planRootReconciliation({
+    groups: input.groups,
+    manual: input.manual,
+    catalog: input.catalog,
+    catalogComplete: input.catalogComplete,
+  }));
   return batch;
 }
 

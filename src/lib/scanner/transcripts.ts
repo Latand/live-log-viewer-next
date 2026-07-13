@@ -48,6 +48,18 @@ export function transcriptEngine(pathname: string): AgentEngine | null {
   return null;
 }
 
+/** Returns the top-level Claude session that owns a direct subagent
+ * transcript. Claude writes the child through this session's process. */
+export function claudeSubagentOwnerPath(pathname: string, knownRoot?: string | null): string | null {
+  const root = knownRoot === undefined ? claudeProjectRootFor(pathname) : knownRoot;
+  if (!root) return null;
+  const relative = path.relative(root, pathname);
+  if (relative.startsWith("..") || path.isAbsolute(relative)) return null;
+  const parts = relative.split(path.sep);
+  if (parts.length !== 4 || parts[2] !== "subagents" || !pathname.endsWith(".jsonl")) return null;
+  return path.join(root, parts[0], `${parts[1]}.jsonl`);
+}
+
 /**
  * Subagent transcripts are written by their parent session's process; pointing
  * the composer at that pid would type into the parent REPL, so only top-level
@@ -197,6 +209,30 @@ export function assignTranscriptPids(entries: FileEntry[]): void {
       claimed.add(owners[0].pid);
     }
   }
+}
+
+/** Destructive-operation guard for a specific hydrated transcript. It uses a
+ * fresh, uncapped process snapshot and accepts conservative cwd ownership when
+ * ordinary UI attribution leaves an idle or older entry without a pid. */
+export function transcriptProcessMayBeRunning(
+  entry: FileEntry,
+  processes: readonly AgentProcess[] = agentProcesses(true),
+): boolean {
+  return processes.some((proc) => transcriptProcessOwnsEntry(entry, proc));
+}
+
+export function transcriptProcessOwnsEntry(
+  entry: FileEntry,
+  proc: AgentProcess,
+  entryProjectKey: string | null = projectKey(entry),
+): boolean {
+  const engine = entry.root === "codex-sessions" ? "codex" : entry.root === "claude-projects" ? "claude" : null;
+  if (!engine || !entry.path.endsWith(".jsonl")) return false;
+  const sid = sessionIdFromPath(entry.path);
+  if (proc.engine !== engine || isHelperArgv(proc.argv) || !pidAlive(proc.pid)) return false;
+  const processSid = argvSessionId(proc.argv);
+  if (sid && processSid === sid) return true;
+  return processSid === null && proc.tty !== 0 && entryProjectKey !== null && processKey(proc) === entryProjectKey;
 }
 
 /**

@@ -6,6 +6,7 @@ import { statePath } from "@/lib/configDir";
 import { migrateBoardProjects } from "@/lib/board/store";
 
 import type { ProjectCatalogEntry } from "../types";
+import { replaceConversationCatalog } from "./conversationCatalog";
 import { describe } from "./describe";
 import type { RawEntry } from "./discover";
 import { PROJECT_RESOLUTION_VERSION, projectResolutionStateKey } from "./projectState";
@@ -16,14 +17,25 @@ type CachedProjectFile = {
   mtimeMs: number;
   stateKey: string;
   project: string;
+  projectRoot?: string | null;
   kind: string;
   session: boolean;
+  worktree?: string;
+  title?: string;
+  engine?: "codex" | "claude" | "shell";
+  fmt?: "codex" | "claude" | "plain";
 };
 
-type ProjectCatalogFile = CachedProjectFile & { path: string };
+type ProjectCatalogFile = CachedProjectFile & {
+  path: string;
+  title: string;
+  titleCached: boolean;
+  engine: "codex" | "claude" | "shell";
+  fmt: "codex" | "claude" | "plain";
+};
 
 type ProjectCatalogState = {
-  version: 1;
+  version: 2;
   resolutionVersion: number;
   files: Record<string, CachedProjectFile>;
 };
@@ -36,9 +48,9 @@ function catalogPath(): string {
 
 function readState(): ProjectCatalogState {
   try {
-    const raw = JSON.parse(fs.readFileSync(catalogPath(), "utf8")) as Partial<ProjectCatalogState>;
-    if (raw.version !== 1 || !raw.files || typeof raw.files !== "object" || Array.isArray(raw.files)) {
-      return { version: 1, resolutionVersion: PROJECT_RESOLUTION_VERSION, files: {} };
+    const raw = JSON.parse(fs.readFileSync(catalogPath(), "utf8")) as Partial<Omit<ProjectCatalogState, "version">> & { version?: number };
+    if ((raw.version !== 1 && raw.version !== 2) || !raw.files || typeof raw.files !== "object" || Array.isArray(raw.files)) {
+      return { version: 2, resolutionVersion: PROJECT_RESOLUTION_VERSION, files: {} };
     }
     const files: Record<string, CachedProjectFile> = {};
     for (const [pathname, value] of Object.entries(raw.files)) {
@@ -50,8 +62,8 @@ function readState(): ProjectCatalogState {
         typeof file.mtimeMs !== "number" ||
         typeof file.stateKey !== "string" ||
         typeof file.project !== "string" ||
-        typeof file.kind !== "string" ||
-        typeof file.session !== "boolean"
+        (file.projectRoot !== undefined && file.projectRoot !== null && typeof file.projectRoot !== "string") ||
+        typeof file.kind !== "string"
       ) {
         continue;
       }
@@ -61,13 +73,18 @@ function readState(): ProjectCatalogState {
         mtimeMs: file.mtimeMs,
         stateKey: file.stateKey,
         project: file.project,
+        projectRoot: typeof file.projectRoot === "string" ? file.projectRoot : file.projectRoot === null ? null : undefined,
         kind: file.kind,
-        session: file.session,
+        session: isConversation(file.rootName, file.kind),
+        worktree: typeof file.worktree === "string" ? file.worktree : undefined,
+        title: typeof file.title === "string" ? file.title : undefined,
+        engine: file.engine === "codex" || file.engine === "claude" || file.engine === "shell" ? file.engine : undefined,
+        fmt: file.fmt === "codex" || file.fmt === "claude" || file.fmt === "plain" ? file.fmt : undefined,
       };
     }
-    return { version: 1, resolutionVersion: raw.resolutionVersion ?? 0, files };
+    return { version: 2, resolutionVersion: raw.resolutionVersion ?? 0, files };
   } catch {
-    return { version: 1, resolutionVersion: PROJECT_RESOLUTION_VERSION, files: {} };
+    return { version: 2, resolutionVersion: PROJECT_RESOLUTION_VERSION, files: {} };
   }
 }
 
@@ -83,8 +100,28 @@ function writeState(state: ProjectCatalogState): void {
   }
 }
 
-function isRootSession(rootName: RawEntry["rootName"], kind: string): boolean {
-  return (rootName === "codex-sessions" || rootName === "claude-projects") && kind === "session";
+function isConversation(rootName: RawEntry["rootName"], kind: string): boolean {
+  return rootName === "codex-sessions" || (rootName === "claude-projects" && (kind === "session" || kind === "subagent"));
+}
+
+function engineForRoot(rootName: RawEntry["rootName"]): ProjectCatalogFile["engine"] {
+  if (rootName === "codex-sessions") return "codex";
+  if (rootName === "claude-projects") return "claude";
+  return "shell";
+}
+
+function fmtForRoot(rootName: RawEntry["rootName"]): ProjectCatalogFile["fmt"] {
+  if (rootName === "codex-sessions") return "codex";
+  if (rootName === "claude-projects") return "claude";
+  return "plain";
+}
+
+function fallbackTitle(raw: RawEntry, kind: string): string {
+  const filename = path.basename(raw.path);
+  if (kind === "subagent") return "Subagent " + filename.slice("agent-".length).split(".")[0];
+  if (raw.rootName === "codex-sessions") return "Codex session";
+  if (raw.rootName === "claude-projects") return "Claude session";
+  return "Background task " + filename.split(".")[0];
 }
 
 function cachedFile(raw: RawEntry, state: ProjectCatalogState, stateKey: string): ProjectCatalogFile {
@@ -94,9 +131,18 @@ function cachedFile(raw: RawEntry, state: ProjectCatalogState, stateKey: string)
     cached &&
     cached.size === raw.st.size &&
     cached.mtimeMs === raw.st.mtimeMs &&
-    cached.stateKey === stateKey
+    cached.stateKey === stateKey &&
+    cached.projectRoot !== undefined
   ) {
-    return { path: raw.path, ...cached };
+    return {
+      path: raw.path,
+      ...cached,
+      session: isConversation(raw.rootName, cached.kind),
+      title: cached.title ?? fallbackTitle(raw, cached.kind),
+      titleCached: typeof cached.title === "string",
+      engine: cached.engine ?? engineForRoot(raw.rootName),
+      fmt: cached.fmt ?? fmtForRoot(raw.rootName),
+    };
   }
   const meta = describe(raw.rootName, raw.root, raw.path, raw.st, stateKey);
   const file: ProjectCatalogFile = {
@@ -106,8 +152,14 @@ function cachedFile(raw: RawEntry, state: ProjectCatalogState, stateKey: string)
     mtimeMs: raw.st.mtimeMs,
     stateKey,
     project: meta.project || "other",
+    projectRoot: meta.projectRoot ?? null,
     kind: meta.kind,
-    session: isRootSession(raw.rootName, meta.kind),
+    session: isConversation(raw.rootName, meta.kind),
+    worktree: meta.worktree,
+    title: meta.title,
+    titleCached: true,
+    engine: meta.engine,
+    fmt: meta.fmt,
   };
   state.files[raw.path] = {
     rootName: file.rootName,
@@ -115,8 +167,13 @@ function cachedFile(raw: RawEntry, state: ProjectCatalogState, stateKey: string)
     mtimeMs: file.mtimeMs,
     stateKey: file.stateKey,
     project: file.project,
+    projectRoot: file.projectRoot,
     kind: file.kind,
     session: file.session,
+    worktree: file.worktree,
+    title: file.titleCached ? file.title : undefined,
+    engine: file.engine,
+    fmt: file.fmt,
   };
   return file;
 }
@@ -151,7 +208,7 @@ function unambiguousMigrations(
   return migrations;
 }
 
-export function projectCatalogSnapshotFromRaw(raw: RawEntry[], options: { persist?: boolean } = {}): {
+export function projectCatalogSnapshotFromRaw(raw: RawEntry[], options: { persist?: boolean; excludedSummaryPaths?: ReadonlySet<string> } = {}): {
   projectCatalog: ProjectCatalogEntry[];
   projectByPath: Map<string, string>;
 } {
@@ -159,6 +216,7 @@ export function projectCatalogSnapshotFromRaw(raw: RawEntry[], options: { persis
   const stateKey = projectResolutionStateKey();
   const nextFiles: Record<string, CachedProjectFile> = {};
   const groups = new Map<string, ProjectCatalogEntry>();
+  const rootCandidates = new Map<string, Map<string, { count: number; newest: number }>>();
   const projectByPath = new Map<string, string>();
   const previousProjects = new Map(raw.map((entry) => [entry.path, state.files[entry.path]?.project]));
   const files = raw.map((entry) => cachedFile(entry, state, stateKey));
@@ -182,8 +240,13 @@ export function projectCatalogSnapshotFromRaw(raw: RawEntry[], options: { persis
       mtimeMs: file.mtimeMs,
       stateKey: file.stateKey,
       project: file.project,
+      projectRoot: file.projectRoot,
       kind: file.kind,
       session: file.session,
+      worktree: file.worktree,
+      title: file.titleCached ? file.title : undefined,
+      engine: file.engine,
+      fmt: file.fmt,
     };
     const previousProject = previousProjects.get(file.path);
     if (previousProject && previousProject !== file.project) {
@@ -200,7 +263,43 @@ export function projectCatalogSnapshotFromRaw(raw: RawEntry[], options: { persis
     }
     group.smt = Math.max(group.smt, file.mtimeMs / 1000);
     if (file.session) group.conversations += 1;
+    if (file.projectRoot && !options.excludedSummaryPaths?.has(file.path)) {
+      const candidates = rootCandidates.get(project) ?? new Map<string, { count: number; newest: number }>();
+      const candidate = candidates.get(file.projectRoot) ?? { count: 0, newest: 0 };
+      candidate.count += 1;
+      candidate.newest = Math.max(candidate.newest, file.mtimeMs);
+      candidates.set(file.projectRoot, candidate);
+      rootCandidates.set(project, candidates);
+    }
   }
+  for (const [project, candidates] of rootCandidates) {
+    const projectRoot = [...candidates]
+      .sort(([leftPath, left], [rightPath, right]) =>
+        right.count - left.count || right.newest - left.newest || leftPath.localeCompare(rightPath))[0]?.[0];
+    if (projectRoot) groups.get(project)!.projectRoot = projectRoot;
+  }
+  for (const pathname of options.excludedSummaryPaths ?? []) {
+    const file = nextFiles[pathname];
+    const group = file ? groups.get(file.project || "other") : undefined;
+    if (file?.session && group && group.conversations > 0) group.conversations -= 1;
+  }
+  replaceConversationCatalog(files.flatMap((file, index) => {
+    if (!file.session || (file.engine !== "codex" && file.engine !== "claude")) return [];
+    return [{
+      path: file.path,
+      root: file.rootName,
+      name: path.relative(raw[index]!.root, file.path),
+      project: file.project || "other",
+      worktree: file.worktree,
+      title: file.title,
+      firstPrompt: "",
+      engine: file.engine,
+      kind: file.kind,
+      fmt: file.fmt,
+      mtime: file.mtimeMs / 1000,
+      size: file.size,
+    }];
+  }));
   if (options.persist !== false) {
     let boardHealed = true;
     try {
@@ -209,7 +308,7 @@ export function projectCatalogSnapshotFromRaw(raw: RawEntry[], options: { persis
       boardHealed = false;
     }
     if (boardHealed) {
-      writeState({ version: 1, resolutionVersion: PROJECT_RESOLUTION_VERSION, files: nextFiles });
+      writeState({ version: 2, resolutionVersion: PROJECT_RESOLUTION_VERSION, files: nextFiles });
     } else {
       console.error("[project catalog] board project migration deferred; a later scan will retry");
     }

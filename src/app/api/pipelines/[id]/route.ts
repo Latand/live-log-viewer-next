@@ -8,7 +8,10 @@ import type { ApiError } from "@/lib/types";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const ACTIONS = new Set<PipelineAction>(["pause", "resume", "retry-stage", "skip-stage", "override-stage", "close"]);
+const ACTIONS = new Set<PipelineAction>([
+  "start", "update-draft", "add-stage", "remove-stage", "reorder-stage",
+  "pause", "resume", "retry-stage", "skip-stage", "override-stage", "delete", "close",
+]);
 
 export async function PATCH(
   req: NextRequest,
@@ -32,5 +35,21 @@ export async function PATCH(
     return NextResponse.json({ ok: true, pipeline: result.pipeline });
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : "could not update pipeline" }, { status: 500 });
+  }
+}
+
+export async function DELETE(
+  req: NextRequest,
+  ctx: { params: Promise<{ id: string }> },
+): Promise<NextResponse<{ ok: true; pipeline: Pipeline } | ApiError>> {
+  const rejection = rejectCrossOrigin(req);
+  if (rejection) return rejection;
+  const { id } = await ctx.params;
+  try {
+    const result = await patchPipeline(id, { action: "delete" });
+    if (!result.pipeline) return NextResponse.json({ error: result.error ?? "could not delete pipeline" }, { status: result.status ?? 400 });
+    return NextResponse.json({ ok: true, pipeline: result.pipeline });
+  } catch (error) {
+    return NextResponse.json({ error: error instanceof Error ? error.message : "could not delete pipeline" }, { status: 500 });
   }
 }

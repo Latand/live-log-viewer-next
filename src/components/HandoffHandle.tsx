@@ -16,10 +16,10 @@ interface Props {
   file: FileEntry;
   /** Opens (or refocuses) the handoff draft pane under this conversation. */
   onHandoff: () => void;
-  /** Phone variant (finding 1): render as an in-flow 44px button below the pane
-      instead of the scheme's floating `-bottom-11` handle, so it reserves its
-      own space and never straddles the docked footer below the focus view. */
-  docked?: boolean;
+  /** Phone variant (issue #177 item 5): a compact 44px button that docks in the
+      footer shelf row beside the collapsed-worker / quiet disclosure, so the
+      three bottom concerns share one row. */
+  inline?: boolean;
 }
 
 /**
@@ -30,12 +30,15 @@ interface Props {
  * DraftAgentPane that inherits this conversation's transcript and directory.
  * Pulling the handle instead of clicking still links to an existing pane.
  */
-export function HandoffHandle({ file, onHandoff, docked = false }: Props) {
+export function HandoffHandle({ file, onHandoff, inline = false }: Props) {
   const { t } = useLocale();
   const link = useAgentLink(file);
-  if (docked) {
+  if (inline) {
+    /* Compact 44px button for the footer shelf row (issue #177 item 5): the
+       handoff shares that single row with the collapsed-worker / quiet
+       disclosure, so the phone footer stays one row. */
     return (
-      <div data-scheme-ui className="shrink-0 px-1.5 pt-1.5">
+      <span data-scheme-ui className="inline-flex shrink-0 pl-1.5">
         <button
           type="button"
           aria-label={t("handoff.aria")}
@@ -51,7 +54,7 @@ export function HandoffHandle({ file, onHandoff, docked = false }: Props) {
           {t("handoff.label")}
         </button>
         {link.overlay}
-      </div>
+      </span>
     );
   }
   return (

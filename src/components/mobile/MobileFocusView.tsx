@@ -4,6 +4,7 @@ import { ListTodo, Map as MapIcon, Pause, Play } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { Loader2, X } from "@/components/icons";
+import { Badge } from "@/components/ui/Badge";
 import { TaskSheet, type TaskSheetView } from "@/components/tasks/TaskSheet";
 import { viewBus } from "@/hooks/viewPresenceBus";
 import type { Flow } from "@/lib/flows/types";
@@ -19,7 +20,6 @@ import { DraftAgentPane } from "@/components/DraftAgentPane";
 import { isWorkflowDraftId } from "@/components/workflows/workflowModel";
 import { WorkflowDraftPane } from "@/components/workflows/WorkflowDraftPane";
 import { RoundDeck } from "@/components/flows/RoundDeck";
-import { canHandoff, HandoffHandle } from "@/components/HandoffHandle";
 import { mapReachable } from "./mapGate";
 import { paneState, type PaneState } from "@/components/paneState";
 import type { BranchGroup } from "@/components/projectModel";
@@ -72,7 +72,10 @@ interface Props {
   onClose: (path: string) => void;
   onDraftClose: (id: string) => void;
   onDraftSpawned: (id: string, file: FileEntry) => void;
-  onHandoff?: (file: FileEntry) => void;
+  /** Reports the focused conversation's file (or null) so the project shell can
+      dock a single handoff control in the footer shelf row (issue #177 item 5),
+      keeping the handoff, collapsed-worker, and quiet strips on one row. */
+  onActiveChange?: (file: FileEntry | null) => void;
   /** Bumped by the header `+ Task` button to open the sheet's create view. */
   taskSheetNonce?: number;
 }
@@ -95,7 +98,7 @@ export function pipelinesToDock(groups: SchemeGroup[]): Pipeline[] {
  * data the scheme draws — nothing on the diagram is unreachable, it is just
  * shown one pane at a time.
  */
-export function MobileFocusView({ project, groups, manual, files, flows, pipelines, surfacePipelines = [], workerStacks = [], tasks, drafts, loaded, focus, onSelect, onClose, onDraftClose, onDraftSpawned, onHandoff, taskSheetNonce = 0 }: Props) {
+export function MobileFocusView({ project, groups, manual, files, flows, pipelines, surfacePipelines = [], workerStacks = [], tasks, drafts, loaded, focus, onSelect, onClose, onDraftClose, onDraftSpawned, onActiveChange, taskSheetNonce = 0 }: Props) {
   const { t } = useLocale();
   const [focusPath, setFocusPath] = useState<string | null>(null);
   const [mapOpen, setMapOpen] = useState(false);
@@ -180,6 +183,13 @@ export function MobileFocusView({ project, groups, manual, files, flows, pipelin
   const activeNode = useMemo(() => layout.nodes.find((node) => node.file.path === resolvedKey) ?? null, [layout, resolvedKey]);
   const activeDeck = useMemo(() => layout.decks.find((deck) => deck.key === resolvedKey) ?? null, [layout, resolvedKey]);
   const activeDraft = useMemo(() => layout.drafts.find((draft) => draft.key === resolvedKey) ?? null, [layout, resolvedKey]);
+  /* Report the focused conversation up so the project shell can dock its handoff
+     control in the footer shelf row (issue #177 item 5). Cleared on unmount so a
+     switch to the list view drops the stale handoff target. */
+  useEffect(() => {
+    onActiveChange?.(activeNode?.file ?? null);
+  }, [activeNode, onActiveChange]);
+  useEffect(() => () => onActiveChange?.(null), [onActiveChange]);
   /* EVERY active pipeline gets a dedicated 44px full-plan/control card on the
      phone (issue #156, HIGH). The mobile lite map passes no pipelineControls, so
      GroupsLayer never paints the past/current/future strip there; a memberful
@@ -365,20 +375,16 @@ export function MobileFocusView({ project, groups, manual, files, flows, pipelin
           the safe-area insets keep the pane off the screen edges symmetrically. */}
       <div className="relative flex min-h-0 flex-1 flex-col py-1.5 pl-[max(0.375rem,env(safe-area-inset-left))] pr-[max(0.375rem,env(safe-area-inset-right))] pb-[max(0.375rem,env(safe-area-inset-bottom))]">
         {activeNode ? (
-          <div key={activeNode.file.path} className="flex min-h-0 flex-1 flex-col">
-            <div className="relative flex min-h-0 flex-1">
-              <BranchPane
-                file={activeNode.file}
-                tasks={activeNode.tasks}
-                isRoot={activeNode.isRoot}
-                onClose={() => onClose(activeNode.file.path)}
-                dragHandle={swipeHandle}
-              />
-            </div>
-            {/* Docked in flow below the pane (finding 1): reserves its own 44px
-                row instead of the scheme's floating handle, so it never overlaps
-                the WorkerStacks footer under the focus view. */}
-            {onHandoff && canHandoff(activeNode.file) ? <HandoffHandle file={activeNode.file} onHandoff={() => onHandoff(activeNode.file)} docked /> : null}
+          /* The handoff control for this pane docks in the footer shelf row
+             (issue #177 item 5), so the focus view itself renders only the pane. */
+          <div key={activeNode.file.path} className="flex min-h-0 flex-1">
+            <BranchPane
+              file={activeNode.file}
+              tasks={activeNode.tasks}
+              isRoot={activeNode.isRoot}
+              onClose={() => onClose(activeNode.file.path)}
+              dragHandle={swipeHandle}
+            />
           </div>
         ) : activeDeck ? (
           <div key={activeDeck.key} className="relative min-h-0 flex-1">
@@ -600,6 +606,7 @@ function PipelineFocusRow({ pipeline, index, renderableFlows, renderablePaths, o
 
 /** Pipeline state → the header dot tone (busy accent, attention amber, done ok). */
 function pipelineDotColor(pipeline: Pipeline): string {
+  if (pipeline.state === "draft") return "var(--color-warning)";
   if (PIPELINE_BUSY_STATES.has(pipeline.state)) return "var(--color-accent)";
   if (PIPELINE_ATTENTION_STATES.has(pipeline.state)) return "var(--color-warning)";
   if (pipeline.state === "completed") return "var(--color-success)";
@@ -628,13 +635,15 @@ export function MobilePipelineDock({ pipeline }: { pipeline: Pipeline }) {
     if (fail) setError(fail);
     setBusy(false);
   };
+  const draft = pipeline.state === "draft";
   const finished = pipeline.state === "completed" || pipeline.state === "closed";
   const parked = pipeline.state === "needs_decision";
   return (
-    <div className="flex flex-col gap-2 px-3 py-2" data-testid="mobile-pipeline-dock" role="group" aria-label={t("pipelineMobile.chipAria", { task: pipeline.task })}>
+    <div className={`flex flex-col gap-2 px-3 py-2 ${draft ? "border-y border-dashed border-warning/70 bg-warning-soft" : ""}`} data-testid="mobile-pipeline-dock" data-pipeline-draft={draft || undefined} role="group" aria-label={t("pipelineMobile.chipAria", { task: pipeline.task })}>
       <div className="flex items-center gap-2">
         <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: pipelineDotColor(pipeline) }} aria-hidden />
         <span className="min-w-0 flex-1 truncate text-[12.5px] font-bold text-primary">{cleanTitle(pipeline.task, 60)}</span>
+        {draft ? <Badge tone="warning">{t("pipelineStrip.draftBadge")}</Badge> : null}
         <span className="shrink-0 text-[11px] font-semibold text-muted">{pipelineStateLabel(t, pipeline.state)}</span>
       </div>
       {/* The whole planned stage graph, scrolled horizontally — past/current/ghost. */}
@@ -660,13 +669,17 @@ export function MobilePipelineDock({ pipeline }: { pipeline: Pipeline }) {
           PipelineStrip). Fixes the completed-pipeline dead end (review round 4). */}
       {pipeline.state === "closed" ? null : (
         <div className="flex flex-wrap items-center gap-1.5">
-          {parked ? (
+          {draft ? (
+            <button type="button" className="inline-flex h-11 items-center gap-1 rounded-full border border-accent bg-accent px-3.5 text-[11px] font-bold text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 disabled:opacity-40" disabled={busy || pipeline.stages.length < 2} onClick={() => void mutate("start")}>
+              <Play className="h-4 w-4" aria-hidden /> {t("pipelineStrip.start")}
+            </button>
+          ) : parked ? (
             <>
               <button type="button" className="inline-flex h-11 items-center rounded-full border border-accent bg-accent px-3.5 text-[11px] font-bold text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40" disabled={busy} onClick={() => void mutate("retry-stage")}>{t("pipelineStrip.retryStage")}</button>
               <button type="button" className="inline-flex h-11 items-center rounded-full border border-border bg-canvas px-3.5 text-[11px] font-bold text-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40" disabled={busy} onClick={() => void mutate("skip-stage")}>{t("pipelineStrip.skipStage")}</button>
             </>
           ) : null}
-          {finished ? null : pipeline.state === "paused" ? (
+          {draft || finished ? null : pipeline.state === "paused" ? (
             <button type="button" className="inline-flex h-11 items-center gap-1 rounded-full border border-success/40 bg-success-soft px-3.5 text-[11px] font-bold text-success focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40" disabled={busy} aria-label={t("pipelineStrip.resume")} onClick={() => void mutate("resume")}>
               <Play className="h-4 w-4" aria-hidden /> {t("pipelineStrip.resume")}
             </button>
@@ -675,8 +688,8 @@ export function MobilePipelineDock({ pipeline }: { pipeline: Pipeline }) {
               <Pause className="h-4 w-4" aria-hidden /> {t("pipelineStrip.pause")}
             </button>
           )}
-          <button type="button" className="inline-flex h-11 items-center gap-1 rounded-full border border-border bg-canvas px-3.5 text-[11px] font-bold text-muted hover:text-danger focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40" disabled={busy} aria-label={t("pipelineStrip.close")} onClick={() => void mutate("close")}>
-            <X className="h-4 w-4" aria-hidden /> {t("pipelineStrip.close")}
+          <button type="button" className="inline-flex h-11 items-center gap-1 rounded-full border border-border bg-canvas px-3.5 text-[11px] font-bold text-muted hover:text-danger focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40" disabled={busy} aria-label={t(draft ? "pipelineStrip.discard" : "pipelineStrip.close")} onClick={() => void mutate(draft ? "delete" : "close")}>
+            <X className="h-4 w-4" aria-hidden /> {t(draft ? "pipelineStrip.discard" : "pipelineStrip.close")}
           </button>
         </div>
       )}

@@ -23,10 +23,15 @@ mock.module("./process", () => ({
     return null;
   },
   isHelperArgv: () => false,
+  outputHolders: () => new Map(),
   pidAlive: (pid: number) => processes.some((proc) => proc.pid === pid),
+  pidHoldsPath: () => false,
   pidWritesPath: () => false,
   readArgv: (pid: number) => processes.find((proc) => proc.pid === pid)?.argv ?? [],
+  readCmdlineText: () => "",
   readCwd: (pid: number) => processes.find((proc) => proc.pid === pid)?.cwd ?? null,
+  readEnvVar: () => null,
+  readPpid: () => null,
   writingHolders: (paths: Iterable<string>) => {
     const out = new Map<string, number>();
     for (const pathname of paths) {
@@ -37,7 +42,25 @@ mock.module("./process", () => ({
   },
 }));
 
-const { assignTranscriptPids } = await import("./transcripts");
+const { assignTranscriptPids, claudeSubagentOwnerPath, transcriptProcessOwnsEntry } = await import("./transcripts");
+
+test("a Claude subagent resolves to the top-level session that owns its writer", () => {
+  const root = "/home/u/.claude/projects";
+  expect(claudeSubagentOwnerPath(
+    "/home/u/.claude/projects/project/session-1/subagents/agent-child.jsonl",
+    root,
+  )).toBe("/home/u/.claude/projects/project/session-1.jsonl");
+  expect(claudeSubagentOwnerPath("/home/u/.claude/projects/project/session-1.jsonl", root)).toBeNull();
+});
+
+test("destructive checks recognize an idle Claude session through uncapped cwd ownership", () => {
+  const pathname = "/home/user/.claude/projects/-repo/idle-session.jsonl";
+  const file = entry(pathname, { activity: "idle" });
+  const proc = { pid: 4401, engine: "claude" as const, argv: ["claude"], cwd: "/repo", tty: 1 };
+  processes.push(proc);
+
+  expect(transcriptProcessOwnsEntry(file, proc, "claude:-repo")).toBe(true);
+});
 
 function entry(pathname: string, overrides: Partial<FileEntry> = {}): FileEntry {
   return {

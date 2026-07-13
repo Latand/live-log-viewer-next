@@ -38,6 +38,7 @@ test("a conversation-id pin resolves to its current generation path", () => {
   const conversation = store.ensureConversation("codex", "/repo/current.jsonl", "default");
   setAgentRegistryForTests(store);
   expect(pinnedPathsFor(conversation.id)).toEqual(new Set(["/repo/current.jsonl"]));
+  expect(pinnedPathsFor([conversation.id, "/plain/path.jsonl"])).toEqual(new Set(["/repo/current.jsonl", "/plain/path.jsonl"]));
   /* Paths outside the registry pass through; unknown ids leave the scan unpinned. */
   expect(pinnedPathsFor("/plain/path.jsonl")).toEqual(new Set(["/plain/path.jsonl"]));
   expect(pinnedPathsFor("conversation_unknown")).toEqual(new Set());

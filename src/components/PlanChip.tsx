@@ -92,6 +92,11 @@ export function CtxChip({ ctx }: { ctx: CtxUsage }) {
   }
   return (
     <Badge tone={ctxTone(ctx.pct)} title={title} aria-label={ariaLabel}>
+      {/* The percentage leads the chip face whenever it is known (issue #177
+          item 1), giving the phone header the exact context % at a glance. When
+          the model's window is unknown the percentage is undefined, so the chip
+          falls to the used-token count below, which stays numeric. */}
+      {ctx.pct === null ? null : <span className="font-bold">{ctx.pct}%</span>}
       ctx {fmtTokens(ctx.usedTokens)}
       {ctx.windowTokens === null ? null : (
         <>

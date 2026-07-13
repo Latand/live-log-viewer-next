@@ -6,6 +6,7 @@ import { codexSessionRoots } from "@/lib/accounts/codex";
 import { claudeProjectRoots } from "@/lib/accounts/claude";
 
 import type { RootKey } from "../types";
+import { DEFAULT_SCHEME_CARDS_PER_PROJECT, DEFAULT_SCHEME_PROJECT_CAP } from "./schemeWindow";
 
 const HOME = os.homedir();
 
@@ -57,11 +58,8 @@ export const EXTS = [".log", ".jsonl", ".output", ".txt"] as const;
 
 export const MAX_CHUNK = 768 * 1024;
 
-/** Base target for entries returned by /api/files (most recent first). */
-export const FILE_CAP = 800;
-
-/** Recent entries reserved for every project before the global recency fill. */
-export const PROJECT_FILE_FLOOR = 10;
+/** Default upper bound of the two-dimensional scheme window. */
+export const FILE_CAP = DEFAULT_SCHEME_PROJECT_CAP * DEFAULT_SCHEME_CARDS_PER_PROJECT;
 
 function realpathSafe(p: string): string | null {
   try {

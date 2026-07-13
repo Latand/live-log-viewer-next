@@ -17,6 +17,7 @@ import { ProtocolMessageBody, parseProtocolPayload } from "./cards/ProtocolMessa
 import { ReviewCard } from "./cards/ReviewCard";
 import { SysMsgCard } from "./cards/SysMsgCard";
 import { ToolCard } from "./cards/ToolCard";
+import { WakeupCard } from "./cards/WakeupCard";
 import { SpeakButton } from "./SpeakButton";
 
 /* Memoized: feed items are immutable after buildFeed, so a pane re-render
@@ -82,6 +83,7 @@ export const FeedItem = memo(function FeedItem({ item, speakText }: { item: Item
       </div>
     );
   }
+  if (item.kind === "tool" && item.wakeup) return <WakeupCard event={item} wakeup={item.wakeup} />;
   if (item.kind === "tool") return <ToolCard event={item} />;
   if (item.kind === "cmd-group") return <CmdGroupCard item={item} />;
   if (item.kind === "tmsg") {

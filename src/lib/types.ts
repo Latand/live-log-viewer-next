@@ -30,6 +30,10 @@ export interface FileEntry {
   /** Path relative to its root. */
   name: string;
   project: string;
+  /** Working directory recorded by the conversation transcript. */
+  cwd?: string | null;
+  /** Canonical parent-repository root when cwd belongs to a linked worktree. */
+  projectRoot?: string | null;
   /** Git worktree name when cwd lives under <repo>/.claude/worktrees/<name>. */
   worktree?: string;
   title: string;
@@ -90,6 +94,8 @@ export interface FileEntry {
   fast?: boolean | null;
   /** Structured Claude prompt that is currently blocking the live agent. */
   pendingQuestion: PendingQuestion | null;
+  /** Newest still-pending self-scheduled wakeup, for the board timer chip. */
+  pendingWakeup?: PendingWakeup | null;
   /** Newest TodoWrite/update_plan state — the agent's plan and current goal. */
   plan?: AgentPlan | null;
   /** Context-window fullness from the transcript tail, when it carries usage. */
@@ -158,6 +164,8 @@ export interface ConversationMigration {
 
 export interface ProjectCatalogEntry {
   project: string;
+  /** Canonical repository root derived from every conversation in the full scan. */
+  projectRoot?: string;
   /** Unix seconds of the newest valid transcript candidate in the project. */
   smt: number;
   /** Lightweight count from the full candidate scan. */
@@ -166,7 +174,11 @@ export interface ProjectCatalogEntry {
 
 export interface FilesResponse {
   files: FileEntry[];
+  /** Rows added only to resolve the current deep-link pin, including closure. */
+  pinOverlayPaths?: string[];
   projectCatalog?: ProjectCatalogEntry[];
+  /** Existing local repository fallback for projects whose conversations lack cwd metadata. */
+  projectCwds?: Record<string, string>;
   flows: Flow[];
   pipelines: Pipeline[];
   /** Present when the pipelines store failed closed; the rest of the payload stays valid. */
@@ -248,6 +260,17 @@ export interface PendingQuestion {
   askedAt: string;
   questions?: PendingQuestionItem[];
   plan?: string;
+}
+
+/** The newest still-pending `ScheduleWakeup` of a conversation, surfaced as a
+    board timer chip so an idle-looking orchestrator reads as sleeping until a
+    known time (issue #161 §3). Absent once the wakeup has fired or been
+    superseded. */
+export interface PendingWakeup {
+  /** Absolute fire time in epoch ms. */
+  fireAt: number;
+  /** The one-line "why", for the chip's hover/tap title. */
+  reason: string;
 }
 
 export interface WaitingMenuOption {

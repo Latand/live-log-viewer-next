@@ -1,5 +1,3 @@
-import { after } from "next/server";
-
 import { buildFilesResponse } from "./response";
 import { cachedFileScan } from "./scanCache";
 
@@ -13,8 +11,7 @@ export async function GET(request: Request): Promise<Response> {
   return buildFilesResponse(request, {
     listFilesWithProjectCatalog: async (selectedProject, pinnedPath) => {
       const scan = await cachedFileScan(selectedProject, pinnedPath, Date.now(), requiredRevision);
-      if (scan.refreshAfterResponse) after(scan.refreshAfterResponse);
-      return scan.snapshot;
+      return { ...scan.snapshot, pinOverlayPaths: scan.pinOverlayPaths };
     },
   });
 }

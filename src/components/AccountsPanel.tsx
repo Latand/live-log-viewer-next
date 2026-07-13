@@ -7,6 +7,7 @@ import {
   claudeLoginErrKey,
   NONTERMINAL_CLAUDE_LOGIN_PHASES,
   type AccountOperation,
+  type AccountAuthHealth,
   type AccountOption,
   type EngineAccountsState,
 } from "@/hooks/useEngineAccounts";
@@ -20,6 +21,12 @@ import { engineTintOf } from "./utils";
 /** Amber that clears contrast on the panel background — state legibility never
     leans on color alone, so this pairs with the "needs sign-in" text chip. */
 const NEEDS_LOGIN_COLOR = "var(--color-warning)";
+const AUTH_HEALTH_KEY = {
+  authenticated: "accounts.auth.authenticated",
+  signed_out: "accounts.auth.signedOut",
+  unknown: "accounts.auth.unknown",
+  error: "accounts.auth.error",
+} as const satisfies Record<AccountAuthHealth, Parameters<TFunction>[0]>;
 
 function engineDisplay(engine: "claude" | "codex"): string {
   return engine === "claude" ? "Claude" : "Codex";
@@ -124,6 +131,18 @@ function StateChip({ state }: { state: RowState }) {
   return null;
 }
 
+function AuthIdentity({ account }: { account: AccountOption }) {
+  const { t } = useLocale();
+  const health: AccountAuthHealth = account.authHealth ?? (account.authPresent ? "unknown" : "signed_out");
+  return (
+    <span className="flex min-w-0 items-center gap-1 text-[9.5px] font-medium text-muted">
+      <code className="truncate font-mono">{account.id}</code>
+      <span aria-hidden>·</span>
+      <span className="shrink-0">{t(AUTH_HEALTH_KEY[health])}</span>
+    </span>
+  );
+}
+
 function AccountRow({ account, engine, activeId, onSelect, onRemove, disabled }: { account: AccountOption; engine: "claude" | "codex"; activeId: string; onSelect: () => void; onRemove: () => void; disabled: boolean }) {
   const { t } = useLocale();
   const state = rowState(account, activeId);
@@ -144,7 +163,10 @@ function AccountRow({ account, engine, activeId, onSelect, onRemove, disabled }:
         className="flex min-h-[44px] w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-canvas disabled:cursor-wait disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 sm:min-h-0"
       >
         <span className="flex h-3.5 w-3.5 shrink-0 items-center justify-center">{isActive ? <Check className="h-3.5 w-3.5 text-accent" aria-hidden /> : null}</span>
-        <span className={`min-w-0 flex-1 truncate text-[12.5px] ${isActive ? "font-bold text-primary" : "font-semibold"}`}>{account.label}</span>
+        <span className="min-w-0 flex-1">
+          <span className={`block truncate text-[12.5px] ${isActive ? "font-bold text-primary" : "font-semibold"}`}>{account.label}</span>
+          <AuthIdentity account={account} />
+        </span>
         <CapacityChip account={account} engine={engine} />
         <StateChip state={state} />
       </button>

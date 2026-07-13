@@ -1,15 +1,15 @@
 "use client";
 
-import { Pause, Play, RefreshCw, Square, X } from "lucide-react";
+import { ArrowDown, ArrowUp, Pause, Play, Plus, RefreshCw, Square, Trash2, X } from "lucide-react";
 import { useMemo, useState } from "react";
 
 import { ENGINE_EFFORTS } from "@/lib/agent/efforts";
 import type { FlowEngine } from "@/lib/flows/types";
-import type { PipelineStage } from "@/lib/pipelines/types";
+import type { PipelineStage, PipelineStageKind } from "@/lib/pipelines/types";
 import { useLocale } from "@/lib/i18n";
 
 import { flowPresentation, patchFlow } from "@/components/flows/flowModel";
-import { patchPipeline, PIPELINE_ROLE_OPTIONS, stageOverrideBody } from "@/components/pipelines/pipelineModel";
+import { patchPipeline, PIPELINE_ROLE_OPTIONS, reviewLoopChainValid, stageOverrideBody } from "@/components/pipelines/pipelineModel";
 
 import type { SchemeGroup } from "./layout";
 
@@ -53,7 +53,7 @@ export function GroupOverridePanel({ group, onClose }: { group: SchemeGroup; onC
       data-group-override={group.kind}
       role="dialog"
       aria-label={group.label}
-      className="flex w-[268px] flex-col gap-2 rounded-[12px] border border-border bg-card p-3 shadow-2"
+      className={`flex flex-col gap-2 rounded-[12px] border border-border bg-card p-3 shadow-2 ${group.pipeline?.state === "draft" ? "w-[320px]" : "w-[268px]"}`}
     >
       {group.flow ? <FlowOverride group={group} onClose={onClose} /> : null}
       {group.pipeline ? <PipelineOverride group={group} onClose={onClose} /> : null}
@@ -390,9 +390,178 @@ function StageForm({
   );
 }
 
+/**
+ * The on-canvas draft BUILDER (issue #136): the draft's stages as a vertical stack
+ * of cards, each the same {@link StageForm} the override-stage editor renders
+ * (role·engine·model·effort·prompt). The stack order IS the execution chain — drag
+ * a card (or use the move buttons) to reorder, which PATCHes `reorder-stage`; the
+ * per-card trash removes (`remove-stage`); the footer adds a run or review-loop
+ * stage (`add-stage`). Every action is a #189 draft PATCH — no second data path,
+ * no form. A draft's stages have never run, so all of them are editable.
+ */
+function DraftStageCards({
+  group,
+  busy,
+  run,
+}: {
+  group: SchemeGroup;
+  busy: boolean;
+  run: (label: string, action: () => Promise<string | null>) => Promise<void>;
+}) {
+  const { t } = useLocale();
+  const pipeline = group.pipeline!;
+  const stages = pipeline.stages;
+  const [dragId, setDragId] = useState<string | null>(null);
+  const [overId, setOverId] = useState<string | null>(null);
+
+  const kinds = stages.map((item) => item.kind);
+  /* A move/removal that would place a review-loop ahead of every run is invalid
+     (the API rejects it), so the controls that would produce one are disabled and
+     an out-of-band drop is a no-op — the plan on the canvas is always startable. */
+  const orderAfterMove = (from: number, to: number): PipelineStageKind[] => {
+    const next = [...kinds];
+    const [moved] = next.splice(from, 1);
+    next.splice(to, 0, moved!);
+    return next;
+  };
+  const canMoveTo = (fromIndex: number, toIndex: number) =>
+    toIndex >= 0 && toIndex < stages.length && toIndex !== fromIndex && reviewLoopChainValid(orderAfterMove(fromIndex, toIndex));
+  const canRemove = (index: number) => reviewLoopChainValid(kinds.filter((_, i) => i !== index));
+  /* A review-loop needs a preceding run, so the add-review control stays disabled
+     until at least one run exists (and while the plan is already at the 4-stage cap). */
+  const canAddReview = stages.length < 4 && stages.some((item) => item.kind === "run");
+
+  const moveTo = (stageId: string, toIndex: number) => {
+    const from = stages.findIndex((item) => item.id === stageId);
+    if (from < 0 || !canMoveTo(from, toIndex)) return;
+    void run(t("groupOverride.reordered"), () => patchPipeline(pipeline.id, "reorder-stage", { stageId, toIndex }));
+  };
+  const addStage = (kind: PipelineStageKind) => {
+    const ids = new Set(stages.map((item) => item.id));
+    let n = stages.length + 1;
+    while (ids.has(`stage-${n}`)) n += 1;
+    void run(t("groupOverride.stageAdded"), () =>
+      patchPipeline(pipeline.id, "add-stage", {
+        index: stages.length,
+        stage: { id: `stage-${n}`, kind, prompt: pipeline.task || "{{task}}", next: null },
+      }),
+    );
+  };
+  const removeStage = (stageId: string) =>
+    void run(t("groupOverride.stageRemoved"), () => patchPipeline(pipeline.id, "remove-stage", { stageId }));
+
+  /* Drop resolves against React state (dragId), which works in environments where
+     the drag payload (dataTransfer) is unavailable, and keeps this unit-testable.
+     Splice semantics: the dragged stage lands at the drop target's current slot;
+     a drop that would break the run→review chain is ignored (moveTo guards it). */
+  const onDrop = (targetId: string) => {
+    const from = dragId;
+    setDragId(null);
+    setOverId(null);
+    if (!from || from === targetId) return;
+    const toIndex = stages.findIndex((item) => item.id === targetId);
+    if (toIndex >= 0) moveTo(from, toIndex);
+  };
+
+  return (
+    <div className="flex flex-col gap-1.5">
+      <span className="text-[10.5px] font-bold text-primary">{t("groupOverride.stagesHeading")}</span>
+      <span className="text-[10px] font-semibold text-muted">{stages.length ? t("groupOverride.stagesHint") : t("groupOverride.stagesEmpty")}</span>
+      <div className="flex max-h-[46vh] flex-col gap-2 overflow-y-auto pr-0.5">
+        {stages.map((stage, index) => (
+          <div
+            key={stage.id}
+            data-stage-card={stage.id}
+            draggable={!busy}
+            onDragStart={(event) => {
+              setDragId(stage.id);
+              event.dataTransfer?.setData?.("text/plain", stage.id);
+            }}
+            onDragEnd={() => {
+              setDragId(null);
+              setOverId(null);
+            }}
+            onDragOver={(event) => {
+              event.preventDefault();
+              if (overId !== stage.id) setOverId(stage.id);
+            }}
+            onDrop={(event) => {
+              event.preventDefault();
+              onDrop(stage.id);
+            }}
+            className={`flex flex-col gap-1.5 rounded-[10px] border bg-card p-2 ${
+              overId === stage.id && dragId && dragId !== stage.id ? "border-accent" : "border-border"
+            } ${dragId === stage.id ? "opacity-60" : ""}`}
+          >
+            <div className="flex items-center gap-1.5">
+              <span
+                className="cursor-grab select-none text-[13px] leading-none text-muted"
+                aria-label={t("groupOverride.dragHandle")}
+                title={t("groupOverride.dragHandle")}
+              >
+                ⠿
+              </span>
+              <span className="inline-flex h-5 min-w-5 items-center justify-center rounded-full bg-sunken px-1.5 text-[10px] font-black text-muted">
+                {index + 1}
+              </span>
+              <span className="min-w-0 flex-1 truncate text-[10.5px] font-bold text-primary">{stage.role?.roleId ?? stage.id}</span>
+              <span className="shrink-0 rounded-full border border-border px-1.5 py-[1px] text-[9px] font-bold uppercase tracking-wide text-muted">
+                {t(stage.kind === "review-loop" ? "groupOverride.reviewKind" : "groupOverride.runKind")}
+              </span>
+              <button
+                className="inline-flex h-6 w-6 items-center justify-center rounded-full border border-border bg-canvas text-muted hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-30"
+                disabled={busy || !canMoveTo(index, index - 1)}
+                aria-label={t("groupOverride.moveStageUp")}
+                onClick={() => moveTo(stage.id, index - 1)}
+              >
+                <ArrowUp className="h-3 w-3" aria-hidden />
+              </button>
+              <button
+                className="inline-flex h-6 w-6 items-center justify-center rounded-full border border-border bg-canvas text-muted hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-30"
+                disabled={busy || !canMoveTo(index, index + 1)}
+                aria-label={t("groupOverride.moveStageDown")}
+                onClick={() => moveTo(stage.id, index + 1)}
+              >
+                <ArrowDown className="h-3 w-3" aria-hidden />
+              </button>
+              <button
+                className="inline-flex h-6 w-6 items-center justify-center rounded-full border border-border bg-canvas text-muted hover:text-danger focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-30"
+                disabled={busy || !canRemove(index)}
+                aria-label={t("groupOverride.removeStage")}
+                onClick={() => removeStage(stage.id)}
+              >
+                <Trash2 className="h-3 w-3" aria-hidden />
+              </button>
+            </div>
+            {/* Same key strategy as the override editor: remount when the resolved
+                runtime/prompt changes so the inputs re-seed after a save. */}
+            <StageForm
+              key={`${stage.id}:${stage.role?.roleId ?? ""}:${stage.effectiveRole.engine}:${stage.effectiveRole.model ?? ""}:${stage.effectiveRole.effort ?? ""}:${stage.prompt}`}
+              group={group}
+              stage={stage}
+              busy={busy}
+              disabled={false}
+              run={run}
+            />
+          </div>
+        ))}
+      </div>
+      <div className="grid grid-cols-2 gap-1.5">
+        <button className={ghostBtn} disabled={busy || stages.length >= 4} onClick={() => addStage("run")}>
+          <Plus className="h-3 w-3" aria-hidden /> {t("groupOverride.addRunStage")}
+        </button>
+        <button className={ghostBtn} disabled={busy || !canAddReview} onClick={() => addStage("review-loop")}>
+          <Plus className="h-3 w-3" aria-hidden /> {t("groupOverride.addReviewStage")}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function PipelineOverride({ group, onClose }: { group: SchemeGroup; onClose: () => void }) {
   const { t } = useLocale();
   const pipeline = group.pipeline!;
+  const draft = pipeline.state === "draft";
   /* Only stages that have not run yet can be re-configured — the engine snapshots
      a stage's config the moment its first attempt starts. */
   const editable = useMemo(
@@ -404,6 +573,9 @@ function PipelineOverride({ group, onClose }: { group: SchemeGroup; onClose: () 
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState<string | null>(null);
+  const [task, setTask] = useState(pipeline.task);
+  const [spec, setSpec] = useState(pipeline.spec ?? "");
+  const [repoDir, setRepoDir] = useState(pipeline.repoDir);
 
   const closed = pipeline.state === "completed" || pipeline.state === "closed";
   const parked = pipeline.state === "needs_decision";
@@ -421,11 +593,37 @@ function PipelineOverride({ group, onClose }: { group: SchemeGroup; onClose: () 
 
   return (
     <>
-      <PanelHeader title={t("groupOverride.pipelineTitle", { name: group.label })} onClose={onClose} />
+      <PanelHeader title={t(draft ? "groupOverride.draftTitle" : "groupOverride.pipelineTitle", { name: group.label })} onClose={onClose} />
       {error ? <span className="truncate text-[10.5px] font-semibold text-danger" title={error}>{error}</span> : null}
       {saved ? <span className="truncate text-[10.5px] font-semibold text-success">{saved}</span> : null}
 
-      {stage ? (
+      {draft ? (
+        <div className="flex flex-col gap-1.5 rounded-[9px] border border-dashed border-warning/60 bg-warning-soft p-2">
+          <label className="flex flex-col gap-1">
+            <span className={fieldLabel}>{t("groupOverride.task")}</span>
+            <input className={inputBase} value={task} onChange={(event) => setTask(event.target.value)} />
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className={fieldLabel}>{t("groupOverride.spec")}</span>
+            <textarea className="min-h-[52px] w-full resize-y rounded-[8px] border border-border bg-canvas px-2 py-1.5 text-[11.5px] font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40" value={spec} onChange={(event) => setSpec(event.target.value)} />
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className={fieldLabel}>{t("groupOverride.repoDir")}</span>
+            <input className={inputBase} value={repoDir} onChange={(event) => setRepoDir(event.target.value)} />
+          </label>
+          <button
+            className={primaryBtn}
+            disabled={busy || !task.trim() || !repoDir.trim()}
+            onClick={() => void run(t("groupOverride.savedDraft"), () => patchPipeline(pipeline.id, "update-draft", { task, spec, repoDir }))}
+          >
+            {t("groupOverride.saveDraft")}
+          </button>
+        </div>
+      ) : null}
+
+      {draft ? (
+        <DraftStageCards group={group} busy={busy} run={run} />
+      ) : stage ? (
         <>
           <label className="flex flex-col gap-1">
             <span className={fieldLabel}>{t("groupOverride.nextStage")}</span>
@@ -475,7 +673,16 @@ function PipelineOverride({ group, onClose }: { group: SchemeGroup; onClose: () 
       ) : null}
 
       <div className="flex items-center gap-1.5">
-        {closed ? null : pipeline.state === "paused" ? (
+        {draft ? (
+          <button
+            className="inline-flex min-h-11 flex-1 items-center justify-center gap-1 rounded-full border border-accent bg-accent px-3 text-[11px] font-bold text-white hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 disabled:opacity-40"
+            disabled={busy || pipeline.stages.length < 2}
+            title={pipeline.stages.length < 2 ? t("groupOverride.startNeedsStages") : undefined}
+            onClick={() => void run(t("pipelineStrip.start"), () => patchPipeline(pipeline.id, "start"))}
+          >
+            <Play className="h-3.5 w-3.5" aria-hidden /> {t("pipelineStrip.start")}
+          </button>
+        ) : closed ? null : pipeline.state === "paused" ? (
           <button
             className="inline-flex flex-1 items-center justify-center gap-1 rounded-full border border-success/40 bg-success-soft px-3 py-1 text-[11px] font-bold text-success hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40"
             disabled={busy}
@@ -495,9 +702,9 @@ function PipelineOverride({ group, onClose }: { group: SchemeGroup; onClose: () 
         <button
           className="inline-flex flex-1 items-center justify-center gap-1 rounded-full border border-border bg-canvas px-3 py-1 text-[11px] font-bold text-muted hover:text-danger focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40"
           disabled={busy}
-          onClick={() => void run(t("pipelineStrip.close"), () => patchPipeline(pipeline.id, "close"))}
+          onClick={() => void run(t(draft ? "pipelineStrip.discard" : "pipelineStrip.close"), () => patchPipeline(pipeline.id, draft ? "delete" : "close"))}
         >
-          <X className="h-3 w-3" aria-hidden /> {t("pipelineStrip.close")}
+          <X className="h-3 w-3" aria-hidden /> {t(draft ? "pipelineStrip.discard" : "pipelineStrip.close")}
         </button>
       </div>
     </>

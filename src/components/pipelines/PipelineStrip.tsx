@@ -5,6 +5,7 @@ import { useLayoutEffect, useRef, useState, type ReactNode, type RefObject } fro
 import { createPortal } from "react-dom";
 
 import { Hint } from "@/components/Hint";
+import { Badge } from "@/components/ui/Badge";
 import { currentRound } from "@/components/scheme/agentLinks";
 import type { Flow } from "@/lib/flows/types";
 import { useLocale } from "@/lib/i18n";
@@ -256,6 +257,7 @@ export function PipelineStrip({
     setBusy(false);
   };
   const attention = PIPELINE_ATTENTION_STATES.has(pipeline.state);
+  const draft = pipeline.state === "draft";
   const finished = pipeline.state === "completed" || pipeline.state === "closed";
   const detail = parkedDetail(pipeline);
   return (
@@ -263,7 +265,7 @@ export function PipelineStrip({
       data-scheme-ui
       role="group"
       aria-label={t("pipelineStrip.groupAria", { task: pipeline.task })}
-      className={`pointer-events-auto flex min-h-11 w-full flex-wrap items-center gap-3 rounded-[14px] border bg-card/95 py-1 shadow-1 ${compact ? "px-2.5" : "px-4"} ${attention ? "border-warning/70" : "border-border"}`}
+      className={`pointer-events-auto flex min-h-11 w-full flex-wrap items-center gap-3 rounded-[14px] border bg-card/95 py-1 shadow-1 ${compact ? "px-2.5" : "px-4"} ${draft ? "border-2 border-dashed border-warning bg-warning-soft" : attention ? "border-warning/70" : "border-border"}`}
     >
       <span className="flex min-w-0 max-w-[42%] shrink-0 items-center gap-2">
         {/* Tone matrix (§3), matching the hub + rail: busy → accent (pulse),
@@ -282,6 +284,7 @@ export function PipelineStrip({
           aria-hidden
         />
         {compact ? null : <span className="shrink-0 text-label font-semibold text-secondary">{t("pipelineStrip.pipeline")}</span>}
+        {draft ? <Badge tone="warning">{t("pipelineStrip.draftBadge")}</Badge> : null}
         <span className="min-w-0 truncate text-[12px] font-bold" title={pipeline.task}>{pipeline.task}</span>
         <span className="shrink-0 text-[11.5px] font-semibold text-muted">{pipelineStateLabel(t, pipeline.state)}</span>
         {detail ? <span className={`min-w-0 truncate text-[11.5px] font-semibold ${attention ? "text-warning" : "text-danger"}`} title={detail}>{detail}</span> : null}
@@ -307,18 +310,25 @@ export function PipelineStrip({
       <span className="flex shrink-0 items-center gap-1.5">
         {error ? <span className="max-w-[220px] truncate text-[10.5px] font-semibold text-danger" title={error}>{error}</span> : null}
         {busy ? <RefreshCw className="h-3.5 w-3.5 animate-spin text-muted" aria-hidden /> : null}
-        {pipeline.state === "needs_decision" ? (
+        {draft ? (
+          /* A draft may be empty (assembled on the canvas, #136) — Start is gated on
+             the 2-stage floor here too, matching the builder panel and mobile dock,
+             so the halo strip never fires a rejected PATCH. */
+          <button className="inline-flex min-h-8 items-center gap-1 rounded-full border border-accent bg-accent px-3 text-[11px] font-bold text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 disabled:opacity-40" disabled={busy || pipeline.stages.length < 2} title={pipeline.stages.length < 2 ? t("groupOverride.startNeedsStages") : undefined} onClick={() => void mutate("start")}>
+            <Play className="h-3.5 w-3.5" aria-hidden /> {t("pipelineStrip.start")}
+          </button>
+        ) : pipeline.state === "needs_decision" ? (
           <>
             <button className="rounded-full border border-accent bg-accent px-3 py-1 text-[11px] font-bold text-white disabled:opacity-40" disabled={busy} onClick={() => void mutate("retry-stage")}>{t("pipelineStrip.retryStage")}</button>
             <button className="rounded-full border border-border bg-canvas px-2.5 py-1 text-[10.5px] font-bold text-muted disabled:opacity-40" disabled={busy} onClick={() => void mutate("skip-stage")}>{t("pipelineStrip.skipStage")}</button>
           </>
         ) : null}
-        {finished ? null : pipeline.state === "paused" ? (
+        {draft || finished ? null : pipeline.state === "paused" ? (
           <Hint label={t("pipelineStrip.resume")}><button className="inline-flex h-6 w-6 items-center justify-center rounded-full text-success" disabled={busy} aria-label={t("pipelineStrip.resume")} onClick={() => void mutate("resume")}><Play className="h-3.5 w-3.5" aria-hidden /></button></Hint>
         ) : (
           <Hint label={t("pipelineStrip.pause")}><button className="inline-flex h-6 w-6 items-center justify-center rounded-full text-muted" disabled={busy} aria-label={t("pipelineStrip.pause")} onClick={() => void mutate("pause")}><Pause className="h-3.5 w-3.5" aria-hidden /></button></Hint>
         )}
-        <Hint label={t("pipelineStrip.close")}><button className="inline-flex h-6 w-6 items-center justify-center rounded-full text-muted hover:text-danger" disabled={busy} aria-label={t("pipelineStrip.close")} onClick={() => void mutate("close")}><X className="h-3.5 w-3.5" aria-hidden /></button></Hint>
+        <Hint label={t(draft ? "pipelineStrip.discard" : "pipelineStrip.close")}><button className="inline-flex h-6 w-6 items-center justify-center rounded-full text-muted hover:text-danger" disabled={busy} aria-label={t(draft ? "pipelineStrip.discard" : "pipelineStrip.close")} onClick={() => void mutate(draft ? "delete" : "close")}><X className="h-3.5 w-3.5" aria-hidden /></button></Hint>
       </span>
     </div>
   );

@@ -56,6 +56,56 @@ export function projectKey(file: FileEntry): string {
   return file.project || "other";
 }
 
+/**
+ * Initial cwd for a project draft. Handoffs preserve the source conversation's
+ * exact checkout. Fresh drafts choose the canonical root seen most often in
+ * the project's conversations, with newest activity breaking equal counts.
+ */
+export function draftWorkingDirectory(
+  files: readonly FileEntry[],
+  project: string,
+  sourcePath?: string,
+  fallbacks: readonly string[] = [],
+): string {
+  if (sourcePath) {
+    const source = files.find((file) => file.path === sourcePath);
+    if (source?.cwd?.trim()) return source.cwd.trim();
+  }
+
+  const candidates = new Map<string, { count: number; newest: number }>();
+  for (const file of files) {
+    if (projectKey(file) !== project) continue;
+    if (file.projectRoot === null) continue;
+    const cwd = file.projectRoot?.trim() || file.cwd?.trim();
+    if (!cwd) continue;
+    const current = candidates.get(cwd) ?? { count: 0, newest: 0 };
+    current.count += 1;
+    current.newest = Math.max(current.newest, file.mtime);
+    candidates.set(cwd, current);
+  }
+  const derived = [...candidates]
+    .sort(([leftPath, left], [rightPath, right]) =>
+      right.count - left.count || right.newest - left.newest || leftPath.localeCompare(rightPath))[0]?.[0] ?? "";
+  return derived || fallbacks.find((cwd) => cwd.trim())?.trim() || "";
+}
+
+export function projectDraftWorkingDirectory(
+  files: readonly FileEntry[],
+  project: string,
+  projectCatalog: readonly ProjectCatalogEntry[],
+  sourcePath?: string,
+  fallbacks: readonly string[] = [],
+  deterministicFallback = "/",
+): string {
+  if (sourcePath) {
+    const sourceCwd = files.find((file) => file.path === sourcePath)?.cwd?.trim();
+    if (sourceCwd) return sourceCwd;
+  }
+  const catalogRoot = projectCatalog.find((entry) => entry.project === project)?.projectRoot?.trim() ?? "";
+  if (catalogRoot) return catalogRoot;
+  return draftWorkingDirectory(files, project, undefined, [...fallbacks, deterministicFallback]) || deterministicFallback;
+}
+
 export interface ProjectSummary {
   project: string;
   /** Live entries anywhere in the project (branches running right now). */
@@ -389,9 +439,17 @@ export function resolveProjectView({
   hasArchiveNodes: boolean;
   hasHistoryRows: boolean;
 }): ProjectView {
+  const schemeAvailable = hasNodes || hasArchiveNodes;
+  /* An explicit toggle choice wins whenever the chosen view has something to
+     show — the Схема/Список control must switch reliably even while the scheme
+     still holds live nodes (issue #177 item 7). Previously an active project was
+     pinned to the scheme regardless of a saved «list» selection, so the toggle
+     read as unresponsive. */
+  if (preferredView === "list" && hasHistoryRows) return "list";
+  if (preferredView === "scheme" && schemeAvailable) return "scheme";
+  /* No usable preference: an active project opens on the scheme, an otherwise
+     quiet one with history opens on the list. */
   if (hasNodes) return "scheme";
-  const preferred = preferredView ?? "list";
-  if (preferred === "scheme") return hasArchiveNodes ? "scheme" : "list";
   return hasHistoryRows ? "list" : "scheme";
 }
 
