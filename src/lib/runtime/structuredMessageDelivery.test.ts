@@ -9,7 +9,7 @@ import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
 import type { RuntimeHostClient } from "./client";
 import type { RuntimeSnapshot } from "./contracts";
 
-import { enqueueStructuredMessage } from "./structuredMessageDelivery";
+import { deliverHeldStructuredMessage, enqueueStructuredMessage } from "./structuredMessageDelivery";
 
 const artifactPath = "/sessions/11111111-1111-4111-8111-111111111111.jsonl";
 const conversationId = "conversation_11111111-1111-4111-8111-111111111111";
@@ -182,6 +182,59 @@ test("structured message routing returns the durable queued receipt immediately"
   expect(command).toMatchObject({ conversationId: conversation.id, text: "hello", idempotencyKey: "message-one", policy: "queue" });
   expect(result).toMatchObject({ ok: true, structured: true, outcome: "queued", operationId: "op-one" });
   expect(kicked).toBe(1);
+  expect(registry.pendingDeliveries(conversation.id)).toMatchObject([{
+    clientMessageId: "message-one",
+    state: "delivery-uncertain",
+  }]);
+});
+
+test("migration-held delivery settles through the runtime journal after EngineHost completion", async () => {
+  const { conversation } = registryWithConversation();
+  let command: unknown;
+  let status = "queued" as "queued" | "delivered";
+  const receipt = () => ({
+    operationId: "held-delivery-one",
+    idempotencyKey: "held-message-one",
+    conversationId: conversation.id,
+    kind: "send" as const,
+    status,
+    queuePosition: 1,
+    at: "2026-07-13T00:00:00.000Z",
+    revision: status === "queued" ? 1 : 2,
+  });
+  const client = {
+    snapshot: async () => snapshot(conversation.id),
+    command: async (value: unknown) => {
+      command = value;
+      return { operationId: "held-delivery-one", replayed: false, receipt: receipt() };
+    },
+    operationStatus: async () => ({ operationId: "held-delivery-one", replayed: true, receipt: receipt() }),
+  } as unknown as RuntimeHostClient;
+
+  const outcome = await deliverHeldStructuredMessage(
+    {
+      conversationId: conversation.id,
+      path: artifactPath,
+      deliveryId: "held-delivery-one",
+      clientMessageId: "held-message-one",
+      text: "after migration",
+    },
+    {
+      enabled: () => true,
+      client: () => client,
+      kick: async () => { status = "delivered"; },
+    },
+  );
+
+  expect(command).toMatchObject({
+    kind: "send",
+    operationId: "held-delivery-one",
+    conversationId: conversation.id,
+    idempotencyKey: "held-message-one",
+    text: "after migration",
+    policy: "queue",
+  });
+  expect(outcome).toBe("delivered");
 });
 
 test("structured message routing holds composer delivery when migration owns the fence", async () => {

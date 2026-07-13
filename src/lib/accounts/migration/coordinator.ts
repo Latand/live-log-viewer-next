@@ -40,6 +40,7 @@ export interface MigrationPreview {
 
 export interface HeldDeliveryPort {
   deliver(input: { delivery: HeldDelivery; path: string; clientMessageId: string }): Promise<"delivered" | "failed" | "delivery-uncertain" | "held">;
+  reconcileUncertain?(input: { delivery: HeldDelivery; path: string; clientMessageId: string }): Promise<"delivered" | "failed" | "delivery-uncertain" | "held">;
 }
 
 function engineOf(entry: FileEntry): MigrationEngine | null {
@@ -442,17 +443,24 @@ export async function drainHeldDeliveries(
   const current = conversation?.generations.at(-1);
   if (!current) return;
   for (const item of registry.pendingDeliveries(conversationId)) {
-    if (item.state !== "assigned" || item.generationId !== current.id) continue;
+    const reconciling = item.state === "delivery-uncertain";
+    if (reconciling && !delivery.reconcileUncertain) continue;
+    if (!reconciling && (item.state !== "assigned" || item.generationId !== current.id)) continue;
     if (item.payloadKind !== "text") {
       registry.recordDeliveryOutcome(item.id, "failed", "request-local delivery requires client retry");
       continue;
     }
-    const claimed = registry.beginDeliveryAttempt(item.id, current.id);
+    const claimed = reconciling ? item : registry.beginDeliveryAttempt(item.id, current.id);
     if (!claimed) continue;
     const clientMessageId = claimed.clientMessageId ?? `migration:${claimed.id}`;
     try {
-      const outcome = await delivery.deliver({ delivery: claimed, path: current.path, clientMessageId });
-      if (outcome === "held") registry.requeueUnactuatedDelivery(claimed.id);
+      const input = { delivery: claimed, path: current.path, clientMessageId };
+      const outcome = reconciling
+        ? await delivery.reconcileUncertain!(input)
+        : await delivery.deliver(input);
+      if (outcome === "held") {
+        if (!reconciling) registry.requeueUnactuatedDelivery(claimed.id);
+      }
       else registry.recordDeliveryOutcome(claimed.id, outcome, outcome === "failed" ? "delivery failed and remains recoverable" : null);
     } catch {
       registry.recordDeliveryOutcome(claimed.id, "delivery-uncertain", "delivery result is uncertain and remains recoverable");
@@ -472,7 +480,7 @@ export async function reconcileMigrations(
     if (owner) await cleanupDiscardedSuccessor(provider, pending.receipt, owner, registry);
   }
   const pendingDeliveries = new Set(Object.values(before.heldDeliveries)
-    .filter((item) => item.state !== "delivered" && item.state !== "delivery-uncertain")
+    .filter((item) => item.state !== "delivered" && (item.state !== "delivery-uncertain" || delivery.reconcileUncertain))
     .map((item) => item.conversationId));
   for (const conversation of Object.values(before.conversations)) {
     if (!conversation.migration || conversation.migration.phase === "rolled-back") {

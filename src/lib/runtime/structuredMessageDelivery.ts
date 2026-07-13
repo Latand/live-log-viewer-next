@@ -29,6 +29,22 @@ export interface StructuredMessageDependencies {
   requestMigrationTick?: () => void;
 }
 
+export interface HeldStructuredMessageRequest {
+  conversationId: string;
+  path: string;
+  deliveryId: string;
+  clientMessageId: string;
+  text: string;
+}
+
+export interface HeldStructuredMessageDependencies {
+  enabled?: () => boolean;
+  client?: () => RuntimeHostClient | null;
+  kick?: () => void | Promise<void>;
+}
+
+export type HeldStructuredMessageOutcome = "delivered" | "failed" | "delivery-uncertain" | null;
+
 function structuredHostsEnabled(): boolean {
   return process.env.LLV_STRUCTURED_HOSTS === "1";
 }
@@ -50,6 +66,43 @@ function requestMigrationProgress(
 ): void {
   const phase = registry.conversation(conversationId)?.migration?.phase;
   if (phase && !["committed", "rolled-back"].includes(phase)) requestTick();
+}
+
+export async function deliverHeldStructuredMessage(
+  request: HeldStructuredMessageRequest,
+  dependencies: HeldStructuredMessageDependencies = {},
+): Promise<HeldStructuredMessageOutcome> {
+  if (!(dependencies.enabled ?? structuredHostsEnabled)()) return null;
+  const client = (dependencies.client ?? runtimeHostClient)();
+  if (!client) return "delivery-uncertain";
+  try {
+    const snapshot = await client.snapshot();
+    const session = snapshot.sessions.find((candidate) => candidate.conversationId === request.conversationId)
+      ?? snapshot.sessions.find((candidate) => candidate.artifactPath === request.path);
+    if (session?.hostKind === "tmux-legacy") return null;
+    if (!session || (session.hostKind !== "codex-app-server" && session.hostKind !== "claude-broker")) {
+      return "delivery-uncertain";
+    }
+    const result = await client.command({
+      kind: "send",
+      operationId: request.deliveryId,
+      conversationId: request.conversationId,
+      idempotencyKey: request.clientMessageId,
+      text: request.text,
+      policy: "queue",
+    });
+    try {
+      await (dependencies.kick ?? kickStructuredDeliveryQueue)();
+    } catch {
+      // The journal receipt below remains authoritative after a drain failure.
+    }
+    const latest = await client.operationStatus(result.operationId) ?? result;
+    if (["delivered", "turn-started", "steered"].includes(latest.receipt.status)) return "delivered";
+    if (latest.receipt.status === "failed" || latest.receipt.status === "rejected") return "failed";
+    return "delivery-uncertain";
+  } catch {
+    return "delivery-uncertain";
+  }
 }
 
 export async function enqueueStructuredMessage(
@@ -127,7 +180,7 @@ export async function enqueueStructuredMessage(
         receipt,
       };
     }
-    if (claimedReservationId) {
+    if (claimedReservationId && ["delivered", "turn-started", "steered"].includes(receipt.status)) {
       registry.recordDeliveryOutcome(claimedReservationId, "delivered");
       requestMigrationProgress(registry, conversation.id, dependencies.requestMigrationTick ?? requestAccountMigrationTick);
     }

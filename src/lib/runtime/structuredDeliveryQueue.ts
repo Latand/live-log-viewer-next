@@ -146,16 +146,16 @@ export class StructuredDeliveryQueue {
       const maySteer = health.status === "active"
         && (effect.kind === "steer" || effect.policy === "steer-if-active");
       if (health.status !== "idle" && !maySteer) return true;
-      const mustFenceTurn = effect.kind === "steer" || effect.turnId !== undefined || maySteer;
+      const expectedTurnId = effect.turnId !== undefined ? effect.turnId : health.activeTurnRef;
       const entry: QueueEntry = {
         id: effect.operationId,
         text: effect.text,
-        ...(mustFenceTurn ? { expectedTurnId: effect.turnId ?? health.activeTurnRef } : {}),
+        expectedTurnId,
       };
       await this.port.transition(
         effect.operationId,
         "delivering",
-        entry.expectedTurnId !== undefined ? { turnId: entry.expectedTurnId } : undefined,
+        { turnId: entry.expectedTurnId },
       );
       let receipt;
       try {
@@ -172,6 +172,10 @@ export class StructuredDeliveryQueue {
       }
       if (receipt.outcome === "rejected") {
         if (receipt.reason === "stale-turn") {
+          if (effect.kind === "send" && effect.policy !== "steer-if-active") {
+            await this.port.transition(effect.operationId, "queued", { reason: receipt.reason });
+            return true;
+          }
           await this.port.transition(effect.operationId, "failed", { reason: receipt.reason });
           continue;
         }

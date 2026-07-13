@@ -1,24 +1,25 @@
-# Issue #166: Isolate real-CLI integration-test sessions
+# Issue #151: Route the delivery queue through structured hosts
 
-Run the Codex app-server and Claude broker integration suites with fresh temporary homes so their real session artifacts never enter the user's scanned roots.
+Persist structured-session composer messages in the runtime journal before actuation and deliver them through `EngineHost.send`.
 
 ## Acceptance criteria
 
-AC1: Every Codex integration run sets `CODEX_HOME` to a fresh temporary directory, uses only the minimal copied file credential, and removes the directory during teardown.
+AC1: Structured Codex and Claude messages enter the durable runtime journal before engine actuation.
 
-AC2: Every Claude integration run sets both `HOME` and `CLAUDE_CONFIG_DIR` to a fresh temporary directory, uses only the minimal copied subscription credential, and removes the directory during teardown.
+AC2: Each conversation drains in FIFO order while independent conversations can progress concurrently.
 
-AC3: A missing binary, missing credential, unsafe credential source, or failed isolated-home authentication probe keeps the existing graceful-skip behavior.
+AC3: Codex delivery uses the queue entry ID as its client message ID and preserves idle and active turn fences across races and retries.
 
-AC4: Each real integration test asserts that its produced rollout or transcript exists beneath its temporary home.
+AC4: Claude delivery uses its durable replay ledger so recovery cannot duplicate engine writes.
 
-AC5: Codex late attach, steering, and restart resume coverage remains unchanged; Claude late attach, restart resume, and permission-answer coverage remains unchanged.
+AC5: Migration-held structured messages drain through the runtime journal and remain fenced until durable structured completion.
 
-AC6: Running the focused integration suites creates zero new fixture files containing the ZEBRA-149, ORCHID-150, or ACK-150 markers under `~/.codex/sessions`, `~/.claude/projects`, and the managed Codex and Claude account roots.
+AC6: Explicit `tmux-legacy` sessions retain the existing tmux delivery path.
+
+AC7: Queued, delivering, delivered, and failed receipt states remain observable and recoverable after process loss.
 
 ## Validation gates
 
-- `bun test`
 - `bunx tsc --noEmit`
-- `bun test src/lib/runtime/codexAppServerHost.integration.test.ts src/lib/runtime/claudeStreamBrokerHost.integration.test.ts`
-- marker-file comparison under the legacy session roots and managed account roots
+- `bun test`
+- `git diff --check`

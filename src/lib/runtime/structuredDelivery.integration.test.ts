@@ -55,7 +55,7 @@ test("a delivering entry resumes after restart through the host ledger without a
   await expect(firstQueue.drain()).rejects.toThrow("runtime stopped before confirmation commit");
   expect(firstJournal.operationResult("operation-one")?.receipt.status).toBe("delivering");
   expect(firstJournal.effectBatch()).toHaveLength(1);
-  expect(ledger.writes).toEqual([{ id: "operation-one", text: "hello" }]);
+  expect(ledger.writes).toEqual([{ id: "operation-one", text: "hello", expectedTurnId: null }]);
   firstJournal.close();
 
   const reopenedJournal = new RuntimeJournal(filename, { structuredHosts: true });
@@ -68,7 +68,7 @@ test("a delivering entry resumes after restart through the host ledger without a
     turnId: "turn:operation-one",
   });
   expect(reopenedJournal.effectBatch()).toEqual([]);
-  expect(ledger.writes).toEqual([{ id: "operation-one", text: "hello" }]);
+  expect(ledger.writes).toEqual([{ id: "operation-one", text: "hello", expectedTurnId: null }]);
   reopenedJournal.close();
 });
 

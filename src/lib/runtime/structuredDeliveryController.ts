@@ -108,9 +108,9 @@ export async function bindStructuredDeliveryQueue(
     }));
   }
   activeQueue = queue;
-  setStructuredDeliveryKick(() => {
-    void queue.drain().catch(() => { console.error("[structured delivery] queue drain failed"); });
-  });
+  setStructuredDeliveryKick(() => queue.drain().catch(() => {
+    console.error("[structured delivery] queue drain failed");
+  }));
   stopActive = () => {
     for (const unsubscribe of unsubscribers) unsubscribe();
     if (activeQueue === queue) {

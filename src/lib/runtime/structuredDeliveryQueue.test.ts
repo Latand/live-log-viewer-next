@@ -352,6 +352,40 @@ test("structured delivery retries the same durable entry after a host race", asy
   ]);
 });
 
+test("an idle queue admission keeps its null turn fence when a turn starts before send", async () => {
+  const expectedTurns: Array<string | null | undefined> = [];
+  const transitions: Array<[string, string, string | null | undefined, string | null | undefined]> = [];
+  const racingHost = host(async (entry) => {
+    expectedTurns.push(entry.expectedTurnId);
+    return { outcome: "rejected", reason: "stale-turn" };
+  });
+  racingHost.health = async () => idleState();
+  const queue = new StructuredDeliveryQueue({
+    effects: async () => [{
+      id: "effect:op-idle-race",
+      kind: "runtime.send",
+      eventSeq: 30,
+      payload: {
+        operationId: "op-idle-race",
+        conversationId: "conversation-one",
+        text: "queue after the active turn",
+        policy: "queue",
+      },
+    }],
+    transition: async (operationId, status, details) => {
+      transitions.push([operationId, status, details?.turnId, details?.reason]);
+    },
+  }, () => racingHost);
+
+  await queue.drain();
+
+  expect(expectedTurns).toEqual([null]);
+  expect(transitions).toEqual([
+    ["op-idle-race", "delivering", null, undefined],
+    ["op-idle-race", "queued", undefined, "stale-turn"],
+  ]);
+});
+
 test("a stale steer never retries as a fresh turn after the host becomes idle", async () => {
   const expectedTurns: Array<string | null | undefined> = [];
   const transitions: Array<[string, string, string | null | undefined]> = [];
