@@ -1,4 +1,5 @@
 import os from "node:os";
+import path from "node:path";
 
 import { readTranscriptHosts, type TranscriptHost } from "@/lib/agent/transcriptHost";
 import { loadFlows } from "@/lib/flows/store";
@@ -7,6 +8,7 @@ import { procBackend, type ProcSnapshotEntry } from "@/lib/proc";
 import { descendantPids } from "@/lib/proc/memory";
 import type { ProcessSignal } from "@/lib/processGroup";
 import { panePidMap } from "@/lib/tmux";
+import { statePath } from "@/lib/configDir";
 
 const DEFAULT_THRESHOLD_MS = 2 * 60 * 60_000;
 const MINIMUM_THRESHOLD_MS = 60_000;
@@ -29,6 +31,7 @@ interface SelectionInput {
   flows: Flow[];
   hosts: TranscriptHost[];
   panePids: number[];
+  flowArtifactsRoot: string;
   thresholdMs: number;
 }
 
@@ -49,11 +52,38 @@ export interface HeadlessProcessReaperReport {
   signaled: number;
 }
 
-function isViewerCodexExec(process: Pick<ReaperProcess, "argv" | "tty">): boolean {
-  if (process.tty !== 0) return false;
+interface ViewerFlowOutput {
+  flowId: string;
+  round: number;
+}
+
+function viewerFlowOutput(outputPath: string | undefined, flowArtifactsRoot: string): ViewerFlowOutput | null {
+  if (!outputPath || !path.isAbsolute(outputPath)) return null;
+  const relative = path.relative(path.resolve(flowArtifactsRoot), path.resolve(outputPath));
+  if (!relative || path.isAbsolute(relative) || relative === ".." || relative.startsWith(`..${path.sep}`)) return null;
+  const parts = relative.split(path.sep);
+  if (parts.length !== 2 || !parts[0]) return null;
+  const match = /^round-(\d+)-last-message\.md$/.exec(parts[1]!);
+  return match ? { flowId: parts[0], round: Number(match[1]) } : null;
+}
+
+function viewerCodexExecOutput(process: Pick<ReaperProcess, "argv" | "tty">, flowArtifactsRoot: string): ViewerFlowOutput | null {
+  if (process.tty !== 0) return null;
   const args = process.argv;
-  return args.includes("exec") && args.includes("--json") && args.includes("--output-last-message")
-    && args.some((arg) => /(^|[/\\])codex(?:-[^/\\]+)?$/i.test(arg));
+  const outputIndex = args.indexOf("--output-last-message");
+  if (!args.includes("exec") || !args.includes("--json") || outputIndex < 0) return null;
+  if (!args.some((arg) => /(^|[/\\])codex(?:-[^/\\]+)?$/i.test(arg))) return null;
+  return viewerFlowOutput(args[outputIndex + 1], flowArtifactsRoot);
+}
+
+function hasViewerFlowProvenance(process: ReaperProcess, input: SelectionInput): boolean {
+  const output = viewerCodexExecOutput(process, input.flowArtifactsRoot);
+  if (!output || !process.identity) return false;
+  const flow = input.flows.find((candidate) => candidate.id === output.flowId);
+  const round = flow?.rounds.find((candidate) => candidate.n === output.round);
+  return flow?.reviewerMode === "headless"
+    && round?.reviewerPid === process.pid
+    && round.reviewerIdentity === process.identity;
 }
 
 function isCodexOwner(process: Pick<ReaperProcess, "argv">): boolean {
@@ -112,7 +142,7 @@ export function selectHeadlessProcessCandidates(input: SelectionInput): Headless
   const byPid = new Map(input.processes.map((process) => [process.pid, process]));
   const protectedPids = protectedRoots(input, byPid);
   const staleViewerExecs = new Set(input.processes
-    .filter((process) => process.ageMs >= input.thresholdMs && process.identity && isViewerCodexExec(process) && !protectedPids.has(process.pid))
+    .filter((process) => process.ageMs >= input.thresholdMs && hasViewerFlowProvenance(process, input) && !protectedPids.has(process.pid))
     .map((process) => process.pid));
   const candidates: HeadlessProcessCandidate[] = [];
 
@@ -175,10 +205,10 @@ function activeFlowReviewerPids(flows: Flow[]): Set<number> {
   return pids;
 }
 
-function snapshot(dependencies: ReaperDependencies, identityPids: ReadonlySet<number> = new Set()): ReaperProcess[] {
+function snapshot(dependencies: ReaperDependencies, flowArtifactsRoot: string, identityPids: ReadonlySet<number> = new Set()): ReaperProcess[] {
   const ppids = dependencies.ppidMap();
   return dependencies.listProcesses().map((process) => {
-    const managed = identityPids.has(process.pid) || isViewerCodexExec(process as ReaperProcess) || isMcpServer(process as ReaperProcess);
+    const managed = identityPids.has(process.pid) || viewerCodexExecOutput(process as ReaperProcess, flowArtifactsRoot) !== null || isMcpServer(process as ReaperProcess);
     const identity = managed ? dependencies.processIdentity(process.pid) : null;
     return {
       ...process,
@@ -219,20 +249,23 @@ export async function runHeadlessProcessReaper(options: {
   hosts: TranscriptHost[];
   flows?: Flow[];
   thresholdMs?: number;
+  flowArtifactsRoot?: string;
   shutdownGraceMs?: number;
   dependencies?: Partial<ReaperDependencies>;
 }): Promise<HeadlessProcessReaperReport> {
   const dependencies = { ...defaultDependencies, ...options.dependencies };
   const thresholdMs = options.thresholdMs ?? headlessReaperThresholdMs();
+  const flowArtifactsRoot = options.flowArtifactsRoot ?? statePath("flows");
   const panePids = await dependencies.readPanePids();
   if (panePids === null) return { candidates: 0, signaled: 0 };
   const initialFlows = options.flows ?? dependencies.loadFlows();
-  const initial = snapshot(dependencies, activeFlowReviewerPids(initialFlows));
+  const initial = snapshot(dependencies, flowArtifactsRoot, activeFlowReviewerPids(initialFlows));
   const candidates = selectHeadlessProcessCandidates({
     processes: initial,
     flows: initialFlows,
     hosts: options.hosts,
     panePids,
+    flowArtifactsRoot,
     thresholdMs,
   });
   let signaled = 0;
@@ -243,8 +276,8 @@ export async function runHeadlessProcessReaper(options: {
       dependencies.readPanePids(),
     ]);
     if (freshPanePids === null) continue;
-    const fresh = snapshot(dependencies, activeFlowReviewerPids(flows));
-    const verified = selectHeadlessProcessCandidates({ processes: fresh, flows, hosts, panePids: freshPanePids, thresholdMs })
+    const fresh = snapshot(dependencies, flowArtifactsRoot, activeFlowReviewerPids(flows));
+    const verified = selectHeadlessProcessCandidates({ processes: fresh, flows, hosts, panePids: freshPanePids, flowArtifactsRoot, thresholdMs })
       .find((current) => current.pid === candidate.pid && current.identity === candidate.identity && current.kind === candidate.kind);
     if (!verified) continue;
     if (verified.kind === "codex-exec") signalGroup(verified, dependencies, options.shutdownGraceMs ?? DEFAULT_SHUTDOWN_GRACE_MS);

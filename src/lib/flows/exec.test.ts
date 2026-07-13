@@ -9,7 +9,7 @@ import { procBackend } from "@/lib/proc";
 /* The state dir must point at a sandbox before store.ts computes its
    module-level constants, so exec/store load dynamically after the env set. */
 process.env.LLV_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "llv-exec-test-"));
-const { forgetHeadlessReview, headlessReviewStatus, reviewerCommand, scanEventStream, startHeadlessReview } = await import("./exec");
+const { forgetHeadlessReview, headlessReviewStatus, reviewerCommand, scanEventStream, startHeadlessReview, terminateHeadlessReviewerGroup } = await import("./exec");
 const { reviewerPrompt } = await import("./prompts");
 const { outputPathFor, stdoutPathFor } = await import("./store");
 
@@ -22,6 +22,59 @@ const EVENTS = [
   "not json",
   JSON.stringify({ item: { type: "agent_message", text: "VERDICT: APPROVE\n\nLooks good." } }),
 ].join("\n");
+
+test("reviewer group escalation kills a TERM-resistant child after the leader exits", () => {
+  let leaderAlive = true;
+  let childAlive = true;
+  const timers: Array<() => void> = [];
+  const signals: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+  terminateHeadlessReviewerGroup(4242, "4242:start", {
+    graceMs: 1,
+    runtime: {
+      pidAlive: () => leaderAlive,
+      processIdentity: () => "4242:start",
+      signalProcess: (pid, signal) => {
+        signals.push({ pid, signal });
+        if (signal === "SIGTERM") leaderAlive = false;
+        if (signal === "SIGKILL") childAlive = false;
+      },
+      setTimeout: (callback) => {
+        timers.push(callback);
+        return { unref() {} } as unknown as ReturnType<typeof setTimeout>;
+      },
+    },
+  });
+
+  expect(signals).toEqual([{ pid: -4242, signal: "SIGTERM" }]);
+  timers[0]!();
+  expect(signals).toEqual([
+    { pid: -4242, signal: "SIGTERM" },
+    { pid: -4242, signal: "SIGKILL" },
+  ]);
+  expect(childAlive).toBeFalse();
+});
+
+test("reviewer group escalation survives a temporarily unavailable process identity", () => {
+  const timers: Array<() => void> = [];
+  const signals: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+  terminateHeadlessReviewerGroup(4343, null, {
+    ownedByLiveHandle: true,
+    runtime: {
+      pidAlive: () => true,
+      signalProcess: (pid, signal) => { signals.push({ pid, signal }); },
+      setTimeout: (callback) => {
+        timers.push(callback);
+        return { unref() {} } as unknown as ReturnType<typeof setTimeout>;
+      },
+    },
+  });
+
+  timers[0]!();
+  expect(signals).toEqual([
+    { pid: -4343, signal: "SIGTERM" },
+    { pid: -4343, signal: "SIGKILL" },
+  ]);
+});
 
 function writeArtifacts(flowId: string, round: number, stdout: string, lastMessage?: string): void {
   const stdoutPath = stdoutPathFor(flowId, round);

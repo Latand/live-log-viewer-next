@@ -10,6 +10,11 @@ import {
 } from "./headlessProcessReaper";
 
 const old = 3 * 60 * 60_000;
+const flowArtifactsRoot = "/viewer-state/flows";
+
+function viewerOutput(flowId: string, round: number): string {
+  return `${flowArtifactsRoot}/${flowId}/round-${round}-last-message.md`;
+}
 
 function process(pid: number, ppid: number, argv: string[], ageMs = old, tty = 0): ReaperProcess {
   return { pid, ppid, argv, ageMs, identity: `${pid}:start`, tty, cwd: null };
@@ -53,11 +58,19 @@ function activeFlow(pid: number): Flow {
   };
 }
 
+function finishedFlow(pid: number): Flow {
+  const flow = activeFlow(pid);
+  flow.state = "fixing";
+  flow.rounds[0]!.verdict = "REQUEST_CHANGES";
+  flow.rounds[0]!.terminalAt = new Date().toISOString();
+  return flow;
+}
+
 test("headless process reaper selects stale viewer exec groups and orphaned MCP roots", () => {
   const processes = [
-    process(100, 1, ["codex", "exec", "--json", "--output-last-message", "/state/round.txt"]),
+    process(100, 1, ["codex", "exec", "--json", "--output-last-message", viewerOutput("flow-100", 1)]),
     process(101, 100, ["npm", "exec", "chrome-devtools-mcp"]),
-    process(200, 1, ["codex", "exec", "--json", "--output-last-message", "/state/live.txt"]),
+    process(200, 1, ["codex", "exec", "--json", "--output-last-message", viewerOutput("flow-200", 1)]),
     process(201, 200, ["codex-telegram-mcp"]),
     process(300, 1, ["bash"], old, 1),
     process(301, 300, ["codex"]),
@@ -67,6 +80,8 @@ test("headless process reaper selects stale viewer exec groups and orphaned MCP 
     process(500, 1, ["uv", "tool", "run", "codex-telegram-mcp"]),
     process(600, 1, ["npm", "exec", "context7-mcp"], 30_000),
     process(700, 1, ["codex", "exec", "Write a summary"]),
+    process(750, 1, ["codex", "exec", "--json", "--output-last-message", "/home/user/manual-review.md"]),
+    process(760, 1, ["codex", "exec", "--json", "--output-last-message", viewerOutput("untracked-flow", 1)]),
     process(800, 1, ["codex", "app-server"]),
     process(801, 800, ["npm", "exec", "chrome-devtools-mcp"]),
     process(850, 1, ["/opt/custom-structured-host", "app-server"]),
@@ -75,9 +90,10 @@ test("headless process reaper selects stale viewer exec groups and orphaned MCP 
 
   expect(selectHeadlessProcessCandidates({
     processes,
-    flows: [activeFlow(200)],
+    flows: [finishedFlow(100), activeFlow(200)],
     hosts: [],
     panePids: [300],
+    flowArtifactsRoot,
     thresholdMs: 2 * 60 * 60_000,
   })).toEqual([
     { pid: 100, identity: "100:start", kind: "codex-exec" },
@@ -86,19 +102,20 @@ test("headless process reaper selects stale viewer exec groups and orphaned MCP 
 });
 
 test("headless reaper revalidates ownership and applies TERM then KILL to the stale group", async () => {
-  const viewerExec = process(900, 1, ["codex", "exec", "--json", "--output-last-message", "/state/stale.txt"]);
+  const viewerExec = process(900, 1, ["codex", "exec", "--json", "--output-last-message", viewerOutput("flow-900", 1)]);
   const signals: Array<{ pid: number; signal: NodeJS.Signals }> = [];
   const timers: Array<() => void> = [];
   const report = await runHeadlessProcessReaper({
     hosts: [],
-    flows: [],
+    flows: [finishedFlow(900)],
     thresholdMs: 2 * 60 * 60_000,
+    flowArtifactsRoot,
     dependencies: {
       listProcesses: () => [viewerExec],
       ppidMap: () => new Map([[900, 1]]),
       processIdentity: () => "900:start",
       processAgeMs: () => old,
-      loadFlows: () => [],
+      loadFlows: () => [finishedFlow(900)],
       readHosts: async () => [],
       readPanePids: async () => [],
       signalProcess: (pid, signal) => { signals.push({ pid, signal }); },
@@ -120,7 +137,7 @@ test("headless reaper revalidates ownership and applies TERM then KILL to the st
 
 test("headless reaper protects an active flow launched through a custom Codex binary", async () => {
   const processes = [
-    process(910, 1, ["/opt/viewer-reviewer", "exec", "--json", "--output-last-message", "/state/live.txt"]),
+    process(910, 1, ["/opt/viewer-reviewer", "exec", "--json", "--output-last-message", viewerOutput("flow-910", 1)]),
     process(911, 910, ["npm", "exec", "context7-mcp"]),
   ];
   const signals: number[] = [];
@@ -128,6 +145,7 @@ test("headless reaper protects an active flow launched through a custom Codex bi
     hosts: [],
     flows: [activeFlow(910)],
     thresholdMs: 2 * 60 * 60_000,
+    flowArtifactsRoot,
     dependencies: {
       listProcesses: () => processes,
       ppidMap: () => new Map([[910, 1], [911, 910]]),

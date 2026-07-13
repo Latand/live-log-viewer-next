@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import type { ChildProcessWithoutNullStreams, SpawnOptionsWithoutStdio } from "node:child_process";
 
 import { procBackend } from "@/lib/proc";
-import { signalDetachedProcessGroup, type ProcessSignal } from "@/lib/processGroup";
+import { signalDetachedProcessGroup, signalProcessGroup, type ProcessSignal } from "@/lib/processGroup";
 import { headlessCodexThreadConfig } from "@/lib/codexHeadlessConfig";
 import { hardenedRedact } from "@/lib/view/compactText";
 
@@ -243,10 +243,6 @@ export class CodexAppServerHost implements EngineHost {
     child.on("error", (error) => this.fail(new Error(`Codex app-server child failed: ${safeError(error)}`)));
     child.on("close", () => {
       this.reaped = true;
-      if (this.terminationTimer) {
-        clearTimeout(this.terminationTimer);
-        this.terminationTimer = null;
-      }
       this.resolveReaped();
       if (!this.releasing && !this.released) {
         if (this.dead) this.notifyStateListeners();
@@ -474,7 +470,8 @@ export class CodexAppServerHost implements EngineHost {
     this.pending.clear();
     this.startTermination();
     if (!await this.waitForReap(this.shutdownGraceMs)) {
-      signalDetachedProcessGroup(this.child, "SIGKILL", this.signalProcess);
+      if (this.reaped) signalProcessGroup(this.child.pid, "SIGKILL", this.signalProcess);
+      else signalDetachedProcessGroup(this.child, "SIGKILL", this.signalProcess);
       if (!await this.waitForReap(this.shutdownGraceMs)) {
         throw new Error("Codex app-server child could not be reaped");
       }
@@ -495,8 +492,8 @@ export class CodexAppServerHost implements EngineHost {
     signalDetachedProcessGroup(this.child, "SIGTERM", this.signalProcess);
     this.terminationTimer = setTimeout(() => {
       this.terminationTimer = null;
-      if (this.reaped) return;
-      signalDetachedProcessGroup(this.child, "SIGKILL", this.signalProcess);
+      if (this.reaped) signalProcessGroup(this.child.pid, "SIGKILL", this.signalProcess);
+      else signalDetachedProcessGroup(this.child, "SIGKILL", this.signalProcess);
     }, this.shutdownGraceMs);
   }
 

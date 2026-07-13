@@ -341,21 +341,31 @@ test("SIGTERM acknowledgement and escalation both end in a reaped child", async 
   expect(reaped).toEqual(["reaped"]);
 });
 
-test("shutdown signals the detached app-server process group", async () => {
+test("shutdown escalates the detached process group after its leader exits during grace", async () => {
   const child = new FakeChild();
   child.onWrite = (message) => {
     if (message.method === "initialize") child.respond(requestId(message), {});
   };
+  const clock = new FakeClock();
   const signals: Array<{ pid: number; signal: NodeJS.Signals }> = [];
   const client = await CodexAppServerClient.start({
     home: "/fake/home",
     spawn: () => child as never,
-    signalProcess: (pid, signal) => { signals.push({ pid, signal }); },
+    clock,
+    signalProcess: (pid, signal) => {
+      signals.push({ pid, signal });
+      if (signal === "SIGKILL") throw new Error("group exited");
+    },
   });
 
   client.close();
 
-  expect(signals).toEqual([{ pid: -4242, signal: "SIGTERM" }]);
-  expect(child.signals).toEqual([]);
   child.emit("close", 0, "SIGTERM");
+  clock.runAll();
+
+  expect(signals).toEqual([
+    { pid: -4242, signal: "SIGTERM" },
+    { pid: -4242, signal: "SIGKILL" },
+  ]);
+  expect(child.signals).toEqual([]);
 });

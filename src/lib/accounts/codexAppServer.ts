@@ -8,7 +8,7 @@ import {
   type AppServerEnvelope,
   type AppServerRequestId,
 } from "./codexAppServerProtocol";
-import { signalDetachedProcessGroup, type ProcessSignal } from "../processGroup";
+import { signalDetachedProcessGroup, signalProcessGroup, type ProcessSignal } from "../processGroup";
 import { headlessCodexThreadConfig } from "../codexHeadlessConfig";
 
 export interface CodexAppServerChild {
@@ -192,10 +192,6 @@ export class CodexAppServerClient {
     child.on("error", (error) => this.fail(new CodexAppServerError(`Codex app-server child error: ${error.message}`, "unknown")));
     child.on("close", (code, signal) => {
       this.reaped = true;
-      if (this.shutdownTimer) {
-        this.clock.clearTimeout(this.shutdownTimer);
-        this.shutdownTimer = null;
-      }
       this.emitLifecycle({ type: "reaped" });
       const detail = this.stderrTail ? `: ${this.stderrTail}` : "";
       if (!this.closed) this.fail(new CodexAppServerError(`Codex app-server exited (code ${code ?? "none"}, signal ${signal ?? "none"})${detail}`, "unknown"));
@@ -484,8 +480,8 @@ export class CodexAppServerClient {
     if (!this.reaped && !this.shutdownTimer) {
       this.shutdownTimer = this.clock.setTimeout(() => {
         this.shutdownTimer = null;
-        if (this.reaped) return;
-        signalDetachedProcessGroup(this.child, "SIGKILL", this.signalProcess);
+        if (this.reaped) signalProcessGroup(this.child.pid, "SIGKILL", this.signalProcess);
+        else signalDetachedProcessGroup(this.child, "SIGKILL", this.signalProcess);
       }, this.shutdownGraceMs);
     }
   }
