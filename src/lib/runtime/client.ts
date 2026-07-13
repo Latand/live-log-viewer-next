@@ -21,7 +21,7 @@ export interface RuntimeHostClient {
   command(command: RuntimeOperationCommand): Promise<RuntimeOperationResult>;
   operationStatus(operationId: string): Promise<RuntimeOperationResult | null>;
   retryOperation(operationId: string): Promise<RuntimeOperationResult>;
-  effectBatch(kinds?: readonly string[]): Promise<RuntimePendingEffect[]>;
+  effectBatch(kinds?: readonly string[], afterEventSeq?: number): Promise<RuntimePendingEffect[]>;
   transitionOperation(
     operationId: string,
     status: Exclude<RuntimeReceiptStatus, "pending">,
@@ -46,8 +46,12 @@ export class UnixRuntimeHostClient implements RuntimeHostClient {
   command(command: RuntimeOperationCommand): Promise<RuntimeOperationResult> { return this.call("command", { command }) as Promise<RuntimeOperationResult>; }
   operationStatus(operationId: string): Promise<RuntimeOperationResult | null> { return this.call("operation-status", { operationId }) as Promise<RuntimeOperationResult | null>; }
   retryOperation(operationId: string): Promise<RuntimeOperationResult> { return this.call("operation-retry", { operationId }) as Promise<RuntimeOperationResult>; }
-  effectBatch(kinds?: readonly string[]): Promise<RuntimePendingEffect[]> {
-    return this.call("effect-batch", kinds ? { kinds: [...kinds] } : undefined) as Promise<RuntimePendingEffect[]>;
+  effectBatch(kinds?: readonly string[], afterEventSeq = 0): Promise<RuntimePendingEffect[]> {
+    const params = {
+      ...(kinds ? { kinds: [...kinds] } : {}),
+      ...(afterEventSeq !== 0 ? { afterEventSeq } : {}),
+    };
+    return this.call("effect-batch", Object.keys(params).length > 0 ? params : undefined) as Promise<RuntimePendingEffect[]>;
   }
   transitionOperation(
     operationId: string,

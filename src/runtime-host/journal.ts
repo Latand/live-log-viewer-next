@@ -697,12 +697,13 @@ export class RuntimeJournal {
     });
   }
 
-  effectBatch(limit = 100, kinds?: readonly string[]): Array<RuntimeEffect & { eventSeq: number }> {
+  effectBatch(limit = 100, kinds?: readonly string[], afterEventSeq = 0): Array<RuntimeEffect & { eventSeq: number }> {
     if (kinds?.length === 0) return [];
+    if (!Number.isSafeInteger(afterEventSeq) || afterEventSeq < 0) throw new Error("runtime effect cursor is invalid");
     const kindFilter = kinds ? ` AND kind IN (${kinds.map(() => "?").join(", ")})` : "";
     const rows = this.db.query<{ id: string; kind: string; payload_json: string; event_seq: number }, Array<string | number>>(
-      `SELECT id, kind, payload_json, event_seq FROM outbox WHERE state = 'pending'${kindFilter} ORDER BY event_seq LIMIT ?`,
-    ).all(...(kinds ?? []), limit);
+      `SELECT id, kind, payload_json, event_seq FROM outbox WHERE state = 'pending'${kindFilter} AND event_seq > ? ORDER BY event_seq LIMIT ?`,
+    ).all(...(kinds ?? []), afterEventSeq, limit);
     return rows.map((row) => {
       const payload = JSON.parse(row.payload_json) as Record<string, unknown>;
       if (row.kind === "runtime.answer") payload.resolution = this.decryptSecret(payload.resolution);

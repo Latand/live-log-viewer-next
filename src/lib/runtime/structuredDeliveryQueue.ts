@@ -11,7 +11,7 @@ export interface StructuredDeliveryEffect {
 export type StructuredDeliveryTransition = "queued" | "delivering" | "delivered" | "failed";
 
 export interface StructuredDeliveryQueuePort {
-  effects(kinds?: readonly string[]): Promise<StructuredDeliveryEffect[]>;
+  effects(kinds?: readonly string[], afterEventSeq?: number): Promise<StructuredDeliveryEffect[]>;
   transition(
     operationId: string,
     status: StructuredDeliveryTransition,
@@ -25,7 +25,7 @@ const STRUCTURED_DELIVERY_BATCH_SIZE = 100;
 
 export function runtimeClientDeliveryPort(client: RuntimeHostClient): StructuredDeliveryQueuePort {
   return {
-    effects: (kinds) => client.effectBatch(kinds),
+    effects: (kinds, afterEventSeq) => client.effectBatch(kinds, afterEventSeq),
     transition: async (operationId, status, details) => {
       await client.transitionOperation(operationId, status, details);
     },
@@ -95,48 +95,57 @@ export class StructuredDeliveryQueue {
   private async drainUntilSettled(): Promise<void> {
     do {
       this.rerun = false;
-      const batch = await this.drainBatch();
-      if (batch.full && batch.progressed) this.rerun = true;
+      await this.drainPass();
     } while (this.rerun);
   }
 
-  private async drainBatch(): Promise<{ full: boolean; progressed: boolean }> {
-    const grouped = new Map<string, SendEffect[]>();
-    const rawEffects = await this.port.effects(["runtime.send", "runtime.steer"]);
-    const effects = rawEffects
-      .map(sendEffect)
-      .filter((effect): effect is SendEffect => effect !== null)
-      .sort((left, right) => left.eventSeq - right.eventSeq);
-    for (const effect of effects) {
-      const target = grouped.get(effect.conversationId) ?? [];
-      target.push(effect);
-      grouped.set(effect.conversationId, target);
+  private async drainPass(): Promise<void> {
+    const blockedConversations = new Set<string>();
+    let afterEventSeq = 0;
+    while (true) {
+      const rawEffects = await this.port.effects(["runtime.send", "runtime.steer"], afterEventSeq);
+      if (rawEffects.length === 0) return;
+      const nextCursor = Math.max(...rawEffects.map((effect) => effect.eventSeq));
+      if (!Number.isSafeInteger(nextCursor) || nextCursor <= afterEventSeq) {
+        throw new Error("structured delivery effect page did not advance");
+      }
+      const grouped = new Map<string, SendEffect[]>();
+      const effects = rawEffects
+        .map(sendEffect)
+        .filter((effect): effect is SendEffect => effect !== null)
+        .sort((left, right) => left.eventSeq - right.eventSeq);
+      for (const effect of effects) {
+        if (blockedConversations.has(effect.conversationId)) continue;
+        const target = grouped.get(effect.conversationId) ?? [];
+        target.push(effect);
+        grouped.set(effect.conversationId, target);
+      }
+      const results = await Promise.all([...grouped.entries()].map(async ([conversationId, target]) => ({
+        conversationId,
+        blocked: await this.drainTarget(target),
+      })));
+      for (const result of results) if (result.blocked) blockedConversations.add(result.conversationId);
+      if (rawEffects.length < STRUCTURED_DELIVERY_BATCH_SIZE) return;
+      afterEventSeq = nextCursor;
     }
-    const results = await Promise.all([...grouped.values()].map((target) => this.drainTarget(target)));
-    return {
-      full: rawEffects.length >= STRUCTURED_DELIVERY_BATCH_SIZE,
-      progressed: results.some(Boolean),
-    };
   }
 
   private async drainTarget(effects: SendEffect[]): Promise<boolean> {
-    let progressed = false;
     for (const effect of effects) {
       if (effect.hasImages) {
         await this.port.transition(effect.operationId, "failed", { reason: "structured host image delivery is unavailable" });
-        progressed = true;
         continue;
       }
       const host = this.resolveHost(effect.conversationId);
-      if (!host) return progressed;
+      if (!host) return true;
       const health = await host.health();
       if (health.status === "dead" || health.status === "unhosted") {
         await this.port.transition(effect.operationId, "queued", { reason: "dead-host" });
-        return progressed;
+        return true;
       }
       const maySteer = health.status === "active"
         && (effect.kind === "steer" || effect.policy === "steer-if-active");
-      if (health.status !== "idle" && !maySteer) return progressed;
+      if (health.status !== "idle" && !maySteer) return true;
       const mustFenceTurn = effect.kind === "steer" || effect.turnId !== undefined || maySteer;
       const entry: QueueEntry = {
         id: effect.operationId,
@@ -156,24 +165,21 @@ export class StructuredDeliveryQueue {
         const afterFailure = await host.health().catch(() => null);
         if (!afterFailure || afterFailure.status === "dead" || afterFailure.status === "unhosted") {
           await this.port.transition(effect.operationId, "queued", { reason });
-          return progressed;
+          return true;
         }
         await this.port.transition(effect.operationId, "failed", { reason });
-        progressed = true;
         continue;
       }
       if (receipt.outcome === "rejected") {
         if (receipt.reason === "stale-turn") {
           await this.port.transition(effect.operationId, "failed", { reason: receipt.reason });
-          progressed = true;
           continue;
         }
         await this.port.transition(effect.operationId, "queued", { reason: receipt.reason });
-        return progressed;
+        return true;
       }
       await this.port.transition(effect.operationId, "delivered", { turnId: receipt.turnId });
-      progressed = true;
     }
-    return progressed;
+    return false;
   }
 }

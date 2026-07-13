@@ -102,6 +102,56 @@ test("unrelated outbox effects cannot starve structured message delivery", async
   expect(sent).toEqual(["op-after-spawns"]);
 });
 
+test("a full page from one busy conversation cannot hide a later ready conversation", async () => {
+  const effects = [
+    ...Array.from({ length: 100 }, (_, index) => ({
+      id: `effect:blocked-${index}`,
+      kind: "runtime.send",
+      eventSeq: index + 1,
+      payload: {
+        operationId: `blocked-${index}`,
+        conversationId: "conversation-blocked",
+        text: `blocked ${index}`,
+        policy: "queue",
+      },
+    })),
+    {
+      id: "effect:ready-101",
+      kind: "runtime.send",
+      eventSeq: 101,
+      payload: {
+        operationId: "ready-101",
+        conversationId: "conversation-ready",
+        text: "deliver me",
+        policy: "queue",
+      },
+    },
+  ];
+  const sent: string[] = [];
+  let busySends = 0;
+  const busyHost = host(async () => {
+    busySends += 1;
+    return { outcome: "turn-started", turnId: "unexpected" };
+  });
+  busyHost.health = async () => ({ ...idleState("session-blocked"), status: "active", activeTurnRef: "turn-blocked" });
+  const queue = new StructuredDeliveryQueue({
+    effects: async (_kinds, afterEventSeq = 0) => effects
+      .filter((effect) => effect.eventSeq > afterEventSeq)
+      .slice(0, 100),
+    transition: async () => {},
+  }, (conversationId) => conversationId === "conversation-blocked"
+    ? busyHost
+    : host(async (entry) => {
+      sent.push(entry.id);
+      return { outcome: "turn-started", turnId: "turn-ready" };
+    }));
+
+  await queue.drain();
+
+  expect(sent).toEqual(["ready-101"]);
+  expect(busySends).toBe(0);
+});
+
 test("structured delivery surfaces a host actuation failure", async () => {
   const transitions: Array<[string, string, string | null | undefined]> = [];
   const port: StructuredDeliveryQueuePort = {
@@ -164,6 +214,49 @@ test("a host crash leaves the conversation head queued for recovery", async () =
     ["op-crash", "delivering", undefined],
     ["op-crash", "queued", "engine child exited"],
   ]);
+});
+
+test("a bounded stalled target still delivers another ready conversation", async () => {
+  let rejectStalled!: (error: Error) => void;
+  const stalled = new Promise<DeliveryReceipt>((_resolve, reject) => { rejectStalled = reject; });
+  let stalledDead = false;
+  const stalledHost = host(async () => stalled);
+  stalledHost.health = async () => ({ ...idleState("session-stalled"), status: stalledDead ? "dead" : "idle" });
+  const sent: string[] = [];
+  const transitions: Array<[string, string]> = [];
+  const queue = new StructuredDeliveryQueue({
+    effects: async () => [
+      {
+        id: "effect:op-stalled",
+        kind: "runtime.send",
+        eventSeq: 25,
+        payload: { operationId: "op-stalled", conversationId: "conversation-stalled", text: "wait", policy: "queue" },
+      },
+      {
+        id: "effect:op-ready",
+        kind: "runtime.send",
+        eventSeq: 26,
+        payload: { operationId: "op-ready", conversationId: "conversation-ready", text: "deliver", policy: "queue" },
+      },
+    ],
+    transition: async (operationId, status) => { transitions.push([operationId, status]); },
+  }, (conversationId) => conversationId === "conversation-stalled"
+    ? stalledHost
+    : host(async (entry) => {
+      sent.push(entry.id);
+      return { outcome: "turn-started", turnId: "turn-ready" };
+    }));
+
+  const drain = queue.drain();
+  await Bun.sleep(0);
+  expect(sent).toEqual(["op-ready"]);
+
+  stalledDead = true;
+  rejectStalled(new Error("Claude delivery confirmation timed out; outcome is uncertain"));
+  await drain;
+
+  expect(transitions).toContainEqual(["op-ready", "delivered"]);
+  expect(transitions).toContainEqual(["op-stalled", "queued"]);
 });
 
 test("an unavailable host keeps the conversation head queued", async () => {

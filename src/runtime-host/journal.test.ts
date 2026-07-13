@@ -909,7 +909,10 @@ test("structured queue controls cross the local runtime socket", async () => {
   });
 
   expect(operation.receipt.status).toBe("queued");
-  expect(await client.effectBatch()).toHaveLength(1);
+  const initialEffects = await client.effectBatch();
+  expect(initialEffects).toHaveLength(1);
+  expect(await client.effectBatch(undefined, initialEffects[0]!.eventSeq)).toEqual([]);
+  await expect(client.effectBatch(undefined, -1)).rejects.toThrow("runtime effect cursor is invalid");
   expect((await client.transitionOperation("op-socket-queue", "delivering")).receipt.status).toBe("delivering");
   expect((await client.transitionOperation("op-socket-queue", "failed", { reason: "write failed" })).receipt.status).toBe("failed");
   expect(await client.effectBatch()).toEqual([]);

@@ -134,7 +134,11 @@ export class RuntimeHost {
         if (kinds !== undefined && (!Array.isArray(kinds) || kinds.some((kind) => typeof kind !== "string"))) {
           throw new Error("runtime effect kinds are invalid");
         }
-        result = this.journal.effectBatch(100, kinds as string[] | undefined);
+        const afterEventSeq = request.params?.afterEventSeq ?? 0;
+        if (typeof afterEventSeq !== "number" || !Number.isSafeInteger(afterEventSeq) || afterEventSeq < 0) {
+          throw new Error("runtime effect cursor is invalid");
+        }
+        result = this.journal.effectBatch(100, kinds as string[] | undefined, afterEventSeq);
       } else if (request.method === "operation-transition") {
         if (!this.structuredHosts) throw new Error("structured hosts are disabled");
         const status = request.params?.status;
