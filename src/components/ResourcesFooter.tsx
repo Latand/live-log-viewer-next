@@ -329,7 +329,7 @@ function CleanupPanel({
         <select
           value={bulkHours}
           onChange={(event) => setBulkHours(Number(event.target.value) as (typeof BULK_HOURS)[number])}
-          className="min-h-[44px] rounded-[8px] border border-line bg-bg px-1.5 py-1 text-[11px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 sm:min-h-0"
+          className="min-h-[44px] min-w-[44px] rounded-[8px] border border-line bg-bg px-1.5 py-1 text-[11px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 sm:min-h-0 sm:min-w-0"
         >
           {BULK_HOURS.map((hours) => (
             <option key={hours} value={hours}>
@@ -443,7 +443,7 @@ function SessionRow({
           title={live ? t("resources.killLiveHint") : t("resources.killHint")}
           onClick={() => (needsArm ? onArm() : onKill())}
           className={[
-            "inline-flex min-h-[44px] shrink-0 items-center rounded-[8px] border px-2 py-1 text-[11px] font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-err/40 sm:min-h-0",
+            "inline-flex min-h-[44px] min-w-[44px] shrink-0 items-center justify-center rounded-[8px] border px-2 py-1 text-[11px] font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-err/40 sm:min-h-0 sm:min-w-0",
             busy ? "cursor-wait opacity-50" : "",
             armed
               ? "border-err bg-err text-white"

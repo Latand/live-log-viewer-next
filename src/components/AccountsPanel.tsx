@@ -150,7 +150,7 @@ function AccountRow({ account, engine, activeId, onSelect, onRemove, disabled }:
       </button>
       {state === "pending" && account.deviceAuth ? (
         <div className="flex items-center gap-2 px-3 pb-1.5 pl-[26px] text-[10px] text-dim">
-          <a href={account.deviceAuth.url} target="_blank" rel="noreferrer" className="truncate underline">{t("accounts.openLogin")}</a>
+          <a href={account.deviceAuth.url} target="_blank" rel="noreferrer" className="inline-flex min-h-[44px] items-center truncate underline sm:min-h-0">{t("accounts.openLogin")}</a>
           <code className="select-all font-semibold text-ink">{account.deviceAuth.code}</code>
         </div>
       ) : null}
@@ -277,7 +277,7 @@ function ClaudeLoginRow({ account, state, loginBusy }: { account: AccountOption;
             {/* The link renders only in awaiting_code — it is stale once the code
                 is submitted. The URL is server-vetted; render it verbatim. */}
             {login.loginUrl ? (
-              <a href={login.loginUrl} target="_blank" rel="noreferrer noopener" className="text-[11px] font-semibold text-accent underline">
+              <a href={login.loginUrl} target="_blank" rel="noreferrer noopener" className="inline-flex min-h-[44px] items-center self-start text-[11px] font-semibold text-accent underline sm:min-h-0">
                 {t("accounts.claudeLogin.openLink")}
               </a>
             ) : null}
@@ -507,7 +507,7 @@ export function AccountsPanel({
               <button
                 type="submit"
                 disabled={mutation !== null || label.trim() === "" || loginBusy}
-                className="h-11 shrink-0 rounded-[8px] border border-line bg-bg px-2.5 text-[11px] font-semibold hover:bg-chip disabled:cursor-not-allowed disabled:opacity-45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 sm:h-8"
+                className="inline-flex h-11 min-w-[44px] shrink-0 items-center justify-center rounded-[8px] border border-line bg-bg px-2.5 text-[11px] font-semibold hover:bg-chip disabled:cursor-not-allowed disabled:opacity-45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 sm:h-8 sm:min-w-0"
               >
                 {t("accounts.confirmAdd")}
               </button>
