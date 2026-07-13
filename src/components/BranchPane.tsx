@@ -1,7 +1,7 @@
 "use client";
 
 import { CornerDownRight, GitBranch, Maximize2, Minimize2, Unlink2 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { ChevronRight, X } from "@/components/icons";
 import { useIsMobile } from "@/hooks/useIsMobile";
@@ -119,13 +119,30 @@ export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noCompose
   const badge = engineBadge(file);
   const state = paneState(file);
   const tone = PANE_TONES[state];
-  /* The live runtime pill (model/effort picker) shows only for a running,
-     top-level claude/codex agent. When it is present on the phone it is the
-     single model·reasoning control, so the read-only model chip + effort bars
-     stand down there to keep them from rendering twice (issue #177 item 2). */
+  /* The live runtime pill (model/effort picker) applies only to a running,
+     top-level claude/codex agent, where reconfigure has a tmux session to act
+     on. On the phone it is the single tappable model·reasoning control for those
+     panes (issue #177 item 2). Every other phone pane collapses its model and
+     reasoning into one compact read-only chip below, so the card carries exactly
+     one model·reasoning element in all states. Desktop keeps its own chip +
+     effort-bar pair. */
   const showRuntimeControls = file.proc === "running" && !file.parent && (file.engine === "claude" || file.engine === "codex");
-  const showIdentityBadge = !(isMobile && showRuntimeControls);
   const migState = cardMigrationState(file.migration);
+  /* The phone metadata row scrolls horizontally to stay one line (issue #177
+     item 4); this tracks whether more is clipped to the right so a fade
+     affordance can show, and the row swallows its own touch gestures so a scroll
+     never reaches the header swipe handler (issue #177 item 1 review). */
+  const metaScrollRef = useRef<HTMLDivElement | null>(null);
+  const [metaClipped, setMetaClipped] = useState(false);
+  const syncMetaClip = useCallback(() => {
+    const el = metaScrollRef.current;
+    if (!el) return;
+    const clipped = el.scrollWidth - el.clientWidth - el.scrollLeft > 4;
+    setMetaClipped((prev) => (prev === clipped ? prev : clipped));
+  }, []);
+  useEffect(() => {
+    syncMetaClip();
+  }, [syncMetaClip, isMobile, file]);
   /* Stable card identity: a committed migration gives this conversation a new
      transcript `path` under the target account, but the same conversationId. So
      the chime pane registry, the composer's held receipts, and per-card recovery
@@ -238,24 +255,54 @@ export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noCompose
               </button>
             ) : null}
           </div>
-          <div className="flex min-w-0 items-center gap-x-1.5">
+          <div
+            className="relative flex min-w-0 items-center gap-x-1.5"
+            /* The metadata row owns its own touch gestures on the phone so a
+               horizontal scroll to reveal clipped chips stays here and never
+               reaches MobileFocusView's header swipe (which would switch
+               conversations). The title row above still answers to swipes. */
+            onTouchStart={isMobile ? (event) => event.stopPropagation() : undefined}
+            onTouchEnd={isMobile ? (event) => event.stopPropagation() : undefined}
+          >
             {/* Context usage is pinned first and never scrolls on the phone
                 (issue #177 item 1): the exact % leads the chip face so it stays
-                on screen no matter how the rest of the metadata row overflows.
-                Desktop keeps ctx inline in the wrapping row below. */}
+                on screen through any overflow of the row beside it. Desktop keeps
+                ctx inline in the wrapping row. */}
             {isMobile && file.ctx ? <CtxChip ctx={file.ctx} /> : null}
             <div
+              ref={metaScrollRef}
+              onScroll={isMobile ? syncMetaClip : undefined}
+              /* Fade the trailing content when the phone row still has clipped
+                 chips — a background-independent scroll affordance that works over
+                 the tinted header tones. */
+              style={isMobile && metaClipped ? { maskImage: "linear-gradient(to right, #000 calc(100% - 20px), transparent)", WebkitMaskImage: "linear-gradient(to right, #000 calc(100% - 20px), transparent)" } : undefined}
               className={`flex min-w-0 items-center gap-x-1.5 gap-y-1 ${
                 isMobile ? "no-scrollbar flex-nowrap overflow-x-auto" : "flex-wrap"
               }`}
             >
               <LastActivity file={file} />
-              {/* Model + reasoning render exactly once (issue #177 item 2): when the
-                  tappable runtime pill is present it already shows «model · effort»
-                  and opens the picker, so on the phone the separate read-only model
-                  chip and effort bars are dropped to avoid the duplicate pair. They
-                  stay wherever that pill is absent (idle/child panes, desktop). */}
-              {showIdentityBadge ? (
+              {/* Model + reasoning as one element (issue #177 item 2): a running
+                  root claude/codex pane gets the tappable picker pill; every other
+                  phone pane gets a single «model · reasoning» read-only chip that
+                  folds the model and effort tier together. Desktop keeps its chip
+                  plus effort-bar pair. */}
+              {showRuntimeControls ? (
+                <AgentRuntimeControls file={file} />
+              ) : isMobile ? (
+                file.model ? (
+                  <span
+                    className="inline-flex shrink-0 items-center rounded-full px-2 py-0.5 font-mono text-[10px] font-semibold"
+                    style={{ backgroundColor: effortTint(file).soft, color: effortTint(file).color }}
+                    title={[badge.label, effortTitle(file)].filter(Boolean).join(" · ")}
+                  >
+                    {file.effort ? `${file.model} · ${file.effort}` : file.model}
+                  </span>
+                ) : (
+                  <span className="inline-flex shrink-0 items-center rounded-full px-2 py-0.5 text-[10px] font-bold" style={badge.style}>
+                    {badge.label}
+                  </span>
+                )
+              ) : (
                 <>
                   {file.model ? (
                     <span
@@ -272,11 +319,11 @@ export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noCompose
                   )}
                   <EffortPills file={file} />
                 </>
-              ) : null}
-              {showRuntimeControls ? <AgentRuntimeControls file={file} /> : null}
+              )}
               <RateLimitBadge rateLimit={file.rateLimit} />
               {file.parentRemoved ? <ParentRemovedChip /> : null}
-              {/* Desktop keeps ctx inline here; on mobile it is pinned above. */}
+              {/* Desktop keeps ctx inline here; on mobile it is pinned ahead of
+                  this scroller. */}
               {!isMobile && file.ctx ? <CtxChip ctx={file.ctx} /> : null}
               {file.worktree && !isMobile ? (
                 <span

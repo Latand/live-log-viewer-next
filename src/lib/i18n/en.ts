@@ -42,6 +42,7 @@ export const en = {
   "runtimeConfig.pending": "After turn",
   "runtimeConfig.confirming": "Next turn",
   "runtimeConfig.applied": "Applied",
+  "runtimeConfig.pendingDraft": "Unapplied draft: {model} · {effort} — tap to review",
   "runtimeConfig.failed": "Could not change the running agent configuration",
   "time.agoSec": "{n}s ago",
   "time.agoMin": "{n}m ago",

@@ -29,6 +29,7 @@ import { dropLegacyWorkflowDrafts, isWorkflowDraftId } from "./workflows/workflo
 import { TaskPanel } from "./tasks/TaskPanel";
 import { TaskToastHost } from "./tasks/taskToast";
 import { MobileFocusView } from "./mobile/MobileFocusView";
+import { canHandoff, HandoffHandle } from "./HandoffHandle";
 import { SchemeBoard } from "./scheme/SchemeBoard";
 import { Switchboard } from "./Switchboard";
 import {
@@ -273,6 +274,10 @@ export function ProjectDashboard({
   );
   const taskPanelOpen = board.prefs.taskPanelOpen;
   const [drafts, setDrafts] = useState<string[]>([]);
+  /* The phone focus view reports its currently-focused conversation here so the
+     footer shelf can dock that pane's handoff control on its single row (issue
+     #177 item 5). */
+  const [mobileActiveFile, setMobileActiveFile] = useState<FileEntry | null>(null);
   /* Desktop `+ Task`: bump drops the inline sticky composer in a free slot on
      the board (pinned near the button). */
   const [newTaskNonce, setNewTaskNonce] = useState(0);
@@ -960,7 +965,7 @@ export function ProjectDashboard({
               onClose={closeNode}
               onDraftClose={removeDraft}
               onDraftSpawned={draftSpawned}
-              onHandoff={addHandoffDraft}
+              onActiveChange={setMobileActiveFile}
               taskSheetNonce={taskSheetNonce}
             />
           ) : listAvailable ? (
@@ -1061,9 +1066,10 @@ export function ProjectDashboard({
           which already excludes every collapsed worker, so a card never appears
           in both a stack and here.
 
-          On the phone both strips fold behind a single bottom disclosure (issue
-          #177 item 5) so the footer is one compact row instead of two stacked
-          full-width strips; desktop keeps them side by side. */}
+          On the phone the handoff control, the collapsed-worker strip, and the
+          quiet strip share one footer row (issue #177 item 5): the handoff docks
+          beside a single disclosure that folds both strips. Desktop renders the
+          two strips directly, side by side. */}
       {(() => {
         const workerTotal = workerStacks.reduce((sum, stack) => sum + stack.items.length, 0);
         const quietTotal = !hasArchiveNodes ? residual.length : 0;
@@ -1075,7 +1081,16 @@ export function ProjectDashboard({
             ) : null}
           </>
         );
-        return isMobile ? <MobileBottomShelf total={workerTotal + quietTotal}>{strips}</MobileBottomShelf> : strips;
+        if (!isMobile) return strips;
+        /* Only the scheme focus view has a focused conversation to hand off; the
+           list view and empty states dock no handoff. */
+        const handoffFile = projectView === "scheme" && mobileActiveFile && canHandoff(mobileActiveFile) ? mobileActiveFile : null;
+        const leading = handoffFile ? <HandoffHandle file={handoffFile} onHandoff={() => addHandoffDraft(handoffFile)} inline /> : null;
+        return (
+          <MobileBottomShelf total={workerTotal + quietTotal} leading={leading}>
+            {strips}
+          </MobileBottomShelf>
+        );
       })()}
 
       <TaskToastHost />

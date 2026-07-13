@@ -39,6 +39,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "runtimeConfig.pending": "Після ходу",
   "runtimeConfig.confirming": "Наступний хід",
   "runtimeConfig.applied": "Застосовано",
+  "runtimeConfig.pendingDraft": "Незастосована чернетка: {model} · {effort} — торкніться, щоб переглянути",
   "runtimeConfig.failed": "Не вдалося змінити конфігурацію активного агента",
   "time.agoSec": "{n} с тому",
   "time.agoMin": "{n} хв тому",
