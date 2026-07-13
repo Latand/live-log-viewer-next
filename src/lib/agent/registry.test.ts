@@ -240,6 +240,50 @@ describe("agent registry", () => {
     expect(result).toBe("completed");
   });
 
+  test("a delayed publisher cannot overwrite a replacement owner", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-delayed-publisher-"));
+    const filename = path.join(dir, "agent-registry.json");
+    const lock = `${filename}.locks/${encodeURIComponent("codex:delayed-publisher")}`;
+    const replacementToken = "44444444-4444-4444-8444-444444444444";
+    let observedReplacement = false;
+    const store = new AgentRegistry(filename, (owner) => owner.startIdentity === "43:replacement", {
+      now: () => Date.now(),
+      wait: async () => {
+        const owner = JSON.parse(fs.readFileSync(path.join(lock, "owner.json"), "utf8"));
+        expect(owner.token).toBe(replacementToken);
+        observedReplacement = true;
+        fs.rmSync(lock, { recursive: true, force: true });
+      },
+    });
+    const originalOpen = fs.openSync;
+    let injected = false;
+    fs.openSync = ((target: fs.PathLike, flags: fs.OpenMode, mode?: fs.Mode) => {
+      if (!injected && String(target).startsWith(lock) && String(target).includes("owner")) {
+        injected = true;
+        if (fs.existsSync(lock)) fs.renameSync(lock, `${lock}.retired-probe`);
+        fs.mkdirSync(lock);
+        fs.writeFileSync(path.join(lock, "owner.json"), JSON.stringify({
+          pid: 43,
+          startIdentity: "43:replacement",
+          token: replacementToken,
+        }));
+      }
+      return originalOpen(target, flags, mode);
+    }) as typeof fs.openSync;
+
+    try {
+      await store.withOperationLock(
+        { engine: "codex", sessionId: "delayed-publisher" },
+        { pid: process.pid, startIdentity: null },
+        async () => undefined,
+      );
+    } finally {
+      fs.openSync = originalOpen;
+    }
+
+    expect(observedReplacement).toBe(true);
+  });
+
   test("a delayed stale contender preserves the replacement lock", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-stale-race-"));
     const filename = path.join(dir, "agent-registry.json");
@@ -326,6 +370,44 @@ describe("agent registry", () => {
     expect(livenessChecks).toBeGreaterThan(100);
     expect(store.engineRouting("codex").activeAccountId).toBe("work");
   });
+
+  test("waits for an interprocess write owner beyond the former deadline", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-interprocess-lock-"));
+    const filename = path.join(dir, "agent-registry.json");
+    const lock = `${filename}.write-lock`;
+    const store = new AgentRegistry(filename);
+    const child = Bun.spawn([process.execPath, "-e", `
+      const fs = require("node:fs");
+      const path = require("node:path");
+      const lock = process.env.LOCK_PATH;
+      fs.mkdirSync(lock, { recursive: true });
+      fs.writeFileSync(path.join(lock, "owner.json"), JSON.stringify({
+        pid: process.pid,
+        startIdentity: null,
+        token: "55555555-5555-4555-8555-555555555555",
+      }));
+      process.stdout.write("ready\\n");
+      setTimeout(() => fs.rmSync(lock, { recursive: true, force: true }), 8_500);
+    `], {
+      env: { ...process.env, LOCK_PATH: lock },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const reader = child.stdout.getReader();
+    const ready = await reader.read();
+    reader.releaseLock();
+    expect(new TextDecoder().decode(ready.value)).toContain("ready");
+
+    try {
+      const startedAt = Date.now();
+      expect(() => store.setEngineRouting("codex", "work")).not.toThrow();
+      expect(Date.now() - startedAt).toBeGreaterThanOrEqual(8_400);
+    } finally {
+      child.kill();
+      await child.exited;
+    }
+    expect(store.engineRouting("codex").activeAccountId).toBe("work");
+  }, 15_000);
 
   test("preserves corrupt registry bytes and rejects mutation", () => {
     const store = registry();

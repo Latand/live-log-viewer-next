@@ -73,7 +73,7 @@ test("renders a capacity chip per account and dims the stale one", () => {
 test("shows account ids and auth health when labels collide", () => {
   const html = render(base({
     accounts: [
-      { id: "botfatherdev-2", label: "botfatherdev", kind: "managed", authPresent: false, authHealth: "signed_out", loginPending: false, loginState: "idle", deviceAuth: null },
+      { id: "botfatherdev-2", label: "botfatherdev", kind: "managed", authPresent: true, authHealth: "signed_out", loginPending: false, loginState: "idle", deviceAuth: null },
       { id: "botfatherdev-3", label: "botfatherdev", kind: "managed", authPresent: true, authHealth: "authenticated", loginPending: false, loginState: "authenticated", deviceAuth: null },
     ],
     active: "botfatherdev-3",

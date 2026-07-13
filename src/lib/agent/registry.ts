@@ -276,7 +276,6 @@ function receiptStillAwaitsResumeSuccessor(receipt: SpawnReceipt): boolean {
 }
 
 const PATH_CORRELATION_WINDOW_MS = 30_000;
-const REGISTRY_WRITE_LOCK_WAIT_MS = 8_000;
 const REGISTRY_LOCK_BACKOFF_MAX_MS = 50;
 const REGISTRY_LOCK_PUBLICATION_GRACE_MS = 1_000;
 
@@ -1174,59 +1173,62 @@ export class AgentRegistry {
     }
   }
 
+  private recoverContendedLock(lock: string): void {
+    let stat: fs.Stats;
+    try {
+      stat = fs.statSync(lock);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw error;
+    }
+    let previous: (ProcessIdentity & { token?: unknown }) | null = null;
+    try {
+      previous = JSON.parse(fs.readFileSync(path.join(lock, "owner.json"), "utf8")) as ProcessIdentity & { token?: unknown };
+    } catch {
+      // Current publishers expose a complete directory in one rename.
+    }
+    if (previous && Number.isInteger(previous.pid) && previous.pid > 0) {
+      if (!this.ownerAlive(previous)) {
+        const fingerprint = typeof previous.token === "string"
+          && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(previous.token)
+          ? previous.token
+          : `legacy-${stat.dev}-${stat.ino}-${stat.ctimeMs}`;
+        this.retireLock(lock, fingerprint);
+      }
+      return;
+    }
+    if (this.lockTiming.now() - stat.mtimeMs >= REGISTRY_LOCK_PUBLICATION_GRACE_MS) {
+      this.retireLock(lock, `incomplete-${stat.dev}-${stat.ino}-${stat.ctimeMs}`);
+    }
+  }
+
   private tryAcquireLock(lock: string, owner: ProcessIdentity): RegistryLockClaim | null {
     const token = crypto.randomUUID();
-    let directory: RegistryLockClaim["directory"] | null = null;
-    try {
-      fs.mkdirSync(lock, 0o700);
-      const stat = fs.statSync(lock);
-      directory = { dev: stat.dev, ino: stat.ino };
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      let stat: fs.Stats;
-      try {
-        stat = fs.statSync(lock);
-      } catch (statError) {
-        if ((statError as NodeJS.ErrnoException).code === "ENOENT") return null;
-        throw statError;
-      }
-      let previous: (ProcessIdentity & { token?: unknown }) | null = null;
-      try {
-        previous = JSON.parse(fs.readFileSync(path.join(lock, "owner.json"), "utf8")) as ProcessIdentity & { token?: unknown };
-      } catch {
-        // Owner publication uses an atomic rename, so an old directory is incomplete.
-      }
-      if (previous && Number.isInteger(previous.pid) && previous.pid > 0) {
-        if (!this.ownerAlive(previous)) {
-          const fingerprint = typeof previous.token === "string"
-            && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(previous.token)
-            ? previous.token
-              : `legacy-${stat.dev}-${stat.ino}-${stat.ctimeMs}`;
-          this.retireLock(lock, fingerprint);
-        }
-        return null;
-      }
-      if (this.lockTiming.now() - stat.mtimeMs >= REGISTRY_LOCK_PUBLICATION_GRACE_MS) {
-        this.retireLock(lock, `incomplete-${stat.dev}-${stat.ino}-${stat.ctimeMs}`);
-      }
-      return null;
-    }
-
-    const ownerFile = path.join(lock, "owner.json");
-    const pendingOwnerFile = path.join(lock, `owner.${token}.tmp`);
+    const staging = `${lock}.pending-${token}`;
     let fd: number | null = null;
     try {
-      fd = fs.openSync(pendingOwnerFile, "wx", 0o600);
+      fs.mkdirSync(staging, 0o700);
+      fd = fs.openSync(path.join(staging, "owner.json"), "wx", 0o600);
       fs.writeFileSync(fd, JSON.stringify({ ...owner, token }), "utf8");
       fs.fsyncSync(fd);
       fs.closeSync(fd);
       fd = null;
-      fs.renameSync(pendingOwnerFile, ownerFile);
-      return { lock, token, directory };
+      const stagingDirectory = fs.openSync(staging, "r");
+      try { fs.fsyncSync(stagingDirectory); } finally { fs.closeSync(stagingDirectory); }
+      const stat = fs.statSync(staging);
+      try {
+        fs.renameSync(staging, lock);
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code !== "EEXIST" && code !== "ENOTEMPTY") throw error;
+        fs.rmSync(staging, { recursive: true, force: true });
+        this.recoverContendedLock(lock);
+        return null;
+      }
+      return { lock, token, directory: { dev: stat.dev, ino: stat.ino } };
     } catch (error) {
       if (fd !== null) fs.closeSync(fd);
-      try { fs.unlinkSync(pendingOwnerFile); } catch { /* publication moved or directory retired */ }
-      if (this.sameDirectory(lock, directory)) fs.rmSync(lock, { recursive: true, force: true });
+      fs.rmSync(staging, { recursive: true, force: true });
       throw error;
     }
   }
@@ -1249,15 +1251,13 @@ export class AgentRegistry {
 
   private acquireLock(lock: string, owner: ProcessIdentity): RegistryLockClaim {
     fs.mkdirSync(path.dirname(lock), { recursive: true, mode: 0o700 });
-    const deadline = this.lockTiming.now() + REGISTRY_WRITE_LOCK_WAIT_MS;
+    // Registry mutations stay queued while a verified writer remains live.
+    // Dead and incomplete owners are recovered by tryAcquireLock().
     for (let attempt = 0; ; attempt += 1) {
       const claim = this.tryAcquireLock(lock, owner);
       if (claim) return claim;
-      const remaining = deadline - this.lockTiming.now();
-      if (remaining <= 0) break;
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, this.lockBackoff(attempt, remaining));
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, this.lockBackoff(attempt, REGISTRY_LOCK_BACKOFF_MAX_MS));
     }
-    throw new Error("agent registry is busy");
   }
 
   private async acquireLockAsync(lock: string, owner: ProcessIdentity): Promise<RegistryLockClaim> {

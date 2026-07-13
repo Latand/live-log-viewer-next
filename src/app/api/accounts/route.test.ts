@@ -169,6 +169,68 @@ test("managed authentication projects only a durable live controller observation
   expect(listCodexAccounts().find((item) => item.id === account.id)?.loginPane).not.toBeNull();
 });
 
+test("credential-bearing accounts project a fresh negative auth observation as signed out", async () => {
+  const account = createManagedCodexAccount("Signed out");
+  authenticateCodex(account);
+  const observedAt = new Date().toISOString();
+  agentRegistry().recordQuotaEvaluation({
+    engine: "codex",
+    observations: [{
+      engine: "codex",
+      accountId: account.id,
+      authenticated: false,
+      authCheckedAt: observedAt,
+      limits: null,
+      provenance: { source: "live", reason: "unsupported-account-type", staleSince: null },
+      observedAt,
+      bootId: "signed-out-route-test",
+    }],
+    signature: null,
+    bootId: "signed-out-route-test",
+    now: observedAt,
+    minimumGapMs: 60_000,
+  });
+
+  const body = await (await GET()).json() as {
+    codex: { accounts: Array<{ id: string; authPresent: boolean; auth: { state: string } }> };
+  };
+  expect(body.codex.accounts.find((item) => item.id === account.id)).toEqual(expect.objectContaining({
+    authPresent: true,
+    auth: expect.objectContaining({ state: "signed_out" }),
+  }));
+});
+
+test("credential-bearing accounts project a fresh failed auth check as an error", async () => {
+  const account = createManagedCodexAccount("Auth error");
+  authenticateCodex(account);
+  const observedAt = new Date().toISOString();
+  agentRegistry().recordQuotaEvaluation({
+    engine: "codex",
+    observations: [{
+      engine: "codex",
+      accountId: account.id,
+      authenticated: false,
+      authCheckedAt: observedAt,
+      limits: null,
+      provenance: { source: "unavailable", reason: "quota-probe-failed", staleSince: null },
+      observedAt,
+      bootId: "auth-error-route-test",
+    }],
+    signature: null,
+    bootId: "auth-error-route-test",
+    now: observedAt,
+    minimumGapMs: 60_000,
+  });
+
+  const body = await (await GET()).json() as {
+    codex: { accounts: Array<{ id: string; authPresent: boolean; auth: { state: string } }> };
+  };
+  expect(body.codex.accounts.find((item) => item.id === account.id)).toEqual(expect.objectContaining({
+    authPresent: true,
+    auth: expect.objectContaining({ state: "error" }),
+  }));
+});
+
 test("future quota and auth observations remain ineligible", async () => {
   const account = createManagedCodexAccount("Future");
   setCodexAccountLoginPane(account.id, { paneId: "%future", windowName: "codex-login", startedAt: 0 });
