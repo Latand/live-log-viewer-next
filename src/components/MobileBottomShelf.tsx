@@ -18,20 +18,20 @@ export function MobileBottomShelf({ total, leading, children }: { total: number;
   const [open, setOpen] = useState(false);
   if (total === 0 && !leading) return null;
   return (
-    <div className="shrink-0 border-t border-line bg-panel" data-testid="mobile-bottom-shelf">
+    <div className="shrink-0 border-t border-border bg-card" data-testid="mobile-bottom-shelf">
       <div className="flex items-center gap-1.5 pr-1.5">
         {leading ? <div className="shrink-0">{leading}</div> : null}
         {total > 0 ? (
           <button
             type="button"
-            className="flex min-h-11 flex-1 items-center gap-2 px-4 text-[10px] font-bold uppercase tracking-[.6px] text-dim hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            className="flex min-h-11 flex-1 items-center gap-2 px-4 text-label font-semibold text-secondary hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
             aria-expanded={open}
             onClick={() => setOpen((value) => !value)}
           >
             <ChevronRight className={`h-3.5 w-3.5 shrink-0 transition-transform ${open ? "rotate-90" : ""}`} aria-hidden />
             <Layers className="h-3 w-3 shrink-0" aria-hidden />
             {t("dash.hiddenShelf")}
-            <span className="font-semibold normal-case tracking-normal">{total}</span>
+            <span className="text-caption font-semibold tabular-nums text-muted">{total}</span>
           </button>
         ) : (
           <span className="min-h-11 flex-1" aria-hidden />

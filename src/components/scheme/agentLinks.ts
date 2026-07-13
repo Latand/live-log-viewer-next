@@ -24,10 +24,10 @@ export type PipelineLinkTone = "dim" | "active" | "ok" | "amber";
 
 /** Tone → CSS color for the pipeline rail (red stays reserved for chips/verdicts). */
 export const PIPELINE_RAIL_COLOR: Record<PipelineLinkTone, string> = {
-  dim: "#b4b4bd",
-  active: "#5a51e0",
-  ok: "#1a8a3e",
-  amber: "#e0ae45",
+  dim: "var(--color-strong)",
+  active: "var(--color-accent)",
+  ok: "var(--color-success)",
+  amber: "var(--color-warning)",
 };
 
 export interface RailSegment {

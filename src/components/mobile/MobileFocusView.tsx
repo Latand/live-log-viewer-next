@@ -4,6 +4,7 @@ import { ListTodo, Map as MapIcon, Pause, Play } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { Loader2, X } from "@/components/icons";
+import { Badge } from "@/components/ui/Badge";
 import { TaskSheet, type TaskSheetView } from "@/components/tasks/TaskSheet";
 import { viewBus } from "@/hooks/viewPresenceBus";
 import type { Flow } from "@/lib/flows/types";
@@ -310,14 +311,14 @@ export function MobileFocusView({ project, groups, manual, files, flows, pipelin
           this single scrolling row with a fade hint at the clipped edge (finding
           5); the map + tasks controls dock on the right so they never float over
           the transcript (findings 2, 3). No separate third pipeline row. */}
-      <div className="flex shrink-0 items-stretch border-b border-line bg-panel">
+      <div className="flex shrink-0 items-stretch border-b border-border bg-card">
         {entries.length > 1 || pipelineFocus ? (
           <div className="relative min-w-0 flex-1">
             <div ref={chipScrollRef} onScroll={syncChipFade} className="no-scrollbar flex items-center gap-1.5 overflow-x-auto px-2 py-1.5">
               {pipelineFocus ? (
                 <>
                   <PipelineFocusRow pipeline={pipelineFocus.pipeline} index={pipelineFocus.index} renderableFlows={renderableFlows} renderablePaths={renderablePaths} onHop={hopToStage} onOpenPath={openStagePath} />
-                  {entries.length > 1 ? <span aria-hidden className="mx-0.5 h-7 w-px shrink-0 bg-line" /> : null}
+                  {entries.length > 1 ? <span aria-hidden className="mx-0.5 h-7 w-px shrink-0 bg-border" /> : null}
                 </>
               ) : null}
               {entries.length > 1
@@ -334,20 +335,20 @@ export function MobileFocusView({ project, groups, manual, files, flows, pipelin
             </div>
             {/* Scroll affordance: a soft panel-colored fade over each clipped
                 edge, shown only while there is more to scroll that way. */}
-            <span aria-hidden className={`pointer-events-none absolute inset-y-0 left-0 w-6 bg-gradient-to-r from-panel to-transparent transition-opacity ${chipFade.left ? "opacity-100" : "opacity-0"}`} />
-            <span aria-hidden className={`pointer-events-none absolute inset-y-0 right-0 w-6 bg-gradient-to-l from-panel to-transparent transition-opacity ${chipFade.right ? "opacity-100" : "opacity-0"}`} />
+            <span aria-hidden className={`pointer-events-none absolute inset-y-0 left-0 w-6 bg-gradient-to-r from-card to-transparent transition-opacity ${chipFade.left ? "opacity-100" : "opacity-0"}`} />
+            <span aria-hidden className={`pointer-events-none absolute inset-y-0 right-0 w-6 bg-gradient-to-l from-card to-transparent transition-opacity ${chipFade.right ? "opacity-100" : "opacity-0"}`} />
           </div>
         ) : (
           <span className="min-w-0 flex-1" aria-hidden />
         )}
-        <div className="flex shrink-0 items-center gap-1 border-l border-line px-1.5">
+        <div className="flex shrink-0 items-center gap-1 border-l border-border px-1.5">
           {/* Collapsed worker stacks count toward map availability (issue #136):
               a worker-heavy board is often one visible root plus several stacks,
               and the map is the only place their per-origin dots can be seen. */}
           {mapReachable(layout.nodes.length, workerStacks.length) ? (
             <button
               type="button"
-              className="inline-flex h-11 min-w-11 items-center justify-center gap-1 rounded-[8px] text-dim hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+              className="inline-flex h-11 min-w-11 items-center justify-center gap-1 rounded-[8px] text-muted hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
               aria-label={t("mobile.openMap")}
               onClick={() => setMapOpen(true)}
             >
@@ -356,7 +357,7 @@ export function MobileFocusView({ project, groups, manual, files, flows, pipelin
           ) : null}
           <button
             type="button"
-            className="inline-flex h-11 min-w-11 items-center justify-center gap-1 rounded-[8px] text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            className="inline-flex h-11 min-w-11 items-center justify-center gap-1 rounded-[8px] text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
             aria-label={t("tasks.panelToggleAria")}
             onClick={() => setTaskSheet("list")}
           >
@@ -412,16 +413,16 @@ export function MobileFocusView({ project, groups, manual, files, flows, pipelin
           dockedPipelines.length ? (
             /* No conversation yet, but an active pipeline is provisioning: its
                plan + controls ARE the surface here (issue #136 / review). */
-            <div className="flex min-h-0 flex-1 flex-col divide-y divide-line overflow-y-auto">
+            <div className="flex min-h-0 flex-1 flex-col divide-y divide-border overflow-y-auto">
               {dockedPipelines.map((pipeline) => (
                 <MobilePipelineDock key={pipeline.id} pipeline={pipeline} />
               ))}
             </div>
           ) : (
-            <div className="flex flex-1 items-center justify-center text-center text-[13px] text-dim">{t("mobile.noConvos")}</div>
+            <div className="flex flex-1 items-center justify-center text-center text-[13px] text-muted">{t("mobile.noConvos")}</div>
           )
         ) : (
-          <div className="flex flex-1 items-center justify-center gap-2 text-center text-[13px] text-dim">
+          <div className="flex flex-1 items-center justify-center gap-2 text-center text-[13px] text-muted">
             <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
             {t("common.loading")}
           </div>
@@ -431,7 +432,7 @@ export function MobileFocusView({ project, groups, manual, files, flows, pipelin
       {/* When a conversation IS focused, docked pipelines keep a compact
           plan/control bar below the pane so their surface never disappears. */}
       {(activeNode || activeDeck || activeDraft) && dockedPipelines.length ? (
-        <div className="max-h-[42vh] shrink-0 divide-y divide-line overflow-y-auto border-t border-line bg-panel">
+        <div className="max-h-[42vh] shrink-0 divide-y divide-border overflow-y-auto border-t border-border bg-card">
           {dockedPipelines.map((pipeline) => (
             <MobilePipelineDock key={pipeline.id} pipeline={pipeline} />
           ))}
@@ -439,13 +440,13 @@ export function MobileFocusView({ project, groups, manual, files, flows, pipelin
       ) : null}
 
       {mapOpen ? (
-        <div className="fixed inset-0 z-50 flex flex-col bg-bg pb-[env(safe-area-inset-bottom)]">
-          <div className="flex min-h-[52px] shrink-0 items-center gap-2 border-b border-line bg-panel px-2 py-1.5">
+        <div className="fixed inset-0 z-50 flex flex-col bg-canvas pb-[env(safe-area-inset-bottom)]">
+          <div className="flex min-h-[52px] shrink-0 items-center gap-2 border-b border-border bg-card px-2 py-1.5">
             <span className="shrink-0 pl-1 text-[13px] font-bold">{t("mobile.map")}</span>
-            <span className="min-w-0 flex-1 truncate text-[11.5px] text-dim">{project}</span>
+            <span className="min-w-0 flex-1 truncate text-[11.5px] text-muted">{project}</span>
             <button
               type="button"
-              className="flex h-11 w-11 shrink-0 items-center justify-center rounded-[8px] border border-line bg-bg text-dim hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+              className="flex h-11 w-11 shrink-0 items-center justify-center rounded-[8px] border border-border bg-canvas text-muted hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
               aria-label={t("mobile.closeMap")}
               onClick={() => setMapOpen(false)}
             >
@@ -478,13 +479,13 @@ export function MobileFocusView({ project, groups, manual, files, flows, pipelin
               only full-plan surface for every active pipeline, memberful ones
               included (issue #156). */}
           {dockedPipelines.length ? (
-            <div className="max-h-[38vh] shrink-0 divide-y divide-line overflow-y-auto border-t border-line bg-panel">
+            <div className="max-h-[38vh] shrink-0 divide-y divide-border overflow-y-auto border-t border-border bg-card">
               {dockedPipelines.map((pipeline) => (
                 <MobilePipelineDock key={pipeline.id} pipeline={pipeline} />
               ))}
             </div>
           ) : null}
-          <div className="shrink-0 border-t border-line bg-panel px-3 py-1.5 text-center text-[11px] text-dim">
+          <div className="shrink-0 border-t border-border bg-card px-3 py-1.5 text-center text-[11px] text-muted">
             {t("mobile.tapNode")}
           </div>
         </div>
@@ -543,13 +544,13 @@ function PipelineFocusRow({ pipeline, index, renderableFlows, renderablePaths, o
     /* Inline chip group living inside the shared conversation-chip strip (finding
        4): no separate row. Every hop/verdict control is a 44px tap target. */
     <div className="flex shrink-0 items-center gap-1.5" role="group" aria-label={t("pipelineMobile.chipAria", { task: pipeline.task })}>
-      <span className="shrink-0 rounded-full bg-chip px-1.5 py-1 text-[10px] font-bold text-dim" aria-hidden>⇢ {t("pipelineMobile.position", { k: index + 1, n: total })}</span>
+      <span className="shrink-0 rounded-full bg-sunken px-1.5 py-1 text-[10px] font-bold text-muted" aria-hidden>⇢ {t("pipelineMobile.position", { k: index + 1, n: total })}</span>
       <button
         type="button"
         disabled={!prevHopEnabled}
         onClick={() => onHop(index - 1)}
         aria-label={t("pipelineMobile.prevStage")}
-        className="inline-flex h-11 shrink-0 items-center rounded-full border border-line bg-panel px-3 text-[11px] font-bold text-dim focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-30"
+        className="inline-flex h-11 shrink-0 items-center rounded-full border border-border bg-card px-3 text-[11px] font-bold text-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-30"
       >
         ‹ {prev ? stageChipLabel(t, prev) : ""}
       </button>
@@ -573,7 +574,7 @@ function PipelineFocusRow({ pipeline, index, renderableFlows, renderablePaths, o
         disabled={!nextHopEnabled}
         onClick={() => onHop(index + 1)}
         aria-label={t("pipelineMobile.nextStage")}
-        className="inline-flex h-11 shrink-0 items-center rounded-full border border-line bg-panel px-3 text-[11px] font-bold text-dim focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-30"
+        className="inline-flex h-11 shrink-0 items-center rounded-full border border-border bg-card px-3 text-[11px] font-bold text-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-30"
       >
         {next ? stageChipLabel(t, next) : ""} ›
       </button>
@@ -585,8 +586,8 @@ function PipelineFocusRow({ pipeline, index, renderableFlows, renderablePaths, o
             if (event.target === event.currentTarget) setSheetOpen(false);
           }}
         >
-          <div className="mb-0 w-full max-w-[420px] rounded-t-[16px] bg-panel p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] shadow-[0_-8px_36px_rgb(20_20_30/0.24)]">
-            <div className="mx-auto mb-2 h-1 w-10 rounded-full bg-line" aria-hidden />
+          <div className="mb-0 w-full max-w-[420px] rounded-t-[16px] bg-card p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] shadow-2">
+            <div className="mx-auto mb-2 h-1 w-10 rounded-full bg-border" aria-hidden />
             <VerdictPopover
               pipeline={pipeline}
               stage={stage}
@@ -605,11 +606,11 @@ function PipelineFocusRow({ pipeline, index, renderableFlows, renderablePaths, o
 
 /** Pipeline state → the header dot tone (busy accent, attention amber, done ok). */
 function pipelineDotColor(pipeline: Pipeline): string {
-  if (pipeline.state === "draft") return "#a06a15";
-  if (PIPELINE_BUSY_STATES.has(pipeline.state)) return "#5a51e0";
-  if (PIPELINE_ATTENTION_STATES.has(pipeline.state)) return "#e0ae45";
-  if (pipeline.state === "completed") return "#1a8a3e";
-  return "#9a9aa4";
+  if (pipeline.state === "draft") return "var(--color-warning)";
+  if (PIPELINE_BUSY_STATES.has(pipeline.state)) return "var(--color-accent)";
+  if (PIPELINE_ATTENTION_STATES.has(pipeline.state)) return "var(--color-warning)";
+  if (pipeline.state === "completed") return "var(--color-success)";
+  return "var(--color-muted)";
 }
 
 /**
@@ -638,12 +639,12 @@ export function MobilePipelineDock({ pipeline }: { pipeline: Pipeline }) {
   const finished = pipeline.state === "completed" || pipeline.state === "closed";
   const parked = pipeline.state === "needs_decision";
   return (
-    <div className={`flex flex-col gap-2 px-3 py-2 ${draft ? "border-y border-dashed border-[#c88719]/70 bg-[#fff9ea]" : ""}`} data-testid="mobile-pipeline-dock" data-pipeline-draft={draft || undefined} role="group" aria-label={t("pipelineMobile.chipAria", { task: pipeline.task })}>
+    <div className={`flex flex-col gap-2 px-3 py-2 ${draft ? "border-y border-dashed border-warning/70 bg-warning-soft" : ""}`} data-testid="mobile-pipeline-dock" data-pipeline-draft={draft || undefined} role="group" aria-label={t("pipelineMobile.chipAria", { task: pipeline.task })}>
       <div className="flex items-center gap-2">
         <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: pipelineDotColor(pipeline) }} aria-hidden />
-        <span className="min-w-0 flex-1 truncate text-[12.5px] font-bold text-ink">{cleanTitle(pipeline.task, 60)}</span>
-        {draft ? <span className="shrink-0 rounded-full border border-dashed border-[#c88719] bg-[#fff1c9] px-2 py-0.5 text-[9px] font-black tracking-[0.08em] text-[#8a5700]">{t("pipelineStrip.draftBadge")}</span> : null}
-        <span className="shrink-0 text-[11px] font-semibold text-dim">{pipelineStateLabel(t, pipeline.state)}</span>
+        <span className="min-w-0 flex-1 truncate text-[12.5px] font-bold text-primary">{cleanTitle(pipeline.task, 60)}</span>
+        {draft ? <Badge tone="warning">{t("pipelineStrip.draftBadge")}</Badge> : null}
+        <span className="shrink-0 text-[11px] font-semibold text-muted">{pipelineStateLabel(t, pipeline.state)}</span>
       </div>
       {/* The whole planned stage graph, scrolled horizontally — past/current/ghost. */}
       <div className="flex items-center gap-1.5 overflow-x-auto pb-1">
@@ -661,7 +662,7 @@ export function MobilePipelineDock({ pipeline }: { pipeline: Pipeline }) {
           );
         })}
       </div>
-      {error ? <span className="text-[11px] font-semibold text-err" role="alert">{error}</span> : null}
+      {error ? <span className="text-[11px] font-semibold text-danger" role="alert">{error}</span> : null}
       {/* A closed pipeline is gone, so no controls; every other state — including
           completed — keeps Close so the operator can always dismiss it. Only
           pause/resume and retry/skip are gated on `finished` (mirrors the desktop
@@ -669,25 +670,25 @@ export function MobilePipelineDock({ pipeline }: { pipeline: Pipeline }) {
       {pipeline.state === "closed" ? null : (
         <div className="flex flex-wrap items-center gap-1.5">
           {draft ? (
-            <button type="button" className="inline-flex h-11 items-center gap-1 rounded-full border border-[#9a6410] bg-[#9a6410] px-3.5 text-[11px] font-bold text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#c88719]/50 disabled:opacity-40" disabled={busy || pipeline.stages.length < 2} onClick={() => void mutate("start")}>
+            <button type="button" className="inline-flex h-11 items-center gap-1 rounded-full border border-accent bg-accent px-3.5 text-[11px] font-bold text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 disabled:opacity-40" disabled={busy || pipeline.stages.length < 2} onClick={() => void mutate("start")}>
               <Play className="h-4 w-4" aria-hidden /> {t("pipelineStrip.start")}
             </button>
           ) : parked ? (
             <>
               <button type="button" className="inline-flex h-11 items-center rounded-full border border-accent bg-accent px-3.5 text-[11px] font-bold text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40" disabled={busy} onClick={() => void mutate("retry-stage")}>{t("pipelineStrip.retryStage")}</button>
-              <button type="button" className="inline-flex h-11 items-center rounded-full border border-line bg-bg px-3.5 text-[11px] font-bold text-dim focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40" disabled={busy} onClick={() => void mutate("skip-stage")}>{t("pipelineStrip.skipStage")}</button>
+              <button type="button" className="inline-flex h-11 items-center rounded-full border border-border bg-canvas px-3.5 text-[11px] font-bold text-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40" disabled={busy} onClick={() => void mutate("skip-stage")}>{t("pipelineStrip.skipStage")}</button>
             </>
           ) : null}
           {draft || finished ? null : pipeline.state === "paused" ? (
-            <button type="button" className="inline-flex h-11 items-center gap-1 rounded-full border border-ok/40 bg-[#eef8f0] px-3.5 text-[11px] font-bold text-ok focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40" disabled={busy} aria-label={t("pipelineStrip.resume")} onClick={() => void mutate("resume")}>
+            <button type="button" className="inline-flex h-11 items-center gap-1 rounded-full border border-success/40 bg-success-soft px-3.5 text-[11px] font-bold text-success focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40" disabled={busy} aria-label={t("pipelineStrip.resume")} onClick={() => void mutate("resume")}>
               <Play className="h-4 w-4" aria-hidden /> {t("pipelineStrip.resume")}
             </button>
           ) : (
-            <button type="button" className="inline-flex h-11 items-center gap-1 rounded-full border border-line bg-bg px-3.5 text-[11px] font-bold text-dim focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40" disabled={busy} aria-label={t("pipelineStrip.pause")} onClick={() => void mutate("pause")}>
+            <button type="button" className="inline-flex h-11 items-center gap-1 rounded-full border border-border bg-canvas px-3.5 text-[11px] font-bold text-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40" disabled={busy} aria-label={t("pipelineStrip.pause")} onClick={() => void mutate("pause")}>
               <Pause className="h-4 w-4" aria-hidden /> {t("pipelineStrip.pause")}
             </button>
           )}
-          <button type="button" className="inline-flex h-11 items-center gap-1 rounded-full border border-line bg-bg px-3.5 text-[11px] font-bold text-dim hover:text-err focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40" disabled={busy} aria-label={t(draft ? "pipelineStrip.discard" : "pipelineStrip.close")} onClick={() => void mutate(draft ? "delete" : "close")}>
+          <button type="button" className="inline-flex h-11 items-center gap-1 rounded-full border border-border bg-canvas px-3.5 text-[11px] font-bold text-muted hover:text-danger focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40" disabled={busy} aria-label={t(draft ? "pipelineStrip.discard" : "pipelineStrip.close")} onClick={() => void mutate(draft ? "delete" : "close")}>
             <X className="h-4 w-4" aria-hidden /> {t(draft ? "pipelineStrip.discard" : "pipelineStrip.close")}
           </button>
         </div>
@@ -717,7 +718,7 @@ function StripChip({
         ref={chipRef}
         type="button"
         className={`flex h-11 shrink-0 items-center gap-1 rounded-full border px-3 text-[11px] font-semibold ${
-          active ? "border-accent/60 bg-accent/10 text-ink" : "border-dashed border-line bg-bg text-dim"
+          active ? "border-accent/60 bg-accent/10 text-primary" : "border-dashed border-border bg-canvas text-muted"
         }`}
         onClick={onClick}
       >
@@ -736,10 +737,10 @@ function StripChip({
       type="button"
       className={`flex h-11 shrink-0 items-center gap-1.5 rounded-full border px-3 text-[11px] font-semibold ${
         active
-          ? "border-accent/60 bg-accent/10 text-ink"
+          ? "border-accent/60 bg-accent/10 text-primary"
           : waiting
-            ? "border-[#e0ae45]/60 bg-[#fff7e6] text-[#8a5a00]"
-            : "border-line bg-bg text-dim"
+            ? "border-warning/60 bg-warning-soft text-warning"
+            : "border-border bg-canvas text-muted"
       }`}
       title={title}
       onClick={onClick}

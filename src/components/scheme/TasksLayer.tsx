@@ -21,7 +21,7 @@ function LiteTaskCard({ task }: { task: PlacedTask }) {
   return (
     <div
       data-scheme-task={task.id}
-      className={`absolute overflow-hidden rounded-[8px] border border-line shadow-card ${
+      className={`absolute overflow-hidden rounded-[8px] border border-border shadow-1 ${
         task.status === "done" ? "opacity-60 saturate-50" : ""
       }`}
       style={{
@@ -32,7 +32,7 @@ function LiteTaskCard({ task }: { task: PlacedTask }) {
       }}
     >
       <div aria-hidden className="h-1 w-full" style={{ backgroundColor: tone.color }} />
-      <div className="px-3 py-2 text-[12.5px] font-bold leading-[17px] text-[#26262c]">
+      <div className="px-3 py-2 text-[12.5px] font-bold leading-[17px] text-primary">
         <span className="line-clamp-4 whitespace-pre-wrap break-words">{taskTitle(task.text) || t("tasks.untitled")}</span>
       </div>
     </div>

@@ -3,6 +3,7 @@
 import { useMemo, useState } from "react";
 
 import { ChevronRight, Layers } from "@/components/icons";
+import { SectionHeader } from "@/components/ui/SectionHeader";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import type { Flow } from "@/lib/flows/types";
 import type { Pipeline } from "@/lib/pipelines/types";
@@ -41,16 +42,16 @@ function StackRow({
   return (
     <div className="min-w-0">
       <button
-        className={`flex w-full items-center gap-2 rounded-[8px] px-2 text-left text-[11px] font-bold text-ink hover:bg-bg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+        className={`flex w-full items-center gap-2 rounded-[8px] px-2 text-left text-[11px] font-semibold text-primary hover:bg-canvas focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
           isMobile ? "min-h-11" : "h-7"
         }`}
         aria-expanded={open}
         onClick={() => setOpen((value) => !value)}
       >
-        <ChevronRight className={`h-3.5 w-3.5 shrink-0 text-dim transition-transform ${open ? "rotate-90" : ""}`} aria-hidden />
-        <Layers className="h-3 w-3 shrink-0 text-dim" aria-hidden />
+        <ChevronRight className={`h-3.5 w-3.5 shrink-0 text-muted transition-transform ${open ? "rotate-90" : ""}`} aria-hidden />
+        <Layers className="h-3 w-3 shrink-0 text-muted" aria-hidden />
         <span className="min-w-0 flex-1 truncate">{label}</span>
-        <span className="shrink-0 rounded-full bg-accent/10 px-1.5 text-[9.5px] font-bold text-accent">{stack.items.length}</span>
+        <span className="shrink-0 text-[10px] font-normal tabular-nums text-muted">{stack.items.length}</span>
       </button>
       {open ? (
         <FlipRow className="mt-1 flex flex-wrap items-start gap-1.5 pb-1 pl-5">
@@ -61,7 +62,7 @@ function StackRow({
               <button
                 key={file.path}
                 data-flip-key={file.path}
-                className={`inline-flex max-w-[340px] items-center gap-1.5 rounded-full border border-line bg-bg text-[11px] font-semibold text-ink hover:border-accent/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+                className={`inline-flex max-w-[340px] items-center gap-1.5 rounded-full border border-transparent bg-sunken text-[11px] font-semibold text-primary hover:border-border focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
                   isMobile ? "min-h-11 px-3" : "h-7 px-2"
                 }`}
                 title={cleanTitle(file.title)}
@@ -69,9 +70,9 @@ function StackRow({
               >
                 <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${activityDot(file.activity)}`} />
                 <span className="shrink-0 rounded-full px-1.5 text-[9px]" style={badge.style}>{badge.label}</span>
-                {verdict ? <span className="shrink-0 text-[10px] text-dim" aria-hidden>{verdict}</span> : null}
+                {verdict ? <span className="shrink-0 text-[10px] text-muted" aria-hidden>{verdict}</span> : null}
                 <span className="truncate">{cleanTitle(file.title, 60)}</span>
-                <span className="shrink-0 font-normal text-dim">{fmtAge(file.mtime)}</span>
+                <span className="shrink-0 font-normal text-muted">{fmtAge(file.mtime)}</span>
               </button>
             );
           })}
@@ -128,19 +129,15 @@ export function WorkerStacks({
   };
 
   return (
-    <div className="shrink-0 border-t border-line bg-panel" data-testid="worker-stacks">
-      <button
-        className={`flex w-full items-center gap-2 px-4 text-[10px] font-bold uppercase tracking-[.6px] text-dim hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
-          isMobile ? "min-h-11" : "h-8"
-        }`}
-        aria-expanded={open}
-        aria-label={t("workerStack.aria")}
-        onClick={() => setOpen((value) => !value)}
-      >
-        <ChevronRight className={`h-3.5 w-3.5 transition-transform ${open ? "rotate-90" : ""}`} aria-hidden />
-        {t("workerStack.title")}
-        <span className="font-semibold normal-case tracking-normal">{total}</span>
-      </button>
+    <div className="shrink-0 border-t border-border bg-canvas" data-testid="worker-stacks">
+      <SectionHeader
+        open={open}
+        onToggle={() => setOpen((value) => !value)}
+        label={t("workerStack.title")}
+        count={total}
+        ariaLabel={t("workerStack.aria")}
+        mobile={isMobile}
+      />
       {open ? (
         <div className="flex max-h-52 flex-col gap-0.5 overflow-y-auto px-3 pb-2.5">
           {stacks.map((stack) => (

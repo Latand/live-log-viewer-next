@@ -367,7 +367,7 @@ export function buildSchemeLayout(
           y1: y + h,
           x2: cx + MINI_W / 2,
           y2: childTop,
-          color: "#9a9aa4",
+          color: "var(--color-muted)",
           live: false,
           dashed: true,
         });
@@ -384,7 +384,7 @@ export function buildSchemeLayout(
           y1: y + h,
           x2: cx + NODE_W / 2,
           y2: childTop,
-          color: "#5a51e0",
+          color: "var(--color-accent)",
           live: false,
           dashed: true,
         });

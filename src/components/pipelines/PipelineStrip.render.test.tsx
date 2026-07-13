@@ -71,9 +71,9 @@ test("the status dot follows the tone matrix (accent busy, amber attention, ok d
   };
   /* Running → accent, never green; needs_decision + paused → amber, never red. */
   expect(dotClass("running")).toContain("bg-accent");
-  expect(dotClass("needs_decision")).toContain("bg-[#e0ae45]");
-  expect(dotClass("paused")).toContain("bg-[#e0ae45]");
-  expect(dotClass("completed")).toContain("bg-ok");
+  expect(dotClass("needs_decision")).toContain("bg-warning");
+  expect(dotClass("paused")).toContain("bg-warning");
+  expect(dotClass("completed")).toContain("bg-success");
   /* Red is reserved for chip/verdict failures — the dot never uses it. */
-  expect(render(pipeline({ state: "needs_decision" }))).not.toContain("rounded-full bg-err");
+  expect(render(pipeline({ state: "needs_decision" }))).not.toContain("rounded-full bg-danger");
 });

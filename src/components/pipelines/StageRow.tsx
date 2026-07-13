@@ -189,13 +189,13 @@ export function StageRow({
     .join(" · ");
 
   return (
-    <div className="flex flex-col gap-1.5 rounded-[10px] border border-line bg-bg/50 p-2" role="group" aria-label={t("pipelineDialog.stageLabel", { n })}>
+    <div className="flex flex-col gap-1.5 rounded-[10px] border border-border bg-canvas/50 p-2" role="group" aria-label={t("pipelineDialog.stageLabel", { n })}>
       <div className="flex items-center gap-1.5">
-        <span className="shrink-0 text-[10.5px] font-bold text-dim">{t("pipelineDialog.stageLabel", { n })}</span>
+        <span className="shrink-0 text-[10.5px] font-bold text-muted">{t("pipelineDialog.stageLabel", { n })}</span>
         <span className="flex-1" />
         <button
           type="button"
-          className="inline-flex h-6 w-6 items-center justify-center rounded-[7px] border border-line bg-panel text-dim hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-30"
+          className="inline-flex h-6 w-6 items-center justify-center rounded-[7px] border border-border bg-card text-muted hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-30"
           aria-label={t("pipelineDialog.moveUp", { n })}
           disabled={index === 0}
           onClick={() => onMove(-1)}
@@ -204,7 +204,7 @@ export function StageRow({
         </button>
         <button
           type="button"
-          className="inline-flex h-6 w-6 items-center justify-center rounded-[7px] border border-line bg-panel text-dim hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-30"
+          className="inline-flex h-6 w-6 items-center justify-center rounded-[7px] border border-border bg-card text-muted hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-30"
           aria-label={t("pipelineDialog.moveDown", { n })}
           disabled={index === total - 1}
           onClick={() => onMove(1)}
@@ -213,7 +213,7 @@ export function StageRow({
         </button>
         <button
           type="button"
-          className="inline-flex h-6 w-6 items-center justify-center rounded-[7px] border border-line bg-panel text-dim hover:text-err focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-30"
+          className="inline-flex h-6 w-6 items-center justify-center rounded-[7px] border border-border bg-card text-muted hover:text-danger focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-30"
           aria-label={t("pipelineDialog.removeStage", { n })}
           disabled={total <= 2}
           onClick={onRemove}
@@ -223,8 +223,8 @@ export function StageRow({
       </div>
 
       <div className="flex flex-wrap items-center gap-1.5">
-        <span className="shrink-0 text-[10px] font-semibold text-dim">{t("pipelineDialog.kind")}</span>
-        <div className="inline-flex overflow-hidden rounded-[8px] border border-line" role="radiogroup" aria-label={t("pipelineDialog.kind")} onKeyDown={onKindArrow}>
+        <span className="shrink-0 text-[10px] font-semibold text-muted">{t("pipelineDialog.kind")}</span>
+        <div className="inline-flex overflow-hidden rounded-[8px] border border-border" role="radiogroup" aria-label={t("pipelineDialog.kind")} onKeyDown={onKindArrow}>
           <button
             ref={runKindRef}
             type="button"
@@ -232,7 +232,7 @@ export function StageRow({
             aria-checked={!isReview}
             tabIndex={isReview ? -1 : 0}
             onClick={() => selectKind("run")}
-            className={`px-2.5 py-1 text-[11px] font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${!isReview ? "bg-accent text-white" : "bg-panel text-dim hover:text-ink"}`}
+            className={`px-2.5 py-1 text-[11px] font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${!isReview ? "bg-accent text-white" : "bg-card text-muted hover:text-primary"}`}
           >
             {t("pipelineDialog.kindRun")}
           </button>
@@ -245,21 +245,21 @@ export function StageRow({
             tabIndex={isReview ? 0 : -1}
             aria-describedby={!canReviewLoop ? `${modelListId}-rev` : undefined}
             onClick={() => selectKind("review-loop")}
-            className={`px-2.5 py-1 text-[11px] font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${isReview ? "bg-accent text-white" : "bg-panel text-dim hover:text-ink"} ${!canReviewLoop ? "cursor-not-allowed opacity-40" : ""}`}
+            className={`px-2.5 py-1 text-[11px] font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${isReview ? "bg-accent text-white" : "bg-card text-muted hover:text-primary"} ${!canReviewLoop ? "cursor-not-allowed opacity-40" : ""}`}
           >
             {t("pipelineDialog.kindReviewLoop")}
           </button>
         </div>
-        {!canReviewLoop ? <span id={`${modelListId}-rev`} className="text-[9.5px] text-dim">{t("pipelineDialog.reviewNeedsRun")}</span> : null}
+        {!canReviewLoop ? <span id={`${modelListId}-rev`} className="text-[9.5px] text-muted">{t("pipelineDialog.reviewNeedsRun")}</span> : null}
       </div>
 
       <div className="flex flex-wrap items-center gap-1.5">
-        <label className="shrink-0 text-[10px] font-semibold text-dim" htmlFor={`${modelListId}-role`}>{t("pipelineDialog.role")}</label>
+        <label className="shrink-0 text-[10px] font-semibold text-muted" htmlFor={`${modelListId}-role`}>{t("pipelineDialog.role")}</label>
         <select
           id={`${modelListId}-role`}
           value={stage.roleId}
           aria-label={t("pipelineDialog.roleAria", { n })}
-          className="h-7 min-w-0 flex-1 rounded-[8px] border border-line bg-panel px-1.5 text-[11px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+          className="h-7 min-w-0 flex-1 rounded-[8px] border border-border bg-card px-1.5 text-[11px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
           onChange={(event) => selectRole(event.target.value)}
         >
           <option value="">{t("pipelineDialog.noRole")}</option>
@@ -267,21 +267,21 @@ export function StageRow({
         </select>
       </div>
       {selectedRole ? (
-        <p className="text-[10px] leading-4 text-dim">{selectedRole.description}</p>
+        <p className="text-[10px] leading-4 text-muted">{selectedRole.description}</p>
       ) : (
-        <p className="text-[10px] leading-4 text-dim">{t("pipelineDialog.noRoleHint")}</p>
+        <p className="text-[10px] leading-4 text-muted">{t("pipelineDialog.noRoleHint")}</p>
       )}
       {selectedRole?.parameters.length ? (
         <div className="flex flex-wrap gap-1.5" role="group" aria-label={t("draft.roleParameters")}>
           {selectedRole.parameters.map((parameter) => (
-            <label key={parameter.key} className="flex min-w-24 flex-1 flex-col gap-0.5 text-[10px] text-dim">
+            <label key={parameter.key} className="flex min-w-24 flex-1 flex-col gap-0.5 text-[10px] text-muted">
               <span>{parameter.label}{parameter.required ? " *" : ""}</span>
               {parameter.kind === "select" ? (
-                <select value={String(stage.roleParams[parameter.key] ?? "")} onChange={(event) => setRoleParam(parameter.key, event.target.value)} className="h-7 rounded-[7px] border border-line bg-panel px-1 text-[11px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40">
+                <select value={String(stage.roleParams[parameter.key] ?? "")} onChange={(event) => setRoleParam(parameter.key, event.target.value)} className="h-7 rounded-[7px] border border-border bg-card px-1 text-[11px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40">
                   {parameter.options?.map((option) => <option key={option} value={option}>{option}</option>)}
                 </select>
               ) : (
-                <input type={parameter.kind === "integer" ? "number" : "text"} min={parameter.min} max={parameter.max} maxLength={parameter.kind === "text" ? MAX_ROLE_PARAM_TEXT_LENGTH : undefined} value={String(stage.roleParams[parameter.key] ?? "")} aria-label={parameter.label} onChange={(event) => setRoleParam(parameter.key, parameter.kind === "integer" && event.target.value ? Number(event.target.value) : event.target.value)} className="h-7 min-w-0 rounded-[7px] border border-line bg-panel px-1.5 text-[11px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40" />
+                <input type={parameter.kind === "integer" ? "number" : "text"} min={parameter.min} max={parameter.max} maxLength={parameter.kind === "text" ? MAX_ROLE_PARAM_TEXT_LENGTH : undefined} value={String(stage.roleParams[parameter.key] ?? "")} aria-label={parameter.label} onChange={(event) => setRoleParam(parameter.key, parameter.kind === "integer" && event.target.value ? Number(event.target.value) : event.target.value)} className="h-7 min-w-0 rounded-[7px] border border-border bg-card px-1.5 text-[11px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40" />
               )}
             </label>
           ))}
@@ -289,11 +289,11 @@ export function StageRow({
       ) : null}
 
       <div className="flex flex-wrap items-center gap-1.5">
-        <span className="shrink-0 text-[10px] font-semibold text-dim">{t("pipelineDialog.runtime")}</span>
-        <span className="min-w-0 truncate font-mono text-[10.5px] text-ink" title={runtimeSummary}>{runtimeSummary}</span>
+        <span className="shrink-0 text-[10px] font-semibold text-muted">{t("pipelineDialog.runtime")}</span>
+        <span className="min-w-0 truncate font-mono text-[10.5px] text-primary" title={runtimeSummary}>{runtimeSummary}</span>
         <button
           type="button"
-          className="shrink-0 text-[10px] font-semibold text-dim hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+          className="shrink-0 text-[10px] font-semibold text-muted hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
           aria-expanded={runtimeOpen}
           aria-label={t("pipelineDialog.editRuntime", { n })}
           onClick={() => setRuntimeOpen((value) => !value)}
@@ -302,11 +302,11 @@ export function StageRow({
         </button>
       </div>
       {runtimeOpen ? (
-        <div className="flex flex-wrap items-center gap-1.5 rounded-[8px] border border-dashed border-line bg-panel/60 p-1.5">
+        <div className="flex flex-wrap items-center gap-1.5 rounded-[8px] border border-dashed border-border bg-card/60 p-1.5">
           <select
             value={stage.engine}
             aria-label={t("flowDialog.engine", { label: t("pipelineDialog.stageLabel", { n }) })}
-            className="h-7 rounded-[8px] border border-line bg-bg px-1.5 text-[11.5px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            className="h-7 rounded-[8px] border border-border bg-canvas px-1.5 text-[11.5px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
             onChange={(event) => setEngine(event.target.value as FlowEngine)}
           >
             <option value="claude">Claude</option>
@@ -317,7 +317,7 @@ export function StageRow({
             list={modelListId}
             placeholder={fallbackModel || t("pipelineDialog.modelPlaceholder")}
             aria-label={t("pipelineDialog.model")}
-            className="h-7 w-0 min-w-24 flex-1 rounded-[8px] border border-line bg-bg px-1.5 font-mono text-[11px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            className="h-7 w-0 min-w-24 flex-1 rounded-[8px] border border-border bg-canvas px-1.5 font-mono text-[11px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
             onChange={(event) => patch({ model: event.target.value.trim(), runtimeOverridden: true })}
           />
           <datalist id={modelListId}>
@@ -326,7 +326,7 @@ export function StageRow({
           <select
             value={stage.effort}
             aria-label={t("pipelineDialog.effort")}
-            className="h-7 rounded-[8px] border border-line bg-bg px-1.5 text-[11.5px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            className="h-7 rounded-[8px] border border-border bg-canvas px-1.5 text-[11.5px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
             onChange={(event) => patch({ effort: event.target.value, runtimeOverridden: true })}
           >
             <option value="">{t("pipelineDialog.effortDefault")}</option>
@@ -337,10 +337,10 @@ export function StageRow({
 
       {isReview ? null : (
         <div className="flex flex-wrap items-center gap-2">
-          <span className="shrink-0 text-[10px] font-semibold text-dim">{t("pipelineDialog.access")}</span>
+          <span className="shrink-0 text-[10px] font-semibold text-muted">{t("pipelineDialog.access")}</span>
           <div className="inline-flex items-center gap-2" role="radiogroup" aria-label={t("pipelineDialog.access")}>
             {(["read-only", "read-write"] as const).map((value) => (
-              <label key={value} className="flex items-center gap-1 text-[10.5px] text-ink">
+              <label key={value} className="flex items-center gap-1 text-[10.5px] text-primary">
                 <input type="radio" name={`${modelListId}-access`} checked={stage.access === value} onChange={() => patch({ access: value })} className="accent-accent" />
                 {t(value === "read-only" ? "pipelineDialog.accessRo" : "pipelineDialog.accessRw")}
               </label>
@@ -349,7 +349,7 @@ export function StageRow({
         </div>
       )}
 
-      <label className="flex flex-col gap-1 text-[10px] font-semibold text-dim">
+      <label className="flex flex-col gap-1 text-[10px] font-semibold text-muted">
         {t("pipelineDialog.prompt")}
         <textarea
           ref={promptRef}
@@ -357,28 +357,28 @@ export function StageRow({
           rows={isReview ? 2 : 3}
           maxLength={MAX_STAGE_PROMPT_LENGTH}
           placeholder={t(isReview ? "pipelineDialog.reviewNotePlaceholder" : "pipelineDialog.promptPlaceholder")}
-          className="resize-y rounded-[8px] border border-line bg-panel px-2 py-1.5 text-[11.5px] font-normal text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+          className="resize-y rounded-[8px] border border-border bg-card px-2 py-1.5 text-[11.5px] font-normal text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
           onChange={(event) => patch({ prompt: event.target.value })}
         />
       </label>
       <div className="flex flex-wrap items-center gap-1.5">
         <button
           type="button"
-          className="rounded-full border border-line bg-chip px-2 py-0.5 font-mono text-[10px] font-semibold text-dim hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+          className="rounded-full border border-border bg-sunken px-2 py-0.5 font-mono text-[10px] font-semibold text-muted hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
           onClick={() => insertPlaceholder("{{task}}")}
         >
           {t("pipelineDialog.insertTask")}
         </button>
         <button
           type="button"
-          className="rounded-full border border-line bg-chip px-2 py-0.5 font-mono text-[10px] font-semibold text-dim hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40"
+          className="rounded-full border border-border bg-sunken px-2 py-0.5 font-mono text-[10px] font-semibold text-muted hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40"
           disabled={index === 0}
           title={index === 0 ? t("pipelineDialog.prevOutputUnavailable") : undefined}
           onClick={() => insertPlaceholder("{{prev.output}}")}
         >
           {t("pipelineDialog.insertPrevOutput")}
         </button>
-        {index === 0 ? <span className="text-[9.5px] text-dim">{t("pipelineDialog.prevOutputUnavailable")}</span> : null}
+        {index === 0 ? <span className="text-[9.5px] text-muted">{t("pipelineDialog.prevOutputUnavailable")}</span> : null}
       </div>
     </div>
   );

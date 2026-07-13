@@ -31,7 +31,7 @@ export function OutputPreview({
   if (!output.trim()) {
     return (
       <div className="mt-1.5">
-        <span className="inline-flex items-center rounded-md bg-chip px-2 py-0.5 text-[11px] text-dim" title={tr("tools.noOutputTip")}>
+        <span className="inline-flex items-center rounded-md bg-sunken px-2 py-0.5 text-[11px] text-muted" title={tr("tools.noOutputTip")}>
           {tr("tools.noOutput")}
         </span>
       </div>
@@ -45,7 +45,7 @@ export function OutputPreview({
       {all && lang ? (
         <CodeBlock code={shown} lang={lang} />
       ) : (
-        <pre className="max-h-[420px] max-w-full overflow-auto whitespace-pre rounded-[10px] border border-line bg-panel-alt px-3 py-2 font-mono text-[12px]">
+        <pre className="max-h-[420px] max-w-full overflow-auto whitespace-pre rounded-[10px] border border-border bg-sunken px-3 py-2 font-mono text-[12px]">
           {shown}
         </pre>
       )}
@@ -69,7 +69,7 @@ export function OutputPreview({
           )}
         </button>
       ) : truncated ? (
-        <div className="mt-1 text-[11px] text-dim">{tr("render.truncated")}</div>
+        <div className="mt-1 text-[11px] text-muted">{tr("render.truncated")}</div>
       ) : null}
     </div>
   );

@@ -46,13 +46,13 @@ function AttachButton({
       className={[
         "inline-flex min-h-[44px] items-center gap-1.5 rounded-[8px] border px-2.5 text-[11px] font-semibold sm:min-h-0 sm:py-1",
         "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:cursor-wait disabled:opacity-50",
-        copied ? "border-ok/50 text-ok" : "border-line text-dim hover:bg-bg hover:text-accent",
+        copied ? "border-success/50 text-success" : "border-border text-muted hover:bg-canvas hover:text-accent",
       ].join(" ")}
     >
       {loading ? (
         <Loader2 className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" aria-hidden />
       ) : copied ? (
-        <Check className="h-3.5 w-3.5 text-ok" aria-hidden />
+        <Check className="h-3.5 w-3.5 text-success" aria-hidden />
       ) : (
         <Icon className="h-3.5 w-3.5" aria-hidden />
       )}
@@ -99,24 +99,24 @@ export function AttachControlsView({
           onCopy={onCopy}
         />
         {busy ? (
-          <span role="status" className="text-[10.5px] text-dim">
+          <span role="status" className="text-[10.5px] text-muted">
             {t("attach.loading")}
           </span>
         ) : null}
         {copied ? (
-          <span role="status" className="text-[10.5px] font-semibold text-ok">
+          <span role="status" className="text-[10.5px] font-semibold text-success">
             {t(copiedKey(copied.kind))}
           </span>
         ) : null}
       </div>
       {error ? (
-        <div role="alert" aria-live="assertive" className="mt-1 flex flex-wrap items-center gap-2 text-[10.5px] text-err">
+        <div role="alert" aria-live="assertive" className="mt-1 flex flex-wrap items-center gap-2 text-[10.5px] text-danger">
           <span className="min-w-0">{t(reasonKey(error.reason))}</span>
           {recoverable ? (
             <button
               type="button"
               onClick={onRefresh}
-              className="inline-flex min-h-[44px] items-center gap-1 rounded-[8px] border border-err/40 px-2 font-semibold text-err hover:bg-err/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-err/40 sm:min-h-0 sm:py-0.5"
+              className="inline-flex min-h-[44px] items-center gap-1 rounded-[8px] border border-danger/40 px-2 font-semibold text-danger hover:bg-danger/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-danger/40 sm:min-h-0 sm:py-0.5"
             >
               <RotateCw className="h-3 w-3" aria-hidden />
               {t("attach.refresh")}

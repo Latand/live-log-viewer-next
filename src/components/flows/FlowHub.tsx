@@ -14,12 +14,12 @@ import { flowPresentation, patchFlow } from "./flowModel";
 /* Hub tone per link phase: work in accent, waiting-on-you in amber, done in
    verdict green, idle gray — the palette the strip and verdict chips use. */
 const PHASE_TONE: Record<FlowLinkPhase, string> = {
-  waiting: "#9a9aa4",
-  running: "#5a51e0",
-  awaiting_verdict: "#5a51e0",
-  attention: "#e0ae45",
-  paused: "#e0ae45",
-  done: "#1a8a3e",
+  waiting: "var(--color-muted)",
+  running: "var(--color-accent)",
+  awaiting_verdict: "var(--color-accent)",
+  attention: "var(--color-warning)",
+  paused: "var(--color-warning)",
+  done: "var(--color-success)",
 };
 
 /**
@@ -84,7 +84,7 @@ export function FlowHub({
     >
       <button
         data-scheme-ui
-        className="absolute inline-flex h-[34px] -translate-x-1/2 -translate-y-1/2 items-center gap-1 whitespace-nowrap rounded-full border-2 bg-panel px-2.5 shadow-card hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+        className="absolute inline-flex h-[34px] -translate-x-1/2 -translate-y-1/2 items-center gap-1 whitespace-nowrap rounded-full border-2 bg-card px-2.5 shadow-1 hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
         style={{ borderColor: tone, color: tone }}
         title={label}
         aria-label={label}
@@ -100,20 +100,20 @@ export function FlowHub({
         <div
           data-scheme-ui
           aria-label={t("flowHub.controls")}
-          className="absolute bottom-[27px] left-0 z-30 flex w-[230px] -translate-x-1/2 flex-col gap-1.5 rounded-[12px] border border-line bg-panel p-2.5 shadow-[0_10px_36px_rgb(20_20_30/0.18)]"
+          className="absolute bottom-[27px] left-0 z-30 flex w-[230px] -translate-x-1/2 flex-col gap-1.5 rounded-[12px] border border-border bg-card p-2.5 shadow-2"
         >
           <span className="flex min-w-0 items-center gap-1.5">
             <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: tone }} aria-hidden />
             <span className="shrink-0 text-[11.5px] font-bold">{state}</span>
             {presentation.detail ? (
-              <span className="min-w-0 truncate text-[10.5px] font-semibold text-dim" title={presentation.detail}>
+              <span className="min-w-0 truncate text-[10.5px] font-semibold text-muted" title={presentation.detail}>
                 {presentation.detail}
               </span>
             ) : null}
-            {busy ? <RefreshCw className="ml-auto h-3 w-3 shrink-0 animate-spin text-dim" aria-hidden /> : null}
+            {busy ? <RefreshCw className="ml-auto h-3 w-3 shrink-0 animate-spin text-muted" aria-hidden /> : null}
           </span>
           {error ? (
-            <span className="truncate text-[10.5px] font-semibold text-err" title={error}>
+            <span className="truncate text-[10.5px] font-semibold text-danger" title={error}>
               {error}
             </span>
           ) : null}
@@ -128,7 +128,7 @@ export function FlowHub({
           ) : null}
           {flow.state === "reviewing" ? (
             <button
-              className="inline-flex items-center justify-center gap-1 rounded-full border border-err/40 bg-[#fbeaea] px-3 py-1 text-[11px] font-bold text-err hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40"
+              className="inline-flex items-center justify-center gap-1 rounded-full border border-danger/40 bg-danger-soft px-3 py-1 text-[11px] font-bold text-danger hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40"
               disabled={busy}
               title={t("flowStrip.stopReviewerTitle")}
               onClick={() => void run("cancel-round")}
@@ -139,7 +139,7 @@ export function FlowHub({
           <span className="flex items-center gap-1.5">
             {closed ? null : flow.state === "paused" ? (
               <button
-                className="inline-flex flex-1 items-center justify-center gap-1 rounded-full border border-ok/40 bg-[#eef8f0] px-3 py-1 text-[11px] font-bold text-ok hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40"
+                className="inline-flex flex-1 items-center justify-center gap-1 rounded-full border border-success/40 bg-success-soft px-3 py-1 text-[11px] font-bold text-success hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40"
                 disabled={busy}
                 onClick={() => void run("resume")}
               >
@@ -147,7 +147,7 @@ export function FlowHub({
               </button>
             ) : (
               <button
-                className="inline-flex flex-1 items-center justify-center gap-1 rounded-full border border-line bg-bg px-3 py-1 text-[11px] font-bold text-dim hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40"
+                className="inline-flex flex-1 items-center justify-center gap-1 rounded-full border border-border bg-canvas px-3 py-1 text-[11px] font-bold text-muted hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40"
                 disabled={busy}
                 onClick={() => void run("pause")}
               >
@@ -155,7 +155,7 @@ export function FlowHub({
               </button>
             )}
             <button
-              className="inline-flex flex-1 items-center justify-center gap-1 rounded-full border border-line bg-bg px-3 py-1 text-[11px] font-bold text-dim hover:text-err focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40"
+              className="inline-flex flex-1 items-center justify-center gap-1 rounded-full border border-border bg-canvas px-3 py-1 text-[11px] font-bold text-muted hover:text-danger focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40"
               disabled={busy}
               onClick={() => void run("close")}
             >

@@ -25,7 +25,7 @@ function DueChip({ draft }: { draft: UseTaskDraftReturn }) {
       <label
         className={`inline-flex items-center gap-1 rounded-full font-semibold ${
           isMobile ? "min-h-11 px-3 text-[12px]" : "px-1.5 py-1 text-[9.5px]"
-        } ${dueAt ? (overdue ? "bg-[#faeee9] text-[#a04a2e]" : "bg-chip text-[#555]") : "bg-chip text-[#555] hover:text-accent"}`}
+        } ${dueAt ? (overdue ? "bg-danger-soft text-danger" : "bg-sunken text-secondary") : "bg-sunken text-secondary hover:text-accent"}`}
         title={dueAt && dueTz ? t("tasks.dueTitle", { zone: dueTz }) : t("tasks.addDue")}
       >
         <CalendarClock className={isMobile ? "h-4 w-4" : "h-3 w-3"} aria-hidden />
@@ -49,7 +49,7 @@ function DueChip({ draft }: { draft: UseTaskDraftReturn }) {
           type="button"
           aria-label={t("tasks.clearDue")}
           onClick={clearDue}
-          className={`inline-flex items-center justify-center rounded-full text-dim hover:text-err focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+          className={`inline-flex items-center justify-center rounded-full text-muted hover:text-danger focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
             isMobile ? "h-11 w-11" : "h-4 w-4"
           }`}
         >
@@ -73,15 +73,15 @@ function StagedAttachments({ draft }: { draft: UseTaskDraftReturn }) {
     return (
       <div className="flex flex-col gap-1.5">
         {draft.attachments.map((att, idx) => (
-          <div key={att.id} className="flex items-center gap-2 rounded-[8px] border border-line bg-panel p-1.5">
+          <div key={att.id} className="flex items-center gap-2 rounded-[8px] border border-border bg-card p-1.5">
             {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img src={attachmentPreviewUrl(att)} alt={t("img.previewAlt", { n: idx + 1 })} className="h-11 w-11 shrink-0 rounded border border-line object-cover" />
-            <span className="min-w-0 flex-1 truncate text-[12px] font-semibold text-dim">{t("img.previewAlt", { n: idx + 1 })}</span>
+            <img src={attachmentPreviewUrl(att)} alt={t("img.previewAlt", { n: idx + 1 })} className="h-11 w-11 shrink-0 rounded border border-border object-cover" />
+            <span className="min-w-0 flex-1 truncate text-[12px] font-semibold text-muted">{t("img.previewAlt", { n: idx + 1 })}</span>
             <button
               type="button"
               onClick={() => draft.removeAttachment(att.id)}
               aria-label={t("img.removeAria", { n: idx + 1 })}
-              className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full border border-line bg-bg text-dim hover:text-err focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+              className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full border border-border bg-canvas text-muted hover:text-danger focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
             >
               <X className="h-4 w-4" aria-hidden />
             </button>
@@ -95,12 +95,12 @@ function StagedAttachments({ draft }: { draft: UseTaskDraftReturn }) {
       {draft.attachments.map((att, idx) => (
         <div key={att.id} className="group/att relative">
           {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img src={attachmentPreviewUrl(att)} alt={t("img.previewAlt", { n: idx + 1 })} className="h-10 w-10 rounded border border-line object-cover" />
+          <img src={attachmentPreviewUrl(att)} alt={t("img.previewAlt", { n: idx + 1 })} className="h-10 w-10 rounded border border-border object-cover" />
           <button
             type="button"
             onClick={() => draft.removeAttachment(att.id)}
             aria-label={t("img.removeAria", { n: idx + 1 })}
-            className="absolute -right-1 -top-1 hidden h-4 w-4 items-center justify-center rounded-full border border-line bg-panel text-dim shadow-card hover:text-err group-hover/att:flex focus-visible:flex focus-visible:outline-none"
+            className="absolute -right-1 -top-1 hidden h-4 w-4 items-center justify-center rounded-full border border-border bg-card text-muted shadow-1 hover:text-danger group-hover/att:flex focus-visible:flex focus-visible:outline-none"
           >
             <X className="h-2.5 w-2.5" aria-hidden />
           </button>

@@ -50,7 +50,7 @@ function ActionButton({
   return (
     <button
       className={`inline-flex h-7 items-center gap-1 whitespace-nowrap rounded-full border px-2.5 text-[11px] font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40 ${
-        confirming ? "border-err bg-err text-white" : "border-line bg-bg text-dim hover:border-accent/45 hover:text-accent"
+        confirming ? "border-danger bg-danger text-white" : "border-border bg-canvas text-muted hover:border-accent/45 hover:text-accent"
       }`}
       disabled={disabled}
       onClick={onClick}
@@ -240,7 +240,7 @@ export const BulkActionBar = memo(function BulkActionBar({
   return (
     <div
       data-scheme-ui
-      className="absolute bottom-3 left-1/2 z-40 flex w-[640px] max-w-[94%] -translate-x-1/2 flex-col gap-1.5 rounded-[12px] border border-line bg-panel/95 p-2.5 shadow-[0_10px_36px_rgb(20_20_30/0.18)]"
+      className="absolute bottom-3 left-1/2 z-40 flex w-[640px] max-w-[94%] -translate-x-1/2 flex-col gap-1.5 rounded-[12px] border border-border bg-card/95 p-2.5 shadow-2"
     >
       {flowOpen ? (
         <BulkFlowPopover
@@ -274,7 +274,7 @@ export const BulkActionBar = memo(function BulkActionBar({
           sendIdleClassName="border-accent bg-accent hover:opacity-90"
           leftSlot={
             <div className="flex min-w-0 items-center gap-1.5">
-              <span className="inline-flex min-w-0 items-center gap-1 rounded-full bg-chip px-2 py-1 text-[10px] font-bold text-[#555]">
+              <span className="inline-flex min-w-0 items-center gap-1 rounded-full bg-sunken px-2 py-1 text-[10px] font-bold text-secondary">
                 {t("bulk.selectedCount", { count: nodes.length })}
               </span>
               <button
@@ -284,10 +284,10 @@ export const BulkActionBar = memo(function BulkActionBar({
                 title={t("tasks.composerToggleTitle")}
                 onClick={() => setAsTask((value) => !value)}
                 className={`inline-flex h-6 shrink-0 items-center gap-1 rounded-full border px-2 text-[10px] font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
-                  asTask ? "border-accent bg-accent/10 text-accent" : "border-line bg-panel text-dim hover:text-ink"
+                  asTask ? "border-accent bg-accent/10 text-accent" : "border-border bg-card text-muted hover:text-primary"
                 }`}
               >
-                <span className={`h-1.5 w-1.5 rounded-full ${asTask ? "bg-accent" : "bg-[#c9c9d1]"}`} aria-hidden />
+                <span className={`h-1.5 w-1.5 rounded-full ${asTask ? "bg-accent" : "bg-strong"}`} aria-hidden />
                 {t("tasks.composerToggle")}
               </button>
             </div>
@@ -352,7 +352,7 @@ export const BulkActionBar = memo(function BulkActionBar({
           onClick={onFit}
         />
         <button
-          className="ml-auto inline-flex h-7 w-7 items-center justify-center rounded-full text-dim hover:bg-bg hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+          className="ml-auto inline-flex h-7 w-7 items-center justify-center rounded-full text-muted hover:bg-canvas hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
           aria-label={t("bulk.exit")}
           title={t("bulk.exit")}
           onClick={onExit}
@@ -362,29 +362,29 @@ export const BulkActionBar = memo(function BulkActionBar({
       </div>
 
       {report ? (
-        <div className="flex max-h-[140px] flex-col gap-0.5 overflow-y-auto rounded-[8px] border border-line bg-bg/60 p-1.5">
+        <div className="flex max-h-[140px] flex-col gap-0.5 overflow-y-auto rounded-[8px] border border-border bg-canvas/60 p-1.5">
           {report.items.map((item) => (
             <div key={item.path} className="flex min-w-0 items-center gap-1.5 text-[11px]">
               {item.ok ? (
-                <CircleCheck className="h-3.5 w-3.5 shrink-0 text-ok" aria-hidden />
+                <CircleCheck className="h-3.5 w-3.5 shrink-0 text-success" aria-hidden />
               ) : (
-                <CircleX className="h-3.5 w-3.5 shrink-0 text-err" aria-hidden />
+                <CircleX className="h-3.5 w-3.5 shrink-0 text-danger" aria-hidden />
               )}
               <span className="min-w-0 shrink-0 truncate font-semibold" style={{ maxWidth: "40%" }}>
                 {report.titles.get(item.path) ?? item.path}
               </span>
-              {item.error ? <span className="min-w-0 flex-1 truncate text-err">{item.error}</span> : null}
+              {item.error ? <span className="min-w-0 flex-1 truncate text-danger">{item.error}</span> : null}
             </div>
           ))}
           {report.current ? (
-            <div className="flex min-w-0 items-center gap-1.5 text-[11px] text-dim">
+            <div className="flex min-w-0 items-center gap-1.5 text-[11px] text-muted">
               <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" aria-hidden />
               <span className="min-w-0 truncate font-semibold">{report.titles.get(report.current) ?? report.current}</span>
             </div>
           ) : null}
           {!running && failedCount ? (
             <button
-              className="mt-1 inline-flex h-6 items-center gap-1 self-start rounded-full border border-line bg-panel px-2 text-[10.5px] font-semibold text-dim hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+              className="mt-1 inline-flex h-6 items-center gap-1 self-start rounded-full border border-border bg-card px-2 text-[10.5px] font-semibold text-muted hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
               onClick={retryFailed}
             >
               <RotateCcw className="h-3 w-3" aria-hidden />
@@ -432,18 +432,18 @@ function BulkFlowPopover({
 
   return (
     <div
-      className="absolute bottom-[calc(100%+8px)] left-1/2 flex w-[420px] max-w-[94%] -translate-x-1/2 flex-col gap-2 rounded-[12px] border border-line bg-panel p-2.5 shadow-[0_10px_36px_rgb(20_20_30/0.18)]"
+      className="absolute bottom-[calc(100%+8px)] left-1/2 flex w-[420px] max-w-[94%] -translate-x-1/2 flex-col gap-2 rounded-[12px] border border-border bg-card p-2.5 shadow-2"
       onKeyDown={(event) => {
         if (event.key === "Escape") onClose();
       }}
     >
       <span className="text-[12px] font-bold">{t("bulk.flowTitle", { count })}</span>
       <div className="grid grid-cols-3 gap-2">
-        <label className="col-span-3 flex flex-col gap-1 text-[10.5px] font-semibold text-dim">
+        <label className="col-span-3 flex flex-col gap-1 text-[10.5px] font-semibold text-muted">
           {t("flowDialog.preset")}
           <select
             value={presetName ?? ""}
-            className="h-8 rounded-[8px] border border-line bg-bg px-2 text-[12px] font-normal text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            className="h-8 rounded-[8px] border border-border bg-canvas px-2 text-[12px] font-normal text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
             onChange={(event) => setPresetName(event.target.value || null)}
           >
             {presets.length ? (
@@ -457,31 +457,31 @@ function BulkFlowPopover({
             )}
           </select>
         </label>
-        <label className="flex flex-col gap-1 text-[10.5px] font-semibold text-dim">
+        <label className="flex flex-col gap-1 text-[10.5px] font-semibold text-muted">
           {t("flowDialog.transitions")}
           <select
             value={mode}
-            className="h-8 rounded-[8px] border border-line bg-bg px-2 text-[11.5px] font-normal text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            className="h-8 rounded-[8px] border border-border bg-canvas px-2 text-[11.5px] font-normal text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
             onChange={(event) => setMode(event.target.value as "auto" | "manual")}
           >
             <option value="auto">{t("flowDialog.auto")}</option>
             <option value="manual">{t("flowDialog.manual")}</option>
           </select>
         </label>
-        <label className="flex flex-col gap-1 text-[10.5px] font-semibold text-dim">
+        <label className="flex flex-col gap-1 text-[10.5px] font-semibold text-muted">
           {t("flowDialog.roundLimit")}
           <input
             type="number"
             min={1}
             max={20}
             value={roundLimit}
-            className="h-8 rounded-[8px] border border-line bg-bg px-2 text-[11.5px] font-normal text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            className="h-8 rounded-[8px] border border-border bg-canvas px-2 text-[11.5px] font-normal text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
             onChange={(event) => setRoundLimit(Math.max(1, Math.min(20, Number(event.target.value) || 5)))}
           />
         </label>
         <div className="flex items-end justify-end gap-1.5">
           <button
-            className="h-8 rounded-[8px] border border-line bg-bg px-2 text-[11px] font-semibold text-dim hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            className="h-8 rounded-[8px] border border-border bg-canvas px-2 text-[11px] font-semibold text-muted hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
             onClick={onClose}
           >
             {t("common.cancel")}

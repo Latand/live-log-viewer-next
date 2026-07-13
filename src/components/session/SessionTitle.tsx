@@ -283,14 +283,14 @@ export function SessionTitle({ file, displayMax = 90, titleClassName = "", class
           type="text"
           value={value}
           maxLength={120}
-          className="min-w-0 flex-1 rounded-[6px] border border-accent/50 bg-bg px-1.5 py-0.5 text-[12px] font-semibold text-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+          className="min-w-0 flex-1 rounded-[6px] border border-accent/50 bg-canvas px-1.5 py-0.5 text-[12px] font-semibold text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
           aria-label={t("rename.inputAria")}
           onChange={(event) => setValue(event.target.value)}
           onKeyDown={onKeyDown}
         />
         <button
           type="button"
-          className={`inline-flex shrink-0 items-center justify-center rounded-[6px] border border-line bg-bg text-dim hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+          className={`inline-flex shrink-0 items-center justify-center rounded-[6px] border border-border bg-canvas text-muted hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
             isMobile ? "h-11 w-11" : "px-1 py-0.5"
           }`}
           aria-label={t("rename.save")}
@@ -302,7 +302,7 @@ export function SessionTitle({ file, displayMax = 90, titleClassName = "", class
         {hasOverride ? (
           <button
             type="button"
-            className={`inline-flex shrink-0 items-center justify-center rounded-[6px] border border-line bg-bg text-dim hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+            className={`inline-flex shrink-0 items-center justify-center rounded-[6px] border border-border bg-canvas text-muted hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
               isMobile ? "h-11 w-11" : "px-1 py-0.5"
             }`}
             aria-label={t("rename.reset")}
@@ -314,7 +314,7 @@ export function SessionTitle({ file, displayMax = 90, titleClassName = "", class
         ) : null}
         <button
           type="button"
-          className={`inline-flex shrink-0 items-center justify-center rounded-[6px] border border-line bg-bg text-dim hover:border-err/40 hover:text-err focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+          className={`inline-flex shrink-0 items-center justify-center rounded-[6px] border border-border bg-canvas text-muted hover:border-danger/40 hover:text-danger focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
             isMobile ? "h-11 w-11" : "px-1 py-0.5"
           }`}
           aria-label={t("rename.cancel")}
@@ -346,7 +346,7 @@ export function SessionTitle({ file, displayMax = 90, titleClassName = "", class
       <button
         ref={launcherRef}
         type="button"
-        className={`inline-flex shrink-0 items-center justify-center rounded-[6px] border border-line bg-bg text-dim hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+        className={`inline-flex shrink-0 items-center justify-center rounded-[6px] border border-border bg-canvas text-muted hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
           alwaysVisible
             ? "h-11 w-11"
             : "px-1 py-0.5 opacity-0 transition-opacity focus-visible:opacity-100 group-hover/title:opacity-100"
@@ -361,7 +361,7 @@ export function SessionTitle({ file, displayMax = 90, titleClassName = "", class
       {retryTitle !== undefined ? (
         <button
           type="button"
-          className={`inline-flex shrink-0 items-center rounded-[6px] border border-err/40 bg-bg font-semibold text-err focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+          className={`inline-flex shrink-0 items-center rounded-[6px] border border-danger/40 bg-canvas font-semibold text-danger focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
             isMobile ? "min-h-11 px-3 text-[12px]" : "px-1.5 py-0.5 text-[10px]"
           }`}
           onPointerDown={stop}

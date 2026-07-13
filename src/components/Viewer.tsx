@@ -416,10 +416,10 @@ export function Viewer() {
      under the header instead of hanging off the pill. */
   const attentionBadge = queue.length ? (
     <div ref={queueRef} className="pointer-events-auto relative">
-      <div className="flex items-center overflow-hidden rounded-full border border-[#e0ae45]/45 bg-[#fff9ed] shadow-card">
+      <div className="flex items-center overflow-hidden rounded-full border border-warning/45 bg-warning-soft shadow-1">
         <button
           type="button"
-          className={`text-[12px] font-bold text-[#8a5a00] hover:bg-[#e0ae45]/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent/40 ${
+          className={`text-[12px] font-bold text-warning hover:bg-warning/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent/40 ${
             isMobile ? "inline-flex min-h-11 items-center px-3.5" : "px-3 py-1"
           }`}
           aria-expanded={queueOpen}
@@ -437,11 +437,11 @@ export function Viewer() {
         </button>
         {isMobile ? null : (
           <>
-            <div className="h-4 w-px shrink-0 bg-[#e0ae45]/45" aria-hidden />
+            <div className="h-4 w-px shrink-0 bg-warning/45" aria-hidden />
             <button
               type="button"
               className={`px-2 py-1.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent/40 ${
-                attentionFilter ? "bg-[#e0ae45]/30 text-[#8a5a00]" : "text-[#b8860b]/70 hover:bg-[#e0ae45]/15 hover:text-[#8a5a00]"
+                attentionFilter ? "bg-warning/30 text-warning" : "text-warning/70 hover:bg-warning/15 hover:text-warning"
               }`}
               aria-pressed={attentionFilter}
               title={attentionFilter ? t("attention.filterOff") : t("attention.filterOn")}
@@ -457,28 +457,28 @@ export function Viewer() {
         <div
           className={`${
             isMobile ? "fixed inset-x-3 top-12" : "absolute right-0 top-[calc(100%+6px)] w-[340px] max-w-[calc(100vw-2rem)]"
-          } z-50 max-h-[60vh] overflow-y-auto rounded-[10px] border border-line bg-panel p-1.5 shadow-card`}
+          } z-50 max-h-[60vh] overflow-y-auto rounded-[10px] border border-border bg-card p-1.5 shadow-1`}
         >
-          <div className="px-2.5 pb-1 pt-1.5 text-[10.5px] font-bold uppercase tracking-wide text-dim">
+          <div className="px-2.5 pb-1 pt-1.5 text-label font-semibold text-secondary">
             {t("attention.popoverTitle")}
           </div>
           {queue.map((item) => (
             <button
               key={item.id}
               type="button"
-              className="flex w-full min-w-0 flex-col gap-0.5 rounded-[8px] px-2.5 py-2 text-left hover:bg-bg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+              className="flex w-full min-w-0 flex-col gap-0.5 rounded-[8px] px-2.5 py-2 text-left hover:bg-canvas focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
               onClick={() => jumpToItem(item)}
             >
               <span className="flex w-full min-w-0 items-center gap-1.5">
-                <span className="min-w-0 flex-1 truncate text-[12px] font-semibold text-ink">
+                <span className="min-w-0 flex-1 truncate text-[12px] font-semibold text-primary">
                   {cleanTitle(item.file.title, 90)}
                 </span>
-                <span className="shrink-0 rounded-full border border-line bg-bg px-1.5 text-[10px] font-semibold text-dim">
+                <span className="shrink-0 rounded-full border border-border bg-canvas px-1.5 text-[10px] font-semibold text-muted">
                   {item.project}
                 </span>
-                <span className="shrink-0 text-[10.5px] text-dim">{fmtAge(item.since)}</span>
+                <span className="shrink-0 text-[10.5px] text-muted">{fmtAge(item.since)}</span>
               </span>
-              <span className={`w-full truncate text-[11px] ${item.tier === "stalled" ? "text-[#b8860b]" : "text-dim"}`}>
+              <span className={`w-full truncate text-[11px] ${item.tier === "stalled" ? "text-warning" : "text-muted"}`}>
                 {attentionSnippet(t, item)}
               </span>
             </button>
@@ -499,7 +499,7 @@ export function Viewer() {
           <ProjectRail files={files} projectCatalog={projectCatalog} pipelines={pipelines} workflows={workflows} archivedProjects={archivedProjects} selected={project} now={clock} loaded={loaded} onSelect={selectProject} />
           <button
             type="button"
-            className="min-w-0 flex-1 bg-ink/35"
+            className="min-w-0 flex-1 bg-primary/35"
             aria-label={t("viewer.closeProjects")}
             onClick={() => setDrawerOpen(false)}
           />
@@ -514,7 +514,7 @@ export function Viewer() {
           <div className="pointer-events-none fixed right-4 top-4 z-50 flex flex-col items-end gap-2">
             {attentionBadge}
             {toastFile ? (
-              <div className="pointer-events-auto flex max-w-[360px] gap-2 rounded-[8px] border border-[#e0ae45]/45 bg-[#fff9ed] px-4 py-3 text-[13px] font-semibold text-ink shadow-card">
+              <div className="pointer-events-auto flex max-w-[360px] gap-2 rounded-[8px] border border-warning/45 bg-warning-soft px-4 py-3 text-[13px] font-semibold text-primary shadow-1">
                 <button
                   className="min-w-0 flex-1 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
                   onClick={() => {
@@ -522,11 +522,11 @@ export function Viewer() {
                     setToastPath(null);
                   }}
                 >
-                  <span className="block text-[11px] font-bold text-[#8a5a00]">{t("viewer.agentWaiting")}</span>
+                  <span className="block text-[11px] font-bold text-warning">{t("viewer.agentWaiting")}</span>
                   <span className="line-clamp-2">{toastFile.title}</span>
                 </button>
                 <button
-                  className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full border border-line bg-bg text-dim hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                  className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full border border-border bg-canvas text-muted hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
                   aria-label={t("viewer.closeNotification")}
                   onClick={() => setToastPath(null)}
                 >
@@ -541,7 +541,7 @@ export function Viewer() {
             own space and never covers the toolbar. Its open target and 44px close
             are both full tap-height. */}
         {isMobile && toastFile ? (
-          <div className="flex shrink-0 items-stretch gap-2 border-b border-[#e0ae45]/45 bg-[#fff9ed] pl-3 pr-1.5 py-1.5">
+          <div className="flex shrink-0 items-stretch gap-2 border-b border-warning/45 bg-warning-soft pl-3 pr-1.5 py-1.5">
             <button
               className="flex min-h-11 min-w-0 flex-1 flex-col justify-center text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
               onClick={() => {
@@ -549,11 +549,11 @@ export function Viewer() {
                 setToastPath(null);
               }}
             >
-              <span className="block text-[11px] font-bold text-[#8a5a00]">{t("viewer.agentWaiting")}</span>
-              <span className="truncate text-[13px] font-semibold text-ink">{toastFile.title}</span>
+              <span className="block text-[11px] font-bold text-warning">{t("viewer.agentWaiting")}</span>
+              <span className="truncate text-[13px] font-semibold text-primary">{toastFile.title}</span>
             </button>
             <button
-              className="flex h-11 w-11 shrink-0 items-center justify-center self-center rounded-full border border-line bg-bg text-dim hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+              className="flex h-11 w-11 shrink-0 items-center justify-center self-center rounded-full border border-border bg-canvas text-muted hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
               aria-label={t("viewer.closeNotification")}
               onClick={() => setToastPath(null)}
             >

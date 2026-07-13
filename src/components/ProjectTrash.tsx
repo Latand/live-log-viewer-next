@@ -74,8 +74,8 @@ export function QuietFileList({
   return (
     <div className="min-h-0 flex-1 overflow-y-auto px-4 py-5">
       <div className="mx-auto w-full max-w-[760px]">
-        <div className="text-[13.5px] font-semibold text-dim">{t("trash.title")}</div>
-        <div className="mb-3 mt-0.5 text-[12px] text-dim">
+        <div className="text-[13.5px] font-semibold text-muted">{t("trash.title")}</div>
+        <div className="mb-3 mt-0.5 text-[12px] text-muted">
           {t("trash.hint")}
         </div>
         <div className="space-y-1.5">
@@ -110,7 +110,7 @@ export function QuietFileRow({
   const badge = engineBadge(file);
   if (gone) {
     return (
-      <div className="flex items-center gap-2 rounded-[8px] border border-line bg-chip/60 px-3 py-1.5 text-[11.5px] font-semibold text-dim">
+      <div className="flex items-center gap-2 rounded-[8px] border border-border bg-sunken/60 px-3 py-1.5 text-[11.5px] font-semibold text-muted">
         <Trash2 className="h-3 w-3 shrink-0" aria-hidden />
         <span className="min-w-0 truncate">{cleanTitle(file.title, 80)}</span>
         <span className="shrink-0">{t("trash.deletedFromDisk")}</span>
@@ -118,10 +118,10 @@ export function QuietFileRow({
     );
   }
   return (
-    <div className="flex min-w-0 items-center gap-2 rounded-[8px] border border-line bg-panel px-3 py-1.5 shadow-card">
+    <div className="flex min-w-0 items-center gap-2 rounded-[8px] border border-border bg-card px-3 py-1.5 shadow-1">
       <button
         type="button"
-        className={`flex min-w-0 flex-1 items-center gap-2 rounded-[6px] text-left hover:bg-bg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${isMobile ? "min-h-11" : "h-full"}`}
+        className={`flex min-w-0 flex-1 items-center gap-2 rounded-[6px] text-left hover:bg-canvas focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${isMobile ? "min-h-11" : "h-full"}`}
         aria-label={t("trash.open", { title: cleanTitle(file.title, 60) })}
         onClick={() => onOpen(file)}
       >
@@ -133,7 +133,7 @@ export function QuietFileRow({
           {cleanTitle(file.title, 90)}
         </span>
         {showProject ? (
-          <span className="max-w-[28vw] shrink-0 truncate rounded-full border border-line bg-bg px-1.5 py-0.5 text-[10px] font-semibold text-dim">
+          <span className="max-w-[28vw] shrink-0 truncate rounded-full border border-border bg-canvas px-1.5 py-0.5 text-[10px] font-semibold text-muted">
             {file.project}
           </span>
         ) : null}
@@ -148,8 +148,8 @@ export function QuietFileRow({
         ) : null}
         {isMobile ? null : (
           <>
-            <span className="shrink-0 text-[10.5px] font-semibold text-dim">{fmtAge(file.mtime)}</span>
-            <span className="shrink-0 text-[10.5px] text-dim">{(file.size / 1024).toFixed(0)} {t("common.kb")}</span>
+            <span className="shrink-0 text-[10.5px] font-semibold text-muted">{fmtAge(file.mtime)}</span>
+            <span className="shrink-0 text-[10.5px] text-muted">{(file.size / 1024).toFixed(0)} {t("common.kb")}</span>
           </>
         )}
       </button>
@@ -181,7 +181,7 @@ export function ArchiveProjectButton({
   return (
     <button
       type="button"
-      className={`inline-flex shrink-0 items-center gap-1.5 rounded-full border border-line bg-bg font-semibold text-dim hover:border-accent/40 hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+      className={`inline-flex shrink-0 items-center gap-1.5 rounded-full border border-border bg-canvas font-semibold text-muted hover:border-accent/40 hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
         isMobile ? "min-h-11 px-3 text-[13px]" : compact ? "p-1 text-[11px]" : "px-2 py-0.5 text-[11px]"
       }`}
       aria-label={t("trash.toArchive")}
@@ -248,13 +248,13 @@ export function DeleteProjectButton({ project, files, available }: { project: st
 
   if (confirming) {
     return (
-      <span className="inline-flex shrink-0 items-center gap-1 rounded-[10px] border border-err/30 bg-[#fff5f5] px-1.5 py-0.5 text-[11px]">
-        <span className="px-0.5 font-semibold text-err">
+      <span className="inline-flex shrink-0 items-center gap-1 rounded-[10px] border border-danger/30 bg-danger-soft px-1.5 py-0.5 text-[11px]">
+        <span className="px-0.5 font-semibold text-danger">
           {t("trash.confirmDelete", { count: targets?.length ?? 0 })}
         </span>
         <button
           type="button"
-          className={`inline-flex items-center rounded-lg bg-err font-bold text-white disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-err/50 ${
+          className={`inline-flex items-center rounded-lg bg-danger font-bold text-white disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-danger/50 ${
             isMobile ? "min-h-11 px-3" : "px-2 py-0.5"
           }`}
           disabled={busy}
@@ -264,7 +264,7 @@ export function DeleteProjectButton({ project, files, available }: { project: st
         </button>
         <button
           type="button"
-          className={`inline-flex items-center rounded-lg border border-line bg-panel font-semibold text-dim focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+          className={`inline-flex items-center rounded-lg border border-border bg-card font-semibold text-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
             isMobile ? "min-h-11 px-3" : "px-2 py-0.5"
           }`}
           onClick={() => { setConfirming(false); setTargets(null); }}
@@ -278,7 +278,7 @@ export function DeleteProjectButton({ project, files, available }: { project: st
     <span className="inline-flex shrink-0 items-center gap-1.5">
       <button
         type="button"
-        className={`inline-flex items-center justify-center rounded-full border border-line bg-bg text-dim hover:border-err/40 hover:text-err focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+        className={`inline-flex items-center justify-center rounded-full border border-border bg-canvas text-muted hover:border-danger/40 hover:text-danger focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
           isMobile ? "h-11 w-11" : "p-1"
         }`}
         aria-label={t("trash.deleteProject")}
@@ -288,7 +288,7 @@ export function DeleteProjectButton({ project, files, available }: { project: st
       >
         {busy ? <span className="text-[10px] font-bold">…</span> : <Trash2 className={isMobile ? "h-4 w-4" : "h-3 w-3"} aria-hidden />}
       </button>
-      {error ? <span className="max-w-[180px] truncate text-[10.5px] font-semibold text-err">{error}</span> : null}
+      {error ? <span className="max-w-[180px] truncate text-[10.5px] font-semibold text-danger">{error}</span> : null}
     </span>
   );
 }

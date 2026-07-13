@@ -41,14 +41,14 @@ export function WakeupCard({ event, wakeup }: { event: ToolEvent; wakeup: Wakeup
   /* The state badge: an amber live countdown while pending, an error label when
      the scheduling call was rejected, a quiet grey label once fired/superseded. */
   const badge = failed
-    ? { text: t("wakeup.failed"), tone: "text-err" }
+    ? { text: t("wakeup.failed"), tone: "text-danger" }
     : superseded
-      ? { text: t("wakeup.superseded"), tone: "text-dim" }
+      ? { text: t("wakeup.superseded"), tone: "text-muted" }
       : phase === "pending"
-        ? { text: relative, tone: "text-[#b0791f]" }
+        ? { text: relative, tone: "text-warning" }
         : phase === "fired"
-          ? { text: clock ? t("wakeup.firedAt", { time: clock }) : t("wakeup.fired"), tone: "text-dim" }
-          : { text: "", tone: "text-dim" };
+          ? { text: clock ? t("wakeup.firedAt", { time: clock }) : t("wakeup.fired"), tone: "text-muted" }
+          : { text: "", tone: "text-muted" };
 
   /* The headline follows the card's state before it reads the clock: a
      superseded FUTURE schedule reads "was set for" and never promises to wake
@@ -64,11 +64,11 @@ export function WakeupCard({ event, wakeup }: { event: ToolEvent; wakeup: Wakeup
           ? t("wakeup.firedAt", { time: clock })
           : t("wakeup.wakesAt", { time: clock });
 
-  const cardTone = active ? "border-[#e4c789] bg-[#fdf7ea]" : failed ? "border-err/35 bg-panel" : "border-line bg-panel";
-  const iconTone = active ? "bg-[#f3e2bd] text-[#8a5d12]" : failed ? "bg-[#fbeaea] text-err" : "bg-chip text-dim";
+  const cardTone = active ? "border-warning/45 bg-warning-soft" : failed ? "border-danger/35 bg-card" : "border-border bg-card";
+  const iconTone = active ? "bg-warning-soft text-warning" : failed ? "bg-danger-soft text-danger" : "bg-sunken text-muted";
 
   return (
-    <details className={`group/wake my-2.5 ml-9 overflow-hidden rounded-[14px] border shadow-card ${cardTone}`} open={active || failed}>
+    <details className={`group/wake my-2.5 ml-9 overflow-hidden rounded-[14px] border shadow-1 ${cardTone}`} open={active || failed}>
       <summary className="flex min-h-[44px] cursor-pointer list-none items-center gap-2.5 px-3.5 py-2">
         <span className={`flex h-6.5 w-6.5 shrink-0 items-center justify-center rounded-lg ${iconTone}`}>
           <GlyphIcon name="clock" className="h-4 w-4" />
@@ -77,17 +77,17 @@ export function WakeupCard({ event, wakeup }: { event: ToolEvent; wakeup: Wakeup
           <span className="truncate text-[12.5px] font-semibold" title={reason || headline}>
             {reason || t("wakeup.card")}
           </span>
-          <span className="truncate text-[11px] text-dim">{headline}</span>
+          <span className="truncate text-[11px] text-muted">{headline}</span>
         </span>
         {badge.text ? (
           <span className={`shrink-0 text-[11px] font-bold tabular-nums ${badge.tone}`}>{badge.text}</span>
         ) : null}
       </summary>
-      <div className="border-t border-line px-3.5 py-2.5">
-        <div className="mb-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11.5px] text-dim">
-          <span className={`font-semibold ${failed ? "text-err" : "text-ink"}`}>{headline}</span>
+      <div className="border-t border-border px-3.5 py-2.5">
+        <div className="mb-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11.5px] text-muted">
+          <span className={`font-semibold ${failed ? "text-danger" : "text-primary"}`}>{headline}</span>
           {relative ? <span>· {relative}</span> : null}
-          {superseded ? <span className="rounded-md bg-chip px-1.5 py-0.5">{t("wakeup.superseded")}</span> : null}
+          {superseded ? <span className="rounded-md bg-sunken px-1.5 py-0.5">{t("wakeup.superseded")}</span> : null}
         </div>
         {/* The harness's rejection message (already redacted and bounded on the
             ToolEvent), so a refused schedule keeps its actionable detail. */}
@@ -97,14 +97,14 @@ export function WakeupCard({ event, wakeup }: { event: ToolEvent; wakeup: Wakeup
           </div>
         ) : null}
         {prompt ? (
-          <details className="group/plan rounded-[10px] border border-line bg-panel-alt">
-            <summary className="flex min-h-[44px] cursor-pointer list-none items-center gap-1.5 px-3 py-2 text-[11.5px] font-semibold text-dim">
+          <details className="group/plan rounded-[10px] border border-border bg-sunken">
+            <summary className="flex min-h-[44px] cursor-pointer list-none items-center gap-1.5 px-3 py-2 text-[11.5px] font-semibold text-muted">
               {t("wakeup.plan")}
             </summary>
-            <div className="border-t border-line px-3 py-2 text-[12.5px] leading-snug">{mdBlocks(prompt)}</div>
+            <div className="border-t border-border px-3 py-2 text-[12.5px] leading-snug">{mdBlocks(prompt)}</div>
           </details>
         ) : (
-          <span className="text-[11.5px] text-dim">{t("wakeup.noPlan")}</span>
+          <span className="text-[11.5px] text-muted">{t("wakeup.noPlan")}</span>
         )}
       </div>
     </details>
