@@ -207,6 +207,31 @@ test("a restored project draft renders with its deterministic project directory 
   expect(directory?.value).toBe(`/home/tester/Projects/${project}`);
 });
 
+test("the 390px draft working-directory editor keeps a 44px touch target", async () => {
+  const project = "mobile-cwd-target-project";
+  const previousMatchMedia = dom.matchMedia;
+  const previousInnerWidth = dom.innerWidth;
+  dom.matchMedia = mobileMatchMedia;
+  (dom as unknown as { innerWidth: number }).innerWidth = 390;
+  try {
+    roots.push(mount(<ProjectDashboard {...dashboardProps(project)} />));
+
+    const create = dom.document.querySelector('button[aria-haspopup="menu"]') as unknown as HTMLButtonElement | null;
+    create?.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event);
+    expect(await waitFor(() => dom.document.querySelector('[role="menuitem"]') !== null)).toBe(true);
+    const agent = dom.document.querySelector('[role="menuitem"]') as unknown as HTMLButtonElement | null;
+    agent?.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event);
+    expect(await waitFor(() => dom.document.querySelector(AGENT_PANE) !== null)).toBe(true);
+    const directory = dom.document.querySelector('input[aria-label="Agent working directory"]') as unknown as HTMLInputElement | null;
+    expect(dom.innerWidth).toBe(390);
+    expect(directory?.className).toContain("min-h-11");
+    expect(directory?.className).toContain("sm:min-h-0");
+  } finally {
+    dom.matchMedia = previousMatchMedia;
+    (dom as unknown as { innerWidth: number }).innerWidth = previousInnerWidth;
+  }
+});
+
 test("a restored handoff draft guards a populated source cwd until validation", async () => {
   const project = "handoff-project";
   const sourcePath = "/sessions/source.jsonl";

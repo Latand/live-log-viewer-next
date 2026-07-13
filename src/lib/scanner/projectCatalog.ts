@@ -263,7 +263,7 @@ export function projectCatalogSnapshotFromRaw(raw: RawEntry[], options: { persis
     }
     group.smt = Math.max(group.smt, file.mtimeMs / 1000);
     if (file.session) group.conversations += 1;
-    if (file.projectRoot) {
+    if (file.projectRoot && !options.excludedSummaryPaths?.has(file.path)) {
       const candidates = rootCandidates.get(project) ?? new Map<string, { count: number; newest: number }>();
       const candidate = candidates.get(file.projectRoot) ?? { count: 0, newest: 0 };
       candidate.count += 1;

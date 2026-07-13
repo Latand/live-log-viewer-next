@@ -560,7 +560,7 @@ export function DraftAgentPane({
           list={dirListId}
           placeholder="/home/…/Projects/…"
           aria-label={t("draft.dirAria")}
-          className="min-w-0 flex-1 rounded-[6px] border border-line bg-panel px-2 py-1 font-mono text-[11px] text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60"
+          className="min-h-11 min-w-0 flex-1 rounded-[6px] border border-line bg-panel px-2 py-1 font-mono text-[11px] text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60 sm:min-h-0"
         />
         <datalist id={dirListId}>
           {dirs.map((dir) => (
