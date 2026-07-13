@@ -28,7 +28,7 @@ import { activityDot, cleanTitle, engineBadge } from "@/components/utils";
 import { PIPELINE_ATTENTION_STATES, PIPELINE_BUSY_STATES, STAGE_GLYPH, STAGE_TONES, latestAttempt, patchPipeline, pipelineStateLabel, renderableFlowIds, stageChipLabel, stageChipState, stageHasEvidence, stageOpenTarget } from "@/components/pipelines/pipelineModel";
 import { VerdictPopover } from "@/components/pipelines/VerdictPopover";
 import { deckKey } from "@/components/scheme/agentLinks";
-import { buildSchemeLayout } from "@/components/scheme/layout";
+import { buildSchemeLayout, type SchemeGroup } from "@/components/scheme/layout";
 import { SchemeBoard } from "@/components/scheme/SchemeBoard";
 import type { WorkerStack } from "@/components/scheme/workerCollapse";
 
@@ -75,6 +75,17 @@ interface Props {
   onHandoff?: (file: FileEntry) => void;
   /** Bumped by the header `+ Task` button to open the sheet's create view. */
   taskSheetNonce?: number;
+}
+
+/**
+ * Every active pipeline that gets a full-plan dock card on the phone (issue
+ * #156): both memberless placeholder groups (no board node — issue #136) and
+ * memberful pipelines, whose complete stage plan the mobile lite map never
+ * paints. One card per pipeline group, so no active pipeline is left with only
+ * the three-stage hop window and no complete plan.
+ */
+export function pipelinesToDock(groups: SchemeGroup[]): Pipeline[] {
+  return groups.flatMap((group) => (group.pipeline ? [group.pipeline] : []));
 }
 
 /**
@@ -169,13 +180,14 @@ export function MobileFocusView({ project, groups, manual, files, flows, pipelin
   const activeNode = useMemo(() => layout.nodes.find((node) => node.file.path === resolvedKey) ?? null, [layout, resolvedKey]);
   const activeDeck = useMemo(() => layout.decks.find((deck) => deck.key === resolvedKey) ?? null, [layout, resolvedKey]);
   const activeDraft = useMemo(() => layout.drafts.find((draft) => draft.key === resolvedKey) ?? null, [layout, resolvedKey]);
-  /* Active pipelines docked with no board node (memberless placeholder groups):
-     they get a dedicated 44px plan/control card on the phone, since the pick-only
-     lite map cannot surface them (issue #136 / review). */
-  const dockedPipelines = useMemo(
-    () => layout.groups.filter((group) => group.pipeline && group.members.length === 0).map((group) => group.pipeline!),
-    [layout],
-  );
+  /* EVERY active pipeline gets a dedicated 44px full-plan/control card on the
+     phone (issue #156, HIGH). The mobile lite map passes no pipelineControls, so
+     GroupsLayer never paints the past/current/future strip there; a memberful
+     pipeline (placed stage nodes) would otherwise expose only the three-stage
+     hop window (PipelineFocusRow) and never its complete plan. Docking all
+     pipeline groups — memberless placeholders included (issue #136) — makes the
+     dock the single full-plan surface for both, with no reliance on the map. */
+  const dockedPipelines = useMemo(() => pipelinesToDock(layout.groups), [layout]);
 
   /* Presence: the phone reports the pinned pane as the sole visible transcript
      (a deck/draft carries no transcript path, so focus is null there); opening
@@ -582,12 +594,14 @@ function pipelineDotColor(pipeline: Pipeline): string {
 }
 
 /**
- * The docked mobile surface for a pipeline with NO board node yet (a provisioning
- * pipeline, or one whose stage nodes are all hidden) — issue #136 / review. The
- * lite map is pick-only and needs ≥2 nodes, so a memberless pipeline would
- * otherwise be unreachable on the phone. This card shows the full planned stage
- * graph (past ✓ / current ▸ / ghost ○) and the pipeline-level controls, every
- * one a 44px tap target, so the plan and its actions live on the phone board.
+ * The docked mobile full-plan surface for an active pipeline (issues #136, #156).
+ * It backs two cases the phone cannot otherwise plan out: a memberless pipeline
+ * (no board node yet — the pick-only lite map needs ≥2 nodes to surface it), and
+ * a memberful pipeline whose complete plan the mobile map suppresses (it passes
+ * no pipelineControls, so GroupsLayer paints no strip there). This card shows the
+ * full planned stage graph (past ✓ / current ▸ / ghost ○) and the pipeline-level
+ * controls, every one a 44px tap target, so the plan and its actions live on the
+ * phone board for every active pipeline, not just memberless ones.
  */
 export function MobilePipelineDock({ pipeline }: { pipeline: Pipeline }) {
   const { t } = useLocale();

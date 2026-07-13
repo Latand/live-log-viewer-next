@@ -3,7 +3,9 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import type { Pipeline } from "@/lib/pipelines/types";
 
-import { MobilePipelineDock } from "./MobileFocusView";
+import type { SchemeGroup } from "@/components/scheme/layout";
+
+import { MobilePipelineDock, pipelinesToDock } from "./MobileFocusView";
 
 /* A provisioning pipeline with zero materialized stage nodes — the exact case the
    phone lite map (pick-only, needs ≥2 nodes) cannot surface (issue #136 / review). */
@@ -31,6 +33,22 @@ test("mobile dock surfaces the full plan + 44px controls for a memberless pipeli
   expect(html).toContain("aria-label=\"Close pipeline\"");
   const controlRows = html.match(/h-11/g) ?? [];
   expect(controlRows.length).toBeGreaterThanOrEqual(2);
+});
+
+test("pipelinesToDock docks every active pipeline group — memberful ones too (#156)", () => {
+  const other = { ...provisioning, id: "p2", task: "Ship the map" } as Pipeline;
+  const group = (pipeline: Pipeline, members: string[]): SchemeGroup =>
+    ({ key: `group::pipeline::${pipeline.id}`, kind: "pipeline", id: pipeline.id, hue: 0, members, pipeline, label: pipeline.task, x: 0, y: 0, w: 1, h: 1 }) as SchemeGroup;
+  const flowGroup = { key: "group::flow::f1", kind: "flow", id: "f1", hue: 0, members: ["/a"], label: "f", x: 0, y: 0, w: 1, h: 1 } as SchemeGroup;
+
+  const docked = pipelinesToDock([
+    group(provisioning, []), // memberless placeholder (issue #136)
+    flowGroup, // a plain flow group carries no pipeline — never docked
+    group(other, ["/x", "/y"]), // memberful pipeline — previously skipped
+  ]);
+
+  /* Both pipelines dock, in group order; the flow group contributes nothing. */
+  expect(docked.map((p) => p.id)).toEqual(["p1", "p2"]);
 });
 
 test("a paused pipeline shows Resume; a completed one keeps Close but drops pause/resume", () => {

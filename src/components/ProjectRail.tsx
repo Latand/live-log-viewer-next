@@ -57,21 +57,52 @@ export function ProjectRail({ files, projectCatalog, pipelines, workflows, archi
           isMobile ? "min-h-[52px] gap-1.5 px-2 py-1.5" : "h-10 px-4"
         }`}
       >
-        <span className={isMobile ? "min-w-0 truncate" : ""}>{t("rail.title")}</span>
-        {totalLive ? (
-          <span className="inline-flex items-center gap-1 rounded-full bg-[#e5f6ea] px-2 py-0.5 text-[10.5px] font-bold text-ok">
-            <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-ok" />
-            {totalLive}
-          </span>
-        ) : null}
-        {totalAttention ? (
-          <span className="inline-flex items-center gap-1 rounded-full bg-[#fff1ca] px-2 py-0.5 text-[10.5px] font-bold text-[#8a5a00]">
-            ⏸ {totalAttention}
-          </span>
-        ) : null}
-        <LanguageToggle />
-        <AccessQrButton />
-        <PushBell />
+        {isMobile ? (
+          /* The 248px drawer header must hold three 44px controls no matter how
+             wide the badges grow (issue #148). Title + both status badges live in
+             one min-w-0 flex-1 group that shrinks (the title truncates first, the
+             tabular-nums badges keep their multi-digit counts); the controls sit
+             in a shrink-0 group so they can never be pushed outside the drawer. */
+          <>
+            <div className="flex min-w-0 flex-1 items-center gap-1.5">
+              <span className="min-w-0 truncate">{t("rail.title")}</span>
+              {totalLive ? (
+                <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-[#e5f6ea] px-1.5 py-0.5 text-[10.5px] font-bold tabular-nums text-ok">
+                  <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-ok" />
+                  {totalLive > 99 ? "99+" : totalLive}
+                </span>
+              ) : null}
+              {totalAttention ? (
+                <span className="inline-flex shrink-0 items-center rounded-full bg-[#fff1ca] px-1.5 py-0.5 text-[10.5px] font-bold tabular-nums text-[#8a5a00]">
+                  ⏸ {totalAttention > 99 ? "99+" : totalAttention}
+                </span>
+              ) : null}
+            </div>
+            <div className="flex shrink-0 items-center gap-1">
+              <LanguageToggle />
+              <AccessQrButton />
+              <PushBell />
+            </div>
+          </>
+        ) : (
+          <>
+            <span>{t("rail.title")}</span>
+            {totalLive ? (
+              <span className="inline-flex items-center gap-1 rounded-full bg-[#e5f6ea] px-2 py-0.5 text-[10.5px] font-bold text-ok">
+                <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-ok" />
+                {totalLive}
+              </span>
+            ) : null}
+            {totalAttention ? (
+              <span className="inline-flex items-center gap-1 rounded-full bg-[#fff1ca] px-2 py-0.5 text-[10.5px] font-bold text-[#8a5a00]">
+                ⏸ {totalAttention}
+              </span>
+            ) : null}
+            <LanguageToggle />
+            <AccessQrButton />
+            <PushBell />
+          </>
+        )}
       </header>
       <div className="px-2.5 pb-1 pt-2.5">
         <input
