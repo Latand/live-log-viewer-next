@@ -68,7 +68,7 @@ function scaffoldPreview(scaffold: string, params: Record<string, string | numbe
 
 /** Everything a draft keeps in sessionStorage; called when the draft leaves the scheme. */
 export function clearDraftStorage(id: string) {
-  for (const name of ["engine", "model", "cwd", "text", "boot", "src", "parentConversationId", "effort", "speed", "accountId", "role", "roleParams", "confirm"]) sessionStorage.removeItem(field(id, name));
+  for (const name of ["engine", "model", "cwd", "cwdUnverified", "text", "boot", "src", "parentConversationId", "effort", "speed", "accountId", "role", "roleParams", "confirm"]) sessionStorage.removeItem(field(id, name));
 }
 
 /** Source transcript a handoff draft continues; empty for a plain draft. */
@@ -100,12 +100,21 @@ export function setDraftText(id: string, text: string) {
 /** Seeds a draft's editable cwd before its first render. */
 export function setDraftCwd(id: string, cwd: string) {
   writeField(id, "cwd", cwd);
+  writeField(id, "cwdUnverified", "");
 }
 
 /** Fills a missing directory while preserving a restored draft's edited value. */
 export function seedDraftCwd(id: string, cwd: string) {
   const next = cwd.trim();
   if (!readField(id, "cwd").trim() && next) writeField(id, "cwd", next);
+  if (next) writeField(id, "cwdUnverified", "");
+}
+
+/** Exposes a missing-source handoff with a safe editable fallback while
+    requiring the user to confirm its directory through an edit before launch. */
+export function requireDraftCwdConfirmation(id: string, cwd: string) {
+  writeField(id, "cwd", cwd.trim());
+  writeField(id, "cwdUnverified", "1");
 }
 
 /** Reads back the durable spawn attempt persisted across reload. Its presence
@@ -156,7 +165,8 @@ export function DraftAgentPane({
   const [parentConversationId] = useState(() => readField(draftId, "parentConversationId"));
   const srcFile = src ? (files.find((entry) => entry.path === src) ?? null) : null;
   const [initialCwd] = useState(() => readField(draftId, "cwd"));
-  const awaitingInheritedCwdRef = useRef(Boolean(src && !initialCwd && !srcFile?.cwd?.trim()));
+  const [cwdNeedsConfirmation, setCwdNeedsConfirmation] = useState(() => readField(draftId, "cwdUnverified") === "1");
+  const awaitingInheritedCwdRef = useRef(Boolean(src && ((!initialCwd && !srcFile?.cwd?.trim()) || readField(draftId, "cwdUnverified") === "1")));
   const [engine, setEngineState] = useState<Engine>(() => {
     const stored = readField(draftId, "engine");
     if (stored === "codex" || stored === "claude") return stored;
@@ -205,8 +215,10 @@ export function DraftAgentPane({
   };
   const setCwd = (value: string) => {
     awaitingInheritedCwdRef.current = false;
+    setCwdNeedsConfirmation(false);
     setCwdState(value);
     writeField(draftId, "cwd", value);
+    writeField(draftId, "cwdUnverified", "");
   };
   const setRoleParams = (value: Record<string, string | number>) => {
     setRoleParamsState(value);
@@ -284,10 +296,15 @@ export function DraftAgentPane({
       .then((json) => {
         if (cancelled) return;
         if (Array.isArray(json.dirs)) setDirs(json.dirs);
+        const inherited = typeof json.cwd === "string" ? json.cwd.trim() : "";
+        const shouldInherit = Boolean(awaitingInheritedCwdRef.current && inherited);
+        if (shouldInherit) {
+          awaitingInheritedCwdRef.current = false;
+          setCwdNeedsConfirmation(false);
+          writeField(draftId, "cwdUnverified", "");
+        }
         setCwdState((prev) => {
-          const inherited = typeof json.cwd === "string" ? json.cwd : "";
-          const next = (awaitingInheritedCwdRef.current && inherited) || prev || inherited || json.dirs?.[0] || "";
-          if (next === inherited && inherited) awaitingInheritedCwdRef.current = false;
+          const next = (shouldInherit && inherited) || prev || inherited || json.dirs?.[0] || "";
           if (next !== prev) writeField(draftId, "cwd", next);
           return next;
         });
@@ -404,6 +421,10 @@ export function DraftAgentPane({
   const send = async (overrideText?: string) => {
     const payloadText = overrideText ?? text;
     if (busy || voiceSending || attempt) return;
+    if (cwdNeedsConfirmation) {
+      setStatus({ kind: "err", text: t("draft.confirmRecoveredDir") });
+      return;
+    }
     if (!cwd.trim()) {
       setStatus({ kind: "err", text: t("draft.needDir") });
       return;
@@ -521,6 +542,11 @@ export function DraftAgentPane({
           ))}
         </datalist>
       </div>
+      {cwdNeedsConfirmation ? (
+        <p role="alert" className="shrink-0 border-b border-warning/30 bg-warning-soft px-2.5 py-1.5 text-[10.5px] leading-4 text-warning">
+          {t("draft.confirmRecoveredDir")}
+        </p>
+      ) : null}
 
       <div className="flex shrink-0 flex-col gap-1.5 border-b border-line bg-[#fbfbfd] px-2.5 py-1.5">
         <div className="flex min-w-0 flex-wrap items-center gap-1.5">

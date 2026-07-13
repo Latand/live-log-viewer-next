@@ -15,7 +15,7 @@ import { MAX_VISIBLE_PATHS } from "@/lib/view/types";
 import type { Workflow } from "@/lib/workflows/types";
 
 import { TaskStrip } from "./BranchPane";
-import { clearDraftStorage, draftCwd, draftParentConversationId, draftSrc, seedDraftCwd, setDraftCwd, setDraftSrc, setDraftText } from "./DraftAgentPane";
+import { clearDraftStorage, draftCwd, draftParentConversationId, draftSrc, requireDraftCwdConfirmation, seedDraftCwd, setDraftCwd, setDraftSrc, setDraftText } from "./DraftAgentPane";
 import { planBoardConvergence, planClose } from "./projectBoardMutations";
 import { claimedReviewerDescendantPaths, foldClaimedReviewers, isActiveFlow } from "./flows/flowModel";
 import { PipelineDialog } from "./pipelines/PipelineDialog";
@@ -107,6 +107,7 @@ interface ColumnPrefs {
 const draftsKey = (project: string) => `llvDrafts:${project}`;
 const HANDOFF_CWD_RETRY_MS = 1_000;
 const HANDOFF_CWD_MAX_RETRY_MS = 30_000;
+const HANDOFF_CWD_MAX_ATTEMPTS = 4;
 
 export function loadDrafts(project: string): string[] {
   try {
@@ -231,13 +232,14 @@ function HeaderMenu({
 }
 
 /** One 44px-tall row inside a HeaderMenu popover. */
-function HeaderMenuItem({ icon, label, onSelect }: { icon: React.ReactNode; label: string; onSelect: () => void }) {
+function HeaderMenuItem({ icon, label, onSelect, disabled = false }: { icon: React.ReactNode; label: string; onSelect: () => void; disabled?: boolean }) {
   return (
     <button
       type="button"
       role="menuitem"
       onClick={onSelect}
-      className="flex min-h-11 w-full items-center gap-2 rounded-[9px] px-2.5 text-left text-[13px] font-semibold text-ink hover:bg-bg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+      disabled={disabled}
+      className="flex min-h-11 w-full items-center gap-2 rounded-[9px] px-2.5 text-left text-[13px] font-semibold text-ink hover:bg-bg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:cursor-not-allowed disabled:opacity-45"
     >
       <span className="flex h-5 w-5 shrink-0 items-center justify-center text-accent">{icon}</span>
       {label}
@@ -361,6 +363,16 @@ export function ProjectDashboard({
         })
         .catch(() => {
           if (cancelled) return;
+          if (attempt + 1 >= HANDOFF_CWD_MAX_ATTEMPTS) {
+            requireDraftCwdConfirmation(id, initialDraftCwd);
+            setPendingRestoredHandoffs((current) => {
+              if (!current.has(id)) return current;
+              const next = new Set(current);
+              next.delete(id);
+              return next;
+            });
+            return;
+          }
           const delay = attempt < 2
             ? 0
             : Math.min(HANDOFF_CWD_RETRY_MS * (2 ** (attempt - 2)), HANDOFF_CWD_MAX_RETRY_MS);
@@ -636,6 +648,7 @@ export function ProjectDashboard({
      pane and the camera glides to it — engine, directory and the first prompt
      are picked right inside that pane. */
   const addDraft = () => {
+    if (!loaded) return;
     onUserNavigate?.();
     const id = newDraftId();
     setDraftCwd(id, projectDraftWorkingDirectory(files, project, projectCatalogEntries, undefined, projectCwdFallbacks, projectCwd));
@@ -921,7 +934,7 @@ export function ProjectDashboard({
             <HeaderMenu triggerLabel={t("dash.createMenu")} icon={<Plus className="h-5 w-5" aria-hidden />}>
               {(close) => (
                 <>
-                  <HeaderMenuItem icon={<MessageSquarePlus className="h-4 w-4" aria-hidden />} label={t("dash.agent")} onSelect={() => { close(); addDraft(); }} />
+                  <HeaderMenuItem icon={<MessageSquarePlus className="h-4 w-4" aria-hidden />} label={t("dash.agent")} disabled={!loaded} onSelect={() => { close(); addDraft(); }} />
                   <HeaderMenuItem icon={<ListTodo className="h-4 w-4" aria-hidden />} label={t("dash.task")} onSelect={() => { close(); addTaskMobile(); }} />
                   <HeaderMenuItem icon={<span className="text-[15px] font-bold leading-none">≡</span>} label={t("dash.pipeline")} onSelect={() => { close(); setPipelineDialogOpen(true); }} />
                 </>
@@ -1102,8 +1115,9 @@ export function ProjectDashboard({
               <button
                 type="button"
                 onClick={addDraft}
+                disabled={!loaded}
                 aria-label={t("dash.newConvo")}
-                className="pointer-events-auto flex shrink-0 items-center gap-1 rounded-[8px] border border-line bg-panel px-3 py-1.5 text-[11.5px] font-bold text-ink shadow-card hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                className="pointer-events-auto flex shrink-0 items-center gap-1 rounded-[8px] border border-line bg-panel px-3 py-1.5 text-[11.5px] font-bold text-ink shadow-card hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:cursor-not-allowed disabled:opacity-45"
               >
                 <span className="text-[13px] leading-none text-accent">+</span> {t("dash.agent")}
               </button>

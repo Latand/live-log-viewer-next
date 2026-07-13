@@ -1,6 +1,6 @@
 "use client";
 
-/* eslint-disable react-hooks/exhaustive-deps, react-hooks/set-state-in-effect */
+/* eslint-disable react-hooks/exhaustive-deps */
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
@@ -12,8 +12,61 @@ import { subscribeLog } from "./logBus";
 
 /** Longest single jsonl line we are willing to chase across history chunks. */
 const OLDER_CHUNK_HOPS = 4;
+const TAIL_CACHE_PATHS = 24;
+const TAIL_CACHE_LINES = 6000;
 
 const utf8len = (text: string) => new TextEncoder().encode(text).length;
+
+interface TailSnapshot {
+  win: { lines: string[]; start: number };
+  size: number;
+  offset: number;
+  historyStart: number;
+  partial: string;
+  first: boolean;
+  hasMore: boolean;
+  tickTime: Date | null;
+}
+
+/* Browser-wide tail snapshots keep revisited projects useful on their first
+   paint. Entries retain the transport offset and partial-line decoder state,
+   so the live subscription continues forward without duplicating cached rows. */
+const tailCache = new Map<string, TailSnapshot>();
+
+function boundedSnapshot(snapshot: TailSnapshot, cap: number): TailSnapshot {
+  const limit = cap > 0 ? Math.min(cap, TAIL_CACHE_LINES) : TAIL_CACHE_LINES;
+  if (snapshot.win.lines.length <= limit) return snapshot;
+  const removed = snapshot.win.lines.slice(0, snapshot.win.lines.length - limit);
+  const removedBytes = removed.reduce((total, line) => total + utf8len(line + "\n"), 0);
+  return {
+    ...snapshot,
+    win: {
+      lines: snapshot.win.lines.slice(-limit),
+      start: snapshot.win.start + removed.length,
+    },
+    historyStart: snapshot.historyStart + removedBytes,
+    hasMore: true,
+  };
+}
+
+function readTailCache(path: string, cap: number): TailSnapshot | null {
+  const cached = tailCache.get(path);
+  if (!cached) return null;
+  tailCache.delete(path);
+  const bounded = boundedSnapshot(cached, cap);
+  tailCache.set(path, bounded);
+  return bounded;
+}
+
+function writeTailCache(path: string, snapshot: TailSnapshot): void {
+  tailCache.delete(path);
+  tailCache.set(path, boundedSnapshot(snapshot, TAIL_CACHE_LINES));
+  while (tailCache.size > TAIL_CACHE_PATHS) {
+    const oldest = tailCache.keys().next().value as string | undefined;
+    if (!oldest) break;
+    tailCache.delete(oldest);
+  }
+}
 
 export interface LogTailState {
   lines: string[];
@@ -46,22 +99,28 @@ export interface LogTailState {
  * trimming never shifts what is being read.
  */
 export function useLogTail(file: FileEntry | null, pausedInput = false, cap = 2500): LogTailState {
+  const [initialSnapshot] = useState(() => file ? readTailCache(file.path, cap) : null);
+  const initialWin = initialSnapshot?.win ?? { lines: [], start: 0 };
   const capRef = useRef(cap);
   /* One atomic window state: the lines plus the absolute index of lines[0],
      updated together so a trim and its start shift can never tear. */
-  const [win, setWin] = useState<{ lines: string[]; start: number }>({ lines: [], start: 0 });
-  const [size, setSize] = useState(0);
-  const [loading, setLoading] = useState(false);
+  const [win, setWin] = useState<{ lines: string[]; start: number }>(initialWin);
+  const [size, setSize] = useState(initialSnapshot?.size ?? 0);
+  const [loading, setLoading] = useState(Boolean(file && !initialSnapshot));
   const [error, setError] = useState<string | null>(null);
-  const [tickTime, setTickTime] = useState<Date | null>(null);
+  const [tickTime, setTickTime] = useState<Date | null>(initialSnapshot?.tickTime ?? null);
   const [paused, setPaused] = useState(false);
-  const [hasMore, setHasMore] = useState(false);
+  const [hasMore, setHasMore] = useState(initialSnapshot?.hasMore ?? false);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [prependGen, setPrependGen] = useState(0);
-  const offsetRef = useRef(0);
-  const startRef = useRef(0);
-  const tailRef = useRef("");
-  const firstRef = useRef(true);
+  const winRef = useRef(initialWin);
+  const sizeRef = useRef(initialSnapshot?.size ?? 0);
+  const tickTimeRef = useRef<Date | null>(initialSnapshot?.tickTime ?? null);
+  const hasMoreRef = useRef(initialSnapshot?.hasMore ?? false);
+  const offsetRef = useRef(initialSnapshot?.offset ?? 0);
+  const startRef = useRef(initialSnapshot?.historyStart ?? 0);
+  const tailRef = useRef(initialSnapshot?.partial ?? "");
+  const firstRef = useRef(initialSnapshot?.first ?? true);
   const genRef = useRef(0);
   const olderBusyRef = useRef(false);
 
@@ -69,26 +128,61 @@ export function useLogTail(file: FileEntry | null, pausedInput = false, cap = 25
     capRef.current = cap;
   }, [cap]);
 
+  const updateWin = (next: { lines: string[]; start: number }) => {
+    winRef.current = next;
+    setWin(next);
+  };
+
+  const updateHasMore = (next: boolean) => {
+    hasMoreRef.current = next;
+    setHasMore(next);
+  };
+
+  const saveSnapshot = (path: string) => {
+    writeTailCache(path, {
+      win: winRef.current,
+      size: sizeRef.current,
+      offset: offsetRef.current,
+      historyStart: startRef.current,
+      partial: tailRef.current,
+      first: firstRef.current,
+      hasMore: hasMoreRef.current,
+      tickTime: tickTimeRef.current,
+    });
+  };
+
   const resetWindow = () => {
     offsetRef.current = 0;
     startRef.current = 0;
     tailRef.current = "";
     firstRef.current = true;
-    setHasMore(false);
+    updateHasMore(false);
   };
 
   const clear = useCallback(() => {
-    setWin({ lines: [], start: 0 });
+    if (file) tailCache.delete(file.path);
+    updateWin({ lines: [], start: 0 });
     resetWindow();
-  }, []);
+  }, [file?.path]);
 
   useEffect(() => {
     genRef.current += 1;
-    resetWindow();
-    setWin({ lines: [], start: 0 });
-    setSize(file?.size ?? 0);
+    const cached = file ? readTailCache(file.path, capRef.current) : null;
+    const nextWin = cached?.win ?? { lines: [], start: 0 };
+    winRef.current = nextWin;
+    offsetRef.current = cached?.offset ?? 0;
+    startRef.current = cached?.historyStart ?? 0;
+    tailRef.current = cached?.partial ?? "";
+    firstRef.current = cached?.first ?? true;
+    hasMoreRef.current = cached?.hasMore ?? false;
+    sizeRef.current = cached?.size ?? file?.size ?? 0;
+    tickTimeRef.current = cached?.tickTime ?? null;
+    setWin(nextWin);
+    setHasMore(hasMoreRef.current);
+    setSize(sizeRef.current);
+    setTickTime(tickTimeRef.current);
     setError(null);
-    setLoading(Boolean(file));
+    setLoading(Boolean(file && !cached));
   }, [file?.path]);
 
   /* Forward polling rides the shared log bus: one batched request per tick
@@ -117,7 +211,7 @@ export function useLogTail(file: FileEntry | null, pausedInput = false, cap = 25
         const chunk = result as LogChunk;
         if (offsetRef.current > chunk.size) {
           resetWindow();
-          setWin({ lines: [], start: 0 });
+          updateWin({ lines: [], start: 0 });
         }
         if (chunk.data) {
           let data = tailRef.current + chunk.data;
@@ -129,29 +223,33 @@ export function useLogTail(file: FileEntry | null, pausedInput = false, cap = 25
               startRef.current = chunk.start + (nl >= 0 ? utf8len(data.slice(0, nl + 1)) : utf8len(data));
               data = nl >= 0 ? data.slice(nl + 1) : "";
             }
-            setHasMore(startRef.current > 0);
+            updateHasMore(startRef.current > 0);
           }
           const parts = data.split("\n");
           tailRef.current = parts.pop() ?? "";
           const complete = parts.map((line) => line.trim()).filter(Boolean);
-          if (offsetRef.current === 0) setWin({ lines: complete, start: 0 });
-          else if (complete.length)
-            setWin((prev) => {
-              const merged = prev.lines.concat(complete);
-              const capNow = capRef.current;
-              if (capNow > 0 && merged.length > capNow) {
-                return { lines: merged.slice(-capNow), start: prev.start + (merged.length - capNow) };
-              }
-              return { lines: merged, start: prev.start };
-            });
+          if (offsetRef.current === 0) updateWin({ lines: complete, start: 0 });
+          else if (complete.length) {
+            const prev = winRef.current;
+            const merged = prev.lines.concat(complete);
+            const capNow = capRef.current;
+            updateWin(capNow > 0 && merged.length > capNow
+              ? { lines: merged.slice(-capNow), start: prev.start + (merged.length - capNow) }
+              : { lines: merged, start: prev.start });
+          }
           firstRef.current = false;
         }
         offsetRef.current = chunk.offset;
+        sizeRef.current = chunk.size;
         setSize(chunk.size);
         setError(null);
         /* Idle polls must not re-render every pane every 1.2s: the tick time
            moves only when bytes actually arrived (status reads "last data"). */
-        if (chunk.data) setTickTime(new Date());
+        if (chunk.data) {
+          tickTimeRef.current = new Date();
+          setTickTime(tickTimeRef.current);
+        }
+        saveSnapshot(file.path);
         setLoading(false);
       },
     });
@@ -193,11 +291,13 @@ export function useLogTail(file: FileEntry | null, pausedInput = false, cap = 25
       if (parts.at(-1) === "") parts.pop();
       const complete = parts.map((line) => line.trim()).filter(Boolean);
       startRef.current = newStart;
-      setHasMore(newStart > 0);
+      updateHasMore(newStart > 0);
       if (complete.length) {
-        setWin((prev) => ({ lines: complete.concat(prev.lines), start: prev.start - complete.length }));
+        const prev = winRef.current;
+        updateWin({ lines: complete.concat(prev.lines), start: prev.start - complete.length });
         setPrependGen((value) => value + 1);
       }
+      saveSnapshot(file.path);
       return complete.length;
     } catch {
       return 0;

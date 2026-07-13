@@ -289,6 +289,80 @@ test("a restored handoff stays unresolved while source cwd lookup retries", asyn
   })).toBe(true);
 });
 
+test("a cold dashboard cannot create an agent draft before project metadata hydrates", async () => {
+  const project = "cold-project";
+  const windowWithMatchMedia = dom as unknown as { matchMedia: typeof mobileMatchMedia };
+  const previousMatchMedia = windowWithMatchMedia.matchMedia;
+  windowWithMatchMedia.matchMedia = mobileMatchMedia;
+  try {
+    roots.push(mount(<ProjectDashboard {...dashboardProps(project)} loaded={false} />));
+
+    expect(await waitFor(() => dom.document.querySelector('button[aria-haspopup="menu"]') !== null)).toBe(true);
+    const create = dom.document.querySelector('button[aria-haspopup="menu"]') as unknown as HTMLButtonElement;
+    create.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event);
+    expect(await waitFor(() => dom.document.querySelector('[role="menuitem"]') !== null)).toBe(true);
+    const agent = dom.document.querySelector('[role="menuitem"]') as unknown as HTMLButtonElement | null;
+    expect(agent?.disabled).toBe(true);
+    agent?.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event);
+    expect(dom.sessionStorage.getItem(draftsKey(project))).toBeNull();
+  } finally {
+    windowWithMatchMedia.matchMedia = previousMatchMedia;
+  }
+});
+
+test("the desktop agent control stays disabled until project metadata hydrates", async () => {
+  const project = "cold-desktop-project";
+  const previousMatchMedia = G.matchMedia;
+  G.matchMedia = (query: string) => ({ ...mobileMatchMedia(query), matches: false });
+  try {
+    roots.push(mount(<ProjectDashboard {...dashboardProps(project)} loaded={false} />));
+    const create = dom.document.querySelector('[aria-label="New conversation with an agent"]') as unknown as HTMLButtonElement | null;
+    expect(create?.disabled).toBe(true);
+    create?.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event);
+    expect(dom.sessionStorage.getItem(draftsKey(project))).toBeNull();
+  } finally {
+    G.matchMedia = previousMatchMedia;
+  }
+});
+
+test("a missing restored handoff reaches an editable bounded recovery card", async () => {
+  const project = "missing-handoff-project";
+  const sourcePath = "/archive/deleted-source.jsonl";
+  let spawnCalls = 0;
+  let launchCalls = 0;
+  dom.sessionStorage.setItem(draftsKey(project), JSON.stringify([agentA]));
+  dom.sessionStorage.setItem(agentField(agentA, "src"), sourcePath);
+  G.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    if (init?.method === "POST" && String(input) === "/api/spawn") {
+      launchCalls += 1;
+      return { ok: true, status: 200, json: async () => ({}), text: async () => "" };
+    }
+    if (String(input).startsWith("/api/spawn?")) {
+      spawnCalls += 1;
+      return { ok: true, status: 200, json: async () => ({ cwd: null }), text: async () => "" };
+    }
+    return { ok: true, status: 200, json: async () => ({}), text: async () => "" };
+  }) as unknown as typeof fetch;
+
+  roots.push(mount(<ProjectDashboard {...dashboardProps(project)} />));
+
+  expect(await waitFor(() => dom.document.querySelector(AGENT_PANE) !== null, 2500)).toBe(true);
+  await new Promise((resolve) => setTimeout(resolve, 1100));
+  const settledCalls = spawnCalls;
+  expect(settledCalls).toBeGreaterThanOrEqual(4);
+  expect(settledCalls).toBeLessThanOrEqual(5);
+  await new Promise((resolve) => setTimeout(resolve, 1100));
+  expect(spawnCalls).toBe(settledCalls);
+  const directory = dom.document.querySelector('input[aria-label="Agent working directory"]') as unknown as HTMLInputElement | null;
+  expect(directory?.value).toBe(`/home/tester/Projects/${project}`);
+  expect(directory?.disabled).toBe(false);
+  expect(dom.document.querySelector('p[role="alert"]')?.textContent).toContain("source working directory");
+  const launch = dom.document.querySelector('[aria-label="Launch the agent"]') as unknown as HTMLButtonElement | null;
+  launch?.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event);
+  await settle();
+  expect(launchCalls).toBe(0);
+});
+
 test("closing a conversation card reports its path to the dashboard owner", async () => {
   const project = "close-project";
   const path = "/sessions/close-me.jsonl";
