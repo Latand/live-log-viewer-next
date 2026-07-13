@@ -224,6 +224,15 @@ export async function bindStructuredDeliveryQueue(
   for (const item of adopted) {
     await register(item);
   }
+  const startupSnapshot = registry.snapshot();
+  for (const conversation of Object.values(startupSnapshot.conversations)) {
+    const generation = conversation.generations.at(-1);
+    if (!generation) continue;
+    const id = sessionKeyId({ engine: conversation.engine, sessionId: generation.id });
+    if (registrations.has(id)) continue;
+    if (startupSnapshot.entries[id]?.host?.kind !== "tmux") continue;
+    await publishCurrentFallback(conversation.id);
+  }
   activeQueue = queue;
   setStructuredDeliveryKick(() => queue.drain().catch(() => {
     console.error("[structured delivery] queue drain failed");

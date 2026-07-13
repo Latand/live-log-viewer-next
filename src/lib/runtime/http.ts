@@ -1,22 +1,30 @@
 import { NextRequest, NextResponse } from "next/server";
 
+import { agentRegistry, type AgentRegistry } from "@/lib/agent/registry";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
 
 import { RuntimeHostUnavailableError, runtimeHostClient, type RuntimeHostClient } from "./client";
 import { parseRuntimeCommand } from "./commands";
 import type { RuntimeOperationKind } from "./contracts";
 import { runtimeEventsEnabled } from "./flags";
+import { enqueueStructuredMessage } from "./structuredMessageDelivery";
 import { kickStructuredDeliveryQueue } from "./structuredDeliverySignal";
 
 export interface RuntimeHttpDependencies {
   enabled(): boolean;
   client(): RuntimeHostClient | null;
-  kick?(): void;
+  structuredEnabled?(): boolean;
+  registry?(): AgentRegistry;
+  enqueue?: typeof enqueueStructuredMessage;
+  kick?(): void | Promise<void>;
 }
 
 const DEFAULT_DEPENDENCIES: RuntimeHttpDependencies = {
   enabled: runtimeEventsEnabled,
   client: runtimeHostClient,
+  structuredEnabled: () => process.env.LLV_STRUCTURED_HOSTS === "1",
+  registry: agentRegistry,
+  enqueue: enqueueStructuredMessage,
   kick: kickStructuredDeliveryQueue,
 };
 
@@ -53,6 +61,30 @@ export async function handleRuntimeCommand(
   const client = dependencies.client();
   if (!client) return NextResponse.json({ error: "runtime host socket is unavailable" }, { status: 503 });
   try {
+    if ((command.kind === "send" || command.kind === "steer") && dependencies.enqueue) {
+      const admitted = await dependencies.enqueue({
+        path: "",
+        conversationId: command.conversationId,
+        clientMessageId: command.idempotencyKey,
+        ...(command.operationId ? { operationId: command.operationId } : {}),
+        kind: command.kind,
+        ...(command.policy ? { policy: command.policy } : {}),
+        ...(command.turnId !== undefined ? { turnId: command.turnId } : {}),
+        text: command.text,
+        hasImages: Boolean(command.images?.length),
+      }, {
+        enabled: dependencies.structuredEnabled ?? (() => process.env.LLV_STRUCTURED_HOSTS === "1"),
+        client: () => client,
+        registry: dependencies.registry ?? agentRegistry,
+        kick: dependencies.kick ?? kickStructuredDeliveryQueue,
+      });
+      if (admitted) {
+        if (!admitted.ok) return NextResponse.json({ error: admitted.error }, { status: admitted.status });
+        if (admitted.outcome === "held") return NextResponse.json({ held: true }, { status: 202 });
+        const status = admitted.receipt.status === "pending" || admitted.receipt.status === "queued" ? 202 : 200;
+        return NextResponse.json({ operationId: admitted.operationId, receipt: admitted.receipt }, { status });
+      }
+    }
     const result = await client.command(command);
     if ((kind === "send" || kind === "steer")
       && (result.receipt.status === "pending" || result.receipt.status === "queued")) {

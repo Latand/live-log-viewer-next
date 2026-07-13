@@ -12,6 +12,10 @@ export interface StructuredMessageRequest {
   path: string;
   conversationId?: string | null;
   clientMessageId?: string | null;
+  operationId?: string;
+  kind?: "send" | "steer";
+  policy?: "queue" | "steer-if-active";
+  turnId?: string | null;
   text: string;
   hasImages: boolean;
 }
@@ -158,11 +162,13 @@ export async function enqueueStructuredMessage(
       };
     }
     const result = await client.command({
-      kind: "send",
+      kind: request.kind ?? "send",
+      ...(request.operationId ? { operationId: request.operationId } : {}),
       conversationId: conversation.id,
       idempotencyKey,
       text: request.text,
-      policy: "queue",
+      policy: request.policy ?? "queue",
+      ...(request.turnId !== undefined ? { turnId: request.turnId } : {}),
     });
     const receipt = result.receipt;
     if (receipt.status === "rejected" || receipt.status === "failed" || receipt.status === "uncertain") {
