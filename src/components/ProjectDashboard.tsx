@@ -15,6 +15,7 @@ import { MAX_VISIBLE_PATHS } from "@/lib/view/types";
 import type { Workflow } from "@/lib/workflows/types";
 
 import { TaskStrip } from "./BranchPane";
+import { ConversationList } from "./ConversationList";
 import { clearDraftStorage, draftCwd, draftParentConversationId, draftSrc, replaceUnverifiedDraftCwd, requireDraftCwdConfirmation, seedDraftCwd, setDraftCwd, setDraftSrc, setDraftText } from "./DraftAgentPane";
 import { planBoardConvergence, planClose } from "./projectBoardMutations";
 import { claimedReviewerDescendantPaths, foldClaimedReviewers, isActiveFlow } from "./flows/flowModel";
@@ -23,11 +24,13 @@ import { pipelinesForProject } from "./pipelines/pipelineModel";
 import { buildSchemeLayout } from "./scheme/layout";
 import { collapsibleWorkerFiles, groupWorkerStacks, pipelineOriginOf, pipelineStagePipelineIds, protectedReviewerNodes } from "./scheme/workerCollapse";
 import { WorkerStacks } from "./WorkerStacks";
+import { MobileBottomShelf } from "./MobileBottomShelf";
 import { clearWorkflowDraftStorage } from "./workflows/WorkflowDraftPane";
 import { dropLegacyWorkflowDrafts, isWorkflowDraftId } from "./workflows/workflowModel";
 import { TaskPanel } from "./tasks/TaskPanel";
 import { TaskToastHost } from "./tasks/taskToast";
 import { MobileFocusView } from "./mobile/MobileFocusView";
+import { canHandoff, HandoffHandle } from "./HandoffHandle";
 import { SchemeBoard } from "./scheme/SchemeBoard";
 import { Switchboard } from "./Switchboard";
 import {
@@ -44,7 +47,7 @@ import {
   residualItems,
 } from "./projectModel";
 import { ArchiveRestore } from "./icons";
-import { ArchiveProjectButton, DeleteProjectButton, QuietFileList } from "./ProjectTrash";
+import { ArchiveProjectButton, DeleteProjectButton } from "./ProjectTrash";
 import { SoundToggle } from "./SoundToggle";
 import { ResidualStrip } from "./TreeAside";
 
@@ -75,6 +78,7 @@ interface Props {
   /** The project is shelved: hidden from the rail and the overview. */
   archived: boolean;
   catalogKnown: boolean;
+  catalogConversationCount: number;
   onArchive: (project: string) => void;
   onUnarchive: (project: string) => void;
   /** Mobile shell: the rail hides behind a drawer, this opens it. */
@@ -86,8 +90,10 @@ interface Props {
       drafts, pipeline and task jumps) supersede any unresolved deep-link
       intent held above; the Viewer cancels its pending hash here. */
   onUserNavigate?: () => void;
-  /** Releases any deep-link scan pin owned by a card after that card closes. */
-  onConversationClose?: (path: string) => void;
+  /** Full-catalog list/search open: pins the transcript through the file feed. */
+  onOpenCatalogFile?: (file: FileEntry) => void;
+  /** Releases any retained list/search pin when its displayed node closes. */
+  onCloseFile?: (path: string) => void;
 }
 
 /** Manual additions and removals of scheme nodes, persisted per project. */
@@ -131,6 +137,12 @@ export function loadDrafts(project: string): string[] {
    against the shared board store (queued, then flushed on that project's next
    load), so cross-project opens survive across devices — see useBoardState. */
 export { queueColumnOpen };
+
+export function pendingFocusTarget(pending: string | null, files: readonly FileEntry[]): string | null {
+  if (!pending) return null;
+  if (pending.startsWith("draft::") || files.some((file) => file.path === pending)) return pending;
+  return null;
+}
 
 /* Kept outside the component: the React Compiler's immutability check flags
    direct global mutation (location.hash = ...) inside a component body. */
@@ -263,12 +275,14 @@ export function ProjectDashboard({
   attentionPaths,
   archived,
   catalogKnown,
+  catalogConversationCount,
   onArchive,
   onUnarchive,
   onMenu,
   attention,
   onUserNavigate,
-  onConversationClose,
+  onOpenCatalogFile,
+  onCloseFile,
 }: Props) {
   const { t } = useLocale();
   const isMobile = useIsMobile();
@@ -286,6 +300,10 @@ export function ProjectDashboard({
   const taskPanelOpen = board.prefs.taskPanelOpen;
   const [drafts, setDrafts] = useState<string[]>([]);
   const [pendingRestoredHandoffs, setPendingRestoredHandoffs] = useState<Set<string>>(() => new Set());
+  /* The phone focus view reports its currently-focused conversation here so the
+     footer shelf can dock that pane's handoff control on its single row (issue
+     #177 item 5). */
+  const [mobileActiveFile, setMobileActiveFile] = useState<FileEntry | null>(null);
   /* Desktop `+ Task`: bump drops the inline sticky composer in a free slot on
      the board (pinned near the button). */
   const [newTaskNonce, setNewTaskNonce] = useState(0);
@@ -598,9 +616,10 @@ export function ProjectDashboard({
      flash it then so the camera has something to glide to. */
   useEffect(() => {
     const pending = pendingFocusRef.current;
-    if (!pending) return;
+    const target = pendingFocusTarget(pending, files);
+    if (!target) return;
     pendingFocusRef.current = null;
-    flashNode(pending);
+    flashNode(target);
   });
 
   /* A task-panel row from another project switches the dashboard first; the
@@ -729,7 +748,7 @@ export function ProjectDashboard({
        clears locally. */
     board.mutate([planClose(path, ephemeral).mutation]);
     setEphemeral((prev) => planClose(path, prev).ephemeral);
-    onConversationClose?.(path);
+    onCloseFile?.(path);
   };
 
   /* Latest manual list behind a ref so the convergence effect below reads
@@ -739,20 +758,25 @@ export function ProjectDashboard({
     prefsSnapshotRef.current = prefs;
   });
 
-  /* Every conversation the current catalog knows for this project, keyed by
-     path — the convergence planner retires a manual entry that has left it. */
+  /* Every scheme-hydrated conversation for this project, keyed by path. The
+     full catalog count tells the planner whether absence proves deletion. */
   const projectCatalog = useMemo(
     () => new Map(groupFiles.filter((file) => projectKey(file) === project).map((file) => [file.path, file] as const)),
     [groupFiles, project],
   );
+  const schemeConversationCount = useMemo(
+    () => files.filter((file) => projectKey(file) === project && file.root !== "claude-tasks").length,
+    [files, project],
+  );
+  const catalogComplete = catalogKnown && schemeConversationCount >= catalogConversationCount;
   /* Only the root key and orphan flag of each group matter to reconciliation. */
   const rootGroups = useMemo(() => groups.map((group) => ({ key: group.key, orphanTask: group.orphanTask })), [groups]);
 
   /* Board membership convergence, as one ordered mutation batch:
        1. succession remap — a predecessor's tombstone/placement follows the
           stable conversation identity to its successor path;
-       2. root reconciliation — seed every current root and retire child/subagent
-          or catalog-absent pollution from `manual`, preserving tombstones.
+       2. root reconciliation — seed every current root, retire child/subagent
+          pollution, and retire absent paths only with complete membership.
      Remap precedes reconciliation so a hidden successor is honored and never
      re-seeded. Both mutations are idempotent, so a batch that changes nothing is
      dropped by the store before transport — no revision churn, no 40-entry
@@ -760,18 +784,20 @@ export function ProjectDashboard({
      the server arrangement. */
   useEffect(() => {
     if (!board.loaded || board.sync === "unavailable") return;
+    if (focusRequest && !pendingFocusTarget(focusRequest.path, files)) return;
     board.mutate(
       planBoardConvergence({
         files,
         groups: rootGroups,
         manual: prefsSnapshotRef.current.manual,
         catalog: projectCatalog,
+        catalogComplete,
         project,
       }),
     );
     /* eslint-disable-next-line react-hooks/exhaustive-deps -- board.mutate is
        delegated to a ref-stable store; manual is read through that ref. */
-  }, [rootGroups, files, projectCatalog, project, board.loaded, board.sync]);
+  }, [rootGroups, files, projectCatalog, catalogComplete, project, board.loaded, board.sync, focusRequest]);
 
   /* Any open lands on the scheme: a card of another project pre-adds its node
      and switches the project; a conversation of this project joins the managed
@@ -807,6 +833,7 @@ export function ProjectDashboard({
     }
     pendingFocusRef.current = file.path;
   };
+  const openFullCatalogFile = onOpenCatalogFile ?? openSwitchboardFile;
 
   const statusBits: string[] = [];
   if (liveCount) {
@@ -835,10 +862,9 @@ export function ProjectDashboard({
   const visibleDrafts = drafts.filter((id) => !pendingRestoredHandoffs.has(id));
   const hasNodes =
     schemeGroups.length > 0 || schemeManual.length > 0 || visibleDrafts.length > 0 || projectTasks.length > 0 || activePipelines.length > 0;
-  /* Everything the project has on disk, freshest first. Powers the
-     delete-project button and the fallback list of an empty scheme —
-     transcripts whose tree lives elsewhere (scratchpad one-offs) build no
-     groups/cards/residual chips, yet keep the project in the rail. */
+  /* Scheme-visible project files, freshest first. They gate live activity for
+     project actions; the deletion flow loads its complete target set from the
+     uncapped conversation catalog before confirmation. */
   const projectFiles = useMemo(
     () => files.filter((file) => projectKey(file) === project).sort((a, b) => b.mtime - a.mtime),
     [files, project],
@@ -884,7 +910,7 @@ export function ProjectDashboard({
     pipelineIdOf,
     originOf: spawnerRootOf,
   });
-  const listAvailable = historyRows.length > 0;
+  const listAvailable = catalogKnown || historyRows.length > 0;
   const projectView = resolveProjectView({
     preferredView: board.prefs.viewMode,
     hasNodes,
@@ -968,7 +994,7 @@ export function ProjectDashboard({
                       <ArchiveProjectButton files={projectFiles} allowEmpty={catalogKnown} onArchive={() => onArchive(project)} />
                     )}
                   </div>
-                  <div className="flex min-h-11 items-center px-1.5"><DeleteProjectButton files={projectFiles} /></div>
+                  <div className="flex min-h-11 items-center px-1.5"><DeleteProjectButton project={project} files={projectFiles} available={catalogKnown} /></div>
                 </>
               )}
             </HeaderMenu>
@@ -988,7 +1014,7 @@ export function ProjectDashboard({
             ) : (
               <ArchiveProjectButton files={projectFiles} allowEmpty={catalogKnown} onArchive={() => onArchive(project)} />
             )}
-            <DeleteProjectButton files={projectFiles} />
+            <DeleteProjectButton project={project} files={projectFiles} available={catalogKnown} />
             <button
               type="button"
               onClick={toggleTaskPanel}
@@ -1065,11 +1091,11 @@ export function ProjectDashboard({
               onClose={closeNode}
               onDraftClose={removeDraft}
               onDraftSpawned={draftSpawned}
-              onHandoff={addHandoffDraft}
+              onActiveChange={setMobileActiveFile}
               taskSheetNonce={taskSheetNonce}
             />
           ) : listAvailable ? (
-            <QuietFileList files={historyRows} activeRootPaths={quietActiveRoots} onOpen={openSwitchboardFile} />
+            <ConversationList project={project} enabled={loaded && projectView === "list"} onOpen={openFullCatalogFile} />
           ) : (
             <div className="flex flex-1 items-center justify-center px-4 py-5 text-center">
               <div>
@@ -1110,7 +1136,7 @@ export function ProjectDashboard({
                 newTaskNonce={newTaskNonce}
               />
             ) : listAvailable ? (
-              <QuietFileList files={historyRows} activeRootPaths={quietActiveRoots} onOpen={openSwitchboardFile} />
+              <ConversationList project={project} enabled={loaded && projectView === "list"} onOpen={openFullCatalogFile} />
             ) : (
               <div className="flex flex-1 items-center justify-center px-4 py-5 text-center">
                 <div>
@@ -1158,27 +1184,43 @@ export function ProjectDashboard({
 
       {/* The corner pill would sit on the focused pane's composer; on the
           phone the strip, the map and the toast cover its job. */}
-      {isMobile ? null : <Switchboard files={files} flows={flows} project={project} loaded={loaded} onOpenFile={openSwitchboardFile} />}
+      {isMobile ? null : <Switchboard files={files} flows={flows} project={project} loaded={loaded} onOpenFile={openSwitchboardFile} onOpenCatalogFile={openFullCatalogFile} />}
 
       {/* Worker-class cards that have auto-collapsed fold into one stack per
           origin — flow / pipeline / spawner (issue #112, #136) — instead of
           vanishing to the switchboard; owner-touched and live cards are never
-          included. */}
-      <WorkerStacks stacks={workerStacks} files={files} flows={flows} pipelines={pipelines} onSelect={openSwitchboardFile} />
+          included. The quiet `residual` strip is derived from `sceneFiles`,
+          which already excludes every collapsed worker, so a card never appears
+          in both a stack and here.
 
-      {/* `residual` is derived from `sceneFiles`, which already excludes every
-          collapsed worker, so a card never appears in both a stack and here. */}
-      {!hasArchiveNodes && residual.length ? (
-        <ResidualStrip items={residual} activeRootPaths={quietActiveRoots} onSelect={openSwitchboardFile} />
-      ) : null}
+          On the phone the handoff control, the collapsed-worker strip, and the
+          quiet strip share one footer row (issue #177 item 5): the handoff docks
+          beside a single disclosure that folds both strips. Desktop renders the
+          two strips directly, side by side. */}
+      {(() => {
+        const workerTotal = workerStacks.reduce((sum, stack) => sum + stack.items.length, 0);
+        const quietTotal = !hasArchiveNodes ? residual.length : 0;
+        const strips = (
+          <>
+            <WorkerStacks stacks={workerStacks} files={files} flows={flows} pipelines={pipelines} onSelect={openSwitchboardFile} />
+            {!hasArchiveNodes && residual.length ? (
+              <ResidualStrip items={residual} activeRootPaths={quietActiveRoots} onSelect={openSwitchboardFile} />
+            ) : null}
+          </>
+        );
+        if (!isMobile) return strips;
+        /* Only the scheme focus view has a focused conversation to hand off; the
+           list view and empty states dock no handoff. */
+        const handoffFile = projectView === "scheme" && mobileActiveFile && canHandoff(mobileActiveFile) ? mobileActiveFile : null;
+        const leading = handoffFile ? <HandoffHandle file={handoffFile} onHandoff={() => addHandoffDraft(handoffFile)} inline /> : null;
+        return (
+          <MobileBottomShelf total={workerTotal + quietTotal} leading={leading}>
+            {strips}
+          </MobileBottomShelf>
+        );
+      })()}
 
       <TaskToastHost />
-
-      {/* Phone-only reservation (finding 4): while a deploy pill is live it
-          publishes `--llv-deploy-inset`; this spacer lifts the docked worker /
-          quiet-conversation sections above it so the toast never covers their
-          rows. Collapses to 0 when no deploy is showing. */}
-      {isMobile ? <div aria-hidden className="shrink-0" style={{ height: "var(--llv-deploy-inset, 0px)" }} /> : null}
     </div>
   );
 }

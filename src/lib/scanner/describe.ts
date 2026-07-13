@@ -21,6 +21,11 @@ interface Meta {
   fmt: Fmt;
 }
 
+/* Earlier issue-171 builds retained full prompts in these global maps. Clear
+   them during hot reload so the bounded scheme metadata shape takes effect
+   without waiting for a process restart. */
+globalCache<unknown>("meta-v4").clear();
+globalCache<unknown>("title-v2").clear();
 const metaCache = globalCache<[number, string, Meta]>("meta-v5");
 // Title and codex project live in the immutable head of a growing transcript,
 // so both are keyed by path and kept for good once resolved. A live file grows
@@ -28,7 +33,11 @@ const metaCache = globalCache<[number, string, Meta]>("meta-v5");
 // tick; these caches read only the head and stop reading once the answer is
 // fixed. A head that has not yet produced a title (empty/short file) is left
 // open so growth can still yield one.
-const titleCache = globalCache<[number, string | null]>("title");
+export type ConversationSearchText = { title: string | null; firstPrompt: string | null };
+const titleCache = globalCache<[number, string | null]>("title-v3");
+/* Search text can be large and belongs to the list/search path. Its bounded
+   cache lives with the search index; page hydration reads only its visible rows. */
+globalCache<unknown>("conversation-search-v1").clear();
 const codexProjectCache = globalCache<{ stateKey: string; project: string; worktree?: string }>("codex-project-v3");
 const repoSlugCache = globalCache<[number, string | null]>("repo-path-from-slug-v1");
 /* The cwd sits in the immutable head, so it follows the title-cache rule:
@@ -49,6 +58,22 @@ function readHead(pathname: string, size: number): { text: string; read: number 
     }
   } catch {
     return null;
+  }
+}
+
+function readSearchHead(pathname: string, size: number): { text: string; read: number } | null {
+  try {
+    const fd = fs.openSync(pathname, "r");
+    try {
+      const buf = Buffer.alloc(Math.min(size, HEAD_BYTES));
+      const read = fs.readSync(fd, buf, 0, buf.length, 0);
+      return { text: buf.toString("utf8", 0, read), read };
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
   }
 }
 
@@ -508,6 +533,33 @@ function goodTitle(text: unknown): string | null {
   return val && !skipTitlePrefixes.some((prefix) => val.startsWith(prefix)) ? val : null;
 }
 
+function userPromptFromRecord(obj: Record<string, unknown>, wantCodex: boolean): string | null {
+  if (wantCodex) {
+    const payload = recordValue(obj.payload) ?? {};
+    if (payload.type === "user_message") {
+      const prompt = typeof payload.message === "string" ? payload.message.trim() : "";
+      return prompt || null;
+    }
+    if (payload.type === "message" && payload.role === "user") {
+      const text = recordsValue(payload.content)
+        .map((part) => stringValue(part.text) ?? stringValue(part.input_text) ?? "")
+        .join(" ")
+        .trim();
+      return text || null;
+    }
+  } else if (obj.type === "user") {
+    const content = recordValue(obj.message)?.content;
+    if (typeof content === "string") return content.trim() || null;
+    const text = recordsValue(content)
+      .filter((part) => part.type === "text")
+      .map((part) => stringValue(part.text) ?? "")
+      .join(" ")
+      .trim();
+    return text || null;
+  }
+  return null;
+}
+
 function titleFromLines(lines: string[], wantCodex: boolean): string | null {
   for (const line of lines) {
     let obj: Record<string, unknown>;
@@ -522,42 +574,43 @@ function titleFromLines(lines: string[], wantCodex: boolean): string | null {
       const title = goodTitle(obj.summary);
       if (title) return title;
     }
-    // Compaction successors open with the raw continuation prompt; the
-    // generated ai-title record names the conversation better.
     if (obj.type === "ai-title") {
       const title = goodTitle(obj.aiTitle);
       if (title) return title;
     }
-    if (wantCodex) {
-      const payload = recordValue(obj.payload) ?? {};
-      if (payload.type === "user_message") {
-        const title = goodTitle(payload.message);
-        if (title) return title;
-      }
-      if (payload.type === "message" && payload.role === "user") {
-        const text = recordsValue(payload.content)
-          .map((part) => stringValue(part.text) ?? stringValue(part.input_text) ?? "")
-          .join(" ")
-          .trim();
-        const title = goodTitle(text);
-        if (title) return title;
-      }
-    } else if (obj.type === "user") {
-      const content = recordValue(obj.message)?.content;
-      if (typeof content === "string") {
-        const title = goodTitle(content);
-        if (title) return title;
-      }
-      const text = recordsValue(content)
-        .filter((part) => part.type === "text")
-        .map((part) => stringValue(part.text) ?? "")
-        .join(" ")
-        .trim();
-      const title = goodTitle(text);
-      if (title) return title;
-    }
+    const title = goodTitle(userPromptFromRecord(obj, wantCodex));
+    if (title) return title;
   }
   return null;
+}
+
+function conversationTextFromLines(lines: string[], wantCodex: boolean): ConversationSearchText {
+  let title: string | null = null;
+  let firstPrompt: string | null = null;
+  for (const line of lines) {
+    let obj: Record<string, unknown>;
+    try {
+      const parsed = JSON.parse(line);
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) continue;
+      obj = parsed;
+    } catch {
+      continue;
+    }
+    if (obj.type === "summary") {
+      title ??= goodTitle(obj.summary);
+    }
+    // Compaction successors open with the raw continuation prompt; the
+    // generated ai-title record names the conversation better.
+    if (obj.type === "ai-title") {
+      title ??= goodTitle(obj.aiTitle);
+    }
+    const prompt = userPromptFromRecord(obj, wantCodex);
+    if (!prompt) continue;
+    firstPrompt ??= prompt;
+    title ??= goodTitle(prompt);
+    if (title && firstPrompt) return { title, firstPrompt };
+  }
+  return { title, firstPrompt };
 }
 
 function transcriptCwd(pathname: string, size: number): string | null {
@@ -586,6 +639,13 @@ function scanJsonlTitle(pathname: string, size: number, wantCodex: boolean): str
   const title = titleFromLines(head.text.split("\n").slice(0, 151), wantCodex);
   titleCache.set(pathname, [head.read, title]);
   return title;
+}
+
+/** Title and first-prompt hydration owned entirely by list/search requests. */
+export function searchTextForTranscript(pathname: string, size: number, engine: "codex" | "claude"): ConversationSearchText {
+  const head = readSearchHead(pathname, size);
+  if (!head) return { title: null, firstPrompt: null };
+  return conversationTextFromLines(head.text.split("\n").slice(0, 151), engine === "codex");
 }
 
 export function describe(rootName: RootKey, root: string, pathname: string, st: fs.Stats, stateKey = projectResolutionStateKey()): Meta {

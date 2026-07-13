@@ -125,6 +125,14 @@ export function AgentRuntimeControls({ file }: { file: FileEntry }) {
         ? t("runtimeConfig.applied")
         : t("runtimeConfig.apply");
   const modelLabel = ENGINE_MODELS[engine].find((model) => model.id === draft.model)?.label ?? draft.model;
+  /* The pill face shows the agent's live configuration — the observed model and
+     effort — so this single control never misreports the running agent while an
+     edited-but-unapplied draft sits in localStorage (issue #177 review). A dot
+     flags an unapplied draft; the sheet holds and edits that draft. */
+  const observedModelId = engine === "claude" ? (normalizeClaudeLaunchModel(file.launchModel ?? file.model) ?? file.model ?? draft.model) : (file.model ?? draft.model);
+  const observedModelLabel = ENGINE_MODELS[engine].find((model) => model.id === observedModelId)?.label ?? file.model ?? observedModelId;
+  const observedEffort = file.effort ?? draft.effort;
+  const draftPending = (file.model != null && draft.model !== observedModelId) || (file.effort != null && draft.effort !== file.effort);
 
   if (isMobile) {
     return (
@@ -137,8 +145,14 @@ export function AgentRuntimeControls({ file }: { file: FileEntry }) {
           className="inline-flex h-11 shrink-0 items-center gap-1.5 rounded-full border border-line bg-bg px-2.5 text-[11px] font-semibold text-[#555] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
         >
           <SlidersHorizontal className="h-3.5 w-3.5 shrink-0 text-accent" aria-hidden />
-          <span className="max-w-[38vw] truncate font-mono">{modelLabel} · {draft.effort}</span>
-          {applyBusy ? <Loader2 className="h-3 w-3 animate-spin" aria-hidden /> : state === "applied" ? <Check className="h-3 w-3 text-ok" aria-hidden /> : null}
+          <span className="max-w-[38vw] truncate font-mono">{observedModelLabel} · {observedEffort}</span>
+          {applyBusy ? (
+            <Loader2 className="h-3 w-3 animate-spin" aria-hidden />
+          ) : state === "applied" ? (
+            <Check className="h-3 w-3 text-ok" aria-hidden />
+          ) : draftPending ? (
+            <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-[#e0ae45]" role="img" aria-label={t("runtimeConfig.pendingDraft", { model: modelLabel, effort: draft.effort })} title={t("runtimeConfig.pendingDraft", { model: modelLabel, effort: draft.effort })} />
+          ) : null}
         </button>
         {sheetOpen ? (
           <div

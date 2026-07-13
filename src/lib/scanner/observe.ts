@@ -8,6 +8,7 @@ import { entryModels } from "./model";
 import { outputHolders } from "./process";
 import { goalFor, planFor } from "./plan";
 import { pendingQuestionFor } from "./questions";
+import { pendingWakeupFor } from "./wakeup";
 import { assignTranscriptPids } from "./transcripts";
 import { waitingInputProbe } from "./waitingInput";
 import { activityVerdict } from "./activity";
@@ -44,6 +45,7 @@ export async function observeFiles(): Promise<FileEntry[]> {
     const probe = await waitingInputProbe(entry); entry.waitingInput = probe.waiting; entry.rateLimit = probe.rateLimit;
     if (probe.atComposer && entry.activity === "stalled") { entry.activity = Date.now() / 1000 - entry.mtime < 900 ? "recent" : "idle"; entry.activityReason = "pane_at_composer"; }
     entry.plan = planFor(entry); entry.goal = goalFor(entry); entry.ctx = ctxFor(entry);
+    entry.pendingWakeup = pendingWakeupFor(entry);
   });
   await linkEntries(entries, { persist: false });
   return entries;

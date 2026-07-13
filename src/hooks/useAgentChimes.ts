@@ -18,7 +18,7 @@ const CHIME_OF: Partial<Record<PaneState, ChimeKind>> = {
 const STAGGER_MS = 220;
 
 /* Upper bound on remembered identities. The retention exists to bridge the
-   FILE_CAP feed window (~400 entries plus hydration), so an order of magnitude
+   bounded scheme feed window, so an order of magnitude
    above it keeps every plausibly-returning conversation while a long-running
    tab stays flat: when the bound is hit, the longest-known identities absent
    from the current poll are evicted first. */
@@ -80,8 +80,8 @@ export function planAgentChimes(
   for (const file of files) {
     if (isAuxTask(file) || isArchivedPredecessor(file)) continue;
     const id = conversationIdentity(file);
-    /* Bound the current poll itself (selected-project hydration can exceed the
-       cap): the feed arrives mtime-descending, so the retained slice is the
+    /* Bound the current poll itself (pins and parent closure can exceed the
+       window): the feed arrives mtime-descending, so the retained slice is the
        most recently active conversations and every return path stays capped. */
     if (next.size >= MAX_TRACKED_IDENTITIES && !next.has(id)) continue;
     const state = paneState(file);
@@ -129,10 +129,10 @@ export function planAgentChimes(
 }
 
 /**
- * Applies the request-scope boundary around the transition scan. A project
- * switch hydrates historical entries that this tab has never observed; those
- * entries seed the retained history silently. Conversations already tracked
- * still announce a real lifecycle transition during the same hydration.
+ * Applies the request-scope boundary around the transition scan. A pinned
+ * deep-link request can hydrate an entry this tab has never observed; that
+ * entry seeds the retained history silently. Previously tracked conversations
+ * still announce a real lifecycle transition during the same request.
  */
 export function planScopedAgentChimes(
   files: readonly FileEntry[],

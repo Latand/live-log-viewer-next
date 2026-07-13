@@ -20,6 +20,7 @@ import type { FileEntry } from "@/lib/types";
    nodes.dom.test uses — and dynamic-import the components afterward so they bind
    to the inert hooks. Restored in afterAll so no sibling suite inherits it. */
 const actualRuntimeHooks = await import("@/hooks/useRuntime");
+const actualConversationCatalogHooks = await import("@/hooks/useConversationCatalog");
 const inertRuntime = { enabled: false, connection: "offline" as const, resyncedAt: null, store: emptyStore() };
 mock.module("@/hooks/useRuntime", () => ({
   ...actualRuntimeHooks,
@@ -28,6 +29,17 @@ mock.module("@/hooks/useRuntime", () => ({
   useRuntimeSession: () => null,
   useRuntimeReceiptsForArtifact: () => [],
   useRuntimeFlow: () => null,
+}));
+mock.module("@/hooks/useConversationCatalog", () => ({
+  useConversationCatalog: () => ({
+    items: [],
+    nextCursor: null,
+    total: 0,
+    loading: false,
+    error: false,
+    loadMore: () => {},
+    retry: () => {},
+  }),
 }));
 
 const { ProjectDashboard } = await import("@/components/ProjectDashboard");
@@ -66,7 +78,10 @@ const OVERRIDES: Record<string, unknown> = {
   ResizeObserver: class { observe() {} unobserve() {} disconnect() {} },
   IntersectionObserver: class { observe() {} unobserve() {} disconnect() {} takeRecords() { return []; } },
   // The board store and draft panes fetch on mount; keep those inert.
-  fetch: (async () => ({ ok: true, status: 200, json: async () => ({}), text: async () => "" })) as unknown as typeof fetch,
+  fetch: (async (input: string | URL | Request) => {
+    const body = String(input).startsWith("/api/conversations") ? { items: [], nextCursor: null } : {};
+    return { ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) };
+  }) as unknown as typeof fetch,
 };
 const HAS: Record<string, boolean> = {};
 const SAVED: Record<string, unknown> = {};
@@ -107,6 +122,7 @@ afterAll(async () => {
     else delete G[key];
   }
   mock.module("@/hooks/useRuntime", () => actualRuntimeHooks);
+  mock.module("@/hooks/useConversationCatalog", () => actualConversationCatalogHooks);
 });
 
 const WF_PANE = '[aria-label="Draft of a new workflow"]';
@@ -130,6 +146,7 @@ const dashboardProps = (project: string) => ({
   archived: false,
   catalogKnown: true,
   projectCwd: `/home/tester/Projects/${project}`,
+  catalogConversationCount: 0,
   onArchive: () => {},
   onUnarchive: () => {},
 });
@@ -480,7 +497,7 @@ test("closing a conversation card reports its path to the dashboard owner", asyn
     <ProjectDashboard
       {...dashboardProps(project)}
       files={[file]}
-      onConversationClose={(closedPath) => closed.push(closedPath)}
+      onCloseFile={(closedPath) => closed.push(closedPath)}
     />,
   ));
 

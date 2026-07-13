@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 import { Loader2, X } from "@/components/icons";
 import { useArchivedPaths } from "@/hooks/useArchivedPaths";
+import { useConversationCatalog } from "@/hooks/useConversationCatalog";
 import { useTimeline } from "@/hooks/useTimeline";
 import { useSwitchboardData, type SwitchboardItem } from "@/hooks/useSwitchboardData";
 import type { Flow } from "@/lib/flows/types";
@@ -25,6 +26,7 @@ interface Props {
   project: string;
   loaded: boolean;
   onOpenFile: (file: FileEntry) => void;
+  onOpenCatalogFile: (file: FileEntry) => void;
 }
 
 function toneFor(item: SwitchboardItem): SwitchCardTone {
@@ -84,7 +86,7 @@ function Section({
   );
 }
 
-export function Switchboard({ files, flows, project, loaded, onOpenFile }: Props) {
+export function Switchboard({ files, flows, project, loaded, onOpenFile, onOpenCatalogFile }: Props) {
   const { t } = useLocale();
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -95,6 +97,7 @@ export function Switchboard({ files, flows, project, loaded, onOpenFile }: Props
   const timeline = useTimeline(project, open);
   const { archivedPaths, archive, unarchive } = useArchivedPaths(files);
   const data = useSwitchboardData(files, timeline.events, query, now, archivedPaths, flows);
+  const catalogSearch = useConversationCatalog({ query, enabled: loaded && open && Boolean(query.trim()) });
   const cornerData = useSwitchboardData(files, [], "", now, archivedPaths, flows);
   const archivedItems = useMemo(
     () =>
@@ -160,6 +163,61 @@ export function Switchboard({ files, flows, project, loaded, onOpenFile }: Props
               </button>
             </header>
             <div className="min-h-0 flex-1 space-y-5 overflow-y-auto px-4 py-4">
+              {query.trim() ? (
+                <section className="mx-auto w-full max-w-[900px]">
+                  <div className="mb-2 flex items-baseline gap-2">
+                    <h2 className="text-[13px] font-bold">{t("switch.results")}</h2>
+                    <span className="text-[11px] font-semibold text-dim">{catalogSearch.total}</span>
+                  </div>
+                  <div className="space-y-1.5">
+                    {catalogSearch.items.map((file) => (
+                      <button
+                        key={file.path}
+                        type="button"
+                        className="flex min-h-11 w-full min-w-0 items-center gap-2 rounded-[8px] border border-line bg-panel px-3 text-left shadow-card hover:border-accent/40 hover:bg-bg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                        onClick={() => {
+                          onOpenCatalogFile(file);
+                          setOpen(false);
+                        }}
+                      >
+                        <span className="min-w-0 flex-1 truncate text-[12.5px] font-semibold text-ink">{cleanTitle(file.title, 100)}</span>
+                        <span className="max-w-[240px] shrink-0 truncate rounded-full border border-line bg-bg px-2 py-0.5 text-[10.5px] font-semibold text-dim">{file.project}</span>
+                      </button>
+                    ))}
+                  </div>
+                  {catalogSearch.loading && !catalogSearch.items.length ? (
+                    <div className="flex items-center justify-center gap-2 pt-[18vh] text-[13px] font-semibold text-dim">
+                      <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> {t("common.loading")}
+                    </div>
+                  ) : null}
+                  {catalogSearch.error ? (
+                    <div className="flex min-h-11 items-center justify-center gap-3 pt-4 text-[13px] font-semibold text-err">
+                      <span>{t("list.failed")}</span>
+                      <button
+                        type="button"
+                        className="min-h-11 rounded-[8px] border border-line bg-panel px-4 font-bold text-ink hover:border-accent/40 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                        onClick={catalogSearch.retry}
+                      >
+                        {t("list.retry")}
+                      </button>
+                    </div>
+                  ) : null}
+                  {!catalogSearch.loading && !catalogSearch.error && !catalogSearch.items.length ? (
+                    <div className="pt-[18vh] text-center text-[13px] font-semibold text-dim">{t("common.nothingFound")}</div>
+                  ) : null}
+                  {catalogSearch.nextCursor && !catalogSearch.error ? (
+                    <button
+                      type="button"
+                      className="mt-3 flex min-h-11 w-full items-center justify-center rounded-[8px] border border-line bg-panel px-4 text-[12.5px] font-bold text-ink hover:border-accent/40 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60"
+                      disabled={catalogSearch.loading}
+                      onClick={catalogSearch.loadMore}
+                    >
+                      {catalogSearch.loading ? t("common.loading") : t("list.loadMore")}
+                    </button>
+                  ) : null}
+                </section>
+              ) : (
+                <>
               <Section title={t("switch.waiting")} items={data.waiting} size="large" currentProject={project} onOpenFile={openFile} onArchive={archiveFile} />
               <Section title={t("switch.working")} items={data.working} size="large" currentProject={project} onOpenFile={openFile} onArchive={archiveFile} />
               <Section title={t("switch.recent")} items={data.recent} size="small" currentProject={project} onOpenFile={openFile} onArchive={archiveFile} />
@@ -219,6 +277,8 @@ export function Switchboard({ files, flows, project, loaded, onOpenFile }: Props
                   ) : null}
                 </section>
               ) : null}
+                </>
+              )}
             </div>
           </div>
         </div>

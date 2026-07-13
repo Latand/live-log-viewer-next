@@ -351,15 +351,17 @@ export function createBoardStore(options: BoardStoreOptions): BoardStore {
   };
 
   /* Flush any cross-project opens queued for this project. A queued open is an
-     explicit user restore: it lifts the tombstone and places the node — a
-     standalone conversation as a manual node, a connected child expanded below
-     its parent. Runs after load so it replays onto the server's arrangement. */
+     explicit user restore: it selects the scheme, lifts the tombstone and
+     places the node — a standalone conversation as a manual node, a connected
+     child expanded below its parent. Runs after load so it replays onto the
+     server's arrangement. */
   const drainOpens = () => {
     if (!loaded || disposed) return;
     const open = pendingOpens.get(project);
     if (!open || (open.manual.length === 0 && open.expanded.length === 0)) return;
     pendingOpens.delete(project);
     const restores: BoardMutationV1[] = [
+      { kind: "set-presentation", viewMode: "scheme" },
       ...open.manual.map((path) => ({ kind: "restore", path, placement: "manual" }) as const),
       ...open.expanded.map((path) => ({ kind: "restore", path, placement: "expanded" }) as const),
     ];

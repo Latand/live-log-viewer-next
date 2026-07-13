@@ -439,9 +439,17 @@ export function resolveProjectView({
   hasArchiveNodes: boolean;
   hasHistoryRows: boolean;
 }): ProjectView {
+  const schemeAvailable = hasNodes || hasArchiveNodes;
+  /* An explicit toggle choice wins whenever the chosen view has something to
+     show — the Схема/Список control must switch reliably even while the scheme
+     still holds live nodes (issue #177 item 7). Previously an active project was
+     pinned to the scheme regardless of a saved «list» selection, so the toggle
+     read as unresponsive. */
+  if (preferredView === "list" && hasHistoryRows) return "list";
+  if (preferredView === "scheme" && schemeAvailable) return "scheme";
+  /* No usable preference: an active project opens on the scheme, an otherwise
+     quiet one with history opens on the list. */
   if (hasNodes) return "scheme";
-  const preferred = preferredView ?? "list";
-  if (preferred === "scheme") return hasArchiveNodes ? "scheme" : "list";
   return hasHistoryRows ? "list" : "scheme";
 }
 

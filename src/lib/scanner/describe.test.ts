@@ -11,6 +11,7 @@ import {
   projectForCwd,
   projectFromSlug,
   projectRootForCwd,
+  searchTextForTranscript,
 } from "./describe";
 
 const SANDBOX = fs.mkdtempSync(path.join(os.tmpdir(), "llv-describe-test-"));
@@ -43,6 +44,29 @@ test("parseWorktreeGitdir rejects gitdirs that are not linked worktrees", () => 
   expect(parseWorktreeGitdir("/home/u/sub", "not a git file")).toBeNull();
   /* "worktrees" segment without a .git parent is another repo layout, not a linked checkout */
   expect(parseWorktreeGitdir("/home/u/sub", "gitdir: /home/u/worktrees/x")).toBeNull();
+});
+
+test("search text hydration retries after a transient filesystem failure", () => {
+  const transcript = path.join(SANDBOX, "transient-search.jsonl");
+  fs.writeFileSync(transcript, JSON.stringify({ type: "user", message: { content: "Recovered search prompt" } }) + "\n");
+  const size = fs.statSync(transcript).size;
+  const originalOpen = fs.openSync;
+  let attempts = 0;
+  fs.openSync = ((...args: Parameters<typeof fs.openSync>) => {
+    attempts += 1;
+    if (attempts === 1) {
+      const error = new Error("too many open files") as NodeJS.ErrnoException;
+      error.code = "EMFILE";
+      throw error;
+    }
+    return originalOpen(...args);
+  }) as typeof fs.openSync;
+  try {
+    expect(() => searchTextForTranscript(transcript, size, "claude")).toThrow("too many open files");
+    expect(searchTextForTranscript(transcript, size, "claude").firstPrompt).toBe("Recovered search prompt");
+  } finally {
+    fs.openSync = originalOpen;
+  }
 });
 
 test("a deleted codex worktree still groups under its parent repo project", () => {
@@ -306,4 +330,23 @@ test("stale flow slug keeps orphan background tasks under the saved project", ()
   const meta = describe("claude-tasks", root, task, fs.statSync(task));
   expect(meta.project).toBe(project);
   expect(meta.worktree).toBe("live-log-viewer-workflows");
+});
+
+test("conversation prompts stay in the search-only metadata path", () => {
+  const root = path.join(SANDBOX, "codex-first-prompt");
+  const transcript = path.join(root, "session.jsonl");
+  fs.mkdirSync(root, { recursive: true });
+  fs.writeFileSync(transcript, JSON.stringify({
+    type: "event_msg",
+    payload: { type: "user_message", message: "Investigate cobalt orchard" },
+  }) + "\n");
+
+  const stat = fs.statSync(transcript);
+  expect(describe("codex-sessions", root, transcript, stat)).toEqual(expect.objectContaining({
+    title: "Investigate cobalt orchard",
+  }));
+  expect(searchTextForTranscript(transcript, stat.size, "codex")).toEqual({
+    title: "Investigate cobalt orchard",
+    firstPrompt: "Investigate cobalt orchard",
+  });
 });

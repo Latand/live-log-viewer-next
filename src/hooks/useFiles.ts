@@ -44,7 +44,7 @@ export interface FilesData {
 const HEALTHY_SYSTEM = { tmux: { status: "healthy" as const } };
 const EMPTY: FilesData = { files: [], pinOverlayPaths: [], requestScope: null, projectCatalog: [], projectCwds: {}, flows: [], pipelines: [], workflows: [], tasks: [], systemHealth: HEALTHY_SYSTEM, conversationAliases: {}, loaded: false };
 
-export function filesApiUrl(pinnedPath?: string | null): string {
+export function filesApiUrl(_project?: string | null, pinnedPath?: string | null): string {
   const params: string[] = [];
   /* A pending legacy `#f=` target: the scanner keeps this exact transcript in
      the capped feed so the deep link can resolve its conversation id even
@@ -153,7 +153,7 @@ export function createFilesClientCache(fetcher: FilesFetcher): FilesClientCache 
 
   const performRevalidate = async (pinnedPath?: string | null, revision?: number): Promise<FilesData> => {
     const generation = ++requestedGeneration;
-    const url = filesApiUrl(pinnedPath);
+    const url = filesApiUrl(undefined, pinnedPath);
     const representation = representations.get(url);
     const headers = filesRequestHeaders(representation?.etag ?? "", revision);
     const response = await fetcher(url, headers ? { headers } : undefined);
@@ -206,7 +206,7 @@ export function filesPollCadence(connection: "live" | "reconnecting" | "degraded
 }
 
 /** Polls /api/files. Keeps the last good list on transient fetch errors. */
-export function useFiles(pinnedPath?: string | null): FilesData {
+export function useFiles(_project?: string | null, pinnedPath?: string | null): FilesData {
   const [data, setData] = useState<FilesData>(() => filesClientCache.read());
   useEffect(() => {
     let alive = true;

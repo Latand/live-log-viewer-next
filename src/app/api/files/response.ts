@@ -6,6 +6,7 @@ import { NextResponse } from "next/server";
 
 import { listFilesWithProjectCatalog } from "@/lib/scanner";
 import { agentRegistry, conversationLookupFromSnapshot } from "@/lib/agent/registry";
+import { conversationCatalogSnapshot } from "@/lib/scanner/conversationCatalog";
 import { pidAlive, readPpid } from "@/lib/scanner/process";
 import { loadFlows } from "@/lib/flows/store";
 import { loadPipelines } from "@/lib/pipelines/store";
@@ -22,13 +23,47 @@ import { tmuxEndpointHealth } from "@/lib/tmux";
 import { claudeProjectRootFor, codexSessionRootFor } from "@/lib/scanner/roots";
 import { projectRootForCwd } from "@/lib/scanner/describe";
 import { projectDirectoryFallbacks } from "@/lib/scanner/projectDirectories";
-import type { FilesResponse } from "@/lib/types";
+import type { FilesResponse, ProjectCatalogEntry } from "@/lib/types";
 
 interface FilesRouteDependencies {
   listFilesWithProjectCatalog: (
     selectedProject: string | undefined,
     pinnedPath: string | undefined,
   ) => Promise<Awaited<ReturnType<typeof listFilesWithProjectCatalog>> & { pinOverlayPaths?: string[] }>;
+}
+
+function projectedProjectCatalog(
+  fallback: ProjectCatalogEntry[],
+  snapshot: ReturnType<ReturnType<typeof agentRegistry>["snapshot"]>,
+): ProjectCatalogEntry[] {
+  const source = conversationCatalogSnapshot();
+  if (!source.length) return fallback;
+  const projectByPath = new Map<string, string>();
+  const archivedPaths = new Set<string>();
+  for (const conversation of Object.values(snapshot.conversations)) {
+    const latest = conversation.generations.at(-1);
+    if (!latest) continue;
+    if (latest.launchProfile.project) projectByPath.set(latest.path, latest.launchProfile.project);
+    for (const generation of conversation.generations) {
+      if (generation.path !== latest.path) archivedPaths.add(generation.path);
+    }
+    for (const pathname of conversation.continuityPaths) {
+      if (pathname !== latest.path) archivedPaths.add(pathname);
+    }
+  }
+  const groups = new Map<string, ProjectCatalogEntry>();
+  const fallbackRoots = new Map(fallback.map((entry) => [entry.project, entry.projectRoot] as const));
+  for (const entry of source) {
+    if (archivedPaths.has(entry.path)) continue;
+    const project = projectByPath.get(entry.path) ?? entry.project;
+    const group = groups.get(project) ?? { project, smt: 0, conversations: 0 };
+    group.smt = Math.max(group.smt, entry.mtime);
+    group.conversations += 1;
+    const projectRoot = fallbackRoots.get(entry.project);
+    if (!group.projectRoot && projectRoot) group.projectRoot = projectRoot;
+    groups.set(project, group);
+  }
+  return [...groups.values()].sort((left, right) => right.smt - left.smt || left.project.localeCompare(right.project));
 }
 
 export async function buildFilesResponse(request: Request, dependencies: FilesRouteDependencies): Promise<NextResponse> {
@@ -261,9 +296,10 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
     console.error("[files] pipelines store unreadable; serving without pipelines", error);
   }
   const projected = projectRateLimitReadModel(files, loadFlows(), registrySnapshot);
+  const effectiveProjectCatalog = projectedProjectCatalog(projectCatalog, registrySnapshot);
   const projectCwds = projectDirectoryFallbacks([
     ...projected.files.map((file) => file.project),
-    ...projectCatalog.map((entry) => entry.project),
+    ...effectiveProjectCatalog.map((entry) => entry.project),
     ...projected.flows.map((flow) => flow.project),
     ...pipelines.map((pipeline) => pipeline.project),
     ...workflows.map((workflow) => workflow.project),
@@ -272,7 +308,7 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
   const body = JSON.stringify({
     files: projected.files,
     ...(responsePinOverlayPaths.size ? { pinOverlayPaths: [...responsePinOverlayPaths] } : {}),
-    projectCatalog,
+    projectCatalog: effectiveProjectCatalog,
     ...(Object.keys(projectCwds).length ? { projectCwds } : {}),
     flows: projected.flows,
     pipelines,

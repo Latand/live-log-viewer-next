@@ -11,10 +11,12 @@ import {
 
 import { createFilesClientCache, filesApiUrl, filesPollCadence, filesRequestHeaders } from "./useFiles";
 
-test("filesApiUrl always addresses the global snapshot", () => {
+test("filesApiUrl keeps project switches on the bounded scheme feed", () => {
   expect(filesApiUrl()).toBe("/api/files");
   expect(filesApiUrl(null)).toBe("/api/files");
-  expect(filesApiUrl("/sessions/pinned.jsonl")).toBe("/api/files?path=%2Fsessions%2Fpinned.jsonl");
+  expect(filesApiUrl("stikon-dispatcher")).toBe("/api/files");
+  expect(filesApiUrl("space project")).toBe("/api/files");
+  expect(filesApiUrl("space project", "/sessions/quiet.jsonl")).toBe("/api/files?path=%2Fsessions%2Fquiet.jsonl");
 });
 
 test("global client cache serves stale rows while revalidation patches changed files", async () => {

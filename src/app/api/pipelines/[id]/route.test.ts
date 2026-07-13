@@ -9,16 +9,25 @@ mock.module("@/lib/pipelines/engine", () => ({
   patchPipeline: async (id: string, body: unknown) => id === pipeline.id ? { pipeline: { ...pipeline, body } } : { error: "pipeline not found", status: 404 },
 }));
 
-const { PATCH } = await import("./route");
+const { DELETE, PATCH } = await import("./route");
 
 test("pipeline PATCH accepts the control actions including override-stage", async () => {
-  for (const action of ["pause", "resume", "retry-stage", "skip-stage", "override-stage", "close"]) {
+  for (const action of ["start", "update-draft", "add-stage", "remove-stage", "reorder-stage", "pause", "resume", "retry-stage", "skip-stage", "override-stage", "delete", "close"]) {
     const response = await PATCH(
       new NextRequest("http://127.0.0.1/api/pipelines/pipeline-1", { method: "PATCH", headers: { host: "127.0.0.1" }, body: JSON.stringify({ action }) }),
       { params: Promise.resolve({ id: "pipeline-1" }) },
     );
     expect(response.status).toBe(200);
   }
+});
+
+test("pipeline DELETE discards a draft through the delete action", async () => {
+  const response = await DELETE(
+    new NextRequest("http://127.0.0.1/api/pipelines/pipeline-1", { method: "DELETE", headers: { host: "127.0.0.1" } }),
+    { params: Promise.resolve({ id: "pipeline-1" }) },
+  );
+  expect(response.status).toBe(200);
+  expect(await response.json()).toEqual({ ok: true, pipeline: { ...pipeline, body: { action: "delete" } } });
 });
 
 test("pipeline PATCH rejects unknown actions", async () => {
