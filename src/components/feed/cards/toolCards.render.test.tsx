@@ -4,7 +4,8 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { translate } from "@/lib/i18n";
 
 import { diffFromApplyPatch } from "../diff";
-import type { ToolEvent } from "../parse";
+import type { CmdGroupItem, ToolEvent } from "../parse";
+import { CmdGroupCard } from "./CmdGroupCard";
 import { DiffCard } from "./DiffCard";
 import { OutputPreview } from "./OutputPreview";
 import { ToolCard } from "./ToolCard";
@@ -120,6 +121,64 @@ test("output preview shows content with an accessible copy control", () => {
   expect(html).toContain("line1");
   expect(html).toContain(en("tools.copyOutput"));
   expect(html).toContain("overflow");
+});
+
+function cmdGroup(calls: ToolEvent[]): CmdGroupItem {
+  const byTool: Record<string, number> = {};
+  let okCount = 0;
+  let errCount = 0;
+  for (const call of calls) {
+    byTool[call.tool] = (byTool[call.tool] ?? 0) + 1;
+    if (call.status === "ok") okCount += 1;
+    else if (call.status === "err") errCount += 1;
+  }
+  return {
+    kind: "cmd-group",
+    ids: calls.map((c) => c.id),
+    calls,
+    t0: calls[0]?.ts,
+    t1: calls.at(-1)?.ts,
+    byTool,
+    okCount,
+    errCount,
+    hasErr: errCount > 0,
+  };
+}
+
+test("a collapsed cmd-group keeps its children's bodies lazily unmounted", () => {
+  const html = renderToStaticMarkup(
+    <CmdGroupCard
+      item={cmdGroup([
+        toolEvent({ id: "a", summary: "ls -la", outputPreview: "total 8\nfile.ts" }),
+        toolEvent({ id: "b", tool: "Read", icon: "file", summary: "Read a.ts", outputPreview: "line-a\nline-b" }),
+      ])}
+    />,
+  );
+  // Both child summaries render as quiet lines.
+  expect(html).toContain("ls -la");
+  expect(html).toContain("Read a.ts");
+  // Their bodies (output, raw-record) stay out of the DOM until a child expands.
+  expect(html).not.toContain("total 8");
+  expect(html).not.toContain("line-a");
+  expect(html).not.toContain(en("tools.rawRecord"));
+});
+
+test("a cmd-group carrying an error opens and mounts the failing child's full body", () => {
+  const html = renderToStaticMarkup(
+    <CmdGroupCard
+      item={cmdGroup([
+        toolEvent({ id: "a", summary: "ls -la" }),
+        toolEvent({ id: "b", summary: "bun test", status: "err", statusLabel: "exit 1", open: true, outputPreview: "boom" }),
+      ])}
+    />,
+  );
+  // The failing line is danger and never silenced.
+  expect(html).toContain("exit 1");
+  expect(html).toContain("text-danger");
+  // The opened error child mounts its body — a grouped call now exposes the same
+  // raw-record control a standalone line does.
+  expect(html).toContain("boom");
+  expect(html).toContain(en("tools.rawRecord"));
 });
 
 test("an orchestration row renders nested children and the meaningful outer summary", () => {

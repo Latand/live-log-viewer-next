@@ -7,7 +7,7 @@ export function SysMsgCard({ label, text }: { label: string; text: string }) {
   const kb = text.length >= 2048 ? `${(text.length / 1024).toFixed(1)} ${tr("common.kb")}` : tr("common.chars", { n: text.length });
   return (
     <details className="group ml-9">
-      <summary className="flex cursor-pointer list-none items-center gap-1.5 rounded-control py-0.5 text-label text-muted hover:bg-sunken [&::-webkit-details-marker]:hidden">
+      <summary className="flex cursor-pointer list-none items-center gap-1.5 rounded-control py-0.5 text-label text-muted hover:bg-sunken [@media(pointer:coarse)]:min-h-11 [&::-webkit-details-marker]:hidden">
         <ChevronRight className="h-3.5 w-3.5 shrink-0 transition-transform group-open:rotate-90" aria-hidden />
         <span className="truncate text-secondary">
           {tr("render.system")} · {kb}

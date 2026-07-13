@@ -145,7 +145,7 @@ export const FeedItem = memo(function FeedItem({ item, speakText }: { item: Item
     const long = item.text.length > 150;
     return (
       <details className="my-0.5 ml-9 text-label italic text-muted">
-        <summary className={`flex list-none items-center gap-1.5 truncate ${long ? "cursor-pointer" : ""}`} title={tr("render.reasoning")}>
+        <summary className={`flex list-none items-center gap-1.5 truncate ${long ? "cursor-pointer [@media(pointer:coarse)]:min-h-11" : ""}`} title={tr("render.reasoning")}>
           <Brain className="h-3.5 w-3.5 shrink-0" aria-hidden />
           <span className="truncate">
             {item.text.slice(0, 150)}

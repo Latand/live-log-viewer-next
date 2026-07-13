@@ -463,7 +463,7 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
                 <span
                   role="status"
                   aria-live="polite"
-                  className={`inline-flex shrink-0 items-center gap-0.5 rounded-full px-1.5 py-0.5 text-[9px] font-bold ${receipt.className}`}
+                  className={`inline-flex shrink-0 items-center gap-0.5 rounded-full px-1.5 py-0.5 text-caption font-bold ${receipt.className}`}
                 >
                   {receipt.label}
                 </span>
@@ -485,12 +485,12 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
                 </button>
               ) : null}
               <span
-                className="min-w-0 max-w-[85%] truncate text-[11px] text-secondary"
+                className="min-w-0 max-w-[85%] truncate text-label text-secondary"
                 title={entry.text}
               >
                 {entry.text}
               </span>
-              <span className="inline-flex shrink-0 items-center gap-0.5 text-[9.5px] tabular-nums text-muted">
+              <span className="inline-flex shrink-0 items-center gap-0.5 text-caption tabular-nums text-muted">
                 {entry.via === "spawn" ? <Play className="h-2.5 w-2.5" aria-hidden /> : <ArrowRight className="h-2.5 w-2.5" aria-hidden />}
                 {hhmm(entry.at)}
               </span>

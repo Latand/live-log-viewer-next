@@ -196,7 +196,7 @@ export function ComposerBar({
           placeholder={placeholder}
           aria-label={textareaAriaLabel}
           disabled={fieldsDisabled}
-          className="min-w-0 flex-1 resize-none overflow-y-auto self-center bg-transparent py-1 text-[12.5px] leading-[18px] text-primary placeholder:text-muted focus-visible:outline-none disabled:opacity-60"
+          className="min-w-0 flex-1 resize-none overflow-y-auto self-center bg-transparent py-1 text-ui leading-[18px] text-primary placeholder:text-muted focus-visible:outline-none disabled:opacity-60"
         />
         <MicButtonView {...dictation} busy={voiceSending} onText={insertSpoken} />
         <span
