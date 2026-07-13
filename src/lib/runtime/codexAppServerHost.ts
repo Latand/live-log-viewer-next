@@ -198,6 +198,7 @@ export class CodexAppServerHost implements EngineHost {
   private readonly pending = new Map<number, PendingRpc>();
   private readonly subscribers = new Set<Subscriber>();
   private readonly events: RuntimeEvent[] = [];
+  private readonly confirmedDeliveries = new Map<string, DeliveryReceipt>();
   private readonly attentions = new Map<string, PendingAttention>();
   private readonly stateListeners = new Set<(state: HostState) => void>();
   private readonly preIdentityEvents: UnsequencedEvent[] = [];
@@ -218,6 +219,7 @@ export class CodexAppServerHost implements EngineHost {
   private releasePromise: Promise<void> | null = null;
   private writerFence: (() => boolean) | null = null;
   private ledgerFailed = false;
+  private failure: Error | null = null;
   private readonly reapedPromise: Promise<void>;
   private resolveReaped!: () => void;
 
@@ -296,6 +298,7 @@ export class CodexAppServerHost implements EngineHost {
       }
       provisional.identity.threadId = identity.threadId;
       provisional.identity.path = identity.path;
+      provisional.rememberConfirmedDeliveries(result);
       provisional.restoreEvents();
       if (threadId) provisional.reconcileThreadHistory(result);
       provisional.flushPreIdentityEvents();
@@ -346,6 +349,8 @@ export class CodexAppServerHost implements EngineHost {
       return { outcome: "rejected", reason: "dead-host" };
     }
     if (!entry.id || !entry.text) throw new Error("queue entry id and text are required");
+    const confirmed = await this.confirmedDelivery(entry.id);
+    if (confirmed) return confirmed;
     const currentTurn = this.activeTurnId;
     if (entry.expectedTurnId !== undefined && entry.expectedTurnId !== currentTurn) {
       return { outcome: "rejected", reason: "stale-turn" };
@@ -613,6 +618,38 @@ export class CodexAppServerHost implements EngineHost {
     }
   }
 
+  private rememberConfirmedDeliveries(result: unknown): void {
+    for (const turn of resumedTurns(result)) {
+      const turnId = stringField(turn, "id");
+      if (!turnId || !Array.isArray(turn.items)) continue;
+      for (const item of turn.items) this.rememberConfirmedDelivery(turnId, item);
+    }
+  }
+
+  private async confirmedDelivery(entryId: string): Promise<DeliveryReceipt | null> {
+    const known = this.confirmedDeliveries.get(entryId);
+    if (known) return known;
+    let thread: unknown;
+    try {
+      thread = await this.rpc("thread/read", { threadId: this.identity.threadId, includeTurns: true });
+    } catch (error) {
+      const message = safeError(error);
+      if (/not materialized yet/i.test(message) && /before first user message/i.test(message)) return null;
+      throw error;
+    }
+    if (this.dead) throw new Error(safeError(this.failure ?? "Codex app-server host is unavailable"));
+    this.rememberConfirmedDeliveries(thread);
+    return this.confirmedDeliveries.get(entryId) ?? null;
+  }
+
+  private rememberConfirmedDelivery(turnId: string, value: unknown): void {
+    const item = record(value);
+    if (stringField(item, "type") !== "userMessage") return;
+    const clientId = stringField(item, "clientId");
+    if (!clientId) return;
+    this.confirmedDeliveries.set(clientId, { outcome: "turn-started", turnId });
+  }
+
   private flushPreIdentityEvents(): void {
     for (const event of this.preIdentityEvents.splice(0)) this.emit(event);
   }
@@ -748,6 +785,7 @@ export class CodexAppServerHost implements EngineHost {
       return;
     }
     if ((method === "item/started" || method === "item/completed") && "item" in params) {
+      if (method === "item/completed" && turnId) this.rememberConfirmedDelivery(turnId, params.item);
       this.emit({ kind: "item", turnId: turnId ?? this.activeTurnId, item: params.item, phase: method === "item/started" ? "started" : "completed" });
       return;
     }
@@ -770,6 +808,7 @@ export class CodexAppServerHost implements EngineHost {
   private fail(error: Error, activeFlags: string[] = []): void {
     if (this.dead || this.released) return;
     this.dead = true;
+    this.failure = error;
     this.activeTurnId = null;
     this.rejectPendingAnswers(error);
     this.attentions.clear();
@@ -786,6 +825,7 @@ export class CodexAppServerHost implements EngineHost {
   private failWithoutLedger(error: Error): void {
     if (this.dead || this.released) return;
     this.dead = true;
+    this.failure = error;
     this.engineStatus = "dead";
     this.activeFlags = [];
     this.activeTurnId = null;

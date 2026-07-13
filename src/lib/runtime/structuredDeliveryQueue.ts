@@ -121,8 +121,8 @@ export class StructuredDeliveryQueue {
       if (!host) return;
       const health = await host.health();
       if (health.status === "dead" || health.status === "unhosted") {
-        await this.port.transition(effect.operationId, "failed", { reason: "dead-host" });
-        continue;
+        await this.port.transition(effect.operationId, "queued", { reason: "dead-host" });
+        return;
       }
       const maySteer = health.status === "active"
         && (effect.kind === "steer" || effect.policy === "steer-if-active");
@@ -137,7 +137,13 @@ export class StructuredDeliveryQueue {
       try {
         receipt = await host.send(entry);
       } catch (error) {
-        await this.port.transition(effect.operationId, "failed", { reason: failureReason(error) });
+        const reason = failureReason(error);
+        const afterFailure = await host.health().catch(() => null);
+        if (!afterFailure || afterFailure.status === "dead" || afterFailure.status === "unhosted") {
+          await this.port.transition(effect.operationId, "queued", { reason });
+          return;
+        }
+        await this.port.transition(effect.operationId, "failed", { reason });
         continue;
       }
       if (receipt.outcome === "rejected") {

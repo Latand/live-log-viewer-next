@@ -93,6 +93,71 @@ test("structured delivery surfaces a host actuation failure", async () => {
   ]);
 });
 
+test("a host crash leaves the conversation head queued for recovery", async () => {
+  const sent: string[] = [];
+  const transitions: Array<[string, string, string | null | undefined]> = [];
+  let dead = false;
+  const crashHost = host(async (entry) => {
+    sent.push(entry.id);
+    dead = true;
+    throw new Error("engine child exited");
+  });
+  crashHost.health = async () => ({ ...idleState(), status: dead ? "dead" : "idle" });
+  const queue = new StructuredDeliveryQueue({
+    effects: async () => [
+      {
+        id: "effect:op-crash",
+        kind: "runtime.send",
+        eventSeq: 22,
+        payload: { operationId: "op-crash", conversationId: "conversation-one", text: "first", policy: "queue" },
+      },
+      {
+        id: "effect:op-after-crash",
+        kind: "runtime.send",
+        eventSeq: 23,
+        payload: { operationId: "op-after-crash", conversationId: "conversation-one", text: "second", policy: "queue" },
+      },
+    ],
+    transition: async (operationId, status, details) => {
+      transitions.push([operationId, status, details?.reason]);
+    },
+  }, () => crashHost);
+
+  await queue.drain();
+
+  expect(sent).toEqual(["op-crash"]);
+  expect(transitions).toEqual([
+    ["op-crash", "delivering", undefined],
+    ["op-crash", "queued", "engine child exited"],
+  ]);
+});
+
+test("an unavailable host keeps the conversation head queued", async () => {
+  const transitions: Array<[string, string, string | null | undefined]> = [];
+  let sends = 0;
+  const deadHost = host(async () => {
+    sends += 1;
+    return { outcome: "turn-started", turnId: "unexpected" };
+  });
+  deadHost.health = async () => ({ ...idleState(), status: "dead" });
+  const queue = new StructuredDeliveryQueue({
+    effects: async () => [{
+      id: "effect:op-waiting",
+      kind: "runtime.send",
+      eventSeq: 24,
+      payload: { operationId: "op-waiting", conversationId: "conversation-one", text: "hello", policy: "queue" },
+    }],
+    transition: async (operationId, status, details) => {
+      transitions.push([operationId, status, details?.reason]);
+    },
+  }, () => deadHost);
+
+  await queue.drain();
+
+  expect(sends).toBe(0);
+  expect(transitions).toEqual([["op-waiting", "queued", "dead-host"]]);
+});
+
 test("structured delivery fails image effects before engine actuation", async () => {
   const transitions: Array<[string, string, string | null | undefined]> = [];
   let sends = 0;

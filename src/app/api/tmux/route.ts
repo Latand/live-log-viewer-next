@@ -16,7 +16,6 @@ import { listFiles } from "@/lib/scanner";
 import { pathAllowed } from "@/lib/scanner/roots";
 import { allowedKillTarget, consumeKillTarget } from "@/lib/resources";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
-import { enqueueStructuredMessage } from "@/lib/runtime/structuredMessageDelivery";
 import {
   captureTmuxAttachReference,
   collectImagePayloads,
@@ -224,6 +223,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<SendResponse 
   }
 
   if (process.env.LLV_STRUCTURED_HOSTS === "1") {
+    const { enqueueStructuredMessage } = await import("@/lib/runtime/structuredMessageDelivery");
     const structured = await enqueueStructuredMessage({
       path: filePath,
       ...(conversationId ? { conversationId } : {}),

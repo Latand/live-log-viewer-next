@@ -68,9 +68,6 @@ mock.module("@/lib/resources", () => ({
   allowedKillTarget: (target: string) => (target === "agents:9.0" ? resourceTarget : null),
   consumeKillTarget: () => {},
 }));
-mock.module("@/lib/runtime/structuredMessageDelivery", () => ({
-  enqueueStructuredMessage: async () => null,
-}));
 mock.module("@/lib/scanner/roots", () => ({ pathAllowed: (pathname: string) => pathname.startsWith("/allowed/") }));
 mock.module("@/lib/tmux", () => ({
   captureTmuxAttachReference: (value: Record<string, unknown>) => ({ ...value, tmuxServerStartIdentity: "900:one", paneStartIdentity: "100:one" }),

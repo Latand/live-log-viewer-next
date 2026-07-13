@@ -51,6 +51,8 @@ class FakeAppServer extends EventEmitter {
   readonly requests: Array<Record<string, unknown>> = [];
   readonly signals: NodeJS.Signals[] = [];
   autoResolveServerRequests = true;
+  readTurns: unknown[] | null = null;
+  readError: string | null = null;
   private readonly serverRequestIds = new Set<string | number>();
   private turn = 0;
 
@@ -121,6 +123,16 @@ class FakeAppServer extends EventEmitter {
         },
       });
     }
+    if (method === "thread/read") {
+      if (this.readError) return this.respondError(message.id, this.readError);
+      return this.respond(message.id, {
+        thread: {
+          id: this.threadId,
+          path: `/sessions/${this.threadId}.jsonl`,
+          turns: this.readTurns ?? this.turns,
+        },
+      });
+    }
     if (method === "turn/start") {
       const turnId = `turn-${++this.turn}`;
       this.respond(message.id, { turn: { id: turnId } });
@@ -133,6 +145,10 @@ class FakeAppServer extends EventEmitter {
 
   private respond(id: number, result: unknown): void {
     this.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id, result })}\n`);
+  }
+
+  private respondError(id: number, message: string): void {
+    this.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id, error: { message } })}\n`);
   }
 }
 
@@ -314,6 +330,43 @@ describe("CodexAppServerHost", () => {
     });
     expect((await replay.next()).value).toEqual({ kind: "turn-ended", turnId: "history-turn", status: "completed", seq: 8 });
     expect(() => host.attach(0)).toThrow("runtime replay begins at sequence 6");
+    await host.release();
+  });
+
+  test("confirms a retried queue entry from its persisted client id", async () => {
+    const server = new FakeAppServer("delivery-thread", "delivery-thread");
+    server.readTurns = [{
+      id: "persisted-turn",
+      status: "completed",
+      items: [{ type: "userMessage", clientId: "operation-recovered", content: [{ type: "text", text: "hello" }] }],
+    }];
+    const host = await CodexAppServerHost.adopt("delivery-thread", {
+      cwd: "/repo",
+      eventStore: new MemoryEventStore(),
+      spawnProcess: fakeSpawn(server),
+    });
+
+    expect(await host.send({ id: "operation-recovered", text: "hello" })).toEqual({
+      outcome: "turn-started",
+      turnId: "persisted-turn",
+    });
+    expect(server.requests.some((request) => request.method === "turn/start" || request.method === "turn/steer")).toBeFalse();
+    await host.release();
+  });
+
+  test("starts the first delivery when Codex reports an unmaterialized thread", async () => {
+    const server = new FakeAppServer("fresh-delivery-thread");
+    server.readError = "thread fresh-delivery-thread is not materialized yet; includeTurns is unavailable before first user message";
+    const host = await CodexAppServerHost.start({
+      cwd: "/repo",
+      eventStore: new MemoryEventStore(),
+      spawnProcess: fakeSpawn(server),
+    });
+
+    expect(await host.send({ id: "operation-first", text: "hello" })).toEqual({
+      outcome: "turn-started",
+      turnId: "turn-1",
+    });
     await host.release();
   });
 
