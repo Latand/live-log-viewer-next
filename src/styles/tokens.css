@@ -10,7 +10,12 @@
    dark theme land. Dark values are NOT wired here yet (Slice 3) — this file is
    the light-theme role table plus the structural tokens. */
 
-@theme {
+/* `@theme static` (not plain `@theme`): a production `next build` tree-shakes
+   unused custom properties out of a plain `@theme`, which would drop the tokens
+   later slices reference by name before any utility uses them (e.g.
+   `--surface-raised`, `--color-warning-soft`). `static` emits the whole token
+   contract to `:root` unconditionally. */
+@theme static {
   /* ── §1.1 Type ─────────────────────────────────────────────────────────── */
   --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto,
     sans-serif;
@@ -35,19 +40,18 @@
   --radius-surface: 12px; /* cards, panes, menus, sheets, tool bodies   */
 
   /* ── §1.4 Surfaces & elevation ─────────────────────────────────────────── */
-  --color-canvas: #f3f3f6; /* app background; darker than before so cards lift */
-  --color-card: #ffffff; /*   the ONE primary surface (panes, rows, composer) */
-  --color-sunken: #f7f7fa; /* code blocks, collapsed strips, canvas bands     */
-  --color-raised: #ffffff; /* menus, popovers, sheets, toasts                 */
+  /* The doc-canonical `--surface-*` names carry the literal values (design doc
+     §1.4); the `--color-*` forms below alias them so Tailwind still emits
+     bg-canvas/bg-card/bg-sunken/bg-raised utilities from the color namespace. */
+  --surface-canvas: #f3f3f6; /* app background; darker than before so cards lift */
+  --surface-card: #ffffff; /*   the ONE primary surface (panes, rows, composer) */
+  --surface-sunken: #f7f7fa; /* code blocks, collapsed strips, canvas bands     */
+  --surface-raised: #ffffff; /* menus, popovers, sheets, toasts                 */
 
-  /* Doc-canonical `--surface-*` names (design doc §1.4, referenced by §2/§3):
-     the `--color-*` forms above exist so Tailwind emits bg-canvas/bg-card/…
-     utilities; these aliases let later slices reference the surfaces by the
-     names the doc uses (`var(--surface-card)`). */
-  --surface-canvas: var(--color-canvas);
-  --surface-card: var(--color-card);
-  --surface-sunken: var(--color-sunken);
-  --surface-raised: var(--color-raised);
+  --color-canvas: var(--surface-canvas);
+  --color-card: var(--surface-card);
+  --color-sunken: var(--surface-sunken);
+  --color-raised: var(--surface-raised);
 
   --shadow-1: 0 1px 2px rgb(20 20 30 / 0.05); /* card  */
   --shadow-2: 0 8px 32px rgb(20 20 30 / 0.16), 0 1px 2px rgb(20 20 30 / 0.06); /* raised */
@@ -56,11 +60,12 @@
   --color-primary: #1c1c22; /*   text-primary  */
   --color-secondary: #55555f; /* text-secondary */
   --color-muted: #8b8b95; /*     text-muted     */
-  --color-border: #e6e6ea; /*    border-default */
-  --color-strong: #c9c9d1; /*    border-strong  */
-  /* Doc-canonical border-role names (§1.5), for by-name references in §2/§3. */
-  --border-default: var(--color-border);
-  --border-strong: var(--color-strong);
+  /* Border roles: literals on the doc-canonical `--border-*` names (design doc
+     §1.5); `--color-*` aliases keep border-border/border-strong utilities. */
+  --border-default: #e6e6ea;
+  --border-strong: #c9c9d1;
+  --color-border: var(--border-default);
+  --color-strong: var(--border-strong);
 
   --color-accent: #5a51e0;
   --color-accent-soft: #ecebfb;
