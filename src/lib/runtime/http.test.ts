@@ -61,6 +61,42 @@ test("runtime command routes fail closed while activation is disabled", async ()
   expect(await response.json()).toEqual({ error: "runtime events are disabled" });
 });
 
+test("direct runtime send and steer commands kick queued delivery for an idle host", async () => {
+  const commands: unknown[] = [];
+  let kicks = 0;
+  const client = {
+    command: async (command: { kind: "send" | "steer"; idempotencyKey: string }) => {
+      commands.push(command);
+      return {
+        operationId: `op-${command.kind}`,
+        replayed: false,
+        receipt: {
+          operationId: `op-${command.kind}`,
+          idempotencyKey: command.idempotencyKey,
+          conversationId: "conv-one",
+          kind: command.kind,
+          status: "queued" as const,
+          queuePosition: 1,
+          at: "2026-07-10T00:00:00.000Z",
+          revision: 1,
+        },
+      };
+    },
+  } as unknown as RuntimeHostClient;
+
+  for (const kind of ["send", "steer"] as const) {
+    const response = await handleRuntimeCommand(
+      request({ conversationId: "conv-one", text: `${kind} message`, idempotencyKey: `${kind}-one` }),
+      kind,
+      { enabled: () => true, client: () => client, kick: () => { kicks += 1; } },
+    );
+    expect(response.status).toBe(202);
+  }
+
+  expect(commands).toMatchObject([{ kind: "send" }, { kind: "steer" }]);
+  expect(kicks).toBe(2);
+});
+
 test("runtime retry requeues the durable operation and kicks delivery", async () => {
   const retried: string[] = [];
   let kicks = 0;

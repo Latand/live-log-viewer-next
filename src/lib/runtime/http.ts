@@ -11,11 +11,13 @@ import { kickStructuredDeliveryQueue } from "./structuredDeliverySignal";
 export interface RuntimeHttpDependencies {
   enabled(): boolean;
   client(): RuntimeHostClient | null;
+  kick?(): void;
 }
 
 const DEFAULT_DEPENDENCIES: RuntimeHttpDependencies = {
   enabled: runtimeEventsEnabled,
   client: runtimeHostClient,
+  kick: kickStructuredDeliveryQueue,
 };
 
 export interface RuntimeRetryHttpDependencies extends RuntimeHttpDependencies {
@@ -52,6 +54,10 @@ export async function handleRuntimeCommand(
   if (!client) return NextResponse.json({ error: "runtime host socket is unavailable" }, { status: 503 });
   try {
     const result = await client.command(command);
+    if ((kind === "send" || kind === "steer")
+      && (result.receipt.status === "pending" || result.receipt.status === "queued")) {
+      dependencies.kick?.();
+    }
     const status = result.receipt.status === "pending" || result.receipt.status === "queued" ? 202 : 200;
     return NextResponse.json({ operationId: result.operationId, receipt: result.receipt }, { status });
   } catch (error) {

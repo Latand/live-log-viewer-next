@@ -1,5 +1,11 @@
-import { expect, test } from "bun:test";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
+import { afterAll, expect, test } from "bun:test";
+
+import { AgentRegistry } from "@/lib/agent/registry";
+import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
 import type { RuntimeHostClient } from "./client";
 import type { RuntimeSnapshot } from "./contracts";
 
@@ -7,8 +13,26 @@ import { enqueueStructuredMessage } from "./structuredMessageDelivery";
 
 const artifactPath = "/sessions/11111111-1111-4111-8111-111111111111.jsonl";
 const conversationId = "conversation_11111111-1111-4111-8111-111111111111";
+const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-structured-message-"));
+let registryNumber = 0;
 
-function snapshot(): RuntimeSnapshot {
+afterAll(() => fs.rmSync(sandbox, { recursive: true, force: true }));
+
+function registryWithConversation(accountId = "default") {
+  const registry = new AgentRegistry(path.join(sandbox, `registry-${registryNumber += 1}.json`));
+  registry.reconcileConversations([{
+    engine: "codex",
+    path: artifactPath,
+    accountId,
+    launchProfile: emptyLaunchProfile({ cwd: "/repo", project: "repo" }),
+    turn: { state: "idle", source: "empty", terminalAt: null },
+    observedAt: "2026-07-13T00:00:00.000Z",
+  }]);
+  const conversation = registry.conversationForPath(artifactPath)!;
+  return { registry, conversation };
+}
+
+function snapshot(ownedConversationId = conversationId): RuntimeSnapshot {
   return {
     schemaVersion: 1,
     snapshotSeq: 1,
@@ -17,7 +41,7 @@ function snapshot(): RuntimeSnapshot {
     runtime: { hostEpoch: 1, health: "ready" },
     filesRevision: 0,
     sessions: [{
-      conversationId,
+      conversationId: ownedConversationId,
       sessionKey: { engine: "codex", sessionId: "11111111-1111-4111-8111-111111111111" },
       hostKind: "codex-app-server",
       host: "hosted",
@@ -126,10 +150,11 @@ test("structured message routing fails closed for an unhosted owner", async () =
 });
 
 test("structured message routing returns the durable queued receipt immediately", async () => {
+  const { registry, conversation } = registryWithConversation();
   let command: unknown;
   let kicked = 0;
   const client = {
-    snapshot: async () => snapshot(),
+    snapshot: async () => snapshot(conversation.id),
     command: async (value: unknown) => {
       command = value;
       return {
@@ -138,7 +163,7 @@ test("structured message routing returns the durable queued receipt immediately"
         receipt: {
           operationId: "op-one",
           idempotencyKey: "message-one",
-          conversationId,
+          conversationId: conversation.id,
           kind: "send" as const,
           status: "queued" as const,
           queuePosition: 1,
@@ -151,10 +176,51 @@ test("structured message routing returns the durable queued receipt immediately"
 
   const result = await enqueueStructuredMessage(
     { path: artifactPath, text: "hello", clientMessageId: "message-one", hasImages: false },
-    { enabled: () => true, client: () => client, kick: () => { kicked += 1; } },
+    { enabled: () => true, client: () => client, registry: () => registry, kick: () => { kicked += 1; } },
   );
 
-  expect(command).toMatchObject({ conversationId, text: "hello", idempotencyKey: "message-one", policy: "queue" });
+  expect(command).toMatchObject({ conversationId: conversation.id, text: "hello", idempotencyKey: "message-one", policy: "queue" });
   expect(result).toMatchObject({ ok: true, structured: true, outcome: "queued", operationId: "op-one" });
   expect(kicked).toBe(1);
+});
+
+test("structured message routing holds composer delivery when migration owns the fence", async () => {
+  const { registry, conversation } = registryWithConversation("managed");
+  registry.commitMigrationIntent({
+    engine: "codex",
+    targetId: "default",
+    origin: "manual",
+    requestId: "structured-migration",
+    expectedRevision: registry.engineRouting("codex").revision,
+    scope: "all",
+  });
+  registry.requestConversationMigrationToActiveAccount(conversation.id);
+  let commands = 0;
+  let migrationTicks = 0;
+  const client = {
+    snapshot: async () => snapshot(conversation.id),
+    command: async () => {
+      commands += 1;
+      throw new Error("the predecessor host received a fenced message");
+    },
+  } as unknown as RuntimeHostClient;
+
+  const result = await enqueueStructuredMessage(
+    { path: artifactPath, text: "after migration", clientMessageId: "migration-message", hasImages: false },
+    {
+      enabled: () => true,
+      client: () => client,
+      registry: () => registry,
+      requestMigrationTick: () => { migrationTicks += 1; },
+    },
+  );
+
+  expect(result).toMatchObject({ ok: true, structured: true, target: conversation.id, outcome: "held" });
+  expect(commands).toBe(0);
+  expect(migrationTicks).toBe(1);
+  expect(registry.pendingDeliveries(conversation.id)).toMatchObject([{
+    state: "held",
+    clientMessageId: "migration-message",
+    text: "after migration",
+  }]);
 });
