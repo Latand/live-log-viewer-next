@@ -118,6 +118,49 @@ test("creation validates linear 2–4 stage chains and optional roles", async ()
   ] as never }, ports)).error).toContain("role only accepts roleId");
 });
 
+test("autoStart false persists a draft without provisioning or spawning", async () => {
+  const h = harness();
+  savePipelines([]);
+  const result = await createPipelineFromRequest({
+    task: "Review this draft",
+    repoDir: "/repo",
+    stages: RUN_STAGES as never,
+    autoStart: false,
+  }, h.ports);
+
+  expect(result.pipeline).toMatchObject({ state: "draft", cursor: { stageId: "plan", state: "pending" } });
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+
+  const persisted = loadPipelines()[0]!;
+  expect(persisted.state).toBe("draft");
+  expect(persisted.runs.every((run) => run.attempts.length === 0)).toBe(true);
+  expect(h.calls.some((call) => call.includes("worktree add"))).toBe(false);
+  expect(h.calls.some((call) => call.startsWith("spawn:"))).toBe(false);
+});
+
+test("starting a draft enters the existing provision and stage-spawn path", async () => {
+  const h = harness();
+  savePipelines([]);
+  const created = await createPipelineFromRequest({
+    task: "Start after review",
+    repoDir: "/repo",
+    stages: RUN_STAGES as never,
+    autoStart: false,
+  }, h.ports);
+  const id = created.pipeline!.id;
+
+  const started = await patchPipeline(id, { action: "start" }, h.ports);
+  expect(started.pipeline?.state).toBe("provisioning");
+  await tickPipelines([], h.ports);
+  expect(loadPipelines()[0]!.state).toBe("running");
+  await tickPipelines([], h.ports);
+
+  expect(loadPipelines()[0]!.runs[0]!.attempts[0]!.state).toBe("running");
+  expect(h.calls.some((call) => call.includes("worktree add"))).toBe(true);
+  expect(h.calls.some((call) => call.startsWith("spawn:"))).toBe(true);
+});
+
 test("role params are accepted, persisted on the stage, and type-checked", async () => {
   const { ports } = harness();
   savePipelines([]);
@@ -606,6 +649,121 @@ test("override-stage re-configures an unstarted stage and rejects a started one 
   });
   savePipelines([started]);
   expect((await patchPipeline(started.id, { action: "override-stage", stageId: "build", prompt: "x" }, ports)).status).toBe(409);
+});
+
+test("override-stage edits every stage while a pipeline is a draft", async () => {
+  const { ports } = harness();
+  savePipelines([]);
+  const created = await createPipelineFromRequest({
+    task: "Tune the plan",
+    repoDir: "/repo",
+    stages: RUN_STAGES as never,
+    autoStart: false,
+  }, ports);
+
+  for (const stage of created.pipeline!.stages) {
+    const updated = await patchPipeline(created.pipeline!.id, {
+      action: "override-stage",
+      stageId: stage.id,
+      prompt: `Edited ${stage.id}`,
+    }, ports);
+    expect(updated.error).toBeUndefined();
+  }
+
+  expect(loadPipelines()[0]!.stages.map((stage) => stage.prompt)).toEqual(["Edited plan", "Edited build"]);
+});
+
+test("draft metadata can be revised before the pipeline starts", async () => {
+  const { ports } = harness();
+  savePipelines([]);
+  const created = await createPipelineFromRequest({
+    task: "Initial task",
+    spec: "Initial AC",
+    repoDir: "/repo",
+    stages: RUN_STAGES as never,
+    autoStart: false,
+  }, ports);
+
+  const updated = await patchPipeline(created.pipeline!.id, {
+    action: "update-draft",
+    task: "Revised task",
+    spec: "Revised AC",
+    repoDir: "/other-repo",
+  }, ports);
+
+  expect(updated.pipeline).toMatchObject({ task: "Revised task", spec: "Revised AC", repoDir: "/other-repo", project: "viewer" });
+  expect(updated.pipeline?.worktreeDir).toContain("other-repo-pipeline-");
+  expect(updated.pipeline?.branch).toContain("revised-task");
+});
+
+test("draft stages can be added, reordered, and removed while keeping a linear plan", async () => {
+  const h = harness();
+  const { ports } = h;
+  savePipelines([]);
+  const created = await createPipelineFromRequest({
+    task: "Edit the plan",
+    repoDir: "/repo",
+    stages: RUN_STAGES as never,
+    autoStart: false,
+  }, ports);
+  const id = created.pipeline!.id;
+  h.setBuilderEffort("high");
+
+  const added = await patchPipeline(id, {
+    action: "add-stage",
+    index: 1,
+    stage: { id: "verify", kind: "run", role: { roleId: "builder" }, prompt: "Verify the plan", next: null },
+  }, ports);
+  expect(added.pipeline?.stages.map((stage) => [stage.id, stage.next])).toEqual([
+    ["plan", "verify"], ["verify", "build"], ["build", null],
+  ]);
+  expect(added.pipeline?.stages.map((stage) => stage.effectiveRole.effort)).toEqual(["high", "high", "medium"]);
+
+  const reordered = await patchPipeline(id, {
+    action: "reorder-stage",
+    stageIds: ["plan", "build", "verify"],
+  }, ports);
+  expect(reordered.pipeline?.stages.map((stage) => stage.id)).toEqual(["plan", "build", "verify"]);
+
+  const removed = await patchPipeline(id, { action: "remove-stage", stageId: "verify" }, ports);
+  expect(removed.pipeline?.stages.map((stage) => [stage.id, stage.next])).toEqual([
+    ["plan", "build"], ["build", null],
+  ]);
+  expect(removed.pipeline?.runs.map((run) => run.stageId)).toEqual(["plan", "build"]);
+});
+
+test("discarding a draft deletes its persisted record", async () => {
+  const { ports } = harness();
+  savePipelines([]);
+  const created = await createPipelineFromRequest({
+    task: "Disposable draft",
+    repoDir: "/repo",
+    stages: RUN_STAGES as never,
+    autoStart: false,
+  }, ports);
+
+  const discarded = await patchPipeline(created.pipeline!.id, { action: "delete" }, ports);
+  expect(discarded.pipeline?.id).toBe(created.pipeline!.id);
+  expect(loadPipelines()).toEqual([]);
+});
+
+test("draft-only mutations cannot rewrite or delete an active pipeline", async () => {
+  const { ports } = harness();
+  const active = await create(ports);
+  const before = structuredClone(loadPipelines()[0]!);
+  const attempts = [
+    { action: "start" },
+    { action: "update-draft", task: "rewritten" },
+    { action: "add-stage", stage: { id: "extra", kind: "run", prompt: "extra", next: null } },
+    { action: "remove-stage", stageId: "plan" },
+    { action: "reorder-stage", stageId: "plan", toIndex: 1 },
+    { action: "delete" },
+  ] as const;
+
+  for (const request of attempts) {
+    expect((await patchPipeline(active.id, request, ports)).status).toBe(409);
+  }
+  expect(loadPipelines()[0]).toEqual(before);
 });
 
 test("override-stage validates the target and requires a change", async () => {
