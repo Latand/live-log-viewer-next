@@ -12,6 +12,7 @@ import {
   kidsIndex,
   quietHistoryRows,
   quietRootsWithActiveDescendants,
+  projectDraftWorkingDirectory,
   residualItems,
   resolveProjectView,
   subtree,
@@ -102,6 +103,12 @@ describe("draftWorkingDirectory", () => {
 
   test("uses a project-owned repository fallback before its first conversation exists", () => {
     expect(draftWorkingDirectory([], "viewer", undefined, ["", "/repo"])).toBe("/repo");
+  });
+
+  test("prefills a catalog-only project from its full-scan canonical root", () => {
+    expect(projectDraftWorkingDirectory([], "viewer", [
+      { project: "viewer", projectRoot: "/repo", smt: 100, conversations: 3 },
+    ])).toBe("/repo");
   });
 });
 

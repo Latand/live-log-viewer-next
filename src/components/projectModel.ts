@@ -88,6 +88,17 @@ export function draftWorkingDirectory(
   return derived || fallbacks.find((cwd) => cwd.trim())?.trim() || "";
 }
 
+export function projectDraftWorkingDirectory(
+  files: readonly FileEntry[],
+  project: string,
+  projectCatalog: readonly ProjectCatalogEntry[],
+  sourcePath?: string,
+  fallbacks: readonly string[] = [],
+): string {
+  const catalogRoot = projectCatalog.find((entry) => entry.project === project)?.projectRoot ?? "";
+  return draftWorkingDirectory(files, project, sourcePath, [catalogRoot, ...fallbacks]);
+}
+
 export interface ProjectSummary {
   project: string;
   /** Live entries anywhere in the project (branches running right now). */

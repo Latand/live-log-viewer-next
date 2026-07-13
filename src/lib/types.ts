@@ -162,6 +162,8 @@ export interface ConversationMigration {
 
 export interface ProjectCatalogEntry {
   project: string;
+  /** Canonical repository root derived from every conversation in the full scan. */
+  projectRoot?: string;
   /** Unix seconds of the newest valid transcript candidate in the project. */
   smt: number;
   /** Lightweight count from the full candidate scan. */

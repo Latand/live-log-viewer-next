@@ -10,7 +10,7 @@ import type { Flow } from "@/lib/flows/types";
 import { useLocale } from "@/lib/i18n";
 import type { Pipeline } from "@/lib/pipelines/types";
 import type { BoardTask } from "@/lib/tasks/types";
-import type { FileEntry } from "@/lib/types";
+import type { FileEntry, ProjectCatalogEntry } from "@/lib/types";
 import { MAX_VISIBLE_PATHS } from "@/lib/view/types";
 import type { Workflow } from "@/lib/workflows/types";
 
@@ -34,8 +34,8 @@ import {
   buildArchiveBranchGroups,
   buildBranchGroups,
   collapsedTrees,
-  draftWorkingDirectory,
   isChildConversation,
+  projectDraftWorkingDirectory,
   projectKey,
   type ProjectView,
   resolveProjectView,
@@ -59,6 +59,7 @@ interface Props {
   pipelinesError?: string;
   workflows: Workflow[];
   tasks: BoardTask[];
+  projectCatalog?: ProjectCatalogEntry[];
   project: string;
   loaded: boolean;
   /** Bumped by Viewer on every openFile so a same-project open re-reads prefs
@@ -246,6 +247,7 @@ export function ProjectDashboard({
   pipelinesError,
   workflows,
   tasks,
+  projectCatalog: projectCatalogEntries = [],
   project,
   loaded,
   openNonce,
@@ -567,7 +569,7 @@ export function ProjectDashboard({
   const addDraft = () => {
     onUserNavigate?.();
     const id = newDraftId();
-    setDraftCwd(id, draftWorkingDirectory(files, project, undefined, projectCwdFallbacks));
+    setDraftCwd(id, projectDraftWorkingDirectory(files, project, projectCatalogEntries, undefined, projectCwdFallbacks));
     persistDrafts([...drafts, id]);
     pendingFocusRef.current = "draft::" + id;
   };
@@ -586,7 +588,7 @@ export function ProjectDashboard({
     }
     const id = newDraftId();
     setDraftSrc(id, file.path, file.conversationId);
-    setDraftCwd(id, draftWorkingDirectory(files, project, file.path, projectCwdFallbacks));
+    setDraftCwd(id, projectDraftWorkingDirectory(files, project, projectCatalogEntries, file.path, projectCwdFallbacks));
     persistDrafts([...drafts, id]);
     pendingFocusRef.current = "draft::" + id;
   };
@@ -604,7 +606,7 @@ export function ProjectDashboard({
     onUserNavigate?.();
     const id = newDraftId();
     setDraftText(id, task.text);
-    setDraftCwd(id, draftWorkingDirectory(files, project, undefined, projectCwdFallbacks));
+    setDraftCwd(id, projectDraftWorkingDirectory(files, project, projectCatalogEntries, undefined, projectCwdFallbacks));
     persistDrafts([...drafts, id]);
     pendingFocusRef.current = "draft::" + id;
   };

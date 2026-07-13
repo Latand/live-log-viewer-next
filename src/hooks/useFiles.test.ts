@@ -34,6 +34,31 @@ test("global client cache serves stale rows while revalidation patches changed f
   expect(second.files[1]).not.toBe(first.files[1]);
 });
 
+test("URL-specific 304 responses restore the matching cached representation", async () => {
+  const cache = createFilesClientCache(async (input, init) => {
+    const headers = new Headers(init?.headers);
+    if (input === "/api/files" && headers.get("If-None-Match") === '"global"') {
+      return new Response(null, { status: 304 });
+    }
+    if (input === "/api/files") {
+      return new Response(JSON.stringify({ files: [file("/global", "Global")] }), {
+        headers: { ETag: '"global"' },
+      });
+    }
+    return new Response(JSON.stringify({ files: [file("/global", "Global"), file("/pinned", "Pinned")] }), {
+      headers: { ETag: '"pinned"' },
+    });
+  });
+
+  await cache.revalidate();
+  await cache.revalidate("/pinned");
+  const restored = await cache.revalidate();
+
+  expect(restored.files.map((entry) => entry.path)).toEqual(["/global"]);
+  expect(restored.requestScope).toBe("/api/files");
+  expect(cache.read()).toBe(restored);
+});
+
 function file(path: string, title: string) {
   return {
     path,

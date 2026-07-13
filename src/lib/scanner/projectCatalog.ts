@@ -16,6 +16,7 @@ type CachedProjectFile = {
   mtimeMs: number;
   stateKey: string;
   project: string;
+  projectRoot?: string | null;
   kind: string;
   session: boolean;
 };
@@ -50,6 +51,7 @@ function readState(): ProjectCatalogState {
         typeof file.mtimeMs !== "number" ||
         typeof file.stateKey !== "string" ||
         typeof file.project !== "string" ||
+        (file.projectRoot !== undefined && file.projectRoot !== null && typeof file.projectRoot !== "string") ||
         typeof file.kind !== "string" ||
         typeof file.session !== "boolean"
       ) {
@@ -61,6 +63,7 @@ function readState(): ProjectCatalogState {
         mtimeMs: file.mtimeMs,
         stateKey: file.stateKey,
         project: file.project,
+        projectRoot: typeof file.projectRoot === "string" ? file.projectRoot : file.projectRoot === null ? null : undefined,
         kind: file.kind,
         session: file.session,
       };
@@ -94,7 +97,8 @@ function cachedFile(raw: RawEntry, state: ProjectCatalogState, stateKey: string)
     cached &&
     cached.size === raw.st.size &&
     cached.mtimeMs === raw.st.mtimeMs &&
-    cached.stateKey === stateKey
+    cached.stateKey === stateKey &&
+    cached.projectRoot !== undefined
   ) {
     return { path: raw.path, ...cached };
   }
@@ -106,6 +110,7 @@ function cachedFile(raw: RawEntry, state: ProjectCatalogState, stateKey: string)
     mtimeMs: raw.st.mtimeMs,
     stateKey,
     project: meta.project || "other",
+    projectRoot: meta.projectRoot ?? null,
     kind: meta.kind,
     session: isRootSession(raw.rootName, meta.kind),
   };
@@ -115,6 +120,7 @@ function cachedFile(raw: RawEntry, state: ProjectCatalogState, stateKey: string)
     mtimeMs: file.mtimeMs,
     stateKey: file.stateKey,
     project: file.project,
+    projectRoot: file.projectRoot,
     kind: file.kind,
     session: file.session,
   };
@@ -159,6 +165,7 @@ export function projectCatalogSnapshotFromRaw(raw: RawEntry[], options: { persis
   const stateKey = projectResolutionStateKey();
   const nextFiles: Record<string, CachedProjectFile> = {};
   const groups = new Map<string, ProjectCatalogEntry>();
+  const rootCandidates = new Map<string, Map<string, { count: number; newest: number }>>();
   const projectByPath = new Map<string, string>();
   const previousProjects = new Map(raw.map((entry) => [entry.path, state.files[entry.path]?.project]));
   const files = raw.map((entry) => cachedFile(entry, state, stateKey));
@@ -182,6 +189,7 @@ export function projectCatalogSnapshotFromRaw(raw: RawEntry[], options: { persis
       mtimeMs: file.mtimeMs,
       stateKey: file.stateKey,
       project: file.project,
+      projectRoot: file.projectRoot,
       kind: file.kind,
       session: file.session,
     };
@@ -200,6 +208,20 @@ export function projectCatalogSnapshotFromRaw(raw: RawEntry[], options: { persis
     }
     group.smt = Math.max(group.smt, file.mtimeMs / 1000);
     if (file.session) group.conversations += 1;
+    if (file.projectRoot) {
+      const candidates = rootCandidates.get(project) ?? new Map<string, { count: number; newest: number }>();
+      const candidate = candidates.get(file.projectRoot) ?? { count: 0, newest: 0 };
+      candidate.count += 1;
+      candidate.newest = Math.max(candidate.newest, file.mtimeMs);
+      candidates.set(file.projectRoot, candidate);
+      rootCandidates.set(project, candidates);
+    }
+  }
+  for (const [project, candidates] of rootCandidates) {
+    const projectRoot = [...candidates]
+      .sort(([leftPath, left], [rightPath, right]) =>
+        right.count - left.count || right.newest - left.newest || leftPath.localeCompare(rightPath))[0]?.[0];
+    if (projectRoot) groups.get(project)!.projectRoot = projectRoot;
   }
   if (options.persist !== false) {
     let boardHealed = true;

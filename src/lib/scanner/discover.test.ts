@@ -37,6 +37,40 @@ test("pure project-catalog discovery leaves the state directory unchanged", asyn
   }
 });
 
+test("project catalog carries the canonical root for projects outside the capped rows", async () => {
+  const base = await mkdtemp(path.join(os.tmpdir(), "llv-discover-catalog-root-"));
+  const previousStateDir = process.env.LLV_STATE_DIR;
+  process.env.LLV_STATE_DIR = path.join(base, "state");
+  try {
+    const roots: Record<RootKey, string> = {
+      "codex-sessions": path.join(base, "codex-sessions"),
+      "claude-projects": path.join(base, "claude-projects"),
+      "claude-tasks": path.join(base, "claude-tasks"),
+    };
+    await Promise.all(Object.values(roots).map((root) => mkdir(root, { recursive: true })));
+    const repo = path.join(base, "catalog-project");
+    const cwd = path.join(repo, ".worktrees", "issue-173");
+    await writeFixture(
+      path.join(roots["codex-sessions"], "catalog-project.jsonl"),
+      JSON.stringify({ type: "session_meta", payload: { cwd } }) + "\n",
+      1_700_000_000,
+    );
+
+    const scan = await discoverFilesWithProjectCatalog(roots, undefined, { persist: false });
+
+    expect(scan.projectCatalog).toEqual([{
+      project: projectForCwd(repo)!,
+      projectRoot: repo,
+      smt: 1_700_000_000,
+      conversations: 1,
+    }]);
+  } finally {
+    if (previousStateDir === undefined) delete process.env.LLV_STATE_DIR;
+    else process.env.LLV_STATE_DIR = previousStateDir;
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
 test("project catalog omits task-only residue from a clean state", async () => {
   const base = await mkdtemp(path.join(os.tmpdir(), "llv-discover-task-residue-"));
   const previousStateDir = process.env.LLV_STATE_DIR;
@@ -232,7 +266,12 @@ test("discoverFiles counts a dual-root Codex rollout once and prefers the accoun
 
     expect(scan.files).toHaveLength(1);
     expect(scan.files[0]).toMatchObject({ path: accountFile, project: "account-project" });
-    expect(scan.projectCatalog).toContainEqual({ project: "account-project", conversations: 1, smt: 10 });
+    expect(scan.projectCatalog).toContainEqual({
+      project: "account-project",
+      projectRoot: path.join(os.homedir(), "Projects", "account-project"),
+      conversations: 1,
+      smt: 10,
+    });
   } finally {
     await rm(base, { recursive: true, force: true });
   }

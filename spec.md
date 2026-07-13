@@ -1,24 +1,33 @@
-# Issue #166: Isolate real-CLI integration-test sessions
+# Issues #173 and #174: Project CWD prefills and global conversation cache
 
-Run the Codex app-server and Claude broker integration suites with fresh temporary homes so their real session artifacts never enter the user's scanned roots.
+Review PR #176 on `agent/issues-173-174-cwd-cache` against both user-facing issues.
 
 ## Acceptance criteria
 
-AC1: Every Codex integration run sets `CODEX_HOME` to a fresh temporary directory, uses only the minimal copied file credential, and removes the directory during teardown.
+AC1: Every agent draft opened inside a project starts with an editable working directory derived from that project's canonical repository root.
 
-AC2: Every Claude integration run sets both `HOME` and `CLAUDE_CONFIG_DIR` to a fresh temporary directory, uses only the minimal copied subscription credential, and removes the directory during teardown.
+AC2: Canonical project roots are derived from conversation CWD metadata across the full scan, including projects whose conversations fall outside the capped response rows.
 
-AC3: A missing binary, missing credential, unsafe credential source, or failed isolated-home authentication probe keeps the existing graceful-skip behavior.
+AC3: Handoff drafts inherit the source conversation's exact CWD. Board agent drafts, task-to-agent drafts, project views, and handoffs share the same prefill behavior.
 
-AC4: Each real integration test asserts that its produced rollout or transcript exists beneath its temporary home.
+AC4: The client keeps one session-wide cross-project conversation snapshot. Switching projects filters that snapshot immediately and performs zero project-scoped scan request.
 
-AC5: Codex late attach, steering, and restart resume coverage remains unchanged; Claude late attach, restart resume, and permission-answer coverage remains unchanged.
+AC5: Background revalidation patches changed rows into cached data. URL-specific conditional requests restore their matching cached representation, and delayed responses cannot overwrite newer data.
 
-AC6: Running the focused integration suites creates zero new fixture files containing the ZEBRA-149, ORCHID-150, or ACK-150 markers under `~/.codex/sessions`, `~/.claude/projects`, and the managed Codex and Claude account roots.
+AC6: Runtime SSE revision hydration and degraded-connection polling continue to refresh the global snapshot.
+
+AC7: The implementation changes no files under `src/lib/flows/`, `src/lib/agent/`, or `src/lib/runtime/`.
+
+AC8: Any newly introduced user-facing copy is present in English and Ukrainian. Existing 44px mobile controls, 390px layouts, and desktop layouts remain intact.
+
+AC9: Tests cover canonical CWD derivation, catalog-only project roots, handoff inheritance, cache hits, stale-while-revalidate patching, URL representation restoration, project-query independence, response ordering, and SSE revision behavior.
+
+AC10: A fresh review uses severity-tagged findings and reaches APPROVE only when every blocking finding is resolved.
 
 ## Validation gates
 
-- `bun test`
+- `bun install`
 - `bunx tsc --noEmit`
-- `bun test src/lib/runtime/codexAppServerHost.integration.test.ts src/lib/runtime/claudeStreamBrokerHost.integration.test.ts`
-- marker-file comparison under the legacy session roots and managed account roots
+- `bun test`
+- `git diff --check`
+- verify the complete diff contains zero changes under the forbidden library directories

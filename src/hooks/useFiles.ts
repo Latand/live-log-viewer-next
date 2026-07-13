@@ -107,17 +107,32 @@ function patchFilesData(previous: FilesData, incoming: FilesData): FilesData {
 /** Session-wide stale-while-revalidate cache over the global scan snapshot. */
 export function createFilesClientCache(fetcher: FilesFetcher): FilesClientCache {
   let snapshot = EMPTY;
-  const etags = new Map<string, string>();
+  const representations = new Map<string, { data: FilesData; etag?: string }>();
   let requestedGeneration = 0;
   let appliedGeneration = 0;
+
+  const rememberRepresentation = (url: string, data: FilesData, etag?: string) => {
+    representations.delete(url);
+    representations.set(url, { data, etag });
+    while (representations.size > 8) {
+      const oldest = representations.keys().next().value;
+      if (oldest === undefined) break;
+      representations.delete(oldest);
+    }
+  };
 
   const performRevalidate = async (pinnedPath?: string | null, revision?: number): Promise<FilesData> => {
     const generation = ++requestedGeneration;
     const url = filesApiUrl(pinnedPath);
-    const headers = filesRequestHeaders(etags.get(url) ?? "", revision);
+    const representation = representations.get(url);
+    const headers = filesRequestHeaders(representation?.etag ?? "", revision);
     const response = await fetcher(url, headers ? { headers } : undefined);
     if (response.status === 304) {
-      appliedGeneration = Math.max(appliedGeneration, generation);
+      if (!representation) throw new Error("files request returned 304 without a cached representation");
+      if (generation < appliedGeneration) return snapshot;
+      snapshot = representation.data;
+      appliedGeneration = generation;
+      rememberRepresentation(url, snapshot, representation.etag);
       return snapshot;
     }
     if (!response.ok) throw new Error(`files request failed: ${response.status}`);
@@ -127,7 +142,7 @@ export function createFilesClientCache(fetcher: FilesFetcher): FilesClientCache 
     snapshot = patchFilesData(snapshot, incoming);
     appliedGeneration = generation;
     const etag = response.headers.get("ETag");
-    if (etag) etags.set(url, etag);
+    rememberRepresentation(url, snapshot, etag ?? undefined);
     return snapshot;
   };
 

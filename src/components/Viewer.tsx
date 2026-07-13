@@ -507,6 +507,7 @@ export function Viewer() {
             pipelinesError={pipelinesError}
             workflows={workflows}
             tasks={tasks}
+            projectCatalog={projectCatalog}
             project={project}
             loaded={loaded}
             openNonce={openNonce}
