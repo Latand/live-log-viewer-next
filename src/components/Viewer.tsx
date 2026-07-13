@@ -112,6 +112,10 @@ export function Viewer() {
   useAgentChimes(files, requestScope);
   const { archivedProjects, archiveProject, unarchiveProject } = useArchivedProjects(files);
   const catalogProjects = useMemo(() => new Set(projectCatalog.map((entry) => entry.project)), [projectCatalog]);
+  const catalogConversationCounts = useMemo(
+    () => new Map(projectCatalog.map((entry) => [entry.project, entry.conversations])),
+    [projectCatalog],
+  );
   const isMobile = useIsMobile();
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [toastPath, setToastPath] = useState<string | null>(null);
@@ -585,6 +589,7 @@ export function Viewer() {
             attentionPaths={attentionPaths}
             archived={archivedProjects.has(project)}
             catalogKnown={catalogProjects.has(project)}
+            catalogConversationCount={catalogConversationCounts.get(project) ?? 0}
             onArchive={archiveProject}
             onUnarchive={unarchiveProject}
             onMenu={isMobile ? () => setDrawerOpen(true) : undefined}

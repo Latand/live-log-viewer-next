@@ -36,7 +36,7 @@ export async function GET(request: Request): Promise<Response> {
   try {
     let page;
     if (query) {
-      const indexed = await indexConversationCatalog(source);
+      const indexed = await indexConversationCatalog(source, { signal: request.signal });
       const displayed = indexed.map(catalogEntryToFileEntry);
       await overlaySessionTitlesYielding(displayed);
       const displayedByPath = new Map(displayed.map((entry) => [entry.path, entry]));

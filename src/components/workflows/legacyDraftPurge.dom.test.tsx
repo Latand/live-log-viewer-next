@@ -127,6 +127,7 @@ const dashboardProps = (project: string) => ({
   openNonce: 0,
   archived: false,
   catalogKnown: true,
+  catalogConversationCount: 0,
   onArchive: () => {},
   onUnarchive: () => {},
 });

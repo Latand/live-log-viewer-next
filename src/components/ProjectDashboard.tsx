@@ -73,6 +73,7 @@ interface Props {
   /** The project is shelved: hidden from the rail and the overview. */
   archived: boolean;
   catalogKnown: boolean;
+  catalogConversationCount: number;
   onArchive: (project: string) => void;
   onUnarchive: (project: string) => void;
   /** Mobile shell: the rail hides behind a drawer, this opens it. */
@@ -262,6 +263,7 @@ export function ProjectDashboard({
   attentionPaths,
   archived,
   catalogKnown,
+  catalogConversationCount,
   onArchive,
   onUnarchive,
   onMenu,
@@ -649,20 +651,25 @@ export function ProjectDashboard({
     prefsSnapshotRef.current = prefs;
   });
 
-  /* Every conversation the current catalog knows for this project, keyed by
-     path — the convergence planner retires a manual entry that has left it. */
+  /* Every scheme-hydrated conversation for this project, keyed by path. The
+     full catalog count tells the planner whether absence proves deletion. */
   const projectCatalog = useMemo(
     () => new Map(groupFiles.filter((file) => projectKey(file) === project).map((file) => [file.path, file] as const)),
     [groupFiles, project],
   );
+  const schemeConversationCount = useMemo(
+    () => files.filter((file) => projectKey(file) === project && file.root !== "claude-tasks").length,
+    [files, project],
+  );
+  const catalogComplete = catalogKnown && schemeConversationCount >= catalogConversationCount;
   /* Only the root key and orphan flag of each group matter to reconciliation. */
   const rootGroups = useMemo(() => groups.map((group) => ({ key: group.key, orphanTask: group.orphanTask })), [groups]);
 
   /* Board membership convergence, as one ordered mutation batch:
        1. succession remap — a predecessor's tombstone/placement follows the
           stable conversation identity to its successor path;
-       2. root reconciliation — seed every current root and retire child/subagent
-          or catalog-absent pollution from `manual`, preserving tombstones.
+       2. root reconciliation — seed every current root, retire child/subagent
+          pollution, and retire absent paths only with complete membership.
      Remap precedes reconciliation so a hidden successor is honored and never
      re-seeded. Both mutations are idempotent, so a batch that changes nothing is
      dropped by the store before transport — no revision churn, no 40-entry
@@ -677,12 +684,13 @@ export function ProjectDashboard({
         groups: rootGroups,
         manual: prefsSnapshotRef.current.manual,
         catalog: projectCatalog,
+        catalogComplete,
         project,
       }),
     );
     /* eslint-disable-next-line react-hooks/exhaustive-deps -- board.mutate is
        delegated to a ref-stable store; manual is read through that ref. */
-  }, [rootGroups, files, projectCatalog, project, board.loaded, board.sync, focusRequest]);
+  }, [rootGroups, files, projectCatalog, catalogComplete, project, board.loaded, board.sync, focusRequest]);
 
   /* Any open lands on the scheme: a card of another project pre-adds its node
      and switches the project; a conversation of this project joins the managed

@@ -74,6 +74,18 @@ test("17b: planRootReconciliation excludes orphan-task groups", () => {
   expect(mutation.roots).toEqual(["/conv"]);
 });
 
+test("capped reconciliation preserves manual paths omitted from the scheme window", () => {
+  const visibleChild = entry({ path: "/visible-child", parent: "/visible-root", kind: "subagent" });
+  const mutation = planRootReconciliation({
+    groups: [{ key: "/visible-root", orphanTask: false }],
+    manual: [visibleChild.path, "/capped-out-root"],
+    catalog: catalogOf([visibleChild]),
+    catalogComplete: false,
+  });
+
+  expect(mutation.removeManual).toEqual([visibleChild.path]);
+});
+
 /* 18: the convergence planner orders the succession remap before reconciliation
    so a predecessor's tombstone follows the identity onto the successor and the
    successor is never re-seeded into manual. */

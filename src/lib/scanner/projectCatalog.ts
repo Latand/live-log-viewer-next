@@ -202,7 +202,7 @@ function unambiguousMigrations(
   return migrations;
 }
 
-export function projectCatalogSnapshotFromRaw(raw: RawEntry[], options: { persist?: boolean } = {}): {
+export function projectCatalogSnapshotFromRaw(raw: RawEntry[], options: { persist?: boolean; excludedSummaryPaths?: ReadonlySet<string> } = {}): {
   projectCatalog: ProjectCatalogEntry[];
   projectByPath: Map<string, string>;
 } {
@@ -255,6 +255,11 @@ export function projectCatalogSnapshotFromRaw(raw: RawEntry[], options: { persis
     }
     group.smt = Math.max(group.smt, file.mtimeMs / 1000);
     if (file.session) group.conversations += 1;
+  }
+  for (const pathname of options.excludedSummaryPaths ?? []) {
+    const file = nextFiles[pathname];
+    const group = file ? groups.get(file.project || "other") : undefined;
+    if (file?.session && group && group.conversations > 0) group.conversations -= 1;
   }
   replaceConversationCatalog(files.flatMap((file, index) => {
     if (!file.session || (file.engine !== "codex" && file.engine !== "claude")) return [];

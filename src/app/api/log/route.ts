@@ -1,5 +1,4 @@
 import fs from "node:fs/promises";
-import path from "node:path";
 
 import { NextRequest, NextResponse } from "next/server";
 
@@ -7,8 +6,9 @@ import { readTailChunk } from "@/lib/logRead";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
 import { listFiles } from "@/lib/scanner";
 import { ownerTranscriptMayExist, transcriptDeletionBlocker, type DeletionSafetyDependencies } from "@/lib/scanner/deleteSafety";
-import { claudeProjectRootFor, MAX_CHUNK, pathAllowed, scanRootEntries } from "@/lib/scanner/roots";
-import { claudeSubagentOwnerPath } from "@/lib/scanner/transcripts";
+import { removeTranscriptFromDisk } from "@/lib/scanner/deleteTranscript";
+import { MAX_CHUNK, pathAllowed } from "@/lib/scanner/roots";
+import { claudeSubagentOwnerPath, transcriptProcessMayBeRunning } from "@/lib/scanner/transcripts";
 import type { ApiError, LogChunk } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -18,6 +18,7 @@ const deletionSafetyDependencies: DeletionSafetyDependencies = {
   list: (pin) => listFiles({ pin }),
   ownerPath: (target) => claudeSubagentOwnerPath(target),
   ownerExists: (ownerPath) => ownerTranscriptMayExist(ownerPath, fs.stat),
+  processMayBeRunning: (entry) => transcriptProcessMayBeRunning(entry),
 };
 
 /**
@@ -69,43 +70,6 @@ export async function GET(
 }
 
 /**
- * A claude root session `<projects>/<slug>/<sid>.jsonl` owns a sibling
- * directory `<projects>/<slug>/<sid>/` (subagent transcripts, tool-results).
- * Left behind, those subagent files would keep the deleted conversation in
- * the list as orphan branches.
- */
-function companionDir(filePath: string): string | null {
-  const root = claudeProjectRootFor(filePath);
-  if (!root) return null;
-  const rel = path.relative(root, filePath);
-  if (rel.startsWith("..") || path.isAbsolute(rel)) return null;
-  const parts = rel.split(path.sep);
-  if (parts.length !== 2 || !filePath.endsWith(".jsonl")) return null;
-  return filePath.slice(0, -".jsonl".length);
-}
-
-/**
- * Removes now-empty ancestor directories of a deleted file, stopping at the
- * owning root. Deleting a project's last transcript otherwise leaves an empty
- * `<projects>/<slug>/` (or codex `sessions/YYYY/MM/DD/`) shell behind — the
- * on-disk clutter the delete feature exists to remove. `rmdir` refuses
- * non-empty directories, so a sibling that appeared mid-walk just stops it.
- */
-async function pruneEmptyDirs(filePath: string): Promise<void> {
-  const root = scanRootEntries().map(([, candidate]) => candidate).find((candidate) => filePath.startsWith(candidate + path.sep));
-  if (!root) return;
-  let dir = path.dirname(filePath);
-  while (dir !== root && dir.startsWith(root + path.sep)) {
-    try {
-      await fs.rmdir(dir);
-    } catch {
-      return;
-    }
-    dir = path.dirname(dir);
-  }
-}
-
-/**
  * Deletes a transcript/log file from disk. The client confirms before calling.
  * Only whitelisted-root paths qualify (same gate as GET), and a conversation
  * whose agent process is still running is refused — kill it first, otherwise
@@ -129,14 +93,9 @@ export async function DELETE(req: NextRequest): Promise<NextResponse<{ ok: true 
   const blocker = await transcriptDeletionBlocker(target, deletionSafetyDependencies);
   if (blocker) return NextResponse.json({ error: blocker }, { status: 409 });
   try {
-    await fs.unlink(target);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-      return NextResponse.json({ error: "could not delete file" }, { status: 500 });
-    }
+    await removeTranscriptFromDisk(target);
+  } catch {
+    return NextResponse.json({ error: "could not delete file" }, { status: 500 });
   }
-  const dir = companionDir(target);
-  if (dir) await fs.rm(dir, { recursive: true, force: true }).catch(() => undefined);
-  await pruneEmptyDirs(target);
   return NextResponse.json({ ok: true });
 }

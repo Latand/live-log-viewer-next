@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 
 import type { ConversationCatalogEntry } from "./conversationCatalog";
-import { loadConversationCatalogPage, paginateConversationCatalog } from "./conversationCatalog";
+import { ExpiredConversationCatalogCursorError, loadConversationCatalogPage, paginateConversationCatalog } from "./conversationCatalog";
 import { schemeWindowConfig, selectSchemeWindow } from "./schemeWindow";
 
 function entry(index: number, project = "viewer"): ConversationCatalogEntry {
@@ -59,6 +59,16 @@ test("pagination keeps its original rows when mtimes refresh between pages", () 
   ]);
 });
 
+test("abandoned uncapped pagination snapshots have an aggregate row budget", () => {
+  const catalog = Array.from({ length: 7_000 }, (_, index) => entry(index + 1));
+  const first = paginateConversationCatalog(catalog, { limit: 1 });
+  paginateConversationCatalog(catalog, { limit: 1 });
+  paginateConversationCatalog(catalog, { limit: 1 });
+
+  expect(() => paginateConversationCatalog(catalog, { limit: 1, cursor: first.nextCursor }))
+    .toThrow(ExpiredConversationCatalogCursorError);
+});
+
 test("search finds a conversation excluded by the scheme project and card caps", () => {
   const catalog = [
     entry(30, "recent-a"),
@@ -71,6 +81,7 @@ test("search finds a conversation excluded by the scheme project and card caps",
 
   expect(scheme.map((item) => item.path)).not.toContain("/sessions/10.jsonl");
   expect(result.items.map((item) => item.path)).toEqual(["/sessions/10.jsonl"]);
+  expect(result.items[0]?.firstPrompt).toBe("");
 });
 
 test("a list page stats only the conversations returned on that page", async () => {

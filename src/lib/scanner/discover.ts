@@ -140,12 +140,13 @@ function entriesFromRaw(raw: RawEntry[], projectByPath?: ReadonlyMap<string, str
     : raw;
   const selected = cappedEntries(ranked, projectByPath ?? new Map());
   const selectedPaths = new Set(selected.map((entry) => entry.path));
+  const rawByPath = pin?.size ? new Map(raw.map((entry) => [entry.path, entry] as const)) : null;
   /* Deep-link targets ride along even when demotion or the cap excluded
      them: the client needs the requested entry and its current generation in
      one payload to resolve the conversation id and redirect the link. */
   for (const pinnedPath of pin ?? []) {
     if (selectedPaths.has(pinnedPath)) continue;
-    const pinned = raw.find((entry) => entry.path === pinnedPath);
+    const pinned = rawByPath?.get(pinnedPath);
     if (pinned) {
       selectedPaths.add(pinned.path);
       selected.push(pinned);
@@ -196,15 +197,22 @@ export async function discoverFilesWithProjectCatalog(
 }> {
   const limit = createLimiter(48);
   const raw = await discoverRaw(roots, limit);
-  const { projectCatalog, projectByPath } = projectCatalogSnapshotFromRaw(raw, options);
+  const { projectCatalog, projectByPath } = projectCatalogSnapshotFromRaw(raw, {
+    persist: options.persist,
+    excludedSummaryPaths: options.demote,
+  });
   return { files: entriesFromRaw(raw, projectByPath, options.demote, options.pin), projectCatalog };
 }
 
-export async function discoverFiles(roots: Roots | RootEntries = scanRootEntries(), demote?: ReadonlySet<string>): Promise<FileEntry[]> {
+export async function discoverFiles(
+  roots: Roots | RootEntries = scanRootEntries(),
+  demote?: ReadonlySet<string>,
+  pin?: ReadonlySet<string>,
+): Promise<FileEntry[]> {
   const limit = createLimiter(48);
   const raw = await discoverRaw(roots, limit);
   const { projectByPath } = projectCatalogSnapshotFromRaw(raw, { persist: false });
-  return entriesFromRaw(raw, projectByPath, demote);
+  return entriesFromRaw(raw, projectByPath, demote, pin);
 }
 
 /** Cold-start fallback for the list/search route. It builds only lightweight

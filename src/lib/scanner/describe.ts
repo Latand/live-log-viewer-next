@@ -33,10 +33,9 @@ const metaCache = globalCache<[number, string, Meta]>("meta-v5");
 // open so growth can still yield one.
 export type ConversationSearchText = { title: string | null; firstPrompt: string | null };
 const titleCache = globalCache<[number, string | null]>("title-v3");
-/* Search text can be large and belongs to the list/search path. Keeping its
-   cache separate prevents recurring scheme scans and their metadata cache from
-   retaining corpus-scale prompt payloads. */
-const searchTextCache = globalCache<[number, ConversationSearchText]>("conversation-search-v1");
+/* Search text can be large and belongs to the list/search path. Its bounded
+   cache lives with the search index; page hydration reads only its visible rows. */
+globalCache<unknown>("conversation-search-v1").clear();
 const codexProjectCache = globalCache<{ stateKey: string; project: string; worktree?: string }>("codex-project-v3");
 /* The cwd sits in the immutable head, so it follows the title-cache rule:
    keyed by path, re-read only while unresolved and the head still short. */
@@ -543,13 +542,9 @@ function scanJsonlTitle(pathname: string, size: number, wantCodex: boolean): str
 
 /** Title and first-prompt hydration owned entirely by list/search requests. */
 export function searchTextForTranscript(pathname: string, size: number, engine: "codex" | "claude"): ConversationSearchText {
-  const cached = searchTextCache.get(pathname);
-  if (cached && ((cached[1].title !== null && cached[1].firstPrompt !== null) || cached[0] >= HEAD_BYTES)) return cached[1];
   const head = readHead(pathname, size);
-  if (!head) return cached?.[1] ?? { title: null, firstPrompt: null };
-  const text = conversationTextFromLines(head.text.split("\n").slice(0, 151), engine === "codex");
-  searchTextCache.set(pathname, [head.read, text]);
-  return text;
+  if (!head) return { title: null, firstPrompt: null };
+  return conversationTextFromLines(head.text.split("\n").slice(0, 151), engine === "codex");
 }
 
 export function describe(rootName: RootKey, root: string, pathname: string, st: fs.Stats, stateKey = projectResolutionStateKey()): Meta {

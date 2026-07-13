@@ -720,6 +720,9 @@ test("demoted archived predecessors rank below live transcripts for the recency 
        resolve its conversation id. */
     const pinnedScan = await discoverFilesWithProjectCatalog(roots, undefined, { demote: new Set([archivedPath]), pin: new Set([archivedPath]) });
     expect(pinnedScan.files.some((entry) => entry.path === archivedPath)).toBe(true);
+    const pinnedProject = pinnedScan.files.find((entry) => entry.path === archivedPath)?.project;
+    expect(pinnedScan.projectCatalog.find((entry) => entry.project === pinnedProject)?.conversations)
+      .toBe(DEFAULT_SCHEME_CARDS_PER_PROJECT);
 
     /* Project selection leaves the scheme window bounded; the explicit pin
        above is the route that admits an excluded predecessor. */

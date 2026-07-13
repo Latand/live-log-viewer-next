@@ -18,6 +18,7 @@ test("deleting a Claude subagent is refused while its owning session is active",
   const blocker = await transcriptDeletionBlocker(child, {
     ownerPath: () => owner,
     ownerExists: async () => true,
+    processMayBeRunning: () => false,
     list: async (pin) => pin === owner
       ? [entry(owner, "running", "live")]
       : [entry(child, null, "recent")],
@@ -31,7 +32,20 @@ test("deleting a live transcript is refused when PID attribution is absent", asy
   const blocker = await transcriptDeletionBlocker(target, {
     ownerPath: () => null,
     ownerExists: async () => false,
+    processMayBeRunning: () => false,
     list: async () => [entry(target, null, "live")],
+  });
+
+  expect(blocker).toBe("agent is still running — stop the process first");
+});
+
+test("deletion refuses an idle transcript with fresh process ownership evidence", async () => {
+  const target = "/projects/project-a/session-3.jsonl";
+  const blocker = await transcriptDeletionBlocker(target, {
+    ownerPath: () => null,
+    ownerExists: async () => false,
+    processMayBeRunning: () => true,
+    list: async () => [entry(target, null, "idle")],
   });
 
   expect(blocker).toBe("agent is still running — stop the process first");

@@ -40,22 +40,18 @@ export async function loadProjectConversations(project: string, fetcher: Project
   return items;
 }
 
-export async function deleteProjectFiles(files: readonly FileEntry[], fetcher: ProjectDeleteFetcher = fetch): Promise<number> {
-  let failed = 0;
-  /* Claude root deletion removes its companion directory recursively. Delete
-     deeper subagent paths first so each catalog row reaches the server before
-     its owning root removes the remaining companion artifacts. */
-  const deepestFirst = [...files].sort((left, right) => right.path.split("/").length - left.path.split("/").length);
-  for (const file of deepestFirst) {
-    try {
-      const response = await fetcher(`/api/log?path=${encodeURIComponent(file.path)}`, { method: "DELETE" });
-      const result = await response.json() as { ok?: boolean };
-      if (!response.ok || !result.ok) failed += 1;
-    } catch {
-      failed += 1;
-    }
+export async function deleteProjectFiles(project: string, files: readonly FileEntry[], fetcher: ProjectDeleteFetcher = fetch): Promise<number> {
+  try {
+    const response = await fetcher("/api/log/project-delete", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ project, paths: files.map((file) => file.path) }),
+    });
+    const result = await response.json() as { ok?: boolean };
+    return response.ok && result.ok ? 0 : files.length;
+  } catch {
+    return files.length;
   }
-  return failed;
 }
 
 /**
@@ -240,7 +236,7 @@ export function DeleteProjectButton({ project, files, available }: { project: st
     if (!targets) return;
     setBusy(true);
     setError("");
-    const failed = await deleteProjectFiles(targets);
+    const failed = await deleteProjectFiles(project, targets);
     setBusy(false);
     setConfirming(false);
     if (failed) {

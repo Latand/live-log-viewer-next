@@ -80,6 +80,9 @@ export interface FileScanOptions {
   /** Deep-link target that must survive the recency cap: a transcript path,
       or a `conversation_*` id resolved to its current generation path. */
   pin?: string;
+  /** Batch of transcript paths that must survive the recency cap. Used by
+      operations that need one activity snapshot for a complete target set. */
+  pins?: readonly string[];
 }
 
 /** Transcript paths a pin value requires in the feed. A conversation id is
@@ -88,22 +91,34 @@ export interface FileScanOptions {
     generation of its owning conversation, so an archived `#f=` target always
     ships together with the successor the client must redirect to. An
     unreadable registry keeps a path pin as itself and drops an id pin. */
-export function pinnedPathsFor(pin: string | undefined): ReadonlySet<string> {
-  if (!pin) return new Set();
+export function pinnedPathsFor(value: string | readonly string[] | undefined): ReadonlySet<string> {
+  const values = typeof value === "string" ? [value] : value?.filter(Boolean) ?? [];
+  if (!values.length) return new Set();
   try {
     const registry = agentRegistry();
     const snapshot = registry.snapshot();
-    if (pin.startsWith("conversation_")) {
-      const canonical = registry.canonicalConversationId(pin as `conversation_${string}`) ?? pin;
-      const latest = snapshot.conversations[canonical]?.generations.at(-1)?.path;
-      return new Set(latest ? [latest] : []);
+    const paths = new Set<string>();
+    const latestByKnownPath = new Map<string, string>();
+    for (const conversation of Object.values(snapshot.conversations)) {
+      const latest = conversation.generations.at(-1)?.path;
+      if (!latest) continue;
+      for (const generation of conversation.generations) latestByKnownPath.set(generation.path, latest);
+      for (const pathname of conversation.continuityPaths) latestByKnownPath.set(pathname, latest);
     }
-    const owner = Object.values(snapshot.conversations).find((conversation) =>
-      conversation.generations.some((generation) => generation.path === pin) || conversation.continuityPaths.includes(pin));
-    const latest = owner?.generations.at(-1)?.path;
-    return new Set(latest && latest !== pin ? [pin, latest] : [pin]);
+    for (const pin of values) {
+      if (pin.startsWith("conversation_")) {
+        const canonical = registry.canonicalConversationId(pin as `conversation_${string}`) ?? pin;
+        const latest = snapshot.conversations[canonical]?.generations.at(-1)?.path;
+        if (latest) paths.add(latest);
+        continue;
+      }
+      paths.add(pin);
+      const latest = latestByKnownPath.get(pin);
+      if (latest) paths.add(latest);
+    }
+    return paths;
   } catch (error) {
-    if (error instanceof RegistryReadError) return new Set(pin.startsWith("conversation_") ? [] : [pin]);
+    if (error instanceof RegistryReadError) return new Set(values.filter((pin) => !pin.startsWith("conversation_")));
     throw error;
   }
 }
@@ -150,9 +165,11 @@ async function listFilesInternal(
 ): Promise<{ files: FileEntry[]; projectCatalog: ProjectCatalogEntry[] }> {
   const persist = options.persist === true;
   const demote = archivedTranscriptPaths();
+  const requestedPins = options.pins ? [...options.pins, ...(options.pin ? [options.pin] : [])] : options.pin;
+  const pin = pinnedPathsFor(requestedPins);
   const scan = includeProjectCatalog
-    ? await discoverFilesWithProjectCatalog(undefined, selectedProject, { persist, demote, pin: pinnedPathsFor(options.pin) })
-    : { files: await discoverFiles(undefined, demote), projectCatalog: [] };
+    ? await discoverFilesWithProjectCatalog(undefined, selectedProject, { persist, demote, pin })
+    : { files: await discoverFiles(undefined, demote, pin), projectCatalog: [] };
   const entries = scan.files;
   // The /proc fd scan is only needed to attribute background-task outputs to a
   // live pid. When the shortlist has no such entries, skip the scan entirely;

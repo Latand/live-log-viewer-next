@@ -57,7 +57,8 @@ const catalogStore = globalThis as typeof globalThis & {
   __llvConversationPagination?: Map<number, CatalogPaginationSnapshot>;
   __llvConversationPaginationSequence?: number;
 };
-const MAX_PAGINATION_SNAPSHOTS = 64;
+const MAX_PAGINATION_SNAPSHOTS = 16;
+const MAX_PAGINATION_ROWS = 20_000;
 
 export class ExpiredConversationCatalogCursorError extends Error {
   constructor() {
@@ -102,7 +103,12 @@ function rememberPagination(items: ConversationCatalogEntry[]): number {
   const snapshot = (catalogStore.__llvConversationPaginationSequence ?? 0) + 1;
   catalogStore.__llvConversationPaginationSequence = snapshot;
   snapshots.set(snapshot, { items: [...items], total: items.length });
-  while (snapshots.size > MAX_PAGINATION_SNAPSHOTS) snapshots.delete(snapshots.keys().next().value!);
+  let retainedRows = [...snapshots.values()].reduce((total, page) => total + page.items.length, 0);
+  while ((snapshots.size > MAX_PAGINATION_SNAPSHOTS || retainedRows > MAX_PAGINATION_ROWS) && snapshots.size > 1) {
+    const oldest = snapshots.keys().next().value!;
+    retainedRows -= snapshots.get(oldest)!.items.length;
+    snapshots.delete(oldest);
+  }
   return snapshot;
 }
 
@@ -142,7 +148,8 @@ export function paginateConversationCatalog(
     const matching = catalog
       .filter((entry) => !options.project || entry.project === options.project)
       .filter((entry) => matchesQuery(entry, options.query ?? ""))
-      .sort((left, right) => right.mtime - left.mtime || left.path.localeCompare(right.path));
+      .sort((left, right) => right.mtime - left.mtime || left.path.localeCompare(right.path))
+      .map((entry) => entry.firstPrompt ? { ...entry, firstPrompt: "" } : entry);
     snapshotId = rememberPagination(matching);
     offset = 0;
     snapshot = paginationSnapshots().get(snapshotId)!;

@@ -211,6 +211,30 @@ export function assignTranscriptPids(entries: FileEntry[]): void {
   }
 }
 
+/** Destructive-operation guard for a specific hydrated transcript. It uses a
+ * fresh, uncapped process snapshot and accepts conservative cwd ownership when
+ * ordinary UI attribution leaves an idle or older entry without a pid. */
+export function transcriptProcessMayBeRunning(
+  entry: FileEntry,
+  processes: readonly AgentProcess[] = agentProcesses(true),
+): boolean {
+  return processes.some((proc) => transcriptProcessOwnsEntry(entry, proc));
+}
+
+export function transcriptProcessOwnsEntry(
+  entry: FileEntry,
+  proc: AgentProcess,
+  entryProjectKey: string | null = projectKey(entry),
+): boolean {
+  const engine = entry.root === "codex-sessions" ? "codex" : entry.root === "claude-projects" ? "claude" : null;
+  if (!engine || !entry.path.endsWith(".jsonl")) return false;
+  const sid = sessionIdFromPath(entry.path);
+  if (proc.engine !== engine || isHelperArgv(proc.argv) || !pidAlive(proc.pid)) return false;
+  const processSid = argvSessionId(proc.argv);
+  if (sid && processSid === sid) return true;
+  return processSid === null && proc.tty !== 0 && entryProjectKey !== null && processKey(proc) === entryProjectKey;
+}
+
 /**
  * Fresh revalidation for kill: re-checks the pid against /proc at request time
  * so a pid recycled since the scanner pass cannot be signalled. The process
