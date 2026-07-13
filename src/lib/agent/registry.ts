@@ -43,6 +43,36 @@ export interface TmuxHostEvidence {
   argv: string[];
 }
 
+export interface StructuredHostColumns {
+  kind: "codex-app-server" | "claude-broker";
+  endpoint: string;
+  process: ProcessIdentity | null;
+  eventCursor: number;
+  protocolVersion: string | null;
+  writerClaimEpoch: number;
+  activeTurnRef: string | null;
+  pendingAttention: string[];
+  activeFlags: string[];
+}
+
+const STRUCTURED_CLAIM_PREFIX = "structured-host:";
+
+function structuredClaimOwner(identity: ProcessIdentity): string {
+  return `${STRUCTURED_CLAIM_PREFIX}${JSON.stringify(identity)}`;
+}
+
+function structuredClaimIdentity(owner: string): ProcessIdentity | null {
+  if (!owner.startsWith(STRUCTURED_CLAIM_PREFIX)) return null;
+  try {
+    const identity = JSON.parse(owner.slice(STRUCTURED_CLAIM_PREFIX.length)) as Partial<ProcessIdentity>;
+    return Number.isInteger(identity.pid) && identity.pid! > 0
+      ? { pid: identity.pid!, startIdentity: typeof identity.startIdentity === "string" ? identity.startIdentity : null }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Immutable tmux facts captured before readiness polling can expose a new
     pane to the observer. They are the only durable correlation between a
     launch receipt and an externally observed host. */
@@ -65,6 +95,8 @@ export interface AgentRegistryEntry {
   launchProfile?: LaunchProfile;
   status: AgentHostStatus;
   host: TmuxHostEvidence | null;
+  /** Structured hosting metadata lives beside legacy tmux evidence during migration. */
+  structuredHost?: StructuredHostColumns | null;
   claimEpoch: number;
   claimOwner: string | null;
   pendingAction: "spawn" | "resume" | "handoff" | null;
@@ -548,6 +580,39 @@ function normalizeGeneration(value: NativeGeneration): NativeGeneration {
   };
 }
 
+function normalizeStructuredHost(value: unknown): StructuredHostColumns | null {
+  if (!value || typeof value !== "object") return null;
+  const host = value as Partial<StructuredHostColumns>;
+  if (host.kind !== "codex-app-server" && host.kind !== "claude-broker") return null;
+  const processIdentity = host.process && typeof host.process === "object"
+    && typeof host.process.pid === "number"
+    ? { pid: host.process.pid, startIdentity: typeof host.process.startIdentity === "string" ? host.process.startIdentity : null }
+    : null;
+  return {
+    kind: host.kind,
+    endpoint: typeof host.endpoint === "string" ? host.endpoint : "",
+    process: processIdentity,
+    eventCursor: Number.isSafeInteger(host.eventCursor) && (host.eventCursor ?? -1) >= 0 ? host.eventCursor! : 0,
+    protocolVersion: typeof host.protocolVersion === "string" ? host.protocolVersion : null,
+    writerClaimEpoch: Number.isSafeInteger(host.writerClaimEpoch) && (host.writerClaimEpoch ?? -1) >= 0 ? host.writerClaimEpoch! : 0,
+    activeTurnRef: typeof host.activeTurnRef === "string" ? host.activeTurnRef : null,
+    pendingAttention: Array.isArray(host.pendingAttention)
+      ? host.pendingAttention.filter((item): item is string => typeof item === "string")
+      : [],
+    activeFlags: Array.isArray(host.activeFlags)
+      ? host.activeFlags.filter((item): item is string => typeof item === "string")
+      : [],
+  };
+}
+
+function normalizeEntry(value: AgentRegistryEntry): AgentRegistryEntry {
+  return {
+    ...value,
+    host: value.host && typeof value.host === "object" && value.host.kind === "tmux" ? value.host : null,
+    structuredHost: normalizeStructuredHost(value.structuredHost),
+  };
+}
+
 function normalizeProviderReceipt(value: ProviderReceipt | null | undefined): ProviderReceipt | null {
   if (!value || typeof value !== "object") return null;
   return {
@@ -908,7 +973,7 @@ function readFile(filename: string): RegistryFile {
     const legacy = parsed.legacyResumePanes;
     return {
       version: 2,
-      entries: parsed.entries,
+      entries: Object.fromEntries(Object.entries(parsed.entries).map(([id, entry]) => [id, normalizeEntry(entry)])),
       receipts: Object.fromEntries(Object.entries(parsed.receipts).map(([id, receipt]) => [id, normalizeReceipt(receipt)])),
       lineageEdges: parsed.lineageEdges && typeof parsed.lineageEdges === "object" ? parsed.lineageEdges : {},
       importedResumePanes: parsed.importedResumePanes === true,
@@ -1395,12 +1460,104 @@ export class AgentRegistry {
   upsert(entry: Omit<AgentRegistryEntry, "updatedAt">): AgentRegistryEntry {
     return this.mutate((file) => {
       const keyId = sessionKeyId(entry.key);
-      const changedHostPaths = activeHostPathsChangedByEntry(file, keyId, entry);
+      const existing = file.entries[keyId];
+      const replacement = entry.structuredHost === undefined && existing?.structuredHost !== undefined
+        ? { ...entry, structuredHost: existing.structuredHost }
+        : entry;
+      const changedHostPaths = activeHostPathsChangedByEntry(file, keyId, replacement);
       const readinessBefore = migrationReadinessSignature(file, entry.key.engine, changedHostPaths);
-      const full = { ...entry, updatedAt: now() };
+      const full = { ...replacement, updatedAt: now() };
       file.entries[keyId] = full;
       advanceMigrationScopeRevision(file, entry.key.engine, readinessBefore, changedHostPaths);
       return clone(full);
+    });
+  }
+
+  setStructuredHost(
+    key: SessionKey,
+    structuredHost: StructuredHostColumns | null,
+    status?: AgentHostStatus,
+  ): AgentRegistryEntry {
+    return this.mutate((file) => {
+      const keyId = sessionKeyId(key);
+      const entry = file.entries[keyId];
+      if (!entry) throw new Error("agent registry entry is missing");
+      const replacement = {
+        ...entry,
+        structuredHost: structuredHost ? normalizeStructuredHost(structuredHost) : null,
+        status: status ?? entry.status,
+      };
+      const changedHostPaths = activeHostPathsChangedByEntry(file, keyId, replacement);
+      const readinessBefore = migrationReadinessSignature(file, key.engine, changedHostPaths);
+      entry.structuredHost = structuredHost ? normalizeStructuredHost(structuredHost) : null;
+      if (status) entry.status = status;
+      entry.updatedAt = now();
+      advanceMigrationScopeRevision(file, key.engine, readinessBefore, changedHostPaths);
+      return clone(entry);
+    });
+  }
+
+  /** Writes mutable host state only while the caller still owns its writer fence. */
+  setStructuredHostClaimed(
+    key: SessionKey,
+    structuredHost: StructuredHostColumns,
+    status: AgentHostStatus,
+    claimOwner: string,
+    claimEpoch: number,
+    releaseClaim = false,
+  ): AgentRegistryEntry | null {
+    return this.mutate((file) => {
+      const keyId = sessionKeyId(key);
+      const entry = file.entries[keyId];
+      if (!entry?.structuredHost
+        || entry.claimOwner !== claimOwner
+        || entry.claimEpoch !== claimEpoch
+        || entry.structuredHost.writerClaimEpoch !== claimEpoch) return null;
+      const replacement = {
+        ...entry,
+        structuredHost: normalizeStructuredHost(structuredHost),
+        status,
+      };
+      const changedHostPaths = activeHostPathsChangedByEntry(file, keyId, replacement);
+      const readinessBefore = migrationReadinessSignature(file, key.engine, changedHostPaths);
+      entry.structuredHost = replacement.structuredHost;
+      entry.status = status;
+      if (releaseClaim) entry.claimOwner = null;
+      entry.updatedAt = now();
+      advanceMigrationScopeRevision(file, key.engine, readinessBefore, changedHostPaths);
+      return clone(entry);
+    });
+  }
+
+  ownsStructuredHostClaim(key: SessionKey, claimOwner: string, claimEpoch: number): boolean {
+    const entry = this.snapshot().entries[sessionKeyId(key)];
+    return entry?.claimOwner === claimOwner
+      && entry.claimEpoch === claimEpoch
+      && entry.structuredHost?.writerClaimEpoch === claimEpoch;
+  }
+
+  /** Atomically claims a stale structured row and advances its writer fence. */
+  claimStructuredHost(
+    key: SessionKey,
+    owner: ProcessIdentity,
+    options: { allowUnhosted?: boolean } = {},
+  ): AgentRegistryEntry | null {
+    return this.mutate((file) => {
+      const entry = file.entries[sessionKeyId(key)];
+      if (!entry?.structuredHost) return null;
+      if (entry.status === "unhosted" && options.allowUnhosted !== true) return null;
+      const liveHost = entry.structuredHost.process;
+      if (liveHost && this.ownerAlive(liveHost)) return null;
+      const requestedOwner = structuredClaimOwner(owner);
+      if (entry.claimOwner && entry.claimOwner !== requestedOwner) {
+        const priorOwner = structuredClaimIdentity(entry.claimOwner);
+        if (!priorOwner || this.ownerAlive(priorOwner)) return null;
+      }
+      entry.claimOwner = requestedOwner;
+      entry.claimEpoch += 1;
+      entry.structuredHost.writerClaimEpoch = entry.claimEpoch;
+      entry.updatedAt = now();
+      return clone(entry);
     });
   }
 
@@ -1408,11 +1565,12 @@ export class AgentRegistry {
     this.mutate((file) => {
       const entry = file.entries[sessionKeyId(key)];
       if (!entry) return;
-      const replacement = { ...entry, host: null, status: "unhosted" as const };
+      const status = entry.structuredHost?.process ? entry.status : "unhosted";
+      const replacement = { ...entry, host: null, status };
       const changedHostPaths = activeHostPathsChangedByEntry(file, sessionKeyId(key), replacement);
       const readinessBefore = migrationReadinessSignature(file, key.engine, changedHostPaths);
       entry.host = null;
-      entry.status = "unhosted";
+      entry.status = status;
       entry.updatedAt = now();
       advanceMigrationScopeRevision(file, key.engine, readinessBefore, changedHostPaths);
     });
@@ -1437,6 +1595,20 @@ export class AgentRegistry {
         entry.claimOwner = null;
         entry.updatedAt = now();
       }
+    });
+  }
+
+  /** Releases a structured writer only while both ownership fences still match. */
+  releaseStructuredHostClaim(key: SessionKey, owner: string, claimEpoch: number): boolean {
+    return this.mutate((file) => {
+      const entry = file.entries[sessionKeyId(key)];
+      if (!entry?.structuredHost
+        || entry.claimOwner !== owner
+        || entry.claimEpoch !== claimEpoch
+        || entry.structuredHost.writerClaimEpoch !== claimEpoch) return false;
+      entry.claimOwner = null;
+      entry.updatedAt = now();
+      return true;
     });
   }
 

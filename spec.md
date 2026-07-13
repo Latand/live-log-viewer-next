@@ -1,25 +1,20 @@
-# PR #154: Chime loop on project switch and limits no-data UI state
+# PR #152: EngineHost interface and CodexAppServerHost
 
 ## Task statement
 
-Stop the lifecycle-chime cascade triggered by selected-project hydration, preserve real question and push notifications, and verify the limits footer explains throttling for a never-cached Claude account.
+Implement issue #149 from the issue #25 runtime spike: define the shared structured-host contract, add the Codex app-server adapter on ChatGPT subscription authentication, persist its mutable host state beside the durable engine thread identity, and support restart adoption through `thread/resume`.
 
 ## Acceptance criteria
 
-- AC1: Production browser evidence identifies the lifecycle Web Audio path and reports the measured firing volume and rate.
-- AC2: Switching projects seeds previously unseen historical attention entries silently.
-- AC3: Conversation transition history survives project switches and repeated polls.
-- AC4: A known live-to-waiting transition during hydration remains audible, and a genuinely new same-scope question rings once.
-- AC5: Scanner `notifyQuestion` web push delivery remains unchanged and keeps its persisted attention-id guard.
-- AC6: A regression test covers the production-sized 464-entry project hydration batch.
-- AC7: A never-cached Claude account with `oauth-rate-limited` provenance shows the throttled state and next retry time in the limits footer.
-- AC8: The diff contains no engine or tmux changes.
-- AC9: The patched browser replay records zero lifecycle chimes for the reproduced project switch.
-- AC10: `bun test` and `bunx tsc --noEmit` pass.
-
-## Validation gates
-
-- Headless Puppeteer production baseline and patched local replay.
-- `bun test`.
-- `bunx tsc --noEmit`.
-- Non-draft PR with a clean merge state.
+- AC1: `EngineHost` exposes `attach(afterSeq)`, `send`, `interrupt`, `answer`, `health`, and `release` with the spike contract semantics.
+- AC2: `CodexAppServerHost` maps the contract to app-server JSON-RPC over stdio and uses the Codex thread ID as durable session identity.
+- AC3: Structured hosting activates only when `LLV_STRUCTURED_HOSTS=1`; the default state remains disabled.
+- AC4: Existing tmux delivery paths, flow engines, and UI remain unchanged.
+- AC5: Registry state persists host kind, endpoint, PID plus process-start identity, event cursor, protocol version, writer-claim epoch, active turn reference, and pending attention.
+- AC6: Viewer restart adoption resumes every eligible Codex registry row through `thread/resume`.
+- AC7: Delivery maps queue entry IDs to `clientUserMessageId`, active turns use `expectedTurnId`, interruption stays explicit, and structured attention can be answered.
+- AC8: The real Codex CLI integration starts a thread, attaches a late client, steers the active turn, restarts the host process, and resumes the same thread on the ChatGPT subscription.
+- AC9: The real integration skips gracefully when the Codex CLI is unavailable.
+- AC10: API keys and authentication tokens never cross into the child environment or diagnostic output.
+- AC11: `bun test`, touched-file ESLint, and `bunx tsc --noEmit` pass.
+- AC12: A fresh independent review reaches a clean APPROVE verdict.

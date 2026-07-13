@@ -1,0 +1,4 @@
+{"jsonrpc":"2.0","method":"thread/status/changed","params":{"threadId":"status-thread","status":{"type":"active","activeFlags":["waitingForApproval"]}}}
+{"jsonrpc":"2.0","method":"thread/status/changed","params":{"threadId":"status-thread","status":{"type":"idle"}}}
+{"jsonrpc":"2.0","method":"thread/status/changed","params":{"threadId":"status-thread","status":{"type":"notLoaded"}}}
+{"jsonrpc":"2.0","method":"thread/status/changed","params":{"threadId":"status-thread","status":{"type":"systemError","activeFlags":["recovering"]}}}
