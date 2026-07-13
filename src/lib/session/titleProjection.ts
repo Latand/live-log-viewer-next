@@ -6,12 +6,10 @@ import { isRenameableSessionEntry } from "./renameEligibility";
 import { applyTitleOverride, indexSessionTitles, loadSessionTitles } from "./titleStore";
 
 /**
- * The single projection that makes a custom session title (issue #33) the last
- * word on `FileEntry.title` for every server consumer — the files response,
- * push notifications, `/api/timeline`, and `/api/resources` — instead of only
- * the files response. Each consumer applies it to its own scanner entries so
- * the override, the preserved `autoTitle`, and the `renamable` flag reach push
- * bodies, timeline actors, and resource rows alike.
+ * The single projection for user-visible session metadata. The latest registry
+ * launch profile supplies its title and project, then a custom title (issue
+ * #33) has final precedence for every server consumer: files, conversation
+ * search, push notifications, `/api/timeline`, and `/api/resources`.
  *
  * Stamps `conversationId` when the registry owns the path (needed for the
  * conversation-keyed override lookup, and a bonus canonical deep link for
@@ -31,7 +29,7 @@ export function overlaySessionTitles(entries: FileEntry[]): void {
     snapshot = null;
   }
 
-  const conversationByPath = new Map<string, string>();
+  const conversationByPath = new Map<string, ViewerConversationId>();
   const aliasesByCanonical = new Map<string, string[]>();
   const ownedPathsByConversation = new Map<string, string[]>();
   if (snapshot) {
@@ -50,9 +48,15 @@ export function overlaySessionTitles(entries: FileEntry[]): void {
 
   for (const entry of entries) {
     if (entry.engine !== "claude" && entry.engine !== "codex") continue;
+    const owner = conversationByPath.get(entry.path);
     if (!entry.conversationId) {
-      const owner = conversationByPath.get(entry.path);
       if (owner) entry.conversationId = owner;
+    }
+    const conversation = owner ? snapshot?.conversations[owner] : undefined;
+    const latest = conversation?.generations.at(-1);
+    if (latest?.path === entry.path) {
+      entry.title = latest.launchProfile.title ?? entry.title;
+      entry.project = latest.launchProfile.project ?? entry.project;
     }
     entry.renamable = isRenameableSessionEntry(entry);
     if (index.size > 0) {

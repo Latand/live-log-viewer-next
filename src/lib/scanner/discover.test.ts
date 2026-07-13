@@ -9,7 +9,7 @@ import type { RootKey } from "../types";
 import { conversationCatalogSnapshot } from "./conversationCatalog";
 import { discoverFiles, discoverFilesWithProjectCatalog } from "./discover";
 import { projectForCwd } from "./describe";
-import { projectResolutionStateKey } from "./projectState";
+import { PROJECT_RESOLUTION_VERSION, projectResolutionStateKey } from "./projectState";
 import { FILE_CAP } from "./roots";
 import { DEFAULT_SCHEME_CARDS_PER_PROJECT } from "./schemeWindow";
 
@@ -32,6 +32,51 @@ test("pure project-catalog discovery leaves the state directory unchanged", asyn
     await Promise.all(Object.values(roots).map((root) => mkdir(root, { recursive: true })));
     await discoverFilesWithProjectCatalog(roots, undefined, { persist: false });
     expect(existsSync(path.join(process.env.LLV_STATE_DIR, "project-catalog.json"))).toBe(false);
+  } finally {
+    if (previousStateDir === undefined) delete process.env.LLV_STATE_DIR;
+    else process.env.LLV_STATE_DIR = previousStateDir;
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test("persisted scheme metadata excludes unbounded first-prompt text", async () => {
+  const base = await mkdtemp(path.join(os.tmpdir(), "llv-discover-bounded-catalog-"));
+  const previousStateDir = process.env.LLV_STATE_DIR;
+  process.env.LLV_STATE_DIR = path.join(base, "state");
+  try {
+    const roots: Record<RootKey, string> = {
+      "codex-sessions": path.join(base, "codex-sessions"),
+      "claude-projects": path.join(base, "claude-projects"),
+      "claude-tasks": path.join(base, "claude-tasks"),
+    };
+    await Promise.all(Object.values(roots).map((root) => mkdir(root, { recursive: true })));
+    const marker = "PROMPT_TAIL_MUST_STAY_OUT_OF_SCHEME_STATE";
+    const prompt = `Readable title ${"x".repeat(2_000)} ${marker}`;
+    const transcript = path.join(roots["claude-projects"], "bounded", "session.jsonl");
+    await writeFixture(transcript, JSON.stringify({ type: "user", message: { content: prompt } }) + "\n", 1_700_000_000);
+    const transcriptStat = await stat(transcript);
+    await mkdir(process.env.LLV_STATE_DIR, { recursive: true });
+    await writeFile(path.join(process.env.LLV_STATE_DIR, "project-catalog.json"), JSON.stringify({
+      version: 1,
+      resolutionVersion: PROJECT_RESOLUTION_VERSION,
+      files: {
+        [transcript]: {
+          rootName: "claude-projects",
+          size: transcriptStat.size,
+          mtimeMs: transcriptStat.mtimeMs,
+          stateKey: projectResolutionStateKey(),
+          project: "bounded",
+          kind: "session",
+          session: true,
+        },
+      },
+    }));
+
+    await discoverFilesWithProjectCatalog(roots);
+
+    const persisted = await readFile(path.join(process.env.LLV_STATE_DIR, "project-catalog.json"), "utf8");
+    expect(persisted).not.toContain(marker);
+    expect(conversationCatalogSnapshot().find((entry) => entry.path === transcript)?.firstPrompt).toBe("");
   } finally {
     if (previousStateDir === undefined) delete process.env.LLV_STATE_DIR;
     else process.env.LLV_STATE_DIR = previousStateDir;

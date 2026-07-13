@@ -14,21 +14,29 @@ interface Meta {
   project: string;
   worktree?: string;
   title: string;
-  firstPrompt: string;
   engine: Engine;
   kind: string;
   fmt: Fmt;
 }
 
-const metaCache = globalCache<[number, string, Meta]>("meta-v4");
+/* Earlier issue-171 builds retained full prompts in these global maps. Clear
+   them during hot reload so the bounded scheme metadata shape takes effect
+   without waiting for a process restart. */
+globalCache<unknown>("meta-v4").clear();
+globalCache<unknown>("title-v2").clear();
+const metaCache = globalCache<[number, string, Meta]>("meta-v5");
 // Title and codex project live in the immutable head of a growing transcript,
 // so both are keyed by path and kept for good once resolved. A live file grows
 // on every poll, so a size-keyed meta cache would re-read the whole file each
 // tick; these caches read only the head and stop reading once the answer is
 // fixed. A head that has not yet produced a title (empty/short file) is left
 // open so growth can still yield one.
-type ConversationText = { title: string | null; firstPrompt: string | null };
-const titleCache = globalCache<[number, ConversationText]>("title-v2");
+export type ConversationSearchText = { title: string | null; firstPrompt: string | null };
+const titleCache = globalCache<[number, string | null]>("title-v3");
+/* Search text can be large and belongs to the list/search path. Keeping its
+   cache separate prevents recurring scheme scans and their metadata cache from
+   retaining corpus-scale prompt payloads. */
+const searchTextCache = globalCache<[number, ConversationSearchText]>("conversation-search-v1");
 const codexProjectCache = globalCache<{ stateKey: string; project: string; worktree?: string }>("codex-project-v3");
 /* The cwd sits in the immutable head, so it follows the title-cache rule:
    keyed by path, re-read only while unresolved and the head still short. */
@@ -452,8 +460,7 @@ function userPromptFromRecord(obj: Record<string, unknown>, wantCodex: boolean):
   return null;
 }
 
-function conversationTextFromLines(lines: string[], wantCodex: boolean): ConversationText {
-  let firstPrompt: string | null = null;
+function titleFromLines(lines: string[], wantCodex: boolean): string | null {
   for (const line of lines) {
     let obj: Record<string, unknown>;
     try {
@@ -465,35 +472,45 @@ function conversationTextFromLines(lines: string[], wantCodex: boolean): Convers
     }
     if (obj.type === "summary") {
       const title = goodTitle(obj.summary);
-      if (title) return { title, firstPrompt };
+      if (title) return title;
+    }
+    if (obj.type === "ai-title") {
+      const title = goodTitle(obj.aiTitle);
+      if (title) return title;
+    }
+    const title = goodTitle(userPromptFromRecord(obj, wantCodex));
+    if (title) return title;
+  }
+  return null;
+}
+
+function conversationTextFromLines(lines: string[], wantCodex: boolean): ConversationSearchText {
+  let title: string | null = null;
+  let firstPrompt: string | null = null;
+  for (const line of lines) {
+    let obj: Record<string, unknown>;
+    try {
+      const parsed = JSON.parse(line);
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) continue;
+      obj = parsed;
+    } catch {
+      continue;
+    }
+    if (obj.type === "summary") {
+      title ??= goodTitle(obj.summary);
     }
     // Compaction successors open with the raw continuation prompt; the
     // generated ai-title record names the conversation better.
     if (obj.type === "ai-title") {
-      const title = goodTitle(obj.aiTitle);
-      if (title) return { title, firstPrompt };
+      title ??= goodTitle(obj.aiTitle);
     }
     const prompt = userPromptFromRecord(obj, wantCodex);
     if (!prompt) continue;
     firstPrompt ??= prompt;
-    const title = goodTitle(prompt);
-    if (title) return { title, firstPrompt };
+    title ??= goodTitle(prompt);
+    if (title && firstPrompt) return { title, firstPrompt };
   }
-  return { title: null, firstPrompt };
-}
-
-function firstPromptFromLines(lines: string[], wantCodex: boolean): string | null {
-  for (const line of lines) {
-    let obj: Record<string, unknown>;
-    try {
-      obj = JSON.parse(line) as Record<string, unknown>;
-    } catch {
-      continue;
-    }
-    const prompt = userPromptFromRecord(obj, wantCodex);
-    if (prompt) return prompt;
-  }
-  return null;
+  return { title, firstPrompt };
 }
 
 function transcriptCwd(pathname: string, size: number): string | null {
@@ -514,26 +531,25 @@ function projectInfoFromSlug(slug: string): { project: string; worktree?: string
   return persistedProjects().bySlug.get(slug) ?? null;
 }
 
-function scanJsonlConversationText(pathname: string, size: number, wantCodex: boolean): ConversationText {
+function scanJsonlTitle(pathname: string, size: number, wantCodex: boolean): string | null {
   const cached = titleCache.get(pathname);
+  if (cached && (cached[1] !== null || cached[0] >= HEAD_BYTES)) return cached[1];
+  const head = readHead(pathname, size);
+  if (!head) return cached?.[1] ?? null;
+  const title = titleFromLines(head.text.split("\n").slice(0, 151), wantCodex);
+  titleCache.set(pathname, [head.read, title]);
+  return title;
+}
+
+/** Title and first-prompt hydration owned entirely by list/search requests. */
+export function searchTextForTranscript(pathname: string, size: number, engine: "codex" | "claude"): ConversationSearchText {
+  const cached = searchTextCache.get(pathname);
   if (cached && ((cached[1].title !== null && cached[1].firstPrompt !== null) || cached[0] >= HEAD_BYTES)) return cached[1];
   const head = readHead(pathname, size);
   if (!head) return cached?.[1] ?? { title: null, firstPrompt: null };
-  const text = conversationTextFromLines(head.text.split("\n").slice(0, 151), wantCodex);
-  titleCache.set(pathname, [head.read, text]);
+  const text = conversationTextFromLines(head.text.split("\n").slice(0, 151), engine === "codex");
+  searchTextCache.set(pathname, [head.read, text]);
   return text;
-}
-
-/** Search-only prompt hydration for transcript kinds whose scheme metadata is
- * available without reading their transcript head (notably Claude subagents). */
-export function firstPromptForTranscript(pathname: string, size: number, engine: "codex" | "claude"): string {
-  const cached = titleCache.get(pathname);
-  if (cached?.[1].firstPrompt) return cached[1].firstPrompt;
-  const head = readHead(pathname, size);
-  if (!head) return "";
-  const firstPrompt = firstPromptFromLines(head.text.split("\n").slice(0, 151), engine === "codex");
-  titleCache.set(pathname, [head.read, { title: cached?.[1].title ?? null, firstPrompt }]);
-  return firstPrompt ?? "";
 }
 
 export function describe(rootName: RootKey, root: string, pathname: string, st: fs.Stats, stateKey = projectResolutionStateKey()): Meta {
@@ -544,7 +560,6 @@ export function describe(rootName: RootKey, root: string, pathname: string, st: 
   let project = "other";
   let worktree: string | undefined;
   let title: string | null = null;
-  let firstPrompt: string | null = null;
   let engine: Engine = "claude";
   let kind = "";
   let fmt: Fmt = "plain";
@@ -578,9 +593,7 @@ export function describe(rootName: RootKey, root: string, pathname: string, st: 
     engine = "codex";
     kind = "session";
     fmt = "codex";
-    const text = scanJsonlConversationText(pathname, st.size, true);
-    title = text.title ?? "Codex session";
-    firstPrompt = text.firstPrompt;
+    title = scanJsonlTitle(pathname, st.size, true) ?? "Codex session";
   } else if (rootName === "claude-projects") {
     const slug = rel.split(path.sep)[0] ?? "";
     const worktreeInfo = worktreeFromSlug(slug);
@@ -606,9 +619,7 @@ export function describe(rootName: RootKey, root: string, pathname: string, st: 
         "Subagent " + fn.slice("agent-".length).split(".")[0];
     } else {
       kind = "session";
-      const text = scanJsonlConversationText(pathname, st.size, false);
-      title = text.title ?? "Claude session";
-      firstPrompt = text.firstPrompt;
+      title = scanJsonlTitle(pathname, st.size, false) ?? "Claude session";
     }
   } else if (rootName === "claude-tasks") {
     const slug = rel.split(path.sep)[0] ?? "";
@@ -623,7 +634,6 @@ export function describe(rootName: RootKey, root: string, pathname: string, st: 
     project,
     worktree,
     title: cleanTitle(title ?? fn, 120),
-    firstPrompt: firstPrompt ?? "",
     engine,
     kind,
     fmt,

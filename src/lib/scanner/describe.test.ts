@@ -4,7 +4,7 @@ import path from "node:path";
 
 import { afterAll, expect, test } from "bun:test";
 
-import { describe, parseWorktreeGitdir, persistWorktreeMap, projectForCwd, projectFromSlug } from "./describe";
+import { describe, parseWorktreeGitdir, persistWorktreeMap, projectForCwd, projectFromSlug, searchTextForTranscript } from "./describe";
 
 const SANDBOX = fs.mkdtempSync(path.join(os.tmpdir(), "llv-describe-test-"));
 const REAL_STATE = process.env.LLV_STATE_DIR;
@@ -246,7 +246,7 @@ test("stale flow slug keeps orphan background tasks under the saved project", ()
   expect(meta.worktree).toBe("live-log-viewer-workflows");
 });
 
-test("conversation metadata retains the first prompt when it supplies the title", () => {
+test("conversation prompts stay in the search-only metadata path", () => {
   const root = path.join(SANDBOX, "codex-first-prompt");
   const transcript = path.join(root, "session.jsonl");
   fs.mkdirSync(root, { recursive: true });
@@ -255,7 +255,11 @@ test("conversation metadata retains the first prompt when it supplies the title"
     payload: { type: "user_message", message: "Investigate cobalt orchard" },
   }) + "\n");
 
-  expect(describe("codex-sessions", root, transcript, fs.statSync(transcript))).toMatchObject({
+  const stat = fs.statSync(transcript);
+  expect(describe("codex-sessions", root, transcript, stat)).toEqual(expect.objectContaining({
+    title: "Investigate cobalt orchard",
+  }));
+  expect(searchTextForTranscript(transcript, stat.size, "codex")).toEqual({
     title: "Investigate cobalt orchard",
     firstPrompt: "Investigate cobalt orchard",
   });

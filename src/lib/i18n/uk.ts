@@ -94,6 +94,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "trash.deleting": "видаляю…",
   "trash.confirmYes": "Так, видалити",
   "trash.deleteProject": "Видалити проєкт з диска",
+  "trash.projectLoadFailed": "Не вдалося завантажити всі розмови проєкту",
 
   "list.title": "Усі розмови",
   "list.hint": "Завантажуються сторінками від найновіших з усіх розмов цього проєкту на диску.",

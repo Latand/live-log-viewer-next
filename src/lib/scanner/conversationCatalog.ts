@@ -31,6 +31,7 @@ export interface ConversationListPage {
 }
 
 export type ConversationStat = (pathname: string) => Promise<{ size: number; mtimeMs: number }>;
+export type ConversationMetadataHydrator = (entry: ConversationCatalogEntry) => ConversationCatalogEntry | Promise<ConversationCatalogEntry>;
 
 export interface ConversationCatalogQuery {
   project?: string;
@@ -146,13 +147,15 @@ export async function loadConversationCatalogPage(
   catalog: readonly ConversationCatalogEntry[],
   options: ConversationCatalogQuery = {},
   statFile: ConversationStat = stat,
+  hydrateMetadata?: ConversationMetadataHydrator,
 ): Promise<ConversationListPage> {
   const page = paginateConversationCatalog(catalog, options);
   const items = await Promise.all(page.items.map(async (entry) => {
     try {
-      const current = await statFile(entry.path);
+      const hydrated = hydrateMetadata ? await hydrateMetadata(entry) : entry;
+      const current = await statFile(hydrated.path);
       return catalogEntryToFileEntry({
-        ...entry,
+        ...hydrated,
         mtime: current.mtimeMs / 1000,
         size: current.size,
       });

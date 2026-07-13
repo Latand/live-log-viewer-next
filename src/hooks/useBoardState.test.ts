@@ -250,12 +250,14 @@ test("polling adopts a change another device made", async () => {
 });
 
 test("a cross-project queued open is flushed when its board loads", async () => {
-  const server = fakeServer({ proj: boardOf(3) });
+  const server = fakeServer({ proj: boardOf(3, { viewMode: "list" }) });
   queueColumnOpen("proj", "/opened", false); // recorded before the project mounts
   const store = createBoardStore({ project: "proj", fetcher: server.fetcher, storage: null, scheduler: idleScheduler().scheduler });
   await settle();
   expect(store.getSnapshot().prefs.manual).toEqual(["/opened"]);
+  expect(store.getSnapshot().prefs.viewMode).toBe("scheme");
   expect(server.projects.proj.prefs.manual).toEqual(["/opened"]);
+  expect(server.projects.proj.prefs.viewMode).toBe("scheme");
   store.dispose();
 });
 

@@ -58,14 +58,20 @@ test("search finds a conversation excluded by the scheme project and card caps",
 test("a list page stats only the conversations returned on that page", async () => {
   const catalog = Array.from({ length: 12 }, (_, index) => entry(index + 1));
   const statPaths: string[] = [];
+  const metadataPaths: string[] = [];
   const page = await loadConversationCatalogPage(catalog, { limit: 4 }, async (pathname) => {
     statPaths.push(pathname);
     return { size: 999, mtimeMs: 50_000 };
+  }, async (item) => {
+    metadataPaths.push(item.path);
+    return { ...item, title: `Hydrated ${item.title}` };
   });
 
   expect(statPaths).toEqual(page.items.map((item) => item.path));
+  expect(metadataPaths).toEqual(statPaths);
   expect(statPaths).toHaveLength(4);
   expect(page.items.every((item) => item.size === 999)).toBe(true);
+  expect(page.items.every((item) => item.title.startsWith("Hydrated "))).toBe(true);
   expect(page.nextCursor).toBeString();
 });
 

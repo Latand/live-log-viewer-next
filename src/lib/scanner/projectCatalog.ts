@@ -21,7 +21,6 @@ type CachedProjectFile = {
   session: boolean;
   worktree?: string;
   title?: string;
-  firstPrompt?: string;
   engine?: "codex" | "claude" | "shell";
   fmt?: "codex" | "claude" | "plain";
 };
@@ -29,7 +28,7 @@ type CachedProjectFile = {
 type ProjectCatalogFile = CachedProjectFile & {
   path: string;
   title: string;
-  firstPrompt: string;
+  titleCached: boolean;
   engine: "codex" | "claude" | "shell";
   fmt: "codex" | "claude" | "plain";
 };
@@ -77,7 +76,6 @@ function readState(): ProjectCatalogState {
         session: file.session,
         worktree: typeof file.worktree === "string" ? file.worktree : undefined,
         title: typeof file.title === "string" ? file.title : undefined,
-        firstPrompt: typeof file.firstPrompt === "string" ? file.firstPrompt : undefined,
         engine: file.engine === "codex" || file.engine === "claude" || file.engine === "shell" ? file.engine : undefined,
         fmt: file.fmt === "codex" || file.fmt === "claude" || file.fmt === "plain" ? file.fmt : undefined,
       };
@@ -104,6 +102,26 @@ function isConversation(rootName: RawEntry["rootName"], kind: string): boolean {
   return rootName === "codex-sessions" || (rootName === "claude-projects" && (kind === "session" || kind === "subagent"));
 }
 
+function engineForRoot(rootName: RawEntry["rootName"]): ProjectCatalogFile["engine"] {
+  if (rootName === "codex-sessions") return "codex";
+  if (rootName === "claude-projects") return "claude";
+  return "shell";
+}
+
+function fmtForRoot(rootName: RawEntry["rootName"]): ProjectCatalogFile["fmt"] {
+  if (rootName === "codex-sessions") return "codex";
+  if (rootName === "claude-projects") return "claude";
+  return "plain";
+}
+
+function fallbackTitle(raw: RawEntry, kind: string): string {
+  const filename = path.basename(raw.path);
+  if (kind === "subagent") return "Subagent " + filename.slice("agent-".length).split(".")[0];
+  if (raw.rootName === "codex-sessions") return "Codex session";
+  if (raw.rootName === "claude-projects") return "Claude session";
+  return "Background task " + filename.split(".")[0];
+}
+
 function cachedFile(raw: RawEntry, state: ProjectCatalogState, stateKey: string): ProjectCatalogFile {
   const cached = state.files[raw.path];
   if (
@@ -111,13 +129,16 @@ function cachedFile(raw: RawEntry, state: ProjectCatalogState, stateKey: string)
     cached &&
     cached.size === raw.st.size &&
     cached.mtimeMs === raw.st.mtimeMs &&
-    cached.stateKey === stateKey &&
-    typeof cached.title === "string" &&
-    typeof cached.firstPrompt === "string" &&
-    (cached.engine === "codex" || cached.engine === "claude" || cached.engine === "shell") &&
-    (cached.fmt === "codex" || cached.fmt === "claude" || cached.fmt === "plain")
+    cached.stateKey === stateKey
   ) {
-    return { path: raw.path, ...cached } as ProjectCatalogFile;
+    return {
+      path: raw.path,
+      ...cached,
+      title: cached.title ?? fallbackTitle(raw, cached.kind),
+      titleCached: typeof cached.title === "string",
+      engine: cached.engine ?? engineForRoot(raw.rootName),
+      fmt: cached.fmt ?? fmtForRoot(raw.rootName),
+    };
   }
   const meta = describe(raw.rootName, raw.root, raw.path, raw.st, stateKey);
   const file: ProjectCatalogFile = {
@@ -131,7 +152,7 @@ function cachedFile(raw: RawEntry, state: ProjectCatalogState, stateKey: string)
     session: isConversation(raw.rootName, meta.kind),
     worktree: meta.worktree,
     title: meta.title,
-    firstPrompt: meta.firstPrompt,
+    titleCached: true,
     engine: meta.engine,
     fmt: meta.fmt,
   };
@@ -144,8 +165,7 @@ function cachedFile(raw: RawEntry, state: ProjectCatalogState, stateKey: string)
     kind: file.kind,
     session: file.session,
     worktree: file.worktree,
-    title: file.title,
-    firstPrompt: file.firstPrompt,
+    title: file.titleCached ? file.title : undefined,
     engine: file.engine,
     fmt: file.fmt,
   };
@@ -216,8 +236,7 @@ export function projectCatalogSnapshotFromRaw(raw: RawEntry[], options: { persis
       kind: file.kind,
       session: file.session,
       worktree: file.worktree,
-      title: file.title,
-      firstPrompt: file.firstPrompt,
+      title: file.titleCached ? file.title : undefined,
       engine: file.engine,
       fmt: file.fmt,
     };
@@ -246,7 +265,7 @@ export function projectCatalogSnapshotFromRaw(raw: RawEntry[], options: { persis
       project: file.project || "other",
       worktree: file.worktree,
       title: file.title,
-      firstPrompt: file.firstPrompt,
+      firstPrompt: "",
       engine: file.engine,
       kind: file.kind,
       fmt: file.fmt,

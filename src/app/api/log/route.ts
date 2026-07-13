@@ -118,7 +118,7 @@ export async function DELETE(req: NextRequest): Promise<NextResponse<{ ok: true 
   if (!target || !stat?.isFile() || !pathAllowed(target)) {
     return NextResponse.json({ error: "path not allowed" }, { status: 403 });
   }
-  const entry = (await listFiles()).find((item) => item.path === target);
+  const entry = (await listFiles({ pin: target })).find((item) => item.path === target);
   if (entry?.proc === "running") {
     return NextResponse.json({ error: "agent is still running — stop the process first" }, { status: 409 });
   }

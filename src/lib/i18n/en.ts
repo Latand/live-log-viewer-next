@@ -99,6 +99,7 @@ export const en = {
   "trash.deleting": "deleting…",
   "trash.confirmYes": "Yes, delete",
   "trash.deleteProject": "Delete project from disk",
+  "trash.projectLoadFailed": "Could not load every project conversation",
 
   "list.title": "All conversations",
   "list.hint": "Loaded in recent-first pages from every conversation stored for this project.",

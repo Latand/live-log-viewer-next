@@ -86,6 +86,8 @@ interface Props {
   onUserNavigate?: () => void;
   /** Full-catalog list/search open: pins the transcript through the file feed. */
   onOpenCatalogFile?: (file: FileEntry) => void;
+  /** Releases any retained list/search pin when its displayed node closes. */
+  onCloseFile?: (path: string) => void;
 }
 
 /** Manual additions and removals of scheme nodes, persisted per project. */
@@ -126,6 +128,12 @@ export function loadDrafts(project: string): string[] {
    against the shared board store (queued, then flushed on that project's next
    load), so cross-project opens survive across devices — see useBoardState. */
 export { queueColumnOpen };
+
+export function pendingFocusTarget(pending: string | null, files: readonly FileEntry[]): string | null {
+  if (!pending) return null;
+  if (pending.startsWith("draft::") || files.some((file) => file.path === pending)) return pending;
+  return null;
+}
 
 /* Kept outside the component: the React Compiler's immutability check flags
    direct global mutation (location.hash = ...) inside a component body. */
@@ -260,6 +268,7 @@ export function ProjectDashboard({
   attention,
   onUserNavigate,
   onOpenCatalogFile,
+  onCloseFile,
 }: Props) {
   const { t } = useLocale();
   const isMobile = useIsMobile();
@@ -505,9 +514,10 @@ export function ProjectDashboard({
      flash it then so the camera has something to glide to. */
   useEffect(() => {
     const pending = pendingFocusRef.current;
-    if (!pending) return;
+    const target = pendingFocusTarget(pending, files);
+    if (!target) return;
     pendingFocusRef.current = null;
-    flashNode(pending);
+    flashNode(target);
   });
 
   /* A task-panel row from another project switches the dashboard first; the
@@ -629,6 +639,7 @@ export function ProjectDashboard({
        clears locally. */
     board.mutate([planClose(path, ephemeral).mutation]);
     setEphemeral((prev) => planClose(path, prev).ephemeral);
+    onCloseFile?.(path);
   };
 
   /* Latest manual list behind a ref so the convergence effect below reads
@@ -659,6 +670,7 @@ export function ProjectDashboard({
      the server arrangement. */
   useEffect(() => {
     if (!board.loaded || board.sync === "unavailable") return;
+    if (focusRequest && !pendingFocusTarget(focusRequest.path, files)) return;
     board.mutate(
       planBoardConvergence({
         files,
@@ -670,7 +682,7 @@ export function ProjectDashboard({
     );
     /* eslint-disable-next-line react-hooks/exhaustive-deps -- board.mutate is
        delegated to a ref-stable store; manual is read through that ref. */
-  }, [rootGroups, files, projectCatalog, project, board.loaded, board.sync]);
+  }, [rootGroups, files, projectCatalog, project, board.loaded, board.sync, focusRequest]);
 
   /* Any open lands on the scheme: a card of another project pre-adds its node
      and switches the project; a conversation of this project joins the managed
@@ -734,10 +746,9 @@ export function ProjectDashboard({
   const activePipelines = useMemo(() => pipelinesForProject(pipelines, project, files), [pipelines, project, files]);
   const hasNodes =
     schemeGroups.length > 0 || schemeManual.length > 0 || drafts.length > 0 || projectTasks.length > 0 || activePipelines.length > 0;
-  /* Everything the project has on disk, freshest first. Powers the
-     delete-project button and the fallback list of an empty scheme —
-     transcripts whose tree lives elsewhere (scratchpad one-offs) build no
-     groups/cards/residual chips, yet keep the project in the rail. */
+  /* Scheme-visible project files, freshest first. They gate live activity for
+     project actions; the deletion flow loads its complete target set from the
+     uncapped conversation catalog before confirmation. */
   const projectFiles = useMemo(
     () => files.filter((file) => projectKey(file) === project).sort((a, b) => b.mtime - a.mtime),
     [files, project],
@@ -867,7 +878,7 @@ export function ProjectDashboard({
                       <ArchiveProjectButton files={projectFiles} allowEmpty={catalogKnown} onArchive={() => onArchive(project)} />
                     )}
                   </div>
-                  <div className="flex min-h-11 items-center px-1.5"><DeleteProjectButton files={projectFiles} /></div>
+                  <div className="flex min-h-11 items-center px-1.5"><DeleteProjectButton project={project} files={projectFiles} available={catalogKnown} /></div>
                 </>
               )}
             </HeaderMenu>
@@ -887,7 +898,7 @@ export function ProjectDashboard({
             ) : (
               <ArchiveProjectButton files={projectFiles} allowEmpty={catalogKnown} onArchive={() => onArchive(project)} />
             )}
-            <DeleteProjectButton files={projectFiles} />
+            <DeleteProjectButton project={project} files={projectFiles} available={catalogKnown} />
             <button
               type="button"
               onClick={toggleTaskPanel}
