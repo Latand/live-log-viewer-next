@@ -19,7 +19,6 @@ import { DraftAgentPane } from "@/components/DraftAgentPane";
 import { isWorkflowDraftId } from "@/components/workflows/workflowModel";
 import { WorkflowDraftPane } from "@/components/workflows/WorkflowDraftPane";
 import { RoundDeck } from "@/components/flows/RoundDeck";
-import { canHandoff, HandoffHandle } from "@/components/HandoffHandle";
 import { mapReachable } from "./mapGate";
 import { paneState, type PaneState } from "@/components/paneState";
 import type { BranchGroup } from "@/components/projectModel";
@@ -72,7 +71,10 @@ interface Props {
   onClose: (path: string) => void;
   onDraftClose: (id: string) => void;
   onDraftSpawned: (id: string, file: FileEntry) => void;
-  onHandoff?: (file: FileEntry) => void;
+  /** Reports the focused conversation's file (or null) so the project shell can
+      dock a single handoff control in the footer shelf row (issue #177 item 5),
+      keeping the handoff, collapsed-worker, and quiet strips on one row. */
+  onActiveChange?: (file: FileEntry | null) => void;
   /** Bumped by the header `+ Task` button to open the sheet's create view. */
   taskSheetNonce?: number;
 }
@@ -95,7 +97,7 @@ export function pipelinesToDock(groups: SchemeGroup[]): Pipeline[] {
  * data the scheme draws — nothing on the diagram is unreachable, it is just
  * shown one pane at a time.
  */
-export function MobileFocusView({ project, groups, manual, files, flows, pipelines, surfacePipelines = [], workerStacks = [], tasks, drafts, loaded, focus, onSelect, onClose, onDraftClose, onDraftSpawned, onHandoff, taskSheetNonce = 0 }: Props) {
+export function MobileFocusView({ project, groups, manual, files, flows, pipelines, surfacePipelines = [], workerStacks = [], tasks, drafts, loaded, focus, onSelect, onClose, onDraftClose, onDraftSpawned, onActiveChange, taskSheetNonce = 0 }: Props) {
   const { t } = useLocale();
   const [focusPath, setFocusPath] = useState<string | null>(null);
   const [mapOpen, setMapOpen] = useState(false);
@@ -180,6 +182,13 @@ export function MobileFocusView({ project, groups, manual, files, flows, pipelin
   const activeNode = useMemo(() => layout.nodes.find((node) => node.file.path === resolvedKey) ?? null, [layout, resolvedKey]);
   const activeDeck = useMemo(() => layout.decks.find((deck) => deck.key === resolvedKey) ?? null, [layout, resolvedKey]);
   const activeDraft = useMemo(() => layout.drafts.find((draft) => draft.key === resolvedKey) ?? null, [layout, resolvedKey]);
+  /* Report the focused conversation up so the project shell can dock its handoff
+     control in the footer shelf row (issue #177 item 5). Cleared on unmount so a
+     switch to the list view drops the stale handoff target. */
+  useEffect(() => {
+    onActiveChange?.(activeNode?.file ?? null);
+  }, [activeNode, onActiveChange]);
+  useEffect(() => () => onActiveChange?.(null), [onActiveChange]);
   /* EVERY active pipeline gets a dedicated 44px full-plan/control card on the
      phone (issue #156, HIGH). The mobile lite map passes no pipelineControls, so
      GroupsLayer never paints the past/current/future strip there; a memberful
@@ -365,20 +374,16 @@ export function MobileFocusView({ project, groups, manual, files, flows, pipelin
           the safe-area insets keep the pane off the screen edges symmetrically. */}
       <div className="relative flex min-h-0 flex-1 flex-col py-1.5 pl-[max(0.375rem,env(safe-area-inset-left))] pr-[max(0.375rem,env(safe-area-inset-right))] pb-[max(0.375rem,env(safe-area-inset-bottom))]">
         {activeNode ? (
-          <div key={activeNode.file.path} className="flex min-h-0 flex-1 flex-col">
-            <div className="relative flex min-h-0 flex-1">
-              <BranchPane
-                file={activeNode.file}
-                tasks={activeNode.tasks}
-                isRoot={activeNode.isRoot}
-                onClose={() => onClose(activeNode.file.path)}
-                dragHandle={swipeHandle}
-              />
-            </div>
-            {/* Docked in flow below the pane (finding 1): reserves its own 44px
-                row instead of the scheme's floating handle, so it never overlaps
-                the WorkerStacks footer under the focus view. */}
-            {onHandoff && canHandoff(activeNode.file) ? <HandoffHandle file={activeNode.file} onHandoff={() => onHandoff(activeNode.file)} docked /> : null}
+          /* The handoff control for this pane docks in the footer shelf row
+             (issue #177 item 5), so the focus view itself renders only the pane. */
+          <div key={activeNode.file.path} className="flex min-h-0 flex-1">
+            <BranchPane
+              file={activeNode.file}
+              tasks={activeNode.tasks}
+              isRoot={activeNode.isRoot}
+              onClose={() => onClose(activeNode.file.path)}
+              dragHandle={swipeHandle}
+            />
           </div>
         ) : activeDeck ? (
           <div key={activeDeck.key} className="relative min-h-0 flex-1">

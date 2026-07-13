@@ -39,6 +39,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "runtimeConfig.pending": "Після ходу",
   "runtimeConfig.confirming": "Наступний хід",
   "runtimeConfig.applied": "Застосовано",
+  "runtimeConfig.pendingDraft": "Незастосована чернетка: {model} · {effort} — торкніться, щоб переглянути",
   "runtimeConfig.failed": "Не вдалося змінити конфігурацію активного агента",
   "time.agoSec": "{n} с тому",
   "time.agoMin": "{n} хв тому",
@@ -77,6 +78,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "dash.emptyHint": "Відкрий пульт у правому нижньому куті і клікни розмову — вона з'явиться тут",
   "dash.viewScheme": "схема",
   "dash.viewList": "розмови",
+  "dash.hiddenShelf": "Приховане",
 
   "trash.title": "Кореневі розмови",
   "trash.hint": "Клік по рядку відкриває розмову нодою; смітник видаляє її файл з диска назавжди.",
