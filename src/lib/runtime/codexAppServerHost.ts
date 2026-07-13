@@ -174,6 +174,23 @@ function itemReplayKey(value: unknown): string {
   return `json:${JSON.stringify(value)}`;
 }
 
+function userMessageText(value: JsonObject): string | null {
+  const direct = stringField(value, "text");
+  if (direct !== null) return direct;
+  if (typeof value.content === "string") return value.content;
+  if (!Array.isArray(value.content)) return null;
+  const parts: string[] = [];
+  for (const part of value.content) {
+    if (typeof part === "string") {
+      parts.push(part);
+      continue;
+    }
+    const text = stringField(part, "text") ?? stringField(part, "content");
+    if (text !== null) parts.push(text);
+  }
+  return parts.length > 0 ? parts.join("") : null;
+}
+
 function threadStatus(value: unknown): ThreadStatus | null {
   const outer = record(value);
   const thread = record(outer?.thread);
@@ -198,7 +215,7 @@ export class CodexAppServerHost implements EngineHost {
   private readonly pending = new Map<number, PendingRpc>();
   private readonly subscribers = new Set<Subscriber>();
   private readonly events: RuntimeEvent[] = [];
-  private readonly confirmedDeliveries = new Map<string, DeliveryReceipt>();
+  private readonly confirmedDeliveries = new Map<string, { receipt: DeliveryReceipt; text: string | null }>();
   private readonly attentions = new Map<string, PendingAttention>();
   private readonly stateListeners = new Set<(state: HostState) => void>();
   private readonly preIdentityEvents: UnsequencedEvent[] = [];
@@ -349,7 +366,7 @@ export class CodexAppServerHost implements EngineHost {
       return { outcome: "rejected", reason: "dead-host" };
     }
     if (!entry.id || !entry.text) throw new Error("queue entry id and text are required");
-    const confirmed = await this.confirmedDelivery(entry.id);
+    const confirmed = await this.confirmedDelivery(entry);
     if (confirmed) return confirmed;
     const currentTurn = this.activeTurnId;
     if (entry.expectedTurnId !== undefined && entry.expectedTurnId !== currentTurn) {
@@ -626,9 +643,9 @@ export class CodexAppServerHost implements EngineHost {
     }
   }
 
-  private async confirmedDelivery(entryId: string): Promise<DeliveryReceipt | null> {
-    const known = this.confirmedDeliveries.get(entryId);
-    if (known) return known;
+  private async confirmedDelivery(entry: QueueEntry): Promise<DeliveryReceipt | null> {
+    const known = this.confirmedDeliveries.get(entry.id);
+    if (known) return this.confirmedReceipt(entry, known);
     let thread: unknown;
     try {
       thread = await this.rpc("thread/read", { threadId: this.identity.threadId, includeTurns: true });
@@ -639,15 +656,31 @@ export class CodexAppServerHost implements EngineHost {
     }
     if (this.dead) throw new Error(safeError(this.failure ?? "Codex app-server host is unavailable"));
     this.rememberConfirmedDeliveries(thread);
-    return this.confirmedDeliveries.get(entryId) ?? null;
+    const recovered = this.confirmedDeliveries.get(entry.id);
+    return recovered ? this.confirmedReceipt(entry, recovered) : null;
+  }
+
+  private confirmedReceipt(
+    entry: QueueEntry,
+    confirmed: { receipt: DeliveryReceipt; text: string | null },
+  ): DeliveryReceipt {
+    if (confirmed.text !== entry.text) {
+      throw new Error("Codex queue entry id belongs to a different payload");
+    }
+    return confirmed.receipt;
   }
 
   private rememberConfirmedDelivery(turnId: string, value: unknown): void {
     const item = record(value);
-    if (stringField(item, "type") !== "userMessage") return;
+    if (!item || stringField(item, "type") !== "userMessage") return;
     const clientId = stringField(item, "clientId");
     if (!clientId) return;
-    this.confirmedDeliveries.set(clientId, { outcome: "turn-started", turnId });
+    const text = userMessageText(item);
+    const previous = this.confirmedDeliveries.get(clientId);
+    this.confirmedDeliveries.set(clientId, {
+      receipt: previous?.receipt ?? { outcome: "turn-started", turnId },
+      text: previous && previous.text !== text ? null : text,
+    });
   }
 
   private flushPreIdentityEvents(): void {

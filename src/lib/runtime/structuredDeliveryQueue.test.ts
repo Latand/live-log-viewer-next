@@ -68,6 +68,40 @@ test("structured delivery preserves queue order within one conversation", async 
   ]);
 });
 
+test("unrelated outbox effects cannot starve structured message delivery", async () => {
+  const allEffects = [
+    ...Array.from({ length: 100 }, (_, index) => ({
+      id: `effect:spawn-${index}`,
+      kind: "runtime.spawn",
+      eventSeq: index + 1,
+      payload: { operationId: `spawn-${index}` },
+    })),
+    {
+      id: "effect:op-after-spawns",
+      kind: "runtime.send",
+      eventSeq: 101,
+      payload: { operationId: "op-after-spawns", conversationId: "conversation-one", text: "deliver me", policy: "queue" },
+    },
+  ];
+  const requestedKinds: Array<readonly string[]> = [];
+  const sent: string[] = [];
+  const queue = new StructuredDeliveryQueue({
+    effects: async (kinds?: readonly string[]) => {
+      requestedKinds.push(kinds ?? []);
+      return allEffects.filter((effect) => !kinds || kinds.includes(effect.kind)).slice(0, 100);
+    },
+    transition: async () => {},
+  }, () => host(async (entry) => {
+    sent.push(entry.id);
+    return { outcome: "turn-started", turnId: "turn-after-spawns" };
+  }));
+
+  await queue.drain();
+
+  expect(requestedKinds).toEqual([["runtime.send", "runtime.steer"]]);
+  expect(sent).toEqual(["op-after-spawns"]);
+});
+
 test("structured delivery surfaces a host actuation failure", async () => {
   const transitions: Array<[string, string, string | null | undefined]> = [];
   const port: StructuredDeliveryQueuePort = {
@@ -222,6 +256,46 @@ test("structured delivery retries the same durable entry after a host race", asy
     ["op-retry", "queued"],
     ["op-retry", "delivering"],
     ["op-retry", "delivered"],
+  ]);
+});
+
+test("a stale steer never retries as a fresh turn after the host becomes idle", async () => {
+  const expectedTurns: Array<string | null | undefined> = [];
+  const transitions: Array<[string, string, string | null | undefined]> = [];
+  let active = true;
+  let pending = true;
+  const steerHost = host(async (entry) => {
+    expectedTurns.push(entry.expectedTurnId);
+    active = false;
+    return entry.expectedTurnId === "turn-old"
+      ? { outcome: "rejected", reason: "stale-turn" }
+      : { outcome: "turn-started", turnId: "fresh-turn" };
+  });
+  steerHost.health = async () => ({
+    ...idleState(),
+    status: active ? "active" : "idle",
+    activeTurnRef: active ? "turn-current" : null,
+  });
+  const queue = new StructuredDeliveryQueue({
+    effects: async () => pending ? [{
+      id: "effect:op-stale-steer",
+      kind: "runtime.steer",
+      eventSeq: 31,
+      payload: { operationId: "op-stale-steer", conversationId: "conversation-one", text: "amend", turnId: "turn-old" },
+    }] : [],
+    transition: async (operationId, status, details) => {
+      transitions.push([operationId, status, details?.reason]);
+      if (status === "failed") pending = false;
+    },
+  }, () => steerHost);
+
+  await queue.drain();
+  await queue.drain();
+
+  expect(expectedTurns).toEqual(["turn-old"]);
+  expect(transitions).toEqual([
+    ["op-stale-steer", "delivering", undefined],
+    ["op-stale-steer", "failed", "stale-turn"],
   ]);
 });
 

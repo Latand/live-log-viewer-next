@@ -11,7 +11,7 @@ export interface StructuredDeliveryEffect {
 export type StructuredDeliveryTransition = "queued" | "delivering" | "delivered" | "failed";
 
 export interface StructuredDeliveryQueuePort {
-  effects(): Promise<StructuredDeliveryEffect[]>;
+  effects(kinds?: readonly string[]): Promise<StructuredDeliveryEffect[]>;
   transition(
     operationId: string,
     status: StructuredDeliveryTransition,
@@ -23,7 +23,7 @@ export type StructuredHostResolver = (conversationId: string) => EngineHost | nu
 
 export function runtimeClientDeliveryPort(client: RuntimeHostClient): StructuredDeliveryQueuePort {
   return {
-    effects: () => client.effectBatch(),
+    effects: (kinds) => client.effectBatch(kinds),
     transition: async (operationId, status, details) => {
       await client.transitionOperation(operationId, status, details);
     },
@@ -99,7 +99,7 @@ export class StructuredDeliveryQueue {
 
   private async drainBatch(): Promise<void> {
     const grouped = new Map<string, SendEffect[]>();
-    const effects = (await this.port.effects())
+    const effects = (await this.port.effects(["runtime.send", "runtime.steer"]))
       .map(sendEffect)
       .filter((effect): effect is SendEffect => effect !== null)
       .sort((left, right) => left.eventSeq - right.eventSeq);
@@ -127,10 +127,11 @@ export class StructuredDeliveryQueue {
       const maySteer = health.status === "active"
         && (effect.kind === "steer" || effect.policy === "steer-if-active");
       if (health.status !== "idle" && !maySteer) return;
+      const mustFenceTurn = effect.kind === "steer" || maySteer;
       const entry: QueueEntry = {
         id: effect.operationId,
         text: effect.text,
-        ...(maySteer ? { expectedTurnId: effect.turnId ?? health.activeTurnRef } : {}),
+        ...(mustFenceTurn ? { expectedTurnId: effect.turnId ?? health.activeTurnRef } : {}),
       };
       await this.port.transition(effect.operationId, "delivering");
       let receipt;
@@ -147,6 +148,10 @@ export class StructuredDeliveryQueue {
         continue;
       }
       if (receipt.outcome === "rejected") {
+        if (receipt.reason === "stale-turn") {
+          await this.port.transition(effect.operationId, "failed", { reason: receipt.reason });
+          continue;
+        }
         await this.port.transition(effect.operationId, "queued", { reason: receipt.reason });
         return;
       }

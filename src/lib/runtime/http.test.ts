@@ -3,7 +3,7 @@ import { expect, test } from "bun:test";
 import { NextRequest } from "next/server";
 
 import { RuntimeHostUnavailableError, type RuntimeHostClient } from "./client";
-import { handleRuntimeCommand } from "./http";
+import { handleRuntimeCommand, handleRuntimeRetry } from "./http";
 
 function request(body: unknown, headers: Record<string, string> = { host: "127.0.0.1" }): NextRequest {
   return new NextRequest("http://127.0.0.1/api/runtime/send", {
@@ -59,4 +59,42 @@ test("runtime command routes fail closed while activation is disabled", async ()
   );
   expect(response.status).toBe(503);
   expect(await response.json()).toEqual({ error: "runtime events are disabled" });
+});
+
+test("runtime retry requeues the durable operation and kicks delivery", async () => {
+  const retried: string[] = [];
+  let kicks = 0;
+  const client = {
+    retryOperation: async (operationId: string) => {
+      retried.push(operationId);
+      return {
+        operationId,
+        replayed: false,
+        receipt: {
+          operationId,
+          idempotencyKey: "send-one",
+          conversationId: "conv-one",
+          kind: "send" as const,
+          status: "queued" as const,
+          at: "2026-07-10T00:00:00.000Z",
+          revision: 4,
+        },
+      };
+    },
+  } as unknown as RuntimeHostClient;
+  const retryRequest = new NextRequest("http://127.0.0.1/api/runtime/operations/op-one", {
+    method: "POST",
+    headers: { host: "127.0.0.1" },
+  });
+
+  const response = await handleRuntimeRetry(retryRequest, "op-one", {
+    enabled: () => true,
+    client: () => client,
+    kick: () => { kicks += 1; },
+  });
+
+  expect(response.status).toBe(202);
+  expect(await response.json()).toMatchObject({ operationId: "op-one", receipt: { status: "queued" } });
+  expect(retried).toEqual(["op-one"]);
+  expect(kicks).toBe(1);
 });

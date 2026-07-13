@@ -387,6 +387,58 @@ export class RuntimeJournal {
     }
   }
 
+  retryOperation(operationId: string): RuntimeOperationResult {
+    this.assertHealthy();
+    if (!this.structuredHosts) throw new Error("structured hosts are disabled");
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const row = this.db.query<{ request_json: string; receipt_json: string }, [string]>(
+        "SELECT request_json, receipt_json FROM operations WHERE operation_id = ?",
+      ).get(operationId);
+      if (!row) throw new Error("runtime operation is unknown");
+      const previous = JSON.parse(row.receipt_json) as RuntimeOperationReceipt;
+      const command = JSON.parse(row.request_json) as RuntimeOperationCommand;
+      if (previous.status !== "failed") throw new Error("only failed runtime operations can retry");
+      if (command.kind !== "send" && command.kind !== "steer") throw new Error("runtime operation does not support retry");
+      const next: RuntimeOperationReceipt = {
+        ...previous,
+        status: "queued",
+        turnId: command.kind === "steer" ? previous.turnId ?? null : null,
+        queuePosition: this.queuedSendCount(command.conversationId) + 1,
+        reason: null,
+        at: new Date(this.now()).toISOString(),
+        revision: previous.revision + 1,
+      };
+      const event = this.appendInTransaction(normalizeRuntimeEventInput({
+        scope: { type: "operation", id: operationId },
+        kind: "receipt",
+        operationId,
+        producer: { kind: "viewer-command", eventKey: `operation:${operationId}:receipt:${next.revision}:queued`, hostEpoch: Number(this.meta("host_epoch")) },
+        payload: next as unknown as Record<string, unknown>,
+      }));
+      const committed = { ...next, revision: event.revision };
+      this.upsertEntity("operation", operationId, event.revision, committed, event.seq);
+      this.db.query("UPDATE operations SET receipt_json = ?, event_seq = ? WHERE operation_id = ?")
+        .run(stableJson(committed), event.seq, operationId);
+      this.db.query(`
+        INSERT INTO outbox(id, kind, payload_json, event_seq, state)
+        VALUES (?, ?, ?, ?, 'pending')
+        ON CONFLICT(id) DO UPDATE SET
+          kind = excluded.kind,
+          payload_json = excluded.payload_json,
+          event_seq = excluded.event_seq,
+          state = 'pending'
+      `).run(`effect:${operationId}`, `runtime.${command.kind}`, stableJson({ ...command, operationId }), event.seq);
+      this.db.exec("COMMIT");
+      this.compactIfNeeded();
+      this.notifyWaiters();
+      return { operationId, receipt: committed, replayed: false };
+    } catch (error) {
+      try { this.db.exec("ROLLBACK"); } catch { /* transaction already closed */ }
+      throw error;
+    }
+  }
+
   snapshot(): RuntimeSnapshot {
     this.db.exec("BEGIN");
     try {
@@ -614,8 +666,13 @@ export class RuntimeJournal {
     });
   }
 
-  effectBatch(limit = 100): Array<RuntimeEffect & { eventSeq: number }> {
-    return this.db.query<{ id: string; kind: string; payload_json: string; event_seq: number }, [number]>("SELECT id, kind, payload_json, event_seq FROM outbox WHERE state = 'pending' ORDER BY event_seq LIMIT ?").all(limit).map((row) => {
+  effectBatch(limit = 100, kinds?: readonly string[]): Array<RuntimeEffect & { eventSeq: number }> {
+    if (kinds?.length === 0) return [];
+    const kindFilter = kinds ? ` AND kind IN (${kinds.map(() => "?").join(", ")})` : "";
+    const rows = this.db.query<{ id: string; kind: string; payload_json: string; event_seq: number }, Array<string | number>>(
+      `SELECT id, kind, payload_json, event_seq FROM outbox WHERE state = 'pending'${kindFilter} ORDER BY event_seq LIMIT ?`,
+    ).all(...(kinds ?? []), limit);
+    return rows.map((row) => {
       const payload = JSON.parse(row.payload_json) as Record<string, unknown>;
       if (row.kind === "runtime.answer") payload.resolution = this.decryptSecret(payload.resolution);
       return { id: row.id, kind: row.kind, payload, eventSeq: row.event_seq };

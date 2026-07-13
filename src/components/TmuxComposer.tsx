@@ -55,6 +55,36 @@ export function deliveryAttemptKey(current: string, stored?: string): string {
   return stored || current;
 }
 
+export function RuntimeComposerReceipts({
+  receipts,
+  onRetry,
+  onEdit,
+}: {
+  receipts: RuntimeReceipt[];
+  onRetry: (receipt: RuntimeReceipt) => void;
+  onEdit: (receipt: RuntimeReceipt) => void;
+}) {
+  return receipts.map((receipt) => {
+    const messageOperation = receipt.kind === "send" || receipt.kind === "steer";
+    const failed = receipt.status === "failed";
+    // Operation receipts cap text at 240 characters. Durable retry reads the
+    // complete journaled request; editing is safe only for an uncapped summary.
+    const editable = messageOperation
+      && (failed || receipt.status === "rejected")
+      && typeof receipt.text === "string"
+      && receipt.text.length > 0
+      && receipt.text.length < 240;
+    return (
+      <ReceiptChip
+        key={receipt.operationId}
+        receipt={receipt}
+        onRetry={messageOperation && failed ? () => onRetry(receipt) : undefined}
+        onEdit={editable ? () => onEdit(receipt) : undefined}
+      />
+    );
+  });
+}
+
 /** A receipt still awaiting durable delivery (a migration hold) must never be
     pruned by the pane/spawn TTLs — its text lands on the successor, whose
     transcript is a different file, so only an explicit resolve/dismiss clears it. */
@@ -335,6 +365,39 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
     }
   };
 
+  const retryRuntimeReceipt = async (receipt: RuntimeReceipt) => {
+    if (busy || voiceSending) return;
+    setBusy(true);
+    setStatus(null);
+    try {
+      const response = await fetch(`/api/runtime/operations/${encodeURIComponent(receipt.operationId)}`, { method: "POST" });
+      const body = (await response.json().catch(() => ({}))) as { receipt?: RuntimeReceipt; error?: string };
+      if (!response.ok || !body.receipt) {
+        setStatus({ kind: "err", text: body.error ?? t("common.failedSend") });
+        return;
+      }
+      setImmediateRuntimeReceipts((current) => [
+        body.receipt!,
+        ...current.filter((candidate) => candidate.operationId !== body.receipt!.operationId),
+      ].slice(0, 8));
+      setStatus({ kind: "info", text: t("composer.deliveryQueued") });
+    } catch {
+      setStatus({ kind: "err", text: t("common.serverUnavailable") });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const editRuntimeReceipt = (receipt: RuntimeReceipt) => {
+    if (!receipt.text) return;
+    setText(receipt.text);
+    setStatus(null);
+    requestAnimationFrame(() => {
+      inputRef.current?.focus();
+      inputRef.current?.setSelectionRange(receipt.text!.length, receipt.text!.length);
+    });
+  };
+
   const interrupt = async () => {
     if (interrupting) return;
     setInterrupting(true);
@@ -561,7 +624,11 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
         showImage={!isMobile}
         receipts={
           displayedRuntimeReceipts.length
-            ? displayedRuntimeReceipts.map((receipt) => <ReceiptChip key={receipt.operationId} receipt={receipt} />)
+            ? <RuntimeComposerReceipts
+                receipts={displayedRuntimeReceipts}
+                onRetry={(receipt) => void retryRuntimeReceipt(receipt)}
+                onEdit={editRuntimeReceipt}
+              />
             : undefined
         }
         leftSlot={

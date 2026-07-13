@@ -354,6 +354,25 @@ describe("CodexAppServerHost", () => {
     await host.release();
   });
 
+  test("rejects a persisted client id whose user-message text differs", async () => {
+    const server = new FakeAppServer("delivery-collision-thread", "delivery-collision-thread");
+    server.readTurns = [{
+      id: "persisted-turn",
+      status: "completed",
+      items: [{ type: "userMessage", clientId: "operation-collision", content: [{ type: "text", text: "original" }] }],
+    }];
+    const host = await CodexAppServerHost.adopt("delivery-collision-thread", {
+      cwd: "/repo",
+      eventStore: new MemoryEventStore(),
+      spawnProcess: fakeSpawn(server),
+    });
+
+    await expect(host.send({ id: "operation-collision", text: "changed" }))
+      .rejects.toThrow("Codex queue entry id belongs to a different payload");
+    expect(server.requests.some((request) => request.method === "turn/start" || request.method === "turn/steer")).toBeFalse();
+    await host.release();
+  });
+
   test("starts the first delivery when Codex reports an unmaterialized thread", async () => {
     const server = new FakeAppServer("fresh-delivery-thread");
     server.readError = "thread fresh-delivery-thread is not materialized yet; includeTurns is unavailable before first user message";

@@ -261,6 +261,77 @@ test("structured send receipts advance through the durable delivery lifecycle", 
   journal.close();
 });
 
+test("a terminal structured send retries from its full journaled request", () => {
+  const dir = sandbox("structured-delivery-retry");
+  const journal = new RuntimeJournal(path.join(dir, "events.sqlite"), { structuredHosts: true });
+  journal.append({
+    scope: runtimeScope("session", "conv-retry"),
+    kind: "session-status",
+    payload: {
+      conversationId: "conv-retry",
+      sessionKey: { engine: "codex", sessionId: "thread-retry" },
+      hostKind: "codex-app-server",
+      host: "hosted",
+      turn: "idle",
+      provenance: "structured",
+      capabilities: { steer: true, structuredAttention: true },
+    },
+  });
+  const text = "retry the complete payload ".repeat(20);
+  journal.executeOperation({
+    kind: "send",
+    operationId: "op-retry-failed",
+    idempotencyKey: "key-retry-failed",
+    conversationId: "conv-retry",
+    text,
+    policy: "queue",
+  });
+  journal.transitionOperation("op-retry-failed", "delivering");
+  journal.transitionOperation("op-retry-failed", "failed", { reason: "engine write failed" });
+  expect(journal.effectBatch()).toEqual([]);
+
+  const retried = journal.retryOperation("op-retry-failed");
+
+  expect(retried.receipt).toMatchObject({ status: "queued", reason: null, revision: 4 });
+  expect(journal.effectBatch()).toEqual([
+    expect.objectContaining({
+      id: "effect:op-retry-failed",
+      kind: "runtime.send",
+      payload: expect.objectContaining({ operationId: "op-retry-failed", text }),
+    }),
+  ]);
+  journal.close();
+});
+
+test("filtered effect batches skip a full page of unrelated pending work", () => {
+  const dir = sandbox("filtered-effect-batch");
+  const journal = new RuntimeJournal(path.join(dir, "events.sqlite"), { structuredHosts: true });
+  for (let index = 0; index < 100; index += 1) {
+    journal.append({
+      scope: runtimeScope("operation", `spawn-${index}`),
+      kind: "receipt",
+      payload: { operationId: `spawn-${index}` },
+      effect: { id: `effect:spawn-${index}`, kind: "runtime.spawn", payload: { operationId: `spawn-${index}` } },
+    });
+  }
+  journal.append({
+    scope: runtimeScope("operation", "send-after-spawns"),
+    kind: "receipt",
+    payload: { operationId: "send-after-spawns" },
+    effect: {
+      id: "effect:send-after-spawns",
+      kind: "runtime.send",
+      payload: { operationId: "send-after-spawns", conversationId: "conv-one", text: "deliver me" },
+    },
+  });
+
+  expect(journal.effectBatch()).toHaveLength(100);
+  expect(journal.effectBatch(100, ["runtime.send", "runtime.steer"])).toEqual([
+    expect.objectContaining({ id: "effect:send-after-spawns", kind: "runtime.send" }),
+  ]);
+  journal.close();
+});
+
 test("answer and interrupt operations update projected attention and turn axes", () => {
   const dir = sandbox("answer-interrupt");
   const filename = path.join(dir, "events.sqlite");
@@ -792,6 +863,11 @@ test("structured queue controls cross the local runtime socket", async () => {
 
   expect(operation.receipt.status).toBe("queued");
   expect(await client.effectBatch()).toHaveLength(1);
+  expect((await client.transitionOperation("op-socket-queue", "delivering")).receipt.status).toBe("delivering");
+  expect((await client.transitionOperation("op-socket-queue", "failed", { reason: "write failed" })).receipt.status).toBe("failed");
+  expect(await client.effectBatch()).toEqual([]);
+  expect((await client.retryOperation("op-socket-queue")).receipt.status).toBe("queued");
+  expect(await client.effectBatch(["runtime.send", "runtime.steer"])).toHaveLength(1);
   expect((await client.transitionOperation("op-socket-queue", "delivering")).receipt.status).toBe("delivering");
   expect((await client.transitionOperation("op-socket-queue", "delivered", { turnId: "turn-one" })).receipt.status).toBe("delivered");
   expect(await client.effectBatch()).toEqual([]);

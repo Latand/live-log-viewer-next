@@ -125,9 +125,16 @@ export class RuntimeHost {
         await this.recoverConsumersBestEffort();
       } else if (request.method === "operation-status") {
         result = this.journal.operationResult(String(request.params?.operationId ?? ""));
+      } else if (request.method === "operation-retry") {
+        if (!this.structuredHosts) throw new Error("structured hosts are disabled");
+        result = this.journal.retryOperation(String(request.params?.operationId ?? ""));
       } else if (request.method === "effect-batch") {
         if (!this.structuredHosts) throw new Error("structured hosts are disabled");
-        result = this.journal.effectBatch();
+        const kinds = request.params?.kinds;
+        if (kinds !== undefined && (!Array.isArray(kinds) || kinds.some((kind) => typeof kind !== "string"))) {
+          throw new Error("runtime effect kinds are invalid");
+        }
+        result = this.journal.effectBatch(100, kinds as string[] | undefined);
       } else if (request.method === "operation-transition") {
         if (!this.structuredHosts) throw new Error("structured hosts are disabled");
         const status = request.params?.status;
