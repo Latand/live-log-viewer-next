@@ -448,7 +448,7 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
           send is queued for the successor rather than delivered live. Shown
           identically under the desktop and mobile composers. */}
       {holdsSends ? (
-        <div role="status" aria-live="polite" className="flex items-center gap-1.5 rounded-control border border-warning/45 bg-warning-soft px-2 py-1 text-[10.5px] font-semibold text-warning">
+        <div role="status" aria-live="polite" className="flex items-center gap-1.5 rounded-control border border-warning/45 bg-warning-soft px-2 py-1 text-label font-semibold text-warning">
           <ArrowUpToLine className="h-3 w-3 shrink-0" aria-hidden />
           <span className="min-w-0 truncate">{t("migrate.heldSend")}</span>
         </div>

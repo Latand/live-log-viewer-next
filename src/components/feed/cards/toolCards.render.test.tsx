@@ -145,7 +145,7 @@ function cmdGroup(calls: ToolEvent[]): CmdGroupItem {
   };
 }
 
-test("a collapsed cmd-group keeps its children's bodies lazily unmounted", () => {
+test("a collapsed cmd-group defers all child rendering until it is expanded", () => {
   const html = renderToStaticMarkup(
     <CmdGroupCard
       item={cmdGroup([
@@ -154,13 +154,32 @@ test("a collapsed cmd-group keeps its children's bodies lazily unmounted", () =>
       ])}
     />,
   );
-  // Both child summaries render as quiet lines.
-  expect(html).toContain("ls -la");
-  expect(html).toContain("Read a.ts");
-  // Their bodies (output, raw-record) stay out of the DOM until a child expands.
+  // The header renders...
+  expect(html).toContain(en("render.actions", { count: 2 }));
+  // ...but no child summary or body is in the DOM until the group is expanded.
+  expect(html).not.toContain("ls -la");
+  expect(html).not.toContain("Read a.ts");
   expect(html).not.toContain("total 8");
-  expect(html).not.toContain("line-a");
   expect(html).not.toContain(en("tools.rawRecord"));
+});
+
+test("a collapsed cmd-group does not mount a diff-backed child's diff body", () => {
+  const patch = ["*** Begin Patch", "*** Update File: src/edit-x.ts", "@@", " keep", "-old", "+new", "*** End Patch"].join("\n");
+  const model = diffFromApplyPatch(patch);
+  const diffEvent = toolEvent({
+    id: "e1",
+    family: "edit",
+    tool: "apply_patch",
+    icon: "edit",
+    summary: "Edit edit-x.ts",
+    open: true, // a diff-backed event opens itself — but a closed group must not mount it
+    body: { type: "diff", files: model.files, filesTruncated: model.filesTruncated },
+  });
+  const html = renderToStaticMarkup(<CmdGroupCard item={cmdGroup([diffEvent, toolEvent({ id: "e2", summary: "echo done" })])} />);
+  expect(html).toContain(en("render.actions", { count: 2 }));
+  // The successful (no-error) group is collapsed, so the child's diff DOM is absent.
+  expect(html).not.toContain("bg-diff-add-soft");
+  expect(html).not.toContain("src/edit-x.ts");
 });
 
 test("a cmd-group carrying an error opens and mounts the failing child's full body", () => {

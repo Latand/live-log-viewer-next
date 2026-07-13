@@ -365,6 +365,34 @@ describe("feed session identity stability", () => {
     expect(settled.items[0].kind).toBe("cmd-group");
   });
 
+  test("a live tail keeps every concurrent in-flight call visible, folding only the completed prefix (§3.4)", () => {
+    const lines = [
+      claudeTool("c1", "Bash", "echo 1"),
+      claudeResult("c1", "1"),
+      claudeTool("c2", "Bash", "echo 2"),
+      claudeResult("c2", "2"),
+      claudeTool("c3", "Read", "cat a.txt"),
+      claudeResult("c3", "a"),
+      claudeTool("r1", "Bash", "sleep 1"), // in-flight
+      claudeTool("r2", "Bash", "sleep 2"), // in-flight, concurrent
+    ];
+    const live = buildFeed({ ...claudeFile, activity: "live" } as FileEntry, lines, false, "");
+    // The completed c1/c2/c3 fold; both running calls stay their own visible lines.
+    expect(live.items).toHaveLength(3);
+    const group = live.items[0];
+    if (group.kind !== "cmd-group") throw new Error("expected the completed prefix folded");
+    expect(group.calls.map((call) => call.id)).toEqual(["c1", "c2", "c3"]);
+    const running = live.items.slice(1);
+    expect(running.map((item) => (item.kind === "tool" ? item.id : item.kind))).toEqual(["r1", "r2"]);
+    expect(running.every((item) => item.kind === "tool" && item.status === "run")).toBe(true);
+  });
+
+  test("a live tail of only concurrent run calls stays fully visible with no group", () => {
+    const lines = [claudeTool("r1", "Bash", "a"), claudeTool("r2", "Bash", "b"), claudeTool("r3", "Bash", "c")];
+    const live = buildFeed({ ...claudeFile, activity: "live" } as FileEntry, lines, false, "");
+    expect(live.items.map((item) => (item.kind === "tool" ? item.id : item.kind))).toEqual(["r1", "r2", "r3"]);
+  });
+
   test("prepended history resets the session and reparses the wider window", () => {
     const session = createFeedSession({ engine: "claude", fmt: "claude", showSvc: false, lineFilter: "" });
     const older = [claudeUser("old message")];

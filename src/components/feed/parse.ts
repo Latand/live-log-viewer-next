@@ -1542,9 +1542,10 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
      tool event folds (Read/Bash/Edit/diff-bodied/orchestration alike); a "think"
      item inside a run is absorbed without breaking it (it carries no signal once
      the run it annotates is folded), while prose/user/tmsg/review/image break it.
-     In a live trailing run the final tool call is held out so the in-flight /
-     most-recent call stays a visible line, but the completed prefix still folds
-     (§3.4 — a live 40-call run must not read as 40 rows). A group whose members'
+     In a live trailing run only the leading completed prefix folds; every
+     in-flight (`run`) call stays a visible line (and if none is running, the
+     most-recent call is held out), so a live 40-call run reads as one quiet
+     group plus its running call(s), never 40 rows (§3.4). A group whose members'
      events are all identity-equal to the previous snapshot's is reused as-is,
      keeping its card memoized. */
   const buildSnapshot = (isLive: boolean): FeedSnapshot => {
@@ -1573,10 +1574,17 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
         else if (cur.item.kind !== "think") break;
         j += 1;
       }
-      /* A live trailing run keeps its last tool call visible; everything before
-         it still folds. A completed or interior run folds in full. */
+      /* A live trailing run folds only its leading completed prefix: every
+         in-flight (`run`) call stays a visible line so concurrent running calls
+         are never buried in a quiet closed group, and if none is running the
+         most-recent call is still held out. A completed or interior run folds in
+         full. */
       const isLiveTail = isLive && j === entries.length;
-      const foldCount = isLiveTail ? toolEntries.length - 1 : toolEntries.length;
+      let foldCount = toolEntries.length;
+      if (isLiveTail) {
+        const firstRun = toolEntries.findIndex((entry) => entry.item.status === "run");
+        foldCount = firstRun >= 0 ? firstRun : toolEntries.length - 1;
+      }
       if (foldCount >= CMD_GROUP_MIN) {
         const grouped = toolEntries.slice(0, foldCount);
         const groupEnd = grouped[grouped.length - 1].idx + 1;

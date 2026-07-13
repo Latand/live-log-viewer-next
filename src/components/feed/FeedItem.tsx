@@ -104,7 +104,7 @@ export const FeedItem = memo(function FeedItem({ item, speakText }: { item: Item
               {item.delivery === "ok" ? tr("render.delivered") : tr("render.notDelivered")}
             </span>
           ) : null}
-          {hhmm(item.ts) ? <span className="ml-auto shrink-0 text-[11px] text-dim">{hhmm(item.ts)}</span> : null}
+          {hhmm(item.ts) ? <span className="ml-auto shrink-0 text-label tabular-nums text-dim">{hhmm(item.ts)}</span> : null}
         </div>
         <div className="px-3.5 pb-2.5 pt-1">
           {protocol ? (

@@ -61,7 +61,7 @@ function ProtocolMeta({ payload }: { payload: ProtocolPayload }) {
           {requestId.length > 40 ? requestId.slice(0, 40) + "…" : requestId}
         </span>
       ) : null}
-      {ts ? <span>{ts}</span> : null}
+      {ts ? <span className="tabular-nums">{ts}</span> : null}
     </div>
   );
 }
