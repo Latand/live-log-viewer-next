@@ -218,26 +218,68 @@ describe("agent registry", () => {
     expect(elapsedMs).toBeGreaterThanOrEqual(180_000);
   });
 
-  test("recovers an interrupted lock publication after its grace period", async () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-incomplete-lock-"));
+  test("preserves an ownerless legacy publisher beyond the former grace period", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-paused-legacy-publisher-"));
     const filename = path.join(dir, "agent-registry.json");
     let nowMs = Date.now();
-    const store = new AgentRegistry(filename, () => true, {
+    let waits = 0;
+    const store = new AgentRegistry(filename, (owner) => owner.startIdentity === "42:legacy", {
       now: () => nowMs,
-      wait: async (delayMs) => { nowMs += delayMs; },
+      wait: async (delayMs) => {
+        nowMs += delayMs;
+        waits += 1;
+        expect(fs.statSync(lock).ino).toBe(legacyIdentity.ino);
+        if (waits === 1) {
+          fs.writeFileSync(path.join(lock, "owner.json"), JSON.stringify({ pid: 42, startIdentity: "42:legacy" }));
+        } else {
+          fs.rmSync(lock, { recursive: true, force: true });
+        }
+      },
     });
-    const lock = `${store.filename}.locks/${encodeURIComponent("codex:interrupted-publisher")}`;
+    const lock = `${store.filename}.locks/${encodeURIComponent("codex:paused-legacy-publisher")}`;
     fs.mkdirSync(lock, { recursive: true });
-    const interruptedAt = new Date(nowMs - 2_000);
-    fs.utimesSync(lock, interruptedAt, interruptedAt);
+    const legacyIdentity = fs.statSync(lock);
+    const pausedAt = new Date(nowMs - 2_000);
+    fs.utimesSync(lock, pausedAt, pausedAt);
 
     const result = await store.withOperationLock(
-      { engine: "codex", sessionId: "interrupted-publisher" },
+      { engine: "codex", sessionId: "paused-legacy-publisher" },
       { pid: process.pid, startIdentity: null },
       async () => "completed",
     );
 
     expect(result).toBe("completed");
+    expect(waits).toBe(2);
+  });
+
+  test("publishes a macOS-compatible lock owner without Linux procfs", async () => {
+    const store = registry();
+    const lock = `${store.filename}.locks/${encodeURIComponent("codex:portable-publication")}`;
+    const originalLink = fs.linkSync;
+    fs.linkSync = ((existingPath: fs.PathLike, newPath: fs.PathLike) => {
+      if (String(newPath).startsWith("/proc/self/fd/")) {
+        const error = new Error("procfs is unavailable") as NodeJS.ErrnoException;
+        error.code = "ENOENT";
+        throw error;
+      }
+      return originalLink(existingPath, newPath);
+    }) as typeof fs.linkSync;
+
+    try {
+      await expect(store.withOperationLock(
+        { engine: "codex", sessionId: "portable-publication" },
+        { pid: process.pid, startIdentity: null },
+        async () => {
+          expect(fs.lstatSync(lock).isSymbolicLink()).toBe(true);
+          expect(fs.statSync(lock).isDirectory()).toBe(true);
+          expect(JSON.parse(fs.readFileSync(path.join(lock, "owner.json"), "utf8")).pid).toBe(process.pid);
+          return "completed";
+        },
+      )).resolves.toBe("completed");
+    } finally {
+      fs.linkSync = originalLink;
+    }
+    expect(fs.readdirSync(path.dirname(lock)).filter((entry) => entry.includes(".owner.pending-"))).toEqual([]);
   });
 
   test("a delayed publisher cannot overwrite a replacement owner", async () => {
@@ -255,12 +297,11 @@ describe("agent registry", () => {
         fs.rmSync(lock, { recursive: true, force: true });
       },
     });
-    const originalLink = fs.linkSync;
+    const originalSymlink = fs.symlinkSync;
     let injected = false;
-    fs.linkSync = ((existingPath: fs.PathLike, newPath: fs.PathLike) => {
-      if (!injected && String(existingPath).startsWith(lock) && String(newPath).endsWith("/owner.json")) {
+    fs.symlinkSync = ((target: fs.PathLike, newPath: fs.PathLike, type?: fs.symlink.Type) => {
+      if (!injected && String(newPath) === lock) {
         injected = true;
-        fs.renameSync(lock, `${lock}.retired-probe`);
         fs.mkdirSync(lock);
         fs.writeFileSync(path.join(lock, "owner.json"), JSON.stringify({
           pid: 43,
@@ -268,8 +309,8 @@ describe("agent registry", () => {
           token: replacementToken,
         }));
       }
-      return originalLink(existingPath, newPath);
-    }) as typeof fs.linkSync;
+      return originalSymlink(target, newPath, type);
+    }) as typeof fs.symlinkSync;
 
     try {
       await store.withOperationLock(
@@ -278,8 +319,7 @@ describe("agent registry", () => {
         async () => undefined,
       );
     } finally {
-      fs.linkSync = originalLink;
-      fs.rmSync(`${lock}.retired-probe`, { recursive: true, force: true });
+      fs.symlinkSync = originalSymlink;
     }
 
     expect(observedReplacement).toBe(true);

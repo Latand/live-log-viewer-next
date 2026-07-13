@@ -283,6 +283,7 @@ interface RegistryLockClaim {
   lock: string;
   token: string;
   identity: { dev: number; ino: number };
+  storage: string;
 }
 
 interface RegistryLockTiming {
@@ -1272,7 +1273,7 @@ export class AgentRegistry {
       try {
         publishedOwner = JSON.parse(fs.readFileSync(this.lockOwnerFile(lock), "utf8")) as ProcessIdentity & { token?: unknown };
       } catch {
-        if (this.lockTiming.now() - publishedStat.mtimeMs < REGISTRY_LOCK_PUBLICATION_GRACE_MS) return;
+        return;
       }
       if (publishedOwner && Number.isInteger(publishedOwner.pid) && publishedOwner.pid > 0 && this.ownerAlive(publishedOwner)) return;
       const publishedToken = typeof publishedOwner?.token === "string" ? publishedOwner.token : null;
@@ -1331,9 +1332,9 @@ export class AgentRegistry {
       }
       return;
     }
-    if (this.lockTiming.now() - stat.mtimeMs >= REGISTRY_LOCK_PUBLICATION_GRACE_MS) {
-      this.retireObservedLock(lock, { dev: stat.dev, ino: stat.ino, isDirectory: stat.isDirectory() }, null, `incomplete-${stat.dev}-${stat.ino}-${stat.ctimeMs}`);
-    }
+    // An ownerless directory can belong to a paused legacy publisher. New
+    // claims publish a fully populated staging directory atomically, so they
+    // never require age-based recovery from this state.
   }
 
   private tryAcquireLock(lock: string, owner: ProcessIdentity): RegistryLockClaim | null {
@@ -1344,34 +1345,34 @@ export class AgentRegistry {
     const token = crypto.randomUUID();
     const staging = `${lock}.owner.pending-${token}`;
     let fd: number | null = null;
-    let directoryFd: number | null = null;
     let identity: RegistryLockClaim["identity"] | null = null;
     let ownerPublished = false;
     try {
-      fd = fs.openSync(staging, "wx", 0o600);
+      fs.mkdirSync(staging, 0o700);
+      fd = fs.openSync(path.join(staging, "owner.json"), "wx", 0o600);
       fs.writeFileSync(fd, JSON.stringify({ ...owner, token }), "utf8");
       fs.fsyncSync(fd);
       fs.closeSync(fd);
       fd = null;
+      const directoryFd = fs.openSync(staging, "r");
       try {
-        fs.mkdirSync(lock, 0o700);
+        fs.fsyncSync(directoryFd);
+        const stat = fs.fstatSync(directoryFd);
+        identity = { dev: stat.dev, ino: stat.ino };
+      } finally {
+        fs.closeSync(directoryFd);
+      }
+      try {
+        fs.symlinkSync(path.basename(staging), lock, "dir");
       } catch (error) {
         const code = (error as NodeJS.ErrnoException).code;
         if (code !== "EEXIST") throw error;
-        fs.rmSync(staging, { force: true });
+        fs.rmSync(staging, { recursive: true, force: true });
         this.recoverContendedLock(lock);
         return null;
       }
-      directoryFd = fs.openSync(lock, "r");
-      const stat = fs.fstatSync(directoryFd);
-      identity = { dev: stat.dev, ino: stat.ino };
-      fs.linkSync(staging, `/proc/self/fd/${directoryFd}/owner.json`);
       ownerPublished = true;
-      fs.fsyncSync(directoryFd);
-      fs.closeSync(directoryFd);
-      directoryFd = null;
-      fs.rmSync(staging, { force: true });
-      const claim = { lock, token, identity };
+      const claim = { lock, token, identity, storage: staging };
       if (!this.sameLock(lock, claim.identity) || this.lockToken(lock) !== token) return null;
       if (fs.existsSync(`${lock}.recovering`) || fs.existsSync(`${lock}.releasing`)) {
         this.releaseLock(claim);
@@ -1380,12 +1381,11 @@ export class AgentRegistry {
       return claim;
     } catch (error) {
       if (fd !== null) fs.closeSync(fd);
-      if (directoryFd !== null) fs.closeSync(directoryFd);
-      fs.rmSync(staging, { force: true });
       if (identity) {
-        if (ownerPublished) this.releaseLock({ lock, token, identity });
+        if (ownerPublished) this.releaseLock({ lock, token, identity, storage: staging });
         else this.retireObservedLock(lock, { ...identity, isDirectory: true }, null, `failed-${token}`);
       }
+      if (!ownerPublished) fs.rmSync(staging, { recursive: true, force: true });
       throw error;
     }
   }
@@ -1414,6 +1414,7 @@ export class AgentRegistry {
         return false;
       }
       fs.rmSync(releasing, { recursive: true, force: true });
+      fs.rmSync(claim.storage, { recursive: true, force: true });
       return true;
     }
     try {
@@ -1432,6 +1433,7 @@ export class AgentRegistry {
       fs.rmSync(candidate, { force: true });
     }
     fs.rmSync(releasing, { force: true });
+    fs.rmSync(claim.storage, { recursive: true, force: true });
     return true;
   }
 
