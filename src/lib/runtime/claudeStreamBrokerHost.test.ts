@@ -215,6 +215,37 @@ describe("ClaudeStreamBrokerHost", () => {
     await host.release();
   });
 
+  test("preserves split UTF-8 replay text for delivery confirmation", async () => {
+    const ledger = new RecordingDeliveryLedger();
+    const child = new FakeClaude(ledger);
+    const host = await ClaudeStreamBrokerHost.start({
+      cwd: "/repo",
+      deliveryLedger: ledger,
+      eventStore: new MemoryEventStore(),
+      readAuthStatus: () => ({ loggedIn: true, authMethod: "claude.ai", subscriptionType: "max" }),
+      spawnProcess: fakeSpawn(child, {}),
+    });
+    let receipt: Awaited<ReturnType<typeof host.send>> | undefined;
+    const sent = host.send({ id: "utf8-replay", text: "привіт" }).then((value) => { receipt = value; });
+    const frame = Buffer.from(`${JSON.stringify({
+      type: "user",
+      isReplay: true,
+      session_id: host.identity.sessionId,
+      uuid: "utf8-user",
+      message: { role: "user", content: [{ type: "text", text: "привіт" }] },
+    })}\n`);
+    const textStart = frame.indexOf(Buffer.from("привіт"));
+    expect(textStart).toBeGreaterThanOrEqual(0);
+    child.stdout.write(frame.subarray(0, textStart + 1));
+    child.stdout.write(frame.subarray(textStart + 1));
+    await Bun.sleep(0);
+    const confirmed = receipt;
+    await host.release();
+    await sent.catch(() => {});
+
+    expect(confirmed).toEqual({ outcome: "turn-started", turnId: "utf8-replay" });
+  });
+
   test("queues ordinary active-turn sends and resumes the same durable session", async () => {
     const ledger = new RecordingDeliveryLedger();
     const eventStore = new MemoryEventStore();

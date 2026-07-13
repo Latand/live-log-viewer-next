@@ -2,6 +2,7 @@ import { spawn, spawnSync } from "node:child_process";
 import type { ChildProcessWithoutNullStreams, SpawnOptionsWithoutStdio } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import { StringDecoder } from "node:string_decoder";
 
 import { statePath } from "@/lib/configDir";
 import { claudeTranscriptPath } from "@/lib/agent/transcript";
@@ -328,6 +329,7 @@ export class ClaudeStreamBrokerHost implements EngineHost {
   private readonly partialTurns = new Set<string>();
   private readonly pendingDeliveries = new Map<string, PendingDelivery>();
   private readonly stateListeners = new Set<(state: HostState) => void>();
+  private readonly stdoutDecoder = new StringDecoder("utf8");
   private stdoutBuffer = "";
   private cursor: number;
   private activeTurnId: string | null = null;
@@ -361,7 +363,13 @@ export class ClaudeStreamBrokerHost implements EngineHost {
     this.protocolVersion = auth.version ?? null;
     this.account = { type: auth.authMethod, planType: auth.subscriptionType };
     this.reapedPromise = new Promise((resolve) => { this.resolveReaped = resolve; });
-    child.stdout.on("data", (chunk: Buffer | string) => this.acceptStdout(String(chunk)));
+    child.stdout.on("data", (chunk: Buffer | string) => {
+      this.acceptStdout(typeof chunk === "string" ? chunk : this.stdoutDecoder.write(chunk));
+    });
+    child.stdout.on("end", () => {
+      const tail = this.stdoutDecoder.end();
+      if (tail) this.acceptStdout(tail);
+    });
     child.stderr.on("data", () => { /* Provider diagnostics may contain credentials. */ });
     child.stdin.on("error", (error) => {
       if (!this.releasing && !this.released) this.fail(new Error(`Claude stream stdin failed: ${safeError(error)}`));
