@@ -77,6 +77,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "dash.emptyHint": "Відкрий пульт у правому нижньому куті і клікни розмову — вона з'явиться тут",
   "dash.viewScheme": "схема",
   "dash.viewList": "розмови",
+  "dash.hiddenShelf": "Приховане",
 
   "trash.title": "Кореневі розмови",
   "trash.hint": "Клік по рядку відкриває розмову нодою; смітник видаляє її файл з диска назавжди.",

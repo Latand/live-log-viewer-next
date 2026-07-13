@@ -119,6 +119,12 @@ export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noCompose
   const badge = engineBadge(file);
   const state = paneState(file);
   const tone = PANE_TONES[state];
+  /* The live runtime pill (model/effort picker) shows only for a running,
+     top-level claude/codex agent. When it is present on the phone it is the
+     single model·reasoning control, so the read-only model chip + effort bars
+     stand down there to keep them from rendering twice (issue #177 item 2). */
+  const showRuntimeControls = file.proc === "running" && !file.parent && (file.engine === "claude" || file.engine === "codex");
+  const showIdentityBadge = !(isMobile && showRuntimeControls);
   const migState = cardMigrationState(file.migration);
   /* Stable card identity: a committed migration gives this conversation a new
      transcript `path` under the target account, but the same conversationId. So
@@ -232,49 +238,65 @@ export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noCompose
               </button>
             ) : null}
           </div>
-          <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1">
-            <LastActivity file={file} />
-            {/* One identity chip: the model when known (engine lives in the tint
-                and the tooltip), the engine label as fallback. */}
-            {file.model ? (
-              <span
-                className="shrink-0 rounded-full px-1.5 py-0.5 font-mono text-[9.5px] font-semibold"
-                style={{ backgroundColor: effortTint(file).soft, color: effortTint(file).color }}
-                title={[badge.label, effortTitle(file)].filter(Boolean).join(" · ")}
-              >
-                {file.model}
-              </span>
-            ) : (
-              <span className="inline-flex shrink-0 items-center rounded-full px-2 py-0.5 text-[10px] font-bold" style={badge.style}>
-                {badge.label}
-              </span>
-            )}
-            <EffortPills file={file} />
-            {file.proc === "running" && !file.parent && (file.engine === "claude" || file.engine === "codex") ? <AgentRuntimeControls file={file} /> : null}
-            <RateLimitBadge rateLimit={file.rateLimit} />
-            {file.parentRemoved ? <ParentRemovedChip /> : null}
-            {/* The phone header keeps only actionable or alarming chips: ctx
-                appears once it nears the limit, the worktree name and the
-                branch-kind label yield their room to the rest of the row. */}
-            {file.ctx && (!isMobile || (file.ctx.pct !== null && file.ctx.pct >= 70)) ? <CtxChip ctx={file.ctx} /> : null}
-            {file.worktree && !isMobile ? (
-              <span
-                className="inline-flex shrink-0 items-center gap-0.5 rounded-full border border-line/80 px-1.5 py-0.5 font-mono text-[9.5px] text-dim"
-                title={t("branch.worktree", { name: file.worktree })}
-              >
-                <GitBranch className="h-2.5 w-2.5" aria-hidden /> {file.worktree}
-              </span>
-            ) : null}
-            {file.plan ? <PlanChip plan={file.plan} /> : null}
-            {file.goal ? <GoalChip goal={file.goal} /> : null}
-            {isRoot || isMobile ? null : (
-              <span
-                className="inline-flex shrink-0 items-center gap-0.5 text-[10px] text-dim"
-                title={file.handoff ? t("branch.handoffTitle") : t("branch.branchTitle")}
-              >
-                <CornerDownRight className="h-3 w-3" aria-hidden /> {file.handoff ? t("kind.handoff") : kindLabel(t, file.kind)}
-              </span>
-            )}
+          <div className="flex min-w-0 items-center gap-x-1.5">
+            {/* Context usage is pinned first and never scrolls on the phone
+                (issue #177 item 1): the exact % leads the chip face so it stays
+                on screen no matter how the rest of the metadata row overflows.
+                Desktop keeps ctx inline in the wrapping row below. */}
+            {isMobile && file.ctx ? <CtxChip ctx={file.ctx} /> : null}
+            <div
+              className={`flex min-w-0 items-center gap-x-1.5 gap-y-1 ${
+                isMobile ? "no-scrollbar flex-nowrap overflow-x-auto" : "flex-wrap"
+              }`}
+            >
+              <LastActivity file={file} />
+              {/* Model + reasoning render exactly once (issue #177 item 2): when the
+                  tappable runtime pill is present it already shows «model · effort»
+                  and opens the picker, so on the phone the separate read-only model
+                  chip and effort bars are dropped to avoid the duplicate pair. They
+                  stay wherever that pill is absent (idle/child panes, desktop). */}
+              {showIdentityBadge ? (
+                <>
+                  {file.model ? (
+                    <span
+                      className="shrink-0 rounded-full px-1.5 py-0.5 font-mono text-[9.5px] font-semibold"
+                      style={{ backgroundColor: effortTint(file).soft, color: effortTint(file).color }}
+                      title={[badge.label, effortTitle(file)].filter(Boolean).join(" · ")}
+                    >
+                      {file.model}
+                    </span>
+                  ) : (
+                    <span className="inline-flex shrink-0 items-center rounded-full px-2 py-0.5 text-[10px] font-bold" style={badge.style}>
+                      {badge.label}
+                    </span>
+                  )}
+                  <EffortPills file={file} />
+                </>
+              ) : null}
+              {showRuntimeControls ? <AgentRuntimeControls file={file} /> : null}
+              <RateLimitBadge rateLimit={file.rateLimit} />
+              {file.parentRemoved ? <ParentRemovedChip /> : null}
+              {/* Desktop keeps ctx inline here; on mobile it is pinned above. */}
+              {!isMobile && file.ctx ? <CtxChip ctx={file.ctx} /> : null}
+              {file.worktree && !isMobile ? (
+                <span
+                  className="inline-flex shrink-0 items-center gap-0.5 rounded-full border border-line/80 px-1.5 py-0.5 font-mono text-[9.5px] text-dim"
+                  title={t("branch.worktree", { name: file.worktree })}
+                >
+                  <GitBranch className="h-2.5 w-2.5" aria-hidden /> {file.worktree}
+                </span>
+              ) : null}
+              {file.plan ? <PlanChip plan={file.plan} /> : null}
+              {file.goal ? <GoalChip goal={file.goal} /> : null}
+              {isRoot || isMobile ? null : (
+                <span
+                  className="inline-flex shrink-0 items-center gap-0.5 text-[10px] text-dim"
+                  title={file.handoff ? t("branch.handoffTitle") : t("branch.branchTitle")}
+                >
+                  <CornerDownRight className="h-3 w-3" aria-hidden /> {file.handoff ? t("kind.handoff") : kindLabel(t, file.kind)}
+                </span>
+              )}
+            </div>
           </div>
         </header>
         {/* Account-migration status ribbon (issue #40): sits in the same slot

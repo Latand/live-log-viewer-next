@@ -6,12 +6,21 @@ import { useIsMobile } from "@/hooks/useIsMobile";
 import { useRuntime } from "@/hooks/useRuntime";
 import type { RuntimeSnapshot, ViewerDeploymentStatus } from "@/lib/runtime/contracts";
 
+/* The viewer-deploy status is internal operator info, not app UI (issue #177
+   item 6): it is removed from the interface by default and never shown on the
+   phone. Set `NEXT_PUBLIC_LLV_SHOW_DEPLOY_PILL=1` to surface it on desktop for
+   deploy debugging. */
+function deployPillEnabled(): boolean {
+  return (typeof process !== "undefined" ? process.env?.NEXT_PUBLIC_LLV_SHOW_DEPLOY_PILL : undefined) === "1";
+}
+
 export function DeploymentStatusPill() {
   const { enabled, store } = useRuntime();
   const isMobile = useIsMobile();
+  const show = !isMobile && deployPillEnabled();
   const [snapshotDeployments, setSnapshotDeployments] = useState<ViewerDeploymentStatus[]>([]);
   useEffect(() => {
-    if (enabled) return;
+    if (enabled || !show) return;
     let active = true;
     const load = async () => {
       try {
@@ -24,23 +33,10 @@ export function DeploymentStatusPill() {
     void load();
     const timer = window.setInterval(() => void load(), 3_000);
     return () => { active = false; window.clearInterval(timer); };
-  }, [enabled]);
+  }, [enabled, show]);
   const deployments = enabled ? Object.values(store.deployments) : snapshotDeployments;
   const deployment = [...deployments].sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0];
-  /* Reserved space, phone only (finding 4): while the pill is live it publishes
-     a bottom inset that the board's docked sections (collapsed workers / quiet
-     conversations) pad against, so the toast sits in its own strip below them and
-     never overlaps their rows — not merely tap-through. Cleared when it hides. */
-  const hasReservation = isMobile && Boolean(deployment);
-  useEffect(() => {
-    if (!hasReservation) return;
-    const root = document.documentElement;
-    root.style.setProperty("--llv-deploy-inset", "calc(2.75rem + env(safe-area-inset-bottom))");
-    return () => {
-      root.style.removeProperty("--llv-deploy-inset");
-    };
-  }, [hasReservation]);
-  if (!deployment) return null;
+  if (!show || !deployment) return null;
   const label = deployment.phase.replaceAll("-", " ");
   const tone = deployment.phase === "succeeded"
     ? "border-ok/45 text-ok"

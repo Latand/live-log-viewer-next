@@ -23,6 +23,7 @@ import { pipelinesForProject } from "./pipelines/pipelineModel";
 import { buildSchemeLayout } from "./scheme/layout";
 import { collapsibleWorkerFiles, groupWorkerStacks, pipelineOriginOf, pipelineStagePipelineIds, protectedReviewerNodes } from "./scheme/workerCollapse";
 import { WorkerStacks } from "./WorkerStacks";
+import { MobileBottomShelf } from "./MobileBottomShelf";
 import { clearWorkflowDraftStorage } from "./workflows/WorkflowDraftPane";
 import { dropLegacyWorkflowDrafts, isWorkflowDraftId } from "./workflows/workflowModel";
 import { TaskPanel } from "./tasks/TaskPanel";
@@ -1056,22 +1057,28 @@ export function ProjectDashboard({
       {/* Worker-class cards that have auto-collapsed fold into one stack per
           origin — flow / pipeline / spawner (issue #112, #136) — instead of
           vanishing to the switchboard; owner-touched and live cards are never
-          included. */}
-      <WorkerStacks stacks={workerStacks} files={files} flows={flows} pipelines={pipelines} onSelect={openSwitchboardFile} />
+          included. The quiet `residual` strip is derived from `sceneFiles`,
+          which already excludes every collapsed worker, so a card never appears
+          in both a stack and here.
 
-      {/* `residual` is derived from `sceneFiles`, which already excludes every
-          collapsed worker, so a card never appears in both a stack and here. */}
-      {!hasArchiveNodes && residual.length ? (
-        <ResidualStrip items={residual} activeRootPaths={quietActiveRoots} onSelect={openSwitchboardFile} />
-      ) : null}
+          On the phone both strips fold behind a single bottom disclosure (issue
+          #177 item 5) so the footer is one compact row instead of two stacked
+          full-width strips; desktop keeps them side by side. */}
+      {(() => {
+        const workerTotal = workerStacks.reduce((sum, stack) => sum + stack.items.length, 0);
+        const quietTotal = !hasArchiveNodes ? residual.length : 0;
+        const strips = (
+          <>
+            <WorkerStacks stacks={workerStacks} files={files} flows={flows} pipelines={pipelines} onSelect={openSwitchboardFile} />
+            {!hasArchiveNodes && residual.length ? (
+              <ResidualStrip items={residual} activeRootPaths={quietActiveRoots} onSelect={openSwitchboardFile} />
+            ) : null}
+          </>
+        );
+        return isMobile ? <MobileBottomShelf total={workerTotal + quietTotal}>{strips}</MobileBottomShelf> : strips;
+      })()}
 
       <TaskToastHost />
-
-      {/* Phone-only reservation (finding 4): while a deploy pill is live it
-          publishes `--llv-deploy-inset`; this spacer lifts the docked worker /
-          quiet-conversation sections above it so the toast never covers their
-          rows. Collapses to 0 when no deploy is showing. */}
-      {isMobile ? <div aria-hidden className="shrink-0" style={{ height: "var(--llv-deploy-inset, 0px)" }} /> : null}
     </div>
   );
 }

@@ -34,8 +34,11 @@ export function HandoffHandle({ file, onHandoff, docked = false }: Props) {
   const { t } = useLocale();
   const link = useAgentLink(file);
   if (docked) {
+    /* Compact, right-aligned action rather than a full-width strip (issue #177
+       item 5): keeps its 44px tap target but stops the handoff from claiming a
+       whole footer row of its own below the focus pane. */
     return (
-      <div data-scheme-ui className="shrink-0 px-1.5 pt-1.5">
+      <div data-scheme-ui className="flex shrink-0 justify-end px-1.5 pt-1.5">
         <button
           type="button"
           aria-label={t("handoff.aria")}
@@ -45,7 +48,7 @@ export function HandoffHandle({ file, onHandoff, docked = false }: Props) {
             if (link.consumeClick()) return;
             onHandoff();
           }}
-          className="flex min-h-11 w-full touch-none items-center justify-center gap-1.5 rounded-[8px] border border-line bg-panel text-[12px] font-semibold text-dim shadow-card hover:border-accent/50 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+          className="inline-flex min-h-11 shrink-0 touch-none items-center justify-center gap-1.5 rounded-full border border-line bg-panel px-4 text-[12px] font-semibold text-dim shadow-card hover:border-accent/50 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
         >
           <ArrowRightLeft className="h-4 w-4 shrink-0" aria-hidden />
           {t("handoff.label")}
