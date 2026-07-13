@@ -1,4 +1,5 @@
 import { EventEmitter } from "node:events";
+import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -7,6 +8,7 @@ import type { ChildProcessWithoutNullStreams, SpawnOptionsWithoutStdio } from "n
 import { describe, expect, spyOn, test } from "bun:test";
 
 import { AgentRegistry } from "@/lib/agent/registry";
+import { procBackend } from "@/lib/proc";
 
 import {
   ClaudeStreamBrokerHost,
@@ -648,6 +650,80 @@ describe("ClaudeStreamBrokerHost", () => {
       structuredHost: { endpoint: "stdio:released", process: null },
     });
   });
+
+  test("boot adoption reaps a surviving orphaned Claude child before resume", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-claude-orphan-adoption-"));
+    const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+    const sessionId = "orphaned-claude-session";
+    const orphan = spawn(process.execPath, [
+      "-e",
+      "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)",
+    ], { stdio: "ignore" });
+    const orphanExit = new Promise<void>((resolve) => { orphan.once("exit", () => resolve()); });
+    let startIdentity: string | null = null;
+    for (let attempt = 0; attempt < 100 && !startIdentity; attempt += 1) {
+      startIdentity = orphan.pid ? procBackend.processIdentity(orphan.pid) : null;
+      if (!startIdentity) await Bun.sleep(2);
+    }
+    if (!orphan.pid || !startIdentity) {
+      try { orphan.kill("SIGKILL"); } catch { /* already exited */ }
+      await orphanExit;
+      throw new Error("orphan test process identity is unavailable");
+    }
+    registry.upsert({
+      key: { engine: "claude", sessionId },
+      artifactPath: `/sessions/${sessionId}.jsonl`,
+      cwd: "/repo",
+      accountId: null,
+      status: "live",
+      host: null,
+      structuredHost: {
+        kind: "claude-broker",
+        endpoint: `stdio:${orphan.pid}`,
+        process: { pid: orphan.pid, startIdentity },
+        eventCursor: 2,
+        protocolVersion: "2.1.197",
+        writerClaimEpoch: 1,
+        activeTurnRef: null,
+        pendingAttention: [],
+        activeFlags: [],
+      },
+      claimEpoch: 1,
+      claimOwner: null,
+      pendingAction: null,
+    });
+    const ledger = new RecordingDeliveryLedger();
+    const replacement = new FakeClaude(ledger);
+    let optionsCalls = 0;
+    let adopted: Awaited<ReturnType<typeof adoptClaudeRegistryHosts>> = [];
+    try {
+      adopted = await adoptClaudeRegistryHosts(
+        registry,
+        () => {
+          optionsCalls += 1;
+          return {
+            cwd: "/repo",
+            deliveryLedger: ledger,
+            eventStore: new MemoryEventStore(),
+            readAuthStatus: () => ({ loggedIn: true, authMethod: "claude.ai", subscriptionType: "max" }),
+            readTranscript: () => [],
+            spawnProcess: fakeSpawn(replacement, {}),
+          };
+        },
+        { NODE_ENV: "test", LLV_STRUCTURED_HOSTS: "1" },
+      );
+    } finally {
+      if (procBackend.processIdentity(orphan.pid) === startIdentity) {
+        try { orphan.kill("SIGKILL"); } catch { /* already exited */ }
+      }
+      await Promise.race([orphanExit, Bun.sleep(2_000)]);
+    }
+
+    expect(adopted).toHaveLength(1);
+    expect(optionsCalls).toBe(1);
+    expect(procBackend.processIdentity(orphan.pid)).not.toBe(startIdentity);
+    await adopted[0]!.host.release();
+  }, 10_000);
 
   test("protocol failure reaps a TERM-resistant child and releases its writer claim", async () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-claude-failure-claim-"));

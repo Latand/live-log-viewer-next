@@ -2,6 +2,7 @@ import type {
   AgentHostStatus,
   AgentRegistry,
   AgentRegistryEntry,
+  ProcessIdentity,
   StructuredHostColumns,
 } from "@/lib/agent/registry";
 import type { SessionKey } from "@/lib/agent/sessionKey";
@@ -195,6 +196,48 @@ export interface AdoptedClaudeHost {
   host: ClaudeStreamBrokerHost;
 }
 
+const STRUCTURED_CLAIM_PREFIX = "structured-host:";
+const ORPHAN_TERM_GRACE_MS = 250;
+const ORPHAN_KILL_GRACE_MS = 1_000;
+
+function claimOwnerBlocksOrphanReap(claimOwner: string | null): boolean {
+  if (!claimOwner) return false;
+  if (!claimOwner.startsWith(STRUCTURED_CLAIM_PREFIX)) return true;
+  let identity: Partial<ProcessIdentity>;
+  try { identity = JSON.parse(claimOwner.slice(STRUCTURED_CLAIM_PREFIX.length)) as Partial<ProcessIdentity>; }
+  catch { return true; }
+  if (!Number.isInteger(identity.pid) || identity.pid! <= 0) return true;
+  const startIdentity = typeof identity.startIdentity === "string" ? identity.startIdentity : null;
+  return procBackend.pidAlive(identity.pid!)
+    && (startIdentity === null || procBackend.processIdentity(identity.pid!) === startIdentity);
+}
+
+function verifiedProcessAlive(processIdentity: ProcessIdentity): boolean {
+  return processIdentity.startIdentity !== null
+    && procBackend.processIdentity(processIdentity.pid) === processIdentity.startIdentity;
+}
+
+async function waitForVerifiedProcessExit(processIdentity: ProcessIdentity, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (verifiedProcessAlive(processIdentity) && Date.now() < deadline) {
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+  }
+  return !verifiedProcessAlive(processIdentity);
+}
+
+async function terminateVerifiedClaudeOrphan(
+  processIdentity: ProcessIdentity,
+  claimOwner: string | null,
+): Promise<boolean> {
+  if (processIdentity.pid === process.pid
+    || !verifiedProcessAlive(processIdentity)
+    || claimOwnerBlocksOrphanReap(claimOwner)) return false;
+  try { process.kill(processIdentity.pid, "SIGTERM"); } catch { /* process exited */ }
+  if (await waitForVerifiedProcessExit(processIdentity, ORPHAN_TERM_GRACE_MS)) return true;
+  try { process.kill(processIdentity.pid, "SIGKILL"); } catch { /* process exited */ }
+  return waitForVerifiedProcessExit(processIdentity, ORPHAN_KILL_GRACE_MS);
+}
+
 /** Boot seam: resume every durable Codex row when structured hosting is enabled. */
 export async function adoptCodexRegistryHosts(
   registry: AgentRegistry,
@@ -255,7 +298,16 @@ export async function adoptClaudeRegistryHosts(
     const owner = { pid: process.pid, startIdentity: procBackend.processIdentity(process.pid) };
     try {
       await registry.withOperationLock(entry.key, owner, async () => {
-        const claimed = registry.claimStructuredHost(entry.key, owner);
+        let claimed = registry.claimStructuredHost(entry.key, owner);
+        if (!claimed) {
+          const current = registry.snapshot().entries[`claude:${entry.key.sessionId}`];
+          const orphan = current?.structuredHost?.kind === "claude-broker"
+            ? current.structuredHost.process
+            : null;
+          if (orphan && await terminateVerifiedClaudeOrphan(orphan, current?.claimOwner ?? null)) {
+            claimed = registry.claimStructuredHost(entry.key, owner);
+          }
+        }
         if (!claimed?.structuredHost) return;
         try {
           const host = await ClaudeStreamBrokerHost.adopt(entry.key.sessionId, {
