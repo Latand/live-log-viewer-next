@@ -24,6 +24,7 @@ import type { Pipeline } from "@/lib/pipelines/types";
 import { FlowStrip } from "@/components/flows/FlowStrip";
 import { RoleTag } from "@/components/flows/RoleTag";
 import { RateLimitBadge } from "@/components/RateLimitBadge";
+import { WakeupChip } from "@/components/WakeupChip";
 import { RoundDeck } from "@/components/flows/RoundDeck";
 import { RoundStateIcon } from "@/components/flows/RoundIcons";
 import { canHandoff, HandoffHandle } from "@/components/HandoffHandle";
@@ -521,6 +522,7 @@ function FarLabel({ file }: { file: FileEntry }) {
           {badge.label}
         </span>
         <RateLimitBadge rateLimit={file.rateLimit} />
+        <WakeupChip wakeup={file.pendingWakeup} />
         <span className="line-clamp-2 min-w-0 font-bold">{cleanTitle(file.title, 70)}</span>
       </div>
     </div>
@@ -576,6 +578,7 @@ function LiteNodeShell({ node, ringed, dimmed, flow }: { node: SchemeNode; ringe
           </span>
           {node.file.model ? <span className="min-w-0 truncate font-mono text-[11px] text-dim">{node.file.model}</span> : null}
           <RateLimitBadge rateLimit={node.file.rateLimit} />
+          <WakeupChip wakeup={node.file.pendingWakeup} />
           <span className="ml-auto shrink-0 text-[11px] text-dim">{fmtAge(node.file.mtime)}</span>
         </div>
         <div className="min-w-0 flex-1 px-3 py-2.5 text-[14px] font-semibold leading-snug">

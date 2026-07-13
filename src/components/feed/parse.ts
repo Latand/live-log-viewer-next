@@ -9,6 +9,7 @@ import {
 import { getLocale, translate } from "@/lib/i18n";
 import { inboxImageExt, MAX_INBOX_IMAGE_BYTES } from "@/lib/imagePolicy";
 import type { FileEntry } from "@/lib/types";
+import { harnessKind, parseScheduleWakeup, refineWakeupFromResult, type WakeupInfo } from "@/lib/wakeup";
 
 import type { GlyphName } from "../icons";
 import { hhmm } from "../utils";
@@ -42,6 +43,11 @@ export type NestedCall = {
 /** The two-level orchestration detail of a `functions.exec` record. */
 export type Orchestration = { source: string; sourceTruncated: boolean; calls: NestedCall[] };
 
+/** A `ScheduleWakeup` call, resolved for the dedicated countdown card.
+    `superseded` is set once a later wakeup in the same conversation replaces
+    this one — only the newest wakeup is "active" (issue #161 §2). */
+export type WakeupEventInfo = WakeupInfo & { superseded: boolean };
+
 /**
  * One normalized, bounded, source-agnostic tool event shared by Claude, Codex,
  * and future engines. Every string field is redacted and capped inside the
@@ -72,6 +78,8 @@ export type ToolEvent = {
   outputTruncated: boolean;
   open: boolean;
   orchestration?: Orchestration;
+  /** Present on a `ScheduleWakeup` call: drives the dedicated wakeup card. */
+  wakeup?: WakeupEventInfo;
 };
 export type CitationEntry = {
   target: string;
@@ -372,7 +380,7 @@ function toolBucket(event: ToolEvent): string {
 /* A diff or an orchestration record earns its own card; simple tool rows
    (shell/read/search/…) still fold into a cmd-group like the old cmd items. */
 function foldableTool(item: Item): item is ToolEvent {
-  return item.kind === "tool" && item.body?.type !== "diff" && !item.orchestration;
+  return item.kind === "tool" && item.body?.type !== "diff" && !item.orchestration && !item.wakeup;
 }
 
 /* Maps a `tools.<method>` orchestration call to a canonical tool name so the
@@ -797,6 +805,9 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
   let codexCompacted: { src: number } | null = null;
   let plainBlock: { lines: string[]; src: number } | null = null;
   let lastPlainCall: CallRec | null = null;
+  /* The newest ScheduleWakeup call: only it stays "active", so registering a
+     newer wakeup marks the previous one superseded (issue #161 §2). */
+  let lastWakeupCall: CallRec | null = null;
   /* Snapshot cache + fold-group identity reuse across re-feeds. */
   let prevGroups = new Map<number, CmdGroupItem>();
   let snapshot: FeedSnapshot | null = null;
@@ -940,6 +951,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
     diff?: DiffModel;
     lang?: string | null;
     summary?: string;
+    wakeup?: WakeupEventInfo;
   }): ToolEvent => {
     const args = opts.args ?? {};
     const family = familyOf(opts.tool);
@@ -969,12 +981,39 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
          compact preview of the first lines, with a toggle for the rest — so the
          change is visible without a click (issue #90). */
       open: Boolean(body),
+      ...(opts.wakeup ? { wakeup: opts.wakeup } : {}),
     };
   };
   const registerCall = (event: ToolEvent): CallRec => {
     const seq = push(event);
     const rec: CallRec = { event, seq };
     calls.set(event.id, rec);
+    return rec;
+  };
+  /* Rewrites a wakeup event copy-on-write (same one-row-changes-identity pattern
+     as attach): used to mark an earlier wakeup superseded when a newer one is
+     scheduled, and to fill its fire time once the tool_result arrives. */
+  const patchWakeupEvent = (callRec: CallRec, wakeup: WakeupEventInfo) => {
+    const event: ToolEvent = { ...callRec.event, wakeup };
+    callRec.event = event;
+    const idx = entryIndex(callRec.seq);
+    if (idx >= 0 && idx < entries.length && entries[idx].item.kind === "tool") {
+      entries[idx] = { ...entries[idx], item: event };
+      snapshot = null;
+    }
+  };
+  /* A ScheduleWakeup call → a wakeup event. The fire time is derived from the
+     record timestamp + delaySeconds; the previous wakeup (if any) is marked
+     superseded so only the newest one renders as active. */
+  const addWakeup = (ts: unknown, id: string, input: Record<string, unknown>): CallRec => {
+    const tsMs = typeof ts === "string" || typeof ts === "number" ? Date.parse(String(ts)) : NaN;
+    const info = parseScheduleWakeup(input, Number.isFinite(tsMs) ? tsMs : null);
+    const event = newToolEvent({ ts, id, tool: "ScheduleWakeup", args: input, engine: "claude", wakeup: { ...info, superseded: false } });
+    const rec = registerCall(event);
+    if (lastWakeupCall && lastWakeupCall.event.wakeup && !lastWakeupCall.event.wakeup.superseded) {
+      patchWakeupEvent(lastWakeupCall, { ...lastWakeupCall.event.wakeup, superseded: true });
+    }
+    lastWakeupCall = rec;
     return rec;
   };
   /* A shell command from any engine. `callId` is absent for plain job logs, so
@@ -1042,6 +1081,14 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
       outputTruncated = prev.outputTruncated || combined.length > limit;
       outputPreview = combined.slice(-limit);
     }
+    /* A wakeup whose fire time the call alone could not derive recovers it from
+       the result's "Next wakeup scheduled for … (in Ns)" text (issue #161). */
+    let wakeup = prev.wakeup;
+    if (wakeup && wakeup.fireAt === null && body) {
+      const tsMs = typeof prev.ts === "string" || typeof prev.ts === "number" ? Date.parse(String(prev.ts)) : NaN;
+      const refined = refineWakeupFromResult(wakeup, Number.isFinite(tsMs) ? tsMs : null, body);
+      wakeup = { ...refined, superseded: wakeup.superseded };
+    }
     const event: ToolEvent = {
       ...prev,
       status: isErr ? "err" : "ok",
@@ -1054,6 +1101,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
       srcResult: curSrc,
       outputPreview,
       outputTruncated,
+      ...(wakeup ? { wakeup } : {}),
     };
     callRec.event = event;
     const idx = entryIndex(callRec.seq);
@@ -1386,9 +1434,13 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
           const name = textPart(part.name) || "tool";
           const input = rec(part.input);
           const id = textPart(part.id) || "plain-" + pushSeq + "-" + String(ts ?? "");
-          const command = familyOf(name) === "shell" ? textPart(input.command) : undefined;
-          const lang = familyOf(name) === "read" ? extLang(textPart(input.file_path)) : undefined;
-          registerCall(newToolEvent({ ts, id, tool: name, args: input, engine: "claude", command, lang }));
+          if (name === "ScheduleWakeup") {
+            addWakeup(ts, id, input);
+          } else {
+            const command = familyOf(name) === "shell" ? textPart(input.command) : undefined;
+            const lang = familyOf(name) === "read" ? extLang(textPart(input.file_path)) : undefined;
+            registerCall(newToolEvent({ ts, id, tool: name, args: input, engine: "claude", command, lang }));
+          }
         }
       }
       return;
@@ -1496,6 +1548,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
     codexCompacted = null;
     plainBlock = null;
     lastPlainCall = null;
+    lastWakeupCall = null;
     prevGroups = new Map();
     snapshot = null;
     /* pushSeq keeps counting across resets so React keys never collide. */
@@ -1531,6 +1584,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
     pendingCodexUsers = pendingCodexUsers.filter((pending) => pending.src >= start);
     if (codexCompacted && codexCompacted.src < start) codexCompacted = null;
     if (lastPlainCall && entryIndex(lastPlainCall.seq) < 0) lastPlainCall = null;
+    if (lastWakeupCall && entryIndex(lastWakeupCall.seq) < 0) lastWakeupCall = null;
     return crossedEchoSeam || (plainBlock !== null && plainBlock.src < start);
   };
 
