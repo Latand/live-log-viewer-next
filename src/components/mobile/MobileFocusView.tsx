@@ -614,7 +614,7 @@ function pipelineDotColor(pipeline: Pipeline): string {
  * no pipelineControls, so GroupsLayer paints no strip there). This card shows the
  * full planned stage graph (past ✓ / current ▸ / ghost ○) and the pipeline-level
  * controls, every one a 44px tap target, so the plan and its actions live on the
- * phone board for every active pipeline, not just memberless ones.
+ * phone board for every active pipeline, memberful ones included.
  */
 export function MobilePipelineDock({ pipeline }: { pipeline: Pipeline }) {
   const { t } = useLocale();

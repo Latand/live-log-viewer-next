@@ -1,6 +1,5 @@
 import { afterAll, afterEach, beforeAll, beforeEach, expect, mock, test } from "bun:test";
 import { Window } from "happy-dom";
-import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { flushSync } from "react-dom";
 
@@ -9,10 +8,10 @@ import { emptyStore } from "@/components/runtime/runtimeModel";
 /* A mounted behavioral test for the shared desktop/mobile legacy-draft purge
    (#136/#156). It seeds sessionStorage the way a pre-fencing tab left it, mounts
    the real ProjectDashboard so ITS restoration effect (ProjectDashboard.tsx:303,
-   `setDrafts(loadDrafts(project))` — the production wiring, not a stand-in) runs,
-   and asserts the real WorkflowDraftPane never mounts while the ordinary agent
-   draft's pane does. Removing that effect leaves drafts `[]`, so the agent pane
-   would vanish and this test fails — exactly the regression the review asks for. */
+   `setDrafts(loadDrafts(project))` — the production wiring itself) runs, and
+   asserts the real WorkflowDraftPane never mounts while the ordinary agent
+   draft's pane does. Disable that effect and drafts stay `[]`, so the agent pane
+   never appears and this test fails — the regression the review asks for. */
 
 /* The dashboard's mobile surface renders ConnectionPill, which subscribes to the
    runtime bus; a sibling suite (useFiles.dom.test) leaves a `./runtimeBus` mock
@@ -67,7 +66,6 @@ const OVERRIDES: Record<string, unknown> = {
   IntersectionObserver: class { observe() {} unobserve() {} disconnect() {} takeRecords() { return []; } },
   // The board store and draft panes fetch on mount; keep those inert.
   fetch: (async () => ({ ok: true, status: 200, json: async () => ({}), text: async () => "" })) as unknown as typeof fetch,
-  IS_REACT_ACT_ENVIRONMENT: true,
 };
 const HAS: Record<string, boolean> = {};
 const SAVED: Record<string, unknown> = {};
@@ -77,6 +75,19 @@ const SAVED: Record<string, unknown> = {};
 const settle = async () => {
   await new Promise((r) => setTimeout(r, 0));
   await new Promise((r) => setTimeout(r, 0));
+};
+
+/* Poll until a predicate holds. React flushes passive effects (the dashboard's
+   restoration effect) and the follow-up re-render on scheduler macrotasks, so a
+   timer loop lets them complete without depending on React's test-only `act`
+   (whose named export is absent in some bun/react resolutions). */
+const waitFor = async (pred: () => boolean, timeoutMs = 4000): Promise<boolean> => {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (pred()) return true;
+    await new Promise((r) => setTimeout(r, 15));
+  }
+  return pred();
 };
 
 beforeAll(() => {
@@ -120,19 +131,11 @@ const dashboardProps = (project: string) => ({
   onUnarchive: () => {},
 });
 
-async function mountAct(node: React.ReactElement): Promise<Root> {
+function mount(node: React.ReactElement): Root {
   const host = dom.document.createElement("div");
   dom.document.body.appendChild(host);
   const root = createRoot(host as unknown as Element);
-  // act flushes the mount's passive effects — including the dashboard's
-  // restoration effect — synchronously; a second act drains the async board
-  // fetch's state updates so no update lands outside act.
-  await act(async () => {
-    root.render(node);
-  });
-  await act(async () => {
-    await settle();
-  });
+  flushSync(() => root.render(node));
   return root;
 }
 
@@ -155,12 +158,13 @@ test("the dashboard's restoration effect purges the legacy draft and never mount
   dom.sessionStorage.setItem(draftsKey(project), JSON.stringify([agentA, "wf-legacy"]));
   for (const name of WF_FIELDS) dom.sessionStorage.setItem(wfField("wf-legacy", name), `wf-legacy-${name}`);
 
-  roots.push(await mountAct(<ProjectDashboard {...dashboardProps(project)} />));
+  roots.push(mount(<ProjectDashboard {...dashboardProps(project)} />));
 
-  /* The dashboard's restoration effect populated `drafts` from storage and the
-     phone surface mounted the ordinary agent draft's real pane — so the
-     WorkflowDraftPane's absence below is meaningful, not vacuous. */
-  expect(dom.document.querySelector(AGENT_PANE)).not.toBeNull();
+  /* Wait for the dashboard's restoration effect to populate `drafts` from
+     storage and the phone surface to mount the ordinary agent draft's real pane.
+     Its presence makes the WorkflowDraftPane check below a live signal — an empty
+     surface would pass that check on its own. */
+  expect(await waitFor(() => dom.document.querySelector(AGENT_PANE) !== null)).toBe(true);
   /* The legacy workflow pane never mounts — restoration dropped its id. */
   expect(dom.document.querySelector(WF_PANE)).toBeNull();
 
@@ -172,11 +176,11 @@ test("the dashboard's restoration effect purges the legacy draft and never mount
 
 test("the phone surface DOES mount the real WorkflowDraftPane for a live wf draft (routing is real)", async () => {
   /* Positive control: fed a workflow draft directly (no purge), the same surface
-     the dashboard renders mounts the genuine WorkflowDraftPane — proving the
-     previous test's absence is the purge at work, not a surface that can't render
-     the pane at all. */
+     the dashboard renders mounts the genuine WorkflowDraftPane. This pins down
+     what the previous test's absence means: the purge removed it, and the surface
+     can otherwise render it. */
   roots.push(
-    await mountAct(
+    mount(
       <MobileFocusView
         project="control"
         groups={[]}
@@ -195,6 +199,6 @@ test("the phone surface DOES mount the real WorkflowDraftPane for a live wf draf
       />,
     ),
   );
-  expect(dom.document.querySelector(WF_PANE)).not.toBeNull();
+  expect(await waitFor(() => dom.document.querySelector(WF_PANE) !== null)).toBe(true);
   expect(dom.document.querySelector(AGENT_PANE)).toBeNull();
 });

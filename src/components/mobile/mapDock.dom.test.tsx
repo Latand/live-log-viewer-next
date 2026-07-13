@@ -1,6 +1,5 @@
 import { afterAll, afterEach, beforeAll, beforeEach, expect, mock, test } from "bun:test";
 import { Window } from "happy-dom";
-import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { flushSync } from "react-dom";
 
@@ -8,8 +7,8 @@ import { emptyStore } from "@/components/runtime/runtimeModel";
 import type { Pipeline } from "@/lib/pipelines/types";
 import type { WorkerStack } from "@/components/scheme/workerCollapse";
 
-/* Finding-1 regression (#156): opening the mobile map must NOT hide the full
-   pipeline plan. The map overlay covers the focus-surface dock, and SchemeBoard
+/* Finding-1 regression (#156): opening the mobile map must keep the full pipeline
+   plan reachable. The map overlay covers the focus-surface dock, and SchemeBoard
    passes no pipelineControls in map mode, so the plan lives on dock cards docked
    inside the overlay itself. This mounts the real MobileFocusView, opens the map,
    and asserts a MobilePipelineDock renders inside the map overlay. */
@@ -48,11 +47,22 @@ const OVERRIDES: Record<string, unknown> = {
   ResizeObserver: class { observe() {} unobserve() {} disconnect() {} },
   IntersectionObserver: class { observe() {} unobserve() {} disconnect() {} takeRecords() { return []; } },
   fetch: (async () => ({ ok: true, status: 200, json: async () => ({}), text: async () => "" })) as unknown as typeof fetch,
-  IS_REACT_ACT_ENVIRONMENT: true,
 };
 const HAS: Record<string, boolean> = {};
 const SAVED: Record<string, unknown> = {};
 const settle = async () => { await new Promise((r) => setTimeout(r, 0)); await new Promise((r) => setTimeout(r, 0)); };
+
+/* Poll a predicate across scheduler macrotasks — lets React flush the click's
+   state update and the overlay's mount without React's test-only `act` (whose
+   named export is absent in some bun/react resolutions). */
+const waitFor = async (pred: () => boolean, timeoutMs = 4000): Promise<boolean> => {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (pred()) return true;
+    await new Promise((r) => setTimeout(r, 15));
+  }
+  return pred();
+};
 
 beforeAll(() => {
   for (const key of Object.keys(OVERRIDES)) { HAS[key] = key in G; SAVED[key] = G[key]; G[key] = OVERRIDES[key]; }
@@ -74,25 +84,24 @@ const pipeline = {
   runs: [], cursor: null, state: "paused", pausedState: "running", stateDetail: null,
   srcPath: null, srcConversationId: null, createdAt: new Date(0).toISOString(), closedAt: null,
 } as unknown as Pipeline;
-// One worker stack makes the map reachable without needing ≥2 placed nodes.
+// One worker stack makes the map reachable with no placed nodes required.
 const stack: WorkerStack = { key: "stack::pipe:p1", kind: "pipeline", id: "p1", items: [] };
 
 let roots: Root[] = [];
 beforeEach(() => { dom.document.body.replaceChildren(); roots = []; });
 afterEach(async () => { for (const r of roots) flushSync(() => r.unmount()); roots = []; await settle(); dom.sessionStorage.clear(); });
 
-async function mountAct(node: React.ReactElement): Promise<Root> {
+function mount(node: React.ReactElement): Root {
   const host = dom.document.createElement("div");
   dom.document.body.appendChild(host);
   const root = createRoot(host as unknown as Element);
-  await act(async () => { root.render(node); });
-  await act(async () => { await settle(); });
+  flushSync(() => root.render(node));
   return root;
 }
 
 test("opening the mobile map keeps every active pipeline's full plan on a dock inside the overlay (#156)", async () => {
   roots.push(
-    await mountAct(
+    mount(
       <MobileFocusView
         project="demo"
         groups={[]}
@@ -118,18 +127,21 @@ test("opening the mobile map keeps every active pipeline's full plan on a dock i
   const openBtn = dom.document.querySelector('button[aria-label="Open the project map"]') as HTMLButtonElement | null;
   expect(openBtn).not.toBeNull();
 
-  await act(async () => { openBtn!.click(); });
-  await act(async () => { await settle(); });
+  flushSync(() => openBtn!.click());
 
-  // Scope to the map overlay itself — the nearest fixed container of the
-  // Close-map control — NOT the page root (which also holds the focus-surface
-  // dock). Without the fix this overlay has no dock and the assertion fails.
-  const closeBtn = dom.document.querySelector('[aria-label="Close the map"]');
-  expect(closeBtn).not.toBeNull();
-  const overlay = closeBtn!.closest("div.fixed");
-  expect(overlay).not.toBeNull();
-  expect(overlay!.querySelector('[data-testid="mobile-pipeline-dock"]')).not.toBeNull();
-  // And the whole planned stage graph is on that dock card.
+  /* Assert against the map overlay itself — the nearest fixed container of the
+     Close-map control. The page root also holds the focus-surface dock, so
+     querying it would pass even with the overlay dock removed; scoping to the
+     overlay makes the assertion fail without the fix. */
+  const found = await waitFor(() => {
+    const close = dom.document.querySelector('[aria-label="Close the map"]');
+    const overlay = close?.closest("div.fixed");
+    return Boolean(overlay?.querySelector('[data-testid="mobile-pipeline-dock"]'));
+  });
+  expect(found).toBe(true);
+
+  const overlay = dom.document.querySelector('[aria-label="Close the map"]')!.closest("div.fixed");
+  // The whole planned stage graph rides on that dock card.
   expect(overlay!.textContent).toContain("plan");
   expect(overlay!.textContent).toContain("build");
 });

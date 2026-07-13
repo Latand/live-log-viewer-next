@@ -55,7 +55,7 @@ test("a paused pipeline shows Resume; a completed one keeps Close but drops paus
   const paused = renderToStaticMarkup(<MobilePipelineDock pipeline={{ ...provisioning, state: "paused" } as Pipeline} />);
   expect(paused).toContain("aria-label=\"Resume pipeline\"");
 
-  /* Completed ≠ closed: it stays active until dismissed, so Close must remain the
+  /* A completed pipeline stays active until dismissed, so Close must remain the
      escape hatch, while pause/resume drop away (review round 4). */
   const done = renderToStaticMarkup(<MobilePipelineDock pipeline={{ ...provisioning, state: "completed" } as Pipeline} />);
   expect(done).not.toContain("aria-label=\"Pause pipeline\"");
