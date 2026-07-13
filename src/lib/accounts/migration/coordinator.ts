@@ -482,7 +482,16 @@ export async function reconcileMigrations(
   const pendingDeliveries = new Set(Object.values(before.heldDeliveries)
     .filter((item) => item.state !== "delivered" && (item.state !== "delivery-uncertain" || delivery.reconcileUncertain))
     .map((item) => item.conversationId));
-  for (const conversation of Object.values(before.conversations)) {
+  for (const snapshotConversation of Object.values(before.conversations)) {
+    let conversation = registry.conversation(snapshotConversation.id) ?? snapshotConversation;
+    if (conversation.migration
+      && conversation.migration.phase !== "committed"
+      && conversation.migration.phase !== "rolled-back"
+      && delivery.reconcileUncertain
+      && registry.pendingDeliveries(conversation.id).some((item) => item.state === "delivery-uncertain")) {
+      await drainHeldDeliveries(conversation.id, delivery, registry);
+      conversation = registry.conversation(conversation.id) ?? conversation;
+    }
     if (!conversation.migration || conversation.migration.phase === "rolled-back") {
       if (pendingDeliveries.has(conversation.id)) await drainHeldDeliveries(conversation.id, delivery, registry);
       continue;
@@ -491,10 +500,11 @@ export async function reconcileMigrations(
       if (pendingDeliveries.has(conversation.id)) await drainHeldDeliveries(conversation.id, delivery, registry);
       continue;
     }
-    const source = conversation.generations.find((generation) => generation.id === conversation.migration?.sourceGenerationId)
+    const migration = conversation.migration;
+    const source = conversation.generations.find((generation) => generation.id === migration.sourceGenerationId)
       ?? conversation.generations.at(-1);
-    if (source?.accountId === null && !conversation.migration.providerReceipt) {
-      registry.rollbackConversationMigration(conversation.id, conversation.migration.revision);
+    if (source?.accountId === null && !migration.providerReceipt) {
+      registry.rollbackConversationMigration(conversation.id, migration.revision);
       continue;
     }
     const advanced = await advanceConversationMigration(conversation.id, registry, provider, { ...options, deferBoardRepair: true });
