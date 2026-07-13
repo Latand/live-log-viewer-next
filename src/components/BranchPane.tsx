@@ -281,15 +281,16 @@ export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noCompose
               }`}
             >
               <LastActivity file={file} />
-              {/* Model + reasoning as one element (issue #177 item 2): a running
-                  root claude/codex pane gets the tappable picker pill; every other
-                  phone pane gets a single «model · reasoning» read-only chip that
-                  folds the model and effort tier together. Desktop keeps its chip
-                  plus effort-bar pair. */}
-              {showRuntimeControls ? (
-                <AgentRuntimeControls file={file} />
-              ) : isMobile ? (
-                file.model ? (
+              {/* Model + reasoning. The phone shows one element (issue #177 item
+                  2): a running root claude/codex pane gets the tappable picker
+                  pill, every other phone pane a single «model · reasoning»
+                  read-only chip. Desktop is unchanged — the observed model chip
+                  and effort bars always render, and the runtime picker rides
+                  alongside them for a running root agent. */}
+              {isMobile ? (
+                showRuntimeControls ? (
+                  <AgentRuntimeControls file={file} />
+                ) : file.model ? (
                   <span
                     className="inline-flex shrink-0 items-center rounded-full px-2 py-0.5 font-mono text-[10px] font-semibold"
                     style={{ backgroundColor: effortTint(file).soft, color: effortTint(file).color }}
@@ -318,6 +319,7 @@ export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noCompose
                     </span>
                   )}
                   <EffortPills file={file} />
+                  {showRuntimeControls ? <AgentRuntimeControls file={file} /> : null}
                 </>
               )}
               <RateLimitBadge rateLimit={file.rateLimit} />
