@@ -8,6 +8,7 @@ import { useLocale } from "@/lib/i18n";
 
 import type { SchemeLayout, SchemeRect } from "./layout";
 import { TASK_W, taskCardHeight, type PlacedTask } from "./taskGeometry";
+import type { WorkerStack } from "./workerCollapse";
 
 export interface Camera {
   x: number;
@@ -18,6 +19,26 @@ export interface Camera {
 const MAP_W = 216;
 const MAP_H = 148;
 
+/** One collapsed worker-stack origin, drawn as a single legend dot (issue #136). */
+export interface StackDot {
+  key: string;
+  color: string;
+}
+
+/** Minimap dot tone per collapsed worker-stack origin (issue #136): orchestration
+    origins (flow/pipeline) in accent, spawner/worktree origins in gray. */
+export const STACK_DOT_COLOR: Record<WorkerStack["kind"], string> = {
+  flow: "#5a51e0",
+  pipeline: "#5a51e0",
+  origin: "#9a9aa4",
+  worktree: "#c9c9d1",
+};
+
+/** One minimap dot per collapsed worker stack (issue #136), tinted by origin. */
+export function stackDotsFor(stacks: readonly WorkerStack[]): StackDot[] {
+  return stacks.map((stack) => ({ key: stack.key, color: STACK_DOT_COLOR[stack.kind] }));
+}
+
 /**
  * Scaled-down world in the corner: every node as an engine-colored block,
  * the current viewport as an accent frame. Click or drag to jump the camera.
@@ -26,6 +47,7 @@ export function Minimap({
   layout,
   world,
   tasks = [],
+  stackDots = [],
   cam,
   vp,
   onJump,
@@ -37,6 +59,9 @@ export function Minimap({
   world: SchemeRect;
   /** Tasks render as 3 px status-colored dots; their edges never show here. */
   tasks?: PlacedTask[];
+  /** Collapsed worker stacks (issue #136): one dot per origin, shown as a compact
+      legend so folded workers read as a handful of dots, never an agent flood. */
+  stackDots?: StackDot[];
   cam: Camera;
   vp: { w: number; h: number };
   onJump: (wx: number, wy: number) => void;
@@ -88,8 +113,10 @@ export function Minimap({
     >
       <svg width={MAP_W} height={MAP_H} aria-hidden>
         <g transform={`translate(${ox - world.x * scale} ${oy - world.y * scale}) scale(${scale})`}>
+          {/* On-canvas quiet-branch stacks: one dot each, so a stack is a single
+              mark on the map, never a wall of member cards (issue #136). */}
           {layout.stacks.map((stack) => (
-            <rect key={stack.key} x={stack.x} y={stack.y} width={stack.w} height={stack.h} rx={18} fill="#c9c9d1" opacity={0.45} />
+            <circle key={stack.key} cx={stack.x + stack.w / 2} cy={stack.y + stack.h / 2} r={7 / scale} fill="#9a9aa4" opacity={0.6} />
           ))}
           {layout.drafts.map((draft) => (
             <rect key={draft.key} x={draft.x} y={draft.y} width={draft.w} height={draft.h} rx={18} fill="#9a9aa4" opacity={0.3} />
@@ -130,6 +157,26 @@ export function Minimap({
           />
         </g>
       </svg>
+      {/* Collapsed worker stacks live off-canvas, so they get a compact legend
+          here — ONE dot per origin, all of them (issue #136): the acceptance
+          contract is one dot per stack, so no stack identity is ever hidden
+          behind a counter. The legend wraps and the dots shrink a touch past a
+          dozen so a busy board stays inside the corner without dropping any. */}
+      {stackDots.length ? (
+        <div
+          className="pointer-events-none absolute bottom-1 left-1 flex max-h-[70%] max-w-[150px] flex-wrap content-end items-center gap-[3px]"
+          title={t("minimap.stacks", { count: stackDots.length })}
+          aria-hidden
+        >
+          {stackDots.map((dot) => (
+            <span
+              key={dot.key}
+              className={`shrink-0 rounded-full ${stackDots.length > 24 ? "h-1 w-1" : "h-1.5 w-1.5"}`}
+              style={{ backgroundColor: dot.color }}
+            />
+          ))}
+        </div>
+      ) : null}
     </div>
   );
 }

@@ -33,6 +33,7 @@ import { activityDot, cleanTitle, engineBadge, engineEdge, fmtAge } from "@/comp
 
 import type { AgentLink } from "./agentLinks";
 import { PIPELINE_RAIL_COLOR, pipelineRailSegment } from "./agentLinks";
+import { routeTaskEdge, segHitsRect } from "./taskGeometry";
 import { GroupOverridePanel } from "./GroupOverridePanel";
 import { stableDomOrder, stableNodeDomOrder } from "./domOrder";
 import {
@@ -223,9 +224,13 @@ export const LoopsLayer = memo(function LoopsLayer({ loops, width, height }: { l
  * endpoints come pre-resolved to board rects, so this layer never repositions
  * anything — it only decorates geometry the layout already owns.
  */
+/* Clearance a pipeline rail keeps off any card it routes around (issue #136). */
+const RAIL_CLEARANCE = 10;
+
 export const AgentLinksLayer = memo(function AgentLinksLayer({
   links,
   byPath,
+  obstacles = [],
   interactive,
   hubInteractive = interactive,
   width,
@@ -233,6 +238,10 @@ export const AgentLinksLayer = memo(function AgentLinksLayer({
 }: {
   links: AgentLink[];
   byPath: Map<string, SchemeRect>;
+  /** Card rects the pipeline rails must not cross — nodes, decks, stacks, drafts
+      (issue #136). A rail excludes its own two endpoints and routes around the
+      rest, reusing the task-edge obstacle router (PR #130). */
+  obstacles?: readonly SchemeRect[];
   interactive: boolean;
   /** Pipeline control hub stays tappable even where the rest of the layer is
       passive — the mobile lite map is pick-only for nodes but its PipelineHub
@@ -245,14 +254,35 @@ export const AgentLinksLayer = memo(function AgentLinksLayer({
   /* Anchor-only pipeline links carry a hub but no rail (from === to), so they are
      excluded from the drawn-rail pass. */
   const pipelineLinks = links.filter((link) => link.pipeline && !link.pipeline.anchorOnly && byPath.has(link.from) && byPath.has(link.to));
+
+  /* Rail geometry per link: the straight edge-to-edge segment, or — when an
+     unrelated card lies across it — an obstacle-avoiding route around every card
+     but its own two endpoints. Shared by the drawn-rail pass and the hub/badge
+     placement so the control never floats off a rerouted rail. */
+  const railGeom = (link: AgentLink): { d: string; mid: { x: number; y: number }; chevrons: string[] } => {
+    const from = byPath.get(link.from)!;
+    const to = byPath.get(link.to)!;
+    const seg = pipelineRailSegment(from, to);
+    const near = obstacles.filter((rect) => rect !== from && rect !== to);
+    const blocked = near.some((rect) => segHitsRect(seg.x1, seg.y1, seg.x2, seg.y2, rect, RAIL_CLEARANCE));
+    if (!blocked) {
+      return { d: `M ${seg.x1} ${seg.y1} L ${seg.x2} ${seg.y2}`, mid: { x: (seg.x1 + seg.x2) / 2, y: (seg.y1 + seg.y2) / 2 }, chevrons: seg.chevrons };
+    }
+    /* Routed around a card: a curved/detoured path replaces the straight rail; the
+       marching chevrons are dropped there (the hub arrow keeps the direction). */
+    const route = routeTaskEdge({ x1: seg.x1, y1: seg.y1, x2: seg.x2, y2: seg.y2 }, near);
+    return { d: route.d, mid: route.mid, chevrons: [] };
+  };
+  const railByKey = new Map(pipelineLinks.map((link) => [link.key, railGeom(link)] as const));
+
   return (
     <>
       {pipelineLinks.length ? (
         <svg width={width} height={height} className="absolute left-0 top-0" aria-hidden>
           {pipelineLinks.map((link) => {
-            const seg = pipelineRailSegment(byPath.get(link.from)!, byPath.get(link.to)!);
+            const geom = railByKey.get(link.key)!;
             const color = PIPELINE_RAIL_COLOR[link.pipeline!.tone];
-            const line = `M ${seg.x1} ${seg.y1} L ${seg.x2} ${seg.y2}`;
+            const line = geom.d;
             const active = link.pipeline!.tone === "active" && !link.pipeline!.paused;
             return (
               <g key={link.key}>
@@ -266,7 +296,7 @@ export const AgentLinksLayer = memo(function AgentLinksLayer({
                   strokeLinecap="round"
                   strokeDasharray={link.pipeline!.tone === "dim" ? "5 7" : undefined}
                 />
-                {seg.chevrons.map((chevron, index) => (
+                {geom.chevrons.map((chevron, index) => (
                   <path key={index} d={chevron} fill="none" stroke={color} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" opacity={0.9} />
                 ))}
               </g>
@@ -279,11 +309,12 @@ export const AgentLinksLayer = memo(function AgentLinksLayer({
         const to = byPath.get(link.to);
         if (!from || !to) return null;
         if (link.pipeline) {
-          /* Rail midpoint, nudged onto the same off-center offset as the line;
-             an anchor-only hub (no rail) sits at the top-center of its node. */
-          const seg = pipelineRailSegment(from, to);
-          const x = link.pipeline.anchorOnly ? from.x + from.w / 2 : (seg.x1 + seg.x2) / 2;
-          const y = link.pipeline.anchorOnly ? from.y : (seg.y1 + seg.y2) / 2;
+          /* Rail midpoint (routed or straight), nudged onto the same off-center
+             offset as the line; an anchor-only hub (no rail) sits at the
+             top-center of its node. */
+          const geom = railByKey.get(link.key);
+          const x = link.pipeline.anchorOnly ? from.x + from.w / 2 : geom?.mid.x ?? from.x + from.w / 2;
+          const y = link.pipeline.anchorOnly ? from.y : geom?.mid.y ?? from.y;
           if (link.pipeline.hub) {
             return <PipelineHub key={link.key} pipeline={link.pipeline.pipeline} x={x} y={y} interactive={hubInteractive} moveTransition={MOVE_TRANSITION} />;
           }
@@ -311,14 +342,37 @@ export const AgentLinksLayer = memo(function AgentLinksLayer({
  * stays readable when the board is zoomed out to the map. A group appears only
  * while its flow/pipeline is open, so it dissolves on close with no extra state.
  */
+/** Everything a pipeline group's on-halo stage strip needs to render + route
+    (issue #136): supplied by SchemeBoard for the interactive board, omitted on
+    the lite map. Absent → group halos keep only their label chip. */
+export interface PipelineGroupControls {
+  flows: Flow[];
+  renderablePaths: ReadonlySet<string>;
+  renderableFlows: ReadonlySet<string>;
+  /** Ids of pipelines whose per-node compact strip is ACTUALLY mounted on a
+      placed board node. A pipeline absent from this set has no on-board plan
+      surface — even if its current stage resolved to a path, that node may be
+      hidden/collapsed — so the group halo must carry the plan itself (issue
+      #136). Membership, not `pipelineBoardStripPath`, is the source of truth. */
+  nodeStripPipelineIds: ReadonlySet<string>;
+  onOpenPath: (path: string) => void;
+  onOpenFlow: (flowId: string) => void;
+}
+
 export const GroupsLayer = memo(function GroupsLayer({
   groups,
   interactive,
+  pipelineControls,
 }: {
   groups: SchemeGroup[];
   /** Passive on the hand-tool, during a selection session and on the lite map:
       the halos still render, but the label chip stops opening the panel. */
   interactive: boolean;
+  /** When present, a pipeline group whose current stage has NO per-node strip
+      (a review-loop or not-yet-materialized stage) renders the full planned
+      stage graph on the halo itself, so the group is always the pipeline surface
+      (issue #136). */
+  pipelineControls?: PipelineGroupControls | null;
 }) {
   const [openId, setOpenId] = useState<string | null>(null);
   if (!groups.length) return null;
@@ -348,6 +402,27 @@ export const GroupsLayer = memo(function GroupsLayer({
               className="absolute inset-0 rounded-[20px] border-2 border-dashed"
               style={{ borderColor: color, backgroundColor: soft }}
             />
+            {/* The pipeline's full planned stage graph on the halo itself, shown
+                only when no per-node strip is actually mounted for it — so the
+                group is the single stage-plan surface with no duplication, and a
+                pipeline whose current node is hidden/collapsed still shows its
+                plan (issue #136 / review finding 1). */}
+            {group.pipeline && pipelineControls && !pipelineControls.nodeStripPipelineIds.has(group.pipeline.id) ? (
+              <div
+                data-scheme-group-strip
+                className={`absolute left-4 right-4 top-3 z-[7] ${interactive ? "pointer-events-auto" : "pointer-events-none"}`}
+              >
+                <PipelineStrip
+                  pipeline={group.pipeline}
+                  flows={pipelineControls.flows}
+                  renderablePaths={pipelineControls.renderablePaths}
+                  renderableFlows={pipelineControls.renderableFlows}
+                  compact
+                  onOpenPath={pipelineControls.onOpenPath}
+                  onOpenFlow={pipelineControls.onOpenFlow}
+                />
+              </div>
+            ) : null}
             <button
               data-scheme-ui
               className={`absolute -top-3 left-5 z-[8] inline-flex max-w-[22em] items-center gap-[0.4em] rounded-full bg-panel px-[0.7em] py-[0.15em] font-bold shadow-card hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:cursor-default ${

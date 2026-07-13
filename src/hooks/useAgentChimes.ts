@@ -52,6 +52,11 @@ export interface ChimePlan {
   chimes: PlannedChime[];
 }
 
+export interface ScopedChimePlan extends ChimePlan {
+  /** The successful /api/files request that produced this payload. */
+  scope: string;
+}
+
 /**
  * Pure transition scan behind {@link useAgentChimes}: compares the current
  * poll against the accumulated baseline and plans which chimes to ring.
@@ -62,6 +67,7 @@ export function planAgentChimes(
   files: readonly FileEntry[],
   prev: ReadonlyMap<string, TrackedConversation> | null,
   linked: ReadonlySet<string>,
+  options: { suppressUnseen?: boolean } = {},
 ): ChimePlan {
   /* Keyed by the stable conversation identity (with the path as the
      pre-migration fallback): a committed account migration swaps the path
@@ -90,14 +96,15 @@ export function planAgentChimes(
   }
   for (const [id, cur] of next) {
     const was = prev.get(id);
+    const suppressUnseen = options.suppressUnseen === true && was === undefined;
     const finished = cur.kind !== undefined && (was?.state === "live" || was === undefined);
-    if (cur.kind !== undefined && finished) chimes.push({ kind: cur.kind, id });
+    if (cur.kind !== undefined && finished && !suppressUnseen) chimes.push({ kind: cur.kind, id });
     if (cur.parent && !nextLinked.has(id)) {
       nextLinked.add(id);
       /* Skip the blip when a finish chime just announced this same
          conversation — a subagent that lived its whole life between polls
          rings once. */
-      if (!finished) chimes.push({ kind: "spawned", id });
+      if (!finished && !suppressUnseen) chimes.push({ kind: "spawned", id });
     }
   }
   /* Last-seen (LRU) order: entries present in this poll are re-inserted at
@@ -122,6 +129,26 @@ export function planAgentChimes(
 }
 
 /**
+ * Applies the request-scope boundary around the transition scan. A project
+ * switch hydrates historical entries that this tab has never observed; those
+ * entries seed the retained history silently. Conversations already tracked
+ * still announce a real lifecycle transition during the same hydration.
+ */
+export function planScopedAgentChimes(
+  files: readonly FileEntry[],
+  previous: ScopedChimePlan | null,
+  scope: string,
+): ScopedChimePlan {
+  const plan = planAgentChimes(
+    files,
+    previous?.tracked ?? null,
+    previous?.linked ?? new Set(),
+    { suppressUnseen: previous !== null && previous.scope !== scope },
+  );
+  return { ...plan, scope };
+}
+
+/**
  * Watches the polled file list for lifecycle transitions and rings a chime
  * when an agent finishes its turn: left `live` into an attention state, or
  * appeared already finished (a branch that ran its whole life between polls).
@@ -131,19 +158,15 @@ export function planAgentChimes(
  * The first poll after page load only seeds the baseline — reloading over
  * finished work stays silent.
  */
-export function useAgentChimes(files: FileEntry[]) {
-  const prevRef = useRef<Map<string, TrackedConversation> | null>(null);
-  /* Children that already rang their spawn blip; a parent link that flaps
-     null → set → null in the scanner must not re-announce the same agent. */
-  const linkedRef = useRef<Set<string>>(new Set());
+export function useAgentChimes(files: FileEntry[], scope: string | null) {
+  const historyRef = useRef<ScopedChimePlan | null>(null);
 
   useEffect(() => primeAudio(), []);
 
   useEffect(() => {
-    if (!files.length) return;
-    const plan = planAgentChimes(files, prevRef.current, linkedRef.current);
-    prevRef.current = plan.tracked;
-    linkedRef.current = plan.linked;
+    if (!files.length || !scope) return;
+    const plan = planScopedAgentChimes(files, historyRef.current, scope);
+    historyRef.current = plan;
     plan.chimes.forEach((planned, voice) => chime(planned.kind, panForPane(planned.id), voice * STAGGER_MS));
-  }, [files]);
+  }, [files, scope]);
 }

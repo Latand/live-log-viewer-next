@@ -536,6 +536,11 @@ export const uk: Record<keyof typeof en, Message> = {
   "tools.noRawRecord": "деталі більше не завантажені",
   "tools.noOutput": "вивід не збережено",
   "tools.noOutputTip": "повний вивід зберігається в сесії rollout",
+  "tools.stdin": "stdin",
+  "tools.stdinPoll": "опитування",
+  "tools.wait": "очікування",
+  "tools.session": "сесія",
+  "tools.waitingSeconds": "очікування {n} с",
   "tools.diffTruncated": "обрізано",
   "tools.orchestration": { one: "{count} виклик інструмента", few: "{count} виклики інструментів", many: "{count} викликів інструментів", other: "{count} викликів інструментів" },
   "tools.nestedCalls": "вкладені виклики",
@@ -863,6 +868,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "bulk.flowStart": "Запустити {count} флоу",
 
   "minimap.title": "Мінімапа — клікни або тягни, щоб перейти",
+  "minimap.stacks": { one: "{count} згорнутий стек", few: "{count} згорнуті стеки", many: "{count} згорнутих стеків", other: "{count} згорнутих стеків" },
 
   "plan.agentPlan": "План агента:",
   "plan.stepsAria": "План: {done} з {total} кроків",
@@ -1023,6 +1029,8 @@ export const uk: Record<keyof typeof en, Message> = {
   "workerStack.title": "Згорнуті воркери",
   "workerStack.aria": "Згорнуті розмови воркерів",
   "workerStack.flow": "Потік",
+  "workerStack.pipeline": "Пайплайн",
+  "workerStack.origin": "Породжені",
   "workerStack.worktree": "Воркери",
 
   "corner.waitingCount": "· {count} чекають",

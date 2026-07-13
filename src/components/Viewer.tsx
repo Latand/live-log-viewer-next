@@ -78,7 +78,7 @@ export function Viewer() {
   useViewPresence();
   const [project, setProject] = useState<string>(() => initialProject());
   const [pendingHash, setPendingHash] = useState<ConversationHash | null>(null);
-  const { files: allFiles, projectCatalog, flows: polledFlows, pipelines, pipelinesError, workflows, tasks, systemHealth, conversationAliases, loaded } = useFiles(project === OVERVIEW ? null : project, pendingHash?.filePath ?? pendingHash?.conversationId ?? null);
+  const { files: allFiles, requestScope, projectCatalog, flows: polledFlows, pipelines, pipelinesError, workflows, tasks, systemHealth, conversationAliases, loaded } = useFiles(project === OVERVIEW ? null : project, pendingHash?.filePath ?? pendingHash?.conversationId ?? null);
   /* A committed account migration keeps the archived predecessor entry in the
      payload (for chain history) but it must never render as a second standalone
      card — every surface below sees only current generations. A no-op (same
@@ -87,7 +87,7 @@ export function Viewer() {
   /* This tab's optimistic flow closes apply before anything renders: the X
      on a flow strip clears the reviewer side of the scheme instantly. */
   const flows = useEffectiveFlows(polledFlows);
-  useAgentChimes(files);
+  useAgentChimes(files, requestScope);
   const { archivedProjects, archiveProject, unarchiveProject } = useArchivedProjects(files);
   const catalogProjects = useMemo(() => new Set(projectCatalog.map((entry) => entry.project)), [projectCatalog]);
   const isMobile = useIsMobile();

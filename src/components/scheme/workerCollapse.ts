@@ -22,7 +22,7 @@ import { activityBand, isChildConversation, kidsIndex, projectKey, subtree } fro
  * lists (`expanded` / `manual`).
  */
 
-export type WorkerClass = "flow-reviewer" | "flow-implementer" | "pipeline-stage" | "spawned-worker";
+export type WorkerClass = "flow-reviewer" | "flow-implementer" | "pipeline-stage" | "spawned-worker" | "spawned-descendant";
 
 /** Default inactivity window before a non-reviewer worker collapses (issue
     #112 asks for ~15 minutes, configurable). Reviewer rounds ignore this and
@@ -102,6 +102,18 @@ function flowMembership(file: FileEntry, flows: readonly Flow[]): FlowMembership
  * first composer prompt is the owner's, yet the generic worker-launch allowance
  * would discount it — so, as with a parentless implementer, topology (the
  * `handoff` flag) decides ownership rather than the fragile message count.
+ *
+ * FAIL TOWARD COLLAPSED (issue #136): the precise classes above miss workers
+ * whenever the flow/pipeline attachment can't be resolved by path (a migrated or
+ * renamed transcript, a stale flows list, a spawned claude *main* session the
+ * `isChildConversation` kinds don't cover). The operator's board floods with
+ * exactly those finished-but-uncollapsed cards. So any conversation that was
+ * spawned *under something* — it carries a `parent` — is worker-class by
+ * default: a `spawned-descendant`. This never overrides the owner exemption
+ * (isCollapseExempt still pins user-authored / live / pinned cards) and never
+ * touches a parentless root (owner-started conversations stay out of scope), but
+ * it means a classification miss now folds the card instead of leaving it as a
+ * full node.
  */
 export function classifyWorker(file: FileEntry, lineage: WorkerLineage): WorkerClass | null {
   if (file.handoff) return null;
@@ -110,7 +122,7 @@ export function classifyWorker(file: FileEntry, lineage: WorkerLineage): WorkerC
   if (membership?.role === "implementer") return file.parent ? "flow-implementer" : null;
   if (lineage.pipelineStagePaths.has(file.path)) return "pipeline-stage";
   if (isChildConversation(file)) return "spawned-worker";
-  return null;
+  return file.parent ? "spawned-descendant" : null;
 }
 
 /** A reviewer round is finished the moment it reaches a verdict or a terminal
@@ -176,8 +188,11 @@ export function shouldCollapseWorker(file: FileEntry, context: CollapseContext):
 export interface WorkerStack {
   /** Stable board key, usable as a camera/flash target and a React key. */
   key: string;
-  kind: "flow" | "worktree";
-  /** Flow id or worktree name behind this stack. */
+  /** One stack per ORIGIN (issue #136): the flow, pipeline, or spawner a worker
+      belongs to — never per worker kind. `worktree` is the last-resort bucket for
+      a spawnerless worker (no resolvable parent). */
+  kind: "flow" | "pipeline" | "origin" | "worktree";
+  /** Flow id / pipeline id / spawner (root-ancestor) path / worktree name. */
   id: string;
   /** Collapse-eligible worker conversations, freshest first. */
   items: FileEntry[];
@@ -188,6 +203,68 @@ export interface WorkerStack {
     path-matching as classification — never the absent `file.flow`. */
 export function flowIdForPath(file: FileEntry, flows: readonly Flow[]): string | null {
   return flowMembership(file, flows)?.flow.id ?? null;
+}
+
+/** Transcript path → the id of the pipeline that owns it, so a pipeline's stage
+    workers fold into ONE chip (issue #136). A stage's own `agentPath` is owned;
+    for a review-loop stage the embedded flow's implementer + reviewer paths are
+    owned too, otherwise the flow bucket would split them off into a second stack
+    (a build stage in the pipeline stack, its reviewer in a flow stack). */
+export function pipelineStagePipelineIds(pipelines: readonly Pipeline[], flows: readonly Flow[] = []): Map<string, string> {
+  const flowById = new Map(flows.map((flow) => [flow.id, flow] as const));
+  const map = new Map<string, string>();
+  for (const pipeline of pipelines) {
+    for (const run of pipeline.runs) {
+      for (const attempt of run.attempts) {
+        if (attempt.agentPath && !map.has(attempt.agentPath)) map.set(attempt.agentPath, pipeline.id);
+        if (attempt.flowId) {
+          const flow = flowById.get(attempt.flowId);
+          if (flow) {
+            if (!map.has(flow.implementerPath)) map.set(flow.implementerPath, pipeline.id);
+            for (const round of flow.rounds) {
+              if (round.reviewerPath && !map.has(round.reviewerPath)) map.set(round.reviewerPath, pipeline.id);
+            }
+          }
+        }
+      }
+    }
+  }
+  return map;
+}
+
+/**
+ * The pipeline a worker belongs to, resolved through its ANCESTOR chain (issue
+ * #136). A pipeline records ownership only for each stage attempt's `agentPath`;
+ * a conversation that stage spawns has its own path, so a path-only lookup would
+ * miss it and split it into a separate origin stack while the stage stays in the
+ * pipeline stack — one pipeline reading as two chips. Walking up `parent` to the
+ * nearest pipeline-owned ancestor keeps the whole subtree in one pipeline stack.
+ */
+export function pipelineOriginOf(
+  file: FileEntry,
+  filesByPath: ReadonlyMap<string, FileEntry>,
+  pipelineIds: ReadonlyMap<string, string>,
+): string | null {
+  let cursor: FileEntry | undefined = file;
+  const seen = new Set<string>();
+  while (cursor && !seen.has(cursor.path)) {
+    const id = pipelineIds.get(cursor.path);
+    if (id) return id;
+    seen.add(cursor.path);
+    cursor = cursor.parent ? filesByPath.get(cursor.parent) : undefined;
+  }
+  return null;
+}
+
+/** Resolvers that place a worker under its origin (issue #136). Both are pure
+    path lookups computed once per render by the caller from the full file set /
+    pipeline list, so grouping stays a deterministic function of the scan. */
+export interface StackOriginResolvers {
+  /** Pipeline id owning a stage attempt on this path, if any. */
+  pipelineIdOf?: (path: string) => string | null;
+  /** The spawner: the root-ancestor conversation path a worker descends from
+      (walked through `file.parent`), or null when it has no in-scope ancestor. */
+  originOf?: (file: FileEntry) => string | null;
 }
 
 export interface ProtectedReviewerNodesInput {
@@ -249,12 +326,29 @@ export function protectedReviewerNodes(input: ProtectedReviewerNodesInput): File
   return out;
 }
 
-function stackKeyFor(file: FileEntry, flows: readonly Flow[]): { key: string; kind: "flow" | "worktree"; id: string } {
+function stackKeyFor(
+  file: FileEntry,
+  flows: readonly Flow[],
+  resolvers: StackOriginResolvers = {},
+): { key: string; kind: WorkerStack["kind"]; id: string } {
+  /* Pipeline ownership wins over the flow bucket (issue #136): a pipeline that
+     embeds a review-loop owns that flow's implementer + reviewers, so a whole
+     architect→builder→review pipeline is ONE stack instead of splitting into a
+     pipeline stack (architect) plus a flow stack (builder/reviewer). The
+     resolver covers pipeline-owned paths AND their ancestors. */
+  const pipelineId = resolvers.pipelineIdOf?.(file.path) ?? null;
+  if (pipelineId) return { key: "wstack::pipeline::" + pipelineId, kind: "pipeline", id: pipelineId };
   const flowId = flowIdForPath(file, flows);
   if (flowId) return { key: "wstack::flow::" + flowId, kind: "flow", id: flowId };
+  const origin = resolvers.originOf?.(file) ?? null;
+  if (origin) return { key: "wstack::origin::" + origin, kind: "origin", id: origin };
   const worktree = file.worktree ?? "";
   return { key: "wstack::worktree::" + worktree, kind: "worktree", id: worktree };
 }
+
+/** Stack-kind ordering: origins that name a running orchestration (flow,
+    pipeline) lead, then spawner groups, then the worktree catch-all. */
+const STACK_KIND_RANK: Record<WorkerStack["kind"], number> = { flow: 0, pipeline: 1, origin: 2, worktree: 3 };
 
 export interface CollapsibleInput {
   files: readonly FileEntry[];
@@ -303,17 +397,23 @@ export function collapsibleWorkerFiles(input: CollapsibleInput): FileEntry[] {
 const freshness = (file: FileEntry) => activityBand(file) * 1e13 - file.mtime;
 
 /**
- * Group already-selected collapsible worker files into per-flow / per-worktree
- * stacks. Flow stacks lead, then worktree stacks; within each, and between
- * stacks, freshest first. `exclude` drops anything the scheme still draws in a
- * retained form (an active flow's reviewer round deck) so a card never appears
- * twice.
+ * Group already-selected collapsible worker files into ONE stack per origin
+ * (issue #136): a flow, a pipeline, a spawner (root-ancestor conversation), or —
+ * only for a spawnerless worker — its worktree. Flow stacks lead, then pipeline,
+ * then spawner, then the worktree catch-all; within each, and between stacks,
+ * freshest first. `exclude` drops anything the scheme still draws in a retained
+ * form (an active flow's reviewer round deck) so a card never appears twice.
  */
-export function groupWorkerStacks(files: readonly FileEntry[], flows: readonly Flow[], exclude: ReadonlySet<string> = new Set()): WorkerStack[] {
+export function groupWorkerStacks(
+  files: readonly FileEntry[],
+  flows: readonly Flow[],
+  exclude: ReadonlySet<string> = new Set(),
+  resolvers: StackOriginResolvers = {},
+): WorkerStack[] {
   const byKey = new Map<string, WorkerStack>();
   for (const file of files) {
     if (exclude.has(file.path)) continue;
-    const { key, kind, id } = stackKeyFor(file, flows);
+    const { key, kind, id } = stackKeyFor(file, flows, resolvers);
     const stack = byKey.get(key) ?? { key, kind, id, items: [] };
     stack.items.push(file);
     byKey.set(key, stack);
@@ -321,7 +421,7 @@ export function groupWorkerStacks(files: readonly FileEntry[], flows: readonly F
   const stacks = [...byKey.values()];
   for (const stack of stacks) stack.items.sort((a, b) => freshness(a) - freshness(b));
   return stacks.sort((a, b) => {
-    if (a.kind !== b.kind) return a.kind === "flow" ? -1 : 1;
+    if (a.kind !== b.kind) return STACK_KIND_RANK[a.kind] - STACK_KIND_RANK[b.kind];
     return freshness(a.items[0]!) - freshness(b.items[0]!);
   });
 }

@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import type { Flow } from "@/lib/flows/types";
+import type { Pipeline } from "@/lib/pipelines/types";
 import type { FileEntry } from "@/lib/types";
 
 import { type BranchGroup, buildBranchGroups } from "@/components/projectModel";
@@ -208,5 +209,81 @@ describe("buildSchemeLayout byPath", () => {
     expect(childNode.y).toBeGreaterThan(parentNode.y + parentNode.h);
     expect(layout.edges.some((edge) => edge.to === "/session/verify-mvp" && !edge.dashed)).toBe(true);
     expect(layout.stacks).toHaveLength(0);
+  });
+});
+
+describe("surface pipelines — memberless active pipelines keep a scheme surface (#136)", () => {
+  const pipeline = (over: Record<string, unknown>): Pipeline =>
+    ({
+      id: "p1", task: "Ship it", project: "demo", repoDir: "/r", worktreeDir: "/w", branch: "b", baseBranch: "main",
+      baseRef: "a", lastPassedCommit: "a", stages: [{ id: "build", kind: "run", prompt: "", next: null }],
+      runs: [], cursor: null, state: "provisioning", pausedState: null, stateDetail: null, srcPath: null,
+      srcConversationId: null, createdAt: "1970", closedAt: null, ...over,
+    }) as unknown as Pipeline;
+
+  test("a provisioning pipeline with no stage node yet gets a placeholder group carrying its plan", () => {
+    const layout = buildSchemeLayout([], [], [], [], [], [], [pipeline({})]);
+    const halo = layout.groups.find((group) => group.kind === "pipeline" && group.id === "p1");
+    expect(halo).toBeTruthy();
+    expect(halo!.pipeline?.id).toBe("p1");
+    /* Memberless: the empty members list is the contract the mobile dock filters
+       on to surface a nodeless pipeline (MobileFocusView `dockedPipelines`). */
+    expect(halo!.members).toHaveLength(0);
+    /* The placeholder is inside the world box so the camera/minimap can reach it. */
+    expect(halo!.x + halo!.w).toBeLessThanOrEqual(layout.width);
+    expect(halo!.y + halo!.h).toBeLessThanOrEqual(layout.height);
+  });
+
+  test("a pipeline already framed by a materialized stage node gets no duplicate placeholder", () => {
+    const root = entry({ path: "/stage" });
+    const group: BranchGroup = { key: "/stage", columns: [{ file: root, tasks: [] }], returnable: [], finished: [], smt: root.mtime, orphanTask: false };
+    const withNode = pipeline({ runs: [{ stageId: "build", attempts: [{ n: 1, state: "running", agentPath: "/stage", flowId: null } as unknown as Record<string, unknown>] }] });
+    const layout = buildSchemeLayout([group], [], [root], [], [], [withNode], [withNode]);
+    const halos = layout.groups.filter((g) => g.kind === "pipeline" && g.id === "p1");
+    expect(halos).toHaveLength(1);
+  });
+});
+
+describe("sibling pipeline halos never overlap (#136 finding 1)", () => {
+  const pipe = (id: string, agentPath: string): Pipeline =>
+    ({
+      id, task: id, project: "demo", repoDir: "/r", worktreeDir: "/w", branch: "b", baseBranch: "main",
+      baseRef: "a", lastPassedCommit: "a", stages: [{ id: "build", kind: "run", prompt: "", next: null }],
+      runs: [{ stageId: "build", attempts: [{ n: 1, state: "running", agentPath, flowId: null }] }],
+      cursor: { stageId: "build", state: "running" }, state: "running", pausedState: null, stateDetail: null,
+      srcPath: null, srcConversationId: null, createdAt: "1970", closedAt: null,
+    }) as unknown as Pipeline;
+
+  test("two pipelines spawned from one origin keep disjoint dashed outlines", () => {
+    /* The origin conversation spawns two pipelines; their stage-0 nodes are
+       adjacent siblings. With only GAP_X (48) between them each halo's 46px pad
+       overlapped by 44px — group-aware spacing must separate them. */
+    const origin = entry({ path: "/origin", activity: "live" });
+    const a = entry({ path: "/origin/a", parent: "/origin", kind: "subagent" });
+    const b = entry({ path: "/origin/b", parent: "/origin", kind: "subagent" });
+    const files = [origin, a, b];
+    const groups = buildBranchGroups(files, "demo");
+    const layout = buildSchemeLayout(groups, [], files, [], [], [pipe("p1", "/origin/a"), pipe("p2", "/origin/b")]);
+    const halos = layout.groups.filter((group) => group.kind === "pipeline");
+    expect(halos).toHaveLength(2);
+    const [left, right] = [...halos].sort((x, y) => x.x - y.x);
+    /* The right halo starts at or past the left halo's outer edge — no overlap. */
+    expect(left!.x + left!.w).toBeLessThanOrEqual(right!.x);
+  });
+
+  test("a pipeline nested deep under an ungrouped sibling still clears an adjacent pipeline (#136 finding 2)", () => {
+    /* p1's stage sits DEEP inside an otherwise-ungrouped child; the boundary must
+       see the group carried by the whole subtree, not just the child's own path. */
+    const origin = entry({ path: "/o", activity: "live" });
+    const ungrouped = entry({ path: "/o/u", parent: "/o", kind: "subagent" });
+    const p1stage = entry({ path: "/o/u/s1", parent: "/o/u", kind: "subagent" });
+    const p2stage = entry({ path: "/o/s2", parent: "/o", kind: "subagent" });
+    const files = [origin, ungrouped, p1stage, p2stage];
+    const groups = buildBranchGroups(files, "demo");
+    const layout = buildSchemeLayout(groups, [], files, [], [], [pipe("p1", "/o/u/s1"), pipe("p2", "/o/s2")]);
+    const halos = layout.groups.filter((group) => group.kind === "pipeline");
+    expect(halos).toHaveLength(2);
+    const [left, right] = [...halos].sort((x, y) => x.x - y.x);
+    expect(left!.x + left!.w).toBeLessThanOrEqual(right!.x);
   });
 });

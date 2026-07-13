@@ -1,8 +1,26 @@
 import { expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import { GroupsLayer, groupLabelScreenPx, groupLabelFontSize } from "./nodes";
+import { GroupsLayer, groupLabelScreenPx, groupLabelFontSize, type PipelineGroupControls } from "./nodes";
 import type { SchemeGroup } from "./layout";
+import type { Pipeline } from "@/lib/pipelines/types";
+
+/* A provisioning pipeline whose current stage has NOT materialized a run-stage
+   session, so it has no per-node strip — the group halo must carry the plan. */
+const planPipeline = {
+  id: "p1", task: "Refactor the scheme", project: "proj", repoDir: "/r", worktreeDir: "/w",
+  branch: "b", baseBranch: "main", baseRef: "a", lastPassedCommit: "a",
+  stages: [
+    { id: "build", kind: "run", prompt: "", next: "review", effectiveRole: { roleId: null, engine: "codex", model: null, effort: null, access: "read-write", promptScaffold: null } },
+    { id: "review", kind: "review-loop", prompt: "", next: null, effectiveRole: { roleId: null, engine: "codex", model: null, effort: null, access: "read-only", promptScaffold: null } },
+  ],
+  runs: [], cursor: null, state: "provisioning", pausedState: null, stateDetail: null,
+  srcPath: null, srcConversationId: null, createdAt: new Date(0).toISOString(), closedAt: null,
+} as unknown as Pipeline;
+
+const controls: PipelineGroupControls = {
+  flows: [], renderablePaths: new Set(), renderableFlows: new Set(), nodeStripPipelineIds: new Set(), onOpenPath: () => {}, onOpenFlow: () => {},
+};
 
 const flowGroup: SchemeGroup = {
   key: "group::flow::f1",
@@ -75,4 +93,35 @@ test("the label chip is a live control when interactive and inert otherwise", ()
 
 test("no groups renders nothing", () => {
   expect(render([], true)).toBe("");
+});
+
+test("a pipeline group carries the full stage plan on its halo when no per-node strip does (#136)", () => {
+  const group: SchemeGroup = { ...pipelineGroup, pipeline: planPipeline };
+  /* With controls: the group is the stage-plan surface — the strip and every
+     planned stage chip (incl. the not-yet-run review stage) render on the halo. */
+  const withControls = renderToStaticMarkup(<GroupsLayer groups={[group]} interactive pipelineControls={controls} />);
+  expect(withControls).toContain("data-scheme-group-strip");
+  expect(withControls).toContain("build");
+  expect(withControls).toContain("review");
+  /* Without controls (e.g. the lite map) the halo keeps only its label chip. */
+  const noControls = renderToStaticMarkup(<GroupsLayer groups={[group]} interactive />);
+  expect(noControls).not.toContain("data-scheme-group-strip");
+});
+
+test("group carries the plan even when the current stage node is hidden/collapsed (finding 1)", () => {
+  /* A pipeline whose current stage resolves to a path (pipelineBoardStripPath is
+     non-null) but whose node is NOT placed on the board: it is absent from
+     nodeStripPipelineIds, so no per-node strip is mounted and the group must own
+     the plan. */
+  const hiddenCurrent = { ...planPipeline, cursor: { stageId: "build", state: "running" } } as unknown as Pipeline;
+  const group: SchemeGroup = { ...pipelineGroup, pipeline: hiddenCurrent };
+  const noMountedStrip: PipelineGroupControls = { ...controls, nodeStripPipelineIds: new Set() };
+  const html = renderToStaticMarkup(<GroupsLayer groups={[group]} interactive pipelineControls={noMountedStrip} />);
+  expect(html).toContain("data-scheme-group-strip");
+
+  /* When the per-node strip IS mounted (pipeline id present), the group must not
+     duplicate it. */
+  const mounted: PipelineGroupControls = { ...controls, nodeStripPipelineIds: new Set(["p1"]) };
+  const dup = renderToStaticMarkup(<GroupsLayer groups={[group]} interactive pipelineControls={mounted} />);
+  expect(dup).not.toContain("data-scheme-group-strip");
 });

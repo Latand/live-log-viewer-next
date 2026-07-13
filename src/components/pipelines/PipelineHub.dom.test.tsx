@@ -6,7 +6,6 @@ import { flushSync } from "react-dom";
 import type { Pipeline } from "@/lib/pipelines/types";
 
 import { PipelineHub } from "./PipelineHub";
-import { pipelineStripDomId } from "./pipelineModel";
 
 const dom = new Window();
 Object.assign(globalThis, {
@@ -33,33 +32,29 @@ const pipeline = {
 afterEach(() => document.body.replaceChildren());
 process.on("exit", () => { globalThis.fetch = realFetch; });
 
-test("opening the dashboard strip keeps focus on the strip after the popover closes", async () => {
-  /* The sibling strip the hub navigates to. */
-  const strip = document.createElement("div");
-  strip.id = pipelineStripDomId("p1");
-  strip.tabIndex = -1;
-  document.body.append(strip);
-
+test("the hub is the single control surface — no legacy 'open dashboard strip' escape hatch (#136)", async () => {
   const host = document.createElement("div");
   document.body.append(host);
   const root: Root = createRoot(host);
   flushSync(() => { root.render(<PipelineHub pipeline={pipeline} x={0} y={0} interactive moveTransition="none" />); });
 
-  /* Open the control popover, then click the "Open dashboard strip" button. */
+  /* Open the control popover. */
   const trigger = host.querySelector("button") as HTMLButtonElement;
   flushSync(() => { trigger.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event); });
-  const openDash = Array.from(host.querySelectorAll("button")).find((b) => b.textContent?.trim() === "Open dashboard strip") as HTMLButtonElement;
-  expect(openDash).toBeTruthy();
-  flushSync(() => { openDash.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event); });
+
+  /* The persistent dashboard band is gone (#136), so the popover no longer
+     offers a jump to it — the on-canvas hub owns the controls end to end. */
+  const openDash = Array.from(host.querySelectorAll("button")).find((b) => b.textContent?.trim() === "Open dashboard strip");
+  expect(openDash).toBeUndefined();
+  expect(trigger.getAttribute("aria-expanded")).toBe("true");
+
+  /* Closing the popover restores focus to the hub trigger. */
+  flushSync(() => { trigger.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event); });
   await Promise.resolve();
   flushSync(() => {});
-
-  /* Focus landed on the strip and was not restored to the hub trigger; the
-     popover is closed. */
-  expect(document.activeElement).toBe(strip);
+  expect(document.activeElement).toBe(trigger);
   expect(trigger.getAttribute("aria-expanded")).toBe("false");
 
   flushSync(() => { root.unmount(); });
   host.remove();
-  strip.remove();
 });

@@ -19,15 +19,12 @@ import { clearDraftStorage, draftParentConversationId, draftSrc, setDraftSrc, se
 import { planBoardConvergence, planClose } from "./projectBoardMutations";
 import { claimedReviewerDescendantPaths, foldClaimedReviewers, isActiveFlow } from "./flows/flowModel";
 import { PipelineDialog } from "./pipelines/PipelineDialog";
-import { PipelineStrip } from "./pipelines/PipelineStrip";
-import { pipelinesForProject, pipelineStripDomId, renderableFlowIds } from "./pipelines/pipelineModel";
+import { pipelinesForProject } from "./pipelines/pipelineModel";
 import { buildSchemeLayout } from "./scheme/layout";
-import { deckKey } from "./scheme/agentLinks";
-import { collapsibleWorkerFiles, groupWorkerStacks, protectedReviewerNodes } from "./scheme/workerCollapse";
+import { collapsibleWorkerFiles, groupWorkerStacks, pipelineOriginOf, pipelineStagePipelineIds, protectedReviewerNodes } from "./scheme/workerCollapse";
 import { WorkerStacks } from "./WorkerStacks";
 import { clearWorkflowDraftStorage } from "./workflows/WorkflowDraftPane";
-import { WorkflowStrip } from "./workflows/WorkflowStrip";
-import { isWorkflowDraftId, workflowsForProject } from "./workflows/workflowModel";
+import { dropLegacyWorkflowDrafts, isWorkflowDraftId } from "./workflows/workflowModel";
 import { TaskPanel } from "./tasks/TaskPanel";
 import { TaskToastHost } from "./tasks/taskToast";
 import { MobileFocusView } from "./mobile/MobileFocusView";
@@ -107,7 +104,16 @@ const draftsKey = (project: string) => `llvDrafts:${project}`;
 function loadDrafts(project: string): string[] {
   try {
     const raw = JSON.parse(sessionStorage.getItem(draftsKey(project)) ?? "[]") as unknown;
-    return Array.isArray(raw) ? raw.filter((id): id is string => typeof id === "string") : [];
+    const ids = Array.isArray(raw) ? raw.filter((id): id is string => typeof id === "string") : [];
+    /* Legacy workflow drafts (wf-*) are fenced (#136): a persisted one must not
+       relaunch the removed WorkflowDraftPane through saved tab state. Drop them on
+       restore and purge their pane storage + the rewritten list, for good. */
+    const kept = dropLegacyWorkflowDrafts(ids);
+    if (kept.length !== ids.length) {
+      for (const id of ids) if (isWorkflowDraftId(id)) clearWorkflowDraftStorage(id);
+      sessionStorage.setItem(draftsKey(project), JSON.stringify(kept));
+    }
+    return kept;
   } catch {
     return [];
   }
@@ -237,7 +243,6 @@ export function ProjectDashboard({
   flows,
   pipelines,
   pipelinesError,
-  workflows,
   tasks,
   project,
   loaded,
@@ -351,6 +356,34 @@ export function ProjectDashboard({
     [files, project, flows, pipelines, pinnedPaths, nowMs],
   );
   const collapsedPaths = useMemo(() => new Set(collapsibleWorkers.map((file) => file.path)), [collapsibleWorkers]);
+  /* Per-origin stack grouping inputs (issue #136): a worker folds under its
+     pipeline, else its spawner — the topmost resolvable ancestor of its
+     `parent` chain — so one origin is one chip regardless of how many workers or
+     rounds it bred. Pipeline ownership resolves through the ancestor chain so a
+     stage's spawned child stays in the pipeline stack, not a second origin one. */
+  const filesByPath = useMemo(() => new Map(files.map((file) => [file.path, file] as const)), [files]);
+  const pipelineIdByPath = useMemo(() => pipelineStagePipelineIds(pipelines, flows), [pipelines, flows]);
+  const pipelineIdOf = useMemo(
+    () => (path: string): string | null => {
+      const file = filesByPath.get(path);
+      return file ? pipelineOriginOf(file, filesByPath, pipelineIdByPath) : null;
+    },
+    [filesByPath, pipelineIdByPath],
+  );
+  const spawnerRootOf = useMemo(
+    () => (file: FileEntry): string | null => {
+      let cursor = file;
+      const seen = new Set<string>([file.path]);
+      for (;;) {
+        const parent = cursor.parent ? filesByPath.get(cursor.parent) : undefined;
+        if (!parent || seen.has(parent.path)) break;
+        seen.add(parent.path);
+        cursor = parent;
+      }
+      return cursor.path === file.path ? null : cursor.path;
+    },
+    [filesByPath],
+  );
   /* The board layout's file set with collapsed workers removed. Kept separate
      from `groupFiles` so board-membership reconciliation still sees the full
      catalog and never retires a collapsed worker's durable placement. */
@@ -358,11 +391,6 @@ export function ProjectDashboard({
     () => (collapsedPaths.size ? groupFiles.filter((file) => !collapsedPaths.has(file.path)) : groupFiles),
     [groupFiles, collapsedPaths],
   );
-  const projectPipelines = useMemo(() => pipelinesForProject(pipelines, project, files), [pipelines, project, files]);
-  /* Stage actions that route to a transcript are disabled once it leaves the
-     scan, so gate them on the current file paths (AC4). */
-  const renderablePaths = useMemo(() => new Set(files.map((entry) => entry.path)), [files]);
-  const projectWorkflows = useMemo(() => workflowsForProject(workflows, project, files), [workflows, project, files]);
   const groups = useMemo(
     () => buildBranchGroups(sceneFiles, project, { expandedConversationPaths: expandedConversations }),
     [sceneFiles, project, expandedConversations],
@@ -537,15 +565,6 @@ export function ProjectDashboard({
     pendingFocusRef.current = "draft::" + id;
   };
 
-  /* The «+ Workflow» sibling (W6): the same draft-card pattern, its pane
-     carries the template picker, the repo directory and the task brief. */
-  const addWorkflowDraft = () => {
-    onUserNavigate?.();
-    const id = "wf-" + newDraftId();
-    persistDrafts([...drafts, id]);
-    pendingFocusRef.current = "draft::" + id;
-  };
-
   /* The handoff handle under a pane: a draft that continues this conversation
      hangs right below it, inheriting the transcript and its directory. A
      repeat click refocuses the existing draft instead of stacking duplicates. */
@@ -684,29 +703,6 @@ export function ProjectDashboard({
     pendingFocusRef.current = file.path;
   };
 
-  /* The pipeline strip renders in the header of both views, but its focus targets
-     only exist on the scheme; from the list view the board is unmounted and the
-     flash/restore would silently no-op. Switch to the scheme first so the
-     scheduled focus actually lands. */
-  const revealOnScheme = () => {
-    if (board.prefs.viewMode !== "scheme") board.setViewMode("scheme");
-  };
-  /* Pipeline strip/verdict "open transcript": a run stage owns a board node, so
-     route its agent path through the same board open. */
-  const openPipelinePath = (path: string) => {
-    const file = files.find((entry) => entry.path === path);
-    if (!file) return;
-    revealOnScheme();
-    openSwitchboardFile(file);
-  };
-  /* A review-loop stage's reviewer transcript is folded into the flow's round
-     deck, so glide to that deck (a byPath key); the reviewer node is removed, so
-     openPipelinePath on its path would reveal nothing (#93 §2.2). */
-  const openPipelineFlow = (flowId: string) => {
-    revealOnScheme();
-    flashNode(deckKey(flowId));
-  };
-
   const statusBits: string[] = [];
   if (liveCount) {
     statusBits.push(
@@ -726,7 +722,13 @@ export function ProjectDashboard({
      canvas instead of hanging as lone stub nodes in the middle of it. */
   const dockedTasks = visibleGroups.filter((group) => group.orphanTask).map((group) => group.columns[0]!.file);
   const schemeGroups = visibleGroups.filter((group) => !group.orphanTask);
-  const hasNodes = schemeGroups.length > 0 || schemeManual.length > 0 || drafts.length > 0 || projectTasks.length > 0;
+  /* Active pipelines for this project (issue #136): the scheme must be available
+     — and carry each pipeline's plan — even before its first stage transcript
+     lands or after every stage node is hidden, now the persistent band is gone.
+     They dock as placeholder groups in the layout (buildSchemeLayout). */
+  const activePipelines = useMemo(() => pipelinesForProject(pipelines, project, files), [pipelines, project, files]);
+  const hasNodes =
+    schemeGroups.length > 0 || schemeManual.length > 0 || drafts.length > 0 || projectTasks.length > 0 || activePipelines.length > 0;
   /* Everything the project has on disk, freshest first. Powers the
      delete-project button and the fallback list of an empty scheme —
      transcripts whose tree lives elsewhere (scratchpad one-offs) build no
@@ -758,7 +760,6 @@ export function ProjectDashboard({
      scheme draws. Derive availability from that layout's nodes, so a scanned but
      unplaced (hidden/tombstoned) implementer disables the action (#93 finding). */
   const pipelineLayout = buildSchemeLayout(hasNodes ? schemeGroups : archiveGroups, hasNodes ? schemeManual : [], files, flows, hasNodes ? drafts : [], pipelines);
-  const renderableFlows = renderableFlowIds(flows, new Set(pipelineLayout.nodes.map((node) => node.file.path)));
   /* Worker rows the scheme still draws in a retained form — an active flow's
      reviewer round deck keeps its finished rounds as deck tabs. Those are
      re-admitted here so a folded reviewer is never listed twice (its deck AND a
@@ -773,7 +774,10 @@ export function ProjectDashboard({
      exclude set: a closed worker is a tombstone — it must not resurface as a
      stack member (its manual/expanded pin was dropped on close, so it would
      otherwise re-qualify as a plain collapse candidate). */
-  const workerStacks = groupWorkerStacks(collapsibleWorkers, flows, new Set([...deckReviewerPaths, ...hiddenSet]));
+  const workerStacks = groupWorkerStacks(collapsibleWorkers, flows, new Set([...deckReviewerPaths, ...hiddenSet]), {
+    pipelineIdOf,
+    originOf: spawnerRootOf,
+  });
   const listAvailable = historyRows.length > 0;
   const projectView = resolveProjectView({
     preferredView: board.prefs.viewMode,
@@ -838,7 +842,6 @@ export function ProjectDashboard({
                   <HeaderMenuItem icon={<MessageSquarePlus className="h-4 w-4" aria-hidden />} label={t("dash.agent")} onSelect={() => { close(); addDraft(); }} />
                   <HeaderMenuItem icon={<ListTodo className="h-4 w-4" aria-hidden />} label={t("dash.task")} onSelect={() => { close(); addTaskMobile(); }} />
                   <HeaderMenuItem icon={<span className="text-[15px] font-bold leading-none">≡</span>} label={t("dash.pipeline")} onSelect={() => { close(); setPipelineDialogOpen(true); }} />
-                  <HeaderMenuItem icon={<Network className="h-4 w-4" aria-hidden />} label={t("dash.workflow")} onSelect={() => { close(); addWorkflowDraft(); }} />
                 </>
               )}
             </HeaderMenu>
@@ -904,14 +907,6 @@ export function ProjectDashboard({
             >
               <span className="text-[13px] leading-none text-accent">+</span> {t("dash.pipeline")}
             </button>
-            <button
-              type="button"
-              onClick={addWorkflowDraft}
-              aria-label={t("dash.newWorkflow")}
-              className="flex shrink-0 items-center gap-1 rounded-[8px] border border-line bg-panel px-2.5 py-1 text-[11.5px] font-bold text-ink shadow-card hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
-            >
-              <span className="text-[13px] leading-none text-accent">+</span> {t("dash.workflow")}
-            </button>
           </>
         )}
       </div>
@@ -926,19 +921,6 @@ export function ProjectDashboard({
       {pipelinesError ? (
         <div className="shrink-0 border-b border-line bg-[#fdf6ec] px-3 py-1.5 text-[11.5px] text-[#8a5b00]" role="alert">
           {t("dash.pipelinesUnavailable")}
-        </div>
-      ) : null}
-
-      {projectPipelines.length || projectWorkflows.length ? (
-        <div className="flex shrink-0 flex-col gap-1.5 border-b border-line bg-[#fbfbfd] px-3 py-1.5">
-          {projectPipelines.map((pipeline) => (
-            <div key={pipeline.id} id={pipelineStripDomId(pipeline.id)} tabIndex={-1} className="scroll-mt-2 rounded-[14px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50">
-              <PipelineStrip pipeline={pipeline} flows={flows} renderablePaths={renderablePaths} renderableFlows={renderableFlows} onOpenPath={openPipelinePath} onOpenFlow={openPipelineFlow} />
-            </div>
-          ))}
-          {projectWorkflows.map((wf) => (
-            <WorkflowStrip key={wf.id} wf={wf} />
-          ))}
         </div>
       ) : null}
 
@@ -967,6 +949,8 @@ export function ProjectDashboard({
               files={files}
               flows={flows}
               pipelines={pipelines}
+              surfacePipelines={activePipelines}
+              workerStacks={workerStacks}
               tasks={hasNodes ? projectTasks : []}
               drafts={hasNodes ? drafts : []}
               loaded={loaded}
@@ -1003,7 +987,9 @@ export function ProjectDashboard({
                 files={files}
                 flows={flows}
                 pipelines={pipelines}
+                surfacePipelines={activePipelines}
                 tasks={hasNodes ? projectTasks : []}
+                workerStacks={workerStacks}
                 drafts={hasNodes ? drafts : []}
                 focus={highlight}
                 attentionPaths={attentionPaths}
@@ -1067,10 +1053,11 @@ export function ProjectDashboard({
           phone the strip, the map and the toast cover its job. */}
       {isMobile ? null : <Switchboard files={files} flows={flows} project={project} loaded={loaded} onOpenFile={openSwitchboardFile} />}
 
-      {/* Worker-class cards that have auto-collapsed fold into per-flow /
-          per-worktree stacks here (issue #112) instead of vanishing to the
-          switchboard; owner-touched and live cards are never included. */}
-      <WorkerStacks stacks={workerStacks} files={files} flows={flows} onSelect={openSwitchboardFile} />
+      {/* Worker-class cards that have auto-collapsed fold into one stack per
+          origin — flow / pipeline / spawner (issue #112, #136) — instead of
+          vanishing to the switchboard; owner-touched and live cards are never
+          included. */}
+      <WorkerStacks stacks={workerStacks} files={files} flows={flows} pipelines={pipelines} onSelect={openSwitchboardFile} />
 
       {/* `residual` is derived from `sceneFiles`, which already excludes every
           collapsed worker, so a card never appears in both a stack and here. */}

@@ -21,14 +21,15 @@ import { pushTaskToast } from "@/components/tasks/taskToast";
 import { cleanTitle } from "@/components/utils";
 import { taskDeliveryText } from "@/lib/tasks/helpers";
 
-import { pipelineAnnouncement, pipelineStripByPath } from "@/components/pipelines/pipelineModel";
+import { pipelineAnnouncement, pipelineStripByPath, renderableFlowIds } from "@/components/pipelines/pipelineModel";
 import { BulkActionBar } from "./BulkActionBar";
 import { nodesInRect, pruneSelection, selectionBBox } from "./lasso";
 import { resolveExpandedNode } from "./expandedNode";
 import { autoEditTokenFor, clearStaleRename, requestRename, type RenameRequest } from "./renameRequest";
 import { buildSchemeLayout } from "./layout";
-import { Minimap } from "./Minimap";
-import { AgentLinksLayer, EdgesLayer, GroupsLayer, LoopsLayer, MOVE_EASE, NodesLayer, type DeckFocus } from "./nodes";
+import { Minimap, stackDotsFor, type StackDot } from "./Minimap";
+import type { WorkerStack } from "./workerCollapse";
+import { AgentLinksLayer, EdgesLayer, GroupsLayer, LoopsLayer, MOVE_EASE, NodesLayer, type DeckFocus, type PipelineGroupControls } from "./nodes";
 import type { TaskCardHandlers } from "./TaskCard";
 import { TaskEdgesLayer } from "./TaskEdgesLayer";
 import { TasksLayer } from "./TasksLayer";
@@ -69,6 +70,12 @@ interface Props {
   pipelines?: Pipeline[];
   /** This project's board tasks — sticky cards over the panes. */
   tasks: BoardTask[];
+  /** Collapsed worker stacks (issue #136): drawn as one minimap dot per origin so
+      folded workers read as a handful of dots, not an agent flood. */
+  workerStacks?: WorkerStack[];
+  /** Active project pipelines that must keep a scheme surface even with no placed
+      stage node yet (issue #136): each gets a docked placeholder group + plan. */
+  surfacePipelines?: Pipeline[];
   /** Ids of not-yet-spawned conversation drafts drawn as full panes. */
   drafts: string[];
   /** Path to glide the camera to and ring briefly (set by openers). */
@@ -144,6 +151,8 @@ export function SchemeBoard({
   flows,
   pipelines = [],
   tasks,
+  workerStacks = [],
+  surfacePipelines = [],
   drafts,
   focus,
   ring,
@@ -176,7 +185,7 @@ export function SchemeBoard({
   }, [focus]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
-  const layout = useMemo(() => buildSchemeLayout(groups, manual, files, flows, drafts, pipelines), [groups, manual, files, flows, drafts, pipelines]);
+  const layout = useMemo(() => buildSchemeLayout(groups, manual, files, flows, drafts, pipelines, surfacePipelines), [groups, manual, files, flows, drafts, pipelines, surfacePipelines]);
 
   /* Selection keys are transcript paths, so the 10s poll relayout keeps the
      set for free; nodes that left the board are pruned out of the state
@@ -347,6 +356,38 @@ export function SchemeBoard({
   const handoffForNodes = onHandoff ? stableHandoff : undefined;
   const stableExpand = useCallback((path: string) => setExpanded(path), []);
 
+  /* Controls for a pipeline group's on-halo stage strip (issue #136): opening a
+     run stage routes through the board's normal select; a review-loop stage
+     glides to the flow's latest round. Stable identities keep GroupsLayer from
+     thrashing across polls. renderablePaths/renderableFlows gate actions to what
+     the board can actually reveal, matching NodesLayer's own strips. */
+  const openPipelinePath = useCallback((path: string) => {
+    const file = files.find((entry) => entry.path === path);
+    if (file) stableSelect(file);
+  }, [files, stableSelect]);
+  const openPipelineFlow = useCallback((flowId: string) => {
+    const flow = flows.find((candidate) => candidate.id === flowId);
+    if (flow) focusRound(flow.id, flow.rounds.at(-1)?.n ?? 1);
+  }, [flows, focusRound]);
+  const renderablePipelinePaths = useMemo(() => new Set(files.map((entry) => entry.path)), [files]);
+  const placedNodePaths = useMemo(() => new Set(layout.nodes.map((node) => node.file.path)), [layout]);
+  const renderableGroupFlows = useMemo(() => renderableFlowIds(flows, placedNodePaths), [flows, placedNodePaths]);
+  /* Pipelines whose per-node compact strip is actually mounted: its board-strip
+     node must be PLACED on the layout, not merely resolvable. A pipeline missing
+     here has no on-board plan surface, so its group halo renders one (finding 1). */
+  const nodeStripPipelineIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const [path, pipeline] of pipelineStrips) if (placedNodePaths.has(path)) ids.add(pipeline.id);
+    return ids;
+  }, [pipelineStrips, placedNodePaths]);
+  const pipelineControls = useMemo<PipelineGroupControls>(
+    () => ({ flows, renderablePaths: renderablePipelinePaths, renderableFlows: renderableGroupFlows, nodeStripPipelineIds, onOpenPath: openPipelinePath, onOpenFlow: openPipelineFlow }),
+    [flows, renderablePipelinePaths, renderableGroupFlows, nodeStripPipelineIds, openPipelinePath, openPipelineFlow],
+  );
+  /* One minimap dot per collapsed worker-stack origin (issue #136): orchestration
+     origins (flow/pipeline) in accent, spawner/worktree origins in gray. */
+  const stackDots = useMemo<StackDot[]>(() => stackDotsFor(workerStacks), [workerStacks]);
+
   /* A stationary background tap: inside the session it toggles the node under
      the cursor (panes are click-through, so the DOM can't answer) or exits on
      empty ground; outside it, it drops the single ring — the job the press
@@ -409,6 +450,13 @@ export function SchemeBoard({
      overlay. */
   const taskObstacles = useMemo<SchemeRect[]>(
     () => [...layout.nodes, ...layout.decks, ...layout.stacks, ...layout.drafts].map(({ x, y, w, h }) => ({ x, y, w, h })),
+    [layout],
+  );
+  /* Card rects the pipeline rails route around (issue #136). Unlike taskObstacles
+     these stay the SAME objects byPath holds, so a rail can exclude its own two
+     endpoints by identity before routing around the rest. */
+  const railObstacles = useMemo<SchemeRect[]>(
+    () => [...layout.nodes, ...layout.decks, ...layout.stacks, ...layout.drafts],
     [layout],
   );
   /* Only placed tasks have a board position; unplaced ones (panel/mobile creation)
@@ -800,13 +848,13 @@ export function SchemeBoard({
       >
         {/* Group halos sit behind every edge and card so a running flow/pipeline
             reads as one framed region; the label chip stays live off the map. */}
-        <GroupsLayer groups={layout.groups} interactive={!mapMode && !handLike && !session} />
+        <GroupsLayer groups={layout.groups} interactive={!mapMode && !handLike && !session} pipelineControls={mapMode ? undefined : pipelineControls} />
         <EdgesLayer edges={layout.edges} width={layout.width} height={layout.height} />
         <LoopsLayer loops={layout.loops} width={layout.width} height={layout.height} />
         {/* Rails/badges stay passive on the map, but the pipeline hub keeps its
             tap target there — the mobile lite map reaches pipeline controls only
             through it (#93 §2.3). */}
-        <AgentLinksLayer links={layout.links} byPath={layout.byPath} interactive={!mapMode && !handLike && !session} hubInteractive={!handLike && !session} width={layout.width} height={layout.height} />
+        <AgentLinksLayer links={layout.links} byPath={layout.byPath} obstacles={railObstacles} interactive={!mapMode && !handLike && !session} hubInteractive={!handLike && !session} width={layout.width} height={layout.height} />
         <NodesLayer
           layout={layout}
           project={project}
@@ -950,7 +998,7 @@ export function SchemeBoard({
         />
       ) : null}
 
-      <Minimap layout={layout} world={world} tasks={placedTasks} cam={cam} vp={vp} onJump={jump} />
+      <Minimap layout={layout} world={world} tasks={placedTasks} stackDots={stackDots} cam={cam} vp={vp} onJump={jump} />
     </div>
     {/* The full-window conversation: the same pane component over the whole
         viewport, with the live feed and the composer of exactly this

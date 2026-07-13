@@ -13,6 +13,7 @@ import {
   deriveGroups,
   derivePipelineLinks,
   groupRect,
+  hueFromId,
   type AgentLink,
   type SchemeGroupSpec,
 } from "./agentLinks";
@@ -38,6 +39,16 @@ export const LOOP_GAP = 170;
 /* Slack between a group halo and the cards it encloses (issue #118): wide
    enough to clear the flow/pipeline strips that hover above each member. */
 export const GROUP_PAD = 46;
+/* Extra headroom added to the halo's TOP only (issue #136): the flow/pipeline
+   strip and its entry buttons hover ~60–92 px above the top member, so the
+   frame is lifted to enclose that control band and read as one clean region.
+   Bottom/left/right stay at GROUP_PAD, so the enclosure geometry is unchanged. */
+export const GROUP_STRIP_HEADROOM = 44;
+/* Horizontal gap between two adjacent sibling subtrees that belong to DIFFERENT
+   flow/pipeline groups (issue #136): wide enough that each halo's GROUP_PAD on
+   both facing sides clears, plus a lane of breathing room, so the two dashed
+   outlines never overlap. GAP_X alone (48) leaves a 44px overlap. */
+export const GROUP_SIBLING_GAP = GROUP_PAD * 2 + GAP_X;
 /* Quiet-branch mini cards stacked under their parent pane. */
 const MINI_W = 360;
 const MINI_H = 52;
@@ -179,6 +190,11 @@ export function buildSchemeLayout(
   flows: Flow[] = [],
   draftIds: string[] = [],
   pipelines: Pipeline[] = [],
+  /** Active project pipelines that must have a scheme surface even with no
+      materialized/placed stage node yet (issue #136): each such pipeline that
+      `deriveGroups` did not already frame gets a docked placeholder group
+      carrying its plan, so a provisioning pipeline is never surfaceless. */
+  surfacePipelines: Pipeline[] = [],
 ): SchemeLayout {
   const byAll = new Map(files.map((file) => [file.path, file]));
   const kids = kidsIndex(files);
@@ -190,6 +206,66 @@ export function buildSchemeLayout(
   const deckFor = flowByImplementer(flows);
   const claimed = claimedReviewerPaths(flows);
   let cursor = PAD;
+
+  /* Which flow/pipeline group owns each placed path (issue #136 spacing). Two
+     sibling subtrees that belong to DIFFERENT groups must sit far enough apart
+     that their padded halos never overlap; same-group and ungrouped siblings keep
+     the tight gap. Membership mirrors deriveGroups: a pipeline owns its run-stage
+     agent paths and its embedded review-loop implementer; a standalone flow owns
+     its implementer + reviewers. */
+  const groupKeyOfPath = new Map<string, string>();
+  const implOfFlow = (flowId: string) => flows.find((flow) => flow.id === flowId)?.implementerPath ?? null;
+  for (const pipeline of pipelines) {
+    if (pipeline.state === "closed") continue;
+    const key = "pipe:" + pipeline.id;
+    for (const run of pipeline.runs) {
+      for (const attempt of run.attempts) {
+        if (attempt.agentPath) groupKeyOfPath.set(attempt.agentPath, key);
+        if (attempt.flowId) {
+          const impl = implOfFlow(attempt.flowId);
+          if (impl) groupKeyOfPath.set(impl, key);
+        }
+      }
+    }
+  }
+  for (const flow of flows) {
+    const key = "flow:" + flow.id;
+    if (!groupKeyOfPath.has(flow.implementerPath)) groupKeyOfPath.set(flow.implementerPath, key);
+    for (const round of flow.rounds) {
+      if (round.reviewerPath && !groupKeyOfPath.has(round.reviewerPath)) groupKeyOfPath.set(round.reviewerPath, key);
+    }
+  }
+  /* The set of flow/pipeline groups a sibling SUBTREE carries — the root plus
+     every descendant, not just the root path (issue #136 finding 2): a group
+     stage nested deep inside an otherwise-ungrouped child still grows a halo out
+     to that child's edge, so the boundary must see it. Memoized per root. */
+  const subtreeGroupsCache = new Map<string, Set<string>>();
+  const subtreeGroups = (root: FileEntry): Set<string> => {
+    const cached = subtreeGroupsCache.get(root.path);
+    if (cached) return cached;
+    const keys = new Set<string>();
+    const own = groupKeyOfPath.get(root.path);
+    if (own) keys.add(own);
+    for (const row of descendantsOf(root, files)) {
+      const key = groupKeyOfPath.get(row.file.path);
+      if (key) keys.add(key);
+    }
+    subtreeGroupsCache.set(root.path, keys);
+    return keys;
+  };
+  /* A boundary between two adjacent sibling subtrees that both carry a group and
+     don't carry the SAME set — exactly when two padded halos would collide. A
+     grouped subtree beside an ungrouped one is fine (GAP_X clears a single
+     GROUP_PAD); two subtrees of one group span into a single halo, so they stay
+     tight. */
+  const isGroupBoundary = (a: FileEntry, b: FileEntry): boolean => {
+    const ga = subtreeGroups(a);
+    const gb = subtreeGroups(b);
+    if (ga.size === 0 || gb.size === 0) return false;
+    if (ga.size !== gb.size) return true;
+    for (const key of ga) if (!gb.has(key)) return true;
+    return false;
+  };
 
   /* Handoff drafts hang under their source pane like a child; drafts whose
      source is not on the scheme (or plain «+ Agent» ones) trail the row. */
@@ -255,7 +331,8 @@ export function buildSchemeLayout(
       const childTop = y + rowH + GAP_Y;
       const children = childrenOf.get(col.file.path) ?? [];
       let cx = x + INDENT;
-      for (const child of children) {
+      for (let i = 0; i < children.length; i += 1) {
+        const child = children[i]!;
         edges.push({
           to: child.file.path,
           x1: x + 40,
@@ -265,7 +342,12 @@ export function buildSchemeLayout(
           color: engineColor(child.file),
           live: child.file.activity === "live",
         });
-        cx += place(child, cx, childTop, depth + 1) + GAP_X;
+        /* Widen the gap only at a flow/pipeline group boundary so two sibling
+           halos never overlap (issue #136); the last slot keeps GAP_X, which the
+           `used` width below subtracts back off. */
+        const nextChild = children[i + 1];
+        const gap = nextChild && isGroupBoundary(child.file, nextChild.file) ? GROUP_SIBLING_GAP : GAP_X;
+        cx += place(child, cx, childTop, depth + 1) + gap;
       }
       const quiet = stackFor.get(col.file.path)?.filter((entry) => !claimed.has(entry.path));
       if (quiet?.length) {
@@ -431,7 +513,37 @@ export function buildSchemeLayout(
     const members = spec.kind === "pipeline" ? expandMembers(spec.members) : spec.members;
     const rect = groupRect(members, (key) => byPath.get(key) ?? null, GROUP_PAD);
     if (!rect) continue;
-    groupHalos.push({ ...spec, ...rect, label: groupLabel(spec) });
+    /* Lift the top edge to enclose the hovering control strip; bottom stays put,
+       so the y shrinks up and h grows by the same amount (issue #136). */
+    const framed = { x: rect.x, y: rect.y - GROUP_STRIP_HEADROOM, w: rect.w, h: rect.h + GROUP_STRIP_HEADROOM };
+    groupHalos.push({ ...spec, ...framed, label: groupLabel(spec) });
+  }
+
+  /* Docked placeholder groups for active pipelines `deriveGroups` did not frame
+     (no materialized/placed stage node): a memberless halo carrying the plan, so
+     a provisioning pipeline keeps a scheme surface after the band's removal
+     (issue #136). It dissolves the moment a real stage node places. */
+  const framedPipelineIds = new Set(groupHalos.filter((halo) => halo.pipeline).map((halo) => halo.id));
+  let dockRight = 0;
+  let dockBottom = 0;
+  let dockY = PAD;
+  for (const pipeline of surfacePipelines) {
+    if (pipeline.state === "closed" || framedPipelineIds.has(pipeline.id)) continue;
+    framedPipelineIds.add(pipeline.id);
+    const rect = { x: cursor, y: dockY, w: NODE_W + GROUP_PAD * 2, h: 150 };
+    groupHalos.push({
+      key: `group::pipeline::${pipeline.id}`,
+      kind: "pipeline",
+      id: pipeline.id,
+      hue: hueFromId(pipeline.id),
+      members: [],
+      pipeline,
+      ...rect,
+      label: cleanTitle(pipeline.task, 60),
+    });
+    dockY += rect.h + GROUP_GAP;
+    dockRight = Math.max(dockRight, rect.x + rect.w);
+    dockBottom = Math.max(dockBottom, rect.y + rect.h);
   }
 
   return {
@@ -447,8 +559,8 @@ export function buildSchemeLayout(
     ],
     drafts,
     byPath,
-    width: Math.max(cursor - GROUP_GAP + PAD, PAD * 2 + NODE_W),
+    width: Math.max(cursor - GROUP_GAP + PAD, PAD * 2 + NODE_W, dockRight + PAD),
     /* Extra room under the last generation for decks and expanded panels. */
-    height: bottom + PAD + 140,
+    height: Math.max(bottom + PAD + 140, dockBottom + PAD),
   };
 }

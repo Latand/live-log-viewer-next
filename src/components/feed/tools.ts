@@ -2,6 +2,7 @@ import { getLocale, translate } from "@/lib/i18n";
 import { redactSecrets } from "@/lib/review";
 
 import type { GlyphName } from "../icons";
+import { formatStdinKeys } from "./ansi";
 import { normalizeEdit, type DiffModel } from "./diff";
 
 /* The source-agnostic tool taxonomy (issue #9 §3). One pure summarizer turns a
@@ -52,6 +53,14 @@ function num(value: unknown): number | undefined {
   if (typeof value === "number" && Number.isFinite(value)) return value;
   if (typeof value === "string" && value.trim() && Number.isFinite(Number(value))) return Number(value);
   return undefined;
+}
+
+/** A session/cell id that may arrive as a number (write_stdin's `session_id`) or
+    a string (wait's `cell_id`), coerced to a display string. */
+function idOf(value: unknown): string {
+  if (typeof value === "string") return value.trim();
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  return "";
 }
 
 function basename(path: string): string {
@@ -180,6 +189,24 @@ export function summarizeTool(
   const family = familyOf(tool);
   const icon = FAMILY_ICON[family];
   const build = (summary: string, chips: ArgChip[] = []): ToolSummary => ({ family, icon, summary: summaryOf(summary), chips: chips.slice(0, 4) });
+
+  /* Codex interactive-shell control tools (issue #141): render as shell-family
+     cards. write_stdin shows the actual keys sent; wait shows the session it is
+     tailing — both instead of an opaque "session_id" blob. */
+  if (tool === "write_stdin") {
+    const session = idOf(args.session_id ?? args.cell_id);
+    const chars = str(args.chars);
+    /* A poll is exactly an empty payload (no bytes sent); any keystroke — even a
+       lone space — is rendered, never mistaken for a poll (finding 2 / #141). */
+    const detail = chars.length === 0 ? tr("tools.stdinPoll") : formatStdinKeys(chars);
+    const summary = session ? `${tr("tools.stdin")} → ${session} · ${detail}` : `${tr("tools.stdin")} · ${detail}`;
+    return { family: "shell", icon: FAMILY_ICON.shell, summary: summaryOf(summary), chips: session ? [chip(session, tr("tools.session"))] : [] };
+  }
+  if (tool === "wait") {
+    const session = idOf(args.cell_id ?? args.session_id);
+    const summary = session ? `${tr("tools.wait")} · ${session}` : tr("tools.wait");
+    return { family: "shell", icon: FAMILY_ICON.shell, summary: summaryOf(summary), chips: session ? [chip(session, tr("tools.session"))] : [] };
+  }
 
   switch (family) {
     case "shell": {
