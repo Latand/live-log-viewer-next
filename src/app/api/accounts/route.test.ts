@@ -231,6 +231,37 @@ test("credential-bearing accounts project a fresh failed auth check as an error"
   }));
 });
 
+test("Claude provider reauthentication projects stored credentials as signed out", async () => {
+  const account = createManagedClaudeAccount("Expired Claude");
+  authenticateClaude(account);
+  const observedAt = new Date().toISOString();
+  agentRegistry().recordQuotaEvaluation({
+    engine: "claude",
+    observations: [{
+      engine: "claude",
+      accountId: account.id,
+      authenticated: true,
+      authCheckedAt: observedAt,
+      limits: null,
+      provenance: { source: "unavailable", reason: "oauth-reauthentication-required", staleSince: null },
+      observedAt,
+      bootId: "claude-reauth-route-test",
+    }],
+    signature: null,
+    bootId: "claude-reauth-route-test",
+    now: observedAt,
+    minimumGapMs: 60_000,
+  });
+
+  const body = await (await GET()).json() as {
+    claude: { accounts: Array<{ id: string; authPresent: boolean; auth: { state: string } }> };
+  };
+  expect(body.claude.accounts.find((item) => item.id === account.id)).toEqual(expect.objectContaining({
+    authPresent: true,
+    auth: expect.objectContaining({ state: "signed_out" }),
+  }));
+});
+
 test("future quota and auth observations remain ineligible", async () => {
   const account = createManagedCodexAccount("Future");
   setCodexAccountLoginPane(account.id, { paneId: "%future", windowName: "codex-login", startedAt: 0 });

@@ -31,6 +31,13 @@ function liveFreshObservation(observation: DurableQuotaObservation | undefined, 
 function accountProjection(observation: DurableQuotaObservation | undefined, authPresent: boolean, now: number) {
   const eligible = liveFreshObservation(observation, now);
   const authCurrent = currentObservation(observation, now);
+  const reauthenticationRequired = authCurrent && observation?.provenance.reason === "oauth-reauthentication-required";
+  let authState: "authenticated" | "signed_out" | "unknown" | "error" = "unknown";
+  if (eligible) authState = "authenticated";
+  else if (!authPresent || reauthenticationRequired) authState = "signed_out";
+  else if (authCurrent && observation?.authenticated === false) {
+    authState = observation.provenance.source === "live" ? "signed_out" : "error";
+  }
   const effective = observation ? effectiveRemaining({
     engine: observation.engine,
     accountId: observation.accountId,
@@ -42,13 +49,7 @@ function accountProjection(observation: DurableQuotaObservation | undefined, aut
   }, now) : null;
   return {
     auth: {
-      state: eligible
-        ? "authenticated"
-        : !authPresent
-          ? "signed_out"
-          : authCurrent && observation?.authenticated === false
-            ? observation.provenance.source === "live" ? "signed_out" : "error"
-            : "unknown",
+      state: authState,
       method: null,
       email: null,
       plan: observation?.limits?.plan ?? null,
