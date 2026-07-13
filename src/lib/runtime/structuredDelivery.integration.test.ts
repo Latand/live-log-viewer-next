@@ -777,6 +777,119 @@ test("successor cleanup drains a delayed publication before restoring path-only 
   journal.close();
 });
 
+test("structured successor cleanup restores a rolled-back tmux source projection", async () => {
+  const sourceId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const successorId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+  const sourcePath = path.join(sandbox, `${sourceId}.jsonl`);
+  const successorPath = path.join(sandbox, `${successorId}.jsonl`);
+  const registry = new AgentRegistry(path.join(sandbox, "legacy-rollback-projection-registry.json"));
+  const profile = emptyLaunchProfile({ cwd: sandbox });
+  registry.reconcileConversations([{
+    engine: "codex",
+    path: sourcePath,
+    accountId: "source",
+    launchProfile: profile,
+    turn: { state: "idle", source: "empty", terminalAt: null },
+    observedAt: "2026-07-14T12:00:00.000Z",
+  }]);
+  const conversation = registry.conversationForPath(sourcePath)!;
+  registry.upsert({
+    key: { engine: "codex", sessionId: sourceId },
+    artifactPath: sourcePath,
+    cwd: sandbox,
+    accountId: "source",
+    launchProfile: profile,
+    status: "idle",
+    host: {
+      kind: "tmux",
+      endpoint: "tmux:legacy-source",
+      server: { pid: 101, startIdentity: "server:101" },
+      paneId: "%101",
+      panePid: { pid: 102, startIdentity: "pane:102" },
+      windowName: "legacy-source",
+      agent: { pid: 103, startIdentity: "agent:103" },
+      argv: ["codex", "resume", sourceId],
+    },
+    structuredHost: null,
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  const journal = new RuntimeJournal(path.join(sandbox, "legacy-rollback-projection-runtime.sqlite"), { structuredHosts: true });
+  const client = runtimeJournalClient(journal);
+  await bindStructuredDeliveryQueue([], { registry, client });
+
+  registry.commitMigrationIntent({
+    engine: "codex",
+    targetId: "target",
+    origin: "manual",
+    requestId: "legacy-rollback-successor",
+    expectedRevision: registry.engineRouting("codex").revision,
+  });
+  const revision = registry.conversation(conversation.id)!.migration!.revision;
+  registry.recordConversationContinuityPath(conversation.id, successorPath);
+  registry.upsert({
+    key: { engine: "codex", sessionId: successorId },
+    artifactPath: successorPath,
+    cwd: sandbox,
+    accountId: "target",
+    launchProfile: profile,
+    status: "idle",
+    host: null,
+    structuredHost: {
+      kind: "codex-app-server",
+      endpoint: "fake:legacy-rollback-successor",
+      process: null,
+      eventCursor: 0,
+      protocolVersion: "fake-v1",
+      writerClaimEpoch: 0,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  await publishStructuredDeliveryHost({
+    key: { engine: "codex", sessionId: successorId },
+    host: observableFakeHost(new FakeEngineHost()),
+  });
+  expect(journal.snapshot().sessions.find((session) => session.conversationId === conversation.id)?.artifactPath)
+    .toBe(successorPath);
+
+  registry.rollbackConversationMigration(conversation.id, revision);
+  await cleanupOnlyProvider().cleanup({
+    operationId: "discarded-legacy-rollback-successor",
+    nativeId: successorId,
+    path: successorPath,
+    continuityPaths: [successorPath],
+    historyHash: "discarded-legacy-history",
+    host: { kind: "codex-app-server", identity: successorId, epoch: 1, verifiedAt: "2026-07-14T12:01:00.000Z" },
+  });
+
+  expect(journal.snapshot().sessions.find((session) => session.conversationId === conversation.id)).toMatchObject({
+    sessionKey: { engine: "codex", sessionId: sourceId },
+    hostKind: "tmux-legacy",
+    artifactPath: sourcePath,
+  });
+  const result = await enqueueStructuredMessage({
+    path: sourcePath,
+    text: "continue on legacy source",
+    clientMessageId: "legacy-rollback-composer-message",
+    hasImages: false,
+  }, {
+    enabled: () => true,
+    client: () => client,
+    registry: () => registry,
+    kick: kickStructuredDeliveryQueue,
+  });
+  expect(result).toBeNull();
+
+  await bindStructuredDeliveryQueue([], { registry, client: null });
+  journal.close();
+});
+
 test("late discarded-successor cleanup republishes the committed retarget host", async () => {
   const sourceId = "77777777-7777-4777-8777-777777777777";
   const discardedId = "88888888-8888-4888-8888-888888888888";

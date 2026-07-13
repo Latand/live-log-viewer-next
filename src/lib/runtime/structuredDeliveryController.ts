@@ -106,7 +106,8 @@ export async function bindStructuredDeliveryQueue(
   const publishChains = new Map<string, Promise<void>>();
   const projectionEpoch = crypto.randomUUID();
   let projectionRevision = 0;
-  const republishCurrentHosts = async (): Promise<void> => {
+  const republishCurrentHosts = async (): Promise<Set<string>> => {
+    const republished = new Set<string>();
     for (const registration of registrations.values()) {
       const entry = entryForHost(registry, registration);
       if (!entry) continue;
@@ -124,11 +125,54 @@ export async function bindStructuredDeliveryQueue(
         await registration.host.health(),
         `projection:${projectionEpoch}:${projectionRevision}`,
       );
+      republished.add(conversationId);
     }
+    return republished;
+  };
+  const publishCurrentFallback = async (conversationId: string): Promise<void> => {
+    const conversation = registry.conversation(conversationId as `conversation_${string}`);
+    const generation = conversation?.generations.at(-1);
+    if (!conversation || !generation) return;
+    const key = { engine: conversation.engine, sessionId: generation.id } as const;
+    const entry = registry.snapshot().entries[sessionKeyId(key)] ?? null;
+    const legacy = entry?.host?.kind === "tmux";
+    const host = legacy
+      ? entry.status === "dead" ? "dead" : entry.status === "unhosted" ? "unhosted" : "hosted"
+      : "unhosted";
+    const turn = entry?.status === "live" ? "running" : entry?.status === "idle" ? "idle" : "unknown";
+    projectionRevision += 1;
+    await client.append({
+      scope: { type: "session", id: conversationId },
+      kind: "session-status",
+      producer: {
+        kind: "structured-delivery-controller",
+        eventKey: `projection:${projectionEpoch}:${projectionRevision}`,
+      },
+      payload: {
+        conversationId,
+        sessionKey: key,
+        hostKind: legacy ? "tmux-legacy" : "unhosted",
+        host,
+        turn,
+        provenance: "derived",
+        accountId: entry?.accountId ?? generation.accountId,
+        parentConversationId: generation.launchProfile.parentConversationId,
+        cwd: entry?.cwd ?? generation.launchProfile.cwd,
+        artifactPath: generation.path,
+        capabilities: { steer: false, structuredAttention: false },
+        activeTurnId: null,
+      },
+    });
+  };
+  const refreshCurrentProjection = async (conversationId: string | null): Promise<void> => {
+    const republished = await republishCurrentHosts();
+    if (conversationId && !republished.has(conversationId)) await publishCurrentFallback(conversationId);
   };
   const unregisterHost = async (key: string, host: EngineHost): Promise<void> => {
     const registered = registrations.get(key);
     if (registered?.host !== host) return;
+    const discardedEntry = entryForHost(registry, registered);
+    const conversationId = discardedEntry ? conversationIdForEntry(registry, discardedEntry) : null;
     registered.unsubscribe();
     registrations.delete(key);
     hosts.delete(key);
@@ -137,7 +181,7 @@ export async function bindStructuredDeliveryQueue(
       await pendingPublications;
       if (publishChains.get(key) === pendingPublications) publishChains.delete(key);
     }
-    await republishCurrentHosts();
+    await refreshCurrentProjection(conversationId);
   };
   const register = async (item: StructuredDeliveryHost): Promise<() => Promise<void>> => {
     const key = sessionKeyId(item.key);
@@ -166,7 +210,8 @@ export async function bindStructuredDeliveryQueue(
     const id = sessionKeyId(key);
     const registered = registrations.get(id);
     if (!registered) {
-      await republishCurrentHosts();
+      const discardedEntry = registry.snapshot().entries[id] ?? null;
+      await refreshCurrentProjection(discardedEntry ? conversationIdForEntry(registry, discardedEntry) : null);
       return false;
     }
     try {
