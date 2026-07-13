@@ -357,7 +357,7 @@ function parseMemCitation(matchText: string, entriesText: string, idsText: strin
   return { kind: "mem-citation", entries, rolloutIds, raw: raw.raw, truncated: raw.truncated };
 }
 
-const CMD_GROUP_MIN = 4;
+const CMD_GROUP_MIN = 2;
 /* Output preview caps (unchanged from the original cmd model): ok output keeps
    the last 12 KB, an error the last 60 KB. The full command line keeps a bound
    too, so a giant heredoc cannot balloon the DOM in the expanded view. */
@@ -384,10 +384,15 @@ function toolBucket(event: ToolEvent): string {
   return event.tool || event.family;
 }
 
-/* A diff or an orchestration record earns its own card; simple tool rows
-   (shell/read/search/…) still fold into a cmd-group like the old cmd items. */
+/* Any tool event folds into a cmd-group (design doc §3.4: a run of ≥2
+   consecutive tool events — Read/Bash/Edit/… alike — reads as one quiet
+   ToolLine header). Diff-bodied edits and orchestration records fold too: the
+   shared ToolLine reveals their diff / nested-call body when the group row is
+   expanded, so nothing is lost by collapsing them into the quiet run. A wakeup
+   is the exception: its countdown/reason card carries live state a folded
+   header would hide, so it always stays a standalone card (issue #161). */
 function foldableTool(item: Item): item is ToolEvent {
-  return item.kind === "tool" && item.body?.type !== "diff" && !item.orchestration && !item.wakeup;
+  return item.kind === "tool" && !item.wakeup;
 }
 
 /* Maps a `tools.<method>` orchestration call to a canonical tool name so the
@@ -1635,15 +1640,17 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
     return crossedEchoSeam || (plainBlock !== null && plainBlock.src < start);
   };
 
-  /* Collapses runs of >=4 consecutive foldable tool entries into one cmd-group
-     item so a long unbroken command series reads as a single summary line.
-     "think" items inside a run don't break it (and are absorbed into the group,
-     since they carry no signal once the run they annotate is folded); prose/
-     user/tmsg/review/image, plus diff and orchestration tool events, break it.
-     The last run of a live transcript is never folded, so the currently running
-     call always stays visible. A group whose members' events are all
-     identity-equal to the previous snapshot's is reused as-is, keeping its card
-     memoized. */
+  /* Collapses a run of >=2 consecutive foldable tool entries into one cmd-group
+     item so a long unbroken tool series reads as a single summary line. Every
+     tool event folds (Read/Bash/Edit/diff-bodied/orchestration alike); a "think"
+     item inside a run is absorbed without breaking it (it carries no signal once
+     the run it annotates is folded), while prose/user/tmsg/review/image break it.
+     In a live trailing run only the leading completed prefix folds; every
+     in-flight (`run`) call stays a visible line (and if none is running, the
+     most-recent call is held out), so a live 40-call run reads as one quiet
+     group plus its running call(s), never 40 rows (§3.4). A group whose members'
+     events are all identity-equal to the previous snapshot's is reused as-is,
+     keeping its card memoized. */
   const buildSnapshot = (isLive: boolean): FeedSnapshot => {
     const out: FeedEntry[] = [];
     const nextGroups = new Map<number, CmdGroupItem>();
@@ -1663,25 +1670,37 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
         continue;
       }
       let j = i;
-      const toolEntries: { seq: number; item: ToolEvent }[] = [];
+      const toolEntries: { idx: number; seq: number; item: ToolEvent }[] = [];
       while (j < entries.length) {
         const cur = entries[j];
-        if (foldableTool(cur.item)) toolEntries.push({ seq: cur.seq, item: cur.item });
+        if (foldableTool(cur.item)) toolEntries.push({ idx: j, seq: cur.seq, item: cur.item });
         else if (cur.item.kind !== "think") break;
         j += 1;
       }
-      const isLastRun = j === entries.length;
-      if (toolEntries.length >= CMD_GROUP_MIN && !(isLive && isLastRun)) {
-        const gkey = toolEntries[0].seq;
+      /* A live trailing run folds only its leading completed prefix: every
+         in-flight (`run`) call stays a visible line so concurrent running calls
+         are never buried in a quiet closed group, and if none is running the
+         most-recent call is still held out. A completed or interior run folds in
+         full. */
+      const isLiveTail = isLive && j === entries.length;
+      let foldCount = toolEntries.length;
+      if (isLiveTail) {
+        const firstRun = toolEntries.findIndex((entry) => entry.item.status === "run");
+        foldCount = firstRun >= 0 ? firstRun : toolEntries.length - 1;
+      }
+      if (foldCount >= CMD_GROUP_MIN) {
+        const grouped = toolEntries.slice(0, foldCount);
+        const groupEnd = grouped[grouped.length - 1].idx + 1;
+        const gkey = grouped[0].seq;
         const prev = prevGroups.get(gkey);
         let group: CmdGroupItem;
-        if (prev && prev.calls.length === toolEntries.length && toolEntries.every((entry, k) => prev.calls[k] === entry.item)) {
+        if (prev && prev.calls.length === grouped.length && grouped.every((entry, k) => prev.calls[k] === entry.item)) {
           group = prev;
         } else {
           const byTool: Record<string, number> = {};
           let okCount = 0;
           let errCount = 0;
-          for (const entry of toolEntries) {
+          for (const entry of grouped) {
             const tool = toolBucket(entry.item);
             byTool[tool] = (byTool[tool] ?? 0) + 1;
             if (entry.item.status === "ok") okCount += 1;
@@ -1689,10 +1708,10 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
           }
           group = {
             kind: "cmd-group",
-            ids: toolEntries.map((entry) => entry.item.id),
-            calls: toolEntries.map((entry) => entry.item),
-            t0: toolEntries[0]?.item.ts,
-            t1: toolEntries.at(-1)?.item.ts,
+            ids: grouped.map((entry) => entry.item.id),
+            calls: grouped.map((entry) => entry.item),
+            t0: grouped[0]?.item.ts,
+            t1: grouped.at(-1)?.item.ts,
             byTool,
             okCount,
             errCount,
@@ -1701,7 +1720,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
         }
         nextGroups.set(gkey, group);
         out.push({ anchorKey: anchorKey(head, "group"), key: "g" + gkey, item: group });
-        i = j;
+        i = groupEnd;
       } else {
         out.push({ anchorKey: anchorKey(head, "row"), key: String(head.seq), item: head.item });
         i += 1;

@@ -25,6 +25,13 @@ export function WakeupChip({ wakeup, className, interactive = true }: { wakeup?:
   const [now, setNow] = useState(() => Date.now());
   const [open, setOpen] = useState(false);
   const fireAt = wakeup?.fireAt ?? 0;
+  // This chip is long-lived (it lives on a card that persists as `wakeup` goes
+  // null → pending over hours), so the mount-time `now` seed goes stale. Refresh
+  // it whenever the fire time changes so a freshly scheduled wakeup renders its
+  // true countdown from the current clock (issue #161 review).
+  useEffect(() => {
+    setNow(Date.now());
+  }, [fireAt]);
   const pending = Boolean(wakeup) && fireAt > now;
   useEffect(() => {
     if (!pending) return;
@@ -67,6 +74,12 @@ export function WakeupChip({ wakeup, className, interactive = true }: { wakeup?:
         }}
         onKeyDown={(e) => e.stopPropagation()}
         onKeyUp={(e) => e.stopPropagation()}
+        /* Camera-event guard: the scheme board resolves taps/drags through a
+           window pointer listener (pickAt), so a chip press must not bubble to
+           it — otherwise tapping the chip on the mobile map would open the
+           conversation instead of revealing the reason (issue #161 review). */
+        onPointerDown={(e) => e.stopPropagation()}
+        onPointerUp={(e) => e.stopPropagation()}
         onBlur={() => setOpen(false)}
         className={`relative ${chrome} after:absolute after:inset-x-0 after:top-1/2 after:h-11 after:-translate-y-1/2 after:content-[''] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40`}
       >

@@ -13,6 +13,11 @@ export interface MicButtonViewProps extends UseDictationResult {
   /** Extra external busy flag (e.g. a caller mid stop-and-send) that blocks
       starting a new recording on top of the hook's own "busy" phase. */
   busy?: boolean;
+  /** Composer-anchored presentation (design doc §3.5): the idle button sheds
+      its border/panel fill for a 32px visual control that keeps a 44px touch
+      hit area (pseudo-element), so it reads as an icon inside the sunken input
+      rather than a second bordered box beside the accent send. */
+  anchored?: boolean;
 }
 
 type BackendId = "local" | "chatgpt" | "elevenlabs";
@@ -215,6 +220,7 @@ export function MicButtonView({
   discard,
   onText,
   busy = false,
+  anchored = false,
 }: MicButtonViewProps) {
   const { t } = useLocale();
   const isMobile = useIsMobile();
@@ -310,9 +316,16 @@ export function MicButtonView({
           event.preventDefault();
           setMenuOpen((open) => !open);
         }}
-        className={`inline-flex shrink-0 items-center justify-center rounded-[8px] border focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60 ${
-          isMobile ? "h-11 w-11" : "p-2"
-        } ${phase === "starting" ? "border-accent/40 bg-accent/10 text-accent" : "border-line bg-panel text-dim hover:text-accent"}`}
+        className={
+          anchored
+            ? `relative inline-flex shrink-0 items-center justify-center rounded-control focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60 ${
+                /* 32px visual, 44px hit via the pseudo-element (rule 8). */
+                isMobile ? "h-8 w-8 before:absolute before:-inset-1.5 before:content-['']" : "p-2"
+              } ${phase === "starting" ? "bg-accent/10 text-accent" : "text-muted hover:bg-sunken hover:text-accent"}`
+            : `inline-flex shrink-0 items-center justify-center rounded-[8px] border focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60 ${
+                isMobile ? "h-11 w-11" : "p-2"
+              } ${phase === "starting" ? "border-accent/40 bg-accent/10 text-accent" : "border-line bg-panel text-dim hover:text-accent"}`
+        }
       >
         {phase === "busy" ? (
           <Loader2 className="h-4 w-4 animate-spin" aria-hidden />

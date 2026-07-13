@@ -512,6 +512,7 @@ export const en = {
   "render.image": "image",
   "render.dataKb": "{n} kB of data",
   "render.commands": { one: "{count} command", other: "{count} commands" },
+  "render.actions": { one: "{count} action", other: "{count} actions" },
   "render.noFindings": "no findings",
   "render.moreFindings": "{count} more findings in raw",
   "render.memoryCitations": "memory citations ({count})",

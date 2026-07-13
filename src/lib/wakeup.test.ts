@@ -4,11 +4,11 @@ import { harnessKind, parseScheduleWakeup, refineWakeupFromResult, wakeupPhase }
 
 const TS = Date.parse("2026-07-07T10:09:45.030Z");
 
-/* Mirrors the parser's fireAtFromClock: the result's absolute HH:MM:SS anchored
-   to the record's LOCAL day (tz-independent, since both sides use local time). */
-function clockEpoch(tsMs: number, h: number, m: number, s: number): number {
+/* Mirrors the parser's fireAtFromClock: a clock-only result's HH:MM:SS anchored
+   to the record's UTC day (deterministic across the scanner and browser zones). */
+function utcClockEpoch(tsMs: number, h: number, m: number, s: number): number {
   const d = new Date(tsMs);
-  d.setHours(h, m, s, 0);
+  d.setUTCHours(h, m, s, 0);
   let e = d.getTime();
   if (e < tsMs - 60_000) e += 86_400_000;
   return e;
@@ -35,25 +35,25 @@ describe("parseScheduleWakeup", () => {
     expect(info.prompt).toBe("Continue writing the issue");
   });
 
-  test("the resolved result clock is authoritative over the requested delay", () => {
+  test("the resolved delay is authoritative over the requested delay", () => {
     const info = parseScheduleWakeup(
       { delaySeconds: 120, reason: "r", prompt: "p" },
       TS,
       "Next wakeup scheduled for 17:00:00 (in 135s).",
     );
-    // The result's exact 17:00:00 wins over ts + 120s and even over ts + 135s.
+    // ts + the resolved 135s wins over the requested 120s (timezone-independent).
     expect(info.delaySeconds).toBe(135);
-    expect(info.fireAt).toBe(clockEpoch(TS, 17, 0, 0));
+    expect(info.fireAt).toBe(TS + 135 * 1000);
   });
 
-  test("uses the result's absolute clock when the input lacks a delay", () => {
+  test("uses ts + the resolved delay when the input lacks a delay", () => {
     const info = parseScheduleWakeup(
       { reason: "r", prompt: "p" },
       TS,
       "Next wakeup scheduled for 13:30:00 (in 1215s). Nothing more to do this turn.",
     );
     expect(info.delaySeconds).toBe(1215);
-    expect(info.fireAt).toBe(clockEpoch(TS, 13, 30, 0));
+    expect(info.fireAt).toBe(TS + 1215 * 1000);
   });
 
   test("uses the resolved (in Ns) when the result carries no absolute clock", () => {
@@ -62,14 +62,14 @@ describe("parseScheduleWakeup", () => {
     expect(info.fireAt).toBe(TS + 1215 * 1000);
   });
 
-  test("falls back to the absolute clock when neither delay nor timestamp is usable", () => {
+  test("falls back to the UTC-anchored clock when no delay is available", () => {
     const info = parseScheduleWakeup({ reason: "r", prompt: "p" }, TS, "Next wakeup scheduled for 13:30:00.");
     expect(info.delaySeconds).toBeNull();
-    // Anchored to the record's local day at 13:30:00.
-    expect(info.fireAt).not.toBeNull();
+    // Clock-only results are interpreted as UTC so scanner and feed agree.
+    expect(info.fireAt).toBe(utcClockEpoch(TS, 13, 30, 0));
     const d = new Date(info.fireAt!);
-    expect(d.getHours()).toBe(13);
-    expect(d.getMinutes()).toBe(30);
+    expect(d.getUTCHours()).toBe(13);
+    expect(d.getUTCMinutes()).toBe(30);
   });
 
   test("is total on garbage input", () => {
@@ -83,15 +83,15 @@ describe("refineWakeupFromResult", () => {
     const base = parseScheduleWakeup({ reason: "r", prompt: "p" }, null);
     expect(base.fireAt).toBeNull();
     const refined = refineWakeupFromResult(base, TS, "Next wakeup scheduled for 13:30:00 (in 1215s).");
-    expect(refined.fireAt).toBe(clockEpoch(TS, 13, 30, 0));
+    expect(refined.fireAt).toBe(TS + 1215 * 1000);
   });
 
   test("overrides the requested-delay fire time with the resolved schedule", () => {
     const base = parseScheduleWakeup({ delaySeconds: 600, reason: "r", prompt: "p" }, TS);
     expect(base.fireAt).toBe(TS + 600 * 1000);
-    // Once the result attaches, its exact 10:20:00 is authoritative over 600s.
+    // Once the result attaches, its resolved 615s is authoritative over 600s.
     const refined = refineWakeupFromResult(base, TS, "Next wakeup scheduled for 10:20:00 (in 615s).");
-    expect(refined.fireAt).toBe(clockEpoch(TS, 10, 20, 0));
+    expect(refined.fireAt).toBe(TS + 615 * 1000);
   });
 
   test("keeps the call-time fire time when the result carries no schedule", () => {

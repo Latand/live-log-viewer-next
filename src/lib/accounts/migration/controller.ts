@@ -5,11 +5,12 @@ import { withAccountMutationLock } from "@/lib/accounts/accountMutation";
 import { agentRegistry, conversationLookupFromSnapshot, type AgentRegistry } from "@/lib/agent/registry";
 import { readTranscriptHosts } from "@/lib/agent/transcriptHost";
 import { deliverConversationMessage, migrationDeliveryOutcome } from "@/lib/delivery";
-import { reconcileFlowConversationOwnership } from "@/lib/flows/store";
+import { loadFlows, reconcileFlowConversationOwnership } from "@/lib/flows/store";
 import { reconcileHandoffConversationOwnership } from "@/lib/handoffLineage";
 import { listFilesWithProjectCatalog, reconcileFileControllers } from "@/lib/scanner";
 import { pidAlive, readPpid } from "@/lib/scanner/process";
 import { runReaperCycle } from "@/lib/reaperRuntime";
+import { runHeadlessProcessReaper } from "@/lib/headlessProcessReaper";
 import { pathForPanePid, reconcileTasks } from "@/lib/tasks/reconcile";
 import { mutateTasks } from "@/lib/tasks/store";
 import { reconcileWorkflowConversationOwnership } from "@/lib/workflows/store";
@@ -139,6 +140,12 @@ export class AccountMigrationController {
       await runReaperCycle({ registry: this.registry, hosts: transcriptHosts.hosts, files });
     } catch {
       console.error("[agent reaper] lifecycle reconciliation failed");
+    }
+    try {
+      const report = await runHeadlessProcessReaper({ hosts: transcriptHosts.hosts, flows: loadFlows() });
+      if (report.signaled > 0) console.warn(`[headless process reaper] terminated ${report.signaled} stale process group(s)`);
+    } catch {
+      console.error("[headless process reaper] reconciliation failed");
     }
     await yieldToRuntime();
     const currentLookup = conversationLookupFromSnapshot(this.registry.snapshot());

@@ -599,7 +599,7 @@ export function DraftAgentPane({
           event.preventDefault();
           void send();
         }}
-        className="flex shrink-0 flex-col gap-1.5 border-t border-line bg-[#fbfbfd] px-2.5 py-2"
+        className="flex shrink-0 flex-col gap-1.5 border-t border-border bg-card px-2.5 py-2"
         aria-label={t("draft.promptAria")}
       >
         <ComposerBar
@@ -613,7 +613,7 @@ export function DraftAgentPane({
           sendIdleStyle={{ backgroundColor: tint.color, borderColor: tint.color }}
           leftSlot={
             <span
-              className="inline-flex min-w-0 items-center gap-1 rounded-full bg-chip px-1.5 py-1 font-mono text-[9.5px] font-semibold text-[#555]"
+              className="inline-flex min-w-0 items-center gap-1 rounded-control bg-sunken px-1.5 py-1 text-caption font-semibold text-secondary"
               title={t("draft.newWindowTitle")}
             >
               <Play className="h-3 w-3 shrink-0" aria-hidden /> {t("draft.newAgent")}

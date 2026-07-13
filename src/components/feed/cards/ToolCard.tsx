@@ -68,40 +68,53 @@ function RawRecord({ event }: { event: ToolEvent }) {
   );
 }
 
-/** One normalized tool event. The summary row is always in the DOM; the body
-    (chips, diff/output, raw record) mounts only after the first expand, keeping
-    a long transcript's collapsed DOM small (issue #9 §7/§8). */
-export function ToolCard({ event }: { event: ToolEvent }) {
+/** One normalized tool event rendered as a quiet ToolLine (design doc §3.4):
+    a borderless, tile-less single row — glyph + summary + (non-ok status) +
+    time — that reads as chrome between messages. The body (chips, diff/output,
+    raw record) mounts only after the first expand into a sunken block, keeping
+    a long transcript's collapsed DOM small (issue #9 §7/§8) — the same lazy
+    contract holds when the line renders inside a cmd-group. An error is never
+    quiet: it carries a danger left edge and danger text, always visible.
+
+    On a coarse pointer the summary inflates to a 44px tap target (rule 8 /
+    #145–#146) while the visual line stays dense on desktop; `showTime` is off
+    for a grouped child, whose time range already lives in the group header. */
+export function ToolLine({ event, showTime = true, className = "" }: { event: ToolEvent; showTime?: boolean; className?: string }) {
   const [mounted, setMounted] = useState(event.open);
   const time = hhmm(event.ts);
   const hasDiff = event.body?.type === "diff";
   const showOutput = !hasDiff || Boolean(event.outputPreview.trim());
+  const isErr = event.status === "err";
   return (
     <details
-      className="group/tool my-2.5 ml-9 overflow-hidden rounded-[14px] border border-line bg-panel shadow-card"
+      className={`group/tool ${className}`}
       open={event.open}
       onToggle={(e) => {
         if (e.currentTarget.open) setMounted(true);
       }}
     >
-      <summary className="flex cursor-pointer list-none items-center gap-2.5 px-3.5 py-2">
-        <span className="flex h-6.5 w-6.5 shrink-0 items-center justify-center rounded-lg bg-chip">
-          <GlyphIcon name={event.icon} className="h-4 w-4" />
-        </span>
-        <span className="min-w-0 flex-1 truncate text-[12.5px]" title={event.summary}>
+      <summary
+        className={`flex cursor-pointer list-none items-center gap-2 rounded-control py-0.5 text-ui hover:bg-sunken [@media(pointer:coarse)]:min-h-11 [&::-webkit-details-marker]:hidden ${
+          isErr ? "border-l-2 border-danger bg-danger-soft pl-2 pr-1 text-danger" : "text-muted"
+        }`}
+      >
+        <GlyphIcon name={event.icon} className="h-3.5 w-3.5 shrink-0" />
+        <span className={`min-w-0 flex-1 truncate ${isErr ? "font-semibold" : "text-secondary"}`} title={event.summary}>
           {event.summary}
         </span>
-        <span className={`inline-flex shrink-0 items-center gap-1 text-xs font-semibold ${statusClass(event.status)}`}>
-          <StatusIcon status={event.status} />
-          {event.statusLabel}
-        </span>
-        {time ? <span className="shrink-0 text-[11px] text-dim">{time}</span> : null}
+        {event.status !== "ok" ? (
+          <span className={`inline-flex shrink-0 items-center gap-1 text-caption font-semibold ${statusClass(event.status)}`}>
+            <StatusIcon status={event.status} className="h-3 w-3" />
+            {event.statusLabel}
+          </span>
+        ) : null}
+        {showTime && time ? <span className="shrink-0 text-caption tabular-nums text-muted">{time}</span> : null}
       </summary>
       {mounted ? (
-        <div className="border-t border-line px-3.5 py-2.5">
+        <div className="mb-1 mt-1 rounded-surface bg-sunken px-3 py-2.5">
           <ToolChips chips={event.chips} />
           {event.command ? (
-            <pre className="max-w-full overflow-x-auto whitespace-pre rounded-[10px] border border-line bg-panel-alt px-3 py-1.5 font-mono text-[12px]">
+            <pre className="max-w-full overflow-x-auto whitespace-pre rounded-control border border-border bg-card px-3 py-1.5 font-mono text-ui">
               {"$ " + event.command}
             </pre>
           ) : null}
@@ -113,4 +126,10 @@ export function ToolCard({ event }: { event: ToolEvent }) {
       ) : null}
     </details>
   );
+}
+
+/** A standalone tool event in the feed: a {@link ToolLine} at the feed's shared
+    chrome indent (`ml-9`). */
+export function ToolCard({ event }: { event: ToolEvent }) {
+  return <ToolLine event={event} className="ml-9" />;
 }

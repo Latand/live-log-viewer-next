@@ -490,6 +490,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "render.image": "зображення",
   "render.dataKb": "даних {n} КБ",
   "render.commands": { one: "{count} команда", few: "{count} команди", many: "{count} команд", other: "{count} команд" },
+  "render.actions": { one: "{count} дія", few: "{count} дії", many: "{count} дій", other: "{count} дій" },
   "render.noFindings": "без findings",
   "render.moreFindings": "ще {count} findings у raw",
   "render.memoryCitations": "цитати пам'яті ({count})",

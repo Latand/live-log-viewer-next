@@ -1,41 +1,9 @@
 @import "tailwindcss";
 
-/* Design tokens of the light design language (from the Python prototype). */
-@theme {
-  --color-bg: #f6f6f8;
-  --color-panel: #ffffff;
-  --color-line: #e6e6ea;
-  --color-ink: #1c1c22;
-  --color-dim: #8b8b95;
-  --color-accent: #5a51e0;
-  --color-ok: #1a8a3e;
-  --color-err: #c62828;
-  --color-chip: #efeff3;
-  --color-user: #e9e9ef;
-  --color-codex: #2f6fd0;
-  --color-codex-soft: #e8f0fb;
-  --color-claude: #d97757;
-  --color-claude-soft: #faeee9;
-  /* Feed surfaces previously hardcoded as hex literals in the cards. */
-  --color-panel-alt: #fafafc;
-  --color-tmsg: #f8f8fd;
-  --color-err-soft: #fff4f4;
-  --color-accent-soft: #ecebfb;
-  --color-faint: #555555;
-  /* Structural diff colors (issue #9 §4): line-type tokens, independent of the
-     syntax highlighter. Light-theme only for now — a dark theme lands app-wide
-     later in one place. */
-  --color-diff-add: #1a7f37;
-  --color-diff-add-soft: #e6ffec;
-  --color-diff-add-strong: #b7ebc6;
-  --color-diff-del: #cf222e;
-  --color-diff-del-soft: #ffebe9;
-  --color-diff-del-strong: #ffd1cf;
-  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto,
-    sans-serif;
-  --font-mono: ui-monospace, "JetBrains Mono", Menlo, monospace;
-  --shadow-card: 0 1px 2px rgb(20 20 30 / 0.05);
-}
+/* The design system's token set (issue #155 §1): type, spacing, radius,
+   surfaces, color roles, motion — plus legacy `--color-*` aliases so untouched
+   components render unchanged during the slice migration. */
+@import "../styles/tokens.css";
 
 body {
   background: var(--color-bg);

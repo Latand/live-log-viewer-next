@@ -1,20 +1,24 @@
-# PR #152: EngineHost interface and CodexAppServerHost
+# Issue #166: Isolate real-CLI integration-test sessions
 
-## Task statement
-
-Implement issue #149 from the issue #25 runtime spike: define the shared structured-host contract, add the Codex app-server adapter on ChatGPT subscription authentication, persist its mutable host state beside the durable engine thread identity, and support restart adoption through `thread/resume`.
+Run the Codex app-server and Claude broker integration suites with fresh temporary homes so their real session artifacts never enter the user's scanned roots.
 
 ## Acceptance criteria
 
-- AC1: `EngineHost` exposes `attach(afterSeq)`, `send`, `interrupt`, `answer`, `health`, and `release` with the spike contract semantics.
-- AC2: `CodexAppServerHost` maps the contract to app-server JSON-RPC over stdio and uses the Codex thread ID as durable session identity.
-- AC3: Structured hosting activates only when `LLV_STRUCTURED_HOSTS=1`; the default state remains disabled.
-- AC4: Existing tmux delivery paths, flow engines, and UI remain unchanged.
-- AC5: Registry state persists host kind, endpoint, PID plus process-start identity, event cursor, protocol version, writer-claim epoch, active turn reference, and pending attention.
-- AC6: Viewer restart adoption resumes every eligible Codex registry row through `thread/resume`.
-- AC7: Delivery maps queue entry IDs to `clientUserMessageId`, active turns use `expectedTurnId`, interruption stays explicit, and structured attention can be answered.
-- AC8: The real Codex CLI integration starts a thread, attaches a late client, steers the active turn, restarts the host process, and resumes the same thread on the ChatGPT subscription.
-- AC9: The real integration skips gracefully when the Codex CLI is unavailable.
-- AC10: API keys and authentication tokens never cross into the child environment or diagnostic output.
-- AC11: `bun test`, touched-file ESLint, and `bunx tsc --noEmit` pass.
-- AC12: A fresh independent review reaches a clean APPROVE verdict.
+AC1: Every Codex integration run sets `CODEX_HOME` to a fresh temporary directory, uses only the minimal copied file credential, and removes the directory during teardown.
+
+AC2: Every Claude integration run sets both `HOME` and `CLAUDE_CONFIG_DIR` to a fresh temporary directory, uses only the minimal copied subscription credential, and removes the directory during teardown.
+
+AC3: A missing binary, missing credential, unsafe credential source, or failed isolated-home authentication probe keeps the existing graceful-skip behavior.
+
+AC4: Each real integration test asserts that its produced rollout or transcript exists beneath its temporary home.
+
+AC5: Codex late attach, steering, and restart resume coverage remains unchanged; Claude late attach, restart resume, and permission-answer coverage remains unchanged.
+
+AC6: Running the focused integration suites creates zero new fixture files containing the ZEBRA-149, ORCHID-150, or ACK-150 markers under `~/.codex/sessions`, `~/.claude/projects`, and the managed Codex and Claude account roots.
+
+## Validation gates
+
+- `bun test`
+- `bunx tsc --noEmit`
+- `bun test src/lib/runtime/codexAppServerHost.integration.test.ts src/lib/runtime/claudeStreamBrokerHost.integration.test.ts`
+- marker-file comparison under the legacy session roots and managed account roots

@@ -104,13 +104,13 @@ const hhmm = (at: number) =>
 function receiptMeta(t: TFunction, state: DeliveryReceiptState | undefined): { label: string; className: string } | null {
   switch (state) {
     case "held":
-      return { label: t("composer.receiptHeld"), className: "bg-[#fff2d6] text-[#7a5300]" };
+      return { label: t("composer.receiptHeld"), className: "bg-warning-soft text-warning" };
     case "queued":
-      return { label: t("composer.receiptQueued"), className: "bg-[#fff2d6] text-[#7a5300]" };
+      return { label: t("composer.receiptQueued"), className: "bg-warning-soft text-warning" };
     case "recovering":
-      return { label: t("composer.receiptRecovering"), className: "bg-[#fff2d6] text-[#7a5300]" };
+      return { label: t("composer.receiptRecovering"), className: "bg-warning-soft text-warning" };
     case "failed":
-      return { label: t("composer.receiptFailed"), className: "bg-[#ffe0e0] text-err" };
+      return { label: t("composer.receiptFailed"), className: "bg-danger-soft text-danger" };
     default:
       return null;
   }
@@ -365,7 +365,7 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
 
   const modeChip = (
     <span
-      className="inline-flex min-w-0 items-center gap-1 rounded-full bg-chip px-1.5 py-1 font-mono text-[9.5px] font-semibold text-[#555]"
+      className="inline-flex min-w-0 items-center gap-1 rounded-control bg-sunken px-1.5 py-1 text-caption font-semibold text-secondary"
       title={relayMode ? t("composer.titleRelay") : spawnMode ? t("composer.titleSpawnResumed") : `tmux ${target}`}
     >
       {relayMode ? (
@@ -378,7 +378,7 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
         </>
       ) : (
         <>
-          <SquareTerminal className="h-3 w-3 shrink-0" aria-hidden /> <span className="truncate">{target}</span>
+          <SquareTerminal className="h-3 w-3 shrink-0" aria-hidden /> <span className="truncate font-mono">{target}</span>
         </>
       )}
     </span>
@@ -394,7 +394,7 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
           aria-label={t("composer.interruptAria")}
           disabled={interrupting}
           onClick={() => void interrupt()}
-          className={`inline-flex shrink-0 items-center justify-center rounded-[8px] border border-line bg-panel text-dim hover:border-err/40 hover:text-err focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-50 ${iconBtn}`}
+          className={`inline-flex shrink-0 items-center justify-center rounded-control text-muted hover:bg-sunken hover:text-danger focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-50 ${iconBtn}`}
         >
           {interrupting ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : <Square className="h-4 w-4" fill="currentColor" aria-hidden />}
         </button>
@@ -412,12 +412,12 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
             setCompactArmed(false);
             void compact();
           }}
-          className={`inline-flex shrink-0 items-center justify-center gap-1 rounded-[8px] border focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-50 ${
+          className={`inline-flex shrink-0 items-center justify-center gap-1 rounded-control focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-50 ${
             isMobile ? "min-h-11 px-2.5" : "p-2"
           } ${
             compactArmed
-              ? "border-[#0d9488] bg-[#e3f4f0] text-[#0b7c72]"
-              : "border-line bg-panel text-dim hover:border-[#0d9488]/50 hover:text-[#0b7c72]"
+              ? "bg-info/10 text-info"
+              : "text-muted hover:bg-sunken hover:text-info"
           }`}
         >
           {compacting ? (
@@ -441,14 +441,14 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
   return (
     <form
       onSubmit={handleSubmit}
-      className="flex shrink-0 flex-col gap-1.5 border-t border-line bg-[#fbfbfd] px-2.5 py-2"
+      className="flex shrink-0 flex-col gap-1.5 border-t border-border bg-card px-2.5 py-2"
       aria-label={spawnMode ? t("composer.spawnAria") : t("composer.sendAria", { target: target ?? "" })}
     >
       {/* Proactive hold hint: while the card is switching accounts, the next
           send is queued for the successor rather than delivered live. Shown
           identically under the desktop and mobile composers. */}
       {holdsSends ? (
-        <div role="status" aria-live="polite" className="flex items-center gap-1.5 rounded-[8px] border border-[#e0ae45]/45 bg-[#fff9ed] px-2 py-1 text-[10.5px] font-semibold text-[#7a5300]">
+        <div role="status" aria-live="polite" className="flex items-center gap-1.5 rounded-control border border-warning/45 bg-warning-soft px-2 py-1 text-label font-semibold text-warning">
           <ArrowUpToLine className="h-3 w-3 shrink-0" aria-hidden />
           <span className="min-w-0 truncate">{t("migrate.heldSend")}</span>
         </div>
@@ -463,7 +463,7 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
                 <span
                   role="status"
                   aria-live="polite"
-                  className={`inline-flex shrink-0 items-center gap-0.5 rounded-full px-1.5 py-0.5 text-[9px] font-bold ${receipt.className}`}
+                  className={`inline-flex shrink-0 items-center gap-0.5 rounded-full px-1.5 py-0.5 text-caption font-bold ${receipt.className}`}
                 >
                   {receipt.label}
                 </span>
@@ -485,12 +485,12 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
                 </button>
               ) : null}
               <span
-                className="min-w-0 max-w-[85%] truncate rounded-[10px] rounded-br-[3px] bg-[#ecebfb] px-2 py-0.5 text-[11px] text-[#333]"
+                className="min-w-0 max-w-[85%] truncate text-label text-secondary"
                 title={entry.text}
               >
                 {entry.text}
               </span>
-              <span className="inline-flex shrink-0 items-center gap-0.5 text-[9.5px] text-dim">
+              <span className="inline-flex shrink-0 items-center gap-0.5 text-caption tabular-nums text-muted">
                 {entry.via === "spawn" ? <Play className="h-2.5 w-2.5" aria-hidden /> : <ArrowRight className="h-2.5 w-2.5" aria-hidden />}
                 {hhmm(entry.at)}
               </span>
@@ -548,7 +548,7 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
                 aria-label={t("composer.moreTools")}
                 title={t("composer.moreTools")}
                 onClick={() => setToolsOpen((value) => !value)}
-                className={`inline-flex shrink-0 items-center justify-center rounded-[8px] border border-line bg-panel text-dim hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${iconBtn}`}
+                className={`inline-flex shrink-0 items-center justify-center rounded-control text-muted hover:bg-sunken hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${iconBtn}`}
               >
                 <Plus className={`h-4 w-4 transition-transform ${toolsOpen ? "rotate-45" : ""}`} aria-hidden />
               </button>
@@ -558,7 +558,7 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
                   {liveControls}
                   <ImagePickerButton
                     ariaLabel={t("composer.addImages")}
-                    className={`inline-flex shrink-0 items-center justify-center rounded-[8px] border border-line bg-panel text-dim hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${iconBtn}`}
+                    className={`inline-flex shrink-0 items-center justify-center rounded-control text-muted hover:bg-sunken hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${iconBtn}`}
                     onFiles={attachments.addFiles}
                   />
                 </>

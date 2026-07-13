@@ -145,7 +145,11 @@ describe("feed session parity with one-shot parse", () => {
       JSON.stringify({ type: "response_item", timestamp: "t4", payload: { type: "function_call_output", call_id: "s1", output: "Script running with cell ID 8479\nWall time 5.0 seconds\nOutput:\n" } }),
     ];
     const feed = buildFeed(codexFile, lines, false, "");
-    const tools = feed.items.filter((item): item is Extract<Item, { kind: "tool" }> => item.kind === "tool");
+    /* Two consecutive tool events now fold into a cmd-group (§3.4), so read the
+       decoded calls from both top-level tool rows and any group. */
+    const tools = feed.items.flatMap((item): Extract<Item, { kind: "tool" }>[] =>
+      item.kind === "tool" ? [item] : item.kind === "cmd-group" ? item.calls : [],
+    );
     const wait = tools.find((tool) => tool.tool === "wait")!;
     expect(wait.family).toBe("shell");
     /* Decoded: real newlines, ANSI removed, preamble (incl. the real wrapper) not leaked. */
@@ -226,7 +230,12 @@ describe("feed session parity with one-shot parse", () => {
       }),
     ];
     const feed = buildFeed(codexFile, lines, false, "");
-    const commands = feed.items.filter((item) => item.kind === "tool");
+    /* The orchestration record and the plain exec are two consecutive tool
+       events, so they now fold into one cmd-group (§3.4); read the calls back
+       from the group. */
+    const commands = feed.items.flatMap((item): Extract<Item, { kind: "tool" }>[] =>
+      item.kind === "tool" ? [item] : item.kind === "cmd-group" ? item.calls : [],
+    );
     expect(commands).toHaveLength(2);
     const command = commands[0];
     if (command?.kind !== "tool") throw new Error("expected tool item");
@@ -330,6 +339,58 @@ describe("feed session identity stability", () => {
     expect(group.kind).toBe("cmd-group");
     const after = session.feed([...lines, claudeProse("one more response")], 0, false);
     expect(after.items[0].item).toBe(group);
+  });
+
+  test("a live trailing tool run folds its completed prefix but keeps the current call visible (§3.4)", () => {
+    const lines = [
+      claudeTool("a1", "Bash", "echo 1"),
+      claudeResult("a1", "1"),
+      claudeTool("a2", "Bash", "echo 2"),
+      claudeResult("a2", "2"),
+      claudeTool("a3", "Read", "cat x.txt"), // in-flight: no result yet
+    ];
+    // Live: the completed a1/a2 fold; the current a3 stays its own visible line —
+    // a live 40-call run must not read as 40 individual ToolLines.
+    const live = buildFeed({ ...claudeFile, activity: "live" } as FileEntry, lines, false, "");
+    expect(live.items).toHaveLength(2);
+    const group = live.items[0];
+    if (group.kind !== "cmd-group") throw new Error("expected a cmd-group");
+    expect(group.calls.map((call) => call.id)).toEqual(["a1", "a2"]);
+    const current = live.items[1];
+    if (current.kind !== "tool") throw new Error("expected the current call as a visible tool line");
+    expect(current.id).toBe("a3");
+    // Settled (not live): the whole run folds into one group.
+    const settled = buildFeed(claudeFile, lines, false, "");
+    expect(settled.items).toHaveLength(1);
+    expect(settled.items[0].kind).toBe("cmd-group");
+  });
+
+  test("a live tail keeps every concurrent in-flight call visible, folding only the completed prefix (§3.4)", () => {
+    const lines = [
+      claudeTool("c1", "Bash", "echo 1"),
+      claudeResult("c1", "1"),
+      claudeTool("c2", "Bash", "echo 2"),
+      claudeResult("c2", "2"),
+      claudeTool("c3", "Read", "cat a.txt"),
+      claudeResult("c3", "a"),
+      claudeTool("r1", "Bash", "sleep 1"), // in-flight
+      claudeTool("r2", "Bash", "sleep 2"), // in-flight, concurrent
+    ];
+    const live = buildFeed({ ...claudeFile, activity: "live" } as FileEntry, lines, false, "");
+    // The completed c1/c2/c3 fold; both running calls stay their own visible lines.
+    expect(live.items).toHaveLength(3);
+    const group = live.items[0];
+    if (group.kind !== "cmd-group") throw new Error("expected the completed prefix folded");
+    expect(group.calls.map((call) => call.id)).toEqual(["c1", "c2", "c3"]);
+    const running = live.items.slice(1);
+    expect(running.map((item) => (item.kind === "tool" ? item.id : item.kind))).toEqual(["r1", "r2"]);
+    expect(running.every((item) => item.kind === "tool" && item.status === "run")).toBe(true);
+  });
+
+  test("a live tail of only concurrent run calls stays fully visible with no group", () => {
+    const lines = [claudeTool("r1", "Bash", "a"), claudeTool("r2", "Bash", "b"), claudeTool("r3", "Bash", "c")];
+    const live = buildFeed({ ...claudeFile, activity: "live" } as FileEntry, lines, false, "");
+    expect(live.items.map((item) => (item.kind === "tool" ? item.id : item.kind))).toEqual(["r1", "r2", "r3"]);
   });
 
   test("prepended history resets the session and reparses the wider window", () => {
@@ -649,12 +710,17 @@ describe("Codex functions.exec orchestration", () => {
     expect(event.orchestration?.calls.some((call) => call.tool === "text" && call.icon === "note")).toBe(true);
   });
 
-  test("consecutive exec records with different nested calls stay distinguishable and never fold", () => {
+  test("consecutive exec records fold into a cmd-group while staying distinguishable (§3.4)", () => {
     const lines = [orch('await tools.exec_command({cmd:"aaa"})', "a"), orch('await tools.exec_command({cmd:"bbb"})', "b"), orch('await tools.exec_command({cmd:"ccc"})', "c"), orch('await tools.exec_command({cmd:"ddd"})', "d")];
-    const tools = buildFeed(codexFile, lines, false, "").items.filter((item) => item.kind === "tool");
-    // four consecutive orchestration rows, each its own card (not a cmd-group)
-    expect(tools).toHaveLength(4);
-    expect(new Set(tools.map((item) => (item.kind === "tool" ? item.summary : ""))).size).toBe(4);
+    const items = buildFeed(codexFile, lines, false, "").items;
+    // Four consecutive orchestration records fold into one quiet group; expanding
+    // it lists each call with its own distinct summary and its nested body intact.
+    expect(items).toHaveLength(1);
+    const group = items[0];
+    if (group.kind !== "cmd-group") throw new Error("expected a cmd-group");
+    expect(group.calls).toHaveLength(4);
+    expect(new Set(group.calls.map((call) => call.summary)).size).toBe(4);
+    expect(group.calls.every((call) => call.orchestration !== undefined)).toBe(true);
     assertParity(codexFile, lines, { chunks: [1] });
   });
 
@@ -792,7 +858,11 @@ describe("Codex functions.exec orchestration", () => {
 
 describe("Codex orchestration over a real rollout fixture (issue #83)", () => {
   const fixture = readFileSync(join(import.meta.dir, "__fixtures__", "codex-orchestration.jsonl"), "utf8").split("\n").filter(Boolean);
-  const events = buildFeed(codexFile, fixture, false, "").items.filter((item): item is Extract<Item, { kind: "tool" }> => item.kind === "tool");
+  /* Consecutive tool events fold into cmd-groups (§3.4), so read every native
+     tool event back from both top-level rows and any group. */
+  const events = buildFeed(codexFile, fixture, false, "").items.flatMap((item): Extract<Item, { kind: "tool" }>[] =>
+    item.kind === "tool" ? [item] : item.kind === "cmd-group" ? item.calls : [],
+  );
 
   test("every native tool card carries a meaningful, non-empty summary", () => {
     expect(events.length).toBeGreaterThanOrEqual(5);
@@ -865,15 +935,6 @@ describe("Claude protocol and repeated prose", () => {
 const claudeWakeup = (id: string, input: Record<string, unknown>, timestamp = "2026-07-06T10:00:02Z") =>
   JSON.stringify({ type: "assistant", timestamp, message: { content: [{ type: "tool_use", id, name: "ScheduleWakeup", input }] } });
 
-/* The result's absolute HH:MM:SS anchored to the record's LOCAL day — mirrors
-   the parser's fireAtFromClock so the assertion is timezone-independent. */
-function clockEpoch(tsMs: number, h: number, m: number, s: number): number {
-  const d = new Date(tsMs);
-  d.setHours(h, m, s, 0);
-  let e = d.getTime();
-  if (e < tsMs - 60_000) e += 86_400_000;
-  return e;
-}
 
 describe("ScheduleWakeup card", () => {
   test("emits a standalone wakeup tool event with a derived fire time", () => {
@@ -933,10 +994,10 @@ describe("ScheduleWakeup card", () => {
     const feed = buildFeed(claudeFile, lines, false, "");
     const tool = feed.items.find((item) => item.kind === "tool");
     const wakeup = tool && tool.kind === "tool" ? tool.wakeup : undefined;
-    expect(wakeup?.fireAt).toBe(clockEpoch(Date.parse(ts), 13, 30, 0));
+    expect(wakeup?.fireAt).toBe(Date.parse(ts) + 1215 * 1000);
   });
 
-  test("the resolved result clock overrides the requested delay on attach", () => {
+  test("the resolved delay overrides the requested delay on attach", () => {
     const ts = "2026-07-06T10:00:02Z";
     const lines = [
       claudeWakeup("w1", { delaySeconds: 120, reason: "r", prompt: "p" }, ts),
@@ -945,8 +1006,8 @@ describe("ScheduleWakeup card", () => {
     const feed = buildFeed(claudeFile, lines, false, "");
     const tool = feed.items.find((item) => item.kind === "tool");
     const wakeup = tool && tool.kind === "tool" ? tool.wakeup : undefined;
-    // The exact 10:02:15 clock wins over both ts + 120s and ts + 135s.
-    expect(wakeup?.fireAt).toBe(clockEpoch(Date.parse(ts), 10, 2, 15));
+    // ts + the resolved 135s wins over the requested 120s (timezone-independent).
+    expect(wakeup?.fireAt).toBe(Date.parse(ts) + 135 * 1000);
   });
 
   test("a rejected wakeup is marked failed and does not supersede the prior valid one", () => {

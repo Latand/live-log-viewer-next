@@ -20,7 +20,7 @@ export function CompactBand({ item }: { item: Extract<Item, { kind: "compact" }>
         <span className="inline-flex items-center gap-1.5 rounded-full border border-[#0d9488]/30 bg-[#e7f6f4] px-2.5 py-1 text-[11px] font-bold text-[#0b7c72]">
           <GlyphIcon name="compact" className="h-3.5 w-3.5" />
           {tr("render.compacted")}
-          {detail ? <span className="font-semibold opacity-75">{detail}</span> : null}
+          {detail ? <span className="font-semibold tabular-nums opacity-75">{detail}</span> : null}
         </span>
         <span className="h-px flex-1 bg-[#0d9488]/30" aria-hidden />
       </div>

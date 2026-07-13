@@ -107,6 +107,14 @@ class FakeAppServer extends EventEmitter {
     if (typeof method === "string" && this.ignoredMethods.includes(method)) return;
     if (method === "initialize") return this.respond(message.id, { userAgent: "codex_desktop_app/0.144.1 (Linux)" });
     if (method === "account/read") return this.respond(message.id, { account: { type: "chatgpt", planType: "pro" }, requiresOpenaiAuth: false });
+    if (method === "config/read") return this.respond(message.id, {
+      config: {
+        mcp_servers: {
+          playwright: { command: "npx", enabled: true },
+          "telegram-readonly": { command: "uv", enabled: true },
+        },
+      },
+    });
     if (method === "thread/start" || method === "thread/resume") {
       const id = method === "thread/resume" ? this.resumedThreadId : this.threadId;
       if (method === "thread/resume" && this.resumeRequest) {
@@ -275,9 +283,21 @@ describe("CodexAppServerHost", () => {
       eventStore: new MemoryEventStore(),
       spawnProcess: fakeSpawn(server, captured),
     });
-    expect(captured.args).toEqual(["-c", "cli_auth_credentials_store=file", "app-server"]);
+    expect(captured.args).toEqual(["-c", "cli_auth_credentials_store=file", "-c", "mcp_servers={}", "app-server"]);
     expect(captured.options?.env?.CODEX_HOME).toBe("/managed-codex-home");
+    expect(captured.options?.detached).toBeTrue();
     expect(server.requests.some((request) => request.method === "thread/resume")).toBeTrue();
+    const resume = server.requests.find((request) => request.method === "thread/resume");
+    expect(resume?.params).toMatchObject({
+      config: {
+        mcp_servers: {
+          playwright: { enabled: false },
+          "telegram-readonly": { enabled: false },
+        },
+        features: { apps: false, plugins: false },
+        include_apps_instructions: false,
+      },
+    });
     await host.release();
   });
 
@@ -511,6 +531,54 @@ describe("CodexAppServerHost", () => {
     expect(server.signals).toEqual(["SIGTERM", "SIGKILL"]);
     expect((await stream.next()).value).toMatchObject({ kind: "session-status", status: "unhosted" });
     expect((await stream.next()).done).toBeTrue();
+  });
+
+  test("release escalates the process group after its leader exits during grace", async () => {
+    const server = new FakeAppServer("group-reap-thread");
+    const signals: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+    const host = await CodexAppServerHost.start({
+      cwd: "/repo",
+      shutdownGraceMs: 5,
+      eventStore: new MemoryEventStore(),
+      spawnProcess: fakeSpawn(server),
+      signalProcess: (pid, signal) => {
+        signals.push({ pid, signal });
+        if (signal === "SIGTERM") queueMicrotask(() => server.emit("close", 0, signal));
+      },
+    });
+
+    await host.release();
+    await Bun.sleep(10);
+
+    expect(signals).toEqual([
+      { pid: -4242, signal: "SIGTERM" },
+      { pid: -4242, signal: "SIGKILL" },
+    ]);
+  });
+
+  test("release cleans the detached process group after an unexpected leader exit", async () => {
+    const server = new FakeAppServer("exited-group-thread");
+    const signals: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+    const host = await CodexAppServerHost.start({
+      cwd: "/repo",
+      shutdownGraceMs: 5,
+      eventStore: new MemoryEventStore(),
+      spawnProcess: fakeSpawn(server),
+      signalProcess: (pid, signal) => {
+        signals.push({ pid, signal });
+        if (signal === "SIGTERM") throw new Error("group exited");
+      },
+    });
+
+    server.emit("close", 0, null);
+    await host.release();
+    await Bun.sleep(10);
+
+    expect(signals).toEqual([
+      { pid: -4242, signal: "SIGTERM" },
+      { pid: -4242, signal: "SIGKILL" },
+    ]);
+    expect(server.signals).toEqual([]);
   });
 
   test("protocol failure starts bounded TERM and KILL cleanup", async () => {

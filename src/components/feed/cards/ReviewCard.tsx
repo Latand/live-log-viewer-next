@@ -48,7 +48,7 @@ export function ReviewCard({ item }: { item: ReviewCardItem }) {
         <span className="text-[11px] text-dim">
           {findingCount ? `${findingCount} finding${findingCount === 1 ? "" : "s"}` : tr("render.noFindings")}
         </span>
-        {hhmm(item.ts) ? <span className="ml-auto text-[11px] text-dim">{hhmm(item.ts)}</span> : null}
+        {hhmm(item.ts) ? <span className="ml-auto text-label tabular-nums text-dim">{hhmm(item.ts)}</span> : null}
       </div>
       <div className="px-3.5 py-2.5">
         {item.summary.length ? (

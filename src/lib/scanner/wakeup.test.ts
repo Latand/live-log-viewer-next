@@ -11,15 +11,6 @@ afterAll(() => fs.rmSync(SANDBOX, { recursive: true, force: true }));
 
 const TS = "2026-07-07T10:09:45.030Z";
 
-/* The result's absolute HH:MM:SS anchored to the record's LOCAL day — mirrors
-   the parser's fireAtFromClock so the assertion is timezone-independent. */
-function clockEpoch(tsMs: number, h: number, m: number, s: number): number {
-  const d = new Date(tsMs);
-  d.setHours(h, m, s, 0);
-  let e = d.getTime();
-  if (e < tsMs - 60_000) e += 86_400_000;
-  return e;
-}
 
 function entry(records: unknown[], root: FileEntry["root"] = "claude-projects"): FileEntry {
   const pathname = path.join(SANDBOX, `${crypto.randomUUID()}.jsonl`);
@@ -71,7 +62,7 @@ describe("pendingWakeupFor", () => {
         message: { content: [{ type: "tool_result", tool_use_id: "w1", content: [{ type: "text", text: "Next wakeup scheduled for 13:30:00 (in 1215s)." }] }] },
       },
     ]);
-    expect(pendingWakeupFor(e, now)?.fireAt).toBe(clockEpoch(Date.parse(TS), 13, 30, 0));
+    expect(pendingWakeupFor(e, now)?.fireAt).toBe(Date.parse(TS) + 1215 * 1000);
   });
 
   test("skips a rejected newest wakeup and keeps the prior successful one", () => {
@@ -86,7 +77,7 @@ describe("pendingWakeupFor", () => {
     ]);
     const pending = pendingWakeupFor(e, now);
     expect(pending?.reason).toBe("valid");
-    expect(pending?.fireAt).toBe(clockEpoch(Date.parse(good), 13, 5, 0));
+    expect(pending?.fireAt).toBe(Date.parse(good) + 3600 * 1000);
   });
 
   test("returns null when the only wakeup was rejected", () => {

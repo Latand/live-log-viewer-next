@@ -49,17 +49,22 @@ function str(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
 }
 
-/* Anchors a bare "HH:MM:SS" wall clock to an absolute epoch. The clock is
-   interpreted in the viewer's local zone (LLV runs beside the agent, so the two
-   share a clock); the day comes from the record timestamp, rolling forward one
-   day when the clock already reads earlier than the record (a wakeup that
-   crosses midnight). */
+/* Anchors a bare "HH:MM:SS" wall clock to an absolute epoch.
+
+   TIMEZONE CONTRACT: the clock is interpreted as UTC, so the scanner (a Node
+   server whose container may leave TZ unset, defaulting to UTC) and the feed
+   (the browser, in the user's local zone) resolve the SAME epoch and never
+   disagree. This path only runs for a clock-only result with no "(in Ns)" — a
+   degenerate shape a real `ScheduleWakeup` result never emits, so the primary
+   `tsMs + delay` derivation (below) carries every real call and is itself
+   timezone-independent. The day comes from the record timestamp, rolling
+   forward one day when the UTC clock already reads earlier than the record. */
 function fireAtFromClock(clock: string, tsMs: number | null): number | null {
   const parts = clock.split(":").map(Number);
   if (parts.length !== 3 || parts.some((n) => !Number.isFinite(n))) return null;
   const [h, m, s] = parts;
   const base = tsMs !== null ? new Date(tsMs) : new Date();
-  base.setHours(h, m, s, 0);
+  base.setUTCHours(h, m, s, 0);
   let fire = base.getTime();
   if (tsMs !== null && fire < tsMs - 60_000) fire += 86_400_000;
   return fire;
@@ -72,10 +77,12 @@ function fireAtFromClock(clock: string, tsMs: number | null): number | null {
  *
  * The harness may adjust the requested `delaySeconds` (processing time), so its
  * result — "Next wakeup scheduled for HH:MM:SS (in Ns)" — carries the RESOLVED
- * schedule that actually fires. When the result is present its absolute clock is
- * authoritative (exact to the second); its resolved "(in Ns)" is the next
- * fallback; the requested `delaySeconds` applies only before the result attaches
- * (a live card) or when the result carries no schedule.
+ * schedule that actually fires. The fire time is derived from `tsMs` plus the
+ * resolved "(in Ns)" delay: authoritative over the requested delay AND
+ * timezone-independent, so the Node scanner and the browser feed agree
+ * regardless of either runtime's zone. The requested `delaySeconds` applies
+ * before the result attaches (a live card); the bare absolute clock is a last
+ * resort (see the UTC contract on `fireAtFromClock`).
  */
 export function parseScheduleWakeup(input: unknown, tsMs: number | null, resultText?: string | null): WakeupInfo {
   const rec = input && typeof input === "object" && !Array.isArray(input) ? (input as Record<string, unknown>) : {};
@@ -92,11 +99,11 @@ export function parseScheduleWakeup(input: unknown, tsMs: number | null, resultT
   // The resolved schedule wins over the requested delay when the result is in.
   const delaySeconds = resolvedDelay ?? requestedDelay;
 
-  // The absolute clock is exact to the second, so it leads; `tsMs + resolvedDelay`
-  // rounds and trails the real fire time by the harness's processing gap.
+  // `tsMs + delay` is timezone-independent and authoritative once the resolved
+  // delay is known; the bare clock is a last resort, anchored to UTC by contract.
   let fireAt: number | null = null;
-  if (clock) fireAt = fireAtFromClock(clock, tsMs);
-  else if (tsMs !== null && resolvedDelay !== null) fireAt = tsMs + resolvedDelay * 1000;
+  if (tsMs !== null && resolvedDelay !== null) fireAt = tsMs + resolvedDelay * 1000;
+  else if (clock) fireAt = fireAtFromClock(clock, tsMs);
   else if (tsMs !== null && requestedDelay !== null) fireAt = tsMs + requestedDelay * 1000;
 
   return { fireAt, delaySeconds, reason, prompt };
