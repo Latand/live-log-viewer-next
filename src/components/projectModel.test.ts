@@ -110,6 +110,12 @@ describe("draftWorkingDirectory", () => {
       { project: "viewer", projectRoot: "/repo", smt: 100, conversations: 3 },
     ])).toBe("/repo");
   });
+
+  test("uses the deterministic server fallback when a project has no cwd metadata", () => {
+    expect(projectDraftWorkingDirectory([], "legacy", [], undefined, [], "/home/user/Projects/legacy")).toBe(
+      "/home/user/Projects/legacy",
+    );
+  });
 });
 
 describe("buildBranchGroups", () => {

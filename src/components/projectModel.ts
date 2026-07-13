@@ -94,9 +94,10 @@ export function projectDraftWorkingDirectory(
   projectCatalog: readonly ProjectCatalogEntry[],
   sourcePath?: string,
   fallbacks: readonly string[] = [],
+  deterministicFallback = "/",
 ): string {
   const catalogRoot = projectCatalog.find((entry) => entry.project === project)?.projectRoot ?? "";
-  return draftWorkingDirectory(files, project, sourcePath, [catalogRoot, ...fallbacks]);
+  return draftWorkingDirectory(files, project, sourcePath, [catalogRoot, ...fallbacks, deterministicFallback]) || "/";
 }
 
 export interface ProjectSummary {

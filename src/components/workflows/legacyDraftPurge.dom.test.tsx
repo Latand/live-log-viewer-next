@@ -127,6 +127,7 @@ const dashboardProps = (project: string) => ({
   openNonce: 0,
   archived: false,
   catalogKnown: true,
+  projectCwd: `/home/tester/Projects/${project}`,
   onArchive: () => {},
   onUnarchive: () => {},
 });
@@ -172,6 +173,17 @@ test("the dashboard's restoration effect purges the legacy draft and never mount
      legacy draft is purged, so a later remount can't resurrect the pane. */
   expect(JSON.parse(dom.sessionStorage.getItem(draftsKey(project))!)).toEqual([agentA]);
   for (const name of WF_FIELDS) expect(dom.sessionStorage.getItem(wfField("wf-legacy", name))).toBeNull();
+});
+
+test("a restored project draft renders with its deterministic project directory on the first pane render", async () => {
+  const project = "legacy-project";
+  dom.sessionStorage.setItem(draftsKey(project), JSON.stringify([agentA]));
+
+  roots.push(mount(<ProjectDashboard {...dashboardProps(project)} />));
+
+  expect(await waitFor(() => dom.document.querySelector(AGENT_PANE) !== null)).toBe(true);
+  const directory = dom.document.querySelector('input[aria-label="Agent working directory"]') as unknown as HTMLInputElement | null;
+  expect(directory?.value).toBe(`/home/tester/Projects/${project}`);
 });
 
 test("the phone surface DOES mount the real WorkflowDraftPane for a live wf draft (routing is real)", async () => {

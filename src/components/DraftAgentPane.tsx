@@ -97,6 +97,11 @@ export function setDraftCwd(id: string, cwd: string) {
   writeField(id, "cwd", cwd);
 }
 
+/** Fills a missing directory while preserving a restored draft's edited value. */
+export function seedDraftCwd(id: string, cwd: string) {
+  if (!readField(id, "cwd") && cwd.trim()) writeField(id, "cwd", cwd);
+}
+
 /** Reads back the durable spawn attempt persisted across reload. Its presence
     means a worker may exist, so the composer stays frozen and send disabled. */
 function readAttempt(id: string): SpawnAttempt | null {

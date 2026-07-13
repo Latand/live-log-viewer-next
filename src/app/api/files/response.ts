@@ -21,6 +21,7 @@ import { overlaySessionTitles } from "@/lib/session/titleProjection";
 import { tmuxEndpointHealth } from "@/lib/tmux";
 import { claudeProjectRootFor, codexSessionRootFor } from "@/lib/scanner/roots";
 import { projectRootForCwd } from "@/lib/scanner/describe";
+import { projectDirectoryFallbacks } from "@/lib/scanner/projectDirectories";
 import type { FilesResponse } from "@/lib/types";
 
 interface FilesRouteDependencies {
@@ -258,9 +259,18 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
     console.error("[files] pipelines store unreadable; serving without pipelines", error);
   }
   const projected = projectRateLimitReadModel(files, loadFlows(), registrySnapshot);
+  const projectCwds = projectDirectoryFallbacks([
+    ...projected.files.map((file) => file.project),
+    ...projectCatalog.map((entry) => entry.project),
+    ...projected.flows.map((flow) => flow.project),
+    ...pipelines.map((pipeline) => pipeline.project),
+    ...workflows.map((workflow) => workflow.project),
+    ...tasks.tasks.map((task) => task.project),
+  ]);
   const body = JSON.stringify({
     files: projected.files,
     projectCatalog,
+    ...(Object.keys(projectCwds).length ? { projectCwds } : {}),
     flows: projected.flows,
     pipelines,
     workflows,

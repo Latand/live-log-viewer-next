@@ -26,6 +26,7 @@ import { runtimeScope } from "@/lib/runtime/contracts";
 import { runtimeEventsEnabled } from "@/lib/runtime/flags";
 import { listFiles } from "@/lib/scanner";
 import { projectForCwd } from "@/lib/scanner/describe";
+import { projectDirectoryCandidates } from "@/lib/scanner/projectDirectories";
 import { buildImagePayload, collectImagePayloads, deleteInboxImages, spawnAgentWithPrompt, verifyTmuxHostEvidence } from "@/lib/tmux";
 import type { ApiError } from "@/lib/types";
 
@@ -34,7 +35,6 @@ export const dynamic = "force-dynamic";
 
 const SUGGEST_SCAN_LIMIT = 80;
 const SUGGEST_MAX = 10;
-const PROJECT_DIR_ROOTS = ["Projects", path.join(".agents", "tools")];
 
 interface SuggestResponse {
   dirs: string[];
@@ -46,33 +46,6 @@ function addDir(dirs: string[], cwd: string | null, project: string): void {
   if (!cwd || dirs.includes(cwd)) return;
   if (project && projectForCwd(cwd) !== project) return;
   dirs.push(cwd);
-}
-
-function projectDirCandidates(project: string): string[] {
-  if (!project) return [];
-  const candidates: string[] = [];
-  for (const rel of PROJECT_DIR_ROOTS) {
-    const root = path.join(os.homedir(), rel);
-    let entries: string[];
-    try {
-      entries = fs.readdirSync(root);
-    } catch {
-      continue;
-    }
-    for (const name of entries) {
-      const cwd = path.join(root, name);
-      let stat: fs.Stats;
-      try {
-        stat = fs.statSync(cwd);
-      } catch {
-        continue;
-      }
-      if (!stat.isDirectory()) continue;
-      addDir(candidates, cwd, project);
-      if (candidates.length >= SUGGEST_MAX) return candidates;
-    }
-  }
-  return candidates;
 }
 
 /** Recent real working directories to prefill the spawn dialog; the current
@@ -90,7 +63,7 @@ export async function GET(req: NextRequest): Promise<NextResponse<SuggestRespons
 
   const dirs: string[] = srcCwd ? [srcCwd] : [];
   if (!srcCwd) {
-    for (const cwd of projectDirCandidates(project)) addDir(dirs, cwd, project);
+    for (const cwd of projectDirectoryCandidates(project, SUGGEST_MAX)) addDir(dirs, cwd, project);
   }
   for (const entry of conversations) {
     if (dirs.length >= SUGGEST_MAX) break;

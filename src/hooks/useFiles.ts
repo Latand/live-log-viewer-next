@@ -27,6 +27,7 @@ export interface FilesData {
   /** Successful request URL that produced `files`; used for scope-aware effects. */
   requestScope: string | null;
   projectCatalog: ProjectCatalogEntry[];
+  projectCwds: Record<string, string>;
   flows: Flow[];
   pipelines: Pipeline[];
   workflows: Workflow[];
@@ -39,7 +40,7 @@ export interface FilesData {
 }
 
 const HEALTHY_SYSTEM = { tmux: { status: "healthy" as const } };
-const EMPTY: FilesData = { files: [], requestScope: null, projectCatalog: [], flows: [], pipelines: [], workflows: [], tasks: [], systemHealth: HEALTHY_SYSTEM, conversationAliases: {}, loaded: false };
+const EMPTY: FilesData = { files: [], requestScope: null, projectCatalog: [], projectCwds: {}, flows: [], pipelines: [], workflows: [], tasks: [], systemHealth: HEALTHY_SYSTEM, conversationAliases: {}, loaded: false };
 
 export function filesApiUrl(pinnedPath?: string | null): string {
   const params: string[] = [];
@@ -71,12 +72,13 @@ function patchRows<T>(previous: readonly T[], incoming: readonly T[], keyOf: (va
 
 function parsedFilesData(parsed: FilesResponse | FileEntry[], requestScope: string): FilesData {
   if (Array.isArray(parsed)) {
-    return { files: parsed, requestScope, projectCatalog: [], flows: [], pipelines: [], workflows: [], tasks: [], systemHealth: HEALTHY_SYSTEM, conversationAliases: {}, loaded: true };
+    return { files: parsed, requestScope, projectCatalog: [], projectCwds: {}, flows: [], pipelines: [], workflows: [], tasks: [], systemHealth: HEALTHY_SYSTEM, conversationAliases: {}, loaded: true };
   }
   return {
     files: parsed.files ?? [],
     requestScope,
     projectCatalog: parsed.projectCatalog ?? [],
+    projectCwds: parsed.projectCwds ?? {},
     flows: parsed.flows ?? [],
     pipelines: parsed.pipelines ?? [],
     workflows: parsed.workflows ?? [],
@@ -93,6 +95,7 @@ function patchFilesData(previous: FilesData, incoming: FilesData): FilesData {
     ...incoming,
     files: patchRows(previous.files, incoming.files, (file) => file.path),
     projectCatalog: patchRows(previous.projectCatalog, incoming.projectCatalog, (entry) => entry.project),
+    projectCwds: equalValue(previous.projectCwds, incoming.projectCwds) ? previous.projectCwds : incoming.projectCwds,
     flows: patchRows(previous.flows, incoming.flows, (flow) => flow.id),
     pipelines: patchRows(previous.pipelines, incoming.pipelines, (pipeline) => pipeline.id),
     workflows: patchRows(previous.workflows, incoming.workflows, (workflow) => workflow.id),

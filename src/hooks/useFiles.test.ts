@@ -1,5 +1,8 @@
 import { expect, test } from "bun:test";
 
+import { parseConversationHash, resolveConversationTarget } from "@/lib/accounts/identity";
+import { filesRequestPin, resolvedConversationPin, type ActiveConversationPin } from "@/components/conversationPin";
+
 import { createFilesClientCache, filesApiUrl, filesPollCadence, filesRequestHeaders } from "./useFiles";
 
 test("filesApiUrl always addresses the global snapshot", () => {
@@ -57,6 +60,34 @@ test("URL-specific 304 responses restore the matching cached representation", as
   expect(restored.files.map((entry) => entry.path)).toEqual(["/global"]);
   expect(restored.requestScope).toBe("/api/files");
   expect(cache.read()).toBe(restored);
+});
+
+test("an out-of-cap #f target keeps its pinned representation through background revalidation", async () => {
+  const targetPath = "/archive/out-of-cap.jsonl";
+  const intent = parseConversationHash(`#f=${encodeURIComponent(targetPath)}`);
+  const requests: string[] = [];
+  let version = 0;
+  const cache = createFilesClientCache(async (input) => {
+    requests.push(input);
+    version += 1;
+    const files = input === "/api/files"
+      ? [file("/global", "Global")]
+      : [file("/global", "Global"), file(targetPath, `Target ${version}`)];
+    return new Response(JSON.stringify({ files }), { headers: { ETag: `"${version}"` } });
+  });
+
+  let active: ActiveConversationPin | null = null;
+  const pinned = await cache.revalidate(filesRequestPin(intent, active));
+  const hit = resolveConversationTarget(pinned.files, intent, {});
+  expect(hit?.path).toBe(targetPath);
+  active = resolvedConversationPin(intent);
+
+  const refreshed = await cache.revalidate(filesRequestPin(null, active));
+  expect(refreshed.files.find((entry) => entry.path === targetPath)?.title).toBe("Target 2");
+  expect(requests).toEqual([
+    `/api/files?path=${encodeURIComponent(targetPath)}`,
+    `/api/files?path=${encodeURIComponent(targetPath)}`,
+  ]);
 });
 
 function file(path: string, title: string) {

@@ -4,7 +4,14 @@ import path from "node:path";
 
 import { afterAll, expect, test } from "bun:test";
 
-import { describe, parseWorktreeGitdir, persistWorktreeMap, projectForCwd, projectFromSlug } from "./describe";
+import {
+  describe,
+  parseWorktreeGitdir,
+  persistWorktreeMap,
+  projectForCwd,
+  projectFromSlug,
+  projectRootForCwd,
+} from "./describe";
 
 const SANDBOX = fs.mkdtempSync(path.join(os.tmpdir(), "llv-describe-test-"));
 const REAL_STATE = process.env.LLV_STATE_DIR;
@@ -69,6 +76,7 @@ test("a deleted worktree scratchpad cwd groups under the encoded parent repo", (
   const dead = path.join(os.tmpdir(), `claude-${process.getuid?.() ?? 1000}`, slug, "deleted-session", "scratchpad", "probes");
   expect(fs.existsSync(dead)).toBe(false);
   expect(projectForCwd(dead)).toBe(projectForCwd(repo));
+  expect(projectRootForCwd(dead)).toBe(repo);
 });
 
 test("a main-checkout scratchpad cwd groups under its encoded project", () => {

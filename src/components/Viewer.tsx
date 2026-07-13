@@ -23,6 +23,7 @@ import { ProjectRail } from "./ProjectRail";
 import { SupervisorHealthAlert } from "./SupervisorHealthAlert";
 import { DeploymentStatusPill } from "./runtime/DeploymentStatusPill";
 import { cleanTitle, fmtAge } from "./utils";
+import { filesRequestPin, resolvedConversationPin, type ActiveConversationPin } from "./conversationPin";
 
 const PROJECT_KEY = "llvProject";
 
@@ -78,7 +79,8 @@ export function Viewer() {
   useViewPresence();
   const [project, setProject] = useState<string>(() => initialProject());
   const [pendingHash, setPendingHash] = useState<ConversationHash | null>(null);
-  const { files: allFiles, requestScope, projectCatalog, flows: polledFlows, pipelines, pipelinesError, workflows, tasks, systemHealth, conversationAliases, loaded } = useFiles(pendingHash?.filePath ?? pendingHash?.conversationId ?? null);
+  const [activePin, setActivePin] = useState<ActiveConversationPin | null>(null);
+  const { files: allFiles, requestScope, projectCatalog, projectCwds, flows: polledFlows, pipelines, pipelinesError, workflows, tasks, systemHealth, conversationAliases, loaded } = useFiles(filesRequestPin(pendingHash, activePin));
   /* A committed account migration keeps the archived predecessor entry in the
      payload (for chain history) but it must never render as a second standalone
      card — every surface below sees only current generations. A no-op (same
@@ -176,6 +178,7 @@ export function Viewer() {
        `#f=` link to a demoted archived predecessor resolves once that poll
        lands instead of being cleared after the first cap-limited payload. */
     if (hit) {
+      setActivePin(resolvedConversationPin(pendingHash));
       openFile(hit);
       setPendingHash(null);
     }
@@ -508,6 +511,7 @@ export function Viewer() {
             workflows={workflows}
             tasks={tasks}
             projectCatalog={projectCatalog}
+            projectCwd={projectCwds[project]}
             project={project}
             loaded={loaded}
             openNonce={openNonce}

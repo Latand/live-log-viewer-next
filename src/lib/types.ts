@@ -173,6 +173,8 @@ export interface ProjectCatalogEntry {
 export interface FilesResponse {
   files: FileEntry[];
   projectCatalog?: ProjectCatalogEntry[];
+  /** Existing local repository fallback for projects whose conversations lack cwd metadata. */
+  projectCwds?: Record<string, string>;
   flows: Flow[];
   pipelines: Pipeline[];
   /** Present when the pipelines store failed closed; the rest of the payload stays valid. */
