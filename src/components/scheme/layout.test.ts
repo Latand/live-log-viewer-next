@@ -88,6 +88,62 @@ describe("buildSchemeLayout byPath", () => {
     expect(layout.byPath.get(layout.decks[0]!.key)).toBe(layout.decks[0]!);
   });
 
+  test("keeps failed and current reviewer bindings in the same round deck", () => {
+    const root = entry({ path: "/implementer", activity: "live", conversationId: "conversation-implementer" });
+    const reviewer = (pathname: string, conversationId: string, slot: string) => entry({
+      path: pathname,
+      conversationId,
+      durableLineage: {
+        kind: "review",
+        role: "reviewer",
+        parentConversationId: root.conversationId!,
+        reviewsConversationId: root.conversationId!,
+        memberships: [{
+          kind: "flow",
+          containerId: "f-retry",
+          role: "reviewer",
+          slot,
+          stageId: null,
+          stageOrder: null,
+          round: 1,
+          parentConversationId: root.conversationId!,
+        }],
+      },
+    });
+    const failed = reviewer("/reviewer-failed", "conversation-reviewer-a", "reviewer:1:binding-a");
+    const current = reviewer("/reviewer-current", "conversation-reviewer-b", "reviewer:1:binding-b");
+    const group: BranchGroup = {
+      key: root.path,
+      columns: [{ file: root, tasks: [] }],
+      returnable: [],
+      finished: [],
+      smt: root.mtime,
+      orphanTask: false,
+    };
+    const reviewFlow = flow({
+      id: "f-retry",
+      implementerPath: root.path,
+      rounds: [{
+        n: 1,
+        reviewerPath: current.path,
+        reviewerConversationId: current.conversationId,
+        findingsPath: null,
+        triggeredBy: "marker",
+        readyNote: null,
+        verdict: null,
+        findingsCount: null,
+        startedAt: "2026-07-05T00:00:00Z",
+        reviewedAt: null,
+        relayedAt: null,
+        error: null,
+      }],
+    });
+
+    const layout = buildSchemeLayout([group], [], [root, current, failed], [reviewFlow], []);
+
+    expect(layout.decks[0]!.rounds.map((item) => item.file?.path)).toEqual([failed.path, current.path]);
+  });
+
   test("derives a flow link whose endpoints resolve to placed board rects", () => {
     const root = entry({ path: "/root", activity: "live" });
     const group: BranchGroup = {

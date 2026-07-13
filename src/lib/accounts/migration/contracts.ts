@@ -223,6 +223,12 @@ export interface SuccessorProviderPort {
     recordContinuityPath(pathname: string): void;
   }): Promise<ProviderReceipt>;
   verify(receipt: ProviderReceipt, input: { engine: MigrationEngine; targetAccountId: string; launchProfile: LaunchProfile }): Promise<void>;
+  publishHost?(receipt: ProviderReceipt, input: {
+    engine: MigrationEngine;
+    conversationId: ViewerConversationId;
+    targetAccountId: string;
+    launchProfile: LaunchProfile;
+  }): Promise<void>;
   cleanup?(receipt: ProviderReceipt): Promise<void>;
 }
 

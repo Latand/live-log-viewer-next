@@ -11,7 +11,7 @@ export function ProcessStatusChip({ file }: { file: FileEntry }) {
   const { t } = useLocale();
   if (file.proc === "running") {
     return (
-      <span className="inline-flex items-center gap-1 whitespace-nowrap rounded-full bg-[#e5f6ea] px-2 py-0.5 text-[11px] font-bold tabular-nums text-ok">
+      <span data-capture-volatile="pid" className="inline-flex items-center gap-1 whitespace-nowrap rounded-full bg-[#e5f6ea] px-2 py-0.5 text-[11px] font-bold tabular-nums text-ok">
         <Play className="h-3 w-3" aria-hidden /> PID {file.pid}
       </span>
     );

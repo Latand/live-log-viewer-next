@@ -41,6 +41,112 @@ test("pure project-catalog discovery leaves the state directory unchanged", asyn
   }
 });
 
+test("project catalog carries the canonical root for projects outside the capped rows", async () => {
+  const base = await mkdtemp(path.join(os.tmpdir(), "llv-discover-catalog-root-"));
+  const previousStateDir = process.env.LLV_STATE_DIR;
+  process.env.LLV_STATE_DIR = path.join(base, "state");
+  try {
+    const roots: Record<RootKey, string> = {
+      "codex-sessions": path.join(base, "codex-sessions"),
+      "claude-projects": path.join(base, "claude-projects"),
+      "claude-tasks": path.join(base, "claude-tasks"),
+    };
+    await Promise.all(Object.values(roots).map((root) => mkdir(root, { recursive: true })));
+    const repo = path.join(base, "catalog-project");
+    const cwd = path.join(repo, ".worktrees", "issue-173");
+    const targetPath = path.join(roots["codex-sessions"], "catalog-project.jsonl");
+    await writeFixture(
+      targetPath,
+      JSON.stringify({ type: "session_meta", payload: { cwd } }) + "\n",
+      1_700_000_000,
+    );
+    await Promise.all(Array.from({ length: DEFAULT_SCHEME_CARDS_PER_PROJECT }, (_, index) => writeFixture(
+      path.join(roots["codex-sessions"], `newer-${index}.jsonl`),
+      JSON.stringify({ type: "session_meta", payload: { cwd: repo } }) + "\n",
+      1_700_000_001 + index,
+    )));
+
+    const scan = await discoverFilesWithProjectCatalog(roots, undefined, { persist: false });
+
+    expect(scan.files.some((file) => file.path === targetPath)).toBe(false);
+    expect(scan.projectCatalog).toEqual([{
+      project: projectForCwd(repo)!,
+      projectRoot: repo,
+      smt: 1_700_000_000 + DEFAULT_SCHEME_CARDS_PER_PROJECT,
+      conversations: DEFAULT_SCHEME_CARDS_PER_PROJECT + 1,
+    }]);
+  } finally {
+    if (previousStateDir === undefined) delete process.env.LLV_STATE_DIR;
+    else process.env.LLV_STATE_DIR = previousStateDir;
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test("archived migration predecessors cannot outvote the current project root", async () => {
+  const base = await mkdtemp(path.join(os.tmpdir(), "llv-discover-current-root-"));
+  const previousStateDir = process.env.LLV_STATE_DIR;
+  process.env.LLV_STATE_DIR = path.join(base, "state");
+  try {
+    const roots: Record<RootKey, string> = {
+      "codex-sessions": path.join(base, "codex-sessions"),
+      "claude-projects": path.join(base, "claude-projects"),
+      "claude-tasks": path.join(base, "claude-tasks"),
+    };
+    await Promise.all(Object.values(roots).map((root) => mkdir(root, { recursive: true })));
+    const archivedPaths = [
+      path.join(roots["codex-sessions"], "archived-one.jsonl"),
+      path.join(roots["codex-sessions"], "archived-two.jsonl"),
+    ];
+    const currentPath = path.join(roots["codex-sessions"], "current.jsonl");
+    for (const [index, pathname] of [...archivedPaths, currentPath].entries()) {
+      await writeFixture(pathname, JSON.stringify({ type: "session_meta", payload: { cwd: "/placeholder" } }) + "\n", 1_700_000_000 + index);
+    }
+    const project = "migration-project";
+    const oldRoot = path.join(base, "repo-old");
+    const currentRoot = path.join(base, "repo-current");
+    const stateKey = projectResolutionStateKey();
+    const cached = async (pathname: string, projectRoot: string) => {
+      const fileStat = await stat(pathname);
+      return {
+        rootName: "codex-sessions",
+        size: fileStat.size,
+        mtimeMs: fileStat.mtimeMs,
+        stateKey,
+        project,
+        projectRoot,
+        kind: "session",
+        session: true,
+        engine: "codex",
+        fmt: "codex",
+      };
+    };
+    await mkdir(process.env.LLV_STATE_DIR, { recursive: true });
+    await writeFile(path.join(process.env.LLV_STATE_DIR, "project-catalog.json"), JSON.stringify({
+      version: 2,
+      resolutionVersion: PROJECT_RESOLUTION_VERSION,
+      files: {
+        [archivedPaths[0]!]: await cached(archivedPaths[0]!, oldRoot),
+        [archivedPaths[1]!]: await cached(archivedPaths[1]!, oldRoot),
+        [currentPath]: await cached(currentPath, currentRoot),
+      },
+    }));
+
+    const scan = await discoverFilesWithProjectCatalog(roots, undefined, {
+      persist: false,
+      demote: new Set(archivedPaths),
+    });
+
+    expect(scan.projectCatalog.find((entry) => entry.project === project)).toMatchObject({
+      conversations: 1,
+      projectRoot: currentRoot,
+    });
+  } finally {
+    if (previousStateDir === undefined) delete process.env.LLV_STATE_DIR;
+    else process.env.LLV_STATE_DIR = previousStateDir;
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
 test("persisted scheme metadata excludes unbounded first-prompt text", async () => {
   const base = await mkdtemp(path.join(os.tmpdir(), "llv-discover-bounded-catalog-"));
   const previousStateDir = process.env.LLV_STATE_DIR;
@@ -347,7 +453,12 @@ test("discoverFiles counts a dual-root Codex rollout once and prefers the accoun
 
     expect(scan.files).toHaveLength(1);
     expect(scan.files[0]).toMatchObject({ path: accountFile, project: "account-project" });
-    expect(scan.projectCatalog).toContainEqual({ project: "account-project", conversations: 1, smt: 10 });
+    expect(scan.projectCatalog).toContainEqual({
+      project: "account-project",
+      projectRoot: path.join(os.homedir(), "Projects", "account-project"),
+      conversations: 1,
+      smt: 10,
+    });
   } finally {
     await rm(base, { recursive: true, force: true });
   }

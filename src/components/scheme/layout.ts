@@ -4,7 +4,7 @@ import type { FileEntry } from "@/lib/types";
 
 import type { DeckRound } from "@/components/flows/RoundDeck";
 import { draftSrc } from "@/components/DraftAgentPane";
-import { claimedReviewerPaths, flowByImplementer } from "@/components/flows/flowModel";
+import { claimedReviewerPaths, flowByImplementer, reviewerFilesForRound } from "@/components/flows/flowModel";
 import { pipelinePlaceholderStages } from "@/components/pipelines/pipelineModel";
 
 import {
@@ -240,7 +240,7 @@ export function buildSchemeLayout(
   const groupKeyOfPath = new Map<string, string>();
   const implOfFlow = (flowId: string) => flows.find((flow) => flow.id === flowId)?.implementerPath ?? null;
   for (const pipeline of pipelines) {
-    if (pipeline.state === "closed") continue;
+    if (pipeline.state === "closed" && !pipeline.restored) continue;
     const key = "pipe:" + pipeline.id;
     for (const run of pipeline.runs) {
       for (const attempt of run.attempts) {
@@ -310,11 +310,12 @@ export function buildSchemeLayout(
      through the full file list, so headless runs join as soon as the scanner
      sees them. */
   const placeDeck = (flow: Flow, x: number, y: number, baseH: number): DeckNode => {
-    const rounds: DeckRound[] = flow.rounds.map((round) => ({
-      round,
-      file: round.reviewerPath ? (byAll.get(round.reviewerPath) ?? null) : null,
-    }));
-    const deck: DeckNode = { key: deckKey(flow.id), flow, rounds, x, y, w: NODE_W, h: deckHeight(flow.rounds.length, baseH) };
+    const rounds = flow.rounds.flatMap<DeckRound>((round) => {
+      const reviewers = reviewerFilesForRound(flow, round, files);
+      if (!reviewers.length) return [{ key: `round:${round.n}:${round.reviewerBindingId ?? "pending"}`, round, file: null }];
+      return reviewers.map((file) => ({ key: `round:${round.n}:${file.conversationId ?? file.path}`, round, file }));
+    });
+    const deck: DeckNode = { key: deckKey(flow.id), flow, rounds, x, y, w: NODE_W, h: deckHeight(rounds.length, baseH) };
     decks.push(deck);
     return deck;
   };
@@ -684,7 +685,7 @@ export function buildSchemeLayout(
      scan): a memberless plan card, as before (issue #136). */
   let dockY = PAD;
   for (const pipeline of surfacePipelines) {
-    if (pipeline.state === "closed" || framedPipelineIds.has(pipeline.id)) continue;
+    if ((pipeline.state === "closed" && !pipeline.restored) || framedPipelineIds.has(pipeline.id)) continue;
     framedPipelineIds.add(pipeline.id);
     const rect = { x: cursor, y: dockY, w: NODE_W + GROUP_PAD * 2, h: 150 };
     groupHalos.push({

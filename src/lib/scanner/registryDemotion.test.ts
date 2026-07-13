@@ -1,4 +1,5 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -54,6 +55,47 @@ test("an archived path pin brings its current generation along", () => {
      the requested predecessor and the successor the link redirects to. */
   const pins = pinnedPathsFor("/repo/old.jsonl");
   expect(pins.has("/repo/old.jsonl")).toBe(true);
+});
+
+test("a member pin restores the complete durable lineage family", () => {
+  const store = new AgentRegistry(path.join(os.tmpdir(), `llv-pin-lineage-${process.pid}`, "agent-registry.json"));
+  const implementer = store.ensureConversation("codex", "/repo/implementer.jsonl", "default");
+  const reviewer = store.ensureConversation("codex", "/repo/reviewer.jsonl", "default");
+  const child = store.ensureConversation("codex", "/repo/reviewer-child.jsonl", "default");
+  const snapshot = store.snapshot();
+  snapshot.lineageEdges[reviewer.id] = {
+    childConversationId: reviewer.id,
+    parentConversationId: implementer.id,
+    childSessionKey: null,
+    parentSessionKey: null,
+    childArtifactPath: "/repo/reviewer.jsonl",
+    parentArtifactPath: "/repo/implementer.jsonl",
+    kind: "review",
+    role: "reviewer",
+    reviewsConversationId: implementer.id,
+    source: "viewer-spawn",
+    evidence: { launchId: null, clientAttemptId: null },
+    createdAt: "now",
+  };
+  snapshot.lineageEdges[child.id] = {
+    ...snapshot.lineageEdges[reviewer.id]!,
+    childConversationId: child.id,
+    parentConversationId: reviewer.id,
+    childArtifactPath: "/repo/reviewer-child.jsonl",
+    parentArtifactPath: "/repo/reviewer.jsonl",
+    kind: "spawn",
+    role: null,
+    reviewsConversationId: null,
+  };
+  fs.mkdirSync(path.dirname(store.filename), { recursive: true });
+  fs.writeFileSync(store.filename, JSON.stringify(snapshot));
+  setAgentRegistryForTests(store);
+
+  expect(pinnedPathsFor(reviewer.id)).toEqual(new Set([
+    "/repo/reviewer.jsonl",
+    "/repo/implementer.jsonl",
+    "/repo/reviewer-child.jsonl",
+  ]));
 });
 
 test("an unreadable registry keeps a path pin and drops an id pin", async () => {

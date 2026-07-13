@@ -24,9 +24,12 @@ const FILES_REVISION_RETRY_MS = 1_000;
 
 export interface FilesData {
   files: FileEntry[];
+  /** Membership added by the current deep-link request above the global cap. */
+  pinOverlayPaths: string[];
   /** Successful request URL that produced `files`; used for scope-aware effects. */
   requestScope: string | null;
   projectCatalog: ProjectCatalogEntry[];
+  projectCwds: Record<string, string>;
   flows: Flow[];
   pipelines: Pipeline[];
   workflows: Workflow[];
@@ -39,7 +42,7 @@ export interface FilesData {
 }
 
 const HEALTHY_SYSTEM = { tmux: { status: "healthy" as const } };
-const EMPTY: FilesData = { files: [], requestScope: null, projectCatalog: [], flows: [], pipelines: [], workflows: [], tasks: [], systemHealth: HEALTHY_SYSTEM, conversationAliases: {}, loaded: false };
+const EMPTY: FilesData = { files: [], pinOverlayPaths: [], requestScope: null, projectCatalog: [], projectCwds: {}, flows: [], pipelines: [], workflows: [], tasks: [], systemHealth: HEALTHY_SYSTEM, conversationAliases: {}, loaded: false };
 
 export function filesApiUrl(_project?: string | null, pinnedPath?: string | null): string {
   const params: string[] = [];
@@ -48,6 +51,129 @@ export function filesApiUrl(_project?: string | null, pinnedPath?: string | null
      when the path is a demoted archived predecessor. */
   if (pinnedPath) params.push("path=" + encodeURIComponent(pinnedPath));
   return params.length ? "/api/files?" + params.join("&") : "/api/files";
+}
+
+type FilesFetcher = (input: string, init?: RequestInit) => Promise<Response>;
+
+export interface FilesClientCache {
+  read(): FilesData;
+  revalidate(pinnedPath?: string | null, revision?: number): Promise<FilesData>;
+}
+
+function equalValue(left: unknown, right: unknown): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function patchRows<T>(previous: readonly T[], incoming: readonly T[], keyOf: (value: T) => string): T[] {
+  const previousByKey = new Map(previous.map((value) => [keyOf(value), value] as const));
+  return incoming.map((value) => {
+    const cached = previousByKey.get(keyOf(value));
+    return cached !== undefined && equalValue(cached, value) ? cached : value;
+  });
+}
+
+function parsedFilesData(parsed: FilesResponse | FileEntry[], requestScope: string): FilesData {
+  if (Array.isArray(parsed)) {
+    return { files: parsed, pinOverlayPaths: [], requestScope, projectCatalog: [], projectCwds: {}, flows: [], pipelines: [], workflows: [], tasks: [], systemHealth: HEALTHY_SYSTEM, conversationAliases: {}, loaded: true };
+  }
+  return {
+    files: parsed.files ?? [],
+    pinOverlayPaths: parsed.pinOverlayPaths ?? [],
+    requestScope,
+    projectCatalog: parsed.projectCatalog ?? [],
+    projectCwds: parsed.projectCwds ?? {},
+    flows: parsed.flows ?? [],
+    pipelines: parsed.pipelines ?? [],
+    workflows: parsed.workflows ?? [],
+    tasks: parsed.tasks ?? [],
+    pipelinesError: parsed.pipelinesError,
+    systemHealth: parsed.systemHealth ?? HEALTHY_SYSTEM,
+    conversationAliases: parsed.conversationAliases ?? {},
+    loaded: true,
+  };
+}
+
+function patchFilesData(previous: FilesData, incoming: FilesData): FilesData {
+  return {
+    ...incoming,
+    files: patchRows(previous.files, incoming.files, (file) => file.path),
+    projectCatalog: patchRows(previous.projectCatalog, incoming.projectCatalog, (entry) => entry.project),
+    projectCwds: equalValue(previous.projectCwds, incoming.projectCwds) ? previous.projectCwds : incoming.projectCwds,
+    flows: patchRows(previous.flows, incoming.flows, (flow) => flow.id),
+    pipelines: patchRows(previous.pipelines, incoming.pipelines, (pipeline) => pipeline.id),
+    workflows: patchRows(previous.workflows, incoming.workflows, (workflow) => workflow.id),
+    tasks: patchRows(previous.tasks, incoming.tasks, (task) => task.id),
+    systemHealth: equalValue(previous.systemHealth, incoming.systemHealth) ? previous.systemHealth : incoming.systemHealth,
+    conversationAliases: equalValue(previous.conversationAliases, incoming.conversationAliases)
+      ? previous.conversationAliases
+      : incoming.conversationAliases,
+  };
+}
+
+/** Restore the exact URL-specific representation certified by a strong ETag.
+    Structural patching keeps unchanged row identities without carrying rows
+    that only appeared in another request scope. */
+function restoreNotModified(current: FilesData, representation: FilesData, requestScope: string): FilesData {
+  return patchFilesData(current, { ...representation, requestScope });
+}
+
+/** Session-wide stale-while-revalidate cache over the global scan snapshot. */
+export function createFilesClientCache(fetcher: FilesFetcher): FilesClientCache {
+  let snapshot = EMPTY;
+  const representations = new Map<string, { data: FilesData; etag?: string }>();
+  let requestedGeneration = 0;
+  let appliedGeneration = 0;
+  let requestQueue: Promise<void> = Promise.resolve();
+
+  const rememberRepresentation = (url: string, data: FilesData, etag?: string) => {
+    representations.delete(url);
+    representations.set(url, { data, etag });
+    while (representations.size > 8) {
+      const oldest = representations.keys().next().value;
+      if (oldest === undefined) break;
+      representations.delete(oldest);
+    }
+  };
+
+  const performRevalidate = async (pinnedPath?: string | null, revision?: number): Promise<FilesData> => {
+    const generation = ++requestedGeneration;
+    const url = filesApiUrl(undefined, pinnedPath);
+    const representation = representations.get(url);
+    const headers = filesRequestHeaders(representation?.etag ?? "", revision);
+    const response = await fetcher(url, headers ? { headers } : undefined);
+    if (response.status === 304) {
+      if (!representation) throw new Error("files request returned 304 without a cached representation");
+      if (generation < appliedGeneration) return snapshot;
+      snapshot = restoreNotModified(snapshot, representation.data, url);
+      appliedGeneration = generation;
+      rememberRepresentation(url, snapshot, representation.etag);
+      return snapshot;
+    }
+    if (!response.ok) throw new Error(`files request failed: ${response.status}`);
+    const parsed = JSON.parse(await response.text()) as FilesResponse | FileEntry[];
+    if (generation < appliedGeneration) return snapshot;
+    const incoming = parsedFilesData(parsed, url);
+    snapshot = patchFilesData(snapshot, incoming);
+    appliedGeneration = generation;
+    const etag = response.headers.get("ETag");
+    rememberRepresentation(url, snapshot, etag ?? undefined);
+    return snapshot;
+  };
+
+  const revalidate = (pinnedPath?: string | null, revision?: number): Promise<FilesData> => {
+    const result = requestQueue.then(() => performRevalidate(pinnedPath, revision));
+    requestQueue = result.then(() => undefined, () => undefined);
+    return result;
+  };
+
+  return { read: () => snapshot, revalidate };
+}
+
+const defaultFilesFetcher: FilesFetcher = (input, init) => fetch(input, init);
+let filesClientCache = createFilesClientCache(defaultFilesFetcher);
+
+export function resetFilesClientCacheForTests(): void {
+  filesClientCache = createFilesClientCache(defaultFilesFetcher);
 }
 
 export function filesRequestHeaders(etag: string, revision?: number): Record<string, string> | undefined {
@@ -67,53 +193,19 @@ export function filesPollCadence(connection: "live" | "reconnecting" | "degraded
 }
 
 /** Polls /api/files. Keeps the last good list on transient fetch errors. */
-export function useFiles(project?: string | null, pinnedPath?: string | null): FilesData {
-  const [data, setData] = useState<FilesData>(EMPTY);
+export function useFiles(_project?: string | null, pinnedPath?: string | null): FilesData {
+  const [data, setData] = useState<FilesData>(() => filesClientCache.read());
   useEffect(() => {
     let alive = true;
-    let lastBody = "";
-    let lastEtag = "";
-    const url = filesApiUrl(project, pinnedPath);
     const performLoad = async (revision?: number): Promise<boolean> => {
       if (!alive) return true;
       try {
-        const headers = filesRequestHeaders(lastEtag, revision);
-        const res = await fetch(url, headers ? { headers } : undefined);
-        /* 304: the server confirms the payload is byte-identical to the last
-           one, so there is nothing to read or re-parse. */
-        if (res.status === 304) return true;
-        if (!res.ok) throw new Error(`files request failed: ${res.status}`);
-        const etag = res.headers.get("ETag");
-        const body = await res.text();
-        if (!alive || body === lastBody) return true;
-        const parsed = JSON.parse(body) as FilesResponse | FileEntry[];
-        /* The flows rollout changes the payload from a bare array to
-           {files, flows}; accept both so client and server can deploy in
-           either order. */
-        if (Array.isArray(parsed)) setData({ files: parsed, requestScope: url, projectCatalog: [], flows: [], pipelines: [], workflows: [], tasks: [], systemHealth: HEALTHY_SYSTEM, conversationAliases: {}, loaded: true });
-        else {
-          setData({
-            files: parsed.files ?? [],
-            requestScope: url,
-            projectCatalog: parsed.projectCatalog ?? [],
-            flows: parsed.flows ?? [],
-            pipelines: parsed.pipelines ?? [],
-            workflows: parsed.workflows ?? [],
-            tasks: parsed.tasks ?? [],
-            pipelinesError: parsed.pipelinesError,
-            systemHealth: parsed.systemHealth ?? HEALTHY_SYSTEM,
-            conversationAliases: parsed.conversationAliases ?? {},
-            loaded: true,
-          });
-        }
-        lastBody = body;
-        if (etag) lastEtag = etag;
+        const next = await filesClientCache.revalidate(pinnedPath, revision);
+        if (alive) setData(next);
         return true;
       } catch {
         /* keep previous list */
         return false;
-      } finally {
-        if (alive) setData((d) => (d.loaded ? d : { ...d, loaded: true }));
       }
     };
     let loadQueue: Promise<void> = Promise.resolve();
@@ -122,7 +214,16 @@ export function useFiles(project?: string | null, pinnedPath?: string | null): F
       loadQueue = result.then(() => undefined);
       return result;
     };
-    void load();
+    let initialRetryTimer: ReturnType<typeof setTimeout> | null = null;
+    const hydrateInitial = async () => {
+      const hydrated = await load();
+      if (!alive || hydrated) return;
+      initialRetryTimer = setTimeout(() => {
+        initialRetryTimer = null;
+        void hydrateInitial();
+      }, FILES_REVISION_RETRY_MS);
+    };
+    void hydrateInitial();
 
     /*
      * Recurring poll cadence. With the runtime bus off (the default,
@@ -190,6 +291,7 @@ export function useFiles(project?: string | null, pinnedPath?: string | null): F
     return () => {
       alive = false;
       if (timer) clearInterval(timer);
+      if (initialRetryTimer) clearTimeout(initialRetryTimer);
       if (revisionTimer) clearTimeout(revisionTimer);
       unsubBus();
       unsubFiles();
@@ -199,6 +301,6 @@ export function useFiles(project?: string | null, pinnedPath?: string | null): F
       window.removeEventListener(TASKS_CHANGED_EVENT, onChanged);
       window.removeEventListener(SESSION_TITLES_CHANGED_EVENT, onChanged);
     };
-  }, [project, pinnedPath]);
+  }, [pinnedPath]);
   return data;
 }

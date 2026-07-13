@@ -50,9 +50,10 @@ function harness() {
       return null;
     },
     spawnReceipt: () => null,
-    spawnAgent: async ({ parentPath, clientAttemptId }, onReserved) => {
+    spawnAgent: async ({ parentPath, clientAttemptId, membership }, onReserved) => {
       spawn += 1;
       calls.push(`spawn:${clientAttemptId}:parent=${parentPath ?? "root"}`);
+      calls.push(`membership:${membership.kind}:${membership.containerId}:${membership.slot}:${membership.role}:${membership.stageOrder}`);
       onReserved({ launchId: `launch-${spawn}`, conversationId: `conversation_stage_${spawn}` });
       return { launchId: `launch-${spawn}`, conversationId: `conversation_stage_${spawn}`, sessionId: `session-${spawn}`, transcript: `/codex/stage-${spawn}.jsonl`, paneId: `%${spawn}` };
     },
@@ -225,6 +226,46 @@ test("linear run stages persist sessions, structured outputs, commits, and linea
   current = loadPipelines()[0]!;
   expect(current.state).toBe("completed");
   expect(current.lastPassedCommit).toStartWith("sha-");
+});
+
+test("pipeline stage membership is supplied before every stage spawn", async () => {
+  const h = harness();
+  const pipeline = await create(h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+
+  expect(h.calls).toContain(`membership:pipeline:${pipeline.id}:plan:1:architect:0`);
+});
+
+test("controller ticks follow a stage conversation to its resumed transcript", async () => {
+  const h = harness();
+  await create(h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  h.ports.pathForConversation = (id) => id === "conversation_stage_1" ? "/codex/stage-1-resumed.jsonl" : null;
+  const resumed = entry("/codex/stage-1-resumed.jsonl");
+  resumed.activity = "live";
+
+  await tickPipelines([resumed], h.ports);
+
+  expect(loadPipelines()[0]!.runs[0]!.attempts[0]!.agentPath).toBe(resumed.path);
+});
+
+test("controller ticks refresh durable paths for completed pipeline attempts", async () => {
+  const h = harness();
+  await create(h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  const pipeline = loadPipelines()[0]!;
+  pipeline.state = "completed";
+  pipeline.cursor = null;
+  pipeline.runs[0]!.attempts[0]!.agentPath = "/codex/stage-1-archived.jsonl";
+  savePipelines([pipeline]);
+  h.ports.pathForConversation = (id) => id === "conversation_stage_1" ? "/codex/stage-1-resumed.jsonl" : null;
+
+  await tickPipelines([], h.ports);
+
+  expect(loadPipelines()[0]!.runs[0]!.attempts[0]!.agentPath).toBe("/codex/stage-1-resumed.jsonl");
 });
 
 test("spawn reservations persist before actuation and concurrent creation waits for the controller mutation", async () => {
@@ -798,7 +839,7 @@ test("draft edits that would orphan a review-loop are rejected (#136)", async ()
   expect(loadPipelines()[0]!.stages.map((stage) => stage.id)).toEqual(["build", "review"]);
 });
 
-test("discarding a draft deletes its persisted record", async () => {
+test("discarding a draft hides its persisted record", async () => {
   const { ports } = harness();
   savePipelines([]);
   const created = await createPipelineFromRequest({
@@ -810,7 +851,9 @@ test("discarding a draft deletes its persisted record", async () => {
 
   const discarded = await patchPipeline(created.pipeline!.id, { action: "delete" }, ports);
   expect(discarded.pipeline?.id).toBe(created.pipeline!.id);
-  expect(loadPipelines()).toEqual([]);
+  expect(loadPipelines()).toHaveLength(1);
+  expect(loadPipelines()[0]).toMatchObject({ id: created.pipeline!.id, state: "draft" });
+  expect(loadPipelines()[0]!.hiddenAt).toBeTruthy();
 });
 
 test("draft-only mutations cannot rewrite or delete an active pipeline", async () => {

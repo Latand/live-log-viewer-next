@@ -18,6 +18,7 @@
   "scripts": {
     "dev": "next dev --webpack --hostname 127.0.0.1",
     "build": "next build --webpack",
+    "demo:capture": "bun scripts/demo-capture.ts",
     "start": "next start",
     "lint": "eslint",
     "prepack": "node scripts/prepack.mjs",

@@ -1,8 +1,9 @@
 import { useMemo, useSyncExternalStore } from "react";
 
 import { getLocale, type Locale, type MessageKey, type TFunction, translate } from "@/lib/i18n";
-import type { Flow, FlowAction, FlowRoleKey, FlowState, ReviewVerdict, RoleConfig } from "@/lib/flows/types";
+import type { Flow, FlowAction, FlowRoleKey, FlowState, ReviewVerdict, RoleConfig, Round } from "@/lib/flows/types";
 import type { FileEntry } from "@/lib/types";
+import { currentConversationFile, withoutArchivedPredecessors } from "@/lib/accounts/identity";
 
 import { isConversation } from "@/components/projectModel";
 import { formatRateLimitTime } from "@/components/rateLimit";
@@ -60,7 +61,7 @@ export function useEffectiveFlows(flows: Flow[]): Flow[] {
 
 /** Flows that still occupy their implementer's node on the scheme. */
 export function isActiveFlow(flow: Flow): boolean {
-  return flow.state !== "closed";
+  return flow.state !== "closed" || flow.restored === true;
 }
 
 export function flowByImplementer(flows: Flow[]): Map<string, Flow> {
@@ -89,6 +90,36 @@ export function claimedReviewerPaths(flows: Flow[]): Set<string> {
   return set;
 }
 
+/** Resolve the current transcript generation for a durable review round. */
+export function reviewerFileForRound(flow: Flow, round: Round, files: readonly FileEntry[]): FileEntry | null {
+  if (round.reviewerConversationId) {
+    const byConversation = currentConversationFile(files, round.reviewerConversationId);
+    if (byConversation) return byConversation;
+  }
+  const byMembership = withoutArchivedPredecessors([...files]).find((file) => file.durableLineage?.memberships.some((membership) =>
+    membership.kind === "flow"
+    && membership.containerId === flow.id
+    && membership.role === "reviewer"
+    && membership.round === round.n
+  ));
+  if (byMembership) return byMembership;
+  const byPath = round.reviewerPath ? (files.find((file) => file.path === round.reviewerPath) ?? null) : null;
+  return byPath?.conversationId ? (currentConversationFile(files, byPath.conversationId) ?? byPath) : byPath;
+}
+
+/** Resolve every durable reviewer binding for one logical round, current last. */
+export function reviewerFilesForRound(flow: Flow, round: Round, files: readonly FileEntry[]): FileEntry[] {
+  const visibleFiles = withoutArchivedPredecessors([...files]);
+  const current = reviewerFileForRound(flow, round, files);
+  const history = visibleFiles.filter((file) => file.durableLineage?.memberships.some((membership) =>
+    membership.kind === "flow"
+    && membership.containerId === flow.id
+    && membership.role === "reviewer"
+    && membership.round === round.n
+  )).filter((file) => file !== current);
+  return current ? [...history, current] : history;
+}
+
 /**
  * Descendants spawned by folded reviewer sessions should remain expanded on
  * the scheme. The reviewer card itself lives in the round deck; its children
@@ -96,6 +127,11 @@ export function claimedReviewerPaths(flows: Flow[]): Set<string> {
  */
 export function claimedReviewerDescendantPaths(files: FileEntry[], flows: Flow[]): Set<string> {
   const claimed = claimedReviewerPaths(flows);
+  for (const file of files) {
+    if (file.durableLineage?.role === "reviewer" || file.durableLineage?.memberships.some((membership) => membership.kind === "flow" && membership.role === "reviewer")) {
+      claimed.add(file.path);
+    }
+  }
   const children = new Map<string, FileEntry[]>();
   for (const file of files) {
     if (!file.parent) continue;
@@ -137,6 +173,18 @@ export function foldClaimedReviewers(files: FileEntry[], flows: Flow[]): FileEnt
     for (const round of flow.rounds) {
       if (round.reviewerPath) anchorByReviewer.set(round.reviewerPath, flow.implementerPath);
     }
+  }
+  const pathByConversationId = new Map(withoutArchivedPredecessors(files).flatMap((file) =>
+    file.conversationId ? [[file.conversationId, file.path] as const] : []));
+  for (const file of files) {
+    const membership = file.durableLineage?.memberships.find((candidate) => candidate.kind === "flow" && candidate.role === "reviewer");
+    if (!membership) continue;
+    const flow = flows.find((candidate) => candidate.id === membership.containerId);
+    const reviewedPath = file.durableLineage?.reviewsConversationId
+      ? pathByConversationId.get(file.durableLineage.reviewsConversationId)
+      : undefined;
+    const anchor = reviewedPath ?? file.parent ?? flow?.implementerPath;
+    if (anchor) anchorByReviewer.set(file.path, anchor);
   }
   if (!anchorByReviewer.size) return files;
   const out: FileEntry[] = [];

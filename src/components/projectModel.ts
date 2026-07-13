@@ -56,6 +56,56 @@ export function projectKey(file: FileEntry): string {
   return file.project || "other";
 }
 
+/**
+ * Initial cwd for a project draft. Handoffs preserve the source conversation's
+ * exact checkout. Fresh drafts choose the canonical root seen most often in
+ * the project's conversations, with newest activity breaking equal counts.
+ */
+export function draftWorkingDirectory(
+  files: readonly FileEntry[],
+  project: string,
+  sourcePath?: string,
+  fallbacks: readonly string[] = [],
+): string {
+  if (sourcePath) {
+    const source = files.find((file) => file.path === sourcePath);
+    if (source?.cwd?.trim()) return source.cwd.trim();
+  }
+
+  const candidates = new Map<string, { count: number; newest: number }>();
+  for (const file of files) {
+    if (projectKey(file) !== project) continue;
+    if (file.projectRoot === null) continue;
+    const cwd = file.projectRoot?.trim() || file.cwd?.trim();
+    if (!cwd) continue;
+    const current = candidates.get(cwd) ?? { count: 0, newest: 0 };
+    current.count += 1;
+    current.newest = Math.max(current.newest, file.mtime);
+    candidates.set(cwd, current);
+  }
+  const derived = [...candidates]
+    .sort(([leftPath, left], [rightPath, right]) =>
+      right.count - left.count || right.newest - left.newest || leftPath.localeCompare(rightPath))[0]?.[0] ?? "";
+  return derived || fallbacks.find((cwd) => cwd.trim())?.trim() || "";
+}
+
+export function projectDraftWorkingDirectory(
+  files: readonly FileEntry[],
+  project: string,
+  projectCatalog: readonly ProjectCatalogEntry[],
+  sourcePath?: string,
+  fallbacks: readonly string[] = [],
+  deterministicFallback = "/",
+): string {
+  if (sourcePath) {
+    const sourceCwd = files.find((file) => file.path === sourcePath)?.cwd?.trim();
+    if (sourceCwd) return sourceCwd;
+  }
+  const catalogRoot = projectCatalog.find((entry) => entry.project === project)?.projectRoot?.trim() ?? "";
+  if (catalogRoot) return catalogRoot;
+  return draftWorkingDirectory(files, project, undefined, [...fallbacks, deterministicFallback]) || deterministicFallback;
+}
+
 export interface ProjectSummary {
   project: string;
   /** Live entries anywhere in the project (branches running right now). */
@@ -116,7 +166,7 @@ export function buildProjectSummaries(
     summary.smt = Math.max(summary.smt, (Date.parse(wf.createdAt) || 0) / 1000);
   }
   for (const pipeline of pipelines) {
-    if (pipeline.state === "closed" || !pipeline.project) continue;
+    if ((pipeline.state === "closed" && !pipeline.restored) || !pipeline.project) continue;
     const summary = summaryFor(pipeline.project);
     summary.catalogOnly = false;
     if (pipeline.state === "provisioning" || pipeline.state === "running") summary.liveCount += 1;

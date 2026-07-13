@@ -127,18 +127,23 @@ function cappedEntries(ranked: RawEntry[], projectByPath: ReadonlyMap<string, st
 function canonicalProjectCatalog(
   projectByPath: ReadonlyMap<string, string>,
   excludedSummaryPaths?: ReadonlySet<string>,
+  sourceCatalog: readonly ProjectCatalogEntry[] = [],
 ): { projectByPath: Map<string, string>; projectCatalog: ProjectCatalogEntry[] } {
   const canonicalByPath = new Map(projectByPath);
   for (const [pathname, project] of sessionProjectProjection(true).projectByPath) {
     if (canonicalByPath.has(pathname)) canonicalByPath.set(pathname, project);
   }
   const groups = new Map<string, ProjectCatalogEntry>();
+  const sourceRoots = new Map(sourceCatalog.map((entry) => [entry.project, entry.projectRoot] as const));
   for (const entry of conversationCatalogSnapshot()) {
     if (excludedSummaryPaths?.has(entry.path)) continue;
     const project = canonicalByPath.get(entry.path) ?? entry.project;
     const group = groups.get(project) ?? { project, smt: 0, conversations: 0 };
     group.smt = Math.max(group.smt, entry.mtime);
     group.conversations += 1;
+    const sourceProject = projectByPath.get(entry.path) ?? entry.project;
+    const projectRoot = sourceRoots.get(sourceProject);
+    if (!group.projectRoot && projectRoot) group.projectRoot = projectRoot;
     groups.set(project, group);
   }
   return {
@@ -195,6 +200,8 @@ function entriesFromRaw(raw: RawEntry[], projectByPath?: ReadonlyMap<string, str
       name: path.relative(entry.root, entry.path),
       project: projectByPath?.get(entry.path) ?? meta.project,
       worktree: meta.worktree,
+      cwd: meta.cwd,
+      projectRoot: meta.projectRoot,
       title: meta.title,
       engine: meta.engine,
       kind: meta.kind,
@@ -226,7 +233,7 @@ export async function discoverFilesWithProjectCatalog(
     persist: options.persist,
     excludedSummaryPaths: options.demote,
   });
-  const { projectCatalog, projectByPath } = canonicalProjectCatalog(snapshot.projectByPath, options.demote);
+  const { projectCatalog, projectByPath } = canonicalProjectCatalog(snapshot.projectByPath, options.demote, snapshot.projectCatalog);
   return { files: entriesFromRaw(raw, projectByPath, options.demote, options.pin), projectCatalog };
 }
 
@@ -238,7 +245,7 @@ export async function discoverFiles(
   const limit = createLimiter(48);
   const raw = await discoverRaw(roots, limit);
   const snapshot = projectCatalogSnapshotFromRaw(raw, { persist: false });
-  const { projectByPath } = canonicalProjectCatalog(snapshot.projectByPath);
+  const { projectByPath } = canonicalProjectCatalog(snapshot.projectByPath, undefined, snapshot.projectCatalog);
   return entriesFromRaw(raw, projectByPath, demote, pin);
 }
 

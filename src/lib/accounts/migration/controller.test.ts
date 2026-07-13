@@ -9,7 +9,7 @@ import { emptyLaunchProfile, type SuccessorProviderPort } from "./contracts";
 import { QuotaController, type QuotaProbePort } from "./quotaController";
 
 const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "llv-account-controller-"));
-const { AccountMigrationController, reconcileAccountMigrationCycle } = await import("./controller");
+const { AccountMigrationController, createMigrationDeliveryPort, reconcileAccountMigrationCycle } = await import("./controller");
 
 afterAll(() => {
   fs.rmSync(stateDir, { recursive: true, force: true });
@@ -39,6 +39,84 @@ test("controller migration cycle reconciles and ticks both durable quota policy 
   expect(ticks.sort()).toEqual(["claude", "codex"]);
   expect(registry.conversation(conversation.id)?.migration?.phase).toBe("committed");
 }, 20_000);
+
+test("controller drains a migration-held structured message through the runtime journal adapter", async () => {
+  const registry = new AgentRegistry(path.join(stateDir, "structured-delivery-registry.json"));
+  registry.reconcileConversations([{
+    engine: "codex",
+    path: "/structured-successor.jsonl",
+    accountId: "target",
+    launchProfile: emptyLaunchProfile(),
+    turn: { state: "idle", source: "empty", terminalAt: null },
+    observedAt: "2026-07-10T12:00:00.000Z",
+  }]);
+  const conversation = registry.conversationForPath("/structured-successor.jsonl")!;
+  const assigned = registry.holdDelivery(conversation.id, "continue", "migration-message");
+  const claimed = registry.beginDeliveryAttempt(assigned.id, assigned.generationId!)!;
+  const structured: unknown[] = [];
+  let legacyCalls = 0;
+  const port = createMigrationDeliveryPort({
+    structuredDelivery: async (request) => {
+      structured.push(request);
+      return "delivered";
+    },
+    legacyDelivery: async () => {
+      legacyCalls += 1;
+      return "delivered";
+    },
+  });
+
+  const outcome = await port.deliver({
+    delivery: claimed,
+    path: "/structured-successor.jsonl",
+    clientMessageId: "migration-message",
+  });
+
+  expect(outcome).toBe("delivered");
+  expect(structured).toEqual([{
+    conversationId: conversation.id,
+    path: "/structured-successor.jsonl",
+    deliveryId: claimed.id,
+    clientMessageId: "migration-message",
+    text: "continue",
+  }]);
+  expect(legacyCalls).toBe(0);
+});
+
+test("controller keeps an uncertain structured claim fenced when ownership cannot be reconciled", async () => {
+  let legacyCalls = 0;
+  const port = createMigrationDeliveryPort({
+    structuredDelivery: async () => null,
+    legacyDelivery: async () => {
+      legacyCalls += 1;
+      return "delivered";
+    },
+  });
+  const delivery = {
+    id: "held-one",
+    conversationId: "conversation_11111111-1111-4111-8111-111111111111" as const,
+    text: "continue",
+    createdAt: "2026-07-13T00:00:00.000Z",
+    clientMessageId: "migration-message",
+    payloadKind: "text" as const,
+    artifactPaths: [],
+    state: "delivery-uncertain" as const,
+    generationId: "generation-one",
+    attempts: 1,
+    assignedAt: "2026-07-13T00:00:00.000Z",
+    deliveredAt: null,
+    error: "delivery started; recovery requires an explicit outcome",
+  };
+
+  const outcome = await port.reconcileUncertain!({
+    delivery,
+    path: "/structured-successor.jsonl",
+    clientMessageId: "migration-message",
+  });
+
+  expect(outcome).toBe("delivery-uncertain");
+  expect(legacyCalls).toBe(0);
+});
 
 test("controller runs a trailing cycle when a signal arrives during reconciliation", async () => {
   const registry = new AgentRegistry(path.join(stateDir, "trailing-cycle-registry.json"));

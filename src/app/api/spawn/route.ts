@@ -15,7 +15,7 @@ import { modelFromBody } from "@/lib/agent/models";
 import { resolveSpawnRole } from "@/lib/roles/registry";
 import { spawnContentDigest, spawnParentSelector, spawnRequestDigest } from "@/lib/agent/spawnIdentity";
 import { sessionKeyFromTranscript } from "@/lib/agent/sessionKey";
-import { resolveSpawnParent, SpawnParentError, transcriptAllowed } from "@/lib/agent/spawnParent";
+import { resolveSpawnLineageParent, SpawnParentError } from "@/lib/agent/spawnParent";
 import { spawnResponseForReceipt, type SpawnResponse } from "@/lib/agent/spawnResponse";
 import { resolveSpawnedTranscriptPath } from "@/lib/agent/spawnedTranscript";
 import { headCwd } from "@/lib/agent/transcript";
@@ -26,20 +26,24 @@ import { runtimeScope } from "@/lib/runtime/contracts";
 import { runtimeEventsEnabled } from "@/lib/runtime/flags";
 import { listFiles } from "@/lib/scanner";
 import { projectForCwd } from "@/lib/scanner/describe";
+import { projectDirectoryCandidates } from "@/lib/scanner/projectDirectories";
 import { buildImagePayload, collectImagePayloads, deleteInboxImages, spawnAgentWithPrompt, verifyTmuxHostEvidence } from "@/lib/tmux";
 import type { ApiError } from "@/lib/types";
+
+import { sourceCwdStatus } from "./sourceCwd";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const SUGGEST_SCAN_LIMIT = 80;
 const SUGGEST_MAX = 10;
-const PROJECT_DIR_ROOTS = ["Projects", path.join(".agents", "tools")];
 
 interface SuggestResponse {
   dirs: string[];
   /** Working directory of the `src` transcript when one was requested. */
   cwd: string | null;
+  /** Whether the recorded source directory currently exists. */
+  cwdExists: boolean;
 }
 
 function addDir(dirs: string[], cwd: string | null, project: string): void {
@@ -48,40 +52,13 @@ function addDir(dirs: string[], cwd: string | null, project: string): void {
   dirs.push(cwd);
 }
 
-function projectDirCandidates(project: string): string[] {
-  if (!project) return [];
-  const candidates: string[] = [];
-  for (const rel of PROJECT_DIR_ROOTS) {
-    const root = path.join(os.homedir(), rel);
-    let entries: string[];
-    try {
-      entries = fs.readdirSync(root);
-    } catch {
-      continue;
-    }
-    for (const name of entries) {
-      const cwd = path.join(root, name);
-      let stat: fs.Stats;
-      try {
-        stat = fs.statSync(cwd);
-      } catch {
-        continue;
-      }
-      if (!stat.isDirectory()) continue;
-      addDir(candidates, cwd, project);
-      if (candidates.length >= SUGGEST_MAX) return candidates;
-    }
-  }
-  return candidates;
-}
-
 /** Recent real working directories to prefill the spawn dialog; the current
     project's transcripts rank first so its directory lands on top. `src` names
     a transcript whose own cwd must win — the handoff card inherits it. */
 export async function GET(req: NextRequest): Promise<NextResponse<SuggestResponse>> {
   const project = req.nextUrl.searchParams.get("project") ?? "";
   const src = req.nextUrl.searchParams.get("src");
-  const srcCwd = src && transcriptAllowed(src) ? headCwd(src, { requireDir: true }) : null;
+  const { cwd: srcCwd, cwdExists } = sourceCwdStatus(src);
   const conversations = (await listFiles())
     .filter((entry) => entry.path.endsWith(".jsonl") && (entry.root === "claude-projects" || entry.root === "codex-sessions"))
     .filter((entry) => !entry.path.includes(path.sep + "subagents" + path.sep))
@@ -90,7 +67,7 @@ export async function GET(req: NextRequest): Promise<NextResponse<SuggestRespons
 
   const dirs: string[] = srcCwd ? [srcCwd] : [];
   if (!srcCwd) {
-    for (const cwd of projectDirCandidates(project)) addDir(dirs, cwd, project);
+    for (const cwd of projectDirectoryCandidates(project, SUGGEST_MAX)) addDir(dirs, cwd, project);
   }
   for (const entry of conversations) {
     if (dirs.length >= SUGGEST_MAX) break;
@@ -99,14 +76,14 @@ export async function GET(req: NextRequest): Promise<NextResponse<SuggestRespons
     addDir(dirs, cwd, project);
   }
   if (!dirs.length) dirs.push(os.homedir());
-  return NextResponse.json({ dirs, cwd: srcCwd });
+  return NextResponse.json({ dirs, cwd: srcCwd, cwdExists });
 }
 
 export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse | ApiError>> {
   const rejection = rejectCrossOrigin(req);
   if (rejection) return rejection;
 
-  let body: { engine?: unknown; model?: unknown; cwd?: unknown; prompt?: unknown; images?: unknown; src?: unknown; parent?: unknown; parentConversationId?: unknown; effort?: unknown; fast?: unknown; accountId?: unknown; clientAttemptId?: unknown; role?: unknown; roleParams?: unknown; confirm?: unknown };
+  let body: { engine?: unknown; model?: unknown; cwd?: unknown; prompt?: unknown; images?: unknown; src?: unknown; parent?: unknown; parentConversationId?: unknown; effort?: unknown; fast?: unknown; accountId?: unknown; clientAttemptId?: unknown; role?: unknown; roleParams?: unknown; confirm?: unknown; reviews?: unknown };
   try {
     body = (await req.json()) as typeof body;
   } catch {
@@ -115,6 +92,12 @@ export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse
 
   const role = resolveSpawnRole(body);
   if (!role.ok) return NextResponse.json({ error: role.error }, { status: 400 });
+  if (role.value?.role === "reviewer" && (typeof body.reviews !== "string" || !body.reviews.trim())) {
+    return NextResponse.json({ error: "reviewer requires reviews" }, { status: 400 });
+  }
+  if (role.value?.role !== "reviewer" && body.reviews !== undefined) {
+    return NextResponse.json({ error: "reviews requires role: reviewer" }, { status: 400 });
+  }
   const engine = body.engine === "claude" || body.engine === "codex"
     ? (body.engine as AgentEngine)
     : (role.value?.config.engine ?? null);
@@ -156,7 +139,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse
   let launchId: string | null = null;
   try {
     const account = accountManager.resolveSpawn(engine, body.accountId);
-    const parent = resolveSpawnParent(body);
+    const parent = resolveSpawnLineageParent(body);
     const parentConversationId = parent?.conversationId ?? null;
     const parentSessionKey = parent?.sessionKey ?? null;
     const parentArtifactPath = parent?.artifactPath ?? null;
@@ -168,7 +151,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse
       fast: reasoning.fast,
       accountId: account.accountId,
       role: role.value?.role ?? null,
-      parent: spawnParentSelector(body),
+      parent: spawnParentSelector({ parentConversationId: parentConversationId ?? undefined }),
       prompt,
       images: images.map((image) => ({ mime: image.mime, digest: spawnContentDigest({ image: image.base64 }) })),
     });
@@ -188,6 +171,8 @@ export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse
       parentConversationId,
       parentSessionKey,
       parentArtifactPath,
+      role: role.value?.role ?? null,
+      reviewsConversationId: role.value?.role === "reviewer" ? parentConversationId : null,
       launchProfile: spec.launchProfile,
       clientAttemptId: body.clientAttemptId ?? null,
       requestDigest: digest,

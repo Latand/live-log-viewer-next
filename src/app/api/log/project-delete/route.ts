@@ -13,6 +13,7 @@ import { pathAllowed } from "@/lib/scanner/roots";
 import { claudeSubagentOwnerPath, transcriptProcessMayBeRunning } from "@/lib/scanner/transcripts";
 import { overlaySessionProjects } from "@/lib/session/titleProjection";
 import type { ApiError } from "@/lib/types";
+
 import { projectDeletionMembershipMatches } from "./membership";
 
 export const runtime = "nodejs";

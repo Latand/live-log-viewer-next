@@ -12,7 +12,9 @@ import type { FileEntry } from "@/lib/types";
 
 let scans = 0;
 let scanOptions: unknown;
+let scanProjects: Array<string | undefined> = [];
 let scannedFiles: FileEntry[] = [];
+let scanFileResults: FileEntry[][] = [];
 let scanGates: Promise<void>[] = [];
 let registryRoot = "";
 let tmuxHealth: unknown = { status: "healthy" };
@@ -28,7 +30,9 @@ beforeEach(() => {
   setAgentRegistryForTests(new AgentRegistry(path.join(registryRoot, "registry.json")));
   resetFilesRouteCacheForTests();
   scans = 0;
+  scanProjects = [];
   scannedFiles = [];
+  scanFileResults = [];
   scanGates = [];
   tmuxHealth = { status: "healthy" };
   replaceConversationCatalog([]);
@@ -45,10 +49,11 @@ afterEach(() => {
 
 mock.module("@/lib/scanner", () => ({
   listFiles: async () => [],
-  listFilesWithProjectCatalog: async (_project: string | undefined, options: unknown) => {
+  listFilesWithProjectCatalog: async (project: string | undefined, options: unknown) => {
     scans += 1;
+    scanProjects.push(project);
     scanOptions = options;
-    const files = scannedFiles;
+    const files = scanFileResults.shift() ?? scannedFiles;
     await scanGates.shift();
     return { files, projectCatalog: [] };
   },
@@ -108,15 +113,64 @@ test("concurrent cold files reads share one scan", async () => {
   expect(scans).toBe(1);
 });
 
-test("an expired snapshot schedules its refresh after the response", async () => {
+test("an expired snapshot returns the shared fresh scan to the revalidating client", async () => {
+  scannedFiles = [file("/sessions/project-a.jsonl")];
   await cachedFileScan();
-  const stale = await cachedFileScan(undefined, undefined, Number.MAX_SAFE_INTEGER);
+  scannedFiles = [file("/sessions/project-b.jsonl")];
+  const refreshed = await cachedFileScan(undefined, undefined, Number.MAX_SAFE_INTEGER);
 
-  expect(scans).toBe(1);
-  expect(stale.refreshAfterResponse).toBeFunction();
-
-  await stale.refreshAfterResponse?.();
+  expect(refreshed.snapshot.files.map((entry) => entry.path)).toEqual(["/sessions/project-b.jsonl"]);
   expect(scans).toBe(2);
+});
+
+test("a pinned refresh advances the shared global slot and identifies every pin-only row", async () => {
+  scannedFiles = [file("/sessions/old-global.jsonl")];
+  await GET(new Request("http://127.0.0.1/api/files"));
+
+  const pinnedPath = "/archive/predecessor.jsonl";
+  const currentPath = "/sessions/current.jsonl";
+  const closurePath = "/sessions/closure-parent.jsonl";
+  const freshGlobal = file("/sessions/fresh-global.jsonl");
+  scanFileResults = [
+    [freshGlobal, file(pinnedPath), file(currentPath), file(closurePath)],
+    [freshGlobal],
+  ];
+  const pinned = await GET(new Request(`http://127.0.0.1/api/files?path=${encodeURIComponent(pinnedPath)}`));
+  const pinnedBody = await pinned.json() as { files: FileEntry[]; pinOverlayPaths: string[] };
+
+  expect(pinnedBody.files.map((entry) => entry.path)).toEqual([
+    freshGlobal.path,
+    pinnedPath,
+    currentPath,
+    closurePath,
+  ]);
+  expect(pinnedBody.pinOverlayPaths).toEqual([pinnedPath, currentPath, closurePath]);
+
+  scannedFiles = [file("/sessions/stale-unshared.jsonl")];
+  const ordinary = await GET(new Request("http://127.0.0.1/api/files"));
+  const ordinaryBody = await ordinary.json() as { files: FileEntry[] };
+  expect(ordinaryBody.files.map((entry) => entry.path)).toEqual([freshGlobal.path]);
+  expect(scans).toBe(3);
+});
+
+test("pinned response projection cannot mutate the shared global scan rows", async () => {
+  const sharedPath = "/sessions/shared-registry-row.jsonl";
+  const pinnedPath = "/archive/pin-only-row.jsonl";
+  const registry = agentRegistry();
+  const conversation = registry.ensureConversation("codex", sharedPath, "source");
+  scanFileResults = [
+    [file(sharedPath), file(pinnedPath)],
+    [file(sharedPath)],
+  ];
+
+  const pinned = await GET(new Request(`http://127.0.0.1/api/files?path=${encodeURIComponent(pinnedPath)}`));
+  const pinnedBody = await pinned.json() as { files: FileEntry[] };
+  expect(pinnedBody.files.find((entry) => entry.path === sharedPath)?.conversationId).toBe(conversation.id);
+
+  setAgentRegistryForTests(new AgentRegistry(path.join(registryRoot, "empty-registry.json")));
+  const ordinary = await GET(new Request("http://127.0.0.1/api/files"));
+  const ordinaryBody = await ordinary.json() as { files: FileEntry[] };
+  expect(ordinaryBody.files.find((entry) => entry.path === sharedPath)?.conversationId).toBeUndefined();
 });
 
 test("a files revision request refreshes the snapshot before responding", async () => {
@@ -216,14 +270,12 @@ test("an arbitrary client revision cannot suppress a later revision refresh", as
   expect(scans).toBe(2);
 });
 
-test("the project scan cache evicts its least recently used entry", async () => {
-  for (let index = 0; index <= 32; index += 1) {
-    await cachedFileScan(`project-${index}`);
-  }
-  expect(scans).toBe(33);
+test("project query changes reuse one global scan snapshot", async () => {
+  await GET(new Request("http://127.0.0.1/api/files?project=project-a"));
+  await GET(new Request("http://127.0.0.1/api/files?project=project-b"));
 
-  await cachedFileScan("project-0");
-  expect(scans).toBe(34);
+  expect(scans).toBe(1);
+  expect(scanProjects).toEqual([undefined]);
 });
 
 function file(path: string): FileEntry {
@@ -409,6 +461,40 @@ test("an existing durable parent omitted from the scan enters the response closu
     project: "repo",
     activityReason: "lineage_placeholder",
   });
+});
+
+test("a lineage placeholder introduced for a pinned child stays inside the pin overlay", async () => {
+  const registry = agentRegistry();
+  const parentPath = path.join(registryRoot, "pinned-parent-019f4906-3f67-7b72-9fbc-9ec3b5ad1335.jsonl");
+  const childPath = "/sessions/pinned-child-019f4906-3f67-7b72-9fbc-9ec3b5ad1336.jsonl";
+  fs.writeFileSync(parentPath, "{}\n");
+  const parent = registry.ensureConversation("codex", parentPath, null);
+  const begun = registry.beginSpawnRequest({
+    engine: "codex",
+    cwd: "/repo",
+    parentConversationId: parent.id,
+    parentArtifactPath: parentPath,
+    launchProfile: emptyLaunchProfile({ cwd: "/repo", parentConversationId: parent.id }),
+  });
+  if (begun.kind !== "created") throw new Error("expected a fresh spawn receipt");
+  registry.settleSpawn(begun.receipt.launchId, {
+    key: { engine: "codex", sessionId: "019f4906-3f67-7b72-9fbc-9ec3b5ad1336" },
+    artifactPath: childPath,
+    cwd: "/repo",
+    accountId: null,
+    status: "unhosted",
+    host: null,
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  scanFileResults = [[file(childPath)], []];
+
+  const response = await GET(new Request(`http://127.0.0.1/api/files?path=${encodeURIComponent(childPath)}`));
+  const body = await response.json() as { files: FileEntry[]; pinOverlayPaths: string[] };
+
+  expect(body.files.map((entry) => entry.path)).toEqual([childPath, parentPath]);
+  expect(body.pinOverlayPaths).toEqual([childPath, parentPath]);
 });
 
 test("lineage projection uses one registry revision during provisional parent adoption", async () => {

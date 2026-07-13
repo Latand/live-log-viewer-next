@@ -13,6 +13,8 @@ import { projectResolutionStateKey } from "./projectState";
 interface Meta {
   project: string;
   worktree?: string;
+  cwd?: string;
+  projectRoot?: string | null;
   title: string;
   engine: Engine;
   kind: string;
@@ -37,6 +39,7 @@ const titleCache = globalCache<[number, string | null]>("title-v3");
    cache lives with the search index; page hydration reads only its visible rows. */
 globalCache<unknown>("conversation-search-v1").clear();
 const codexProjectCache = globalCache<{ stateKey: string; project: string; worktree?: string }>("codex-project-v3");
+const repoSlugCache = globalCache<[number, string | null]>("repo-path-from-slug-v1");
 /* The cwd sits in the immutable head, so it follows the title-cache rule:
    keyed by path, re-read only while unresolved and the head still short. */
 const cwdCache = globalCache<[number, string | null]>("claude-cwd");
@@ -129,6 +132,73 @@ function existingRepoPath(repoName: string): string {
     }
   }
   return path.join(os.homedir(), "Projects", repoName);
+}
+
+function repoPathFromSlug(slug: string): string | null {
+  const home = os.homedir();
+  const encodedHome = home.replace(/[^a-zA-Z0-9]/g, "-");
+  const roots: Array<[string, string]> = [
+    [`${encodedHome}-Projects-`, path.join(home, "Projects")],
+    [`${encodedHome}--agents-tools-`, path.join(home, ".agents", "tools")],
+  ];
+  for (const [prefix, root] of roots) {
+    if (!slug.startsWith(prefix)) continue;
+    const encodedName = slug.slice(prefix.length);
+    if (!encodedName) return root;
+    try {
+      for (const name of fs.readdirSync(root)) {
+        if (name.replace(/[^a-zA-Z0-9]/g, "-") === encodedName) return path.join(root, name);
+      }
+    } catch {
+      /* The parent root can be absent after its conversations were recorded. */
+    }
+    return path.join(root, encodedName);
+  }
+  if (slug === encodedHome) return home;
+  const cached = repoSlugCache.get(slug);
+  if (cached && cached[0] > Date.now()) return cached[1];
+
+  /* Slugs for repositories outside the two conventional roots are lossy:
+     separators, dots, and spaces all become dashes. Walk only filesystem
+     branches whose encoded prefix can still match, then accept a unique
+     existing directory (preferring a git root when ambiguity remains). */
+  if (!slug.startsWith("-")) return null;
+  const matches: string[] = [];
+  let frontier: Array<{ pathname: string; encoded: string }> = [{ pathname: path.parse(home).root, encoded: "" }];
+  for (let depth = 0; depth < 32 && frontier.length > 0 && matches.length < 16; depth += 1) {
+    const next: Array<{ pathname: string; encoded: string }> = [];
+    for (const parent of frontier) {
+      let entries: fs.Dirent[];
+      try {
+        entries = fs.readdirSync(parent.pathname, { withFileTypes: true });
+      } catch {
+        continue;
+      }
+      for (const entry of entries) {
+        const encoded = parent.encoded + "-" + entry.name.replace(/[^a-zA-Z0-9]/g, "-");
+        if (encoded !== slug && !slug.startsWith(encoded + "-")) continue;
+        const pathname = path.join(parent.pathname, entry.name);
+        let directory = entry.isDirectory();
+        if (!directory && entry.isSymbolicLink()) {
+          try {
+            directory = fs.statSync(pathname).isDirectory();
+          } catch {
+            directory = false;
+          }
+        }
+        if (!directory) continue;
+        if (encoded === slug) matches.push(pathname);
+        else next.push({ pathname, encoded });
+      }
+    }
+    frontier = next.slice(0, 64);
+  }
+  const repositories = matches.filter(hasGitMarker);
+  const resolved = repositories.length === 1
+    ? repositories[0]!
+    : matches.length === 1 ? matches[0]! : null;
+  repoSlugCache.set(slug, [Date.now() + 10_000, resolved]);
+  return resolved;
 }
 
 /** Codex creates ephemeral worktrees at `~/.codex/worktrees/<hash>/<RepoName>`
@@ -346,7 +416,7 @@ function persistedProjects(): {
     slugs name it (`projectFromSlug` of the dashed path). One naming scheme
     means a codex session, a claude session, and any worktree of the same repo
     all land in the SAME sidebar group instead of lookalike neighbors. */
-function projectInfoFromCwd(cwd: string): { project: string; worktree?: string } | null {
+function projectInfoFromCwd(cwd: string): { project: string; worktree?: string; repo?: string } | null {
   const scratchpad = projectInfoFromClaudeTaskCwd(cwd);
   if (scratchpad) return scratchpad;
   let worktree =
@@ -374,7 +444,20 @@ export function projectForCwd(cwd: string): string | null {
   return projectInfoFromCwd(cwd)?.project ?? null;
 }
 
-function worktreeFromSlug(slug: string): { project: string; worktree: string } | null {
+/** Resolve a conversation cwd to the repository root shared by its worktrees. */
+export function projectRootForCwd(cwd: string): string | undefined {
+  const scratchpad = projectInfoFromClaudeTaskCwd(cwd);
+  if (scratchpad) return scratchpad.repo;
+  const worktree =
+    worktreeFromPath(cwd) ??
+    worktreeFromNested(cwd) ??
+    worktreeFromCodexPath(cwd) ??
+    worktreeFromGitFile(cwd) ??
+    worktreeFromMemory(cwd);
+  return worktree?.repo ?? cwd;
+}
+
+function worktreeFromSlug(slug: string): { project: string; worktree: string; repo?: string } | null {
   const codexMarker = "--codex-worktrees-";
   const markers = ["--claude-worktrees-", codexMarker, "--worktrees-"];
   let marker: string | null = null;
@@ -399,8 +482,9 @@ function worktreeFromSlug(slug: string): { project: string; worktree: string } |
       .sort((left, right) => left - right)[0];
     const repoName = nestedAt === undefined ? repoAndNested : repoAndNested.slice(0, nestedAt);
     if (!repoName) return null;
-    const project = projectFromSlug(existingRepoPath(repoName).replace(/[^a-zA-Z0-9]/g, "-"));
-    return project ? { project, worktree } : null;
+    const repo = existingRepoPath(repoName);
+    const project = projectFromSlug(repo.replace(/[^a-zA-Z0-9]/g, "-"));
+    return project ? { project, worktree, repo } : null;
   }
   const nextAt = ["--claude-worktrees-", "--codex-worktrees-", "--worktrees-", "-worktrees-"]
     .map((candidate) => suffix.indexOf(candidate))
@@ -411,14 +495,14 @@ function worktreeFromSlug(slug: string): { project: string; worktree: string } |
   const repoSlug = slug.slice(0, index);
   const project = projectFromSlug(repoSlug);
   if (!project) return null;
-  return { project, worktree };
+  return { project, worktree, repo: repoPathFromSlug(repoSlug) ?? undefined };
 }
 
 /** Claude places nested scratchpad agents under
     `<tmp>/claude-<uid>/<encoded-cwd>/<session>/scratchpad/...`. The encoded
     cwd retains dotted worktree containers as `--worktrees-`, which is enough
     to recover the parent project after the checkout and scratchpad disappear. */
-function projectInfoFromClaudeTaskCwd(cwd: string): { project: string; worktree?: string } | null {
+function projectInfoFromClaudeTaskCwd(cwd: string): { project: string; worktree?: string; repo?: string } | null {
   const parts = cwd.split(path.sep);
   const container = parts.findIndex((part) => /^claude-\d+$/.test(part));
   const slug = container >= 0 ? parts[container + 1] : undefined;
@@ -427,14 +511,15 @@ function projectInfoFromClaudeTaskCwd(cwd: string): { project: string; worktree?
   const worktree = worktreeFromSlug(slug);
   if (worktree) return worktree;
   const project = projectFromSlug(slug);
-  return project ? { project } : null;
+  return project ? { project, repo: repoPathFromSlug(slug) ?? undefined } : null;
 }
 
 function cwdFromLines(lines: string[]): string | null {
   for (const line of lines) {
     try {
       const parsed = JSON.parse(line);
-      const cwd = stringValue(recordValue(parsed)?.cwd);
+      const record = recordValue(parsed);
+      const cwd = stringValue(record?.cwd) ?? stringValue(recordValue(record?.payload)?.cwd);
       if (cwd) return cwd;
     } catch {
       continue;
@@ -570,29 +655,22 @@ export function describe(rootName: RootKey, root: string, pathname: string, st: 
   const fn = path.basename(pathname);
   let project = "other";
   let worktree: string | undefined;
+  let cwd: string | undefined;
   let title: string | null = null;
   let engine: Engine = "claude";
   let kind = "";
   let fmt: Fmt = "plain";
   if (rootName === "codex-sessions") {
+    cwd = transcriptCwd(pathname, st.size) ?? undefined;
     const cachedProject = codexProjectCache.get(pathname);
     if (cachedProject?.stateKey === stateKey) {
       project = cachedProject.project;
       worktree = cachedProject.worktree;
     } else {
       project = "";
-      const head = readHead(pathname, st.size);
-      if (head) {
-        try {
-          const first = JSON.parse(head.text.split("\n")[0] ?? "{}");
-          const cwd = stringValue(recordValue(first.payload)?.cwd) ?? "";
-          const info = projectInfoFromCwd(cwd);
-          project = info?.project ?? "";
-          worktree = info?.worktree;
-        } catch {
-          project = "";
-        }
-      }
+      const info = cwd ? projectInfoFromCwd(cwd) : null;
+      project = info?.project ?? "";
+      worktree = info?.worktree;
       if (!project) {
         const info = projectInfoFromTranscript(pathname);
         project = info?.project ?? "";
@@ -613,7 +691,7 @@ export function describe(rootName: RootKey, root: string, pathname: string, st: 
     /* The slug alone cannot tell a sibling worktree checkout from a real
        standalone project — only the cwd's git metadata can. When it proves a
        worktree, the session regroups under its main repo's project name. */
-    const cwd = transcriptCwd(pathname, st.size);
+    cwd = transcriptCwd(pathname, st.size) ?? undefined;
     const info = cwd ? projectInfoFromCwd(cwd) : projectInfoFromTranscript(pathname);
     const persistedInfo = projectInfoFromTranscript(pathname);
     if (info && (worktreeInfo || info.worktree || persistedInfo)) {
@@ -644,6 +722,8 @@ export function describe(rootName: RootKey, root: string, pathname: string, st: 
   const meta = {
     project,
     worktree,
+    cwd,
+    projectRoot: cwd ? projectRootForCwd(cwd) ?? null : undefined,
     title: cleanTitle(title ?? fn, 120),
     engine,
     kind,

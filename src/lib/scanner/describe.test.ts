@@ -4,7 +4,15 @@ import path from "node:path";
 
 import { afterAll, expect, test } from "bun:test";
 
-import { describe, parseWorktreeGitdir, persistWorktreeMap, projectForCwd, projectFromSlug, searchTextForTranscript } from "./describe";
+import {
+  describe,
+  parseWorktreeGitdir,
+  persistWorktreeMap,
+  projectForCwd,
+  projectFromSlug,
+  projectRootForCwd,
+  searchTextForTranscript,
+} from "./describe";
 
 const SANDBOX = fs.mkdtempSync(path.join(os.tmpdir(), "llv-describe-test-"));
 const REAL_STATE = process.env.LLV_STATE_DIR;
@@ -92,6 +100,7 @@ test("a deleted worktree scratchpad cwd groups under the encoded parent repo", (
   const dead = path.join(os.tmpdir(), `claude-${process.getuid?.() ?? 1000}`, slug, "deleted-session", "scratchpad", "probes");
   expect(fs.existsSync(dead)).toBe(false);
   expect(projectForCwd(dead)).toBe(projectForCwd(repo));
+  expect(projectRootForCwd(dead)).toBe(repo);
 });
 
 test("a main-checkout scratchpad cwd groups under its encoded project", () => {
@@ -100,6 +109,21 @@ test("a main-checkout scratchpad cwd groups under its encoded project", () => {
   const dead = path.join(os.tmpdir(), `claude-${process.getuid?.() ?? 1000}`, slug, "deleted-session", "scratchpad", "probes");
   expect(fs.existsSync(dead)).toBe(false);
   expect(projectForCwd(dead)).toBe(projectForCwd(repo));
+});
+
+test("a deleted scratchpad encoded from an external repository keeps its canonical root", () => {
+  const repo = path.join(SANDBOX, "external-root", "repo.with-hyphen");
+  fs.mkdirSync(path.join(repo, ".git"), { recursive: true });
+  const slug = repo.replace(/[^a-zA-Z0-9]/g, "-");
+  const dead = path.join(os.tmpdir(), `claude-${process.getuid?.() ?? 1000}`, slug, "deleted-session", "scratchpad", "probes");
+
+  expect(fs.existsSync(dead)).toBe(false);
+  expect(projectForCwd(dead)).toBe(projectForCwd(repo));
+  expect(projectRootForCwd(dead)).toBe(repo);
+
+  const missingSlug = path.join(SANDBOX, "removed-external-repo").replace(/[^a-zA-Z0-9]/g, "-");
+  const missing = path.join(os.tmpdir(), `claude-${process.getuid?.() ?? 1000}`, missingSlug, "deleted-session", "scratchpad");
+  expect(projectRootForCwd(missing)).toBeUndefined();
 });
 
 test("the outer nested worktree wins over a later specialized container", () => {
@@ -154,6 +178,45 @@ test("a deleted nested worktree (repo/worktrees/<name>) still groups under its p
   expect(projectForCwd(nestedDotted)).toBe(projectForCwd(repo));
   expect(projectForCwd(deepNested)).toBe(projectForCwd(repo));
   expect(projectForCwd(nested)).toBe("CelestiaCompose");
+});
+
+test("conversation metadata carries the exact cwd and its canonical project root", () => {
+  const repo = path.join(SANDBOX, "cwd-project");
+  const cwd = path.join(repo, ".worktrees", "issue-173");
+  const root = path.join(SANDBOX, "cwd-transcripts");
+  const transcript = path.join(root, "cwd-project", "session.jsonl");
+  fs.mkdirSync(path.dirname(transcript), { recursive: true });
+  fs.writeFileSync(transcript, JSON.stringify({ type: "user", cwd, message: { content: "Prefill cwd" } }) + "\n");
+
+  expect(describe("claude-projects", root, transcript, fs.statSync(transcript))).toMatchObject({
+    cwd,
+    projectRoot: repo,
+  });
+});
+
+test("conversation metadata marks an unresolved deleted scratchpad root explicitly", () => {
+  const missingSlug = path.join(SANDBOX, "removed-external-repo").replace(/[^a-zA-Z0-9]/g, "-");
+  const cwd = path.join(os.tmpdir(), `claude-${process.getuid?.() ?? 1000}`, missingSlug, "deleted-session", "scratchpad");
+  const root = path.join(SANDBOX, "unresolved-scratchpad-transcripts");
+  const transcript = path.join(root, "removed-external-repo", "session.jsonl");
+  fs.mkdirSync(path.dirname(transcript), { recursive: true });
+  fs.writeFileSync(transcript, JSON.stringify({ type: "user", cwd, message: { content: "Prefill cwd" } }) + "\n");
+
+  expect(fs.existsSync(cwd)).toBe(false);
+  expect(describe("claude-projects", root, transcript, fs.statSync(transcript))).toMatchObject({ cwd, projectRoot: null });
+});
+
+test("growing Codex transcripts retain cwd metadata after the project cache warms", () => {
+  const repo = path.join(SANDBOX, "codex-cwd-project");
+  const cwd = path.join(repo, ".worktrees", "issue-174");
+  const root = path.join(SANDBOX, "codex-cwd-transcripts");
+  const transcript = path.join(root, "2026", "07", "rollout-cwd.jsonl");
+  fs.mkdirSync(path.dirname(transcript), { recursive: true });
+  fs.writeFileSync(transcript, JSON.stringify({ type: "session_meta", payload: { cwd } }) + "\n");
+
+  expect(describe("codex-sessions", root, transcript, fs.statSync(transcript))).toMatchObject({ cwd, projectRoot: repo });
+  fs.appendFileSync(transcript, JSON.stringify({ type: "event_msg", payload: { type: "user_message", message: "continue" } }) + "\n");
+  expect(describe("codex-sessions", root, transcript, fs.statSync(transcript))).toMatchObject({ cwd, projectRoot: repo });
 });
 
 test("a nested `worktrees` segment under .claude/.codex is left to its own recognizer", () => {

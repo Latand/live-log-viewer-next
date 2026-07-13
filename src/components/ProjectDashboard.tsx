@@ -10,13 +10,13 @@ import type { Flow } from "@/lib/flows/types";
 import { useLocale } from "@/lib/i18n";
 import type { Pipeline } from "@/lib/pipelines/types";
 import type { BoardTask } from "@/lib/tasks/types";
-import type { FileEntry } from "@/lib/types";
+import type { FileEntry, ProjectCatalogEntry } from "@/lib/types";
 import { MAX_VISIBLE_PATHS } from "@/lib/view/types";
 import type { Workflow } from "@/lib/workflows/types";
 
 import { TaskStrip } from "./BranchPane";
 import { ConversationList } from "./ConversationList";
-import { clearDraftStorage, draftParentConversationId, draftSrc, setDraftSrc, setDraftText } from "./DraftAgentPane";
+import { clearDraftStorage, draftCwd, draftParentConversationId, draftSrc, replaceUnverifiedDraftCwd, requireDraftCwdConfirmation, seedDraftCwd, setDraftCwd, setDraftSrc, setDraftText } from "./DraftAgentPane";
 import { planBoardConvergence, planClose } from "./projectBoardMutations";
 import { claimedReviewerDescendantPaths, foldClaimedReviewers, isActiveFlow } from "./flows/flowModel";
 import { createDraftPipeline, pipelinesForProject, type PipelineTemplate } from "./pipelines/pipelineModel";
@@ -38,6 +38,7 @@ import {
   buildBranchGroups,
   collapsedTrees,
   isChildConversation,
+  projectDraftWorkingDirectory,
   projectKey,
   type ProjectView,
   resolveProjectView,
@@ -61,6 +62,8 @@ interface Props {
   pipelinesError?: string;
   workflows: Workflow[];
   tasks: BoardTask[];
+  projectCatalog?: ProjectCatalogEntry[];
+  projectCwd?: string;
   project: string;
   loaded: boolean;
   /** Bumped by Viewer on every openFile so a same-project open re-reads prefs
@@ -108,6 +111,9 @@ interface ColumnPrefs {
    are unspawned composer state, not shared board arrangement, so they stay
    per-tab in sessionStorage and do not sync (#38). */
 const draftsKey = (project: string) => `llvDrafts:${project}`;
+const HANDOFF_CWD_RETRY_MS = 1_000;
+const HANDOFF_CWD_MAX_RETRY_MS = 30_000;
+const HANDOFF_CWD_MAX_ATTEMPTS = 4;
 
 export function loadDrafts(project: string): string[] {
   try {
@@ -238,13 +244,14 @@ function HeaderMenu({
 }
 
 /** One 44px-tall row inside a HeaderMenu popover. */
-function HeaderMenuItem({ icon, label, onSelect }: { icon: React.ReactNode; label: string; onSelect: () => void }) {
+function HeaderMenuItem({ icon, label, onSelect, disabled = false }: { icon: React.ReactNode; label: string; onSelect: () => void; disabled?: boolean }) {
   return (
     <button
       type="button"
       role="menuitem"
       onClick={onSelect}
-      className="flex min-h-11 w-full items-center gap-2 rounded-[9px] px-2.5 text-left text-[13px] font-semibold text-ink hover:bg-bg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+      disabled={disabled}
+      className="flex min-h-11 w-full items-center gap-2 rounded-[9px] px-2.5 text-left text-[13px] font-semibold text-ink hover:bg-bg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:cursor-not-allowed disabled:opacity-45"
     >
       <span className="flex h-5 w-5 shrink-0 items-center justify-center text-accent">{icon}</span>
       {label}
@@ -257,7 +264,10 @@ export function ProjectDashboard({
   flows,
   pipelines,
   pipelinesError,
+  workflows,
   tasks,
+  projectCatalog: projectCatalogEntries = [],
+  projectCwd,
   project,
   loaded,
   openNonce,
@@ -289,6 +299,7 @@ export function ProjectDashboard({
   );
   const taskPanelOpen = board.prefs.taskPanelOpen;
   const [drafts, setDrafts] = useState<string[]>([]);
+  const [pendingRestoredHandoffs, setPendingRestoredHandoffs] = useState<Set<string>>(() => new Set());
   /* The phone focus view reports its currently-focused conversation here so the
      footer shelf can dock that pane's handoff control on its single row (issue
      #177 item 5). */
@@ -320,6 +331,17 @@ export function ProjectDashboard({
      the first tick lands the real time, and reviewer verdicts collapse without
      waiting on the clock at all. */
   const [nowMs, setNowMs] = useState(0);
+  const projectCwdFallbacks = useMemo(() => [
+    ...pipelines.filter((pipeline) => pipeline.project === project).map((pipeline) => pipeline.repoDir),
+    ...workflows.filter((workflow) => workflow.project === project).map((workflow) => workflow.repoDir),
+    ...(projectCwd ? [projectCwd] : []),
+  ], [pipelines, project, projectCwd, workflows]);
+  const resolvedDraftCwd = useMemo(
+    () => projectDraftWorkingDirectory(files, project, projectCatalogEntries, undefined, projectCwdFallbacks, ""),
+    [files, project, projectCatalogEntries, projectCwdFallbacks],
+  );
+  const initialDraftCwd = resolvedDraftCwd || "/";
+  const initialDraftCwdVerified = Boolean(resolvedDraftCwd);
 
   useEffect(() => {
     const tick = () => setNowMs(Date.now());
@@ -329,9 +351,82 @@ export function ProjectDashboard({
   }, []);
 
   useEffect(() => {
+    if (!loaded) return;
+    let cancelled = false;
+    const retryTimers = new Set<number>();
+    const restored = loadDrafts(project);
+    const unresolved: Array<{ id: string; sourcePath: string }> = [];
+    for (const id of restored) {
+      if (!isWorkflowDraftId(id)) {
+        const sourcePath = draftSrc(id) || undefined;
+        if (draftCwd(id)) {
+          if (!sourcePath && initialDraftCwdVerified) replaceUnverifiedDraftCwd(id, initialDraftCwd);
+          continue;
+        }
+        const sourceCwd = sourcePath
+          ? files.find((file) => file.path === sourcePath)?.cwd?.trim()
+          : undefined;
+        if (sourceCwd) requireDraftCwdConfirmation(id, sourceCwd);
+        else if (sourcePath) unresolved.push({ id, sourcePath });
+        else if (initialDraftCwdVerified) seedDraftCwd(id, initialDraftCwd);
+        else requireDraftCwdConfirmation(id, initialDraftCwd);
+      }
+    }
     /* eslint-disable-next-line react-hooks/set-state-in-effect */
-    setDrafts(loadDrafts(project));
-  }, [project, openNonce]);
+    setDrafts(restored);
+    setPendingRestoredHandoffs(new Set(unresolved.map(({ id }) => id)));
+    const resolveSourceCwd = (id: string, sourcePath: string, attempt = 0) => {
+      void fetch("/api/spawn?project=" + encodeURIComponent(project) + "&src=" + encodeURIComponent(sourcePath))
+        .then(async (response) => {
+          if (!response.ok) throw new Error(`spawn suggestions failed: ${response.status}`);
+          return response.json() as Promise<{ cwd?: string | null; cwdExists?: boolean }>;
+        })
+        .then((body) => {
+          const sourceCwd = typeof body.cwd === "string" ? body.cwd.trim() : "";
+          if (!sourceCwd) throw new Error("spawn suggestions omitted the source cwd");
+          if (cancelled) return;
+          if (body.cwdExists === false) requireDraftCwdConfirmation(id, sourceCwd);
+          else seedDraftCwd(id, sourceCwd);
+          setPendingRestoredHandoffs((current) => {
+            if (!current.has(id)) return current;
+            const next = new Set(current);
+            next.delete(id);
+            return next;
+          });
+        })
+        .catch(() => {
+          if (cancelled) return;
+          if (attempt + 1 >= HANDOFF_CWD_MAX_ATTEMPTS) {
+            requireDraftCwdConfirmation(id, initialDraftCwd);
+            setPendingRestoredHandoffs((current) => {
+              if (!current.has(id)) return current;
+              const next = new Set(current);
+              next.delete(id);
+              return next;
+            });
+            return;
+          }
+          const delay = attempt < 2
+            ? 0
+            : Math.min(HANDOFF_CWD_RETRY_MS * (2 ** (attempt - 2)), HANDOFF_CWD_MAX_RETRY_MS);
+          const timer = window.setTimeout(() => {
+            retryTimers.delete(timer);
+            resolveSourceCwd(id, sourcePath, attempt + 1);
+          }, delay);
+          retryTimers.add(timer);
+        });
+    };
+    for (const { id, sourcePath } of unresolved) {
+      resolveSourceCwd(id, sourcePath);
+    }
+    return () => {
+      cancelled = true;
+      for (const timer of retryTimers) window.clearTimeout(timer);
+    };
+  /* Source rows are sampled when restoration starts; the dedicated lookup
+     retries independently and `initialDraftCwd` carries ordinary root changes. */
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [project, openNonce, loaded, initialDraftCwd, initialDraftCwdVerified]);
   const toggleTaskPanel = () => board.setTaskPanelOpen(!taskPanelOpen);
   useEffect(
     () => () => {
@@ -583,13 +678,15 @@ export function ProjectDashboard({
   /* randomUUID needs a secure context; LAN http access gets the fallback. */
   const newDraftId = () =>
     typeof crypto.randomUUID === "function" ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
-
   /* The «+ Agent» flow: a draft conversation lands on the scheme as a full
      pane and the camera glides to it — engine, directory and the first prompt
      are picked right inside that pane. */
   const addDraft = () => {
+    if (!loaded) return;
     onUserNavigate?.();
     const id = newDraftId();
+    if (initialDraftCwdVerified) setDraftCwd(id, initialDraftCwd);
+    else requireDraftCwdConfirmation(id, initialDraftCwd);
     persistDrafts([...drafts, id]);
     pendingFocusRef.current = "draft::" + id;
   };
@@ -623,6 +720,8 @@ export function ProjectDashboard({
     }
     const id = newDraftId();
     setDraftSrc(id, file.path, file.conversationId);
+    const handoffCwd = projectDraftWorkingDirectory(files, project, projectCatalogEntries, file.path, projectCwdFallbacks, initialDraftCwd);
+    requireDraftCwdConfirmation(id, handoffCwd);
     persistDrafts([...drafts, id]);
     pendingFocusRef.current = "draft::" + id;
   };
@@ -640,6 +739,8 @@ export function ProjectDashboard({
     onUserNavigate?.();
     const id = newDraftId();
     setDraftText(id, task.text);
+    if (initialDraftCwdVerified) setDraftCwd(id, initialDraftCwd);
+    else requireDraftCwdConfirmation(id, initialDraftCwd);
     persistDrafts([...drafts, id]);
     pendingFocusRef.current = "draft::" + id;
   };
@@ -780,8 +881,9 @@ export function ProjectDashboard({
      lands or after every stage node is hidden, now the persistent band is gone.
      They dock as placeholder groups in the layout (buildSchemeLayout). */
   const activePipelines = useMemo(() => pipelinesForProject(pipelines, project, files), [pipelines, project, files]);
+  const visibleDrafts = drafts.filter((id) => !pendingRestoredHandoffs.has(id));
   const hasNodes =
-    schemeGroups.length > 0 || schemeManual.length > 0 || drafts.length > 0 || projectTasks.length > 0 || activePipelines.length > 0;
+    schemeGroups.length > 0 || schemeManual.length > 0 || visibleDrafts.length > 0 || projectTasks.length > 0 || activePipelines.length > 0;
   /* Scheme-visible project files, freshest first. They gate live activity for
      project actions; the deletion flow loads its complete target set from the
      uncapped conversation catalog before confirmation. */
@@ -811,7 +913,7 @@ export function ProjectDashboard({
      exists only for an implementer placed as a board node — the same layout the
      scheme draws. Derive availability from that layout's nodes, so a scanned but
      unplaced (hidden/tombstoned) implementer disables the action (#93 finding). */
-  const pipelineLayout = buildSchemeLayout(hasNodes ? schemeGroups : archiveGroups, hasNodes ? schemeManual : [], files, flows, hasNodes ? drafts : [], pipelines);
+  const pipelineLayout = buildSchemeLayout(hasNodes ? schemeGroups : archiveGroups, hasNodes ? schemeManual : [], files, flows, hasNodes ? visibleDrafts : [], pipelines);
   /* Worker rows the scheme still draws in a retained form — an active flow's
      reviewer round deck keeps its finished rounds as deck tabs. Those are
      re-admitted here so a folded reviewer is never listed twice (its deck AND a
@@ -891,7 +993,7 @@ export function ProjectDashboard({
             <HeaderMenu triggerLabel={t("dash.createMenu")} icon={<Plus className="h-5 w-5" aria-hidden />}>
               {(close) => (
                 <>
-                  <HeaderMenuItem icon={<MessageSquarePlus className="h-4 w-4" aria-hidden />} label={t("dash.agent")} onSelect={() => { close(); addDraft(); }} />
+                  <HeaderMenuItem icon={<MessageSquarePlus className="h-4 w-4" aria-hidden />} label={t("dash.agent")} disabled={!loaded} onSelect={() => { close(); addDraft(); }} />
                   <HeaderMenuItem icon={<ListTodo className="h-4 w-4" aria-hidden />} label={t("dash.task")} onSelect={() => { close(); addTaskMobile(); }} />
                   <HeaderMenuItem icon={<span className="text-[15px] font-bold leading-none">≡</span>} label={t("dash.pipeline")} onSelect={() => { close(); setTemplatePickerOpen(true); }} />
                 </>
@@ -1008,7 +1110,7 @@ export function ProjectDashboard({
               surfacePipelines={activePipelines}
               workerStacks={workerStacks}
               tasks={hasNodes ? projectTasks : []}
-              drafts={hasNodes ? drafts : []}
+              drafts={hasNodes ? visibleDrafts : []}
               loaded={loaded}
               focus={highlight}
               onSelect={openSwitchboardFile}
@@ -1046,7 +1148,7 @@ export function ProjectDashboard({
                 surfacePipelines={activePipelines}
                 tasks={hasNodes ? projectTasks : []}
                 workerStacks={workerStacks}
-                drafts={hasNodes ? drafts : []}
+                drafts={hasNodes ? visibleDrafts : []}
                 focus={highlight}
                 attentionPaths={attentionPaths}
                 onSelect={openSwitchboardFile}
@@ -1078,8 +1180,9 @@ export function ProjectDashboard({
               <button
                 type="button"
                 onClick={addDraft}
+                disabled={!loaded}
                 aria-label={t("dash.newConvo")}
-                className="pointer-events-auto flex shrink-0 items-center gap-1 rounded-[8px] border border-line bg-panel px-3 py-1.5 text-[11.5px] font-bold text-ink shadow-card hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                className="pointer-events-auto flex shrink-0 items-center gap-1 rounded-[8px] border border-line bg-panel px-3 py-1.5 text-[11.5px] font-bold text-ink shadow-card hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:cursor-not-allowed disabled:opacity-45"
               >
                 <span className="text-[13px] leading-none text-accent">+</span> {t("dash.agent")}
               </button>

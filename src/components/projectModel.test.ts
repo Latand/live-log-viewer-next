@@ -6,11 +6,13 @@ import {
   buildArchiveBranchGroups,
   buildBranchGroups,
   buildProjectSummaries,
+  draftWorkingDirectory,
   descendantCounts,
   isConversation,
   kidsIndex,
   quietHistoryRows,
   quietRootsWithActiveDescendants,
+  projectDraftWorkingDirectory,
   residualItems,
   resolveProjectView,
   subtree,
@@ -74,6 +76,70 @@ describe("tree primitives", () => {
     const counts = descendantCounts(cyclic);
     expect(counts.get("/a")).toBe(1);
     expect(counts.get("/b")).toBe(1);
+  });
+});
+
+describe("draftWorkingDirectory", () => {
+  test("prefills project drafts from the dominant canonical root and handoffs from their source cwd", () => {
+    const files = [
+      entry({ path: "/recent-worktree", project: "viewer", cwd: "/repo/.worktrees/fix", projectRoot: "/repo", mtime: 300 }),
+      entry({ path: "/older-main", project: "viewer", cwd: "/repo", projectRoot: "/repo", mtime: 200 }),
+      entry({ path: "/other-root", project: "viewer", cwd: "/alternate", projectRoot: "/alternate", mtime: 400 }),
+      entry({ path: "/elsewhere", project: "other", cwd: "/elsewhere", projectRoot: "/elsewhere", mtime: 500 }),
+    ];
+
+    expect(draftWorkingDirectory(files, "viewer")).toBe("/repo");
+    expect(draftWorkingDirectory(files, "viewer", "/recent-worktree")).toBe("/repo/.worktrees/fix");
+  });
+
+  test("uses the freshest canonical root when project candidates have equal support", () => {
+    const files = [
+      entry({ path: "/older", project: "viewer", cwd: "/older", projectRoot: "/older", mtime: 100 }),
+      entry({ path: "/newer", project: "viewer", cwd: "/newer", projectRoot: "/newer", mtime: 200 }),
+    ];
+
+    expect(draftWorkingDirectory(files, "viewer")).toBe("/newer");
+  });
+
+  test("uses a project-owned repository fallback before its first conversation exists", () => {
+    expect(draftWorkingDirectory([], "viewer", undefined, ["", "/repo"])).toBe("/repo");
+  });
+
+  test("prefills a catalog-only project from its full-scan canonical root", () => {
+    expect(projectDraftWorkingDirectory([], "viewer", [
+      { project: "viewer", projectRoot: "/repo", smt: 100, conversations: 3 },
+    ])).toBe("/repo");
+  });
+
+  test("prefers the full-scan canonical root when capped rows disagree", () => {
+    const files = [
+      entry({ path: "/minority", project: "viewer", cwd: "/minority", projectRoot: "/minority", mtime: 500 }),
+    ];
+
+    expect(projectDraftWorkingDirectory(files, "viewer", [
+      { project: "viewer", projectRoot: "/canonical", smt: 600, conversations: 12 },
+    ])).toBe("/canonical");
+  });
+
+  test("uses the deterministic server fallback when a project has no cwd metadata", () => {
+    expect(projectDraftWorkingDirectory([], "legacy", [], undefined, [], "/home/user/Projects/legacy")).toBe(
+      "/home/user/Projects/legacy",
+    );
+  });
+
+  test("excludes an unresolved deleted scratchpad cwd from ordinary draft root voting", () => {
+    const deletedScratchpad = "/tmp/claude-1000/-outside-repos-legacy/deleted-session/scratchpad";
+    const files = [entry({
+      path: "/sessions/deleted-scratchpad.jsonl",
+      project: "legacy",
+      cwd: deletedScratchpad,
+      projectRoot: null,
+      mtime: 900,
+    })];
+
+    expect(projectDraftWorkingDirectory(files, "legacy", [], undefined, [], "/home/user/Projects/legacy")).toBe(
+      "/home/user/Projects/legacy",
+    );
   });
 });
 

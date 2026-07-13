@@ -407,6 +407,52 @@ describe("ClaudeStreamBrokerHost", () => {
     await replacement.release();
   });
 
+  test("a missing replay confirmation times out and leaves retry ownership for adoption", async () => {
+    const ledger = new RecordingDeliveryLedger();
+    const eventStore = new MemoryEventStore();
+    const firstChild = new FakeClaude(ledger);
+    const first = await ClaudeStreamBrokerHost.adopt("timeout-session", {
+      cwd: "/repo",
+      deliveryLedger: ledger,
+      eventStore,
+      requestTimeoutMs: 5,
+      shutdownGraceMs: 5,
+      readAuthStatus: () => ({ loggedIn: true, authMethod: "claude.ai", subscriptionType: "max" }),
+      readTranscript: () => [],
+      spawnProcess: fakeSpawn(firstChild, {}),
+    });
+
+    await expect(first.send({ id: "timeout-entry", text: "retry after timeout" }))
+      .rejects.toThrow("delivery confirmation timed out");
+    expect((await first.health()).status).toBe("dead");
+    expect(ledger.load("timeout-session")).toContainEqual(expect.objectContaining({
+      entry: { id: "timeout-entry", text: "retry after timeout" },
+      delivered: false,
+    }));
+    await first.release();
+
+    const replacementChild = new FakeClaude(ledger);
+    const replacement = await ClaudeStreamBrokerHost.adopt("timeout-session", {
+      cwd: "/repo",
+      deliveryLedger: ledger,
+      eventStore,
+      requestTimeoutMs: 1_000,
+      readAuthStatus: () => ({ loggedIn: true, authMethod: "claude.ai", subscriptionType: "max" }),
+      readTranscript: () => [],
+      spawnProcess: fakeSpawn(replacementChild, {}),
+    });
+    const retried = replacement.send({ id: "timeout-entry", text: "retry after timeout" });
+    replacementChild.emitJson({
+      type: "user",
+      isReplay: true,
+      session_id: "timeout-session",
+      uuid: "retry-timeout-user",
+      message: { role: "user", content: [{ type: "text", text: "retry after timeout" }] },
+    });
+    expect(await retried).toEqual({ outcome: "turn-started", turnId: "timeout-entry" });
+    await replacement.release();
+  });
+
   test("managed Claude adoption uses its credential home and transcript root", async () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-managed-claude-host-"));
     const configDir = path.join(directory, "account");

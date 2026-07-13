@@ -100,7 +100,7 @@ export function Viewer() {
   const [project, setProject] = useState<string>(() => initialProject());
   const [pendingHash, setPendingHash] = useState<ConversationHash | null>(null);
   const [catalogPin, dispatchCatalogPin] = useReducer(reduceCatalogPin, null);
-  const { files: allFiles, requestScope, projectCatalog, flows: polledFlows, pipelines, pipelinesError, workflows, tasks, systemHealth, conversationAliases, loaded } = useFiles(null, filesRequestPin(pendingHash, catalogPin?.path ?? null));
+  const { files: allFiles, requestScope, projectCatalog, projectCwds, flows: polledFlows, pipelines, pipelinesError, workflows, tasks, systemHealth, conversationAliases, loaded } = useFiles(null, filesRequestPin(pendingHash, catalogPin?.path ?? null));
   /* A committed account migration keeps the archived predecessor entry in the
      payload (for chain history) but it must never render as a second standalone
      card — every surface below sees only current generations. A no-op (same
@@ -582,6 +582,8 @@ export function Viewer() {
             pipelinesError={pipelinesError}
             workflows={workflows}
             tasks={tasks}
+            projectCatalog={projectCatalog}
+            projectCwd={projectCwds[project]}
             project={project}
             loaded={loaded}
             openNonce={openNonce}

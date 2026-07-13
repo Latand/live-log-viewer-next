@@ -47,3 +47,4 @@ prod.log
 /.claude/*
 !/.claude/skills/
 /.tmux-multi-agent/
+/fixtures/demo-home/.capture/

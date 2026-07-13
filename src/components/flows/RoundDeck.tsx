@@ -18,6 +18,7 @@ const TAB_STEP = 30;
 const TAB_MAX = 5;
 
 export interface DeckRound {
+  key: string;
   round: Round;
   file: FileEntry | null;
 }
@@ -93,23 +94,24 @@ export function RoundDeck({
   const { t } = useLocale();
   const latest = rounds.length ? rounds[rounds.length - 1]! : null;
   /* Ephemeral by design: on reload the live round is in front again. */
-  const [frontN, setFrontN] = useState<number | null>(null);
+  const [frontKey, setFrontKey] = useState<string | null>(null);
   /* State adjustments happen during render (no effects): a strip chip click
      pulls its round forward, and a freshly started round always surfaces —
      stale manual selection would hide live work. */
   const [seenFocus, setSeenFocus] = useState<number | null>(null);
   if (focusRound != null && focusRound !== seenFocus) {
     setSeenFocus(focusRound);
-    setFrontN(Math.round(focusRound));
+    const focused = rounds.findLast((item) => item.round.n === Math.round(focusRound));
+    setFrontKey(focused?.key ?? null);
   }
-  const [seenLatest, setSeenLatest] = useState<number | null>(null);
-  if (latest && latest.round.n !== seenLatest) {
-    setSeenLatest(latest.round.n);
-    if (frontN != null && latest.round.n > frontN && latest.round.verdict === null) setFrontN(null);
+  const [seenLatest, setSeenLatest] = useState<string | null>(null);
+  if (latest && latest.key !== seenLatest) {
+    setSeenLatest(latest.key);
+    if (frontKey != null && latest.round.verdict === null) setFrontKey(null);
   }
   const front = useMemo(
-    () => rounds.find((item) => item.round.n === frontN) ?? latest,
-    [rounds, frontN, latest],
+    () => rounds.find((item) => item.key === frontKey) ?? latest,
+    [rounds, frontKey, latest],
   );
 
   if (!front) {
@@ -120,13 +122,13 @@ export function RoundDeck({
     );
   }
 
-  const stacked = rounds.filter((item) => item.round.n !== front.round.n).reverse();
+  const stacked = rounds.filter((item) => item.key !== front.key).reverse();
   const shown = stacked.slice(0, TAB_MAX);
   const hidden = stacked.length - shown.length;
   const tone = verdictTone(front.round.verdict);
   const finished = front.round.verdict !== null || !!front.round.error;
   const liveBehind =
-    latest && front.round.n !== latest.round.n && latest.round.verdict === null && !latest.round.error
+    latest && front.key !== latest.key && latest.round.verdict === null && !latest.round.error
       ? latest
       : null;
 
@@ -134,7 +136,7 @@ export function RoundDeck({
     <div className="deck-3d relative h-full" style={{ paddingBottom: Math.min(stacked.length, TAB_MAX + (hidden ? 1 : 0)) * TAB_STEP }}>
       {/* Front card. Key by round: swapping rounds remounts the pane with the
           scheme fade instead of morphing one feed into another. */}
-      <div key={front.round.n} className="scheme-enter relative z-[11] flex h-full flex-col">
+      <div key={front.key} className="scheme-enter relative z-[11] flex h-full flex-col">
         {front.file ? (
           <BranchPane
             file={front.file}
@@ -171,11 +173,11 @@ export function RoundDeck({
 
       {shown.map((item, index) => (
         <RoundTab
-          key={item.round.n}
+          key={item.key}
           round={item.round}
           depth={index}
-          pulse={liveBehind?.round.n === item.round.n}
-          onPull={() => setFrontN(item.round.n)}
+          pulse={liveBehind?.key === item.key}
+          onPull={() => setFrontKey(item.key)}
         />
       ))}
       {hidden > 0 ? (

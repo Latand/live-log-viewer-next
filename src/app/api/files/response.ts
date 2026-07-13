@@ -4,11 +4,12 @@ import path from "node:path";
 
 import { NextResponse } from "next/server";
 
-import { listFilesWithProjectCatalog } from "@/lib/scanner";
+import { listFilesWithProjectCatalog, pinnedPathsFor } from "@/lib/scanner";
 import { agentRegistry, conversationLookupFromSnapshot } from "@/lib/agent/registry";
 import { conversationCatalogSnapshot } from "@/lib/scanner/conversationCatalog";
 import { pidAlive, readPpid } from "@/lib/scanner/process";
 import { loadFlows } from "@/lib/flows/store";
+import { projectRestoredFlows } from "@/lib/flows/visibility";
 import { loadPipelines } from "@/lib/pipelines/store";
 import type { Pipeline } from "@/lib/pipelines/types";
 import { filterPipelinesForFileScan } from "@/lib/pipelines/visibility";
@@ -21,13 +22,15 @@ import { readAuthorshipEvidence } from "@/lib/reaperAuthorship";
 import { overlaySessionTitles } from "@/lib/session/titleProjection";
 import { tmuxEndpointHealth } from "@/lib/tmux";
 import { claudeProjectRootFor, codexSessionRootFor } from "@/lib/scanner/roots";
+import { projectRootForCwd } from "@/lib/scanner/describe";
+import { projectDirectoryFallbacks } from "@/lib/scanner/projectDirectories";
 import type { FilesResponse, ProjectCatalogEntry } from "@/lib/types";
 
 interface FilesRouteDependencies {
   listFilesWithProjectCatalog: (
     selectedProject: string | undefined,
     pinnedPath: string | undefined,
-  ) => ReturnType<typeof listFilesWithProjectCatalog>;
+  ) => Promise<Awaited<ReturnType<typeof listFilesWithProjectCatalog>> & { pinOverlayPaths?: string[] }>;
 }
 
 function projectedProjectCatalog(
@@ -50,12 +53,15 @@ function projectedProjectCatalog(
     }
   }
   const groups = new Map<string, ProjectCatalogEntry>();
+  const fallbackRoots = new Map(fallback.map((entry) => [entry.project, entry.projectRoot] as const));
   for (const entry of source) {
     if (archivedPaths.has(entry.path)) continue;
     const project = projectByPath.get(entry.path) ?? entry.project;
     const group = groups.get(project) ?? { project, smt: 0, conversations: 0 };
     group.smt = Math.max(group.smt, entry.mtime);
     group.conversations += 1;
+    const projectRoot = fallbackRoots.get(entry.project);
+    if (!group.projectRoot && projectRoot) group.projectRoot = projectRoot;
     groups.set(project, group);
   }
   return [...groups.values()].sort((left, right) => right.smt - left.smt || left.project.localeCompare(right.project));
@@ -65,7 +71,9 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
   const url = new URL(request.url);
   const selectedProject = url.searchParams.get("project")?.trim() || undefined;
   const pinnedPath = url.searchParams.get("path")?.trim() || undefined;
-  const { files, projectCatalog } = await dependencies.listFilesWithProjectCatalog(selectedProject, pinnedPath);
+  const { files, projectCatalog, pinOverlayPaths } = await dependencies.listFilesWithProjectCatalog(selectedProject, pinnedPath);
+  const responsePinOverlayPaths = new Set(pinOverlayPaths ?? []);
+  const visibilityPinnedPaths = new Set([...pinnedPathsFor(pinnedPath), ...responsePinOverlayPaths]);
   // A scan is a read model. Runtime reconciliation and notifications belong to
   // the external scheduler, keeping repeated GETs byte-stable for state files.
   const registry = agentRegistry();
@@ -101,6 +109,8 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
       root: parentConversation.engine === "codex" ? "codex-sessions" as const : "claude-projects" as const,
       name: rootPath ? path.relative(rootPath, parentPath) : path.basename(parentPath),
       project: parentGeneration.launchProfile.project ?? child.project,
+      cwd: parentGeneration.launchProfile.cwd,
+      projectRoot: parentGeneration.launchProfile.cwd ? projectRootForCwd(parentGeneration.launchProfile.cwd) : null,
       title: parentGeneration.launchProfile.title ?? path.basename(parentPath, path.extname(parentPath)),
       engine: parentConversation.engine,
       kind: "session",
@@ -122,6 +132,7 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
     };
     files.push(placeholder);
     filesByPath.set(parentPath, placeholder);
+    if (responsePinOverlayPaths.has(child.path)) responsePinOverlayPaths.add(parentPath);
   }
   const scannedPaths = new Set(files.map((file) => file.path));
   const ownsPath = (conversation: (typeof registrySnapshot.conversations)[keyof typeof registrySnapshot.conversations], pathname: string) =>
@@ -152,7 +163,27 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
       file.effort = profile.effort ?? file.effort;
       file.goal = profile.goal ?? file.goal;
       file.plan = profile.plan ?? file.plan;
-      const parentConversationId = registrySnapshot.lineageEdges[conversation.id]?.parentConversationId ?? profile.parentConversationId;
+      const durableEdge = registrySnapshot.lineageEdges[conversation.id];
+      const memberships = registrySnapshot.memberships[conversation.id] ?? [];
+      if (durableEdge || memberships.length) {
+        file.durableLineage = {
+          kind: durableEdge?.kind ?? "spawn",
+          role: durableEdge?.role ?? null,
+          parentConversationId: durableEdge?.parentConversationId ?? profile.parentConversationId,
+          reviewsConversationId: durableEdge?.reviewsConversationId ?? null,
+          memberships: memberships.map((membership) => ({
+            kind: membership.kind,
+            containerId: membership.containerId,
+            role: membership.role,
+            slot: membership.slot,
+            stageId: membership.stageId,
+            stageOrder: membership.stageOrder,
+            round: membership.round,
+            parentConversationId: membership.parentConversationId,
+          })),
+        };
+      }
+      const parentConversationId = durableEdge?.parentConversationId ?? profile.parentConversationId;
       if (parentConversationId) {
         const canonicalParentId = conversationLookup.canonicalConversationId(parentConversationId);
         const parentPath = registrySnapshot.conversations[canonicalParentId]?.generations.at(-1)?.path ?? null;
@@ -281,16 +312,33 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
   let pipelines: Pipeline[] = [];
   let pipelinesError: string | undefined;
   try {
-    pipelines = filterPipelinesForFileScan(loadPipelines(), files);
+    pipelines = filterPipelinesForFileScan(loadPipelines(), files, {
+      pinnedPaths: visibilityPinnedPaths,
+      memberships: registrySnapshot.memberships,
+    });
   } catch (error) {
     pipelinesError = error instanceof Error ? error.message : "pipeline registry unreadable";
     console.error("[files] pipelines store unreadable; serving without pipelines", error);
   }
-  const projected = projectRateLimitReadModel(files, loadFlows(), registrySnapshot);
+  const flows = projectRestoredFlows(loadFlows(), files, {
+    pinnedPaths: visibilityPinnedPaths,
+    memberships: registrySnapshot.memberships,
+  });
+  const projected = projectRateLimitReadModel(files, flows, registrySnapshot);
   const effectiveProjectCatalog = projectedProjectCatalog(projectCatalog, registrySnapshot);
+  const projectCwds = projectDirectoryFallbacks([
+    ...projected.files.map((file) => file.project),
+    ...effectiveProjectCatalog.map((entry) => entry.project),
+    ...projected.flows.map((flow) => flow.project),
+    ...pipelines.map((pipeline) => pipeline.project),
+    ...workflows.map((workflow) => workflow.project),
+    ...tasks.tasks.map((task) => task.project),
+  ]);
   const body = JSON.stringify({
     files: projected.files,
+    ...(responsePinOverlayPaths.size ? { pinOverlayPaths: [...responsePinOverlayPaths] } : {}),
     projectCatalog: effectiveProjectCatalog,
+    ...(Object.keys(projectCwds).length ? { projectCwds } : {}),
     flows: projected.flows,
     pipelines,
     workflows,
