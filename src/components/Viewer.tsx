@@ -23,7 +23,7 @@ import { ProjectRail } from "./ProjectRail";
 import { SupervisorHealthAlert } from "./SupervisorHealthAlert";
 import { DeploymentStatusPill } from "./runtime/DeploymentStatusPill";
 import { cleanTitle, fmtAge } from "./utils";
-import { filesRequestPin, resolvedConversationPin, type ActiveConversationPin } from "./conversationPin";
+import { filesRequestPin, pinForProject, releaseConversationPin, resolvedConversationPin, type ActiveConversationPin } from "./conversationPin";
 
 const PROJECT_KEY = "llvProject";
 
@@ -117,7 +117,11 @@ export function Viewer() {
         /* Navigation moved off the conversation link: the old target must
            stop pinning polls and must not open later out of nowhere. */
         setPendingHash(null);
-        if (next.project) setProject(next.project);
+        const nextProject = next.project;
+        if (nextProject) {
+          setProject(nextProject);
+          setActivePin((current) => pinForProject(current, nextProject));
+        }
       }
     };
     window.addEventListener("hashchange", onHash);
@@ -130,6 +134,7 @@ export function Viewer() {
     /* Explicit project navigation replaces the hash without a hashchange
        event, so any unresolved conversation intent is cancelled here. */
     setPendingHash(null);
+    setActivePin((current) => pinForProject(current, nextProject));
     localStorage.setItem(PROJECT_KEY, nextProject);
     writeHash(nextProject);
     setDrawerOpen(false);
@@ -178,7 +183,7 @@ export function Viewer() {
        `#f=` link to a demoted archived predecessor resolves once that poll
        lands instead of being cleared after the first cap-limited payload. */
     if (hit) {
-      setActivePin(resolvedConversationPin(pendingHash));
+      setActivePin(resolvedConversationPin(pendingHash, { path: hit.path, project: projectKey(hit) }));
       openFile(hit);
       setPendingHash(null);
     }
@@ -247,6 +252,9 @@ export function Viewer() {
      re-flash (D9); consumed by ProjectDashboard's pendingFocusRef path. */
   const [focusRequest, setFocusRequest] = useState<{ path: string; nonce: number } | null>(null);
   const cancelPendingIntent = useCallback(() => setPendingHash(null), []);
+  const releaseClosedPin = useCallback((path: string) => {
+    setActivePin((current) => releaseConversationPin(current, path));
+  }, []);
   const requestFocus = useCallback((path: string) => {
     /* A user-driven focus (N/Shift-N cycle, attention jump) supersedes any
        unresolved deep-link intent; a stale pin must never re-steal focus when
@@ -524,6 +532,7 @@ export function Viewer() {
             onMenu={isMobile ? () => setDrawerOpen(true) : undefined}
             attention={isMobile ? attentionBadge : undefined}
             onUserNavigate={cancelPendingIntent}
+            onConversationClose={releaseClosedPin}
           />
         )}
       </main>

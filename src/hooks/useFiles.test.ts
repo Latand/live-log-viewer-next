@@ -1,7 +1,13 @@
 import { expect, test } from "bun:test";
 
 import { parseConversationHash, resolveConversationTarget } from "@/lib/accounts/identity";
-import { filesRequestPin, resolvedConversationPin, type ActiveConversationPin } from "@/components/conversationPin";
+import {
+  filesRequestPin,
+  pinForProject,
+  releaseConversationPin,
+  resolvedConversationPin,
+  type ActiveConversationPin,
+} from "@/components/conversationPin";
 
 import { createFilesClientCache, filesApiUrl, filesPollCadence, filesRequestHeaders } from "./useFiles";
 
@@ -80,7 +86,7 @@ test("an out-of-cap #f target keeps its pinned representation through background
   const pinned = await cache.revalidate(filesRequestPin(intent, active));
   const hit = resolveConversationTarget(pinned.files, intent, {});
   expect(hit?.path).toBe(targetPath);
-  active = resolvedConversationPin(intent);
+  active = resolvedConversationPin(intent, hit!);
 
   const refreshed = await cache.revalidate(filesRequestPin(null, active));
   expect(refreshed.files.find((entry) => entry.path === targetPath)?.title).toBe("Target 2");
@@ -88,6 +94,41 @@ test("an out-of-cap #f target keeps its pinned representation through background
     `/api/files?path=${encodeURIComponent(targetPath)}`,
     `/api/files?path=${encodeURIComponent(targetPath)}`,
   ]);
+});
+
+test("closing an out-of-cap #f card releases its pinned representation", async () => {
+  const targetPath = "/archive/closed-target.jsonl";
+  const intent = parseConversationHash(`#f=${encodeURIComponent(targetPath)}`);
+  const requests: string[] = [];
+  const cache = createFilesClientCache(async (input) => {
+    requests.push(input);
+    const files = input === "/api/files"
+      ? [file("/global", "Global")]
+      : [file("/global", "Global"), file(targetPath, "Pinned")];
+    return new Response(JSON.stringify({ files }));
+  });
+
+  const pinned = await cache.revalidate(filesRequestPin(intent, null));
+  const hit = resolveConversationTarget(pinned.files, intent, {})!;
+  const active = resolvedConversationPin(intent, hit);
+  const afterClose = releaseConversationPin(active, hit.path);
+  const refreshed = await cache.revalidate(filesRequestPin(null, afterClose));
+
+  expect(refreshed.files.map((entry) => entry.path)).toEqual(["/global"]);
+  expect(requests).toEqual([
+    `/api/files?path=${encodeURIComponent(targetPath)}`,
+    "/api/files",
+  ]);
+});
+
+test("project navigation releases an active #f pin after leaving its card project", () => {
+  const targetPath = "/archive/navigation-target.jsonl";
+  const intent = parseConversationHash(`#f=${encodeURIComponent(targetPath)}`);
+  const target = file(targetPath, "Pinned");
+  const active = resolvedConversationPin(intent, target);
+
+  expect(pinForProject(active, target.project)).toBe(active);
+  expect(pinForProject(active, "project-b")).toBeNull();
 });
 
 function file(path: string, title: string) {

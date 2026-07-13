@@ -86,6 +86,8 @@ interface Props {
       drafts, pipeline and task jumps) supersede any unresolved deep-link
       intent held above; the Viewer cancels its pending hash here. */
   onUserNavigate?: () => void;
+  /** Releases any deep-link scan pin owned by a card after that card closes. */
+  onConversationClose?: (path: string) => void;
 }
 
 /** Manual additions and removals of scheme nodes, persisted per project. */
@@ -262,6 +264,7 @@ export function ProjectDashboard({
   onMenu,
   attention,
   onUserNavigate,
+  onConversationClose,
 }: Props) {
   const { t } = useLocale();
   const isMobile = useIsMobile();
@@ -318,7 +321,13 @@ export function ProjectDashboard({
     if (!loaded) return;
     const restored = loadDrafts(project);
     for (const id of restored) {
-      if (!isWorkflowDraftId(id)) seedDraftCwd(id, initialDraftCwd);
+      if (!isWorkflowDraftId(id)) {
+        const sourcePath = draftSrc(id) || undefined;
+        const sourceCwd = sourcePath
+          ? files.find((file) => file.path === sourcePath)?.cwd?.trim()
+          : undefined;
+        if (!sourcePath || sourceCwd) seedDraftCwd(id, sourceCwd || initialDraftCwd);
+      }
     }
     /* eslint-disable-next-line react-hooks/set-state-in-effect */
     setDrafts(restored);
@@ -646,6 +655,7 @@ export function ProjectDashboard({
        clears locally. */
     board.mutate([planClose(path, ephemeral).mutation]);
     setEphemeral((prev) => planClose(path, prev).ephemeral);
+    onConversationClose?.(path);
   };
 
   /* Latest manual list behind a ref so the convergence effect below reads

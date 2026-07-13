@@ -149,12 +149,17 @@ export function DraftAgentPane({
   const [src] = useState(() => readField(draftId, "src"));
   const [parentConversationId] = useState(() => readField(draftId, "parentConversationId"));
   const srcFile = src ? (files.find((entry) => entry.path === src) ?? null) : null;
+  const awaitingInheritedCwdRef = useRef(false);
   const [engine, setEngineState] = useState<Engine>(() => {
     const stored = readField(draftId, "engine");
     if (stored === "codex" || stored === "claude") return stored;
     return srcFile?.engine === "codex" ? "codex" : "claude";
   });
-  const [cwd, setCwdState] = useState(() => readField(draftId, "cwd") || draftWorkingDirectory(files, project, src));
+  const [cwd, setCwdState] = useState(() => {
+    const stored = readField(draftId, "cwd");
+    awaitingInheritedCwdRef.current = Boolean(src && !stored && !srcFile?.cwd?.trim());
+    return stored || draftWorkingDirectory(files, project, src);
+  });
   const [model, setModelState] = useState(() => readField(draftId, "model") || defaultModelFor(engine));
   const [effort, setEffortState] = useState(() => readField(draftId, "effort"));
   const [speed, setSpeedState] = useState<SpeedChoice>(() => {
@@ -196,6 +201,7 @@ export function DraftAgentPane({
     if (effort && !isEngineEffort(value, effort)) setEffort("");
   };
   const setCwd = (value: string) => {
+    awaitingInheritedCwdRef.current = false;
     setCwdState(value);
     writeField(draftId, "cwd", value);
   };
@@ -277,7 +283,8 @@ export function DraftAgentPane({
         if (Array.isArray(json.dirs)) setDirs(json.dirs);
         setCwdState((prev) => {
           const inherited = typeof json.cwd === "string" ? json.cwd : "";
-          const next = prev || inherited || json.dirs?.[0] || "";
+          const next = (awaitingInheritedCwdRef.current && inherited) || prev || inherited || json.dirs?.[0] || "";
+          if (next === inherited && inherited) awaitingInheritedCwdRef.current = false;
           if (next !== prev) writeField(draftId, "cwd", next);
           return next;
         });

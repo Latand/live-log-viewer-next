@@ -4,6 +4,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { flushSync } from "react-dom";
 
 import { emptyStore } from "@/components/runtime/runtimeModel";
+import type { FileEntry } from "@/lib/types";
 
 /* A mounted behavioral test for the shared desktop/mobile legacy-draft purge
    (#136/#156). It seeds sessionStorage the way a pre-fencing tab left it, mounts
@@ -113,6 +114,7 @@ const AGENT_PANE = '[aria-label="Draft of a new agent conversation"]';
 
 const draftsKey = (project: string) => `llvDrafts:${project}`;
 const wfField = (id: string, name: string) => `llvWfDraft:${id}:${name}`;
+const agentField = (id: string, name: string) => `llvDraftPane:${id}:${name}`;
 const WF_FIELDS = ["template", "dir", "task", "mode"];
 const agentA = "3f2504e0-4f89-41d3-9a0c-0305e82c3301";
 
@@ -143,6 +145,7 @@ function mount(node: React.ReactElement): Root {
 let roots: Root[] = [];
 beforeEach(() => {
   dom.document.body.replaceChildren();
+  G.fetch = OVERRIDES.fetch;
   roots = [];
 });
 afterEach(async () => {
@@ -184,6 +187,108 @@ test("a restored project draft renders with its deterministic project directory 
   expect(await waitFor(() => dom.document.querySelector(AGENT_PANE) !== null)).toBe(true);
   const directory = dom.document.querySelector('input[aria-label="Agent working directory"]') as unknown as HTMLInputElement | null;
   expect(directory?.value).toBe(`/home/tester/Projects/${project}`);
+});
+
+test("a restored handoff draft renders with the source conversation cwd", async () => {
+  const project = "handoff-project";
+  const sourcePath = "/sessions/source.jsonl";
+  const sourceCwd = "/repos/handoff/.worktrees/source-branch";
+  const source: FileEntry = {
+    path: sourcePath,
+    root: "codex-sessions",
+    name: "source.jsonl",
+    project,
+    cwd: sourceCwd,
+    projectRoot: "/repos/handoff",
+    title: "Source conversation",
+    engine: "codex",
+    kind: "session",
+    fmt: "codex",
+    parent: null,
+    mtime: 1,
+    size: 1,
+    activity: "recent",
+    proc: null,
+    pid: null,
+    model: null,
+    pendingQuestion: null,
+    waitingInput: null,
+  };
+  dom.sessionStorage.setItem(draftsKey(project), JSON.stringify([agentA]));
+  dom.sessionStorage.setItem(agentField(agentA, "src"), sourcePath);
+
+  roots.push(mount(<ProjectDashboard {...dashboardProps(project)} files={[source]} />));
+
+  expect(await waitFor(() => dom.document.querySelector(AGENT_PANE) !== null)).toBe(true);
+  const directory = dom.document.querySelector('input[aria-label="Agent working directory"]') as unknown as HTMLInputElement | null;
+  expect(directory?.value).toBe(sourceCwd);
+});
+
+test("a restored handoff adopts the source cwd when its transcript is outside the snapshot", async () => {
+  const project = "archived-handoff-project";
+  const sourcePath = "/archive/source.jsonl";
+  const sourceCwd = "/repos/archived/.worktrees/source-branch";
+  dom.sessionStorage.setItem(draftsKey(project), JSON.stringify([agentA]));
+  dom.sessionStorage.setItem(agentField(agentA, "src"), sourcePath);
+  G.fetch = (async (input: string | URL | Request) => {
+    if (String(input).startsWith("/api/spawn?")) {
+      return { ok: true, status: 200, json: async () => ({ dirs: [sourceCwd], cwd: sourceCwd }), text: async () => "" };
+    }
+    return { ok: true, status: 200, json: async () => ({}), text: async () => "" };
+  }) as unknown as typeof fetch;
+
+  roots.push(mount(<ProjectDashboard {...dashboardProps(project)} />));
+
+  expect(await waitFor(() => {
+    const directory = dom.document.querySelector('input[aria-label="Agent working directory"]') as unknown as HTMLInputElement | null;
+    return directory?.value === sourceCwd;
+  })).toBe(true);
+});
+
+test("closing a conversation card reports its path to the dashboard owner", async () => {
+  const project = "close-project";
+  const path = "/sessions/close-me.jsonl";
+  const closed: string[] = [];
+  G.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+    if (init?.method === "PATCH") {
+      return { ok: false, status: 400, json: async () => ({ error: "INVALID_REQUEST" }), text: async () => "" };
+    }
+    return { ok: true, status: 200, json: async () => ({}), text: async () => "" };
+  }) as unknown as typeof fetch;
+  const file: FileEntry = {
+    path,
+    root: "codex-sessions",
+    name: "close-me.jsonl",
+    project,
+    cwd: "/repos/close-project",
+    projectRoot: "/repos/close-project",
+    title: "Close me",
+    engine: "codex",
+    kind: "session",
+    fmt: "codex",
+    parent: null,
+    mtime: 1,
+    size: 1,
+    activity: "recent",
+    proc: null,
+    pid: null,
+    model: null,
+    pendingQuestion: null,
+    waitingInput: null,
+  };
+
+  roots.push(mount(
+    <ProjectDashboard
+      {...dashboardProps(project)}
+      files={[file]}
+      onConversationClose={(closedPath) => closed.push(closedPath)}
+    />,
+  ));
+
+  expect(await waitFor(() => dom.document.querySelector('[aria-label="Remove column Close me"]') !== null)).toBe(true);
+  const close = dom.document.querySelector('[aria-label="Remove column Close me"]') as unknown as HTMLElement;
+  close.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event);
+  expect(closed).toEqual([path]);
 });
 
 test("the phone surface DOES mount the real WorkflowDraftPane for a live wf draft (routing is real)", async () => {
