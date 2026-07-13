@@ -223,8 +223,14 @@ describe("resolveProjectView", () => {
     expect(resolveProjectView({ preferredView: null, hasNodes: true, hasArchiveNodes: false, hasHistoryRows: true })).toBe("scheme");
   });
 
-  test("active projects honor an explicit list selection", () => {
+  test("an explicit list selection wins even while the scheme has live nodes", () => {
+    /* Issue #177 item 7: the Схема/Список toggle must switch reliably; a saved
+       «list» choice is honored whenever history rows exist to show. */
     expect(resolveProjectView({ preferredView: "list", hasNodes: true, hasArchiveNodes: false, hasHistoryRows: true })).toBe("list");
+  });
+
+  test("a list selection with no history rows falls back to the active scheme", () => {
+    expect(resolveProjectView({ preferredView: "list", hasNodes: true, hasArchiveNodes: false, hasHistoryRows: false })).toBe("scheme");
   });
 
   test("keeps an explicit scheme selection when an archive scheme exists", () => {

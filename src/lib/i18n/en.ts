@@ -42,6 +42,7 @@ export const en = {
   "runtimeConfig.pending": "After turn",
   "runtimeConfig.confirming": "Next turn",
   "runtimeConfig.applied": "Applied",
+  "runtimeConfig.pendingDraft": "Unapplied draft: {model} · {effort} — tap to review",
   "runtimeConfig.failed": "Could not change the running agent configuration",
   "time.agoSec": "{n}s ago",
   "time.agoMin": "{n}m ago",
@@ -83,6 +84,7 @@ export const en = {
   "dash.emptyHint": "Open the switchboard in the bottom-right corner and click a conversation — it will appear here",
   "dash.viewScheme": "scheme",
   "dash.viewList": "conversations",
+  "dash.hiddenShelf": "Hidden",
 
   // ProjectTrash
   "trash.title": "Root conversations",

@@ -24,11 +24,13 @@ import { pipelinesForProject } from "./pipelines/pipelineModel";
 import { buildSchemeLayout } from "./scheme/layout";
 import { collapsibleWorkerFiles, groupWorkerStacks, pipelineOriginOf, pipelineStagePipelineIds, protectedReviewerNodes } from "./scheme/workerCollapse";
 import { WorkerStacks } from "./WorkerStacks";
+import { MobileBottomShelf } from "./MobileBottomShelf";
 import { clearWorkflowDraftStorage } from "./workflows/WorkflowDraftPane";
 import { dropLegacyWorkflowDrafts, isWorkflowDraftId } from "./workflows/workflowModel";
 import { TaskPanel } from "./tasks/TaskPanel";
 import { TaskToastHost } from "./tasks/taskToast";
 import { MobileFocusView } from "./mobile/MobileFocusView";
+import { canHandoff, HandoffHandle } from "./HandoffHandle";
 import { SchemeBoard } from "./scheme/SchemeBoard";
 import { Switchboard } from "./Switchboard";
 import {
@@ -287,6 +289,10 @@ export function ProjectDashboard({
   );
   const taskPanelOpen = board.prefs.taskPanelOpen;
   const [drafts, setDrafts] = useState<string[]>([]);
+  /* The phone focus view reports its currently-focused conversation here so the
+     footer shelf can dock that pane's handoff control on its single row (issue
+     #177 item 5). */
+  const [mobileActiveFile, setMobileActiveFile] = useState<FileEntry | null>(null);
   /* Desktop `+ Task`: bump drops the inline sticky composer in a free slot on
      the board (pinned near the button). */
   const [newTaskNonce, setNewTaskNonce] = useState(0);
@@ -983,7 +989,7 @@ export function ProjectDashboard({
               onClose={closeNode}
               onDraftClose={removeDraft}
               onDraftSpawned={draftSpawned}
-              onHandoff={addHandoffDraft}
+              onActiveChange={setMobileActiveFile}
               taskSheetNonce={taskSheetNonce}
             />
           ) : listAvailable ? (
@@ -1080,22 +1086,38 @@ export function ProjectDashboard({
       {/* Worker-class cards that have auto-collapsed fold into one stack per
           origin — flow / pipeline / spawner (issue #112, #136) — instead of
           vanishing to the switchboard; owner-touched and live cards are never
-          included. */}
-      <WorkerStacks stacks={workerStacks} files={files} flows={flows} pipelines={pipelines} onSelect={openSwitchboardFile} />
+          included. The quiet `residual` strip is derived from `sceneFiles`,
+          which already excludes every collapsed worker, so a card never appears
+          in both a stack and here.
 
-      {/* `residual` is derived from `sceneFiles`, which already excludes every
-          collapsed worker, so a card never appears in both a stack and here. */}
-      {!hasArchiveNodes && residual.length ? (
-        <ResidualStrip items={residual} activeRootPaths={quietActiveRoots} onSelect={openSwitchboardFile} />
-      ) : null}
+          On the phone the handoff control, the collapsed-worker strip, and the
+          quiet strip share one footer row (issue #177 item 5): the handoff docks
+          beside a single disclosure that folds both strips. Desktop renders the
+          two strips directly, side by side. */}
+      {(() => {
+        const workerTotal = workerStacks.reduce((sum, stack) => sum + stack.items.length, 0);
+        const quietTotal = !hasArchiveNodes ? residual.length : 0;
+        const strips = (
+          <>
+            <WorkerStacks stacks={workerStacks} files={files} flows={flows} pipelines={pipelines} onSelect={openSwitchboardFile} />
+            {!hasArchiveNodes && residual.length ? (
+              <ResidualStrip items={residual} activeRootPaths={quietActiveRoots} onSelect={openSwitchboardFile} />
+            ) : null}
+          </>
+        );
+        if (!isMobile) return strips;
+        /* Only the scheme focus view has a focused conversation to hand off; the
+           list view and empty states dock no handoff. */
+        const handoffFile = projectView === "scheme" && mobileActiveFile && canHandoff(mobileActiveFile) ? mobileActiveFile : null;
+        const leading = handoffFile ? <HandoffHandle file={handoffFile} onHandoff={() => addHandoffDraft(handoffFile)} inline /> : null;
+        return (
+          <MobileBottomShelf total={workerTotal + quietTotal} leading={leading}>
+            {strips}
+          </MobileBottomShelf>
+        );
+      })()}
 
       <TaskToastHost />
-
-      {/* Phone-only reservation (finding 4): while a deploy pill is live it
-          publishes `--llv-deploy-inset`; this spacer lifts the docked worker /
-          quiet-conversation sections above it so the toast never covers their
-          rows. Collapses to 0 when no deploy is showing. */}
-      {isMobile ? <div aria-hidden className="shrink-0" style={{ height: "var(--llv-deploy-inset, 0px)" }} /> : null}
     </div>
   );
 }
