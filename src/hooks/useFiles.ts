@@ -41,15 +41,103 @@ export interface FilesData {
 const HEALTHY_SYSTEM = { tmux: { status: "healthy" as const } };
 const EMPTY: FilesData = { files: [], requestScope: null, projectCatalog: [], flows: [], pipelines: [], workflows: [], tasks: [], systemHealth: HEALTHY_SYSTEM, conversationAliases: {}, loaded: false };
 
-export function filesApiUrl(project?: string | null, pinnedPath?: string | null): string {
+export function filesApiUrl(pinnedPath?: string | null): string {
   const params: string[] = [];
-  if (project) params.push("project=" + encodeURIComponent(project));
   /* A pending legacy `#f=` target: the scanner keeps this exact transcript in
      the capped feed so the deep link can resolve its conversation id even
      when the path is a demoted archived predecessor. */
   if (pinnedPath) params.push("path=" + encodeURIComponent(pinnedPath));
   return params.length ? "/api/files?" + params.join("&") : "/api/files";
 }
+
+type FilesFetcher = (input: string, init?: RequestInit) => Promise<Response>;
+
+export interface FilesClientCache {
+  read(): FilesData;
+  revalidate(pinnedPath?: string | null, revision?: number): Promise<FilesData>;
+}
+
+function equalValue(left: unknown, right: unknown): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function patchRows<T>(previous: readonly T[], incoming: readonly T[], keyOf: (value: T) => string): T[] {
+  const previousByKey = new Map(previous.map((value) => [keyOf(value), value] as const));
+  return incoming.map((value) => {
+    const cached = previousByKey.get(keyOf(value));
+    return cached !== undefined && equalValue(cached, value) ? cached : value;
+  });
+}
+
+function parsedFilesData(parsed: FilesResponse | FileEntry[], requestScope: string): FilesData {
+  if (Array.isArray(parsed)) {
+    return { files: parsed, requestScope, projectCatalog: [], flows: [], pipelines: [], workflows: [], tasks: [], systemHealth: HEALTHY_SYSTEM, conversationAliases: {}, loaded: true };
+  }
+  return {
+    files: parsed.files ?? [],
+    requestScope,
+    projectCatalog: parsed.projectCatalog ?? [],
+    flows: parsed.flows ?? [],
+    pipelines: parsed.pipelines ?? [],
+    workflows: parsed.workflows ?? [],
+    tasks: parsed.tasks ?? [],
+    pipelinesError: parsed.pipelinesError,
+    systemHealth: parsed.systemHealth ?? HEALTHY_SYSTEM,
+    conversationAliases: parsed.conversationAliases ?? {},
+    loaded: true,
+  };
+}
+
+function patchFilesData(previous: FilesData, incoming: FilesData): FilesData {
+  return {
+    ...incoming,
+    files: patchRows(previous.files, incoming.files, (file) => file.path),
+    projectCatalog: patchRows(previous.projectCatalog, incoming.projectCatalog, (entry) => entry.project),
+    flows: patchRows(previous.flows, incoming.flows, (flow) => flow.id),
+    pipelines: patchRows(previous.pipelines, incoming.pipelines, (pipeline) => pipeline.id),
+    workflows: patchRows(previous.workflows, incoming.workflows, (workflow) => workflow.id),
+    tasks: patchRows(previous.tasks, incoming.tasks, (task) => task.id),
+    systemHealth: equalValue(previous.systemHealth, incoming.systemHealth) ? previous.systemHealth : incoming.systemHealth,
+    conversationAliases: equalValue(previous.conversationAliases, incoming.conversationAliases)
+      ? previous.conversationAliases
+      : incoming.conversationAliases,
+  };
+}
+
+/** Session-wide stale-while-revalidate cache over the global scan snapshot. */
+export function createFilesClientCache(fetcher: FilesFetcher): FilesClientCache {
+  let snapshot = EMPTY;
+  const etags = new Map<string, string>();
+  let requestedGeneration = 0;
+  let appliedGeneration = 0;
+
+  const performRevalidate = async (pinnedPath?: string | null, revision?: number): Promise<FilesData> => {
+    const generation = ++requestedGeneration;
+    const url = filesApiUrl(pinnedPath);
+    const headers = filesRequestHeaders(etags.get(url) ?? "", revision);
+    const response = await fetcher(url, headers ? { headers } : undefined);
+    if (response.status === 304) {
+      appliedGeneration = Math.max(appliedGeneration, generation);
+      return snapshot;
+    }
+    if (!response.ok) throw new Error(`files request failed: ${response.status}`);
+    const parsed = JSON.parse(await response.text()) as FilesResponse | FileEntry[];
+    if (generation < appliedGeneration) return snapshot;
+    const incoming = parsedFilesData(parsed, url);
+    snapshot = patchFilesData(snapshot, incoming);
+    appliedGeneration = generation;
+    const etag = response.headers.get("ETag");
+    if (etag) etags.set(url, etag);
+    return snapshot;
+  };
+
+  return {
+    read: () => snapshot,
+    revalidate: performRevalidate,
+  };
+}
+
+const filesClientCache = createFilesClientCache((input, init) => fetch(input, init));
 
 export function filesRequestHeaders(etag: string, revision?: number): Record<string, string> | undefined {
   const headers: Record<string, string> = {};
@@ -68,47 +156,15 @@ export function filesPollCadence(connection: "live" | "reconnecting" | "degraded
 }
 
 /** Polls /api/files. Keeps the last good list on transient fetch errors. */
-export function useFiles(project?: string | null, pinnedPath?: string | null): FilesData {
-  const [data, setData] = useState<FilesData>(EMPTY);
+export function useFiles(pinnedPath?: string | null): FilesData {
+  const [data, setData] = useState<FilesData>(() => filesClientCache.read());
   useEffect(() => {
     let alive = true;
-    let lastBody = "";
-    let lastEtag = "";
-    const url = filesApiUrl(project, pinnedPath);
     const performLoad = async (revision?: number): Promise<boolean> => {
       if (!alive) return true;
       try {
-        const headers = filesRequestHeaders(lastEtag, revision);
-        const res = await fetch(url, headers ? { headers } : undefined);
-        /* 304: the server confirms the payload is byte-identical to the last
-           one, so there is nothing to read or re-parse. */
-        if (res.status === 304) return true;
-        if (!res.ok) throw new Error(`files request failed: ${res.status}`);
-        const etag = res.headers.get("ETag");
-        const body = await res.text();
-        if (!alive || body === lastBody) return true;
-        const parsed = JSON.parse(body) as FilesResponse | FileEntry[];
-        /* The flows rollout changes the payload from a bare array to
-           {files, flows}; accept both so client and server can deploy in
-           either order. */
-        if (Array.isArray(parsed)) setData({ files: parsed, requestScope: url, projectCatalog: [], flows: [], pipelines: [], workflows: [], tasks: [], systemHealth: HEALTHY_SYSTEM, conversationAliases: {}, loaded: true });
-        else {
-          setData({
-            files: parsed.files ?? [],
-            requestScope: url,
-            projectCatalog: parsed.projectCatalog ?? [],
-            flows: parsed.flows ?? [],
-            pipelines: parsed.pipelines ?? [],
-            workflows: parsed.workflows ?? [],
-            tasks: parsed.tasks ?? [],
-            pipelinesError: parsed.pipelinesError,
-            systemHealth: parsed.systemHealth ?? HEALTHY_SYSTEM,
-            conversationAliases: parsed.conversationAliases ?? {},
-            loaded: true,
-          });
-        }
-        lastBody = body;
-        if (etag) lastEtag = etag;
+        const next = await filesClientCache.revalidate(pinnedPath, revision);
+        if (alive) setData(next);
         return true;
       } catch {
         /* keep previous list */
@@ -200,6 +256,6 @@ export function useFiles(project?: string | null, pinnedPath?: string | null): F
       window.removeEventListener(TASKS_CHANGED_EVENT, onChanged);
       window.removeEventListener(SESSION_TITLES_CHANGED_EVENT, onChanged);
     };
-  }, [project, pinnedPath]);
+  }, [pinnedPath]);
   return data;
 }

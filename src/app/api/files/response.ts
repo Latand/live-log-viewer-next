@@ -20,6 +20,7 @@ import { readAuthorshipEvidence } from "@/lib/reaperAuthorship";
 import { overlaySessionTitles } from "@/lib/session/titleProjection";
 import { tmuxEndpointHealth } from "@/lib/tmux";
 import { claudeProjectRootFor, codexSessionRootFor } from "@/lib/scanner/roots";
+import { projectRootForCwd } from "@/lib/scanner/describe";
 import type { FilesResponse } from "@/lib/types";
 
 interface FilesRouteDependencies {
@@ -69,6 +70,8 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
       root: parentConversation.engine === "codex" ? "codex-sessions" as const : "claude-projects" as const,
       name: rootPath ? path.relative(rootPath, parentPath) : path.basename(parentPath),
       project: parentGeneration.launchProfile.project ?? child.project,
+      cwd: parentGeneration.launchProfile.cwd,
+      projectRoot: parentGeneration.launchProfile.cwd ? projectRootForCwd(parentGeneration.launchProfile.cwd) : null,
       title: parentGeneration.launchProfile.title ?? path.basename(parentPath, path.extname(parentPath)),
       engine: parentConversation.engine,
       kind: "session",

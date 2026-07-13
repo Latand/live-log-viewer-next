@@ -56,6 +56,38 @@ export function projectKey(file: FileEntry): string {
   return file.project || "other";
 }
 
+/**
+ * Initial cwd for a project draft. Handoffs preserve the source conversation's
+ * exact checkout. Fresh drafts choose the canonical root seen most often in
+ * the project's conversations, with newest activity breaking equal counts.
+ */
+export function draftWorkingDirectory(
+  files: readonly FileEntry[],
+  project: string,
+  sourcePath?: string,
+  fallbacks: readonly string[] = [],
+): string {
+  if (sourcePath) {
+    const source = files.find((file) => file.path === sourcePath);
+    if (source?.cwd?.trim()) return source.cwd.trim();
+  }
+
+  const candidates = new Map<string, { count: number; newest: number }>();
+  for (const file of files) {
+    if (projectKey(file) !== project) continue;
+    const cwd = file.projectRoot?.trim() || file.cwd?.trim();
+    if (!cwd) continue;
+    const current = candidates.get(cwd) ?? { count: 0, newest: 0 };
+    current.count += 1;
+    current.newest = Math.max(current.newest, file.mtime);
+    candidates.set(cwd, current);
+  }
+  const derived = [...candidates]
+    .sort(([leftPath, left], [rightPath, right]) =>
+      right.count - left.count || right.newest - left.newest || leftPath.localeCompare(rightPath))[0]?.[0] ?? "";
+  return derived || fallbacks.find((cwd) => cwd.trim())?.trim() || "";
+}
+
 export interface ProjectSummary {
   project: string;
   /** Live entries anywhere in the project (branches running right now). */

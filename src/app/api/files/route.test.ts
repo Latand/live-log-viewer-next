@@ -11,6 +11,7 @@ import type { FileEntry } from "@/lib/types";
 
 let scans = 0;
 let scanOptions: unknown;
+let scanProjects: Array<string | undefined> = [];
 let scannedFiles: FileEntry[] = [];
 let scanGates: Promise<void>[] = [];
 let registryRoot = "";
@@ -27,6 +28,7 @@ beforeEach(() => {
   setAgentRegistryForTests(new AgentRegistry(path.join(registryRoot, "registry.json")));
   resetFilesRouteCacheForTests();
   scans = 0;
+  scanProjects = [];
   scannedFiles = [];
   scanGates = [];
   tmuxHealth = { status: "healthy" };
@@ -42,8 +44,9 @@ afterEach(() => {
 
 mock.module("@/lib/scanner", () => ({
   listFiles: async () => [],
-  listFilesWithProjectCatalog: async (_project: string | undefined, options: unknown) => {
+  listFilesWithProjectCatalog: async (project: string | undefined, options: unknown) => {
     scans += 1;
+    scanProjects.push(project);
     scanOptions = options;
     const files = scannedFiles;
     await scanGates.shift();
@@ -213,14 +216,12 @@ test("an arbitrary client revision cannot suppress a later revision refresh", as
   expect(scans).toBe(2);
 });
 
-test("the project scan cache evicts its least recently used entry", async () => {
-  for (let index = 0; index <= 32; index += 1) {
-    await cachedFileScan(`project-${index}`);
-  }
-  expect(scans).toBe(33);
+test("project query changes reuse one global scan snapshot", async () => {
+  await GET(new Request("http://127.0.0.1/api/files?project=project-a"));
+  await GET(new Request("http://127.0.0.1/api/files?project=project-b"));
 
-  await cachedFileScan("project-0");
-  expect(scans).toBe(34);
+  expect(scans).toBe(1);
+  expect(scanProjects).toEqual([undefined]);
 });
 
 function file(path: string): FileEntry {

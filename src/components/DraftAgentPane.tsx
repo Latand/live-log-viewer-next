@@ -29,6 +29,7 @@ import {
 } from "./draftSpawn";
 import { ReasoningControls, type SpeedChoice } from "./ReasoningControls";
 import { cleanTitle, engineTintOf } from "./utils";
+import { draftWorkingDirectory } from "./projectModel";
 
 type Engine = "claude" | "codex";
 
@@ -91,6 +92,11 @@ export function setDraftText(id: string, text: string) {
   writeField(id, "text", text);
 }
 
+/** Seeds a draft's editable cwd before its first render. */
+export function setDraftCwd(id: string, cwd: string) {
+  writeField(id, "cwd", cwd);
+}
+
 /** Reads back the durable spawn attempt persisted across reload. Its presence
     means a worker may exist, so the composer stays frozen and send disabled. */
 function readAttempt(id: string): SpawnAttempt | null {
@@ -143,7 +149,7 @@ export function DraftAgentPane({
     if (stored === "codex" || stored === "claude") return stored;
     return srcFile?.engine === "codex" ? "codex" : "claude";
   });
-  const [cwd, setCwdState] = useState(() => readField(draftId, "cwd"));
+  const [cwd, setCwdState] = useState(() => readField(draftId, "cwd") || draftWorkingDirectory(files, project, src));
   const [model, setModelState] = useState(() => readField(draftId, "model") || defaultModelFor(engine));
   const [effort, setEffortState] = useState(() => readField(draftId, "effort"));
   const [speed, setSpeedState] = useState<SpeedChoice>(() => {

@@ -13,13 +13,15 @@ import { projectResolutionStateKey } from "./projectState";
 interface Meta {
   project: string;
   worktree?: string;
+  cwd?: string;
+  projectRoot?: string;
   title: string;
   engine: Engine;
   kind: string;
   fmt: Fmt;
 }
 
-const metaCache = globalCache<[number, string, Meta]>("meta-v3");
+const metaCache = globalCache<[number, string, Meta]>("meta-v4");
 // Title and codex project live in the immutable head of a growing transcript,
 // so both are keyed by path and kept for good once resolved. A live file grows
 // on every poll, so a size-keyed meta cache would re-read the whole file each
@@ -349,6 +351,17 @@ export function projectForCwd(cwd: string): string | null {
   return projectInfoFromCwd(cwd)?.project ?? null;
 }
 
+/** Resolve a conversation cwd to the repository root shared by its worktrees. */
+export function projectRootForCwd(cwd: string): string {
+  const worktree =
+    worktreeFromPath(cwd) ??
+    worktreeFromNested(cwd) ??
+    worktreeFromCodexPath(cwd) ??
+    worktreeFromGitFile(cwd) ??
+    worktreeFromMemory(cwd);
+  return worktree?.repo ?? cwd;
+}
+
 function worktreeFromSlug(slug: string): { project: string; worktree: string } | null {
   const codexMarker = "--codex-worktrees-";
   const markers = ["--claude-worktrees-", codexMarker, "--worktrees-"];
@@ -409,7 +422,8 @@ function cwdFromLines(lines: string[]): string | null {
   for (const line of lines) {
     try {
       const parsed = JSON.parse(line);
-      const cwd = stringValue(recordValue(parsed)?.cwd);
+      const record = recordValue(parsed);
+      const cwd = stringValue(record?.cwd) ?? stringValue(recordValue(record?.payload)?.cwd);
       if (cwd) return cwd;
     } catch {
       continue;
@@ -510,29 +524,22 @@ export function describe(rootName: RootKey, root: string, pathname: string, st: 
   const fn = path.basename(pathname);
   let project = "other";
   let worktree: string | undefined;
+  let cwd: string | undefined;
   let title: string | null = null;
   let engine: Engine = "claude";
   let kind = "";
   let fmt: Fmt = "plain";
   if (rootName === "codex-sessions") {
+    cwd = transcriptCwd(pathname, st.size) ?? undefined;
     const cachedProject = codexProjectCache.get(pathname);
     if (cachedProject?.stateKey === stateKey) {
       project = cachedProject.project;
       worktree = cachedProject.worktree;
     } else {
       project = "";
-      const head = readHead(pathname, st.size);
-      if (head) {
-        try {
-          const first = JSON.parse(head.text.split("\n")[0] ?? "{}");
-          const cwd = stringValue(recordValue(first.payload)?.cwd) ?? "";
-          const info = projectInfoFromCwd(cwd);
-          project = info?.project ?? "";
-          worktree = info?.worktree;
-        } catch {
-          project = "";
-        }
-      }
+      const info = cwd ? projectInfoFromCwd(cwd) : null;
+      project = info?.project ?? "";
+      worktree = info?.worktree;
       if (!project) {
         const info = projectInfoFromTranscript(pathname);
         project = info?.project ?? "";
@@ -553,7 +560,7 @@ export function describe(rootName: RootKey, root: string, pathname: string, st: 
     /* The slug alone cannot tell a sibling worktree checkout from a real
        standalone project — only the cwd's git metadata can. When it proves a
        worktree, the session regroups under its main repo's project name. */
-    const cwd = transcriptCwd(pathname, st.size);
+    cwd = transcriptCwd(pathname, st.size) ?? undefined;
     const info = cwd ? projectInfoFromCwd(cwd) : projectInfoFromTranscript(pathname);
     const persistedInfo = projectInfoFromTranscript(pathname);
     if (info && (worktreeInfo || info.worktree || persistedInfo)) {
@@ -584,6 +591,8 @@ export function describe(rootName: RootKey, root: string, pathname: string, st: 
   const meta = {
     project,
     worktree,
+    cwd,
+    projectRoot: cwd ? projectRootForCwd(cwd) : undefined,
     title: cleanTitle(title ?? fn, 120),
     engine,
     kind,

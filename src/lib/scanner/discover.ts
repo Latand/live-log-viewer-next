@@ -198,6 +198,8 @@ function entriesFromRaw(raw: RawEntry[], selectedProject?: string, projectByPath
       name: path.relative(entry.root, entry.path),
       project: projectByPath?.get(entry.path) ?? meta.project,
       worktree: meta.worktree,
+      cwd: meta.cwd,
+      projectRoot: meta.projectRoot,
       title: meta.title,
       engine: meta.engine,
       kind: meta.kind,

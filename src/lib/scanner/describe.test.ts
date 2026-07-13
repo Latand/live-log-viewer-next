@@ -133,6 +133,33 @@ test("a deleted nested worktree (repo/worktrees/<name>) still groups under its p
   expect(projectForCwd(nested)).toBe("CelestiaCompose");
 });
 
+test("conversation metadata carries the exact cwd and its canonical project root", () => {
+  const repo = path.join(SANDBOX, "cwd-project");
+  const cwd = path.join(repo, ".worktrees", "issue-173");
+  const root = path.join(SANDBOX, "cwd-transcripts");
+  const transcript = path.join(root, "cwd-project", "session.jsonl");
+  fs.mkdirSync(path.dirname(transcript), { recursive: true });
+  fs.writeFileSync(transcript, JSON.stringify({ type: "user", cwd, message: { content: "Prefill cwd" } }) + "\n");
+
+  expect(describe("claude-projects", root, transcript, fs.statSync(transcript))).toMatchObject({
+    cwd,
+    projectRoot: repo,
+  });
+});
+
+test("growing Codex transcripts retain cwd metadata after the project cache warms", () => {
+  const repo = path.join(SANDBOX, "codex-cwd-project");
+  const cwd = path.join(repo, ".worktrees", "issue-174");
+  const root = path.join(SANDBOX, "codex-cwd-transcripts");
+  const transcript = path.join(root, "2026", "07", "rollout-cwd.jsonl");
+  fs.mkdirSync(path.dirname(transcript), { recursive: true });
+  fs.writeFileSync(transcript, JSON.stringify({ type: "session_meta", payload: { cwd } }) + "\n");
+
+  expect(describe("codex-sessions", root, transcript, fs.statSync(transcript))).toMatchObject({ cwd, projectRoot: repo });
+  fs.appendFileSync(transcript, JSON.stringify({ type: "event_msg", payload: { type: "user_message", message: "continue" } }) + "\n");
+  expect(describe("codex-sessions", root, transcript, fs.statSync(transcript))).toMatchObject({ cwd, projectRoot: repo });
+});
+
 test("a nested `worktrees` segment under .claude/.codex is left to its own recognizer", () => {
   /* `.codex/worktrees/<hash>/<Repo>` must resolve via the codex recognizer to
      the repo name, not be mis-read as a repo ending in `.codex`. */

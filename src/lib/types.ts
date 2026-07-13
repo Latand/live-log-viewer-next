@@ -30,6 +30,10 @@ export interface FileEntry {
   /** Path relative to its root. */
   name: string;
   project: string;
+  /** Working directory recorded by the conversation transcript. */
+  cwd?: string | null;
+  /** Canonical parent-repository root when cwd belongs to a linked worktree. */
+  projectRoot?: string | null;
   /** Git worktree name when cwd lives under <repo>/.claude/worktrees/<name>. */
   worktree?: string;
   title: string;
