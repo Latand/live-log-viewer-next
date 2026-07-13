@@ -6,7 +6,8 @@ import { afterAll, expect, test } from "bun:test";
 
 import { AgentRegistry } from "@/lib/agent/registry";
 import { reconcileMigrations } from "@/lib/accounts/migration/coordinator";
-import { emptyLaunchProfile, type SuccessorProviderPort } from "@/lib/accounts/migration/contracts";
+import { emptyLaunchProfile, type ProviderReceipt, type SuccessorProviderPort } from "@/lib/accounts/migration/contracts";
+import { RegisteredSuccessorProvider } from "@/lib/accounts/migration/provider";
 import { RuntimeJournal } from "@/runtime-host/journal";
 
 import type { RuntimeHostClient } from "./client";
@@ -15,7 +16,7 @@ import { FakeEngineHost, createFakeDeliveryLedger } from "./fixtures/fakeEngineH
 import { bindStructuredDeliveryQueue, publishStructuredDeliveryHost } from "./structuredDeliveryController";
 import { StructuredDeliveryQueue, type StructuredDeliveryQueuePort } from "./structuredDeliveryQueue";
 import { kickStructuredDeliveryQueue } from "./structuredDeliverySignal";
-import { deliverHeldStructuredMessage } from "./structuredMessageDelivery";
+import { deliverHeldStructuredMessage, enqueueStructuredMessage } from "./structuredMessageDelivery";
 
 const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-structured-delivery-"));
 afterAll(() => fs.rmSync(sandbox, { recursive: true, force: true }));
@@ -28,6 +29,34 @@ function journalPort(journal: RuntimeJournal, failDelivered = false): Structured
       journal.transitionOperation(operationId, status, details);
     },
   };
+}
+
+function observableFakeHost(host: FakeEngineHost): FakeEngineHost & { onStateChange(): () => void } {
+  return Object.assign(host, { onStateChange: () => () => {} });
+}
+
+function runtimeJournalClient(journal: RuntimeJournal): RuntimeHostClient {
+  return {
+    snapshot: async () => journal.snapshot(),
+    append: async (event) => journal.append(event),
+    command: async (command) => journal.executeOperation(command),
+    operationStatus: async (operationId) => journal.operationResult(operationId),
+    effectBatch: async (kinds, afterEventSeq) => journal.effectBatch(100, kinds, afterEventSeq),
+    transitionOperation: async (operationId, status, details) => journal.transitionOperation(operationId, status, details),
+  } as RuntimeHostClient;
+}
+
+function cleanupOnlyProvider(): RegisteredSuccessorProvider {
+  return new RegisteredSuccessorProvider({
+    accounts: {
+      resolveSpawn: () => { throw new Error("unexpected account resolution"); },
+      resolveTranscriptOwner: () => { throw new Error("unexpected account resolution"); },
+    },
+    startCodex: async () => { throw new Error("unexpected Codex client"); },
+    claudeStatus: async () => { throw new Error("unexpected Claude status"); },
+    spawnClaude: async () => { throw new Error("unexpected Claude spawn"); },
+    now: () => "2026-07-13T12:01:00.000Z",
+  });
 }
 
 test("a delivering entry resumes after restart through the host ledger without a second engine write", async () => {
@@ -303,20 +332,12 @@ test("a migration-held delivery switches from the source host to the published C
   });
 
   const journal = new RuntimeJournal(path.join(sandbox, "migration-runtime.sqlite"), { structuredHosts: true });
-  const client = {
-    snapshot: async () => journal.snapshot(),
-    append: async (event) => journal.append(event),
-    command: async (command) => journal.executeOperation(command),
-    operationStatus: async (operationId) => journal.operationResult(operationId),
-    effectBatch: async (kinds, afterEventSeq) => journal.effectBatch(100, kinds, afterEventSeq),
-    transitionOperation: async (operationId, status, details) => journal.transitionOperation(operationId, status, details),
-  } as RuntimeHostClient;
-  const observable = (host: FakeEngineHost) => Object.assign(host, { onStateChange: () => () => {} });
+  const client = runtimeJournalClient(journal);
   const sourceLedger = createFakeDeliveryLedger();
   const successorLedger = createFakeDeliveryLedger();
   await bindStructuredDeliveryQueue([{
     key: { engine: "codex", sessionId: sourceId },
-    host: observable(new FakeEngineHost(sourceLedger)),
+    host: observableFakeHost(new FakeEngineHost(sourceLedger)),
   }], { registry, client });
 
   registry.commitMigrationIntent({
@@ -375,7 +396,7 @@ test("a migration-held delivery switches from the source host to the published C
       });
       await publishStructuredDeliveryHost({
         key: { engine: "codex", sessionId: successorId },
-        host: observable(new FakeEngineHost(successorLedger)),
+        host: observableFakeHost(new FakeEngineHost(successorLedger)),
       });
     },
   };
@@ -406,6 +427,439 @@ test("a migration-held delivery switches from the source host to the published C
   expect(registry.pendingDeliveries(conversation.id)).toEqual([]);
   expect(journal.operationResult(held.id)?.receipt.status).toBe("delivered");
 
+  await bindStructuredDeliveryQueue([], { registry, client: null });
+  journal.close();
+});
+
+test("a migration-held delivery switches from the source host to the published Claude successor", async () => {
+  const sourceId = "33333333-3333-4333-8333-333333333333";
+  const successorId = "44444444-4444-4444-8444-444444444444";
+  const accountRoot = path.join(sandbox, "claude-migration-accounts");
+  const sourceHome = path.join(accountRoot, "source");
+  const targetHome = path.join(accountRoot, "target");
+  const sourceRoot = path.join(sourceHome, "projects");
+  const targetRoot = path.join(targetHome, "projects");
+  fs.mkdirSync(sourceRoot, { recursive: true, mode: 0o700 });
+  fs.mkdirSync(targetRoot, { recursive: true, mode: 0o700 });
+  fs.chmodSync(sourceHome, 0o700);
+  fs.chmodSync(targetHome, 0o700);
+  const sourcePath = path.join(sourceRoot, `${sourceId}.jsonl`);
+  const successorPath = path.join(targetRoot, `${successorId}.jsonl`);
+  fs.writeFileSync(sourcePath, JSON.stringify({ sessionId: sourceId }) + "\n", { mode: 0o600 });
+  fs.writeFileSync(successorPath, JSON.stringify({ sessionId: successorId }) + "\n", { mode: 0o600 });
+
+  const registry = new AgentRegistry(path.join(sandbox, "claude-migration-registry.json"));
+  const profile = emptyLaunchProfile({ cwd: sandbox });
+  registry.reconcileConversations([{
+    engine: "claude",
+    path: sourcePath,
+    accountId: "source",
+    launchProfile: profile,
+    turn: { state: "idle", source: "empty", terminalAt: null },
+    observedAt: "2026-07-13T12:00:00.000Z",
+  }]);
+  const conversation = registry.conversationForPath(sourcePath)!;
+  registry.upsert({
+    key: { engine: "claude", sessionId: sourceId },
+    artifactPath: sourcePath,
+    cwd: sandbox,
+    accountId: "source",
+    launchProfile: profile,
+    status: "idle",
+    host: null,
+    structuredHost: {
+      kind: "claude-broker",
+      endpoint: "fake:claude-source",
+      process: null,
+      eventCursor: 0,
+      protocolVersion: "fake-v1",
+      writerClaimEpoch: 0,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  const journal = new RuntimeJournal(path.join(sandbox, "claude-migration-runtime.sqlite"), { structuredHosts: true });
+  const client = runtimeJournalClient(journal);
+  const sourceLedger = createFakeDeliveryLedger();
+  const successorLedger = createFakeDeliveryLedger();
+  await bindStructuredDeliveryQueue([{
+    key: { engine: "claude", sessionId: sourceId },
+    host: observableFakeHost(new FakeEngineHost(sourceLedger)),
+  }], { registry, client });
+
+  registry.commitMigrationIntent({
+    engine: "claude",
+    targetId: "target",
+    origin: "manual",
+    requestId: "publish-claude-successor-before-drain",
+    expectedRevision: registry.engineRouting("claude").revision,
+  });
+  let migrating = registry.conversation(conversation.id)!;
+  const revision = migrating.migration!.revision;
+  migrating = registry.transitionConversationMigration(migrating.id, revision, ["requested"], { phase: "preparing" });
+  migrating = registry.transitionConversationMigration(migrating.id, revision, ["preparing"], { phase: "successor-starting" });
+  registry.recordConversationContinuityPath(migrating.id, successorPath);
+  const receipt: ProviderReceipt = {
+    operationId: migrating.migration!.operationId,
+    nativeId: successorId,
+    path: successorPath,
+    continuityPaths: [successorPath],
+    historyHash: "claude-successor-history",
+    host: {
+      kind: "claude-stream",
+      identity: "%44:4444",
+      epoch: 1,
+      verifiedAt: "2026-07-13T12:01:00.000Z",
+      tmuxHost: {
+        kind: "tmux",
+        endpoint: "/tmp/claude-migration-tmux.sock",
+        server: { pid: 4400, startIdentity: "server-4400" },
+        paneId: "%44",
+        panePid: { pid: 4444, startIdentity: "pane-4444" },
+        windowName: "claude-migration-successor",
+        agent: { pid: 4445, startIdentity: "agent-4445" },
+        argv: ["claude"],
+      },
+    },
+  };
+  registry.transitionConversationMigration(migrating.id, revision, ["successor-starting"], {
+    phase: "verifying",
+    providerReceipt: receipt,
+  });
+  const held = registry.holdDelivery(conversation.id, "continue on the Claude successor", "claude-migration-message");
+  expect(held.state).toBe("held");
+
+  const sourceAccount = {
+    engine: "claude" as const,
+    accountId: "source",
+    kind: "managed" as const,
+    home: sourceHome,
+    transcriptRoot: sourceRoot,
+    env: { ...process.env },
+  };
+  const targetAccount = {
+    engine: "claude" as const,
+    accountId: "target",
+    kind: "managed" as const,
+    home: targetHome,
+    transcriptRoot: targetRoot,
+    env: { ...process.env },
+  };
+  let publications = 0;
+  const provider = new RegisteredSuccessorProvider({
+    accounts: {
+      resolveSpawn: () => targetAccount,
+      resolveTranscriptOwner: () => sourceAccount,
+    },
+    startCodex: async () => { throw new Error("unexpected Codex client"); },
+    claudeStatus: async () => ({ loggedIn: true }),
+    spawnClaude: async () => { throw new Error("unexpected Claude spawn"); },
+    verifyClaudeHost: async () => true,
+    publishClaudeHost: async () => {
+      publications += 1;
+      registry.upsert({
+        key: { engine: "claude", sessionId: successorId },
+        artifactPath: successorPath,
+        cwd: sandbox,
+        accountId: "target",
+        launchProfile: profile,
+        status: "idle",
+        host: null,
+        structuredHost: {
+          kind: "claude-broker",
+          endpoint: "fake:claude-successor",
+          process: null,
+          eventCursor: 0,
+          protocolVersion: "fake-v1",
+          writerClaimEpoch: 0,
+          activeTurnRef: null,
+          pendingAttention: [],
+          activeFlags: [],
+        },
+        claimEpoch: 0,
+        claimOwner: null,
+        pendingAction: null,
+      });
+      const unregister = await publishStructuredDeliveryHost({
+        key: { engine: "claude", sessionId: successorId },
+        host: observableFakeHost(new FakeEngineHost(successorLedger)),
+      });
+      return async () => { await unregister(); };
+    },
+    registry,
+    now: () => "2026-07-13T12:01:00.000Z",
+  });
+
+  await reconcileMigrations(provider, {
+    async deliver({ delivery, path: deliveryPath, clientMessageId }) {
+      return await deliverHeldStructuredMessage({
+        conversationId: conversation.id,
+        path: deliveryPath,
+        deliveryId: delivery.id,
+        clientMessageId,
+        text: delivery.text,
+      }, {
+        enabled: () => true,
+        client: () => client,
+        kick: kickStructuredDeliveryQueue,
+      }) ?? "delivery-uncertain";
+    },
+  }, registry);
+
+  expect(publications).toBe(1);
+  expect(sourceLedger.writes).toEqual([]);
+  expect(successorLedger.writes).toEqual([{
+    id: held.id,
+    text: "continue on the Claude successor",
+    expectedTurnId: null,
+  }]);
+  expect(registry.pendingDeliveries(conversation.id)).toEqual([]);
+  expect(journal.operationResult(held.id)?.receipt.status).toBe("delivered");
+
+  await bindStructuredDeliveryQueue([], { registry, client: null });
+  journal.close();
+});
+
+test("successor cleanup republishes the rolled-back source for path-only composer delivery", async () => {
+  const sourceId = "55555555-5555-4555-8555-555555555555";
+  const successorId = "66666666-6666-4666-8666-666666666666";
+  const sourcePath = path.join(sandbox, `${sourceId}.jsonl`);
+  const successorPath = path.join(sandbox, `${successorId}.jsonl`);
+  const registry = new AgentRegistry(path.join(sandbox, "rollback-projection-registry.json"));
+  const profile = emptyLaunchProfile({ cwd: sandbox });
+  registry.reconcileConversations([{
+    engine: "codex",
+    path: sourcePath,
+    accountId: "source",
+    launchProfile: profile,
+    turn: { state: "idle", source: "empty", terminalAt: null },
+    observedAt: "2026-07-13T12:00:00.000Z",
+  }]);
+  const conversation = registry.conversationForPath(sourcePath)!;
+  const structuredColumns = (endpoint: string) => ({
+    kind: "codex-app-server" as const,
+    endpoint,
+    process: null,
+    eventCursor: 0,
+    protocolVersion: "fake-v1",
+    writerClaimEpoch: 0,
+    activeTurnRef: null,
+    pendingAttention: [],
+    activeFlags: [],
+  });
+  registry.upsert({
+    key: { engine: "codex", sessionId: sourceId },
+    artifactPath: sourcePath,
+    cwd: sandbox,
+    accountId: "source",
+    launchProfile: profile,
+    status: "idle",
+    host: null,
+    structuredHost: structuredColumns("fake:rollback-source"),
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  const journal = new RuntimeJournal(path.join(sandbox, "rollback-projection-runtime.sqlite"), { structuredHosts: true });
+  const client = runtimeJournalClient(journal);
+  const sourceLedger = createFakeDeliveryLedger();
+  await bindStructuredDeliveryQueue([{
+    key: { engine: "codex", sessionId: sourceId },
+    host: observableFakeHost(new FakeEngineHost(sourceLedger)),
+  }], { registry, client });
+
+  registry.commitMigrationIntent({
+    engine: "codex",
+    targetId: "target",
+    origin: "manual",
+    requestId: "rollback-successor-projection",
+    expectedRevision: registry.engineRouting("codex").revision,
+  });
+  const revision = registry.conversation(conversation.id)!.migration!.revision;
+  registry.recordConversationContinuityPath(conversation.id, successorPath);
+  registry.upsert({
+    key: { engine: "codex", sessionId: successorId },
+    artifactPath: successorPath,
+    cwd: sandbox,
+    accountId: "target",
+    launchProfile: profile,
+    status: "idle",
+    host: null,
+    structuredHost: structuredColumns("fake:rollback-successor"),
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  await publishStructuredDeliveryHost({
+    key: { engine: "codex", sessionId: successorId },
+    host: observableFakeHost(new FakeEngineHost()),
+  });
+  expect(journal.snapshot().sessions.find((session) => session.conversationId === conversation.id)?.artifactPath)
+    .toBe(successorPath);
+
+  registry.rollbackConversationMigration(conversation.id, revision);
+  await cleanupOnlyProvider().cleanup({
+    operationId: "discarded-rollback-successor",
+    nativeId: successorId,
+    path: successorPath,
+    continuityPaths: [successorPath],
+    historyHash: "discarded-history",
+    host: { kind: "codex-app-server", identity: successorId, epoch: 1, verifiedAt: "2026-07-13T12:01:00.000Z" },
+  });
+  const result = await enqueueStructuredMessage({
+    path: sourcePath,
+    text: "continue after rollback",
+    clientMessageId: "rollback-composer-message",
+    hasImages: false,
+  }, {
+    enabled: () => true,
+    client: () => client,
+    registry: () => registry,
+    kick: kickStructuredDeliveryQueue,
+  });
+  await kickStructuredDeliveryQueue();
+
+  expect(result).toMatchObject({ ok: true, structured: true, target: conversation.id });
+  expect(sourceLedger.writes).toEqual([{
+    id: expect.any(String),
+    text: "continue after rollback",
+    expectedTurnId: null,
+  }]);
+
+  await bindStructuredDeliveryQueue([], { registry, client: null });
+  journal.close();
+});
+
+test("late discarded-successor cleanup republishes the committed retarget host", async () => {
+  const sourceId = "77777777-7777-4777-8777-777777777777";
+  const discardedId = "88888888-8888-4888-8888-888888888888";
+  const committedId = "99999999-9999-4999-8999-999999999999";
+  const sourcePath = path.join(sandbox, `${sourceId}.jsonl`);
+  const discardedPath = path.join(sandbox, `${discardedId}.jsonl`);
+  const committedPath = path.join(sandbox, `${committedId}.jsonl`);
+  const registry = new AgentRegistry(path.join(sandbox, "retarget-projection-registry.json"));
+  const profile = emptyLaunchProfile({ cwd: sandbox });
+  registry.reconcileConversations([{
+    engine: "codex",
+    path: sourcePath,
+    accountId: "source",
+    launchProfile: profile,
+    turn: { state: "idle", source: "empty", terminalAt: null },
+    observedAt: "2026-07-13T12:00:00.000Z",
+  }]);
+  const conversation = registry.conversationForPath(sourcePath)!;
+  const upsertHost = (sessionId: string, artifactPath: string, accountId: string, endpoint: string) => registry.upsert({
+    key: { engine: "codex" as const, sessionId },
+    artifactPath,
+    cwd: sandbox,
+    accountId,
+    launchProfile: profile,
+    status: "idle" as const,
+    host: null,
+    structuredHost: {
+      kind: "codex-app-server" as const,
+      endpoint,
+      process: null,
+      eventCursor: 0,
+      protocolVersion: "fake-v1",
+      writerClaimEpoch: 0,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  upsertHost(sourceId, sourcePath, "source", "fake:retarget-source");
+  const journal = new RuntimeJournal(path.join(sandbox, "retarget-projection-runtime.sqlite"), { structuredHosts: true });
+  const client = runtimeJournalClient(journal);
+  await bindStructuredDeliveryQueue([{
+    key: { engine: "codex", sessionId: sourceId },
+    host: observableFakeHost(new FakeEngineHost()),
+  }], { registry, client });
+
+  registry.commitMigrationIntent({
+    engine: "codex",
+    targetId: "committed",
+    origin: "manual",
+    requestId: "retarget-projection",
+    expectedRevision: registry.engineRouting("codex").revision,
+  });
+  let migrating = registry.conversation(conversation.id)!;
+  const revision = migrating.migration!.revision;
+  migrating = registry.transitionConversationMigration(migrating.id, revision, ["requested"], { phase: "preparing" });
+  migrating = registry.transitionConversationMigration(migrating.id, revision, ["preparing"], { phase: "successor-starting" });
+  registry.recordConversationContinuityPath(conversation.id, discardedPath);
+  registry.recordConversationContinuityPath(conversation.id, committedPath);
+  upsertHost(discardedId, discardedPath, "discarded", "fake:retarget-discarded");
+  upsertHost(committedId, committedPath, "committed", "fake:retarget-committed");
+  const committedLedger = createFakeDeliveryLedger();
+  const unregisterCommitted = await publishStructuredDeliveryHost({
+    key: { engine: "codex", sessionId: committedId },
+    host: observableFakeHost(new FakeEngineHost(committedLedger)),
+  });
+  await publishStructuredDeliveryHost({
+    key: { engine: "codex", sessionId: discardedId },
+    host: observableFakeHost(new FakeEngineHost()),
+  });
+  expect(journal.snapshot().sessions.find((session) => session.conversationId === conversation.id)?.artifactPath)
+    .toBe(discardedPath);
+
+  const receipt: ProviderReceipt = {
+    operationId: migrating.migration!.operationId,
+    nativeId: committedId,
+    path: committedPath,
+    continuityPaths: [committedPath],
+    historyHash: "retarget-history",
+    host: { kind: "codex-app-server", identity: committedId, epoch: 1, verifiedAt: "2026-07-13T12:02:00.000Z" },
+  };
+  registry.transitionConversationMigration(conversation.id, revision, ["successor-starting"], {
+    phase: "verifying",
+    providerReceipt: receipt,
+  });
+  registry.commitSuccessor(conversation.id, {
+    id: committedId,
+    path: committedPath,
+    accountId: "committed",
+    launchProfile: profile,
+    historyHash: receipt.historyHash,
+    host: receipt.host,
+  }, revision);
+  await cleanupOnlyProvider().cleanup({
+    operationId: "discarded-retarget-successor",
+    nativeId: discardedId,
+    path: discardedPath,
+    continuityPaths: [discardedPath],
+    historyHash: "discarded-retarget-history",
+    host: { kind: "codex-app-server", identity: discardedId, epoch: 1, verifiedAt: "2026-07-13T12:01:00.000Z" },
+  });
+
+  const result = await enqueueStructuredMessage({
+    path: committedPath,
+    text: "continue after retarget",
+    clientMessageId: "retarget-composer-message",
+    hasImages: false,
+  }, {
+    enabled: () => true,
+    client: () => client,
+    registry: () => registry,
+    kick: kickStructuredDeliveryQueue,
+  });
+  await kickStructuredDeliveryQueue();
+
+  expect(result).toMatchObject({ ok: true, structured: true, target: conversation.id });
+  expect(committedLedger.writes).toEqual([{
+    id: expect.any(String),
+    text: "continue after retarget",
+    expectedTurnId: null,
+  }]);
+
+  await unregisterCommitted();
   await bindStructuredDeliveryQueue([], { registry, client: null });
   journal.close();
 });

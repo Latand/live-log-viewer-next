@@ -11,13 +11,21 @@ import { agentRegistry, type AgentRegistry, type SpawnReceipt, type TmuxHostEvid
 import { sessionKey, sessionKeyId } from "@/lib/agent/sessionKey";
 import { statePath } from "@/lib/configDir";
 import { procBackend } from "@/lib/proc";
+import { ClaudeStreamBrokerHost } from "@/lib/runtime/claudeStreamBrokerHost";
 import { CodexAppServerHost } from "@/lib/runtime/codexAppServerHost";
-import { hasStructuredDeliveryHost, publishStructuredDeliveryHost } from "@/lib/runtime/structuredDeliveryController";
-import { bindCodexHostPersistence, structuredHostsEnabled } from "@/lib/runtime/registry";
+import { hasStructuredDeliveryHost, publishStructuredDeliveryHost, releaseStructuredDeliveryHost } from "@/lib/runtime/structuredDeliveryController";
+import { bindClaudeHostPersistence, bindCodexHostPersistence, structuredHostsEnabled } from "@/lib/runtime/registry";
 import { cleanupTmuxHostIfMatches, forgetResumePaneIfMatches, spawnAgentWithPrompt, verifyTmuxHostEvidence, type TmuxHostCleanupResult } from "@/lib/tmux";
 
 import type { LaunchProfile, ProviderReceipt, SuccessorProviderPort } from "./contracts";
 import { hashValidatedHistory, HistorySecurityError, safeCopyHistory, validateHistorySource } from "./safeHistoryCopy";
+
+interface StructuredHostPublicationInput {
+  receipt: ProviderReceipt;
+  target: AccountContext;
+  profile: LaunchProfile;
+  registry: AgentRegistry;
+}
 
 export interface ProviderDependencies {
   accounts: Pick<AccountManager, "resolveSpawn" | "resolveTranscriptOwner">;
@@ -35,12 +43,8 @@ export interface ProviderDependencies {
   afterCodexForkReturned?(): void;
   afterCodexCopyPublished?(): void;
   scanCodexForkArtifacts?(root: string, sourceNativeId: string, createdAtMs: number): CodexForkArtifact[];
-  publishCodexHost?(input: {
-    receipt: ProviderReceipt;
-    target: AccountContext;
-    profile: LaunchProfile;
-    registry: AgentRegistry;
-  }): Promise<() => Promise<void>>;
+  publishCodexHost?(input: StructuredHostPublicationInput): Promise<() => Promise<void>>;
+  publishClaudeHost?(input: StructuredHostPublicationInput): Promise<() => Promise<void>>;
   now(): string;
 }
 
@@ -197,7 +201,7 @@ async function publishCodexSuccessorHost(input: {
   if (!structuredHostsEnabled()) return async () => {};
   const key = sessionKey("codex", input.receipt.nativeId);
   if (!key) throw new Error("successor Codex thread identity is invalid");
-  if (hasStructuredDeliveryHost(key)) return async () => {};
+  if (hasStructuredDeliveryHost(key)) return async () => { await releaseStructuredDeliveryHost(key); };
 
   const existing = input.registry.snapshot().entries[sessionKeyId(key)];
   const entry = input.registry.upsert({
@@ -238,7 +242,7 @@ async function publishCodexSuccessorHost(input: {
     : undefined;
   let host: CodexAppServerHost | null = null;
   let stopPersistence = () => {};
-  let unregister = () => {};
+  let unregister = async () => {};
   try {
     host = await CodexAppServerHost.adopt(input.receipt.nativeId, {
       cwd: input.profile.cwd,
@@ -259,7 +263,7 @@ async function publishCodexSuccessorHost(input: {
     );
     unregister = await publishStructuredDeliveryHost({ key, host });
   } catch (error) {
-    unregister();
+    await unregister();
     if (host) await host.release();
     stopPersistence();
     input.registry.releaseStructuredHostClaim(key, claimed.claimOwner, claimed.claimEpoch);
@@ -267,7 +271,90 @@ async function publishCodexSuccessorHost(input: {
   }
   const publishedHost = host;
   return async () => {
-    unregister();
+    await unregister();
+    await publishedHost.release();
+    stopPersistence();
+  };
+}
+
+async function publishClaudeSuccessorHost(
+  input: StructuredHostPublicationInput & {
+    cancelClaude: NonNullable<ProviderDependencies["cancelClaude"]>;
+  },
+): Promise<() => Promise<void>> {
+  if (!structuredHostsEnabled()) return async () => {};
+  const key = sessionKey("claude", input.receipt.nativeId);
+  if (!key) throw new Error("successor Claude session identity is invalid");
+  if (hasStructuredDeliveryHost(key)) return async () => { await releaseStructuredDeliveryHost(key); };
+
+  const existing = input.registry.snapshot().entries[sessionKeyId(key)];
+  const entry = input.registry.upsert({
+    ...(existing ?? {
+      key,
+      status: "unhosted" as const,
+      host: null,
+      claimEpoch: 0,
+      claimOwner: null,
+      pendingAction: null,
+    }),
+    key,
+    artifactPath: input.receipt.path,
+    cwd: input.profile.cwd,
+    accountId: input.target.accountId,
+    launchProfile: input.profile,
+  });
+  if (!entry.structuredHost) {
+    input.registry.setStructuredHost(key, {
+      kind: "claude-broker",
+      endpoint: "stdio:pending",
+      process: null,
+      eventCursor: 0,
+      protocolVersion: null,
+      writerClaimEpoch: entry.claimEpoch,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    }, "unhosted");
+  }
+  const owner = { pid: process.pid, startIdentity: procBackend.processIdentity(process.pid) };
+  const claimed = input.registry.claimStructuredHost(key, owner, { allowUnhosted: true });
+  if (!claimed?.claimOwner) throw new Error("successor Claude structured host claim is unavailable");
+
+  let host: ClaudeStreamBrokerHost | null = null;
+  let stopPersistence = () => {};
+  let unregister = async () => {};
+  try {
+    const tmuxHost = claudeTmuxHostFromReceipt(input.receipt);
+    const cancelled = await input.cancelClaude(tmuxHost);
+    if (!cleanupConfirmed(cancelled)) throw new Error("successor Claude host transition is still pending");
+    await forgetResumePaneIfMatches(input.receipt.path, tmuxHost);
+    host = await ClaudeStreamBrokerHost.adopt(input.receipt.nativeId, {
+      cwd: input.profile.cwd,
+      claudeConfigDir: input.target.kind === "managed" ? input.target.home : undefined,
+      claudeProjectsDir: input.target.transcriptRoot,
+      env: input.target.env,
+      model: input.profile.model ?? undefined,
+      effort: input.profile.effort ?? undefined,
+      permissionMode: input.profile.permissionMode ?? undefined,
+    });
+    stopPersistence = await bindClaudeHostPersistence(
+      input.registry,
+      key,
+      host,
+      claimed.claimOwner,
+      claimed.claimEpoch,
+    );
+    unregister = await publishStructuredDeliveryHost({ key, host });
+  } catch (error) {
+    await unregister();
+    if (host) await host.release();
+    stopPersistence();
+    input.registry.releaseStructuredHostClaim(key, claimed.claimOwner, claimed.claimEpoch);
+    throw error;
+  }
+  const publishedHost = host;
+  return async () => {
+    await unregister();
     await publishedHost.release();
     stopPersistence();
   };
@@ -529,12 +616,12 @@ function assertClaudeTranscript(receipt: ProviderReceipt, target: AccountContext
 }
 
 export class RegisteredSuccessorProvider implements SuccessorProviderPort {
-  private readonly publishedCodexHosts = new Map<string, {
+  private readonly publishedHosts = new Map<string, {
     nativeId: string;
     path: string;
     cleanup: () => Promise<void>;
   }>();
-  private readonly publishingCodexHosts = new Map<string, Promise<void>>();
+  private readonly publishingHosts = new Map<string, Promise<void>>();
 
   constructor(private readonly dependencies: ProviderDependencies = defaultDependencies) {}
 
@@ -575,55 +662,75 @@ export class RegisteredSuccessorProvider implements SuccessorProviderPort {
     receipt: ProviderReceipt,
     input: Parameters<NonNullable<SuccessorProviderPort["publishHost"]>>[1],
   ): Promise<void> {
-    if (input.engine !== "codex") return;
-    const existing = this.publishedCodexHosts.get(receipt.operationId);
+    const injectedPublisher = input.engine === "codex"
+      ? this.dependencies.publishCodexHost
+      : this.dependencies.publishClaudeHost;
+    if (!injectedPublisher && !structuredHostsEnabled()) return;
+    const existing = this.publishedHosts.get(receipt.operationId);
     if (existing) {
       if (existing.nativeId !== receipt.nativeId || existing.path !== receipt.path) {
-        throw new Error("successor Codex host publication conflicts");
+        throw new Error("successor host publication conflicts");
       }
       return;
     }
-    const pending = this.publishingCodexHosts.get(receipt.operationId);
+    const pending = this.publishingHosts.get(receipt.operationId);
     if (pending) {
       await pending;
-      const published = this.publishedCodexHosts.get(receipt.operationId);
+      const published = this.publishedHosts.get(receipt.operationId);
       if (!published || published.nativeId !== receipt.nativeId || published.path !== receipt.path) {
-        throw new Error("successor Codex host publication conflicts");
+        throw new Error("successor host publication conflicts");
       }
       return;
     }
     const publication = (async () => {
-      const target = this.dependencies.accounts.resolveSpawn("codex", input.targetAccountId);
-      const cleanup = await (this.dependencies.publishCodexHost ?? publishCodexSuccessorHost)({
+      const target = this.dependencies.accounts.resolveSpawn(input.engine, input.targetAccountId);
+      const publicationInput = {
         receipt,
         target,
         profile: input.launchProfile,
         registry: this.dependencies.registry ?? agentRegistry(),
-      });
-      this.publishedCodexHosts.set(receipt.operationId, {
+      };
+      let cleanup: () => Promise<void>;
+      if (input.engine === "codex") {
+        cleanup = await (injectedPublisher ?? publishCodexSuccessorHost)(publicationInput);
+      } else if (injectedPublisher) {
+        cleanup = await injectedPublisher(publicationInput);
+      } else {
+        cleanup = await publishClaudeSuccessorHost({
+          ...publicationInput,
+          cancelClaude: this.dependencies.cancelClaude ?? defaultDependencies.cancelClaude!,
+        });
+      }
+      this.publishedHosts.set(receipt.operationId, {
         nativeId: receipt.nativeId,
         path: receipt.path,
         cleanup,
       });
     })();
-    this.publishingCodexHosts.set(receipt.operationId, publication);
+    this.publishingHosts.set(receipt.operationId, publication);
     try {
       await publication;
     } finally {
-      if (this.publishingCodexHosts.get(receipt.operationId) === publication) {
-        this.publishingCodexHosts.delete(receipt.operationId);
+      if (this.publishingHosts.get(receipt.operationId) === publication) {
+        this.publishingHosts.delete(receipt.operationId);
       }
     }
   }
 
   async cleanup(receipt: ProviderReceipt): Promise<void> {
-    if (receipt.host.kind === "codex-app-server") {
-      const published = this.publishedCodexHosts.get(receipt.operationId);
-      if (!published || published.nativeId !== receipt.nativeId || published.path !== receipt.path) return;
+    const published = this.publishedHosts.get(receipt.operationId);
+    if (published && published.nativeId === receipt.nativeId && published.path === receipt.path) {
       await published.cleanup();
-      this.publishedCodexHosts.delete(receipt.operationId);
+      this.publishedHosts.delete(receipt.operationId);
       return;
     }
+    const key = receipt.host.kind === "codex-app-server"
+      ? sessionKey("codex", receipt.nativeId)
+      : receipt.host.kind === "claude-stream"
+        ? sessionKey("claude", receipt.nativeId)
+        : null;
+    if (key && await releaseStructuredDeliveryHost(key)) return;
+    if (receipt.host.kind === "codex-app-server") return;
     if (receipt.host.kind !== "claude-stream") return;
     const host = claudeTmuxHostFromReceipt(receipt);
     const cancelled = await this.dependencies.cancelClaude?.(host);
