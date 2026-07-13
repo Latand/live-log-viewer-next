@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 
-import { projectDeletionMembershipMatches } from "./route";
+import { projectDeletionMembershipMatches } from "./membership";
 
 test("project deletion rejects membership added after the client catalog snapshot", () => {
   const expected = new Set(["/sessions/one.jsonl", "/sessions/two.jsonl"]);

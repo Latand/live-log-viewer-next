@@ -207,7 +207,7 @@ test("a restored project draft renders with its deterministic project directory 
   expect(directory?.value).toBe(`/home/tester/Projects/${project}`);
 });
 
-test("a restored handoff draft renders with the source conversation cwd", async () => {
+test("a restored handoff draft guards a populated source cwd until validation", async () => {
   const project = "handoff-project";
   const sourcePath = "/sessions/source.jsonl";
   const sourceCwd = "/repos/handoff/.worktrees/source-branch";
@@ -234,12 +234,24 @@ test("a restored handoff draft renders with the source conversation cwd", async 
   };
   dom.sessionStorage.setItem(draftsKey(project), JSON.stringify([agentA]));
   dom.sessionStorage.setItem(agentField(agentA, "src"), sourcePath);
+  G.fetch = (async (input: string | URL | Request) => {
+    if (String(input).startsWith("/api/spawn?")) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ dirs: [sourceCwd], cwd: sourceCwd, cwdExists: false }),
+        text: async () => "",
+      };
+    }
+    return { ok: true, status: 200, json: async () => ({}), text: async () => "" };
+  }) as unknown as typeof fetch;
 
   roots.push(mount(<ProjectDashboard {...dashboardProps(project)} files={[source]} />));
 
   expect(await waitFor(() => dom.document.querySelector(AGENT_PANE) !== null)).toBe(true);
   const directory = dom.document.querySelector('input[aria-label="Agent working directory"]') as unknown as HTMLInputElement | null;
   expect(directory?.value).toBe(sourceCwd);
+  expect(dom.document.querySelector('p[role="alert"]')?.textContent).toContain("Confirm the working directory");
 });
 
 test("a fresh handoff replaces its provisional project root with the resolved source cwd", async () => {
@@ -287,6 +299,56 @@ test("a fresh handoff replaces its provisional project root with the resolved so
   expect(dom.document.querySelector('p[role="alert"]')).toBeNull();
 });
 
+test("a fresh handoff guards a populated cwd when the source checkout was deleted", async () => {
+  const project = "fresh-deleted-handoff-project";
+  const sourcePath = "/sessions/fresh-deleted-source.jsonl";
+  const projectRoot = "/repos/fresh-deleted-handoff";
+  const sourceCwd = `${projectRoot}/.worktrees/deleted-source-branch`;
+  const source: FileEntry = {
+    path: sourcePath,
+    root: "codex-sessions",
+    name: "fresh-deleted-source.jsonl",
+    project,
+    cwd: sourceCwd,
+    projectRoot,
+    title: "Deleted source checkout",
+    engine: "codex",
+    kind: "session",
+    fmt: "codex",
+    parent: null,
+    mtime: 1,
+    size: 1,
+    activity: "recent",
+    proc: null,
+    pid: null,
+    model: null,
+    pendingQuestion: null,
+    waitingInput: null,
+  };
+  G.fetch = (async (input: string | URL | Request) => {
+    if (String(input).startsWith("/api/spawn?")) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ dirs: [sourceCwd], cwd: sourceCwd, cwdExists: false }),
+        text: async () => "",
+      };
+    }
+    return { ok: true, status: 200, json: async () => ({}), text: async () => "" };
+  }) as unknown as typeof fetch;
+
+  roots.push(mount(<ProjectDashboard {...dashboardProps(project)} files={[source]} projectCwd={projectRoot} />));
+
+  expect(await waitFor(() => dom.document.querySelector('[aria-label="Hand the conversation to a new agent — a draft appears below"]') !== null)).toBe(true);
+  const handoff = dom.document.querySelector('[aria-label="Hand the conversation to a new agent — a draft appears below"]') as unknown as HTMLElement;
+  handoff.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event);
+  expect(await waitFor(() => {
+    const directory = dom.document.querySelector('input[aria-label="Agent working directory"]') as unknown as HTMLInputElement | null;
+    return directory?.value === sourceCwd;
+  })).toBe(true);
+  expect(dom.document.querySelector('p[role="alert"]')?.textContent).toContain("Confirm the working directory");
+});
+
 test("a restored handoff waits for its out-of-snapshot source cwd before exposing the composer", async () => {
   const project = "archived-handoff-project";
   const sourcePath = "/archive/source.jsonl";
@@ -314,6 +376,42 @@ test("a restored handoff waits for its out-of-snapshot source cwd before exposin
     const directory = dom.document.querySelector('input[aria-label="Agent working directory"]') as unknown as HTMLInputElement | null;
     return directory?.value === sourceCwd;
   })).toBe(true);
+});
+
+test("a restored handoff keeps a deleted source checkout cwd behind confirmation", async () => {
+  const project = "deleted-checkout-handoff-project";
+  const sourcePath = "/archive/deleted-checkout-source.jsonl";
+  const sourceCwd = "/repos/deleted-checkout/.worktrees/source-branch";
+  let launchCalls = 0;
+  dom.sessionStorage.setItem(draftsKey(project), JSON.stringify([agentA]));
+  dom.sessionStorage.setItem(agentField(agentA, "src"), sourcePath);
+  G.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    if (init?.method === "POST" && String(input) === "/api/spawn") {
+      launchCalls += 1;
+      return { ok: true, status: 200, json: async () => ({}), text: async () => "" };
+    }
+    if (String(input).startsWith("/api/spawn?")) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ dirs: [sourceCwd], cwd: sourceCwd, cwdExists: false }),
+        text: async () => "",
+      };
+    }
+    return { ok: true, status: 200, json: async () => ({}), text: async () => "" };
+  }) as unknown as typeof fetch;
+
+  roots.push(mount(<ProjectDashboard {...dashboardProps(project)} />));
+
+  expect(await waitFor(() => {
+    const directory = dom.document.querySelector('input[aria-label="Agent working directory"]') as unknown as HTMLInputElement | null;
+    return directory?.value === sourceCwd;
+  })).toBe(true);
+  expect(dom.document.querySelector('p[role="alert"]')?.textContent).toContain("Confirm the working directory");
+  const launch = dom.document.querySelector('[aria-label="Launch the agent"]') as unknown as HTMLButtonElement | null;
+  launch?.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event);
+  await settle();
+  expect(launchCalls).toBe(0);
 });
 
 test("a restored handoff stays unresolved while source cwd lookup retries", async () => {

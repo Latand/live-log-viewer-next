@@ -15,7 +15,7 @@ import { modelFromBody } from "@/lib/agent/models";
 import { resolveSpawnRole } from "@/lib/roles/registry";
 import { spawnContentDigest, spawnParentSelector, spawnRequestDigest } from "@/lib/agent/spawnIdentity";
 import { sessionKeyFromTranscript } from "@/lib/agent/sessionKey";
-import { resolveSpawnParent, SpawnParentError, transcriptAllowed } from "@/lib/agent/spawnParent";
+import { resolveSpawnParent, SpawnParentError } from "@/lib/agent/spawnParent";
 import { spawnResponseForReceipt, type SpawnResponse } from "@/lib/agent/spawnResponse";
 import { resolveSpawnedTranscriptPath } from "@/lib/agent/spawnedTranscript";
 import { headCwd } from "@/lib/agent/transcript";
@@ -30,6 +30,8 @@ import { projectDirectoryCandidates } from "@/lib/scanner/projectDirectories";
 import { buildImagePayload, collectImagePayloads, deleteInboxImages, spawnAgentWithPrompt, verifyTmuxHostEvidence } from "@/lib/tmux";
 import type { ApiError } from "@/lib/types";
 
+import { sourceCwdStatus } from "./sourceCwd";
+
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
@@ -40,6 +42,8 @@ interface SuggestResponse {
   dirs: string[];
   /** Working directory of the `src` transcript when one was requested. */
   cwd: string | null;
+  /** Whether the recorded source directory currently exists. */
+  cwdExists: boolean;
 }
 
 function addDir(dirs: string[], cwd: string | null, project: string): void {
@@ -54,7 +58,7 @@ function addDir(dirs: string[], cwd: string | null, project: string): void {
 export async function GET(req: NextRequest): Promise<NextResponse<SuggestResponse>> {
   const project = req.nextUrl.searchParams.get("project") ?? "";
   const src = req.nextUrl.searchParams.get("src");
-  const srcCwd = src && transcriptAllowed(src) ? headCwd(src, { requireDir: true }) : null;
+  const { cwd: srcCwd, cwdExists } = sourceCwdStatus(src);
   const conversations = (await listFiles())
     .filter((entry) => entry.path.endsWith(".jsonl") && (entry.root === "claude-projects" || entry.root === "codex-sessions"))
     .filter((entry) => !entry.path.includes(path.sep + "subagents" + path.sep))
@@ -72,7 +76,7 @@ export async function GET(req: NextRequest): Promise<NextResponse<SuggestRespons
     addDir(dirs, cwd, project);
   }
   if (!dirs.length) dirs.push(os.homedir());
-  return NextResponse.json({ dirs, cwd: srcCwd });
+  return NextResponse.json({ dirs, cwd: srcCwd, cwdExists });
 }
 
 export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse | ApiError>> {

@@ -13,7 +13,7 @@ import type { ApiError } from "@/lib/types";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-export const MAX_PREFLIGHT_PATHS = 10_000;
+const MAX_PREFLIGHT_PATHS = 10_000;
 
 type PreflightResponse = { ok: true } | ApiError;
 

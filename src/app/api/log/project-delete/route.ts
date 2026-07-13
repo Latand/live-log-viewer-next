@@ -14,14 +14,12 @@ import { claudeSubagentOwnerPath, transcriptProcessMayBeRunning } from "@/lib/sc
 import { overlaySessionProjects } from "@/lib/session/titleProjection";
 import type { ApiError } from "@/lib/types";
 
+import { projectDeletionMembershipMatches } from "./membership";
+
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const MAX_PROJECT_PATHS = 10_000;
-
-export function projectDeletionMembershipMatches(expected: ReadonlySet<string>, current: readonly { path: string }[]): boolean {
-  return expected.size === current.length && current.every((entry) => expected.has(entry.path));
-}
 
 export async function POST(req: NextRequest): Promise<NextResponse<{ ok: true; deleted: number } | ApiError>> {
   const rejection = rejectCrossOrigin(req);

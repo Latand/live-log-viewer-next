@@ -359,7 +359,7 @@ export function ProjectDashboard({
         const sourceCwd = sourcePath
           ? files.find((file) => file.path === sourcePath)?.cwd?.trim()
           : undefined;
-        if (sourceCwd) seedDraftCwd(id, sourceCwd);
+        if (sourceCwd) requireDraftCwdConfirmation(id, sourceCwd);
         else if (sourcePath) unresolved.push({ id, sourcePath });
         else if (initialDraftCwdVerified) seedDraftCwd(id, initialDraftCwd);
         else requireDraftCwdConfirmation(id, initialDraftCwd);
@@ -372,13 +372,14 @@ export function ProjectDashboard({
       void fetch("/api/spawn?project=" + encodeURIComponent(project) + "&src=" + encodeURIComponent(sourcePath))
         .then(async (response) => {
           if (!response.ok) throw new Error(`spawn suggestions failed: ${response.status}`);
-          return response.json() as Promise<{ cwd?: string | null }>;
+          return response.json() as Promise<{ cwd?: string | null; cwdExists?: boolean }>;
         })
         .then((body) => {
           const sourceCwd = typeof body.cwd === "string" ? body.cwd.trim() : "";
           if (!sourceCwd) throw new Error("spawn suggestions omitted the source cwd");
           if (cancelled) return;
-          seedDraftCwd(id, sourceCwd);
+          if (body.cwdExists === false) requireDraftCwdConfirmation(id, sourceCwd);
+          else seedDraftCwd(id, sourceCwd);
           setPendingRestoredHandoffs((current) => {
             if (!current.has(id)) return current;
             const next = new Set(current);
@@ -698,8 +699,7 @@ export function ProjectDashboard({
     const id = newDraftId();
     setDraftSrc(id, file.path, file.conversationId);
     const handoffCwd = projectDraftWorkingDirectory(files, project, projectCatalogEntries, file.path, projectCwdFallbacks, initialDraftCwd);
-    if (file.cwd?.trim()) setDraftCwd(id, handoffCwd);
-    else requireDraftCwdConfirmation(id, handoffCwd);
+    requireDraftCwdConfirmation(id, handoffCwd);
     persistDrafts([...drafts, id]);
     pendingFocusRef.current = "draft::" + id;
   };

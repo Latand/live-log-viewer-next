@@ -317,7 +317,7 @@ export function DraftAgentPane({
   useEffect(() => {
     let cancelled = false;
     fetch("/api/spawn?project=" + encodeURIComponent(project) + (src ? "&src=" + encodeURIComponent(src) : ""))
-      .then((res) => res.json() as Promise<{ dirs?: string[]; cwd?: string | null }>)
+      .then((res) => res.json() as Promise<{ dirs?: string[]; cwd?: string | null; cwdExists?: boolean }>)
       .then((json) => {
         if (cancelled) return;
         if (Array.isArray(json.dirs)) setDirs(json.dirs);
@@ -325,8 +325,9 @@ export function DraftAgentPane({
         const shouldInherit = Boolean(awaitingInheritedCwdRef.current && inherited);
         if (shouldInherit) {
           awaitingInheritedCwdRef.current = false;
-          setCwdNeedsConfirmation(false);
-          writeField(draftId, "cwdUnverified", "");
+          const needsConfirmation = json.cwdExists === false;
+          setCwdNeedsConfirmation(needsConfirmation);
+          writeField(draftId, "cwdUnverified", needsConfirmation ? "1" : "");
         }
         setCwdState((prev) => {
           const next = (shouldInherit && inherited) || prev || inherited || json.dirs?.[0] || "";
