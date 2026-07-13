@@ -34,12 +34,12 @@ export const FeedItem = memo(function FeedItem({ item, speakText }: { item: Item
     const cls = item.engine === "codex" ? "bg-codex" : "bg-claude";
     const AvatarIcon = item.engine === "codex" ? Command : Sparkle;
     return (
-      <div className="group/msg my-3.5 flex gap-2.5">
+      <div className="group/msg my-3 flex gap-2.5">
         <div className={`mt-1 flex h-6.5 w-6.5 shrink-0 items-center justify-center rounded-full text-white ${cls}`}>
           <AvatarIcon className="h-3.5 w-3.5" aria-hidden />
         </div>
         <div className="relative min-w-0 flex-1 whitespace-pre-wrap break-words">
-          {hhmm(item.ts) ? <div className="mb-0.5 text-[11px] text-dim">{hhmm(item.ts)}</div> : null}
+          {hhmm(item.ts) ? <div className="mb-0.5 text-[11px] tabular-nums text-dim">{hhmm(item.ts)}</div> : null}
           <div className="absolute right-0 top-0 flex items-center gap-0.5">
             {speakText ? <SpeakButton text={speakText} /> : null}
             <CopyButton
@@ -56,13 +56,13 @@ export const FeedItem = memo(function FeedItem({ item, speakText }: { item: Item
   if (item.kind === "user") {
     const long = item.text.length > 500;
     return (
-      <div className="group/msg my-3.5 flex items-start justify-end gap-1.5">
+      <div className="group/msg my-3 flex items-start justify-end gap-1.5">
         <CopyButton
           text={item.text}
           label={tr("feed.copyMd")}
           className="mt-2 opacity-0 transition-opacity focus-visible:opacity-100 group-hover/msg:opacity-100 [@media(hover:none)]:opacity-60"
         />
-        <div className="max-w-[75%] whitespace-pre-wrap break-words rounded-2xl bg-user px-4 py-2.5">
+        <div className="max-w-[75%] whitespace-pre-wrap break-words rounded-surface bg-user px-4 py-2.5">
           {long ? (
             <details className="group/usr">
               <summary className="cursor-pointer list-none [&::-webkit-details-marker]:hidden">
@@ -88,7 +88,7 @@ export const FeedItem = memo(function FeedItem({ item, speakText }: { item: Item
     const protocol = parseProtocolPayload(item.text);
     const long = item.text.length > 420 || item.text.split("\n").length > 6;
     return (
-      <div className="my-2.5 ml-9 overflow-hidden rounded-[14px] border border-accent/25 bg-tmsg shadow-card">
+      <div className="my-3 ml-9 overflow-hidden rounded-surface border border-accent/25 bg-tmsg shadow-1">
         <div className="flex items-center gap-2 px-3.5 pt-2">
           <span className="flex h-6.5 w-6.5 shrink-0 items-center justify-center rounded-lg bg-accent-soft text-accent">
             <Mail className="h-3.5 w-3.5" aria-hidden />
@@ -135,7 +135,7 @@ export const FeedItem = memo(function FeedItem({ item, speakText }: { item: Item
   }
   if (item.kind === "tnote") {
     return (
-      <div className="my-1 ml-9 flex items-center gap-1.5 text-[11.5px] text-dim">
+      <div className="my-0.5 ml-9 flex items-center gap-1.5 text-label text-muted">
         <Mail className="h-3 w-3 shrink-0" aria-hidden />
         {item.text}
       </div>
@@ -144,7 +144,7 @@ export const FeedItem = memo(function FeedItem({ item, speakText }: { item: Item
   if (item.kind === "think") {
     const long = item.text.length > 150;
     return (
-      <details className="my-1 ml-9 text-[11.5px] italic text-dim">
+      <details className="my-0.5 ml-9 text-label italic text-muted">
         <summary className={`flex list-none items-center gap-1.5 truncate ${long ? "cursor-pointer" : ""}`} title={tr("render.reasoning")}>
           <Brain className="h-3.5 w-3.5 shrink-0" aria-hidden />
           <span className="truncate">

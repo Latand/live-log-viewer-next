@@ -347,7 +347,7 @@ function parseMemCitation(matchText: string, entriesText: string, idsText: strin
   return { kind: "mem-citation", entries, rolloutIds, raw: raw.raw, truncated: raw.truncated };
 }
 
-const CMD_GROUP_MIN = 4;
+const CMD_GROUP_MIN = 2;
 /* Output preview caps (unchanged from the original cmd model): ok output keeps
    the last 12 KB, an error the last 60 KB. The full command line keeps a bound
    too, so a giant heredoc cannot balloon the DOM in the expanded view. */
@@ -369,10 +369,13 @@ function toolBucket(event: ToolEvent): string {
   return event.tool || event.family;
 }
 
-/* A diff or an orchestration record earns its own card; simple tool rows
-   (shell/read/search/…) still fold into a cmd-group like the old cmd items. */
+/* Any tool event folds into a cmd-group (design doc §3.4: a run of ≥2
+   consecutive tool events — Read/Bash/Edit/… alike — reads as one quiet
+   ToolLine header). Only an orchestration record, itself a container of nested
+   calls, stays its own line; a diff-bodied Edit folds and reveals its diff when
+   the group row is expanded. */
 function foldableTool(item: Item): item is ToolEvent {
-  return item.kind === "tool" && item.body?.type !== "diff" && !item.orchestration;
+  return item.kind === "tool" && !item.orchestration;
 }
 
 /* Maps a `tools.<method>` orchestration call to a canonical tool name so the
@@ -1534,7 +1537,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
     return crossedEchoSeam || (plainBlock !== null && plainBlock.src < start);
   };
 
-  /* Collapses runs of >=4 consecutive foldable tool entries into one cmd-group
+  /* Collapses runs of >=2 consecutive foldable tool entries into one cmd-group
      item so a long unbroken command series reads as a single summary line.
      "think" items inside a run don't break it (and are absorbed into the group,
      since they carry no signal once the run they annotate is folded); prose/

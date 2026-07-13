@@ -599,7 +599,7 @@ export function DraftAgentPane({
           event.preventDefault();
           void send();
         }}
-        className="flex shrink-0 flex-col gap-1.5 border-t border-line bg-[#fbfbfd] px-2.5 py-2"
+        className="flex shrink-0 flex-col gap-1.5 border-t border-border bg-card px-2.5 py-2"
         aria-label={t("draft.promptAria")}
       >
         <ComposerBar

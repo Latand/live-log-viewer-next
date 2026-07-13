@@ -145,7 +145,11 @@ describe("feed session parity with one-shot parse", () => {
       JSON.stringify({ type: "response_item", timestamp: "t4", payload: { type: "function_call_output", call_id: "s1", output: "Script running with cell ID 8479\nWall time 5.0 seconds\nOutput:\n" } }),
     ];
     const feed = buildFeed(codexFile, lines, false, "");
-    const tools = feed.items.filter((item): item is Extract<Item, { kind: "tool" }> => item.kind === "tool");
+    /* Two consecutive tool events now fold into a cmd-group (§3.4), so read the
+       decoded calls from both top-level tool rows and any group. */
+    const tools = feed.items.flatMap((item): Extract<Item, { kind: "tool" }>[] =>
+      item.kind === "tool" ? [item] : item.kind === "cmd-group" ? item.calls : [],
+    );
     const wait = tools.find((tool) => tool.tool === "wait")!;
     expect(wait.family).toBe("shell");
     /* Decoded: real newlines, ANSI removed, preamble (incl. the real wrapper) not leaked. */

@@ -430,7 +430,7 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
           if (el.scrollTop < 120 && canRevealOlder && !tail.loadingOlder && !tail.loading) revealOlder();
         }}
       >
-      <div ref={content} className={compact ? "px-3 pb-4 text-[13px]" : "mx-auto w-full max-w-[1060px] px-6 pb-16"}>
+      <div ref={content} className={compact ? "px-3 pb-3 text-[13px]" : "mx-auto w-full max-w-[1060px] px-6 pb-4"}>
         {!file ? (
           <div className="mt-[20vh] text-center text-dim">{t("feed.pickLog")}</div>
         ) : (

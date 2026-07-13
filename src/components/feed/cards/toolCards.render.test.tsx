@@ -31,13 +31,20 @@ function toolEvent(over: Partial<ToolEvent> = {}): ToolEvent {
   };
 }
 
-test("a collapsed tool row renders its summary and status while body nodes stay lazily unmounted", () => {
+test("a collapsed tool row renders its summary as a quiet line while body nodes stay lazily unmounted", () => {
   const html = renderToStaticMarkup(<ToolCard event={toolEvent({ outputPreview: "total 8\nfile.ts" })} />);
   expect(html).toContain("ls -la");
-  expect(html).toContain(">ok<");
+  // Success is silence (§3.4): a collapsed ok row shows no status label.
+  expect(html).not.toContain(">ok<");
   // The body (output pre, raw-record button) is not in the DOM until expanded.
   expect(html).not.toContain("total 8");
   expect(html).not.toContain(en("tools.rawRecord"));
+});
+
+test("a non-ok tool row surfaces its status label even when collapsed", () => {
+  const html = renderToStaticMarkup(<ToolCard event={toolEvent({ status: "err", statusLabel: "exit 1" })} />);
+  expect(html).toContain("exit 1");
+  expect(html).toContain("text-danger");
 });
 
 test("an auto-opened error row mounts its body and shows the compact no-output chip", () => {
