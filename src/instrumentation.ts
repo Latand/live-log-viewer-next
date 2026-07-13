@@ -7,7 +7,10 @@ export async function register(): Promise<void> {
   }
   if (process.env.LLV_ACCOUNT_CONTROLLER_DISABLED !== "1") {
     const { startAccountMigrationController } = await import("@/lib/accounts/migration/controller");
-    try { await startAccountMigrationController(); }
-    catch { console.error("[account migration controller] initial durable reconciliation failed"); }
+    // Deliberately not awaited: the full-catalog reconciliation can exceed the
+    // deployment candidate's 90s health gate, and the viewer can serve before
+    // the first reconciliation cycle lands.
+    void startAccountMigrationController()
+      .catch(() => { console.error("[account migration controller] initial durable reconciliation failed"); });
   }
 }
