@@ -476,8 +476,9 @@ export class CodexAppServerClient {
 
   private beginShutdown(): void {
     try { this.child.stdin.end(); } catch { /* child already ended */ }
-    signalDetachedProcessGroup(this.child, "SIGTERM", this.signalProcess);
-    if (!this.reaped && !this.shutdownTimer) {
+    if (this.reaped) signalProcessGroup(this.child.pid, "SIGTERM", this.signalProcess);
+    else signalDetachedProcessGroup(this.child, "SIGTERM", this.signalProcess);
+    if (!this.shutdownTimer) {
       this.shutdownTimer = this.clock.setTimeout(() => {
         this.shutdownTimer = null;
         if (this.reaped) signalProcessGroup(this.child.pid, "SIGKILL", this.signalProcess);

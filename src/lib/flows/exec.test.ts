@@ -54,14 +54,18 @@ test("reviewer group escalation kills a TERM-resistant child after the leader ex
   expect(childAlive).toBeFalse();
 });
 
-test("reviewer group escalation survives a temporarily unavailable process identity", () => {
+test("reviewer group escalation survives an exited leader owned by its live handle", () => {
   const timers: Array<() => void> = [];
   const signals: Array<{ pid: number; signal: NodeJS.Signals }> = [];
   terminateHeadlessReviewerGroup(4343, null, {
     ownedByLiveHandle: true,
+    leaderExited: true,
     runtime: {
-      pidAlive: () => true,
-      signalProcess: (pid, signal) => { signals.push({ pid, signal }); },
+      pidAlive: () => false,
+      signalProcess: (pid, signal) => {
+        signals.push({ pid, signal });
+        if (signal === "SIGTERM") throw new Error("group exited");
+      },
       setTimeout: (callback) => {
         timers.push(callback);
         return { unref() {} } as unknown as ReturnType<typeof setTimeout>;
@@ -74,6 +78,34 @@ test("reviewer group escalation survives a temporarily unavailable process ident
     { pid: -4343, signal: "SIGTERM" },
     { pid: -4343, signal: "SIGKILL" },
   ]);
+});
+
+test("reviewer group cleanup kills a real descendant after its detached leader exits", async () => {
+  const childPidPath = path.join(process.env.LLV_STATE_DIR!, "exited-leader-child.pid");
+  const leader = spawn("sh", ["-c", "(trap '' HUP TERM; while :; do sleep 1; done) & printf '%s' \"$!\" > \"$CHILD_PID_FILE\""], {
+    detached: true,
+    stdio: "ignore",
+    env: { ...process.env, CHILD_PID_FILE: childPidPath },
+  });
+  const leaderPid = leader.pid!;
+  const leaderClosed = new Promise<void>((resolve) => { leader.once("close", () => resolve()); });
+
+  try {
+    await waitForFile(childPidPath);
+    const childPid = Number(fs.readFileSync(childPidPath, "utf8"));
+    await leaderClosed;
+    expect(process.kill(childPid, 0)).toBeTrue();
+
+    terminateHeadlessReviewerGroup(leaderPid, null, {
+      ownedByLiveHandle: true,
+      leaderExited: true,
+      graceMs: 20,
+    });
+
+    await waitForDeath(childPid);
+  } finally {
+    try { process.kill(-leaderPid, "SIGKILL"); } catch { /* group cleanup completed */ }
+  }
 });
 
 function writeArtifacts(flowId: string, round: number, stdout: string, lastMessage?: string): void {

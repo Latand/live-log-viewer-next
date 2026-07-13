@@ -486,10 +486,11 @@ export class CodexAppServerHost implements EngineHost {
   }
 
   private startTermination(): void {
-    if (this.terminationStarted || this.reaped) return;
+    if (this.terminationStarted) return;
     this.terminationStarted = true;
     try { this.child.stdin.end(); } catch { /* already closed */ }
-    signalDetachedProcessGroup(this.child, "SIGTERM", this.signalProcess);
+    if (this.reaped) signalProcessGroup(this.child.pid, "SIGTERM", this.signalProcess);
+    else signalDetachedProcessGroup(this.child, "SIGTERM", this.signalProcess);
     this.terminationTimer = setTimeout(() => {
       this.terminationTimer = null;
       if (this.reaped) signalProcessGroup(this.child.pid, "SIGKILL", this.signalProcess);

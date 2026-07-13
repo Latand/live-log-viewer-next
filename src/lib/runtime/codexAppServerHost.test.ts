@@ -556,6 +556,31 @@ describe("CodexAppServerHost", () => {
     ]);
   });
 
+  test("release cleans the detached process group after an unexpected leader exit", async () => {
+    const server = new FakeAppServer("exited-group-thread");
+    const signals: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+    const host = await CodexAppServerHost.start({
+      cwd: "/repo",
+      shutdownGraceMs: 5,
+      eventStore: new MemoryEventStore(),
+      spawnProcess: fakeSpawn(server),
+      signalProcess: (pid, signal) => {
+        signals.push({ pid, signal });
+        if (signal === "SIGTERM") throw new Error("group exited");
+      },
+    });
+
+    server.emit("close", 0, null);
+    await host.release();
+    await Bun.sleep(10);
+
+    expect(signals).toEqual([
+      { pid: -4242, signal: "SIGTERM" },
+      { pid: -4242, signal: "SIGKILL" },
+    ]);
+    expect(server.signals).toEqual([]);
+  });
+
   test("protocol failure starts bounded TERM and KILL cleanup", async () => {
     const server = new FakeAppServer("failed-thread", "failed-thread", true);
     const host = await CodexAppServerHost.start({

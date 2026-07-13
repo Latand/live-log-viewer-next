@@ -135,6 +135,34 @@ test("headless reaper revalidates ownership and applies TERM then KILL to the st
   ]);
 });
 
+test("stale review cleanup aborts when the leader identity changes before TERM", async () => {
+  const viewerExec = process(940, 1, ["codex", "exec", "--json", "--output-last-message", viewerOutput("flow-940", 1)]);
+  const signals: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+  let identityReads = 0;
+  const report = await runHeadlessProcessReaper({
+    hosts: [],
+    flows: [finishedFlow(940)],
+    thresholdMs: 2 * 60 * 60_000,
+    flowArtifactsRoot,
+    dependencies: {
+      listProcesses: () => [viewerExec],
+      ppidMap: () => new Map([[940, 1]]),
+      processIdentity: () => {
+        identityReads += 1;
+        return identityReads <= 2 ? "940:start" : "940:replacement";
+      },
+      processAgeMs: () => old,
+      loadFlows: () => [finishedFlow(940)],
+      readHosts: async () => [],
+      readPanePids: async () => [],
+      signalProcess: (pid, signal) => { signals.push({ pid, signal }); },
+    },
+  });
+
+  expect(report).toEqual({ candidates: 1, signaled: 0 });
+  expect(signals).toEqual([]);
+});
+
 test("headless reaper protects an active flow launched through a custom Codex binary", async () => {
   const processes = [
     process(910, 1, ["/opt/viewer-reviewer", "exec", "--json", "--output-last-message", viewerOutput("flow-910", 1)]),
@@ -160,6 +188,74 @@ test("headless reaper protects an active flow launched through a custom Codex bi
 
   expect(report).toEqual({ candidates: 0, signaled: 0 });
   expect(signals).toEqual([]);
+});
+
+test("orphan cleanup aborts when the root identity changes before TERM", async () => {
+  const orphan = process(920, 1, ["npm", "exec", "context7-mcp"]);
+  const signals: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+  let identityReads = 0;
+  const report = await runHeadlessProcessReaper({
+    hosts: [],
+    flows: [],
+    thresholdMs: 2 * 60 * 60_000,
+    flowArtifactsRoot,
+    dependencies: {
+      listProcesses: () => [orphan],
+      ppidMap: () => new Map([[920, 1]]),
+      processIdentity: () => {
+        identityReads += 1;
+        return identityReads <= 2 ? "920:start" : "920:replacement";
+      },
+      processAgeMs: () => old,
+      loadFlows: () => [],
+      readHosts: async () => [],
+      readPanePids: async () => [],
+      signalProcess: (pid, signal) => { signals.push({ pid, signal }); },
+    },
+  });
+
+  expect(report).toEqual({ candidates: 1, signaled: 0 });
+  expect(signals).toEqual([]);
+});
+
+test("orphan cleanup skips a descendant whose identity changes before TERM", async () => {
+  const root = process(930, 1, ["npm", "exec", "context7-mcp"]);
+  const child = process(931, 930, ["uv", "run", "child-mcp"]);
+  const signals: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+  const timers: Array<() => void> = [];
+  const identityReads = new Map<number, number>();
+  const report = await runHeadlessProcessReaper({
+    hosts: [],
+    flows: [],
+    thresholdMs: 2 * 60 * 60_000,
+    flowArtifactsRoot,
+    dependencies: {
+      listProcesses: () => [root, child],
+      ppidMap: () => new Map([[930, 1], [931, 930]]),
+      processIdentity: (pid) => {
+        const reads = (identityReads.get(pid) ?? 0) + 1;
+        identityReads.set(pid, reads);
+        return pid === 931 && reads >= 3 ? "931:replacement" : `${pid}:start`;
+      },
+      processAgeMs: () => old,
+      loadFlows: () => [],
+      readHosts: async () => [],
+      readPanePids: async () => [],
+      signalProcess: (pid, signal) => { signals.push({ pid, signal }); },
+      setTimeout: (callback) => {
+        timers.push(callback);
+        return { unref() {} } as unknown as ReturnType<typeof setTimeout>;
+      },
+    },
+  });
+
+  expect(report).toEqual({ candidates: 1, signaled: 1 });
+  expect(signals).toEqual([{ pid: 930, signal: "SIGTERM" }]);
+  timers[0]!();
+  expect(signals).toEqual([
+    { pid: 930, signal: "SIGTERM" },
+    { pid: 930, signal: "SIGKILL" },
+  ]);
 });
 
 test("headless reaper threshold defaults to two hours and rejects unsafe overrides", () => {

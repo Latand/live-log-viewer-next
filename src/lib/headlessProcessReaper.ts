@@ -219,30 +219,43 @@ function snapshot(dependencies: ReaperDependencies, flowArtifactsRoot: string, i
   });
 }
 
-function signalGroup(candidate: HeadlessProcessCandidate, dependencies: ReaperDependencies, graceMs: number): void {
+function signalGroup(candidate: HeadlessProcessCandidate, dependencies: ReaperDependencies, graceMs: number): boolean {
+  if (dependencies.processIdentity(candidate.pid) !== candidate.identity) return false;
   try { dependencies.signalProcess(-candidate.pid, "SIGTERM"); }
-  catch { try { dependencies.signalProcess(candidate.pid, "SIGTERM"); } catch { return; } }
+  catch {
+    if (dependencies.processIdentity(candidate.pid) !== candidate.identity) return false;
+    try { dependencies.signalProcess(candidate.pid, "SIGTERM"); } catch { return false; }
+  }
   const timer = dependencies.setTimeout(() => {
     try { dependencies.signalProcess(-candidate.pid, "SIGKILL"); }
     catch { /* the process group has exited */ }
   }, graceMs);
   timer.unref?.();
+  return true;
 }
 
-function signalOrphanTree(candidate: HeadlessProcessCandidate, processes: ReaperProcess[], dependencies: ReaperDependencies, graceMs: number): void {
+function signalOrphanTree(candidate: HeadlessProcessCandidate, processes: ReaperProcess[], dependencies: ReaperDependencies, graceMs: number): boolean {
   const ppids = new Map(processes.map((process) => [process.pid, process.ppid]));
-  const tree = descendantPids(candidate.pid, ppids).reverse().map((pid) => ({ pid, identity: dependencies.processIdentity(pid) }));
+  const observed = new Map(processes.map((process) => [process.pid, process.identity]));
+  const tree = descendantPids(candidate.pid, ppids).reverse().map((pid) => ({
+    pid,
+    expectedIdentity: observed.get(pid) ?? null,
+    identity: dependencies.processIdentity(pid),
+  }));
+  const root = tree.find((process) => process.pid === candidate.pid);
+  if (root?.expectedIdentity !== candidate.identity || root.identity !== candidate.identity) return false;
   for (const process of tree) {
-    if (!process.identity) continue;
+    if (!process.expectedIdentity || process.identity !== process.expectedIdentity) continue;
     try { dependencies.signalProcess(process.pid, "SIGTERM"); } catch { /* process has exited */ }
   }
   const timer = dependencies.setTimeout(() => {
     for (const process of tree) {
-      if (!process.identity || dependencies.processIdentity(process.pid) !== process.identity) continue;
+      if (!process.expectedIdentity || dependencies.processIdentity(process.pid) !== process.expectedIdentity) continue;
       try { dependencies.signalProcess(process.pid, "SIGKILL"); } catch { /* process has exited */ }
     }
   }, graceMs);
   timer.unref?.();
+  return true;
 }
 
 export async function runHeadlessProcessReaper(options: {
@@ -280,8 +293,11 @@ export async function runHeadlessProcessReaper(options: {
     const verified = selectHeadlessProcessCandidates({ processes: fresh, flows, hosts, panePids: freshPanePids, flowArtifactsRoot, thresholdMs })
       .find((current) => current.pid === candidate.pid && current.identity === candidate.identity && current.kind === candidate.kind);
     if (!verified) continue;
-    if (verified.kind === "codex-exec") signalGroup(verified, dependencies, options.shutdownGraceMs ?? DEFAULT_SHUTDOWN_GRACE_MS);
-    else signalOrphanTree(verified, fresh, dependencies, options.shutdownGraceMs ?? DEFAULT_SHUTDOWN_GRACE_MS);
+    if (verified.kind === "codex-exec") {
+      if (!signalGroup(verified, dependencies, options.shutdownGraceMs ?? DEFAULT_SHUTDOWN_GRACE_MS)) continue;
+    } else if (!signalOrphanTree(verified, fresh, dependencies, options.shutdownGraceMs ?? DEFAULT_SHUTDOWN_GRACE_MS)) {
+      continue;
+    }
     signaled += 1;
   }
   return { candidates: candidates.length, signaled };

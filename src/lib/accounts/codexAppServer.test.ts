@@ -229,14 +229,27 @@ test("malformed output and protocol errors reject safely with redacted details",
 });
 
 test("a child exit rejects an in-flight request and reaps the child", async () => {
-  const { child, start } = clientWith((fake, message) => {
-    if (message.method === "initialize") fake.respond(requestId(message), {});
+  const child = new FakeChild();
+  child.onWrite = (message) => {
+    if (message.method === "initialize") child.respond(requestId(message), {});
+  };
+  const clock = new FakeClock();
+  const signals: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+  const client = await CodexAppServerClient.start({
+    home: "/fake/home",
+    spawn: () => child as never,
+    clock,
+    signalProcess: (pid, signal) => { signals.push({ pid, signal }); },
   });
-  const client = await start();
   const pending = client.readAccount();
   child.exit();
   await expect(pending).rejects.toThrow("exited");
-  expect(child.killed).toBe(1);
+  clock.runAll();
+  expect(signals).toEqual([
+    { pid: -4242, signal: "SIGTERM" },
+    { pid: -4242, signal: "SIGKILL" },
+  ]);
+  expect(child.killed).toBe(0);
 });
 
 test("fragmented and coalesced JSONL messages preserve request and notification ordering", async () => {
@@ -361,6 +374,33 @@ test("shutdown escalates the detached process group after its leader exits durin
   client.close();
 
   child.emit("close", 0, "SIGTERM");
+  clock.runAll();
+
+  expect(signals).toEqual([
+    { pid: -4242, signal: "SIGTERM" },
+    { pid: -4242, signal: "SIGKILL" },
+  ]);
+  expect(child.signals).toEqual([]);
+});
+
+test("unexpected leader exit still cleans its detached process group", async () => {
+  const child = new FakeChild();
+  child.onWrite = (message) => {
+    if (message.method === "initialize") child.respond(requestId(message), {});
+  };
+  const clock = new FakeClock();
+  const signals: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+  await CodexAppServerClient.start({
+    home: "/fake/home",
+    spawn: () => child as never,
+    clock,
+    signalProcess: (pid, signal) => {
+      signals.push({ pid, signal });
+      if (signal === "SIGTERM") throw new Error("group exited");
+    },
+  });
+
+  child.emit("close", 0, null);
   clock.runAll();
 
   expect(signals).toEqual([
