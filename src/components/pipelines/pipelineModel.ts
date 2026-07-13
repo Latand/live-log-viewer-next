@@ -469,16 +469,41 @@ export async function createPipeline(req: CreatePipelineRequest): Promise<{ pipe
 }
 
 /**
- * Creates an EMPTY draft pipeline straight on the canvas (#136), with no form: it
+ * Folds a client-side template straight into POST-able stage inputs (issue #196
+ * template-first flow). Runtime fields are left to the server (no
+ * `runtimeOverridden`), so each role resolves its current registry defaults —
+ * the same rule the builder's own submit follows.
+ */
+export function templateStageInputs(template: PipelineTemplate): PipelineStageInput[] {
+  return draftStagesToInput(
+    template.stages.map((stage, index) => ({
+      key: `tpl-${index}`,
+      kind: stage.kind,
+      roleId: stage.roleId,
+      engine: "claude" as FlowEngine,
+      model: "",
+      effort: "",
+      access: stage.access,
+      prompt: stage.prompt,
+      roleParams: {},
+    })),
+  );
+}
+
+/**
+ * Creates a draft pipeline straight on the canvas (#136, #196), with no form: it
  * resolves the project's repo directory from the spawn endpoint (the same source
- * the dialog seeds from), then POSTs `autoStart:false` with **zero** stages. The
- * draft renders as a scheme group the operator assembles visually (add stage cards,
- * drag to reorder, edit role/model/effort/prompt) and Starts once it has ≥2 stages.
- * Runs entirely on the #189 draft machinery — no second data path.
+ * the dialog seeds from), then POSTs `autoStart:false`. With a template the draft
+ * carries the template's full role chain from the first render — every stage
+ * lands on the canvas as a dashed placeholder window before anything spawns
+ * (issue #196 template-first flow); without one it starts EMPTY and the operator
+ * assembles stages visually. Both run entirely on the #189 draft machinery — no
+ * second data path; the 2-stage floor is enforced only at Start.
  */
 export async function createDraftPipeline(
   project: string,
   repoPrefill?: string,
+  template?: PipelineTemplate,
 ): Promise<{ pipeline?: Pipeline; error?: string }> {
   let repoDir = (repoPrefill ?? "").trim();
   if (!repoDir) {
@@ -494,9 +519,57 @@ export async function createDraftPipeline(
   return createPipeline({
     task: translate(getLocale(), "pipelineBuilder.untitledTask"),
     repoDir,
-    stages: [],
+    stages: template ? templateStageInputs(template) : [],
     autoStart: false,
   });
+}
+
+/* ── Stage placeholders (issue #196) ────────────────────────────────────── */
+
+/** Pipeline states whose not-yet-materialized stages render as dashed
+    placeholder windows on the canvas. Completed/closed pipelines have no
+    upcoming stages, so they never grow placeholders. */
+export const PIPELINE_PLACEHOLDER_STATES: ReadonlySet<PipelineState> = new Set([
+  "draft",
+  "provisioning",
+  "running",
+  "needs_decision",
+  "paused",
+]);
+
+/**
+ * Does a stage already have a live board surface? A run stage is present once
+ * its latest attempt's transcript is a placed node; a review-loop is present
+ * once its flow has a placed round deck (the reviewer transcript itself is
+ * folded into the deck, so `agentPath` is never the right probe there).
+ */
+export function stageHasBoardPresence(
+  pipeline: Pipeline,
+  stage: PipelineStage,
+  placedPaths: ReadonlySet<string>,
+  placedFlowIds: ReadonlySet<string>,
+): boolean {
+  const attempt = latestAttempt(pipeline, stage.id);
+  if (!attempt) return false;
+  if (stage.kind === "review-loop") return Boolean(attempt.flowId && placedFlowIds.has(attempt.flowId));
+  return Boolean(attempt.agentPath && placedPaths.has(attempt.agentPath));
+}
+
+/**
+ * The stages of an active pipeline that need a dashed placeholder window on the
+ * canvas (issue #196): every planned stage without a live board surface, in
+ * stage order. For a draft this is the whole chain — the template's shape is
+ * visible before anything spawns; for a running pipeline the placeholders are
+ * the stages an agent hasn't attached to yet, and each placeholder dissolves in
+ * place the moment its stage materializes a node/deck.
+ */
+export function pipelinePlaceholderStages(
+  pipeline: Pipeline,
+  placedPaths: ReadonlySet<string>,
+  placedFlowIds: ReadonlySet<string>,
+): PipelineStage[] {
+  if (!PIPELINE_PLACEHOLDER_STATES.has(pipeline.state)) return [];
+  return pipeline.stages.filter((stage) => !stageHasBoardPresence(pipeline, stage, placedPaths, placedFlowIds));
 }
 
 export async function patchPipeline(

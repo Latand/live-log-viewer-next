@@ -775,6 +775,23 @@ export const uk: Record<keyof typeof en, Message> = {
   "pipelineStrip.roundShort": "Р{n}",
   "pipelineStrip.attemptSuffix": "×{n}",
   "pipelineStrip.chipAria": "Етап {label}: {state}",
+  "pipelineStrip.stageOf": "етап {k}/{n}",
+
+  // плейсхолдери етапів пайплайна + вибір шаблону (#196)
+  "pipelineSlot.paneAria": "Запланований етап {role}",
+  "pipelineSlot.stageOf": "етап {k}/{n}",
+  "pipelineSlot.promptLabel": "Промпт етапу",
+  "pipelineSlot.noPrompt": "Промпту ще немає — відредагуй його в панелі збірки.",
+  "pipelineSlot.waiting": "Вікно чату {role} з’явиться тут, щойно етап стартує.",
+  "pipelineSlot.starting": "Запускаємо агента {role}…",
+  "pipelineSlot.reviewHint": "Цикл рев’ю попереднього етапу — його раунди з’являться тут.",
+  "pipelineSlot.frozen": "Етап уже виконувався — конфігурацію заморожено.",
+  "pipelineSlot.saved": "Збережено",
+  "pipelineTemplates.title": "Новий пайплайн",
+  "pipelineTemplates.subtitle": "Обери шаблон — усі ролі одразу з’являться на полотні як вікна-плейсхолдери, ще до запуску.",
+  "pipelineTemplates.blank": "Порожнє полотно",
+  "pipelineTemplates.blankHint": "Почни з нуля і збери етапи вручну.",
+  "pipelineTemplates.noRole": "без ролі",
 
   "pipelineChipState.pending": "очікує",
   "pipelineChipState.spawning": "запускається",

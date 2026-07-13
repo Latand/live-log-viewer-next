@@ -20,7 +20,8 @@ import { clearDraftStorage, draftParentConversationId, draftSrc, setDraftSrc, se
 import { planBoardConvergence, planClose } from "./projectBoardMutations";
 import { claimedReviewerDescendantPaths, foldClaimedReviewers, isActiveFlow } from "./flows/flowModel";
 import { PipelineDialog } from "./pipelines/PipelineDialog";
-import { createDraftPipeline, pipelinesForProject } from "./pipelines/pipelineModel";
+import { createDraftPipeline, pipelinesForProject, type PipelineTemplate } from "./pipelines/pipelineModel";
+import { PipelineTemplatePicker } from "./pipelines/PipelineTemplatePicker";
 import { buildSchemeLayout } from "./scheme/layout";
 import { collapsibleWorkerFiles, groupWorkerStacks, pipelineOriginOf, pipelineStagePipelineIds, protectedReviewerNodes } from "./scheme/workerCollapse";
 import { WorkerStacks } from "./WorkerStacks";
@@ -301,6 +302,9 @@ export function ProjectDashboard({
   /* Place-on-map: the unplaced task whose next board click pins it. */
   const [placeTask, setPlaceTask] = useState<BoardTask | null>(null);
   const [pipelineDialogOpen, setPipelineDialogOpen] = useState(false);
+  /* Template-first pipeline entry (#196): `+ Пайплайн` opens this picker; the
+     chosen template lands as a draft with its whole role chain on the canvas. */
+  const [templatePickerOpen, setTemplatePickerOpen] = useState(false);
   /* The canvas builder (#136): the draft pipeline whose group panel auto-opens
      right after `+ Пайплайн` drops it, so the operator lands in the builder with
      no hunting for its chip. */
@@ -592,14 +596,16 @@ export function ProjectDashboard({
     pendingFocusRef.current = "draft::" + id;
   };
 
-  /* `+ Пайплайн` on the canvas (#136): drop an empty DRAFT group and open its
-     builder panel — no form. If the repo can't be resolved (or the POST fails),
-     fall back to the creation dialog so the operator can fix it there. */
-  const addPipelineDraft = async () => {
+  /* `+ Пайплайн` (#136, #196): the picker's template lands as a DRAFT whose
+     whole role chain renders as dashed placeholder windows on the canvas; the
+     blank choice drops an empty draft and opens its builder panel. If the repo
+     can't be resolved (or the POST fails), fall back to the creation dialog so
+     the operator can fix it there. */
+  const addPipelineDraft = async (template: PipelineTemplate | null) => {
     if (draftBusy) return;
     onUserNavigate?.();
     setDraftBusy(true);
-    const result = await createDraftPipeline(project);
+    const result = await createDraftPipeline(project, undefined, template ?? undefined);
     setDraftBusy(false);
     if (result.pipeline) setBuilderPipelineId(result.pipeline.id);
     else setPipelineDialogOpen(true);
@@ -889,7 +895,7 @@ export function ProjectDashboard({
                 <>
                   <HeaderMenuItem icon={<MessageSquarePlus className="h-4 w-4" aria-hidden />} label={t("dash.agent")} onSelect={() => { close(); addDraft(); }} />
                   <HeaderMenuItem icon={<ListTodo className="h-4 w-4" aria-hidden />} label={t("dash.task")} onSelect={() => { close(); addTaskMobile(); }} />
-                  <HeaderMenuItem icon={<span className="text-[15px] font-bold leading-none">≡</span>} label={t("dash.pipeline")} onSelect={() => { close(); setPipelineDialogOpen(true); }} />
+                  <HeaderMenuItem icon={<span className="text-[15px] font-bold leading-none">≡</span>} label={t("dash.pipeline")} onSelect={() => { close(); setTemplatePickerOpen(true); }} />
                 </>
               )}
             </HeaderMenu>
@@ -964,6 +970,17 @@ export function ProjectDashboard({
            key remount drops project A's task/repo/stages, which keeps them out of
            project B's draft (and stops A's repo from submitting under B). */
         <PipelineDialog key={project} project={project} onClose={() => setPipelineDialogOpen(false)} />
+      ) : null}
+
+      {templatePickerOpen ? (
+        <PipelineTemplatePicker
+          busy={draftBusy}
+          onClose={() => setTemplatePickerOpen(false)}
+          onPick={(template) => {
+            setTemplatePickerOpen(false);
+            void addPipelineDraft(template);
+          }}
+        />
       ) : null}
 
       {pipelinesError ? (
@@ -1085,7 +1102,7 @@ export function ProjectDashboard({
               </button>
               <button
                 type="button"
-                onClick={() => void addPipelineDraft()}
+                onClick={() => setTemplatePickerOpen(true)}
                 disabled={draftBusy}
                 aria-label={t("pipelineBuilder.createDraftAria")}
                 className="pointer-events-auto flex shrink-0 items-center gap-1 rounded-[8px] border border-line bg-panel px-3 py-1.5 text-[11.5px] font-bold text-ink shadow-card hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-50"

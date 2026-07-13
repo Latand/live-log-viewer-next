@@ -6,7 +6,7 @@ import type { SchemeLayout, SchemeRect } from "./layout";
 import type { WorkerStack } from "./workerCollapse";
 
 const emptyLayout: SchemeLayout = {
-  nodes: [], edges: [], stacks: [], decks: [], loops: [], groups: [], links: [], drafts: [],
+  nodes: [], edges: [], stacks: [], decks: [], loops: [], groups: [], links: [], drafts: [], slots: [],
   byPath: new Map(), width: 1000, height: 1000,
 };
 const world: SchemeRect = { x: 0, y: 0, w: 1000, h: 1000 };

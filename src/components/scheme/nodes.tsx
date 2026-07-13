@@ -19,7 +19,8 @@ import { FlowHub } from "@/components/flows/FlowHub";
 import { PipelineDialog } from "@/components/pipelines/PipelineDialog";
 import { PipelineHub } from "@/components/pipelines/PipelineHub";
 import { PipelineStrip } from "@/components/pipelines/PipelineStrip";
-import { canSourcePipeline, renderableFlowIds } from "@/components/pipelines/pipelineModel";
+import { StagePlaceholderPane } from "@/components/pipelines/StagePlaceholderPane";
+import { STAGE_TONES, canSourcePipeline, renderableFlowIds, stageChipState } from "@/components/pipelines/pipelineModel";
 import type { Pipeline } from "@/lib/pipelines/types";
 import { FlowStrip } from "@/components/flows/FlowStrip";
 import { RoleTag } from "@/components/flows/RoleTag";
@@ -40,6 +41,7 @@ import { stableDomOrder, stableNodeDomOrder } from "./domOrder";
 import {
   LOOP_GAP,
   NODE_W,
+  SLOT_GAP,
   type DeckNode,
   type DraftNode,
   type FlowLoop,
@@ -49,6 +51,7 @@ import {
   type SchemeLayout,
   type SchemeNode,
   type SchemeRect,
+  type StageSlot,
 } from "./layout";
 
 /* Layout reshuffles glide instead of jumping. */
@@ -977,6 +980,42 @@ function DraftShell({
   );
 }
 
+/**
+ * A planned pipeline stage's dashed placeholder window as a scheme citizen
+ * (issue #196), plus the handoff badge riding the gap to its left when the
+ * previous stage's slot sits directly beside it — so the staging (which role
+ * runs after which, where the review cycles sit) reads off the canvas before
+ * anything spawns. Remounted on the stage's resolved runtime so a saved
+ * override re-seeds the pickers (same key strategy as the builder's StageForm).
+ */
+function StageSlotShell({ slot, lite, dimmed }: { slot: StageSlot; lite: boolean; dimmed: boolean }) {
+  const tone = STAGE_TONES[stageChipState(slot.pipeline, slot.stage)];
+  return (
+    <div
+      data-scheme-node={slot.key}
+      className={`scheme-enter absolute${dimClass(dimmed)}`}
+      style={{ transform: `translate(${slot.x}px, ${slot.y}px)`, width: slot.w, height: slot.h, transition: MOVE_TRANSITION }}
+    >
+      {slot.incoming ? (
+        <span
+          aria-hidden
+          className="absolute top-[110px] z-[2] inline-flex h-7 -translate-x-1/2 -translate-y-1/2 items-center rounded-full border-2 bg-panel px-2 text-[14px] font-bold shadow-card"
+          style={{ left: -SLOT_GAP / 2, borderColor: tone.color, color: tone.color }}
+        >
+          {slot.incoming === "review-loop" ? "⟳" : "→"}
+        </span>
+      ) : null}
+      <div className="flex h-full">
+        <StagePlaceholderPane
+          key={`${slot.stage.id}:${slot.stage.effectiveRole.engine}:${slot.stage.effectiveRole.model ?? ""}:${slot.stage.effectiveRole.effort ?? ""}`}
+          slot={slot}
+          interactive={!lite}
+        />
+      </div>
+    </div>
+  );
+}
+
 /** The review deck as a scheme citizen: positioned like a child node. */
 function DeckShell({
   deck,
@@ -1092,6 +1131,7 @@ export const NodesLayer = memo(function NodesLayer({
   const stacksInDomOrder = useMemo(() => stableDomOrder(layout.stacks, (stack) => stack.key), [layout.stacks]);
   const decksInDomOrder = useMemo(() => stableDomOrder(layout.decks, (deck) => deck.key), [layout.decks]);
   const draftsInDomOrder = useMemo(() => stableDomOrder(layout.drafts, (draft) => draft.key), [layout.drafts]);
+  const slotsInDomOrder = useMemo(() => stableDomOrder(layout.slots, (slot) => slot.key), [layout.slots]);
   const nodesInDomOrder = useMemo(
     () => stableNodeDomOrder(layout.nodes),
     [layout.nodes],
@@ -1135,6 +1175,11 @@ export const NodesLayer = memo(function NodesLayer({
           />
         ),
       )}
+      {/* Placeholder windows for planned pipeline stages (issue #196): dashed
+          chat-window shells the live stage windows replace in place. */}
+      {slotsInDomOrder.map((slot) => (
+        <StageSlotShell key={slot.key} slot={slot} lite={lite} dimmed={attentionPaths !== null} />
+      ))}
       {draftsInDomOrder.map((draft) =>
         lite ? (
           <LiteDraftShell

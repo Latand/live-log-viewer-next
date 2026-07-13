@@ -802,6 +802,23 @@ export const en = {
   "pipelineStrip.roundShort": "R{n}",
   "pipelineStrip.attemptSuffix": "×{n}",
   "pipelineStrip.chipAria": "Stage {label}: {state}",
+  "pipelineStrip.stageOf": "stage {k}/{n}",
+
+  // pipeline stage placeholders + template picker (#196)
+  "pipelineSlot.paneAria": "Planned stage {role}",
+  "pipelineSlot.stageOf": "stage {k}/{n}",
+  "pipelineSlot.promptLabel": "Stage prompt",
+  "pipelineSlot.noPrompt": "No prompt yet — edit it in the builder panel.",
+  "pipelineSlot.waiting": "The {role} chat window opens here when this stage starts.",
+  "pipelineSlot.starting": "Starting the {role} agent…",
+  "pipelineSlot.reviewHint": "Review cycle over the previous stage — its rounds land here.",
+  "pipelineSlot.frozen": "This stage already ran — its configuration is locked.",
+  "pipelineSlot.saved": "Saved",
+  "pipelineTemplates.title": "New pipeline",
+  "pipelineTemplates.subtitle": "Pick a template — every role lands on the canvas as a placeholder window before anything starts.",
+  "pipelineTemplates.blank": "Blank canvas",
+  "pipelineTemplates.blankHint": "Start empty and assemble the stages by hand.",
+  "pipelineTemplates.noRole": "no role",
 
   "pipelineChipState.pending": "pending",
   "pipelineChipState.spawning": "spawning",
