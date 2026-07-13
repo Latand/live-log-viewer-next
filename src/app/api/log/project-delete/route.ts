@@ -68,6 +68,33 @@ export async function POST(req: NextRequest): Promise<NextResponse<{ ok: true; d
     const blocker = await transcriptDeletionBlocker(target, dependencies);
     if (blocker) return NextResponse.json({ error: blocker }, { status: 409 });
   }
+  /* The catalog and process checks above can take time on a large project.
+     Repeat both immediately at the reversible staging boundary so a transcript
+     or agent that appeared during validation blocks the whole commit. */
+  await refreshConversationCatalog();
+  const commitCatalog = conversationCatalogSnapshot().map(catalogEntryToFileEntry);
+  overlaySessionProjects(commitCatalog);
+  const commitCurrent = commitCatalog.filter((entry) => entry.project === project);
+  if (!projectDeletionMembershipMatches(new Set(targets), commitCurrent)) {
+    return NextResponse.json({ error: "project changed — refresh and try again" }, { status: 409 });
+  }
+  const commitOwnerExists = new Map<string, boolean>();
+  for (const target of targets) {
+    const owner = claudeSubagentOwnerPath(target);
+    if (owner && !commitOwnerExists.has(owner)) commitOwnerExists.set(owner, await ownerTranscriptMayExist(owner, fs.stat));
+  }
+  const commitEntries = await listFiles({ pins: [...targets, ...commitOwnerExists.keys()] });
+  const commitProcesses = agentProcesses(true);
+  const commitDependencies = {
+    list: async () => commitEntries,
+    ownerPath: claudeSubagentOwnerPath,
+    ownerExists: async (owner: string) => commitOwnerExists.get(owner) ?? false,
+    processMayBeRunning: (entry: (typeof commitEntries)[number]) => transcriptProcessMayBeRunning(entry, commitProcesses),
+  };
+  for (const target of targets) {
+    const blocker = await transcriptDeletionBlocker(target, commitDependencies);
+    if (blocker) return NextResponse.json({ error: blocker }, { status: 409 });
+  }
   try {
     await removeProjectTranscriptsFromDisk(targets);
   } catch {

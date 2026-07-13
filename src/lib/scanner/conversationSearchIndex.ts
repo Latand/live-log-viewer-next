@@ -15,6 +15,8 @@ interface SearchTextCacheEntry extends TranscriptSearchText {
 const BATCH_SIZE = 24;
 const MAX_SEARCH_CACHE_BYTES = 16 * 1024 * 1024;
 const MAX_SEARCH_CACHE_ENTRIES = 2_048;
+const MAX_SEARCH_PROJECTION_BYTES = 128 * 1024 * 1024;
+const MAX_SEARCH_PROJECTION_ENTRIES = 50_000;
 const SEARCH_PROJECTION_TTL_MS = 15_000;
 const store = globalThis as typeof globalThis & {
   __llvConversationSearchText?: Map<string, SearchTextCacheEntry>;
@@ -112,12 +114,12 @@ function searchTextBytes(text: TranscriptSearchText, pathname: string): number {
   return 128 + 2 * (pathname.length + (text.title?.length ?? 0) + (text.firstPrompt?.length ?? 0));
 }
 
-function projectionFits(items: readonly ConversationCatalogEntry[]): boolean {
-  if (items.length > MAX_SEARCH_CACHE_ENTRIES) return false;
+function projectionFits(items: readonly ConversationCatalogEntry[], maxBytes: number, maxEntries: number): boolean {
+  if (items.length > maxEntries) return false;
   let bytes = 0;
   for (const entry of items) {
     bytes += 192 + 2 * (entry.path.length + entry.project.length + entry.title.length + entry.firstPrompt.length);
-    if (bytes > MAX_SEARCH_CACHE_BYTES) return false;
+    if (bytes > maxBytes) return false;
   }
   return true;
 }
@@ -144,6 +146,8 @@ export async function indexConversationCatalog(
     maxCacheEntries?: number;
     signal?: AbortSignal;
     reuseProjection?: boolean;
+    maxProjectionBytes?: number;
+    maxProjectionEntries?: number;
   } = {},
 ): Promise<ConversationCatalogEntry[]> {
   const readText = options.readText ?? searchTextForTranscript;
@@ -151,6 +155,8 @@ export async function indexConversationCatalog(
   const batchSize = Math.max(1, options.batchSize ?? BATCH_SIZE);
   const maxCacheBytes = Math.max(0, options.maxCacheBytes ?? MAX_SEARCH_CACHE_BYTES);
   const maxCacheEntries = Math.max(0, Math.floor(options.maxCacheEntries ?? MAX_SEARCH_CACHE_ENTRIES));
+  const maxProjectionBytes = Math.max(0, options.maxProjectionBytes ?? MAX_SEARCH_PROJECTION_BYTES);
+  const maxProjectionEntries = Math.max(0, Math.floor(options.maxProjectionEntries ?? MAX_SEARCH_PROJECTION_ENTRIES));
   const hasOverrides = Boolean(options.readText || options.yieldControl || options.batchSize
     || options.maxCacheBytes !== undefined || options.maxCacheEntries !== undefined);
   const reuseProjection = options.reuseProjection ?? !hasOverrides;
@@ -172,7 +178,7 @@ export async function indexConversationCatalog(
     building = { catalog, controller, promise };
     store.__llvConversationSearchBuild = building;
     void promise.then((items) => {
-      if (store.__llvConversationSearchBuild === building && projectionFits(items)) {
+      if (store.__llvConversationSearchBuild === building && projectionFits(items, maxProjectionBytes, maxProjectionEntries)) {
         const projection = { catalog, items, expiresAt: Date.now() + SEARCH_PROJECTION_TTL_MS };
         store.__llvConversationSearchProjection = projection;
         store.__llvConversationSearchProjectionTimer = setTimeout(() => {

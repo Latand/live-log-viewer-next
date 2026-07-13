@@ -53,11 +53,15 @@ export async function removeProjectTranscriptsFromDisk(targets: readonly string[
       staged.push({ target, staged: stagedPath });
     }
   } catch (error) {
-    for (const item of staged.reverse()) await fs.rename(item.staged, item.target).catch(() => undefined);
+    const rollbackErrors: unknown[] = [];
+    for (const item of staged.reverse()) {
+      try { await fs.rename(item.staged, item.target); } catch (rollbackError) { rollbackErrors.push(rollbackError); }
+    }
+    if (rollbackErrors.length) throw new AggregateError([error, ...rollbackErrors], "project deletion rollback failed");
     throw error;
   }
   for (const item of staged) {
-    await fs.rm(item.staged, { force: true }).catch(() => undefined);
+    await fs.rm(item.staged, { force: true });
     await removeCompanionAndPrune(item.target);
   }
 }

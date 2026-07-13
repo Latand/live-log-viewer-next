@@ -38,7 +38,7 @@ export function planRootReconciliation(input: {
   const removeManual = input.manual.filter((path) => {
     if (rootSet.has(path)) return false;
     const file = input.catalog.get(path);
-    if (!file) return input.catalogComplete !== false;
+    if (!file) return input.catalogComplete !== false && path.endsWith(".jsonl");
     return isChildConversation(file);
   });
   return { kind: "reconcile-roots", roots, removeManual };

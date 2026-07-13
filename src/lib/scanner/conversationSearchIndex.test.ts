@@ -150,7 +150,7 @@ test("a superseded build leaves cache byte accounting exact", async () => {
   expect(stats.trackedBytes).toBeLessThanOrEqual(400);
 });
 
-test("an oversized full-catalog projection is never retained globally", async () => {
+test("a full-catalog projection beyond its hard entry ceiling is never retained", async () => {
   const catalog = Array.from({ length: 2_049 }, (_, index) => entry(7000 + index));
   let reads = 0;
   const options = {
@@ -160,6 +160,7 @@ test("an oversized full-catalog projection is never retained globally", async ()
     },
     yieldControl: async () => {},
     reuseProjection: true,
+    maxProjectionEntries: 2_048,
   };
 
   await indexConversationCatalog(catalog, options);

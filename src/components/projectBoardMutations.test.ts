@@ -44,7 +44,7 @@ test("17: planRootReconciliation seeds only root group keys past the former cap"
   const groups = Array.from({ length: 41 }, (_, i) => ({ key: `/root-${i}`, orphanTask: false }));
   const child = entry({ path: "/root-0/child", parent: "/root-0", kind: "subagent" });
   const catalog = catalogOf([child, ...groups.map((group) => entry({ path: group.key }))]);
-  const manual = ["/root-0", child.path, "/absent"];
+  const manual = ["/root-0", child.path, "/absent.jsonl"];
 
   const mutation = planRootReconciliation({ groups, manual, catalog });
 
@@ -55,7 +55,7 @@ test("17: planRootReconciliation seeds only root group keys past the former cap"
   expect(mutation.roots).not.toContain(child.path);
   /* Child pollution and a catalog-absent entry are retired; a current root is kept. */
   expect(mutation.removeManual).toContain(child.path);
-  expect(mutation.removeManual).toContain("/absent");
+  expect(mutation.removeManual).toContain("/absent.jsonl");
   expect(mutation.removeManual).not.toContain("/root-0");
   /* Applying it seeds every root, drops the pollution, and is a fixed point. */
   const once = applyBoardMutations(boardOf({ manual }), [mutation]);
@@ -84,6 +84,17 @@ test("capped reconciliation preserves manual paths omitted from the scheme windo
   });
 
   expect(mutation.removeManual).toEqual([visibleChild.path]);
+});
+
+test("complete conversation membership preserves a capped-out background task placement", () => {
+  const mutation = planRootReconciliation({
+    groups: [],
+    manual: ["/tasks/capped-out.output", "/sessions/deleted.jsonl"],
+    catalog: new Map(),
+    catalogComplete: true,
+  });
+
+  expect(mutation.removeManual).toEqual(["/sessions/deleted.jsonl"]);
 });
 
 /* 18: the convergence planner orders the succession remap before reconciliation
