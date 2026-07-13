@@ -237,6 +237,37 @@ test("pipeline stage membership is supplied before every stage spawn", async () 
   expect(h.calls).toContain(`membership:pipeline:${pipeline.id}:plan:1:architect:0`);
 });
 
+test("controller ticks follow a stage conversation to its resumed transcript", async () => {
+  const h = harness();
+  await create(h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  h.ports.pathForConversation = (id) => id === "conversation_stage_1" ? "/codex/stage-1-resumed.jsonl" : null;
+  const resumed = entry("/codex/stage-1-resumed.jsonl");
+  resumed.activity = "live";
+
+  await tickPipelines([resumed], h.ports);
+
+  expect(loadPipelines()[0]!.runs[0]!.attempts[0]!.agentPath).toBe(resumed.path);
+});
+
+test("controller ticks refresh durable paths for completed pipeline attempts", async () => {
+  const h = harness();
+  await create(h.ports);
+  await tickPipelines([], h.ports);
+  await tickPipelines([], h.ports);
+  const pipeline = loadPipelines()[0]!;
+  pipeline.state = "completed";
+  pipeline.cursor = null;
+  pipeline.runs[0]!.attempts[0]!.agentPath = "/codex/stage-1-archived.jsonl";
+  savePipelines([pipeline]);
+  h.ports.pathForConversation = (id) => id === "conversation_stage_1" ? "/codex/stage-1-resumed.jsonl" : null;
+
+  await tickPipelines([], h.ports);
+
+  expect(loadPipelines()[0]!.runs[0]!.attempts[0]!.agentPath).toBe("/codex/stage-1-resumed.jsonl");
+});
+
 test("spawn reservations persist before actuation and concurrent creation waits for the controller mutation", async () => {
   const h = harness();
   await create(h.ports);

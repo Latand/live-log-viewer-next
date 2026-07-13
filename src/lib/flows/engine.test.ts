@@ -108,12 +108,37 @@ test("a flow reviewer reserves the canonical review edge before process launch",
         kind: "flow",
         containerId: flow.id,
         role: "reviewer",
-        slot: "reviewer:1",
+        slot: `reviewer:1:${round.reviewerBindingId}`,
         round: 1,
         parentConversationId: implementer.id,
       }],
     },
   });
+});
+
+test("reviewer retries reserve distinct immutable membership slots", () => {
+  const registry = new AgentRegistry(path.join(process.env.LLV_STATE_DIR!, "review-retry-lineage-registry.json"));
+  const implementer = registry.ensureConversation("codex", "/sessions/retry-implementer.jsonl", "terra");
+  const flow = {
+    id: "flow-retry-lineage",
+    cwd: "/repo",
+    implementerPath: "/sessions/retry-implementer.jsonl",
+    implementerConversationId: implementer.id,
+    roles: { reviewer: { engine: "codex", model: null, effort: "xhigh" } },
+    rounds: [],
+  } as unknown as Flow;
+  const round = newRound(flow, "button", null);
+  const first = reserveReviewerSpawn(flow, round, flow.roles.reviewer, "terra", registry);
+  round.reviewerBindingId = "binding-retry";
+  round.startedAt = "2026-07-14T12:00:00.000Z";
+  const second = reserveReviewerSpawn(flow, round, flow.roles.reviewer, "terra", registry);
+  const snapshot = registry.snapshot();
+  const slots = [first.receipt.conversationId, second.receipt.conversationId]
+    .flatMap((conversationId) => snapshot.memberships[conversationId] ?? [])
+    .map((membership) => membership.slot);
+
+  expect(first.receipt.conversationId).not.toBe(second.receipt.conversationId);
+  expect(new Set(slots).size).toBe(2);
 });
 
 test("review-flow heuristic claim skips a newer native Codex subagent", async () => {

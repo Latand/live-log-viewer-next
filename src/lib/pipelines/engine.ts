@@ -358,7 +358,10 @@ function commitPassedStage(
 }
 
 function updateAttemptIdentity(pipeline: Pipeline, attempt: PipelineStageAttempt, entries: FileEntry[], ports: PipelinePorts): void {
-  if (!attempt.agentPath && attempt.conversationId) attempt.agentPath = ports.pathForConversation(attempt.conversationId);
+  if (attempt.conversationId) {
+    const currentPath = ports.pathForConversation(attempt.conversationId);
+    if (currentPath) attempt.agentPath = currentPath;
+  }
   if (!attempt.agentPath && attempt.sessionId) {
     attempt.agentPath = entries.find((entry) => path.basename(entry.path).includes(attempt.sessionId!))?.path ?? null;
   }
@@ -366,6 +369,20 @@ function updateAttemptIdentity(pipeline: Pipeline, attempt: PipelineStageAttempt
     attempt.conversationId ??= ports.conversationIdForPath(attempt.agentPath);
     attempt.sessionId ??= sessionKeyFromTranscript(attempt.effectiveRole.engine, attempt.agentPath)?.sessionId ?? null;
   }
+}
+
+function rebindPipelineAttemptPaths(pipeline: Pipeline, ports: PipelinePorts): boolean {
+  let changed = false;
+  for (const run of pipeline.runs) {
+    for (const attempt of run.attempts) {
+      if (!attempt.conversationId) continue;
+      const currentPath = ports.pathForConversation(attempt.conversationId);
+      if (!currentPath || currentPath === attempt.agentPath) continue;
+      attempt.agentPath = currentPath;
+      changed = true;
+    }
+  }
+  return changed;
 }
 
 async function tickRunStage(
@@ -670,9 +687,14 @@ export async function tickPipelines(entries: FileEntry[], ports: PipelinePorts =
     return await withPipelineMutation(async (pipelines, persist) => {
       let changed = false;
       for (const pipeline of pipelines) {
-        if (TERMINAL_STATES.has(pipeline.state) || pipeline.state === "paused" || pipeline.state === "needs_decision") continue;
-        if (await tickPipeline(pipeline, entries, ports, persist)) changed = true;
-        if (changed) persist();
+        let pipelineChanged = rebindPipelineAttemptPaths(pipeline, ports);
+        if (!TERMINAL_STATES.has(pipeline.state) && pipeline.state !== "paused" && pipeline.state !== "needs_decision") {
+          pipelineChanged = await tickPipeline(pipeline, entries, ports, persist) || pipelineChanged;
+        }
+        if (pipelineChanged) {
+          changed = true;
+          persist();
+        }
       }
       if (changed) persist();
       return { pipelines, changed };

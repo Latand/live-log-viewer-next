@@ -58,6 +58,8 @@ export type Round = {
   n: number; // 1-based
   reviewerPath: string | null; // reviewer run's transcript path once known
   reviewerConversationId?: string | null;
+  /** Stable identity of one reviewer launch binding within the logical round. */
+  reviewerBindingId?: string | null;
   /** Reviewer role frozen when this round is created/retried and re-frozen at
       launch (issue #118 + #117). The engine launches, recovers and polls the
       reviewer through this snapshot, so a mid-flight `set-roles` (which mutates

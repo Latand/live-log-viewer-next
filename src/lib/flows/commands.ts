@@ -312,6 +312,7 @@ export function patchFlow(id: string, req: PatchFlowRequest): { flow?: Flow; err
     Object.assign(round, {
       reviewerPath: null,
       reviewerConversationId: null,
+      reviewerBindingId: crypto.randomUUID(),
       accountId: null,
       attemptedAccounts: [],
       autoRetryCount: 0,

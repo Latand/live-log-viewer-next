@@ -34,6 +34,7 @@ function hiddenPipeline(conversationId: string): Pipeline {
 test("a pinned resumed member restores its hidden pipeline read model", () => {
   const conversationId = "conversation_019f4906-3f67-7b72-9fbc-9ec3b5ad1326";
   const file = { path: "/resumed.jsonl", conversationId } as FileEntry;
+  const archived = { path: "/old.jsonl", conversationId, migratedTo: file.path } as FileEntry;
   const membership = {
     conversationId,
     kind: "pipeline",
@@ -47,12 +48,17 @@ test("a pinned resumed member restores its hidden pipeline read model", () => {
     createdAt: "2026-01-01T00:00:00.000Z",
   } as DurableConversationMembership;
 
-  expect(filterPipelinesForFileScan([hiddenPipeline(conversationId)], [file], {
+  expect(filterPipelinesForFileScan([hiddenPipeline(conversationId)], [file, archived], {
     pinnedPaths: new Set(),
     memberships: { [conversationId]: [membership] },
   })).toEqual([]);
-  expect(filterPipelinesForFileScan([hiddenPipeline(conversationId)], [file], {
+  expect(filterPipelinesForFileScan([hiddenPipeline(conversationId)], [file, archived], {
     pinnedPaths: new Set([file.path]),
     memberships: { [conversationId]: [membership] },
-  })[0]).toMatchObject({ id: "pipeline-hidden", state: "closed", restored: true });
+  })[0]).toMatchObject({
+    id: "pipeline-hidden",
+    state: "closed",
+    restored: true,
+    runs: [{ attempts: [{ conversationId, agentPath: "/resumed.jsonl" }] }],
+  });
 });

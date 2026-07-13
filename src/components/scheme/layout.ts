@@ -4,7 +4,7 @@ import type { FileEntry } from "@/lib/types";
 
 import type { DeckRound } from "@/components/flows/RoundDeck";
 import { draftSrc } from "@/components/DraftAgentPane";
-import { claimedReviewerPaths, flowByImplementer, reviewerFileForRound } from "@/components/flows/flowModel";
+import { claimedReviewerPaths, flowByImplementer, reviewerFilesForRound } from "@/components/flows/flowModel";
 
 import {
   buildAnchorIndex,
@@ -286,11 +286,12 @@ export function buildSchemeLayout(
      through the full file list, so headless runs join as soon as the scanner
      sees them. */
   const placeDeck = (flow: Flow, x: number, y: number, baseH: number): DeckNode => {
-    const rounds: DeckRound[] = flow.rounds.map((round) => ({
-      round,
-      file: reviewerFileForRound(flow, round, files),
-    }));
-    const deck: DeckNode = { key: deckKey(flow.id), flow, rounds, x, y, w: NODE_W, h: deckHeight(flow.rounds.length, baseH) };
+    const rounds = flow.rounds.flatMap<DeckRound>((round) => {
+      const reviewers = reviewerFilesForRound(flow, round, files);
+      if (!reviewers.length) return [{ key: `round:${round.n}:${round.reviewerBindingId ?? "pending"}`, round, file: null }];
+      return reviewers.map((file) => ({ key: `round:${round.n}:${file.conversationId ?? file.path}`, round, file }));
+    });
+    const deck: DeckNode = { key: deckKey(flow.id), flow, rounds, x, y, w: NODE_W, h: deckHeight(rounds.length, baseH) };
     decks.push(deck);
     return deck;
   };

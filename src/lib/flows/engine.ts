@@ -117,6 +117,7 @@ export function newRound(flow: Flow, triggeredBy: Round["triggeredBy"], readyNot
   return {
     n: flow.rounds.length + 1,
     reviewerPath: null,
+    reviewerBindingId: crypto.randomUUID(),
     accountId: null,
     attemptedAccounts: [],
     autoRetryCount: 0,
@@ -170,8 +171,10 @@ export function reserveReviewerSpawn(
     round: null,
     parentConversationId: null,
   });
+  const reviewerBindingId = round.reviewerBindingId ?? crypto.randomUUID();
+  round.reviewerBindingId = reviewerBindingId;
   const correlation = crypto.createHash("sha256")
-    .update(`${flow.id}:${round.n}:${round.startedAt}`)
+    .update(`${flow.id}:${round.n}:${reviewerBindingId}`)
     .digest("hex")
     .slice(0, 24);
   const begun = registry.beginSpawnRequest({
@@ -187,7 +190,7 @@ export function reserveReviewerSpawn(
       kind: "flow",
       containerId: flow.id,
       role: "reviewer",
-      slot: `reviewer:${round.n}`,
+      slot: `reviewer:${round.n}:${reviewerBindingId}`,
       stageId: null,
       stageOrder: 1,
       round: round.n,
@@ -197,7 +200,7 @@ export function reserveReviewerSpawn(
     requestDigest: crypto.createHash("sha256").update(JSON.stringify({
       flowId: flow.id,
       round: round.n,
-      startedAt: round.startedAt,
+      reviewerBindingId,
       role,
       accountId,
       reviews: owner.id,
@@ -572,6 +575,7 @@ function retryHeadlessRound(flow: Flow, round: Round): void {
   Object.assign(round, {
     reviewerPath: null,
     reviewerConversationId: null,
+    reviewerBindingId: crypto.randomUUID(),
     reviewerRole: null,
     accountId: null,
     sessionId: null,
