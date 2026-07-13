@@ -15,12 +15,70 @@ function assertPixelMetrics(metrics, limits, shotId) {
   if (metrics.nearBlackRatio > limits.maxNearBlackRatio) {
     throw new Error(`${shotId} has ${(metrics.nearBlackRatio * 100).toFixed(2)}% near-black pixels`);
   }
+  if (metrics.maxTileNearBlackRatio > limits.maxTileNearBlackRatio) {
+    throw new Error(
+      `${shotId} has ${(metrics.maxTileNearBlackRatio * 100).toFixed(2)}% near-black tile at ${metrics.maxTile.column},${metrics.maxTile.row}`,
+    );
+  }
   if (metrics.nonWhiteRatio < limits.minNonWhiteRatio) {
     throw new Error(`${shotId} has only ${(metrics.nonWhiteRatio * 100).toFixed(2)}% non-white pixels`);
   }
   if (metrics.colorCount < limits.minColorCount) {
     throw new Error(`${shotId} has only ${metrics.colorCount} quantized colors`);
   }
+}
+
+function measurePixelMetrics(data, width, height, tileSize) {
+  if (!Number.isInteger(width) || width <= 0 || !Number.isInteger(height) || height <= 0) {
+    throw new Error("pixel dimensions must be positive integers");
+  }
+  if (!Number.isInteger(tileSize) || tileSize <= 0) throw new Error("pixel tile size must be a positive integer");
+  if (data.length !== width * height * 3) throw new Error("pixel buffer length does not match its dimensions");
+
+  const columns = Math.ceil(width / tileSize);
+  const rows = Math.ceil(height / tileSize);
+  const tileNearBlack = new Uint32Array(columns * rows);
+  const tilePixels = new Uint32Array(columns * rows);
+  let nearBlack = 0;
+  let nonWhite = 0;
+  const colors = new Set();
+  for (let y = 0; y < height; y += 1) {
+    const tileRow = Math.floor(y / tileSize);
+    for (let x = 0; x < width; x += 1) {
+      const offset = (y * width + x) * 3;
+      const red = data[offset];
+      const green = data[offset + 1];
+      const blue = data[offset + 2];
+      const tileIndex = tileRow * columns + Math.floor(x / tileSize);
+      tilePixels[tileIndex] += 1;
+      if (red < 12 && green < 12 && blue < 12) {
+        nearBlack += 1;
+        tileNearBlack[tileIndex] += 1;
+      }
+      if (red < 248 || green < 248 || blue < 248) nonWhite += 1;
+      colors.add(`${red >> 4},${green >> 4},${blue >> 4}`);
+    }
+  }
+
+  let maxTileIndex = 0;
+  let maxTileNearBlackRatio = 0;
+  for (let index = 0; index < tilePixels.length; index += 1) {
+    const ratio = tileNearBlack[index] / tilePixels[index];
+    if (ratio > maxTileNearBlackRatio) {
+      maxTileIndex = index;
+      maxTileNearBlackRatio = ratio;
+    }
+  }
+  const column = maxTileIndex % columns;
+  const row = Math.floor(maxTileIndex / columns);
+  const pixels = width * height;
+  return {
+    nearBlackRatio: nearBlack / pixels,
+    nonWhiteRatio: nonWhite / pixels,
+    colorCount: colors.size,
+    maxTileNearBlackRatio,
+    maxTile: { column, row },
+  };
 }
 
 async function assertVisibleElements(page, shot) {
@@ -66,23 +124,7 @@ async function assertPngFrame(png, shot) {
   if (info.width !== shot.viewport.width || info.height !== shot.viewport.height || info.channels !== 3) {
     throw new Error(`${shot.id} PNG dimensions are ${info.width}x${info.height}x${info.channels}`);
   }
-  let nearBlack = 0;
-  let nonWhite = 0;
-  const colors = new Set();
-  for (let index = 0; index < data.length; index += 3) {
-    const red = data[index];
-    const green = data[index + 1];
-    const blue = data[index + 2];
-    if (red < 12 && green < 12 && blue < 12) nearBlack += 1;
-    if (red < 248 || green < 248 || blue < 248) nonWhite += 1;
-    colors.add(`${red >> 4},${green >> 4},${blue >> 4}`);
-  }
-  const pixels = info.width * info.height;
-  const metrics = {
-    nearBlackRatio: nearBlack / pixels,
-    nonWhiteRatio: nonWhite / pixels,
-    colorCount: colors.size,
-  };
+  const metrics = measurePixelMetrics(data, info.width, info.height, shot.frame.pixels.tileSize);
   assertPixelMetrics(metrics, shot.frame.pixels, shot.id);
   return metrics;
 }
@@ -228,7 +270,7 @@ async function main() {
   }
 }
 
-module.exports = { assertPixelMetrics };
+module.exports = { assertPixelMetrics, measurePixelMetrics };
 
 if (require.main === module) {
   main().catch((error) => {

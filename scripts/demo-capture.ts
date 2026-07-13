@@ -35,6 +35,8 @@ export type DemoShot = {
     absentText: string[];
     pixels: {
       maxNearBlackRatio: number;
+      maxTileNearBlackRatio: number;
+      tileSize: number;
       minNonWhiteRatio: number;
       minColorCount: number;
     };
@@ -43,6 +45,8 @@ export type DemoShot = {
 
 const FRAME_PIXELS = {
   maxNearBlackRatio: 0.05,
+  maxTileNearBlackRatio: 0.2,
+  tileSize: 64,
   minNonWhiteRatio: 0.15,
   minColorCount: 100,
 };
