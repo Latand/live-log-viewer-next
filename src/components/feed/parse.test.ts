@@ -876,7 +876,7 @@ function clockEpoch(tsMs: number, h: number, m: number, s: number): number {
 }
 
 describe("ScheduleWakeup card", () => {
-  test("emits a wakeup tool event with a derived fire time, not a folded row", () => {
+  test("emits a standalone wakeup tool event with a derived fire time", () => {
     const ts = "2026-07-06T10:00:02Z";
     const lines = [claudeWakeup("w1", { delaySeconds: 1200, reason: "Fallback poll", prompt: "Continue the issue" }, ts)];
     const feed = buildFeed(claudeFile, lines, false, "");
@@ -945,7 +945,7 @@ describe("ScheduleWakeup card", () => {
     const feed = buildFeed(claudeFile, lines, false, "");
     const tool = feed.items.find((item) => item.kind === "tool");
     const wakeup = tool && tool.kind === "tool" ? tool.wakeup : undefined;
-    // Exact 10:02:15, not ts + 120s and not ts + 135s.
+    // The exact 10:02:15 clock wins over both ts + 120s and ts + 135s.
     expect(wakeup?.fireAt).toBe(clockEpoch(Date.parse(ts), 10, 2, 15));
   });
 

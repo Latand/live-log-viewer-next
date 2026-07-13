@@ -33,7 +33,7 @@ test("an active wakeup renders the reason, an absolute time and a countdown", ()
   expect(html).toContain("wake plan");
 });
 
-test("a superseded FUTURE wakeup reads a past/inactive headline, never 'wakes at'", () => {
+test("a superseded FUTURE wakeup reads an inactive 'was set for' headline", () => {
   const html = render(info({ superseded: true }));
   expect(html).toContain("superseded");
   expect(html).toContain("was set for");

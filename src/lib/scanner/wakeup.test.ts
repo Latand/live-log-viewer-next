@@ -123,6 +123,15 @@ describe("pendingWakeupFor", () => {
     expect(pending?.reason.length).toBeLessThanOrEqual(300);
   });
 
+  test("a cached pending wakeup expires against the clock without a size change", () => {
+    const e = entry([wakeupRecord("w1", { delaySeconds: 1200, reason: "r", prompt: "p" })]);
+    // First scan while the wakeup is ahead caches it under the file size.
+    expect(pendingWakeupFor(e, Date.parse(TS) + 60_000)).not.toBeNull();
+    // A later scan of the same (unchanged) file, now past the fire time, hits the
+    // cache but must re-validate and surface nothing.
+    expect(pendingWakeupFor(e, Date.parse(TS) + 2000 * 1000)).toBeNull();
+  });
+
   test("ignores non-claude transcripts", () => {
     const e = entry([wakeupRecord("w1", { delaySeconds: 1200, reason: "r", prompt: "p" })], "codex-sessions");
     expect(pendingWakeupFor(e, Date.parse(TS) + 60_000)).toBeNull();

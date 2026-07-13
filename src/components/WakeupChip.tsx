@@ -10,8 +10,9 @@ import { fmtWakeClock, fmtWakeMagnitude } from "./wakeupFormat";
 
 /* The board timer chip (issue #161 §3): "⏰ 12 min" on a conversation card /
    scheme node, so an idle-looking orchestrator reads as sleeping until a known
-   time. Ticks once a minute; drops itself the moment the fire time passes so a
-   stale server snapshot never leaves a phantom countdown on the board.
+   time. It re-reads the clock every 30 seconds and removes itself on the first
+   tick at or after the fire time, so a stale server snapshot clears from the
+   board within one cadence instead of lingering as a phantom countdown.
 
    Interactive (default): a real button carrying the reason behind a hover title
    AND a tap disclosure, with an invisible 44px hit area so touch users can

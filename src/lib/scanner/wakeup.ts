@@ -39,9 +39,8 @@ interface WakeupCall {
 }
 
 /** Every `ScheduleWakeup` call in one assistant record, in block order (oldest
-    first). A single record can carry several tool calls, so the caller must
-    consider them all — not just the first — to pick the newest (issue #161
-    review). */
+    first). A single record can carry several tool calls, so the caller scans
+    them all to pick the newest (issue #161 review). */
 function scheduleWakeupCalls(obj: Record<string, unknown>): WakeupCall[] {
   if (obj.type !== "assistant") return [];
   const ts = stringValue(obj.timestamp);
@@ -57,16 +56,23 @@ function scheduleWakeupCalls(obj: Record<string, unknown>): WakeupCall[] {
 /**
  * The newest still-pending self-scheduled wakeup of a Claude conversation, or
  * null. Walks the tail newest-first — and, within a record, its tool calls
- * newest-first — for the newest `ScheduleWakeup` whose result did NOT error. A
+ * newest-first — for the newest `ScheduleWakeup` whose result succeeded; a
  * rejected call is skipped so the board never advertises a wakeup the harness
  * refused (issue #161 review). The chosen call's fire time comes from the
  * result's resolved schedule (else record timestamp + delaySeconds) and it
- * surfaces only while that time is in the future.
+ * surfaces only while that time is still ahead.
  */
 export function pendingWakeupFor(entry: FileEntry, now = Date.now()): PendingWakeup | null {
   if (entry.engine !== "claude" || !entry.path.endsWith(".jsonl")) return null;
   const cached = wakeupCache.get(entry.path);
-  if (cached?.[0] === entry.size) return cached[1];
+  if (cached?.[0] === entry.size) {
+    // An idle sleeping agent writes nothing until it wakes, so a cached pending
+    // wakeup keeps the same file size after it fires. Re-check its fire time
+    // against the live clock so an expired wakeup stops surfacing (issue #161
+    // review).
+    const value = cached[1];
+    return value && value.fireAt <= now ? null : value;
+  }
 
   const records = tailRecords(entry.path, entry.size);
   let pending: PendingWakeup | null = null;
