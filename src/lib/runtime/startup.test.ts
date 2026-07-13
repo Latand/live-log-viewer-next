@@ -35,20 +35,40 @@ test("server startup delegates managed rows with file credentials and their laun
     claimOwner: null,
     pendingAction: null,
   });
-  let options: unknown;
+  let codexOptions: unknown;
+  let claudeOptions: unknown;
   await adoptStructuredHostsAtStartup({
     registry,
     resolveCodexOwner: () => ({ home: "/managed", kind: "managed" }),
+    resolveClaudeOwner: () => ({
+      home: "/managed-claude",
+      kind: "managed",
+      transcriptRoot: "/managed-claude/projects",
+      env: { NODE_ENV: "test", CLAUDE_CONFIG_DIR: "/managed-claude" },
+    }),
     adopt: async (received, optionsFor) => {
       expect(received).toBe(registry);
-      options = optionsFor(registry.snapshot().entries["codex:startup-thread"]!);
+      codexOptions = optionsFor(registry.snapshot().entries["codex:startup-thread"]!);
+      return [];
+    },
+    adoptClaude: async (received, optionsFor) => {
+      expect(received).toBe(registry);
+      claudeOptions = optionsFor(registry.snapshot().entries["codex:startup-thread"]!);
       return [];
     },
   });
-  expect(options).toMatchObject({
+  expect(codexOptions).toMatchObject({
     cwd: "/repo",
     codexHome: "/managed",
     fileAuthCredentials: true,
+    model: "gpt-5.4-mini",
+    effort: "high",
+  });
+  expect(claudeOptions).toMatchObject({
+    cwd: "/repo",
+    claudeConfigDir: "/managed-claude",
+    claudeProjectsDir: "/managed-claude/projects",
+    env: { CLAUDE_CONFIG_DIR: "/managed-claude" },
     model: "gpt-5.4-mini",
     effort: "high",
   });

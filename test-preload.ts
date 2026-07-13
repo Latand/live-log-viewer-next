@@ -2,6 +2,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+// Bun preserves an ambient NODE_ENV. Pin the test runtime before JSX modules load.
+Object.assign(process.env, { NODE_ENV: "test" });
+
 /*
  * Test-suite guard: force an isolated LLV_STATE_DIR before ANY module loads.
  *

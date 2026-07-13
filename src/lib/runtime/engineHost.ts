@@ -8,6 +8,7 @@ export interface QueueEntry {
 export type DeliveryReceipt =
   | { outcome: "steered"; turnId: string }
   | { outcome: "turn-started"; turnId: string }
+  | { outcome: "queued-next-turn"; turnId: string }
   | { outcome: "rejected"; reason: "stale-turn" | "dead-host" };
 
 export type RuntimeEvent =
