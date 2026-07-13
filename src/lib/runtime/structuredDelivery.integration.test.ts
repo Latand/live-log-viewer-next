@@ -6,6 +6,7 @@ import { afterAll, expect, test } from "bun:test";
 
 import { RuntimeJournal } from "@/runtime-host/journal";
 
+import type { EngineHost, QueueEntry } from "./engineHost";
 import { FakeEngineHost, createFakeDeliveryLedger } from "./fixtures/fakeEngineHost";
 import { StructuredDeliveryQueue, type StructuredDeliveryQueuePort } from "./structuredDeliveryQueue";
 
@@ -69,4 +70,79 @@ test("a delivering entry resumes after restart through the host ledger without a
   expect(reopenedJournal.effectBatch()).toEqual([]);
   expect(ledger.writes).toEqual([{ id: "operation-one", text: "hello" }]);
   reopenedJournal.close();
+});
+
+test("an explicit steer keeps its admission turn fence through unavailable-host recovery", async () => {
+  const filename = path.join(sandbox, "explicit-steer-fence.sqlite");
+  const journal = new RuntimeJournal(filename, { structuredHosts: true });
+  journal.append({
+    scope: { type: "session", id: "conversation-steer" },
+    kind: "session-status",
+    payload: {
+      conversationId: "conversation-steer",
+      sessionKey: { engine: "codex", sessionId: "session-steer" },
+      hostKind: "codex-app-server",
+      host: "hosted",
+      turn: "running",
+      activeTurnId: "turn-old",
+      provenance: "structured",
+      artifactPath: "/sessions/steer.jsonl",
+      capabilities: { steer: true, structuredAttention: true },
+    },
+  });
+  const admitted = journal.executeOperation({
+    kind: "steer",
+    operationId: "operation-steer",
+    idempotencyKey: "message-steer",
+    conversationId: "conversation-steer",
+    text: "amend the active turn",
+  });
+  expect(admitted.receipt).toMatchObject({ status: "pending", turnId: "turn-old" });
+
+  const expectedTurns: Array<string | null | undefined> = [];
+  let recovered = false;
+  const idleHost = {
+    health: async () => ({
+      status: recovered ? "idle" as const : "dead" as const,
+      sessionKey: "session-steer",
+      endpoint: "fake:steer",
+      pid: 1,
+      processStartIdentity: "fake:1",
+      eventCursor: 0,
+      protocolVersion: "fake-v1",
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+      account: null,
+    }),
+    send: async (entry: QueueEntry) => {
+      expectedTurns.push(entry.expectedTurnId);
+      return entry.expectedTurnId === "turn-old"
+        ? { outcome: "rejected" as const, reason: "stale-turn" as const }
+        : { outcome: "turn-started" as const, turnId: "fresh-turn" };
+    },
+    async *attach() {},
+    interrupt: async () => {},
+    answer: async () => {},
+    release: async () => {},
+  } satisfies EngineHost;
+  const queue = new StructuredDeliveryQueue(journalPort(journal), () => idleHost);
+
+  await queue.drain();
+  expect(journal.operationResult("operation-steer")?.receipt).toMatchObject({
+    status: "queued",
+    turnId: "turn-old",
+    reason: "dead-host",
+  });
+
+  recovered = true;
+  await queue.drain();
+
+  expect(expectedTurns).toEqual(["turn-old"]);
+  expect(journal.operationResult("operation-steer")?.receipt).toMatchObject({
+    status: "failed",
+    turnId: "turn-old",
+    reason: "stale-turn",
+  });
+  journal.close();
 });

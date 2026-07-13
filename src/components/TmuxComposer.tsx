@@ -57,10 +57,12 @@ export function deliveryAttemptKey(current: string, stored?: string): string {
 
 export function RuntimeComposerReceipts({
   receipts,
+  actionsDisabled = false,
   onRetry,
   onEdit,
 }: {
   receipts: RuntimeReceipt[];
+  actionsDisabled?: boolean;
   onRetry: (receipt: RuntimeReceipt) => void;
   onEdit: (receipt: RuntimeReceipt) => void;
 }) {
@@ -78,6 +80,7 @@ export function RuntimeComposerReceipts({
       <ReceiptChip
         key={receipt.operationId}
         receipt={receipt}
+        actionsDisabled={actionsDisabled}
         onRetry={messageOperation && failed ? () => onRetry(receipt) : undefined}
         onEdit={editable ? () => onEdit(receipt) : undefined}
       />
@@ -396,7 +399,7 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
   };
 
   const editRuntimeReceipt = (receipt: RuntimeReceipt) => {
-    if (!receipt.text) return;
+    if (busy || voiceSending || !receipt.text) return;
     idempotencyKey.current = mintIdempotencyKey();
     setText(receipt.text);
     setStatus(null);
@@ -634,6 +637,7 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
           displayedRuntimeReceipts.length
             ? <RuntimeComposerReceipts
                 receipts={displayedRuntimeReceipts}
+                actionsDisabled={busy || voiceSending}
                 onRetry={(receipt) => void retryRuntimeReceipt(receipt)}
                 onEdit={editRuntimeReceipt}
               />

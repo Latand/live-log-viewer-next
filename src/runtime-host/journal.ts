@@ -295,7 +295,15 @@ export class RuntimeJournal {
       const receipt = this.operationReceipt(command, operationId);
       const effectPayload = command.kind === "answer"
         ? { ...command, operationId, resolution: this.encryptSecret(command.resolution) }
-        : { ...command, operationId };
+        : {
+            ...command,
+            operationId,
+            ...(this.structuredHosts
+              && (command.kind === "send" || command.kind === "steer")
+              && typeof receipt.turnId === "string"
+              ? { turnId: receipt.turnId }
+              : {}),
+          };
       const effect = receipt.status === "pending" || receipt.status === "queued"
         ? { id: `effect:${operationId}`, kind: `runtime.${command.kind}`, payload: effectPayload }
         : undefined;
@@ -351,11 +359,12 @@ export class RuntimeJournal {
         this.db.exec("COMMIT");
         return { operationId, receipt: previous, replayed: true };
       }
-      const retrying = previous.status === "delivering" && status === "queued";
+      const queueing = status === "queued"
+        && (previous.status === "delivering" || (this.structuredHosts && previous.status === "pending"));
       const beginning = (previous.status === "pending" || previous.status === "queued") && status === "delivering";
       const completing = (previous.status === "pending" || previous.status === "queued" || previous.status === "delivering")
         && status !== "delivering" && status !== "queued";
-      if (!retrying && !beginning && !completing) throw new Error("runtime operation transition is invalid");
+      if (!queueing && !beginning && !completing) throw new Error("runtime operation transition is invalid");
       const command = JSON.parse(row.request_json) as RuntimeOperationCommand;
       if (beginning && (command.kind === "send" || command.kind === "steer") && details.turnId !== undefined) {
         const effect = this.db.query<{ payload_json: string }, [string]>("SELECT payload_json FROM outbox WHERE id = ?")
