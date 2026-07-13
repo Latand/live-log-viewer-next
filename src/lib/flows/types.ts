@@ -145,6 +145,8 @@ export type Flow = {
   rounds: Round[];
   createdAt: string;
   closedAt: string | null;
+  /** Read-model marker set when a hidden flow is projected for a pinned member. */
+  restored?: boolean;
 };
 
 export type FlowPreset = {

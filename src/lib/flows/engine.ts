@@ -6,7 +6,8 @@ import { freshSpecFor, resumeSpecFor } from "@/lib/agent/cli";
 import { accountManager } from "@/lib/accounts/manager";
 import type { AccountContext } from "@/lib/accounts/contracts";
 import { deliverToTranscriptHost } from "@/lib/agent/transcriptHost";
-import { agentRegistry } from "@/lib/agent/registry";
+import { agentRegistry, type AgentRegistry, type SpawnBeginResult, type SpawnReceipt, type TmuxHostEvidence } from "@/lib/agent/registry";
+import { sessionKeyFromTranscript } from "@/lib/agent/sessionKey";
 import { resolveSpawnedTranscriptPath } from "@/lib/agent/spawnedTranscript";
 import { headCwd } from "@/lib/agent/transcript";
 import { isNativeCodexSubagentTranscript } from "@/lib/scanner/codexNative";
@@ -144,6 +145,68 @@ export function newRound(flow: Flow, triggeredBy: Round["triggeredBy"], readyNot
     relayedAt: null,
     error: null,
   };
+}
+
+export function reserveReviewerSpawn(
+  flow: Flow,
+  round: Round,
+  role: RoleConfig,
+  accountId: string | null,
+  registry: AgentRegistry = agentRegistry(),
+): Exclude<SpawnBeginResult, { kind: "conflict" }> {
+  const implementer = flow.implementerConversationId?.startsWith("conversation_")
+    ? registry.conversation(flow.implementerConversationId as `conversation_${string}`)
+    : null;
+  const owner = implementer ?? registry.ensureConversation(flow.roles.implementer.engine, flow.implementerPath, null);
+  flow.implementerConversationId = owner.id;
+  const parentPath = owner.generations.at(-1)?.path ?? flow.implementerPath;
+  registry.rememberMembership(owner.id, {
+    kind: "flow",
+    containerId: flow.id,
+    role: "implementer",
+    slot: "implementer",
+    stageId: null,
+    stageOrder: 0,
+    round: null,
+    parentConversationId: null,
+  });
+  const correlation = crypto.createHash("sha256")
+    .update(`${flow.id}:${round.n}:${round.startedAt}`)
+    .digest("hex")
+    .slice(0, 24);
+  const begun = registry.beginSpawnRequest({
+    engine: role.engine,
+    cwd: flow.cwd,
+    accountId,
+    parentConversationId: owner.id,
+    parentSessionKey: sessionKeyFromTranscript(owner.engine, parentPath),
+    parentArtifactPath: parentPath,
+    role: "reviewer",
+    reviewsConversationId: owner.id,
+    memberships: [{
+      kind: "flow",
+      containerId: flow.id,
+      role: "reviewer",
+      slot: `reviewer:${round.n}`,
+      stageId: null,
+      stageOrder: 1,
+      round: round.n,
+      parentConversationId: owner.id,
+    }],
+    clientAttemptId: `flow_${flow.id}_${correlation}`,
+    requestDigest: crypto.createHash("sha256").update(JSON.stringify({
+      flowId: flow.id,
+      round: round.n,
+      startedAt: round.startedAt,
+      role,
+      accountId,
+      reviews: owner.id,
+    })).digest("hex"),
+  });
+  if (begun.kind === "conflict") throw new Error("reviewer spawn conflicts with its durable reservation");
+  round.launchId = begun.receipt.launchId;
+  round.reviewerConversationId = begun.receipt.conversationId;
+  return begun;
 }
 
 export function captureReviewHead(flow: Flow, round: Round): string {
@@ -345,6 +408,48 @@ interface PreparedReviewerLaunch {
   account: AccountContext;
 }
 
+function adoptReviewerReceipt(flow: Flow, round: Round, receipt: SpawnReceipt): boolean {
+  if (receipt.state === "failed" || receipt.state === "conflicted") {
+    throw new Error(receipt.error ?? `reviewer reservation is ${receipt.state}`);
+  }
+  round.launchId = receipt.launchId;
+  round.reviewerConversationId = receipt.conversationId;
+  round.reviewerPath = receipt.artifactPath ?? round.reviewerPath;
+  round.sessionId = receipt.key?.sessionId ?? round.sessionId;
+  const host = receipt.verifiedHost;
+  if (host) round.reviewerPane = { paneId: host.paneId, windowName: host.windowName };
+  flow.state = "reviewing";
+  flow.stateDetail = null;
+  if (receipt.artifactPath || host) round.launchLeaseUntil = null;
+  return receipt.state !== "starting" || Boolean(receipt.artifactPath || receipt.pane || receipt.verifiedHost);
+}
+
+function settleReviewerSpawn(flow: Flow, round: Round, role: RoleConfig, accountId: string | null, host: TmuxHostEvidence | null = null): void {
+  if (!round.launchId || !round.reviewerPath) return;
+  const registry = agentRegistry();
+  const receipt = registry.snapshot().receipts[round.launchId];
+  if (!receipt) return;
+  if (receipt?.state === "completed") {
+    round.reviewerConversationId = receipt.conversationId;
+    return;
+  }
+  const key = sessionKeyFromTranscript(role.engine, round.reviewerPath);
+  if (!key) return;
+  const settled = registry.settleSpawn(round.launchId, {
+    key,
+    artifactPath: round.reviewerPath,
+    cwd: flow.cwd,
+    accountId,
+    status: "starting",
+    host,
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: "spawn",
+  });
+  if (settled.kind === "conflict") throw new Error(settled.code);
+  round.reviewerConversationId = settled.conversation.id;
+}
+
 /* Rate-limit-aware account + role selection (issue #117): pane reviewers use the
    flow's reviewer role, headless reviewers pick an account excluding ones already
    attempted this round, parking the flow when every account is exhausted. Freezes
@@ -374,7 +479,14 @@ function prepareReviewerLaunch(flow: Flow, round: Round): PreparedReviewerLaunch
   return { role, account };
 }
 
-async function launchReviewer(flow: Flow, round: Round, prepared: PreparedReviewerLaunch, persistCheckpoint: () => void): Promise<void> {
+async function launchReviewer(
+  flow: Flow,
+  round: Round,
+  prepared: PreparedReviewerLaunch,
+  reservation: Exclude<SpawnBeginResult, { kind: "conflict" }>,
+  persistCheckpoint: () => void,
+): Promise<void> {
+  if (reservation.kind === "replay" && adoptReviewerReceipt(flow, round, reservation.receipt)) return;
   captureReviewHead(flow, round);
   persistCheckpoint();
   const prompt = reviewerPrompt(flow, round);
@@ -390,7 +502,7 @@ async function launchReviewer(flow: Flow, round: Round, prepared: PreparedReview
       claudeProjectsDir: account.engine === "claude" ? account.transcriptRoot : null,
     });
     const startedAtMs = Date.now();
-    const pane = await spawnAgentWithPrompt(spec, prompt);
+    const pane = await spawnAgentWithPrompt(spec, prompt, reservation.receipt);
     /* The pane handle makes cancel-round reliable even while the reviewer's
        transcript is still unattributed (codex, or an early stop click). */
     round.reviewerPane = { paneId: pane.paneId, windowName: spec.windowName };
@@ -403,6 +515,7 @@ async function launchReviewer(flow: Flow, round: Round, prepared: PreparedReview
       codexSessionsDir: account.engine === "codex" ? account.transcriptRoot : null,
     });
     if (transcript) round.reviewerPath = transcript;
+    settleReviewerSpawn(flow, round, role, account.accountId, pane.host ?? null);
     if (!round.reviewerPath && pane.panePid) round.error = null;
     round.launchLeaseUntil = null;
     /* Persist the pane handle NOW so a close that races the tail of this spawn can
@@ -429,6 +542,7 @@ async function launchReviewer(flow: Flow, round: Round, prepared: PreparedReview
     account.engine === "claude" ? { home: account.home, projectsDir: account.transcriptRoot, managed: account.kind === "managed" } : null,
   );
   recordHeadlessLaunch(round, launched);
+  settleReviewerSpawn(flow, round, role, account.accountId);
   /* Same ownership guard as the pane branch: persist the pid, and if a concurrent
      close/pause/retry took the flow over, terminate the orphan (forgetHeadlessReview
      SIGTERM/SIGKILLs the detached group) and clear the abandoned spawn markers so
@@ -586,12 +700,12 @@ async function tickFlow(
     try {
       const prepared = prepareReviewerLaunch(flow, round);
       round.spawnStartedAt = isoNow();
-      round.launchId = crypto.randomUUID();
+      const reservation = reserveReviewerSpawn(flow, round, prepared.role, prepared.account.accountId);
       round.launchLeaseUntil = new Date(Date.now() + REVIEWER_LAUNCH_LEASE_MS).toISOString();
       persistCheckpoint();
       /* launchReviewer persists again after spawning (for the ownership/orphan
          check), so no extra checkpoint is needed here. */
-      await launchReviewer(flow, round, prepared, persistCheckpoint);
+      await launchReviewer(flow, round, prepared, reservation, persistCheckpoint);
     } catch (error) {
       if (error instanceof ReviewerAccountsExhaustedError) {
         round.error = null;
@@ -625,6 +739,7 @@ async function tickFlow(
       }
       maybeClaimReviewerPathBySession(entries, round, round.sessionId ?? null);
       if (!round.reviewerPath && !round.sessionId) maybeClaimReviewerPathByHeuristic(flow, entries, round);
+      settleReviewerSpawn(flow, round, reviewerRoleFor(flow, round), round.accountId ?? null);
       if (status?.status === "lost" && launchLeaseActive(round)) return JSON.stringify(flow) !== before;
       if (status?.status === "running") return JSON.stringify(flow) !== before;
       if (status?.status === "lost") {
@@ -660,6 +775,9 @@ async function tickFlow(
       return JSON.stringify(flow) !== before;
     }
     maybeClaimReviewerPathByHeuristic(flow, entries, round);
+    settleReviewerSpawn(flow, round, reviewerRoleFor(flow, round), round.accountId ?? null, round.reviewerPane
+      ? agentRegistry().snapshot().receipts[round.launchId ?? ""]?.verifiedHost ?? null
+      : null);
     if (round.reviewerPath) {
       const reviewer = entriesByPath.get(round.reviewerPath);
       const fallback = fallbackReviewFromTranscript(round, entriesByPath, reviewerRoleFor(flow, round).engine);

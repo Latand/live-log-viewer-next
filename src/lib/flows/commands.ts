@@ -93,6 +93,9 @@ export async function createFlowFromRequest(req: CreateFlowRequest, entries: Fil
   if (entry.root !== "claude-projects" && entry.root !== "codex-sessions") {
     return { error: "implementer must be a Claude or Codex session", status: 400 };
   }
+  if (entry.engine !== "claude" && entry.engine !== "codex") {
+    return { error: "implementer must use the Claude or Codex engine", status: 400 };
+  }
   const normalizedSpec = normalizeFlowSpec(req.spec);
   if (!normalizedSpec.ok) {
     return { error: "spec must be a string", status: 400 };
@@ -110,13 +113,18 @@ export async function createFlowFromRequest(req: CreateFlowRequest, entries: Fil
   const flows = loadFlows();
   const existing = flows.find((flow) => flow.implementerPath === entry.path && flow.closedAt === null && flow.state !== "closed");
   if (existing) return { error: "implementer already has an active flow", status: 409 };
+  const registry = agentRegistry();
+  const implementerConversation = entry.conversationId?.startsWith("conversation_")
+    ? registry.conversation(entry.conversationId as `conversation_${string}`)
+    : null;
+  const owner = implementerConversation ?? registry.ensureConversation(entry.engine, entry.path, null);
   const flow: Flow = {
     id: crypto.randomUUID().slice(0, 8),
     template: "implement-review-loop",
     project: entry.project,
     cwd,
     implementerPath: entry.path,
-    implementerConversationId: entry.conversationId ?? null,
+    implementerConversationId: owner.id,
     roles,
     reviewerFallback: roles.reviewer.engine === "codex" ? configuredReviewerFallback() : null,
     baseRef: base.sha,
@@ -137,6 +145,16 @@ export async function createFlowFromRequest(req: CreateFlowRequest, entries: Fil
     createdAt: isoNow(),
     closedAt: null,
   };
+  registry.rememberMembership(owner.id, {
+    kind: "flow",
+    containerId: flow.id,
+    role: "implementer",
+    slot: "implementer",
+    stageId: null,
+    stageOrder: 0,
+    round: null,
+    parentConversationId: null,
+  });
   flows.push(flow);
   saveFlows(flows);
   try {

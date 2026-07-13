@@ -6,11 +6,12 @@ import path from "node:path";
 
 import type { FileEntry } from "@/lib/types";
 import { procBackend } from "@/lib/proc";
+import { AgentRegistry } from "@/lib/agent/registry";
 
 import type { Flow } from "./types";
 
 process.env.LLV_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "llv-flow-engine-test-"));
-const { captureReviewHead, newRound, tickFlows, persistTickFlows, flowTickBase, reviewerLaunchPersisted, abandonLaunch, adoptSyntheticLaunchTakeover, recordHeadlessLaunch, relayFixOrPark } = await import("./engine");
+const { captureReviewHead, newRound, tickFlows, persistTickFlows, flowTickBase, reviewerLaunchPersisted, abandonLaunch, adoptSyntheticLaunchTakeover, recordHeadlessLaunch, relayFixOrPark, reserveReviewerSpawn } = await import("./engine");
 const { loadFlows, outputPathFor, saveFlows, stderrPathFor, stdoutPathFor } = await import("./store");
 
 afterAll(() => {
@@ -74,6 +75,45 @@ test("a review round captures its clean commit immediately before launch", () =>
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }
+});
+
+test("a flow reviewer reserves the canonical review edge before process launch", () => {
+  const registry = new AgentRegistry(path.join(process.env.LLV_STATE_DIR!, "review-lineage-registry.json"));
+  const implementer = registry.ensureConversation("codex", "/sessions/implementer.jsonl", "terra");
+  const flow = {
+    id: "flow-lineage",
+    cwd: "/repo",
+    implementerPath: "/sessions/implementer.jsonl",
+    implementerConversationId: implementer.id,
+    roles: { reviewer: { engine: "codex", model: null, effort: "xhigh" } },
+    rounds: [],
+  } as unknown as Flow;
+  const round = newRound(flow, "button", null);
+
+  const begun = reserveReviewerSpawn(flow, round, flow.roles.reviewer, "terra", registry);
+
+  expect(begun.kind).toBe("created");
+  expect(round).toMatchObject({ launchId: begun.receipt.launchId, reviewerConversationId: begun.receipt.conversationId });
+  expect(registry.snapshot()).toMatchObject({
+    lineageEdges: {
+      [begun.receipt.conversationId]: {
+        kind: "review",
+        role: "reviewer",
+        reviewsConversationId: implementer.id,
+        parentConversationId: implementer.id,
+      },
+    },
+    memberships: {
+      [begun.receipt.conversationId]: [{
+        kind: "flow",
+        containerId: flow.id,
+        role: "reviewer",
+        slot: "reviewer:1",
+        round: 1,
+        parentConversationId: implementer.id,
+      }],
+    },
+  });
 });
 
 test("review-flow heuristic claim skips a newer native Codex subagent", async () => {

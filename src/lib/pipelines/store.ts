@@ -142,7 +142,9 @@ function isPipeline(value: unknown): value is Pipeline {
     isNullableString(pipeline.srcPath) &&
     isNullableString(pipeline.srcConversationId) &&
     typeof pipeline.createdAt === "string" &&
-    isNullableString(pipeline.closedAt)
+    isNullableString(pipeline.closedAt) &&
+    (pipeline.hiddenAt === undefined || isNullableString(pipeline.hiddenAt)) &&
+    (pipeline.restored === undefined || typeof pipeline.restored === "boolean")
   )) return false;
   const stages = pipeline.stages as PipelineStage[];
   const runs = pipeline.runs as Pipeline["runs"];
@@ -191,6 +193,8 @@ export function loadPipelines(): Pipeline[] {
     srcPath: pipeline.srcPath ?? null,
     srcConversationId: pipeline.srcConversationId ?? null,
     closedAt: pipeline.closedAt ?? null,
+    hiddenAt: pipeline.hiddenAt ?? null,
+    restored: undefined,
     runs: pipeline.runs.map((run) => ({
       ...run,
       attempts: Array.isArray(run.attempts)
@@ -290,6 +294,7 @@ export function buildPipeline(input: {
     srcConversationId: input.srcConversationId,
     createdAt: input.now,
     closedAt: null,
+    hiddenAt: null,
   };
 }
 

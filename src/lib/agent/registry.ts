@@ -141,6 +141,9 @@ export interface SpawnLineageEdge {
   parentSessionKey: SessionKey | null;
   childArtifactPath: string | null;
   parentArtifactPath: string | null;
+  kind: "spawn" | "review";
+  role: string | null;
+  reviewsConversationId: ViewerConversationId | null;
   source: "viewer-spawn" | "engine-native";
   evidence: {
     launchId: string | null;
@@ -148,6 +151,21 @@ export interface SpawnLineageEdge {
   };
   createdAt: string;
 }
+
+export interface DurableConversationMembership {
+  conversationId: ViewerConversationId;
+  kind: "flow" | "pipeline";
+  containerId: string;
+  role: string;
+  slot: string;
+  stageId: string | null;
+  stageOrder: number | null;
+  round: number | null;
+  parentConversationId: ViewerConversationId | null;
+  createdAt: string;
+}
+
+export type DurableMembershipInput = Omit<DurableConversationMembership, "conversationId" | "createdAt">;
 
 export interface SpawnRequest {
   engine: AgentEngine;
@@ -159,6 +177,9 @@ export interface SpawnRequest {
   parentConversationId?: ViewerConversationId | null;
   parentSessionKey?: SessionKey | null;
   parentArtifactPath?: string | null;
+  role?: string | null;
+  reviewsConversationId?: ViewerConversationId | null;
+  memberships?: DurableMembershipInput[];
   conversationId?: ViewerConversationId;
   purpose?: SpawnReceipt["purpose"];
   expectedArtifactPath?: string | null;
@@ -195,6 +216,7 @@ export interface RegistryFile {
   entries: Record<string, AgentRegistryEntry>;
   receipts: Record<string, SpawnReceipt>;
   lineageEdges: Record<string, SpawnLineageEdge>;
+  memberships: Record<string, DurableConversationMembership[]>;
   importedResumePanes: boolean;
   /** Compatibility evidence only. It never authorizes a pane until the live
       resolver proves server, process, engine, and transcript ownership. */
@@ -543,6 +565,7 @@ const EMPTY: RegistryFile = {
   entries: {},
   receipts: {},
   lineageEdges: {},
+  memberships: {},
   importedResumePanes: false,
   legacyResumePanes: { serverPid: null, panes: {} },
   conversations: {},
@@ -631,6 +654,51 @@ function normalizeEntry(value: AgentRegistryEntry): AgentRegistryEntry {
     host: value.host && typeof value.host === "object" && value.host.kind === "tmux" ? value.host : null,
     structuredHost: normalizeStructuredHost(value.structuredHost),
   };
+}
+
+function normalizeLineageEdge(value: SpawnLineageEdge): SpawnLineageEdge {
+  const reviewsConversationId = typeof value.reviewsConversationId === "string" && value.reviewsConversationId.startsWith("conversation_")
+    ? value.reviewsConversationId as ViewerConversationId
+    : null;
+  const role = typeof value.role === "string" && value.role.trim() ? value.role.trim() : null;
+  return {
+    ...value,
+    kind: value.kind === "review" || reviewsConversationId || role === "reviewer" ? "review" : "spawn",
+    role,
+    reviewsConversationId,
+  };
+}
+
+function normalizeMemberships(value: unknown): RegistryFile["memberships"] {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const normalized: RegistryFile["memberships"] = {};
+  for (const [conversationId, rows] of Object.entries(value)) {
+    if (!conversationId.startsWith("conversation_") || !Array.isArray(rows)) continue;
+    const valid = rows.flatMap((candidate): DurableConversationMembership[] => {
+      if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return [];
+      const row = candidate as Partial<DurableConversationMembership>;
+      if ((row.kind !== "flow" && row.kind !== "pipeline")
+        || typeof row.containerId !== "string" || !row.containerId
+        || typeof row.role !== "string" || !row.role
+        || typeof row.slot !== "string" || !row.slot) return [];
+      return [{
+        conversationId: conversationId as ViewerConversationId,
+        kind: row.kind,
+        containerId: row.containerId,
+        role: row.role,
+        slot: row.slot,
+        stageId: typeof row.stageId === "string" ? row.stageId : null,
+        stageOrder: Number.isInteger(row.stageOrder) ? row.stageOrder! : null,
+        round: Number.isInteger(row.round) ? row.round! : null,
+        parentConversationId: typeof row.parentConversationId === "string" && row.parentConversationId.startsWith("conversation_")
+          ? row.parentConversationId as ViewerConversationId
+          : null,
+        createdAt: typeof row.createdAt === "string" ? row.createdAt : now(),
+      }];
+    });
+    if (valid.length) normalized[conversationId] = valid;
+  }
+  return normalized;
 }
 
 function normalizeProviderReceipt(value: ProviderReceipt | null | undefined): ProviderReceipt | null {
@@ -799,6 +867,7 @@ function conversationDurabilityScore(file: RegistryFile, conversation: RegistryC
   }
   if (file.lineageEdges[conversation.id]) score += 10;
   for (const edge of Object.values(file.lineageEdges)) if (edge.parentConversationId === conversation.id) score += 5;
+  if (file.memberships[conversation.id]?.length) score += 10;
   for (const delivery of Object.values(file.heldDeliveries)) if (delivery.conversationId === conversation.id) score += 5;
   return score;
 }
@@ -834,6 +903,9 @@ function recordObservedLineage(
     parentSessionKey: parentGeneration ? sessionKeyFromTranscript(parent.engine, parentGeneration.path) : null,
     childArtifactPath: artifactPath,
     parentArtifactPath: parentGeneration?.path ?? null,
+    kind: existing?.kind ?? "spawn",
+    role: existing?.role ?? null,
+    reviewsConversationId: existing?.reviewsConversationId ?? null,
     source: existing?.source ?? "engine-native",
     evidence: existing?.evidence ?? { launchId: null, clientAttemptId: null },
     createdAt: existing?.createdAt ?? observedAt,
@@ -850,6 +922,43 @@ function resolveConversationAlias(file: Pick<RegistryFile, "conversationAliases"
     current = next;
   }
   return current;
+}
+
+function recordMembership(
+  file: RegistryFile,
+  conversationId: ViewerConversationId,
+  input: DurableMembershipInput,
+  createdAt: string,
+): DurableConversationMembership {
+  if ((input.kind !== "flow" && input.kind !== "pipeline") || !input.containerId.trim() || !input.role.trim() || !input.slot.trim()) {
+    throw new Error("durable membership is invalid");
+  }
+  const canonicalConversationId = resolveConversationAlias(file, conversationId);
+  const parentConversationId = input.parentConversationId ? resolveConversationAlias(file, input.parentConversationId) : null;
+  const membership: DurableConversationMembership = {
+    conversationId: canonicalConversationId,
+    kind: input.kind,
+    containerId: input.containerId,
+    role: input.role,
+    slot: input.slot,
+    stageId: input.stageId ?? null,
+    stageOrder: Number.isInteger(input.stageOrder) ? input.stageOrder : null,
+    round: Number.isInteger(input.round) ? input.round : null,
+    parentConversationId,
+    createdAt,
+  };
+  const rows = file.memberships[canonicalConversationId] ?? [];
+  const existing = rows.find((row) => row.kind === membership.kind && row.containerId === membership.containerId && row.slot === membership.slot);
+  if (existing) {
+    const immutableShape = ({ createdAt: _createdAt, ...row }: DurableConversationMembership) => row;
+    if (JSON.stringify(immutableShape(existing)) !== JSON.stringify(immutableShape(membership))) {
+      throw new Error("durable membership is immutable");
+    }
+    return existing;
+  }
+  rows.push(membership);
+  file.memberships[canonicalConversationId] = rows;
+  return membership;
 }
 
 export function conversationLookupFromSnapshot(snapshot: RegistryFile): ConversationLookup {
@@ -907,6 +1016,23 @@ function adoptProvisionalOwner(
     if (!existing || edge.childConversationId === target.id) reassignedEdges[reassigned.childConversationId] = reassigned;
   }
   file.lineageEdges = reassignedEdges;
+  const reassignedMemberships: RegistryFile["memberships"] = {};
+  for (const [conversationId, memberships] of Object.entries(file.memberships)) {
+    const reassignedConversationId = conversationId === owner.id ? target.id : conversationId as ViewerConversationId;
+    const rows = memberships.map((membership) => ({
+      ...membership,
+      conversationId: reassignedConversationId,
+      parentConversationId: membership.parentConversationId === owner.id ? target.id : membership.parentConversationId,
+    }));
+    const destination = reassignedMemberships[reassignedConversationId] ?? [];
+    for (const row of rows) {
+      if (!destination.some((existing) => existing.kind === row.kind && existing.containerId === row.containerId && existing.slot === row.slot)) {
+        destination.push(row);
+      }
+    }
+    reassignedMemberships[reassignedConversationId] = destination;
+  }
+  file.memberships = reassignedMemberships;
   for (const delivery of Object.values(file.heldDeliveries)) {
     if (delivery.conversationId === owner.id) delivery.conversationId = target.id;
   }
@@ -995,7 +1121,10 @@ function readFile(filename: string): RegistryFile {
       version: 2,
       entries: Object.fromEntries(Object.entries(parsed.entries).map(([id, entry]) => [id, normalizeEntry(entry)])),
       receipts: Object.fromEntries(Object.entries(parsed.receipts).map(([id, receipt]) => [id, normalizeReceipt(receipt)])),
-      lineageEdges: parsed.lineageEdges && typeof parsed.lineageEdges === "object" ? parsed.lineageEdges : {},
+      lineageEdges: parsed.lineageEdges && typeof parsed.lineageEdges === "object"
+        ? Object.fromEntries(Object.entries(parsed.lineageEdges).map(([id, edge]) => [id, normalizeLineageEdge(edge)]))
+        : {},
+      memberships: normalizeMemberships(parsed.memberships),
       importedResumePanes: parsed.importedResumePanes === true,
       legacyResumePanes: legacy && typeof legacy === "object" && "panes" in legacy
         ? { serverPid: typeof (legacy as { serverPid?: unknown }).serverPid === "number" ? (legacy as { serverPid: number }).serverPid : null, panes: ((legacy as { panes?: unknown }).panes as Record<string, ResumePaneRecord>) ?? {} }
@@ -1492,6 +1621,13 @@ export class AgentRegistry {
     return this.mutate((file) => {
       const conversationId = input.conversationId ? resolveConversationAlias(file, input.conversationId) : null;
       const parentConversationId = input.parentConversationId ? resolveConversationAlias(file, input.parentConversationId) : null;
+      const reviewsConversationId = input.reviewsConversationId ? resolveConversationAlias(file, input.reviewsConversationId) : null;
+      const role = typeof input.role === "string" && input.role.trim() ? input.role.trim() : null;
+      if (role === "reviewer" && !reviewsConversationId) throw new Error("reviewer spawn requires reviewsConversationId");
+      if (reviewsConversationId && role !== "reviewer") throw new Error("reviewsConversationId requires reviewer role");
+      if (reviewsConversationId !== null && reviewsConversationId !== parentConversationId) {
+        throw new Error("reviewer parent must be the reviewed conversation");
+      }
       const existingConversation = conversationId ? file.conversations[conversationId] : null;
       const requestedProfile = emptyLaunchProfile({ cwd: input.cwd, ...(input.launchProfile ?? {}), parentConversationId });
       const currentProfile = existingConversation?.generations.at(-1)?.launchProfile;
@@ -1546,13 +1682,23 @@ export class AgentRegistry {
           parentSessionKey: input.parentSessionKey ?? null,
           childArtifactPath: null,
           parentArtifactPath: input.parentArtifactPath ?? null,
+          kind: reviewsConversationId ? "review" : "spawn",
+          role,
+          reviewsConversationId,
           source: "viewer-spawn",
           evidence: { launchId: receipt.launchId, clientAttemptId: receipt.clientAttemptId },
           createdAt: receipt.createdAt,
         };
       }
+      for (const membership of input.memberships ?? []) {
+        recordMembership(file, receipt.conversationId, membership, receipt.createdAt);
+      }
       return { kind: "created", receipt: clone(receipt) };
     });
+  }
+
+  rememberMembership(conversationId: ViewerConversationId, membership: DurableMembershipInput): DurableConversationMembership {
+    return this.mutate((file) => clone(recordMembership(file, conversationId, membership, now())));
   }
 
   beginSpawn(engine: AgentEngine, cwd: string, launchProfile: Partial<LaunchProfile> = {}): SpawnReceipt {
@@ -1714,7 +1860,7 @@ export class AgentRegistry {
       }
       addConversationContinuityPath(conversation, entry.artifactPath);
     }
-    if (receipt.purpose === "launch" && receipt.state === "path-pending") {
+    if (receipt.purpose === "launch") {
       const provisionalOwner = Object.values(file.conversations).find((candidate) => candidate.id !== conversation.id
         && candidate.engine === conversation.engine && conversationOwnsPath(candidate, entry.artifactPath));
       if (provisionalOwner && !adoptProvisionalOwner(file, provisionalOwner, conversation, entry.artifactPath)) {

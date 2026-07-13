@@ -5,7 +5,13 @@ import type { FileEntry } from "@/lib/types";
 
 import { protectedReviewerNodes } from "@/components/scheme/workerCollapse";
 
-import { claimedReviewerDescendantPaths, flowPresentation, foldClaimedReviewers, isActiveFlow } from "./flowModel";
+import {
+  claimedReviewerDescendantPaths,
+  flowPresentation,
+  foldClaimedReviewers,
+  isActiveFlow,
+  reviewerFileForRound,
+} from "./flowModel";
 
 function entry(overrides: Partial<FileEntry> & { path: string }): FileEntry {
   return {
@@ -67,6 +73,49 @@ function flow(overrides: Partial<Flow> & { implementerPath: string; reviewerPath
 }
 
 describe("reviewer folding", () => {
+  test("resolves a resumed reviewer through its stable durable edge", () => {
+    const resumed = entry({
+      path: "/reviewer-resumed",
+      conversationId: "conversation-reviewer",
+      durableLineage: {
+        kind: "review",
+        role: "reviewer",
+        parentConversationId: "conversation-implementer",
+        reviewsConversationId: "conversation-implementer",
+        memberships: [{
+          kind: "flow",
+          containerId: "flow-1",
+          slot: "reviewer:3",
+          role: "reviewer",
+          round: 3,
+          stageId: null,
+          stageOrder: null,
+          parentConversationId: "conversation-implementer",
+        }],
+      },
+    });
+    const currentFlow = flow({
+      implementerPath: "/implementer",
+      reviewerPath: "/reviewer-rotated-away",
+      rounds: [{
+        n: 3,
+        reviewerPath: "/reviewer-rotated-away",
+        reviewerConversationId: "conversation-reviewer",
+        findingsPath: null,
+        triggeredBy: "marker",
+        readyNote: null,
+        verdict: null,
+        findingsCount: null,
+        startedAt: "2026-07-05T00:00:00Z",
+        reviewedAt: null,
+        relayedAt: null,
+        error: null,
+      }],
+    });
+
+    expect(reviewerFileForRound(currentFlow, currentFlow.rounds[0]!, [resumed])).toBe(resumed);
+  });
+
   test("keeps descendants available for expanded scheme placement", () => {
     const implementer = entry({ path: "/implementer" });
     const reviewer = entry({ path: "/reviewer", parent: "/implementer" });
