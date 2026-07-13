@@ -813,8 +813,10 @@ test("Codex successor provider recovers a validated fork created before exact re
   const journalRoot = path.join(base, "provider-journal");
   const sourceId = "019f423a-d6e9-7903-b597-3e676b6ff3d4";
   const forkId = "019f423a-d6e9-4903-8597-3e676b6ff3d4";
+  const ambiguousId = "019f423a-d6e9-4903-8597-3e676b6ff3ff";
   const sourcePath = path.join(source.transcriptRoot, `rollout-${sourceId}.jsonl`);
   const forkPath = path.join(source.transcriptRoot, `rollout-${forkId}.jsonl`);
+  const ambiguousPath = path.join(source.transcriptRoot, `rollout-${ambiguousId}.jsonl`);
   fs.writeFileSync(sourcePath, codexSessionMeta(sourceId), { mode: 0o600 });
   let forkCalls = 0;
   const client = () => ({
@@ -835,6 +837,10 @@ test("Codex successor provider recovers a validated fork created before exact re
     spawnClaude: async () => { throw new Error("unexpected Claude spawn"); },
     now: () => "2026-07-10T12:00:00.000Z",
     journalRoot,
+    scanCodexForkArtifacts: () => [
+      { id: forkId, path: forkPath },
+      { id: ambiguousId, path: ambiguousPath },
+    ].filter((artifact) => fs.existsSync(artifact.path)),
   } as ProviderDependencies & { journalRoot: string; afterCodexForkReturned?: () => void };
   const registry = new AgentRegistry(path.join(base, "registry.json"));
   const conversation = registry.ensureConversation("codex", sourcePath, "source");
@@ -862,8 +868,6 @@ test("Codex successor provider recovers a validated fork created before exact re
   await expect(crashed.create(input)).rejects.toThrow("simulated crash before exact fork receipt");
   expect(forkCalls).toBe(1);
 
-  const ambiguousId = "019f423a-d6e9-4903-8597-3e676b6ff3ff";
-  const ambiguousPath = path.join(source.transcriptRoot, `rollout-${ambiguousId}.jsonl`);
   fs.writeFileSync(ambiguousPath, codexSessionMeta(ambiguousId, sourceId), { mode: 0o600 });
   await expect(new RegisteredSuccessorProvider(dependencies).create(input)).rejects.toThrow("ambiguous");
   expect(forkCalls).toBe(1);

@@ -11,8 +11,8 @@ import type { DurableQuotaObservation, MigrationEngine } from "@/lib/accounts/mi
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-function liveFreshObservation(observation: DurableQuotaObservation | undefined, now: number): boolean {
-  if (!observation?.authenticated || observation.provenance.source !== "live") return false;
+function currentObservation(observation: DurableQuotaObservation | undefined, now: number): boolean {
+  if (!observation) return false;
   const observedAge = now - Date.parse(observation.observedAt);
   const authAge = now - Date.parse(observation.authCheckedAt);
   return Number.isFinite(observedAge) && Number.isFinite(authAge)
@@ -20,8 +20,24 @@ function liveFreshObservation(observation: DurableQuotaObservation | undefined, 
     && observedAge <= AUTO_BALANCE_FRESH_MS && authAge <= AUTO_BALANCE_FRESH_MS;
 }
 
+function currentLiveObservation(observation: DurableQuotaObservation | undefined, now: number): boolean {
+  return observation?.provenance.source === "live" && currentObservation(observation, now);
+}
+
+function liveFreshObservation(observation: DurableQuotaObservation | undefined, now: number): boolean {
+  return observation?.authenticated === true && currentLiveObservation(observation, now);
+}
+
 function accountProjection(observation: DurableQuotaObservation | undefined, authPresent: boolean, now: number) {
   const eligible = liveFreshObservation(observation, now);
+  const authCurrent = currentObservation(observation, now);
+  const reauthenticationRequired = authCurrent && observation?.provenance.reason === "oauth-reauthentication-required";
+  let authState: "authenticated" | "signed_out" | "unknown" | "error" = "unknown";
+  if (eligible) authState = "authenticated";
+  else if (!authPresent || reauthenticationRequired) authState = "signed_out";
+  else if (authCurrent && observation?.authenticated === false) {
+    authState = observation.provenance.source === "live" ? "signed_out" : "error";
+  }
   const effective = observation ? effectiveRemaining({
     engine: observation.engine,
     accountId: observation.accountId,
@@ -33,7 +49,7 @@ function accountProjection(observation: DurableQuotaObservation | undefined, aut
   }, now) : null;
   return {
     auth: {
-      state: eligible ? "authenticated" : authPresent ? "unknown" : "signed_out",
+      state: authState,
       method: null,
       email: null,
       plan: observation?.limits?.plan ?? null,
