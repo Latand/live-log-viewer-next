@@ -6,6 +6,7 @@ import { statePath } from "@/lib/configDir";
 import { migrateBoardProjects } from "@/lib/board/store";
 
 import type { ProjectCatalogEntry } from "../types";
+import { replaceConversationCatalog } from "./conversationCatalog";
 import { describe } from "./describe";
 import type { RawEntry } from "./discover";
 import { PROJECT_RESOLUTION_VERSION, projectResolutionStateKey } from "./projectState";
@@ -18,9 +19,20 @@ type CachedProjectFile = {
   project: string;
   kind: string;
   session: boolean;
+  worktree?: string;
+  title?: string;
+  firstPrompt?: string;
+  engine?: "codex" | "claude" | "shell";
+  fmt?: "codex" | "claude" | "plain";
 };
 
-type ProjectCatalogFile = CachedProjectFile & { path: string };
+type ProjectCatalogFile = CachedProjectFile & {
+  path: string;
+  title: string;
+  firstPrompt: string;
+  engine: "codex" | "claude" | "shell";
+  fmt: "codex" | "claude" | "plain";
+};
 
 type ProjectCatalogState = {
   version: 1;
@@ -63,6 +75,11 @@ function readState(): ProjectCatalogState {
         project: file.project,
         kind: file.kind,
         session: file.session,
+        worktree: typeof file.worktree === "string" ? file.worktree : undefined,
+        title: typeof file.title === "string" ? file.title : undefined,
+        firstPrompt: typeof file.firstPrompt === "string" ? file.firstPrompt : undefined,
+        engine: file.engine === "codex" || file.engine === "claude" || file.engine === "shell" ? file.engine : undefined,
+        fmt: file.fmt === "codex" || file.fmt === "claude" || file.fmt === "plain" ? file.fmt : undefined,
       };
     }
     return { version: 1, resolutionVersion: raw.resolutionVersion ?? 0, files };
@@ -83,8 +100,8 @@ function writeState(state: ProjectCatalogState): void {
   }
 }
 
-function isRootSession(rootName: RawEntry["rootName"], kind: string): boolean {
-  return (rootName === "codex-sessions" || rootName === "claude-projects") && kind === "session";
+function isConversation(rootName: RawEntry["rootName"], kind: string): boolean {
+  return rootName === "codex-sessions" || (rootName === "claude-projects" && (kind === "session" || kind === "subagent"));
 }
 
 function cachedFile(raw: RawEntry, state: ProjectCatalogState, stateKey: string): ProjectCatalogFile {
@@ -94,9 +111,13 @@ function cachedFile(raw: RawEntry, state: ProjectCatalogState, stateKey: string)
     cached &&
     cached.size === raw.st.size &&
     cached.mtimeMs === raw.st.mtimeMs &&
-    cached.stateKey === stateKey
+    cached.stateKey === stateKey &&
+    typeof cached.title === "string" &&
+    typeof cached.firstPrompt === "string" &&
+    (cached.engine === "codex" || cached.engine === "claude" || cached.engine === "shell") &&
+    (cached.fmt === "codex" || cached.fmt === "claude" || cached.fmt === "plain")
   ) {
-    return { path: raw.path, ...cached };
+    return { path: raw.path, ...cached } as ProjectCatalogFile;
   }
   const meta = describe(raw.rootName, raw.root, raw.path, raw.st, stateKey);
   const file: ProjectCatalogFile = {
@@ -107,7 +128,12 @@ function cachedFile(raw: RawEntry, state: ProjectCatalogState, stateKey: string)
     stateKey,
     project: meta.project || "other",
     kind: meta.kind,
-    session: isRootSession(raw.rootName, meta.kind),
+    session: isConversation(raw.rootName, meta.kind),
+    worktree: meta.worktree,
+    title: meta.title,
+    firstPrompt: meta.firstPrompt,
+    engine: meta.engine,
+    fmt: meta.fmt,
   };
   state.files[raw.path] = {
     rootName: file.rootName,
@@ -117,6 +143,11 @@ function cachedFile(raw: RawEntry, state: ProjectCatalogState, stateKey: string)
     project: file.project,
     kind: file.kind,
     session: file.session,
+    worktree: file.worktree,
+    title: file.title,
+    firstPrompt: file.firstPrompt,
+    engine: file.engine,
+    fmt: file.fmt,
   };
   return file;
 }
@@ -184,6 +215,11 @@ export function projectCatalogSnapshotFromRaw(raw: RawEntry[], options: { persis
       project: file.project,
       kind: file.kind,
       session: file.session,
+      worktree: file.worktree,
+      title: file.title,
+      firstPrompt: file.firstPrompt,
+      engine: file.engine,
+      fmt: file.fmt,
     };
     const previousProject = previousProjects.get(file.path);
     if (previousProject && previousProject !== file.project) {
@@ -201,6 +237,23 @@ export function projectCatalogSnapshotFromRaw(raw: RawEntry[], options: { persis
     group.smt = Math.max(group.smt, file.mtimeMs / 1000);
     if (file.session) group.conversations += 1;
   }
+  replaceConversationCatalog(files.flatMap((file, index) => {
+    if (!file.session || (file.engine !== "codex" && file.engine !== "claude")) return [];
+    return [{
+      path: file.path,
+      root: file.rootName,
+      name: path.relative(raw[index]!.root, file.path),
+      project: file.project || "other",
+      worktree: file.worktree,
+      title: file.title,
+      firstPrompt: file.firstPrompt,
+      engine: file.engine,
+      kind: file.kind,
+      fmt: file.fmt,
+      mtime: file.mtimeMs / 1000,
+      size: file.size,
+    }];
+  }));
   if (options.persist !== false) {
     let boardHealed = true;
     try {

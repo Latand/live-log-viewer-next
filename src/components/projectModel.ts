@@ -389,9 +389,9 @@ export function resolveProjectView({
   hasArchiveNodes: boolean;
   hasHistoryRows: boolean;
 }): ProjectView {
+  if (preferredView === "list" && hasHistoryRows) return "list";
+  if (preferredView === "scheme" && (hasNodes || hasArchiveNodes)) return "scheme";
   if (hasNodes) return "scheme";
-  const preferred = preferredView ?? "list";
-  if (preferred === "scheme") return hasArchiveNodes ? "scheme" : "list";
   return hasHistoryRows ? "list" : "scheme";
 }
 

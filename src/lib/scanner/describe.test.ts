@@ -245,3 +245,18 @@ test("stale flow slug keeps orphan background tasks under the saved project", ()
   expect(meta.project).toBe(project);
   expect(meta.worktree).toBe("live-log-viewer-workflows");
 });
+
+test("conversation metadata retains the first prompt when it supplies the title", () => {
+  const root = path.join(SANDBOX, "codex-first-prompt");
+  const transcript = path.join(root, "session.jsonl");
+  fs.mkdirSync(root, { recursive: true });
+  fs.writeFileSync(transcript, JSON.stringify({
+    type: "event_msg",
+    payload: { type: "user_message", message: "Investigate cobalt orchard" },
+  }) + "\n");
+
+  expect(describe("codex-sessions", root, transcript, fs.statSync(transcript))).toMatchObject({
+    title: "Investigate cobalt orchard",
+    firstPrompt: "Investigate cobalt orchard",
+  });
+});

@@ -3,7 +3,7 @@
 import { Filter, TriangleAlert, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { parseConversationHash, resolveConversationTarget, withoutArchivedPredecessors, type ConversationHash } from "@/lib/accounts/identity";
+import { formatConversationHash, parseConversationHash, resolveConversationTarget, withoutArchivedPredecessors, type ConversationHash } from "@/lib/accounts/identity";
 import { useAgentChimes } from "@/hooks/useAgentChimes";
 import { useArchivedProjects } from "@/hooks/useArchivedProjects";
 import { useEffectiveFlows } from "@/components/flows/flowModel";
@@ -78,7 +78,7 @@ export function Viewer() {
   useViewPresence();
   const [project, setProject] = useState<string>(() => initialProject());
   const [pendingHash, setPendingHash] = useState<ConversationHash | null>(null);
-  const { files: allFiles, requestScope, projectCatalog, flows: polledFlows, pipelines, pipelinesError, workflows, tasks, systemHealth, conversationAliases, loaded } = useFiles(project === OVERVIEW ? null : project, pendingHash?.filePath ?? pendingHash?.conversationId ?? null);
+  const { files: allFiles, requestScope, projectCatalog, flows: polledFlows, pipelines, pipelinesError, workflows, tasks, systemHealth, conversationAliases, loaded } = useFiles(null, pendingHash?.filePath ?? pendingHash?.conversationId ?? null);
   /* A committed account migration keeps the archived predecessor entry in the
      payload (for chain history) but it must never render as a second standalone
      card — every surface below sees only current generations. A no-op (same
@@ -161,6 +161,21 @@ export function Viewer() {
     },
     [selectProject],
   );
+
+  /* Full-catalog list/search rows can sit beyond the scheme window. Their
+     legacy file link becomes a temporary scanner pin; once the capped feed
+     carries the entry, the regular hash resolver opens its current generation. */
+  const openCatalogFile = useCallback((file: FileEntry) => {
+    const key = projectKey(file);
+    queueColumnOpen(key, file.path, isChildConversation(file));
+    setProject(key);
+    localStorage.setItem(PROJECT_KEY, key);
+    setDrawerOpen(false);
+    setOpenNonce((value) => value + 1);
+    const hash = formatConversationHash(file);
+    history.replaceState(null, "", hash);
+    setPendingHash(parseConversationHash(hash));
+  }, []);
 
   /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
@@ -519,6 +534,7 @@ export function Viewer() {
             onMenu={isMobile ? () => setDrawerOpen(true) : undefined}
             attention={isMobile ? attentionBadge : undefined}
             onUserNavigate={cancelPendingIntent}
+            onOpenCatalogFile={openCatalogFile}
           />
         )}
       </main>

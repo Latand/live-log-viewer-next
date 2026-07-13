@@ -41,9 +41,8 @@ export interface FilesData {
 const HEALTHY_SYSTEM = { tmux: { status: "healthy" as const } };
 const EMPTY: FilesData = { files: [], requestScope: null, projectCatalog: [], flows: [], pipelines: [], workflows: [], tasks: [], systemHealth: HEALTHY_SYSTEM, conversationAliases: {}, loaded: false };
 
-export function filesApiUrl(project?: string | null, pinnedPath?: string | null): string {
+export function filesApiUrl(_project?: string | null, pinnedPath?: string | null): string {
   const params: string[] = [];
-  if (project) params.push("project=" + encodeURIComponent(project));
   /* A pending legacy `#f=` target: the scanner keeps this exact transcript in
      the capped feed so the deep link can resolve its conversation id even
      when the path is a demoted archived predecessor. */

@@ -2,11 +2,12 @@ import { expect, test } from "bun:test";
 
 import { filesApiUrl, filesPollCadence, filesRequestHeaders } from "./useFiles";
 
-test("filesApiUrl requests selected project hydration", () => {
+test("filesApiUrl keeps project switches on the bounded scheme feed", () => {
   expect(filesApiUrl()).toBe("/api/files");
   expect(filesApiUrl(null)).toBe("/api/files");
-  expect(filesApiUrl("stikon-dispatcher")).toBe("/api/files?project=stikon-dispatcher");
-  expect(filesApiUrl("space project")).toBe("/api/files?project=space%20project");
+  expect(filesApiUrl("stikon-dispatcher")).toBe("/api/files");
+  expect(filesApiUrl("space project")).toBe("/api/files");
+  expect(filesApiUrl("space project", "/sessions/quiet.jsonl")).toBe("/api/files?path=%2Fsessions%2Fquiet.jsonl");
 });
 
 test("files revision reads identify the revision and retain ETag revalidation", () => {

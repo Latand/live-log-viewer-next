@@ -14,19 +14,21 @@ interface Meta {
   project: string;
   worktree?: string;
   title: string;
+  firstPrompt: string;
   engine: Engine;
   kind: string;
   fmt: Fmt;
 }
 
-const metaCache = globalCache<[number, string, Meta]>("meta-v3");
+const metaCache = globalCache<[number, string, Meta]>("meta-v4");
 // Title and codex project live in the immutable head of a growing transcript,
 // so both are keyed by path and kept for good once resolved. A live file grows
 // on every poll, so a size-keyed meta cache would re-read the whole file each
 // tick; these caches read only the head and stop reading once the answer is
 // fixed. A head that has not yet produced a title (empty/short file) is left
 // open so growth can still yield one.
-const titleCache = globalCache<[number, string | null]>("title");
+type ConversationText = { title: string | null; firstPrompt: string | null };
+const titleCache = globalCache<[number, ConversationText]>("title-v2");
 const codexProjectCache = globalCache<{ stateKey: string; project: string; worktree?: string }>("codex-project-v3");
 /* The cwd sits in the immutable head, so it follows the title-cache rule:
    keyed by path, re-read only while unresolved and the head still short. */
@@ -423,7 +425,35 @@ function goodTitle(text: unknown): string | null {
   return val && !skipTitlePrefixes.some((prefix) => val.startsWith(prefix)) ? val : null;
 }
 
-function titleFromLines(lines: string[], wantCodex: boolean): string | null {
+function userPromptFromRecord(obj: Record<string, unknown>, wantCodex: boolean): string | null {
+  if (wantCodex) {
+    const payload = recordValue(obj.payload) ?? {};
+    if (payload.type === "user_message") {
+      const prompt = typeof payload.message === "string" ? payload.message.trim() : "";
+      return prompt || null;
+    }
+    if (payload.type === "message" && payload.role === "user") {
+      const text = recordsValue(payload.content)
+        .map((part) => stringValue(part.text) ?? stringValue(part.input_text) ?? "")
+        .join(" ")
+        .trim();
+      return text || null;
+    }
+  } else if (obj.type === "user") {
+    const content = recordValue(obj.message)?.content;
+    if (typeof content === "string") return content.trim() || null;
+    const text = recordsValue(content)
+      .filter((part) => part.type === "text")
+      .map((part) => stringValue(part.text) ?? "")
+      .join(" ")
+      .trim();
+    return text || null;
+  }
+  return null;
+}
+
+function conversationTextFromLines(lines: string[], wantCodex: boolean): ConversationText {
+  let firstPrompt: string | null = null;
   for (const line of lines) {
     let obj: Record<string, unknown>;
     try {
@@ -435,42 +465,33 @@ function titleFromLines(lines: string[], wantCodex: boolean): string | null {
     }
     if (obj.type === "summary") {
       const title = goodTitle(obj.summary);
-      if (title) return title;
+      if (title) return { title, firstPrompt };
     }
     // Compaction successors open with the raw continuation prompt; the
     // generated ai-title record names the conversation better.
     if (obj.type === "ai-title") {
       const title = goodTitle(obj.aiTitle);
-      if (title) return title;
+      if (title) return { title, firstPrompt };
     }
-    if (wantCodex) {
-      const payload = recordValue(obj.payload) ?? {};
-      if (payload.type === "user_message") {
-        const title = goodTitle(payload.message);
-        if (title) return title;
-      }
-      if (payload.type === "message" && payload.role === "user") {
-        const text = recordsValue(payload.content)
-          .map((part) => stringValue(part.text) ?? stringValue(part.input_text) ?? "")
-          .join(" ")
-          .trim();
-        const title = goodTitle(text);
-        if (title) return title;
-      }
-    } else if (obj.type === "user") {
-      const content = recordValue(obj.message)?.content;
-      if (typeof content === "string") {
-        const title = goodTitle(content);
-        if (title) return title;
-      }
-      const text = recordsValue(content)
-        .filter((part) => part.type === "text")
-        .map((part) => stringValue(part.text) ?? "")
-        .join(" ")
-        .trim();
-      const title = goodTitle(text);
-      if (title) return title;
+    const prompt = userPromptFromRecord(obj, wantCodex);
+    if (!prompt) continue;
+    firstPrompt ??= prompt;
+    const title = goodTitle(prompt);
+    if (title) return { title, firstPrompt };
+  }
+  return { title: null, firstPrompt };
+}
+
+function firstPromptFromLines(lines: string[], wantCodex: boolean): string | null {
+  for (const line of lines) {
+    let obj: Record<string, unknown>;
+    try {
+      obj = JSON.parse(line) as Record<string, unknown>;
+    } catch {
+      continue;
     }
+    const prompt = userPromptFromRecord(obj, wantCodex);
+    if (prompt) return prompt;
   }
   return null;
 }
@@ -493,14 +514,26 @@ function projectInfoFromSlug(slug: string): { project: string; worktree?: string
   return persistedProjects().bySlug.get(slug) ?? null;
 }
 
-function scanJsonlTitle(pathname: string, size: number, wantCodex: boolean): string | null {
+function scanJsonlConversationText(pathname: string, size: number, wantCodex: boolean): ConversationText {
   const cached = titleCache.get(pathname);
-  if (cached && (cached[1] !== null || cached[0] >= HEAD_BYTES)) return cached[1];
+  if (cached && ((cached[1].title !== null && cached[1].firstPrompt !== null) || cached[0] >= HEAD_BYTES)) return cached[1];
   const head = readHead(pathname, size);
-  if (!head) return cached?.[1] ?? null;
-  const title = titleFromLines(head.text.split("\n").slice(0, 151), wantCodex);
-  titleCache.set(pathname, [head.read, title]);
-  return title;
+  if (!head) return cached?.[1] ?? { title: null, firstPrompt: null };
+  const text = conversationTextFromLines(head.text.split("\n").slice(0, 151), wantCodex);
+  titleCache.set(pathname, [head.read, text]);
+  return text;
+}
+
+/** Search-only prompt hydration for transcript kinds whose scheme metadata is
+ * available without reading their transcript head (notably Claude subagents). */
+export function firstPromptForTranscript(pathname: string, size: number, engine: "codex" | "claude"): string {
+  const cached = titleCache.get(pathname);
+  if (cached?.[1].firstPrompt) return cached[1].firstPrompt;
+  const head = readHead(pathname, size);
+  if (!head) return "";
+  const firstPrompt = firstPromptFromLines(head.text.split("\n").slice(0, 151), engine === "codex");
+  titleCache.set(pathname, [head.read, { title: cached?.[1].title ?? null, firstPrompt }]);
+  return firstPrompt ?? "";
 }
 
 export function describe(rootName: RootKey, root: string, pathname: string, st: fs.Stats, stateKey = projectResolutionStateKey()): Meta {
@@ -511,6 +544,7 @@ export function describe(rootName: RootKey, root: string, pathname: string, st: 
   let project = "other";
   let worktree: string | undefined;
   let title: string | null = null;
+  let firstPrompt: string | null = null;
   let engine: Engine = "claude";
   let kind = "";
   let fmt: Fmt = "plain";
@@ -544,7 +578,9 @@ export function describe(rootName: RootKey, root: string, pathname: string, st: 
     engine = "codex";
     kind = "session";
     fmt = "codex";
-    title = scanJsonlTitle(pathname, st.size, true) ?? "Codex session";
+    const text = scanJsonlConversationText(pathname, st.size, true);
+    title = text.title ?? "Codex session";
+    firstPrompt = text.firstPrompt;
   } else if (rootName === "claude-projects") {
     const slug = rel.split(path.sep)[0] ?? "";
     const worktreeInfo = worktreeFromSlug(slug);
@@ -570,7 +606,9 @@ export function describe(rootName: RootKey, root: string, pathname: string, st: 
         "Subagent " + fn.slice("agent-".length).split(".")[0];
     } else {
       kind = "session";
-      title = scanJsonlTitle(pathname, st.size, false) ?? "Claude session";
+      const text = scanJsonlConversationText(pathname, st.size, false);
+      title = text.title ?? "Claude session";
+      firstPrompt = text.firstPrompt;
     }
   } else if (rootName === "claude-tasks") {
     const slug = rel.split(path.sep)[0] ?? "";
@@ -585,6 +623,7 @@ export function describe(rootName: RootKey, root: string, pathname: string, st: 
     project,
     worktree,
     title: cleanTitle(title ?? fn, 120),
+    firstPrompt: firstPrompt ?? "",
     engine,
     kind,
     fmt,

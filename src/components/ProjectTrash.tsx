@@ -58,16 +58,19 @@ export function QuietFileList({
   );
 }
 
-function QuietFileRow({
+export function QuietFileRow({
   file,
   activeSubtree,
+  showProject = false,
   onOpen,
 }: {
   file: FileEntry;
   activeSubtree: boolean;
+  showProject?: boolean;
   onOpen: (file: FileEntry) => void;
 }) {
   const { t } = useLocale();
+  const isMobile = useIsMobile();
   const [gone, setGone] = useState(false);
   const badge = engineBadge(file);
   if (gone) {
@@ -83,7 +86,7 @@ function QuietFileRow({
     <div className="flex min-w-0 items-center gap-2 rounded-[8px] border border-line bg-panel px-3 py-1.5 shadow-card">
       <button
         type="button"
-        className="flex h-full min-w-0 flex-1 items-center gap-2 rounded-[6px] text-left hover:bg-bg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+        className={`flex min-w-0 flex-1 items-center gap-2 rounded-[6px] text-left hover:bg-bg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${isMobile ? "min-h-11" : "h-full"}`}
         aria-label={t("trash.open", { title: cleanTitle(file.title, 60) })}
         onClick={() => onOpen(file)}
       >
@@ -94,6 +97,11 @@ function QuietFileRow({
         <span className="min-w-0 flex-1 truncate text-[12.5px] font-semibold" title={file.path}>
           {cleanTitle(file.title, 90)}
         </span>
+        {showProject ? (
+          <span className="max-w-[28vw] shrink-0 truncate rounded-full border border-line bg-bg px-1.5 py-0.5 text-[10px] font-semibold text-dim">
+            {file.project}
+          </span>
+        ) : null}
         {activeSubtree ? (
           <span
             className="inline-flex shrink-0 items-center gap-1 rounded-full border border-accent/25 bg-accent/10 px-1.5 py-0.5 text-[10px] font-bold text-accent"
@@ -103,8 +111,12 @@ function QuietFileRow({
             {t("trash.activeSubtree")}
           </span>
         ) : null}
-        <span className="shrink-0 text-[10.5px] font-semibold text-dim">{fmtAge(file.mtime)}</span>
-        <span className="shrink-0 text-[10.5px] text-dim">{(file.size / 1024).toFixed(0)} {t("common.kb")}</span>
+        {isMobile ? null : (
+          <>
+            <span className="shrink-0 text-[10.5px] font-semibold text-dim">{fmtAge(file.mtime)}</span>
+            <span className="shrink-0 text-[10.5px] text-dim">{(file.size / 1024).toFixed(0)} {t("common.kb")}</span>
+          </>
+        )}
       </button>
       <DeleteFileButton file={file} onDeleted={() => setGone(true)} />
     </div>

@@ -95,9 +95,16 @@ export const uk: Record<keyof typeof en, Message> = {
   "trash.confirmYes": "Так, видалити",
   "trash.deleteProject": "Видалити проєкт з диска",
 
+  "list.title": "Усі розмови",
+  "list.hint": "Завантажуються сторінками від найновіших з усіх розмов цього проєкту на диску.",
+  "list.searchHint": "Пошук у всіх розмовах на диску в усіх проєктах.",
+  "list.loadMore": "Завантажити більше розмов",
+  "list.failed": "Не вдалося завантажити розмови",
+
   "switch.aria": "Пульт агентів",
   "switch.title": "Пульт",
-  "switch.search": "Пошук за назвою або проєктом",
+  "switch.search": "Пошук за назвою, першим промптом або проєктом",
+  "switch.results": "Усі знайдені розмови",
   "switch.updating": "оновлення…",
   "switch.close": "Закрити пульт",
   "switch.waiting": "Чекає тебе",

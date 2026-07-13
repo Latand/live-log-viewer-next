@@ -38,8 +38,8 @@ function applyProcessState(entry: FileEntry, holders: Map<string, number>) {
  *  1. discover.ts  — walk ROOTS, filter EXTS, skip `tool-results/` and
  *     everything in claude-tasks that is not `<slug>/<sid>/tasks/*.output`,
  *     skip a-prefixed task outputs that mirror subagents/agent-<id>.jsonl,
- *     stat each file, dedupe copied Codex rollouts, reserve each project's
- *     recent entries, then fill the FILE_CAP target by global mtime.
+ *     stat each file, dedupe copied Codex rollouts, then apply the configurable
+ *     recent-project and per-project scheme window.
  *  2. describe.ts  — project/title/kind/engine/fmt per root (port `describe`,
  *     `_scan_jsonl_title`, `_project_from_slug`), size-keyed cache.
  *  3. activity.ts  — port `_tail_records`, `_jsonl_turn_state`, `_activity`

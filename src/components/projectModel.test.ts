@@ -223,8 +223,8 @@ describe("resolveProjectView", () => {
     expect(resolveProjectView({ preferredView: null, hasNodes: true, hasArchiveNodes: false, hasHistoryRows: true })).toBe("scheme");
   });
 
-  test("active projects stay on the scheme after a saved list selection", () => {
-    expect(resolveProjectView({ preferredView: "list", hasNodes: true, hasArchiveNodes: false, hasHistoryRows: true })).toBe("scheme");
+  test("active projects honor an explicit list selection", () => {
+    expect(resolveProjectView({ preferredView: "list", hasNodes: true, hasArchiveNodes: false, hasHistoryRows: true })).toBe("list");
   });
 
   test("keeps an explicit scheme selection when an archive scheme exists", () => {

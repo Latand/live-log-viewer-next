@@ -7,7 +7,8 @@ import { codexThreadIdFromPath, nativeCodexParentThreadId } from "./codexNative"
 import { describe } from "./describe";
 import { projectCatalogSnapshotFromRaw } from "./projectCatalog";
 import { projectResolutionStateKey } from "./projectState";
-import { EXTS, FILE_CAP, PROJECT_FILE_FLOOR, ROOTS, scanRootEntries } from "./roots";
+import { EXTS, ROOTS, scanRootEntries } from "./roots";
+import { selectSchemeWindow } from "./schemeWindow";
 
 export function taskParts(root: string, pathname: string): [string, string, string] | null {
   const parts = path.relative(root, pathname).split(path.sep);
@@ -118,27 +119,10 @@ async function discoverRaw(roots: Roots | RootEntries, limit: Limit): Promise<Ra
 }
 
 function cappedEntries(ranked: RawEntry[], projectByPath: ReadonlyMap<string, string>): RawEntry[] {
-  /* The per-project floor can exceed the base cap when the project count is
-     unusually large. Keeping every project represented takes precedence;
-     parent closure and selected-project hydration already make the cap a base
-     target. */
-  const selectedPaths = new Set<string>();
-  const projectCounts = new Map<string, number>();
-  for (const entry of ranked) {
-    const project = projectByPath.get(entry.path) ?? "other";
-    const count = projectCounts.get(project) ?? 0;
-    if (count >= PROJECT_FILE_FLOOR) continue;
-    projectCounts.set(project, count + 1);
-    selectedPaths.add(entry.path);
-  }
-  for (const entry of ranked) {
-    if (selectedPaths.size >= FILE_CAP) break;
-    selectedPaths.add(entry.path);
-  }
-  return ranked.filter((entry) => selectedPaths.has(entry.path));
+  return selectSchemeWindow(ranked, (entry) => projectByPath.get(entry.path) ?? "other");
 }
 
-function entriesFromRaw(raw: RawEntry[], selectedProject?: string, projectByPath?: ReadonlyMap<string, string>, demoted?: ReadonlySet<string>, pin?: ReadonlySet<string>): FileEntry[] {
+function entriesFromRaw(raw: RawEntry[], projectByPath?: ReadonlyMap<string, string>, demoted?: ReadonlySet<string>, pin?: ReadonlySet<string>): FileEntry[] {
   const stateKey = projectResolutionStateKey();
   raw.sort((a, b) => b.st.mtimeMs - a.st.mtimeMs);
   const rawByCodexThread = new Map<string, RawEntry>();
@@ -156,19 +140,6 @@ function entriesFromRaw(raw: RawEntry[], selectedProject?: string, projectByPath
     : raw;
   const selected = cappedEntries(ranked, projectByPath ?? new Map());
   const selectedPaths = new Set(selected.map((entry) => entry.path));
-  /* Selected-project hydration deliberately ignores demotion: legacy `#f=`
-     deep links resolve an archived predecessor from the hydrated feed to
-     redirect onto its successor, so the selected project must stay complete —
-     demotion only shapes the global recency ranking. */
-  if (selectedProject) {
-    for (const entry of raw) {
-      if (selectedPaths.has(entry.path)) continue;
-      const project = projectByPath?.get(entry.path) ?? (describe(entry.rootName, entry.root, entry.path, entry.st, stateKey).project || "other");
-      if (project !== selectedProject) continue;
-      selectedPaths.add(entry.path);
-      selected.push(entry);
-    }
-  }
   /* Deep-link targets ride along even when demotion or the cap excluded
      them: the client needs the requested entry and its current generation in
      one payload to resolve the conversation id and redirect the link. */
@@ -217,7 +188,7 @@ function entriesFromRaw(raw: RawEntry[], selectedProject?: string, projectByPath
 
 export async function discoverFilesWithProjectCatalog(
   roots: Roots | RootEntries = scanRootEntries(),
-  selectedProject?: string,
+  _selectedProject?: string,
   options: { persist?: boolean; demote?: ReadonlySet<string>; pin?: ReadonlySet<string> } = {},
 ): Promise<{
   files: FileEntry[];
@@ -226,12 +197,19 @@ export async function discoverFilesWithProjectCatalog(
   const limit = createLimiter(48);
   const raw = await discoverRaw(roots, limit);
   const { projectCatalog, projectByPath } = projectCatalogSnapshotFromRaw(raw, options);
-  return { files: entriesFromRaw(raw, selectedProject, projectByPath, options.demote, options.pin), projectCatalog };
+  return { files: entriesFromRaw(raw, projectByPath, options.demote, options.pin), projectCatalog };
 }
 
 export async function discoverFiles(roots: Roots | RootEntries = scanRootEntries(), demote?: ReadonlySet<string>): Promise<FileEntry[]> {
   const limit = createLimiter(48);
   const raw = await discoverRaw(roots, limit);
   const { projectByPath } = projectCatalogSnapshotFromRaw(raw, { persist: false });
-  return entriesFromRaw(raw, undefined, projectByPath, demote);
+  return entriesFromRaw(raw, projectByPath, demote);
+}
+
+/** Cold-start fallback for the list/search route. It builds only lightweight
+ * catalog metadata and leaves the scheme processing pipeline untouched. */
+export async function refreshConversationCatalog(roots: Roots | RootEntries = scanRootEntries()): Promise<void> {
+  const raw = await discoverRaw(roots, createLimiter(48));
+  projectCatalogSnapshotFromRaw(raw, { persist: false });
 }

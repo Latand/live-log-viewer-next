@@ -15,6 +15,7 @@ import { MAX_VISIBLE_PATHS } from "@/lib/view/types";
 import type { Workflow } from "@/lib/workflows/types";
 
 import { TaskStrip } from "./BranchPane";
+import { ConversationList } from "./ConversationList";
 import { clearDraftStorage, draftParentConversationId, draftSrc, setDraftSrc, setDraftText } from "./DraftAgentPane";
 import { planBoardConvergence, planClose } from "./projectBoardMutations";
 import { claimedReviewerDescendantPaths, foldClaimedReviewers, isActiveFlow } from "./flows/flowModel";
@@ -43,7 +44,7 @@ import {
   residualItems,
 } from "./projectModel";
 import { ArchiveRestore } from "./icons";
-import { ArchiveProjectButton, DeleteProjectButton, QuietFileList } from "./ProjectTrash";
+import { ArchiveProjectButton, DeleteProjectButton } from "./ProjectTrash";
 import { SoundToggle } from "./SoundToggle";
 import { ResidualStrip } from "./TreeAside";
 
@@ -83,6 +84,8 @@ interface Props {
       drafts, pipeline and task jumps) supersede any unresolved deep-link
       intent held above; the Viewer cancels its pending hash here. */
   onUserNavigate?: () => void;
+  /** Full-catalog list/search open: pins the transcript through the file feed. */
+  onOpenCatalogFile?: (file: FileEntry) => void;
 }
 
 /** Manual additions and removals of scheme nodes, persisted per project. */
@@ -256,6 +259,7 @@ export function ProjectDashboard({
   onMenu,
   attention,
   onUserNavigate,
+  onOpenCatalogFile,
 }: Props) {
   const { t } = useLocale();
   const isMobile = useIsMobile();
@@ -702,6 +706,7 @@ export function ProjectDashboard({
     }
     pendingFocusRef.current = file.path;
   };
+  const openFullCatalogFile = onOpenCatalogFile ?? openSwitchboardFile;
 
   const statusBits: string[] = [];
   if (liveCount) {
@@ -778,7 +783,7 @@ export function ProjectDashboard({
     pipelineIdOf,
     originOf: spawnerRootOf,
   });
-  const listAvailable = historyRows.length > 0;
+  const listAvailable = catalogKnown || historyRows.length > 0;
   const projectView = resolveProjectView({
     preferredView: board.prefs.viewMode,
     hasNodes,
@@ -963,7 +968,7 @@ export function ProjectDashboard({
               taskSheetNonce={taskSheetNonce}
             />
           ) : listAvailable ? (
-            <QuietFileList files={historyRows} activeRootPaths={quietActiveRoots} onOpen={openSwitchboardFile} />
+            <ConversationList project={project} enabled={loaded && projectView === "list"} onOpen={openFullCatalogFile} />
           ) : (
             <div className="flex flex-1 items-center justify-center px-4 py-5 text-center">
               <div>
@@ -1004,7 +1009,7 @@ export function ProjectDashboard({
                 newTaskNonce={newTaskNonce}
               />
             ) : listAvailable ? (
-              <QuietFileList files={historyRows} activeRootPaths={quietActiveRoots} onOpen={openSwitchboardFile} />
+              <ConversationList project={project} enabled={loaded && projectView === "list"} onOpen={openFullCatalogFile} />
             ) : (
               <div className="flex flex-1 items-center justify-center px-4 py-5 text-center">
                 <div>
@@ -1051,7 +1056,7 @@ export function ProjectDashboard({
 
       {/* The corner pill would sit on the focused pane's composer; on the
           phone the strip, the map and the toast cover its job. */}
-      {isMobile ? null : <Switchboard files={files} flows={flows} project={project} loaded={loaded} onOpenFile={openSwitchboardFile} />}
+      {isMobile ? null : <Switchboard files={files} flows={flows} project={project} loaded={loaded} onOpenFile={openSwitchboardFile} onOpenCatalogFile={openFullCatalogFile} />}
 
       {/* Worker-class cards that have auto-collapsed fold into one stack per
           origin — flow / pipeline / spawner (issue #112, #136) — instead of
