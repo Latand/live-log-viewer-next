@@ -5,8 +5,8 @@
  *
  * The runner materializes a disposable home inside fixtures/demo-home/, boots
  * Next.js with that isolated environment, and delegates rendering to the
- * mcp/puppeteer Docker image. Each shot renders twice and must preserve its
- * stable text before the PNG is published under docs/media/.
+ * pinned mcp/puppeteer Docker image. Each shot renders twice, preserves its
+ * stable text, and passes final element and pixel gates before publication.
  */
 import { spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
@@ -14,6 +14,7 @@ import path from "node:path";
 
 export const DEMO_FIXED_ISO = "2100-01-02T12:00:00.000Z";
 export const DEMO_TOKEN = "__DEMO_HOME__";
+export const PUPPETEER_IMAGE = "mcp/puppeteer@sha256:c1e2bda6d92d400e900e497b743552a670a33631799c0a6478e91096e389bd27";
 const UNRESOLVED_TOKEN = /__[A-Z0-9_]*DEMO[A-Z0-9_]*__/;
 const DEFAULT_PORT = 3028;
 
@@ -24,6 +25,26 @@ export type DemoShot = {
   file: string | null;
   viewport: { width: number; height: number };
   stableText: string[];
+  frame: {
+    visible: Array<{
+      selector: string;
+      text: string;
+      minWidth: number;
+      minHeight: number;
+    }>;
+    absentText: string[];
+    pixels: {
+      maxNearBlackRatio: number;
+      minNonWhiteRatio: number;
+      minColorCount: number;
+    };
+  };
+};
+
+const FRAME_PIXELS = {
+  maxNearBlackRatio: 0.05,
+  minNonWhiteRatio: 0.15,
+  minColorCount: 100,
 };
 
 const claudePath = (project: string, session: string) =>
@@ -37,6 +58,14 @@ export const SHOTS: DemoShot[] = [
     file: claudePath("atlas", "11111111-1111-4111-8111-111111111111.jsonl"),
     viewport: { width: 1040, height: 720 },
     stableText: ["Ship a deterministic demo capture", "bun test", "src/capture.ts"],
+    frame: {
+      visible: [
+        { selector: "section[data-link-path]", text: "Ship a deterministic demo capture", minWidth: 640, minHeight: 420 },
+        { selector: "details[open]", text: "src/capture.ts", minWidth: 360, minHeight: 80 },
+      ],
+      absentText: [],
+      pixels: FRAME_PIXELS,
+    },
   },
   {
     id: "session-tree",
@@ -45,6 +74,14 @@ export const SHOTS: DemoShot[] = [
     file: null,
     viewport: { width: 1180, height: 720 },
     stableText: ["Fixture architect", "Capture builder", "Polish overview cards"],
+    frame: {
+      visible: [
+        { selector: "section[data-link-path]", text: "Fixture architect", minWidth: 180, minHeight: 140 },
+        { selector: "section[data-link-path]", text: "Capture builder", minWidth: 180, minHeight: 140 },
+      ],
+      absentText: [],
+      pixels: FRAME_PIXELS,
+    },
   },
   {
     id: "codex-session",
@@ -53,6 +90,13 @@ export const SHOTS: DemoShot[] = [
     file: `${DEMO_TOKEN}/.codex/sessions/2100/01/02/rollout-2100-01-02T11-20-00-33333333-3333-4333-8333-333333333333.jsonl`,
     viewport: { width: 1020, height: 500 },
     stableText: ["Audit the capture fixture", "Inspect fixture state", "All fixture checks pass"],
+    frame: {
+      visible: [
+        { selector: "section[data-link-path]", text: "All fixture checks pass", minWidth: 640, minHeight: 260 },
+      ],
+      absentText: [],
+      pixels: FRAME_PIXELS,
+    },
   },
   {
     id: "overview-board",
@@ -61,6 +105,15 @@ export const SHOTS: DemoShot[] = [
     file: null,
     viewport: { width: 920, height: 420 },
     stableText: ["atlas", "orbit", "forge"],
+    frame: {
+      visible: [
+        { selector: "button", text: "atlas", minWidth: 140, minHeight: 60 },
+        { selector: "button", text: "orbit", minWidth: 140, minHeight: 60 },
+        { selector: "button", text: "forge", minWidth: 140, minHeight: 60 },
+      ],
+      absentText: [],
+      pixels: FRAME_PIXELS,
+    },
   },
   {
     id: "pending-question",
@@ -68,7 +121,24 @@ export const SHOTS: DemoShot[] = [
     project: "atlas",
     file: claudePath("atlas", "22222222-2222-4222-8222-222222222222.jsonl"),
     viewport: { width: 980, height: 580 },
-    stableText: ["AskUserQuestion", "Choose the hero framing", "waiting for a reply"],
+    stableText: [
+      "AskUserQuestion",
+      "Choose the hero framing",
+      "Compact feed",
+      "Balanced board",
+      "Overview first",
+      "waiting for a reply",
+    ],
+    frame: {
+      visible: [
+        { selector: "#question", text: "Choose the hero framing", minWidth: 560, minHeight: 260 },
+        { selector: "#question button", text: "Compact feed", minWidth: 420, minHeight: 36 },
+        { selector: "#question button", text: "Balanced board", minWidth: 420, minHeight: 36 },
+        { selector: "#question button", text: "Overview first", minWidth: 420, minHeight: 36 },
+      ],
+      absentText: ["tmux pane unavailable"],
+      pixels: FRAME_PIXELS,
+    },
   },
   {
     id: "review-loop",
@@ -77,6 +147,14 @@ export const SHOTS: DemoShot[] = [
     file: null,
     viewport: { width: 1180, height: 720 },
     stableText: ["Demo media review loop", "R2", "Reviewer checking deterministic output"],
+    frame: {
+      visible: [
+        { selector: "[data-scheme-group=\"flow\"]", text: "Demo media review loop", minWidth: 360, minHeight: 220 },
+        { selector: "section[data-link-path]", text: "Reviewer checking deterministic output", minWidth: 180, minHeight: 140 },
+      ],
+      absentText: [],
+      pixels: FRAME_PIXELS,
+    },
   },
 ];
 
@@ -122,6 +200,17 @@ export function buildDemoEnvironment(
     SHELL: "/bin/sh",
     LLV_DEMO_UID: String(uid),
   };
+}
+
+export function buildDockerClientEnvironment(
+  source: Record<string, string | undefined> = process.env,
+): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {
+    NODE_ENV: "production",
+    PATH: source.PATH,
+  };
+  if (source.DOCKER_HOST) env.DOCKER_HOST = source.DOCKER_HOST;
+  return env;
 }
 
 export function renderFixtureTemplate(value: string, demoHome: string): string {
@@ -247,6 +336,29 @@ function runProcess(command: string, args: string[], options: Parameters<typeof 
   });
 }
 
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", `'\\''`)}'`;
+}
+
+async function startPendingQuestionPane(root: string, pendingPath: string, env: NodeJS.ProcessEnv): Promise<void> {
+  const holderPath = path.join(root, "pending-question-holder.cjs");
+  fs.writeFileSync(
+    holderPath,
+    'const fs = require("node:fs"); fs.openSync(process.argv[2], "a"); setInterval(() => {}, 60_000);\n',
+    "utf8",
+  );
+  const holderCommand = `exec ${shellQuote(process.execPath)} ${shellQuote(holderPath)} ${shellQuote(pendingPath)}`;
+  await runProcess(
+    "tmux",
+    ["new-session", "-d", "-s", "demo-capture", "-n", "pending-question", holderCommand],
+    { cwd: env.HOME, env, stdio: "ignore" },
+  );
+}
+
+async function stopFixtureTmux(env: NodeJS.ProcessEnv): Promise<void> {
+  await runProcess("tmux", ["kill-server"], { cwd: env.HOME, env, stdio: "ignore" });
+}
+
 async function stop(child: ChildProcess | null): Promise<void> {
   if (!child || child.exitCode !== null) return;
   const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()));
@@ -277,8 +389,7 @@ async function main(): Promise<void> {
     claudePath("atlas", "22222222-2222-4222-8222-222222222222.jsonl"),
     env.HOME!,
   );
-  const holderCode = `const fs=require("node:fs");fs.openSync(${JSON.stringify(pendingPath)},"a");setInterval(()=>{},60000);`;
-  const holder = spawn(process.execPath, ["-e", holderCode], { cwd: env.HOME, env, stdio: "ignore" });
+  await startPendingQuestionPane(root, pendingPath, env);
   const server = spawn(
     "bunx",
     ["next", "dev", "--hostname", "0.0.0.0", "--port", String(port)],
@@ -300,7 +411,7 @@ async function main(): Promise<void> {
 
   let shutdownPromise: Promise<void> | null = null;
   const shutdown = () => {
-    shutdownPromise ??= Promise.all([stop(server), stop(holder)]).then(() => undefined);
+    shutdownPromise ??= Promise.all([stop(server), stopFixtureTmux(env)]).then(() => undefined);
     return shutdownPromise;
   };
   process.once("SIGINT", () => { void shutdown(); process.exitCode = 130; });
@@ -317,10 +428,10 @@ async function main(): Promise<void> {
         "-v", `${path.join(repoRoot, "docs/media")}:/output`,
         "-e", "NODE_PATH=/project/node_modules",
         "--entrypoint", "node",
-        "mcp/puppeteer:latest",
+        PUPPETEER_IMAGE,
         "/workspace/scripts/demo-capture-browser.cjs",
         "--config", configInContainer,
-      ], { cwd: repoRoot, env: process.env, stdio: "inherit" });
+      ], { cwd: repoRoot, env: buildDockerClientEnvironment(), stdio: "inherit" });
     } catch (error) {
       throw new Error(`${error instanceof Error ? error.message : String(error)}\n${serverLogs()}`);
     }

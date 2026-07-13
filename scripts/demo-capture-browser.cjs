@@ -1,6 +1,5 @@
 const fs = require("node:fs");
 const path = require("node:path");
-const puppeteer = require("puppeteer");
 
 function arg(name) {
   const index = process.argv.indexOf(name);
@@ -10,6 +9,82 @@ function arg(name) {
 
 function normalizedText(value) {
   return value.replace(/\s+/g, " ").trim();
+}
+
+function assertPixelMetrics(metrics, limits, shotId) {
+  if (metrics.nearBlackRatio > limits.maxNearBlackRatio) {
+    throw new Error(`${shotId} has ${(metrics.nearBlackRatio * 100).toFixed(2)}% near-black pixels`);
+  }
+  if (metrics.nonWhiteRatio < limits.minNonWhiteRatio) {
+    throw new Error(`${shotId} has only ${(metrics.nonWhiteRatio * 100).toFixed(2)}% non-white pixels`);
+  }
+  if (metrics.colorCount < limits.minColorCount) {
+    throw new Error(`${shotId} has only ${metrics.colorCount} quantized colors`);
+  }
+}
+
+async function assertVisibleElements(page, shot) {
+  const failures = await page.evaluate((frame) => {
+    const problems = [];
+    for (const expected of frame.visible) {
+      const candidates = Array.from(document.querySelectorAll(expected.selector));
+      const element = candidates
+        .filter((candidate) => (candidate.innerText || "").includes(expected.text))
+        .sort((left, right) => {
+          const leftBox = left.getBoundingClientRect();
+          const rightBox = right.getBoundingClientRect();
+          return rightBox.width * rightBox.height - leftBox.width * leftBox.height;
+        })[0];
+      if (!(element instanceof HTMLElement)) {
+        problems.push(`missing ${expected.selector} containing ${JSON.stringify(expected.text)}`);
+        continue;
+      }
+      const style = getComputedStyle(element);
+      const box = element.getBoundingClientRect();
+      const rendered = style.display !== "none" && style.visibility !== "hidden" && Number(style.opacity) > 0;
+      if (!rendered) problems.push(`${expected.selector} containing ${JSON.stringify(expected.text)} is hidden`);
+      if (box.width < expected.minWidth || box.height < expected.minHeight) {
+        problems.push(
+          `${expected.selector} containing ${JSON.stringify(expected.text)} is ${box.width.toFixed(1)}x${box.height.toFixed(1)}`,
+        );
+      }
+      if (box.left < -0.5 || box.top < -0.5 || box.right > innerWidth + 0.5 || box.bottom > innerHeight + 0.5) {
+        problems.push(`${expected.selector} containing ${JSON.stringify(expected.text)} leaves the viewport`);
+      }
+    }
+    for (const text of frame.absentText) {
+      if (document.body.innerText.includes(text)) problems.push(`unexpected text ${JSON.stringify(text)}`);
+    }
+    return problems;
+  }, shot.frame);
+  if (failures.length) throw new Error(`${shot.id} final element assertions failed:\n${failures.join("\n")}`);
+}
+
+async function assertPngFrame(png, shot) {
+  const sharp = require("sharp");
+  const { data, info } = await sharp(png).removeAlpha().raw().toBuffer({ resolveWithObject: true });
+  if (info.width !== shot.viewport.width || info.height !== shot.viewport.height || info.channels !== 3) {
+    throw new Error(`${shot.id} PNG dimensions are ${info.width}x${info.height}x${info.channels}`);
+  }
+  let nearBlack = 0;
+  let nonWhite = 0;
+  const colors = new Set();
+  for (let index = 0; index < data.length; index += 3) {
+    const red = data[index];
+    const green = data[index + 1];
+    const blue = data[index + 2];
+    if (red < 12 && green < 12 && blue < 12) nearBlack += 1;
+    if (red < 248 || green < 248 || blue < 248) nonWhite += 1;
+    colors.add(`${red >> 4},${green >> 4},${blue >> 4}`);
+  }
+  const pixels = info.width * info.height;
+  const metrics = {
+    nearBlackRatio: nearBlack / pixels,
+    nonWhiteRatio: nonWhite / pixels,
+    colorCount: colors.size,
+  };
+  assertPixelMetrics(metrics, shot.frame.pixels, shot.id);
+  return metrics;
 }
 
 async function installDeterministicPage(page, fixedIso) {
@@ -64,6 +139,9 @@ async function render(browser, config, shot, capturePng) {
     html { scroll-behavior: auto !important; }
     body { cursor: default !important; }
     [data-capture-volatile="pid"] { display: none !important; }
+    button[aria-label^="Copy"],
+    button[aria-label^="Read answer"],
+    button[aria-label="Enable sound notifications"] { opacity: 0 !important; }
     nextjs-portal { display: none !important; }
   ` });
   const hash = shotHash(shot);
@@ -113,12 +191,15 @@ async function render(browser, config, shot, capturePng) {
   }
   await new Promise((resolve) => setTimeout(resolve, 350));
   const text = await page.evaluate(() => document.body.innerText);
+  await assertVisibleElements(page, shot);
   const png = capturePng ? Buffer.from(await page.screenshot({ type: "png" })) : null;
+  const pixelMetrics = png ? await assertPngFrame(png, shot) : null;
   await page.close();
-  return { text, png };
+  return { text, png, pixelMetrics };
 }
 
 async function main() {
+  const puppeteer = require("puppeteer");
   const config = JSON.parse(fs.readFileSync(arg("--config"), "utf8"));
   const browser = await puppeteer.launch({
     executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || "/usr/bin/chromium",
@@ -137,14 +218,21 @@ async function main() {
       }
       const output = path.join(config.outputDir, shot.output);
       fs.writeFileSync(output, first.png);
-      process.stdout.write(`${shot.output} ${first.png.length} bytes\n`);
+      const metrics = first.pixelMetrics;
+      process.stdout.write(
+        `${shot.output} ${first.png.length} bytes, ${(metrics.nearBlackRatio * 100).toFixed(2)}% near-black, ${metrics.colorCount} colors\n`,
+      );
     }
   } finally {
     await browser.close();
   }
 }
 
-main().catch((error) => {
-  console.error(error);
-  process.exitCode = 1;
-});
+module.exports = { assertPixelMetrics };
+
+if (require.main === module) {
+  main().catch((error) => {
+    console.error(error);
+    process.exitCode = 1;
+  });
+}
