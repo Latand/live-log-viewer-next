@@ -105,6 +105,8 @@ interface ColumnPrefs {
    are unspawned composer state, not shared board arrangement, so they stay
    per-tab in sessionStorage and do not sync (#38). */
 const draftsKey = (project: string) => `llvDrafts:${project}`;
+const HANDOFF_CWD_RETRY_MS = 1_000;
+const HANDOFF_CWD_MAX_RETRY_MS = 30_000;
 
 export function loadDrafts(project: string): string[] {
   try {
@@ -321,6 +323,7 @@ export function ProjectDashboard({
   useEffect(() => {
     if (!loaded) return;
     let cancelled = false;
+    const retryTimers = new Set<number>();
     const restored = loadDrafts(project);
     const unresolved: Array<{ id: string; sourcePath: string }> = [];
     for (const id of restored) {
@@ -338,28 +341,46 @@ export function ProjectDashboard({
     /* eslint-disable-next-line react-hooks/set-state-in-effect */
     setDrafts(restored);
     setPendingRestoredHandoffs(new Set(unresolved.map(({ id }) => id)));
-    for (const { id, sourcePath } of unresolved) {
+    const resolveSourceCwd = (id: string, sourcePath: string, attempt = 0) => {
       void fetch("/api/spawn?project=" + encodeURIComponent(project) + "&src=" + encodeURIComponent(sourcePath))
         .then(async (response) => {
           if (!response.ok) throw new Error(`spawn suggestions failed: ${response.status}`);
           return response.json() as Promise<{ cwd?: string | null }>;
         })
-        .then((body) => typeof body.cwd === "string" ? body.cwd.trim() : "")
-        .catch(() => "")
-        .then((sourceCwd) => {
+        .then((body) => {
+          const sourceCwd = typeof body.cwd === "string" ? body.cwd.trim() : "";
+          if (!sourceCwd) throw new Error("spawn suggestions omitted the source cwd");
           if (cancelled) return;
-          seedDraftCwd(id, sourceCwd || initialDraftCwd);
+          seedDraftCwd(id, sourceCwd);
           setPendingRestoredHandoffs((current) => {
             if (!current.has(id)) return current;
             const next = new Set(current);
             next.delete(id);
             return next;
           });
+        })
+        .catch(() => {
+          if (cancelled) return;
+          const delay = attempt < 2
+            ? 0
+            : Math.min(HANDOFF_CWD_RETRY_MS * (2 ** (attempt - 2)), HANDOFF_CWD_MAX_RETRY_MS);
+          const timer = window.setTimeout(() => {
+            retryTimers.delete(timer);
+            resolveSourceCwd(id, sourcePath, attempt + 1);
+          }, delay);
+          retryTimers.add(timer);
         });
+    };
+    for (const { id, sourcePath } of unresolved) {
+      resolveSourceCwd(id, sourcePath);
     }
     return () => {
       cancelled = true;
+      for (const timer of retryTimers) window.clearTimeout(timer);
     };
+  /* Source rows are sampled when restoration starts; the dedicated lookup
+     retries independently and `initialDraftCwd` carries ordinary root changes. */
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [project, openNonce, loaded, initialDraftCwd]);
   const toggleTaskPanel = () => board.setTaskPanelOpen(!taskPanelOpen);
   useEffect(

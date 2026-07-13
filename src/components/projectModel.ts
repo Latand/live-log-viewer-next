@@ -96,8 +96,13 @@ export function projectDraftWorkingDirectory(
   fallbacks: readonly string[] = [],
   deterministicFallback = "/",
 ): string {
-  const catalogRoot = projectCatalog.find((entry) => entry.project === project)?.projectRoot ?? "";
-  return draftWorkingDirectory(files, project, sourcePath, [catalogRoot, ...fallbacks, deterministicFallback]) || "/";
+  if (sourcePath) {
+    const sourceCwd = files.find((file) => file.path === sourcePath)?.cwd?.trim();
+    if (sourceCwd) return sourceCwd;
+  }
+  const catalogRoot = projectCatalog.find((entry) => entry.project === project)?.projectRoot?.trim() ?? "";
+  if (catalogRoot) return catalogRoot;
+  return draftWorkingDirectory(files, project, undefined, [...fallbacks, deterministicFallback]) || "/";
 }
 
 export interface ProjectSummary {

@@ -254,6 +254,41 @@ test("a restored handoff waits for its out-of-snapshot source cwd before exposin
   })).toBe(true);
 });
 
+test("a restored handoff stays unresolved while source cwd lookup retries", async () => {
+  const project = "retry-handoff-project";
+  const sourcePath = "/archive/retry-source.jsonl";
+  const sourceCwd = "/repos/retry/.worktrees/source-branch";
+  let spawnCalls = 0;
+  let releaseSuccess!: () => void;
+  const successGate = new Promise<void>((resolve) => { releaseSuccess = resolve; });
+  dom.sessionStorage.setItem(draftsKey(project), JSON.stringify([agentA]));
+  dom.sessionStorage.setItem(agentField(agentA, "src"), sourcePath);
+  G.fetch = (async (input: string | URL | Request) => {
+    if (!String(input).startsWith("/api/spawn?")) {
+      return { ok: true, status: 200, json: async () => ({}), text: async () => "" };
+    }
+    spawnCalls += 1;
+    if (spawnCalls === 1) {
+      return { ok: false, status: 503, json: async () => ({}), text: async () => "" };
+    }
+    if (spawnCalls === 2) {
+      return { ok: true, status: 200, json: async () => ({ cwd: null }), text: async () => "" };
+    }
+    await successGate;
+    return { ok: true, status: 200, json: async () => ({ cwd: sourceCwd }), text: async () => "" };
+  }) as unknown as typeof fetch;
+
+  roots.push(mount(<ProjectDashboard {...dashboardProps(project)} />));
+
+  expect(await waitFor(() => spawnCalls === 3, 250)).toBe(true);
+  expect(dom.document.querySelector(AGENT_PANE)).toBeNull();
+  releaseSuccess();
+  expect(await waitFor(() => {
+    const directory = dom.document.querySelector('input[aria-label="Agent working directory"]') as unknown as HTMLInputElement | null;
+    return directory?.value === sourceCwd;
+  })).toBe(true);
+});
+
 test("closing a conversation card reports its path to the dashboard owner", async () => {
   const project = "close-project";
   const path = "/sessions/close-me.jsonl";

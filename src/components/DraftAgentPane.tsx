@@ -155,17 +155,14 @@ export function DraftAgentPane({
   const [src] = useState(() => readField(draftId, "src"));
   const [parentConversationId] = useState(() => readField(draftId, "parentConversationId"));
   const srcFile = src ? (files.find((entry) => entry.path === src) ?? null) : null;
-  const awaitingInheritedCwdRef = useRef(false);
+  const [initialCwd] = useState(() => readField(draftId, "cwd"));
+  const awaitingInheritedCwdRef = useRef(Boolean(src && !initialCwd && !srcFile?.cwd?.trim()));
   const [engine, setEngineState] = useState<Engine>(() => {
     const stored = readField(draftId, "engine");
     if (stored === "codex" || stored === "claude") return stored;
     return srcFile?.engine === "codex" ? "codex" : "claude";
   });
-  const [cwd, setCwdState] = useState(() => {
-    const stored = readField(draftId, "cwd");
-    awaitingInheritedCwdRef.current = Boolean(src && !stored && !srcFile?.cwd?.trim());
-    return stored || draftWorkingDirectory(files, project, src);
-  });
+  const [cwd, setCwdState] = useState(() => initialCwd || draftWorkingDirectory(files, project, src));
   const [model, setModelState] = useState(() => readField(draftId, "model") || defaultModelFor(engine));
   const [effort, setEffortState] = useState(() => readField(draftId, "effort"));
   const [speed, setSpeedState] = useState<SpeedChoice>(() => {

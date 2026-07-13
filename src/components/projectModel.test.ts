@@ -111,6 +111,16 @@ describe("draftWorkingDirectory", () => {
     ])).toBe("/repo");
   });
 
+  test("prefers the full-scan canonical root when capped rows disagree", () => {
+    const files = [
+      entry({ path: "/minority", project: "viewer", cwd: "/minority", projectRoot: "/minority", mtime: 500 }),
+    ];
+
+    expect(projectDraftWorkingDirectory(files, "viewer", [
+      { project: "viewer", projectRoot: "/canonical", smt: 600, conversations: 12 },
+    ])).toBe("/canonical");
+  });
+
   test("uses the deterministic server fallback when a project has no cwd metadata", () => {
     expect(projectDraftWorkingDirectory([], "legacy", [], undefined, [], "/home/user/Projects/legacy")).toBe(
       "/home/user/Projects/legacy",
