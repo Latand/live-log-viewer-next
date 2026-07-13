@@ -10,17 +10,19 @@ import { recordsValue, recordValue, stringValue } from "./json";
 
 const wakeupCache = globalCache<[number, PendingWakeup | null]>("wakeup");
 
-/** The paired tool_result body for a given tool_use id, if present in the tail. */
-function toolResultText(obj: Record<string, unknown>, toolUseId: string): string | null {
+/** The paired tool_result for a given tool_use id, with its error flag, if
+    present in the tail. `text` may be null while `isError` is still meaningful. */
+function toolResultFor(obj: Record<string, unknown>, toolUseId: string): { text: string | null; isError: boolean } | null {
   const content = recordsValue(recordValue(obj.message)?.content);
   for (const block of content) {
     if (block.type !== "tool_result" || stringValue(block.tool_use_id) !== toolUseId) continue;
+    const isError = block.is_error === true;
     const value = block.content;
-    if (typeof value === "string") return value;
+    if (typeof value === "string") return { text: value, isError };
     if (Array.isArray(value)) {
-      return value.map((item) => (typeof item === "string" ? item : stringValue(recordValue(item)?.text) ?? "")).filter(Boolean).join("\n");
+      return { text: value.map((item) => (typeof item === "string" ? item : stringValue(recordValue(item)?.text) ?? "")).filter(Boolean).join("\n"), isError };
     }
-    return null;
+    return { text: null, isError };
   }
   return null;
 }
@@ -38,10 +40,12 @@ function scheduleWakeupCall(obj: Record<string, unknown>): { id: string; input: 
 
 /**
  * The newest still-pending self-scheduled wakeup of a Claude conversation, or
- * null. Walks the tail newest-first, resolves the first `ScheduleWakeup` call's
- * fire time (record timestamp + delaySeconds, with the tool result as a delay
- * fallback), and returns it only while that time is in the future — a fired or
- * absent wakeup surfaces nothing.
+ * null. Walks the tail newest-first for the newest `ScheduleWakeup` whose result
+ * did NOT error — a rejected call is skipped so the board never advertises a
+ * wakeup the harness refused (issue #161 review) — resolves its fire time (the
+ * result's resolved schedule, else record timestamp + delaySeconds), and returns
+ * it only while that time is in the future. A fired or absent wakeup surfaces
+ * nothing.
  */
 export function pendingWakeupFor(entry: FileEntry, now = Date.now()): PendingWakeup | null {
   if (entry.engine !== "claude" || !entry.path.endsWith(".jsonl")) return null;
@@ -53,12 +57,14 @@ export function pendingWakeupFor(entry: FileEntry, now = Date.now()): PendingWak
   for (let i = records.length - 1; i >= 0; i -= 1) {
     const call = scheduleWakeupCall(records[i]);
     if (!call) continue;
-    const tsMs = call.ts ? Date.parse(call.ts) : NaN;
-    let resultText: string | null = null;
-    for (let j = i + 1; j < records.length && resultText === null; j += 1) {
-      resultText = toolResultText(records[j], call.id);
+    let result: { text: string | null; isError: boolean } | null = null;
+    for (let j = i + 1; j < records.length && result === null; j += 1) {
+      result = toolResultFor(records[j], call.id);
     }
-    const info = parseScheduleWakeup(call.input, Number.isFinite(tsMs) ? tsMs : null, resultText);
+    // A rejected scheduling call is not the active wakeup — keep looking back.
+    if (result?.isError) continue;
+    const tsMs = call.ts ? Date.parse(call.ts) : NaN;
+    const info = parseScheduleWakeup(call.input, Number.isFinite(tsMs) ? tsMs : null, result?.text ?? null);
     if (info.fireAt !== null && info.fireAt > now) pending = { fireAt: info.fireAt, reason: info.reason };
     break;
   }

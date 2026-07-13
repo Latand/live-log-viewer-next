@@ -8,7 +8,7 @@ const FUTURE = Date.now() + 20 * 60 * 1000;
 const PAST = Date.now() - 20 * 60 * 1000;
 
 function info(over: Partial<WakeupEventInfo> = {}): WakeupEventInfo {
-  return { fireAt: FUTURE, delaySeconds: 1200, reason: "Fallback poll", prompt: "Continue the issue", superseded: false, ...over };
+  return { fireAt: FUTURE, delaySeconds: 1200, reason: "Fallback poll", prompt: "Continue the issue", superseded: false, failed: false, ...over };
 }
 
 test("an active wakeup renders the reason, an absolute time and a countdown", () => {
@@ -35,4 +35,11 @@ test("a wakeup without a fire time still shows its reason and plan", () => {
   const html = renderToStaticMarkup(<WakeupCard wakeup={info({ fireAt: null })} />);
   expect(html).toContain("Fallback poll");
   expect(html).toContain("Continue the issue");
+});
+
+test("a failed (rejected) wakeup renders the failed state, not a countdown", () => {
+  const html = renderToStaticMarkup(<WakeupCard wakeup={info({ failed: true })} />);
+  expect(html).toContain("scheduling failed");
+  // No live countdown for a rejected schedule.
+  expect(html).not.toContain("in 20 min");
 });

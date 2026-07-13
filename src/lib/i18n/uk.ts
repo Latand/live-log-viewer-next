@@ -559,6 +559,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "wakeup.wakesAt": "прокинеться о {time}",
   "wakeup.firedAt": "спрацював о {time}",
   "wakeup.fired": "спрацював",
+  "wakeup.failed": "не заплановано",
   "wakeup.superseded": "замінено",
   "wakeup.noTime": "пробудження заплановано",
   "wakeup.plan": "план пробудження",

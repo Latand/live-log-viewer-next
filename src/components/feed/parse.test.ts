@@ -925,4 +925,36 @@ describe("ScheduleWakeup card", () => {
     const wakeup = tool && tool.kind === "tool" ? tool.wakeup : undefined;
     expect(wakeup?.fireAt).toBe(Date.parse(ts) + 1215 * 1000);
   });
+
+  test("the resolved result schedule overrides the requested delay on attach", () => {
+    const ts = "2026-07-06T10:00:02Z";
+    const lines = [
+      claudeWakeup("w1", { delaySeconds: 120, reason: "r", prompt: "p" }, ts),
+      claudeResult("w1", "Next wakeup scheduled for 10:02:15 (in 135s)."),
+    ];
+    const feed = buildFeed(claudeFile, lines, false, "");
+    const tool = feed.items.find((item) => item.kind === "tool");
+    const wakeup = tool && tool.kind === "tool" ? tool.wakeup : undefined;
+    expect(wakeup?.fireAt).toBe(Date.parse(ts) + 135 * 1000);
+  });
+
+  test("a rejected wakeup is marked failed and does not supersede the prior valid one", () => {
+    const lines = [
+      claudeWakeup("w1", { delaySeconds: 600, reason: "first", prompt: "p1" }),
+      claudeResult("w1", "Next wakeup scheduled for 10:10:00 (in 600s)."),
+      claudeProse("waited a bit"),
+      claudeWakeup("w2", { delaySeconds: 900, reason: "second", prompt: "p2" }),
+      claudeResult("w2", "delaySeconds must be between 60 and 3600", true),
+    ];
+    const feed = buildFeed(claudeFile, lines, false, "");
+    const wakeups = feed.items.filter((item) => item.kind === "tool" && item.wakeup);
+    expect(wakeups).toHaveLength(2);
+    const by = new Map(wakeups.map((w) => [w.kind === "tool" ? w.wakeup?.reason : "", w.kind === "tool" ? w.wakeup : undefined]));
+    // The rejected newer call is failed and not superseding; the first stays active.
+    expect(by.get("second")?.failed).toBe(true);
+    expect(by.get("second")?.superseded).toBe(false);
+    expect(by.get("first")?.failed).toBe(false);
+    expect(by.get("first")?.superseded).toBe(false);
+    assertParity(claudeFile, lines);
+  });
 });

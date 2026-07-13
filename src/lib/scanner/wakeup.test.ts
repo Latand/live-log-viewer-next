@@ -64,6 +64,30 @@ describe("pendingWakeupFor", () => {
     expect(pendingWakeupFor(e, now)?.fireAt).toBe(Date.parse(TS) + 1215 * 1000);
   });
 
+  test("skips a rejected newest wakeup and keeps the prior successful one", () => {
+    const now = Date.parse(TS) + 60_000;
+    const good = "2026-07-07T10:05:00.000Z";
+    const bad = "2026-07-07T10:12:00.000Z";
+    const e = entry([
+      wakeupRecord("w1", { delaySeconds: 3600, reason: "valid", prompt: "p" }, good),
+      { type: "user", timestamp: good, message: { content: [{ type: "tool_result", tool_use_id: "w1", content: [{ type: "text", text: "Next wakeup scheduled for 13:05:00 (in 3600s)." }] }] } },
+      wakeupRecord("w2", { delaySeconds: 900, reason: "rejected", prompt: "p" }, bad),
+      { type: "user", timestamp: bad, message: { content: [{ type: "tool_result", tool_use_id: "w2", is_error: true, content: [{ type: "text", text: "delaySeconds must be between 60 and 3600" }] }] } },
+    ]);
+    const pending = pendingWakeupFor(e, now);
+    expect(pending?.reason).toBe("valid");
+    expect(pending?.fireAt).toBe(Date.parse(good) + 3600 * 1000);
+  });
+
+  test("returns null when the only wakeup was rejected", () => {
+    const now = Date.parse(TS) + 60_000;
+    const e = entry([
+      wakeupRecord("w1", { delaySeconds: 1200, reason: "r", prompt: "p" }, TS),
+      { type: "user", timestamp: TS, message: { content: [{ type: "tool_result", tool_use_id: "w1", is_error: true, content: [{ type: "text", text: "rejected" }] }] } },
+    ]);
+    expect(pendingWakeupFor(e, now)).toBeNull();
+  });
+
   test("ignores non-claude transcripts", () => {
     const e = entry([wakeupRecord("w1", { delaySeconds: 1200, reason: "r", prompt: "p" })], "codex-sessions");
     expect(pendingWakeupFor(e, Date.parse(TS) + 60_000)).toBeNull();

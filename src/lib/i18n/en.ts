@@ -581,6 +581,7 @@ export const en = {
   "wakeup.wakesAt": "wakes at {time}",
   "wakeup.firedAt": "fired at {time}",
   "wakeup.fired": "fired",
+  "wakeup.failed": "scheduling failed",
   "wakeup.superseded": "superseded",
   "wakeup.noTime": "wakeup scheduled",
   "wakeup.plan": "wake plan",

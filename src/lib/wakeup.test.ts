@@ -25,14 +25,15 @@ describe("parseScheduleWakeup", () => {
     expect(info.prompt).toBe("Continue writing the issue");
   });
 
-  test("prefers input delay over the result text", () => {
+  test("the resolved result schedule overrides the requested delay", () => {
     const info = parseScheduleWakeup(
-      { delaySeconds: 1200, reason: "r", prompt: "p" },
+      { delaySeconds: 120, reason: "r", prompt: "p" },
       TS,
-      "Next wakeup scheduled for 13:30:00 (in 1215s).",
+      "Next wakeup scheduled for 17:00:00 (in 135s).",
     );
-    // Fire time comes from ts + input delay, not the result's 1215s.
-    expect(info.fireAt).toBe(TS + 1200 * 1000);
+    // The harness resolved 120s → 135s; the result is authoritative.
+    expect(info.delaySeconds).toBe(135);
+    expect(info.fireAt).toBe(TS + 135 * 1000);
   });
 
   test("falls back to the result's (in Ns) when the input lacks a delay", () => {
@@ -69,9 +70,17 @@ describe("refineWakeupFromResult", () => {
     expect(refined.fireAt).toBe(TS + 1215 * 1000);
   });
 
-  test("keeps an already-known fire time untouched", () => {
+  test("overrides the requested-delay fire time with the resolved schedule", () => {
     const base = parseScheduleWakeup({ delaySeconds: 600, reason: "r", prompt: "p" }, TS);
-    const refined = refineWakeupFromResult(base, TS, "Next wakeup scheduled for 09:00:00 (in 5s).");
+    expect(base.fireAt).toBe(TS + 600 * 1000);
+    // Once the result attaches, its resolved 615s is authoritative over 600s.
+    const refined = refineWakeupFromResult(base, TS, "Next wakeup scheduled for 09:20:00 (in 615s).");
+    expect(refined.fireAt).toBe(TS + 615 * 1000);
+  });
+
+  test("keeps the call-time fire time when the result carries no schedule", () => {
+    const base = parseScheduleWakeup({ delaySeconds: 600, reason: "r", prompt: "p" }, TS);
+    const refined = refineWakeupFromResult(base, TS, "Scheduling acknowledged.");
     expect(refined.fireAt).toBe(TS + 600 * 1000);
   });
 });

@@ -44,9 +44,11 @@ export type NestedCall = {
 export type Orchestration = { source: string; sourceTruncated: boolean; calls: NestedCall[] };
 
 /** A `ScheduleWakeup` call, resolved for the dedicated countdown card.
-    `superseded` is set once a later wakeup in the same conversation replaces
-    this one — only the newest wakeup is "active" (issue #161 §2). */
-export type WakeupEventInfo = WakeupInfo & { superseded: boolean };
+    `superseded` is set once a later successful wakeup replaces this one — only
+    the newest still-valid wakeup is "active" (issue #161 §2). `failed` is set
+    when the scheduling call errored: a rejected schedule never counts down and
+    never supersedes the previous valid one (issue #161 review). */
+export type WakeupEventInfo = WakeupInfo & { superseded: boolean; failed: boolean };
 
 /**
  * One normalized, bounded, source-agnostic tool event shared by Claude, Codex,
@@ -805,9 +807,11 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
   let codexCompacted: { src: number } | null = null;
   let plainBlock: { lines: string[]; src: number } | null = null;
   let lastPlainCall: CallRec | null = null;
-  /* The newest ScheduleWakeup call: only it stays "active", so registering a
-     newer wakeup marks the previous one superseded (issue #161 §2). */
-  let lastWakeupCall: CallRec | null = null;
+  /* Every ScheduleWakeup call, in transcript order. The active wakeup is the
+     newest non-failed one; all earlier valid wakeups are superseded and failed
+     calls stay inactive — recomputed whenever a wakeup is added or a call's
+     result marks it failed (issue #161 §2 + review). */
+  const wakeupCalls: CallRec[] = [];
   /* Snapshot cache + fold-group identity reuse across re-feeds. */
   let prevGroups = new Map<number, CmdGroupItem>();
   let snapshot: FeedSnapshot | null = null;
@@ -991,8 +995,8 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
     return rec;
   };
   /* Rewrites a wakeup event copy-on-write (same one-row-changes-identity pattern
-     as attach): used to mark an earlier wakeup superseded when a newer one is
-     scheduled, and to fill its fire time once the tool_result arrives. */
+     as attach): used to update supersede/fail flags and to fill a fire time once
+     the tool_result arrives. */
   const patchWakeupEvent = (callRec: CallRec, wakeup: WakeupEventInfo) => {
     const event: ToolEvent = { ...callRec.event, wakeup };
     callRec.event = event;
@@ -1002,18 +1006,33 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
       snapshot = null;
     }
   };
-  /* A ScheduleWakeup call → a wakeup event. The fire time is derived from the
-     record timestamp + delaySeconds; the previous wakeup (if any) is marked
-     superseded so only the newest one renders as active. */
+  /* The active wakeup is the newest one whose call did not fail; every earlier
+     valid wakeup is superseded, and a failed call is neither active nor a
+     supersessor. Recomputed whenever the set changes (a new call, or a result
+     that marks a call failed). */
+  const recomputeWakeupStates = () => {
+    let activeSeq: number | null = null;
+    for (let i = wakeupCalls.length - 1; i >= 0; i -= 1) {
+      const w = wakeupCalls[i].event.wakeup;
+      if (w && !w.failed) { activeSeq = wakeupCalls[i].seq; break; }
+    }
+    for (const callRec of wakeupCalls) {
+      const w = callRec.event.wakeup;
+      if (!w) continue;
+      const superseded = !w.failed && callRec.seq !== activeSeq;
+      if (w.superseded !== superseded) patchWakeupEvent(callRec, { ...w, superseded });
+    }
+  };
+  /* A ScheduleWakeup call → a wakeup event, provisionally active until its
+     result attaches. Supersession is recomputed across all wakeups so a later
+     failed call cannot bump a still-valid earlier one. */
   const addWakeup = (ts: unknown, id: string, input: Record<string, unknown>): CallRec => {
     const tsMs = typeof ts === "string" || typeof ts === "number" ? Date.parse(String(ts)) : NaN;
     const info = parseScheduleWakeup(input, Number.isFinite(tsMs) ? tsMs : null);
-    const event = newToolEvent({ ts, id, tool: "ScheduleWakeup", args: input, engine: "claude", wakeup: { ...info, superseded: false } });
+    const event = newToolEvent({ ts, id, tool: "ScheduleWakeup", args: input, engine: "claude", wakeup: { ...info, superseded: false, failed: false } });
     const rec = registerCall(event);
-    if (lastWakeupCall && lastWakeupCall.event.wakeup && !lastWakeupCall.event.wakeup.superseded) {
-      patchWakeupEvent(lastWakeupCall, { ...lastWakeupCall.event.wakeup, superseded: true });
-    }
-    lastWakeupCall = rec;
+    wakeupCalls.push(rec);
+    recomputeWakeupStates();
     return rec;
   };
   /* A shell command from any engine. `callId` is absent for plain job logs, so
@@ -1081,13 +1100,19 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
       outputTruncated = prev.outputTruncated || combined.length > limit;
       outputPreview = combined.slice(-limit);
     }
-    /* A wakeup whose fire time the call alone could not derive recovers it from
-       the result's "Next wakeup scheduled for … (in Ns)" text (issue #161). */
+    /* A wakeup's result carries the RESOLVED schedule (issue #161): on success
+       refine the fire time from it (it overrides the requested delay); on error
+       the call is rejected — mark it failed so it never counts down and never
+       keeps the previous valid wakeup superseded (issue #161 review). */
     let wakeup = prev.wakeup;
-    if (wakeup && wakeup.fireAt === null && body) {
-      const tsMs = typeof prev.ts === "string" || typeof prev.ts === "number" ? Date.parse(String(prev.ts)) : NaN;
-      const refined = refineWakeupFromResult(wakeup, Number.isFinite(tsMs) ? tsMs : null, body);
-      wakeup = { ...refined, superseded: wakeup.superseded };
+    if (wakeup) {
+      if (isErr) {
+        wakeup = { ...wakeup, failed: true };
+      } else if (body) {
+        const tsMs = typeof prev.ts === "string" || typeof prev.ts === "number" ? Date.parse(String(prev.ts)) : NaN;
+        const refined = refineWakeupFromResult(wakeup, Number.isFinite(tsMs) ? tsMs : null, body);
+        wakeup = { ...refined, superseded: wakeup.superseded, failed: false };
+      }
     }
     const event: ToolEvent = {
       ...prev,
@@ -1112,6 +1137,9 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
         snapshot = null;
       }
     }
+    /* A wakeup that just failed no longer supersedes the prior valid one — its
+       result changed the active/superseded assignment across the set. */
+    if (wakeup && wakeup.failed) recomputeWakeupStates();
     return event;
   };
   const addOutput = (callId: string | undefined, output: string, err?: boolean) => {
@@ -1548,7 +1576,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
     codexCompacted = null;
     plainBlock = null;
     lastPlainCall = null;
-    lastWakeupCall = null;
+    wakeupCalls.length = 0;
     prevGroups = new Map();
     snapshot = null;
     /* pushSeq keeps counting across resets so React keys never collide. */
@@ -1584,7 +1612,14 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
     pendingCodexUsers = pendingCodexUsers.filter((pending) => pending.src >= start);
     if (codexCompacted && codexCompacted.src < start) codexCompacted = null;
     if (lastPlainCall && entryIndex(lastPlainCall.seq) < 0) lastPlainCall = null;
-    if (lastWakeupCall && entryIndex(lastWakeupCall.seq) < 0) lastWakeupCall = null;
+    /* Drop wakeup calls whose entry slid out of the window; recompute so the
+       active/superseded assignment matches a fresh parse of the shortened
+       window. */
+    let wakeupsEvicted = false;
+    for (let i = wakeupCalls.length - 1; i >= 0; i -= 1) {
+      if (entryIndex(wakeupCalls[i].seq) < 0) { wakeupCalls.splice(i, 1); wakeupsEvicted = true; }
+    }
+    if (wakeupsEvicted) recomputeWakeupStates();
     return crossedEchoSeam || (plainBlock !== null && plainBlock.src < start);
   };
 

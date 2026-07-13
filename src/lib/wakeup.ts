@@ -68,35 +68,44 @@ function fireAtFromClock(clock: string, tsMs: number | null): number | null {
 /**
  * Parse a `ScheduleWakeup` tool call into a fire time, reason, and plan.
  * `tsMs` is the transcript entry's epoch (the moment the call was made);
- * `resultText` is the paired tool_result body, a fallback for the delay when
- * the input carried none. Fire time is derived from `tsMs + delaySeconds`
- * first (issue #161); the result's "(in Ns)" and absolute clock are fallbacks.
+ * `resultText` is the paired tool_result body.
+ *
+ * The harness may adjust the requested `delaySeconds` (processing time), so its
+ * result — "Next wakeup scheduled for HH:MM:SS (in Ns)" — carries the RESOLVED
+ * schedule that actually fires. When the result is present its resolved delay
+ * (then its absolute clock) is authoritative; the requested `delaySeconds` is
+ * used only before the result attaches (a live card) or when the result carries
+ * no schedule.
  */
 export function parseScheduleWakeup(input: unknown, tsMs: number | null, resultText?: string | null): WakeupInfo {
   const rec = input && typeof input === "object" && !Array.isArray(input) ? (input as Record<string, unknown>) : {};
   const reason = str(rec.reason);
   const prompt = str(rec.prompt);
-  let delaySeconds = num(rec.delaySeconds);
+  const requestedDelay = num(rec.delaySeconds);
 
   const match = typeof resultText === "string" ? resultText.match(NEXT_WAKEUP_RE) : null;
   const inMatch = typeof resultText === "string" ? resultText.match(IN_SECONDS_RE) : null;
-  if (delaySeconds === null) {
-    const recovered = match?.[2] ?? inMatch?.[1];
-    if (recovered) delaySeconds = Number(recovered);
-  }
+  const resolvedRaw = match?.[2] ?? inMatch?.[1];
+  const resolvedDelay = resolvedRaw ? Number(resolvedRaw) : null;
+  const clock = match?.[1] ?? null;
+
+  // The resolved schedule wins over the requested delay when the result is in.
+  const delaySeconds = resolvedDelay ?? requestedDelay;
 
   let fireAt: number | null = null;
-  if (tsMs !== null && delaySeconds !== null) fireAt = tsMs + delaySeconds * 1000;
-  else if (match?.[1]) fireAt = fireAtFromClock(match[1], tsMs);
+  if (tsMs !== null && resolvedDelay !== null) fireAt = tsMs + resolvedDelay * 1000;
+  else if (clock) fireAt = fireAtFromClock(clock, tsMs);
+  else if (tsMs !== null && requestedDelay !== null) fireAt = tsMs + requestedDelay * 1000;
 
   return { fireAt, delaySeconds, reason, prompt };
 }
 
-/** Refines a parsed wakeup once its tool_result attaches: fills a fire time the
-    call alone could not derive (no delay in the input, no valid timestamp). */
+/** Refines a parsed wakeup once its tool_result attaches. The result carries the
+    RESOLVED schedule, so it overrides the requested-delay fire time computed at
+    call time (issue #161 review); the original is kept only if the result yields
+    no schedule of its own. */
 export function refineWakeupFromResult(info: WakeupInfo, tsMs: number | null, resultText: string): WakeupInfo {
-  if (info.fireAt !== null) return info;
-  const refined = parseScheduleWakeup({ reason: info.reason, prompt: info.prompt, delaySeconds: info.delaySeconds }, tsMs, resultText);
+  const refined = parseScheduleWakeup({ reason: info.reason, prompt: info.prompt }, tsMs, resultText);
   return refined.fireAt !== null ? refined : info;
 }
 
