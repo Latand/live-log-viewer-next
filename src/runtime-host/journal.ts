@@ -456,7 +456,9 @@ export class RuntimeJournal {
         stableJson({
           ...command,
           operationId,
-          ...(typeof previous.turnId === "string" ? { turnId: previous.turnId } : {}),
+          ...(typeof previous.turnId === "string" || previous.turnId === null
+            ? { turnId: previous.turnId }
+            : {}),
         }),
         event.seq,
       );

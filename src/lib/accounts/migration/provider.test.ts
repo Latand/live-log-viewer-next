@@ -80,6 +80,51 @@ test("provider receipt identity ignores timestamp and object key order", () => {
   expect(sameProviderReceiptOutcome(left, right)).toBeTrue();
 });
 
+test("Codex successor host publication is single-owner and cleanup releases that owner", async () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "llv-provider-published-host-"));
+  roots.push(base);
+  const source = accountRoot("codex", base, "source");
+  const target = accountRoot("codex", base, "target");
+  let publications = 0;
+  let cleanups = 0;
+  const provider = new RegisteredSuccessorProvider({
+    accounts: { resolveSpawn: () => target, resolveTranscriptOwner: () => source },
+    startCodex: async () => { throw new Error("unexpected Codex client"); },
+    claudeStatus: async () => ({ loggedIn: true }),
+    spawnClaude: async () => { throw new Error("unexpected Claude spawn"); },
+    publishCodexHost: async () => {
+      publications += 1;
+      await Promise.resolve();
+      return async () => { cleanups += 1; };
+    },
+    now: () => "2026-07-13T12:00:00.000Z",
+  });
+  const receipt: ProviderReceipt = {
+    operationId: "publish-operation",
+    nativeId: "22222222-2222-4222-8222-222222222222",
+    path: path.join(target.transcriptRoot, "22222222-2222-4222-8222-222222222222.jsonl"),
+    continuityPaths: [],
+    historyHash: "history",
+    host: {
+      kind: "codex-app-server",
+      identity: "22222222-2222-4222-8222-222222222222",
+      epoch: 1,
+      verifiedAt: "2026-07-13T12:00:00.000Z",
+    },
+  };
+  const input = {
+    engine: "codex" as const,
+    conversationId: "conversation_published_host" as const,
+    targetAccountId: "target",
+    launchProfile: emptyLaunchProfile({ cwd: base }),
+  };
+
+  await Promise.all([provider.publishHost(receipt, input), provider.publishHost(receipt, input)]);
+  expect(publications).toBe(1);
+  await provider.cleanup(receipt);
+  expect(cleanups).toBe(1);
+});
+
 test("Claude successor provider uses registered homes and shared model normalization", async () => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), "llv-provider-claude-"));
   roots.push(base);

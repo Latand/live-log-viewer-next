@@ -377,6 +377,12 @@ export async function advanceConversationMigration(
     if (!source) throw new Error("conversation has no source generation");
     if (!receipt || receipt.operationId !== migration.operationId) throw new Error("persisted successor receipt operation does not match");
     await successorProvider.verify(receipt, { engine: conversation.engine, targetAccountId: migration.targetId, launchProfile: source.launchProfile });
+    await successorProvider.publishHost?.(receipt, {
+      engine: conversation.engine,
+      conversationId: conversation.id,
+      targetAccountId: migration.targetId,
+      launchProfile: source.launchProfile,
+    });
     const committed = registry.commitSuccessor(conversation.id, {
       id: receipt.nativeId,
       path: receipt.path,

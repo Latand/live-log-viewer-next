@@ -8,8 +8,12 @@ import { CodexAppServerClient, CodexAppServerError } from "@/lib/accounts/codexA
 import { realClaudeLoginPorts } from "@/lib/accounts/claudeLogin";
 import { claudeSuccessorSpecFor } from "@/lib/agent/cli";
 import { agentRegistry, type AgentRegistry, type SpawnReceipt, type TmuxHostEvidence } from "@/lib/agent/registry";
+import { sessionKey, sessionKeyId } from "@/lib/agent/sessionKey";
 import { statePath } from "@/lib/configDir";
 import { procBackend } from "@/lib/proc";
+import { CodexAppServerHost } from "@/lib/runtime/codexAppServerHost";
+import { hasStructuredDeliveryHost, publishStructuredDeliveryHost } from "@/lib/runtime/structuredDeliveryController";
+import { bindCodexHostPersistence, structuredHostsEnabled } from "@/lib/runtime/registry";
 import { cleanupTmuxHostIfMatches, forgetResumePaneIfMatches, spawnAgentWithPrompt, verifyTmuxHostEvidence, type TmuxHostCleanupResult } from "@/lib/tmux";
 
 import type { LaunchProfile, ProviderReceipt, SuccessorProviderPort } from "./contracts";
@@ -31,6 +35,12 @@ export interface ProviderDependencies {
   afterCodexForkReturned?(): void;
   afterCodexCopyPublished?(): void;
   scanCodexForkArtifacts?(root: string, sourceNativeId: string, createdAtMs: number): CodexForkArtifact[];
+  publishCodexHost?(input: {
+    receipt: ProviderReceipt;
+    target: AccountContext;
+    profile: LaunchProfile;
+    registry: AgentRegistry;
+  }): Promise<() => Promise<void>>;
   now(): string;
 }
 
@@ -176,6 +186,91 @@ function assertProviderLockOwned(filename: string, token: string): void {
     if (owner.token === token) return;
   } catch { /* handled by the fenced error below */ }
   throw new Error("Codex provider operation lease was lost");
+}
+
+async function publishCodexSuccessorHost(input: {
+  receipt: ProviderReceipt;
+  target: AccountContext;
+  profile: LaunchProfile;
+  registry: AgentRegistry;
+}): Promise<() => Promise<void>> {
+  if (!structuredHostsEnabled()) return async () => {};
+  const key = sessionKey("codex", input.receipt.nativeId);
+  if (!key) throw new Error("successor Codex thread identity is invalid");
+  if (hasStructuredDeliveryHost(key)) return async () => {};
+
+  const existing = input.registry.snapshot().entries[sessionKeyId(key)];
+  const entry = input.registry.upsert({
+    ...(existing ?? {
+      key,
+      status: "unhosted" as const,
+      host: null,
+      claimEpoch: 0,
+      claimOwner: null,
+      pendingAction: null,
+    }),
+    key,
+    artifactPath: input.receipt.path,
+    cwd: input.profile.cwd,
+    accountId: input.target.accountId,
+    launchProfile: input.profile,
+  });
+  if (!entry.structuredHost) {
+    input.registry.setStructuredHost(key, {
+      kind: "codex-app-server",
+      endpoint: "stdio:pending",
+      process: null,
+      eventCursor: 0,
+      protocolVersion: null,
+      writerClaimEpoch: entry.claimEpoch,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    }, "unhosted");
+  }
+  const owner = { pid: process.pid, startIdentity: procBackend.processIdentity(process.pid) };
+  const claimed = input.registry.claimStructuredHost(key, owner, { allowUnhosted: true });
+  if (!claimed?.claimOwner) throw new Error("successor Codex structured host claim is unavailable");
+
+  const approvalPolicy = input.profile.permissionMode
+    && ["never", "on-request", "untrusted"].includes(input.profile.permissionMode)
+    ? input.profile.permissionMode
+    : undefined;
+  let host: CodexAppServerHost | null = null;
+  let stopPersistence = () => {};
+  let unregister = () => {};
+  try {
+    host = await CodexAppServerHost.adopt(input.receipt.nativeId, {
+      cwd: input.profile.cwd,
+      codexHome: input.target.home,
+      fileAuthCredentials: input.target.kind === "managed",
+      model: input.profile.model ?? undefined,
+      effort: input.profile.effort ?? undefined,
+      sandbox: input.profile.readOnly ? "read-only" : undefined,
+      approvalPolicy,
+      env: input.target.env,
+    });
+    stopPersistence = await bindCodexHostPersistence(
+      input.registry,
+      key,
+      host,
+      claimed.claimOwner,
+      claimed.claimEpoch,
+    );
+    unregister = await publishStructuredDeliveryHost({ key, host });
+  } catch (error) {
+    unregister();
+    if (host) await host.release();
+    stopPersistence();
+    input.registry.releaseStructuredHostClaim(key, claimed.claimOwner, claimed.claimEpoch);
+    throw error;
+  }
+  const publishedHost = host;
+  return async () => {
+    unregister();
+    await publishedHost.release();
+    stopPersistence();
+  };
 }
 
 async function waitForProviderLock(): Promise<void> {
@@ -434,6 +529,13 @@ function assertClaudeTranscript(receipt: ProviderReceipt, target: AccountContext
 }
 
 export class RegisteredSuccessorProvider implements SuccessorProviderPort {
+  private readonly publishedCodexHosts = new Map<string, {
+    nativeId: string;
+    path: string;
+    cleanup: () => Promise<void>;
+  }>();
+  private readonly publishingCodexHosts = new Map<string, Promise<void>>();
+
   constructor(private readonly dependencies: ProviderDependencies = defaultDependencies) {}
 
   async create(input: Parameters<SuccessorProviderPort["create"]>[0]): Promise<ProviderReceipt> {
@@ -469,7 +571,59 @@ export class RegisteredSuccessorProvider implements SuccessorProviderPort {
     } finally { client.close(); }
   }
 
+  async publishHost(
+    receipt: ProviderReceipt,
+    input: Parameters<NonNullable<SuccessorProviderPort["publishHost"]>>[1],
+  ): Promise<void> {
+    if (input.engine !== "codex") return;
+    const existing = this.publishedCodexHosts.get(receipt.operationId);
+    if (existing) {
+      if (existing.nativeId !== receipt.nativeId || existing.path !== receipt.path) {
+        throw new Error("successor Codex host publication conflicts");
+      }
+      return;
+    }
+    const pending = this.publishingCodexHosts.get(receipt.operationId);
+    if (pending) {
+      await pending;
+      const published = this.publishedCodexHosts.get(receipt.operationId);
+      if (!published || published.nativeId !== receipt.nativeId || published.path !== receipt.path) {
+        throw new Error("successor Codex host publication conflicts");
+      }
+      return;
+    }
+    const publication = (async () => {
+      const target = this.dependencies.accounts.resolveSpawn("codex", input.targetAccountId);
+      const cleanup = await (this.dependencies.publishCodexHost ?? publishCodexSuccessorHost)({
+        receipt,
+        target,
+        profile: input.launchProfile,
+        registry: this.dependencies.registry ?? agentRegistry(),
+      });
+      this.publishedCodexHosts.set(receipt.operationId, {
+        nativeId: receipt.nativeId,
+        path: receipt.path,
+        cleanup,
+      });
+    })();
+    this.publishingCodexHosts.set(receipt.operationId, publication);
+    try {
+      await publication;
+    } finally {
+      if (this.publishingCodexHosts.get(receipt.operationId) === publication) {
+        this.publishingCodexHosts.delete(receipt.operationId);
+      }
+    }
+  }
+
   async cleanup(receipt: ProviderReceipt): Promise<void> {
+    if (receipt.host.kind === "codex-app-server") {
+      const published = this.publishedCodexHosts.get(receipt.operationId);
+      if (!published || published.nativeId !== receipt.nativeId || published.path !== receipt.path) return;
+      await published.cleanup();
+      this.publishedCodexHosts.delete(receipt.operationId);
+      return;
+    }
     if (receipt.host.kind !== "claude-stream") return;
     const host = claudeTmuxHostFromReceipt(receipt);
     const cancelled = await this.dependencies.cancelClaude?.(host);
