@@ -379,6 +379,19 @@ export function normalizeStageOrder(stages: DraftStage[]): DraftStage[] {
   return stages;
 }
 
+/**
+ * The linear-chain invariant the #189 API enforces: no review-loop may precede
+ * the first run stage (a review loop reviews a preceding run). For a non-empty
+ * plan this reduces to "stage 0 is a run"; an empty plan is trivially valid. The
+ * canvas builder guards its reorder/remove/add-review controls with this so it
+ * never fires a PATCH the server would 400 (issue #136).
+ */
+export function reviewLoopChainValid(kinds: readonly PipelineStageKind[]): boolean {
+  const firstRun = kinds.indexOf("run");
+  const firstReview = kinds.indexOf("review-loop");
+  return firstReview === -1 || (firstRun !== -1 && firstRun < firstReview);
+}
+
 /** Slugs a role id / kind into a URL-safe stage id, deduped with numeric suffixes. */
 export function deriveStageId(kind: PipelineStageKind, roleId: string, taken: Set<string>): string {
   const base =
@@ -456,12 +469,12 @@ export async function createPipeline(req: CreatePipelineRequest): Promise<{ pipe
 }
 
 /**
- * Creates a DRAFT pipeline straight on the canvas (#136), with no form: it
+ * Creates an EMPTY draft pipeline straight on the canvas (#136), with no form: it
  * resolves the project's repo directory from the spawn endpoint (the same source
- * the dialog seeds from), then POSTs `autoStart:false` with two blank run stages —
- * the API's 2-stage minimum. The draft renders as a scheme group the operator then
- * assembles visually (add/reorder stage cards, edit role/model/effort/prompt) and
- * Starts. Runs entirely on the #189 draft machinery — no second data path.
+ * the dialog seeds from), then POSTs `autoStart:false` with **zero** stages. The
+ * draft renders as a scheme group the operator assembles visually (add stage cards,
+ * drag to reorder, edit role/model/effort/prompt) and Starts once it has ≥2 stages.
+ * Runs entirely on the #189 draft machinery — no second data path.
  */
 export async function createDraftPipeline(
   project: string,
@@ -478,23 +491,12 @@ export async function createDraftPipeline(
     }
   }
   if (!repoDir) return { error: translate(getLocale(), "common.serverUnavailable") };
-  const seed: PipelineStageInput[] = draftStagesToInput([
-    blankBuilderStage(),
-    blankBuilderStage(),
-  ]);
   return createPipeline({
     task: translate(getLocale(), "pipelineBuilder.untitledTask"),
     repoDir,
-    stages: seed,
+    stages: [],
     autoStart: false,
   });
-}
-
-/** A blank run stage row for the canvas seed: no role, a `{{task}}` prompt so it
-    clears the server's non-empty-prompt guard while staying obviously a placeholder
-    the operator overwrites. */
-function blankBuilderStage(): DraftStage {
-  return { key: "", kind: "run", roleId: "", engine: "claude", model: "", effort: "", access: "read-write", prompt: "{{task}}", roleParams: {} };
 }
 
 export async function patchPipeline(

@@ -18,7 +18,7 @@ afterEach(() => {
   globalThis.fetch = realFetch;
 });
 
-test("resolves the repo from /api/spawn and POSTs a two-stage autoStart:false draft (#136)", async () => {
+test("resolves the repo from /api/spawn and POSTs an EMPTY autoStart:false draft (#136)", async () => {
   const requests: Array<{ url: string; body?: unknown }> = [];
   globalThis.fetch = (async (url: string, init?: { body?: string }) => {
     requests.push({ url, body: init?.body ? JSON.parse(init.body) : undefined });
@@ -32,8 +32,9 @@ test("resolves the repo from /api/spawn and POSTs a two-stage autoStart:false dr
   const body = post?.body as { autoStart?: boolean; repoDir?: string; stages?: unknown[] };
   expect(body?.autoStart).toBe(false);
   expect(body?.repoDir).toBe("/home/me/repo");
-  /* The seed is exactly the API's 2-stage minimum, both plain run stages. */
-  expect(body?.stages).toHaveLength(2);
+  /* The draft is created EMPTY (#136 recast) — the operator assembles stages on
+     the canvas; the 2-stage floor is enforced only at Start. */
+  expect(body?.stages).toEqual([]);
 });
 
 test("prefers an explicit repo prefill over the spawn lookup (#136)", async () => {

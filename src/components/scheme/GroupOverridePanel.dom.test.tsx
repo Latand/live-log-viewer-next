@@ -232,6 +232,71 @@ function draftFixture(): SchemeGroup {
   };
 }
 
+function emptyDraftFixture(): SchemeGroup {
+  return {
+    ...pipelineGroup,
+    pipeline: {
+      ...pipelineGroup.pipeline!,
+      state: "draft",
+      repoDir: "/repo",
+      stages: [],
+      runs: [],
+      cursor: null,
+    } as unknown as Pipeline,
+  };
+}
+
+function reviewDraftFixture(): SchemeGroup {
+  const stages = [
+    { id: "build", kind: "run", role: { roleId: "builder" }, prompt: "Build", next: "review", effectiveRole: { engine: "claude", model: "fable", effort: "high", access: "read-write", roleId: "builder", promptScaffold: null } },
+    { id: "review", kind: "review-loop", role: { roleId: "reviewer" }, prompt: "Review", next: null, effectiveRole: { engine: "claude", model: "fable", effort: "high", access: "read-only", roleId: "reviewer", promptScaffold: null } },
+  ];
+  return {
+    ...pipelineGroup,
+    pipeline: {
+      ...pipelineGroup.pipeline!,
+      state: "draft",
+      repoDir: "/repo",
+      stages,
+      runs: stages.map((stage) => ({ stageId: stage.id, attempts: [] })),
+      cursor: { stageId: "build", state: "pending" },
+    } as unknown as Pipeline,
+  };
+}
+
+test("canvas builder: an empty draft shows no cards, disables Start and add-review (#136)", () => {
+  const { host, root } = mount(<GroupOverridePanel group={emptyDraftFixture()} onClose={() => undefined} />);
+  expect(host.querySelectorAll("[data-stage-card]").length).toBe(0);
+  const start = Array.from(host.querySelectorAll("button")).find((b) => b.textContent?.includes("Start pipeline")) as HTMLButtonElement;
+  expect(start.disabled).toBe(true);
+  /* A review loop needs a preceding run, so it cannot be the first stage added. */
+  const addReview = Array.from(host.querySelectorAll("button")).find((b) => b.textContent?.includes("Add review loop")) as HTMLButtonElement;
+  expect(addReview.disabled).toBe(true);
+  const addRun = Array.from(host.querySelectorAll("button")).find((b) => b.textContent === "Add stage" || /Add stage/.test(b.textContent || "")) as HTMLButtonElement;
+  expect(addRun.disabled).toBe(false);
+  flushSync(() => root.unmount());
+  host.remove();
+});
+
+test("canvas builder: controls that would orphan a review loop are disabled, and a bad drop is a no-op (#136)", async () => {
+  const { host, root } = mount(<GroupOverridePanel group={reviewDraftFixture()} onClose={() => undefined} />);
+  const reviewCard = host.querySelector('[data-stage-card="review"]') as HTMLElement;
+  const buildCard = host.querySelector('[data-stage-card="build"]') as HTMLElement;
+  /* Moving the review loop above its only run would break the chain → disabled. */
+  const reviewUp = Array.from(reviewCard.querySelectorAll("button")).find((b) => b.getAttribute("aria-label") === "Move up") as HTMLButtonElement;
+  expect(reviewUp.disabled).toBe(true);
+  /* Removing the sole preceding run would orphan the review loop → disabled. */
+  const buildRemove = Array.from(buildCard.querySelectorAll("button")).find((b) => b.getAttribute("aria-label") === "Remove stage") as HTMLButtonElement;
+  expect(buildRemove.disabled).toBe(true);
+  /* Dragging the review card onto the run card (index 0) must not PATCH. */
+  flushSync(() => reviewCard.dispatchEvent(new dom.Event("dragstart", { bubbles: true }) as unknown as Event));
+  flushSync(() => buildCard.dispatchEvent(new dom.Event("drop", { bubbles: true }) as unknown as Event));
+  await Promise.resolve();
+  expect(calls.some((call) => (call.body as { action?: string })?.action === "reorder-stage")).toBe(false);
+  flushSync(() => root.unmount());
+  host.remove();
+});
+
 test("canvas builder: adding a review loop posts add-stage with the review-loop kind (#136)", async () => {
   const { host, root } = mount(<GroupOverridePanel group={draftFixture()} onClose={() => undefined} />);
   const add = Array.from(host.querySelectorAll("button")).find((b) => b.textContent?.includes("Add review loop")) as HTMLButtonElement;

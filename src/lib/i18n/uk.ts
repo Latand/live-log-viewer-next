@@ -670,6 +670,8 @@ export const uk: Record<keyof typeof en, Message> = {
   "groupOverride.savedStage": "Етап оновлено для наступного запуску",
   "groupOverride.stagesHeading": "Етапи · порядок виконання",
   "groupOverride.stagesHint": "Перетягуй картки, щоб змінити порядок. Порядок — це ланцюг виконання.",
+  "groupOverride.stagesEmpty": "Ще немає етапів — додай етап нижче, щоб почати збірку.",
+  "groupOverride.startNeedsStages": "Додай щонайменше 2 етапи перед запуском.",
   "groupOverride.addRunStage": "Додати етап",
   "groupOverride.addReviewStage": "Додати цикл ревʼю",
   "groupOverride.dragHandle": "Перетягни, щоб змінити порядок етапу",

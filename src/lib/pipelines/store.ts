@@ -146,7 +146,11 @@ function isPipeline(value: unknown): value is Pipeline {
   )) return false;
   const stages = pipeline.stages as PipelineStage[];
   const runs = pipeline.runs as Pipeline["runs"];
-  if (stages.length < 2 || stages.length > 4 || runs.length !== stages.length) return false;
+  /* A draft is a scratchpad the operator assembles from zero on the canvas (#136),
+     so it may hold 0–4 stages; the 2-stage minimum is enforced only when Start is
+     requested (engine `start`). Every non-draft state keeps the 2–4 invariant. */
+  const minStages = pipeline.state === "draft" ? 0 : 2;
+  if (stages.length < minStages || stages.length > 4 || runs.length !== stages.length) return false;
   const ids = stages.map((stage) => stage.id);
   if (new Set(ids).size !== ids.length) return false;
   if (stages.some((stage, index) => stage.next !== (stages[index + 1]?.id ?? null))) return false;
@@ -158,7 +162,11 @@ function isPipeline(value: unknown): value is Pipeline {
   if (cursor !== null && (!cursor || typeof cursor !== "object" || !ids.includes(cursor.stageId) || !["pending", "spawning", "running", "reviewing", "committing"].includes(cursor.state))) return false;
   if ((pipeline.state === "completed" || pipeline.state === "closed") && cursor !== null) return false;
   if (pipeline.state === "draft") {
-    if (cursor?.stageId !== stages[0]!.id || cursor.state !== "pending") return false;
+    /* An empty draft has no stage to point the cursor at; once it holds stages the
+       cursor rests on the first, pending (Start spawns from there). */
+    if (stages.length === 0) {
+      if (cursor !== null) return false;
+    } else if (cursor?.stageId !== stages[0]!.id || cursor.state !== "pending") return false;
     if (runs.some((run) => run.attempts.length > 0)) return false;
     if (pipeline.baseBranch || pipeline.baseRef || pipeline.lastPassedCommit || pipeline.closedAt) return false;
   }
@@ -274,7 +282,7 @@ export function buildPipeline(input: {
     lastPassedCommit: "",
     stages: JSON.parse(JSON.stringify(input.stages)) as PipelineStage[],
     runs: input.stages.map((stage) => ({ stageId: stage.id, attempts: [] })),
-    cursor: { stageId: input.stages[0]!.id, state: "pending" },
+    cursor: input.stages.length ? { stageId: input.stages[0]!.id, state: "pending" } : null,
     state: input.state ?? "provisioning",
     pausedState: null,
     stateDetail: null,

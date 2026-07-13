@@ -695,6 +695,8 @@ export const en = {
   "groupOverride.savedStage": "Stage updated for its next run",
   "groupOverride.stagesHeading": "Stages · execution order",
   "groupOverride.stagesHint": "Drag cards to reorder. The order is the execution chain.",
+  "groupOverride.stagesEmpty": "No stages yet — add a stage below to start building.",
+  "groupOverride.startNeedsStages": "Add at least 2 stages before starting.",
   "groupOverride.addRunStage": "Add stage",
   "groupOverride.addReviewStage": "Add review loop",
   "groupOverride.dragHandle": "Drag to reorder this stage",

@@ -9,7 +9,7 @@ import type { PipelineStage, PipelineStageKind } from "@/lib/pipelines/types";
 import { useLocale } from "@/lib/i18n";
 
 import { flowPresentation, patchFlow } from "@/components/flows/flowModel";
-import { patchPipeline, PIPELINE_ROLE_OPTIONS, stageOverrideBody } from "@/components/pipelines/pipelineModel";
+import { patchPipeline, PIPELINE_ROLE_OPTIONS, reviewLoopChainValid, stageOverrideBody } from "@/components/pipelines/pipelineModel";
 
 import type { SchemeGroup } from "./layout";
 
@@ -414,8 +414,26 @@ function DraftStageCards({
   const [dragId, setDragId] = useState<string | null>(null);
   const [overId, setOverId] = useState<string | null>(null);
 
+  const kinds = stages.map((item) => item.kind);
+  /* A move/removal that would place a review-loop ahead of every run is invalid
+     (the API rejects it), so the controls that would produce one are disabled and
+     an out-of-band drop is a no-op — the plan on the canvas is always startable. */
+  const orderAfterMove = (from: number, to: number): PipelineStageKind[] => {
+    const next = [...kinds];
+    const [moved] = next.splice(from, 1);
+    next.splice(to, 0, moved!);
+    return next;
+  };
+  const canMoveTo = (fromIndex: number, toIndex: number) =>
+    toIndex >= 0 && toIndex < stages.length && toIndex !== fromIndex && reviewLoopChainValid(orderAfterMove(fromIndex, toIndex));
+  const canRemove = (index: number) => reviewLoopChainValid(kinds.filter((_, i) => i !== index));
+  /* A review-loop needs a preceding run, so the add-review control stays disabled
+     until at least one run exists (and while the plan is already at the 4-stage cap). */
+  const canAddReview = stages.length < 4 && stages.some((item) => item.kind === "run");
+
   const moveTo = (stageId: string, toIndex: number) => {
-    if (toIndex < 0 || toIndex >= stages.length) return;
+    const from = stages.findIndex((item) => item.id === stageId);
+    if (from < 0 || !canMoveTo(from, toIndex)) return;
     void run(t("groupOverride.reordered"), () => patchPipeline(pipeline.id, "reorder-stage", { stageId, toIndex }));
   };
   const addStage = (kind: PipelineStageKind) => {
@@ -434,7 +452,8 @@ function DraftStageCards({
 
   /* Drop resolves against React state (dragId), not dataTransfer, so it works in
      environments where the drag payload is unavailable (and stays unit-testable).
-     Splice semantics: the dragged stage lands at the drop target's current slot. */
+     Splice semantics: the dragged stage lands at the drop target's current slot;
+     a drop that would break the run→review chain is ignored (moveTo guards it). */
   const onDrop = (targetId: string) => {
     const from = dragId;
     setDragId(null);
@@ -447,7 +466,7 @@ function DraftStageCards({
   return (
     <div className="flex flex-col gap-1.5">
       <span className="text-[10.5px] font-bold text-ink">{t("groupOverride.stagesHeading")}</span>
-      <span className="text-[10px] font-semibold text-dim">{t("groupOverride.stagesHint")}</span>
+      <span className="text-[10px] font-semibold text-dim">{stages.length ? t("groupOverride.stagesHint") : t("groupOverride.stagesEmpty")}</span>
       <div className="flex max-h-[46vh] flex-col gap-2 overflow-y-auto pr-0.5">
         {stages.map((stage, index) => (
           <div
@@ -491,7 +510,7 @@ function DraftStageCards({
               </span>
               <button
                 className="inline-flex h-6 w-6 items-center justify-center rounded-full border border-line bg-bg text-dim hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-30"
-                disabled={busy || index === 0}
+                disabled={busy || !canMoveTo(index, index - 1)}
                 aria-label={t("groupOverride.moveStageUp")}
                 onClick={() => moveTo(stage.id, index - 1)}
               >
@@ -499,7 +518,7 @@ function DraftStageCards({
               </button>
               <button
                 className="inline-flex h-6 w-6 items-center justify-center rounded-full border border-line bg-bg text-dim hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-30"
-                disabled={busy || index === stages.length - 1}
+                disabled={busy || !canMoveTo(index, index + 1)}
                 aria-label={t("groupOverride.moveStageDown")}
                 onClick={() => moveTo(stage.id, index + 1)}
               >
@@ -507,7 +526,7 @@ function DraftStageCards({
               </button>
               <button
                 className="inline-flex h-6 w-6 items-center justify-center rounded-full border border-line bg-bg text-dim hover:text-err focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-30"
-                disabled={busy || stages.length <= 2}
+                disabled={busy || !canRemove(index)}
                 aria-label={t("groupOverride.removeStage")}
                 onClick={() => removeStage(stage.id)}
               >
@@ -531,7 +550,7 @@ function DraftStageCards({
         <button className={ghostBtn} disabled={busy || stages.length >= 4} onClick={() => addStage("run")}>
           <Plus className="h-3 w-3" aria-hidden /> {t("groupOverride.addRunStage")}
         </button>
-        <button className={ghostBtn} disabled={busy || stages.length >= 4} onClick={() => addStage("review-loop")}>
+        <button className={ghostBtn} disabled={busy || !canAddReview} onClick={() => addStage("review-loop")}>
           <Plus className="h-3 w-3" aria-hidden /> {t("groupOverride.addReviewStage")}
         </button>
       </div>
@@ -657,7 +676,8 @@ function PipelineOverride({ group, onClose }: { group: SchemeGroup; onClose: () 
         {draft ? (
           <button
             className="inline-flex min-h-11 flex-1 items-center justify-center gap-1 rounded-full border border-[#9a6410] bg-[#9a6410] px-3 text-[11px] font-bold text-white hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#c88719]/50 disabled:opacity-40"
-            disabled={busy}
+            disabled={busy || pipeline.stages.length < 2}
+            title={pipeline.stages.length < 2 ? t("groupOverride.startNeedsStages") : undefined}
             onClick={() => void run(t("pipelineStrip.start"), () => patchPipeline(pipeline.id, "start"))}
           >
             <Play className="h-3.5 w-3.5" aria-hidden /> {t("pipelineStrip.start")}

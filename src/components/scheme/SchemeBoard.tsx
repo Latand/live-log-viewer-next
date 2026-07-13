@@ -615,6 +615,24 @@ export function SchemeBoard({
     // eslint-disable-next-line react-hooks/exhaustive-deps -- fires only on a new `+ Task` press
   }, [newTaskNonce]);
 
+  /* The canvas builder (#136): when `+ Пайплайн` drops a fresh draft, reveal its
+     placeholder group — glide the camera onto it and drop the hand tool so its
+     builder panel (which GroupsLayer opens only while interactive) is on screen
+     and open, instead of docked somewhere off a panned/populated board. Fires once
+     per id, and only once the group has appeared in the layout (the POST→refetch
+     round-trip). */
+  const builderRevealed = useRef<string | null>(null);
+  useEffect(() => {
+    if (!builderPipelineId || mapMode) return;
+    if (builderRevealed.current === builderPipelineId) return;
+    const group = layout.groups.find((candidate) => candidate.id === builderPipelineId && candidate.pipeline);
+    if (!group) return;
+    builderRevealed.current = builderPipelineId;
+    setMode("select");
+    centerOn(group, 0.75);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- fires when the new draft's group first renders
+  }, [builderPipelineId, layout]);
+
   /* Spatial keyboard navigation: live only on the desktop board — a selection
      session, an expanded overlay, or map mode all suspend it. */
   const navEnabled = !mapMode && !session && !overlayOpen;
