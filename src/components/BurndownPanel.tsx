@@ -19,8 +19,8 @@ const PH = VB_H - PAD.t - PAD.b;
 /** Same amber-<30% / red-<10% thresholds the footer bars use; above that the
     curve keeps the engine's identity tint. */
 function paceColor(remaining: number, tint: string): string {
-  if (remaining <= 10) return "#c62828";
-  if (remaining <= 30) return "#d29a2f";
+  if (remaining <= 10) return "var(--color-danger)";
+  if (remaining <= 30) return "var(--color-warning)";
   return tint;
 }
 
@@ -61,10 +61,10 @@ function BurndownChart({ series, tint, now }: { series: BurndownSeries; tint: st
   return (
     <svg viewBox={`0 0 ${VB_W} ${VB_H}`} preserveAspectRatio="none" className="h-[150px] w-full" role="img">
       {/* Plot frame + 50% guide */}
-      <rect x={PAD.l} y={PAD.t} width={PW} height={PH} className="fill-none stroke-line" strokeWidth={1} vectorEffect="non-scaling-stroke" />
-      <line x1={PAD.l} y1={yScale(50)} x2={PAD.l + PW} y2={yScale(50)} className="stroke-line" strokeWidth={1} strokeDasharray="2 3" vectorEffect="non-scaling-stroke" opacity={0.6} />
+      <rect x={PAD.l} y={PAD.t} width={PW} height={PH} className="fill-none stroke-border" strokeWidth={1} vectorEffect="non-scaling-stroke" />
+      <line x1={PAD.l} y1={yScale(50)} x2={PAD.l + PW} y2={yScale(50)} className="stroke-border" strokeWidth={1} strokeDasharray="2 3" vectorEffect="non-scaling-stroke" opacity={0.6} />
       {idealPath ? (
-        <path d={idealPath} className="fill-none stroke-dim" strokeWidth={1.5} strokeDasharray="4 3" vectorEffect="non-scaling-stroke" opacity={0.7} />
+        <path d={idealPath} className="fill-none stroke-muted" strokeWidth={1.5} strokeDasharray="4 3" vectorEffect="non-scaling-stroke" opacity={0.7} />
       ) : null}
       {actualPath ? (
         <path d={actualPath} fill="none" stroke={curveColor} strokeWidth={2} strokeLinejoin="round" strokeLinecap="round" vectorEffect="non-scaling-stroke" />
@@ -154,14 +154,14 @@ export function BurndownPanel({
       aria-label={t("burndown.openAria", { engine: label })}
       tabIndex={-1}
       onKeyDown={(event) => handleOverlayEscape(event, onClose)}
-      className="fixed bottom-3 left-1/2 z-50 flex w-[min(430px,calc(100vw-16px))] -translate-x-1/2 flex-col rounded-[12px] border border-line bg-panel shadow-[0_8px_28px_rgba(20,20,30,0.14)] sm:absolute sm:bottom-1 sm:left-full sm:ml-2 sm:translate-x-0"
+      className="fixed bottom-3 left-1/2 z-50 flex w-[min(430px,calc(100vw-16px))] -translate-x-1/2 flex-col rounded-[12px] border border-border bg-card shadow-[0_8px_28px_rgba(20,20,30,0.14)] sm:absolute sm:bottom-1 sm:left-full sm:ml-2 sm:translate-x-0"
     >
-      <header className="flex items-center gap-2 border-b border-line px-3 py-2">
+      <header className="flex items-center gap-2 border-b border-border px-3 py-2">
         <span className="text-[12.5px] font-bold" style={{ color: tint }}>{label}</span>
-        <span className="text-[11px] text-dim">{t("burndown.title")}</span>
-        {plan ? <span className="truncate text-[10px] text-dim">{plan}</span> : null}
+        <span className="text-[11px] text-muted">{t("burndown.title")}</span>
+        {plan ? <span className="truncate text-[10px] text-muted">{plan}</span> : null}
         <div className="ml-auto flex items-center gap-1">
-          <div className="flex rounded-[8px] border border-line p-0.5" role="tablist" aria-label={t("burndown.windowAria")}>
+          <div className="flex rounded-[8px] border border-border p-0.5" role="tablist" aria-label={t("burndown.windowAria")}>
             {(["weekly", "session"] as const).map((key) => (
               <button
                 key={key}
@@ -169,7 +169,7 @@ export function BurndownPanel({
                 role="tab"
                 aria-selected={window === key}
                 onClick={() => setWindow(key)}
-                className={`rounded-[6px] px-2 py-0.5 text-[10.5px] font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${window === key ? "bg-chip text-ink" : "text-dim hover:text-ink"}`}
+                className={`rounded-[6px] px-2 py-0.5 text-[10.5px] font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${window === key ? "bg-sunken text-primary" : "text-muted hover:text-primary"}`}
               >
                 {t(key === "weekly" ? "limits.week" : "limits.5h")}
               </button>
@@ -180,7 +180,7 @@ export function BurndownPanel({
             type="button"
             aria-label={t("burndown.close")}
             onClick={onClose}
-            className="rounded-[6px] p-1 text-dim hover:bg-bg hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            className="rounded-[6px] p-1 text-muted hover:bg-canvas hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
           >
             <X className="h-3.5 w-3.5" aria-hidden />
           </button>
@@ -188,15 +188,15 @@ export function BurndownPanel({
       </header>
       <div className="px-3 py-2.5">
         {failed ? (
-          <div className="py-6 text-center text-[12px] text-dim">{t("burndown.failed")}</div>
+          <div className="py-6 text-center text-[12px] text-muted">{t("burndown.failed")}</div>
         ) : !data || ownershipPending ? (
-          <div className="py-6 text-center text-[12px] text-dim">{t("burndown.loading")}</div>
+          <div className="py-6 text-center text-[12px] text-muted">{t("burndown.loading")}</div>
         ) : hasData && series ? (
           <>
             <BurndownChart series={series} tint={tint} now={now} />
-            <div className="mt-1.5 flex items-center justify-between text-[10px] text-dim">
+            <div className="mt-1.5 flex items-center justify-between text-[10px] text-muted">
               <span className="flex items-center gap-1">
-                <span className="inline-block h-0 w-3 border-t-2 border-dashed border-dim" aria-hidden />
+                <span className="inline-block h-0 w-3 border-t-2 border-dashed border-muted" aria-hidden />
                 {t("burndown.ideal")}
               </span>
               <span className="flex items-center gap-1">
@@ -205,14 +205,14 @@ export function BurndownPanel({
               </span>
             </div>
             {paceText ? (
-              <div className="mt-2 text-[11.5px] font-semibold text-ink">
+              <div className="mt-2 text-[11.5px] font-semibold text-primary">
                 {paceText}
-                {projectText ? <span className="ml-1 font-normal text-dim">· {projectText}</span> : null}
+                {projectText ? <span className="ml-1 font-normal text-muted">· {projectText}</span> : null}
               </div>
             ) : null}
           </>
         ) : (
-          <div className="py-6 text-center text-[12px] text-dim">
+          <div className="py-6 text-center text-[12px] text-muted">
             {t("burndown.empty")}
             {sinceText ? <div className="mt-1 text-[11px]">{sinceText}</div> : null}
           </div>

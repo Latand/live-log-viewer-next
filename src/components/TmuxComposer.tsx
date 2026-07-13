@@ -474,7 +474,7 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
                   aria-label={t("composer.retrySend")}
                   title={t("composer.retrySend")}
                   disabled={busy || voiceSending}
-                  className={`inline-flex shrink-0 items-center justify-center rounded text-dim hover:text-accent disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+                  className={`inline-flex shrink-0 items-center justify-center rounded text-muted hover:text-accent disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
                     isMobile ? "h-11 w-11" : "px-0.5"
                   }`}
                   onClick={() => {
@@ -497,7 +497,7 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
               <button
                 type="button"
                 aria-label={t("composer.removeFromQueue")}
-                className={`inline-flex shrink-0 items-center justify-center rounded text-dim hover:text-err focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+                className={`inline-flex shrink-0 items-center justify-center rounded text-muted hover:text-danger focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
                   isMobile ? "h-11 w-11" : "px-0.5"
                 }`}
                 onClick={() => persistSent(sent.filter((item) => item.id !== entry.id))}

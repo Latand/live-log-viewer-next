@@ -12,21 +12,21 @@ import { Hint } from "@/components/Hint";
 import { isGateOpen, patchWorkflow, WF_ATTENTION_STATES, WF_BUSY_STATES, workflowStateLabel } from "./workflowModel";
 
 function stateDot(wf: Workflow): string {
-  if (wf.state === "approved") return "bg-ok";
-  if (wf.state === "needs_decision") return "bg-err";
-  if (wf.state === "paused") return "bg-[#e0ae45]";
-  if (WF_BUSY_STATES.has(wf.state)) return "bg-ok animate-pulse";
-  return "bg-[#9a9aa4]";
+  if (wf.state === "approved") return "bg-success";
+  if (wf.state === "needs_decision") return "bg-danger";
+  if (wf.state === "paused") return "bg-warning";
+  if (WF_BUSY_STATES.has(wf.state)) return "bg-success animate-pulse";
+  return "bg-muted";
 }
 
 /** Chip tone of one stage: done green, current accent, waiting gray. */
 function stageTone(wf: Workflow, index: number): { color: string; soft: string; pulse: boolean } {
   const run = wf.stageRuns[index];
-  if (run?.doneAt) return { color: "#1a8a3e", soft: "#e7f4ea", pulse: false };
+  if (run?.doneAt) return { color: "var(--color-success)", soft: "var(--color-success-soft)", pulse: false };
   if (index === wf.stageIndex && WF_BUSY_STATES.has(wf.state) && wf.state !== "provisioning") {
-    return { color: "#5a51e0", soft: "#ecebfb", pulse: true };
+    return { color: "var(--color-accent)", soft: "var(--color-accent-soft)", pulse: true };
   }
-  return { color: "#8b8b95", soft: "#efeff3", pulse: false };
+  return { color: "var(--color-muted)", soft: "var(--color-sunken)", pulse: false };
 }
 
 /**
@@ -62,18 +62,18 @@ export function WorkflowStrip({ wf }: { wf: Workflow }) {
   return (
     <div
       data-scheme-ui
-      className={`pointer-events-auto flex min-h-11 w-full items-center gap-3 rounded-[14px] border bg-panel/95 px-4 py-1 shadow-[0_2px_10px_rgb(20_20_30/0.08)] ${
-        attention ? "border-[#e0ae45]/70" : "border-line"
+      className={`pointer-events-auto flex min-h-11 w-full items-center gap-3 rounded-[14px] border bg-card/95 px-4 py-1 shadow-[0_2px_10px_rgb(20_20_30/0.08)] ${
+        attention ? "border-warning/70" : "border-border"
       }`}
     >
       {/* State cluster: dot, the WF mark, the name, current state and detail. */}
       <span className="flex min-w-0 max-w-[46%] shrink-0 items-center gap-2">
         <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${stateDot(wf)}`} aria-hidden />
-        <span className="shrink-0 text-[10.5px] font-bold tracking-[0.08em] text-dim">{t("wfStrip.workflow")}</span>
+        <span className="shrink-0 text-[10.5px] font-bold tracking-[0.08em] text-muted">{t("wfStrip.workflow")}</span>
         <span className="shrink-0 text-[12px] font-bold">{wf.name}</span>
-        <span className="shrink-0 text-[11.5px] font-semibold text-dim">{workflowStateLabel(t, wf.state)}</span>
+        <span className="shrink-0 text-[11.5px] font-semibold text-muted">{workflowStateLabel(t, wf.state)}</span>
         {wf.stateDetail ? (
-          <span className="min-w-0 truncate text-[11.5px] font-semibold text-err" title={wf.stateDetail}>
+          <span className="min-w-0 truncate text-[11.5px] font-semibold text-danger" title={wf.stateDetail}>
             {wf.stateDetail}
           </span>
         ) : null}
@@ -87,7 +87,7 @@ export function WorkflowStrip({ wf }: { wf: Workflow }) {
           return (
             <span key={index} className="flex shrink-0 items-center gap-1.5">
               {index > 0 ? (
-                <span className="text-[10px] font-bold text-[#c9c9d1]" aria-hidden>
+                <span className="text-[10px] font-bold text-strong" aria-hidden>
                   →
                 </span>
               ) : null}
@@ -107,14 +107,14 @@ export function WorkflowStrip({ wf }: { wf: Workflow }) {
       {/* Control cluster. */}
       <span className="flex shrink-0 items-center gap-1.5">
         {error ? (
-          <span className="max-w-[220px] truncate text-[10.5px] font-semibold text-err" title={error}>
+          <span className="max-w-[220px] truncate text-[10.5px] font-semibold text-danger" title={error}>
             {error}
           </span>
         ) : null}
-        {busy ? <RefreshCw className="h-3.5 w-3.5 shrink-0 animate-spin text-dim" aria-hidden /> : null}
+        {busy ? <RefreshCw className="h-3.5 w-3.5 shrink-0 animate-spin text-muted" aria-hidden /> : null}
         {wf.prUrl ? (
           <a
-            className="inline-flex h-6 shrink-0 items-center gap-1 rounded-full border border-ok/40 bg-[#eef8f0] px-2.5 text-[10.5px] font-bold text-ok hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            className="inline-flex h-6 shrink-0 items-center gap-1 rounded-full border border-success/40 bg-success-soft px-2.5 text-[10.5px] font-bold text-success hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
             href={wf.prUrl}
             target="_blank"
             rel="noreferrer"
@@ -141,7 +141,7 @@ export function WorkflowStrip({ wf }: { wf: Workflow }) {
               {t("wfStrip.retryStage")}
             </button>
             <button
-              className="shrink-0 rounded-full border border-line bg-bg px-2.5 py-1 text-[10.5px] font-bold text-dim hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40"
+              className="shrink-0 rounded-full border border-border bg-canvas px-2.5 py-1 text-[10.5px] font-bold text-muted hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40"
               disabled={busy}
               onClick={() => void run("advance")}
             >
@@ -152,7 +152,7 @@ export function WorkflowStrip({ wf }: { wf: Workflow }) {
         {finished ? null : wf.state === "paused" ? (
           <Hint label={t("wfStrip.resume")}>
             <button
-              className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-ok hover:bg-bg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40"
+              className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-success hover:bg-canvas focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40"
               disabled={busy}
               aria-label={t("wfStrip.resume")}
               onClick={() => void run("resume")}
@@ -163,7 +163,7 @@ export function WorkflowStrip({ wf }: { wf: Workflow }) {
         ) : (
           <Hint label={t("wfStrip.pause")}>
             <button
-              className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-dim hover:bg-bg hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40"
+              className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-muted hover:bg-canvas hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40"
               disabled={busy}
               aria-label={t("wfStrip.pause")}
               onClick={() => void run("pause")}
@@ -174,7 +174,7 @@ export function WorkflowStrip({ wf }: { wf: Workflow }) {
         )}
         <Hint label={t("wfStrip.close")}>
           <button
-            className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-dim hover:bg-bg hover:text-err focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40"
+            className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-muted hover:bg-canvas hover:text-danger focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40"
             disabled={busy}
             aria-label={t("wfStrip.close")}
             onClick={() => void run("close")}

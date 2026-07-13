@@ -28,10 +28,10 @@ export interface StackDot {
 /** Minimap dot tone per collapsed worker-stack origin (issue #136): orchestration
     origins (flow/pipeline) in accent, spawner/worktree origins in gray. */
 export const STACK_DOT_COLOR: Record<WorkerStack["kind"], string> = {
-  flow: "#5a51e0",
-  pipeline: "#5a51e0",
-  origin: "#9a9aa4",
-  worktree: "#c9c9d1",
+  flow: "var(--color-accent)",
+  pipeline: "var(--color-accent)",
+  origin: "var(--color-muted)",
+  worktree: "var(--color-strong)",
 };
 
 /** One minimap dot per collapsed worker stack (issue #136), tinted by origin. */
@@ -83,7 +83,7 @@ export function Minimap({
     <div
       ref={ref}
       data-scheme-ui
-      className="absolute bottom-3 right-3 z-40 cursor-pointer overflow-hidden rounded-[10px] border border-line bg-panel/95 shadow-card"
+      className="absolute bottom-3 right-3 z-40 cursor-pointer overflow-hidden rounded-[10px] border border-border bg-card/95 shadow-1"
       style={{ width: MAP_W, height: MAP_H }}
       title={t("minimap.title")}
       onPointerDown={(event) => {
@@ -116,13 +116,13 @@ export function Minimap({
           {/* On-canvas quiet-branch stacks: one dot each, so a stack is a single
               mark on the map, never a wall of member cards (issue #136). */}
           {layout.stacks.map((stack) => (
-            <circle key={stack.key} cx={stack.x + stack.w / 2} cy={stack.y + stack.h / 2} r={7 / scale} fill="#9a9aa4" opacity={0.6} />
+            <circle key={stack.key} cx={stack.x + stack.w / 2} cy={stack.y + stack.h / 2} r={7 / scale} fill="var(--color-muted)" opacity={0.6} />
           ))}
           {layout.drafts.map((draft) => (
-            <rect key={draft.key} x={draft.x} y={draft.y} width={draft.w} height={draft.h} rx={18} fill="#9a9aa4" opacity={0.3} />
+            <rect key={draft.key} x={draft.x} y={draft.y} width={draft.w} height={draft.h} rx={18} fill="var(--color-muted)" opacity={0.3} />
           ))}
           {layout.decks.map((deck) => (
-            <rect key={deck.key} x={deck.x} y={deck.y} width={deck.w} height={deck.h} rx={18} fill="#5a51e0" opacity={0.3} />
+            <rect key={deck.key} x={deck.x} y={deck.y} width={deck.w} height={deck.h} rx={18} fill="var(--color-accent)" opacity={0.3} />
           ))}
           {layout.nodes.map((node) => (
             <rect
@@ -152,7 +152,7 @@ export function Minimap({
             width={vp.w / cam.z}
             height={vp.h / cam.z}
             fill="rgba(90,81,224,0.08)"
-            stroke="#5a51e0"
+            stroke="var(--color-accent)"
             strokeWidth={2.5 / scale}
           />
         </g>

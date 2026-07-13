@@ -58,7 +58,7 @@ export function PushBell() {
 
   return (
     <button
-      className={`inline-flex shrink-0 items-center justify-center rounded-full border border-line bg-panel text-dim hover:text-ink disabled:opacity-45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+      className={`inline-flex shrink-0 items-center justify-center rounded-full border border-border bg-card text-muted hover:text-primary disabled:opacity-45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
         isMobile ? "h-11 w-11" : "h-[26px] w-[26px]"
       }`}
       title={supported ? (enabled ? t("push.enabled") : t("push.enable")) : t("push.needsHttps")}

@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 
 import { Play } from "@/components/icons";
+import { Badge } from "@/components/ui/Badge";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useLocale } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
@@ -11,24 +12,16 @@ export function ProcessStatusChip({ file }: { file: FileEntry }) {
   const { t } = useLocale();
   if (file.proc === "running") {
     return (
-      <span className="inline-flex items-center gap-1 whitespace-nowrap rounded-full bg-[#e5f6ea] px-2 py-0.5 text-[11px] font-bold tabular-nums text-ok">
+      <Badge tone="success">
         <Play className="h-3 w-3" aria-hidden /> PID {file.pid}
-      </span>
+      </Badge>
     );
   }
   if (file.proc === "killed" || file.activity === "stalled") {
-    return (
-      <span className="inline-flex items-center gap-1 rounded-full bg-[#f7e8e8] px-2 py-0.5 text-[11px] font-bold text-err">
-        {t("task.interruptedBadge")}
-      </span>
-    );
+    return <Badge tone="danger">{t("task.interruptedBadge")}</Badge>;
   }
   if (file.proc === "done") {
-    return (
-      <span className="inline-flex items-center gap-1 rounded-full bg-chip px-2 py-0.5 text-[11px] font-bold text-dim">
-        {t("task.finishedBadge")}
-      </span>
-    );
+    return <Badge tone="neutral">{t("task.finishedBadge")}</Badge>;
   }
   return null;
 }
@@ -88,12 +81,12 @@ export function ProcessStatusControls({
       {hideChip ? null : chip}
       {file.proc === "running" ? (
         confirming ? (
-          <span className="inline-flex max-w-full items-center gap-1 rounded-[10px] border border-err/30 bg-[#fff5f5] px-1.5 py-0.5">
+          <span className="inline-flex max-w-full items-center gap-1 rounded-[8px] border border-danger/30 bg-danger-soft px-1.5 py-0.5">
             {compact ? null : (
-              <span className="truncate px-1 text-[11px] font-semibold text-err">{t("task.confirmKill", { pid: file.pid ?? "" })}</span>
+              <span className="truncate px-1 text-[11px] font-semibold text-danger">{t("task.confirmKill", { pid: file.pid ?? "" })}</span>
             )}
             <button
-              className={`inline-flex items-center whitespace-nowrap rounded-lg bg-err text-[11px] font-bold tabular-nums text-white disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-err/50 ${
+              className={`inline-flex items-center whitespace-nowrap rounded-lg bg-danger text-[11px] font-bold tabular-nums text-white disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-danger/50 ${
                 isMobile ? "min-h-11 px-3" : "px-2 py-0.5"
               }`}
               disabled={killing}
@@ -102,7 +95,7 @@ export function ProcessStatusControls({
               {forceNext ? "SIGKILL" : compact ? t("task.killPid", { pid: file.pid ?? "" }) : t("task.confirmKillYes")}
             </button>
             <button
-              className={`inline-flex items-center whitespace-nowrap rounded-lg border border-line bg-panel text-[11px] font-semibold text-dim focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+              className={`inline-flex items-center whitespace-nowrap rounded-lg border border-border bg-card text-[11px] font-semibold text-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
                 isMobile ? "min-h-11 px-3" : "px-2 py-0.5"
               }`}
               onClick={() => setConfirming(false)}
@@ -112,7 +105,7 @@ export function ProcessStatusControls({
           </span>
         ) : (
           <button
-            className={`inline-flex items-center whitespace-nowrap rounded-full border border-line bg-panel text-[11px] font-semibold text-dim hover:border-err/40 hover:text-err focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+            className={`inline-flex items-center whitespace-nowrap rounded-full border border-border bg-card text-[11px] font-semibold text-muted hover:border-danger/40 hover:text-danger focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
               isMobile ? "min-h-11 px-3" : "px-2 py-0.5"
             }`}
             aria-label={t("task.stopAria", { pid: file.pid ?? "" })}
@@ -122,7 +115,7 @@ export function ProcessStatusControls({
           </button>
         )
       ) : null}
-      {message ? <span className="max-w-[220px] truncate text-[11px] font-semibold text-dim">{message}</span> : null}
+      {message ? <span className="max-w-[220px] truncate text-[11px] font-semibold text-muted">{message}</span> : null}
     </span>
   );
 }
@@ -131,19 +124,19 @@ export function TaskHeader({ file }: { file: FileEntry }) {
   const { t } = useLocale();
   if (file.root !== "claude-tasks") return null;
   return (
-    <div className="mb-4 mt-1 rounded-[14px] border border-line bg-panel px-4 py-3 shadow-card">
+    <div className="mb-4 mt-1 rounded-[12px] border border-border bg-card px-4 py-3 shadow-1">
       <div className="mb-2 flex flex-wrap items-center gap-2">
         <ProcessStatusChip file={file} />
       </div>
       {file.cmd ? (
         <>
-          <div className="mb-1 text-[13.5px] font-semibold">{file.cmdDesc || t("task.backgroundCommand")}</div>
-          <code className="block whitespace-pre-wrap break-words rounded-lg border border-line bg-[#fafafc] px-2.5 py-2 font-mono text-[12.5px]">
+          <div className="mb-1 text-[13px] font-semibold">{file.cmdDesc || t("task.backgroundCommand")}</div>
+          <code className="block whitespace-pre-wrap break-words rounded-lg border border-border bg-sunken px-2.5 py-2 font-mono text-[12px]">
             $ {file.cmd}
           </code>
         </>
       ) : (
-        <div className="text-[13.5px] text-dim">{t("task.commandNotFound")}</div>
+        <div className="text-[13px] text-muted">{t("task.commandNotFound")}</div>
       )}
     </div>
   );

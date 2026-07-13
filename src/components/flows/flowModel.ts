@@ -226,10 +226,10 @@ export const VERDICT_GLYPHS: Record<ReviewVerdict, string> = {
 
 /** Text/background pair per verdict, in the dashboard's token palette. */
 export function verdictTone(verdict: ReviewVerdict | null): { color: string; soft: string } {
-  if (verdict === "APPROVE") return { color: "#1a8a3e", soft: "#e7f4ea" };
-  if (verdict === "REQUEST_CHANGES") return { color: "#c62828", soft: "#fbeaea" };
-  if (verdict === "COMMENT") return { color: "#b07d1f", soft: "#fdf3dd" };
-  return { color: "#8b8b95", soft: "#efeff3" };
+  if (verdict === "APPROVE") return { color: "var(--color-success)", soft: "var(--color-success-soft)" };
+  if (verdict === "REQUEST_CHANGES") return { color: "var(--color-danger)", soft: "var(--color-danger-soft)" };
+  if (verdict === "COMMENT") return { color: "var(--color-warning)", soft: "var(--color-warning-soft)" };
+  return { color: "var(--color-muted)", soft: "var(--color-sunken)" };
 }
 
 export async function patchFlow(

@@ -16,7 +16,7 @@ import { OutputPreview } from "./OutputPreview";
 import { StatusIcon } from "./shared";
 
 function statusClass(status: ToolEvent["status"]): string {
-  return status === "ok" ? "text-ok" : status === "err" ? "text-err" : "text-dim";
+  return status === "ok" ? "text-success" : status === "err" ? "text-danger" : "text-muted";
 }
 
 export function ToolChips({ chips }: { chips: ArgChip[] }) {
@@ -24,8 +24,8 @@ export function ToolChips({ chips }: { chips: ArgChip[] }) {
   return (
     <div className="mb-1 flex flex-wrap gap-1">
       {chips.map((chip, i) => (
-        <span key={i} className="inline-flex max-w-full items-center gap-1 truncate rounded-md bg-chip px-1.5 py-0.5 font-mono text-[11px] text-ink">
-          {chip.label ? <span className="text-dim">{chip.label}</span> : null}
+        <span key={i} className="inline-flex max-w-full items-center gap-1 truncate rounded-md bg-sunken px-1.5 py-0.5 font-mono text-[11px] text-primary">
+          {chip.label ? <span className="text-muted">{chip.label}</span> : null}
           {chip.value}
         </span>
       ))}
@@ -44,7 +44,7 @@ function RawRecord({ event }: { event: ToolEvent }) {
       <button
         type="button"
         onClick={() => setOpen(true)}
-        className="mt-1.5 text-[11px] font-semibold text-dim hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+        className="mt-1.5 text-[11px] font-semibold text-muted hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
       >
         {tr("tools.rawRecord")}
       </button>
@@ -55,14 +55,14 @@ function RawRecord({ event }: { event: ToolEvent }) {
   const record = raw.length ? debugRaw(raw.join("\n")).raw : "";
   return (
     <div className="mt-1.5">
-      <div className="mb-1 flex items-center gap-2 text-[10.5px] text-dim">
+      <div className="mb-1 flex items-center gap-2 text-[10.5px] text-muted">
         <span className="font-mono">{tr("tools.callId", { id: event.id })}</span>
         <CopyButton text={event.id} label={tr("tools.copyId")} className="p-0.5" />
       </div>
       {record ? (
-        <pre className="max-h-[300px] max-w-full overflow-auto whitespace-pre rounded-[10px] border border-line bg-panel-alt px-3 py-2 font-mono text-[11px]">{record}</pre>
+        <pre className="max-h-[300px] max-w-full overflow-auto whitespace-pre rounded-[10px] border border-border bg-sunken px-3 py-2 font-mono text-[11px]">{record}</pre>
       ) : (
-        <span className="inline-flex items-center rounded-md bg-chip px-2 py-0.5 text-[11px] text-dim">{tr("tools.noRawRecord")}</span>
+        <span className="inline-flex items-center rounded-md bg-sunken px-2 py-0.5 text-[11px] text-muted">{tr("tools.noRawRecord")}</span>
       )}
     </div>
   );

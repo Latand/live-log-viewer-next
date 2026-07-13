@@ -9,10 +9,10 @@ import { useRuntime } from "@/hooks/useRuntime";
 
 /** Visual tone per connection state, in the dashboard token palette. */
 const TONE: Record<ConnectionState, { dot: string; text: string; pulse: boolean }> = {
-  live: { dot: "bg-ok", text: "text-ok", pulse: true },
-  reconnecting: { dot: "bg-[#e0ae45]", text: "text-[#b8860b]", pulse: true },
-  degraded: { dot: "bg-[#e0ae45]", text: "text-[#b8860b]", pulse: false },
-  offline: { dot: "bg-err", text: "text-err", pulse: false },
+  live: { dot: "bg-success", text: "text-success", pulse: true },
+  reconnecting: { dot: "bg-warning", text: "text-warning", pulse: true },
+  degraded: { dot: "bg-warning", text: "text-warning", pulse: false },
+  offline: { dot: "bg-danger", text: "text-danger", pulse: false },
 };
 
 const ANNOUNCE_KEY: Record<ConnectionState, "runtime.announce.live" | "runtime.announce.reconnecting" | "runtime.announce.degraded" | "runtime.announce.offline"> = {
@@ -43,7 +43,7 @@ export function ConnectionPillView({ connection, resynced, legacy, compact, anno
   const tone = TONE[connection];
   return (
     <div
-      className={`inline-flex items-center gap-1.5 rounded-full border border-line bg-panel/95 font-bold shadow-card backdrop-blur ${
+      className={`inline-flex items-center gap-1.5 rounded-full border border-border bg-card/95 font-bold shadow-1 backdrop-blur ${
         compact ? "px-2 py-0.5 text-[10.5px]" : "px-2.5 py-1 text-[11.5px]"
       }`}
       data-connection={connection}
@@ -53,7 +53,7 @@ export function ConnectionPillView({ connection, resynced, legacy, compact, anno
         aria-hidden
       />
       <span className={tone.text}>{t(`runtime.${connection}`)}</span>
-      {legacy ? <span className="text-dim">· {t("runtime.legacyProvenance")}</span> : null}
+      {legacy ? <span className="text-muted">· {t("runtime.legacyProvenance")}</span> : null}
       {resynced ? (
         <span className="rounded-full bg-accent/10 px-1.5 text-[10px] font-bold text-accent">{t("runtime.resynced")}</span>
       ) : null}

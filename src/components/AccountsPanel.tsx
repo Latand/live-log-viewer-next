@@ -19,7 +19,7 @@ import { engineTintOf } from "./utils";
 
 /** Amber that clears contrast on the panel background — state legibility never
     leans on color alone, so this pairs with the "needs sign-in" text chip. */
-const NEEDS_LOGIN_COLOR = "#8a5a00";
+const NEEDS_LOGIN_COLOR = "var(--color-warning)";
 
 function engineDisplay(engine: "claude" | "codex"): string {
   return engine === "claude" ? "Claude" : "Codex";
@@ -28,8 +28,8 @@ function engineDisplay(engine: "claude" | "codex"): string {
 /** Capacity-chip color ramp mirrors the limits bars: engine tint with headroom,
     amber as it tightens, red when nearly spent. */
 function capacityColor(percent: number, engineColor: string): string {
-  if (percent <= 10) return "#c62828";
-  if (percent <= 30) return "#d29a2f";
+  if (percent <= 10) return "var(--color-danger)";
+  if (percent <= 30) return "var(--color-warning)";
   return engineColor;
 }
 
@@ -43,7 +43,7 @@ function CapacityChip({ account, engine }: { account: AccountOption; engine: "cl
   const color = capacityColor(effective.percent, tint.color);
   return (
     <span
-      className={`shrink-0 rounded-full border border-line bg-bg px-1.5 py-0.5 text-[10px] font-bold tabular-nums ${stale ? "opacity-55" : ""}`}
+      className={`shrink-0 rounded-full border border-border bg-canvas px-1.5 py-0.5 text-[10px] font-bold tabular-nums ${stale ? "opacity-55" : ""}`}
       style={{ color }}
       title={t(stale ? "accounts.effectiveStale" : "accounts.effectiveTip", { window })}
     >
@@ -80,14 +80,14 @@ function AccountLimitsDetail({ account }: { account: AccountOption }) {
       {/* Freshness is a visible, screen-reader-readable line — not opacity or a
           title tooltip alone (touch has no hover, and `title` AT support is
           spotty), so historical numbers never read as current. */}
-      {stale ? <div className="text-[9.5px] font-semibold uppercase tracking-wide text-dim">{t("accounts.limitsStale")}</div> : null}
+      {stale ? <div className="text-[9.5px] font-semibold text-secondary">{t("accounts.limitsStale")}</div> : null}
       {windows.map(({ key, label, window: w }) => {
         const left = Math.max(0, Math.min(100, 100 - w.usedPercent));
         return (
-          <div key={key} className="flex items-baseline gap-1.5 text-[10px] leading-snug text-dim">
+          <div key={key} className="flex items-baseline gap-1.5 text-[10px] leading-snug text-muted">
             <dt className="w-8 shrink-0 font-semibold">{label}</dt>
             <dd className="flex min-w-0 flex-1 items-baseline gap-1">
-              <span className="font-bold tabular-nums text-ink">{Math.round(left)}%</span>
+              <span className="font-bold tabular-nums text-primary">{Math.round(left)}%</span>
               <span>{t("limits.left")}</span>
               {w.resetsAt ? (
                 <span className="truncate">· {t("limits.reset", { eta: formatResetEta(w.resetsAt, now), at: formatResetClock(w.resetsAt, now) })}</span>
@@ -113,14 +113,14 @@ function StateChip({ state }: { state: RowState }) {
   const { t } = useLocale();
   if (state === "pending") {
     return (
-      <span className="flex shrink-0 items-center gap-1 text-[10px] font-semibold text-dim">
+      <span className="flex shrink-0 items-center gap-1 text-[10px] font-semibold text-muted">
         <Loader2 className="h-3 w-3 animate-spin motion-reduce:animate-none" aria-hidden />
         {t("accounts.pendingLogin")}
       </span>
     );
   }
   if (state === "needsLogin") return <span className="shrink-0 text-[10px] font-semibold" style={{ color: NEEDS_LOGIN_COLOR }}>{t("accounts.needsLogin")}</span>;
-  if (state === "active") return <span className="shrink-0 text-[10px] font-semibold text-dim">{t("accounts.active")}</span>;
+  if (state === "active") return <span className="shrink-0 text-[10px] font-semibold text-muted">{t("accounts.active")}</span>;
   return null;
 }
 
@@ -141,24 +141,24 @@ function AccountRow({ account, engine, activeId, onSelect, onRemove, disabled }:
         aria-current={isActive ? "true" : undefined}
         disabled={selectionDisabled}
         onClick={onSelect}
-        className="flex min-h-[44px] w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-bg disabled:cursor-wait disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 sm:min-h-0"
+        className="flex min-h-[44px] w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-canvas disabled:cursor-wait disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 sm:min-h-0"
       >
         <span className="flex h-3.5 w-3.5 shrink-0 items-center justify-center">{isActive ? <Check className="h-3.5 w-3.5 text-accent" aria-hidden /> : null}</span>
-        <span className={`min-w-0 flex-1 truncate text-[12.5px] ${isActive ? "font-bold text-ink" : "font-semibold"}`}>{account.label}</span>
+        <span className={`min-w-0 flex-1 truncate text-[12.5px] ${isActive ? "font-bold text-primary" : "font-semibold"}`}>{account.label}</span>
         <CapacityChip account={account} engine={engine} />
         <StateChip state={state} />
       </button>
       {state === "pending" && account.deviceAuth ? (
-        <div className="flex items-center gap-2 px-3 pb-1.5 pl-[26px] text-[10px] text-dim">
+        <div className="flex items-center gap-2 px-3 pb-1.5 pl-[26px] text-[10px] text-muted">
           <a href={account.deviceAuth.url} target="_blank" rel="noreferrer" className="inline-flex min-h-[44px] items-center truncate underline sm:min-h-0">{t("accounts.openLogin")}</a>
-          <code className="select-all font-semibold text-ink">{account.deviceAuth.code}</code>
+          <code className="select-all font-semibold text-primary">{account.deviceAuth.code}</code>
         </div>
       ) : null}
       {account.kind === "managed" ? (
         <div className="flex items-center gap-2 px-3 pb-1.5 pl-[26px]">
           {confirmingRemove ? (
             <>
-              <span className="min-w-0 flex-1 text-[10.5px] font-semibold text-err">{t("accounts.removeConfirm")}</span>
+              <span className="min-w-0 flex-1 text-[10.5px] font-semibold text-danger">{t("accounts.removeConfirm")}</span>
               <button
                 type="button"
                 disabled={disabled}
@@ -166,7 +166,7 @@ function AccountRow({ account, engine, activeId, onSelect, onRemove, disabled }:
                   setConfirmingRemove(false);
                   onRemove();
                 }}
-                className="inline-flex min-h-[44px] shrink-0 items-center rounded-[7px] border border-err bg-err px-2 py-0.5 text-[10.5px] font-semibold text-white hover:opacity-90 disabled:opacity-45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 sm:min-h-0"
+                className="inline-flex min-h-[44px] shrink-0 items-center rounded-[7px] border border-danger bg-danger px-2 py-0.5 text-[10.5px] font-semibold text-white hover:opacity-90 disabled:opacity-45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 sm:min-h-0"
               >
                 {t("accounts.removeConfirmCta")}
               </button>
@@ -174,7 +174,7 @@ function AccountRow({ account, engine, activeId, onSelect, onRemove, disabled }:
                 type="button"
                 disabled={disabled}
                 onClick={() => setConfirmingRemove(false)}
-                className="inline-flex min-h-[44px] shrink-0 items-center rounded-[7px] border border-line bg-bg px-2 py-0.5 text-[10.5px] font-semibold hover:bg-chip disabled:opacity-45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 sm:min-h-0"
+                className="inline-flex min-h-[44px] shrink-0 items-center rounded-[7px] border border-border bg-canvas px-2 py-0.5 text-[10.5px] font-semibold hover:bg-sunken disabled:opacity-45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 sm:min-h-0"
               >
                 {t("accounts.removeConfirmCancel")}
               </button>
@@ -185,7 +185,7 @@ function AccountRow({ account, engine, activeId, onSelect, onRemove, disabled }:
               aria-label={t("accounts.removeAria", { label: account.label })}
               disabled={disabled}
               onClick={() => setConfirmingRemove(true)}
-              className="inline-flex min-h-[44px] items-center rounded-[7px] border border-line bg-bg px-2 py-0.5 text-[10.5px] font-semibold text-err hover:bg-[#fff5f5] disabled:opacity-45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 sm:min-h-0"
+              className="inline-flex min-h-[44px] items-center rounded-[7px] border border-border bg-canvas px-2 py-0.5 text-[10.5px] font-semibold text-danger hover:bg-danger-soft disabled:opacity-45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 sm:min-h-0"
             >
               {t("accounts.remove")}
             </button>
@@ -247,15 +247,15 @@ function ClaudeLoginRow({ account, state, loginBusy }: { account: AccountOption;
         type="button"
         onClick={() => activate(() => void state.cancelLogin(login.operationId))}
         disabled={busy || !cancelable}
-        className="inline-flex min-h-[44px] shrink-0 items-center rounded-[7px] border border-line bg-bg px-2 py-0.5 text-[11px] font-semibold hover:bg-chip disabled:opacity-45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 sm:min-h-0"
+        className="inline-flex min-h-[44px] shrink-0 items-center rounded-[7px] border border-border bg-canvas px-2 py-0.5 text-[11px] font-semibold hover:bg-sunken disabled:opacity-45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 sm:min-h-0"
       >
         {t("accounts.claudeLogin.cancel")}
       </button>
     );
     const spinnerLine = (key: "accounts.claudeLogin.starting" | "accounts.claudeLogin.awaitingBrowser" | "accounts.claudeLogin.verifying" | "accounts.claudeLogin.canceling") => (
       <div className="flex items-center gap-2">
-        <Loader2 className="h-3 w-3 shrink-0 animate-spin motion-reduce:animate-none text-dim" aria-hidden />
-        <span className="min-w-0 flex-1 text-[11px] text-dim">{t(key)}</span>
+        <Loader2 className="h-3 w-3 shrink-0 animate-spin motion-reduce:animate-none text-muted" aria-hidden />
+        <span className="min-w-0 flex-1 text-[11px] text-muted">{t(key)}</span>
         {cancelable ? cancelButton : null}
       </div>
     );
@@ -304,17 +304,17 @@ function ClaudeLoginRow({ account, state, loginBusy }: { account: AccountOption;
                 aria-label={t("accounts.claudeLogin.codeLabel")}
                 aria-describedby={hintId}
                 placeholder={t("accounts.claudeLogin.codePlaceholder")}
-                className="h-11 min-w-0 flex-1 rounded-[8px] border border-line bg-bg px-2 font-mono text-[11.5px] outline-none focus-visible:ring-2 focus-visible:ring-accent/40 sm:h-8"
+                className="h-11 min-w-0 flex-1 rounded-[8px] border border-border bg-canvas px-2 font-mono text-[11.5px] outline-none focus-visible:ring-2 focus-visible:ring-accent/40 sm:h-8"
               />
               <button
                 type="submit"
                 disabled={busy || submitted || code.trim() === ""}
-                className="h-11 shrink-0 rounded-[8px] border border-line bg-bg px-2.5 text-[11px] font-semibold hover:bg-chip disabled:cursor-not-allowed disabled:opacity-45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 sm:h-8"
+                className="h-11 shrink-0 rounded-[8px] border border-border bg-canvas px-2.5 text-[11px] font-semibold hover:bg-sunken disabled:cursor-not-allowed disabled:opacity-45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 sm:h-8"
               >
                 {t("accounts.claudeLogin.submit")}
               </button>
             </form>
-            <p id={hintId} className="text-[10px] leading-snug text-dim">{t("accounts.claudeLogin.codeHint")}</p>
+            <p id={hintId} className="text-[10px] leading-snug text-muted">{t("accounts.claudeLogin.codeHint")}</p>
             <div className="flex justify-end">{cancelButton}</div>
           </>
         ) : null}
@@ -326,12 +326,12 @@ function ClaudeLoginRow({ account, state, loginBusy }: { account: AccountOption;
   if (login && login.result?.status === "failure") {
     return (
       <div ref={rowRef} tabIndex={-1} role="alert" className="flex items-center gap-2 px-3 pb-2 pl-[26px] focus-visible:outline-none">
-        <span className="min-w-0 flex-1 text-[10.5px] font-semibold text-err">{t(claudeLoginErrKey(login.result.code))}</span>
+        <span className="min-w-0 flex-1 text-[10.5px] font-semibold text-danger">{t(claudeLoginErrKey(login.result.code))}</span>
         <button
           type="button"
           onClick={() => activate(() => void state.retryLogin(account.id))}
           disabled={busy || loginBusy}
-          className="inline-flex min-h-[44px] shrink-0 items-center rounded-[7px] border border-line bg-bg px-2 py-0.5 text-[11px] font-semibold hover:bg-chip disabled:opacity-45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 sm:min-h-0"
+          className="inline-flex min-h-[44px] shrink-0 items-center rounded-[7px] border border-border bg-canvas px-2 py-0.5 text-[11px] font-semibold hover:bg-sunken disabled:opacity-45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 sm:min-h-0"
         >
           {t("accounts.retry")}
         </button>
@@ -348,7 +348,7 @@ function ClaudeLoginRow({ account, state, loginBusy }: { account: AccountOption;
           type="button"
           onClick={() => activate(() => void state.retryLogin(account.id))}
           disabled={busy || loginBusy}
-          className="inline-flex min-h-[44px] shrink-0 items-center rounded-[7px] border border-line bg-bg px-2.5 py-0.5 text-[11px] font-semibold hover:bg-chip disabled:opacity-45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 sm:min-h-0"
+          className="inline-flex min-h-[44px] shrink-0 items-center rounded-[7px] border border-border bg-canvas px-2.5 py-0.5 text-[11px] font-semibold hover:bg-sunken disabled:opacity-45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 sm:min-h-0"
         >
           {t("accounts.claudeLogin.signIn")}
         </button>
@@ -462,16 +462,16 @@ export function AccountsPanel({
         aria-label={t("accounts.titleFor", { engine: engineName })}
         aria-busy={mutation !== null}
         onKeyDown={(event) => handleOverlayEscape(event, onClose)}
-        className={`fixed bottom-3 left-1/2 z-50 flex w-[min(360px,calc(100vw-16px))] -translate-x-1/2 flex-col rounded-[12px] border border-line bg-panel shadow-[0_8px_28px_rgba(20,20,30,0.14)] ${placementClass}`}
+        className={`fixed bottom-3 left-1/2 z-50 flex w-[min(360px,calc(100vw-16px))] -translate-x-1/2 flex-col rounded-[12px] border border-border bg-card shadow-[0_8px_28px_rgba(20,20,30,0.14)] ${placementClass}`}
       >
-        <header className="flex items-center gap-2 border-b border-line px-3 py-2">
+        <header className="flex items-center gap-2 border-b border-border px-3 py-2">
           <span className="text-[12.5px] font-bold">{t("accounts.titleFor", { engine: engineName })}</span>
           <button
             ref={closeRef}
             type="button"
             aria-label={t("accounts.close")}
             onClick={onClose}
-            className="ml-auto inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded-[6px] p-1 text-dim hover:bg-bg hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 sm:min-h-0 sm:min-w-0"
+            className="ml-auto inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded-[6px] p-1 text-muted hover:bg-canvas hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 sm:min-h-0 sm:min-w-0"
           >
             <X className="h-3.5 w-3.5" aria-hidden />
           </button>
@@ -480,15 +480,15 @@ export function AccountsPanel({
         <p className="sr-only" role="status" aria-live="polite">{announcement}</p>
 
         {mutation ? (
-          <div role="status" aria-live="polite" className="flex items-center gap-2 border-b border-line bg-accent/5 px-3 py-2 text-[11px] font-semibold text-ink">
+          <div role="status" aria-live="polite" className="flex items-center gap-2 border-b border-border bg-accent/5 px-3 py-2 text-[11px] font-semibold text-primary">
             <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin motion-reduce:animate-none text-accent" aria-hidden />
             {operationText(mutation, t)}
           </div>
         ) : null}
           <>
             <div className="max-h-[min(300px,50vh)] overflow-y-auto py-1">
-              {status === "loading" ? <div className="px-3 py-2 text-[11px] text-dim">{t("accounts.loading")}</div> : null}
-              {status === "error" && accounts.length === 0 ? <div className="px-3 py-2 text-[11px] text-dim">{t("accounts.noAccounts")}</div> : null}
+              {status === "loading" ? <div className="px-3 py-2 text-[11px] text-muted">{t("accounts.loading")}</div> : null}
+              {status === "error" && accounts.length === 0 ? <div className="px-3 py-2 text-[11px] text-muted">{t("accounts.noAccounts")}</div> : null}
               {accounts.map((account) => (
                 <Fragment key={account.id}>
                   <AccountRow account={account} engine={engine} activeId={active} disabled={mutation !== null} onSelect={() => void onSelect(account.id)} onRemove={() => void state.remove(account.id)} />
@@ -497,34 +497,34 @@ export function AccountsPanel({
                 </Fragment>
               ))}
             </div>
-            <form onSubmit={onAdd} className="flex items-center gap-2 border-t border-line px-3 py-2">
+            <form onSubmit={onAdd} className="flex items-center gap-2 border-t border-border px-3 py-2">
               <input
                 value={label}
                 onChange={(event) => setLabel(event.target.value)}
                 placeholder={t("accounts.labelPlaceholder")}
-                className="h-11 min-w-0 flex-1 rounded-[8px] border border-line bg-bg px-2 text-[11.5px] outline-none focus-visible:ring-2 focus-visible:ring-accent/40 sm:h-8"
+                className="h-11 min-w-0 flex-1 rounded-[8px] border border-border bg-canvas px-2 text-[11.5px] outline-none focus-visible:ring-2 focus-visible:ring-accent/40 sm:h-8"
               />
               <button
                 type="submit"
                 disabled={mutation !== null || label.trim() === "" || loginBusy}
-                className="inline-flex h-11 min-w-[44px] shrink-0 items-center justify-center rounded-[8px] border border-line bg-bg px-2.5 text-[11px] font-semibold hover:bg-chip disabled:cursor-not-allowed disabled:opacity-45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 sm:h-8 sm:min-w-0"
+                className="inline-flex h-11 min-w-[44px] shrink-0 items-center justify-center rounded-[8px] border border-border bg-canvas px-2.5 text-[11px] font-semibold hover:bg-sunken disabled:cursor-not-allowed disabled:opacity-45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 sm:h-8 sm:min-w-0"
               >
                 {t("accounts.confirmAdd")}
               </button>
             </form>
-            <div className="flex justify-end border-t border-line px-3 py-1.5">
+            <div className="flex justify-end border-t border-border px-3 py-1.5">
               <button
                 type="button"
                 disabled={mutation !== null}
                 onClick={() => void state.cleanupOrphans()}
-                className="inline-flex min-h-[44px] items-center text-[10.5px] font-semibold text-dim underline underline-offset-2 hover:text-ink disabled:opacity-45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 sm:min-h-0"
+                className="inline-flex min-h-[44px] items-center text-[10.5px] font-semibold text-muted underline underline-offset-2 hover:text-primary disabled:opacity-45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 sm:min-h-0"
               >
                 {t("accounts.cleanupOrphans")}
               </button>
             </div>
             {notice ? (
-              <div className="flex items-center gap-2 border-t border-line px-3 py-1.5">
-                <span className="min-w-0 flex-1 truncate text-[11px] text-dim" title={accountNoticeText(t, notice)}>{accountNoticeText(t, notice)}</span>
+              <div className="flex items-center gap-2 border-t border-border px-3 py-1.5">
+                <span className="min-w-0 flex-1 truncate text-[11px] text-muted" title={accountNoticeText(t, notice)}>{accountNoticeText(t, notice)}</span>
                 {notice.action ? (
                   <button
                     type="button"
@@ -532,7 +532,7 @@ export function AccountsPanel({
                     onClick={() => void state.retryNotice().then((recovered) => {
                       if (recovered && notice.operation === "add") setLabel("");
                     })}
-                    className="inline-flex min-h-[44px] shrink-0 items-center rounded-[7px] border border-line bg-bg px-2 py-0.5 text-[11px] font-semibold hover:bg-chip focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 sm:min-h-0"
+                    className="inline-flex min-h-[44px] shrink-0 items-center rounded-[7px] border border-border bg-canvas px-2 py-0.5 text-[11px] font-semibold hover:bg-sunken focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 sm:min-h-0"
                   >
                     {notice.action.kind === "forceRemove"
                       ? t("accounts.forceRemove")

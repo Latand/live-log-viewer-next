@@ -13,7 +13,7 @@ import { cleanTitle } from "./utils";
 
 /** Accent of the agent-link gesture: the arrow, the target border highlight
     (see the [data-link-hover] rule in globals.css) and the drop chip. */
-const LINK_COLOR = "#0d9488";
+const LINK_COLOR = "var(--color-info)";
 /** Pointer travel that turns a pill press into a link drag instead of a click. */
 const DRAG_THRESHOLD = 7;
 /** How long the arrow and its confirmation chip linger after a drop. */

@@ -1,20 +1,20 @@
-/* Viewer design system — issue #155, Slice 1 token set.
+/* Viewer design system — issue #155 token set (design doc §1).
 
    The single source of truth for type, spacing, radius, surfaces, color roles,
-   and motion (design doc §1). Imported first from globals.css so every Tailwind
-   `@theme` utility (bg-*, text-*, rounded-*, shadow-*) is generated from here.
+   and motion. Imported first from globals.css so every Tailwind `@theme` utility
+   (bg-*, text-*, rounded-*, shadow-*) is generated from here.
 
-   Migration note: the legacy `--color-*` names the codebase already uses stay
-   defined as aliases of the new roles, so components not yet migrated keep
-   rendering unchanged. They are deleted in Slice 3, once the raw-hex sweep and
-   dark theme land. This file holds the light-theme role table and the
-   structural tokens; dark values arrive in Slice 3. */
+   Slice 3 adds the dark palette (design doc §1.5): the light role table lives in
+   the `@theme static` block below; the dark values override the same custom
+   properties under `prefers-color-scheme: dark` (with a `data-theme` escape
+   hatch). Because every alias and component resolves through these role tokens,
+   flipping the OS theme re-tints the whole app in one place — no component holds
+   a light-only literal (the raw-hex sweep, doc §5 slice 3, enforces that). */
 
 /* Use `@theme static` because a production `next build` prunes unused custom
-   properties from a plain `@theme`, which would drop the tokens later slices
-   reference by name before any utility uses them (e.g. `--surface-raised`,
-   `--color-warning-soft`). `static` emits the whole token contract to `:root`
-   unconditionally. */
+   properties from a plain `@theme`, which would drop tokens referenced by name
+   before any utility uses them (e.g. `--surface-raised`, `--color-warning-soft`).
+   `static` emits the whole token contract to `:root` unconditionally. */
 @theme static {
   /* ── §1.1 Type ─────────────────────────────────────────────────────────── */
   --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto,
@@ -76,6 +76,7 @@
   --color-danger: #c62828;
   --color-danger-soft: #fdeeee;
   --color-info: #0d9488; /* link / handoff teal */
+  --color-info-soft: #e5f5f3;
 
   /* Engine identity tints (kept; model-family shifts live in utils.ts). */
   --color-codex: #2f6fd0;
@@ -89,31 +90,118 @@
   --motion-slow: 320ms; /* sheets, overlays, deck moves     */
   --ease-standard: cubic-bezier(0.2, 0, 0, 1);
 
-  /* ── Legacy aliases (deleted in Slice 3) ───────────────────────────────────
-     Untouched components reference these names; they resolve to the new roles
-     so the whole app keeps rendering while slices land independently. */
-  --color-bg: var(--color-canvas);
-  --color-panel: var(--color-card);
-  --color-line: var(--color-border);
-  --color-ink: var(--color-primary);
-  --color-fg: var(--color-primary);
-  --color-dim: var(--color-muted);
-  --color-faint: var(--color-secondary);
-  --color-ok: var(--color-success);
-  --color-err: var(--color-danger);
-  --color-err-soft: #fff4f4;
-  --color-chip: #efeff3;
+  /* ── Durable extra roles (referenced by name in components) ────────────────
+     The user-message bubble keeps a distinct fill (design doc §3.4); it is a
+     first-class token, not a legacy alias, so it gets a dark value below. */
   --color-user: #e9e9ef;
-  --color-panel-alt: #fafafc;
-  --color-tmsg: #f8f8fd;
-  --shadow-card: var(--shadow-1);
 
-  /* ── Diff / syntax structural tokens (issue #9 §4) — unchanged, dark values
-        land in Slice 3, out of scope here. */
+  /* Slice 3 deletes the legacy `--color-*` aliases (design doc §1, §5): every
+     component now names a role directly (bg-card/text-muted/border-border/…),
+     the raw-hex sweep is complete, and the dark palette lands below — so nothing
+     forwards through a compatibility name anymore. */
+
+  /* ── Diff / syntax structural tokens (issue #9 §4) — dark values below. */
   --color-diff-add: #1a7f37;
   --color-diff-add-soft: #e6ffec;
   --color-diff-add-strong: #b7ebc6;
   --color-diff-del: #cf222e;
   --color-diff-del-soft: #ffebe9;
   --color-diff-del-strong: #ffd1cf;
+}
+
+/* ── Dark palette (design doc §1.5) ─────────────────────────────────────────
+   Overrides the same custom properties the light theme set. Applied when the OS
+   asks for dark AND the app hasn't been pinned light, or when `data-theme=dark`
+   is set explicitly. `color-scheme` flips native form controls, scrollbars, and
+   the default canvas so nothing renders as a light island. The alias tokens are
+   `var()` forwards, so they inherit these automatically — only literals move. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+
+    --surface-canvas: #101014;
+    --surface-card: #17171c;
+    --surface-sunken: #121216;
+    --surface-raised: #1d1d24;
+
+    --shadow-1: 0 1px 2px rgb(0 0 0 / 0.4);
+    --shadow-2: 0 8px 32px rgb(0 0 0 / 0.55), 0 1px 2px rgb(0 0 0 / 0.4);
+
+    --color-primary: #e8e8ec;
+    --color-secondary: #a2a2ae;
+    --color-muted: #6f6f7a;
+    --border-default: #26262e;
+    --border-strong: #3a3a44;
+
+    --color-accent: #8f88ff;
+    --color-accent-soft: #262347;
+    --color-success: #4fc36f;
+    --color-success-soft: #14261a;
+    --color-warning: #e0ae45;
+    --color-warning-soft: #2b2312;
+    --color-danger: #f07171;
+    --color-danger-soft: #2c1616;
+    --color-info: #2dd4bf;
+    --color-info-soft: #10241f;
+
+    --color-codex: #6ba2e8;
+    --color-codex-soft: #152238;
+    --color-claude: #e08a6d;
+    --color-claude-soft: #2b1c15;
+
+    --color-user: #2a2a33;
+
+    --color-diff-add: #3fb950;
+    --color-diff-add-soft: #12261a;
+    --color-diff-add-strong: #1f4d2e;
+    --color-diff-del: #f85149;
+    --color-diff-del-soft: #2d1416;
+    --color-diff-del-strong: #5c2626;
+  }
+}
+
+/* Explicit `data-theme="dark"` mirrors the media block for a future in-app
+   toggle; the media query above handles the OS-driven case. Kept in sync with
+   the light table in `@theme static`. */
+[data-theme="dark"] {
+  color-scheme: dark;
+
+  --surface-canvas: #101014;
+  --surface-card: #17171c;
+  --surface-sunken: #121216;
+  --surface-raised: #1d1d24;
+
+  --shadow-1: 0 1px 2px rgb(0 0 0 / 0.4);
+  --shadow-2: 0 8px 32px rgb(0 0 0 / 0.55), 0 1px 2px rgb(0 0 0 / 0.4);
+
+  --color-primary: #e8e8ec;
+  --color-secondary: #a2a2ae;
+  --color-muted: #6f6f7a;
+  --border-default: #26262e;
+  --border-strong: #3a3a44;
+
+  --color-accent: #8f88ff;
+  --color-accent-soft: #262347;
+  --color-success: #4fc36f;
+  --color-success-soft: #14261a;
+  --color-warning: #e0ae45;
+  --color-warning-soft: #2b2312;
+  --color-danger: #f07171;
+  --color-danger-soft: #2c1616;
+  --color-info: #2dd4bf;
+  --color-info-soft: #10241f;
+
+  --color-codex: #6ba2e8;
+  --color-codex-soft: #152238;
+  --color-claude: #e08a6d;
+  --color-claude-soft: #2b1c15;
+
+  --color-user: #2a2a33;
+
+  --color-diff-add: #3fb950;
+  --color-diff-add-soft: #12261a;
+  --color-diff-add-strong: #1f4d2e;
+  --color-diff-del: #f85149;
+  --color-diff-del-soft: #2d1416;
+  --color-diff-del-strong: #5c2626;
 }

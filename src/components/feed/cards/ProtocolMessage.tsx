@@ -15,7 +15,7 @@ const PROTOCOL_TYPE_META: Record<string, { icon: GlyphName; labelKey: Parameters
 };
 
 function protocolToneClass(tone: "amber" | "accent"): string {
-  return tone === "amber" ? "border-[#d89b21]/35 bg-[#fff9ea] text-[#9a6500]" : "border-accent/25 bg-accent/10 text-accent";
+  return tone === "amber" ? "border-warning/35 bg-warning-soft text-warning" : "border-accent/25 bg-accent/10 text-accent";
 }
 
 /** tmsg text is sometimes an inline protocol envelope (shutdown/plan-approval
@@ -42,7 +42,7 @@ function asProtocolString(value: unknown): string | undefined {
 
 function ApproveChip({ approve }: { approve: boolean }) {
   return (
-    <span className={`rounded-full border px-2 py-0.5 text-[10.5px] font-extrabold ${approve ? "border-ok/25 bg-[#eefaf1] text-ok" : "border-err/25 bg-[#fff0f0] text-err"}`}>
+    <span className={`rounded-full border px-2 py-0.5 text-[10.5px] font-extrabold ${approve ? "border-success/25 bg-success-soft text-success" : "border-danger/25 bg-danger-soft text-danger"}`}>
       {approve ? tr("render.approved") : tr("render.rejected")}
     </span>
   );
@@ -54,7 +54,7 @@ function ProtocolMeta({ payload }: { payload: ProtocolPayload }) {
   const ts = hhmm(payload.timestamp);
   if (!from && !requestId && !ts) return null;
   return (
-    <div className="mt-1.5 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-[11px] text-dim">
+    <div className="mt-1.5 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-[11px] text-muted">
       {from ? <span>{tr("render.from", { from })}</span> : null}
       {requestId ? (
         <span className="truncate font-mono" title={requestId}>
@@ -72,10 +72,10 @@ export function ProtocolMessageBody({ payload }: { payload: ProtocolPayload }) {
   if (!meta) {
     return (
       <div className="text-[13px]">
-        <div className="text-dim">{tr("render.structured")}</div>
+        <div className="text-muted">{tr("render.structured")}</div>
         <details className="mt-1 text-[12px]">
           <summary className="cursor-pointer list-none font-semibold text-accent">{tr("render.showJson")}</summary>
-          <pre className="mt-1 max-h-[280px] overflow-auto whitespace-pre-wrap rounded-md bg-chip px-2.5 py-2 font-mono text-[11.5px]">
+          <pre className="mt-1 max-h-[280px] overflow-auto whitespace-pre-wrap rounded-md bg-sunken px-2.5 py-2 font-mono text-[11.5px]">
             {JSON.stringify(payload, null, 2)}
           </pre>
         </details>

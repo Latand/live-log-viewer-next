@@ -108,7 +108,7 @@ export function AccessQrButton() {
           if (!open) setState({ status: "idle" });
           setOpen(!open);
         }}
-        className={`flex items-center justify-center rounded-[8px] border border-line bg-panel text-dim hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+        className={`flex items-center justify-center rounded-[8px] border border-border bg-card text-muted hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
           isMobile ? "h-11 w-11" : "p-1.5"
         }`}
       >
@@ -119,15 +119,15 @@ export function AccessQrButton() {
            a right-aligned panel would run past the left viewport edge. On sm+
            the panel opens rightward over the content area; below sm it is
            fixed and centered. */
-        <div className="fixed left-1/2 top-12 z-50 flex w-[260px] -translate-x-1/2 flex-col gap-2.5 rounded-[12px] border border-line bg-panel p-3 shadow-[0_8px_28px_rgba(20,20,30,0.14)] sm:absolute sm:left-0 sm:right-auto sm:top-full sm:mt-1.5 sm:translate-x-0">
+        <div className="fixed left-1/2 top-12 z-50 flex w-[260px] -translate-x-1/2 flex-col gap-2.5 rounded-[12px] border border-border bg-card p-3 shadow-[0_8px_28px_rgba(20,20,30,0.14)] sm:absolute sm:left-0 sm:right-auto sm:top-full sm:mt-1.5 sm:translate-x-0">
           {state.status === "idle" ? (
-            <span className="text-[12px] text-ink">{t("common.loading")}</span>
+            <span className="text-[12px] text-primary">{t("common.loading")}</span>
           ) : state.status === "error" ? (
-            <span className="text-[12px] font-semibold text-err">{t("qr.failed")}</span>
+            <span className="text-[12px] font-semibold text-danger">{t("qr.failed")}</span>
           ) : state.status === "unavailable" ? (
-            <span className="text-[12px] leading-relaxed text-ink">
+            <span className="text-[12px] leading-relaxed text-primary">
               {t("qr.startHint")}
-              <code className="break-all rounded bg-chip px-1 py-0.5 font-mono text-[11px]">
+              <code className="break-all rounded bg-sunken px-1 py-0.5 font-mono text-[11px]">
                 bunx agent-log-viewer --tailscale
               </code>
             </span>
@@ -137,7 +137,7 @@ export function AccessQrButton() {
                 // eslint-disable-next-line @next/next/no-img-element
                 <img src={qrSrc} alt={t("qr.alt")} className="mx-auto h-[220px] w-[220px]" />
               ) : (
-                <span className="text-[12px] text-ink">{t("qr.generating")}</span>
+                <span className="text-[12px] text-primary">{t("qr.generating")}</span>
               )}
               <div className="flex items-center gap-1.5">
                 <input
@@ -145,18 +145,18 @@ export function AccessQrButton() {
                   value={state.url}
                   aria-label={t("qr.linkAria")}
                   onFocus={(event) => event.currentTarget.select()}
-                  className="min-h-[44px] min-w-0 flex-1 truncate rounded-[8px] border border-line bg-bg px-2 py-1.5 font-mono text-[10.5px] text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 sm:min-h-0"
+                  className="min-h-[44px] min-w-0 flex-1 truncate rounded-[8px] border border-border bg-canvas px-2 py-1.5 font-mono text-[10.5px] text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 sm:min-h-0"
                 />
                 <button
                   type="button"
                   aria-label={t("qr.copy")}
                   onClick={copy}
-                  className="flex min-h-[44px] min-w-[44px] shrink-0 items-center justify-center gap-1 rounded-[8px] border border-line bg-panel px-2 py-1.5 text-[11px] font-semibold text-dim hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 sm:min-h-0 sm:min-w-0"
+                  className="flex min-h-[44px] min-w-[44px] shrink-0 items-center justify-center gap-1 rounded-[8px] border border-border bg-card px-2 py-1.5 text-[11px] font-semibold text-muted hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 sm:min-h-0 sm:min-w-0"
                 >
                   {copied ? <Check className="h-3.5 w-3.5" aria-hidden /> : <Copy className="h-3.5 w-3.5" aria-hidden />}
                 </button>
               </div>
-              <span className="text-[10.5px] text-dim">{t("qr.scanHint")}</span>
+              <span className="text-[10.5px] text-muted">{t("qr.scanHint")}</span>
             </>
           )}
         </div>

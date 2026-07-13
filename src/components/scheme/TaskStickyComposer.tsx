@@ -84,16 +84,16 @@ export function TaskStickyComposer({
           event.preventDefault();
           void composer.submit();
         }}
-        className="flex flex-col gap-1.5 overflow-hidden rounded-[8px] border border-line bg-panel p-2 shadow-card ring-2 ring-accent/50"
+        className="flex flex-col gap-1.5 overflow-hidden rounded-[8px] border border-border bg-card p-2 shadow-1 ring-2 ring-accent/50"
         style={{ backgroundColor: TASK_TONES.inbox.soft }}
       >
         <div className="flex items-center justify-between">
-          <span className="text-[10.5px] font-bold text-dim">{t("tasks.newTask")}</span>
+          <span className="text-[10.5px] font-bold text-muted">{t("tasks.newTask")}</span>
           <button
             type="button"
             aria-label={t("common.close")}
             onClick={onCancel}
-            className="inline-flex h-5 w-5 items-center justify-center rounded-[6px] text-dim hover:text-err focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            className="inline-flex h-5 w-5 items-center justify-center rounded-[6px] text-muted hover:text-danger focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
           >
             <X className="h-3 w-3" aria-hidden />
           </button>

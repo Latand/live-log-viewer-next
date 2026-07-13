@@ -18,13 +18,13 @@ export function ImageCard({ media, data, w, h, bytes }: { media: string; data: s
       <button
         type="button"
         onClick={() => setView("thumb")}
-        className="my-2 ml-9 flex items-center gap-2 rounded-[14px] border border-line bg-panel px-3.5 py-2 text-[13px] shadow-card"
+        className="my-2 ml-9 flex items-center gap-2 rounded-[14px] border border-border bg-card px-3.5 py-2 text-[13px] shadow-1"
       >
-        <span className="flex h-6.5 w-6.5 items-center justify-center rounded-lg bg-chip">
+        <span className="flex h-6.5 w-6.5 items-center justify-center rounded-lg bg-sunken">
           <GlyphIcon name="image" className="h-4 w-4" />
         </span>
         <span className="font-semibold">{dims}</span>
-        <span className="text-dim">· {kb} {tr("common.kb")}</span>
+        <span className="text-muted">· {kb} {tr("common.kb")}</span>
         <span className="ml-1 text-[12px] font-semibold text-accent">{tr("common.show")}</span>
       </button>
     );
@@ -38,9 +38,9 @@ export function ImageCard({ media, data, w, h, bytes }: { media: string; data: s
         src={src}
         alt={`${tr("render.image")} ${dims}`}
         onClick={() => setView("full")}
-        className="max-h-[240px] cursor-zoom-in rounded-[14px] border border-line"
+        className="max-h-[240px] cursor-zoom-in rounded-[14px] border border-border"
       />
-      <button type="button" onClick={() => setView("chip")} className="mt-1 block text-[12px] text-dim">
+      <button type="button" onClick={() => setView("chip")} className="mt-1 block text-[12px] text-muted">
         {tr("common.collapse")}
       </button>
       {view === "full" ? (

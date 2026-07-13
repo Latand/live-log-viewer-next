@@ -31,11 +31,11 @@ const noop = () => undefined;
 
 /* Card treatment per lifecycle state; `glow` also feeds the orbiting border. */
 const PANE_TONES: Record<PaneState, { section: string; header: string; glow?: string }> = {
-  live: { section: "border-ok/60 shadow-[0_0_0_3px_rgba(47,158,68,0.16)]", header: "bg-[#eef8f0]" },
-  waiting: { section: "border-[#e0ae45]/60 shadow-[0_0_0_3px_rgba(224,174,69,0.2)]", header: "bg-[#fff7e6]", glow: "#e0ae45" },
-  returned: { section: "border-accent/50 shadow-[0_0_0_3px_rgba(90,81,224,0.15)]", header: "bg-[#f1f0fc]", glow: "#7a6ff0" },
-  stalled: { section: "border-err/50 shadow-[0_0_0_3px_rgba(198,40,40,0.13)]", header: "bg-[#fdf0f0]", glow: "#d76a6a" },
-  done: { section: "border-line", header: "bg-[#f4f4f6] text-dim opacity-80 saturate-50" },
+  live: { section: "border-success/60 shadow-[0_0_0_3px_rgba(47,158,68,0.16)]", header: "bg-success-soft" },
+  waiting: { section: "border-warning/60 shadow-[0_0_0_3px_rgba(224,174,69,0.2)]", header: "bg-warning-soft", glow: "var(--color-warning)" },
+  returned: { section: "border-accent/50 shadow-[0_0_0_3px_rgba(90,81,224,0.15)]", header: "bg-accent-soft", glow: "var(--color-accent)" },
+  stalled: { section: "border-danger/50 shadow-[0_0_0_3px_rgba(198,40,40,0.13)]", header: "bg-danger-soft", glow: "var(--color-danger)" },
+  done: { section: "border-border", header: "bg-sunken text-muted opacity-80 saturate-50" },
 };
 
 /** Maps the internal (Cyrillic) file.kind discriminant to a localized label. */
@@ -51,7 +51,7 @@ export function ParentRemovedChip() {
   const { t } = useLocale();
   return (
     <span
-      className="inline-flex shrink-0 items-center gap-0.5 rounded-full border border-line/80 px-1.5 py-0.5 text-[9.5px] font-semibold text-dim"
+      className="inline-flex shrink-0 items-center gap-0.5 rounded-full border border-border/80 px-1.5 py-0.5 text-[9.5px] font-semibold text-muted"
       title={t("lineage.parentRemovedTitle")}
     >
       <Unlink2 className="h-2.5 w-2.5" aria-hidden /> {t("lineage.parentRemoved")}
@@ -75,7 +75,7 @@ function LastActivity({ file }: { file: FileEntry }) {
   const quiet = (file.activity === "live" || file.activity === "recent") && age > 180;
   return (
     <span
-      className={`shrink-0 font-mono text-[9.5px] tabular-nums ${quiet ? "font-semibold text-[#b3831d]" : "text-dim"}`}
+      className={`shrink-0 font-mono text-[9.5px] tabular-nums ${quiet ? "font-semibold text-warning" : "text-muted"}`}
       title={t(quiet ? "branch.lastActivityQuiet" : "branch.lastActivity", { age: fmtAge(file.mtime) })}
     >
       {fmtAge(file.mtime)}
@@ -182,17 +182,17 @@ export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noCompose
            presses that start here (wheel pan still covers scrolling). */
         data-pan-ignore
         data-link-path={file.path}
-        className={`relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-[10px] border bg-panel shadow-card ${tone.section}`}
+        className={`relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-[10px] border bg-card shadow-1 ${tone.section}`}
       >
         <span
           aria-hidden
           className={`w-full shrink-0 ${isRoot ? "h-1" : "h-0.5"}`}
-          style={state === "done" ? { backgroundColor: "#c9c9d1" } : engineEdge(file)}
+          style={state === "done" ? { backgroundColor: "var(--color-strong)" } : engineEdge(file)}
         />
         {/* Two deliberate rows: identity + actions on top (the close X pinned
             to the corner at every width), the metadata chips below. */}
         <header
-          className={`flex shrink-0 flex-col gap-y-1 border-b border-line px-2.5 py-1.5 ${tone.header} ${
+          className={`flex shrink-0 flex-col gap-y-1 border-b border-border px-2.5 py-1.5 ${tone.header} ${
             dragHandle ? "cursor-grab active:cursor-grabbing" : ""
           }`}
           {...dragHandle}
@@ -209,7 +209,7 @@ export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noCompose
             <ProcessStatusControls file={file} compact hideChip={isMobile} />
             {onToggleExpand ? (
               <button
-                className={`inline-flex shrink-0 items-center justify-center rounded-[8px] border border-line bg-bg text-dim hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+                className={`inline-flex shrink-0 items-center justify-center rounded-[8px] border border-border bg-canvas text-muted hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
                   isMobile ? "h-11 w-11" : "px-1.5 py-0.5"
                 }`}
                 aria-label={expanded ? t("branch.collapseFull") : t("branch.expandFull", { title: cleanTitle(file.title, 60) })}
@@ -222,7 +222,7 @@ export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noCompose
             <DeleteFileButton file={file} onDeleted={onClose} />
             {onClose ? (
               <button
-                className={`inline-flex shrink-0 items-center justify-center rounded-[8px] border border-line bg-bg text-dim hover:border-err/40 hover:text-err focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+                className={`inline-flex shrink-0 items-center justify-center rounded-[8px] border border-border bg-canvas text-muted hover:border-danger/40 hover:text-danger focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
                   isMobile ? "h-11 w-11" : "px-1.5 py-0.5"
                 }`}
                 aria-label={t("branch.removeColumn", { title: cleanTitle(file.title, 60) })}
@@ -259,7 +259,7 @@ export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noCompose
             {file.ctx && (!isMobile || (file.ctx.pct !== null && file.ctx.pct >= 70)) ? <CtxChip ctx={file.ctx} /> : null}
             {file.worktree && !isMobile ? (
               <span
-                className="inline-flex shrink-0 items-center gap-0.5 rounded-full border border-line/80 px-1.5 py-0.5 font-mono text-[9.5px] text-dim"
+                className="inline-flex shrink-0 items-center gap-0.5 rounded-full border border-border/80 px-1.5 py-0.5 font-mono text-[9.5px] text-muted"
                 title={t("branch.worktree", { name: file.worktree })}
               >
                 <GitBranch className="h-2.5 w-2.5" aria-hidden /> {file.worktree}
@@ -269,7 +269,7 @@ export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noCompose
             {file.goal ? <GoalChip goal={file.goal} /> : null}
             {isRoot || isMobile ? null : (
               <span
-                className="inline-flex shrink-0 items-center gap-0.5 text-[10px] text-dim"
+                className="inline-flex shrink-0 items-center gap-0.5 text-[10px] text-muted"
                 title={file.handoff ? t("branch.handoffTitle") : t("branch.branchTitle")}
               >
                 <CornerDownRight className="h-3 w-3" aria-hidden /> {file.handoff ? t("kind.handoff") : kindLabel(t, file.kind)}
@@ -293,7 +293,7 @@ export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noCompose
         ) : null}
         {banner ?? null}
         {tasks.length ? (
-          <FlipRow className="shrink-0 border-b border-line bg-[#fbfbfd]" enter="fade">
+          <FlipRow className="shrink-0 border-b border-border bg-sunken" enter="fade">
             {tasks.map((task) => (
               <div key={task.path} data-flip-key={task.path}>
                 <TaskStrip file={task} paused={feedPaused} />
@@ -332,18 +332,18 @@ export function TaskStrip({
   const [open, setOpen] = useState(false);
   const title = cleanTitle(file.cmdDesc || file.title, 80);
   return (
-    <div className="border-t border-line first:border-t-0">
+    <div className="border-t border-border first:border-t-0">
       {/* 44px expand target on the phone (issue #148); desktop keeps its compact
           28px row via the sm: reset. These rows ride inside conversation panes
           and the docked-task section, both reachable by ordinary taps at 390px. */}
       <div className="flex min-h-11 flex-wrap items-center gap-1.5 pl-2 pr-2.5 sm:min-h-7">
         <button
-          className="flex min-h-11 min-w-0 flex-1 items-center gap-1.5 rounded-[6px] text-left hover:bg-bg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 sm:min-h-7"
+          className="flex min-h-11 min-w-0 flex-1 items-center gap-1.5 rounded-[6px] text-left hover:bg-canvas focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 sm:min-h-7"
           aria-expanded={open}
           aria-label={t("branch.toggleBackground", { action: open ? t("branch.collapse") : t("branch.expand"), title })}
           onClick={() => setOpen((value) => !value)}
         >
-          <ChevronRight className={`h-3.5 w-3.5 shrink-0 text-dim transition-transform ${open ? "rotate-90" : ""}`} aria-hidden />
+          <ChevronRight className={`h-3.5 w-3.5 shrink-0 text-muted transition-transform ${open ? "rotate-90" : ""}`} aria-hidden />
           <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${activityDot(file.activity)}`} />
           <span className="min-w-0 flex-1 truncate text-[11.5px] font-semibold" title={cleanTitle(file.title)}>
             {title}
@@ -352,7 +352,7 @@ export function TaskStrip({
         <ProcessStatusControls file={file} compact />
       </div>
       {open ? (
-        <div className="flex h-[220px] flex-col border-t border-dashed border-line bg-bg/60">
+        <div className="flex h-[220px] flex-col border-t border-dashed border-border bg-canvas/60">
           <LogFeed
             file={file}
             showSvc={false}

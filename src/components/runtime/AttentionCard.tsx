@@ -72,10 +72,10 @@ export function AttentionCard({ attention, onApprove, onDeny, onAnswerQuestion, 
 
   const question = attention.request.question;
   const border = attention.unowned
-    ? "border-err/60 bg-err/5"
+    ? "border-danger/60 bg-danger/5"
     : heuristic
-      ? "border-dashed border-line bg-bg"
-      : "border-[#e0ae45]/45 bg-[#fff9ed]";
+      ? "border-dashed border-border bg-canvas"
+      : "border-warning/45 bg-warning-soft";
 
   return (
     <div
@@ -83,61 +83,61 @@ export function AttentionCard({ attention, onApprove, onDeny, onAnswerQuestion, 
       role="group"
       aria-label={t("runtime.attention.title")}
       data-attention-kind={attention.kind}
-      className={`my-3 rounded-[8px] border p-4 shadow-card ${border}`}
+      className={`my-3 rounded-[8px] border p-4 shadow-1 ${border}`}
     >
       <div className="mb-2 flex flex-wrap items-center gap-2">
         {attention.unowned ? (
-          <span className="inline-flex items-center gap-1 rounded-full bg-err/15 px-2 py-0.5 text-[11px] font-bold text-err" role="alert">
+          <span className="inline-flex items-center gap-1 rounded-full bg-danger/15 px-2 py-0.5 text-[11px] font-bold text-danger" role="alert">
             <AlertTriangle className="h-3.5 w-3.5" aria-hidden /> {t("runtime.attention.unowned")}
           </span>
         ) : null}
-        <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-bold ${heuristic ? "bg-chip text-dim" : "bg-[#f5dfae] text-[#8a5a00]"}`}>
+        <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-bold ${heuristic ? "bg-sunken text-muted" : "bg-warning-soft text-warning"}`}>
           {t(KIND_LABEL[attention.kind])}
         </span>
-        {heuristic ? <span className="text-[11px] text-dim">{t("runtime.attention.heuristicNote")}</span> : null}
+        {heuristic ? <span className="text-[11px] text-muted">{t("runtime.attention.heuristicNote")}</span> : null}
         {remaining !== null ? (
-          <span className="text-[11px] font-semibold text-dim" role="timer" aria-live="off">
+          <span className="text-[11px] font-semibold text-muted" role="timer" aria-live="off">
             {t("runtime.attention.expiresIn", { seconds: remaining })}
           </span>
         ) : null}
       </div>
 
-      {attention.request.title ? <div className="text-[13px] font-semibold text-ink">{attention.request.title}</div> : null}
+      {attention.request.title ? <div className="text-[13px] font-semibold text-primary">{attention.request.title}</div> : null}
 
       {attention.request.command ? (
-        <pre className="mt-2 max-h-[220px] overflow-auto whitespace-pre-wrap break-words rounded-[8px] border border-line bg-bg px-3 py-2 text-[12px]">
-          <span className="mb-1 block text-[10px] font-bold uppercase tracking-wide text-dim">{t("runtime.attention.command")}</span>
+        <pre className="mt-2 max-h-[220px] overflow-auto whitespace-pre-wrap break-words rounded-[8px] border border-border bg-canvas px-3 py-2 text-[12px]">
+          <span className="mb-1 block text-[10px] font-semibold text-secondary">{t("runtime.attention.command")}</span>
           {attention.request.command}
         </pre>
       ) : null}
 
       {attention.request.tool ? (
         <div className="mt-2 text-[13px]">
-          <span className="text-[11px] font-bold uppercase tracking-wide text-dim">{t("runtime.attention.tool")}</span>{" "}
-          <span className="font-semibold text-ink">{attention.request.tool}</span>
+          <span className="text-[11px] font-semibold text-secondary">{t("runtime.attention.tool")}</span>{" "}
+          <span className="font-semibold text-primary">{attention.request.tool}</span>
         </div>
       ) : null}
 
-      {attention.request.detail ? <div className="mt-2 text-[12px] text-dim">{attention.request.detail}</div> : null}
+      {attention.request.detail ? <div className="mt-2 text-[12px] text-muted">{attention.request.detail}</div> : null}
 
       {question ? (
         <div className="mt-2">
-          {question.header ? <div className="text-[11px] font-bold text-dim">{question.header}</div> : null}
-          <div className="text-[14px] font-bold text-ink">{question.prompt}</div>
+          {question.header ? <div className="text-[11px] font-bold text-muted">{question.header}</div> : null}
+          <div className="text-[14px] font-bold text-primary">{question.prompt}</div>
           <div className="mt-2 space-y-1.5">
             {(question.options ?? []).map((option, index) => (
               <button
                 key={index}
                 className={`flex w-full items-start gap-2 rounded-[8px] border px-3 py-2 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/35 disabled:opacity-60 ${
-                  option.recommended ? "border-[#e0ae45]/45 bg-[#fff5dc]" : "border-line bg-bg"
+                  option.recommended ? "border-warning/45 bg-warning-soft" : "border-border bg-canvas"
                 }`}
                 disabled={busy}
                 onClick={() => onAnswerQuestion?.(index)}
               >
-                <span className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded border border-line bg-panel text-[10px] font-bold">{index + 1}</span>
+                <span className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded border border-border bg-card text-[10px] font-bold">{index + 1}</span>
                 <span className="min-w-0">
                   <span className="block text-[13px] font-bold">{option.label}</span>
-                  {option.description ? <span className="block text-[12px] text-dim">{option.description}</span> : null}
+                  {option.description ? <span className="block text-[12px] text-muted">{option.description}</span> : null}
                 </span>
               </button>
             ))}
@@ -149,7 +149,7 @@ export function AttentionCard({ attention, onApprove, onDeny, onAnswerQuestion, 
         <div className="mt-3 flex flex-wrap items-center gap-2">
           {onApprove ? (
             <button
-              className="inline-flex items-center gap-1.5 rounded-[8px] bg-ok px-3 py-1.5 text-[13px] font-bold text-white disabled:opacity-60"
+              className="inline-flex items-center gap-1.5 rounded-[8px] bg-success px-3 py-1.5 text-[13px] font-bold text-white disabled:opacity-60"
               disabled={busy}
               onClick={onApprove}
             >
@@ -158,19 +158,19 @@ export function AttentionCard({ attention, onApprove, onDeny, onAnswerQuestion, 
           ) : null}
           {onDeny ? (
             <button
-              className="inline-flex items-center gap-1.5 rounded-[8px] bg-err px-3 py-1.5 text-[13px] font-bold text-white disabled:opacity-60"
+              className="inline-flex items-center gap-1.5 rounded-[8px] bg-danger px-3 py-1.5 text-[13px] font-bold text-white disabled:opacity-60"
               disabled={busy}
               onClick={onDeny}
             >
               <X className="h-4 w-4" aria-hidden /> {t("runtime.attention.deny")}
             </button>
           ) : null}
-          <span className="text-[11px] text-dim">{t("runtime.attention.keysHint")}</span>
+          <span className="text-[11px] text-muted">{t("runtime.attention.keysHint")}</span>
         </div>
       ) : null}
 
       {busy ? (
-        <div className="mt-2 inline-flex items-center gap-1.5 text-[12px] font-semibold text-dim">
+        <div className="mt-2 inline-flex items-center gap-1.5 text-[12px] font-semibold text-muted">
           <Loader2 className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" aria-hidden /> {t("runtime.attention.answering")}
         </div>
       ) : null}

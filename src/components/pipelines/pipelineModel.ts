@@ -113,14 +113,14 @@ export type StageChipState =
   | "skipped";
 
 export const STAGE_TONES: Record<StageChipState, { color: string; soft: string }> = {
-  pending: { color: "#8b8b95", soft: "#efeff3" },
-  running: { color: "#5a51e0", soft: "#ecebfb" },
-  reviewing: { color: "#5a51e0", soft: "#ecebfb" },
-  committing: { color: "#5a51e0", soft: "#ecebfb" },
-  passed: { color: "#1a8a3e", soft: "#e7f4ea" },
-  failed: { color: "#c62828", soft: "#fbeaea" },
-  needs_decision: { color: "#e0ae45", soft: "#faf0da" },
-  skipped: { color: "#8b8b95", soft: "#efeff3" },
+  pending: { color: "var(--color-muted)", soft: "var(--color-sunken)" },
+  running: { color: "var(--color-accent)", soft: "var(--color-accent-soft)" },
+  reviewing: { color: "var(--color-accent)", soft: "var(--color-accent-soft)" },
+  committing: { color: "var(--color-accent)", soft: "var(--color-accent-soft)" },
+  passed: { color: "var(--color-success)", soft: "var(--color-success-soft)" },
+  failed: { color: "var(--color-danger)", soft: "var(--color-danger-soft)" },
+  needs_decision: { color: "var(--color-warning)", soft: "var(--color-warning-soft)" },
+  skipped: { color: "var(--color-muted)", soft: "var(--color-sunken)" },
 };
 
 /**
@@ -292,9 +292,9 @@ export function pipelineAnnouncement(t: TFunction, pipeline: Pipeline): string {
 }
 
 export const VERDICT_TONES: Record<StageVerdictStatus, { color: string; soft: string }> = {
-  pass: { color: "#1a8a3e", soft: "#e7f4ea" },
-  fail: { color: "#c62828", soft: "#fbeaea" },
-  needs_decision: { color: "#e0ae45", soft: "#faf0da" },
+  pass: { color: "var(--color-success)", soft: "var(--color-success-soft)" },
+  fail: { color: "var(--color-danger)", soft: "var(--color-danger-soft)" },
+  needs_decision: { color: "var(--color-warning)", soft: "var(--color-warning-soft)" },
 };
 
 export function verdictStatusLabel(t: TFunction, status: StageVerdictStatus): string {

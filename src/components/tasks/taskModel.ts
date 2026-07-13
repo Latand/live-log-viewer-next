@@ -7,10 +7,10 @@ export interface TaskTone {
 }
 
 export const TASK_TONES: Record<TaskStatus, TaskTone> = {
-  inbox: { color: "#e0ae45", soft: "#fdf3dd" },
-  assigned: { color: "#5a51e0", soft: "#efeefc" },
-  blocked: { color: "#d97757", soft: "#faeee9" },
-  done: { color: "#1a8a3e", soft: "#e7f4ea" },
+  inbox: { color: "var(--color-warning)", soft: "var(--color-warning-soft)" },
+  assigned: { color: "var(--color-accent)", soft: "var(--color-accent-soft)" },
+  blocked: { color: "var(--color-danger)", soft: "var(--color-danger-soft)" },
+  done: { color: "var(--color-success)", soft: "var(--color-success-soft)" },
 };
 
 /** Chip-click cycle order; statuses move manually in v1. */

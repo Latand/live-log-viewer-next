@@ -51,9 +51,9 @@ export function ProjectRail({ files, projectCatalog, pipelines, workflows, archi
   const totalAttention = useMemo(() => summaries.reduce((sum, s) => sum + s.attentionCount, 0), [summaries]);
 
   return (
-    <aside className="flex w-[248px] shrink-0 flex-col border-r border-line bg-panel">
+    <aside className="flex w-[248px] shrink-0 flex-col border-r border-border bg-card">
       <header
-        className={`flex shrink-0 items-center gap-2 border-b border-line text-[13.5px] font-bold ${
+        className={`flex shrink-0 items-center gap-2 border-b border-border text-[13.5px] font-bold ${
           isMobile ? "min-h-[52px] gap-1.5 px-2 py-1.5" : "h-10 px-4"
         }`}
       >
@@ -70,12 +70,12 @@ export function ProjectRail({ files, projectCatalog, pipelines, workflows, archi
             <div className="flex min-w-0 flex-1 items-center gap-1 overflow-hidden">
               <span className="min-w-0 truncate">{t("rail.title")}</span>
               {totalLive ? (
-                <span className="inline-flex shrink-0 items-center rounded-full bg-[#e5f6ea] px-1.5 py-0.5 text-[10.5px] font-bold tabular-nums text-ok">
+                <span className="inline-flex shrink-0 items-center rounded-full bg-success-soft px-1.5 py-0.5 text-[10.5px] font-bold tabular-nums text-success">
                   {totalLive > 99 ? "99+" : totalLive}
                 </span>
               ) : null}
               {totalAttention ? (
-                <span className="inline-flex shrink-0 items-center rounded-full bg-[#fff1ca] px-1.5 py-0.5 text-[10.5px] font-bold tabular-nums text-[#8a5a00]">
+                <span className="inline-flex shrink-0 items-center rounded-full bg-warning-soft px-1.5 py-0.5 text-[10.5px] font-bold tabular-nums text-warning">
                   ⏸{totalAttention > 99 ? "99+" : totalAttention}
                 </span>
               ) : null}
@@ -90,13 +90,13 @@ export function ProjectRail({ files, projectCatalog, pipelines, workflows, archi
           <>
             <span>{t("rail.title")}</span>
             {totalLive ? (
-              <span className="inline-flex items-center gap-1 rounded-full bg-[#e5f6ea] px-2 py-0.5 text-[10.5px] font-bold text-ok">
-                <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-ok" />
+              <span className="inline-flex items-center gap-1 rounded-full bg-success-soft px-2 py-0.5 text-[10.5px] font-bold text-success">
+                <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-success" />
                 {totalLive}
               </span>
             ) : null}
             {totalAttention ? (
-              <span className="inline-flex items-center gap-1 rounded-full bg-[#fff1ca] px-2 py-0.5 text-[10.5px] font-bold text-[#8a5a00]">
+              <span className="inline-flex items-center gap-1 rounded-full bg-warning-soft px-2 py-0.5 text-[10.5px] font-bold text-warning">
                 ⏸ {totalAttention}
               </span>
             ) : null}
@@ -108,7 +108,7 @@ export function ProjectRail({ files, projectCatalog, pipelines, workflows, archi
       </header>
       <div className="px-2.5 pb-1 pt-2.5">
         <input
-          className={`w-full rounded-[9px] border border-line bg-bg px-2.5 text-[12px] outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+          className={`w-full rounded-[9px] border border-border bg-canvas px-2.5 text-[12px] outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
             isMobile ? "min-h-11" : "py-1.5"
           }`}
           placeholder={t("rail.filter")}
@@ -127,7 +127,7 @@ export function ProjectRail({ files, projectCatalog, pipelines, workflows, archi
           hasLive={false}
           onClick={() => onSelect(OVERVIEW)}
         />
-        <div className="mx-2.5 my-1.5 border-t border-line" />
+        <div className="mx-2.5 my-1.5 border-t border-border" />
         <FlipRow>
           {activeRows.map((summary) => (
             <div key={summary.project} data-flip-key={summary.project}>
@@ -147,10 +147,10 @@ export function ProjectRail({ files, projectCatalog, pipelines, workflows, archi
         </FlipRow>
         {archivedRows.length ? (
           <>
-            <div className="mx-2.5 my-1.5 border-t border-line" />
+            <div className="mx-2.5 my-1.5 border-t border-border" />
             <button
               type="button"
-              className={`mb-0.5 flex w-full items-center gap-1.5 rounded-[10px] px-2.5 text-left text-[11.5px] font-bold text-dim hover:bg-bg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+              className={`mb-0.5 flex w-full items-center gap-1.5 rounded-[10px] px-2.5 text-left text-[11.5px] font-bold text-muted hover:bg-canvas focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
                 isMobile ? "min-h-11" : "py-1.5"
               }`}
               aria-expanded={archiveOpen}
@@ -181,9 +181,9 @@ export function ProjectRail({ files, projectCatalog, pipelines, workflows, archi
         ) : null}
         {!activeRows.length && !archivedRows.length ? (
           loaded ? (
-            <div className="px-3 py-4 text-center text-[12px] text-dim">{t("common.nothingFound")}</div>
+            <div className="px-3 py-4 text-center text-[12px] text-muted">{t("common.nothingFound")}</div>
           ) : (
-            <div className="flex items-center justify-center gap-2 px-3 py-4 text-[12px] text-dim">
+            <div className="flex items-center justify-center gap-2 px-3 py-4 text-[12px] text-muted">
               <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
               {t("common.loading")}
             </div>
@@ -223,7 +223,7 @@ function RailRow({
       className={[
         "mb-0.5 flex w-full items-center gap-2 rounded-[10px] border px-2.5 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40",
         isMobile ? "min-h-11" : "py-2",
-        active ? "border-line bg-bg shadow-card" : "border-transparent hover:bg-bg",
+        active ? "border-border bg-canvas shadow-1" : "border-transparent hover:bg-canvas",
         muted ? "opacity-65" : "",
       ].join(" ")}
       aria-current={active ? "page" : undefined}
@@ -232,20 +232,20 @@ function RailRow({
       <span
         className={[
           "h-2 w-2 shrink-0 rounded-full",
-          hasLive ? "animate-pulse bg-ok" : muted ? "bg-[#b8b8c2]" : "bg-[#d6d6dd]",
+          hasLive ? "animate-pulse bg-success" : muted ? "bg-strong" : "bg-strong",
         ].join(" ")}
       />
       <span className="min-w-0 flex-1">
-        <span className={`block truncate text-[13px] ${active ? "font-bold" : "font-semibold"} ${muted ? "text-dim" : ""}`}>{label}</span>
-        {age ? <span className="block text-[10.5px] text-dim">{age}</span> : null}
+        <span className={`block truncate text-[13px] ${active ? "font-bold" : "font-semibold"} ${muted ? "text-muted" : ""}`}>{label}</span>
+        {age ? <span className="block text-[10.5px] text-muted">{age}</span> : null}
       </span>
       {live > 0 ? (
-        <span className="shrink-0 rounded-full bg-[#e5f6ea] px-1.5 py-0.5 text-[10.5px] font-bold text-ok">{live}</span>
+        <span className="shrink-0 rounded-full bg-success-soft px-1.5 py-0.5 text-[10.5px] font-bold text-success">{live}</span>
       ) : null}
       {attention > 0 ? (
-        <span className="shrink-0 rounded-full bg-[#fff1ca] px-1.5 py-0.5 text-[10.5px] font-bold text-[#8a5a00]">⏸ {attention}</span>
+        <span className="shrink-0 rounded-full bg-warning-soft px-1.5 py-0.5 text-[10.5px] font-bold text-warning">⏸ {attention}</span>
       ) : null}
-      {total !== null ? <span className="shrink-0 text-[11px] font-semibold text-dim">{total}</span> : null}
+      {total !== null ? <span className="shrink-0 text-[11px] font-semibold text-muted">{total}</span> : null}
     </button>
   );
 }

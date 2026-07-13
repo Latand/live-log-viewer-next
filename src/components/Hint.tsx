@@ -30,7 +30,7 @@ export function Hint({
       {children}
       <span
         role="tooltip"
-        className={`pointer-events-none absolute z-[60] whitespace-nowrap rounded-[7px] bg-ink px-2 py-1 text-[10.5px] font-semibold text-white opacity-0 shadow-card transition-opacity delay-150 duration-100 group-focus-within/hint:opacity-100 group-hover/hint:opacity-100 ${alignClass} ${
+        className={`pointer-events-none absolute z-[60] whitespace-nowrap rounded-[7px] bg-primary px-2 py-1 text-[10.5px] font-semibold text-white opacity-0 shadow-1 transition-opacity delay-150 duration-100 group-focus-within/hint:opacity-100 group-hover/hint:opacity-100 ${alignClass} ${
           side === "top" ? "bottom-full mb-1.5" : "top-full mt-1.5"
         }`}
       >

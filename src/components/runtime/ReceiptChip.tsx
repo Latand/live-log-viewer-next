@@ -6,10 +6,10 @@ import { receiptIsTerminal, type ReceiptStatus, type RuntimeReceipt } from "./ru
 
 /** Tone per receipt status. Text carries the meaning; color only reinforces. */
 function tone(status: ReceiptStatus): string {
-  if (status === "rejected" || status === "failed") return "border-err/30 bg-err/10 text-err";
-  if (status === "delivered" || status === "answered") return "border-ok/25 bg-ok/10 text-ok";
-  if (status === "uncertain") return "border-[#e0ae45]/45 bg-[#fff5dc] text-[#8a5a00]";
-  return "border-line bg-chip text-dim";
+  if (status === "rejected" || status === "failed") return "border-danger/30 bg-danger/10 text-danger";
+  if (status === "delivered" || status === "answered") return "border-success/25 bg-success/10 text-success";
+  if (status === "uncertain") return "border-warning/45 bg-warning-soft text-warning";
+  return "border-border bg-sunken text-muted";
 }
 
 function statusText(t: TFunction, receipt: RuntimeReceipt): string {
@@ -55,7 +55,7 @@ export function ReceiptChip({ receipt, onRetry, onEdit }: ReceiptChipProps) {
       </span>
       {failed && onRetry ? (
         <button
-          className="rounded-full border border-line bg-bg px-2 py-0.5 text-dim hover:border-accent/45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+          className="rounded-full border border-border bg-canvas px-2 py-0.5 text-muted hover:border-accent/45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
           onClick={onRetry}
         >
           {t("runtime.receipt.retry")}
@@ -63,14 +63,14 @@ export function ReceiptChip({ receipt, onRetry, onEdit }: ReceiptChipProps) {
       ) : null}
       {failed && onEdit ? (
         <button
-          className="rounded-full border border-line bg-bg px-2 py-0.5 text-dim hover:border-accent/45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+          className="rounded-full border border-border bg-canvas px-2 py-0.5 text-muted hover:border-accent/45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
           onClick={onEdit}
         >
           {t("runtime.receipt.edit")}
         </button>
       ) : null}
       {!receiptIsTerminal(receipt.status) && receipt.status !== "pending" ? (
-        <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-dim motion-reduce:animate-none" aria-hidden />
+        <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-muted motion-reduce:animate-none" aria-hidden />
       ) : null}
     </span>
   );

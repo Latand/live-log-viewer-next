@@ -101,21 +101,21 @@ export function ImagePreviewStrip({ images, onRemove }: { images: PendingImage[]
     return (
       <div className="flex flex-col gap-1.5">
         {images.map((image, idx) => (
-          <div key={idx} className="flex items-center gap-2 rounded-[8px] border border-line bg-panel p-1.5">
+          <div key={idx} className="flex items-center gap-2 rounded-[8px] border border-border bg-card p-1.5">
             {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img src={image.preview} alt={t("img.previewAlt", { n: idx + 1 })} className="h-11 w-11 shrink-0 rounded border border-line object-cover" />
-            <span className="min-w-0 flex-1 truncate text-[12px] font-semibold text-dim">{t("img.previewAlt", { n: idx + 1 })}</span>
+            <img src={image.preview} alt={t("img.previewAlt", { n: idx + 1 })} className="h-11 w-11 shrink-0 rounded border border-border object-cover" />
+            <span className="min-w-0 flex-1 truncate text-[12px] font-semibold text-muted">{t("img.previewAlt", { n: idx + 1 })}</span>
             <button
               type="button"
               onClick={() => onRemove(idx)}
               aria-label={t("img.removeAria", { n: idx + 1 })}
-              className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full border border-line bg-bg text-dim hover:text-err focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+              className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full border border-border bg-canvas text-muted hover:text-danger focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
             >
               <X className="h-4 w-4" aria-hidden />
             </button>
           </div>
         ))}
-        <span className="inline-flex items-center gap-1 text-[10.5px] font-semibold text-dim">
+        <span className="inline-flex items-center gap-1 text-[10.5px] font-semibold text-muted">
           {t("composer.imagesCount", { count: images.length })} <ArrowRight className="h-3 w-3" aria-hidden /> {t("img.toFilePaths")}
         </span>
       </div>
@@ -126,18 +126,18 @@ export function ImagePreviewStrip({ images, onRemove }: { images: PendingImage[]
       {images.map((image, idx) => (
         <div key={idx} className="group/img relative">
           {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img src={image.preview} alt={t("img.previewAlt", { n: idx + 1 })} className="h-10 w-10 rounded border border-line object-cover" />
+          <img src={image.preview} alt={t("img.previewAlt", { n: idx + 1 })} className="h-10 w-10 rounded border border-border object-cover" />
           <button
             type="button"
             onClick={() => onRemove(idx)}
             aria-label={t("img.removeAria", { n: idx + 1 })}
-            className="absolute -right-1 -top-1 hidden h-4 w-4 items-center justify-center rounded-full border border-line bg-panel text-dim shadow-card hover:text-err group-hover/img:flex focus-visible:flex focus-visible:outline-none"
+            className="absolute -right-1 -top-1 hidden h-4 w-4 items-center justify-center rounded-full border border-border bg-card text-muted shadow-1 hover:text-danger group-hover/img:flex focus-visible:flex focus-visible:outline-none"
           >
             <X className="h-2.5 w-2.5" aria-hidden />
           </button>
         </div>
       ))}
-      <span className="inline-flex items-center gap-1 text-[10.5px] font-semibold text-dim">
+      <span className="inline-flex items-center gap-1 text-[10.5px] font-semibold text-muted">
         {t("composer.imagesCount", { count: images.length })} <ArrowRight className="h-3 w-3" aria-hidden /> {t("img.toFilePaths")}
       </span>
     </div>

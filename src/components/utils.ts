@@ -27,44 +27,63 @@ export function hhmm(ts: unknown): string {
 
 /** Same activity encoding everywhere: green pulse, amber, red, gray. */
 export function activityDot(activity: FileEntry["activity"]): string {
-  if (activity === "live") return "animate-pulse bg-ok";
-  if (activity === "recent") return "bg-[#d29a2f]";
-  if (activity === "stalled") return "bg-err";
-  return "bg-[#c9c9d1]";
+  if (activity === "live") return "animate-pulse bg-success";
+  if (activity === "recent") return "bg-warning";
+  if (activity === "stalled") return "bg-danger";
+  return "bg-strong";
 }
 
 export type ModelTint = { color: string; soft: string };
 
 /* Engine base identity: Codex blue, Claude orange. Model families shift the
-   hue so sibling agents on different models are tellable apart at a glance. */
-const ENGINE_TINTS: Record<string, ModelTint> = {
-  codex: { color: "#2f6fd0", soft: "#e8f0fb" },
-  claude: { color: "#d97757", soft: "#faeee9" },
+   hue so sibling agents on different models are tellable apart at a glance.
+
+   Only the identity `color` is stored — a saturated hue that reads on any
+   surface, so it feeds inline styles, SVG, and canvas unchanged. The pale chip
+   background (`soft`) is derived as a translucent tint of that color (below), so
+   it composites over whatever surface is active: near-white on the light theme
+   (matching the old opaque softs) and a subtle dark tint on the dark theme, with
+   no second per-theme literal (design doc §1.5). */
+const ENGINE_COLORS: Record<string, string> = {
+  codex: "#2f6fd0",
+  claude: "#d97757",
 };
-const NEUTRAL_TINT: ModelTint = { color: "#9a9aa4", soft: "#ececf1" };
-const CLAUDE_TINTS: [RegExp, ModelTint][] = [
-  [/fable|mythos/, { color: "#c2410c", soft: "#fbeade" }],
-  [/opus/, { color: "#8a5ad6", soft: "#f1ebfb" }],
-  [/sonnet/, { color: "#e0913f", soft: "#fbf1e4" }],
-  [/haiku/, { color: "#d9a58c", soft: "#f9f1ec" }],
+const NEUTRAL_COLOR = "#9a9aa4";
+const CLAUDE_MODEL_COLORS: [RegExp, string][] = [
+  [/fable|mythos/, "#c2410c"],
+  [/opus/, "#8a5ad6"],
+  [/sonnet/, "#e0913f"],
+  [/haiku/, "#d9a58c"],
 ];
-const CODEX_TINTS: [RegExp, ModelTint][] = [
-  [/terra/, { color: "#2b7a62", soft: "#e5f3ee" }],
-  [/sol/, { color: "#a55b18", soft: "#fbefe0" }],
-  [/spark/, { color: "#5ea3e4", soft: "#ecf4fd" }],
-  [/mini|nano/, { color: "#7fb1e8", soft: "#eff6fd" }],
-  [/codex/, { color: "#1d55ab", soft: "#e4edfa" }],
+const CODEX_MODEL_COLORS: [RegExp, string][] = [
+  [/terra/, "#2b7a62"],
+  [/sol/, "#a55b18"],
+  [/spark/, "#5ea3e4"],
+  [/mini|nano/, "#7fb1e8"],
+  [/codex/, "#1d55ab"],
 ];
+
+/** Translucent tint of an identity color for chip/badge backgrounds. Alpha is
+    tuned so the result over white matches the previous opaque soft hexes while
+    staying dark-aware over the dark card surface. Accepts a `#rrggbb` hex. */
+function softOf(hexColor: string): string {
+  const [h, s, l] = hexToHsl(hexColor);
+  return `hsl(${Math.round(h)} ${Math.round(s)}% ${Math.round(l)}% / 0.14)`;
+}
+
+function tintOf(color: string): ModelTint {
+  return { color, soft: softOf(color) };
+}
 
 /** Identity color tinted by model family (Terra green, Sol amber, Fable deep orange…). */
 export function modelTint(file: FileEntry): ModelTint {
-  const base = ENGINE_TINTS[file.engine];
-  if (!base) return NEUTRAL_TINT;
+  const base = ENGINE_COLORS[file.engine];
+  if (!base) return tintOf(NEUTRAL_COLOR);
   const model = (file.model ?? "").toLowerCase();
-  for (const [re, tint] of file.engine === "codex" ? CODEX_TINTS : CLAUDE_TINTS) {
-    if (re.test(model)) return tint;
+  for (const [re, color] of file.engine === "codex" ? CODEX_MODEL_COLORS : CLAUDE_MODEL_COLORS) {
+    if (re.test(model)) return tintOf(color);
   }
-  return base;
+  return tintOf(base);
 }
 
 /* Reasoning-effort ramp: lightness/saturation deltas applied on top of the
@@ -102,17 +121,21 @@ function shiftTone(hex: string, dl: number, ds: number): string {
   return `hsl(${Math.round(h)} ${Math.round(clamp(s + ds))}% ${Math.round(clamp(l + dl))}%)`;
 }
 
+/** Append the standard soft alpha to an `hsl(h s% l%)` string from shiftTone. */
+function softFromHsl(hsl: string): string {
+  return hsl.replace(/\)$/, " / 0.14)");
+}
+
 /** Model tint dimmed or deepened by the entry's reasoning-effort tier.
     Unknown/absent effort returns the plain model tint — renders as today. */
 export function effortTint(file: FileEntry): ModelTint {
   const base = modelTint(file);
   const ramp = EFFORT_RAMP[file.effort ?? ""];
   if (!ramp) return base;
-  return {
-    color: shiftTone(base.color, ramp.dl, ramp.ds),
-    // The pale chip background moves a third as far so text stays readable.
-    soft: shiftTone(base.soft, Math.round(ramp.dl / 3), Math.round(ramp.ds / 2)),
-  };
+  const color = shiftTone(base.color, ramp.dl, ramp.ds);
+  // The chip background is a translucent tint of the shifted color, so it stays
+  // dark-aware and tracks the effort ramp without a second per-theme literal.
+  return { color, soft: softFromHsl(color) };
 }
 
 /** Chip tooltip carrying the raw effort value; empty keeps the chip as-is. */
@@ -129,7 +152,7 @@ export function effortMeter(file: FileEntry): { level: number; slots: number } {
 
 /** Engine base tint for UI that has no FileEntry yet (e.g. the spawn dialog). */
 export function engineTintOf(engine: string): ModelTint {
-  return ENGINE_TINTS[engine] ?? NEUTRAL_TINT;
+  return tintOf(ENGINE_COLORS[engine] ?? NEUTRAL_COLOR);
 }
 
 /** Model-tinted identity color as a raw value for SVG connectors and dots. */
@@ -147,7 +170,7 @@ export function engineEdge(file: FileEntry): { backgroundColor: string } {
 
 export function engineBadgeFor(engine: string) {
   const label = { codex: "Codex", claude: "Claude", shell: "Bash" }[engine] ?? engine;
-  const tint = ENGINE_TINTS[engine] ?? NEUTRAL_TINT;
+  const tint = tintOf(ENGINE_COLORS[engine] ?? NEUTRAL_COLOR);
   return { label, style: { backgroundColor: tint.soft, color: tint.color } };
 }
 

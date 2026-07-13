@@ -52,7 +52,7 @@ export function TargetChecklist({
   };
 
   if (!conversations.length) {
-    return <div className="px-1.5 py-2 text-[11px] text-dim">{t("tasks.pickerEmpty")}</div>;
+    return <div className="px-1.5 py-2 text-[11px] text-muted">{t("tasks.pickerEmpty")}</div>;
   }
   return (
     <div className="flex flex-col gap-0.5 overflow-y-auto" style={{ maxHeight }}>
@@ -63,7 +63,7 @@ export function TargetChecklist({
           <div key={file.path} className="flex items-center gap-1">
             {/* Full-height 44px tap targets — this checklist is the phone task
                 sheet's target picker (finding 1). */}
-            <label className="flex min-h-11 min-w-0 flex-1 cursor-pointer items-center gap-1.5 rounded-[6px] px-1.5 hover:bg-bg">
+            <label className="flex min-h-11 min-w-0 flex-1 cursor-pointer items-center gap-1.5 rounded-[6px] px-1.5 hover:bg-canvas">
               <input type="checkbox" checked={checked.has(file.path)} onChange={() => toggle(file.path)} className="h-5 w-5 accent-accent" />
               <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${activityDot(file.activity)}`} />
               <span className="shrink-0 rounded-full px-1.5 text-[9px] font-bold" style={badge.style}>
@@ -76,7 +76,7 @@ export function TargetChecklist({
             {childCount ? (
               <button
                 type="button"
-                className="inline-flex h-11 min-w-11 shrink-0 items-center justify-center gap-0.5 rounded-[6px] px-1.5 text-[10px] font-semibold text-dim hover:bg-bg hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                className="inline-flex h-11 min-w-11 shrink-0 items-center justify-center gap-0.5 rounded-[6px] px-1.5 text-[10px] font-semibold text-muted hover:bg-canvas hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
                 title={t("tasks.pickerAllChildren")}
                 onClick={() => checkChildren(file)}
               >

@@ -51,7 +51,12 @@ test("stackDotsFor maps each worker stack to one origin-toned dot (#136)", () =>
   ] as unknown as WorkerStack[];
   const dots = stackDotsFor(stacks);
   expect(dots).toHaveLength(4);
-  expect(dots.map((d) => d.color)).toEqual(["#5a51e0", "#5a51e0", "#9a9aa4", "#c9c9d1"]);
+  expect(dots.map((d) => d.color)).toEqual([
+    "var(--color-accent)",
+    "var(--color-accent)",
+    "var(--color-muted)",
+    "var(--color-strong)",
+  ]);
   expect(dots.map((d) => d.key)).toEqual(stacks.map((s) => s.key));
 });
 

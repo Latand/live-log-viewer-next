@@ -26,11 +26,11 @@ function RoleEditor({
   const modelListId = useId();
   return (
     <div className="flex items-center gap-1.5">
-      <span className="w-[86px] shrink-0 text-[10.5px] font-semibold text-dim">{label}</span>
+      <span className="w-[86px] shrink-0 text-[10.5px] font-semibold text-muted">{label}</span>
       <select
         value={role.engine}
         aria-label={t("flowDialog.engine", { label })}
-        className="h-7 rounded-[8px] border border-line bg-bg px-1.5 text-[11.5px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+        className="h-7 rounded-[8px] border border-border bg-canvas px-1.5 text-[11.5px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
         onChange={(event) => onChange({ ...role, engine: event.target.value as RoleConfig["engine"], effort: null })}
       >
         <option value="claude">Claude</option>
@@ -41,7 +41,7 @@ function RoleEditor({
         list={modelListId}
         placeholder={t("flowDialog.modelPlaceholder")}
         aria-label={t("flowDialog.model", { label })}
-        className="h-7 w-0 min-w-0 flex-1 rounded-[8px] border border-line bg-bg px-1.5 font-mono text-[11px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+        className="h-7 w-0 min-w-0 flex-1 rounded-[8px] border border-border bg-canvas px-1.5 font-mono text-[11px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
         onChange={(event) => onChange({ ...role, model: event.target.value.trim() || null })}
       />
       <datalist id={modelListId}>
@@ -52,7 +52,7 @@ function RoleEditor({
       <select
         value={role.effort ?? ""}
         aria-label={`Reasoning effort: ${label}`}
-        className="h-7 rounded-[8px] border border-line bg-bg px-1.5 text-[11.5px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+        className="h-7 rounded-[8px] border border-border bg-canvas px-1.5 text-[11.5px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
         onChange={(event) => onChange({ ...role, effort: event.target.value || null })}
       >
         <option value="">{t("flowDialog.effortDefault")}</option>
@@ -141,22 +141,22 @@ export function FlowDialog({ file, onClose }: { file: FileEntry; onClose: () => 
   return (
     <div
       data-scheme-ui
-      className="flex w-[420px] flex-col gap-2.5 rounded-[12px] border border-line bg-panel p-3 shadow-[0_10px_36px_rgb(20_20_30/0.18)]"
+      className="flex w-[420px] flex-col gap-2.5 rounded-[12px] border border-border bg-card p-3 shadow-[0_10px_36px_rgb(20_20_30/0.18)]"
       onKeyDown={(event) => {
         if (event.key === "Escape") onClose();
       }}
     >
       <div className="flex items-center gap-2">
         <span className="text-[12.5px] font-bold">{t("flowDialog.title")}</span>
-        <span className="min-w-0 flex-1 truncate text-[10.5px] text-dim">{t("flowDialog.subtitle")}</span>
+        <span className="min-w-0 flex-1 truncate text-[10.5px] text-muted">{t("flowDialog.subtitle")}</span>
       </div>
 
       {presets.length ? (
-        <label className="flex flex-col gap-1 text-[10.5px] font-semibold text-dim">
+        <label className="flex flex-col gap-1 text-[10.5px] font-semibold text-muted">
           {t("flowDialog.preset")}
           <select
             value={presetName ?? ""}
-            className="h-8 rounded-[8px] border border-line bg-bg px-2 text-[12px] font-normal text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            className="h-8 rounded-[8px] border border-border bg-canvas px-2 text-[12px] font-normal text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
             onChange={(event) => pickPreset(event.target.value)}
           >
             {presets.map((preset) => (
@@ -169,81 +169,81 @@ export function FlowDialog({ file, onClose }: { file: FileEntry; onClose: () => 
       ) : null}
 
       <button
-        className="self-start text-[10.5px] font-semibold text-dim hover:text-accent focus-visible:outline-none"
+        className="self-start text-[10.5px] font-semibold text-muted hover:text-accent focus-visible:outline-none"
         aria-expanded={custom}
         onClick={() => setCustom((value) => !value)}
       >
         {custom ? t("flowDialog.rolesManualOpen") : t("flowDialog.rolesManual")}
       </button>
       {custom ? (
-        <div className="flex flex-col gap-1.5 rounded-[10px] border border-dashed border-line bg-bg/50 p-2">
+        <div className="flex flex-col gap-1.5 rounded-[10px] border border-dashed border-border bg-canvas/50 p-2">
           <RoleEditor label={t("flowDialog.implementer")} role={roles.implementer} onChange={(next) => setRoles((prev) => ({ ...prev, implementer: next }))} />
           <RoleEditor label={t("flowDialog.reviewer")} role={roles.reviewer} onChange={(next) => setRoles((prev) => ({ ...prev, reviewer: next }))} />
         </div>
       ) : null}
 
-      <label className="flex flex-col gap-1 text-[10.5px] font-semibold text-dim">
+      <label className="flex flex-col gap-1 text-[10.5px] font-semibold text-muted">
         {t("flowDialog.spec")}
         <textarea
           value={spec}
           rows={4}
           placeholder={t("flowDialog.specPlaceholder")}
-          className="resize-y rounded-[8px] border border-line bg-bg px-2 py-1.5 text-[11.5px] font-normal text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+          className="resize-y rounded-[8px] border border-border bg-canvas px-2 py-1.5 text-[11.5px] font-normal text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
           onChange={(event) => setSpec(event.target.value)}
         />
       </label>
 
       <div className="grid grid-cols-2 gap-2">
-        <label className="flex flex-col gap-1 text-[10.5px] font-semibold text-dim">
+        <label className="flex flex-col gap-1 text-[10.5px] font-semibold text-muted">
           {t("flowDialog.diffBase")}
           <select
             value={baseMode}
-            className="h-8 rounded-[8px] border border-line bg-bg px-2 text-[11.5px] font-normal text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            className="h-8 rounded-[8px] border border-border bg-canvas px-2 text-[11.5px] font-normal text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
             onChange={(event) => setBaseMode(event.target.value as "head" | "merge-base")}
           >
             <option value="head">{t("flowDialog.fromHead")}</option>
             <option value="merge-base">{t("flowDialog.fromMergeBase")}</option>
           </select>
         </label>
-        <label className="flex flex-col gap-1 text-[10.5px] font-semibold text-dim">
+        <label className="flex flex-col gap-1 text-[10.5px] font-semibold text-muted">
           {t("flowDialog.reviewer")}
           <select
             value={reviewerMode}
-            className="h-8 rounded-[8px] border border-line bg-bg px-2 text-[11.5px] font-normal text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            className="h-8 rounded-[8px] border border-border bg-canvas px-2 text-[11.5px] font-normal text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
             onChange={(event) => setReviewerMode(event.target.value as "headless" | "pane")}
           >
             <option value="headless">{t("flowDialog.headless")}</option>
             <option value="pane">{t("flowDialog.tmuxPane")}</option>
           </select>
         </label>
-        <label className="flex flex-col gap-1 text-[10.5px] font-semibold text-dim">
+        <label className="flex flex-col gap-1 text-[10.5px] font-semibold text-muted">
           {t("flowDialog.transitions")}
           <select
             value={mode}
-            className="h-8 rounded-[8px] border border-line bg-bg px-2 text-[11.5px] font-normal text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            className="h-8 rounded-[8px] border border-border bg-canvas px-2 text-[11.5px] font-normal text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
             onChange={(event) => setMode(event.target.value as "auto" | "manual")}
           >
             <option value="auto">{t("flowDialog.auto")}</option>
             <option value="manual">{t("flowDialog.manual")}</option>
           </select>
         </label>
-        <label className="flex flex-col gap-1 text-[10.5px] font-semibold text-dim">
+        <label className="flex flex-col gap-1 text-[10.5px] font-semibold text-muted">
           {t("flowDialog.roundLimit")}
           <input
             type="number"
             min={1}
             max={20}
             value={roundLimit}
-            className="h-8 rounded-[8px] border border-line bg-bg px-2 text-[11.5px] font-normal text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            className="h-8 rounded-[8px] border border-border bg-canvas px-2 text-[11.5px] font-normal text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
             onChange={(event) => setRoundLimit(Math.max(1, Math.min(20, Number(event.target.value) || 5)))}
           />
         </label>
       </div>
 
       <div className="flex items-center gap-2">
-        {error ? <span className="min-w-0 flex-1 truncate text-[10.5px] font-semibold text-err">{error}</span> : <span className="flex-1" />}
+        {error ? <span className="min-w-0 flex-1 truncate text-[10.5px] font-semibold text-danger">{error}</span> : <span className="flex-1" />}
         <button
-          className="rounded-[8px] border border-line bg-bg px-2.5 py-1.5 text-[11.5px] font-semibold text-dim hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+          className="rounded-[8px] border border-border bg-canvas px-2.5 py-1.5 text-[11.5px] font-semibold text-muted hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
           onClick={onClose}
         >
           {t("common.cancel")}

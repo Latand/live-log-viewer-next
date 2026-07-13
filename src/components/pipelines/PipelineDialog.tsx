@@ -465,16 +465,16 @@ export function PipelineDialog({
         role="dialog"
         aria-modal="true"
         aria-label={t("pipelineDialog.title")}
-        className="my-auto flex w-full max-w-[680px] flex-col gap-2.5 rounded-[14px] border border-line bg-panel p-4 shadow-[0_18px_60px_rgb(20_20_30/0.28)]"
+        className="my-auto flex w-full max-w-[680px] flex-col gap-2.5 rounded-[14px] border border-border bg-card p-4 shadow-[0_18px_60px_rgb(20_20_30/0.28)]"
       >
         <div className="flex items-start gap-2">
           <div className="flex min-w-0 flex-col">
             <span className="text-[14px] font-bold">{t("pipelineDialog.title")}</span>
-            <span className="text-[11px] text-dim">{t("pipelineDialog.subtitle")}</span>
+            <span className="text-[11px] text-muted">{t("pipelineDialog.subtitle")}</span>
           </div>
           <button
             type="button"
-            className="ml-auto inline-flex h-7 w-7 items-center justify-center rounded-[8px] border border-line bg-bg text-dim hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            className="ml-auto inline-flex h-7 w-7 items-center justify-center rounded-[8px] border border-border bg-canvas text-muted hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
             aria-label={t("common.cancel")}
             onClick={onClose}
           >
@@ -482,37 +482,37 @@ export function PipelineDialog({
           </button>
         </div>
 
-        <label className="flex flex-col gap-1 text-[10.5px] font-semibold text-dim">
+        <label className="flex flex-col gap-1 text-[10.5px] font-semibold text-muted">
           {t("pipelineDialog.task")}
           <input
             ref={taskRef}
             value={task}
             maxLength={MAX_TASK_LENGTH}
             placeholder={t("pipelineDialog.taskPlaceholder")}
-            className="h-9 rounded-[8px] border border-line bg-bg px-2.5 text-[12.5px] font-normal text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            className="h-9 rounded-[8px] border border-border bg-canvas px-2.5 text-[12.5px] font-normal text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
             onChange={(event) => setTask(event.target.value)}
           />
         </label>
 
-        <label className="flex flex-col gap-1 text-[10.5px] font-semibold text-dim">
+        <label className="flex flex-col gap-1 text-[10.5px] font-semibold text-muted">
           {t("pipelineDialog.spec")}
           <textarea
             value={spec}
             rows={3}
             maxLength={MAX_SPEC_LENGTH}
             placeholder={t("pipelineDialog.specPlaceholder")}
-            className="resize-y rounded-[8px] border border-line bg-bg px-2 py-1.5 text-[11.5px] font-normal text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            className="resize-y rounded-[8px] border border-border bg-canvas px-2 py-1.5 text-[11.5px] font-normal text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
             onChange={(event) => setSpec(event.target.value)}
           />
         </label>
 
-        <label className="flex flex-col gap-1 text-[10.5px] font-semibold text-dim">
+        <label className="flex flex-col gap-1 text-[10.5px] font-semibold text-muted">
           {t("pipelineDialog.repo")}
           <input
             value={repoDir}
             list="pipeline-dialog-dirs"
             placeholder={t("pipelineDialog.repoPlaceholder")}
-            className="h-9 rounded-[8px] border border-line bg-bg px-2.5 font-mono text-[11.5px] font-normal text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            className="h-9 rounded-[8px] border border-border bg-canvas px-2.5 font-mono text-[11.5px] font-normal text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
             onChange={(event) => setRepoDir(event.target.value)}
           />
           <datalist id="pipeline-dialog-dirs">
@@ -527,7 +527,7 @@ export function PipelineDialog({
         ) : null}
 
         <div className="flex flex-col gap-1">
-          <span className="text-[10.5px] font-semibold text-dim">{t("pipelineDialog.templatesLabel")}</span>
+          <span className="text-[10.5px] font-semibold text-muted">{t("pipelineDialog.templatesLabel")}</span>
           <div className="flex flex-wrap gap-1.5">
             {PIPELINE_TEMPLATES.map((template) => {
               const ready = templateReady(template, roles);
@@ -537,7 +537,7 @@ export function PipelineDialog({
                   type="button"
                   disabled={!ready}
                   title={ready ? undefined : rolesError ? t("pipelineDialog.templatesUnavailable") : t("pipelineDialog.templatesLoading")}
-                  className="rounded-full border border-line bg-bg px-2.5 py-1 text-[10.5px] font-semibold text-dim hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:cursor-not-allowed disabled:opacity-40"
+                  className="rounded-full border border-border bg-canvas px-2.5 py-1 text-[10.5px] font-semibold text-muted hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:cursor-not-allowed disabled:opacity-40"
                   onClick={() => applyTemplate(template)}
                 >
                   {t(template.labelKey)}
@@ -546,11 +546,11 @@ export function PipelineDialog({
             })}
           </div>
           {rolesError ? (
-            <div className="flex flex-wrap items-center gap-2 rounded-[8px] border border-[#e0ae45]/50 bg-[#fdf6ec] px-2.5 py-1.5" role="alert">
-              <span className="min-w-0 flex-1 text-[10.5px] font-semibold text-[#8a5b00]">{t("pipelineDialog.rolesError")}</span>
+            <div className="flex flex-wrap items-center gap-2 rounded-[8px] border border-warning/50 bg-warning-soft px-2.5 py-1.5" role="alert">
+              <span className="min-w-0 flex-1 text-[10.5px] font-semibold text-warning">{t("pipelineDialog.rolesError")}</span>
               <button
                 type="button"
-                className="shrink-0 rounded-full border border-[#e0ae45]/60 bg-panel px-2.5 py-0.5 text-[10.5px] font-bold text-[#8a5b00] hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                className="shrink-0 rounded-full border border-warning/60 bg-card px-2.5 py-0.5 text-[10.5px] font-bold text-warning hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
                 onClick={() => setRolesReload((n) => n + 1)}
               >
                 {t("pipelineDialog.rolesRetry")}
@@ -560,7 +560,7 @@ export function PipelineDialog({
         </div>
 
         <div className="flex items-center gap-2">
-          <span className="text-[10.5px] font-bold tracking-[0.06em] text-dim">{t("pipelineDialog.stagesLabel", { count: stages.length })}</span>
+          <span className="text-[11px] font-semibold text-secondary">{t("pipelineDialog.stagesLabel", { count: stages.length })}</span>
         </div>
         <div className="flex flex-col gap-1.5">
           {stages.map((stage, index) => (
@@ -579,18 +579,18 @@ export function PipelineDialog({
         </div>
         <button
           type="button"
-          className="self-start rounded-[8px] border border-dashed border-line bg-bg px-3 py-1.5 text-[11px] font-semibold text-dim hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40"
+          className="self-start rounded-[8px] border border-dashed border-border bg-canvas px-3 py-1.5 text-[11px] font-semibold text-muted hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40"
           disabled={stages.length >= 4}
           onClick={addStage}
         >
           <Plus className="mr-1 inline h-3.5 w-3.5" aria-hidden /> {t("pipelineDialog.addStage")}
         </button>
 
-        <div className="mt-1 flex items-center gap-2 border-t border-line pt-2.5">
-          {error ? <span className="min-w-0 flex-1 truncate text-[10.5px] font-semibold text-err" title={error}>{error}</span> : <span className="flex-1" />}
+        <div className="mt-1 flex items-center gap-2 border-t border-border pt-2.5">
+          {error ? <span className="min-w-0 flex-1 truncate text-[10.5px] font-semibold text-danger" title={error}>{error}</span> : <span className="flex-1" />}
           <button
             type="button"
-            className="rounded-[8px] border border-line bg-bg px-3 py-1.5 text-[11.5px] font-semibold text-dim hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            className="rounded-[8px] border border-border bg-canvas px-3 py-1.5 text-[11.5px] font-semibold text-muted hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
             onClick={onClose}
           >
             {t("common.cancel")}

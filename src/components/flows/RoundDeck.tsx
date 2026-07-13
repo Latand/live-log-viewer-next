@@ -44,8 +44,8 @@ function RoundTab({
   const tone = verdictTone(round.verdict);
   return (
     <button
-      className={`deck-tab absolute inset-x-0 flex items-center gap-1.5 rounded-[9px] border bg-panel px-2.5 text-left shadow-card focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
-        pulse ? "deck-tab-live border-ok/50" : "border-line hover:border-accent/45"
+      className={`deck-tab absolute inset-x-0 flex items-center gap-1.5 rounded-[9px] border bg-card px-2.5 text-left shadow-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+        pulse ? "deck-tab-live border-success/50" : "border-border hover:border-accent/45"
       }`}
       style={{
         height: TAB_H + 10,
@@ -62,11 +62,11 @@ function RoundTab({
       >
         R{round.n} <RoundStateIcon verdict={round.verdict} error={!!round.error} className="h-2.5 w-2.5" />
       </span>
-      <span className="min-w-0 flex-1 truncate text-[10.5px] font-semibold text-dim">
+      <span className="min-w-0 flex-1 truncate text-[10.5px] font-semibold text-muted">
         {round.error ? t("roundDeck.aborted") : round.verdict ? round.verdict : t("roundDeck.reviewInProgress")}
         {round.findingsCount != null && round.findingsCount > 0 ? ` · ${t("roundDeck.findings", { count: round.findingsCount })}` : ""}
       </span>
-      {pulse ? <span className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-ok" aria-hidden /> : null}
+      {pulse ? <span className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-success" aria-hidden /> : null}
     </button>
   );
 }
@@ -114,8 +114,8 @@ export function RoundDeck({
 
   if (!front) {
     return (
-      <div className="flex h-full items-center justify-center rounded-[10px] border border-dashed border-[#c9c9d1] bg-panel/60">
-        <span className="text-[12px] font-semibold text-dim">{t("roundDeck.waitingFirst")}</span>
+      <div className="flex h-full items-center justify-center rounded-[10px] border border-dashed border-strong bg-card/60">
+        <span className="text-[12px] font-semibold text-muted">{t("roundDeck.waitingFirst")}</span>
       </div>
     );
   }
@@ -144,7 +144,7 @@ export function RoundDeck({
             noComposer={flow.reviewerMode === "headless" || finished}
             banner={
               <div
-                className="flex h-6 shrink-0 items-center gap-1.5 border-b border-line px-2.5 text-[10.5px] font-bold"
+                className="flex h-6 shrink-0 items-center gap-1.5 border-b border-border px-2.5 text-[10.5px] font-bold"
                 style={{ backgroundColor: tone.soft, color: tone.color }}
               >
                 {roundLabel(t, front.round)}
@@ -160,9 +160,9 @@ export function RoundDeck({
             }
           />
         ) : (
-          <div className="flex h-full flex-col items-center justify-center gap-1 rounded-[10px] border border-line bg-panel shadow-card">
-            <span className="text-[12px] font-semibold text-dim">{roundLabel(t, front.round)}</span>
-            <span className="text-[11px] text-dim">
+          <div className="flex h-full flex-col items-center justify-center gap-1 rounded-[10px] border border-border bg-card shadow-1">
+            <span className="text-[12px] font-semibold text-muted">{roundLabel(t, front.round)}</span>
+            <span className="text-[11px] text-muted">
               {front.round.error ? front.round.error : t("roundDeck.spawningReviewer")}
             </span>
           </div>
@@ -180,7 +180,7 @@ export function RoundDeck({
       ))}
       {hidden > 0 ? (
         <div
-          className="pointer-events-none absolute inset-x-6 flex items-center justify-center rounded-[9px] border border-line bg-panel/70 text-[10px] font-semibold text-dim shadow-card"
+          className="pointer-events-none absolute inset-x-6 flex items-center justify-center rounded-[9px] border border-border bg-card/70 text-[10px] font-semibold text-muted shadow-1"
           style={{ height: TAB_H, bottom: -(shown.length * TAB_STEP) - 8, zIndex: 10 - shown.length }}
           aria-hidden
         >

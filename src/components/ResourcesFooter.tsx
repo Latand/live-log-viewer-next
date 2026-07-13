@@ -22,15 +22,15 @@ function fmtBytes(n: number): string {
 
 /** Bar color mirrors the LimitRow thresholds: amber under 30% headroom, red under 10%. */
 function ramColor(availablePercent: number): string {
-  if (availablePercent < 10) return "#c62828";
-  if (availablePercent < 30) return "#d29a2f";
-  return "#9a9aa4";
+  if (availablePercent < 10) return "var(--color-danger)";
+  if (availablePercent < 30) return "var(--color-warning)";
+  return "var(--color-muted)";
 }
 
 function swapColor(usedPercent: number): string {
-  if (usedPercent > 85) return "#c62828";
-  if (usedPercent > 60) return "#d29a2f";
-  return "#9a9aa4";
+  if (usedPercent > 85) return "var(--color-danger)";
+  if (usedPercent > 60) return "var(--color-warning)";
+  return "var(--color-muted)";
 }
 
 function MemoryRow({ label, usedPercent, color, note }: { label: string; usedPercent: number; color: string; note: string }) {
@@ -38,10 +38,10 @@ function MemoryRow({ label, usedPercent, color, note }: { label: string; usedPer
   return (
     <div className="mt-1.5 first:mt-0">
       <div className="flex items-baseline justify-between">
-        <span className="text-[11px] font-semibold text-ink">{label}</span>
-        <span className="text-[11px] tabular-nums text-dim">{note}</span>
+        <span className="text-[11px] font-semibold text-primary">{label}</span>
+        <span className="text-[11px] tabular-nums text-muted">{note}</span>
       </div>
-      <div className="mt-1 h-[4px] overflow-hidden rounded-full bg-chip">
+      <div className="mt-1 h-[4px] overflow-hidden rounded-full bg-sunken">
         <div
           className="h-full rounded-full transition-[width] duration-700 ease-out"
           style={{ width: width + "%", backgroundColor: color }}
@@ -129,17 +129,17 @@ export function ResourcesFooter() {
   const swapUsedPct = system && system.swapTotal > 0 ? (100 * system.swapUsed) / system.swapTotal : 0;
 
   return (
-    <div ref={panelRef} className="relative shrink-0 border-t border-line">
+    <div ref={panelRef} className="relative shrink-0 border-t border-border">
       <button
         type="button"
         aria-expanded={open}
         aria-label={t("resources.openAria")}
         onClick={() => setOpen((value) => !value)}
-        className="block w-full px-3.5 pb-2.5 pt-2 text-left hover:bg-bg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+        className="block w-full px-3.5 pb-2.5 pt-2 text-left hover:bg-canvas focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
       >
         {snap.staleSince ? (
           <span
-            className="absolute right-2 top-2 h-1.5 w-1.5 rounded-full bg-[#d29a2f]"
+            className="absolute right-2 top-2 h-1.5 w-1.5 rounded-full bg-warning"
             title={t("resources.stale", { stale: fmtAge(snap.staleSince) })}
           />
         ) : null}
@@ -159,12 +159,12 @@ export function ResourcesFooter() {
                 note={t("resources.used", { amount: fmtBytes(system.swapUsed) })}
               />
             ) : null}
-            <span className="mt-1.5 block text-right text-[9.5px] tabular-nums text-dim">
+            <span className="mt-1.5 block text-right text-[9.5px] tabular-nums text-muted">
               {t("resources.captured", { age: fmtAge(Date.parse(system.capturedAt) / 1000) })}
             </span>
           </>
         ) : (
-          <span className="text-[11px] font-semibold text-ink">{t("resources.title")}</span>
+          <span className="text-[11px] font-semibold text-primary">{t("resources.title")}</span>
         )}
       </button>
       {open ? (
@@ -292,24 +292,24 @@ function CleanupPanel({
   const bulkCount = bulkTargets(bulkHours).length;
 
   return (
-    <div className="fixed bottom-3 left-1/2 z-50 flex w-[min(430px,calc(100vw-16px))] -translate-x-1/2 flex-col rounded-[12px] border border-line bg-panel shadow-[0_8px_28px_rgba(20,20,30,0.14)] sm:absolute sm:bottom-1 sm:left-full sm:ml-2 sm:translate-x-0">
-      <header className="flex items-center gap-2 border-b border-line px-3 py-2">
+    <div className="fixed bottom-3 left-1/2 z-50 flex w-[min(430px,calc(100vw-16px))] -translate-x-1/2 flex-col rounded-[12px] border border-border bg-card shadow-[0_8px_28px_rgba(20,20,30,0.14)] sm:absolute sm:bottom-1 sm:left-full sm:ml-2 sm:translate-x-0">
+      <header className="flex items-center gap-2 border-b border-border px-3 py-2">
         <span className="text-[12.5px] font-bold">{t("resources.title")}</span>
         {sessions.length ? (
-          <span className="text-[11px] tabular-nums text-dim">{t("resources.total", { amount: fmtBytes(totalBytes) })}</span>
+          <span className="text-[11px] tabular-nums text-muted">{t("resources.total", { amount: fmtBytes(totalBytes) })}</span>
         ) : null}
         <button
           type="button"
           aria-label={t("resources.close")}
           onClick={onClose}
-          className="ml-auto inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded-[6px] p-1 text-dim hover:bg-bg hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 sm:min-h-0 sm:min-w-0"
+          className="ml-auto inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded-[6px] p-1 text-muted hover:bg-canvas hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 sm:min-h-0 sm:min-w-0"
         >
           <X className="h-3.5 w-3.5" aria-hidden />
         </button>
       </header>
       <div className="max-h-[min(420px,60vh)] overflow-y-auto py-1">
         {sessions.length === 0 ? (
-          <div className="px-3 py-4 text-center text-[12px] text-dim">{t("resources.empty")}</div>
+          <div className="px-3 py-4 text-center text-[12px] text-muted">{t("resources.empty")}</div>
         ) : (
           sessions.map((session) => (
             <SessionRow
@@ -324,12 +324,12 @@ function CleanupPanel({
           ))
         )}
       </div>
-      <footer className="flex items-center gap-2 border-t border-line px-3 py-2">
-        <span className="text-[11px] text-dim">{t("resources.bulkLabel")}</span>
+      <footer className="flex items-center gap-2 border-t border-border px-3 py-2">
+        <span className="text-[11px] text-muted">{t("resources.bulkLabel")}</span>
         <select
           value={bulkHours}
           onChange={(event) => setBulkHours(Number(event.target.value) as (typeof BULK_HOURS)[number])}
-          className="min-h-[44px] min-w-[44px] rounded-[8px] border border-line bg-bg px-1.5 py-1 text-[11px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 sm:min-h-0 sm:min-w-0"
+          className="min-h-[44px] min-w-[44px] rounded-[8px] border border-border bg-canvas px-1.5 py-1 text-[11px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 sm:min-h-0 sm:min-w-0"
         >
           {BULK_HOURS.map((hours) => (
             <option key={hours} value={hours}>
@@ -342,17 +342,17 @@ function CleanupPanel({
           disabled={bulkBusy || bulkCount === 0}
           title={bulkCount === 0 ? t("resources.bulkNone") : undefined}
           onClick={() => void killBulk()}
-          className="ml-auto inline-flex min-h-[44px] items-center rounded-[8px] border border-err/40 px-2.5 py-1 text-[11px] font-semibold text-err hover:bg-err/10 disabled:cursor-not-allowed disabled:opacity-45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-err/40 sm:min-h-0"
+          className="ml-auto inline-flex min-h-[44px] items-center rounded-[8px] border border-danger/40 px-2.5 py-1 text-[11px] font-semibold text-danger hover:bg-danger/10 disabled:cursor-not-allowed disabled:opacity-45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-danger/40 sm:min-h-0"
         >
           {t("resources.bulkKill")}
           {bulkCount ? ` (${bulkCount})` : ""}
         </button>
       </footer>
-      <div className="flex items-center gap-2 border-t border-line px-3 py-2">
-        <span className="text-[13px] leading-none text-err" aria-hidden>
+      <div className="flex items-center gap-2 border-t border-border px-3 py-2">
+        <span className="text-[13px] leading-none text-danger" aria-hidden>
           ⚠
         </span>
-        <span className="min-w-0 flex-1 truncate text-[10.5px] text-dim" title={t("resources.killAllHint")}>
+        <span className="min-w-0 flex-1 truncate text-[10.5px] text-muted" title={t("resources.killAllHint")}>
           {t("resources.killAllHint")}
         </span>
         <button
@@ -361,8 +361,8 @@ function CleanupPanel({
           title={sessions.length === 0 ? t("resources.killAllNone") : t("resources.killAllHint")}
           onClick={() => (killAllArmed ? void killAll() : setKillAllArmed(true))}
           className={[
-            "inline-flex min-h-[44px] shrink-0 items-center rounded-[8px] border px-2.5 py-1 text-[11px] font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-err/40 disabled:cursor-not-allowed disabled:opacity-45 sm:min-h-0",
-            killAllArmed ? "border-err bg-err text-white" : "border-err/40 text-err hover:bg-err/10",
+            "inline-flex min-h-[44px] shrink-0 items-center rounded-[8px] border px-2.5 py-1 text-[11px] font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-danger/40 disabled:cursor-not-allowed disabled:opacity-45 sm:min-h-0",
+            killAllArmed ? "border-danger bg-danger text-white" : "border-danger/40 text-danger hover:bg-danger/10",
           ].join(" ")}
         >
           {killAllArmed
@@ -370,7 +370,7 @@ function CleanupPanel({
             : t("resources.killAll") + (sessions.length ? ` (${sessions.length})` : "")}
         </button>
       </div>
-      {error ? <div className="border-t border-line px-3 py-1.5 text-[11px] font-semibold text-err">{error}</div> : null}
+      {error ? <div className="border-t border-border px-3 py-1.5 text-[11px] font-semibold text-danger">{error}</div> : null}
     </div>
   );
 }
@@ -407,7 +407,7 @@ function SessionRow({
      agent mid-turn with one stray tap. */
   const needsArm = live && !armed;
   return (
-    <div className="px-3 py-1.5 hover:bg-bg">
+    <div className="px-3 py-1.5 hover:bg-canvas">
       <div className="flex items-center gap-2">
         <span className={`h-2 w-2 shrink-0 rounded-full ${activityDot(session.activity ?? "idle")}`} />
         <span
@@ -423,7 +423,7 @@ function SessionRow({
           <span className="block truncate text-[12px] font-semibold">
             {hostConflict ? t("resources.hostConflict") : session.title ?? (session.cwd ? tailPath(session.cwd) : t("resources.orphan"))}
           </span>
-          <span className="block truncate text-[10.5px] text-dim">
+          <span className="block truncate text-[10.5px] text-muted">
             {hostConflict ? t("resources.hostConflictHint") + " · " : session.title === null ? t("resources.orphan") + " · " : session.project ? session.project + " · " : ""}
             {lastActive !== null ? fmtAge(lastActive) : session.target}
           </span>
@@ -431,7 +431,7 @@ function SessionRow({
         <span className="shrink-0 text-right">
           <span className="block text-[11.5px] font-bold tabular-nums">{fmtBytes(session.rssBytes)}</span>
           {session.swapBytes > 0 ? (
-            <span className="block text-[10px] tabular-nums text-dim">
+            <span className="block text-[10px] tabular-nums text-muted">
               {t("resources.swapShare", { amount: fmtBytes(session.swapBytes) })}
             </span>
           ) : null}
@@ -443,13 +443,13 @@ function SessionRow({
           title={live ? t("resources.killLiveHint") : t("resources.killHint")}
           onClick={() => (needsArm ? onArm() : onKill())}
           className={[
-            "inline-flex min-h-[44px] min-w-[44px] shrink-0 items-center justify-center rounded-[8px] border px-2 py-1 text-[11px] font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-err/40 sm:min-h-0 sm:min-w-0",
+            "inline-flex min-h-[44px] min-w-[44px] shrink-0 items-center justify-center rounded-[8px] border px-2 py-1 text-[11px] font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-danger/40 sm:min-h-0 sm:min-w-0",
             busy ? "cursor-wait opacity-50" : "",
             armed
-              ? "border-err bg-err text-white"
+              ? "border-danger bg-danger text-white"
               : needsArm
-                ? "border-line text-dim opacity-60 hover:opacity-90"
-                : "border-err/40 text-err hover:bg-err/10",
+                ? "border-border text-muted opacity-60 hover:opacity-90"
+                : "border-danger/40 text-danger hover:bg-danger/10",
           ].join(" ")}
         >
           {armed ? t("resources.confirm") : t("resources.kill")}
