@@ -7,14 +7,14 @@
    Migration note: the legacy `--color-*` names the codebase already uses stay
    defined as aliases of the new roles, so components not yet migrated keep
    rendering unchanged. They are deleted in Slice 3, once the raw-hex sweep and
-   dark theme land. Dark values are NOT wired here yet (Slice 3) — this file is
-   the light-theme role table plus the structural tokens. */
+   dark theme land. This file holds the light-theme role table and the
+   structural tokens; dark values arrive in Slice 3. */
 
-/* `@theme static` (not plain `@theme`): a production `next build` tree-shakes
-   unused custom properties out of a plain `@theme`, which would drop the tokens
-   later slices reference by name before any utility uses them (e.g.
-   `--surface-raised`, `--color-warning-soft`). `static` emits the whole token
-   contract to `:root` unconditionally. */
+/* Use `@theme static` because a production `next build` prunes unused custom
+   properties from a plain `@theme`, which would drop the tokens later slices
+   reference by name before any utility uses them (e.g. `--surface-raised`,
+   `--color-warning-soft`). `static` emits the whole token contract to `:root`
+   unconditionally. */
 @theme static {
   /* ── §1.1 Type ─────────────────────────────────────────────────────────── */
   --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto,
