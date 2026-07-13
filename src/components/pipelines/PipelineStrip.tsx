@@ -310,7 +310,10 @@ export function PipelineStrip({
         {error ? <span className="max-w-[220px] truncate text-[10.5px] font-semibold text-err" title={error}>{error}</span> : null}
         {busy ? <RefreshCw className="h-3.5 w-3.5 animate-spin text-dim" aria-hidden /> : null}
         {draft ? (
-          <button className="inline-flex min-h-8 items-center gap-1 rounded-full border border-[#9a6410] bg-[#9a6410] px-3 text-[11px] font-bold text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#c88719]/50 disabled:opacity-40" disabled={busy} onClick={() => void mutate("start")}>
+          /* A draft may be empty (assembled on the canvas, #136) — Start is gated on
+             the 2-stage floor here too, matching the builder panel and mobile dock,
+             so the halo strip never fires a rejected PATCH. */
+          <button className="inline-flex min-h-8 items-center gap-1 rounded-full border border-[#9a6410] bg-[#9a6410] px-3 text-[11px] font-bold text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#c88719]/50 disabled:opacity-40" disabled={busy || pipeline.stages.length < 2} title={pipeline.stages.length < 2 ? t("groupOverride.startNeedsStages") : undefined} onClick={() => void mutate("start")}>
             <Play className="h-3.5 w-3.5" aria-hidden /> {t("pipelineStrip.start")}
           </button>
         ) : pipeline.state === "needs_decision" ? (
