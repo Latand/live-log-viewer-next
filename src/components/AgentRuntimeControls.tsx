@@ -119,14 +119,14 @@ export function RuntimeControlsView({
           onClick={() => setSheetOpen(true)}
           aria-haspopup="dialog"
           aria-label={t("runtimeConfig.openSheet")}
-          className="inline-flex h-11 shrink-0 items-center gap-1.5 rounded-full border border-line bg-bg px-2.5 text-label font-semibold text-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60"
+          className="inline-flex h-11 shrink-0 items-center gap-1.5 rounded-full border border-border bg-canvas px-2.5 text-label font-semibold text-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60"
         >
           <SlidersHorizontal className="h-3.5 w-3.5 shrink-0 text-accent" aria-hidden />
           <span className="max-w-[38vw] truncate">{observedModelLabel} · {observedEffort}</span>
           {applyBusy ? (
             <Loader2 className="h-3 w-3 animate-spin" aria-hidden />
           ) : state === "applied" ? (
-            <Check className="h-3 w-3 text-ok" aria-hidden />
+            <Check className="h-3 w-3 text-success" aria-hidden />
           ) : draftPending ? (
             <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-warning" role="img" aria-label={t("runtimeConfig.pendingDraft", { model: modelLabel, effort: draft.effort })} title={t("runtimeConfig.pendingDraft", { model: modelLabel, effort: draft.effort })} />
           ) : null}
@@ -137,19 +137,19 @@ export function RuntimeControlsView({
             role="presentation"
             onClick={(event) => { if (event.target === event.currentTarget) setSheetOpen(false); }}
           >
-            <div role="dialog" aria-label={t("runtimeConfig.openSheet")} className="max-h-[80vh] w-full max-w-[440px] overflow-y-auto rounded-t-[16px] bg-panel p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] shadow-[0_-8px_36px_rgb(20_20_30/0.24)]">
+            <div role="dialog" aria-label={t("runtimeConfig.openSheet")} className="max-h-[80vh] w-full max-w-[440px] overflow-y-auto rounded-t-[16px] bg-card p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] shadow-2">
               <div className="mb-2 flex items-center gap-2">
-                <div className="mx-auto h-1 w-10 rounded-full bg-line" aria-hidden />
+                <div className="mx-auto h-1 w-10 rounded-full bg-border" aria-hidden />
                 <button
                   type="button"
                   onClick={() => setSheetOpen(false)}
                   aria-label={t("common.close")}
-                  className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full border border-line bg-bg text-dim hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                  className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full border border-border bg-canvas text-muted hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
                 >
                   <X className="h-4 w-4" aria-hidden />
                 </button>
               </div>
-              <div className="mb-1 text-caption font-semibold uppercase tracking-wide text-dim">{t("runtimeConfig.model")}</div>
+              <div className="mb-1 text-caption font-semibold uppercase tracking-wide text-muted">{t("runtimeConfig.model")}</div>
               <div className="mb-3 flex flex-wrap gap-1.5">
                 {(withDefaults ? [{ id: "", label: t("draft.modelDefault") }, ...ENGINE_MODELS[engine]] : [...ENGINE_MODELS[engine]]).map((model) => (
                   <button
@@ -158,14 +158,14 @@ export function RuntimeControlsView({
                     aria-pressed={draft.model === model.id}
                     onClick={() => editModel(model.id)}
                     className={`inline-flex min-h-11 items-center rounded-control border px-3 text-body font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
-                      draft.model === model.id ? "border-accent bg-accent/10 text-accent" : "border-line bg-bg text-ink"
+                      draft.model === model.id ? "border-accent bg-accent/10 text-accent" : "border-border bg-canvas text-primary"
                     }`}
                   >
                     {model.label}
                   </button>
                 ))}
               </div>
-              <div className="mb-1 text-caption font-semibold uppercase tracking-wide text-dim">{t("runtimeConfig.effort")}</div>
+              <div className="mb-1 text-caption font-semibold uppercase tracking-wide text-muted">{t("runtimeConfig.effort")}</div>
               <div className="mb-3 flex flex-wrap gap-1.5">
                 {(withDefaults ? ["", ...efforts] : efforts).map((effort) => (
                   <button
@@ -174,7 +174,7 @@ export function RuntimeControlsView({
                     aria-pressed={draft.effort === effort}
                     onClick={() => onEdit((current) => ({ ...current, effort }))}
                     className={`inline-flex min-h-11 items-center rounded-control border px-3 text-body font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
-                      draft.effort === effort ? "border-accent bg-accent/10 text-accent" : "border-line bg-bg text-ink"
+                      draft.effort === effort ? "border-accent bg-accent/10 text-accent" : "border-border bg-canvas text-primary"
                     }`}
                   >
                     {effort || t("draft.effortDefault")}
@@ -182,12 +182,12 @@ export function RuntimeControlsView({
                 ))}
               </div>
               {speedShown ? (
-                <label className="mb-3 flex min-h-11 items-center gap-2 rounded-control border border-line bg-bg px-3 text-body font-semibold text-ink">
+                <label className="mb-3 flex min-h-11 items-center gap-2 rounded-control border border-border bg-canvas px-3 text-body font-semibold text-primary">
                   <input type="checkbox" className="h-4 w-4" checked={draft.fast} onChange={(event) => onEdit((current) => ({ ...current, fast: event.target.checked }))} />
                   {t("runtimeConfig.speedTitle")}
                 </label>
               ) : null}
-              {error ? <div className="mb-2 text-ui font-semibold text-err">{error}</div> : null}
+              {error ? <div className="mb-2 text-ui font-semibold text-danger">{error}</div> : null}
               <button
                 type="button"
                 disabled={state === "saving"}
@@ -204,7 +204,7 @@ export function RuntimeControlsView({
     );
   }
 
-  const selectClass = "h-6 rounded-full border border-line bg-bg px-1.5 font-mono text-[9.5px] font-semibold text-[#555] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60";
+  const selectClass = "h-6 rounded-full border border-border bg-canvas px-1.5 font-mono text-[9.5px] font-semibold text-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60";
   return (
     <div className="inline-flex min-w-0 items-center gap-1" onPointerDown={(event) => event.stopPropagation()} title={error || undefined}>
       <select
@@ -228,11 +228,11 @@ export function RuntimeControlsView({
         {efforts.map((effort) => <option key={effort} value={effort}>{effort}</option>)}
       </select>
       {speedShown ? (
-        <label className="inline-flex h-6 items-center gap-1 rounded-full border border-line bg-bg px-1.5 font-mono text-[9.5px] font-semibold text-[#555]" title={t("runtimeConfig.speedTitle")}>
+        <label className="inline-flex h-6 items-center gap-1 rounded-full border border-border bg-canvas px-1.5 font-mono text-[9.5px] font-semibold text-secondary" title={t("runtimeConfig.speedTitle")}>
           <input type="checkbox" checked={draft.fast} onChange={(event) => onEdit((current) => ({ ...current, fast: event.target.checked }))} /> fast
         </label>
       ) : null}
-      <button type="button" className="inline-flex h-6 items-center gap-1 rounded-full border border-line bg-bg px-1.5 text-[9.5px] font-semibold text-dim hover:border-accent/45 hover:text-accent disabled:opacity-60" disabled={disabled || state === "saving"} onClick={onApply} aria-label={t("runtimeConfig.apply")}>
+      <button type="button" className="inline-flex h-6 items-center gap-1 rounded-full border border-border bg-canvas px-1.5 text-[9.5px] font-semibold text-muted hover:border-accent/45 hover:text-accent disabled:opacity-60" disabled={disabled || state === "saving"} onClick={onApply} aria-label={t("runtimeConfig.apply")}>
         {applyBusy ? <Loader2 className="h-3 w-3 animate-spin" aria-hidden /> : <Check className="h-3 w-3" aria-hidden />}
         {state === "pending" ? t("runtimeConfig.pending") : state === "confirming" ? t("runtimeConfig.confirming") : state === "applied" ? t("runtimeConfig.applied") : t("runtimeConfig.apply")}
       </button>

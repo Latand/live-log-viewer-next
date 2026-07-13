@@ -30,10 +30,10 @@ interface Props {
 }
 
 function toneClass(tone: SwitchCardTone): string {
-  if (tone === "working") return "border-ok/40 bg-[#f3fbf5] shadow-[0_0_0_3px_rgba(26,138,62,0.12)]";
-  if (tone === "stalled") return "border-err/35 bg-[#fff5f5]";
-  if (tone === "waiting") return "border-[#e0ae45]/45 bg-[#fff9ed]";
-  return "border-line bg-panel";
+  if (tone === "working") return "border-success/40 bg-success-soft shadow-[0_0_0_3px_color-mix(in_srgb,var(--color-success)_16%,transparent)]";
+  if (tone === "stalled") return "border-danger/35 bg-danger-soft";
+  if (tone === "waiting") return "border-warning/45 bg-warning-soft";
+  return "border-border bg-card";
 }
 
 export function SwitchCard({ file, title, project, currentProject, descendants, statusLine, size, tone, onOpen, onArchive }: Props) {
@@ -42,7 +42,7 @@ export function SwitchCard({ file, title, project, currentProject, descendants, 
   const large = size === "large";
   return (
     <article
-      className={`group relative flex ${large ? "h-[150px] w-[300px]" : "h-[108px] w-[220px]"} shrink-0 flex-col rounded-[8px] border p-3 shadow-card transition-colors hover:border-accent/45 ${toneClass(tone)}`}
+      className={`group relative flex ${large ? "h-[150px] w-[300px]" : "h-[108px] w-[220px]"} shrink-0 flex-col rounded-[8px] border p-3 shadow-1 transition-colors hover:border-accent/45 ${toneClass(tone)}`}
       role="button"
       tabIndex={0}
       aria-label={t("switchCard.openColumn", { title: cleanTitle(title, 80) })}
@@ -54,7 +54,7 @@ export function SwitchCard({ file, title, project, currentProject, descendants, 
       {file.activity === "live" ? null : (
         <button
           type="button"
-          className="absolute right-1.5 top-1.5 z-10 hidden h-5 w-5 items-center justify-center rounded-full border border-line bg-bg text-dim hover:border-err/50 hover:text-err focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 group-hover:flex group-focus-within:flex"
+          className="absolute right-1.5 top-1.5 z-10 hidden h-5 w-5 items-center justify-center rounded-full border border-border bg-canvas text-muted hover:border-danger/50 hover:text-danger focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 group-hover:flex group-focus-within:flex"
           aria-label={t("switchCard.remove")}
           onClick={(event) => {
             event.stopPropagation();
@@ -84,8 +84,8 @@ export function SwitchCard({ file, title, project, currentProject, descendants, 
         <RateLimitBadge rateLimit={file.rateLimit} />
         <WakeupChip key={wakeupChipKey(file.pendingWakeup)} wakeup={file.pendingWakeup} />
         <span
-          className={`ml-auto min-w-0 truncate rounded-full border border-line bg-bg px-1.5 py-0.5 text-[9.5px] font-semibold ${
-            project === currentProject ? "text-dim" : "text-ink"
+          className={`ml-auto min-w-0 truncate rounded-full border border-border bg-canvas px-1.5 py-0.5 text-[9.5px] font-semibold ${
+            project === currentProject ? "text-muted" : "text-primary"
           }`}
           title={project}
         >
@@ -95,7 +95,7 @@ export function SwitchCard({ file, title, project, currentProject, descendants, 
       <div className={`relative mt-2 min-w-0 ${large ? "text-[14px]" : "text-[12.5px]"} font-bold leading-snug`} title={title}>
         <span className={large ? "line-clamp-2" : "line-clamp-2"}>{title}</span>
       </div>
-      <div className="relative mt-auto flex min-w-0 items-center gap-2 text-[10.5px] font-semibold text-dim">
+      <div className="relative mt-auto flex min-w-0 items-center gap-2 text-[10.5px] font-semibold text-muted">
         <span className="shrink-0">{fmtAge(file.mtime)}</span>
         {file.ctx ? <CtxChip ctx={file.ctx} /> : null}
         {descendants ? (
@@ -105,7 +105,7 @@ export function SwitchCard({ file, title, project, currentProject, descendants, 
         ) : null}
       </div>
       {statusLine ? (
-        <div className={`relative mt-1 min-w-0 truncate ${large ? "text-[11.5px]" : "text-[10.5px]"} font-semibold text-ink/75`}>
+        <div className={`relative mt-1 min-w-0 truncate ${large ? "text-[11.5px]" : "text-[10.5px]"} font-semibold text-primary/75`}>
           {statusLine}
         </div>
       ) : null}

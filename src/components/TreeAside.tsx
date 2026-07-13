@@ -2,7 +2,8 @@
 
 import { useState } from "react";
 
-import { ChevronRight, GitBranch } from "@/components/icons";
+import { GitBranch } from "@/components/icons";
+import { SectionHeader } from "@/components/ui/SectionHeader";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useLocale } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
@@ -24,18 +25,14 @@ export function ResidualStrip({
   const isMobile = useIsMobile();
   const [open, setOpen] = useState(false);
   return (
-    <div className="shrink-0 border-t border-line bg-panel">
-      <button
-        className={`flex w-full items-center gap-2 px-4 text-[10px] font-bold uppercase tracking-[.6px] text-dim hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
-          isMobile ? "min-h-11" : "h-8"
-        }`}
-        aria-expanded={open}
-        onClick={() => setOpen((value) => !value)}
-      >
-        <ChevronRight className={`h-3.5 w-3.5 transition-transform ${open ? "rotate-90" : ""}`} aria-hidden />
-        {t("tree.quiet")}
-        <span className="font-semibold normal-case tracking-normal">{items.length}</span>
-      </button>
+    <div className="shrink-0 border-t border-border bg-canvas">
+      <SectionHeader
+        open={open}
+        onToggle={() => setOpen((value) => !value)}
+        label={t("tree.quiet")}
+        count={items.length}
+        mobile={isMobile}
+      />
       {open ? (
         <FlipRow className="flex max-h-44 flex-wrap items-start gap-1.5 overflow-y-auto px-3 pb-2.5">
           {items.map((file) => {
@@ -46,7 +43,7 @@ export function ResidualStrip({
               <button
                 key={file.path}
                 data-flip-key={file.path}
-                className={`inline-flex max-w-[360px] items-center gap-1.5 rounded-full border border-line bg-bg text-[11px] font-semibold text-ink hover:border-accent/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+                className={`inline-flex max-w-[360px] items-center gap-1.5 rounded-full border border-transparent bg-sunken text-[11px] font-semibold text-primary hover:border-border focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
                   isMobile ? "min-h-11 px-3" : "h-7 px-2"
                 }`}
                 title={cleanTitle(file.title)}
@@ -64,7 +61,7 @@ export function ResidualStrip({
                     {t("trash.activeSubtree")}
                   </span>
                 ) : null}
-                <span className="shrink-0 font-normal text-dim">{fmtAge(file.mtime)}</span>
+                <span className="shrink-0 font-normal text-muted">{fmtAge(file.mtime)}</span>
               </button>
             );
           })}

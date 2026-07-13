@@ -126,7 +126,7 @@ function ToolButton({
   return (
     <button
       className={`inline-flex h-7 w-7 items-center justify-center rounded-[8px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
-        active ? "bg-accent/10 text-accent" : "text-dim hover:bg-bg hover:text-ink"
+        active ? "bg-accent/10 text-accent" : "text-muted hover:bg-canvas hover:text-primary"
       }`}
       title={title}
       aria-label={title}
@@ -852,7 +852,7 @@ export function SchemeBoard({
         className="pointer-events-none absolute"
         style={{
           inset: -tile,
-          backgroundImage: "radial-gradient(rgba(28,28,34,0.09) 1px, transparent 1px)",
+          backgroundImage: "radial-gradient(color-mix(in srgb, var(--color-primary) 9%, transparent) 1px, transparent 1px)",
           backgroundSize: `${tile}px ${tile}px`,
           transform: `translate(${((cam.x % tile) + tile) % tile}px, ${((cam.y % tile) + tile) % tile}px)`,
           willChange: "transform",
@@ -929,7 +929,7 @@ export function SchemeBoard({
             style={{ left: bbox.x - 14, top: bbox.y - 14, width: bbox.w + 28, height: bbox.h + 28 }}
           >
             <span
-              className="absolute -top-3 left-4 rounded-full border border-accent/50 bg-panel px-2 py-0.5 font-bold text-accent"
+              className="absolute -top-3 left-4 rounded-full border border-accent/50 bg-card px-2 py-0.5 font-bold text-accent"
               style={{ fontSize: "calc(11px * min(var(--inv-z, 1), 2.6))" }}
             >
               {t("bulk.selectedCount", { count: multi.size })}
@@ -964,7 +964,7 @@ export function SchemeBoard({
         </div>
       ) : null}
 
-      <div data-scheme-ui className="absolute left-3 top-3 z-40 flex items-center gap-1 rounded-[10px] border border-line bg-panel/95 p-1 shadow-card">
+      <div data-scheme-ui className="absolute left-3 top-3 z-40 flex items-center gap-1 rounded-[10px] border border-border bg-card/95 p-1 shadow-1">
         {mapMode ? null : (
           <>
             <ToolButton active={handLike && !taskTool} title={t("scheme.handTool")} onClick={() => setMode("hand")}>
@@ -994,14 +994,14 @@ export function SchemeBoard({
             <ToolButton active={taskTool} title={t("tasks.tool")} onClick={() => setTaskTool(!taskTool)}>
               <StickyNote className="h-4 w-4" aria-hidden />
             </ToolButton>
-            <div className="mx-0.5 h-5 w-px bg-line" aria-hidden />
+            <div className="mx-0.5 h-5 w-px bg-border" aria-hidden />
           </>
         )}
         <ToolButton title={t("scheme.zoomOut")} onClick={() => zoomCenter(0.8)}>
           <Minus className="h-4 w-4" aria-hidden />
         </ToolButton>
         <button
-          className="min-w-[46px] rounded-[8px] px-1 text-center text-[11px] font-semibold text-dim hover:bg-bg hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+          className="min-w-[46px] rounded-[8px] px-1 text-center text-[11px] font-semibold text-muted hover:bg-canvas hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
           title={t("scheme.zoom100")}
           onClick={() => zoomTo(1)}
         >
@@ -1034,7 +1034,7 @@ export function SchemeBoard({
         canvas pan/select handlers. */}
     {expandedNode ? (
       <div
-        className="fixed inset-0 z-40 flex flex-col bg-bg p-3"
+        className="fixed inset-0 z-40 flex flex-col bg-canvas p-3"
         role="dialog"
         aria-modal="true"
         aria-label={cleanTitle(expandedNode.file.title, 90)}

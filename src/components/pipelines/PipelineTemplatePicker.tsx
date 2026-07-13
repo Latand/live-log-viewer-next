@@ -47,18 +47,18 @@ export function PipelineTemplatePicker({
         role="dialog"
         aria-modal="true"
         aria-label={t("pipelineTemplates.title")}
-        className="w-full max-w-[460px] rounded-t-[16px] bg-panel p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] shadow-[0_8px_32px_rgb(20_20_30/0.16)] sm:rounded-[12px] sm:pb-3"
+        className="w-full max-w-[460px] rounded-t-[16px] bg-card p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] shadow-2 sm:rounded-[12px] sm:pb-3"
       >
         <div className="mb-1 flex items-center gap-2">
           <div className="min-w-0 flex-1">
-            <div className="text-[15px] font-bold text-ink">{t("pipelineTemplates.title")}</div>
-            <div className="text-[12px] text-dim">{t("pipelineTemplates.subtitle")}</div>
+            <div className="text-[15px] font-bold text-primary">{t("pipelineTemplates.title")}</div>
+            <div className="text-[12px] text-muted">{t("pipelineTemplates.subtitle")}</div>
           </div>
           <button
             type="button"
             onClick={onClose}
             aria-label={t("common.close")}
-            className="flex h-11 w-11 shrink-0 items-center justify-center rounded-[8px] border border-line bg-bg text-dim hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            className="flex h-11 w-11 shrink-0 items-center justify-center rounded-[8px] border border-border bg-canvas text-muted hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
           >
             <X className="h-4 w-4" aria-hidden />
           </button>
@@ -72,7 +72,7 @@ export function PipelineTemplatePicker({
               onClick={() => onPick(template)}
               className="flex min-h-11 w-full flex-col justify-center gap-1 rounded-[8px] px-3 py-2 text-left hover:bg-sunken focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-50"
             >
-              <span className="text-[13px] font-semibold text-ink">{t(template.labelKey)}</span>
+              <span className="text-[13px] font-semibold text-primary">{t(template.labelKey)}</span>
               <span className="flex flex-wrap items-center gap-1" aria-hidden>
                 {template.stages.map((stage, index) => (
                   <span key={index} className="flex items-center gap-1">
@@ -96,8 +96,8 @@ export function PipelineTemplatePicker({
             onClick={() => onPick(null)}
             className="flex min-h-11 w-full flex-col justify-center gap-0.5 rounded-[8px] border border-dashed border-strong px-3 py-2 text-left hover:bg-sunken focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-50"
           >
-            <span className="text-[13px] font-semibold text-ink">{t("pipelineTemplates.blank")}</span>
-            <span className="text-[11px] text-dim">{t("pipelineTemplates.blankHint")}</span>
+            <span className="text-[13px] font-semibold text-primary">{t("pipelineTemplates.blank")}</span>
+            <span className="text-[11px] text-muted">{t("pipelineTemplates.blankHint")}</span>
           </button>
         </div>
       </div>

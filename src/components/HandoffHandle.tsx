@@ -48,7 +48,7 @@ export function HandoffHandle({ file, onHandoff, inline = false }: Props) {
             if (link.consumeClick()) return;
             onHandoff();
           }}
-          className="inline-flex min-h-11 shrink-0 touch-none items-center gap-1.5 rounded-full border border-line bg-panel px-3 text-[12px] font-semibold text-dim shadow-card hover:border-accent/50 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+          className="flex min-h-11 w-full touch-none items-center justify-center gap-1.5 rounded-[8px] border border-border bg-card text-[12px] font-semibold text-muted shadow-1 hover:border-accent/50 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
         >
           <ArrowRightLeft className="h-4 w-4 shrink-0" aria-hidden />
           {t("handoff.label")}
@@ -68,7 +68,7 @@ export function HandoffHandle({ file, onHandoff, inline = false }: Props) {
           if (link.consumeClick()) return;
           onHandoff();
         }}
-        className="flex h-7 touch-none items-center gap-1.5 rounded-full border border-line bg-panel px-2 text-dim shadow-card transition-[border-color,color] duration-150 hover:border-accent/50 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+        className="flex h-7 touch-none items-center gap-1.5 rounded-full border border-border bg-card px-2 text-muted shadow-1 transition-[border-color,color] duration-150 hover:border-accent/50 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
       >
         <ArrowRightLeft className="h-3.5 w-3.5 shrink-0" aria-hidden />
         <span className="max-w-[0px] overflow-hidden whitespace-nowrap text-[11px] font-semibold transition-[max-width] duration-200 group-hover:max-w-[180px] group-focus-within:max-w-[180px]">

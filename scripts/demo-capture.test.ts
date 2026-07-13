@@ -12,7 +12,7 @@ import {
   renderFixtureTemplate,
 } from "./demo-capture";
 
-const { assertPixelMetrics, measurePixelMetrics } = require("./demo-capture-browser.cjs") as {
+const { assertPixelMetrics, measurePixelMetrics, waitForVisibleElements } = require("./demo-capture-browser.cjs") as {
   assertPixelMetrics: (
     metrics: {
       nearBlackRatio: number;
@@ -31,6 +31,13 @@ const { assertPixelMetrics, measurePixelMetrics } = require("./demo-capture-brow
     maxTileNearBlackRatio: number;
     maxTile: { column: number; row: number };
   };
+  waitForVisibleElements: (
+    page: {
+      waitForFunction: (...args: unknown[]) => Promise<void>;
+      evaluate: (...args: unknown[]) => Promise<void>;
+    },
+    shot: (typeof SHOTS)[number],
+  ) => Promise<void>;
 };
 
 describe("demo capture contract", () => {
@@ -122,5 +129,34 @@ describe("demo capture contract", () => {
       { maxNearBlackRatio: 0.05, minNonWhiteRatio: 0.15, minColorCount: 100, maxTileNearBlackRatio: 0.2 },
       "overview-board",
     )).toThrow("near-black tile");
+  });
+
+  test("capture waits for the complete required-element contract", async () => {
+    let releaseReadiness!: () => void;
+    const readiness = new Promise<void>((resolve) => { releaseReadiness = resolve; });
+    let releasePaint!: () => void;
+    const paint = new Promise<void>((resolve) => { releasePaint = resolve; });
+    let receivedFrame: unknown;
+    let finished = false;
+    const page = {
+      waitForFunction: async (...args: unknown[]) => {
+        receivedFrame = args[2];
+        await readiness;
+      },
+      evaluate: async () => { await paint; },
+    };
+    const shot = SHOTS.find((candidate) => candidate.id === "review-loop")!;
+    expect(shot.frame.visible.map((expected) => expected.text)).toContain("Reviewer checking deterministic output");
+    const waiting = waitForVisibleElements(page, shot).then(() => { finished = true; });
+
+    await Promise.resolve();
+    expect(finished).toBeFalse();
+    expect(receivedFrame).toBe(shot.frame);
+    releaseReadiness();
+    await Promise.resolve();
+    expect(finished).toBeFalse();
+    releasePaint();
+    await waiting;
+    expect(finished).toBeTrue();
   });
 });

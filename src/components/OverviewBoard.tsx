@@ -60,11 +60,11 @@ export function OverviewBoard({ files, projectCatalog, pipelines, workflows, arc
 
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-      <div className="flex h-10 shrink-0 items-center gap-2.5 border-b border-line bg-panel px-4">
+      <div className="flex h-10 shrink-0 items-center gap-2.5 border-b border-border bg-card px-4">
         {onMenu ? (
           <button
             type="button"
-            className="-ml-1.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-[8px] border border-line bg-bg text-dim hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            className="-ml-1.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-[8px] border border-border bg-canvas text-muted hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
             aria-label={t("dash.openProjects")}
             onClick={onMenu}
           >
@@ -72,7 +72,7 @@ export function OverviewBoard({ files, projectCatalog, pipelines, workflows, arc
           </button>
         ) : null}
         <h1 className="text-[13.5px] font-bold">{t("rail.overview")}</h1>
-        <span className="text-[11.5px] text-dim">
+        <span className="text-[11.5px] text-muted">
           {totalLive
             ? t("overview.branchesLiveIn", { count: totalLive, projects: t("overview.projects", { count: liveProjects }) })
             : t("common.nothingRunning")}
@@ -88,20 +88,18 @@ export function OverviewBoard({ files, projectCatalog, pipelines, workflows, arc
           return (
             <button
               key={summary.project}
-              className={`flex flex-col gap-1.5 rounded-[10px] border border-line bg-panel p-3 text-left shadow-card hover:border-accent/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+              className={`flex flex-col gap-1.5 rounded-[10px] border border-border bg-card p-3 text-left shadow-1 hover:border-accent/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
                 summary.catalogOnly ? "opacity-70" : ""
               }`}
               onClick={() => onSelectProject(summary.project)}
             >
               <span className="flex items-center gap-2">
-                <span className={`h-2 w-2 shrink-0 rounded-full ${summary.liveCount ? "animate-pulse bg-ok" : "bg-[#d6d6dd]"}`} />
+                <span className={`h-2 w-2 shrink-0 rounded-full ${summary.liveCount ? "animate-pulse bg-success" : "bg-strong"}`} />
                 <span className="min-w-0 flex-1 truncate text-[13px] font-bold">{summary.project}</span>
                 {summary.liveCount ? (
-                  <span className="shrink-0 rounded-full bg-[#e5f6ea] px-1.5 py-0.5 text-[10.5px] font-bold text-ok">
-                    {summary.liveCount}
-                  </span>
+                  <span className="shrink-0 text-caption font-semibold tabular-nums text-muted">{summary.liveCount}</span>
                 ) : null}
-                <span className="shrink-0 text-[11px] font-semibold text-dim">{summary.conversations}</span>
+                <span className="shrink-0 text-[11px] font-semibold text-muted">{summary.conversations}</span>
               </span>
               {liveBranches.length ? (
                 <span className="flex flex-col gap-1">
@@ -110,7 +108,7 @@ export function OverviewBoard({ files, projectCatalog, pipelines, workflows, arc
                     return (
                       <span
                         key={branch.path}
-                        className="flex cursor-pointer items-center gap-1.5 rounded-[8px] px-1 py-0.5 text-[11.5px] hover:bg-bg"
+                        className="flex cursor-pointer items-center gap-1.5 rounded-[8px] px-1 py-0.5 text-[11.5px] hover:bg-canvas"
                         role="link"
                         tabIndex={0}
                         title={cleanTitle(branch.title)}
@@ -131,11 +129,11 @@ export function OverviewBoard({ files, projectCatalog, pipelines, workflows, arc
                     );
                   })}
                   {moreLive > 0 ? (
-                    <span className="px-1 text-[10.5px] font-semibold text-dim">{t("overview.moreLive", { count: moreLive })}</span>
+                    <span className="px-1 text-[10.5px] font-semibold text-muted">{t("overview.moreLive", { count: moreLive })}</span>
                   ) : null}
                 </span>
               ) : (
-                <span className="text-[11px] text-dim">
+                <span className="text-[11px] text-muted">
                   {t("overview.quiet", { age: latest ? fmtAge(latest.mtime) : "—" })}
                 </span>
               )}
@@ -143,7 +141,7 @@ export function OverviewBoard({ files, projectCatalog, pipelines, workflows, arc
           );
         })}
         {!summaries.length ? (
-          <div className="col-span-full mt-[20vh] text-center text-dim">{t("overview.empty")}</div>
+          <div className="col-span-full mt-[20vh] text-center text-muted">{t("overview.empty")}</div>
         ) : null}
       </div>
     </div>

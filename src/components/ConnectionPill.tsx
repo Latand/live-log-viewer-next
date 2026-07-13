@@ -3,16 +3,17 @@
 import { useEffect, useRef, useState } from "react";
 
 import type { ConnectionState } from "@/components/runtime/runtimeModel";
+import { Badge, type BadgeTone } from "@/components/ui/Badge";
 import { useLocale, type TFunction } from "@/lib/i18n";
 
 import { useRuntime } from "@/hooks/useRuntime";
 
-/** Visual tone per connection state, in the dashboard token palette. */
-const TONE: Record<ConnectionState, { dot: string; text: string; pulse: boolean }> = {
-  live: { dot: "bg-ok", text: "text-ok", pulse: true },
-  reconnecting: { dot: "bg-[#e0ae45]", text: "text-[#b8860b]", pulse: true },
-  degraded: { dot: "bg-[#e0ae45]", text: "text-[#b8860b]", pulse: false },
-  offline: { dot: "bg-err", text: "text-err", pulse: false },
+/** Badge tone + status dot per connection state (six-tone vocabulary, §3.7). */
+const TONE: Record<ConnectionState, { badge: BadgeTone; dot: string; pulse: boolean }> = {
+  live: { badge: "success", dot: "bg-success", pulse: true },
+  reconnecting: { badge: "warning", dot: "bg-warning", pulse: true },
+  degraded: { badge: "warning", dot: "bg-warning", pulse: false },
+  offline: { badge: "danger", dot: "bg-danger", pulse: false },
 };
 
 const ANNOUNCE_KEY: Record<ConnectionState, "runtime.announce.live" | "runtime.announce.reconnecting" | "runtime.announce.degraded" | "runtime.announce.offline"> = {
@@ -42,26 +43,19 @@ export interface ConnectionPillViewProps {
 export function ConnectionPillView({ connection, resynced, legacy, compact, announce, t }: ConnectionPillViewProps) {
   const tone = TONE[connection];
   return (
-    <div
-      className={`inline-flex items-center gap-1.5 rounded-full border border-line bg-panel/95 font-bold shadow-card backdrop-blur ${
-        compact ? "px-2 py-0.5 text-[10.5px]" : "px-2.5 py-1 text-[11.5px]"
-      }`}
-      data-connection={connection}
-    >
+    <Badge tone={tone.badge} data-connection={connection} className={`backdrop-blur ${compact ? "" : "shadow-1"}`}>
       <span
         className={`h-2 w-2 rounded-full ${tone.dot} ${tone.pulse ? "animate-pulse motion-reduce:animate-none" : ""}`}
         aria-hidden
       />
-      <span className={tone.text}>{t(`runtime.${connection}`)}</span>
-      {legacy ? <span className="text-dim">· {t("runtime.legacyProvenance")}</span> : null}
-      {resynced ? (
-        <span className="rounded-full bg-accent/10 px-1.5 text-[10px] font-bold text-accent">{t("runtime.resynced")}</span>
-      ) : null}
+      <span>{t(`runtime.${connection}`)}</span>
+      {legacy ? <span className="font-normal text-muted">· {t("runtime.legacyProvenance")}</span> : null}
+      {resynced ? <span className="rounded-full bg-accent-soft px-1.5 text-accent">{t("runtime.resynced")}</span> : null}
       {/* One polite announcement per settled transition. */}
       <span role="status" aria-live="polite" className="sr-only">
         {announce}
       </span>
-    </div>
+    </Badge>
   );
 }
 

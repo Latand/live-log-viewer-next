@@ -8,9 +8,9 @@ import { MOVE_EASE, MOVE_MS } from "./nodes";
 import { type TaskEdgeGeom, type TaskEdgeRoute } from "./taskGeometry";
 
 /* Coral of a failed delivery beats the task's own status tone. */
-const FAILED_COLOR = "#d97757";
+const FAILED_COLOR = "var(--color-danger)";
 /* Muted teal marks the provenance thread back to the originating session. */
-const SOURCE_COLOR = "#0d8a72";
+const SOURCE_COLOR = "var(--color-info)";
 /* A crossing the router could not avoid is faded to this fraction of its normal
    opacity — it then reads as running *behind* the card it must pass. */
 const CROSS_FADE = 0.4;
@@ -105,7 +105,7 @@ export const TaskEdgesLayer = memo(function TaskEdgesLayer({
                   cx={midX}
                   cy={midY}
                   r={11}
-                  fill="#fff"
+                  fill="var(--color-card)"
                   stroke={FAILED_COLOR}
                   strokeWidth={2}
                   style={

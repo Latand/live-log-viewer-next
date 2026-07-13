@@ -67,21 +67,25 @@ export function TaskToastHost() {
     <div
       className={
         isMobile
-          ? "z-50 flex shrink-0 flex-col gap-1.5 border-t border-line bg-panel px-3 py-2 pb-[max(0.5rem,env(safe-area-inset-bottom))]"
+          ? "z-50 flex shrink-0 flex-col gap-1.5 border-t border-border bg-canvas px-3 py-2 pb-[max(0.5rem,env(safe-area-inset-bottom))]"
           : "pointer-events-none absolute inset-x-0 bottom-14 z-50 flex flex-col items-center gap-1.5 px-3"
       }
     >
       {toasts.map((toast) => (
         <div
           key={toast.id}
-          className={`pointer-events-auto flex items-start gap-2 rounded-[10px] border px-3 py-2 text-[11.5px] font-semibold shadow-[0_10px_36px_rgb(20_20_30/0.18)] ${isMobile ? "w-full" : "max-w-[560px]"} ${
-            toast.kind === "ok" ? "border-ok/40 bg-[#eef8f0] text-[#1c6b30]" : "border-err/40 bg-[#fdf0f0] text-[#8f2525]"
-          }`}
+          className={`pointer-events-auto flex items-start gap-2 overflow-hidden rounded-surface border-l-[3px] bg-raised py-2 pl-3 pr-2 text-ui text-primary shadow-2 ${
+            isMobile ? "w-full" : "max-w-[560px]"
+          } ${toast.kind === "ok" ? "border-l-success" : "border-l-danger"}`}
+          role="status"
         >
+          <span className={`mt-px shrink-0 font-semibold ${toast.kind === "ok" ? "text-success" : "text-danger"}`} aria-hidden>
+            {toast.kind === "ok" ? "✓" : "✕"}
+          </span>
           <span className="min-w-0 flex-1 break-words">{toast.text}</span>
           <button
             type="button"
-            className={`shrink-0 rounded opacity-60 hover:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+            className={`shrink-0 rounded text-muted opacity-70 hover:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
               isMobile ? "-my-1 -mr-1 flex h-11 w-11 items-center justify-center" : "mt-0.5 p-0.5"
             }`}
             aria-label={translate(getLocale(), "viewer.closeNotification")}

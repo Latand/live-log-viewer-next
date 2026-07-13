@@ -61,7 +61,7 @@ function AssignmentChip({
   const { t } = useLocale();
   if (!assignment.path) {
     return (
-      <span className="flex h-6 items-center gap-1.5 rounded-[6px] bg-white/55 px-1.5 text-[10.5px] font-semibold text-dim">
+      <span className="flex h-6 items-center gap-1.5 rounded-[6px] bg-sunken px-1.5 text-[10.5px] font-semibold text-muted">
         <Loader2 className="h-3 w-3 shrink-0 animate-spin" aria-hidden />
         {t("tasks.spawning")}
       </span>
@@ -84,11 +84,11 @@ function AssignmentChip({
   return (
     <span
       className={`flex h-6 w-full min-w-0 items-center gap-1.5 rounded-[6px] px-1.5 ${
-        failed ? "bg-[#faeee9] text-[#a04a2e]" : dead ? "bg-white/45 text-dim opacity-70" : "bg-white/55"
+        failed ? "bg-danger-soft text-danger" : dead ? "bg-sunken text-muted opacity-70" : "bg-sunken"
       }`}
       title={wrapTitle}
     >
-      {handoff ? <Link2 className="h-3 w-3 shrink-0 text-[#0d9488]" aria-hidden /> : null}
+      {handoff ? <Link2 className="h-3 w-3 shrink-0 text-info" aria-hidden /> : null}
       {file ? <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${activityDot(file.activity)}`} /> : null}
       {badge ? (
         <span className="shrink-0 rounded-full px-1.5 text-[9px] font-bold" style={badge.style}>
@@ -99,7 +99,7 @@ function AssignmentChip({
       {failed ? <span aria-hidden>⚠</span> : null}
       <button
         type="button"
-        className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-dim hover:bg-black/5 hover:text-err focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+        className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-muted hover:bg-black/5 hover:text-danger focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
         aria-label={t("tasks.detachAria", { title })}
         title={t("tasks.detach")}
         onClick={() => onDetach(task, assignment.path!)}
@@ -121,7 +121,7 @@ function SourceChip({ task, file }: { task: BoardTask; file: FileEntry | null })
   const badge = engineBadgeFor(source.engine);
   return (
     <span
-      className="flex h-6 w-full min-w-0 items-center gap-1.5 rounded-[6px] bg-white/55 px-1.5 text-[#0d6f5f]"
+      className="flex h-6 w-full min-w-0 items-center gap-1.5 rounded-[6px] bg-sunken px-1.5 text-info"
       title={`${t("tasks.sourceTitle")}: ${source.text}`}
     >
       <Link2 className="h-3 w-3 shrink-0" aria-hidden />
@@ -305,7 +305,7 @@ export const TaskCard = memo(function TaskCard({
       onPointerUp={onPointerUp}
     >
       <div
-        className={`flex flex-col overflow-hidden rounded-[8px] border border-line shadow-card ${
+        className={`flex flex-col overflow-hidden rounded-[8px] border border-border shadow-1 ${
           task.status === "done" ? "opacity-60 saturate-50" : ""
         } ${editing ? "ring-2 ring-accent/50" : ""}`}
         style={{ backgroundColor: tone.soft }}
@@ -325,14 +325,14 @@ export const TaskCard = memo(function TaskCard({
             }}
             aria-label={t("tasks.editAria")}
             rows={Math.min(16, Math.max(3, draft.split("\n").length + 1))}
-            className="w-full resize-none bg-transparent px-3 py-2 text-[12.5px] leading-[17px] text-[#26262c] placeholder:text-dim focus-visible:outline-none"
+            className="w-full resize-none bg-transparent px-3 py-2 text-[12.5px] leading-[17px] text-primary placeholder:text-muted focus-visible:outline-none"
             maxLength={6000}
           />
         ) : (
           <div data-task-body className="cursor-text overflow-y-auto px-3 py-2" style={{ maxHeight: TASK_BODY_MAX }}>
-            <div className="whitespace-pre-wrap break-words text-[12.5px] font-bold leading-[17px] text-[#26262c]">{title}</div>
+            <div className="whitespace-pre-wrap break-words text-[12.5px] font-bold leading-[17px] text-primary">{title}</div>
             {rest.trim() ? (
-              <div className="whitespace-pre-wrap break-words text-[12.5px] leading-[17px] text-[#3a3a42]">{rest}</div>
+              <div className="whitespace-pre-wrap break-words text-[12.5px] leading-[17px] text-secondary">{rest}</div>
             ) : null}
           </div>
         )}
@@ -364,7 +364,7 @@ export const TaskCard = memo(function TaskCard({
             empty canvas) to seed a fresh draft conversation. */}
         <button
           type="button"
-          className="inline-flex h-7 touch-none items-center gap-1 rounded-full border border-line bg-panel px-2 text-[10.5px] font-semibold text-dim shadow-card hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+          className="inline-flex h-7 touch-none items-center gap-1 rounded-full border border-border bg-card px-2 text-[10.5px] font-semibold text-muted shadow-1 hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
           title={t("tasks.sendTitle")}
           onPointerDown={link.onPillPointerDown}
           onClick={() => {
@@ -377,8 +377,8 @@ export const TaskCard = memo(function TaskCard({
         </button>
         <button
           type="button"
-          className="inline-flex h-7 items-center rounded-full border px-2 text-[10.5px] font-bold shadow-card focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
-          style={{ backgroundColor: "#fff", color: tone.color, borderColor: tone.color }}
+          className="inline-flex h-7 items-center rounded-full border px-2 text-[10.5px] font-bold shadow-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+          style={{ backgroundColor: "var(--color-card)", color: tone.color, borderColor: tone.color }}
           title={t("tasks.statusTitle", { label: t(`tasks.status.${task.status}`) })}
           onClick={() => void handlers.patch(task.id, { status: nextTaskStatus(task.status) })}
         >
@@ -386,8 +386,8 @@ export const TaskCard = memo(function TaskCard({
         </button>
         <button
           type="button"
-          className={`inline-flex h-7 items-center gap-1 rounded-full border px-2 text-[10.5px] font-semibold shadow-card focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
-            armDelete ? "border-err bg-err text-white" : "border-line bg-panel text-dim hover:border-err/40 hover:text-err"
+          className={`inline-flex h-7 items-center gap-1 rounded-full border px-2 text-[10.5px] font-semibold shadow-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+            armDelete ? "border-danger bg-danger text-white" : "border-border bg-card text-muted hover:border-danger/40 hover:text-danger"
           }`}
           aria-label={t("tasks.deleteAria", { title })}
           title={armDelete ? t("tasks.deleteConfirm") : t("tasks.delete")}

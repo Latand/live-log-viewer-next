@@ -200,7 +200,7 @@ export const LoopsLayer = memo(function LoopsLayer({ loops, width, height }: { l
         const arc = (d: string, live: boolean) => ({
           d,
           fill: "none" as const,
-          stroke: live ? "#5a51e0" : "#c9c9d1",
+          stroke: live ? "var(--color-accent)" : "var(--color-strong)",
           strokeWidth: live ? 3 : 2.5,
           strokeLinecap: "round" as const,
           className: live ? "loop-arc-live" : undefined,
@@ -211,9 +211,9 @@ export const LoopsLayer = memo(function LoopsLayer({ loops, width, height }: { l
         return (
           <g key={loop.key}>
             <path {...arc(forward, leg === "forward")} />
-            <path d={forwardHead} style={headStyle(forwardHead)} fill={leg === "forward" ? "#5a51e0" : "#c9c9d1"} />
+            <path d={forwardHead} style={headStyle(forwardHead)} fill={leg === "forward" ? "var(--color-accent)" : "var(--color-strong)"} />
             <path {...arc(back, leg === "back")} />
-            <path d={backHead} style={headStyle(backHead)} fill={leg === "back" ? "#5a51e0" : "#c9c9d1"} />
+            <path d={backHead} style={headStyle(backHead)} fill={leg === "back" ? "var(--color-accent)" : "var(--color-strong)"} />
           </g>
         );
       })}
@@ -419,8 +419,8 @@ export const GroupsLayer = memo(function GroupsLayer({
     <div aria-hidden={false}>
       {groups.map((group) => {
         const draft = group.pipeline?.state === "draft";
-        const color = draft ? "#a06a15" : `hsl(${group.hue} 62% 42%)`;
-        const soft = draft ? "#fff7df" : `hsl(${group.hue} 62% 42% / 0.055)`;
+        const color = draft ? "var(--color-warning)" : `hsl(${group.hue} 62% 42%)`;
+        const soft = draft ? "var(--color-warning-soft)" : `hsl(${group.hue} 62% 42% / 0.055)`;
         const open = openGroup?.id === group.id;
         return (
           /* Positioned with left/top rather than a transform: a transform would
@@ -440,7 +440,7 @@ export const GroupsLayer = memo(function GroupsLayer({
               style={{
                 borderColor: color,
                 backgroundColor: soft,
-                ...(draft ? { backgroundImage: "repeating-linear-gradient(135deg, transparent 0 12px, rgb(160 106 21 / 0.07) 12px 14px)" } : {}),
+                ...(draft ? { backgroundImage: "repeating-linear-gradient(135deg, transparent 0 12px, color-mix(in srgb, var(--color-warning) 7%, transparent) 12px 14px)" } : {}),
               }}
             />
             {/* The pipeline's full planned stage graph on the halo itself, shown
@@ -466,7 +466,7 @@ export const GroupsLayer = memo(function GroupsLayer({
             ) : null}
             <button
               data-scheme-ui
-              className={`absolute -top-3 left-5 z-[8] inline-flex max-w-[22em] items-center gap-[0.4em] rounded-full bg-panel px-[0.7em] py-[0.15em] font-bold shadow-card hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:cursor-default ${
+              className={`absolute -top-3 left-5 z-[8] inline-flex max-w-[22em] items-center gap-[0.4em] rounded-full bg-card px-[0.7em] py-[0.15em] font-bold shadow-1 hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:cursor-default ${
                 interactive ? "pointer-events-auto" : ""
               }`}
               /* Font fully counter-scaled (constant on-screen at any zoom); border
@@ -479,7 +479,7 @@ export const GroupsLayer = memo(function GroupsLayer({
             >
               <span aria-hidden>{group.kind === "pipeline" ? "⇢" : "⟳"}</span>
               <span className="truncate">{group.label}</span>
-              {draft ? <span className="rounded-full bg-[#fff1c9] px-[0.55em] py-[0.12em] text-[0.82em] font-black tracking-[0.08em] text-[#8a5700]">{t("pipelineStrip.draftBadge")}</span> : null}
+              {draft ? <span className="rounded-full bg-warning-soft px-[0.55em] py-[0.12em] text-[0.82em] font-black tracking-[0.08em] text-warning">{t("pipelineStrip.draftBadge")}</span> : null}
             </button>
           </div>
         );
@@ -510,7 +510,7 @@ function PipelineEdgeBadge({ index, total, color, x, y, moveTransition }: { inde
   return (
     <div
       data-scheme-ui
-      className="pointer-events-none absolute left-0 top-0 z-[4] inline-flex h-[18px] -translate-x-1/2 -translate-y-1/2 items-center gap-0.5 rounded-full border bg-panel px-1.5 text-[9.5px] font-bold shadow-card"
+      className="pointer-events-none absolute left-0 top-0 z-[4] inline-flex h-[18px] -translate-x-1/2 -translate-y-1/2 items-center gap-0.5 rounded-full border bg-card px-1.5 text-[9.5px] font-bold shadow-1"
       style={{ transform: `translate(${x}px, ${y}px) translate(-50%, -50%)`, transition: moveTransition, borderColor: color, color }}
       aria-hidden
     >
@@ -525,7 +525,7 @@ function UnderRow({ file, onSelect }: { file: FileEntry; onSelect: (file: FileEn
   const badge = engineBadge(file);
   return (
     <button
-      className="flex h-8 w-full min-w-0 items-center gap-1.5 rounded-[8px] px-2 text-left hover:bg-bg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+      className="flex h-8 w-full min-w-0 items-center gap-1.5 rounded-[8px] px-2 text-left hover:bg-canvas focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
       title={cleanTitle(file.title)}
       onClick={() => onSelect(file)}
     >
@@ -534,7 +534,7 @@ function UnderRow({ file, onSelect }: { file: FileEntry; onSelect: (file: FileEn
         {badge.label}
       </span>
       <span className="min-w-0 flex-1 truncate text-[11.5px] font-semibold">{cleanTitle(file.cmdDesc || file.title, 80)}</span>
-      <span className="shrink-0 text-[10.5px] text-dim">{fmtAge(file.mtime)}</span>
+      <span className="shrink-0 text-[10.5px] text-muted">{fmtAge(file.mtime)}</span>
     </button>
   );
 }
@@ -553,7 +553,7 @@ function FarLabel({ file }: { file: FileEntry }) {
       aria-hidden
     >
       <div
-        className="flex max-w-[94%] items-center gap-[0.5em] rounded-[0.55em] border border-line bg-panel/95 px-[0.75em] py-[0.45em] shadow-[0_2px_14px_rgb(20_20_30/0.14)]"
+        className="flex max-w-[94%] items-center gap-[0.5em] rounded-[0.55em] border border-border bg-card/95 px-[0.75em] py-[0.45em] shadow-2"
         /* Constant on-screen size until ~2.6× (z≈0.38); further out it shrinks
            with the world so neighboring labels never overlap. */
         style={{ fontSize: "calc(13px * min(var(--inv-z, 1), 2.6))" }}
@@ -602,34 +602,34 @@ function LiteNodeShell({ node, ringed, dimmed, flow }: { node: SchemeNode; ringe
       ) : null}
       {node.under.length ? (
         <>
-          <div className="absolute inset-x-4 -bottom-4 h-5 rounded-[10px] border border-line bg-panel/70 shadow-card" aria-hidden />
-          <div className="absolute inset-x-2 -bottom-2 h-5 rounded-[10px] border border-line bg-panel/90 shadow-card" aria-hidden />
+          <div className="absolute inset-x-4 -bottom-4 h-5 rounded-[10px] border border-border bg-card/70 shadow-1" aria-hidden />
+          <div className="absolute inset-x-2 -bottom-2 h-5 rounded-[10px] border border-border bg-card/90 shadow-1" aria-hidden />
         </>
       ) : null}
       <div
-        className={`relative z-[1] flex h-full min-w-0 flex-col overflow-hidden rounded-[10px] border border-line bg-panel shadow-card ${
-          ringed ? "ring-2 ring-accent/60 ring-offset-2 ring-offset-bg" : ""
+        className={`relative z-[1] flex h-full min-w-0 flex-col overflow-hidden rounded-[10px] border border-border bg-card shadow-1 ${
+          ringed ? "ring-2 ring-accent/60 ring-offset-2 ring-offset-canvas" : ""
         }`}
       >
         <span aria-hidden className="h-1 w-full shrink-0" style={engineEdge(node.file)} />
-        <div className="flex shrink-0 items-center gap-2 border-b border-line px-3 py-2.5">
+        <div className="flex shrink-0 items-center gap-2 border-b border-border px-3 py-2.5">
           <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${activityDot(node.file.activity)}`} />
           <span className="shrink-0 rounded-full px-2 py-0.5 text-[11px] font-bold" style={badge.style}>
             {badge.label}
           </span>
-          {node.file.model ? <span className="min-w-0 truncate font-mono text-[11px] text-dim">{node.file.model}</span> : null}
+          {node.file.model ? <span className="min-w-0 truncate font-mono text-[11px] text-muted">{node.file.model}</span> : null}
           <RateLimitBadge rateLimit={node.file.rateLimit} />
           {/* pointer-events-auto re-enables taps for just the chip inside the
               map's pointer-events-none layer, so its reason disclosure works at
               390px; the chip's own guard keeps the tap from opening the pane. */}
           <WakeupChip key={wakeupChipKey(node.file.pendingWakeup)} wakeup={node.file.pendingWakeup} className="pointer-events-auto" />
-          <span className="ml-auto shrink-0 text-[11px] text-dim">{fmtAge(node.file.mtime)}</span>
+          <span className="ml-auto shrink-0 text-[11px] text-muted">{fmtAge(node.file.mtime)}</span>
         </div>
         <div className="min-w-0 flex-1 px-3 py-2.5 text-[14px] font-semibold leading-snug">
           <span className="line-clamp-5">{cleanTitle(node.file.title, 180)}</span>
         </div>
         {node.under.length ? (
-          <div className="shrink-0 px-3 pb-2.5 text-[11px] font-semibold text-dim">
+          <div className="shrink-0 px-3 pb-2.5 text-[11px] font-semibold text-muted">
             {node.under.length} {t("scheme.underneath")}
           </div>
         ) : null}
@@ -650,11 +650,11 @@ function LiteDraftShell({ draft, ringed, dimmed }: { draft: DraftNode; ringed: b
       style={{ transform: `translate(${draft.x}px, ${draft.y}px)`, width: draft.w, height: draft.h, transition: MOVE_TRANSITION }}
     >
       <div
-        className={`flex h-full items-center justify-center rounded-[10px] border border-dashed border-line bg-panel/70 ${
-          ringed ? "ring-2 ring-accent/60 ring-offset-2 ring-offset-bg" : ""
+        className={`flex h-full items-center justify-center rounded-[10px] border border-dashed border-border bg-card/70 ${
+          ringed ? "ring-2 ring-accent/60 ring-offset-2 ring-offset-canvas" : ""
         }`}
       >
-        <span className="flex items-center gap-1.5 text-[13px] font-semibold text-dim">
+        <span className="flex items-center gap-1.5 text-[13px] font-semibold text-muted">
           <span className="text-[15px] leading-none text-accent">＋</span> {t("mobile.agent")}
         </span>
       </div>
@@ -674,11 +674,11 @@ function LiteDeckShell({ deck, dimmed }: { deck: DeckNode; dimmed: boolean }) {
       className={`scheme-enter absolute${dimClass(dimmed)}`}
       style={{ transform: `translate(${deck.x}px, ${deck.y}px)`, width: deck.w, height: deck.h, transition: MOVE_TRANSITION }}
     >
-      <div className="flex h-full flex-col overflow-hidden rounded-[10px] border border-line bg-panel shadow-card">
+      <div className="flex h-full flex-col overflow-hidden rounded-[10px] border border-border bg-card shadow-1">
         {round ? (
           <>
             <div
-              className="flex shrink-0 items-center gap-1.5 border-b border-line px-3 py-2.5"
+              className="flex shrink-0 items-center gap-1.5 border-b border-border px-3 py-2.5"
               style={{ backgroundColor: tone.soft, color: tone.color }}
             >
               <span className="flex shrink-0 items-center gap-1 text-[12px] font-bold">
@@ -694,13 +694,13 @@ function LiteDeckShell({ deck, dimmed }: { deck: DeckNode; dimmed: boolean }) {
               </span>
             </div>
             {deck.rounds.length > 1 ? (
-              <div className="shrink-0 px-3 pb-2.5 text-[11px] font-semibold text-dim">
+              <div className="shrink-0 px-3 pb-2.5 text-[11px] font-semibold text-muted">
                 {t("roundDeck.moreRounds", { count: deck.rounds.length - 1 })}
               </div>
             ) : null}
           </>
         ) : (
-          <div className="flex flex-1 items-center justify-center text-[12px] font-semibold text-dim">{t("roundDeck.waitingFirst")}</div>
+          <div className="flex flex-1 items-center justify-center text-[12px] font-semibold text-muted">{t("roundDeck.waitingFirst")}</div>
         )}
       </div>
       <RoleTag role="reviewer" active={activeLoopRole(deck.flow) === "reviewer"} />
@@ -721,13 +721,13 @@ function MiniStackShell({ stack, dimmed, onSelect }: { stack: MiniStack; dimmed:
       className={`scheme-enter absolute${dimClass(dimmed)}`}
       style={{ transform: `translate(${stack.x}px, ${stack.y}px)`, width: stack.w, height: stack.h, transition: MOVE_TRANSITION }}
     >
-      <div className="flex h-full flex-col gap-1.5 overflow-y-auto rounded-[10px] border border-dashed border-[#c9c9d1] bg-panel/60 p-2">
+      <div className="flex h-full flex-col gap-1.5 overflow-y-auto rounded-[10px] border border-dashed border-strong bg-card/60 p-2">
         {stack.items.map(({ file, branches }) => {
           const badge = engineBadge(file);
           return (
             <button
               key={file.path}
-              className="flex min-h-[52px] w-full min-w-0 flex-col justify-center gap-0.5 rounded-[8px] border border-line bg-panel px-2 py-1 text-left shadow-card hover:border-accent/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+              className="flex min-h-[52px] w-full min-w-0 flex-col justify-center gap-0.5 rounded-[8px] border border-border bg-card px-2 py-1 text-left shadow-1 hover:border-accent/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
               title={cleanTitle(file.title)}
               onClick={() => onSelect(file)}
             >
@@ -738,7 +738,7 @@ function MiniStackShell({ stack, dimmed, onSelect }: { stack: MiniStack; dimmed:
                 </span>
                 <span className="min-w-0 flex-1 truncate text-[11.5px] font-semibold">{cleanTitle(file.title, 70)}</span>
               </span>
-              <span className="flex items-center gap-2 pl-3 text-[10.5px] text-dim">
+              <span className="flex items-center gap-2 pl-3 text-[10.5px] text-muted">
                 <span>{kindLabel(t, file.kind)}</span>
                 <span>{fmtAge(file.mtime)}</span>
                 {branches ? <span>⤷ {branches}</span> : null}
@@ -826,7 +826,7 @@ function NodeShell({
     >
       {marked ? (
         <>
-          <span className="absolute -right-2.5 -top-2.5 z-[5] flex h-6 w-6 items-center justify-center rounded-full border-2 border-bg bg-accent text-white shadow-card">
+          <span className="absolute -right-2.5 -top-2.5 z-[5] flex h-6 w-6 items-center justify-center rounded-full border-2 border-canvas bg-accent text-white shadow-1">
             <Check className="h-3.5 w-3.5" aria-hidden />
           </span>
           {/* The promised member tint: readable at far zoom, panes stay legible. */}
@@ -856,7 +856,7 @@ function NodeShell({
           {canFlow ? (
             <button
               data-scheme-ui
-              className="inline-flex h-7 items-center gap-1 rounded-full border border-line bg-panel px-2.5 text-[11px] font-semibold text-dim shadow-card hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+              className="inline-flex h-7 items-center gap-1 rounded-full border border-border bg-card px-2.5 text-[11px] font-semibold text-muted shadow-1 hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
               aria-expanded={flowOpen}
               title={t("scheme.flowTitle")}
               onClick={() => setFlowOpen((value) => !value)}
@@ -867,7 +867,7 @@ function NodeShell({
           {canPipeline ? (
             <button
               data-scheme-ui
-              className="inline-flex h-7 items-center gap-1 rounded-full border border-line bg-panel px-2.5 text-[11px] font-semibold text-dim shadow-card hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+              className="inline-flex h-7 items-center gap-1 rounded-full border border-border bg-card px-2.5 text-[11px] font-semibold text-muted shadow-1 hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
               aria-expanded={pipelineOpen}
               title={t("scheme.pipelineTitle")}
               onClick={() => setPipelineOpen(true)}
@@ -904,11 +904,11 @@ function NodeShell({
           finished tasks lie beneath the conversation, deck-style. */}
       {node.under.length ? (
         <>
-          <div className="absolute inset-x-4 -bottom-4 h-5 rounded-[10px] border border-line bg-panel/70 shadow-card" aria-hidden />
-          <div className="absolute inset-x-2 -bottom-2 h-5 rounded-[10px] border border-line bg-panel/90 shadow-card" aria-hidden />
+          <div className="absolute inset-x-4 -bottom-4 h-5 rounded-[10px] border border-border bg-card/70 shadow-1" aria-hidden />
+          <div className="absolute inset-x-2 -bottom-2 h-5 rounded-[10px] border border-border bg-card/90 shadow-1" aria-hidden />
         </>
       ) : null}
-      <div className={`relative z-[1] flex h-full ${ringed ? "rounded-[10px] ring-2 ring-accent/60 ring-offset-2 ring-offset-bg" : ""}`}>
+      <div className={`relative z-[1] flex h-full ${ringed ? "rounded-[10px] ring-2 ring-accent/60 ring-offset-2 ring-offset-canvas" : ""}`}>
         <BranchPane
           file={node.file}
           tasks={node.tasks}
@@ -925,7 +925,7 @@ function NodeShell({
       {onHandoff && canHandoff(node.file) ? <HandoffHandle file={node.file} onHandoff={() => onHandoff(node.file)} /> : null}
       {node.under.length ? (
         <button
-          className="absolute -bottom-11 left-1/2 z-[2] inline-flex h-7 -translate-x-1/2 items-center gap-1.5 whitespace-nowrap rounded-full border border-line bg-panel px-2.5 text-[11px] font-semibold text-dim shadow-card hover:border-accent/40 hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+          className="absolute -bottom-11 left-1/2 z-[2] inline-flex h-7 -translate-x-1/2 items-center gap-1.5 whitespace-nowrap rounded-full border border-border bg-card px-2.5 text-[11px] font-semibold text-muted shadow-1 hover:border-accent/40 hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
           aria-expanded={underOpen}
           title={t("scheme.collapsedTitle")}
           onClick={() => setUnderOpen((value) => !value)}
@@ -936,7 +936,7 @@ function NodeShell({
         </button>
       ) : null}
       {underOpen ? (
-        <div className="absolute left-0 top-[calc(100%+52px)] z-30 max-h-[280px] w-full overflow-y-auto rounded-[10px] border border-line bg-panel p-1.5 shadow-[0_10px_36px_rgb(20_20_30/0.18)]">
+        <div className="absolute left-0 top-[calc(100%+52px)] z-30 max-h-[280px] w-full overflow-y-auto rounded-[10px] border border-border bg-card p-1.5 shadow-2">
           {node.under.map((file) => (
             <UnderRow key={file.path} file={file} onSelect={onSelect} />
           ))}
@@ -970,7 +970,7 @@ function DraftShell({
       className={`scheme-enter absolute${dimClass(dimmed)}`}
       style={{ transform: `translate(${draft.x}px, ${draft.y}px)`, width: draft.w, height: draft.h, transition: MOVE_TRANSITION }}
     >
-      <div className={`flex h-full ${ringed ? "rounded-[10px] ring-2 ring-accent/60 ring-offset-2 ring-offset-bg" : ""}`}>
+      <div className={`flex h-full ${ringed ? "rounded-[10px] ring-2 ring-accent/60 ring-offset-2 ring-offset-canvas" : ""}`}>
         {isWorkflowDraftId(draft.id) ? (
           <WorkflowDraftPane
             draftId={draft.id}
@@ -1039,7 +1039,7 @@ function StageSlotShell({ slot, lite, dimmed }: { slot: StageSlot; lite: boolean
       {slot.incoming ? (
         <span
           aria-hidden
-          className="absolute top-[110px] z-[2] inline-flex h-6 -translate-x-1/2 -translate-y-1/2 items-center rounded-full border bg-panel px-1.5 text-[12px] font-bold shadow-card"
+          className="absolute top-[110px] z-[2] inline-flex h-6 -translate-x-1/2 -translate-y-1/2 items-center rounded-full border bg-card px-1.5 text-[12px] font-bold shadow-1"
           style={{ left: -SLOT_GAP / 2, borderColor: tone.color, color: tone.color }}
         >
           {slot.incoming === "review-loop" ? "⟳" : "→"}
@@ -1052,7 +1052,7 @@ function StageSlotShell({ slot, lite, dimmed }: { slot: StageSlot; lite: boolean
         <div className="absolute -bottom-10 left-0 z-[2] flex items-center gap-1.5">
           <button
             data-scheme-ui
-            className="inline-flex h-7 items-center gap-1 rounded-full border border-line bg-panel px-2.5 text-[11px] font-semibold text-dim shadow-card hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40"
+            className="inline-flex h-7 items-center gap-1 rounded-full border border-border bg-card px-2.5 text-[11px] font-semibold text-muted shadow-1 hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40"
             disabled={busy}
             title={t("pipelineSlot.addAgentTitle")}
             onClick={() => addAfter("run")}
@@ -1061,7 +1061,7 @@ function StageSlotShell({ slot, lite, dimmed }: { slot: StageSlot; lite: boolean
           </button>
           <button
             data-scheme-ui
-            className="inline-flex h-7 items-center gap-1 rounded-full border border-line bg-panel px-2.5 text-[11px] font-semibold text-dim shadow-card hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40"
+            className="inline-flex h-7 items-center gap-1 rounded-full border border-border bg-card px-2.5 text-[11px] font-semibold text-muted shadow-1 hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40"
             disabled={busy || !canAddReview}
             title={t("pipelineSlot.addReviewTitle")}
             onClick={() => addAfter("review-loop")}

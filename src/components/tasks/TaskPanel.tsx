@@ -69,12 +69,12 @@ function PanelNewTask({ project, onDone }: { project: string; onDone: () => void
         event.preventDefault();
         void draft.composer.submit();
       }}
-      className="flex flex-col gap-1.5 rounded-[10px] border border-line bg-panel p-1.5"
+      className="flex flex-col gap-1.5 rounded-[10px] border border-border bg-card p-1.5"
     >
       <TaskComposer draft={draft} placeholder={t("tasks.newPlaceholder")} createLabel={t("tasks.panelCreate")} />
       <button
         type="button"
-        className="self-end text-[10px] font-semibold text-dim hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+        className="self-end text-[10px] font-semibold text-muted hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
         onClick={onDone}
       >
         {t("common.close")}
@@ -113,17 +113,17 @@ export function TaskPanel({
   );
 
   return (
-    <aside className="flex w-[280px] shrink-0 flex-col border-l border-line bg-panel" aria-label={t("tasks.panelTitle")}>
-      <div className="flex h-9 shrink-0 items-center gap-1.5 border-b border-line px-2.5">
+    <aside className="flex w-[280px] shrink-0 flex-col border-l border-border bg-card" aria-label={t("tasks.panelTitle")}>
+      <div className="flex h-9 shrink-0 items-center gap-1.5 border-b border-border px-2.5">
         <span className="text-[12px] font-bold">{t("tasks.panelTitle")}</span>
-        <div className="ml-1 flex items-center rounded-full border border-line p-0.5">
+        <div className="ml-1 flex items-center rounded-full border border-border p-0.5">
           {(["project", "all"] as const).map((key) => (
             <button
               key={key}
               type="button"
               aria-pressed={scope === key}
               className={`rounded-full px-2 py-0.5 text-[10px] font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
-                scope === key ? "bg-accent/10 text-accent" : "text-dim hover:text-ink"
+                scope === key ? "bg-accent/10 text-accent" : "text-muted hover:text-primary"
               }`}
               onClick={() => setScope(key)}
             >
@@ -133,7 +133,7 @@ export function TaskPanel({
         </div>
         <button
           type="button"
-          className="ml-auto inline-flex shrink-0 items-center rounded-[8px] border border-line bg-bg px-1.5 py-0.5 text-dim hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+          className="ml-auto inline-flex shrink-0 items-center rounded-[8px] border border-border bg-canvas px-1.5 py-0.5 text-muted hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
           aria-label={t("tasks.panelClose")}
           onClick={onClose}
         >
@@ -160,7 +160,7 @@ export function TaskPanel({
             return (
               <div
                 key={task.id}
-                className={`flex w-full min-w-0 flex-col gap-0.5 rounded-[8px] border border-line bg-panel px-2 py-1.5 shadow-card hover:border-accent/40 ${
+                className={`flex w-full min-w-0 flex-col gap-0.5 rounded-[8px] border border-border bg-card px-2 py-1.5 shadow-1 hover:border-accent/40 ${
                   task.status === "done" ? "opacity-60" : ""
                 }`}
               >
@@ -181,16 +181,16 @@ export function TaskPanel({
                       {taskTitle(task.text) || t("tasks.untitled")}
                     </span>
                   </span>
-                  <span className="flex flex-wrap items-center gap-2 pl-0.5 text-[10px] text-dim">
+                  <span className="flex flex-wrap items-center gap-2 pl-0.5 text-[10px] text-muted">
                     {scope === "all" ? <span className="min-w-0 max-w-[110px] truncate">{task.project}</span> : null}
                     {task.dueAt && task.dueTz ? (
-                      <span className={dueOverdue ? "font-semibold text-[#a04a2e]" : ""} title={t("tasks.dueTitle", { zone: task.dueTz })}>
+                      <span className={dueOverdue ? "font-semibold text-danger" : ""} title={t("tasks.dueTitle", { zone: task.dueTz })}>
                         ⏰ {formatDue(task.dueAt, task.dueTz, getLocale())}
                       </span>
                     ) : null}
                     {task.attachments?.length ? <span title={t("tasks.attachCount", { count: task.attachments.length })}>📎 {task.attachments.length}</span> : null}
                     {task.source ? (
-                      <span className="inline-flex items-center gap-0.5 text-[#0d6f5f]" title={`${t("tasks.sourceTitle")}: ${task.source.text}`}>
+                      <span className="inline-flex items-center gap-0.5 text-info" title={`${t("tasks.sourceTitle")}: ${task.source.text}`}>
                         <Link2 className="h-2.5 w-2.5" aria-hidden />
                         {t("tasks.source")}
                       </span>
@@ -201,11 +201,11 @@ export function TaskPanel({
                 </button>
                 {unplaced ? (
                   <div className="flex items-center gap-1.5 pl-0.5">
-                    <span className="rounded-full bg-chip px-1.5 py-0.5 text-[9px] font-bold text-[#7a5300]">{t("tasks.unplaced")}</span>
+                    <span className="rounded-full bg-sunken px-1.5 py-0.5 text-[9px] font-bold text-warning">{t("tasks.unplaced")}</span>
                     {onPlaceOnMap ? (
                       <button
                         type="button"
-                        className="inline-flex items-center gap-0.5 rounded-[6px] border border-line px-1.5 py-0.5 text-[9.5px] font-bold text-accent hover:bg-accent/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                        className="inline-flex items-center gap-0.5 rounded-[6px] border border-border px-1.5 py-0.5 text-[9.5px] font-bold text-accent hover:bg-accent/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
                         onClick={() => onPlaceOnMap(task)}
                       >
                         <MapPin className="h-2.5 w-2.5" aria-hidden /> {t("tasks.placeOnMap")}
@@ -217,7 +217,7 @@ export function TaskPanel({
             );
           })
         ) : (
-          <div className="px-2 py-3 text-center text-[11px] text-dim">{t("tasks.panelEmpty")}</div>
+          <div className="px-2 py-3 text-center text-[11px] text-muted">{t("tasks.panelEmpty")}</div>
         )}
       </div>
     </aside>

@@ -9,6 +9,21 @@ export function fmtElapsed(s: number): string {
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 }
 
+/** The danger role resolved to RGB from the active theme's `--color-danger`
+    token. The canvas 2D `fillStyle` cannot read a CSS variable, so we resolve it
+    per frame — this way the meter adopts the dark danger color in dark mode
+    instead of the baked-in light literal. Falls back to the light danger hex
+    when there is no DOM (SSR/tests). */
+function dangerRgb(): [number, number, number] {
+  const fallback: [number, number, number] = [198, 40, 40];
+  if (typeof document === "undefined") return fallback;
+  const raw = getComputedStyle(document.documentElement).getPropertyValue("--color-danger").trim();
+  const hex = raw.startsWith("#") ? raw.slice(1) : "";
+  if (hex.length !== 6) return fallback;
+  const n = parseInt(hex, 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+}
+
 export function drawMeter(canvas: HTMLCanvasElement, bins: Uint8Array): void {
   const dpr = window.devicePixelRatio || 1;
   if (canvas.width !== METER_WIDTH * dpr || canvas.height !== METER_HEIGHT * dpr) {
@@ -22,6 +37,7 @@ export function drawMeter(canvas: HTMLCanvasElement, bins: Uint8Array): void {
   const usable = Math.max(METER_BARS, Math.floor(bins.length * METER_SPECTRUM_SHARE));
   const step = usable / METER_BARS;
   const barWidth = METER_WIDTH / METER_BARS;
+  const [dr, dg, db] = dangerRgb();
   for (let i = 0; i < METER_BARS; i += 1) {
     const from = Math.floor(i * step);
     const to = Math.max(from + 1, Math.floor((i + 1) * step));
@@ -29,7 +45,7 @@ export function drawMeter(canvas: HTMLCanvasElement, bins: Uint8Array): void {
     for (let j = from; j < to; j += 1) sum += bins[j] ?? 0;
     const level = sum / (to - from) / 255;
     const barHeight = Math.max(1.5, level * METER_HEIGHT);
-    g.fillStyle = `rgba(198, 40, 40, ${(0.35 + level * 0.65).toFixed(3)})`;
+    g.fillStyle = `rgba(${dr}, ${dg}, ${db}, ${(0.35 + level * 0.65).toFixed(3)})`;
     g.fillRect(i * barWidth + 1, (METER_HEIGHT - barHeight) / 2, barWidth - 2, barHeight);
   }
 }

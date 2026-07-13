@@ -298,28 +298,28 @@ export function SpeakButton({ text }: { text: string }) {
 
   return (
     <span className="relative">
-      <button ref={triggerRef} type="button" onClick={toggle} className={`inline-flex items-center justify-center rounded-md text-dim transition-opacity hover:bg-chip hover:text-ink focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 [@media(hover:none)]:opacity-60 ${isMobile ? "h-11 w-11" : "p-1 opacity-0 group-hover/msg:opacity-100"}`} aria-label={active ? t("tts.stop") : cached ? t("tts.replay") : t("tts.read")} title={active ? t("tts.stop") : cached ? t("tts.replayFree") : t("tts.readPaid")}>
+      <button ref={triggerRef} type="button" onClick={toggle} className={`inline-flex items-center justify-center rounded-md text-muted transition-opacity hover:bg-sunken hover:text-primary focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 [@media(hover:none)]:opacity-60 ${isMobile ? "h-11 w-11" : "p-1 opacity-0 group-hover/msg:opacity-100"}`} aria-label={active ? t("tts.stop") : cached ? t("tts.replay") : t("tts.read")} title={active ? t("tts.stop") : cached ? t("tts.replayFree") : t("tts.readPaid")}>
         {active ? <Square className="h-3.5 w-3.5" aria-hidden /> : <Volume2 className="h-3.5 w-3.5" aria-hidden />}
       </button>
       <span role="status" aria-live="polite" className="sr-only">{announcement}</span>
-      {phase === "playing" && timing.total > 0 ? <span className="text-[10px] tabular-nums text-dim">{Math.floor(timing.elapsed)} / {Math.ceil(timing.total)}s</span> : null}
+      {phase === "playing" && timing.total > 0 ? <span className="text-[10px] tabular-nums text-muted">{Math.floor(timing.elapsed)} / {Math.ceil(timing.total)}s</span> : null}
       {confirming ? (
-        <span ref={dialogRef} role="dialog" aria-modal="true" aria-label={t("tts.confirmAria")} onKeyDown={onDialogKeyDown} className="absolute right-0 top-7 z-50 block w-72 rounded-xl border border-line bg-panel p-3 text-left shadow-xl">
-          <span className="block text-xs font-bold text-ink">{t("tts.confirmTitle")}</span>
-          <span className="mt-1 block text-[11px] text-dim">{option.id} · {option.model} · {option.voice}</span>
-          <span className="block text-[11px] text-dim">{t("tts.characters", { count: text.length.toLocaleString() })}</span>
-          <span className="mt-2 block text-[11px] text-ink">{t("tts.billing", { provider: option.id })}</span>
-          <span className="block text-[11px] text-ink">{t("tts.disclosure")}</span>
-          {text.length > MAX_TTS_TEXT_LENGTH ? <span className="mt-2 block text-[11px] font-semibold text-err">{t("tts.shorten", { count: MAX_TTS_TEXT_LENGTH.toLocaleString() })}</span> : null}
-          {!option.available ? <span className="mt-2 block break-all text-[11px] text-err">{t("tts.missingKey", { provider: option.id, path: option.keyPath })}</span> : null}
-          <span className="mt-2 flex flex-wrap gap-1">{info.options.map((candidate) => <button key={candidate.id} type="button" disabled={info.lockedByEnv} onClick={() => void pickBackend(candidate.id)} className={`inline-flex items-center rounded bg-chip text-[10px] font-semibold disabled:opacity-50 ${isMobile ? "min-h-11 px-3" : "px-2 py-1"}`}>{candidate.id}{candidate.id === info.backend ? " ✓" : ""}</button>)}</span>
+        <span ref={dialogRef} role="dialog" aria-modal="true" aria-label={t("tts.confirmAria")} onKeyDown={onDialogKeyDown} className="absolute right-0 top-7 z-50 block w-72 rounded-xl border border-border bg-card p-3 text-left shadow-xl">
+          <span className="block text-xs font-bold text-primary">{t("tts.confirmTitle")}</span>
+          <span className="mt-1 block text-[11px] text-muted">{option.id} · {option.model} · {option.voice}</span>
+          <span className="block text-[11px] text-muted">{t("tts.characters", { count: text.length.toLocaleString() })}</span>
+          <span className="mt-2 block text-[11px] text-primary">{t("tts.billing", { provider: option.id })}</span>
+          <span className="block text-[11px] text-primary">{t("tts.disclosure")}</span>
+          {text.length > MAX_TTS_TEXT_LENGTH ? <span className="mt-2 block text-[11px] font-semibold text-danger">{t("tts.shorten", { count: MAX_TTS_TEXT_LENGTH.toLocaleString() })}</span> : null}
+          {!option.available ? <span className="mt-2 block break-all text-[11px] text-danger">{t("tts.missingKey", { provider: option.id, path: option.keyPath })}</span> : null}
+          <span className="mt-2 flex flex-wrap gap-1">{info.options.map((candidate) => <button key={candidate.id} type="button" disabled={info.lockedByEnv} onClick={() => void pickBackend(candidate.id)} className={`inline-flex items-center rounded bg-sunken text-[10px] font-semibold disabled:opacity-50 ${isMobile ? "min-h-11 px-3" : "px-2 py-1"}`}>{candidate.id}{candidate.id === info.backend ? " ✓" : ""}</button>)}</span>
           <span className="mt-3 flex justify-end gap-2">
-            <button type="button" onClick={closeConfirm} className={`inline-flex items-center rounded text-xs text-dim ${isMobile ? "min-h-11 px-3" : "px-2 py-1"}`}>{t("tts.cancel")}</button>
+            <button type="button" onClick={closeConfirm} className={`inline-flex items-center rounded text-xs text-muted ${isMobile ? "min-h-11 px-3" : "px-2 py-1"}`}>{t("tts.cancel")}</button>
             <button type="button" disabled={!option.available} onClick={confirmPaid} className={`inline-flex items-center rounded bg-accent text-xs font-bold text-white disabled:opacity-50 ${isMobile ? "min-h-11 px-3" : "px-2 py-1"}`}>{t("tts.speak")}</button>
           </span>
         </span>
       ) : null}
-      {error ? <span role="alert" className="absolute right-0 top-7 z-40 w-56 rounded bg-panel p-2 text-[11px] text-err shadow">{error}</span> : null}
+      {error ? <span role="alert" className="absolute right-0 top-7 z-40 w-56 rounded bg-card p-2 text-[11px] text-danger shadow">{error}</span> : null}
     </span>
   );
 }

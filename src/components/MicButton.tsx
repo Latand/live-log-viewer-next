@@ -109,32 +109,32 @@ function BackendMenu({ onClose }: { onClose: () => void }) {
       ref={rootRef}
       role="menu"
       aria-label={t("mic.menuTitle")}
-      className="absolute bottom-[calc(100%+6px)] right-0 z-40 w-[300px] rounded-[12px] border border-line bg-panel p-1.5 shadow-[0_10px_36px_rgb(20_20_30/0.18)]"
+      className="absolute bottom-[calc(100%+6px)] right-0 z-40 w-[300px] rounded-[12px] border border-border bg-card p-1.5 shadow-2"
     >
       {keyOption ? (
         <div className="flex flex-col gap-2 p-2">
-          <span className="text-[12px] font-bold text-err">
+          <span className="text-[12px] font-bold text-danger">
             {t("mic.keyTitle", { name: t(`stt.${keyOption.id}.name`) })}
           </span>
-          <span className="text-[11.5px] leading-snug text-ink">{t(`stt.${keyOption.id}.fix`)}</span>
-          <span className="flex items-center gap-1 rounded-[8px] border border-line bg-bg px-2 py-1.5">
-            <code className="min-w-0 flex-1 break-all font-mono text-[10.5px] text-ink">{keyOption.keyPath}</code>
+          <span className="text-[11.5px] leading-snug text-primary">{t(`stt.${keyOption.id}.fix`)}</span>
+          <span className="flex items-center gap-1 rounded-[8px] border border-border bg-canvas px-2 py-1.5">
+            <code className="min-w-0 flex-1 break-all font-mono text-[10.5px] text-primary">{keyOption.keyPath}</code>
             <button
               type="button"
               aria-label={t("mic.copyPath")}
               title={t("mic.copyPath")}
-              className="inline-flex shrink-0 items-center gap-1 rounded-[6px] border border-line bg-panel px-1.5 py-1 text-[10px] font-semibold text-dim hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+              className="inline-flex shrink-0 items-center gap-1 rounded-[6px] border border-border bg-card px-1.5 py-1 text-[10px] font-semibold text-muted hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
               onClick={() => {
                 void navigator.clipboard.writeText(keyOption.keyPath).then(() => setCopied(true));
               }}
             >
-              {copied ? <Check className="h-3 w-3 text-ok" aria-hidden /> : <Copy className="h-3 w-3" aria-hidden />}
+              {copied ? <Check className="h-3 w-3 text-success" aria-hidden /> : <Copy className="h-3 w-3" aria-hidden />}
               {copied ? t("mic.copied") : t("mic.copy")}
             </button>
           </span>
           <button
             type="button"
-            className="self-start rounded-[8px] px-2 py-1 text-[11px] font-semibold text-dim hover:bg-bg hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            className="self-start rounded-[8px] px-2 py-1 text-[11px] font-semibold text-muted hover:bg-canvas hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
             onClick={() => setKeyFor(null)}
           >
             ← {t("mic.back")}
@@ -142,14 +142,14 @@ function BackendMenu({ onClose }: { onClose: () => void }) {
         </div>
       ) : (
         <>
-          <div className="px-2 pb-1 pt-1.5 text-[10.5px] font-bold uppercase tracking-wide text-dim">
+          <div className="px-2 pb-1 pt-1.5 text-label font-semibold text-secondary">
             {t("mic.menuTitle")}
           </div>
           {info?.lockedByEnv ? (
-            <div className="px-2 pb-1 text-[10.5px] text-err">{t("mic.menuLocked")}</div>
+            <div className="px-2 pb-1 text-[10.5px] text-danger">{t("mic.menuLocked")}</div>
           ) : null}
           {!info && !error ? (
-            <div className="flex items-center gap-2 px-2 py-2 text-[11.5px] text-dim">
+            <div className="flex items-center gap-2 px-2 py-2 text-[11.5px] text-muted">
               <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden /> {t("mic.menuLoading")}
             </div>
           ) : null}
@@ -164,37 +164,37 @@ function BackendMenu({ onClose }: { onClose: () => void }) {
                 disabled={Boolean(info?.lockedByEnv) || saving !== null}
                 onClick={() => void pick(option.id, option.available)}
                 className={`flex w-full items-start gap-2 rounded-[9px] px-2 py-1.5 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60 ${
-                  active ? "bg-accent/10" : "hover:bg-bg"
+                  active ? "bg-accent/10" : "hover:bg-canvas"
                 }`}
               >
                 <span className="mt-[3px] flex h-3.5 w-3.5 shrink-0 items-center justify-center">
                   {saving === option.id ? (
-                    <Loader2 className="h-3.5 w-3.5 animate-spin text-dim" aria-hidden />
+                    <Loader2 className="h-3.5 w-3.5 animate-spin text-muted" aria-hidden />
                   ) : active ? (
                     <Check className="h-3.5 w-3.5 text-accent" aria-hidden />
                   ) : (
                     <span
                       aria-hidden
                       className="h-2 w-2 rounded-full"
-                      style={{ backgroundColor: option.available ? "#1a8a3e" : "#e0ae45" }}
+                      style={{ backgroundColor: option.available ? "var(--color-success)" : "var(--color-warning)" }}
                     />
                   )}
                 </span>
                 <span className="min-w-0 flex-1">
-                  <span className="flex items-center gap-1.5 text-[12px] font-semibold text-ink">
+                  <span className="flex items-center gap-1.5 text-[12px] font-semibold text-primary">
                     {t(`stt.${option.id}.name`)}
                     {!option.available ? (
-                      <span className="rounded-full bg-[#fdf3dd] px-1.5 py-px text-[9.5px] font-bold text-[#b07d1f]">
+                      <span className="rounded-full bg-warning-soft px-1.5 py-px text-[9.5px] font-bold text-warning">
                         {t("mic.noKey")}
                       </span>
                     ) : null}
                   </span>
-                  <span className="block text-[10.5px] leading-snug text-dim">{t(`stt.${option.id}.desc`)}</span>
+                  <span className="block text-[10.5px] leading-snug text-muted">{t(`stt.${option.id}.desc`)}</span>
                 </span>
               </button>
             );
           })}
-          {error ? <div className="px-2 py-1 text-[10.5px] font-semibold text-err">{error}</div> : null}
+          {error ? <div className="px-2 py-1 text-[10.5px] font-semibold text-danger">{error}</div> : null}
         </>
       )}
     </div>
@@ -260,8 +260,8 @@ export function MicButtonView({
             isMobile ? "min-h-11" : "py-2"
           } ${
             warn
-              ? "border-[#e0ae45]/70 bg-[#fdf3dd] text-[#b07d1f] focus-visible:ring-[#e0ae45]/50"
-              : "border-err/50 bg-[#fff2f2] text-err focus-visible:ring-err/40"
+              ? "border-warning/70 bg-warning-soft text-warning focus-visible:ring-warning/50"
+              : "border-danger/50 bg-danger-soft text-danger focus-visible:ring-danger/40"
           }`}
         >
           <canvas ref={canvasRef} width={METER_WIDTH} height={METER_HEIGHT} className="h-4 w-14" aria-hidden />
@@ -271,7 +271,7 @@ export function MicButtonView({
           type="button"
           aria-label={t("mic.cancel")}
           onClick={discard}
-          className={`inline-flex items-center justify-center rounded-[8px] border border-line bg-panel text-dim hover:text-err focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+          className={`inline-flex items-center justify-center rounded-[8px] border border-border bg-card text-muted hover:text-danger focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
             isMobile ? "h-11 w-11" : "p-2"
           }`}
         >
@@ -287,7 +287,7 @@ export function MicButtonView({
     return (
       <span className="flex shrink-0 items-center gap-1">
         {srRegion}
-        <span className="flex items-center gap-1.5 rounded-[8px] border border-[#e0ae45]/70 bg-[#fdf3dd] px-2 py-2 text-[11px] font-bold text-[#b07d1f]">
+        <span className="flex items-center gap-1.5 rounded-[8px] border border-warning/70 bg-warning-soft px-2 py-2 text-[11px] font-bold text-warning">
           {phase === "busy" ? (
             <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
           ) : (
@@ -324,7 +324,7 @@ export function MicButtonView({
               } ${phase === "starting" ? "bg-accent/10 text-accent" : "text-muted hover:bg-sunken hover:text-accent"}`
             : `inline-flex shrink-0 items-center justify-center rounded-[8px] border focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60 ${
                 isMobile ? "h-11 w-11" : "p-2"
-              } ${phase === "starting" ? "border-accent/40 bg-accent/10 text-accent" : "border-line bg-panel text-dim hover:text-accent"}`
+              } ${phase === "starting" ? "border-accent/40 bg-accent/10 text-accent" : "border-border bg-card text-muted hover:text-accent"}`
         }
       >
         {phase === "busy" ? (

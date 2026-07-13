@@ -53,7 +53,7 @@ export function GroupOverridePanel({ group, onClose }: { group: SchemeGroup; onC
       data-group-override={group.kind}
       role="dialog"
       aria-label={group.label}
-      className={`flex flex-col gap-2 rounded-[12px] border border-line bg-panel p-3 shadow-[0_10px_36px_rgb(20_20_30/0.18)] ${group.pipeline?.state === "draft" ? "w-[320px]" : "w-[268px]"}`}
+      className={`flex flex-col gap-2 rounded-[12px] border border-border bg-card p-3 shadow-2 ${group.pipeline?.state === "draft" ? "w-[320px]" : "w-[268px]"}`}
     >
       {group.flow ? <FlowOverride group={group} onClose={onClose} /> : null}
       {group.pipeline ? <PipelineOverride group={group} onClose={onClose} /> : null}
@@ -67,7 +67,7 @@ function PanelHeader({ title, onClose }: { title: string; onClose: () => void })
     <div className="flex items-center gap-1.5">
       <span className="min-w-0 flex-1 truncate text-[12px] font-bold">{title}</span>
       <button
-        className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full border border-line bg-bg text-dim hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+        className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full border border-border bg-canvas text-muted hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
         aria-label={t("groupOverride.closePanel")}
         onClick={onClose}
       >
@@ -77,13 +77,13 @@ function PanelHeader({ title, onClose }: { title: string; onClose: () => void })
   );
 }
 
-const fieldLabel = "text-[10px] font-bold uppercase tracking-wide text-dim";
+const fieldLabel = "text-label font-semibold text-secondary";
 const inputBase =
-  "h-7 w-full rounded-[8px] border border-line bg-bg px-2 text-[11.5px] font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40";
+  "h-7 w-full rounded-[8px] border border-border bg-canvas px-2 text-[11.5px] font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40";
 const primaryBtn =
   "inline-flex items-center justify-center gap-1 rounded-full border border-accent bg-accent px-3 py-1 text-[11px] font-bold text-white hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 disabled:opacity-40";
 const ghostBtn =
-  "inline-flex flex-1 items-center justify-center gap-1 rounded-full border border-line bg-bg px-3 py-1 text-[11px] font-bold text-dim hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40";
+  "inline-flex flex-1 items-center justify-center gap-1 rounded-full border border-border bg-canvas px-3 py-1 text-[11px] font-bold text-muted hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40";
 
 /* The effort tiers offered depend on the selected engine — codex tops out at
    xhigh, claude adds max — so the control can never present a combination the
@@ -173,10 +173,10 @@ function FlowOverride({ group, onClose }: { group: SchemeGroup; onClose: () => v
   return (
     <>
       <PanelHeader title={t("groupOverride.flowTitle", { name: group.label })} onClose={onClose} />
-      {error ? <span className="truncate text-[10.5px] font-semibold text-err" title={error}>{error}</span> : null}
-      {saved ? <span className="truncate text-[10.5px] font-semibold text-ok">{saved}</span> : null}
+      {error ? <span className="truncate text-[10.5px] font-semibold text-danger" title={error}>{error}</span> : null}
+      {saved ? <span className="truncate text-[10.5px] font-semibold text-success">{saved}</span> : null}
 
-      <span className="text-[10.5px] font-bold text-ink">{t("groupOverride.reviewerRole")}</span>
+      <span className="text-[10.5px] font-bold text-primary">{t("groupOverride.reviewerRole")}</span>
       <div className="flex items-end gap-1.5">
         <EngineSelect value={engine} onChange={(next) => resetRuntimeForEngine(next, { setEngine, setModel, setEffort, effort })} />
         <EffortSelect engine={engine} value={effort} onChange={setEffort} label={t("groupOverride.effort")} />
@@ -213,14 +213,14 @@ function FlowOverride({ group, onClose }: { group: SchemeGroup; onClose: () => v
             so the editor is disabled instead of silently discarding edits
             (issue #118 review). */}
         <textarea
-          className="min-h-[52px] w-full resize-y rounded-[8px] border border-line bg-bg px-2 py-1.5 text-[11.5px] font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:cursor-not-allowed disabled:opacity-50"
+          className="min-h-[52px] w-full resize-y rounded-[8px] border border-border bg-canvas px-2 py-1.5 text-[11.5px] font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:cursor-not-allowed disabled:opacity-50"
           value={note}
           placeholder={t("groupOverride.notePlaceholder")}
           disabled={!pendingCarriesNote || busy}
           onChange={(event) => setNote(event.target.value)}
         />
         {!pendingCarriesNote ? (
-          <span className="text-[10px] font-semibold text-dim">{t("groupOverride.noteUnavailable")}</span>
+          <span className="text-[10px] font-semibold text-muted">{t("groupOverride.noteUnavailable")}</span>
         ) : null}
       </label>
 
@@ -278,7 +278,7 @@ function FlowOverride({ group, onClose }: { group: SchemeGroup; onClose: () => v
         ) : null}
         {flow.state === "reviewing" ? (
           <button
-            className="inline-flex flex-1 items-center justify-center gap-1 rounded-full border border-err/40 bg-[#fbeaea] px-3 py-1 text-[11px] font-bold text-err hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40"
+            className="inline-flex flex-1 items-center justify-center gap-1 rounded-full border border-danger/40 bg-danger-soft px-3 py-1 text-[11px] font-bold text-danger hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40"
             disabled={busy}
             onClick={() => void run(t("groupOverride.savedCancel"), () => patchFlow(flow.id, { action: "cancel-round" }))}
           >
@@ -290,7 +290,7 @@ function FlowOverride({ group, onClose }: { group: SchemeGroup; onClose: () => v
       <div className="flex items-center gap-1.5">
         {closed ? null : flow.state === "paused" ? (
           <button
-            className="inline-flex flex-1 items-center justify-center gap-1 rounded-full border border-ok/40 bg-[#eef8f0] px-3 py-1 text-[11px] font-bold text-ok hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40"
+            className="inline-flex flex-1 items-center justify-center gap-1 rounded-full border border-success/40 bg-success-soft px-3 py-1 text-[11px] font-bold text-success hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40"
             disabled={busy}
             onClick={() => void run(t("flowStrip.resume"), () => patchFlow(flow.id, { action: "resume" }))}
           >
@@ -306,7 +306,7 @@ function FlowOverride({ group, onClose }: { group: SchemeGroup; onClose: () => v
           </button>
         )}
         <button
-          className="inline-flex flex-1 items-center justify-center gap-1 rounded-full border border-line bg-bg px-3 py-1 text-[11px] font-bold text-dim hover:text-err focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40"
+          className="inline-flex flex-1 items-center justify-center gap-1 rounded-full border border-border bg-canvas px-3 py-1 text-[11px] font-bold text-muted hover:text-danger focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40"
           disabled={busy}
           onClick={() => void run(t("flowStrip.close"), () => patchFlow(flow.id, { action: "close" }))}
         >
@@ -368,7 +368,7 @@ function StageForm({
       <label className="flex flex-col gap-1">
         <span className={fieldLabel}>{t("groupOverride.stagePrompt")}</span>
         <textarea
-          className="min-h-[64px] w-full resize-y rounded-[8px] border border-line bg-bg px-2 py-1.5 text-[11.5px] font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+          className="min-h-[64px] w-full resize-y rounded-[8px] border border-border bg-canvas px-2 py-1.5 text-[11.5px] font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
           value={prompt}
           onChange={(event) => setPrompt(event.target.value)}
         />
@@ -465,8 +465,8 @@ function DraftStageCards({
 
   return (
     <div className="flex flex-col gap-1.5">
-      <span className="text-[10.5px] font-bold text-ink">{t("groupOverride.stagesHeading")}</span>
-      <span className="text-[10px] font-semibold text-dim">{stages.length ? t("groupOverride.stagesHint") : t("groupOverride.stagesEmpty")}</span>
+      <span className="text-[10.5px] font-bold text-primary">{t("groupOverride.stagesHeading")}</span>
+      <span className="text-[10px] font-semibold text-muted">{stages.length ? t("groupOverride.stagesHint") : t("groupOverride.stagesEmpty")}</span>
       <div className="flex max-h-[46vh] flex-col gap-2 overflow-y-auto pr-0.5">
         {stages.map((stage, index) => (
           <div
@@ -489,27 +489,27 @@ function DraftStageCards({
               event.preventDefault();
               onDrop(stage.id);
             }}
-            className={`flex flex-col gap-1.5 rounded-[10px] border bg-panel p-2 ${
-              overId === stage.id && dragId && dragId !== stage.id ? "border-accent" : "border-line"
+            className={`flex flex-col gap-1.5 rounded-[10px] border bg-card p-2 ${
+              overId === stage.id && dragId && dragId !== stage.id ? "border-accent" : "border-border"
             } ${dragId === stage.id ? "opacity-60" : ""}`}
           >
             <div className="flex items-center gap-1.5">
               <span
-                className="cursor-grab select-none text-[13px] leading-none text-dim"
+                className="cursor-grab select-none text-[13px] leading-none text-muted"
                 aria-label={t("groupOverride.dragHandle")}
                 title={t("groupOverride.dragHandle")}
               >
                 ⠿
               </span>
-              <span className="inline-flex h-5 min-w-5 items-center justify-center rounded-full bg-chip px-1.5 text-[10px] font-black text-dim">
+              <span className="inline-flex h-5 min-w-5 items-center justify-center rounded-full bg-sunken px-1.5 text-[10px] font-black text-muted">
                 {index + 1}
               </span>
-              <span className="min-w-0 flex-1 truncate text-[10.5px] font-bold text-ink">{stage.role?.roleId ?? stage.id}</span>
-              <span className="shrink-0 rounded-full border border-line px-1.5 py-[1px] text-[9px] font-bold uppercase tracking-wide text-dim">
+              <span className="min-w-0 flex-1 truncate text-[10.5px] font-bold text-primary">{stage.role?.roleId ?? stage.id}</span>
+              <span className="shrink-0 rounded-full border border-border px-1.5 py-[1px] text-[9px] font-bold uppercase tracking-wide text-muted">
                 {t(stage.kind === "review-loop" ? "groupOverride.reviewKind" : "groupOverride.runKind")}
               </span>
               <button
-                className="inline-flex h-6 w-6 items-center justify-center rounded-full border border-line bg-bg text-dim hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-30"
+                className="inline-flex h-6 w-6 items-center justify-center rounded-full border border-border bg-canvas text-muted hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-30"
                 disabled={busy || !canMoveTo(index, index - 1)}
                 aria-label={t("groupOverride.moveStageUp")}
                 onClick={() => moveTo(stage.id, index - 1)}
@@ -517,7 +517,7 @@ function DraftStageCards({
                 <ArrowUp className="h-3 w-3" aria-hidden />
               </button>
               <button
-                className="inline-flex h-6 w-6 items-center justify-center rounded-full border border-line bg-bg text-dim hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-30"
+                className="inline-flex h-6 w-6 items-center justify-center rounded-full border border-border bg-canvas text-muted hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-30"
                 disabled={busy || !canMoveTo(index, index + 1)}
                 aria-label={t("groupOverride.moveStageDown")}
                 onClick={() => moveTo(stage.id, index + 1)}
@@ -525,7 +525,7 @@ function DraftStageCards({
                 <ArrowDown className="h-3 w-3" aria-hidden />
               </button>
               <button
-                className="inline-flex h-6 w-6 items-center justify-center rounded-full border border-line bg-bg text-dim hover:text-err focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-30"
+                className="inline-flex h-6 w-6 items-center justify-center rounded-full border border-border bg-canvas text-muted hover:text-danger focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-30"
                 disabled={busy || !canRemove(index)}
                 aria-label={t("groupOverride.removeStage")}
                 onClick={() => removeStage(stage.id)}
@@ -594,18 +594,18 @@ function PipelineOverride({ group, onClose }: { group: SchemeGroup; onClose: () 
   return (
     <>
       <PanelHeader title={t(draft ? "groupOverride.draftTitle" : "groupOverride.pipelineTitle", { name: group.label })} onClose={onClose} />
-      {error ? <span className="truncate text-[10.5px] font-semibold text-err" title={error}>{error}</span> : null}
-      {saved ? <span className="truncate text-[10.5px] font-semibold text-ok">{saved}</span> : null}
+      {error ? <span className="truncate text-[10.5px] font-semibold text-danger" title={error}>{error}</span> : null}
+      {saved ? <span className="truncate text-[10.5px] font-semibold text-success">{saved}</span> : null}
 
       {draft ? (
-        <div className="flex flex-col gap-1.5 rounded-[9px] border border-dashed border-[#c88719]/60 bg-[#fff9ea] p-2">
+        <div className="flex flex-col gap-1.5 rounded-[9px] border border-dashed border-warning/60 bg-warning-soft p-2">
           <label className="flex flex-col gap-1">
             <span className={fieldLabel}>{t("groupOverride.task")}</span>
             <input className={inputBase} value={task} onChange={(event) => setTask(event.target.value)} />
           </label>
           <label className="flex flex-col gap-1">
             <span className={fieldLabel}>{t("groupOverride.spec")}</span>
-            <textarea className="min-h-[52px] w-full resize-y rounded-[8px] border border-line bg-bg px-2 py-1.5 text-[11.5px] font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#c88719]/40" value={spec} onChange={(event) => setSpec(event.target.value)} />
+            <textarea className="min-h-[52px] w-full resize-y rounded-[8px] border border-border bg-canvas px-2 py-1.5 text-[11.5px] font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40" value={spec} onChange={(event) => setSpec(event.target.value)} />
           </label>
           <label className="flex flex-col gap-1">
             <span className={fieldLabel}>{t("groupOverride.repoDir")}</span>
@@ -650,7 +650,7 @@ function PipelineOverride({ group, onClose }: { group: SchemeGroup; onClose: () 
           />
         </>
       ) : (
-        <span className="text-[11px] font-semibold text-dim">{t("groupOverride.noEditableStage")}</span>
+        <span className="text-[11px] font-semibold text-muted">{t("groupOverride.noEditableStage")}</span>
       )}
 
       {parked ? (
@@ -675,7 +675,7 @@ function PipelineOverride({ group, onClose }: { group: SchemeGroup; onClose: () 
       <div className="flex items-center gap-1.5">
         {draft ? (
           <button
-            className="inline-flex min-h-11 flex-1 items-center justify-center gap-1 rounded-full border border-[#9a6410] bg-[#9a6410] px-3 text-[11px] font-bold text-white hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#c88719]/50 disabled:opacity-40"
+            className="inline-flex min-h-11 flex-1 items-center justify-center gap-1 rounded-full border border-accent bg-accent px-3 text-[11px] font-bold text-white hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 disabled:opacity-40"
             disabled={busy || pipeline.stages.length < 2}
             title={pipeline.stages.length < 2 ? t("groupOverride.startNeedsStages") : undefined}
             onClick={() => void run(t("pipelineStrip.start"), () => patchPipeline(pipeline.id, "start"))}
@@ -684,7 +684,7 @@ function PipelineOverride({ group, onClose }: { group: SchemeGroup; onClose: () 
           </button>
         ) : closed ? null : pipeline.state === "paused" ? (
           <button
-            className="inline-flex flex-1 items-center justify-center gap-1 rounded-full border border-ok/40 bg-[#eef8f0] px-3 py-1 text-[11px] font-bold text-ok hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40"
+            className="inline-flex flex-1 items-center justify-center gap-1 rounded-full border border-success/40 bg-success-soft px-3 py-1 text-[11px] font-bold text-success hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40"
             disabled={busy}
             onClick={() => void run(t("pipelineStrip.resume"), () => patchPipeline(pipeline.id, "resume"))}
           >
@@ -700,7 +700,7 @@ function PipelineOverride({ group, onClose }: { group: SchemeGroup; onClose: () 
           </button>
         )}
         <button
-          className="inline-flex flex-1 items-center justify-center gap-1 rounded-full border border-line bg-bg px-3 py-1 text-[11px] font-bold text-dim hover:text-err focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40"
+          className="inline-flex flex-1 items-center justify-center gap-1 rounded-full border border-border bg-canvas px-3 py-1 text-[11px] font-bold text-muted hover:text-danger focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40"
           disabled={busy}
           onClick={() => void run(t(draft ? "pipelineStrip.discard" : "pipelineStrip.close"), () => patchPipeline(pipeline.id, draft ? "delete" : "close"))}
         >

@@ -39,16 +39,16 @@ export function DeploymentStatusPill() {
   if (!show || !deployment) return null;
   const label = deployment.phase.replaceAll("-", " ");
   const tone = deployment.phase === "succeeded"
-    ? "border-ok/45 text-ok"
+    ? "border-success/45 text-success"
     : deployment.phase === "failed" || deployment.phase === "rolled-back"
-      ? "border-[#d06b5d]/45 text-[#a33d31]"
+      ? "border-danger/45 text-danger"
       : "border-accent/45 text-accent";
   return (
     /* Purely informational and desktop-only — never a hit-target.
        `pointer-events-none` guards taps through it, and the safe-area inset lifts
        it clear of the home bar. */
     <div
-      className={`pointer-events-none fixed bottom-[max(0.75rem,env(safe-area-inset-bottom))] left-1/2 z-40 max-w-[calc(100vw-1.5rem)] -translate-x-1/2 truncate rounded-full border bg-panel/95 px-3 py-1 text-[11px] font-semibold shadow-card backdrop-blur ${tone}`}
+      className={`pointer-events-none fixed bottom-[max(0.75rem,env(safe-area-inset-bottom))] left-1/2 z-40 max-w-[calc(100vw-1.5rem)] -translate-x-1/2 truncate rounded-full border bg-raised px-3 py-1 text-[11px] font-semibold shadow-2 backdrop-blur ${tone}`}
       role="status"
       title={deployment.error ?? `Revision ${deployment.revision.slice(0, 12)}`}
     >

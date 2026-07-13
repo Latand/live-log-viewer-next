@@ -32,7 +32,7 @@ export function EffortPills({ file }: { file: FileEntry }) {
           style={{
             width: "3px",
             height: `${7 + i}px`,
-            backgroundColor: i < level ? color : "var(--color-line, #e6e6ea)",
+            backgroundColor: i < level ? color : "var(--color-border)",
           }}
         />
       ))}

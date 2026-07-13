@@ -181,7 +181,7 @@ function StageChip({
 
   return (
     <span ref={chipRef} className="relative flex shrink-0 items-center gap-1.5">
-      {index ? <span className="text-[10px] font-bold text-[#c9c9d1]" aria-hidden>→</span> : null}
+      {index ? <span className="text-[10px] font-bold text-strong" aria-hidden>→</span> : null}
       <span className="inline-flex items-center">
         <button
           type="button"
@@ -204,7 +204,7 @@ function StageChip({
             onClick={onToggleVerdict}
             aria-expanded={open}
             aria-label={t("pipelineStrip.openVerdict", { label })}
-            className="inline-flex h-6 items-center rounded-r-full border-l border-panel/60 px-1 text-[10.5px] font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            className="inline-flex h-6 items-center rounded-r-full border-l border-card/60 px-1 text-[10.5px] font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
             style={{ backgroundColor: tone.soft, color: tone.color }}
           >
             <span aria-hidden>{attempt!.verdict ? (attempt!.verdict.status === "pass" ? "✓" : attempt!.verdict.status === "fail" ? "✕" : "●") : "!"}</span>
@@ -274,22 +274,22 @@ export function PipelineStrip({
       ? "bg-warning-soft text-warning"
       : pipeline.state === "completed"
         ? "bg-success-soft text-success"
-        : "bg-chip text-dim";
+        : "bg-sunken text-muted";
   const actionBtn =
     "inline-flex h-7 shrink-0 items-center justify-center gap-1 rounded-control border px-2.5 text-ui font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40";
-  const neutralBtn = `${actionBtn} border-line bg-panel text-secondary hover:text-ink`;
-  const quietDangerBtn = `${actionBtn} border-line bg-panel text-secondary hover:border-danger/40 hover:text-danger`;
+  const neutralBtn = `${actionBtn} border-border bg-card text-secondary hover:text-primary`;
+  const quietDangerBtn = `${actionBtn} border-border bg-card text-secondary hover:border-danger/40 hover:text-danger`;
   return (
     <div
       data-scheme-ui
       role="group"
       aria-label={t("pipelineStrip.groupAria", { task: pipeline.task })}
-      className={`pointer-events-auto flex min-h-9 w-full flex-wrap items-center gap-x-2.5 gap-y-1 rounded-surface border bg-panel/95 py-1 shadow-card ${compact ? "px-2.5" : "px-3"} ${draft ? "border-2 border-dashed border-warning" : attention ? "border-warning/70" : "border-line"}`}
+      className={`pointer-events-auto flex min-h-9 w-full flex-wrap items-center gap-x-2.5 gap-y-1 rounded-surface border bg-card/95 py-1 shadow-1 ${compact ? "px-2.5" : "px-3"} ${draft ? "border-2 border-dashed border-warning" : attention ? "border-warning/70" : "border-border"}`}
     >
       <span className="flex min-w-0 max-w-full shrink-0 items-center gap-2 sm:max-w-[46%]">
         <span
           className={`h-2.5 w-2.5 shrink-0 rounded-full ${
-            busyState ? "animate-pulse bg-accent" : attention ? "bg-warning" : pipeline.state === "completed" ? "bg-ok" : draft ? "bg-warning" : "bg-strong"
+            busyState ? "animate-pulse bg-accent" : attention ? "bg-warning" : pipeline.state === "completed" ? "bg-success" : draft ? "bg-warning" : "bg-strong"
           }`}
           aria-hidden
         />
@@ -298,16 +298,16 @@ export function PipelineStrip({
             {t("pipelineStrip.draftBadge")}
           </span>
         ) : null}
-        <span className="min-w-0 truncate text-ui font-semibold text-ink" title={pipeline.task}>{pipeline.task}</span>
+        <span className="min-w-0 truncate text-ui font-semibold text-primary" title={pipeline.task}>{pipeline.task}</span>
         <span className={`shrink-0 rounded-full px-1.5 py-0.5 text-caption font-semibold ${statusBadge}`}>
           {pipelineStateLabel(t, pipeline.state)}
         </span>
         {!draft && total ? (
-          <span className="shrink-0 text-label font-semibold tabular-nums text-dim">
+          <span className="shrink-0 text-label font-semibold tabular-nums text-muted">
             {t("pipelineStrip.stageOf", { k: position, n: total })}
           </span>
         ) : null}
-        {detail ? <span className={`min-w-0 truncate text-ui font-semibold ${attention ? "text-warning" : "text-err"}`} title={detail}>{detail}</span> : null}
+        {detail ? <span className={`min-w-0 truncate text-ui font-semibold ${attention ? "text-warning" : "text-danger"}`} title={detail}>{detail}</span> : null}
       </span>
       <span className="no-scrollbar flex min-w-0 flex-1 items-center justify-center gap-1.5 overflow-x-auto" aria-label={t("pipelineStrip.stagesAria")}>
         {pipeline.stages.map((stage, index) => (
@@ -328,8 +328,8 @@ export function PipelineStrip({
         ))}
       </span>
       <span className="flex shrink-0 flex-wrap items-center gap-1.5">
-        {error ? <span className="max-w-[220px] truncate text-caption font-semibold text-err" title={error}>{error}</span> : null}
-        {busy ? <RefreshCw className="h-3.5 w-3.5 animate-spin text-dim" aria-hidden /> : null}
+        {error ? <span className="max-w-[220px] truncate text-caption font-semibold text-danger" title={error}>{error}</span> : null}
+        {busy ? <RefreshCw className="h-3.5 w-3.5 animate-spin text-muted" aria-hidden /> : null}
         {draft ? (
           /* A draft may be empty (assembled on the canvas, #136) — Start is gated on
              the 2-stage floor here too, matching the builder panel and mobile dock,

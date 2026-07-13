@@ -51,13 +51,13 @@ export function CodexAccountSwitch() {
         aria-haspopup="dialog"
         aria-label={t("accounts.triggerAria", { engine: "Codex" })}
         onClick={() => setOpen((value) => !value)}
-        className="flex h-8 items-center gap-1 rounded-[7px] border border-line bg-bg px-2 text-[11px] font-semibold hover:bg-chip focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+        className="flex h-8 items-center gap-1 rounded-[7px] border border-border bg-canvas px-2 text-[11px] font-semibold hover:bg-sunken focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
       >
         <span className="max-w-36 truncate">{label}</span>
         {draining ? (
           <Loader2 className="h-3 w-3 shrink-0 animate-spin motion-reduce:animate-none text-accent" aria-hidden />
         ) : (
-          <ChevronDown className="h-3 w-3 shrink-0 text-dim" aria-hidden />
+          <ChevronDown className="h-3 w-3 shrink-0 text-muted" aria-hidden />
         )}
       </button>
       {open ? <AccountsPanel state={state} onClose={close} placement="header" /> : null}

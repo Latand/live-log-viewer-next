@@ -56,7 +56,7 @@ export function InboxImageCard({ name, path }: { name: string; path: string }) {
     return (
       <div className="my-2 flex justify-end">
         <span
-          className="inline-flex max-w-[75%] items-center gap-1.5 rounded-full border border-line bg-chip px-2.5 py-1 text-[11.5px] font-semibold text-dim"
+          className="inline-flex max-w-[75%] items-center gap-1.5 rounded-full border border-border bg-sunken px-2.5 py-1 text-[11.5px] font-semibold text-muted"
           title={path}
         >
           <GlyphIcon name="image" className="h-3.5 w-3.5" />
@@ -73,10 +73,10 @@ export function InboxImageCard({ name, path }: { name: string; path: string }) {
         <button
           type="button"
           onClick={() => setView("thumb")}
-          className="inline-flex max-w-[75%] items-center gap-2 rounded-[14px] border border-line bg-panel px-3.5 py-2 text-[13px] shadow-card"
+          className="inline-flex max-w-[75%] items-center gap-2 rounded-[14px] border border-border bg-card px-3.5 py-2 text-[13px] shadow-1"
           title={path}
         >
-          <span className="flex h-6.5 w-6.5 shrink-0 items-center justify-center rounded-lg bg-chip">
+          <span className="flex h-6.5 w-6.5 shrink-0 items-center justify-center rounded-lg bg-sunken">
             <GlyphIcon name="image" className="h-4 w-4" />
           </span>
           <span className="truncate font-mono text-[12px]">{name}</span>
@@ -96,21 +96,21 @@ export function InboxImageCard({ name, path }: { name: string; path: string }) {
           alt={t("inbox.attachedAlt", { name })}
           onClick={() => setView("full")}
           onError={() => setGone("missing")}
-          className="ml-auto block max-h-[240px] cursor-zoom-in rounded-[14px] border border-line"
+          className="ml-auto block max-h-[240px] cursor-zoom-in rounded-[14px] border border-border"
         />
         <div className="mt-1 flex flex-wrap items-center justify-end gap-1.5 text-[11px]">
-          <span className="min-w-0 truncate font-mono text-dim" title={path}>
+          <span className="min-w-0 truncate font-mono text-muted" title={path}>
             {name}
           </span>
-          <button type="button" onClick={() => setView("chip")} className="shrink-0 text-dim hover:text-ink">
+          <button type="button" onClick={() => setView("chip")} className="shrink-0 text-muted hover:text-primary">
             {t("common.collapse")}
           </button>
           {confirming ? (
-            <span className="inline-flex shrink-0 items-center gap-1 rounded-[10px] border border-err/30 bg-[#fff5f5] px-1.5 py-0.5">
-              <span className="px-1 font-semibold text-err">{t("inbox.confirmDelete")}</span>
+            <span className="inline-flex shrink-0 items-center gap-1 rounded-[10px] border border-danger/30 bg-danger-soft px-1.5 py-0.5">
+              <span className="px-1 font-semibold text-danger">{t("inbox.confirmDelete")}</span>
               <button
                 type="button"
-                className="rounded-lg bg-err px-2 py-0.5 font-bold text-white disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-err/50"
+                className="rounded-lg bg-danger px-2 py-0.5 font-bold text-white disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-danger/50"
                 disabled={deleting}
                 onClick={remove}
               >
@@ -118,7 +118,7 @@ export function InboxImageCard({ name, path }: { name: string; path: string }) {
               </button>
               <button
                 type="button"
-                className="rounded-lg border border-line bg-panel px-2 py-0.5 font-semibold text-dim focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                className="rounded-lg border border-border bg-card px-2 py-0.5 font-semibold text-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
                 onClick={() => setConfirming(false)}
               >
                 {t("common.cancel")}
@@ -129,12 +129,12 @@ export function InboxImageCard({ name, path }: { name: string; path: string }) {
               type="button"
               onClick={() => setConfirming(true)}
               aria-label={t("inbox.deleteAria", { name })}
-              className="inline-flex shrink-0 items-center gap-1 rounded-full border border-line bg-panel px-2 py-0.5 font-semibold text-dim hover:border-err/40 hover:text-err focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+              className="inline-flex shrink-0 items-center gap-1 rounded-full border border-border bg-card px-2 py-0.5 font-semibold text-muted hover:border-danger/40 hover:text-danger focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
             >
               <Trash2 className="h-3 w-3" aria-hidden /> {t("inbox.deleteFromDisk")}
             </button>
           )}
-          {error ? <span className="shrink-0 font-semibold text-err">{error}</span> : null}
+          {error ? <span className="shrink-0 font-semibold text-danger">{error}</span> : null}
         </div>
       </div>
       {view === "full" ? <Lightbox src={src} alt={t("inbox.attachedAlt", { name })} caption={path} onClose={() => setView("thumb")} /> : null}

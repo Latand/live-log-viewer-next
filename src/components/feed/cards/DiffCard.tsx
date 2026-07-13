@@ -41,7 +41,7 @@ function LineRow({ line }: { line: DiffLine }) {
       ? "bg-diff-add-soft text-diff-add"
       : line.t === "-"
         ? "bg-diff-del-soft text-diff-del"
-        : "text-ink";
+        : "text-primary";
   const intralineTone = line.t === "+" ? "bg-diff-add-strong" : "bg-diff-del-strong";
   return (
     <div className={`whitespace-pre px-2 ${tone}`}>
@@ -69,8 +69,8 @@ function FileDiffView({ file }: { file: FileDiff }) {
   const visible = all ? rows : rows.slice(0, PREVIEW_LINES);
   const copyText = file.hunks.flatMap((hunk) => hunk.lines.map((line) => line.t + line.text)).join("\n");
   return (
-    <div className="group/diff relative overflow-hidden rounded-[10px] border border-line bg-panel-alt">
-      <div className="flex items-center gap-2 border-b border-line px-2.5 py-1 text-[11.5px]">
+    <div className="group/diff relative overflow-hidden rounded-[10px] border border-border bg-sunken">
+      <div className="flex items-center gap-2 border-b border-border px-2.5 py-1 text-[11.5px]">
         <span className={`shrink-0 font-semibold uppercase ${OP_TONE[file.op]}`}>{file.op}</span>
         <span className="min-w-0 flex-1 truncate">
           <FileRef file={file.path} />
@@ -89,13 +89,13 @@ function FileDiffView({ file }: { file: FileDiff }) {
         ) : null}
       </div>
       {file.binary ? (
-        <div className="px-2.5 py-2 text-[11.5px] text-dim">{tr("tools.binaryContent", { size: humanKb(file.added + file.removed) })}</div>
+        <div className="px-2.5 py-2 text-[11.5px] text-muted">{tr("tools.binaryContent", { size: humanKb(file.added + file.removed) })}</div>
       ) : rows.length ? (
         <>
           <div className="max-w-full overflow-x-auto py-1 font-mono text-[11.5px] leading-[1.5]">
             {visible.map(({ line, header }, i) => (
               <div key={i}>
-                {header ? <div className="whitespace-pre px-2 text-dim">{`@@ ${header}`}</div> : null}
+                {header ? <div className="whitespace-pre px-2 text-muted">{`@@ ${header}`}</div> : null}
                 <LineRow line={line} />
               </div>
             ))}
@@ -104,7 +104,7 @@ function FileDiffView({ file }: { file: FileDiff }) {
             <button
               type="button"
               onClick={() => setAll((value) => !value)}
-              className="w-full border-t border-line px-2.5 py-1 text-left text-[11px] font-semibold text-accent hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+              className="w-full border-t border-border px-2.5 py-1 text-left text-[11px] font-semibold text-accent hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
             >
               {all ? (
                 <span className="inline-flex items-center gap-1">
@@ -117,7 +117,7 @@ function FileDiffView({ file }: { file: FileDiff }) {
           ) : null}
         </>
       ) : null}
-      {file.truncated ? <div className="border-t border-line px-2.5 py-0.5 text-[10.5px] text-dim">{tr("tools.diffTruncated")}</div> : null}
+      {file.truncated ? <div className="border-t border-border px-2.5 py-0.5 text-[10.5px] text-muted">{tr("tools.diffTruncated")}</div> : null}
     </div>
   );
 }
@@ -128,7 +128,7 @@ export function DiffCard({ body }: { body: ToolBody }) {
       {body.files.map((file, i) => (
         <FileDiffView key={`${file.path}:${i}`} file={file} />
       ))}
-      {body.filesTruncated ? <div className="text-[11px] text-dim">{tr("tools.moreFiles", { count: body.files.length })}</div> : null}
+      {body.filesTruncated ? <div className="text-[11px] text-muted">{tr("tools.moreFiles", { count: body.files.length })}</div> : null}
     </div>
   );
 }

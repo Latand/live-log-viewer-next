@@ -15,7 +15,7 @@ export function StatusIcon({ status, className }: { status: ToolStatus; classNam
 
 export function FileRef({ file, line }: { file: string; line?: number }) {
   const label = line ? `${file}:${line}` : file;
-  const cls = "inline-block min-w-0 max-w-full truncate rounded-md bg-chip px-1.5 py-0.5 align-bottom font-mono text-[11.5px]";
+  const cls = "inline-block min-w-0 max-w-full truncate rounded-md bg-sunken px-1.5 py-0.5 align-bottom font-mono text-[11.5px]";
   if (TRANSCRIPT_PATH_RE.test(file)) {
     return (
       <a href={`#f=${encodeURIComponent(file)}`} className={`${cls} text-accent underline decoration-dotted`} title={label}>

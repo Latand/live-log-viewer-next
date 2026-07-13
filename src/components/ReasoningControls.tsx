@@ -33,7 +33,7 @@ export function ReasoningControls({
 }) {
   const { t } = useLocale();
   const selectClass =
-    "h-7 min-w-0 rounded-[8px] border border-line bg-panel px-1.5 text-[11px] text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60";
+    "h-7 min-w-0 rounded-[8px] border border-border bg-card px-1.5 text-[11px] text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60";
   return (
     <>
       <select
