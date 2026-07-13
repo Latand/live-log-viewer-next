@@ -141,7 +141,7 @@ function AccountRow({ account, engine, activeId, onSelect, onRemove, disabled }:
         aria-current={isActive ? "true" : undefined}
         disabled={selectionDisabled}
         onClick={onSelect}
-        className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-bg disabled:cursor-wait disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+        className="flex min-h-[44px] w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-bg disabled:cursor-wait disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 sm:min-h-0"
       >
         <span className="flex h-3.5 w-3.5 shrink-0 items-center justify-center">{isActive ? <Check className="h-3.5 w-3.5 text-accent" aria-hidden /> : null}</span>
         <span className={`min-w-0 flex-1 truncate text-[12.5px] ${isActive ? "font-bold text-ink" : "font-semibold"}`}>{account.label}</span>
@@ -150,7 +150,7 @@ function AccountRow({ account, engine, activeId, onSelect, onRemove, disabled }:
       </button>
       {state === "pending" && account.deviceAuth ? (
         <div className="flex items-center gap-2 px-3 pb-1.5 pl-[26px] text-[10px] text-dim">
-          <a href={account.deviceAuth.url} target="_blank" rel="noreferrer" className="truncate underline">{t("accounts.openLogin")}</a>
+          <a href={account.deviceAuth.url} target="_blank" rel="noreferrer" className="inline-flex min-h-[44px] items-center truncate underline sm:min-h-0">{t("accounts.openLogin")}</a>
           <code className="select-all font-semibold text-ink">{account.deviceAuth.code}</code>
         </div>
       ) : null}
@@ -166,7 +166,7 @@ function AccountRow({ account, engine, activeId, onSelect, onRemove, disabled }:
                   setConfirmingRemove(false);
                   onRemove();
                 }}
-                className="shrink-0 rounded-[7px] border border-err bg-err px-2 py-0.5 text-[10.5px] font-semibold text-white hover:opacity-90 disabled:opacity-45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                className="inline-flex min-h-[44px] shrink-0 items-center rounded-[7px] border border-err bg-err px-2 py-0.5 text-[10.5px] font-semibold text-white hover:opacity-90 disabled:opacity-45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 sm:min-h-0"
               >
                 {t("accounts.removeConfirmCta")}
               </button>
@@ -174,7 +174,7 @@ function AccountRow({ account, engine, activeId, onSelect, onRemove, disabled }:
                 type="button"
                 disabled={disabled}
                 onClick={() => setConfirmingRemove(false)}
-                className="shrink-0 rounded-[7px] border border-line bg-bg px-2 py-0.5 text-[10.5px] font-semibold hover:bg-chip disabled:opacity-45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                className="inline-flex min-h-[44px] shrink-0 items-center rounded-[7px] border border-line bg-bg px-2 py-0.5 text-[10.5px] font-semibold hover:bg-chip disabled:opacity-45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 sm:min-h-0"
               >
                 {t("accounts.removeConfirmCancel")}
               </button>
@@ -185,7 +185,7 @@ function AccountRow({ account, engine, activeId, onSelect, onRemove, disabled }:
               aria-label={t("accounts.removeAria", { label: account.label })}
               disabled={disabled}
               onClick={() => setConfirmingRemove(true)}
-              className="rounded-[7px] border border-line bg-bg px-2 py-0.5 text-[10.5px] font-semibold text-err hover:bg-[#fff5f5] disabled:opacity-45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+              className="inline-flex min-h-[44px] items-center rounded-[7px] border border-line bg-bg px-2 py-0.5 text-[10.5px] font-semibold text-err hover:bg-[#fff5f5] disabled:opacity-45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 sm:min-h-0"
             >
               {t("accounts.remove")}
             </button>
@@ -247,7 +247,7 @@ function ClaudeLoginRow({ account, state, loginBusy }: { account: AccountOption;
         type="button"
         onClick={() => activate(() => void state.cancelLogin(login.operationId))}
         disabled={busy || !cancelable}
-        className="shrink-0 rounded-[7px] border border-line bg-bg px-2 py-0.5 text-[11px] font-semibold hover:bg-chip disabled:opacity-45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+        className="inline-flex min-h-[44px] shrink-0 items-center rounded-[7px] border border-line bg-bg px-2 py-0.5 text-[11px] font-semibold hover:bg-chip disabled:opacity-45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 sm:min-h-0"
       >
         {t("accounts.claudeLogin.cancel")}
       </button>
@@ -277,7 +277,7 @@ function ClaudeLoginRow({ account, state, loginBusy }: { account: AccountOption;
             {/* The link renders only in awaiting_code — it is stale once the code
                 is submitted. The URL is server-vetted; render it verbatim. */}
             {login.loginUrl ? (
-              <a href={login.loginUrl} target="_blank" rel="noreferrer noopener" className="text-[11px] font-semibold text-accent underline">
+              <a href={login.loginUrl} target="_blank" rel="noreferrer noopener" className="inline-flex min-h-[44px] items-center self-start text-[11px] font-semibold text-accent underline sm:min-h-0">
                 {t("accounts.claudeLogin.openLink")}
               </a>
             ) : null}
@@ -304,12 +304,12 @@ function ClaudeLoginRow({ account, state, loginBusy }: { account: AccountOption;
                 aria-label={t("accounts.claudeLogin.codeLabel")}
                 aria-describedby={hintId}
                 placeholder={t("accounts.claudeLogin.codePlaceholder")}
-                className="h-8 min-w-0 flex-1 rounded-[8px] border border-line bg-bg px-2 font-mono text-[11.5px] outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                className="h-11 min-w-0 flex-1 rounded-[8px] border border-line bg-bg px-2 font-mono text-[11.5px] outline-none focus-visible:ring-2 focus-visible:ring-accent/40 sm:h-8"
               />
               <button
                 type="submit"
                 disabled={busy || submitted || code.trim() === ""}
-                className="h-8 shrink-0 rounded-[8px] border border-line bg-bg px-2.5 text-[11px] font-semibold hover:bg-chip disabled:cursor-not-allowed disabled:opacity-45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                className="h-11 shrink-0 rounded-[8px] border border-line bg-bg px-2.5 text-[11px] font-semibold hover:bg-chip disabled:cursor-not-allowed disabled:opacity-45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 sm:h-8"
               >
                 {t("accounts.claudeLogin.submit")}
               </button>
@@ -331,7 +331,7 @@ function ClaudeLoginRow({ account, state, loginBusy }: { account: AccountOption;
           type="button"
           onClick={() => activate(() => void state.retryLogin(account.id))}
           disabled={busy || loginBusy}
-          className="shrink-0 rounded-[7px] border border-line bg-bg px-2 py-0.5 text-[11px] font-semibold hover:bg-chip disabled:opacity-45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+          className="inline-flex min-h-[44px] shrink-0 items-center rounded-[7px] border border-line bg-bg px-2 py-0.5 text-[11px] font-semibold hover:bg-chip disabled:opacity-45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 sm:min-h-0"
         >
           {t("accounts.retry")}
         </button>
@@ -348,7 +348,7 @@ function ClaudeLoginRow({ account, state, loginBusy }: { account: AccountOption;
           type="button"
           onClick={() => activate(() => void state.retryLogin(account.id))}
           disabled={busy || loginBusy}
-          className="shrink-0 rounded-[7px] border border-line bg-bg px-2.5 py-0.5 text-[11px] font-semibold hover:bg-chip disabled:opacity-45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+          className="inline-flex min-h-[44px] shrink-0 items-center rounded-[7px] border border-line bg-bg px-2.5 py-0.5 text-[11px] font-semibold hover:bg-chip disabled:opacity-45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 sm:min-h-0"
         >
           {t("accounts.claudeLogin.signIn")}
         </button>
@@ -471,7 +471,7 @@ export function AccountsPanel({
             type="button"
             aria-label={t("accounts.close")}
             onClick={onClose}
-            className="ml-auto rounded-[6px] p-1 text-dim hover:bg-bg hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            className="ml-auto inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded-[6px] p-1 text-dim hover:bg-bg hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 sm:min-h-0 sm:min-w-0"
           >
             <X className="h-3.5 w-3.5" aria-hidden />
           </button>
@@ -502,12 +502,12 @@ export function AccountsPanel({
                 value={label}
                 onChange={(event) => setLabel(event.target.value)}
                 placeholder={t("accounts.labelPlaceholder")}
-                className="h-8 min-w-0 flex-1 rounded-[8px] border border-line bg-bg px-2 text-[11.5px] outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                className="h-11 min-w-0 flex-1 rounded-[8px] border border-line bg-bg px-2 text-[11.5px] outline-none focus-visible:ring-2 focus-visible:ring-accent/40 sm:h-8"
               />
               <button
                 type="submit"
                 disabled={mutation !== null || label.trim() === "" || loginBusy}
-                className="h-8 shrink-0 rounded-[8px] border border-line bg-bg px-2.5 text-[11px] font-semibold hover:bg-chip disabled:cursor-not-allowed disabled:opacity-45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                className="inline-flex h-11 min-w-[44px] shrink-0 items-center justify-center rounded-[8px] border border-line bg-bg px-2.5 text-[11px] font-semibold hover:bg-chip disabled:cursor-not-allowed disabled:opacity-45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 sm:h-8 sm:min-w-0"
               >
                 {t("accounts.confirmAdd")}
               </button>
@@ -517,7 +517,7 @@ export function AccountsPanel({
                 type="button"
                 disabled={mutation !== null}
                 onClick={() => void state.cleanupOrphans()}
-                className="text-[10.5px] font-semibold text-dim underline underline-offset-2 hover:text-ink disabled:opacity-45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                className="inline-flex min-h-[44px] items-center text-[10.5px] font-semibold text-dim underline underline-offset-2 hover:text-ink disabled:opacity-45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 sm:min-h-0"
               >
                 {t("accounts.cleanupOrphans")}
               </button>
@@ -532,7 +532,7 @@ export function AccountsPanel({
                     onClick={() => void state.retryNotice().then((recovered) => {
                       if (recovered && notice.operation === "add") setLabel("");
                     })}
-                    className="shrink-0 rounded-[7px] border border-line bg-bg px-2 py-0.5 text-[11px] font-semibold hover:bg-chip focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                    className="inline-flex min-h-[44px] shrink-0 items-center rounded-[7px] border border-line bg-bg px-2 py-0.5 text-[11px] font-semibold hover:bg-chip focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 sm:min-h-0"
                   >
                     {notice.action.kind === "forceRemove"
                       ? t("accounts.forceRemove")
