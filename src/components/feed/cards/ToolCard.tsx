@@ -114,7 +114,7 @@ export function ToolLine({ event, showTime = true, className = "" }: { event: To
         <div className="mb-1 mt-1 rounded-surface bg-sunken px-3 py-2.5">
           <ToolChips chips={event.chips} />
           {event.command ? (
-            <pre className="max-w-full overflow-x-auto whitespace-pre rounded-control border border-border bg-card px-3 py-1.5 font-mono text-[12px]">
+            <pre className="max-w-full overflow-x-auto whitespace-pre rounded-control border border-border bg-card px-3 py-1.5 font-mono text-ui">
               {"$ " + event.command}
             </pre>
           ) : null}

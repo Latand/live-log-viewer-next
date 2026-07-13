@@ -198,7 +198,7 @@ export function ComposerBar({
           disabled={fieldsDisabled}
           className="min-w-0 flex-1 resize-none overflow-y-auto self-center bg-transparent py-1 text-ui leading-[18px] text-primary placeholder:text-muted focus-visible:outline-none disabled:opacity-60"
         />
-        <MicButtonView {...dictation} busy={voiceSending} onText={insertSpoken} />
+        <MicButtonView {...dictation} busy={voiceSending} onText={insertSpoken} anchored />
         <span
           className="relative inline-flex shrink-0"
           onContextMenu={(event) => {

@@ -39,7 +39,7 @@ export const FeedItem = memo(function FeedItem({ item, speakText }: { item: Item
           <AvatarIcon className="h-3.5 w-3.5" aria-hidden />
         </div>
         <div className="relative min-w-0 flex-1 whitespace-pre-wrap break-words">
-          {hhmm(item.ts) ? <div className="mb-0.5 text-[11px] tabular-nums text-dim">{hhmm(item.ts)}</div> : null}
+          {hhmm(item.ts) ? <div className="mb-0.5 text-label tabular-nums text-dim">{hhmm(item.ts)}</div> : null}
           <div className="absolute right-0 top-0 flex items-center gap-0.5">
             {speakText ? <SpeakButton text={speakText} /> : null}
             <CopyButton

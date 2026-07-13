@@ -613,7 +613,7 @@ export function DraftAgentPane({
           sendIdleStyle={{ backgroundColor: tint.color, borderColor: tint.color }}
           leftSlot={
             <span
-              className="inline-flex min-w-0 items-center gap-1 rounded-full bg-chip px-1.5 py-1 font-mono text-[9.5px] font-semibold text-[#555]"
+              className="inline-flex min-w-0 items-center gap-1 rounded-control bg-sunken px-1.5 py-1 text-caption font-semibold text-secondary"
               title={t("draft.newWindowTitle")}
             >
               <Play className="h-3 w-3 shrink-0" aria-hidden /> {t("draft.newAgent")}

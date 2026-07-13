@@ -230,7 +230,12 @@ describe("feed session parity with one-shot parse", () => {
       }),
     ];
     const feed = buildFeed(codexFile, lines, false, "");
-    const commands = feed.items.filter((item) => item.kind === "tool");
+    /* The orchestration record and the plain exec are two consecutive tool
+       events, so they now fold into one cmd-group (§3.4); read the calls back
+       from the group. */
+    const commands = feed.items.flatMap((item): Extract<Item, { kind: "tool" }>[] =>
+      item.kind === "tool" ? [item] : item.kind === "cmd-group" ? item.calls : [],
+    );
     expect(commands).toHaveLength(2);
     const command = commands[0];
     if (command?.kind !== "tool") throw new Error("expected tool item");
@@ -334,6 +339,30 @@ describe("feed session identity stability", () => {
     expect(group.kind).toBe("cmd-group");
     const after = session.feed([...lines, claudeProse("one more response")], 0, false);
     expect(after.items[0].item).toBe(group);
+  });
+
+  test("a live trailing tool run folds its completed prefix but keeps the current call visible (§3.4)", () => {
+    const lines = [
+      claudeTool("a1", "Bash", "echo 1"),
+      claudeResult("a1", "1"),
+      claudeTool("a2", "Bash", "echo 2"),
+      claudeResult("a2", "2"),
+      claudeTool("a3", "Read", "cat x.txt"), // in-flight: no result yet
+    ];
+    // Live: the completed a1/a2 fold; the current a3 stays its own visible line —
+    // a live 40-call run must not read as 40 individual ToolLines.
+    const live = buildFeed({ ...claudeFile, activity: "live" } as FileEntry, lines, false, "");
+    expect(live.items).toHaveLength(2);
+    const group = live.items[0];
+    if (group.kind !== "cmd-group") throw new Error("expected a cmd-group");
+    expect(group.calls.map((call) => call.id)).toEqual(["a1", "a2"]);
+    const current = live.items[1];
+    if (current.kind !== "tool") throw new Error("expected the current call as a visible tool line");
+    expect(current.id).toBe("a3");
+    // Settled (not live): the whole run folds into one group.
+    const settled = buildFeed(claudeFile, lines, false, "");
+    expect(settled.items).toHaveLength(1);
+    expect(settled.items[0].kind).toBe("cmd-group");
   });
 
   test("prepended history resets the session and reparses the wider window", () => {
@@ -653,12 +682,17 @@ describe("Codex functions.exec orchestration", () => {
     expect(event.orchestration?.calls.some((call) => call.tool === "text" && call.icon === "note")).toBe(true);
   });
 
-  test("consecutive exec records with different nested calls stay distinguishable and never fold", () => {
+  test("consecutive exec records fold into a cmd-group while staying distinguishable (§3.4)", () => {
     const lines = [orch('await tools.exec_command({cmd:"aaa"})', "a"), orch('await tools.exec_command({cmd:"bbb"})', "b"), orch('await tools.exec_command({cmd:"ccc"})', "c"), orch('await tools.exec_command({cmd:"ddd"})', "d")];
-    const tools = buildFeed(codexFile, lines, false, "").items.filter((item) => item.kind === "tool");
-    // four consecutive orchestration rows, each its own card (not a cmd-group)
-    expect(tools).toHaveLength(4);
-    expect(new Set(tools.map((item) => (item.kind === "tool" ? item.summary : ""))).size).toBe(4);
+    const items = buildFeed(codexFile, lines, false, "").items;
+    // Four consecutive orchestration records fold into one quiet group; expanding
+    // it lists each call with its own distinct summary and its nested body intact.
+    expect(items).toHaveLength(1);
+    const group = items[0];
+    if (group.kind !== "cmd-group") throw new Error("expected a cmd-group");
+    expect(group.calls).toHaveLength(4);
+    expect(new Set(group.calls.map((call) => call.summary)).size).toBe(4);
+    expect(group.calls.every((call) => call.orchestration !== undefined)).toBe(true);
     assertParity(codexFile, lines, { chunks: [1] });
   });
 
@@ -796,7 +830,11 @@ describe("Codex functions.exec orchestration", () => {
 
 describe("Codex orchestration over a real rollout fixture (issue #83)", () => {
   const fixture = readFileSync(join(import.meta.dir, "__fixtures__", "codex-orchestration.jsonl"), "utf8").split("\n").filter(Boolean);
-  const events = buildFeed(codexFile, fixture, false, "").items.filter((item): item is Extract<Item, { kind: "tool" }> => item.kind === "tool");
+  /* Consecutive tool events fold into cmd-groups (§3.4), so read every native
+     tool event back from both top-level rows and any group. */
+  const events = buildFeed(codexFile, fixture, false, "").items.flatMap((item): Extract<Item, { kind: "tool" }>[] =>
+    item.kind === "tool" ? [item] : item.kind === "cmd-group" ? item.calls : [],
+  );
 
   test("every native tool card carries a meaningful, non-empty summary", () => {
     expect(events.length).toBeGreaterThanOrEqual(5);

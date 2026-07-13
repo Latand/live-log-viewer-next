@@ -104,13 +104,13 @@ const hhmm = (at: number) =>
 function receiptMeta(t: TFunction, state: DeliveryReceiptState | undefined): { label: string; className: string } | null {
   switch (state) {
     case "held":
-      return { label: t("composer.receiptHeld"), className: "bg-[#fff2d6] text-[#7a5300]" };
+      return { label: t("composer.receiptHeld"), className: "bg-warning-soft text-warning" };
     case "queued":
-      return { label: t("composer.receiptQueued"), className: "bg-[#fff2d6] text-[#7a5300]" };
+      return { label: t("composer.receiptQueued"), className: "bg-warning-soft text-warning" };
     case "recovering":
-      return { label: t("composer.receiptRecovering"), className: "bg-[#fff2d6] text-[#7a5300]" };
+      return { label: t("composer.receiptRecovering"), className: "bg-warning-soft text-warning" };
     case "failed":
-      return { label: t("composer.receiptFailed"), className: "bg-[#ffe0e0] text-err" };
+      return { label: t("composer.receiptFailed"), className: "bg-danger-soft text-danger" };
     default:
       return null;
   }
@@ -365,7 +365,7 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
 
   const modeChip = (
     <span
-      className="inline-flex min-w-0 items-center gap-1 rounded-control bg-sunken px-1.5 py-1 text-[9.5px] font-semibold text-secondary"
+      className="inline-flex min-w-0 items-center gap-1 rounded-control bg-sunken px-1.5 py-1 text-caption font-semibold text-secondary"
       title={relayMode ? t("composer.titleRelay") : spawnMode ? t("composer.titleSpawnResumed") : `tmux ${target}`}
     >
       {relayMode ? (
