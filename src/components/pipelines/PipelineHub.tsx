@@ -9,6 +9,7 @@ import type { Pipeline, PipelineAction } from "@/lib/pipelines/types";
 import { latestAttempt, patchPipeline, pipelineStateLabel, stageChipLabel } from "./pipelineModel";
 
 const TONES: Record<Pipeline["state"], string> = {
+  draft: "#a06a15",
   provisioning: "#5a51e0",
   running: "#5a51e0",
   needs_decision: "#e0ae45",

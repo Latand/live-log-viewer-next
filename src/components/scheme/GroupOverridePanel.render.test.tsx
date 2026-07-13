@@ -125,3 +125,28 @@ test("a pipeline with every stage started shows the no-editable-stage message", 
   expect(html).toContain("No upcoming stage to edit");
   expect(html).not.toContain("Update stage");
 });
+
+test("a draft pipeline exposes metadata, stage-plan, Start, and discard controls", () => {
+  const draft = {
+    ...pipeline,
+    state: "draft",
+    spec: "AC1",
+    repoDir: "/repo",
+    runs: pipeline.stages.map((stage) => ({ stageId: stage.id, attempts: [] })),
+  } as unknown as Pipeline;
+  const html = renderToStaticMarkup(
+    <GroupOverridePanel group={{ ...pipelineGroup, pipeline: draft }} onClose={noop} />,
+  );
+
+  expect(html).toContain("Task");
+  expect(html).toContain("Specification");
+  expect(html).toContain("Repository");
+  expect(html).toContain("Save draft details");
+  expect(html).toContain("Add stage");
+  expect(html).toContain("Move up");
+  expect(html).toContain("Move down");
+  expect(html).toContain("Remove stage");
+  expect(html).toContain("Start pipeline");
+  expect(html).toContain("Discard draft");
+  expect(html).not.toContain("Pause pipeline");
+});
