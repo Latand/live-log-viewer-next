@@ -29,8 +29,10 @@ export const GAP_X = 48;
 /* Vertical corridor between generations: arrows plus the under-deck chip. */
 const GAP_Y = 130;
 /* Children start slightly right of the parent's left edge — the requested
-   "below and a bit to the side" staircase read. */
-const INDENT = 64;
+   "below and a bit to the side" staircase read. Exported: pipeline stage slots
+   anchor on the same offset so an attaching stage window lands exactly on its
+   placeholder (issue #196). */
+export const INDENT = 64;
 const GROUP_GAP = 150;
 const PAD = 100;
 /* Corridor between an implementer and its reviewer deck: wide enough for the
@@ -496,13 +498,12 @@ export function buildSchemeLayout(
      placeholder windows in stage order, so the whole chain is visible from the
      moment a template lands as a draft. A memberless pipeline (draft /
      provisioning) docks its full row after the tree columns; once stages
-     materialize, the remaining placeholders hang below the pipeline's placed
-     members so the region stays one halo.
-     TODO(#197): membership is re-derived per poll from pipeline.runs attempts
-     against the live scan, so a stage whose transcript leaves the scan regrows
-     its placeholder and the live window never inherits the slot's exact spot.
-     Durable membership/lineage persistence (issue #197) will pin each slot to
-     the window that materialized it. */
+     materialize, the remaining placeholders continue from the chain's tip at
+     the exact spot the tree will hand the next stage window (tip + INDENT, one
+     generation below) — so an attaching agent's live window takes over its
+     placeholder's position and card: dashed becomes solid IN PLACE.
+     TODO(#197 follow-up): with durable membership (#199) landed, slots can next
+     be pinned to their materialized windows across scan gaps. */
   const rectsIntersect = (a: SchemeRect, b: SchemeRect) =>
     a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
   const slots: StageSlot[] = [];
@@ -512,8 +513,13 @@ export function buildSchemeLayout(
     const placedPaths = new Set(nodes.map((node) => node.file.path));
     const placedFlowIds = new Set(decks.map((deck) => deck.flow.id));
     const nodeRectByPath = new Map<string, SchemeRect>(nodes.map((node) => [node.file.path, node]));
+    /* Only THIS project's pipelines may grow memberless slot rows — the global
+       list serves cross-project stage membership, so without this fence a
+       foreign draft would drop its slots + halo on every project's canvas. A
+       global pipeline still gets slots once it has a placed member here. */
+    const surfaceIds = new Set(surfacePipelines.map((pipeline) => pipeline.id));
     const seen = new Set<string>();
-    const pool = [...pipelines, ...surfacePipelines].filter((pipeline) => {
+    const pool = [...surfacePipelines, ...pipelines].filter((pipeline) => {
       if (pipeline.state === "closed" || seen.has(pipeline.id)) return false;
       seen.add(pipeline.id);
       return true;
@@ -524,33 +530,47 @@ export function buildSchemeLayout(
       if (!pending.length) continue;
       const memberRects: SchemeRect[] = [];
       const memberPaths = new Set<string>();
-      for (const run of pipeline.runs) {
-        for (const attempt of run.attempts) {
-          if (attempt.agentPath) {
-            const rect = nodeRectByPath.get(attempt.agentPath);
-            if (rect) {
-              memberRects.push(rect);
-              memberPaths.add(attempt.agentPath);
-            }
-          }
-          if (attempt.flowId) {
-            const impl = implOfFlow(attempt.flowId);
-            const rect = impl ? nodeRectByPath.get(impl) : null;
-            if (impl && rect) {
-              memberRects.push(rect);
-              memberPaths.add(impl);
-            }
-            const deck = decks.find((candidate) => candidate.flow.id === attempt.flowId);
-            if (deck) memberRects.push(deck);
+      /* The chain's tip: the LAST stage (in chain order) with a placed window —
+         a run stage's agent node, or a review-loop's implementer. The next
+         stage's live window lands as the tip's child, so the slot row anchors
+         there. */
+      let tip: SchemeRect | null = null;
+      for (const stage of pipeline.stages) {
+        const attempt = pipeline.runs.find((run) => run.stageId === stage.id)?.attempts.at(-1);
+        if (!attempt) continue;
+        if (attempt.agentPath) {
+          const rect = nodeRectByPath.get(attempt.agentPath);
+          if (rect) {
+            memberRects.push(rect);
+            memberPaths.add(attempt.agentPath);
+            if (stage.kind !== "review-loop") tip = rect;
           }
         }
+        if (attempt.flowId) {
+          const impl = implOfFlow(attempt.flowId);
+          const rect = impl ? nodeRectByPath.get(impl) : null;
+          if (impl && rect) {
+            memberRects.push(rect);
+            memberPaths.add(impl);
+            if (stage.kind === "review-loop") tip = rect;
+          }
+          const deck = decks.find((candidate) => candidate.flow.id === attempt.flowId);
+          if (deck) memberRects.push(deck);
+        }
       }
+      if (!surfaceIds.has(pipeline.id) && !memberRects.length) continue;
       const rowW = pending.length * SLOT_W + (pending.length - 1) * SLOT_GAP;
       let sx: number;
       let sy: number;
-      if (memberRects.length) {
-        sx = Math.min(...memberRects.map((rect) => rect.x));
-        sy = Math.max(...memberRects.map((rect) => rect.y + rect.h)) + GAP_Y;
+      if (tip) {
+        /* The tree indents a child one INDENT right of its parent and one
+           generation (GAP_Y) below — anchoring the first slot exactly there
+           makes the attach hand-off positionally exact: the live window the
+           tree places for the next stage lands on the slot's own coordinates
+           (review finding 3 reproduced a 64px INDENT mismatch), so the dashed
+           card becomes the solid window in place. */
+        sx = tip.x + INDENT;
+        sy = tip.y + tip.h + GAP_Y;
         /* Step below any unrelated card the row would cover — bounded, so a
            pathological board can never loop forever. */
         const row = (): SchemeRect => ({ x: sx, y: sy, w: rowW, h: SLOT_H });

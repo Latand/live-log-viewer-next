@@ -276,7 +276,7 @@ export function PipelineStrip({
         ? "bg-success-soft text-success"
         : "bg-chip text-dim";
   const actionBtn =
-    "inline-flex h-7 shrink-0 items-center justify-center gap-1 rounded-[8px] border px-2.5 text-[11px] font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40";
+    "inline-flex h-7 shrink-0 items-center justify-center gap-1 rounded-control border px-2.5 text-ui font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40";
   const neutralBtn = `${actionBtn} border-line bg-panel text-secondary hover:text-ink`;
   const quietDangerBtn = `${actionBtn} border-line bg-panel text-secondary hover:border-danger/40 hover:text-danger`;
   return (
@@ -284,7 +284,7 @@ export function PipelineStrip({
       data-scheme-ui
       role="group"
       aria-label={t("pipelineStrip.groupAria", { task: pipeline.task })}
-      className={`pointer-events-auto flex min-h-9 w-full flex-wrap items-center gap-x-2.5 gap-y-1 rounded-[12px] border bg-panel/95 py-1 shadow-card ${compact ? "px-2.5" : "px-3"} ${draft ? "border-2 border-dashed border-warning" : attention ? "border-warning/70" : "border-line"}`}
+      className={`pointer-events-auto flex min-h-9 w-full flex-wrap items-center gap-x-2.5 gap-y-1 rounded-surface border bg-panel/95 py-1 shadow-card ${compact ? "px-2.5" : "px-3"} ${draft ? "border-2 border-dashed border-warning" : attention ? "border-warning/70" : "border-line"}`}
     >
       <span className="flex min-w-0 max-w-full shrink-0 items-center gap-2 sm:max-w-[46%]">
         <span
@@ -294,20 +294,20 @@ export function PipelineStrip({
           aria-hidden
         />
         {draft ? (
-          <span className="shrink-0 rounded-full border border-dashed border-warning bg-warning-soft px-2 py-0.5 text-[10px] font-semibold tracking-[0.06em] text-warning">
+          <span className="shrink-0 rounded-full border border-dashed border-warning bg-warning-soft px-2 py-0.5 text-caption font-semibold tracking-[0.06em] text-warning">
             {t("pipelineStrip.draftBadge")}
           </span>
         ) : null}
-        <span className="min-w-0 truncate text-[12px] font-semibold text-ink" title={pipeline.task}>{pipeline.task}</span>
-        <span className={`shrink-0 rounded-full px-1.5 py-0.5 text-[10.5px] font-semibold ${statusBadge}`}>
+        <span className="min-w-0 truncate text-ui font-semibold text-ink" title={pipeline.task}>{pipeline.task}</span>
+        <span className={`shrink-0 rounded-full px-1.5 py-0.5 text-caption font-semibold ${statusBadge}`}>
           {pipelineStateLabel(t, pipeline.state)}
         </span>
         {!draft && total ? (
-          <span className="shrink-0 text-[11px] font-semibold tabular-nums text-dim">
+          <span className="shrink-0 text-label font-semibold tabular-nums text-dim">
             {t("pipelineStrip.stageOf", { k: position, n: total })}
           </span>
         ) : null}
-        {detail ? <span className={`min-w-0 truncate text-[11.5px] font-semibold ${attention ? "text-warning" : "text-err"}`} title={detail}>{detail}</span> : null}
+        {detail ? <span className={`min-w-0 truncate text-ui font-semibold ${attention ? "text-warning" : "text-err"}`} title={detail}>{detail}</span> : null}
       </span>
       <span className="no-scrollbar flex min-w-0 flex-1 items-center justify-center gap-1.5 overflow-x-auto" aria-label={t("pipelineStrip.stagesAria")}>
         {pipeline.stages.map((stage, index) => (
@@ -328,7 +328,7 @@ export function PipelineStrip({
         ))}
       </span>
       <span className="flex shrink-0 flex-wrap items-center gap-1.5">
-        {error ? <span className="max-w-[220px] truncate text-[10.5px] font-semibold text-err" title={error}>{error}</span> : null}
+        {error ? <span className="max-w-[220px] truncate text-caption font-semibold text-err" title={error}>{error}</span> : null}
         {busy ? <RefreshCw className="h-3.5 w-3.5 animate-spin text-dim" aria-hidden /> : null}
         {draft ? (
           /* A draft may be empty (assembled on the canvas, #136) — Start is gated on

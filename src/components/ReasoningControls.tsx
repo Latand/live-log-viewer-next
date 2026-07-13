@@ -11,8 +11,6 @@ export type SpeedChoice = "" | "fast" | "standard";
  * Reasoning-effort select plus the codex-only speed (fast/standard) select —
  * the shared control strip for every "start a new agent" surface. The tier
  * list follows the engine; an empty value leaves the CLI on its own default.
- * `showSpeed={false}` drops the speed select on surfaces without a speed
- * concept (pipeline stage placeholders, #196).
  */
 export function ReasoningControls({
   engine,
@@ -20,7 +18,6 @@ export function ReasoningControls({
   effort,
   speed,
   disabled,
-  showSpeed = true,
   onModel,
   onEffort,
   onSpeed,
@@ -30,7 +27,6 @@ export function ReasoningControls({
   effort: string;
   speed: SpeedChoice;
   disabled?: boolean;
-  showSpeed?: boolean;
   onModel: (value: string) => void;
   onEffort: (value: string) => void;
   onSpeed: (value: SpeedChoice) => void;
@@ -70,7 +66,7 @@ export function ReasoningControls({
           </option>
         ))}
       </select>
-      {engine === "codex" && showSpeed ? (
+      {engine === "codex" ? (
         <select
           value={speed}
           disabled={disabled}

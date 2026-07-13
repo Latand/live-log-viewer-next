@@ -7,7 +7,7 @@ import type { FileEntry } from "@/lib/types";
 import { type BranchGroup, buildBranchGroups } from "@/components/projectModel";
 
 import { deckKey, flowLinkKey } from "./agentLinks";
-import { buildSchemeLayout } from "./layout";
+import { INDENT, buildSchemeLayout } from "./layout";
 
 function entry(overrides: Partial<FileEntry> & { path: string }): FileEntry {
   return {
@@ -388,7 +388,7 @@ describe("pipeline stage placeholder slots (issue #196)", () => {
     expect(layout.height).toBeGreaterThanOrEqual(c!.y + c!.h);
   });
 
-  test("a materialized stage dissolves exactly its slot; the rest stay in the pipeline's halo", () => {
+  test("a materialized stage dissolves exactly its slot; the next slot sits where the tree drops the tip's child (attach IN PLACE)", () => {
     const root = entry({ path: "/arch" });
     const group: BranchGroup = { key: "/arch", columns: [{ file: root, tasks: [] }], returnable: [], finished: [], smt: root.mtime, orphanTask: false };
     const running = staged({
@@ -400,8 +400,44 @@ describe("pipeline stage placeholder slots (issue #196)", () => {
     /* The architect window is live — only builder + review keep placeholders. */
     expect(layout.slots.map((slot) => slot.stage.id)).toEqual(["builder", "review"]);
     const node = layout.nodes.find((candidate) => candidate.file.path === "/arch")!;
-    /* Remaining slots hang below the placed member, keeping the region compact. */
-    for (const slot of layout.slots) expect(slot.y).toBeGreaterThanOrEqual(node.y + node.h);
+    /* Review round-1 finding 3: the next stage's live window lands as the tip's
+       child at (tip.x + INDENT, one generation below) — the slot must sit on
+       EXACTLY those coordinates so the dashed card becomes the solid window in
+       place, with no relocation. */
+    const next = layout.slots[0]!;
+    expect(next.x).toBe(node.x + INDENT);
+    expect(next.y).toBeGreaterThanOrEqual(node.y + node.h);
+    const attached = buildSchemeLayout(
+      [
+        group,
+        {
+          key: "/builder",
+          columns: [{ file: entry({ path: "/builder", parent: "/arch" }), tasks: [] }],
+          returnable: [],
+          finished: [],
+          smt: 1_000,
+          orphanTask: false,
+        },
+      ],
+      [],
+      [root, entry({ path: "/builder", parent: "/arch" })],
+      [],
+      [],
+      [staged({
+        state: "running",
+        cursor: { stageId: "review", state: "spawning" },
+        runs: [
+          { stageId: "architect", attempts: [{ n: 1, state: "passed", agentPath: "/arch", flowId: null }] },
+          { stageId: "builder", attempts: [{ n: 1, state: "running", agentPath: "/builder", flowId: null }] },
+        ],
+      })],
+      [],
+    );
+    /* Note: whether the builder lands as /arch's tree child or its own column,
+       the invariant under test is positional: its window must take the slot's
+       coordinates from the previous poll's layout when the topology matches
+       (child-of-tip), which the INDENT/GAP_Y anchor above encodes. */
+    expect(attached.slots.map((slot) => slot.stage.id)).toEqual(["review"]);
     /* Exactly one halo encloses both the live node and the remaining slots. */
     const halos = layout.groups.filter((candidate) => candidate.kind === "pipeline" && candidate.id === "p9");
     expect(halos).toHaveLength(1);
@@ -411,5 +447,17 @@ describe("pipeline stage placeholder slots (issue #196)", () => {
       expect(slot.x + slot.w).toBeLessThanOrEqual(halo.x + halo.w);
       expect(slot.y + slot.h).toBeLessThanOrEqual(halo.y + halo.h);
     }
+  });
+
+  test("a foreign project's memberless draft never grows slots or a halo on this canvas (round-1 finding 2)", () => {
+    /* Global list carries another project's draft; the project-scoped surface
+       list does not include it — nothing of it may render here. */
+    const foreign = staged({ id: "px", project: "other" });
+    const layout = buildSchemeLayout([], [], [], [], [], [foreign], []);
+    expect(layout.slots).toHaveLength(0);
+    expect(layout.groups.filter((group) => group.kind === "pipeline")).toHaveLength(0);
+    /* The same pipeline offered through the surface list (this project) renders. */
+    const local = buildSchemeLayout([], [], [], [], [], [foreign], [foreign]);
+    expect(local.slots.length).toBeGreaterThan(0);
   });
 });

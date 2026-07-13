@@ -97,7 +97,7 @@ test("a placeholder IS the draft-agent window recipe: engine radiogroup, role se
   host.remove();
 });
 
-test("changing the effort PATCHes override-stage with ONLY the changed field, stageId pinned", async () => {
+test("editing the effort + Apply PATCHes override-stage with ONLY the changed field, stageId pinned (live-window apply lifecycle)", async () => {
   const patches: Array<{ url: string; body: Record<string, unknown> }> = [];
   globalThis.fetch = (async (url: string, init?: { method?: string; body?: string }) => {
     if (!init?.method || init.method !== "PATCH") return { ok: true, json: async () => ({ roles: [] }) };
@@ -110,6 +110,12 @@ test("changing the effort PATCHes override-stage with ONLY the changed field, st
   flushSync(() => {
     Object.getOwnPropertyDescriptor(dom.HTMLSelectElement.prototype, "value")!.set!.call(effortSelect, "max");
     effortSelect.dispatchEvent(new dom.Event("change", { bubbles: true }) as unknown as Event);
+  });
+  /* Nothing lands until Apply — the same explicit lifecycle live windows use. */
+  expect(patches).toHaveLength(0);
+  const apply = host.querySelector('button[aria-label="Apply"]') as HTMLButtonElement;
+  flushSync(() => {
+    apply.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event);
   });
   await Bun.sleep(0);
   expect(patches).toHaveLength(1);

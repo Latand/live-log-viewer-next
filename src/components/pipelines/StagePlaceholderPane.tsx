@@ -3,9 +3,9 @@
 import { Check, Loader2 } from "lucide-react";
 import { useState } from "react";
 
+import { RuntimeControlsView, type RuntimeApplyState, type RuntimeDraft } from "@/components/AgentRuntimeControls";
 import { EngineRadioGroup, RoleSection, useRoleCatalog } from "@/components/DraftAgentPane";
 import { X } from "@/components/icons";
-import { ReasoningControls } from "@/components/ReasoningControls";
 import type { StageSlot } from "@/components/scheme/layout";
 import { engineTintOf } from "@/components/utils";
 import { isEngineEffort } from "@/lib/agent/efforts";
@@ -43,8 +43,9 @@ function sanitizeParams(params: Record<string, string | number>): Record<string,
 /**
  * A planned pipeline stage as the SAME window a new agent gets (issue #196):
  * the DraftAgentPane recipe — engine chips in the header, the shared
- * RoleSection (role select, params, scaffold preview), the shared
- * ReasoningControls row, and the prompt editor at the bottom — just dashed,
+ * RoleSection (role select, params, scaffold preview), the live windows' own
+ * RuntimeControlsView (model · effort · apply, exactly as BranchPane mounts
+ * it), and the prompt editor at the bottom — just dashed,
  * because no agent is attached yet. Every edit is an `override-stage` PATCH
  * against the draft; server echoes re-seed the controls in place (render-phase
  * adjustment), so the pane never remounts under the operator's cursor. When
@@ -68,9 +69,14 @@ export function StagePlaceholderPane({ slot, interactive }: { slot: StageSlot; i
     pipeline.state !== "completed" &&
     pipeline.state !== "closed";
 
+  const effectiveModel = stage.effectiveRole.model ?? "";
+  const effectiveEffort = stage.effectiveRole.effort ?? "";
   const [engine, setEngine] = useState<FlowEngine>(stage.effectiveRole.engine);
-  const [model, setModel] = useState(stage.effectiveRole.model ?? "");
-  const [effort, setEffort] = useState(stage.effectiveRole.effort ?? "");
+  /* The stage's runtime draft rides the SAME RuntimeControlsView the live
+     conversation windows use (review round 1) — edited here, applied as an
+     override-stage PATCH instead of a tmux reconfigure. */
+  const [runtime, setRuntime] = useState<RuntimeDraft>({ model: effectiveModel, effort: effectiveEffort, fast: false });
+  const [applyState, setApplyState] = useState<RuntimeApplyState>("idle");
   const [roleId, setRoleId] = useState(stage.role?.roleId ?? "");
   const [roleParams, setRoleParams] = useState<Record<string, string | number>>(stage.role?.params ?? {});
   const [prompt, setPrompt] = useState(stage.prompt);
@@ -87,8 +93,7 @@ export function StagePlaceholderPane({ slot, interactive }: { slot: StageSlot; i
   if (seenRuntime !== runtimeSig) {
     setSeenRuntime(runtimeSig);
     setEngine(stage.effectiveRole.engine);
-    setModel(stage.effectiveRole.model ?? "");
-    setEffort(stage.effectiveRole.effort ?? "");
+    setRuntime({ model: effectiveModel, effort: effectiveEffort, fast: false });
   }
   const roleSig = `${stage.role?.roleId ?? ""}:${JSON.stringify(stage.role?.params ?? {})}`;
   const [seenRole, setSeenRole] = useState(roleSig);
@@ -117,19 +122,35 @@ export function StagePlaceholderPane({ slot, interactive }: { slot: StageSlot; i
     if (next === engine) return;
     /* Switching the engine invalidates the model and can invalidate the effort
        tier; clearing the pins hands both back to the engine/role defaults. */
-    const keepEffort = Boolean(effort && isEngineEffort(next, effort));
+    const keepEffort = Boolean(runtime.effort && isEngineEffort(next, runtime.effort));
     setEngine(next);
-    setModel("");
-    if (!keepEffort) setEffort("");
+    setRuntime((current) => ({ ...current, model: "", effort: keepEffort ? current.effort : "" }));
     void save({ engine: next, model: null, ...(keepEffort ? {} : { effort: null }) });
   };
-  const changeModel = (value: string) => {
-    setModel(value);
-    void save({ model: value.trim() || null });
+  const editRuntime = (update: (current: RuntimeDraft) => RuntimeDraft) => {
+    setRuntime(update);
+    setApplyState("idle");
   };
-  const changeEffort = (value: string) => {
-    setEffort(value);
-    void save({ effort: value || null });
+  /* Apply carries only the fields that differ from the stage's resolved
+     runtime, so unchanged values never pin a role default (issue #118 rule). */
+  const applyRuntime = async () => {
+    if (applyState === "saving") return;
+    const body: Omit<PatchPipelineRequest, "action" | "stageId"> = {};
+    if (runtime.model.trim() !== effectiveModel) body.model = runtime.model.trim() || null;
+    if (runtime.effort !== effectiveEffort) body.effort = runtime.effort || null;
+    if (!Object.keys(body).length) {
+      setApplyState("applied");
+      return;
+    }
+    setApplyState("saving");
+    setError(null);
+    const fail = await patchPipeline(pipeline.id, "override-stage", { stageId: stage.id, ...body });
+    if (fail) {
+      setError(fail);
+      setApplyState("error");
+    } else {
+      setApplyState("applied");
+    }
   };
   const selectRole = (next: string) => {
     setRoleId(next);
@@ -177,7 +198,9 @@ export function StagePlaceholderPane({ slot, interactive }: { slot: StageSlot; i
     : state === "running" || state === "reviewing" || state === "committing"
       ? t("pipelineSlot.starting", { role: label })
       : t("pipelineSlot.waiting", { role: label });
-  const modelLabel = (ENGINE_MODELS[engine].find((option) => option.id === model)?.label ?? model) || t("draft.modelDefault");
+  const observedModelLabel = (ENGINE_MODELS[engine].find((option) => option.id === effectiveModel)?.label ?? effectiveModel) || t("draft.modelDefault");
+  const observedEffort = effectiveEffort || t("groupOverride.effortDefault");
+  const runtimePending = runtime.model !== effectiveModel || runtime.effort !== effectiveEffort;
 
   return (
     <section
@@ -230,16 +253,19 @@ export function StagePlaceholderPane({ slot, interactive }: { slot: StageSlot; i
         <span className="shrink-0 text-[10px] font-semibold text-dim">{t("draft.reasoning")}</span>
         {interactive ? (
           <>
-            <ReasoningControls
+            <RuntimeControlsView
               engine={engine as "claude" | "codex"}
-              model={model}
-              effort={effort}
-              speed=""
+              draft={runtime}
+              state={applyState}
+              error={error ?? ""}
+              observedModelLabel={observedModelLabel}
+              observedEffort={observedEffort}
+              draftPending={runtimePending}
               showSpeed={false}
+              withDefaults
               disabled={!editable || busy}
-              onModel={changeModel}
-              onEffort={changeEffort}
-              onSpeed={() => undefined}
+              onEdit={editRuntime}
+              onApply={() => void applyRuntime()}
             />
             {busy ? (
               <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-dim" aria-hidden />
@@ -249,8 +275,8 @@ export function StagePlaceholderPane({ slot, interactive }: { slot: StageSlot; i
           </>
         ) : (
           <span className="min-w-0 truncate text-[11px] font-semibold text-dim">
-            {modelLabel}
-            {effort ? ` · ${effort}` : ""}
+            {observedModelLabel}
+            {effectiveEffort ? ` · ${effectiveEffort}` : ""}
           </span>
         )}
       </div>
