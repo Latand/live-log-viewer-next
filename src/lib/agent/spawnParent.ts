@@ -72,3 +72,31 @@ export function resolveSpawnParent(
     sessionKey: sessionKeyFromTranscript(engine, artifactPath),
   };
 }
+
+export function resolveSpawnLineageParent(
+  body: { role?: unknown; reviews?: unknown; src?: unknown; parent?: unknown; parentConversationId?: unknown },
+  registry = agentRegistry(),
+): ResolvedSpawnParent | null {
+  const reviewer = body.role === "reviewer";
+  if (!reviewer) {
+    if (body.reviews !== undefined) throw new SpawnParentError("reviews requires role: reviewer", 400);
+    return resolveSpawnParent(body, registry);
+  }
+  if (typeof body.reviews !== "string" || !body.reviews.trim()) {
+    throw new SpawnParentError("reviewer requires reviews", 400);
+  }
+  const reviewRef = body.reviews.trim();
+  const reviewed = reviewRef.startsWith("conversation_")
+    ? resolveSpawnParent({ parentConversationId: reviewRef }, registry)
+    : resolveSpawnParent({ parent: reviewRef }, registry);
+  if (!reviewed) throw new SpawnParentError("reviewed conversation is invalid", 400);
+
+  const explicitSelector = body.parentConversationId !== undefined || body.parent !== undefined || body.src !== undefined;
+  if (explicitSelector) {
+    const explicit = resolveSpawnParent(body, registry);
+    if (!explicit || explicit.conversationId !== reviewed.conversationId) {
+      throw new SpawnParentError("reviewer parent must match reviews", 400);
+    }
+  }
+  return reviewed;
+}

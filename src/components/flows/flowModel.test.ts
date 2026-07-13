@@ -5,7 +5,14 @@ import type { FileEntry } from "@/lib/types";
 
 import { protectedReviewerNodes } from "@/components/scheme/workerCollapse";
 
-import { claimedReviewerDescendantPaths, flowPresentation, foldClaimedReviewers, isActiveFlow } from "./flowModel";
+import {
+  claimedReviewerDescendantPaths,
+  flowPresentation,
+  foldClaimedReviewers,
+  isActiveFlow,
+  reviewerFileForRound,
+  reviewerFilesForRound,
+} from "./flowModel";
 
 function entry(overrides: Partial<FileEntry> & { path: string }): FileEntry {
   return {
@@ -67,6 +74,101 @@ function flow(overrides: Partial<Flow> & { implementerPath: string; reviewerPath
 }
 
 describe("reviewer folding", () => {
+  test("resolves a resumed reviewer through its stable durable edge", () => {
+    const resumed = entry({
+      path: "/reviewer-resumed",
+      conversationId: "conversation-reviewer",
+      durableLineage: {
+        kind: "review",
+        role: "reviewer",
+        parentConversationId: "conversation-implementer",
+        reviewsConversationId: "conversation-implementer",
+        memberships: [{
+          kind: "flow",
+          containerId: "flow-1",
+          slot: "reviewer:3",
+          role: "reviewer",
+          round: 3,
+          stageId: null,
+          stageOrder: null,
+          parentConversationId: "conversation-implementer",
+        }],
+      },
+    });
+    const archived = entry({
+      path: "/reviewer-rotated-away",
+      conversationId: "conversation-reviewer",
+      migratedTo: resumed.path,
+    });
+    const currentFlow = flow({
+      implementerPath: "/implementer",
+      reviewerPath: "/reviewer-rotated-away",
+      rounds: [{
+        n: 3,
+        reviewerPath: "/reviewer-rotated-away",
+        reviewerConversationId: "conversation-reviewer",
+        findingsPath: null,
+        triggeredBy: "marker",
+        readyNote: null,
+        verdict: null,
+        findingsCount: null,
+        startedAt: "2026-07-05T00:00:00Z",
+        reviewedAt: null,
+        relayedAt: null,
+        error: null,
+      }],
+    });
+
+    expect(reviewerFileForRound(currentFlow, currentFlow.rounds[0]!, [archived, resumed])).toBe(resumed);
+    expect(reviewerFilesForRound(currentFlow, currentFlow.rounds[0]!, [archived, resumed])).toEqual([resumed]);
+  });
+
+  test("projects every immutable reviewer retry into one logical round", () => {
+    const reviewer = (path: string, conversationId: string, slot: string) => entry({
+      path,
+      conversationId,
+      durableLineage: {
+        kind: "review",
+        role: "reviewer",
+        parentConversationId: "conversation-implementer",
+        reviewsConversationId: "conversation-implementer",
+        memberships: [{
+          kind: "flow",
+          containerId: "flow-1",
+          slot,
+          role: "reviewer",
+          round: 2,
+          stageId: null,
+          stageOrder: null,
+          parentConversationId: "conversation-implementer",
+        }],
+      },
+    });
+    const failed = reviewer("/reviewer-failed", "conversation-reviewer-a", "reviewer:2:binding-a");
+    const current = reviewer("/reviewer-current", "conversation-reviewer-b", "reviewer:2:binding-b");
+    const currentFlow = flow({
+      implementerPath: "/implementer",
+      reviewerPath: current.path,
+      rounds: [{
+        n: 2,
+        reviewerPath: current.path,
+        reviewerConversationId: current.conversationId,
+        findingsPath: null,
+        triggeredBy: "marker",
+        readyNote: null,
+        verdict: null,
+        findingsCount: null,
+        startedAt: "2026-07-05T00:00:00Z",
+        reviewedAt: null,
+        relayedAt: null,
+        error: null,
+      }],
+    });
+
+    expect(reviewerFilesForRound(currentFlow, currentFlow.rounds[0]!, [current, failed]).map((file) => file.path))
+      .toEqual([failed.path, current.path]);
+  });
+
   test("keeps descendants available for expanded scheme placement", () => {
     const implementer = entry({ path: "/implementer" });
     const reviewer = entry({ path: "/reviewer", parent: "/implementer" });
@@ -83,6 +185,42 @@ describe("reviewer folding", () => {
       ["/subtask", "/implementer"],
       ["/sidecar", "/subtask"],
     ]);
+  });
+
+  test("re-homes reviewer descendants under the resumed implementer generation", () => {
+    const implementer = entry({ path: "/implementer-resumed", conversationId: "conversation-implementer" });
+    const archived = entry({
+      path: "/implementer-archived",
+      conversationId: implementer.conversationId,
+      migratedTo: implementer.path,
+    });
+    const reviewer = entry({
+      path: "/reviewer",
+      durableLineage: {
+        kind: "review",
+        role: "reviewer",
+        parentConversationId: implementer.conversationId!,
+        reviewsConversationId: implementer.conversationId!,
+        memberships: [{
+          kind: "flow",
+          containerId: "flow-1",
+          slot: "reviewer:1:binding",
+          role: "reviewer",
+          round: 1,
+          stageId: null,
+          stageOrder: null,
+          parentConversationId: implementer.conversationId!,
+        }],
+      },
+    });
+    const child = entry({ path: "/reviewer-child", parent: reviewer.path });
+
+    const folded = foldClaimedReviewers([implementer, archived, reviewer, child], [flow({
+      implementerPath: implementer.path,
+      reviewerPath: reviewer.path,
+    })]);
+
+    expect(folded.find((file) => file.path === child.path)?.parent).toBe(implementer.path);
   });
 
   test("a closed flow stays folded but never expands its reviewer subtree into active nodes", () => {

@@ -235,3 +235,15 @@ test("retry-round clears with an empty note and keeps the note when omitted (iss
   seed({ state: "needs_decision", rounds: [pendingRound("stale note")] as never });
   expect(patchFlow("f1", { action: "retry-round", note: "fresh" }).flow!.rounds[0]!.readyNote).toBe("fresh");
 });
+
+test("retry-round allocates a fresh immutable reviewer binding", () => {
+  seed({
+    state: "needs_decision",
+    rounds: [{ ...pendingRound(null), reviewerBindingId: "binding-original" }] as never,
+  });
+
+  const retried = patchFlow("f1", { action: "retry-round" }).flow!.rounds[0]!;
+
+  expect(retried.reviewerBindingId).toBeString();
+  expect(retried.reviewerBindingId).not.toBe("binding-original");
+});

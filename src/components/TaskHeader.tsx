@@ -12,7 +12,7 @@ export function ProcessStatusChip({ file }: { file: FileEntry }) {
   const { t } = useLocale();
   if (file.proc === "running") {
     return (
-      <Badge tone="success">
+      <Badge tone="success" data-capture-volatile="pid">
         <Play className="h-3 w-3" aria-hidden /> PID {file.pid}
       </Badge>
     );

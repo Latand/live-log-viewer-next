@@ -93,13 +93,14 @@ export function useRuntimeSession(conversationId: string | null): RuntimeSession
  * first. Empty while the bus is off or no hosted session carries that artifact
  * — so a legacy/unhosted composer shows nothing new.
  */
-export function useRuntimeReceiptsForArtifact(path: string | null): RuntimeReceipt[] {
+export function useRuntimeReceiptsForArtifact(path: string | null, conversationId?: string | null): RuntimeReceipt[] {
   const { store, enabled } = useRuntime();
   return useMemo(() => {
-    if (!enabled || !path) return [];
-    const session = Object.values(store.sessions).find((s) => s.artifactPath === path);
+    if (!enabled || (!path && !conversationId)) return [];
+    const session = (conversationId ? store.sessions[conversationId] : undefined)
+      ?? Object.values(store.sessions).find((s) => s.artifactPath === path);
     return session ? session.recentReceipts : [];
-  }, [store, enabled, path]);
+  }, [store, enabled, path, conversationId]);
 }
 
 /**

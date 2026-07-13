@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import { RuntimeIdempotencyConflictError, type RuntimeEvent, type RuntimeEventInput, type RuntimeOperationCommand, type RuntimeSocketRequest, type RuntimeSocketResponse } from "@/lib/runtime/contracts";
+import { RuntimeIdempotencyConflictError, type RuntimeEvent, type RuntimeEventInput, type RuntimeOperationCommand, type RuntimeReceiptStatus, type RuntimeSocketRequest, type RuntimeSocketResponse } from "@/lib/runtime/contracts";
 import { consumeRuntimeEvent, type RuntimeConsumerPorts } from "@/lib/runtime/consumers";
 import { procBackend } from "@/lib/proc";
 
@@ -48,6 +48,7 @@ export class RuntimeHost {
     readonly journal: RuntimeJournal,
     private readonly consumers?: RuntimeConsumerPorts,
     private readonly deployments?: ViewerDeploymentCoordinator,
+    private readonly structuredHosts = process.env.LLV_STRUCTURED_HOSTS === "1",
   ) {}
 
   async recoverConsumers(): Promise<number> {
@@ -124,6 +125,32 @@ export class RuntimeHost {
         await this.recoverConsumersBestEffort();
       } else if (request.method === "operation-status") {
         result = this.journal.operationResult(String(request.params?.operationId ?? ""));
+      } else if (request.method === "operation-retry") {
+        if (!this.structuredHosts) throw new Error("structured hosts are disabled");
+        result = this.journal.retryOperation(String(request.params?.operationId ?? ""));
+      } else if (request.method === "effect-batch") {
+        if (!this.structuredHosts) throw new Error("structured hosts are disabled");
+        const kinds = request.params?.kinds;
+        if (kinds !== undefined && (!Array.isArray(kinds) || kinds.some((kind) => typeof kind !== "string"))) {
+          throw new Error("runtime effect kinds are invalid");
+        }
+        const afterEventSeq = request.params?.afterEventSeq ?? 0;
+        if (typeof afterEventSeq !== "number" || !Number.isSafeInteger(afterEventSeq) || afterEventSeq < 0) {
+          throw new Error("runtime effect cursor is invalid");
+        }
+        result = this.journal.effectBatch(100, kinds as string[] | undefined, afterEventSeq);
+      } else if (request.method === "operation-transition") {
+        if (!this.structuredHosts) throw new Error("structured hosts are disabled");
+        const status = request.params?.status;
+        if (status !== "queued" && status !== "delivering" && status !== "delivered" && status !== "failed") {
+          throw new Error("runtime operation transition status is invalid");
+        }
+        const details = request.params?.details;
+        result = this.journal.transitionOperation(
+          String(request.params?.operationId ?? ""),
+          status as Exclude<RuntimeReceiptStatus, "pending">,
+          details && typeof details === "object" ? details as { turnId?: string | null; queuePosition?: number | null; reason?: string | null } : {},
+        );
       } else if (request.method === "viewer-deployment-request") {
         if (!this.deployments) throw new Error("viewer deployments are disabled");
         result = await this.deployments.requestViewerDeployment({

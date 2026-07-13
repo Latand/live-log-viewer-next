@@ -76,7 +76,7 @@ export function formatConversationHash(file: Pick<FileEntry, "conversationId" | 
 
 /** The current, visible entry for a stable id: the one generation that is not an
     archived predecessor. */
-function currentByConversation(files: FileEntry[], conversationId: string): FileEntry | null {
+export function currentConversationFile(files: readonly FileEntry[], conversationId: string): FileEntry | null {
   let fallback: FileEntry | null = null;
   for (const file of files) {
     if (file.conversationId !== conversationId) continue;
@@ -110,12 +110,12 @@ export function resolveConversationTarget(files: FileEntry[], hash: Conversation
   if (hash.conversationId) {
     /* A link copied before provisional-id adoption carries an old alias;
        files annotate the canonical id, so canonicalize before matching. */
-    return currentByConversation(files, canonicalizeConversationId(hash.conversationId, conversationAliases));
+    return currentConversationFile(files, canonicalizeConversationId(hash.conversationId, conversationAliases));
   }
   if (hash.filePath) {
     const direct = files.find((file) => file.path === hash.filePath) ?? null;
     if (direct && isArchivedPredecessor(direct) && direct.conversationId) {
-      return currentByConversation(files, direct.conversationId) ?? direct;
+      return currentConversationFile(files, direct.conversationId) ?? direct;
     }
     return direct;
   }

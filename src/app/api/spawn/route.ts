@@ -15,7 +15,7 @@ import { modelFromBody } from "@/lib/agent/models";
 import { resolveSpawnRole } from "@/lib/roles/registry";
 import { spawnContentDigest, spawnParentSelector, spawnRequestDigest } from "@/lib/agent/spawnIdentity";
 import { sessionKeyFromTranscript } from "@/lib/agent/sessionKey";
-import { resolveSpawnParent, SpawnParentError } from "@/lib/agent/spawnParent";
+import { resolveSpawnLineageParent, SpawnParentError } from "@/lib/agent/spawnParent";
 import { spawnResponseForReceipt, type SpawnResponse } from "@/lib/agent/spawnResponse";
 import { resolveSpawnedTranscriptPath } from "@/lib/agent/spawnedTranscript";
 import { headCwd } from "@/lib/agent/transcript";
@@ -83,7 +83,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse
   const rejection = rejectCrossOrigin(req);
   if (rejection) return rejection;
 
-  let body: { engine?: unknown; model?: unknown; cwd?: unknown; prompt?: unknown; images?: unknown; src?: unknown; parent?: unknown; parentConversationId?: unknown; effort?: unknown; fast?: unknown; accountId?: unknown; clientAttemptId?: unknown; role?: unknown; roleParams?: unknown; confirm?: unknown };
+  let body: { engine?: unknown; model?: unknown; cwd?: unknown; prompt?: unknown; images?: unknown; src?: unknown; parent?: unknown; parentConversationId?: unknown; effort?: unknown; fast?: unknown; accountId?: unknown; clientAttemptId?: unknown; role?: unknown; roleParams?: unknown; confirm?: unknown; reviews?: unknown };
   try {
     body = (await req.json()) as typeof body;
   } catch {
@@ -92,6 +92,12 @@ export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse
 
   const role = resolveSpawnRole(body);
   if (!role.ok) return NextResponse.json({ error: role.error }, { status: 400 });
+  if (role.value?.role === "reviewer" && (typeof body.reviews !== "string" || !body.reviews.trim())) {
+    return NextResponse.json({ error: "reviewer requires reviews" }, { status: 400 });
+  }
+  if (role.value?.role !== "reviewer" && body.reviews !== undefined) {
+    return NextResponse.json({ error: "reviews requires role: reviewer" }, { status: 400 });
+  }
   const engine = body.engine === "claude" || body.engine === "codex"
     ? (body.engine as AgentEngine)
     : (role.value?.config.engine ?? null);
@@ -133,7 +139,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse
   let launchId: string | null = null;
   try {
     const account = accountManager.resolveSpawn(engine, body.accountId);
-    const parent = resolveSpawnParent(body);
+    const parent = resolveSpawnLineageParent(body);
     const parentConversationId = parent?.conversationId ?? null;
     const parentSessionKey = parent?.sessionKey ?? null;
     const parentArtifactPath = parent?.artifactPath ?? null;
@@ -145,7 +151,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse
       fast: reasoning.fast,
       accountId: account.accountId,
       role: role.value?.role ?? null,
-      parent: spawnParentSelector(body),
+      parent: spawnParentSelector({ parentConversationId: parentConversationId ?? undefined }),
       prompt,
       images: images.map((image) => ({ mime: image.mime, digest: spawnContentDigest({ image: image.base64 }) })),
     });
@@ -165,6 +171,8 @@ export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse
       parentConversationId,
       parentSessionKey,
       parentArtifactPath,
+      role: role.value?.role ?? null,
+      reviewsConversationId: role.value?.role === "reviewer" ? parentConversationId : null,
       launchProfile: spec.launchProfile,
       clientAttemptId: body.clientAttemptId ?? null,
       requestDigest: digest,

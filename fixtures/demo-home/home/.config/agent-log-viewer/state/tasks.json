@@ -1,0 +1,43 @@
+{
+  "tasks": [
+    {
+      "id": "task-demo-polish",
+      "project": "atlas",
+      "status": "inbox",
+      "text": "Polish overview cards\nTighten the project summaries and keep quota state visible.",
+      "placement": "pinned",
+      "pos": { "x": 760, "y": 110 },
+      "assignments": [],
+      "source": {
+        "path": "__DEMO_HOME__/.claude/projects/__DEMO_HOME_SLUG__-Projects-atlas/11111111-1111-4111-8111-111111111111.jsonl",
+        "ts": "2100-01-02T10:00:00.000Z",
+        "text": "Ship a deterministic demo capture",
+        "fingerprint": "demo-polish-overview-cards",
+        "engine": "claude"
+      },
+      "createdAt": "2100-01-02T10:10:00.000Z",
+      "updatedAt": "2100-01-02T10:10:00.000Z"
+    },
+    {
+      "id": "task-demo-review-evidence",
+      "project": "forge",
+      "status": "assigned",
+      "text": "Verify review evidence\nCompare both deterministic render passes.",
+      "placement": "pinned",
+      "pos": { "x": 780, "y": 520 },
+      "assignments": [
+        {
+          "path": "__DEMO_HOME__/.claude/projects/__DEMO_HOME_SLUG__-Projects-forge/55555555-5555-4555-8555-555555555555.jsonl",
+          "panePid": null,
+          "state": "delivered",
+          "error": null,
+          "at": "2100-01-02T11:05:00.000Z",
+          "accountId": "default",
+          "engine": "claude"
+        }
+      ],
+      "createdAt": "2100-01-02T11:04:00.000Z",
+      "updatedAt": "2100-01-02T11:05:00.000Z"
+    }
+  ]
+}

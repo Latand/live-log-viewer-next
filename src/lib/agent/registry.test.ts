@@ -1584,6 +1584,54 @@ describe("agent registry", () => {
     });
   });
 
+  test("reserves reviewer lineage and container membership before launch actuation", () => {
+    const store = registry();
+    const implementer = store.ensureConversation(
+      "codex",
+      "/sessions/implementer-019f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl",
+      "terra",
+    );
+
+    const begun = store.beginSpawnRequest({
+      engine: "codex",
+      cwd: "/repo",
+      accountId: "terra",
+      parentConversationId: implementer.id,
+      role: "reviewer",
+      reviewsConversationId: implementer.id,
+      memberships: [{
+        kind: "flow",
+        containerId: "flow-durable",
+        role: "reviewer",
+        slot: "reviewer:3",
+        stageId: null,
+        stageOrder: null,
+        round: 3,
+        parentConversationId: implementer.id,
+      }],
+    });
+    if (begun.kind !== "created") throw new Error("expected create");
+
+    const restarted = new AgentRegistry(store.filename).snapshot();
+    expect(restarted.lineageEdges[begun.receipt.conversationId]).toMatchObject({
+      childConversationId: begun.receipt.conversationId,
+      parentConversationId: implementer.id,
+      kind: "review",
+      role: "reviewer",
+      reviewsConversationId: implementer.id,
+      childArtifactPath: null,
+    });
+    expect(restarted.memberships[begun.receipt.conversationId]).toEqual([expect.objectContaining({
+      conversationId: begun.receipt.conversationId,
+      kind: "flow",
+      containerId: "flow-durable",
+      role: "reviewer",
+      slot: "reviewer:3",
+      round: 3,
+      parentConversationId: implementer.id,
+    })]);
+  });
+
   test("provisional successor adoption discards lineage that canonicalizes to a self-edge", () => {
     const store = registry();
     const sourcePath = "/sessions/source-019f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl";

@@ -120,6 +120,9 @@ export type Pipeline = {
   srcConversationId: string | null;
   createdAt: string;
   closedAt: string | null;
+  hiddenAt?: string | null;
+  /** Read-model marker set when a hidden container is projected for a pinned member. */
+  restored?: boolean;
 };
 
 export type CreatePipelineRequest = {

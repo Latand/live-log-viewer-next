@@ -236,16 +236,19 @@ describe("durable request recovery", () => {
     expect(hasRecoverableRequest(attempt)).toBe(true);
   });
 
-  test("a selected role and its parameters survive recovery and reach the spawn route", () => {
+  test("a reviewer selection survives recovery and reaches the spawn route", () => {
     const attempt = createSpawnAttempt("attempt_role_1", 2_000_000_000_123, {
       ...baseAttempt.request!,
       role: "reviewer",
       roleParams: { diffSource: "main...HEAD", lens: "all" },
+      reviews: "conversation_019f4906-3f67-7b72-9fbc-9ec3b5ad1325",
     });
     expect(spawnRequestBody(attempt)).toMatchObject({
       role: "reviewer",
       roleParams: { diffSource: "main...HEAD", lens: "all" },
+      reviews: "conversation_019f4906-3f67-7b72-9fbc-9ec3b5ad1325",
     });
+    expect(hasRecoverableRequest(attempt)).toBe(true);
   });
 
   test("receipt replay enriches the persisted attempt without changing its recovery data", () => {

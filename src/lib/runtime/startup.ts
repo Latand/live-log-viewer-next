@@ -7,12 +7,15 @@ import {
   type AdoptedClaudeHost,
   type AdoptedCodexHost,
 } from "./registry";
+import type { RuntimeHostClient } from "./client";
+import { bindStructuredDeliveryQueue } from "./structuredDeliveryController";
 
 type AdoptedStructuredHost = AdoptedCodexHost | AdoptedClaudeHost;
 let adoptedHosts: AdoptedStructuredHost[] = [];
 
 export interface StructuredStartupDependencies {
   registry?: AgentRegistry;
+  client?: RuntimeHostClient | null;
   adopt?: typeof adoptCodexRegistryHosts;
   adoptClaude?: typeof adoptClaudeRegistryHosts;
   resolveCodexOwner?: (entry: AgentRegistryEntry) => { home: string; kind: "legacy" | "managed" } | null;
@@ -61,6 +64,7 @@ export async function adoptStructuredHostsAtStartup(
     },
   );
   adoptedHosts = [...codex, ...claude];
+  await bindStructuredDeliveryQueue(adoptedHosts, { registry: dependencies.registry, client: dependencies.client });
   return adoptedHosts;
 }
 

@@ -1494,6 +1494,35 @@ describe("durable account migration coordinator", () => {
     expect(store.pendingDeliveries(conversation.id)[0]?.state).toBe("delivery-uncertain");
   });
 
+  test("a durable delivery port reconciles its uncertain claim to journal completion", async () => {
+    const store = registry();
+    store.reconcileConversations([observation("/structured.jsonl", "a", "idle")]);
+    const conversation = store.conversationForPath("/structured.jsonl")!;
+    store.holdDelivery(conversation.id, "send through the structured host", "structured-held");
+    const calls: string[] = [];
+    const durable = {
+      async deliver() {
+        calls.push("deliver");
+        return "delivery-uncertain" as const;
+      },
+      async reconcileUncertain() {
+        calls.push("reconcile");
+        return "delivered" as const;
+      },
+    };
+
+    await drainHeldDeliveries(conversation.id, durable, store);
+    expect(store.pendingDeliveries(conversation.id)[0]).toMatchObject({
+      state: "delivery-uncertain",
+      attempts: 1,
+    });
+
+    await drainHeldDeliveries(conversation.id, durable, store);
+
+    expect(calls).toEqual(["deliver", "reconcile"]);
+    expect(store.pendingDeliveries(conversation.id)).toEqual([]);
+  });
+
   test("a rapid retarget fences a stale provider result", async () => {
     const store = registry();
     store.reconcileConversations([observation("/source.jsonl", "a", "idle")]);
@@ -1765,6 +1794,41 @@ describe("durable account migration coordinator", () => {
     store.recordDeliveryOutcome(queued.id, "delivered");
     await advanceConversationMigration(conversation.id, store, provider(["/after-delivery.jsonl"], counts));
     expect(counts.create).toBe(1);
+    expect(store.conversation(conversation.id)?.migration?.phase).toBe("committed");
+  });
+
+  test("journal completion releases a queued send before waiting-turn migration readiness", async () => {
+    const store = registry();
+    store.reconcileConversations([observation("/queued-before-migration.jsonl", "a", "idle")]);
+    const conversation = store.conversationForPath("/queued-before-migration.jsonl")!;
+    const queued = store.holdDelivery(conversation.id, "queued before migration", "queued-before-migration");
+    expect(store.beginDeliveryAttempt(queued.id, queued.generationId!)).toMatchObject({ state: "delivery-uncertain" });
+    store.commitMigrationIntent({
+      engine: "codex",
+      targetId: "b",
+      origin: "manual",
+      requestId: "migrate-after-queued-send",
+      expectedRevision: store.engineRouting("codex").revision,
+      scope: "all",
+    });
+    expect(store.conversation(conversation.id)?.migration?.phase).toBe("waiting-turn");
+    const counts = { create: 0, verify: 0 };
+    let reconciles = 0;
+
+    await reconcileMigrations(provider(["/after-queued-send.jsonl"], counts), {
+      async deliver() {
+        throw new Error("uncertain journal delivery was actuated again");
+      },
+      async reconcileUncertain({ delivery }) {
+        reconciles += 1;
+        expect(delivery.id).toBe(queued.id);
+        return "delivered";
+      },
+    }, store);
+
+    expect(reconciles).toBe(1);
+    expect(counts.create).toBe(1);
+    expect(store.pendingDeliveries(conversation.id)).toEqual([]);
     expect(store.conversation(conversation.id)?.migration?.phase).toBe("committed");
   });
 

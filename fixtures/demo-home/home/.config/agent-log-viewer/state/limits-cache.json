@@ -1,0 +1,52 @@
+{
+  "version": 2,
+  "engines": {
+    "claude": {
+      "default": {
+        "at": 4102574400000,
+        "data": {
+          "session": { "usedPercent": 24, "resetsAt": 4102581600 },
+          "weekly": { "usedPercent": 41, "resetsAt": 4103006400 },
+          "plan": "Max",
+          "capturedAt": null
+        },
+        "provenance": { "source": "cache", "reason": null, "staleSince": null }
+      }
+    },
+    "codex": {
+      "default": {
+        "at": 4102574400000,
+        "data": {
+          "session": { "usedPercent": 18, "resetsAt": 4102585200 },
+          "weekly": { "usedPercent": 36, "resetsAt": 4103092800 },
+          "plan": "Plus",
+          "capturedAt": 4102570800
+        },
+        "provenance": { "source": "cache", "reason": null, "staleSince": null }
+      }
+    }
+  },
+  "at": 4102574400000,
+  "accountId": "default",
+  "data": {
+    "claude": {
+      "session": { "usedPercent": 24, "resetsAt": 4102581600 },
+      "weekly": { "usedPercent": 41, "resetsAt": 4103006400 },
+      "plan": "Max",
+      "capturedAt": null
+    },
+    "codex": {
+      "session": { "usedPercent": 18, "resetsAt": 4102585200 },
+      "weekly": { "usedPercent": 36, "resetsAt": 4103092800 },
+      "plan": "Plus",
+      "capturedAt": 4102570800
+    },
+    "claudeAccountId": "default",
+    "codexAccountId": "default",
+    "provenance": {
+      "claude": { "source": "cache", "reason": null, "staleSince": null },
+      "codex": { "source": "cache", "reason": null, "staleSince": null }
+    },
+    "staleSince": null
+  }
+}

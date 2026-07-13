@@ -71,7 +71,7 @@ export function pipelineStripDomId(pipelineId: string): string {
 export function pipelinesForProject(pipelines: Pipeline[], project: string, files: FileEntry[]): Pipeline[] {
   const paths = new Set(files.filter((file) => file.project === project).map((file) => file.path));
   return pipelines.filter((pipeline) => {
-    if (pipeline.state === "closed") return false;
+    if (pipeline.state === "closed" && !pipeline.restored) return false;
     if (pipeline.project === project) return true;
     return pipeline.runs.some((run) => run.attempts.some((attempt) => Boolean(attempt.agentPath && paths.has(attempt.agentPath))));
   });
@@ -211,7 +211,7 @@ export function stageAccess(pipeline: Pipeline, stage: PipelineStage): PipelineA
     is unplaced has zero decks, and Open-review/hops must stay disabled for it. */
 export function renderableFlowIds(flows: Flow[], placedPaths: ReadonlySet<string>): Set<string> {
   return new Set(
-    flows.filter((flow) => flow.state !== "closed" && placedPaths.has(flow.implementerPath)).map((flow) => flow.id),
+    flows.filter((flow) => (flow.state !== "closed" || flow.restored) && placedPaths.has(flow.implementerPath)).map((flow) => flow.id),
   );
 }
 

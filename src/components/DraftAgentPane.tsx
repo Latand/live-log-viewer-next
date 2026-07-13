@@ -10,6 +10,7 @@ import { useLocale } from "@/lib/i18n";
 import { BUILDER_APPLY_FIXES_CONFIG, BUILDER_FRONTEND_CONFIG } from "@/lib/roles/paramConfig";
 import type { RoleDefinition } from "@/lib/roles/types";
 import type { FileEntry } from "@/lib/types";
+import { withoutArchivedPredecessors } from "@/lib/accounts/identity";
 
 import { ComposerBar } from "./ComposerBar";
 import { DraftLaunchStatus } from "./DraftLaunchStatus";
@@ -68,7 +69,7 @@ function scaffoldPreview(scaffold: string, params: Record<string, string | numbe
 
 /** Everything a draft keeps in sessionStorage; called when the draft leaves the scheme. */
 export function clearDraftStorage(id: string) {
-  for (const name of ["engine", "model", "cwd", "cwdUnverified", "text", "boot", "src", "parentConversationId", "effort", "speed", "accountId", "role", "roleParams", "confirm"]) sessionStorage.removeItem(field(id, name));
+  for (const name of ["engine", "model", "cwd", "cwdUnverified", "text", "boot", "src", "parentConversationId", "effort", "speed", "accountId", "role", "roleParams", "reviews", "confirm"]) sessionStorage.removeItem(field(id, name));
 }
 
 /** Source transcript a handoff draft continues; empty for a plain draft. */
@@ -196,6 +197,7 @@ export function DraftAgentPane({
   const [roles, setRoles] = useState<RoleCatalogItem[]>([]);
   const [roleId, setRoleIdState] = useState(() => readField(draftId, "role"));
   const [roleParams, setRoleParamsState] = useState(() => readRoleParams(draftId));
+  const [reviews, setReviewsState] = useState(() => readField(draftId, "reviews"));
   const [deployConfirm, setDeployConfirmState] = useState(() => readField(draftId, "confirm"));
   const [accounts, setAccounts] = useState<{ id: string; label: string }[]>([]);
   const [dirs, setDirs] = useState<string[]>([]);
@@ -276,6 +278,10 @@ export function DraftAgentPane({
   const setDeployConfirm = (value: string) => {
     setDeployConfirmState(value);
     writeField(draftId, "confirm", value);
+  };
+  const setReviews = (value: string) => {
+    setReviewsState(value);
+    writeField(draftId, "reviews", value);
   };
   const selectRole = (nextId: string) => {
     setRoleIdState(nextId);
@@ -469,6 +475,10 @@ export function DraftAgentPane({
         setStatus({ kind: "err", text: t("draft.deployConfirm") });
         return;
       }
+      if (selectedRole.id === "reviewer" && !reviews) {
+        setStatus({ kind: "err", text: t("draft.reviewerNeedsConversation") });
+        return;
+      }
     }
     if (!payloadText.trim() && !attachments.images.length) return;
     /* eslint-disable-next-line react-hooks/purity -- `send` only runs from
@@ -485,7 +495,12 @@ export function DraftAgentPane({
       images: attachments.images.map((image) => ({ base64: image.base64, mime: image.mime })),
       src,
       ...(parentConversationId ? { parentConversationId } : {}),
-      ...(roleId ? { role: roleId, roleParams, ...(deployConfirm ? { confirm: deployConfirm } : {}) } : {}),
+      ...(roleId ? {
+        role: roleId,
+        roleParams,
+        ...(roleId === "reviewer" && reviews ? { reviews } : {}),
+        ...(deployConfirm ? { confirm: deployConfirm } : {}),
+      } : {}),
     });
     /* Persist before POST: a navigation now has the launch id, timestamp, and
        exact recoverable payload needed to reconcile the original request. */
@@ -503,6 +518,9 @@ export function DraftAgentPane({
      `launching`; a durable attempt shows booting/booting-slow/confirming/attention. */
   const phase = displayPhase(attempt, busy, slowBoot);
   const target = attempt?.target ?? "";
+  const reviewCandidates = withoutArchivedPredecessors(files).filter((file) =>
+    (file.engine === "claude" || file.engine === "codex")
+    && Boolean(file.conversationId || file.path));
 
   return (
     <section
@@ -608,6 +626,27 @@ export function DraftAgentPane({
                   </label>
                 ))}
               </div>
+            ) : null}
+            {selectedRole.id === "reviewer" ? (
+              <label className="flex max-w-full flex-col gap-0.5 text-[10px] text-muted">
+                <span>{t("draft.reviews")}</span>
+                <select
+                  value={reviews}
+                  disabled={fieldsDisabled}
+                  onChange={(event) => setReviews(event.target.value)}
+                  aria-label={t("draft.reviewsAria")}
+                  className="h-7 min-w-0 rounded-[7px] border border-border bg-card px-1.5 text-[11px] text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60"
+                >
+                  <option value="">{t("draft.reviewsPlaceholder")}</option>
+                  {reviews && !reviewCandidates.some((file) => (file.conversationId ?? file.path) === reviews) ? (
+                    <option value={reviews}>{reviews}</option>
+                  ) : null}
+                  {reviewCandidates.map((file) => {
+                    const value = file.conversationId ?? file.path;
+                    return <option key={value} value={value}>{cleanTitle(file.title, 80)}</option>;
+                  })}
+                </select>
+              </label>
             ) : null}
             {selectedRole.id === "deployer" ? (
               <label className="flex max-w-52 flex-col gap-0.5 text-[10px] text-muted">

@@ -40,6 +40,7 @@ export interface MigrationPreview {
 
 export interface HeldDeliveryPort {
   deliver(input: { delivery: HeldDelivery; path: string; clientMessageId: string }): Promise<"delivered" | "failed" | "delivery-uncertain" | "held">;
+  reconcileUncertain?(input: { delivery: HeldDelivery; path: string; clientMessageId: string }): Promise<"delivered" | "failed" | "delivery-uncertain" | "held">;
 }
 
 function engineOf(entry: FileEntry): MigrationEngine | null {
@@ -376,6 +377,12 @@ export async function advanceConversationMigration(
     if (!source) throw new Error("conversation has no source generation");
     if (!receipt || receipt.operationId !== migration.operationId) throw new Error("persisted successor receipt operation does not match");
     await successorProvider.verify(receipt, { engine: conversation.engine, targetAccountId: migration.targetId, launchProfile: source.launchProfile });
+    await successorProvider.publishHost?.(receipt, {
+      engine: conversation.engine,
+      conversationId: conversation.id,
+      targetAccountId: migration.targetId,
+      launchProfile: source.launchProfile,
+    });
     const committed = registry.commitSuccessor(conversation.id, {
       id: receipt.nativeId,
       path: receipt.path,
@@ -442,17 +449,24 @@ export async function drainHeldDeliveries(
   const current = conversation?.generations.at(-1);
   if (!current) return;
   for (const item of registry.pendingDeliveries(conversationId)) {
-    if (item.state !== "assigned" || item.generationId !== current.id) continue;
+    const reconciling = item.state === "delivery-uncertain";
+    if (reconciling && !delivery.reconcileUncertain) continue;
+    if (!reconciling && (item.state !== "assigned" || item.generationId !== current.id)) continue;
     if (item.payloadKind !== "text") {
       registry.recordDeliveryOutcome(item.id, "failed", "request-local delivery requires client retry");
       continue;
     }
-    const claimed = registry.beginDeliveryAttempt(item.id, current.id);
+    const claimed = reconciling ? item : registry.beginDeliveryAttempt(item.id, current.id);
     if (!claimed) continue;
     const clientMessageId = claimed.clientMessageId ?? `migration:${claimed.id}`;
     try {
-      const outcome = await delivery.deliver({ delivery: claimed, path: current.path, clientMessageId });
-      if (outcome === "held") registry.requeueUnactuatedDelivery(claimed.id);
+      const input = { delivery: claimed, path: current.path, clientMessageId };
+      const outcome = reconciling
+        ? await delivery.reconcileUncertain!(input)
+        : await delivery.deliver(input);
+      if (outcome === "held") {
+        if (!reconciling) registry.requeueUnactuatedDelivery(claimed.id);
+      }
       else registry.recordDeliveryOutcome(claimed.id, outcome, outcome === "failed" ? "delivery failed and remains recoverable" : null);
     } catch {
       registry.recordDeliveryOutcome(claimed.id, "delivery-uncertain", "delivery result is uncertain and remains recoverable");
@@ -472,9 +486,18 @@ export async function reconcileMigrations(
     if (owner) await cleanupDiscardedSuccessor(provider, pending.receipt, owner, registry);
   }
   const pendingDeliveries = new Set(Object.values(before.heldDeliveries)
-    .filter((item) => item.state !== "delivered" && item.state !== "delivery-uncertain")
+    .filter((item) => item.state !== "delivered" && (item.state !== "delivery-uncertain" || delivery.reconcileUncertain))
     .map((item) => item.conversationId));
-  for (const conversation of Object.values(before.conversations)) {
+  for (const snapshotConversation of Object.values(before.conversations)) {
+    let conversation = registry.conversation(snapshotConversation.id) ?? snapshotConversation;
+    if (conversation.migration
+      && conversation.migration.phase !== "committed"
+      && conversation.migration.phase !== "rolled-back"
+      && delivery.reconcileUncertain
+      && registry.pendingDeliveries(conversation.id).some((item) => item.state === "delivery-uncertain")) {
+      await drainHeldDeliveries(conversation.id, delivery, registry);
+      conversation = registry.conversation(conversation.id) ?? conversation;
+    }
     if (!conversation.migration || conversation.migration.phase === "rolled-back") {
       if (pendingDeliveries.has(conversation.id)) await drainHeldDeliveries(conversation.id, delivery, registry);
       continue;
@@ -483,10 +506,11 @@ export async function reconcileMigrations(
       if (pendingDeliveries.has(conversation.id)) await drainHeldDeliveries(conversation.id, delivery, registry);
       continue;
     }
-    const source = conversation.generations.find((generation) => generation.id === conversation.migration?.sourceGenerationId)
+    const migration = conversation.migration;
+    const source = conversation.generations.find((generation) => generation.id === migration.sourceGenerationId)
       ?? conversation.generations.at(-1);
-    if (source?.accountId === null && !conversation.migration.providerReceipt) {
-      registry.rollbackConversationMigration(conversation.id, conversation.migration.revision);
+    if (source?.accountId === null && !migration.providerReceipt) {
+      registry.rollbackConversationMigration(conversation.id, migration.revision);
       continue;
     }
     const advanced = await advanceConversationMigration(conversation.id, registry, provider, { ...options, deferBoardRepair: true });

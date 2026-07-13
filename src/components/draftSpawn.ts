@@ -47,6 +47,8 @@ export interface RecoverableSpawnRequest {
   /** Optional role registry reference. Omitted for the unchanged blank draft. */
   role?: string;
   roleParams?: Record<string, string | number>;
+  /** Stable conversation reference reviewed by a reviewer-role spawn. */
+  reviews?: string;
   confirm?: string;
 }
 
@@ -118,6 +120,8 @@ export function hasRecoverableRequest(attempt: SpawnAttempt): attempt is SpawnAt
     (request.parentConversationId === undefined || typeof request.parentConversationId === "string") &&
     (request.role === undefined || typeof request.role === "string") &&
     (request.roleParams === undefined || (typeof request.roleParams === "object" && request.roleParams !== null && !Array.isArray(request.roleParams))) &&
+    (request.reviews === undefined || typeof request.reviews === "string") &&
+    (request.role === "reviewer" ? Boolean(request.reviews?.trim()) : request.reviews === undefined) &&
     (request.confirm === undefined || typeof request.confirm === "string") &&
     Array.isArray(request.images) && request.images.every((image) => typeof image?.base64 === "string" && typeof image?.mime === "string"),
   );
@@ -139,6 +143,7 @@ export function spawnRequestBody(attempt: SpawnAttempt & { request: RecoverableS
     ...(request.src ? { src: request.src } : {}),
     ...(request.parentConversationId ? { parentConversationId: request.parentConversationId } : {}),
     ...(request.role ? { role: request.role, roleParams: request.roleParams ?? {} } : {}),
+    ...(request.reviews ? { reviews: request.reviews } : {}),
     ...(request.confirm ? { confirm: request.confirm } : {}),
   };
 }

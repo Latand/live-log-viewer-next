@@ -30,6 +30,7 @@ function statusText(t: TFunction, receipt: RuntimeReceipt): string {
 
 export interface ReceiptChipProps {
   receipt: RuntimeReceipt;
+  actionsDisabled?: boolean;
   /** Retry reuses the same idempotency key — never a second send. */
   onRetry?: () => void;
   /** Edit-and-resend mints a fresh key. */
@@ -42,7 +43,7 @@ export interface ReceiptChipProps {
  * verbatim and are announced politely; both offer Retry (same key) and Edit
  * (new key).
  */
-export function ReceiptChip({ receipt, onRetry, onEdit }: ReceiptChipProps) {
+export function ReceiptChip({ receipt, actionsDisabled = false, onRetry, onEdit }: ReceiptChipProps) {
   const { t } = useLocale();
   const failed = receipt.status === "rejected" || receipt.status === "failed";
   return (
@@ -56,7 +57,9 @@ export function ReceiptChip({ receipt, onRetry, onEdit }: ReceiptChipProps) {
       </Badge>
       {failed && onRetry ? (
         <button
-          className="rounded-full border border-border bg-canvas px-2 py-0.5 text-muted hover:border-accent/45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+          type="button"
+          disabled={actionsDisabled}
+          className="min-h-11 rounded-full border border-border bg-canvas px-3 py-0.5 text-muted hover:border-accent/45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-50 sm:min-h-0 sm:px-2"
           onClick={onRetry}
         >
           {t("runtime.receipt.retry")}
@@ -64,7 +67,9 @@ export function ReceiptChip({ receipt, onRetry, onEdit }: ReceiptChipProps) {
       ) : null}
       {failed && onEdit ? (
         <button
-          className="rounded-full border border-border bg-canvas px-2 py-0.5 text-muted hover:border-accent/45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+          type="button"
+          disabled={actionsDisabled}
+          className="min-h-11 rounded-full border border-border bg-canvas px-3 py-0.5 text-muted hover:border-accent/45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-50 sm:min-h-0 sm:px-2"
           onClick={onEdit}
         >
           {t("runtime.receipt.edit")}

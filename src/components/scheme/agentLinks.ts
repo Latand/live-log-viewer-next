@@ -298,7 +298,7 @@ export function deriveGroups(
      pipeline's, so skip their standalone group below. */
   const embeddedFlowIds = new Set<string>();
   for (const pipeline of pipelines) {
-    if (pipeline.state === "closed") continue;
+    if (pipeline.state === "closed" && !pipeline.restored) continue;
     for (const run of pipeline.runs) {
       for (const attempt of run.attempts) {
         if (attempt.flowId) embeddedFlowIds.add(attempt.flowId);
@@ -306,7 +306,7 @@ export function deriveGroups(
     }
   }
   for (const pipeline of pipelines) {
-    if (pipeline.state === "closed") continue;
+    if (pipeline.state === "closed" && !pipeline.restored) continue;
     const members = new Set<string>();
     for (const stage of pipeline.stages) {
       /* Every materialized attempt, not just the latest: a retried stage can
@@ -379,7 +379,7 @@ export function derivePipelineLinks(
 ): AgentLink[] {
   const links: AgentLink[] = [];
   for (const pipeline of pipelines) {
-    if (pipeline.state === "closed") continue;
+    if (pipeline.state === "closed" && !pipeline.restored) continue;
     const total = pipeline.stages.length;
     const cursorStageId = pipeline.cursor?.stageId ?? pipeline.stages.at(-1)?.id ?? null;
     const own: AgentLink[] = [];

@@ -1,0 +1,2 @@
+{"type":"user","uuid":"a3000000-0000-4000-8000-000000000001","timestamp":"2100-01-02T10:02:00.000Z","cwd":"/demo/Projects/atlas","message":{"role":"user","content":"Build the Docker-backed screenshot pass."}}
+{"type":"assistant","uuid":"a3000000-0000-4000-8000-000000000002","timestamp":"2100-01-02T10:02:14.000Z","cwd":"/demo/Projects/atlas","message":{"role":"assistant","model":"claude-sonnet-4-5","content":[{"type":"text","text":"Capture builder: six stable views render through the container bridge."}]}}

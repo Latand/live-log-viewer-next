@@ -77,6 +77,7 @@ export type AttentionState =
  */
 export type ReceiptStatus =
   | "pending"
+  | "delivering"
   | "turn-started"
   | "steered"
   | "queued"

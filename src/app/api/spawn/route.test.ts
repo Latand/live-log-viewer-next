@@ -7,7 +7,7 @@ import { AgentRegistry } from "@/lib/agent/registry";
 import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
 import { spawnParentSelector, spawnRequestDigest } from "@/lib/agent/spawnIdentity";
 import { spawnResponseForReceipt } from "@/lib/agent/spawnResponse";
-import { resolveSpawnParent } from "@/lib/agent/spawnParent";
+import { resolveSpawnLineageParent, resolveSpawnParent, SpawnParentError } from "@/lib/agent/spawnParent";
 
 function registry(): AgentRegistry {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "llv-spawn-route-"));
@@ -51,6 +51,21 @@ test("spawn route accepts an explicit stable parent conversation identity", () =
     artifactPath: parentPath,
     sessionKey: { engine: "codex", sessionId: "019f4906-3f67-7b72-9fbc-9ec3b5ad1326" },
   });
+});
+
+test("reviewer spawn requires one reviewed conversation and resolves its stable identity", () => {
+  const store = registry();
+  const implementerPath = "/sessions/rollout-019f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl";
+  const implementer = store.ensureConversation("codex", implementerPath, "terra");
+
+  expect(() => resolveSpawnLineageParent({ role: "reviewer" }, store)).toThrow(SpawnParentError);
+  expect(resolveSpawnLineageParent({ role: "reviewer", reviews: implementer.id }, store)).toEqual({
+    conversationId: implementer.id,
+    engine: "codex",
+    artifactPath: implementerPath,
+    sessionKey: { engine: "codex", sessionId: "019f4906-3f67-7b72-9fbc-9ec3b5ad1326" },
+  });
+  expect(() => resolveSpawnLineageParent({ role: "builder", reviews: implementer.id }, store)).toThrow(SpawnParentError);
 });
 
 function digestForParent(body: { parentConversationId: string }): string {
