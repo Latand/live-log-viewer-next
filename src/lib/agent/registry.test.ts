@@ -192,7 +192,7 @@ describe("agent registry", () => {
     expect(events).toEqual(["first-started", "first-finished", "second-started"]);
   });
 
-  test("waits through a sixty-second valid operation holder", async () => {
+  test("waits beyond the complete delivery retry budget for a valid operation holder", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-long-lock-"));
     const filename = path.join(dir, "agent-registry.json");
     let elapsedMs = 0;
@@ -201,7 +201,7 @@ describe("agent registry", () => {
       now: () => elapsedMs,
       wait: async (delayMs) => {
         elapsedMs += delayMs;
-        if (elapsedMs >= 60_000) fs.rmSync(lock, { recursive: true, force: true });
+        if (elapsedMs >= 180_000) fs.rmSync(lock, { recursive: true, force: true });
       },
     });
     lock = `${store.filename}.locks/${encodeURIComponent("codex:long-holder")}`;
@@ -215,7 +215,93 @@ describe("agent registry", () => {
     );
 
     expect(result).toBe("completed");
-    expect(elapsedMs).toBeGreaterThanOrEqual(60_000);
+    expect(elapsedMs).toBeGreaterThanOrEqual(180_000);
+  });
+
+  test("recovers an interrupted lock publication after its grace period", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-incomplete-lock-"));
+    const filename = path.join(dir, "agent-registry.json");
+    let nowMs = Date.now();
+    const store = new AgentRegistry(filename, () => true, {
+      now: () => nowMs,
+      wait: async (delayMs) => { nowMs += delayMs; },
+    });
+    const lock = `${store.filename}.locks/${encodeURIComponent("codex:interrupted-publisher")}`;
+    fs.mkdirSync(lock, { recursive: true });
+    const interruptedAt = new Date(nowMs - 2_000);
+    fs.utimesSync(lock, interruptedAt, interruptedAt);
+
+    const result = await store.withOperationLock(
+      { engine: "codex", sessionId: "interrupted-publisher" },
+      { pid: process.pid, startIdentity: null },
+      async () => "completed",
+    );
+
+    expect(result).toBe("completed");
+  });
+
+  test("a delayed stale contender preserves the replacement lock", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-stale-race-"));
+    const filename = path.join(dir, "agent-registry.json");
+    const staleToken = "11111111-1111-4111-8111-111111111111";
+    const replacementToken = "22222222-2222-4222-8222-222222222222";
+    const lock = `${filename}.locks/${encodeURIComponent("codex:stale-race")}`;
+    let raced = false;
+    const store = new AgentRegistry(filename, (owner) => {
+      if (owner.startIdentity === "42:stale" && !raced) {
+        raced = true;
+        fs.renameSync(lock, `${lock}.retired-${staleToken}`);
+        fs.mkdirSync(lock);
+        fs.writeFileSync(path.join(lock, "owner.json"), JSON.stringify({
+          pid: 43,
+          startIdentity: "43:replacement",
+          token: replacementToken,
+        }));
+        return false;
+      }
+      return owner.startIdentity === "43:replacement";
+    }, {
+      now: () => Date.now(),
+      wait: async () => {
+        expect(JSON.parse(fs.readFileSync(path.join(lock, "owner.json"), "utf8")).token).toBe(replacementToken);
+        fs.rmSync(lock, { recursive: true, force: true });
+      },
+    });
+    fs.mkdirSync(lock, { recursive: true });
+    fs.writeFileSync(path.join(lock, "owner.json"), JSON.stringify({
+      pid: 42,
+      startIdentity: "42:stale",
+      token: staleToken,
+    }));
+
+    await expect(store.withOperationLock(
+      { engine: "codex", sessionId: "stale-race" },
+      { pid: process.pid, startIdentity: null },
+      async () => "completed",
+    )).resolves.toBe("completed");
+  });
+
+  test("an old claim cannot release a replacement lock", async () => {
+    const store = registry();
+    const lock = `${store.filename}.locks/${encodeURIComponent("codex:replacement")}`;
+    const replacementToken = "33333333-3333-4333-8333-333333333333";
+
+    await store.withOperationLock(
+      { engine: "codex", sessionId: "replacement" },
+      { pid: process.pid, startIdentity: null },
+      async () => {
+        fs.rmSync(lock, { recursive: true, force: true });
+        fs.mkdirSync(lock);
+        fs.writeFileSync(path.join(lock, "owner.json"), JSON.stringify({
+          pid: process.pid,
+          startIdentity: null,
+          token: replacementToken,
+        }));
+      },
+    );
+
+    expect(JSON.parse(fs.readFileSync(path.join(lock, "owner.json"), "utf8")).token).toBe(replacementToken);
+    fs.rmSync(lock, { recursive: true, force: true });
   });
 
   test("reclaims a lock only after its recorded process identity is stale", () => {

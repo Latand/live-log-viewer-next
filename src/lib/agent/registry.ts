@@ -277,9 +277,14 @@ function receiptStillAwaitsResumeSuccessor(receipt: SpawnReceipt): boolean {
 
 const PATH_CORRELATION_WINDOW_MS = 30_000;
 const REGISTRY_WRITE_LOCK_WAIT_MS = 8_000;
-/** Spawn readiness polling may hold an operation lock for 60 seconds. */
-const REGISTRY_OPERATION_LOCK_WAIT_MS = 120_000;
 const REGISTRY_LOCK_BACKOFF_MAX_MS = 50;
+const REGISTRY_LOCK_PUBLICATION_GRACE_MS = 1_000;
+
+interface RegistryLockClaim {
+  lock: string;
+  token: string;
+  directory: { dev: number; ino: number };
+}
 
 interface RegistryLockTiming {
   now(): number;
@@ -1120,7 +1125,7 @@ export class AgentRegistry {
   private compactAtStartup(): void {
     if (!fs.existsSync(this.filename)) return;
     const lock = `${this.filename}.write-lock`;
-    this.acquireLock(lock, { pid: process.pid, startIdentity: procBackend.processIdentity(process.pid) });
+    const claim = this.acquireLock(lock, { pid: process.pid, startIdentity: procBackend.processIdentity(process.pid) });
     try {
       let original: string;
       try {
@@ -1142,26 +1147,98 @@ export class AgentRegistry {
       compactDeliveryReservations(file);
       if (serializeRegistry(file) !== original) writeAtomic(this.filename, file);
     } finally {
-      fs.rmSync(lock, { recursive: true, force: true });
+      this.releaseLock(claim);
     }
   }
 
-  private tryAcquireLock(lock: string, owner: ProcessIdentity): boolean {
+  private sameDirectory(lock: string, expected: RegistryLockClaim["directory"]): boolean {
+    try {
+      const current = fs.statSync(lock);
+      return current.dev === expected.dev && current.ino === expected.ino;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+      throw error;
+    }
+  }
+
+  private retireLock(lock: string, fingerprint: string): void {
+    // Every observer of one stale directory chooses the same destination.
+    // The retained directory fences delayed observers away from a new owner.
+    const retired = `${lock}.retired-${fingerprint}`;
+    try {
+      fs.renameSync(lock, retired);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "ENOENT" || code === "EEXIST" || code === "ENOTEMPTY") return;
+      throw error;
+    }
+  }
+
+  private tryAcquireLock(lock: string, owner: ProcessIdentity): RegistryLockClaim | null {
+    const token = crypto.randomUUID();
+    let directory: RegistryLockClaim["directory"] | null = null;
     try {
       fs.mkdirSync(lock, 0o700);
-      fs.writeFileSync(path.join(lock, "owner.json"), JSON.stringify(owner), { mode: 0o600 });
-      return true;
+      const stat = fs.statSync(lock);
+      directory = { dev: stat.dev, ino: stat.ino };
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      let stale = false;
+      let stat: fs.Stats;
       try {
-        const previous = JSON.parse(fs.readFileSync(path.join(lock, "owner.json"), "utf8")) as ProcessIdentity;
-        stale = Number.isInteger(previous.pid) && previous.pid > 0 && !this.ownerAlive(previous);
-      } catch {
-        /* A creator may still be writing owner.json. Preserve unknown locks. */
+        stat = fs.statSync(lock);
+      } catch (statError) {
+        if ((statError as NodeJS.ErrnoException).code === "ENOENT") return null;
+        throw statError;
       }
-      if (stale) fs.rmSync(lock, { recursive: true, force: true });
-      return false;
+      let previous: (ProcessIdentity & { token?: unknown }) | null = null;
+      try {
+        previous = JSON.parse(fs.readFileSync(path.join(lock, "owner.json"), "utf8")) as ProcessIdentity & { token?: unknown };
+      } catch {
+        // Owner publication uses an atomic rename, so an old directory is incomplete.
+      }
+      if (previous && Number.isInteger(previous.pid) && previous.pid > 0) {
+        if (!this.ownerAlive(previous)) {
+          const fingerprint = typeof previous.token === "string"
+            && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(previous.token)
+            ? previous.token
+              : `legacy-${stat.dev}-${stat.ino}-${stat.ctimeMs}`;
+          this.retireLock(lock, fingerprint);
+        }
+        return null;
+      }
+      if (this.lockTiming.now() - stat.mtimeMs >= REGISTRY_LOCK_PUBLICATION_GRACE_MS) {
+        this.retireLock(lock, `incomplete-${stat.dev}-${stat.ino}-${stat.ctimeMs}`);
+      }
+      return null;
+    }
+
+    const ownerFile = path.join(lock, "owner.json");
+    const pendingOwnerFile = path.join(lock, `owner.${token}.tmp`);
+    let fd: number | null = null;
+    try {
+      fd = fs.openSync(pendingOwnerFile, "wx", 0o600);
+      fs.writeFileSync(fd, JSON.stringify({ ...owner, token }), "utf8");
+      fs.fsyncSync(fd);
+      fs.closeSync(fd);
+      fd = null;
+      fs.renameSync(pendingOwnerFile, ownerFile);
+      return { lock, token, directory };
+    } catch (error) {
+      if (fd !== null) fs.closeSync(fd);
+      try { fs.unlinkSync(pendingOwnerFile); } catch { /* publication moved or directory retired */ }
+      if (this.sameDirectory(lock, directory)) fs.rmSync(lock, { recursive: true, force: true });
+      throw error;
+    }
+  }
+
+  private releaseLock(claim: RegistryLockClaim): void {
+    if (!this.sameDirectory(claim.lock, claim.directory)) return;
+    try {
+      const owner = JSON.parse(fs.readFileSync(path.join(claim.lock, "owner.json"), "utf8")) as { token?: unknown };
+      if (owner.token !== claim.token || !this.sameDirectory(claim.lock, claim.directory)) return;
+      fs.rmSync(claim.lock, { recursive: true, force: true });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
   }
 
@@ -1170,11 +1247,12 @@ export class AgentRegistry {
     return Math.min(backoff, remaining);
   }
 
-  private acquireLock(lock: string, owner: ProcessIdentity): void {
+  private acquireLock(lock: string, owner: ProcessIdentity): RegistryLockClaim {
     fs.mkdirSync(path.dirname(lock), { recursive: true, mode: 0o700 });
     const deadline = this.lockTiming.now() + REGISTRY_WRITE_LOCK_WAIT_MS;
     for (let attempt = 0; ; attempt += 1) {
-      if (this.tryAcquireLock(lock, owner)) return;
+      const claim = this.tryAcquireLock(lock, owner);
+      if (claim) return claim;
       const remaining = deadline - this.lockTiming.now();
       if (remaining <= 0) break;
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, this.lockBackoff(attempt, remaining));
@@ -1182,28 +1260,27 @@ export class AgentRegistry {
     throw new Error("agent registry is busy");
   }
 
-  private async acquireLockAsync(lock: string, owner: ProcessIdentity): Promise<void> {
+  private async acquireLockAsync(lock: string, owner: ProcessIdentity): Promise<RegistryLockClaim> {
     fs.mkdirSync(path.dirname(lock), { recursive: true, mode: 0o700 });
-    const deadline = this.lockTiming.now() + REGISTRY_OPERATION_LOCK_WAIT_MS;
+    // Interactive callers stay queued while a verified owner remains live.
+    // Dead and incomplete owners are recovered by tryAcquireLock().
     for (let attempt = 0; ; attempt += 1) {
-      if (this.tryAcquireLock(lock, owner)) return;
-      const remaining = deadline - this.lockTiming.now();
-      if (remaining <= 0) break;
-      await this.lockTiming.wait(this.lockBackoff(attempt, remaining));
+      const claim = this.tryAcquireLock(lock, owner);
+      if (claim) return claim;
+      await this.lockTiming.wait(this.lockBackoff(attempt, REGISTRY_LOCK_BACKOFF_MAX_MS));
     }
-    throw new Error("agent registry is busy");
   }
 
   private mutate<T>(fn: (file: RegistryFile) => T): T {
     const lock = `${this.filename}.write-lock`;
-    this.acquireLock(lock, { pid: process.pid, startIdentity: procBackend.processIdentity(process.pid) });
+    const claim = this.acquireLock(lock, { pid: process.pid, startIdentity: procBackend.processIdentity(process.pid) });
     try {
       const file = readFile(this.filename);
       const result = fn(file);
       writeAtomic(this.filename, file);
       return result;
     } finally {
-      fs.rmSync(lock, { recursive: true, force: true });
+      this.releaseLock(claim);
     }
   }
 
@@ -1743,11 +1820,11 @@ export class AgentRegistry {
       identity and may be recovered by an explicit caller after verification. */
   async withOperationLock<T>(key: SessionKey, owner: ProcessIdentity, fn: () => Promise<T>): Promise<T> {
     const lock = `${this.filename}.locks/${encodeURIComponent(sessionKeyId(key))}`;
-    await this.acquireLockAsync(lock, owner);
+    const claim = await this.acquireLockAsync(lock, owner);
     try {
       return await fn();
     } finally {
-      fs.rmSync(lock, { recursive: true, force: true });
+      this.releaseLock(claim);
     }
   }
 
