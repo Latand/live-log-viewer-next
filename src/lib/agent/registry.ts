@@ -276,6 +276,9 @@ function receiptStillAwaitsResumeSuccessor(receipt: SpawnReceipt): boolean {
 }
 
 const PATH_CORRELATION_WINDOW_MS = 30_000;
+const REGISTRY_WRITE_LOCK_WAIT_MS = 8_000;
+const REGISTRY_OPERATION_LOCK_WAIT_MS = 30_000;
+const REGISTRY_LOCK_BACKOFF_MAX_MS = 50;
 
 function correlatePathPendingReceipts(file: RegistryFile, observations: ConversationObservation[]): Map<string, string> {
   type PendingReceipt = { launchId: string; cwd: string; accountId: string | null; expectedStart: number };
@@ -574,7 +577,7 @@ function nativeGenerationId(pathname: string): string {
 function normalizeGeneration(value: NativeGeneration): NativeGeneration {
   return {
     ...value,
-    launchProfile: emptyLaunchProfile(value.launchProfile),
+    launchProfile: emptyLaunchProfile(value.launchProfile ?? {}),
     historyHash: typeof value.historyHash === "string" ? value.historyHash : null,
     host: value.host && typeof value.host === "object" ? value.host : null,
   };
@@ -608,6 +611,7 @@ function normalizeStructuredHost(value: unknown): StructuredHostColumns | null {
 function normalizeEntry(value: AgentRegistryEntry): AgentRegistryEntry {
   return {
     ...value,
+    ...(value.launchProfile ? { launchProfile: emptyLaunchProfile(value.launchProfile) } : {}),
     host: value.host && typeof value.host === "object" && value.host.kind === "tmux" ? value.host : null,
     structuredHost: normalizeStructuredHost(value.structuredHost),
   };
@@ -1011,10 +1015,42 @@ function readFile(filename: string): RegistryFile {
   }
 }
 
+function compactLaunchProfile(profile: LaunchProfile): Partial<LaunchProfile> {
+  const compact: Partial<LaunchProfile> = { ...profile };
+  for (const key of Object.keys(compact) as Array<keyof LaunchProfile>) {
+    if (compact[key] === null) delete compact[key];
+  }
+  if (compact.cwd === "") delete compact.cwd;
+  if (compact.role === "worker") delete compact.role;
+  return compact;
+}
+
+function serializeRegistry(value: RegistryFile): string {
+  const storage = {
+    ...value,
+    entries: Object.fromEntries(Object.entries(value.entries).map(([id, entry]) => [id, {
+      ...entry,
+      ...(entry.launchProfile ? { launchProfile: compactLaunchProfile(entry.launchProfile) } : {}),
+    }])),
+    receipts: Object.fromEntries(Object.entries(value.receipts).map(([id, receipt]) => [id, {
+      ...receipt,
+      launchProfile: compactLaunchProfile(receipt.launchProfile),
+    }])),
+    conversations: Object.fromEntries(Object.entries(value.conversations).map(([id, conversation]) => [id, {
+      ...conversation,
+      generations: conversation.generations.map((generation) => ({
+        ...generation,
+        launchProfile: compactLaunchProfile(generation.launchProfile),
+      })),
+    }])),
+  };
+  return JSON.stringify(storage) + "\n";
+}
+
 function writeAtomic(filename: string, value: RegistryFile): void {
   fs.mkdirSync(path.dirname(filename), { recursive: true, mode: 0o700 });
   const temp = `${filename}.${process.pid}.${crypto.randomUUID()}.tmp`;
-  const payload = JSON.stringify(value, null, 2) + "\n";
+  const payload = serializeRegistry(value);
   let fd: number | null = null;
   try {
     fd = fs.openSync(temp, "w", 0o600);
@@ -1039,30 +1075,109 @@ export class AgentRegistry {
     readonly filename = statePath("agent-registry.json"),
     private readonly ownerAlive: (owner: ProcessIdentity) => boolean = (owner) =>
       procBackend.pidAlive(owner.pid) && (owner.startIdentity === null || procBackend.processIdentity(owner.pid) === owner.startIdentity),
-  ) {}
+  ) {
+    this.cleanupStaleTempFiles();
+    this.compactAtStartup();
+  }
+
+  private cleanupStaleTempFiles(): void {
+    const directory = path.dirname(this.filename);
+    const prefix = `${path.basename(this.filename)}.`;
+    let entries: string[];
+    try {
+      entries = fs.readdirSync(directory);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw error;
+    }
+    for (const entry of entries) {
+      if (!entry.startsWith(prefix) || !entry.endsWith(".tmp")) continue;
+      const owner = entry.slice(prefix.length, -4).split(".");
+      const pid = Number(owner[0]);
+      if (owner.length !== 2 || !Number.isInteger(pid) || pid <= 0
+        || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(owner[1] ?? "")) continue;
+      if (this.ownerAlive({ pid, startIdentity: null })) continue;
+      try {
+        fs.unlinkSync(path.join(directory, entry));
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+    }
+  }
+
+  private compactAtStartup(): void {
+    if (!fs.existsSync(this.filename)) return;
+    const lock = `${this.filename}.write-lock`;
+    this.acquireLock(lock, { pid: process.pid, startIdentity: procBackend.processIdentity(process.pid) });
+    try {
+      let original: string;
+      try {
+        original = fs.readFileSync(this.filename, "utf8");
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+        throw error;
+      }
+      let file: RegistryFile;
+      try {
+        file = readFile(this.filename);
+      } catch (error) {
+        if (error instanceof RegistryReadError) {
+          console.error("agent registry startup compaction skipped:", error);
+          return;
+        }
+        throw error;
+      }
+      compactDeliveryReservations(file);
+      if (serializeRegistry(file) !== original) writeAtomic(this.filename, file);
+    } finally {
+      fs.rmSync(lock, { recursive: true, force: true });
+    }
+  }
+
+  private tryAcquireLock(lock: string, owner: ProcessIdentity): boolean {
+    try {
+      fs.mkdirSync(lock, 0o700);
+      fs.writeFileSync(path.join(lock, "owner.json"), JSON.stringify(owner), { mode: 0o600 });
+      return true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      let stale = false;
+      try {
+        const previous = JSON.parse(fs.readFileSync(path.join(lock, "owner.json"), "utf8")) as ProcessIdentity;
+        stale = Number.isInteger(previous.pid) && previous.pid > 0 && !this.ownerAlive(previous);
+      } catch {
+        /* A creator may still be writing owner.json. Preserve unknown locks. */
+      }
+      if (stale) fs.rmSync(lock, { recursive: true, force: true });
+      return false;
+    }
+  }
+
+  private lockBackoff(attempt: number, remaining: number): number {
+    const backoff = Math.min(5 * (2 ** Math.floor(attempt / 20)), REGISTRY_LOCK_BACKOFF_MAX_MS);
+    return Math.min(backoff, remaining);
+  }
 
   private acquireLock(lock: string, owner: ProcessIdentity): void {
     fs.mkdirSync(path.dirname(lock), { recursive: true, mode: 0o700 });
-    for (let attempt = 0; attempt < 100; attempt += 1) {
-      try {
-        fs.mkdirSync(lock, 0o700);
-        fs.writeFileSync(path.join(lock, "owner.json"), JSON.stringify(owner), { mode: 0o600 });
-        return;
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-        let stale = false;
-        try {
-          const previous = JSON.parse(fs.readFileSync(path.join(lock, "owner.json"), "utf8")) as ProcessIdentity;
-          stale = Number.isInteger(previous.pid) && previous.pid > 0 && !this.ownerAlive(previous);
-        } catch {
-          /* A creator may still be writing owner.json. Preserve unknown locks. */
-        }
-        if (stale) {
-          fs.rmSync(lock, { recursive: true, force: true });
-          continue;
-        }
-        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
-      }
+    const deadline = Date.now() + REGISTRY_WRITE_LOCK_WAIT_MS;
+    for (let attempt = 0; ; attempt += 1) {
+      if (this.tryAcquireLock(lock, owner)) return;
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) break;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, this.lockBackoff(attempt, remaining));
+    }
+    throw new Error("agent registry is busy");
+  }
+
+  private async acquireLockAsync(lock: string, owner: ProcessIdentity): Promise<void> {
+    fs.mkdirSync(path.dirname(lock), { recursive: true, mode: 0o700 });
+    const deadline = Date.now() + REGISTRY_OPERATION_LOCK_WAIT_MS;
+    for (let attempt = 0; ; attempt += 1) {
+      if (this.tryAcquireLock(lock, owner)) return;
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) break;
+      await new Promise((resolve) => setTimeout(resolve, this.lockBackoff(attempt, remaining)));
     }
     throw new Error("agent registry is busy");
   }
@@ -1549,7 +1664,7 @@ export class AgentRegistry {
       const liveHost = entry.structuredHost.process;
       if (liveHost && this.ownerAlive(liveHost)) return null;
       const requestedOwner = structuredClaimOwner(owner);
-      if (entry.claimOwner && entry.claimOwner !== requestedOwner) {
+      if (entry.claimOwner) {
         const priorOwner = structuredClaimIdentity(entry.claimOwner);
         if (!priorOwner || this.ownerAlive(priorOwner)) return null;
       }
@@ -1616,7 +1731,7 @@ export class AgentRegistry {
       identity and may be recovered by an explicit caller after verification. */
   async withOperationLock<T>(key: SessionKey, owner: ProcessIdentity, fn: () => Promise<T>): Promise<T> {
     const lock = `${this.filename}.locks/${encodeURIComponent(sessionKeyId(key))}`;
-    this.acquireLock(lock, owner);
+    await this.acquireLockAsync(lock, owner);
     try {
       return await fn();
     } finally {

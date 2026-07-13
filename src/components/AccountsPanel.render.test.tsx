@@ -70,6 +70,21 @@ test("renders a capacity chip per account and dims the stale one", () => {
   expect(html).toContain("opacity-55"); // the stale Work chip
 });
 
+test("shows account ids and auth health when labels collide", () => {
+  const html = render(base({
+    accounts: [
+      { id: "botfatherdev-2", label: "botfatherdev", kind: "managed", authPresent: false, authHealth: "signed_out", loginPending: false, loginState: "idle", deviceAuth: null },
+      { id: "botfatherdev-3", label: "botfatherdev", kind: "managed", authPresent: true, authHealth: "authenticated", loginPending: false, loginState: "authenticated", deviceAuth: null },
+    ],
+    active: "botfatherdev-3",
+  }));
+
+  expect(html).toContain("botfatherdev-2");
+  expect(html).toContain("botfatherdev-3");
+  expect(html).toContain("Signed out");
+  expect(html).toContain("Authenticated");
+});
+
 test("breaks out each account's session and weekly windows with reset times", () => {
   const nowS = Math.floor(Date.now() / 1000);
   const html = render(base({

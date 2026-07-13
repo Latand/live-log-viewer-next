@@ -68,7 +68,7 @@ describe("agent registry", () => {
     fs.writeFileSync(store.filename, JSON.stringify(snapshot));
 
     const upgraded = new AgentRegistry(store.filename);
-    expect(upgraded.compactDeliveryReservations()).toBe(5);
+    expect(upgraded.compactDeliveryReservations()).toBe(0);
     const restarted = new AgentRegistry(store.filename);
     const retained = Object.values(restarted.snapshot().heldDeliveries);
     expect(retained).toHaveLength(100);
@@ -91,6 +91,37 @@ describe("agent registry", () => {
     expect(failed).toHaveLength(50);
     expect(failed.every((delivery) => delivery.state === "failed")).toBe(true);
     expect(store.holdDelivery(conversation.id, "new body", "new-after-failures")).toMatchObject({ state: "assigned" });
+  });
+
+  test("startup compaction stores normalized snapshots sparsely without changing durable state", () => {
+    const store = registry();
+    store.ensureConversation("codex", "/sessions/compact-a.jsonl", "default");
+    store.ensureConversation("claude", "/sessions/compact-b.jsonl", "work");
+    const expected = store.snapshot();
+    fs.writeFileSync(store.filename, JSON.stringify(expected, null, 2) + "\n");
+    const verboseBytes = fs.statSync(store.filename).size;
+
+    const restarted = new AgentRegistry(store.filename);
+    const compactPayload = fs.readFileSync(store.filename, "utf8");
+
+    expect(fs.statSync(store.filename).size).toBeLessThan(verboseBytes);
+    expect(compactPayload).not.toContain("\n  \"entries\"");
+    expect(compactPayload).not.toContain("\"model\":null");
+    expect(restarted.snapshot()).toEqual(expected);
+  });
+
+  test("startup removes registry temp files only after their writer exits", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-tmp-"));
+    const filename = path.join(dir, "agent-registry.json");
+    const deadWriter = `${filename}.42.11111111-1111-4111-8111-111111111111.tmp`;
+    const liveWriter = `${filename}.43.22222222-2222-4222-8222-222222222222.tmp`;
+    fs.writeFileSync(deadWriter, "dead writer");
+    fs.writeFileSync(liveWriter, "live writer");
+
+    new AgentRegistry(filename, (owner) => owner.pid === 43);
+
+    expect(fs.existsSync(deadWriter)).toBeFalse();
+    expect(fs.existsSync(liveWriter)).toBeTrue();
   });
 
   test("account-retirement compensation preserves unrelated concurrent mutations", () => {
@@ -138,12 +169,50 @@ describe("agent registry", () => {
     await expect(store.withOperationLock(KEY, { pid: 1, startIdentity: "1:one" }, async () => { throw new Error("boom"); })).rejects.toThrow("boom");
   });
 
+  test("queues a transiently contended operation lock", async () => {
+    const store = registry();
+    const owner = { pid: process.pid, startIdentity: null };
+    const events: string[] = [];
+    let releaseFirst!: () => void;
+    const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    const first = store.withOperationLock(KEY, owner, async () => {
+      events.push("first-started");
+      await firstGate;
+      events.push("first-finished");
+    });
+    await Bun.sleep(0);
+    const second = store.withOperationLock(KEY, owner, async () => {
+      events.push("second-started");
+    });
+
+    await Bun.sleep(10);
+    expect(events).toEqual(["first-started"]);
+    releaseFirst();
+    await Promise.all([first, second]);
+    expect(events).toEqual(["first-started", "first-finished", "second-started"]);
+  });
+
   test("reclaims a lock only after its recorded process identity is stale", () => {
     const store = registry(() => false);
     const lock = `${store.filename}.write-lock`;
     fs.mkdirSync(lock, { recursive: true });
     fs.writeFileSync(path.join(lock, "owner.json"), JSON.stringify({ pid: 42, startIdentity: "42:old" }));
     expect(() => store.beginSpawn("codex", "/repo")).not.toThrow();
+  });
+
+  test("waits through transient write-lock contention", () => {
+    let livenessChecks = 0;
+    const store = registry(() => {
+      livenessChecks += 1;
+      return livenessChecks <= 100;
+    });
+    const lock = `${store.filename}.write-lock`;
+    fs.mkdirSync(lock, { recursive: true });
+    fs.writeFileSync(path.join(lock, "owner.json"), JSON.stringify({ pid: 42, startIdentity: "42:writer" }));
+
+    expect(() => store.setEngineRouting("codex", "work")).not.toThrow();
+    expect(livenessChecks).toBeGreaterThan(100);
+    expect(store.engineRouting("codex").activeAccountId).toBe("work");
   });
 
   test("preserves corrupt registry bytes and rejects mutation", () => {
