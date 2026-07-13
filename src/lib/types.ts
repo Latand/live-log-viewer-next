@@ -90,6 +90,8 @@ export interface FileEntry {
   fast?: boolean | null;
   /** Structured Claude prompt that is currently blocking the live agent. */
   pendingQuestion: PendingQuestion | null;
+  /** Newest still-pending self-scheduled wakeup, for the board timer chip. */
+  pendingWakeup?: PendingWakeup | null;
   /** Newest TodoWrite/update_plan state — the agent's plan and current goal. */
   plan?: AgentPlan | null;
   /** Context-window fullness from the transcript tail, when it carries usage. */
@@ -248,6 +250,17 @@ export interface PendingQuestion {
   askedAt: string;
   questions?: PendingQuestionItem[];
   plan?: string;
+}
+
+/** The newest still-pending `ScheduleWakeup` of a conversation, surfaced as a
+    board timer chip so an idle-looking orchestrator reads as sleeping until a
+    known time (issue #161 §3). Absent once the wakeup has fired or been
+    superseded. */
+export interface PendingWakeup {
+  /** Absolute fire time in epoch ms. */
+  fireAt: number;
+  /** The one-line "why", for the chip's hover/tap title. */
+  reason: string;
 }
 
 export interface WaitingMenuOption {

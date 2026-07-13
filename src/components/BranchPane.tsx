@@ -25,6 +25,7 @@ import { SessionTitle } from "./session/SessionTitle";
 import { ProcessStatusControls } from "./TaskHeader";
 import { TmuxComposer } from "./TmuxComposer";
 import { RateLimitBadge } from "./RateLimitBadge";
+import { WakeupChip, wakeupChipKey } from "./WakeupChip";
 import { activityDot, cleanTitle, effortTint, effortTitle, engineBadge, engineEdge, fmtAge } from "./utils";
 
 const noop = () => undefined;
@@ -252,6 +253,7 @@ export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noCompose
             <EffortPills file={file} />
             {file.proc === "running" && !file.parent && (file.engine === "claude" || file.engine === "codex") ? <AgentRuntimeControls file={file} /> : null}
             <RateLimitBadge rateLimit={file.rateLimit} />
+            <WakeupChip key={wakeupChipKey(file.pendingWakeup)} wakeup={file.pendingWakeup} />
             {file.parentRemoved ? <ParentRemovedChip /> : null}
             {/* The phone header keeps only actionable or alarming chips: ctx
                 appears once it nears the limit, the worktree name and the

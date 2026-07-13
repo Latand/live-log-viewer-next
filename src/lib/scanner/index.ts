@@ -16,6 +16,7 @@ import { entryModels } from "./model";
 import { outputHolders } from "./process";
 import { goalFor, planFor } from "./plan";
 import { pendingQuestionFor } from "./questions";
+import { pendingWakeupFor } from "./wakeup";
 import { assignTranscriptPids } from "./transcripts";
 import { waitingInputProbe } from "./waitingInput";
 
@@ -191,6 +192,7 @@ async function listFilesInternal(
     entry.plan = planFor(entry);
     entry.goal = goalFor(entry);
     entry.ctx = ctxFor(entry);
+    entry.pendingWakeup = pendingWakeupFor(entry);
   });
   await linkEntries(entries, { persist });
   return { files: entries, projectCatalog: scan.projectCatalog };

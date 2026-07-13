@@ -931,3 +931,102 @@ describe("Claude protocol and repeated prose", () => {
     assertParity(claudeFile, lines, { chunks: [1], cap: 2 });
   });
 });
+
+const claudeWakeup = (id: string, input: Record<string, unknown>, timestamp = "2026-07-06T10:00:02Z") =>
+  JSON.stringify({ type: "assistant", timestamp, message: { content: [{ type: "tool_use", id, name: "ScheduleWakeup", input }] } });
+
+
+describe("ScheduleWakeup card", () => {
+  test("emits a standalone wakeup tool event with a derived fire time", () => {
+    const ts = "2026-07-06T10:00:02Z";
+    const lines = [claudeWakeup("w1", { delaySeconds: 1200, reason: "Fallback poll", prompt: "Continue the issue" }, ts)];
+    const feed = buildFeed(claudeFile, lines, false, "");
+    const tools = feed.items.filter((item) => item.kind === "tool");
+    expect(tools).toHaveLength(1);
+    const wakeup = tools[0].kind === "tool" ? tools[0].wakeup : undefined;
+    expect(wakeup).toBeDefined();
+    expect(wakeup?.reason).toBe("Fallback poll");
+    expect(wakeup?.prompt).toBe("Continue the issue");
+    expect(wakeup?.superseded).toBe(false);
+    expect(wakeup?.fireAt).toBe(Date.parse(ts) + 1200 * 1000);
+  });
+
+  test("a wakeup never folds into a cmd-group even amid a command run", () => {
+    const lines = [
+      claudeTool("g1", "Bash", "echo 1"),
+      claudeResult("g1", "1"),
+      claudeTool("g2", "Bash", "echo 2"),
+      claudeResult("g2", "2"),
+      claudeWakeup("w1", { delaySeconds: 60, reason: "r", prompt: "p" }),
+      claudeTool("g3", "Bash", "echo 3"),
+      claudeResult("g3", "3"),
+      claudeTool("g4", "Bash", "echo 4"),
+      claudeResult("g4", "4"),
+      claudeProse("done"),
+    ];
+    const feed = buildFeed(claudeFile, lines, false, "");
+    const wakeups = feed.items.filter((item) => item.kind === "tool" && item.wakeup);
+    expect(wakeups).toHaveLength(1);
+    assertParity(claudeFile, lines);
+  });
+
+  test("only the newest wakeup stays active; earlier ones are superseded", () => {
+    const lines = [
+      claudeWakeup("w1", { delaySeconds: 600, reason: "first", prompt: "p1" }),
+      claudeProse("waited a bit"),
+      claudeWakeup("w2", { delaySeconds: 900, reason: "second", prompt: "p2" }),
+    ];
+    const feed = buildFeed(claudeFile, lines, false, "");
+    const wakeups = feed.items.filter((item) => item.kind === "tool" && item.wakeup);
+    expect(wakeups).toHaveLength(2);
+    const byReason = new Map(wakeups.map((w) => [w.kind === "tool" ? w.wakeup?.reason : "", w.kind === "tool" ? w.wakeup?.superseded : undefined]));
+    expect(byReason.get("first")).toBe(true);
+    expect(byReason.get("second")).toBe(false);
+    assertParity(claudeFile, lines);
+  });
+
+  test("recovers the fire time from the result when the input carried no delay", () => {
+    const ts = "2026-07-06T10:00:02Z";
+    const lines = [
+      claudeWakeup("w1", { reason: "r", prompt: "p" }, ts),
+      claudeResult("w1", "Next wakeup scheduled for 13:30:00 (in 1215s). Nothing more to do this turn."),
+    ];
+    const feed = buildFeed(claudeFile, lines, false, "");
+    const tool = feed.items.find((item) => item.kind === "tool");
+    const wakeup = tool && tool.kind === "tool" ? tool.wakeup : undefined;
+    expect(wakeup?.fireAt).toBe(Date.parse(ts) + 1215 * 1000);
+  });
+
+  test("the resolved delay overrides the requested delay on attach", () => {
+    const ts = "2026-07-06T10:00:02Z";
+    const lines = [
+      claudeWakeup("w1", { delaySeconds: 120, reason: "r", prompt: "p" }, ts),
+      claudeResult("w1", "Next wakeup scheduled for 10:02:15 (in 135s)."),
+    ];
+    const feed = buildFeed(claudeFile, lines, false, "");
+    const tool = feed.items.find((item) => item.kind === "tool");
+    const wakeup = tool && tool.kind === "tool" ? tool.wakeup : undefined;
+    // ts + the resolved 135s wins over the requested 120s (timezone-independent).
+    expect(wakeup?.fireAt).toBe(Date.parse(ts) + 135 * 1000);
+  });
+
+  test("a rejected wakeup is marked failed and does not supersede the prior valid one", () => {
+    const lines = [
+      claudeWakeup("w1", { delaySeconds: 600, reason: "first", prompt: "p1" }),
+      claudeResult("w1", "Next wakeup scheduled for 10:10:00 (in 600s)."),
+      claudeProse("waited a bit"),
+      claudeWakeup("w2", { delaySeconds: 900, reason: "second", prompt: "p2" }),
+      claudeResult("w2", "delaySeconds must be between 60 and 3600", true),
+    ];
+    const feed = buildFeed(claudeFile, lines, false, "");
+    const wakeups = feed.items.filter((item) => item.kind === "tool" && item.wakeup);
+    expect(wakeups).toHaveLength(2);
+    const by = new Map(wakeups.map((w) => [w.kind === "tool" ? w.wakeup?.reason : "", w.kind === "tool" ? w.wakeup : undefined]));
+    // The rejected newer call is failed and not superseding; the first stays active.
+    expect(by.get("second")?.failed).toBe(true);
+    expect(by.get("second")?.superseded).toBe(false);
+    expect(by.get("first")?.failed).toBe(false);
+    expect(by.get("first")?.superseded).toBe(false);
+    assertParity(claudeFile, lines);
+  });
+});
