@@ -768,7 +768,7 @@ test("a draft can be emptied stage by stage on the canvas (#136)", async () => {
   const oneLeft = await patchPipeline(id, { action: "remove-stage", stageId: "plan" }, ports);
   expect(oneLeft.pipeline?.stages).toEqual([]);
   expect(oneLeft.pipeline?.cursor).toBeNull();
-  /* Nothing left to remove is a clean 409, not a crash. */
+  /* Removing from an already-empty draft returns a clean 409. */
   expect((await patchPipeline(id, { action: "remove-stage", stageId: "plan" }, ports)).status).toBe(409);
 });
 

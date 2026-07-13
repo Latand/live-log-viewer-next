@@ -777,8 +777,8 @@ function replaceDraftStages(
 ): { error?: string } {
   const relinked = inputs.map((stage, index) => ({ ...stage, next: inputs[index + 1]?.id ?? null }));
   const preserved = new Map(pipeline.stages.map((stage) => [stage.id, stage]));
-  /* Draft edits may empty the plan entirely (remove down to zero) — the 2-stage
-     floor is a Start-time gate, not an edit-time one (#136). */
+  /* Draft edits may empty the plan entirely (remove down to zero); the 2-stage
+     floor is enforced only at Start (#136). */
   const normalized = normalizeStages(relinked, lookup, preserved, 0);
   if (!normalized.stages) return { error: normalized.error ?? "invalid stages" };
   pipeline.stages = normalized.stages;
@@ -854,9 +854,9 @@ export async function patchPipeline(
 
     if (req.action === "start") {
       if (pipeline.state !== "draft") return { error: "pipeline is not a draft", status: 409 };
-      /* The 2–4 stage floor is enforced here, not on the draft (#136): a draft may
-         be assembled from zero, but it cannot run without a full stage plan. The
-         review-loop-needs-a-preceding-run rule already held on every draft edit. */
+      /* Start enforces the 2–4 stage floor (#136): a draft may hold zero stages
+         while it is assembled on the canvas, and it needs a full stage plan to run.
+         The review-loop-needs-a-preceding-run rule already held on every draft edit. */
       if (pipeline.stages.length < 2) return { error: "add at least 2 stages before starting", status: 409 };
       pipeline.state = "provisioning";
       pipeline.stateDetail = null;

@@ -400,8 +400,9 @@ export const GroupsLayer = memo(function GroupsLayer({
     setAutoOpened(autoOpenGroupId);
     setOpenId(autoOpenGroupId);
   }
-  /* Tell the caller it can drop the request. Parent state only — no local setState
-     here — so it stays off the cascading-render path the lint rule guards. */
+  /* Tell the caller it can drop the request. This effect only calls the parent
+     callback and runs no local setState, so it stays off the cascading-render path
+     the lint rule guards. */
   useEffect(() => {
     if (autoOpenGroupId && autoOpenGroupId === autoOpened) onAutoOpen?.();
   }, [autoOpenGroupId, autoOpened, onAutoOpen]);

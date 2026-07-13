@@ -55,7 +55,8 @@ test("an empty draft's strip disables Start until it holds 2 stages (#136)", () 
     const open = html.lastIndexOf("<button", at);
     return html.slice(open, html.indexOf(">", open));
   };
-  /* Match the `disabled` attribute, not the `disabled:` Tailwind class. */
+  /* Assert on the `disabled=""` attribute; the class list also carries the token
+     `disabled:opacity-40`, which a bare substring check would match. */
   const empty = pipeline({ state: "draft", stages: [], runs: [], cursor: null });
   expect(startTag(render(empty), "Start pipeline")).toContain('disabled=""');
   /* Once it reaches the 2-stage floor, Start is live. */

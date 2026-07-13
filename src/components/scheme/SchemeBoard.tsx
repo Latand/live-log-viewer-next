@@ -616,10 +616,11 @@ export function SchemeBoard({
   }, [newTaskNonce]);
 
   /* The canvas builder (#136): when `+ Пайплайн` drops a fresh draft, reveal its
-     placeholder group — glide the camera onto it and drop the hand tool so its
-     builder panel (which GroupsLayer opens only while interactive) is on screen
-     and open, instead of docked somewhere off a panned/populated board. Fires once
-     per id, and only once the group has appeared in the layout (the POST→refetch
+     placeholder group so its builder panel opens on screen. GroupsLayer opens the
+     panel only while interactive, and both the hand tool and an active selection
+     session (armed or a non-empty multi-set) suspend interactivity — so end the
+     session, switch to select mode, and glide the camera onto the group. Fires
+     once per id, once the group appears in the layout (the POST→refetch
      round-trip). */
   const builderRevealed = useRef<string | null>(null);
   useEffect(() => {
@@ -628,6 +629,8 @@ export function SchemeBoard({
     const group = layout.groups.find((candidate) => candidate.id === builderPipelineId && candidate.pipeline);
     if (!group) return;
     builderRevealed.current = builderPipelineId;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- one-shot reveal syncing camera + selection to a new draft
+    clearSession();
     setMode("select");
     centerOn(group, 0.75);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- fires when the new draft's group first renders

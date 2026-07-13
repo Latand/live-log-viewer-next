@@ -450,8 +450,8 @@ function DraftStageCards({
   const removeStage = (stageId: string) =>
     void run(t("groupOverride.stageRemoved"), () => patchPipeline(pipeline.id, "remove-stage", { stageId }));
 
-  /* Drop resolves against React state (dragId), not dataTransfer, so it works in
-     environments where the drag payload is unavailable (and stays unit-testable).
+  /* Drop resolves against React state (dragId), which works in environments where
+     the drag payload (dataTransfer) is unavailable, and keeps this unit-testable.
      Splice semantics: the dragged stage lands at the drop target's current slot;
      a drop that would break the run→review chain is ignored (moveTo guards it). */
   const onDrop = (targetId: string) => {
