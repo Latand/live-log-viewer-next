@@ -107,6 +107,14 @@ class FakeAppServer extends EventEmitter {
     if (typeof method === "string" && this.ignoredMethods.includes(method)) return;
     if (method === "initialize") return this.respond(message.id, { userAgent: "codex_desktop_app/0.144.1 (Linux)" });
     if (method === "account/read") return this.respond(message.id, { account: { type: "chatgpt", planType: "pro" }, requiresOpenaiAuth: false });
+    if (method === "config/read") return this.respond(message.id, {
+      config: {
+        mcp_servers: {
+          playwright: { command: "npx", enabled: true },
+          "telegram-readonly": { command: "uv", enabled: true },
+        },
+      },
+    });
     if (method === "thread/start" || method === "thread/resume") {
       const id = method === "thread/resume" ? this.resumedThreadId : this.threadId;
       if (method === "thread/resume" && this.resumeRequest) {
@@ -275,9 +283,21 @@ describe("CodexAppServerHost", () => {
       eventStore: new MemoryEventStore(),
       spawnProcess: fakeSpawn(server, captured),
     });
-    expect(captured.args).toEqual(["-c", "cli_auth_credentials_store=file", "app-server"]);
+    expect(captured.args).toEqual(["-c", "cli_auth_credentials_store=file", "-c", "mcp_servers={}", "app-server"]);
     expect(captured.options?.env?.CODEX_HOME).toBe("/managed-codex-home");
+    expect(captured.options?.detached).toBeTrue();
     expect(server.requests.some((request) => request.method === "thread/resume")).toBeTrue();
+    const resume = server.requests.find((request) => request.method === "thread/resume");
+    expect(resume?.params).toMatchObject({
+      config: {
+        mcp_servers: {
+          playwright: { enabled: false },
+          "telegram-readonly": { enabled: false },
+        },
+        features: { apps: false, plugins: false },
+        include_apps_instructions: false,
+      },
+    });
     await host.release();
   });
 

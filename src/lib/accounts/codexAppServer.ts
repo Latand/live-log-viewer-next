@@ -8,8 +8,11 @@ import {
   type AppServerEnvelope,
   type AppServerRequestId,
 } from "./codexAppServerProtocol";
+import { signalDetachedProcessGroup, type ProcessSignal } from "../processGroup";
+import { headlessCodexThreadConfig } from "../codexHeadlessConfig";
 
 export interface CodexAppServerChild {
+  pid?: number;
   stdin: Pick<ChildProcessWithoutNullStreams["stdin"], "write" | "end">;
   stdout: Pick<ChildProcessWithoutNullStreams["stdout"], "on">;
   stderr?: Pick<ChildProcessWithoutNullStreams["stderr"], "on">;
@@ -32,6 +35,7 @@ export interface CodexAppServerOptions {
   clock?: CodexAppServerClock;
   requestTimeoutMs?: number;
   shutdownGraceMs?: number;
+  signalProcess?: ProcessSignal;
 }
 
 export interface DeviceCodeChallenge {
@@ -98,9 +102,10 @@ const defaultClock: CodexAppServerClock = {
 };
 
 function spawnCodexAppServer(home: string): CodexAppServerChild {
-  const child = spawn(process.env.LLV_CODEX_BINARY || "codex", ["-c", "cli_auth_credentials_store=file", "app-server"], {
+  const child = spawn(process.env.LLV_CODEX_BINARY || "codex", ["-c", "cli_auth_credentials_store=file", "-c", "mcp_servers={}", "app-server"], {
     env: { ...process.env, CODEX_HOME: home },
     stdio: ["pipe", "pipe", "pipe"],
+    detached: true,
   });
   return child;
 }
@@ -178,6 +183,7 @@ export class CodexAppServerClient {
     private readonly clock: CodexAppServerClock,
     private readonly requestTimeoutMs: number,
     private readonly shutdownGraceMs: number,
+    private readonly signalProcess: ProcessSignal,
   ) {
     child.stdout.on("data", (chunk: Buffer | string) => this.acceptStdout(String(chunk)));
     child.stderr?.on("data", (chunk: Buffer | string) => {
@@ -202,6 +208,7 @@ export class CodexAppServerClient {
       options.clock ?? defaultClock,
       options.requestTimeoutMs ?? DEFAULT_TIMEOUT_MS,
       options.shutdownGraceMs ?? DEFAULT_SHUTDOWN_GRACE_MS,
+      options.signalProcess ?? process.kill,
     );
     try {
       const response = await client.request("initialize", {
@@ -299,6 +306,14 @@ export class CodexAppServerClient {
     approvalPolicy?: string | null;
     sandbox?: string | null;
   } = {}): Promise<AppServerThreadRef> {
+    const effectiveConfig = await this.request("config/read", {
+      ...(options.cwd ? { cwd: options.cwd } : {}),
+      includeLayers: false,
+    });
+    const config = {
+      ...headlessCodexThreadConfig(effectiveConfig),
+      ...(options.effort ? { model_reasoning_effort: options.effort } : {}),
+    };
     const response = await this.request("thread/resume", {
       threadId,
       ...(options.path ? { path: options.path } : {}),
@@ -307,7 +322,7 @@ export class CodexAppServerClient {
       ...(options.fast != null ? { serviceTier: options.fast ? "priority" : "standard" } : {}),
       ...(options.approvalPolicy ? { approvalPolicy: options.approvalPolicy } : {}),
       ...(options.sandbox ? { sandbox: options.sandbox } : {}),
-      ...(options.effort ? { config: { model_reasoning_effort: options.effort } } : {}),
+      config,
     });
     const thread = isRecord(response) && isRecord(response.thread) ? response.thread : response;
     if (!isRecord(thread)) throw protocolError("thread/resume response is malformed");
@@ -465,12 +480,12 @@ export class CodexAppServerClient {
 
   private beginShutdown(): void {
     try { this.child.stdin.end(); } catch { /* child already ended */ }
-    try { this.child.kill("SIGTERM"); } catch { /* child already exited */ }
+    signalDetachedProcessGroup(this.child, "SIGTERM", this.signalProcess);
     if (!this.reaped && !this.shutdownTimer) {
       this.shutdownTimer = this.clock.setTimeout(() => {
         this.shutdownTimer = null;
         if (this.reaped) return;
-        try { this.child.kill("SIGKILL"); } catch { /* child already exited */ }
+        signalDetachedProcessGroup(this.child, "SIGKILL", this.signalProcess);
       }, this.shutdownGraceMs);
     }
   }

@@ -5,6 +5,7 @@ import { expect, test } from "bun:test";
 import { CodexAppServerClient } from "./codexAppServer";
 
 class FakeChild extends EventEmitter {
+  readonly pid = 4242;
   readonly writes: string[] = [];
   readonly stdin = {
     write: (line: string) => {
@@ -161,6 +162,7 @@ test("successor thread methods use the structured fork, resume, read, name, and 
     if (typeof message.method !== "string") return;
     methods.push({ method: message.method, params: message.params });
     if (message.method === "thread/fork") fake.respond(requestId(message), { thread: { id: "fork-1", path: "/source/fork-1.jsonl" } });
+    else if (message.method === "config/read") fake.respond(requestId(message), { config: { mcp_servers: { playwright: {}, "telegram-readonly": {} } } });
     else if (message.method === "thread/resume") fake.respond(requestId(message), { thread: { id: "fork-1" } });
     else if (message.method === "thread/read") fake.respond(requestId(message), { thread: { id: "fork-1", path: "/target/fork-1.jsonl" } });
     else fake.respond(requestId(message), {});
@@ -172,7 +174,7 @@ test("successor thread methods use the structured fork, resume, read, name, and 
   await expect(client.readThread("fork-1")).resolves.toEqual({ id: "fork-1", path: "/target/fork-1.jsonl" });
   await client.setThreadName("fork-1", "Title");
   await client.setThreadGoal("fork-1", "Ship");
-  expect(methods.map((item) => item.method)).toEqual(["thread/fork", "thread/resume", "thread/read", "thread/name/set", "thread/goal/set"]);
+  expect(methods.map((item) => item.method)).toEqual(["thread/fork", "config/read", "thread/resume", "thread/read", "thread/name/set", "thread/goal/set"]);
   expect(methods.find((item) => item.method === "thread/resume")?.params).toEqual({
     threadId: "fork-1",
     path: "/target/fork-1.jsonl",
@@ -181,7 +183,12 @@ test("successor thread methods use the structured fork, resume, read, name, and 
     serviceTier: "priority",
     approvalPolicy: "never",
     sandbox: "read-only",
-    config: { model_reasoning_effort: "high" },
+    config: {
+      mcp_servers: { playwright: { enabled: false }, "telegram-readonly": { enabled: false } },
+      features: { apps: false, plugins: false },
+      include_apps_instructions: false,
+      model_reasoning_effort: "high",
+    },
   });
   client.close();
 });
@@ -332,4 +339,23 @@ test("SIGTERM acknowledgement and escalation both end in a reaped child", async 
   expect(unacknowledged.signals).toEqual(["SIGTERM", "SIGKILL"]);
   unacknowledged.emit("close", null, "SIGKILL");
   expect(reaped).toEqual(["reaped"]);
+});
+
+test("shutdown signals the detached app-server process group", async () => {
+  const child = new FakeChild();
+  child.onWrite = (message) => {
+    if (message.method === "initialize") child.respond(requestId(message), {});
+  };
+  const signals: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+  const client = await CodexAppServerClient.start({
+    home: "/fake/home",
+    spawn: () => child as never,
+    signalProcess: (pid, signal) => { signals.push({ pid, signal }); },
+  });
+
+  client.close();
+
+  expect(signals).toEqual([{ pid: -4242, signal: "SIGTERM" }]);
+  expect(child.signals).toEqual([]);
+  child.emit("close", 0, "SIGTERM");
 });

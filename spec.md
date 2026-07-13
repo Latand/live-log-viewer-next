@@ -1,20 +1,24 @@
-# PR #152: EngineHost interface and CodexAppServerHost
+# Issue #159: Headless Codex process containment
 
 ## Task statement
 
-Implement issue #149 from the issue #25 runtime spike: define the shared structured-host contract, add the Codex app-server adapter on ChatGPT subscription authentication, persist its mutable host state beside the durable engine thread identity, and support restart adoption through `thread/resume`.
+Prevent Viewer-owned headless Codex work from accumulating MCP server fleets. Isolate every review and app-server child in a process group, disable MCP startup, reap stale Viewer review groups and orphaned MCP roots, and reduce quota-probe churn after repeated initialize timeouts.
+
+## CLI verification
+
+Codex CLI 0.144.1 treats `-c mcp_servers={}` as a merge, so configured MCP entries remain enabled when a thread starts. The verified review-round isolation flag is `codex exec --ignore-user-config`; it preserves `CODEX_HOME` authentication and starts zero configured MCP children. App-server launches still carry the requested empty-table override. Structured thread start and resume additionally read the effective server table, disable every entry, disable plugin/app MCP sources, and suppress app instructions.
 
 ## Acceptance criteria
 
-- AC1: `EngineHost` exposes `attach(afterSeq)`, `send`, `interrupt`, `answer`, `health`, and `release` with the spike contract semantics.
-- AC2: `CodexAppServerHost` maps the contract to app-server JSON-RPC over stdio and uses the Codex thread ID as durable session identity.
-- AC3: Structured hosting activates only when `LLV_STRUCTURED_HOSTS=1`; the default state remains disabled.
-- AC4: Existing tmux delivery paths, flow engines, and UI remain unchanged.
-- AC5: Registry state persists host kind, endpoint, PID plus process-start identity, event cursor, protocol version, writer-claim epoch, active turn reference, and pending attention.
-- AC6: Viewer restart adoption resumes every eligible Codex registry row through `thread/resume`.
-- AC7: Delivery maps queue entry IDs to `clientUserMessageId`, active turns use `expectedTurnId`, interruption stays explicit, and structured attention can be answered.
-- AC8: The real Codex CLI integration starts a thread, attaches a late client, steers the active turn, restarts the host process, and resumes the same thread on the ChatGPT subscription.
-- AC9: The real integration skips gracefully when the Codex CLI is unavailable.
-- AC10: API keys and authentication tokens never cross into the child environment or diagnostic output.
-- AC11: `bun test`, touched-file ESLint, and `bunx tsc --noEmit` pass.
-- AC12: A fresh independent review reaches a clean APPROVE verdict.
+- AC1: Viewer-owned `codex exec` reviewers start with clean user configuration and zero configured MCP servers.
+- AC2: Both Viewer-owned `codex app-server` implementations pass `-c mcp_servers={}`.
+- AC3: Structured Codex thread start and resume disable all effective MCP entries plus plugin/app MCP sources.
+- AC4: Every Viewer-owned headless Codex child uses `detached: true` and receives group-wide SIGTERM followed by group-wide SIGKILL after the existing grace period.
+- AC5: Interactive tmux agent spawn behavior remains unchanged.
+- AC6: A periodic Viewer tick finds stale Viewer review commands and orphaned MCP roots at or above a configurable age threshold; the default is two hours.
+- AC7: Reaper selection protects every fresh tmux pane ancestry, every active flow-round identity, every live Codex app-server tree, and every Claude ancestry.
+- AC8: Reaper actuation refreshes tmux, flow, process, and process-start evidence immediately before signaling. A failed tmux observation suppresses the cleanup tick.
+- AC9: Consecutive Codex app-server initialize timeouts use persisted exponential cooldowns starting at one minute and capped at fifteen minutes.
+- AC10: Transcript quota data remains available during initialize-timeout cooldowns, and a successful live probe clears the timeout streak.
+- AC11: Unit tests cover group signaling, stale-process selection and revalidation, tmux/flow/Claude protections, and initialize-timeout backoff.
+- AC12: `bun test`, touched-file ESLint, and `bunx tsc --noEmit` pass.
