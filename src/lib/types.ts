@@ -112,6 +112,23 @@ export interface FileEntry {
   cmdDesc?: string;
   /** Review-loop ownership for grouping implementer/reviewer sessions. */
   flow?: FlowAnnotation;
+  /** Stable registry projection used by board adapters after paths rotate. */
+  durableLineage?: {
+    kind: "spawn" | "review";
+    role: string | null;
+    parentConversationId: string | null;
+    reviewsConversationId: string | null;
+    memberships: Array<{
+      kind: "flow" | "pipeline";
+      containerId: string;
+      role: string;
+      slot: string;
+      stageId: string | null;
+      stageOrder: number | null;
+      round: number | null;
+      parentConversationId: string | null;
+    }>;
+  };
   /** Stable Viewer conversation identity (issue #40 account migration). Owns
       the card across native generation changes; falls back to `path` while the
       backend coordinator is unmerged. See {@link ConversationMigration} and

@@ -75,6 +75,15 @@ interface FlowMembership {
  * A reviewer match wins over an implementer match.
  */
 function flowMembership(file: FileEntry, flows: readonly Flow[]): FlowMembership | null {
+  const durable = file.durableLineage?.memberships.find((membership) => membership.kind === "flow");
+  if (durable) {
+    const flow = flows.find((candidate) => candidate.id === durable.containerId);
+    if (flow && durable.role === "reviewer") {
+      const round = flow.rounds.find((candidate) => candidate.n === durable.round) ?? null;
+      return { role: "reviewer", flow, round };
+    }
+    if (flow && durable.role === "implementer") return { role: "implementer", flow, round: null };
+  }
   for (const flow of flows) {
     for (const round of flow.rounds) {
       if (round.reviewerPath === file.path) return { role: "reviewer", flow, round };
@@ -180,7 +189,7 @@ export function shouldCollapseWorker(file: FileEntry, context: CollapseContext):
        spawning, reviewing, or awaiting the owner's decision — it must stay
        expanded even if its own transcript is momentarily idle. Only a closed
        flow's implementer is a candidate, and then only past the idle window. */
-    if (!membership || membership.flow.state !== "closed") return false;
+    if (!membership || membership.flow.state !== "closed" || membership.flow.restored) return false;
   }
   return context.nowMs - file.mtime * 1000 >= context.idleMs;
 }
@@ -303,17 +312,26 @@ export interface ProtectedReviewerNodesInput {
  */
 export function protectedReviewerNodes(input: ProtectedReviewerNodesInput): FileEntry[] {
   const byPath = new Map(input.files.map((file) => [file.path, file] as const));
+  const durableReviewerPaths = new Map<string, string[]>();
+  for (const file of input.files) {
+    const membership = file.durableLineage?.memberships.find((candidate) => candidate.kind === "flow" && candidate.role === "reviewer");
+    if (!membership) continue;
+    const rows = durableReviewerPaths.get(membership.containerId) ?? [];
+    rows.push(file.path);
+    durableReviewerPaths.set(membership.containerId, rows);
+  }
   const decked = new Set<string>();
   for (const flow of input.flows) {
-    if (flow.state === "closed") continue;
+    if (flow.state === "closed" && !flow.restored) continue;
     if (!input.renderedNodePaths.has(flow.implementerPath)) continue;
     for (const round of flow.rounds) if (round.reviewerPath) decked.add(round.reviewerPath);
+    for (const pathname of durableReviewerPaths.get(flow.id) ?? []) decked.add(pathname);
   }
   const out: FileEntry[] = [];
   const seen = new Set<string>();
   for (const flow of input.flows) {
-    for (const round of flow.rounds) {
-      const path = round.reviewerPath;
+    const reviewerPaths = [...flow.rounds.map((round) => round.reviewerPath), ...(durableReviewerPaths.get(flow.id) ?? [])];
+    for (const path of reviewerPaths) {
       if (!path || seen.has(path) || decked.has(path)) continue;
       if (input.renderedNodePaths.has(path) || input.hiddenPaths.has(path)) continue;
       const file = byPath.get(path);

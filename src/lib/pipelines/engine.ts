@@ -4,7 +4,7 @@ import path from "node:path";
 import { accountManager } from "@/lib/accounts/manager";
 import { emptyLaunchProfile, type ViewerConversationId } from "@/lib/accounts/migration/contracts";
 import { freshSpecFor } from "@/lib/agent/cli";
-import { agentRegistry } from "@/lib/agent/registry";
+import { agentRegistry, type DurableMembershipInput } from "@/lib/agent/registry";
 import { sessionKeyFromTranscript } from "@/lib/agent/sessionKey";
 import { resolveSpawnedTranscriptPath } from "@/lib/agent/spawnedTranscript";
 import { headCwd } from "@/lib/agent/transcript";
@@ -59,6 +59,7 @@ export interface PipelinePorts {
     prompt: string;
     parentPath: string | null;
     clientAttemptId: string;
+    membership: DurableMembershipInput;
   }, onReserved: (reservation: PipelineStageLaunchReservation) => void): Promise<PipelineStageSpawn>;
   spawnReceipt(launchId: string): PipelineSpawnReceipt | null;
   paneAgentAlive(paneId: string): Promise<boolean>;
@@ -127,6 +128,7 @@ async function spawnPipelineAgent(
     parentConversationId: parent.conversationId,
     parentSessionKey: parent.sessionKey,
     parentArtifactPath: parent.conversationId ? input.parentPath : null,
+    memberships: [{ ...input.membership, parentConversationId: parent.conversationId }],
     launchProfile,
     clientAttemptId: input.clientAttemptId,
     requestDigest: digest,
@@ -356,7 +358,10 @@ function commitPassedStage(
 }
 
 function updateAttemptIdentity(pipeline: Pipeline, attempt: PipelineStageAttempt, entries: FileEntry[], ports: PipelinePorts): void {
-  if (!attempt.agentPath && attempt.conversationId) attempt.agentPath = ports.pathForConversation(attempt.conversationId);
+  if (attempt.conversationId) {
+    const currentPath = ports.pathForConversation(attempt.conversationId);
+    if (currentPath) attempt.agentPath = currentPath;
+  }
   if (!attempt.agentPath && attempt.sessionId) {
     attempt.agentPath = entries.find((entry) => path.basename(entry.path).includes(attempt.sessionId!))?.path ?? null;
   }
@@ -364,6 +369,20 @@ function updateAttemptIdentity(pipeline: Pipeline, attempt: PipelineStageAttempt
     attempt.conversationId ??= ports.conversationIdForPath(attempt.agentPath);
     attempt.sessionId ??= sessionKeyFromTranscript(attempt.effectiveRole.engine, attempt.agentPath)?.sessionId ?? null;
   }
+}
+
+function rebindPipelineAttemptPaths(pipeline: Pipeline, ports: PipelinePorts): boolean {
+  let changed = false;
+  for (const run of pipeline.runs) {
+    for (const attempt of run.attempts) {
+      if (!attempt.conversationId) continue;
+      const currentPath = ports.pathForConversation(attempt.conversationId);
+      if (!currentPath || currentPath === attempt.agentPath) continue;
+      attempt.agentPath = currentPath;
+      changed = true;
+    }
+  }
+  return changed;
 }
 
 async function tickRunStage(
@@ -398,6 +417,16 @@ async function tickRunStage(
         prompt,
         parentPath: latestCompletedAgentPath(pipeline, stage.id),
         clientAttemptId: clientAttemptId(pipeline, stage, attempt),
+        membership: {
+          kind: "pipeline",
+          containerId: pipeline.id,
+          role: attempt.effectiveRole.roleId ?? "agent",
+          slot: `${stage.id}:${attempt.n}`,
+          stageId: stage.id,
+          stageOrder: pipeline.stages.indexOf(stage),
+          round: null,
+          parentConversationId: null,
+        },
       }, (reservation) => {
         attempt.launchId = reservation.launchId;
         attempt.conversationId = reservation.conversationId;
@@ -658,9 +687,14 @@ export async function tickPipelines(entries: FileEntry[], ports: PipelinePorts =
     return await withPipelineMutation(async (pipelines, persist) => {
       let changed = false;
       for (const pipeline of pipelines) {
-        if (TERMINAL_STATES.has(pipeline.state) || pipeline.state === "paused" || pipeline.state === "needs_decision") continue;
-        if (await tickPipeline(pipeline, entries, ports, persist)) changed = true;
-        if (changed) persist();
+        let pipelineChanged = rebindPipelineAttemptPaths(pipeline, ports);
+        if (!TERMINAL_STATES.has(pipeline.state) && pipeline.state !== "paused" && pipeline.state !== "needs_decision") {
+          pipelineChanged = await tickPipeline(pipeline, entries, ports, persist) || pipelineChanged;
+        }
+        if (pipelineChanged) {
+          changed = true;
+          persist();
+        }
       }
       if (changed) persist();
       return { pipelines, changed };
@@ -1052,12 +1086,12 @@ export async function patchPipeline(
       }
     } else if (req.action === "delete") {
       if (pipeline.state !== "draft") return { error: "only draft pipelines can be deleted", status: 409 };
-      pipelines.splice(pipelines.indexOf(pipeline), 1);
+      pipeline.hiddenAt = ports.now();
       persist();
       return { pipeline };
     } else if (req.action === "close") {
       if (pipeline.state === "draft") {
-        pipelines.splice(pipelines.indexOf(pipeline), 1);
+        pipeline.hiddenAt = ports.now();
         persist();
         return { pipeline };
       }
@@ -1067,6 +1101,7 @@ export async function patchPipeline(
       pipeline.pausedState = null;
       pipeline.stateDetail = null;
       pipeline.closedAt = ports.now();
+      pipeline.hiddenAt = pipeline.closedAt;
     } else {
       return { error: "unknown pipeline action", status: 400 };
     }

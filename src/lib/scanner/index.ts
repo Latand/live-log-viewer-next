@@ -99,22 +99,66 @@ export function pinnedPathsFor(value: string | readonly string[] | undefined): R
     const snapshot = registry.snapshot();
     const paths = new Set<string>();
     const latestByKnownPath = new Map<string, string>();
+    const conversationIdByKnownPath = new Map<string, `conversation_${string}`>();
     for (const conversation of Object.values(snapshot.conversations)) {
       const latest = conversation.generations.at(-1)?.path;
       if (!latest) continue;
-      for (const generation of conversation.generations) latestByKnownPath.set(generation.path, latest);
-      for (const pathname of conversation.continuityPaths) latestByKnownPath.set(pathname, latest);
+      for (const generation of conversation.generations) {
+        latestByKnownPath.set(generation.path, latest);
+        conversationIdByKnownPath.set(generation.path, conversation.id);
+      }
+      for (const pathname of conversation.continuityPaths) {
+        latestByKnownPath.set(pathname, latest);
+        conversationIdByKnownPath.set(pathname, conversation.id);
+      }
     }
+    const children = new Map<string, `conversation_${string}`[]>();
+    for (const edge of Object.values(snapshot.lineageEdges)) {
+      const parent = registry.canonicalConversationId(edge.parentConversationId);
+      const child = registry.canonicalConversationId(edge.childConversationId);
+      const rows = children.get(parent) ?? [];
+      if (!rows.includes(child)) rows.push(child);
+      children.set(parent, rows);
+    }
+    const membersByContainer = new Map<string, `conversation_${string}`[]>();
+    for (const memberships of Object.values(snapshot.memberships)) {
+      for (const membership of memberships) {
+        const key = `${membership.kind}:${membership.containerId}`;
+        const rows = membersByContainer.get(key) ?? [];
+        const member = registry.canonicalConversationId(membership.conversationId);
+        if (!rows.includes(member)) rows.push(member);
+        membersByContainer.set(key, rows);
+      }
+    }
+    const addFamily = (seed: `conversation_${string}`) => {
+      const queue = [registry.canonicalConversationId(seed)];
+      const seen = new Set<string>();
+      while (queue.length) {
+        const conversationId = queue.shift()!;
+        if (seen.has(conversationId)) continue;
+        seen.add(conversationId);
+        const conversation = snapshot.conversations[conversationId];
+        const latest = conversation?.generations.at(-1)?.path;
+        if (latest) paths.add(latest);
+        const parent = snapshot.lineageEdges[conversationId]?.parentConversationId;
+        if (parent) queue.push(registry.canonicalConversationId(parent));
+        for (const child of children.get(conversationId) ?? []) queue.push(child);
+        for (const membership of snapshot.memberships[conversationId] ?? []) {
+          for (const member of membersByContainer.get(`${membership.kind}:${membership.containerId}`) ?? []) queue.push(member);
+        }
+      }
+    };
     for (const pin of values) {
       if (pin.startsWith("conversation_")) {
         const canonical = registry.canonicalConversationId(pin as `conversation_${string}`) ?? pin;
-        const latest = snapshot.conversations[canonical]?.generations.at(-1)?.path;
-        if (latest) paths.add(latest);
+        if (snapshot.conversations[canonical]) addFamily(canonical);
         continue;
       }
       paths.add(pin);
       const latest = latestByKnownPath.get(pin);
       if (latest) paths.add(latest);
+      const owner = conversationIdByKnownPath.get(pin);
+      if (owner) addFamily(owner);
     }
     return paths;
   } catch (error) {

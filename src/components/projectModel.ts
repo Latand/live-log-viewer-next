@@ -166,7 +166,7 @@ export function buildProjectSummaries(
     summary.smt = Math.max(summary.smt, (Date.parse(wf.createdAt) || 0) / 1000);
   }
   for (const pipeline of pipelines) {
-    if (pipeline.state === "closed" || !pipeline.project) continue;
+    if ((pipeline.state === "closed" && !pipeline.restored) || !pipeline.project) continue;
     const summary = summaryFor(pipeline.project);
     summary.catalogOnly = false;
     if (pipeline.state === "provisioning" || pipeline.state === "running") summary.liveCount += 1;
