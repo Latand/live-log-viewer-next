@@ -357,6 +357,19 @@ export class RuntimeJournal {
         && status !== "delivering" && status !== "queued";
       if (!retrying && !beginning && !completing) throw new Error("runtime operation transition is invalid");
       const command = JSON.parse(row.request_json) as RuntimeOperationCommand;
+      if (beginning && (command.kind === "send" || command.kind === "steer") && details.turnId !== undefined) {
+        const effect = this.db.query<{ payload_json: string }, [string]>("SELECT payload_json FROM outbox WHERE id = ?")
+          .get(`effect:${operationId}`);
+        if (!effect) throw new Error("runtime operation effect is missing");
+        const payload = JSON.parse(effect.payload_json) as Record<string, unknown>;
+        if (payload.turnId !== undefined && payload.turnId !== details.turnId) {
+          throw new Error("runtime operation turn fence conflicts with its durable effect");
+        }
+        if (payload.turnId === undefined) {
+          this.db.query("UPDATE outbox SET payload_json = ? WHERE id = ?")
+            .run(stableJson({ ...payload, turnId: details.turnId }), `effect:${operationId}`);
+        }
+      }
       const next: RuntimeOperationReceipt = {
         ...previous,
         ...details,
@@ -403,7 +416,7 @@ export class RuntimeJournal {
       const next: RuntimeOperationReceipt = {
         ...previous,
         status: "queued",
-        turnId: command.kind === "steer" ? previous.turnId ?? null : null,
+        turnId: previous.turnId ?? null,
         queuePosition: this.queuedSendCount(command.conversationId) + 1,
         reason: null,
         at: new Date(this.now()).toISOString(),
@@ -428,7 +441,16 @@ export class RuntimeJournal {
           payload_json = excluded.payload_json,
           event_seq = excluded.event_seq,
           state = 'pending'
-      `).run(`effect:${operationId}`, `runtime.${command.kind}`, stableJson({ ...command, operationId }), event.seq);
+      `).run(
+        `effect:${operationId}`,
+        `runtime.${command.kind}`,
+        stableJson({
+          ...command,
+          operationId,
+          ...(typeof previous.turnId === "string" ? { turnId: previous.turnId } : {}),
+        }),
+        event.seq,
+      );
       this.db.exec("COMMIT");
       this.compactIfNeeded();
       this.notifyWaiters();

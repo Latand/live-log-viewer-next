@@ -62,6 +62,69 @@ test("structured message routing is inert while its gate is disabled", async () 
   expect(called).toBe(false);
 });
 
+test("structured message routing fails closed when runtime ownership is unavailable", async () => {
+  const result = await enqueueStructuredMessage(
+    { path: artifactPath, text: "hello", hasImages: false },
+    { enabled: () => true, client: () => null },
+  );
+
+  expect(result).toEqual({
+    ok: false,
+    structured: true,
+    outcome: "failed",
+    error: "structured host ownership is unavailable; retry after runtime synchronization",
+    status: 503,
+  });
+});
+
+test("structured message routing fails closed when the snapshot has no owner", async () => {
+  const client = {
+    snapshot: async () => ({ ...snapshot(), sessions: [] }),
+  } as unknown as RuntimeHostClient;
+
+  const result = await enqueueStructuredMessage(
+    { path: artifactPath, text: "hello", hasImages: false },
+    { enabled: () => true, client: () => client },
+  );
+
+  expect(result).toEqual({
+    ok: false,
+    structured: true,
+    outcome: "failed",
+    error: "structured host ownership is unavailable; retry after runtime synchronization",
+    status: 503,
+  });
+});
+
+test("structured message routing only falls through for an explicit legacy owner", async () => {
+  const legacySnapshot = snapshot();
+  legacySnapshot.sessions[0] = { ...legacySnapshot.sessions[0]!, hostKind: "tmux-legacy" };
+  const client = {
+    snapshot: async () => legacySnapshot,
+    command: async () => { throw new Error("legacy delivery reached the structured host"); },
+  } as unknown as RuntimeHostClient;
+
+  const result = await enqueueStructuredMessage(
+    { path: artifactPath, text: "hello", hasImages: false },
+    { enabled: () => true, client: () => client },
+  );
+
+  expect(result).toBeNull();
+});
+
+test("structured message routing fails closed for an unhosted owner", async () => {
+  const unhostedSnapshot = snapshot();
+  unhostedSnapshot.sessions[0] = { ...unhostedSnapshot.sessions[0]!, hostKind: "unhosted" };
+  const client = { snapshot: async () => unhostedSnapshot } as unknown as RuntimeHostClient;
+
+  const result = await enqueueStructuredMessage(
+    { path: artifactPath, text: "hello", hasImages: false },
+    { enabled: () => true, client: () => client },
+  );
+
+  expect(result).toMatchObject({ ok: false, structured: true, status: 503 });
+});
+
 test("structured message routing returns the durable queued receipt immediately", async () => {
   let command: unknown;
   let kicked = 0;

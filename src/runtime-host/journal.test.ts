@@ -332,6 +332,53 @@ test("filtered effect batches skip a full page of unrelated pending work", () =>
   journal.close();
 });
 
+test("a delivering transition persists its derived turn fence in the outbox", () => {
+  const dir = sandbox("structured-delivery-fence");
+  const journal = new RuntimeJournal(path.join(dir, "events.sqlite"), { structuredHosts: true });
+  journal.append({
+    scope: runtimeScope("session", "conv-fence"),
+    kind: "session-status",
+    payload: {
+      conversationId: "conv-fence",
+      sessionKey: { engine: "codex", sessionId: "thread-fence" },
+      hostKind: "codex-app-server",
+      host: "hosted",
+      turn: "running",
+      activeTurnId: "turn-old",
+      provenance: "structured",
+      capabilities: { steer: true, structuredAttention: true },
+    },
+  });
+  journal.executeOperation({
+    kind: "send",
+    operationId: "op-fenced-send",
+    idempotencyKey: "key-fenced-send",
+    conversationId: "conv-fence",
+    text: "amend",
+    policy: "steer-if-active",
+  });
+
+  journal.transitionOperation("op-fenced-send", "delivering", { turnId: "turn-old" });
+
+  expect(journal.effectBatch()).toEqual([
+    expect.objectContaining({
+      id: "effect:op-fenced-send",
+      payload: expect.objectContaining({ turnId: "turn-old" }),
+    }),
+  ]);
+
+  journal.transitionOperation("op-fenced-send", "failed", { reason: "engine write failed" });
+  journal.retryOperation("op-fenced-send");
+
+  expect(journal.effectBatch()).toEqual([
+    expect.objectContaining({
+      id: "effect:op-fenced-send",
+      payload: expect.objectContaining({ turnId: "turn-old" }),
+    }),
+  ]);
+  journal.close();
+});
+
 test("answer and interrupt operations update projected attention and turn axes", () => {
   const dir = sandbox("answer-interrupt");
   const filename = path.join(dir, "events.sqlite");

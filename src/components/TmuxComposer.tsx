@@ -310,6 +310,13 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
         receipt?: RuntimeReceipt;
       };
       if (!res.ok || !json.ok) {
+        if (json.structured && json.receipt) {
+          setImmediateRuntimeReceipts((current) => [
+            json.receipt!,
+            ...current.filter((receipt) => receipt.operationId !== json.receipt!.operationId),
+          ].slice(0, 8));
+          idempotencyKey.current = mintIdempotencyKey();
+        }
         // A hard failure keeps the draft text (never cleared) so the message is
         // not lost; the error is announced by the composer's live status region.
         setStatus({ kind: "err", text: json.error ?? t("common.failedSend") });
@@ -390,6 +397,7 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
 
   const editRuntimeReceipt = (receipt: RuntimeReceipt) => {
     if (!receipt.text) return;
+    idempotencyKey.current = mintIdempotencyKey();
     setText(receipt.text);
     setStatus(null);
     requestAnimationFrame(() => {

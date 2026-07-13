@@ -299,6 +299,56 @@ test("a stale steer never retries as a fresh turn after the host becomes idle", 
   ]);
 });
 
+test("an ambiguous steered send keeps its original turn fence after host recovery", async () => {
+  const expectedTurns: Array<string | null | undefined> = [];
+  const transitions: Array<[string, string, string | null | undefined]> = [];
+  const effect = {
+    id: "effect:op-ambiguous-steer",
+    kind: "runtime.send",
+    eventSeq: 32,
+    payload: {
+      operationId: "op-ambiguous-steer",
+      conversationId: "conversation-one",
+      text: "amend",
+      policy: "steer-if-active",
+    } as Record<string, unknown>,
+  };
+  let recovered = false;
+  let pending = true;
+  const recoveredHost = host(async (entry) => {
+    expectedTurns.push(entry.expectedTurnId);
+    if (!recovered) throw new Error("engine child exited");
+    return entry.expectedTurnId === "turn-old"
+      ? { outcome: "rejected", reason: "stale-turn" }
+      : { outcome: "turn-started", turnId: "fresh-turn" };
+  });
+  recoveredHost.health = async () => ({
+    ...idleState(),
+    status: recovered ? "idle" : expectedTurns.length > 0 ? "dead" : "active",
+    activeTurnRef: recovered ? null : "turn-old",
+  });
+  const queue = new StructuredDeliveryQueue({
+    effects: async () => pending ? [effect] : [],
+    transition: async (operationId, status, details) => {
+      transitions.push([operationId, status, details?.turnId]);
+      if (status === "delivering" && details?.turnId !== undefined) effect.payload.turnId = details.turnId;
+      if (status === "failed") pending = false;
+    },
+  }, () => recoveredHost);
+
+  await queue.drain();
+  recovered = true;
+  await queue.drain();
+
+  expect(expectedTurns).toEqual(["turn-old", "turn-old"]);
+  expect(transitions.map(([operationId, status]) => [operationId, status])).toEqual([
+    ["op-ambiguous-steer", "delivering"],
+    ["op-ambiguous-steer", "queued"],
+    ["op-ambiguous-steer", "delivering"],
+    ["op-ambiguous-steer", "failed"],
+  ]);
+});
+
 test("overlapping queue kicks share one drain", async () => {
   let release!: () => void;
   const gate = new Promise<void>((resolve) => { release = resolve; });

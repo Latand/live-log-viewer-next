@@ -26,20 +26,34 @@ function structuredHostsEnabled(): boolean {
   return process.env.LLV_STRUCTURED_HOSTS === "1";
 }
 
+function ownershipUnavailable(): StructuredMessageResult {
+  return {
+    ok: false,
+    structured: true,
+    outcome: "failed",
+    error: "structured host ownership is unavailable; retry after runtime synchronization",
+    status: 503,
+  };
+}
+
 export async function enqueueStructuredMessage(
   request: StructuredMessageRequest,
   dependencies: StructuredMessageDependencies = {},
 ): Promise<StructuredMessageResult | null> {
   if (!(dependencies.enabled ?? structuredHostsEnabled)()) return null;
   const client = (dependencies.client ?? runtimeHostClient)();
-  if (!client) return null;
+  if (!client) return ownershipUnavailable();
   try {
     const snapshot = await client.snapshot();
     const session = (request.conversationId
       ? snapshot.sessions.find((candidate) => candidate.conversationId === request.conversationId)
       : undefined)
       ?? snapshot.sessions.find((candidate) => candidate.artifactPath === request.path);
-    if (!session || (session.hostKind !== "codex-app-server" && session.hostKind !== "claude-broker")) return null;
+    if (!session) return ownershipUnavailable();
+    if (session.hostKind === "tmux-legacy") return null;
+    if (session.hostKind !== "codex-app-server" && session.hostKind !== "claude-broker") {
+      return ownershipUnavailable();
+    }
     if (request.hasImages) {
       return { ok: false, structured: true, outcome: "failed", error: "structured host image delivery is unavailable", status: 409 };
     }
