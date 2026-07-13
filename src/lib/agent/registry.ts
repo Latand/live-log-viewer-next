@@ -282,7 +282,7 @@ const REGISTRY_LOCK_PUBLICATION_GRACE_MS = 1_000;
 interface RegistryLockClaim {
   lock: string;
   token: string;
-  directory: { dev: number; ino: number };
+  identity: { dev: number; ino: number };
 }
 
 interface RegistryLockTiming {
@@ -1150,7 +1150,7 @@ export class AgentRegistry {
     }
   }
 
-  private sameDirectory(lock: string, expected: RegistryLockClaim["directory"]): boolean {
+  private sameLock(lock: string, expected: RegistryLockClaim["identity"]): boolean {
     try {
       const current = fs.statSync(lock);
       return current.dev === expected.dev && current.ino === expected.ino;
@@ -1160,9 +1160,13 @@ export class AgentRegistry {
     }
   }
 
+  private lockOwnerFile(lock: string): string {
+    return fs.statSync(lock).isDirectory() ? path.join(lock, "owner.json") : lock;
+  }
+
   private lockToken(lock: string): string | null {
     try {
-      const owner = JSON.parse(fs.readFileSync(path.join(lock, "owner.json"), "utf8")) as { token?: unknown };
+      const owner = JSON.parse(fs.readFileSync(this.lockOwnerFile(lock), "utf8")) as { token?: unknown };
       return typeof owner.token === "string" ? owner.token : null;
     } catch {
       return null;
@@ -1197,13 +1201,48 @@ export class AgentRegistry {
     }
   }
 
+  private resolveInterruptedRelease(lock: string): void {
+    const releasing = `${lock}.releasing`;
+    if (!fs.existsSync(releasing)) return;
+    let stat: fs.Stats;
+    let owner: ProcessIdentity | null = null;
+    try {
+      stat = fs.statSync(releasing);
+      owner = JSON.parse(fs.readFileSync(this.lockOwnerFile(releasing), "utf8")) as ProcessIdentity;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      return;
+    }
+    if (Number.isInteger(owner.pid) && owner.pid > 0 && this.ownerAlive(owner)) return;
+    if ((!Number.isInteger(owner.pid) || owner.pid <= 0)
+      && this.lockTiming.now() - stat.mtimeMs < REGISTRY_LOCK_PUBLICATION_GRACE_MS) return;
+    fs.rmSync(releasing, { recursive: true, force: true });
+  }
+
   private retireObservedLock(
     lock: string,
-    observed: RegistryLockClaim["directory"],
+    observed: RegistryLockClaim["identity"] & { isDirectory: boolean },
     token: string | null,
     fingerprint: string,
   ): void {
     const recovery = `${lock}.recovering`;
+    if (!observed.isDirectory) {
+      try {
+        fs.linkSync(lock, recovery);
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code === "ENOENT" || code === "EEXIST") return;
+        throw error;
+      }
+      if (!this.sameLock(recovery, observed) || this.lockToken(recovery) !== token
+        || !this.sameLock(lock, observed) || this.lockToken(lock) !== token) {
+        fs.rmSync(recovery, { force: true });
+        return;
+      }
+      fs.rmSync(lock, { force: true });
+      this.finishRetirement(recovery, `${lock}.retired-${fingerprint}`);
+      return;
+    }
     try {
       fs.renameSync(lock, recovery);
     } catch (error) {
@@ -1211,7 +1250,7 @@ export class AgentRegistry {
       if (code === "ENOENT" || code === "EEXIST" || code === "ENOTEMPTY") return;
       throw error;
     }
-    if (!this.sameDirectory(recovery, observed) || this.lockToken(recovery) !== token) {
+    if (!this.sameLock(recovery, observed) || this.lockToken(recovery) !== token) {
       this.restoreRecovery(lock, recovery);
       return;
     }
@@ -1231,7 +1270,7 @@ export class AgentRegistry {
         throw error;
       }
       try {
-        publishedOwner = JSON.parse(fs.readFileSync(path.join(lock, "owner.json"), "utf8")) as ProcessIdentity & { token?: unknown };
+        publishedOwner = JSON.parse(fs.readFileSync(this.lockOwnerFile(lock), "utf8")) as ProcessIdentity & { token?: unknown };
       } catch {
         if (this.lockTiming.now() - publishedStat.mtimeMs < REGISTRY_LOCK_PUBLICATION_GRACE_MS) return;
       }
@@ -1248,7 +1287,7 @@ export class AgentRegistry {
     let owner: (ProcessIdentity & { token?: unknown }) | null = null;
     try {
       stat = fs.statSync(recovery);
-      owner = JSON.parse(fs.readFileSync(path.join(recovery, "owner.json"), "utf8")) as ProcessIdentity & { token?: unknown };
+      owner = JSON.parse(fs.readFileSync(this.lockOwnerFile(recovery), "utf8")) as ProcessIdentity & { token?: unknown };
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
       this.finishRetirement(recovery, `${lock}.retired-interrupted-invalid`);
@@ -1275,9 +1314,9 @@ export class AgentRegistry {
     }
     let previous: (ProcessIdentity & { token?: unknown }) | null = null;
     try {
-      previous = JSON.parse(fs.readFileSync(path.join(lock, "owner.json"), "utf8")) as ProcessIdentity & { token?: unknown };
+      previous = JSON.parse(fs.readFileSync(this.lockOwnerFile(lock), "utf8")) as ProcessIdentity & { token?: unknown };
     } catch {
-      // Current publishers expose a complete directory in one rename.
+      // Current file claims publish complete; legacy directories may still await owner.json.
     }
     if (previous && Number.isInteger(previous.pid) && previous.pid > 0) {
       if (!this.ownerAlive(previous)) {
@@ -1285,60 +1324,82 @@ export class AgentRegistry {
           && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(previous.token)
           ? previous.token
           : `legacy-${stat.dev}-${stat.ino}-${stat.ctimeMs}`;
-        this.retireObservedLock(lock, { dev: stat.dev, ino: stat.ino }, typeof previous.token === "string" ? previous.token : null, fingerprint);
+        this.retireObservedLock(lock, { dev: stat.dev, ino: stat.ino, isDirectory: stat.isDirectory() }, typeof previous.token === "string" ? previous.token : null, fingerprint);
       }
       return;
     }
     if (this.lockTiming.now() - stat.mtimeMs >= REGISTRY_LOCK_PUBLICATION_GRACE_MS) {
-      this.retireObservedLock(lock, { dev: stat.dev, ino: stat.ino }, null, `incomplete-${stat.dev}-${stat.ino}-${stat.ctimeMs}`);
+      this.retireObservedLock(lock, { dev: stat.dev, ino: stat.ino, isDirectory: stat.isDirectory() }, null, `incomplete-${stat.dev}-${stat.ino}-${stat.ctimeMs}`);
     }
   }
 
   private tryAcquireLock(lock: string, owner: ProcessIdentity): RegistryLockClaim | null {
+    this.resolveInterruptedRelease(lock);
+    if (fs.existsSync(`${lock}.releasing`)) return null;
     this.resolveInterruptedRecovery(lock);
     if (fs.existsSync(`${lock}.recovering`)) return null;
     const token = crypto.randomUUID();
-    const staging = `${lock}.pending-${token}`;
+    const staging = `${lock}.owner.pending-${token}`;
     let fd: number | null = null;
     try {
-      fs.mkdirSync(staging, 0o700);
-      fd = fs.openSync(path.join(staging, "owner.json"), "wx", 0o600);
+      fd = fs.openSync(staging, "wx", 0o600);
       fs.writeFileSync(fd, JSON.stringify({ ...owner, token }), "utf8");
       fs.fsyncSync(fd);
       fs.closeSync(fd);
       fd = null;
-      const stagingDirectory = fs.openSync(staging, "r");
-      try { fs.fsyncSync(stagingDirectory); } finally { fs.closeSync(stagingDirectory); }
       const stat = fs.statSync(staging);
       try {
-        fs.renameSync(staging, lock);
+        fs.linkSync(staging, lock);
       } catch (error) {
         const code = (error as NodeJS.ErrnoException).code;
-        if (code !== "EEXIST" && code !== "ENOTEMPTY") throw error;
-        fs.rmSync(staging, { recursive: true, force: true });
+        if (code !== "EEXIST") throw error;
+        fs.rmSync(staging, { force: true });
         this.recoverContendedLock(lock);
         return null;
       }
-      const claim = { lock, token, directory: { dev: stat.dev, ino: stat.ino } };
-      if (fs.existsSync(`${lock}.recovering`)) {
-        if (this.sameDirectory(lock, claim.directory) && this.lockToken(lock) === token) {
-          fs.rmSync(lock, { recursive: true, force: true });
+      fs.rmSync(staging, { force: true });
+      const claim = { lock, token, identity: { dev: stat.dev, ino: stat.ino } };
+      if (fs.existsSync(`${lock}.recovering`) || fs.existsSync(`${lock}.releasing`)) {
+        if (this.sameLock(lock, claim.identity) && this.lockToken(lock) === token) {
+          fs.rmSync(lock, { force: true });
         }
         return null;
       }
       return claim;
     } catch (error) {
       if (fd !== null) fs.closeSync(fd);
-      fs.rmSync(staging, { recursive: true, force: true });
+      fs.rmSync(staging, { force: true });
       throw error;
     }
   }
 
+  private retireClaim(candidate: string, claim: RegistryLockClaim): boolean {
+    const releasing = `${claim.lock}.releasing`;
+    this.resolveInterruptedRelease(claim.lock);
+    if (fs.existsSync(releasing)) return false;
+    try {
+      fs.linkSync(candidate, releasing);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "ENOENT") return false;
+      if (code === "EEXIST") return false;
+      throw error;
+    }
+    if (!this.sameLock(releasing, claim.identity) || this.lockToken(releasing) !== claim.token) {
+      fs.rmSync(releasing, { force: true });
+      return false;
+    }
+    if (this.sameLock(candidate, claim.identity) && this.lockToken(candidate) === claim.token) {
+      fs.rmSync(candidate, { force: true });
+    }
+    fs.rmSync(releasing, { force: true });
+    return true;
+  }
+
   private releaseLock(claim: RegistryLockClaim): void {
     for (const candidate of [claim.lock, `${claim.lock}.recovering`, claim.lock]) {
-      if (!this.sameDirectory(candidate, claim.directory) || this.lockToken(candidate) !== claim.token) continue;
-      fs.rmSync(candidate, { recursive: true, force: true });
-      return;
+      if (!this.sameLock(candidate, claim.identity) || this.lockToken(candidate) !== claim.token) continue;
+      if (this.retireClaim(candidate, claim)) return;
     }
   }
 

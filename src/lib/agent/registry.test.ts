@@ -284,6 +284,43 @@ describe("agent registry", () => {
     expect(observedReplacement).toBe(true);
   });
 
+  test("publication preserves an empty lock directory owned by a delayed legacy writer", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-legacy-publisher-"));
+    const filename = path.join(dir, "agent-registry.json");
+    const lock = `${filename}.locks/${encodeURIComponent("codex:legacy-publisher")}`;
+    let observedLegacyLock = false;
+    const store = new AgentRegistry(filename, () => true, {
+      now: () => Date.now(),
+      wait: async () => {
+        expect(fs.statSync(lock).isDirectory()).toBe(true);
+        expect(fs.readdirSync(lock)).toEqual([]);
+        observedLegacyLock = true;
+        fs.rmSync(lock, { recursive: true, force: true });
+      },
+    });
+    const originalOpen = fs.openSync;
+    let injected = false;
+    fs.openSync = ((target: fs.PathLike, flags: fs.OpenMode, mode?: fs.Mode) => {
+      if (!injected && String(target).startsWith(lock) && String(target).includes("owner")) {
+        injected = true;
+        fs.mkdirSync(lock);
+      }
+      return originalOpen(target, flags, mode);
+    }) as typeof fs.openSync;
+
+    try {
+      await store.withOperationLock(
+        { engine: "codex", sessionId: "legacy-publisher" },
+        { pid: process.pid, startIdentity: null },
+        async () => undefined,
+      );
+    } finally {
+      fs.openSync = originalOpen;
+    }
+
+    expect(observedLegacyLock).toBe(true);
+  });
+
   test("a delayed stale contender preserves the replacement lock", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-stale-race-"));
     const filename = path.join(dir, "agent-registry.json");
