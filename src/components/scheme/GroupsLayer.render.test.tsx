@@ -125,3 +125,15 @@ test("group carries the plan even when the current stage node is hidden/collapse
   const dup = renderToStaticMarkup(<GroupsLayer groups={[group]} interactive pipelineControls={mounted} />);
   expect(dup).not.toContain("data-scheme-group-strip");
 });
+
+test("a draft pipeline has a scheme-only draft treatment and its complete stage plan", () => {
+  const draft = { ...planPipeline, state: "draft" } as Pipeline;
+  const group: SchemeGroup = { ...pipelineGroup, pipeline: draft };
+  const html = renderToStaticMarkup(<GroupsLayer groups={[group]} interactive pipelineControls={controls} />);
+
+  expect(html).toContain('data-pipeline-draft="true"');
+  expect(html).toContain("DRAFT");
+  expect(html).toContain("build");
+  expect(html).toContain("review");
+  expect(html).toContain("Start pipeline");
+});

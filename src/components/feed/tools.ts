@@ -1,5 +1,6 @@
 import { getLocale, translate } from "@/lib/i18n";
 import { redactSecrets } from "@/lib/review";
+import { harnessKind } from "@/lib/wakeup";
 
 import type { GlyphName } from "../icons";
 import { formatStdinKeys } from "./ansi";
@@ -206,6 +207,32 @@ export function summarizeTool(
     const session = idOf(args.cell_id ?? args.session_id);
     const summary = session ? `${tr("tools.wait")} · ${session}` : tr("tools.wait");
     return { family: "shell", icon: FAMILY_ICON.shell, summary: summaryOf(summary), chips: session ? [chip(session, tr("tools.session"))] : [] };
+  }
+
+  /* Harness self-scheduling tools (issue #161): render a human summary so their
+     arguments read as prose and never as a raw JSON blob. ScheduleWakeup gets a
+     dedicated countdown card upstream (see WakeupCard); this summary is its
+     collapsed/fallback line and the whole treatment for CronCreate/Monitor. */
+  const harness = harnessKind(tool);
+  if (harness) {
+    if (harness === "wakeup") {
+      const reason = str(args.reason);
+      const summary = reason ? `${tr("tools.wakeup")} · ${reason}` : tr("tools.wakeup");
+      return { family: "plan", icon: "clock", summary: summaryOf(summary), chips: [] };
+    }
+    if (harness === "cron") {
+      const schedule = str(args.schedule ?? args.cron ?? args.interval ?? args.when);
+      const label = str(args.name ?? args.prompt ?? args.task ?? args.description);
+      const detail = [schedule, label].filter(Boolean).join(" · ");
+      const summary = detail ? `${tr("tools.cron")} · ${detail}` : tr("tools.cron");
+      const chips: ArgChip[] = [];
+      if (schedule) chips.push(chip(schedule, tr("tools.schedule")));
+      return { family: "plan", icon: "clock", summary: summaryOf(summary), chips };
+    }
+    // monitor
+    const target = str(args.reason ?? args.until ?? args.description ?? args.target) || firstStringArg(args);
+    const summary = target ? `${tr("tools.monitor")} · ${target}` : tr("tools.monitor");
+    return { family: "plan", icon: "clock", summary: summaryOf(summary), chips: [] };
   }
 
   switch (family) {

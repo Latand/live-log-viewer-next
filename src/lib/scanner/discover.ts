@@ -3,10 +3,14 @@ import { access, readdir, stat } from "node:fs/promises";
 import path from "node:path";
 
 import type { FileEntry, ProjectCatalogEntry, RootKey } from "../types";
+import { sessionProjectProjection } from "../session/titleProjection";
 import { codexThreadIdFromPath, nativeCodexParentThreadId } from "./codexNative";
 import { describe } from "./describe";
+import { conversationCatalogSnapshot } from "./conversationCatalog";
 import { projectCatalogSnapshotFromRaw } from "./projectCatalog";
-import { EXTS, FILE_CAP, ROOTS, scanRootEntries } from "./roots";
+import { projectResolutionStateKey } from "./projectState";
+import { EXTS, ROOTS, scanRootEntries } from "./roots";
+import { selectSchemeWindow } from "./schemeWindow";
 
 export function taskParts(root: string, pathname: string): [string, string, string] | null {
   const parts = path.relative(root, pathname).split(path.sep);
@@ -96,13 +100,60 @@ function rootEntries(roots: Roots | RootEntries): RootEntries {
 
 async function discoverRaw(roots: Roots | RootEntries, limit: Limit): Promise<RawEntry[]> {
   const staticRoots = Array.isArray(roots) ? ROOTS : roots;
-  return (await Promise.all(rootEntries(roots).map(async ([rootName, root]) => {
+  const raw = (await Promise.all(rootEntries(roots).map(async ([rootName, root]) => {
     if (!(await rootExists(root, limit))) return [];
     return walk(rootName, staticRoots, root, root, limit);
   }))).flat();
+  /* Codex account roots follow the legacy root in registry order. A copied
+     rollout therefore resolves to its managed-account copy before ranking. */
+  const codexRollouts = new Map<string, RawEntry>();
+  for (const entry of raw) {
+    const filename = path.basename(entry.path);
+    if (entry.rootName !== "codex-sessions" || !filename.startsWith("rollout-") || !filename.endsWith(".jsonl")) continue;
+    const current = codexRollouts.get(filename);
+    if (!current || current.root !== entry.root) codexRollouts.set(filename, entry);
+  }
+  return raw.filter((entry) => {
+    const filename = path.basename(entry.path);
+    if (entry.rootName !== "codex-sessions" || !filename.startsWith("rollout-") || !filename.endsWith(".jsonl")) return true;
+    return codexRollouts.get(filename) === entry;
+  });
 }
 
-function entriesFromRaw(raw: RawEntry[], selectedProject?: string, projectByPath?: ReadonlyMap<string, string>, demoted?: ReadonlySet<string>, pin?: ReadonlySet<string>): FileEntry[] {
+function cappedEntries(ranked: RawEntry[], projectByPath: ReadonlyMap<string, string>): RawEntry[] {
+  return selectSchemeWindow(ranked, (entry) => projectByPath.get(entry.path) ?? "other");
+}
+
+function canonicalProjectCatalog(
+  projectByPath: ReadonlyMap<string, string>,
+  excludedSummaryPaths?: ReadonlySet<string>,
+  sourceCatalog: readonly ProjectCatalogEntry[] = [],
+): { projectByPath: Map<string, string>; projectCatalog: ProjectCatalogEntry[] } {
+  const canonicalByPath = new Map(projectByPath);
+  for (const [pathname, project] of sessionProjectProjection(true).projectByPath) {
+    if (canonicalByPath.has(pathname)) canonicalByPath.set(pathname, project);
+  }
+  const groups = new Map<string, ProjectCatalogEntry>();
+  const sourceRoots = new Map(sourceCatalog.map((entry) => [entry.project, entry.projectRoot] as const));
+  for (const entry of conversationCatalogSnapshot()) {
+    if (excludedSummaryPaths?.has(entry.path)) continue;
+    const project = canonicalByPath.get(entry.path) ?? entry.project;
+    const group = groups.get(project) ?? { project, smt: 0, conversations: 0 };
+    group.smt = Math.max(group.smt, entry.mtime);
+    group.conversations += 1;
+    const sourceProject = projectByPath.get(entry.path) ?? entry.project;
+    const projectRoot = sourceRoots.get(sourceProject);
+    if (!group.projectRoot && projectRoot) group.projectRoot = projectRoot;
+    groups.set(project, group);
+  }
+  return {
+    projectByPath: canonicalByPath,
+    projectCatalog: [...groups.values()].sort((a, b) => b.smt - a.smt || a.project.localeCompare(b.project)),
+  };
+}
+
+function entriesFromRaw(raw: RawEntry[], projectByPath?: ReadonlyMap<string, string>, demoted?: ReadonlySet<string>, pin?: ReadonlySet<string>): FileEntry[] {
+  const stateKey = projectResolutionStateKey();
   raw.sort((a, b) => b.st.mtimeMs - a.st.mtimeMs);
   const rawByCodexThread = new Map<string, RawEntry>();
   for (const entry of raw) {
@@ -117,27 +168,15 @@ function entriesFromRaw(raw: RawEntry[], selectedProject?: string, projectByPath
   const ranked = demoted?.size
     ? [...raw.filter((entry) => !demoted.has(entry.path)), ...raw.filter((entry) => demoted.has(entry.path))]
     : raw;
-  const selected = ranked.slice(0, FILE_CAP);
+  const selected = cappedEntries(ranked, projectByPath ?? new Map());
   const selectedPaths = new Set(selected.map((entry) => entry.path));
-  /* Selected-project hydration deliberately ignores demotion: legacy `#f=`
-     deep links resolve an archived predecessor from the hydrated feed to
-     redirect onto its successor, so the selected project must stay complete —
-     demotion only shapes the global recency ranking. */
-  if (selectedProject) {
-    for (const entry of raw) {
-      if (selectedPaths.has(entry.path)) continue;
-      const project = projectByPath?.get(entry.path) ?? (describe(entry.rootName, entry.root, entry.path, entry.st).project || "other");
-      if (project !== selectedProject) continue;
-      selectedPaths.add(entry.path);
-      selected.push(entry);
-    }
-  }
+  const rawByPath = pin?.size ? new Map(raw.map((entry) => [entry.path, entry] as const)) : null;
   /* Deep-link targets ride along even when demotion or the cap excluded
      them: the client needs the requested entry and its current generation in
      one payload to resolve the conversation id and redirect the link. */
   for (const pinnedPath of pin ?? []) {
     if (selectedPaths.has(pinnedPath)) continue;
-    const pinned = raw.find((entry) => entry.path === pinnedPath);
+    const pinned = rawByPath?.get(pinnedPath);
     if (pinned) {
       selectedPaths.add(pinned.path);
       selected.push(pinned);
@@ -154,13 +193,15 @@ function entriesFromRaw(raw: RawEntry[], selectedProject?: string, projectByPath
     }
   }
   return selected.map((entry) => {
-    const meta = describe(entry.rootName, entry.root, entry.path, entry.st);
+    const meta = describe(entry.rootName, entry.root, entry.path, entry.st, stateKey);
     return {
       path: entry.path,
       root: entry.rootName,
       name: path.relative(entry.root, entry.path),
       project: projectByPath?.get(entry.path) ?? meta.project,
       worktree: meta.worktree,
+      cwd: meta.cwd,
+      projectRoot: meta.projectRoot,
       title: meta.title,
       engine: meta.engine,
       kind: meta.kind,
@@ -180,7 +221,7 @@ function entriesFromRaw(raw: RawEntry[], selectedProject?: string, projectByPath
 
 export async function discoverFilesWithProjectCatalog(
   roots: Roots | RootEntries = scanRootEntries(),
-  selectedProject?: string,
+  _selectedProject?: string,
   options: { persist?: boolean; demote?: ReadonlySet<string>; pin?: ReadonlySet<string> } = {},
 ): Promise<{
   files: FileEntry[];
@@ -188,14 +229,29 @@ export async function discoverFilesWithProjectCatalog(
 }> {
   const limit = createLimiter(48);
   const raw = await discoverRaw(roots, limit);
-  const { projectCatalog, projectByPath } = projectCatalogSnapshotFromRaw(raw, options);
-  return { files: entriesFromRaw(raw, selectedProject, projectByPath, options.demote, options.pin), projectCatalog };
+  const snapshot = projectCatalogSnapshotFromRaw(raw, {
+    persist: options.persist,
+    excludedSummaryPaths: options.demote,
+  });
+  const { projectCatalog, projectByPath } = canonicalProjectCatalog(snapshot.projectByPath, options.demote, snapshot.projectCatalog);
+  return { files: entriesFromRaw(raw, projectByPath, options.demote, options.pin), projectCatalog };
 }
 
-export async function discoverFiles(roots: Roots | RootEntries = scanRootEntries(), demote?: ReadonlySet<string>): Promise<FileEntry[]> {
+export async function discoverFiles(
+  roots: Roots | RootEntries = scanRootEntries(),
+  demote?: ReadonlySet<string>,
+  pin?: ReadonlySet<string>,
+): Promise<FileEntry[]> {
   const limit = createLimiter(48);
   const raw = await discoverRaw(roots, limit);
-  // describe() reads file heads, so it runs only on the capped shortlist plus
-  // parent closure; the walk stays a cheap stat pass over every candidate.
-  return entriesFromRaw(raw, undefined, undefined, demote);
+  const snapshot = projectCatalogSnapshotFromRaw(raw, { persist: false });
+  const { projectByPath } = canonicalProjectCatalog(snapshot.projectByPath, undefined, snapshot.projectCatalog);
+  return entriesFromRaw(raw, projectByPath, demote, pin);
+}
+
+/** Cold-start fallback for the list/search route. It builds only lightweight
+ * catalog metadata and leaves the scheme processing pipeline untouched. */
+export async function refreshConversationCatalog(roots: Roots | RootEntries = scanRootEntries()): Promise<void> {
+  const raw = await discoverRaw(roots, createLimiter(48));
+  projectCatalogSnapshotFromRaw(raw, { persist: false });
 }

@@ -105,6 +105,11 @@ interface Props {
       slot near the button's world anchor (bottom-left quadrant), avoiding cards
       and panes via `findFreeSlot`. */
   newTaskNonce?: number;
+  /** The canvas pipeline builder (#136): a draft pipeline whose group panel should
+      open as soon as it renders, so `+ Пайплайн` lands the operator in the builder.
+      `onBuilderOpened` fires once consumed so the caller can clear it. */
+  builderPipelineId?: string | null;
+  onBuilderOpened?: () => void;
 }
 
 function ToolButton({
@@ -167,6 +172,8 @@ export function SchemeBoard({
   placeTaskId,
   onTaskPlaced,
   newTaskNonce,
+  builderPipelineId,
+  onBuilderOpened,
 }: Props) {
   const { t } = useLocale();
   const mapMode = Boolean(onNodePick);
@@ -608,6 +615,27 @@ export function SchemeBoard({
     // eslint-disable-next-line react-hooks/exhaustive-deps -- fires only on a new `+ Task` press
   }, [newTaskNonce]);
 
+  /* The canvas builder (#136): when `+ Пайплайн` drops a fresh draft, reveal its
+     placeholder group so its builder panel opens on screen. GroupsLayer opens the
+     panel only while interactive, and both the hand tool and an active selection
+     session (armed or a non-empty multi-set) suspend interactivity — so end the
+     session, switch to select mode, and glide the camera onto the group. Fires
+     once per id, once the group appears in the layout (the POST→refetch
+     round-trip). */
+  const builderRevealed = useRef<string | null>(null);
+  useEffect(() => {
+    if (!builderPipelineId || mapMode) return;
+    if (builderRevealed.current === builderPipelineId) return;
+    const group = layout.groups.find((candidate) => candidate.id === builderPipelineId && candidate.pipeline);
+    if (!group) return;
+    builderRevealed.current = builderPipelineId;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- one-shot reveal syncing camera + selection to a new draft
+    clearSession();
+    setMode("select");
+    centerOn(group, 0.75);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- fires when the new draft's group first renders
+  }, [builderPipelineId, layout]);
+
   /* Spatial keyboard navigation: live only on the desktop board — a selection
      session, an expanded overlay, or map mode all suspend it. */
   const navEnabled = !mapMode && !session && !overlayOpen;
@@ -848,7 +876,7 @@ export function SchemeBoard({
       >
         {/* Group halos sit behind every edge and card so a running flow/pipeline
             reads as one framed region; the label chip stays live off the map. */}
-        <GroupsLayer groups={layout.groups} interactive={!mapMode && !handLike && !session} pipelineControls={mapMode ? undefined : pipelineControls} />
+        <GroupsLayer groups={layout.groups} interactive={!mapMode && !handLike && !session} pipelineControls={mapMode ? undefined : pipelineControls} autoOpenGroupId={builderPipelineId} onAutoOpen={onBuilderOpened} />
         <EdgesLayer edges={layout.edges} width={layout.width} height={layout.height} />
         <LoopsLayer loops={layout.loops} width={layout.width} height={layout.height} />
         {/* Rails/badges stay passive on the map, but the pipeline hub keeps its

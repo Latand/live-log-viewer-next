@@ -1,10 +1,24 @@
-import { Check, GlyphIcon, X } from "../../icons";
+"use client";
+
+import { useState } from "react";
+
+import { ChevronRight } from "../../icons";
 import { hhmm } from "../../utils";
 import { tr, type CmdGroupItem } from "../parse";
-import { OutputPreview } from "./OutputPreview";
 import { StatusIcon } from "./shared";
+import { ToolLine } from "./ToolCard";
 
+/* A run of ≥2 consecutive tool events folded into one quiet ToolLine header
+   (design doc §3.4): `▸ N дій · Tool ×a · Tool ×b · t0–t1`. Expanded, it lists
+   the individual calls as quiet ToolLines. A group carrying an error opens by
+   default and shows the failing line in danger — an error is never hidden. */
 export function CmdGroupCard({ item }: { item: CmdGroupItem }) {
+  /* Children (and their diff / output / raw-record bodies) mount only after the
+     group is first expanded. A diff-backed child sets open:true, so rendering it
+     inside a still-collapsed group would eagerly build the hidden body and break
+     the §3.4 lazy contract for long edit runs (issue #9 §7/§8). An error group
+     opens by default, so it mounts immediately. */
+  const [mounted, setMounted] = useState(item.hasErr);
   const tools = Object.entries(item.byTool)
     .map(([tool, count]) => `${tool} ×${count}`)
     .join(" · ");
@@ -13,60 +27,42 @@ export function CmdGroupCard({ item }: { item: CmdGroupItem }) {
   const range = t0 && t1 && t0 !== t1 ? `${t0}–${t1}` : t0 || t1;
   return (
     <details
-      className={`my-2.5 ml-9 overflow-hidden rounded-[14px] border shadow-card ${item.hasErr ? "border-err/35 bg-err-soft" : "border-line bg-panel"}`}
+      className="group/grp ml-9"
       open={item.hasErr}
+      onToggle={(e) => {
+        if (e.currentTarget.open) setMounted(true);
+      }}
     >
-      <summary className="flex cursor-pointer list-none items-center gap-2.5 px-3.5 py-2">
-        <span className="flex h-6.5 w-6.5 shrink-0 items-center justify-center rounded-lg bg-chip">
-          <GlyphIcon name="cmd-group" className="h-4 w-4" />
-        </span>
-        <span className="flex min-w-0 flex-1 items-center gap-1 truncate text-[12.5px]">
-          {tr("render.commands", { count: item.calls.length })}
-          {tools ? " · " + tools : ""} ·
-          <span className="inline-flex items-center gap-0.5 text-ok">
-            <Check className="h-3.5 w-3.5" aria-hidden />
-            {item.okCount}
-          </span>
+      <summary
+        className={`flex cursor-pointer list-none items-center gap-2 rounded-control py-0.5 text-ui hover:bg-sunken [@media(pointer:coarse)]:min-h-11 [&::-webkit-details-marker]:hidden ${
+          item.hasErr ? "text-danger" : "text-muted"
+        }`}
+      >
+        <ChevronRight className="h-3.5 w-3.5 shrink-0 transition-transform group-open/grp:rotate-90" aria-hidden />
+        <span className="flex min-w-0 flex-1 items-center gap-1 truncate text-secondary">
+          {tr("render.actions", { count: item.calls.length })}
+          {tools ? " · " + tools : ""}
           {item.errCount ? (
-            <span className="inline-flex items-center gap-0.5 text-err">
-              <X className="h-3.5 w-3.5" aria-hidden />
+            <span className="ml-1 inline-flex items-center gap-0.5 font-semibold text-danger">
+              <StatusIcon status="err" className="h-3 w-3" />
               {item.errCount}
             </span>
           ) : null}
         </span>
-        {range ? <span className="ml-auto shrink-0 text-[11px] text-dim">{range}</span> : null}
+        {range ? <span className="ml-auto shrink-0 text-caption tabular-nums text-muted">{range}</span> : null}
       </summary>
-      <div className="space-y-1 border-t border-line bg-panel-alt px-2 py-1.5">
-        {item.calls.map((event, idx) => {
-          const statusCls = event.status === "ok" ? "text-ok" : event.status === "err" ? "text-err" : "text-dim";
-          return (
-            /* A transcript can carry the same tool id twice (a resume re-emits
-               the tool_use), so the id alone is not a unique key. */
-            <details key={`${item.ids[idx]}:${idx}`} className="overflow-hidden rounded-[10px] border border-line bg-panel" open={event.open}>
-              <summary className="flex h-6 cursor-pointer list-none items-center gap-2 px-2.5 text-[11.5px]">
-                <span className="flex h-4.5 w-4.5 shrink-0 items-center justify-center rounded-md bg-chip">
-                  <GlyphIcon name={event.icon} className="h-3 w-3" />
-                </span>
-                <span className="min-w-0 flex-1 truncate font-mono text-[11px]" title={event.summary}>
-                  {event.summary}
-                </span>
-                <span className={`ml-auto inline-flex shrink-0 items-center gap-1 text-[10.5px] font-semibold ${statusCls}`}>
-                  <StatusIcon status={event.status} className="h-3 w-3" />
-                  {event.statusLabel}
-                </span>
-              </summary>
-              <div className="border-t border-line px-2.5 py-1.5">
-                {event.command ? (
-                  <pre className="max-w-full overflow-x-auto whitespace-pre rounded-[8px] border border-line bg-panel-alt px-2.5 py-1 font-mono text-[11px]">
-                    {"$ " + event.command}
-                  </pre>
-                ) : null}
-                <OutputPreview output={event.outputPreview} truncated={event.outputTruncated} lang={event.lang} />
-              </div>
-            </details>
-          );
-        })}
-      </div>
+      {/* Each grouped call reuses the shared ToolLine, so an expanded call shows
+          the same chips + raw record a standalone line does. The time is dropped
+          here — the range lives in the group header above. */}
+      {mounted ? (
+        <div className="mb-1 mt-1 space-y-0.5">
+          {item.calls.map((event, idx) => (
+            /* A transcript can carry the same tool id twice (a resume re-emits the
+               tool_use), so the id alone is not a unique key. */
+            <ToolLine key={`${item.ids[idx]}:${idx}`} event={event} showTime={false} />
+          ))}
+        </div>
+      ) : null}
     </details>
   );
 }

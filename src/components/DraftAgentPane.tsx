@@ -29,6 +29,7 @@ import {
 } from "./draftSpawn";
 import { ReasoningControls, type SpeedChoice } from "./ReasoningControls";
 import { cleanTitle, engineTintOf } from "./utils";
+import { draftWorkingDirectory } from "./projectModel";
 
 type Engine = "claude" | "codex";
 
@@ -67,12 +68,17 @@ function scaffoldPreview(scaffold: string, params: Record<string, string | numbe
 
 /** Everything a draft keeps in sessionStorage; called when the draft leaves the scheme. */
 export function clearDraftStorage(id: string) {
-  for (const name of ["engine", "model", "cwd", "text", "boot", "src", "parentConversationId", "effort", "speed", "accountId", "role", "roleParams", "confirm"]) sessionStorage.removeItem(field(id, name));
+  for (const name of ["engine", "model", "cwd", "cwdUnverified", "text", "boot", "src", "parentConversationId", "effort", "speed", "accountId", "role", "roleParams", "confirm"]) sessionStorage.removeItem(field(id, name));
 }
 
 /** Source transcript a handoff draft continues; empty for a plain draft. */
 export function draftSrc(id: string): string {
   return readField(id, "src");
+}
+
+/** Persisted editable directory, used to restore a draft before its pane mounts. */
+export function draftCwd(id: string): string {
+  return readField(id, "cwd").trim();
 }
 
 export function draftParentConversationId(id: string): string {
@@ -89,6 +95,39 @@ export function setDraftSrc(id: string, src: string, parentConversationId?: stri
     a brand-new agent» path drops the task text here, launching nothing. */
 export function setDraftText(id: string, text: string) {
   writeField(id, "text", text);
+}
+
+/** Seeds a draft's editable cwd before its first render. */
+export function setDraftCwd(id: string, cwd: string) {
+  writeField(id, "cwd", cwd);
+  writeField(id, "cwdUnverified", "");
+}
+
+/** Fills a missing directory while preserving a restored draft's edited value. */
+export function seedDraftCwd(id: string, cwd: string) {
+  const next = cwd.trim();
+  if (!readField(id, "cwd").trim() && next) writeField(id, "cwd", next);
+  if (next) writeField(id, "cwdUnverified", "");
+}
+
+/** Exposes a missing-source handoff with a safe editable fallback while
+    requiring the user to confirm its directory through an edit before launch. */
+export function requireDraftCwdConfirmation(id: string, cwd: string) {
+  writeField(id, "cwd", cwd.trim());
+  writeField(id, "cwdUnverified", "1");
+}
+
+const DRAFT_CWD_VERIFIED_EVENT = "llv:draft-cwd-verified";
+
+/** Replaces a system-provided fallback after project metadata identifies the
+    canonical root. User edits clear the marker and remain untouched. */
+export function replaceUnverifiedDraftCwd(id: string, cwd: string): boolean {
+  const next = cwd.trim();
+  if (!next || readField(id, "cwdUnverified") !== "1") return false;
+  writeField(id, "cwd", next);
+  writeField(id, "cwdUnverified", "");
+  window.dispatchEvent(new window.CustomEvent(DRAFT_CWD_VERIFIED_EVENT, { detail: { id, cwd: next } }));
+  return true;
 }
 
 /** Reads back the durable spawn attempt persisted across reload. Its presence
@@ -138,12 +177,15 @@ export function DraftAgentPane({
   const [src] = useState(() => readField(draftId, "src"));
   const [parentConversationId] = useState(() => readField(draftId, "parentConversationId"));
   const srcFile = src ? (files.find((entry) => entry.path === src) ?? null) : null;
+  const [initialCwd] = useState(() => readField(draftId, "cwd"));
+  const [cwdNeedsConfirmation, setCwdNeedsConfirmation] = useState(() => readField(draftId, "cwdUnverified") === "1");
+  const awaitingInheritedCwdRef = useRef(Boolean(src && ((!initialCwd && !srcFile?.cwd?.trim()) || readField(draftId, "cwdUnverified") === "1")));
   const [engine, setEngineState] = useState<Engine>(() => {
     const stored = readField(draftId, "engine");
     if (stored === "codex" || stored === "claude") return stored;
     return srcFile?.engine === "codex" ? "codex" : "claude";
   });
-  const [cwd, setCwdState] = useState(() => readField(draftId, "cwd"));
+  const [cwd, setCwdState] = useState(() => initialCwd || draftWorkingDirectory(files, project, src));
   const [model, setModelState] = useState(() => readField(draftId, "model") || defaultModelFor(engine));
   const [effort, setEffortState] = useState(() => readField(draftId, "effort"));
   const [speed, setSpeedState] = useState<SpeedChoice>(() => {
@@ -163,6 +205,18 @@ export function DraftAgentPane({
   /* Records launched from this mount are already in flight. Reloaded records
      are replayed once with their own idempotency key to fetch the same receipt. */
   const replayedAttemptIds = useRef(new Set<string>());
+
+  useEffect(() => {
+    const applyVerifiedCwd = (event: Event) => {
+      const detail = (event as CustomEvent<{ id?: string; cwd?: string }>).detail;
+      if (detail?.id !== draftId || typeof detail.cwd !== "string") return;
+      awaitingInheritedCwdRef.current = false;
+      setCwdState(detail.cwd);
+      setCwdNeedsConfirmation(false);
+    };
+    window.addEventListener(DRAFT_CWD_VERIFIED_EVENT, applyVerifiedCwd);
+    return () => window.removeEventListener(DRAFT_CWD_VERIFIED_EVENT, applyVerifiedCwd);
+  }, [draftId]);
 
   const setModel = (value: string) => {
     setModelState(value);
@@ -185,8 +239,11 @@ export function DraftAgentPane({
     if (effort && !isEngineEffort(value, effort)) setEffort("");
   };
   const setCwd = (value: string) => {
+    awaitingInheritedCwdRef.current = false;
+    setCwdNeedsConfirmation(false);
     setCwdState(value);
     writeField(draftId, "cwd", value);
+    writeField(draftId, "cwdUnverified", "");
   };
   const setRoleParams = (value: Record<string, string | number>) => {
     setRoleParamsState(value);
@@ -260,13 +317,20 @@ export function DraftAgentPane({
   useEffect(() => {
     let cancelled = false;
     fetch("/api/spawn?project=" + encodeURIComponent(project) + (src ? "&src=" + encodeURIComponent(src) : ""))
-      .then((res) => res.json() as Promise<{ dirs?: string[]; cwd?: string | null }>)
+      .then((res) => res.json() as Promise<{ dirs?: string[]; cwd?: string | null; cwdExists?: boolean }>)
       .then((json) => {
         if (cancelled) return;
         if (Array.isArray(json.dirs)) setDirs(json.dirs);
+        const inherited = typeof json.cwd === "string" ? json.cwd.trim() : "";
+        const shouldInherit = Boolean(awaitingInheritedCwdRef.current && inherited);
+        if (shouldInherit) {
+          awaitingInheritedCwdRef.current = false;
+          const needsConfirmation = json.cwdExists === false;
+          setCwdNeedsConfirmation(needsConfirmation);
+          writeField(draftId, "cwdUnverified", needsConfirmation ? "1" : "");
+        }
         setCwdState((prev) => {
-          const inherited = typeof json.cwd === "string" ? json.cwd : "";
-          const next = prev || inherited || json.dirs?.[0] || "";
+          const next = (shouldInherit && inherited) || prev || inherited || json.dirs?.[0] || "";
           if (next !== prev) writeField(draftId, "cwd", next);
           return next;
         });
@@ -383,6 +447,10 @@ export function DraftAgentPane({
   const send = async (overrideText?: string) => {
     const payloadText = overrideText ?? text;
     if (busy || voiceSending || attempt) return;
+    if (cwdNeedsConfirmation) {
+      setStatus({ kind: "err", text: t("draft.confirmRecoveredDir") });
+      return;
+    }
     if (!cwd.trim()) {
       setStatus({ kind: "err", text: t("draft.needDir") });
       return;
@@ -492,7 +560,7 @@ export function DraftAgentPane({
           list={dirListId}
           placeholder="/home/…/Projects/…"
           aria-label={t("draft.dirAria")}
-          className="min-w-0 flex-1 rounded-[6px] border border-line bg-panel px-2 py-1 font-mono text-[11px] text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60"
+          className="min-h-11 min-w-0 flex-1 rounded-[6px] border border-line bg-panel px-2 py-1 font-mono text-[11px] text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60 sm:min-h-0"
         />
         <datalist id={dirListId}>
           {dirs.map((dir) => (
@@ -500,6 +568,11 @@ export function DraftAgentPane({
           ))}
         </datalist>
       </div>
+      {cwdNeedsConfirmation ? (
+        <p role="alert" className="shrink-0 border-b border-warning/30 bg-warning-soft px-2.5 py-1.5 text-[10.5px] leading-4 text-warning">
+          {t("draft.confirmRecoveredDir")}
+        </p>
+      ) : null}
 
       <div className="flex shrink-0 flex-col gap-1.5 border-b border-line bg-[#fbfbfd] px-2.5 py-1.5">
         <div className="flex min-w-0 flex-wrap items-center gap-1.5">
@@ -599,7 +672,7 @@ export function DraftAgentPane({
           event.preventDefault();
           void send();
         }}
-        className="flex shrink-0 flex-col gap-1.5 border-t border-line bg-[#fbfbfd] px-2.5 py-2"
+        className="flex shrink-0 flex-col gap-1.5 border-t border-border bg-card px-2.5 py-2"
         aria-label={t("draft.promptAria")}
       >
         <ComposerBar
@@ -613,7 +686,7 @@ export function DraftAgentPane({
           sendIdleStyle={{ backgroundColor: tint.color, borderColor: tint.color }}
           leftSlot={
             <span
-              className="inline-flex min-w-0 items-center gap-1 rounded-full bg-chip px-1.5 py-1 font-mono text-[9.5px] font-semibold text-[#555]"
+              className="inline-flex min-w-0 items-center gap-1 rounded-control bg-sunken px-1.5 py-1 text-caption font-semibold text-secondary"
               title={t("draft.newWindowTitle")}
             >
               <Play className="h-3 w-3 shrink-0" aria-hidden /> {t("draft.newAgent")}

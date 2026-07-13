@@ -1,7 +1,7 @@
 "use client";
 
 import { CornerDownRight, GitBranch, Maximize2, Minimize2, Unlink2 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { ChevronRight, X } from "@/components/icons";
 import { useIsMobile } from "@/hooks/useIsMobile";
@@ -25,6 +25,7 @@ import { SessionTitle } from "./session/SessionTitle";
 import { ProcessStatusControls } from "./TaskHeader";
 import { TmuxComposer } from "./TmuxComposer";
 import { RateLimitBadge } from "./RateLimitBadge";
+import { WakeupChip, wakeupChipKey } from "./WakeupChip";
 import { activityDot, cleanTitle, effortTint, effortTitle, engineBadge, engineEdge, fmtAge } from "./utils";
 
 const noop = () => undefined;
@@ -119,7 +120,30 @@ export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noCompose
   const badge = engineBadge(file);
   const state = paneState(file);
   const tone = PANE_TONES[state];
+  /* The live runtime pill (model/effort picker) applies only to a running,
+     top-level claude/codex agent, where reconfigure has a tmux session to act
+     on. On the phone it is the single tappable model·reasoning control for those
+     panes (issue #177 item 2). Every other phone pane collapses its model and
+     reasoning into one compact read-only chip below, so the card carries exactly
+     one model·reasoning element in all states. Desktop keeps its own chip +
+     effort-bar pair. */
+  const showRuntimeControls = file.proc === "running" && !file.parent && (file.engine === "claude" || file.engine === "codex");
   const migState = cardMigrationState(file.migration);
+  /* The phone metadata row scrolls horizontally to stay one line (issue #177
+     item 4); this tracks whether more is clipped to the right so a fade
+     affordance can show, and the row swallows its own touch gestures so a scroll
+     never reaches the header swipe handler (issue #177 item 1 review). */
+  const metaScrollRef = useRef<HTMLDivElement | null>(null);
+  const [metaClipped, setMetaClipped] = useState(false);
+  const syncMetaClip = useCallback(() => {
+    const el = metaScrollRef.current;
+    if (!el) return;
+    const clipped = el.scrollWidth - el.clientWidth - el.scrollLeft > 4;
+    setMetaClipped((prev) => (prev === clipped ? prev : clipped));
+  }, []);
+  useEffect(() => {
+    syncMetaClip();
+  }, [syncMetaClip, isMobile, file]);
   /* Stable card identity: a committed migration gives this conversation a new
      transcript `path` under the target account, but the same conversationId. So
      the chime pane registry, the composer's held receipts, and per-card recovery
@@ -232,49 +256,100 @@ export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noCompose
               </button>
             ) : null}
           </div>
-          <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1">
-            <LastActivity file={file} />
-            {/* One identity chip: the model when known (engine lives in the tint
-                and the tooltip), the engine label as fallback. */}
-            {file.model ? (
-              <span
-                className="shrink-0 rounded-full px-1.5 py-0.5 font-mono text-[9.5px] font-semibold"
-                style={{ backgroundColor: effortTint(file).soft, color: effortTint(file).color }}
-                title={[badge.label, effortTitle(file)].filter(Boolean).join(" · ")}
-              >
-                {file.model}
-              </span>
-            ) : (
-              <span className="inline-flex shrink-0 items-center rounded-full px-2 py-0.5 text-[10px] font-bold" style={badge.style}>
-                {badge.label}
-              </span>
-            )}
-            <EffortPills file={file} />
-            {file.proc === "running" && !file.parent && (file.engine === "claude" || file.engine === "codex") ? <AgentRuntimeControls file={file} /> : null}
-            <RateLimitBadge rateLimit={file.rateLimit} />
-            {file.parentRemoved ? <ParentRemovedChip /> : null}
-            {/* The phone header keeps only actionable or alarming chips: ctx
-                appears once it nears the limit, the worktree name and the
-                branch-kind label yield their room to the rest of the row. */}
-            {file.ctx && (!isMobile || (file.ctx.pct !== null && file.ctx.pct >= 70)) ? <CtxChip ctx={file.ctx} /> : null}
-            {file.worktree && !isMobile ? (
-              <span
-                className="inline-flex shrink-0 items-center gap-0.5 rounded-full border border-line/80 px-1.5 py-0.5 font-mono text-[9.5px] text-dim"
-                title={t("branch.worktree", { name: file.worktree })}
-              >
-                <GitBranch className="h-2.5 w-2.5" aria-hidden /> {file.worktree}
-              </span>
-            ) : null}
-            {file.plan ? <PlanChip plan={file.plan} /> : null}
-            {file.goal ? <GoalChip goal={file.goal} /> : null}
-            {isRoot || isMobile ? null : (
-              <span
-                className="inline-flex shrink-0 items-center gap-0.5 text-[10px] text-dim"
-                title={file.handoff ? t("branch.handoffTitle") : t("branch.branchTitle")}
-              >
-                <CornerDownRight className="h-3 w-3" aria-hidden /> {file.handoff ? t("kind.handoff") : kindLabel(t, file.kind)}
-              </span>
-            )}
+          <div
+            className="relative flex min-w-0 items-center gap-x-1.5"
+            /* The metadata row owns its own touch gestures on the phone so a
+               horizontal scroll to reveal clipped chips stays here and never
+               reaches MobileFocusView's header swipe (which would switch
+               conversations). The title row above still answers to swipes. */
+            onTouchStart={isMobile ? (event) => event.stopPropagation() : undefined}
+            onTouchEnd={isMobile ? (event) => event.stopPropagation() : undefined}
+          >
+            {/* Context usage is pinned first and never scrolls on the phone
+                (issue #177 item 1): the exact % leads the chip face so it stays
+                on screen through any overflow of the row beside it. Desktop keeps
+                ctx inline in the wrapping row. */}
+            {isMobile && file.ctx ? <CtxChip ctx={file.ctx} /> : null}
+            <div
+              ref={metaScrollRef}
+              onScroll={isMobile ? syncMetaClip : undefined}
+              /* Fade the trailing content when the phone row still has clipped
+                 chips — a background-independent scroll affordance that works over
+                 the tinted header tones. */
+              style={isMobile && metaClipped ? { maskImage: "linear-gradient(to right, #000 calc(100% - 20px), transparent)", WebkitMaskImage: "linear-gradient(to right, #000 calc(100% - 20px), transparent)" } : undefined}
+              className={`flex min-w-0 items-center gap-x-1.5 gap-y-1 ${
+                isMobile ? "no-scrollbar flex-nowrap overflow-x-auto" : "flex-wrap"
+              }`}
+            >
+              <LastActivity file={file} />
+              {/* Model + reasoning. The phone shows one element (issue #177 item
+                  2): a running root claude/codex pane gets the tappable picker
+                  pill, every other phone pane a single «model · reasoning»
+                  read-only chip. Desktop is unchanged — the observed model chip
+                  and effort bars always render, and the runtime picker rides
+                  alongside them for a running root agent. */}
+              {isMobile ? (
+                showRuntimeControls ? (
+                  <AgentRuntimeControls file={file} />
+                ) : file.model ? (
+                  <span
+                    className="inline-flex shrink-0 items-center rounded-full px-2 py-0.5 font-mono text-[10px] font-semibold"
+                    style={{ backgroundColor: effortTint(file).soft, color: effortTint(file).color }}
+                    title={[badge.label, effortTitle(file)].filter(Boolean).join(" · ")}
+                  >
+                    {file.effort ? `${file.model} · ${file.effort}` : file.model}
+                  </span>
+                ) : (
+                  <span className="inline-flex shrink-0 items-center rounded-full px-2 py-0.5 text-[10px] font-bold" style={badge.style}>
+                    {badge.label}
+                  </span>
+                )
+              ) : (
+                <>
+                  {file.model ? (
+                    <span
+                      className="shrink-0 rounded-full px-1.5 py-0.5 font-mono text-[9.5px] font-semibold"
+                      style={{ backgroundColor: effortTint(file).soft, color: effortTint(file).color }}
+                      title={[badge.label, effortTitle(file)].filter(Boolean).join(" · ")}
+                    >
+                      {file.model}
+                    </span>
+                  ) : (
+                    <span className="inline-flex shrink-0 items-center rounded-full px-2 py-0.5 text-[10px] font-bold" style={badge.style}>
+                      {badge.label}
+                    </span>
+                  )}
+                  <EffortPills file={file} />
+                  {showRuntimeControls ? <AgentRuntimeControls file={file} /> : null}
+                </>
+              )}
+              <RateLimitBadge rateLimit={file.rateLimit} />
+              {/* Scheduled-wakeup chip (#165): a pending self-wake shows on every
+                  surface, phone included, since it is actionable status. */}
+              <WakeupChip key={wakeupChipKey(file.pendingWakeup)} wakeup={file.pendingWakeup} />
+              {file.parentRemoved ? <ParentRemovedChip /> : null}
+              {/* Desktop keeps ctx inline here; on mobile it is pinned ahead of
+                  this scroller. */}
+              {!isMobile && file.ctx ? <CtxChip ctx={file.ctx} /> : null}
+              {file.worktree && !isMobile ? (
+                <span
+                  className="inline-flex shrink-0 items-center gap-0.5 rounded-full border border-line/80 px-1.5 py-0.5 font-mono text-[9.5px] text-dim"
+                  title={t("branch.worktree", { name: file.worktree })}
+                >
+                  <GitBranch className="h-2.5 w-2.5" aria-hidden /> {file.worktree}
+                </span>
+              ) : null}
+              {file.plan ? <PlanChip plan={file.plan} /> : null}
+              {file.goal ? <GoalChip goal={file.goal} /> : null}
+              {isRoot || isMobile ? null : (
+                <span
+                  className="inline-flex shrink-0 items-center gap-0.5 text-[10px] text-dim"
+                  title={file.handoff ? t("branch.handoffTitle") : t("branch.branchTitle")}
+                >
+                  <CornerDownRight className="h-3 w-3" aria-hidden /> {file.handoff ? t("kind.handoff") : kindLabel(t, file.kind)}
+                </span>
+              )}
+            </div>
           </div>
         </header>
         {/* Account-migration status ribbon (issue #40): sits in the same slot

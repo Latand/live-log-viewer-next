@@ -4,7 +4,15 @@ import path from "node:path";
 
 import { afterAll, expect, test } from "bun:test";
 
-import { describe, parseWorktreeGitdir, persistWorktreeMap, projectForCwd, projectFromSlug } from "./describe";
+import {
+  describe,
+  parseWorktreeGitdir,
+  persistWorktreeMap,
+  projectForCwd,
+  projectFromSlug,
+  projectRootForCwd,
+  searchTextForTranscript,
+} from "./describe";
 
 const SANDBOX = fs.mkdtempSync(path.join(os.tmpdir(), "llv-describe-test-"));
 const REAL_STATE = process.env.LLV_STATE_DIR;
@@ -38,6 +46,29 @@ test("parseWorktreeGitdir rejects gitdirs that are not linked worktrees", () => 
   expect(parseWorktreeGitdir("/home/u/sub", "gitdir: /home/u/worktrees/x")).toBeNull();
 });
 
+test("search text hydration retries after a transient filesystem failure", () => {
+  const transcript = path.join(SANDBOX, "transient-search.jsonl");
+  fs.writeFileSync(transcript, JSON.stringify({ type: "user", message: { content: "Recovered search prompt" } }) + "\n");
+  const size = fs.statSync(transcript).size;
+  const originalOpen = fs.openSync;
+  let attempts = 0;
+  fs.openSync = ((...args: Parameters<typeof fs.openSync>) => {
+    attempts += 1;
+    if (attempts === 1) {
+      const error = new Error("too many open files") as NodeJS.ErrnoException;
+      error.code = "EMFILE";
+      throw error;
+    }
+    return originalOpen(...args);
+  }) as typeof fs.openSync;
+  try {
+    expect(() => searchTextForTranscript(transcript, size, "claude")).toThrow("too many open files");
+    expect(searchTextForTranscript(transcript, size, "claude").firstPrompt).toBe("Recovered search prompt");
+  } finally {
+    fs.openSync = originalOpen;
+  }
+});
+
 test("a deleted codex worktree still groups under its parent repo project", () => {
   /* Codex removes `~/.codex/worktrees/<hash>/<Repo>` after the task, so the
      on-disk `.git` pointer is gone — a path with no filesystem presence must
@@ -69,6 +100,7 @@ test("a deleted worktree scratchpad cwd groups under the encoded parent repo", (
   const dead = path.join(os.tmpdir(), `claude-${process.getuid?.() ?? 1000}`, slug, "deleted-session", "scratchpad", "probes");
   expect(fs.existsSync(dead)).toBe(false);
   expect(projectForCwd(dead)).toBe(projectForCwd(repo));
+  expect(projectRootForCwd(dead)).toBe(repo);
 });
 
 test("a main-checkout scratchpad cwd groups under its encoded project", () => {
@@ -77,6 +109,21 @@ test("a main-checkout scratchpad cwd groups under its encoded project", () => {
   const dead = path.join(os.tmpdir(), `claude-${process.getuid?.() ?? 1000}`, slug, "deleted-session", "scratchpad", "probes");
   expect(fs.existsSync(dead)).toBe(false);
   expect(projectForCwd(dead)).toBe(projectForCwd(repo));
+});
+
+test("a deleted scratchpad encoded from an external repository keeps its canonical root", () => {
+  const repo = path.join(SANDBOX, "external-root", "repo.with-hyphen");
+  fs.mkdirSync(path.join(repo, ".git"), { recursive: true });
+  const slug = repo.replace(/[^a-zA-Z0-9]/g, "-");
+  const dead = path.join(os.tmpdir(), `claude-${process.getuid?.() ?? 1000}`, slug, "deleted-session", "scratchpad", "probes");
+
+  expect(fs.existsSync(dead)).toBe(false);
+  expect(projectForCwd(dead)).toBe(projectForCwd(repo));
+  expect(projectRootForCwd(dead)).toBe(repo);
+
+  const missingSlug = path.join(SANDBOX, "removed-external-repo").replace(/[^a-zA-Z0-9]/g, "-");
+  const missing = path.join(os.tmpdir(), `claude-${process.getuid?.() ?? 1000}`, missingSlug, "deleted-session", "scratchpad");
+  expect(projectRootForCwd(missing)).toBeUndefined();
 });
 
 test("the outer nested worktree wins over a later specialized container", () => {
@@ -131,6 +178,45 @@ test("a deleted nested worktree (repo/worktrees/<name>) still groups under its p
   expect(projectForCwd(nestedDotted)).toBe(projectForCwd(repo));
   expect(projectForCwd(deepNested)).toBe(projectForCwd(repo));
   expect(projectForCwd(nested)).toBe("CelestiaCompose");
+});
+
+test("conversation metadata carries the exact cwd and its canonical project root", () => {
+  const repo = path.join(SANDBOX, "cwd-project");
+  const cwd = path.join(repo, ".worktrees", "issue-173");
+  const root = path.join(SANDBOX, "cwd-transcripts");
+  const transcript = path.join(root, "cwd-project", "session.jsonl");
+  fs.mkdirSync(path.dirname(transcript), { recursive: true });
+  fs.writeFileSync(transcript, JSON.stringify({ type: "user", cwd, message: { content: "Prefill cwd" } }) + "\n");
+
+  expect(describe("claude-projects", root, transcript, fs.statSync(transcript))).toMatchObject({
+    cwd,
+    projectRoot: repo,
+  });
+});
+
+test("conversation metadata marks an unresolved deleted scratchpad root explicitly", () => {
+  const missingSlug = path.join(SANDBOX, "removed-external-repo").replace(/[^a-zA-Z0-9]/g, "-");
+  const cwd = path.join(os.tmpdir(), `claude-${process.getuid?.() ?? 1000}`, missingSlug, "deleted-session", "scratchpad");
+  const root = path.join(SANDBOX, "unresolved-scratchpad-transcripts");
+  const transcript = path.join(root, "removed-external-repo", "session.jsonl");
+  fs.mkdirSync(path.dirname(transcript), { recursive: true });
+  fs.writeFileSync(transcript, JSON.stringify({ type: "user", cwd, message: { content: "Prefill cwd" } }) + "\n");
+
+  expect(fs.existsSync(cwd)).toBe(false);
+  expect(describe("claude-projects", root, transcript, fs.statSync(transcript))).toMatchObject({ cwd, projectRoot: null });
+});
+
+test("growing Codex transcripts retain cwd metadata after the project cache warms", () => {
+  const repo = path.join(SANDBOX, "codex-cwd-project");
+  const cwd = path.join(repo, ".worktrees", "issue-174");
+  const root = path.join(SANDBOX, "codex-cwd-transcripts");
+  const transcript = path.join(root, "2026", "07", "rollout-cwd.jsonl");
+  fs.mkdirSync(path.dirname(transcript), { recursive: true });
+  fs.writeFileSync(transcript, JSON.stringify({ type: "session_meta", payload: { cwd } }) + "\n");
+
+  expect(describe("codex-sessions", root, transcript, fs.statSync(transcript))).toMatchObject({ cwd, projectRoot: repo });
+  fs.appendFileSync(transcript, JSON.stringify({ type: "event_msg", payload: { type: "user_message", message: "continue" } }) + "\n");
+  expect(describe("codex-sessions", root, transcript, fs.statSync(transcript))).toMatchObject({ cwd, projectRoot: repo });
 });
 
 test("a nested `worktrees` segment under .claude/.codex is left to its own recognizer", () => {
@@ -244,4 +330,23 @@ test("stale flow slug keeps orphan background tasks under the saved project", ()
   const meta = describe("claude-tasks", root, task, fs.statSync(task));
   expect(meta.project).toBe(project);
   expect(meta.worktree).toBe("live-log-viewer-workflows");
+});
+
+test("conversation prompts stay in the search-only metadata path", () => {
+  const root = path.join(SANDBOX, "codex-first-prompt");
+  const transcript = path.join(root, "session.jsonl");
+  fs.mkdirSync(root, { recursive: true });
+  fs.writeFileSync(transcript, JSON.stringify({
+    type: "event_msg",
+    payload: { type: "user_message", message: "Investigate cobalt orchard" },
+  }) + "\n");
+
+  const stat = fs.statSync(transcript);
+  expect(describe("codex-sessions", root, transcript, stat)).toEqual(expect.objectContaining({
+    title: "Investigate cobalt orchard",
+  }));
+  expect(searchTextForTranscript(transcript, stat.size, "codex")).toEqual({
+    title: "Investigate cobalt orchard",
+    firstPrompt: "Investigate cobalt orchard",
+  });
 });

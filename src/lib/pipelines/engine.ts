@@ -24,7 +24,7 @@ import { commitPipelineStage, provisionPipelineWorktree, resetPipelineStage } fr
 import { MAX_SPEC_LENGTH, MAX_STAGE_PROMPT_LENGTH, MAX_TASK_LENGTH } from "./limits";
 import { renderStagePrompt } from "./prompts";
 import { pipelineRoleLookup, resolvePipelineRole, validatePipelineRoleParams, type PipelineRoleLookup } from "./roles";
-import { buildPipeline, isEffectiveRole, loadPipelines, PipelineStoreError, withPipelineMutation } from "./store";
+import { buildPipeline, isEffectiveRole, loadPipelines, pipelineIdentity, PipelineStoreError, withPipelineMutation } from "./store";
 import type {
   CreatePipelineRequest,
   EffectivePipelineRole,
@@ -677,8 +677,18 @@ export async function tickPipelines(entries: FileEntry[], ports: PipelinePorts =
   }
 }
 
-function normalizeStages(value: unknown, lookup?: PipelineRoleLookup | null): { stages?: PipelineStage[]; error?: string } {
-  if (!Array.isArray(value) || value.length < 2 || value.length > 4) return { error: "pipelines require 2–4 stages" };
+function normalizeStages(
+  value: unknown,
+  lookup?: PipelineRoleLookup | null,
+  preservedStages?: ReadonlyMap<string, PipelineStage>,
+  /* Drafts assemble from zero on the canvas (#136), so their edit path accepts
+     0–4 stages; the run path (create-and-start) keeps the 2-stage floor. The
+     review-loop-needs-a-preceding-run and linear-chain rules apply either way. */
+  minStages = 2,
+): { stages?: PipelineStage[]; error?: string } {
+  if (!Array.isArray(value) || value.length < minStages || value.length > 4) {
+    return { error: minStages === 0 ? "pipelines require at most 4 stages" : "pipelines require 2–4 stages" };
+  }
   const stages: PipelineStage[] = [];
   const ids = new Set<string>();
   let hasRun = false;
@@ -687,6 +697,7 @@ function normalizeStages(value: unknown, lookup?: PipelineRoleLookup | null): { 
     const stage = raw as Partial<PipelineStageInput>;
     const id = typeof stage.id === "string" ? stage.id.trim() : "";
     if (!/^[A-Za-z0-9_-]{1,64}$/.test(id) || ids.has(id)) return { error: "stage ids must be unique URL-safe names" };
+    const preservedStage = preservedStages?.get(id);
     if (stage.kind !== "run" && stage.kind !== "review-loop") return { error: "stage kind must be run or review-loop" };
     if (stage.kind === "review-loop" && !hasRun) return { error: "review-loop stage requires a preceding run stage" };
     const prompt = typeof stage.prompt === "string" ? stage.prompt.trim() : "";
@@ -712,7 +723,7 @@ function normalizeStages(value: unknown, lookup?: PipelineRoleLookup | null): { 
       return { error: `stage ${id} role params must be strings or numbers` };
     }
     if (roleParams && !roleId) return { error: `stage ${id} role params require a roleId` };
-    if (roleId && roleParams) {
+    if (roleId && roleParams && !preservedStage) {
       /* Canonical value checks (options, integer bounds, text length, unknown
          keys) so an invalid param can't freeze into the stored scaffold. */
       const paramError = validatePipelineRoleParams(roleId, roleParams as Record<string, string | number>);
@@ -731,8 +742,8 @@ function normalizeStages(value: unknown, lookup?: PipelineRoleLookup | null): { 
       prompt,
       next: stage.next ?? null,
     };
-    const resolved = resolvePipelineRole(input, stage.kind, lookup);
-    if (!resolved.role) return { error: resolved.error };
+    const resolved = preservedStage ? { role: preservedStage.effectiveRole } : resolvePipelineRole(input, stage.kind, lookup);
+    if (!resolved.role) return { error: "error" in resolved ? resolved.error : "invalid stage role" };
     const normalizedStage: PipelineStage = { ...input, effectiveRole: structuredClone(resolved.role) };
     ids.add(id);
     if (stage.kind === "run") hasRun = true;
@@ -745,6 +756,37 @@ function normalizeStages(value: unknown, lookup?: PipelineRoleLookup | null): { 
   return { stages };
 }
 
+function draftStageInputs(stages: PipelineStage[]): PipelineStageInput[] {
+  return stages.map((stage, index) => ({
+    id: stage.id,
+    kind: stage.kind,
+    ...(stage.role ? { role: structuredClone(stage.role) } : {}),
+    ...(stage.engine !== undefined ? { engine: stage.engine } : {}),
+    ...(stage.model !== undefined ? { model: stage.model } : {}),
+    ...(stage.effort !== undefined ? { effort: stage.effort } : {}),
+    ...(stage.access !== undefined ? { access: stage.access } : {}),
+    prompt: stage.prompt,
+    next: stages[index + 1]?.id ?? null,
+  }));
+}
+
+function replaceDraftStages(
+  pipeline: Pipeline,
+  inputs: PipelineStageInput[],
+  lookup?: PipelineRoleLookup | null,
+): { error?: string } {
+  const relinked = inputs.map((stage, index) => ({ ...stage, next: inputs[index + 1]?.id ?? null }));
+  const preserved = new Map(pipeline.stages.map((stage) => [stage.id, stage]));
+  /* Draft edits may empty the plan entirely (remove down to zero); the 2-stage
+     floor is enforced only at Start (#136). */
+  const normalized = normalizeStages(relinked, lookup, preserved, 0);
+  if (!normalized.stages) return { error: normalized.error ?? "invalid stages" };
+  pipeline.stages = normalized.stages;
+  pipeline.runs = normalized.stages.map((stage) => ({ stageId: stage.id, attempts: [] }));
+  pipeline.cursor = normalized.stages.length ? { stageId: normalized.stages[0]!.id, state: "pending" } : null;
+  return {};
+}
+
 export async function createPipelineFromRequest(
   req: CreatePipelineRequest,
   ports: PipelinePorts = defaultPipelinePorts(),
@@ -755,11 +797,14 @@ export async function createPipelineFromRequest(
   const spec = typeof req.spec === "string" && req.spec.trim() ? req.spec.trim() : undefined;
   if (req.spec !== undefined && typeof req.spec !== "string") return { error: "spec must be a string", status: 400 };
   if (spec && spec.length > MAX_SPEC_LENGTH) return { error: `spec exceeds ${MAX_SPEC_LENGTH} characters`, status: 400 };
+  if (req.autoStart !== undefined && typeof req.autoStart !== "boolean") return { error: "autoStart must be a boolean", status: 400 };
   const repoDir = typeof req.repoDir === "string" ? req.repoDir.trim() : "";
   if (!repoDir) return { error: "repoDir is required", status: 400 };
   const git = ports.exec("git", ["rev-parse", "--git-dir"], repoDir);
   if (git.code !== 0) return { error: `not a git repository: ${repoDir}`, status: 400 };
-  const normalized = normalizeStages(req.stages, ports.roleLookup);
+  /* A draft (autoStart:false) may be created empty and assembled on the canvas
+     (#136); an immediately-started pipeline still needs its full 2–4 stage plan. */
+  const normalized = normalizeStages(req.stages, ports.roleLookup, undefined, req.autoStart === false ? 0 : 2);
   if (!normalized.stages) return { error: normalized.error ?? "invalid stages", status: 400 };
   const srcPath = typeof req.src === "string" && req.src.trim() ? req.src.trim() : null;
   const pipeline = buildPipeline({
@@ -772,6 +817,7 @@ export async function createPipelineFromRequest(
     srcPath,
     srcConversationId: srcPath ? ports.conversationIdForPath(srcPath) : null,
     now: ports.now(),
+    state: req.autoStart === false ? "draft" : "provisioning",
   });
   return withPipelineMutation((pipelines, persist) => {
     pipelines.push(pipeline);
@@ -806,7 +852,80 @@ export async function patchPipeline(
     const attempt = stage ? currentAttempt(pipeline, stage.id) : null;
     const flow = attempt?.flowId ? ports.getFlow(attempt.flowId) : null;
 
-    if (req.action === "pause") {
+    if (req.action === "start") {
+      if (pipeline.state !== "draft") return { error: "pipeline is not a draft", status: 409 };
+      /* Start enforces the 2–4 stage floor (#136): a draft may hold zero stages
+         while it is assembled on the canvas, and it needs a full stage plan to run.
+         The review-loop-needs-a-preceding-run rule already held on every draft edit. */
+      if (pipeline.stages.length < 2) return { error: "add at least 2 stages before starting", status: 409 };
+      pipeline.state = "provisioning";
+      pipeline.stateDetail = null;
+    } else if (req.action === "update-draft") {
+      if (pipeline.state !== "draft") return { error: "pipeline is not a draft", status: 409 };
+      if (req.task === undefined && req.spec === undefined && req.repoDir === undefined) return { error: "update-draft needs at least one field to change", status: 400 };
+      const task = req.task === undefined ? pipeline.task : typeof req.task === "string" ? req.task.trim() : "";
+      if (!task) return { error: "task is required", status: 400 };
+      if (task.length > MAX_TASK_LENGTH) return { error: `task exceeds ${MAX_TASK_LENGTH} characters`, status: 400 };
+      if (req.spec !== undefined && typeof req.spec !== "string") return { error: "spec must be a string", status: 400 };
+      const spec = req.spec === undefined ? pipeline.spec : req.spec.trim() || undefined;
+      if (spec && spec.length > MAX_SPEC_LENGTH) return { error: `spec exceeds ${MAX_SPEC_LENGTH} characters`, status: 400 };
+      const repoDir = req.repoDir === undefined ? pipeline.repoDir : typeof req.repoDir === "string" ? req.repoDir.trim() : "";
+      if (!repoDir) return { error: "repoDir is required", status: 400 };
+      if (repoDir !== pipeline.repoDir) {
+        const git = ports.exec("git", ["rev-parse", "--git-dir"], repoDir);
+        if (git.code !== 0) return { error: `not a git repository: ${repoDir}`, status: 400 };
+      }
+      pipeline.task = task;
+      if (spec) pipeline.spec = spec;
+      else delete pipeline.spec;
+      pipeline.repoDir = repoDir;
+      pipeline.project = ports.projectForCwd(repoDir) ?? path.basename(repoDir);
+      Object.assign(pipeline, pipelineIdentity(pipeline.id, task, repoDir));
+    } else if (req.action === "add-stage") {
+      if (pipeline.state !== "draft") return { error: "pipeline is not a draft", status: 409 };
+      if (!req.stage || typeof req.stage !== "object" || Array.isArray(req.stage)) return { error: "stage is required", status: 400 };
+      const inputs = draftStageInputs(pipeline.stages);
+      const index = req.index === undefined ? inputs.length : req.index;
+      if (!Number.isInteger(index) || index < 0 || index > inputs.length) return { error: "stage index is out of range", status: 400 };
+      inputs.splice(index, 0, req.stage);
+      const replaced = replaceDraftStages(pipeline, inputs, ports.roleLookup);
+      if (replaced.error) return { error: replaced.error, status: 400 };
+    } else if (req.action === "remove-stage") {
+      if (pipeline.state !== "draft") return { error: "pipeline is not a draft", status: 409 };
+      /* A draft can be emptied entirely on the canvas (#136); the 2-stage floor is
+         a Start-time gate. remove that would orphan a review-loop (drop its only
+         preceding run) is still rejected by replaceDraftStages' normalization. */
+      if (pipeline.stages.length === 0) return { error: "no stage to remove", status: 409 };
+      const index = pipeline.stages.findIndex((stage) => stage.id === req.stageId);
+      if (index < 0) return { error: "stage not found", status: 404 };
+      const inputs = draftStageInputs(pipeline.stages);
+      inputs.splice(index, 1);
+      const replaced = replaceDraftStages(pipeline, inputs, ports.roleLookup);
+      if (replaced.error) return { error: replaced.error, status: 400 };
+    } else if (req.action === "reorder-stage") {
+      if (pipeline.state !== "draft") return { error: "pipeline is not a draft", status: 409 };
+      const inputs = draftStageInputs(pipeline.stages);
+      let ordered: PipelineStageInput[];
+      if (Array.isArray(req.stageIds)) {
+        const currentIds = new Set(inputs.map((stage) => stage.id));
+        if (req.stageIds.length !== inputs.length || new Set(req.stageIds).size !== inputs.length || req.stageIds.some((id) => !currentIds.has(id))) {
+          return { error: "stageIds must contain every stage exactly once", status: 400 };
+        }
+        const byId = new Map(inputs.map((stage) => [stage.id, stage]));
+        ordered = req.stageIds.map((id) => byId.get(id)!);
+      } else {
+        const from = inputs.findIndex((stage) => stage.id === req.stageId);
+        if (from < 0) return { error: "stage not found", status: 404 };
+        const toIndex = req.toIndex;
+        if (!Number.isInteger(toIndex) || toIndex! < 0 || toIndex! >= inputs.length) return { error: "stage index is out of range", status: 400 };
+        ordered = [...inputs];
+        const [moved] = ordered.splice(from, 1);
+        ordered.splice(toIndex!, 0, moved!);
+      }
+      const replaced = replaceDraftStages(pipeline, ordered, ports.roleLookup);
+      if (replaced.error) return { error: replaced.error, status: 400 };
+    } else if (req.action === "pause") {
+      if (pipeline.state === "draft") return { error: "draft pipelines can only be started, edited, or deleted", status: 409 };
       if (!TERMINAL_STATES.has(pipeline.state) && pipeline.state !== "paused") {
         pipeline.pausedState = pipeline.state;
         pipeline.state = "paused";
@@ -931,7 +1050,17 @@ export async function patchPipeline(
         if (prompt.length > MAX_STAGE_PROMPT_LENGTH) return { error: `stage prompt exceeds ${MAX_STAGE_PROMPT_LENGTH} characters`, status: 400 };
         target.prompt = prompt;
       }
+    } else if (req.action === "delete") {
+      if (pipeline.state !== "draft") return { error: "only draft pipelines can be deleted", status: 409 };
+      pipelines.splice(pipelines.indexOf(pipeline), 1);
+      persist();
+      return { pipeline };
     } else if (req.action === "close") {
+      if (pipeline.state === "draft") {
+        pipelines.splice(pipelines.indexOf(pipeline), 1);
+        persist();
+        return { pipeline };
+      }
       if (flow && flow.state !== "closed") await ports.closeFlow(flow.id);
       pipeline.state = "closed";
       pipeline.cursor = null;

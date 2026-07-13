@@ -48,6 +48,22 @@ test("a running attempt with no verdict, error, or park shows no trigger", () =>
   expect(render(p)).not.toContain("Open verdict for stage");
 });
 
+test("an empty draft's strip disables Start until it holds 2 stages (#136)", () => {
+  /* Isolate the opening tag of the button wrapping the given label. */
+  const startTag = (html: string, label: string) => {
+    const at = html.indexOf(label);
+    const open = html.lastIndexOf("<button", at);
+    return html.slice(open, html.indexOf(">", open));
+  };
+  /* Assert on the `disabled=""` attribute; the class list also carries the token
+     `disabled:opacity-40`, which a bare substring check would match. */
+  const empty = pipeline({ state: "draft", stages: [], runs: [], cursor: null });
+  expect(startTag(render(empty), "Start pipeline")).toContain('disabled=""');
+  /* Once it reaches the 2-stage floor, Start is live. */
+  const two = pipeline({ state: "draft", stages: [stage("a"), stage("b")], runs: [], cursor: { stageId: "a", state: "pending" } });
+  expect(startTag(render(two), "Start pipeline")).not.toContain('disabled=""');
+});
+
 test("the status dot follows the tone matrix (accent busy, amber attention, ok done)", () => {
   const dotClass = (state: PipelineState, over: Partial<Pipeline> = {}) => {
     const html = render(pipeline({ state, ...over }));

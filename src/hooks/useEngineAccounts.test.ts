@@ -26,8 +26,8 @@ const claudePayload = (over: Record<string, unknown> = {}) => ({
   claude: {
     active: "main",
     accounts: [
-      { id: "main", label: "Main", authPresent: true, loginPending: false, loginState: "authenticated", deviceAuth: null, effective: { percent: 12, window: "session", freshness: "fresh" } },
-      { id: "work", label: "Work", authPresent: true, loginPending: false, loginState: "authenticated", deviceAuth: null },
+      { id: "main", label: "Main", authPresent: true, auth: { state: "authenticated" }, loginPending: false, loginState: "authenticated", deviceAuth: null, effective: { percent: 12, window: "session", freshness: "fresh" } },
+      { id: "work", label: "Work", authPresent: true, auth: { state: "unknown" }, loginPending: false, loginState: "authenticated", deviceAuth: null },
     ],
     ...over,
   },
@@ -49,6 +49,7 @@ test("a claude store reads body.claude, its engine endpoints, and parses migrati
   expect(calls[0].url).toBe("/api/accounts");
   expect(store.active).toBe("main");
   expect(store.accounts[0]?.effective).toEqual({ percent: 12, window: "session", freshness: "fresh" });
+  expect(store.accounts.map((account) => account.authHealth)).toEqual(["authenticated", "unknown"]);
   expect(store.migration).toMatchObject({ intentId: "i1", origin: "auto", state: "draining", counts: { done: 1, total: 3 } });
   expect(store.autoBalance).toMatchObject({ enabled: true, state: "draining" });
   unsub();

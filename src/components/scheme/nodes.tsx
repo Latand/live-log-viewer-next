@@ -1,7 +1,7 @@
 "use client";
 
 import { Check, Layers } from "lucide-react";
-import { memo, useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useState } from "react";
 
 import { ChevronRight } from "@/components/icons";
 import type { Flow } from "@/lib/flows/types";
@@ -24,6 +24,7 @@ import type { Pipeline } from "@/lib/pipelines/types";
 import { FlowStrip } from "@/components/flows/FlowStrip";
 import { RoleTag } from "@/components/flows/RoleTag";
 import { RateLimitBadge } from "@/components/RateLimitBadge";
+import { WakeupChip, wakeupChipKey } from "@/components/WakeupChip";
 import { RoundDeck } from "@/components/flows/RoundDeck";
 import { RoundStateIcon } from "@/components/flows/RoundIcons";
 import { canHandoff, HandoffHandle } from "@/components/HandoffHandle";
@@ -363,6 +364,8 @@ export const GroupsLayer = memo(function GroupsLayer({
   groups,
   interactive,
   pipelineControls,
+  autoOpenGroupId,
+  onAutoOpen,
 }: {
   groups: SchemeGroup[];
   /** Passive on the hand-tool, during a selection session and on the lite map:
@@ -373,8 +376,36 @@ export const GroupsLayer = memo(function GroupsLayer({
       stage graph on the halo itself, so the group is always the pipeline surface
       (issue #136). */
   pipelineControls?: PipelineGroupControls | null;
+  /** A group id whose override/builder panel should open on its own as soon as it
+      arrives — the canvas builder lands the operator straight in a fresh draft's
+      panel (#136). `onAutoOpen` fires once consumed so the caller clears it. */
+  autoOpenGroupId?: string | null;
+  onAutoOpen?: () => void;
 }) {
+  const { t } = useLocale();
   const [openId, setOpenId] = useState<string | null>(null);
+  /* Open the requested group once it appears (the draft POST → refetch → layout
+     round-trip means its halo may not exist on the render that first receives the
+     id). Adjusted render-phase — React's endorsed idiom, no setState-in-effect
+     cascade — and guarded by a ref so it fires a single time per distinct id even
+     while the prop lingers. Only while interactive, so the map/hand-tool never
+     force a panel open. */
+  const [autoOpened, setAutoOpened] = useState<string | null>(null);
+  if (
+    autoOpenGroupId &&
+    interactive &&
+    autoOpenGroupId !== autoOpened &&
+    groups.some((group) => group.id === autoOpenGroupId)
+  ) {
+    setAutoOpened(autoOpenGroupId);
+    setOpenId(autoOpenGroupId);
+  }
+  /* Tell the caller it can drop the request. This effect only calls the parent
+     callback and runs no local setState, so it stays off the cascading-render path
+     the lint rule guards. */
+  useEffect(() => {
+    if (autoOpenGroupId && autoOpenGroupId === autoOpened) onAutoOpen?.();
+  }, [autoOpenGroupId, autoOpened, onAutoOpen]);
   if (!groups.length) return null;
   const openGroup = interactive ? groups.find((group) => group.id === openId) ?? null : null;
   return (
@@ -383,8 +414,9 @@ export const GroupsLayer = memo(function GroupsLayer({
        and can paint above the cards. */
     <div aria-hidden={false}>
       {groups.map((group) => {
-        const color = `hsl(${group.hue} 62% 42%)`;
-        const soft = `hsl(${group.hue} 62% 42% / 0.055)`;
+        const draft = group.pipeline?.state === "draft";
+        const color = draft ? "#a06a15" : `hsl(${group.hue} 62% 42%)`;
+        const soft = draft ? "#fff7df" : `hsl(${group.hue} 62% 42% / 0.055)`;
         const open = openGroup?.id === group.id;
         return (
           /* Positioned with left/top rather than a transform: a transform would
@@ -394,13 +426,18 @@ export const GroupsLayer = memo(function GroupsLayer({
           <div
             key={group.key}
             data-scheme-group={group.kind}
+            data-pipeline-draft={draft || undefined}
             className="pointer-events-none absolute"
             style={{ left: group.x, top: group.y, width: group.w, height: group.h, transition: GROUP_MOVE_TRANSITION }}
           >
             <div
               aria-hidden
               className="absolute inset-0 rounded-[20px] border-2 border-dashed"
-              style={{ borderColor: color, backgroundColor: soft }}
+              style={{
+                borderColor: color,
+                backgroundColor: soft,
+                ...(draft ? { backgroundImage: "repeating-linear-gradient(135deg, transparent 0 12px, rgb(160 106 21 / 0.07) 12px 14px)" } : {}),
+              }}
             />
             {/* The pipeline's full planned stage graph on the halo itself, shown
                 only when no per-node strip is actually mounted for it — so the
@@ -430,7 +467,7 @@ export const GroupsLayer = memo(function GroupsLayer({
               }`}
               /* Font fully counter-scaled (constant on-screen at any zoom); border
                  and padding are in em so the whole chip holds its on-screen size. */
-              style={{ borderColor: color, color, borderWidth: "0.18em", borderStyle: "solid", fontSize: groupLabelFontSize() }}
+              style={{ borderColor: color, color, borderWidth: "0.18em", borderStyle: draft ? "dashed" : "solid", fontSize: groupLabelFontSize() }}
               aria-expanded={open}
               aria-haspopup="dialog"
               disabled={!interactive}
@@ -438,6 +475,7 @@ export const GroupsLayer = memo(function GroupsLayer({
             >
               <span aria-hidden>{group.kind === "pipeline" ? "⇢" : "⟳"}</span>
               <span className="truncate">{group.label}</span>
+              {draft ? <span className="rounded-full bg-[#fff1c9] px-[0.55em] py-[0.12em] text-[0.82em] font-black tracking-[0.08em] text-[#8a5700]">{t("pipelineStrip.draftBadge")}</span> : null}
             </button>
           </div>
         );
@@ -521,6 +559,7 @@ function FarLabel({ file }: { file: FileEntry }) {
           {badge.label}
         </span>
         <RateLimitBadge rateLimit={file.rateLimit} />
+        <WakeupChip key={wakeupChipKey(file.pendingWakeup)} wakeup={file.pendingWakeup} interactive={false} />
         <span className="line-clamp-2 min-w-0 font-bold">{cleanTitle(file.title, 70)}</span>
       </div>
     </div>
@@ -576,6 +615,10 @@ function LiteNodeShell({ node, ringed, dimmed, flow }: { node: SchemeNode; ringe
           </span>
           {node.file.model ? <span className="min-w-0 truncate font-mono text-[11px] text-dim">{node.file.model}</span> : null}
           <RateLimitBadge rateLimit={node.file.rateLimit} />
+          {/* pointer-events-auto re-enables taps for just the chip inside the
+              map's pointer-events-none layer, so its reason disclosure works at
+              390px; the chip's own guard keeps the tap from opening the pane. */}
+          <WakeupChip key={wakeupChipKey(node.file.pendingWakeup)} wakeup={node.file.pendingWakeup} className="pointer-events-auto" />
           <span className="ml-auto shrink-0 text-[11px] text-dim">{fmtAge(node.file.mtime)}</span>
         </div>
         <div className="min-w-0 flex-1 px-3 py-2.5 text-[14px] font-semibold leading-snug">

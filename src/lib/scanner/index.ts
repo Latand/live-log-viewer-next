@@ -3,7 +3,7 @@ import { agentRegistry, RegistryReadError } from "../agent/registry";
 import { tickFlows } from "../flows/engine";
 import { tickPipelines } from "../pipelines/engine";
 import { notifyQuestion } from "../push";
-import { overlaySessionTitles } from "../session/titleProjection";
+import { overlaySessionTitles, sessionProjectProjection } from "../session/titleProjection";
 import { tickTaskInbox } from "../tasks/inboxScanner";
 import { resolveTarget } from "../tmux";
 import { tickWorkflows } from "../workflows/engine";
@@ -16,6 +16,7 @@ import { entryModels } from "./model";
 import { outputHolders } from "./process";
 import { goalFor, planFor } from "./plan";
 import { pendingQuestionFor } from "./questions";
+import { pendingWakeupFor } from "./wakeup";
 import { assignTranscriptPids } from "./transcripts";
 import { waitingInputProbe } from "./waitingInput";
 
@@ -38,7 +39,8 @@ function applyProcessState(entry: FileEntry, holders: Map<string, number>) {
  *  1. discover.ts  — walk ROOTS, filter EXTS, skip `tool-results/` and
  *     everything in claude-tasks that is not `<slug>/<sid>/tasks/*.output`,
  *     skip a-prefixed task outputs that mirror subagents/agent-<id>.jsonl,
- *     stat each file, sort by mtime desc, cap at FILE_CAP.
+ *     stat each file, dedupe copied Codex rollouts, then apply the configurable
+ *     recent-project and per-project scheme window.
  *  2. describe.ts  — project/title/kind/engine/fmt per root (port `describe`,
  *     `_scan_jsonl_title`, `_project_from_slug`), size-keyed cache.
  *  3. activity.ts  — port `_tail_records`, `_jsonl_turn_state`, `_activity`
@@ -78,6 +80,9 @@ export interface FileScanOptions {
   /** Deep-link target that must survive the recency cap: a transcript path,
       or a `conversation_*` id resolved to its current generation path. */
   pin?: string;
+  /** Batch of transcript paths that must survive the recency cap. Used by
+      operations that need one activity snapshot for a complete target set. */
+  pins?: readonly string[];
 }
 
 /** Transcript paths a pin value requires in the feed. A conversation id is
@@ -86,22 +91,34 @@ export interface FileScanOptions {
     generation of its owning conversation, so an archived `#f=` target always
     ships together with the successor the client must redirect to. An
     unreadable registry keeps a path pin as itself and drops an id pin. */
-export function pinnedPathsFor(pin: string | undefined): ReadonlySet<string> {
-  if (!pin) return new Set();
+export function pinnedPathsFor(value: string | readonly string[] | undefined): ReadonlySet<string> {
+  const values = typeof value === "string" ? [value] : value?.filter(Boolean) ?? [];
+  if (!values.length) return new Set();
   try {
     const registry = agentRegistry();
     const snapshot = registry.snapshot();
-    if (pin.startsWith("conversation_")) {
-      const canonical = registry.canonicalConversationId(pin as `conversation_${string}`) ?? pin;
-      const latest = snapshot.conversations[canonical]?.generations.at(-1)?.path;
-      return new Set(latest ? [latest] : []);
+    const paths = new Set<string>();
+    const latestByKnownPath = new Map<string, string>();
+    for (const conversation of Object.values(snapshot.conversations)) {
+      const latest = conversation.generations.at(-1)?.path;
+      if (!latest) continue;
+      for (const generation of conversation.generations) latestByKnownPath.set(generation.path, latest);
+      for (const pathname of conversation.continuityPaths) latestByKnownPath.set(pathname, latest);
     }
-    const owner = Object.values(snapshot.conversations).find((conversation) =>
-      conversation.generations.some((generation) => generation.path === pin) || conversation.continuityPaths.includes(pin));
-    const latest = owner?.generations.at(-1)?.path;
-    return new Set(latest && latest !== pin ? [pin, latest] : [pin]);
+    for (const pin of values) {
+      if (pin.startsWith("conversation_")) {
+        const canonical = registry.canonicalConversationId(pin as `conversation_${string}`) ?? pin;
+        const latest = snapshot.conversations[canonical]?.generations.at(-1)?.path;
+        if (latest) paths.add(latest);
+        continue;
+      }
+      paths.add(pin);
+      const latest = latestByKnownPath.get(pin);
+      if (latest) paths.add(latest);
+    }
+    return paths;
   } catch (error) {
-    if (error instanceof RegistryReadError) return new Set(pin.startsWith("conversation_") ? [] : [pin]);
+    if (error instanceof RegistryReadError) return new Set(values.filter((pin) => !pin.startsWith("conversation_")));
     throw error;
   }
 }
@@ -120,25 +137,7 @@ export async function listFilesWithProjectCatalog(selectedProject?: string, opti
    into their successor's card, so they rank below live transcripts when the
    recency cap is applied and leave the cap slots to live conversations. */
 export function archivedTranscriptPaths(): ReadonlySet<string> {
-  const archived = new Set<string>();
-  let snapshot: ReturnType<ReturnType<typeof agentRegistry>["snapshot"]>;
-  try {
-    snapshot = agentRegistry().snapshot();
-  } catch (error) {
-    /* Demotion only shapes the recency ranking. When the registry is
-       corrupt or unsupported, discovery proceeds with an empty demotion set
-       and timeline/spawn/tasks/tmux stay available. Mirrors the board
-       route's RegistryReadError handling. */
-    if (error instanceof RegistryReadError) return archived;
-    throw error;
-  }
-  for (const conversation of Object.values(snapshot.conversations)) {
-    const latest = conversation.generations.at(-1);
-    if (!latest) continue;
-    for (const generation of conversation.generations) if (generation.path !== latest.path) archived.add(generation.path);
-    for (const pathname of conversation.continuityPaths) if (pathname !== latest.path) archived.add(pathname);
-  }
-  return archived;
+  return sessionProjectProjection(true).archivedPaths;
 }
 
 async function listFilesInternal(
@@ -148,9 +147,11 @@ async function listFilesInternal(
 ): Promise<{ files: FileEntry[]; projectCatalog: ProjectCatalogEntry[] }> {
   const persist = options.persist === true;
   const demote = archivedTranscriptPaths();
+  const requestedPins = options.pins ? [...options.pins, ...(options.pin ? [options.pin] : [])] : options.pin;
+  const pin = pinnedPathsFor(requestedPins);
   const scan = includeProjectCatalog
-    ? await discoverFilesWithProjectCatalog(undefined, selectedProject, { persist, demote, pin: pinnedPathsFor(options.pin) })
-    : { files: await discoverFiles(undefined, demote), projectCatalog: [] };
+    ? await discoverFilesWithProjectCatalog(undefined, selectedProject, { persist, demote, pin })
+    : { files: await discoverFiles(undefined, demote, pin), projectCatalog: [] };
   const entries = scan.files;
   // The /proc fd scan is only needed to attribute background-task outputs to a
   // live pid. When the shortlist has no such entries, skip the scan entirely;
@@ -190,6 +191,7 @@ async function listFilesInternal(
     entry.plan = planFor(entry);
     entry.goal = goalFor(entry);
     entry.ctx = ctxFor(entry);
+    entry.pendingWakeup = pendingWakeupFor(entry);
   });
   await linkEntries(entries, { persist });
   return { files: entries, projectCatalog: scan.projectCatalog };

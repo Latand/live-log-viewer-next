@@ -1,14 +1,30 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useRef, useState, useSyncExternalStore } from "react";
 
 import { useImageAttachments } from "@/components/imageAttachments";
 import { useAutosizePinned } from "@/hooks/useAutosizePinned";
 import { useDictation } from "@/hooks/useDictation";
+import { useIsMobile } from "@/hooks/useIsMobile";
 
 /* The pane / draft / bulk / task-create composers grow to ~6 rows, then scroll
    internally pinned to the newest text. */
 const COMPOSER_MAX_PX = 160;
+/* On the phone the field grows further — up to ~40% of the viewport (issue #177
+   item 3) — so a multi-line prompt is comfortable to read while typing, past
+   which it scrolls internally. The send/mic controls keep their 44px targets. */
+const COMPOSER_MAX_VH = 0.4;
+
+/* Live viewport height, tracked the same way as `useIsMobile` (external store,
+   no setState-in-effect) so the phone grow ceiling re-measures on rotation and
+   the server render stays stable. */
+function subscribeViewport(onChange: () => void) {
+  window.addEventListener("resize", onChange);
+  return () => window.removeEventListener("resize", onChange);
+}
+function useViewportHeight(): number {
+  return useSyncExternalStore(subscribeViewport, () => window.innerHeight, () => 800);
+}
 
 export interface ComposerStatus {
   /** `info` is a neutral/pending tone (e.g. a message held for a migration). */
@@ -60,6 +76,13 @@ export function useComposer({ initialText, persistText, submit, disabled = false
   const [status, setStatus] = useState<ComposerStatus | null>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
+  /* Grow ceiling: the desktop keeps its ~6-row cap; the phone tracks 40% of the
+     live viewport height so the field can open into a tall multi-line input and
+     re-measures on rotation/resize (issue #177 item 3). */
+  const isMobile = useIsMobile();
+  const viewportH = useViewportHeight();
+  const maxPx = isMobile ? Math.max(COMPOSER_MAX_PX, Math.round(viewportH * COMPOSER_MAX_VH)) : COMPOSER_MAX_PX;
+
   const attachments = useImageAttachments({
     onError: (message) => setStatus({ kind: "err", text: message }),
     onAdded: () => setStatus(null),
@@ -98,7 +121,7 @@ export function useComposer({ initialText, persistText, submit, disabled = false
      the field pins to the bottom on every update so the latest spoken words
      stay visible; while typing it pins only when the caret is at the end. */
   useAutosizePinned(inputRef, displayText, {
-    maxPx: COMPOSER_MAX_PX,
+    maxPx,
     pinned: Boolean(dictation.liveText),
   });
 

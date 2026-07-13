@@ -1,4 +1,5 @@
 import {
+  AlarmClock,
   Archive,
   ArchiveRestore,
   ArrowDown,
@@ -44,6 +45,7 @@ import {
 } from "lucide-react";
 
 export {
+  AlarmClock,
   Archive,
   ArchiveRestore,
   ArrowDown,
@@ -105,7 +107,8 @@ export type GlyphName =
   | "edit"
   | "search"
   | "web"
-  | "spawn";
+  | "spawn"
+  | "clock";
 
 const GLYPHS: Record<GlyphName, LucideIcon> = {
   shell: ChevronRight,
@@ -126,6 +129,7 @@ const GLYPHS: Record<GlyphName, LucideIcon> = {
   search: Search,
   web: Globe,
   spawn: GitBranch,
+  clock: AlarmClock,
 };
 
 export function GlyphIcon({ name, className }: { name: GlyphName; className?: string }) {

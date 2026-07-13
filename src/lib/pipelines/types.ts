@@ -96,7 +96,7 @@ export type PipelineStageRun = {
 
 export type PipelineCursorState = "pending" | "spawning" | "running" | "reviewing" | "committing";
 
-export type PipelineState = "provisioning" | "running" | "needs_decision" | "paused" | "completed" | "closed";
+export type PipelineState = "draft" | "provisioning" | "running" | "needs_decision" | "paused" | "completed" | "closed";
 
 export type Pipeline = {
   id: string;
@@ -114,7 +114,7 @@ export type Pipeline = {
   runs: PipelineStageRun[];
   cursor: { stageId: string; state: PipelineCursorState } | null;
   state: PipelineState;
-  pausedState: Exclude<PipelineState, "paused"> | null;
+  pausedState: Exclude<PipelineState, "paused" | "draft"> | null;
   stateDetail: string | null;
   srcPath: string | null;
   srcConversationId: string | null;
@@ -128,9 +128,22 @@ export type CreatePipelineRequest = {
   repoDir: string;
   stages: PipelineStageInput[];
   src?: string;
+  autoStart?: boolean;
 };
 
-export type PipelineAction = "pause" | "resume" | "retry-stage" | "skip-stage" | "override-stage" | "close";
+export type PipelineAction =
+  | "start"
+  | "update-draft"
+  | "add-stage"
+  | "remove-stage"
+  | "reorder-stage"
+  | "pause"
+  | "resume"
+  | "retry-stage"
+  | "skip-stage"
+  | "override-stage"
+  | "delete"
+  | "close";
 
 export type PatchPipelineRequest = {
   action: PipelineAction;
@@ -147,6 +160,13 @@ export type PatchPipelineRequest = {
   model?: string | null;
   effort?: string | null;
   prompt?: string;
+  task?: string;
+  spec?: string;
+  repoDir?: string;
+  stage?: PipelineStageInput;
+  index?: number;
+  stageIds?: string[];
+  toIndex?: number;
 };
 
 export type PipelinesResponse = {

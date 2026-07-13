@@ -9,6 +9,7 @@ import {
 import { getLocale, translate } from "@/lib/i18n";
 import { inboxImageExt, MAX_INBOX_IMAGE_BYTES } from "@/lib/imagePolicy";
 import type { FileEntry } from "@/lib/types";
+import { parseScheduleWakeup, refineWakeupFromResult, type WakeupInfo } from "@/lib/wakeup";
 
 import type { GlyphName } from "../icons";
 import { hhmm } from "../utils";
@@ -42,6 +43,13 @@ export type NestedCall = {
 /** The two-level orchestration detail of a `functions.exec` record. */
 export type Orchestration = { source: string; sourceTruncated: boolean; calls: NestedCall[] };
 
+/** A `ScheduleWakeup` call, resolved for the dedicated countdown card.
+    `superseded` is set once a later successful wakeup replaces this one — only
+    the newest still-valid wakeup is "active" (issue #161 §2). `failed` is set
+    when the scheduling call errored: a rejected schedule never counts down and
+    never supersedes the previous valid one (issue #161 review). */
+export type WakeupEventInfo = WakeupInfo & { superseded: boolean; failed: boolean };
+
 /**
  * One normalized, bounded, source-agnostic tool event shared by Claude, Codex,
  * and future engines. Every string field is redacted and capped inside the
@@ -72,6 +80,8 @@ export type ToolEvent = {
   outputTruncated: boolean;
   open: boolean;
   orchestration?: Orchestration;
+  /** Present on a `ScheduleWakeup` call: drives the dedicated wakeup card. */
+  wakeup?: WakeupEventInfo;
 };
 export type CitationEntry = {
   target: string;
@@ -347,13 +357,18 @@ function parseMemCitation(matchText: string, entriesText: string, idsText: strin
   return { kind: "mem-citation", entries, rolloutIds, raw: raw.raw, truncated: raw.truncated };
 }
 
-const CMD_GROUP_MIN = 4;
+const CMD_GROUP_MIN = 2;
 /* Output preview caps (unchanged from the original cmd model): ok output keeps
    the last 12 KB, an error the last 60 KB. The full command line keeps a bound
    too, so a giant heredoc cannot balloon the DOM in the expanded view. */
 const OUTPUT_OK_MAX = 12_000;
 const OUTPUT_ERR_MAX = 60_000;
 const COMMAND_MAX = 8_000;
+/* Wakeup reason/prompt are redacted and bounded before they reach the card, the
+   same safety funnel every other tool field passes through (issue #161 review).
+   The reason is a one-line summary; the prompt is the longer wake plan. */
+const WAKEUP_REASON_MAX = 300;
+const WAKEUP_PROMPT_MAX = 4_000;
 /* A Codex result-preamble line (custom-tool + interactive-shell wrappers, all
    known variants). Used to strip the contiguous leading metadata block. */
 const PREAMBLE_LINE = /^(?:Chunk ID:|Wall time\b|Original token count:|Output:[ \t]*$|Script completed\b|Script running with (?:cell|session) ID\b|Process running with (?:cell|session) ID\b|Process exited with code\b)/;
@@ -369,10 +384,15 @@ function toolBucket(event: ToolEvent): string {
   return event.tool || event.family;
 }
 
-/* A diff or an orchestration record earns its own card; simple tool rows
-   (shell/read/search/…) still fold into a cmd-group like the old cmd items. */
+/* Any tool event folds into a cmd-group (design doc §3.4: a run of ≥2
+   consecutive tool events — Read/Bash/Edit/… alike — reads as one quiet
+   ToolLine header). Diff-bodied edits and orchestration records fold too: the
+   shared ToolLine reveals their diff / nested-call body when the group row is
+   expanded, so nothing is lost by collapsing them into the quiet run. A wakeup
+   is the exception: its countdown/reason card carries live state a folded
+   header would hide, so it always stays a standalone card (issue #161). */
 function foldableTool(item: Item): item is ToolEvent {
-  return item.kind === "tool" && item.body?.type !== "diff" && !item.orchestration;
+  return item.kind === "tool" && !item.wakeup;
 }
 
 /* Maps a `tools.<method>` orchestration call to a canonical tool name so the
@@ -797,6 +817,11 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
   let codexCompacted: { src: number } | null = null;
   let plainBlock: { lines: string[]; src: number } | null = null;
   let lastPlainCall: CallRec | null = null;
+  /* Every ScheduleWakeup call, in transcript order. The active wakeup is the
+     newest non-failed one; all earlier valid wakeups are superseded and failed
+     calls stay inactive — recomputed whenever a wakeup is added or a call's
+     result marks it failed (issue #161 §2 + review). */
+  const wakeupCalls: CallRec[] = [];
   /* Snapshot cache + fold-group identity reuse across re-feeds. */
   let prevGroups = new Map<number, CmdGroupItem>();
   let snapshot: FeedSnapshot | null = null;
@@ -940,6 +965,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
     diff?: DiffModel;
     lang?: string | null;
     summary?: string;
+    wakeup?: WakeupEventInfo;
   }): ToolEvent => {
     const args = opts.args ?? {};
     const family = familyOf(opts.tool);
@@ -969,12 +995,61 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
          compact preview of the first lines, with a toggle for the rest — so the
          change is visible without a click (issue #90). */
       open: Boolean(body),
+      ...(opts.wakeup ? { wakeup: opts.wakeup } : {}),
     };
   };
   const registerCall = (event: ToolEvent): CallRec => {
     const seq = push(event);
     const rec: CallRec = { event, seq };
     calls.set(event.id, rec);
+    return rec;
+  };
+  /* Rewrites a wakeup event copy-on-write (same one-row-changes-identity pattern
+     as attach): used to update supersede/fail flags and to fill a fire time once
+     the tool_result arrives. */
+  const patchWakeupEvent = (callRec: CallRec, wakeup: WakeupEventInfo) => {
+    const event: ToolEvent = { ...callRec.event, wakeup };
+    callRec.event = event;
+    const idx = entryIndex(callRec.seq);
+    if (idx >= 0 && idx < entries.length && entries[idx].item.kind === "tool") {
+      entries[idx] = { ...entries[idx], item: event };
+      snapshot = null;
+    }
+  };
+  /* The active wakeup is the newest one whose call did not fail; every earlier
+     valid wakeup is superseded, and a failed call is neither active nor a
+     supersessor. Recomputed whenever the set changes (a new call, or a result
+     that marks a call failed). */
+  const recomputeWakeupStates = () => {
+    let activeSeq: number | null = null;
+    for (let i = wakeupCalls.length - 1; i >= 0; i -= 1) {
+      const w = wakeupCalls[i].event.wakeup;
+      if (w && !w.failed) { activeSeq = wakeupCalls[i].seq; break; }
+    }
+    for (const callRec of wakeupCalls) {
+      const w = callRec.event.wakeup;
+      if (!w) continue;
+      const superseded = !w.failed && callRec.seq !== activeSeq;
+      if (w.superseded !== superseded) patchWakeupEvent(callRec, { ...w, superseded });
+    }
+  };
+  /* Redacts and bounds a wakeup's reason/prompt at the card boundary, the same
+     funnel every other tool field passes through (issue #161 review). */
+  const safeWakeup = (info: WakeupInfo): WakeupInfo => ({
+    ...info,
+    reason: redactSecrets(info.reason).slice(0, WAKEUP_REASON_MAX),
+    prompt: redactSecrets(info.prompt).slice(0, WAKEUP_PROMPT_MAX),
+  });
+  /* A ScheduleWakeup call → a wakeup event, provisionally active until its
+     result attaches. Supersession is recomputed across all wakeups so a later
+     failed call cannot bump a still-valid earlier one. */
+  const addWakeup = (ts: unknown, id: string, input: Record<string, unknown>): CallRec => {
+    const tsMs = typeof ts === "string" || typeof ts === "number" ? Date.parse(String(ts)) : NaN;
+    const info = safeWakeup(parseScheduleWakeup(input, Number.isFinite(tsMs) ? tsMs : null));
+    const event = newToolEvent({ ts, id, tool: "ScheduleWakeup", args: input, engine: "claude", wakeup: { ...info, superseded: false, failed: false } });
+    const rec = registerCall(event);
+    wakeupCalls.push(rec);
+    recomputeWakeupStates();
     return rec;
   };
   /* A shell command from any engine. `callId` is absent for plain job logs, so
@@ -1042,6 +1117,20 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
       outputTruncated = prev.outputTruncated || combined.length > limit;
       outputPreview = combined.slice(-limit);
     }
+    /* A wakeup's result carries the RESOLVED schedule (issue #161): on success
+       refine the fire time from it (it overrides the requested delay); on error
+       the call is rejected — mark it failed so it never counts down and never
+       keeps the previous valid wakeup superseded (issue #161 review). */
+    let wakeup = prev.wakeup;
+    if (wakeup) {
+      if (isErr) {
+        wakeup = { ...wakeup, failed: true };
+      } else if (body) {
+        const tsMs = typeof prev.ts === "string" || typeof prev.ts === "number" ? Date.parse(String(prev.ts)) : NaN;
+        const refined = safeWakeup(refineWakeupFromResult(wakeup, Number.isFinite(tsMs) ? tsMs : null, body));
+        wakeup = { ...refined, superseded: wakeup.superseded, failed: false };
+      }
+    }
     const event: ToolEvent = {
       ...prev,
       status: isErr ? "err" : "ok",
@@ -1054,6 +1143,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
       srcResult: curSrc,
       outputPreview,
       outputTruncated,
+      ...(wakeup ? { wakeup } : {}),
     };
     callRec.event = event;
     const idx = entryIndex(callRec.seq);
@@ -1064,6 +1154,9 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
         snapshot = null;
       }
     }
+    /* A wakeup that just failed no longer supersedes the prior valid one — its
+       result changed the active/superseded assignment across the set. */
+    if (wakeup && wakeup.failed) recomputeWakeupStates();
     return event;
   };
   const addOutput = (callId: string | undefined, output: string, err?: boolean) => {
@@ -1386,9 +1479,13 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
           const name = textPart(part.name) || "tool";
           const input = rec(part.input);
           const id = textPart(part.id) || "plain-" + pushSeq + "-" + String(ts ?? "");
-          const command = familyOf(name) === "shell" ? textPart(input.command) : undefined;
-          const lang = familyOf(name) === "read" ? extLang(textPart(input.file_path)) : undefined;
-          registerCall(newToolEvent({ ts, id, tool: name, args: input, engine: "claude", command, lang }));
+          if (name === "ScheduleWakeup") {
+            addWakeup(ts, id, input);
+          } else {
+            const command = familyOf(name) === "shell" ? textPart(input.command) : undefined;
+            const lang = familyOf(name) === "read" ? extLang(textPart(input.file_path)) : undefined;
+            registerCall(newToolEvent({ ts, id, tool: name, args: input, engine: "claude", command, lang }));
+          }
         }
       }
       return;
@@ -1496,6 +1593,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
     codexCompacted = null;
     plainBlock = null;
     lastPlainCall = null;
+    wakeupCalls.length = 0;
     prevGroups = new Map();
     snapshot = null;
     /* pushSeq keeps counting across resets so React keys never collide. */
@@ -1531,18 +1629,28 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
     pendingCodexUsers = pendingCodexUsers.filter((pending) => pending.src >= start);
     if (codexCompacted && codexCompacted.src < start) codexCompacted = null;
     if (lastPlainCall && entryIndex(lastPlainCall.seq) < 0) lastPlainCall = null;
+    /* Drop wakeup calls whose entry slid out of the window; recompute so the
+       active/superseded assignment matches a fresh parse of the shortened
+       window. */
+    let wakeupsEvicted = false;
+    for (let i = wakeupCalls.length - 1; i >= 0; i -= 1) {
+      if (entryIndex(wakeupCalls[i].seq) < 0) { wakeupCalls.splice(i, 1); wakeupsEvicted = true; }
+    }
+    if (wakeupsEvicted) recomputeWakeupStates();
     return crossedEchoSeam || (plainBlock !== null && plainBlock.src < start);
   };
 
-  /* Collapses runs of >=4 consecutive foldable tool entries into one cmd-group
-     item so a long unbroken command series reads as a single summary line.
-     "think" items inside a run don't break it (and are absorbed into the group,
-     since they carry no signal once the run they annotate is folded); prose/
-     user/tmsg/review/image, plus diff and orchestration tool events, break it.
-     The last run of a live transcript is never folded, so the currently running
-     call always stays visible. A group whose members' events are all
-     identity-equal to the previous snapshot's is reused as-is, keeping its card
-     memoized. */
+  /* Collapses a run of >=2 consecutive foldable tool entries into one cmd-group
+     item so a long unbroken tool series reads as a single summary line. Every
+     tool event folds (Read/Bash/Edit/diff-bodied/orchestration alike); a "think"
+     item inside a run is absorbed without breaking it (it carries no signal once
+     the run it annotates is folded), while prose/user/tmsg/review/image break it.
+     In a live trailing run only the leading completed prefix folds; every
+     in-flight (`run`) call stays a visible line (and if none is running, the
+     most-recent call is held out), so a live 40-call run reads as one quiet
+     group plus its running call(s), never 40 rows (§3.4). A group whose members'
+     events are all identity-equal to the previous snapshot's is reused as-is,
+     keeping its card memoized. */
   const buildSnapshot = (isLive: boolean): FeedSnapshot => {
     const out: FeedEntry[] = [];
     const nextGroups = new Map<number, CmdGroupItem>();
@@ -1562,25 +1670,37 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
         continue;
       }
       let j = i;
-      const toolEntries: { seq: number; item: ToolEvent }[] = [];
+      const toolEntries: { idx: number; seq: number; item: ToolEvent }[] = [];
       while (j < entries.length) {
         const cur = entries[j];
-        if (foldableTool(cur.item)) toolEntries.push({ seq: cur.seq, item: cur.item });
+        if (foldableTool(cur.item)) toolEntries.push({ idx: j, seq: cur.seq, item: cur.item });
         else if (cur.item.kind !== "think") break;
         j += 1;
       }
-      const isLastRun = j === entries.length;
-      if (toolEntries.length >= CMD_GROUP_MIN && !(isLive && isLastRun)) {
-        const gkey = toolEntries[0].seq;
+      /* A live trailing run folds only its leading completed prefix: every
+         in-flight (`run`) call stays a visible line so concurrent running calls
+         are never buried in a quiet closed group, and if none is running the
+         most-recent call is still held out. A completed or interior run folds in
+         full. */
+      const isLiveTail = isLive && j === entries.length;
+      let foldCount = toolEntries.length;
+      if (isLiveTail) {
+        const firstRun = toolEntries.findIndex((entry) => entry.item.status === "run");
+        foldCount = firstRun >= 0 ? firstRun : toolEntries.length - 1;
+      }
+      if (foldCount >= CMD_GROUP_MIN) {
+        const grouped = toolEntries.slice(0, foldCount);
+        const groupEnd = grouped[grouped.length - 1].idx + 1;
+        const gkey = grouped[0].seq;
         const prev = prevGroups.get(gkey);
         let group: CmdGroupItem;
-        if (prev && prev.calls.length === toolEntries.length && toolEntries.every((entry, k) => prev.calls[k] === entry.item)) {
+        if (prev && prev.calls.length === grouped.length && grouped.every((entry, k) => prev.calls[k] === entry.item)) {
           group = prev;
         } else {
           const byTool: Record<string, number> = {};
           let okCount = 0;
           let errCount = 0;
-          for (const entry of toolEntries) {
+          for (const entry of grouped) {
             const tool = toolBucket(entry.item);
             byTool[tool] = (byTool[tool] ?? 0) + 1;
             if (entry.item.status === "ok") okCount += 1;
@@ -1588,10 +1708,10 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
           }
           group = {
             kind: "cmd-group",
-            ids: toolEntries.map((entry) => entry.item.id),
-            calls: toolEntries.map((entry) => entry.item),
-            t0: toolEntries[0]?.item.ts,
-            t1: toolEntries.at(-1)?.item.ts,
+            ids: grouped.map((entry) => entry.item.id),
+            calls: grouped.map((entry) => entry.item),
+            t0: grouped[0]?.item.ts,
+            t1: grouped.at(-1)?.item.ts,
             byTool,
             okCount,
             errCount,
@@ -1600,7 +1720,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
         }
         nextGroups.set(gkey, group);
         out.push({ anchorKey: anchorKey(head, "group"), key: "g" + gkey, item: group });
-        i = j;
+        i = groupEnd;
       } else {
         out.push({ anchorKey: anchorKey(head, "row"), key: String(head.seq), item: head.item });
         i += 1;

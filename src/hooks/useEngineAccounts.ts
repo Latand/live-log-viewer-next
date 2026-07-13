@@ -106,12 +106,15 @@ export type AccountLimits = {
   weekly: AccountLimitWindow | null;
 };
 
+export type AccountAuthHealth = "authenticated" | "signed_out" | "unknown" | "error";
+
 export type AccountOption = {
   id: string;
   label: string;
   /** Managed accounts own the sign-in/retry affordances; legacy ones never do. */
   kind?: "legacy" | "managed";
   authPresent: boolean;
+  authHealth?: AccountAuthHealth;
   loginPending: boolean;
   loginState: ManagedAttemptState | "idle" | "authenticated";
   attemptState?: ManagedAttemptState | null;
@@ -273,12 +276,18 @@ function accountResponse(body: unknown, engine: Engine): EngineResponse {
   const section = (body as Record<string, unknown> | null)?.[engine] as { active?: unknown; accounts?: unknown; migration?: unknown; autoBalance?: unknown } | undefined;
   if (typeof section?.active !== "string" || !Array.isArray(section.accounts)) throw new Error("accounts response invalid");
   const accounts = section.accounts.map((raw): AccountOption => {
-    const account = raw as AccountOption & { effective?: unknown; login?: unknown; limits?: unknown };
+    const account = raw as AccountOption & { auth?: unknown; effective?: unknown; login?: unknown; limits?: unknown };
     const login = engine === "claude" ? parseClaudeLogin(account.login) : null;
     // The phase is authoritative for pending state (C3): a nonterminal login
     // keeps the row pending even when the server's raw `loginPending` lags.
     const loginPending = login ? NONTERMINAL_CLAUDE_LOGIN_PHASES.has(login.phase) : account.loginPending === true;
-    return { ...account, login, loginPending, effective: parseEffective(account.effective), limits: parseAccountLimits(account.limits) };
+    const authState = typeof account.auth === "object" && account.auth !== null
+      ? (account.auth as { state?: unknown }).state
+      : null;
+    const authHealth: AccountAuthHealth = authState === "authenticated" || authState === "signed_out" || authState === "unknown" || authState === "error"
+      ? authState
+      : account.authPresent ? "unknown" : "signed_out";
+    return { ...account, authHealth, login, loginPending, effective: parseEffective(account.effective), limits: parseAccountLimits(account.limits) };
   });
   return {
     active: section.active,

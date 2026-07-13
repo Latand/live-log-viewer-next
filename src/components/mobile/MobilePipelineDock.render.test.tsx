@@ -66,3 +66,26 @@ test("a paused pipeline shows Resume; a completed one keeps Close but drops paus
   const closed = renderToStaticMarkup(<MobilePipelineDock pipeline={{ ...provisioning, state: "closed" } as Pipeline} />);
   expect(closed).not.toContain("aria-label=\"Close pipeline\"");
 });
+
+test("mobile renders a read-only draft plan with a 44px Start action", () => {
+  const draft = {
+    ...provisioning,
+    task: "Review on mobile",
+    state: "draft",
+    baseBranch: "",
+    baseRef: "",
+    lastPassedCommit: "",
+    runs: provisioning.stages.map((stage) => ({ stageId: stage.id, attempts: [] })),
+    cursor: { stageId: "plan", state: "pending" },
+  } as Pipeline;
+  const html = renderToStaticMarkup(<MobilePipelineDock pipeline={draft} />);
+
+  expect(html).toContain("DRAFT");
+  expect(html).toContain("plan");
+  expect(html).toContain("build");
+  expect(html).toContain("review");
+  expect(html).toContain("Start pipeline");
+  expect(html).toContain("h-11");
+  expect(html).toContain("Discard draft");
+  expect(html).not.toContain("Pause pipeline");
+});

@@ -395,7 +395,7 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
           ) : null
         ) : (
           <button
-            className={`absolute bottom-2 ${pillPos} z-10 inline-flex items-center gap-1 whitespace-nowrap rounded-full border border-line bg-panel px-2.5 py-1 text-[11px] font-semibold text-ink shadow-card hover:border-accent/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40`}
+            className={`absolute bottom-2 ${pillPos} z-10 inline-flex items-center gap-1 whitespace-nowrap rounded-full border border-border bg-raised px-2.5 py-1 text-label font-semibold text-primary shadow-1 [@media(pointer:coarse)]:min-h-11 hover:border-accent/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40`}
             aria-label={t("feed.backToLive")}
             onClick={jumpToTail}
           >
@@ -430,14 +430,14 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
           if (el.scrollTop < 120 && canRevealOlder && !tail.loadingOlder && !tail.loading) revealOlder();
         }}
       >
-      <div ref={content} className={compact ? "px-3 pb-4 text-[13px]" : "mx-auto w-full max-w-[1060px] px-6 pb-16"}>
+      <div ref={content} className={compact ? "px-3 pb-3 text-body" : "mx-auto w-full max-w-[1060px] px-6 pb-4"}>
         {!file ? (
           <div className="mt-[20vh] text-center text-dim">{t("feed.pickLog")}</div>
         ) : (
           <>
             {compact && canRevealOlder ? (
               <button
-                className="mb-2 flex w-full items-center justify-center gap-1.5 rounded-[8px] border border-dashed border-line bg-bg px-2 py-1 text-[11px] font-semibold text-dim hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                className="mb-2 flex w-full items-center justify-center gap-1.5 rounded-control border border-dashed border-border bg-sunken px-2 py-1 text-label font-semibold text-muted [@media(pointer:coarse)]:min-h-11 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
                 disabled={tail.loadingOlder}
                 onClick={revealOlder}
               >
@@ -452,7 +452,7 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
             ) : null}
             {!compact && canRevealOlder && feed.items.length ? (
               <button
-                className="mb-3 flex w-full items-center justify-center gap-1.5 rounded-[10px] border border-dashed border-line bg-panel px-3 py-1.5 text-[12px] font-semibold text-dim hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                className="mb-3 flex w-full items-center justify-center gap-1.5 rounded-control border border-dashed border-border bg-sunken px-3 py-1.5 text-ui font-semibold text-muted [@media(pointer:coarse)]:min-h-11 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
                 disabled={tail.loadingOlder}
                 onClick={revealOlder}
               >

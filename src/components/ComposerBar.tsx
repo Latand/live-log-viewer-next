@@ -77,8 +77,10 @@ function SendMenu({ label, actions, onClose }: { label: string; actions: SendMen
       ref={rootRef}
       role="menu"
       aria-label={label}
-      className="absolute bottom-[calc(100%+6px)] right-0 z-40 w-[220px] rounded-[12px] border border-line bg-panel p-1.5 shadow-[0_10px_36px_rgb(20_20_30/0.18)]"
+      className="absolute bottom-[calc(100%+6px)] right-0 z-40 w-[220px] rounded-surface border border-border bg-raised p-1.5 shadow-2"
     >
+      {/* Menu group-label typography (uppercase/tracking → sentence-case §3.6)
+          is Slice 3; kept as-is here to hold the slice boundary. */}
       <div className="px-2 pb-1 pt-1.5 text-[10.5px] font-bold uppercase tracking-wide text-dim">
         {label}
       </div>
@@ -92,14 +94,14 @@ function SendMenu({ label, actions, onClose }: { label: string; actions: SendMen
             action.onSelect();
             onClose();
           }}
-          className={`flex w-full items-start gap-2 rounded-[9px] px-2 py-1.5 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-50 ${
-            action.tone === "ok" ? "hover:bg-ok/10" : "hover:bg-bg"
+          className={`flex w-full items-start gap-2 rounded-control px-2 py-1.5 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-50 ${
+            action.tone === "ok" ? "hover:bg-success/10" : "hover:bg-sunken"
           }`}
         >
-          <Play className={`mt-[2px] h-3.5 w-3.5 shrink-0 ${action.tone === "ok" ? "text-ok" : "text-dim"}`} aria-hidden />
+          <Play className={`mt-[2px] h-3.5 w-3.5 shrink-0 ${action.tone === "ok" ? "text-success" : "text-muted"}`} aria-hidden />
           <span className="min-w-0 flex-1">
-            <span className="block text-[12px] font-semibold text-ink">{action.label}</span>
-            {action.description ? <span className="block text-[10.5px] leading-snug text-dim">{action.description}</span> : null}
+            <span className="block text-ui font-semibold text-primary">{action.label}</span>
+            {action.description ? <span className="block text-caption leading-snug text-muted">{action.description}</span> : null}
           </span>
         </button>
       ))}
@@ -150,101 +152,111 @@ export function ComposerBar({
   const [sendMenuOpen, setSendMenuOpen] = useState(false);
   const hasSendMenu = sendMenuActions.length > 0;
   const sendDisabled = !canSend && !hasSendMenu;
-  /* Phone action buttons meet the 44px minimum; desktop keeps the compact p-2. */
-  const iconBtn = isMobile ? "h-11 w-11" : "p-2";
+  /* Composer action buttons (send, image) are a 32px visual control with a 44px
+     touch hit area via a pseudo-element (design doc §3.5, matching the anchored
+     mic), so the accent send never renders as a full 44×44 block on a phone;
+     desktop keeps the compact p-2. */
+  const iconBtn = isMobile ? "relative h-8 w-8 before:absolute before:-inset-1.5 before:content-['']" : "p-2";
 
   return (
     <>
-      <textarea
-        ref={inputRef}
-        value={displayText}
-        rows={1}
-        readOnly={Boolean(dictation.liveText)}
-        onChange={(event) => setText(event.target.value)}
-        /* Focusing the composer often precedes a dictation; minting the live
-           token here hides its round-trip from the eventual mic press. */
-        onFocus={prewarmLiveToken}
-        onPaste={(event) => {
-          if (onImageFiles) {
-            const picks = Array.from(event.clipboardData.items)
-              .filter((entry) => entry.type.startsWith("image/"))
-              .map((entry) => entry.getAsFile())
-              .filter((entry): entry is File => entry !== null);
-            if (picks.length) {
-              event.preventDefault();
-              onImageFiles(picks);
+      {/* The input is the anchor (design doc §3.5): a single sunken field that
+          owns the mic and send controls at its right edge, so send is the one
+          accent element in the composer. */}
+      <div className="flex items-end gap-1 rounded-control border border-border bg-sunken py-1 pl-2.5 pr-1 focus-within:ring-2 focus-within:ring-accent/40">
+        <textarea
+          ref={inputRef}
+          value={displayText}
+          rows={1}
+          readOnly={Boolean(dictation.liveText)}
+          onChange={(event) => setText(event.target.value)}
+          /* Focusing the composer often precedes a dictation; minting the live
+             token here hides its round-trip from the eventual mic press. */
+          onFocus={prewarmLiveToken}
+          onPaste={(event) => {
+            if (onImageFiles) {
+              const picks = Array.from(event.clipboardData.items)
+                .filter((entry) => entry.type.startsWith("image/"))
+                .map((entry) => entry.getAsFile())
+                .filter((entry): entry is File => entry !== null);
+              if (picks.length) {
+                event.preventDefault();
+                onImageFiles(picks);
+              }
+              return;
             }
-            return;
-          }
-          attachments.handlePaste(event);
-        }}
-        onKeyDown={(event) => {
-          /* Enter sends like the old single-line input; Shift+Enter makes a
-             new line. Composition guard keeps IME confirms from sending.
-             During recording Enter means stop-and-send — a plain submit would
-             fire off just the typed prefix and leave the recording running. */
-          if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
+            attachments.handlePaste(event);
+          }}
+          onKeyDown={(event) => {
+            /* Enter sends like the old single-line input; Shift+Enter makes a
+               new line. Composition guard keeps IME confirms from sending.
+               During recording Enter means stop-and-send — a plain submit would
+               fire off just the typed prefix and leave the recording running. */
+            if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
+              event.preventDefault();
+              if (dictation.phase === "rec") void stopAndSend();
+              else void submit();
+            }
+          }}
+          placeholder={placeholder}
+          aria-label={textareaAriaLabel}
+          disabled={fieldsDisabled}
+          className="min-w-0 flex-1 resize-none overflow-y-auto self-center bg-transparent py-1 text-ui leading-[18px] text-primary placeholder:text-muted focus-visible:outline-none disabled:opacity-60"
+        />
+        <MicButtonView {...dictation} busy={voiceSending} onText={insertSpoken} anchored />
+        <span
+          className="relative inline-flex shrink-0"
+          onContextMenu={(event) => {
+            if (!hasSendMenu || dictationRecording) return;
             event.preventDefault();
-            if (dictation.phase === "rec") void stopAndSend();
-            else void submit();
-          }
-        }}
-        placeholder={placeholder}
-        aria-label={textareaAriaLabel}
-        disabled={fieldsDisabled}
-        className="w-full resize-none overflow-y-auto rounded-[10px] border border-line bg-panel px-2.5 py-1.5 text-[12.5px] leading-[18px] text-[#222] placeholder:text-dim focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60"
-      />
-      <div className="flex items-center justify-between gap-1.5">
-        {leftSlot}
-        <div className="flex shrink-0 items-center gap-1.5">
-          <MicButtonView {...dictation} busy={voiceSending} onText={insertSpoken} />
+            setSendMenuOpen((open) => !open);
+          }}
+        >
+          <Hint label={dictationRecording ? (sendTitleRecording ?? sendLabelRecording) : sendLabelIdle} align="right">
+            <button
+              type={dictationRecording ? "button" : "submit"}
+              onClick={
+                dictationRecording
+                  ? () => void stopAndSend()
+                  : (event) => {
+                      if (!canSend) {
+                        event.preventDefault();
+                        event.stopPropagation();
+                      }
+                    }
+              }
+              disabled={sendDisabled}
+              aria-disabled={!canSend}
+              aria-label={dictationRecording ? sendLabelRecording : sendLabelIdle}
+              style={dictationRecording ? undefined : sendIdleStyle}
+              className={`inline-flex shrink-0 items-center justify-center rounded-control border text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 disabled:opacity-40 aria-disabled:opacity-40 ${iconBtn} ${
+                dictationRecording ? "border-danger bg-danger hover:opacity-90" : sendIdleClassName
+              }`}
+            >
+              {busy || voiceSending ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : <Play className="h-4 w-4" aria-hidden />}
+            </button>
+          </Hint>
+          {sendMenuOpen && hasSendMenu && sendMenuLabel ? (
+            <SendMenu label={sendMenuLabel} actions={sendMenuActions} onClose={() => setSendMenuOpen(false)} />
+          ) : null}
+        </span>
+      </div>
+      {/* Secondary controls (mode chip, interrupt/compact, images): one quiet
+          borderless row under the input. */}
+      {leftSlot || showImage ? (
+        <div className="flex items-center justify-between gap-1.5">
+          <div className="flex min-w-0 items-center gap-1.5">{leftSlot}</div>
           {showImage ? (
             <Hint label={imageAriaLabel}>
               <ImagePickerButton
                 ariaLabel={imageAriaLabel}
-                className={`inline-flex shrink-0 items-center justify-center rounded-[8px] border border-line bg-panel text-dim hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${iconBtn}`}
+                className={`inline-flex shrink-0 items-center justify-center rounded-control text-muted hover:bg-sunken hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${iconBtn}`}
                 onFiles={onImageFiles ?? attachments.addFiles}
               />
             </Hint>
           ) : null}
-          <span
-            className="relative inline-flex shrink-0"
-            onContextMenu={(event) => {
-              if (!hasSendMenu || dictationRecording) return;
-              event.preventDefault();
-              setSendMenuOpen((open) => !open);
-            }}
-          >
-            <Hint label={dictationRecording ? (sendTitleRecording ?? sendLabelRecording) : sendLabelIdle} align="right">
-              <button
-                type={dictationRecording ? "button" : "submit"}
-                onClick={
-                  dictationRecording
-                    ? () => void stopAndSend()
-                    : (event) => {
-                        if (!canSend) {
-                          event.preventDefault();
-                          event.stopPropagation();
-                        }
-                      }
-                }
-                disabled={sendDisabled}
-                aria-disabled={!canSend}
-                aria-label={dictationRecording ? sendLabelRecording : sendLabelIdle}
-                style={dictationRecording ? undefined : sendIdleStyle}
-                className={`inline-flex shrink-0 items-center justify-center rounded-[8px] border text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 disabled:opacity-40 aria-disabled:opacity-40 ${iconBtn} ${
-                  dictationRecording ? "border-err bg-err hover:opacity-90" : sendIdleClassName
-                }`}
-              >
-                {busy || voiceSending ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : <Play className="h-4 w-4" aria-hidden />}
-              </button>
-            </Hint>
-            {sendMenuOpen && hasSendMenu && sendMenuLabel ? (
-              <SendMenu label={sendMenuLabel} actions={sendMenuActions} onClose={() => setSendMenuOpen(false)} />
-            ) : null}
-          </span>
         </div>
-      </div>
+      ) : null}
       {/* The task composer renders its own durable-ref strip; the in-memory one
           stays for the pane/draft composers that still upload at send time. */}
       {onImageFiles ? null : <ImagePreviewStrip images={attachments.images} onRemove={attachments.removeAt} />}
@@ -252,7 +264,7 @@ export function ComposerBar({
         <span
           role="status"
           aria-live={status.kind === "err" ? "assertive" : "polite"}
-          className={`truncate text-[10.5px] font-semibold ${status.kind === "ok" ? "text-ok" : status.kind === "info" ? "text-[#7a5300]" : "text-err"}`}
+          className={`truncate text-caption font-semibold ${status.kind === "ok" ? "text-success" : status.kind === "info" ? "text-warning" : "text-danger"}`}
         >
           {status.text}
         </span>
