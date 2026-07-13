@@ -1160,17 +1160,109 @@ export class AgentRegistry {
     }
   }
 
-  private retireLock(lock: string, fingerprint: string): void {
-    // Every observer of one stale directory chooses the same destination.
-    // The retained directory fences delayed observers away from a new owner.
-    const retired = `${lock}.retired-${fingerprint}`;
+  private lockToken(lock: string): string | null {
     try {
-      fs.renameSync(lock, retired);
+      const owner = JSON.parse(fs.readFileSync(path.join(lock, "owner.json"), "utf8")) as { token?: unknown };
+      return typeof owner.token === "string" ? owner.token : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private finishRetirement(source: string, retired: string): void {
+    try {
+      fs.renameSync(source, retired);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "ENOENT") return;
+      if (code === "EEXIST" || code === "ENOTEMPTY") {
+        fs.rmSync(source, { recursive: true, force: true });
+        return;
+      }
+      throw error;
+    }
+  }
+
+  private restoreRecovery(lock: string, recovery: string): void {
+    for (;;) {
+      try {
+        fs.renameSync(recovery, lock);
+        return;
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code === "ENOENT") return;
+        if (code !== "EEXIST" && code !== "ENOTEMPTY") throw error;
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
+      }
+    }
+  }
+
+  private retireObservedLock(
+    lock: string,
+    observed: RegistryLockClaim["directory"],
+    token: string | null,
+    fingerprint: string,
+  ): void {
+    const recovery = `${lock}.recovering`;
+    try {
+      fs.renameSync(lock, recovery);
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
       if (code === "ENOENT" || code === "EEXIST" || code === "ENOTEMPTY") return;
       throw error;
     }
+    if (!this.sameDirectory(recovery, observed) || this.lockToken(recovery) !== token) {
+      this.restoreRecovery(lock, recovery);
+      return;
+    }
+    this.finishRetirement(recovery, `${lock}.retired-${fingerprint}`);
+  }
+
+  private resolveInterruptedRecovery(lock: string): void {
+    const recovery = `${lock}.recovering`;
+    if (!fs.existsSync(recovery)) return;
+    if (fs.existsSync(lock)) {
+      let publishedStat: fs.Stats;
+      let publishedOwner: (ProcessIdentity & { token?: unknown }) | null = null;
+      try {
+        publishedStat = fs.statSync(lock);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+        throw error;
+      }
+      try {
+        publishedOwner = JSON.parse(fs.readFileSync(path.join(lock, "owner.json"), "utf8")) as ProcessIdentity & { token?: unknown };
+      } catch {
+        if (this.lockTiming.now() - publishedStat.mtimeMs < REGISTRY_LOCK_PUBLICATION_GRACE_MS) return;
+      }
+      if (publishedOwner && Number.isInteger(publishedOwner.pid) && publishedOwner.pid > 0 && this.ownerAlive(publishedOwner)) return;
+      const publishedToken = typeof publishedOwner?.token === "string" ? publishedOwner.token : null;
+      const publishedFingerprint = publishedToken
+        && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(publishedToken)
+        ? publishedToken
+        : `abandoned-${publishedStat.dev}-${publishedStat.ino}-${publishedStat.ctimeMs}`;
+      this.finishRetirement(lock, `${lock}.retired-${publishedFingerprint}`);
+      if (fs.existsSync(lock)) return;
+    }
+    let stat: fs.Stats;
+    let owner: (ProcessIdentity & { token?: unknown }) | null = null;
+    try {
+      stat = fs.statSync(recovery);
+      owner = JSON.parse(fs.readFileSync(path.join(recovery, "owner.json"), "utf8")) as ProcessIdentity & { token?: unknown };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      this.finishRetirement(recovery, `${lock}.retired-interrupted-invalid`);
+      return;
+    }
+    if (Number.isInteger(owner.pid) && owner.pid > 0 && this.ownerAlive(owner)) {
+      this.restoreRecovery(lock, recovery);
+      return;
+    }
+    const token = typeof owner.token === "string" ? owner.token : null;
+    const fingerprint = token && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(token)
+      ? token
+      : `interrupted-${stat.dev}-${stat.ino}-${stat.ctimeMs}`;
+    this.finishRetirement(recovery, `${lock}.retired-${fingerprint}`);
   }
 
   private recoverContendedLock(lock: string): void {
@@ -1193,16 +1285,18 @@ export class AgentRegistry {
           && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(previous.token)
           ? previous.token
           : `legacy-${stat.dev}-${stat.ino}-${stat.ctimeMs}`;
-        this.retireLock(lock, fingerprint);
+        this.retireObservedLock(lock, { dev: stat.dev, ino: stat.ino }, typeof previous.token === "string" ? previous.token : null, fingerprint);
       }
       return;
     }
     if (this.lockTiming.now() - stat.mtimeMs >= REGISTRY_LOCK_PUBLICATION_GRACE_MS) {
-      this.retireLock(lock, `incomplete-${stat.dev}-${stat.ino}-${stat.ctimeMs}`);
+      this.retireObservedLock(lock, { dev: stat.dev, ino: stat.ino }, null, `incomplete-${stat.dev}-${stat.ino}-${stat.ctimeMs}`);
     }
   }
 
   private tryAcquireLock(lock: string, owner: ProcessIdentity): RegistryLockClaim | null {
+    this.resolveInterruptedRecovery(lock);
+    if (fs.existsSync(`${lock}.recovering`)) return null;
     const token = crypto.randomUUID();
     const staging = `${lock}.pending-${token}`;
     let fd: number | null = null;
@@ -1225,7 +1319,14 @@ export class AgentRegistry {
         this.recoverContendedLock(lock);
         return null;
       }
-      return { lock, token, directory: { dev: stat.dev, ino: stat.ino } };
+      const claim = { lock, token, directory: { dev: stat.dev, ino: stat.ino } };
+      if (fs.existsSync(`${lock}.recovering`)) {
+        if (this.sameDirectory(lock, claim.directory) && this.lockToken(lock) === token) {
+          fs.rmSync(lock, { recursive: true, force: true });
+        }
+        return null;
+      }
+      return claim;
     } catch (error) {
       if (fd !== null) fs.closeSync(fd);
       fs.rmSync(staging, { recursive: true, force: true });
@@ -1234,13 +1335,10 @@ export class AgentRegistry {
   }
 
   private releaseLock(claim: RegistryLockClaim): void {
-    if (!this.sameDirectory(claim.lock, claim.directory)) return;
-    try {
-      const owner = JSON.parse(fs.readFileSync(path.join(claim.lock, "owner.json"), "utf8")) as { token?: unknown };
-      if (owner.token !== claim.token || !this.sameDirectory(claim.lock, claim.directory)) return;
-      fs.rmSync(claim.lock, { recursive: true, force: true });
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    for (const candidate of [claim.lock, `${claim.lock}.recovering`, claim.lock]) {
+      if (!this.sameDirectory(candidate, claim.directory) || this.lockToken(candidate) !== claim.token) continue;
+      fs.rmSync(candidate, { recursive: true, force: true });
+      return;
     }
   }
 

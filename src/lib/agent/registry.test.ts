@@ -325,6 +325,54 @@ describe("agent registry", () => {
     )).resolves.toBe("completed");
   });
 
+  test("stale recovery preserves a replacement acquired during the liveness check", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-liveness-race-"));
+    const filename = path.join(dir, "agent-registry.json");
+    const staleToken = "66666666-6666-4666-8666-666666666666";
+    const replacementToken = "77777777-7777-4777-8777-777777777777";
+    const lock = `${filename}.locks/${encodeURIComponent("codex:liveness-race")}`;
+    let raced = false;
+    let replacementMoved = false;
+    const store = new AgentRegistry(filename, (owner) => {
+      if (owner.startIdentity === "42:stale" && !raced) {
+        raced = true;
+        fs.rmSync(lock, { recursive: true, force: true });
+        fs.mkdirSync(lock);
+        fs.writeFileSync(path.join(lock, "owner.json"), JSON.stringify({
+          pid: 43,
+          startIdentity: "43:replacement",
+          token: replacementToken,
+        }));
+        return false;
+      }
+      return owner.startIdentity === "43:replacement";
+    }, {
+      now: () => Date.now(),
+      wait: async () => {
+        const retired = `${lock}.retired-${staleToken}`;
+        replacementMoved = !fs.existsSync(lock) && fs.existsSync(retired);
+        const replacementPath = replacementMoved ? retired : lock;
+        expect(JSON.parse(fs.readFileSync(path.join(replacementPath, "owner.json"), "utf8")).token).toBe(replacementToken);
+        fs.rmSync(replacementPath, { recursive: true, force: true });
+      },
+    });
+    fs.mkdirSync(lock, { recursive: true });
+    fs.writeFileSync(path.join(lock, "owner.json"), JSON.stringify({
+      pid: 42,
+      startIdentity: "42:stale",
+      token: staleToken,
+    }));
+
+    await store.withOperationLock(
+      { engine: "codex", sessionId: "liveness-race" },
+      { pid: process.pid, startIdentity: null },
+      async () => undefined,
+    );
+
+    expect(raced).toBe(true);
+    expect(replacementMoved).toBe(false);
+  });
+
   test("an old claim cannot release a replacement lock", async () => {
     const store = registry();
     const lock = `${store.filename}.locks/${encodeURIComponent("codex:replacement")}`;
