@@ -6,6 +6,7 @@ import { NextResponse } from "next/server";
 
 import { listFilesWithProjectCatalog } from "@/lib/scanner";
 import { agentRegistry, conversationLookupFromSnapshot } from "@/lib/agent/registry";
+import { conversationCatalogSnapshot } from "@/lib/scanner/conversationCatalog";
 import { pidAlive, readPpid } from "@/lib/scanner/process";
 import { loadFlows } from "@/lib/flows/store";
 import { loadPipelines } from "@/lib/pipelines/store";
@@ -20,13 +21,44 @@ import { readAuthorshipEvidence } from "@/lib/reaperAuthorship";
 import { overlaySessionTitles } from "@/lib/session/titleProjection";
 import { tmuxEndpointHealth } from "@/lib/tmux";
 import { claudeProjectRootFor, codexSessionRootFor } from "@/lib/scanner/roots";
-import type { FilesResponse } from "@/lib/types";
+import type { FilesResponse, ProjectCatalogEntry } from "@/lib/types";
 
 interface FilesRouteDependencies {
   listFilesWithProjectCatalog: (
     selectedProject: string | undefined,
     pinnedPath: string | undefined,
   ) => ReturnType<typeof listFilesWithProjectCatalog>;
+}
+
+function projectedProjectCatalog(
+  fallback: ProjectCatalogEntry[],
+  snapshot: ReturnType<ReturnType<typeof agentRegistry>["snapshot"]>,
+): ProjectCatalogEntry[] {
+  const source = conversationCatalogSnapshot();
+  if (!source.length) return fallback;
+  const projectByPath = new Map<string, string>();
+  const archivedPaths = new Set<string>();
+  for (const conversation of Object.values(snapshot.conversations)) {
+    const latest = conversation.generations.at(-1);
+    if (!latest) continue;
+    if (latest.launchProfile.project) projectByPath.set(latest.path, latest.launchProfile.project);
+    for (const generation of conversation.generations) {
+      if (generation.path !== latest.path) archivedPaths.add(generation.path);
+    }
+    for (const pathname of conversation.continuityPaths) {
+      if (pathname !== latest.path) archivedPaths.add(pathname);
+    }
+  }
+  const groups = new Map<string, ProjectCatalogEntry>();
+  for (const entry of source) {
+    if (archivedPaths.has(entry.path)) continue;
+    const project = projectByPath.get(entry.path) ?? entry.project;
+    const group = groups.get(project) ?? { project, smt: 0, conversations: 0 };
+    group.smt = Math.max(group.smt, entry.mtime);
+    group.conversations += 1;
+    groups.set(project, group);
+  }
+  return [...groups.values()].sort((left, right) => right.smt - left.smt || left.project.localeCompare(right.project));
 }
 
 export async function buildFilesResponse(request: Request, dependencies: FilesRouteDependencies): Promise<NextResponse> {
@@ -255,9 +287,10 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
     console.error("[files] pipelines store unreadable; serving without pipelines", error);
   }
   const projected = projectRateLimitReadModel(files, loadFlows(), registrySnapshot);
+  const effectiveProjectCatalog = projectedProjectCatalog(projectCatalog, registrySnapshot);
   const body = JSON.stringify({
     files: projected.files,
-    projectCatalog,
+    projectCatalog: effectiveProjectCatalog,
     flows: projected.flows,
     pipelines,
     workflows,

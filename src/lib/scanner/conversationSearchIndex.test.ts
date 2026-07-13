@@ -57,6 +57,25 @@ test("search indexing prunes cached transcripts outside the current catalog", as
   expect(reads).toEqual([catalog[0]!.path]);
 });
 
+test("search indexing caches text only after hydration succeeds", async () => {
+  const catalog = [entry(1501)];
+  let reads = 0;
+  const readText = () => {
+    reads += 1;
+    if (reads === 1) throw new Error("transient read failure");
+    return { title: "Recovered title", firstPrompt: "Recovered prompt" };
+  };
+  const options = { readText, yieldControl: async () => {} };
+
+  await expect(indexConversationCatalog(catalog, options)).rejects.toThrow("transient read failure");
+  const recovered = await indexConversationCatalog(catalog, options);
+  const cached = await indexConversationCatalog(catalog, options);
+
+  expect(recovered[0]).toMatchObject({ title: "Recovered title", firstPrompt: "Recovered prompt" });
+  expect(cached[0]).toMatchObject({ title: "Recovered title", firstPrompt: "Recovered prompt" });
+  expect(reads).toBe(2);
+});
+
 test("search indexing evicts prompt text beyond its byte budget", async () => {
   const catalog = [entry(2001), entry(2002)];
   const reads: string[] = [];

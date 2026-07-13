@@ -3,7 +3,7 @@ import { agentRegistry, RegistryReadError } from "../agent/registry";
 import { tickFlows } from "../flows/engine";
 import { tickPipelines } from "../pipelines/engine";
 import { notifyQuestion } from "../push";
-import { overlaySessionTitles } from "../session/titleProjection";
+import { overlaySessionTitles, sessionProjectProjection } from "../session/titleProjection";
 import { tickTaskInbox } from "../tasks/inboxScanner";
 import { resolveTarget } from "../tmux";
 import { tickWorkflows } from "../workflows/engine";
@@ -137,25 +137,7 @@ export async function listFilesWithProjectCatalog(selectedProject?: string, opti
    into their successor's card, so they rank below live transcripts when the
    recency cap is applied and leave the cap slots to live conversations. */
 export function archivedTranscriptPaths(): ReadonlySet<string> {
-  const archived = new Set<string>();
-  let snapshot: ReturnType<ReturnType<typeof agentRegistry>["snapshot"]>;
-  try {
-    snapshot = agentRegistry().snapshot();
-  } catch (error) {
-    /* Demotion only shapes the recency ranking. When the registry is
-       corrupt or unsupported, discovery proceeds with an empty demotion set
-       and timeline/spawn/tasks/tmux stay available. Mirrors the board
-       route's RegistryReadError handling. */
-    if (error instanceof RegistryReadError) return archived;
-    throw error;
-  }
-  for (const conversation of Object.values(snapshot.conversations)) {
-    const latest = conversation.generations.at(-1);
-    if (!latest) continue;
-    for (const generation of conversation.generations) if (generation.path !== latest.path) archived.add(generation.path);
-    for (const pathname of conversation.continuityPaths) if (pathname !== latest.path) archived.add(pathname);
-  }
-  return archived;
+  return sessionProjectProjection(true).archivedPaths;
 }
 
 async function listFilesInternal(

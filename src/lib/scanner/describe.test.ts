@@ -38,6 +38,29 @@ test("parseWorktreeGitdir rejects gitdirs that are not linked worktrees", () => 
   expect(parseWorktreeGitdir("/home/u/sub", "gitdir: /home/u/worktrees/x")).toBeNull();
 });
 
+test("search text hydration retries after a transient filesystem failure", () => {
+  const transcript = path.join(SANDBOX, "transient-search.jsonl");
+  fs.writeFileSync(transcript, JSON.stringify({ type: "user", message: { content: "Recovered search prompt" } }) + "\n");
+  const size = fs.statSync(transcript).size;
+  const originalOpen = fs.openSync;
+  let attempts = 0;
+  fs.openSync = ((...args: Parameters<typeof fs.openSync>) => {
+    attempts += 1;
+    if (attempts === 1) {
+      const error = new Error("too many open files") as NodeJS.ErrnoException;
+      error.code = "EMFILE";
+      throw error;
+    }
+    return originalOpen(...args);
+  }) as typeof fs.openSync;
+  try {
+    expect(() => searchTextForTranscript(transcript, size, "claude")).toThrow("too many open files");
+    expect(searchTextForTranscript(transcript, size, "claude").firstPrompt).toBe("Recovered search prompt");
+  } finally {
+    fs.openSync = originalOpen;
+  }
+});
+
 test("a deleted codex worktree still groups under its parent repo project", () => {
   /* Codex removes `~/.codex/worktrees/<hash>/<Repo>` after the task, so the
      on-disk `.git` pointer is gone — a path with no filesystem presence must

@@ -6,6 +6,7 @@ import path from "node:path";
 import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
 import { withoutArchivedPredecessors } from "@/lib/accounts/identity";
 import { agentRegistry, AgentRegistry, setAgentRegistryForTests } from "@/lib/agent/registry";
+import { replaceConversationCatalog } from "@/lib/scanner/conversationCatalog";
 import { writeSessionTitle } from "@/lib/session/titleStore";
 import type { FileEntry } from "@/lib/types";
 
@@ -30,10 +31,12 @@ beforeEach(() => {
   scannedFiles = [];
   scanGates = [];
   tmuxHealth = { status: "healthy" };
+  replaceConversationCatalog([]);
 });
 
 afterEach(() => {
   setAgentRegistryForTests(null);
+  replaceConversationCatalog([]);
   if (previousState === undefined) delete process.env.LLV_STATE_DIR;
   else process.env.LLV_STATE_DIR = previousState;
   fs.rmSync(registryRoot, { recursive: true, force: true });
@@ -499,6 +502,40 @@ test("a custom session title (issue #33) overrides the derived title and keeps i
   expect(entry?.titleRevision).toBe(1);
   // A main session projects the rename-eligibility flag for the client gate.
   expect(entry?.renamable).toBe(true);
+});
+
+test("the files rail reaggregates uncapped conversations under registry launch projects", async () => {
+  const registry = agentRegistry();
+  const transcript = path.join(stateDir, "capped-out-launch-project.jsonl");
+  fs.writeFileSync(transcript, JSON.stringify({ type: "user", message: { content: "Catalog prompt" } }) + "\n");
+  const stat = fs.statSync(transcript);
+  registry.reconcileConversations([{
+    engine: "claude",
+    path: transcript,
+    accountId: null,
+    launchProfile: emptyLaunchProfile({ cwd: stateDir, project: "effective-project" }),
+    turn: { state: "idle", source: "empty", terminalAt: null },
+    observedAt: "2026-07-13T00:00:00.000Z",
+  }]);
+  replaceConversationCatalog([{
+    path: transcript,
+    root: "claude-projects",
+    name: "capped-out-launch-project.jsonl",
+    project: "scanner-project",
+    title: "Catalog prompt",
+    firstPrompt: "",
+    engine: "claude",
+    kind: "session",
+    fmt: "claude",
+    mtime: stat.mtimeMs / 1000,
+    size: stat.size,
+  }]);
+  scannedFiles = [];
+
+  const response = await GET(new Request("http://127.0.0.1/api/files"));
+  const body = await response.json() as { projectCatalog: Array<{ project: string; conversations: number }> };
+
+  expect(body.projectCatalog).toEqual([expect.objectContaining({ project: "effective-project", conversations: 1 })]);
 });
 
 test("an unreadable pipelines store degrades to pipelinesError without failing the poll", async () => {

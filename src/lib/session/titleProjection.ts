@@ -1,6 +1,6 @@
 import fs from "node:fs";
 
-import { agentRegistry } from "@/lib/agent/registry";
+import { agentRegistry, RegistryReadError } from "@/lib/agent/registry";
 import type { ViewerConversationId } from "@/lib/accounts/migration/contracts";
 import type { FileEntry } from "@/lib/types";
 
@@ -16,6 +16,8 @@ interface RegistryProjection {
   conversationByPath: Map<string, ViewerConversationId>;
   aliasesByCanonical: Map<string, string[]>;
   ownedPathsByConversation: Map<string, string[]>;
+  projectByPath: Map<string, string>;
+  archivedPaths: Set<string>;
 }
 
 const registryProjectionCache = new WeakMap<Registry, RegistryProjection>();
@@ -41,23 +43,35 @@ function canonicalConversationId(snapshot: RegistrySnapshot, alias: string): str
   return current;
 }
 
-function registryProjection(registry: Registry): RegistryProjection | null {
+function registryProjection(registry: Registry, surfaceUnexpectedError = false): RegistryProjection | null {
   const signature = registrySignature(registry);
   const cached = registryProjectionCache.get(registry);
   if (cached?.signature === signature) return cached;
   let snapshot: RegistrySnapshot;
   try {
     snapshot = registry.snapshot();
-  } catch {
+  } catch (error) {
+    if (surfaceUnexpectedError && !(error instanceof RegistryReadError)) throw error;
     return null;
   }
   const conversationByPath = new Map<string, ViewerConversationId>();
   const aliasesByCanonical = new Map<string, string[]>();
   const ownedPathsByConversation = new Map<string, string[]>();
+  const projectByPath = new Map<string, string>();
+  const archivedPaths = new Set<string>();
   for (const conversation of Object.values(snapshot.conversations)) {
     const owned = [...conversation.generations.map((generation) => generation.path), ...conversation.continuityPaths];
     ownedPathsByConversation.set(conversation.id, owned);
     for (const pathname of owned) if (!conversationByPath.has(pathname)) conversationByPath.set(pathname, conversation.id);
+    const latest = conversation.generations.at(-1);
+    if (!latest) continue;
+    if (latest.launchProfile.project) projectByPath.set(latest.path, latest.launchProfile.project);
+    for (const generation of conversation.generations) {
+      if (generation.path !== latest.path) archivedPaths.add(generation.path);
+    }
+    for (const pathname of conversation.continuityPaths) {
+      if (pathname !== latest.path) archivedPaths.add(pathname);
+    }
   }
   for (const alias of Object.keys(snapshot.conversationAliases)) {
     const canonical = canonicalConversationId(snapshot, alias);
@@ -65,7 +79,15 @@ function registryProjection(registry: Registry): RegistryProjection | null {
     const list = aliasesByCanonical.get(canonical);
     if (list) list.push(alias); else aliasesByCanonical.set(canonical, [alias]);
   }
-  const projection = { signature, snapshot, conversationByPath, aliasesByCanonical, ownedPathsByConversation };
+  const projection = {
+    signature,
+    snapshot,
+    conversationByPath,
+    aliasesByCanonical,
+    ownedPathsByConversation,
+    projectByPath,
+    archivedPaths,
+  };
   registryProjectionCache.set(registry, projection);
   return projection;
 }
@@ -135,15 +157,21 @@ export async function overlaySessionTitlesYielding(
 /** Projects registry launch-profile projects before an empty-query project
  * filter runs. This stays metadata-only and leaves transcript heads untouched. */
 export function overlaySessionProjects(entries: FileEntry[]): void {
-  const projection = registryProjection(agentRegistry());
-  if (!projection) return;
-  const projectByPath = new Map<string, string>();
-  for (const conversation of Object.values(projection.snapshot.conversations)) {
-    const latest = conversation.generations.at(-1);
-    if (latest?.launchProfile.project) projectByPath.set(latest.path, latest.launchProfile.project);
-  }
+  const projectByPath = sessionProjectProjection().projectByPath;
   for (const entry of entries) {
     const project = projectByPath.get(entry.path);
     if (project) entry.project = project;
   }
+}
+
+/** Registry metadata that shapes the scanner shortlist. Reading this through
+ * the same signature cache as title projection keeps repeated scheme scans
+ * free of another registry parse. */
+export function sessionProjectProjection(surfaceUnexpectedError = false): {
+  projectByPath: ReadonlyMap<string, string>;
+  archivedPaths: ReadonlySet<string>;
+} {
+  const projection = registryProjection(agentRegistry(), surfaceUnexpectedError);
+  if (!projection) return { projectByPath: new Map(), archivedPaths: new Set() };
+  return { projectByPath: projection.projectByPath, archivedPaths: projection.archivedPaths };
 }

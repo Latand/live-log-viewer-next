@@ -34,7 +34,7 @@ type ProjectCatalogFile = CachedProjectFile & {
 };
 
 type ProjectCatalogState = {
-  version: 1;
+  version: 2;
   resolutionVersion: number;
   files: Record<string, CachedProjectFile>;
 };
@@ -47,9 +47,9 @@ function catalogPath(): string {
 
 function readState(): ProjectCatalogState {
   try {
-    const raw = JSON.parse(fs.readFileSync(catalogPath(), "utf8")) as Partial<ProjectCatalogState>;
-    if (raw.version !== 1 || !raw.files || typeof raw.files !== "object" || Array.isArray(raw.files)) {
-      return { version: 1, resolutionVersion: PROJECT_RESOLUTION_VERSION, files: {} };
+    const raw = JSON.parse(fs.readFileSync(catalogPath(), "utf8")) as Partial<Omit<ProjectCatalogState, "version">> & { version?: number };
+    if ((raw.version !== 1 && raw.version !== 2) || !raw.files || typeof raw.files !== "object" || Array.isArray(raw.files)) {
+      return { version: 2, resolutionVersion: PROJECT_RESOLUTION_VERSION, files: {} };
     }
     const files: Record<string, CachedProjectFile> = {};
     for (const [pathname, value] of Object.entries(raw.files)) {
@@ -61,8 +61,7 @@ function readState(): ProjectCatalogState {
         typeof file.mtimeMs !== "number" ||
         typeof file.stateKey !== "string" ||
         typeof file.project !== "string" ||
-        typeof file.kind !== "string" ||
-        typeof file.session !== "boolean"
+        typeof file.kind !== "string"
       ) {
         continue;
       }
@@ -73,16 +72,16 @@ function readState(): ProjectCatalogState {
         stateKey: file.stateKey,
         project: file.project,
         kind: file.kind,
-        session: file.session,
+        session: isConversation(file.rootName, file.kind),
         worktree: typeof file.worktree === "string" ? file.worktree : undefined,
         title: typeof file.title === "string" ? file.title : undefined,
         engine: file.engine === "codex" || file.engine === "claude" || file.engine === "shell" ? file.engine : undefined,
         fmt: file.fmt === "codex" || file.fmt === "claude" || file.fmt === "plain" ? file.fmt : undefined,
       };
     }
-    return { version: 1, resolutionVersion: raw.resolutionVersion ?? 0, files };
+    return { version: 2, resolutionVersion: raw.resolutionVersion ?? 0, files };
   } catch {
-    return { version: 1, resolutionVersion: PROJECT_RESOLUTION_VERSION, files: {} };
+    return { version: 2, resolutionVersion: PROJECT_RESOLUTION_VERSION, files: {} };
   }
 }
 
@@ -134,6 +133,7 @@ function cachedFile(raw: RawEntry, state: ProjectCatalogState, stateKey: string)
     return {
       path: raw.path,
       ...cached,
+      session: isConversation(raw.rootName, cached.kind),
       title: cached.title ?? fallbackTitle(raw, cached.kind),
       titleCached: typeof cached.title === "string",
       engine: cached.engine ?? engineForRoot(raw.rootName),
@@ -286,7 +286,7 @@ export function projectCatalogSnapshotFromRaw(raw: RawEntry[], options: { persis
       boardHealed = false;
     }
     if (boardHealed) {
-      writeState({ version: 1, resolutionVersion: PROJECT_RESOLUTION_VERSION, files: nextFiles });
+      writeState({ version: 2, resolutionVersion: PROJECT_RESOLUTION_VERSION, files: nextFiles });
     } else {
       console.error("[project catalog] board project migration deferred; a later scan will retry");
     }

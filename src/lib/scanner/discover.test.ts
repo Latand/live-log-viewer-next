@@ -5,6 +5,8 @@ import path from "node:path";
 
 import { expect, test } from "bun:test";
 
+import { emptyLaunchProfile } from "../accounts/migration/contracts";
+import { AgentRegistry, setAgentRegistryForTests } from "../agent/registry";
 import type { RootKey } from "../types";
 import { conversationCatalogSnapshot } from "./conversationCatalog";
 import { discoverFiles, discoverFilesWithProjectCatalog } from "./discover";
@@ -77,6 +79,51 @@ test("persisted scheme metadata excludes unbounded first-prompt text", async () 
     const persisted = await readFile(path.join(process.env.LLV_STATE_DIR, "project-catalog.json"), "utf8");
     expect(persisted).not.toContain(marker);
     expect(conversationCatalogSnapshot().find((entry) => entry.path === transcript)?.firstPrompt).toBe("");
+  } finally {
+    if (previousStateDir === undefined) delete process.env.LLV_STATE_DIR;
+    else process.env.LLV_STATE_DIR = previousStateDir;
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test("a legacy cached Claude subagent is migrated into the conversation catalog", async () => {
+  const base = await mkdtemp(path.join(os.tmpdir(), "llv-discover-legacy-subagent-"));
+  const previousStateDir = process.env.LLV_STATE_DIR;
+  process.env.LLV_STATE_DIR = path.join(base, "state");
+  try {
+    const roots: Record<RootKey, string> = {
+      "codex-sessions": path.join(base, "codex-sessions"),
+      "claude-projects": path.join(base, "claude-projects"),
+      "claude-tasks": path.join(base, "claude-tasks"),
+    };
+    await Promise.all(Object.values(roots).map((root) => mkdir(root, { recursive: true })));
+    const subagent = path.join(roots["claude-projects"], "legacy-project", "session", "subagents", "agent-child.jsonl");
+    await writeFixture(subagent, JSON.stringify({ type: "user", message: { content: "Legacy child prompt" } }) + "\n", 1_700_000_010);
+    const subagentStat = await stat(subagent);
+    await mkdir(process.env.LLV_STATE_DIR, { recursive: true });
+    await writeFile(path.join(process.env.LLV_STATE_DIR, "project-catalog.json"), JSON.stringify({
+      version: 1,
+      resolutionVersion: PROJECT_RESOLUTION_VERSION,
+      files: {
+        [subagent]: {
+          rootName: "claude-projects",
+          size: subagentStat.size,
+          mtimeMs: subagentStat.mtimeMs,
+          stateKey: projectResolutionStateKey(),
+          project: "legacy-project",
+          kind: "subagent",
+          session: false,
+        },
+      },
+    }));
+
+    const scan = await discoverFilesWithProjectCatalog(roots);
+    const persisted = JSON.parse(await readFile(path.join(process.env.LLV_STATE_DIR, "project-catalog.json"), "utf8"));
+
+    expect(conversationCatalogSnapshot().map((entry) => entry.path)).toContain(subagent);
+    expect(scan.projectCatalog).toContainEqual({ project: "legacy-project", conversations: 1, smt: 1_700_000_010 });
+    expect(persisted.version).toBe(2);
+    expect(persisted.files[subagent].session).toBe(true);
   } finally {
     if (previousStateDir === undefined) delete process.env.LLV_STATE_DIR;
     else process.env.LLV_STATE_DIR = previousStateDir;
@@ -376,6 +423,51 @@ test("discoverFilesWithProjectCatalog keeps quiet projects in the recent cap", a
       smt: startedAt - 10,
     });
   } finally {
+    if (previousStateDir === undefined) delete process.env.LLV_STATE_DIR;
+    else process.env.LLV_STATE_DIR = previousStateDir;
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test("registry launch projects govern scheme caps and the uncapped project catalog", async () => {
+  const base = await mkdtemp(path.join(os.tmpdir(), "llv-discover-launch-project-cap-"));
+  const previousStateDir = process.env.LLV_STATE_DIR;
+  process.env.LLV_STATE_DIR = path.join(base, "state");
+  const registry = new AgentRegistry(path.join(base, "registry.json"));
+  setAgentRegistryForTests(registry);
+  try {
+    const roots: Record<RootKey, string> = {
+      "codex-sessions": path.join(base, "codex-sessions"),
+      "claude-projects": path.join(base, "claude-projects"),
+      "claude-tasks": path.join(base, "claude-tasks"),
+    };
+    await Promise.all(Object.values(roots).map((root) => mkdir(root, { recursive: true })));
+    const paths: string[] = [];
+    for (let index = 0; index < DEFAULT_SCHEME_CARDS_PER_PROJECT * 2; index += 1) {
+      const scannerProject = index % 2 === 0 ? "scanner-a" : "scanner-b";
+      const pathname = path.join(roots["claude-projects"], scannerProject, `session-${index}.jsonl`);
+      paths.push(pathname);
+      await writeFixture(pathname, JSON.stringify({ type: "user", message: { content: `Prompt ${index}` } }) + "\n", 1_700_030_000 + index);
+    }
+    registry.reconcileConversations(paths.map((pathname, index) => ({
+      engine: "claude" as const,
+      path: pathname,
+      accountId: null,
+      launchProfile: emptyLaunchProfile({ cwd: base, project: "effective-project" }),
+      turn: { state: "idle" as const, source: "empty" as const, terminalAt: null },
+      observedAt: new Date((1_700_030_000 + index) * 1000).toISOString(),
+    })));
+
+    const scan = await discoverFilesWithProjectCatalog(roots);
+
+    expect(scan.files.filter((entry) => entry.project === "effective-project")).toHaveLength(DEFAULT_SCHEME_CARDS_PER_PROJECT);
+    expect(scan.projectCatalog).toEqual([{
+      project: "effective-project",
+      conversations: DEFAULT_SCHEME_CARDS_PER_PROJECT * 2,
+      smt: 1_700_030_000 + DEFAULT_SCHEME_CARDS_PER_PROJECT * 2 - 1,
+    }]);
+  } finally {
+    setAgentRegistryForTests(null);
     if (previousStateDir === undefined) delete process.env.LLV_STATE_DIR;
     else process.env.LLV_STATE_DIR = previousStateDir;
     await rm(base, { recursive: true, force: true });

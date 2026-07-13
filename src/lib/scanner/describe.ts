@@ -58,6 +58,22 @@ function readHead(pathname: string, size: number): { text: string; read: number 
   }
 }
 
+function readSearchHead(pathname: string, size: number): { text: string; read: number } | null {
+  try {
+    const fd = fs.openSync(pathname, "r");
+    try {
+      const buf = Buffer.alloc(Math.min(size, HEAD_BYTES));
+      const read = fs.readSync(fd, buf, 0, buf.length, 0);
+      return { text: buf.toString("utf8", 0, read), read };
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+}
+
 // Claude project slugs encode the cwd with "/" and "." replaced by "-":
 // "-home-user-Projects-my-app" → "my-app", plain home dir → its basename.
 const homeSlug = "-" + os.homedir().split(path.sep).filter(Boolean).join("-");
@@ -542,7 +558,7 @@ function scanJsonlTitle(pathname: string, size: number, wantCodex: boolean): str
 
 /** Title and first-prompt hydration owned entirely by list/search requests. */
 export function searchTextForTranscript(pathname: string, size: number, engine: "codex" | "claude"): ConversationSearchText {
-  const head = readHead(pathname, size);
+  const head = readSearchHead(pathname, size);
   if (!head) return { title: null, firstPrompt: null };
   return conversationTextFromLines(head.text.split("\n").slice(0, 151), engine === "codex");
 }

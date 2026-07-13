@@ -3,8 +3,10 @@ import { access, readdir, stat } from "node:fs/promises";
 import path from "node:path";
 
 import type { FileEntry, ProjectCatalogEntry, RootKey } from "../types";
+import { sessionProjectProjection } from "../session/titleProjection";
 import { codexThreadIdFromPath, nativeCodexParentThreadId } from "./codexNative";
 import { describe } from "./describe";
+import { conversationCatalogSnapshot } from "./conversationCatalog";
 import { projectCatalogSnapshotFromRaw } from "./projectCatalog";
 import { projectResolutionStateKey } from "./projectState";
 import { EXTS, ROOTS, scanRootEntries } from "./roots";
@@ -122,6 +124,29 @@ function cappedEntries(ranked: RawEntry[], projectByPath: ReadonlyMap<string, st
   return selectSchemeWindow(ranked, (entry) => projectByPath.get(entry.path) ?? "other");
 }
 
+function canonicalProjectCatalog(
+  projectByPath: ReadonlyMap<string, string>,
+  excludedSummaryPaths?: ReadonlySet<string>,
+): { projectByPath: Map<string, string>; projectCatalog: ProjectCatalogEntry[] } {
+  const canonicalByPath = new Map(projectByPath);
+  for (const [pathname, project] of sessionProjectProjection(true).projectByPath) {
+    if (canonicalByPath.has(pathname)) canonicalByPath.set(pathname, project);
+  }
+  const groups = new Map<string, ProjectCatalogEntry>();
+  for (const entry of conversationCatalogSnapshot()) {
+    if (excludedSummaryPaths?.has(entry.path)) continue;
+    const project = canonicalByPath.get(entry.path) ?? entry.project;
+    const group = groups.get(project) ?? { project, smt: 0, conversations: 0 };
+    group.smt = Math.max(group.smt, entry.mtime);
+    group.conversations += 1;
+    groups.set(project, group);
+  }
+  return {
+    projectByPath: canonicalByPath,
+    projectCatalog: [...groups.values()].sort((a, b) => b.smt - a.smt || a.project.localeCompare(b.project)),
+  };
+}
+
 function entriesFromRaw(raw: RawEntry[], projectByPath?: ReadonlyMap<string, string>, demoted?: ReadonlySet<string>, pin?: ReadonlySet<string>): FileEntry[] {
   const stateKey = projectResolutionStateKey();
   raw.sort((a, b) => b.st.mtimeMs - a.st.mtimeMs);
@@ -197,10 +222,11 @@ export async function discoverFilesWithProjectCatalog(
 }> {
   const limit = createLimiter(48);
   const raw = await discoverRaw(roots, limit);
-  const { projectCatalog, projectByPath } = projectCatalogSnapshotFromRaw(raw, {
+  const snapshot = projectCatalogSnapshotFromRaw(raw, {
     persist: options.persist,
     excludedSummaryPaths: options.demote,
   });
+  const { projectCatalog, projectByPath } = canonicalProjectCatalog(snapshot.projectByPath, options.demote);
   return { files: entriesFromRaw(raw, projectByPath, options.demote, options.pin), projectCatalog };
 }
 
@@ -211,7 +237,8 @@ export async function discoverFiles(
 ): Promise<FileEntry[]> {
   const limit = createLimiter(48);
   const raw = await discoverRaw(roots, limit);
-  const { projectByPath } = projectCatalogSnapshotFromRaw(raw, { persist: false });
+  const snapshot = projectCatalogSnapshotFromRaw(raw, { persist: false });
+  const { projectByPath } = canonicalProjectCatalog(snapshot.projectByPath);
   return entriesFromRaw(raw, projectByPath, demote, pin);
 }
 
