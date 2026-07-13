@@ -557,6 +557,7 @@ export const uk: Record<keyof typeof en, Message> = {
   // ScheduleWakeup card + board timer chip (issue #161)
   "wakeup.card": "заплановане пробудження",
   "wakeup.wakesAt": "прокинеться о {time}",
+  "wakeup.wasSetFor": "було на {time}",
   "wakeup.firedAt": "спрацював о {time}",
   "wakeup.fired": "спрацював",
   "wakeup.failed": "не заплановано",

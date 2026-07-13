@@ -579,6 +579,7 @@ export const en = {
   // ScheduleWakeup card + board timer chip (issue #161)
   "wakeup.card": "scheduled wakeup",
   "wakeup.wakesAt": "wakes at {time}",
+  "wakeup.wasSetFor": "was set for {time}",
   "wakeup.firedAt": "fired at {time}",
   "wakeup.fired": "fired",
   "wakeup.failed": "scheduling failed",

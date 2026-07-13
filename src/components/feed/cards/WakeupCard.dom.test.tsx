@@ -3,7 +3,7 @@ import { Window } from "happy-dom";
 import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
 
-import type { WakeupEventInfo } from "../parse";
+import type { ToolEvent, WakeupEventInfo } from "../parse";
 import { WakeupCard } from "./WakeupCard";
 
 const dom = new Window();
@@ -29,6 +29,13 @@ function wakeup(over: Partial<WakeupEventInfo> = {}): WakeupEventInfo {
   return { fireAt: 0, delaySeconds: 5, reason: "r", prompt: "p", superseded: false, failed: false, ...over };
 }
 
+function toolEvent(w: WakeupEventInfo): ToolEvent {
+  return {
+    kind: "tool", id: "w1", ts: "2026-07-07T10:00:00Z", srcCall: 0, family: "plan", tool: "ScheduleWakeup", icon: "clock",
+    summary: w.reason, chips: [], status: "ok", statusLabel: "ok", outputPreview: "", outputTruncated: false, open: false, wakeup: w,
+  };
+}
+
 test("stops the countdown interval once the wakeup fires", () => {
   const realSet = globalThis.setInterval;
   const realClear = globalThis.clearInterval;
@@ -51,7 +58,8 @@ test("stops the countdown interval once the wakeup fires", () => {
     const container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
-    flushSync(() => root!.render(<WakeupCard wakeup={wakeup({ fireAt })} />));
+    const w = wakeup({ fireAt });
+    flushSync(() => root!.render(<WakeupCard event={toolEvent(w)} wakeup={w} />));
 
     // While pending, the 1s interval is running.
     expect(started).toBe(1);

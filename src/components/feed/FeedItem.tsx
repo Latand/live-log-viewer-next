@@ -83,7 +83,7 @@ export const FeedItem = memo(function FeedItem({ item, speakText }: { item: Item
       </div>
     );
   }
-  if (item.kind === "tool" && item.wakeup) return <WakeupCard wakeup={item.wakeup} />;
+  if (item.kind === "tool" && item.wakeup) return <WakeupCard event={item} wakeup={item.wakeup} />;
   if (item.kind === "tool") return <ToolCard event={item} />;
   if (item.kind === "cmd-group") return <CmdGroupCard item={item} />;
   if (item.kind === "tmsg") {

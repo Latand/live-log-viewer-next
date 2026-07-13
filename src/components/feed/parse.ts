@@ -364,6 +364,11 @@ const CMD_GROUP_MIN = 4;
 const OUTPUT_OK_MAX = 12_000;
 const OUTPUT_ERR_MAX = 60_000;
 const COMMAND_MAX = 8_000;
+/* Wakeup reason/prompt are redacted and bounded before they reach the card, the
+   same safety funnel every other tool field passes through (issue #161 review).
+   The reason is a one-line summary; the prompt is the longer wake plan. */
+const WAKEUP_REASON_MAX = 300;
+const WAKEUP_PROMPT_MAX = 4_000;
 /* A Codex result-preamble line (custom-tool + interactive-shell wrappers, all
    known variants). Used to strip the contiguous leading metadata block. */
 const PREAMBLE_LINE = /^(?:Chunk ID:|Wall time\b|Original token count:|Output:[ \t]*$|Script completed\b|Script running with (?:cell|session) ID\b|Process running with (?:cell|session) ID\b|Process exited with code\b)/;
@@ -1023,12 +1028,19 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
       if (w.superseded !== superseded) patchWakeupEvent(callRec, { ...w, superseded });
     }
   };
+  /* Redacts and bounds a wakeup's reason/prompt at the card boundary, the same
+     funnel every other tool field passes through (issue #161 review). */
+  const safeWakeup = (info: WakeupInfo): WakeupInfo => ({
+    ...info,
+    reason: redactSecrets(info.reason).slice(0, WAKEUP_REASON_MAX),
+    prompt: redactSecrets(info.prompt).slice(0, WAKEUP_PROMPT_MAX),
+  });
   /* A ScheduleWakeup call → a wakeup event, provisionally active until its
      result attaches. Supersession is recomputed across all wakeups so a later
      failed call cannot bump a still-valid earlier one. */
   const addWakeup = (ts: unknown, id: string, input: Record<string, unknown>): CallRec => {
     const tsMs = typeof ts === "string" || typeof ts === "number" ? Date.parse(String(ts)) : NaN;
-    const info = parseScheduleWakeup(input, Number.isFinite(tsMs) ? tsMs : null);
+    const info = safeWakeup(parseScheduleWakeup(input, Number.isFinite(tsMs) ? tsMs : null));
     const event = newToolEvent({ ts, id, tool: "ScheduleWakeup", args: input, engine: "claude", wakeup: { ...info, superseded: false, failed: false } });
     const rec = registerCall(event);
     wakeupCalls.push(rec);
@@ -1110,7 +1122,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
         wakeup = { ...wakeup, failed: true };
       } else if (body) {
         const tsMs = typeof prev.ts === "string" || typeof prev.ts === "number" ? Date.parse(String(prev.ts)) : NaN;
-        const refined = refineWakeupFromResult(wakeup, Number.isFinite(tsMs) ? tsMs : null, body);
+        const refined = safeWakeup(refineWakeupFromResult(wakeup, Number.isFinite(tsMs) ? tsMs : null, body));
         wakeup = { ...refined, superseded: wakeup.superseded, failed: false };
       }
     }

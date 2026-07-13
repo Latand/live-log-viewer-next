@@ -209,10 +209,10 @@ export function summarizeTool(
     return { family: "shell", icon: FAMILY_ICON.shell, summary: summaryOf(summary), chips: session ? [chip(session, tr("tools.session"))] : [] };
   }
 
-  /* Harness self-scheduling tools (issue #161): render a human summary rather
-     than a raw JSON blob. ScheduleWakeup gets a dedicated countdown card
-     upstream (see WakeupCard); this summary is its collapsed/fallback line and
-     the whole treatment for CronCreate/Monitor. */
+  /* Harness self-scheduling tools (issue #161): render a human summary so their
+     arguments read as prose and never as a raw JSON blob. ScheduleWakeup gets a
+     dedicated countdown card upstream (see WakeupCard); this summary is its
+     collapsed/fallback line and the whole treatment for CronCreate/Monitor. */
   const harness = harnessKind(tool);
   if (harness) {
     if (harness === "wakeup") {

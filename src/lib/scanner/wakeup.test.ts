@@ -11,6 +11,16 @@ afterAll(() => fs.rmSync(SANDBOX, { recursive: true, force: true }));
 
 const TS = "2026-07-07T10:09:45.030Z";
 
+/* The result's absolute HH:MM:SS anchored to the record's LOCAL day — mirrors
+   the parser's fireAtFromClock so the assertion is timezone-independent. */
+function clockEpoch(tsMs: number, h: number, m: number, s: number): number {
+  const d = new Date(tsMs);
+  d.setHours(h, m, s, 0);
+  let e = d.getTime();
+  if (e < tsMs - 60_000) e += 86_400_000;
+  return e;
+}
+
 function entry(records: unknown[], root: FileEntry["root"] = "claude-projects"): FileEntry {
   const pathname = path.join(SANDBOX, `${crypto.randomUUID()}.jsonl`);
   fs.writeFileSync(pathname, records.map((record) => JSON.stringify(record)).join("\n") + "\n");
@@ -61,7 +71,7 @@ describe("pendingWakeupFor", () => {
         message: { content: [{ type: "tool_result", tool_use_id: "w1", content: [{ type: "text", text: "Next wakeup scheduled for 13:30:00 (in 1215s)." }] }] },
       },
     ]);
-    expect(pendingWakeupFor(e, now)?.fireAt).toBe(Date.parse(TS) + 1215 * 1000);
+    expect(pendingWakeupFor(e, now)?.fireAt).toBe(clockEpoch(Date.parse(TS), 13, 30, 0));
   });
 
   test("skips a rejected newest wakeup and keeps the prior successful one", () => {
@@ -76,7 +86,7 @@ describe("pendingWakeupFor", () => {
     ]);
     const pending = pendingWakeupFor(e, now);
     expect(pending?.reason).toBe("valid");
-    expect(pending?.fireAt).toBe(Date.parse(good) + 3600 * 1000);
+    expect(pending?.fireAt).toBe(clockEpoch(Date.parse(good), 13, 5, 0));
   });
 
   test("returns null when the only wakeup was rejected", () => {
@@ -86,6 +96,31 @@ describe("pendingWakeupFor", () => {
       { type: "user", timestamp: TS, message: { content: [{ type: "tool_result", tool_use_id: "w1", is_error: true, content: [{ type: "text", text: "rejected" }] }] } },
     ]);
     expect(pendingWakeupFor(e, now)).toBeNull();
+  });
+
+  test("selects the newest call when one record carries several", () => {
+    const now = Date.parse(TS) + 60_000;
+    const e = entry([
+      {
+        type: "assistant", timestamp: TS,
+        message: {
+          content: [
+            { type: "tool_use", id: "a", name: "ScheduleWakeup", input: { delaySeconds: 300, reason: "earlier", prompt: "p" } },
+            { type: "tool_use", id: "b", name: "ScheduleWakeup", input: { delaySeconds: 3600, reason: "later", prompt: "p" } },
+          ],
+        },
+      },
+    ]);
+    const pending = pendingWakeupFor(e, now);
+    expect(pending?.reason).toBe("later");
+    expect(pending?.fireAt).toBe(Date.parse(TS) + 3600 * 1000);
+  });
+
+  test("bounds the surfaced reason to a safe length", () => {
+    const now = Date.parse(TS) + 60_000;
+    const e = entry([wakeupRecord("w1", { delaySeconds: 1200, reason: "x".repeat(5000), prompt: "p" })]);
+    const pending = pendingWakeupFor(e, now);
+    expect(pending?.reason.length).toBeLessThanOrEqual(300);
   });
 
   test("ignores non-claude transcripts", () => {

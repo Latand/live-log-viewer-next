@@ -8,16 +8,18 @@ import { wakeupPhase } from "@/lib/wakeup";
 import { GlyphIcon } from "../../icons";
 import { fmtWakeClock, fmtWakeRelative } from "../../wakeupFormat";
 import { mdBlocks } from "../markdown";
-import { type WakeupEventInfo } from "../parse";
+import { type ToolEvent, type WakeupEventInfo } from "../parse";
+import { OutputPreview } from "./OutputPreview";
 
 /**
  * A `ScheduleWakeup` call as a dedicated card: the reason is the visible
  * summary, the absolute fire time carries a live countdown, and the wake plan
  * (the prompt) sits behind an expander as readable text (issue #161). Only the
  * newest successful wakeup of a conversation is active; a superseded, elapsed,
- * or rejected one shows a quiet past/failed state.
+ * or rejected one shows a quiet past/failed state. A rejected call also surfaces
+ * the harness's bounded error output so the reason it was refused stays visible.
  */
-export function WakeupCard({ wakeup }: { wakeup: WakeupEventInfo }) {
+export function WakeupCard({ event, wakeup }: { event: ToolEvent; wakeup: WakeupEventInfo }) {
   const { locale, t } = useLocale();
   const { fireAt, superseded, failed, reason, prompt } = wakeup;
 
@@ -48,20 +50,25 @@ export function WakeupCard({ wakeup }: { wakeup: WakeupEventInfo }) {
           ? { text: clock ? t("wakeup.firedAt", { time: clock }) : t("wakeup.fired"), tone: "text-dim" }
           : { text: "", tone: "text-dim" };
 
-  const past = fireAt !== null && fireAt <= now;
+  /* The headline follows the card's state before it reads the clock: a
+     superseded FUTURE schedule reads "was set for" and never promises to wake
+     (issue #161 review). Only a still-active or already-fired schedule speaks of
+     its time as future or past. */
   const headline = failed
     ? t("wakeup.failed")
-    : clock
-      ? past
-        ? t("wakeup.firedAt", { time: clock })
-        : t("wakeup.wakesAt", { time: clock })
-      : t("wakeup.noTime");
+    : !clock
+      ? t("wakeup.noTime")
+      : superseded
+        ? t("wakeup.wasSetFor", { time: clock })
+        : fireAt !== null && fireAt <= now
+          ? t("wakeup.firedAt", { time: clock })
+          : t("wakeup.wakesAt", { time: clock });
 
   const cardTone = active ? "border-[#e4c789] bg-[#fdf7ea]" : failed ? "border-err/35 bg-panel" : "border-line bg-panel";
   const iconTone = active ? "bg-[#f3e2bd] text-[#8a5d12]" : failed ? "bg-[#fbeaea] text-err" : "bg-chip text-dim";
 
   return (
-    <details className={`group/wake my-2.5 ml-9 overflow-hidden rounded-[14px] border shadow-card ${cardTone}`} open={active}>
+    <details className={`group/wake my-2.5 ml-9 overflow-hidden rounded-[14px] border shadow-card ${cardTone}`} open={active || failed}>
       <summary className="flex min-h-[44px] cursor-pointer list-none items-center gap-2.5 px-3.5 py-2">
         <span className={`flex h-6.5 w-6.5 shrink-0 items-center justify-center rounded-lg ${iconTone}`}>
           <GlyphIcon name="clock" className="h-4 w-4" />
@@ -82,6 +89,13 @@ export function WakeupCard({ wakeup }: { wakeup: WakeupEventInfo }) {
           {relative ? <span>· {relative}</span> : null}
           {superseded ? <span className="rounded-md bg-chip px-1.5 py-0.5">{t("wakeup.superseded")}</span> : null}
         </div>
+        {/* The harness's rejection message (already redacted and bounded on the
+            ToolEvent), so a refused schedule keeps its actionable detail. */}
+        {failed && event.outputPreview.trim() ? (
+          <div className="mb-2">
+            <OutputPreview output={event.outputPreview} truncated={event.outputTruncated} />
+          </div>
+        ) : null}
         {prompt ? (
           <details className="group/plan rounded-[10px] border border-line bg-panel-alt">
             <summary className="flex min-h-[44px] cursor-pointer list-none items-center gap-1.5 px-3 py-2 text-[11.5px] font-semibold text-dim">

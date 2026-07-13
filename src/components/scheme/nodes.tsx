@@ -522,7 +522,7 @@ function FarLabel({ file }: { file: FileEntry }) {
           {badge.label}
         </span>
         <RateLimitBadge rateLimit={file.rateLimit} />
-        <WakeupChip wakeup={file.pendingWakeup} />
+        <WakeupChip wakeup={file.pendingWakeup} interactive={false} />
         <span className="line-clamp-2 min-w-0 font-bold">{cleanTitle(file.title, 70)}</span>
       </div>
     </div>

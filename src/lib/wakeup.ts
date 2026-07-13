@@ -1,12 +1,12 @@
 /* Source-agnostic parsing for the harness self-scheduling tools an orchestrator
-   calls — `ScheduleWakeup` above all. A wakeup is not a generic tool row: the
-   user needs to see WHEN the agent wakes, how long is left, and what it plans to
-   check on wake. This module is pure (no React, no DOM) so both the feed card
-   and the scanner (board timer chip) derive the same fire time the same way. */
+   calls — `ScheduleWakeup` above all. A wakeup card exists to surface WHEN the
+   agent wakes, how long is left, and what it plans to check on wake, which a
+   generic tool row hides. This module is pure (no React, no DOM) so both the
+   feed card and the scanner (board timer chip) derive the same fire time. */
 
-/** The harness tools that get humanized rather than dumped as JSON. Only
-    `ScheduleWakeup` earns the full countdown card; the others get a readable
-    summary so they never render as a raw arguments blob (issue #161 §4). */
+/** The harness tools that get a human summary. Only `ScheduleWakeup` earns the
+    full countdown card; the others get a readable summary so their arguments
+    render as prose and never as a raw JSON blob (issue #161 §4). */
 export type HarnessKind = "wakeup" | "cron" | "monitor";
 
 export const HARNESS_TOOLS: Record<string, HarnessKind> = {
@@ -72,10 +72,10 @@ function fireAtFromClock(clock: string, tsMs: number | null): number | null {
  *
  * The harness may adjust the requested `delaySeconds` (processing time), so its
  * result — "Next wakeup scheduled for HH:MM:SS (in Ns)" — carries the RESOLVED
- * schedule that actually fires. When the result is present its resolved delay
- * (then its absolute clock) is authoritative; the requested `delaySeconds` is
- * used only before the result attaches (a live card) or when the result carries
- * no schedule.
+ * schedule that actually fires. When the result is present its absolute clock is
+ * authoritative (exact to the second); its resolved "(in Ns)" is the next
+ * fallback; the requested `delaySeconds` applies only before the result attaches
+ * (a live card) or when the result carries no schedule.
  */
 export function parseScheduleWakeup(input: unknown, tsMs: number | null, resultText?: string | null): WakeupInfo {
   const rec = input && typeof input === "object" && !Array.isArray(input) ? (input as Record<string, unknown>) : {};
@@ -92,9 +92,11 @@ export function parseScheduleWakeup(input: unknown, tsMs: number | null, resultT
   // The resolved schedule wins over the requested delay when the result is in.
   const delaySeconds = resolvedDelay ?? requestedDelay;
 
+  // The absolute clock is exact to the second, so it leads; `tsMs + resolvedDelay`
+  // rounds and trails the real fire time by the harness's processing gap.
   let fireAt: number | null = null;
-  if (tsMs !== null && resolvedDelay !== null) fireAt = tsMs + resolvedDelay * 1000;
-  else if (clock) fireAt = fireAtFromClock(clock, tsMs);
+  if (clock) fireAt = fireAtFromClock(clock, tsMs);
+  else if (tsMs !== null && resolvedDelay !== null) fireAt = tsMs + resolvedDelay * 1000;
   else if (tsMs !== null && requestedDelay !== null) fireAt = tsMs + requestedDelay * 1000;
 
   return { fireAt, delaySeconds, reason, prompt };

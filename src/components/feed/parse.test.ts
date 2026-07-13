@@ -865,6 +865,16 @@ describe("Claude protocol and repeated prose", () => {
 const claudeWakeup = (id: string, input: Record<string, unknown>, timestamp = "2026-07-06T10:00:02Z") =>
   JSON.stringify({ type: "assistant", timestamp, message: { content: [{ type: "tool_use", id, name: "ScheduleWakeup", input }] } });
 
+/* The result's absolute HH:MM:SS anchored to the record's LOCAL day — mirrors
+   the parser's fireAtFromClock so the assertion is timezone-independent. */
+function clockEpoch(tsMs: number, h: number, m: number, s: number): number {
+  const d = new Date(tsMs);
+  d.setHours(h, m, s, 0);
+  let e = d.getTime();
+  if (e < tsMs - 60_000) e += 86_400_000;
+  return e;
+}
+
 describe("ScheduleWakeup card", () => {
   test("emits a wakeup tool event with a derived fire time, not a folded row", () => {
     const ts = "2026-07-06T10:00:02Z";
@@ -923,10 +933,10 @@ describe("ScheduleWakeup card", () => {
     const feed = buildFeed(claudeFile, lines, false, "");
     const tool = feed.items.find((item) => item.kind === "tool");
     const wakeup = tool && tool.kind === "tool" ? tool.wakeup : undefined;
-    expect(wakeup?.fireAt).toBe(Date.parse(ts) + 1215 * 1000);
+    expect(wakeup?.fireAt).toBe(clockEpoch(Date.parse(ts), 13, 30, 0));
   });
 
-  test("the resolved result schedule overrides the requested delay on attach", () => {
+  test("the resolved result clock overrides the requested delay on attach", () => {
     const ts = "2026-07-06T10:00:02Z";
     const lines = [
       claudeWakeup("w1", { delaySeconds: 120, reason: "r", prompt: "p" }, ts),
@@ -935,7 +945,8 @@ describe("ScheduleWakeup card", () => {
     const feed = buildFeed(claudeFile, lines, false, "");
     const tool = feed.items.find((item) => item.kind === "tool");
     const wakeup = tool && tool.kind === "tool" ? tool.wakeup : undefined;
-    expect(wakeup?.fireAt).toBe(Date.parse(ts) + 135 * 1000);
+    // Exact 10:02:15, not ts + 120s and not ts + 135s.
+    expect(wakeup?.fireAt).toBe(clockEpoch(Date.parse(ts), 10, 2, 15));
   });
 
   test("a rejected wakeup is marked failed and does not supersede the prior valid one", () => {
