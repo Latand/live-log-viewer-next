@@ -3,7 +3,7 @@ import { describe, expect, test } from "bun:test";
 import type { TranscriptHost } from "@/lib/agent/transcriptHost";
 import type { FileEntry } from "@/lib/types";
 
-import { allowedKillTarget, canonicalResourceEntry, conflictingResourceHost, consumeKillTarget, noteSessionTargets } from "./resources";
+import { allowedKillTarget, canonicalResourceEntry, conflictingResourceHost, consumeKillTarget, noteSessionTargets, parseResourcesFixture } from "./resources";
 
 const PATHNAME = "/home/user/.codex/sessions/2026/07/10/rollout-2026-07-10-019f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl";
 
@@ -61,6 +61,22 @@ function ref(tmuxServerPid: number, panePid: number, paneId: string) {
 }
 
 describe("resource observation", () => {
+  test("accepts a deterministic resource fixture", () => {
+    const fixture = {
+      system: {
+        ramTotal: 34_359_738_368,
+        ramAvailable: 21_474_836_480,
+        swapTotal: 8_589_934_592,
+        swapUsed: 1_073_741_824,
+        capturedAt: "2100-01-02T12:00:00.000Z",
+      },
+      sessions: [],
+    };
+
+    expect(parseResourcesFixture(JSON.stringify(fixture))).toEqual(fixture);
+    expect(() => parseResourcesFixture('{"system":{"ramTotal":-1},"sessions":[]}')).toThrow("invalid resources fixture");
+  });
+
   test("attributes a duplicated transcript only to the shared canonical host", () => {
     const snapshot = { hosts: [duplicate, canonical], observation: "available" as const, canonicalFor: (pathname: string) => (pathname === PATHNAME ? canonical : null) };
 

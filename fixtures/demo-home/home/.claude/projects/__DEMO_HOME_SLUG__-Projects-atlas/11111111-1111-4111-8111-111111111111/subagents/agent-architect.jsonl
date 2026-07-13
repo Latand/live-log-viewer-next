@@ -1,0 +1,2 @@
+{"type":"user","uuid":"a2000000-0000-4000-8000-000000000001","timestamp":"2100-01-02T10:01:00.000Z","cwd":"/demo/Projects/atlas","message":{"role":"user","content":"Design the fixture boundaries and isolation contract."}}
+{"type":"assistant","uuid":"a2000000-0000-4000-8000-000000000002","timestamp":"2100-01-02T10:01:12.000Z","cwd":"/demo/Projects/atlas","message":{"role":"assistant","model":"claude-opus-4-1","content":[{"type":"text","text":"Fixture architect: all mutable paths live beneath the generated demo home."}]}}

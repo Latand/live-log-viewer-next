@@ -1,0 +1,10 @@
+{
+  "system": {
+    "ramTotal": 34359738368,
+    "ramAvailable": 21474836480,
+    "swapTotal": 8589934592,
+    "swapUsed": 1073741824,
+    "capturedAt": "2100-01-02T12:00:00.000Z"
+  },
+  "sessions": []
+}

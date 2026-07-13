@@ -1,4 +1,5 @@
 import { procBackend } from "@/lib/proc";
+import { readFileSync } from "node:fs";
 import { descendantPids } from "@/lib/proc/memory";
 import { listFiles } from "@/lib/scanner";
 import { overlaySessionTitles } from "@/lib/session/titleProjection";
@@ -16,6 +17,34 @@ import type { FileEntry, ResourceSession, ResourcesPayload } from "./types";
  */
 
 const CACHE_MS = 10_000;
+
+function finiteNonNegative(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+
+export function parseResourcesFixture(raw: string): ResourcesPayload {
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    throw new Error("invalid resources fixture: expected JSON");
+  }
+  const candidate = value as Partial<ResourcesPayload> | null;
+  const system = candidate?.system;
+  const validSystem = system === null || (
+    typeof system === "object"
+    && finiteNonNegative(system.ramTotal)
+    && finiteNonNegative(system.ramAvailable)
+    && finiteNonNegative(system.swapTotal)
+    && finiteNonNegative(system.swapUsed)
+    && typeof system.capturedAt === "string"
+    && Number.isFinite(Date.parse(system.capturedAt))
+  );
+  if (!candidate || !validSystem || !Array.isArray(candidate.sessions) || candidate.sessions.length !== 0) {
+    throw new Error("invalid resources fixture: expected system metrics and an empty sessions list");
+  }
+  return { system: system ?? null, sessions: [] };
+}
 
 function captureSystemMemory(): ResourcesPayload["system"] {
   const system = procBackend.systemMemory();
@@ -165,6 +194,11 @@ async function buildResources(fresh: boolean): Promise<ResourcesPayload> {
     `fresh` forces a rebuild — used right after a kill so the freed memory and
     the shorter session list show up immediately. */
 export async function readResources(fresh = false): Promise<ResourcesPayload> {
+  const fixturePath = process.env.LLV_RESOURCES_FIXTURE;
+  if (fixturePath) {
+    noteSessionTargets([]);
+    return parseResourcesFixture(readFileSync(fixturePath, "utf8"));
+  }
   const cached = globalStore.__llvResourcesCache;
   /* Pane discovery is the expensive cached half. Host pressure comes from a
      new /proc/meminfo snapshot on every request, so RAM and swap never inherit
