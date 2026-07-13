@@ -74,7 +74,13 @@ export class FileClaudeDeliveryLedger implements ClaudeDeliveryLedger {
   }
 
   recordQueued(sessionId: string, entry: QueueEntry, disposition: ClaudeDeliveryState["disposition"]): void {
-    if (this.load(sessionId).some((state) => state.entry.id === entry.id)) return;
+    const existing = this.load(sessionId).find((state) => state.entry.id === entry.id);
+    if (existing) {
+      if (!sameQueueEntry(existing.entry, entry)) {
+        throw new Error("Claude delivery ledger entry id belongs to a different payload");
+      }
+      return;
+    }
     this.append(sessionId, { kind: "queued", entry, disposition, queuedAt: new Date().toISOString() });
   }
 
@@ -185,6 +191,12 @@ function record(value: unknown): JsonObject | null {
 function stringField(value: unknown, key: string): string | null {
   const object = record(value);
   return object && typeof object[key] === "string" ? object[key] as string : null;
+}
+
+function sameQueueEntry(left: QueueEntry, right: QueueEntry): boolean {
+  return left.id === right.id
+    && left.text === right.text
+    && left.expectedTurnId === right.expectedTurnId;
 }
 
 function deliveryRecord(value: unknown): ClaudeDeliveryRecord | null {
@@ -435,10 +447,13 @@ export class ClaudeStreamBrokerHost implements EngineHost {
   async send(entry: QueueEntry): Promise<DeliveryReceipt> {
     if (this.unavailable()) return { outcome: "rejected", reason: "dead-host" };
     if (!entry.id || !entry.text) throw new Error("queue entry id and text are required");
-    if (entry.expectedTurnId !== undefined && entry.expectedTurnId !== this.activeTurnId) {
+    const duplicate = this.deliveries.find((state) => state.entry.id === entry.id);
+    if (duplicate && !sameQueueEntry(duplicate.entry, entry)) {
+      throw new Error("Claude queue entry id belongs to a different payload");
+    }
+    if (!duplicate && entry.expectedTurnId !== undefined && entry.expectedTurnId !== this.activeTurnId) {
       return { outcome: "rejected", reason: "stale-turn" };
     }
-    const duplicate = this.deliveries.find((state) => state.entry.id === entry.id);
     if (duplicate?.delivered) {
       return { outcome: duplicate.disposition, turnId: duplicate.entry.id };
     }

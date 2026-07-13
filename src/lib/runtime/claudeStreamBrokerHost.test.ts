@@ -237,7 +237,12 @@ describe("ClaudeStreamBrokerHost", () => {
 
   test("retries a ledgered pre-actuation entry and confirms an actuated entry from transcript", async () => {
     const pendingLedger = new RecordingDeliveryLedger();
-    pendingLedger.recordQueued("pending-session", { id: "pending", text: "retry me" }, "turn-started");
+    const pendingEntry: QueueEntry = {
+      id: "pending",
+      text: "retry me",
+      expectedTurnId: "turn-before-crash",
+    };
+    pendingLedger.recordQueued("pending-session", pendingEntry, "queued-next-turn");
     const pendingChild = new FakeClaude(pendingLedger);
     const pending = await ClaudeStreamBrokerHost.adopt("pending-session", {
       cwd: "/repo",
@@ -247,9 +252,10 @@ describe("ClaudeStreamBrokerHost", () => {
       readTranscript: () => [],
       spawnProcess: fakeSpawn(pendingChild, {}),
     });
-    const retried = pending.send({ id: "pending", text: "retry me" });
+    expect((await pending.health()).activeTurnRef).toBeNull();
+    const retried = pending.send(pendingEntry);
     pendingChild.emitJson({ type: "user", session_id: "pending-session", uuid: "retried-user", message: { role: "user", content: [{ type: "text", text: "retry me" }] } });
-    expect(await retried).toEqual({ outcome: "turn-started", turnId: "pending" });
+    expect(await retried).toEqual({ outcome: "queued-next-turn", turnId: "pending" });
     expect(pendingChild.inputs.filter((input) => input.type === "user")).toHaveLength(1);
     await pending.release();
 
@@ -268,6 +274,47 @@ describe("ClaudeStreamBrokerHost", () => {
     expect(confirmedChild.inputs).toHaveLength(0);
     expect(confirmedLedger.order).toContain("confirmed:confirmed");
     await confirmed.release();
+  });
+
+  test("rejects a changed payload before retrying an undelivered ledger entry", async () => {
+    const sessionId = "immutable-pending-session";
+    const ledger = new RecordingDeliveryLedger();
+    ledger.recordQueued(sessionId, { id: "immutable-entry", text: "original" }, "turn-started");
+    const child = new FakeClaude(ledger);
+    const host = await ClaudeStreamBrokerHost.adopt(sessionId, {
+      cwd: "/repo",
+      deliveryLedger: ledger,
+      eventStore: new MemoryEventStore(),
+      readAuthStatus: () => ({ loggedIn: true, authMethod: "claude.ai", subscriptionType: "max" }),
+      readTranscript: () => [],
+      spawnProcess: fakeSpawn(child, {}),
+    });
+
+    await expect(host.send({ id: "immutable-entry", text: "changed" })).rejects.toThrow("different payload");
+    expect(child.inputs.filter((input) => input.type === "user")).toHaveLength(0);
+    await host.release();
+  });
+
+  test("rejects changed queue fields for an entry already confirmed delivered", async () => {
+    const sessionId = "immutable-delivered-session";
+    const original: QueueEntry = { id: "immutable-entry", text: "original", expectedTurnId: null };
+    const ledger = new RecordingDeliveryLedger();
+    ledger.recordQueued(sessionId, original, "turn-started");
+    const child = new FakeClaude(ledger);
+    const host = await ClaudeStreamBrokerHost.adopt(sessionId, {
+      cwd: "/repo",
+      deliveryLedger: ledger,
+      eventStore: new MemoryEventStore(),
+      readAuthStatus: () => ({ loggedIn: true, authMethod: "claude.ai", subscriptionType: "max" }),
+      readTranscript: () => [{ text: "original", uuid: "original-user", timestamp: new Date().toISOString() }],
+      spawnProcess: fakeSpawn(child, {}),
+    });
+
+    await expect(host.send({ ...original, text: "changed" })).rejects.toThrow("different payload");
+    await expect(host.send({ ...original, expectedTurnId: "changed-turn" })).rejects.toThrow("different payload");
+    expect(await host.send(original)).toEqual({ outcome: "turn-started", turnId: "immutable-entry" });
+    expect(child.inputs).toHaveLength(0);
+    await host.release();
   });
 
   test("host loss rejects an unconfirmed send and leaves retry ownership for adoption", async () => {
@@ -602,6 +649,8 @@ describe("ClaudeStreamBrokerHost", () => {
     const ledger = new FileClaudeDeliveryLedger(directory);
     ledger.recordQueued("durable", { id: "entry", text: "hello" }, "turn-started");
     ledger.confirmDelivered("durable", "entry", "engine-user");
+    expect(() => ledger.recordQueued("durable", { id: "entry", text: "changed" }, "turn-started"))
+      .toThrow("different payload");
     expect(new FileClaudeDeliveryLedger(directory).load("durable")).toMatchObject([{
       entry: { id: "entry", text: "hello" },
       disposition: "turn-started",
