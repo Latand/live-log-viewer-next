@@ -60,17 +60,20 @@ export function ProjectRail({ files, projectCatalog, pipelines, workflows, archi
       >
         {isMobile ? (
           /* The 248px drawer header must hold three 44px controls no matter how
-             wide the badges grow (issue #148). Title + both status badges live in
-             one min-w-0 flex-1 group that shrinks (title truncates first); the
-             controls sit in a shrink-0 group so they can never be pushed outside.
-             The group is overflow-hidden so even the capped `99+`/`99+` maximum can
-             only clip within its own share, never bleed into the controls — and
-             the badges are compact (no live dot, tight padding, tabular-nums) so
+             wide the counts grow (issue #148). Title + live count + attention
+             badge live in one min-w-0 flex-1 group that shrinks (title truncates
+             first); the controls sit in a shrink-0 group so they can never be
+             pushed outside. The group is overflow-hidden so even the capped
+             `99+`/`99+` maximum can only clip within its own share, never bleed
+             into the controls — and the live count is plain text (rule 5) while
+             the attention badge stays compact (tight padding, tabular-nums) so
              that maximum still fits without clipping in the ~86px it is allotted. */
           <>
             <div className="flex min-w-0 flex-1 items-center gap-1 overflow-hidden">
               <span className="min-w-0 truncate">{t("rail.title")}</span>
-              {totalLive ? <Badge tone="success">{totalLive > 99 ? "99+" : totalLive}</Badge> : null}
+              {totalLive ? (
+                <span className="shrink-0 text-[11px] font-semibold tabular-nums text-muted">{totalLive > 99 ? "99+" : totalLive}</span>
+              ) : null}
               {totalAttention ? <Badge tone="warning">⏸{totalAttention > 99 ? "99+" : totalAttention}</Badge> : null}
             </div>
             <div className="flex shrink-0 items-center gap-1">
@@ -83,10 +86,10 @@ export function ProjectRail({ files, projectCatalog, pipelines, workflows, archi
           <>
             <span>{t("rail.title")}</span>
             {totalLive ? (
-              <Badge tone="success">
+              <span className="inline-flex shrink-0 items-center gap-1 text-[11px] font-semibold tabular-nums text-muted">
                 <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-success" />
                 {totalLive}
-              </Badge>
+              </span>
             ) : null}
             {totalAttention ? <Badge tone="warning">⏸ {totalAttention}</Badge> : null}
             <LanguageToggle />
@@ -228,7 +231,7 @@ function RailRow({
         <span className={`block truncate text-[13px] ${active ? "font-bold" : "font-semibold"} ${muted ? "text-muted" : ""}`}>{label}</span>
         {age ? <span className="block text-[10.5px] text-muted">{age}</span> : null}
       </span>
-      {live > 0 ? <Badge tone="success">{live}</Badge> : null}
+      {live > 0 ? <span className="shrink-0 text-[11px] font-semibold tabular-nums text-muted">{live}</span> : null}
       {attention > 0 ? <Badge tone="warning">⏸ {attention}</Badge> : null}
       {total !== null ? <span className="shrink-0 text-[11px] font-semibold text-muted">{total}</span> : null}
     </button>

@@ -8,6 +8,7 @@ import { Check, Plus, RotateCcw } from "lucide-react";
 import type { TFunction } from "@/lib/i18n";
 
 import { Hint } from "@/components/Hint";
+import { Badge, type BadgeTone } from "@/components/ui/Badge";
 import { useComposer } from "@/hooks/useComposer";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useRuntimeReceiptsForArtifact } from "@/hooks/useRuntime";
@@ -98,19 +99,20 @@ export function appendComposerDraft(id: string, text: string) {
 const hhmm = (at: number) =>
   new Date(at).toLocaleTimeString(getLocale() === "uk" ? "uk-UA" : "en-US", { hour12: false, hour: "2-digit", minute: "2-digit" });
 
-/** The label + tone for a delivery-receipt state chip, or `null` for a plainly
-    delivered message (no chip). Held/queued/recovering read amber (pending),
-    failed reads red (actionable). Text carries the state — never colour alone. */
-function receiptMeta(t: TFunction, state: DeliveryReceiptState | undefined): { label: string; className: string } | null {
+/** The label + Badge tone for a delivery-receipt state chip, or `null` for a
+    plainly delivered message (no chip). Held/queued/recovering read amber
+    (pending), failed reads red (actionable). Text carries the state — never
+    colour alone. Rendered through the shared {@link Badge} recipe (design §3.7). */
+function receiptMeta(t: TFunction, state: DeliveryReceiptState | undefined): { label: string; tone: BadgeTone } | null {
   switch (state) {
     case "held":
-      return { label: t("composer.receiptHeld"), className: "bg-warning-soft text-warning" };
+      return { label: t("composer.receiptHeld"), tone: "warning" };
     case "queued":
-      return { label: t("composer.receiptQueued"), className: "bg-warning-soft text-warning" };
+      return { label: t("composer.receiptQueued"), tone: "warning" };
     case "recovering":
-      return { label: t("composer.receiptRecovering"), className: "bg-warning-soft text-warning" };
+      return { label: t("composer.receiptRecovering"), tone: "warning" };
     case "failed":
-      return { label: t("composer.receiptFailed"), className: "bg-danger-soft text-danger" };
+      return { label: t("composer.receiptFailed"), tone: "danger" };
     default:
       return null;
   }
@@ -460,13 +462,9 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
             return (
             <div key={entry.id} className="flex items-center justify-end gap-1.5">
               {receipt ? (
-                <span
-                  role="status"
-                  aria-live="polite"
-                  className={`inline-flex shrink-0 items-center gap-0.5 rounded-full px-1.5 py-0.5 text-caption font-bold ${receipt.className}`}
-                >
+                <Badge tone={receipt.tone} role="status" aria-live="polite">
                   {receipt.label}
-                </span>
+                </Badge>
               ) : null}
               {entry.state === "failed" ? (
                 <button

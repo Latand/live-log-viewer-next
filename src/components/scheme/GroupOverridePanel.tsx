@@ -77,7 +77,7 @@ function PanelHeader({ title, onClose }: { title: string; onClose: () => void })
   );
 }
 
-const fieldLabel = "text-[10px] font-semibold text-secondary";
+const fieldLabel = "text-label font-semibold text-secondary";
 const inputBase =
   "h-7 w-full rounded-[8px] border border-border bg-canvas px-2 text-[11.5px] font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40";
 const primaryBtn =

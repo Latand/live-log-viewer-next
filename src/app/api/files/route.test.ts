@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, mock, test } from "bun:test";
+import { afterAll, afterEach, beforeEach, expect, mock, test } from "bun:test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -40,6 +40,25 @@ afterEach(() => {
   fs.rmSync(stateDir, { recursive: true, force: true });
 });
 
+/* `mock.module` is process-global and outlives this file, so any suite that runs
+   afterward and imports one of these modules would otherwise see the stub — e.g.
+   the mocked `@/lib/tmux` drops the named exports `provider.ts` imports, which
+   crashes an unrelated migration suite. Capture the real namespaces first and
+   restore them in afterAll so the leak is contained to this file. */
+const MOCKED_MODULES = [
+  "@/lib/scanner",
+  "@/lib/flows/store",
+  "@/lib/pipelines/store",
+  "@/lib/pipelines/visibility",
+  "@/lib/tasks/store",
+  "@/lib/workflows/store",
+  "@/lib/workflows/visibility",
+  "@/lib/tmux",
+] as const;
+const realModules = new Map<string, unknown>(
+  await Promise.all(MOCKED_MODULES.map(async (name) => [name, { ...(await import(name)) }] as const)),
+);
+
 mock.module("@/lib/scanner", () => ({
   listFiles: async () => [],
   listFilesWithProjectCatalog: async (_project: string | undefined, options: unknown) => {
@@ -61,6 +80,10 @@ mock.module("@/lib/tasks/store", () => ({
 mock.module("@/lib/workflows/store", () => ({ loadWorkflows: () => [] }));
 mock.module("@/lib/workflows/visibility", () => ({ filterWorkflowsForFileScan: () => [] }));
 mock.module("@/lib/tmux", () => ({ tmuxEndpointHealth: () => tmuxHealth }));
+
+afterAll(() => {
+  for (const [name, real] of realModules) mock.module(name, () => real as Record<string, unknown>);
+});
 
 const { cachedFileScan, resetFilesRouteCacheForTests } = await import("./scanCache");
 const { GET } = await import("./route");

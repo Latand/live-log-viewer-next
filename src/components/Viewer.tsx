@@ -384,7 +384,7 @@ export function Viewer() {
             isMobile ? "fixed inset-x-3 top-12" : "absolute right-0 top-[calc(100%+6px)] w-[340px] max-w-[calc(100vw-2rem)]"
           } z-50 max-h-[60vh] overflow-y-auto rounded-[10px] border border-border bg-card p-1.5 shadow-1`}
         >
-          <div className="px-2.5 pb-1 pt-1.5 text-[10.5px] font-semibold text-secondary">
+          <div className="px-2.5 pb-1 pt-1.5 text-label font-semibold text-secondary">
             {t("attention.popoverTitle")}
           </div>
           {queue.map((item) => (

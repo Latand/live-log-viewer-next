@@ -64,23 +64,27 @@ const CODEX_MODEL_COLORS: [RegExp, string][] = [
 ];
 
 /** Model tint from HSL parts. `color` reads on either theme via `light-dark()`:
-    the light value is the identity hue, the dark value lifts the same hue to a
-    lightness readable on the dark card/soft tint (the deep light-theme hues fall
-    to ~2.5:1 otherwise). `soft` is a translucent tint of the same hue, so the
-    chip background composites over whatever surface is active (design doc §1.5).
-    `color-scheme` is set on :root, and every consumer is a CSS/SVG color context
-    (inline style, SVG `fill`), so both values resolve per theme with no JS. */
-function themedTint(h: number, s: number, l: number): ModelTint {
+    the light value is the identity hue at `lLight`, the dark value the same hue
+    at `lDark` — a separate lightness so the deep light-theme hues (which fall to
+    ~2.5:1 on the dark card) are lifted to a readable level while the effort ramp
+    still drives brightness in BOTH themes. `soft` is a translucent tint of the
+    light hue, so the chip background composites over whatever surface is active
+    (design doc §1.5). `color-scheme` is set on :root, and every consumer is a
+    CSS/SVG color context (inline style, SVG `fill`), so both resolve with no JS. */
+function themedTint(h: number, s: number, lLight: number, lDark: number): ModelTint {
   const H = Math.round(h);
   const S = Math.round(s);
-  const L = Math.round(l);
+  const L = Math.round(lLight);
   const light = `hsl(${H} ${S}% ${L}%)`;
-  const dark = `hsl(${H} ${Math.min(S, 78)}% 72%)`;
+  const dark = `hsl(${H} ${Math.min(S, 78)}% ${Math.round(lDark)}%)`;
   return { color: `light-dark(${light}, ${dark})`, soft: `hsl(${H} ${S}% ${L}% / 0.14)` };
 }
 
+/** Readable dark lightness for a base (no-effort) hue — deep hues are lifted,
+    already-light hues kept, so every model badge reads on the dark surface. */
 function tintOf(hex: string): ModelTint {
-  return themedTint(...hexToHsl(hex));
+  const [h, s, l] = hexToHsl(hex);
+  return themedTint(h, s, l, Math.max(l, 68));
 }
 
 /** Raw identity hex before theming — the shift input for {@link effortTint}. */
@@ -137,8 +141,12 @@ export function effortTint(file: FileEntry): ModelTint {
   const ramp = EFFORT_RAMP[file.effort ?? ""];
   if (!ramp) return tintOf(baseHex);
   const [h, s, l] = hexToHsl(baseHex);
-  const clamp = (v: number) => Math.min(100, Math.max(0, v));
-  return themedTint(h, clamp(s + ramp.ds), clamp(l + ramp.dl));
+  const clamp = (v: number, lo = 0, hi = 100) => Math.min(hi, Math.max(lo, v));
+  // Light: the ramp deepens (lower L) toward xhigh/max, as before. Dark: it
+  // brightens by the same magnitude (`-dl`) off a readable center, so brightness
+  // keeps carrying the effort signal on both themes (color-blind safe, per the
+  // ramp contract) instead of collapsing to one lightness.
+  return themedTint(h, clamp(s + ramp.ds), clamp(l + ramp.dl), clamp(72 - ramp.dl, 58, 90));
 }
 
 /** Chip tooltip carrying the raw effort value; empty keeps the chip as-is. */

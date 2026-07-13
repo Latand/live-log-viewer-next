@@ -107,7 +107,7 @@ export function VerdictPopover({
 
       {verdict && typeof verdict.confidence === "number" ? (
         <div className="flex items-center gap-1.5">
-          <span className="shrink-0 text-[9.5px] font-semibold text-secondary">{t("pipelineVerdict.confidence")}</span>
+          <span className="shrink-0 text-label font-semibold text-secondary">{t("pipelineVerdict.confidence")}</span>
           <span className="h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-border" aria-hidden>
             <span className="block h-full rounded-full" style={{ width: `${Math.round(Math.max(0, Math.min(1, verdict.confidence)) * 100)}%`, backgroundColor: tone?.color ?? "var(--color-accent)" }} />
           </span>
@@ -117,7 +117,7 @@ export function VerdictPopover({
 
       {findings.length ? (
         <div className="flex max-h-40 flex-col gap-1 overflow-y-auto">
-          <span className="text-[9.5px] font-semibold text-secondary">{t("pipelineVerdict.findings", { count: findings.length })}</span>
+          <span className="text-label font-semibold text-secondary">{t("pipelineVerdict.findings", { count: findings.length })}</span>
           <ul className="flex flex-col gap-1">
             {shown.map((finding, index) => (
               <li key={index} className="rounded-[7px] bg-canvas px-2 py-1 text-[10.5px] leading-4 text-primary">{finding}</li>
@@ -133,7 +133,7 @@ export function VerdictPopover({
 
       {priorAttempts.length ? (
         <div className="flex shrink-0 flex-col gap-0.5 border-t border-border pt-1.5">
-          <span className="text-[9.5px] font-semibold text-secondary">{t("pipelineVerdict.priorAttempts")}</span>
+          <span className="text-label font-semibold text-secondary">{t("pipelineVerdict.priorAttempts")}</span>
           {/* Retries append attempts without bound, so the audit scrolls within a
               fixed height — otherwise a long history grows the popover past the
               viewport and pushes the Retry/Skip footer off-screen. */}

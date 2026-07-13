@@ -142,7 +142,7 @@ function BackendMenu({ onClose }: { onClose: () => void }) {
         </div>
       ) : (
         <>
-          <div className="px-2 pb-1 pt-1.5 text-[10.5px] font-semibold text-secondary">
+          <div className="px-2 pb-1 pt-1.5 text-label font-semibold text-secondary">
             {t("mic.menuTitle")}
           </div>
           {info?.lockedByEnv ? (
