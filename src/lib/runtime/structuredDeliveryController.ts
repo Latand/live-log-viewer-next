@@ -131,22 +131,34 @@ export async function bindStructuredDeliveryQueue(
   let drainTimer: ReturnType<typeof setTimeout> | null = null;
   let drainBackoffMs = DELIVERY_DRAIN_COALESCE_MS;
   let stopped = false;
-  const scheduleDrain = (delayMs = DELIVERY_DRAIN_COALESCE_MS) => {
-    if (stopped || drainTimer) return;
+  const scheduleDrain = (delayMs = DELIVERY_DRAIN_COALESCE_MS): boolean => {
+    if (stopped || drainTimer) return false;
     drainTimer = setTimeout(() => {
       drainTimer = null;
       if (stopped) return;
-      void queue.drain().then(
-        () => { drainBackoffMs = DELIVERY_DRAIN_COALESCE_MS; },
-        () => {
-          console.error("[structured delivery] scheduled queue drain failed");
-          const retryMs = drainBackoffMs;
-          drainBackoffMs = Math.min(drainBackoffMs * 2, DELIVERY_DRAIN_MAX_BACKOFF_MS);
-          scheduleDrain(retryMs);
-        },
-      );
+      void drainWithRetry();
     }, delayMs);
     drainTimer.unref?.();
+    return true;
+  };
+  const drainWithRetry = async (): Promise<void> => {
+    try {
+      await queue.drain();
+      drainBackoffMs = DELIVERY_DRAIN_COALESCE_MS;
+    } catch (error) {
+      if (stopped) return;
+      const retryMs = drainBackoffMs;
+      const retryScheduled = scheduleDrain(retryMs);
+      if (retryScheduled) {
+        drainBackoffMs = Math.min(retryMs * 2, DELIVERY_DRAIN_MAX_BACKOFF_MS);
+      }
+      console.error(
+        retryScheduled
+          ? "[structured delivery] queue drain failed; retry scheduled"
+          : "[structured delivery] queue drain failed; retry already pending",
+        error,
+      );
+    }
   };
   const requestDrain = () => {
     if (state.activeQueue === queue) scheduleDrain();
@@ -337,9 +349,12 @@ export async function bindStructuredDeliveryQueue(
     await publishCurrentFallback(conversation.id);
   }
   state.activeQueue = queue;
-  setStructuredDeliveryKick(() => queue.drain().catch(() => {
-    console.error("[structured delivery] queue drain failed");
-  }));
+  setStructuredDeliveryKick(() => {
+    if (stopped) return;
+    if (drainTimer) clearTimeout(drainTimer);
+    drainTimer = null;
+    return drainWithRetry();
+  });
   state.stopActive = () => {
     stopped = true;
     if (drainTimer) clearTimeout(drainTimer);

@@ -207,6 +207,169 @@ test("an engine event burst preserves every projection without polling the deliv
   }
 });
 
+test("a failed route kick retries queued controls and messages without a host-state notification", async () => {
+  const directory = path.join(sandbox, "controller-route-kick-retry");
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const sessionId = "c012d11e-1854-4157-aede-75eae7bde18c";
+  const artifactPath = path.join(directory, `${sessionId}.jsonl`);
+  const profile = emptyLaunchProfile({ cwd: directory });
+  registry.reconcileConversations([{
+    engine: "codex",
+    path: artifactPath,
+    accountId: "route-kick-account",
+    launchProfile: profile,
+    turn: { state: "busy", source: "assistant", terminalAt: null },
+    observedAt: "2026-07-14T12:00:00.000Z",
+  }]);
+  const conversationId = Object.keys(registry.snapshot().conversations)[0]!;
+  registry.upsert({
+    key: { engine: "codex", sessionId },
+    artifactPath,
+    cwd: directory,
+    accountId: "route-kick-account",
+    launchProfile: profile,
+    status: "live",
+    host: null,
+    structuredHost: {
+      kind: "codex-app-server",
+      endpoint: "fake:route-kick-host",
+      process: null,
+      eventCursor: 0,
+      protocolVersion: "fake-v1",
+      writerClaimEpoch: 0,
+      activeTurnRef: "turn:route-kick",
+      pendingAttention: ["attention-route-kick"],
+      activeFlags: [],
+    },
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  const journal = new RuntimeJournal(path.join(directory, "events.sqlite"), { structuredHosts: true });
+  const baseClient = runtimeJournalClient(journal);
+  const transitions: Array<[string, string]> = [];
+  let effectBatchCalls = 0;
+  let failNextEffectBatch = false;
+  const client = {
+    ...baseClient,
+    effectBatch: async (...args: Parameters<RuntimeHostClient["effectBatch"]>) => {
+      effectBatchCalls += 1;
+      if (failNextEffectBatch) {
+        failNextEffectBatch = false;
+        throw new Error("transient route-kick effect-batch failure");
+      }
+      return await baseClient.effectBatch(...args);
+    },
+    transitionOperation: async (...args: Parameters<RuntimeHostClient["transitionOperation"]>) => {
+      transitions.push([args[0], args[1]]);
+      return await baseClient.transitionOperation(...args);
+    },
+  } satisfies RuntimeHostClient;
+  const hostCalls: string[] = [];
+  let hostState: HostState = {
+    status: "active",
+    sessionKey: "route-kick-session",
+    endpoint: "fake:route-kick-host",
+    pid: 1,
+    processStartIdentity: "fake:1",
+    eventCursor: 0,
+    protocolVersion: "fake-v1",
+    activeTurnRef: "turn:route-kick",
+    pendingAttention: ["attention-route-kick"],
+    activeFlags: [],
+    account: null,
+  };
+  const host = {
+    async *attach(): AsyncIterableIterator<RuntimeEvent> {},
+    send: async (entry: QueueEntry) => {
+      hostCalls.push(`send:${entry.id}`);
+      return { outcome: "turn-started" as const, turnId: `turn:${entry.id}` };
+    },
+    answer: async (attentionId: string) => { hostCalls.push(`answer:${attentionId}`); },
+    interrupt: async (turnId: string) => {
+      hostCalls.push(`interrupt:${turnId}`);
+      hostState = { ...hostState, status: "idle", activeTurnRef: null };
+    },
+    health: async () => ({ ...hostState }),
+    release: async () => {},
+    onStateChange(listener: (state: HostState) => void) {
+      listener({ ...hostState });
+      return () => {};
+    },
+  } satisfies EngineHost & { onStateChange(listener: (state: HostState) => void): () => void };
+
+  try {
+    await bindStructuredDeliveryQueue([{
+      key: { engine: "codex", sessionId },
+      host,
+    }], { registry, client });
+    journal.append({
+      scope: { type: "session", id: conversationId },
+      kind: "attention",
+      payload: {
+        id: "attention-route-kick",
+        conversationId,
+        kind: "question",
+        state: "open",
+        unowned: false,
+        createdAt: "2026-07-14T12:00:00.000Z",
+        request: { question: { prompt: "Proceed?" } },
+        turnId: "turn:route-kick",
+      },
+    });
+    journal.executeOperation({
+      kind: "send",
+      operationId: "operation-route-send",
+      idempotencyKey: "route-send",
+      conversationId,
+      text: "continue after controls",
+      policy: "queue",
+    });
+    journal.executeOperation({
+      kind: "answer",
+      operationId: "operation-route-answer",
+      idempotencyKey: "route-answer",
+      conversationId,
+      attentionId: "attention-route-kick",
+      resolution: { answer: "yes" },
+    });
+    journal.executeOperation({
+      kind: "interrupt",
+      operationId: "operation-route-interrupt",
+      idempotencyKey: "route-interrupt",
+      conversationId,
+      turnId: "turn:route-kick",
+    });
+    const baselineEffectBatchCalls = effectBatchCalls;
+    failNextEffectBatch = true;
+
+    await kickStructuredDeliveryQueue();
+    expect(effectBatchCalls - baselineEffectBatchCalls).toBe(1);
+    await waitForCondition(() => journal.operationResult("operation-route-send")?.receipt.status === "delivered");
+
+    expect(journal.operationResult("operation-route-answer")?.receipt.status).toBe("answered");
+    expect(journal.operationResult("operation-route-interrupt")?.receipt.status).toBe("interrupted");
+    expect(journal.operationResult("operation-route-send")?.receipt.status).toBe("delivered");
+    expect(effectBatchCalls - baselineEffectBatchCalls).toBe(2);
+    expect(hostCalls).toEqual([
+      "answer:attention-route-kick",
+      "interrupt:turn:route-kick",
+      "send:operation-route-send",
+    ]);
+    expect(transitions).toEqual([
+      ["operation-route-answer", "delivering"],
+      ["operation-route-answer", "answered"],
+      ["operation-route-interrupt", "delivering"],
+      ["operation-route-interrupt", "interrupted"],
+      ["operation-route-send", "delivering"],
+      ["operation-route-send", "delivered"],
+    ]);
+  } finally {
+    await bindStructuredDeliveryQueue([], { registry, client: null });
+    journal.close();
+  }
+});
+
 test("a delivering entry resumes after restart through the host ledger without a second engine write", async () => {
   const filename = path.join(sandbox, "events.sqlite");
   const ledger = createFakeDeliveryLedger();
