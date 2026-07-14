@@ -181,13 +181,13 @@ function StageChip({
 
   return (
     <span ref={chipRef} className="relative flex shrink-0 items-center gap-1.5">
-      {index ? <span className="text-[10px] font-bold text-strong" aria-hidden>→</span> : null}
+      {index ? <span className="text-caption font-bold text-strong" aria-hidden>→</span> : null}
       <span className="inline-flex items-center">
         <button
           type="button"
           disabled={!canOpen}
           onClick={openStage}
-          className={`inline-flex h-6 max-w-[180px] items-center gap-1 truncate rounded-l-full ${evidence ? "" : "rounded-r-full"} px-2 text-[10.5px] font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:cursor-default ${pulse ? "animate-pulse" : ""}`}
+          className={`inline-flex h-6 max-w-[180px] items-center gap-1 truncate rounded-l-full ${evidence ? "" : "rounded-r-full"} px-2 text-label font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:cursor-default ${pulse ? "animate-pulse" : ""}`}
           style={{ backgroundColor: tone.soft, color: tone.color }}
           title={title}
           aria-label={t("pipelineStrip.chipAria", { label, state: chipState })}
@@ -204,7 +204,7 @@ function StageChip({
             onClick={onToggleVerdict}
             aria-expanded={open}
             aria-label={t("pipelineStrip.openVerdict", { label })}
-            className="inline-flex h-6 items-center rounded-r-full border-l border-card/60 px-1 text-[10.5px] font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            className="inline-flex h-6 items-center rounded-r-full border-l border-card/60 px-1 text-label font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
             style={{ backgroundColor: tone.soft, color: tone.color }}
           >
             <span aria-hidden>{attempt!.verdict ? (attempt!.verdict.status === "pass" ? "✓" : attempt!.verdict.status === "fail" ? "✕" : "●") : "!"}</span>
@@ -294,7 +294,7 @@ export function PipelineStrip({
           aria-hidden
         />
         {draft ? (
-          <span className="shrink-0 rounded-full border border-dashed border-warning bg-warning-soft px-2 py-0.5 text-caption font-semibold tracking-[0.06em] text-warning">
+          <span className="shrink-0 rounded-full border border-dashed border-warning bg-warning-soft px-2 py-0.5 text-caption font-semibold text-warning">
             {t("pipelineStrip.draftBadge")}
           </span>
         ) : null}

@@ -206,7 +206,7 @@ export function StagePlaceholderPane({ slot, interactive }: { slot: StageSlot; i
     <section
       data-pan-ignore
       aria-label={t("pipelineSlot.paneAria", { role: label })}
-      className="relative flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-[10px] border-2 border-dashed bg-card shadow-1"
+      className="relative flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-control border-2 border-dashed bg-card shadow-1"
       style={{ borderColor: active ? tone.color : "var(--border-strong)" }}
     >
       <span aria-hidden className="h-1 w-full shrink-0 opacity-60" style={{ backgroundColor: tint.color }} />
@@ -217,15 +217,15 @@ export function StagePlaceholderPane({ slot, interactive }: { slot: StageSlot; i
           title={t(`pipelineChipState.${state}`)}
         />
         <EngineRadioGroup engine={engine as "claude" | "codex"} disabled={!editable || busy} onChange={changeEngine} />
-        <span className="min-w-0 flex-1 truncate text-[12px] font-semibold text-muted" title={label}>
+        <span className="min-w-0 flex-1 truncate text-ui font-semibold text-muted" title={label}>
           {label} · {t("pipelineSlot.stageOf", { k: slot.index + 1, n: slot.total })}
         </span>
-        <span className="shrink-0 rounded-full border border-border bg-card/70 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide text-muted">
+        <span className="shrink-0 rounded-full border border-border bg-card/70 px-1.5 py-0.5 text-caption font-bold uppercase tracking-wide text-muted">
           {review ? `⟳ ${t("groupOverride.reviewKind")}` : t("groupOverride.runKind")}
         </span>
         {canRemove ? (
           <button
-            className="inline-flex shrink-0 items-center rounded-[8px] border border-border bg-canvas px-1.5 py-0.5 text-muted hover:border-danger/40 hover:text-danger focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40"
+            className="inline-flex shrink-0 items-center rounded-control border border-border bg-canvas px-1.5 py-0.5 text-muted hover:border-danger/40 hover:text-danger focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40"
             aria-label={t("groupOverride.removeStage")}
             disabled={busy}
             onClick={removeStage}
@@ -250,7 +250,7 @@ export function StagePlaceholderPane({ slot, interactive }: { slot: StageSlot; i
       ) : null}
 
       <div className="flex shrink-0 flex-wrap items-center gap-1.5 border-b border-border bg-sunken px-2.5 py-1.5">
-        <span className="shrink-0 text-[10px] font-semibold text-muted">{t("draft.reasoning")}</span>
+        <span className="shrink-0 text-caption font-semibold text-muted">{t("draft.reasoning")}</span>
         {interactive ? (
           <>
             <RuntimeControlsView
@@ -274,26 +274,26 @@ export function StagePlaceholderPane({ slot, interactive }: { slot: StageSlot; i
             ) : null}
           </>
         ) : (
-          <span className="min-w-0 truncate text-[11px] font-semibold text-muted">
+          <span className="min-w-0 truncate text-label font-semibold text-muted">
             {observedModelLabel}
             {effectiveEffort ? ` · ${effectiveEffort}` : ""}
           </span>
         )}
       </div>
       {error ? (
-        <div className="shrink-0 px-2.5 py-1 text-[10.5px] font-semibold text-danger" role="alert">
+        <div className="shrink-0 px-2.5 py-1 text-label font-semibold text-danger" role="alert">
           {error}
         </div>
       ) : null}
       {interactive && !editable ? (
-        <div className="shrink-0 px-2.5 py-1 text-[10.5px] font-semibold text-muted">{t("pipelineSlot.frozen")}</div>
+        <div className="shrink-0 px-2.5 py-1 text-label font-semibold text-muted">{t("pipelineSlot.frozen")}</div>
       ) : null}
 
       <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-2 overflow-y-auto px-4 py-3 text-center">
-        <span className="rounded-full px-3 py-1 text-[13px] font-bold" style={{ backgroundColor: tone.soft, color: tone.color }}>
+        <span className="rounded-full px-3 py-1 text-body font-bold" style={{ backgroundColor: tone.soft, color: tone.color }}>
           {label}
         </span>
-        <span className="max-w-[380px] text-[12px] leading-5 text-muted">{hint}</span>
+        <span className="max-w-[380px] text-ui leading-5 text-muted">{hint}</span>
       </div>
 
       {interactive ? (
@@ -305,7 +305,7 @@ export function StagePlaceholderPane({ slot, interactive }: { slot: StageSlot; i
           className="flex shrink-0 flex-col gap-1 border-t border-border bg-card px-2.5 py-2"
           aria-label={t("pipelineSlot.promptAria")}
         >
-          <label className="text-[10px] font-semibold text-muted" htmlFor={`slot-prompt-${slot.key}`}>
+          <label className="text-caption font-semibold text-muted" htmlFor={`slot-prompt-${slot.key}`}>
             {t("pipelineSlot.promptLabel")}
           </label>
           <textarea
@@ -315,14 +315,14 @@ export function StagePlaceholderPane({ slot, interactive }: { slot: StageSlot; i
             onChange={(event) => setPrompt(event.target.value)}
             onBlur={savePrompt}
             placeholder={t("pipelineSlot.noPrompt")}
-            className="min-h-[52px] w-full resize-y rounded-[8px] border border-border bg-canvas px-2 py-1.5 text-[11.5px] text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60"
+            className="min-h-[52px] w-full resize-y rounded-control border border-border bg-canvas px-2 py-1.5 text-ui text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60"
           />
           {promptDirty ? (
             <div className="flex items-center justify-end">
               <button
                 type="submit"
                 disabled={!editable || busy || !prompt.trim()}
-                className="inline-flex h-7 items-center gap-1 rounded-[8px] border border-accent bg-accent px-2.5 text-[10.5px] font-bold text-white hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 disabled:opacity-40"
+                className="inline-flex h-7 items-center gap-1 rounded-control border border-accent bg-accent px-2.5 text-label font-bold text-white hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 disabled:opacity-40"
               >
                 {t("pipelineSlot.savePrompt")}
               </button>
