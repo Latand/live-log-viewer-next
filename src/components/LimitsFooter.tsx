@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { accountEntryPointVisible, type Engine, useEngineAccounts } from "@/hooks/useEngineAccounts";
+import { consumePendingAccountPanel, onAccountPanelRequest } from "@/lib/accounts/openPanel";
 import { type Locale, translate, useLocale } from "@/lib/i18n";
 import { LIMITS_RATE_LIMITED_REASON, LIMITS_REAUTH_REQUIRED_REASON, type EngineLimits, type LimitsPayload, type LimitsProvenance, type LimitWindow } from "@/lib/types";
 
@@ -193,6 +194,7 @@ function EngineLimitsBlock({
   const accounts = useEngineAccounts(engine);
   const [open, setOpen] = useState(false);
   const [chartOpen, setChartOpen] = useState(false);
+  const [focusAccountId, setFocusAccountId] = useState<string | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const chartTriggerRef = useRef<HTMLButtonElement>(null);
@@ -200,8 +202,26 @@ function EngineLimitsBlock({
 
   const close = () => {
     setOpen(false);
+    setFocusAccountId(null);
     triggerRef.current?.focus();
   };
+
+  // A tapped account badge (issue #229) asks this engine's panel to open focused
+  // on one account. Desktop: this block is always mounted, so the window event
+  // lands directly. Mobile: it mounts with the project drawer, so a request
+  // dispatched a moment earlier is claimed from the retained pending slot here.
+  useEffect(() => {
+    const openFocused = (accountId: string) => {
+      setChartOpen(false);
+      setFocusAccountId(accountId);
+      setOpen(true);
+    };
+    const pending = consumePendingAccountPanel(engine);
+    if (pending) openFocused(pending.accountId);
+    return onAccountPanelRequest((request) => {
+      if (request.engine === engine) openFocused(request.accountId);
+    });
+  }, [engine]);
 
   const closeChart = () => {
     setChartOpen(false);
@@ -319,7 +339,7 @@ function EngineLimitsBlock({
         )}
         {visibleFailureReason ? <div className="px-3.5 pb-3 pt-0.5 text-[10px] text-muted">{visibleFailureReason}</div> : null}
       </div>
-      {open ? <AccountsPanel state={accounts} onClose={close} /> : null}
+      {open ? <AccountsPanel state={accounts} onClose={close} focusAccountId={focusAccountId} /> : null}
       {chartOpen ? <BurndownPanel key={accounts.active} engine={engine} label={label} plan={accountLimits?.plan ?? null} activeAccountId={accounts.active} onClose={closeChart} /> : null}
     </div>
   );

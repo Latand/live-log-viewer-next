@@ -1171,6 +1171,10 @@ export const uk: Record<keyof typeof en, Message> = {
   "branch.lastActivityQuiet": "Позначений активним, але транскрипт мовчить: остання активність {age}",
   "branch.handoffTitle": "агент, породжений хендоффом цієї розмови",
   "branch.branchTitle": "гілка цієї розмови",
+  // Account badge (issue #229)
+  "branch.accountTip": "Акаунт {id} · {engine} · {health}",
+  "branch.accountTipPlain": "Акаунт {id} · {engine}",
+  "branch.accountAria": "Відкрити акаунти для {id}",
   "lineage.parentRemoved": "батьківську розмову видалено",
   "lineage.parentRemovedTitle": "Транскрипт батьківської розмови видалено",
   "branch.removeColumn": "Прибрати колонку {title}",

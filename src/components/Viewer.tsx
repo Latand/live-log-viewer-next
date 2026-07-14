@@ -4,6 +4,7 @@ import { Crown, Filter, TriangleAlert, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 
 import { formatConversationHash, parseConversationHash, resolveConversationTarget, withoutArchivedPredecessors, type ConversationHash } from "@/lib/accounts/identity";
+import { onAccountPanelRequest } from "@/lib/accounts/openPanel";
 import { useAgentChimes } from "@/hooks/useAgentChimes";
 import { useArchivedProjects } from "@/hooks/useArchivedProjects";
 import { useEffectiveFlows } from "@/components/flows/flowModel";
@@ -189,6 +190,14 @@ export function Viewer() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [drawerOpen]);
+
+  // A tapped account badge (issue #229) opens the accounts surface. On mobile
+  // the limits footer lives inside the project drawer, so the drawer must open
+  // first; its per-engine block then claims the retained request on mount.
+  useEffect(() => {
+    if (!isMobile) return;
+    return onAccountPanelRequest(() => setDrawerOpen(true));
+  }, [isMobile]);
 
   /* A file open (overview card, deep link) becomes a column of its project. */
   const openFile = useCallback(
