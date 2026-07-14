@@ -116,6 +116,9 @@ export function createRuntimeBus(deps: RuntimeBusDeps): RuntimeBus {
   let resyncedTimer: ReturnType<typeof setTimeout> | null = null;
   let fallbackTimer: ReturnType<typeof setInterval> | null = null;
   let sseRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  let fallbackEpoch = 0;
+  let fallbackPollSerial = 0;
+  let fallbackAppliedSerial = 0;
 
   function emit(): void {
     for (const listener of listeners) listener();
@@ -132,6 +135,7 @@ export function createRuntimeBus(deps: RuntimeBusDeps): RuntimeBus {
   }
 
   function clearFallback(): void {
+    fallbackEpoch += 1;
     if (fallbackTimer) deps.clearInterval(fallbackTimer);
     fallbackTimer = null;
     sseRetryTimer = clearTimer(sseRetryTimer);
@@ -316,9 +320,10 @@ export function createRuntimeBus(deps: RuntimeBusDeps): RuntimeBus {
   function startFallback(): void {
     closeSource();
     clearFallback();
+    const myEpoch = fallbackEpoch;
     setState({ connection: "degraded" });
-    void pollFallback();
-    fallbackTimer = deps.setInterval(() => void pollFallback(), FALLBACK_POLL_MS);
+    void pollFallback(myEpoch);
+    fallbackTimer = deps.setInterval(() => void pollFallback(myEpoch), FALLBACK_POLL_MS);
     sseRetryTimer = deps.setTimeout(() => {
       sseRetryTimer = null;
       clearFallback();
@@ -328,11 +333,18 @@ export function createRuntimeBus(deps: RuntimeBusDeps): RuntimeBus {
     }, SSE_RETRY_MS);
   }
 
-  async function pollFallback(): Promise<void> {
+  async function pollFallback(myEpoch: number): Promise<void> {
+    const myPollSerial = ++fallbackPollSerial;
     try {
       const res = await deps.fetch(SNAPSHOT_URL, { headers: { accept: "application/json" } });
       if (!res.ok) throw new Error(`snapshot ${res.status}`);
       const snapshot = (await res.json()) as RuntimeSnapshot;
+      if (
+        myEpoch !== fallbackEpoch
+        || snapshot.snapshotSeq < state.store.cursor
+        || (snapshot.snapshotSeq === state.store.cursor && myPollSerial < fallbackAppliedSerial)
+      ) return;
+      fallbackAppliedSerial = Math.max(fallbackAppliedSerial, myPollSerial);
       const prevFiles = state.store.filesRevision;
       setState({
         store: installSnapshot(snapshot),
@@ -344,6 +356,7 @@ export function createRuntimeBus(deps: RuntimeBusDeps): RuntimeBus {
         for (const listener of filesListeners) listener(snapshot.filesRevision);
       }
     } catch {
+      if (myEpoch !== fallbackEpoch) return;
       // Still down. If nothing has been served for long enough, go offline.
       const last = state.lastEventAt;
       if (last !== null && deps.now() - last >= OFFLINE_AFTER_MS && state.connection !== "offline") {

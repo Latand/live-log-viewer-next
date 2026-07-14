@@ -161,6 +161,7 @@ interface Harness {
   clock: Clock;
   sources: FakeEventSource[];
   setSnapshot: (s: RuntimeSnapshot) => void;
+  deferNextFetch: () => { resolveSnapshot: (s: RuntimeSnapshot) => void };
   failFetch: (fail: boolean) => void;
   fetchCalls: () => number;
 }
@@ -171,10 +172,16 @@ function harness(): Harness {
   let currentSnapshot = snapshot(100);
   let shouldFail = false;
   let calls = 0;
+  let deferredFetch: Promise<Response> | null = null;
   const deps: RuntimeBusDeps = {
     fetch: (() => {
       calls += 1;
       if (shouldFail) return Promise.reject(new Error("network"));
+      if (deferredFetch) {
+        const pending = deferredFetch;
+        deferredFetch = null;
+        return pending;
+      }
       return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(currentSnapshot) } as unknown as Response);
     }) as FetchLike,
     createEventSource: (url) => {
@@ -193,6 +200,15 @@ function harness(): Harness {
     clock,
     sources,
     setSnapshot: (s) => (currentSnapshot = s),
+    deferNextFetch: () => {
+      let resolveFetch!: (response: Response) => void;
+      deferredFetch = new Promise((resolve) => {
+        resolveFetch = resolve;
+      });
+      return {
+        resolveSnapshot: (s) => resolveFetch({ ok: true, status: 200, json: () => Promise.resolve(s) } as unknown as Response),
+      };
+    },
     failFetch: (fail) => (shouldFail = fail),
     fetchCalls: () => calls,
   };
@@ -373,6 +389,56 @@ describe("runtimeBus degraded fallback", () => {
       live = h.bus.getState().connection === "live";
     }
     expect(live).toBe(true);
+  });
+
+  test("old fallback responses cannot overwrite newer rollback snapshots", async () => {
+    h.bus.start();
+    await flush();
+    h.sources[0]!.open();
+
+    h.sources[0]!.error();
+    h.clock.advance(9_000);
+    await flush();
+    h.sources[h.sources.length - 1]!.error();
+    h.clock.advance(9_000);
+    await flush();
+
+    const oldPoll = h.deferNextFetch();
+    h.sources[h.sources.length - 1]!.error();
+    expect(h.bus.getState().connection).toBe("degraded");
+
+    h.setSnapshot(snapshot(200, { structuredHostsEnabled: false }));
+    h.clock.advance(10_000);
+    await flush();
+
+    oldPoll.resolveSnapshot(snapshot(200, { structuredHostsEnabled: true }));
+    await flush();
+    expect(h.bus.getState()).toMatchObject({
+      connection: "degraded",
+      structuredHostsEnabled: false,
+      store: { cursor: 200 },
+    });
+
+    const teardownPoll = h.deferNextFetch();
+    h.clock.advance(10_000);
+    await flush();
+    h.clock.advance(40_000);
+    await flush();
+    h.sources[h.sources.length - 1]!.open();
+    expect(h.bus.getState()).toMatchObject({
+      connection: "live",
+      structuredHostsEnabled: false,
+      store: { cursor: 200 },
+    });
+
+    teardownPoll.resolveSnapshot(snapshot(150, { structuredHostsEnabled: true }));
+    await flush();
+
+    expect(h.bus.getState()).toMatchObject({
+      connection: "live",
+      structuredHostsEnabled: false,
+      store: { cursor: 200 },
+    });
   });
 
   test("files.revision applied on the stream notifies files subscribers", async () => {
