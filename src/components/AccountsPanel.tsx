@@ -148,7 +148,7 @@ function AuthIdentity({ account }: { account: AccountOption }) {
   );
 }
 
-function AccountRow({ account, engine, activeId, onSelect, onRemove, disabled }: { account: AccountOption; engine: "claude" | "codex"; activeId: string; onSelect: () => void; onRemove: () => void; disabled: boolean }) {
+function AccountRow({ account, engine, activeId, onSelect, onRemove, disabled, focused = false }: { account: AccountOption; engine: "claude" | "codex"; activeId: string; onSelect: () => void; onRemove: () => void; disabled: boolean; focused?: boolean }) {
   const { t } = useLocale();
   const state = rowState(account, activeId);
   const isActive = account.id === activeId;
@@ -158,14 +158,21 @@ function AccountRow({ account, engine, activeId, onSelect, onRemove, disabled }:
   // second, explicit confirm — mirroring the confirm step migration already
   // requires for its far less destructive account switch.
   const [confirmingRemove, setConfirmingRemove] = useState(false);
+  // A badge-driven open (issue #229) focuses one account: scroll it into view
+  // and ring it so the panel lands on the conversation's account, not the top.
+  const selectRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    if (focused) selectRef.current?.scrollIntoView({ block: "nearest" });
+  }, [focused]);
   return (
     <div>
       <button
+        ref={selectRef}
         type="button"
         aria-current={isActive ? "true" : undefined}
         disabled={selectionDisabled}
         onClick={onSelect}
-        className="flex min-h-[44px] w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-canvas disabled:cursor-wait disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 sm:min-h-0"
+        className={`flex min-h-[44px] w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-canvas disabled:cursor-wait disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 sm:min-h-0 ${focused ? "bg-accent/5 ring-2 ring-inset ring-accent/50" : ""}`}
       >
         <span className="flex h-3.5 w-3.5 shrink-0 items-center justify-center">{isActive ? <Check className="h-3.5 w-3.5 text-accent" aria-hidden /> : null}</span>
         <span className="min-w-0 flex-1">
@@ -427,10 +434,14 @@ export function AccountsPanel({
   state,
   onClose,
   placement = "footer",
+  focusAccountId = null,
 }: {
   state: EngineAccountsState;
   onClose: () => void;
   placement?: "footer" | "header";
+  /** When set, the panel opens scrolled to and highlighting this account
+      (issue #229 — a header account badge steers here). */
+  focusAccountId?: string | null;
 }) {
   const { t } = useLocale();
   const { accounts, active, status, notice, mutation, engine } = state;
@@ -518,7 +529,7 @@ export function AccountsPanel({
               {status === "error" && accounts.length === 0 ? <div className="px-3 py-2 text-[11px] text-muted">{t("accounts.noAccounts")}</div> : null}
               {accounts.map((account) => (
                 <Fragment key={account.id}>
-                  <AccountRow account={account} engine={engine} activeId={active} disabled={mutation !== null} onSelect={() => void onSelect(account.id)} onRemove={() => void state.remove(account.id)} />
+                  <AccountRow account={account} engine={engine} activeId={active} disabled={mutation !== null} focused={account.id === focusAccountId} onSelect={() => void onSelect(account.id)} onRemove={() => void state.remove(account.id)} />
                   <AccountLimitsDetail account={account} />
                   {engine === "claude" ? <ClaudeLoginRow key={account.login?.operationId ?? account.id} account={account} state={state} loginBusy={loginBusy} /> : null}
                 </Fragment>

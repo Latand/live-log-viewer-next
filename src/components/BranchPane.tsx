@@ -11,7 +11,9 @@ import type { FileEntry } from "@/lib/types";
 
 import { cardMigrationState, postConversationMigration } from "@/lib/accounts/migration";
 import { conversationIdentity } from "@/lib/accounts/identity";
+import { accountIdFromPath } from "@/lib/accounts/badge";
 
+import { AccountBadge } from "./AccountBadge";
 import { registerLinkTarget } from "./AgentLink";
 import { DeleteFileButton } from "./DeleteFileButton";
 import { FavoriteCrown, FavoriteCrownMarker } from "./FavoriteCrown";
@@ -348,6 +350,11 @@ export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noCompose
                   <GitBranch className="h-2.5 w-2.5" aria-hidden /> {file.worktree}
                 </span>
               ) : null}
+              {/* Account badge (issue #229): the third meta-chip, after ctx and
+                  the branch chip. Shell tasks carry no account, so they skip it;
+                  the id is read from the live transcript path so a migrated
+                  conversation reflects its current account. */}
+              {file.engine === "shell" ? null : <AccountBadge engine={file.engine} accountId={accountIdFromPath(file.path)} />}
               {file.plan ? <PlanChip plan={file.plan} /> : null}
               {file.goal ? <GoalChip goal={file.goal} /> : null}
               {isRoot || isMobile ? null : (
