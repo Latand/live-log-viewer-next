@@ -1066,6 +1066,9 @@ export const uk: Record<keyof typeof en, Message> = {
   "branch.expand": "Розгорнути",
   "branch.expandFull": "Розгорнути розмову {title} на все вікно",
   "branch.collapseFull": "Повернутися до полотна (Esc)",
+  // Crown favorites (issue #185)
+  "branch.favorite": "Додати в обране",
+  "branch.unfavorite": "Прибрати з обраного",
 
   "tree.quiet": "Тихі розмови й задачі",
 
@@ -1166,6 +1169,16 @@ export const uk: Record<keyof typeof en, Message> = {
   "tasks.panelAll": "всі",
   "tasks.panelEmpty": "задач поки нема — кинь картку інструментом «задача» (T)",
   "tasks.panelClose": "Закрити панель задач",
+  // Favorites section in the docked panel (issue #185)
+  "favorites.sectionTitle": "Обране",
+  "favorites.empty": "обраного поки нема — наведи на картку й тапни корону",
+  "favorites.focusTitle": "Показати {title} на дошці",
+  "favorites.count": {
+    one: "{count} обране",
+    few: "{count} обраних",
+    many: "{count} обраних",
+    other: "{count} обраних",
+  },
   "tasks.sheetNew": "нова задача",
   "tasks.sheetCreate": "Створити задачу",
   "tasks.sheetBack": "Назад до списку задач",

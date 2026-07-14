@@ -138,8 +138,8 @@ test("readLegacyPrefs reconstructs the three old localStorage tiers", () => {
     ["llvTaskPanel", "1"],
   ]);
   const storage = { getItem: (key: string) => map.get(key) ?? null };
-  expect(readLegacyPrefs("proj", storage)).toEqual({ manual: ["/a"], hidden: ["/b"], expanded: ["/c"], viewMode: "list", taskPanelOpen: true });
-  expect(readLegacyPrefs("other", storage)).toEqual({ manual: [], hidden: [], expanded: [], viewMode: null, taskPanelOpen: true });
+  expect(readLegacyPrefs("proj", storage)).toEqual({ manual: ["/a"], hidden: ["/b"], expanded: ["/c"], favorites: [], viewMode: "list", taskPanelOpen: true });
+  expect(readLegacyPrefs("other", storage)).toEqual({ manual: [], hidden: [], expanded: [], favorites: [], viewMode: null, taskPanelOpen: true });
   expect(readLegacyPrefs("proj", { getItem: () => null })).toBeNull();
 });
 

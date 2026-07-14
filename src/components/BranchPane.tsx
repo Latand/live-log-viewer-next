@@ -14,6 +14,7 @@ import { conversationIdentity } from "@/lib/accounts/identity";
 
 import { registerLinkTarget } from "./AgentLink";
 import { DeleteFileButton } from "./DeleteFileButton";
+import { FavoriteCrown } from "./FavoriteCrown";
 import { MigrationDivider, MigrationRibbon } from "./MigrationRibbon";
 import { EffortPills } from "./EffortPills";
 import { AgentRuntimeControls } from "./AgentRuntimeControls";
@@ -111,9 +112,13 @@ interface Props {
   /** Bumped to open this pane's rename editor (scheme-board F2 targets the
       expanded overlay, not the node's board pane). */
   autoEditToken?: number;
+  /** Shows the proximity crown favorite control in the header (issue #185).
+      Only the board node and the mobile focus pane opt in — reviewer decks,
+      pipeline placeholders and other embeds render the pane without it. */
+  showFavorite?: boolean;
 }
 
-export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noComposer, banner, onToggleExpand, expanded, dormant, autoEditToken }: Props) {
+export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noComposer, banner, onToggleExpand, expanded, dormant, autoEditToken, showFavorite }: Props) {
   const { t } = useLocale();
   const isMobile = useIsMobile();
   const paneRef = useRef<HTMLElement | null>(null);
@@ -231,6 +236,7 @@ export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noCompose
               </span>
             )}
             <ProcessStatusControls file={file} compact hideChip={isMobile} />
+            {showFavorite ? <FavoriteCrown id={cardId} cardRef={paneRef} touch={isMobile} /> : null}
             {onToggleExpand ? (
               <button
                 className={`inline-flex shrink-0 items-center justify-center rounded-[8px] border border-border bg-canvas text-muted hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${

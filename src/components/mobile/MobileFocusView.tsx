@@ -382,6 +382,7 @@ export function MobileFocusView({ project, groups, manual, files, flows, pipelin
               file={activeNode.file}
               tasks={activeNode.tasks}
               isRoot={activeNode.isRoot}
+              showFavorite
               onClose={() => onClose(activeNode.file.path)}
               dragHandle={swipeHandle}
             />

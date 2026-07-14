@@ -149,6 +149,39 @@ body {
   contain-intrinsic-size: auto 44px;
 }
 
+/* Proximity crown favorites (issue #185): the reveal and the commit both glide
+   — opacity/scale on show, a one-shot pop on the transition to lit — so a
+   favorite lights up beautifully without any layout shift. */
+.favorite-crown {
+  transition: opacity 200ms var(--ease-standard, ease-out), transform 200ms var(--ease-standard, ease-out);
+}
+.favorite-crown.opacity-0 {
+  transform: scale(0.85);
+}
+@keyframes crown-pop {
+  0% {
+    transform: scale(1);
+  }
+  45% {
+    transform: scale(1.28);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+.favorite-crown.is-favorite {
+  animation: crown-pop 320ms var(--ease-standard, ease-out);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .favorite-crown,
+  .favorite-crown.is-favorite {
+    animation: none;
+    transition: opacity 200ms linear;
+    transform: none;
+  }
+}
+
 /* A node entering the scheme canvas fades in instead of popping. */
 @keyframes scheme-in {
   from {

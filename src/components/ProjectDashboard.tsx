@@ -4,6 +4,8 @@ import { List, ListTodo, Menu, MessageSquarePlus, MoreHorizontal, Network, Plus 
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { queueColumnOpen, useBoardState } from "@/hooks/useBoardState";
+import { conversationIdentity } from "@/lib/accounts/identity";
+import { FavoritesProvider, type FavoritesApi } from "./favorites/FavoritesContext";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { viewBus } from "@/hooks/viewPresenceBus";
 import type { Flow } from "@/lib/flows/types";
@@ -298,6 +300,35 @@ export function ProjectDashboard({
     [board.prefs],
   );
   const taskPanelOpen = board.prefs.taskPanelOpen;
+  /* Crown favorites (issue #185): the durable id set, an API handed to every
+     card through context, and the resolved rows (one live file per favorited
+     id, freshest generation) the docked panel lists. */
+  const favoriteIds = board.prefs.favorites;
+  const favoritesApi = useMemo<FavoritesApi>(
+    () => ({
+      has: (id) => favoriteIds.includes(id),
+      toggle: (id) => board.setFavorite(id, !favoriteIds.includes(id)),
+    }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- board.setFavorite is a stable hook setter
+    [favoriteIds],
+  );
+  /* One row per favorited id that still has a scanned transcript, keeping the
+     freshest generation so a resumed conversation lists once under its current
+     file. Sorted freshest-first for the panel. */
+  const favoriteRows = useMemo(() => {
+    if (favoriteIds.length === 0) return [] as { id: string; file: FileEntry; project: string }[];
+    const favoriteSet = new Set(favoriteIds);
+    const byId = new Map<string, FileEntry>();
+    for (const file of files) {
+      const id = conversationIdentity(file);
+      if (!favoriteSet.has(id)) continue;
+      const existing = byId.get(id);
+      if (!existing || file.mtime > existing.mtime) byId.set(id, file);
+    }
+    return [...byId.entries()]
+      .map(([id, file]) => ({ id, file, project: projectKey(file) }))
+      .sort((a, b) => b.file.mtime - a.file.mtime);
+  }, [files, favoriteIds]);
   const [drafts, setDrafts] = useState<string[]>([]);
   const [pendingRestoredHandoffs, setPendingRestoredHandoffs] = useState<Set<string>>(() => new Set());
   /* The phone focus view reports its currently-focused conversation here so the
@@ -961,6 +992,7 @@ export function ProjectDashboard({
   }, [projectView, schemeAvailable, listAvailable, historyRows, isMobile]);
 
   return (
+    <FavoritesProvider value={favoritesApi}>
     <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
       <div
         className={
@@ -1206,7 +1238,16 @@ export function ProjectDashboard({
             </div>
           </div>
           {taskPanelOpen ? (
-            <TaskPanel tasks={tasks} project={project} onOpenTask={openTask} onPlaceOnMap={placeOnMap} onClose={toggleTaskPanel} />
+            <TaskPanel
+              tasks={tasks}
+              project={project}
+              favorites={favoriteRows}
+              onOpenFavorite={openSwitchboardFile}
+              onToggleFavorite={(id) => board.setFavorite(id, false)}
+              onOpenTask={openTask}
+              onPlaceOnMap={placeOnMap}
+              onClose={toggleTaskPanel}
+            />
           ) : null}
         </div>
       )}
@@ -1251,5 +1292,6 @@ export function ProjectDashboard({
 
       <TaskToastHost />
     </div>
+    </FavoritesProvider>
   );
 }

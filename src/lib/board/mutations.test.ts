@@ -2,12 +2,12 @@ import { describe, expect, test } from "bun:test";
 
 import { applyBoardMutations } from "./mutations";
 
-const board = (prefs: Partial<{ manual: string[]; hidden: string[]; expanded: string[] }> = {}) => ({
+const board = (prefs: Partial<{ manual: string[]; hidden: string[]; expanded: string[]; favorites: string[] }> = {}) => ({
   schemaVersion: 1 as const,
   revision: 7,
   updatedAt: "2026-07-10T00:00:00.000Z",
   pathAliases: {},
-  prefs: { manual: [], hidden: [], expanded: [], viewMode: null, taskPanelOpen: false, ...prefs },
+  prefs: { manual: [], hidden: [], expanded: [], favorites: [], viewMode: null, taskPanelOpen: false, ...prefs },
 });
 
 describe("board mutations", () => {
@@ -90,5 +90,27 @@ describe("board mutations", () => {
     expect(restored.prefs).toMatchObject({ hidden: [], manual: [], expanded: ["/root"] });
     const reconciled = applyBoardMutations(restored, [{ kind: "reconcile-roots", roots: ["/root"], removeManual: [] }]);
     expect(reconciled.prefs).toMatchObject({ manual: ["/root"], expanded: ["/root"] });
+  });
+
+  test("set-favorite adds and removes durable ids idempotently", () => {
+    const on = applyBoardMutations(board(), [{ kind: "set-favorite", id: "conv-1", favorite: true }]);
+    expect(on.prefs.favorites).toEqual(["conv-1"]);
+    // A second add is a no-op (deduped), not a duplicate.
+    expect(applyBoardMutations(on, [{ kind: "set-favorite", id: "conv-1", favorite: true }]).prefs.favorites).toEqual(["conv-1"]);
+    const off = applyBoardMutations(on, [{ kind: "set-favorite", id: "conv-1", favorite: false }]);
+    expect(off.prefs.favorites).toEqual([]);
+    // Removing an absent id leaves the set untouched.
+    expect(applyBoardMutations(off, [{ kind: "set-favorite", id: "conv-1", favorite: false }]).prefs.favorites).toEqual([]);
+  });
+
+  test("favorites are durable ids kept out of the path alias/hidden machinery", () => {
+    /* A favorite keyed on a conversation id must survive a resume that remaps
+       the transcript path and a close that hides that path — neither should
+       touch the favorites set. */
+    const seeded = applyBoardMutations(board({ manual: ["/old"] }), [{ kind: "set-favorite", id: "conv-9", favorite: true }]);
+    const remapped = applyBoardMutations(seeded, [{ kind: "remap-paths", pairs: [{ from: "/old", to: "/new" }] }]);
+    expect(remapped.prefs.favorites).toEqual(["conv-9"]);
+    const closed = applyBoardMutations(remapped, [{ kind: "close", path: "/new" }]);
+    expect(closed.prefs).toMatchObject({ hidden: ["/new"], favorites: ["conv-9"] });
   });
 });

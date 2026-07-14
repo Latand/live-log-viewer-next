@@ -1099,6 +1099,9 @@ export const en = {
   "branch.expand": "Expand",
   "branch.expandFull": "Expand conversation {title} to the full window",
   "branch.collapseFull": "Back to the canvas (Esc)",
+  // Crown favorites (issue #185)
+  "branch.favorite": "Mark as favorite",
+  "branch.unfavorite": "Remove from favorites",
 
   // TreeAside
   "tree.quiet": "Quiet conversations and tasks",
@@ -1207,6 +1210,14 @@ export const en = {
   "tasks.panelAll": "all",
   "tasks.panelEmpty": "no tasks yet — drop one with the board's task tool (T)",
   "tasks.panelClose": "Close the task panel",
+  // Favorites section in the docked panel (issue #185)
+  "favorites.sectionTitle": "Favorites",
+  "favorites.empty": "no favorites yet — hover a card and tap its crown",
+  "favorites.focusTitle": "Focus {title} on the board",
+  "favorites.count": {
+    one: "{count} favorite",
+    other: "{count} favorites",
+  },
   "tasks.sheetNew": "new task",
   "tasks.sheetCreate": "Create the task",
   "tasks.sheetBack": "Back to the task list",

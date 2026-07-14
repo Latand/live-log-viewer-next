@@ -33,7 +33,7 @@ const boardOf = (prefs: Partial<BoardProjectStateV1["prefs"]>, pathAliases: Reco
   revision: 1,
   updatedAt: new Date(0).toISOString(),
   pathAliases,
-  prefs: { manual: [], hidden: [], expanded: [], viewMode: null, taskPanelOpen: false, ...prefs },
+  prefs: { manual: [], hidden: [], expanded: [], favorites: [], viewMode: null, taskPanelOpen: false, ...prefs },
 });
 
 const catalogOf = (files: FileEntry[]): Map<string, FileEntry> => new Map(files.map((file) => [file.path, file]));

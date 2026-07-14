@@ -5,7 +5,13 @@ export type BoardMutationV1 =
   | { kind: "restore"; path: string; placement: "auto" | "manual" | "expanded" }
   | { kind: "reconcile-roots"; roots: string[]; removeManual: string[] }
   | { kind: "remap-paths"; pairs: Array<{ from: string; to: string }> }
-  | { kind: "set-presentation"; viewMode?: "scheme" | "list" | null; taskPanelOpen?: boolean };
+  | { kind: "set-presentation"; viewMode?: "scheme" | "list" | null; taskPanelOpen?: boolean }
+  /* Crown favorites (issue #185): `id` is a durable conversation identity
+     (`conversationId` when the backend supplies one, else the transcript path),
+     kept apart from the path-keyed membership lists so it never passes through
+     `resolvePath`/`pathAliases` — a favorite must survive a resume that mints a
+     new transcript path, which the alias graph would otherwise rewrite. */
+  | { kind: "set-favorite"; id: string; favorite: boolean };
 
 function unique(paths: readonly string[]): string[] {
   return [...new Set(paths)];
@@ -46,7 +52,10 @@ function normalize(board: BoardProjectStateV1, aliases = aliasesOf(board)): Boar
     ...board,
     pathAliases: canonicalAliases,
     explicitManual: visible(board.explicitManual ?? []).filter((item) => manualSet.has(item)),
-    prefs: { ...board.prefs, manual, hidden, expanded: visible(board.prefs.expanded) },
+    /* Favorites are durable conversation ids, not transcript paths: dedupe them
+       but keep them out of the alias/hidden machinery so favoriting survives a
+       resume and a favorited-then-closed card stays favorited. */
+    prefs: { ...board.prefs, manual, hidden, expanded: visible(board.prefs.expanded), favorites: unique(board.prefs.favorites ?? []) },
   };
 }
 
@@ -119,6 +128,13 @@ export function applyBoardMutations(board: BoardProjectStateV1, mutations: reado
     }
     if (mutation.kind === "restore") {
       next = restore(next, resolvePath(mutation.path, aliasesOf(next)), mutation.placement);
+      continue;
+    }
+    if (mutation.kind === "set-favorite") {
+      const favorites = mutation.favorite
+        ? unique([...next.prefs.favorites, mutation.id])
+        : next.prefs.favorites.filter((item) => item !== mutation.id);
+      next = normalize({ ...next, prefs: { ...next.prefs, favorites } });
       continue;
     }
     if (mutation.kind === "set-presentation") {

@@ -89,7 +89,7 @@ export interface BoardProjectStateV1 {
   updatedAt: string;
   pathAliases?: Record<string, string>;
   explicitManual?: string[];
-  prefs: { manual: string[]; hidden: string[]; expanded: string[]; viewMode: "scheme" | "list" | null; taskPanelOpen: boolean };
+  prefs: { manual: string[]; hidden: string[]; expanded: string[]; favorites: string[]; viewMode: "scheme" | "list" | null; taskPanelOpen: boolean };
 }
 
 export interface BoardFileV1 { projects: Record<string, BoardProjectStateV1> }

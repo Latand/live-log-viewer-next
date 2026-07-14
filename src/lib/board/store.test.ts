@@ -18,6 +18,22 @@ describe("board store", () => {
     expect(stale).toMatchObject({ ok: false, board: { revision: 1 } });
     expect(boardFor("viewer", file).prefs.manual).toEqual(["/a"]);
   });
+  test("favorites persist across a reload and survive a legacy board with no favorites field", () => {
+    const file = temporaryFile();
+    const added = mutateBoard("viewer", 0, [{ kind: "set-favorite", id: "conv-1", favorite: true }], file);
+    expect(added).toMatchObject({ ok: true, board: { revision: 1 } });
+    // Survives a fresh read of the persisted file (a reload/deploy).
+    expect(boardFor("viewer", file).prefs.favorites).toEqual(["conv-1"]);
+    // A board written before favorites existed reads back with an empty list.
+    fs.writeFileSync(file, JSON.stringify({ projects: { viewer: {
+      schemaVersion: 1, revision: 5, updatedAt: "2026-07-10T00:00:00.000Z",
+      prefs: { manual: [], hidden: [], expanded: [], viewMode: null, taskPanelOpen: false },
+    } } }), "utf8");
+    expect(boardFor("viewer", file).prefs.favorites).toEqual([]);
+    const seeded = mutateBoard("viewer", 5, [{ kind: "set-favorite", id: "conv-2", favorite: true }], file);
+    expect(seeded).toMatchObject({ ok: true, board: { revision: 6 } });
+    expect(boardFor("viewer", file).prefs.favorites).toEqual(["conv-2"]);
+  });
   test("durable writes fsync the board file and parent directory", async () => {
     const file = temporaryFile();
     const modulePath = path.join(import.meta.dir, "store.ts");
@@ -290,7 +306,7 @@ describe("board store", () => {
     expect(forward.older).toBeUndefined();
     expect(forward.newest).toBeUndefined();
     expect(forward.canonical.prefs).toEqual({
-      manual: ["/a"], hidden: [], expanded: ["/base", "/b"], viewMode: "list", taskPanelOpen: true,
+      manual: ["/a"], hidden: [], expanded: ["/base", "/b"], favorites: [], viewMode: "list", taskPanelOpen: true,
     });
     expect(forward.canonical.pathAliases).toEqual({ "/alias": "/new" });
     expect(reverse.canonical.prefs).toEqual(forward.canonical.prefs);

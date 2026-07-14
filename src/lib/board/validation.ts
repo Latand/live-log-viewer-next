@@ -72,6 +72,11 @@ function mutation(value: unknown, index: number): BoardMutationV1 {
     }
     return { kind: "remap-paths", pairs };
   }
+  if (raw.kind === "set-favorite") {
+    exact(raw, ["kind", "id", "favorite"], `mutations[${index}]`);
+    if (typeof raw.favorite !== "boolean") throw new ViewValidationError("INVALID_REQUEST", `invalid mutations[${index}].favorite`);
+    return { kind: "set-favorite", id: validPath(raw.id, `mutations[${index}].id`), favorite: raw.favorite };
+  }
   if (raw.kind === "set-presentation") {
     exact(raw, ["kind", "viewMode", "taskPanelOpen"], `mutations[${index}]`);
     if (raw.viewMode === undefined && raw.taskPanelOpen === undefined) throw new ViewValidationError("INVALID_REQUEST", `empty mutations[${index}]`);
@@ -110,12 +115,13 @@ export async function validateBoardPatchRequest(request: Request): Promise<{ pro
     rejectMutationAliasCycles(mutations);
     return { project: body.project, baseRevision: body.baseRevision as number, mutations };
   }
-  const rawPatch = record(body.patch, "patch"); exact(rawPatch, ["manual", "hidden", "expanded", "viewMode", "taskPanelOpen"], "patch");
+  const rawPatch = record(body.patch, "patch"); exact(rawPatch, ["manual", "hidden", "expanded", "favorites", "viewMode", "taskPanelOpen"], "patch");
   if (Object.keys(rawPatch).length === 0) throw new ViewValidationError("INVALID_REQUEST", "empty patch");
   const patch: BoardPatch = {};
   if (rawPatch.manual !== undefined) patch.manual = pathList(rawPatch.manual, "patch.manual");
   if (rawPatch.hidden !== undefined) patch.hidden = pathList(rawPatch.hidden, "patch.hidden");
   if (rawPatch.expanded !== undefined) patch.expanded = pathList(rawPatch.expanded, "patch.expanded");
+  if (rawPatch.favorites !== undefined) patch.favorites = pathList(rawPatch.favorites, "patch.favorites");
   if (rawPatch.viewMode !== undefined) {
     if (rawPatch.viewMode !== null && rawPatch.viewMode !== "scheme" && rawPatch.viewMode !== "list") throw new ViewValidationError("INVALID_REQUEST", "invalid patch.viewMode");
     patch.viewMode = rawPatch.viewMode;

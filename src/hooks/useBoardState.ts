@@ -57,7 +57,7 @@ export function patchPrefix(outbox: readonly BoardMutationV1[], maxCount = MAX_M
   return prefix;
 }
 
-export const EMPTY_BOARD_PREFS: BoardPrefs = { manual: [], hidden: [], expanded: [], viewMode: null, taskPanelOpen: false };
+export const EMPTY_BOARD_PREFS: BoardPrefs = { manual: [], hidden: [], expanded: [], favorites: [], viewMode: null, taskPanelOpen: false };
 
 /* Legacy per-browser keys #38 migrates off of. `llvTaskPanel` is global today;
    it seeds every project's per-project panel state and is left intact so a
@@ -78,7 +78,7 @@ export interface BoardSnapshot {
 }
 
 export function isEmptyPrefs(prefs: BoardPrefs): boolean {
-  return prefs.manual.length === 0 && prefs.hidden.length === 0 && prefs.expanded.length === 0 && prefs.viewMode === null && !prefs.taskPanelOpen;
+  return prefs.manual.length === 0 && prefs.hidden.length === 0 && prefs.expanded.length === 0 && prefs.favorites.length === 0 && prefs.viewMode === null && !prefs.taskPanelOpen;
 }
 
 /** Worth seeding the server with: anything a user actually arranged. Empty
@@ -111,7 +111,9 @@ export function readLegacyPrefs(project: string, storage: Pick<Storage, "getItem
   const viewMode: BoardViewMode = savedView === "scheme" || savedView === "list" ? savedView : null;
   const taskPanelOpen = storage.getItem(LEGACY_TASK_PANEL_KEY) === "1";
   if (!hadColumns && viewMode === null && !taskPanelOpen) return null;
-  return { ...columns, viewMode, taskPanelOpen };
+  /* Favorites are server-only (issue #185) — no legacy per-browser tier feeds
+     them, so the migration seed always carries an empty list. */
+  return { ...columns, favorites: [], viewMode, taskPanelOpen };
 }
 
 /** Coalesce two partial patches: later keys win, so a burst of edits collapses
@@ -556,6 +558,8 @@ export interface BoardState extends BoardSnapshot {
   restore(path: string, placement: "auto" | "manual" | "expanded"): void;
   setViewMode(viewMode: BoardViewMode): void;
   setTaskPanelOpen(open: boolean): void;
+  /** Toggle a durable conversation id in the per-project favorites set (#185). */
+  setFavorite(id: string, favorite: boolean): void;
 }
 
 /**
@@ -607,6 +611,9 @@ export function useBoardState(project: string | null): BoardState {
     },
     setTaskPanelOpen(open) {
       storeRef.current?.mutate([{ kind: "set-presentation", taskPanelOpen: open }]);
+    },
+    setFavorite(id, favorite) {
+      storeRef.current?.mutate([{ kind: "set-favorite", id, favorite }]);
     },
   };
 }

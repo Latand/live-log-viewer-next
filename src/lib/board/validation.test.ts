@@ -49,3 +49,20 @@ test("the body cap admits the maximal validator-legal legacy-seed patch", async 
   const parsed = await validateBoardPatchRequest(patchRequest(body));
   expect(parsed.patch?.manual).toHaveLength(512);
 });
+
+test("accepts a well-formed set-favorite mutation and rejects malformed ones", async () => {
+  const ok = await validateBoardPatchRequest(
+    patchRequest({ schemaVersion: 1, project: "proj", baseRevision: 3, mutations: [{ kind: "set-favorite", id: "conv-1", favorite: true }] }),
+  );
+  expect(ok.mutations).toEqual([{ kind: "set-favorite", id: "conv-1", favorite: true }]);
+
+  await expect(
+    validateBoardPatchRequest(patchRequest({ schemaVersion: 1, project: "proj", baseRevision: 3, mutations: [{ kind: "set-favorite", id: "conv-1" }] })),
+  ).rejects.toThrow();
+  await expect(
+    validateBoardPatchRequest(patchRequest({ schemaVersion: 1, project: "proj", baseRevision: 3, mutations: [{ kind: "set-favorite", id: "", favorite: true }] })),
+  ).rejects.toThrow();
+  await expect(
+    validateBoardPatchRequest(patchRequest({ schemaVersion: 1, project: "proj", baseRevision: 3, mutations: [{ kind: "set-favorite", id: "conv-1", favorite: "yes" }] })),
+  ).rejects.toThrow();
+});

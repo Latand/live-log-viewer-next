@@ -914,6 +914,7 @@ function NodeShell({
           tasks={node.tasks}
           isRoot={node.isRoot}
           dormant={dormant}
+          showFavorite
           onClose={() => onClose(node.file.path)}
           onToggleExpand={() => onExpand(node.file.path)}
         />

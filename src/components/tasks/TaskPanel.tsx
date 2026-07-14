@@ -1,18 +1,87 @@
 "use client";
 
-import { MapPin } from "lucide-react";
+import { Crown, MapPin } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { Link2, X } from "@/components/icons";
-import { fmtAge } from "@/components/utils";
+import { activityDot, cleanTitle, fmtAge } from "@/components/utils";
 import { useTaskDraft } from "@/hooks/useTaskDraft";
 import { getLocale, useLocale } from "@/lib/i18n";
 import { formatDue, isOverdue } from "@/lib/tasks/helpers";
 import type { BoardTask } from "@/lib/tasks/types";
+import type { FileEntry } from "@/lib/types";
 
 import { createTask } from "./taskApi";
 import { TaskComposer } from "./TaskComposer";
 import { TASK_TONES, taskTitle } from "./taskModel";
+
+/** A favorited conversation resolved to its freshest scanned generation. */
+export interface FavoriteRow {
+  /** Durable conversation identity (`conversationIdentity`). */
+  id: string;
+  file: FileEntry;
+  project: string;
+}
+
+/**
+ * The crown-favorites list (issue #185), docked above the task list and scoped
+ * by the same project/all toggle. A row click focuses/pins the conversation on
+ * the board; its crown unfavorites in place.
+ */
+function FavoritesSection({
+  rows,
+  scopeAll,
+  onOpen,
+  onToggle,
+}: {
+  rows: FavoriteRow[];
+  scopeAll: boolean;
+  onOpen: (file: FileEntry) => void;
+  onToggle: (id: string) => void;
+}) {
+  const { t } = useLocale();
+  return (
+    <section className="mb-1 flex flex-col gap-0.5" aria-label={t("favorites.sectionTitle")}>
+      <div className="flex items-center gap-1 px-1 pb-0.5 text-[10px] font-bold uppercase tracking-wide text-muted">
+        <Crown className="h-3 w-3 fill-warning text-warning" aria-hidden />
+        {t("favorites.sectionTitle")}
+        {rows.length ? <span className="font-semibold text-muted/70">{rows.length}</span> : null}
+      </div>
+      {rows.length ? (
+        rows.map(({ id, file, project }) => (
+          <div
+            key={id}
+            className="flex items-center gap-1 rounded-[8px] border border-border bg-card px-2 py-1.5 shadow-1 hover:border-accent/40"
+          >
+            <button
+              type="button"
+              className="flex min-w-0 flex-1 items-center gap-1.5 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+              title={t("favorites.focusTitle", { title: cleanTitle(file.title, 60) })}
+              onClick={() => onOpen(file)}
+            >
+              <span className={`h-2 w-2 shrink-0 rounded-full ${activityDot(file.activity)}`} aria-hidden />
+              <span className="min-w-0 flex-1 truncate text-[11.5px] font-semibold">
+                {cleanTitle(file.title, 90) || t("tasks.untitled")}
+              </span>
+              {scopeAll ? <span className="max-w-[90px] shrink-0 truncate text-[10px] text-muted">{project}</span> : null}
+            </button>
+            <button
+              type="button"
+              className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-[6px] text-warning hover:bg-warning-soft focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+              aria-label={t("branch.unfavorite")}
+              title={t("branch.unfavorite")}
+              onClick={() => onToggle(id)}
+            >
+              <Crown className="h-3.5 w-3.5 fill-warning" aria-hidden />
+            </button>
+          </div>
+        ))
+      ) : (
+        <div className="px-2 py-1.5 text-[10.5px] text-muted">{t("favorites.empty")}</div>
+      )}
+    </section>
+  );
+}
 
 /** Freshest work first; done tasks sink to the bottom of the list. */
 function panelOrder(a: BoardTask, b: BoardTask): number {
@@ -92,6 +161,9 @@ function PanelNewTask({ project, onDone }: { project: string; onDone: () => void
 export function TaskPanel({
   tasks,
   project,
+  favorites,
+  onOpenFavorite,
+  onToggleFavorite,
   onOpenTask,
   onPlaceOnMap,
   onClose,
@@ -99,6 +171,12 @@ export function TaskPanel({
   /** Every project's tasks; the header toggle filters. */
   tasks: BoardTask[];
   project: string;
+  /** Favorited conversations across every project; the toggle scopes them (#185). */
+  favorites: FavoriteRow[];
+  /** Focus/pin a favorited conversation on the board. */
+  onOpenFavorite: (file: FileEntry) => void;
+  /** Unfavorite by durable id. */
+  onToggleFavorite: (id: string) => void;
   onOpenTask: (task: BoardTask) => void;
   /** Arms board placement mode for an unplaced task; absent hides the action. */
   onPlaceOnMap?: (task: BoardTask) => void;
@@ -110,6 +188,10 @@ export function TaskPanel({
   const rows = useMemo(
     () => (scope === "project" ? tasks.filter((task) => task.project === project) : [...tasks]).sort(panelOrder),
     [tasks, project, scope],
+  );
+  const favoriteRows = useMemo(
+    () => (scope === "project" ? favorites.filter((row) => row.project === project) : favorites),
+    [favorites, project, scope],
   );
 
   return (
@@ -141,6 +223,7 @@ export function TaskPanel({
         </button>
       </div>
       <div className="flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto p-1.5">
+        <FavoritesSection rows={favoriteRows} scopeAll={scope === "all"} onOpen={onOpenFavorite} onToggle={onToggleFavorite} />
         {composing ? (
           <PanelNewTask project={project} onDone={() => setComposing(false)} />
         ) : (
