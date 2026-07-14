@@ -389,7 +389,7 @@ describe("pipeline stage placeholder slots (issue #196)", () => {
   });
 
   test("a materialized stage dissolves exactly its slot; the next slot sits where the tree drops the tip's child (attach IN PLACE)", () => {
-    const root = entry({ path: "/arch" });
+    const root = entry({ path: "/arch", activity: "live" });
     const group: BranchGroup = { key: "/arch", columns: [{ file: root, tasks: [] }], returnable: [], finished: [], smt: root.mtime, orphanTask: false };
     const running = staged({
       state: "running",
@@ -407,20 +407,12 @@ describe("pipeline stage placeholder slots (issue #196)", () => {
     const next = layout.slots[0]!;
     expect(next.x).toBe(node.x + INDENT);
     expect(next.y).toBeGreaterThanOrEqual(node.y + node.h);
+    const builder = entry({ path: "/builder", parent: "/arch", kind: "subagent" });
+    const attachedFiles = [root, builder];
     const attached = buildSchemeLayout(
-      [
-        group,
-        {
-          key: "/builder",
-          columns: [{ file: entry({ path: "/builder", parent: "/arch" }), tasks: [] }],
-          returnable: [],
-          finished: [],
-          smt: 1_000,
-          orphanTask: false,
-        },
-      ],
+      buildBranchGroups(attachedFiles, "demo"),
       [],
-      [root, entry({ path: "/builder", parent: "/arch" })],
+      attachedFiles,
       [],
       [],
       [staged({
@@ -433,10 +425,9 @@ describe("pipeline stage placeholder slots (issue #196)", () => {
       })],
       [],
     );
-    /* Note: whether the builder lands as /arch's tree child or its own column,
-       the invariant under test is positional: its window must take the slot's
-       coordinates from the previous poll's layout when the topology matches
-       (child-of-tip), which the INDENT/GAP_Y anchor above encodes. */
+    const attachedBuilder = attached.nodes.find((candidate) => candidate.file.path === builder.path)!;
+    expect({ x: attachedBuilder.x, y: attachedBuilder.y, w: attachedBuilder.w })
+      .toEqual({ x: next.x, y: next.y, w: next.w });
     expect(attached.slots.map((slot) => slot.stage.id)).toEqual(["review"]);
     /* Exactly one halo encloses both the live node and the remaining slots. */
     const halos = layout.groups.filter((candidate) => candidate.kind === "pipeline" && candidate.id === "p9");
