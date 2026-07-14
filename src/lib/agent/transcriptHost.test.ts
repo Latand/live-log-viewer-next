@@ -6,7 +6,7 @@ import path from "node:path";
 
 import { withSpawnCapability, type ResumeSpec } from "@/lib/agent/cli";
 import { AgentRegistry } from "@/lib/agent/registry";
-import { beginRegistryResume, createTranscriptHostResolver } from "@/lib/agent/transcriptHost";
+import { beginRegistryResume, createTranscriptHostResolver, type TranscriptHost } from "@/lib/agent/transcriptHost";
 import { TmuxDeliveryUncertainError } from "@/lib/tmux";
 import type { AgentProcess } from "@/lib/scanner/process";
 import type { PaneRef, SpawnedPane } from "@/lib/tmux";
@@ -96,7 +96,10 @@ interface FakeHostState {
   quarantineAfterResumeBegin: boolean;
 }
 
-function fakeHost(existing = true) {
+function fakeHost(
+  existing = true,
+  reconcile?: (hosts: TranscriptHost[]) => { quarantinedPaneIds: string[] },
+) {
   const state: FakeHostState = {
     entry: entry({ pid: existing ? 200 : null, proc: existing ? "running" : null }),
     panes: existing ? new Map([[100, { paneId: "%1", target: "agents:4.0" }]]) : new Map(),
@@ -181,7 +184,7 @@ function fakeHost(existing = true) {
       if (!pane.panePid) return;
       state.records.set(pathname, { paneId: pane.paneId, panePid: pane.panePid, windowName: resumeSpec.windowName, engine: resumeSpec.engine });
     },
-    reconcile: async (hosts) => ({
+    reconcile: async (hosts) => reconcile?.(hosts) ?? ({
       quarantinedPaneIds: state.quarantineAfterResumeBegin && state.resumeBegan
         ? hosts.filter((host) => host.launchId === state.launchId).map((host) => host.paneId)
         : [],
@@ -216,6 +219,70 @@ describe("transcript host resolver", () => {
     });
     expect(state.spawnCalls).toBe(0);
     expect(state.delivered).toEqual(["%1:steer"]);
+  });
+
+  test("resolves dialog and composer delivery for an account-home Claude session after late readiness", async () => {
+    const sessionId = "88d36d1d-d681-4dc3-ac3b-0b0c54f33c7e";
+    const accountPath = `/home/user/.config/agent-log-viewer/accounts/claude/work/projects/-repo/${sessionId}.jsonl`;
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-account-home-host-"));
+    const registry = new AgentRegistry(path.join(directory, "registry.json"));
+    const begun = registry.beginSpawnRequest({ engine: "claude", cwd: "/repo", accountId: "work" });
+    if (begun.kind !== "created") throw new Error("expected create");
+    registry.bindSpawnPane(begun.receipt.launchId, {
+      endpoint: "/tmp",
+      server: { pid: 900, startIdentity: null },
+      paneId: "%1",
+      panePid: { pid: 100, startIdentity: null },
+      target: "agents:4.0",
+    });
+    registry.failSpawn(begun.receipt.launchId, "agent never reached a launch-ready prompt");
+    const { resolver, state } = fakeHost(true, (hosts) => {
+      const quarantinedPaneIds: string[] = [];
+      for (const host of hosts) {
+        const settled = registry.completeObservedSpawn(host.launchId!, {
+          key: { engine: "claude", sessionId },
+          artifactPath: accountPath,
+          cwd: host.cwd,
+          accountId: null,
+          status: "live",
+          host: {
+            kind: "tmux",
+            endpoint: "/tmp",
+            server: { pid: host.tmuxServerPid, startIdentity: null },
+            paneId: host.paneId,
+            panePid: { pid: host.panePid, startIdentity: null },
+            windowName: host.windowName ?? "",
+            agent: { pid: host.agentPid, startIdentity: host.agentIdentity },
+            argv: host.agentArgv,
+          },
+          claimEpoch: 0,
+          claimOwner: null,
+          pendingAction: null,
+        });
+        if (settled.kind === "conflict") quarantinedPaneIds.push(host.paneId);
+      }
+      return { quarantinedPaneIds };
+    });
+    state.entry = entry({
+      path: accountPath,
+      root: "claude-projects",
+      name: accountPath,
+      engine: "claude",
+      fmt: "claude",
+      pid: 200,
+      proc: "running",
+    });
+    state.agents = [{ pid: 200, engine: "claude", argv: ["claude", "--session-id", sessionId], cwd: "/repo", tty: 1 }];
+    state.launchId = begun.receipt.launchId;
+
+    expect((await resolver.readTranscriptHosts(true)).canonicalFor(accountPath)?.paneId).toBe("%1");
+    expect(await resolver.deliverToTranscriptHost({ entry: state.entry, spec: { ...spec, engine: "claude" }, payload: "composer message" })).toMatchObject({
+      ok: true,
+      outcome: "delivered-to-live",
+      target: "agents:4.0",
+    });
+    expect(state.delivered).toEqual(["%1:composer message"]);
+    fs.rmSync(directory, { recursive: true, force: true });
   });
 
   test("serializes two cold sends into one resume and delivers both payloads", async () => {

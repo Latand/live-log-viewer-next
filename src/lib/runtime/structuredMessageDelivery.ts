@@ -53,16 +53,6 @@ function structuredHostsEnabled(): boolean {
   return process.env.LLV_STRUCTURED_HOSTS === "1";
 }
 
-function ownershipUnavailable(): StructuredMessageResult {
-  return {
-    ok: false,
-    structured: true,
-    outcome: "failed",
-    error: "structured host ownership is unavailable; retry after runtime synchronization",
-    status: 503,
-  };
-}
-
 function requestMigrationProgress(
   registry: AgentRegistry,
   conversationId: ViewerConversationId,
@@ -78,15 +68,18 @@ export async function deliverHeldStructuredMessage(
 ): Promise<HeldStructuredMessageOutcome> {
   if (!(dependencies.enabled ?? structuredHostsEnabled)()) return null;
   const client = (dependencies.client ?? runtimeHostClient)();
-  if (!client) return "delivery-uncertain";
+  if (!client) return null;
+  let snapshot: Awaited<ReturnType<RuntimeHostClient["snapshot"]>>;
   try {
-    const snapshot = await client.snapshot();
-    const session = snapshot.sessions.find((candidate) => candidate.conversationId === request.conversationId)
-      ?? snapshot.sessions.find((candidate) => candidate.artifactPath === request.path);
-    if (session?.hostKind === "tmux-legacy") return null;
-    if (!session || (session.hostKind !== "codex-app-server" && session.hostKind !== "claude-broker")) {
-      return "delivery-uncertain";
-    }
+    snapshot = await client.snapshot();
+  } catch {
+    return null;
+  }
+  const session = snapshot.sessions.find((candidate) => candidate.conversationId === request.conversationId)
+    ?? snapshot.sessions.find((candidate) => candidate.artifactPath === request.path);
+  if (!session || session.hostKind === "tmux-legacy") return null;
+  if (session.hostKind !== "codex-app-server" && session.hostKind !== "claude-broker") return null;
+  try {
     const result = await client.command({
       kind: "send",
       operationId: request.deliveryId,
@@ -115,25 +108,27 @@ export async function enqueueStructuredMessage(
 ): Promise<StructuredMessageResult | null> {
   if (!(dependencies.enabled ?? structuredHostsEnabled)()) return null;
   const client = (dependencies.client ?? runtimeHostClient)();
-  if (!client) return ownershipUnavailable();
+  if (!client) return null;
+  let snapshot: Awaited<ReturnType<RuntimeHostClient["snapshot"]>>;
   try {
-    const snapshot = await client.snapshot();
-    const session = (request.conversationId
-      ? snapshot.sessions.find((candidate) => candidate.conversationId === request.conversationId)
-      : undefined)
-      ?? snapshot.sessions.find((candidate) => candidate.artifactPath === request.path);
-    if (!session) return ownershipUnavailable();
-    if (session.hostKind === "tmux-legacy") return null;
-    if (session.hostKind !== "codex-app-server" && session.hostKind !== "claude-broker") {
-      return ownershipUnavailable();
-    }
-    if (request.hasImages) {
-      return { ok: false, structured: true, outcome: "failed", error: "structured host image delivery is unavailable", status: 409 };
-    }
-    if (!session.conversationId.startsWith("conversation_")) return ownershipUnavailable();
-    const registry = (dependencies.registry ?? agentRegistry)();
-    const conversation = registry.conversation(session.conversationId as ViewerConversationId);
-    if (!conversation) return ownershipUnavailable();
+    snapshot = await client.snapshot();
+  } catch {
+    return null;
+  }
+  const session = (request.conversationId
+    ? snapshot.sessions.find((candidate) => candidate.conversationId === request.conversationId)
+    : undefined)
+    ?? snapshot.sessions.find((candidate) => candidate.artifactPath === request.path);
+  if (!session || session.hostKind === "tmux-legacy") return null;
+  if (session.hostKind !== "codex-app-server" && session.hostKind !== "claude-broker") return null;
+  if (request.hasImages) {
+    return { ok: false, structured: true, outcome: "failed", error: "structured host image delivery is unavailable", status: 409 };
+  }
+  if (!session.conversationId.startsWith("conversation_")) return null;
+  const registry = (dependencies.registry ?? agentRegistry)();
+  const conversation = registry.conversation(session.conversationId as ViewerConversationId);
+  if (!conversation) return null;
+  try {
     const idempotencyKey = request.clientMessageId?.trim() || `queue_${crypto.randomUUID()}`;
     let reservation = registry.holdDelivery(conversation.id, request.text, idempotencyKey);
     let claimedReservationId: string | null = null;

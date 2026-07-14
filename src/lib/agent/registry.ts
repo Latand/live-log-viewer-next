@@ -2100,6 +2100,26 @@ export class AgentRegistry {
       }
       return { kind: "conflict", receipt: clone(receipt), code };
     };
+    const observedPaneMatches = completionMode === "observed-completed"
+      && receipt.state === "conflicted"
+      && receipt.artifactPath === null
+      && receipt.key === null
+      && receipt.pane !== null
+      && entry.host?.kind === "tmux"
+      && receipt.pane.endpoint === entry.host.endpoint
+      && receipt.pane.paneId === entry.host.paneId
+      && receipt.pane.server.pid === entry.host.server.pid
+      && receipt.pane.server.startIdentity === entry.host.server.startIdentity
+      && receipt.pane.panePid.pid === entry.host.panePid.pid
+      && receipt.pane.panePid.startIdentity === entry.host.panePid.startIdentity
+      && !["spawn_artifact_conflict", "spawn_pane_conflict", "spawn_identity_conflict", "spawn_host_identity_conflict"].includes(receipt.error ?? "");
+    if (observedPaneMatches) {
+      /* A launch verification timeout can race a composer that settles late.
+         Exact pane identity plus the observed engine-native transcript
+         establishes the durable launch owner. */
+      receipt.state = "pane-bound";
+      receipt.error = null;
+    }
     if (receipt.state === "failed" || receipt.state === "conflicted") {
       return {
         kind: "conflict",

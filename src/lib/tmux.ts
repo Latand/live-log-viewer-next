@@ -1168,7 +1168,7 @@ export async function forgetResumePaneIfMatches(transcriptPath: string, host: Tm
   persistResumePanes();
 }
 
-const SPAWN_READY_TIMEOUT_MS = 60_000;
+export const SPAWN_READY_TIMEOUT_MS = 180_000;
 const SPAWN_POLL_MS = 1_000;
 const SPAWN_PROMPT_VERIFY_ROUNDS = 6;
 const SPAWN_PROMPT_VERIFY_MS = 400;

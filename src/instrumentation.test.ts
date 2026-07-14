@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
 
-import { accountControllerDelayMs, initializeOperatorSpawnCapabilityAtStartup, scheduleAccountMigrationController } from "./instrumentation";
+import { accountControllerDelayMs, initializeOperatorSpawnCapabilityAtStartup, runStructuredHostStartup, scheduleAccountMigrationController } from "./instrumentation";
 import { operatorSpawnCapabilityPath } from "@/lib/agent/operatorCapability";
 
 test("account controller delay defaults to immediate startup and retains the explicit escape hatch", () => {
@@ -48,4 +48,16 @@ test("server startup mints the operator capability and rotates it on request", a
     else process.env.LLV_STATE_DIR = previousStateDir;
     fs.rmSync(sandbox, { recursive: true, force: true });
   }
+});
+
+test("structured-host startup logs the thrown adoption error object", async () => {
+  const failure = new Error("container adoption failed");
+  const logged: unknown[][] = [];
+
+  await runStructuredHostStartup(
+    async () => { throw failure; },
+    (...args) => { logged.push(args); },
+  );
+
+  expect(logged).toEqual([["[structured hosts] startup adoption failed", failure]]);
 });

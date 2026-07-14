@@ -19,6 +19,23 @@ test("a busy turn with the interrupt hint never reads as at-composer", () => {
   expect(screenAtIdleComposer(BUSY_CLAUDE)).toBe(false);
 });
 
+test("informational lines above a ready composer do not hide late launch readiness", () => {
+  const codex = [
+    "Your usage window has reset; the previous turn ended with esc to interrupt.",
+    "",
+    "› ",
+    "  Context 100% used",
+  ].join("\n");
+  const claude = [
+    "❯ Try \"fix typecheck errors\"",
+    "────────────────────────────────────────",
+    "  ⏵⏵ bypass permissions on (shift+tab to cycle)",
+  ].join("\n");
+
+  expect(screenAtIdleComposer(codex)).toBe(true);
+  expect(screenAtIdleComposer(claude)).toBe(true);
+});
+
 test("quiet streamed output without a composer never reads as at-composer", () => {
   expect(screenAtIdleComposer(QUIET_OUTPUT)).toBe(false);
 });

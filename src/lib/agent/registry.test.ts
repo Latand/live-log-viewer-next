@@ -163,6 +163,52 @@ describe("agent registry", () => {
     expect(route.receipt.completionMode).toBe("route-recovered");
   });
 
+  test("an observed account-home Claude session recovers a pane-bound late-readiness failure", () => {
+    const store = registry();
+    const sessionId = "88d36d1d-d681-4dc3-ac3b-0b0c54f33c7e";
+    const artifactPath = `/home/user/.config/agent-log-viewer/accounts/claude/work/projects/-repo/${sessionId}.jsonl`;
+    const begun = store.beginSpawnRequest({
+      engine: "claude",
+      cwd: "/repo",
+      accountId: "work",
+    });
+    if (begun.kind !== "created") throw new Error("expected create");
+    const pane = {
+      endpoint: "/run/user/1000/agent-log-viewer",
+      server: { pid: 900, startIdentity: "900:one" },
+      paneId: "%25",
+      panePid: { pid: 100, startIdentity: "100:one" },
+      target: "agents:17.0",
+    };
+    store.bindSpawnPane(begun.receipt.launchId, pane);
+    store.failSpawn(begun.receipt.launchId, "agent never reached a launch-ready prompt");
+
+    const observed = store.completeObservedSpawn(begun.receipt.launchId, {
+      key: { engine: "claude", sessionId },
+      artifactPath,
+      cwd: "/repo",
+      accountId: null,
+      status: "live",
+      host: {
+        kind: "tmux",
+        ...pane,
+        windowName: "claude-new",
+        agent: { pid: 101, startIdentity: "101:one" },
+        argv: ["claude", "--session-id", sessionId],
+      },
+      claimEpoch: 0,
+      claimOwner: null,
+      pendingAction: null,
+    });
+
+    expect(observed).toMatchObject({
+      kind: "settled",
+      receipt: { state: "completed", artifactPath, key: { engine: "claude", sessionId } },
+      entry: { host: { paneId: "%25", argv: ["claude", "--session-id", sessionId] } },
+    });
+    expect(store.conversationForPath(artifactPath)?.id).toBe(begun.receipt.conversationId);
+  });
+
   test("serializes durable operations", async () => {
     const store = registry();
     store.upsert({ key: KEY, artifactPath: "/a", cwd: "/repo", accountId: null, status: "live", host: null, claimEpoch: 0, claimOwner: null, pendingAction: null });

@@ -23,13 +23,23 @@ export async function initializeOperatorSpawnCapabilityAtStartup(
   else ensureOperatorSpawnCapability();
 }
 
+export async function runStructuredHostStartup(
+  adopt: () => Promise<unknown>,
+  log: (...args: unknown[]) => void = console.error,
+): Promise<void> {
+  try {
+    await adopt();
+  } catch (error) {
+    log("[structured hosts] startup adoption failed", error);
+  }
+}
+
 export async function register(): Promise<void> {
   if (process.env.NEXT_RUNTIME === "edge" || process.env.NEXT_PHASE?.includes("build")) return;
   await initializeOperatorSpawnCapabilityAtStartup();
   if (process.env.LLV_STRUCTURED_HOSTS === "1") {
     const { adoptStructuredHostsAtStartup } = await import("@/lib/runtime/startup");
-    try { await adoptStructuredHostsAtStartup(); }
-    catch { console.error("[structured hosts] startup adoption failed"); }
+    await runStructuredHostStartup(adoptStructuredHostsAtStartup);
   }
   if (process.env.LLV_ACCOUNT_CONTROLLER_DISABLED !== "1") {
     const { startAccountMigrationController } = await import("@/lib/accounts/migration/controller");
