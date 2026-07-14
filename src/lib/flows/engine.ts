@@ -244,7 +244,11 @@ function currentConversationPath(conversationId: string | null | undefined, fall
 export async function sendToImplementer(flow: Flow, entriesByPath: Map<string, FileEntry>, text: string): Promise<string> {
   const entry = entriesByPath.get(currentConversationPath(flow.implementerConversationId, flow.implementerPath));
   if (!entry) throw new Error("implementer transcript is missing from scanner");
-  const spec = resumeSpecFor(entry.root, entry.path, { model: entry.launchModel ?? entry.model, effort: entry.effort });
+  const spec = resumeSpecFor(entry.root, entry.path, {
+    model: entry.launchModel ?? entry.model,
+    effort: entry.effort,
+    allowSubagents: agentRegistry().launchProfileForPath(entry.path)?.allowSubagents,
+  });
   if (!spec) throw new Error("implementer session cannot be resumed");
   const outcome = await deliverToTranscriptHost({ entry, spec, payload: text });
   if (!outcome.ok) throw new Error(outcome.error);
@@ -534,6 +538,7 @@ async function launchReviewer(
     }
     return;
   }
+  const spawnCapability = agentRegistry().rotateSpawnCapabilityForReceipt(reservation.receipt.launchId);
   const launched = startHeadlessReview(
     flow.id,
     round.n,
@@ -543,6 +548,8 @@ async function launchReviewer(
     undefined,
     account.engine === "codex" ? { home: account.home, managed: account.kind === "managed" } : null,
     account.engine === "claude" ? { home: account.home, projectsDir: account.transcriptRoot, managed: account.kind === "managed" } : null,
+    undefined,
+    spawnCapability,
   );
   recordHeadlessLaunch(round, launched);
   settleReviewerSpawn(flow, round, role, account.accountId);

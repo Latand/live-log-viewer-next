@@ -185,7 +185,7 @@ test("successor thread methods use the structured fork, resume, read, name, and 
     sandbox: "read-only",
     config: {
       mcp_servers: { playwright: { enabled: false }, "telegram-readonly": { enabled: false } },
-      features: { apps: false, plugins: false },
+      features: { apps: false, plugins: false, multi_agent: false },
       include_apps_instructions: false,
       model_reasoning_effort: "high",
     },

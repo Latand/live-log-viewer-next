@@ -3,7 +3,8 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
-import type { ResumeSpec } from "@/lib/agent/cli";
+import { withSpawnCapability, type ResumeSpec } from "@/lib/agent/cli";
+import { fenceViewerSpawnPrompt } from "@/lib/agent/spawnPolicy";
 import {
   agentRegistry,
   type ProcessIdentity,
@@ -1317,7 +1318,8 @@ async function spawnAgentWithPromptUnchecked(spec: ResumeSpec, text: string, rec
     result: "ok",
     meta: { window: spec.windowName, display },
   });
-  if (text) await sendText(target, text);
+  const fencedPrompt = fenceViewerSpawnPrompt(spec.engine, text);
+  if (fencedPrompt) await sendText(target, fencedPrompt);
   const finalVerification = await verifyTmuxSpawnBinding(binding, endpoint);
   if (!finalVerification ||
     !pidAlive(agent.pid) ||
@@ -1341,7 +1343,8 @@ async function spawnAgentWithPromptUnchecked(spec: ResumeSpec, text: string, rec
 export async function spawnAgentWithPrompt(spec: ResumeSpec, text: string, existingReceipt?: SpawnReceipt): Promise<SpawnedPane> {
   const receipt = existingReceipt ?? agentRegistry().beginSpawn(spec.engine, spec.cwd, spec.launchProfile);
   try {
-    return { ...(await spawnAgentWithPromptUnchecked(spec, text, receipt)), receipt };
+    const capability = agentRegistry().rotateSpawnCapabilityForReceipt(receipt.launchId);
+    return { ...(await spawnAgentWithPromptUnchecked(withSpawnCapability(spec, capability), text, receipt)), receipt };
   } catch (error) {
     agentRegistry().failSpawn(receipt.launchId, error instanceof Error ? error.message : String(error));
     throw error;

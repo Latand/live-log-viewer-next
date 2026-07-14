@@ -15,9 +15,17 @@ import { adoptStructuredHostsAtStartup, type StructuredStartupDependencies } fro
 test("server startup delegates managed rows with file credentials and their launch profile", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-startup-"));
   const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const artifactPath = "/managed/sessions/startup-thread.jsonl";
+  const conversation = registry.ensureConversation("codex", artifactPath, "managed");
+  registry.beginSpawnRequest({
+    engine: "codex",
+    cwd: "/repo",
+    conversationId: conversation.id,
+    spawnCapabilityDigest: "a".repeat(64),
+  });
   registry.upsert({
     key: { engine: "codex", sessionId: "startup-thread" },
-    artifactPath: "/managed/sessions/startup-thread.jsonl",
+    artifactPath,
     cwd: "/repo",
     accountId: "managed",
     launchProfile: {
@@ -27,6 +35,7 @@ test("server startup delegates managed rows with file credentials and their laun
       fast: null,
       permissionMode: null,
       readOnly: true,
+      allowSubagents: true,
       title: null,
       project: null,
       parentConversationId: null,
@@ -68,6 +77,7 @@ test("server startup delegates managed rows with file credentials and their laun
     fileAuthCredentials: true,
     model: "gpt-5.4-mini",
     effort: "high",
+    env: { LLV_SPAWN_CAPABILITY: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/) },
   });
   expect(claudeOptions).toMatchObject({
     cwd: "/repo",
@@ -76,6 +86,10 @@ test("server startup delegates managed rows with file credentials and their laun
     env: { CLAUDE_CONFIG_DIR: "/managed-claude" },
     model: "gpt-5.4-mini",
     effort: "high",
+    allowSubagents: true,
+  });
+  expect(claudeOptions).toMatchObject({
+    env: { LLV_SPAWN_CAPABILITY: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/) },
   });
 });
 

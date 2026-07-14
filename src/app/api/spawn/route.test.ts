@@ -1,18 +1,91 @@
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { expect, test } from "bun:test";
+import { NextRequest } from "next/server";
 
 import { AgentRegistry } from "@/lib/agent/registry";
 import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
 import { spawnParentSelector, spawnRequestDigest } from "@/lib/agent/spawnIdentity";
 import { spawnResponseForReceipt } from "@/lib/agent/spawnResponse";
-import { resolveSpawnLineageParent, resolveSpawnParent, SpawnParentError } from "@/lib/agent/spawnParent";
+import { resolveSpawnLineage, resolveSpawnLineageParent, resolveSpawnParent, SpawnParentError } from "@/lib/agent/spawnParent";
+import { authenticatedAgentSpawnCaller, isAgentInitiatedSpawn } from "./admission";
+import { POST } from "./route";
 
 function registry(): AgentRegistry {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "llv-spawn-route-"));
   return new AgentRegistry(path.join(dir, "agent-registry.json"));
 }
+
+test("agent-initiated spawn without lineage returns a teaching 400", async () => {
+  const response = await POST(new NextRequest("http://127.0.0.1:8898/api/spawn", {
+    method: "POST",
+    headers: { host: "127.0.0.1:8898", "content-type": "application/json" },
+    body: JSON.stringify({ engine: "codex", cwd: "/repo", prompt: "help" }),
+  }));
+
+  expect(response.status).toBe(400);
+  expect(await response.json()).toEqual({
+    error: expect.stringContaining("POST http://127.0.0.1:8898/api/spawn"),
+  });
+});
+
+test("same-origin browser requests use the Viewer spawn surface", () => {
+  const request = new NextRequest("http://127.0.0.1:8898/api/spawn", {
+    headers: { host: "127.0.0.1:8898", origin: "http://127.0.0.1:8898", "sec-fetch-site": "same-origin" },
+  });
+
+  expect(isAgentInitiatedSpawn(request)).toBe(false);
+  expect(isAgentInitiatedSpawn(new NextRequest("http://127.0.0.1:8898/api/spawn"))).toBe(true);
+});
+
+test("agent capability binds src to the caller conversation", () => {
+  const store = registry();
+  const capability = "C".repeat(43);
+  const callerPath = "/sessions/caller-019f4906-3f67-7b72-9fbc-9ec3b5ad1325.jsonl";
+  const begun = store.beginSpawnRequest({
+    engine: "codex",
+    cwd: "/repo",
+    spawnCapabilityDigest: crypto.createHash("sha256").update(capability).digest("hex"),
+  });
+  if (begun.kind !== "created") throw new Error("expected create");
+  const settled = store.settleSpawn(begun.receipt.launchId, {
+    key: { engine: "codex", sessionId: "019f4906-3f67-7b72-9fbc-9ec3b5ad1325" },
+    artifactPath: callerPath,
+    cwd: "/repo",
+    accountId: "terra",
+    status: "live",
+    host: null,
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  expect(settled.kind).toBe("settled");
+  const request = new NextRequest("http://127.0.0.1:8898/api/spawn", {
+    headers: { "x-llv-spawn-capability": capability },
+  });
+
+  expect(authenticatedAgentSpawnCaller(request, callerPath, store)).toEqual({
+    conversationId: begun.receipt.conversationId,
+  });
+
+  const other = store.ensureConversation("codex", "/sessions/other.jsonl", "terra");
+  expect(authenticatedAgentSpawnCaller(request, other.generations[0]!.path, store)).toEqual({
+    error: "src must identify the authenticated caller conversation",
+  });
+});
+
+test("agent callers cannot grant themselves native sub-agent permission", async () => {
+  const response = await POST(new NextRequest("http://127.0.0.1:8898/api/spawn", {
+    method: "POST",
+    headers: { host: "127.0.0.1:8898", "content-type": "application/json" },
+    body: JSON.stringify({ src: "/caller.jsonl", role: "orchestrator", allowSubagents: true }),
+  }));
+
+  expect(response.status).toBe(403);
+  expect(await response.json()).toEqual({ error: "allowSubagents requires an authenticated Viewer operator spawn" });
+});
 
 test("spawn route projects a launched path-pending receipt as a truthful success", () => {
   const store = registry();
@@ -66,6 +139,19 @@ test("reviewer spawn requires one reviewed conversation and resolves its stable 
     sessionKey: { engine: "codex", sessionId: "019f4906-3f67-7b72-9fbc-9ec3b5ad1326" },
   });
   expect(() => resolveSpawnLineageParent({ role: "builder", reviews: implementer.id }, store)).toThrow(SpawnParentError);
+});
+
+test("reviewer lineage keeps the caller and reviewed implementer distinct", () => {
+  const store = registry();
+  const callerPath = "/sessions/caller-019f4906-3f67-7b72-9fbc-9ec3b5ad1325.jsonl";
+  const implementerPath = "/sessions/implementer-019f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl";
+  const caller = store.ensureConversation("codex", callerPath, "terra");
+  const implementer = store.ensureConversation("codex", implementerPath, "terra");
+
+  const lineage = resolveSpawnLineage({ role: "reviewer", parentConversationId: caller.id, reviews: implementer.id }, store);
+
+  expect(lineage.parent?.conversationId).toBe(caller.id);
+  expect(lineage.reviewed?.conversationId).toBe(implementer.id);
 });
 
 function digestForParent(body: { parentConversationId: string }): string {

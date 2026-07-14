@@ -5,18 +5,19 @@ import path from "node:path";
 import { NextRequest, NextResponse } from "next/server";
 
 import { UnknownAccountError } from "@/lib/accounts/codex";
-import { UnknownClaudeAccountError } from "@/lib/accounts/claude";
+import { claudeSettingsPath, isManagedClaudeHome, UnknownClaudeAccountError } from "@/lib/accounts/claude";
 import { accountManager } from "@/lib/accounts/manager";
 import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
 import { freshSpecFor, type AgentEngine } from "@/lib/agent/cli";
-import { agentRegistry } from "@/lib/agent/registry";
+import { agentRegistry, SpawnChildLimitError } from "@/lib/agent/registry";
 import { reasoningFromBody } from "@/lib/agent/efforts";
 import { modelFromBody } from "@/lib/agent/models";
 import { resolveSpawnRole } from "@/lib/roles/registry";
 import { spawnContentDigest, spawnParentSelector, spawnRequestDigest } from "@/lib/agent/spawnIdentity";
 import { sessionKeyFromTranscript } from "@/lib/agent/sessionKey";
-import { resolveSpawnLineageParent, SpawnParentError } from "@/lib/agent/spawnParent";
+import { resolveSpawnLineage, SpawnParentError } from "@/lib/agent/spawnParent";
 import { spawnResponseForReceipt, type SpawnResponse } from "@/lib/agent/spawnResponse";
+import { applyClaudeSpawnPolicy } from "@/lib/agent/spawnPolicy";
 import { resolveSpawnedTranscriptPath } from "@/lib/agent/spawnedTranscript";
 import { headCwd } from "@/lib/agent/transcript";
 import { persistHandoffLineage, rememberHandoffChild } from "@/lib/handoffLineage";
@@ -31,6 +32,7 @@ import { buildImagePayload, collectImagePayloads, deleteInboxImages, spawnAgentW
 import type { ApiError } from "@/lib/types";
 
 import { sourceCwdStatus } from "./sourceCwd";
+import { AGENT_SPAWN_LINEAGE_ERROR, AGENT_SPAWN_LIVE_CHILD_CAP, agentSpawnLineageError, authenticatedAgentSpawnCaller, isAgentInitiatedSpawn } from "./admission";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -83,12 +85,31 @@ export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse
   const rejection = rejectCrossOrigin(req);
   if (rejection) return rejection;
 
-  let body: { engine?: unknown; model?: unknown; cwd?: unknown; prompt?: unknown; images?: unknown; src?: unknown; parent?: unknown; parentConversationId?: unknown; effort?: unknown; fast?: unknown; accountId?: unknown; clientAttemptId?: unknown; role?: unknown; roleParams?: unknown; confirm?: unknown; reviews?: unknown };
+  let body: { engine?: unknown; model?: unknown; cwd?: unknown; prompt?: unknown; images?: unknown; src?: unknown; parent?: unknown; parentConversationId?: unknown; effort?: unknown; fast?: unknown; accountId?: unknown; clientAttemptId?: unknown; role?: unknown; roleParams?: unknown; confirm?: unknown; reviews?: unknown; allowSubagents?: unknown };
   try {
     body = (await req.json()) as typeof body;
   } catch {
     return NextResponse.json({ error: "invalid JSON" }, { status: 400 });
   }
+
+  const lineageError = agentSpawnLineageError(req, body);
+  if (lineageError) return NextResponse.json({ error: lineageError }, { status: 400 });
+  const agentInitiated = isAgentInitiatedSpawn(req);
+  if (body.allowSubagents !== undefined && typeof body.allowSubagents !== "boolean") {
+    return NextResponse.json({ error: "allowSubagents must be a boolean" }, { status: 400 });
+  }
+  if (agentInitiated && body.allowSubagents === true) {
+    return NextResponse.json({ error: "allowSubagents requires an authenticated Viewer operator spawn" }, { status: 403 });
+  }
+
+  const registry = agentRegistry();
+  const authenticatedCaller = agentInitiated
+    ? authenticatedAgentSpawnCaller(req, body.src, registry)
+    : null;
+  if (authenticatedCaller && "error" in authenticatedCaller) {
+    return NextResponse.json({ error: authenticatedCaller.error }, { status: 403 });
+  }
+  const authenticatedCallerId = authenticatedCaller?.conversationId ?? null;
 
   const role = resolveSpawnRole(body);
   if (!role.ok) return NextResponse.json({ error: role.error }, { status: 400 });
@@ -139,7 +160,12 @@ export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse
   let launchId: string | null = null;
   try {
     const account = accountManager.resolveSpawn(engine, body.accountId);
-    const parent = resolveSpawnLineageParent(body);
+    const lineage = resolveSpawnLineage(agentInitiated
+      ? { parentConversationId: authenticatedCallerId!, role: role.value?.role, reviews: body.reviews }
+      : body, registry);
+    const parent = lineage.parent;
+    const reviewedConversationId = lineage.reviewed?.conversationId ?? null;
+    if (agentInitiated && !parent) return NextResponse.json({ error: AGENT_SPAWN_LINEAGE_ERROR }, { status: 400 });
     const parentConversationId = parent?.conversationId ?? null;
     const parentSessionKey = parent?.sessionKey ?? null;
     const parentArtifactPath = parent?.artifactPath ?? null;
@@ -151,7 +177,9 @@ export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse
       fast: reasoning.fast,
       accountId: account.accountId,
       role: role.value?.role ?? null,
+      ...(body.allowSubagents === true ? { allowSubagents: true } : {}),
       parent: spawnParentSelector({ parentConversationId: parentConversationId ?? undefined }),
+      ...(reviewedConversationId ? { reviews: spawnParentSelector({ parentConversationId: reviewedConversationId }) } : {}),
       prompt,
       images: images.map((image) => ({ mime: image.mime, digest: spawnContentDigest({ image: image.base64 }) })),
     });
@@ -162,9 +190,11 @@ export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse
       codexHome: engine === "codex" ? account.home : null,
       claudeConfigDir: engine === "claude" ? account.home : null,
       claudeProjectsDir: engine === "claude" ? account.transcriptRoot : null,
+      allowSubagents: body.allowSubagents === true,
+      deferClaudeSpawnPolicy: true,
     });
-    const spec = { ...specBase, launchProfile: emptyLaunchProfile({ ...(specBase.launchProfile ?? {}), cwd, parentConversationId }) };
-    const begun = agentRegistry().beginSpawnRequest({
+    const spec = { ...specBase, launchProfile: emptyLaunchProfile({ ...(specBase.launchProfile ?? {}), cwd, parentConversationId, allowSubagents: body.allowSubagents === true }) };
+    const begun = registry.beginSpawnRequest({
       engine,
       cwd,
       accountId: account.accountId,
@@ -172,7 +202,8 @@ export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse
       parentSessionKey,
       parentArtifactPath,
       role: role.value?.role ?? null,
-      reviewsConversationId: role.value?.role === "reviewer" ? parentConversationId : null,
+      reviewsConversationId: reviewedConversationId,
+      liveChildrenCap: agentInitiated ? AGENT_SPAWN_LIVE_CHILD_CAP : undefined,
       launchProfile: spec.launchProfile,
       clientAttemptId: body.clientAttemptId ?? null,
       requestDigest: digest,
@@ -184,6 +215,14 @@ export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse
       return NextResponse.json(response, { status: response.state === "starting" ? 202 : 200 });
     }
     launchId = begun.receipt.launchId;
+    if (engine === "claude") {
+      const profileId = path.basename(spec.transcript ?? "", ".jsonl");
+      applyClaudeSpawnPolicy(account.home, {
+        allowSubagents: body.allowSubagents === true,
+        baseSettingsPath: isManagedClaudeHome(account.home) ? claudeSettingsPath() : null,
+        profileId,
+      });
+    }
     /* Pasted images land in the inbox and reach the fresh agent as file paths
        appended to its first prompt — the same contract the pane composer uses. */
     const bundle = buildImagePayload(prompt, images);
@@ -272,6 +311,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse
       deleteInboxImages(imagePaths);
     }
     if (error instanceof SpawnParentError) return NextResponse.json({ error: error.message }, { status: error.status });
+    if (error instanceof SpawnChildLimitError) return NextResponse.json({ error: error.message }, { status: 429 });
     if (error instanceof UnknownAccountError || error instanceof UnknownClaudeAccountError) return NextResponse.json({ error: error.message }, { status: 400 });
     if (receipt?.pane) {
       if (receipt.state === "prompt-delivered" || receipt.state === "host-verified") agentRegistry().markSpawnPathPending(receipt.launchId);

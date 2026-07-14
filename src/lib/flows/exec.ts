@@ -6,6 +6,7 @@ import path from "node:path";
 import { resolveBinary } from "@/lib/agent/cli";
 import { claudeManagedEnvironment, claudeSettingsPath } from "@/lib/accounts/claude";
 import { claudeTranscriptPath } from "@/lib/agent/transcript";
+import { applyClaudeSpawnPolicy, fenceViewerSpawnPrompt } from "@/lib/agent/spawnPolicy";
 import { procBackend } from "@/lib/proc";
 
 import type { FlowEngine, RoleConfig, Round } from "./types";
@@ -59,6 +60,13 @@ interface LiveRun {
 }
 
 const runs = new Map<string, LiveRun>();
+
+function reviewerEnvironment(base: NodeJS.ProcessEnv, spawnCapability?: string): NodeJS.ProcessEnv {
+  const env = { ...base };
+  delete env.LLV_TOKEN;
+  if (spawnCapability) env.LLV_SPAWN_CAPABILITY = spawnCapability;
+  return env;
+}
 
 function runKey(flowId: string, round: number): string {
   return `${flowId}:${round}`;
@@ -200,6 +208,7 @@ export function reviewerCommand(
   cwd: string,
   codexAccount?: HeadlessCodexAccount | null,
   claudeAccount?: HeadlessClaudeAccount | null,
+  spawnCapability?: string,
 ): { command: string; args: string[]; env: NodeJS.ProcessEnv; stdin: string | null; outputPath: string | null; sessionId: string | null; reviewerPath: string | null } {
   if (role.engine === "claude") {
     const sessionId = crypto.randomUUID();
@@ -214,22 +223,28 @@ export function reviewerCommand(
     ];
     if (role.model) args.push("--model", role.model);
     if (role.effort) args.push("--effort", role.effort);
-    const settings = claudeAccount?.managed ? claudeSettingsPath() : null;
+    const settings = claudeAccount
+      ? applyClaudeSpawnPolicy(claudeAccount.home, {
+        baseSettingsPath: claudeAccount.managed ? claudeSettingsPath() : null,
+        profileId: `headless-${sessionId}`,
+      }).settingsPath
+      : null;
     if (settings) args.push("--settings", settings);
-    return { command: resolveBinary("claude"), args, env: claudeAccount?.managed ? claudeManagedEnvironment(claudeAccount.home) : process.env, stdin: null, outputPath: null, sessionId, reviewerPath: claudeTranscriptPath(cwd, sessionId, claudeAccount?.projectsDir) };
+    const baseEnv = claudeAccount?.managed ? claudeManagedEnvironment(claudeAccount.home) : process.env;
+    return { command: resolveBinary("claude"), args, env: reviewerEnvironment(baseEnv, spawnCapability), stdin: null, outputPath: null, sessionId, reviewerPath: claudeTranscriptPath(cwd, sessionId, claudeAccount?.projectsDir) };
   }
   /* --json turns stdout into a JSONL event stream whose first events carry
      the session/thread id — a structured contract instead of parsing the
      human banner. The verdict itself still arrives via --output-last-message. */
-  const args = ["exec", "--ignore-user-config", "-", "--json", "--output-last-message", outputPath, "--dangerously-bypass-approvals-and-sandbox"];
+  const args = ["--disable", "multi_agent", "exec", "--ignore-user-config", "-", "--json", "--output-last-message", outputPath, "--dangerously-bypass-approvals-and-sandbox"];
   if (codexAccount?.managed) args.unshift("-c", "cli_auth_credentials_store=file");
   if (role.model) args.push("-m", role.model);
   if (role.effort) args.push("-c", `model_reasoning_effort=${role.effort}`);
   return {
     command: resolveBinary("codex"),
     args,
-    env: codexAccount?.home ? { ...process.env, CODEX_HOME: codexAccount.home } : process.env,
-    stdin: prompt,
+    env: reviewerEnvironment(codexAccount?.home ? { ...process.env, CODEX_HOME: codexAccount.home } : process.env, spawnCapability),
+    stdin: fenceViewerSpawnPrompt("codex", prompt),
     outputPath,
     sessionId: null,
     reviewerPath: null,
@@ -246,13 +261,14 @@ export function startHeadlessReview(
   codexAccount?: HeadlessCodexAccount | null,
   claudeAccount?: HeadlessClaudeAccount | null,
   runtime?: HeadlessReviewRuntime,
+  spawnCapability?: string,
 ): HeadlessReviewLaunch {
   const key = runKey(flowId, round);
   if (runs.has(key)) return { pid: null, identity: null, sessionId: null, reviewerPath: null };
   const outputPath = outputPathFor(flowId, round);
   fs.mkdirSync(path.dirname(outputPath), { recursive: true });
   clearHeadlessReviewArtifacts(flowId, round);
-  const built = reviewerCommand(role, prompt, outputPath, cwd, codexAccount, claudeAccount);
+  const built = reviewerCommand(role, prompt, outputPath, cwd, codexAccount, claudeAccount, spawnCapability);
   /* Detached + file-backed stdio: the reviewer must not die with the viewer.
      A plain child shares the dev server's process group, so Ctrl+C on the
      server delivers SIGINT to the reviewer too; detached makes it a group

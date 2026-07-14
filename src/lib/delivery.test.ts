@@ -65,7 +65,7 @@ test("idle reconfiguration survives a transient host miss and resumes after veri
   const key = { engine: "codex" as const, sessionId };
   registry.upsert({
     key, artifactPath: pathname, cwd: SANDBOX, accountId: "default",
-    launchProfile: emptyLaunchProfile({ cwd: SANDBOX, role: "worker", readOnly: true, permissionMode: "never" }), status: "idle",
+    launchProfile: emptyLaunchProfile({ cwd: SANDBOX, role: "worker", readOnly: true, permissionMode: "never", allowSubagents: true }), status: "idle",
     host: KILL_HOST, claimEpoch: 1, claimOwner: null, pendingAction: null,
   });
   const entry: FileEntry = {
@@ -76,7 +76,7 @@ test("idle reconfiguration survives a transient host miss and resumes after veri
   };
   let resumed = 0;
   let killed = false;
-  let resumePolicy: { readOnly?: boolean | null; permissionMode?: string | null } = {};
+  let resumePolicy: { readOnly?: boolean | null; permissionMode?: string | null; allowSubagents?: boolean } = {};
 
   const outcome = await reconfigureConversation(pathname, { model: "gpt-5.6-terra", effort: "medium", fast: true }, {
     pathAllowed: () => true,
@@ -100,7 +100,7 @@ test("idle reconfiguration survives a transient host miss and resumes after veri
   expect(outcome).toMatchObject({ ok: true, outcome: "reconfigured", target: "%8" });
   expect(resumed).toBe(1);
   expect(killed).toBe(true);
-  expect(resumePolicy).toMatchObject({ readOnly: true, permissionMode: "never" });
+  expect(resumePolicy).toMatchObject({ readOnly: true, permissionMode: "never", allowSubagents: true });
 });
 
 const KILL_HOST: TmuxHostEvidence = {

@@ -1,10 +1,12 @@
 import { spawn, spawnSync } from "node:child_process";
 import type { ChildProcessWithoutNullStreams, SpawnOptionsWithoutStdio } from "node:child_process";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
 
 import { statePath } from "@/lib/configDir";
+import { applyClaudeSpawnPolicy } from "@/lib/agent/spawnPolicy";
 import { claudeTranscriptPath } from "@/lib/agent/transcript";
 import { procBackend } from "@/lib/proc";
 import { hardenedRedact } from "@/lib/view/compactText";
@@ -158,6 +160,8 @@ export interface ClaudeStreamBrokerHostOptions {
   cwd: string;
   claudeConfigDir?: string;
   claudeProjectsDir?: string;
+  spawnPolicyBaseSettingsPath?: string | null;
+  allowSubagents?: boolean;
   binary?: string;
   model?: string;
   effort?: string;
@@ -186,6 +190,7 @@ const CHILD_ENV_ALLOWLIST = [
   "LC_ALL", "LC_CTYPE", "TERM", "COLORTERM", "NO_COLOR", "XDG_CONFIG_HOME",
   "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_RUNTIME_DIR",
   "DBUS_SESSION_BUS_ADDRESS", "SSL_CERT_FILE", "SSL_CERT_DIR",
+  "LLV_SPAWN_CAPABILITY",
 ] as const;
 const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_SHUTDOWN_GRACE_MS = 1_000;
@@ -414,6 +419,16 @@ export class ClaudeStreamBrokerHost implements EngineHost {
       "--permission-prompt-tool", "stdio",
       "--permission-mode", options.permissionMode ?? "default",
     ];
+    if (!options.allowSubagents) args.push("--disallowedTools", "Task,Agent");
+    if (options.claudeConfigDir) {
+      const profileId = `structured-${crypto.createHash("sha256").update(sessionId).digest("hex").slice(0, 24)}`;
+      const settings = applyClaudeSpawnPolicy(options.claudeConfigDir, {
+        allowSubagents: options.allowSubagents,
+        baseSettingsPath: options.spawnPolicyBaseSettingsPath,
+        profileId,
+      });
+      args.push("--settings", settings.settingsPath);
+    }
     if (resume) args.push("--resume", sessionId);
     else args.push("--session-id", sessionId);
     if (options.model) args.push("--model", options.model);

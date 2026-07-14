@@ -109,6 +109,8 @@ export interface SpawnReceipt {
   clientAttemptId: string | null;
   /** SHA-256 of the public launch shape. Prompt/image contents never persist. */
   requestDigest: string | null;
+  /** One-way binding for the caller credential injected into this worker. */
+  spawnCapabilityDigest: string | null;
   /** Reserved at receipt birth so path discovery cannot choose the identity. */
   conversationId: ViewerConversationId;
   purpose: "launch" | "migration-successor" | "resume-successor";
@@ -173,6 +175,7 @@ export interface SpawnRequest {
   launchProfile?: Partial<LaunchProfile>;
   clientAttemptId?: string | null;
   requestDigest?: string | null;
+  spawnCapabilityDigest?: string | null;
   accountId?: string | null;
   parentConversationId?: ViewerConversationId | null;
   parentSessionKey?: SessionKey | null;
@@ -183,6 +186,15 @@ export interface SpawnRequest {
   conversationId?: ViewerConversationId;
   purpose?: SpawnReceipt["purpose"];
   expectedArtifactPath?: string | null;
+  /** Atomic direct-child admission guard for agent-initiated Viewer spawns. */
+  liveChildrenCap?: number;
+}
+
+export class SpawnChildLimitError extends Error {
+  constructor(readonly parentConversationId: ViewerConversationId, readonly cap: number) {
+    super(`Agent spawn limit reached: caller ${parentConversationId} already has ${cap} live children (cap: ${cap}). Wait for a child to finish before spawning another helper.`);
+    this.name = "SpawnChildLimitError";
+  }
 }
 
 export type SpawnBeginResult =
@@ -421,6 +433,7 @@ function mergeResumeLaunchProfile(current: LaunchProfile, requested: LaunchProfi
     fast: requested.fast ?? current.fast,
     permissionMode: requested.permissionMode ?? current.permissionMode,
     readOnly: requested.readOnly ?? current.readOnly,
+    allowSubagents: current.allowSubagents || requested.allowSubagents,
     title: requested.title ?? current.title,
     project: requested.project ?? current.project,
     parentConversationId: requested.parentConversationId ?? current.parentConversationId,
@@ -609,6 +622,69 @@ function restoreOwnedChanges(current: unknown, retired: unknown, previous: unkno
 
 function now(): string {
   return new Date().toISOString();
+}
+
+const LIVE_CHILD_RECEIPT_STATES = new Set<SpawnReceipt["state"]>([
+  "starting",
+  "pane-bound",
+  "host-verified",
+  "prompt-delivered",
+  "path-pending",
+]);
+const LIVE_CHILD_HOST_STATES = new Set<AgentHostStatus>(["starting", "live", "idle", "handoff"]);
+export const SPAWN_STARTING_ADMISSION_LEASE_MS = 2 * 60_000;
+
+function processIdentityAlive(identity: ProcessIdentity): boolean {
+  return procBackend.pidAlive(identity.pid)
+    && (identity.startIdentity === null || procBackend.processIdentity(identity.pid) === identity.startIdentity);
+}
+
+function childEntries(
+  file: RegistryFile,
+  childConversationId: ViewerConversationId,
+  edge: SpawnLineageEdge,
+  receipt: SpawnReceipt | null,
+): AgentRegistryEntry[] {
+  const keys = [receipt?.key, edge.childSessionKey];
+  const child = file.conversations[childConversationId];
+  const generation = child?.generations.at(-1);
+  keys.push(generation ? sessionKeyFromTranscript(child.engine, generation.path) : null);
+  return [...new Set(keys.filter((key): key is SessionKey => Boolean(key)).map(sessionKeyId))]
+    .flatMap((key) => file.entries[key] ? [file.entries[key]!] : []);
+}
+
+function knownChildProcesses(receipt: SpawnReceipt | null, entries: AgentRegistryEntry[]): ProcessIdentity[] {
+  return [
+    receipt?.verifiedHost?.agent,
+    receipt?.pane?.panePid,
+    ...entries.flatMap((entry) => [entry.host?.agent, entry.structuredHost?.process]),
+  ].filter((identity): identity is ProcessIdentity => Boolean(identity));
+}
+
+function liveViewerChildCount(file: RegistryFile, parentConversationId: ViewerConversationId): number {
+  const canonicalParentId = resolveConversationAlias(file, parentConversationId);
+  const liveChildren = new Set<ViewerConversationId>();
+  for (const edge of Object.values(file.lineageEdges)) {
+    if (edge.source !== "viewer-spawn" || resolveConversationAlias(file, edge.parentConversationId) !== canonicalParentId) continue;
+    const childConversationId = resolveConversationAlias(file, edge.childConversationId);
+    const receipt = edge.evidence.launchId ? file.receipts[edge.evidence.launchId] : null;
+    const entries = childEntries(file, childConversationId, edge, receipt);
+    const processes = knownChildProcesses(receipt, entries);
+    if (processes.some(processIdentityAlive)) {
+      liveChildren.add(childConversationId);
+      continue;
+    }
+    if (processes.length > 0) continue;
+    if (receipt && LIVE_CHILD_RECEIPT_STATES.has(receipt.state)) {
+      if (receipt.state === "starting") {
+        if (Date.now() - Date.parse(receipt.createdAt) > SPAWN_STARTING_ADMISSION_LEASE_MS) continue;
+      }
+      liveChildren.add(childConversationId);
+      continue;
+    }
+    if (entries.some((entry) => LIVE_CHILD_HOST_STATES.has(entry.status))) liveChildren.add(childConversationId);
+  }
+  return liveChildren.size;
 }
 
 function nativeGenerationId(pathname: string): string {
@@ -1012,6 +1088,7 @@ function adoptProvisionalOwner(
       ...edge,
       childConversationId: edge.childConversationId === owner.id ? target.id : edge.childConversationId,
       parentConversationId: edge.parentConversationId === owner.id ? target.id : edge.parentConversationId,
+      reviewsConversationId: edge.reviewsConversationId === owner.id ? target.id : edge.reviewsConversationId,
     };
     if (reassigned.childConversationId === reassigned.parentConversationId) continue;
     const existing = reassignedEdges[reassigned.childConversationId];
@@ -1079,6 +1156,9 @@ function normalizeReceipt(value: SpawnReceipt): SpawnReceipt {
     ...value,
     clientAttemptId: typeof value.clientAttemptId === "string" ? value.clientAttemptId : null,
     requestDigest: typeof value.requestDigest === "string" ? value.requestDigest : null,
+    spawnCapabilityDigest: typeof value.spawnCapabilityDigest === "string" && /^[0-9a-f]{64}$/.test(value.spawnCapabilityDigest)
+      ? value.spawnCapabilityDigest
+      : null,
     conversationId: typeof value.conversationId === "string" && value.conversationId.startsWith("conversation_")
       ? value.conversationId as ViewerConversationId
       : `conversation_${crypto.randomUUID()}`,
@@ -1177,6 +1257,7 @@ function compactLaunchProfile(profile: LaunchProfile): Partial<LaunchProfile> {
   }
   if (compact.cwd === "") delete compact.cwd;
   if (compact.role === "worker") delete compact.role;
+  if (compact.allowSubagents === false) delete compact.allowSubagents;
   return compact;
 }
 
@@ -1625,6 +1706,48 @@ export class AgentRegistry {
 
   snapshot(): RegistryFile { return readFile(this.filename); }
 
+  conversationIdForSpawnCapabilityDigest(digest: string): ViewerConversationId | null {
+    if (!/^[0-9a-f]{64}$/.test(digest)) return null;
+    const file = readFile(this.filename);
+    const receipt = Object.values(file.receipts).find((candidate) => candidate.spawnCapabilityDigest === digest);
+    return receipt ? resolveConversationAlias(file, receipt.conversationId) : null;
+  }
+
+  rotateSpawnCapabilityForReceipt(launchId: string): string {
+    const capability = crypto.randomBytes(32).toString("base64url");
+    const digest = crypto.createHash("sha256").update(capability).digest("hex");
+    return this.mutate((file) => {
+      const target = file.receipts[launchId];
+      if (!target) throw new Error("spawn receipt is missing");
+      const conversationId = resolveConversationAlias(file, target.conversationId);
+      for (const receipt of Object.values(file.receipts)) {
+        if (resolveConversationAlias(file, receipt.conversationId) === conversationId) {
+          receipt.spawnCapabilityDigest = null;
+        }
+      }
+      target.spawnCapabilityDigest = digest;
+      return capability;
+    });
+  }
+
+  rotateSpawnCapabilityForPath(artifactPath: string): string | null {
+    const capability = crypto.randomBytes(32).toString("base64url");
+    const digest = crypto.createHash("sha256").update(capability).digest("hex");
+    return this.mutate((file) => {
+      const conversation = Object.values(file.conversations)
+        .find((candidate) => conversationOwnsPath(candidate, artifactPath));
+      if (!conversation) return null;
+      const receipts = Object.values(file.receipts)
+        .filter((candidate) => resolveConversationAlias(file, candidate.conversationId) === conversation.id)
+        .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+      const current = receipts[0];
+      if (!current) return null;
+      for (const receipt of receipts) receipt.spawnCapabilityDigest = null;
+      current.spawnCapabilityDigest = digest;
+      return capability;
+    });
+  }
+
   /** Create or replay a client-correlated durable launch receipt. Existing
       internal callers use beginSpawn() and receive an uncorrelated receipt. */
   beginSpawnRequest(input: SpawnRequest): SpawnBeginResult {
@@ -1635,9 +1758,6 @@ export class AgentRegistry {
       const role = typeof input.role === "string" && input.role.trim() ? input.role.trim() : null;
       if (role === "reviewer" && !reviewsConversationId) throw new Error("reviewer spawn requires reviewsConversationId");
       if (reviewsConversationId && role !== "reviewer") throw new Error("reviewsConversationId requires reviewer role");
-      if (reviewsConversationId !== null && reviewsConversationId !== parentConversationId) {
-        throw new Error("reviewer parent must be the reviewed conversation");
-      }
       const existingConversation = conversationId ? file.conversations[conversationId] : null;
       const requestedProfile = emptyLaunchProfile({ cwd: input.cwd, ...(input.launchProfile ?? {}), parentConversationId });
       const currentProfile = existingConversation?.generations.at(-1)?.launchProfile;
@@ -1657,11 +1777,28 @@ export class AgentRegistry {
           return { kind: compatible ? "replay" : "conflict", receipt: clone(existing) };
         }
       }
+      if (input.liveChildrenCap !== undefined) {
+        if (!Number.isInteger(input.liveChildrenCap) || input.liveChildrenCap < 1) throw new Error("liveChildrenCap must be a positive integer");
+        if (!parentConversationId) throw new Error("liveChildrenCap requires parentConversationId");
+        if (liveViewerChildCount(file, parentConversationId) >= input.liveChildrenCap) {
+          throw new SpawnChildLimitError(parentConversationId, input.liveChildrenCap);
+        }
+      }
+      if (conversationId && input.spawnCapabilityDigest) {
+        for (const existing of Object.values(file.receipts)) {
+          if (resolveConversationAlias(file, existing.conversationId) === conversationId) {
+            existing.spawnCapabilityDigest = null;
+          }
+        }
+      }
       const createdAt = now();
       const receipt: SpawnReceipt = {
         launchId: crypto.randomUUID(),
         clientAttemptId: input.clientAttemptId ?? null,
         requestDigest: input.requestDigest ?? null,
+        spawnCapabilityDigest: typeof input.spawnCapabilityDigest === "string" && /^[0-9a-f]{64}$/.test(input.spawnCapabilityDigest)
+          ? input.spawnCapabilityDigest
+          : null,
         conversationId: conversationId ?? `conversation_${crypto.randomUUID()}`,
         purpose: input.purpose ?? "launch",
         resumeSourcePath: input.purpose === "resume-successor" ? existingConversation?.generations.at(-1)?.path ?? null : null,

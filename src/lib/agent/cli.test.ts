@@ -11,7 +11,7 @@ process.env.LLV_STATE_DIR = path.join(SANDBOX, "state");
 process.env.LLV_CODEX_HOME = path.join(SANDBOX, "legacy");
 process.env.LLV_CLAUDE_HOME = path.join(SANDBOX, "legacy-claude");
 
-const { freshSpecFor, resumeSpecFor } = await import("./cli");
+const { freshSpecFor, resumeSpecFor, withSpawnCapability } = await import("./cli");
 const { createManagedCodexAccount } = await import("@/lib/accounts/codex");
 const { createManagedClaudeAccount } = await import("@/lib/accounts/claude");
 
@@ -29,8 +29,17 @@ test("fresh Codex commands fix CODEX_HOME in the typed shell command", () => {
   const home = path.join(SANDBOX, "account with space");
   const spec = freshSpecFor("codex", "/repo", { codexHome: home });
 
-  expect(spec.command).toStartWith(`CODEX_HOME='${home}' `);
+  expect(spec.command).toStartWith(`env -u LLV_TOKEN CODEX_HOME='${home}' `);
   expect(spec.command).toContain("codex");
+  expect(spec.command).toContain("'--disable' 'multi_agent'");
+});
+
+test("Viewer spawn capability is scoped into the launched agent command", () => {
+  const capability = "A".repeat(43);
+  const spec = withSpawnCapability(freshSpecFor("codex", "/repo"), capability);
+
+  expect(spec.command).toStartWith(`env LLV_SPAWN_CAPABILITY='${capability}' `);
+  expect(spec.launchProfile?.cwd).toBe("/repo");
 });
 
 test("Claude commands do not gain Codex environment assignments", () => {
@@ -46,7 +55,10 @@ test("Codex resume derives its owning account home from the transcript path", ()
 
   const spec = resumeSpecFor("codex-sessions", transcript);
 
-  expect(spec?.command).toStartWith(`CODEX_HOME='${path.join(SANDBOX, "legacy")}' `);
+  expect(spec?.command).toStartWith(
+    `env -u LLV_TOKEN CODEX_HOME='${path.join(SANDBOX, "legacy")}' `,
+  );
+  expect(spec?.command).toContain("--disable multi_agent");
   expect(spec?.command).toContain("resume 019f423a-d6e9-7903-b597-3e676b6ff3d4");
 });
 
@@ -119,7 +131,53 @@ test("managed Claude fresh and resume commands pin the transcript owner and scru
   expect(transcript.startsWith(account.projectsDir + path.sep)).toBe(true);
   expect(fresh.command).toContain("CLAUDE_CONFIG_DIR=");
   expect(fresh.command).toContain("-u ANTHROPIC_API_KEY");
+  expect(fresh.command).toContain("-u LLV_TOKEN");
+  const sid = path.basename(transcript, ".jsonl");
+  const settingsPath = path.join(account.home, ".llv", "spawn-settings", `${sid}.json`);
+  expect(fresh.command).toContain(`'--settings' '${settingsPath}'`);
+  const settings = JSON.parse(fs.readFileSync(settingsPath, "utf8")) as {
+    hooks: { PreToolUse: Array<{ matcher: string }> };
+  };
+  expect(settings.hooks.PreToolUse.some((group) => group.matcher === "Task|Agent")).toBe(true);
   const resumed = resumeSpecFor("claude-projects", transcript)?.command ?? "";
   expect(resumed).toContain(`CLAUDE_CONFIG_DIR='${account.home}'`);
   expect(resumed).toContain("--resume");
+});
+
+test("allowSubagents leaves a managed Claude fresh spawn without the Viewer hook", () => {
+  const account = createManagedClaudeAccount("Claude Orchestrator");
+
+  const fresh = freshSpecFor("claude", "/repo", {
+    claudeConfigDir: account.home,
+    claudeProjectsDir: account.projectsDir,
+    allowSubagents: true,
+  });
+  const sid = path.basename(fresh.transcript!, ".jsonl");
+  const settings = JSON.parse(fs.readFileSync(path.join(account.home, ".llv", "spawn-settings", `${sid}.json`), "utf8")) as {
+    hooks: { PreToolUse: unknown[] };
+  };
+
+  expect(settings.hooks.PreToolUse).toEqual([]);
+  fs.mkdirSync(path.dirname(fresh.transcript!), { recursive: true });
+  fs.writeFileSync(fresh.transcript!, JSON.stringify({ cwd: "/repo" }) + "\n");
+  resumeSpecFor("claude-projects", fresh.transcript!, { allowSubagents: true });
+  const resumedSettings = JSON.parse(fs.readFileSync(
+    path.join(account.home, ".llv", "spawn-settings", `resume-${sid}.json`),
+    "utf8",
+  )) as { hooks: { PreToolUse: unknown[] } };
+  expect(resumedSettings.hooks.PreToolUse).toEqual([]);
+});
+
+test("deferred Claude policy planning leaves disk unchanged before route admission", () => {
+  const account = createManagedClaudeAccount("Claude Deferred");
+
+  const fresh = freshSpecFor("claude", "/repo", {
+    claudeConfigDir: account.home,
+    claudeProjectsDir: account.projectsDir,
+    deferClaudeSpawnPolicy: true,
+  });
+  const sid = path.basename(fresh.transcript!, ".jsonl");
+
+  expect(fresh.command).toContain(path.join(account.home, ".llv", "spawn-settings", `${sid}.json`));
+  expect(fs.existsSync(path.join(account.home, ".llv"))).toBe(false);
 });

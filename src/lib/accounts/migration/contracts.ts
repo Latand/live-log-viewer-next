@@ -14,6 +14,7 @@ export interface LaunchProfile {
   fast: boolean | null;
   permissionMode: string | null;
   readOnly: boolean | null;
+  allowSubagents: boolean;
   title: string | null;
   project: string | null;
   parentConversationId: ViewerConversationId | null;
@@ -30,6 +31,7 @@ export function emptyLaunchProfile(overrides: Partial<LaunchProfile> = {}): Laun
     fast: null,
     permissionMode: null,
     readOnly: null,
+    allowSubagents: false,
     title: null,
     project: null,
     parentConversationId: null,
