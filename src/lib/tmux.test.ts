@@ -13,6 +13,7 @@ import {
   resolveTmuxAttach,
   resolveTmuxEndpointContract,
   selectSpawnedAgentProcess,
+  SPAWN_READY_TIMEOUT_MS,
   tmuxAttachCommands,
   tmuxEndpoint,
   verifyTmuxSpawnBinding,
@@ -171,6 +172,10 @@ describe("spawn pane fencing", () => {
     const parents = new Map([[201, 101], [202, 102], [209, 109], [101, 900], [102, 900], [109, 900]]);
     expect(selectSpawnedAgentProcess(109, "codex", "/repo", processes, (pid) => parents.get(pid) ?? null)?.pid).toBe(209);
     expect(selectSpawnedAgentProcess(110, "codex", "/repo", processes, (pid) => parents.get(pid) ?? null)).toBeNull();
+  });
+
+  test("keeps polling through account-home transcript creation latency", () => {
+    expect(SPAWN_READY_TIMEOUT_MS).toBeGreaterThanOrEqual(180_000);
   });
 });
 

@@ -296,8 +296,17 @@ export function launchPromptLanded(engine: "claude" | "codex", screen: string, p
  */
 export function screenAtIdleComposer(screen: string): boolean {
   if (screenWaitsForInput(screen)) return false;
-  const tail = screen.split("\n").slice(-14).join("\n");
-  return composerLine(screen) !== "" && READY_MARKERS.test(tail) && !BUSY_MARKERS.test(tail);
+  const lines = screen.split("\n");
+  let composerIdx = -1;
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    if (COMPOSER_PROMPT.test(lines[index] ?? "")) {
+      composerIdx = index;
+      break;
+    }
+  }
+  if (composerIdx === -1) return false;
+  const statusRegion = lines.slice(composerIdx + 1).join("\n");
+  return READY_MARKERS.test(statusRegion) && !BUSY_MARKERS.test(statusRegion);
 }
 
 /** Short readable tail of a captured screen, for error messages and logs. */

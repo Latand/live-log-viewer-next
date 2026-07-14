@@ -1168,7 +1168,7 @@ export async function forgetResumePaneIfMatches(transcriptPath: string, host: Tm
   persistResumePanes();
 }
 
-const SPAWN_READY_TIMEOUT_MS = 60_000;
+export const SPAWN_READY_TIMEOUT_MS = 180_000;
 const SPAWN_POLL_MS = 1_000;
 const SPAWN_PROMPT_VERIFY_ROUNDS = 6;
 const SPAWN_PROMPT_VERIFY_MS = 400;
@@ -1311,6 +1311,8 @@ async function spawnAgentWithPromptUnchecked(spec: ResumeSpec, text: string, rec
     agent: { pid: agent.pid, startIdentity: agentStartIdentity },
     argv: [...agent.argv],
   };
+  const verified = agentRegistry().markSpawnHostVerified(receipt.launchId, host);
+  if (verified.state === "conflicted") throw new Error(verified.error ?? "spawn host verification conflict");
   logEvent("spawn", {
     target,
     cwd: spec.cwd,
@@ -1320,13 +1322,24 @@ async function spawnAgentWithPromptUnchecked(spec: ResumeSpec, text: string, rec
   });
   const fencedPrompt = fenceViewerSpawnPrompt(spec.engine, text);
   if (fencedPrompt) {
-    await sendText(target, fencedPrompt);
+    try {
+      await sendText(target, fencedPrompt);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.includes("pane is unavailable") || message.includes("pane identity changed during delivery")) {
+        agentRegistry().invalidateSpawnHost(receipt.launchId, "spawn_host_identity_conflict");
+      }
+      throw error;
+    }
     let promptVerified = false;
     let promptScreen = "";
     for (let round = 0; round < SPAWN_PROMPT_VERIFY_ROUNDS; round += 1) {
       promptScreen = await paneScreen(target, endpoint);
       const promptFailure = detectLaunchFailure(spec.engine, promptScreen);
-      if (promptFailure) throw new Error(promptFailure.message);
+      if (promptFailure) {
+        agentRegistry().invalidateSpawnHost(receipt.launchId, promptFailure.message);
+        throw new Error(promptFailure.message);
+      }
       if (launchPromptLanded(spec.engine, promptScreen, fencedPrompt)) {
         promptVerified = true;
         break;
@@ -1340,10 +1353,9 @@ async function spawnAgentWithPromptUnchecked(spec: ResumeSpec, text: string, rec
     !pidAlive(agent.pid) ||
     (agentStartIdentity !== null && procBackend.processIdentity(agent.pid) !== agentStartIdentity) ||
     ancestryDistance(agent.pid, panePid, readPpid) === null) {
+    agentRegistry().invalidateSpawnHost(receipt.launchId, "spawn_host_identity_conflict");
     throw new Error("spawn host identity changed before launch confirmation");
   }
-  const verified = agentRegistry().markSpawnHostVerified(receipt.launchId, host);
-  if (verified.state === "conflicted") throw new Error(verified.error ?? "spawn host verification conflict");
   agentRegistry().markSpawnPromptDelivered(receipt.launchId);
   return {
     paneId: target,

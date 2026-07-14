@@ -86,22 +86,25 @@ test("structured message routing is inert while its gate is disabled", async () 
   expect(called).toBe(false);
 });
 
-test("structured message routing fails closed when runtime ownership is unavailable", async () => {
+test("structured message routing falls through after startup adoption leaves no runtime client", async () => {
   const result = await enqueueStructuredMessage(
     { path: artifactPath, text: "hello", hasImages: false },
-    { enabled: () => true, client: () => null },
+    { enabled: () => true, client: () => null, startupFailed: () => true },
   );
 
-  expect(result).toEqual({
-    ok: false,
-    structured: true,
-    outcome: "failed",
-    error: "structured host ownership is unavailable; retry after runtime synchronization",
-    status: 503,
-  });
+  expect(result).toBeNull();
 });
 
-test("structured message routing fails closed when the snapshot has no owner", async () => {
+test("structured message routing fences a missing runtime client without startup failure evidence", async () => {
+  const result = await enqueueStructuredMessage(
+    { path: artifactPath, text: "hello", hasImages: false },
+    { enabled: () => true, client: () => null, startupFailed: () => false },
+  );
+
+  expect(result).toMatchObject({ ok: false, structured: true, outcome: "failed", status: 503 });
+});
+
+test("structured message routing falls through when the snapshot has no owner for the session", async () => {
   const client = {
     snapshot: async () => ({ ...snapshot(), sessions: [] }),
   } as unknown as RuntimeHostClient;
@@ -111,13 +114,66 @@ test("structured message routing fails closed when the snapshot has no owner", a
     { enabled: () => true, client: () => client },
   );
 
-  expect(result).toEqual({
+  expect(result).toBeNull();
+});
+
+test("structured message routing falls through when failed startup adoption leaves the snapshot unavailable", async () => {
+  const client = {
+    snapshot: async () => { throw new Error("startup adoption failed"); },
+  } as unknown as RuntimeHostClient;
+
+  const result = await enqueueStructuredMessage(
+    { path: artifactPath, text: "hello", hasImages: false },
+    { enabled: () => true, client: () => client, startupFailed: () => true },
+  );
+
+  expect(result).toBeNull();
+});
+
+test("structured message routing fences a transient snapshot failure", async () => {
+  const client = {
+    snapshot: async () => { throw new Error("runtime socket timed out"); },
+  } as unknown as RuntimeHostClient;
+
+  const result = await enqueueStructuredMessage(
+    { path: artifactPath, text: "hello", hasImages: false },
+    { enabled: () => true, client: () => client, startupFailed: () => false },
+  );
+
+  expect(result).toMatchObject({
     ok: false,
     structured: true,
     outcome: "failed",
-    error: "structured host ownership is unavailable; retry after runtime synchronization",
     status: 503,
   });
+});
+
+test("structured ownership recovery revokes startup-failure fallback authorization", async () => {
+  let startupFailed = true;
+  let snapshots = 0;
+  const client = {
+    snapshot: async () => {
+      snapshots += 1;
+      if (snapshots === 1) return snapshot();
+      throw new Error("runtime socket timed out after recovery");
+    },
+  } as unknown as RuntimeHostClient;
+  const dependencies = {
+    enabled: () => true,
+    client: () => client,
+    startupFailed: () => startupFailed,
+    startupRecovered: () => { startupFailed = false; },
+  };
+
+  expect(await enqueueStructuredMessage(
+    { path: artifactPath, text: "observe recovery", hasImages: true },
+    dependencies,
+  )).toMatchObject({ ok: false, structured: true, status: 409 });
+  expect(startupFailed).toBe(false);
+  expect(await enqueueStructuredMessage(
+    { path: artifactPath, text: "remain fenced", hasImages: false },
+    dependencies,
+  )).toMatchObject({ ok: false, structured: true, status: 503 });
 });
 
 test("structured message routing only falls through for an explicit legacy owner", async () => {
@@ -136,7 +192,25 @@ test("structured message routing only falls through for an explicit legacy owner
   expect(result).toBeNull();
 });
 
-test("structured message routing fails closed for an unhosted owner", async () => {
+test("structured ownership stays fenced while its registry projection is missing", async () => {
+  const client = {
+    snapshot: async () => snapshot(),
+  } as unknown as RuntimeHostClient;
+  const { registry } = registryWithConversation("missing-projection");
+
+  const result = await enqueueStructuredMessage(
+    { path: artifactPath, conversationId, text: "stay structured", hasImages: false },
+    {
+      enabled: () => true,
+      client: () => client,
+      registry: () => new AgentRegistry(path.join(path.dirname(registry.filename), "missing.json")),
+    },
+  );
+
+  expect(result).toMatchObject({ ok: false, structured: true, outcome: "failed", status: 503 });
+});
+
+test("structured message routing falls through for an unhosted owner", async () => {
   const unhostedSnapshot = snapshot();
   unhostedSnapshot.sessions[0] = { ...unhostedSnapshot.sessions[0]!, hostKind: "unhosted" };
   const client = { snapshot: async () => unhostedSnapshot } as unknown as RuntimeHostClient;
@@ -146,7 +220,7 @@ test("structured message routing fails closed for an unhosted owner", async () =
     { enabled: () => true, client: () => client },
   );
 
-  expect(result).toMatchObject({ ok: false, structured: true, status: 503 });
+  expect(result).toBeNull();
 });
 
 test("structured message routing returns the durable queued receipt immediately", async () => {
@@ -235,6 +309,61 @@ test("migration-held delivery settles through the runtime journal after EngineHo
     policy: "queue",
   });
   expect(outcome).toBe("delivered");
+});
+
+test("held delivery falls through when structured ownership is unavailable", async () => {
+  const request = {
+    conversationId: "conversation_missing",
+    path: artifactPath,
+    deliveryId: "held-missing-owner",
+    clientMessageId: "held-missing-owner-message",
+    text: "continue through tmux",
+  };
+  const missingSessionClient = {
+    snapshot: async () => ({ ...snapshot(), sessions: [] }),
+  } as unknown as RuntimeHostClient;
+
+  expect(await deliverHeldStructuredMessage(request, {
+    enabled: () => true,
+    client: () => null,
+    startupFailed: () => true,
+  })).toBeNull();
+  expect(await deliverHeldStructuredMessage(request, {
+    enabled: () => true,
+    client: () => missingSessionClient,
+  })).toBeNull();
+});
+
+test("held delivery fences a missing runtime client without startup failure evidence", async () => {
+  expect(await deliverHeldStructuredMessage({
+    conversationId,
+    path: artifactPath,
+    deliveryId: "held-missing-client",
+    clientMessageId: "held-missing-client-message",
+    text: "stay fenced",
+  }, {
+    enabled: () => true,
+    client: () => null,
+    startupFailed: () => false,
+  })).toBe("delivery-uncertain");
+});
+
+test("held delivery stays uncertain during a transient structured snapshot failure", async () => {
+  const client = {
+    snapshot: async () => { throw new Error("runtime socket timed out"); },
+  } as unknown as RuntimeHostClient;
+
+  expect(await deliverHeldStructuredMessage({
+    conversationId,
+    path: artifactPath,
+    deliveryId: "held-transient-snapshot",
+    clientMessageId: "held-transient-snapshot-message",
+    text: "stay fenced",
+  }, {
+    enabled: () => true,
+    client: () => client,
+    startupFailed: () => false,
+  })).toBe("delivery-uncertain");
 });
 
 test("structured message routing holds composer delivery when migration owns the fence", async () => {

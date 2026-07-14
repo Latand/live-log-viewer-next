@@ -1,3 +1,5 @@
+import { markStructuredHostStartupFailed, markStructuredHostStartupReady } from "@/lib/runtime/startupStatus";
+
 export function accountControllerDelayMs(env: Readonly<Record<string, string | undefined>> = process.env): number {
   const configured = Number(env.LLV_ACCOUNT_CONTROLLER_DELAY_MS ?? 0);
   return Number.isFinite(configured) ? Math.max(0, configured) : 0;
@@ -23,13 +25,25 @@ export async function initializeOperatorSpawnCapabilityAtStartup(
   else ensureOperatorSpawnCapability();
 }
 
+export async function runStructuredHostStartup(
+  adopt: () => Promise<unknown>,
+  log: (...args: unknown[]) => void = console.error,
+): Promise<void> {
+  try {
+    await adopt();
+    markStructuredHostStartupReady();
+  } catch (error) {
+    markStructuredHostStartupFailed();
+    log("[structured hosts] startup adoption failed", error);
+  }
+}
+
 export async function register(): Promise<void> {
   if (process.env.NEXT_RUNTIME === "edge" || process.env.NEXT_PHASE?.includes("build")) return;
   await initializeOperatorSpawnCapabilityAtStartup();
   if (process.env.LLV_STRUCTURED_HOSTS === "1") {
     const { adoptStructuredHostsAtStartup } = await import("@/lib/runtime/startup");
-    try { await adoptStructuredHostsAtStartup(); }
-    catch { console.error("[structured hosts] startup adoption failed"); }
+    await runStructuredHostStartup(adoptStructuredHostsAtStartup);
   }
   if (process.env.LLV_ACCOUNT_CONTROLLER_DISABLED !== "1") {
     const { startAccountMigrationController } = await import("@/lib/accounts/migration/controller");

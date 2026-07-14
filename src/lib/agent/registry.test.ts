@@ -163,6 +163,160 @@ describe("agent registry", () => {
     expect(route.receipt.completionMode).toBe("route-recovered");
   });
 
+  test("an observed account-home Claude session recovers a pane-bound late-readiness failure", () => {
+    const store = registry();
+    const sessionId = "88d36d1d-d681-4dc3-ac3b-0b0c54f33c7e";
+    const artifactPath = `/home/user/.config/agent-log-viewer/accounts/claude/work/projects/-repo/${sessionId}.jsonl`;
+    const begun = store.beginSpawnRequest({
+      engine: "claude",
+      cwd: "/repo",
+      accountId: "work",
+    });
+    if (begun.kind !== "created") throw new Error("expected create");
+    const pane = {
+      endpoint: "/run/user/1000/agent-log-viewer",
+      server: { pid: 900, startIdentity: "900:one" },
+      paneId: "%25",
+      panePid: { pid: 100, startIdentity: "100:one" },
+      target: "agents:17.0",
+    };
+    store.bindSpawnPane(begun.receipt.launchId, pane);
+    store.failSpawn(begun.receipt.launchId, "agent never reached a launch-ready prompt");
+
+    const observed = store.completeObservedSpawn(begun.receipt.launchId, {
+      key: { engine: "claude", sessionId },
+      artifactPath,
+      cwd: "/repo",
+      accountId: null,
+      status: "live",
+      host: {
+        kind: "tmux",
+        ...pane,
+        windowName: "claude-new",
+        agent: { pid: 101, startIdentity: "101:one" },
+        argv: ["claude", "--session-id", sessionId],
+      },
+      claimEpoch: 0,
+      claimOwner: null,
+      pendingAction: null,
+    });
+
+    expect(observed).toMatchObject({
+      kind: "settled",
+      receipt: { state: "completed", artifactPath, key: { engine: "claude", sessionId } },
+      entry: { host: { paneId: "%25", argv: ["claude", "--session-id", sessionId] } },
+    });
+    expect(store.conversationForPath(artifactPath)?.id).toBe(begun.receipt.conversationId);
+  });
+
+  test("live pane evidence releases a readiness quarantine and preserves hard identity fences", () => {
+    const store = registry();
+    const begun = store.beginSpawnRequest({ engine: "claude", cwd: "/repo", accountId: "work" });
+    if (begun.kind !== "created") throw new Error("expected create");
+    const binding = {
+      endpoint: "/tmp",
+      server: { pid: 900, startIdentity: null },
+      paneId: "%25",
+      panePid: { pid: 100, startIdentity: null },
+      target: "agents:17.0",
+    };
+    const host = {
+      kind: "tmux" as const,
+      endpoint: "/tmp",
+      server: { pid: 900, startIdentity: "900:observed" },
+      paneId: "%25",
+      panePid: { pid: 100, startIdentity: "100:observed" },
+      windowName: "claude-new",
+      agent: { pid: 101, startIdentity: "101:observed" },
+      argv: ["claude", "--session-id", "88d36d1d-d681-4dc3-ac3b-0b0c54f33c7e"],
+    };
+    store.bindSpawnPane(begun.receipt.launchId, binding);
+    store.failSpawn(begun.receipt.launchId, "agent never reached a launch-ready prompt");
+
+    expect(store.confirmSpawnPaneAlive(begun.receipt.launchId, host, { engine: "claude", cwd: "/repo" })).toMatchObject({
+      state: "host-verified",
+      error: null,
+      verifiedHost: host,
+    });
+
+    const fenced = store.beginSpawnRequest({ engine: "claude", cwd: "/repo", accountId: "work" });
+    if (fenced.kind !== "created") throw new Error("expected create");
+    store.bindSpawnPane(fenced.receipt.launchId, binding);
+    store.invalidateSpawnHost(fenced.receipt.launchId, "spawn_host_identity_conflict");
+    expect(store.confirmSpawnPaneAlive(fenced.receipt.launchId, host, { engine: "claude", cwd: "/repo" })).toMatchObject({
+      state: "conflicted",
+      error: "spawn_host_identity_conflict",
+    });
+
+    const authFailure = store.beginSpawnRequest({ engine: "claude", cwd: "/repo", accountId: "work" });
+    if (authFailure.kind !== "created") throw new Error("expected create");
+    store.bindSpawnPane(authFailure.receipt.launchId, binding);
+    store.failSpawn(authFailure.receipt.launchId, "Claude account work needs re-login. Open Accounts, sign in, and retry.");
+    expect(store.confirmSpawnPaneAlive(authFailure.receipt.launchId, host, { engine: "claude", cwd: "/repo" })).toMatchObject({
+      state: "conflicted",
+      error: "Claude account work needs re-login. Open Accounts, sign in, and retry.",
+    });
+
+    const changedHost = store.beginSpawnRequest({ engine: "claude", cwd: "/repo", accountId: "work" });
+    if (changedHost.kind !== "created") throw new Error("expected create");
+    store.bindSpawnPane(changedHost.receipt.launchId, binding);
+    store.failSpawn(changedHost.receipt.launchId, "spawn host identity changed before launch confirmation");
+    expect(store.confirmSpawnPaneAlive(changedHost.receipt.launchId, host, { engine: "claude", cwd: "/repo" })).toMatchObject({
+      state: "conflicted",
+      error: "spawn host identity changed before launch confirmation",
+    });
+  });
+
+  test("a verified ready-composer host stays available after prompt verification fails", () => {
+    const store = registry();
+    const begun = store.beginSpawnRequest({ engine: "claude", cwd: "/repo", accountId: "work" });
+    if (begun.kind !== "created") throw new Error("expected create");
+    const binding = {
+      endpoint: "/tmp",
+      server: { pid: 900, startIdentity: "900:one" },
+      paneId: "%25",
+      panePid: { pid: 100, startIdentity: "100:one" },
+      target: "agents:17.0",
+    };
+    const host = {
+      kind: "tmux" as const,
+      endpoint: "/tmp",
+      server: binding.server,
+      paneId: binding.paneId,
+      panePid: binding.panePid,
+      windowName: "claude-new",
+      agent: { pid: 101, startIdentity: "101:one" },
+      argv: ["claude", "--session-id", "88d36d1d-d681-4dc3-ac3b-0b0c54f33c7e"],
+    };
+    store.bindSpawnPane(begun.receipt.launchId, binding);
+    store.markSpawnHostVerified(begun.receipt.launchId, host);
+    store.failSpawn(begun.receipt.launchId, "launch prompt was not accepted by the agent: ready composer");
+
+    expect(store.snapshot().receipts[begun.receipt.launchId]).toMatchObject({
+      state: "host-verified",
+      error: "launch prompt was not accepted by the agent: ready composer",
+      verifiedHost: host,
+    });
+    store.failSpawn(begun.receipt.launchId, "tmux paste failed after ready composer");
+    expect(store.snapshot().receipts[begun.receipt.launchId]).toMatchObject({
+      state: "host-verified",
+      error: "tmux paste failed after ready composer",
+      verifiedHost: host,
+    });
+
+    const authFailure = store.beginSpawnRequest({ engine: "claude", cwd: "/repo", accountId: "work" });
+    if (authFailure.kind !== "created") throw new Error("expected create");
+    store.bindSpawnPane(authFailure.receipt.launchId, binding);
+    store.markSpawnHostVerified(authFailure.receipt.launchId, host);
+    store.invalidateSpawnHost(authFailure.receipt.launchId, "Claude account work needs re-login. Open Accounts, sign in, and retry.");
+    store.failSpawn(authFailure.receipt.launchId, "Claude account work needs re-login. Open Accounts, sign in, and retry.");
+    expect(store.snapshot().receipts[authFailure.receipt.launchId]).toMatchObject({
+      state: "conflicted",
+      error: "Claude account work needs re-login. Open Accounts, sign in, and retry.",
+      verifiedHost: null,
+    });
+  });
+
   test("serializes durable operations", async () => {
     const store = registry();
     store.upsert({ key: KEY, artifactPath: "/a", cwd: "/repo", accountId: null, status: "live", host: null, claimEpoch: 0, claimOwner: null, pendingAction: null });
