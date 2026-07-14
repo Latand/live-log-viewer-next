@@ -245,7 +245,7 @@ describe("runtimeBus reconnect", () => {
   let h: Harness;
   beforeEach(() => (h = harness()));
 
-  test("transport blip reconnects and resumes from the cursor, no new snapshot fetch", async () => {
+  test("transport blip refreshes deployment state and resumes from the cursor", async () => {
     h.bus.start();
     await flush();
     h.sources[0]!.open();
@@ -256,12 +256,26 @@ describe("runtimeBus reconnect", () => {
     expect(h.bus.getState().connection).toBe("reconnecting");
     h.clock.advance(600); // past the first backoff
     await flush();
-    // resumed by reopening the stream from the cursor, not by re-snapshotting
-    expect(h.fetchCalls()).toBe(fetchesBefore);
+    expect(h.fetchCalls()).toBe(fetchesBefore + 1);
     expect(h.sources.length).toBe(2);
     expect(h.sources[1]!.url).toContain("after=101");
     h.sources[1]!.open();
     expect(h.bus.getState().connection).toBe("live");
+  });
+
+  test("a tab refreshes the structured-host gate after a server restart", async () => {
+    h.bus.start();
+    await flush();
+    h.sources[0]!.open();
+    expect(h.bus.getState().structuredHostsEnabled).toBeTrue();
+
+    h.setSnapshot(snapshot(100, { structuredHostsEnabled: false }));
+    h.sources[0]!.error();
+    h.clock.advance(600);
+    await flush();
+
+    expect(h.bus.getState().structuredHostsEnabled).toBeFalse();
+    expect(h.sources[1]!.url).toContain("after=100");
   });
 
   test("heartbeat timeout is treated as a lost transport", async () => {
@@ -340,11 +354,12 @@ describe("runtimeBus degraded fallback", () => {
 
     // The fallback poll refreshes the snapshot every 10s.
     const fetchesBefore = h.fetchCalls();
-    h.setSnapshot(snapshot(120));
+    h.setSnapshot(snapshot(120, { structuredHostsEnabled: false }));
     h.clock.advance(10_000);
     await flush();
     expect(h.fetchCalls()).toBeGreaterThan(fetchesBefore);
     expect(h.bus.getState().store.cursor).toBe(120);
+    expect(h.bus.getState().structuredHostsEnabled).toBeFalse();
 
     // After the SSE retry window, a live stream is attempted again. Open any
     // freshly-created stream promptly (a real EventSource opens on its own),

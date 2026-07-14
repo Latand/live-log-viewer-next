@@ -287,11 +287,29 @@ export function createRuntimeBus(deps: RuntimeBusDeps): RuntimeBus {
   }
 
   /** Resume the live stream: reopen from the cursor so the server replays only
-   *  missing revisions (A3). Fall back to a full snapshot if we never had one,
-   *  or if the cursor turns out to predate retention (server sends `reset`). */
+   *  missing revisions (A3). Refresh the deployment gate before reopening so
+   *  a tab converges after a server restart. */
   function resume(): void {
-    if (hasSnapshot) openStream(state.store.cursor);
-    else void join(false);
+    if (!hasSnapshot) {
+      void join(false);
+      return;
+    }
+    void refreshGateAndResume();
+  }
+
+  async function refreshGateAndResume(): Promise<void> {
+    const myGen = generation;
+    try {
+      const res = await deps.fetch(SNAPSHOT_URL, { headers: { accept: "application/json" } });
+      if (!res.ok) throw new Error(`snapshot ${res.status}`);
+      const snapshot = (await res.json()) as RuntimeSnapshot;
+      if (myGen !== generation) return;
+      setState({ structuredHostsEnabled: snapshot.structuredHostsEnabled === true });
+      openStream(state.store.cursor);
+    } catch {
+      if (myGen !== generation) return;
+      onTransportLost();
+    }
   }
 
   /** Bounded poll fallback: refresh the snapshot every 10s and periodically retry SSE. */
@@ -316,7 +334,12 @@ export function createRuntimeBus(deps: RuntimeBusDeps): RuntimeBus {
       if (!res.ok) throw new Error(`snapshot ${res.status}`);
       const snapshot = (await res.json()) as RuntimeSnapshot;
       const prevFiles = state.store.filesRevision;
-      setState({ store: installSnapshot(snapshot), lastEventAt: deps.now(), connection: "degraded" });
+      setState({
+        store: installSnapshot(snapshot),
+        lastEventAt: deps.now(),
+        connection: "degraded",
+        structuredHostsEnabled: snapshot.structuredHostsEnabled === true,
+      });
       if (snapshot.filesRevision > prevFiles) {
         for (const listener of filesListeners) listener(snapshot.filesRevision);
       }

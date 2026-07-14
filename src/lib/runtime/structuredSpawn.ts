@@ -38,6 +38,49 @@ interface HostBinding {
   unregister(): Promise<void>;
 }
 
+const FAILED_SPAWN_OPERATION_STATUSES = new Set([
+  "failed",
+  "rejected",
+  "uncertain",
+  "turn-started",
+  "steered",
+  "interrupted",
+  "answered",
+]);
+
+async function projectStructuredSpawnFailure(
+  client: RuntimeHostClient,
+  receipt: SpawnReceipt,
+  entry: { accountId: string | null; cwd: string },
+  identity?: { key: SessionKey; artifactPath: string },
+): Promise<void> {
+  const key = identity?.key ?? receipt.key;
+  const artifactPath = identity?.artifactPath ?? receipt.artifactPath;
+  if (!key || !artifactPath) return;
+  await client.append({
+    scope: { type: "session", id: receipt.conversationId },
+    kind: "session-status",
+    producer: {
+      kind: key.engine === "codex" ? "codex-app-server" : "claude-broker",
+      eventKey: `structured-spawn-failed:${receipt.launchId}`,
+    },
+    payload: {
+      conversationId: receipt.conversationId,
+      sessionKey: key,
+      hostKind: key.engine === "codex" ? "codex-app-server" : "claude-broker",
+      host: "dead",
+      turn: "idle",
+      provenance: "structured",
+      accountId: entry.accountId,
+      parentConversationId: receipt.parentConversationId,
+      cwd: entry.cwd,
+      artifactPath,
+      capabilities: { steer: key.engine === "codex", structuredAttention: true },
+      activeTurnId: null,
+    },
+  });
+}
+
 export interface StructuredSpawnDependencies {
   startHost?(input: StructuredSpawnInput, capability: string): Promise<SpawnedStructuredHost>;
   bindHost?(registry: AgentRegistry, key: SessionKey, host: SpawnedStructuredHost, claimOwner: string, claimEpoch: number): Promise<() => void>;
@@ -68,16 +111,10 @@ export async function recoverPendingStructuredSpawns(
   for (const receipt of Object.values(snapshot.receipts)) {
     if (receipt.state !== "path-pending" || !receipt.key || !receipt.artifactPath) continue;
     const entry = snapshot.entries[sessionKeyId(receipt.key)];
-    if (!entry?.structuredHost || entry.status === "dead" || entry.status === "unhosted") continue;
     const operation = await client.operationStatus(receipt.launchId);
     const status = operation?.receipt.status;
-    if (status === "failed"
-      || status === "rejected"
-      || status === "uncertain"
-      || status === "turn-started"
-      || status === "steered"
-      || status === "interrupted"
-      || status === "answered") {
+    if (status && FAILED_SPAWN_OPERATION_STATUSES.has(status)) {
+      if (entry) await projectStructuredSpawnFailure(client, receipt, entry);
       registry.failStructuredSpawn(
         receipt.launchId,
         operation?.receipt.reason ?? `structured spawn operation ended as ${status}`,
@@ -85,6 +122,7 @@ export async function recoverPendingStructuredSpawns(
       await releaseStructuredDeliveryHost(receipt.key).catch(() => false);
       continue;
     }
+    if (!entry?.structuredHost || entry.status === "dead" || entry.status === "unhosted") continue;
     if (status !== "delivered") {
       const effect = spawnEffects.get(receipt.launchId);
       const prompt = typeof effect?.prompt === "string" ? effect.prompt : null;
@@ -293,27 +331,9 @@ export async function spawnStructuredConversation(
       input.registry.failStructuredSpawn(input.receipt.launchId, error instanceof Error ? error.message : "structured spawn failed");
       const entry = input.registry.snapshot().entries[sessionKeyId(key)];
       if (entry) {
-        await input.client.append({
-          scope: { type: "session", id: input.receipt.conversationId },
-          kind: "session-status",
-          producer: {
-            kind: key.engine === "codex" ? "codex-app-server" : "claude-broker",
-            eventKey: `structured-spawn-failed:${input.receipt.launchId}`,
-          },
-          payload: {
-            conversationId: input.receipt.conversationId,
-            sessionKey: key,
-            hostKind: key.engine === "codex" ? "codex-app-server" : "claude-broker",
-            host: "dead",
-            turn: "idle",
-            provenance: "structured",
-            accountId: entry.accountId,
-            parentConversationId: input.receipt.parentConversationId,
-            cwd: entry.cwd,
-            artifactPath: entry.artifactPath,
-            capabilities: { steer: key.engine === "codex", structuredAttention: true },
-            activeTurnId: null,
-          },
+        await projectStructuredSpawnFailure(input.client, input.receipt, entry, {
+          key,
+          artifactPath: entry.artifactPath,
         }).catch(() => {});
       }
     }

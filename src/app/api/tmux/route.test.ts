@@ -42,6 +42,7 @@ let delivery: (message: unknown) => Promise<{ ok: true; outcome: "delivered-to-l
 });
 let killOutcome: { ok: true; target: string } | { ok: false; outcome: "failed"; error: string; status: number } = { ok: true, target: "agents:4.0" };
 let structuredControlCalls = 0;
+let interruptCalls = 0;
 let structuredControlResult:
   | { status: 202; body: { ok: true; structured: true; target: string; operationId: string; receipt: { operationId: string; status: string } } }
   | { status: 409; body: { error: string } }
@@ -86,7 +87,10 @@ mock.module("@/lib/delivery", () => ({
   answerDialogKey: async () => ({ ok: true, target: "" }),
   compactConversation: async () => ({ ok: true, target: "" }),
   deliverConversationMessage: (message: unknown) => delivery(message),
-  interruptConversation: async () => ({ ok: true, target: "" }),
+  interruptConversation: async () => {
+    interruptCalls += 1;
+    return { ok: true, target: "" };
+  },
   killConversation: async () => killOutcome,
   livePaneTarget: async () => null,
   reconfigureConversation: async () => ({ ok: true, outcome: "reconfigured", target: "agents:4.0" }),
@@ -227,13 +231,25 @@ test("/api/tmux POST carries concurrent sends through the delivery seam", async 
 
 test("/api/tmux bypasses persisted structured control state when hosting is disabled", async () => {
   const previous = process.env.LLV_STRUCTURED_HOSTS;
+  const legacyDeliveries: unknown[] = [];
   structuredControlCalls = 0;
+  interruptCalls = 0;
   structuredControlResult = { status: 409, body: { error: "stale structured projection" } };
+  delivery = async (message: unknown) => {
+    legacyDeliveries.push(message);
+    return { ok: true, outcome: "delivered-to-live", target: "agents:4.0" };
+  };
   try {
     process.env.LLV_STRUCTURED_HOSTS = "0";
     const legacy = await POST(post({ path: PATHNAME, action: "resume" }));
+    const send = await POST(post({ path: PATHNAME, text: "continue after rollback" }));
+    const interrupt = await POST(post({ path: PATHNAME, action: "interrupt" }));
     expect(legacy.status).toBe(200);
+    expect(send.status).toBe(200);
+    expect(interrupt.status).toBe(200);
     expect(structuredControlCalls).toBe(0);
+    expect(legacyDeliveries).toHaveLength(1);
+    expect(interruptCalls).toBe(1);
 
     process.env.LLV_STRUCTURED_HOSTS = "1";
     const structured = await POST(post({ path: PATHNAME, action: "resume" }));
@@ -241,6 +257,7 @@ test("/api/tmux bypasses persisted structured control state when hosting is disa
     expect(await structured.json()).toEqual({ error: "stale structured projection" });
     expect(structuredControlCalls).toBe(1);
   } finally {
+    delivery = async () => ({ ok: true, outcome: "delivered-to-live", target: "agents:4.0" });
     structuredControlResult = null;
     if (previous === undefined) delete process.env.LLV_STRUCTURED_HOSTS;
     else process.env.LLV_STRUCTURED_HOSTS = previous;

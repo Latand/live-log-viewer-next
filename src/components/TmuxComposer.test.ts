@@ -36,9 +36,11 @@ function runtimeSession(structuredControlsEnabled: boolean): RuntimeSessionView 
   };
 }
 
-test("the composer ignores stale structured projections while hosting is disabled", () => {
-  expect(structuredComposerSession(runtimeSession(false))).toBeNull();
-  expect(structuredComposerSession(runtimeSession(true))?.session.conversationId).toBe("conv-one");
+test("the composer follows structured-host gate transitions", () => {
+  const session = runtimeSession(true);
+  expect(structuredComposerSession(session)?.session.conversationId).toBe("conv-one");
+  session.structuredControlsEnabled = false;
+  expect(structuredComposerSession(session)).toBeNull();
 });
 
 test("a failed durable receipt retries with its original delivery key", () => {
