@@ -1,5 +1,6 @@
 import type { FileEntry, ProjectCatalogEntry } from "../types";
 import { agentRegistry, RegistryReadError } from "../agent/registry";
+import { forEachCooperatively, yieldToRuntime } from "../cooperative";
 import { tickFlows } from "../flows/engine";
 import { tickPipelines } from "../pipelines/engine";
 import { notifyQuestion } from "../push";
@@ -52,26 +53,19 @@ function applyProcessState(entry: FileEntry, holders: Map<string, number>) {
  * Steps 3-5 run only on the capped shortlist.
  */
 const NO_HOLDERS: Map<string, number> = new Map();
-const YIELD_EVERY = 75;
-
-function yieldToEventLoop(): Promise<void> {
-  return new Promise((resolve) => setImmediate(resolve));
-}
+const ASYNC_BATCH_SIZE = 16;
 
 async function forEachEntryYielding(entries: FileEntry[], visit: (entry: FileEntry) => void): Promise<void> {
-  for (let index = 0; index < entries.length; index += 1) {
-    visit(entries[index]!);
-    if ((index + 1) % YIELD_EVERY === 0) await yieldToEventLoop();
-  }
+  await forEachCooperatively(entries, visit);
 }
 
 async function forEachEntryBatchYielding(
   entries: FileEntry[],
   visit: (entry: FileEntry) => Promise<void>,
 ): Promise<void> {
-  for (let start = 0; start < entries.length; start += YIELD_EVERY) {
-    await Promise.all(entries.slice(start, start + YIELD_EVERY).map(visit));
-    if (start + YIELD_EVERY < entries.length) await yieldToEventLoop();
+  for (let start = 0; start < entries.length; start += ASYNC_BATCH_SIZE) {
+    await Promise.all(entries.slice(start, start + ASYNC_BATCH_SIZE).map(visit));
+    if (start + ASYNC_BATCH_SIZE < entries.length) await yieldToRuntime();
   }
 }
 
@@ -245,12 +239,18 @@ async function listFilesInternal(
     stable: workflows observe the flow state from the same controller tick. */
 export async function reconcileFileControllers(entries: FileEntry[]): Promise<void> {
   await linkEntries(entries, { persist: true });
+  await yieldToRuntime();
   // Custom session titles (issue #33) must reach push bodies too, so overlay
   // them before notifying — a rename shows the human name in notifications.
   overlaySessionTitles(entries);
-  for (const entry of entries) if (entry.pendingQuestion || entry.waitingInput) void notifyQuestion(entry);
+  await forEachCooperatively(entries, (entry) => {
+    if (entry.pendingQuestion || entry.waitingInput) void notifyQuestion(entry);
+  });
   await tickFlows(entries);
+  await yieldToRuntime();
   await tickPipelines(entries);
+  await yieldToRuntime();
   await tickWorkflows(entries);
+  await yieldToRuntime();
   tickTaskInbox(entries);
 }

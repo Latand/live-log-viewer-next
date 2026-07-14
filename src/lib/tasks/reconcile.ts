@@ -25,6 +25,10 @@ function isMainClaudeSession(entry: FileEntry): boolean {
 
 export function defaultSuccessorForPath(pathname: string, files: FileEntry[]): string | null {
   const byPath = new Map(files.map((file) => [file.path, file]));
+  return successorFromIndex(pathname, byPath);
+}
+
+function successorFromIndex(pathname: string, byPath: ReadonlyMap<string, FileEntry>): string | null {
   const entry = byPath.get(pathname);
   if (!entry?.parent || entry.handoff) return null;
   const successor = byPath.get(entry.parent);
@@ -64,7 +68,12 @@ export function pathForPanePid(
   return null;
 }
 
-function reconcileAssignment(assignment: TaskAssignment, files: FileEntry[], env: ReconcileEnv): { assignment: TaskAssignment; dirty: boolean } {
+function reconcileAssignment(
+  assignment: TaskAssignment,
+  files: FileEntry[],
+  filesByPath: ReadonlyMap<string, FileEntry>,
+  env: ReconcileEnv,
+): { assignment: TaskAssignment; dirty: boolean } {
   let current = assignment;
   let dirty = false;
   if (current.conversationId) {
@@ -76,7 +85,7 @@ function reconcileAssignment(assignment: TaskAssignment, files: FileEntry[], env
   }
   if (current.path && !current.conversationId) {
     const conversationId = env.conversationIdForPath?.(current.path)
-      ?? files.find((file) => file.path === current.path)?.conversationId
+      ?? filesByPath.get(current.path)?.conversationId
       ?? null;
     if (conversationId) { current = { ...current, conversationId }; dirty = true; }
   }
@@ -97,7 +106,7 @@ function reconcileAssignment(assignment: TaskAssignment, files: FileEntry[], env
     const attributed = env.pathForPanePid?.(current.panePid, files) ?? null;
     if (attributed) {
       const conversationId = env.conversationIdForPath?.(attributed)
-        ?? files.find((file) => file.path === attributed)?.conversationId
+        ?? filesByPath.get(attributed)?.conversationId
         ?? null;
       return {
         assignment: {
@@ -121,16 +130,20 @@ function reconcileAssignment(assignment: TaskAssignment, files: FileEntry[], env
 
 export function reconcileTasks(files: FileEntry[], tasks: BoardTask[], env: ReconcileEnv = {}): { tasks: BoardTask[]; dirty: boolean } {
   let dirty = false;
+  const filesByPath = new Map(files.map((file) => [file.path, file]));
+  const indexedEnv: ReconcileEnv = env.successorForPath
+    ? env
+    : { ...env, successorForPath: (pathname) => successorFromIndex(pathname, filesByPath) };
   const reconciled = tasks.map((task) => {
     let taskDirty = false;
     const assignments = task.assignments.map((assignment) => {
-      const result = reconcileAssignment(assignment, files, env);
+      const result = reconcileAssignment(assignment, files, filesByPath, indexedEnv);
       if (result.dirty) taskDirty = true;
       return result.assignment;
     });
     if (!taskDirty) return task;
     dirty = true;
-    return { ...task, assignments, updatedAt: env.now?.() ?? new Date().toISOString() };
+    return { ...task, assignments, updatedAt: indexedEnv.now?.() ?? new Date().toISOString() };
   });
   return { tasks: dirty ? reconciled : tasks, dirty };
 }

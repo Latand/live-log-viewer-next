@@ -3,6 +3,7 @@ import path from "node:path";
 
 import { statePath } from "@/lib/configDir";
 import { agentRegistry, type ConversationLookup } from "@/lib/agent/registry";
+import { forEachCooperatively } from "@/lib/cooperative";
 import type { RoleConfig } from "@/lib/flows/types";
 import { atomicWriteText } from "@/lib/flows/store";
 import { ROLE_DEFAULTS } from "@/lib/roles/defaults";
@@ -10,7 +11,7 @@ import { resolveRole } from "@/lib/roles/registry";
 import { loadRoleDefinitionsOrDefaults } from "@/lib/roles/store";
 import type { RoleConfig as RegistryRoleConfig, RoleDefinition } from "@/lib/roles/types";
 
-import type { FinishAction, ImplementStage, ReviewStage, Workflow, WorkflowStage, WorkflowTemplate } from "./types";
+import type { FinishAction, ImplementStage, ReviewStage, Workflow, WorkflowStage, WorkflowStageRun, WorkflowTemplate } from "./types";
 
 const workflowsFile = () => statePath("workflows.json");
 const templatesFile = () => statePath("workflow-templates.json");
@@ -311,34 +312,57 @@ export function loadWorkflows(): Workflow[] {
   }));
 }
 
+function reconcileWorkflowPath(
+  value: { path: string | null; conversationId: string | null | undefined },
+  registry: ConversationLookup,
+): { path: string | null; conversationId: string | null; changed: boolean } {
+  if (value.conversationId?.startsWith("conversation_")) {
+    const path = registry.conversation(value.conversationId as `conversation_${string}`)?.generations.at(-1)?.path ?? value.path;
+    return { path, conversationId: value.conversationId, changed: path !== value.path };
+  }
+  if (!value.path) return { path: value.path, conversationId: value.conversationId ?? null, changed: false };
+  const owner = registry.conversationForPath(value.path);
+  return owner
+    ? { path: value.path, conversationId: owner.id, changed: true }
+    : { path: value.path, conversationId: value.conversationId ?? null, changed: false };
+}
+
+function reconcileWorkflowRun(run: WorkflowStageRun, registry: ConversationLookup): boolean {
+  const result = reconcileWorkflowPath({ path: run.agentPath, conversationId: run.agentConversationId }, registry);
+  run.agentPath = result.path;
+  run.agentConversationId = result.conversationId;
+  return result.changed;
+}
+
+function reconcileWorkflowRoots(workflow: Workflow, registry: ConversationLookup): boolean {
+  const source = reconcileWorkflowPath({ path: workflow.srcPath ?? null, conversationId: workflow.srcConversationId }, registry);
+  workflow.srcPath = source.path;
+  workflow.srcConversationId = source.conversationId;
+  const fixer = reconcileWorkflowPath({ path: workflow.fixerPath, conversationId: workflow.fixerConversationId }, registry);
+  workflow.fixerPath = fixer.path;
+  workflow.fixerConversationId = fixer.conversationId;
+  return source.changed || fixer.changed;
+}
+
 export function reconcileWorkflowConversationOwnership(registry: ConversationLookup = agentRegistry()): void {
   const workflows = loadWorkflows();
   let dirty = false;
   for (const workflow of workflows) {
-    if (workflow.srcConversationId?.startsWith("conversation_")) {
-      const current = registry.conversation(workflow.srcConversationId as `conversation_${string}`)?.generations.at(-1)?.path;
-      if (current && current !== workflow.srcPath) { workflow.srcPath = current; dirty = true; }
-    } else if (workflow.srcPath) {
-      const owner = registry.conversationForPath(workflow.srcPath);
-      if (owner) { workflow.srcConversationId = owner.id; dirty = true; }
-    }
-    if (workflow.fixerConversationId?.startsWith("conversation_")) {
-      const current = registry.conversation(workflow.fixerConversationId as `conversation_${string}`)?.generations.at(-1)?.path;
-      if (current && current !== workflow.fixerPath) { workflow.fixerPath = current; dirty = true; }
-    } else if (workflow.fixerPath) {
-      const owner = registry.conversationForPath(workflow.fixerPath);
-      if (owner) { workflow.fixerConversationId = owner.id; dirty = true; }
-    }
-    for (const run of workflow.stageRuns) {
-      if (run.agentConversationId?.startsWith("conversation_")) {
-        const current = registry.conversation(run.agentConversationId as `conversation_${string}`)?.generations.at(-1)?.path;
-        if (current && current !== run.agentPath) { run.agentPath = current; dirty = true; }
-      } else if (run.agentPath) {
-        const owner = registry.conversationForPath(run.agentPath);
-        if (owner) { run.agentConversationId = owner.id; dirty = true; }
-      }
-    }
+    dirty = reconcileWorkflowRoots(workflow, registry) || dirty;
+    for (const run of workflow.stageRuns) dirty = reconcileWorkflowRun(run, registry) || dirty;
   }
+  if (dirty) saveWorkflows(workflows);
+}
+
+export async function reconcileWorkflowConversationOwnershipCooperatively(registry: ConversationLookup = agentRegistry()): Promise<void> {
+  const workflows = loadWorkflows();
+  let dirty = false;
+  await forEachCooperatively(workflows, async (workflow) => {
+    dirty = reconcileWorkflowRoots(workflow, registry) || dirty;
+    await forEachCooperatively(workflow.stageRuns, (run) => {
+      dirty = reconcileWorkflowRun(run, registry) || dirty;
+    });
+  });
   if (dirty) saveWorkflows(workflows);
 }
 

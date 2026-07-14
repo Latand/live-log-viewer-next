@@ -4,9 +4,10 @@ import { managedCodexRuntime } from "@/lib/accounts/codexRuntime";
 import { withAccountMutationLock } from "@/lib/accounts/accountMutation";
 import { agentRegistry, conversationLookupFromSnapshot, type AgentRegistry } from "@/lib/agent/registry";
 import { readTranscriptHosts } from "@/lib/agent/transcriptHost";
+import { forEachCooperatively, yieldToRuntime } from "@/lib/cooperative";
 import { deliverConversationMessage, migrationDeliveryOutcome } from "@/lib/delivery";
-import { loadFlows, reconcileFlowConversationOwnership } from "@/lib/flows/store";
-import { reconcileHandoffConversationOwnership } from "@/lib/handoffLineage";
+import { loadFlows, reconcileFlowConversationOwnershipCooperatively } from "@/lib/flows/store";
+import { reconcileHandoffConversationOwnershipCooperatively } from "@/lib/handoffLineage";
 import { listFilesWithProjectCatalog, reconcileFileControllers } from "@/lib/scanner";
 import { pidAlive, readPpid } from "@/lib/scanner/process";
 import { runReaperCycle } from "@/lib/reaperRuntime";
@@ -14,7 +15,7 @@ import { runHeadlessProcessReaper } from "@/lib/headlessProcessReaper";
 import { deliverHeldStructuredMessage, type HeldStructuredMessageOutcome } from "@/lib/runtime/structuredMessageDelivery";
 import { pathForPanePid, reconcileTasks } from "@/lib/tasks/reconcile";
 import { mutateTasks } from "@/lib/tasks/store";
-import { reconcileWorkflowConversationOwnership } from "@/lib/workflows/store";
+import { reconcileWorkflowConversationOwnershipCooperatively } from "@/lib/workflows/store";
 import { paneInfo } from "@/lib/tmux";
 
 import { drainHeldDeliveries, reconcileMigrationInventory, reconcileMigrations, type HeldDeliveryPort } from "./coordinator";
@@ -25,10 +26,6 @@ import { QuotaController } from "./quotaController";
 
 const CONTROLLER_INTERVAL_MS = 60_000;
 const INITIAL_INVENTORY_DELAY_MS = 1_000;
-
-function yieldToRuntime(): Promise<void> {
-  return new Promise((resolve) => setImmediate(resolve));
-}
 
 type HeldDeliveryInput = Parameters<HeldDeliveryPort["deliver"]>[0];
 
@@ -75,9 +72,9 @@ export async function reconcileAccountMigrationCycle(
   await yieldToRuntime();
   await reconcileMigrations(provider, delivery, registry);
   await yieldToRuntime();
-  for (const conversation of Object.values(registry.snapshot().conversations)) {
+  await forEachCooperatively(Object.values(registry.snapshot().conversations), async (conversation) => {
     if (conversation.migration?.phase === "rolled-back") await drainHeldDeliveries(conversation.id, delivery, registry);
-  }
+  });
   await yieldToRuntime();
   await Promise.all([quota.tick("claude"), quota.tick("codex")]);
 }
@@ -157,9 +154,9 @@ export class AccountMigrationController {
     const inventorySnapshot = await reconcileMigrationInventory(this.registry, files);
     await yieldToRuntime();
     const inventoryLookup = conversationLookupFromSnapshot(inventorySnapshot);
-    reconcileFlowConversationOwnership(inventoryLookup);
-    reconcileWorkflowConversationOwnership(inventoryLookup);
-    reconcileHandoffConversationOwnership(inventoryLookup);
+    await reconcileFlowConversationOwnershipCooperatively(inventoryLookup);
+    await reconcileWorkflowConversationOwnershipCooperatively(inventoryLookup);
+    await reconcileHandoffConversationOwnershipCooperatively(inventoryLookup);
     await yieldToRuntime();
     await reconcileFileControllers(files);
     await yieldToRuntime();
@@ -207,6 +204,7 @@ const globalController = globalThis as unknown as {
 };
 
 export async function startAccountMigrationController(): Promise<void> {
+  await yieldToRuntime();
   const registry = agentRegistry();
   const quota = new QuotaController(registry);
   const controller = globalController.__llvAccountMigrationController ??= new AccountMigrationController(registry, quota);

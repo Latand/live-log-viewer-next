@@ -4,6 +4,7 @@ import path from "node:path";
 import { statePath } from "@/lib/configDir";
 import { pidAlive } from "@/lib/scanner/process";
 import { agentRegistry, type ConversationLookup } from "@/lib/agent/registry";
+import { forEachCooperatively } from "@/lib/cooperative";
 
 /**
  * Compatibility lineage for older handoffs. Viewer spawns now commit a durable
@@ -112,6 +113,19 @@ export function reconcileHandoffConversationOwnership(registry: ConversationLook
     store.conversationChildren.set(child.id, parent.id);
     changed = true;
   }
+  if (changed) { dirty = true; persistHandoffLineage(); }
+}
+
+export async function reconcileHandoffConversationOwnershipCooperatively(registry: ConversationLookup = agentRegistry()): Promise<void> {
+  const store = load();
+  let changed = false;
+  await forEachCooperatively([...store.children], ([childPath, parentPath]) => {
+    const child = registry.conversationForPath(childPath);
+    const parent = registry.conversationForPath(parentPath);
+    if (!child || !parent || store.conversationChildren.get(child.id) === parent.id) return;
+    store.conversationChildren.set(child.id, parent.id);
+    changed = true;
+  });
   if (changed) { dirty = true; persistHandoffLineage(); }
 }
 

@@ -4,12 +4,13 @@ import path from "node:path";
 
 import { statePath } from "@/lib/configDir";
 import { agentRegistry, type ConversationLookup } from "@/lib/agent/registry";
+import { forEachCooperatively } from "@/lib/cooperative";
 import { ROLE_DEFAULTS } from "@/lib/roles/defaults";
 import { resolveRole } from "@/lib/roles/registry";
 import { loadRoleDefinitionsOrDefaults } from "@/lib/roles/store";
 import type { RoleDefinition } from "@/lib/roles/types";
 
-import type { Flow, FlowPreset, ReviewVerdict } from "./types";
+import type { Flow, FlowPreset, ReviewVerdict, Round } from "./types";
 
 /* Resolve on every call, never bake at module load: a test that pins
    LLV_STATE_DIR after this module is first imported (import order across a
@@ -200,37 +201,54 @@ export function loadFlows(): Flow[] {
   }));
 }
 
+function reconcileFlowImplementer(flow: Flow, registry: ConversationLookup): boolean {
+  if (flow.implementerConversationId?.startsWith("conversation_")) {
+    const current = registry.conversation(flow.implementerConversationId as `conversation_${string}`)?.generations.at(-1)?.path;
+    if (current && current !== flow.implementerPath) { flow.implementerPath = current; return true; }
+    return false;
+  }
+  const owner = registry.conversationForPath(flow.implementerPath);
+  if (!owner) return false;
+  flow.implementerConversationId = owner.id;
+  const current = owner.generations.at(-1)?.path;
+  if (current) flow.implementerPath = current;
+  return true;
+}
+
+function reconcileFlowRound(round: Round, registry: ConversationLookup): boolean {
+  if (round.reviewerConversationId?.startsWith("conversation_")) {
+    const current = registry.conversation(round.reviewerConversationId as `conversation_${string}`)?.generations.at(-1)?.path;
+    if (current && current !== round.reviewerPath) { round.reviewerPath = current; return true; }
+    return false;
+  }
+  if (!round.reviewerPath) return false;
+  const owner = registry.conversationForPath(round.reviewerPath);
+  if (!owner) return false;
+  round.reviewerConversationId = owner.id;
+  const current = owner.generations.at(-1)?.path;
+  if (current) round.reviewerPath = current;
+  return true;
+}
+
 export function reconcileFlowConversationOwnership(registry: ConversationLookup = agentRegistry()): void {
   const flows = loadFlows();
   let dirty = false;
   for (const flow of flows) {
-    if (flow.implementerConversationId?.startsWith("conversation_")) {
-      const current = registry.conversation(flow.implementerConversationId as `conversation_${string}`)?.generations.at(-1)?.path;
-      if (current && current !== flow.implementerPath) { flow.implementerPath = current; dirty = true; }
-    } else {
-      const owner = registry.conversationForPath(flow.implementerPath);
-      if (owner) {
-        flow.implementerConversationId = owner.id;
-        const current = owner.generations.at(-1)?.path;
-        if (current) flow.implementerPath = current;
-        dirty = true;
-      }
-    }
-    for (const round of flow.rounds) {
-      if (round.reviewerConversationId?.startsWith("conversation_")) {
-        const current = registry.conversation(round.reviewerConversationId as `conversation_${string}`)?.generations.at(-1)?.path;
-        if (current && current !== round.reviewerPath) { round.reviewerPath = current; dirty = true; }
-      } else if (round.reviewerPath) {
-        const owner = registry.conversationForPath(round.reviewerPath);
-        if (owner) {
-          round.reviewerConversationId = owner.id;
-          const current = owner.generations.at(-1)?.path;
-          if (current) round.reviewerPath = current;
-          dirty = true;
-        }
-      }
-    }
+    dirty = reconcileFlowImplementer(flow, registry) || dirty;
+    for (const round of flow.rounds) dirty = reconcileFlowRound(round, registry) || dirty;
   }
+  if (dirty) saveFlows(flows);
+}
+
+export async function reconcileFlowConversationOwnershipCooperatively(registry: ConversationLookup = agentRegistry()): Promise<void> {
+  const flows = loadFlows();
+  let dirty = false;
+  await forEachCooperatively(flows, async (flow) => {
+    dirty = reconcileFlowImplementer(flow, registry) || dirty;
+    await forEachCooperatively(flow.rounds, (round) => {
+      dirty = reconcileFlowRound(round, registry) || dirty;
+    });
+  });
   if (dirty) saveFlows(flows);
 }
 

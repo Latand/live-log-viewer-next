@@ -9,6 +9,7 @@ import {
   remapBoardPaths as remapDurableBoardPaths,
   transferBoardPathPlacements as transferDurableBoardPathPlacements,
 } from "@/lib/board/store";
+import { forEachCooperatively, yieldToRuntime } from "@/lib/cooperative";
 import { listFiles } from "@/lib/scanner";
 import { tailRecords } from "@/lib/scanner/activity";
 import type { FileEntry } from "@/lib/types";
@@ -47,11 +48,11 @@ function engineOf(entry: FileEntry): MigrationEngine | null {
   return entry.engine === "claude" || entry.engine === "codex" ? entry.engine : null;
 }
 
-function inventory(files: FileEntry[], registry: AgentRegistry): ConversationObservation[] {
+async function inventory(files: FileEntry[], registry: AgentRegistry): Promise<ConversationObservation[]> {
   const snapshot = registry.snapshot();
   const conversationByPath = new Map<string, RegistryConversation>();
   const launchProfileByPath = new Map<string, RegistryConversation["generations"][number]["launchProfile"]>();
-  for (const conversation of Object.values(snapshot.conversations)) {
+  await forEachCooperatively(Object.values(snapshot.conversations), (conversation) => {
     for (const generation of conversation.generations) {
       if (!conversationByPath.has(generation.path)) conversationByPath.set(generation.path, conversation);
       if (!launchProfileByPath.has(generation.path)) launchProfileByPath.set(generation.path, generation.launchProfile);
@@ -61,15 +62,16 @@ function inventory(files: FileEntry[], registry: AgentRegistry): ConversationObs
       if (!conversationByPath.has(pathname)) conversationByPath.set(pathname, conversation);
       if (current && !launchProfileByPath.has(pathname)) launchProfileByPath.set(pathname, current.launchProfile);
     }
-  }
-  for (const receipt of Object.values(snapshot.receipts)) {
+  });
+  await forEachCooperatively(Object.values(snapshot.receipts), (receipt) => {
     if (receipt.artifactPath && !launchProfileByPath.has(receipt.artifactPath)) {
       launchProfileByPath.set(receipt.artifactPath, receipt.launchProfile);
     }
-  }
-  return files.flatMap((entry) => {
+  });
+  const observations: ConversationObservation[] = [];
+  await forEachCooperatively(files, (entry) => {
     const engine = engineOf(entry);
-    if (!engine) return [];
+    if (!engine) return;
     const existing = conversationByPath.get(entry.path) ?? null;
     const parentConversation = entry.parent ? conversationByPath.get(entry.parent) ?? null : null;
     const owner = accountManager.resolveTranscriptOwner(engine, entry.path);
@@ -80,7 +82,7 @@ function inventory(files: FileEntry[], registry: AgentRegistry): ConversationObs
     const currentProfile = launchProfileByPath.get(entry.path)
       ?? existing?.generations.find((generation) => generation.path === entry.path)?.launchProfile;
     const configuredRoot = process.env.LLV_ROOT_CONVERSATION_ID;
-    return [{
+    observations.push({
       engine,
       path: entry.path,
       accountId: owner?.accountId ?? null,
@@ -101,13 +103,14 @@ function inventory(files: FileEntry[], registry: AgentRegistry): ConversationObs
       turn,
       startedAt: headSessionStartedAt(entry.path),
       observedAt: new Date(Math.max(entry.mtime * 1000, Date.now())).toISOString(),
-    }];
+    });
   });
+  return observations;
 }
 
 export async function reconcileMigrationInventory(registry: AgentRegistry = agentRegistry(), files?: FileEntry[]): Promise<ReturnType<AgentRegistry["snapshot"]>> {
   const entries = files ?? await listFiles();
-  return registry.reconcileConversations(inventory(entries, registry));
+  return registry.reconcileConversations(await inventory(entries, registry));
 }
 
 function previewFromSnapshot(engine: MigrationEngine, targetId: string, registry: AgentRegistry): MigrationPreview {
@@ -235,19 +238,23 @@ function boardRepairPlan(conversation: RegistryConversation): BoardRepairPlan | 
   };
 }
 
-function repairCommittedBoardSuccessions(
+async function repairCommittedBoardSuccessions(
   conversations: readonly RegistryConversation[],
   registry: AgentRegistry,
   remapPaths: typeof remapDurableBoardPaths,
   transferPlacements: typeof transferDurableBoardPathPlacements,
-): void {
-  const plans = conversations.flatMap((conversation) => {
+): Promise<void> {
+  const plans: BoardRepairPlan[] = [];
+  await forEachCooperatively(conversations, (conversation) => {
     const plan = boardRepairPlan(conversation);
-    return plan ? [plan] : [];
+    if (plan) plans.push(plan);
   });
-  const placementTransfers = plans.flatMap((plan) => plan.previousProject && plan.previousProject !== plan.project
-    ? [{ fromProject: plan.previousProject, toProject: plan.project, paths: plan.placementPaths }]
-    : []);
+  const placementTransfers: { fromProject: string; toProject: string; paths: string[] }[] = [];
+  await forEachCooperatively(plans, (plan) => {
+    if (plan.previousProject && plan.previousProject !== plan.project) {
+      placementTransfers.push({ fromProject: plan.previousProject, toProject: plan.project, paths: plan.placementPaths });
+    }
+  });
   if (placementTransfers.length > 0) {
     try {
       transferPlacements(placementTransfers);
@@ -263,30 +270,32 @@ function repairCommittedBoardSuccessions(
     plans.map((plan) => ({ id: plan.conversationId, operationId: plan.operationId, project: plan.project })),
   );
   const byProject = new Map<string, BoardRepairPlan[]>();
-  for (const plan of plans) {
-    byProject.set(plan.project, [...(byProject.get(plan.project) ?? []), plan]);
-  }
+  await forEachCooperatively(plans, (plan) => {
+    const projectPlans = byProject.get(plan.project) ?? [];
+    projectPlans.push(plan);
+    byProject.set(plan.project, projectPlans);
+  });
   const converged: { id: ViewerConversationId; operationId: string; project: string }[] = [];
-  for (const [project, plans] of byProject) {
+  await forEachCooperatively([...byProject], ([project, projectPlans]) => {
     try {
       const repaired = remapPaths(
         project,
-        plans.flatMap((plan) => plan.pairs),
-        { provisionalManual: [...new Set(plans.flatMap((plan) => plan.provisionalManual))] },
+        projectPlans.flatMap((plan) => plan.pairs),
+        { provisionalManual: [...new Set(projectPlans.flatMap((plan) => plan.provisionalManual))] },
       );
       const aliases = repaired.pathAliases ?? {};
-      if (!plans.every((plan) => plan.pairs.every(({ from, to }) => aliases[from] === to))) {
+      if (!projectPlans.every((plan) => plan.pairs.every(({ from, to }) => aliases[from] === to))) {
         throw new Error("board continuity aliases did not converge");
       }
-      converged.push(...plans.map((plan) => ({ id: plan.conversationId, operationId: plan.operationId, project })));
+      converged.push(...projectPlans.map((plan) => ({ id: plan.conversationId, operationId: plan.operationId, project })));
     } catch (error) {
       console.warn("[account-migration] board continuity repair deferred", {
         project,
-        conversations: plans.length,
+        conversations: projectPlans.length,
         error: safeProviderDiagnostic(error),
       });
     }
-  }
+  });
   registry.markMigrationBoardProjects(converged);
 }
 
@@ -330,7 +339,7 @@ export async function advanceConversationMigration(
     migration = conversation.migration!;
   }
   if (migration.phase === "committed") {
-    if (!options.deferBoardRepair) repairCommittedBoardSuccessions(
+    if (!options.deferBoardRepair) await repairCommittedBoardSuccessions(
       [conversation],
       registry,
       options.remapBoardPaths ?? remapDurableBoardPaths,
@@ -391,7 +400,7 @@ export async function advanceConversationMigration(
       historyHash: receipt.historyHash,
       host: receipt.host,
     }, migration.revision);
-    if (!options.deferBoardRepair) repairCommittedBoardSuccessions(
+    if (!options.deferBoardRepair) await repairCommittedBoardSuccessions(
       [committed],
       registry,
       options.remapBoardPaths ?? remapDurableBoardPaths,
@@ -412,7 +421,7 @@ export async function advanceConversationMigration(
       || fencedByDurableReceipt
     )) {
       await cleanupDiscardedSuccessor(successorProvider, receipt, latest, registry);
-      if (!options.deferBoardRepair) repairCommittedBoardSuccessions(
+      if (!options.deferBoardRepair) await repairCommittedBoardSuccessions(
         [latest],
         registry,
         options.remapBoardPaths ?? remapDurableBoardPaths,
@@ -448,16 +457,16 @@ export async function drainHeldDeliveries(
   const conversation = registry.conversation(conversationId);
   const current = conversation?.generations.at(-1);
   if (!current) return;
-  for (const item of registry.pendingDeliveries(conversationId)) {
+  await forEachCooperatively(registry.pendingDeliveries(conversationId), async (item) => {
     const reconciling = item.state === "delivery-uncertain";
-    if (reconciling && !delivery.reconcileUncertain) continue;
-    if (!reconciling && (item.state !== "assigned" || item.generationId !== current.id)) continue;
+    if (reconciling && !delivery.reconcileUncertain) return;
+    if (!reconciling && (item.state !== "assigned" || item.generationId !== current.id)) return;
     if (item.payloadKind !== "text") {
       registry.recordDeliveryOutcome(item.id, "failed", "request-local delivery requires client retry");
-      continue;
+      return;
     }
     const claimed = reconciling ? item : registry.beginDeliveryAttempt(item.id, current.id);
-    if (!claimed) continue;
+    if (!claimed) return;
     const clientMessageId = claimed.clientMessageId ?? `migration:${claimed.id}`;
     try {
       const input = { delivery: claimed, path: current.path, clientMessageId };
@@ -471,7 +480,7 @@ export async function drainHeldDeliveries(
     } catch {
       registry.recordDeliveryOutcome(claimed.id, "delivery-uncertain", "delivery result is uncertain and remains recoverable");
     }
-  }
+  });
 }
 
 export async function reconcileMigrations(
@@ -481,15 +490,19 @@ export async function reconcileMigrations(
   options: MigrationCoordinatorOptions = {},
 ): Promise<void> {
   const before = registry.snapshot();
-  for (const pending of Object.values(before.pendingSuccessorCleanups)) {
+  await forEachCooperatively(Object.values(before.pendingSuccessorCleanups), async (pending) => {
     const owner = registry.conversation(pending.conversationId);
     if (owner) await cleanupDiscardedSuccessor(provider, pending.receipt, owner, registry);
-  }
-  const pendingDeliveries = new Set(Object.values(before.heldDeliveries)
-    .filter((item) => item.state !== "delivered" && (item.state !== "delivery-uncertain" || delivery.reconcileUncertain))
-    .map((item) => item.conversationId));
-  for (const snapshotConversation of Object.values(before.conversations)) {
-    let conversation = registry.conversation(snapshotConversation.id) ?? snapshotConversation;
+  });
+  const pendingDeliveries = new Set<ViewerConversationId>();
+  await forEachCooperatively(Object.values(before.heldDeliveries), (item) => {
+    if (item.state !== "delivered" && (item.state !== "delivery-uncertain" || delivery.reconcileUncertain)) {
+      pendingDeliveries.add(item.conversationId);
+    }
+  });
+  await forEachCooperatively(Object.values(before.conversations), async (snapshotConversation) => {
+    const needsFreshSnapshot = snapshotConversation.migration !== null || pendingDeliveries.has(snapshotConversation.id);
+    let conversation = needsFreshSnapshot ? registry.conversation(snapshotConversation.id) ?? snapshotConversation : snapshotConversation;
     if (conversation.migration
       && conversation.migration.phase !== "committed"
       && conversation.migration.phase !== "rolled-back"
@@ -500,38 +513,47 @@ export async function reconcileMigrations(
     }
     if (!conversation.migration || conversation.migration.phase === "rolled-back") {
       if (pendingDeliveries.has(conversation.id)) await drainHeldDeliveries(conversation.id, delivery, registry);
-      continue;
+      return;
     }
     if (conversation.migration.phase === "committed") {
       if (pendingDeliveries.has(conversation.id)) await drainHeldDeliveries(conversation.id, delivery, registry);
-      continue;
+      return;
     }
     const migration = conversation.migration;
     const source = conversation.generations.find((generation) => generation.id === migration.sourceGenerationId)
       ?? conversation.generations.at(-1);
     if (source?.accountId === null && !migration.providerReceipt) {
       registry.rollbackConversationMigration(conversation.id, migration.revision);
-      continue;
+      return;
     }
     const advanced = await advanceConversationMigration(conversation.id, registry, provider, { ...options, deferBoardRepair: true });
     if (advanced.migration?.phase === "committed" && pendingDeliveries.has(advanced.id)) await drainHeldDeliveries(advanced.id, delivery, registry);
-  }
+  });
+  await yieldToRuntime();
   const after = registry.snapshot();
-  repairCommittedBoardSuccessions(
+  await repairCommittedBoardSuccessions(
     Object.values(after.conversations),
     registry,
     options.remapBoardPaths ?? remapDurableBoardPaths,
     options.transferBoardPathPlacements ?? transferDurableBoardPathPlacements,
   );
-  for (const intent of Object.values(after.migrationIntents)) {
-    if (intent.state !== "draining") continue;
-    const owned = Object.values(after.conversations).filter((conversation) => conversation.migration?.intentId === intent.id);
+  const conversationsByIntent = new Map<string, RegistryConversation[]>();
+  await forEachCooperatively(Object.values(after.conversations), (conversation) => {
+    const intentId = conversation.migration?.intentId;
+    if (!intentId) return;
+    const owned = conversationsByIntent.get(intentId) ?? [];
+    owned.push(conversation);
+    conversationsByIntent.set(intentId, owned);
+  });
+  await forEachCooperatively(Object.values(after.migrationIntents), (intent) => {
+    if (intent.state !== "draining") return;
+    const owned = conversationsByIntent.get(intent.id) ?? [];
     if (!owned.length || owned.every((conversation) => ["committed", "rolled-back", "failed-recoverable"].includes(conversation.migration?.phase ?? ""))) {
       registry.setMigrationIntentState(intent.id, "complete");
       const outcome = owned.some((conversation) => conversation.migration?.phase === "failed-recoverable") ? "failed-partial" : "complete";
       registry.recordAutoBalanceOutcome(intent.engine, outcome, intent.evidence, new Date(Date.now() + AUTO_BALANCE_COOLDOWN_MS).toISOString());
     }
-  }
+  });
 }
 
 export function deliveryFence(conversation: RegistryConversation): "deliver" | "held" | "recoverable" {
