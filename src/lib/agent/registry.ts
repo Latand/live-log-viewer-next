@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { isDeepStrictEqual } from "node:util";
 
 import { statePath } from "@/lib/configDir";
 import { procBackend } from "@/lib/proc";
@@ -23,6 +24,7 @@ import {
 
 import type { AgentEngine } from "./cli";
 import { sessionKeyFromTranscript, sessionKeyId, type SessionKey } from "./sessionKey";
+import { SqliteAgentRegistryStore, type SqliteRegistrySnapshot } from "./sqliteRegistryStore";
 import type { ResumePaneRecord } from "@/lib/resumePanesFile";
 
 export type AgentHostStatus = "starting" | "live" | "idle" | "handoff" | "unhosted" | "dead";
@@ -561,7 +563,9 @@ export class MigrationRevisionError extends Error {
   }
 }
 
-function emptyPolicy(): AutoBalancePolicy {
+const LEGACY_POLICY_RESTARTED_AT = "1970-01-01T00:00:00.000Z";
+
+function emptyPolicy(restartedAt = now()): AutoBalancePolicy {
   return {
     enabled: true,
     revision: 0,
@@ -571,7 +575,7 @@ function emptyPolicy(): AutoBalancePolicy {
     lastTrigger: null,
     lastCheckAt: null,
     sustain: null,
-    restartedAt: now(),
+    restartedAt,
   };
 }
 
@@ -840,7 +844,7 @@ function normalizeConversation(value: RegistryConversation): RegistryConversatio
 }
 
 function normalizePolicy(value: AutoBalancePolicy | undefined): AutoBalancePolicy {
-  const fallback = emptyPolicy();
+  const fallback = emptyPolicy(LEGACY_POLICY_RESTARTED_AT);
   if (!value || typeof value !== "object") return fallback;
   return {
     ...fallback,
@@ -1187,6 +1191,10 @@ function upgradeV1(parsed: Omit<Partial<RegistryFile>, "version">): RegistryFile
   const legacy = parsed.legacyResumePanes;
   return {
     ...clone(EMPTY),
+    autoBalance: {
+      claude: emptyPolicy(LEGACY_POLICY_RESTARTED_AT),
+      codex: emptyPolicy(LEGACY_POLICY_RESTARTED_AT),
+    },
     entries: (parsed.entries as RegistryFile["entries"]) ?? {},
     receipts: Object.fromEntries(Object.entries((parsed.receipts as RegistryFile["receipts"]) ?? {}).map(([id, receipt]) => [id, normalizeReceipt(receipt)])),
     conversationAliases: {},
@@ -1197,17 +1205,16 @@ function upgradeV1(parsed: Omit<Partial<RegistryFile>, "version">): RegistryFile
   };
 }
 
-function readFile(filename: string): RegistryFile {
-  try {
-    const parsed = JSON.parse(fs.readFileSync(filename, "utf8")) as Omit<Partial<RegistryFile>, "version"> & { version?: unknown };
-    if (parsed.version === 1 && parsed.entries && parsed.receipts && typeof parsed.entries === "object" && typeof parsed.receipts === "object") {
-      return upgradeV1(parsed);
-    }
-    if (parsed.version !== 2 || !parsed.entries || !parsed.receipts || typeof parsed.entries !== "object" || typeof parsed.receipts !== "object") {
-      throw new RegistryReadError("agent registry schema is unsupported");
-    }
-    const legacy = parsed.legacyResumePanes;
-    return {
+export function normalizeRegistry(value: unknown): RegistryFile {
+  const parsed = value as Omit<Partial<RegistryFile>, "version"> & { version?: unknown };
+  if (parsed.version === 1 && parsed.entries && parsed.receipts && typeof parsed.entries === "object" && typeof parsed.receipts === "object") {
+    return upgradeV1(parsed);
+  }
+  if (parsed.version !== 2 || !parsed.entries || !parsed.receipts || typeof parsed.entries !== "object" || typeof parsed.receipts !== "object") {
+    throw new RegistryReadError("agent registry schema is unsupported");
+  }
+  const legacy = parsed.legacyResumePanes;
+  return {
       version: 2,
       entries: Object.fromEntries(Object.entries(parsed.entries).map(([id, entry]) => [id, normalizeEntry(entry)])),
       receipts: Object.fromEntries(Object.entries(parsed.receipts).map(([id, receipt]) => [id, normalizeReceipt(receipt)])),
@@ -1232,7 +1239,10 @@ function readFile(filename: string): RegistryFile {
       engineRouting: parsed.engineRouting && typeof parsed.engineRouting === "object" ? { ...EMPTY.engineRouting, ...parsed.engineRouting } : clone(EMPTY.engineRouting),
       autoBalance: parsed.autoBalance && typeof parsed.autoBalance === "object"
         ? { claude: normalizePolicy(parsed.autoBalance.claude), codex: normalizePolicy(parsed.autoBalance.codex) }
-        : { claude: emptyPolicy(), codex: emptyPolicy() },
+        : {
+            claude: emptyPolicy(LEGACY_POLICY_RESTARTED_AT),
+            codex: emptyPolicy(LEGACY_POLICY_RESTARTED_AT),
+          },
       quotaObservations: parsed.quotaObservations && typeof parsed.quotaObservations === "object"
         ? { ...EMPTY.quotaObservations, ...parsed.quotaObservations }
         : clone(EMPTY.quotaObservations),
@@ -1242,7 +1252,12 @@ function readFile(filename: string): RegistryFile {
       pendingSuccessorCleanups: parsed.pendingSuccessorCleanups && typeof parsed.pendingSuccessorCleanups === "object"
         ? parsed.pendingSuccessorCleanups
         : {},
-    };
+  };
+}
+
+function readFile(filename: string): RegistryFile {
+  try {
+    return normalizeRegistry(JSON.parse(fs.readFileSync(filename, "utf8")));
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return clone(EMPTY);
     if (error instanceof RegistryReadError) throw error;
@@ -1261,9 +1276,10 @@ function compactLaunchProfile(profile: LaunchProfile): Partial<LaunchProfile> {
   return compact;
 }
 
-function serializeRegistry(value: RegistryFile): string {
+function serializeRegistry(value: RegistryFile, sqliteRevision?: number): string {
   const storage = {
     ...value,
+    ...(sqliteRevision === undefined ? {} : { _sqliteRevision: sqliteRevision }),
     entries: Object.fromEntries(Object.entries(value.entries).map(([id, entry]) => [id, {
       ...entry,
       ...(entry.launchProfile ? { launchProfile: compactLaunchProfile(entry.launchProfile) } : {}),
@@ -1283,10 +1299,10 @@ function serializeRegistry(value: RegistryFile): string {
   return JSON.stringify(storage) + "\n";
 }
 
-function writeAtomic(filename: string, value: RegistryFile): void {
+function writeAtomic(filename: string, value: RegistryFile, sqliteRevision?: number): void {
   fs.mkdirSync(path.dirname(filename), { recursive: true, mode: 0o700 });
   const temp = `${filename}.${process.pid}.${crypto.randomUUID()}.tmp`;
-  const payload = serializeRegistry(value);
+  const payload = serializeRegistry(value, sqliteRevision);
   let fd: number | null = null;
   try {
     fd = fs.openSync(temp, "w", 0o600);
@@ -1303,18 +1319,103 @@ function writeAtomic(filename: string, value: RegistryFile): void {
   }
 }
 
+export type AgentRegistrySqliteMode = "off" | "dual-write" | "read" | "sqlite";
+
+export interface AgentRegistryStorageOptions {
+  sqliteMode?: AgentRegistrySqliteMode;
+  sqliteFilename?: string;
+  onSqliteWriterWait?: (durationMs: number) => void;
+  beforeDualWriteStartupReplace?: () => void;
+  beforeDualWriteMutationReplace?: () => void;
+}
+
+export class RegistryParityError extends Error {
+  override name = "RegistryParityError";
+}
+
+function sqliteModeFromEnvironment(): AgentRegistrySqliteMode {
+  const configured = process.env.LLV_AGENT_REGISTRY_SQLITE ?? "off";
+  if (configured === "off" || configured === "dual-write" || configured === "read" || configured === "sqlite") return configured;
+  throw new Error("LLV_AGENT_REGISTRY_SQLITE must be off, dual-write, read, or sqlite");
+}
+
+function defaultSqliteFilename(jsonFilename: string): string {
+  return jsonFilename.endsWith(".json") ? `${jsonFilename.slice(0, -5)}.sqlite` : `${jsonFilename}.sqlite`;
+}
+
+function sqliteMirrorRevision(filename: string): number | null {
+  try {
+    const revision = (JSON.parse(fs.readFileSync(filename, "utf8")) as { _sqliteRevision?: unknown })._sqliteRevision;
+    return Number.isInteger(revision) && Number(revision) >= 0 ? Number(revision) : null;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+}
+
 /** Durable source for identity and handoff evidence. The lock directory is
     intentionally separate from in-memory promises, so a Viewer replacement
     cannot leave an imaginary owner behind. */
 export class AgentRegistry {
+  private readonly sqliteMode: AgentRegistrySqliteMode;
+  private readonly sqliteStore: SqliteAgentRegistryStore | null;
+  private readonly beforeDualWriteMutationReplace: (() => void) | undefined;
+
   constructor(
     readonly filename = statePath("agent-registry.json"),
     private readonly ownerAlive: (owner: ProcessIdentity) => boolean = (owner) =>
       procBackend.pidAlive(owner.pid) && (owner.startIdentity === null || procBackend.processIdentity(owner.pid) === owner.startIdentity),
     private readonly lockTiming: RegistryLockTiming = SYSTEM_LOCK_TIMING,
+    storage: AgentRegistryStorageOptions = {},
   ) {
-    this.cleanupStaleTempFiles();
-    this.compactAtStartup();
+    this.sqliteMode = storage.sqliteMode ?? sqliteModeFromEnvironment();
+    this.beforeDualWriteMutationReplace = storage.beforeDualWriteMutationReplace;
+    this.sqliteStore = this.sqliteMode === "off"
+      ? null
+      : new SqliteAgentRegistryStore(storage.sqliteFilename ?? defaultSqliteFilename(filename), {
+          initialSnapshot: readFile(filename),
+          normalize: normalizeRegistry,
+          onWriterWait: storage.onSqliteWriterWait,
+        });
+    if (this.sqliteMode === "off") {
+      this.cleanupStaleTempFiles();
+      this.compactAtStartup();
+    }
+    if (this.sqliteMode === "dual-write") {
+      this.cleanupStaleTempFiles();
+      this.synchronizeDualWriteStartup(storage.beforeDualWriteStartupReplace);
+    }
+    if (this.sqliteMode === "read" || this.sqliteMode === "sqlite") {
+      const sqlite = this.sqliteStore!.snapshot();
+      const mirrorRevision = sqliteMirrorRevision(this.filename);
+      if (mirrorRevision === null || mirrorRevision === sqlite.revision) this.assertSqliteParity(sqlite);
+      if (mirrorRevision !== null && mirrorRevision > sqlite.revision) {
+        throw new RegistryParityError("agent registry JSON mirror revision is ahead of SQLite");
+      }
+      this.mirrorSqliteSnapshot(sqlite);
+    }
+  }
+
+  private assertSqliteParity(snapshot: SqliteRegistrySnapshot = this.sqliteStore!.snapshot()): void {
+    const json = readFile(this.filename);
+    if (!isDeepStrictEqual(snapshot.file, json)) {
+      const fields = [...new Set([...Object.keys(snapshot.file), ...Object.keys(json)])]
+        .filter((field) => !isDeepStrictEqual(
+          snapshot.file[field as keyof RegistryFile],
+          json[field as keyof RegistryFile],
+        ));
+      throw new RegistryParityError(`agent registry JSON and SQLite snapshots differ: ${fields.join(", ")}`);
+    }
+  }
+
+  private mirrorSqliteSnapshot(initial: SqliteRegistrySnapshot): void {
+    let snapshot = initial;
+    for (;;) {
+      writeAtomic(this.filename, snapshot.file, snapshot.revision);
+      const latest = this.sqliteStore!.snapshot();
+      if (latest.revision <= snapshot.revision) return;
+      snapshot = latest;
+    }
   }
 
   private cleanupStaleTempFiles(): void {
@@ -1347,25 +1448,58 @@ export class AgentRegistry {
     const lock = `${this.filename}.write-lock`;
     const claim = this.acquireLock(lock, { pid: process.pid, startIdentity: procBackend.processIdentity(process.pid) });
     try {
-      let original: string;
-      try {
-        original = fs.readFileSync(this.filename, "utf8");
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
-        throw error;
+      this.compactAtStartupLocked();
+    } finally {
+      this.releaseLock(claim);
+    }
+  }
+
+  private compactAtStartupLocked(): void {
+    let original: string;
+    try {
+      original = fs.readFileSync(this.filename, "utf8");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw error;
+    }
+    let file: RegistryFile;
+    try {
+      file = readFile(this.filename);
+    } catch (error) {
+      if (error instanceof RegistryReadError) {
+        console.error("agent registry startup compaction skipped:", error);
+        return;
       }
-      let file: RegistryFile;
-      try {
-        file = readFile(this.filename);
-      } catch (error) {
-        if (error instanceof RegistryReadError) {
-          console.error("agent registry startup compaction skipped:", error);
-          return;
-        }
-        throw error;
+      throw error;
+    }
+    compactDeliveryReservations(file);
+    if (serializeRegistry(file) !== original) writeAtomic(this.filename, file);
+  }
+
+  private synchronizeDualWriteStartup(beforeReplace: (() => void) | undefined): void {
+    const lock = `${this.filename}.write-lock`;
+    const claim = this.acquireLock(lock, { pid: process.pid, startIdentity: procBackend.processIdentity(process.pid) });
+    try {
+      const sqlite = this.sqliteStore!.snapshot();
+      if (!fs.existsSync(this.filename)) writeAtomic(this.filename, sqlite.file);
+      const mirrorRevision = sqliteMirrorRevision(this.filename);
+      if (mirrorRevision !== null && mirrorRevision !== sqlite.revision) {
+        throw new RegistryParityError(
+          `agent registry backend revisions differ: JSON ${mirrorRevision}, SQLite ${sqlite.revision}`,
+        );
       }
-      compactDeliveryReservations(file);
-      if (serializeRegistry(file) !== original) writeAtomic(this.filename, file);
+      this.assertSqliteParity(sqlite);
+      this.compactAtStartupLocked();
+      const file = readFile(this.filename);
+      beforeReplace?.();
+      const replacement = this.sqliteStore!.replace(file, sqlite.revision);
+      if (!replacement.replaced) {
+        this.mirrorSqliteSnapshot(replacement);
+        throw new RegistryParityError(
+          `agent registry SQLite revision changed during dual-write startup: expected ${sqlite.revision}, current ${replacement.revision}`,
+        );
+      }
+      this.assertSqliteParity();
     } finally {
       this.releaseLock(claim);
     }
@@ -1692,23 +1826,56 @@ export class AgentRegistry {
   }
 
   private mutate<T>(fn: (file: RegistryFile) => T): T {
+    if (this.sqliteMode === "read" || this.sqliteMode === "sqlite") {
+      const mutation = this.sqliteStore!.mutate(fn, this.sqliteMode === "read");
+      if (this.sqliteMode === "read") {
+        if (!mutation.file) throw new Error("SQLite read mode mutation is missing its rollback snapshot");
+        this.mirrorSqliteSnapshot({ file: mutation.file, revision: mutation.revision });
+      }
+      return mutation.result;
+    }
     const lock = `${this.filename}.write-lock`;
     const claim = this.acquireLock(lock, { pid: process.pid, startIdentity: procBackend.processIdentity(process.pid) });
     try {
+      const sqlite = this.sqliteMode === "dual-write" ? this.sqliteStore!.snapshot() : null;
+      if (sqlite) {
+        const mirrorRevision = sqliteMirrorRevision(this.filename);
+        if (mirrorRevision !== null && mirrorRevision !== sqlite.revision) {
+          throw new RegistryParityError(
+            `agent registry backend revisions differ: JSON ${mirrorRevision}, SQLite ${sqlite.revision}`,
+          );
+        }
+        this.assertSqliteParity(sqlite);
+      }
       const file = readFile(this.filename);
       const result = fn(file);
       writeAtomic(this.filename, file);
+      if (sqlite) {
+        this.beforeDualWriteMutationReplace?.();
+        const replacement = this.sqliteStore!.replace(file, sqlite.revision);
+        if (!replacement.replaced) {
+          this.mirrorSqliteSnapshot(replacement);
+          throw new RegistryParityError(
+            `agent registry SQLite revision changed during dual-write mutation: expected ${sqlite.revision}, current ${replacement.revision}`,
+          );
+        }
+        this.assertSqliteParity();
+      }
       return result;
     } finally {
       this.releaseLock(claim);
     }
   }
 
-  snapshot(): RegistryFile { return readFile(this.filename); }
+  snapshot(): RegistryFile {
+    return this.sqliteMode === "read" || this.sqliteMode === "sqlite"
+      ? this.sqliteStore!.snapshot().file
+      : readFile(this.filename);
+  }
 
   conversationIdForSpawnCapabilityDigest(digest: string): ViewerConversationId | null {
     if (!/^[0-9a-f]{64}$/.test(digest)) return null;
-    const file = readFile(this.filename);
+    const file = this.snapshot();
     const receipt = Object.values(file.receipts).find((candidate) => candidate.spawnCapabilityDigest === digest);
     return receipt ? resolveConversationAlias(file, receipt.conversationId) : null;
   }

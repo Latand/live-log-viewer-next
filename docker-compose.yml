@@ -84,7 +84,7 @@ services:
           echo "legacy Viewer launch requires LLV_ALLOW_LEGACY_VIEWER=1 and profile legacy-viewer-migration" >&2
           exit 78
         fi
-        exec node_modules/.bin/next start --port "$${PORT:-8898}" --hostname "$${HOSTNAME:-127.0.0.1}"
+        exec bun-container --bun node_modules/.bin/next start --port "$${PORT:-8898}" --hostname "$${HOSTNAME:-127.0.0.1}"
     environment:
       HOME: /home/latand
       HOSTNAME: 127.0.0.1

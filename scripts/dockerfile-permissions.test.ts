@@ -90,3 +90,10 @@ describe("runtime-host Docker credentials (#102)", () => {
     expect(wrapper).not.toContain("--setuid");
   });
 });
+
+describe("SQLite registry Viewer runtime (#187)", () => {
+  test("Docker launches every Viewer through the in-container Bun runtime", () => {
+    expect(runtimeStage).toContain("CMD [\"sh\", \"-c\", \"exec bun-container --bun node_modules/.bin/next start");
+    expect(compose).toContain("exec bun-container --bun node_modules/.bin/next start");
+  });
+});

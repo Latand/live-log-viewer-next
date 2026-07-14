@@ -225,4 +225,4 @@ fi
 EOF
 
 EXPOSE 8898
-CMD ["sh", "-c", "exec node_modules/.bin/next start --port ${PORT:-8898} --hostname ${HOSTNAME:-127.0.0.1}"]
+CMD ["sh", "-c", "exec bun-container --bun node_modules/.bin/next start --port ${PORT:-8898} --hostname ${HOSTNAME:-127.0.0.1}"]
