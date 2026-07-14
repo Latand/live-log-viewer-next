@@ -1374,6 +1374,7 @@ export const en = {
   "runtime.drift": "drift: {evidence}",
   "runtime.driftDismiss": "Dismiss",
   "runtime.receipt.pending": "sending…",
+  "runtime.receipt.busyRetry": "Couldn’t deliver — agent is busy, we’ll retry",
   "runtime.receipt.delivering": "delivering…",
   "runtime.receipt.turn-started": "turn started",
   "runtime.receipt.steered": "steered into current turn",

@@ -5,6 +5,7 @@ import { procBackend } from "@/lib/proc";
 import { signalDetachedProcessGroup, signalProcessGroup, type ProcessSignal } from "@/lib/processGroup";
 import { headlessCodexThreadConfig } from "@/lib/codexHeadlessConfig";
 import { hardenedRedact } from "@/lib/view/compactText";
+import { decodeCodexStructuredUserText, encodeCodexStructuredUserText } from "./codexStructuredUserText";
 
 import type {
   DeliveryReceipt,
@@ -394,7 +395,7 @@ export class CodexAppServerHost implements EngineHost {
     if (entry.expectedTurnId !== undefined && entry.expectedTurnId !== currentTurn) {
       return { outcome: "rejected", reason: "stale-turn" };
     }
-    const input = [{ type: "text", text: entry.text }];
+    const input = [{ type: "text", text: encodeCodexStructuredUserText(entry.text) }];
     if (currentTurn) {
       try {
         const result = await this.rpc("turn/steer", {
@@ -733,7 +734,8 @@ export class CodexAppServerHost implements EngineHost {
     if (!item || stringField(item, "type") !== "userMessage") return;
     const clientId = stringField(item, "clientId");
     if (!clientId) return;
-    const text = userMessageText(item);
+    const wireText = userMessageText(item);
+    const text = wireText === null ? null : decodeCodexStructuredUserText(wireText).text;
     const previous = this.confirmedDeliveries.get(clientId);
     const pending = this.pendingDeliveries.get(clientId);
     const confirmed = {

@@ -90,6 +90,7 @@ const codexAssistantResponse = (timestamp: string, text: string) =>
 const codexAssistantEvent = (timestamp: string, message: string) =>
   JSON.stringify({ type: "event_msg", timestamp, payload: { type: "agent_message", phase: "commentary", message } });
 const codexUserPair = (timestamp: string, text: string) => [codexUserResponse(timestamp, [{ type: "input_text", text }]), codexUserEvent(timestamp, text)];
+const CODEX_STRUCTURED_USER_MARKER = "<!-- llv:structured-user -->\n";
 const codexReasoning = (timestamp: string) => JSON.stringify({ type: "response_item", timestamp, payload: { type: "reasoning" } });
 
 function fixtureLines(name: string): string[] {
@@ -491,6 +492,35 @@ describe("Codex user-turn coalescing", () => {
     expect(itemsOfKind(feed, "user")).toHaveLength(prefixes.length);
     expect(itemsOfKind(feed, "sysmsg")).toHaveLength(0);
     assertParity(codexFile, lines, { chunks: [1, 2, 1], cap: 5 });
+  });
+
+  test("keeps standalone structured reserved-prefix input in one user bubble across later events", () => {
+    for (const [index, text] of [
+      "# AGENTS.md instructions from the user",
+      "<permissions instructions> from the user",
+    ].entries()) {
+      const responseTs = `2026-07-14T10:00:0${index}.000Z`;
+      const startedTs = `2026-07-14T10:00:0${index}.100Z`;
+      const echoTs = `2026-07-14T10:00:0${index}.200Z`;
+      const wireText = CODEX_STRUCTURED_USER_MARKER + text;
+      const response = codexUserResponse(responseTs, [{ type: "input_text", text: wireText }]);
+      const started = JSON.stringify({ type: "event_msg", timestamp: startedTs, payload: { type: "task_started" } });
+      const echo = codexUserEvent(echoTs, wireText);
+      const lines = [response, started, echo];
+      const session = createFeedSession({ engine: "codex", fmt: "codex", showSvc: false, lineFilter: "" });
+
+      expect(session.feed([response], 0, true).items.map((entry) => entry.item)).toEqual([
+        { kind: "user", ts: responseTs, text },
+      ]);
+      expect(session.feed([response, started], 0, true).items.map((entry) => entry.item).filter((item) => item.kind === "user")).toEqual([
+        { kind: "user", ts: responseTs, text },
+      ]);
+      const complete = session.feed(lines, 0, true).items.map((entry) => entry.item);
+      expect(complete.filter((item) => item.kind === "user")).toEqual([{ kind: "user", ts: echoTs, text }]);
+      expect(complete.filter((item) => item.kind === "sysmsg")).toHaveLength(0);
+      assertParity(codexFile, lines, { chunks: [1], cap: 3, live: true });
+      assertParity(codexFile, lines, { chunks: [1], cap: 2, live: true });
+    }
   });
 
   test("collapses recognized standalone harness envelopes", () => {

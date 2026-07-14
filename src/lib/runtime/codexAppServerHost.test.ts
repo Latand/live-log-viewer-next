@@ -224,7 +224,11 @@ describe("CodexAppServerHost", () => {
     expect(await host.send({ id: "stale", text: "wrong", expectedTurnId: "turn-old" })).toEqual({ outcome: "rejected", reason: "stale-turn" });
     expect(await host.send({ id: "delivery-two", text: "steer", expectedTurnId: "turn-1" })).toEqual({ outcome: "steered", turnId: "turn-1" });
     const steer = server.requests.find((request) => request.method === "turn/steer")!;
-    expect(steer.params).toMatchObject({ expectedTurnId: "turn-1", clientUserMessageId: "delivery-two" });
+    expect(steer.params).toMatchObject({
+      expectedTurnId: "turn-1",
+      clientUserMessageId: "delivery-two",
+      input: [{ type: "text", text: "<!-- llv:structured-user -->\nsteer" }],
+    });
 
     server.request("approval-1", "item/commandExecution/requestApproval", { command: "touch allowed" });
     await Bun.sleep(0);

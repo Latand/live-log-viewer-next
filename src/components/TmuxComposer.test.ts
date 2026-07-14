@@ -2,6 +2,8 @@ import { expect, test } from "bun:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
+import { translate } from "@/lib/i18n";
+
 import { deliveryAttemptKey, mergeRuntimeReceipts, RuntimeComposerReceipts } from "./TmuxComposer";
 
 test("a failed durable receipt retries with its original delivery key", () => {
@@ -75,7 +77,7 @@ test("a queued structured send renders as a quiet optimistic user message", () =
   expect(html).not.toContain("Queued for durable delivery");
 });
 
-test("an optimistic automatic retry stays quiet", () => {
+test("an optimistic automatic retry shows human busy feedback", () => {
   const html = renderToStaticMarkup(
     createElement(RuntimeComposerReceipts, {
       receipts: [{
@@ -95,8 +97,11 @@ test("an optimistic automatic retry stays quiet", () => {
   );
 
   expect(html).toContain("animate-pulse");
+  expect(html).toContain("agent is busy");
+  expect(translate("en", "runtime.receipt.busyRetry")).toBe("Couldn’t deliver — agent is busy, we’ll retry");
+  expect(translate("uk", "runtime.receipt.busyRetry")).toBe("Не вдалося доставити — агент зайнятий, повторимо");
   expect(html).not.toContain("delivery-auto-retry");
-  expect(html).not.toContain("agent is busy");
+  expect(html).not.toContain("thread/read");
 });
 
 test("a bounded receipt summary keeps retry while withholding lossy edit", () => {

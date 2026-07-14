@@ -94,7 +94,8 @@ export function RuntimeComposerReceipts({
     if (messageOperation && receipt.status === "delivered") return null;
     if (messageOperation && receipt.text) {
       const pending = !receiptIsTerminal(receipt.status);
-      const pendingLabel = t("runtime.receipt.pending");
+      const busyRetry = pending && receipt.reason === "delivery-auto-retry";
+      const pendingLabel = t(busyRetry ? "runtime.receipt.busyRetry" : "runtime.receipt.pending");
       return (
         <div
           key={receipt.operationId}
@@ -105,7 +106,7 @@ export function RuntimeComposerReceipts({
             <span className="whitespace-pre-wrap break-words text-right">{receipt.text}</span>
             {pending ? (
               <span className="inline-flex items-center gap-1.5 text-caption text-muted" role="status" aria-live="polite">
-                <span className="sr-only">{pendingLabel}</span>
+                <span className={busyRetry ? undefined : "sr-only"}>{pendingLabel}</span>
                 <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-muted motion-reduce:animate-none" aria-hidden />
               </span>
             ) : (

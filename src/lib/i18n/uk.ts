@@ -1332,6 +1332,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "runtime.drift": "розбіжність: {evidence}",
   "runtime.driftDismiss": "Сховати",
   "runtime.receipt.pending": "надсилання…",
+  "runtime.receipt.busyRetry": "Не вдалося доставити — агент зайнятий, повторимо",
   "runtime.receipt.delivering": "доставляється…",
   "runtime.receipt.turn-started": "хід почато",
   "runtime.receipt.steered": "вкладено в поточний хід",
