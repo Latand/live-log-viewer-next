@@ -107,6 +107,9 @@ const CHILD_ENV_ALLOWLIST = [
 ] as const;
 const DEFAULT_TIMEOUT_MS = 30_000;
 const ACTIVE_THREAD_READ_TIMEOUT_MULTIPLIER = 3;
+const LATE_THREAD_READ_RESPONSE_TTL_MULTIPLIER = 3;
+const MIN_LATE_THREAD_READ_RESPONSE_TTL_MS = 1_000;
+const MAX_LATE_THREAD_READ_RESPONSES = 32;
 const DEFAULT_SHUTDOWN_GRACE_MS = 1_000;
 const MAX_LINE_BYTES = 4 * 1024 * 1024;
 const MUTATING_RPC_METHODS = new Set(["thread/start", "thread/resume", "turn/start", "turn/steer", "turn/interrupt"]);
@@ -229,6 +232,7 @@ export class CodexAppServerHost implements EngineHost {
   private readonly effort: string | undefined;
   private readonly signalProcess: ProcessSignal;
   private readonly pending = new Map<number, PendingRpc>();
+  private readonly lateThreadReadResponses = new Map<number, number>();
   private readonly subscribers = new Set<Subscriber>();
   private readonly events: RuntimeEvent[] = [];
   private readonly confirmedDeliveries = new Map<string, { receipt: DeliveryReceipt; text: string | null }>();
@@ -791,6 +795,7 @@ export class CodexAppServerHost implements EngineHost {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
+        if (method === "thread/read") this.rememberLateThreadReadResponse(id, timeoutMs);
         const error = new Error(`${method} timed out${MUTATING_RPC_METHODS.has(method) ? "; outcome is uncertain" : ""}`);
         reject(error);
         if (MUTATING_RPC_METHODS.has(method)) this.fail(error);
@@ -798,6 +803,27 @@ export class CodexAppServerHost implements EngineHost {
       this.pending.set(id, { resolve, reject, timer });
       this.write({ jsonrpc: "2.0", id, method, params });
     });
+  }
+
+  private rememberLateThreadReadResponse(id: number, timeoutMs: number): void {
+    const now = Date.now();
+    for (const [lateId, expiresAt] of this.lateThreadReadResponses) {
+      if (expiresAt <= now) this.lateThreadReadResponses.delete(lateId);
+    }
+    const ttlMs = Math.max(timeoutMs * LATE_THREAD_READ_RESPONSE_TTL_MULTIPLIER, MIN_LATE_THREAD_READ_RESPONSE_TTL_MS);
+    this.lateThreadReadResponses.set(id, now + ttlMs);
+    while (this.lateThreadReadResponses.size > MAX_LATE_THREAD_READ_RESPONSES) {
+      const oldestId = this.lateThreadReadResponses.keys().next().value;
+      if (oldestId === undefined) break;
+      this.lateThreadReadResponses.delete(oldestId);
+    }
+  }
+
+  private consumeLateThreadReadResponse(id: number): boolean {
+    const expiresAt = this.lateThreadReadResponses.get(id);
+    if (expiresAt === undefined) return false;
+    this.lateThreadReadResponses.delete(id);
+    return expiresAt > Date.now();
   }
 
   private notify(method: string, params: JsonObject): void {
@@ -842,6 +868,7 @@ export class CodexAppServerHost implements EngineHost {
     if ((typeof id === "number" || typeof id === "string") && !method) {
       if (typeof id !== "number") return this.fail(new Error("Codex app-server response id is invalid"));
       const pending = this.pending.get(id);
+      if (!pending && this.consumeLateThreadReadResponse(id)) return;
       if (!pending) return this.fail(new Error("Codex app-server response has no matching request"));
       this.pending.delete(id);
       clearTimeout(pending.timer);

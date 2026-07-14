@@ -50,6 +50,7 @@ interface SentEntry {
 const SENT_LIMIT = 8;
 const SPAWN_TTL_MS = 90_000;
 const PANE_TTL_MS = 10 * 60_000;
+const RECOVERABLE_BUSY_RETRY_REASONS = new Set(["delivery-auto-retry", "interrupt-auto-retry"]);
 const sentKey = (id: string) => "llvSent:" + id;
 
 export function deliveryAttemptKey(current: string, stored?: string): string {
@@ -94,7 +95,9 @@ export function RuntimeComposerReceipts({
     if (messageOperation && receipt.status === "delivered") return null;
     if (messageOperation && receipt.text) {
       const pending = !receiptIsTerminal(receipt.status);
-      const busyRetry = pending && receipt.reason === "delivery-auto-retry";
+      const busyRetry = pending
+        && typeof receipt.reason === "string"
+        && RECOVERABLE_BUSY_RETRY_REASONS.has(receipt.reason);
       const pendingLabel = t(busyRetry ? "runtime.receipt.busyRetry" : "runtime.receipt.pending");
       return (
         <div
