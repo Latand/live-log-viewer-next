@@ -699,6 +699,20 @@ export class RuntimeJournal {
     });
   }
 
+  producerCursor(producerKind: string, eventKeyPrefix: string): number {
+    if (!producerKind || !eventKeyPrefix) throw new Error("runtime producer cursor is invalid");
+    const rows = this.db.query<{ producer_key: string }, [string, string, string]>(
+      "SELECT producer_key FROM producer_receipts WHERE producer_kind = ? AND producer_key >= ? AND producer_key < ?",
+    ).all(producerKind, eventKeyPrefix, `${eventKeyPrefix}\uffff`);
+    let cursor = 0;
+    for (const row of rows) {
+      if (!row.producer_key.startsWith(eventKeyPrefix)) continue;
+      const sequence = Number(row.producer_key.slice(eventKeyPrefix.length));
+      if (Number.isSafeInteger(sequence) && sequence > cursor) cursor = sequence;
+    }
+    return cursor;
+  }
+
   effectBatch(limit = 100, kinds?: readonly string[], afterEventSeq = 0): Array<RuntimeEffect & { eventSeq: number }> {
     if (kinds?.length === 0) return [];
     if (!Number.isSafeInteger(afterEventSeq) || afterEventSeq < 0) throw new Error("runtime effect cursor is invalid");

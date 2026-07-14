@@ -807,7 +807,8 @@ describe("ClaudeStreamBrokerHost", () => {
 
   test("boot adoption resumes claimed Claude rows and persists broker columns", async () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-claude-adoption-"));
-    const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+    const registryPath = path.join(directory, "agent-registry.json");
+    const registry = new AgentRegistry(registryPath);
     const sessionId = "adopted-claude-session";
     registry.upsert({
       key: { engine: "claude", sessionId },
@@ -865,6 +866,35 @@ describe("ClaudeStreamBrokerHost", () => {
       claimOwner: null,
       structuredHost: { endpoint: "stdio:released", process: null },
     });
+
+    const restartedRegistry = new AgentRegistry(registryPath);
+    const replacement = new FakeClaude(ledger);
+    const restartCaptured: { args?: string[] } = {};
+    const restarted = await adoptClaudeRegistryHosts(
+      restartedRegistry,
+      () => ({
+        cwd: "/repo",
+        deliveryLedger: ledger,
+        eventStore: new MemoryEventStore(),
+        readAuthStatus: () => ({ loggedIn: true, authMethod: "claude.ai", subscriptionType: "max", version: "2.1.197" }),
+        readTranscript: () => [],
+        spawnProcess: fakeSpawn(replacement, restartCaptured),
+      }),
+      { NODE_ENV: "test", LLV_STRUCTURED_HOSTS: "1" },
+    );
+    expect(restarted).toHaveLength(1);
+    expect(restartCaptured.args).toContain("--resume");
+    expect(restartedRegistry.snapshot().entries[`claude:${sessionId}`]).toMatchObject({
+      status: "idle",
+      host: null,
+      claimEpoch: 4,
+      structuredHost: {
+        kind: "claude-broker",
+        endpoint: "stdio:5150",
+        writerClaimEpoch: 4,
+      },
+    });
+    await restarted[0]!.host.release();
   });
 
   test("boot adoption reaps a surviving orphaned Claude child before resume", async () => {

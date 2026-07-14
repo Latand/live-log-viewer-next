@@ -247,14 +247,13 @@ export async function adoptCodexRegistryHosts(
   if (!structuredHostsEnabled(env)) return [];
   const rows = Object.values(registry.snapshot().entries).filter((entry) =>
     entry.key.engine === "codex"
-    && entry.status !== "unhosted"
     && entry.structuredHost?.kind === "codex-app-server");
   const adopted: AdoptedCodexHost[] = [];
   for (const entry of rows) {
     const owner = { pid: process.pid, startIdentity: procBackend.processIdentity(process.pid) };
     try {
       await registry.withOperationLock(entry.key, owner, async () => {
-        const claimed = registry.claimStructuredHost(entry.key, owner);
+        const claimed = registry.claimStructuredHost(entry.key, owner, { allowUnhosted: true });
         if (!claimed?.structuredHost) return;
         try {
           const host = await CodexAppServerHost.adopt(entry.key.sessionId, {
@@ -291,21 +290,20 @@ export async function adoptClaudeRegistryHosts(
   if (!structuredHostsEnabled(env)) return [];
   const rows = Object.values(registry.snapshot().entries).filter((entry) =>
     entry.key.engine === "claude"
-    && entry.status !== "unhosted"
     && entry.structuredHost?.kind === "claude-broker");
   const adopted: AdoptedClaudeHost[] = [];
   for (const entry of rows) {
     const owner = { pid: process.pid, startIdentity: procBackend.processIdentity(process.pid) };
     try {
       await registry.withOperationLock(entry.key, owner, async () => {
-        let claimed = registry.claimStructuredHost(entry.key, owner);
+        let claimed = registry.claimStructuredHost(entry.key, owner, { allowUnhosted: true });
         if (!claimed) {
           const current = registry.snapshot().entries[`claude:${entry.key.sessionId}`];
           const orphan = current?.structuredHost?.kind === "claude-broker"
             ? current.structuredHost.process
             : null;
           if (orphan && await terminateVerifiedClaudeOrphan(orphan, current?.claimOwner ?? null)) {
-            claimed = registry.claimStructuredHost(entry.key, owner);
+            claimed = registry.claimStructuredHost(entry.key, owner, { allowUnhosted: true });
           }
         }
         if (!claimed?.structuredHost) return;

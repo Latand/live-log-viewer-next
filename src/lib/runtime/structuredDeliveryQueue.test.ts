@@ -689,7 +689,7 @@ test("an absent-host kill retries after terminal projection fails", async () => 
     return true;
   });
 
-  await queue.drain();
+  await expect(queue.drain()).rejects.toThrow("dead projection unavailable");
 
   expect(pending).toBeTrue();
   expect(transitions).toEqual([
@@ -732,7 +732,7 @@ test("an active-host kill retries after terminal projection fails", async () => 
     return true;
   });
 
-  await queue.drain();
+  await expect(queue.drain()).rejects.toThrow("dead projection unavailable");
 
   expect(pending).toBeTrue();
   expect(transitions).toEqual([

@@ -56,6 +56,24 @@ test("producer dedupe keys are isolated by producer identity", () => {
   journal.close();
 });
 
+test("producer cursor reports the highest durably acknowledged engine event", () => {
+  const dir = sandbox("producer-cursor");
+  const journal = new RuntimeJournal(path.join(dir, "events.sqlite"), { maxEvents: 1, now: () => 100 });
+  for (const sequence of [1, 2, 3]) {
+    journal.append({
+      scope: runtimeScope("session", "one"),
+      kind: "delta",
+      payload: { conversationId: "one", turnId: "turn-one", text: `delta ${sequence}` },
+      producer: { kind: "codex-app-server", eventKey: `engine-host:codex:thread-one:${sequence}` },
+    });
+  }
+  journal.compact(1);
+
+  expect(journal.producerCursor("codex-app-server", "engine-host:codex:thread-one:")).toBe(3);
+  expect(journal.producerCursor("claude-broker", "engine-host:claude:thread-one:")).toBe(0);
+  journal.close();
+});
+
 test("snapshot exposes the canonical projected runtime model", () => {
   const dir = sandbox("canonical-snapshot");
   const journal = new RuntimeJournal(path.join(dir, "events.sqlite"), { maxEvents: 100, now: () => 100 });
@@ -899,6 +917,13 @@ test("structured queue controls cross the local runtime socket", async () => {
   const server = serveRuntimeHost(socketPath, new RuntimeHost(journal, undefined, undefined, true));
   await new Promise<void>((resolve) => server.once("listening", resolve));
   const client = new UnixRuntimeHostClient(socketPath);
+  await client.append({
+    scope: runtimeScope("session", "one"),
+    kind: "limits",
+    payload: { conversationId: "one", snapshot: {} },
+    producer: { kind: "codex-app-server", eventKey: "engine-host:codex:thread-one:7" },
+  });
+  expect(await client.producerCursor("codex-app-server", "engine-host:codex:thread-one:")).toBe(7);
   const operation = await client.command({
     kind: "send",
     conversationId: "one",
