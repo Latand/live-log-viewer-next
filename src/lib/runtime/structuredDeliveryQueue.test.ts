@@ -98,7 +98,7 @@ test("unrelated outbox effects cannot starve structured message delivery", async
 
   await queue.drain();
 
-  expect(requestedKinds).toEqual([["runtime.send", "runtime.steer", "runtime.answer", "runtime.interrupt"]]);
+  expect(requestedKinds).toEqual([["runtime.send", "runtime.steer", "runtime.answer", "runtime.interrupt", "runtime.kill"]]);
   expect(sent).toEqual(["op-after-spawns"]);
 });
 
@@ -593,4 +593,34 @@ test("a control operation behind a full message page still reaches the active ho
   await queue.drain();
 
   expect(interrupts).toEqual(["turn-held"]);
+});
+
+test("a structured kill terminates its host and completes its receipt", async () => {
+  const transitions: Array<[string, string]> = [];
+  const terminated: string[] = [];
+  const target = host(async () => ({ outcome: "turn-started", turnId: "unexpected" }));
+  const queue = new StructuredDeliveryQueue({
+    effects: async () => [{
+      id: "kill-one",
+      kind: "runtime.kill",
+      eventSeq: 1,
+      payload: {
+        operationId: "kill-one",
+        conversationId: "conversation-one",
+        sessionKey: { engine: "codex", sessionId: "thread-one" },
+      },
+    }],
+    transition: async (operationId, status) => { transitions.push([operationId, status]); },
+  }, () => target, async (conversationId, sessionKey) => {
+    terminated.push(`${conversationId}:${sessionKey.engine}:${sessionKey.sessionId}`);
+    return true;
+  });
+
+  await queue.drain();
+
+  expect(terminated).toEqual(["conversation-one:codex:thread-one"]);
+  expect(transitions).toEqual([
+    ["kill-one", "delivering"],
+    ["kill-one", "delivered"],
+  ]);
 });

@@ -39,6 +39,21 @@ test("dedicated runtime command parsers freeze the Opus request bodies", () => {
     operationId: "answer-one",
     idempotencyKey: "answer-one",
   });
+  expect(parseRuntimeCommand("spawn", {
+    conversationId: "conv-empty",
+    operationId: "spawn-empty",
+    engine: "codex",
+    cwd: "/repo",
+    prompt: "",
+  })).toMatchObject({ kind: "spawn", cwd: "/repo", prompt: "" });
+  expect(parseRuntimeCommand("kill", {
+    conversationId: "conv-kill",
+    operationId: "kill-one",
+    sessionKey: { engine: "codex", sessionId: "thread-one" },
+  })).toMatchObject({
+    kind: "kill",
+    sessionKey: { engine: "codex", sessionId: "thread-one" },
+  });
 });
 
 test("runtime command parsing rejects malformed and oversized bodies", () => {
@@ -46,5 +61,7 @@ test("runtime command parsing rejects malformed and oversized bodies", () => {
   expect(() => parseRuntimeCommand("interrupt", { conversationId: "conv one", operationId: "interrupt-one" })).toThrow("conversationId is invalid");
   expect(() => parseRuntimeCommand("interrupt", { conversationId: "conv-one", operationId: "interrupt-one", turnId: 42 })).toThrow("turnId is invalid");
   expect(() => parseRuntimeCommand("spawn", { conversationId: "conv-one", operationId: "spawn-one", engine: "codex", cwd: "/repo", prompt: "go", accountId: 42 })).toThrow("accountId is invalid");
+  expect(() => parseRuntimeCommand("spawn", { conversationId: "conv-one", operationId: "spawn-missing", engine: "codex", cwd: "/repo" })).toThrow("prompt is required");
+  expect(() => parseRuntimeCommand("kill", { conversationId: "conv-one", operationId: "kill-missing" })).toThrow("sessionKey is invalid");
   expect(() => parseRuntimeCommand("send", { conversationId: "conv-one", text: "x".repeat(256 * 1024), idempotencyKey: "send-one" })).toThrow("request body exceeds 256 KiB");
 });

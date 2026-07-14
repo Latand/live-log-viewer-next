@@ -55,6 +55,7 @@ export interface RuntimeBusState {
   lastEventAt: number | null;
   /** False until start() runs with the flag on — the UI shows nothing live. */
   enabled: boolean;
+  structuredHostsEnabled: boolean;
 }
 
 /** Minimal EventSource surface so tests can inject a fake. */
@@ -97,6 +98,7 @@ export function createRuntimeBus(deps: RuntimeBusDeps): RuntimeBus {
     resyncedAt: null,
     lastEventAt: null,
     enabled: false,
+    structuredHostsEnabled: false,
   };
 
   const listeners = new Set<() => void>();
@@ -183,7 +185,11 @@ export function createRuntimeBus(deps: RuntimeBusDeps): RuntimeBus {
       const snapshot = (await res.json()) as RuntimeSnapshot;
       if (myGen !== generation) return; // superseded while awaiting
       hasSnapshot = true;
-      setState({ store: installSnapshot(snapshot), lastEventAt: deps.now() });
+      setState({
+        store: installSnapshot(snapshot),
+        lastEventAt: deps.now(),
+        structuredHostsEnabled: snapshot.structuredHostsEnabled === true,
+      });
       if (afterCursorReset) noteResynced();
       openStream(snapshot.snapshotSeq);
     } catch {
@@ -346,7 +352,14 @@ export function createRuntimeBus(deps: RuntimeBusDeps): RuntimeBus {
       hasSnapshot = false;
       reconnectAttempts = 0;
       firstFailureAt = null;
-      state = { store: emptyStore(), connection: "offline", resyncedAt: null, lastEventAt: null, enabled: false };
+      state = {
+        store: emptyStore(),
+        connection: "offline",
+        resyncedAt: null,
+        lastEventAt: null,
+        enabled: false,
+        structuredHostsEnabled: false,
+      };
       emit();
     },
   };

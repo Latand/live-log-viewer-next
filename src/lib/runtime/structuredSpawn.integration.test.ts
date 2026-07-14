@@ -14,7 +14,8 @@ import { RuntimeJournal } from "@/runtime-host/journal";
 
 import type { RuntimeHostClient } from "./client";
 import type { DeliveryReceipt, HostState, QueueEntry, RuntimeEvent } from "./engineHost";
-import { bindStructuredDeliveryQueue } from "./structuredDeliveryController";
+import { bindStructuredDeliveryQueue, hasStructuredDeliveryHost } from "./structuredDeliveryController";
+import { dispatchStructuredControl } from "./structuredControls";
 import { kickStructuredDeliveryQueue } from "./structuredDeliverySignal";
 import { enqueueStructuredMessage } from "./structuredMessageDelivery";
 import { recoverPendingStructuredSpawns, spawnStructuredConversation, structuredClaudePermissionMode, structuredClaudeSpawnPolicyBaseSettingsPath, type SpawnedStructuredHost } from "./structuredSpawn";
@@ -71,6 +72,7 @@ class RoundTripHost implements SpawnedStructuredHost {
   private activeTurnRef: string | null = null;
   private pendingAttention: string[] = [];
   private released = false;
+  releaseCount = 0;
 
   constructor(readonly engine: "codex" | "claude", readonly artifactPath: string, sessionId: string) {
     this.identity = engine === "codex" ? { threadId: sessionId, path: artifactPath } : { sessionId };
@@ -165,6 +167,7 @@ class RoundTripHost implements SpawnedStructuredHost {
   }
 
   async release(): Promise<void> {
+    this.releaseCount += 1;
     this.released = true;
     for (const wake of this.waiters) wake();
     this.waiters.clear();
@@ -426,6 +429,138 @@ test("startup recovery finalizes a staged spawn without duplicating its admitted
   expect((await client.operationStatus(begun.receipt.launchId))?.receipt.status).toBe("delivered");
 });
 
+test("startup recovery cleans a staged host whose spawn operation already failed", async () => {
+  const id = crypto.randomUUID();
+  const cwd = path.join(sandbox, `failed-recovery-${id}`);
+  fs.mkdirSync(cwd, { recursive: true });
+  const artifactPath = path.join(cwd, `${id}.jsonl`);
+  const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const journal = new RuntimeJournal(path.join(cwd, "runtime.sqlite"), { structuredHosts: true });
+  const client = runtimeClient(journal);
+  const launchProfile = emptyLaunchProfile({ cwd, model: "gpt-5.6-luna" });
+  const begun = registry.beginSpawnRequest({ engine: "codex", cwd, accountId: "codex-subscription", launchProfile });
+  if (begun.kind !== "created") throw new Error("spawn receipt was unavailable");
+  await client.command({
+    kind: "spawn",
+    operationId: begun.receipt.launchId,
+    idempotencyKey: begun.receipt.launchId,
+    conversationId: begun.receipt.conversationId,
+    engine: "codex",
+    cwd,
+    prompt: "crash-window prompt",
+    accountId: "codex-subscription",
+    parentConversationId: null,
+  });
+  const key = { engine: "codex" as const, sessionId: id };
+  const staged = registry.stageStructuredSpawn(begun.receipt.launchId, {
+    key,
+    artifactPath,
+    cwd,
+    accountId: "codex-subscription",
+    launchProfile,
+    status: "idle",
+    host: null,
+    structuredHost: {
+      kind: "codex-app-server",
+      endpoint: "fake:stdio",
+      process: { pid: process.pid, startIdentity: "test-process" },
+      eventCursor: 0,
+      protocolVersion: "fake-v1",
+      writerClaimEpoch: 1,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 1,
+    claimOwner: "structured-host:test",
+    pendingAction: "spawn",
+  });
+  if (staged.kind !== "settled") throw new Error("spawn identity was unavailable");
+  const host = new RoundTripHost("codex", artifactPath, id);
+  await bindStructuredDeliveryQueue([{ key, host }], { registry, client });
+  await client.transitionOperation(begun.receipt.launchId, "failed", { reason: "engine child failed" });
+
+  await recoverPendingStructuredSpawns(registry, client);
+  await recoverPendingStructuredSpawns(registry, client);
+
+  expect(registry.snapshot().receipts[begun.receipt.launchId]).toMatchObject({
+    state: "failed",
+    error: "engine child failed",
+  });
+  expect(registry.snapshot().entries[`codex:${id}`]).toMatchObject({
+    status: "dead",
+    structuredHost: null,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  expect(hasStructuredDeliveryHost(key)).toBeFalse();
+  expect(host.releaseCount).toBe(1);
+  expect((await client.operationStatus(begun.receipt.launchId))?.receipt).toMatchObject({
+    status: "failed",
+    reason: "engine child failed",
+  });
+  expect(journal.snapshot().sessions.find((session) => session.conversationId === begun.receipt.conversationId)).toMatchObject({
+    host: "dead",
+  });
+});
+
+test("startup recovery completes an intentionally empty spawn prompt without a host send", async () => {
+  const id = crypto.randomUUID();
+  const cwd = path.join(sandbox, `empty-prompt-recovery-${id}`);
+  fs.mkdirSync(cwd, { recursive: true });
+  const artifactPath = path.join(cwd, `${id}.jsonl`);
+  const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const journal = new RuntimeJournal(path.join(cwd, "runtime.sqlite"), { structuredHosts: true });
+  const client = runtimeClient(journal);
+  const launchProfile = emptyLaunchProfile({ cwd, model: "gpt-5.6-luna" });
+  const begun = registry.beginSpawnRequest({ engine: "codex", cwd, accountId: "codex-subscription", launchProfile });
+  if (begun.kind !== "created") throw new Error("spawn receipt was unavailable");
+  await client.command({
+    kind: "spawn",
+    operationId: begun.receipt.launchId,
+    idempotencyKey: begun.receipt.launchId,
+    conversationId: begun.receipt.conversationId,
+    engine: "codex",
+    cwd,
+    prompt: "",
+    accountId: "codex-subscription",
+    parentConversationId: null,
+  });
+  const key = { engine: "codex" as const, sessionId: id };
+  const staged = registry.stageStructuredSpawn(begun.receipt.launchId, {
+    key,
+    artifactPath,
+    cwd,
+    accountId: "codex-subscription",
+    launchProfile,
+    status: "idle",
+    host: null,
+    structuredHost: {
+      kind: "codex-app-server",
+      endpoint: "fake:stdio",
+      process: { pid: process.pid, startIdentity: "test-process" },
+      eventCursor: 0,
+      protocolVersion: "fake-v1",
+      writerClaimEpoch: 1,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 1,
+    claimOwner: "structured-host:test",
+    pendingAction: "spawn",
+  });
+  if (staged.kind !== "settled") throw new Error("spawn identity was unavailable");
+  const host = new RoundTripHost("codex", artifactPath, id);
+  await bindStructuredDeliveryQueue([{ key, host }], { registry, client });
+
+  await recoverPendingStructuredSpawns(registry, client);
+
+  expect(host.sent).toEqual([]);
+  expect(registry.snapshot().receipts[begun.receipt.launchId]).toMatchObject({ state: "completed", artifactPath });
+  expect((await client.operationStatus(begun.receipt.launchId))?.receipt.status).toBe("delivered");
+});
+
 describe.each(["codex", "claude"] as const)("%s structured spawn round trip", (engine) => {
   test("spawn, send, question, answer, interrupt, and resume use one pane-less host", async () => {
     const id = crypto.randomUUID();
@@ -574,6 +709,34 @@ describe.each(["codex", "claude"] as const)("%s structured spawn round trip", (e
       "deliberately slow fake-host turn",
       "resume after interrupt",
     ]);
+
+    const killOperationId = `kill_${id}`;
+    const kill = await dispatchStructuredControl({ path: artifactPath, conversationId: response.conversationId, action: "kill" }, {
+      registry,
+      client,
+      operationId: () => killOperationId,
+      kick: () => {},
+      enabled: () => true,
+    });
+    expect(kill).toMatchObject({ status: 202, body: { ok: true, structured: true, operationId: killOperationId } });
+    await kickStructuredDeliveryQueue();
+    await waitFor(() => host.releaseCount === 1);
+
+    expect(hasStructuredDeliveryHost({ engine, sessionId: id })).toBeFalse();
+    expect(registry.snapshot().entries[`${engine}:${id}`]).toMatchObject({
+      status: "dead",
+      host: null,
+      structuredHost: null,
+      claimOwner: null,
+      pendingAction: null,
+    });
+    expect((await client.operationStatus(killOperationId))?.receipt).toMatchObject({
+      kind: "kill",
+      status: "delivered",
+    });
+    expect(journal.snapshot().sessions.find((session) => session.conversationId === response.conversationId)).toMatchObject({
+      host: "dead",
+    });
   });
 });
 

@@ -63,6 +63,22 @@ export function parseRuntimeCommand(kind: RuntimeOperationKind, value: unknown):
     };
   }
 
+  if (kind === "kill") {
+    const key = body.sessionKey;
+    if (!key || typeof key !== "object" || Array.isArray(key)) throw new Error("sessionKey is invalid");
+    const candidate = key as Record<string, unknown>;
+    const engine = candidate.engine === "codex" || candidate.engine === "claude" ? candidate.engine : null;
+    const sessionId = typeof candidate.sessionId === "string" ? candidate.sessionId.trim() : "";
+    if (!engine || !sessionId || sessionId.includes(":") || /\s/.test(sessionId)) throw new Error("sessionKey is invalid");
+    return {
+      kind,
+      conversationId,
+      ...(operationId ? { operationId } : {}),
+      idempotencyKey,
+      sessionKey: { engine, sessionId },
+    };
+  }
+
   if (kind === "answer") {
     if (!("resolution" in body)) throw new Error("resolution is required");
     return {
@@ -78,8 +94,9 @@ export function parseRuntimeCommand(kind: RuntimeOperationKind, value: unknown):
   const engine = body.engine === "codex" || body.engine === "claude" ? body.engine : null;
   if (!engine) throw new Error("engine is invalid");
   const cwd = typeof body.cwd === "string" ? body.cwd.trim() : "";
-  const prompt = typeof body.prompt === "string" ? body.prompt.trim() : "";
-  if (!cwd || !prompt) throw new Error("spawn cwd and prompt are required");
+  if (!cwd) throw new Error("spawn cwd is required");
+  if (typeof body.prompt !== "string") throw new Error("prompt is required");
+  const prompt = body.prompt.trim();
   const accountId = optionalNullableId(body.accountId, "accountId");
   const parentConversationId = optionalNullableId(body.parentConversationId, "parentConversationId");
   const sessionId = optionalNullableId(body.sessionId, "sessionId");

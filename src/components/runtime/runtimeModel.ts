@@ -88,7 +88,7 @@ export type ReceiptStatus =
   | "failed"
   | "uncertain";
 
-export type OperationKind = "send" | "steer" | "interrupt" | "answer" | "spawn";
+export type OperationKind = "send" | "steer" | "interrupt" | "answer" | "kill" | "spawn";
 
 /** Client connection state (Fable §2). `resynced` is a transient note, not a state. */
 export type ConnectionState = "live" | "reconnecting" | "degraded" | "offline";
@@ -258,6 +258,7 @@ export interface RuntimeSnapshot {
   schemaVersion: number;
   snapshotSeq: number;
   retentionFloorSeq: number;
+  structuredHostsEnabled?: boolean;
   serverTime?: string;
   runtime: { hostEpoch: number; health: string };
   filesRevision: number;

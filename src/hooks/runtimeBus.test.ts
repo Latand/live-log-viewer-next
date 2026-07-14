@@ -112,6 +112,7 @@ function snapshot(seq: number, overrides: Partial<RuntimeSnapshot> = {}): Runtim
     snapshotSeq: seq,
     retentionFloorSeq: 0,
     runtime: { hostEpoch: 1, health: "ready" },
+    structuredHostsEnabled: true,
     filesRevision: 1,
     sessions: [
       {
@@ -144,6 +145,16 @@ function snapshot(seq: number, overrides: Partial<RuntimeSnapshot> = {}): Runtim
     ...overrides,
   };
 }
+
+test("the snapshot carries the runtime structured-host gate into client state", async () => {
+  const h = harness();
+  h.setSnapshot(snapshot(101, { structuredHostsEnabled: false }));
+  h.bus.start();
+  await flush();
+
+  expect(h.bus.getState().structuredHostsEnabled).toBeFalse();
+  expect(h.bus.getState().store.sessions.conv_a?.hostKind).toBe("codex-app-server");
+});
 
 interface Harness {
   bus: RuntimeBus;

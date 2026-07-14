@@ -45,7 +45,7 @@ test("runtime command HTTP handling preserves validation, CSRF, status, and conf
       };
     },
   } as unknown as RuntimeHostClient;
-  const deps = { enabled: () => true, client: () => client };
+  const deps = { enabled: () => true, structuredEnabled: () => true, client: () => client };
 
   const accepted = await handleRuntimeCommand(request({ conversationId: "conv-one", text: "continue", idempotencyKey: "send-one" }), "send", deps);
   expect(accepted.status).toBe(202);
@@ -59,7 +59,7 @@ test("runtime command HTTP handling preserves validation, CSRF, status, and conf
   expect(forbidden.status).toBe(403);
 
   const conflictClient = { command: async () => { throw new RuntimeHostUnavailableError("conflict", "idempotency-conflict"); } } as unknown as RuntimeHostClient;
-  const conflict = await handleRuntimeCommand(request({ conversationId: "conv-one", text: "continue", idempotencyKey: "send-one" }), "send", { enabled: () => true, client: () => conflictClient });
+  const conflict = await handleRuntimeCommand(request({ conversationId: "conv-one", text: "continue", idempotencyKey: "send-one" }), "send", { enabled: () => true, structuredEnabled: () => true, client: () => conflictClient });
   expect(conflict.status).toBe(409);
 });
 
@@ -71,6 +71,38 @@ test("runtime command routes fail closed while activation is disabled", async ()
   );
   expect(response.status).toBe(503);
   expect(await response.json()).toEqual({ error: "runtime events are disabled" });
+});
+
+test("direct structured commands stop before runtime admission when hosting is disabled", async () => {
+  const commands: unknown[] = [];
+  const client = {
+    command: async (command: unknown) => {
+      commands.push(command);
+      throw new Error("disabled command reached the runtime host");
+    },
+  } as unknown as RuntimeHostClient;
+  const dependencies: RuntimeHttpDependencies = {
+    enabled: () => true,
+    structuredEnabled: () => false,
+    client: () => client,
+  };
+
+  const send = await handleRuntimeCommand(
+    request({ conversationId: "conv-one", text: "continue", idempotencyKey: "send-disabled" }),
+    "send",
+    dependencies,
+  );
+  const interrupt = await handleRuntimeCommand(
+    request({ conversationId: "conv-one", operationId: "interrupt-disabled" }),
+    "interrupt",
+    dependencies,
+  );
+
+  expect(send.status).toBe(503);
+  expect(interrupt.status).toBe(503);
+  expect(await send.json()).toEqual({ error: "structured hosts are disabled" });
+  expect(await interrupt.json()).toEqual({ error: "structured hosts are disabled" });
+  expect(commands).toEqual([]);
 });
 
 test("direct runtime send and steer commands kick queued delivery for an idle host", async () => {
@@ -100,7 +132,7 @@ test("direct runtime send and steer commands kick queued delivery for an idle ho
     const response = await handleRuntimeCommand(
       request({ conversationId: "conv-one", text: `${kind} message`, idempotencyKey: `${kind}-one` }),
       kind,
-      { enabled: () => true, client: () => client, kick: () => { kicks += 1; } },
+      { enabled: () => true, structuredEnabled: () => true, client: () => client, kick: () => { kicks += 1; } },
     );
     expect(response.status).toBe(202);
   }
@@ -126,7 +158,7 @@ test("answer and interrupt commands kick their queued host controls", async () =
       },
     }),
   } as unknown as RuntimeHostClient;
-  const dependencies = { enabled: () => true, client: () => client, kick: () => { kicks += 1; } };
+  const dependencies = { enabled: () => true, structuredEnabled: () => true, client: () => client, kick: () => { kicks += 1; } };
 
   const answer = await handleRuntimeCommand(request({
     conversationId: "conversation-one",

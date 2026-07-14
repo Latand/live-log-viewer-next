@@ -22,9 +22,11 @@ export async function dispatchStructuredControl(
     client?: RuntimeHostClient | null;
     operationId?: () => string;
     kick?: () => void;
+    enabled?: () => boolean;
   } = {},
 ): Promise<StructuredControlResult | null> {
   if (!request.action) return null;
+  if (!(dependencies.enabled ?? (() => process.env.LLV_STRUCTURED_HOSTS === "1"))()) return null;
   const registry = dependencies.registry ?? agentRegistry();
   const conversation = request.path
     ? registry.conversationForPath(request.path)
@@ -36,7 +38,7 @@ export async function dispatchStructuredControl(
   const entry = registry.snapshot().entries[sessionKeyId({ engine: conversation.engine, sessionId: generation.id })];
   if (!entry?.structuredHost) return null;
 
-  if (request.action !== "interrupt") {
+  if (request.action !== "interrupt" && request.action !== "kill") {
     const label = ["compact", "dialog-key", "kill", "reconfigure", "resume"].includes(request.action)
       ? request.action
       : "requested";
@@ -47,13 +49,21 @@ export async function dispatchStructuredControl(
   if (!client) return { status: 503, body: { error: "structured runtime host is unavailable" } };
   try {
     const operationId = (dependencies.operationId ?? newOperationId)();
-    const result = await client.command({
-      kind: "interrupt",
-      operationId,
-      idempotencyKey: operationId,
-      conversationId: conversation.id,
-      turnId: entry.structuredHost.activeTurnRef,
-    });
+    const result = await client.command(request.action === "kill"
+      ? {
+          kind: "kill",
+          operationId,
+          idempotencyKey: operationId,
+          conversationId: conversation.id,
+          sessionKey: { engine: conversation.engine, sessionId: generation.id },
+        }
+      : {
+          kind: "interrupt",
+          operationId,
+          idempotencyKey: operationId,
+          conversationId: conversation.id,
+          turnId: entry.structuredHost.activeTurnRef,
+        });
     (dependencies.kick ?? kickStructuredDeliveryQueue)();
     return {
       status: 202,

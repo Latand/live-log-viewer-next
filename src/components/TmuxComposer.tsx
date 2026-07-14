@@ -11,7 +11,7 @@ import { Hint } from "@/components/Hint";
 import { Badge, type BadgeTone } from "@/components/ui/Badge";
 import { useComposer } from "@/hooks/useComposer";
 import { useIsMobile } from "@/hooks/useIsMobile";
-import { interruptRuntime, sendRuntimeMessage, useRuntimeReceiptsForArtifact, useRuntimeSession } from "@/hooks/useRuntime";
+import { interruptRuntime, sendRuntimeMessage, useRuntimeReceiptsForArtifact, useRuntimeSession, type RuntimeSessionView } from "@/hooks/useRuntime";
 import { useTmuxTarget } from "@/hooks/useTmuxTarget";
 import { conversationIdentity } from "@/lib/accounts/identity";
 import { cardMigrationState, migrationHoldsSends } from "@/lib/accounts/migration";
@@ -170,6 +170,13 @@ function nowMs(): number {
   return Date.now();
 }
 
+export function structuredComposerSession(runtimeSession: RuntimeSessionView | null): RuntimeSessionView | null {
+  if (!runtimeSession?.structuredControlsEnabled || runtimeSession.legacy) return null;
+  return runtimeSession.session.hostKind === "codex-app-server" || runtimeSession.session.hostKind === "claude-broker"
+    ? runtimeSession
+    : null;
+}
+
 /**
  * Chat-style composer pinned under the feed. A live pane gets the text typed
  * straight into its tmux pane; a finished resumable conversation boots a new
@@ -184,10 +191,7 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
      (falls back to path pre-migration). */
   const cardId = conversationIdentity(file);
   const runtimeSession = useRuntimeSession(cardId);
-  const structuredSession = runtimeSession && !runtimeSession.legacy
-    && (runtimeSession.session.hostKind === "codex-app-server" || runtimeSession.session.hostKind === "claude-broker")
-    ? runtimeSession
-    : null;
+  const structuredSession = structuredComposerSession(runtimeSession);
   /* While a card is switching accounts its next send is held for the successor
      (Sol delivery fence): the composer shows the held affordance instead of
      pretending the text reached the live predecessor pane. */

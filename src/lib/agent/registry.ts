@@ -2489,6 +2489,27 @@ export class AgentRegistry {
     });
   }
 
+  terminateStructuredHost(key: SessionKey): boolean {
+    return this.mutate((file) => {
+      const keyId = sessionKeyId(key);
+      const entry = file.entries[keyId];
+      if (!entry) return false;
+      const replacement = {
+        ...entry,
+        host: null,
+        structuredHost: null,
+        status: "dead" as const,
+        claimOwner: null,
+        pendingAction: null,
+      };
+      const changedHostPaths = activeHostPathsChangedByEntry(file, keyId, replacement);
+      const readinessBefore = migrationReadinessSignature(file, key.engine, changedHostPaths);
+      Object.assign(entry, replacement, { updatedAt: now() });
+      advanceMigrationScopeRevision(file, key.engine, readinessBefore, changedHostPaths);
+      return true;
+    });
+  }
+
   /** Writes mutable host state only while the caller still owns its writer fence. */
   setStructuredHostClaimed(
     key: SessionKey,

@@ -24,6 +24,7 @@ interface ControllerState {
   activeHosts: Map<string, EngineHost> | null;
   registerActiveHost: ((item: StructuredDeliveryHost) => Promise<() => Promise<void>>) | null;
   releaseActiveHost: ((key: SessionKey) => Promise<boolean>) | null;
+  terminateActiveHost: ((key: SessionKey) => Promise<boolean>) | null;
   stopActive: () => void;
 }
 const controllerStore = globalThis as typeof globalThis & { __llvStructuredDeliveryController?: ControllerState };
@@ -32,6 +33,7 @@ const state: ControllerState = controllerStore.__llvStructuredDeliveryController
   activeHosts: null,
   registerActiveHost: null,
   releaseActiveHost: null,
+  terminateActiveHost: null,
   stopActive: () => {},
 };
 
@@ -111,12 +113,24 @@ export async function bindStructuredDeliveryQueue(
   state.activeHosts = null;
   state.registerActiveHost = null;
   state.releaseActiveHost = null;
+  state.terminateActiveHost = null;
   setStructuredDeliveryKick(null);
   const client = dependencies.client === undefined ? runtimeHostClient() : dependencies.client;
   if (!client) return;
   const registry = dependencies.registry ?? agentRegistry();
   const hosts = new Map<string, EngineHost>();
-  const queue = new StructuredDeliveryQueue(runtimeClientDeliveryPort(client), hostResolver(registry, hosts));
+  const queue = new StructuredDeliveryQueue(
+    runtimeClientDeliveryPort(client),
+    hostResolver(registry, hosts),
+    async (conversationId, expectedKey) => {
+      const conversation = registry.conversation(conversationId as `conversation_${string}`);
+      const generation = conversation?.generations.at(-1);
+      if (!conversation || !generation) return false;
+      const currentKey = { engine: conversation.engine, sessionId: generation.id } as const;
+      if (sessionKeyId(currentKey) !== sessionKeyId(expectedKey)) return false;
+      return await state.terminateActiveHost?.(currentKey) ?? false;
+    },
+  );
   const registrations = new Map<string, { key: SessionKey; host: ObservableEngineHost; unsubscribe: () => void; stopEvents: () => Promise<void> }>();
   const publishChains = new Map<string, Promise<void>>();
   const projectionEpoch = crypto.randomUUID();
@@ -151,9 +165,11 @@ export async function bindStructuredDeliveryQueue(
     const key = { engine: conversation.engine, sessionId: generation.id } as const;
     const entry = registry.snapshot().entries[sessionKeyId(key)] ?? null;
     const legacy = entry?.host?.kind === "tmux";
-    const host = legacy
-      ? entry.status === "dead" ? "dead" : entry.status === "unhosted" ? "unhosted" : "hosted"
-      : "unhosted";
+    const host = entry?.status === "dead"
+      ? "dead"
+      : legacy && entry?.status !== "unhosted"
+        ? "hosted"
+        : "unhosted";
     const turn = entry?.status === "live" ? "running" : entry?.status === "idle" ? "idle" : "unknown";
     projectionRevision += 1;
     await client.append({
@@ -267,6 +283,15 @@ export async function bindStructuredDeliveryQueue(
     }
     return true;
   };
+  state.terminateActiveHost = async (key) => {
+    const id = sessionKeyId(key);
+    const registered = registrations.get(id);
+    if (!registered) return false;
+    await registered.host.release();
+    registry.terminateStructuredHost(key);
+    await unregisterHost(id, registered.host);
+    return true;
+  };
   for (const item of adopted) {
     await register(item);
   }
@@ -295,6 +320,7 @@ export async function bindStructuredDeliveryQueue(
       state.activeHosts = null;
       state.registerActiveHost = null;
       state.releaseActiveHost = null;
+      state.terminateActiveHost = null;
       setStructuredDeliveryKick(null);
     }
   };
