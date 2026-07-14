@@ -49,6 +49,15 @@ test("respawn shows a spinner and disables while busy", () => {
   expect(html).toContain("animate-spin");
 });
 
+test("a failed Re-check is surfaced as an alert, not swallowed (§5, finding 5)", () => {
+  const html = renderToStaticMarkup(
+    <DeadHostBannerView t={t} sinceLabel="1 min" onRespawn={() => {}} onAttach={() => {}} onRecheck={() => {}} recheckError="Couldn't reach the runtime — try again." />,
+  );
+  expect(html).toContain('role="alert"');
+  // (the apostrophe in "Couldn't" is HTML-escaped in static markup)
+  expect(html).toContain("reach the runtime — try again.");
+});
+
 test("banner action buttons meet the 44px mobile target", () => {
   const html = renderToStaticMarkup(
     <DeadHostBannerView t={t} sinceLabel="1 min" onRespawn={() => {}} onAttach={() => {}} onRecheck={() => {}} />,

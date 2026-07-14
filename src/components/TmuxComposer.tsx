@@ -19,14 +19,18 @@ import type { FileEntry } from "@/lib/types";
 import type { RuntimeReceipt } from "@/components/runtime/runtimeModel";
 
 import { ComposerBar } from "./ComposerBar";
-import { readResumeDraft } from "./AgentRuntimeControls";
+import { savedResumeProfile } from "./AgentRuntimeControls";
 import { ReceiptChip } from "./runtime/ReceiptChip";
 import { collapseReceipts, mintIdempotencyKey } from "./runtime/runtimeModel";
 
 /** The persisted "on resume" runtime profile as a POST body fragment (issue
     #241 §4). `fast` is a codex-only service-tier override. */
 function resumeProfileBody(file: FileEntry): { model?: string; effort?: string; fast?: boolean } {
-  const draft = readResumeDraft(file);
+  // Only an *explicitly applied* profile overrides the resume — absent one, the
+  // send carries zero model/effort/fast so the native resume boots with the
+  // conversation's own recorded runtime (finding 4).
+  const draft = savedResumeProfile(file);
+  if (!draft) return {};
   return {
     ...(draft.model ? { model: draft.model } : {}),
     ...(draft.effort ? { effort: draft.effort } : {}),
@@ -107,23 +111,20 @@ export function RuntimeComposerReceipts({
   onEdit: (receipt: RuntimeReceipt) => void;
 }) {
   const { t } = useLocale();
-  const { inFlight, failure, history } = collapseReceipts(receipts);
+  const { current, history } = collapseReceipts(receipts);
   return (
     <div className="flex w-full flex-col gap-1">
-      {inFlight.map((receipt) => (
-        <ReceiptChip key={receipt.operationId} receipt={receipt} />
-      ))}
-      {failure ? (
+      {current ? (
         <span className="inline-flex flex-wrap items-center gap-1.5">
           <ReceiptChip
-            receipt={failure.receipt}
+            receipt={current.receipt}
             actionsDisabled={actionsDisabled}
-            onRetry={failure.receipt.status === "failed" && (failure.receipt.kind === "send" || failure.receipt.kind === "steer") ? () => onRetry(failure.receipt) : undefined}
-            onEdit={receiptEditable(failure.receipt) ? () => onEdit(failure.receipt) : undefined}
+            onRetry={current.receipt.status === "failed" && (current.receipt.kind === "send" || current.receipt.kind === "steer") ? () => onRetry(current.receipt) : undefined}
+            onEdit={receiptEditable(current.receipt) ? () => onEdit(current.receipt) : undefined}
           />
-          {failure.count > 1 ? (
-            <span className="text-caption font-semibold tabular-nums text-muted" aria-label={t("runtime.receipt.repeatCount", { count: failure.count })}>
-              ×{failure.count}
+          {current.count > 1 ? (
+            <span className="text-caption font-semibold tabular-nums text-muted" aria-label={t("runtime.receipt.repeatCount", { count: current.count })}>
+              ×{current.count}
             </span>
           ) : null}
         </span>

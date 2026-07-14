@@ -17,6 +17,7 @@ import {
   humanReceiptReasonKey,
   type RuntimeAttention,
   type RuntimeEnvelope,
+  type ReceiptStatus,
   type RuntimeReceipt,
   type RuntimeSession,
   type RuntimeSnapshot,
@@ -387,16 +388,17 @@ describe("collapseReceipts", () => {
 
   test("terminal successes are silent — they never surface as a row (the transcript is the proof)", () => {
     const collapsed = collapseReceipts([r("a", { status: "delivered" }), r("b", { status: "answered" })]);
-    expect(collapsed.failure).toBeNull();
-    expect(collapsed.inFlight).toEqual([]);
+    expect(collapsed.current).toBeNull();
     // kept only for the forensic `history` disclosure
     expect(collapsed.history.length).toBe(2);
     expect(receiptIsTerminalSuccess("steered")).toBe(true);
   });
 
-  test("in-flight receipts stay visible so their pulse dot survives", () => {
+  test("the newest in-flight receipt is the single current row; older ones fall to history", () => {
     const collapsed = collapseReceipts([r("a", { status: "delivering" }), r("b", { status: "queued", queuePosition: 2 })]);
-    expect(collapsed.inFlight.map((x) => x.operationId)).toEqual(["a", "b"]);
+    expect(collapsed.current?.receipt.operationId).toBe("a");
+    expect(collapsed.current?.count).toBe(1);
+    expect(collapsed.history.map((x) => x.operationId)).toEqual(["b"]);
   });
 
   test("identical consecutive failures collapse into one row with a ×N counter", () => {
@@ -405,8 +407,9 @@ describe("collapseReceipts", () => {
       r("b", { status: "failed", reason: "dead-host" }),
       r("c", { status: "failed", reason: "dead-host" }),
     ]);
-    expect(collapsed.failure?.count).toBe(3);
-    expect(collapsed.failure?.receipt.operationId).toBe("a"); // the newest is the head
+    expect(collapsed.current?.count).toBe(3);
+    expect(collapsed.current?.receipt.operationId).toBe("a"); // the newest is the head
+    expect(collapsed.history).toEqual([]);
   });
 
   test("a different failure reason breaks the run, leaving the older one in history", () => {
@@ -414,7 +417,36 @@ describe("collapseReceipts", () => {
       r("a", { status: "failed", reason: "dead-host" }),
       r("b", { status: "rejected", reason: "turn-active" }),
     ]);
-    expect(collapsed.failure?.count).toBe(1);
-    expect(collapsed.failure?.receipt.operationId).toBe("a");
+    expect(collapsed.current?.count).toBe(1);
+    expect(collapsed.current?.receipt.operationId).toBe("a");
+    expect(collapsed.history.map((x) => x.operationId)).toEqual(["b"]);
+  });
+
+  test("interrupted and uncertain surface as the current row instead of vanishing", () => {
+    for (const status of ["interrupted", "uncertain"] as const) {
+      const collapsed = collapseReceipts([r("a", { status }), r("b", { status: "delivered" })]);
+      expect(collapsed.current?.receipt.operationId).toBe("a");
+      expect(collapsed.current?.receipt.status).toBe(status);
+      expect(collapsed.current?.count).toBe(1); // non-failures never fold
+      expect(collapsed.history.map((x) => x.operationId)).toEqual(["b"]); // success kept for forensics
+    }
+  });
+
+  test("every status is classified exhaustively and yields at most one current row", () => {
+    const ALL: ReceiptStatus[] = [
+      "pending", "delivering", "turn-started", "steered", "queued",
+      "delivered", "interrupted", "answered", "rejected", "failed", "uncertain",
+    ];
+    for (const status of ALL) {
+      const collapsed = collapseReceipts([r("x", { status })]);
+      if (receiptIsTerminalSuccess(status)) {
+        expect(collapsed.current).toBeNull(); // successes stay silent
+        expect(collapsed.history.map((x) => x.operationId)).toEqual(["x"]);
+      } else {
+        // exactly one current row — never zero (vanished), never many
+        expect(collapsed.current?.receipt.operationId).toBe("x");
+        expect(collapsed.history).toEqual([]);
+      }
+    }
   });
 });

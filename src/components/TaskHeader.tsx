@@ -4,8 +4,12 @@ import { useEffect, useState } from "react";
 
 import { Play } from "@/components/icons";
 import { Badge } from "@/components/ui/Badge";
+import { Hint } from "@/components/Hint";
 import { useIsMobile } from "@/hooks/useIsMobile";
+import { useRuntimeSession } from "@/hooks/useRuntime";
+import { conversationIdentity } from "@/lib/accounts/identity";
 import { useLocale } from "@/lib/i18n";
+import { capabilitiesFor } from "./agentCapabilities";
 import type { FileEntry } from "@/lib/types";
 
 export function ProcessStatusChip({ file }: { file: FileEntry }) {
@@ -44,6 +48,14 @@ export function ProcessStatusControls({
   const [message, setMessage] = useState("");
   const [forceNext, setForceNext] = useState(false);
 
+  /* Kill obeys the one capability matrix (issue #241 §4) — never a control that
+     posts to `/api/proc` on a surface where the header PID isn't the thing to
+     kill. A structured host shows a *disabled* Kill with the #240 tooltip; a
+     dead/finished host omits it; only a live tmux root/subagent (or a shell
+     task) invokes the SIGTERM/SIGKILL endpoint. */
+  const runtimeSession = useRuntimeSession(conversationIdentity(file));
+  const killCap = capabilitiesFor(file, runtimeSession).controls.kill;
+
   useEffect(() => {
     if (!confirming) return;
     const timer = window.setTimeout(() => setConfirming(false), 5_000);
@@ -76,10 +88,28 @@ export function ProcessStatusControls({
     }
   };
 
+  const killDisabled = killCap.state === "disabled";
+  const killReason = killDisabled ? t(killCap.reason) : "";
   return (
     <span className={`inline-flex min-w-0 flex-wrap items-center gap-1.5 ${compact ? "text-[10.5px]" : "text-xs"}`}>
       {hideChip ? null : chip}
-      {file.proc === "running" ? (
+      {killDisabled ? (
+        /* Structured host: the button exists (designed now, per #241) but is
+           inert with a tooltip naming when it arrives (#240). */
+        <Hint label={killReason}>
+          <button
+            type="button"
+            aria-disabled
+            disabled
+            aria-label={`${t("task.kill")} — ${killReason}`}
+            className={`inline-flex items-center whitespace-nowrap rounded-full border border-border bg-card text-[11px] font-semibold text-muted opacity-50 ${
+              isMobile ? "min-h-11 px-3" : "px-2 py-0.5"
+            }`}
+          >
+            {t("task.kill")}
+          </button>
+        </Hint>
+      ) : killCap.state === "enabled" && file.proc === "running" ? (
         confirming ? (
           <span className="inline-flex max-w-full items-center gap-1 rounded-[8px] border border-danger/30 bg-danger-soft px-1.5 py-0.5">
             {compact ? null : (

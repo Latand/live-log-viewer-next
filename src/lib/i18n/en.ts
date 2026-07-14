@@ -317,6 +317,7 @@ export const en = {
   "deadHost.respawn": "Respawn conversation",
   "deadHost.attach": "Open in terminal",
   "deadHost.recheck": "Re-check",
+  "deadHost.recheckFailed": "Couldn't reach the runtime — try again.",
   "deadHost.sendBlocked": "host is dead — respawn to continue",
   "deadHost.expiredCard": "expired — the host died before this was answered",
 

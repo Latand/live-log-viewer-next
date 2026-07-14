@@ -309,6 +309,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "deadHost.respawn": "Відновити розмову",
   "deadHost.attach": "Відкрити в терміналі",
   "deadHost.recheck": "Перевірити знову",
+  "deadHost.recheckFailed": "Не вдалося зʼєднатися зі середовищем — спробуйте ще раз.",
   "deadHost.sendBlocked": "хост мертвий — відновіть, щоб продовжити",
   "deadHost.expiredCard": "застаріло — хост помер, перш ніж на це відповіли",
 

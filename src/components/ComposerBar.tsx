@@ -175,7 +175,10 @@ export function ComposerBar({
      the controls sit inline at the field's right edge as before. */
   const controls = (
     <>
-      <MicButtonView {...dictation} busy={voiceSending} onText={insertSpoken} anchored />
+      {/* Dictation is inert while the host is dead (§5): a spoken message could
+          never be delivered, so the mic disables alongside Send — no half-open
+          affordance that records into a void. */}
+      <MicButtonView {...dictation} busy={voiceSending || sendBlocked} onText={insertSpoken} anchored />
       <span
         className="relative inline-flex shrink-0"
         onContextMenu={(event) => {

@@ -17,6 +17,7 @@ import type { RuntimeSessionView } from "@/hooks/useRuntime";
 
 import { mintIdempotencyKey } from "@/components/runtime/runtimeModel";
 import {
+  attachModeFor,
   capabilitiesFor,
   stripHasVisibleControls,
   type Capability,
@@ -59,11 +60,15 @@ function StripButton({
   isMobile: boolean;
 }) {
   const disabled = cap.state === "disabled";
-  const reason = disabled ? t(cap.reason) : "";
-  const label = disabled ? `${t(ariaLabel)} — ${reason}` : t(ariaLabel);
+  /* An enabled control may still carry an explanatory `note` (e.g. a subagent
+     Stop that interrupts the root agent). Both the disabled reason and the
+     enabled note ride into the aria-label and the hover hint so the effect is
+     never a surprise and screen readers hear it too (§4). */
+  const explain = disabled ? t(cap.reason) : cap.state === "enabled" && cap.note ? t(cap.note) : "";
+  const label = explain ? `${t(ariaLabel)} — ${explain}` : t(ariaLabel);
   const size = isMobile ? "h-11 w-11" : "p-2";
   return (
-    <Hint label={disabled ? reason : t(hint)}>
+    <Hint label={explain || t(hint)}>
       <button
         type="button"
         aria-label={label}
@@ -366,7 +371,7 @@ export function AgentControlStrip({ file }: { file: FileEntry }) {
         onToggleOverflow={() => setOverflowOpen((open) => !open)}
         status={status}
       />
-      {attachOpen ? <AttachTerminalDialog file={file} onClose={() => setAttachOpen(false)} /> : null}
+      {attachOpen ? <AttachTerminalDialog file={file} mode={attachModeFor(file, runtimeSession)} onClose={() => setAttachOpen(false)} /> : null}
     </div>
   );
 }

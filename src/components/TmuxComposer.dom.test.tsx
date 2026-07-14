@@ -169,6 +169,34 @@ test("editing and resending a rejected receipt uses a fresh delivery key", async
   flushSync(() => root.unmount());
 });
 
+test("a dead host leaves the mic and send inert and never POSTs (§5, finding 5)", () => {
+  const posts: string[] = [];
+  globalThis.fetch = (async (input: string) => {
+    posts.push(String(input));
+    return { ok: true, json: async () => ({ targets: {} }) } as Response;
+  }) as typeof fetch;
+  const file = {
+    path: "/codex.jsonl", root: "codex-sessions", name: "codex.jsonl", project: "viewer", title: "Codex",
+    engine: "codex", kind: "session", fmt: "codex", parent: null, mtime: 1, size: 1, activity: "idle",
+    proc: "running", pid: null, conversationId: "conv-dead", pendingQuestion: null, waitingInput: null,
+  } as FileEntry;
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  flushSync(() => root.render(<TmuxComposer file={file} deadHost />));
+
+  const buttons = [...host.querySelectorAll("button")];
+  const mic = buttons.find((b) => (b.getAttribute("aria-label") ?? "").includes("Dictate")) as HTMLButtonElement;
+  const send = host.querySelector('button[type="submit"]') as HTMLButtonElement | null;
+  // dictation is disabled — a spoken message could never be delivered
+  expect(mic.disabled).toBe(true);
+  // send stays present as a draft surface but is inert (aria-disabled), no POST
+  expect(send?.getAttribute("aria-disabled")).toBe("true");
+  flushSync(() => host.querySelector("form")!.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event));
+  expect(posts.some((u) => u === "/api/tmux")).toBe(false);
+  flushSync(() => root.unmount());
+});
+
 test("receipt editing stays disabled while a newer send is in flight", async () => {
   let tmuxRequests = 0;
   let resolveSecond!: (response: Response) => void;

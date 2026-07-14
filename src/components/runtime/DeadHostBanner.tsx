@@ -8,8 +8,7 @@ import { AttachTerminalDialog } from "@/components/AttachTerminalDialog";
 import { useLocale, type TFunction } from "@/lib/i18n";
 import { fmtAge } from "@/components/utils";
 import type { FileEntry } from "@/lib/types";
-import type { RuntimeSessionView } from "@/hooks/useRuntime";
-import { SNAPSHOT_URL } from "@/hooks/runtimeBus";
+import { refreshRuntime, type RuntimeSessionView } from "@/hooks/useRuntime";
 
 /** The host axis is dead (or fell unhosted after a crash) — the banner owns
     recovery, so the stale permission cards and the composer stand down (§5). */
@@ -26,6 +25,9 @@ export interface DeadHostBannerViewProps {
   onRecheck: () => void;
   respawnBusy?: boolean;
   recheckBusy?: boolean;
+  /** Set when the last Re-check failed to fetch a snapshot — surfaced so the
+      recovery attempt is never silently swallowed (§5). */
+  recheckError?: string | null;
 }
 
 /**
@@ -43,6 +45,7 @@ export function DeadHostBannerView({
   onRecheck,
   respawnBusy = false,
   recheckBusy = false,
+  recheckError = null,
 }: DeadHostBannerViewProps) {
   return (
     <div
@@ -83,6 +86,9 @@ export function DeadHostBannerView({
           {t("deadHost.recheck")}
         </button>
       </div>
+      {recheckError ? (
+        <p role="alert" className="text-caption font-semibold text-danger">{recheckError}</p>
+      ) : null}
     </div>
   );
 }
@@ -93,6 +99,7 @@ export function DeadHostBanner({ file }: { file: FileEntry }) {
   const [attachOpen, setAttachOpen] = useState(false);
   const [respawnBusy, setRespawnBusy] = useState(false);
   const [recheckBusy, setRecheckBusy] = useState(false);
+  const [recheckError, setRecheckError] = useState<string | null>(null);
 
   const respawn = async () => {
     if (respawnBusy) return;
@@ -113,15 +120,13 @@ export function DeadHostBanner({ file }: { file: FileEntry }) {
   const recheck = async () => {
     if (recheckBusy) return;
     setRecheckBusy(true);
-    try {
-      // Force a fresh runtime snapshot; a recovered host flips the axis and the
-      // bus's own projection clears this banner.
-      await fetch(SNAPSHOT_URL, { headers: { "Cache-Control": "no-store" } });
-    } catch {
-      /* offline — the bus keeps retrying on its own cadence */
-    } finally {
-      setRecheckBusy(false);
-    }
+    setRecheckError(null);
+    // Route through the runtime bus so the fresh snapshot is actually installed
+    // into the store: a recovered host flips its axis and the bus's projection
+    // clears this banner. A plain fetch would discard the snapshot (finding 5).
+    const ok = await refreshRuntime();
+    if (!ok) setRecheckError(t("deadHost.recheckFailed"));
+    setRecheckBusy(false);
   };
 
   return (
@@ -134,6 +139,7 @@ export function DeadHostBanner({ file }: { file: FileEntry }) {
         onRecheck={() => void recheck()}
         respawnBusy={respawnBusy}
         recheckBusy={recheckBusy}
+        recheckError={recheckError}
       />
       {attachOpen ? <AttachTerminalDialog file={file} onClose={() => setAttachOpen(false)} /> : null}
     </>

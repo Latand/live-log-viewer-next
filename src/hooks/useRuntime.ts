@@ -166,6 +166,14 @@ export function interruptRuntime(conversationId: string, operationId: string): P
   return postCommand("/api/runtime/interrupt", { conversationId, operationId });
 }
 
+/** Force a fresh runtime snapshot into the tab-wide store (dead-host Re-check,
+    §5). Resolves `true` when a snapshot was installed, `false` on failure so the
+    caller can surface it. A no-op resolving `false` when the bus is inert. */
+export function refreshRuntime(): Promise<boolean> {
+  if (typeof window === "undefined" || !isRuntimeUiEnabled()) return Promise.resolve(false);
+  return getRuntimeBus().refresh();
+}
+
 export function answerRuntime(conversationId: string, attentionId: string, resolution: unknown, operationId: string): Promise<CommandResult> {
   return postCommand("/api/runtime/answer", { conversationId, attentionId, resolution, operationId });
 }

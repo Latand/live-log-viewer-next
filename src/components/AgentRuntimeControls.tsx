@@ -312,12 +312,24 @@ function resumeKey(file: FileEntry): string {
   return storageKey(file) + ":resume";
 }
 
-/** The persisted resume profile for a conversation, or its defaults. */
+/** The persisted resume profile for a conversation, or its defaults — for
+    *display* only (the picker always needs a concrete model/effort to show). */
 export function readResumeDraft(file: FileEntry): RuntimeDraft {
+  return savedResumeProfile(file) ?? defaults(file);
+}
+
+/**
+ * The *explicitly saved* resume profile, or `null` when the user never applied
+ * one. This is the send-path source of truth (issue #241 finding 4): a display
+ * default must never become a silent model/effort override on resume, because
+ * `defaults()` synthesizes a first-catalog model even for unknown legacy models
+ * — sending that would swap the model the native resume would have booted.
+ */
+export function savedResumeProfile(file: FileEntry): RuntimeDraft | null {
   const fallback = defaults(file);
   try {
     const value = JSON.parse(localStorage.getItem(resumeKey(file)) ?? "null") as Partial<RuntimeDraft> | null;
-    if (!value) return fallback;
+    if (!value) return null;
     const engine = file.engine as "claude" | "codex";
     const model = ENGINE_MODELS[engine].some((item) => item.id === value.model) ? value.model! : fallback.model;
     const efforts = effortScale(engine, model) ?? [];
@@ -327,7 +339,7 @@ export function readResumeDraft(file: FileEntry): RuntimeDraft {
       fast: engine === "codex" && typeof value.fast === "boolean" ? value.fast : fallback.fast,
     };
   } catch {
-    return fallback;
+    return null;
   }
 }
 

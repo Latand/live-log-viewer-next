@@ -638,6 +638,18 @@ function receiptIsFailure(status: ReceiptStatus): boolean {
 }
 
 /**
+ * Every status that is *not* a terminal success — the exhaustive complement of
+ * {@link receiptIsTerminalSuccess}. This is the set the receipt row may surface:
+ * in-flight (pending/delivering/queued), failures (rejected/failed), and the two
+ * that previously fell through the cracks — `interrupted` and `uncertain`. No
+ * status can vanish: a receipt is either a silent success or a surfaceable
+ * non-success (§7).
+ */
+export function receiptIsNonSuccess(status: ReceiptStatus): boolean {
+  return !receiptIsTerminalSuccess(status);
+}
+
+/**
  * Reason codes mapped to human sentence keys (§7 "human words, both
  * languages"). Unknown reasons are printed verbatim by the caller, prefixed
  * "not delivered:". Keyed on the sanitized lowercase reason — no Cyrillic in the
@@ -661,45 +673,56 @@ export function humanReceiptReasonKey(reason: string | null | undefined): Messag
   return RECEIPT_REASON_KEYS[reason.trim().toLowerCase()] ?? null;
 }
 
-/** One collapsed failure row: the newest failure plus how many identical
-    consecutive ones folded into it (§7 "×5 · [Retry] [Edit]"). */
-export interface CollapsedFailure {
+/** The one row the receipt strip surfaces: the newest non-success receipt plus
+    how many identical consecutive failures folded into it (§7 "×5 · [Retry]
+    [Edit]"). A single row keeps the strip to "at most one visible current row". */
+export interface CollapsedCurrent {
   receipt: RuntimeReceipt;
   count: number;
 }
 
 export interface CollapsedReceipts {
-  /** In-flight receipts (queued/delivering) — each keeps its pulse dot. */
-  inFlight: RuntimeReceipt[];
-  /** At most one visible failure row, with its repeat counter. */
-  failure: CollapsedFailure | null;
-  /** Older receipts kept behind a `history (n)` disclosure for forensics. */
+  /** At most one visible row: the newest non-success receipt (in-flight,
+      failure, interrupted, or uncertain), with its repeat counter. Null when
+      every receipt is a terminal success (the row stays silent). */
+  current: CollapsedCurrent | null;
+  /** Everything the row doesn't surface — silent successes and older receipts —
+      kept behind a `history (n)` disclosure for forensics. */
   history: RuntimeReceipt[];
 }
 
 /**
  * Collapse a newest-first receipt list into the single-slot status row (§7):
- * terminal successes disappear (the transcript is the proof), in-flight rows
- * stay, and identical consecutive failures fold into one row with a counter.
- * Everything the row doesn't surface lands in `history` for forensics. Pure and
- * order-deterministic so the reducer is unit-tested.
+ * terminal successes are silent (the transcript is the proof), and the newest
+ * non-success receipt — whatever its status — surfaces as the one current row,
+ * with identical consecutive failures folded into a ×N counter. Every status is
+ * classified exhaustively (no more vanishing `interrupted`/`uncertain`), and at
+ * most one current row ever renders. Everything else lands in `history`. Pure
+ * and order-deterministic so the reducer is unit-tested.
  */
 export function collapseReceipts(receipts: RuntimeReceipt[]): CollapsedReceipts {
-  const inFlight = receipts.filter((r) => receiptIsInFlight(r.status));
-  const failures = receipts.filter((r) => receiptIsFailure(r.status));
-  if (failures.length === 0) {
-    return { inFlight, failure: null, history: receipts.filter((r) => receiptIsTerminalSuccess(r.status)) };
+  const idx = receipts.findIndex((r) => receiptIsNonSuccess(r.status));
+  if (idx === -1) {
+    // Every receipt is a terminal success: silent row, successes kept for forensics.
+    return { current: null, history: [...receipts] };
   }
-  const [head, ...rest] = failures;
-  const sameReason = (r: RuntimeReceipt) => (r.reason ?? "") === (head!.reason ?? "");
+  const head = receipts[idx]!;
+  const folded = new Set<string>([head.operationId]);
   let count = 1;
-  for (const r of rest) {
-    if (sameReason(r)) count += 1;
-    else break;
+  if (receiptIsFailure(head.status)) {
+    const reasonOf = (r: RuntimeReceipt) => r.reason ?? "";
+    for (let j = idx + 1; j < receipts.length; j += 1) {
+      const r = receipts[j]!;
+      if (receiptIsFailure(r.status) && reasonOf(r) === reasonOf(head)) {
+        count += 1;
+        folded.add(r.operationId);
+      } else {
+        break;
+      }
+    }
   }
-  const foldedIds = new Set([head!.operationId, ...rest.slice(0, count - 1).map((r) => r.operationId)]);
-  const history = receipts.filter((r) => !foldedIds.has(r.operationId) && !receiptIsInFlight(r.status));
-  return { inFlight, failure: { receipt: head!, count }, history };
+  const history = receipts.filter((r) => !folded.has(r.operationId));
+  return { current: { receipt: head, count }, history };
 }
 
 /**

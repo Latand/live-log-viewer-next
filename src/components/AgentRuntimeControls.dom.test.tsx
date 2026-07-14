@@ -5,7 +5,7 @@ import { createRoot, type Root } from "react-dom/client";
 
 import type { FileEntry } from "@/lib/types";
 
-import { AgentRuntimeControls, ResumeRuntimeControls, readResumeDraft } from "./AgentRuntimeControls";
+import { AgentRuntimeControls, ResumeRuntimeControls, readResumeDraft, savedResumeProfile } from "./AgentRuntimeControls";
 
 const dom = new Window();
 Object.assign(globalThis, {
@@ -79,6 +79,20 @@ test("the on-resume profile (issue #241 §4) persists under a :resume key and ro
   // and readResumeDraft (what the spawn path reads at send time) returns it
   expect(readResumeDraft(file).effort).toBe("medium");
   flushSync(() => root.unmount());
+});
+
+test("savedResumeProfile is null without saved state, so resume sends zero overrides (finding 4)", () => {
+  // No saved profile — display defaults must NOT leak into the send as overrides.
+  expect(savedResumeProfile(file)).toBeNull();
+  // …but the picker still needs a concrete draft to display.
+  expect(readResumeDraft(file).model).toBe("gpt-5.6-sol");
+});
+
+test("savedResumeProfile returns the applied profile once one is explicitly saved (finding 4)", () => {
+  localStorage.setItem(key + ":resume", JSON.stringify({ model: "gpt-5.6-sol", effort: "medium", fast: false }));
+  const saved = savedResumeProfile(file);
+  expect(saved?.model).toBe("gpt-5.6-sol");
+  expect(saved?.effort).toBe("medium");
 });
 
 test("readResumeDraft clamps an out-of-range persisted effort back to the file default", () => {

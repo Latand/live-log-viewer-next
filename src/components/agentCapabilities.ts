@@ -18,10 +18,12 @@ import type { RuntimeSessionView } from "@/hooks/useRuntime";
 /** The controls the strip (and the header kill) gate on. */
 export type ControlName = "stop" | "compact" | "runtime" | "kill" | "terminal" | "images" | "send";
 
-/** One control's resolved capability. `reason` is a localized tooltip key that
-    the strip appends to the aria-label so screen readers hear it too. */
+/** One control's resolved capability. `reason` (disabled) and `note` (enabled)
+    are localized tooltip keys the strip appends to the aria-label so screen
+    readers hear them too. A `note` explains an *enabled* control whose effect
+    isn't obvious — e.g. a subagent Stop that lands in the root agent (§4). */
 export type Capability =
-  | { state: "enabled" }
+  | { state: "enabled"; note?: MessageKey }
   | { state: "disabled"; reason: MessageKey }
   | { state: "hidden" };
 
@@ -46,6 +48,7 @@ export interface StripCapabilities {
 const ENABLED: Capability = { state: "enabled" };
 const HIDDEN: Capability = { state: "hidden" };
 const disabled = (reason: MessageKey): Capability => ({ state: "disabled", reason });
+const enabledWithNote = (note: MessageKey): Capability => ({ state: "enabled", note });
 
 /** A structured (pane-less) host that is currently alive. */
 function isStructuredHost(rv: RuntimeSessionView | null): boolean {
@@ -111,7 +114,10 @@ export function capabilitiesFor(file: FileEntry, rv: RuntimeSessionView | null):
       return {
         surface,
         controls: {
-          stop: disabled("strip.stopSubagent"),
+          // Stop is enabled: ESC lands in the canonical root pane
+          // (`livePaneHost` resolves it server-side), so the interrupt is a
+          // real root-agent interrupt. The note says so — never a dead button.
+          stop: enabledWithNote("strip.stopSubagent"),
           compact: disabled("strip.compactSubagent"),
           runtime: HIDDEN,
           kill: ENABLED,
@@ -193,4 +199,20 @@ export function capabilitiesFor(file: FileEntry, rv: RuntimeSessionView | null):
 /** True when the strip has at least one visible (enabled or disabled) control. */
 export function stripHasVisibleControls(caps: StripCapabilities): boolean {
   return Object.values(caps.controls).some((c) => c.state !== "hidden");
+}
+
+/** How the Terminal dialog should build its command (design §6). */
+export type AttachMode = "live" | "resume";
+
+/**
+ * A live tmux pane attaches to the *running* pane — its ESC-and-type command,
+ * plus a read-only variant — and a Claude subagent attaches to its root pane.
+ * Every other surface (structured, finished, dead) hands out a resume command
+ * that boots a fresh window. Selecting `resume` for a live tmux pane was the
+ * finding-3 bug: it generated a resume command for a conversation still running
+ * in a pane you could simply attach to.
+ */
+export function attachModeFor(file: FileEntry, rv: RuntimeSessionView | null): AttachMode {
+  const surface = surfaceFor(file, rv);
+  return surface === "live-root" || surface === "live-subagent" ? "live" : "resume";
 }

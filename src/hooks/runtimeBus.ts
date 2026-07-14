@@ -88,6 +88,11 @@ export interface RuntimeBus {
   subscribeFilesRevision(listener: (revision: number) => void): () => void;
   start(): void;
   stop(): void;
+  /** Force a fresh snapshot into the store on demand (dead-host Re-check, §5):
+      a recovered host flips its axis and the projection clears the banner.
+      Resolves `true` when a snapshot was installed, `false` on a failed fetch so
+      the caller can surface the failure. The live stream is left untouched. */
+  refresh(): Promise<boolean>;
 }
 
 export function createRuntimeBus(deps: RuntimeBusDeps): RuntimeBus {
@@ -348,6 +353,22 @@ export function createRuntimeBus(deps: RuntimeBusDeps): RuntimeBus {
       firstFailureAt = null;
       state = { store: emptyStore(), connection: "offline", resyncedAt: null, lastEventAt: null, enabled: false };
       emit();
+    },
+    async refresh() {
+      const myGen = generation;
+      try {
+        const res = await deps.fetch(SNAPSHOT_URL, { headers: { accept: "application/json" } });
+        if (!res.ok) return false;
+        const snapshot = (await res.json()) as RuntimeSnapshot;
+        // A newer generation already superseded us (reconnect/stop raced): the
+        // fetch itself succeeded and fresher state is live, so report success.
+        if (myGen !== generation) return true;
+        hasSnapshot = true;
+        setState({ store: installSnapshot(snapshot), lastEventAt: deps.now() });
+        return true;
+      } catch {
+        return false;
+      }
     },
   };
 }

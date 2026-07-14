@@ -4,7 +4,7 @@ import type { FileEntry } from "@/lib/types";
 import type { RuntimeSessionView } from "@/hooks/useRuntime";
 import type { HostAxis, HostKind } from "@/components/runtime/runtimeModel";
 
-import { capabilitiesFor, stripHasVisibleControls, surfaceFor, type ControlName, type StripSurface } from "./agentCapabilities";
+import { attachModeFor, capabilitiesFor, stripHasVisibleControls, surfaceFor, type ControlName, type StripSurface } from "./agentCapabilities";
 
 /**
  * Every cell of the design §4 capability matrix, asserted against the pure
@@ -39,6 +39,10 @@ const reason = (name: ControlName, f: FileEntry, view: RuntimeSessionView | null
   const cap = capabilitiesFor(f, view).controls[name];
   return cap.state === "disabled" ? cap.reason : null;
 };
+const note = (name: ControlName, f: FileEntry, view: RuntimeSessionView | null) => {
+  const cap = capabilitiesFor(f, view).controls[name];
+  return cap.state === "enabled" ? cap.note ?? null : null;
+};
 
 /* ------------------------------ surface classification ------------------------------ */
 
@@ -71,9 +75,11 @@ test("live-root: every control enabled", () => {
   }
 });
 
-test("live-subagent: stop/compact disabled with subagent reasons, runtime hidden, kill enabled", () => {
+test("live-subagent: stop enabled (root-interrupt note), compact disabled, runtime hidden, kill enabled", () => {
   const f = file({ proc: "running", parent: "/root.jsonl" });
-  expect(reason("stop", f, null)).toBe("strip.stopSubagent");
+  // Stop is a real capability on a subagent — ESC lands in the root pane.
+  expect(state("stop", f, null)).toBe("enabled");
+  expect(note("stop", f, null)).toBe("strip.stopSubagent");
   expect(reason("compact", f, null)).toBe("strip.compactSubagent");
   expect(state("runtime", f, null)).toBe("hidden");
   expect(state("kill", f, null)).toBe("enabled");
@@ -128,6 +134,19 @@ test("inert: a finished non-resumable subagent still offers a terminal iff resum
   // a finished codex session is resumable → the terminal command is still composable
   const resumable = file({ proc: null, engine: "codex", root: "codex-sessions", kind: "session" });
   expect(surfaceFor(resumable, null)).toBe<StripSurface>("resume");
+});
+
+/* ------------------------------ attach mode (§6, finding 3) ------------------------------ */
+
+test("attachModeFor picks live tmux attach for running panes and resume for everything else", () => {
+  // a live tmux root/subagent attaches to the running pane (root pane for a child)
+  expect(attachModeFor(file({ proc: "running" }), null)).toBe("live");
+  expect(attachModeFor(file({ proc: "running", parent: "/root.jsonl" }), null)).toBe("live");
+  expect(attachModeFor(file({ engine: "codex", root: "codex-sessions", proc: "running" }), null)).toBe("live");
+  // structured, finished, and dead hosts all resume in a fresh window
+  expect(attachModeFor(file({ proc: "running" }), rv("codex-app-server", "hosted"))).toBe("resume");
+  expect(attachModeFor(file({ proc: null, engine: "codex", root: "codex-sessions" }), null)).toBe("resume");
+  expect(attachModeFor(file({ proc: "running" }), rv("claude-broker", "dead"))).toBe("resume");
 });
 
 /* ------------------------------ visibility helper ------------------------------ */
