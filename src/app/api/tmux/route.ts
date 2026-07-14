@@ -11,17 +11,13 @@ import {
   type DeliveryOutcome,
 } from "@/lib/delivery";
 import { canonicalTranscriptTarget, readTranscriptHosts } from "@/lib/agent/transcriptHost";
-import { agentRegistry } from "@/lib/agent/registry";
-import { sessionKeyId } from "@/lib/agent/sessionKey";
 import { reconfigurationFromBody } from "@/lib/agent/reconfigure";
 import { listFiles } from "@/lib/scanner";
 import { pathAllowed } from "@/lib/scanner/roots";
 import { allowedKillTarget, consumeKillTarget } from "@/lib/resources";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
 import { materializeStructuredTerminal } from "@/lib/runtime/structuredTerminal";
-import { runtimeHostClient } from "@/lib/runtime/client";
-import { newOperationId } from "@/lib/runtime/contracts";
-import { kickStructuredDeliveryQueue } from "@/lib/runtime/structuredDeliverySignal";
+import { dispatchStructuredControl } from "@/lib/runtime/structuredControls";
 import {
   captureTmuxAttachReference,
   collectImagePayloads,
@@ -207,35 +203,9 @@ export async function POST(req: NextRequest): Promise<NextResponse<SendResponse 
     }
   }
 
-  const registry = agentRegistry();
-  const registeredConversation = filePath ? registry.conversationForPath(filePath) : null;
-  const registeredGeneration = registeredConversation?.generations.at(-1);
-  const structuredEntry = registeredConversation && registeredGeneration
-    ? registry.snapshot().entries[sessionKeyId({ engine: registeredConversation.engine, sessionId: registeredGeneration.id })]
-    : null;
-  if (structuredEntry?.structuredHost && body.action === "interrupt") {
-    const client = runtimeHostClient();
-    if (!client || !registeredConversation) {
-      return NextResponse.json({ error: "structured runtime host is unavailable" }, { status: 503 });
-    }
-    try {
-      const operationId = newOperationId();
-      const result = await client.command({
-        kind: "interrupt",
-        operationId,
-        idempotencyKey: operationId,
-        conversationId: registeredConversation.id,
-        turnId: structuredEntry.structuredHost.activeTurnRef,
-      });
-      kickStructuredDeliveryQueue();
-      return NextResponse.json({ ok: true, structured: true, target: registeredConversation.id, operationId, receipt: result.receipt }, { status: 202 });
-    } catch (error) {
-      return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 503 });
-    }
-  }
-  if (structuredEntry?.structuredHost && body.action === "dialog-key") {
-    return NextResponse.json({ error: "structured questions require a runtime attention answer" }, { status: 409 });
-  }
+  const explicitAction = typeof body.action === "string" ? body.action : "";
+  const structuredControl = await dispatchStructuredControl({ path: filePath, conversationId, action: explicitAction });
+  if (structuredControl) return NextResponse.json(structuredControl.body, { status: structuredControl.status });
 
   if (body.action === "interrupt") return respond(await interruptConversation(filePath));
   if (body.action === "compact") return respond(await compactConversation(filePath));

@@ -2135,7 +2135,13 @@ export class AgentRegistry {
     });
   }
 
-  private settleSpawnInFile(file: RegistryFile, launchId: string, entry: Omit<AgentRegistryEntry, "updatedAt">, completionMode: NonNullable<SpawnReceipt["completionMode"]>): SpawnSettlement {
+  private settleSpawnInFile(
+    file: RegistryFile,
+    launchId: string,
+    entry: Omit<AgentRegistryEntry, "updatedAt">,
+    completionMode: NonNullable<SpawnReceipt["completionMode"]>,
+    finalize = true,
+  ): SpawnSettlement {
     const receipt = file.receipts[launchId];
     if (!receipt) throw new Error("unknown spawn receipt");
     const prior = receipt.key ? file.entries[sessionKeyId(receipt.key)] : null;
@@ -2328,12 +2334,51 @@ export class AgentRegistry {
     }
     if (entry.host?.kind === "tmux") receipt.verifiedHost = entry.host;
     if (receipt.target === null && entry.host?.kind === "tmux") receipt.target = entry.host.paneId;
-    receipt.state = "completed";
+    receipt.state = finalize ? "completed" : "path-pending";
     receipt.error = null;
-    receipt.completionMode = receipt.completionMode === "observed-completed" && completionMode === "route-completed"
-      ? "route-recovered"
-      : receipt.completionMode ?? completionMode;
+    if (finalize) {
+      receipt.completionMode = receipt.completionMode === "observed-completed" && completionMode === "route-completed"
+        ? "route-recovered"
+        : receipt.completionMode ?? completionMode;
+    }
     return { kind: "settled", receipt: clone(receipt), entry: clone(full), conversation: clone(conversation) };
+  }
+
+  stageStructuredSpawn(launchId: string, entry: Omit<AgentRegistryEntry, "updatedAt">): SpawnSettlement {
+    return this.mutate((file) => {
+      const paths = new Set([entry.artifactPath]);
+      const signature = migrationReadinessSignature(file, entry.key.engine, paths);
+      const staged = this.settleSpawnInFile(file, launchId, entry, "route-completed", false);
+      advanceMigrationScopeRevision(file, entry.key.engine, signature, paths);
+      return staged;
+    });
+  }
+
+  finalizeStructuredSpawn(launchId: string): SpawnSettlement {
+    return this.mutate((file) => {
+      const receipt = file.receipts[launchId];
+      if (!receipt) throw new Error("unknown spawn receipt");
+      if (receipt.state === "failed" || receipt.state === "conflicted") {
+        return { kind: "conflict", receipt: clone(receipt), code: "spawn_identity_conflict" };
+      }
+      if (!receipt.key || !receipt.artifactPath) throw new Error("structured spawn identity is incomplete");
+      const entry = file.entries[sessionKeyId(receipt.key)];
+      const conversation = file.conversations[receipt.conversationId];
+      if (!entry || !conversation
+        || entry.artifactPath !== receipt.artifactPath
+        || !entry.structuredHost?.process
+        || !entry.claimOwner
+        || entry.status === "unhosted"
+        || entry.status === "dead") {
+        throw new Error("structured spawn durable host setup is incomplete");
+      }
+      entry.pendingAction = null;
+      entry.updatedAt = now();
+      receipt.state = "completed";
+      receipt.error = null;
+      receipt.completionMode = "route-completed";
+      return { kind: "settled", receipt: clone(receipt), entry: clone(entry), conversation: clone(conversation) };
+    });
   }
 
   settleSpawn(launchId: string, entry: Omit<AgentRegistryEntry, "updatedAt">, completionMode: NonNullable<SpawnReceipt["completionMode"]> = "route-completed"): SpawnSettlement {
@@ -2363,6 +2408,34 @@ export class AgentRegistry {
       receipt.state = receipt.pane ? "conflicted" : "failed";
       receipt.error = error;
       if (receipt.state === "conflicted") receipt.verifiedHost = null;
+    });
+  }
+
+  failStructuredSpawn(launchId: string, error: string): void {
+    this.mutate((file) => {
+      const receipt = file.receipts[launchId];
+      if (!receipt || receipt.state === "completed" || receipt.state === "failed" || receipt.state === "conflicted") return;
+      receipt.state = "failed";
+      receipt.error = error;
+      if (!receipt.key || !receipt.artifactPath) return;
+      const entry = file.entries[sessionKeyId(receipt.key)];
+      if (!entry || entry.artifactPath !== receipt.artifactPath) return;
+      const changedHostPaths = activeHostPathsChangedByEntry(file, sessionKeyId(receipt.key), {
+        ...entry,
+        host: null,
+        structuredHost: null,
+        status: "dead",
+        claimOwner: null,
+        pendingAction: null,
+      });
+      const readinessBefore = migrationReadinessSignature(file, receipt.key.engine, changedHostPaths);
+      entry.host = null;
+      entry.structuredHost = null;
+      entry.status = "dead";
+      entry.claimOwner = null;
+      entry.pendingAction = null;
+      entry.updatedAt = now();
+      advanceMigrationScopeRevision(file, receipt.key.engine, readinessBefore, changedHostPaths);
     });
   }
 

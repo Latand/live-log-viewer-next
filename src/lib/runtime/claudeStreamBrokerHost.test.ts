@@ -243,6 +243,77 @@ describe("ClaudeStreamBrokerHost", () => {
     await allowed.release();
   });
 
+  test("managed fresh and adopted hosts share one settings profile while legacy settings stay local", async () => {
+    const managedHome = fs.mkdtempSync(path.join(os.tmpdir(), "llv-claude-managed-policy-"));
+    const sharedHome = fs.mkdtempSync(path.join(os.tmpdir(), "llv-claude-shared-policy-"));
+    const sharedSettingsPath = path.join(sharedHome, "settings.json");
+    fs.writeFileSync(sharedSettingsPath, JSON.stringify({
+      theme: "shared-dark",
+      env: { SHARED_SETTING: "kept" },
+      hooks: { PreToolUse: [{ matcher: "Read", hooks: [{ type: "command", command: "shared-read-hook" }] }] },
+    }));
+
+    const freshChild = new FakeClaude(new RecordingDeliveryLedger());
+    const freshCapture: { args?: string[] } = {};
+    const fresh = await ClaudeStreamBrokerHost.start({
+      sessionId: "managed-policy-session",
+      cwd: managedHome,
+      claudeConfigDir: managedHome,
+      spawnPolicyBaseSettingsPath: sharedSettingsPath,
+      readAuthStatus: () => ({ loggedIn: true, authMethod: "claude.ai", subscriptionType: "max" }),
+      readTranscript: () => [],
+      spawnProcess: fakeSpawn(freshChild, freshCapture),
+    });
+    const freshSettingsPath = freshCapture.args![freshCapture.args!.indexOf("--settings") + 1]!;
+    const freshSettings = JSON.parse(fs.readFileSync(freshSettingsPath, "utf8")) as {
+      theme: string;
+      env: Record<string, string>;
+      hooks: { PreToolUse: Array<{ matcher: string }> };
+    };
+    await fresh.release();
+
+    const adoptedChild = new FakeClaude(new RecordingDeliveryLedger());
+    const adoptedCapture: { args?: string[] } = {};
+    const adopted = await ClaudeStreamBrokerHost.adopt("managed-policy-session", {
+      cwd: managedHome,
+      claudeConfigDir: managedHome,
+      spawnPolicyBaseSettingsPath: sharedSettingsPath,
+      readAuthStatus: () => ({ loggedIn: true, authMethod: "claude.ai", subscriptionType: "max" }),
+      readTranscript: () => [],
+      spawnProcess: fakeSpawn(adoptedChild, adoptedCapture),
+    });
+    const adoptedSettingsPath = adoptedCapture.args![adoptedCapture.args!.indexOf("--settings") + 1]!;
+    const adoptedSettings = JSON.parse(fs.readFileSync(adoptedSettingsPath, "utf8"));
+    expect(freshSettings.theme).toBe("shared-dark");
+    expect(freshSettings.env).toEqual({ SHARED_SETTING: "kept" });
+    expect(freshSettings.hooks.PreToolUse.map((group) => group.matcher)).toEqual(["Read", "Task|Agent"]);
+    expect(adoptedSettings).toEqual(freshSettings);
+    await adopted.release();
+
+    const legacyHome = fs.mkdtempSync(path.join(os.tmpdir(), "llv-claude-legacy-policy-"));
+    const legacySettingsPath = path.join(legacyHome, "settings.json");
+    const legacySettings = JSON.stringify({ theme: "legacy-light", custom: { owner: "legacy" } });
+    fs.writeFileSync(legacySettingsPath, legacySettings);
+    const legacyChild = new FakeClaude(new RecordingDeliveryLedger());
+    const legacyCapture: { args?: string[] } = {};
+    const legacy = await ClaudeStreamBrokerHost.start({
+      sessionId: "legacy-policy-session",
+      cwd: legacyHome,
+      claudeConfigDir: legacyHome,
+      spawnPolicyBaseSettingsPath: null,
+      readAuthStatus: () => ({ loggedIn: true, authMethod: "claude.ai", subscriptionType: "max" }),
+      readTranscript: () => [],
+      spawnProcess: fakeSpawn(legacyChild, legacyCapture),
+    });
+    const legacyProfilePath = legacyCapture.args![legacyCapture.args!.indexOf("--settings") + 1]!;
+    const legacyProfile = JSON.parse(fs.readFileSync(legacyProfilePath, "utf8")) as {
+      hooks: { PreToolUse: Array<{ matcher: string }> };
+    };
+    expect(legacyProfile.hooks.PreToolUse.some((group) => group.matcher === "Task|Agent")).toBe(true);
+    expect(fs.readFileSync(legacySettingsPath, "utf8")).toBe(legacySettings);
+    await legacy.release();
+  });
+
   test("confirms delivery only from replayed user-role frames", async () => {
     const ledger = new RecordingDeliveryLedger();
     const child = new FakeClaude(ledger);

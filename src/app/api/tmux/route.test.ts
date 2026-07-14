@@ -1,8 +1,22 @@
-import { expect, mock, test } from "bun:test";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
+import { afterAll, expect, mock, test } from "bun:test";
 
 import { NextRequest } from "next/server";
 
-const PATHNAME = "/allowed/rollout-019f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl";
+const previousCodexHome = process.env.LLV_CODEX_HOME;
+const routeCodexHome = fs.mkdtempSync(path.join(os.tmpdir(), "llv-tmux-route-codex-"));
+const PATHNAME = path.join(routeCodexHome, "sessions", "rollout-019f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl");
+fs.mkdirSync(path.dirname(PATHNAME), { recursive: true });
+fs.writeFileSync(PATHNAME, "{}\n");
+process.env.LLV_CODEX_HOME = routeCodexHome;
+afterAll(() => {
+  if (previousCodexHome === undefined) delete process.env.LLV_CODEX_HOME;
+  else process.env.LLV_CODEX_HOME = previousCodexHome;
+  fs.rmSync(routeCodexHome, { recursive: true, force: true });
+});
 
 let transcriptReads = 0;
 let lastTranscriptReadFresh: boolean | undefined;
@@ -50,32 +64,43 @@ const snapshot = {
 
 mock.module("@/lib/agent/transcriptHost", () => ({
   canonicalTranscriptTarget: (observed: typeof snapshot, pathname: string) => observed.canonicalFor(pathname)?.display ?? null,
+  deliverToTranscriptHost: async () => ({ kind: "unavailable" }),
   readTranscriptHosts: async (fresh?: boolean) => {
     transcriptReads += 1;
     lastTranscriptReadFresh = fresh;
     return snapshot;
   },
 }));
+mock.module("@/lib/runtime/structuredControls", () => ({ dispatchStructuredControl: async () => null }));
 mock.module("@/lib/delivery", () => ({
   answerDialogKey: async () => ({ ok: true, target: "" }),
   compactConversation: async () => ({ ok: true, target: "" }),
   deliverConversationMessage: (message: unknown) => delivery(message),
   interruptConversation: async () => ({ ok: true, target: "" }),
   killConversation: async () => killOutcome,
+  livePaneTarget: async () => null,
+  reconfigureConversation: async () => ({ ok: true, outcome: "reconfigured", target: "agents:4.0" }),
   resumeConversation: async () => ({ ok: true, target: "" }),
 }));
 mock.module("@/lib/resources", () => ({
   allowedKillTarget: (target: string) => (target === "agents:9.0" ? resourceTarget : null),
   consumeKillTarget: () => {},
 }));
-mock.module("@/lib/scanner/roots", () => ({ pathAllowed: (pathname: string) => pathname.startsWith("/allowed/") }));
 mock.module("@/lib/tmux", () => ({
   captureTmuxAttachReference: (value: Record<string, unknown>) => ({ ...value, tmuxServerStartIdentity: "900:one", paneStartIdentity: "100:one" }),
   collectImagePayloads: () => ({ images: [], error: null }),
   killPane: async () => {},
   panePidOf: async () => null,
   resolveRequestedTmuxTarget: async (pid: number | null) => (pid === null ? null : pidTargets.get(pid) ?? null),
+  resolveTarget: async (pid: number) => pidTargets.get(pid) ?? null,
+  knownLivePids: async () => new Set<number>(),
+  panePidMap: async () => new Map<number, string>(),
+  paneInfo: async () => null,
+  targetForKnownPid: async (pid: number) => pidTargets.get(pid) ?? null,
+  verifyTmuxHostEvidence: async () => true,
   resolveTmuxAttach: async () => attachResolution,
+  spawnAgentWithPrompt: async () => ({ paneId: "%91", display: "agents:worker.0" }),
+  spawnCommandWindow: async () => ({ paneId: "%90", display: "agents:view.0" }),
   tmuxEndpointDescriptor: () => endpoint,
 }));
 

@@ -16,7 +16,7 @@ import { resolveSpawnRole } from "@/lib/roles/registry";
 import { spawnContentDigest, spawnParentSelector, spawnRequestDigest } from "@/lib/agent/spawnIdentity";
 import { sessionKeyFromTranscript, sessionKeyId } from "@/lib/agent/sessionKey";
 import { resolveSpawnLineage, SpawnParentError } from "@/lib/agent/spawnParent";
-import { spawnResponseForReceipt, type SpawnResponse } from "@/lib/agent/spawnResponse";
+import { spawnReplayStatus, spawnResponseForReceipt, type SpawnResponse } from "@/lib/agent/spawnResponse";
 import { applyClaudeSpawnPolicy, prepareManagedClaudeSpawnHome } from "@/lib/agent/spawnPolicy";
 import { resolveSpawnedTranscriptPath } from "@/lib/agent/spawnedTranscript";
 import { headCwd } from "@/lib/agent/transcript";
@@ -224,7 +224,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse
       const structured = Boolean(begun.receipt.key && registry.snapshot().entries[sessionKeyId(begun.receipt.key)]?.structuredHost);
       const response = spawnResponseForReceipt(begun.receipt, begun.receipt.artifactPath, { structured });
       if (begun.receipt.state === "failed") return NextResponse.json({ error: "original spawn failed before launch", retrySafe: true }, { status: 409 });
-      return NextResponse.json(response, { status: response.state === "starting" ? 202 : 200 });
+      return NextResponse.json(response, { status: spawnReplayStatus(response, structured) });
     }
     launchId = begun.receipt.launchId;
     if (engine === "claude" && transport === "tmux") {

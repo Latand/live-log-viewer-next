@@ -13,6 +13,10 @@ export interface SpawnResponse {
   error?: string;
 }
 
+export function spawnReplayStatus(response: SpawnResponse, structured: boolean): 200 | 202 {
+  return response.state === "starting" || (structured && response.state === "path-pending") ? 202 : 200;
+}
+
 export function spawnResponseForReceipt(
   receipt: SpawnReceipt,
   path = receipt.artifactPath,

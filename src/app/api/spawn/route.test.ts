@@ -10,7 +10,7 @@ import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
 import { codexSessionRoots } from "@/lib/accounts/codex";
 import { spawnParentSelector, spawnRequestDigest } from "@/lib/agent/spawnIdentity";
 import { rotateOperatorSpawnCapability } from "@/lib/agent/operatorCapability";
-import { spawnResponseForReceipt } from "@/lib/agent/spawnResponse";
+import { spawnReplayStatus, spawnResponseForReceipt } from "@/lib/agent/spawnResponse";
 import { resolveSpawnLineage, resolveSpawnLineageParent, resolveSpawnParent, SpawnParentError } from "@/lib/agent/spawnParent";
 import { authenticatedAgentSpawnCaller, isAgentInitiatedSpawn, spawnLineageSelectorForCaller } from "./admission";
 import { POST } from "./route";
@@ -311,6 +311,22 @@ test("a completed pane-less receipt replays as a launched structured conversatio
     path: pathname,
     state: "settled",
   });
+});
+
+test("a staged pane-less receipt replays with accepted status", () => {
+  const response = {
+    ok: true as const,
+    target: null,
+    path: "/sessions/pending.jsonl",
+    launchId: "launch-pending",
+    conversationId: "conversation_pending",
+    launched: false,
+    retrySafe: false,
+    state: "path-pending" as const,
+  };
+
+  expect(spawnReplayStatus(response, true)).toBe(202);
+  expect(spawnReplayStatus(response, false)).toBe(200);
 });
 
 test("a pane-bound launch verification failure returns launched false with its teaching error", () => {

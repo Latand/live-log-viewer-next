@@ -9,8 +9,9 @@ import {
   type AdoptedClaudeHost,
   type AdoptedCodexHost,
 } from "./registry";
-import type { RuntimeHostClient } from "./client";
+import { runtimeHostClient, type RuntimeHostClient } from "./client";
 import { bindStructuredDeliveryQueue } from "./structuredDeliveryController";
+import { recoverPendingStructuredSpawns } from "./structuredSpawn";
 
 type AdoptedStructuredHost = AdoptedCodexHost | AdoptedClaudeHost;
 let adoptedHosts: AdoptedStructuredHost[] = [];
@@ -75,7 +76,9 @@ export async function adoptStructuredHostsAtStartup(
     },
   );
   adoptedHosts = [...codex, ...claude];
-  await bindStructuredDeliveryQueue(adoptedHosts, { registry: dependencies.registry, client: dependencies.client });
+  const client = dependencies.client === undefined ? runtimeHostClient() : dependencies.client;
+  await bindStructuredDeliveryQueue(adoptedHosts, { registry: dependencies.registry, client });
+  if (client) await recoverPendingStructuredSpawns(registry, client);
   return adoptedHosts;
 }
 
