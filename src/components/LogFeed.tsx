@@ -19,6 +19,7 @@ import { QuestionCard } from "./feed/QuestionCard";
 import { speakableAnswer } from "./feed/speakableAnswer";
 import { isSubagent } from "./projectModel";
 import { TaskHeader } from "./TaskHeader";
+import { workedCaption } from "./turnDuration";
 
 /** Items rendered initially and added per «show earlier» step. */
 const RENDER_STEP = 1500;
@@ -96,6 +97,21 @@ function WorkingRow({ icon: Icon, label }: { icon: LucideIcon; label: string }) 
       </span>
       <Icon className="h-3.5 w-3.5" aria-hidden />
       {label}
+    </div>
+  );
+}
+
+/** Muted caption after the final message once the turn is complete, mirroring
+    the codex TUI's "Worked for …" line (issue #231). Renders nothing while the
+    turn is still running — `workedCaption` returns null until `endedAt` is set. */
+function WorkedSeparator({ file }: { file: FileEntry }) {
+  const caption = workedCaption(file);
+  if (!caption) return null;
+  return (
+    <div className="mt-3 flex items-center gap-2 text-[11px] font-semibold text-muted" role="note">
+      <span className="h-px flex-1 bg-border" aria-hidden />
+      <span className="tabular-nums">{caption}</span>
+      <span className="h-px flex-1 bg-border" aria-hidden />
     </div>
   );
 }
@@ -495,6 +511,7 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
                     <CornerDownRight className="h-3.5 w-3.5" aria-hidden /> {t("feed.returnedResult")}
                   </div>
                 ) : null}
+                <WorkedSeparator file={file} />
               </>
             ) : (
               <div className="mt-[14vh] text-center text-muted">

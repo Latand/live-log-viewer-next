@@ -48,6 +48,9 @@ export const en = {
   "time.agoMin": "{n}m ago",
   "time.agoHour": "{n}h ago",
   "time.agoDay": "{n}d ago",
+  "turn.worked": "Worked for {d}",
+  "turn.running": "working {d}",
+  "turn.lastRun": "last run: {d}",
 
   // Conversation kind labels (display of file.kind discriminant)
   "kind.session": "session",

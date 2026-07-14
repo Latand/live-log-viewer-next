@@ -10,6 +10,7 @@ import { resolveTarget } from "../tmux";
 import { tickWorkflows } from "../workflows/engine";
 import { activityVerdict } from "./activity";
 import { ctxFor } from "./context";
+import { lastTurnFor } from "./turnDuration";
 import { discoverFiles, discoverFilesWithProjectCatalog } from "./discover";
 import { entryEffort, entryFast } from "./effort";
 import { linkEntries } from "./links";
@@ -229,6 +230,7 @@ async function listFilesInternal(
     entry.plan = planFor(entry);
     entry.goal = goalFor(entry);
     entry.ctx = ctxFor(entry);
+    entry.lastTurn = lastTurnFor(entry);
     entry.pendingWakeup = pendingWakeupFor(entry);
   });
   await linkEntries(entries, { persist });

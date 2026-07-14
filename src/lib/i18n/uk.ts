@@ -45,6 +45,9 @@ export const uk: Record<keyof typeof en, Message> = {
   "time.agoMin": "{n} хв тому",
   "time.agoHour": "{n} год тому",
   "time.agoDay": "{n} д тому",
+  "turn.worked": "Працював {d}",
+  "turn.running": "працює {d}",
+  "turn.lastRun": "останній прогін: {d}",
 
   "kind.session": "сесія",
   "kind.subagent": "субагент",
