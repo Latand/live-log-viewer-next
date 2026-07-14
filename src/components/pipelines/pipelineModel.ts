@@ -1,9 +1,12 @@
+import { roleNameById } from "@/components/builderCopy";
+import { applyPipelineSnapshot, revertPipelineSnapshot } from "@/hooks/useFiles";
 import { getLocale, translate, type MessageKey, type TFunction } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
 import type { Flow, FlowEngine } from "@/lib/flows/types";
 import { PIPELINE_DISALLOWED_ROLE_IDS } from "@/lib/pipelines/types";
 import type {
   CreatePipelineRequest,
+  EffectivePipelineRole,
   Pipeline,
   PipelineAccess,
   PipelineAction,
@@ -18,7 +21,9 @@ import type {
   StageVerdictStatus,
 } from "@/lib/pipelines/types";
 
-export const PIPELINES_CHANGED_EVENT = "llv:pipelines-changed";
+import { PIPELINES_CHANGED_EVENT } from "./pipelineEvents";
+
+export { PIPELINES_CHANGED_EVENT };
 
 /** Client-safe list of the pipeline role ids an operator may assign to a stage,
     minus the ones a pipeline may not use (deployer needs interactive deploy
@@ -36,10 +41,13 @@ export type StageOverrideForm = { roleId: string; engine: FlowEngine; model: str
  * Sending an unchanged engine/model/effort would pin the previous role's runtime
  * as an explicit override and defeat the backend's "changing the role resets
  * unpinned runtime to its defaults" rule — so a role-only change must omit them.
- * Prompt is always sent (it is required and the primary edit).
+ * The prompt too travels only when edited, so an untouched stage's stored
+ * prompt is never rewritten by an unrelated override (issue #221 §5).
  */
 export function stageOverrideBody(stage: PipelineStage, form: StageOverrideForm): Omit<PatchPipelineRequest, "action"> {
-  const body: Omit<PatchPipelineRequest, "action"> = { stageId: stage.id, prompt: form.prompt.trim() };
+  const body: Omit<PatchPipelineRequest, "action"> = { stageId: stage.id };
+  const prompt = form.prompt.trim();
+  if (prompt && prompt !== stage.prompt) body.prompt = prompt;
   if (form.roleId !== (stage.role?.roleId ?? "")) body.role = form.roleId ? { roleId: form.roleId as PipelineRoleId } : null;
   if (form.engine !== stage.effectiveRole.engine) body.engine = form.engine;
   if (form.model.trim() !== (stage.effectiveRole.model ?? "")) body.model = form.model.trim() || null;
@@ -266,9 +274,10 @@ export function attemptStateLabel(t: TFunction, state: PipelineAttemptState): st
   return t(`pipelineChipState.${state}`);
 }
 
-/** Short label a chip shows: the role's registry id, or the stage id for raw stages. */
+/** Short label a chip shows: the role's localized display name, or the stage id
+    for raw role-less stages. */
 export function stageChipLabel(t: TFunction, stage: PipelineStage): string {
-  if (stage.role?.roleId) return stage.role.roleId;
+  if (stage.role?.roleId) return roleNameById(t, stage.role.roleId);
   if (stage.kind === "review-loop") return t("pipelineStrip.reviewStage");
   return stage.id;
 }
@@ -327,15 +336,20 @@ export type PipelineTemplate = {
   stages: Array<Pick<DraftStage, "kind" | "roleId" | "access" | "prompt">>;
 };
 
-/** Client-side starters. They only seed rows; persisted templates are a later slice. */
+/** Client-side starters. They only seed rows; persisted templates are a later
+    slice. Stage prompts are PURE wiring tokens (issue #221 §5): the role
+    scaffold carries the instructions, the tokens only route the task text /
+    previous stage's output in — so the builder can show the wiring as a
+    plain-language caption and treat any extra text as the operator's own
+    additional prompt. */
 export const PIPELINE_TEMPLATES: readonly PipelineTemplate[] = [
   {
     id: "planBuildReview",
     labelKey: "pipelineTemplates.planBuildReview",
     stages: [
-      { kind: "run", roleId: "architect", access: "read-only", prompt: "Plan {{task}}" },
+      { kind: "run", roleId: "architect", access: "read-only", prompt: "{{task}}" },
       { kind: "run", roleId: "builder", access: "read-write", prompt: "{{prev.output}}" },
-      { kind: "review-loop", roleId: "reviewer", access: "read-only", prompt: "Review the implementation against {{task}}." },
+      { kind: "review-loop", roleId: "reviewer", access: "read-only", prompt: "{{task}}" },
     ],
   },
   {
@@ -343,7 +357,7 @@ export const PIPELINE_TEMPLATES: readonly PipelineTemplate[] = [
     labelKey: "pipelineTemplates.buildReview",
     stages: [
       { kind: "run", roleId: "builder", access: "read-write", prompt: "{{task}}" },
-      { kind: "review-loop", roleId: "reviewer", access: "read-only", prompt: "Review the implementation against {{task}}." },
+      { kind: "review-loop", roleId: "reviewer", access: "read-only", prompt: "{{task}}" },
     ],
   },
   {
@@ -351,18 +365,62 @@ export const PIPELINE_TEMPLATES: readonly PipelineTemplate[] = [
     labelKey: "pipelineTemplates.buildVerify",
     stages: [
       { kind: "run", roleId: "builder", access: "read-write", prompt: "{{task}}" },
-      { kind: "run", roleId: "verifier", access: "read-only", prompt: "Verify {{prev.output}} satisfies {{task}}." },
+      { kind: "run", roleId: "verifier", access: "read-only", prompt: "{{prev.output}}" },
     ],
   },
   {
     id: "blank",
     labelKey: "pipelineTemplates.blank",
     stages: [
-      { kind: "run", roleId: "", access: "read-write", prompt: "" },
-      { kind: "run", roleId: "", access: "read-write", prompt: "" },
+      { kind: "run", roleId: "", access: "read-write", prompt: "{{task}}" },
+      { kind: "run", roleId: "", access: "read-write", prompt: "{{prev.output}}" },
     ],
   },
 ];
+
+/* ── Stage prompt wiring (issue #221 §5) ────────────────────────────────────
+   The {{task}}/{{prev.output}} tokens are plumbing the operator never needs to
+   see: the engine substitutes them (and ALWAYS appends the pinned task) when it
+   renders the stage prompt. The builder therefore splits a stored prompt into
+   its wiring (shown as a plain-language caption) and the operator's additional
+   text (the only editable part), and reassembles on save. */
+
+const WIRING_TOKEN_RE = /\{\{(?:task|prev\.output)\}\}/g;
+
+/** Default wiring for a stage by chain position: the first stage receives the
+    task, every later one the previous stage's output. */
+export function defaultStageWiring(index: number): string {
+  return index > 0 ? "{{prev.output}}" : "{{task}}";
+}
+
+/** The operator-authored part of a stage prompt: everything except the wiring
+    tokens, whitespace-normalized. */
+export function stagePromptExtra(prompt: string): string {
+  return prompt
+    .replace(WIRING_TOKEN_RE, " ")
+    .split("\n")
+    .map((line) => line.replace(/[ \t]+/g, " ").trim())
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+/** Does the stage's prompt route the previous stage's output in? (The pinned
+    task is always appended by the engine, so it needs no probe.) */
+export function stageReceivesPrevOutput(prompt: string): boolean {
+  return prompt.includes("{{prev.output}}");
+}
+
+/** Reassemble a stage prompt from its current wiring tokens plus the edited
+    additional text. Token order is preserved; a prompt that lost every token
+    (legacy free text) falls back to the position default so the stage never
+    loses its input. */
+export function buildStagePrompt(currentPrompt: string, extra: string, index: number): string {
+  const tokens = [...new Set(currentPrompt.match(WIRING_TOKEN_RE) ?? [])];
+  const wiring = tokens.length ? tokens.join("\n") : defaultStageWiring(index);
+  const text = extra.trim();
+  return text ? `${wiring}\n\n${text}` : wiring;
+}
 
 /**
  * The linear-chain invariant the API enforces (a review-loop needs a preceding
@@ -459,7 +517,12 @@ export async function createPipeline(req: CreatePipelineRequest): Promise<{ pipe
     });
     const json = (await response.json().catch(() => null)) as { pipeline?: Pipeline; error?: string } | null;
     if (response.ok && json?.pipeline) {
-      window.dispatchEvent(new Event(PIPELINES_CHANGED_EVENT));
+      /* The POST echo IS the new record — apply it straight into the client
+         cache so the draft's builder appears immediately (issue #221 §3). An
+         auto-started pipeline also spawns agents, so only that path still pays
+         the full board refetch. */
+      applyPipelineSnapshot(json.pipeline, true);
+      if (req.autoStart !== false) window.dispatchEvent(new Event(PIPELINES_CHANGED_EVENT));
       return { pipeline: json.pipeline };
     }
     return { error: json?.error ?? translate(getLocale(), "pipelineModel.failed", { status: response.status }) };
@@ -578,24 +641,85 @@ export function pipelinePlaceholderStages(
   return pipeline.stages.filter((stage) => !stageHasBoardPresence(pipeline, stage, placedPaths, placedFlowIds));
 }
 
+/** Actions whose side effects reach past the pipeline record (spawned/killed
+    agents, closed flows, freed panes) — only these still trigger the full
+    /api/files refetch. Draft-shape edits ride the PATCH echo alone. */
+const PIPELINE_REFRESH_ACTIONS: ReadonlySet<PipelineAction> = new Set([
+  "start",
+  "retry-stage",
+  "skip-stage",
+  "resume",
+  "pause",
+  "close",
+]);
+
+/** Neutral resolution a not-yet-echoed optimistic stage renders with; the PATCH
+    echo replaces it (typically within one frame's worth of round-trip). */
+const OPTIMISTIC_EFFECTIVE_ROLE: Omit<EffectivePipelineRole, "access"> = {
+  roleId: null,
+  engine: "claude",
+  model: "",
+  effort: "",
+  promptScaffold: null,
+};
+
+/** Recompute the linear `next` chain after a local insert/removal — the same
+    normalization the server applies when it persists the mutation. */
+function chainStages(stages: PipelineStage[]): PipelineStage[] {
+  return stages.map((stage, index) => ({ ...stage, next: stages[index + 1]?.id ?? null }));
+}
+
+/** The pipeline as it will look once `add-stage` persists — applied locally
+    before the PATCH so the new placeholder window appears instantly (§3). */
+export function optimisticAddStage(pipeline: Pipeline, input: PipelineStageInput, index: number): Pipeline {
+  const stage: PipelineStage = {
+    ...input,
+    effectiveRole: {
+      ...OPTIMISTIC_EFFECTIVE_ROLE,
+      roleId: input.role?.roleId ?? null,
+      ...(input.engine ? { engine: input.engine } : {}),
+      access: input.access ?? (input.kind === "review-loop" ? "read-only" : "read-write"),
+    },
+  };
+  const stages = [...pipeline.stages];
+  stages.splice(Math.max(0, Math.min(index, stages.length)), 0, stage);
+  return { ...pipeline, stages: chainStages(stages) };
+}
+
+/** The pipeline as it will look once `remove-stage` persists. */
+export function optimisticRemoveStage(pipeline: Pipeline, stageId: string): Pipeline {
+  return { ...pipeline, stages: chainStages(pipeline.stages.filter((stage) => stage.id !== stageId)) };
+}
+
 export async function patchPipeline(
   id: string,
   action: PipelineAction,
   extra?: Omit<PatchPipelineRequest, "action">,
+  /** Locally predicted post-PATCH pipeline: applied to the client cache BEFORE
+      the request so the mutation is perceived instantly, confirmed by the echo,
+      rolled back on failure (issue #221 §3). */
+  optimistic?: Pipeline,
 ): Promise<string | null> {
+  if (optimistic) applyPipelineSnapshot(optimistic, false);
   try {
     const response = await fetch(`/api/pipelines/${encodeURIComponent(id)}`, {
       method: "PATCH",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ action, ...extra }),
     });
+    const json = (await response.json().catch(() => null)) as { pipeline?: Pipeline; error?: string } | null;
     if (response.ok) {
-      window.dispatchEvent(new Event(PIPELINES_CHANGED_EVENT));
+      /* The PATCH echo is the authoritative post-mutation record: applying it
+         updates every mounted board surface without a scan refetch. */
+      if (json?.pipeline) applyPipelineSnapshot(json.pipeline, true);
+      else if (optimistic) revertPipelineSnapshot(id);
+      if (PIPELINE_REFRESH_ACTIONS.has(action)) window.dispatchEvent(new Event(PIPELINES_CHANGED_EVENT));
       return null;
     }
-    const json = (await response.json().catch(() => null)) as { error?: string } | null;
+    if (optimistic) revertPipelineSnapshot(id);
     return json?.error ?? translate(getLocale(), "pipelineModel.failed", { status: response.status });
   } catch {
+    if (optimistic) revertPipelineSnapshot(id);
     return translate(getLocale(), "common.serverUnavailable");
   }
 }

@@ -350,8 +350,10 @@ test("canvas builder: editing a stage card inline posts override-stage for that 
   const apply = Array.from(planCard.querySelectorAll("button")).find((b) => b.textContent?.includes("Update stage")) as HTMLButtonElement;
   flushSync(() => apply.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event));
   await Promise.resolve();
+  /* Only the changed role travels — the untouched prompt is omitted so the
+     stored wiring is never rewritten by a role-only edit (issue #221 §5). */
   const patch = calls.find((call) => call.url.includes("/api/pipelines/p1"));
-  expect(patch?.body).toEqual({ action: "override-stage", stageId: "plan", prompt: "Plan", role: { roleId: "builder" } });
+  expect(patch?.body).toEqual({ action: "override-stage", stageId: "plan", role: { roleId: "builder" } });
   flushSync(() => root.unmount());
   host.remove();
 });
@@ -380,10 +382,11 @@ test("an unchanged stage override submits no stale runtime or role (issue #118 r
   flushSync(() => apply.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event));
   await Promise.resolve();
 
-  /* Nothing was edited, so only stageId + prompt travel — never the current
-     engine/model/effort/role as spurious pins that would defeat role-reset. */
+  /* Nothing was edited, so only the stageId travels — never the current
+     engine/model/effort/role/prompt as spurious pins that would defeat
+     role-reset or rewrite the stored wiring. */
   const patch = calls.find((call) => call.url.includes("/api/pipelines/p1"));
-  expect(patch?.body).toEqual({ action: "override-stage", stageId: "build", prompt: "Build it" });
+  expect(patch?.body).toEqual({ action: "override-stage", stageId: "build" });
 
   flushSync(() => root.unmount());
   host.remove();

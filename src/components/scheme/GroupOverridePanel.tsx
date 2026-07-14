@@ -8,8 +8,21 @@ import type { FlowEngine } from "@/lib/flows/types";
 import type { PipelineStage, PipelineStageKind } from "@/lib/pipelines/types";
 import { useLocale } from "@/lib/i18n";
 
+import { effortTierLabel, roleNameById } from "@/components/builderCopy";
 import { flowPresentation, patchFlow } from "@/components/flows/flowModel";
-import { patchPipeline, PIPELINE_ROLE_OPTIONS, reviewLoopChainValid, stageOverrideBody } from "@/components/pipelines/pipelineModel";
+import {
+  buildStagePrompt,
+  defaultStageWiring,
+  optimisticAddStage,
+  optimisticRemoveStage,
+  patchPipeline,
+  PIPELINE_ROLE_OPTIONS,
+  reviewLoopChainValid,
+  stageOverrideBody,
+  stagePromptExtra,
+  stageReceivesPrevOutput,
+} from "@/components/pipelines/pipelineModel";
+import { Select } from "@/components/ui/Select";
 
 import type { SchemeGroup } from "./layout";
 
@@ -96,12 +109,12 @@ function EffortSelect({ engine, value, onChange, label }: { engine: FlowEngine; 
   return (
     <label className="flex min-w-0 flex-1 flex-col gap-1">
       <span className={fieldLabel}>{label}</span>
-      <select className={inputBase} value={safe} onChange={(event) => onChange(event.target.value)}>
+      <Select className="w-full" value={safe} onChange={(event) => onChange(event.target.value)}>
         <option value="">{t("groupOverride.effortDefault")}</option>
         {tiers.map((effort) => (
-          <option key={effort} value={effort}>{effort}</option>
+          <option key={effort} value={effort}>{effortTierLabel(t, effort)}</option>
         ))}
-      </select>
+      </Select>
     </label>
   );
 }
@@ -111,13 +124,13 @@ function EngineSelect({ value, onChange }: { value: FlowEngine; onChange: (value
   return (
     <label className="flex min-w-0 flex-1 flex-col gap-1">
       <span className={fieldLabel}>{t("groupOverride.engine")}</span>
-      <select className={inputBase} value={value} onChange={(event) => onChange(event.target.value as FlowEngine)}>
+      <Select className="w-full" value={value} onChange={(event) => onChange(event.target.value as FlowEngine)}>
         {ENGINES.map((engine) => (
           <option key={engine} value={engine}>
             {engine}
           </option>
         ))}
-      </select>
+      </Select>
     </label>
   );
 }
@@ -324,12 +337,16 @@ function FlowOverride({ group, onClose }: { group: SchemeGroup; onClose: () => v
 function StageForm({
   group,
   stage,
+  index,
   busy,
   disabled,
   run,
 }: {
   group: SchemeGroup;
   stage: PipelineStage;
+  /** 0-based chain position — drives the plain-language wiring caption and the
+      wiring fallback when a legacy prompt carries no tokens. */
+  index: number;
   busy: boolean;
   disabled: boolean;
   run: (label: string, action: () => Promise<string | null>) => Promise<void>;
@@ -340,17 +357,23 @@ function StageForm({
   const [engine, setEngine] = useState<FlowEngine>(stage.effectiveRole.engine);
   const [model, setModel] = useState(stage.effectiveRole.model ?? "");
   const [effort, setEffort] = useState(stage.effectiveRole.effort ?? "");
-  const [prompt, setPrompt] = useState(stage.prompt);
+  /* The wiring tokens are automatic plumbing (issue #221 §5) — the operator
+     edits only the additional text; the caption states what flows in. An
+     untouched field submits the stored prompt verbatim, so a role/runtime-only
+     override never rewrites the prompt. */
+  const [extra, setExtra] = useState(() => stagePromptExtra(stage.prompt));
+  const promptForSubmit = () =>
+    extra.trim() === stagePromptExtra(stage.prompt) ? stage.prompt : buildStagePrompt(stage.prompt, extra, index);
   return (
     <>
       <label className="flex flex-col gap-1">
         <span className={fieldLabel}>{t("groupOverride.role")}</span>
-        <select className={inputBase} value={roleId} onChange={(event) => setRoleId(event.target.value)}>
+        <Select className="w-full" value={roleId} onChange={(event) => setRoleId(event.target.value)}>
           <option value="">{t("groupOverride.noRole")}</option>
           {PIPELINE_ROLE_OPTIONS.map((id) => (
-            <option key={id} value={id}>{id}</option>
+            <option key={id} value={id}>{roleNameById(t, id)}</option>
           ))}
-        </select>
+        </Select>
       </label>
       <div className="flex items-end gap-1.5">
         <EngineSelect value={engine} onChange={(next) => resetRuntimeForEngine(next, { setEngine, setModel, setEffort, effort })} />
@@ -367,20 +390,34 @@ function StageForm({
       </label>
       <label className="flex flex-col gap-1">
         <span className={fieldLabel}>{t("groupOverride.stagePrompt")}</span>
+        <span className="text-label font-medium text-muted">
+          {t(
+            stage.kind === "review-loop"
+              ? "pipelineSlot.reviewHint"
+              : index > 0 && stageReceivesPrevOutput(stage.prompt)
+                ? "pipelineSlot.wiringPrev"
+                : "pipelineSlot.wiringTask",
+          )}
+        </span>
         <textarea
           className="min-h-[64px] w-full resize-y rounded-[8px] border border-border bg-canvas px-2 py-1.5 text-[11.5px] font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
-          value={prompt}
-          onChange={(event) => setPrompt(event.target.value)}
+          value={extra}
+          placeholder={t("pipelineSlot.noPrompt")}
+          onChange={(event) => setExtra(event.target.value)}
         />
       </label>
       <button
         className={primaryBtn}
-        disabled={busy || disabled || !prompt.trim()}
+        disabled={busy || disabled}
         onClick={() =>
           void run(t("groupOverride.savedStage"), () =>
             /* Only the fields the operator changed are sent, so a role-only change
                lets the backend apply the new role's runtime defaults (Finding 4). */
-            patchPipeline(pipeline.id, "override-stage", stageOverrideBody(stage, { roleId, engine, model, effort, prompt })),
+            patchPipeline(
+              pipeline.id,
+              "override-stage",
+              stageOverrideBody(stage, { roleId, engine, model, effort, prompt: promptForSubmit() }),
+            ),
           )
         }
       >
@@ -440,15 +477,16 @@ function DraftStageCards({
     const ids = new Set(stages.map((item) => item.id));
     let n = stages.length + 1;
     while (ids.has(`stage-${n}`)) n += 1;
+    const index = stages.length;
+    const stage = { id: `stage-${n}`, kind, prompt: defaultStageWiring(index), next: null };
     void run(t("groupOverride.stageAdded"), () =>
-      patchPipeline(pipeline.id, "add-stage", {
-        index: stages.length,
-        stage: { id: `stage-${n}`, kind, prompt: pipeline.task || "{{task}}", next: null },
-      }),
+      patchPipeline(pipeline.id, "add-stage", { index, stage }, optimisticAddStage(pipeline, stage, index)),
     );
   };
   const removeStage = (stageId: string) =>
-    void run(t("groupOverride.stageRemoved"), () => patchPipeline(pipeline.id, "remove-stage", { stageId }));
+    void run(t("groupOverride.stageRemoved"), () =>
+      patchPipeline(pipeline.id, "remove-stage", { stageId }, optimisticRemoveStage(pipeline, stageId)),
+    );
 
   /* Drop resolves against React state (dragId), which works in environments where
      the drag payload (dataTransfer) is unavailable, and keeps this unit-testable.
@@ -504,7 +542,7 @@ function DraftStageCards({
               <span className="inline-flex h-5 min-w-5 items-center justify-center rounded-full bg-sunken px-1.5 text-[10px] font-black text-muted">
                 {index + 1}
               </span>
-              <span className="min-w-0 flex-1 truncate text-[10.5px] font-bold text-primary">{stage.role?.roleId ?? stage.id}</span>
+              <span className="min-w-0 flex-1 truncate text-[10.5px] font-bold text-primary">{stage.role?.roleId ? roleNameById(t, stage.role.roleId) : stage.id}</span>
               <span className="shrink-0 rounded-full border border-border px-1.5 py-[1px] text-[9px] font-bold uppercase tracking-wide text-muted">
                 {t(stage.kind === "review-loop" ? "groupOverride.reviewKind" : "groupOverride.runKind")}
               </span>
@@ -539,6 +577,7 @@ function DraftStageCards({
               key={`${stage.id}:${stage.role?.roleId ?? ""}:${stage.effectiveRole.engine}:${stage.effectiveRole.model ?? ""}:${stage.effectiveRole.effort ?? ""}:${stage.prompt}`}
               group={group}
               stage={stage}
+              index={index}
               busy={busy}
               disabled={false}
               run={run}
@@ -627,13 +666,13 @@ function PipelineOverride({ group, onClose }: { group: SchemeGroup; onClose: () 
         <>
           <label className="flex flex-col gap-1">
             <span className={fieldLabel}>{t("groupOverride.nextStage")}</span>
-            <select className={inputBase} value={stage.id} onChange={(event) => setStageId(event.target.value)}>
+            <Select className="w-full" value={stage.id} onChange={(event) => setStageId(event.target.value)}>
               {editable.map((item) => (
                 <option key={item.id} value={item.id}>
-                  {item.role?.roleId ?? item.id}
+                  {item.role?.roleId ? roleNameById(t, item.role.roleId) : item.id}
                 </option>
               ))}
-            </select>
+            </Select>
           </label>
           {/* Keyed on the stage id so switching stages remounts the form with the
               picked stage's config — no reset-in-effect. */}
@@ -644,6 +683,7 @@ function PipelineOverride({ group, onClose }: { group: SchemeGroup; onClose: () 
             key={`${stage.id}:${stage.role?.roleId ?? ""}:${stage.effectiveRole.engine}:${stage.effectiveRole.model ?? ""}:${stage.effectiveRole.effort ?? ""}:${stage.prompt}`}
             group={group}
             stage={stage}
+            index={Math.max(0, pipeline.stages.findIndex((item) => item.id === stage.id))}
             busy={busy}
             disabled={closed}
             run={run}

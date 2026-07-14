@@ -26,6 +26,12 @@ import {
   pipelinePlaceholderStages,
   stageOverrideBody,
   templateStageInputs,
+  buildStagePrompt,
+  defaultStageWiring,
+  optimisticAddStage,
+  optimisticRemoveStage,
+  stagePromptExtra,
+  stageReceivesPrevOutput,
 } from "./pipelineModel";
 import type { Flow } from "@/lib/flows/types";
 
@@ -423,14 +429,20 @@ describe("stageOverrideBody sends only changed fields (issue #118 Finding 4)", (
   }
   const base = { roleId: "builder", engine: "codex" as const, model: "gpt-5.6", effort: "high", prompt: "Build it" };
 
-  test("an unchanged form sends only stageId + prompt — no stale runtime or role", () => {
-    expect(stageOverrideBody(editable(), base)).toEqual({ stageId: "build", prompt: "Build it" });
+  test("an unchanged form sends only stageId — no stale runtime, role, or prompt rewrite", () => {
+    expect(stageOverrideBody(editable(), base)).toEqual({ stageId: "build" });
+  });
+
+  test("an edited prompt travels; an unchanged one is omitted (issue #221 §5)", () => {
+    expect(stageOverrideBody(editable(), { ...base, prompt: "{{task}}\n\nBuild it well" })).toEqual({
+      stageId: "build",
+      prompt: "{{task}}\n\nBuild it well",
+    });
   });
 
   test("a role-only change omits engine/model/effort so the new role's defaults apply", () => {
     expect(stageOverrideBody(editable(), { ...base, roleId: "architect" })).toEqual({
       stageId: "build",
-      prompt: "Build it",
       role: { roleId: "architect" },
     });
   });
@@ -440,11 +452,79 @@ describe("stageOverrideBody sends only changed fields (issue #118 Finding 4)", (
   });
 
   test("a runtime-only change sends just that field, keeping the role untouched", () => {
-    expect(stageOverrideBody(editable(), { ...base, effort: "low" })).toEqual({ stageId: "build", prompt: "Build it", effort: "low" });
-    expect(stageOverrideBody(editable(), { ...base, model: "" })).toEqual({ stageId: "build", prompt: "Build it", model: null });
+    expect(stageOverrideBody(editable(), { ...base, effort: "low" })).toEqual({ stageId: "build", effort: "low" });
+    expect(stageOverrideBody(editable(), { ...base, model: "" })).toEqual({ stageId: "build", model: null });
   });
 })
 ;
+
+describe("stage prompt wiring (issue #221 §5 — plumbing hidden behind captions)", () => {
+  test("stagePromptExtra strips wiring tokens and normalizes whitespace", () => {
+    expect(stagePromptExtra("{{task}}")).toBe("");
+    expect(stagePromptExtra("{{prev.output}}\n\nFocus on the API layer.")).toBe("Focus on the API layer.");
+    expect(stagePromptExtra("Plan {{task}} carefully")).toBe("Plan carefully");
+    expect(stagePromptExtra("free text only")).toBe("free text only");
+  });
+
+  test("buildStagePrompt keeps the prompt's own tokens and appends the extra text", () => {
+    expect(buildStagePrompt("{{task}}", "", 0)).toBe("{{task}}");
+    expect(buildStagePrompt("{{task}}", "Ship it fast", 0)).toBe("{{task}}\n\nShip it fast");
+    expect(buildStagePrompt("{{prev.output}}\n\nold note", "new note", 1)).toBe("{{prev.output}}\n\nnew note");
+  });
+
+  test("a token-less legacy prompt falls back to the position default wiring", () => {
+    expect(buildStagePrompt("just words", "just words", 0)).toBe("{{task}}\n\njust words");
+    expect(buildStagePrompt("just words", "other", 2)).toBe("{{prev.output}}\n\nother");
+    expect(defaultStageWiring(0)).toBe("{{task}}");
+    expect(defaultStageWiring(3)).toBe("{{prev.output}}");
+  });
+
+  test("edit → parse → rebuild round-trips a wired prompt", () => {
+    const stored = "{{prev.output}}\n\nMind the tests.";
+    expect(buildStagePrompt(stored, stagePromptExtra(stored), 1)).toBe(stored);
+  });
+
+  test("stageReceivesPrevOutput probes only the prev-output token", () => {
+    expect(stageReceivesPrevOutput("{{prev.output}}")).toBe(true);
+    expect(stageReceivesPrevOutput("{{task}}")).toBe(false);
+  });
+
+  test("every template stage prompt is pure wiring — no English instruction text leaks into the UI model", () => {
+    for (const template of PIPELINE_TEMPLATES) {
+      for (const stage of template.stages) {
+        expect(stagePromptExtra(stage.prompt)).toBe("");
+      }
+    }
+  });
+});
+
+describe("optimistic stage mutations (issue #221 §3 — instant add/remove)", () => {
+  const chain = (): PipelineStage[] => ([
+    { id: "a", kind: "run", prompt: "{{task}}", next: "b", effectiveRole: { roleId: null, engine: "claude", model: "", effort: "", access: "read-write", promptScaffold: null } },
+    { id: "b", kind: "run", prompt: "{{prev.output}}", next: null, effectiveRole: { roleId: null, engine: "claude", model: "", effort: "", access: "read-write", promptScaffold: null } },
+  ] as PipelineStage[]);
+
+  test("optimisticAddStage inserts at the index and re-links the next chain", () => {
+    const before = pipeline({ stages: chain() });
+    const next = optimisticAddStage(before, { id: "c", kind: "run", prompt: "{{prev.output}}", next: null }, 2);
+    expect(next.stages.map((stage) => stage.id)).toEqual(["a", "b", "c"]);
+    expect(next.stages.map((stage) => stage.next)).toEqual(["b", "c", null]);
+    expect(next.stages[2]!.effectiveRole.access).toBe("read-write");
+    /* The source pipeline is untouched (rollback re-applies it verbatim). */
+    expect(before.stages).toHaveLength(2);
+  });
+
+  test("optimisticAddStage gives a review-loop read-only access by default", () => {
+    const next = optimisticAddStage(pipeline({ stages: chain() }), { id: "r", kind: "review-loop", prompt: "{{task}}", next: null }, 2);
+    expect(next.stages[2]!.effectiveRole.access).toBe("read-only");
+  });
+
+  test("optimisticRemoveStage drops the stage and heals the chain", () => {
+    const next = optimisticRemoveStage(pipeline({ stages: chain() }), "a");
+    expect(next.stages.map((stage) => stage.id)).toEqual(["b"]);
+    expect(next.stages[0]!.next).toBeNull();
+  });
+});
 
 describe("template-first drafts + stage placeholders (issue #196)", () => {
   test("templateStageInputs folds a template into POSTable stages with roles and no pinned runtime", () => {

@@ -2,7 +2,9 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { roleDescription, roleName, roleParamDescription, roleParamLabel, roleParamOptionLabel } from "@/components/builderCopy";
 import { Play, X } from "@/components/icons";
+import { Select } from "@/components/ui/Select";
 import { useComposer } from "@/hooks/useComposer";
 import { isEngineEffort } from "@/lib/agent/efforts";
 import { defaultModelFor } from "@/lib/agent/models";
@@ -85,16 +87,38 @@ export function EngineRadioGroup({
   );
 }
 
-/** The shared /api/roles catalog fetch (agent drafts + stage placeholders). */
-export function useRoleCatalog(): RoleCatalogItem[] {
-  const [roles, setRoles] = useState<RoleCatalogItem[]>([]);
-  useEffect(() => {
-    let cancelled = false;
-    void fetch("/api/roles").then(async (res) => {
-      if (!res.ok) return;
+/* One /api/roles fetch per session, shared by every draft pane and stage
+   placeholder — a draft pipeline mounts one placeholder per stage, and each
+   used to fire its own catalog request on mount (issue #221 §3 mount cost). */
+let roleCatalogCache: RoleCatalogItem[] | null = null;
+let roleCatalogRequest: Promise<RoleCatalogItem[] | null> | null = null;
+
+function fetchRoleCatalog(): Promise<RoleCatalogItem[] | null> {
+  roleCatalogRequest ??= fetch("/api/roles")
+    .then(async (res) => {
+      if (!res.ok) return null;
       const body = await res.json() as { roles?: RoleCatalogItem[] };
-      if (!cancelled && Array.isArray(body.roles)) setRoles(body.roles);
-    }).catch(() => {});
+      return Array.isArray(body.roles) ? body.roles : null;
+    })
+    .catch(() => null)
+    .then((roles) => {
+      if (roles) roleCatalogCache = roles;
+      else roleCatalogRequest = null; /* transient failure: allow a retry */
+      return roles;
+    });
+  return roleCatalogRequest;
+}
+
+/** The shared /api/roles catalog (agent drafts + stage placeholders),
+    session-cached: later mounts render the catalog synchronously. */
+export function useRoleCatalog(): RoleCatalogItem[] {
+  const [roles, setRoles] = useState<RoleCatalogItem[]>(() => roleCatalogCache ?? []);
+  useEffect(() => {
+    if (roleCatalogCache) return;
+    let cancelled = false;
+    void fetchRoleCatalog().then((fetched) => {
+      if (!cancelled && fetched) setRoles(fetched);
+    });
     return () => { cancelled = true; };
   }, []);
   return roles;
@@ -137,47 +161,59 @@ export function RoleSection({
   return (
     <div className="flex shrink-0 flex-col gap-1.5 border-b border-border bg-sunken px-2.5 py-1.5">
       <div className="flex min-w-0 flex-wrap items-center gap-1.5">
-        <label className="shrink-0 text-[10px] font-semibold text-muted" htmlFor={`draft-role-${idPrefix}`}>{t("draft.role")}</label>
-        <select
+        <label className="shrink-0 text-caption font-semibold text-muted" htmlFor={`draft-role-${idPrefix}`}>{t("draft.role")}</label>
+        <Select
           id={`draft-role-${idPrefix}`}
           value={roleId}
           disabled={disabled}
           onChange={(event) => onSelectRole(event.target.value)}
           aria-label={t("draft.roleAria")}
-          className="h-7 min-w-0 flex-1 rounded-[8px] border border-border bg-card px-1.5 text-[11px] text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60"
+          className="flex-1"
         >
           <option value="">{t("draft.noRole")}</option>
-          {offered.map((role) => <option key={role.id} value={role.id}>{role.name}</option>)}
-        </select>
+          {offered.map((role) => <option key={role.id} value={role.id}>{roleName(t, role)}</option>)}
+        </Select>
       </div>
       {selectedRole ? (
         <>
-          <p className="text-[10px] leading-4 text-muted">{selectedRole.description}</p>
+          <p className="text-caption leading-4 text-muted">{roleDescription(t, selectedRole)}</p>
           {selectedRole.parameters.length ? (
             <div className="flex flex-wrap gap-1.5" role="group" aria-label={t("draft.roleParameters")}>
-              {selectedRole.parameters.map((parameter) => (
-                <label key={parameter.key} className="flex min-w-28 flex-1 flex-col gap-0.5 text-[10px] text-muted">
-                  <span>{parameter.label}{parameter.required ? " *" : ""}</span>
-                  {parameter.kind === "select" ? (
-                    <select value={String(roleParams[parameter.key] ?? "")} disabled={disabled} onChange={(event) => onSetParam(parameter.key, event.target.value)} className="h-7 rounded-[7px] border border-border bg-card px-1 text-[11px] text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60">
-                      {parameter.options?.map((option) => <option key={option} value={option}>{option}</option>)}
-                    </select>
-                  ) : (
-                    <input type={parameter.kind === "integer" ? "number" : "text"} min={parameter.min} max={parameter.max} value={String(roleParams[parameter.key] ?? "")} disabled={disabled} onChange={(event) => onSetParam(parameter.key, parameter.kind === "integer" && event.target.value ? Number(event.target.value) : event.target.value)} aria-label={parameter.label} className="h-7 min-w-0 rounded-[7px] border border-border bg-card px-1.5 text-[11px] text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60" />
-                  )}
-                  <span className="leading-3">{parameter.description}</span>
-                </label>
-              ))}
+              {selectedRole.parameters.map((parameter) => {
+                const label = roleParamLabel(t, selectedRole.id, parameter);
+                return (
+                  <label key={parameter.key} className="flex min-w-28 flex-1 flex-col gap-0.5 text-caption text-muted">
+                    <span>{label}{parameter.required ? " *" : ""}</span>
+                    {parameter.kind === "select" ? (
+                      <Select value={String(roleParams[parameter.key] ?? "")} disabled={disabled} onChange={(event) => onSetParam(parameter.key, event.target.value)}>
+                        {parameter.options?.map((option) => (
+                          <option key={option} value={option}>{roleParamOptionLabel(t, selectedRole.id, parameter.key, option)}</option>
+                        ))}
+                      </Select>
+                    ) : (
+                      <input type={parameter.kind === "integer" ? "number" : "text"} min={parameter.min} max={parameter.max} value={String(roleParams[parameter.key] ?? "")} disabled={disabled} onChange={(event) => onSetParam(parameter.key, parameter.kind === "integer" && event.target.value ? Number(event.target.value) : event.target.value)} aria-label={label} className="h-7 min-w-0 rounded-control border border-border bg-card px-1.5 text-ui text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60" />
+                    )}
+                    <span className="leading-3">{roleParamDescription(t, selectedRole.id, parameter)}</span>
+                  </label>
+                );
+              })}
             </div>
           ) : null}
           {children}
-          <div className="rounded-[7px] border border-border bg-sunken px-2 py-1.5 text-[10px] leading-4 text-muted">
-            <span className="font-semibold text-primary">{t("draft.scaffoldPreview")}</span>
-            <pre className={`mt-1 whitespace-pre-wrap font-sans ${compactPreview ? "max-h-24 overflow-y-auto" : ""}`}>{scaffoldPreview(selectedRole.promptPreview, roleParams)}</pre>
-            <ul className={`mt-1 list-disc pl-4 ${compactPreview ? "max-h-16 overflow-y-auto" : ""}`} aria-label={t("draft.safetyFences")}>
-              {selectedRole.safetyFences.map((fence) => <li key={fence}>{fence}</li>)}
-            </ul>
-          </div>
+          {/* The full scaffold the agent will receive stays English (it IS the
+              prompt) — folded behind a clearly-labeled collapsible so the uk UI
+              never shows raw English copy uninvited (issue #221 §1/§5). */}
+          <details className="rounded-control border border-border bg-card/60">
+            <summary className="min-h-7 cursor-pointer select-none list-item px-2 py-1 text-caption font-semibold text-secondary marker:text-muted hover:text-primary">
+              {t("draft.rolePromptToggle")}
+            </summary>
+            <div className="border-t border-border px-2 py-1.5 text-caption leading-4 text-muted">
+              <pre className={`whitespace-pre-wrap font-sans ${compactPreview ? "max-h-24 overflow-y-auto" : ""}`}>{scaffoldPreview(selectedRole.promptPreview, roleParams)}</pre>
+              <ul className={`mt-1 list-disc pl-4 ${compactPreview ? "max-h-16 overflow-y-auto" : ""}`} aria-label={t("draft.safetyFences")}>
+                {selectedRole.safetyFences.map((fence) => <li key={fence}>{fence}</li>)}
+              </ul>
+            </div>
+          </details>
         </>
       ) : null}
     </div>
@@ -663,7 +699,7 @@ export function DraftAgentPane({
     >
       <span aria-hidden className="h-1 w-full shrink-0" style={{ backgroundColor: tint.color }} />
       <header className="flex h-10 shrink-0 items-center gap-1.5 border-b border-border px-2.5" style={{ backgroundColor: tint.soft }}>
-        {engine === "codex" && accounts.length ? <select value={accountId} onChange={(event) => { setAccountIdState(event.target.value); writeField(draftId, "accountId", event.target.value); }} className="h-6 max-w-28 rounded border border-border bg-canvas px-1 text-[10px] font-semibold" aria-label={t("accounts.activeAria")}>{accounts.map((account) => <option key={account.id} value={account.id}>{account.label}</option>)}</select> : null}
+        {engine === "codex" && accounts.length ? <Select value={accountId} onChange={(event) => { setAccountIdState(event.target.value); writeField(draftId, "accountId", event.target.value); }} className="max-w-28" aria-label={t("accounts.activeAria")}>{accounts.map((account) => <option key={account.id} value={account.id}>{account.label}</option>)}</Select> : null}
         <span className="h-2 w-2 shrink-0 rounded-full bg-strong" title={t("draft.notStarted")} />
         <EngineRadioGroup engine={engine} disabled={fieldsDisabled} onChange={setEngine} />
         <span
@@ -714,14 +750,13 @@ export function DraftAgentPane({
         onSetParam={setRoleParam}
       >
         {selectedRole?.id === "reviewer" ? (
-          <label className="flex max-w-full flex-col gap-0.5 text-[10px] text-muted">
+          <label className="flex max-w-full flex-col gap-0.5 text-caption text-muted">
             <span>{t("draft.reviews")}</span>
-            <select
+            <Select
               value={reviews}
               disabled={fieldsDisabled}
               onChange={(event) => setReviews(event.target.value)}
               aria-label={t("draft.reviewsAria")}
-              className="h-7 min-w-0 rounded-[7px] border border-border bg-card px-1.5 text-[11px] text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60"
             >
               <option value="">{t("draft.reviewsPlaceholder")}</option>
               {reviews && !reviewCandidates.some((file) => (file.conversationId ?? file.path) === reviews) ? (
@@ -731,7 +766,7 @@ export function DraftAgentPane({
                 const value = file.conversationId ?? file.path;
                 return <option key={value} value={value}>{cleanTitle(file.title, 80)}</option>;
               })}
-            </select>
+            </Select>
           </label>
         ) : null}
         {selectedRole?.id === "deployer" ? (

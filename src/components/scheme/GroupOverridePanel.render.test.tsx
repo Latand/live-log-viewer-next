@@ -98,10 +98,11 @@ test("the pipeline override panel edits the next unstarted stage and keeps stage
   expect(html).toContain("Next stage");
   expect(html).toContain("Role");
   expect(html).toContain("No role");
-  /* Role options are offered and deployer is excluded (pipeline-disallowed). */
-  expect(html).toContain(">architect<");
-  expect(html).not.toContain(">deployer<");
-  expect(html).toContain("Stage prompt");
+  /* Role options are offered with localized display names (issue #221 §1) and
+     deployer is excluded (pipeline-disallowed). */
+  expect(html).toContain(">Architect<");
+  expect(html).not.toContain(">Deployer<");
+  expect(html).toContain("Additional prompt (optional)");
   expect(html).toContain("Build it");
   expect(html).toContain("Update stage");
   /* The already-running "plan" stage must not be offered for override. */

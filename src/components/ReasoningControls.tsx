@@ -1,5 +1,7 @@
 "use client";
 
+import { effortTierLabel } from "@/components/builderCopy";
+import { Select } from "@/components/ui/Select";
 import { ENGINE_EFFORTS } from "@/lib/agent/efforts";
 import { ENGINE_MODELS } from "@/lib/agent/models";
 import { useLocale } from "@/lib/i18n";
@@ -11,6 +13,8 @@ export type SpeedChoice = "" | "fast" | "standard";
  * Reasoning-effort select plus the codex-only speed (fast/standard) select —
  * the shared control strip for every "start a new agent" surface. The tier
  * list follows the engine; an empty value leaves the CLI on its own default.
+ * All three ride the design system's one select recipe (issue #221 §6), and
+ * tier/speed labels localize while the submitted values stay the CLI tokens.
  */
 export function ReasoningControls({
   engine,
@@ -32,16 +36,13 @@ export function ReasoningControls({
   onSpeed: (value: SpeedChoice) => void;
 }) {
   const { t } = useLocale();
-  const selectClass =
-    "h-7 min-w-0 rounded-[8px] border border-border bg-card px-1.5 text-[11px] text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60";
   return (
     <>
-      <select
+      <Select
         value={model}
         disabled={disabled}
         aria-label={t("draft.modelAria")}
         title={t("draft.modelAria")}
-        className={selectClass}
         onChange={(event) => onModel(event.target.value)}
       >
         <option value="">{t("draft.modelDefault")}</option>
@@ -50,35 +51,33 @@ export function ReasoningControls({
             {option.label}
           </option>
         ))}
-      </select>
-      <select
+      </Select>
+      <Select
         value={effort}
         disabled={disabled}
         aria-label={t("draft.reasoningAria")}
         title={t("draft.reasoningAria")}
-        className={selectClass}
         onChange={(event) => onEffort(event.target.value)}
       >
         <option value="">{t("draft.effortDefault")}</option>
         {ENGINE_EFFORTS[engine].map((tier) => (
           <option key={tier} value={tier}>
-            {tier}
+            {effortTierLabel(t, tier)}
           </option>
         ))}
-      </select>
+      </Select>
       {engine === "codex" ? (
-        <select
+        <Select
           value={speed}
           disabled={disabled}
           aria-label={t("draft.speedAria")}
           title={t("draft.speedTitle")}
-          className={selectClass}
           onChange={(event) => onSpeed(event.target.value as SpeedChoice)}
         >
           <option value="">{t("draft.speedDefault")}</option>
-          <option value="fast">fast</option>
-          <option value="standard">standard</option>
-        </select>
+          <option value="fast">{t("draft.speedFast")}</option>
+          <option value="standard">{t("draft.speedStandard")}</option>
+        </Select>
       ) : null}
     </>
   );

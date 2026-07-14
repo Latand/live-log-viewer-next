@@ -292,6 +292,62 @@ function file(path: string, title: string) {
   };
 }
 
+function pipelineRow(id: string, task: string, over: Record<string, unknown> = {}) {
+  return { id, task, project: "project-a", state: "draft", stages: [], runs: [], cursor: null, hiddenAt: null, ...over };
+}
+
+test("a pipeline echo applies without a refetch and survives a STALE in-flight scan (issue #221 §3)", async () => {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  let call = 0;
+  const cache = createFilesClientCache(async () => {
+    const index = call++;
+    /* Scan 2 was requested BEFORE the echo landed server-side: it still carries
+       the pre-mutation record. */
+    if (index === 1) await gate;
+    return new Response(JSON.stringify({ files: [], pipelines: [pipelineRow("p1", "old task")] }), { headers: { ETag: `"${index}"` } });
+  });
+
+  await cache.revalidate();
+  const stale = cache.revalidate();
+  /* Let the stale scan's request actually START (mint its generation) before
+     the mutation echoes — that is the real race: a fetch already in flight
+     when the PATCH persists. */
+  await Promise.resolve();
+  await Promise.resolve();
+  cache.applyPipeline(pipelineRow("p1", "patched task") as never, true);
+  expect(cache.read().pipelines[0]!.task).toBe("patched task");
+
+  release();
+  await stale;
+  /* The stale scan must not roll the confirmed patch back… */
+  expect(cache.read().pipelines[0]!.task).toBe("patched task");
+  /* …but a scan REQUESTED after the echo is authoritative and retires the overlay. */
+  await cache.revalidate();
+  expect(cache.read().pipelines[0]!.task).toBe("old task");
+});
+
+test("an unconfirmed optimistic pipeline outlives every scan until reverted", async () => {
+  const cache = createFilesClientCache(async () =>
+    new Response(JSON.stringify({ files: [], pipelines: [pipelineRow("p1", "server")] })));
+  await cache.revalidate();
+  cache.applyPipeline(pipelineRow("p1", "optimistic") as never, false);
+  await cache.revalidate();
+  expect(cache.read().pipelines[0]!.task).toBe("optimistic");
+  cache.revertPipeline("p1");
+  expect(cache.read().pipelines[0]!.task).toBe("server");
+});
+
+test("a created-draft echo appears before any scan lists it; a hidden (deleted) echo disappears", async () => {
+  const cache = createFilesClientCache(async () =>
+    new Response(JSON.stringify({ files: [], pipelines: [] })));
+  await cache.revalidate();
+  cache.applyPipeline(pipelineRow("fresh", "new draft") as never, true);
+  expect(cache.read().pipelines.map((pipeline) => pipeline.id)).toEqual(["fresh"]);
+  cache.applyPipeline(pipelineRow("fresh", "new draft", { hiddenAt: "1970" }) as never, true);
+  expect(cache.read().pipelines).toEqual([]);
+});
+
 test("files revision reads identify the revision and retain ETag revalidation", () => {
   expect(filesRequestHeaders("", undefined)).toBeUndefined();
   expect(filesRequestHeaders('"cached"', 42)).toEqual({

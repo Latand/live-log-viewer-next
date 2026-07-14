@@ -3,7 +3,9 @@
 import { Check, Loader2, SlidersHorizontal } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
+import { effortTierLabel } from "@/components/builderCopy";
 import { X } from "@/components/icons";
+import { Select } from "@/components/ui/Select";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { conversationIdentity } from "@/lib/accounts/identity";
 import { effortScale } from "@/lib/agent/efforts";
@@ -177,7 +179,7 @@ export function RuntimeControlsView({
                       draft.effort === effort ? "border-accent bg-accent/10 text-accent" : "border-border bg-canvas text-primary"
                     }`}
                   >
-                    {effort || t("draft.effortDefault")}
+                    {effort ? effortTierLabel(t, effort) : t("draft.effortDefault")}
                   </button>
                 ))}
               </div>
@@ -204,11 +206,9 @@ export function RuntimeControlsView({
     );
   }
 
-  const selectClass = "h-6 rounded-full border border-border bg-canvas px-1.5 font-mono text-[9.5px] font-semibold text-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60";
   return (
     <div className="inline-flex min-w-0 items-center gap-1" onPointerDown={(event) => event.stopPropagation()} title={error || undefined}>
-      <select
-        className={selectClass}
+      <Select
         aria-label={t("runtimeConfig.model")}
         value={draft.model}
         disabled={disabled}
@@ -216,20 +216,19 @@ export function RuntimeControlsView({
       >
         {withDefaults ? <option value="">{t("draft.modelDefault")}</option> : null}
         {ENGINE_MODELS[engine].map((model) => <option key={model.id} value={model.id}>{model.label}</option>)}
-      </select>
-      <select
-        className={selectClass}
+      </Select>
+      <Select
         aria-label={t("runtimeConfig.effort")}
         value={draft.effort}
         disabled={disabled}
         onChange={(event) => onEdit((current) => ({ ...current, effort: event.target.value }))}
       >
         {withDefaults ? <option value="">{t("draft.effortDefault")}</option> : null}
-        {efforts.map((effort) => <option key={effort} value={effort}>{effort}</option>)}
-      </select>
+        {efforts.map((effort) => <option key={effort} value={effort}>{effortTierLabel(t, effort)}</option>)}
+      </Select>
       {speedShown ? (
-        <label className="inline-flex h-6 items-center gap-1 rounded-full border border-border bg-canvas px-1.5 font-mono text-[9.5px] font-semibold text-secondary" title={t("runtimeConfig.speedTitle")}>
-          <input type="checkbox" checked={draft.fast} onChange={(event) => onEdit((current) => ({ ...current, fast: event.target.checked }))} /> fast
+        <label className="inline-flex h-7 items-center gap-1 rounded-control border border-border bg-card px-1.5 text-ui font-semibold text-secondary" title={t("runtimeConfig.speedTitle")}>
+          <input type="checkbox" checked={draft.fast} onChange={(event) => onEdit((current) => ({ ...current, fast: event.target.checked }))} /> {t("draft.speedFast")}
         </label>
       ) : null}
       <button type="button" className="inline-flex h-6 items-center gap-1 rounded-full border border-border bg-canvas px-1.5 text-[9.5px] font-semibold text-muted hover:border-accent/45 hover:text-accent disabled:opacity-60" disabled={disabled || state === "saving"} onClick={onApply} aria-label={t("runtimeConfig.apply")}>

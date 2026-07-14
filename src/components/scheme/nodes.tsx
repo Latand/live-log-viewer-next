@@ -20,7 +20,7 @@ import { PipelineHub } from "@/components/pipelines/PipelineHub";
 import { PipelineStrip } from "@/components/pipelines/PipelineStrip";
 import { PipelineTemplatePicker } from "@/components/pipelines/PipelineTemplatePicker";
 import { StagePlaceholderPane } from "@/components/pipelines/StagePlaceholderPane";
-import { STAGE_TONES, canSourcePipeline, createDraftPipeline, patchPipeline, renderableFlowIds, reviewLoopChainValid, stageChipState } from "@/components/pipelines/pipelineModel";
+import { STAGE_TONES, canSourcePipeline, createDraftPipeline, optimisticAddStage, patchPipeline, renderableFlowIds, reviewLoopChainValid, stageChipState } from "@/components/pipelines/pipelineModel";
 import { pushTaskToast } from "@/components/tasks/taskToast";
 import type { Pipeline } from "@/lib/pipelines/types";
 import { FlowStrip } from "@/components/flows/FlowStrip";
@@ -386,7 +386,6 @@ export const GroupsLayer = memo(function GroupsLayer({
   autoOpenGroupId?: string | null;
   onAutoOpen?: () => void;
 }) {
-  const { t } = useLocale();
   const [openId, setOpenId] = useState<string | null>(null);
   /* Open the requested group once it appears (the draft POST → refetch → layout
      round-trip means its halo may not exist on the render that first receives the
@@ -477,9 +476,11 @@ export const GroupsLayer = memo(function GroupsLayer({
               disabled={!interactive}
               onClick={() => setOpenId((value) => (value === group.id ? null : group.id))}
             >
+              {/* Title only — the draft status badge lives on the strip below
+                  (one title, one badge; issue #221 §2). The dashed warning
+                  border already reads as "draft" at a glance. */}
               <span aria-hidden>{group.kind === "pipeline" ? "⇢" : "⟳"}</span>
               <span className="truncate">{group.label}</span>
-              {draft ? <span className="rounded-full bg-warning-soft px-[0.55em] py-[0.12em] text-[0.82em] font-black tracking-[0.08em] text-warning">{t("pipelineStrip.draftBadge")}</span> : null}
             </button>
           </div>
         );
@@ -999,9 +1000,11 @@ function DraftShell({
  * riding the gap to its left when the previous stage's slot sits directly
  * beside it — so the staging (which role runs after which, where the hard
  * review cycles sit) reads off the canvas before anything spawns. On a draft,
- * connection chips under the window extend the chain: `＋ agent` inserts the
- * next run handoff after this stage, `＋ ⟳` attaches the hard review-cycle
- * link — every one an add-stage PATCH on the same draft contract.
+ * the chain grows to the RIGHT: the last stage carries the `＋ next agent`
+ * affordance on its right edge — the direction the pipeline extends (issue
+ * #221 §4) — while `＋ ⟳ review cycle` stays attached under the stage it
+ * wraps. Every add is an optimistic add-stage PATCH on the same draft
+ * contract, applied locally first (issue #221 §3).
  */
 function StageSlotShell({ slot, lite, dimmed }: { slot: StageSlot; lite: boolean; dimmed: boolean }) {
   const { t } = useLocale();
@@ -1009,24 +1012,24 @@ function StageSlotShell({ slot, lite, dimmed }: { slot: StageSlot; lite: boolean
   const tone = STAGE_TONES[stageChipState(slot.pipeline, slot.stage)];
   const { pipeline } = slot;
   const draft = pipeline.state === "draft";
+  const last = slot.index === slot.total - 1;
   const kinds = pipeline.stages.map((item) => item.kind);
   const kindsWithInsert = (kind: "run" | "review-loop") => {
     const next = [...kinds];
     next.splice(slot.index + 1, 0, kind);
     return next;
   };
-  const canAddRun = draft && !lite && pipeline.stages.length < 4;
-  const canAddReview = canAddRun && reviewLoopChainValid(kindsWithInsert("review-loop"));
+  const canAdd = draft && !lite && pipeline.stages.length < 4;
+  const canAddReview = canAdd && reviewLoopChainValid(kindsWithInsert("review-loop"));
   const addAfter = (kind: "run" | "review-loop") => {
     if (busy) return;
     setBusy(true);
     const ids = new Set(pipeline.stages.map((item) => item.id));
     let n = pipeline.stages.length + 1;
     while (ids.has(`stage-${n}`)) n += 1;
-    void patchPipeline(pipeline.id, "add-stage", {
-      index: slot.index + 1,
-      stage: { id: `stage-${n}`, kind, prompt: pipeline.task || "{{task}}", next: null },
-    }).then((fail) => {
+    const index = slot.index + 1;
+    const stage = { id: `stage-${n}`, kind, prompt: index > 0 ? "{{prev.output}}" : "{{task}}", next: null };
+    void patchPipeline(pipeline.id, "add-stage", { index, stage }, optimisticAddStage(pipeline, stage, index)).then((fail) => {
       if (fail) pushTaskToast("err", fail);
       setBusy(false);
     });
@@ -1049,17 +1052,26 @@ function StageSlotShell({ slot, lite, dimmed }: { slot: StageSlot; lite: boolean
       <div className="flex h-full">
         <StagePlaceholderPane slot={slot} interactive={!lite} />
       </div>
-      {canAddRun ? (
-        <div className="absolute -bottom-10 left-0 z-[2] flex items-center gap-1.5">
+      {/* Extend-the-chain affordance: only on the LAST stage, riding the right
+          edge where the next window will materialize (issue #221 §4). */}
+      {canAdd && last ? (
+        <div data-scheme-ui className="absolute left-full top-[110px] z-[2] flex -translate-y-1/2 items-center">
+          <span aria-hidden className="h-0 w-5 border-t-2 border-dashed border-strong" />
           <button
             data-scheme-ui
-            className="inline-flex h-7 items-center gap-1 rounded-full border border-border bg-card px-2.5 text-[11px] font-semibold text-muted shadow-1 hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40"
+            className="inline-flex h-9 shrink-0 items-center gap-1 whitespace-nowrap rounded-full border-2 border-dashed border-border bg-card px-3 text-[11.5px] font-bold text-secondary shadow-1 hover:border-accent/60 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40"
             disabled={busy}
             title={t("pipelineSlot.addAgentTitle")}
             onClick={() => addAfter("run")}
           >
-            <span className="text-[13px] leading-none text-accent">＋</span> {t("pipelineSlot.addAgent")}
+            <span className="text-[14px] leading-none text-accent" aria-hidden>＋</span> {t("pipelineSlot.addAgent")}
           </button>
+        </div>
+      ) : null}
+      {/* The review cycle wraps THIS stage, so its affordance stays attached to
+          the stage's own card. */}
+      {canAdd && slot.stage.kind === "run" ? (
+        <div className="absolute -bottom-10 left-0 z-[2] flex items-center gap-1.5">
           <button
             data-scheme-ui
             className="inline-flex h-7 items-center gap-1 rounded-full border border-border bg-card px-2.5 text-[11px] font-semibold text-muted shadow-1 hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40"
@@ -1067,7 +1079,7 @@ function StageSlotShell({ slot, lite, dimmed }: { slot: StageSlot; lite: boolean
             title={t("pipelineSlot.addReviewTitle")}
             onClick={() => addAfter("review-loop")}
           >
-            <span className="text-[13px] leading-none text-accent">⟳</span> {t("pipelineSlot.addReview")}
+            <span className="text-[13px] leading-none text-accent" aria-hidden>⟳</span> {t("pipelineSlot.addReview")}
           </button>
         </div>
       ) : null}

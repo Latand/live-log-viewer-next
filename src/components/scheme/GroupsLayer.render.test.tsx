@@ -132,7 +132,12 @@ test("a draft pipeline has a scheme-only draft treatment and its complete stage 
   const html = renderToStaticMarkup(<GroupsLayer groups={[group]} interactive pipelineControls={controls} />);
 
   expect(html).toContain('data-pipeline-draft="true"');
-  expect(html).toContain("DRAFT");
+  /* One title, one draft badge (issue #221 §2): the chip names the pipeline
+     (once), the strip carries the single "draft" state badge — no separate
+     DRAFT pill, and the compact strip repeats no title. */
+  expect(html).not.toContain("DRAFT");
+  expect(html.split(">Refactor the scheme<").length - 1).toBe(1); // visible title: the chip only (aria-labels aside)
+  expect(html.split(">draft<").length - 1).toBe(1);
   expect(html).toContain("build");
   expect(html).toContain("review");
   expect(html).toContain("Start pipeline");

@@ -4,6 +4,7 @@ import { Check, Loader2 } from "lucide-react";
 import { useState } from "react";
 
 import { RuntimeControlsView, type RuntimeApplyState, type RuntimeDraft } from "@/components/AgentRuntimeControls";
+import { effortTierLabel } from "@/components/builderCopy";
 import { EngineRadioGroup, RoleSection, useRoleCatalog } from "@/components/DraftAgentPane";
 import { X } from "@/components/icons";
 import type { StageSlot } from "@/components/scheme/layout";
@@ -17,11 +18,15 @@ import type { PatchPipelineRequest, PipelineRoleId } from "@/lib/pipelines/types
 import {
   PIPELINE_ROLE_OPTIONS,
   STAGE_TONES,
+  buildStagePrompt,
+  optimisticRemoveStage,
   patchPipeline,
   reviewLoopChainValid,
   stageAttempts,
   stageChipLabel,
   stageChipState,
+  stagePromptExtra,
+  stageReceivesPrevOutput,
 } from "./pipelineModel";
 
 const PIPELINE_ROLE_ID_SET: ReadonlySet<string> = new Set(PIPELINE_ROLE_OPTIONS);
@@ -79,7 +84,9 @@ export function StagePlaceholderPane({ slot, interactive }: { slot: StageSlot; i
   const [applyState, setApplyState] = useState<RuntimeApplyState>("idle");
   const [roleId, setRoleId] = useState(stage.role?.roleId ?? "");
   const [roleParams, setRoleParams] = useState<Record<string, string | number>>(stage.role?.params ?? {});
-  const [prompt, setPrompt] = useState(stage.prompt);
+  /* The operator edits only the ADDITIONAL prompt — the {{task}}/{{prev.output}}
+     wiring is automatic plumbing the card explains in plain words (issue #221 §5). */
+  const [extraPrompt, setExtraPrompt] = useState(() => stagePromptExtra(stage.prompt));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
@@ -104,9 +111,9 @@ export function StagePlaceholderPane({ slot, interactive }: { slot: StageSlot; i
   }
   const [seenPrompt, setSeenPrompt] = useState(stage.prompt);
   if (seenPrompt !== stage.prompt) {
-    const previous = seenPrompt;
+    const previous = stagePromptExtra(seenPrompt);
     setSeenPrompt(stage.prompt);
-    setPrompt((current) => (current === previous ? stage.prompt : current));
+    setExtraPrompt((current) => (current === previous ? stagePromptExtra(stage.prompt) : current));
   }
 
   const save = async (body: Omit<PatchPipelineRequest, "action" | "stageId">) => {
@@ -173,10 +180,10 @@ export function StagePlaceholderPane({ slot, interactive }: { slot: StageSlot; i
     const params = sanitizeParams(next);
     void save({ role: { roleId: roleId as PipelineRoleId, ...(Object.keys(params).length ? { params } : {}) } });
   };
-  const promptDirty = prompt !== stage.prompt;
+  const promptDirty = extraPrompt.trim() !== stagePromptExtra(stage.prompt);
   const savePrompt = () => {
-    if (!promptDirty || !prompt.trim()) return;
-    void save({ prompt: prompt.trim() });
+    if (!promptDirty) return;
+    void save({ prompt: buildStagePrompt(stage.prompt, extraPrompt, slot.index) });
   };
   /* Removing this stage must keep the chain startable: a removal that would
      orphan a review loop is disabled (same guard as the builder panel). */
@@ -184,7 +191,9 @@ export function StagePlaceholderPane({ slot, interactive }: { slot: StageSlot; i
     draft && interactive && reviewLoopChainValid(pipeline.stages.filter((item) => item.id !== stage.id).map((item) => item.kind));
   const removeStage = () => {
     setBusy(true);
-    void patchPipeline(pipeline.id, "remove-stage", { stageId: stage.id }).then((fail) => {
+    /* Optimistic: the slot dissolves immediately; the PATCH echo confirms it,
+       a failure restores it (issue #221 §3). */
+    void patchPipeline(pipeline.id, "remove-stage", { stageId: stage.id }, optimisticRemoveStage(pipeline, stage.id)).then((fail) => {
       if (fail) setError(fail);
       setBusy(false);
     });
@@ -199,7 +208,7 @@ export function StagePlaceholderPane({ slot, interactive }: { slot: StageSlot; i
       ? t("pipelineSlot.starting", { role: label })
       : t("pipelineSlot.waiting", { role: label });
   const observedModelLabel = (ENGINE_MODELS[engine].find((option) => option.id === effectiveModel)?.label ?? effectiveModel) || t("draft.modelDefault");
-  const observedEffort = effectiveEffort || t("groupOverride.effortDefault");
+  const observedEffort = effectiveEffort ? effortTierLabel(t, effectiveEffort) : t("groupOverride.effortDefault");
   const runtimePending = runtime.model !== effectiveModel || runtime.effort !== effectiveEffort;
 
   return (
@@ -276,7 +285,7 @@ export function StagePlaceholderPane({ slot, interactive }: { slot: StageSlot; i
         ) : (
           <span className="min-w-0 truncate text-label font-semibold text-muted">
             {observedModelLabel}
-            {effectiveEffort ? ` · ${effectiveEffort}` : ""}
+            {effectiveEffort ? ` · ${effortTierLabel(t, effectiveEffort)}` : ""}
           </span>
         )}
       </div>
@@ -305,14 +314,26 @@ export function StagePlaceholderPane({ slot, interactive }: { slot: StageSlot; i
           className="flex shrink-0 flex-col gap-1 border-t border-border bg-card px-2.5 py-2"
           aria-label={t("pipelineSlot.promptAria")}
         >
+          {/* The wiring is automatic — say so in plain words instead of exposing
+              {{task}}/{{prev.output}} plumbing (issue #221 §5). A review loop
+              already explains itself in the pane body. */}
+          {!review ? (
+            <span className="text-caption font-semibold text-secondary">
+              {t(
+                slot.index > 0 && stageReceivesPrevOutput(stage.prompt)
+                  ? "pipelineSlot.wiringPrev"
+                  : "pipelineSlot.wiringTask",
+              )}
+            </span>
+          ) : null}
           <label className="text-caption font-semibold text-muted" htmlFor={`slot-prompt-${slot.key}`}>
             {t("pipelineSlot.promptLabel")}
           </label>
           <textarea
             id={`slot-prompt-${slot.key}`}
-            value={prompt}
+            value={extraPrompt}
             disabled={!editable || busy}
-            onChange={(event) => setPrompt(event.target.value)}
+            onChange={(event) => setExtraPrompt(event.target.value)}
             onBlur={savePrompt}
             placeholder={t("pipelineSlot.noPrompt")}
             className="min-h-[52px] w-full resize-y rounded-control border border-border bg-canvas px-2 py-1.5 text-ui text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60"
@@ -321,7 +342,7 @@ export function StagePlaceholderPane({ slot, interactive }: { slot: StageSlot; i
             <div className="flex items-center justify-end">
               <button
                 type="submit"
-                disabled={!editable || busy || !prompt.trim()}
+                disabled={!editable || busy}
                 className="inline-flex h-7 items-center gap-1 rounded-control border border-accent bg-accent px-2.5 text-label font-bold text-white hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 disabled:opacity-40"
               >
                 {t("pipelineSlot.savePrompt")}

@@ -80,7 +80,8 @@ function mount(node: React.ReactNode): { host: HTMLElement; root: Root } {
 
 test("a placeholder IS the draft-agent window recipe: engine radiogroup, role select, shared model+effort pickers, prompt editor", () => {
   const { host, root } = mount(<StagePlaceholderPane slot={slot()} interactive />);
-  expect(host.textContent).toContain("architect");
+  /* Role display names localize (issue #221 §1); the stored id stays raw. */
+  expect(host.textContent).toContain("Architect");
   expect(host.textContent).toContain("stage 1/3");
   /* Same window anatomy as DraftAgentPane: engine radiogroup in the header… */
   expect(host.querySelector('[role="radiogroup"]')).toBeTruthy();
@@ -90,9 +91,12 @@ test("a placeholder IS the draft-agent window recipe: engine radiogroup, role se
   expect(selects.length).toBe(3);
   expect(selects[1]!.value).toBe("fable");
   expect(selects[2]!.value).toBe("high");
-  /* …and the stage prompt as the editable footer. */
+  /* …a plain-language wiring caption instead of raw {{task}} plumbing, and the
+     ADDITIONAL prompt as the editable footer (issue #221 §5). */
+  expect(host.textContent).toContain("Automatically receives: the task text");
   const textarea = host.querySelector("textarea") as HTMLTextAreaElement;
   expect(textarea.value).toBe("Plan the work");
+  expect(textarea.value).not.toContain("{{");
   flushSync(() => root.unmount());
   host.remove();
 });
@@ -144,7 +148,9 @@ test("editing the prompt saves on blur with ONLY the prompt", async () => {
   /* Re-read after the commit: onBlur must close over the fresh prompt state. */
   flushSync(() => propsOf().onBlur({}));
   await Bun.sleep(0);
-  expect(patches).toEqual([{ action: "override-stage", stageId: "architect", prompt: "Plan the rework carefully" }]);
+  /* The edited ADDITIONAL text is reassembled onto the stage's wiring (a
+     token-less legacy prompt gains its position default) — issue #221 §5. */
+  expect(patches).toEqual([{ action: "override-stage", stageId: "architect", prompt: "{{task}}\n\nPlan the rework carefully" }]);
   flushSync(() => root.unmount());
   host.remove();
 });
@@ -162,7 +168,7 @@ test("a stage that already ran is frozen: pickers disabled, no PATCH from a chan
 test("the lite (map) variant renders a static runtime summary instead of pickers", () => {
   const { host, root } = mount(<StagePlaceholderPane slot={slot()} interactive={false} />);
   expect(host.querySelectorAll("select").length).toBe(0);
-  expect(host.textContent).toContain("architect");
+  expect(host.textContent).toContain("Architect");
   expect(host.textContent).toContain("Fable");
   flushSync(() => root.unmount());
   host.remove();

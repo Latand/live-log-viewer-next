@@ -80,7 +80,10 @@ test("mobile renders a read-only draft plan with a 44px Start action", () => {
   } as Pipeline;
   const html = renderToStaticMarkup(<MobilePipelineDock pipeline={draft} />);
 
-  expect(html).toContain("DRAFT");
+  /* One title, ONE draft marker (issue #221 §2): the state label alone. */
+  expect(html).toContain(">draft<");
+  expect(html).not.toContain("DRAFT");
+  expect(html.split("Review on mobile").length - 1).toBe(2); // aria-label + visible title
   expect(html).toContain("plan");
   expect(html).toContain("build");
   expect(html).toContain("review");

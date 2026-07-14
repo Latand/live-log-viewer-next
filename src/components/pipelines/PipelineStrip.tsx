@@ -293,12 +293,14 @@ export function PipelineStrip({
           }`}
           aria-hidden
         />
-        {draft ? (
-          <span className="shrink-0 rounded-full border border-dashed border-warning bg-warning-soft px-2 py-0.5 text-caption font-semibold text-warning">
-            {t("pipelineStrip.draftBadge")}
-          </span>
-        ) : null}
-        <span className="min-w-0 truncate text-ui font-semibold text-primary" title={pipeline.task}>{pipeline.task}</span>
+        {/* One title, one status badge (issue #221 §2): the compact (on-canvas)
+            strip sits under the group label chip that already names the
+            pipeline, so it carries only the status; the standalone strip keeps
+            the title. The state badge is the single draft marker — no separate
+            DRAFT pill. */}
+        {compact ? null : (
+          <span className="min-w-0 truncate text-ui font-semibold text-primary" title={pipeline.task}>{pipeline.task}</span>
+        )}
         <span className={`shrink-0 rounded-full px-1.5 py-0.5 text-caption font-semibold ${statusBadge}`}>
           {pipelineStateLabel(t, pipeline.state)}
         </span>

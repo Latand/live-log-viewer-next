@@ -4,7 +4,6 @@ import { ListTodo, Map as MapIcon, Pause, Play } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { Loader2, X } from "@/components/icons";
-import { Badge } from "@/components/ui/Badge";
 import { TaskSheet, type TaskSheetView } from "@/components/tasks/TaskSheet";
 import { viewBus } from "@/hooks/viewPresenceBus";
 import type { Flow } from "@/lib/flows/types";
@@ -643,8 +642,9 @@ export function MobilePipelineDock({ pipeline }: { pipeline: Pipeline }) {
     <div className={`flex flex-col gap-2 px-3 py-2 ${draft ? "border-y border-dashed border-warning/70 bg-warning-soft" : ""}`} data-testid="mobile-pipeline-dock" data-pipeline-draft={draft || undefined} role="group" aria-label={t("pipelineMobile.chipAria", { task: pipeline.task })}>
       <div className="flex items-center gap-2">
         <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: pipelineDotColor(pipeline) }} aria-hidden />
+        {/* One title, one status marker (issue #221 §2): the state label already
+            says "draft", so no separate DRAFT badge. */}
         <span className="min-w-0 flex-1 truncate text-[12.5px] font-bold text-primary">{cleanTitle(pipeline.task, 60)}</span>
-        {draft ? <Badge tone="warning">{t("pipelineStrip.draftBadge")}</Badge> : null}
         <span className="shrink-0 text-[11px] font-semibold text-muted">{pipelineStateLabel(t, pipeline.state)}</span>
       </div>
       {/* The whole planned stage graph, scrolled horizontally — past/current/ghost. */}

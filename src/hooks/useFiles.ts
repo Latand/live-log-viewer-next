@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 
 import { FLOWS_CHANGED_EVENT } from "@/components/flows/flowModel";
-import { PIPELINES_CHANGED_EVENT } from "@/components/pipelines/pipelineModel";
+import { PIPELINES_CHANGED_EVENT, PIPELINES_PATCHED_EVENT } from "@/components/pipelines/pipelineEvents";
 import { SESSION_TITLES_CHANGED_EVENT } from "@/components/session/sessionTitleApi";
 import { TASKS_CHANGED_EVENT } from "@/components/tasks/taskApi";
 import { WORKFLOWS_CHANGED_EVENT } from "@/components/workflows/workflowModel";
@@ -58,6 +58,14 @@ type FilesFetcher = (input: string, init?: RequestInit) => Promise<Response>;
 export interface FilesClientCache {
   read(): FilesData;
   revalidate(pinnedPath?: string | null, revision?: number): Promise<FilesData>;
+  /** Layer one pipeline record over the server snapshot without a refetch — an
+      optimistic local mutation (`confirmed: false`, held until reverted or
+      confirmed) or a PATCH/POST echo (`confirmed: true`, held only until a scan
+      requested after the echo lands and becomes authoritative). */
+  applyPipeline(pipeline: Pipeline, confirmed: boolean): void;
+  /** Drop a local overlay (a failed optimistic mutation) — the server snapshot
+      is authoritative again. */
+  revertPipeline(id: string): void;
 }
 
 function equalValue(left: unknown, right: unknown): boolean {
@@ -124,6 +132,40 @@ export function createFilesClientCache(fetcher: FilesFetcher): FilesClientCache 
   let requestedGeneration = 0;
   let appliedGeneration = 0;
   let requestQueue: Promise<void> = Promise.resolve();
+  /* Locally patched pipelines (issue #221 instant stage mutations): each entry
+     shadows the server row until a scan that was REQUESTED after the mutation
+     confirmed (`minGeneration`) arrives — an in-flight stale scan can never
+     roll an applied edit back. `pipeline: null` hides a locally deleted draft. */
+  const pipelineOverlays = new Map<string, { pipeline: Pipeline | null; minGeneration: number }>();
+  let serverPipelines: readonly Pipeline[] = EMPTY.pipelines;
+
+  const composePipelines = () => {
+    if (!pipelineOverlays.size) {
+      snapshot = { ...snapshot, pipelines: [...serverPipelines] };
+      return;
+    }
+    const seen = new Set<string>();
+    const pipelines = serverPipelines.flatMap((pipeline) => {
+      const entry = pipelineOverlays.get(pipeline.id);
+      if (!entry) return [pipeline];
+      seen.add(pipeline.id);
+      return entry.pipeline ? [entry.pipeline] : [];
+    });
+    for (const [id, entry] of pipelineOverlays) {
+      if (!seen.has(id) && entry.pipeline) pipelines.push(entry.pipeline);
+    }
+    snapshot = { ...snapshot, pipelines };
+  };
+
+  /** The server snapshot from `generation` reflects every overlay whose
+      minGeneration it reaches — those overlays retire; younger ones re-apply. */
+  const settleServerPipelines = (generation: number) => {
+    serverPipelines = snapshot.pipelines;
+    for (const [id, entry] of pipelineOverlays) {
+      if (entry.minGeneration <= generation) pipelineOverlays.delete(id);
+    }
+    if (pipelineOverlays.size) composePipelines();
+  };
 
   const rememberRepresentation = (url: string, data: FilesData, etag?: string) => {
     representations.delete(url);
@@ -147,6 +189,7 @@ export function createFilesClientCache(fetcher: FilesFetcher): FilesClientCache 
       snapshot = restoreNotModified(snapshot, representation.data, url);
       appliedGeneration = generation;
       rememberRepresentation(url, snapshot, representation.etag);
+      settleServerPipelines(generation);
       return snapshot;
     }
     if (!response.ok) throw new Error(`files request failed: ${response.status}`);
@@ -157,6 +200,7 @@ export function createFilesClientCache(fetcher: FilesFetcher): FilesClientCache 
     appliedGeneration = generation;
     const etag = response.headers.get("ETag");
     rememberRepresentation(url, snapshot, etag ?? undefined);
+    settleServerPipelines(generation);
     return snapshot;
   };
 
@@ -166,7 +210,25 @@ export function createFilesClientCache(fetcher: FilesFetcher): FilesClientCache 
     return result;
   };
 
-  return { read: () => snapshot, revalidate };
+  const applyPipeline = (pipeline: Pipeline, confirmed: boolean) => {
+    /* A deleted/closed draft echo carries hiddenAt — locally it just disappears
+       (the server's visibility filter drops it from the next scan too). */
+    const hidden = Boolean(pipeline.hiddenAt) && !pipeline.restored;
+    pipelineOverlays.set(pipeline.id, {
+      pipeline: hidden ? null : pipeline,
+      /* An unconfirmed (optimistic) overlay outlives every scan until its PATCH
+         echoes or fails; a confirmed one only until a younger scan carries it. */
+      minGeneration: confirmed ? requestedGeneration + 1 : Number.POSITIVE_INFINITY,
+    });
+    composePipelines();
+  };
+
+  const revertPipeline = (id: string) => {
+    if (!pipelineOverlays.delete(id)) return;
+    composePipelines();
+  };
+
+  return { read: () => snapshot, revalidate, applyPipeline, revertPipeline };
 }
 
 const defaultFilesFetcher: FilesFetcher = (input, init) => fetch(input, init);
@@ -174,6 +236,25 @@ let filesClientCache = createFilesClientCache(defaultFilesFetcher);
 
 export function resetFilesClientCacheForTests(): void {
   filesClientCache = createFilesClientCache(defaultFilesFetcher);
+}
+
+/**
+ * Apply a locally-known pipeline record (an optimistic mutation or a PATCH/POST
+ * echo) straight into the client cache and notify every mounted `useFiles` —
+ * the board updates in the same frame, with NO /api/files refetch (issue #221:
+ * instant stage add/remove). `confirmed: false` marks a not-yet-persisted
+ * optimistic state; confirm it with the echo or roll it back with
+ * {@link revertPipelineSnapshot}.
+ */
+export function applyPipelineSnapshot(pipeline: Pipeline, confirmed: boolean): void {
+  filesClientCache.applyPipeline(pipeline, confirmed);
+  if (typeof window !== "undefined") window.dispatchEvent(new Event(PIPELINES_PATCHED_EVENT));
+}
+
+/** Roll back a failed optimistic pipeline mutation to the server snapshot. */
+export function revertPipelineSnapshot(id: string): void {
+  filesClientCache.revertPipeline(id);
+  if (typeof window !== "undefined") window.dispatchEvent(new Event(PIPELINES_PATCHED_EVENT));
 }
 
 export function filesRequestHeaders(etag: string, revision?: number): Record<string, string> | undefined {
@@ -245,6 +326,12 @@ export function useFiles(_project?: string | null, pinnedPath?: string | null): 
     /* Flow, workflow and task mutations refresh out of band: strips and
        cards must not sit on stale state for up to a full poll interval. */
     const onChanged = () => void load();
+    /* A locally-applied pipeline patch (optimistic mutation / PATCH echo) is
+       already in the cache — re-read it, never refetch. */
+    const onPatched = () => {
+      if (alive) setData(filesClientCache.read());
+    };
+    window.addEventListener(PIPELINES_PATCHED_EVENT, onPatched);
     window.addEventListener(FLOWS_CHANGED_EVENT, onChanged);
     window.addEventListener(PIPELINES_CHANGED_EVENT, onChanged);
     window.addEventListener(WORKFLOWS_CHANGED_EVENT, onChanged);
@@ -295,6 +382,7 @@ export function useFiles(_project?: string | null, pinnedPath?: string | null): 
       if (revisionTimer) clearTimeout(revisionTimer);
       unsubBus();
       unsubFiles();
+      window.removeEventListener(PIPELINES_PATCHED_EVENT, onPatched);
       window.removeEventListener(FLOWS_CHANGED_EVENT, onChanged);
       window.removeEventListener(PIPELINES_CHANGED_EVENT, onChanged);
       window.removeEventListener(WORKFLOWS_CHANGED_EVENT, onChanged);
