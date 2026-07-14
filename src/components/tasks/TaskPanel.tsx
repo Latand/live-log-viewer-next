@@ -38,16 +38,19 @@ function FavoritesSection({
   const { t } = useLocale();
   return (
     <section className="mb-1 flex flex-col gap-0.5" aria-label={t("favorites.sectionTitle")}>
-      <div className="flex items-center gap-1 px-1 pb-0.5 text-[10px] font-bold uppercase tracking-wide text-muted">
+      {/* SectionHeader recipe (design doc §3.6): sentence-case label + `· counter`,
+          no uppercase/tracking. §1.4: rows inside this card get a hairline border,
+          no shadow. */}
+      <div className="flex items-center gap-1 px-1 pb-0.5 text-label font-semibold text-secondary">
         <Crown className="h-3 w-3 fill-crown text-crown" aria-hidden />
         {t("favorites.sectionTitle")}
-        {rows.length ? <span className="font-semibold text-muted/70">{rows.length}</span> : null}
+        {rows.length ? <span className="text-caption font-normal tabular-nums text-muted">· {rows.length}</span> : null}
       </div>
       {rows.length ? (
         rows.map(({ id, file, project }) => (
           <div
             key={id}
-            className="flex items-center gap-1 rounded-[8px] border border-border bg-card px-2 py-1.5 shadow-1 hover:border-accent/40"
+            className="flex items-center gap-1 rounded-control border border-border bg-card px-2 py-1.5 hover:border-accent/40"
           >
             <button
               type="button"
@@ -56,14 +59,14 @@ function FavoritesSection({
               onClick={() => onOpen(file)}
             >
               <span className={`h-2 w-2 shrink-0 rounded-full ${activityDot(file.activity)}`} aria-hidden />
-              <span className="min-w-0 flex-1 truncate text-[11.5px] font-semibold">
+              <span className="min-w-0 flex-1 truncate text-ui font-semibold">
                 {cleanTitle(file.title, 90) || t("tasks.untitled")}
               </span>
-              {scopeAll ? <span className="max-w-[90px] shrink-0 truncate text-[10px] text-muted">{project}</span> : null}
+              {scopeAll ? <span className="max-w-[90px] shrink-0 truncate text-caption text-muted">{project}</span> : null}
             </button>
             <button
               type="button"
-              className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-[6px] text-crown hover:bg-crown-soft focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+              className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-control text-crown hover:bg-crown-soft focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
               aria-label={t("branch.unfavorite")}
               title={t("branch.unfavorite")}
               onClick={() => onToggle(id)}
@@ -73,7 +76,7 @@ function FavoritesSection({
           </div>
         ))
       ) : (
-        <div className="px-2 py-1.5 text-[10.5px] text-muted">{t("favorites.empty")}</div>
+        <div className="px-2 py-1.5 text-caption text-muted">{t("favorites.empty")}</div>
       )}
     </section>
   );
@@ -239,7 +242,7 @@ export function TaskPanel({
             return (
               <div
                 key={task.id}
-                className={`flex w-full min-w-0 flex-col gap-0.5 rounded-[8px] border border-border bg-card px-2 py-1.5 shadow-1 hover:border-accent/40 ${
+                className={`flex w-full min-w-0 flex-col gap-0.5 rounded-[8px] border border-border bg-card px-2 py-1.5 hover:border-accent/40 ${
                   task.status === "done" ? "opacity-60" : ""
                 }`}
               >

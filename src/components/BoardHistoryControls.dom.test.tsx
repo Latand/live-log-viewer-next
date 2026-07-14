@@ -40,7 +40,7 @@ async function mount(node: React.ReactElement): Promise<{ buttons: HTMLButtonEle
   return { buttons, container };
 }
 
-test("both arrows are disabled with an empty history", async () => {
+test("desktop: the island stays hidden until the log has something to act on", async () => {
   const { buttons } = await mount(
     <BoardHistoryControls
       canUndo={false}
@@ -52,16 +52,12 @@ test("both arrows are disabled with an empty history", async () => {
       isMobile={false}
     />,
   );
-  expect(buttons).toHaveLength(2);
-  const [undo, redo] = buttons;
-  expect(undo!.disabled).toBe(true);
-  expect(redo!.disabled).toBe(true);
-  /* Edge tooltips explain why the control is inert. */
-  expect(undo!.getAttribute("title")).toBe("Nothing to undo");
-  expect(redo!.getAttribute("title")).toBe("Nothing to redo");
+  /* Resting chrome hygiene (finding 2): no disabled two-button box before the
+     first close. */
+  expect(buttons).toHaveLength(0);
 });
 
-test("undo enabled, tooltip names the card the next undo restores", async () => {
+test("desktop: undo enabled, the label names the card and discloses the shortcut", async () => {
   const clicks: string[] = [];
   const { buttons } = await mount(
     <BoardHistoryControls
@@ -74,10 +70,15 @@ test("undo enabled, tooltip names the card the next undo restores", async () => 
       isMobile={false}
     />,
   );
+  expect(buttons).toHaveLength(2);
   const [undo, redo] = buttons;
   expect(undo!.disabled).toBe(false);
   expect(redo!.disabled).toBe(true);
-  expect(undo!.getAttribute("title")).toBe("Undo — reopen “Alpha”");
+  /* Styled Hint (finding 4): the label rides aria-label, not a native title,
+     and names the shortcut the feature ships. */
+  expect(undo!.getAttribute("title")).toBeNull();
+  expect(undo!.getAttribute("aria-label")).toBe("Undo — reopen “Alpha” (Ctrl+Z)");
+  expect(redo!.getAttribute("aria-label")).toBe("Nothing to redo");
   act(() => {
     undo!.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as MouseEvent);
   });
@@ -88,20 +89,43 @@ test("undo enabled, tooltip names the card the next undo restores", async () => 
   expect(clicks).toEqual(["undo"]);
 });
 
-test("mobile sizing meets the 44px touch target", async () => {
+test("mobile: a single undo button, only while an undo is possible, at a 44px target", async () => {
+  const clicks: string[] = [];
   const { buttons } = await mount(
     <BoardHistoryControls
       canUndo
       canRedo
       undoEntry={close("Alpha")}
       redoEntry={close("Beta")}
+      onUndo={() => clicks.push("undo")}
+      onRedo={() => clicks.push("redo")}
+      isMobile
+    />,
+  );
+  /* Finding 1: redo lives on Ctrl+Shift+Z / the «⋯» menu, so the toolbar spends
+     one 44px slot, not two. */
+  expect(buttons).toHaveLength(1);
+  const [undo] = buttons;
+  expect(undo!.className).toContain("h-11");
+  expect(undo!.className).toContain("w-11");
+  expect(undo!.getAttribute("aria-label")).toBe("Undo — reopen “Alpha” (Ctrl+Z)");
+  act(() => {
+    undo!.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as MouseEvent);
+  });
+  expect(clicks).toEqual(["undo"]);
+});
+
+test("mobile: nothing renders when there is no undo", async () => {
+  const { buttons } = await mount(
+    <BoardHistoryControls
+      canUndo={false}
+      canRedo
+      undoEntry={null}
+      redoEntry={close("Beta")}
       onUndo={() => {}}
       onRedo={() => {}}
       isMobile
     />,
   );
-  for (const btn of buttons) {
-    expect(btn.className).toContain("h-11");
-    expect(btn.className).toContain("w-11");
-  }
+  expect(buttons).toHaveLength(0);
 });

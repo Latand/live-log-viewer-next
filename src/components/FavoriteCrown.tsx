@@ -48,6 +48,10 @@ export function FavoriteCrown({
       type="button"
       data-scheme-ui
       data-favorite-crown={favorited ? "on" : "off"}
+      /* Drives the hidden-state scale in globals.css off a data attribute, so a
+         refactor of the `opacity-0` utility can't silently kill the reveal
+         (finding 6). `data-favorite-crown` is favorited-state, not visibility. */
+      data-crown-hidden={visible ? undefined : "true"}
       aria-pressed={favorited}
       aria-label={label}
       title={label}
