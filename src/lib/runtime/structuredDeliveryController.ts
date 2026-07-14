@@ -123,12 +123,11 @@ export async function bindStructuredDeliveryQueue(
     runtimeClientDeliveryPort(client),
     hostResolver(registry, hosts),
     async (conversationId, expectedKey) => {
-      const conversation = registry.conversation(conversationId as `conversation_${string}`);
-      const generation = conversation?.generations.at(-1);
-      if (!conversation || !generation) return false;
-      const currentKey = { engine: conversation.engine, sessionId: generation.id } as const;
-      if (sessionKeyId(currentKey) !== sessionKeyId(expectedKey)) return false;
-      return await state.terminateActiveHost?.(currentKey) ?? false;
+      if (await state.terminateActiveHost?.(expectedKey)) return true;
+      return registry.terminateInactiveStructuredHost(
+        conversationId as `conversation_${string}`,
+        expectedKey,
+      );
     },
   );
   const registrations = new Map<string, { key: SessionKey; host: ObservableEngineHost; unsubscribe: () => void; stopEvents: () => Promise<void> }>();

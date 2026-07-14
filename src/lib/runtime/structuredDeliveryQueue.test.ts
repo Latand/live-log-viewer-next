@@ -624,3 +624,42 @@ test("a structured kill terminates its host and completes its receipt", async ()
     ["kill-one", "delivered"],
   ]);
 });
+
+test("concurrent kills finish after the first kill removes the host", async () => {
+  const pending = new Set(["kill-one", "kill-two"]);
+  const transitions: Array<[string, string]> = [];
+  let hosted = true;
+  let terminations = 0;
+  const target = host(async () => ({ outcome: "turn-started", turnId: "unexpected" }));
+  const queue = new StructuredDeliveryQueue({
+    effects: async () => [...pending].map((operationId, index) => ({
+      id: operationId,
+      kind: "runtime.kill",
+      eventSeq: index + 1,
+      payload: {
+        operationId,
+        conversationId: "conversation-one",
+        sessionKey: { engine: "codex", sessionId: "thread-one" },
+      },
+    })),
+    transition: async (operationId, status) => {
+      transitions.push([operationId, status]);
+      if (status === "delivered" || status === "failed") pending.delete(operationId);
+    },
+  }, () => hosted ? target : null, async () => {
+    terminations += 1;
+    hosted = false;
+    return true;
+  });
+
+  await queue.drain();
+
+  expect(terminations).toBe(2);
+  expect(transitions).toEqual([
+    ["kill-one", "delivering"],
+    ["kill-one", "delivered"],
+    ["kill-two", "delivering"],
+    ["kill-two", "delivered"],
+  ]);
+  expect(pending.size).toBe(0);
+});

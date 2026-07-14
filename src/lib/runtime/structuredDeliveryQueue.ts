@@ -255,11 +255,25 @@ export class StructuredDeliveryQueue {
 
   private async drainControl(effect: ControlEffect): Promise<boolean> {
     const host = this.resolveHost(effect.conversationId);
-    if (!host) return true;
     if (effect.kind === "kill") {
+      if (!effect.sessionKey) {
+        await this.port.transition(effect.operationId, "failed", { reason: "structured host termination target is unavailable" });
+        return false;
+      }
+      if (!host) {
+        try {
+          if (!await this.terminateHost(effect.conversationId, effect.sessionKey)) return true;
+          await this.port.transition(effect.operationId, "delivering");
+          await this.port.transition(effect.operationId, "delivered");
+          return false;
+        } catch (error) {
+          await this.port.transition(effect.operationId, "failed", { reason: failureReason(error) });
+          return false;
+        }
+      }
       await this.port.transition(effect.operationId, "delivering");
       try {
-        if (!effect.sessionKey || !await this.terminateHost(effect.conversationId, effect.sessionKey)) {
+        if (!await this.terminateHost(effect.conversationId, effect.sessionKey)) {
           await this.port.transition(effect.operationId, "failed", { reason: "structured host termination is unavailable" });
           return false;
         }
@@ -270,6 +284,7 @@ export class StructuredDeliveryQueue {
         return false;
       }
     }
+    if (!host) return true;
     const health = await host.health();
     if (health.status === "dead" || health.status === "unhosted") {
       await this.port.transition(effect.operationId, "queued", { reason: "dead-host" });

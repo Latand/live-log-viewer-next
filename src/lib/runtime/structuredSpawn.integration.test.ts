@@ -630,6 +630,229 @@ test("startup recovery completes an intentionally empty spawn prompt without a h
   expect((await client.operationStatus(begun.receipt.launchId))?.receipt.status).toBe("delivered");
 });
 
+test("a queued kill terminalizes after restart when its generation is confirmed dead", async () => {
+  const id = crypto.randomUUID();
+  const cwd = path.join(sandbox, `dead-kill-recovery-${id}`);
+  fs.mkdirSync(cwd, { recursive: true });
+  const artifactPath = path.join(cwd, `${id}.jsonl`);
+  const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const journal = new RuntimeJournal(path.join(cwd, "runtime.sqlite"), { structuredHosts: true });
+  const client = runtimeClient(journal);
+  const conversation = registry.ensureConversation("codex", artifactPath, "codex-subscription");
+  const generation = conversation.generations.at(-1);
+  if (!generation) throw new Error("structured generation was unavailable");
+  const key = { engine: "codex" as const, sessionId: generation.id };
+  registry.upsert({
+    key,
+    artifactPath,
+    cwd,
+    accountId: "codex-subscription",
+    status: "dead",
+    host: null,
+    structuredHost: null,
+    claimEpoch: 1,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  const operationId = `kill_${id}`;
+  await client.command({
+    kind: "kill",
+    operationId,
+    idempotencyKey: operationId,
+    conversationId: conversation.id,
+    sessionKey: key,
+  });
+
+  await bindStructuredDeliveryQueue([], { registry, client });
+
+  expect((await client.operationStatus(operationId))?.receipt).toMatchObject({
+    kind: "kill",
+    status: "delivered",
+  });
+  expect(registry.snapshot().entries[`codex:${generation.id}`]).toMatchObject({
+    status: "dead",
+    host: null,
+    structuredHost: null,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  expect(await client.effectBatch(["runtime.kill"], 0)).toEqual([]);
+});
+
+test("a dead predecessor kill terminalizes without touching its live successor", async () => {
+  const predecessorId = crypto.randomUUID();
+  const successorId = crypto.randomUUID();
+  const cwd = path.join(sandbox, `successor-kill-${predecessorId}`);
+  fs.mkdirSync(cwd, { recursive: true });
+  const predecessorPath = path.join(cwd, `${predecessorId}.jsonl`);
+  const successorPath = path.join(cwd, `${successorId}.jsonl`);
+  const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const journal = new RuntimeJournal(path.join(cwd, "runtime.sqlite"), { structuredHosts: true });
+  const client = runtimeClient(journal);
+  const conversation = registry.ensureConversation("codex", predecessorPath, "codex-subscription");
+  const predecessorKey = { engine: "codex" as const, sessionId: predecessorId };
+  registry.upsert({
+    key: predecessorKey,
+    artifactPath: predecessorPath,
+    cwd,
+    accountId: "codex-subscription",
+    status: "dead",
+    host: null,
+    structuredHost: null,
+    claimEpoch: 1,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  const resumed = registry.beginSpawnRequest({
+    engine: "codex",
+    cwd,
+    accountId: "codex-subscription",
+    conversationId: conversation.id,
+    purpose: "resume-successor",
+  });
+  if (resumed.kind !== "created") throw new Error("successor receipt was unavailable");
+  const successorKey = { engine: "codex" as const, sessionId: successorId };
+  const settled = registry.settleSpawn(resumed.receipt.launchId, {
+    key: successorKey,
+    artifactPath: successorPath,
+    cwd,
+    accountId: "codex-subscription",
+    status: "live",
+    host: null,
+    structuredHost: {
+      kind: "codex-app-server",
+      endpoint: "fake:successor",
+      process: { pid: process.pid, startIdentity: "successor-process" },
+      eventCursor: 1,
+      protocolVersion: "fake-v1",
+      writerClaimEpoch: 2,
+      activeTurnRef: "successor-turn",
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 2,
+    claimOwner: "structured-host:successor",
+    pendingAction: null,
+  });
+  if (settled.kind !== "settled") throw new Error("successor settlement failed");
+  const successorBefore = registry.snapshot().entries[`codex:${successorId}`];
+  const operationId = `kill_${predecessorId}`;
+  await client.command({
+    kind: "kill",
+    operationId,
+    idempotencyKey: operationId,
+    conversationId: conversation.id,
+    sessionKey: predecessorKey,
+  });
+  const successorHost = new RoundTripHost("codex", successorPath, successorId);
+
+  await bindStructuredDeliveryQueue([{ key: successorKey, host: successorHost }], { registry, client });
+
+  expect((await client.operationStatus(operationId))?.receipt.status).toBe("delivered");
+  expect(registry.snapshot().entries[`codex:${successorId}`]).toEqual(successorBefore);
+  expect(successorHost.releaseCount).toBe(0);
+  expect(hasStructuredDeliveryHost(successorKey)).toBeTrue();
+  expect(await client.effectBatch(["runtime.kill"], 0)).toEqual([]);
+});
+
+test("a queued kill waits when an unadopted structured process may still be live", async () => {
+  const id = crypto.randomUUID();
+  const cwd = path.join(sandbox, `live-kill-recovery-${id}`);
+  fs.mkdirSync(cwd, { recursive: true });
+  const artifactPath = path.join(cwd, `${id}.jsonl`);
+  const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const journal = new RuntimeJournal(path.join(cwd, "runtime.sqlite"), { structuredHosts: true });
+  const client = runtimeClient(journal);
+  const conversation = registry.ensureConversation("codex", artifactPath, "codex-subscription");
+  const key = { engine: "codex" as const, sessionId: id };
+  registry.upsert({
+    key,
+    artifactPath,
+    cwd,
+    accountId: "codex-subscription",
+    status: "live",
+    host: null,
+    structuredHost: {
+      kind: "codex-app-server",
+      endpoint: "fake:unadopted",
+      process: { pid: process.pid, startIdentity: "potentially-live" },
+      eventCursor: 1,
+      protocolVersion: "fake-v1",
+      writerClaimEpoch: 1,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 1,
+    claimOwner: "structured-host:unadopted",
+    pendingAction: null,
+  });
+  const entryBefore = registry.snapshot().entries[`codex:${id}`];
+  const operationId = `kill_${id}`;
+  await client.command({
+    kind: "kill",
+    operationId,
+    idempotencyKey: operationId,
+    conversationId: conversation.id,
+    sessionKey: key,
+  });
+
+  await bindStructuredDeliveryQueue([], { registry, client });
+
+  expect((await client.operationStatus(operationId))?.receipt.status).toBe("queued");
+  expect(registry.snapshot().entries[`codex:${id}`]).toEqual(entryBefore);
+  expect(await client.effectBatch(["runtime.kill"], 0)).toHaveLength(1);
+});
+
+test("a queued kill waits through a processless structured adoption claim", async () => {
+  const id = crypto.randomUUID();
+  const cwd = path.join(sandbox, `claimed-kill-recovery-${id}`);
+  fs.mkdirSync(cwd, { recursive: true });
+  const artifactPath = path.join(cwd, `${id}.jsonl`);
+  const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const journal = new RuntimeJournal(path.join(cwd, "runtime.sqlite"), { structuredHosts: true });
+  const client = runtimeClient(journal);
+  const conversation = registry.ensureConversation("codex", artifactPath, "codex-subscription");
+  const key = { engine: "codex" as const, sessionId: id };
+  registry.upsert({
+    key,
+    artifactPath,
+    cwd,
+    accountId: "codex-subscription",
+    status: "unhosted",
+    host: null,
+    structuredHost: {
+      kind: "codex-app-server",
+      endpoint: "stdio:pending",
+      process: null,
+      eventCursor: 0,
+      protocolVersion: null,
+      writerClaimEpoch: 1,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 1,
+    claimOwner: "structured-host:adopting",
+    pendingAction: null,
+  });
+  const entryBefore = registry.snapshot().entries[`codex:${id}`];
+  const operationId = `kill_${id}`;
+  await client.command({
+    kind: "kill",
+    operationId,
+    idempotencyKey: operationId,
+    conversationId: conversation.id,
+    sessionKey: key,
+  });
+
+  await bindStructuredDeliveryQueue([], { registry, client });
+
+  expect((await client.operationStatus(operationId))?.receipt.status).toBe("queued");
+  expect(registry.snapshot().entries[`codex:${id}`]).toEqual(entryBefore);
+  expect(await client.effectBatch(["runtime.kill"], 0)).toHaveLength(1);
+});
+
 describe.each(["codex", "claude"] as const)("%s structured spawn round trip", (engine) => {
   test("spawn, send, question, answer, interrupt, resume, and kill use one pane-less host", async () => {
     const id = crypto.randomUUID();
@@ -791,6 +1014,7 @@ describe.each(["codex", "claude"] as const)("%s structured spawn round trip", (e
     expect(host.sent.some((entry) => entry.text === "must stay queued after kill")).toBeFalse();
 
     const killOperationId = `kill_${id}`;
+    const secondKillOperationId = `kill_again_${id}`;
     const kill = await dispatchStructuredControl({ path: artifactPath, conversationId: response.conversationId, action: "kill" }, {
       registry,
       client,
@@ -799,6 +1023,14 @@ describe.each(["codex", "claude"] as const)("%s structured spawn round trip", (e
       enabled: () => true,
     });
     expect(kill).toMatchObject({ status: 202, body: { ok: true, structured: true, operationId: killOperationId } });
+    const secondKill = await dispatchStructuredControl({ path: artifactPath, conversationId: response.conversationId, action: "kill" }, {
+      registry,
+      client,
+      operationId: () => secondKillOperationId,
+      kick: () => {},
+      enabled: () => true,
+    });
+    expect(secondKill).toMatchObject({ status: 202, body: { ok: true, structured: true, operationId: secondKillOperationId } });
     await completesWithin(kickStructuredDeliveryQueue(), "structured kill did not complete");
     await waitFor(() => host.releaseCount === 1);
 
@@ -814,6 +1046,11 @@ describe.each(["codex", "claude"] as const)("%s structured spawn round trip", (e
       kind: "kill",
       status: "delivered",
     });
+    expect((await client.operationStatus(secondKillOperationId))?.receipt).toMatchObject({
+      kind: "kill",
+      status: "delivered",
+    });
+    expect(await client.effectBatch(["runtime.kill"], 0)).toEqual([]);
     expect(journal.snapshot().sessions.find((session) => session.conversationId === response.conversationId)).toMatchObject({
       host: "dead",
     });
