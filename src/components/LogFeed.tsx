@@ -15,7 +15,7 @@ import { createFeedSession, type FeedSession, type FeedSnapshot } from "./feed/p
 import { FeedItem } from "./feed/FeedItem";
 import { RawLineProvider, type RawLineLookup } from "./feed/rawLine";
 import { BoundedLru } from "./feed/scrollMemory";
-import { QuestionCard } from "./feed/QuestionCard";
+import { ConversationAttention } from "./runtime/ConversationAttention";
 import { speakableAnswer } from "./feed/speakableAnswer";
 import { isSubagent } from "./projectModel";
 import { TaskHeader } from "./TaskHeader";
@@ -497,7 +497,7 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
                     </div>
                   );
                 })}
-                {file.pendingQuestion || file.waitingInput ? <QuestionCard key={file.pendingQuestion?.toolUseId ?? "waiting"} file={file} /> : null}
+                <ConversationAttention file={file} />
                 {!file.pendingQuestion && !file.waitingInput && endedQuestion ? (
                   <div className="my-4 rounded-[8px] border border-border bg-sunken px-4 py-3 text-[13px] font-semibold text-muted">{endedQuestion}</div>
                 ) : null}
@@ -534,7 +534,7 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
                 ) : null}
               </div>
             )}
-            {feed.items.length ? null : file.pendingQuestion || file.waitingInput ? <QuestionCard key={file.pendingQuestion?.toolUseId ?? "waiting"} file={file} /> : null}
+            {feed.items.length ? null : <ConversationAttention file={file} />}
           </>
         )}
         </div>

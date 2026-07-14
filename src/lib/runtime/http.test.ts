@@ -109,6 +109,42 @@ test("direct runtime send and steer commands kick queued delivery for an idle ho
   expect(kicks).toBe(2);
 });
 
+test("answer and interrupt commands kick their queued host controls", async () => {
+  let kicks = 0;
+  const client = {
+    command: async (command: { kind: "answer" | "interrupt"; operationId: string; idempotencyKey: string }) => ({
+      operationId: command.operationId,
+      replayed: false,
+      receipt: {
+        operationId: command.operationId,
+        idempotencyKey: command.idempotencyKey,
+        conversationId: "conversation-one",
+        kind: command.kind,
+        status: "queued" as const,
+        at: "2026-07-14T00:00:00.000Z",
+        revision: 1,
+      },
+    }),
+  } as unknown as RuntimeHostClient;
+  const dependencies = { enabled: () => true, client: () => client, kick: () => { kicks += 1; } };
+
+  const answer = await handleRuntimeCommand(request({
+    conversationId: "conversation-one",
+    attentionId: "question-one",
+    resolution: { answer: "yes" },
+    operationId: "answer-operation-one",
+  }), "answer", dependencies);
+  const interrupt = await handleRuntimeCommand(request({
+    conversationId: "conversation-one",
+    turnId: "turn-one",
+    operationId: "interrupt-operation-one",
+  }), "interrupt", dependencies);
+
+  expect(answer.status).toBe(202);
+  expect(interrupt.status).toBe(202);
+  expect(kicks).toBe(2);
+});
+
 test("direct runtime send and steer stay held while their conversation migrates", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-http-migration-"));
   const sourceId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";

@@ -14,7 +14,7 @@ import { reasoningFromBody } from "@/lib/agent/efforts";
 import { modelFromBody } from "@/lib/agent/models";
 import { resolveSpawnRole } from "@/lib/roles/registry";
 import { spawnContentDigest, spawnParentSelector, spawnRequestDigest } from "@/lib/agent/spawnIdentity";
-import { sessionKeyFromTranscript } from "@/lib/agent/sessionKey";
+import { sessionKeyFromTranscript, sessionKeyId } from "@/lib/agent/sessionKey";
 import { resolveSpawnLineage, SpawnParentError } from "@/lib/agent/spawnParent";
 import { spawnResponseForReceipt, type SpawnResponse } from "@/lib/agent/spawnResponse";
 import { applyClaudeSpawnPolicy, prepareManagedClaudeSpawnHome } from "@/lib/agent/spawnPolicy";
@@ -25,6 +25,8 @@ import { rejectCrossOrigin } from "@/lib/sameOrigin";
 import { runtimeHostClient } from "@/lib/runtime/client";
 import { runtimeScope } from "@/lib/runtime/contracts";
 import { runtimeEventsEnabled } from "@/lib/runtime/flags";
+import { spawnStructuredConversation } from "@/lib/runtime/structuredSpawn";
+import { structuredSpawnGap, spawnTransport } from "@/lib/runtime/spawnTransport";
 import { listFiles } from "@/lib/scanner";
 import { projectForCwd } from "@/lib/scanner/describe";
 import { projectDirectoryCandidates } from "@/lib/scanner/projectDirectories";
@@ -151,6 +153,16 @@ export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse
   if (imageError) {
     return NextResponse.json({ error: imageError.error }, { status: imageError.status });
   }
+  let transport;
+  try {
+    transport = spawnTransport();
+  } catch (error) {
+    return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 500 });
+  }
+  if (transport === "structured") {
+    const gap = structuredSpawnGap({ engine, hasImages: images.length > 0, fast: reasoning.fast });
+    if (gap) return NextResponse.json({ error: gap }, { status: 409 });
+  }
 
   /* Saved paths stay visible to the catch. A pane-bound receipt keeps them:
      the agent may already have accepted the prompt despite a later failure. */
@@ -209,12 +221,13 @@ export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse
     });
     if (begun.kind === "conflict") return NextResponse.json({ error: "spawn attempt conflicts with its original request" }, { status: 409 });
     if (begun.kind === "replay") {
-      const response = spawnResponseForReceipt(begun.receipt);
+      const structured = Boolean(begun.receipt.key && registry.snapshot().entries[sessionKeyId(begun.receipt.key)]?.structuredHost);
+      const response = spawnResponseForReceipt(begun.receipt, begun.receipt.artifactPath, { structured });
       if (begun.receipt.state === "failed") return NextResponse.json({ error: "original spawn failed before launch", retrySafe: true }, { status: 409 });
       return NextResponse.json(response, { status: response.state === "starting" ? 202 : 200 });
     }
     launchId = begun.receipt.launchId;
-    if (engine === "claude") {
+    if (engine === "claude" && transport === "tmux") {
       const profileId = path.basename(spec.transcript ?? "", ".jsonl");
       if (isManagedClaudeHome(account.home)) prepareManagedClaudeSpawnHome(account.home, cwd);
       applyClaudeSpawnPolicy(account.home, {
@@ -222,6 +235,24 @@ export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse
         baseSettingsPath: isManagedClaudeHome(account.home) ? claudeSettingsPath() : null,
         profileId,
       });
+    }
+    if (transport === "structured") {
+      const runtimeClient = runtimeHostClient();
+      if (!runtimeClient) throw new Error("structured spawn runtime host is unavailable");
+      const response = await spawnStructuredConversation({
+        engine,
+        receipt: begun.receipt,
+        spec,
+        account,
+        prompt,
+        registry,
+        client: runtimeClient,
+      });
+      if (parentArtifactPath && response.path) {
+        rememberHandoffChild(response.path, parentArtifactPath);
+        persistHandoffLineage();
+      }
+      return NextResponse.json(response);
     }
     /* Pasted images land in the inbox and reach the fresh agent as file paths
        appended to its first prompt — the same contract the pane composer uses. */

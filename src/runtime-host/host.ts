@@ -142,7 +142,12 @@ export class RuntimeHost {
       } else if (request.method === "operation-transition") {
         if (!this.structuredHosts) throw new Error("structured hosts are disabled");
         const status = request.params?.status;
-        if (status !== "queued" && status !== "delivering" && status !== "delivered" && status !== "failed") {
+        if (status !== "queued"
+          && status !== "delivering"
+          && status !== "delivered"
+          && status !== "interrupted"
+          && status !== "answered"
+          && status !== "failed") {
           throw new Error("runtime operation transition status is invalid");
         }
         const details = request.params?.details;

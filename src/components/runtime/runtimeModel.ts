@@ -157,6 +157,19 @@ export interface AttentionRequest {
     options?: { label: string; description?: string; recommended?: boolean }[];
     multiSelect?: boolean;
   };
+  questions?: Array<{
+    header?: string;
+    prompt: string;
+    options?: { label: string; description?: string; recommended?: boolean }[];
+    multiSelect?: boolean;
+  }>;
+  protocol?: {
+    engine: RuntimeEngine;
+    method: string;
+    questionId?: string;
+    questionIds?: string[];
+    input?: Record<string, unknown>;
+  };
 }
 
 export interface RuntimeAttention {

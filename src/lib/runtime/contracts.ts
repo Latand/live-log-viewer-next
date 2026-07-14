@@ -135,6 +135,19 @@ export interface RuntimeAttentionRequest {
     options?: Array<{ label: string; description?: string; recommended?: boolean }>;
     multiSelect?: boolean;
   };
+  questions?: Array<{
+    header?: string;
+    prompt: string;
+    options?: Array<{ label: string; description?: string; recommended?: boolean }>;
+    multiSelect?: boolean;
+  }>;
+  protocol?: {
+    engine: "codex" | "claude";
+    method: string;
+    questionId?: string;
+    questionIds?: string[];
+    input?: Record<string, unknown>;
+  };
 }
 
 export interface RuntimeAttention {

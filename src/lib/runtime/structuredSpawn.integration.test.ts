@@ -1,0 +1,360 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import crypto from "node:crypto";
+
+import { afterAll, afterEach, describe, expect, test } from "bun:test";
+
+import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
+import type { AccountContext } from "@/lib/accounts/contracts";
+import type { ResumeSpec } from "@/lib/agent/cli";
+import { AgentRegistry } from "@/lib/agent/registry";
+import { RuntimeJournal } from "@/runtime-host/journal";
+
+import type { RuntimeHostClient } from "./client";
+import type { DeliveryReceipt, HostState, QueueEntry, RuntimeEvent } from "./engineHost";
+import { bindStructuredDeliveryQueue } from "./structuredDeliveryController";
+import { kickStructuredDeliveryQueue } from "./structuredDeliverySignal";
+import { enqueueStructuredMessage } from "./structuredMessageDelivery";
+import { spawnStructuredConversation, structuredClaudePermissionMode, type SpawnedStructuredHost } from "./structuredSpawn";
+import { materializeStructuredTerminal } from "./structuredTerminal";
+
+type UnsequencedEvent = RuntimeEvent extends infer Event
+  ? Event extends RuntimeEvent ? Omit<Event, "seq"> : never
+  : never;
+
+const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-structured-spawn-"));
+afterAll(() => fs.rmSync(sandbox, { recursive: true, force: true }));
+afterEach(async () => { await bindStructuredDeliveryQueue([]); });
+
+test("structured Claude fresh sessions use the permission channel", () => {
+  expect(structuredClaudePermissionMode("bypassPermissions")).toBe("default");
+  expect(structuredClaudePermissionMode("plan")).toBe("plan");
+});
+
+function runtimeClient(journal: RuntimeJournal): RuntimeHostClient {
+  return {
+    snapshot: async () => journal.snapshot(),
+    events: async (after) => journal.replay(after),
+    waitEvents: async (after) => journal.replay(after),
+    append: async (event) => journal.append(event),
+    operation: async (event) => journal.append(event),
+    command: async (command) => journal.executeOperation(command),
+    operationStatus: async (operationId) => journal.operationResult(operationId),
+    retryOperation: async (operationId) => journal.retryOperation(operationId),
+    effectBatch: async (kinds, afterEventSeq) => journal.effectBatch(100, kinds, afterEventSeq),
+    transitionOperation: async (operationId, status, details) => journal.transitionOperation(operationId, status, details),
+  } as RuntimeHostClient;
+}
+
+class RoundTripHost implements SpawnedStructuredHost {
+  readonly sent: QueueEntry[] = [];
+  readonly answers: Array<{ id: string; value: unknown }> = [];
+  readonly interrupts: string[] = [];
+  readonly identity: { threadId: string; path: string } | { sessionId: string };
+  private readonly listeners = new Set<(state: HostState) => void>();
+  private readonly events: RuntimeEvent[] = [];
+  private readonly waiters = new Set<() => void>();
+  private cursor = 0;
+  private status: HostState["status"] = "idle";
+  private activeTurnRef: string | null = null;
+  private pendingAttention: string[] = [];
+  private released = false;
+
+  constructor(readonly engine: "codex" | "claude", readonly artifactPath: string, sessionId: string) {
+    this.identity = engine === "codex" ? { threadId: sessionId, path: artifactPath } : { sessionId };
+  }
+
+  onStateChange(listener: (state: HostState) => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+
+  attach(afterSeq: number): AsyncIterable<RuntimeEvent> {
+    const host = this;
+    return {
+      async *[Symbol.asyncIterator]() {
+        let cursor = afterSeq;
+        while (!host.released) {
+          const event = host.events.find((candidate) => candidate.seq > cursor);
+          if (event) {
+            cursor = event.seq;
+            yield event;
+            continue;
+          }
+          await new Promise<void>((resolve) => host.waiters.add(resolve));
+        }
+      },
+    };
+  }
+
+  async send(entry: QueueEntry): Promise<DeliveryReceipt> {
+    this.sent.push({ ...entry });
+    const turnId = `turn-${this.sent.length}`;
+    this.status = "active";
+    this.activeTurnRef = turnId;
+    this.emit({ kind: "turn-started", turnId });
+    this.notify();
+    return { outcome: "turn-started", turnId };
+  }
+
+  finishTurn(): void {
+    const turnId = this.activeTurnRef;
+    if (!turnId) return;
+    this.status = "idle";
+    this.activeTurnRef = null;
+    this.emit({ kind: "turn-ended", turnId, status: "completed" });
+    this.notify();
+  }
+
+  ask(attentionId: string): void {
+    this.status = "attention";
+    this.pendingAttention = [attentionId];
+    this.emit({
+      kind: "attention",
+      id: attentionId,
+      method: this.engine === "codex" ? "item/tool/requestUserInput" : "control_request",
+      attention: this.engine === "codex"
+        ? { turnId: this.activeTurnRef, questions: [{ id: "scope", header: "Scope", question: "Continue?", options: [{ label: "Yes" }] }] }
+        : { tool_name: "AskUserQuestion", input: { questions: [{ header: "Scope", question: "Continue?", options: [{ label: "Yes" }] }] } },
+    });
+    this.notify();
+  }
+
+  async answer(attentionRef: string, value: unknown): Promise<void> {
+    this.answers.push({ id: attentionRef, value });
+    this.pendingAttention = [];
+    this.status = this.activeTurnRef ? "active" : "idle";
+    this.emit({ kind: "attention-resolved", id: attentionRef, resolution: "answered" });
+    this.notify();
+  }
+
+  async interrupt(turnRef: string): Promise<void> {
+    this.interrupts.push(turnRef);
+    this.activeTurnRef = null;
+    this.status = "idle";
+    this.emit({ kind: "turn-ended", turnId: turnRef, status: "interrupted" });
+    this.notify();
+  }
+
+  async health(): Promise<HostState> {
+    return {
+      status: this.status,
+      sessionKey: this.engine === "codex" ? (this.identity as { threadId: string }).threadId : (this.identity as { sessionId: string }).sessionId,
+      endpoint: "fake:stdio",
+      pid: process.pid,
+      processStartIdentity: "test-process",
+      eventCursor: this.cursor,
+      protocolVersion: "fake-v1",
+      activeTurnRef: this.activeTurnRef,
+      pendingAttention: [...this.pendingAttention],
+      activeFlags: [],
+      account: { type: this.engine === "codex" ? "chatgpt" : "claude.ai", planType: "subscription" },
+    };
+  }
+
+  async release(): Promise<void> {
+    this.released = true;
+    for (const wake of this.waiters) wake();
+    this.waiters.clear();
+  }
+
+  private emit(event: UnsequencedEvent): void {
+    this.cursor += 1;
+    this.events.push({ ...event, seq: this.cursor } as RuntimeEvent);
+    for (const wake of this.waiters) wake();
+    this.waiters.clear();
+  }
+
+  private notify(): void {
+    void this.health().then((state) => {
+      for (const listener of this.listeners) listener(state);
+    });
+  }
+}
+
+async function waitFor(assertion: () => boolean): Promise<void> {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    if (assertion()) return;
+    await Bun.sleep(5);
+  }
+  throw new Error("round-trip condition did not settle");
+}
+
+describe.each(["codex", "claude"] as const)("%s structured spawn round trip", (engine) => {
+  test("spawn, send, question, answer, interrupt, and resume use one pane-less host", async () => {
+    const id = crypto.randomUUID();
+    const cwd = path.join(sandbox, `${engine}-${id}`);
+    fs.mkdirSync(cwd, { recursive: true });
+    const artifactPath = path.join(cwd, `${id}.jsonl`);
+    const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+    const journal = new RuntimeJournal(path.join(cwd, "runtime.sqlite"), { structuredHosts: true });
+    const client = runtimeClient(journal);
+    await bindStructuredDeliveryQueue([], { registry, client });
+    const model = engine === "codex" ? "gpt-5.6-luna" : "claude-sonnet-4-6";
+    const launchProfile = emptyLaunchProfile({ cwd, model });
+    const begun = registry.beginSpawnRequest({
+      engine,
+      cwd,
+      accountId: `${engine}-subscription`,
+      launchProfile,
+      clientAttemptId: `attempt_${id}`,
+      requestDigest: id.replaceAll("-", "").padEnd(64, "0").slice(0, 64),
+    });
+    if (begun.kind !== "created") throw new Error("spawn receipt was unavailable");
+    const spec: ResumeSpec = { command: engine, cwd, windowName: `test-${engine}`, engine, transcript: artifactPath, launchProfile };
+    const account: AccountContext = {
+      engine,
+      accountId: `${engine}-subscription`,
+      kind: "managed",
+      home: path.join(cwd, "account"),
+      transcriptRoot: cwd,
+      env: { NODE_ENV: "test" },
+    };
+    const host = new RoundTripHost(engine, artifactPath, id);
+
+    const response = await spawnStructuredConversation({
+      engine,
+      receipt: begun.receipt,
+      spec,
+      account,
+      prompt: "initial prompt",
+      registry,
+      client,
+    }, {
+      startHost: async (input) => {
+        expect(input.spec.launchProfile?.model).toBe(model);
+        return host;
+      },
+      bindHost: async (targetRegistry, key, runningHost, claimOwner, claimEpoch) => {
+        const state = await runningHost.health();
+        targetRegistry.setStructuredHostClaimed(key, {
+          kind: engine === "codex" ? "codex-app-server" : "claude-broker",
+          endpoint: state.endpoint,
+          process: state.pid ? { pid: state.pid, startIdentity: state.processStartIdentity } : null,
+          eventCursor: state.eventCursor,
+          protocolVersion: state.protocolVersion,
+          writerClaimEpoch: claimEpoch,
+          activeTurnRef: state.activeTurnRef,
+          pendingAttention: state.pendingAttention,
+          activeFlags: state.activeFlags,
+        }, "idle", claimOwner, claimEpoch);
+        return () => {};
+      },
+      processIdentity: () => ({ pid: process.pid, startIdentity: "test-process" }),
+    });
+
+    expect(response).toMatchObject({ launched: true, target: null, path: artifactPath, state: "settled" });
+    expect(registry.snapshot().receipts[begun.receipt.launchId]?.pane).toBeNull();
+    const registryBeforeAttach = registry.snapshot();
+    let terminalCommand = "";
+    const attached = await materializeStructuredTerminal(artifactPath, {
+      registry,
+      spawn: async (command) => {
+        terminalCommand = command.command;
+        return {
+          paneId: "%77",
+          panePid: 7700,
+          display: "agents:view.0",
+          host: undefined,
+          ...command,
+        };
+      },
+    });
+    expect(attached).toEqual({ target: "%77", display: "agents:view.0" });
+    expect(terminalCommand).toContain("tail -n 200 -F");
+    expect(terminalCommand.includes("codex resume") || terminalCommand.includes("claude --resume")).toBeFalse();
+    expect(registry.snapshot().entries).toEqual(registryBeforeAttach.entries);
+    await waitFor(() => host.sent.length === 1);
+    host.finishTurn();
+
+    const sent = await enqueueStructuredMessage({
+      path: artifactPath,
+      conversationId: response.conversationId,
+      clientMessageId: `message_${id}`,
+      text: "viewer send",
+      hasImages: false,
+    }, { client: () => client, registry: () => registry, enabled: () => true });
+    expect(sent?.ok).toBeTrue();
+    await waitFor(() => host.sent.some((entry) => entry.text === "viewer send"));
+
+    host.ask("question-one");
+    await waitFor(() => journal.snapshot().attentions.some((attention) => attention.id === "question-one"));
+    const resolution = engine === "codex"
+      ? { answers: { scope: { answers: ["Yes"] } } }
+      : { behavior: "allow", updatedInput: { questions: [{ header: "Scope", question: "Continue?", options: [{ label: "Yes" }] }], answers: { "Continue?": "Yes" } } };
+    await client.command({
+      kind: "answer",
+      operationId: `answer_${id}`,
+      idempotencyKey: `answer_${id}`,
+      conversationId: response.conversationId,
+      attentionId: "question-one",
+      resolution,
+    });
+    await kickStructuredDeliveryQueue();
+    await waitFor(() => host.answers.length === 1);
+    expect(host.answers[0]).toEqual({ id: "question-one", value: resolution });
+
+    host.finishTurn();
+    await enqueueStructuredMessage({
+      path: artifactPath,
+      conversationId: response.conversationId,
+      clientMessageId: `slow_${id}`,
+      text: "deliberately slow fake-host turn",
+      hasImages: false,
+    }, { client: () => client, registry: () => registry, enabled: () => true });
+    await waitFor(() => host.sent.some((entry) => entry.text === "deliberately slow fake-host turn"));
+    const slowTurn = (await host.health()).activeTurnRef!;
+    await client.command({
+      kind: "interrupt",
+      operationId: `interrupt_${id}`,
+      idempotencyKey: `interrupt_${id}`,
+      conversationId: response.conversationId,
+      turnId: slowTurn,
+    });
+    await kickStructuredDeliveryQueue();
+    await waitFor(() => host.interrupts.includes(slowTurn));
+
+    await enqueueStructuredMessage({
+      path: artifactPath,
+      conversationId: response.conversationId,
+      clientMessageId: `resume_${id}`,
+      text: "resume after interrupt",
+      hasImages: false,
+    }, { client: () => client, registry: () => registry, enabled: () => true });
+    await waitFor(() => host.sent.some((entry) => entry.text === "resume after interrupt"));
+    expect(host.sent.map((entry) => entry.text)).toEqual([
+      "initial prompt",
+      "viewer send",
+      "deliberately slow fake-host turn",
+      "resume after interrupt",
+    ]);
+  });
+});
+
+test("structured spawn fails loudly when Codex omits the transcript-path capability", async () => {
+  const id = crypto.randomUUID();
+  const cwd = path.join(sandbox, `codex-gap-${id}`);
+  fs.mkdirSync(cwd, { recursive: true });
+  const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const journal = new RuntimeJournal(path.join(cwd, "runtime.sqlite"), { structuredHosts: true });
+  const client = runtimeClient(journal);
+  const launchProfile = emptyLaunchProfile({ cwd, model: "gpt-5.6-luna" });
+  const begun = registry.beginSpawnRequest({ engine: "codex", cwd, accountId: "codex-subscription", launchProfile });
+  if (begun.kind !== "created") throw new Error("spawn receipt was unavailable");
+  const host = new RoundTripHost("codex", path.join(cwd, `${id}.jsonl`), id);
+  Object.defineProperty(host, "identity", { value: { threadId: id, path: null } });
+
+  await expect(spawnStructuredConversation({
+    engine: "codex",
+    receipt: begun.receipt,
+    spec: { command: "codex", cwd, windowName: "gap", engine: "codex", launchProfile },
+    account: { engine: "codex", accountId: "codex-subscription", kind: "managed", home: cwd, transcriptRoot: cwd, env: { NODE_ENV: "test" } },
+    prompt: "prompt",
+    registry,
+    client,
+  }, { startHost: async () => host })).rejects.toThrow("app-server returned no transcript path");
+
+  expect(registry.snapshot().receipts[begun.receipt.launchId]?.state).toBe("failed");
+  expect(journal.operationResult(begun.receipt.launchId)?.receipt).toMatchObject({ status: "failed", reason: expect.stringContaining("transcript path") });
+});

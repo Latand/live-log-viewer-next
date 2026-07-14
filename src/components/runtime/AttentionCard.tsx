@@ -18,7 +18,8 @@ export interface AttentionCardProps {
   attention: RuntimeAttention;
   onApprove?: () => void;
   onDeny?: () => void;
-  onAnswerQuestion?: (optionIndex: number) => void;
+  onAnswerQuestion?: (optionIndex: number, questionIndex?: number) => void;
+  onAnswerQuestions?: (answers: number[][]) => void;
   busy?: boolean;
 }
 
@@ -30,11 +31,17 @@ export interface AttentionCardProps {
  * reduced motion. The `autoResolutionMs` countdown is display-only — only an
  * engine-confirmed resolution closes the card (Sol: no client auto-resolve).
  */
-export function AttentionCard({ attention, onApprove, onDeny, onAnswerQuestion, busy }: AttentionCardProps) {
+export function AttentionCard({ attention, onApprove, onDeny, onAnswerQuestion, onAnswerQuestions, busy }: AttentionCardProps) {
   const { t } = useLocale();
   const cardRef = useRef<HTMLDivElement>(null);
   const heuristic = attention.kind === "waiting_heuristic";
   const remaining = useCountdown(attention.autoResolutionMs ?? null);
+  const [selections, setSelections] = useState<Record<number, number[]>>({});
+  const [selectionAttentionId, setSelectionAttentionId] = useState(attention.id);
+  if (selectionAttentionId !== attention.id) {
+    setSelectionAttentionId(attention.id);
+    setSelections({});
+  }
 
   // Focus the first control and trap Tab within the card while it is open.
   useEffect(() => {
@@ -70,7 +77,8 @@ export function AttentionCard({ attention, onApprove, onDeny, onAnswerQuestion, 
     return () => node.removeEventListener("keydown", onKey);
   }, [attention.id, onApprove, onDeny]);
 
-  const question = attention.request.question;
+  const questions = attention.request.questions
+    ?? (attention.request.question ? [attention.request.question] : []);
   const border = attention.unowned
     ? "border-danger/60 bg-danger/5"
     : heuristic
@@ -120,19 +128,35 @@ export function AttentionCard({ attention, onApprove, onDeny, onAnswerQuestion, 
 
       {attention.request.detail ? <div className="mt-2 text-[12px] text-muted">{attention.request.detail}</div> : null}
 
-      {question ? (
-        <div className="mt-2">
-          {question.header ? <div className="text-[11px] font-bold text-muted">{question.header}</div> : null}
-          <div className="text-[14px] font-bold text-primary">{question.prompt}</div>
-          <div className="mt-2 space-y-1.5">
-            {(question.options ?? []).map((option, index) => (
+      {questions.length > 0 ? (
+        <div className="mt-2 space-y-3">
+          {questions.map((question, questionIndex) => {
+            const staged = questions.length > 1 || question.multiSelect === true;
+            const selected = selections[questionIndex] ?? [];
+            return <div key={questionIndex}>
+              {question.header ? <div className="text-[11px] font-bold text-muted">{question.header}</div> : null}
+              <div className="text-[14px] font-bold text-primary">{question.prompt}</div>
+              <div className="mt-2 space-y-1.5">
+                {(question.options ?? []).map((option, index) => (
               <button
                 key={index}
                 className={`flex w-full items-start gap-2 rounded-[8px] border px-3 py-2 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/35 disabled:opacity-60 ${
-                  option.recommended ? "border-warning/45 bg-warning-soft" : "border-border bg-canvas"
+                  selected.includes(index) ? "border-accent bg-accent/10" : option.recommended ? "border-warning/45 bg-warning-soft" : "border-border bg-canvas"
                 }`}
                 disabled={busy}
-                onClick={() => onAnswerQuestion?.(index)}
+                onClick={() => {
+                  if (!staged) {
+                    onAnswerQuestion?.(index, questionIndex);
+                    return;
+                  }
+                  setSelections((current) => {
+                    const prior = current[questionIndex] ?? [];
+                    const next = question.multiSelect
+                      ? prior.includes(index) ? prior.filter((candidate) => candidate !== index) : [...prior, index]
+                      : [index];
+                    return { ...current, [questionIndex]: next };
+                  });
+                }}
               >
                 <span className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded border border-border bg-card text-[10px] font-bold">{index + 1}</span>
                 <span className="min-w-0">
@@ -140,9 +164,20 @@ export function AttentionCard({ attention, onApprove, onDeny, onAnswerQuestion, 
                   {option.description ? <span className="block text-[12px] text-muted">{option.description}</span> : null}
                 </span>
               </button>
-            ))}
+                ))}
+              </div>
+            </div>;
+          })}
+          {questions.length > 1 || questions.some((question) => question.multiSelect) ? (
+            <button
+              className="inline-flex items-center gap-1.5 rounded-[8px] bg-accent px-3 py-1.5 text-[13px] font-bold text-white disabled:opacity-60"
+              disabled={busy || questions.some((_question, index) => !(selections[index]?.length))}
+              onClick={() => onAnswerQuestions?.(questions.map((_question, index) => selections[index] ?? []))}
+            >
+              <Check className="h-4 w-4" aria-hidden /> {t("runtime.attention.answer")}
+            </button>
+          ) : null}
           </div>
-        </div>
       ) : null}
 
       {(attention.kind === "approval" || attention.kind === "permission") && (onApprove || onDeny) ? (

@@ -158,6 +158,7 @@ export interface ClaudeSessionIdentity { sessionId: string }
 
 export interface ClaudeStreamBrokerHostOptions {
   cwd: string;
+  sessionId?: string;
   claudeConfigDir?: string;
   claudeProjectsDir?: string;
   spawnPolicyBaseSettingsPath?: string | null;
@@ -394,7 +395,7 @@ export class ClaudeStreamBrokerHost implements EngineHost {
   }
 
   static async start(options: ClaudeStreamBrokerHostOptions): Promise<ClaudeStreamBrokerHost> {
-    return this.open(crypto.randomUUID(), false, options);
+    return this.open(options.sessionId ?? crypto.randomUUID(), false, options);
   }
 
   static async adopt(sessionId: string, options: ClaudeStreamBrokerHostOptions): Promise<ClaudeStreamBrokerHost> {
@@ -562,6 +563,11 @@ export class ClaudeStreamBrokerHost implements EngineHost {
   async answer(attentionRef: string, value: unknown): Promise<void> {
     if (this.unavailable()) throw new Error("Claude stream host is unavailable");
     if (!this.attentions.has(attentionRef)) throw new Error("attention request is missing or already answered");
+    const attention = this.attentions.get(attentionRef)!;
+    const response = record(value);
+    const answer = response?.behavior === "allow"
+      ? { ...response, updatedInput: { ...(record(attention.input) ?? {}), ...(record(response.updatedInput) ?? {}) } }
+      : value ?? {};
     if (this.pendingAnswers.has(attentionRef)) throw new Error("attention answer is already awaiting confirmation");
     await new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -573,7 +579,7 @@ export class ClaudeStreamBrokerHost implements EngineHost {
       this.pendingAnswers.set(attentionRef, { resolve, reject, timer });
       this.write({
         type: "control_response",
-        response: { subtype: "success", request_id: attentionRef, response: value ?? {} },
+        response: { subtype: "success", request_id: attentionRef, response: answer },
       });
     });
   }

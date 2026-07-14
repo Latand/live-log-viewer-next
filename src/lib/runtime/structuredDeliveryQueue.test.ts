@@ -98,7 +98,7 @@ test("unrelated outbox effects cannot starve structured message delivery", async
 
   await queue.drain();
 
-  expect(requestedKinds).toEqual([["runtime.send", "runtime.steer"]]);
+  expect(requestedKinds).toEqual([["runtime.send", "runtime.steer", "runtime.answer", "runtime.interrupt"]]);
   expect(sent).toEqual(["op-after-spawns"]);
 });
 
@@ -506,4 +506,91 @@ test("overlapping queue kicks share one drain", async () => {
   await Promise.all([first, second]);
 
   expect(sends).toBe(1);
+});
+
+test("an answer reaches the host command channel before queued messages", async () => {
+  const calls: string[] = [];
+  const transitions: Array<[string, string]> = [];
+  const target = host(async (entry) => {
+    calls.push(`send:${entry.text}`);
+    return { outcome: "turn-started", turnId: "turn-next" };
+  });
+  target.answer = async (attentionId, resolution) => {
+    calls.push(`answer:${attentionId}:${JSON.stringify(resolution)}`);
+  };
+  const queue = new StructuredDeliveryQueue({
+    effects: async () => [
+      { id: "send", kind: "runtime.send", eventSeq: 1, payload: { operationId: "send", conversationId: "conversation-one", text: "resume" } },
+      { id: "answer", kind: "runtime.answer", eventSeq: 2, payload: { operationId: "answer", conversationId: "conversation-one", attentionId: "question-one", resolution: { answer: "yes" } } },
+    ],
+    transition: async (operationId, status) => { transitions.push([operationId, status]); },
+  }, () => target);
+
+  await queue.drain();
+
+  expect(calls).toEqual([
+    'answer:question-one:{"answer":"yes"}',
+    "send:resume",
+  ]);
+  expect(transitions).toContainEqual(["answer", "answered"]);
+});
+
+test("interrupt actuates a deliberately held fake-host turn", async () => {
+  const calls: string[] = [];
+  const target = host(async () => ({ outcome: "queued-next-turn", turnId: "turn-held" }));
+  target.health = async () => ({ ...idleState(), status: "active", activeTurnRef: "turn-held" });
+  target.interrupt = async (turnId) => { calls.push(turnId); };
+  const transitions: Array<[string, string]> = [];
+  const queue = new StructuredDeliveryQueue({
+    effects: async () => [{
+      id: "interrupt",
+      kind: "runtime.interrupt",
+      eventSeq: 3,
+      payload: { operationId: "interrupt", conversationId: "conversation-one", turnId: "turn-held" },
+    }],
+    transition: async (operationId, status) => { transitions.push([operationId, status]); },
+  }, () => target);
+
+  await queue.drain();
+
+  expect(calls).toEqual(["turn-held"]);
+  expect(transitions).toEqual([
+    ["interrupt", "delivering"],
+    ["interrupt", "interrupted"],
+  ]);
+});
+
+test("a control operation behind a full message page still reaches the active host", async () => {
+  const effects = [
+    ...Array.from({ length: 100 }, (_, index) => ({
+      id: `send-${index}`,
+      kind: "runtime.send",
+      eventSeq: index + 1,
+      payload: { operationId: `send-${index}`, conversationId: "conversation-one", text: `message ${index}`, policy: "queue" },
+    })),
+    {
+      id: "interrupt-after-page",
+      kind: "runtime.interrupt",
+      eventSeq: 101,
+      payload: { operationId: "interrupt-after-page", conversationId: "conversation-one", turnId: "turn-held" },
+    },
+  ];
+  let active = true;
+  const interrupts: string[] = [];
+  const target = host(async () => ({ outcome: "turn-started", turnId: "unexpected" }));
+  target.health = async () => ({ ...idleState(), status: active ? "active" : "idle", activeTurnRef: active ? "turn-held" : null });
+  target.interrupt = async (turnId) => { interrupts.push(turnId); active = false; };
+  const completed = new Set<string>();
+  const queue = new StructuredDeliveryQueue({
+    effects: async (_kinds, afterEventSeq = 0) => effects
+      .filter((effect) => effect.eventSeq > afterEventSeq && !completed.has(String(effect.payload.operationId)))
+      .slice(0, 100),
+    transition: async (operationId, status) => {
+      if (status === "interrupted" || status === "delivered" || status === "failed") completed.add(operationId);
+    },
+  }, () => target);
+
+  await queue.drain();
+
+  expect(interrupts).toEqual(["turn-held"]);
 });

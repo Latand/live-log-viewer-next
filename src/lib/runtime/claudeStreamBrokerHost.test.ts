@@ -580,6 +580,37 @@ describe("ClaudeStreamBrokerHost", () => {
     child.emitJson({ type: "control_response", response: { subtype: "success", request_id: "permission-one", response: { behavior: "deny" } } });
     await answer;
     expect((await host.health()).pendingAttention).toEqual([]);
+
+    child.emitJson({ type: "control_request", request_id: "permission-two", request: { subtype: "can_use_tool", tool_name: "Write", input: { file_path: "/repo/a.txt", content: "hello" } } });
+    await Bun.sleep(0);
+    const allowed = host.answer("permission-two", { behavior: "allow" });
+    expect(child.inputs.at(-1)).toEqual({
+      type: "control_response",
+      response: {
+        subtype: "success",
+        request_id: "permission-two",
+        response: { behavior: "allow", updatedInput: { file_path: "/repo/a.txt", content: "hello" } },
+      },
+    });
+    child.emitJson({ type: "control_response", response: { subtype: "success", request_id: "permission-two", response: { behavior: "allow" } } });
+    await allowed;
+
+    child.emitJson({ type: "control_request", request_id: "question-one", request: { subtype: "can_use_tool", tool_name: "AskUserQuestion", input: { questions: [{ question: "Continue?" }] } } });
+    await Bun.sleep(0);
+    const question = host.answer("question-one", { behavior: "allow", updatedInput: { answers: { "Continue?": "Yes" } } });
+    expect(child.inputs.at(-1)).toEqual({
+      type: "control_response",
+      response: {
+        subtype: "success",
+        request_id: "question-one",
+        response: {
+          behavior: "allow",
+          updatedInput: { questions: [{ question: "Continue?" }], answers: { "Continue?": "Yes" } },
+        },
+      },
+    });
+    child.emitJson({ type: "control_response", response: { subtype: "success", request_id: "question-one", response: { behavior: "allow" } } });
+    await question;
     await host.release();
   });
 

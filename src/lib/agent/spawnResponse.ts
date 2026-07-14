@@ -13,14 +13,20 @@ export interface SpawnResponse {
   error?: string;
 }
 
-export function spawnResponseForReceipt(receipt: SpawnReceipt, path = receipt.artifactPath): SpawnResponse {
+export function spawnResponseForReceipt(
+  receipt: SpawnReceipt,
+  path = receipt.artifactPath,
+  options: { structured?: boolean } = {},
+): SpawnResponse {
   const conflict = receipt.state === "conflicted";
   const pending = receipt.state === "starting"
     || receipt.state === "pane-bound"
     || receipt.state === "host-verified"
     || receipt.state === "prompt-delivered"
     || receipt.state === "path-pending";
-  const launched = receipt.verifiedHost !== null && receipt.state !== "failed" && receipt.state !== "conflicted";
+  const launched = (receipt.verifiedHost !== null || (options.structured === true && receipt.state === "completed"))
+    && receipt.state !== "failed"
+    && receipt.state !== "conflicted";
   return {
     ok: true,
     target: receipt.pane?.paneId ?? receipt.target ?? null,

@@ -61,6 +61,7 @@ export interface CodexAppServerHostOptions {
   binary?: string;
   model?: string;
   effort?: string;
+  allowSubagents?: boolean;
   fileAuthCredentials?: boolean;
   sandbox?: string;
   approvalPolicy?: string;
@@ -316,7 +317,10 @@ export class CodexAppServerHost implements EngineHost {
       const accountType = stringField(account, "type");
       if (accountType !== "chatgpt") throw new Error("Codex app-server requires a ChatGPT subscription login");
       provisional.account = { type: accountType, planType: stringField(account, "planType") };
-      const config = headlessCodexThreadConfig(await provisional.rpc("config/read", { cwd: options.cwd, includeLayers: false }));
+      const config = headlessCodexThreadConfig(
+        await provisional.rpc("config/read", { cwd: options.cwd, includeLayers: false }),
+        options.allowSubagents === true,
+      );
       const result = threadId
         ? await provisional.rpc("thread/resume", { threadId, config })
         : await provisional.rpc("thread/start", {

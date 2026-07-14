@@ -6,6 +6,7 @@ import { sessionKeyId, type SessionKey } from "@/lib/agent/sessionKey";
 import { runtimeHostClient, type RuntimeHostClient } from "./client";
 import type { EngineHost, HostState } from "./engineHost";
 import { runtimeClientDeliveryPort, StructuredDeliveryQueue } from "./structuredDeliveryQueue";
+import { projectEngineHostEvent } from "./engineHostEvents";
 import { setStructuredDeliveryKick } from "./structuredDeliverySignal";
 
 type ObservableEngineHost = EngineHost & { onStateChange(listener: (state: HostState) => void): () => void };
@@ -102,7 +103,7 @@ export async function bindStructuredDeliveryQueue(
   const registry = dependencies.registry ?? agentRegistry();
   const hosts = new Map<string, EngineHost>();
   const queue = new StructuredDeliveryQueue(runtimeClientDeliveryPort(client), hostResolver(registry, hosts));
-  const registrations = new Map<string, { key: SessionKey; host: ObservableEngineHost; unsubscribe: () => void }>();
+  const registrations = new Map<string, { key: SessionKey; host: ObservableEngineHost; unsubscribe: () => void; stopEvents: () => Promise<void> }>();
   const publishChains = new Map<string, Promise<void>>();
   const projectionEpoch = crypto.randomUUID();
   let projectionRevision = 0;
@@ -174,6 +175,7 @@ export async function bindStructuredDeliveryQueue(
     const discardedEntry = entryForHost(registry, registered);
     const conversationId = discardedEntry ? conversationIdForEntry(registry, discardedEntry) : null;
     registered.unsubscribe();
+    await registered.stopEvents();
     registrations.delete(key);
     hosts.delete(key);
     const pendingPublications = publishChains.get(key);
@@ -187,10 +189,9 @@ export async function bindStructuredDeliveryQueue(
     const key = sessionKeyId(item.key);
     const current = registrations.get(key);
     if (current?.host === item.host) return async () => {};
+    if (current) await unregisterHost(key, current.host);
     const state = await item.host.health();
     await publishHostState(client, registry, item, state);
-    current?.unsubscribe();
-    registrations.delete(key);
     hosts.set(key, item.host);
     const observable = item.host as ObservableEngineHost;
     const unsubscribe = observable.onStateChange((state) => {
@@ -201,7 +202,38 @@ export async function bindStructuredDeliveryQueue(
         .catch(() => { console.error("[structured delivery] host state sync failed"); });
       publishChains.set(key, next);
     });
-    registrations.set(key, { key: item.key, host: item.host, unsubscribe });
+    const entry = entryForHost(registry, item);
+    const conversationId = entry ? conversationIdForEntry(registry, entry) : null;
+    const events = item.host.attach(0)[Symbol.asyncIterator]();
+    let eventsStopped = false;
+    const eventPump = (async () => {
+      if (!conversationId) return;
+      while (!eventsStopped) {
+        const next = await events.next();
+        if (next.done) return;
+        const projected = projectEngineHostEvent(conversationId, key, next.value);
+        if (!projected) continue;
+        while (!eventsStopped) {
+          try {
+            await client.append(projected);
+            break;
+          } catch {
+            await new Promise<void>((resolve) => setTimeout(resolve, 100));
+          }
+        }
+        if (!eventsStopped) await queue.drain().catch(() => {
+          console.error("[structured delivery] engine event drain failed");
+        });
+      }
+    })().catch(() => {
+      if (!eventsStopped) console.error("[structured delivery] engine event sync failed");
+    });
+    const stopEvents = async () => {
+      if (eventsStopped) return;
+      eventsStopped = true;
+      void events.return?.().catch(() => {});
+    };
+    registrations.set(key, { key: item.key, host: item.host, unsubscribe, stopEvents });
     return () => unregisterHost(key, item.host);
   };
   activeHosts = hosts;
@@ -238,7 +270,10 @@ export async function bindStructuredDeliveryQueue(
     console.error("[structured delivery] queue drain failed");
   }));
   stopActive = () => {
-    for (const registration of registrations.values()) registration.unsubscribe();
+    for (const registration of registrations.values()) {
+      registration.unsubscribe();
+      void registration.stopEvents();
+    }
     registrations.clear();
     hosts.clear();
     if (activeQueue === queue) {

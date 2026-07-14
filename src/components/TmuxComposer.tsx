@@ -11,7 +11,7 @@ import { Hint } from "@/components/Hint";
 import { Badge, type BadgeTone } from "@/components/ui/Badge";
 import { useComposer } from "@/hooks/useComposer";
 import { useIsMobile } from "@/hooks/useIsMobile";
-import { useRuntimeReceiptsForArtifact } from "@/hooks/useRuntime";
+import { interruptRuntime, sendRuntimeMessage, useRuntimeReceiptsForArtifact, useRuntimeSession } from "@/hooks/useRuntime";
 import { useTmuxTarget } from "@/hooks/useTmuxTarget";
 import { conversationIdentity } from "@/lib/accounts/identity";
 import { cardMigrationState, migrationHoldsSends } from "@/lib/accounts/migration";
@@ -183,6 +183,11 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
      path under the target account, and the draft/held receipts must ride along
      (falls back to path pre-migration). */
   const cardId = conversationIdentity(file);
+  const runtimeSession = useRuntimeSession(cardId);
+  const structuredSession = runtimeSession && !runtimeSession.legacy
+    && (runtimeSession.session.hostKind === "codex-app-server" || runtimeSession.session.hostKind === "claude-broker")
+    ? runtimeSession
+    : null;
   /* While a card is switching accounts its next send is held for the successor
      (Sol delivery fence): the composer shows the held affordance instead of
      pretending the text reached the live predecessor pane. */
@@ -206,6 +211,7 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
      images) behind one toggle: mic and send stay, the row stops crowding. */
   const [toolsOpen, setToolsOpen] = useState(false);
   const [interrupting, setInterrupting] = useState(false);
+  const [attachingTerminal, setAttachingTerminal] = useState(false);
   const [compacting, setCompacting] = useState(false);
   /* Two-step compact: the first click arms the button, only the second sends
      /compact — a stray click must never condense a live agent's context. */
@@ -283,7 +289,7 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
 
   const resumable = canMessageWithoutPane(file);
   if (target === null && !resumable) return null;
-  const spawnMode = target === null;
+  const spawnMode = target === null && !structuredSession;
   const relayMode = spawnMode && file.root === "claude-projects" && file.kind === "subagent";
 
   const persistSent = (next: SentEntry[]) => {
@@ -300,19 +306,7 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
        against this id so the successor never receives the same prompt twice. */
     const clientMessageId = deliveryAttemptKey(idempotencyKey.current, retry?.clientMessageId);
     try {
-      const res = await fetch("/api/tmux", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          pid: file.pid ?? undefined,
-          path: file.path,
-          text: payloadText,
-          idempotencyKey: clientMessageId,
-          clientMessageId,
-          images: attachments.images.map((image) => ({ base64: image.base64, mime: image.mime })),
-        }),
-      });
-      const json = (await res.json()) as {
+      const json: {
         ok?: boolean;
         structured?: boolean;
         error?: string;
@@ -321,8 +315,39 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
         spawned?: boolean;
         outcome?: "delivered-to-live" | "resumed" | "held" | "queued" | "delivering" | "delivered" | "recovering" | "failed";
         receipt?: RuntimeReceipt;
-      };
-      if (!res.ok || !json.ok) {
+      } = structuredSession
+        ? attachments.images.length > 0
+          ? { ok: false, structured: true, error: t("composer.structuredImagesUnavailable") }
+          : await sendRuntimeMessage({
+              conversationId: structuredSession.session.conversationId,
+              text: payloadText.trim(),
+              idempotencyKey: clientMessageId,
+              policy: "steer-if-active",
+            }).then((result) => ({
+              ok: result.ok,
+              structured: true,
+              error: result.error,
+              receipt: result.receipt,
+              outcome: result.receipt?.status === "delivering" || result.receipt?.status === "delivered"
+                ? result.receipt.status
+                : "queued",
+            }))
+        : await fetch("/api/tmux", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              pid: file.pid ?? undefined,
+              path: file.path,
+              text: payloadText,
+              idempotencyKey: clientMessageId,
+              clientMessageId,
+              images: attachments.images.map((image) => ({ base64: image.base64, mime: image.mime })),
+            }),
+          }).then(async (response) => {
+            const body = await response.json() as typeof json;
+            return { ...body, ok: response.ok && body.ok === true };
+          });
+      if (!json.ok) {
         if (json.structured && json.receipt) {
           setImmediateRuntimeReceipts((current) => [
             json.receipt!,
@@ -424,14 +449,18 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
     setInterrupting(true);
     setStatus(null);
     try {
-      const res = await fetch("/api/tmux", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ action: "interrupt", path: file.path }),
-      });
-      const json = (await res.json()) as { ok?: boolean; error?: string };
-      if (!res.ok || !json.ok) {
-        setStatus({ kind: "err", text: json.error ?? t("composer.failedInterrupt") });
+      const result = structuredSession
+        ? await interruptRuntime(structuredSession.session.conversationId, mintIdempotencyKey())
+        : await fetch("/api/tmux", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ action: "interrupt", path: file.path }),
+          }).then(async (response) => {
+            const body = await response.json() as { ok?: boolean; error?: string };
+            return { ok: response.ok && body.ok === true, error: body.error };
+          });
+      if (!result.ok) {
+        setStatus({ kind: "err", text: result.error ?? t("composer.failedInterrupt") });
         return;
       }
       setStatus({ kind: "ok", text: t("composer.escapeSent") });
@@ -439,6 +468,29 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
       setStatus({ kind: "err", text: t("common.serverUnavailable") });
     } finally {
       setInterrupting(false);
+    }
+  };
+
+  const attachTerminal = async () => {
+    if (attachingTerminal) return;
+    setAttachingTerminal(true);
+    setStatus(null);
+    try {
+      const response = await fetch("/api/tmux", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ action: "attach-terminal", path: file.path }),
+      });
+      const body = await response.json() as { ok?: boolean; target?: string; error?: string };
+      if (!response.ok || !body.ok) {
+        setStatus({ kind: "err", text: body.error ?? t("composer.attachTerminalFailed") });
+        return;
+      }
+      setStatus({ kind: "ok", text: t("composer.attachTerminalReady", { target: body.target ?? "" }) });
+    } catch {
+      setStatus({ kind: "err", text: t("common.serverUnavailable") });
+    } finally {
+      setAttachingTerminal(false);
     }
   };
 
@@ -475,9 +527,13 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
   const modeChip = (
     <span
       className="inline-flex min-w-0 items-center gap-1 rounded-control bg-sunken px-1.5 py-1 text-caption font-semibold text-secondary"
-      title={relayMode ? t("composer.titleRelay") : spawnMode ? t("composer.titleSpawnResumed") : `tmux ${target}`}
+      title={structuredSession ? t("composer.structuredHost") : relayMode ? t("composer.titleRelay") : spawnMode ? t("composer.titleSpawnResumed") : `tmux ${target}`}
     >
-      {relayMode ? (
+      {structuredSession ? (
+        <>
+          <SquareTerminal className="h-3 w-3 shrink-0" aria-hidden /> {t("composer.structured")}
+        </>
+      ) : relayMode ? (
         <>
           <ArrowUpToLine className="h-3 w-3 shrink-0" aria-hidden /> {t("composer.root")}
         </>
@@ -508,7 +564,19 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
           {interrupting ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : <Square className="h-4 w-4" fill="currentColor" aria-hidden />}
         </button>
       </Hint>
-      <Hint label={compactArmed ? t("composer.compactConfirmTitle") : t("composer.compactTitle")}>
+      {structuredSession ? (
+        <Hint label={t("composer.attachTerminal")}>
+          <button
+            type="button"
+            aria-label={t("composer.attachTerminal")}
+            disabled={attachingTerminal}
+            onClick={() => void attachTerminal()}
+            className={`inline-flex shrink-0 items-center justify-center rounded-control text-muted hover:bg-sunken hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-50 ${iconBtn}`}
+          >
+            {attachingTerminal ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : <SquareTerminal className="h-4 w-4" aria-hidden />}
+          </button>
+        </Hint>
+      ) : <Hint label={compactArmed ? t("composer.compactConfirmTitle") : t("composer.compactTitle")}>
         <button
           type="button"
           aria-label={compactArmed ? t("composer.compactConfirmTitle") : t("composer.compactAria")}
@@ -540,7 +608,7 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
             <FoldVertical className="h-4 w-4" aria-hidden />
           )}
         </button>
-      </Hint>
+      </Hint>}
     </>
   ) : null;
 
@@ -551,7 +619,7 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
     <form
       onSubmit={handleSubmit}
       className="flex shrink-0 flex-col gap-1.5 border-t border-border bg-card px-2.5 py-2"
-      aria-label={spawnMode ? t("composer.spawnAria") : t("composer.sendAria", { target: target ?? "" })}
+      aria-label={structuredSession ? t("composer.sendStructuredAria") : spawnMode ? t("composer.spawnAria") : t("composer.sendAria", { target: target ?? "" })}
     >
       {/* Proactive hold hint: while the card is switching accounts, the next
           send is queued for the successor rather than delivered live. Shown

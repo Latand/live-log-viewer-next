@@ -86,8 +86,7 @@ export async function handleRuntimeCommand(
       }
     }
     const result = await client.command(command);
-    if ((kind === "send" || kind === "steer")
-      && (result.receipt.status === "pending" || result.receipt.status === "queued")) {
+    if (result.receipt.status === "pending" || result.receipt.status === "queued") {
       dependencies.kick?.();
     }
     const status = result.receipt.status === "pending" || result.receipt.status === "queued" ? 202 : 200;
