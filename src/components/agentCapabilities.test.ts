@@ -66,6 +66,54 @@ test("a tmux-legacy session never counts as a structured host", () => {
   expect(surfaceFor(file({ proc: "running" }), rv("tmux-legacy", "hosted", true))).toBe<StripSurface>("live-root");
 });
 
+/* ------------------- finding 1: unresolved host fails safe ------------------- */
+
+test("a running conversation with no runtime session under the plane is unresolved — zero legacy controls", () => {
+  // The plane is authoritative but no session has arrived: a running pid must NOT
+  // be read as a live tmux pane (it could be a structured/dead host).
+  const f = file({ proc: "running" });
+  expect(surfaceFor(f, null, { runtimeEnabled: true })).toBe<StripSurface>("unresolved");
+  const caps = capabilitiesFor(f, null, { runtimeEnabled: true });
+  for (const c of ["stop", "compact", "runtime", "kill", "terminal", "images"] as ControlName[]) {
+    expect(caps.controls[c].state).toBe("hidden");
+  }
+  // send is disabled (not silently enabled) so the composer blocks its POST
+  expect(caps.controls.send.state).toBe("disabled");
+  expect(caps.controls.send.state === "disabled" && caps.controls.send.reason).toBe("strip.resolving");
+  // and the strip itself renders nothing
+  expect(stripHasVisibleControls(caps)).toBe(false);
+});
+
+test("affirmative legacy-tmux evidence resolves a running pane to live-root even under the plane", () => {
+  expect(surfaceFor(file({ proc: "running" }), rv("tmux-legacy", "hosted", true), { runtimeEnabled: true })).toBe<StripSurface>("live-root");
+});
+
+test("hydrated structured and dead hosts resolve to their rows under the plane", () => {
+  expect(surfaceFor(file({ proc: "running" }), rv("codex-app-server", "hosted"), { runtimeEnabled: true })).toBe<StripSurface>("structured");
+  expect(surfaceFor(file({ proc: "running" }), rv("claude-broker", "dead"), { runtimeEnabled: true })).toBe<StripSurface>("dead");
+});
+
+test("a finished (proc-null) conversation stays resume under the plane — not unresolved", () => {
+  const finished = file({ proc: null, engine: "codex", root: "codex-sessions" });
+  expect(surfaceFor(finished, null, { runtimeEnabled: true })).toBe<StripSurface>("resume");
+});
+
+/* ------------------- finding 2: scanner-shaped subagents ------------------- */
+
+test("a scanner-shaped subagent (proc:null) resolves from its root-host liveness", () => {
+  const child = file({ proc: null, pid: null, kind: "subagent", parent: "/root.jsonl" });
+  // live root → the documented live-subagent controls appear
+  expect(surfaceFor(child, null, { runtimeEnabled: true, root: "live" })).toBe<StripSurface>("live-subagent");
+  const caps = capabilitiesFor(child, null, { runtimeEnabled: true, root: "live" });
+  expect(caps.controls.stop.state).toBe("enabled");
+  expect(caps.controls.kill.state).toBe("enabled");
+  expect(caps.controls.terminal.state).toBe("enabled");
+  // a dead/finished root keeps the child gated (inert), never live controls
+  expect(surfaceFor(child, null, { runtimeEnabled: true, root: "gated" })).toBe<StripSurface>("inert");
+  // an as-yet-unknown root under the plane also stays inert (no relay control fires)
+  expect(surfaceFor(child, null, { runtimeEnabled: true, root: "unknown" })).toBe<StripSurface>("inert");
+});
+
 /* ------------------------------ §4 matrix rows ------------------------------ */
 
 test("live-root: every control enabled", () => {
