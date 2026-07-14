@@ -22,6 +22,7 @@ The orchestrator (a long-lived Claude session in `~/.agents/tools/live-log-viewe
 
 - **DATA bar** (runtime/flows/agent/scanner/data-integrity): clean APPROVE required; extend rounds (`extend {rounds:N}`) up to ~9–13 instead of merging with findings.
 - **UI bar** (components/styling/mobile): 5–7 substantive rounds; if only non-core/cosmetic findings remain → merge + file a follow-up tail issue quoting the verdict verbatim. Post-approval trailing commits that are tests/comments/screenshots only → merge without another round.
+- **Fable gate on all UI/UX** (owner rule, 2026-07-14): every visual change is either designed by Fable BEFORE an Opus lane starts (design note in the issue), or gets a mandatory Fable critique round when the Opus lane finishes. Never hand Opus a raw user prompt for UI. Fable critiques against rendered screenshots — reuse/extend the demo-capture renderer (scripts/demo-capture*) to shoot the new feature. Don't interrupt mid-work lanes; critique lands at their finish.
 
 ## Out-of-band review (flows API unusable for a lane)
 
