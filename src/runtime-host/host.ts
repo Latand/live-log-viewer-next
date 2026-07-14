@@ -139,6 +139,14 @@ export class RuntimeHost {
           throw new Error("runtime effect cursor is invalid");
         }
         result = this.journal.effectBatch(100, kinds as string[] | undefined, afterEventSeq);
+      } else if (request.method === "producer-cursor") {
+        const producerKind = request.params?.producerKind;
+        const eventKeyPrefix = request.params?.eventKeyPrefix;
+        if (typeof producerKind !== "string" || !producerKind || producerKind.length > 128
+          || typeof eventKeyPrefix !== "string" || !eventKeyPrefix || eventKeyPrefix.length > 512) {
+          throw new Error("runtime producer cursor is invalid");
+        }
+        result = this.journal.producerCursor(producerKind, eventKeyPrefix);
       } else if (request.method === "operation-transition") {
         if (!this.structuredHosts) throw new Error("structured hosts are disabled");
         const status = request.params?.status;

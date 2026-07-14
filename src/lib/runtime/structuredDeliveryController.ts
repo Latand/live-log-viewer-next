@@ -15,6 +15,9 @@ export interface StructuredDeliveryHost {
   host: ObservableEngineHost;
 }
 
+const DELIVERY_DRAIN_COALESCE_MS = 25;
+const DELIVERY_DRAIN_MAX_BACKOFF_MS = 1_000;
+
 /* Next standalone bundles instrumentation and route handlers separately, so a
    module-level `let` written by startup adoption is invisible to routes. The
    controller registration must live on `globalThis`, like every other
@@ -41,6 +44,14 @@ function entryForHost(registry: AgentRegistry, adopted: StructuredDeliveryHost):
 
 function conversationIdForEntry(registry: AgentRegistry, entry: AgentRegistryEntry): string | null {
   return registry.conversationForPath(entry.artifactPath)?.id ?? null;
+}
+
+function deliveryStateKey(state: HostState): string {
+  return JSON.stringify([state.status, state.activeTurnRef]);
+}
+
+function hostProjectionKey(state: HostState): string {
+  return JSON.stringify([state.status, state.activeTurnRef, state.pendingAttention]);
 }
 
 function hostResolver(
@@ -117,6 +128,29 @@ export async function bindStructuredDeliveryQueue(
   const registry = dependencies.registry ?? agentRegistry();
   const hosts = new Map<string, EngineHost>();
   const queue = new StructuredDeliveryQueue(runtimeClientDeliveryPort(client), hostResolver(registry, hosts));
+  let drainTimer: ReturnType<typeof setTimeout> | null = null;
+  let drainBackoffMs = DELIVERY_DRAIN_COALESCE_MS;
+  let stopped = false;
+  const scheduleDrain = (delayMs = DELIVERY_DRAIN_COALESCE_MS) => {
+    if (stopped || drainTimer) return;
+    drainTimer = setTimeout(() => {
+      drainTimer = null;
+      if (stopped) return;
+      void queue.drain().then(
+        () => { drainBackoffMs = DELIVERY_DRAIN_COALESCE_MS; },
+        () => {
+          console.error("[structured delivery] scheduled queue drain failed");
+          const retryMs = drainBackoffMs;
+          drainBackoffMs = Math.min(drainBackoffMs * 2, DELIVERY_DRAIN_MAX_BACKOFF_MS);
+          scheduleDrain(retryMs);
+        },
+      );
+    }, delayMs);
+    drainTimer.unref?.();
+  };
+  const requestDrain = () => {
+    if (state.activeQueue === queue) scheduleDrain();
+  };
   const registrations = new Map<string, { key: SessionKey; host: ObservableEngineHost; unsubscribe: () => void; stopEvents: () => Promise<void> }>();
   const publishChains = new Map<string, Promise<void>>();
   const projectionEpoch = crypto.randomUUID();
@@ -204,23 +238,49 @@ export async function bindStructuredDeliveryQueue(
     const current = registrations.get(key);
     if (current?.host === item.host) return async () => {};
     if (current) await unregisterHost(key, current.host);
-    const state = await item.host.health();
-    await publishHostState(client, registry, item, state);
+    const initialState = await item.host.health();
+    await publishHostState(client, registry, item, initialState);
     hosts.set(key, item.host);
+    requestDrain();
     const observable = item.host as ObservableEngineHost;
+    let deliveryState = deliveryStateKey(initialState);
+    let projectedState = hostProjectionKey(initialState);
     const unsubscribe = observable.onStateChange((state) => {
+      const nextDeliveryState = deliveryStateKey(state);
+      const nextProjectedState = hostProjectionKey(state);
       const previous = publishChains.get(key) ?? Promise.resolve();
       const next = previous
-        .then(() => publishHostState(client, registry, item, state))
-        .then(() => queue.drain())
+        .then(async () => {
+          if (nextProjectedState !== projectedState) {
+            await publishHostState(client, registry, item, state);
+            projectedState = nextProjectedState;
+          }
+          if (nextDeliveryState === deliveryState) return;
+          deliveryState = nextDeliveryState;
+          requestDrain();
+        })
         .catch(() => { console.error("[structured delivery] host state sync failed"); });
       publishChains.set(key, next);
     });
     const entry = entryForHost(registry, item);
     const conversationId = entry ? conversationIdForEntry(registry, entry) : null;
-    const events = item.host.attach(0)[Symbol.asyncIterator]();
+    let acknowledgedEventCursor = 0;
+    if (conversationId) {
+      /* Runtime-host producer receipts advance after the projected event commits.
+         Registry cursors track the engine ledger and can lead this acknowledgement
+         during a crash, so they cannot safely skip replay here. */
+      try {
+        acknowledgedEventCursor = await client.producerCursor(
+          item.key.engine === "codex" ? "codex-app-server" : "claude-broker",
+          `engine-host:${key}:`,
+        );
+      } catch {
+        console.error("[structured delivery] producer cursor unavailable; replaying host events");
+      }
+    }
+    const events = item.host.attach(acknowledgedEventCursor)[Symbol.asyncIterator]();
     let eventsStopped = false;
-    const eventPump = (async () => {
+    void (async () => {
       if (!conversationId) return;
       while (!eventsStopped) {
         const next = await events.next();
@@ -235,9 +295,6 @@ export async function bindStructuredDeliveryQueue(
             await new Promise<void>((resolve) => setTimeout(resolve, 100));
           }
         }
-        if (!eventsStopped) await queue.drain().catch(() => {
-          console.error("[structured delivery] engine event drain failed");
-        });
       }
     })().catch(() => {
       if (!eventsStopped) console.error("[structured delivery] engine event sync failed");
@@ -284,6 +341,9 @@ export async function bindStructuredDeliveryQueue(
     console.error("[structured delivery] queue drain failed");
   }));
   state.stopActive = () => {
+    stopped = true;
+    if (drainTimer) clearTimeout(drainTimer);
+    drainTimer = null;
     for (const registration of registrations.values()) {
       registration.unsubscribe();
       void registration.stopEvents();

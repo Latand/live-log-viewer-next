@@ -102,6 +102,7 @@ function runtimeClient(journal: RuntimeJournal): RuntimeHostClient {
     command: async (command) => journal.executeOperation(command),
     operationStatus: async (operationId) => journal.operationResult(operationId),
     retryOperation: async (operationId) => journal.retryOperation(operationId),
+    producerCursor: async (producerKind, eventKeyPrefix) => journal.producerCursor(producerKind, eventKeyPrefix),
     effectBatch: async (kinds, afterEventSeq) => journal.effectBatch(100, kinds, afterEventSeq),
     transitionOperation: async (operationId, status, details) => journal.transitionOperation(operationId, status, details),
   } as RuntimeHostClient;

@@ -354,7 +354,7 @@ export interface RuntimeReplay {
 
 export interface RuntimeSocketRequest {
   id: string;
-  method: "snapshot" | "events" | "wait" | "append" | "operation" | "command" | "operation-status" | "operation-retry" | "effect-batch" | "operation-transition" | "viewer-deployment-request" | "viewer-deployment-read";
+  method: "snapshot" | "events" | "wait" | "append" | "operation" | "command" | "operation-status" | "operation-retry" | "effect-batch" | "operation-transition" | "producer-cursor" | "viewer-deployment-request" | "viewer-deployment-read";
   params?: Record<string, unknown>;
 }
 

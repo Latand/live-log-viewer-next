@@ -11,7 +11,7 @@ import { RegisteredSuccessorProvider } from "@/lib/accounts/migration/provider";
 import { RuntimeJournal } from "@/runtime-host/journal";
 
 import type { RuntimeHostClient } from "./client";
-import type { EngineHost, HostState, QueueEntry } from "./engineHost";
+import type { EngineHost, HostState, QueueEntry, RuntimeEvent } from "./engineHost";
 import { FakeEngineHost, createFakeDeliveryLedger } from "./fixtures/fakeEngineHost";
 import { bindStructuredDeliveryQueue, publishStructuredDeliveryHost } from "./structuredDeliveryController";
 import { StructuredDeliveryQueue, type StructuredDeliveryQueuePort } from "./structuredDeliveryQueue";
@@ -35,12 +35,86 @@ function observableFakeHost(host: FakeEngineHost): FakeEngineHost & { onStateCha
   return Object.assign(host, { onStateChange: () => () => {} });
 }
 
+function burstyObservableHost(): {
+  host: EngineHost & { onStateChange(listener: (state: HostState) => void): () => void };
+  emit(event: RuntimeEvent): void;
+  attachedAfter(): number | null;
+} {
+  let state: HostState = {
+    status: "active",
+    sessionKey: "burst-session",
+    endpoint: "fake:burst-host",
+    pid: 1,
+    processStartIdentity: "fake:1",
+    eventCursor: 0,
+    protocolVersion: "fake-v1",
+    activeTurnRef: "turn:burst",
+    pendingAttention: [],
+    activeFlags: [],
+    account: null,
+  };
+  const listeners = new Set<(state: HostState) => void>();
+  const queued: RuntimeEvent[] = [];
+  const waiters: Array<(result: IteratorResult<RuntimeEvent>) => void> = [];
+  let attachedAfter: number | null = null;
+  let closed = false;
+  const iterator: AsyncIterator<RuntimeEvent> = {
+    next: async () => {
+      const event = queued.shift();
+      if (event) return { value: event, done: false };
+      if (closed) return { value: undefined, done: true };
+      return await new Promise<IteratorResult<RuntimeEvent>>((resolve) => waiters.push(resolve));
+    },
+    return: async () => {
+      closed = true;
+      for (const resolve of waiters.splice(0)) resolve({ value: undefined, done: true });
+      return { value: undefined, done: true };
+    },
+  };
+  const host = {
+    attach: (afterSeq: number) => {
+      attachedAfter = afterSeq;
+      return { [Symbol.asyncIterator]: () => iterator };
+    },
+    send: async (entry: QueueEntry) => ({ outcome: "turn-started" as const, turnId: `turn:${entry.id}` }),
+    interrupt: async () => {},
+    answer: async () => {},
+    health: async () => ({ ...state }),
+    release: async () => {},
+    onStateChange(listener: (next: HostState) => void) {
+      listeners.add(listener);
+      listener({ ...state });
+      return () => listeners.delete(listener);
+    },
+  } satisfies EngineHost & { onStateChange(listener: (state: HostState) => void): () => void };
+  return {
+    host,
+    emit(event) {
+      state = { ...state, eventCursor: event.seq };
+      for (const listener of listeners) listener({ ...state });
+      const resolve = waiters.shift();
+      if (resolve) resolve({ value: event, done: false });
+      else queued.push(event);
+    },
+    attachedAfter: () => attachedAfter,
+  };
+}
+
+async function waitForCondition(assertion: () => boolean): Promise<void> {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    if (assertion()) return;
+    await Bun.sleep(5);
+  }
+  throw new Error("structured delivery condition did not settle");
+}
+
 function runtimeJournalClient(journal: RuntimeJournal): RuntimeHostClient {
   return {
     snapshot: async () => journal.snapshot(),
     append: async (event) => journal.append(event),
     command: async (command) => journal.executeOperation(command),
     operationStatus: async (operationId) => journal.operationResult(operationId),
+    producerCursor: async (producerKind, eventKeyPrefix) => journal.producerCursor(producerKind, eventKeyPrefix),
     effectBatch: async (kinds, afterEventSeq) => journal.effectBatch(100, kinds, afterEventSeq),
     transitionOperation: async (operationId, status, details) => journal.transitionOperation(operationId, status, details),
   } as RuntimeHostClient;
@@ -58,6 +132,80 @@ function cleanupOnlyProvider(): RegisteredSuccessorProvider {
     now: () => "2026-07-13T12:01:00.000Z",
   });
 }
+
+test("an engine event burst preserves every projection without polling the delivery queue per event", async () => {
+  const directory = path.join(sandbox, "controller-event-burst");
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const artifactPath = path.join(directory, "burst-session.jsonl");
+  const profile = emptyLaunchProfile({ cwd: directory });
+  registry.reconcileConversations([{
+    engine: "codex",
+    path: artifactPath,
+    accountId: "burst-account",
+    launchProfile: profile,
+    turn: { state: "busy", source: "assistant", terminalAt: null },
+    observedAt: "2026-07-14T12:00:00.000Z",
+  }]);
+  registry.upsert({
+    key: { engine: "codex", sessionId: "burst-session" },
+    artifactPath,
+    cwd: directory,
+    accountId: "burst-account",
+    launchProfile: profile,
+    status: "live",
+    host: null,
+    structuredHost: {
+      kind: "codex-app-server",
+      endpoint: "fake:burst-host",
+      process: null,
+      eventCursor: 0,
+      protocolVersion: "fake-v1",
+      writerClaimEpoch: 0,
+      activeTurnRef: "turn:burst",
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  let effectBatchCalls = 0;
+  let deltaProjections = 0;
+  let sessionStatusProjections = 0;
+  const client = {
+    append: async (event: { kind: string }) => {
+      if (event.kind === "delta") deltaProjections += 1;
+      if (event.kind === "session-status") sessionStatusProjections += 1;
+    },
+    producerCursor: async () => 17,
+    effectBatch: async () => { effectBatchCalls += 1; return []; },
+    transitionOperation: async () => { throw new Error("unexpected operation transition"); },
+  } as unknown as RuntimeHostClient;
+  const burst = burstyObservableHost();
+
+  try {
+    await bindStructuredDeliveryQueue([{
+      key: { engine: "codex", sessionId: "burst-session" },
+      host: burst.host,
+    }], { registry, client });
+    await Bun.sleep(50);
+    expect(burst.attachedAfter()).toBe(17);
+    const baselineEffects = effectBatchCalls;
+    const baselineStatuses = sessionStatusProjections;
+
+    for (let index = 18; index <= 57; index += 1) {
+      burst.emit({ kind: "delta", turnId: "turn:burst", text: `delta ${index}`, seq: index });
+    }
+
+    await waitForCondition(() => deltaProjections === 40);
+    await Bun.sleep(50);
+    expect(deltaProjections).toBe(40);
+    expect(sessionStatusProjections - baselineStatuses).toBeLessThanOrEqual(1);
+    expect(effectBatchCalls - baselineEffects).toBeLessThanOrEqual(1);
+  } finally {
+    await bindStructuredDeliveryQueue([], { registry, client: null });
+  }
+});
 
 test("a delivering entry resumes after restart through the host ledger without a second engine write", async () => {
   const filename = path.join(sandbox, "events.sqlite");
