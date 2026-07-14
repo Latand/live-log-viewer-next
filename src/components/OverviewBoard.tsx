@@ -9,6 +9,7 @@ import type { FileEntry, ProjectCatalogEntry } from "@/lib/types";
 import type { Pipeline } from "@/lib/pipelines/types";
 import type { Workflow } from "@/lib/workflows/types";
 
+import { OrchestratorChatButton } from "./OrchestratorChatButton";
 import { buildBranchGroups, buildProjectSummaries, projectKey } from "./projectModel";
 import { activityDot, cleanTitle, engineBadge, fmtAge } from "./utils";
 
@@ -78,7 +79,10 @@ export function OverviewBoard({ files, projectCatalog, pipelines, workflows, arc
             : t("common.nothingRunning")}
           {archivedCount ? ` ${t("overview.archived", { count: archivedCount })}` : ""}
         </span>
-        {attention ? <span className="ml-auto flex shrink-0 items-center">{attention}</span> : null}
+        <span className="ml-auto flex shrink-0 items-center gap-2">
+          <OrchestratorChatButton />
+          {attention}
+        </span>
       </div>
       <div
         className="grid flex-1 auto-rows-min gap-2.5 overflow-y-auto p-3"

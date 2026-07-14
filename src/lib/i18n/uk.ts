@@ -1059,6 +1059,11 @@ export const uk: Record<keyof typeof en, Message> = {
   "overview.quiet": "тихо · остання активність {age}",
   "overview.empty": "Логів поки нема",
 
+  "orch.chat": "Оркестратор",
+  "orch.open": "Відкрити чат оркестратора",
+  "orch.starting": "Запускаю…",
+  "orch.error": "Не вдалося відкрити оркестратора — торкніться, щоб повторити",
+
   "branch.live": "працює",
   "branch.waiting": "закінчив хід — чекає відповіді",
   "branch.returned": "повернувся з результатом",

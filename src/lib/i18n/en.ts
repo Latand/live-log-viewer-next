@@ -1091,6 +1091,12 @@ export const en = {
   "overview.quiet": "quiet · last activity {age}",
   "overview.empty": "No logs yet",
 
+  // OrchestratorChatButton
+  "orch.chat": "Orchestrator",
+  "orch.open": "Open the orchestrator chat",
+  "orch.starting": "Starting…",
+  "orch.error": "Couldn't open the orchestrator — tap to retry",
+
   // BranchPane
   "branch.live": "working",
   "branch.waiting": "finished the turn — waiting for a reply",
