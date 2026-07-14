@@ -61,19 +61,23 @@ test("structured Claude receipts expose the effective permission mode", () => {
   const trusted = store.beginSpawnRequest({
     engine: "claude",
     cwd: "/repo",
+    transport: "structured",
     launchProfile: emptyLaunchProfile({ cwd: "/repo", permissionMode: "bypassPermissions" }),
   });
   const downgraded = store.beginSpawnRequest({
     engine: "claude",
     cwd: "/repo",
+    transport: "structured",
     launchProfile: emptyLaunchProfile({ cwd: "/repo", permissionMode: "default" }),
   });
   if (trusted.kind !== "created" || downgraded.kind !== "created") throw new Error("spawn receipt was unavailable");
 
-  expect(spawnResponseForReceipt(trusted.receipt, null, { structured: true })).toMatchObject({
+  expect(spawnResponseForReceipt(trusted.receipt, null)).toMatchObject({
+    state: "starting",
     effectivePermissionMode: "bypassPermissions",
   });
-  expect(spawnResponseForReceipt(downgraded.receipt, null, { structured: true })).toMatchObject({
+  expect(spawnResponseForReceipt(downgraded.receipt, null)).toMatchObject({
+    state: "starting",
     effectivePermissionMode: "default",
   });
 });

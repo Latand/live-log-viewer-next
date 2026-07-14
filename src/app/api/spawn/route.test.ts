@@ -7,11 +7,12 @@ import { NextRequest } from "next/server";
 
 import { agentRegistry, AgentRegistry } from "@/lib/agent/registry";
 import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
-import { codexSessionRoots } from "@/lib/accounts/codex";
+import { codexSessionRoots, createManagedCodexAccount } from "@/lib/accounts/codex";
 import { spawnParentSelector, spawnRequestDigest } from "@/lib/agent/spawnIdentity";
 import { rotateOperatorSpawnCapability } from "@/lib/agent/operatorCapability";
 import { spawnReplayStatus, spawnResponseForReceipt } from "@/lib/agent/spawnResponse";
 import { resolveSpawnLineage, resolveSpawnLineageParent, resolveSpawnParent, SpawnParentError } from "@/lib/agent/spawnParent";
+import type { RuntimeHostClient } from "@/lib/runtime/client";
 import { authenticatedAgentSpawnCaller, isAgentInitiatedSpawn, spawnLineageSelectorForCaller } from "./admission";
 import { POST } from "./route";
 
@@ -28,6 +29,31 @@ afterAll(() => {
 function registry(): AgentRegistry {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "llv-spawn-route-"));
   return new AgentRegistry(path.join(dir, "agent-registry.json"));
+}
+
+function structuredRouteDependencies(cwd: string): Parameters<typeof POST.withDependencies>[1] {
+  return {
+    resolveHealthySpawnAccount: async () => ({
+      engine: "claude",
+      accountId: "claude-test",
+      kind: "managed",
+      home: path.join(cwd, "account"),
+      transcriptRoot: path.join(cwd, "projects"),
+      env: { NODE_ENV: "test" },
+    }),
+    runtimeHostClient: () => ({} as RuntimeHostClient),
+    spawnStructuredConversation: async (input) => ({
+      ok: true,
+      target: null,
+      path: null,
+      effectivePermissionMode: input.spec.launchProfile?.permissionMode ?? "default",
+      launchId: input.receipt.launchId,
+      conversationId: input.receipt.conversationId,
+      launched: true,
+      retrySafe: false,
+      state: "settled",
+    }),
+  };
 }
 
 test("agent-initiated spawn without lineage returns a teaching 400", async () => {
@@ -220,6 +246,79 @@ test("operator callers may grant native sub-agent permission", async () => {
 
   expect(response.status).toBe(400);
   expect(await response.json()).toEqual({ error: "working directory is required" });
+});
+
+test("operator structured Claude retries retain bypass and agent reuse conflicts", async () => {
+  const cwd = fs.mkdtempSync(path.join(routeSandbox, "operator-permission-"));
+  const store = agentRegistry();
+  const callerSessionId = crypto.randomUUID();
+  const callerAccount = createManagedCodexAccount(`route-caller-${callerSessionId}`);
+  const callerPath = path.join(callerAccount.sessionsDir, `${callerSessionId}.jsonl`);
+  fs.mkdirSync(path.dirname(callerPath), { recursive: true });
+  fs.writeFileSync(callerPath, "{}\n");
+  const caller = store.beginSpawnRequest({ engine: "codex", cwd, accountId: "caller" });
+  if (caller.kind !== "created") throw new Error("expected caller reservation");
+  const settledCaller = store.settleSpawn(caller.receipt.launchId, {
+    key: { engine: "codex", sessionId: callerSessionId },
+    artifactPath: callerPath,
+    cwd,
+    accountId: "caller",
+    status: "idle",
+    host: null,
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  if (settledCaller.kind !== "settled") throw new Error(`caller settlement failed: ${settledCaller.code}`);
+  expect(store.conversationForPath(callerPath)?.id).toBe(caller.receipt.conversationId);
+  const agentCapability = store.rotateSpawnCapabilityForReceipt(caller.receipt.launchId);
+  const operatorCapability = rotateOperatorSpawnCapability();
+  const attemptId = `attempt_${crypto.randomUUID()}`;
+  const request = (capability: string, clientAttemptId = attemptId) => new NextRequest("http://127.0.0.1:8898/api/spawn", {
+    method: "POST",
+    headers: { host: "127.0.0.1:8898", "content-type": "application/json", "x-llv-spawn-capability": capability },
+    body: JSON.stringify({ engine: "claude", model: "claude-sonnet-4-6", cwd, prompt: "build", src: callerPath, role: "builder", clientAttemptId }),
+  });
+  const previousTransport = process.env.LLV_SPAWN_TRANSPORT;
+  const previousHosts = process.env.LLV_STRUCTURED_HOSTS;
+  const previousEvents = process.env.LLV_RUNTIME_EVENTS;
+  const previousSocket = process.env.LLV_RUNTIME_HOST_SOCKET;
+  const previousUi = process.env.NEXT_PUBLIC_RUNTIME_UI;
+  process.env.LLV_SPAWN_TRANSPORT = "structured";
+  process.env.LLV_STRUCTURED_HOSTS = "1";
+  process.env.LLV_RUNTIME_EVENTS = "1";
+  process.env.LLV_RUNTIME_HOST_SOCKET = path.join(cwd, "runtime.sock");
+  process.env.NEXT_PUBLIC_RUNTIME_UI = "1";
+  try {
+    const launched = await POST.withDependencies(request(operatorCapability), structuredRouteDependencies(cwd));
+    expect(await launched.json()).toMatchObject({ effectivePermissionMode: "bypassPermissions" });
+
+    const replay = await POST.withDependencies(request(operatorCapability), structuredRouteDependencies(cwd));
+    expect(replay.status).toBe(202);
+    expect(await replay.json()).toMatchObject({ state: "starting", effectivePermissionMode: "bypassPermissions" });
+
+    const conflict = await POST.withDependencies(request(agentCapability), structuredRouteDependencies(cwd));
+    expect(conflict.status).toBe(409);
+    expect(await conflict.json()).toEqual({ error: "spawn attempt conflicts with its original request" });
+
+    const agentAttemptId = `attempt_${crypto.randomUUID()}`;
+    const agentLaunch = await POST.withDependencies(request(agentCapability, agentAttemptId), structuredRouteDependencies(cwd));
+    expect(await agentLaunch.json()).toMatchObject({ effectivePermissionMode: "default" });
+    const agentReplay = await POST.withDependencies(request(agentCapability, agentAttemptId), structuredRouteDependencies(cwd));
+    expect(agentReplay.status).toBe(202);
+    expect(await agentReplay.json()).toMatchObject({ state: "starting", effectivePermissionMode: "default" });
+  } finally {
+    if (previousTransport === undefined) delete process.env.LLV_SPAWN_TRANSPORT;
+    else process.env.LLV_SPAWN_TRANSPORT = previousTransport;
+    if (previousHosts === undefined) delete process.env.LLV_STRUCTURED_HOSTS;
+    else process.env.LLV_STRUCTURED_HOSTS = previousHosts;
+    if (previousEvents === undefined) delete process.env.LLV_RUNTIME_EVENTS;
+    else process.env.LLV_RUNTIME_EVENTS = previousEvents;
+    if (previousSocket === undefined) delete process.env.LLV_RUNTIME_HOST_SOCKET;
+    else process.env.LLV_RUNTIME_HOST_SOCKET = previousSocket;
+    if (previousUi === undefined) delete process.env.NEXT_PUBLIC_RUNTIME_UI;
+    else process.env.NEXT_PUBLIC_RUNTIME_UI = previousUi;
+  }
 });
 
 test("structured spawn flag reaches the pane-less capability gate", async () => {

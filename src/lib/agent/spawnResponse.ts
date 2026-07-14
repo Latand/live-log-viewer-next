@@ -24,6 +24,8 @@ export function spawnResponseForReceipt(
   path = receipt.artifactPath,
   options: { structured?: boolean } = {},
 ): SpawnResponse {
+  const structured = receipt.transport === "structured"
+    || (receipt.transport === null && options.structured === true);
   const conflict = receipt.state === "conflicted";
   const pending = receipt.state === "starting"
     || receipt.state === "pane-bound"
@@ -37,7 +39,7 @@ export function spawnResponseForReceipt(
     ok: true,
     target: receipt.pane?.paneId ?? receipt.target ?? null,
     path,
-    ...(options.structured === true && receipt.engine === "claude"
+    ...(structured && receipt.engine === "claude"
       ? { effectivePermissionMode: receipt.launchProfile.permissionMode ?? "default" }
       : {}),
     launchId: receipt.launchId,
