@@ -13,6 +13,7 @@
 
 import type { MessageKey } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
+import type { HostAxis } from "@/components/runtime/runtimeModel";
 import type { RuntimeSessionView } from "@/hooks/useRuntime";
 
 /** The controls the strip (and the header kill) gate on. */
@@ -38,11 +39,68 @@ export type StripSurface =
   | "resume"         // finished, resumable root conversation
   | "dead"           // host died / went unhosted — banner owns recovery (§5)
   | "shell"          // background shell task — only Kill applies
+  | "unresolved"     // runtime plane is authoritative but no host evidence yet
   | "inert";         // nothing applies (e.g. a finished, non-resumable subagent)
 
 export interface StripCapabilities {
   surface: StripSurface;
   controls: Record<ControlName, Capability>;
+}
+
+/**
+ * Liveness of a Claude subagent's canonical ROOT host. The scanner intentionally
+ * leaves subagent `proc`/`pid` null because the root process writes the child
+ * transcript (see `src/lib/scanner/transcripts.ts`), so a child's liveness *is*
+ * its root host's. Resolved by the component from the runtime store (issue #241
+ * finding 2). `unknown` means the root host has not been observed yet.
+ */
+export type RootLiveness = "live" | "gated" | "unknown";
+
+/**
+ * How the caller establishes host authority. When `runtimeEnabled` is true the
+ * runtime plane is the source of truth for host capability: a conversation with
+ * no resolved runtime session is *unresolved*, not "legacy tmux with a running
+ * pid" — so no legacy Stop/Kill/runtime control or dead-host send may fire until
+ * affirmative host evidence arrives (issue #241 finding 1). When it is false the
+ * runtime plane is off entirely (pre-#241 world) and `file.proc` is authoritative.
+ */
+export interface HostOptions {
+  runtimeEnabled?: boolean;
+  /** For a Claude subagent: the liveness of its canonical root host. */
+  root?: RootLiveness;
+}
+
+/** Resolved host authority — the single place `null` runtime state is classified. */
+type HostResolution =
+  | { kind: "structured" }
+  | { kind: "dead" }
+  | { kind: "legacy" }        // file.proc is authoritative (tmux-legacy or plane off)
+  | { kind: "unresolved" };   // plane on, no host evidence yet — fail safe
+
+function resolveHost(rv: RuntimeSessionView | null, opts: HostOptions): HostResolution {
+  // Dead wins over structured: a structured host that went dead/unhosted still
+  // routes to the banner, never the structured strip.
+  if (isDeadHost(rv)) return { kind: "dead" };
+  if (isStructuredHost(rv)) return { kind: "structured" };
+  // Affirmative legacy-host evidence (a tmux-legacy projection) or the runtime
+  // plane being off both make `file.proc` the authority. A bare `null` while the
+  // plane is on is *unresolved*, never assumed-legacy.
+  if (rv && rv.legacy) return { kind: "legacy" };
+  if (!opts.runtimeEnabled) return { kind: "legacy" };
+  return { kind: "unresolved" };
+}
+
+/** Derive a Claude subagent's root-host liveness from the root's runtime view. */
+export function rootLivenessFrom(root: { host: HostAxis } | null): RootLiveness {
+  if (!root) return "unknown";
+  if (root.host === "dead" || root.host === "unhosted") return "gated";
+  if (root.host === "hosted") return "live";
+  return "unknown"; // registering / recovering / conflict — transitional
+}
+
+/** A Claude subagent transcript, whose own proc/pid the scanner leaves null. */
+function isClaudeSubagent(file: FileEntry): boolean {
+  return file.root === "claude-projects" && file.kind === "subagent";
 }
 
 const ENABLED: Capability = { state: "enabled" };
@@ -75,12 +133,30 @@ function isSubagent(file: FileEntry): boolean {
 }
 
 /** Classify the surface. Dead-host and shell win over everything else. */
-export function surfaceFor(file: FileEntry, rv: RuntimeSessionView | null): StripSurface {
+export function surfaceFor(file: FileEntry, rv: RuntimeSessionView | null, opts: HostOptions = {}): StripSurface {
   if (file.engine === "shell") return "shell";
-  if (isDeadHost(rv)) return "dead";
-  if (isStructuredHost(rv)) return "structured";
-  const running = file.proc === "running";
-  if (running) {
+  const host = resolveHost(rv, opts);
+  if (host.kind === "structured") return "structured";
+  if (host.kind === "dead") return "dead";
+
+  // A Claude subagent's own proc/pid is null by scanner design (the root process
+  // writes the child transcript), so its liveness is the ROOT host's, resolved
+  // by the caller into `opts.root` (issue #241 finding 2). A live root grants the
+  // subagent strip; a dead/finished root keeps it gated (inert or resume).
+  if (isClaudeSubagent(file)) {
+    if (opts.root === "live") return "live-subagent";
+    if (opts.root === "gated") return isResumableConversation(file) ? "resume" : "inert";
+    // Root not yet observed: under the runtime plane this is unresolved (fail
+    // safe); in pure-legacy mode fall back to the child's own (usually null) proc.
+    if (host.kind === "unresolved") return "unresolved";
+    if (file.proc === "running") return "live-subagent";
+    return isResumableConversation(file) ? "resume" : "inert";
+  }
+
+  // Non-subagent: the runtime plane must resolve the host before any legacy
+  // control is offered — a running pid alone is not affirmative legacy evidence.
+  if (host.kind === "unresolved") return "unresolved";
+  if (file.proc === "running") {
     if (isSubagent(file) || file.parent) return "live-subagent";
     return "live-root";
   }
@@ -94,8 +170,8 @@ export function surfaceFor(file: FileEntry, rv: RuntimeSessionView | null): Stri
  * structured images) are `disabled` with a tooltip today and flip to `enabled`
  * by editing exactly one row here when those merge.
  */
-export function capabilitiesFor(file: FileEntry, rv: RuntimeSessionView | null): StripCapabilities {
-  const surface = surfaceFor(file, rv);
+export function capabilitiesFor(file: FileEntry, rv: RuntimeSessionView | null, opts: HostOptions = {}): StripCapabilities {
+  const surface = surfaceFor(file, rv, opts);
   switch (surface) {
     case "live-root":
       return {
@@ -179,6 +255,24 @@ export function capabilitiesFor(file: FileEntry, rv: RuntimeSessionView | null):
           send: HIDDEN,
         },
       };
+    case "unresolved":
+      // The runtime plane owns host capability but hasn't resolved this
+      // conversation yet (initial snapshot load / bus outage). Every legacy
+      // control stays hidden and Send is disabled with a reason — no /api/tmux
+      // or /api/proc request can fire against an as-yet-unclassified host, and
+      // no dead-host send can slip through (issue #241 finding 1).
+      return {
+        surface,
+        controls: {
+          stop: HIDDEN,
+          compact: HIDDEN,
+          runtime: HIDDEN,
+          kill: HIDDEN,
+          terminal: HIDDEN,
+          images: HIDDEN,
+          send: disabled("strip.resolving"),
+        },
+      };
     case "inert":
     default:
       return {
@@ -196,9 +290,13 @@ export function capabilitiesFor(file: FileEntry, rv: RuntimeSessionView | null):
   }
 }
 
-/** True when the strip has at least one visible (enabled or disabled) control. */
+/** The controls the strip *itself* renders. `kind`/`send`/`images` belong to the
+    header and the composer, so they never keep an otherwise-empty strip alive. */
+const STRIP_OWN_CONTROLS: ControlName[] = ["stop", "compact", "runtime", "terminal"];
+
+/** True when the strip has at least one of its own visible controls. */
 export function stripHasVisibleControls(caps: StripCapabilities): boolean {
-  return Object.values(caps.controls).some((c) => c.state !== "hidden");
+  return STRIP_OWN_CONTROLS.some((name) => caps.controls[name].state !== "hidden");
 }
 
 /** How the Terminal dialog should build its command (design §6). */
@@ -212,7 +310,7 @@ export type AttachMode = "live" | "resume";
  * finding-3 bug: it generated a resume command for a conversation still running
  * in a pane you could simply attach to.
  */
-export function attachModeFor(file: FileEntry, rv: RuntimeSessionView | null): AttachMode {
-  const surface = surfaceFor(file, rv);
+export function attachModeFor(file: FileEntry, rv: RuntimeSessionView | null, opts: HostOptions = {}): AttachMode {
+  const surface = surfaceFor(file, rv, opts);
   return surface === "live-root" || surface === "live-subagent" ? "live" : "resume";
 }

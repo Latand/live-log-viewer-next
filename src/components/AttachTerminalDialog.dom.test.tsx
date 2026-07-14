@@ -14,6 +14,7 @@ const command: AttachCommand = {
   accountLabel: "D · claude-max",
   cwd: "/home/latand/Projects/atlas",
   command: "env -u ANTHROPIC_API_KEY CLAUDE_CONFIG_DIR='/x/d' claude --resume 22222222",
+  cdCommand: "cd '/home/latand/Projects/atlas'",
   fullCommand: "cd '/home/latand/Projects/atlas' && env -u ANTHROPIC_API_KEY CLAUDE_CONFIG_DIR='/x/d' claude --resume 22222222",
 };
 
@@ -28,8 +29,8 @@ test("the dialog is a labelled modal that shows the account and both copy blocks
   expect(html).toContain('role="dialog"');
   expect(html).toContain('aria-modal="true"');
   expect(html).toContain("D · claude-max");
-  // the cwd block and the resume command block are both present, copyable
-  expect(html).toContain("cd /home/latand/Projects/atlas");
+  // the cwd block (shell-quoted) and the resume command block are both present, copyable
+  expect(html).toContain("cd &#x27;/home/latand/Projects/atlas&#x27;");
   expect(html).toContain("claude --resume 22222222");
   expect(html).toContain(translate("en", "attach.copyFull"));
   expect(html).toContain(translate("en", "attach.secondaryViewer"));

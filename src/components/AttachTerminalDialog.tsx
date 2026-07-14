@@ -66,6 +66,9 @@ export interface AttachTerminalDialogViewProps {
   onClose: () => void;
   onSecondary?: () => void;
   secondaryBusy?: boolean;
+  /** Set when the last viewer-pane action returned a non-2xx / threw — surfaced
+      so the secondary recovery is never silently swallowed (finding 4). */
+  secondaryError?: string | null;
 }
 
 /** Presentational attach dialog — instant, copyable, no waiting (issue #247
@@ -79,7 +82,22 @@ export function AttachTerminalDialogView({
   onClose,
   onSecondary,
   secondaryBusy = false,
+  secondaryError = null,
 }: AttachTerminalDialogViewProps) {
+  const secondaryButton = onSecondary ? (
+    <button
+      type="button"
+      onClick={onSecondary}
+      disabled={secondaryBusy}
+      className="inline-flex min-h-11 items-center gap-1.5 rounded-control border border-border bg-canvas px-3 text-label font-semibold text-muted hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-50 sm:min-h-9"
+    >
+      {secondaryBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden /> : null}
+      {t("attach.secondaryViewer")}
+    </button>
+  ) : null;
+  const secondaryAlert = secondaryError ? (
+    <p role="alert" className="w-full text-caption font-semibold text-danger">{secondaryError}</p>
+  ) : null;
   return (
     <div
       className="fixed inset-0 z-[80] flex items-center justify-center bg-black/40 p-3"
@@ -140,22 +158,13 @@ export function AttachTerminalDialogView({
               >
                 <Copy className="h-3.5 w-3.5" aria-hidden /> {t("attach.copyFull")}
               </button>
-              {onSecondary ? (
-                <button
-                  type="button"
-                  onClick={onSecondary}
-                  disabled={secondaryBusy}
-                  className="inline-flex min-h-11 items-center gap-1.5 rounded-control border border-border bg-canvas px-3 text-label font-semibold text-muted hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-50 sm:min-h-9"
-                >
-                  {secondaryBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden /> : null}
-                  {t("attach.secondaryViewer")}
-                </button>
-              ) : null}
+              {secondaryButton}
+              {secondaryAlert}
             </div>
           </>
         ) : command ? (
           <>
-            <CopyRow t={t} label={t("attach.copyCwd")} value={`cd ${command.cwd}`} />
+            <CopyRow t={t} label={t("attach.copyCwd")} value={command.cdCommand} />
             <CopyRow t={t} label={t("attach.copyCommand")} value={command.command} />
             {command.note === "subagent-root" ? (
               <p className="text-caption text-muted">{t("attach.subagentNote")}</p>
@@ -172,17 +181,8 @@ export function AttachTerminalDialogView({
               >
                 <Copy className="h-3.5 w-3.5" aria-hidden /> {t("attach.copyFull")}
               </button>
-              {onSecondary ? (
-                <button
-                  type="button"
-                  onClick={onSecondary}
-                  disabled={secondaryBusy}
-                  className="inline-flex min-h-11 items-center gap-1.5 rounded-control border border-border bg-canvas px-3 text-label font-semibold text-muted hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-50 sm:min-h-9"
-                >
-                  {secondaryBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden /> : null}
-                  {t("attach.secondaryViewer")}
-                </button>
-              ) : null}
+              {secondaryButton}
+              {secondaryAlert}
             </div>
           </>
         ) : null}
@@ -204,6 +204,7 @@ export function AttachTerminalDialog({ file, onClose, mode = "resume" }: { file:
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [secondaryBusy, setSecondaryBusy] = useState(false);
+  const [secondaryError, setSecondaryError] = useState<string | null>(null);
 
   useEffect(() => {
     // The dialog mounts fresh each open, so `loading`/`error` already start at
@@ -229,19 +230,30 @@ export function AttachTerminalDialog({ file, onClose, mode = "resume" }: { file:
       .catch(() => { if (!cancelled) setError(t("attach.network")); })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-  }, [file.path, mode, t]);
+    // `t` is intentionally excluded: it changes identity every render, and
+    // re-running this effect on each render would re-fetch the command in a loop.
+    // The command depends only on the transcript path and the attach mode.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [file.path, mode]);
 
   const openViewerPane = async () => {
     if (secondaryBusy) return;
     setSecondaryBusy(true);
+    setSecondaryError(null);
+    // The copy path is the recommended one, but a failed viewer-pane action must
+    // still be surfaced rather than appear to complete (finding 4).
     try {
-      await fetch("/api/tmux", {
+      const res = await fetch("/api/tmux", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ action: "attach-terminal", path: file.path }),
       });
+      if (!res.ok) {
+        const body = (await res.json().catch(() => ({}))) as { error?: string };
+        setSecondaryError(body.error ?? t("attach.secondaryFailed"));
+      }
     } catch {
-      /* the primary copy path is the recommended one; ignore viewer-pane errors */
+      setSecondaryError(t("attach.secondaryFailed"));
     } finally {
       setSecondaryBusy(false);
     }
@@ -257,6 +269,7 @@ export function AttachTerminalDialog({ file, onClose, mode = "resume" }: { file:
       onClose={onClose}
       onSecondary={() => void openViewerPane()}
       secondaryBusy={secondaryBusy}
+      secondaryError={secondaryError}
     />
   );
 }

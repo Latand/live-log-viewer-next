@@ -25,6 +25,9 @@ export interface DeadHostBannerViewProps {
   onRecheck: () => void;
   respawnBusy?: boolean;
   recheckBusy?: boolean;
+  /** Set when the last Respawn returned a non-2xx / threw — surfaced so a failed
+      recovery is never silently swallowed (§5, finding 4). */
+  respawnError?: string | null;
   /** Set when the last Re-check failed to fetch a snapshot — surfaced so the
       recovery attempt is never silently swallowed (§5). */
   recheckError?: string | null;
@@ -45,6 +48,7 @@ export function DeadHostBannerView({
   onRecheck,
   respawnBusy = false,
   recheckBusy = false,
+  respawnError = null,
   recheckError = null,
 }: DeadHostBannerViewProps) {
   return (
@@ -86,6 +90,9 @@ export function DeadHostBannerView({
           {t("deadHost.recheck")}
         </button>
       </div>
+      {respawnError ? (
+        <p role="alert" className="text-caption font-semibold text-danger">{respawnError}</p>
+      ) : null}
       {recheckError ? (
         <p role="alert" className="text-caption font-semibold text-danger">{recheckError}</p>
       ) : null}
@@ -99,19 +106,28 @@ export function DeadHostBanner({ file }: { file: FileEntry }) {
   const [attachOpen, setAttachOpen] = useState(false);
   const [respawnBusy, setRespawnBusy] = useState(false);
   const [recheckBusy, setRecheckBusy] = useState(false);
+  const [respawnError, setRespawnError] = useState<string | null>(null);
   const [recheckError, setRecheckError] = useState<string | null>(null);
 
   const respawn = async () => {
     if (respawnBusy) return;
     setRespawnBusy(true);
+    setRespawnError(null);
+    // A successful resume boots asynchronously and the recovering axis clears the
+    // banner; a non-2xx / network failure must be surfaced, not swallowed, so the
+    // control never appears to complete while producing no recovery (finding 4).
     try {
-      await fetch("/api/tmux", {
+      const res = await fetch("/api/tmux", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ action: "resume", path: file.path }),
       });
+      if (!res.ok) {
+        const body = (await res.json().catch(() => ({}))) as { error?: string };
+        setRespawnError(body.error ?? t("deadHost.respawnFailed"));
+      }
     } catch {
-      /* the resume boots asynchronously; the recovering axis clears the banner */
+      setRespawnError(t("deadHost.respawnFailed"));
     } finally {
       setRespawnBusy(false);
     }
@@ -139,6 +155,7 @@ export function DeadHostBanner({ file }: { file: FileEntry }) {
         onRecheck={() => void recheck()}
         respawnBusy={respawnBusy}
         recheckBusy={recheckBusy}
+        respawnError={respawnError}
         recheckError={recheckError}
       />
       {attachOpen ? <AttachTerminalDialog file={file} onClose={() => setAttachOpen(false)} /> : null}

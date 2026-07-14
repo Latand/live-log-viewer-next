@@ -302,6 +302,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "strip.compactSubagent": "недоступно для субагентів",
   "strip.awaits240": "з'явиться разом із #240",
   "strip.imagesStructured": "картинки поки не доставляються структурованим агентам",
+  "strip.resolving": "визначаємо середовище агента…",
 
   // Dead-host banner (issue #247)
   "deadHost.title": "Хост агента помер · {since} тому",
@@ -310,6 +311,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "deadHost.attach": "Відкрити в терміналі",
   "deadHost.recheck": "Перевірити знову",
   "deadHost.recheckFailed": "Не вдалося зʼєднатися зі середовищем — спробуйте ще раз.",
+  "deadHost.respawnFailed": "Не вдалося перезапустити — спробуйте ще раз.",
   "deadHost.sendBlocked": "хост мертвий — відновіть, щоб продовжити",
   "deadHost.expiredCard": "застаріло — хост помер, перш ніж на це відповіли",
 
@@ -322,6 +324,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "attach.takeoverWarning": "Відновлення тут перебирає розмову у переглядача.",
   "attach.subagentNote": "Субагенти відновлюються через свою кореневу сесію.",
   "attach.secondaryViewer": "Відкрити панель перегляду лише для читання в tmux",
+  "attach.secondaryFailed": "Не вдалося відкрити панель перегляду — спробуйте ще раз.",
 
   // Human receipt reasons (issue #247 §7)
   "receipt.human.deadHost": "хост агента помер",

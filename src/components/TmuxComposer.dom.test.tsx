@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
+import { act } from "react";
 import { Window } from "happy-dom";
-import { flushSync } from "react-dom";
-import { createRoot } from "react-dom/client";
+import { createRoot, type Root } from "react-dom/client";
 
 import type { FileEntry } from "@/lib/types";
 
@@ -9,6 +9,7 @@ import { appendComposerDraft, RuntimeComposerReceipts, TmuxComposer } from "./Tm
 
 const dom = new Window();
 Object.assign(globalThis, {
+  IS_REACT_ACT_ENVIRONMENT: true,
   window: dom,
   document: dom.document,
   navigator: dom.navigator,
@@ -39,14 +40,30 @@ afterEach(() => {
   sessionStorage.clear();
 });
 
-test("editing a rejected receipt does not submit the composer form", () => {
-  let edits = 0;
-  let submits = 0;
+/** Render into a fresh root, flushing mount effects (target poll) inside act. */
+async function renderInto(node: React.ReactElement): Promise<{ host: HTMLElement; root: Root }> {
   const host = document.createElement("div");
   document.body.append(host);
   const root = createRoot(host);
+  await act(async () => {
+    root.render(node);
+    await new Promise((r) => setTimeout(r, 0));
+  });
+  return { host, root };
+}
 
-  flushSync(() => root.render(
+/** Run a DOM interaction and let its async state updates settle inside act. */
+const settle = async (fn: () => void) => {
+  await act(async () => {
+    fn();
+    await new Promise((r) => setTimeout(r, 0));
+  });
+};
+
+test("editing a rejected receipt does not submit the composer form", async () => {
+  let edits = 0;
+  let submits = 0;
+  const { host, root } = await renderInto(
     <form onSubmit={(event) => { event.preventDefault(); submits += 1; }}>
       <RuntimeComposerReceipts
         receipts={[{
@@ -64,16 +81,16 @@ test("editing a rejected receipt does not submit the composer form", () => {
         onEdit={() => { edits += 1; }}
       />
     </form>,
-  ));
+  );
 
   const edit = [...host.querySelectorAll("button")].find((button) => button.textContent?.includes("Edit"));
   expect(edit).toBeDefined();
-  flushSync(() => edit!.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event));
+  await settle(() => edit!.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event));
 
   expect(edits).toBe(1);
   expect(submits).toBe(0);
   expect(edit!.getAttribute("type")).toBe("button");
-  flushSync(() => root.unmount());
+  await act(async () => root.unmount());
 });
 
 test("editing and resending a rejected receipt uses a fresh delivery key", async () => {
@@ -147,29 +164,24 @@ test("editing and resending a rejected receipt uses a fresh delivery key", async
     waitingInput: null,
   } as FileEntry;
   sessionStorage.setItem("llvDraft:conv-one", "try this again");
-  const host = document.createElement("div");
-  document.body.append(host);
-  const root = createRoot(host);
-  flushSync(() => root.render(<TmuxComposer file={file} />));
+  const { host, root } = await renderInto(<TmuxComposer file={file} />);
 
   const textarea = host.querySelector("textarea") as HTMLTextAreaElement;
   expect(textarea.value).toBe("try this again");
-  flushSync(() => textarea.closest("form")!.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event));
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  await settle(() => textarea.closest("form")!.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event));
 
   expect(sentKeys).toHaveLength(1);
   const edit = [...host.querySelectorAll("button")].find((button) => button.textContent?.includes("Edit"));
   expect(edit).toBeDefined();
-  flushSync(() => edit!.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event));
-  flushSync(() => textarea.closest("form")!.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event));
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  await settle(() => edit!.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event));
+  await settle(() => textarea.closest("form")!.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event));
 
   expect(sentKeys).toHaveLength(2);
   expect(sentKeys[1]).not.toBe(sentKeys[0]);
-  flushSync(() => root.unmount());
+  await act(async () => root.unmount());
 });
 
-test("a dead host leaves the mic and send inert and never POSTs (§5, finding 5)", () => {
+test("a dead host leaves the mic and send inert and never POSTs (§5, finding 5)", async () => {
   const posts: string[] = [];
   globalThis.fetch = (async (input: string) => {
     posts.push(String(input));
@@ -180,10 +192,7 @@ test("a dead host leaves the mic and send inert and never POSTs (§5, finding 5)
     engine: "codex", kind: "session", fmt: "codex", parent: null, mtime: 1, size: 1, activity: "idle",
     proc: "running", pid: null, conversationId: "conv-dead", pendingQuestion: null, waitingInput: null,
   } as FileEntry;
-  const host = document.createElement("div");
-  document.body.append(host);
-  const root = createRoot(host);
-  flushSync(() => root.render(<TmuxComposer file={file} deadHost />));
+  const { host, root } = await renderInto(<TmuxComposer file={file} deadHost />);
 
   const buttons = [...host.querySelectorAll("button")];
   const mic = buttons.find((b) => (b.getAttribute("aria-label") ?? "").includes("Dictate")) as HTMLButtonElement;
@@ -192,9 +201,32 @@ test("a dead host leaves the mic and send inert and never POSTs (§5, finding 5)
   expect(mic.disabled).toBe(true);
   // send stays present as a draft surface but is inert (aria-disabled), no POST
   expect(send?.getAttribute("aria-disabled")).toBe("true");
-  flushSync(() => host.querySelector("form")!.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event));
+  await settle(() => host.querySelector("form")!.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event));
   expect(posts.some((u) => u === "/api/tmux")).toBe(false);
-  flushSync(() => root.unmount());
+  await act(async () => root.unmount());
+});
+
+test("an unresolved host blocks the send POST with a localized reason (finding 1)", async () => {
+  const posts: string[] = [];
+  globalThis.fetch = (async (input: string) => {
+    posts.push(String(input));
+    if (String(input) === "/api/tmux/targets") return { ok: true, json: async () => ({ targets: { "0": "%1" } }) } as Response;
+    return { ok: true, json: async () => ({ ok: true }) } as Response;
+  }) as typeof fetch;
+  const file = {
+    path: "/codex.jsonl", root: "codex-sessions", name: "codex.jsonl", project: "viewer", title: "Codex",
+    engine: "codex", kind: "session", fmt: "codex", parent: null, mtime: 1, size: 1, activity: "idle",
+    proc: "running", pid: null, conversationId: "conv-unresolved", pendingQuestion: null, waitingInput: null,
+  } as FileEntry;
+  sessionStorage.setItem("llvDraft:conv-unresolved", "hello");
+  const { host, root } = await renderInto(<TmuxComposer file={file} sendBlockedReason="resolving the agent host…" />);
+
+  const send = host.querySelector('button[type="submit"]') as HTMLButtonElement | null;
+  expect(send?.getAttribute("aria-disabled")).toBe("true");
+  await settle(() => host.querySelector("form")!.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event));
+  // never messaged the legacy tmux endpoint while the host was unresolved
+  expect(posts.some((u) => u === "/api/tmux")).toBe(false);
+  await act(async () => root.unmount());
 });
 
 test("receipt editing stays disabled while a newer send is in flight", async () => {
@@ -252,28 +284,23 @@ test("receipt editing stays disabled while a newer send is in flight", async () 
     waitingInput: null,
   } as FileEntry;
   sessionStorage.setItem("llvDraft:conv-race", "first attempt");
-  const host = document.createElement("div");
-  document.body.append(host);
-  const root = createRoot(host);
-  flushSync(() => root.render(<TmuxComposer file={file} />));
+  const { host, root } = await renderInto(<TmuxComposer file={file} />);
   const textarea = host.querySelector("textarea") as HTMLTextAreaElement;
   const form = textarea.closest("form")!;
 
-  flushSync(() => form.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event));
-  await new Promise((resolve) => setTimeout(resolve, 0));
-  flushSync(() => appendComposerDraft("conv-race", "second attempt"));
+  await settle(() => form.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event));
+  await settle(() => appendComposerDraft("conv-race", "second attempt"));
   expect(textarea.value).toBe("first attempt\n\nsecond attempt");
 
-  flushSync(() => form.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event));
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  await settle(() => form.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event));
   expect(tmuxRequests).toBe(2);
   const edit = [...host.querySelectorAll("button")].find((button) => button.textContent?.includes("Edit")) as HTMLButtonElement;
   expect(edit).toBeDefined();
   expect(edit.disabled).toBe(true);
-  flushSync(() => edit.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event));
+  await settle(() => edit.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event));
   expect(textarea.value).toBe("first attempt\n\nsecond attempt");
 
-  resolveSecond({
+  await settle(() => resolveSecond({
     ok: true,
     status: 200,
     json: async () => ({
@@ -290,8 +317,7 @@ test("receipt editing stays disabled while a newer send is in flight", async () 
         revision: 1,
       },
     }),
-  } as Response);
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  } as Response));
   expect(textarea.value).toBe("");
-  flushSync(() => root.unmount());
+  await act(async () => root.unmount());
 });

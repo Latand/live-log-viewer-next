@@ -6,10 +6,8 @@ import { Play } from "@/components/icons";
 import { Badge } from "@/components/ui/Badge";
 import { Hint } from "@/components/Hint";
 import { useIsMobile } from "@/hooks/useIsMobile";
-import { useRuntimeSession } from "@/hooks/useRuntime";
-import { conversationIdentity } from "@/lib/accounts/identity";
 import { useLocale } from "@/lib/i18n";
-import { capabilitiesFor } from "./agentCapabilities";
+import { useAgentCapabilities } from "./useAgentCapabilities";
 import type { FileEntry } from "@/lib/types";
 
 export function ProcessStatusChip({ file }: { file: FileEntry }) {
@@ -51,10 +49,11 @@ export function ProcessStatusControls({
   /* Kill obeys the one capability matrix (issue #241 §4) — never a control that
      posts to `/api/proc` on a surface where the header PID isn't the thing to
      kill. A structured host shows a *disabled* Kill with the #240 tooltip; a
-     dead/finished host omits it; only a live tmux root/subagent (or a shell
-     task) invokes the SIGTERM/SIGKILL endpoint. */
-  const runtimeSession = useRuntimeSession(conversationIdentity(file));
-  const killCap = capabilitiesFor(file, runtimeSession).controls.kill;
+     dead/finished/unresolved host omits it; only a live tmux root/subagent (or a
+     shell task) invokes the SIGTERM/SIGKILL endpoint. A live subagent's own
+     proc/pid is null (the root writes its transcript), so /api/proc resolves the
+     kill to the canonical root pid server-side. */
+  const killCap = useAgentCapabilities(file).caps.controls.kill;
 
   useEffect(() => {
     if (!confirming) return;
@@ -109,7 +108,7 @@ export function ProcessStatusControls({
             {t("task.kill")}
           </button>
         </Hint>
-      ) : killCap.state === "enabled" && file.proc === "running" ? (
+      ) : killCap.state === "enabled" ? (
         confirming ? (
           <span className="inline-flex max-w-full items-center gap-1 rounded-[8px] border border-danger/30 bg-danger-soft px-1.5 py-0.5">
             {compact ? null : (

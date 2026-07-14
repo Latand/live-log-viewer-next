@@ -9,16 +9,14 @@ import { Hint } from "@/components/Hint";
 import { AgentRuntimeControls, DisabledRuntimeControls, ResumeRuntimeControls } from "@/components/AgentRuntimeControls";
 import { AttachTerminalDialog } from "@/components/AttachTerminalDialog";
 import { useIsMobile } from "@/hooks/useIsMobile";
-import { interruptRuntime, useRuntimeSession } from "@/hooks/useRuntime";
-import { conversationIdentity } from "@/lib/accounts/identity";
+import { interruptRuntime } from "@/hooks/useRuntime";
 import { useLocale, type MessageKey, type TFunction } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
 import type { RuntimeSessionView } from "@/hooks/useRuntime";
 
 import { mintIdempotencyKey } from "@/components/runtime/runtimeModel";
+import { useAgentCapabilities } from "./useAgentCapabilities";
 import {
-  attachModeFor,
-  capabilitiesFor,
   stripHasVisibleControls,
   type Capability,
   type ControlName,
@@ -269,10 +267,8 @@ export function AgentControlStripView({
 export function AgentControlStrip({ file }: { file: FileEntry }) {
   const { t } = useLocale();
   const isMobile = useIsMobile();
-  const cardId = conversationIdentity(file);
-  const runtimeSession = useRuntimeSession(cardId);
+  const { caps, runtime: runtimeSession, attachMode } = useAgentCapabilities(file);
   const structuredSession = structuredSessionOf(runtimeSession);
-  const caps = capabilitiesFor(file, runtimeSession);
 
   const rootRef = useRef<HTMLDivElement | null>(null);
   const [layout, setLayout] = useState<StripLayout>("full");
@@ -371,7 +367,7 @@ export function AgentControlStrip({ file }: { file: FileEntry }) {
         onToggleOverflow={() => setOverflowOpen((open) => !open)}
         status={status}
       />
-      {attachOpen ? <AttachTerminalDialog file={file} mode={attachModeFor(file, runtimeSession)} onClose={() => setAttachOpen(false)} /> : null}
+      {attachOpen ? <AttachTerminalDialog file={file} mode={attachMode} onClose={() => setAttachOpen(false)} /> : null}
     </div>
   );
 }

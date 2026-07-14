@@ -7,7 +7,6 @@ import { ChevronRight, X } from "@/components/icons";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { registerPane } from "@/lib/chime";
 import { type TFunction, useLocale } from "@/lib/i18n";
-import { useRuntimeSession } from "@/hooks/useRuntime";
 import type { FileEntry } from "@/lib/types";
 
 import { cardMigrationState, postConversationMigration } from "@/lib/accounts/migration";
@@ -21,7 +20,8 @@ import { FavoriteCrown, FavoriteCrownMarker } from "./FavoriteCrown";
 import { MigrationDivider, MigrationRibbon } from "./MigrationRibbon";
 import { EffortPills } from "./EffortPills";
 import { AgentControlStrip } from "./AgentControlStrip";
-import { DeadHostBanner, isDeadHostSession } from "./runtime/DeadHostBanner";
+import { useAgentCapabilities } from "./useAgentCapabilities";
+import { DeadHostBanner } from "./runtime/DeadHostBanner";
 import { FlipRow } from "./FlipRow";
 import { LogFeed } from "./LogFeed";
 import { paneState, type PaneState } from "./paneState";
@@ -150,11 +150,15 @@ export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noCompose
      the chime pane registry, the composer's held receipts, and per-card recovery
      all key on this — never on `path`, which is active-generation metadata. */
   const cardId = conversationIdentity(file);
-  /* The runtime host projection drives the dead-host banner (§5): when the
-     structured host died, the banner owns recovery and the composer/attention
-     cards stand down. */
-  const runtimeSession = useRuntimeSession(cardId);
-  const deadHost = isDeadHostSession(runtimeSession);
+  /* The one capability read (issue #241 §4): drives the dead-host banner (§5)
+     and the composer send gate. When the structured host died the banner owns
+     recovery and the composer/attention cards stand down; while the runtime
+     plane has not yet resolved the host, Send is blocked so a structured/dead
+     conversation is never messaged through the legacy /api/tmux path (finding 1). */
+  const { caps } = useAgentCapabilities(file);
+  const deadHost = caps.surface === "dead";
+  const sendCap = caps.controls.send;
+  const sendBlockedReason = !deadHost && sendCap.state === "disabled" ? t(sendCap.reason) : null;
   /* A failed per-card retry/rollback must be announced, not swallowed (finding
      3): the previous code ignored the POST result entirely. */
   const [recoveryError, setRecoveryError] = useState<string | null>(null);
@@ -409,7 +413,7 @@ export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noCompose
             review rounds that still need Stop. Renders nothing on surfaces where
             no control applies. */}
         <AgentControlStrip file={file} />
-        {noComposer ? null : <TmuxComposer file={file} pollPaused={feedPaused} deadHost={deadHost} />}
+        {noComposer ? null : <TmuxComposer file={file} pollPaused={feedPaused} deadHost={deadHost} sendBlockedReason={sendBlockedReason} />}
       </section>
     </div>
   );

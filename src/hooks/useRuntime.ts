@@ -70,22 +70,41 @@ export interface RuntimeSessionView {
   legacy: boolean;
 }
 
+/** Build the derived view for a resolved session record. */
+function sessionViewFor(store: RuntimeStore, session: RuntimeSession): RuntimeSessionView {
+  return {
+    session,
+    uiState: deriveSessionState(session, hasBlockingAttention(store, session)),
+    attentions: openAttentions(store, session),
+    receipts: session.recentReceipts,
+    legacy: session.hostKind === "tmux-legacy",
+  };
+}
+
 /** Derived view for one hosted session, or null when the bus doesn't carry it. */
 export function useRuntimeSession(conversationId: string | null): RuntimeSessionView | null {
   const { store } = useRuntime();
   return useMemo(() => {
     if (!conversationId) return null;
     const session = store.sessions[conversationId];
-    if (!session) return null;
-    const attentions = openAttentions(store, session);
-    return {
-      session,
-      uiState: deriveSessionState(session, hasBlockingAttention(store, session)),
-      attentions,
-      receipts: session.recentReceipts,
-      legacy: session.hostKind === "tmux-legacy",
-    };
+    return session ? sessionViewFor(store, session) : null;
   }, [store, conversationId]);
+}
+
+/**
+ * The runtime session hosting a given transcript artifact (its `artifactPath`),
+ * or null. Used to resolve a Claude subagent's canonical ROOT host liveness: the
+ * scanner leaves child `proc`/`pid` null because the root process writes the
+ * child transcript, so the child's liveness *is* the root host's (issue #241
+ * finding 2). Keyed on the root transcript path — a subagent's `parent`.
+ */
+export function useRuntimeSessionByArtifact(artifactPath: string | null): RuntimeSessionView | null {
+  const { store } = useRuntime();
+  return useMemo(() => {
+    if (!artifactPath) return null;
+    const session = Object.values(store.sessions).find((s) => s.artifactPath === artifactPath);
+    return session ? sessionViewFor(store, session) : null;
+  }, [store, artifactPath]);
 }
 
 /**

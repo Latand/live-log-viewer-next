@@ -1,14 +1,16 @@
 import { afterEach, expect, mock, test } from "bun:test";
+import { act } from "react";
 import { Window } from "happy-dom";
-import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
 
 import { translate } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
 
-/* Finding 5: dead-host Re-check must route through the runtime-bus refresh (so a
-   recovered host actually clears the banner) and surface failures rather than
-   discarding the snapshot. `refreshRuntime` is mocked to exercise both paths. */
+/* Finding 4/5: dead-host recovery must never swallow a failure. Re-check routes
+   through the runtime-bus refresh (so a recovered host actually clears the
+   banner) and surfaces a failed refresh; Respawn surfaces a non-2xx/network
+   failure instead of appearing to complete. `refreshRuntime` is mocked and
+   `fetch` is stubbed to exercise both paths. */
 
 let refreshResult = true;
 let refreshCalls = 0;
@@ -22,6 +24,7 @@ const { DeadHostBanner } = await import("./DeadHostBanner");
 
 const dom = new Window();
 Object.assign(globalThis, {
+  IS_REACT_ACT_ENVIRONMENT: true,
   window: dom, document: dom.document, navigator: dom.navigator,
   Node: dom.Node, HTMLElement: dom.HTMLElement, Event: dom.Event,
   localStorage: dom.localStorage, sessionStorage: dom.sessionStorage,
@@ -34,32 +37,60 @@ const file: FileEntry = {
   pendingQuestion: null, waitingInput: null,
 } as FileEntry;
 
-afterEach(() => { refreshResult = true; refreshCalls = 0; document.body.replaceChildren(); });
+const realFetch = globalThis.fetch;
+afterEach(() => { refreshResult = true; refreshCalls = 0; globalThis.fetch = realFetch; document.body.replaceChildren(); });
 
-function mount(): { host: HTMLElement; root: Root } {
+async function mount(): Promise<{ host: HTMLElement; root: Root }> {
   const host = document.createElement("div");
   document.body.append(host);
   const root = createRoot(host);
-  flushSync(() => root.render(<DeadHostBanner file={file} />));
+  await act(async () => root.render(<DeadHostBanner file={file} />));
   return { host, root };
 }
 
-const recheckBtn = (host: HTMLElement) =>
-  [...host.querySelectorAll("button")].find((b) => (b.textContent ?? "").includes(translate("en", "deadHost.recheck")))!;
+const byLabel = (host: HTMLElement, key: Parameters<typeof translate>[1]) =>
+  [...host.querySelectorAll("button")].find((b) => (b.textContent ?? "").includes(translate("en", key)))!;
+
+const click = async (button: HTMLButtonElement) => {
+  await act(async () => {
+    button.dispatchEvent(new dom.Event("click", { bubbles: true }) as unknown as Event);
+    await new Promise((r) => setTimeout(r, 0));
+  });
+};
 
 test("Re-check calls the runtime-bus refresh (not a discarded snapshot fetch)", async () => {
-  const { host, root } = mount();
-  flushSync(() => recheckBtn(host).dispatchEvent(new dom.Event("click", { bubbles: true }) as unknown as Event));
-  await new Promise((r) => setTimeout(r, 0));
+  const { host, root } = await mount();
+  await click(byLabel(host, "deadHost.recheck"));
   expect(refreshCalls).toBe(1);
-  flushSync(() => root.unmount());
+  await act(async () => root.unmount());
 });
 
 test("a failed refresh shows the error alert", async () => {
   refreshResult = false;
-  const { host, root } = mount();
-  flushSync(() => recheckBtn(host).dispatchEvent(new dom.Event("click", { bubbles: true }) as unknown as Event));
-  await new Promise((r) => setTimeout(r, 0));
-  expect(host.querySelector('[role="alert"]')?.textContent).toContain(translate("en", "deadHost.recheckFailed"));
-  flushSync(() => root.unmount());
+  const { host, root } = await mount();
+  await click(byLabel(host, "deadHost.recheck"));
+  const alerts = [...host.querySelectorAll('[role="alert"]')].map((n) => n.textContent ?? "");
+  expect(alerts.some((text) => text.includes(translate("en", "deadHost.recheckFailed")))).toBe(true);
+  await act(async () => root.unmount());
+});
+
+test("a non-2xx respawn surfaces the failure instead of silently completing", async () => {
+  globalThis.fetch = ((url: string) => {
+    void url;
+    return Promise.resolve({ ok: false, status: 409, json: () => Promise.resolve({ error: "no pane to resume" }) } as unknown as Response);
+  }) as typeof fetch;
+  const { host, root } = await mount();
+  await click(byLabel(host, "deadHost.respawn"));
+  const alerts = [...host.querySelectorAll('[role="alert"]')].map((n) => n.textContent ?? "");
+  expect(alerts.some((text) => text.includes("no pane to resume"))).toBe(true);
+  await act(async () => root.unmount());
+});
+
+test("a respawn network error surfaces the localized failure", async () => {
+  globalThis.fetch = (() => Promise.reject(new Error("offline"))) as typeof fetch;
+  const { host, root } = await mount();
+  await click(byLabel(host, "deadHost.respawn"));
+  const alerts = [...host.querySelectorAll('[role="alert"]')].map((n) => n.textContent ?? "");
+  expect(alerts.some((text) => text.includes(translate("en", "deadHost.respawnFailed")))).toBe(true);
+  await act(async () => root.unmount());
 });

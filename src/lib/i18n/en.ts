@@ -310,6 +310,7 @@ export const en = {
   "strip.compactSubagent": "not available for subagents",
   "strip.awaits240": "arrives with #240",
   "strip.imagesStructured": "images aren't delivered to structured agents yet",
+  "strip.resolving": "resolving the agent host…",
 
   // Dead-host banner (issue #247)
   "deadHost.title": "Agent host died · {since} ago",
@@ -318,6 +319,7 @@ export const en = {
   "deadHost.attach": "Open in terminal",
   "deadHost.recheck": "Re-check",
   "deadHost.recheckFailed": "Couldn't reach the runtime — try again.",
+  "deadHost.respawnFailed": "Respawn failed — try again.",
   "deadHost.sendBlocked": "host is dead — respawn to continue",
   "deadHost.expiredCard": "expired — the host died before this was answered",
 
@@ -330,6 +332,7 @@ export const en = {
   "attach.takeoverWarning": "Resuming here takes over the conversation from the viewer.",
   "attach.subagentNote": "Subagents resume through their root session.",
   "attach.secondaryViewer": "Open a read-only viewer pane in tmux",
+  "attach.secondaryFailed": "Couldn't open the viewer pane — try again.",
 
   // Human receipt reasons (issue #247 §7)
   "receipt.human.deadHost": "the agent's host has died",

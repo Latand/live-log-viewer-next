@@ -70,6 +70,21 @@ export function deliveryAttemptKey(current: string, stored?: string): string {
   return stored || current;
 }
 
+/** Parsed epoch-ms of a receipt's `at`; malformed timestamps sort oldest so a
+    newer, well-formed receipt always wins the current row. */
+function receiptTime(receipt: RuntimeReceipt): number {
+  const ms = Date.parse(receipt.at);
+  return Number.isFinite(ms) ? ms : -Infinity;
+}
+
+/**
+ * Merge durable (bus) and immediate (just-POSTed) receipts into one newest-first
+ * list. Deduplicate by `operationId` keeping the highest revision, then order by
+ * timestamp descending so {@link collapseReceipts} surfaces the newest
+ * non-success — never an older durable failure over a newer immediate operation
+ * (issue #247 finding 3). Ties (equal or malformed timestamps) break
+ * deterministically by revision then operationId so the ordering is stable.
+ */
 export function mergeRuntimeReceipts(
   runtimeReceipts: RuntimeReceipt[],
   immediateReceipts: RuntimeReceipt[],
@@ -79,7 +94,13 @@ export function mergeRuntimeReceipts(
     const current = merged.get(receipt.operationId);
     if (!current || receipt.revision > current.revision) merged.set(receipt.operationId, receipt);
   }
-  return [...merged.values()];
+  return [...merged.values()].sort((a, b) => {
+    const ta = receiptTime(a);
+    const tb = receiptTime(b);
+    if (ta !== tb) return tb - ta;
+    if (a.revision !== b.revision) return b.revision - a.revision;
+    return a.operationId.localeCompare(b.operationId);
+  });
 }
 
 /** Whether a receipt's message text is short enough to safely edit-and-resend
@@ -218,7 +239,21 @@ function nowMs(): number {
  * agent window in the current tmux session with the text as the first prompt.
  * Sent messages stay visible as a queue above the input until dismissed.
  */
-export function TmuxComposer({ file, pollPaused = false, deadHost = false }: { file: FileEntry; pollPaused?: boolean; deadHost?: boolean }) {
+export function TmuxComposer({
+  file,
+  pollPaused = false,
+  deadHost = false,
+  sendBlockedReason = null,
+}: {
+  file: FileEntry;
+  pollPaused?: boolean;
+  deadHost?: boolean;
+  /** Localized reason Send is inert on a non-dead surface (e.g. the host is
+      still unresolved under the runtime plane — issue #241 finding 1). No POST
+      is attempted while it is set, so no /api/tmux request can fire against an
+      as-yet-unclassified host. */
+  sendBlockedReason?: string | null;
+}) {
   const { t } = useLocale();
   /* Draft text and delivery receipts key on the stable conversation identity,
      not the transcript path: a committed account migration gives the card a new
@@ -335,6 +370,13 @@ export function TmuxComposer({ file, pollPaused = false, deadHost = false }: { f
        of the bad news; the composer only says why Send is inert. */
     if (deadHost) {
       setStatus({ kind: "err", text: t("deadHost.sendBlocked") });
+      return;
+    }
+    /* Host not yet resolved under the runtime plane: block the POST so a
+       structured/dead conversation is never sent to via the legacy /api/tmux
+       path before its real host capability arrives (finding 1). */
+    if (sendBlockedReason) {
+      setStatus({ kind: "err", text: sendBlockedReason });
       return;
     }
     setBusy(true);
@@ -589,7 +631,7 @@ export function TmuxComposer({ file, pollPaused = false, deadHost = false }: { f
         }
         showImage={!deadHost}
         imageDisabledReason={structuredSession ? t("strip.imagesStructured") : undefined}
-        sendDisabledReason={deadHost ? t("deadHost.sendBlocked") : undefined}
+        sendDisabledReason={deadHost ? t("deadHost.sendBlocked") : sendBlockedReason ?? undefined}
         receipts={
           displayedRuntimeReceipts.length
             ? <RuntimeComposerReceipts

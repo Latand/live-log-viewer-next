@@ -28,6 +28,9 @@ export interface AttachCommand {
   cwd: string;
   /** The resume/attach command with its account env prefix and flags. */
   command: string;
+  /** Shell-quoted `cd '<cwd>'` for the "Copy working directory" row, so a path
+      with spaces or apostrophes pastes correctly (finding 5). */
+  cdCommand: string;
   /** One-liner for "Copy full command": `cd '<cwd>' && <command>`. */
   fullCommand: string;
   /** Claude subagents resume through their root session — the dialog says so. */
@@ -45,6 +48,7 @@ export function attachCommandFromSpec(
     accountLabel: meta.accountLabel,
     cwd: spec.cwd,
     command: spec.command,
+    cdCommand: `cd ${shellQuote(spec.cwd)}`,
     fullCommand: `cd ${shellQuote(spec.cwd)} && ${spec.command}`,
     ...(meta.note ? { note: meta.note } : {}),
   };

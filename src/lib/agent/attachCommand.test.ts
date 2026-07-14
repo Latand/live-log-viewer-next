@@ -38,8 +38,17 @@ test("attachCommandFromSpec composes the one-line full command with a shell-quot
   expect(cmd.command).toBe("claude --resume 22222222");
   // the apostrophe in the path is shell-escaped for the `cd '<cwd>' && …` one-liner
   expect(cmd.fullCommand).toBe("cd '/home/o'\\''brien/atlas' && claude --resume 22222222");
+  // the standalone "Copy working directory" row shares the same quoting (finding 5)
+  expect(cmd.cdCommand).toBe("cd '/home/o'\\''brien/atlas'");
   expect(cmd.accountLabel).toBe("D · claude-max");
   expect(cmd.note).toBeUndefined();
+});
+
+test("cdCommand shell-quotes ordinary and space-bearing paths so both paste correctly", () => {
+  expect(attachCommandFromSpec(spec({ cwd: "/plain/path" }), { accountId: "d", accountLabel: "l" }).cdCommand)
+    .toBe("cd '/plain/path'");
+  expect(attachCommandFromSpec(spec({ cwd: "/has a space/atlas" }), { accountId: "d", accountLabel: "l" }).cdCommand)
+    .toBe("cd '/has a space/atlas'");
 });
 
 test("resolveAttachCommand resolves a live/finished conversation to its own resume command", () => {
