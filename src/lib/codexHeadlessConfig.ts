@@ -1,3 +1,5 @@
+import { CODEX_VIEWER_SPAWN_FEATURES } from "@/lib/agent/spawnPolicy";
+
 type JsonObject = Record<string, unknown>;
 
 function record(value: unknown): JsonObject | null {
@@ -11,7 +13,7 @@ export function headlessCodexThreadConfig(configRead: unknown): JsonObject {
   if (!config || !servers) throw new Error("config/read returned no MCP server table");
   return {
     mcp_servers: Object.fromEntries(Object.keys(servers).map((name) => [name, { enabled: false }])),
-    features: { plugins: false, apps: false },
+    features: CODEX_VIEWER_SPAWN_FEATURES,
     include_apps_instructions: false,
   };
 }

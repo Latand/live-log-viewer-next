@@ -10,7 +10,9 @@ export interface SpawnRequestIdentity {
   fast: boolean | null;
   accountId: string | null;
   role: string | null;
+  allowSubagents?: boolean;
   parent: SpawnParentSelector;
+  reviews?: SpawnParentSelector;
   prompt: string;
   images: Array<{ mime: string; digest: string }>;
 }

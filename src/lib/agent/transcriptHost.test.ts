@@ -1,7 +1,12 @@
 import { describe, expect, test } from "bun:test";
+import crypto from "node:crypto";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
-import type { ResumeSpec } from "@/lib/agent/cli";
-import { createTranscriptHostResolver } from "@/lib/agent/transcriptHost";
+import { withSpawnCapability, type ResumeSpec } from "@/lib/agent/cli";
+import { AgentRegistry } from "@/lib/agent/registry";
+import { beginRegistryResume, createTranscriptHostResolver } from "@/lib/agent/transcriptHost";
 import { TmuxDeliveryUncertainError } from "@/lib/tmux";
 import type { AgentProcess } from "@/lib/scanner/process";
 import type { PaneRef, SpawnedPane } from "@/lib/tmux";
@@ -40,6 +45,30 @@ const spec: ResumeSpec = {
   windowName: "codex-resume",
   engine: "codex",
 };
+
+test("registry resume receives one conversation-bound capability at central actuation", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-resume-capability-"));
+  const registry = new AgentRegistry(path.join(directory, "registry.json"));
+  const conversation = registry.ensureConversation("codex", PATHNAME, "terra");
+  const previousDigest = "a".repeat(64);
+  registry.beginSpawnRequest({
+    engine: "codex",
+    cwd: "/repo",
+    conversationId: conversation.id,
+    spawnCapabilityDigest: previousDigest,
+  });
+
+  const prepared = beginRegistryResume(entry(), spec, registry);
+  if (!prepared) throw new Error("expected a managed resume");
+  const capability = registry.rotateSpawnCapabilityForReceipt(prepared.receipt.launchId);
+  const launchSpec = withSpawnCapability(prepared.spec, capability);
+  const digest = crypto.createHash("sha256").update(capability).digest("hex");
+
+  expect(registry.conversationIdForSpawnCapabilityDigest(previousDigest)).toBeNull();
+  expect(registry.conversationIdForSpawnCapabilityDigest(digest)).toBe(conversation.id);
+  expect(launchSpec.command.match(/LLV_SPAWN_CAPABILITY=/g)).toHaveLength(1);
+  fs.rmSync(directory, { recursive: true, force: true });
+});
 
 interface FakeHostState {
   entry: FileEntry;

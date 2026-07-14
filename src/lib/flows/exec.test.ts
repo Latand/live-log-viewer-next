@@ -155,9 +155,13 @@ test("headless codex reviewer launches without CLI sandbox blocking", () => {
   expect(built.args).toContain("--ignore-user-config");
   expect(built.args).toContain("-");
   expect(built.args).not.toContain("review prompt");
-  expect(built.stdin).toBe("review prompt");
+  expect(built.stdin).toStartWith("review prompt");
   expect(built.args).not.toContain("--sandbox");
   expect(built.args).not.toContain("read-only");
+  expect(built.args).toContain("--disable");
+  expect(built.args).toContain("multi_agent");
+  expect(built.stdin).toContain("review prompt");
+  expect(built.stdin).toContain("Viewer spawn policy:");
 });
 
 test("headless Codex launch flushes the complete prompt and closes stdin", async () => {
@@ -183,7 +187,10 @@ test("headless Codex launch flushes the complete prompt and closes stdin", async
   );
   await waitForFile(capturePath);
 
-  expect(JSON.parse(fs.readFileSync(capturePath, "utf8"))).toEqual({ prompt, eof: true });
+  const captured = JSON.parse(fs.readFileSync(capturePath, "utf8")) as { prompt: string; eof: boolean };
+  expect(captured.prompt).toStartWith(prompt.trim());
+  expect(captured.prompt).toContain("Viewer spawn policy:");
+  expect(captured.eof).toBe(true);
   forgetHeadlessReview("flow-stdin-eof", 1);
 });
 
@@ -231,16 +238,22 @@ test("an owned reviewer stays running when process identity is briefly unavailab
 });
 
 test("headless managed Codex reviewer fixes its account home and file credential store at launch", () => {
+  process.env.LLV_TOKEN = "viewer-token";
   const built = reviewerCommand(
     { engine: "codex", model: null, effort: null },
     "review prompt",
     "/out/review.md",
     "/repo",
     { home: "/accounts/work", managed: true },
+    null,
+    "B".repeat(43),
   );
 
   expect(built.env.CODEX_HOME).toBe("/accounts/work");
   expect(built.args).toContain("cli_auth_credentials_store=file");
+  expect(built.env.LLV_TOKEN).toBeUndefined();
+  expect(built.env.LLV_SPAWN_CAPABILITY).toBe("B".repeat(43));
+  delete process.env.LLV_TOKEN;
 });
 
 test("headless claude reviewer launches with approval-free tool access", () => {
@@ -249,6 +262,32 @@ test("headless claude reviewer launches with approval-free tool access", () => {
   expect(built.args).toContain("--dangerously-skip-permissions");
   expect(built.args).not.toContain("--permission-mode");
   expect(built.args).not.toContain("--disallowedTools");
+});
+
+test("headless managed Claude reviewer installs the native sub-agent deny profile and scrubs Viewer auth", () => {
+  const home = path.join(process.env.LLV_STATE_DIR!, "headless-claude-account");
+  fs.mkdirSync(home, { recursive: true });
+  fs.writeFileSync(path.join(home, "settings.json"), JSON.stringify({ theme: "dark" }));
+  process.env.LLV_TOKEN = "viewer-token";
+
+  const built = reviewerCommand(
+    { engine: "claude", model: null, effort: null },
+    "review prompt",
+    "/out/review.md",
+    "/repo",
+    null,
+    { home, projectsDir: path.join(home, "projects"), managed: true },
+  );
+  const settingsIndex = built.args.indexOf("--settings");
+  const settingsPath = built.args[settingsIndex + 1]!;
+  const settings = JSON.parse(fs.readFileSync(settingsPath, "utf8")) as {
+    hooks: { PreToolUse: Array<{ matcher: string }> };
+  };
+
+  expect(settingsIndex).toBeGreaterThanOrEqual(0);
+  expect(settings.hooks.PreToolUse.some((group) => group.matcher === "Task|Agent")).toBe(true);
+  expect(built.env.LLV_TOKEN).toBeUndefined();
+  delete process.env.LLV_TOKEN;
 });
 
 test("reviewer prompt carries the read-only contract while allowing validation commands", () => {

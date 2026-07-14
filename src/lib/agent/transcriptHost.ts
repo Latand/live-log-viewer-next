@@ -104,7 +104,7 @@ interface HostDependencies {
   parentPid: (pid: number) => number | null;
   identity: (pid: number) => string | null;
   spawn: (spec: ResumeSpec, text: string, receipt?: SpawnReceipt) => Promise<SpawnedPane>;
-  beginResume?: (entry: FileEntry, spec: ResumeSpec) => SpawnReceipt | null;
+  beginResume?: (entry: FileEntry, spec: ResumeSpec) => { receipt: SpawnReceipt; spec: ResumeSpec } | null;
   remember: (pathname: string, spec: ResumeSpec, pane: SpawnedPane) => Promise<void>;
   deliver: (paneId: string, text: string) => Promise<void>;
   launchId?: (paneId: string) => Promise<string | null>;
@@ -395,9 +395,10 @@ export function createTranscriptHostResolver(
       host.agentIdentity !== rejectedHost.agentIdentity;
     if (host && !identityReplaced && (await revalidate(host, input.entry))) return { host, resumed: false };
 
-    const receipt = dependencies.beginResume?.(input.entry, input.spec) ?? undefined;
-    const spawned = await dependencies.spawn(input.spec, "", receipt);
-    await dependencies.remember(input.entry.path, input.spec, spawned);
+    const prepared = dependencies.beginResume?.(input.entry, input.spec) ?? null;
+    const resumeSpec = prepared?.spec ?? input.spec;
+    const spawned = await dependencies.spawn(resumeSpec, "", prepared?.receipt);
+    await dependencies.remember(input.entry.path, resumeSpec, spawned);
     snapshot = await observe(true);
     if (snapshot.observation === "failure") throw new Error(`tmux pane observation failed: ${snapshot.observationError}`);
     const resumedConflict = conflictForPath(snapshot, input.entry.path, conversationIdForPath);
@@ -558,9 +559,12 @@ async function rememberRegistryResume(pathname: string, spec: ResumeSpec, pane: 
   if (serverPid !== null) agentRegistry().rememberResumePane(serverPid, pathname, { paneId: pane.paneId, panePid: pane.panePid, windowName: spec.windowName, engine: spec.engine });
 }
 
-function beginRegistryResume(entry: FileEntry, spec: ResumeSpec): SpawnReceipt | null {
+export function beginRegistryResume(
+  entry: FileEntry,
+  spec: ResumeSpec,
+  registry = agentRegistry(),
+): { receipt: SpawnReceipt; spec: ResumeSpec } | null {
   if (entry.engine !== "claude" && entry.engine !== "codex") return null;
-  const registry = agentRegistry();
   const conversation = registry.conversationForPath(entry.path)
     ?? registry.ensureConversation(entry.engine, entry.path, null);
   const current = conversation.generations.at(-1);
@@ -572,7 +576,7 @@ function beginRegistryResume(entry: FileEntry, spec: ResumeSpec): SpawnReceipt |
     purpose: "resume-successor",
     launchProfile: spec.launchProfile ?? current?.launchProfile,
   });
-  return begun.receipt;
+  return { receipt: begun.receipt, spec };
 }
 
 async function serializeRegistryDelivery(entry: FileEntry, task: () => Promise<HostDeliveryOutcome>): Promise<HostDeliveryOutcome> {

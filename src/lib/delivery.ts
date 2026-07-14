@@ -74,6 +74,7 @@ export async function reconfigureConversation(
     ...config,
     readOnly: profile?.readOnly ?? null,
     permissionMode: profile?.permissionMode ?? null,
+    allowSubagents: profile?.allowSubagents ?? false,
   });
   const deliver = overrides.deliver ?? deliverToTranscriptHost;
   const observedHost = await (overrides.livePaneHost ?? livePaneHost)(filePath);
@@ -266,7 +267,11 @@ export async function resumeConversation(filePath: string): Promise<DeliveryOutc
   }
   const entry = (await listFiles()).find((item) => item.path === filePath);
   if (!entry) return failure("file is unknown to the viewer", 403);
-  const spec = resumeSpecFor(entry.root, entry.path, { model: entry.launchModel ?? entry.model, effort: entry.effort });
+  const spec = resumeSpecFor(entry.root, entry.path, {
+    model: entry.launchModel ?? entry.model,
+    effort: entry.effort,
+    allowSubagents: agentRegistry().launchProfileForPath(entry.path)?.allowSubagents,
+  });
   if (!spec) return failure("this conversation cannot be resumed", 409);
   try {
     return await hostOutcome(deliverToTranscriptHost({ entry, spec, payload: "" }));
@@ -482,7 +487,11 @@ export async function deliverConversationMessage(message: ConversationMessage, o
     if (!entry) {
       return settle(failure("file is unknown to the viewer", 403));
     }
-    const spec = resumeSpecFor(entry.root, entry.path, { model: entry.launchModel ?? entry.model, effort: entry.effort });
+    const spec = resumeSpecFor(entry.root, entry.path, {
+      model: entry.launchModel ?? entry.model,
+      effort: entry.effort,
+      allowSubagents: agentRegistry().launchProfileForPath(entry.path)?.allowSubagents,
+    });
     if (spec) {
       const bundle = materializePayload();
       imagePaths = bundle.imagePaths;
@@ -505,7 +514,11 @@ export async function deliverConversationMessage(message: ConversationMessage, o
     }
     /* Resolved before saving anything: the root's live pane or resume spec
        must exist, or the request is rejected without ever writing an image. */
-    const rootSpec = resumeSpecFor(root.root, root.path, { model: root.launchModel ?? root.model, effort: root.effort });
+    const rootSpec = resumeSpecFor(root.root, root.path, {
+      model: root.launchModel ?? root.model,
+      effort: root.effort,
+      allowSubagents: agentRegistry().launchProfileForPath(root.path)?.allowSubagents,
+    });
     if (!rootSpec) {
       return settle(failure("root session is unavailable for messaging", 409));
     }

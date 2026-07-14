@@ -8,6 +8,7 @@ import { claudeHomeOwningTranscript, claudeSettingsPath, isManagedClaudeHome, le
 
 import { claudeTranscriptPath, headCwd } from "./transcript";
 import { normalizeClaudeLaunchModel } from "./models";
+import { applyClaudeSpawnPolicy, claudeSpawnPolicyPaths, VIEWER_SPAWN_CAPABILITY_ENV } from "./spawnPolicy";
 import type { LaunchProfile } from "@/lib/accounts/migration/contracts";
 
 export { ENGINE_EFFORTS, isEngineEffort } from "./efforts";
@@ -69,6 +70,14 @@ export interface ResumeSpec {
   launchProfile?: LaunchProfile;
 }
 
+export function withSpawnCapability(spec: ResumeSpec, capability: string): ResumeSpec {
+  if (!/^[A-Za-z0-9_-]{43}$/.test(capability)) throw new Error("Viewer spawn capability is invalid");
+  return {
+    ...spec,
+    command: `env ${VIEWER_SPAWN_CAPABILITY_ENV}=${shellQuote(capability)} ${spec.command}`,
+  };
+}
+
 export interface FreshSpecOptions {
   model?: string | null;
   effort?: string | null;
@@ -81,9 +90,13 @@ export interface FreshSpecOptions {
   /** Claude only: an already-resolved managed config home. */
   claudeConfigDir?: string | null;
   claudeProjectsDir?: string | null;
+  /** Claude only: omit the Viewer-managed native sub-agent deny hook. */
+  allowSubagents?: boolean;
+  /** Route admission owns policy materialization after its durable reservation. */
+  deferClaudeSpawnPolicy?: boolean;
 }
 
-const CLAUDE_SHADOWED_ENV = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_BASE_URL", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "GOOGLE_APPLICATION_CREDENTIALS", "VERTEXAI_PROJECT", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX"];
+const CLAUDE_SHADOWED_ENV = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_BASE_URL", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "GOOGLE_APPLICATION_CREDENTIALS", "VERTEXAI_PROJECT", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "LLV_TOKEN"];
 export function claudeEnvPrefix(home: string): string { return `env ${CLAUDE_SHADOWED_ENV.map((key) => `-u ${key}`).join(" ")} CLAUDE_CONFIG_DIR=${shellQuote(home)}`; }
 
 export interface ResumeSpecOptions {
@@ -94,6 +107,7 @@ export interface ResumeSpecOptions {
   /** Execution policy inherited from the generation being replaced. */
   readOnly?: boolean | null;
   permissionMode?: string | null;
+  allowSubagents?: boolean;
 }
 
 /** Boot spec for a brand-new agent (no prior conversation) in a chosen directory. */
@@ -115,7 +129,16 @@ export function freshSpecFor(engine: AgentEngine, cwd: string, options: FreshSpe
     if (options.model) args.push("--model", options.model);
     if (options.effort) args.push("--effort", options.effort);
     const managed = Boolean(options.claudeConfigDir && isManagedClaudeHome(options.claudeConfigDir));
-    const settings = managed ? claudeSettingsPath() : null;
+    const installedPolicy = options.claudeConfigDir
+      ? options.deferClaudeSpawnPolicy
+        ? claudeSpawnPolicyPaths(options.claudeConfigDir, sid)
+        : applyClaudeSpawnPolicy(options.claudeConfigDir, {
+          allowSubagents: options.allowSubagents,
+          baseSettingsPath: managed ? claudeSettingsPath() : null,
+          profileId: sid,
+        })
+      : null;
+    const settings = installedPolicy?.settingsPath ?? null;
     if (settings) args.push("--settings", settings);
     const command = args.map(shellQuote).join(" ");
     return {
@@ -131,6 +154,7 @@ export function freshSpecFor(engine: AgentEngine, cwd: string, options: FreshSpe
         fast: null,
         permissionMode: options.readOnly ? "plan" : "bypassPermissions",
         readOnly: options.readOnly ?? false,
+        allowSubagents: options.allowSubagents ?? false,
         title: null,
         project: null,
         parentConversationId: null,
@@ -147,9 +171,10 @@ export function freshSpecFor(engine: AgentEngine, cwd: string, options: FreshSpe
   if (options.effort) args.push("-c", `model_reasoning_effort=${options.effort}`);
   if (options.fast != null) args.push("-c", `service_tier=${options.fast ? "priority" : "standard"}`);
   if (options.readOnly) args.push("--sandbox", "read-only");
+  args.push("--disable", "multi_agent");
   const command = args.map(shellQuote).join(" ");
   return {
-    command: `CODEX_HOME=${shellQuote(home)} ${command}`,
+    command: `env -u LLV_TOKEN CODEX_HOME=${shellQuote(home)} ${command}`,
     cwd,
     windowName: "codex-new",
     engine: "codex",
@@ -160,6 +185,7 @@ export function freshSpecFor(engine: AgentEngine, cwd: string, options: FreshSpe
       fast: options.fast ?? null,
       permissionMode: options.readOnly ? "never" : null,
       readOnly: options.readOnly ?? false,
+      allowSubagents: false,
       title: null,
       project: null,
       parentConversationId: null,
@@ -200,8 +226,12 @@ export function claudeSuccessorSpecFor(input: {
   if (model) args.push("--model", model);
   if (input.profile.effort && /^[a-z]+$/.test(input.profile.effort)) args.push("--effort", input.profile.effort);
   args.push("--resume", input.sourcePath, "--fork-session", "--session-id", input.candidateId);
-  const settings = isManagedClaudeHome(input.targetHome) ? claudeSettingsPath() : null;
-  if (settings) args.push("--settings", settings);
+  const settings = applyClaudeSpawnPolicy(input.targetHome, {
+    allowSubagents: input.profile.allowSubagents,
+    baseSettingsPath: isManagedClaudeHome(input.targetHome) ? claudeSettingsPath() : null,
+    profileId: input.candidateId,
+  }).settingsPath;
+  args.push("--settings", settings);
   return {
     command: `${claudeEnvPrefix(input.targetHome)} ${args.map(shellQuote).join(" ")}`,
     cwd: input.profile.cwd || resumeCwd(input.sourcePath),
@@ -225,7 +255,11 @@ export function resumeSpecFor(root: string, pathname: string, options: ResumeSpe
     const home = claudeHomeOwningTranscript(pathname);
     if (!home) return null;
     const managed = isManagedClaudeHome(home);
-    const settings = managed ? claudeSettingsPath() : null;
+    const settings = applyClaudeSpawnPolicy(home, {
+      allowSubagents: options.allowSubagents,
+      baseSettingsPath: managed ? claudeSettingsPath() : null,
+      profileId: `resume-${sid}`,
+    }).settingsPath;
     let command = shellQuote(resolveBinary("claude"));
     if (options.readOnly || options.permissionMode === "plan") {
       command += " --permission-mode plan --disallowedTools Edit,Write,NotebookEdit";
@@ -234,7 +268,7 @@ export function resumeSpecFor(root: string, pathname: string, options: ResumeSpe
     } else {
       command += " --dangerously-skip-permissions";
     }
-    if (settings) command += ` --settings ${shellQuote(settings)}`;
+    command += ` --settings ${shellQuote(settings)}`;
     const launchModel = normalizeClaudeLaunchModel(options.model);
     if (launchModel) command += ` --model ${shellQuote(launchModel)}`;
     if (options.effort) command += ` --effort ${shellQuote(options.effort)}`;
@@ -244,7 +278,7 @@ export function resumeSpecFor(root: string, pathname: string, options: ResumeSpe
       cwd: resumeCwd(pathname),
       windowName: "claude-resume",
       engine: "claude",
-      launchProfile: { ...emptyLaunchProfileForResume(resumeCwd(pathname), launchModel, options.effort ?? null), readOnly: options.readOnly ?? null, permissionMode: options.permissionMode ?? null },
+      launchProfile: { ...emptyLaunchProfileForResume(resumeCwd(pathname), launchModel, options.effort ?? null), readOnly: options.readOnly ?? null, permissionMode: options.permissionMode ?? null, allowSubagents: options.allowSubagents ?? false },
     };
   }
   if (root === "codex-sessions" && base.endsWith(".jsonl")) {
@@ -261,9 +295,10 @@ export function resumeSpecFor(root: string, pathname: string, options: ResumeSpe
     if (options.permissionMode && ["untrusted", "on-request", "never"].includes(options.permissionMode)) {
       command += ` --ask-for-approval ${shellQuote(options.permissionMode)}`;
     }
+    command += " --disable multi_agent";
     command += ` resume ${id}`;
     return {
-      command: `CODEX_HOME=${shellQuote(home)} ${command}`,
+      command: `env -u LLV_TOKEN CODEX_HOME=${shellQuote(home)} ${command}`,
       cwd: resumeCwd(pathname),
       windowName: "codex-resume",
       engine: "codex",
@@ -281,6 +316,7 @@ function emptyLaunchProfileForResume(cwd: string, model: string | null, effort: 
     fast: null,
     permissionMode: null,
     readOnly: null,
+    allowSubagents: false,
     title: null,
     project: null,
     parentConversationId: null,

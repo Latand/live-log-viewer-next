@@ -11,6 +11,11 @@ export interface ResolvedSpawnParent {
   sessionKey: ReturnType<typeof sessionKeyFromTranscript>;
 }
 
+export interface ResolvedSpawnLineage {
+  parent: ResolvedSpawnParent | null;
+  reviewed: ResolvedSpawnParent | null;
+}
+
 export class SpawnParentError extends Error {
   constructor(message: string, readonly status: number) {
     super(message);
@@ -73,14 +78,14 @@ export function resolveSpawnParent(
   };
 }
 
-export function resolveSpawnLineageParent(
+export function resolveSpawnLineage(
   body: { role?: unknown; reviews?: unknown; src?: unknown; parent?: unknown; parentConversationId?: unknown },
   registry = agentRegistry(),
-): ResolvedSpawnParent | null {
+): ResolvedSpawnLineage {
   const reviewer = body.role === "reviewer";
   if (!reviewer) {
     if (body.reviews !== undefined) throw new SpawnParentError("reviews requires role: reviewer", 400);
-    return resolveSpawnParent(body, registry);
+    return { parent: resolveSpawnParent(body, registry), reviewed: null };
   }
   if (typeof body.reviews !== "string" || !body.reviews.trim()) {
     throw new SpawnParentError("reviewer requires reviews", 400);
@@ -92,11 +97,14 @@ export function resolveSpawnLineageParent(
   if (!reviewed) throw new SpawnParentError("reviewed conversation is invalid", 400);
 
   const explicitSelector = body.parentConversationId !== undefined || body.parent !== undefined || body.src !== undefined;
-  if (explicitSelector) {
-    const explicit = resolveSpawnParent(body, registry);
-    if (!explicit || explicit.conversationId !== reviewed.conversationId) {
-      throw new SpawnParentError("reviewer parent must match reviews", 400);
-    }
-  }
-  return reviewed;
+  const parent = explicitSelector ? resolveSpawnParent(body, registry) : reviewed;
+  if (!parent) throw new SpawnParentError("reviewer caller is invalid", 400);
+  return { parent, reviewed };
+}
+
+export function resolveSpawnLineageParent(
+  body: { role?: unknown; reviews?: unknown; src?: unknown; parent?: unknown; parentConversationId?: unknown },
+  registry = agentRegistry(),
+): ResolvedSpawnParent | null {
+  return resolveSpawnLineage(body, registry).parent;
 }

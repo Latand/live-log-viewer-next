@@ -159,6 +159,8 @@ describe("ClaudeStreamBrokerHost", () => {
     expect(captured.args).toContain("--input-format");
     expect(captured.args).toContain("--output-format");
     expect(captured.args).toContain("--safe-mode");
+    expect(captured.args).toContain("--disallowedTools");
+    expect(captured.args).toContain("Task,Agent");
     expect(captured.args).toContain("--replay-user-messages");
     expect(captured.args).toContain("--permission-prompt-tool");
     expect(captured.args?.at(captured.args.indexOf("--permission-prompt-tool") + 1)).toBe("stdio");
@@ -191,6 +193,54 @@ describe("ClaudeStreamBrokerHost", () => {
     expect(await nextEvent(late)).toEqual({ kind: "delta", turnId: "delivery-one", text: "done", seq: 4 });
     expect((await host.health()).account).toEqual({ type: "claude.ai", planType: "max" });
     await host.release();
+  });
+
+  test("structured Claude hosts install the deny profile and preserve the explicit escape", async () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "llv-claude-structured-policy-"));
+    fs.writeFileSync(path.join(home, "settings.json"), JSON.stringify({ theme: "dark" }));
+
+    const deniedLedger = new RecordingDeliveryLedger();
+    const deniedChild = new FakeClaude(deniedLedger);
+    const deniedCapture: { args?: string[] } = {};
+    const denied = await ClaudeStreamBrokerHost.start({
+      cwd: home,
+      claudeConfigDir: home,
+      deliveryLedger: deniedLedger,
+      eventStore: new MemoryEventStore(),
+      readAuthStatus: () => ({ loggedIn: true, authMethod: "claude.ai", subscriptionType: "max" }),
+      readTranscript: () => [],
+      spawnProcess: fakeSpawn(deniedChild, deniedCapture),
+    });
+    const deniedSettingsIndex = deniedCapture.args!.indexOf("--settings");
+    const deniedSettings = JSON.parse(fs.readFileSync(deniedCapture.args![deniedSettingsIndex + 1]!, "utf8")) as {
+      hooks: { PreToolUse: Array<{ matcher: string }> };
+    };
+    expect(deniedSettingsIndex).toBeGreaterThanOrEqual(0);
+    expect(deniedCapture.args).toContain("Task,Agent");
+    expect(deniedSettings.hooks.PreToolUse.some((group) => group.matcher === "Task|Agent")).toBe(true);
+    await denied.release();
+
+    const allowedLedger = new RecordingDeliveryLedger();
+    const allowedChild = new FakeClaude(allowedLedger);
+    const allowedCapture: { args?: string[] } = {};
+    const allowed = await ClaudeStreamBrokerHost.adopt("allowed-structured-session", {
+      cwd: home,
+      claudeConfigDir: home,
+      allowSubagents: true,
+      deliveryLedger: allowedLedger,
+      eventStore: new MemoryEventStore(),
+      readAuthStatus: () => ({ loggedIn: true, authMethod: "claude.ai", subscriptionType: "max" }),
+      readTranscript: () => [],
+      spawnProcess: fakeSpawn(allowedChild, allowedCapture),
+    });
+    const allowedSettingsIndex = allowedCapture.args!.indexOf("--settings");
+    const allowedSettings = JSON.parse(fs.readFileSync(allowedCapture.args![allowedSettingsIndex + 1]!, "utf8")) as {
+      hooks: { PreToolUse: Array<{ matcher: string }> };
+    };
+    expect(allowedSettingsIndex).toBeGreaterThanOrEqual(0);
+    expect(allowedCapture.args).not.toContain("Task,Agent");
+    expect(allowedSettings.hooks.PreToolUse.some((group) => group.matcher === "Task|Agent")).toBe(false);
+    await allowed.release();
   });
 
   test("confirms delivery only from replayed user-role frames", async () => {
