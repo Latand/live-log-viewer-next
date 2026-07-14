@@ -32,6 +32,21 @@ test("fresh Codex commands fix CODEX_HOME in the typed shell command", () => {
   expect(spec.command).toStartWith(`env -u LLV_TOKEN CODEX_HOME='${home}' `);
   expect(spec.command).toContain("codex");
   expect(spec.command).toContain("'--disable' 'multi_agent'");
+  expect(spec.launchProfile?.allowSubagents).toBe(false);
+});
+
+test("allowSubagents enables Codex multi-agent for fresh and resumed launches", () => {
+  const transcript = path.join(SANDBOX, "legacy", "sessions", "2026", "07", "14", "rollout-019f5f2f-743a-7f23-9773-3cf2dd4b4168.jsonl");
+  fs.mkdirSync(path.dirname(transcript), { recursive: true });
+  fs.writeFileSync(transcript, JSON.stringify({ type: "session_meta", payload: { cwd: SANDBOX } }) + "\n");
+
+  const fresh = freshSpecFor("codex", "/repo", { allowSubagents: true });
+  const resumed = resumeSpecFor("codex-sessions", transcript, { allowSubagents: true });
+
+  expect(fresh.command).not.toContain("--disable");
+  expect(fresh.launchProfile?.allowSubagents).toBe(true);
+  expect(resumed?.command).not.toContain("--disable multi_agent");
+  expect(resumed?.launchProfile?.allowSubagents).toBe(true);
 });
 
 test("Viewer spawn capability is scoped into the launched agent command", () => {

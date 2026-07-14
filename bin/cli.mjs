@@ -44,6 +44,7 @@ Options:
       --tailscale      Access over Tailscale
       --no-open        Don't open the browser
       --new-token      Create a new access key
+      --new-operator-token  Rotate the operator spawn capability
   -v, --version        Show the version
   -h, --help           Show this help`,
     badPort: (value) => `Invalid port: ${value}`,
@@ -74,6 +75,7 @@ Options:
       --tailscale      Доступ через Tailscale
       --no-open        Не відкривати браузер
       --new-token      Створити новий ключ доступу
+      --new-operator-token  Оновити операторський ключ запуску агентів
   -v, --version        Показати версію
   -h, --help           Показати довідку`,
     badPort: (value) => `Некоректний порт: ${value}`,
@@ -131,6 +133,7 @@ function parseArgs(args) {
     tailscale: false,
     noOpen: false,
     newToken: false,
+    newOperatorToken: false,
     help: false,
     version: false,
   };
@@ -159,6 +162,8 @@ function parseArgs(args) {
       options.noOpen = true;
     } else if (arg === "--new-token") {
       options.newToken = true;
+    } else if (arg === "--new-operator-token") {
+      options.newOperatorToken = true;
     } else if (arg === "-v" || arg === "--version") {
       options.version = true;
     } else if (arg === "-h" || arg === "--help") {
@@ -257,6 +262,10 @@ function buildChildEnv(options, runtime) {
 
   if (runtime.tailnetUrl) {
     env.LLV_TS_URL = runtime.tailnetUrl;
+  }
+
+  if (options.newOperatorToken) {
+    env.LLV_ROTATE_OPERATOR_SPAWN_CAPABILITY = "1";
   }
 
   return env;
