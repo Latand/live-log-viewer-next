@@ -938,7 +938,8 @@ describe("CodexAppServerHost", () => {
 
   test("boot adoption resumes every flagged Codex registry row", async () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-structured-adoption-"));
-    const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+    const registryPath = path.join(directory, "agent-registry.json");
+    const registry = new AgentRegistry(registryPath);
     const key = { engine: "codex" as const, sessionId: "adopted-thread" };
     registry.upsert({
       key,
@@ -1002,33 +1003,39 @@ describe("CodexAppServerHost", () => {
       claimOwner: null,
       structuredHost: { eventCursor: 18, process: null, activeTurnRef: null, pendingAttention: [] },
     });
-    let restarted = false;
+    const restartedRegistry = new AgentRegistry(registryPath);
+    const replacement = new FakeAppServer("adopted-thread");
     const releasedRows = await adoptCodexRegistryHosts(
-      registry,
-      () => {
-        restarted = true;
-        return { cwd: "/repo", eventStore: new MemoryEventStore(), spawnProcess: fakeSpawn(new FakeAppServer("adopted-thread")) };
-      },
+      restartedRegistry,
+      () => ({ cwd: "/repo", eventStore: new MemoryEventStore(), spawnProcess: fakeSpawn(replacement) }),
       { NODE_ENV: "test", LLV_STRUCTURED_HOSTS: "1" },
     );
-    expect(releasedRows).toEqual([]);
-    expect(restarted).toBeFalse();
-    const replacementOwner = { pid: process.pid, startIdentity: "replacement-viewer" };
-    expect(registry.claimStructuredHost(key, replacementOwner)).toBeNull();
-    const reclaimed = registry.claimStructuredHost(key, replacementOwner, { allowUnhosted: true });
-    expect(reclaimed?.claimEpoch).toBe(5);
+    expect(releasedRows).toHaveLength(1);
+    expect(replacement.requests.some((request) => request.method === "thread/resume")).toBeTrue();
+    expect(restartedRegistry.snapshot().entries["codex:adopted-thread"]).toMatchObject({
+      status: "idle",
+      host: null,
+      claimEpoch: 5,
+      structuredHost: {
+        kind: "codex-app-server",
+        endpoint: "stdio:4242",
+        writerClaimEpoch: 5,
+      },
+    });
+    await releasedRows[0]!.host.release();
   });
 
-  test("failed adoption clears connection-scoped attention and activity", async () => {
+  test("failed restart adoption leaves a loud dead structured host", async () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-failed-adoption-"));
-    const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+    const registryPath = path.join(directory, "agent-registry.json");
+    const registry = new AgentRegistry(registryPath);
     const key = { engine: "codex" as const, sessionId: "failed-adoption-thread" };
     registry.upsert({
       key,
       artifactPath: "/sessions/failed-adoption-thread.jsonl",
       cwd: "/repo",
       accountId: null,
-      status: "dead",
+      status: "unhosted",
       host: null,
       structuredHost: {
         kind: "codex-app-server",
@@ -1045,20 +1052,29 @@ describe("CodexAppServerHost", () => {
       claimOwner: null,
       pendingAction: null,
     });
+    const restartedRegistry = new AgentRegistry(registryPath);
+    let adoptionAttempted = false;
     const adopted = await adoptCodexRegistryHosts(
-      registry,
-      () => ({
-        cwd: "/repo",
-        eventStore: new MemoryEventStore(),
-        spawnProcess: fakeSpawn(new FakeAppServer("failed-adoption-thread", "different-thread")),
-      }),
+      restartedRegistry,
+      () => {
+        adoptionAttempted = true;
+        return {
+          cwd: "/repo",
+          eventStore: new MemoryEventStore(),
+          spawnProcess: fakeSpawn(new FakeAppServer("failed-adoption-thread", "different-thread")),
+        };
+      },
       { NODE_ENV: "test", LLV_STRUCTURED_HOSTS: "1" },
     );
     expect(adopted).toEqual([]);
-    expect(registry.snapshot().entries["codex:failed-adoption-thread"]).toMatchObject({
+    expect(adoptionAttempted).toBeTrue();
+    expect(restartedRegistry.snapshot().entries["codex:failed-adoption-thread"]).toMatchObject({
       status: "dead",
+      host: null,
       claimOwner: null,
       structuredHost: {
+        kind: "codex-app-server",
+        endpoint: "stdio:released",
         process: null,
         activeTurnRef: null,
         pendingAttention: [],
