@@ -267,8 +267,8 @@ export class StructuredDeliveryQueue {
           await this.port.transition(effect.operationId, "delivered");
           return false;
         } catch (error) {
-          await this.port.transition(effect.operationId, "failed", { reason: failureReason(error) });
-          return false;
+          await this.port.transition(effect.operationId, "queued", { reason: failureReason(error) });
+          return true;
         }
       }
       await this.port.transition(effect.operationId, "delivering");
@@ -280,8 +280,8 @@ export class StructuredDeliveryQueue {
         await this.port.transition(effect.operationId, "delivered");
         return false;
       } catch (error) {
-        await this.port.transition(effect.operationId, "failed", { reason: failureReason(error) });
-        return false;
+        await this.port.transition(effect.operationId, "queued", { reason: failureReason(error) });
+        return true;
       }
     }
     if (!host) return true;

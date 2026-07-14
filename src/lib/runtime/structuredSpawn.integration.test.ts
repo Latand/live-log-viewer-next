@@ -654,6 +654,25 @@ test("a queued kill terminalizes after restart when its generation is confirmed 
     claimOwner: null,
     pendingAction: null,
   });
+  await client.append({
+    scope: { type: "session", id: conversation.id },
+    kind: "session-status",
+    payload: {
+      conversationId: conversation.id,
+      sessionKey: key,
+      hostKind: "codex-app-server",
+      host: "hosted",
+      turn: "idle",
+      provenance: "structured",
+      accountId: "codex-subscription",
+      parentConversationId: null,
+      cwd,
+      artifactPath,
+      capabilities: { steer: true, structuredAttention: true },
+      activeTurnId: null,
+    },
+  });
+  expect(journal.snapshot().sessions.find((session) => session.conversationId === conversation.id)?.host).toBe("hosted");
   const operationId = `kill_${id}`;
   await client.command({
     kind: "kill",
@@ -677,6 +696,20 @@ test("a queued kill terminalizes after restart when its generation is confirmed 
     pendingAction: null,
   });
   expect(await client.effectBatch(["runtime.kill"], 0)).toEqual([]);
+  expect(journal.snapshot().sessions.find((session) => session.conversationId === conversation.id)).toMatchObject({
+    host: "dead",
+    activeTurnId: null,
+  });
+  const sendOperationId = `send_after_${id}`;
+  const sent = await client.command({
+    kind: "send",
+    operationId: sendOperationId,
+    idempotencyKey: sendOperationId,
+    conversationId: conversation.id,
+    text: "must reject after kill",
+    policy: "queue",
+  });
+  expect(sent.receipt).toMatchObject({ status: "rejected", reason: "dead-host" });
 });
 
 test("a dead predecessor kill terminalizes without touching its live successor", async () => {
@@ -752,6 +785,11 @@ test("a dead predecessor kill terminalizes without touching its live successor",
   expect(registry.snapshot().entries[`codex:${successorId}`]).toEqual(successorBefore);
   expect(successorHost.releaseCount).toBe(0);
   expect(hasStructuredDeliveryHost(successorKey)).toBeTrue();
+  expect(journal.snapshot().sessions.find((session) => session.conversationId === conversation.id)).toMatchObject({
+    sessionKey: successorKey,
+    host: "hosted",
+    hostKind: "codex-app-server",
+  });
   expect(await client.effectBatch(["runtime.kill"], 0)).toEqual([]);
 });
 

@@ -2557,7 +2557,10 @@ export class AgentRegistry {
     });
   }
 
-  terminateInactiveStructuredHost(conversationId: ViewerConversationId, key: SessionKey): boolean {
+  terminateInactiveStructuredHost(
+    conversationId: ViewerConversationId,
+    key: SessionKey,
+  ): false | "current" | "predecessor" {
     return this.mutate((file) => {
       const conversation = file.conversations[conversationId];
       const keyId = sessionKeyId(key);
@@ -2582,7 +2585,7 @@ export class AgentRegistry {
       const readinessBefore = migrationReadinessSignature(file, key.engine, changedHostPaths);
       Object.assign(entry, replacement, { updatedAt: now() });
       advanceMigrationScopeRevision(file, key.engine, readinessBefore, changedHostPaths);
-      return true;
+      return conversation.generations.at(-1)?.id === key.sessionId ? "current" : "predecessor";
     });
   }
 

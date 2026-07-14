@@ -663,3 +663,90 @@ test("concurrent kills finish after the first kill removes the host", async () =
   ]);
   expect(pending.size).toBe(0);
 });
+
+test("an absent-host kill retries after terminal projection fails", async () => {
+  let pending = true;
+  let attempts = 0;
+  const transitions: Array<[string, string, string | null | undefined]> = [];
+  const queue = new StructuredDeliveryQueue({
+    effects: async () => pending ? [{
+      id: "kill-retry",
+      kind: "runtime.kill",
+      eventSeq: 1,
+      payload: {
+        operationId: "kill-retry",
+        conversationId: "conversation-one",
+        sessionKey: { engine: "codex", sessionId: "thread-one" },
+      },
+    }] : [],
+    transition: async (operationId, status, details) => {
+      transitions.push([operationId, status, details?.reason]);
+      if (status === "delivered" || status === "failed") pending = false;
+    },
+  }, () => null, async () => {
+    attempts += 1;
+    if (attempts === 1) throw new Error("dead projection unavailable");
+    return true;
+  });
+
+  await queue.drain();
+
+  expect(pending).toBeTrue();
+  expect(transitions).toEqual([
+    ["kill-retry", "queued", "dead projection unavailable"],
+  ]);
+
+  await queue.drain();
+
+  expect(pending).toBeFalse();
+  expect(transitions).toEqual([
+    ["kill-retry", "queued", "dead projection unavailable"],
+    ["kill-retry", "delivering", undefined],
+    ["kill-retry", "delivered", undefined],
+  ]);
+});
+
+test("an active-host kill retries after terminal projection fails", async () => {
+  let pending = true;
+  let attempts = 0;
+  const transitions: Array<[string, string, string | null | undefined]> = [];
+  const target = host(async () => ({ outcome: "turn-started", turnId: "unexpected" }));
+  const queue = new StructuredDeliveryQueue({
+    effects: async () => pending ? [{
+      id: "kill-active-retry",
+      kind: "runtime.kill",
+      eventSeq: 1,
+      payload: {
+        operationId: "kill-active-retry",
+        conversationId: "conversation-one",
+        sessionKey: { engine: "codex", sessionId: "thread-one" },
+      },
+    }] : [],
+    transition: async (operationId, status, details) => {
+      transitions.push([operationId, status, details?.reason]);
+      if (status === "delivered" || status === "failed") pending = false;
+    },
+  }, () => target, async () => {
+    attempts += 1;
+    if (attempts === 1) throw new Error("dead projection unavailable");
+    return true;
+  });
+
+  await queue.drain();
+
+  expect(pending).toBeTrue();
+  expect(transitions).toEqual([
+    ["kill-active-retry", "delivering", undefined],
+    ["kill-active-retry", "queued", "dead projection unavailable"],
+  ]);
+
+  await queue.drain();
+
+  expect(pending).toBeFalse();
+  expect(transitions).toEqual([
+    ["kill-active-retry", "delivering", undefined],
+    ["kill-active-retry", "queued", "dead projection unavailable"],
+    ["kill-active-retry", "delivering", undefined],
+    ["kill-active-retry", "delivered", undefined],
+  ]);
+});

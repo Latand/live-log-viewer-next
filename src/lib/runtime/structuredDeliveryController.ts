@@ -124,10 +124,13 @@ export async function bindStructuredDeliveryQueue(
     hostResolver(registry, hosts),
     async (conversationId, expectedKey) => {
       if (await state.terminateActiveHost?.(expectedKey)) return true;
-      return registry.terminateInactiveStructuredHost(
+      const terminated = registry.terminateInactiveStructuredHost(
         conversationId as `conversation_${string}`,
         expectedKey,
       );
+      if (!terminated) return false;
+      if (terminated === "current") await refreshCurrentProjection(conversationId);
+      return true;
     },
   );
   const registrations = new Map<string, { key: SessionKey; host: ObservableEngineHost; unsubscribe: () => void; stopEvents: () => Promise<void> }>();
