@@ -7,6 +7,7 @@ import type { ViewerConversationId } from "@/lib/accounts/migration/contracts";
 import { runtimeHostClient, type RuntimeHostClient } from "./client";
 import type { RuntimeOperationReceipt } from "./contracts";
 import { kickStructuredDeliveryQueue } from "./structuredDeliverySignal";
+import { didStructuredHostStartupFail, markStructuredHostStartupReady } from "./startupStatus";
 
 export interface StructuredMessageRequest {
   path: string;
@@ -31,6 +32,8 @@ export interface StructuredMessageDependencies {
   registry?: () => AgentRegistry;
   kick?: () => void;
   requestMigrationTick?: () => void;
+  startupFailed?: () => boolean;
+  startupRecovered?: () => void;
 }
 
 export interface HeldStructuredMessageRequest {
@@ -45,12 +48,33 @@ export interface HeldStructuredMessageDependencies {
   enabled?: () => boolean;
   client?: () => RuntimeHostClient | null;
   kick?: () => void | Promise<void>;
+  startupFailed?: () => boolean;
+  startupRecovered?: () => void;
 }
 
 export type HeldStructuredMessageOutcome = "delivered" | "failed" | "delivery-uncertain" | null;
 
 function structuredHostsEnabled(): boolean {
   return process.env.LLV_STRUCTURED_HOSTS === "1";
+}
+
+function ownershipUnavailable(): StructuredMessageResult {
+  return {
+    ok: false,
+    structured: true,
+    outcome: "failed",
+    error: "structured host ownership is unavailable; retry after runtime synchronization",
+    status: 503,
+  };
+}
+
+function recordStructuredRuntimeRecovery(
+  snapshot: Awaited<ReturnType<RuntimeHostClient["snapshot"]>>,
+  recovered: () => void,
+): void {
+  if (snapshot.sessions.some((session) => session.hostKind === "codex-app-server" || session.hostKind === "claude-broker")) {
+    recovered();
+  }
 }
 
 function requestMigrationProgress(
@@ -68,13 +92,15 @@ export async function deliverHeldStructuredMessage(
 ): Promise<HeldStructuredMessageOutcome> {
   if (!(dependencies.enabled ?? structuredHostsEnabled)()) return null;
   const client = (dependencies.client ?? runtimeHostClient)();
-  if (!client) return null;
+  if (!client) return (dependencies.startupFailed ?? didStructuredHostStartupFail)() ? null : "delivery-uncertain";
   let snapshot: Awaited<ReturnType<RuntimeHostClient["snapshot"]>>;
   try {
     snapshot = await client.snapshot();
-  } catch {
-    return null;
+  } catch (error) {
+    console.error("[structured delivery] runtime snapshot failed", error);
+    return (dependencies.startupFailed ?? didStructuredHostStartupFail)() ? null : "delivery-uncertain";
   }
+  recordStructuredRuntimeRecovery(snapshot, dependencies.startupRecovered ?? markStructuredHostStartupReady);
   const session = snapshot.sessions.find((candidate) => candidate.conversationId === request.conversationId)
     ?? snapshot.sessions.find((candidate) => candidate.artifactPath === request.path);
   if (!session || session.hostKind === "tmux-legacy") return null;
@@ -108,13 +134,15 @@ export async function enqueueStructuredMessage(
 ): Promise<StructuredMessageResult | null> {
   if (!(dependencies.enabled ?? structuredHostsEnabled)()) return null;
   const client = (dependencies.client ?? runtimeHostClient)();
-  if (!client) return null;
+  if (!client) return (dependencies.startupFailed ?? didStructuredHostStartupFail)() ? null : ownershipUnavailable();
   let snapshot: Awaited<ReturnType<RuntimeHostClient["snapshot"]>>;
   try {
     snapshot = await client.snapshot();
-  } catch {
-    return null;
+  } catch (error) {
+    console.error("[structured delivery] runtime snapshot failed", error);
+    return (dependencies.startupFailed ?? didStructuredHostStartupFail)() ? null : ownershipUnavailable();
   }
+  recordStructuredRuntimeRecovery(snapshot, dependencies.startupRecovered ?? markStructuredHostStartupReady);
   const session = (request.conversationId
     ? snapshot.sessions.find((candidate) => candidate.conversationId === request.conversationId)
     : undefined)
@@ -124,10 +152,10 @@ export async function enqueueStructuredMessage(
   if (request.hasImages) {
     return { ok: false, structured: true, outcome: "failed", error: "structured host image delivery is unavailable", status: 409 };
   }
-  if (!session.conversationId.startsWith("conversation_")) return null;
+  if (!session.conversationId.startsWith("conversation_")) return ownershipUnavailable();
   const registry = (dependencies.registry ?? agentRegistry)();
   const conversation = registry.conversation(session.conversationId as ViewerConversationId);
-  if (!conversation) return null;
+  if (!conversation) return ownershipUnavailable();
   try {
     const idempotencyKey = request.clientMessageId?.trim() || `queue_${crypto.randomUUID()}`;
     let reservation = registry.holdDelivery(conversation.id, request.text, idempotencyKey);

@@ -1353,6 +1353,13 @@ function sqliteMirrorRevision(filename: string): number | null {
   }
 }
 
+function isRecoverableSpawnReadinessFailure(error: string | null): boolean {
+  return error === "agent never reached a launch-ready prompt"
+    || error?.startsWith("agent never reached a launch-ready prompt:") === true
+    || error === "launch prompt was not accepted by the agent"
+    || error?.startsWith("launch prompt was not accepted by the agent:") === true;
+}
+
 /** Durable source for identity and handoff evidence. The lock directory is
     intentionally separate from in-memory promises, so a Viewer replacement
     cannot leave an imaginary owner behind. */
@@ -2089,6 +2096,45 @@ export class AgentRegistry {
     });
   }
 
+  private confirmSpawnPaneAliveInFile(
+    file: RegistryFile,
+    launchId: string,
+    host: TmuxHostEvidence,
+    observed: { engine: Extract<AgentEngine, "claude" | "codex">; cwd: string },
+  ): SpawnReceipt | null {
+    const receipt = file.receipts[launchId];
+    if (!receipt || receipt.state !== "conflicted" || !receipt.pane) return receipt ?? null;
+    if (receipt.engine !== observed.engine || receipt.cwd !== observed.cwd) return receipt;
+    if (!isRecoverableSpawnReadinessFailure(receipt.error)) {
+      return receipt;
+    }
+    const binding = receipt.pane;
+    const serverMatches = binding.server.pid === host.server.pid
+      && (binding.server.startIdentity === null || binding.server.startIdentity === host.server.startIdentity);
+    const paneMatches = binding.paneId === host.paneId
+      && binding.panePid.pid === host.panePid.pid
+      && (binding.panePid.startIdentity === null || binding.panePid.startIdentity === host.panePid.startIdentity);
+    if (!serverMatches || !paneMatches) return receipt;
+    receipt.state = "host-verified";
+    receipt.error = null;
+    receipt.verifiedHost = host;
+    receipt.target = host.paneId;
+    return receipt;
+  }
+
+  confirmSpawnPaneAlive(
+    launchId: string,
+    host: TmuxHostEvidence,
+    observed: { engine: Extract<AgentEngine, "claude" | "codex">; cwd: string },
+  ): SpawnReceipt | null {
+    const current = this.snapshot().receipts[launchId];
+    if (!current || current.state !== "conflicted") return current ? clone(current) : null;
+    return this.mutate((file) => {
+      const receipt = this.confirmSpawnPaneAliveInFile(file, launchId, host, observed);
+      return receipt ? clone(receipt) : null;
+    });
+  }
+
   private settleSpawnInFile(file: RegistryFile, launchId: string, entry: Omit<AgentRegistryEntry, "updatedAt">, completionMode: NonNullable<SpawnReceipt["completionMode"]>): SpawnSettlement {
     const receipt = file.receipts[launchId];
     if (!receipt) throw new Error("unknown spawn receipt");
@@ -2100,25 +2146,10 @@ export class AgentRegistry {
       }
       return { kind: "conflict", receipt: clone(receipt), code };
     };
-    const observedPaneMatches = completionMode === "observed-completed"
-      && receipt.state === "conflicted"
-      && receipt.artifactPath === null
-      && receipt.key === null
-      && receipt.pane !== null
-      && entry.host?.kind === "tmux"
-      && receipt.pane.endpoint === entry.host.endpoint
-      && receipt.pane.paneId === entry.host.paneId
-      && receipt.pane.server.pid === entry.host.server.pid
-      && receipt.pane.server.startIdentity === entry.host.server.startIdentity
-      && receipt.pane.panePid.pid === entry.host.panePid.pid
-      && receipt.pane.panePid.startIdentity === entry.host.panePid.startIdentity
-      && !["spawn_artifact_conflict", "spawn_pane_conflict", "spawn_identity_conflict", "spawn_host_identity_conflict"].includes(receipt.error ?? "");
-    if (observedPaneMatches) {
-      /* A launch verification timeout can race a composer that settles late.
-         Exact pane identity plus the observed engine-native transcript
-         establishes the durable launch owner. */
-      receipt.state = "pane-bound";
-      receipt.error = null;
+    if (completionMode === "observed-completed" && entry.host?.kind === "tmux") {
+      /* Live process evidence can enrich a binding whose birth identity was
+         unavailable during launch verification. */
+      this.confirmSpawnPaneAliveInFile(file, launchId, entry.host, { engine: entry.key.engine, cwd: entry.cwd });
     }
     if (receipt.state === "failed" || receipt.state === "conflicted") {
       return {
@@ -2325,6 +2356,10 @@ export class AgentRegistry {
     this.mutate((file) => {
       const receipt = file.receipts[launchId];
       if (!receipt || receipt.state === "completed" || receipt.state === "failed" || receipt.state === "conflicted") return;
+      if (receipt.state === "host-verified" || receipt.state === "prompt-delivered") {
+        receipt.error = error;
+        return;
+      }
       receipt.state = receipt.pane ? "conflicted" : "failed";
       receipt.error = error;
       if (receipt.state === "conflicted") receipt.verifiedHost = null;

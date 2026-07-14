@@ -99,6 +99,7 @@ interface FakeHostState {
 function fakeHost(
   existing = true,
   reconcile?: (hosts: TranscriptHost[]) => { quarantinedPaneIds: string[] },
+  confirmAlive?: (host: TranscriptHost) => void,
 ) {
   const state: FakeHostState = {
     entry: entry({ pid: existing ? 200 : null, proc: existing ? "running" : null }),
@@ -189,6 +190,7 @@ function fakeHost(
         ? hosts.filter((host) => host.launchId === state.launchId).map((host) => host.paneId)
         : [],
     }),
+    confirmAlive,
     deliver: async (paneId: string, text: string) => {
       state.deliverAttempts += 1;
       if (state.deliverError) throw state.deliverError;
@@ -236,6 +238,10 @@ describe("transcript host resolver", () => {
       target: "agents:4.0",
     });
     registry.failSpawn(begun.receipt.launchId, "agent never reached a launch-ready prompt");
+    expect(registry.snapshot().receipts[begun.receipt.launchId]).toMatchObject({
+      state: "conflicted",
+      error: "agent never reached a launch-ready prompt",
+    });
     const { resolver, state } = fakeHost(true, (hosts) => {
       const quarantinedPaneIds: string[] = [];
       for (const host of hosts) {
@@ -248,9 +254,9 @@ describe("transcript host resolver", () => {
           host: {
             kind: "tmux",
             endpoint: "/tmp",
-            server: { pid: host.tmuxServerPid, startIdentity: null },
+            server: { pid: host.tmuxServerPid, startIdentity: "900:observed" },
             paneId: host.paneId,
-            panePid: { pid: host.panePid, startIdentity: null },
+            panePid: { pid: host.panePid, startIdentity: "100:observed" },
             windowName: host.windowName ?? "",
             agent: { pid: host.agentPid, startIdentity: host.agentIdentity },
             argv: host.agentArgv,
@@ -276,12 +282,53 @@ describe("transcript host resolver", () => {
     state.launchId = begun.receipt.launchId;
 
     expect((await resolver.readTranscriptHosts(true)).canonicalFor(accountPath)?.paneId).toBe("%1");
+    expect(registry.snapshot().receipts[begun.receipt.launchId]).toMatchObject({
+      state: "completed",
+      error: null,
+    });
     expect(await resolver.deliverToTranscriptHost({ entry: state.entry, spec: { ...spec, engine: "claude" }, payload: "composer message" })).toMatchObject({
       ok: true,
       outcome: "delivered-to-live",
       target: "agents:4.0",
     });
     expect(state.delivered).toEqual(["%1:composer message"]);
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+
+  test("successful composer delivery releases a recoverable pane quarantine", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-delivery-quarantine-"));
+    const registry = new AgentRegistry(path.join(directory, "registry.json"));
+    const begun = registry.beginSpawnRequest({ engine: "codex", cwd: "/repo", accountId: null });
+    if (begun.kind !== "created") throw new Error("expected create");
+    registry.bindSpawnPane(begun.receipt.launchId, {
+      endpoint: "/tmp",
+      server: { pid: 900, startIdentity: null },
+      paneId: "%1",
+      panePid: { pid: 100, startIdentity: null },
+      target: "agents:4.0",
+    });
+    registry.failSpawn(begun.receipt.launchId, "agent never reached a launch-ready prompt");
+    const { resolver, state } = fakeHost(true, undefined, (host) => {
+      registry.confirmSpawnPaneAlive(begun.receipt.launchId, {
+        kind: "tmux",
+        endpoint: "/tmp",
+        server: { pid: host.tmuxServerPid, startIdentity: "900:observed" },
+        paneId: host.paneId,
+        panePid: { pid: host.panePid, startIdentity: "100:observed" },
+        windowName: host.windowName ?? "",
+        agent: { pid: host.agentPid, startIdentity: host.agentIdentity },
+        argv: host.agentArgv,
+      }, { engine: host.engine, cwd: host.cwd });
+    });
+
+    expect(await resolver.deliverToTranscriptHost({ entry: state.entry, spec, payload: "release quarantine" })).toMatchObject({
+      ok: true,
+      outcome: "delivered-to-live",
+    });
+    expect(registry.snapshot().receipts[begun.receipt.launchId]).toMatchObject({
+      state: "host-verified",
+      error: null,
+    });
     fs.rmSync(directory, { recursive: true, force: true });
   });
 

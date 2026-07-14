@@ -1,3 +1,5 @@
+import { markStructuredHostStartupFailed, markStructuredHostStartupReady } from "@/lib/runtime/startupStatus";
+
 export function accountControllerDelayMs(env: Readonly<Record<string, string | undefined>> = process.env): number {
   const configured = Number(env.LLV_ACCOUNT_CONTROLLER_DELAY_MS ?? 0);
   return Number.isFinite(configured) ? Math.max(0, configured) : 0;
@@ -29,7 +31,9 @@ export async function runStructuredHostStartup(
 ): Promise<void> {
   try {
     await adopt();
+    markStructuredHostStartupReady();
   } catch (error) {
+    markStructuredHostStartupFailed();
     log("[structured hosts] startup adoption failed", error);
   }
 }

@@ -107,6 +107,7 @@ interface HostDependencies {
   beginResume?: (entry: FileEntry, spec: ResumeSpec) => { receipt: SpawnReceipt; spec: ResumeSpec } | null;
   remember: (pathname: string, spec: ResumeSpec, pane: SpawnedPane) => Promise<void>;
   deliver: (paneId: string, text: string) => Promise<void>;
+  confirmAlive?: (host: TranscriptHost) => void | Promise<void>;
   launchId?: (paneId: string) => Promise<string | null>;
   conversationIdForPath?: (pathname: string) => string | null;
   reconcile?: (hosts: TranscriptHost[]) => HostReconciliation | void | Promise<HostReconciliation | void>;
@@ -447,6 +448,11 @@ export function createTranscriptHostResolver(
         }
         try {
           await dependencies.deliver(decision.host.paneId, input.payload);
+          try {
+            await dependencies.confirmAlive?.(decision.host);
+          } catch (error) {
+            console.error("[transcript host] live delivery registry confirmation failed", error);
+          }
           return {
             ok: true,
             outcome: owner && resumed ? "resumed" : "delivered-to-live",
@@ -476,25 +482,35 @@ export function createTranscriptHostResolver(
   };
 }
 
+function tmuxEvidenceForHost(host: TranscriptHost): TmuxHostEvidence {
+  return {
+    kind: "tmux",
+    endpoint: tmuxEndpoint(),
+    server: { pid: host.tmuxServerPid, startIdentity: procBackend.processIdentity(host.tmuxServerPid) },
+    paneId: host.paneId,
+    panePid: { pid: host.panePid, startIdentity: procBackend.processIdentity(host.panePid) },
+    windowName: host.windowName ?? "",
+    agent: { pid: host.agentPid, startIdentity: host.agentIdentity },
+    argv: host.agentArgv,
+  };
+}
+
+function confirmRegistryHostAlive(host: TranscriptHost): void {
+  if (host.launchId) {
+    agentRegistry().confirmSpawnPaneAlive(host.launchId, tmuxEvidenceForHost(host), { engine: host.engine, cwd: host.cwd });
+  }
+}
+
 async function reconcileRegistry(hosts: TranscriptHost[]): Promise<HostReconciliation> {
   const registry = agentRegistry();
   const seen = new Set<string>();
   const quarantinedPaneIds = new Set<string>();
   for (const host of hosts) {
+    const evidence = tmuxEvidenceForHost(host);
+    if (host.launchId) registry.confirmSpawnPaneAlive(host.launchId, evidence, { engine: host.engine, cwd: host.cwd });
     if (!host.primaryPath) continue;
     const key = sessionKeyFromTranscript(host.engine, host.primaryPath);
     if (!key) continue;
-    const serverStart = procBackend.processIdentity(host.tmuxServerPid);
-    const evidence: TmuxHostEvidence = {
-      kind: "tmux",
-      endpoint: tmuxEndpoint(),
-      server: { pid: host.tmuxServerPid, startIdentity: serverStart },
-      paneId: host.paneId,
-      panePid: { pid: host.panePid, startIdentity: procBackend.processIdentity(host.panePid) },
-      windowName: host.windowName ?? "",
-      agent: { pid: host.agentPid, startIdentity: host.agentIdentity },
-      argv: host.agentArgv,
-    };
     if (host.launchId) {
       const settled = registry.completeObservedSpawn(host.launchId, {
         key,
@@ -610,6 +626,7 @@ const runtimeResolver = createTranscriptHostResolver({
   spawn: spawnAgentWithPrompt,
   remember: rememberRegistryResume,
   deliver: sendText,
+  confirmAlive: confirmRegistryHostAlive,
   reconcile: reconcileRegistry,
   serializeDelivery: serializeRegistryDelivery,
 }, globalStore.__llvTranscriptHostDecisions ??= new Map());
