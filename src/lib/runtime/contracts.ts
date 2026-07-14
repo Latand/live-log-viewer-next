@@ -38,7 +38,7 @@ export interface RuntimeSessionAxes {
 
 export type RuntimeAttentionKind = "approval" | "permission" | "question" | "waiting_heuristic";
 export type RuntimeAttentionState = "open" | "resolving" | "resolved" | "expired-confirmed" | "cancelled" | "resolution-unknown";
-export type RuntimeOperationKind = "send" | "steer" | "interrupt" | "answer" | "spawn";
+export type RuntimeOperationKind = "send" | "steer" | "interrupt" | "answer" | "kill" | "spawn";
 export type RuntimeReceiptStatus =
   | "pending"
   | "delivering"
@@ -197,6 +197,11 @@ export interface RuntimeInterruptCommand extends RuntimeCommandBase {
   turnId?: string | null;
 }
 
+export interface RuntimeKillCommand extends RuntimeCommandBase {
+  kind: "kill";
+  sessionKey: { engine: RuntimeEngine; sessionId: string };
+}
+
 export interface RuntimeAnswerCommand extends RuntimeCommandBase {
   kind: "answer";
   attentionId: string;
@@ -213,7 +218,7 @@ export interface RuntimeSpawnCommand extends RuntimeCommandBase {
   sessionId?: string | null;
 }
 
-export type RuntimeOperationCommand = RuntimeSendCommand | RuntimeInterruptCommand | RuntimeAnswerCommand | RuntimeSpawnCommand;
+export type RuntimeOperationCommand = RuntimeSendCommand | RuntimeInterruptCommand | RuntimeAnswerCommand | RuntimeKillCommand | RuntimeSpawnCommand;
 
 export interface RuntimeOperationResult {
   operationId: string;

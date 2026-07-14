@@ -41,6 +41,12 @@ let delivery: (message: unknown) => Promise<{ ok: true; outcome: "delivered-to-l
   target: "agents:4.0",
 });
 let killOutcome: { ok: true; target: string } | { ok: false; outcome: "failed"; error: string; status: number } = { ok: true, target: "agents:4.0" };
+let structuredControlCalls = 0;
+let interruptCalls = 0;
+let structuredControlResult:
+  | { status: 202; body: { ok: true; structured: true; target: string; operationId: string; receipt: { operationId: string; status: string } } }
+  | { status: 409; body: { error: string } }
+  | null = null;
 
 const host = {
   paneId: "%1",
@@ -71,12 +77,20 @@ mock.module("@/lib/agent/transcriptHost", () => ({
     return snapshot;
   },
 }));
-mock.module("@/lib/runtime/structuredControls", () => ({ dispatchStructuredControl: async () => null }));
+mock.module("@/lib/runtime/structuredControls", () => ({
+  dispatchStructuredControl: async () => {
+    structuredControlCalls += 1;
+    return structuredControlResult;
+  },
+}));
 mock.module("@/lib/delivery", () => ({
   answerDialogKey: async () => ({ ok: true, target: "" }),
   compactConversation: async () => ({ ok: true, target: "" }),
   deliverConversationMessage: (message: unknown) => delivery(message),
-  interruptConversation: async () => ({ ok: true, target: "" }),
+  interruptConversation: async () => {
+    interruptCalls += 1;
+    return { ok: true, target: "" };
+  },
   killConversation: async () => killOutcome,
   livePaneTarget: async () => null,
   reconfigureConversation: async () => ({ ok: true, outcome: "reconfigured", target: "agents:4.0" }),
@@ -90,6 +104,7 @@ mock.module("@/lib/tmux", () => ({
   captureTmuxAttachReference: (value: Record<string, unknown>) => ({ ...value, tmuxServerStartIdentity: "900:one", paneStartIdentity: "100:one" }),
   collectImagePayloads: () => ({ images: [], error: null }),
   killPane: async () => {},
+  paneScreen: async () => "",
   panePidOf: async () => null,
   resolveRequestedTmuxTarget: async (pid: number | null) => (pid === null ? null : pidTargets.get(pid) ?? null),
   resolveTarget: async (pid: number) => pidTargets.get(pid) ?? null,
@@ -212,6 +227,72 @@ test("/api/tmux POST carries concurrent sends through the delivery seam", async 
     { pid: null, path: PATHNAME, text: "first", images: [] },
     { pid: null, path: PATHNAME, text: "second", images: [] },
   ]);
+});
+
+test("/api/tmux bypasses persisted structured control state when hosting is disabled", async () => {
+  const previous = process.env.LLV_STRUCTURED_HOSTS;
+  const legacyDeliveries: unknown[] = [];
+  structuredControlCalls = 0;
+  interruptCalls = 0;
+  structuredControlResult = { status: 409, body: { error: "stale structured projection" } };
+  delivery = async (message: unknown) => {
+    legacyDeliveries.push(message);
+    return { ok: true, outcome: "delivered-to-live", target: "agents:4.0" };
+  };
+  try {
+    process.env.LLV_STRUCTURED_HOSTS = "0";
+    const legacy = await POST(post({ path: PATHNAME, action: "resume" }));
+    const send = await POST(post({ path: PATHNAME, text: "continue after rollback" }));
+    const interrupt = await POST(post({ path: PATHNAME, action: "interrupt" }));
+    expect(legacy.status).toBe(200);
+    expect(send.status).toBe(200);
+    expect(interrupt.status).toBe(200);
+    expect(structuredControlCalls).toBe(0);
+    expect(legacyDeliveries).toHaveLength(1);
+    expect(interruptCalls).toBe(1);
+
+    process.env.LLV_STRUCTURED_HOSTS = "1";
+    const structured = await POST(post({ path: PATHNAME, action: "resume" }));
+    expect(structured.status).toBe(409);
+    expect(await structured.json()).toEqual({ error: "stale structured projection" });
+    expect(structuredControlCalls).toBe(1);
+  } finally {
+    delivery = async () => ({ ok: true, outcome: "delivered-to-live", target: "agents:4.0" });
+    structuredControlResult = null;
+    if (previous === undefined) delete process.env.LLV_STRUCTURED_HOSTS;
+    else process.env.LLV_STRUCTURED_HOSTS = previous;
+  }
+});
+
+test("/api/tmux admits pane-less kill through the structured control path", async () => {
+  const previous = process.env.LLV_STRUCTURED_HOSTS;
+  structuredControlCalls = 0;
+  structuredControlResult = {
+    status: 202,
+    body: {
+      ok: true,
+      structured: true,
+      target: "conversation-kill",
+      operationId: "kill-one",
+      receipt: { operationId: "kill-one", status: "queued" },
+    },
+  };
+  try {
+    process.env.LLV_STRUCTURED_HOSTS = "1";
+    const response = await POST(post({ path: PATHNAME, action: "kill" }));
+    expect(response.status).toBe(202);
+    expect(await response.json()).toMatchObject({
+      ok: true,
+      structured: true,
+      operationId: "kill-one",
+      receipt: { status: "queued" },
+    });
+    expect(structuredControlCalls).toBe(1);
+  } finally {
+    structuredControlResult = null;
+    if (previous === undefined) delete process.env.LLV_STRUCTURED_HOSTS;
+    else process.env.LLV_STRUCTURED_HOSTS = previous;
+  }
 });
 
 test("/api/tmux POST kill never reports success with an empty target", async () => {

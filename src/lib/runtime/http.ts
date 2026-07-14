@@ -46,6 +46,9 @@ export async function handleRuntimeCommand(
   const rejection = rejectCrossOrigin(request);
   if (rejection) return rejection;
   if (!dependencies.enabled()) return NextResponse.json({ error: "runtime events are disabled" }, { status: 503 });
+  if (!(dependencies.structuredEnabled ?? (() => process.env.LLV_STRUCTURED_HOSTS === "1"))()) {
+    return NextResponse.json({ error: "structured hosts are disabled" }, { status: 503 });
+  }
   let value: unknown;
   try {
     value = await request.json();

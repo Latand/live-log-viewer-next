@@ -2,9 +2,47 @@ import { expect, test } from "bun:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
+import type { RuntimeSessionView } from "@/hooks/useRuntime";
 import { translate } from "@/lib/i18n";
 
-import { deliveryAttemptKey, mergeRuntimeReceipts, RuntimeComposerReceipts } from "./TmuxComposer";
+import { deliveryAttemptKey, mergeRuntimeReceipts, RuntimeComposerReceipts, structuredComposerSession } from "./TmuxComposer";
+
+function runtimeSession(structuredControlsEnabled: boolean): RuntimeSessionView {
+  return {
+    structuredControlsEnabled,
+    legacy: false,
+    uiState: "idle",
+    attentions: [],
+    receipts: [],
+    session: {
+      conversationId: "conv-one",
+      sessionKey: { engine: "codex", sessionId: "thread-one" },
+      hostKind: "codex-app-server",
+      host: "hosted",
+      turn: "idle",
+      provenance: "structured",
+      revision: 1,
+      attentionIds: [],
+      recentReceipts: [],
+      accountId: "account-one",
+      parentConversationId: null,
+      flowId: null,
+      workflowId: null,
+      cwd: "/repo",
+      artifactPath: "/repo/thread-one.jsonl",
+      capabilities: { steer: true, structuredAttention: true },
+      activeTurnId: null,
+      drift: null,
+    },
+  };
+}
+
+test("the composer follows structured-host gate transitions", () => {
+  const session = runtimeSession(true);
+  expect(structuredComposerSession(session)?.session.conversationId).toBe("conv-one");
+  session.structuredControlsEnabled = false;
+  expect(structuredComposerSession(session)).toBeNull();
+});
 
 test("a failed durable receipt retries with its original delivery key", () => {
   expect(deliveryAttemptKey("fresh-key", "held-key")).toBe("held-key");

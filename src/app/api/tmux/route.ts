@@ -204,7 +204,9 @@ export async function POST(req: NextRequest): Promise<NextResponse<SendResponse 
   }
 
   const explicitAction = typeof body.action === "string" ? body.action : "";
-  const structuredControl = await dispatchStructuredControl({ path: filePath, conversationId, action: explicitAction });
+  const structuredControl = process.env.LLV_STRUCTURED_HOSTS === "1"
+    ? await dispatchStructuredControl({ path: filePath, conversationId, action: explicitAction })
+    : null;
   if (structuredControl) return NextResponse.json(structuredControl.body, { status: structuredControl.status });
 
   if (body.action === "interrupt") return respond(await interruptConversation(filePath));

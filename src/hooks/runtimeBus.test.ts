@@ -112,6 +112,7 @@ function snapshot(seq: number, overrides: Partial<RuntimeSnapshot> = {}): Runtim
     snapshotSeq: seq,
     retentionFloorSeq: 0,
     runtime: { hostEpoch: 1, health: "ready" },
+    structuredHostsEnabled: true,
     filesRevision: 1,
     sessions: [
       {
@@ -145,11 +146,22 @@ function snapshot(seq: number, overrides: Partial<RuntimeSnapshot> = {}): Runtim
   };
 }
 
+test("the snapshot carries the runtime structured-host gate into client state", async () => {
+  const h = harness();
+  h.setSnapshot(snapshot(101, { structuredHostsEnabled: false }));
+  h.bus.start();
+  await flush();
+
+  expect(h.bus.getState().structuredHostsEnabled).toBeFalse();
+  expect(h.bus.getState().store.sessions.conv_a?.hostKind).toBe("codex-app-server");
+});
+
 interface Harness {
   bus: RuntimeBus;
   clock: Clock;
   sources: FakeEventSource[];
   setSnapshot: (s: RuntimeSnapshot) => void;
+  deferNextFetch: () => { resolveSnapshot: (s: RuntimeSnapshot) => void };
   failFetch: (fail: boolean) => void;
   fetchCalls: () => number;
 }
@@ -160,10 +172,16 @@ function harness(): Harness {
   let currentSnapshot = snapshot(100);
   let shouldFail = false;
   let calls = 0;
+  let deferredFetch: Promise<Response> | null = null;
   const deps: RuntimeBusDeps = {
     fetch: (() => {
       calls += 1;
       if (shouldFail) return Promise.reject(new Error("network"));
+      if (deferredFetch) {
+        const pending = deferredFetch;
+        deferredFetch = null;
+        return pending;
+      }
       return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(currentSnapshot) } as unknown as Response);
     }) as FetchLike,
     createEventSource: (url) => {
@@ -182,6 +200,15 @@ function harness(): Harness {
     clock,
     sources,
     setSnapshot: (s) => (currentSnapshot = s),
+    deferNextFetch: () => {
+      let resolveFetch!: (response: Response) => void;
+      deferredFetch = new Promise((resolve) => {
+        resolveFetch = resolve;
+      });
+      return {
+        resolveSnapshot: (s) => resolveFetch({ ok: true, status: 200, json: () => Promise.resolve(s) } as unknown as Response),
+      };
+    },
     failFetch: (fail) => (shouldFail = fail),
     fetchCalls: () => calls,
   };
@@ -234,7 +261,7 @@ describe("runtimeBus reconnect", () => {
   let h: Harness;
   beforeEach(() => (h = harness()));
 
-  test("transport blip reconnects and resumes from the cursor, no new snapshot fetch", async () => {
+  test("transport blip refreshes deployment state and resumes from the cursor", async () => {
     h.bus.start();
     await flush();
     h.sources[0]!.open();
@@ -245,12 +272,26 @@ describe("runtimeBus reconnect", () => {
     expect(h.bus.getState().connection).toBe("reconnecting");
     h.clock.advance(600); // past the first backoff
     await flush();
-    // resumed by reopening the stream from the cursor, not by re-snapshotting
-    expect(h.fetchCalls()).toBe(fetchesBefore);
+    expect(h.fetchCalls()).toBe(fetchesBefore + 1);
     expect(h.sources.length).toBe(2);
     expect(h.sources[1]!.url).toContain("after=101");
     h.sources[1]!.open();
     expect(h.bus.getState().connection).toBe("live");
+  });
+
+  test("a tab refreshes the structured-host gate after a server restart", async () => {
+    h.bus.start();
+    await flush();
+    h.sources[0]!.open();
+    expect(h.bus.getState().structuredHostsEnabled).toBeTrue();
+
+    h.setSnapshot(snapshot(100, { structuredHostsEnabled: false }));
+    h.sources[0]!.error();
+    h.clock.advance(600);
+    await flush();
+
+    expect(h.bus.getState().structuredHostsEnabled).toBeFalse();
+    expect(h.sources[1]!.url).toContain("after=100");
   });
 
   test("heartbeat timeout is treated as a lost transport", async () => {
@@ -329,11 +370,12 @@ describe("runtimeBus degraded fallback", () => {
 
     // The fallback poll refreshes the snapshot every 10s.
     const fetchesBefore = h.fetchCalls();
-    h.setSnapshot(snapshot(120));
+    h.setSnapshot(snapshot(120, { structuredHostsEnabled: false }));
     h.clock.advance(10_000);
     await flush();
     expect(h.fetchCalls()).toBeGreaterThan(fetchesBefore);
     expect(h.bus.getState().store.cursor).toBe(120);
+    expect(h.bus.getState().structuredHostsEnabled).toBeFalse();
 
     // After the SSE retry window, a live stream is attempted again. Open any
     // freshly-created stream promptly (a real EventSource opens on its own),
@@ -347,6 +389,56 @@ describe("runtimeBus degraded fallback", () => {
       live = h.bus.getState().connection === "live";
     }
     expect(live).toBe(true);
+  });
+
+  test("old fallback responses cannot overwrite newer rollback snapshots", async () => {
+    h.bus.start();
+    await flush();
+    h.sources[0]!.open();
+
+    h.sources[0]!.error();
+    h.clock.advance(9_000);
+    await flush();
+    h.sources[h.sources.length - 1]!.error();
+    h.clock.advance(9_000);
+    await flush();
+
+    const oldPoll = h.deferNextFetch();
+    h.sources[h.sources.length - 1]!.error();
+    expect(h.bus.getState().connection).toBe("degraded");
+
+    h.setSnapshot(snapshot(200, { structuredHostsEnabled: false }));
+    h.clock.advance(10_000);
+    await flush();
+
+    oldPoll.resolveSnapshot(snapshot(200, { structuredHostsEnabled: true }));
+    await flush();
+    expect(h.bus.getState()).toMatchObject({
+      connection: "degraded",
+      structuredHostsEnabled: false,
+      store: { cursor: 200 },
+    });
+
+    const teardownPoll = h.deferNextFetch();
+    h.clock.advance(10_000);
+    await flush();
+    h.clock.advance(40_000);
+    await flush();
+    h.sources[h.sources.length - 1]!.open();
+    expect(h.bus.getState()).toMatchObject({
+      connection: "live",
+      structuredHostsEnabled: false,
+      store: { cursor: 200 },
+    });
+
+    teardownPoll.resolveSnapshot(snapshot(150, { structuredHostsEnabled: true }));
+    await flush();
+
+    expect(h.bus.getState()).toMatchObject({
+      connection: "live",
+      structuredHostsEnabled: false,
+      store: { cursor: 200 },
+    });
   });
 
   test("files.revision applied on the stream notifies files subscribers", async () => {

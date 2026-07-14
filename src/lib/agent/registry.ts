@@ -2390,6 +2390,44 @@ export class AgentRegistry {
     });
   }
 
+  recoverDeliveredStructuredSpawn(launchId: string): SpawnSettlement {
+    return this.mutate((file) => {
+      const receipt = file.receipts[launchId];
+      if (!receipt) throw new Error("unknown spawn receipt");
+      if (receipt.state === "failed" || receipt.state === "conflicted") {
+        return { kind: "conflict", receipt: clone(receipt), code: "spawn_identity_conflict" };
+      }
+      if (receipt.state !== "path-pending" || !receipt.key || !receipt.artifactPath) {
+        throw new Error("structured spawn recovery identity is incomplete");
+      }
+      const entry = file.entries[sessionKeyId(receipt.key)];
+      const conversation = file.conversations[receipt.conversationId];
+      if (!entry || !conversation || entry.artifactPath !== receipt.artifactPath) {
+        throw new Error("structured spawn recovery identity is unavailable");
+      }
+      if (entry.host || entry.structuredHost?.process || entry.claimOwner
+        || (entry.status !== "dead" && entry.status !== "unhosted")) {
+        throw new Error("structured spawn host loss is unconfirmed");
+      }
+      const replacement = {
+        ...entry,
+        host: null,
+        structuredHost: null,
+        status: "dead" as const,
+        claimOwner: null,
+        pendingAction: null,
+      };
+      const changedHostPaths = activeHostPathsChangedByEntry(file, sessionKeyId(receipt.key), replacement);
+      const readinessBefore = migrationReadinessSignature(file, receipt.key.engine, changedHostPaths);
+      Object.assign(entry, replacement, { updatedAt: now() });
+      receipt.state = "completed";
+      receipt.error = null;
+      receipt.completionMode = receipt.completionMode ?? "route-recovered";
+      advanceMigrationScopeRevision(file, receipt.key.engine, readinessBefore, changedHostPaths);
+      return { kind: "settled", receipt: clone(receipt), entry: clone(entry), conversation: clone(conversation) };
+    });
+  }
+
   settleSpawn(launchId: string, entry: Omit<AgentRegistryEntry, "updatedAt">, completionMode: NonNullable<SpawnReceipt["completionMode"]> = "route-completed"): SpawnSettlement {
     return this.mutate((file) => {
       const paths = new Set([entry.artifactPath]);
@@ -2495,6 +2533,59 @@ export class AgentRegistry {
       entry.updatedAt = now();
       advanceMigrationScopeRevision(file, key.engine, readinessBefore, changedHostPaths);
       return clone(entry);
+    });
+  }
+
+  terminateStructuredHost(key: SessionKey): boolean {
+    return this.mutate((file) => {
+      const keyId = sessionKeyId(key);
+      const entry = file.entries[keyId];
+      if (!entry) return false;
+      const replacement = {
+        ...entry,
+        host: null,
+        structuredHost: null,
+        status: "dead" as const,
+        claimOwner: null,
+        pendingAction: null,
+      };
+      const changedHostPaths = activeHostPathsChangedByEntry(file, keyId, replacement);
+      const readinessBefore = migrationReadinessSignature(file, key.engine, changedHostPaths);
+      Object.assign(entry, replacement, { updatedAt: now() });
+      advanceMigrationScopeRevision(file, key.engine, readinessBefore, changedHostPaths);
+      return true;
+    });
+  }
+
+  terminateInactiveStructuredHost(
+    conversationId: ViewerConversationId,
+    key: SessionKey,
+  ): false | "current" | "predecessor" {
+    return this.mutate((file) => {
+      const conversation = file.conversations[conversationId];
+      const keyId = sessionKeyId(key);
+      const entry = file.entries[keyId];
+      if (!conversation
+        || conversation.engine !== key.engine
+        || !conversation.generations.some((generation) => generation.id === key.sessionId)
+        || !entry
+        || entry.host
+        || entry.structuredHost?.process
+        || entry.claimOwner
+        || (entry.status !== "dead" && entry.status !== "unhosted")) return false;
+      const replacement = {
+        ...entry,
+        host: null,
+        structuredHost: null,
+        status: "dead" as const,
+        claimOwner: null,
+        pendingAction: null,
+      };
+      const changedHostPaths = activeHostPathsChangedByEntry(file, keyId, replacement);
+      const readinessBefore = migrationReadinessSignature(file, key.engine, changedHostPaths);
+      Object.assign(entry, replacement, { updatedAt: now() });
+      advanceMigrationScopeRevision(file, key.engine, readinessBefore, changedHostPaths);
+      return conversation.generations.at(-1)?.id === key.sessionId ? "current" : "predecessor";
     });
   }
 
