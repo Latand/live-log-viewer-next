@@ -59,9 +59,18 @@ afterEach(() => {
   globalThis.fetch = realFetch;
 });
 
-test("Reviewer role exposes and persists the reviewed conversation selection", async () => {
-  globalThis.fetch = (async (input) => {
+test("Reviewer role persists and submits the reviewed conversation", async () => {
+  const posts: Record<string, unknown>[] = [];
+  globalThis.fetch = (async (input, init) => {
     const url = String(input);
+    if (url === "/api/spawn" && init?.method === "POST") {
+      posts.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+      return {
+        ok: true,
+        status: 202,
+        json: async () => ({ ok: true, state: "starting", launched: false, path: null, launchId: "launch-reviewer" }),
+      } as Response;
+    }
     if (url.startsWith("/api/spawn?")) return { ok: true, json: async () => ({ dirs: ["/repo"] }) } as Response;
     if (url === "/api/accounts") return { ok: true, json: async () => ({ codex: { active: "terra", accounts: [] } }) } as Response;
     if (url === "/api/roles") return {
@@ -100,4 +109,18 @@ test("Reviewer role exposes and persists the reviewed conversation selection", a
   reviews.value = implementer.conversationId;
   flushSync(() => reviews.dispatchEvent(new dom.Event("change", { bubbles: true }) as unknown as Event));
   expect(sessionStorage.getItem("llvDraftPane:review-draft:reviews")).toBe(implementer.conversationId);
+
+  const textarea = host.querySelector("textarea") as HTMLTextAreaElement;
+  const propsKey = Object.keys(textarea).find((key) => key.startsWith("__reactProps$"))!;
+  const props = (textarea as unknown as Record<string, { onChange: (event: unknown) => void }>)[propsKey]!;
+  flushSync(() => props.onChange({ target: { value: "Review the durable membership work" } }));
+  flushSync(() => host.querySelector("form")!.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  expect(posts).toHaveLength(1);
+  expect(posts[0]).toMatchObject({
+    role: "reviewer",
+    reviews: implementer.conversationId,
+    prompt: "Review the durable membership work",
+  });
 });
