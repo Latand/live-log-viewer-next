@@ -2,16 +2,28 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { expect, test } from "bun:test";
+import { afterAll, expect, test } from "bun:test";
 import { NextRequest } from "next/server";
 
-import { AgentRegistry } from "@/lib/agent/registry";
+import { agentRegistry, AgentRegistry } from "@/lib/agent/registry";
 import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
+import { codexSessionRoots } from "@/lib/accounts/codex";
 import { spawnParentSelector, spawnRequestDigest } from "@/lib/agent/spawnIdentity";
+import { rotateOperatorSpawnCapability } from "@/lib/agent/operatorCapability";
 import { spawnResponseForReceipt } from "@/lib/agent/spawnResponse";
 import { resolveSpawnLineage, resolveSpawnLineageParent, resolveSpawnParent, SpawnParentError } from "@/lib/agent/spawnParent";
-import { authenticatedAgentSpawnCaller, isAgentInitiatedSpawn } from "./admission";
+import { authenticatedAgentSpawnCaller, isAgentInitiatedSpawn, spawnLineageSelectorForCaller } from "./admission";
 import { POST } from "./route";
+
+const previousStateDir = process.env.LLV_STATE_DIR;
+const routeSandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-spawn-route-tests-"));
+process.env.LLV_STATE_DIR = path.join(routeSandbox, "state");
+
+afterAll(() => {
+  if (previousStateDir === undefined) delete process.env.LLV_STATE_DIR;
+  else process.env.LLV_STATE_DIR = previousStateDir;
+  fs.rmSync(routeSandbox, { recursive: true, force: true });
+});
 
 function registry(): AgentRegistry {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "llv-spawn-route-"));
@@ -67,7 +79,9 @@ test("agent capability binds src to the caller conversation", () => {
   });
 
   expect(authenticatedAgentSpawnCaller(request, callerPath, store)).toEqual({
+    kind: "agent",
     conversationId: begun.receipt.conversationId,
+    liveChildrenCap: 3,
   });
 
   const other = store.ensureConversation("codex", "/sessions/other.jsonl", "terra");
@@ -76,15 +90,136 @@ test("agent capability binds src to the caller conversation", () => {
   });
 });
 
-test("agent callers cannot grant themselves native sub-agent permission", async () => {
+test("operator capability skips conversation binding and rotation rejects the previous token", () => {
+  const store = registry();
+  const first = rotateOperatorSpawnCapability();
+  const request = (capability: string) => new NextRequest("http://127.0.0.1:8898/api/spawn", {
+    headers: { "x-llv-spawn-capability": capability },
+  });
+
+  expect(authenticatedAgentSpawnCaller(request(first), "/outside/viewer.jsonl", store)).toEqual({
+    kind: "operator",
+    conversationId: null,
+    liveChildrenCap: undefined,
+  });
+
+  const rotated = rotateOperatorSpawnCapability();
+  expect(authenticatedAgentSpawnCaller(request(first), "/outside/viewer.jsonl", store)).toEqual({
+    error: expect.stringContaining("x-llv-spawn-capability"),
+  });
+  expect(authenticatedAgentSpawnCaller(request(rotated), "/outside/viewer.jsonl", store)).toMatchObject({
+    kind: "operator",
+  });
+});
+
+test("operator capability file failures preserve agent admission and reject unknown credentials", () => {
+  const store = registry();
+  const capability = "A".repeat(43);
+  const callerPath = `/sessions/caller-${crypto.randomUUID()}.jsonl`;
+  const begun = store.beginSpawnRequest({
+    engine: "codex",
+    cwd: "/repo",
+    spawnCapabilityDigest: crypto.createHash("sha256").update(capability).digest("hex"),
+  });
+  if (begun.kind !== "created") throw new Error("expected create");
+  store.settleSpawn(begun.receipt.launchId, {
+    key: { engine: "codex", sessionId: crypto.randomUUID() },
+    artifactPath: callerPath,
+    cwd: "/repo",
+    accountId: "terra",
+    status: "live",
+    host: null,
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  const blockedState = path.join(routeSandbox, "blocked-state");
+  fs.writeFileSync(blockedState, "blocked\n");
+  const currentState = process.env.LLV_STATE_DIR;
+  process.env.LLV_STATE_DIR = blockedState;
+  try {
+    const request = (candidate: string) => new NextRequest("http://127.0.0.1:8898/api/spawn", {
+      headers: { "x-llv-spawn-capability": candidate },
+    });
+    expect(authenticatedAgentSpawnCaller(request(capability), callerPath, store)).toEqual({
+      kind: "agent",
+      conversationId: begun.receipt.conversationId,
+      liveChildrenCap: 3,
+    });
+    expect(authenticatedAgentSpawnCaller(request("C".repeat(43)), "/caller.jsonl", store)).toEqual({
+      error: expect.stringContaining("capability read failed"),
+      status: 503,
+    });
+  } finally {
+    process.env.LLV_STATE_DIR = currentState;
+  }
+});
+
+test("operator-authenticated non-browser calls still require lineage", async () => {
+  const capability = rotateOperatorSpawnCapability();
   const response = await POST(new NextRequest("http://127.0.0.1:8898/api/spawn", {
     method: "POST",
-    headers: { host: "127.0.0.1:8898", "content-type": "application/json" },
-    body: JSON.stringify({ src: "/caller.jsonl", role: "orchestrator", allowSubagents: true }),
+    headers: {
+      host: "127.0.0.1:8898",
+      "content-type": "application/json",
+      "x-llv-spawn-capability": capability,
+    },
+    body: JSON.stringify({ engine: "codex", cwd: "/repo", prompt: "help" }),
+  }));
+
+  expect(response.status).toBe(400);
+  expect(await response.json()).toEqual({ error: expect.stringContaining("src") });
+});
+
+test("agent callers cannot grant themselves native sub-agent permission", async () => {
+  const store = agentRegistry();
+  const capability = crypto.randomBytes(32).toString("base64url");
+  const callerPath = `/sessions/caller-${crypto.randomUUID()}.jsonl`;
+  const begun = store.beginSpawnRequest({
+    engine: "codex",
+    cwd: "/repo",
+    spawnCapabilityDigest: crypto.createHash("sha256").update(capability).digest("hex"),
+  });
+  if (begun.kind !== "created") throw new Error("expected create");
+  store.settleSpawn(begun.receipt.launchId, {
+    key: { engine: "codex", sessionId: crypto.randomUUID() },
+    artifactPath: callerPath,
+    cwd: "/repo",
+    accountId: "terra",
+    status: "live",
+    host: null,
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  const response = await POST(new NextRequest("http://127.0.0.1:8898/api/spawn", {
+    method: "POST",
+    headers: {
+      host: "127.0.0.1:8898",
+      "content-type": "application/json",
+      "x-llv-spawn-capability": capability,
+    },
+    body: JSON.stringify({ src: callerPath, role: "orchestrator", allowSubagents: true }),
   }));
 
   expect(response.status).toBe(403);
   expect(await response.json()).toEqual({ error: "allowSubagents requires an authenticated Viewer operator spawn" });
+});
+
+test("operator callers may grant native sub-agent permission", async () => {
+  const capability = rotateOperatorSpawnCapability();
+  const response = await POST(new NextRequest("http://127.0.0.1:8898/api/spawn", {
+    method: "POST",
+    headers: {
+      host: "127.0.0.1:8898",
+      "content-type": "application/json",
+      "x-llv-spawn-capability": capability,
+    },
+    body: JSON.stringify({ src: "/caller.jsonl", role: "orchestrator", allowSubagents: true }),
+  }));
+
+  expect(response.status).toBe(400);
+  expect(await response.json()).toEqual({ error: "working directory is required" });
 });
 
 test("spawn route projects a launched path-pending receipt as a truthful success", () => {
@@ -166,6 +301,60 @@ test("reviewer lineage keeps the caller and reviewed implementer distinct", () =
 
   expect(lineage.parent?.conversationId).toBe(caller.id);
   expect(lineage.reviewed?.conversationId).toBe(implementer.id);
+});
+
+test("operator lineage accepts src and keeps reviewer edges distinct", () => {
+  const store = registry();
+  const previousCodexHome = process.env.LLV_CODEX_HOME;
+  const codexHome = path.join(routeSandbox, `codex-${crypto.randomUUID()}`);
+  process.env.LLV_CODEX_HOME = codexHome;
+  const sessions = codexSessionRoots()[0]!;
+  const callerPath = path.join(sessions, "2026", "07", "14", `caller-${crypto.randomUUID()}.jsonl`);
+  const implementerPath = path.join(sessions, "2026", "07", "14", `implementer-${crypto.randomUUID()}.jsonl`);
+  fs.mkdirSync(path.dirname(callerPath), { recursive: true });
+  fs.writeFileSync(callerPath, "{}\n");
+  fs.writeFileSync(implementerPath, "{}\n");
+  try {
+    const operator = { kind: "operator", conversationId: null, liveChildrenCap: undefined } as const;
+    const override = store.ensureConversation("codex", "/sessions/override.jsonl", "terra");
+    const builder = resolveSpawnLineage(spawnLineageSelectorForCaller(operator, {
+      src: callerPath,
+      parent: implementerPath,
+      role: "builder",
+    }), store);
+    const reviewer = resolveSpawnLineage(spawnLineageSelectorForCaller(operator, {
+      src: callerPath,
+      parentConversationId: override.id,
+      role: "reviewer",
+      reviews: implementerPath,
+    }), store);
+
+    expect(builder.parent?.artifactPath).toBe(callerPath);
+    expect(reviewer.parent?.artifactPath).toBe(callerPath);
+    expect(reviewer.reviewed?.artifactPath).toBe(implementerPath);
+    expect(reviewer.parent?.conversationId).not.toBe(reviewer.reviewed?.conversationId);
+    const browserBody = { src: callerPath, parentConversationId: override.id, role: "builder" };
+    expect(spawnLineageSelectorForCaller(null, browserBody)).toBe(browserBody);
+  } finally {
+    if (previousCodexHome === undefined) delete process.env.LLV_CODEX_HOME;
+    else process.env.LLV_CODEX_HOME = previousCodexHome;
+  }
+});
+
+test("operator caller can reserve more than the ordinary live-child cap", () => {
+  const store = registry();
+  const parent = store.ensureConversation("codex", "/sessions/operator-parent.jsonl", "terra");
+  const operator = { kind: "operator", conversationId: null, liveChildrenCap: undefined } as const;
+  const reservations = Array.from({ length: 4 }, () => store.beginSpawnRequest({
+    engine: "codex",
+    cwd: "/repo",
+    parentConversationId: parent.id,
+    role: "builder",
+    liveChildrenCap: operator.liveChildrenCap,
+  }));
+
+  expect(reservations.every((reservation) => reservation.kind === "created")).toBe(true);
+  expect(Object.values(store.snapshot().lineageEdges).filter((edge) => edge.parentConversationId === parent.id)).toHaveLength(4);
 });
 
 function digestForParent(body: { parentConversationId: string }): string {

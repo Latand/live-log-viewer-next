@@ -15,8 +15,17 @@ export function scheduleAccountMigrationController(start: () => Promise<void>, d
   timer.unref?.();
 }
 
+export async function initializeOperatorSpawnCapabilityAtStartup(
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): Promise<void> {
+  const { ensureOperatorSpawnCapability, rotateOperatorSpawnCapability } = await import("@/lib/agent/operatorCapability");
+  if (env.LLV_ROTATE_OPERATOR_SPAWN_CAPABILITY === "1") rotateOperatorSpawnCapability();
+  else ensureOperatorSpawnCapability();
+}
+
 export async function register(): Promise<void> {
   if (process.env.NEXT_RUNTIME === "edge" || process.env.NEXT_PHASE?.includes("build")) return;
+  await initializeOperatorSpawnCapabilityAtStartup();
   if (process.env.LLV_STRUCTURED_HOSTS === "1") {
     const { adoptStructuredHostsAtStartup } = await import("@/lib/runtime/startup");
     try { await adoptStructuredHostsAtStartup(); }

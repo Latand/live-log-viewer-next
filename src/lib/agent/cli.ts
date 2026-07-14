@@ -90,7 +90,7 @@ export interface FreshSpecOptions {
   /** Claude only: an already-resolved managed config home. */
   claudeConfigDir?: string | null;
   claudeProjectsDir?: string | null;
-  /** Claude only: omit the Viewer-managed native sub-agent deny hook. */
+  /** Allow native Claude sub-agents and the Codex multi-agent feature. */
   allowSubagents?: boolean;
   /** Route admission owns policy materialization after its durable reservation. */
   deferClaudeSpawnPolicy?: boolean;
@@ -171,7 +171,7 @@ export function freshSpecFor(engine: AgentEngine, cwd: string, options: FreshSpe
   if (options.effort) args.push("-c", `model_reasoning_effort=${options.effort}`);
   if (options.fast != null) args.push("-c", `service_tier=${options.fast ? "priority" : "standard"}`);
   if (options.readOnly) args.push("--sandbox", "read-only");
-  args.push("--disable", "multi_agent");
+  if (!options.allowSubagents) args.push("--disable", "multi_agent");
   const command = args.map(shellQuote).join(" ");
   return {
     command: `env -u LLV_TOKEN CODEX_HOME=${shellQuote(home)} ${command}`,
@@ -185,7 +185,7 @@ export function freshSpecFor(engine: AgentEngine, cwd: string, options: FreshSpe
       fast: options.fast ?? null,
       permissionMode: options.readOnly ? "never" : null,
       readOnly: options.readOnly ?? false,
-      allowSubagents: false,
+      allowSubagents: options.allowSubagents ?? false,
       title: null,
       project: null,
       parentConversationId: null,
@@ -295,14 +295,14 @@ export function resumeSpecFor(root: string, pathname: string, options: ResumeSpe
     if (options.permissionMode && ["untrusted", "on-request", "never"].includes(options.permissionMode)) {
       command += ` --ask-for-approval ${shellQuote(options.permissionMode)}`;
     }
-    command += " --disable multi_agent";
+    if (!options.allowSubagents) command += " --disable multi_agent";
     command += ` resume ${id}`;
     return {
       command: `env -u LLV_TOKEN CODEX_HOME=${shellQuote(home)} ${command}`,
       cwd: resumeCwd(pathname),
       windowName: "codex-resume",
       engine: "codex",
-      launchProfile: { ...emptyLaunchProfileForResume(resumeCwd(pathname), options.model ?? null, options.effort ?? null), fast: options.fast ?? null, readOnly: options.readOnly ?? null, permissionMode: options.permissionMode ?? null },
+      launchProfile: { ...emptyLaunchProfileForResume(resumeCwd(pathname), options.model ?? null, options.effort ?? null), fast: options.fast ?? null, readOnly: options.readOnly ?? null, permissionMode: options.permissionMode ?? null, allowSubagents: options.allowSubagents ?? false },
     };
   }
   return null;

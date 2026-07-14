@@ -6,7 +6,7 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { UnknownAccountError } from "@/lib/accounts/codex";
 import { claudeSettingsPath, isManagedClaudeHome, UnknownClaudeAccountError } from "@/lib/accounts/claude";
-import { accountManager, resolveHealthySpawnAccount } from "@/lib/accounts/manager";
+import { resolveHealthySpawnAccount } from "@/lib/accounts/manager";
 import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
 import { freshSpecFor, type AgentEngine } from "@/lib/agent/cli";
 import { agentRegistry, SpawnChildLimitError } from "@/lib/agent/registry";
@@ -32,7 +32,7 @@ import { buildImagePayload, collectImagePayloads, deleteInboxImages, spawnAgentW
 import type { ApiError } from "@/lib/types";
 
 import { sourceCwdStatus } from "./sourceCwd";
-import { AGENT_SPAWN_LINEAGE_ERROR, AGENT_SPAWN_LIVE_CHILD_CAP, agentSpawnLineageError, authenticatedAgentSpawnCaller, isAgentInitiatedSpawn } from "./admission";
+import { AGENT_SPAWN_LINEAGE_ERROR, agentSpawnLineageError, authenticatedAgentSpawnCaller, isAgentInitiatedSpawn, spawnLineageSelectorForCaller, type AuthenticatedSpawnCaller } from "./admission";
 import { spawnAccountErrorResponse } from "./accountError";
 
 export const runtime = "nodejs";
@@ -99,19 +99,16 @@ export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse
   if (body.allowSubagents !== undefined && typeof body.allowSubagents !== "boolean") {
     return NextResponse.json({ error: "allowSubagents must be a boolean" }, { status: 400 });
   }
-  if (agentInitiated && body.allowSubagents === true) {
+  const registry = agentRegistry();
+  let authenticatedCaller: AuthenticatedSpawnCaller | null = null;
+  if (agentInitiated) {
+    const caller = authenticatedAgentSpawnCaller(req, body.src, registry);
+    if ("error" in caller) return NextResponse.json({ error: caller.error }, { status: caller.status ?? 403 });
+    authenticatedCaller = caller;
+  }
+  if (agentInitiated && body.allowSubagents === true && authenticatedCaller?.kind !== "operator") {
     return NextResponse.json({ error: "allowSubagents requires an authenticated Viewer operator spawn" }, { status: 403 });
   }
-
-  const registry = agentRegistry();
-  const authenticatedCaller = agentInitiated
-    ? authenticatedAgentSpawnCaller(req, body.src, registry)
-    : null;
-  if (authenticatedCaller && "error" in authenticatedCaller) {
-    return NextResponse.json({ error: authenticatedCaller.error }, { status: 403 });
-  }
-  const authenticatedCallerId = authenticatedCaller?.conversationId ?? null;
-
   const role = resolveSpawnRole(body);
   if (!role.ok) return NextResponse.json({ error: role.error }, { status: 400 });
   if (role.value?.role === "reviewer" && (typeof body.reviews !== "string" || !body.reviews.trim())) {
@@ -161,9 +158,10 @@ export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse
   let launchId: string | null = null;
   try {
     const account = await resolveHealthySpawnAccount(engine, body.accountId);
-    const lineage = resolveSpawnLineage(agentInitiated
-      ? { parentConversationId: authenticatedCallerId!, role: role.value?.role, reviews: body.reviews }
-      : body, registry);
+    const lineage = resolveSpawnLineage(spawnLineageSelectorForCaller(authenticatedCaller, {
+      ...body,
+      role: role.value?.role,
+    }), registry);
     const parent = lineage.parent;
     const reviewedConversationId = lineage.reviewed?.conversationId ?? null;
     if (agentInitiated && !parent) return NextResponse.json({ error: AGENT_SPAWN_LINEAGE_ERROR }, { status: 400 });
@@ -204,7 +202,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse
       parentArtifactPath,
       role: role.value?.role ?? null,
       reviewsConversationId: reviewedConversationId,
-      liveChildrenCap: agentInitiated ? AGENT_SPAWN_LIVE_CHILD_CAP : undefined,
+      liveChildrenCap: authenticatedCaller?.liveChildrenCap,
       launchProfile: spec.launchProfile,
       clientAttemptId: body.clientAttemptId ?? null,
       requestDigest: digest,

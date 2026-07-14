@@ -1,7 +1,11 @@
 import { expect, test } from "bun:test";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { performance } from "node:perf_hooks";
 
-import { accountControllerDelayMs, scheduleAccountMigrationController } from "./instrumentation";
+import { accountControllerDelayMs, initializeOperatorSpawnCapabilityAtStartup, scheduleAccountMigrationController } from "./instrumentation";
+import { operatorSpawnCapabilityPath } from "@/lib/agent/operatorCapability";
 
 test("account controller delay defaults to immediate startup and retains the explicit escape hatch", () => {
   expect(accountControllerDelayMs({})).toBe(0);
@@ -25,3 +29,23 @@ test("cold boot enables the controller while readiness receives the first runtim
   await new Promise<void>((resolve) => setTimeout(resolve, 0));
   expect(controllerStarts).toBe(1);
 }, 5_000);
+
+test("server startup mints the operator capability and rotates it on request", async () => {
+  const previousStateDir = process.env.LLV_STATE_DIR;
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-instrumentation-operator-"));
+  process.env.LLV_STATE_DIR = path.join(sandbox, "state");
+  try {
+    await initializeOperatorSpawnCapabilityAtStartup({});
+    const first = fs.readFileSync(operatorSpawnCapabilityPath(), "utf8");
+
+    await initializeOperatorSpawnCapabilityAtStartup({});
+    expect(fs.readFileSync(operatorSpawnCapabilityPath(), "utf8")).toBe(first);
+
+    await initializeOperatorSpawnCapabilityAtStartup({ LLV_ROTATE_OPERATOR_SPAWN_CAPABILITY: "1" });
+    expect(fs.readFileSync(operatorSpawnCapabilityPath(), "utf8")).not.toBe(first);
+  } finally {
+    if (previousStateDir === undefined) delete process.env.LLV_STATE_DIR;
+    else process.env.LLV_STATE_DIR = previousStateDir;
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  }
+});
