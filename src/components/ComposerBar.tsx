@@ -157,12 +157,65 @@ export function ComposerBar({
      desktop keeps the compact p-2. */
   const iconBtn = isMobile ? "relative h-8 w-8 before:absolute before:-inset-1.5 before:content-['']" : "p-2";
 
+  /* While recording, the mic collapses into a wide meter+timer chip and a
+     cancel button (see MicButtonView). Sharing the input's row with those and
+     the send button starved the live transcript into a narrow left column
+     (issue #188), so recording flips the input to a column: the text spans the
+     full width and the controls drop to a right-aligned row beneath it. Idle,
+     the controls sit inline at the field's right edge as before. */
+  const controls = (
+    <>
+      <MicButtonView {...dictation} busy={voiceSending} onText={insertSpoken} anchored />
+      <span
+        className="relative inline-flex shrink-0"
+        onContextMenu={(event) => {
+          if (!hasSendMenu || dictationRecording) return;
+          event.preventDefault();
+          setSendMenuOpen((open) => !open);
+        }}
+      >
+        <Hint label={dictationRecording ? (sendTitleRecording ?? sendLabelRecording) : sendLabelIdle} align="right">
+          <button
+            type={dictationRecording ? "button" : "submit"}
+            onClick={
+              dictationRecording
+                ? () => void stopAndSend()
+                : (event) => {
+                    if (!canSend) {
+                      event.preventDefault();
+                      event.stopPropagation();
+                    }
+                  }
+            }
+            disabled={sendDisabled}
+            aria-disabled={!canSend}
+            aria-label={dictationRecording ? sendLabelRecording : sendLabelIdle}
+            style={dictationRecording ? undefined : sendIdleStyle}
+            className={`inline-flex shrink-0 items-center justify-center rounded-control border text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 disabled:opacity-40 aria-disabled:opacity-40 ${iconBtn} ${
+              dictationRecording ? "border-danger bg-danger hover:opacity-90" : sendIdleClassName
+            }`}
+          >
+            {busy || voiceSending ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : <Play className="h-4 w-4" aria-hidden />}
+          </button>
+        </Hint>
+        {sendMenuOpen && hasSendMenu && sendMenuLabel ? (
+          <SendMenu label={sendMenuLabel} actions={sendMenuActions} onClose={() => setSendMenuOpen(false)} />
+        ) : null}
+      </span>
+    </>
+  );
+
   return (
     <>
       {/* The input is the anchor (design doc §3.5): a single sunken field that
-          owns the mic and send controls at its right edge, so send is the one
-          accent element in the composer. */}
-      <div className="flex items-end gap-1 rounded-control border border-border bg-sunken py-1 pl-2.5 pr-1 focus-within:ring-2 focus-within:ring-accent/40">
+          owns the mic and send controls. Idle it lays them out at the right
+          edge (row); while recording it stacks the controls below the
+          full-width transcript (column). */}
+      <div
+        className={`flex rounded-control border border-border bg-sunken focus-within:ring-2 focus-within:ring-accent/40 ${
+          dictationRecording ? "flex-col gap-1.5 p-2.5" : "items-end gap-1 py-1 pl-2.5 pr-1"
+        }`}
+      >
         <textarea
           ref={inputRef}
           value={displayText}
@@ -200,45 +253,15 @@ export function ComposerBar({
           placeholder={placeholder}
           aria-label={textareaAriaLabel}
           disabled={fieldsDisabled}
-          className="min-w-0 flex-1 resize-none overflow-y-auto self-center bg-transparent py-1 text-ui leading-[18px] text-primary placeholder:text-muted focus-visible:outline-none disabled:opacity-60"
+          className={`min-w-0 resize-none overflow-y-auto bg-transparent py-1 text-ui leading-[18px] text-primary placeholder:text-muted focus-visible:outline-none disabled:opacity-60 ${
+            dictationRecording ? "w-full" : "flex-1 self-center"
+          }`}
         />
-        <MicButtonView {...dictation} busy={voiceSending} onText={insertSpoken} anchored />
-        <span
-          className="relative inline-flex shrink-0"
-          onContextMenu={(event) => {
-            if (!hasSendMenu || dictationRecording) return;
-            event.preventDefault();
-            setSendMenuOpen((open) => !open);
-          }}
-        >
-          <Hint label={dictationRecording ? (sendTitleRecording ?? sendLabelRecording) : sendLabelIdle} align="right">
-            <button
-              type={dictationRecording ? "button" : "submit"}
-              onClick={
-                dictationRecording
-                  ? () => void stopAndSend()
-                  : (event) => {
-                      if (!canSend) {
-                        event.preventDefault();
-                        event.stopPropagation();
-                      }
-                    }
-              }
-              disabled={sendDisabled}
-              aria-disabled={!canSend}
-              aria-label={dictationRecording ? sendLabelRecording : sendLabelIdle}
-              style={dictationRecording ? undefined : sendIdleStyle}
-              className={`inline-flex shrink-0 items-center justify-center rounded-control border text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 disabled:opacity-40 aria-disabled:opacity-40 ${iconBtn} ${
-                dictationRecording ? "border-danger bg-danger hover:opacity-90" : sendIdleClassName
-              }`}
-            >
-              {busy || voiceSending ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : <Play className="h-4 w-4" aria-hidden />}
-            </button>
-          </Hint>
-          {sendMenuOpen && hasSendMenu && sendMenuLabel ? (
-            <SendMenu label={sendMenuLabel} actions={sendMenuActions} onClose={() => setSendMenuOpen(false)} />
-          ) : null}
-        </span>
+        {dictationRecording ? (
+          <div className="flex items-center justify-end gap-1">{controls}</div>
+        ) : (
+          controls
+        )}
       </div>
       {/* Secondary controls (mode chip, interrupt/compact, images): one quiet
           borderless row under the input. */}
