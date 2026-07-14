@@ -5,6 +5,8 @@ export interface SpawnResponse {
   target: string | null;
   /** Transcript path the fresh session will write, when knowable. */
   path: string | null;
+  /** Effective Claude permission mode for pane-less launches. */
+  effectivePermissionMode?: string;
   launchId: string;
   conversationId: string;
   launched: boolean;
@@ -22,6 +24,8 @@ export function spawnResponseForReceipt(
   path = receipt.artifactPath,
   options: { structured?: boolean } = {},
 ): SpawnResponse {
+  const structured = receipt.transport === "structured"
+    || (receipt.transport === null && options.structured === true);
   const conflict = receipt.state === "conflicted";
   const pending = receipt.state === "starting"
     || receipt.state === "pane-bound"
@@ -35,6 +39,9 @@ export function spawnResponseForReceipt(
     ok: true,
     target: receipt.pane?.paneId ?? receipt.target ?? null,
     path,
+    ...(structured && receipt.engine === "claude"
+      ? { effectivePermissionMode: receipt.launchProfile.permissionMode ?? "default" }
+      : {}),
     launchId: receipt.launchId,
     conversationId: receipt.conversationId,
     launched,

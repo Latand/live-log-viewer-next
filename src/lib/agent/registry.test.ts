@@ -1009,6 +1009,31 @@ describe("agent registry", () => {
     expect(conflict.kind).toBe("conflict");
   });
 
+  test("spawn idempotency includes effective permission mode and reserved transport", () => {
+    const store = registry();
+    const request = {
+      engine: "claude" as const,
+      cwd: "/repo",
+      accountId: "work",
+      clientAttemptId: "attempt_permission_mode",
+      requestDigest: "same-public-shape",
+      transport: "structured" as const,
+      launchProfile: emptyLaunchProfile({ cwd: "/repo", permissionMode: "bypassPermissions" }),
+    };
+    const first = store.beginSpawnRequest(request);
+    if (first.kind !== "created") throw new Error("expected create");
+
+    expect(store.beginSpawnRequest(request)).toMatchObject({
+      kind: "replay",
+      receipt: { launchId: first.receipt.launchId },
+    });
+    expect(store.beginSpawnRequest({
+      ...request,
+      launchProfile: emptyLaunchProfile({ cwd: "/repo", permissionMode: "default" }),
+    }).kind).toBe("conflict");
+    expect(store.beginSpawnRequest({ ...request, transport: "tmux" }).kind).toBe("conflict");
+  });
+
   test("spawn capability digest durably resolves its reserved conversation", () => {
     const store = registry();
     const digest = "a".repeat(64);
