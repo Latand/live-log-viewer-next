@@ -7,10 +7,21 @@ import { unavailableLimits } from "./contracts";
 import { withAccountMutationLockAsync } from "./accountMutation";
 import { agentRegistry, type AgentRegistry } from "@/lib/agent/registry";
 import { selectHeadlessAccount } from "./headlessSelection";
+import { selectHealthyClaudeAccount } from "./spawnHealth";
 
 function contextForSpawn(engine: "claude" | "codex", requested?: string | null) {
   if (engine === "claude") { const item = claudeAccountForSpawn(requested); return { engine, accountId: item.id, kind: item.kind, home: item.home, transcriptRoot: item.projectsDir, env: item.kind === "managed" ? claudeManagedEnvironment(item.home) : process.env }; }
   const item = accountForSpawn(requested); return { engine, accountId: item.id, kind: item.kind, home: item.home, transcriptRoot: item.sessionsDir, env: { ...process.env, CODEX_HOME: item.home } };
+}
+
+/** Viewer-visible spawn admission performs a fresh Claude OAuth health pass. */
+export async function resolveHealthySpawnAccount(engine: "claude" | "codex", requested?: string | null) {
+  const routed = requested ?? agentRegistry().engineRouting(engine).activeAccountId ?? undefined;
+  if (engine === "codex") return contextForSpawn(engine, routed);
+  const accounts = listClaudeAccounts();
+  if (routed && !accounts.some((account) => account.id === routed)) throw new UnknownClaudeAccountError(routed);
+  const selected = await selectHealthyClaudeAccount(accounts, routed);
+  return contextForSpawn(engine, selected.id);
 }
 
 function summary(engine: "claude" | "codex", id: string): AccountSummary {

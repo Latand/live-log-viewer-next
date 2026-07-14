@@ -83,6 +83,8 @@ export interface SpawnAttempt {
   /** Handoff source transcript, or "" for a plain draft. */
   src: string;
   phase: DurablePhase;
+  /** Teaching error for a launch that opened a pane and then failed verification. */
+  error?: string | null;
 }
 
 export function createSpawnAttempt(clientAttemptId: string, at: number, request: RecoverableSpawnRequest): SpawnAttempt & { request: RecoverableSpawnRequest } {
@@ -99,6 +101,7 @@ export function createSpawnAttempt(clientAttemptId: string, at: number, request:
     engine: request.engine,
     src: request.src,
     phase: "confirming",
+    error: null,
   };
 }
 
@@ -161,6 +164,21 @@ export function applySpawnOutcome(
     conversationId: outcome.conversationId,
     launchId: outcome.launchId,
     phase: outcome.durable,
+    error: null,
+  };
+}
+
+export function applySpawnFailure(
+  attempt: SpawnAttempt,
+  outcome: Extract<SpawnOutcome, { kind: "failed-launch" }>,
+): SpawnAttempt {
+  return {
+    ...attempt,
+    target: outcome.target,
+    conversationId: outcome.conversationId,
+    launchId: outcome.launchId,
+    phase: "attention",
+    error: outcome.message,
   };
 }
 
@@ -185,6 +203,8 @@ export type SpawnOutcome =
   /** Proven pre-launch failure: no pane opened, images cleaned up server-side.
       Safe to retry — the draft re-enables send and shows the reason. */
   | { kind: "failed-preflight"; message: string | null }
+  /** A pane opened, then positive launch verification found a terminal screen. */
+  | { kind: "failed-launch"; message: string; target: string; conversationId: string | null; launchId: string | null }
   /** The client cannot prove whether a worker exists (transport loss, opaque
       5xx, a conflicting attempt). Treated as worker-may-exist: send stays off. */
   | { kind: "ambiguous" };
@@ -207,6 +227,9 @@ export function classifySpawnResponse(status: number, ok: boolean, body: SpawnRe
     const conversationId = typeof body.conversationId === "string" ? body.conversationId : null;
     const launchId = typeof body.launchId === "string" ? body.launchId : null;
     const target = typeof body.target === "string" ? body.target : "";
+    if (body.launched === false && typeof body.error === "string" && body.error) {
+      return { kind: "failed-launch", message: body.error, target, conversationId, launchId };
+    }
     /* A settled receipt with a known path is the only deterministic match; any
        other unresolved launch receipt (path-pending, starting replay,
        conflict) becomes confirming and adopts by identity/heuristic. */
@@ -221,7 +244,7 @@ export function classifySpawnResponse(status: number, ok: boolean, body: SpawnRe
     };
   }
   /* A replay of a receipt that failed before launch is explicitly retry-safe. */
-  if (status === 409 && body?.retrySafe) return { kind: "failed-preflight", message: body?.error ?? null };
+  if (body?.retrySafe) return { kind: "failed-preflight", message: body?.error ?? null };
   /* A conflicting attempt (same key, different request) can leave the
      original worker alive. Send stays disabled. */
   if (status === 409) return { kind: "ambiguous" };

@@ -47,3 +47,13 @@ test("attention without a known target points the user at their tmux windows", (
   expect(html).toContain("launch it again");
   expect(html).not.toContain("{target}");
 });
+
+test("a verified launch failure replaces generic attention copy with the teaching error", () => {
+  const html = renderToStaticMarkup(<DraftLaunchStatus
+    phase="attention"
+    target="sess:4.0"
+    error="Claude account botfatherdev-2 needs re-login. Open Accounts, sign in, and retry."
+  />);
+  expect(html).toContain("Claude account botfatherdev-2 needs re-login");
+  expect(html).not.toContain("launch it again");
+});

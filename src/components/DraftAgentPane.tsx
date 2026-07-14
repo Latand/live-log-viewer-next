@@ -20,6 +20,7 @@ import {
   type SpawnAttempt,
   type SpawnResponseBody,
   applySpawnOutcome,
+  applySpawnFailure,
   classifySpawnResponse,
   classifyTransportLoss,
   createSpawnAttempt,
@@ -548,6 +549,8 @@ export function DraftAgentPane({
       const outcome = classifySpawnResponse(res.status, res.ok, json);
       if (outcome.kind === "launched") {
         setAttempt(applySpawnOutcome(candidate, outcome));
+      } else if (outcome.kind === "failed-launch") {
+        setAttempt(applySpawnFailure(candidate, outcome));
       } else if (outcome.kind === "failed-preflight") {
         /* The server proved that no pane opened. Restore the exact durable
            payload so editing and retrying cannot lose an attachment. */
@@ -761,7 +764,7 @@ export function DraftAgentPane({
                 {attempt.prompt || t("draft.imagesOnly")}
               </span>
             </div>
-            <DraftLaunchStatus ref={attentionRef} phase={phase} target={target} />
+            <DraftLaunchStatus ref={attentionRef} phase={phase} target={target} error={attempt.error ?? null} />
           </div>
         ) : (
           <div className="flex flex-1 flex-col items-center justify-center gap-2 text-center">

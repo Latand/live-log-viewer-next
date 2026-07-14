@@ -72,6 +72,46 @@ function readSettings(pathname: string): JsonObject {
   return settings;
 }
 
+/** Seeds the mutable Claude home state before a managed bypass launch. */
+export function prepareManagedClaudeSpawnHome(home: string, cwd: string): void {
+  const pathname = path.join(home, ".claude.json");
+  try {
+    const stat = fs.lstatSync(pathname);
+    if (stat.isSymbolicLink() || !stat.isFile()) throw new Error(`Claude state path is unsafe: ${pathname}`);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  let state: JsonObject = {};
+  if (fs.existsSync(pathname)) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(fs.readFileSync(pathname, "utf8"));
+    } catch {
+      throw new Error(`Claude state is invalid JSON: ${pathname}`);
+    }
+    const value = record(parsed);
+    if (!value) throw new Error(`Claude state must contain a JSON object: ${pathname}`);
+    state = value;
+  }
+  const projects = state.projects === undefined ? {} : record(state.projects);
+  if (!projects) throw new Error(`Claude state projects must contain a JSON object: ${pathname}`);
+  const existingProject = projects[cwd] === undefined ? {} : record(projects[cwd]);
+  if (!existingProject) throw new Error(`Claude project state must contain a JSON object: ${cwd}`);
+  atomicWrite(pathname, JSON.stringify({
+    ...state,
+    hasCompletedOnboarding: true,
+    bypassPermissionsModeAccepted: true,
+    projects: {
+      ...projects,
+      [cwd]: {
+        ...existingProject,
+        hasTrustDialogAccepted: true,
+        hasCompletedProjectOnboarding: true,
+      },
+    },
+  }, null, 2) + "\n", 0o600);
+}
+
 function managedCommand(command: unknown): boolean {
   return typeof command === "string" && command.startsWith(MANAGED_HOOK_PREFIX);
 }

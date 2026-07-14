@@ -7,6 +7,7 @@ import {
   SLOW_BOOT_MS,
   type SpawnAttempt,
   applySpawnOutcome,
+  applySpawnFailure,
   classifySpawnResponse,
   classifyTransportLoss,
   createSpawnAttempt,
@@ -120,6 +121,32 @@ describe("classifySpawnResponse — server → card outcome", () => {
     }
   });
 
+  test("verified post-launch failure stays frozen and surfaces its teaching error", () => {
+    const out = classifySpawnResponse(200, true, {
+      ok: true,
+      state: "conflict",
+      launched: false,
+      path: null,
+      conversationId: "conversation_9",
+      launchId: "launch-1",
+      target: "sess:3.0",
+      error: "Claude account botfatherdev-2 needs re-login. Open Accounts, sign in, and retry.",
+    });
+    expect(out).toEqual({
+      kind: "failed-launch",
+      message: "Claude account botfatherdev-2 needs re-login. Open Accounts, sign in, and retry.",
+      target: "sess:3.0",
+      conversationId: "conversation_9",
+      launchId: "launch-1",
+    });
+    if (out.kind !== "failed-launch") throw new Error("expected failed launch");
+    expect(applySpawnFailure(baseAttempt, out)).toMatchObject({
+      phase: "attention",
+      target: "sess:3.0",
+      error: out.message,
+    });
+  });
+
   test("400 preflight → failed-preflight, retry safe, surfaces the reason", () => {
     const out = classifySpawnResponse(400, false, { error: "directory does not exist: /nope" });
     expect(out).toEqual({ kind: "failed-preflight", message: "directory does not exist: /nope" });
@@ -141,6 +168,13 @@ describe("classifySpawnResponse — server → card outcome", () => {
   test("5xx / opaque → ambiguous (a proxy 5xx could land after launch)", () => {
     expect(classifySpawnResponse(500, false, { error: "boom" })).toEqual({ kind: "ambiguous" });
     expect(classifySpawnResponse(502, false, null)).toEqual({ kind: "ambiguous" });
+  });
+
+  test("retry-safe 503 is a visible preflight failure", () => {
+    expect(classifySpawnResponse(503, false, { error: "account needs re-login", retrySafe: true })).toEqual({
+      kind: "failed-preflight",
+      message: "account needs re-login",
+    });
   });
 
   test("transport loss → ambiguous", () => {

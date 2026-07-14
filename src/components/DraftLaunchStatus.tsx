@@ -18,16 +18,16 @@ import type { DraftPhase } from "./draftSpawn";
  * `attention` swaps it for a static "don't relaunch" glyph. In `attention` the
  * region is focusable (`tabIndex -1`) so the pane can move focus to the guidance.
  */
-export const DraftLaunchStatus = forwardRef<HTMLDivElement, { phase: DraftPhase; target: string }>(function DraftLaunchStatus(
-  { phase, target },
+export const DraftLaunchStatus = forwardRef<HTMLDivElement, { phase: DraftPhase; target: string; error?: string | null }>(function DraftLaunchStatus(
+  { phase, target, error },
   ref,
 ) {
   const { t } = useLocale();
   const attention = phase === "attention";
   const statusText = attention
-    ? target
+    ? error || (target
       ? t("draft.attention", { target })
-      : t("draft.attentionNoTarget")
+      : t("draft.attentionNoTarget"))
     : phase === "confirming"
       ? target
         ? t("draft.confirming", { target })

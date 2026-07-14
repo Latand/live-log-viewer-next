@@ -249,6 +249,45 @@ export function screenWaitsForInput(screen: string): boolean {
    screen merely lacks a menu. */
 export const BUSY_MARKERS = /esc to interrupt|ctrl\+c to (?:stop|cancel)|Interrupting/i;
 
+const CLAUDE_LOGIN_SCREEN = /Select login method|Choose (?:a|your) login method|Log in to (?:Claude|continue)|Sign in to (?:Claude|continue)/i;
+const CLAUDE_BYPASS_ACCEPTANCE_SCREEN = /Bypass Permissions mode[\s\S]*(?:accept all responsibility|No, exit)/i;
+
+export type LaunchFailure = {
+  code: "authentication_required" | "bypass_acceptance_required";
+  message: string;
+};
+
+/** Fatal startup screens that cannot receive the launch prompt. */
+export function detectLaunchFailure(engine: "claude" | "codex", screen: string): LaunchFailure | null {
+  if (engine !== "claude") return null;
+  if (BUSY_MARKERS.test(screen) || screenAtIdleComposer(screen)) return null;
+  const tail = screen.split("\n").slice(-20).join("\n");
+  if (CLAUDE_LOGIN_SCREEN.test(tail)) {
+    return {
+      code: "authentication_required",
+      message: "Claude needs account re-login. Open Accounts, sign in, and retry the launch.",
+    };
+  }
+  if (CLAUDE_BYPASS_ACCEPTANCE_SCREEN.test(tail)) {
+    return {
+      code: "bypass_acceptance_required",
+      message: "Claude bypass-permissions acceptance was not prepared. Retry the launch after refreshing the account.",
+    };
+  }
+  return null;
+}
+
+/** Positive evidence that the first prompt left the composer for a live turn. */
+export function launchPromptLanded(engine: "claude" | "codex", screen: string, prompt: string): boolean {
+  if (detectLaunchFailure(engine, screen)) return false;
+  const head = prompt.split("\n").map((line) => line.trim()).find(Boolean)?.slice(0, 32) ?? "";
+  if (!head) return screenAtIdleComposer(screen);
+  if (BUSY_MARKERS.test(screen)) return true;
+  const composer = composerLine(screen);
+  if (composer.includes(head) || composer.includes("[Pasted text")) return false;
+  return composer !== "" && READY_MARKERS.test(screen);
+}
+
 /**
  * Positive idle-composer detection: the composer prompt is drawn, the ready
  * hints are on the status bar, and no busy/interrupt hint remains. A quiet

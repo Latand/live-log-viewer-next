@@ -6,7 +6,7 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { UnknownAccountError } from "@/lib/accounts/codex";
 import { claudeSettingsPath, isManagedClaudeHome, UnknownClaudeAccountError } from "@/lib/accounts/claude";
-import { accountManager } from "@/lib/accounts/manager";
+import { accountManager, resolveHealthySpawnAccount } from "@/lib/accounts/manager";
 import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
 import { freshSpecFor, type AgentEngine } from "@/lib/agent/cli";
 import { agentRegistry, SpawnChildLimitError } from "@/lib/agent/registry";
@@ -17,7 +17,7 @@ import { spawnContentDigest, spawnParentSelector, spawnRequestDigest } from "@/l
 import { sessionKeyFromTranscript } from "@/lib/agent/sessionKey";
 import { resolveSpawnLineage, SpawnParentError } from "@/lib/agent/spawnParent";
 import { spawnResponseForReceipt, type SpawnResponse } from "@/lib/agent/spawnResponse";
-import { applyClaudeSpawnPolicy } from "@/lib/agent/spawnPolicy";
+import { applyClaudeSpawnPolicy, prepareManagedClaudeSpawnHome } from "@/lib/agent/spawnPolicy";
 import { resolveSpawnedTranscriptPath } from "@/lib/agent/spawnedTranscript";
 import { headCwd } from "@/lib/agent/transcript";
 import { persistHandoffLineage, rememberHandoffChild } from "@/lib/handoffLineage";
@@ -33,6 +33,7 @@ import type { ApiError } from "@/lib/types";
 
 import { sourceCwdStatus } from "./sourceCwd";
 import { AGENT_SPAWN_LINEAGE_ERROR, AGENT_SPAWN_LIVE_CHILD_CAP, agentSpawnLineageError, authenticatedAgentSpawnCaller, isAgentInitiatedSpawn } from "./admission";
+import { spawnAccountErrorResponse } from "./accountError";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -159,7 +160,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse
   let imagePaths: string[] = [];
   let launchId: string | null = null;
   try {
-    const account = accountManager.resolveSpawn(engine, body.accountId);
+    const account = await resolveHealthySpawnAccount(engine, body.accountId);
     const lineage = resolveSpawnLineage(agentInitiated
       ? { parentConversationId: authenticatedCallerId!, role: role.value?.role, reviews: body.reviews }
       : body, registry);
@@ -217,6 +218,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse
     launchId = begun.receipt.launchId;
     if (engine === "claude") {
       const profileId = path.basename(spec.transcript ?? "", ".jsonl");
+      if (isManagedClaudeHome(account.home)) prepareManagedClaudeSpawnHome(account.home, cwd);
       applyClaudeSpawnPolicy(account.home, {
         allowSubagents: body.allowSubagents === true,
         baseSettingsPath: isManagedClaudeHome(account.home) ? claudeSettingsPath() : null,
@@ -313,6 +315,8 @@ export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse
     if (error instanceof SpawnParentError) return NextResponse.json({ error: error.message }, { status: error.status });
     if (error instanceof SpawnChildLimitError) return NextResponse.json({ error: error.message }, { status: 429 });
     if (error instanceof UnknownAccountError || error instanceof UnknownClaudeAccountError) return NextResponse.json({ error: error.message }, { status: 400 });
+    const accountError = spawnAccountErrorResponse(error);
+    if (accountError) return accountError;
     if (receipt?.pane) {
       if (receipt.state === "prompt-delivered" || receipt.state === "host-verified") agentRegistry().markSpawnPathPending(receipt.launchId);
       const recovered = agentRegistry().snapshot().receipts[receipt.launchId];

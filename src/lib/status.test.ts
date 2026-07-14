@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 
-import { detectLiveRateLimit, screenAtIdleComposer } from "./status";
+import { detectLaunchFailure, detectLiveRateLimit, launchPromptLanded, screenAtIdleComposer } from "./status";
 
 const IDLE_CLAUDE = ["● Done. The tests pass.", "", "❯ ", "  ? for shortcuts"].join("\n");
 
@@ -48,4 +48,49 @@ test("historical usage prose above a ready composer stays clear", () => {
   ].join("\n");
 
   expect(detectLiveRateLimit(screen, Date.now() / 1000)).toBeNull();
+});
+
+test("Claude login and bypass-acceptance screens fail launch with teaching errors", () => {
+  expect(detectLaunchFailure("claude", [
+    "Welcome to Claude Code",
+    "Select login method",
+    "1. Claude account with subscription",
+  ].join("\n"))).toEqual({
+    code: "authentication_required",
+    message: "Claude needs account re-login. Open Accounts, sign in, and retry the launch.",
+  });
+  expect(detectLaunchFailure("claude", [
+    "Bypass Permissions mode",
+    "By proceeding, you accept all responsibility",
+    "No, exit",
+  ].join("\n"))).toEqual({
+    code: "bypass_acceptance_required",
+    message: "Claude bypass-permissions acceptance was not prepared. Retry the launch after refreshing the account.",
+  });
+});
+
+test("launch prompt verification accepts a submitted turn and rejects a login screen", () => {
+  const busy = [
+    "❯ Implement issue 178",
+    "✳ Deliberating… (esc to interrupt)",
+  ].join("\n");
+  expect(launchPromptLanded("claude", busy, "Implement issue 178")).toBe(true);
+  expect(launchPromptLanded("claude", "Select login method\n1. Claude account", "Implement issue 178")).toBe(false);
+  expect(launchPromptLanded("claude", "❯ Implement issue 178\n? for shortcuts", "Implement issue 178")).toBe(false);
+});
+
+test("login wording inside a live prompt or transcript never becomes a startup failure", () => {
+  const busy = [
+    "❯ Render the exact text Select login method",
+    "✳ Deliberating… (esc to interrupt)",
+  ].join("\n");
+  expect(detectLaunchFailure("claude", busy)).toBeNull();
+
+  const ready = [
+    "● The page now renders Select login method.",
+    "",
+    "❯ ",
+    "  ? for shortcuts",
+  ].join("\n");
+  expect(detectLaunchFailure("claude", ready)).toBeNull();
 });

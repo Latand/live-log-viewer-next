@@ -23,10 +23,12 @@ import { agentProcesses, isHelperArgv, pidAlive, readArgv, readPpid, type AgentP
 import {
   composerLine,
   detectBlockingGate,
+  detectLaunchFailure,
   detectStartupGate,
   isShellCommand,
+  launchPromptLanded,
   parseScreenMenu,
-  READY_MARKERS,
+  screenAtIdleComposer,
   screenTail,
 } from "@/lib/status";
 
@@ -1168,7 +1170,8 @@ export async function forgetResumePaneIfMatches(transcriptPath: string, host: Tm
 
 const SPAWN_READY_TIMEOUT_MS = 60_000;
 const SPAWN_POLL_MS = 1_000;
-const SPAWN_STABLE_ROUNDS = 3;
+const SPAWN_PROMPT_VERIFY_ROUNDS = 6;
+const SPAWN_PROMPT_VERIFY_MS = 400;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -1251,8 +1254,6 @@ async function spawnAgentWithPromptUnchecked(spec: ResumeSpec, text: string, rec
   const deadline = Date.now() + SPAWN_READY_TIMEOUT_MS;
   let agentSeen = false;
   let answeredScreen = "";
-  let previousScreen = "";
-  let stableRounds = 0;
   while (Date.now() < deadline) {
     await sleep(SPAWN_POLL_MS);
     const current = await verifyTmuxSpawnBinding(binding, endpoint);
@@ -1267,6 +1268,8 @@ async function spawnAgentWithPromptUnchecked(spec: ResumeSpec, text: string, rec
     agentSeen = true;
 
     const screen = await paneScreen(target, endpoint);
+    const launchFailure = detectLaunchFailure(spec.engine, screen);
+    if (launchFailure) throw new Error(launchFailure.message);
     /* Startup gates (trust-folder, resume-summary picker, other option-list
        dialogs) each default to the safe option, so Enter clears them.
        Re-answering only when the screen changed avoids hammering Enter into a
@@ -1276,24 +1279,21 @@ async function spawnAgentWithPromptUnchecked(spec: ResumeSpec, text: string, rec
       logEvent("gate", { target, cwd: spec.cwd, result: "ok", reason: gate });
       await runBoundTmux(["send-keys", "-t", target, "Enter"]);
       answeredScreen = screen;
-      previousScreen = "";
-      stableRounds = 0;
       continue;
     }
-    if (READY_MARKERS.test(screen)) break;
-    if (screen === previousScreen) {
-      stableRounds += 1;
-      if (stableRounds >= SPAWN_STABLE_ROUNDS) break;
-    } else {
-      stableRounds = 0;
-      previousScreen = screen;
-    }
+    if (screenAtIdleComposer(screen)) break;
   }
 
   const finalPane = await verifyTmuxSpawnBinding(binding, endpoint);
   if (!finalPane || isShellCommand(finalPane.command)) {
     logEvent("spawn", { target, cwd: spec.cwd, result: "error", reason: "agent_exited_on_boot" });
     throw new Error(`agent did not start in the window: ${screenTail(await paneScreen(target, endpoint))}`);
+  }
+  const readyScreen = await paneScreen(target, endpoint);
+  const readyFailure = detectLaunchFailure(spec.engine, readyScreen);
+  if (readyFailure) throw new Error(readyFailure.message);
+  if (!screenAtIdleComposer(readyScreen)) {
+    throw new Error(`agent never reached a launch-ready prompt: ${screenTail(readyScreen)}`);
   }
   const agent = selectSpawnedAgentProcess(panePid, spec.engine, spec.cwd, agentProcesses(true), readPpid);
   if (!agent) throw new Error("booted agent process could not be verified beneath the created pane");
@@ -1319,7 +1319,22 @@ async function spawnAgentWithPromptUnchecked(spec: ResumeSpec, text: string, rec
     meta: { window: spec.windowName, display },
   });
   const fencedPrompt = fenceViewerSpawnPrompt(spec.engine, text);
-  if (fencedPrompt) await sendText(target, fencedPrompt);
+  if (fencedPrompt) {
+    await sendText(target, fencedPrompt);
+    let promptVerified = false;
+    let promptScreen = "";
+    for (let round = 0; round < SPAWN_PROMPT_VERIFY_ROUNDS; round += 1) {
+      promptScreen = await paneScreen(target, endpoint);
+      const promptFailure = detectLaunchFailure(spec.engine, promptScreen);
+      if (promptFailure) throw new Error(promptFailure.message);
+      if (launchPromptLanded(spec.engine, promptScreen, fencedPrompt)) {
+        promptVerified = true;
+        break;
+      }
+      await sleep(SPAWN_PROMPT_VERIFY_MS);
+    }
+    if (!promptVerified) throw new Error(`launch prompt was not accepted by the agent: ${screenTail(promptScreen)}`);
+  }
   const finalVerification = await verifyTmuxSpawnBinding(binding, endpoint);
   if (!finalVerification ||
     !pidAlive(agent.pid) ||

@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { applyClaudeSpawnPolicy, fenceViewerSpawnPrompt, NATIVE_SUBAGENT_DENY_MESSAGE, VIEWER_SPAWN_PROMPT_FENCE } from "./spawnPolicy";
+import { applyClaudeSpawnPolicy, fenceViewerSpawnPrompt, NATIVE_SUBAGENT_DENY_MESSAGE, prepareManagedClaudeSpawnHome, VIEWER_SPAWN_PROMPT_FENCE } from "./spawnPolicy";
 
 const homes: string[] = [];
 
@@ -106,6 +106,33 @@ test("allowSubagents uses an isolated profile while the denied profile stays enf
 
   expect(denied.hooks.PreToolUse.some((group) => group.matcher === "Task|Agent")).toBe(true);
   expect(allowed.hooks.PreToolUse).toEqual([{ matcher: "Read", hooks: [{ type: "command", command: "user-read-hook" }] }]);
+});
+
+test("managed Claude launch state accepts bypass mode and trusts the exact spawn directory", () => {
+  const accountHome = home();
+  const statePath = path.join(accountHome, ".claude.json");
+  fs.writeFileSync(statePath, JSON.stringify({
+    theme: "dark",
+    projects: { "/existing": { hasTrustDialogAccepted: true, custom: "kept" } },
+  }));
+
+  prepareManagedClaudeSpawnHome(accountHome, "/repo/worktree");
+
+  const state = JSON.parse(fs.readFileSync(statePath, "utf8")) as {
+    theme: string;
+    hasCompletedOnboarding: boolean;
+    bypassPermissionsModeAccepted: boolean;
+    projects: Record<string, Record<string, unknown>>;
+  };
+  expect(state.theme).toBe("dark");
+  expect(state.hasCompletedOnboarding).toBe(true);
+  expect(state.bypassPermissionsModeAccepted).toBe(true);
+  expect(state.projects["/existing"]).toEqual({ hasTrustDialogAccepted: true, custom: "kept" });
+  expect(state.projects["/repo/worktree"]).toMatchObject({
+    hasTrustDialogAccepted: true,
+    hasCompletedProjectOnboarding: true,
+  });
+  expect(fs.statSync(statePath).mode & 0o777).toBe(0o600);
 });
 
 test("Codex spawn prompts carry the Viewer lineage fence", () => {

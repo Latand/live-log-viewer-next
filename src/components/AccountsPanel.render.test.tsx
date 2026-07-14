@@ -72,6 +72,7 @@ test("renders a capacity chip per account and dims the stale one", () => {
 
 test("shows account ids and auth health when labels collide", () => {
   const html = render(base({
+    engine: "claude",
     accounts: [
       { id: "botfatherdev-2", label: "botfatherdev", kind: "managed", authPresent: true, authHealth: "signed_out", loginPending: false, loginState: "idle", deviceAuth: null },
       { id: "botfatherdev-3", label: "botfatherdev", kind: "managed", authPresent: true, authHealth: "authenticated", loginPending: false, loginState: "authenticated", deviceAuth: null },
@@ -83,6 +84,9 @@ test("shows account ids and auth health when labels collide", () => {
   expect(html).toContain("botfatherdev-3");
   expect(html).toContain("Signed out");
   expect(html).toContain("Authenticated");
+  expect(html).toContain("bg-danger-soft text-danger");
+  expect(html).toContain("needs sign-in");
+  expect(html).toContain(">Sign in<");
 });
 
 test("breaks out each account's session and weekly windows with reset times", () => {

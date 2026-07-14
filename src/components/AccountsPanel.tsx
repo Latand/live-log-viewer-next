@@ -15,6 +15,7 @@ import { type TFunction, useLocale } from "@/lib/i18n";
 import { handleOverlayEscape } from "@/lib/overlay";
 
 import { Check, Loader2, X } from "./icons";
+import { Badge } from "./ui/Badge";
 import { formatResetClock, formatResetEta } from "./rateLimit";
 import { engineTintOf } from "./utils";
 
@@ -109,9 +110,13 @@ function AccountLimitsDetail({ account }: { account: AccountOption }) {
 
 type RowState = "active" | "needsLogin" | "pending" | "idle";
 
+function authHealth(account: AccountOption): AccountAuthHealth {
+  return account.authHealth ?? (account.authPresent ? "unknown" : "signed_out");
+}
+
 function rowState(account: AccountOption, activeId: string): RowState {
   if (account.loginPending) return "pending";
-  if (!account.authPresent) return "needsLogin";
+  if (!account.authPresent || authHealth(account) === "signed_out") return "needsLogin";
   if (account.id === activeId) return "active";
   return "idle";
 }
@@ -133,12 +138,12 @@ function StateChip({ state }: { state: RowState }) {
 
 function AuthIdentity({ account }: { account: AccountOption }) {
   const { t } = useLocale();
-  const health: AccountAuthHealth = account.authHealth ?? (account.authPresent ? "unknown" : "signed_out");
+  const health = authHealth(account);
+  const tone = health === "authenticated" ? "success" : health === "signed_out" || health === "error" ? "danger" : "neutral";
   return (
     <span className="flex min-w-0 items-center gap-1 text-[9.5px] font-medium text-muted">
       <code className="truncate font-mono">{account.id}</code>
-      <span aria-hidden>·</span>
-      <span className="shrink-0">{t(AUTH_HEALTH_KEY[health])}</span>
+      <Badge tone={tone} className="px-1.5 py-0 text-[9px]">{t(AUTH_HEALTH_KEY[health])}</Badge>
     </span>
   );
 }
@@ -147,7 +152,7 @@ function AccountRow({ account, engine, activeId, onSelect, onRemove, disabled }:
   const { t } = useLocale();
   const state = rowState(account, activeId);
   const isActive = account.id === activeId;
-  const selectionDisabled = disabled || !account.authPresent || account.loginPending;
+  const selectionDisabled = disabled || !account.authPresent || authHealth(account) === "signed_out" || account.loginPending;
   // Removal deletes the managed home (including its credentials) with no undo,
   // so the unblocked path arms on the first click and only executes on a
   // second, explicit confirm — mirroring the confirm step migration already
@@ -363,7 +368,7 @@ function ClaudeLoginRow({ account, state, loginBusy }: { account: AccountOption;
 
   // Managed account with no auth and no live op (covers canceled and the broken
   // production account): a Sign in affordance that restarts login in place.
-  if (account.kind === "managed" && !account.authPresent) {
+  if (account.kind === "managed" && (!account.authPresent || authHealth(account) === "signed_out")) {
     return (
       <div ref={rowRef} tabIndex={-1} className="flex items-center gap-2 px-3 pb-2 pl-[26px] focus-visible:outline-none">
         <button

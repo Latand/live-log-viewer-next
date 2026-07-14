@@ -10,6 +10,7 @@ export interface SpawnResponse {
   launched: boolean;
   retrySafe: boolean;
   state: "settled" | "path-pending" | "starting" | "conflict";
+  error?: string;
 }
 
 export function spawnResponseForReceipt(receipt: SpawnReceipt, path = receipt.artifactPath): SpawnResponse {
@@ -28,6 +29,7 @@ export function spawnResponseForReceipt(receipt: SpawnReceipt, path = receipt.ar
     conversationId: receipt.conversationId,
     launched,
     retrySafe: receipt.state === "failed",
+    ...(receipt.error ? { error: receipt.error } : {}),
     state: conflict
       ? "conflict"
       : pending

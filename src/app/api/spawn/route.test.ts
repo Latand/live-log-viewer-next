@@ -113,6 +113,20 @@ test("spawn route projects a launched path-pending receipt as a truthful success
   });
 });
 
+test("a pane-bound launch verification failure returns launched false with its teaching error", () => {
+  const store = registry();
+  const begun = store.beginSpawnRequest({ engine: "claude", cwd: "/repo", accountId: "botfatherdev-2" });
+  if (begun.kind !== "created") throw new Error("expected a new receipt");
+  store.bindSpawnPane(begun.receipt.launchId, { endpoint: "/tmp", server: { pid: 9, startIdentity: "9:a" }, paneId: "%9", panePid: { pid: 99, startIdentity: "99:a" }, target: "agents:9.0" });
+  store.failSpawn(begun.receipt.launchId, "Claude account botfatherdev-2 needs re-login. Open Accounts, sign in, and retry.");
+
+  expect(spawnResponseForReceipt(store.snapshot().receipts[begun.receipt.launchId]!)).toMatchObject({
+    launched: false,
+    state: "conflict",
+    error: "Claude account botfatherdev-2 needs re-login. Open Accounts, sign in, and retry.",
+  });
+});
+
 test("spawn route accepts an explicit stable parent conversation identity", () => {
   const store = registry();
   const parentPath = "/sessions/rollout-019f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl";
