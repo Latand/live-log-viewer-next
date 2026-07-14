@@ -5,8 +5,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 import { useBoardActionHistory } from "@/hooks/useBoardActionHistory";
 import { queueColumnOpen, useBoardState } from "@/hooks/useBoardState";
-import { conversationIdentity } from "@/lib/accounts/identity";
 import { FavoritesProvider, type FavoritesApi } from "./favorites/FavoritesContext";
+import { resolveFavoriteRows } from "./favorites/favoriteRows";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { viewBus } from "@/hooks/viewPresenceBus";
 import type { Flow } from "@/lib/flows/types";
@@ -327,6 +327,11 @@ export function ProjectDashboard({
      card through context, and the resolved rows (one live file per favorited
      id, freshest generation) the docked panel lists. */
   const favoriteIds = board.prefs.favorites;
+  /* The crowned identities as a membership set: the scheme layout lifts these
+     roots into the pinned top band (issue #224), and the set identity only moves
+     when membership does, so a poll that returns the same favorites never
+     re-lays-out the board. */
+  const favoriteIdSet = useMemo<ReadonlySet<string>>(() => new Set(favoriteIds), [favoriteIds]);
   const favoritesApi = useMemo<FavoritesApi>(
     () => ({
       has: (id) => favoriteIds.includes(id),
@@ -338,20 +343,7 @@ export function ProjectDashboard({
   /* One row per favorited id that still has a scanned transcript, keeping the
      freshest generation so a resumed conversation lists once under its current
      file. Sorted freshest-first for the panel. */
-  const favoriteRows = useMemo(() => {
-    if (favoriteIds.length === 0) return [] as { id: string; file: FileEntry; project: string }[];
-    const favoriteSet = new Set(favoriteIds);
-    const byId = new Map<string, FileEntry>();
-    for (const file of files) {
-      const id = conversationIdentity(file);
-      if (!favoriteSet.has(id)) continue;
-      const existing = byId.get(id);
-      if (!existing || file.mtime > existing.mtime) byId.set(id, file);
-    }
-    return [...byId.entries()]
-      .map(([id, file]) => ({ id, file, project: projectKey(file) }))
-      .sort((a, b) => b.file.mtime - a.file.mtime);
-  }, [files, favoriteIds]);
+  const favoriteRows = useMemo(() => resolveFavoriteRows(files, favoriteIds), [files, favoriteIds]);
   const [drafts, setDrafts] = useState<string[]>([]);
   const [pendingRestoredHandoffs, setPendingRestoredHandoffs] = useState<Set<string>>(() => new Set());
   /* The phone focus view reports its currently-focused conversation here so the
@@ -1226,6 +1218,7 @@ export function ProjectDashboard({
               workerStacks={workerStacks}
               tasks={hasNodes ? projectTasks : []}
               drafts={hasNodes ? visibleDrafts : []}
+              favorites={favoriteIdSet}
               loaded={loaded}
               focus={highlight}
               onSelect={openSwitchboardFile}
@@ -1266,6 +1259,7 @@ export function ProjectDashboard({
                 tasks={hasNodes ? projectTasks : []}
                 workerStacks={workerStacks}
                 drafts={hasNodes ? visibleDrafts : []}
+                favorites={favoriteIdSet}
                 focus={highlight}
                 attentionPaths={attentionPaths}
                 onSelect={openSwitchboardFile}

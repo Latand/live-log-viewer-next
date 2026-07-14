@@ -1,6 +1,6 @@
 "use client";
 
-import { Filter, TriangleAlert, X } from "lucide-react";
+import { Crown, Filter, TriangleAlert, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 
 import { formatConversationHash, parseConversationHash, resolveConversationTarget, withoutArchivedPredecessors, type ConversationHash } from "@/lib/accounts/identity";
@@ -8,6 +8,7 @@ import { useAgentChimes } from "@/hooks/useAgentChimes";
 import { useArchivedProjects } from "@/hooks/useArchivedProjects";
 import { useEffectiveFlows } from "@/components/flows/flowModel";
 import { useFiles } from "@/hooks/useFiles";
+import { useBoardState } from "@/hooks/useBoardState";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useViewPresence } from "@/hooks/useViewPresence";
 import { OVERVIEW_CONTEXT, OVERVIEW_SLICE, viewBus } from "@/hooks/viewPresenceBus";
@@ -16,13 +17,14 @@ import type { FileEntry } from "@/lib/types";
 
 import { attentionId, buildAttentionQueue, nextAttention, STALLED_ATTENTION_TTL, type AttentionItem } from "./attention";
 import { ConnectionPill } from "./ConnectionPill";
+import { resolveFavoriteRows, type FavoriteRow } from "./favorites/favoriteRows";
 import { OverviewBoard } from "./OverviewBoard";
 import { ProjectDashboard, queueColumnOpen } from "./ProjectDashboard";
 import { isChildConversation, OVERVIEW, projectKey } from "./projectModel";
 import { ProjectRail } from "./ProjectRail";
 import { SupervisorHealthAlert } from "./SupervisorHealthAlert";
 import { DeploymentStatusPill } from "./runtime/DeploymentStatusPill";
-import { cleanTitle, fmtAge } from "./utils";
+import { activityDot, cleanTitle, fmtAge } from "./utils";
 
 const PROJECT_KEY = "llvProject";
 
@@ -280,6 +282,16 @@ export function Viewer() {
   const [queueOpen, setQueueOpen] = useState(false);
   const queueRef = useRef<HTMLDivElement | null>(null);
 
+  /* Crown favorites pinned atop the «Чекають» popover (issue #224): the same
+     durable board prefs the dashboard reads, scoped to the current project so
+     the section mirrors the pinned scheme row. The overview has no board, so it
+     lists nothing. */
+  const favoritesBoard = useBoardState(project === OVERVIEW ? null : project);
+  const favoriteRows = useMemo(
+    () => (project === OVERVIEW ? [] : resolveFavoriteRows(files, favoritesBoard.prefs.favorites).filter((row) => row.project === project)),
+    [files, favoritesBoard.prefs.favorites, project],
+  );
+
   useEffect(() => {
     document.title = queue.length ? `(${queue.length}) Agent Log Viewer` : "Agent Log Viewer";
   }, [queue.length]);
@@ -390,6 +402,17 @@ export function Viewer() {
     [project, selectProject, requestFocus],
   );
 
+  /* A crowned row in the popover focuses its conversation, switching project
+     first if the favorite lives elsewhere — same hand-off as an attention jump. */
+  const openFavorite = useCallback(
+    (row: FavoriteRow) => {
+      setQueueOpen(false);
+      if (row.project !== project) selectProject(row.project);
+      requestFocus(row.file.path);
+    },
+    [project, selectProject, requestFocus],
+  );
+
   useEffect(() => {
     /* Toast fires on hard-blocked signals only — a stalled id must never enter
        this seen-set, so the guard narrows before the shared derivation. */
@@ -459,6 +482,40 @@ export function Viewer() {
             isMobile ? "fixed inset-x-3 top-12" : "absolute right-0 top-[calc(100%+6px)] w-[340px] max-w-[calc(100vw-2rem)]"
           } z-50 max-h-[60vh] overflow-y-auto rounded-[10px] border border-border bg-card p-1.5 shadow-1`}
         >
+          {/* Crowned conversations pinned at the top, mirroring the scheme's
+              favorites row (issue #224). */}
+          {favoriteRows.length ? (
+            <div className="mb-1 border-b border-border pb-1">
+              <div className="flex items-center gap-1 px-2.5 pb-0.5 pt-1.5 text-label font-semibold text-secondary">
+                <Crown className="h-3 w-3 fill-crown text-crown" aria-hidden />
+                {t("favorites.sectionTitle")}
+              </div>
+              {favoriteRows.map((row) => (
+                <div key={row.id} className="flex items-center gap-1 rounded-[8px] hover:bg-canvas">
+                  <button
+                    type="button"
+                    className="flex min-w-0 flex-1 items-center gap-1.5 rounded-[8px] px-2.5 py-2 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                    title={t("favorites.focusTitle", { title: cleanTitle(row.file.title, 60) })}
+                    onClick={() => openFavorite(row)}
+                  >
+                    <span className={`h-2 w-2 shrink-0 rounded-full ${activityDot(row.file.activity)}`} aria-hidden />
+                    <span className="min-w-0 flex-1 truncate text-[12px] font-semibold text-primary">
+                      {cleanTitle(row.file.title, 90)}
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    className="mr-1 inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-[6px] text-crown hover:bg-crown-soft focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                    aria-label={t("branch.unfavorite")}
+                    title={t("branch.unfavorite")}
+                    onClick={() => favoritesBoard.setFavorite(row.id, false)}
+                  >
+                    <Crown className="h-3.5 w-3.5 fill-crown" aria-hidden />
+                  </button>
+                </div>
+              ))}
+            </div>
+          ) : null}
           <div className="px-2.5 pb-1 pt-1.5 text-label font-semibold text-secondary">
             {t("attention.popoverTitle")}
           </div>

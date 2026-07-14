@@ -14,7 +14,7 @@ import { conversationIdentity } from "@/lib/accounts/identity";
 
 import { registerLinkTarget } from "./AgentLink";
 import { DeleteFileButton } from "./DeleteFileButton";
-import { FavoriteCrown } from "./FavoriteCrown";
+import { FavoriteCrown, FavoriteCrownMarker } from "./FavoriteCrown";
 import { MigrationDivider, MigrationRibbon } from "./MigrationRibbon";
 import { EffortPills } from "./EffortPills";
 import { AgentRuntimeControls } from "./AgentRuntimeControls";
@@ -205,6 +205,9 @@ export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noCompose
       className={`relative flex min-h-0 min-w-0 flex-1 ${tone.glow ? "pane-attention" : ""}`}
       style={tone.glow ? ({ "--pane-glow": tone.glow } as React.CSSProperties) : undefined}
     >
+      {/* The favorited-state crown perched on the top edge (issue #224); lives on
+          this unclipped wrapper so it can overhang the card frame from above. */}
+      {showFavorite ? <FavoriteCrownMarker id={cardId} /> : null}
       <section
         ref={paneRef}
         /* Text inside the column must stay selectable: the canvas drag-pan skips

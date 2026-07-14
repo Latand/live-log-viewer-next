@@ -20,6 +20,7 @@ import {
 } from "./agentLinks";
 import { type BranchGroup, descendantsOf, isChildConversation, kidsIndex } from "@/components/projectModel";
 import { cleanTitle, engineColor } from "@/components/utils";
+import { conversationIdentity } from "@/lib/accounts/identity";
 
 /* World geometry of the scheme canvas, in unscaled pixels. */
 export const NODE_W = 600;
@@ -35,6 +36,9 @@ const GAP_Y = 130;
 export const INDENT = 64;
 const GROUP_GAP = 150;
 const PAD = 100;
+/* Vertical corridor between the pinned favorites band and the rest of the board
+   (issue #224): wider than GAP_Y so the crowned row reads as its own region. */
+const FAV_BAND_GAP = 220;
 /* Corridor between an implementer and its reviewer deck: wide enough for the
    two cycle arcs and the ⟳ hub between the cards. Exported so the flow strip
    can span the whole pair. */
@@ -221,6 +225,11 @@ export function buildSchemeLayout(
       `deriveGroups` did not already frame gets a docked placeholder group
       carrying its plan, so a provisioning pipeline is never surfaceless. */
   surfacePipelines: Pipeline[] = [],
+  /** Durable identities (`conversationIdentity`) the user has crowned (issue
+      #224). A group/manual root whose identity is favorited is lifted into a
+      dedicated band PINNED at the very top of the scheme, ordered within the band
+      by activity recency; everything else flows below. Empty ⇒ prior behavior. */
+  favorites: ReadonlySet<string> = new Set(),
 ): SchemeLayout {
   const byAll = new Map(files.map((file) => [file.path, file]));
   const kids = kidsIndex(files);
@@ -331,6 +340,7 @@ export function buildSchemeLayout(
     stackFor: Map<string, FileEntry[]>,
     deck: Map<string, FileEntry[]>,
     rootPath: string,
+    bandTop: number,
   ) => {
     const place = (col: { file: FileEntry; tasks: FileEntry[] }, x: number, y: number, depth: number): number => {
       const h = depth === 0 ? ROOT_H : CHILD_H;
@@ -420,12 +430,12 @@ export function buildSchemeLayout(
       const subtree = used > 0 ? Math.max(NODE_W, INDENT + used) : NODE_W;
       return Math.max(subtree, flow ? NODE_W + LOOP_GAP + NODE_W : NODE_W);
     };
-    return place(top, cursor, PAD, 0);
+    return place(top, cursor, bandTop, 0);
   };
 
-  for (const group of groups) {
+  const placeGroup = (group: BranchGroup, bandTop: number) => {
     const cols = group.columns;
-    if (!cols.length) continue;
+    if (!cols.length) return;
     const topPath = cols[0]!.file.path;
     const inGroup = new Set(cols.map((col) => col.file.path));
 
@@ -467,10 +477,10 @@ export function buildSchemeLayout(
       }
     }
     const deck = new Map<string, FileEntry[]>([[topPath, deckItems]]);
-    cursor += placeTree(cols[0]!, childrenOf, stackFor, deck, group.key) + GROUP_GAP;
-  }
+    cursor += placeTree(cols[0]!, childrenOf, stackFor, deck, group.key, bandTop) + GROUP_GAP;
+  };
 
-  for (const file of manual) {
+  const placeManual = (file: FileEntry, bandTop: number) => {
     const descendants = descendantsOf(file, files)
       .map((row) => row.file)
       .filter((entry) => !claimed.has(entry.path));
@@ -483,13 +493,53 @@ export function buildSchemeLayout(
         new Map(quiet.length ? [[file.path, quiet]] : []),
         new Map([[file.path, deckItems]]),
         file.parent ? "" : file.path,
+        bandTop,
       ) + GROUP_GAP;
+  };
+
+  /* ── Favorites band (issue #224) ──────────────────────────────────────────
+     Crowned roots lift into their own row pinned at the very top, ordered
+     within the band purely by activity recency (freshest mtime first). Their
+     subtrees (edges, decks, quiet stacks) grow exactly as usual — only the row
+     they sit in is fixed. Everything else lays out in a second band below the
+     deepest favorite. With no favorites, `restTop` collapses to PAD and the
+     board is laid out in one band exactly as before. */
+  const isFavoriteRoot = (file: FileEntry) => favorites.has(conversationIdentity(file));
+  const recency = (file: FileEntry) => file.mtime;
+  const favGroups: BranchGroup[] = [];
+  const restGroups: BranchGroup[] = [];
+  for (const group of groups) {
+    const top = group.columns[0]?.file;
+    (top && isFavoriteRoot(top) ? favGroups : restGroups).push(group);
   }
+  const favManual: FileEntry[] = [];
+  const restManual: FileEntry[] = [];
+  for (const file of manual) (isFavoriteRoot(file) ? favManual : restManual).push(file);
+  favGroups.sort((a, b) => recency(b.columns[0]!.file) - recency(a.columns[0]!.file));
+  favManual.sort((a, b) => recency(b) - recency(a));
+  const hasFavorites = favGroups.length + favManual.length > 0;
+
+  for (const group of favGroups) placeGroup(group, PAD);
+  for (const file of favManual) placeManual(file, PAD);
+
+  /* The favorites band's deepest edge — the second band starts just below it. */
+  let bandBottom = PAD;
+  if (hasFavorites) {
+    for (const node of nodes) bandBottom = Math.max(bandBottom, node.y + node.h);
+    for (const deck of decks) bandBottom = Math.max(bandBottom, deck.y + deck.h);
+    for (const stack of stacks) bandBottom = Math.max(bandBottom, stack.y + stack.h);
+    for (const draft of drafts) bandBottom = Math.max(bandBottom, draft.y + draft.h);
+  }
+  const restTop = hasFavorites ? bandBottom + FAV_BAND_GAP : PAD;
+
+  cursor = PAD;
+  for (const group of restGroups) placeGroup(group, restTop);
+  for (const file of restManual) placeManual(file, restTop);
 
   /* Remaining drafts trail the row like fresh top-level nodes: root-sized, no edges. */
   for (const id of draftIds) {
     if (placedDrafts.has(id)) continue;
-    drafts.push({ key: "draft::" + id, id, x: cursor, y: PAD, w: NODE_W, h: ROOT_H });
+    drafts.push({ key: "draft::" + id, id, x: cursor, y: restTop, w: NODE_W, h: ROOT_H });
     cursor += NODE_W + GROUP_GAP;
   }
 
@@ -524,7 +574,7 @@ export function buildSchemeLayout(
       seen.add(pipeline.id);
       return true;
     });
-    let slotDockY = PAD;
+    let slotDockY = restTop;
     for (const pipeline of pool) {
       const pending = pipelinePlaceholderStages(pipeline, placedPaths, placedFlowIds);
       if (!pending.length) continue;
@@ -703,7 +753,7 @@ export function buildSchemeLayout(
   /* Fallback docked halo for an active surface pipeline with neither placed
      members nor placeholder slots (e.g. completed but its transcripts left the
      scan): a memberless plan card, as before (issue #136). */
-  let dockY = PAD;
+  let dockY = restTop;
   for (const pipeline of surfacePipelines) {
     if ((pipeline.state === "closed" && !pipeline.restored) || framedPipelineIds.has(pipeline.id)) continue;
     framedPipelineIds.add(pipeline.id);

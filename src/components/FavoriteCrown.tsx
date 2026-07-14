@@ -63,10 +63,35 @@ export function FavoriteCrown({
         aria-hidden
         className={`${touch ? "h-5 w-5" : "h-4 w-4"} transition-[color,fill,filter,transform] duration-200 ${
           favorited
-            ? "fill-warning text-warning drop-shadow-[0_0_5px_color-mix(in_srgb,var(--color-warning)_65%,transparent)]"
-            : "text-muted [stroke-dasharray:2_3] group-hover/crown:fill-warning group-hover/crown:text-warning group-hover/crown:[stroke-dasharray:0]"
+            ? "fill-crown text-crown drop-shadow-[0_0_5px_color-mix(in_srgb,var(--color-crown)_65%,transparent)]"
+            : "text-muted [stroke-dasharray:2_3] group-hover/crown:fill-crown group-hover/crown:text-crown group-hover/crown:[stroke-dasharray:0]"
         }`}
       />
     </button>
+  );
+}
+
+/**
+ * The favorited-state marker (issue #224): a gold crown that sits ON the
+ * window's top-right edge, overlapping the frame from above like a crown worn by
+ * the card. Purely decorative — the header {@link FavoriteCrown} owns the toggle
+ * — so it is `aria-hidden` and click-through. Renders nothing unless this id is
+ * favorited (or outside a `FavoritesProvider`), so an unfavorited card is clean.
+ *
+ * Mount on the card's UNCLIPPED outer wrapper: the negative top offset must
+ * overhang the pane's rounded frame, which its own `overflow-hidden` section
+ * would otherwise cut.
+ */
+export function FavoriteCrownMarker({ id }: { id: string }) {
+  const favorites = useFavorites();
+  if (!favorites?.has(id)) return null;
+  return (
+    <span
+      aria-hidden
+      data-favorite-marker="on"
+      className="favorite-crown-marker pointer-events-none absolute -top-2.5 right-3 z-[3] inline-flex h-5 w-5 items-center justify-center rounded-full"
+    >
+      <Crown className="h-4 w-4 fill-crown text-crown drop-shadow-[0_1px_2px_color-mix(in_srgb,var(--color-crown)_55%,transparent)]" aria-hidden />
+    </span>
   );
 }

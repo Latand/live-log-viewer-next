@@ -11,17 +11,13 @@ import { formatDue, isOverdue } from "@/lib/tasks/helpers";
 import type { BoardTask } from "@/lib/tasks/types";
 import type { FileEntry } from "@/lib/types";
 
+import { type FavoriteRow } from "@/components/favorites/favoriteRows";
+
 import { createTask } from "./taskApi";
 import { TaskComposer } from "./TaskComposer";
 import { TASK_TONES, taskTitle } from "./taskModel";
 
-/** A favorited conversation resolved to its freshest scanned generation. */
-export interface FavoriteRow {
-  /** Durable conversation identity (`conversationIdentity`). */
-  id: string;
-  file: FileEntry;
-  project: string;
-}
+export type { FavoriteRow };
 
 /**
  * The crown-favorites list (issue #185), docked above the task list and scoped
@@ -43,7 +39,7 @@ function FavoritesSection({
   return (
     <section className="mb-1 flex flex-col gap-0.5" aria-label={t("favorites.sectionTitle")}>
       <div className="flex items-center gap-1 px-1 pb-0.5 text-[10px] font-bold uppercase tracking-wide text-muted">
-        <Crown className="h-3 w-3 fill-warning text-warning" aria-hidden />
+        <Crown className="h-3 w-3 fill-crown text-crown" aria-hidden />
         {t("favorites.sectionTitle")}
         {rows.length ? <span className="font-semibold text-muted/70">{rows.length}</span> : null}
       </div>
@@ -67,12 +63,12 @@ function FavoritesSection({
             </button>
             <button
               type="button"
-              className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-[6px] text-warning hover:bg-warning-soft focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+              className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-[6px] text-crown hover:bg-crown-soft focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
               aria-label={t("branch.unfavorite")}
               title={t("branch.unfavorite")}
               onClick={() => onToggle(id)}
             >
-              <Crown className="h-3.5 w-3.5 fill-warning" aria-hidden />
+              <Crown className="h-3.5 w-3.5 fill-crown" aria-hidden />
             </button>
           </div>
         ))

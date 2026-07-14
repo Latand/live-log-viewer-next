@@ -452,3 +452,54 @@ describe("pipeline stage placeholder slots (issue #196)", () => {
     expect(local.slots.length).toBeGreaterThan(0);
   });
 });
+
+describe("buildSchemeLayout favorites band (issue #224)", () => {
+  const soloGroup = (path: string, mtime: number): { group: BranchGroup; file: FileEntry } => {
+    const file = entry({ path, mtime, activity: "live" });
+    return {
+      file,
+      group: { key: path, columns: [{ file, tasks: [] }], returnable: [], finished: [], smt: mtime, orphanTask: false },
+    };
+  };
+
+  test("crowned roots pin to the top band above everything else, freshest-first", () => {
+    const a = soloGroup("/fav-a", 3_000);
+    const b = soloGroup("/fav-b", 5_000);
+    const c = soloGroup("/plain-c", 4_000);
+    const files = [a.file, b.file, c.file];
+    const favorites = new Set(["/fav-a", "/fav-b"]);
+    const layout = buildSchemeLayout([a.group, b.group, c.group], [], files, [], [], [], [], favorites);
+
+    const nodeFor = (path: string) => layout.nodes.find((node) => node.file.path === path)!;
+    const favA = nodeFor("/fav-a");
+    const favB = nodeFor("/fav-b");
+    const plainC = nodeFor("/plain-c");
+
+    /* Both favorites share the top row; the plain group starts strictly below. */
+    expect(favA.y).toBe(favB.y);
+    expect(plainC.y).toBeGreaterThan(favA.y + favA.h);
+    /* Within the band, the freshest (b, mtime 5000) sits left of the older (a). */
+    expect(favB.x).toBeLessThan(favA.x);
+  });
+
+  test("no favorites lays the board out in a single band, unchanged", () => {
+    const a = soloGroup("/a", 3_000);
+    const b = soloGroup("/b", 5_000);
+    const files = [a.file, b.file];
+    const base = buildSchemeLayout([a.group, b.group], [], files, [], [], [], []);
+    const withEmpty = buildSchemeLayout([a.group, b.group], [], files, [], [], [], [], new Set());
+    const topY = (layout: ReturnType<typeof buildSchemeLayout>, path: string) =>
+      layout.nodes.find((node) => node.file.path === path)!.y;
+    expect(topY(base, "/a")).toBe(topY(base, "/b"));
+    expect(topY(withEmpty, "/a")).toBe(topY(base, "/a"));
+  });
+
+  test("a favorited manual root lifts into the band too", () => {
+    const fav = entry({ path: "/manual-fav", mtime: 9_000, activity: "live" });
+    const plain = soloGroup("/plain", 1_000);
+    const layout = buildSchemeLayout([plain.group], [fav], [fav, plain.file], [], [], [], [], new Set(["/manual-fav"]));
+    const favNode = layout.nodes.find((node) => node.file.path === "/manual-fav")!;
+    const plainNode = layout.nodes.find((node) => node.file.path === "/plain")!;
+    expect(plainNode.y).toBeGreaterThan(favNode.y + favNode.h);
+  });
+});

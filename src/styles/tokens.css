@@ -73,6 +73,11 @@
   --color-success-soft: #e5f6ea;
   --color-warning: #9a6b00;
   --color-warning-soft: #fff4dd;
+  /* Crown favorites accent (issue #224): a true gold/yellow, distinct from the
+     browny `--color-warning`, so a crowned card reads as regal, not as a
+     warning. Tuned for contrast on the light `--surface-card`. */
+  --color-crown: #e0a400;
+  --color-crown-soft: #fdf1cf;
   --color-danger: #c62828;
   --color-danger-soft: #fdeeee;
   --color-info: #0d9488; /* link / handoff teal */
@@ -145,6 +150,8 @@
     --color-success-soft: #14261a;
     --color-warning: #e0ae45;
     --color-warning-soft: #2b2312;
+    --color-crown: #f5c542;
+    --color-crown-soft: #2e2611;
     --color-danger: #f07171;
     --color-danger-soft: #2c1616;
     --color-info: #2dd4bf;
@@ -192,6 +199,8 @@
   --color-success-soft: #14261a;
   --color-warning: #e0ae45;
   --color-warning-soft: #2b2312;
+  --color-crown: #f5c542;
+  --color-crown-soft: #2e2611;
   --color-danger: #f07171;
   --color-danger-soft: #2c1616;
   --color-info: #2dd4bf;
