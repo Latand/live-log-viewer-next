@@ -142,20 +142,24 @@ export function surfaceFor(file: FileEntry, rv: RuntimeSessionView | null, opts:
   // A Claude subagent's own proc/pid is null by scanner design (the root process
   // writes the child transcript), so its liveness is the ROOT host's, resolved
   // by the caller into `opts.root` (issue #241 finding 2). A live root grants the
-  // subagent strip; a dead/finished root keeps it gated (inert or resume).
+  // subagent strip; a gated (dead/finished) or as-yet-unknown root keeps it inert
+  // so no relay control fires against an unconfirmed host. `opts.root` is only
+  // absent in pure-legacy mode, where the child's own proc is the fallback.
   if (isClaudeSubagent(file)) {
     if (opts.root === "live") return "live-subagent";
-    if (opts.root === "gated") return isResumableConversation(file) ? "resume" : "inert";
-    // Root not yet observed: under the runtime plane this is unresolved (fail
-    // safe); in pure-legacy mode fall back to the child's own (usually null) proc.
-    if (host.kind === "unresolved") return "unresolved";
-    if (file.proc === "running") return "live-subagent";
+    if (opts.root === undefined && host.kind !== "unresolved" && file.proc === "running") return "live-subagent";
     return isResumableConversation(file) ? "resume" : "inert";
   }
 
-  // Non-subagent: the runtime plane must resolve the host before any legacy
-  // control is offered — a running pid alone is not affirmative legacy evidence.
-  if (host.kind === "unresolved") return "unresolved";
+  // Non-subagent under the runtime plane: only a *running* pid is ambiguous — it
+  // could be a structured/dead host or a live tmux pane, so it fails safe to
+  // `unresolved` until affirmative host evidence arrives (finding 1). A finished
+  // (proc-null) conversation has no live host to misclassify, so resume/inert
+  // stay available.
+  if (host.kind === "unresolved") {
+    if (file.proc === "running") return "unresolved";
+    return isResumableConversation(file) ? "resume" : "inert";
+  }
   if (file.proc === "running") {
     if (isSubagent(file) || file.parent) return "live-subagent";
     return "live-root";

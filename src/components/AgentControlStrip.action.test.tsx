@@ -1,4 +1,4 @@
-import { afterEach, expect, mock, test } from "bun:test";
+import { afterAll, afterEach, expect, mock, test } from "bun:test";
 import { act } from "react";
 import { Window } from "happy-dom";
 import { createRoot, type Root } from "react-dom/client";
@@ -34,13 +34,27 @@ function rootView(host: HostAxis): RuntimeSessionView {
   };
 }
 let rootAxis: HostAxis = "hosted";
+// The mock registry is global across test files: keep the runtime plane
+// mutable and restore the disabled default in afterAll so later files see
+// the same shape as the real hook without a live runtime.
+let runtimeEnabled = true;
 const actual = await import("@/hooks/useRuntime");
 mock.module("@/hooks/useRuntime", () => ({
   ...actual,
-  useRuntime: () => ({ enabled: true, connection: "live", resyncedAt: null, store: {} }),
+  useRuntime: () => ({
+    enabled: runtimeEnabled,
+    connection: runtimeEnabled ? "live" : "offline",
+    resyncedAt: null,
+    store: {},
+  }),
   useRuntimeSession: () => null,
-  useRuntimeSessionByArtifact: (path: string | null) => (path === "/root.jsonl" ? rootView(rootAxis) : null),
+  useRuntimeSessionByArtifact: (path: string | null) =>
+    runtimeEnabled && path === "/root.jsonl" ? rootView(rootAxis) : null,
 }));
+
+afterAll(() => {
+  runtimeEnabled = false;
+});
 
 const { AgentControlStrip } = await import("./AgentControlStrip");
 

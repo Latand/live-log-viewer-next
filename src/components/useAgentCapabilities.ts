@@ -40,9 +40,12 @@ export function useAgentCapabilities(file: FileEntry): AgentCapabilities {
   // runtime store by matching the root transcript path (the child's `parent`).
   const isClaudeSubagent = file.root === "claude-projects" && file.kind === "subagent";
   const rootView = useRuntimeSessionByArtifact(isClaudeSubagent ? file.parent : null);
+  // Root liveness only matters when the runtime plane is authoritative. With the
+  // plane off (pure-legacy mode) there is no store to read, so `file.proc` drives
+  // subagent classification exactly as before — never a spurious "unknown" root.
   const opts: HostOptions = {
     runtimeEnabled: enabled,
-    ...(isClaudeSubagent ? { root: rootLivenessFrom(rootView ? rootView.session : null) } : {}),
+    ...(enabled && isClaudeSubagent ? { root: rootLivenessFrom(rootView ? rootView.session : null) } : {}),
   };
   return {
     caps: capabilitiesFor(file, runtime, opts),

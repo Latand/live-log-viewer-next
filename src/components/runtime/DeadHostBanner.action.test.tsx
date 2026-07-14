@@ -87,7 +87,7 @@ test("a non-2xx respawn surfaces the failure instead of silently completing", as
 });
 
 test("a respawn network error surfaces the localized failure", async () => {
-  globalThis.fetch = (() => Promise.reject(new Error("offline"))) as typeof fetch;
+  globalThis.fetch = (() => Promise.reject(new Error("offline"))) as unknown as typeof fetch;
   const { host, root } = await mount();
   await click(byLabel(host, "deadHost.respawn"));
   const alerts = [...host.querySelectorAll('[role="alert"]')].map((n) => n.textContent ?? "");
