@@ -843,6 +843,16 @@ export const uk: Record<keyof typeof en, Message> = {
 
   "dash.pipeline": "Пайплайн",
   "dash.newPipeline": "Новий пайплайн",
+
+  // Історія дій дошки (скасувати/повторити нещодавні дії, напр. закриття картки)
+  "board.historyGroup": "Скасувати та повторити дії на дошці",
+  "board.undo": "Скасувати",
+  "board.redo": "Повторити",
+  "board.undoReopen": "Скасувати — знову відкрити «{title}»",
+  "board.redoReclose": "Повторити — знову закрити «{title}»",
+  "board.undoNothing": "Немає що скасовувати",
+  "board.redoNothing": "Немає що повторювати",
+
   "scheme.pipeline": "Пайплайн",
   "scheme.pipelineTitle": "Запустити пайплайн із цієї розмови",
   "board.pipeline": "Пайплайн",

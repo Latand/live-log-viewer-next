@@ -870,6 +870,16 @@ export const en = {
 
   "dash.pipeline": "Pipeline",
   "dash.newPipeline": "New pipeline",
+
+  // Board action history (undo/redo of recent board actions, e.g. closing a card)
+  "board.historyGroup": "Undo and redo board actions",
+  "board.undo": "Undo",
+  "board.redo": "Redo",
+  "board.undoReopen": "Undo — reopen “{title}”",
+  "board.redoReclose": "Redo — close “{title}” again",
+  "board.undoNothing": "Nothing to undo",
+  "board.redoNothing": "Nothing to redo",
+
   "scheme.pipeline": "Pipeline",
   "scheme.pipelineTitle": "Start a pipeline from this conversation",
   "board.pipeline": "Pipeline",
