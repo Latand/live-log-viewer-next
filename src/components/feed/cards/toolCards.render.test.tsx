@@ -8,6 +8,7 @@ import type { CmdGroupItem, ToolEvent } from "../parse";
 import { CmdGroupCard } from "./CmdGroupCard";
 import { DiffCard } from "./DiffCard";
 import { OutputPreview } from "./OutputPreview";
+import { RecordCard } from "./RecordCard";
 import { SysMsgCard } from "./SysMsgCard";
 import { ToolCard } from "./ToolCard";
 
@@ -207,6 +208,25 @@ test("a system message collapses to the compact per-1000 size, not chars/kB (§3
   // The verbose "1402 chars" / "1.4 kB" forms are gone.
   expect(html).not.toContain("1402 ");
   expect(html).not.toContain(en("common.kb"));
+});
+
+test("a fallback transcript record renders a typed chip with bounded collapsible detail", () => {
+  const html = renderToStaticMarkup(
+    <RecordCard
+      item={{
+        kind: "record",
+        ts: "2026-07-14T10:00:00Z",
+        recordType: "future_payload",
+        body: '{\n  "detail": "synthetic"\n}',
+        truncated: true,
+      }}
+    />,
+  );
+  expect(html).toContain(en("render.transcriptRecord"));
+  expect(html).toContain("future_payload");
+  expect(html).toContain("synthetic");
+  expect(html).toContain(en("render.truncated"));
+  expect(html).toContain("<details");
 });
 
 test("an orchestration row renders nested children and the meaningful outer summary", () => {

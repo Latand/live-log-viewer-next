@@ -737,6 +737,55 @@ describe("Codex functions.exec orchestration", () => {
     expect(JSON.stringify(event)).not.toContain("SECRETLEAK99");
   });
 
+  test("unwraps metadata-passthrough exec calls and preserves nested stdin poll details", () => {
+    const lines = [
+      JSON.stringify({
+        type: "response_item",
+        timestamp: "t1",
+        payload: {
+          type: "custom_tool_call",
+          id: "ctc-poll",
+          call_id: "poll-call",
+          name: "exec",
+          status: "completed",
+          input: 'const result = await tools.write_stdin({ session_id: 73, chars: "" }); text(result.output);',
+          internal_chat_message_metadata_passthrough: { turn_id: "turn-synthetic" },
+        },
+      }),
+      JSON.stringify({
+        type: "response_item",
+        timestamp: "t2",
+        payload: {
+          type: "custom_tool_call_output",
+          call_id: "poll-call",
+          output: [{ type: "input_text", text: "Script completed\nWall time 0.1 seconds\nOutput:\nprocess is still running" }],
+          internal_chat_message_metadata_passthrough: { turn_id: "turn-synthetic" },
+        },
+      }),
+    ];
+
+    const event = buildFeed(codexFile, lines, false, "").items.find((item) => item.kind === "tool");
+    if (event?.kind !== "tool") throw new Error("expected metadata-wrapped exec tool");
+    expect(event.orchestration?.calls).toHaveLength(2);
+    expect(event.orchestration?.calls[0]?.tool).toBe("write_stdin");
+    expect(event.orchestration?.calls[0]?.summary).toContain("73");
+    expect(event.orchestration?.calls[0]?.summary.toLowerCase()).toContain("poll");
+    expect(event.outputPreview).toContain("process is still running");
+    expect(event.outputPreview).not.toContain("Script completed");
+  });
+
+  test("keeps runtime stdin argument expressions visible in nested summaries", () => {
+    const event = buildFeed(
+      codexFile,
+      [orch("await tools.write_stdin({ session_id: process.session_id, chars });", "runtime-poll")],
+      false,
+      "",
+    ).items.find((item) => item.kind === "tool");
+    if (event?.kind !== "tool") throw new Error("expected nested stdin tool");
+    expect(event.orchestration?.calls[0]?.summary).toContain("process.session_id");
+    expect(event.orchestration?.calls[0]?.summary).toContain("chars");
+  });
+
   test("a plain custom tool without tools.* stays a single generic row", () => {
     const feed = buildFeed(codexFile, [orch("return 2 + 2;", "p1")], false, "");
     const event = feed.items.find((item) => item.kind === "tool");
@@ -853,6 +902,258 @@ describe("Codex functions.exec orchestration", () => {
     expect(event.status).toBe("ok");
     expect(event.outputPreview).toBe("");
     expect(event.body?.type).toBe("diff");
+  });
+});
+
+describe("Codex payload audit fixture", () => {
+  const lines = fixtureLines("codex-payload-audit.jsonl");
+
+  test("pins the read-only audit provenance, counts, and parser dispositions", () => {
+    const manifest = JSON.parse(readFileSync(path.join(import.meta.dir, "fixtures", "codex-payload-audit-manifest.json"), "utf8")) as {
+      roots: string[];
+      windowDays: number;
+      files: number;
+      rows: number;
+      malformedRows: number;
+      payloads: { record: string; type: string; count: number; disposition: string }[];
+      nested: { path: string; type: string; count: number; disposition: string }[];
+    };
+    expect(manifest.roots).toEqual(["~/.codex/sessions", "~/.config/agent-log-viewer/accounts/codex/*/sessions"]);
+    expect(manifest.windowDays).toBe(3);
+    expect(manifest.files).toBeGreaterThan(0);
+    expect(manifest.rows).toBeGreaterThan(0);
+    expect(manifest.malformedRows).toBe(3);
+    expect(manifest.payloads.every((entry) => entry.count > 0 && ["structured", "service", "typed-fallback"].includes(entry.disposition))).toBe(true);
+    expect(manifest.nested.every((entry) => entry.count > 0 && ["structured", "service", "typed-detail"].includes(entry.disposition))).toBe(true);
+    const fixturePayloads = new Set(
+      lines
+        .map((line) => JSON.parse(line) as { type?: string; payload?: { type?: string } })
+        .filter((record) => record.type && record.payload?.type)
+        .map((record) => `${record.type}/${record.payload!.type}`),
+    );
+    expect([...fixturePayloads].sort()).toEqual(manifest.payloads.map((entry) => `${entry.record}/${entry.type}`).sort());
+    expect(nestedTypes()).toEqual(manifest.nested.map((entry) => `${entry.path}:${entry.type}`).sort());
+  });
+
+  function nestedTypes(): string[] {
+    const found = new Set<string>();
+    for (const line of lines) {
+      const payload = (JSON.parse(line) as { payload?: Record<string, unknown> }).payload;
+      if (!payload) continue;
+      const typed = (value: unknown): string | null => value && typeof value === "object" && typeof (value as { type?: unknown }).type === "string"
+        ? String((value as { type: string }).type)
+        : null;
+      const collect = (prefix: string, values: unknown) => {
+        if (!Array.isArray(values)) return;
+        for (const value of values) {
+          const type = typed(value);
+          if (type) found.add(`${prefix}:${type}`);
+        }
+      };
+      collect("content", payload.content);
+      collect("output", payload.output);
+      collect("replacement", payload.replacement_history);
+      for (const replacement of Array.isArray(payload.replacement_history) ? payload.replacement_history : []) {
+        collect("replacement.content", replacement && typeof replacement === "object" ? (replacement as { content?: unknown }).content : undefined);
+      }
+      const action = typed(payload.action);
+      if (action) found.add(`action:${action}`);
+      if (payload.changes && typeof payload.changes === "object") {
+        for (const change of Object.values(payload.changes)) {
+          const type = typed(change);
+          if (type) found.add(`change:${type}`);
+        }
+      }
+      collect("tools", payload.tools);
+      for (const namespace of Array.isArray(payload.tools) ? payload.tools : []) {
+        collect("tools.tool", namespace && typeof namespace === "object" ? (namespace as { tools?: unknown }).tools : undefined);
+      }
+      const result = payload.result && typeof payload.result === "object" ? payload.result as { Ok?: { content?: unknown } } : undefined;
+      collect("result.Ok.content", result?.Ok?.content);
+    }
+    return [...found].sort();
+  }
+
+  test("covers every top-level and payload type observed in the three-day audit", () => {
+    const records = lines.map((line) => JSON.parse(line) as { type?: string; payload?: { type?: string } });
+    expect([...new Set(records.map((record) => record.type ?? "<missing>"))].sort()).toEqual([
+      "<missing>",
+      "compacted",
+      "event_msg",
+      "inter_agent_communication_metadata",
+      "response_item",
+      "session_meta",
+      "turn_context",
+      "world_state",
+    ]);
+    expect([...new Set(records.map((record) => record.payload?.type).filter((type): type is string => Boolean(type)))].sort()).toEqual([
+      "agent_message",
+      "context_compacted",
+      "custom_tool_call",
+      "custom_tool_call_output",
+      "function_call",
+      "function_call_output",
+      "mcp_tool_call_end",
+      "message",
+      "patch_apply_end",
+      "reasoning",
+      "sub_agent_activity",
+      "task_complete",
+      "task_started",
+      "thread_settings_applied",
+      "token_count",
+      "tool_search_call",
+      "tool_search_output",
+      "turn_aborted",
+      "user_message",
+      "web_search_end",
+    ]);
+  });
+
+  test("covers every nested item type observed in the three-day audit", () => {
+    expect(nestedTypes()).toEqual([
+      "action:find_in_page",
+      "action:open_page",
+      "action:other",
+      "action:search",
+      "change:add",
+      "change:delete",
+      "change:update",
+      "content:encrypted_content",
+      "content:input_image",
+      "content:input_text",
+      "content:output_text",
+      "output:input_image",
+      "output:input_text",
+      "replacement.content:input_text",
+      "replacement:compaction",
+      "replacement:message",
+      "result.Ok.content:image",
+      "result.Ok.content:text",
+      "tools.tool:function",
+      "tools:namespace",
+    ]);
+  });
+
+  test("every audited shape reaches a structured, service, or typed fallback item", () => {
+    const feed = buildFeed(codexFile, lines, true, "");
+    expect(feed.items.some((item) => item.kind === "raw")).toBe(false);
+    const fallbacks = feed.items.filter((item) => (item as { kind: string }).kind === "record") as unknown as { recordType: string }[];
+    expect(fallbacks.map((item) => item.recordType).sort()).toEqual(["record", "record", "tool_search_call", "tool_search_output"]);
+  });
+
+  test("typed fallback bounds, redacts, and contains a future payload", () => {
+    const line = JSON.stringify({
+      type: "response_item",
+      timestamp: "t",
+      payload: { type: "future_payload", api_key: "LEAKME12345", detail: "x".repeat(40_000) },
+    });
+    const feed = buildFeed(codexFile, [line], false, "");
+    expect(feed.items).toHaveLength(1);
+    const item = feed.items[0] as unknown as { kind: string; recordType: string; body: string; truncated: boolean };
+    expect(item.kind).toBe("record");
+    expect(item.recordType).toBe("future_payload");
+    expect(item.body).not.toContain("LEAKME12345");
+    expect(item.body.length).toBeLessThanOrEqual(24_000);
+    expect(item.truncated).toBe(true);
+  });
+
+  test("typed fallback redacts bearer credentials from detail and its type chip", () => {
+    const credential = "synthetic-sensitive-credential";
+    const line = JSON.stringify({
+      type: "response_item",
+      timestamp: "t",
+      payload: {
+        type: `authorization: Bearer ${credential}`,
+        detail: `Authorization: Bearer ${credential}`,
+      },
+    });
+    const item = buildFeed(codexFile, [line], false, "").items[0] as unknown as { kind: string; recordType: string; body: string };
+    expect(item.kind).toBe("record");
+    expect(item.recordType).not.toContain(credential);
+    expect(item.recordType).toContain("[redacted]");
+    expect(item.body).not.toContain(credential);
+    expect(item.body).toContain("[redacted]");
+  });
+
+  test("a malformed JSONL row stays inside the typed record renderer", () => {
+    const feed = buildFeed(codexFile, ['{"type":"response_item","payload":{"api_key":"LEAKME12345"'], false, "");
+    expect(feed.items).toHaveLength(1);
+    const item = feed.items[0] as unknown as { kind: string; recordType: string; body: string };
+    expect(item.kind).toBe("record");
+    expect(item.recordType).toBe("malformed_record");
+    expect(item.body).toContain("response_item");
+    expect(item.body).not.toContain("LEAKME12345");
+  });
+
+  test("a malformed JSONL row redacts a bearer credential", () => {
+    const credential = "synthetic-malformed-credential";
+    const feed = buildFeed(codexFile, [`{"type":"response_item","Authorization":"Bearer ${credential}`], false, "");
+    const item = feed.items[0] as unknown as { kind: string; body: string };
+    expect(item.kind).toBe("record");
+    expect(item.body).not.toContain(credential);
+    expect(item.body).toContain("[redacted]");
+  });
+
+  test("valid non-record JSON values stay inside the typed record renderer", () => {
+    for (const line of ["[]", '"synthetic"', "42", "true", "null"]) {
+      const feed = buildFeed(codexFile, [line], false, "");
+      expect(feed.items).toHaveLength(1);
+      const item = feed.items[0] as unknown as { kind: string; recordType: string };
+      expect(item.kind).toBe("record");
+      expect(item.recordType).toBe("malformed_record");
+    }
+  });
+
+  test("typed tool output keeps an image placeholder beside captured text", () => {
+    const feed = buildFeed(codexFile, lines, false, "");
+    const tools = feed.items.flatMap((item): Extract<Item, { kind: "tool" }>[] =>
+      item.kind === "tool" ? [item] : item.kind === "cmd-group" ? item.calls : [],
+    );
+    const custom = tools.find((item) => item.id === "custom-call");
+    expect(custom?.outputPreview).toContain("Synthetic poll output");
+    expect(custom?.outputPreview.toLowerCase()).toContain("image");
+    expect(custom?.outputPreview).not.toContain("c3ludGhldGlj");
+  });
+
+  test("typed tool output keeps primitive values and unknown block labels", () => {
+    const lines = [
+      JSON.stringify({ type: "response_item", timestamp: "t1", payload: { type: "custom_tool_call", call_id: "mixed-call", name: "exec", input: "return 1;" } }),
+      JSON.stringify({
+        type: "response_item",
+        timestamp: "t2",
+        payload: { type: "custom_tool_call_output", call_id: "mixed-call", output: [{ type: "future_block", detail: "opaque-value" }, 7, true] },
+      }),
+    ];
+    const event = buildFeed(codexFile, lines, false, "").items.find((item) => item.kind === "tool");
+    if (event?.kind !== "tool") throw new Error("expected mixed-output tool");
+    expect(event.outputPreview).toContain("future_block");
+    expect(event.outputPreview).toContain("7");
+    expect(event.outputPreview).toContain("true");
+    expect(event.outputPreview).not.toContain("opaque-value");
+  });
+
+  test("typed tool output redacts bearer credentials in text and block labels", () => {
+    const credential = "synthetic-tool-output-credential";
+    const lines = [
+      JSON.stringify({ type: "response_item", timestamp: "t1", payload: { type: "custom_tool_call", call_id: "secret-call", name: "exec", input: "return 1;" } }),
+      JSON.stringify({
+        type: "response_item",
+        timestamp: "t2",
+        payload: {
+          type: "custom_tool_call_output",
+          call_id: "secret-call",
+          output: [
+            { type: "input_text", text: `Authorization: Bearer ${credential}` },
+            { type: `Bearer ${credential}`, detail: "opaque" },
+          ],
+        },
+      }),
+    ];
+    const event = buildFeed(codexFile, lines, false, "").items.find((item) => item.kind === "tool");
+    if (event?.kind !== "tool") throw new Error("expected secret-output tool");
+    expect(event.outputPreview).not.toContain(credential);
+    expect(event.outputPreview).toContain("[redacted]");
   });
 });
 

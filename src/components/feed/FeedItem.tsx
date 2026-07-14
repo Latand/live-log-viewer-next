@@ -15,6 +15,7 @@ import { ImageCard } from "./cards/ImageCard";
 import { MemCitationCard } from "./cards/MemCitationCard";
 import { ProtocolMessageBody, parseProtocolPayload } from "./cards/ProtocolMessage";
 import { ReviewCard } from "./cards/ReviewCard";
+import { RecordCard } from "./cards/RecordCard";
 import { SysMsgCard } from "./cards/SysMsgCard";
 import { ToolCard } from "./cards/ToolCard";
 import { WakeupCard } from "./cards/WakeupCard";
@@ -30,6 +31,7 @@ export const FeedItem = memo(function FeedItem({ item, speakText }: { item: Item
   if (item.kind === "sysmsg") return <SysMsgCard label={item.label} text={item.text} />;
   if (item.kind === "compact") return <CompactBand item={item} />;
   if (item.kind === "review") return <ReviewCard item={item} />;
+  if (item.kind === "record") return <RecordCard item={item} />;
   if (item.kind === "mem-citation") return <MemCitationCard item={item} />;
   if (item.kind === "prose") {
     const cls = item.engine === "codex" ? "bg-codex" : "bg-claude";

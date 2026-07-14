@@ -96,6 +96,13 @@ export type MemCitationItem = {
   raw: string;
   truncated: boolean;
 };
+export type TranscriptRecordItem = {
+  kind: "record";
+  ts: unknown;
+  recordType: string;
+  body: string;
+  truncated: boolean;
+};
 export type Tmsg = {
   kind: "tmsg";
   ts: unknown;
@@ -127,6 +134,7 @@ export type Item =
   | CmdGroupItem
   | ReviewCardItem
   | MemCitationItem
+  | TranscriptRecordItem
   | Tmsg
   | { kind: "tnote"; text: string }
   | { kind: "think"; text: string }
@@ -324,18 +332,66 @@ function normalizeCodexUserContent(content: unknown): CodexUserContent {
 
 /** Responses custom tools return either plain text or typed text blocks. */
 function toolOutputText(value: unknown): string {
-  if (typeof value === "string") return value;
+  if (typeof value === "string") return redactTranscriptText(value);
   if (Array.isArray(value)) {
-    return arr(value)
-      .map((part) => textPart(part.text) || textPart(part.input_text) || textPart(part.output_text))
+    return value
+      .map((part) => {
+        if (typeof part === "string") return redactTranscriptText(part);
+        if (typeof part === "number" || typeof part === "boolean") return String(part);
+        if (!part || typeof part !== "object" || Array.isArray(part)) return "";
+        const block = rec(part);
+        const text = textPart(block.text) || textPart(block.input_text) || textPart(block.output_text);
+        if (text) return redactTranscriptText(text);
+        if (block.type === "input_image" || block.type === "image") return `[${tr("render.imageOutput")}]`;
+        const type = redactTranscriptText(textPart(block.type)).slice(0, ATTACHMENT_TYPE_MAX);
+        return `[${type ? tr("render.toolOutputType", { type }) : tr("render.toolOutput")}]`;
+      })
       .filter(Boolean)
       .join("\n");
   }
-  return value === undefined || value === null ? "" : JSON.stringify(value);
+  return value === undefined || value === null ? "" : redactTranscriptText(JSON.stringify(value));
 }
 
 function toolOutputFailed(text: string): boolean {
   return /^Script failed\b/im.test(text) || /\b(?:exit|exited with) code [1-9]\d*\b/i.test(text);
+}
+
+const RECORD_FIELD_MAX = 4_000;
+const SENSITIVE_RECORD_KEY = /(?:api.?key|access.?token|refresh.?token|authorization|bearer|secret|password|passwd|pwd|token)/i;
+const SENSITIVE_RECORD_TEXT = /(?:api|token|authorization|bearer|secret|password|passwd|pwd)/i;
+const JSON_SECRET_VALUE = /("(?:api[_-]?key|access[_-]?token|refresh[_-]?token|authorization|bearer|secret|password|passwd|pwd|token)"\s*:\s*")[^"]*/gi;
+const INLINE_SECRET_VALUE = /((?:api[_-]?key|access[_-]?token|refresh[_-]?token|authorization|bearer|secret|password|passwd|pwd|token)\s*[:=]\s*["']?)[^\s"',}]+/gi;
+const BEARER_SECRET_VALUE = /(\bbearer\s+)[^\s"',}]+/gi;
+
+function redactTranscriptText(value: string): string {
+  const bearerSafe = value.replace(BEARER_SECRET_VALUE, "$1[redacted]");
+  return redactSecrets(bearerSafe).replace(JSON_SECRET_VALUE, "$1[redacted]").replace(INLINE_SECRET_VALUE, "$1[redacted]");
+}
+
+/* Future rollout records stay diagnosable without allowing a new payload to
+   inject an unbounded string, ciphertext, image data, or credential into the
+   feed. The whole formatted record still passes through the shared debug cap. */
+function transcriptRecordBody(value: unknown): { body: string; truncated: boolean } {
+  let fieldTruncated = false;
+  const serialized = JSON.stringify(
+    value,
+    (key, item) => {
+      if (SENSITIVE_RECORD_KEY.test(key)) return "[redacted]";
+      if (key === "encrypted_content") return "[encrypted]";
+      if (typeof item !== "string") return item;
+      if (/^data:image\//i.test(item)) {
+        fieldTruncated = true;
+        return `[image data · ${item.length} chars]`;
+      }
+      const safeItem = SENSITIVE_RECORD_TEXT.test(item) ? redactTranscriptText(item) : item;
+      if (safeItem.length <= RECORD_FIELD_MAX) return safeItem;
+      fieldTruncated = true;
+      return safeItem.slice(0, RECORD_FIELD_MAX) + "…";
+    },
+    2,
+  ) ?? "{}";
+  const bounded = debugRaw(serialized);
+  return { body: bounded.raw, truncated: fieldTruncated || bounded.truncated };
 }
 
 function parseMemCitation(matchText: string, entriesText: string, idsText: string): MemCitationItem {
@@ -473,6 +529,35 @@ function objFieldValue(argsSrc: string, keys: readonly string[]): string {
   return "";
 }
 
+/* Scalar counterpart used by interactive-shell control calls. Session ids are
+   numeric in write_stdin payloads and string-valued in wait payloads, while
+   chars may be the deliberately empty string that denotes a poll. */
+function objFieldScalar(argsSrc: string, keys: readonly string[]): string | number | boolean | undefined {
+  for (const key of keys) {
+    const re = new RegExp(`(?:^|[{,([\\s])${key}\\s*:\\s*`);
+    const match = re.exec(argsSrc);
+    if (!match) continue;
+    const start = (match.index ?? 0) + match[0].length;
+    const quote = argsSrc[start];
+    if (quote === '"' || quote === "'" || quote === "`") {
+      return decodeJsString(argsSrc.slice(start + 1, skipStringLiteral(argsSrc, start)));
+    }
+    const token = argsSrc.slice(start).match(/^-?\d+(?:\.\d+)?|^(?:true|false)\b/)?.[0];
+    if (token) {
+      if (token === "true" || token === "false") return token === "true";
+      const value = Number(token);
+      return Number.isFinite(value) ? value : undefined;
+    }
+    const expression = argsSrc.slice(start).match(/^([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\b/)?.[1];
+    if (expression) return expression;
+    return undefined;
+  }
+  for (const key of keys) {
+    if (new RegExp(`(?:^|[{,]\\s*)${key}\\s*(?=[,}])`).test(argsSrc)) return key;
+  }
+  return undefined;
+}
+
 /* The first string/template literal in an argument source. */
 function firstLiteral(argsSrc: string): string {
   for (let i = 0; i < argsSrc.length; i += 1) {
@@ -564,6 +649,19 @@ function applyPatchBody(input: string): string {
    source so the nested row summarizes like a first-class tool call rather than
    grabbing whatever substring happened to be quoted first. */
 function orchCallArgs(tool: string, argsSrc: string, fullInput: string): Record<string, unknown> {
+  if (tool === "write_stdin") {
+    return {
+      session_id: objFieldScalar(argsSrc, ["session_id"]),
+      cell_id: objFieldScalar(argsSrc, ["cell_id"]),
+      chars: objFieldScalar(argsSrc, ["chars"]),
+    };
+  }
+  if (tool === "wait") {
+    return {
+      cell_id: objFieldScalar(argsSrc, ["cell_id"]),
+      session_id: objFieldScalar(argsSrc, ["session_id"]),
+    };
+  }
   switch (familyOf(tool)) {
     case "shell":
       return { command: resolveField(argsSrc, fullInput, ["cmd", "command"]) || positionalLiteral(argsSrc) };
@@ -1190,6 +1288,11 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
   const addNote = (text: string) => {
     push({ kind: "note", text });
   };
+  const addRecord = (ts: unknown, recordType: string, value: unknown) => {
+    const detail = transcriptRecordBody(value);
+    const safeType = redactTranscriptText(recordType).slice(0, ATTACHMENT_TYPE_MAX);
+    push({ kind: "record", ts, recordType: safeType || tr("render.record"), ...detail });
+  };
   /* Inbound teammate traffic arrives as user text wrapped in <teammate-message>;
      idle_notification JSON bodies collapse to a thin service-style row. */
   const addUserText = (ts: unknown, text: string, isHarness = false) => {
@@ -1339,7 +1442,10 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
         if (codexCompacted) return void (codexCompacted = null);
         return addCompact(ts);
       }
-      return addSvc(textPart(p.type) || "event");
+      if (["mcp_tool_call_end", "patch_apply_end", "sub_agent_activity", "thread_settings_applied", "token_count", "turn_aborted", "web_search_end"].includes(textPart(p.type))) {
+        return addSvc(textPart(p.type));
+      }
+      return addRecord(ts, textPart(p.type) || "event", p);
     }
     if (obj.type === "response_item") {
       if (p.type === "message") {
@@ -1395,8 +1501,8 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
         const output = toolOutputText(p.output);
         return addOutput(textPart(p.call_id), output, toolOutputFailed(output));
       }
-      if (p.type === "reasoning") return addSvc("reasoning");
-      return addSvc(textPart(p.type) || "item");
+      if (p.type === "reasoning" || p.type === "agent_message") return addSvc(textPart(p.type));
+      return addRecord(ts, textPart(p.type) || "item", p);
     }
     finalizePendingCodexUsers();
     if (obj.type === "session_meta") {
@@ -1406,7 +1512,10 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
       codexCompacted = { src: curSrc };
       return addCompact(ts);
     }
-    addSvc(textPart(obj.type) || tr("render.record"));
+    if (obj.type === "turn_context" || obj.type === "world_state" || obj.type === "inter_agent_communication_metadata") {
+      return addSvc(textPart(obj.type));
+    }
+    addRecord(ts, textPart(obj.type) || tr("render.record"), obj);
   };
   const renderClaude = (obj: Record<string, unknown>) => {
     const ts = obj.timestamp;
@@ -1574,9 +1683,9 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
         if (obj && typeof obj === "object" && !Array.isArray(obj)) {
           if (cfg.fmt === "claude") renderClaude(obj);
           else renderCodex(obj);
-        }
+        } else addRecord(null, "malformed_record", { value: obj });
       } catch {
-        renderPlain(line);
+        addRecord(null, "malformed_record", { source: line });
       }
     } else renderPlain(line);
   };
