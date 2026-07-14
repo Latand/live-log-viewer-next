@@ -3,6 +3,7 @@
 import { List, ListTodo, Menu, MessageSquarePlus, MoreHorizontal, Network, Plus } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
+import { useBoardActionHistory } from "@/hooks/useBoardActionHistory";
 import { queueColumnOpen, useBoardState } from "@/hooks/useBoardState";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { viewBus } from "@/hooks/viewPresenceBus";
@@ -14,6 +15,7 @@ import type { FileEntry, ProjectCatalogEntry } from "@/lib/types";
 import { MAX_VISIBLE_PATHS } from "@/lib/view/types";
 import type { Workflow } from "@/lib/workflows/types";
 
+import { BoardHistoryControls } from "./BoardHistoryControls";
 import { TaskStrip } from "./BranchPane";
 import { ConversationList } from "./ConversationList";
 import { clearDraftStorage, draftCwd, draftParentConversationId, draftSrc, replaceUnverifiedDraftCwd, requireDraftCwdConfirmation, seedDraftCwd, setDraftCwd, setDraftSrc, setDraftText } from "./DraftAgentPane";
@@ -293,6 +295,10 @@ export function ProjectDashboard({
      one-time seed from the old per-browser localStorage (#38). Reads stay
      optimistic — a local edit shows at once, then PATCHes. */
   const board = useBoardState(project);
+  /* Per-project, device-local undo/redo log of recent board actions (issue
+     #184). v1 records card closes; undo reopens the last-closed card through the
+     shared restore path, redo closes it again. */
+  const history = useBoardActionHistory(project);
   const prefs = useMemo<ColumnPrefs>(
     () => ({ manual: board.prefs.manual, hidden: board.prefs.hidden, expanded: board.prefs.expanded }),
     [board.prefs],
@@ -753,7 +759,8 @@ export function ProjectDashboard({
     openSwitchboardFile(file);
   };
 
-  const closeNode = (path: string) => {
+  /* The raw close, shared by an explicit user close and a history redo. */
+  const applyClose = (path: string) => {
     /* Closing a chat also puts out its tmux pane; fire-and-forget, since the
        node disappears either way and a pane that survived a failed request
        just stays for the next close. Branch nodes are filtered server-side —
@@ -771,6 +778,15 @@ export function ProjectDashboard({
     board.mutate([planClose(path, ephemeral).mutation]);
     setEphemeral((prev) => planClose(path, prev).ephemeral);
     onCloseFile?.(path);
+  };
+
+  const closeNode = (path: string) => {
+    /* Record the close in the undo log before applying it, capturing the current
+       title for the undo tooltip. Redo replays through `applyClose` directly, so
+       it never re-records and the log stays a single linear trail. */
+    const title = projectCatalog.get(path)?.title ?? files.find((file) => file.path === path)?.title ?? "";
+    history.record({ kind: "close", path, title });
+    applyClose(path);
   };
 
   /* Latest manual list behind a ref so the convergence effect below reads
@@ -856,6 +872,45 @@ export function ProjectDashboard({
     pendingFocusRef.current = file.path;
   };
   const openFullCatalogFile = onOpenCatalogFile ?? openSwitchboardFile;
+
+  /* Undo a close: reopen the card through the shared restore path so #199's
+     durable membership rebinds it to its pipeline/review zone automatically. When
+     the file entry is known we go through `openSwitchboardFile` (same role-based
+     placement + focus as an explicit open); otherwise we lift the tombstone
+     directly so a card whose transcript is momentarily absent still comes back. */
+  const onUndo = () => {
+    const entry = history.undo();
+    if (entry === null || entry.kind !== "close") return;
+    const file = projectCatalog.get(entry.path) ?? files.find((item) => item.path === entry.path);
+    if (file) openSwitchboardFile(file);
+    else board.restore(entry.path, "manual");
+  };
+  const onRedo = () => {
+    const entry = history.redo();
+    if (entry === null || entry.kind !== "close") return;
+    applyClose(entry.path);
+  };
+  /* Keep the keyboard handler pointed at the latest closures without re-binding
+     the listener every render. */
+  const undoRedoRef = useRef({ onUndo, onRedo });
+  undoRedoRef.current = { onUndo, onRedo };
+  useEffect(() => {
+    if (project === null) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (!(event.ctrlKey || event.metaKey) || event.altKey) return;
+      if (event.key.toLowerCase() !== "z") return;
+      /* Never steal Ctrl+Z from a text field — the composer and rename inputs own
+         their own undo. */
+      const target = event.target as HTMLElement | null;
+      const tag = target?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || target?.isContentEditable) return;
+      event.preventDefault();
+      if (event.shiftKey) undoRedoRef.current.onRedo();
+      else undoRedoRef.current.onUndo();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [project]);
 
   const statusBits: string[] = [];
   if (liveCount) {
@@ -982,6 +1037,15 @@ export function ProjectDashboard({
           </button>
         ) : null}
         <h1 className={`truncate text-[13.5px] font-bold ${isMobile ? "min-w-0 flex-1" : ""}`}>{project}</h1>
+        <BoardHistoryControls
+          canUndo={history.canUndo}
+          canRedo={history.canRedo}
+          undoEntry={history.undoEntry}
+          redoEntry={history.redoEntry}
+          onUndo={onUndo}
+          onRedo={onRedo}
+          isMobile={isMobile}
+        />
         {isMobile ? (
           <>
             {/* Toolbar folds to a single row (findings 1, 7): the scheme/list
