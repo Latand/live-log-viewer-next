@@ -129,8 +129,19 @@ function hostIdentity(engine: AgentEngine, host: SpawnedStructuredHost, input: S
   };
 }
 
-export function structuredClaudePermissionMode(mode: string | null | undefined): string {
-  return !mode || mode === "bypassPermissions" ? "default" : mode;
+export interface StructuredClaudePermissionContext {
+  agentInitiated: boolean;
+  operatorAuthenticated: boolean;
+  roleSpawn: boolean;
+}
+
+export function structuredClaudePermissionMode(
+  mode: string | null | undefined,
+  context: StructuredClaudePermissionContext,
+): string {
+  if (!mode) return "default";
+  if (mode !== "bypassPermissions") return mode;
+  return context.operatorAuthenticated || (context.roleSpawn && !context.agentInitiated) ? mode : "default";
 }
 
 export function structuredClaudeSpawnPolicyBaseSettingsPath(
@@ -166,7 +177,7 @@ async function defaultStartHost(input: StructuredSpawnInput, capability: string)
     allowSubagents: profile.allowSubagents,
     model: profile.model ?? undefined,
     effort: profile.effort ?? undefined,
-    permissionMode: structuredClaudePermissionMode(profile.permissionMode),
+    permissionMode: profile.permissionMode ?? "default",
     env,
   });
 }
@@ -261,6 +272,9 @@ export async function spawnStructuredConversation(
       ok: true,
       target: null,
       path: identity.path,
+      ...(input.engine === "claude"
+        ? { effectivePermissionMode: input.spec.launchProfile?.permissionMode ?? "default" }
+        : {}),
       launchId: input.receipt.launchId,
       conversationId: settled.conversation.id,
       launched: true,

@@ -25,7 +25,7 @@ import { rejectCrossOrigin } from "@/lib/sameOrigin";
 import { runtimeHostClient } from "@/lib/runtime/client";
 import { runtimeScope } from "@/lib/runtime/contracts";
 import { runtimeEventsEnabled } from "@/lib/runtime/flags";
-import { spawnStructuredConversation } from "@/lib/runtime/structuredSpawn";
+import { spawnStructuredConversation, structuredClaudePermissionMode } from "@/lib/runtime/structuredSpawn";
 import { structuredSpawnGap, spawnTransport } from "@/lib/runtime/spawnTransport";
 import { listFiles } from "@/lib/scanner";
 import { projectForCwd } from "@/lib/scanner/describe";
@@ -204,7 +204,23 @@ export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse
       allowSubagents: body.allowSubagents === true,
       deferClaudeSpawnPolicy: true,
     });
-    const spec = { ...specBase, launchProfile: emptyLaunchProfile({ ...(specBase.launchProfile ?? {}), cwd, parentConversationId, allowSubagents: body.allowSubagents === true }) };
+    const permissionMode = engine === "claude" && transport === "structured"
+      ? structuredClaudePermissionMode(specBase.launchProfile?.permissionMode, {
+        agentInitiated,
+        operatorAuthenticated: authenticatedCaller?.kind === "operator",
+        roleSpawn: Boolean(role.value),
+      })
+      : specBase.launchProfile?.permissionMode;
+    const spec = {
+      ...specBase,
+      launchProfile: emptyLaunchProfile({
+        ...(specBase.launchProfile ?? {}),
+        cwd,
+        parentConversationId,
+        allowSubagents: body.allowSubagents === true,
+        permissionMode,
+      }),
+    };
     const begun = registry.beginSpawnRequest({
       engine,
       cwd,

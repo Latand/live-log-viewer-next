@@ -135,6 +135,24 @@ async function nextEvent(iterator: AsyncIterator<RuntimeEvent>): Promise<Runtime
 }
 
 describe("ClaudeStreamBrokerHost", () => {
+  test("passes bypassPermissions to the pane-less Claude process", async () => {
+    const ledger = new RecordingDeliveryLedger();
+    const child = new FakeClaude(ledger);
+    const captured: { args?: string[]; options?: SpawnOptionsWithoutStdio } = {};
+    const host = await ClaudeStreamBrokerHost.start({
+      cwd: "/repo",
+      permissionMode: "bypassPermissions",
+      eventStore: new MemoryEventStore(),
+      deliveryLedger: ledger,
+      readAuthStatus: () => ({ loggedIn: true, authMethod: "claude.ai", subscriptionType: "max" }),
+      spawnProcess: fakeSpawn(child, captured),
+    });
+
+    const modeIndex = captured.args!.indexOf("--permission-mode");
+    expect(captured.args?.slice(modeIndex, modeIndex + 2)).toEqual(["--permission-mode", "bypassPermissions"]);
+    await host.release();
+  });
+
   test("persists sends before stdin and fans durable events to late viewers", async () => {
     const ledger = new RecordingDeliveryLedger();
     const child = new FakeClaude(ledger);

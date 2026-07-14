@@ -28,9 +28,54 @@ const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-structured-spawn-"));
 afterAll(() => fs.rmSync(sandbox, { recursive: true, force: true }));
 afterEach(async () => { await bindStructuredDeliveryQueue([]); });
 
-test("structured Claude fresh sessions use the permission channel", () => {
-  expect(structuredClaudePermissionMode("bypassPermissions")).toBe("default");
-  expect(structuredClaudePermissionMode("plan")).toBe("plan");
+test("structured Claude permission mapping distinguishes trusted autonomous spawn paths", () => {
+  expect(structuredClaudePermissionMode("bypassPermissions", {
+    agentInitiated: true,
+    operatorAuthenticated: true,
+    roleSpawn: true,
+  })).toBe("bypassPermissions");
+  expect(structuredClaudePermissionMode("bypassPermissions", {
+    agentInitiated: false,
+    operatorAuthenticated: false,
+    roleSpawn: true,
+  })).toBe("bypassPermissions");
+  expect(structuredClaudePermissionMode("bypassPermissions", {
+    agentInitiated: true,
+    operatorAuthenticated: false,
+    roleSpawn: true,
+  })).toBe("default");
+  expect(structuredClaudePermissionMode("bypassPermissions", {
+    agentInitiated: false,
+    operatorAuthenticated: false,
+    roleSpawn: false,
+  })).toBe("default");
+  expect(structuredClaudePermissionMode("plan", {
+    agentInitiated: true,
+    operatorAuthenticated: false,
+    roleSpawn: true,
+  })).toBe("plan");
+});
+
+test("structured Claude receipts expose the effective permission mode", () => {
+  const store = new AgentRegistry(path.join(sandbox, `permission-receipt-${crypto.randomUUID()}.json`), undefined, undefined, { sqliteMode: "off" });
+  const trusted = store.beginSpawnRequest({
+    engine: "claude",
+    cwd: "/repo",
+    launchProfile: emptyLaunchProfile({ cwd: "/repo", permissionMode: "bypassPermissions" }),
+  });
+  const downgraded = store.beginSpawnRequest({
+    engine: "claude",
+    cwd: "/repo",
+    launchProfile: emptyLaunchProfile({ cwd: "/repo", permissionMode: "default" }),
+  });
+  if (trusted.kind !== "created" || downgraded.kind !== "created") throw new Error("spawn receipt was unavailable");
+
+  expect(spawnResponseForReceipt(trusted.receipt, null, { structured: true })).toMatchObject({
+    effectivePermissionMode: "bypassPermissions",
+  });
+  expect(spawnResponseForReceipt(downgraded.receipt, null, { structured: true })).toMatchObject({
+    effectivePermissionMode: "default",
+  });
 });
 
 test("fresh managed Claude structured spawns select the shared settings snapshot", () => {
@@ -490,6 +535,7 @@ describe.each(["codex", "claude"] as const)("%s structured spawn round trip", (e
     });
 
     expect(response).toMatchObject({ launched: true, target: null, path: artifactPath, state: "settled" });
+    if (engine === "claude") expect(response).toMatchObject({ effectivePermissionMode: "default" });
     expect(registry.snapshot().receipts[begun.receipt.launchId]?.pane).toBeNull();
     const registryBeforeAttach = registry.snapshot();
     let terminalCommand = "";

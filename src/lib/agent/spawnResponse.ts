@@ -5,6 +5,8 @@ export interface SpawnResponse {
   target: string | null;
   /** Transcript path the fresh session will write, when knowable. */
   path: string | null;
+  /** Effective Claude permission mode for pane-less launches. */
+  effectivePermissionMode?: string;
   launchId: string;
   conversationId: string;
   launched: boolean;
@@ -35,6 +37,9 @@ export function spawnResponseForReceipt(
     ok: true,
     target: receipt.pane?.paneId ?? receipt.target ?? null,
     path,
+    ...(options.structured === true && receipt.engine === "claude"
+      ? { effectivePermissionMode: receipt.launchProfile.permissionMode ?? "default" }
+      : {}),
     launchId: receipt.launchId,
     conversationId: receipt.conversationId,
     launched,
