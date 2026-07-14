@@ -166,6 +166,8 @@ test("editing and resending a rejected receipt uses a fresh delivery key", async
 
   expect(sentKeys).toHaveLength(2);
   expect(sentKeys[1]).not.toBe(sentKeys[0]);
+  expect(host.textContent).not.toContain("Queued for durable delivery");
+  expect(host.querySelector('[data-optimistic-message="true"]')?.textContent).toContain("try this again");
   flushSync(() => root.unmount());
 });
 

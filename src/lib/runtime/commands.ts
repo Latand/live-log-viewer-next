@@ -40,7 +40,9 @@ export function parseRuntimeCommand(kind: RuntimeOperationKind, value: unknown):
     const images = body.images === undefined ? undefined : body.images;
     if (images !== undefined && (!Array.isArray(images) || images.length > 16 || images.some((image) => typeof image !== "string"))) throw new Error("images are invalid");
     const policy = body.policy === undefined ? undefined : body.policy;
-    if (policy !== undefined && policy !== "queue" && policy !== "steer-if-active") throw new Error("policy is invalid");
+    if (policy !== undefined && policy !== "queue" && policy !== "steer-if-active" && policy !== "interrupt-active") {
+      throw new Error("policy is invalid");
+    }
     return {
       kind,
       conversationId,

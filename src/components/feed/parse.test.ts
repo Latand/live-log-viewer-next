@@ -406,6 +406,20 @@ describe("feed session identity stability", () => {
 });
 
 describe("Codex user-turn coalescing", () => {
+  test("keeps a standalone structured user response in a user bubble", () => {
+    const lines = [
+      codexUserResponse("t1", [{ type: "input_text", text: "queued through the structured host" }]),
+      JSON.stringify({ type: "event_msg", timestamp: "t2", payload: { type: "task_started" } }),
+    ];
+    const feed = buildFeed(codexFile, lines, false, "");
+
+    expect(itemsOfKind(feed, "user")).toEqual([
+      { kind: "user", ts: "t1", text: "queued through the structured host" },
+    ]);
+    expect(itemsOfKind(feed, "sysmsg")).toHaveLength(0);
+    assertParity(codexFile, lines, { chunks: [1] });
+  });
+
   test("folds only an adjacent response/event echo and preserves two identical sends", () => {
     const lines = [...codexUserPair("t1", "same"), ...codexUserPair("t2", "same")];
     expect(itemsOfKind(buildFeed(codexFile, lines.slice(0, 2), false, ""), "user")).toEqual([{ kind: "user", ts: "t1", text: "same" }]);
@@ -479,7 +493,7 @@ describe("Codex user-turn coalescing", () => {
     assertParity(codexFile, lines, { chunks: [1, 2, 1], cap: 5 });
   });
 
-  test("uses record shape to collapse actual harness rows", () => {
+  test("collapses recognized standalone harness envelopes", () => {
     const lines = [
       codexUserResponse("t1", [{ type: "input_text", text: "<permissions instructions> injected" }]),
       JSON.stringify({ type: "event_msg", timestamp: "t2", payload: { type: "task_started" } }),
@@ -1194,6 +1208,20 @@ describe("Codex orchestration over a real rollout fixture (issue #83)", () => {
 });
 
 describe("Claude protocol and repeated prose", () => {
+  test("keeps a structured-host user record in the user role", () => {
+    const lines = [JSON.stringify({
+      type: "user",
+      message: { role: "user", content: [{ type: "text", text: "queued through the structured host" }] },
+    })];
+    const feed = buildFeed(claudeFile, lines, false, "");
+
+    expect(itemsOfKind(feed, "user")).toEqual([
+      { kind: "user", ts: undefined, text: "queued through the structured host" },
+    ]);
+    expect(itemsOfKind(feed, "sysmsg")).toHaveLength(0);
+    assertParity(claudeFile, lines, { chunks: [1] });
+  });
+
   test("keeps a queued human message in the user role beside harness records", () => {
     const lines = fixtureLines("claude-queued-mid-turn.jsonl");
     const feed = buildFeed(claudeFile, lines, false, "");

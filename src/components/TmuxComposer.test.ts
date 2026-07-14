@@ -51,6 +51,54 @@ test("the production runtime receipt list exposes recovery actions for failures"
   expect(html.match(/min-h-11/g)?.length).toBe(2);
 });
 
+test("a queued structured send renders as a quiet optimistic user message", () => {
+  const html = renderToStaticMarkup(
+    createElement(RuntimeComposerReceipts, {
+      receipts: [{
+        operationId: "op-pending",
+        idempotencyKey: "key-pending",
+        conversationId: "conv-one",
+        kind: "send",
+        status: "queued",
+        text: "keep going",
+        at: "2026-07-13T00:00:00.000Z",
+        revision: 1,
+      }],
+      onRetry: () => {},
+      onEdit: () => {},
+    }),
+  );
+
+  expect(html).toContain('data-optimistic-message="true"');
+  expect(html).toContain("keep going");
+  expect(html).toContain("animate-pulse");
+  expect(html).not.toContain("Queued for durable delivery");
+});
+
+test("an optimistic automatic retry stays quiet", () => {
+  const html = renderToStaticMarkup(
+    createElement(RuntimeComposerReceipts, {
+      receipts: [{
+        operationId: "op-auto-retry",
+        idempotencyKey: "key-auto-retry",
+        conversationId: "conv-one",
+        kind: "steer",
+        status: "queued",
+        reason: "delivery-auto-retry",
+        text: "keep going",
+        at: "2026-07-13T00:00:00.000Z",
+        revision: 3,
+      }],
+      onRetry: () => {},
+      onEdit: () => {},
+    }),
+  );
+
+  expect(html).toContain("animate-pulse");
+  expect(html).not.toContain("delivery-auto-retry");
+  expect(html).not.toContain("agent is busy");
+});
+
 test("a bounded receipt summary keeps retry while withholding lossy edit", () => {
   const html = renderToStaticMarkup(
     createElement(RuntimeComposerReceipts, {

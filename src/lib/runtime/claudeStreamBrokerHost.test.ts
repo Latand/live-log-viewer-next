@@ -191,6 +191,9 @@ describe("ClaudeStreamBrokerHost", () => {
     await Bun.sleep(0);
     expect(sendSettled).toBeFalse();
     expect(ledger.order.slice(0, 2)).toEqual(["ledger:delivery-one", "stdin:begin"]);
+    expect(child.inputs.find((input) => input.type === "user")).toMatchObject({
+      message: { role: "user" },
+    });
 
     child.emitJson({ type: "system", subtype: "init", session_id: host.identity.sessionId, apiKeySource: "none", model: "claude-test" });
     child.emitJson({ type: "user", isReplay: true, session_id: host.identity.sessionId, uuid: "user-one", message: { role: "user", content: [{ type: "text", text: "begin" }] } });

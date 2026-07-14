@@ -145,7 +145,7 @@ export interface SendOptions {
   conversationId: string;
   text: string;
   idempotencyKey: string;
-  policy?: "queue" | "steer-if-active";
+  policy?: "queue" | "steer-if-active" | "interrupt-active";
   images?: string[];
   kind?: OperationKind;
 }
@@ -158,7 +158,7 @@ export function sendRuntimeMessage(options: SendOptions): Promise<CommandResult>
     text: options.text,
     images: options.images,
     idempotencyKey: options.idempotencyKey,
-    policy: options.policy ?? "steer-if-active",
+    policy: options.policy ?? "interrupt-active",
   });
 }
 

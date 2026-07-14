@@ -254,7 +254,6 @@ export const uk: Record<keyof typeof en, Message> = {
   "composer.queueAria": "Черга надісланих повідомлень",
   "composer.removeFromQueue": "Прибрати з черги",
   "composer.deliveryHeld": "Притримано для «{label}» — доставиться після зміни акаунта",
-  "composer.deliveryQueued": "Додано до надійної черги доставки",
   "composer.structured": "структурований",
   "composer.structuredHost": "Структурований runtime-хост",
   "composer.structuredImagesUnavailable": "Структуровані розмови поки не підтримують картинки",

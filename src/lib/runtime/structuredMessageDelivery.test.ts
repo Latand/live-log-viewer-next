@@ -253,7 +253,12 @@ test("structured message routing returns the durable queued receipt immediately"
     { enabled: () => true, client: () => client, registry: () => registry, kick: () => { kicked += 1; } },
   );
 
-  expect(command).toMatchObject({ conversationId: conversation.id, text: "hello", idempotencyKey: "message-one", policy: "queue" });
+  expect(command).toMatchObject({
+    conversationId: conversation.id,
+    text: "hello",
+    idempotencyKey: "message-one",
+    policy: "interrupt-active",
+  });
   expect(result).toMatchObject({ ok: true, structured: true, outcome: "queued", operationId: "op-one" });
   expect(kicked).toBe(1);
   expect(registry.pendingDeliveries(conversation.id)).toMatchObject([{
@@ -306,7 +311,7 @@ test("migration-held delivery settles through the runtime journal after EngineHo
     conversationId: conversation.id,
     idempotencyKey: "held-message-one",
     text: "after migration",
-    policy: "queue",
+    policy: "interrupt-active",
   });
   expect(outcome).toBe("delivered");
 });

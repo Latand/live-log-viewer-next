@@ -105,6 +105,7 @@ const CHILD_ENV_ALLOWLIST = [
   "LLV_SPAWN_CAPABILITY",
 ] as const;
 const DEFAULT_TIMEOUT_MS = 30_000;
+const ACTIVE_THREAD_READ_TIMEOUT_MULTIPLIER = 3;
 const DEFAULT_SHUTDOWN_GRACE_MS = 1_000;
 const MAX_LINE_BYTES = 4 * 1024 * 1024;
 const MUTATING_RPC_METHODS = new Set(["thread/start", "thread/resume", "turn/start", "turn/steer", "turn/interrupt"]);
@@ -675,7 +676,10 @@ export class CodexAppServerHost implements EngineHost {
     if (known) return this.confirmedReceipt(entry, known);
     let thread: unknown;
     try {
-      thread = await this.rpc("thread/read", { threadId: this.identity.threadId, includeTurns: true });
+      const timeoutMs = this.activeTurnId
+        ? this.requestTimeoutMs * ACTIVE_THREAD_READ_TIMEOUT_MULTIPLIER
+        : this.requestTimeoutMs;
+      thread = await this.rpc("thread/read", { threadId: this.identity.threadId, includeTurns: true }, timeoutMs);
     } catch (error) {
       const message = safeError(error);
       if (/not materialized yet/i.test(message) && /before first user message/i.test(message)) return null;
@@ -779,7 +783,7 @@ export class CodexAppServerHost implements EngineHost {
     this.setSessionStatus(mapped, status.activeFlags);
   }
 
-  private rpc(method: string, params: JsonObject = {}): Promise<unknown> {
+  private rpc(method: string, params: JsonObject = {}, timeoutMs = this.requestTimeoutMs): Promise<unknown> {
     if (this.dead || this.releasing || this.released) return Promise.reject(new Error("Codex app-server host is unavailable"));
     const id = this.nextRpcId++;
     return new Promise((resolve, reject) => {
@@ -788,7 +792,7 @@ export class CodexAppServerHost implements EngineHost {
         const error = new Error(`${method} timed out${MUTATING_RPC_METHODS.has(method) ? "; outcome is uncertain" : ""}`);
         reject(error);
         if (MUTATING_RPC_METHODS.has(method)) this.fail(error);
-      }, this.requestTimeoutMs);
+      }, timeoutMs);
       this.pending.set(id, { resolve, reject, timer });
       this.write({ jsonrpc: "2.0", id, method, params });
     });

@@ -17,6 +17,12 @@ test("dedicated runtime command parsers freeze the Opus request bodies", () => {
     idempotencyKey: "send-one",
     policy: "steer-if-active",
   });
+  expect(parseRuntimeCommand("send", {
+    conversationId: "conv-one",
+    text: "replace the current turn",
+    idempotencyKey: "send-two",
+    policy: "interrupt-active",
+  })).toMatchObject({ policy: "interrupt-active" });
   expect(parseRuntimeCommand("interrupt", {
     conversationId: "conv-one",
     operationId: "interrupt-one",

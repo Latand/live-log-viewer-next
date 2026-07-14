@@ -241,6 +241,10 @@ function sysMsgLabel(text: string, fallback?: string): string {
   return fallback || tr("render.system");
 }
 
+function isCodexHarnessUserText(text: string): boolean {
+  return /^\s*(?:# AGENTS\.md instructions\b|<(?:environment_context|permissions instructions|multi_agent_mode|turn_aborted)\b)/.test(text);
+}
+
 function tmsgAttr(attrs: string, name: string): string {
   return attrs.match(new RegExp(`${name}="([^"]*)"`))?.[1] ?? "";
 }
@@ -1331,9 +1335,9 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
     }
     for (const image of images) push({ kind: "inbox-image", name: image.name, path: image.path });
   };
-  /* Harness classification is driven by the source record, never a textual
-     prefix. A human can legitimately begin a composer message with XML or a
-     phrase that looks like a harness reminder. */
+  /* Codex stores human input and harness context in user-role response rows.
+     Known envelope markers identify harness rows. Echoed composer messages
+     keep their user classification even when their text starts similarly. */
   const addSysMsg = (text: string, fallbackLabel?: string) => {
     push({ kind: "sysmsg", label: sysMsgLabel(text, fallbackLabel), text });
   };
@@ -1358,9 +1362,10 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
     const pendingUsers = pendingCodexUsers;
     pendingCodexUsers = [];
     for (const pending of pendingUsers) {
-      /* A user-role response without the immediately following event is a
-         harness/service injection in the observed Codex schema. Its content may
-         use any prefix, so record shape provides the classification. */
+      /* App-server structured input may persist without a user_message echo.
+         Preserve its declared user role. Recognized harness envelopes move to
+         the system lane. */
+      if (!isCodexHarnessUserText(pending.text)) continue;
       let converted = false;
       for (const seq of pending.entrySeqs) {
         const idx = entryIndex(seq);

@@ -835,6 +835,34 @@ describe("CodexAppServerHost", () => {
     await host.release();
   });
 
+  test("an active turn gives thread/read enough time to answer", async () => {
+    const ignoredMethods: string[] = [];
+    const server = new FakeAppServer("slow-read-thread", "slow-read-thread", false, [], undefined, null, ignoredMethods);
+    const host = await CodexAppServerHost.start({
+      cwd: "/repo",
+      requestTimeoutMs: 20,
+      eventStore: new MemoryEventStore(),
+      spawnProcess: fakeSpawn(server),
+    });
+    expect(await host.send({ id: "first", text: "begin" })).toEqual({ outcome: "turn-started", turnId: "turn-1" });
+    ignoredMethods.push("thread/read");
+
+    const pending = host.send({ id: "slow-read-follow-up", text: "continue", expectedTurnId: "turn-1" })
+      .then((value) => ({ value }), (error: Error) => ({ error }));
+    await Bun.sleep(35);
+    const read = server.requests.findLast((request) => request.method === "thread/read")!;
+    server.stdout.write(`${JSON.stringify({
+      jsonrpc: "2.0",
+      id: read.id,
+      result: { thread: { id: "slow-read-thread", path: "/sessions/slow-read-thread.jsonl", turns: [] } },
+    })}\n`);
+    const result = await pending;
+
+    if ("error" in result) throw result.error;
+    expect(result.value).toEqual({ outcome: "steered", turnId: "turn-1" });
+    await host.release();
+  });
+
   test("ledger failures are contained, reject pending work, and close subscribers", async () => {
     const store = new FailingEventStore();
     const server = new FakeAppServer("ledger-thread", "ledger-thread", false, [], undefined, null, ["turn/start"]);

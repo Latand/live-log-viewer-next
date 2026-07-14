@@ -127,7 +127,12 @@ export async function bindStructuredDeliveryQueue(
   if (!client) return;
   const registry = dependencies.registry ?? agentRegistry();
   const hosts = new Map<string, EngineHost>();
-  const queue = new StructuredDeliveryQueue(runtimeClientDeliveryPort(client), hostResolver(registry, hosts));
+  let scheduleAutomaticRetry = () => {};
+  const queue = new StructuredDeliveryQueue(
+    runtimeClientDeliveryPort(client),
+    hostResolver(registry, hosts),
+    () => scheduleAutomaticRetry(),
+  );
   let drainTimer: ReturnType<typeof setTimeout> | null = null;
   let drainBackoffMs = DELIVERY_DRAIN_COALESCE_MS;
   let stopped = false;
@@ -162,6 +167,9 @@ export async function bindStructuredDeliveryQueue(
   };
   const requestDrain = () => {
     if (state.activeQueue === queue) scheduleDrain();
+  };
+  scheduleAutomaticRetry = () => {
+    if (state.activeQueue === queue) scheduleDrain(DELIVERY_DRAIN_MAX_BACKOFF_MS);
   };
   const registrations = new Map<string, { key: SessionKey; host: ObservableEngineHost; unsubscribe: () => void; stopEvents: () => Promise<void> }>();
   const publishChains = new Map<string, Promise<void>>();

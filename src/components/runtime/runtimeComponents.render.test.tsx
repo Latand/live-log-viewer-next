@@ -65,6 +65,14 @@ test("queued receipt shows its position", () => {
   expect(html).toContain(translate("en", "runtime.receipt.queuedPos", { position: 3 }));
 });
 
+test("queued automatic delivery hides its transport reason", () => {
+  const html = renderToStaticMarkup(
+    <ReceiptChip receipt={receipt({ status: "queued", reason: "delivery-auto-retry" })} />,
+  );
+  expect(html).toContain(translate("en", "runtime.receipt.queued"));
+  expect(html).not.toContain("delivery-auto-retry");
+});
+
 test("delivering receipt is localized in English and Ukrainian", () => {
   const html = renderToStaticMarkup(<ReceiptChip receipt={receipt({ status: "delivering" })} />);
   expect(html).toContain(translate("en", "runtime.receipt.delivering"));

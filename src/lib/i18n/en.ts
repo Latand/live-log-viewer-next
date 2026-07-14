@@ -262,7 +262,6 @@ export const en = {
   "composer.queueAria": "Queue of sent messages",
   "composer.removeFromQueue": "Remove from queue",
   "composer.deliveryHeld": "Held for «{label}» — delivers after the account switch",
-  "composer.deliveryQueued": "Queued for durable delivery",
   "composer.structured": "structured",
   "composer.structuredHost": "Structured runtime host",
   "composer.structuredImagesUnavailable": "Image delivery is unavailable for structured conversations",
