@@ -155,7 +155,7 @@ body {
 .favorite-crown {
   transition: opacity 200ms var(--ease-standard, ease-out), transform 200ms var(--ease-standard, ease-out);
 }
-.favorite-crown.opacity-0 {
+.favorite-crown[data-crown-hidden] {
   transform: scale(0.85);
 }
 @keyframes crown-pop {

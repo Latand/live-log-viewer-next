@@ -1,6 +1,6 @@
 "use client";
 
-import { List, ListTodo, Menu, MessageSquarePlus, MoreHorizontal, Network, Plus } from "lucide-react";
+import { List, ListTodo, Menu, MessageSquarePlus, MoreHorizontal, Network, Plus, Redo2 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { useBoardActionHistory } from "@/hooks/useBoardActionHistory";
@@ -1105,8 +1105,14 @@ export function ProjectDashboard({
               )}
             </HeaderMenu>
             <HeaderMenu triggerLabel={t("dash.moreMenu")} icon={<MoreHorizontal className="h-5 w-5" aria-hidden />}>
-              {() => (
+              {(close) => (
                 <>
+                  {/* Redo lives here on mobile — the header shows only a single
+                      undo button, so its counterpart rides the «⋯» menu (and
+                      Ctrl+Shift+Z), shown only while a redo is possible. */}
+                  {history.canRedo ? (
+                    <HeaderMenuItem icon={<Redo2 className="h-4 w-4" aria-hidden />} label={t("board.redo")} onSelect={() => { close(); onRedo(); }} />
+                  ) : null}
                   <div className="flex min-h-11 items-center gap-2 px-1.5"><span className="text-[13px] font-semibold text-primary">{t("dash.soundMenu")}</span><SoundToggle /></div>
                   <div className="flex min-h-11 items-center px-1.5">
                     {archived ? (

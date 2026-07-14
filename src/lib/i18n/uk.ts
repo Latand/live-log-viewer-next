@@ -1286,12 +1286,6 @@ export const uk: Record<keyof typeof en, Message> = {
   "favorites.sectionTitle": "Обране",
   "favorites.empty": "обраного поки нема — наведи на картку й тапни корону",
   "favorites.focusTitle": "Показати {title} на дошці",
-  "favorites.count": {
-    one: "{count} обране",
-    few: "{count} обраних",
-    many: "{count} обраних",
-    other: "{count} обраних",
-  },
   "tasks.sheetNew": "нова задача",
   "tasks.sheetCreate": "Створити задачу",
   "tasks.sheetBack": "Назад до списку задач",

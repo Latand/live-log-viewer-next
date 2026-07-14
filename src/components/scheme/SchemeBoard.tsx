@@ -1052,6 +1052,7 @@ export function SchemeBoard({
           tasks={expandedNode.tasks}
           isRoot={expandedNode.isRoot}
           expanded
+          showFavorite
           onToggleExpand={() => setExpanded(null)}
           autoEditToken={autoEditTokenFor(renameRequest, expandedNode.file.path)}
         />

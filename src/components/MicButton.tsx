@@ -256,7 +256,7 @@ export function MicButtonView({
           aria-label={t("mic.stopRecognize")}
           title={warn ? t("mic.timeLeft", { time: fmtElapsed(remaining) }) : undefined}
           onClick={handleMain}
-          className={`flex items-center gap-1.5 rounded-[8px] border px-2 text-[11px] font-bold tabular-nums focus-visible:outline-none focus-visible:ring-2 ${
+          className={`flex items-center gap-1.5 rounded-control border px-2 text-label font-bold tabular-nums focus-visible:outline-none focus-visible:ring-2 ${
             isMobile ? "min-h-11" : "py-2"
           } ${
             warn
@@ -271,7 +271,7 @@ export function MicButtonView({
           type="button"
           aria-label={t("mic.cancel")}
           onClick={discard}
-          className={`inline-flex items-center justify-center rounded-[8px] border border-border bg-card text-muted hover:text-danger focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+          className={`inline-flex items-center justify-center rounded-control border border-border bg-card text-muted hover:text-danger focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
             isMobile ? "h-11 w-11" : "p-2"
           }`}
         >
@@ -287,7 +287,7 @@ export function MicButtonView({
     return (
       <span className="flex shrink-0 items-center gap-1">
         {srRegion}
-        <span className="flex items-center gap-1.5 rounded-[8px] border border-warning/70 bg-warning-soft px-2 py-2 text-[11px] font-bold text-warning">
+        <span className="flex items-center gap-1.5 rounded-control border border-warning/70 bg-warning-soft px-2 py-2 text-label font-bold text-warning">
           {phase === "busy" ? (
             <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
           ) : (
