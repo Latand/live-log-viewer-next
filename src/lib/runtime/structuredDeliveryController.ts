@@ -160,21 +160,23 @@ export async function bindStructuredDeliveryQueue(
       scope: { type: "session", id: conversationId },
       kind: "session-status",
       producer: {
-        kind: "structured-delivery-controller",
+        kind: entry?.structuredHost?.kind ?? "structured-delivery-controller",
         eventKey: `projection:${projectionEpoch}:${projectionRevision}`,
       },
       payload: {
         conversationId,
         sessionKey: key,
-        hostKind: legacy ? "tmux-legacy" : "unhosted",
-        host,
+        hostKind: entry?.structuredHost?.kind ?? (legacy ? "tmux-legacy" : "unhosted"),
+        host: entry?.structuredHost && entry.status === "dead" ? "dead" : host,
         turn,
-        provenance: "derived",
+        provenance: entry?.structuredHost ? "structured" : "derived",
         accountId: entry?.accountId ?? generation.accountId,
         parentConversationId: generation.launchProfile.parentConversationId,
         cwd: entry?.cwd ?? generation.launchProfile.cwd,
         artifactPath: generation.path,
-        capabilities: { steer: false, structuredAttention: false },
+        capabilities: entry?.structuredHost
+          ? { steer: entry.structuredHost.kind === "codex-app-server", structuredAttention: true }
+          : { steer: false, structuredAttention: false },
         activeTurnId: null,
       },
     });
@@ -276,7 +278,8 @@ export async function bindStructuredDeliveryQueue(
     if (!generation) continue;
     const id = sessionKeyId({ engine: conversation.engine, sessionId: generation.id });
     if (registrations.has(id)) continue;
-    if (startupSnapshot.entries[id]?.host?.kind !== "tmux") continue;
+    const entry = startupSnapshot.entries[id];
+    if (!entry?.structuredHost && entry?.host?.kind !== "tmux") continue;
     await publishCurrentFallback(conversation.id);
   }
   state.activeQueue = queue;
