@@ -218,6 +218,12 @@ class RoundTripHost implements SpawnedStructuredHost {
   async release(): Promise<void> {
     this.releaseCount += 1;
     this.released = true;
+    this.status = "unhosted";
+    this.activeTurnRef = null;
+    this.pendingAttention = [];
+    this.emit({ kind: "session-status", status: "unhosted" });
+    const state = await this.health();
+    for (const listener of this.listeners) listener(state);
     for (const wake of this.waiters) wake();
     this.waiters.clear();
   }
@@ -242,6 +248,20 @@ async function waitFor(assertion: () => boolean): Promise<void> {
     await Bun.sleep(5);
   }
   throw new Error("round-trip condition did not settle");
+}
+
+async function completesWithin<T>(operation: T | PromiseLike<T>, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      Promise.resolve(operation),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), 1_000);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 function deferred(): { promise: Promise<void>; resolve(): void } {
@@ -611,7 +631,7 @@ test("startup recovery completes an intentionally empty spawn prompt without a h
 });
 
 describe.each(["codex", "claude"] as const)("%s structured spawn round trip", (engine) => {
-  test("spawn, send, question, answer, interrupt, and resume use one pane-less host", async () => {
+  test("spawn, send, question, answer, interrupt, resume, and kill use one pane-less host", async () => {
     const id = crypto.randomUUID();
     const cwd = path.join(sandbox, `${engine}-${id}`);
     fs.mkdirSync(cwd, { recursive: true });
@@ -760,6 +780,16 @@ describe.each(["codex", "claude"] as const)("%s structured spawn round trip", (e
       "resume after interrupt",
     ]);
 
+    const pendingAfterKillId = `pending_after_kill_${id}`;
+    await enqueueStructuredMessage({
+      path: artifactPath,
+      conversationId: response.conversationId,
+      clientMessageId: pendingAfterKillId,
+      text: "must stay queued after kill",
+      hasImages: false,
+    }, { client: () => client, registry: () => registry, enabled: () => true });
+    expect(host.sent.some((entry) => entry.text === "must stay queued after kill")).toBeFalse();
+
     const killOperationId = `kill_${id}`;
     const kill = await dispatchStructuredControl({ path: artifactPath, conversationId: response.conversationId, action: "kill" }, {
       registry,
@@ -769,7 +799,7 @@ describe.each(["codex", "claude"] as const)("%s structured spawn round trip", (e
       enabled: () => true,
     });
     expect(kill).toMatchObject({ status: 202, body: { ok: true, structured: true, operationId: killOperationId } });
-    await kickStructuredDeliveryQueue();
+    await completesWithin(kickStructuredDeliveryQueue(), "structured kill did not complete");
     await waitFor(() => host.releaseCount === 1);
 
     expect(hasStructuredDeliveryHost({ engine, sessionId: id })).toBeFalse();
@@ -787,6 +817,8 @@ describe.each(["codex", "claude"] as const)("%s structured spawn round trip", (e
     expect(journal.snapshot().sessions.find((session) => session.conversationId === response.conversationId)).toMatchObject({
       host: "dead",
     });
+    await completesWithin(kickStructuredDeliveryQueue(), "structured delivery queue stayed wedged after kill");
+    expect(host.sent.some((entry) => entry.text === "must stay queued after kill")).toBeFalse();
   });
 });
 

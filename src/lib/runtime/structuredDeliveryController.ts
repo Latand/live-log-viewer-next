@@ -226,10 +226,17 @@ export async function bindStructuredDeliveryQueue(
     const observable = item.host as ObservableEngineHost;
     const unsubscribe = observable.onStateChange((state) => {
       const previous = publishChains.get(key) ?? Promise.resolve();
-      const next = previous
-        .then(() => publishHostState(client, registry, item, state))
-        .then(() => queue.drain())
-        .catch(() => { console.error("[structured delivery] host state sync failed"); });
+      const next = previous.then(async () => {
+        try {
+          await publishHostState(client, registry, item, state);
+        } catch {
+          console.error("[structured delivery] host state sync failed");
+          return;
+        }
+        void queue.drain().catch(() => {
+          console.error("[structured delivery] host state drain failed");
+        });
+      });
       publishChains.set(key, next);
     });
     const entry = entryForHost(registry, item);
