@@ -15,11 +15,25 @@ export interface StructuredDeliveryHost {
   host: ObservableEngineHost;
 }
 
-let activeQueue: StructuredDeliveryQueue | null = null;
-let activeHosts: Map<string, EngineHost> | null = null;
-let registerActiveHost: ((item: StructuredDeliveryHost) => Promise<() => Promise<void>>) | null = null;
-let releaseActiveHost: ((key: SessionKey) => Promise<boolean>) | null = null;
-let stopActive = () => {};
+/* Next standalone bundles instrumentation and route handlers separately, so a
+   module-level `let` written by startup adoption is invisible to routes. The
+   controller registration must live on `globalThis`, like every other
+   cross-bundle singleton in this codebase (see scanner/caches.ts). */
+interface ControllerState {
+  activeQueue: StructuredDeliveryQueue | null;
+  activeHosts: Map<string, EngineHost> | null;
+  registerActiveHost: ((item: StructuredDeliveryHost) => Promise<() => Promise<void>>) | null;
+  releaseActiveHost: ((key: SessionKey) => Promise<boolean>) | null;
+  stopActive: () => void;
+}
+const controllerStore = globalThis as typeof globalThis & { __llvStructuredDeliveryController?: ControllerState };
+const state: ControllerState = controllerStore.__llvStructuredDeliveryController ??= {
+  activeQueue: null,
+  activeHosts: null,
+  registerActiveHost: null,
+  releaseActiveHost: null,
+  stopActive: () => {},
+};
 
 function entryForHost(registry: AgentRegistry, adopted: StructuredDeliveryHost): AgentRegistryEntry | null {
   return registry.snapshot().entries[sessionKeyId(adopted.key)] ?? null;
@@ -91,12 +105,12 @@ export async function bindStructuredDeliveryQueue(
   adopted: readonly StructuredDeliveryHost[],
   dependencies: { registry?: AgentRegistry; client?: RuntimeHostClient | null } = {},
 ): Promise<void> {
-  stopActive();
-  stopActive = () => {};
-  activeQueue = null;
-  activeHosts = null;
-  registerActiveHost = null;
-  releaseActiveHost = null;
+  state.stopActive();
+  state.stopActive = () => {};
+  state.activeQueue = null;
+  state.activeHosts = null;
+  state.registerActiveHost = null;
+  state.releaseActiveHost = null;
   setStructuredDeliveryKick(null);
   const client = dependencies.client === undefined ? runtimeHostClient() : dependencies.client;
   if (!client) return;
@@ -236,9 +250,9 @@ export async function bindStructuredDeliveryQueue(
     registrations.set(key, { key: item.key, host: item.host, unsubscribe, stopEvents });
     return () => unregisterHost(key, item.host);
   };
-  activeHosts = hosts;
-  registerActiveHost = register;
-  releaseActiveHost = async (key) => {
+  state.activeHosts = hosts;
+  state.registerActiveHost = register;
+  state.releaseActiveHost = async (key) => {
     const id = sessionKeyId(key);
     const registered = registrations.get(id);
     if (!registered) {
@@ -265,22 +279,22 @@ export async function bindStructuredDeliveryQueue(
     if (startupSnapshot.entries[id]?.host?.kind !== "tmux") continue;
     await publishCurrentFallback(conversation.id);
   }
-  activeQueue = queue;
+  state.activeQueue = queue;
   setStructuredDeliveryKick(() => queue.drain().catch(() => {
     console.error("[structured delivery] queue drain failed");
   }));
-  stopActive = () => {
+  state.stopActive = () => {
     for (const registration of registrations.values()) {
       registration.unsubscribe();
       void registration.stopEvents();
     }
     registrations.clear();
     hosts.clear();
-    if (activeQueue === queue) {
-      activeQueue = null;
-      activeHosts = null;
-      registerActiveHost = null;
-      releaseActiveHost = null;
+    if (state.activeQueue === queue) {
+      state.activeQueue = null;
+      state.activeHosts = null;
+      state.registerActiveHost = null;
+      state.releaseActiveHost = null;
       setStructuredDeliveryKick(null);
     }
   };
@@ -288,14 +302,14 @@ export async function bindStructuredDeliveryQueue(
 }
 
 export function hasStructuredDeliveryHost(key: SessionKey): boolean {
-  return activeHosts?.has(sessionKeyId(key)) ?? false;
+  return state.activeHosts?.has(sessionKeyId(key)) ?? false;
 }
 
 export async function publishStructuredDeliveryHost(item: StructuredDeliveryHost): Promise<() => Promise<void>> {
-  if (!registerActiveHost) throw new Error("structured delivery controller is unavailable");
-  return registerActiveHost(item);
+  if (!state.registerActiveHost) throw new Error("structured delivery controller is unavailable");
+  return state.registerActiveHost(item);
 }
 
 export async function releaseStructuredDeliveryHost(key: SessionKey): Promise<boolean> {
-  return await releaseActiveHost?.(key) ?? false;
+  return await state.releaseActiveHost?.(key) ?? false;
 }
