@@ -48,10 +48,11 @@ const FAILED_SPAWN_OPERATION_STATUSES = new Set([
   "answered",
 ]);
 
-async function projectStructuredSpawnFailure(
+async function projectDeadStructuredSpawn(
   client: RuntimeHostClient,
   receipt: SpawnReceipt,
   entry: { accountId: string | null; cwd: string },
+  eventKey: string,
   identity?: { key: SessionKey; artifactPath: string },
 ): Promise<void> {
   const key = identity?.key ?? receipt.key;
@@ -62,7 +63,7 @@ async function projectStructuredSpawnFailure(
     kind: "session-status",
     producer: {
       kind: key.engine === "codex" ? "codex-app-server" : "claude-broker",
-      eventKey: `structured-spawn-failed:${receipt.launchId}`,
+      eventKey,
     },
     payload: {
       conversationId: receipt.conversationId,
@@ -114,7 +115,12 @@ export async function recoverPendingStructuredSpawns(
     const operation = await client.operationStatus(receipt.launchId);
     const status = operation?.receipt.status;
     if (status && FAILED_SPAWN_OPERATION_STATUSES.has(status)) {
-      if (entry) await projectStructuredSpawnFailure(client, receipt, entry);
+      if (entry) await projectDeadStructuredSpawn(
+        client,
+        receipt,
+        entry,
+        `structured-spawn-failed:${receipt.launchId}`,
+      );
       registry.failStructuredSpawn(
         receipt.launchId,
         operation?.receipt.reason ?? `structured spawn operation ended as ${status}`,
@@ -122,30 +128,50 @@ export async function recoverPendingStructuredSpawns(
       await releaseStructuredDeliveryHost(receipt.key).catch(() => false);
       continue;
     }
-    if (!entry?.structuredHost || entry.status === "dead" || entry.status === "unhosted") continue;
-    if (status !== "delivered") {
-      const effect = spawnEffects.get(receipt.launchId);
-      const prompt = typeof effect?.prompt === "string" ? effect.prompt : null;
-      if (prompt === null || effect?.conversationId !== receipt.conversationId || effect?.cwd !== receipt.cwd) {
-        throw new Error(`structured spawn recovery is missing durable prompt admission for ${receipt.launchId}`);
+    if (status === "delivered") {
+      const hostReady = entry?.structuredHost?.process
+        && entry.claimOwner
+        && entry.status !== "dead"
+        && entry.status !== "unhosted";
+      if (hostReady) {
+        const finalized = registry.finalizeStructuredSpawn(receipt.launchId);
+        if (finalized.kind === "conflict") throw new Error(`structured spawn recovery conflict: ${finalized.code}`);
+      } else {
+        if (!entry) throw new Error(`structured spawn recovery identity is unavailable for ${receipt.launchId}`);
+        await projectDeadStructuredSpawn(
+          client,
+          receipt,
+          entry,
+          `structured-spawn-delivered-host-dead:${receipt.launchId}`,
+        );
+        const settled = registry.recoverDeliveredStructuredSpawn(receipt.launchId);
+        if (settled.kind === "conflict") throw new Error(`structured spawn recovery conflict: ${settled.code}`);
+        await releaseStructuredDeliveryHost(receipt.key).catch(() => false);
       }
-      if (prompt.trim()) {
-        const delivered = await enqueueStructuredMessage({
-          path: receipt.artifactPath,
-          conversationId: receipt.conversationId,
-          clientMessageId: `spawn_${receipt.launchId}`,
-          operationId: `spawn_message_${receipt.launchId}`,
-          text: prompt,
-          hasImages: false,
-        }, {
-          client: () => client,
-          registry: () => registry,
-          enabled: () => true,
-        });
-        if (!delivered?.ok) throw new Error(delivered?.error ?? `structured spawn recovery could not admit ${receipt.launchId}`);
-      }
-      await client.transitionOperation(receipt.launchId, "delivered");
+      continue;
     }
+    if (!entry?.structuredHost || entry.status === "dead" || entry.status === "unhosted") continue;
+    const effect = spawnEffects.get(receipt.launchId);
+    const prompt = typeof effect?.prompt === "string" ? effect.prompt : null;
+    if (prompt === null || effect?.conversationId !== receipt.conversationId || effect?.cwd !== receipt.cwd) {
+      throw new Error(`structured spawn recovery is missing durable prompt admission for ${receipt.launchId}`);
+    }
+    if (prompt.trim()) {
+      const delivered = await enqueueStructuredMessage({
+        path: receipt.artifactPath,
+        conversationId: receipt.conversationId,
+        clientMessageId: `spawn_${receipt.launchId}`,
+        operationId: `spawn_message_${receipt.launchId}`,
+        text: prompt,
+        hasImages: false,
+      }, {
+        client: () => client,
+        registry: () => registry,
+        enabled: () => true,
+      });
+      if (!delivered?.ok) throw new Error(delivered?.error ?? `structured spawn recovery could not admit ${receipt.launchId}`);
+    }
+    await client.transitionOperation(receipt.launchId, "delivered");
     const finalized = registry.finalizeStructuredSpawn(receipt.launchId);
     if (finalized.kind === "conflict") throw new Error(`structured spawn recovery conflict: ${finalized.code}`);
   }
@@ -331,10 +357,13 @@ export async function spawnStructuredConversation(
       input.registry.failStructuredSpawn(input.receipt.launchId, error instanceof Error ? error.message : "structured spawn failed");
       const entry = input.registry.snapshot().entries[sessionKeyId(key)];
       if (entry) {
-        await projectStructuredSpawnFailure(input.client, input.receipt, entry, {
-          key,
-          artifactPath: entry.artifactPath,
-        }).catch(() => {});
+        await projectDeadStructuredSpawn(
+          input.client,
+          input.receipt,
+          entry,
+          `structured-spawn-failed:${input.receipt.launchId}`,
+          { key, artifactPath: entry.artifactPath },
+        ).catch(() => {});
       }
     }
     else input.registry.failSpawn(input.receipt.launchId, "structured spawn failed before host binding");
