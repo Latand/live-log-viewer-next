@@ -102,6 +102,13 @@ export interface FileEntry {
   ctx?: CtxUsage | null;
   /** Codex only: the thread's declared goal (objective + status). */
   goal?: AgentGoal | null;
+  /** Boundaries of the most-recent turn — the prompt (or relayed message) that
+      started it and, once the agent falls idle, the last assistant/tool output
+      that closed it. `endedAt` is null while the turn is still running, so the
+      UI ticks live elapsed; when set, the feed prints a «Worked for …» caption
+      and the card meta row parks the run length in a tooltip. Absent when no
+      turn boundary can be derived from the transcript tail (issue #231). */
+  lastTurn?: TurnBoundary | null;
   /** Best-effort TUI scrape fallback for prompts without a transcript protocol. */
   waitingInput: WaitingInput | null;
   /** Live pane wall or fresh structured account exhaustion. */
@@ -227,6 +234,16 @@ export interface CtxUsage {
   registryVersion?: string;
   /** ISO timestamp of the transcript usage record, with scan time fallback. */
   observedAt: string;
+}
+
+/** Boundaries of a single conversational turn, in Unix epoch **milliseconds**.
+    `startedAt` is the timestamp of the prompt (or relayed message) that opened
+    the turn; `endedAt` is the timestamp of the last assistant/tool output once
+    the agent goes idle, or null while the turn is still running. Derived in the
+    scanner from per-message transcript timestamps for both engines (issue #231). */
+export interface TurnBoundary {
+  startedAt: number;
+  endedAt: number | null;
 }
 
 /** Codex thread goal (update_goal tool / thread_goal_updated events): the

@@ -33,6 +33,7 @@ import { canHandoff, HandoffHandle } from "@/components/HandoffHandle";
 import { isWorkflowDraftId } from "@/components/workflows/workflowModel";
 import { WorkflowDraftPane } from "@/components/workflows/WorkflowDraftPane";
 import { activityDot, cleanTitle, engineBadge, engineEdge, fmtAge } from "@/components/utils";
+import { recencyTurnInfo } from "@/components/turnDuration";
 
 import type { AgentLink } from "./agentLinks";
 import { PIPELINE_RAIL_COLOR, pipelineRailSegment } from "./agentLinks";
@@ -521,6 +522,22 @@ function PipelineEdgeBadge({ index, total, color, x, y, moveTransition }: { inde
   );
 }
 
+/** Card meta-row recency slot (issue #231). While the agent is live and the
+    turn is open it ticks the elapsed run time («працює 4 хв»); once idle it
+    reverts to the "…ago" label and parks the finished run length in the
+    tooltip («останній прогін: 12 хв»), keeping the visible row uncluttered. */
+function RecencyChip({ file, className }: { file: FileEntry; className?: string }) {
+  const info = recencyTurnInfo(file);
+  if (info.running) {
+    return <span className={`${className ?? ""} shrink-0 font-semibold tabular-nums text-success`}>{info.running}</span>;
+  }
+  return (
+    <span className={`${className ?? ""} shrink-0 tabular-nums text-muted`} title={info.idleTitle ?? undefined}>
+      {fmtAge(file.mtime)}
+    </span>
+  );
+}
+
 /** Quiet history chip inside an expanded under-deck panel. */
 function UnderRow({ file, onSelect }: { file: FileEntry; onSelect: (file: FileEntry) => void }) {
   const badge = engineBadge(file);
@@ -624,7 +641,7 @@ function LiteNodeShell({ node, ringed, dimmed, flow }: { node: SchemeNode; ringe
               map's pointer-events-none layer, so its reason disclosure works at
               390px; the chip's own guard keeps the tap from opening the pane. */}
           <WakeupChip key={wakeupChipKey(node.file.pendingWakeup)} wakeup={node.file.pendingWakeup} className="pointer-events-auto" />
-          <span className="ml-auto shrink-0 text-[11px] text-muted">{fmtAge(node.file.mtime)}</span>
+          <RecencyChip file={node.file} className="ml-auto text-[11px]" />
         </div>
         <div className="min-w-0 flex-1 px-3 py-2.5 text-[14px] font-semibold leading-snug">
           <span className="line-clamp-5">{cleanTitle(node.file.title, 180)}</span>
