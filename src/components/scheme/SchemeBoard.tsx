@@ -831,7 +831,7 @@ export function SchemeBoard({
     <>
     <div
       ref={viewportRef}
-      className={`relative min-h-0 flex-1 overflow-hidden ${
+      className={`relative min-h-0 flex-1 overflow-clip ${
         panning ? "cursor-grabbing select-none" : taskTool ? "cursor-crosshair" : handLike ? "cursor-grab" : ""
       } ${handLike ? "touch-none" : ""}`}
       tabIndex={mapMode ? undefined : 0}
@@ -840,6 +840,13 @@ export function SchemeBoard({
       onPointerMove={onPointerMove}
       onDoubleClick={onDoubleClick}
       onClick={onClick}
+      /* Focusable controls live inside world-space panes. Browser focus can
+         scroll a clipped ancestor to reveal one, which would offset every
+         camera coordinate and carry the minimap away from its corner. */
+      onScroll={(event) => {
+        event.currentTarget.scrollLeft = 0;
+        event.currentTarget.scrollTop = 0;
+      }}
     >
       {/* Announces the window the arrow keys just landed on, for screen readers. */}
       <div className="sr-only" aria-live="polite" role="status">
