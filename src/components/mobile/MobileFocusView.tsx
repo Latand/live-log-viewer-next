@@ -64,6 +64,9 @@ interface Props {
   tasks: BoardTask[];
   /** Ids of not-yet-spawned conversation drafts, focusable like nodes. */
   drafts: string[];
+  /** Durable identities the user has crowned (issue #224): their roots lift into
+      the pinned top band on the map, mirroring the desktop scheme. */
+  favorites?: ReadonlySet<string>;
   loaded: boolean;
   /** Path an opener wants on screen (same signal the scheme camera gets). */
   focus: string | null;
@@ -97,7 +100,7 @@ export function pipelinesToDock(groups: SchemeGroup[]): Pipeline[] {
  * data the scheme draws — nothing on the diagram is unreachable, it is just
  * shown one pane at a time.
  */
-export function MobileFocusView({ project, groups, manual, files, flows, pipelines, surfacePipelines = [], workerStacks = [], tasks, drafts, loaded, focus, onSelect, onClose, onDraftClose, onDraftSpawned, onActiveChange, taskSheetNonce = 0 }: Props) {
+export function MobileFocusView({ project, groups, manual, files, flows, pipelines, surfacePipelines = [], workerStacks = [], tasks, drafts, favorites, loaded, focus, onSelect, onClose, onDraftClose, onDraftSpawned, onActiveChange, taskSheetNonce = 0 }: Props) {
   const { t } = useLocale();
   const [focusPath, setFocusPath] = useState<string | null>(null);
   const [mapOpen, setMapOpen] = useState(false);
@@ -121,7 +124,7 @@ export function MobileFocusView({ project, groups, manual, files, flows, pipelin
     setChipFade((prev) => (prev.left === left && prev.right === right ? prev : { left, right }));
   }, []);
 
-  const layout = useMemo(() => buildSchemeLayout(groups, manual, files, flows, drafts, pipelines, surfacePipelines), [groups, manual, files, flows, drafts, pipelines, surfacePipelines]);
+  const layout = useMemo(() => buildSchemeLayout(groups, manual, files, flows, drafts, pipelines, surfacePipelines, favorites), [groups, manual, files, flows, drafts, pipelines, surfacePipelines, favorites]);
   /* Scheme order (depth-first, groups left to right) becomes the strip order,
      so chips and the map agree on what "next" means. */
   const entries = useMemo<Entry[]>(

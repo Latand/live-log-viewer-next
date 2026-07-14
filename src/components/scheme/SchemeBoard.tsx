@@ -78,6 +78,9 @@ interface Props {
   surfacePipelines?: Pipeline[];
   /** Ids of not-yet-spawned conversation drafts drawn as full panes. */
   drafts: string[];
+  /** Durable identities the user has crowned (issue #224): their roots lift into
+      a band pinned at the top of the scheme. */
+  favorites?: ReadonlySet<string>;
   /** Path to glide the camera to and ring briefly (set by openers). */
   focus: string | null;
   /** Path to ring without moving the camera, used by the mobile full-map overlay. */
@@ -159,6 +162,7 @@ export function SchemeBoard({
   workerStacks = [],
   surfacePipelines = [],
   drafts,
+  favorites,
   focus,
   ring,
   attentionPaths,
@@ -192,7 +196,7 @@ export function SchemeBoard({
   }, [focus]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
-  const layout = useMemo(() => buildSchemeLayout(groups, manual, files, flows, drafts, pipelines, surfacePipelines), [groups, manual, files, flows, drafts, pipelines, surfacePipelines]);
+  const layout = useMemo(() => buildSchemeLayout(groups, manual, files, flows, drafts, pipelines, surfacePipelines, favorites), [groups, manual, files, flows, drafts, pipelines, surfacePipelines, favorites]);
 
   /* Selection keys are transcript paths, so the 10s poll relayout keeps the
      set for free; nodes that left the board are pruned out of the state
