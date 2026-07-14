@@ -25,7 +25,7 @@ import { rejectCrossOrigin } from "@/lib/sameOrigin";
 import { runtimeHostClient } from "@/lib/runtime/client";
 import { runtimeScope } from "@/lib/runtime/contracts";
 import { runtimeEventsEnabled } from "@/lib/runtime/flags";
-import { spawnStructuredConversation } from "@/lib/runtime/structuredSpawn";
+import { spawnStructuredConversation, structuredClaudePermissionMode } from "@/lib/runtime/structuredSpawn";
 import { structuredSpawnGap, spawnTransport } from "@/lib/runtime/spawnTransport";
 import { listFiles } from "@/lib/scanner";
 import { projectForCwd } from "@/lib/scanner/describe";
@@ -42,6 +42,18 @@ export const dynamic = "force-dynamic";
 
 const SUGGEST_SCAN_LIMIT = 80;
 const SUGGEST_MAX = 10;
+
+interface SpawnRouteDependencies {
+  resolveHealthySpawnAccount: typeof resolveHealthySpawnAccount;
+  runtimeHostClient: typeof runtimeHostClient;
+  spawnStructuredConversation: typeof spawnStructuredConversation;
+}
+
+const productionSpawnRouteDependencies: SpawnRouteDependencies = {
+  resolveHealthySpawnAccount,
+  runtimeHostClient,
+  spawnStructuredConversation,
+};
 
 interface SuggestResponse {
   dirs: string[];
@@ -84,7 +96,10 @@ export async function GET(req: NextRequest): Promise<NextResponse<SuggestRespons
   return NextResponse.json({ dirs, cwd: srcCwd, cwdExists });
 }
 
-export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse | ApiError>> {
+async function postSpawn(
+  req: NextRequest,
+  dependencies: SpawnRouteDependencies = productionSpawnRouteDependencies,
+): Promise<NextResponse<SpawnResponse | ApiError>> {
   const rejection = rejectCrossOrigin(req);
   if (rejection) return rejection;
 
@@ -169,7 +184,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse
   let imagePaths: string[] = [];
   let launchId: string | null = null;
   try {
-    const account = await resolveHealthySpawnAccount(engine, body.accountId);
+    const account = await dependencies.resolveHealthySpawnAccount(engine, body.accountId);
     const lineage = resolveSpawnLineage(spawnLineageSelectorForCaller(authenticatedCaller, {
       ...body,
       role: role.value?.role,
@@ -204,10 +219,27 @@ export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse
       allowSubagents: body.allowSubagents === true,
       deferClaudeSpawnPolicy: true,
     });
-    const spec = { ...specBase, launchProfile: emptyLaunchProfile({ ...(specBase.launchProfile ?? {}), cwd, parentConversationId, allowSubagents: body.allowSubagents === true }) };
+    const permissionMode = engine === "claude" && transport === "structured"
+      ? structuredClaudePermissionMode(specBase.launchProfile?.permissionMode, {
+        agentInitiated,
+        operatorAuthenticated: authenticatedCaller?.kind === "operator",
+        roleSpawn: Boolean(role.value),
+      })
+      : specBase.launchProfile?.permissionMode;
+    const spec = {
+      ...specBase,
+      launchProfile: emptyLaunchProfile({
+        ...(specBase.launchProfile ?? {}),
+        cwd,
+        parentConversationId,
+        allowSubagents: body.allowSubagents === true,
+        permissionMode,
+      }),
+    };
     const begun = registry.beginSpawnRequest({
       engine,
       cwd,
+      transport,
       accountId: account.accountId,
       parentConversationId,
       parentSessionKey,
@@ -221,7 +253,9 @@ export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse
     });
     if (begun.kind === "conflict") return NextResponse.json({ error: "spawn attempt conflicts with its original request" }, { status: 409 });
     if (begun.kind === "replay") {
-      const structured = Boolean(begun.receipt.key && registry.snapshot().entries[sessionKeyId(begun.receipt.key)]?.structuredHost);
+      const structured = begun.receipt.transport === "structured"
+        || (begun.receipt.transport === null
+          && Boolean(begun.receipt.key && registry.snapshot().entries[sessionKeyId(begun.receipt.key)]?.structuredHost));
       const response = spawnResponseForReceipt(begun.receipt, begun.receipt.artifactPath, { structured });
       if (begun.receipt.state === "failed") return NextResponse.json({ error: "original spawn failed before launch", retrySafe: true }, { status: 409 });
       return NextResponse.json(response, { status: spawnReplayStatus(response, structured) });
@@ -237,9 +271,9 @@ export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse
       });
     }
     if (transport === "structured") {
-      const runtimeClient = runtimeHostClient();
+      const runtimeClient = dependencies.runtimeHostClient();
       if (!runtimeClient) throw new Error("structured spawn runtime host is unavailable");
-      const response = await spawnStructuredConversation({
+      const response = await dependencies.spawnStructuredConversation({
         engine,
         receipt: begun.receipt,
         spec,
@@ -258,7 +292,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse
        appended to its first prompt — the same contract the pane composer uses. */
     const bundle = buildImagePayload(prompt, images);
     imagePaths = bundle.imagePaths;
-    let runtimeClient = runtimeEventsEnabled() ? runtimeHostClient() : null;
+    let runtimeClient = runtimeEventsEnabled() ? dependencies.runtimeHostClient() : null;
     /* The durable launch receipt owns the runtime idempotency key too. A
        recovered route cannot create a second logical lineage edge. */
     const operationId = runtimeClient ? begun.receipt.launchId : null;
@@ -354,3 +388,8 @@ export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse
     return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 500 });
   }
 }
+
+export const POST = Object.assign(
+  async (req: NextRequest): Promise<NextResponse<SpawnResponse | ApiError>> => await postSpawn(req),
+  { withDependencies: postSpawn },
+);

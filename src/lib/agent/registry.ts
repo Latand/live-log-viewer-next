@@ -111,6 +111,8 @@ export interface SpawnReceipt {
   clientAttemptId: string | null;
   /** SHA-256 of the public launch shape. Prompt/image contents never persist. */
   requestDigest: string | null;
+  /** Launch transport fixed when the idempotent reservation is created. */
+  transport: "tmux" | "structured" | null;
   /** One-way binding for the caller credential injected into this worker. */
   spawnCapabilityDigest: string | null;
   /** Reserved at receipt birth so path discovery cannot choose the identity. */
@@ -174,6 +176,7 @@ export type DurableMembershipInput = Omit<DurableConversationMembership, "conver
 export interface SpawnRequest {
   engine: AgentEngine;
   cwd: string;
+  transport?: "tmux" | "structured" | null;
   launchProfile?: Partial<LaunchProfile>;
   clientAttemptId?: string | null;
   requestDigest?: string | null;
@@ -1160,6 +1163,7 @@ function normalizeReceipt(value: SpawnReceipt): SpawnReceipt {
     ...value,
     clientAttemptId: typeof value.clientAttemptId === "string" ? value.clientAttemptId : null,
     requestDigest: typeof value.requestDigest === "string" ? value.requestDigest : null,
+    transport: value.transport === "tmux" || value.transport === "structured" ? value.transport : null,
     spawnCapabilityDigest: typeof value.spawnCapabilityDigest === "string" && /^[0-9a-f]{64}$/.test(value.spawnCapabilityDigest)
       ? value.spawnCapabilityDigest
       : null,
@@ -1947,7 +1951,11 @@ export class AgentRegistry {
       if (input.clientAttemptId) {
         const existing = Object.values(file.receipts).find((receipt) => receipt.clientAttemptId === input.clientAttemptId);
         if (existing) {
-          const compatible = existing.requestDigest === (input.requestDigest ?? null) && existing.engine === input.engine && existing.cwd === input.cwd;
+          const compatible = existing.requestDigest === (input.requestDigest ?? null)
+            && existing.engine === input.engine
+            && existing.cwd === input.cwd
+            && existing.transport === (input.transport ?? null)
+            && existing.launchProfile.permissionMode === profile.permissionMode;
           return { kind: compatible ? "replay" : "conflict", receipt: clone(existing) };
         }
       }
@@ -1970,6 +1978,7 @@ export class AgentRegistry {
         launchId: crypto.randomUUID(),
         clientAttemptId: input.clientAttemptId ?? null,
         requestDigest: input.requestDigest ?? null,
+        transport: input.transport ?? null,
         spawnCapabilityDigest: typeof input.spawnCapabilityDigest === "string" && /^[0-9a-f]{64}$/.test(input.spawnCapabilityDigest)
           ? input.spawnCapabilityDigest
           : null,
