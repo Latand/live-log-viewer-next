@@ -7,8 +7,8 @@ import { forEachCooperatively, mapCooperatively } from "../cooperative";
 import { sessionProjectProjection } from "../session/titleProjection";
 import { codexThreadIdFromPath, nativeCodexParentThreadId } from "./codexNative";
 import { describe } from "./describe";
-import { conversationCatalogSnapshot } from "./conversationCatalog";
-import { projectCatalogSnapshotFromRaw } from "./projectCatalog";
+import type { ConversationCatalogEntry } from "./conversationCatalog";
+import { beginProjectCatalogScan, projectCatalogSnapshotFromRaw } from "./projectCatalog";
 import { projectResolutionStateKey } from "./projectState";
 import { EXTS, ROOTS, scanRootEntries } from "./roots";
 import { selectSchemeWindow } from "./schemeWindow";
@@ -130,6 +130,7 @@ function cappedEntries(ranked: RawEntry[], projectByPath: ReadonlyMap<string, st
 
 async function canonicalProjectCatalog(
   projectByPath: ReadonlyMap<string, string>,
+  conversationCatalog: readonly ConversationCatalogEntry[],
   excludedSummaryPaths?: ReadonlySet<string>,
   sourceCatalog: readonly ProjectCatalogEntry[] = [],
 ): Promise<{ projectByPath: Map<string, string>; projectCatalog: ProjectCatalogEntry[] }> {
@@ -142,7 +143,7 @@ async function canonicalProjectCatalog(
   await forEachCooperatively(sourceCatalog, (entry) => {
     sourceRoots.set(entry.project, entry.projectRoot);
   });
-  await forEachCooperatively(conversationCatalogSnapshot(), (entry) => {
+  await forEachCooperatively(conversationCatalog, (entry) => {
     if (excludedSummaryPaths?.has(entry.path)) return;
     const project = canonicalByPath.get(entry.path) ?? entry.project;
     const group = groups.get(project) ?? { project, smt: 0, conversations: 0 };
@@ -233,13 +234,20 @@ export async function discoverFilesWithProjectCatalog(
   files: FileEntry[];
   projectCatalog: ProjectCatalogEntry[];
 }> {
+  const scanToken = beginProjectCatalogScan(options.persist !== false);
   const limit = createLimiter(48);
   const raw = await discoverRaw(roots, limit);
   const snapshot = await projectCatalogSnapshotFromRaw(raw, {
     persist: options.persist,
     excludedSummaryPaths: options.demote,
+    scanToken,
   });
-  const { projectCatalog, projectByPath } = await canonicalProjectCatalog(snapshot.projectByPath, options.demote, snapshot.projectCatalog);
+  const { projectCatalog, projectByPath } = await canonicalProjectCatalog(
+    snapshot.projectByPath,
+    snapshot.conversationCatalog,
+    options.demote,
+    snapshot.projectCatalog,
+  );
   return { files: await entriesFromRaw(raw, projectByPath, options.demote, options.pin), projectCatalog };
 }
 
@@ -248,16 +256,23 @@ export async function discoverFiles(
   demote?: ReadonlySet<string>,
   pin?: ReadonlySet<string>,
 ): Promise<FileEntry[]> {
+  const scanToken = beginProjectCatalogScan(false);
   const limit = createLimiter(48);
   const raw = await discoverRaw(roots, limit);
-  const snapshot = await projectCatalogSnapshotFromRaw(raw, { persist: false });
-  const { projectByPath } = await canonicalProjectCatalog(snapshot.projectByPath, undefined, snapshot.projectCatalog);
+  const snapshot = await projectCatalogSnapshotFromRaw(raw, { persist: false, scanToken });
+  const { projectByPath } = await canonicalProjectCatalog(
+    snapshot.projectByPath,
+    snapshot.conversationCatalog,
+    undefined,
+    snapshot.projectCatalog,
+  );
   return entriesFromRaw(raw, projectByPath, demote, pin);
 }
 
 /** Cold-start fallback for the list/search route. It builds only lightweight
  * catalog metadata and leaves the scheme processing pipeline untouched. */
 export async function refreshConversationCatalog(roots: Roots | RootEntries = scanRootEntries()): Promise<void> {
+  const scanToken = beginProjectCatalogScan(false);
   const raw = await discoverRaw(roots, createLimiter(48));
-  await projectCatalogSnapshotFromRaw(raw, { persist: false });
+  await projectCatalogSnapshotFromRaw(raw, { persist: false, scanToken });
 }

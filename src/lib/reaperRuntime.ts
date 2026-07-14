@@ -7,6 +7,7 @@ import { agentRegistry, type AgentRegistry, type RegistryFile, type TmuxHostEvid
 import { readTranscriptHosts, type TranscriptHost, type TranscriptHostSnapshot } from "@/lib/agent/transcriptHost";
 import { boardFor } from "@/lib/board/store";
 import { statePath } from "@/lib/configDir";
+import { forEachCooperatively } from "@/lib/cooperative";
 import { resolveFlowMergeIdentity } from "@/lib/flows/git";
 import { loadFlows, saveFlows } from "@/lib/flows/store";
 import type { Flow, FlowMergeEvidence } from "@/lib/flows/types";
@@ -14,7 +15,7 @@ import { reconcileMigrationInventory } from "@/lib/accounts/migration/coordinato
 import { procBackend } from "@/lib/proc";
 import { listFiles } from "@/lib/scanner";
 import { isNativeCodexSubagentTranscript } from "@/lib/scanner/codexNative";
-import { scanUserAuthoredMessages } from "@/lib/session/reader";
+import { scanUserAuthoredMessagesCooperatively } from "@/lib/session/reader";
 import { killTmuxHostIfMatches, tmuxEndpoint } from "@/lib/tmux";
 import type { FileEntry } from "@/lib/types";
 
@@ -398,14 +399,14 @@ function viewerNativeSubagentAllowance(file: FileEntry | undefined): number {
   return 0;
 }
 
-function authorshipEvidence(
+async function authorshipEvidence(
   snapshot: ReturnType<AgentRegistry["snapshot"]>,
   hosts: TranscriptHost[],
   flows: Flow[],
   files: FileEntry[],
   missingTranscriptPaths: ReadonlySet<string>,
   priorScannedAt: Record<string, number>,
-): {
+): Promise<{
   userAuthoredPaths: Set<string>;
   unverifiedPaths: Set<string>;
   /* Path → observed transcript mtime (seconds) for every transcript scanned to
@@ -413,7 +414,7 @@ function authorshipEvidence(
      the board needs to clear `authorshipUnverified` without falsely certifying
      an unscanned worker (issue #112). */
   verifiedCleanAt: Map<string, number>;
-} {
+}> {
   const userAuthoredPaths = new Set<string>();
   const unverifiedPaths = new Set<string>();
   const verifiedCleanAt = new Map<string, number>();
@@ -425,23 +426,26 @@ function authorshipEvidence(
      the scan sees, in addition to the live hosts. A live file is skipped: it is
      board-exempt regardless and its mtime advances every write, so scanning it
      would churn without ever producing a usable stamp. */
-  const fileByPath = new Map(files.map((file) => [file.path, file] as const));
+  const fileByPath = new Map<string, FileEntry>();
   const targets = new Map<string, "claude" | "codex">();
-  for (const host of hosts) {
+  await forEachCooperatively(files, (file) => {
+    fileByPath.set(file.path, file);
+  });
+  await forEachCooperatively(hosts, (host) => {
     if (host.primaryPath) targets.set(host.primaryPath, host.engine);
-  }
-  for (const file of files) {
-    if (file.engine !== "claude" && file.engine !== "codex") continue;
-    if (file.activity === "live" || targets.has(file.path)) continue;
+  });
+  await forEachCooperatively(files, (file) => {
+    if (file.engine !== "claude" && file.engine !== "codex") return;
+    if (file.activity === "live" || targets.has(file.path)) return;
     /* Already clean-stamped at or past the current mtime — no need to re-scan;
        the persisted stamp still stands (the caller keeps prior state entries). */
     const stamp = priorScannedAt[file.path];
-    if (stamp !== undefined && stamp >= file.mtime) continue;
+    if (stamp !== undefined && stamp >= file.mtime) return;
     targets.set(file.path, file.engine);
-  }
-  for (const [pathname, engine] of targets) {
-    if (userAuthoredPaths.has(pathname) || unverifiedPaths.has(pathname)) continue;
-    if (missingTranscriptPaths.has(pathname)) continue;
+  });
+  await forEachCooperatively([...targets], async ([pathname, engine]) => {
+    if (userAuthoredPaths.has(pathname) || unverifiedPaths.has(pathname)) return;
+    if (missingTranscriptPaths.has(pathname)) return;
     const viewerMessageAllowance = (hasViewerWorkerLaunchPrompt(snapshot, pathname) ? 1 : 0)
       + viewerFlowMessageAllowance(flows, pathname)
       + viewerReviewerLaunchAllowance(flows, pathname)
@@ -455,13 +459,13 @@ function authorshipEvidence(
       observedMtime = fs.statSync(pathname).mtimeMs / 1000;
     } catch {
       unverifiedPaths.add(pathname);
-      continue;
+      return;
     }
-    const scan = scanUserAuthoredMessages(pathname, engine, viewerMessageAllowance + 1);
+    const scan = await scanUserAuthoredMessagesCooperatively(pathname, engine, viewerMessageAllowance + 1);
     if (scan.count > viewerMessageAllowance) userAuthoredPaths.add(pathname);
     else if (!scan.complete) unverifiedPaths.add(pathname);
     else verifiedCleanAt.set(pathname, observedMtime);
-  }
+  });
   return { userAuthoredPaths, unverifiedPaths, verifiedCleanAt };
 }
 
@@ -538,7 +542,7 @@ async function makeInput(
   const snapshot = registry.snapshot();
   const missingTranscriptPaths = new Set(hosts.flatMap((host) =>
     host.primaryPath && !fs.existsSync(host.primaryPath) ? [host.primaryPath] : []));
-  const authorship = authorshipEvidence(snapshot, hosts, flows, files, missingTranscriptPaths, state.scannedAt);
+  const authorship = await authorshipEvidence(snapshot, hosts, flows, files, missingTranscriptPaths, state.scannedAt);
   let stateChanged = false;
   for (const pathname of authorship.userAuthoredPaths) {
     if (state.userAuthoredPaths[pathname]) continue;

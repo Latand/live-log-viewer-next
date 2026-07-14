@@ -251,6 +251,7 @@ export interface ConversationObservation {
   accountId: string | null;
   launchProfile: LaunchProfile;
   turn: TurnState;
+  expectedTurnObservedAt?: string | null;
   startedAt?: string | null;
   observedAt: string;
 }
@@ -1057,6 +1058,14 @@ function adoptProvisionalOwner(
   file.conversationRevision[target.engine] += 1;
   file.engineRouting[target.engine].revision += 1;
   return true;
+}
+
+function observationIsCurrent(currentObservedAt: string | null, observedAt: string): boolean {
+  if (!currentObservedAt) return true;
+  const currentTime = Date.parse(currentObservedAt);
+  const observedTime = Date.parse(observedAt);
+  if (Number.isFinite(currentTime) && Number.isFinite(observedTime)) return observedTime >= currentTime;
+  return observedAt >= currentObservedAt;
 }
 
 function normalizeReceipt(value: SpawnReceipt): SpawnReceipt {
@@ -2277,13 +2286,17 @@ export class AgentRegistry {
       };
       for (const conversation of Object.values(file.conversations)) indexConversation(conversation);
       const resumeReceiptsByConversation = new Map<ViewerConversationId, SpawnReceipt[]>();
-      for (const receipt of Object.values(file.receipts)) {
-        if (receipt.purpose !== "resume-successor") continue;
-        const conversationId = resolveConversationAlias(file, receipt.conversationId);
-        const receipts = resumeReceiptsByConversation.get(conversationId) ?? [];
-        receipts.push(receipt);
-        resumeReceiptsByConversation.set(conversationId, receipts);
-      }
+      const refreshResumeReceiptIndex = () => {
+        resumeReceiptsByConversation.clear();
+        for (const receipt of Object.values(file.receipts)) {
+          if (receipt.purpose !== "resume-successor") continue;
+          const conversationId = resolveConversationAlias(file, receipt.conversationId);
+          const receipts = resumeReceiptsByConversation.get(conversationId) ?? [];
+          receipts.push(receipt);
+          resumeReceiptsByConversation.set(conversationId, receipts);
+        }
+      };
+      refreshResumeReceiptIndex();
       const migrationReceiptByPath = new Map<string, SpawnReceipt>();
       for (const receipt of Object.values(file.receipts)) {
         const receiptPath = receipt.artifactPath ? `${receipt.engine}:${receipt.artifactPath}` : null;
@@ -2311,6 +2324,7 @@ export class AgentRegistry {
           }, "observed-completed") : null;
           if (recovered?.kind === "settled") {
             scopeChanged.add(observation.engine);
+            refreshResumeReceiptIndex();
             const recoveredConversation = file.conversations[resolveConversationAlias(file, pathPendingReceipt!.conversationId)];
             if (recoveredConversation) indexConversation(recoveredConversation);
           }
@@ -2321,11 +2335,13 @@ export class AgentRegistry {
           && conversationOwnsPath(candidate, observation.path));
         let exactOwner = preferredConversationOwner(file, exactOwners);
         if (exactOwner) {
+          let ownerAdopted = false;
           for (const duplicate of exactOwners) {
             if (duplicate.id !== exactOwner.id && scannerAllocatedProvisionalOwner(duplicate, observation.path)) {
-              adoptProvisionalOwner(file, duplicate, exactOwner, observation.path);
+              ownerAdopted = adoptProvisionalOwner(file, duplicate, exactOwner, observation.path) || ownerAdopted;
             }
           }
+          if (ownerAdopted) refreshResumeReceiptIndex();
         }
         const nativeSessionId = nativeId ? `${observation.engine}:${nativeId}` : null;
         const firstObservedPath = nativeSessionId ? firstPathByNativeSession.get(nativeSessionId) : undefined;
@@ -2343,6 +2359,7 @@ export class AgentRegistry {
           exactOwner = nativeOwner;
           conversation = nativeOwner;
           adoptedSuccessorPath = true;
+          refreshResumeReceiptIndex();
         }
         if (!resumeInventoryFenced && (!exactOwner || adoptedSuccessorPath) && nativeOwner && nativeId) {
           const generation = nativeOwner.generations.find((candidate) => candidate.id === nativeId);
@@ -2425,8 +2442,14 @@ export class AgentRegistry {
           plan: observation.launchProfile.plan ?? generation.launchProfile.plan,
         };
         recordObservedLineage(file, conversation, observation.path, observation.observedAt);
-        conversation.turn = { ...observation.turn, observedAt: observation.observedAt };
-        conversation.updatedAt = observation.observedAt;
+        const turnBaseStillCurrent = observation.expectedTurnObservedAt === undefined
+          || observation.expectedTurnObservedAt === conversation.turn.observedAt;
+        if (turnBaseStillCurrent && observationIsCurrent(conversation.turn.observedAt, observation.observedAt)) {
+          conversation.turn = { ...observation.turn, observedAt: observation.observedAt };
+        }
+        if (observationIsCurrent(conversation.updatedAt, observation.observedAt)) {
+          conversation.updatedAt = observation.observedAt;
+        }
         if (priorAccountId !== generation.accountId || priorRole !== generation.launchProfile.role || priorTurnState !== conversation.turn.state) {
           scopeChanged.add(observation.engine);
         }

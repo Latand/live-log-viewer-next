@@ -114,15 +114,83 @@ async function reconcileAccountLogins(): Promise<void> {
   }));
 }
 
+type InventorySnapshot = Awaited<ReturnType<typeof reconcileMigrationInventory>>;
+type ConversationLookup = ReturnType<typeof conversationLookupFromSnapshot>;
+type ControllerScan = Awaited<ReturnType<typeof listFilesWithProjectCatalog>>;
+
+export interface AccountMigrationControllerCyclePorts {
+  scan: () => ReturnType<typeof listFilesWithProjectCatalog>;
+  reconcileInventory: (registry: AgentRegistry, files: ControllerScan["files"]) => Promise<InventorySnapshot>;
+  reconcileFlowOwnership: (lookup: ConversationLookup) => Promise<void>;
+  reconcileWorkflowOwnership: (lookup: ConversationLookup) => Promise<void>;
+  reconcileHandoffOwnership: (lookup: ConversationLookup) => Promise<void>;
+  reconcileFiles: typeof reconcileFileControllers;
+  reconcileRuntime: (registry: AgentRegistry, files: ControllerScan["files"]) => Promise<void>;
+  reconcileTaskStore: (registry: AgentRegistry, files: ControllerScan["files"]) => void | Promise<void>;
+  syncRouting: (registry: AgentRegistry) => void | Promise<void>;
+  reconcileMigrationCycle: (registry: AgentRegistry, quota: Pick<QuotaController, "tick">) => Promise<void>;
+}
+
+async function reconcileControllerRuntime(registry: AgentRegistry, files: ControllerScan["files"]): Promise<void> {
+  await reconcileAccountLogins();
+  const transcriptHosts = await readTranscriptHosts(true);
+  try {
+    await runReaperCycle({ registry, hosts: transcriptHosts.hosts, files });
+  } catch {
+    console.error("[agent reaper] lifecycle reconciliation failed");
+  }
+  try {
+    const report = await runHeadlessProcessReaper({ hosts: transcriptHosts.hosts, flows: loadFlows() });
+    if (report.signaled > 0) console.warn(`[headless process reaper] terminated ${report.signaled} stale process group(s)`);
+  } catch {
+    console.error("[headless process reaper] reconciliation failed");
+  }
+}
+
+function reconcileControllerTasks(registry: AgentRegistry, files: ControllerScan["files"]): void {
+  const currentLookup = conversationLookupFromSnapshot(registry.snapshot());
+  mutateTasks((current) => {
+    const reconciled = reconcileTasks(files, current, {
+      pathForPanePid: (panePid, entries) => pathForPanePid(entries, panePid, readPpid),
+      panePidAlive: pidAlive,
+      conversationIdForPath: (pathname) => currentLookup.conversationForPath(pathname)?.id ?? null,
+      canonicalConversationId: (conversationId) => conversationId.startsWith("conversation_")
+        ? currentLookup.canonicalConversationId(conversationId as `conversation_${string}`)
+        : null,
+      pathForConversationId: (conversationId) => conversationId.startsWith("conversation_")
+        ? currentLookup.conversation(conversationId as `conversation_${string}`)?.generations.at(-1)?.path ?? null
+        : null,
+    });
+    return { tasks: reconciled.dirty ? reconciled.tasks : undefined, result: undefined };
+  });
+}
+
+const DEFAULT_CONTROLLER_CYCLE_PORTS: AccountMigrationControllerCyclePorts = {
+  scan: () => listFilesWithProjectCatalog(undefined, { persist: true }),
+  reconcileInventory: reconcileMigrationInventory,
+  reconcileFlowOwnership: reconcileFlowConversationOwnershipCooperatively,
+  reconcileWorkflowOwnership: reconcileWorkflowConversationOwnershipCooperatively,
+  reconcileHandoffOwnership: reconcileHandoffConversationOwnershipCooperatively,
+  reconcileFiles: reconcileFileControllers,
+  reconcileRuntime: reconcileControllerRuntime,
+  reconcileTaskStore: reconcileControllerTasks,
+  syncRouting: syncCompatibilityRouting,
+  reconcileMigrationCycle: reconcileAccountMigrationCycle,
+};
+
 export class AccountMigrationController {
   private running: Promise<void> | null = null;
   private trailingCycleRequested = false;
+  private readonly ports: AccountMigrationControllerCyclePorts;
 
   constructor(
     private readonly registry: AgentRegistry = agentRegistry(),
-    private readonly quota = new QuotaController(registry),
+    private readonly quota: Pick<QuotaController, "tick"> = new QuotaController(registry),
     private readonly cycle: (() => Promise<void>) | null = null,
-  ) {}
+    ports: Partial<AccountMigrationControllerCyclePorts> = {},
+  ) {
+    this.ports = { ...DEFAULT_CONTROLLER_CYCLE_PORTS, ...ports };
+  }
 
   tick(): Promise<void> {
     if (this.running) {
@@ -149,49 +217,23 @@ export class AccountMigrationController {
   }
 
   private async run(): Promise<void> {
-    const { files } = await listFilesWithProjectCatalog(undefined, { persist: true });
+    const { files } = await this.ports.scan();
     await yieldToRuntime();
-    const inventorySnapshot = await reconcileMigrationInventory(this.registry, files);
+    const inventorySnapshot = await this.ports.reconcileInventory(this.registry, files);
     await yieldToRuntime();
     const inventoryLookup = conversationLookupFromSnapshot(inventorySnapshot);
-    await reconcileFlowConversationOwnershipCooperatively(inventoryLookup);
-    await reconcileWorkflowConversationOwnershipCooperatively(inventoryLookup);
-    await reconcileHandoffConversationOwnershipCooperatively(inventoryLookup);
+    await this.ports.reconcileFlowOwnership(inventoryLookup);
+    await this.ports.reconcileWorkflowOwnership(inventoryLookup);
+    await this.ports.reconcileHandoffOwnership(inventoryLookup);
     await yieldToRuntime();
-    await reconcileFileControllers(files);
+    await this.ports.reconcileFiles(files);
     await yieldToRuntime();
-    await reconcileAccountLogins();
-    const transcriptHosts = await readTranscriptHosts(true);
-    try {
-      await runReaperCycle({ registry: this.registry, hosts: transcriptHosts.hosts, files });
-    } catch {
-      console.error("[agent reaper] lifecycle reconciliation failed");
-    }
-    try {
-      const report = await runHeadlessProcessReaper({ hosts: transcriptHosts.hosts, flows: loadFlows() });
-      if (report.signaled > 0) console.warn(`[headless process reaper] terminated ${report.signaled} stale process group(s)`);
-    } catch {
-      console.error("[headless process reaper] reconciliation failed");
-    }
+    await this.ports.reconcileRuntime(this.registry, files);
     await yieldToRuntime();
-    const currentLookup = conversationLookupFromSnapshot(this.registry.snapshot());
-    mutateTasks((current) => {
-      const reconciled = reconcileTasks(files, current, {
-        pathForPanePid: (panePid, entries) => pathForPanePid(entries, panePid, readPpid),
-        panePidAlive: pidAlive,
-        conversationIdForPath: (pathname) => currentLookup.conversationForPath(pathname)?.id ?? null,
-        canonicalConversationId: (conversationId) => conversationId.startsWith("conversation_")
-          ? currentLookup.canonicalConversationId(conversationId as `conversation_${string}`)
-          : null,
-        pathForConversationId: (conversationId) => conversationId.startsWith("conversation_")
-          ? currentLookup.conversation(conversationId as `conversation_${string}`)?.generations.at(-1)?.path ?? null
-          : null,
-      });
-      return { tasks: reconciled.dirty ? reconciled.tasks : undefined, result: undefined };
-    });
+    await this.ports.reconcileTaskStore(this.registry, files);
     await yieldToRuntime();
-    syncCompatibilityRouting(this.registry);
-    await reconcileAccountMigrationCycle(this.registry, this.quota);
+    await this.ports.syncRouting(this.registry);
+    await this.ports.reconcileMigrationCycle(this.registry, this.quota);
   }
 }
 

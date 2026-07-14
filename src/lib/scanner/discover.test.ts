@@ -9,8 +9,9 @@ import { emptyLaunchProfile } from "../accounts/migration/contracts";
 import { AgentRegistry, setAgentRegistryForTests } from "../agent/registry";
 import type { RootKey } from "../types";
 import { conversationCatalogSnapshot } from "./conversationCatalog";
-import { discoverFiles, discoverFilesWithProjectCatalog } from "./discover";
+import { discoverFiles, discoverFilesWithProjectCatalog, type RawEntry } from "./discover";
 import { projectForCwd } from "./describe";
+import { projectCatalogSnapshotFromRaw } from "./projectCatalog";
 import { PROJECT_RESOLUTION_VERSION, projectResolutionStateKey } from "./projectState";
 import { FILE_CAP } from "./roots";
 import { DEFAULT_SCHEME_CARDS_PER_PROJECT } from "./schemeWindow";
@@ -37,6 +38,134 @@ test("pure project-catalog discovery leaves the state directory unchanged", asyn
   } finally {
     if (previousStateDir === undefined) delete process.env.LLV_STATE_DIR;
     else process.env.LLV_STATE_DIR = previousStateDir;
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test("project snapshots retain their scan-local conversation catalog after a later publication", async () => {
+  const base = await mkdtemp(path.join(os.tmpdir(), "llv-scan-local-catalog-"));
+  try {
+    const firstRoot = path.join(base, "first");
+    const secondRoot = path.join(base, "second");
+    const firstPath = path.join(firstRoot, "first.jsonl");
+    const secondPath = path.join(secondRoot, "second.jsonl");
+    await writeFixture(firstPath, JSON.stringify({ type: "session_meta", payload: { cwd: "/repo/first" } }) + "\n", 1_700_000_000);
+    await writeFixture(secondPath, JSON.stringify({ type: "session_meta", payload: { cwd: "/repo/second" } }) + "\n", 1_700_000_001);
+    const rawEntry = async (root: string, pathname: string): Promise<RawEntry> => ({
+      rootName: "codex-sessions",
+      root,
+      path: pathname,
+      st: await stat(pathname),
+    });
+
+    const first = await projectCatalogSnapshotFromRaw([await rawEntry(firstRoot, firstPath)], { persist: false });
+    await projectCatalogSnapshotFromRaw([await rawEntry(secondRoot, secondPath)], { persist: false });
+
+    expect(first.conversationCatalog.map((entry) => entry.path)).toEqual([firstPath]);
+    expect(conversationCatalogSnapshot().map((entry) => entry.path)).toEqual([secondPath]);
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test("an older overlapping scan cannot replace a newer catalog publication", async () => {
+  const base = await mkdtemp(path.join(os.tmpdir(), "llv-catalog-publication-order-"));
+  const previousStateDir = process.env.LLV_STATE_DIR;
+  process.env.LLV_STATE_DIR = path.join(base, "state");
+  try {
+    const oldRoot = path.join(base, "old");
+    const freshRoot = path.join(base, "fresh");
+    const oldPaths = await Promise.all(Array.from({ length: 17 }, async (_, index) => {
+      const pathname = path.join(oldRoot, `old-${index}.jsonl`);
+      await writeFixture(pathname, JSON.stringify({ type: "session_meta", payload: { cwd: "/repo/old" } }) + "\n", 1_700_000_000 + index);
+      return pathname;
+    }));
+    const freshPath = path.join(freshRoot, "fresh.jsonl");
+    await writeFixture(freshPath, JSON.stringify({ type: "session_meta", payload: { cwd: "/repo/fresh" } }) + "\n", 1_700_000_100);
+    const rawEntry = async (root: string, pathname: string): Promise<RawEntry> => ({
+      rootName: "codex-sessions",
+      root,
+      path: pathname,
+      st: await stat(pathname),
+    });
+    const oldRows = await Promise.all(oldPaths.map((pathname) => rawEntry(oldRoot, pathname)));
+    const freshRow = await rawEntry(freshRoot, freshPath);
+
+    const olderScan = projectCatalogSnapshotFromRaw(oldRows);
+    const newerScan = new Promise<void>((resolve, reject) => {
+      setImmediate(() => void projectCatalogSnapshotFromRaw([freshRow]).then(() => resolve(), reject));
+    });
+    await Promise.all([olderScan, newerScan]);
+
+    expect(conversationCatalogSnapshot().map((entry) => entry.path)).toEqual([freshPath]);
+    const persisted = JSON.parse(await readFile(path.join(process.env.LLV_STATE_DIR, "project-catalog.json"), "utf8"));
+    expect(Object.keys(persisted.files)).toEqual([freshPath]);
+  } finally {
+    if (previousStateDir === undefined) delete process.env.LLV_STATE_DIR;
+    else process.env.LLV_STATE_DIR = previousStateDir;
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test("a read-only scan leaves an overlapping durable publication eligible to persist", async () => {
+  const base = await mkdtemp(path.join(os.tmpdir(), "llv-catalog-durable-order-"));
+  const previousStateDir = process.env.LLV_STATE_DIR;
+  process.env.LLV_STATE_DIR = path.join(base, "state");
+  try {
+    const durableRoot = path.join(base, "durable");
+    const readOnlyRoot = path.join(base, "read-only");
+    const durablePaths = await Promise.all(Array.from({ length: 17 }, async (_, index) => {
+      const pathname = path.join(durableRoot, `durable-${index}.jsonl`);
+      await writeFixture(pathname, JSON.stringify({ type: "session_meta", payload: { cwd: "/repo/durable" } }) + "\n", 1_700_000_000 + index);
+      return pathname;
+    }));
+    const readOnlyPath = path.join(readOnlyRoot, "read-only.jsonl");
+    await writeFixture(readOnlyPath, JSON.stringify({ type: "session_meta", payload: { cwd: "/repo/read-only" } }) + "\n", 1_700_000_100);
+    const rawEntry = async (root: string, pathname: string): Promise<RawEntry> => ({
+      rootName: "codex-sessions",
+      root,
+      path: pathname,
+      st: await stat(pathname),
+    });
+    const durableRows = await Promise.all(durablePaths.map((pathname) => rawEntry(durableRoot, pathname)));
+    const readOnlyRow = await rawEntry(readOnlyRoot, readOnlyPath);
+
+    const durableScan = projectCatalogSnapshotFromRaw(durableRows);
+    const readOnlyScan = new Promise<void>((resolve, reject) => {
+      setImmediate(() => void projectCatalogSnapshotFromRaw([readOnlyRow], { persist: false }).then(() => resolve(), reject));
+    });
+    await Promise.all([durableScan, readOnlyScan]);
+
+    expect(conversationCatalogSnapshot().map((entry) => entry.path)).toEqual([readOnlyPath]);
+    const persisted = JSON.parse(await readFile(path.join(process.env.LLV_STATE_DIR, "project-catalog.json"), "utf8"));
+    expect(Object.keys(persisted.files).sort()).toEqual([...durablePaths].sort());
+  } finally {
+    if (previousStateDir === undefined) delete process.env.LLV_STATE_DIR;
+    else process.env.LLV_STATE_DIR = previousStateDir;
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test("discovery orders publication from scan start across overlapping filesystem walks", async () => {
+  const base = await mkdtemp(path.join(os.tmpdir(), "llv-discovery-start-order-"));
+  try {
+    const oldRoot = path.join(base, "old");
+    const freshRoot = path.join(base, "fresh");
+    await Promise.all(Array.from({ length: 200 }, async (_, index) => {
+      const pathname = path.join(oldRoot, `old-${index}.jsonl`);
+      await writeFixture(pathname, JSON.stringify({ type: "session_meta", payload: { cwd: "/repo/old" } }) + "\n", 1_700_000_000 + index);
+    }));
+    const freshPath = path.join(freshRoot, "fresh.jsonl");
+    await writeFixture(freshPath, JSON.stringify({ type: "session_meta", payload: { cwd: "/repo/fresh" } }) + "\n", 1_700_001_000);
+
+    const olderScan = discoverFilesWithProjectCatalog([["codex-sessions", oldRoot]], undefined, { persist: false });
+    const newerScan = new Promise<void>((resolve, reject) => {
+      setImmediate(() => void discoverFilesWithProjectCatalog([["codex-sessions", freshRoot]], undefined, { persist: false }).then(() => resolve(), reject));
+    });
+    await Promise.all([olderScan, newerScan]);
+
+    expect(conversationCatalogSnapshot().map((entry) => entry.path)).toEqual([freshPath]);
+  } finally {
     await rm(base, { recursive: true, force: true });
   }
 });

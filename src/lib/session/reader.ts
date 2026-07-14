@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import { StringDecoder } from "node:string_decoder";
 
+import { yieldToRuntime } from "@/lib/cooperative";
 import type { Engine } from "@/lib/types";
 
 export type SessionRecordKind = "message" | "reasoning" | "tool_call" | "tool_result" | "trace";
@@ -231,69 +232,116 @@ export interface AuthorshipScanResult {
   complete: boolean;
 }
 
+function createAuthorshipScanner(engine: Extract<Engine, "claude" | "codex">, limit: number) {
+  let count = 0;
+  let complete = true;
+  let pending = "";
+  let skippingRecord = false;
+  const decoder = new StringDecoder("utf8");
+  const consume = (line: string): boolean => {
+    const text = line.trim();
+    if (!text) return false;
+    try {
+      const parsed = JSON.parse(text) as unknown;
+      return Boolean(parsed && typeof parsed === "object" && !Array.isArray(parsed)
+        && recordHasUserMessage(parsed as Record<string, unknown>, engine));
+    } catch {
+      complete = false;
+      return false;
+    }
+  };
+  const consumeDecoded = (decoded: string): boolean => {
+    let cursor = 0;
+    while (cursor < decoded.length) {
+      const newline = decoded.indexOf("\n", cursor);
+      const end = newline === -1 ? decoded.length : newline;
+      if (!skippingRecord) {
+        pending += decoded.slice(cursor, end);
+        if (pending.length > AUTHORSHIP_SCAN_MAX_RECORD_CHARS) {
+          pending = "";
+          skippingRecord = true;
+          complete = false;
+        }
+      }
+      if (newline === -1) return false;
+      if (!skippingRecord && consume(pending)) {
+        count += 1;
+        if (count >= limit) return true;
+      }
+      pending = "";
+      skippingRecord = false;
+      cursor = newline + 1;
+    }
+    return false;
+  };
+  return {
+    consume(chunk: Uint8Array): boolean {
+      return consumeDecoded(decoder.write(chunk));
+    },
+    finish(): AuthorshipScanResult {
+      const tail = decoder.end();
+      if (tail && consumeDecoded(tail)) return { count, complete };
+      if (!skippingRecord && Boolean(pending) && consume(pending)) count += 1;
+      return { count, complete };
+    },
+    result(): AuthorshipScanResult {
+      return { count, complete };
+    },
+    failed(): AuthorshipScanResult {
+      return { count, complete: false };
+    },
+  };
+}
+
 export function scanUserAuthoredMessages(
   pathname: string,
   engine: Extract<Engine, "claude" | "codex">,
   limit = Number.MAX_SAFE_INTEGER,
 ): AuthorshipScanResult {
   let fd: number | null = null;
-  let count = 0;
-  let complete = true;
+  const scanner = createAuthorshipScanner(engine, limit);
   try {
     fd = fs.openSync(pathname, "r");
     const chunk = Buffer.allocUnsafe(AUTHORSHIP_SCAN_CHUNK_BYTES);
-    const decoder = new StringDecoder("utf8");
-    let pending = "";
-    let skippingRecord = false;
-    const consume = (line: string): boolean => {
-      const text = line.trim();
-      if (!text) return false;
-      try {
-        const parsed = JSON.parse(text) as unknown;
-        return Boolean(parsed && typeof parsed === "object" && !Array.isArray(parsed)
-          && recordHasUserMessage(parsed as Record<string, unknown>, engine));
-      } catch {
-        complete = false;
-        return false;
-      }
-    };
-    const consumeChunk = (decoded: string): boolean => {
-      let cursor = 0;
-      while (cursor < decoded.length) {
-        const newline = decoded.indexOf("\n", cursor);
-        const end = newline === -1 ? decoded.length : newline;
-        if (!skippingRecord) {
-          pending += decoded.slice(cursor, end);
-          if (pending.length > AUTHORSHIP_SCAN_MAX_RECORD_CHARS) {
-            pending = "";
-            skippingRecord = true;
-            complete = false;
-          }
-        }
-        if (newline === -1) return false;
-        if (!skippingRecord && consume(pending)) {
-          count += 1;
-          if (count >= limit) return true;
-        }
-        pending = "";
-        skippingRecord = false;
-        cursor = newline + 1;
-      }
-      return false;
-    };
     for (;;) {
       const bytes = fs.readSync(fd, chunk, 0, chunk.length, null);
       if (bytes === 0) break;
-      if (consumeChunk(decoder.write(chunk.subarray(0, bytes)))) return { count, complete };
+      if (scanner.consume(chunk.subarray(0, bytes))) return scanner.result();
     }
-    const tail = decoder.end();
-    if (tail && consumeChunk(tail)) return { count, complete };
-    if (!skippingRecord && Boolean(pending) && consume(pending)) count += 1;
-    return { count, complete };
+    return scanner.finish();
   } catch {
-    return { count, complete: false };
+    return scanner.failed();
   } finally {
     if (fd !== null) fs.closeSync(fd);
+  }
+}
+
+export async function scanUserAuthoredMessagesCooperatively(
+  pathname: string,
+  engine: Extract<Engine, "claude" | "codex">,
+  limit = Number.MAX_SAFE_INTEGER,
+): Promise<AuthorshipScanResult> {
+  const scanner = createAuthorshipScanner(engine, limit);
+  let file: Awaited<ReturnType<typeof fs.promises.open>> | null = null;
+  try {
+    file = await fs.promises.open(pathname, "r");
+    const chunk = Buffer.allocUnsafe(AUTHORSHIP_SCAN_CHUNK_BYTES);
+    let chunksSinceYield = 0;
+    for (;;) {
+      const { bytesRead } = await file.read(chunk, 0, chunk.length, null);
+      if (bytesRead === 0) break;
+      if (scanner.consume(chunk.subarray(0, bytesRead))) return scanner.result();
+      chunksSinceYield += 1;
+      if (chunksSinceYield >= 8) {
+        chunksSinceYield = 0;
+        await yieldToRuntime();
+      }
+    }
+    return scanner.finish();
+  } catch {
+    return scanner.failed();
+  } finally {
+    await file?.close().catch(() => undefined);
   }
 }
 

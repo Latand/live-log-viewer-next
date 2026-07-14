@@ -6,7 +6,7 @@ import path from "node:path";
 import { AgentRegistry } from "@/lib/agent/registry";
 import { CODEX_SOL_MODEL, CODEX_TERRA_MODEL } from "@/lib/agent/models";
 
-import { configuredReviewerFallback, FLOWS_SCHEMA_VERSION, loadFlows, mergeSeededPresets, reconcileFlowConversationOwnership, saveFlows, seededPresetsFromRoles } from "./store";
+import { configuredReviewerFallback, FLOWS_SCHEMA_VERSION, loadFlows, mergeSeededPresets, reconcileFlowConversationOwnership, reconcileFlowConversationOwnershipCooperatively, saveFlows, seededPresetsFromRoles } from "./store";
 import type { Flow, FlowPreset } from "./types";
 
 const LEGACY_DEFAULT: FlowPreset = {
@@ -239,6 +239,59 @@ test("a path-only flow resolves every resume generation in one reconciliation", 
     expect(loadFlows()[0]).toMatchObject({
       implementerConversationId: conversation.id,
       implementerPath: paths[2],
+    });
+  } finally {
+    if (previousState === undefined) delete process.env.LLV_STATE_DIR;
+    else process.env.LLV_STATE_DIR = previousState;
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  }
+});
+
+test("cooperative ownership reconciliation preserves a flow closed during a yield", async () => {
+  const previousState = process.env.LLV_STATE_DIR;
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-flow-ownership-race-"));
+  process.env.LLV_STATE_DIR = sandbox;
+  try {
+    const registry = new AgentRegistry(path.join(sandbox, "registry.json"));
+    const owner = registry.ensureConversation("codex", "/implementer-a.jsonl", "a");
+    registry.setConversationMigration(owner.id, { intentId: "impl", phase: "verifying", targetId: "b", revision: 1, error: null, updatedAt: "now" });
+    registry.commitSuccessor(owner.id, { id: "implementer-b", path: "/implementer-b.jsonl", accountId: "b" }, 1);
+    const flows = Array.from({ length: 17 }, (_, index): Flow => ({
+      id: `ownership-race-${index}`,
+      template: "implement-review-loop",
+      project: "repo",
+      cwd: "/repo",
+      implementerPath: "/implementer-a.jsonl",
+      implementerConversationId: owner.id,
+      roles: { implementer: { engine: "codex", model: null, effort: "high" }, reviewer: { engine: "codex", model: null, effort: "xhigh" } },
+      baseRef: "base",
+      baseMode: "head",
+      mode: "manual",
+      reviewerMode: "headless",
+      roundLimit: 1,
+      state: "waiting_ready",
+      pausedState: null,
+      stateDetail: null,
+      rounds: [],
+      createdAt: "now",
+      closedAt: null,
+    }));
+    saveFlows(flows);
+
+    const reconciliation = reconcileFlowConversationOwnershipCooperatively(registry);
+    await new Promise<void>((resolve) => setImmediate(() => {
+      const current = loadFlows();
+      current[0] = { ...current[0]!, state: "closed", closedAt: "closed-during-yield" };
+      saveFlows(current);
+      resolve();
+    }));
+    await reconciliation;
+
+    expect(loadFlows()[0]).toMatchObject({
+      state: "closed",
+      closedAt: "closed-during-yield",
+      implementerPath: "/implementer-b.jsonl",
+      implementerConversationId: owner.id,
     });
   } finally {
     if (previousState === undefined) delete process.env.LLV_STATE_DIR;

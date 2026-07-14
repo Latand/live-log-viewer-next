@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import crypto from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, test } from "bun:test";
@@ -672,6 +673,29 @@ describe("agent registry", () => {
     expect(store.conversationForPath("/source-account/fork.jsonl")?.id).toBe(source.id);
   });
 
+  test("a stale inventory observation preserves a newer turn state", () => {
+    const store = registry();
+    const conversation = store.ensureConversation("codex", "/turn-race.jsonl", "a");
+    const observe = (state: "idle" | "busy", observedAt: string) => store.reconcileConversations([{
+      engine: "codex",
+      path: "/turn-race.jsonl",
+      accountId: "a",
+      launchProfile: emptyLaunchProfile({ cwd: "/repo" }),
+      turn: { state, source: "empty" as const, terminalAt: null },
+      observedAt,
+    }]);
+
+    observe("busy", "2026-07-14T12:00:01.000Z");
+    observe("idle", "2026-07-14T12:00:00.000Z");
+
+    expect(store.conversation(conversation.id)?.turn).toEqual({
+      state: "busy",
+      source: "empty",
+      terminalAt: null,
+      observedAt: "2026-07-14T12:00:01.000Z",
+    });
+  });
+
   test("migration provenance adopts a path allocated by a concurrent inventory scan", () => {
     const store = registry();
     const source = store.ensureConversation("codex", "/source.jsonl", "a");
@@ -703,6 +727,58 @@ describe("agent registry", () => {
     expect(store.canonicalPath(targetPath)).toBe("/source.jsonl");
     expect(adopted.conversationRevision.codex).toBe(beforeAdoption.conversationRevision.codex + 1);
     expect(adopted.engineRouting.codex.revision).toBe(beforeAdoption.engineRouting.codex.revision + 1);
+  });
+
+  test("provisional adoption refreshes the pending resume fence within one inventory transaction", () => {
+    const store = registry();
+    const nativeId = "019f4906-3f67-7b72-9fbc-9ec3b5ad1326";
+    const sourcePath = `/sessions/2026/07/11/rollout-source-${nativeId}.jsonl`;
+    const resumedPath = `/sessions/2026/07/12/rollout-resumed-${nativeId}.jsonl`;
+    const canonical = store.ensureConversation("codex", sourcePath, "a");
+    store.setConversationMigration(canonical.id, {
+      intentId: "intent",
+      phase: "successor-starting",
+      targetId: "b",
+      revision: 1,
+      error: null,
+      updatedAt: "2026-07-14T12:00:00.000Z",
+    });
+    const persisted = store.snapshot();
+    const provisionalId = `conversation_${crypto.randomUUID()}` as const;
+    persisted.conversations[provisionalId] = {
+      ...structuredClone(persisted.conversations[canonical.id]!),
+      id: provisionalId,
+      generations: [{
+        ...structuredClone(persisted.conversations[canonical.id]!.generations[0]!),
+        path: sourcePath,
+      }],
+      continuityPaths: [],
+      migration: null,
+    };
+    fs.writeFileSync(store.filename, JSON.stringify(persisted));
+    const begun = store.beginSpawnRequest({
+      engine: "codex",
+      cwd: "/repo",
+      accountId: "a",
+      conversationId: provisionalId,
+      purpose: "resume-successor",
+    });
+    if (begun.kind !== "created") throw new Error("expected create");
+    const observation = (pathname: string) => ({
+      engine: "codex" as const,
+      path: pathname,
+      accountId: "a",
+      launchProfile: emptyLaunchProfile({ cwd: "/repo" }),
+      turn: { state: "idle" as const, source: "empty" as const, terminalAt: null },
+      observedAt: "2026-07-14T12:01:00.000Z",
+    });
+
+    store.reconcileConversations([observation(sourcePath), observation(resumedPath)]);
+
+    expect(store.conversation(canonical.id)?.generations[0]?.path).toBe(sourcePath);
+    expect(store.conversation(canonical.id)?.continuityPaths).toEqual([]);
+    expect(store.conversationForPath(resumedPath)).toBeNull();
+    expect(store.snapshot().receipts[begun.receipt.launchId]?.conversationId).toBe(canonical.id);
   });
 
   test("validated provider provenance survives migration retarget and stop", () => {

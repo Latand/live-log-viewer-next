@@ -11,7 +11,7 @@ import { saveRoleOverrides } from "@/lib/roles/store";
 const previousState = process.env.LLV_STATE_DIR;
 const state = fs.mkdtempSync(path.join(os.tmpdir(), "llv-wf-store-test-"));
 process.env.LLV_STATE_DIR = state;
-const { buildWorkflow, defaultFixerFromRoles, loadTemplates, loadWorkflows, mergeSeededTemplates, normalizeStages, normalizeTemplate, reconcileWorkflowConversationOwnership, roleConfigFromReference, saveWorkflows, seededTemplatesFromRoles } =
+const { buildWorkflow, defaultFixerFromRoles, loadTemplates, loadWorkflows, mergeSeededTemplates, normalizeStages, normalizeTemplate, reconcileWorkflowConversationOwnership, reconcileWorkflowConversationOwnershipCooperatively, roleConfigFromReference, saveWorkflows, seededTemplatesFromRoles } =
   await import("./store");
 
 type WorkflowTemplate = import("./types").WorkflowTemplate;
@@ -247,6 +247,43 @@ test("workflow bindings follow the active conversation generation", () => {
     fixerPath: "/stage-b.jsonl",
   });
   expect(reconciled.stageRuns[0]).toMatchObject({ agentPath: "/stage-b.jsonl", agentConversationId: owner.id });
+});
+
+test("cooperative ownership reconciliation preserves a workflow closed during a yield", async () => {
+  const registry = new AgentRegistry(path.join(process.env.LLV_STATE_DIR!, "workflow-race-registry.json"));
+  const owner = registry.ensureConversation("codex", "/stage-race-a.jsonl", "a");
+  registry.setConversationMigration(owner.id, { intentId: "workflow-race", phase: "verifying", targetId: "b", revision: 1, error: null, updatedAt: "now" });
+  registry.commitSuccessor(owner.id, { id: "stage-race-b", path: "/stage-race-b.jsonl", accountId: "b" }, 1);
+  const template = normalizeTemplate({ name: "owner-race-demo", stages: [IMPLEMENT, REVIEW] })!;
+  const workflows = Array.from({ length: 17 }, (_, index) => {
+    const workflow = buildWorkflow({ id: `owner-race-${index}`, name: "owner-race-demo", task: "Ship", project: "repo", repoDir: "/repo", template, mode: "manual", now: "now" });
+    workflow.srcPath = "/stage-race-a.jsonl";
+    workflow.srcConversationId = owner.id;
+    workflow.fixerPath = "/stage-race-a.jsonl";
+    workflow.fixerConversationId = owner.id;
+    workflow.stageRuns[0]!.agentPath = "/stage-race-a.jsonl";
+    workflow.stageRuns[0]!.agentConversationId = owner.id;
+    return workflow;
+  });
+  saveWorkflows(workflows);
+
+  const reconciliation = reconcileWorkflowConversationOwnershipCooperatively(registry);
+  await new Promise<void>((resolve) => setImmediate(() => {
+    const current = loadWorkflows();
+    current[0] = { ...current[0]!, state: "closed", closedAt: "closed-during-yield" };
+    saveWorkflows(current);
+    resolve();
+  }));
+  await reconciliation;
+
+  const reconciled = loadWorkflows()[0]!;
+  expect(reconciled).toMatchObject({
+    state: "closed",
+    closedAt: "closed-during-yield",
+    srcPath: "/stage-race-b.jsonl",
+    fixerPath: "/stage-race-b.jsonl",
+  });
+  expect(reconciled.stageRuns[0]).toMatchObject({ agentPath: "/stage-race-b.jsonl", agentConversationId: owner.id });
 });
 
 test("buildWorkflow derives sibling worktree dir and wf/ branch from the task", () => {

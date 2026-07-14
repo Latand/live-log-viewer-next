@@ -49,6 +49,7 @@ function engineOf(entry: FileEntry): MigrationEngine | null {
 }
 
 async function inventory(files: FileEntry[], registry: AgentRegistry): Promise<ConversationObservation[]> {
+  const inventoryStartedAt = Date.now();
   const snapshot = registry.snapshot();
   const conversationByPath = new Map<string, RegistryConversation>();
   const launchProfileByPath = new Map<string, RegistryConversation["generations"][number]["launchProfile"]>();
@@ -101,8 +102,9 @@ async function inventory(files: FileEntry[], registry: AgentRegistry): Promise<C
         plan: entry.plan ?? currentProfile?.plan ?? null,
       }),
       turn,
+      expectedTurnObservedAt: existing?.turn.observedAt ?? null,
       startedAt: headSessionStartedAt(entry.path),
-      observedAt: new Date(Math.max(entry.mtime * 1000, Date.now())).toISOString(),
+      observedAt: new Date(Math.max(entry.mtime * 1000, inventoryStartedAt)).toISOString(),
     });
   });
   return observations;

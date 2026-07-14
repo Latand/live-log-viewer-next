@@ -344,6 +344,51 @@ function reconcileWorkflowRoots(workflow: Workflow, registry: ConversationLookup
   return source.changed || fixer.changed;
 }
 
+type ConversationBinding = { path: string | null; conversationId: string | null };
+type WorkflowOwnershipPatch = {
+  id: string;
+  source: { before: ConversationBinding; after: ConversationBinding } | null;
+  fixer: { before: ConversationBinding; after: ConversationBinding } | null;
+  runs: { index: number; before: ConversationBinding; after: ConversationBinding }[];
+};
+
+function sameBinding(pathname: string | null, conversationId: string | null | undefined, expected: ConversationBinding): boolean {
+  return pathname === expected.path && (conversationId ?? null) === expected.conversationId;
+}
+
+function changedBinding(before: ConversationBinding, after: ConversationBinding): boolean {
+  return before.path !== after.path || before.conversationId !== after.conversationId;
+}
+
+function mergeWorkflowOwnershipPatches(patches: readonly WorkflowOwnershipPatch[]): void {
+  if (patches.length === 0) return;
+  const current = loadWorkflows();
+  const currentById = new Map(current.map((workflow) => [workflow.id, workflow]));
+  let changed = false;
+  for (const patch of patches) {
+    const workflow = currentById.get(patch.id);
+    if (!workflow) continue;
+    if (patch.source && sameBinding(workflow.srcPath ?? null, workflow.srcConversationId, patch.source.before)) {
+      workflow.srcPath = patch.source.after.path;
+      workflow.srcConversationId = patch.source.after.conversationId;
+      changed = true;
+    }
+    if (patch.fixer && sameBinding(workflow.fixerPath, workflow.fixerConversationId, patch.fixer.before)) {
+      workflow.fixerPath = patch.fixer.after.path;
+      workflow.fixerConversationId = patch.fixer.after.conversationId;
+      changed = true;
+    }
+    for (const runPatch of patch.runs) {
+      const run = workflow.stageRuns.find((candidate) => candidate.index === runPatch.index);
+      if (!run || !sameBinding(run.agentPath, run.agentConversationId, runPatch.before)) continue;
+      run.agentPath = runPatch.after.path;
+      run.agentConversationId = runPatch.after.conversationId;
+      changed = true;
+    }
+  }
+  if (changed) saveWorkflows(current);
+}
+
 export function reconcileWorkflowConversationOwnership(registry: ConversationLookup = agentRegistry()): void {
   const workflows = loadWorkflows();
   let dirty = false;
@@ -356,14 +401,36 @@ export function reconcileWorkflowConversationOwnership(registry: ConversationLoo
 
 export async function reconcileWorkflowConversationOwnershipCooperatively(registry: ConversationLookup = agentRegistry()): Promise<void> {
   const workflows = loadWorkflows();
-  let dirty = false;
+  const patches: WorkflowOwnershipPatch[] = [];
   await forEachCooperatively(workflows, async (workflow) => {
-    dirty = reconcileWorkflowRoots(workflow, registry) || dirty;
+    const sourceBefore = { path: workflow.srcPath ?? null, conversationId: workflow.srcConversationId ?? null };
+    const fixerBefore = { path: workflow.fixerPath, conversationId: workflow.fixerConversationId ?? null };
+    reconcileWorkflowRoots(workflow, registry);
+    const sourceAfter = { path: workflow.srcPath ?? null, conversationId: workflow.srcConversationId ?? null };
+    const fixerAfter = { path: workflow.fixerPath, conversationId: workflow.fixerConversationId ?? null };
+    const runPatches: WorkflowOwnershipPatch["runs"] = [];
     await forEachCooperatively(workflow.stageRuns, (run) => {
-      dirty = reconcileWorkflowRun(run, registry) || dirty;
+      const before = { path: run.agentPath, conversationId: run.agentConversationId ?? null };
+      if (reconcileWorkflowRun(run, registry)) {
+        runPatches.push({
+          index: run.index,
+          before,
+          after: { path: run.agentPath, conversationId: run.agentConversationId ?? null },
+        });
+      }
     });
+    const sourceChanged = changedBinding(sourceBefore, sourceAfter);
+    const fixerChanged = changedBinding(fixerBefore, fixerAfter);
+    if (sourceChanged || fixerChanged || runPatches.length > 0) {
+      patches.push({
+        id: workflow.id,
+        source: sourceChanged ? { before: sourceBefore, after: sourceAfter } : null,
+        fixer: fixerChanged ? { before: fixerBefore, after: fixerAfter } : null,
+        runs: runPatches,
+      });
+    }
   });
-  if (dirty) saveWorkflows(workflows);
+  mergeWorkflowOwnershipPatches(patches);
 }
 
 export function saveWorkflows(workflows: Workflow[]): void {

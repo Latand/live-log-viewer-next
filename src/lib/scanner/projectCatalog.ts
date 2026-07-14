@@ -42,6 +42,24 @@ type ProjectCatalogState = {
 };
 
 const CATALOG_FILE = "project-catalog.json";
+const projectCatalogRuntime = globalThis as typeof globalThis & {
+  __llvProjectCatalogPublicationGeneration?: number;
+  __llvProjectCatalogPersistenceGeneration?: number;
+};
+
+export interface ProjectCatalogScanToken {
+  publication: number;
+  persistence: number | null;
+}
+
+export function beginProjectCatalogScan(persist: boolean): ProjectCatalogScanToken {
+  const publication = (projectCatalogRuntime.__llvProjectCatalogPublicationGeneration ?? 0) + 1;
+  projectCatalogRuntime.__llvProjectCatalogPublicationGeneration = publication;
+  if (!persist) return { publication, persistence: null };
+  const persistence = (projectCatalogRuntime.__llvProjectCatalogPersistenceGeneration ?? 0) + 1;
+  projectCatalogRuntime.__llvProjectCatalogPersistenceGeneration = persistence;
+  return { publication, persistence };
+}
 
 function catalogPath(): string {
   return statePath(CATALOG_FILE);
@@ -209,10 +227,16 @@ function unambiguousMigrations(
   return migrations;
 }
 
-export async function projectCatalogSnapshotFromRaw(raw: RawEntry[], options: { persist?: boolean; excludedSummaryPaths?: ReadonlySet<string> } = {}): Promise<{
+export async function projectCatalogSnapshotFromRaw(raw: RawEntry[], options: {
+  persist?: boolean;
+  excludedSummaryPaths?: ReadonlySet<string>;
+  scanToken?: ProjectCatalogScanToken;
+} = {}): Promise<{
   projectCatalog: ProjectCatalogEntry[];
   projectByPath: Map<string, string>;
+  conversationCatalog: ConversationCatalogEntry[];
 }> {
+  const scanToken = options.scanToken ?? beginProjectCatalogScan(options.persist !== false);
   const state = readState();
   const stateKey = projectResolutionStateKey();
   const nextFiles: Record<string, CachedProjectFile> = {};
@@ -304,8 +328,11 @@ export async function projectCatalogSnapshotFromRaw(raw: RawEntry[], options: { 
       size: file.size,
     });
   });
-  replaceConversationCatalog(conversationCatalog);
-  if (options.persist !== false) {
+  const isCurrentPublication = projectCatalogRuntime.__llvProjectCatalogPublicationGeneration === scanToken.publication;
+  const isCurrentPersistence = scanToken.persistence !== null
+    && projectCatalogRuntime.__llvProjectCatalogPersistenceGeneration === scanToken.persistence;
+  if (isCurrentPublication) replaceConversationCatalog(conversationCatalog);
+  if (isCurrentPersistence && options.persist !== false) {
     let boardHealed = true;
     try {
       boardHealed = migrateBoardProjects(unambiguousMigrations(changes, groups));
@@ -323,6 +350,7 @@ export async function projectCatalogSnapshotFromRaw(raw: RawEntry[], options: { 
       .filter((entry) => entry.conversations > 0)
       .sort((a, b) => b.smt - a.smt || a.project.localeCompare(b.project)),
     projectByPath,
+    conversationCatalog,
   };
 }
 

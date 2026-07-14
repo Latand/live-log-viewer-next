@@ -230,6 +230,42 @@ function reconcileFlowRound(round: Round, registry: ConversationLookup): boolean
   return true;
 }
 
+type ConversationBinding = { path: string | null; conversationId: string | null };
+type ImplementerBinding = { path: string; conversationId: string | null };
+type FlowOwnershipPatch = {
+  id: string;
+  implementer: { before: ImplementerBinding; after: ImplementerBinding } | null;
+  rounds: { n: number; before: ConversationBinding; after: ConversationBinding }[];
+};
+
+function sameBinding(pathname: string | null, conversationId: string | null | undefined, expected: ConversationBinding): boolean {
+  return pathname === expected.path && (conversationId ?? null) === expected.conversationId;
+}
+
+function mergeFlowOwnershipPatches(patches: readonly FlowOwnershipPatch[]): void {
+  if (patches.length === 0) return;
+  const current = loadFlows();
+  const currentById = new Map(current.map((flow) => [flow.id, flow]));
+  let changed = false;
+  for (const patch of patches) {
+    const flow = currentById.get(patch.id);
+    if (!flow) continue;
+    if (patch.implementer && sameBinding(flow.implementerPath, flow.implementerConversationId, patch.implementer.before)) {
+      flow.implementerPath = patch.implementer.after.path;
+      flow.implementerConversationId = patch.implementer.after.conversationId;
+      changed = true;
+    }
+    for (const roundPatch of patch.rounds) {
+      const round = flow.rounds.find((candidate) => candidate.n === roundPatch.n);
+      if (!round || !sameBinding(round.reviewerPath, round.reviewerConversationId, roundPatch.before)) continue;
+      round.reviewerPath = roundPatch.after.path;
+      round.reviewerConversationId = roundPatch.after.conversationId;
+      changed = true;
+    }
+  }
+  if (changed) saveFlows(current);
+}
+
 export function reconcileFlowConversationOwnership(registry: ConversationLookup = agentRegistry()): void {
   const flows = loadFlows();
   let dirty = false;
@@ -242,14 +278,33 @@ export function reconcileFlowConversationOwnership(registry: ConversationLookup 
 
 export async function reconcileFlowConversationOwnershipCooperatively(registry: ConversationLookup = agentRegistry()): Promise<void> {
   const flows = loadFlows();
-  let dirty = false;
+  const patches: FlowOwnershipPatch[] = [];
   await forEachCooperatively(flows, async (flow) => {
-    dirty = reconcileFlowImplementer(flow, registry) || dirty;
+    const implementerBefore = { path: flow.implementerPath, conversationId: flow.implementerConversationId ?? null };
+    const implementerChanged = reconcileFlowImplementer(flow, registry);
+    const roundPatches: FlowOwnershipPatch["rounds"] = [];
     await forEachCooperatively(flow.rounds, (round) => {
-      dirty = reconcileFlowRound(round, registry) || dirty;
+      const before = { path: round.reviewerPath, conversationId: round.reviewerConversationId ?? null };
+      if (reconcileFlowRound(round, registry)) {
+        roundPatches.push({
+          n: round.n,
+          before,
+          after: { path: round.reviewerPath, conversationId: round.reviewerConversationId ?? null },
+        });
+      }
     });
+    if (implementerChanged || roundPatches.length > 0) {
+      patches.push({
+        id: flow.id,
+        implementer: implementerChanged ? {
+          before: implementerBefore,
+          after: { path: flow.implementerPath, conversationId: flow.implementerConversationId ?? null },
+        } : null,
+        rounds: roundPatches,
+      });
+    }
   });
-  if (dirty) saveFlows(flows);
+  mergeFlowOwnershipPatches(patches);
 }
 
 export function saveFlows(flows: Flow[]): void {
