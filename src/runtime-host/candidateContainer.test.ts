@@ -200,9 +200,11 @@ test("candidate executes the Compose guard with its runtime launch grant", () =>
   const next = path.join(sandbox, "node_modules", ".bin", "next");
   fs.mkdirSync(path.dirname(next), { recursive: true });
   fs.writeFileSync(next, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  const bunContainer = path.join(sandbox, "bun-container");
+  fs.writeFileSync(bunContainer, "#!/bin/sh\nshift\nexec \"$@\"\n", { mode: 0o755 });
   const result = Bun.spawnSync(command, {
     cwd: sandbox,
-    env: { ...process.env, ...environmentFromArgs(args) },
+    env: { ...process.env, ...environmentFromArgs(args), PATH: `${sandbox}:${process.env.PATH ?? ""}` },
     stdout: "pipe",
     stderr: "pipe",
   });

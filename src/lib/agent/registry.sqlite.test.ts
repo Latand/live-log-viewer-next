@@ -64,6 +64,33 @@ test("SQLite first boot imports JSON and preserves membership and capability dig
   expect(new AgentRegistry(filename).snapshot()).toEqual(sqlite.snapshot());
 });
 
+for (const version of [1, 2]) {
+  test(`dual-write migration normalizes a legacy v${version} registry deterministically across processes`, async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), `llv-registry-sqlite-legacy-v${version}-`));
+    const filename = path.join(directory, "agent-registry.json");
+    fs.writeFileSync(filename, JSON.stringify({ version, entries: {}, receipts: {} }));
+
+    const first = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "dual-write" });
+    expect(first.snapshot().autoBalance.claude.restartedAt).toBe(first.snapshot().autoBalance.codex.restartedAt);
+
+    const ready = path.join(directory, "restart.ready");
+    const release = path.join(directory, "restart.release");
+    const restarted = Bun.spawn([
+      process.execPath,
+      CHILD,
+      "dual-writer",
+      filename,
+      ready,
+      release,
+      `legacy-v${version}-restart`,
+    ], { cwd: process.cwd(), stdout: "pipe", stderr: "pipe" });
+    waitFor(ready);
+    fs.writeFileSync(release, "start");
+    expect(await restarted.exited).toBe(0);
+    expect(await new Response(restarted.stderr).text()).toBe("");
+  });
+}
+
 test("dual-write keeps JSON authoritative and SQLite reads require parity", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-sqlite-parity-"));
   const filename = path.join(directory, "agent-registry.json");
@@ -87,6 +114,221 @@ test("dual-write keeps JSON authoritative and SQLite reads require parity", () =
   db.close();
 
   expect(() => new AgentRegistry(filename, undefined, undefined, { sqliteMode: "read" })).toThrow(RegistryParityError);
+});
+
+test("dual-write fails closed when SQLite is ahead of its JSON mirror", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-sqlite-transition-"));
+  const filename = path.join(directory, "agent-registry.json");
+  const sqlite = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "sqlite" });
+  const conversation = sqlite.ensureConversation("codex", "/sessions/sqlite-only.jsonl", "sqlite-only");
+  const staleMirror = fs.readFileSync(filename, "utf8");
+
+  expect(() => new AgentRegistry(filename, undefined, undefined, { sqliteMode: "dual-write" })).toThrow(RegistryParityError);
+  expect(fs.readFileSync(filename, "utf8")).toBe(staleMirror);
+
+  const recovered = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "sqlite" });
+  expect(recovered.snapshot().conversations[conversation.id]).toBeDefined();
+  expect(new AgentRegistry(filename).snapshot().conversations[conversation.id]).toBeDefined();
+});
+
+test("dual-write startup serializes SQLite replacement with a concurrent writer", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-dual-startup-"));
+  const filename = path.join(directory, "agent-registry.json");
+  new AgentRegistry(filename, undefined, undefined, { sqliteMode: "dual-write" });
+  const startupReady = path.join(directory, "startup.ready");
+  const releaseStartup = path.join(directory, "startup.release");
+  const startup = Bun.spawn([process.execPath, CHILD, "dual-startup", filename, startupReady, releaseStartup], {
+    cwd: process.cwd(),
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  waitFor(startupReady);
+
+  const writerReady = path.join(directory, "writer.ready");
+  const startWriter = path.join(directory, "writer.start");
+  const attempted = path.join(directory, "writer.attempted");
+  const writer = Bun.spawn([
+    process.execPath,
+    CHILD,
+    "dual-writer",
+    filename,
+    writerReady,
+    startWriter,
+    "concurrent-dual-writer",
+    "0",
+    attempted,
+  ], { cwd: process.cwd(), stdout: "pipe", stderr: "pipe" });
+  waitFor(writerReady);
+  fs.writeFileSync(startWriter, "start");
+  waitFor(attempted);
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+  expect(fs.existsSync(`${attempted}.done`)).toBeFalse();
+
+  fs.writeFileSync(releaseStartup, "release");
+  expect(await Promise.all([startup.exited, writer.exited])).toEqual([0, 0]);
+  expect(await Promise.all([
+    new Response(startup.stderr).text(),
+    new Response(writer.stderr).text(),
+  ])).toEqual(["", ""]);
+
+  const dual = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "dual-write" });
+  expect(Object.values(dual.snapshot().conversations).some((conversation) =>
+    conversation.generations.some((generation) => generation.path === "/sessions/concurrent-dual-writer.jsonl"))).toBeTrue();
+});
+
+for (const mode of ["read", "sqlite"] as const) {
+  test(`dual-write startup fails closed across a concurrent ${mode} writer`, async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), `llv-registry-${mode}-transition-`));
+    const filename = path.join(directory, "agent-registry.json");
+    new AgentRegistry(filename, undefined, undefined, { sqliteMode: "dual-write" });
+    const startupReady = path.join(directory, "startup.ready");
+    const releaseStartup = path.join(directory, "startup.release");
+    const startup = Bun.spawn([process.execPath, CHILD, "dual-startup", filename, startupReady, releaseStartup], {
+      cwd: process.cwd(),
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    waitFor(startupReady);
+
+    const writerReady = path.join(directory, "writer.ready");
+    const startWriter = path.join(directory, "writer.start");
+    const writerDone = path.join(directory, "writer.done");
+    const writer = Bun.spawn([
+      process.execPath,
+      CHILD,
+      "transition-writer",
+      filename,
+      writerReady,
+      startWriter,
+      mode,
+      "0",
+      writerDone,
+    ], { cwd: process.cwd(), stdout: "pipe", stderr: "pipe" });
+    waitFor(writerReady);
+    fs.writeFileSync(startWriter, "start");
+    expect(await writer.exited).toBe(0);
+    expect(await new Response(writer.stderr).text()).toBe("");
+
+    fs.writeFileSync(releaseStartup, "release");
+    expect(await startup.exited).not.toBe(0);
+    expect(await new Response(startup.stderr).text()).toContain("RegistryParityError");
+
+    const sqlite = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "sqlite" });
+    expect(Object.values(sqlite.snapshot().conversations).some((conversation) =>
+      conversation.generations.some((generation) => generation.path === `/sessions/${mode}.jsonl`))).toBeTrue();
+    expect(new AgentRegistry(filename).snapshot()).toEqual(sqlite.snapshot());
+    expect(new AgentRegistry(filename, undefined, undefined, { sqliteMode: "dual-write" })
+      .conversationForPath(`/sessions/${mode}.jsonl`)).toBeDefined();
+  });
+}
+
+test("dual-write mutation fails closed across a concurrent SQLite writer", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-dual-mutation-transition-"));
+  const filename = path.join(directory, "agent-registry.json");
+  new AgentRegistry(filename, undefined, undefined, { sqliteMode: "dual-write" });
+  const writerReady = path.join(directory, "writer.ready");
+  const startWriter = path.join(directory, "writer.start");
+  const writerDone = path.join(directory, "writer.done");
+  const writer = Bun.spawn([
+    process.execPath,
+    CHILD,
+    "transition-writer",
+    filename,
+    writerReady,
+    startWriter,
+    "sqlite",
+    "0",
+    writerDone,
+  ], { cwd: process.cwd(), stdout: "pipe", stderr: "pipe" });
+  waitFor(writerReady);
+  const dual = new AgentRegistry(filename, undefined, undefined, {
+    sqliteMode: "dual-write",
+    beforeDualWriteMutationReplace: () => {
+      fs.writeFileSync(startWriter, "start");
+      waitFor(`${writerDone}.done`);
+    },
+  });
+
+  expect(() => dual.ensureConversation("codex", "/sessions/dual.jsonl", "dual")).toThrow(RegistryParityError);
+  expect(await writer.exited).toBe(0);
+  expect(await new Response(writer.stderr).text()).toBe("");
+
+  const recovered = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "read" });
+  expect(recovered.conversationForPath("/sessions/sqlite.jsonl")).toBeDefined();
+  expect(recovered.conversationForPath("/sessions/dual.jsonl")).toBeNull();
+  expect(new AgentRegistry(filename).snapshot()).toEqual(recovered.snapshot());
+});
+
+test("SQLite restart preserves first-owner insertion order for shared paths", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-sqlite-order-"));
+  const filename = path.join(directory, "agent-registry.json");
+  const sqlite = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "sqlite" });
+  const first = sqlite.ensureConversation("codex", "/sessions/first-owner.jsonl", "first");
+  let later = sqlite.ensureConversation("codex", "/sessions/later-owner-0.jsonl", "later");
+  for (let attempt = 1; first.id < later.id && attempt < 100; attempt += 1) {
+    later = sqlite.ensureConversation("codex", `/sessions/later-owner-${attempt}.jsonl`, "later");
+  }
+  if (first.id < later.id) throw new Error("failed to create reverse-lexical conversation ids");
+  const db = new Database(path.join(directory, "agent-registry.sqlite"));
+  const stored = db.query<{ value_json: string }, [string, string]>(
+    "SELECT value_json FROM registry_rows WHERE collection = ? AND row_key = ?",
+  ).get("conversations", later.id);
+  if (!stored) throw new Error("expected the later SQLite conversation");
+  const duplicateOwner = JSON.parse(stored.value_json) as { continuityPaths: string[] };
+  duplicateOwner.continuityPaths.push("/sessions/first-owner.jsonl");
+  db.query("UPDATE registry_rows SET value_json = ? WHERE collection = ? AND row_key = ?")
+    .run(JSON.stringify(duplicateOwner), "conversations", later.id);
+  db.close();
+
+  const restarted = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "sqlite" });
+
+  expect(restarted.conversationForPath("/sessions/first-owner.jsonl")?.id).toBe(first.id);
+});
+
+test("rollback rebaseline imports off-mode writes into a fresh SQLite database", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-rollback-rebaseline-"));
+  const filename = path.join(directory, "agent-registry.json");
+  const dualReady = path.join(directory, "dual.ready");
+  const startDual = path.join(directory, "dual.start");
+  const dual = Bun.spawn([
+    process.execPath,
+    CHILD,
+    "dual-writer",
+    filename,
+    dualReady,
+    startDual,
+    "before-rollback",
+  ], { cwd: process.cwd(), stdout: "pipe", stderr: "pipe" });
+  waitFor(dualReady);
+  fs.writeFileSync(startDual, "start");
+  expect(await dual.exited).toBe(0);
+
+  const offReady = path.join(directory, "off.ready");
+  const startOff = path.join(directory, "off.start");
+  const off = Bun.spawn([
+    process.execPath,
+    CHILD,
+    "writer-json",
+    filename,
+    offReady,
+    startOff,
+    "after-rollback",
+    "1",
+  ], { cwd: process.cwd(), stdout: "pipe", stderr: "pipe" });
+  waitFor(offReady);
+  fs.writeFileSync(startOff, "start");
+  expect(await off.exited).toBe(0);
+
+  const sqliteFilename = path.join(directory, "agent-registry.sqlite");
+  for (const suffix of ["", "-wal", "-shm"]) {
+    const active = `${sqliteFilename}${suffix}`;
+    if (fs.existsSync(active)) fs.renameSync(active, `${active}.rollback-evidence`);
+  }
+
+  const resumed = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "dual-write" });
+  expect(resumed.conversationForPath("/sessions/after-rollback-000.jsonl")).toBeDefined();
+  expect(new AgentRegistry(filename, undefined, undefined, { sqliteMode: "sqlite" })
+    .conversationForPath("/sessions/after-rollback-000.jsonl")).toBeDefined();
 });
 
 test("two SQLite registry processes preserve every concurrent write without registry locks", async () => {
@@ -249,7 +491,10 @@ test("SQLite adoption keeps structured-host writer epochs fenced across restarts
 });
 
 test("synthetic ten-lane load records JSON and SQLite registry operation p95", async () => {
-  async function measure(mode: "json" | "sqlite"): Promise<number> {
+  async function measure(mode: "json" | "sqlite"): Promise<{
+    operationP95: number;
+    writerWaitP95: number | null;
+  }> {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), `llv-registry-${mode}-ten-lane-`));
     const filename = path.join(directory, "agent-registry.json");
     const seed = new AgentRegistry(filename);
@@ -283,15 +528,28 @@ test("synthetic ten-lane load records JSON and SQLite registry operation p95", a
     fs.writeFileSync(start, "start");
     expect(await Promise.all(children.map(({ child }) => child.exited))).toEqual(Array(10).fill(0));
     expect(await Promise.all(children.map(({ child }) => new Response(child.stderr).text()))).toEqual(Array(10).fill(""));
-    const durations = children.flatMap(({ result }) => JSON.parse(fs.readFileSync(result, "utf8")) as number[]);
+    const measurements = children.map(({ result }) => JSON.parse(fs.readFileSync(result, "utf8")) as {
+      durations: number[];
+      writerWaits: number[];
+    });
+    const durations = measurements.flatMap((measurement) => measurement.durations);
     expect(durations).toHaveLength(120);
-    return percentile(durations, 0.95);
+    const writerWaits = measurements.flatMap((measurement) => measurement.writerWaits);
+    if (mode === "sqlite") expect(writerWaits.length).toBeGreaterThanOrEqual(durations.length);
+    return {
+      operationP95: percentile(durations, 0.95),
+      writerWaitP95: writerWaits.length > 0 ? percentile(writerWaits, 0.95) : null,
+    };
   }
 
-  const jsonP95 = await measure("json");
-  const sqliteP95 = await measure("sqlite");
-  console.info(`[agent registry benchmark] ten-lane operation p95: JSON=${jsonP95.toFixed(1)}ms SQLite=${sqliteP95.toFixed(1)}ms`);
-  expect(jsonP95).toBeGreaterThan(0);
-  expect(sqliteP95).toBeGreaterThan(0);
-  expect(sqliteP95).toBeLessThan(5_000);
+  const json = await measure("json");
+  const sqlite = await measure("sqlite");
+  console.info(
+    `[agent registry benchmark] ten-lane p95: operation JSON=${json.operationP95.toFixed(1)}ms `
+    + `SQLite=${sqlite.operationP95.toFixed(1)}ms; SQLite writer wait=${sqlite.writerWaitP95?.toFixed(1)}ms`,
+  );
+  expect(json.operationP95).toBeGreaterThan(0);
+  expect(sqlite.operationP95).toBeGreaterThan(0);
+  expect(sqlite.writerWaitP95).not.toBeNull();
+  expect(sqlite.operationP95).toBeLessThan(json.operationP95);
 }, 30_000);

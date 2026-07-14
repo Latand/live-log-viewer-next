@@ -100,7 +100,7 @@ With bun:
 ```bash
 bun install
 bun run build
-bun start --port 8898 --hostname 127.0.0.1
+bun --bun node_modules/.bin/next start --port 8898 --hostname 127.0.0.1
 # open http://127.0.0.1:8898/
 ```
 
@@ -115,6 +115,11 @@ npm start -- --port 8898 --hostname 127.0.0.1
 `start` serves the output of the last `build`, so run `build` first. For
 development, `bun dev` runs the app with hot reload (it needs a high OS
 file-watch limit for large home directories).
+
+The gated SQLite registry modes require the Viewer server to run on Bun. The
+Docker runtime and `agent-log-viewer` CLI select Bun automatically whenever
+`LLV_AGENT_REGISTRY_SQLITE` is enabled. Local source checkouts should use the
+explicit `bun --bun` command above during the rollout.
 
 **Prerequisites:** Node ≥ 20.9, and bun or npm/pnpm. `tmux` is optional — see
 [Platform support](#platform-support).

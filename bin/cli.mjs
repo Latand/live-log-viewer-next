@@ -211,11 +211,18 @@ function readPackageJson(packageRoot) {
 }
 
 function resolveServer(packageRoot) {
+  const sqliteMode = process.env.LLV_AGENT_REGISTRY_SQLITE ?? "off";
+  const bunRuntime = sqliteMode === "off"
+    ? null
+    : (process.versions.bun ? process.execPath : (process.env.LLV_BUN_EXECUTABLE || "bun"));
+  const commandFor = (command, args, bunEntry = command, bunArgs = args) => bunRuntime
+    ? { command: bunRuntime, args: ["--bun", bunEntry, ...bunArgs] }
+    : { command, args };
   const publishedStandalone = join(packageRoot, "dist", "standalone", "server.js");
   if (existsSync(publishedStandalone)) {
+    const launch = commandFor(process.execPath, [publishedStandalone], publishedStandalone, []);
     return {
-      command: process.execPath,
-      args: [publishedStandalone],
+      ...launch,
       cwd: join(packageRoot, "dist", "standalone"),
       label: "server.js",
     };
@@ -223,9 +230,9 @@ function resolveServer(packageRoot) {
 
   const repoStandalone = join(packageRoot, ".next", "standalone", "server.js");
   if (existsSync(repoStandalone)) {
+    const launch = commandFor(process.execPath, [repoStandalone], repoStandalone, []);
     return {
-      command: process.execPath,
-      args: [repoStandalone],
+      ...launch,
       cwd: join(packageRoot, ".next", "standalone"),
       label: "server.js",
     };
@@ -237,8 +244,7 @@ function resolveServer(packageRoot) {
   }
 
   return {
-    command: nextBin,
-    args: ["start"],
+    ...commandFor(nextBin, ["start"]),
     cwd: packageRoot,
     label: "next start",
   };

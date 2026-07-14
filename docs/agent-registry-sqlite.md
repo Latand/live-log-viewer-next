@@ -9,10 +9,12 @@ The registry supports four values for `LLV_AGENT_REGISTRY_SQLITE`:
 
 The first process that opens any gated SQLite mode creates `agent-registry.sqlite` and imports the normalized contents of `agent-registry.json` in one transaction. An interrupted import has no migration marker, so the next boot retries the complete import. Durable memberships, spawn receipts, capability digests, lineage, conversation generations, migration state, delivery receipts, and routing policy all migrate through the same snapshot.
 
+Every process with an enabled SQLite mode must run on Bun. The Docker Viewer uses `bun-container --bun`, and the published CLI selects Bun automatically when the gate is enabled. For a source checkout, launch Next with `bun --bun node_modules/.bin/next start`.
+
 ## Rollout
 
 1. Preserve a copy of the current state directory.
-2. Start every Viewer and runtime-host process with `LLV_AGENT_REGISTRY_SQLITE=dual-write`.
+2. Start every Bun-hosted Viewer and runtime-host process with `LLV_AGENT_REGISTRY_SQLITE=dual-write`.
 3. Treat `RegistryParityError` as a rollout stop. Keep JSON authoritative while investigating any mismatch.
 4. Restart every registry writer with `LLV_AGENT_REGISTRY_SQLITE=read` for an SQLite-read burn-in with a continuously refreshed JSON rollback mirror.
 5. After that burn-in, restart every writer with `LLV_AGENT_REGISTRY_SQLITE=sqlite` to remove JSON rewrites from the operation path.
@@ -26,6 +28,8 @@ The `read` and `sqlite` paths bypass the whole-registry writer lock, its retry/b
 2. Preserve the JSON and SQLite files together for diagnosis.
 3. When rolling back from `sqlite`, start one process with `LLV_AGENT_REGISTRY_SQLITE=read` and stop it after startup. Startup refreshes the JSON mirror to the current SQLite revision.
 4. Restart all processes with `LLV_AGENT_REGISTRY_SQLITE=off`. The JSON mirror is the authoritative rollback source.
-5. To resume the rollout, use `dual-write` first. That mode imports the current JSON snapshot into SQLite and verifies parity before serving registry operations.
+5. A rollback with no subsequent `off`-mode mutations can resume directly in `dual-write`. It admits an existing backend pair only when the revisions and normalized snapshots agree, preserving both files and throwing `RegistryParityError` on any drift.
+6. After any `off`-mode mutation, stop every writer again and archive `agent-registry.sqlite`, `agent-registry.sqlite-wal`, and `agent-registry.sqlite-shm` together under distinct names. Keep that archived trio with the pre-rebaseline JSON for diagnosis.
+7. With the active SQLite paths clear and the current JSON retained, start exactly one Bun process in `dual-write`. First boot creates a fresh database and imports the authoritative JSON in one transaction. Stop that process after initialization, preserve a fresh state-directory copy, then restart every writer in `dual-write`.
 
 Keep the SQLite files until the rollback has been validated. The database and WAL artifacts preserve evidence for diagnosing storage failures and caller-level state changes.

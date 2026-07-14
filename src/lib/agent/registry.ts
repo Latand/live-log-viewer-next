@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { isDeepStrictEqual } from "node:util";
 
 import { statePath } from "@/lib/configDir";
 import { procBackend } from "@/lib/proc";
@@ -562,7 +563,9 @@ export class MigrationRevisionError extends Error {
   }
 }
 
-function emptyPolicy(): AutoBalancePolicy {
+const LEGACY_POLICY_RESTARTED_AT = "1970-01-01T00:00:00.000Z";
+
+function emptyPolicy(restartedAt = now()): AutoBalancePolicy {
   return {
     enabled: true,
     revision: 0,
@@ -572,7 +575,7 @@ function emptyPolicy(): AutoBalancePolicy {
     lastTrigger: null,
     lastCheckAt: null,
     sustain: null,
-    restartedAt: now(),
+    restartedAt,
   };
 }
 
@@ -841,7 +844,7 @@ function normalizeConversation(value: RegistryConversation): RegistryConversatio
 }
 
 function normalizePolicy(value: AutoBalancePolicy | undefined): AutoBalancePolicy {
-  const fallback = emptyPolicy();
+  const fallback = emptyPolicy(LEGACY_POLICY_RESTARTED_AT);
   if (!value || typeof value !== "object") return fallback;
   return {
     ...fallback,
@@ -1188,6 +1191,10 @@ function upgradeV1(parsed: Omit<Partial<RegistryFile>, "version">): RegistryFile
   const legacy = parsed.legacyResumePanes;
   return {
     ...clone(EMPTY),
+    autoBalance: {
+      claude: emptyPolicy(LEGACY_POLICY_RESTARTED_AT),
+      codex: emptyPolicy(LEGACY_POLICY_RESTARTED_AT),
+    },
     entries: (parsed.entries as RegistryFile["entries"]) ?? {},
     receipts: Object.fromEntries(Object.entries((parsed.receipts as RegistryFile["receipts"]) ?? {}).map(([id, receipt]) => [id, normalizeReceipt(receipt)])),
     conversationAliases: {},
@@ -1232,7 +1239,10 @@ export function normalizeRegistry(value: unknown): RegistryFile {
       engineRouting: parsed.engineRouting && typeof parsed.engineRouting === "object" ? { ...EMPTY.engineRouting, ...parsed.engineRouting } : clone(EMPTY.engineRouting),
       autoBalance: parsed.autoBalance && typeof parsed.autoBalance === "object"
         ? { claude: normalizePolicy(parsed.autoBalance.claude), codex: normalizePolicy(parsed.autoBalance.codex) }
-        : { claude: emptyPolicy(), codex: emptyPolicy() },
+        : {
+            claude: emptyPolicy(LEGACY_POLICY_RESTARTED_AT),
+            codex: emptyPolicy(LEGACY_POLICY_RESTARTED_AT),
+          },
       quotaObservations: parsed.quotaObservations && typeof parsed.quotaObservations === "object"
         ? { ...EMPTY.quotaObservations, ...parsed.quotaObservations }
         : clone(EMPTY.quotaObservations),
@@ -1314,6 +1324,9 @@ export type AgentRegistrySqliteMode = "off" | "dual-write" | "read" | "sqlite";
 export interface AgentRegistryStorageOptions {
   sqliteMode?: AgentRegistrySqliteMode;
   sqliteFilename?: string;
+  onSqliteWriterWait?: (durationMs: number) => void;
+  beforeDualWriteStartupReplace?: () => void;
+  beforeDualWriteMutationReplace?: () => void;
 }
 
 export class RegistryParityError extends Error {
@@ -1346,6 +1359,7 @@ function sqliteMirrorRevision(filename: string): number | null {
 export class AgentRegistry {
   private readonly sqliteMode: AgentRegistrySqliteMode;
   private readonly sqliteStore: SqliteAgentRegistryStore | null;
+  private readonly beforeDualWriteMutationReplace: (() => void) | undefined;
 
   constructor(
     readonly filename = statePath("agent-registry.json"),
@@ -1355,19 +1369,21 @@ export class AgentRegistry {
     storage: AgentRegistryStorageOptions = {},
   ) {
     this.sqliteMode = storage.sqliteMode ?? sqliteModeFromEnvironment();
+    this.beforeDualWriteMutationReplace = storage.beforeDualWriteMutationReplace;
     this.sqliteStore = this.sqliteMode === "off"
       ? null
       : new SqliteAgentRegistryStore(storage.sqliteFilename ?? defaultSqliteFilename(filename), {
           initialSnapshot: readFile(filename),
           normalize: normalizeRegistry,
+          onWriterWait: storage.onSqliteWriterWait,
         });
-    if (this.sqliteMode === "off" || this.sqliteMode === "dual-write") {
+    if (this.sqliteMode === "off") {
       this.cleanupStaleTempFiles();
       this.compactAtStartup();
     }
     if (this.sqliteMode === "dual-write") {
-      this.sqliteStore!.replace(readFile(this.filename));
-      this.assertSqliteParity();
+      this.cleanupStaleTempFiles();
+      this.synchronizeDualWriteStartup(storage.beforeDualWriteStartupReplace);
     }
     if (this.sqliteMode === "read" || this.sqliteMode === "sqlite") {
       const sqlite = this.sqliteStore!.snapshot();
@@ -1382,8 +1398,13 @@ export class AgentRegistry {
 
   private assertSqliteParity(snapshot: SqliteRegistrySnapshot = this.sqliteStore!.snapshot()): void {
     const json = readFile(this.filename);
-    if (serializeRegistry(snapshot.file) !== serializeRegistry(json)) {
-      throw new RegistryParityError("agent registry JSON and SQLite snapshots differ");
+    if (!isDeepStrictEqual(snapshot.file, json)) {
+      const fields = [...new Set([...Object.keys(snapshot.file), ...Object.keys(json)])]
+        .filter((field) => !isDeepStrictEqual(
+          snapshot.file[field as keyof RegistryFile],
+          json[field as keyof RegistryFile],
+        ));
+      throw new RegistryParityError(`agent registry JSON and SQLite snapshots differ: ${fields.join(", ")}`);
     }
   }
 
@@ -1427,25 +1448,58 @@ export class AgentRegistry {
     const lock = `${this.filename}.write-lock`;
     const claim = this.acquireLock(lock, { pid: process.pid, startIdentity: procBackend.processIdentity(process.pid) });
     try {
-      let original: string;
-      try {
-        original = fs.readFileSync(this.filename, "utf8");
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
-        throw error;
+      this.compactAtStartupLocked();
+    } finally {
+      this.releaseLock(claim);
+    }
+  }
+
+  private compactAtStartupLocked(): void {
+    let original: string;
+    try {
+      original = fs.readFileSync(this.filename, "utf8");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw error;
+    }
+    let file: RegistryFile;
+    try {
+      file = readFile(this.filename);
+    } catch (error) {
+      if (error instanceof RegistryReadError) {
+        console.error("agent registry startup compaction skipped:", error);
+        return;
       }
-      let file: RegistryFile;
-      try {
-        file = readFile(this.filename);
-      } catch (error) {
-        if (error instanceof RegistryReadError) {
-          console.error("agent registry startup compaction skipped:", error);
-          return;
-        }
-        throw error;
+      throw error;
+    }
+    compactDeliveryReservations(file);
+    if (serializeRegistry(file) !== original) writeAtomic(this.filename, file);
+  }
+
+  private synchronizeDualWriteStartup(beforeReplace: (() => void) | undefined): void {
+    const lock = `${this.filename}.write-lock`;
+    const claim = this.acquireLock(lock, { pid: process.pid, startIdentity: procBackend.processIdentity(process.pid) });
+    try {
+      const sqlite = this.sqliteStore!.snapshot();
+      if (!fs.existsSync(this.filename)) writeAtomic(this.filename, sqlite.file);
+      const mirrorRevision = sqliteMirrorRevision(this.filename);
+      if (mirrorRevision !== null && mirrorRevision !== sqlite.revision) {
+        throw new RegistryParityError(
+          `agent registry backend revisions differ: JSON ${mirrorRevision}, SQLite ${sqlite.revision}`,
+        );
       }
-      compactDeliveryReservations(file);
-      if (serializeRegistry(file) !== original) writeAtomic(this.filename, file);
+      this.assertSqliteParity(sqlite);
+      this.compactAtStartupLocked();
+      const file = readFile(this.filename);
+      beforeReplace?.();
+      const replacement = this.sqliteStore!.replace(file, sqlite.revision);
+      if (!replacement.replaced) {
+        this.mirrorSqliteSnapshot(replacement);
+        throw new RegistryParityError(
+          `agent registry SQLite revision changed during dual-write startup: expected ${sqlite.revision}, current ${replacement.revision}`,
+        );
+      }
+      this.assertSqliteParity();
     } finally {
       this.releaseLock(claim);
     }
@@ -1773,18 +1827,38 @@ export class AgentRegistry {
 
   private mutate<T>(fn: (file: RegistryFile) => T): T {
     if (this.sqliteMode === "read" || this.sqliteMode === "sqlite") {
-      const mutation = this.sqliteStore!.mutate(fn);
-      if (this.sqliteMode === "read") this.mirrorSqliteSnapshot(mutation);
+      const mutation = this.sqliteStore!.mutate(fn, this.sqliteMode === "read");
+      if (this.sqliteMode === "read") {
+        if (!mutation.file) throw new Error("SQLite read mode mutation is missing its rollback snapshot");
+        this.mirrorSqliteSnapshot({ file: mutation.file, revision: mutation.revision });
+      }
       return mutation.result;
     }
     const lock = `${this.filename}.write-lock`;
     const claim = this.acquireLock(lock, { pid: process.pid, startIdentity: procBackend.processIdentity(process.pid) });
     try {
+      const sqlite = this.sqliteMode === "dual-write" ? this.sqliteStore!.snapshot() : null;
+      if (sqlite) {
+        const mirrorRevision = sqliteMirrorRevision(this.filename);
+        if (mirrorRevision !== null && mirrorRevision !== sqlite.revision) {
+          throw new RegistryParityError(
+            `agent registry backend revisions differ: JSON ${mirrorRevision}, SQLite ${sqlite.revision}`,
+          );
+        }
+        this.assertSqliteParity(sqlite);
+      }
       const file = readFile(this.filename);
       const result = fn(file);
       writeAtomic(this.filename, file);
-      if (this.sqliteMode === "dual-write") {
-        this.sqliteStore!.replace(file);
+      if (sqlite) {
+        this.beforeDualWriteMutationReplace?.();
+        const replacement = this.sqliteStore!.replace(file, sqlite.revision);
+        if (!replacement.replaced) {
+          this.mirrorSqliteSnapshot(replacement);
+          throw new RegistryParityError(
+            `agent registry SQLite revision changed during dual-write mutation: expected ${sqlite.revision}, current ${replacement.revision}`,
+          );
+        }
         this.assertSqliteParity();
       }
       return result;
