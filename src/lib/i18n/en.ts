@@ -80,6 +80,7 @@ export const en = {
   "dash.task": "Task",
   "dash.newTask": "New task",
   "dash.pipelinesUnavailable": "Pipelines are temporarily unavailable: the pipelines state file could not be read. Other panels stay live.",
+  "dash.loadingBoard": "Loading the board…",
   "dash.emptyTitle": "The scheme is empty for now",
   "dash.emptyHint": "Open the switchboard in the bottom-right corner and click a conversation — it will appear here",
   "dash.viewScheme": "scheme",

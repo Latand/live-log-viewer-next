@@ -36,6 +36,7 @@ import { TaskToastHost, pushTaskToast } from "./tasks/taskToast";
 import { MobileFocusView } from "./mobile/MobileFocusView";
 import { canHandoff, HandoffHandle } from "./HandoffHandle";
 import { SchemeBoard } from "./scheme/SchemeBoard";
+import { SchemeSkeleton } from "./scheme/SchemeSkeleton";
 import { Switchboard } from "./Switchboard";
 import {
   buildArchiveBranchGroups,
@@ -146,6 +147,17 @@ export function pendingFocusTarget(pending: string | null, files: readonly FileE
   if (!pending) return null;
   if (pending.startsWith("draft::") || files.some((file) => file.path === pending)) return pending;
   return null;
+}
+
+/** The board may paint its real nodes only once BOTH the first full scan and the
+    persisted board state have resolved (#172). Painting before the persisted
+    state lands shows the raw scan snapshot — every card, uncollapsed and
+    uncapped — which then culls to the settled set as closes, worker-stack
+    collapse and caps apply: the first-render flash. Until both are ready the
+    dashboard holds a skeleton, so the first real frame already equals the
+    settled arrangement. */
+export function boardFirstPaintReady(scanLoaded: boolean, boardLoaded: boolean): boolean {
+  return scanLoaded && boardLoaded;
 }
 
 /* Kept outside the component: the React Compiler's immutability check flags
@@ -297,6 +309,11 @@ export function ProjectDashboard({
      one-time seed from the old per-browser localStorage (#38). Reads stay
      optimistic — a local edit shows at once, then PATCHes. */
   const board = useBoardState(project);
+  /* Gate the board's real content on the settled state (#172): hold a skeleton
+     until the scan and the persisted board arrangement have both loaded, so the
+     first painted board already reflects closes, worker-stack collapse and caps
+     instead of flashing the raw scan snapshot and culling it. */
+  const boardReady = boardFirstPaintReady(loaded, board.loaded);
   /* Per-project, device-local undo/redo log of recent board actions (issue
      #184). v1 records card closes; undo reopens the last-closed card through the
      shared restore path, redo closes it again. */
@@ -1178,7 +1195,7 @@ export function ProjectDashboard({
         </div>
       ) : null}
 
-      {dockedTasks.length ? (
+      {boardReady && dockedTasks.length ? (
         <div className="shrink-0 border-b border-border bg-sunken">
           {dockedTasks.map((task) => (
             <div
@@ -1195,7 +1212,9 @@ export function ProjectDashboard({
         <>
           {/* The scheme/list toggle moved into the header row (finding 7), so the
               phone shell is two nav rows at most: header + the focus-view strip. */}
-          {projectView === "scheme" && schemeAvailable ? (
+          {!boardReady ? (
+            <SchemeSkeleton />
+          ) : projectView === "scheme" && schemeAvailable ? (
             <MobileFocusView
               project={project}
               groups={hasNodes ? schemeGroups : archiveGroups}
@@ -1230,10 +1249,12 @@ export function ProjectDashboard({
       ) : (
         <div className="flex min-h-0 min-w-0 flex-1">
           <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
-            {viewToggle ? (
+            {boardReady && viewToggle ? (
               <ProjectViewTabs value={projectView} onChange={chooseEmptyView} floating />
             ) : null}
-            {projectView === "scheme" && schemeAvailable ? (
+            {!boardReady ? (
+              <SchemeSkeleton />
+            ) : projectView === "scheme" && schemeAvailable ? (
               <SchemeBoard
                 project={project}
                 groups={hasNodes ? schemeGroups : archiveGroups}
@@ -1318,7 +1339,7 @@ export function ProjectDashboard({
 
       {/* The corner pill would sit on the focused pane's composer; on the
           phone the strip, the map and the toast cover its job. */}
-      {isMobile ? null : <Switchboard files={files} flows={flows} project={project} loaded={loaded} onOpenFile={openSwitchboardFile} onOpenCatalogFile={openFullCatalogFile} />}
+      {!isMobile && boardReady ? <Switchboard files={files} flows={flows} project={project} loaded={loaded} onOpenFile={openSwitchboardFile} onOpenCatalogFile={openFullCatalogFile} /> : null}
 
       {/* Worker-class cards that have auto-collapsed fold into one stack per
           origin — flow / pipeline / spawner (issue #112, #136) — instead of
@@ -1331,7 +1352,7 @@ export function ProjectDashboard({
           quiet strip share one footer row (issue #177 item 5): the handoff docks
           beside a single disclosure that folds both strips. Desktop renders the
           two strips directly, side by side. */}
-      {(() => {
+      {boardReady && (() => {
         const workerTotal = workerStacks.reduce((sum, stack) => sum + stack.items.length, 0);
         const quietTotal = !hasArchiveNodes ? residual.length : 0;
         const strips = (

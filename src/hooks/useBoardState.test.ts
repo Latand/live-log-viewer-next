@@ -718,3 +718,39 @@ test("schema-version skew holds the outbox and reports unavailable until it heal
   expect(store.getSnapshot().sync).toBe("current");
   store.dispose();
 });
+
+test("a project loaded once primes the next store from the settled snapshot (#172)", async () => {
+  const server = fakeServer({ proj: boardOf(4, { manual: ["/a"], hidden: ["/b"], viewMode: "scheme" }) });
+  const first = createBoardStore({ project: "proj", fetcher: server.fetcher, storage: null, scheduler: idleScheduler().scheduler });
+  await settle();
+  expect(first.getSnapshot()).toMatchObject({ loaded: true, prefs: prefsWith({ manual: ["/a"], hidden: ["/b"], viewMode: "scheme" }) });
+  first.dispose();
+
+  /* A reload/soft-nav remount starts settled from the session cache: its very
+     first snapshot already carries the pruned arrangement, so no empty frame
+     paints before the background GET revalidates — the board never flashes an
+     uncapped set and culls it (#172). */
+  const second = createBoardStore({ project: "proj", fetcher: server.fetcher, storage: null, scheduler: idleScheduler().scheduler });
+  expect(second.getSnapshot()).toMatchObject({ loaded: true, prefs: prefsWith({ manual: ["/a"], hidden: ["/b"], viewMode: "scheme" }) });
+  await settle();
+  expect(second.getSnapshot()).toMatchObject({ loaded: true, revision: 4, prefs: prefsWith({ manual: ["/a"], hidden: ["/b"], viewMode: "scheme" }) });
+  second.dispose();
+});
+
+test("an unavailable board is never cached, so a later mount still holds until it truly loads (#172)", async () => {
+  const down: Parameters<typeof createBoardStore>[0]["fetcher"] = async () => ({ ok: false, status: 500, json: async () => ({}) });
+  const first = createBoardStore({ project: "proj", fetcher: down, storage: null, scheduler: idleScheduler().scheduler });
+  await settle();
+  expect(first.getSnapshot()).toMatchObject({ loaded: true, sync: "unavailable" });
+  first.dispose();
+
+  /* The failed load must not have primed the cache with an empty/unavailable
+     board: the next mount holds `loaded: false` (the dashboard skeleton) until a
+     real GET lands, then paints the settled hidden set. */
+  const server = fakeServer({ proj: boardOf(2, { hidden: ["/b"] }) });
+  const second = createBoardStore({ project: "proj", fetcher: server.fetcher, storage: null, scheduler: idleScheduler().scheduler });
+  expect(second.getSnapshot().loaded).toBe(false);
+  await settle();
+  expect(second.getSnapshot()).toMatchObject({ loaded: true, prefs: prefsWith({ hidden: ["/b"] }) });
+  second.dispose();
+});

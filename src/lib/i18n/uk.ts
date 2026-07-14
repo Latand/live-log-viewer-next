@@ -74,6 +74,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "dash.task": "Задача",
   "dash.newTask": "Нова задача",
   "dash.pipelinesUnavailable": "Пайплайни тимчасово недоступні: файл стану пайплайнів не вдалося прочитати. Решта панелей працює.",
+  "dash.loadingBoard": "Завантаження дошки…",
   "dash.emptyTitle": "На схемі поки порожньо",
   "dash.emptyHint": "Відкрий пульт у правому нижньому куті і клікни розмову — вона з'явиться тут",
   "dash.viewScheme": "схема",

@@ -133,6 +133,14 @@ interface PendingOpen {
 const pendingOpens = new Map<string, PendingOpen>();
 const activeStores = new Map<string, () => void>();
 
+/* Session cache of the last server-confirmed board per project (#172). A store
+   for a project already loaded this session primes from here — it renders the
+   settled arrangement on its first frame and only background-revalidates,
+   instead of starting empty and culling to the pruned set. Only confirmed
+   (non-optimistic, non-unavailable) boards are cached, so a stale entry can
+   never widen the board beyond what the server last acknowledged. */
+const confirmedBoards = new Map<string, BoardProjectStateV1>();
+
 /**
  * Pre-add a conversation to a project's board. A child conversation (`connected`
  * = isChildConversation, what the tree can nest) goes into the expand set so it
@@ -150,10 +158,12 @@ export function queueColumnOpen(project: string, path: string, connected = false
   activeStores.get(project)?.();
 }
 
-/** Test seam: clears queued cross-project opens between cases. */
+/** Test seam: clears queued cross-project opens and the session board cache
+    between cases, so a board confirmed in one test never primes the next. */
 export function resetPendingOpensForTest(): void {
   pendingOpens.clear();
   activeStores.clear();
+  confirmedBoards.clear();
 }
 
 type WriteAttempt =
@@ -249,15 +259,20 @@ export function createBoardStore(options: BoardStoreOptions): BoardStore {
     prefs: EMPTY_BOARD_PREFS,
   });
 
-  let snapshot: BoardSnapshot = { prefs: EMPTY_BOARD_PREFS, explicitManual: [], revision: 0, sync: "unavailable", loaded: false };
   /* Last board the server acknowledged, and the semantic mutations not yet
      acknowledged. The optimistic arrangement is the outbox replayed over the
-     confirmed board. */
-  let confirmed: BoardProjectStateV1 = emptyBoard();
+     confirmed board. A project loaded earlier this session primes both the
+     confirmed board and `loaded` from the cache, so the first snapshot already
+     carries the settled arrangement (#172) while a background GET revalidates. */
+  const cachedConfirmed = confirmedBoards.get(project);
+  let confirmed: BoardProjectStateV1 = cachedConfirmed ?? emptyBoard();
   let outbox: BoardMutationV1[] = [];
   let inflight = false;
-  let loaded = false;
+  let loaded = cachedConfirmed !== undefined;
   let unavailable = false;
+  let snapshot: BoardSnapshot = loaded
+    ? { prefs: confirmed.prefs, explicitManual: confirmed.explicitManual ?? [], revision: confirmed.revision, sync: "current", loaded: true }
+    : { prefs: EMPTY_BOARD_PREFS, explicitManual: [], revision: 0, sync: "unavailable", loaded: false };
   let disposed = false;
   /* Consecutive revision conflicts: each means a fresh concurrent write, so we
      retry immediately up to a cap before falling back to the backoff timer. */
@@ -280,6 +295,10 @@ export function createBoardStore(options: BoardStoreOptions): BoardStore {
   const refresh = () => {
     const board = optimisticBoard(confirmed, outbox);
     snapshot = { prefs: board.prefs, explicitManual: board.explicitManual ?? [], revision: confirmed.revision, sync: syncFor(), loaded };
+    /* Cache only a genuinely loaded, available board — never the pre-load empty
+       board or an unavailable one — so a later mount primes from the settled
+       arrangement and not from a placeholder that would paint an unpruned set. */
+    if (loaded && !unavailable) confirmedBoards.set(project, confirmed);
     emit();
   };
 
@@ -550,6 +569,19 @@ export function createBoardStore(options: BoardStoreOptions): BoardStore {
 
 const UNAVAILABLE_SNAPSHOT: BoardSnapshot = { prefs: EMPTY_BOARD_PREFS, explicitManual: [], revision: 0, sync: "unavailable", loaded: false };
 
+/** The first snapshot a project's binding renders. A project already loaded this
+    session starts settled from the session cache (#172) so its board paints the
+    pruned arrangement immediately; everything else starts unavailable and holds
+    the dashboard skeleton until the store's first load lands. Empty on the
+    server (the cache is per-request), so hydration matches the first client
+    render. */
+function initialBoardSnapshot(project: string | null): BoardSnapshot {
+  if (typeof window === "undefined" || project === null) return UNAVAILABLE_SNAPSHOT;
+  const cached = confirmedBoards.get(project);
+  if (!cached) return UNAVAILABLE_SNAPSHOT;
+  return { prefs: cached.prefs, explicitManual: cached.explicitManual ?? [], revision: cached.revision, sync: "current", loaded: true };
+}
+
 export interface BoardState extends BoardSnapshot {
   /** Dispatch a semantic mutation batch (close/restore/reconcile/remap/
       presentation). The store replays it optimistically and flushes durably. */
@@ -569,13 +601,22 @@ export interface BoardState extends BoardSnapshot {
  */
 export function useBoardState(project: string | null): BoardState {
   const storeRef = useRef<BoardStore | null>(null);
-  const [snapshot, setSnapshot] = useState<BoardSnapshot>(UNAVAILABLE_SNAPSHOT);
+  /* The snapshot is tagged with the project it describes. Selecting a new
+     project re-runs the effect below, but the render that changed `project`
+     happens first with the previous project's snapshot still in state.
+     Reporting that stale (or, for a fresh project, empty) arrangement as
+     `loaded` would paint it for one frame and then cull to the real board — the
+     flash (#172). Until the effect rebinds the store, the tag mismatches and the
+     board reports unavailable, so the dashboard keeps its skeleton. */
+  const [bound, setBound] = useState<{ project: string | null; snapshot: BoardSnapshot }>(
+    () => ({ project, snapshot: initialBoardSnapshot(project) }),
+  );
 
   useEffect(() => {
     if (typeof window === "undefined" || project === null) {
       storeRef.current = null;
       /* eslint-disable-next-line react-hooks/set-state-in-effect */
-      setSnapshot(UNAVAILABLE_SNAPSHOT);
+      setBound({ project, snapshot: UNAVAILABLE_SNAPSHOT });
       return;
     }
     let storage: Pick<Storage, "getItem"> | null = null;
@@ -586,8 +627,8 @@ export function useBoardState(project: string | null): BoardState {
     }
     const store = createBoardStore({ project, fetcher: (input, init) => fetch(input, init), storage });
     storeRef.current = store;
-    setSnapshot(store.getSnapshot());
-    const unsubscribe = store.subscribe(() => setSnapshot(store.getSnapshot()));
+    setBound({ project, snapshot: store.getSnapshot() });
+    const unsubscribe = store.subscribe(() => setBound({ project, snapshot: store.getSnapshot() }));
     return () => {
       unsubscribe();
       store.dispose();
@@ -595,8 +636,9 @@ export function useBoardState(project: string | null): BoardState {
     };
   }, [project]);
 
+  const current = bound.project === project ? bound.snapshot : UNAVAILABLE_SNAPSHOT;
   return {
-    ...snapshot,
+    ...current,
     mutate(mutations) {
       storeRef.current?.mutate(mutations);
     },
