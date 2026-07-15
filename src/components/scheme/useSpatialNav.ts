@@ -209,9 +209,15 @@ export function useSpatialNav({
     return true;
   }, [rectFor]);
 
-  /* Reflow follow: when the layout changes under a followed anchor, translate
-     the camera by the anchor's world delta so it holds its screen position;
-     if the anchor left the board, drop follow and the ring. */
+  /* Reflow follow: when the followed anchor is re-laid-out, translate the camera
+     by its world delta so it holds its screen position; if it left the board,
+     drop follow and the ring. A task-card anchor moves independently of the
+     node layout — a drag drop, a collision re-placement, a poll that shifts or
+     removes the card, or a text edit that changes its estimated height all
+     rewrite `taskNav` while `layout` can stay identity-stable — so this must
+     re-run on `taskNav` too, or a selected card silently stops following and is
+     never dropped when it vanishes. The rect itself is read through `rectFor`
+     (the live task ref), so the window handlers stay identity-stable. */
   useEffect(() => {
     if (!followRef.current) return;
     const sel = selectedRef.current;
@@ -230,7 +236,7 @@ export function useSpatialNav({
     }
     if (rect) prevRectRef.current = { key: sel, x: rect.x, y: rect.y, w: rect.w, h: rect.h };
     if (plan.kind === "translate") glideByRef.current(plan.dx, plan.dy);
-  }, [layout, rectFor]);
+  }, [layout, taskNav, rectFor]);
 
   /* Any new anchor arms follow so it stays framed through reflow — an Arrow
      land, a pane click, or a focus jump after a send (the original issue's
