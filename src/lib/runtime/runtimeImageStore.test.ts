@@ -28,6 +28,15 @@ function taggedPng(tag: string): Buffer {
   return Buffer.concat([PNG, Buffer.from(tag)]);
 }
 
+function currentProcessStartTime(): string {
+  const stat = fs.readFileSync("/proc/self/stat", "utf8");
+  const commandEnd = stat.lastIndexOf(") ");
+  if (commandEnd < 0) throw new Error("process identity is malformed");
+  const startTime = stat.slice(commandEnd + 2).trim().split(/\s+/)[19];
+  if (!startTime) throw new Error("process start time is unavailable");
+  return startTime;
+}
+
 test("runtime images are validated and stored as private content-addressed blobs", () => {
   const root = sandbox();
   const store = new RuntimeImageStore(root);
@@ -157,6 +166,38 @@ test("concurrent runtime image writers cannot exceed the global byte quota", asy
   expect(exits.filter((code) => code === 2)).toHaveLength(children.length - 1);
   expect(storedBytes).toBeLessThanOrEqual(maxBytes);
 }, 20_000);
+
+test("an aged writer lock stays owned while its exact process identity is alive", () => {
+  const root = sandbox();
+  const lock = path.join(root, ".writer-lock");
+  fs.mkdirSync(lock, { mode: 0o700 });
+  fs.writeFileSync(path.join(lock, "owner.json"), JSON.stringify({
+    pid: process.pid,
+    processStartTime: currentProcessStartTime(),
+    token: crypto.randomUUID(),
+  }), { mode: 0o600 });
+  fs.utimesSync(lock, new Date(1), new Date(1));
+
+  expect(() => new RuntimeImageStore(root, { writerLockStaleMs: 0, writerLockWaitMs: 10 }))
+    .toThrow("runtime image writer lock timed out");
+  expect(fs.existsSync(lock)).toBe(true);
+});
+
+test("an aged writer lock is recovered after its owning process exits", () => {
+  const root = sandbox();
+  const lock = path.join(root, ".writer-lock");
+  fs.mkdirSync(lock, { mode: 0o700 });
+  fs.writeFileSync(path.join(lock, "owner.json"), JSON.stringify({
+    pid: 2_147_483_647,
+    processStartTime: "1",
+    token: crypto.randomUUID(),
+  }), { mode: 0o600 });
+  fs.utimesSync(lock, new Date(1), new Date(1));
+
+  new RuntimeImageStore(root, { writerLockStaleMs: 0, writerLockWaitMs: 10 });
+
+  expect(fs.existsSync(lock)).toBe(false);
+});
 
 test("runtime image writes remove partial and published files after every injected failure", () => {
   for (const failedStage of ["write", "fsync", "link", "directory-fsync"] as const) {

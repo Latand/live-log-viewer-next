@@ -106,6 +106,8 @@ export interface RuntimeImageStoreOptions {
   gcGraceMs?: number;
   reachableDigests?: () => ReadonlySet<string>;
   afterRootOpen?: (operation: "read" | "write" | "maintenance") => void;
+  writerLockStaleMs?: number;
+  writerLockWaitMs?: number;
 }
 
 const REF_DIGEST = /^[a-f0-9]{64}$/;
@@ -226,6 +228,47 @@ interface OpenRoot {
   path: string;
 }
 
+interface WriterLockOwner {
+  pid: number;
+  processStartTime: string;
+  token: string;
+}
+
+function processStartTime(pid: number): string | null {
+  let stat: string;
+  try { stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8"); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+  const commandEnd = stat.lastIndexOf(") ");
+  if (commandEnd < 0) throw new Error("process identity is malformed");
+  return stat.slice(commandEnd + 2).trim().split(/\s+/)[19] ?? null;
+}
+
+function readWriterLockOwner(lock: string): WriterLockOwner | null {
+  let value: unknown;
+  try {
+    const fd = fs.openSync(path.join(lock, "owner.json"), fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    try { value = JSON.parse(fs.readFileSync(fd, "utf8")); }
+    finally { fs.closeSync(fd); }
+  } catch (error) {
+    if (["ENOENT", "ELOOP"].includes((error as NodeJS.ErrnoException).code ?? "")) return null;
+    if (error instanceof SyntaxError) return null;
+    throw error;
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const owner = value as Partial<WriterLockOwner>;
+  if (!Number.isSafeInteger(owner.pid) || owner.pid! <= 0
+    || typeof owner.processStartTime !== "string" || !owner.processStartTime
+    || typeof owner.token !== "string" || !owner.token) return null;
+  return owner as WriterLockOwner;
+}
+
+function writerLockOwnerIsAlive(owner: WriterLockOwner | null): boolean {
+  return owner !== null && processStartTime(owner.pid) === owner.processStartTime;
+}
+
 export class RuntimeImageStore {
   private readonly maxBytes: number;
   private readonly fault: NonNullable<RuntimeImageStoreOptions["fault"]>;
@@ -234,6 +277,8 @@ export class RuntimeImageStore {
   private readonly gcGraceMs: number;
   private readonly reachableDigests: () => ReadonlySet<string>;
   private readonly afterRootOpen: NonNullable<RuntimeImageStoreOptions["afterRootOpen"]>;
+  private readonly writerLockStaleMs: number;
+  private readonly writerLockWaitMs: number;
 
   constructor(
     private readonly root = statePath("runtime-images"),
@@ -246,6 +291,8 @@ export class RuntimeImageStore {
     this.gcGraceMs = options.gcGraceMs ?? GC_GRACE_MS;
     this.reachableDigests = options.reachableDigests ?? (() => collectRuntimeImageReachableDigests(path.dirname(this.root)));
     this.afterRootOpen = options.afterRootOpen ?? (() => {});
+    this.writerLockStaleMs = options.writerLockStaleMs ?? WRITER_LOCK_STALE_MS;
+    this.writerLockWaitMs = options.writerLockWaitMs ?? WRITER_LOCK_WAIT_MS;
     this.ensurePrivateRoot();
     this.withWriterLock("maintenance", (root) => this.removeAgedPartials(root));
   }
@@ -303,35 +350,56 @@ export class RuntimeImageStore {
   }
 
   private withWriterLock<T>(operation: "write" | "maintenance", run: (root: OpenRoot) => T): T {
+    const ownProcessStartTime = processStartTime(process.pid);
+    if (!ownProcessStartTime) throw new Error("runtime image writer identity is unavailable");
     this.ensurePrivateRoot();
     const root = this.openRoot(operation);
     const lock = path.join(root.path, ".writer-lock");
-    const deadline = this.now() + WRITER_LOCK_WAIT_MS;
+    const deadline = this.now() + this.writerLockWaitMs;
+    const owner: WriterLockOwner = {
+      pid: process.pid,
+      processStartTime: ownProcessStartTime,
+      token: crypto.randomUUID(),
+    };
+    let acquired = false;
     try {
       while (true) {
+        let created = false;
         try {
           fs.mkdirSync(lock, { mode: 0o700 });
-          break;
+          created = true;
         } catch (error) {
           if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        }
+        if (created) {
           try {
-            const stat = fs.lstatSync(lock);
-            if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error("runtime image writer lock is unsafe");
-            if (this.now() - stat.mtimeMs > WRITER_LOCK_STALE_MS) {
-              fs.rmSync(lock, { recursive: true, force: true });
-              continue;
-            }
-          } catch (statError) {
-            if ((statError as NodeJS.ErrnoException).code !== "ENOENT") throw statError;
+            fs.writeFileSync(path.join(lock, "owner.json"), JSON.stringify(owner), { flag: "wx", mode: 0o600 });
+            acquired = true;
+            break;
+          } catch (error) {
+            fs.rmSync(lock, { recursive: true, force: true });
+            throw error;
+          }
+        }
+        try {
+          const stat = fs.lstatSync(lock);
+          if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error("runtime image writer lock is unsafe");
+          if (this.now() - stat.mtimeMs > this.writerLockStaleMs && !writerLockOwnerIsAlive(readWriterLockOwner(lock))) {
+            fs.rmSync(lock, { recursive: true, force: true });
             continue;
           }
-          if (this.now() >= deadline) throw new Error("runtime image writer lock timed out");
-          sleepSync(5);
+        } catch (statError) {
+          if ((statError as NodeJS.ErrnoException).code !== "ENOENT") throw statError;
+          continue;
         }
+        if (this.now() >= deadline) throw new Error("runtime image writer lock timed out");
+        sleepSync(5);
       }
       return run(root);
     } finally {
-      fs.rmSync(lock, { recursive: true, force: true });
+      if (acquired && readWriterLockOwner(lock)?.token === owner.token) {
+        fs.rmSync(lock, { recursive: true, force: true });
+      }
       fs.closeSync(root.fd);
     }
   }
