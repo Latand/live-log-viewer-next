@@ -9,8 +9,24 @@ import { RuntimeJournal } from "@/runtime-host/journal";
 
 import type { RuntimeHostClient } from "./client";
 import { bindStructuredDeliveryQueue } from "./structuredDeliveryController";
+import { createFakeDeliveryLedger, FakeEngineHost } from "./fixtures/fakeEngineHost";
 import { enqueueStructuredMessage } from "./structuredMessageDelivery";
 import { adoptStructuredHostsAtStartup, type StructuredStartupDependencies } from "./startup";
+
+function runtimeClient(journal: RuntimeJournal): RuntimeHostClient {
+  return {
+    snapshot: async () => journal.snapshot(),
+    events: async (after) => journal.replay(after),
+    waitEvents: async (after) => journal.replay(after),
+    append: async (event) => journal.append(event),
+    operation: async (event) => journal.append(event),
+    command: async (command) => journal.executeOperation(command),
+    operationStatus: async (operationId) => journal.operationResult(operationId),
+    retryOperation: async (operationId) => journal.retryOperation(operationId),
+    effectBatch: async (kinds, afterEventSeq) => journal.effectBatch(100, kinds, afterEventSeq),
+    transitionOperation: async (operationId, status, details) => journal.transitionOperation(operationId, status, details),
+  } as RuntimeHostClient;
+}
 
 test("server startup delegates managed rows with file credentials and their launch profile", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-startup-"));
@@ -93,6 +109,230 @@ test("server startup delegates managed rows with file credentials and their laun
   });
 });
 
+function runtimeJournalClient(journal: RuntimeJournal): RuntimeHostClient {
+  return {
+    snapshot: async () => journal.snapshot(),
+    append: async (event) => journal.append(event),
+    command: async (command) => journal.executeOperation(command),
+    operationStatus: async (operationId) => journal.operationResult(operationId),
+    effectBatch: async (kinds, afterEventSeq) => journal.effectBatch(100, kinds, afterEventSeq),
+    transitionOperation: async (operationId, status, details) => journal.transitionOperation(operationId, status, details),
+  } as RuntimeHostClient;
+}
+
+function structuredRestartFixture(
+  directory: string,
+  engine: "codex" | "claude",
+  status: "dead" | "unhosted" = "dead",
+  structured = true,
+) {
+  const sessionId = engine === "codex"
+    ? "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    : "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+  const artifactPath = path.join(directory, `${sessionId}.jsonl`);
+  fs.writeFileSync(artifactPath, "");
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const conversation = registry.ensureConversation(engine, artifactPath, null);
+  registry.upsert({
+    key: { engine, sessionId },
+    artifactPath,
+    cwd: directory,
+    accountId: null,
+    launchProfile: emptyLaunchProfile({ cwd: directory }),
+    status,
+    host: null,
+    structuredHost: structured ? {
+      kind: engine === "codex" ? "codex-app-server" : "claude-broker",
+      endpoint: "stdio:released",
+      process: null,
+      eventCursor: 4,
+      protocolVersion: "test",
+      writerClaimEpoch: 2,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    } : null,
+    claimEpoch: 2,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  return { artifactPath, conversation, registry, sessionId };
+}
+
+async function waitFor(predicate: () => boolean): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (predicate()) return;
+    await Bun.sleep(1);
+  }
+  throw new Error("startup delivery did not settle");
+}
+
+test.each(["codex", "claude"] as const)("failed %s restart adoption projects dead structured ownership and fences legacy delivery", async (engine) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), `llv-runtime-startup-dead-${engine}-`));
+  const { artifactPath, conversation, registry, sessionId } = structuredRestartFixture(directory, engine);
+  const journal = new RuntimeJournal(path.join(directory, "runtime.sqlite"), { structuredHosts: true });
+  const client = runtimeJournalClient(journal);
+
+  await adoptStructuredHostsAtStartup({
+    registry,
+    client,
+    adopt: async () => [],
+    adoptClaude: async () => [],
+  });
+
+  expect(journal.snapshot().sessions).toMatchObject([{
+    conversationId: conversation.id,
+    sessionKey: { engine, sessionId },
+    hostKind: engine === "codex" ? "codex-app-server" : "claude-broker",
+    host: "dead",
+    artifactPath,
+  }]);
+  let legacyCalls = 0;
+  const delivery = await enqueueStructuredMessage({
+    path: artifactPath,
+    text: "must stay structured",
+    clientMessageId: `failed-${engine}-restart-message`,
+    hasImages: false,
+  }, {
+    enabled: () => true,
+    client: () => client,
+    registry: () => registry,
+  });
+  if (delivery === null) legacyCalls += 1;
+  expect(delivery).toMatchObject({
+    ok: false,
+    structured: true,
+    outcome: "failed",
+    error: "dead-host",
+    status: 409,
+    receipt: { status: "rejected", reason: "dead-host" },
+  });
+  expect(legacyCalls).toBe(0);
+
+  await bindStructuredDeliveryQueue([], { registry, client: null });
+  journal.close();
+  fs.rmSync(directory, { recursive: true, force: true });
+});
+
+test("failed restart adoption replaces a stale hosted projection before delivery", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-startup-stale-hosted-"));
+  const { artifactPath, conversation, registry, sessionId } = structuredRestartFixture(directory, "codex");
+  const journal = new RuntimeJournal(path.join(directory, "runtime.sqlite"), { structuredHosts: true });
+  const client = runtimeJournalClient(journal);
+  journal.append({
+    scope: { type: "session", id: conversation.id },
+    kind: "session-status",
+    payload: {
+      conversationId: conversation.id,
+      sessionKey: { engine: "codex", sessionId },
+      hostKind: "codex-app-server",
+      host: "hosted",
+      turn: "idle",
+      provenance: "structured",
+      artifactPath,
+      capabilities: { steer: true, structuredAttention: true },
+    },
+  });
+
+  await adoptStructuredHostsAtStartup({
+    registry,
+    client,
+    adopt: async () => [],
+    adoptClaude: async () => [],
+  });
+
+  expect(journal.snapshot().sessions).toMatchObject([{
+    conversationId: conversation.id,
+    hostKind: "codex-app-server",
+    host: "dead",
+  }]);
+  const delivery = await enqueueStructuredMessage({
+    path: artifactPath,
+    text: "reject stale hosted delivery",
+    clientMessageId: "failed-stale-restart-message",
+    hasImages: false,
+  }, {
+    enabled: () => true,
+    client: () => client,
+    registry: () => registry,
+  });
+  expect(delivery).toMatchObject({
+    ok: false,
+    structured: true,
+    error: "dead-host",
+    receipt: { status: "rejected", reason: "dead-host" },
+  });
+
+  await bindStructuredDeliveryQueue([], { registry, client: null });
+  journal.close();
+  fs.rmSync(directory, { recursive: true, force: true });
+});
+
+test.each(["codex", "claude"] as const)("successful %s restart adoption publishes hosted ownership and delivers through EngineHost", async (engine) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), `llv-runtime-startup-hosted-${engine}-`));
+  const { artifactPath, conversation, registry, sessionId } = structuredRestartFixture(directory, engine, "unhosted");
+  const journal = new RuntimeJournal(path.join(directory, "runtime.sqlite"), { structuredHosts: true });
+  const client = runtimeJournalClient(journal);
+  const ledger = createFakeDeliveryLedger();
+  const host = Object.assign(new FakeEngineHost(ledger), { onStateChange: () => () => {} });
+  const key = { engine, sessionId } as const;
+
+  await adoptStructuredHostsAtStartup({
+    registry,
+    client,
+    adopt: async () => engine === "codex" ? [{ key, host: host as never }] : [],
+    adoptClaude: async () => engine === "claude" ? [{ key, host: host as never }] : [],
+  });
+
+  expect(journal.snapshot().sessions).toMatchObject([{
+    conversationId: conversation.id,
+    sessionKey: key,
+    hostKind: engine === "codex" ? "codex-app-server" : "claude-broker",
+    host: "hosted",
+    artifactPath,
+  }]);
+  let legacyCalls = 0;
+  const delivery = await enqueueStructuredMessage({
+    path: artifactPath,
+    text: `deliver through ${engine}`,
+    clientMessageId: `hosted-${engine}-restart-message`,
+    hasImages: false,
+  }, {
+    enabled: () => true,
+    client: () => client,
+    registry: () => registry,
+  });
+  if (delivery === null) legacyCalls += 1;
+  expect(delivery).toMatchObject({ ok: true, structured: true, outcome: "queued" });
+  await waitFor(() => ledger.writes.length === 1);
+  expect(ledger.writes).toEqual([expect.objectContaining({ text: `deliver through ${engine}` })]);
+  expect(legacyCalls).toBe(0);
+
+  await bindStructuredDeliveryQueue([], { registry, client: null });
+  journal.close();
+  fs.rmSync(directory, { recursive: true, force: true });
+});
+
+test("terminal structured row with a cleared ownership marker stays outside startup adoption", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-startup-terminal-"));
+  const { registry } = structuredRestartFixture(directory, "codex", "dead", false);
+  const journal = new RuntimeJournal(path.join(directory, "runtime.sqlite"), { structuredHosts: true });
+  const client = runtimeJournalClient(journal);
+
+  await adoptStructuredHostsAtStartup({
+    registry,
+    client,
+    adopt: async () => [],
+    adoptClaude: async () => [],
+  });
+
+  expect(journal.snapshot().sessions).toEqual([]);
+
+  await bindStructuredDeliveryQueue([], { registry, client: null });
+  journal.close();
+  fs.rmSync(directory, { recursive: true, force: true });
+});
+
 test("fresh-journal startup projects a live tmux registry row for composer fallback", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-startup-legacy-"));
   const sourceId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
@@ -131,14 +371,7 @@ test("fresh-journal startup projects a live tmux registry row for composer fallb
     pendingAction: null,
   });
   const journal = new RuntimeJournal(path.join(directory, "runtime.sqlite"), { structuredHosts: true });
-  const client = {
-    snapshot: async () => journal.snapshot(),
-    append: async (event: Parameters<RuntimeHostClient["append"]>[0]) => journal.append(event),
-    command: async (command: Parameters<RuntimeHostClient["command"]>[0]) => journal.executeOperation(command),
-    operationStatus: async (operationId: string) => journal.operationResult(operationId),
-    effectBatch: async (kinds?: readonly string[], afterEventSeq?: number) => journal.effectBatch(100, kinds, afterEventSeq),
-    transitionOperation: async (...args: Parameters<RuntimeHostClient["transitionOperation"]>) => journal.transitionOperation(...args),
-  } as RuntimeHostClient;
+  const client = runtimeJournalClient(journal);
 
   await adoptStructuredHostsAtStartup({
     registry,
@@ -165,6 +398,222 @@ test("fresh-journal startup projects a live tmux registry row for composer fallb
     registry: () => registry,
   });
   expect(delivery).toBeNull();
+
+  await bindStructuredDeliveryQueue([], { registry, client: null });
+  journal.close();
+  fs.rmSync(directory, { recursive: true, force: true });
+});
+
+test("startup reconciles a failed spawn after host adoption fails", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-startup-failed-spawn-"));
+  const sessionId = crypto.randomUUID();
+  const artifactPath = path.join(directory, `${sessionId}.jsonl`);
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const journal = new RuntimeJournal(path.join(directory, "runtime.sqlite"), { structuredHosts: true });
+  const client = runtimeClient(journal);
+  const profile = emptyLaunchProfile({ cwd: directory });
+  const begun = registry.beginSpawnRequest({ engine: "codex", cwd: directory, accountId: "managed", launchProfile: profile });
+  if (begun.kind !== "created") throw new Error("spawn receipt was unavailable");
+  await client.command({
+    kind: "spawn",
+    operationId: begun.receipt.launchId,
+    idempotencyKey: begun.receipt.launchId,
+    conversationId: begun.receipt.conversationId,
+    engine: "codex",
+    cwd: directory,
+    prompt: "recover after failed adoption",
+    accountId: "managed",
+    parentConversationId: null,
+  });
+  const key = { engine: "codex" as const, sessionId };
+  const staged = registry.stageStructuredSpawn(begun.receipt.launchId, {
+    key,
+    artifactPath,
+    cwd: directory,
+    accountId: "managed",
+    launchProfile: profile,
+    status: "idle",
+    host: null,
+    structuredHost: {
+      kind: "codex-app-server",
+      endpoint: "stdio:staged",
+      process: null,
+      eventCursor: 0,
+      protocolVersion: "test-v1",
+      writerClaimEpoch: 0,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: "spawn",
+  });
+  if (staged.kind !== "settled") throw new Error("spawn identity was unavailable");
+  await client.transitionOperation(begun.receipt.launchId, "failed", { reason: "engine process could not resume" });
+
+  let failedAdoptions = 0;
+  const dependencies: StructuredStartupDependencies = {
+    registry,
+    client,
+    adopt: async (received) => {
+      const entry = received.snapshot().entries[`codex:${sessionId}`];
+      if (entry?.structuredHost) {
+        failedAdoptions += 1;
+        received.setStructuredHost(key, {
+          ...entry.structuredHost,
+          endpoint: "stdio:released",
+          process: null,
+          activeTurnRef: null,
+          pendingAttention: [],
+          activeFlags: [],
+        }, "dead");
+      }
+      return [];
+    },
+    adoptClaude: async () => [],
+  };
+
+  expect(await adoptStructuredHostsAtStartup(dependencies)).toEqual([]);
+  expect(await adoptStructuredHostsAtStartup(dependencies)).toEqual([]);
+
+  expect(failedAdoptions).toBe(1);
+  expect(registry.snapshot().receipts[begun.receipt.launchId]).toMatchObject({
+    state: "failed",
+    error: "engine process could not resume",
+  });
+  expect(registry.snapshot().entries[`codex:${sessionId}`]).toMatchObject({
+    status: "dead",
+    structuredHost: null,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  expect((await client.operationStatus(begun.receipt.launchId))?.receipt).toMatchObject({
+    status: "failed",
+    reason: "engine process could not resume",
+  });
+  expect(journal.snapshot().sessions.find((session) => session.conversationId === begun.receipt.conversationId)).toMatchObject({
+    host: "dead",
+    activeTurnId: null,
+  });
+  expect((await client.events(0)).events).toContainEqual(expect.objectContaining({
+    kind: "session-status",
+    payload: expect.objectContaining({
+      conversationId: begun.receipt.conversationId,
+      host: "dead",
+      artifactPath,
+    }),
+  }));
+
+  await bindStructuredDeliveryQueue([], { registry, client: null });
+  journal.close();
+  fs.rmSync(directory, { recursive: true, force: true });
+});
+
+test("startup settles a delivered spawn after host adoption fails", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-startup-delivered-spawn-"));
+  const sessionId = crypto.randomUUID();
+  const artifactPath = path.join(directory, `${sessionId}.jsonl`);
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const journal = new RuntimeJournal(path.join(directory, "runtime.sqlite"), { structuredHosts: true });
+  const client = runtimeClient(journal);
+  const profile = emptyLaunchProfile({ cwd: directory });
+  const begun = registry.beginSpawnRequest({ engine: "codex", cwd: directory, accountId: "managed", launchProfile: profile });
+  if (begun.kind !== "created") throw new Error("spawn receipt was unavailable");
+  await client.command({
+    kind: "spawn",
+    operationId: begun.receipt.launchId,
+    idempotencyKey: begun.receipt.launchId,
+    conversationId: begun.receipt.conversationId,
+    engine: "codex",
+    cwd: directory,
+    prompt: "already delivered prompt",
+    accountId: "managed",
+    parentConversationId: null,
+  });
+  const key = { engine: "codex" as const, sessionId };
+  const staged = registry.stageStructuredSpawn(begun.receipt.launchId, {
+    key,
+    artifactPath,
+    cwd: directory,
+    accountId: "managed",
+    launchProfile: profile,
+    status: "idle",
+    host: null,
+    structuredHost: {
+      kind: "codex-app-server",
+      endpoint: "stdio:staged",
+      process: null,
+      eventCursor: 0,
+      protocolVersion: "test-v1",
+      writerClaimEpoch: 0,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: "spawn",
+  });
+  if (staged.kind !== "settled") throw new Error("spawn identity was unavailable");
+  await client.transitionOperation(begun.receipt.launchId, "delivered");
+
+  let failedAdoptions = 0;
+  let recoverySendCommands = 0;
+  const startupClient = {
+    ...client,
+    command: async (command: Parameters<RuntimeHostClient["command"]>[0]) => {
+      if (command.kind === "send" || command.kind === "steer") recoverySendCommands += 1;
+      return client.command(command);
+    },
+  } as RuntimeHostClient;
+  const dependencies: StructuredStartupDependencies = {
+    registry,
+    client: startupClient,
+    adopt: async (received) => {
+      const entry = received.snapshot().entries[`codex:${sessionId}`];
+      if (entry?.structuredHost) {
+        failedAdoptions += 1;
+        received.setStructuredHost(key, {
+          ...entry.structuredHost,
+          endpoint: "stdio:released",
+          process: null,
+          activeTurnRef: null,
+          pendingAttention: [],
+          activeFlags: [],
+        }, "dead");
+      }
+      return [];
+    },
+    adoptClaude: async () => [],
+  };
+
+  expect(await adoptStructuredHostsAtStartup(dependencies)).toEqual([]);
+  expect(await adoptStructuredHostsAtStartup(dependencies)).toEqual([]);
+
+  expect(failedAdoptions).toBe(1);
+  expect(registry.snapshot().receipts[begun.receipt.launchId]).toMatchObject({
+    state: "completed",
+    artifactPath,
+    completionMode: "route-recovered",
+  });
+  expect(registry.snapshot().entries[`codex:${sessionId}`]).toMatchObject({
+    status: "dead",
+    structuredHost: null,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  expect((await client.operationStatus(begun.receipt.launchId))?.receipt).toMatchObject({
+    status: "delivered",
+    reason: null,
+  });
+  await expect(client.retryOperation(begun.receipt.launchId)).rejects.toThrow("only failed runtime operations can retry");
+  expect(journal.snapshot().sessions.find((session) => session.conversationId === begun.receipt.conversationId)).toMatchObject({
+    host: "dead",
+    activeTurnId: null,
+  });
+  expect(recoverySendCommands).toBe(0);
+  expect(await client.effectBatch(["runtime.send", "runtime.steer"])).toEqual([]);
 
   await bindStructuredDeliveryQueue([], { registry, client: null });
   journal.close();

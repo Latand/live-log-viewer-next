@@ -14,7 +14,8 @@ import { RuntimeJournal } from "@/runtime-host/journal";
 
 import type { RuntimeHostClient } from "./client";
 import type { DeliveryReceipt, HostState, QueueEntry, RuntimeEvent } from "./engineHost";
-import { bindStructuredDeliveryQueue } from "./structuredDeliveryController";
+import { bindStructuredDeliveryQueue, hasStructuredDeliveryHost } from "./structuredDeliveryController";
+import { dispatchStructuredControl } from "./structuredControls";
 import { kickStructuredDeliveryQueue } from "./structuredDeliverySignal";
 import { enqueueStructuredMessage } from "./structuredMessageDelivery";
 import { recoverPendingStructuredSpawns, spawnStructuredConversation, structuredClaudePermissionMode, structuredClaudeSpawnPolicyBaseSettingsPath, type SpawnedStructuredHost } from "./structuredSpawn";
@@ -28,9 +29,58 @@ const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-structured-spawn-"));
 afterAll(() => fs.rmSync(sandbox, { recursive: true, force: true }));
 afterEach(async () => { await bindStructuredDeliveryQueue([]); });
 
-test("structured Claude fresh sessions use the permission channel", () => {
-  expect(structuredClaudePermissionMode("bypassPermissions")).toBe("default");
-  expect(structuredClaudePermissionMode("plan")).toBe("plan");
+test("structured Claude permission mapping distinguishes trusted autonomous spawn paths", () => {
+  expect(structuredClaudePermissionMode("bypassPermissions", {
+    agentInitiated: true,
+    operatorAuthenticated: true,
+    roleSpawn: true,
+  })).toBe("bypassPermissions");
+  expect(structuredClaudePermissionMode("bypassPermissions", {
+    agentInitiated: false,
+    operatorAuthenticated: false,
+    roleSpawn: true,
+  })).toBe("bypassPermissions");
+  expect(structuredClaudePermissionMode("bypassPermissions", {
+    agentInitiated: true,
+    operatorAuthenticated: false,
+    roleSpawn: true,
+  })).toBe("default");
+  expect(structuredClaudePermissionMode("bypassPermissions", {
+    agentInitiated: false,
+    operatorAuthenticated: false,
+    roleSpawn: false,
+  })).toBe("default");
+  expect(structuredClaudePermissionMode("plan", {
+    agentInitiated: true,
+    operatorAuthenticated: false,
+    roleSpawn: true,
+  })).toBe("plan");
+});
+
+test("structured Claude receipts expose the effective permission mode", () => {
+  const store = new AgentRegistry(path.join(sandbox, `permission-receipt-${crypto.randomUUID()}.json`), undefined, undefined, { sqliteMode: "off" });
+  const trusted = store.beginSpawnRequest({
+    engine: "claude",
+    cwd: "/repo",
+    transport: "structured",
+    launchProfile: emptyLaunchProfile({ cwd: "/repo", permissionMode: "bypassPermissions" }),
+  });
+  const downgraded = store.beginSpawnRequest({
+    engine: "claude",
+    cwd: "/repo",
+    transport: "structured",
+    launchProfile: emptyLaunchProfile({ cwd: "/repo", permissionMode: "default" }),
+  });
+  if (trusted.kind !== "created" || downgraded.kind !== "created") throw new Error("spawn receipt was unavailable");
+
+  expect(spawnResponseForReceipt(trusted.receipt, null)).toMatchObject({
+    state: "starting",
+    effectivePermissionMode: "bypassPermissions",
+  });
+  expect(spawnResponseForReceipt(downgraded.receipt, null)).toMatchObject({
+    state: "starting",
+    effectivePermissionMode: "default",
+  });
 });
 
 test("fresh managed Claude structured spawns select the shared settings snapshot", () => {
@@ -53,6 +103,7 @@ function runtimeClient(journal: RuntimeJournal): RuntimeHostClient {
     command: async (command) => journal.executeOperation(command),
     operationStatus: async (operationId) => journal.operationResult(operationId),
     retryOperation: async (operationId) => journal.retryOperation(operationId),
+    producerCursor: async (producerKind, eventKeyPrefix) => journal.producerCursor(producerKind, eventKeyPrefix),
     effectBatch: async (kinds, afterEventSeq) => journal.effectBatch(100, kinds, afterEventSeq),
     transitionOperation: async (operationId, status, details) => journal.transitionOperation(operationId, status, details),
   } as RuntimeHostClient;
@@ -71,6 +122,7 @@ class RoundTripHost implements SpawnedStructuredHost {
   private activeTurnRef: string | null = null;
   private pendingAttention: string[] = [];
   private released = false;
+  releaseCount = 0;
 
   constructor(readonly engine: "codex" | "claude", readonly artifactPath: string, sessionId: string) {
     this.identity = engine === "codex" ? { threadId: sessionId, path: artifactPath } : { sessionId };
@@ -165,7 +217,14 @@ class RoundTripHost implements SpawnedStructuredHost {
   }
 
   async release(): Promise<void> {
+    this.releaseCount += 1;
     this.released = true;
+    this.status = "unhosted";
+    this.activeTurnRef = null;
+    this.pendingAttention = [];
+    this.emit({ kind: "session-status", status: "unhosted" });
+    const state = await this.health();
+    for (const listener of this.listeners) listener(state);
     for (const wake of this.waiters) wake();
     this.waiters.clear();
   }
@@ -190,6 +249,20 @@ async function waitFor(assertion: () => boolean): Promise<void> {
     await Bun.sleep(5);
   }
   throw new Error("round-trip condition did not settle");
+}
+
+async function completesWithin<T>(operation: T | PromiseLike<T>, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      Promise.resolve(operation),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), 1_000);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 function deferred(): { promise: Promise<void>; resolve(): void } {
@@ -426,8 +499,401 @@ test("startup recovery finalizes a staged spawn without duplicating its admitted
   expect((await client.operationStatus(begun.receipt.launchId))?.receipt.status).toBe("delivered");
 });
 
+test("startup recovery cleans a staged host whose spawn operation already failed", async () => {
+  const id = crypto.randomUUID();
+  const cwd = path.join(sandbox, `failed-recovery-${id}`);
+  fs.mkdirSync(cwd, { recursive: true });
+  const artifactPath = path.join(cwd, `${id}.jsonl`);
+  const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const journal = new RuntimeJournal(path.join(cwd, "runtime.sqlite"), { structuredHosts: true });
+  const client = runtimeClient(journal);
+  const launchProfile = emptyLaunchProfile({ cwd, model: "gpt-5.6-luna" });
+  const begun = registry.beginSpawnRequest({ engine: "codex", cwd, accountId: "codex-subscription", launchProfile });
+  if (begun.kind !== "created") throw new Error("spawn receipt was unavailable");
+  await client.command({
+    kind: "spawn",
+    operationId: begun.receipt.launchId,
+    idempotencyKey: begun.receipt.launchId,
+    conversationId: begun.receipt.conversationId,
+    engine: "codex",
+    cwd,
+    prompt: "crash-window prompt",
+    accountId: "codex-subscription",
+    parentConversationId: null,
+  });
+  const key = { engine: "codex" as const, sessionId: id };
+  const staged = registry.stageStructuredSpawn(begun.receipt.launchId, {
+    key,
+    artifactPath,
+    cwd,
+    accountId: "codex-subscription",
+    launchProfile,
+    status: "idle",
+    host: null,
+    structuredHost: {
+      kind: "codex-app-server",
+      endpoint: "fake:stdio",
+      process: { pid: process.pid, startIdentity: "test-process" },
+      eventCursor: 0,
+      protocolVersion: "fake-v1",
+      writerClaimEpoch: 1,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 1,
+    claimOwner: "structured-host:test",
+    pendingAction: "spawn",
+  });
+  if (staged.kind !== "settled") throw new Error("spawn identity was unavailable");
+  const host = new RoundTripHost("codex", artifactPath, id);
+  await bindStructuredDeliveryQueue([{ key, host }], { registry, client });
+  await client.transitionOperation(begun.receipt.launchId, "failed", { reason: "engine child failed" });
+
+  await recoverPendingStructuredSpawns(registry, client);
+  await recoverPendingStructuredSpawns(registry, client);
+
+  expect(registry.snapshot().receipts[begun.receipt.launchId]).toMatchObject({
+    state: "failed",
+    error: "engine child failed",
+  });
+  expect(registry.snapshot().entries[`codex:${id}`]).toMatchObject({
+    status: "dead",
+    structuredHost: null,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  expect(hasStructuredDeliveryHost(key)).toBeFalse();
+  expect(host.releaseCount).toBe(1);
+  expect((await client.operationStatus(begun.receipt.launchId))?.receipt).toMatchObject({
+    status: "failed",
+    reason: "engine child failed",
+  });
+  expect(journal.snapshot().sessions.find((session) => session.conversationId === begun.receipt.conversationId)).toMatchObject({
+    host: "dead",
+  });
+});
+
+test("startup recovery completes an intentionally empty spawn prompt without a host send", async () => {
+  const id = crypto.randomUUID();
+  const cwd = path.join(sandbox, `empty-prompt-recovery-${id}`);
+  fs.mkdirSync(cwd, { recursive: true });
+  const artifactPath = path.join(cwd, `${id}.jsonl`);
+  const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const journal = new RuntimeJournal(path.join(cwd, "runtime.sqlite"), { structuredHosts: true });
+  const client = runtimeClient(journal);
+  const launchProfile = emptyLaunchProfile({ cwd, model: "gpt-5.6-luna" });
+  const begun = registry.beginSpawnRequest({ engine: "codex", cwd, accountId: "codex-subscription", launchProfile });
+  if (begun.kind !== "created") throw new Error("spawn receipt was unavailable");
+  await client.command({
+    kind: "spawn",
+    operationId: begun.receipt.launchId,
+    idempotencyKey: begun.receipt.launchId,
+    conversationId: begun.receipt.conversationId,
+    engine: "codex",
+    cwd,
+    prompt: "",
+    accountId: "codex-subscription",
+    parentConversationId: null,
+  });
+  const key = { engine: "codex" as const, sessionId: id };
+  const staged = registry.stageStructuredSpawn(begun.receipt.launchId, {
+    key,
+    artifactPath,
+    cwd,
+    accountId: "codex-subscription",
+    launchProfile,
+    status: "idle",
+    host: null,
+    structuredHost: {
+      kind: "codex-app-server",
+      endpoint: "fake:stdio",
+      process: { pid: process.pid, startIdentity: "test-process" },
+      eventCursor: 0,
+      protocolVersion: "fake-v1",
+      writerClaimEpoch: 1,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 1,
+    claimOwner: "structured-host:test",
+    pendingAction: "spawn",
+  });
+  if (staged.kind !== "settled") throw new Error("spawn identity was unavailable");
+  const host = new RoundTripHost("codex", artifactPath, id);
+  await bindStructuredDeliveryQueue([{ key, host }], { registry, client });
+
+  await recoverPendingStructuredSpawns(registry, client);
+
+  expect(host.sent).toEqual([]);
+  expect(registry.snapshot().receipts[begun.receipt.launchId]).toMatchObject({ state: "completed", artifactPath });
+  expect((await client.operationStatus(begun.receipt.launchId))?.receipt.status).toBe("delivered");
+});
+
+test("a queued kill terminalizes after restart when its generation is confirmed dead", async () => {
+  const id = crypto.randomUUID();
+  const cwd = path.join(sandbox, `dead-kill-recovery-${id}`);
+  fs.mkdirSync(cwd, { recursive: true });
+  const artifactPath = path.join(cwd, `${id}.jsonl`);
+  const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const journal = new RuntimeJournal(path.join(cwd, "runtime.sqlite"), { structuredHosts: true });
+  const client = runtimeClient(journal);
+  const conversation = registry.ensureConversation("codex", artifactPath, "codex-subscription");
+  const generation = conversation.generations.at(-1);
+  if (!generation) throw new Error("structured generation was unavailable");
+  const key = { engine: "codex" as const, sessionId: generation.id };
+  registry.upsert({
+    key,
+    artifactPath,
+    cwd,
+    accountId: "codex-subscription",
+    status: "dead",
+    host: null,
+    structuredHost: null,
+    claimEpoch: 1,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  await client.append({
+    scope: { type: "session", id: conversation.id },
+    kind: "session-status",
+    payload: {
+      conversationId: conversation.id,
+      sessionKey: key,
+      hostKind: "codex-app-server",
+      host: "hosted",
+      turn: "idle",
+      provenance: "structured",
+      accountId: "codex-subscription",
+      parentConversationId: null,
+      cwd,
+      artifactPath,
+      capabilities: { steer: true, structuredAttention: true },
+      activeTurnId: null,
+    },
+  });
+  expect(journal.snapshot().sessions.find((session) => session.conversationId === conversation.id)?.host).toBe("hosted");
+  const operationId = `kill_${id}`;
+  await client.command({
+    kind: "kill",
+    operationId,
+    idempotencyKey: operationId,
+    conversationId: conversation.id,
+    sessionKey: key,
+  });
+
+  await bindStructuredDeliveryQueue([], { registry, client });
+
+  expect((await client.operationStatus(operationId))?.receipt).toMatchObject({
+    kind: "kill",
+    status: "delivered",
+  });
+  expect(registry.snapshot().entries[`codex:${generation.id}`]).toMatchObject({
+    status: "dead",
+    host: null,
+    structuredHost: null,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  expect(await client.effectBatch(["runtime.kill"], 0)).toEqual([]);
+  expect(journal.snapshot().sessions.find((session) => session.conversationId === conversation.id)).toMatchObject({
+    host: "dead",
+    activeTurnId: null,
+  });
+  const sendOperationId = `send_after_${id}`;
+  const sent = await client.command({
+    kind: "send",
+    operationId: sendOperationId,
+    idempotencyKey: sendOperationId,
+    conversationId: conversation.id,
+    text: "must reject after kill",
+    policy: "queue",
+  });
+  expect(sent.receipt).toMatchObject({ status: "rejected", reason: "dead-host" });
+});
+
+test("a dead predecessor kill terminalizes without touching its live successor", async () => {
+  const predecessorId = crypto.randomUUID();
+  const successorId = crypto.randomUUID();
+  const cwd = path.join(sandbox, `successor-kill-${predecessorId}`);
+  fs.mkdirSync(cwd, { recursive: true });
+  const predecessorPath = path.join(cwd, `${predecessorId}.jsonl`);
+  const successorPath = path.join(cwd, `${successorId}.jsonl`);
+  const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const journal = new RuntimeJournal(path.join(cwd, "runtime.sqlite"), { structuredHosts: true });
+  const client = runtimeClient(journal);
+  const conversation = registry.ensureConversation("codex", predecessorPath, "codex-subscription");
+  const predecessorKey = { engine: "codex" as const, sessionId: predecessorId };
+  registry.upsert({
+    key: predecessorKey,
+    artifactPath: predecessorPath,
+    cwd,
+    accountId: "codex-subscription",
+    status: "dead",
+    host: null,
+    structuredHost: null,
+    claimEpoch: 1,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  const resumed = registry.beginSpawnRequest({
+    engine: "codex",
+    cwd,
+    accountId: "codex-subscription",
+    conversationId: conversation.id,
+    purpose: "resume-successor",
+  });
+  if (resumed.kind !== "created") throw new Error("successor receipt was unavailable");
+  const successorKey = { engine: "codex" as const, sessionId: successorId };
+  const settled = registry.settleSpawn(resumed.receipt.launchId, {
+    key: successorKey,
+    artifactPath: successorPath,
+    cwd,
+    accountId: "codex-subscription",
+    status: "live",
+    host: null,
+    structuredHost: {
+      kind: "codex-app-server",
+      endpoint: "fake:successor",
+      process: { pid: process.pid, startIdentity: "successor-process" },
+      eventCursor: 1,
+      protocolVersion: "fake-v1",
+      writerClaimEpoch: 2,
+      activeTurnRef: "successor-turn",
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 2,
+    claimOwner: "structured-host:successor",
+    pendingAction: null,
+  });
+  if (settled.kind !== "settled") throw new Error("successor settlement failed");
+  const successorBefore = registry.snapshot().entries[`codex:${successorId}`];
+  const operationId = `kill_${predecessorId}`;
+  await client.command({
+    kind: "kill",
+    operationId,
+    idempotencyKey: operationId,
+    conversationId: conversation.id,
+    sessionKey: predecessorKey,
+  });
+  const successorHost = new RoundTripHost("codex", successorPath, successorId);
+
+  await bindStructuredDeliveryQueue([{ key: successorKey, host: successorHost }], { registry, client });
+
+  expect((await client.operationStatus(operationId))?.receipt.status).toBe("delivered");
+  expect(registry.snapshot().entries[`codex:${successorId}`]).toEqual(successorBefore);
+  expect(successorHost.releaseCount).toBe(0);
+  expect(hasStructuredDeliveryHost(successorKey)).toBeTrue();
+  expect(journal.snapshot().sessions.find((session) => session.conversationId === conversation.id)).toMatchObject({
+    sessionKey: successorKey,
+    host: "hosted",
+    hostKind: "codex-app-server",
+  });
+  expect(await client.effectBatch(["runtime.kill"], 0)).toEqual([]);
+});
+
+test("a queued kill waits when an unadopted structured process may still be live", async () => {
+  const id = crypto.randomUUID();
+  const cwd = path.join(sandbox, `live-kill-recovery-${id}`);
+  fs.mkdirSync(cwd, { recursive: true });
+  const artifactPath = path.join(cwd, `${id}.jsonl`);
+  const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const journal = new RuntimeJournal(path.join(cwd, "runtime.sqlite"), { structuredHosts: true });
+  const client = runtimeClient(journal);
+  const conversation = registry.ensureConversation("codex", artifactPath, "codex-subscription");
+  const key = { engine: "codex" as const, sessionId: id };
+  registry.upsert({
+    key,
+    artifactPath,
+    cwd,
+    accountId: "codex-subscription",
+    status: "live",
+    host: null,
+    structuredHost: {
+      kind: "codex-app-server",
+      endpoint: "fake:unadopted",
+      process: { pid: process.pid, startIdentity: "potentially-live" },
+      eventCursor: 1,
+      protocolVersion: "fake-v1",
+      writerClaimEpoch: 1,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 1,
+    claimOwner: "structured-host:unadopted",
+    pendingAction: null,
+  });
+  const entryBefore = registry.snapshot().entries[`codex:${id}`];
+  const operationId = `kill_${id}`;
+  await client.command({
+    kind: "kill",
+    operationId,
+    idempotencyKey: operationId,
+    conversationId: conversation.id,
+    sessionKey: key,
+  });
+
+  await bindStructuredDeliveryQueue([], { registry, client });
+
+  expect((await client.operationStatus(operationId))?.receipt.status).toBe("queued");
+  expect(registry.snapshot().entries[`codex:${id}`]).toEqual(entryBefore);
+  expect(await client.effectBatch(["runtime.kill"], 0)).toHaveLength(1);
+});
+
+test("a queued kill waits through a processless structured adoption claim", async () => {
+  const id = crypto.randomUUID();
+  const cwd = path.join(sandbox, `claimed-kill-recovery-${id}`);
+  fs.mkdirSync(cwd, { recursive: true });
+  const artifactPath = path.join(cwd, `${id}.jsonl`);
+  const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const journal = new RuntimeJournal(path.join(cwd, "runtime.sqlite"), { structuredHosts: true });
+  const client = runtimeClient(journal);
+  const conversation = registry.ensureConversation("codex", artifactPath, "codex-subscription");
+  const key = { engine: "codex" as const, sessionId: id };
+  registry.upsert({
+    key,
+    artifactPath,
+    cwd,
+    accountId: "codex-subscription",
+    status: "unhosted",
+    host: null,
+    structuredHost: {
+      kind: "codex-app-server",
+      endpoint: "stdio:pending",
+      process: null,
+      eventCursor: 0,
+      protocolVersion: null,
+      writerClaimEpoch: 1,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 1,
+    claimOwner: "structured-host:adopting",
+    pendingAction: null,
+  });
+  const entryBefore = registry.snapshot().entries[`codex:${id}`];
+  const operationId = `kill_${id}`;
+  await client.command({
+    kind: "kill",
+    operationId,
+    idempotencyKey: operationId,
+    conversationId: conversation.id,
+    sessionKey: key,
+  });
+
+  await bindStructuredDeliveryQueue([], { registry, client });
+
+  expect((await client.operationStatus(operationId))?.receipt.status).toBe("queued");
+  expect(registry.snapshot().entries[`codex:${id}`]).toEqual(entryBefore);
+  expect(await client.effectBatch(["runtime.kill"], 0)).toHaveLength(1);
+});
+
 describe.each(["codex", "claude"] as const)("%s structured spawn round trip", (engine) => {
-  test("spawn, send, question, answer, interrupt, and resume use one pane-less host", async () => {
+  test("spawn, send, question, answer, interrupt, resume, and kill use one pane-less host", async () => {
     const id = crypto.randomUUID();
     const cwd = path.join(sandbox, `${engine}-${id}`);
     fs.mkdirSync(cwd, { recursive: true });
@@ -490,6 +956,7 @@ describe.each(["codex", "claude"] as const)("%s structured spawn round trip", (e
     });
 
     expect(response).toMatchObject({ launched: true, target: null, path: artifactPath, state: "settled" });
+    if (engine === "claude") expect(response).toMatchObject({ effectivePermissionMode: "default" });
     expect(registry.snapshot().receipts[begun.receipt.launchId]?.pane).toBeNull();
     const registryBeforeAttach = registry.snapshot();
     let terminalCommand = "";
@@ -574,6 +1041,60 @@ describe.each(["codex", "claude"] as const)("%s structured spawn round trip", (e
       "deliberately slow fake-host turn",
       "resume after interrupt",
     ]);
+
+    const pendingAfterKillId = `pending_after_kill_${id}`;
+    await enqueueStructuredMessage({
+      path: artifactPath,
+      conversationId: response.conversationId,
+      clientMessageId: pendingAfterKillId,
+      text: "must stay queued after kill",
+      hasImages: false,
+    }, { client: () => client, registry: () => registry, enabled: () => true });
+    expect(host.sent.some((entry) => entry.text === "must stay queued after kill")).toBeFalse();
+
+    const killOperationId = `kill_${id}`;
+    const secondKillOperationId = `kill_again_${id}`;
+    const kill = await dispatchStructuredControl({ path: artifactPath, conversationId: response.conversationId, action: "kill" }, {
+      registry,
+      client,
+      operationId: () => killOperationId,
+      kick: () => {},
+      enabled: () => true,
+    });
+    expect(kill).toMatchObject({ status: 202, body: { ok: true, structured: true, operationId: killOperationId } });
+    const secondKill = await dispatchStructuredControl({ path: artifactPath, conversationId: response.conversationId, action: "kill" }, {
+      registry,
+      client,
+      operationId: () => secondKillOperationId,
+      kick: () => {},
+      enabled: () => true,
+    });
+    expect(secondKill).toMatchObject({ status: 202, body: { ok: true, structured: true, operationId: secondKillOperationId } });
+    await completesWithin(kickStructuredDeliveryQueue(), "structured kill did not complete");
+    await waitFor(() => host.releaseCount === 1);
+
+    expect(hasStructuredDeliveryHost({ engine, sessionId: id })).toBeFalse();
+    expect(registry.snapshot().entries[`${engine}:${id}`]).toMatchObject({
+      status: "dead",
+      host: null,
+      structuredHost: null,
+      claimOwner: null,
+      pendingAction: null,
+    });
+    expect((await client.operationStatus(killOperationId))?.receipt).toMatchObject({
+      kind: "kill",
+      status: "delivered",
+    });
+    expect((await client.operationStatus(secondKillOperationId))?.receipt).toMatchObject({
+      kind: "kill",
+      status: "delivered",
+    });
+    expect(await client.effectBatch(["runtime.kill"], 0)).toEqual([]);
+    expect(journal.snapshot().sessions.find((session) => session.conversationId === response.conversationId)).toMatchObject({
+      host: "dead",
+    });
+    await completesWithin(kickStructuredDeliveryQueue(), "structured delivery queue stayed wedged after kill");
+    expect(host.sent.some((entry) => entry.text === "must stay queued after kill")).toBeFalse();
   });
 });
 

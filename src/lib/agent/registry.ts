@@ -111,6 +111,8 @@ export interface SpawnReceipt {
   clientAttemptId: string | null;
   /** SHA-256 of the public launch shape. Prompt/image contents never persist. */
   requestDigest: string | null;
+  /** Launch transport fixed when the idempotent reservation is created. */
+  transport: "tmux" | "structured" | null;
   /** One-way binding for the caller credential injected into this worker. */
   spawnCapabilityDigest: string | null;
   /** Reserved at receipt birth so path discovery cannot choose the identity. */
@@ -174,6 +176,7 @@ export type DurableMembershipInput = Omit<DurableConversationMembership, "conver
 export interface SpawnRequest {
   engine: AgentEngine;
   cwd: string;
+  transport?: "tmux" | "structured" | null;
   launchProfile?: Partial<LaunchProfile>;
   clientAttemptId?: string | null;
   requestDigest?: string | null;
@@ -1160,6 +1163,7 @@ function normalizeReceipt(value: SpawnReceipt): SpawnReceipt {
     ...value,
     clientAttemptId: typeof value.clientAttemptId === "string" ? value.clientAttemptId : null,
     requestDigest: typeof value.requestDigest === "string" ? value.requestDigest : null,
+    transport: value.transport === "tmux" || value.transport === "structured" ? value.transport : null,
     spawnCapabilityDigest: typeof value.spawnCapabilityDigest === "string" && /^[0-9a-f]{64}$/.test(value.spawnCapabilityDigest)
       ? value.spawnCapabilityDigest
       : null,
@@ -1947,7 +1951,11 @@ export class AgentRegistry {
       if (input.clientAttemptId) {
         const existing = Object.values(file.receipts).find((receipt) => receipt.clientAttemptId === input.clientAttemptId);
         if (existing) {
-          const compatible = existing.requestDigest === (input.requestDigest ?? null) && existing.engine === input.engine && existing.cwd === input.cwd;
+          const compatible = existing.requestDigest === (input.requestDigest ?? null)
+            && existing.engine === input.engine
+            && existing.cwd === input.cwd
+            && existing.transport === (input.transport ?? null)
+            && existing.launchProfile.permissionMode === profile.permissionMode;
           return { kind: compatible ? "replay" : "conflict", receipt: clone(existing) };
         }
       }
@@ -1970,6 +1978,7 @@ export class AgentRegistry {
         launchId: crypto.randomUUID(),
         clientAttemptId: input.clientAttemptId ?? null,
         requestDigest: input.requestDigest ?? null,
+        transport: input.transport ?? null,
         spawnCapabilityDigest: typeof input.spawnCapabilityDigest === "string" && /^[0-9a-f]{64}$/.test(input.spawnCapabilityDigest)
           ? input.spawnCapabilityDigest
           : null,
@@ -2381,6 +2390,44 @@ export class AgentRegistry {
     });
   }
 
+  recoverDeliveredStructuredSpawn(launchId: string): SpawnSettlement {
+    return this.mutate((file) => {
+      const receipt = file.receipts[launchId];
+      if (!receipt) throw new Error("unknown spawn receipt");
+      if (receipt.state === "failed" || receipt.state === "conflicted") {
+        return { kind: "conflict", receipt: clone(receipt), code: "spawn_identity_conflict" };
+      }
+      if (receipt.state !== "path-pending" || !receipt.key || !receipt.artifactPath) {
+        throw new Error("structured spawn recovery identity is incomplete");
+      }
+      const entry = file.entries[sessionKeyId(receipt.key)];
+      const conversation = file.conversations[receipt.conversationId];
+      if (!entry || !conversation || entry.artifactPath !== receipt.artifactPath) {
+        throw new Error("structured spawn recovery identity is unavailable");
+      }
+      if (entry.host || entry.structuredHost?.process || entry.claimOwner
+        || (entry.status !== "dead" && entry.status !== "unhosted")) {
+        throw new Error("structured spawn host loss is unconfirmed");
+      }
+      const replacement = {
+        ...entry,
+        host: null,
+        structuredHost: null,
+        status: "dead" as const,
+        claimOwner: null,
+        pendingAction: null,
+      };
+      const changedHostPaths = activeHostPathsChangedByEntry(file, sessionKeyId(receipt.key), replacement);
+      const readinessBefore = migrationReadinessSignature(file, receipt.key.engine, changedHostPaths);
+      Object.assign(entry, replacement, { updatedAt: now() });
+      receipt.state = "completed";
+      receipt.error = null;
+      receipt.completionMode = receipt.completionMode ?? "route-recovered";
+      advanceMigrationScopeRevision(file, receipt.key.engine, readinessBefore, changedHostPaths);
+      return { kind: "settled", receipt: clone(receipt), entry: clone(entry), conversation: clone(conversation) };
+    });
+  }
+
   settleSpawn(launchId: string, entry: Omit<AgentRegistryEntry, "updatedAt">, completionMode: NonNullable<SpawnReceipt["completionMode"]> = "route-completed"): SpawnSettlement {
     return this.mutate((file) => {
       const paths = new Set([entry.artifactPath]);
@@ -2486,6 +2533,59 @@ export class AgentRegistry {
       entry.updatedAt = now();
       advanceMigrationScopeRevision(file, key.engine, readinessBefore, changedHostPaths);
       return clone(entry);
+    });
+  }
+
+  terminateStructuredHost(key: SessionKey): boolean {
+    return this.mutate((file) => {
+      const keyId = sessionKeyId(key);
+      const entry = file.entries[keyId];
+      if (!entry) return false;
+      const replacement = {
+        ...entry,
+        host: null,
+        structuredHost: null,
+        status: "dead" as const,
+        claimOwner: null,
+        pendingAction: null,
+      };
+      const changedHostPaths = activeHostPathsChangedByEntry(file, keyId, replacement);
+      const readinessBefore = migrationReadinessSignature(file, key.engine, changedHostPaths);
+      Object.assign(entry, replacement, { updatedAt: now() });
+      advanceMigrationScopeRevision(file, key.engine, readinessBefore, changedHostPaths);
+      return true;
+    });
+  }
+
+  terminateInactiveStructuredHost(
+    conversationId: ViewerConversationId,
+    key: SessionKey,
+  ): false | "current" | "predecessor" {
+    return this.mutate((file) => {
+      const conversation = file.conversations[conversationId];
+      const keyId = sessionKeyId(key);
+      const entry = file.entries[keyId];
+      if (!conversation
+        || conversation.engine !== key.engine
+        || !conversation.generations.some((generation) => generation.id === key.sessionId)
+        || !entry
+        || entry.host
+        || entry.structuredHost?.process
+        || entry.claimOwner
+        || (entry.status !== "dead" && entry.status !== "unhosted")) return false;
+      const replacement = {
+        ...entry,
+        host: null,
+        structuredHost: null,
+        status: "dead" as const,
+        claimOwner: null,
+        pendingAction: null,
+      };
+      const changedHostPaths = activeHostPathsChangedByEntry(file, keyId, replacement);
+      const readinessBefore = migrationReadinessSignature(file, key.engine, changedHostPaths);
+      Object.assign(entry, replacement, { updatedAt: now() });
+      advanceMigrationScopeRevision(file, key.engine, readinessBefore, changedHostPaths);
+      return conversation.generations.at(-1)?.id === key.sessionId ? "current" : "predecessor";
     });
   }
 

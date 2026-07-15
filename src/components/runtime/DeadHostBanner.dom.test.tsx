@@ -12,7 +12,7 @@ import type { RuntimeAttention } from "./runtimeModel";
 const t = (key: Parameters<typeof translate>[1], params?: Parameters<typeof translate>[2]) => translate("en", key, params);
 
 function rv(hostKind: HostKind, host: HostAxis, legacy = false): RuntimeSessionView {
-  return { session: { hostKind, host } as RuntimeSessionView["session"], uiState: {} as RuntimeSessionView["uiState"], attentions: [], receipts: [], legacy };
+  return { session: { hostKind, host } as RuntimeSessionView["session"], uiState: {} as RuntimeSessionView["uiState"], attentions: [], receipts: [], legacy, structuredControlsEnabled: true };
 }
 
 /* ------------------------------ isDeadHostSession ------------------------------ */

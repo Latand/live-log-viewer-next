@@ -31,6 +31,7 @@ function rv(hostKind: HostKind, host: HostAxis, legacy = false): RuntimeSessionV
     attentions: [],
     receipts: [],
     legacy,
+    structuredControlsEnabled: true,
   };
 }
 

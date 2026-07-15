@@ -35,6 +35,8 @@ When the implementer transcript is gone or the engine can't run rounds: spawn a 
 2. **Remove the outgoing container** — promotion leaves it running (bug, #137): keep only the container named in `~/.config/agent-log-viewer/state/viewer-release.json`.
 3. Topology: runtime-host container owns the **8898 proxy** → promoted `llv-deploy-*` on its candidate port. The legacy `agent-log-viewer.service` must stay stopped (its gnome autostart is disabled with `Hidden=true`); if it grabs 8898 the runtime-host crash-loops on bind.
 4. Remind the user to hard-reload the tab (stale client after deploy causes phantom UI behavior).
+5. **Runtime-host protocol changes** (anything under `src/runtime-host/` or new socket methods): rebuild its image too — `docker compose build runtime-host && LLV_VIEWER_DEPLOYMENTS=1 docker compose up -d runtime-host` (WITHOUT `LLV_VIEWER_DEPLOYMENTS=1` the recreate silently drops the 8898 proxy). Stale runtime-host symptom: viewer logs `runtime request method is unsupported`.
+6. Since the #194 cutover (2026-07-14) spawns are pane-less (`LLV_SPAWN_TRANSPORT=structured`, `target:null`); tmux is attach-only legacy. Module-level singletons in route-reachable code MUST live on `globalThis` (Next standalone bundles instrumentation separately — in-process tests can't catch it). `docker logs` survives restarts — use `--since` to check whether a restart cleared an error. First Claude structured spawn after a deploy may time out (cold broker) — retry once.
 Batch merges into one deploy; deploy immediately for user-blocking fixes.
 
 ## Resource guard (every checkpoint — the machine has OOM'd)

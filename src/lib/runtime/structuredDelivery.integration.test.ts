@@ -11,7 +11,7 @@ import { RegisteredSuccessorProvider } from "@/lib/accounts/migration/provider";
 import { RuntimeJournal } from "@/runtime-host/journal";
 
 import type { RuntimeHostClient } from "./client";
-import type { EngineHost, HostState, QueueEntry } from "./engineHost";
+import type { EngineHost, HostState, QueueEntry, RuntimeEvent } from "./engineHost";
 import { FakeEngineHost, createFakeDeliveryLedger } from "./fixtures/fakeEngineHost";
 import { bindStructuredDeliveryQueue, publishStructuredDeliveryHost } from "./structuredDeliveryController";
 import { StructuredDeliveryQueue, type StructuredDeliveryQueuePort } from "./structuredDeliveryQueue";
@@ -35,12 +35,86 @@ function observableFakeHost(host: FakeEngineHost): FakeEngineHost & { onStateCha
   return Object.assign(host, { onStateChange: () => () => {} });
 }
 
+function burstyObservableHost(): {
+  host: EngineHost & { onStateChange(listener: (state: HostState) => void): () => void };
+  emit(event: RuntimeEvent): void;
+  attachedAfter(): number | null;
+} {
+  let state: HostState = {
+    status: "active",
+    sessionKey: "burst-session",
+    endpoint: "fake:burst-host",
+    pid: 1,
+    processStartIdentity: "fake:1",
+    eventCursor: 0,
+    protocolVersion: "fake-v1",
+    activeTurnRef: "turn:burst",
+    pendingAttention: [],
+    activeFlags: [],
+    account: null,
+  };
+  const listeners = new Set<(state: HostState) => void>();
+  const queued: RuntimeEvent[] = [];
+  const waiters: Array<(result: IteratorResult<RuntimeEvent>) => void> = [];
+  let attachedAfter: number | null = null;
+  let closed = false;
+  const iterator: AsyncIterator<RuntimeEvent> = {
+    next: async () => {
+      const event = queued.shift();
+      if (event) return { value: event, done: false };
+      if (closed) return { value: undefined, done: true };
+      return await new Promise<IteratorResult<RuntimeEvent>>((resolve) => waiters.push(resolve));
+    },
+    return: async () => {
+      closed = true;
+      for (const resolve of waiters.splice(0)) resolve({ value: undefined, done: true });
+      return { value: undefined, done: true };
+    },
+  };
+  const host = {
+    attach: (afterSeq: number) => {
+      attachedAfter = afterSeq;
+      return { [Symbol.asyncIterator]: () => iterator };
+    },
+    send: async (entry: QueueEntry) => ({ outcome: "turn-started" as const, turnId: `turn:${entry.id}` }),
+    interrupt: async () => {},
+    answer: async () => {},
+    health: async () => ({ ...state }),
+    release: async () => {},
+    onStateChange(listener: (next: HostState) => void) {
+      listeners.add(listener);
+      listener({ ...state });
+      return () => listeners.delete(listener);
+    },
+  } satisfies EngineHost & { onStateChange(listener: (state: HostState) => void): () => void };
+  return {
+    host,
+    emit(event) {
+      state = { ...state, eventCursor: event.seq };
+      for (const listener of listeners) listener({ ...state });
+      const resolve = waiters.shift();
+      if (resolve) resolve({ value: event, done: false });
+      else queued.push(event);
+    },
+    attachedAfter: () => attachedAfter,
+  };
+}
+
+async function waitForCondition(assertion: () => boolean): Promise<void> {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    if (assertion()) return;
+    await Bun.sleep(5);
+  }
+  throw new Error("structured delivery condition did not settle");
+}
+
 function runtimeJournalClient(journal: RuntimeJournal): RuntimeHostClient {
   return {
     snapshot: async () => journal.snapshot(),
     append: async (event) => journal.append(event),
     command: async (command) => journal.executeOperation(command),
     operationStatus: async (operationId) => journal.operationResult(operationId),
+    producerCursor: async (producerKind, eventKeyPrefix) => journal.producerCursor(producerKind, eventKeyPrefix),
     effectBatch: async (kinds, afterEventSeq) => journal.effectBatch(100, kinds, afterEventSeq),
     transitionOperation: async (operationId, status, details) => journal.transitionOperation(operationId, status, details),
   } as RuntimeHostClient;
@@ -58,6 +132,329 @@ function cleanupOnlyProvider(): RegisteredSuccessorProvider {
     now: () => "2026-07-13T12:01:00.000Z",
   });
 }
+
+test("an engine event burst preserves every projection without polling the delivery queue per event", async () => {
+  const directory = path.join(sandbox, "controller-event-burst");
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const artifactPath = path.join(directory, "burst-session.jsonl");
+  const profile = emptyLaunchProfile({ cwd: directory });
+  registry.reconcileConversations([{
+    engine: "codex",
+    path: artifactPath,
+    accountId: "burst-account",
+    launchProfile: profile,
+    turn: { state: "busy", source: "assistant", terminalAt: null },
+    observedAt: "2026-07-14T12:00:00.000Z",
+  }]);
+  registry.upsert({
+    key: { engine: "codex", sessionId: "burst-session" },
+    artifactPath,
+    cwd: directory,
+    accountId: "burst-account",
+    launchProfile: profile,
+    status: "live",
+    host: null,
+    structuredHost: {
+      kind: "codex-app-server",
+      endpoint: "fake:burst-host",
+      process: null,
+      eventCursor: 0,
+      protocolVersion: "fake-v1",
+      writerClaimEpoch: 0,
+      activeTurnRef: "turn:burst",
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  let effectBatchCalls = 0;
+  let deltaProjections = 0;
+  let sessionStatusProjections = 0;
+  const client = {
+    append: async (event: { kind: string }) => {
+      if (event.kind === "delta") deltaProjections += 1;
+      if (event.kind === "session-status") sessionStatusProjections += 1;
+    },
+    producerCursor: async () => 17,
+    effectBatch: async () => { effectBatchCalls += 1; return []; },
+    transitionOperation: async () => { throw new Error("unexpected operation transition"); },
+  } as unknown as RuntimeHostClient;
+  const burst = burstyObservableHost();
+
+  try {
+    await bindStructuredDeliveryQueue([{
+      key: { engine: "codex", sessionId: "burst-session" },
+      host: burst.host,
+    }], { registry, client });
+    await Bun.sleep(50);
+    expect(burst.attachedAfter()).toBe(17);
+    const baselineEffects = effectBatchCalls;
+    const baselineStatuses = sessionStatusProjections;
+
+    for (let index = 18; index <= 57; index += 1) {
+      burst.emit({ kind: "delta", turnId: "turn:burst", text: `delta ${index}`, seq: index });
+    }
+
+    await waitForCondition(() => deltaProjections === 40);
+    await Bun.sleep(50);
+    expect(deltaProjections).toBe(40);
+    expect(sessionStatusProjections - baselineStatuses).toBeLessThanOrEqual(1);
+    expect(effectBatchCalls - baselineEffects).toBeLessThanOrEqual(1);
+  } finally {
+    await bindStructuredDeliveryQueue([], { registry, client: null });
+  }
+});
+
+test("a failed route kick retries queued controls and messages without a host-state notification", async () => {
+  const directory = path.join(sandbox, "controller-route-kick-retry");
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const sessionId = "c012d11e-1854-4157-aede-75eae7bde18c";
+  const artifactPath = path.join(directory, `${sessionId}.jsonl`);
+  const profile = emptyLaunchProfile({ cwd: directory });
+  registry.reconcileConversations([{
+    engine: "codex",
+    path: artifactPath,
+    accountId: "route-kick-account",
+    launchProfile: profile,
+    turn: { state: "busy", source: "assistant", terminalAt: null },
+    observedAt: "2026-07-14T12:00:00.000Z",
+  }]);
+  const conversationId = Object.keys(registry.snapshot().conversations)[0]!;
+  registry.upsert({
+    key: { engine: "codex", sessionId },
+    artifactPath,
+    cwd: directory,
+    accountId: "route-kick-account",
+    launchProfile: profile,
+    status: "live",
+    host: null,
+    structuredHost: {
+      kind: "codex-app-server",
+      endpoint: "fake:route-kick-host",
+      process: null,
+      eventCursor: 0,
+      protocolVersion: "fake-v1",
+      writerClaimEpoch: 0,
+      activeTurnRef: "turn:route-kick",
+      pendingAttention: ["attention-route-kick"],
+      activeFlags: [],
+    },
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  const journal = new RuntimeJournal(path.join(directory, "events.sqlite"), { structuredHosts: true });
+  const baseClient = runtimeJournalClient(journal);
+  const transitions: Array<[string, string]> = [];
+  let effectBatchCalls = 0;
+  let failNextEffectBatch = false;
+  const client = {
+    ...baseClient,
+    effectBatch: async (...args: Parameters<RuntimeHostClient["effectBatch"]>) => {
+      effectBatchCalls += 1;
+      if (failNextEffectBatch) {
+        failNextEffectBatch = false;
+        throw new Error("transient route-kick effect-batch failure");
+      }
+      return await baseClient.effectBatch(...args);
+    },
+    transitionOperation: async (...args: Parameters<RuntimeHostClient["transitionOperation"]>) => {
+      transitions.push([args[0], args[1]]);
+      return await baseClient.transitionOperation(...args);
+    },
+  } satisfies RuntimeHostClient;
+  const hostCalls: string[] = [];
+  let hostState: HostState = {
+    status: "active",
+    sessionKey: "route-kick-session",
+    endpoint: "fake:route-kick-host",
+    pid: 1,
+    processStartIdentity: "fake:1",
+    eventCursor: 0,
+    protocolVersion: "fake-v1",
+    activeTurnRef: "turn:route-kick",
+    pendingAttention: ["attention-route-kick"],
+    activeFlags: [],
+    account: null,
+  };
+  const host = {
+    async *attach(): AsyncIterableIterator<RuntimeEvent> {},
+    send: async (entry: QueueEntry) => {
+      hostCalls.push(`send:${entry.id}`);
+      return { outcome: "turn-started" as const, turnId: `turn:${entry.id}` };
+    },
+    answer: async (attentionId: string) => { hostCalls.push(`answer:${attentionId}`); },
+    interrupt: async (turnId: string) => {
+      hostCalls.push(`interrupt:${turnId}`);
+      hostState = { ...hostState, status: "idle", activeTurnRef: null };
+    },
+    health: async () => ({ ...hostState }),
+    release: async () => {},
+    onStateChange(listener: (state: HostState) => void) {
+      listener({ ...hostState });
+      return () => {};
+    },
+  } satisfies EngineHost & { onStateChange(listener: (state: HostState) => void): () => void };
+
+  try {
+    await bindStructuredDeliveryQueue([{
+      key: { engine: "codex", sessionId },
+      host,
+    }], { registry, client });
+    journal.append({
+      scope: { type: "session", id: conversationId },
+      kind: "attention",
+      payload: {
+        id: "attention-route-kick",
+        conversationId,
+        kind: "question",
+        state: "open",
+        unowned: false,
+        createdAt: "2026-07-14T12:00:00.000Z",
+        request: { question: { prompt: "Proceed?" } },
+        turnId: "turn:route-kick",
+      },
+    });
+    journal.executeOperation({
+      kind: "send",
+      operationId: "operation-route-send",
+      idempotencyKey: "route-send",
+      conversationId,
+      text: "continue after controls",
+      policy: "queue",
+    });
+    journal.executeOperation({
+      kind: "answer",
+      operationId: "operation-route-answer",
+      idempotencyKey: "route-answer",
+      conversationId,
+      attentionId: "attention-route-kick",
+      resolution: { answer: "yes" },
+    });
+    journal.executeOperation({
+      kind: "interrupt",
+      operationId: "operation-route-interrupt",
+      idempotencyKey: "route-interrupt",
+      conversationId,
+      turnId: "turn:route-kick",
+    });
+    const baselineEffectBatchCalls = effectBatchCalls;
+    failNextEffectBatch = true;
+
+    await kickStructuredDeliveryQueue();
+    expect(effectBatchCalls - baselineEffectBatchCalls).toBe(1);
+    await waitForCondition(() => journal.operationResult("operation-route-send")?.receipt.status === "delivered");
+
+    expect(journal.operationResult("operation-route-answer")?.receipt.status).toBe("answered");
+    expect(journal.operationResult("operation-route-interrupt")?.receipt.status).toBe("interrupted");
+    expect(journal.operationResult("operation-route-send")?.receipt.status).toBe("delivered");
+    expect(effectBatchCalls - baselineEffectBatchCalls).toBe(2);
+    expect(hostCalls).toEqual([
+      "answer:attention-route-kick",
+      "interrupt:turn:route-kick",
+      "send:operation-route-send",
+    ]);
+    expect(transitions).toEqual([
+      ["operation-route-answer", "delivering"],
+      ["operation-route-answer", "answered"],
+      ["operation-route-interrupt", "delivering"],
+      ["operation-route-interrupt", "interrupted"],
+      ["operation-route-send", "delivering"],
+      ["operation-route-send", "delivered"],
+    ]);
+  } finally {
+    await bindStructuredDeliveryQueue([], { registry, client: null });
+    journal.close();
+  }
+});
+
+test("a failed kill projection retries through the coalesced drain and terminalizes", async () => {
+  const directory = path.join(sandbox, "controller-kill-projection-retry");
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const sessionId = "b6b55ea7-4a5e-4fe5-894d-2f332a7247c7";
+  const artifactPath = path.join(directory, `${sessionId}.jsonl`);
+  const profile = emptyLaunchProfile({ cwd: directory });
+  registry.reconcileConversations([{
+    engine: "codex",
+    path: artifactPath,
+    accountId: "kill-retry-account",
+    launchProfile: profile,
+    turn: { state: "idle", source: "assistant", terminalAt: null },
+    observedAt: "2026-07-14T12:00:00.000Z",
+  }]);
+  const conversationId = Object.keys(registry.snapshot().conversations)[0]!;
+  const key = { engine: "codex" as const, sessionId };
+  registry.upsert({
+    key,
+    artifactPath,
+    cwd: directory,
+    accountId: "kill-retry-account",
+    launchProfile: profile,
+    status: "idle",
+    host: null,
+    structuredHost: {
+      kind: "codex-app-server",
+      endpoint: "fake:kill-retry-host",
+      process: null,
+      eventCursor: 0,
+      protocolVersion: "fake-v1",
+      writerClaimEpoch: 0,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  const journal = new RuntimeJournal(path.join(directory, "events.sqlite"), { structuredHosts: true });
+  const baseClient = runtimeJournalClient(journal);
+  let failNextDeadProjection = false;
+  let deadProjectionAttempts = 0;
+  const client = {
+    ...baseClient,
+    append: async (...args: Parameters<RuntimeHostClient["append"]>) => {
+      const [event] = args;
+      if (event.kind === "session-status" && event.payload.host === "dead") {
+        deadProjectionAttempts += 1;
+        if (failNextDeadProjection) {
+          failNextDeadProjection = false;
+          throw new Error("transient dead projection failure");
+        }
+      }
+      return await baseClient.append(...args);
+    },
+  } satisfies RuntimeHostClient;
+  const host = observableFakeHost(new FakeEngineHost());
+
+  try {
+    await bindStructuredDeliveryQueue([{ key, host }], { registry, client });
+    const operationId = "operation-kill-projection-retry";
+    journal.executeOperation({
+      kind: "kill",
+      operationId,
+      idempotencyKey: operationId,
+      conversationId,
+      sessionKey: key,
+    });
+    failNextDeadProjection = true;
+
+    await kickStructuredDeliveryQueue();
+    expect(journal.operationResult(operationId)?.receipt.status).toBe("queued");
+    await waitForCondition(() => journal.operationResult(operationId)?.receipt.status === "delivered");
+
+    expect(deadProjectionAttempts).toBe(2);
+    expect(journal.snapshot().sessions.find((session) => session.conversationId === conversationId)).toMatchObject({
+      sessionKey: key,
+      host: "dead",
+    });
+  } finally {
+    await bindStructuredDeliveryQueue([], { registry, client: null });
+    journal.close();
+  }
+});
 
 test("a delivering entry resumes after restart through the host ledger without a second engine write", async () => {
   const filename = path.join(sandbox, "events.sqlite");

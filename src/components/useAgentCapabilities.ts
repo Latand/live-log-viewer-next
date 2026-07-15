@@ -13,9 +13,11 @@ import {
   type StripCapabilities,
 } from "./agentCapabilities";
 
-/** A currently-alive structured (pane-less) host view, else null. */
+/** A currently-alive structured (pane-less) host view, else null. Honors the
+    LLV_STRUCTURED_HOSTS rollback gate: with the flag off every conversation —
+    including one with structured registry state — must take the legacy path. */
 function structuredSessionOf(rv: RuntimeSessionView | null): RuntimeSessionView | null {
-  if (!rv || rv.legacy) return null;
+  if (!rv?.structuredControlsEnabled || rv.legacy) return null;
   return rv.session.hostKind === "codex-app-server" || rv.session.hostKind === "claude-broker" ? rv : null;
 }
 

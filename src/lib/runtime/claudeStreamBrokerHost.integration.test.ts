@@ -11,10 +11,12 @@ import { pathIsInside, prepareClaudeIntegrationTestHome } from "./integrationTes
 const claudeBinary = process.env.LLV_CLAUDE_BINARY ?? "claude";
 const resumeHome = prepareClaudeIntegrationTestHome(claudeBinary);
 const permissionHome = prepareClaudeIntegrationTestHome(claudeBinary);
+const bypassHome = prepareClaudeIntegrationTestHome(claudeBinary);
 
 afterAll(() => {
   resumeHome?.cleanup();
   permissionHome?.cleanup();
+  bypassHome?.cleanup();
 });
 
 async function waitFor(
@@ -151,5 +153,46 @@ test.skipIf(!permissionHome)("real Claude permission requests reach EngineHost.a
   } finally {
     await host?.release();
     permissionHome.cleanup();
+  }
+}, 180_000);
+
+test.skipIf(!bypassHome)("real Claude bypass executes Bash without pending attention", async () => {
+  if (!bypassHome) throw new Error("isolated Claude subscription home is unavailable");
+  const directory = bypassHome.directory;
+  const eventStore = new FileRuntimeEventStore(path.join(directory, "events"));
+  const deliveryLedger = new FileClaudeDeliveryLedger(path.join(directory, "deliveries"));
+  let host: ClaudeStreamBrokerHost | null = null;
+  try {
+    host = await ClaudeStreamBrokerHost.start({
+      cwd: directory,
+      binary: claudeBinary,
+      claudeConfigDir: bypassHome.claudeConfigDir,
+      claudeProjectsDir: bypassHome.claudeProjectsDir,
+      env: bypassHome.env,
+      model: "haiku",
+      permissionMode: "bypassPermissions",
+      tools: ["Bash"],
+      systemPrompt: "Follow the user request exactly and use the requested tool.",
+      eventStore,
+      deliveryLedger,
+    });
+    const events = host.attach(0)[Symbol.asyncIterator]();
+    const probePath = path.join(directory, "bypass-probe");
+    const sent = await host.send({
+      id: `issue-243-bypass-${crypto.randomUUID()}`,
+      text: `Use the Bash tool once to run \`touch ${probePath}\`. Reply after the tool completes.`,
+    });
+    expect(sent.outcome).toBe("turn-started");
+    let sawAttention = false;
+    await waitFor(events, (event) => {
+      if (event.kind === "attention") sawAttention = true;
+      return event.kind === "turn-ended";
+    });
+    expect(fs.existsSync(probePath)).toBeTrue();
+    expect(sawAttention).toBeFalse();
+    expect((await host.health()).pendingAttention).toEqual([]);
+  } finally {
+    await host?.release();
+    bypassHome.cleanup();
   }
 }, 180_000);

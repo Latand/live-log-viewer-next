@@ -46,17 +46,18 @@ interface SendEffect {
 interface ControlEffect {
   operationId: string;
   conversationId: string;
-  kind: "answer" | "interrupt";
+  kind: "answer" | "interrupt" | "kill";
   attentionId?: string;
   resolution?: unknown;
   turnId?: string | null;
+  sessionKey?: { engine: "codex" | "claude"; sessionId: string };
   eventSeq: number;
 }
 
 type DeliveryEffect = SendEffect | ControlEffect;
 
 function isControlEffect(effect: DeliveryEffect): effect is ControlEffect {
-  return effect.kind === "answer" || effect.kind === "interrupt";
+  return effect.kind === "answer" || effect.kind === "interrupt" || effect.kind === "kill";
 }
 
 function sendEffect(effect: StructuredDeliveryEffect): SendEffect | null {
@@ -84,7 +85,7 @@ function sendEffect(effect: StructuredDeliveryEffect): SendEffect | null {
 }
 
 function controlEffect(effect: StructuredDeliveryEffect): ControlEffect | null {
-  if (effect.kind !== "runtime.answer" && effect.kind !== "runtime.interrupt") return null;
+  if (effect.kind !== "runtime.answer" && effect.kind !== "runtime.interrupt" && effect.kind !== "runtime.kill") return null;
   const operationId = typeof effect.payload.operationId === "string" ? effect.payload.operationId : "";
   const conversationId = typeof effect.payload.conversationId === "string" ? effect.payload.conversationId : "";
   if (!operationId || !conversationId) return null;
@@ -92,6 +93,19 @@ function controlEffect(effect: StructuredDeliveryEffect): ControlEffect | null {
     const attentionId = typeof effect.payload.attentionId === "string" ? effect.payload.attentionId : "";
     if (!attentionId || !("resolution" in effect.payload)) return null;
     return { operationId, conversationId, kind: "answer", attentionId, resolution: effect.payload.resolution, eventSeq: effect.eventSeq };
+  }
+  if (effect.kind === "runtime.kill") {
+    const key = effect.payload.sessionKey;
+    if (!key || typeof key !== "object" || Array.isArray(key)) return null;
+    const candidate = key as Record<string, unknown>;
+    if ((candidate.engine !== "codex" && candidate.engine !== "claude") || typeof candidate.sessionId !== "string") return null;
+    return {
+      operationId,
+      conversationId,
+      kind: "kill",
+      sessionKey: { engine: candidate.engine, sessionId: candidate.sessionId },
+      eventSeq: effect.eventSeq,
+    };
   }
   const turnId = typeof effect.payload.turnId === "string" || effect.payload.turnId === null
     ? effect.payload.turnId
@@ -115,6 +129,10 @@ export class StructuredDeliveryQueue {
   constructor(
     private readonly port: StructuredDeliveryQueuePort,
     private readonly resolveHost: StructuredHostResolver,
+    private readonly terminateHost: (
+      conversationId: string,
+      sessionKey: { engine: "codex" | "claude"; sessionId: string },
+    ) => Promise<boolean> = async () => false,
   ) {}
 
   drain(): Promise<void> {
@@ -140,7 +158,7 @@ export class StructuredDeliveryQueue {
     let afterEventSeq = 0;
     while (true) {
       const rawEffects = await this.port.effects(
-        ["runtime.send", "runtime.steer", "runtime.answer", "runtime.interrupt"],
+        ["runtime.send", "runtime.steer", "runtime.answer", "runtime.interrupt", "runtime.kill"],
         afterEventSeq,
       );
       if (rawEffects.length === 0) return;
@@ -237,6 +255,35 @@ export class StructuredDeliveryQueue {
 
   private async drainControl(effect: ControlEffect): Promise<boolean> {
     const host = this.resolveHost(effect.conversationId);
+    if (effect.kind === "kill") {
+      if (!effect.sessionKey) {
+        await this.port.transition(effect.operationId, "failed", { reason: "structured host termination target is unavailable" });
+        return false;
+      }
+      if (!host) {
+        try {
+          if (!await this.terminateHost(effect.conversationId, effect.sessionKey)) return true;
+          await this.port.transition(effect.operationId, "delivering");
+          await this.port.transition(effect.operationId, "delivered");
+          return false;
+        } catch (error) {
+          await this.port.transition(effect.operationId, "queued", { reason: failureReason(error) });
+          throw error;
+        }
+      }
+      await this.port.transition(effect.operationId, "delivering");
+      try {
+        if (!await this.terminateHost(effect.conversationId, effect.sessionKey)) {
+          await this.port.transition(effect.operationId, "failed", { reason: "structured host termination is unavailable" });
+          return false;
+        }
+        await this.port.transition(effect.operationId, "delivered");
+        return false;
+      } catch (error) {
+        await this.port.transition(effect.operationId, "queued", { reason: failureReason(error) });
+        throw error;
+      }
+    }
     if (!host) return true;
     const health = await host.health();
     if (health.status === "dead" || health.status === "unhosted") {

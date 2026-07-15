@@ -41,10 +41,10 @@ bindDomGlobals();
    artifact path (the subagent's `parent`); the root session itself reads as a
    live legacy tmux pane. */
 function legacyRoot(): RuntimeSessionView {
-  return { session: { hostKind: "tmux-legacy", host: "hosted", artifactPath: "/root.jsonl" } as RuntimeSessionView["session"], uiState: {} as RuntimeSessionView["uiState"], attentions: [], receipts: [], legacy: true };
+  return { session: { hostKind: "tmux-legacy", host: "hosted", artifactPath: "/root.jsonl" } as RuntimeSessionView["session"], uiState: {} as RuntimeSessionView["uiState"], attentions: [], receipts: [], legacy: true, structuredControlsEnabled: true };
 }
 function structuredRoot(): RuntimeSessionView {
-  return { session: { hostKind: "claude-broker", host: "hosted", artifactPath: "/root.jsonl" } as RuntimeSessionView["session"], uiState: {} as RuntimeSessionView["uiState"], attentions: [], receipts: [], legacy: false };
+  return { session: { hostKind: "claude-broker", host: "hosted", artifactPath: "/root.jsonl" } as RuntimeSessionView["session"], uiState: {} as RuntimeSessionView["uiState"], attentions: [], receipts: [], legacy: false, structuredControlsEnabled: true };
 }
 
 const actualRuntimeHooks = await import("@/hooks/useRuntime");

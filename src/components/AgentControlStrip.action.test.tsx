@@ -32,7 +32,7 @@ Object.assign(globalThis, {
 function rootView(kind: HostKind, host: HostAxis): RuntimeSessionView {
   return {
     session: { hostKind: kind, host, artifactPath: "/root.jsonl", conversationId: "conv-root" } as RuntimeSessionView["session"],
-    uiState: {} as RuntimeSessionView["uiState"], attentions: [], receipts: [], legacy: kind === "tmux-legacy",
+    uiState: {} as RuntimeSessionView["uiState"], attentions: [], receipts: [], legacy: kind === "tmux-legacy", structuredControlsEnabled: true,
   };
 }
 let rootKind: HostKind = "claude-broker";

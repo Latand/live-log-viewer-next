@@ -21,6 +21,7 @@ export interface RuntimeHostClient {
   command(command: RuntimeOperationCommand): Promise<RuntimeOperationResult>;
   operationStatus(operationId: string): Promise<RuntimeOperationResult | null>;
   retryOperation(operationId: string): Promise<RuntimeOperationResult>;
+  producerCursor(producerKind: string, eventKeyPrefix: string): Promise<number>;
   effectBatch(kinds?: readonly string[], afterEventSeq?: number): Promise<RuntimePendingEffect[]>;
   transitionOperation(
     operationId: string,
@@ -46,6 +47,7 @@ export class UnixRuntimeHostClient implements RuntimeHostClient {
   command(command: RuntimeOperationCommand): Promise<RuntimeOperationResult> { return this.call("command", { command }) as Promise<RuntimeOperationResult>; }
   operationStatus(operationId: string): Promise<RuntimeOperationResult | null> { return this.call("operation-status", { operationId }) as Promise<RuntimeOperationResult | null>; }
   retryOperation(operationId: string): Promise<RuntimeOperationResult> { return this.call("operation-retry", { operationId }) as Promise<RuntimeOperationResult>; }
+  producerCursor(producerKind: string, eventKeyPrefix: string): Promise<number> { return this.call("producer-cursor", { producerKind, eventKeyPrefix }) as Promise<number>; }
   effectBatch(kinds?: readonly string[], afterEventSeq = 0): Promise<RuntimePendingEffect[]> {
     const params = {
       ...(kinds ? { kinds: [...kinds] } : {}),

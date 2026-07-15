@@ -26,6 +26,7 @@ const INERT: RuntimeBusState = {
   resyncedAt: null,
   lastEventAt: null,
   enabled: false,
+  structuredHostsEnabled: false,
 };
 
 /**
@@ -52,6 +53,7 @@ export function useRuntimeBusState(): RuntimeBusState {
 
 export interface RuntimeView {
   enabled: boolean;
+  structuredHostsEnabled: boolean;
   connection: ConnectionState;
   resyncedAt: number | null;
   store: RuntimeStore;
@@ -59,7 +61,13 @@ export interface RuntimeView {
 
 export function useRuntime(): RuntimeView {
   const state = useRuntimeBusState();
-  return { enabled: state.enabled, connection: state.connection, resyncedAt: state.resyncedAt, store: state.store };
+  return {
+    enabled: state.enabled,
+    structuredHostsEnabled: state.structuredHostsEnabled,
+    connection: state.connection,
+    resyncedAt: state.resyncedAt,
+    store: state.store,
+  };
 }
 
 export interface RuntimeSessionView {
@@ -68,27 +76,33 @@ export interface RuntimeSessionView {
   attentions: RuntimeAttention[];
   receipts: RuntimeReceipt[];
   legacy: boolean;
+  structuredControlsEnabled: boolean;
 }
 
 /** Build the derived view for a resolved session record. */
-function sessionViewFor(store: RuntimeStore, session: RuntimeSession): RuntimeSessionView {
+function sessionViewFor(
+  store: RuntimeStore,
+  session: RuntimeSession,
+  structuredControlsEnabled: boolean,
+): RuntimeSessionView {
   return {
     session,
     uiState: deriveSessionState(session, hasBlockingAttention(store, session)),
     attentions: openAttentions(store, session),
     receipts: session.recentReceipts,
     legacy: session.hostKind === "tmux-legacy",
+    structuredControlsEnabled,
   };
 }
 
 /** Derived view for one hosted session, or null when the bus doesn't carry it. */
 export function useRuntimeSession(conversationId: string | null): RuntimeSessionView | null {
-  const { store } = useRuntime();
+  const { store, structuredHostsEnabled } = useRuntime();
   return useMemo(() => {
     if (!conversationId) return null;
     const session = store.sessions[conversationId];
-    return session ? sessionViewFor(store, session) : null;
-  }, [store, conversationId]);
+    return session ? sessionViewFor(store, session, structuredHostsEnabled) : null;
+  }, [store, structuredHostsEnabled, conversationId]);
 }
 
 /**
@@ -99,12 +113,12 @@ export function useRuntimeSession(conversationId: string | null): RuntimeSession
  * finding 2). Keyed on the root transcript path — a subagent's `parent`.
  */
 export function useRuntimeSessionByArtifact(artifactPath: string | null): RuntimeSessionView | null {
-  const { store } = useRuntime();
+  const { store, structuredHostsEnabled } = useRuntime();
   return useMemo(() => {
     if (!artifactPath) return null;
     const session = Object.values(store.sessions).find((s) => s.artifactPath === artifactPath);
-    return session ? sessionViewFor(store, session) : null;
-  }, [store, artifactPath]);
+    return session ? sessionViewFor(store, session, structuredHostsEnabled) : null;
+  }, [store, structuredHostsEnabled, artifactPath]);
 }
 
 /**

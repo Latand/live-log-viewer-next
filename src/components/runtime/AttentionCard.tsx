@@ -53,7 +53,7 @@ export function AttentionCard({ attention, onApprove, onDeny, onAnswerQuestion, 
     const node = cardRef.current;
     if (!node) return;
     const focusables = () => Array.from(node.querySelectorAll<HTMLElement>('button,[href],input,select,textarea,[tabindex]:not([tabindex="-1"])')).filter((el) => !el.hasAttribute("disabled"));
-    focusables()[0]?.focus();
+    focusables()[0]?.focus({ preventScroll: true });
     const onKey = (event: KeyboardEvent) => {
       if (event.key === "Escape" && onDeny) {
         event.preventDefault();
@@ -72,10 +72,10 @@ export function AttentionCard({ attention, onApprove, onDeny, onAnswerQuestion, 
       const last = items[items.length - 1]!;
       if (event.shiftKey && document.activeElement === first) {
         event.preventDefault();
-        last.focus();
+        last.focus({ preventScroll: true });
       } else if (!event.shiftKey && document.activeElement === last) {
         event.preventDefault();
-        first.focus();
+        first.focus({ preventScroll: true });
       }
     };
     node.addEventListener("keydown", onKey);

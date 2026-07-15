@@ -10,7 +10,7 @@ import type { TFunction } from "@/lib/i18n";
 import { Badge, type BadgeTone } from "@/components/ui/Badge";
 import { useComposer } from "@/hooks/useComposer";
 import { useIsMobile } from "@/hooks/useIsMobile";
-import { sendRuntimeMessage, useRuntimeReceiptsForArtifact } from "@/hooks/useRuntime";
+import { sendRuntimeMessage, useRuntimeReceiptsForArtifact, type RuntimeSessionView } from "@/hooks/useRuntime";
 import { useAgentCapabilities } from "./useAgentCapabilities";
 import { useTmuxTarget } from "@/hooks/useTmuxTarget";
 import { conversationIdentity } from "@/lib/accounts/identity";
@@ -232,6 +232,13 @@ function receiptMeta(t: TFunction, state: DeliveryReceiptState | undefined): { l
     check does not see a bare `Date.now()` in a render-scope closure. */
 function nowMs(): number {
   return Date.now();
+}
+
+export function structuredComposerSession(runtimeSession: RuntimeSessionView | null): RuntimeSessionView | null {
+  if (!runtimeSession?.structuredControlsEnabled || runtimeSession.legacy) return null;
+  return runtimeSession.session.hostKind === "codex-app-server" || runtimeSession.session.hostKind === "claude-broker"
+    ? runtimeSession
+    : null;
 }
 
 /**

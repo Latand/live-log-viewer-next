@@ -39,7 +39,7 @@ Object.assign(globalThis, {
 });
 
 function rv(hostKind: HostKind, host: HostAxis, artifactPath?: string): RuntimeSessionView {
-  return { session: { hostKind, host, artifactPath } as RuntimeSessionView["session"], uiState: {} as RuntimeSessionView["uiState"], attentions: [], receipts: [], legacy: hostKind === "tmux-legacy" };
+  return { session: { hostKind, host, artifactPath } as RuntimeSessionView["session"], uiState: {} as RuntimeSessionView["uiState"], attentions: [], receipts: [], legacy: hostKind === "tmux-legacy", structuredControlsEnabled: true };
 }
 
 function file(over: Partial<FileEntry> = {}): FileEntry {

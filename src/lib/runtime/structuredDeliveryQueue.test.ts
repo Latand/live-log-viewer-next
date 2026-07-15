@@ -98,7 +98,7 @@ test("unrelated outbox effects cannot starve structured message delivery", async
 
   await queue.drain();
 
-  expect(requestedKinds).toEqual([["runtime.send", "runtime.steer", "runtime.answer", "runtime.interrupt"]]);
+  expect(requestedKinds).toEqual([["runtime.send", "runtime.steer", "runtime.answer", "runtime.interrupt", "runtime.kill"]]);
   expect(sent).toEqual(["op-after-spawns"]);
 });
 
@@ -593,4 +593,160 @@ test("a control operation behind a full message page still reaches the active ho
   await queue.drain();
 
   expect(interrupts).toEqual(["turn-held"]);
+});
+
+test("a structured kill terminates its host and completes its receipt", async () => {
+  const transitions: Array<[string, string]> = [];
+  const terminated: string[] = [];
+  const target = host(async () => ({ outcome: "turn-started", turnId: "unexpected" }));
+  const queue = new StructuredDeliveryQueue({
+    effects: async () => [{
+      id: "kill-one",
+      kind: "runtime.kill",
+      eventSeq: 1,
+      payload: {
+        operationId: "kill-one",
+        conversationId: "conversation-one",
+        sessionKey: { engine: "codex", sessionId: "thread-one" },
+      },
+    }],
+    transition: async (operationId, status) => { transitions.push([operationId, status]); },
+  }, () => target, async (conversationId, sessionKey) => {
+    terminated.push(`${conversationId}:${sessionKey.engine}:${sessionKey.sessionId}`);
+    return true;
+  });
+
+  await queue.drain();
+
+  expect(terminated).toEqual(["conversation-one:codex:thread-one"]);
+  expect(transitions).toEqual([
+    ["kill-one", "delivering"],
+    ["kill-one", "delivered"],
+  ]);
+});
+
+test("concurrent kills finish after the first kill removes the host", async () => {
+  const pending = new Set(["kill-one", "kill-two"]);
+  const transitions: Array<[string, string]> = [];
+  let hosted = true;
+  let terminations = 0;
+  const target = host(async () => ({ outcome: "turn-started", turnId: "unexpected" }));
+  const queue = new StructuredDeliveryQueue({
+    effects: async () => [...pending].map((operationId, index) => ({
+      id: operationId,
+      kind: "runtime.kill",
+      eventSeq: index + 1,
+      payload: {
+        operationId,
+        conversationId: "conversation-one",
+        sessionKey: { engine: "codex", sessionId: "thread-one" },
+      },
+    })),
+    transition: async (operationId, status) => {
+      transitions.push([operationId, status]);
+      if (status === "delivered" || status === "failed") pending.delete(operationId);
+    },
+  }, () => hosted ? target : null, async () => {
+    terminations += 1;
+    hosted = false;
+    return true;
+  });
+
+  await queue.drain();
+
+  expect(terminations).toBe(2);
+  expect(transitions).toEqual([
+    ["kill-one", "delivering"],
+    ["kill-one", "delivered"],
+    ["kill-two", "delivering"],
+    ["kill-two", "delivered"],
+  ]);
+  expect(pending.size).toBe(0);
+});
+
+test("an absent-host kill retries after terminal projection fails", async () => {
+  let pending = true;
+  let attempts = 0;
+  const transitions: Array<[string, string, string | null | undefined]> = [];
+  const queue = new StructuredDeliveryQueue({
+    effects: async () => pending ? [{
+      id: "kill-retry",
+      kind: "runtime.kill",
+      eventSeq: 1,
+      payload: {
+        operationId: "kill-retry",
+        conversationId: "conversation-one",
+        sessionKey: { engine: "codex", sessionId: "thread-one" },
+      },
+    }] : [],
+    transition: async (operationId, status, details) => {
+      transitions.push([operationId, status, details?.reason]);
+      if (status === "delivered" || status === "failed") pending = false;
+    },
+  }, () => null, async () => {
+    attempts += 1;
+    if (attempts === 1) throw new Error("dead projection unavailable");
+    return true;
+  });
+
+  await expect(queue.drain()).rejects.toThrow("dead projection unavailable");
+
+  expect(pending).toBeTrue();
+  expect(transitions).toEqual([
+    ["kill-retry", "queued", "dead projection unavailable"],
+  ]);
+
+  await queue.drain();
+
+  expect(pending).toBeFalse();
+  expect(transitions).toEqual([
+    ["kill-retry", "queued", "dead projection unavailable"],
+    ["kill-retry", "delivering", undefined],
+    ["kill-retry", "delivered", undefined],
+  ]);
+});
+
+test("an active-host kill retries after terminal projection fails", async () => {
+  let pending = true;
+  let attempts = 0;
+  const transitions: Array<[string, string, string | null | undefined]> = [];
+  const target = host(async () => ({ outcome: "turn-started", turnId: "unexpected" }));
+  const queue = new StructuredDeliveryQueue({
+    effects: async () => pending ? [{
+      id: "kill-active-retry",
+      kind: "runtime.kill",
+      eventSeq: 1,
+      payload: {
+        operationId: "kill-active-retry",
+        conversationId: "conversation-one",
+        sessionKey: { engine: "codex", sessionId: "thread-one" },
+      },
+    }] : [],
+    transition: async (operationId, status, details) => {
+      transitions.push([operationId, status, details?.reason]);
+      if (status === "delivered" || status === "failed") pending = false;
+    },
+  }, () => target, async () => {
+    attempts += 1;
+    if (attempts === 1) throw new Error("dead projection unavailable");
+    return true;
+  });
+
+  await expect(queue.drain()).rejects.toThrow("dead projection unavailable");
+
+  expect(pending).toBeTrue();
+  expect(transitions).toEqual([
+    ["kill-active-retry", "delivering", undefined],
+    ["kill-active-retry", "queued", "dead projection unavailable"],
+  ]);
+
+  await queue.drain();
+
+  expect(pending).toBeFalse();
+  expect(transitions).toEqual([
+    ["kill-active-retry", "delivering", undefined],
+    ["kill-active-retry", "queued", "dead projection unavailable"],
+    ["kill-active-retry", "delivering", undefined],
+    ["kill-active-retry", "delivered", undefined],
+  ]);
 });

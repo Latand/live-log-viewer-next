@@ -22,7 +22,7 @@ function file(overrides: Partial<FileEntry> = {}): FileEntry {
 }
 
 function rv(hostKind: HostKind, host: HostAxis): RuntimeSessionView {
-  return { session: { hostKind, host } as RuntimeSessionView["session"], uiState: {} as RuntimeSessionView["uiState"], attentions: [], receipts: [], legacy: false };
+  return { session: { hostKind, host } as RuntimeSessionView["session"], uiState: {} as RuntimeSessionView["uiState"], attentions: [], receipts: [], legacy: false, structuredControlsEnabled: true };
 }
 
 function render(f: FileEntry, view: RuntimeSessionView | null, extra: Partial<Parameters<typeof AgentControlStripView>[0]> = {}) {
