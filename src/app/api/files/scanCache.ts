@@ -55,7 +55,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function isFileScanSnapshot(value: unknown): value is FileScanSnapshot {
-  if (!isRecord(value) || !Array.isArray(value.files) || !Array.isArray(value.projectCatalog)) return false;
+  if (!isRecord(value) || value.complete !== true || !Array.isArray(value.files) || !Array.isArray(value.projectCatalog)) return false;
   const filesValid = value.files.every((candidate) => {
     if (!isRecord(candidate)) return false;
     return typeof candidate.path === "string"
@@ -157,7 +157,7 @@ function normalizeFileScanCacheSlot(value: unknown): FileScanCacheSlot {
   const legacy = isRecord(value) ? value : {};
   const slot: FileScanCacheSlot = {
     schemaVersion: FILE_SCAN_CACHE_SCHEMA_VERSION,
-    snapshot: legacy.snapshot as FileScanSnapshot | undefined,
+    snapshot: isFileScanSnapshot(legacy.snapshot) ? legacy.snapshot : undefined,
     snapshotGeneration: 0,
     requestedGeneration: 0,
     refreshedAt: typeof legacy.refreshedAt === "number" && Number.isFinite(legacy.refreshedAt) ? legacy.refreshedAt : 0,
@@ -165,6 +165,7 @@ function normalizeFileScanCacheSlot(value: unknown): FileScanCacheSlot {
   const pending = refreshPromise(legacy.refresh);
   if (pending) {
     const promise = pending.then((snapshot) => {
+      if (!snapshot.complete) throw new Error("filesystem scan incomplete");
       slot.snapshot = snapshot;
       slot.refreshedAt = Date.now();
       return snapshot;
@@ -176,7 +177,7 @@ function normalizeFileScanCacheSlot(value: unknown): FileScanCacheSlot {
 
 function beginFileScanRefresh(slot: FileScanCacheSlot, generation: number): FileScanRefresh {
   const promise = listFilesWithProjectCatalog(undefined, { persist: false, persistIndex: true }).then((snapshot) => {
-    if (snapshot.complete === false) throw new Error("filesystem scan incomplete");
+    if (!snapshot.complete) throw new Error("filesystem scan incomplete");
     writePersistedFileScanSnapshot(snapshot);
     slot.snapshot = snapshot;
     slot.snapshotGeneration = Math.max(slot.snapshotGeneration, generation);
@@ -189,12 +190,13 @@ function beginFileScanRefresh(slot: FileScanCacheSlot, generation: number): File
 function beginPinnedFileScanRefresh(slot: FileScanCacheSlot, generation: number, pinnedPath: string): FileScanRefresh {
   const promise = (async () => {
     const pinnedSnapshot = await listFilesWithProjectCatalog(undefined, { persist: false, persistIndex: true, pin: pinnedPath });
-    if (pinnedSnapshot.complete === false) throw new Error("filesystem scan incomplete");
+    if (!pinnedSnapshot.complete) throw new Error("filesystem scan incomplete");
     const pinOverlayPaths = pinnedSnapshot.pinOverlayPaths ?? [];
     const overlayPathSet = new Set(pinOverlayPaths);
     const globalSnapshot = {
       files: pinnedSnapshot.files.filter((file) => !overlayPathSet.has(file.path)),
       projectCatalog: pinnedSnapshot.projectCatalog,
+      complete: true,
     };
     slot.pinnedSnapshots ??= new Map();
     slot.pinnedSnapshots.delete(pinnedPath);

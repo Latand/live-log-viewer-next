@@ -83,6 +83,13 @@ export interface FileScanOptions {
   pins?: readonly string[];
 }
 
+export interface FileCatalogScan {
+  files: FileEntry[];
+  projectCatalog: ProjectCatalogEntry[];
+  pinOverlayPaths?: string[];
+  complete: boolean;
+}
+
 /** Transcript paths a pin value requires in the feed. A conversation id is
     canonicalized through the registry's durable aliases and maps to its
     latest generation. A plain path also brings the registry-current
@@ -169,7 +176,7 @@ export async function listFiles(options: FileScanOptions = {}): Promise<FileEntr
   return (await listFilesInternal(false, undefined, options)).files;
 }
 
-export async function listFilesWithProjectCatalog(selectedProject?: string, options: FileScanOptions = {}): Promise<{ files: FileEntry[]; projectCatalog: ProjectCatalogEntry[]; pinOverlayPaths?: string[]; complete?: boolean }> {
+export async function listFilesWithProjectCatalog(selectedProject?: string, options: FileScanOptions = {}): Promise<FileCatalogScan> {
   return listFilesInternal(true, selectedProject, options);
 }
 
@@ -186,14 +193,14 @@ async function listFilesInternal(
   includeProjectCatalog: boolean,
   selectedProject?: string,
   options: FileScanOptions = {},
-): Promise<{ files: FileEntry[]; projectCatalog: ProjectCatalogEntry[]; pinOverlayPaths?: string[]; complete?: boolean }> {
+): Promise<FileCatalogScan> {
   const persist = options.persist === true;
   const demote = archivedTranscriptPaths();
   const requestedPins = options.pins ? [...options.pins, ...(options.pin ? [options.pin] : [])] : options.pin;
   const pin = pinnedPathsFor(requestedPins);
   const scan = includeProjectCatalog
     ? await discoverFilesWithProjectCatalog(undefined, selectedProject, { persist, persistIndex: options.persistIndex, demote, pin })
-    : { files: await discoverFiles(undefined, demote, pin), projectCatalog: [] };
+    : { files: await discoverFiles(undefined, demote, pin), projectCatalog: [], complete: true };
   const entries = scan.files;
   // The /proc fd scan is only needed to attribute background-task outputs to a
   // live pid. When the shortlist has no such entries, skip the scan entirely;
@@ -238,7 +245,12 @@ async function listFilesInternal(
   });
   await linkEntries(entries, { persist });
   const pinOverlayPaths = "pinOverlayPaths" in scan ? scan.pinOverlayPaths : undefined;
-  return { files: entries, projectCatalog: scan.projectCatalog, ...(pinOverlayPaths?.length ? { pinOverlayPaths } : {}) };
+  return {
+    files: entries,
+    projectCatalog: scan.projectCatalog,
+    ...(pinOverlayPaths?.length ? { pinOverlayPaths } : {}),
+    complete: scan.complete,
+  };
 }
 
 /** Durable controllers run outside request handlers. Flow ordering remains

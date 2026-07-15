@@ -81,7 +81,7 @@ mock.module("@/lib/scanner", () => ({
     await scanGates.shift();
     const pinOverlayPaths = scanPinOverlayResults.shift();
     const complete = scanCompleteResults.shift();
-    return { files, projectCatalog: [], ...(pinOverlayPaths ? { pinOverlayPaths } : {}), ...(complete === false ? { complete } : {}) };
+    return { files, projectCatalog: [], ...(pinOverlayPaths ? { pinOverlayPaths } : {}), complete: complete ?? true };
   },
 }));
 let pipelinesStore: () => unknown[] = () => [];
@@ -147,6 +147,7 @@ test("a restart serves the persisted completed snapshot while revalidating", asy
   const persistedSnapshot = {
     files: [file("/sessions/persisted.jsonl")],
     projectCatalog: [],
+    complete: true,
   };
   fs.writeFileSync(path.join(stateDir, "files-scan-snapshot.json"), JSON.stringify({
     version: 1,
@@ -171,6 +172,7 @@ test("a client automatically converges from a persisted restart snapshot to its 
     snapshot: {
       files: [file("/sessions/persisted-client.jsonl")],
       projectCatalog: [],
+      complete: true,
     },
   }));
   resetFilesRouteCacheForTests();
@@ -202,7 +204,7 @@ test("a restart hydrates a persisted 7700-row snapshot within two seconds", asyn
   const files = Array.from({ length: 7_700 }, (_, index) => file(`/sessions/persisted-${index}.jsonl`));
   fs.writeFileSync(path.join(stateDir, "files-scan-snapshot.json"), JSON.stringify({
     version: 1,
-    snapshot: { files, projectCatalog: [] },
+    snapshot: { files, projectCatalog: [], complete: true },
   }));
   resetFilesRouteCacheForTests();
 
@@ -234,6 +236,7 @@ test("snapshot publication failures preserve the canonical file, clean temps, st
     snapshot: {
       files: [file("/sessions/canonical.jsonl")],
       projectCatalog: [],
+      complete: true,
     },
   });
   fs.writeFileSync(snapshotPath, canonical);
@@ -564,6 +567,7 @@ test("a persisted legacy cache slot serves stale data during fresh hydration", a
   const legacySnapshot = {
     files: [file("/sessions/sentinel-stale.jsonl")],
     projectCatalog: [],
+    complete: true,
   };
   const cacheStore = globalThis as typeof globalThis & {
     __llvFilesRouteScans?: Map<string, unknown>;

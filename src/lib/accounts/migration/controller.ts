@@ -217,7 +217,8 @@ export class AccountMigrationController {
   }
 
   private async run(): Promise<void> {
-    const { files } = await this.ports.scan();
+    const { files, complete } = await this.ports.scan();
+    if (!complete) return;
     await yieldToRuntime();
     const inventorySnapshot = await this.ports.reconcileInventory(this.registry, files);
     await yieldToRuntime();

@@ -155,7 +155,7 @@ test("a complete initial controller cycle stays inside the event-loop budget", a
       {
         scan: async () => {
           await cooperativePhase("scan");
-          return { files, projectCatalog: [] };
+          return { files, projectCatalog: [], complete: true };
         },
         reconcileFlowOwnership: async () => cooperativePhase("flows"),
         reconcileWorkflowOwnership: async () => cooperativePhase("workflows"),

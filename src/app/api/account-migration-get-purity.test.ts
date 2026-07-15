@@ -12,7 +12,7 @@ const { buildFilesResponse } = await import("@/app/api/files/response");
 const registry = new AgentRegistry(path.join(root, "registry.json"));
 registry.beginSpawn("codex", "/repo");
 const getFiles = (request: Request) => buildFilesResponse(request, {
-  listFilesWithProjectCatalog: async () => ({ files: [], projectCatalog: [] }),
+  listFilesWithProjectCatalog: async () => ({ files: [], projectCatalog: [], complete: true }),
 });
 
 function stateBytes(): Record<string, string> {

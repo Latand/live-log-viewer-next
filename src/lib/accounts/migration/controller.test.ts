@@ -184,6 +184,46 @@ test("controller preserves one trailing cycle when the running cycle fails", asy
   expect(cycles).toBe(2);
 });
 
+test("controller reconciliation waits for a complete scanner inventory", async () => {
+  const reconciliations: string[] = [];
+  let complete = false;
+  const registry = new AgentRegistry(path.join(stateDir, "incomplete-inventory-registry.json"));
+  const controller = new AccountMigrationController(
+    registry,
+    { tick: async () => {} } as never,
+    null,
+    {
+      scan: async () => ({ files: [], projectCatalog: [], complete }),
+      reconcileInventory: async () => { reconciliations.push("inventory"); return registry.snapshot(); },
+      reconcileFlowOwnership: async () => { reconciliations.push("flows"); },
+      reconcileWorkflowOwnership: async () => { reconciliations.push("workflows"); },
+      reconcileHandoffOwnership: async () => { reconciliations.push("handoffs"); },
+      reconcileFiles: async () => { reconciliations.push("files"); },
+      reconcileRuntime: async () => { reconciliations.push("runtime"); },
+      reconcileTaskStore: async () => { reconciliations.push("tasks"); },
+      syncRouting: async () => { reconciliations.push("routing"); },
+      reconcileMigrationCycle: async () => { reconciliations.push("migration"); },
+    },
+  );
+
+  await controller.tick();
+  expect(reconciliations).toEqual([]);
+
+  complete = true;
+  await controller.tick();
+  expect(reconciliations).toEqual([
+    "inventory",
+    "flows",
+    "workflows",
+    "handoffs",
+    "files",
+    "runtime",
+    "tasks",
+    "routing",
+    "migration",
+  ]);
+});
+
 test("quota controller cycles preserve routing and transcript ownership", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "llv-account-controller-auto-"));
   try {
