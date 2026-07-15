@@ -72,7 +72,7 @@ describe("readStableTailRecords", () => {
     const tailBytes = 128 * 1024;
     fs.writeFileSync(transcript, `${JSON.stringify({ padding: "before-window" })}\n${line}${" ".repeat(tailBytes - line.length)}`);
 
-    expect(await readStableTailRecords(transcript)).toEqual({ integrity: "complete", records: [record] });
+    expect(await readStableTailRecords(transcript)).toEqual({ integrity: "complete", prefixTruncated: true, records: [record] });
 
     fs.rmSync(directory, { recursive: true, force: true });
   });
@@ -85,7 +85,7 @@ describe("readStableTailRecords", () => {
     const tailBytes = 128 * 1024;
     fs.writeFileSync(transcript, `${JSON.stringify({ padding: "before-window" })}\n${line}${" ".repeat(tailBytes - line.length)}`);
 
-    expect(await readStableTailRecords(transcript)).toEqual({ integrity: "complete", records: [record] });
+    expect(await readStableTailRecords(transcript)).toEqual({ integrity: "complete", prefixTruncated: true, records: [record] });
 
     fs.rmSync(directory, { recursive: true, force: true });
   });
@@ -109,7 +109,7 @@ describe("readStableTailRecords", () => {
     const record = { type: "result", subtype: "success" };
     fs.writeFileSync(transcript, JSON.stringify(record));
 
-    expect(await readStableTailRecords(transcript)).toEqual({ integrity: "complete", records: [record] });
+    expect(await readStableTailRecords(transcript)).toEqual({ integrity: "complete", prefixTruncated: false, records: [record] });
 
     fs.rmSync(directory, { recursive: true, force: true });
   });
@@ -123,6 +123,7 @@ describe("readStableTailRecords", () => {
 
     expect(await readStableTailRecords(transcript, finalLine.length + 12)).toEqual({
       integrity: "complete",
+      prefixTruncated: true,
       records: [finalRecord],
     });
 
@@ -140,6 +141,7 @@ describe("readStableTailRecords", () => {
 
     expect(await readStableTailRecords(transcript, content.length - seek)).toEqual({
       integrity: "complete",
+      prefixTruncated: true,
       records: [finalRecord],
     });
 
@@ -172,7 +174,7 @@ describe("readStableTailRecords", () => {
     expect(tailRecords(transcript, terminalText.length)).toEqual([terminal]);
     fs.writeFileSync(transcript, activeText);
 
-    expect(await readStableTailRecords(transcript)).toEqual({ integrity: "complete", records: [active] });
+    expect(await readStableTailRecords(transcript)).toEqual({ integrity: "complete", prefixTruncated: false, records: [active] });
     expect(tailRecords(transcript, activeText.length)).toEqual([terminal]);
 
     fs.rmSync(directory, { recursive: true, force: true });

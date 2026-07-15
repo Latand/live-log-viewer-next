@@ -18,7 +18,7 @@ const tailCache = globalCache<[number, number, Record<string, unknown>[]]>("tail
 const TAIL_CACHE_CAP = 64;
 
 export type StableTailRead =
-  | { integrity: "complete"; records: Record<string, unknown>[] }
+  | { integrity: "complete"; prefixTruncated: boolean; records: Record<string, unknown>[] }
   | { integrity: "uncertain"; records: [] };
 
 function sameFileState(left: fs.BigIntStats, right: fs.BigIntStats): boolean {
@@ -62,7 +62,7 @@ export async function readStableTailRecords(pathname: string, nbytes = 131_072):
       if (buffer[0] === 0x0a) jsonBuffer = buffer.subarray(1);
       else {
         const firstNewline = buffer.indexOf(0x0a);
-        if (firstNewline < 0) return { integrity: "complete", records: [] };
+        if (firstNewline < 0) return { integrity: "complete", prefixTruncated: true, records: [] };
         jsonBuffer = buffer.subarray(firstNewline + 1);
       }
     }
@@ -88,7 +88,7 @@ export async function readStableTailRecords(pathname: string, nbytes = 131_072):
       }
       records.push(parsed as Record<string, unknown>);
     }
-    return { integrity: "complete", records };
+    return { integrity: "complete", prefixTruncated: seek > 0, records };
   } catch {
     return { integrity: "uncertain", records: [] };
   } finally {

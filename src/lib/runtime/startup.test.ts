@@ -5,6 +5,7 @@ import { expect, spyOn, test } from "bun:test";
 
 import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
 import { AgentRegistry } from "@/lib/agent/registry";
+import { turnStateFromRecords } from "@/lib/scanner/activity";
 import { RuntimeJournal } from "@/runtime-host/journal";
 
 import type { RuntimeHostClient } from "./client";
@@ -562,6 +563,56 @@ test("startup adoption reads terminal transcripts before booting production-shap
 });
 
 test.each(["codex", "claude"] as const)(
+  "startup adopts a persisted terminal %s conversation whose transcript starts a new turn before restart",
+  async (engine) => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), `llv-runtime-startup-reopened-${engine}-`));
+    const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+    const sessionId = `${engine === "codex" ? "2" : "3"}1000000-0000-4000-8000-000000000001`;
+    const { conversation } = addStructuredRestartConversation(registry, directory, {
+      engine,
+      sessionId,
+      status: "live",
+      turn: "terminal",
+      activeTurnRef: `fresh-${engine}-turn`,
+      transcriptRecords: engine === "codex"
+        ? [{ timestamp: "2026-07-15T10:01:00.000Z", payload: { type: "task_started" } }]
+        : [{ type: "user", timestamp: "2026-07-15T10:01:00.000Z", message: { role: "user", content: [] } }],
+    });
+
+    expect(await startupAdoptionAttempts(registry)).toEqual([`${engine}:${sessionId}`]);
+    expect(registry.conversation(conversation.id)?.turn.state).toBe("busy");
+
+    fs.rmSync(directory, { recursive: true, force: true });
+  },
+);
+
+test("startup keeps a Codex host eligible when the bounded tail cuts off an unmatched tool call", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-startup-cutoff-tool-"));
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const sessionId = "41000000-0000-4000-8000-000000000001";
+  const transcriptRecords = [
+    { timestamp: "2026-07-15T10:00:00.000Z", payload: { type: "task_started", turn_id: "turn-1" } },
+    {
+      timestamp: "2026-07-15T10:00:01.000Z",
+      payload: { type: "function_call", call_id: "tool-before-cutoff", arguments: "x".repeat(128 * 1024) },
+    },
+    { timestamp: "2026-07-15T10:00:02.000Z", payload: { type: "task_complete", turn_id: "turn-1" } },
+  ];
+  expect(turnStateFromRecords(transcriptRecords, true)).toBe("busy");
+  addStructuredRestartConversation(registry, directory, {
+    sessionId,
+    status: "live",
+    turn: "busy",
+    activeTurnRef: "turn-1",
+    transcriptRecords,
+  });
+
+  expect(await startupAdoptionAttempts(registry)).toEqual([`codex:${sessionId}`]);
+
+  fs.rmSync(directory, { recursive: true, force: true });
+});
+
+test.each(["codex", "claude"] as const)(
   "a clean terminal %s transcript stays retired across repeated startup",
   async (engine) => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), `llv-runtime-startup-repeat-terminal-${engine}-`));
@@ -574,7 +625,12 @@ test.each(["codex", "claude"] as const)(
       turn: "busy",
       activeTurnRef: `stale-${engine}`,
       transcriptRecords: engine === "codex"
-        ? [{ timestamp: "2026-07-15T10:00:00.000Z", payload: { type: "task_complete" } }]
+        ? [
+            { timestamp: "2026-07-15T10:00:00.000Z", payload: { type: "task_started", turn_id: "turn-1" } },
+            { timestamp: "2026-07-15T10:00:01.000Z", payload: { type: "function_call", call_id: "tool-1" } },
+            { timestamp: "2026-07-15T10:00:02.000Z", payload: { type: "function_call_output", call_id: "tool-1" } },
+            { timestamp: "2026-07-15T10:00:03.000Z", payload: { type: "task_complete", turn_id: "turn-1" } },
+          ]
         : [claudeTerminalRecord()],
     });
 
@@ -638,7 +694,12 @@ test.each(["codex", "claude"] as const)(
       turn: "busy",
       activeTurnRef: `stale-${engine}`,
       transcriptRecords: engine === "codex"
-        ? [{ timestamp: "2026-07-15T10:00:00.000Z", payload: { type: "task_complete" } }]
+        ? [
+            { timestamp: "2026-07-15T10:00:00.000Z", payload: { type: "task_started", turn_id: "turn-1" } },
+            { timestamp: "2026-07-15T10:00:01.000Z", payload: { type: "function_call", call_id: "tool-1" } },
+            { timestamp: "2026-07-15T10:00:02.000Z", payload: { type: "function_call_output", call_id: "tool-1" } },
+            { timestamp: "2026-07-15T10:00:03.000Z", payload: { type: "task_complete", turn_id: "turn-1" } },
+          ]
         : [claudeTerminalRecord()],
       alignFirstRecordToTailBoundary: true,
     });

@@ -41,18 +41,32 @@ const TRANSCRIPT_REFRESH_CONCURRENCY = 16;
 function persistedTurnState(
   records: Record<string, unknown>[],
   engine: "codex" | "claude",
+  prefixTruncated: boolean,
 ) {
-  return engine === "claude"
-    ? turnStateFromRecords(records, false)
-    : turnStateFromRecords(records, true, true);
+  if (engine === "claude") return turnStateFromRecords(records, false);
+  if (!prefixTruncated) return turnStateFromRecords(records, true, true);
+
+  const turnStartIndex = records.findLastIndex((record) => {
+    const payload = record.payload;
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) return false;
+    const type = (payload as Record<string, unknown>).type;
+    return type === "task_started" || type === "turn_started" || type === "user_message";
+  });
+  if (turnStartIndex < 0) {
+    const turn = turnStateFromRecords(records, true, true);
+    return turn.state === "terminal"
+      ? { state: "unknown" as const, source: "empty" as const, terminalAt: null }
+      : turn;
+  }
+  return turnStateFromRecords(records.slice(turnStartIndex), true, true);
 }
 
-async function refreshTerminalTranscriptState(registry: AgentRegistry): Promise<void> {
+async function refreshStructuredTranscriptState(registry: AgentRegistry): Promise<void> {
   const snapshot = registry.snapshot();
   const observedAt = new Date().toISOString();
   const candidates = Object.values(snapshot.conversations).flatMap((conversation) => {
     const generation = conversation.generations.at(-1);
-    if (!generation || conversation.turn.state === "terminal") return [];
+    if (!generation) return [];
     const entry = snapshot.entries[sessionKeyId({ engine: conversation.engine, sessionId: generation.id })];
     return entry?.structuredHost ? [{ conversation, generation }] : [];
   });
@@ -67,8 +81,8 @@ async function refreshTerminalTranscriptState(registry: AgentRegistry): Promise<
         const { conversation, generation } = candidate;
         const tail = await readStableTailRecords(generation.path);
         if (tail.integrity !== "complete") continue;
-        const turn = persistedTurnState(tail.records, conversation.engine);
-        if (turn.state !== "terminal") continue;
+        const turn = persistedTurnState(tail.records, conversation.engine, tail.prefixTruncated);
+        if (turn.state !== "busy" && turn.state !== "terminal") continue;
         observations.push({
           engine: conversation.engine,
           path: generation.path,
@@ -183,7 +197,7 @@ export async function adoptStructuredHostsAtStartup(
   dependencies: StructuredStartupDependencies = {},
 ): Promise<AdoptedStructuredHost[]> {
   const registry = dependencies.registry ?? agentRegistry();
-  await refreshTerminalTranscriptState(registry);
+  await refreshStructuredTranscriptState(registry);
   const client = dependencies.client === undefined ? runtimeHostClient() : dependencies.client;
   const signals = await structuredStartupSignals(registry, client);
   const shouldAdopt = structuredStartupAdoptionFilter(registry, signals);
