@@ -1318,7 +1318,6 @@ export const en = {
   "tasks.spawnTitle": "Spawn a fresh agent with this task as the brief",
   "tasks.spawnGo": "Launch",
   "tasks.statusTitle": "Status: {label} — click cycles (inbox → assigned → blocked → done)",
-  "tasks.statusPrefix": "status",
   "tasks.status.inbox": "inbox",
   "tasks.status.assigned": "assigned",
   "tasks.status.blocked": "blocked",

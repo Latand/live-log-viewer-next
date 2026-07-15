@@ -1276,7 +1276,6 @@ export const uk: Record<keyof typeof en, Message> = {
   "tasks.spawnTitle": "Запустити нового агента з цією задачею як брифом",
   "tasks.spawnGo": "Запустити",
   "tasks.statusTitle": "Статус: {label} — клік перемикає (інбокс → призначено → заблоковано → готово)",
-  "tasks.statusPrefix": "статус",
   "tasks.status.inbox": "інбокс",
   "tasks.status.assigned": "призначено",
   "tasks.status.blocked": "заблоковано",

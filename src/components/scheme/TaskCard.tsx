@@ -61,7 +61,7 @@ function AssignmentChip({
   const { t } = useLocale();
   if (!assignment.path) {
     return (
-      <span className="flex h-6 items-center gap-1.5 rounded-[6px] bg-sunken px-1.5 text-[10.5px] font-semibold text-muted">
+      <span className="flex h-6 items-center gap-1.5 rounded-[7px] border border-border bg-card/80 px-2 text-[10.5px] font-semibold text-muted">
         <Loader2 className="h-3 w-3 shrink-0 animate-spin" aria-hidden />
         {t("tasks.spawning")}
       </span>
@@ -83,8 +83,12 @@ function AssignmentChip({
           : undefined;
   return (
     <span
-      className={`flex h-6 w-full min-w-0 items-center gap-1.5 rounded-[6px] px-1.5 ${
-        failed ? "bg-danger-soft text-danger" : dead ? "bg-sunken text-muted opacity-70" : "bg-sunken"
+      className={`flex h-6 w-full min-w-0 items-center gap-1.5 rounded-[7px] border px-2 ${
+        failed
+          ? "border-danger/25 bg-danger-soft text-danger"
+          : dead
+            ? "border-border bg-sunken text-muted opacity-70"
+            : "border-border bg-card/80"
       }`}
       title={wrapTitle}
     >
@@ -121,7 +125,7 @@ function SourceChip({ task, file }: { task: BoardTask; file: FileEntry | null })
   const badge = engineBadgeFor(source.engine);
   return (
     <span
-      className="flex h-6 w-full min-w-0 items-center gap-1.5 rounded-[6px] bg-sunken px-1.5 text-info"
+      className="flex h-6 w-full min-w-0 items-center gap-1.5 rounded-[7px] border border-info/20 bg-info-soft px-2 text-info"
       title={`${t("tasks.sourceTitle")}: ${source.text}`}
     >
       <Link2 className="h-3 w-3 shrink-0" aria-hidden />
@@ -308,12 +312,14 @@ export const TaskCard = memo(function TaskCard({
       onPointerUp={onPointerUp}
     >
       <div
-        className={`flex flex-col overflow-hidden rounded-[8px] border border-border shadow-1 ${
+        className={`flex flex-col overflow-hidden rounded-[10px] border border-border shadow-1 transition-shadow ${
           task.status === "done" ? "opacity-60 saturate-50" : ""
-        } ${editing ? "ring-2 ring-accent/50" : selected ? "ring-2 ring-accent ring-offset-1 ring-offset-canvas" : ""}`}
+        } ${lifted ? "shadow-2" : "group-hover:shadow-2"} ${
+          editing ? "ring-2 ring-accent/50" : selected ? "ring-2 ring-accent ring-offset-1 ring-offset-canvas" : ""
+        }`}
         style={{ backgroundColor: tone.soft }}
       >
-        <div aria-hidden className="h-1 w-full shrink-0" style={{ backgroundColor: tone.color }} />
+        <div aria-hidden className="h-1.5 w-full shrink-0" style={{ backgroundColor: tone.color }} />
         {editing ? (
           <textarea
             ref={editRef}
@@ -333,7 +339,9 @@ export const TaskCard = memo(function TaskCard({
           />
         ) : (
           <div data-task-body className="cursor-text overflow-y-auto px-3 py-2" style={{ maxHeight: TASK_BODY_MAX }}>
-            <div className="whitespace-pre-wrap break-words text-[12.5px] font-bold leading-[17px] text-primary">{title}</div>
+            <div className="whitespace-pre-wrap break-words text-[12.5px] font-semibold leading-[17px] tracking-[-0.006em] text-primary">
+              {title}
+            </div>
             {rest.trim() ? (
               <div className="whitespace-pre-wrap break-words text-[12.5px] leading-[17px] text-secondary">{rest}</div>
             ) : null}
@@ -358,7 +366,7 @@ export const TaskCard = memo(function TaskCard({
       {/* Action row floats under the card on hover/edit so the card's own
           height keeps matching the pure geometry estimate. */}
       <div
-        className={`absolute left-0 top-full flex -translate-y-8 items-center gap-1 ${
+        className={`absolute left-0 top-full flex -translate-y-8 items-center gap-1.5 ${
           lifted ? "" : "pointer-events-none opacity-0 group-hover:pointer-events-auto group-hover:opacity-100"
         } transition-opacity`}
       >
@@ -380,12 +388,13 @@ export const TaskCard = memo(function TaskCard({
         </button>
         <button
           type="button"
-          className="inline-flex h-7 items-center rounded-full border px-2 text-[10.5px] font-bold shadow-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
-          style={{ backgroundColor: "var(--color-card)", color: tone.color, borderColor: tone.color }}
+          className="inline-flex h-7 items-center gap-1.5 rounded-full border px-2.5 text-[10.5px] font-bold shadow-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+          style={{ backgroundColor: tone.soft, color: tone.color, borderColor: tone.color }}
           title={t("tasks.statusTitle", { label: t(`tasks.status.${task.status}`) })}
           onClick={() => void handlers.patch(task.id, { status: nextTaskStatus(task.status) })}
         >
-          {t("tasks.statusPrefix")}: {t(`tasks.status.${task.status}`)}
+          <span aria-hidden className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ backgroundColor: tone.color }} />
+          {t(`tasks.status.${task.status}`)}
         </button>
         <button
           type="button"
