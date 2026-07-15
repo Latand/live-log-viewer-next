@@ -4,6 +4,7 @@ import type { Camera } from "./Minimap";
 import { GAP_X, NODE_W, type SchemeLayout } from "./layout";
 import {
   collectNavTargets,
+  isTaskNavKey,
   LABEL_Z,
   MAX_Z,
   navTargetLabel,
@@ -11,6 +12,9 @@ import {
   type NavTarget,
   nextZoomStep,
   pickDirectional,
+  TASK_NAV_PREFIX,
+  taskNavKey,
+  type TaskNavTarget,
   zoomLadderSteps,
 } from "./spatialNav";
 import { translate, type TFunction } from "@/lib/i18n";
@@ -125,6 +129,57 @@ describe("collectNavTargets", () => {
     expect(targets).toHaveLength(2);
     expect(targets.find((t) => t.key === "deck::x")).toEqual({ key: "deck::x", x: 5, y: 6, w: 7, h: 8 });
   });
+
+  test("appends task cards as nav targets after the layout nodes", () => {
+    const layout = { byPath: new Map([["p1", { x: 1, y: 2, w: 3, h: 4 }]]) } as unknown as Parameters<typeof collectNavTargets>[0];
+    const tasks: TaskNavTarget[] = [{ key: taskNavKey("t1"), x: 10, y: 20, w: 260, h: 90, label: "Fix the parser" }];
+    const targets = collectNavTargets(layout, tasks);
+    expect(targets).toHaveLength(2);
+    /* Only the geometry crosses over — the label is not a NavTarget field. */
+    expect(targets.find((t) => t.key === taskNavKey("t1"))).toEqual({ key: "task::t1", x: 10, y: 20, w: 260, h: 90 });
+  });
+
+  test("defaults to no task targets when the arg is omitted", () => {
+    const layout = { byPath: new Map([["p1", { x: 0, y: 0, w: 1, h: 1 }]]) } as unknown as Parameters<typeof collectNavTargets>[0];
+    expect(collectNavTargets(layout)).toHaveLength(1);
+  });
+});
+
+describe("task nav keys", () => {
+  test("taskNavKey prefixes the id and isTaskNavKey recognizes it", () => {
+    expect(taskNavKey("abc")).toBe(`${TASK_NAV_PREFIX}abc`);
+    expect(isTaskNavKey(taskNavKey("abc"))).toBe(true);
+    expect(isTaskNavKey("/home/u/conv/parent.jsonl")).toBe(false);
+    expect(isTaskNavKey("deck::x")).toBe(false);
+    expect(isTaskNavKey(null)).toBe(false);
+  });
+});
+
+describe("pickDirectional — task cards tier alongside nodes", () => {
+  /* A node and a task card sitting in the same row, one node-width apart, plus a
+     task card directly below the node — arrows must reach the cards by the same
+     spatial tiers that reach nodes, and never wrap. */
+  const node = target("/conv/a.jsonl", 0, 0, NODE_W, H);
+  const rightCard = target(taskNavKey("t1"), NODE_W + GAP_X, 0, 260, 90);
+  const belowCard = target(taskNavKey("t2"), 0, H + 200, 260, 90);
+  const targets = [node, rightCard, belowCard];
+
+  test("Right from a node lands on the task card in its band", () => {
+    expect(pickDirectional(targets, "/conv/a.jsonl", "right")).toBe(taskNavKey("t1"));
+  });
+
+  test("Down from a node lands on the task card below it", () => {
+    expect(pickDirectional(targets, "/conv/a.jsonl", "down")).toBe(taskNavKey("t2"));
+  });
+
+  test("Left from a task card walks back to the node, and stops at the edge", () => {
+    expect(pickDirectional(targets, taskNavKey("t1"), "left")).toBe("/conv/a.jsonl");
+    expect(pickDirectional(targets, taskNavKey("t1"), "up")).toBeNull();
+  });
+
+  test("Right from the rightmost card returns null (no wrap)", () => {
+    expect(pickDirectional(targets, taskNavKey("t1"), "right")).toBeNull();
+  });
 });
 
 describe("nearestToViewportCenter", () => {
@@ -234,5 +289,17 @@ describe("navTargetLabel — screen-reader labels", () => {
   test("draft and deck keys drop their prefix (never a path)", () => {
     expect(navTargetLabel(layout, "draft::abc-123", t)).toBe("abc-123");
     expect(navTargetLabel(layout, "deck::flow-1", t)).toBe("flow-1");
+  });
+
+  test("a task key announces its first-line label from the task map", () => {
+    const taskLabels = new Map([[taskNavKey("t1"), "Refactor the parser"]]);
+    expect(navTargetLabel(layout, taskNavKey("t1"), t, taskLabels)).toBe("Refactor the parser");
+  });
+
+  test("the task label wins over any node/stack resolution for the same key", () => {
+    /* A task label is authoritative — it never falls through to the raw-key
+       branch that would leak a prefix or path. */
+    const taskLabels = new Map([["deck::flow-1", "Ship the deck"]]);
+    expect(navTargetLabel(layout, "deck::flow-1", t, taskLabels)).toBe("Ship the deck");
   });
 });

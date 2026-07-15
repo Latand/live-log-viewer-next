@@ -62,6 +62,27 @@ export interface NavTarget extends SchemeRect {
   key: string;
 }
 
+/** Selection-key prefix for a task-card nav target — shared with the camera's
+    `taskRects` so a card is addressed by the same key wherever it is resolved. */
+export const TASK_NAV_PREFIX = "task::";
+
+/** The nav/selection key for a task id. */
+export function taskNavKey(id: string): string {
+  return TASK_NAV_PREFIX + id;
+}
+
+/** True for a selection key that addresses a task card (not a layout node). */
+export function isTaskNavKey(key: string | null | undefined): boolean {
+  return key != null && key.startsWith(TASK_NAV_PREFIX);
+}
+
+/** A task card as a nav target: its world box plus the screen-reader label
+    (the card's first text line), carried together so `collectNavTargets` and
+    `navTargetLabel` stay pure functions of their inputs. */
+export interface TaskNavTarget extends NavTarget {
+  label: string;
+}
+
 /* Directional-pick tuning (exported so the tests pin the exact behaviour). */
 /** Candidate must sit at least this far along the primary axis to count — a
     tiny forward nudge is the same band, not a step. */
@@ -80,22 +101,29 @@ export const LABEL_Z = 0.45;
    readable floor; the loop also stops at LABEL_Z, this is a hard backstop. */
 const MAX_LADDER_N = 20;
 
-/** Every layout entry the camera can select — nodes, drafts, mini-stacks, decks
-    (exactly the `data-scheme-node` set). Task cards live elsewhere and are not
-    navigation targets. */
-export function collectNavTargets(layout: SchemeLayout): NavTarget[] {
+/** Every entry the camera can select: layout nodes/drafts/mini-stacks/decks
+    (the `data-scheme-node` set), followed by every placed task card. Both are
+    the same kind of spatial target — Arrow keys tier between them by world
+    position through {@link pickDirectional}. `tasks` defaults to none so the
+    node-only callers stay unchanged. */
+export function collectNavTargets(layout: SchemeLayout, tasks: readonly NavTarget[] = []): NavTarget[] {
   const out: NavTarget[] = [];
   for (const [key, rect] of layout.byPath) out.push({ key, x: rect.x, y: rect.y, w: rect.w, h: rect.h });
+  for (const task of tasks) out.push({ key: task.key, x: task.x, y: task.y, w: task.w, h: task.h });
   return out;
 }
 
 /**
  * Screen-reader label for a nav-target key. A real conversation node announces
- * its clean title; virtual layout keys must never leak a filesystem path or a
- * raw `::stack` suffix — a quiet-branch stack reads as "N quiet branches under
- * <parent title>", and drafts/decks drop their `draft::`/`deck::` prefix.
+ * its clean title; a task card announces its first text line (looked up in
+ * `taskLabels`, never a path); virtual layout keys must never leak a filesystem
+ * path or a raw `::stack` suffix — a quiet-branch stack reads as "N quiet
+ * branches under <parent title>", and drafts/decks drop their `draft::`/`deck::`
+ * prefix.
  */
-export function navTargetLabel(layout: SchemeLayout, key: string, t: TFunction): string {
+export function navTargetLabel(layout: SchemeLayout, key: string, t: TFunction, taskLabels?: ReadonlyMap<string, string>): string {
+  const taskLabel = taskLabels?.get(key);
+  if (taskLabel !== undefined) return taskLabel;
   const node = layout.nodes.find((n) => n.file.path === key);
   if (node) return cleanTitle(node.file.title, 80);
   const stack = layout.stacks.find((s) => s.key === key);

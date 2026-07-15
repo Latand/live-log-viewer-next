@@ -17,6 +17,7 @@ import { BranchPane } from "@/components/BranchPane";
 import { flowByImplementer } from "@/components/flows/flowModel";
 import type { BranchGroup } from "@/components/projectModel";
 import { deleteTask, handoffTask, unassignTask, updateTask } from "@/components/tasks/taskApi";
+import { taskTitle } from "@/components/tasks/taskModel";
 import { pushTaskToast } from "@/components/tasks/taskToast";
 import { cleanTitle } from "@/components/utils";
 import { taskDeliveryText } from "@/lib/tasks/helpers";
@@ -46,6 +47,7 @@ import {
   taskWorldBounds,
   type SchemeRect,
 } from "./taskGeometry";
+import { isTaskNavKey, TASK_NAV_PREFIX, taskNavKey, type TaskNavTarget } from "./spatialNav";
 import { resolveTaskPlacements } from "./taskPlacement";
 import { useLasso } from "./useLasso";
 import { useSchemeCamera } from "./useSchemeCamera";
@@ -487,8 +489,19 @@ export function SchemeBoard({
   );
   /* Camera-facing rects: focus glides and map taps resolve task keys. */
   const taskRects = useMemo(
-    () => new Map(placedTasks.map((task) => ["task::" + task.id, taskRect(task)] as const)),
+    () => new Map(placedTasks.map((task) => [taskNavKey(task.id), taskRect(task)] as const)),
     [placedTasks],
+  );
+  /* Task cards as spatial-nav targets: the same world box the camera resolves,
+     plus the first-line title the live region announces. Arrow keys tier
+     between these and the layout nodes (issue #292). */
+  const taskNav = useMemo<TaskNavTarget[]>(
+    () =>
+      placedTasks.map((task) => {
+        const rect = taskRect(task);
+        return { key: taskNavKey(task.id), x: rect.x, y: rect.y, w: rect.w, h: rect.h, label: taskTitle(task.text) || t("tasks.untitled") };
+      }),
+    [placedTasks, t],
   );
   const taskEdges = useMemo(() => buildTaskEdges(placedTasks, buildTaskTargetIndex(layout)), [placedTasks, layout]);
   /* Card rects the edge router steers around, each tagged with its task so an
@@ -646,6 +659,7 @@ export function SchemeBoard({
   const { onArrow, onZoomKey, announcement } = useSpatialNav({
     enabled: navEnabled,
     layout,
+    taskNav,
     cam,
     vp,
     selected,
@@ -925,6 +939,7 @@ export function SchemeBoard({
           project={project}
           interactive={!handLike && !session}
           lite={mapMode}
+          selectedId={isTaskNavKey(selected) ? selected!.slice(TASK_NAV_PREFIX.length) : null}
           camRef={camRef}
           handlers={taskHandlers}
           pending={pendingTask}

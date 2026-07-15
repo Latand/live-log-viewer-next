@@ -50,6 +50,7 @@ export const TasksLayer = memo(function TasksLayer({
   project,
   interactive,
   lite,
+  selectedId,
   camRef,
   handlers,
   pending,
@@ -62,6 +63,8 @@ export const TasksLayer = memo(function TasksLayer({
   interactive: boolean;
   /** Map mode: static tinted mini-cards, taps resolve by geometry. */
   lite: boolean;
+  /** Id of the card holding the spatial-nav selection ring, or null. */
+  selectedId: string | null;
   camRef: React.RefObject<Camera>;
   handlers: TaskCardHandlers;
   /** World point where the «task» tool / double-click / `+ Task` dropped a
@@ -76,7 +79,7 @@ export const TasksLayer = memo(function TasksLayer({
         lite ? (
           <LiteTaskCard key={task.id} task={task} />
         ) : (
-          <TaskCard key={task.id} task={task} files={files} camRef={camRef} handlers={handlers} />
+          <TaskCard key={task.id} task={task} files={files} selected={task.id === selectedId} camRef={camRef} handlers={handlers} />
         ),
       )}
       {pending && !lite ? (

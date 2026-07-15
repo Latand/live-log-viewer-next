@@ -143,11 +143,14 @@ function SourceChip({ task, file }: { task: BoardTask; file: FileEntry | null })
 export const TaskCard = memo(function TaskCard({
   task,
   files,
+  selected,
   camRef,
   handlers,
 }: {
   task: PlacedTask;
   files: FileEntry[];
+  /** Holds the spatial-nav selection ring (Arrow-key focus, issue #292). */
+  selected: boolean;
   camRef: React.RefObject<Camera>;
   handlers: TaskCardHandlers;
 }) {
@@ -307,7 +310,7 @@ export const TaskCard = memo(function TaskCard({
       <div
         className={`flex flex-col overflow-hidden rounded-[8px] border border-border shadow-1 ${
           task.status === "done" ? "opacity-60 saturate-50" : ""
-        } ${editing ? "ring-2 ring-accent/50" : ""}`}
+        } ${editing ? "ring-2 ring-accent/50" : selected ? "ring-2 ring-accent ring-offset-1 ring-offset-canvas" : ""}`}
         style={{ backgroundColor: tone.soft }}
       >
         <div aria-hidden className="h-1 w-full shrink-0" style={{ backgroundColor: tone.color }} />

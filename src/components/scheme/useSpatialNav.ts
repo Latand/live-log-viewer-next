@@ -13,6 +13,7 @@ import {
   nextZoomStep,
   pickDirectional,
   planReflow,
+  type TaskNavTarget,
   zoomLadderSteps,
 } from "./spatialNav";
 import { useLocale } from "@/lib/i18n";
@@ -21,6 +22,9 @@ interface SpatialNavOptions {
   /** Nav is live only on the desktop board with no session/overlay/map mode. */
   enabled: boolean;
   layout: SchemeLayout;
+  /** Placed task cards as nav targets (world box + first-line label), walked by
+      Arrow keys alongside the layout nodes. */
+  taskNav: readonly TaskNavTarget[];
   cam: Camera;
   vp: { w: number; h: number };
   /** The single-selection ring path, owned by SchemeBoard. */
@@ -84,6 +88,7 @@ function scrollConsumes(start: HTMLElement | null, dir: NavDir): boolean {
 export function useSpatialNav({
   enabled,
   layout,
+  taskNav,
   cam,
   vp,
   selected,
@@ -106,6 +111,7 @@ export function useSpatialNav({
      listener and must stay identity-stable across camera frames. */
   const enabledRef = useRef(enabled);
   const layoutRef = useRef(layout);
+  const taskNavRef = useRef(taskNav);
   const camRef = useRef(cam);
   const vpRef = useRef(vp);
   const selectedRef = useRef(selected);
@@ -117,6 +123,7 @@ export function useSpatialNav({
   useEffect(() => {
     enabledRef.current = enabled;
     layoutRef.current = layout;
+    taskNavRef.current = taskNav;
     camRef.current = cam;
     vpRef.current = vp;
     selectedRef.current = selected;
@@ -127,13 +134,25 @@ export function useSpatialNav({
     tRef.current = t;
   });
 
-  const labelFor = useCallback((key: string): string => navTargetLabel(layoutRef.current, key, tRef.current), []);
+  /* Rect for any nav key — a layout node from `byPath`, or a task card from the
+     task-nav set — so the follow lifecycle resolves both kinds identically. */
+  const rectFor = useCallback((key: string): SchemeRect | null => {
+    const layoutRect = layoutRef.current.byPath.get(key);
+    if (layoutRect) return layoutRect;
+    const task = taskNavRef.current.find((t) => t.key === key);
+    return task ? { x: task.x, y: task.y, w: task.w, h: task.h } : null;
+  }, []);
+
+  const labelFor = useCallback((key: string): string => {
+    const labels = new Map(taskNavRef.current.map((t) => [t.key, t.label] as const));
+    return navTargetLabel(layoutRef.current, key, tRef.current, labels);
+  }, []);
 
   /* Land on a target: anchor it, centre it (zoom unchanged), seed the reflow
      baseline, ring it, and announce it. */
   const land = useCallback(
     (key: string) => {
-      const rect = layoutRef.current.byPath.get(key);
+      const rect = rectFor(key);
       followRef.current = true;
       if (rect) {
         prevRectRef.current = { key, x: rect.x, y: rect.y, w: rect.w, h: rect.h };
@@ -142,7 +161,7 @@ export function useSpatialNav({
       setSelectedRef.current(key);
       setAnnouncement(labelFor(key));
     },
-    [labelFor],
+    [labelFor, rectFor],
   );
 
   const onArrow = useCallback((event: KeyboardEvent): boolean => {
@@ -157,7 +176,7 @@ export function useSpatialNav({
     }
     if (scrollConsumes(target ?? active, dir)) return false;
 
-    const targets = collectNavTargets(layoutRef.current);
+    const targets = collectNavTargets(layoutRef.current, taskNavRef.current);
     if (!targets.length) return false;
     const sel = selectedRef.current;
     const hasSel = followRef.current && sel != null && targets.some((t) => t.key === sel);
@@ -179,7 +198,7 @@ export function useSpatialNav({
     if (!enabledRef.current || !followRef.current) return false;
     const sel = selectedRef.current;
     if (sel == null) return false;
-    const rect = layoutRef.current.byPath.get(sel);
+    const rect = rectFor(sel);
     if (!rect) return false;
     const steps = zoomLadderSteps(rect, vpRef.current);
     const next = nextZoomStep(steps, camRef.current.z, dir);
@@ -188,7 +207,7 @@ export function useSpatialNav({
     glideFrameRef.current(rect, next);
     prevRectRef.current = { key: sel, x: rect.x, y: rect.y, w: rect.w, h: rect.h };
     return true;
-  }, []);
+  }, [rectFor]);
 
   /* Reflow follow: when the layout changes under a followed anchor, translate
      the camera by the anchor's world delta so it holds its screen position;
@@ -200,7 +219,7 @@ export function useSpatialNav({
       prevRectRef.current = null;
       return;
     }
-    const rect = layout.byPath.get(sel) ?? null;
+    const rect = rectFor(sel);
     const prev = prevRectRef.current;
     const plan = planReflow(prev && prev.key === sel ? prev : null, rect);
     if (plan.kind === "drop") {
@@ -211,7 +230,7 @@ export function useSpatialNav({
     }
     if (rect) prevRectRef.current = { key: sel, x: rect.x, y: rect.y, w: rect.w, h: rect.h };
     if (plan.kind === "translate") glideByRef.current(plan.dx, plan.dy);
-  }, [layout]);
+  }, [layout, rectFor]);
 
   /* Any new anchor arms follow so it stays framed through reflow — an Arrow
      land, a pane click, or a focus jump after a send (the original issue's
@@ -226,10 +245,10 @@ export function useSpatialNav({
       return;
     }
     if (!enabledRef.current) return;
-    const rect = layoutRef.current.byPath.get(selected) ?? null;
+    const rect = rectFor(selected);
     followRef.current = true;
     prevRectRef.current = rect ? { key: selected, x: rect.x, y: rect.y, w: rect.w, h: rect.h } : null;
-  }, [selected]);
+  }, [selected, rectFor]);
 
   /* Any manual camera gesture re-baselines: drop follow but keep the ring. */
   const firstNonce = useRef(true);
