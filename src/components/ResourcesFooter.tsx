@@ -76,7 +76,11 @@ export function createResourcesLoader(
 
   return {
     load(fresh = false): Promise<boolean> {
+      if (disposed) return Promise.resolve(false);
       return requests.run(fresh, async (forceFresh) => {
+        /* A fresh call may have waited behind an ordinary poll. Teardown can
+           happen while it waits, so check again before starting another scan. */
+        if (disposed) return false;
         const at = Date.now() / 1000;
         try {
           const res = await fetcher("/api/resources" + (forceFresh ? "?fresh=1" : ""));

@@ -79,3 +79,29 @@ test("a failed request can be retried", async () => {
   expect(await loader.load()).toBeTrue();
   expect(calls).toBe(2);
 });
+
+test("dispose prevents a queued forced refresh from starting", async () => {
+  const ordinary = deferred<Response>();
+  const urls: string[] = [];
+  const loader = createResourcesLoader(
+    async (input) => {
+      urls.push(String(input));
+      return ordinary.promise;
+    },
+    () => {},
+    () => {},
+  );
+
+  const first = loader.load();
+  const queuedRefresh = loader.load(true);
+  await Promise.resolve();
+  expect(urls).toEqual(["/api/resources"]);
+
+  loader.dispose();
+  ordinary.resolve(Response.json(payload));
+
+  expect(await first).toBeTrue();
+  expect(await queuedRefresh).toBeFalse();
+  expect(await loader.load(true)).toBeFalse();
+  expect(urls).toEqual(["/api/resources"]);
+});
