@@ -122,7 +122,7 @@ export class RuntimeHost {
           : appended;
       } else if (request.method === "command") {
         result = this.journal.executeOperation(request.params?.command as RuntimeOperationCommand);
-        void this.recoverConsumersBestEffort();
+        setImmediate(() => { void this.recoverConsumersBestEffort(); });
       } else if (request.method === "operation-status") {
         result = this.journal.operationResult(String(request.params?.operationId ?? ""));
       } else if (request.method === "operation-retry") {

@@ -265,7 +265,7 @@ export const en = {
   "composer.structured": "structured",
   "composer.structuredHost": "Structured runtime host",
   "composer.structuredImagesUnavailable": "Image delivery is unavailable for structured conversations",
-  "composer.codexImagesVertical2": "Codex image delivery is disabled until vertical 2.",
+  "composer.codexImagesTextOnly": "The selected Codex model accepts text input only.",
   "composer.structuredImagesProtocol": "This structured host has no negotiated image capability.",
   "composer.imageCapabilityLoading": "Image capability is loading.",
   "composer.imageCapabilityError": "Image capability could not be loaded.",

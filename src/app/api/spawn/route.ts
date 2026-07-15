@@ -11,7 +11,7 @@ import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
 import { freshSpecFor, type AgentEngine } from "@/lib/agent/cli";
 import { agentRegistry, SpawnChildLimitError } from "@/lib/agent/registry";
 import { reasoningFromBody } from "@/lib/agent/efforts";
-import { modelFromBody } from "@/lib/agent/models";
+import { codexModelSupportsImages, modelFromBody } from "@/lib/agent/models";
 import { resolveSpawnRole } from "@/lib/roles/registry";
 import { spawnContentDigest, spawnParentSelector, spawnRequestDigest } from "@/lib/agent/spawnIdentity";
 import { sessionKeyFromTranscript, sessionKeyId } from "@/lib/agent/sessionKey";
@@ -112,7 +112,7 @@ export async function GET(req: NextRequest): Promise<NextResponse<SuggestRespons
     spawnTransport: transport,
     imageInput: {
       claude: runtimeImageCapability("claude", transport === "structured"),
-      codex: runtimeImageCapability("codex", false),
+      codex: runtimeImageCapability("codex", transport === "structured" && codexModelSupportsImages(null)),
     },
   });
 }
@@ -196,7 +196,12 @@ async function postSpawn(
     return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 500 });
   }
   if (transport === "structured") {
-    const gap = structuredSpawnGap({ engine, hasImages: images.length > 0, fast: reasoning.fast });
+    const gap = structuredSpawnGap({
+      engine,
+      model: selectedModel.model,
+      hasImages: images.length > 0,
+      fast: reasoning.fast,
+    });
     if (gap) return NextResponse.json({ error: gap }, { status: 409 });
   }
 

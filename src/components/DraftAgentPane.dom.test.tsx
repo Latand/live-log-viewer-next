@@ -78,7 +78,7 @@ const imageNegotiation = (spawnTransport: "tmux" | "structured") => ({
   spawnTransport,
   imageInput: {
     claude: imageCapability(true),
-    codex: imageCapability(false, { reason: "Codex image delivery is disabled until vertical 2." }),
+    codex: imageCapability(true),
   },
 });
 
@@ -121,7 +121,7 @@ test("image capability failure renders localized recovery and retry restores tmu
   expect((host.querySelector('button[aria-label="Додати картинки до промпта"]') as HTMLButtonElement).disabled).toBe(false);
 });
 
-test("malformed capability retry adopts structured Claude limits and keeps Codex gated", async () => {
+test("malformed capability retry adopts structured image limits for Claude and Codex", async () => {
   let requests = 0;
   globalThis.fetch = (async (input) => {
     const url = String(input);
@@ -162,8 +162,7 @@ test("malformed capability retry adopts structured Claude limits and keeps Codex
   await new Promise((resolve) => setTimeout(resolve, 0));
   await new Promise((resolve) => setTimeout(resolve, 0));
   const picker = host.querySelector('button[aria-label="Add images to the prompt"]') as HTMLButtonElement;
-  expect(picker.disabled).toBe(true);
-  expect(picker.title).toContain("Codex image delivery is disabled until vertical 2.");
+  expect(picker.disabled).toBe(false);
 });
 
 test("Reviewer role persists and submits the reviewed conversation", async () => {

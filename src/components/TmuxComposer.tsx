@@ -230,9 +230,7 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
   const structuredImageCapability = structuredSession?.session.capabilities.imageInput;
   const structuredImagesDisabled = Boolean(structuredSession && !structuredImageCapability?.supported);
   const structuredImagesReason = structuredImagesDisabled
-    ? structuredSession?.session.sessionKey.engine === "codex"
-      ? t("composer.codexImagesVertical2")
-      : t("composer.structuredImagesProtocol")
+    ? t("composer.structuredImagesProtocol")
     : undefined;
   /* While a card is switching accounts its next send is held for the successor
      (Sol delivery fence): the composer shows the held affordance instead of

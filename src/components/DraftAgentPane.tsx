@@ -7,7 +7,7 @@ import { Play, X } from "@/components/icons";
 import { Select } from "@/components/ui/Select";
 import { useComposer } from "@/hooks/useComposer";
 import { isEngineEffort } from "@/lib/agent/efforts";
-import { defaultModelFor } from "@/lib/agent/models";
+import { codexModelSupportsImages, defaultModelFor } from "@/lib/agent/models";
 import { useLocale } from "@/lib/i18n";
 import { BUILDER_APPLY_FIXES_CONFIG, BUILDER_FRONTEND_CONFIG } from "@/lib/roles/paramConfig";
 import type { RoleDefinition } from "@/lib/roles/types";
@@ -530,9 +530,12 @@ export function DraftAgentPane({
     writeField(draftId, "boot", value ? JSON.stringify(value) : "");
   }, [draftId]);
   const readySpawnImageNegotiation = spawnImageNegotiation.status === "ready" ? spawnImageNegotiation.value : null;
-  const structuredSpawnImageCapability = readySpawnImageNegotiation?.spawnTransport === "structured"
+  const negotiatedSpawnImageCapability = readySpawnImageNegotiation?.spawnTransport === "structured"
     ? readySpawnImageNegotiation.imageInput[engine]
     : null;
+  const structuredSpawnImageCapability = negotiatedSpawnImageCapability && engine === "codex" && !codexModelSupportsImages(model)
+    ? { ...negotiatedSpawnImageCapability, supported: false, reason: t("composer.codexImagesTextOnly") }
+    : negotiatedSpawnImageCapability;
 
   /* While a spawn is in flight the whole draft is frozen (boot set), so the
      composer's fields lock alongside the send/voice flags. */
@@ -678,14 +681,14 @@ export function DraftAgentPane({
 
   const selectedRole = roles.find((role) => role.id === roleId) ?? null;
   const spawnImagesDisabled = spawnImageNegotiation.status !== "ready"
-    || (readySpawnImageNegotiation?.spawnTransport === "structured" && !readySpawnImageNegotiation.imageInput[engine].supported);
+    || (readySpawnImageNegotiation?.spawnTransport === "structured" && !structuredSpawnImageCapability?.supported);
   const spawnImagesReason = spawnImageNegotiation.status === "loading"
     ? t("composer.imageCapabilityLoading")
     : spawnImageNegotiation.status === "error"
       ? t("composer.imageCapabilityError")
-      : readySpawnImageNegotiation?.spawnTransport === "structured" && engine === "codex"
-      ? t("composer.codexImagesVertical2")
-      : readySpawnImageNegotiation?.spawnTransport === "structured" && !readySpawnImageNegotiation.imageInput[engine].supported
+      : readySpawnImageNegotiation?.spawnTransport === "structured" && engine === "codex" && !codexModelSupportsImages(model)
+        ? t("composer.codexImagesTextOnly")
+        : readySpawnImageNegotiation?.spawnTransport === "structured" && !structuredSpawnImageCapability?.supported
         ? t("composer.structuredImagesProtocol")
         : undefined;
 

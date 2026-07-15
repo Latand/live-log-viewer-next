@@ -429,6 +429,67 @@ test("structured spawn flag reaches the pane-less capability gate", async () => 
   }
 });
 
+test("text-only Codex models reject images before blob and receipt mutation", async () => {
+  const cwd = fs.mkdtempSync(path.join(routeSandbox, "codex-text-only-image-"));
+  const previous = {
+    transport: process.env.LLV_SPAWN_TRANSPORT,
+    hosts: process.env.LLV_STRUCTURED_HOSTS,
+    events: process.env.LLV_RUNTIME_EVENTS,
+    socket: process.env.LLV_RUNTIME_HOST_SOCKET,
+    ui: process.env.NEXT_PUBLIC_RUNTIME_UI,
+  };
+  process.env.LLV_SPAWN_TRANSPORT = "structured";
+  process.env.LLV_STRUCTURED_HOSTS = "1";
+  process.env.LLV_RUNTIME_EVENTS = "1";
+  process.env.LLV_RUNTIME_HOST_SOCKET = path.join(cwd, "runtime.sock");
+  process.env.NEXT_PUBLIC_RUNTIME_UI = "1";
+  let storageCalled = false;
+  const dependencies = {
+    ...structuredRouteDependencies(cwd),
+    storeImages: () => {
+      storageCalled = true;
+      return [];
+    },
+  };
+  const beforeReceipts = Object.keys(agentRegistry().snapshot().receipts).sort();
+  const png = Buffer.from("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489", "hex").toString("base64");
+  try {
+    const response = await POST.withDependencies(new NextRequest("http://127.0.0.1:8898/api/spawn", {
+      method: "POST",
+      headers: {
+        host: "127.0.0.1:8898",
+        origin: "http://127.0.0.1:8898",
+        "sec-fetch-site": "same-origin",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        engine: "codex",
+        model: "gpt-5.3-codex-spark",
+        cwd,
+        prompt: "inspect",
+        images: [{ base64: png, mime: "image/png" }],
+      }),
+    }), dependencies);
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({
+      error: "The selected Codex model does not advertise image input through app-server.",
+    });
+    expect(storageCalled).toBeFalse();
+    expect(Object.keys(agentRegistry().snapshot().receipts).sort()).toEqual(beforeReceipts);
+  } finally {
+    if (previous.transport === undefined) delete process.env.LLV_SPAWN_TRANSPORT;
+    else process.env.LLV_SPAWN_TRANSPORT = previous.transport;
+    if (previous.hosts === undefined) delete process.env.LLV_STRUCTURED_HOSTS;
+    else process.env.LLV_STRUCTURED_HOSTS = previous.hosts;
+    if (previous.events === undefined) delete process.env.LLV_RUNTIME_EVENTS;
+    else process.env.LLV_RUNTIME_EVENTS = previous.events;
+    if (previous.socket === undefined) delete process.env.LLV_RUNTIME_HOST_SOCKET;
+    else process.env.LLV_RUNTIME_HOST_SOCKET = previous.socket;
+    if (previous.ui === undefined) delete process.env.NEXT_PUBLIC_RUNTIME_UI;
+    else process.env.NEXT_PUBLIC_RUNTIME_UI = previous.ui;
+  }
+});
+
 test("spawn route projects a launched path-pending receipt as a truthful success", () => {
   const store = registry();
   const begun = store.beginSpawnRequest({ engine: "codex", cwd: "/repo", accountId: "terra", clientAttemptId: "attempt_path_pending", requestDigest: "digest" });

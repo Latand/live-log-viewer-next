@@ -29,7 +29,7 @@ export interface RuntimeImageCapability {
   maxEncodedBytesPerRequest: number;
 }
 
-export const CODEX_STRUCTURED_IMAGE_REASON = "Codex structured image delivery is disabled until vertical 2.";
+export const CODEX_STRUCTURED_IMAGE_REASON = "The selected Codex model does not advertise image input through app-server.";
 export const STRUCTURED_IMAGE_PROTOCOL_REASON = "Structured image protocol is unavailable for this host.";
 
 export function normalizeStructuredImageMime(value: string): StructuredImageMime | null {

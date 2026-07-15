@@ -8,6 +8,21 @@ export type AgentModelOption = {
 export const CODEX_SOL_MODEL = "gpt-5.6-sol";
 export const CODEX_TERRA_MODEL = "gpt-5.6-terra";
 
+const CODEX_IMAGE_INPUT_MODELS = new Set([
+  CODEX_SOL_MODEL,
+  CODEX_TERRA_MODEL,
+  "gpt-5.6-luna",
+  "gpt-5.5",
+  "gpt-5.4",
+  "gpt-5.4-mini",
+]);
+
+/** Current app-server model/list image modalities, used for pre-spawn admission. */
+export function codexModelSupportsImages(model: string | null | undefined): boolean {
+  if (!model?.trim()) return true;
+  return CODEX_IMAGE_INPUT_MODELS.has(model.trim());
+}
+
 export const ENGINE_MODELS: Record<"claude" | "codex", readonly AgentModelOption[]> = {
   claude: [
     { id: "fable", label: "Fable", use: "review" },

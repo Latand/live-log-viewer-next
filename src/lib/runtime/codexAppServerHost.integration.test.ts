@@ -103,7 +103,12 @@ test.skipIf(!isolatedHome)("real Codex subscription supports late attach, steeri
     expect(pathIsInside(isolatedHome.codexHome, recovered.identity.path ?? "")).toBeTrue();
     const restartReplay = recovered.attach(releasedCursor - 1)[Symbol.asyncIterator]();
     expect((await restartReplay.next()).value).toEqual({ kind: "session-status", status: "unhosted", seq: releasedCursor });
-    expect((await restartReplay.next()).value).toEqual({ kind: "session-status", status: "idle", seq: releasedCursor + 1 });
+    expect((await restartReplay.next()).value).toEqual({
+      kind: "session-status",
+      status: "idle",
+      activeFlags: ["structured-image-v1"],
+      seq: releasedCursor + 1,
+    });
     const recoveryEvents = recovered.attach(releasedCursor + 1)[Symbol.asyncIterator]();
     const recall = await recovered.send({
       id: `issue-149-recall-${crypto.randomUUID()}`,

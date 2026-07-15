@@ -28,7 +28,7 @@ export interface RuntimeImageUpload {
 }
 
 export function runtimeImageCapability(engine: "claude" | "codex", protocolAdvertised: boolean): RuntimeImageCapability {
-  const supported = engine === "claude" && protocolAdvertised;
+  const supported = protocolAdvertised;
   const reason = supported
     ? null
     : engine === "codex"

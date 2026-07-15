@@ -28,7 +28,7 @@ describe("structuredSpawnGap", () => {
   };
 
   test("accepts the supported pane-less shape", () => {
-    expect(structuredSpawnGap({ engine: "codex", hasImages: false, fast: null }, enabled)).toBeNull();
+    expect(structuredSpawnGap({ engine: "codex", model: "gpt-5.6-sol", hasImages: false, fast: null }, enabled)).toBeNull();
   });
 
   test.each([
@@ -37,15 +37,17 @@ describe("structuredSpawnGap", () => {
     [{ ...enabled, LLV_RUNTIME_HOST_SOCKET: "" }, "LLV_RUNTIME_HOST_SOCKET"],
     [{ ...enabled, NEXT_PUBLIC_RUNTIME_UI: "0" }, "NEXT_PUBLIC_RUNTIME_UI=1"],
   ] as const)("names missing runtime capability", (env, gap) => {
-    expect(structuredSpawnGap({ engine: "claude", hasImages: false, fast: null }, env)).toContain(gap);
+    expect(structuredSpawnGap({ engine: "claude", model: "fable", hasImages: false, fast: null }, env)).toContain(gap);
   });
 
-  test("negotiates Claude images and keeps Codex gated for vertical two", () => {
-    expect(structuredSpawnGap({ engine: "claude", hasImages: true, fast: null }, enabled)).toBeNull();
-    expect(structuredSpawnGap({ engine: "codex", hasImages: true, fast: null }, enabled)).toContain("vertical 2");
+  test("negotiates Claude images and Codex image-capable models", () => {
+    expect(structuredSpawnGap({ engine: "claude", model: "fable", hasImages: true, fast: null }, enabled)).toBeNull();
+    expect(structuredSpawnGap({ engine: "codex", model: "gpt-5.6-sol", hasImages: true, fast: null }, enabled)).toBeNull();
+    expect(structuredSpawnGap({ engine: "codex", model: "gpt-5.3-codex-spark", hasImages: true, fast: null }, enabled))
+      .toContain("does not advertise image input");
   });
 
   test("names Codex service-tier selection as an unsupported spawn feature", () => {
-    expect(structuredSpawnGap({ engine: "codex", hasImages: false, fast: true }, enabled)).toContain("Codex service tier");
+    expect(structuredSpawnGap({ engine: "codex", model: "gpt-5.6-sol", hasImages: false, fast: true }, enabled)).toContain("Codex service tier");
   });
 });

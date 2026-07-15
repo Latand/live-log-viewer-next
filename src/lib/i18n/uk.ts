@@ -257,7 +257,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "composer.structured": "структурований",
   "composer.structuredHost": "Структурований runtime-хост",
   "composer.structuredImagesUnavailable": "Структуровані розмови поки не підтримують картинки",
-  "composer.codexImagesVertical2": "Доставку зображень у Codex вимкнено до другого етапу.",
+  "composer.codexImagesTextOnly": "Обрана модель Codex приймає лише текст.",
   "composer.structuredImagesProtocol": "Цей структурований хост не узгодив підтримку зображень.",
   "composer.imageCapabilityLoading": "Завантажуємо дані про підтримку зображень.",
   "composer.imageCapabilityError": "Не вдалося завантажити дані про підтримку зображень.",

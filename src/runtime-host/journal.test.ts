@@ -146,7 +146,7 @@ test("snapshot exposes the canonical projected runtime model", () => {
         structuredAttention: true,
         imageInput: expect.objectContaining({
           supported: false,
-          reason: "Codex structured image delivery is disabled until vertical 2.",
+          reason: "The selected Codex model does not advertise image input through app-server.",
         }),
       },
       activeTurnId: "turn-one",
@@ -761,10 +761,12 @@ test("runtime command acknowledgements do not wait for a slow committed-event co
   const journal = new RuntimeJournal(path.join(dir, "events.sqlite"), { maxEvents: 100, now: () => 100 });
   let releaseConsumer!: () => void;
   let markStarted!: () => void;
+  let consumerHasStarted = false;
   const consumerStarted = new Promise<void>((resolve) => { markStarted = resolve; });
   const consumerGate = new Promise<void>((resolve) => { releaseConsumer = resolve; });
   const host = new RuntimeHost(journal, {
     flowReady: async () => {
+      consumerHasStarted = true;
       markStarted();
       await consumerGate;
       return { id: "flow-one", state: "spawn_pending" } as unknown as Flow;
@@ -791,12 +793,9 @@ test("runtime command acknowledgements do not wait for a slow committed-event co
       },
     },
   });
+  expect((await response).ok).toBe(true);
+  expect(consumerHasStarted).toBeFalse();
   await consumerStarted;
-
-  expect(await Promise.race([
-    response.then((value) => value.ok),
-    Bun.sleep(50).then(() => false),
-  ])).toBe(true);
 
   releaseConsumer();
   await host.recoverConsumers();
