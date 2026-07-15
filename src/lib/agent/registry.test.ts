@@ -57,6 +57,8 @@ describe("agent registry", () => {
         createdAt: `2026-07-11T00:${String(Math.floor(index / 60)).padStart(2, "0")}:${String(index % 60).padStart(2, "0")}.000Z`,
         clientMessageId: id,
         payloadKind: "text",
+        runtimeImages: [],
+        contentDigest: null,
         artifactPaths: [],
         state: "delivered",
         generationId: conversation.generations.at(-1)!.id,

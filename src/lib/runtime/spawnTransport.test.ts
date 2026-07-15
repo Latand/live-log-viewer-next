@@ -40,8 +40,9 @@ describe("structuredSpawnGap", () => {
     expect(structuredSpawnGap({ engine: "claude", hasImages: false, fast: null }, env)).toContain(gap);
   });
 
-  test("names image delivery as an unsupported spawn feature", () => {
-    expect(structuredSpawnGap({ engine: "codex", hasImages: true, fast: null }, enabled)).toContain("image delivery");
+  test("negotiates Claude images and keeps Codex gated for vertical two", () => {
+    expect(structuredSpawnGap({ engine: "claude", hasImages: true, fast: null }, enabled)).toBeNull();
+    expect(structuredSpawnGap({ engine: "codex", hasImages: true, fast: null }, enabled)).toContain("vertical 2");
   });
 
   test("names Codex service-tier selection as an unsupported spawn feature", () => {

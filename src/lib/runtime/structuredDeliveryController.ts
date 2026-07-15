@@ -8,6 +8,8 @@ import type { EngineHost, HostState } from "./engineHost";
 import { runtimeClientDeliveryPort, StructuredDeliveryQueue } from "./structuredDeliveryQueue";
 import { projectEngineHostEvent } from "./engineHostEvents";
 import { setStructuredDeliveryKick } from "./structuredDeliverySignal";
+import { runtimeImageCapability } from "./runtimeImageStore";
+import { STRUCTURED_IMAGE_CAPABILITY } from "./structuredContent";
 
 type ObservableEngineHost = EngineHost & { onStateChange(listener: (state: HostState) => void): () => void };
 export interface StructuredDeliveryHost {
@@ -108,7 +110,14 @@ async function publishHostState(
       parentConversationId: entry.launchProfile?.parentConversationId ?? null,
       cwd: entry.cwd,
       artifactPath: entry.artifactPath,
-      capabilities: { steer: adopted.key.engine === "codex", structuredAttention: true },
+      capabilities: {
+        steer: adopted.key.engine === "codex",
+        structuredAttention: true,
+        imageInput: runtimeImageCapability(
+          adopted.key.engine,
+          state.activeFlags.includes(STRUCTURED_IMAGE_CAPABILITY),
+        ),
+      },
       activeTurnId: state.activeTurnRef,
     },
   });
@@ -244,8 +253,16 @@ export async function bindStructuredDeliveryQueue(
         cwd: entry?.cwd ?? generation.launchProfile.cwd,
         artifactPath: generation.path,
         capabilities: entry?.structuredHost
-          ? { steer: entry.structuredHost.kind === "codex-app-server", structuredAttention: true }
-          : { steer: false, structuredAttention: false },
+          ? {
+              steer: entry.structuredHost.kind === "codex-app-server",
+              structuredAttention: true,
+              imageInput: runtimeImageCapability(key.engine, false),
+            }
+          : {
+              steer: false,
+              structuredAttention: false,
+              imageInput: runtimeImageCapability(key.engine, false),
+            },
         activeTurnId: null,
       },
     });

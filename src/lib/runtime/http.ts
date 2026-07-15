@@ -9,6 +9,8 @@ import type { RuntimeOperationKind } from "./contracts";
 import { runtimeEventsEnabled } from "./flags";
 import { enqueueStructuredMessage } from "./structuredMessageDelivery";
 import { kickStructuredDeliveryQueue } from "./structuredDeliverySignal";
+import { MAX_STRUCTURED_IMAGES, type RuntimeImageUpload } from "./runtimeImageStore";
+import { normalizeStructuredImageMime, type StructuredImageRef } from "./structuredContent";
 
 export interface RuntimeHttpDependencies {
   enabled(): boolean;
@@ -56,8 +58,29 @@ export async function handleRuntimeCommand(
     return NextResponse.json({ error: "invalid JSON" }, { status: 400 });
   }
   let command;
+  let rawImages: RuntimeImageUpload[] | null = null;
   try {
-    command = parseRuntimeCommand(kind, value);
+    let parseValue = value;
+    if ((kind === "send" || kind === "steer") && value && typeof value === "object" && !Array.isArray(value)) {
+      const body = value as Record<string, unknown>;
+      if (Array.isArray(body.images) && body.images.some((image) => image && typeof image === "object" && "base64" in image)) {
+        if (body.images.length > MAX_STRUCTURED_IMAGES) throw new Error("too many images");
+        rawImages = body.images.map((value) => {
+          if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("images are invalid");
+          const image = value as Record<string, unknown>;
+          const mime = typeof image.mime === "string" ? normalizeStructuredImageMime(image.mime) : null;
+          if (!mime || typeof image.base64 !== "string") throw new Error("images are invalid");
+          return { mime, base64: image.base64 };
+        });
+        const admissionRefs: StructuredImageRef[] = rawImages.map((image, index) => ({
+          sha256: index.toString(16).padStart(64, "0"),
+          mime: normalizeStructuredImageMime(image.mime)!,
+          bytes: 1,
+        }));
+        parseValue = { ...body, images: admissionRefs };
+      }
+    }
+    command = parseRuntimeCommand(kind, parseValue);
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : "runtime command is invalid" }, { status: 400 });
   }
@@ -74,7 +97,7 @@ export async function handleRuntimeCommand(
         ...(command.policy ? { policy: command.policy } : {}),
         ...(command.turnId !== undefined ? { turnId: command.turnId } : {}),
         text: command.text,
-        hasImages: Boolean(command.images?.length),
+        ...(rawImages ? { images: rawImages } : command.images?.length ? { imageRefs: command.images } : {}),
       }, {
         enabled: dependencies.structuredEnabled ?? (() => process.env.LLV_STRUCTURED_HOSTS === "1"),
         client: () => client,

@@ -249,7 +249,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<SendResponse 
       ...(conversationId ? { conversationId } : {}),
       ...(typeof body.clientMessageId === "string" ? { clientMessageId: body.clientMessageId.slice(0, 128) } : {}),
       text: text.trim(),
-      hasImages: images.length > 0,
+      images,
     });
     if (structured) {
       const { status, ...response } = structured.ok ? { ...structured, status: 200 } : structured;

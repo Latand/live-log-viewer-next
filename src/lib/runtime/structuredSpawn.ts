@@ -17,6 +17,8 @@ import type { EngineHost, HostState } from "./engineHost";
 import { bindClaudeHostPersistence, bindCodexHostPersistence } from "./registry";
 import { publishStructuredDeliveryHost, releaseStructuredDeliveryHost } from "./structuredDeliveryController";
 import { enqueueStructuredMessage } from "./structuredMessageDelivery";
+import { runtimeImageCapability } from "./runtimeImageStore";
+import { parseStructuredImageRefs, structuredContent, type StructuredImageRef } from "./structuredContent";
 
 export type SpawnedStructuredHost = EngineHost & {
   identity: { threadId: string; path: string | null } | { sessionId: string };
@@ -29,6 +31,7 @@ export interface StructuredSpawnInput {
   spec: ResumeSpec;
   account: AccountContext;
   prompt: string;
+  imageRefs?: StructuredImageRef[];
   registry: AgentRegistry;
   client: RuntimeHostClient;
 }
@@ -76,7 +79,11 @@ async function projectDeadStructuredSpawn(
       parentConversationId: receipt.parentConversationId,
       cwd: entry.cwd,
       artifactPath,
-      capabilities: { steer: key.engine === "codex", structuredAttention: true },
+      capabilities: {
+        steer: key.engine === "codex",
+        structuredAttention: true,
+        imageInput: runtimeImageCapability(key.engine, false),
+      },
       activeTurnId: null,
     },
   });
@@ -153,17 +160,19 @@ export async function recoverPendingStructuredSpawns(
     if (!entry?.structuredHost || entry.status === "dead" || entry.status === "unhosted") continue;
     const effect = spawnEffects.get(receipt.launchId);
     const prompt = typeof effect?.prompt === "string" ? effect.prompt : null;
+    const imageRefs = parseStructuredImageRefs(effect?.images ?? [], 16);
     if (prompt === null || effect?.conversationId !== receipt.conversationId || effect?.cwd !== receipt.cwd) {
       throw new Error(`structured spawn recovery is missing durable prompt admission for ${receipt.launchId}`);
     }
-    if (prompt.trim()) {
+    if (imageRefs === null) throw new Error(`structured spawn recovery has invalid image refs for ${receipt.launchId}`);
+    if (prompt.trim() || imageRefs.length) {
       const delivered = await enqueueStructuredMessage({
         path: receipt.artifactPath,
         conversationId: receipt.conversationId,
         clientMessageId: `spawn_${receipt.launchId}`,
         operationId: `spawn_message_${receipt.launchId}`,
         text: prompt,
-        hasImages: false,
+        imageRefs,
       }, {
         client: () => client,
         registry: () => registry,
@@ -276,14 +285,14 @@ async function defaultBindHost(
 }
 
 async function defaultDeliverFirst(input: StructuredSpawnInput, artifactPath: string): Promise<void> {
-  if (!input.prompt.trim()) return;
+  if (!input.prompt.trim() && !input.imageRefs?.length) return;
   const delivered = await enqueueStructuredMessage({
     path: artifactPath,
     conversationId: input.receipt.conversationId,
     clientMessageId: `spawn_${input.receipt.launchId}`,
     operationId: `spawn_message_${input.receipt.launchId}`,
     text: input.prompt,
-    hasImages: false,
+    imageRefs: input.imageRefs,
   }, {
     client: () => input.client,
     registry: () => input.registry,
@@ -309,9 +318,13 @@ export async function spawnStructuredConversation(
   const processIdentity = dependencies.processIdentity ?? (() => ({ pid: process.pid, startIdentity: procBackend.processIdentity(process.pid) }));
   const operationId = input.receipt.launchId;
   let host: SpawnedStructuredHost | null = null;
-  let binding: HostBinding = { stopPersistence: () => {}, unregister: async () => {} };
+  const binding: HostBinding = { stopPersistence: () => {}, unregister: async () => {} };
   let key: SessionKey | null = null;
   try {
+    const imageRefs = input.imageRefs ?? [];
+    const content = input.prompt.trim() || imageRefs.length
+      ? structuredContent(input.prompt, imageRefs)
+      : null;
     await input.client.command({
       kind: "spawn",
       operationId,
@@ -319,7 +332,9 @@ export async function spawnStructuredConversation(
       conversationId: input.receipt.conversationId,
       engine: input.engine,
       cwd: input.spec.cwd,
-      prompt: input.prompt,
+      prompt: content?.content.text ?? "",
+      ...(content?.content.images.length ? { images: content.content.images } : {}),
+      ...(content ? { contentDigest: content.contentDigest } : {}),
       accountId: input.account.accountId,
       parentConversationId: input.receipt.parentConversationId,
     });

@@ -39,6 +39,7 @@ export function createMigrationDeliveryPort(
 ): HeldDeliveryPort {
   const structuredDelivery = dependencies.structuredDelivery ?? deliverHeldStructuredMessage;
   const legacyDelivery = dependencies.legacyDelivery ?? (async ({ delivery, path, clientMessageId }) => {
+    if (delivery.payloadKind === "runtime-images") return "delivery-uncertain";
     const result = await deliverConversationMessage({ pid: null, path, text: delivery.text, images: [], clientMessageId, reservedDeliveryId: delivery.id });
     return migrationDeliveryOutcome(result);
   });
@@ -48,6 +49,7 @@ export function createMigrationDeliveryPort(
     deliveryId: delivery.id,
     clientMessageId,
     text: delivery.text,
+    ...(delivery.runtimeImages.length ? { imageRefs: delivery.runtimeImages } : {}),
   });
   return {
     async deliver(input) {

@@ -8,6 +8,7 @@ import { Database } from "bun:sqlite";
 import type { Flow } from "@/lib/flows/types";
 import { UnixRuntimeHostClient } from "@/lib/runtime/client";
 import { runtimeScope } from "@/lib/runtime/contracts";
+import { structuredContentDigest, type StructuredImageRef } from "@/lib/runtime/structuredContent";
 
 import { RuntimeHost, RuntimeHostFence } from "./host";
 import { RuntimeJournal, RuntimeJournalFault } from "./journal";
@@ -140,7 +141,14 @@ test("snapshot exposes the canonical projected runtime model", () => {
       workflowId: null,
       cwd: "/repo",
       artifactPath: "/sessions/one.jsonl",
-      capabilities: { steer: true, structuredAttention: true },
+      capabilities: {
+        steer: true,
+        structuredAttention: true,
+        imageInput: expect.objectContaining({
+          supported: false,
+          reason: "Codex structured image delivery is disabled until vertical 2.",
+        }),
+      },
       activeTurnId: "turn-one",
       drift: null,
     }],
@@ -227,6 +235,57 @@ test("send operations converge by idempotency key and persist one receipt and ef
   expect(journal.snapshot().sessions[0]?.recentReceipts).toHaveLength(1);
   expect(() => journal.executeOperation({ ...command, text: "different" })).toThrow("idempotency key already belongs to another request");
   expect(() => journal.executeOperation({ ...command, idempotencyKey: "send-key-two" })).toThrow("operationId already belongs to another request");
+  journal.close();
+});
+
+test("image refs remain ordered and participate in journal idempotency", () => {
+  const dir = sandbox("operation-images");
+  const journal = new RuntimeJournal(path.join(dir, "events.sqlite"), { structuredHosts: true });
+  journal.append({
+    scope: runtimeScope("session", "conv-images"),
+    kind: "session-status",
+    payload: {
+      conversationId: "conv-images",
+      sessionKey: { engine: "claude", sessionId: "session-images" },
+      hostKind: "claude-broker",
+      host: "hosted",
+      turn: "idle",
+      provenance: "structured",
+      capabilities: { steer: false, structuredAttention: true },
+    },
+  });
+  const images: StructuredImageRef[] = [
+    { sha256: "a".repeat(64), mime: "image/png", bytes: 67 },
+    { sha256: "b".repeat(64), mime: "image/webp", bytes: 80 },
+  ];
+  const command = {
+    kind: "send" as const,
+    operationId: "op-images",
+    idempotencyKey: "key-images",
+    conversationId: "conv-images",
+    text: "",
+    images,
+    contentDigest: structuredContentDigest({ text: "", images }),
+    policy: "queue" as const,
+  };
+
+  const first = journal.executeOperation(command);
+  expect(first.receipt).toMatchObject({ status: "queued", text: "", imageCount: 2 });
+  expect(journal.effectBatch()[0]?.payload).toMatchObject({
+    operationId: "op-images",
+    text: "",
+    images,
+    contentDigest: command.contentDigest,
+  });
+  expect(Buffer.byteLength(JSON.stringify(journal.effectBatch()[0]))).toBeLessThan(16 * 1024);
+  expect(() => journal.executeOperation({
+    ...command,
+    images: [{ ...images[0]!, sha256: "c".repeat(64) }, images[1]!],
+    contentDigest: structuredContentDigest({
+      text: "",
+      images: [{ ...images[0]!, sha256: "c".repeat(64) }, images[1]!],
+    }),
+  })).toThrow("idempotency key already belongs to another request");
   journal.close();
 });
 

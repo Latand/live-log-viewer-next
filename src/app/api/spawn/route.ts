@@ -25,6 +25,7 @@ import { rejectCrossOrigin } from "@/lib/sameOrigin";
 import { runtimeHostClient } from "@/lib/runtime/client";
 import { runtimeScope } from "@/lib/runtime/contracts";
 import { runtimeEventsEnabled } from "@/lib/runtime/flags";
+import { runtimeImageCapability, runtimeImageStore } from "@/lib/runtime/runtimeImageStore";
 import { spawnStructuredConversation, structuredClaudePermissionMode } from "@/lib/runtime/structuredSpawn";
 import { structuredSpawnGap, spawnTransport } from "@/lib/runtime/spawnTransport";
 import { listFiles } from "@/lib/scanner";
@@ -61,6 +62,11 @@ interface SuggestResponse {
   cwd: string | null;
   /** Whether the recorded source directory currently exists. */
   cwdExists: boolean;
+  spawnTransport: "tmux" | "structured";
+  imageInput: {
+    claude: ReturnType<typeof runtimeImageCapability>;
+    codex: ReturnType<typeof runtimeImageCapability>;
+  };
 }
 
 function addDir(dirs: string[], cwd: string | null, project: string): void {
@@ -93,7 +99,17 @@ export async function GET(req: NextRequest): Promise<NextResponse<SuggestRespons
     addDir(dirs, cwd, project);
   }
   if (!dirs.length) dirs.push(os.homedir());
-  return NextResponse.json({ dirs, cwd: srcCwd, cwdExists });
+  const transport = spawnTransport();
+  return NextResponse.json({
+    dirs,
+    cwd: srcCwd,
+    cwdExists,
+    spawnTransport: transport,
+    imageInput: {
+      claude: runtimeImageCapability("claude", transport === "structured"),
+      codex: runtimeImageCapability("codex", false),
+    },
+  });
 }
 
 async function postSpawn(
@@ -273,12 +289,14 @@ async function postSpawn(
     if (transport === "structured") {
       const runtimeClient = dependencies.runtimeHostClient();
       if (!runtimeClient) throw new Error("structured spawn runtime host is unavailable");
+      const imageRefs = runtimeImageStore().putMany(images);
       const response = await dependencies.spawnStructuredConversation({
         engine,
         receipt: begun.receipt,
         spec,
         account,
         prompt,
+        imageRefs,
         registry,
         client: runtimeClient,
       });

@@ -134,6 +134,7 @@ class RoundTripHost implements SpawnedStructuredHost {
   }
 
   attach(afterSeq: number): AsyncIterable<RuntimeEvent> {
+    // eslint-disable-next-line @typescript-eslint/no-this-alias -- the generator receiver is the iterable wrapper
     const host = this;
     return {
       async *[Symbol.asyncIterator]() {
@@ -264,6 +265,57 @@ async function completesWithin<T>(operation: T | PromiseLike<T>, message: string
     if (timer) clearTimeout(timer);
   }
 }
+
+test("a fresh structured spawn permits an intentionally empty first message", async () => {
+  const id = crypto.randomUUID();
+  const cwd = path.join(sandbox, `empty-spawn-${id}`);
+  fs.mkdirSync(cwd, { recursive: true });
+  const artifactPath = path.join(cwd, `${id}.jsonl`);
+  const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const journal = new RuntimeJournal(path.join(cwd, "runtime.sqlite"), { structuredHosts: true });
+  const client = runtimeClient(journal);
+  const launchProfile = emptyLaunchProfile({ cwd, model: "gpt-5.6-luna" });
+  const begun = registry.beginSpawnRequest({
+    engine: "codex",
+    cwd,
+    accountId: "codex-subscription",
+    launchProfile,
+  });
+  if (begun.kind !== "created") throw new Error("spawn receipt was unavailable");
+  const host = new RoundTripHost("codex", artifactPath, id);
+
+  await expect(spawnStructuredConversation({
+    engine: "codex",
+    receipt: begun.receipt,
+    spec: { command: "codex", cwd, windowName: "empty", engine: "codex", transcript: artifactPath, launchProfile },
+    account: { engine: "codex", accountId: "codex-subscription", kind: "managed", home: cwd, transcriptRoot: cwd, env: { NODE_ENV: "test" } },
+    prompt: "",
+    registry,
+    client,
+  }, {
+    startHost: async () => host,
+    bindHost: async (targetRegistry, key, runningHost, claimOwner, claimEpoch) => {
+      const state = await runningHost.health();
+      targetRegistry.setStructuredHostClaimed(key, {
+        kind: "codex-app-server",
+        endpoint: state.endpoint,
+        process: { pid: process.pid, startIdentity: "test-process" },
+        eventCursor: state.eventCursor,
+        protocolVersion: state.protocolVersion,
+        writerClaimEpoch: claimEpoch,
+        activeTurnRef: state.activeTurnRef,
+        pendingAttention: state.pendingAttention,
+        activeFlags: state.activeFlags,
+      }, "idle", claimOwner, claimEpoch);
+      return () => {};
+    },
+    publishHost: async () => async () => {},
+    processIdentity: () => ({ pid: process.pid, startIdentity: "test-process" }),
+  })).resolves.toMatchObject({ launched: true, state: "settled" });
+
+  expect(host.sent).toEqual([]);
+  expect(await client.effectBatch(["runtime.send", "runtime.steer"], 0)).toEqual([]);
+});
 
 function deferred(): { promise: Promise<void>; resolve(): void } {
   let resolve!: () => void;

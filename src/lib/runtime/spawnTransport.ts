@@ -1,4 +1,5 @@
 import type { AgentEngine } from "@/lib/agent/cli";
+import { CODEX_STRUCTURED_IMAGE_REASON } from "./structuredContent";
 
 export type SpawnTransport = "tmux" | "structured";
 
@@ -18,7 +19,7 @@ export function structuredSpawnGap(
   if (env.LLV_RUNTIME_EVENTS !== "1") return "structured spawn requires LLV_RUNTIME_EVENTS=1";
   if (!env.LLV_RUNTIME_HOST_SOCKET?.trim()) return "structured spawn requires LLV_RUNTIME_HOST_SOCKET";
   if (env.NEXT_PUBLIC_RUNTIME_UI !== "1") return "structured spawn requires NEXT_PUBLIC_RUNTIME_UI=1 for viewer controls";
-  if (request.hasImages) return "structured spawn does not support image delivery";
+  if (request.hasImages && request.engine === "codex") return CODEX_STRUCTURED_IMAGE_REASON;
   if (request.engine === "codex" && request.fast !== null) {
     return "structured Codex spawn does not support an explicit Codex service tier";
   }

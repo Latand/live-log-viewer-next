@@ -48,6 +48,8 @@ export interface ComposerBarProps {
       `useImageAttachments`. When set, the in-memory preview strip is suppressed
       (the caller renders its own from staged refs). */
   onImageFiles?: (files: File[]) => void;
+  imageDisabled?: boolean;
+  imageDisabledReason?: string;
   /** Durable runtime receipt chips for the last sends on this target (issue
       #25). Rendered under the status line; absent while the runtime bus is off,
       so the composer is unchanged on the landing-disabled path. */
@@ -129,6 +131,8 @@ export function ComposerBar({
   sendMenuActions = [],
   showImage = true,
   onImageFiles,
+  imageDisabled = false,
+  imageDisabledReason,
   receipts,
 }: ComposerBarProps) {
   const {
@@ -150,7 +154,8 @@ export function ComposerBar({
   const isMobile = useIsMobile();
   const [sendMenuOpen, setSendMenuOpen] = useState(false);
   const hasSendMenu = sendMenuActions.length > 0;
-  const sendDisabled = !canSend && !hasSendMenu;
+  const imageSendBlocked = imageDisabled && attachments.images.length > 0;
+  const sendDisabled = (!canSend && !hasSendMenu) || imageSendBlocked;
   /* Composer action buttons (send, image) are a 32px visual control with a 44px
      touch hit area via a pseudo-element (design doc §3.5, matching the anchored
      mic), so the accent send never renders as a full 44×44 block on a phone;
@@ -188,7 +193,7 @@ export function ComposerBar({
                   }
             }
             disabled={sendDisabled}
-            aria-disabled={!canSend}
+            aria-disabled={!canSend || imageSendBlocked}
             aria-label={dictationRecording ? sendLabelRecording : sendLabelIdle}
             style={dictationRecording ? undefined : sendIdleStyle}
             className={`inline-flex shrink-0 items-center justify-center rounded-control border text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 disabled:opacity-40 aria-disabled:opacity-40 ${iconBtn} ${
@@ -226,11 +231,15 @@ export function ComposerBar({
              token here hides its round-trip from the eventual mic press. */
           onFocus={prewarmLiveToken}
           onPaste={(event) => {
+            const picks = Array.from(event.clipboardData.items)
+              .filter((entry) => entry.type.startsWith("image/"))
+              .map((entry) => entry.getAsFile())
+              .filter((entry): entry is File => entry !== null);
+            if (imageDisabled && picks.length) {
+              event.preventDefault();
+              return;
+            }
             if (onImageFiles) {
-              const picks = Array.from(event.clipboardData.items)
-                .filter((entry) => entry.type.startsWith("image/"))
-                .map((entry) => entry.getAsFile())
-                .filter((entry): entry is File => entry !== null);
               if (picks.length) {
                 event.preventDefault();
                 onImageFiles(picks);
@@ -238,6 +247,17 @@ export function ComposerBar({
               return;
             }
             attachments.handlePaste(event);
+          }}
+          onDragOver={(event) => {
+            if (imageDisabled && Array.from(event.dataTransfer.items).some((item) => item.type.startsWith("image/"))) {
+              event.preventDefault();
+            }
+          }}
+          onDrop={(event) => {
+            const files = Array.from(event.dataTransfer.files).filter((file) => file.type.startsWith("image/"));
+            if (!files.length) return;
+            event.preventDefault();
+            if (!imageDisabled) (onImageFiles ?? attachments.addFiles)(files);
           }}
           onKeyDown={(event) => {
             /* Enter sends like the old single-line input; Shift+Enter makes a
@@ -274,6 +294,8 @@ export function ComposerBar({
                 ariaLabel={imageAriaLabel}
                 className={`inline-flex shrink-0 items-center justify-center rounded-control text-muted hover:bg-sunken hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${iconBtn}`}
                 onFiles={onImageFiles ?? attachments.addFiles}
+                disabled={imageDisabled}
+                disabledReason={imageDisabledReason}
               />
             </Hint>
           ) : null}
@@ -290,6 +312,9 @@ export function ComposerBar({
         >
           {status.text}
         </span>
+      ) : null}
+      {imageDisabled && imageDisabledReason ? (
+        <span role="status" className="text-caption font-semibold text-muted">{imageDisabledReason}</span>
       ) : null}
       {receipts ? <div className="flex flex-wrap gap-1.5">{receipts}</div> : null}
     </>

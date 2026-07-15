@@ -463,7 +463,7 @@ export async function drainHeldDeliveries(
     const reconciling = item.state === "delivery-uncertain";
     if (reconciling && !delivery.reconcileUncertain) return;
     if (!reconciling && (item.state !== "assigned" || item.generationId !== current.id)) return;
-    if (item.payloadKind !== "text") {
+    if (item.payloadKind !== "text" && item.payloadKind !== "runtime-images") {
       registry.recordDeliveryOutcome(item.id, "failed", "request-local delivery requires client retry");
       return;
     }

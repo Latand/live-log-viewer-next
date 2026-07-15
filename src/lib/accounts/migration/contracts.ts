@@ -1,4 +1,5 @@
 import type { AgentEngine } from "@/lib/agent/cli";
+import type { StructuredImageRef } from "@/lib/runtime/structuredContent";
 import type { AgentGoal, AgentPlan, EngineLimits, LimitsProvenance } from "@/lib/types";
 
 export type MigrationEngine = Extract<AgentEngine, "claude" | "codex">;
@@ -203,7 +204,9 @@ export interface HeldDelivery {
   createdAt: string;
   clientMessageId: string | null;
   /** Image payload bytes stay request-local; these reservations can only be retried by the client. */
-  payloadKind: "text" | "ephemeral-images" | "ephemeral-text";
+  payloadKind: "text" | "ephemeral-images" | "ephemeral-text" | "runtime-images";
+  runtimeImages: StructuredImageRef[];
+  contentDigest: string | null;
   /** Inbox files already materialized for an ambiguous request-local attempt. */
   artifactPaths: string[];
   state: "held" | "assigned" | "delivered" | "failed" | "delivery-uncertain";

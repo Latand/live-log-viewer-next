@@ -1,5 +1,11 @@
 import type { DeliveryReceipt, EngineHost, QueueEntry } from "./engineHost";
 import type { RuntimeHostClient } from "./client";
+import {
+  STRUCTURED_IMAGE_CAPABILITY,
+  parseStructuredImageRefs,
+  structuredContent,
+  type StructuredMessageContent,
+} from "./structuredContent";
 
 export interface StructuredDeliveryEffect {
   id: string;
@@ -36,11 +42,11 @@ export function runtimeClientDeliveryPort(client: RuntimeHostClient): Structured
 interface SendEffect {
   operationId: string;
   conversationId: string;
-  text: string;
+  content: StructuredMessageContent;
+  contentDigest: string;
   turnId?: string | null;
   policy?: "queue" | "steer-if-active" | "interrupt-active";
   kind: "send" | "steer";
-  hasImages: boolean;
   eventSeq: number;
 }
 
@@ -66,7 +72,11 @@ function sendEffect(effect: StructuredDeliveryEffect): SendEffect | null {
   const operationId = typeof effect.payload.operationId === "string" ? effect.payload.operationId : "";
   const conversationId = typeof effect.payload.conversationId === "string" ? effect.payload.conversationId : "";
   const text = typeof effect.payload.text === "string" ? effect.payload.text : "";
-  if (!operationId || !conversationId || !text) return null;
+  const images = effect.payload.images === undefined ? [] : parseStructuredImageRefs(effect.payload.images, 16);
+  if (!operationId || !conversationId || !images) return null;
+  let content;
+  try { content = structuredContent(text, images); } catch { return null; }
+  if (typeof effect.payload.contentDigest === "string" && effect.payload.contentDigest !== content.contentDigest) return null;
   const turnId = typeof effect.payload.turnId === "string" || effect.payload.turnId === null
     ? effect.payload.turnId
     : undefined;
@@ -78,9 +88,9 @@ function sendEffect(effect: StructuredDeliveryEffect): SendEffect | null {
   return {
     operationId,
     conversationId,
-    text,
+    content: content.content,
+    contentDigest: content.contentDigest,
     kind: effect.kind === "runtime.steer" ? "steer" : "send",
-    hasImages: Array.isArray(effect.payload.images) && effect.payload.images.length > 0,
     eventSeq: effect.eventSeq,
     ...(turnId !== undefined ? { turnId } : {}),
     ...(policy ? { policy } : {}),
@@ -218,16 +228,16 @@ export class StructuredDeliveryQueue {
         if (blocked) return true;
         continue;
       }
-      if (effect.hasImages) {
-        await this.port.transition(effect.operationId, "failed", { reason: "structured host image delivery is unavailable" });
-        continue;
-      }
       const host = this.resolveHost(effect.conversationId);
       if (!host) return true;
       const health = await host.health();
       if (health.status === "dead" || health.status === "unhosted") {
         await this.port.transition(effect.operationId, "queued", { reason: "dead-host" });
         return true;
+      }
+      if (effect.content.images.length > 0 && !health.activeFlags.includes(STRUCTURED_IMAGE_CAPABILITY)) {
+        await this.port.transition(effect.operationId, "failed", { reason: "structured host image capability is unavailable" });
+        continue;
       }
       const maySteer = health.status === "active"
         && (effect.kind === "steer" || effect.policy === "steer-if-active");
@@ -248,7 +258,10 @@ export class StructuredDeliveryQueue {
             : health.activeTurnRef;
       const entry: QueueEntry = {
         id: effect.operationId,
-        text: effect.text,
+        content: effect.content,
+        contentDigest: effect.contentDigest,
+        text: effect.content.text,
+        images: effect.content.images,
         expectedTurnId: effect.policy === "interrupt-active" ? null : deliveryFence,
       };
       await this.port.transition(

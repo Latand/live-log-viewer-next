@@ -227,6 +227,13 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
   const cardId = conversationIdentity(file);
   const runtimeSession = useRuntimeSession(cardId);
   const structuredSession = structuredComposerSession(runtimeSession);
+  const structuredImageCapability = structuredSession?.session.capabilities.imageInput;
+  const structuredImagesDisabled = Boolean(structuredSession && !structuredImageCapability?.supported);
+  const structuredImagesReason = structuredImagesDisabled
+    ? structuredSession?.session.sessionKey.engine === "codex"
+      ? t("composer.codexImagesVertical2")
+      : t("composer.structuredImagesProtocol")
+    : undefined;
   /* While a card is switching accounts its next send is held for the successor
      (Sol delivery fence): the composer shows the held affordance instead of
      pretending the text reached the live predecessor pane. */
@@ -355,11 +362,12 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
         outcome?: "delivered-to-live" | "resumed" | "held" | "queued" | "delivering" | "delivered" | "recovering" | "failed";
         receipt?: RuntimeReceipt;
       } = structuredSession
-        ? attachments.images.length > 0
-          ? { ok: false, structured: true, error: t("composer.structuredImagesUnavailable") }
+        ? structuredImagesDisabled && attachments.images.length > 0
+          ? { ok: false, structured: true, error: structuredImagesReason }
           : await sendRuntimeMessage({
               conversationId: structuredSession.session.conversationId,
               text: payloadText.trim(),
+              images: attachments.images.map((image) => ({ base64: image.base64, mime: image.mime })),
               idempotencyKey: clientMessageId,
               policy: "interrupt-active",
             }).then((result) => ({
@@ -744,6 +752,8 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
             : []
         }
         showImage={!isMobile}
+        imageDisabled={structuredImagesDisabled}
+        imageDisabledReason={structuredImagesReason}
         receipts={
           displayedRuntimeReceipts.length
             ? <RuntimeComposerReceipts
@@ -775,6 +785,8 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
                     ariaLabel={t("composer.addImages")}
                     className={`inline-flex shrink-0 items-center justify-center rounded-control text-muted hover:bg-sunken hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${iconBtn}`}
                     onFiles={attachments.addFiles}
+                    disabled={structuredImagesDisabled}
+                    disabledReason={structuredImagesReason}
                   />
                 </>
               ) : null}

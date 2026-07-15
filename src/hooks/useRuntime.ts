@@ -156,7 +156,7 @@ export interface SendOptions {
   text: string;
   idempotencyKey: string;
   policy?: "queue" | "steer-if-active" | "interrupt-active";
-  images?: string[];
+  images?: { base64: string; mime: string }[];
   kind?: OperationKind;
 }
 

@@ -8,6 +8,8 @@ import { AgentRegistry } from "@/lib/agent/registry";
 import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
 import type { RuntimeHostClient } from "./client";
 import type { RuntimeSnapshot } from "./contracts";
+import { runtimeImageCapability } from "./runtimeImageStore";
+import { structuredContentDigest, type StructuredImageRef } from "./structuredContent";
 
 import { deliverHeldStructuredMessage, enqueueStructuredMessage } from "./structuredMessageDelivery";
 
@@ -18,10 +20,10 @@ let registryNumber = 0;
 
 afterAll(() => fs.rmSync(sandbox, { recursive: true, force: true }));
 
-function registryWithConversation(accountId = "default") {
+function registryWithConversation(accountId = "default", engine: "codex" | "claude" = "codex") {
   const registry = new AgentRegistry(path.join(sandbox, `registry-${registryNumber += 1}.json`));
   registry.reconcileConversations([{
-    engine: "codex",
+    engine,
     path: artifactPath,
     accountId,
     launchProfile: emptyLaunchProfile({ cwd: "/repo", project: "repo" }),
@@ -32,7 +34,7 @@ function registryWithConversation(accountId = "default") {
   return { registry, conversation };
 }
 
-function snapshot(ownedConversationId = conversationId): RuntimeSnapshot {
+function snapshot(ownedConversationId = conversationId, engine: "codex" | "claude" = "codex", imageSupported = false): RuntimeSnapshot {
   return {
     schemaVersion: 1,
     snapshotSeq: 1,
@@ -42,8 +44,8 @@ function snapshot(ownedConversationId = conversationId): RuntimeSnapshot {
     filesRevision: 0,
     sessions: [{
       conversationId: ownedConversationId,
-      sessionKey: { engine: "codex", sessionId: "11111111-1111-4111-8111-111111111111" },
-      hostKind: "codex-app-server",
+      sessionKey: { engine, sessionId: "11111111-1111-4111-8111-111111111111" },
+      hostKind: engine === "codex" ? "codex-app-server" : "claude-broker",
       host: "hosted",
       turn: "idle",
       provenance: "structured",
@@ -56,7 +58,11 @@ function snapshot(ownedConversationId = conversationId): RuntimeSnapshot {
       workflowId: null,
       cwd: "/repo",
       artifactPath,
-      capabilities: { steer: true, structuredAttention: true },
+      capabilities: {
+        steer: engine === "codex",
+        structuredAttention: true,
+        imageInput: runtimeImageCapability(engine, imageSupported),
+      },
       activeTurnId: null,
     }],
     attentions: [],
@@ -68,6 +74,81 @@ function snapshot(ownedConversationId = conversationId): RuntimeSnapshot {
     deployments: [],
   };
 }
+
+test("Claude image-only admission stores refs and journals their content digest", async () => {
+  const { registry, conversation } = registryWithConversation("default", "claude");
+  const imageRef: StructuredImageRef = { sha256: "a".repeat(64), mime: "image/png", bytes: 67 };
+  let command: Record<string, unknown> | null = null;
+  const client = {
+    snapshot: async () => snapshot(conversation.id, "claude", true),
+    command: async (value: Record<string, unknown>) => {
+      command = value;
+      return {
+        operationId: "op-image-only",
+        replayed: false,
+        receipt: {
+          operationId: "op-image-only",
+          idempotencyKey: "image-only-key",
+          conversationId: conversation.id,
+          kind: "send",
+          status: "queued",
+          text: "",
+          imageCount: 1,
+          at: "2026-07-15T00:00:00.000Z",
+          revision: 1,
+        },
+      };
+    },
+  } as unknown as RuntimeHostClient;
+
+  const result = await enqueueStructuredMessage({
+    path: artifactPath,
+    conversationId: conversation.id,
+    clientMessageId: "image-only-key",
+    text: "",
+    images: [{ base64: "fixture", mime: "image/png" }],
+  }, {
+    enabled: () => true,
+    client: () => client,
+    registry: () => registry,
+    storeImages: () => [imageRef],
+    kick: () => {},
+  });
+
+  expect(result).toMatchObject({ ok: true, outcome: "queued" });
+  expect(command).toMatchObject({
+    text: "",
+    images: [imageRef],
+    contentDigest: structuredContentDigest({ text: "", images: [imageRef] }),
+  });
+});
+
+test("stale structured image capability rejects before blob storage or command admission", async () => {
+  const { registry, conversation } = registryWithConversation("default", "claude");
+  let stores = 0;
+  let commands = 0;
+  const client = {
+    snapshot: async () => snapshot(conversation.id, "claude", false),
+    command: async () => { commands += 1; throw new Error("unexpected command"); },
+  } as unknown as RuntimeHostClient;
+
+  const result = await enqueueStructuredMessage({
+    path: artifactPath,
+    conversationId: conversation.id,
+    clientMessageId: "stale-image-capability",
+    text: "",
+    images: [{ base64: "fixture", mime: "image/png" }],
+  }, {
+    enabled: () => true,
+    client: () => client,
+    registry: () => registry,
+    storeImages: () => { stores += 1; return []; },
+  });
+
+  expect(result).toMatchObject({ ok: false, status: 409, error: "Structured image protocol is unavailable for this host." });
+  expect(stores).toBe(0);
+  expect(commands).toBe(0);
+});
 
 test("structured message routing is inert while its gate is disabled", async () => {
   let called = false;

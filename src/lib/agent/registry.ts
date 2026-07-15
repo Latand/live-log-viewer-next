@@ -26,6 +26,7 @@ import type { AgentEngine } from "./cli";
 import { sessionKeyFromTranscript, sessionKeyId, type SessionKey } from "./sessionKey";
 import { SqliteAgentRegistryStore, type SqliteRegistrySnapshot } from "./sqliteRegistryStore";
 import type { ResumePaneRecord } from "@/lib/resumePanesFile";
+import { parseStructuredImageRefs, structuredContent, type StructuredImageRef } from "@/lib/runtime/structuredContent";
 
 export type AgentHostStatus = "starting" | "live" | "idle" | "handoff" | "unhosted" | "dead";
 
@@ -860,11 +861,19 @@ function normalizePolicy(value: AutoBalancePolicy | undefined): AutoBalancePolic
 
 function normalizeHeldDelivery(value: HeldDelivery): HeldDelivery {
   const state = value.state ?? "held";
+  const payloadKind = value.payloadKind ?? "text";
+  const runtimeImages = parseStructuredImageRefs(value.runtimeImages ?? [], 16) ?? [];
+  let contentDigest = typeof value.contentDigest === "string" ? value.contentDigest : null;
+  if (!contentDigest && state !== "delivered" && (payloadKind === "text" || payloadKind === "runtime-images")) {
+    try { contentDigest = structuredContent(value.text, runtimeImages).contentDigest; } catch { /* legacy invalid records stay recoverable */ }
+  }
   return {
     ...value,
     text: state === "delivered" ? "" : value.text,
     clientMessageId: value.clientMessageId ?? null,
-    payloadKind: value.payloadKind ?? "text",
+    payloadKind,
+    runtimeImages,
+    contentDigest,
     artifactPaths: Array.isArray(value.artifactPaths)
       ? value.artifactPaths.filter((pathname): pathname is string => typeof pathname === "string")
       : [],
@@ -3569,6 +3578,8 @@ export class AgentRegistry {
     text: string,
     clientMessageId: string | null = null,
     payloadKind: HeldDelivery["payloadKind"] = "text",
+    runtimeImages: readonly StructuredImageRef[] = [],
+    contentDigest: string | null = null,
   ): HeldDelivery {
     if (payloadKind === "text" && (!text || text.length > 32_000)) throw new Error("held delivery must contain at most 32000 characters");
     return this.mutate((file) => {
@@ -3601,7 +3612,12 @@ export class AgentRegistry {
         if (conversation) advanceMigrationScopeRevision(file, conversation.engine, signature, paths);
         return clone(delivery);
       };
-      if (existing) return place(existing);
+      if (existing) {
+        if (contentDigest && contentDigest !== existing.contentDigest) {
+          throw new Error("held delivery idempotency conflict");
+        }
+        return place(existing);
+      }
       const held: HeldDelivery = {
         id: crypto.randomUUID(),
         conversationId: canonicalId,
@@ -3609,6 +3625,8 @@ export class AgentRegistry {
         createdAt: now(),
         clientMessageId,
         payloadKind,
+        runtimeImages: runtimeImages.map((image) => ({ ...image })),
+        contentDigest,
         artifactPaths: [],
         state: "held",
         generationId: null,

@@ -150,10 +150,14 @@ export function ImagePickerButton({
   onFiles,
   ariaLabel,
   className,
+  disabled = false,
+  disabledReason,
 }: {
   onFiles: (files: File[]) => void;
   ariaLabel: string;
   className: string;
+  disabled?: boolean;
+  disabledReason?: string;
 }) {
   const fileRef = useRef<HTMLInputElement>(null);
   return (
@@ -163,13 +167,14 @@ export function ImagePickerButton({
         type="file"
         accept="image/*"
         multiple
+        disabled={disabled}
         className="hidden"
         onChange={(event) => {
           onFiles(Array.from(event.target.files ?? []));
           event.target.value = "";
         }}
       />
-      <button type="button" aria-label={ariaLabel} onClick={() => fileRef.current?.click()} className={className}>
+      <button type="button" aria-label={ariaLabel} title={disabledReason} disabled={disabled} onClick={() => fileRef.current?.click()} className={className}>
         <ImageIcon className="h-4 w-4" aria-hidden />
       </button>
     </>
