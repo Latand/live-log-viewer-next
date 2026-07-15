@@ -1,6 +1,6 @@
 "use client";
 
-import { Link2, Loader2, Send, Trash2, X } from "lucide-react";
+import { ChevronDown, ChevronUp, Crosshair, Link2, Loader2, Send, Trash2, X } from "lucide-react";
 import { memo, useEffect, useRef, useState } from "react";
 
 import { useLocale } from "@/lib/i18n";
@@ -14,7 +14,14 @@ import { activityDot, cleanTitle, engineBadge, engineBadgeFor } from "@/componen
 
 import type { Camera } from "./Minimap";
 import { MOVE_EASE, MOVE_MS } from "./nodes";
-import { TASK_BODY_MAX, TASK_W, taskRect, type PlacedTask, type SchemeRect } from "./taskGeometry";
+import { TASK_W, taskCardExpandable, taskRect, type PlacedTask, type SchemeRect } from "./taskGeometry";
+
+/* Collapsed text clamps. Tailwind's scanner needs the literal class names, so
+   these must mirror TASK_TITLE_CLAMP / TASK_PREVIEW_CLAMP in taskGeometry.ts —
+   the height estimate is an upper bound only while the rendered clamp is at or
+   under the geometry constant. */
+const TITLE_CLAMP_CLASS = "line-clamp-2";
+const PREVIEW_CLAMP_CLASS = "line-clamp-3";
 
 /* Below this zoom the card text is unreadable: an edit click glides first. */
 const EDIT_MIN_Z = 0.55;
@@ -45,6 +52,12 @@ export interface TaskCardHandlers {
   /** Detach one assignment — the undo for a wrong handoff. */
   unassign: (task: BoardTask, path: string) => void;
   center: (rect: SchemeRect) => void;
+  /** Toggle the card between its compact and full-text presentation. The
+      expanded set lives on the board so geometry/reflow see it (issue #292). */
+  toggleExpand: (id: string) => void;
+  /** Open + center the assigned agent's live pane through its canonical
+      conversation path — the same opener a pane click uses. */
+  openAgent: (file: FileEntry) => void;
 }
 
 function AssignmentChip({
@@ -52,11 +65,13 @@ function AssignmentChip({
   assignment,
   file,
   onDetach,
+  onOpen,
 }: {
   task: BoardTask;
   assignment: BoardTask["assignments"][number];
   file: FileEntry | null;
   onDetach: (task: BoardTask, path: string) => void;
+  onOpen: (file: FileEntry) => void;
 }) {
   const { t } = useLocale();
   if (!assignment.path) {
@@ -101,6 +116,23 @@ function AssignmentChip({
       ) : null}
       <span className="min-w-0 flex-1 truncate text-[10.5px] font-semibold">{title}</span>
       {failed ? <span aria-hidden>⚠</span> : null}
+      {/* The one-click way from the task to its agent: opens and centers the
+          live pane via the canonical conversation path. A dead assignment keeps
+          the control visible but truthfully disabled — there is no pane to
+          open until the conversation returns to the list. */}
+      <button
+        type="button"
+        data-task-open-agent
+        className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-muted hover:bg-black/5 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-muted"
+        aria-label={t("tasks.openAgentAria", { title })}
+        title={dead ? t("tasks.deadChip") : t("tasks.openAgent")}
+        disabled={dead}
+        onClick={() => {
+          if (file) onOpen(file);
+        }}
+      >
+        <Crosshair className="h-3 w-3" aria-hidden />
+      </button>
       <button
         type="button"
         className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-muted hover:bg-black/5 hover:text-danger focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
@@ -140,14 +172,18 @@ function SourceChip({ task, file }: { task: BoardTask; file: FileEntry | null })
 
 /**
  * A task as a sticky card on the board: tinted by status with a colored top
- * strip, first line bold, body scrolling past the cap, assignment chips and
- * a hover action row. Owns its drag (world deltas via the camera ref, one
- * PATCH on drop) and its inline editing (blur/Esc saves, autosave debounce).
+ * strip, first line bold, the body clamped to a compact preview (expandable to
+ * the full text via the bottom disclosure — no internal scrolling either way),
+ * assignment chips and a hover action row. Owns its drag (world deltas via the
+ * camera ref, one PATCH on drop) and its inline editing (blur/Esc saves,
+ * autosave debounce); the expanded state lives on the board so placement and
+ * edge routing reflow around the grown card (issue #292).
  */
 export const TaskCard = memo(function TaskCard({
   task,
   files,
   selected,
+  expanded,
   camRef,
   handlers,
 }: {
@@ -155,6 +191,8 @@ export const TaskCard = memo(function TaskCard({
   files: FileEntry[];
   /** Holds the spatial-nav selection ring (Arrow-key focus, issue #292). */
   selected: boolean;
+  /** Full-text presentation (board-owned, session-only). */
+  expanded: boolean;
   camRef: React.RefObject<Camera>;
   handlers: TaskCardHandlers;
 }) {
@@ -338,12 +376,21 @@ export const TaskCard = memo(function TaskCard({
             maxLength={6000}
           />
         ) : (
-          <div data-task-body className="cursor-text overflow-y-auto px-3 py-2" style={{ maxHeight: TASK_BODY_MAX }}>
-            <div className="whitespace-pre-wrap break-words text-[12.5px] font-semibold leading-[17px] tracking-[-0.006em] text-primary">
+          /* No internal scrollbar in either presentation: collapsed text is
+             CSS-clamped to the same row budget the height estimate counts, and
+             expanded shows every row of the durable text (issue #292). */
+          <div data-task-body className="cursor-text px-3 py-2">
+            <div
+              className={`whitespace-pre-wrap break-words text-[12.5px] font-semibold leading-[17px] tracking-[-0.006em] text-primary ${
+                expanded ? "" : TITLE_CLAMP_CLASS
+              }`}
+            >
               {title}
             </div>
             {rest.trim() ? (
-              <div className="whitespace-pre-wrap break-words text-[12.5px] leading-[17px] text-secondary">{rest}</div>
+              <div className={`whitespace-pre-wrap break-words text-[12.5px] leading-[17px] text-secondary ${expanded ? "" : PREVIEW_CLAMP_CLASS}`}>
+                {rest}
+              </div>
             ) : null}
           </div>
         )}
@@ -357,8 +404,26 @@ export const TaskCard = memo(function TaskCard({
                 assignment={assignment}
                 file={assignment.path ? (byPath.get(assignment.path) ?? null) : null}
                 onDetach={(target, path) => handlers.unassign(target, path)}
+                onOpen={handlers.openAgent}
               />
             ))}
+          </div>
+        ) : null}
+        {/* Bottom disclosure — rendered exactly when the geometry counted it
+            (taskCardExpandable), so the height estimate stays an upper bound.
+            Hidden while the textarea owns the card. */}
+        {!editing && taskCardExpandable(task) ? (
+          <div className="px-2 pb-2">
+            <button
+              type="button"
+              data-task-disclosure
+              aria-expanded={expanded}
+              className="flex h-6 w-full items-center justify-center gap-1 rounded-[7px] border border-border bg-card/60 text-[10.5px] font-semibold text-muted transition-colors hover:bg-card hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+              onClick={() => handlers.toggleExpand(task.id)}
+            >
+              {expanded ? <ChevronUp className="h-3 w-3" aria-hidden /> : <ChevronDown className="h-3 w-3" aria-hidden />}
+              {t(expanded ? "tasks.collapse" : "tasks.expand")}
+            </button>
           </div>
         ) : null}
       </div>

@@ -51,6 +51,7 @@ export const TasksLayer = memo(function TasksLayer({
   interactive,
   lite,
   selectedId,
+  expandedIds,
   camRef,
   handlers,
   pending,
@@ -65,6 +66,8 @@ export const TasksLayer = memo(function TasksLayer({
   lite: boolean;
   /** Id of the card holding the spatial-nav selection ring, or null. */
   selectedId: string | null;
+  /** Ids of cards showing their full text (board-owned, issue #292). */
+  expandedIds: ReadonlySet<string>;
   camRef: React.RefObject<Camera>;
   handlers: TaskCardHandlers;
   /** World point where the «task» tool / double-click / `+ Task` dropped a
@@ -79,7 +82,15 @@ export const TasksLayer = memo(function TasksLayer({
         lite ? (
           <LiteTaskCard key={task.id} task={task} />
         ) : (
-          <TaskCard key={task.id} task={task} files={files} selected={task.id === selectedId} camRef={camRef} handlers={handlers} />
+          <TaskCard
+            key={task.id}
+            task={task}
+            files={files}
+            selected={task.id === selectedId}
+            expanded={expandedIds.has(task.id)}
+            camRef={camRef}
+            handlers={handlers}
+          />
         ),
       )}
       {pending && !lite ? (

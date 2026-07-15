@@ -15,8 +15,17 @@ export function isPlacedTask(task: BoardTask): task is PlacedTask {
 
 /* Task card geometry in world pixels (docs/design/sticky-notes.md). */
 export const TASK_W = 260;
-/** Body height cap; past it the card body scrolls internally. */
-export const TASK_BODY_MAX = 340;
+/* Collapsed cards clamp their text instead of scrolling (issue #292): the bold
+   title shows at most TASK_TITLE_CLAMP rendered rows and the body preview at
+   most TASK_PREVIEW_CLAMP (CSS line-clamp in TaskCard), so the collapsed render
+   can never exceed the clamped row count and the height estimate stays an upper
+   bound by construction. Expanding removes the clamps and the estimate switches
+   to the full wrap simulation below. */
+export const TASK_TITLE_CLAMP = 2;
+export const TASK_PREVIEW_CLAMP = 3;
+/** Bottom disclosure row («Expand/Collapse task»): an h-6 control inside a
+    px-2 pb-2 block — 24 + 8. Rendered exactly when {@link taskCardExpandable}. */
+export const TASK_DISCLOSURE_H = 32;
 const TASK_MIN_H = 64;
 /* Card body geometry: 12.5px text on 17px lines inside 12px (px-3) horizontal
    padding, so the wrap width is TASK_W − 24 = 236px. This estimate must be an
@@ -95,31 +104,61 @@ function hardLineRows(line: string): number {
   return rows;
 }
 
+/* Worst-case rendered rows of the two body blocks TaskCard draws: the bold
+   first line (the title) and everything after the first hard break (the rest).
+   Split on every hard break `whitespace-pre-wrap` renders — CRLF, a lone CR,
+   or a lone LF — so a string of standalone `\r`s can't hide extra rendered
+   rows inside one counted line and undercount the height. */
+function taskTextRows(text: string): { title: number; rest: number } {
+  const lines = text.split(/\r\n?|\n/);
+  const title = hardLineRows(lines[0] ?? "");
+  let rest = 0;
+  for (let i = 1; i < lines.length; i++) rest += hardLineRows(lines[i]!);
+  return { title, rest };
+}
+
 /**
- * Estimated on-board height of a task card: status strip + wrapped text
- * (capped at the internal-scroll threshold) + one chip row per assignment.
- * A conservative upper bound of the rendered card — the wrap simulation counts
+ * Does this card hold more text than its collapsed clamps can show? Decides —
+ * for the render and the height estimate alike, so the two can never disagree —
+ * whether the bottom disclosure control appears and whether expanding changes
+ * anything. Computed against the same upper-bound wrap simulation as the
+ * height: an over-count can only show a disclosure over text that already fits
+ * (harmless), never hide clipped text.
+ */
+export function taskCardExpandable(task: Pick<BoardTask, "text">): boolean {
+  const rows = taskTextRows(task.text);
+  return rows.title > TASK_TITLE_CLAMP || rows.rest > TASK_PREVIEW_CLAMP;
+}
+
+/**
+ * Estimated on-board height of a task card: status strip + text + one chip row
+ * per assignment + the disclosure row when the text overruns the collapsed
+ * clamps. Collapsed (the default) the text contributes at most
+ * TASK_TITLE_CLAMP + TASK_PREVIEW_CLAMP rows — the CSS line-clamps guarantee
+ * the render never exceeds that; expanded it contributes every wrapped row of
+ * the full durable text, with no internal scrolling or cap. Either way a
+ * conservative upper bound of the rendered card — the wrap simulation counts
  * rows against upper-bound glyph widths and every hard break — so the returned
  * box always contains the rendered card and the collision pass never lets two
  * cards overlap on screen.
  */
-export function taskCardHeight(task: Pick<BoardTask, "text" | "assignments" | "source">): number {
-  let lines = 0;
-  /* Split on every hard break `whitespace-pre-wrap` renders — CRLF, a lone CR,
-     or a lone LF — so a string of standalone `\r`s can't hide extra rendered
-     rows inside one counted line and undercount the height. */
-  for (const raw of task.text.split(/\r\n?|\n/)) {
-    lines += hardLineRows(raw);
-  }
-  const bodyH = Math.min(lines * LINE_H, TASK_BODY_MAX) + PAD_Y;
+export function taskCardHeight(task: Pick<BoardTask, "text" | "assignments" | "source">, expanded = false): number {
+  const rows = taskTextRows(task.text);
+  const expandable = rows.title > TASK_TITLE_CLAMP || rows.rest > TASK_PREVIEW_CLAMP;
+  const lines =
+    expanded && expandable
+      ? rows.title + rows.rest
+      : Math.min(rows.title, TASK_TITLE_CLAMP) + Math.min(rows.rest, TASK_PREVIEW_CLAMP);
+  const bodyH = lines * LINE_H + PAD_Y;
   const chipRows = task.assignments.length + (task.source ? 1 : 0);
   const chipsH = chipRows ? chipRows * CHIP_ROW_H + CHIP_PAD : 0;
-  return Math.max(TASK_MIN_H, STRIP_H + bodyH + chipsH);
+  const discloseH = expandable ? TASK_DISCLOSURE_H : 0;
+  return Math.max(TASK_MIN_H, STRIP_H + bodyH + chipsH + discloseH);
 }
 
 /** World-space box of a task card, derived from its owned position. */
-export function taskRect(task: Pick<PlacedTask, "pos" | "text" | "assignments" | "source">): SchemeRect {
-  return { x: task.pos.x, y: task.pos.y, w: TASK_W, h: taskCardHeight(task) };
+export function taskRect(task: Pick<PlacedTask, "pos" | "text" | "assignments" | "source">, expanded = false): SchemeRect {
+  return { x: task.pos.x, y: task.pos.y, w: TASK_W, h: taskCardHeight(task, expanded) };
 }
 
 export function rectCenter(rect: SchemeRect): { x: number; y: number } {
@@ -222,11 +261,17 @@ export interface TaskEdgeGeom {
  * Edge geometry from every task card to each resolvable assignment target.
  * Spawning assignments without a transcript and dead assignments (path
  * absent from the index) draw no edge — they stay chips on the card.
+ * `expandedIds` grows the card box for expanded cards so their edges anchor on
+ * the rendered boundary, never underneath the grown card.
  */
-export function buildTaskEdges(tasks: readonly PlacedTask[], index: ReadonlyMap<string, SchemeRect>): TaskEdgeGeom[] {
+export function buildTaskEdges(
+  tasks: readonly PlacedTask[],
+  index: ReadonlyMap<string, SchemeRect>,
+  expandedIds?: ReadonlySet<string>,
+): TaskEdgeGeom[] {
   const edges: TaskEdgeGeom[] = [];
   for (const task of tasks) {
-    const card = taskRect(task);
+    const card = taskRect(task, expandedIds?.has(task.id) ?? false);
     const cardCenter = rectCenter(card);
     if (task.source) {
       const target = index.get(task.source.path);

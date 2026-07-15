@@ -457,6 +457,21 @@ export function SchemeBoard({
     const fresh = localTasks.filter((task) => !have.has(task.id) && task.project === project);
     return fresh.length ? [...tasks, ...fresh] : tasks;
   }, [tasks, localTasks, project]);
+  /* Cards showing their full text (issue #292). Board-owned and session-only —
+     never persisted, so expanding changes no task data — and threaded through
+     every geometry consumer (placement, nav targets, edge routing, camera
+     rects) so the grown card reflows instead of overlapping. Pruned when a
+     card leaves the board so a reused id never comes back pre-expanded. */
+  const [expandedTaskIds, setExpandedTaskIds] = useState<ReadonlySet<string>>(new Set());
+  useEffect(() => {
+    const have = new Set(mergedTasks.map((task) => task.id));
+    /* eslint-disable-next-line react-hooks/set-state-in-effect -- prune-only:
+       returns the same reference unless a tracked card left the board */
+    setExpandedTaskIds((prev) => {
+      if (![...prev].some((id) => !have.has(id))) return prev;
+      return new Set([...prev].filter((id) => have.has(id)));
+    });
+  }, [mergedTasks]);
   /* Panes, decks, stacks and drafts the cards must not bury (issue #17): the
      placement pass spreads any pileup into their gaps. Group halos are derived
      from these same rects, so nudging cards never disturbs a flow/pipeline
@@ -478,7 +493,7 @@ export function SchemeBoard({
   /* Collision-aware display positions: cards keep their stored spot unless they
      overlap another card or pane, so hand-arranged boards pass through untouched
      while the curator/inbox lattice pileup gets spread out and stays readable. */
-  const placement = useMemo(() => resolveTaskPlacements(boardTasks, taskObstacles), [boardTasks, taskObstacles]);
+  const placement = useMemo(() => resolveTaskPlacements(boardTasks, taskObstacles, expandedTaskIds), [boardTasks, taskObstacles, expandedTaskIds]);
   const placedTasks = useMemo(
     () =>
       boardTasks.map((task) => {
@@ -489,8 +504,8 @@ export function SchemeBoard({
   );
   /* Camera-facing rects: focus glides and map taps resolve task keys. */
   const taskRects = useMemo(
-    () => new Map(placedTasks.map((task) => [taskNavKey(task.id), taskRect(task)] as const)),
-    [placedTasks],
+    () => new Map(placedTasks.map((task) => [taskNavKey(task.id), taskRect(task, expandedTaskIds.has(task.id))] as const)),
+    [placedTasks, expandedTaskIds],
   );
   /* Task cards as spatial-nav targets: the same world box the camera resolves,
      plus the first-line title the live region announces. Arrow keys tier
@@ -498,17 +513,21 @@ export function SchemeBoard({
   const taskNav = useMemo<TaskNavTarget[]>(
     () =>
       placedTasks.map((task) => {
-        const rect = taskRect(task);
+        const rect = taskRect(task, expandedTaskIds.has(task.id));
         return { key: taskNavKey(task.id), x: rect.x, y: rect.y, w: rect.w, h: rect.h, label: taskTitle(task.text) || t("tasks.untitled") };
       }),
-    [placedTasks, t],
+    [placedTasks, expandedTaskIds, t],
   );
-  const taskEdges = useMemo(() => buildTaskEdges(placedTasks, buildTaskTargetIndex(layout)), [placedTasks, layout]);
+  /* Where each assignment path is drawn — shared by the edge builder and the
+     card's open-agent control, which centers the camera on the same box the
+     edge lands on. */
+  const taskTargetIndex = useMemo(() => buildTaskTargetIndex(layout), [layout]);
+  const taskEdges = useMemo(() => buildTaskEdges(placedTasks, taskTargetIndex, expandedTaskIds), [placedTasks, taskTargetIndex, expandedTaskIds]);
   /* Card rects the edge router steers around, each tagged with its task so an
      edge is never counted as crossing the card it leaves from (issue #17). */
   const taskCardObstacles = useMemo(
-    () => placedTasks.map((task) => ({ id: task.id, ...taskRect(task) })),
-    [placedTasks],
+    () => placedTasks.map((task) => ({ id: task.id, ...taskRect(task, expandedTaskIds.has(task.id)) })),
+    [placedTasks, expandedTaskIds],
   );
   /* Route all task edges here — the layer only renders them — so the world box below can grow
      to include the routed geometry. Cached on a rounded geometry signature: the
@@ -777,6 +796,13 @@ export function SchemeBoard({
      cleaned up by a click — nothing is ever re-delivered from the board. */
   const retryEdge = useCallback((taskId: string, path: string) => void unassignTask(taskId, path), []);
 
+  /* The open-agent control resolves its target box through this ref so a
+     layout poll never rebuilds the handlers (the task layer memoizes on them). */
+  const taskTargetIndexRef = useRef(taskTargetIndex);
+  useEffect(() => {
+    taskTargetIndexRef.current = taskTargetIndex;
+  }, [taskTargetIndex]);
+
   const taskHandlers = useMemo<TaskCardHandlers>(
     () => ({
       patch: async (id, patch) => {
@@ -816,8 +842,24 @@ export function SchemeBoard({
         if (error) pushTaskToast("err", error);
       },
       center: (rect: SchemeRect) => centerOn(rect, 0.75),
+      toggleExpand: (id) =>
+        setExpandedTaskIds((prev) => {
+          const next = new Set(prev);
+          if (next.has(id)) next.delete(id);
+          else next.add(id);
+          return next;
+        }),
+      /* Open + center the assigned agent: glide onto the box its edge lands on
+         (a pane, or the stack/deck hosting it), then run the canonical opener —
+         the same select a pane click routes through, which restores a hidden
+         node and rings a visible one. */
+      openAgent: (file) => {
+        const rect = taskTargetIndexRef.current.get(file.path);
+        if (rect) centerOn(rect, 0.75);
+        stableSelect(file);
+      },
     }),
-    [centerOn],
+    [centerOn, stableSelect],
   );
 
   /* The sticky composer owns the create (text, voice, images, deadline); the
@@ -940,6 +982,7 @@ export function SchemeBoard({
           interactive={!handLike && !session}
           lite={mapMode}
           selectedId={isTaskNavKey(selected) ? selected!.slice(TASK_NAV_PREFIX.length) : null}
+          expandedIds={expandedTaskIds}
           camRef={camRef}
           handlers={taskHandlers}
           pending={pendingTask}

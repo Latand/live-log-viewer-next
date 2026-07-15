@@ -120,36 +120,62 @@ export function isAutoPlaceable(task: PlaceableTask): boolean {
  * first, id as the final tiebreak), so the oldest card of a pileup holds the
  * anchor and each new one flows around those already there — adding a task can
  * never reshuffle the cards that predate it.
+ *
+ * `expandedIds` (issue #292) marks cards showing their full text: an expanded
+ * card grows to its expanded height and anchors at its own spot — the user just
+ * opened it to read — while any card its grown box now covers is displaced for
+ * display until the card collapses again (the stored positions never change, so
+ * collapsing restores the arrangement exactly). Two expanded cards that overlap
+ * each other resolve in creation order: the older holds, the newer relocates.
  */
-export function resolveTaskPlacements(tasks: readonly PlaceableTask[], obstacles: readonly SchemeRect[]): Map<string, { x: number; y: number }> {
-  const cards = tasks.map((task) => ({
-    id: task.id,
-    createdAt: task.createdAt,
-    x: task.pos.x,
-    y: task.pos.y,
-    w: TASK_W,
-    h: taskCardHeight(task),
-    auto: isAutoPlaceable(task),
-  }));
+export function resolveTaskPlacements(
+  tasks: readonly PlaceableTask[],
+  obstacles: readonly SchemeRect[],
+  expandedIds?: ReadonlySet<string>,
+): Map<string, { x: number; y: number }> {
+  const cards = tasks.map((task) => {
+    const expanded = expandedIds?.has(task.id) ?? false;
+    return {
+      id: task.id,
+      createdAt: task.createdAt,
+      x: task.pos.x,
+      y: task.pos.y,
+      w: TASK_W,
+      h: taskCardHeight(task, expanded),
+      auto: !expanded && isAutoPlaceable(task),
+      expanded,
+    };
+  });
+  const byAge = (a: (typeof cards)[number], b: (typeof cards)[number]) =>
+    a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
 
   const placed: SchemeRect[] = [];
+  const expandedRects: SchemeRect[] = [];
   const result = new Map<string, { x: number; y: number }>();
-  /* Held cards land first at their exact spot and join `placed` as anchors, so
-     auto cards flow around them no matter the input order. */
-  for (const card of cards) {
-    if (card.auto) continue;
-    const spot = { x: card.x, y: card.y };
+  const land = (card: (typeof cards)[number], spot: { x: number; y: number }) => {
     result.set(card.id, spot);
-    placed.push({ x: spot.x, y: spot.y, w: card.w, h: card.h });
+    const rect = { x: spot.x, y: spot.y, w: card.w, h: card.h };
+    placed.push(rect);
+    if (card.expanded) expandedRects.push(rect);
+  };
+
+  /* Expanded cards land first: each holds its spot unless an older expanded
+     card's grown box already covers it. */
+  for (const card of cards.filter((c) => c.expanded).sort(byAge)) {
+    const spot = clashesAny(card, expandedRects, TASK_GUTTER) ? findSlot(card, placed, obstacles) : { x: card.x, y: card.y };
+    land(card, spot);
   }
 
-  const order = cards
-    .filter((card) => card.auto)
-    .sort((a, b) => (a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
-  for (const card of order) {
-    const spot = findSlot(card, placed, obstacles);
-    result.set(card.id, spot);
-    placed.push({ x: spot.x, y: spot.y, w: card.w, h: card.h });
+  /* Held cards keep their exact spot — the user's arrangement — and join
+     `placed` as anchors, unless an expanded card's grown box covers them: those
+     step aside for display so the full text stays readable without overlap. */
+  for (const card of cards.filter((c) => !c.expanded && !c.auto).sort(byAge)) {
+    const spot = clashesAny(card, expandedRects, TASK_GUTTER) ? findSlot(card, placed, obstacles) : { x: card.x, y: card.y };
+    land(card, spot);
+  }
+
+  for (const card of cards.filter((c) => c.auto).sort(byAge)) {
+    land(card, findSlot(card, placed, obstacles));
   }
   return result;
 }

@@ -209,3 +209,71 @@ describe("resolveTaskPlacements", () => {
     }
   });
 });
+
+describe("resolveTaskPlacements — expanded cards (issue #292)", () => {
+  /* Tall enough that its expanded box swallows a card 200px below. */
+  const LONG = Array.from({ length: 30 }, (_, i) => `line ${i}`).join("\n");
+
+  test("an expanded card holds its spot; the pinned card it now covers steps aside", () => {
+    const a = task("a", 0, 0, { text: LONG, createdAt: "2026-07-01T00:00:00.000Z" });
+    const b = task("b", 0, 200, { createdAt: "2026-07-02T00:00:00.000Z" });
+    /* Collapsed, the two never touch — both hold. */
+    const collapsed = resolveTaskPlacements([a, b], []);
+    expect(collapsed.get("a")).toEqual({ x: 0, y: 0 });
+    expect(collapsed.get("b")).toEqual({ x: 0, y: 200 });
+    /* Expanded, a's grown box covers b: a holds (the user is reading it), b is
+       displaced for display and the two clear each other. */
+    const expanded = resolveTaskPlacements([a, b], [], new Set(["a"]));
+    expect(expanded.get("a")).toEqual({ x: 0, y: 0 });
+    expect(expanded.get("b")).not.toEqual({ x: 0, y: 200 });
+    const rectA = { x: 0, y: 0, w: TASK_W, h: taskCardHeight(a, true) };
+    const rectB = { ...expanded.get("b")!, w: TASK_W, h: taskCardHeight(b) };
+    expect(clash(rectA, rectB, TASK_GUTTER - 1)).toBe(false);
+  });
+
+  test("collapsing restores the arrangement exactly (stored positions never change)", () => {
+    const a = task("a", 0, 0, { text: LONG });
+    const b = task("b", 0, 200);
+    const before = resolveTaskPlacements([a, b], []);
+    const after = resolveTaskPlacements([a, b], []);
+    expect(after.get("a")).toEqual(before.get("a"));
+    expect(after.get("b")).toEqual(before.get("b"));
+  });
+
+  test("a pinned card clear of the expanded box does not move", () => {
+    const a = task("a", 0, 0, { text: LONG });
+    const far = task("far", 2000, 0);
+    const placement = resolveTaskPlacements([a, far], [], new Set(["a"]));
+    expect(placement.get("far")).toEqual({ x: 2000, y: 0 });
+  });
+
+  test("two overlapping expanded cards resolve in creation order without overlap", () => {
+    const a = task("a", 0, 0, { text: LONG, createdAt: "2026-07-01T00:00:00.000Z" });
+    const b = task("b", 0, 200, { text: LONG, createdAt: "2026-07-02T00:00:00.000Z" });
+    const placement = resolveTaskPlacements([a, b], [], new Set(["a", "b"]));
+    expect(placement.get("a")).toEqual({ x: 0, y: 0 });
+    const rectA = { x: 0, y: 0, w: TASK_W, h: taskCardHeight(a, true) };
+    const rectB = { ...placement.get("b")!, w: TASK_W, h: taskCardHeight(b, true) };
+    expect(clash(rectA, rectB, TASK_GUTTER - 1)).toBe(false);
+  });
+
+  test("an expanded auto card anchors instead of auto-flowing", () => {
+    /* Reading an auto card must not let the auto pass slide it around. */
+    const auto = task("auto", 740, 120, { text: LONG, source: SRC });
+    expect(isAutoPlaceable(auto)).toBe(true);
+    const placement = resolveTaskPlacements([auto], [], new Set(["auto"]));
+    expect(placement.get("auto")).toEqual({ x: 740, y: 120 });
+  });
+
+  test("deterministic with expansions: permuting the input yields identical positions", () => {
+    const tasks = [
+      task("a", 0, 0, { text: LONG, createdAt: "2026-07-01T00:00:00.000Z" }),
+      task("b", 0, 200, { createdAt: "2026-07-02T00:00:00.000Z" }),
+      task("c", 0, 420, { createdAt: "2026-07-03T00:00:00.000Z" }),
+    ];
+    const expanded = new Set(["a"]);
+    const forward = resolveTaskPlacements(tasks, [], expanded);
+    const reversed = resolveTaskPlacements([...tasks].reverse(), [], expanded);
+    for (const t of tasks) expect(reversed.get(t.id)).toEqual(forward.get(t.id));
+  });
+});

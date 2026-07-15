@@ -12,9 +12,12 @@ import {
   routePathsBounds,
   routeTaskEdge,
   routeTaskEdges,
-  TASK_BODY_MAX,
+  TASK_DISCLOSURE_H,
+  TASK_PREVIEW_CLAMP,
+  TASK_TITLE_CLAMP,
   TASK_W,
   TASK_WORLD_MARGIN,
+  taskCardExpandable,
   taskCardHeight,
   taskEdgesSignature,
   taskRect,
@@ -102,11 +105,51 @@ describe("taskRect / taskCardHeight", () => {
     expect(rect).toMatchObject({ x: 40, y: 60, w: TASK_W });
   });
 
-  test("height grows with text but the body caps at the scroll threshold", () => {
-    const short = taskCardHeight(task({ id: "t", text: "x" }));
+  test("collapsed height is short and text-length independent past the clamps", () => {
+    /* The collapsed card clamps title + preview (no internal scroll), so a
+       6,000-char body and a 600-char body collapse to the same short card. */
+    const medium = taskCardHeight(task({ id: "t", text: "x".repeat(600) }));
     const long = taskCardHeight(task({ id: "t", text: "x".repeat(6000) }));
-    expect(long).toBeGreaterThan(short);
-    expect(long).toBeLessThanOrEqual(TASK_BODY_MAX + 40);
+    expect(long).toBe(medium);
+    const clampBound = 6 + (TASK_TITLE_CLAMP + TASK_PREVIEW_CLAMP) * 17 + 20 + TASK_DISCLOSURE_H;
+    expect(long).toBeLessThanOrEqual(clampBound);
+  });
+
+  test("expanded height covers the full text with no cap and grows with it", () => {
+    const collapsed = taskCardHeight(task({ id: "t", text: "x".repeat(6000) }));
+    const expanded = taskCardHeight(task({ id: "t", text: "x".repeat(6000) }), true);
+    const longer = taskCardHeight(task({ id: "t", text: "x".repeat(12000) }), true);
+    expect(expanded).toBeGreaterThan(collapsed);
+    expect(longer).toBeGreaterThan(expanded);
+    /* Every wrapped row is counted: at 13px max glyph advance the 236px box
+       holds 18 chars per row, so 6,000 chars are ≥ 334 rows ≥ 5,678px of body. */
+    expect(expanded).toBeGreaterThanOrEqual(Math.ceil(6000 / 18) * 17);
+  });
+
+  test("expanding a card without hidden text changes nothing", () => {
+    const text = "short title\none preview line";
+    expect(taskCardExpandable(task({ id: "t", text }))).toBe(false);
+    expect(taskCardHeight(task({ id: "t", text }), true)).toBe(taskCardHeight(task({ id: "t", text })));
+  });
+
+  test("the disclosure row is counted exactly when the text overruns the clamps", () => {
+    const short = task({ id: "t", text: "one line" });
+    const tall = task({ id: "t", text: Array.from({ length: 12 }, (_, i) => `line ${i}`).join("\n") });
+    expect(taskCardExpandable(short)).toBe(false);
+    expect(taskCardExpandable(tall)).toBe(true);
+    /* Same clamped text rows (title 1 + preview 3 vs title 1 + rest 0) differ by
+       the preview rows and the disclosure — assert the disclosure is present by
+       comparing against a clamp-exact model. */
+    const clamped = 6 + (1 + TASK_PREVIEW_CLAMP) * 17 + 20 + TASK_DISCLOSURE_H;
+    expect(taskCardHeight(tall)).toBe(Math.max(64, clamped));
+  });
+
+  test("taskRect grows for an expanded card at the same origin", () => {
+    const t = task({ id: "t", pos: { x: 40, y: 60 }, text: "x".repeat(2000) });
+    const collapsed = taskRect(t);
+    const expanded = taskRect(t, true);
+    expect(expanded).toMatchObject({ x: 40, y: 60, w: TASK_W });
+    expect(expanded.h).toBeGreaterThan(collapsed.h);
   });
 
   test("assignments add chip rows", () => {
@@ -123,15 +166,16 @@ describe("taskRect / taskCardHeight", () => {
     expect(sourced).toBeGreaterThan(bare);
   });
 
-  test("height is a conservative upper bound for wide-glyph titles (Finding 2)", () => {
+  test("expanded height is a conservative upper bound for wide-glyph titles (Finding 2)", () => {
     /* 300 'W's (the widest glyph) with two assignment chips renders ~337px in
-       Chromium. The estimate must not fall short of that, or the collision pass
-       leaves the next card overlapping the rendered one. */
-    const h = taskCardHeight(task({ id: "t", text: "W".repeat(300), assignments: [assignment({}), assignment({ path: "/b" })] }));
+       Chromium even under the old scroll cap; expanded shows every row, so the
+       estimate must not fall short of that or the collision pass leaves the
+       next card overlapping the rendered one. */
+    const h = taskCardHeight(task({ id: "t", text: "W".repeat(300), assignments: [assignment({}), assignment({ path: "/b" })] }), true);
     expect(h).toBeGreaterThanOrEqual(337);
   });
 
-  test("estimate bounds a worst-case rendered model at every length (Finding 2)", () => {
+  test("expanded estimate bounds a worst-case rendered model at every length (Finding 2)", () => {
     /* Independent upper-bound model: the 236px content box wraps the widest bold
        glyph (≤13px advance — Chromium measured ~11.8 for 'W') into
        ceil(n·13/236) lines of 17px, plus the 6px strip, 20px body padding and
@@ -141,14 +185,14 @@ describe("taskRect / taskCardHeight", () => {
     const CONTENT_W = 260 - 24;
     const model = (chars: number, chips: number): number => {
       const lines = Math.ceil((chars * 13) / CONTENT_W);
-      const body = Math.min(lines * 17, 340) + 20;
+      const body = lines * 17 + 20;
       const chipsH = chips ? chips * 26 + 6 : 0;
       return 6 + body + chipsH;
     };
     for (const chars of [1, 40, 120, 250, 340]) {
       for (const chips of [0, 1, 3]) {
         const chipList = Array.from({ length: chips }, (_, i) => assignment({ path: "/c" + i }));
-        const h = taskCardHeight(task({ id: "t", text: "W".repeat(chars), assignments: chipList }));
+        const h = taskCardHeight(task({ id: "t", text: "W".repeat(chars), assignments: chipList }), true);
         expect(h).toBeGreaterThanOrEqual(model(chars, chips));
       }
     }
@@ -162,34 +206,35 @@ describe("taskRect / taskCardHeight", () => {
     expect(wideRun).toBeGreaterThan(oneChar);
   });
 
-  test("word-boundary wrapping is included in the height bound (Finding)", () => {
+  test("word-boundary wrapping is included in the expanded height bound (Finding)", () => {
     /* Twenty 10-'W' words wrap one-per-row in the 236px box (each word is ~118px,
-       two don't fit), so the body hits its 340px cap (~378px card with a source
-       chip). A length÷chars estimate packs them and undercounts to ~283px; the
-       greedy word-wrap bound must cover the real render. */
+       two don't fit) — 20 rendered rows. A length÷chars estimate packs them into
+       ~12 rows and undercounts; the greedy word-wrap bound must cover the real
+       render (20·17 rows + strip + padding + source chip row). */
     const twentyWords = Array.from({ length: 20 }, () => "WWWWWWWWWW").join(" ");
     const h = taskCardHeight(
       task({ id: "t", text: twentyWords, source: { path: "/n", ts: null, text: "x", fingerprint: "fp", engine: "codex" } }),
+      true,
     );
-    expect(h).toBeGreaterThanOrEqual(378);
+    expect(h).toBeGreaterThanOrEqual(20 * 17 + 6 + 20 + 28 + 8);
   });
 
   test("tabs are counted at a full tab stop (Finding 2)", () => {
     /* `whitespace-pre-wrap` expands each tab to the next 8-space stop, so a
        `W\t`×50 run wraps to ~6 rows (~128px body); counting a tab as a single
        space undercounts to ~94px and overlaps the following card. */
-    const tabbed = taskCardHeight(task({ id: "t", text: "W\t".repeat(50) }));
-    const spaced = taskCardHeight(task({ id: "t", text: "W ".repeat(50) }));
+    const tabbed = taskCardHeight(task({ id: "t", text: "W\t".repeat(50) }), true);
+    const spaced = taskCardHeight(task({ id: "t", text: "W ".repeat(50) }), true);
     expect(tabbed).toBeGreaterThanOrEqual(128);
     expect(tabbed).toBeGreaterThanOrEqual(spaced);
   });
 
   test("standalone carriage returns each count as a rendered line (Finding 2)", () => {
     /* `whitespace-pre-wrap` breaks on a lone \r, so 100 of them are 101 rendered
-       rows (body hits its 340px cap ≈ 346px card). A LF-only split would keep
-       them in one line and undercount to ~230px, overlapping the next card. */
-    const h = taskCardHeight(task({ id: "t", text: "x\r".repeat(100) + "x" }));
-    expect(h).toBeGreaterThanOrEqual(346);
+       rows when expanded (~1,743px of body). A LF-only split would keep them in
+       one counted line and undercount to a single row, overlapping the next card. */
+    const h = taskCardHeight(task({ id: "t", text: "x\r".repeat(100) + "x" }), true);
+    expect(h).toBeGreaterThanOrEqual(101 * 17 + 6 + 20);
     /* CRLF and lone LF still count identically — the split treats all three the same. */
     const lf = taskCardHeight(task({ id: "t", text: "ab\ncd\nef" }));
     const crlf = taskCardHeight(task({ id: "t", text: "ab\r\ncd\r\nef" }));
@@ -458,6 +503,22 @@ describe("buildTaskEdges", () => {
     expect(edges[0]!.key).toBe("t4::source::/node");
     expect(edges[0]!.relation).toBe("source");
     expect(edges[0]!.failed).toBe(false);
+  });
+
+  test("an expanded card anchors its edge on the grown box, never inside it (issue #292)", () => {
+    /* Target sits far below the card, so the edge leaves the card's bottom
+       side: for the expanded card that boundary is the expanded height. */
+    const below = buildTaskTargetIndex({
+      nodes: [{ x: 0, y: 4000, w: 600, h: 680, file: { path: "/node" }, under: [] }],
+      stacks: [],
+      decks: [],
+    });
+    const long = task({ id: "t5", text: Array.from({ length: 30 }, (_, i) => `line ${i}`).join("\n"), assignments: [assignment({ path: "/node" })] });
+    const collapsed = buildTaskEdges([long], below)[0]!;
+    const expanded = buildTaskEdges([long], below, new Set(["t5"]))[0]!;
+    expect(collapsed.y1).toBe(taskRect(long).y + taskRect(long).h);
+    expect(expanded.y1).toBe(taskRect(long, true).y + taskRect(long, true).h);
+    expect(expanded.y1).toBeGreaterThan(collapsed.y1);
   });
 });
 
