@@ -756,6 +756,53 @@ test("runtime host serializes concurrent duplicate consumer delivery", async () 
   journal.close();
 });
 
+test("runtime command acknowledgements do not wait for a slow committed-event consumer", async () => {
+  const dir = sandbox("command-ack");
+  const journal = new RuntimeJournal(path.join(dir, "events.sqlite"), { maxEvents: 100, now: () => 100 });
+  let releaseConsumer!: () => void;
+  let markStarted!: () => void;
+  const consumerStarted = new Promise<void>((resolve) => { markStarted = resolve; });
+  const consumerGate = new Promise<void>((resolve) => { releaseConsumer = resolve; });
+  const host = new RuntimeHost(journal, {
+    flowReady: async () => {
+      markStarted();
+      await consumerGate;
+      return { id: "flow-one", state: "spawn_pending" } as unknown as Flow;
+    },
+    workflowStageCompleted: () => undefined,
+    taskDeliveryAcknowledged: () => undefined,
+  }, undefined, true);
+  journal.append({
+    scope: runtimeScope("session", "slow-consumer"),
+    kind: "turn.completed",
+    payload: { flowId: "flow-one", readyNote: "REVIEW_READY: slow" },
+  });
+
+  const response = host.handle({
+    id: "command-request",
+    method: "command",
+    params: {
+      command: {
+        kind: "send",
+        operationId: "op-command-ack",
+        idempotencyKey: "command-ack",
+        conversationId: "conversation-one",
+        text: "continue",
+      },
+    },
+  });
+  await consumerStarted;
+
+  expect(await Promise.race([
+    response.then((value) => value.ok),
+    Bun.sleep(50).then(() => false),
+  ])).toBe(true);
+
+  releaseConsumer();
+  await host.recoverConsumers();
+  journal.close();
+});
+
 test("runtime host recovers committed consumer work after restart", async () => {
   const dir = sandbox("consumer-restart");
   const filename = path.join(dir, "events.sqlite");
