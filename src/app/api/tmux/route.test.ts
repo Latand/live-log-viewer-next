@@ -6,6 +6,7 @@ import { afterAll, expect, mock, test } from "bun:test";
 
 import { NextRequest } from "next/server";
 
+const realResources = { ...(await import("@/lib/resources")) };
 const previousCodexHome = process.env.LLV_CODEX_HOME;
 const routeCodexHome = fs.mkdtempSync(path.join(os.tmpdir(), "llv-tmux-route-codex-"));
 const PATHNAME = path.join(routeCodexHome, "sessions", "rollout-019f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl");
@@ -16,6 +17,7 @@ afterAll(() => {
   if (previousCodexHome === undefined) delete process.env.LLV_CODEX_HOME;
   else process.env.LLV_CODEX_HOME = previousCodexHome;
   fs.rmSync(routeCodexHome, { recursive: true, force: true });
+  mock.module("@/lib/resources", () => realResources);
 });
 
 let transcriptReads = 0;
@@ -97,8 +99,13 @@ mock.module("@/lib/delivery", () => ({
   resumeConversation: async () => ({ ok: true, target: "" }),
 }));
 mock.module("@/lib/resources", () => ({
-  allowedKillTarget: (target: string) => (target === "agents:9.0" ? resourceTarget : null),
-  consumeKillTarget: () => {},
+  ...realResources,
+  allowedKillTarget: (target: string) => target === "agents:9.0"
+    ? resourceTarget
+    : realResources.allowedKillTarget(target),
+  consumeKillTarget: (target: string) => {
+    if (target !== "agents:9.0") realResources.consumeKillTarget(target);
+  },
 }));
 mock.module("@/lib/tmux", () => ({
   captureTmuxAttachReference: (value: Record<string, unknown>) => ({ ...value, tmuxServerStartIdentity: "900:one", paneStartIdentity: "100:one" }),

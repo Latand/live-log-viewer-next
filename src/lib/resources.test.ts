@@ -3,7 +3,7 @@ import { describe, expect, test } from "bun:test";
 import type { TranscriptHost } from "@/lib/agent/transcriptHost";
 import type { FileEntry } from "@/lib/types";
 
-import { allowedKillTarget, canonicalResourceEntry, conflictingResourceHost, consumeKillTarget, noteSessionTargets, parseResourcesFixture } from "./resources";
+import { allowedKillTarget, buildResourceSnapshot, canonicalResourceEntry, conflictingResourceHost, consumeKillTarget, noteSessionTargets, parseResourcesFixture } from "./resources";
 
 const PATHNAME = "/home/user/.codex/sessions/2026/07/10/rollout-2026-07-10-019f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl";
 
@@ -61,6 +61,57 @@ function ref(tmuxServerPid: number, panePid: number, paneId: string) {
 }
 
 describe("resource observation", () => {
+  test("builds host ownership and metadata from one shared transcript generation", async () => {
+    let scans = 0;
+    let hostFresh: boolean | null = null;
+    const files = [entry];
+    const payload = await buildResourceSnapshot(true, {
+      readFiles: async () => {
+        scans += 1;
+        return files;
+      },
+      readHosts: async (fresh, entries) => {
+        hostFresh = fresh;
+        expect(entries).toBe(files);
+        return {
+          hosts: [canonical],
+          observation: "available",
+          conflicts: [],
+          canonicalFor: (pathname: string) => pathname === PATHNAME ? canonical : null,
+        };
+      },
+      proc: {
+        systemMemory: () => ({ ramTotal: 1_000, ramAvailable: 750, swapTotal: 100, swapUsed: 25 }),
+        ppidMap: () => new Map([[200, 100], [300, 200]]),
+        processMemory: () => new Map([
+          [100, { rssBytes: 10, swapBytes: 1 }],
+          [200, { rssBytes: 20, swapBytes: 2 }],
+          [300, { rssBytes: 30, swapBytes: 3 }],
+        ]),
+      },
+      captureAttachReference: () => ref(900, 100, "%1"),
+    });
+
+    expect(scans).toBe(1);
+    expect(hostFresh).toBeTrue();
+    expect(payload.sessions).toEqual([{
+      target: "agents:4.0",
+      panePid: 100,
+      path: PATHNAME,
+      engine: "codex",
+      hostConflict: false,
+      title: "Issue 31",
+      project: "live-log-viewer-next",
+      activity: "live",
+      lastActiveAt: "1970-01-01T00:00:01.000Z",
+      cwd: "/repo",
+      rssBytes: 60,
+      swapBytes: 6,
+      procCount: 3,
+    }]);
+    expect(allowedKillTarget("agents:4.0")).toEqual(ref(900, 100, "%1"));
+  });
+
   test("accepts a deterministic resource fixture", () => {
     const fixture = {
       system: {

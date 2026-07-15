@@ -19,6 +19,7 @@ let scanFileResults: FileEntry[][] = [];
 let scanPinOverlayResults: Array<string[] | undefined> = [];
 let scanCompleteResults: Array<boolean | undefined> = [];
 let scanGates: Promise<void>[] = [];
+let hydrateScannedFiles: (files: FileEntry[], options: unknown) => FileEntry[] = (files) => files;
 let registryRoot = "";
 let tmuxHealth: unknown = { status: "healthy" };
 let stateDir = "";
@@ -39,6 +40,7 @@ beforeEach(() => {
   scanPinOverlayResults = [];
   scanCompleteResults = [];
   scanGates = [];
+  hydrateScannedFiles = (files) => files;
   tmuxHealth = { status: "healthy" };
   replaceConversationCatalog([]);
 });
@@ -46,17 +48,15 @@ beforeEach(() => {
 afterEach(() => {
   setAgentRegistryForTests(null);
   replaceConversationCatalog([]);
+  noteSessionTargets([]);
   if (previousState === undefined) delete process.env.LLV_STATE_DIR;
   else process.env.LLV_STATE_DIR = previousState;
   fs.rmSync(registryRoot, { recursive: true, force: true });
   fs.rmSync(stateDir, { recursive: true, force: true });
 });
 
-/* `mock.module` is process-global and outlives this file, so any suite that runs
-   afterward and imports one of these modules would otherwise see the stub — e.g.
-   the mocked `@/lib/tmux` drops the named exports `provider.ts` imports, which
-   crashes an unrelated migration suite. Capture the real namespaces first and
-   restore them in afterAll so the leak is contained to this file. */
+/* `mock.module` is process-global and outlives this file. Capture the real
+   namespaces first and restore them in afterAll so the stubs stay local. */
 const MOCKED_MODULES = [
   "@/lib/scanner",
   "@/lib/flows/store",
@@ -77,7 +77,7 @@ mock.module("@/lib/scanner", () => ({
     scans += 1;
     scanProjects.push(project);
     scanOptions = options;
-    const files = scanFileResults.shift() ?? scannedFiles;
+    const files = hydrateScannedFiles(scanFileResults.shift() ?? scannedFiles, options);
     await scanGates.shift();
     const pinOverlayPaths = scanPinOverlayResults.shift();
     const complete = scanCompleteResults.shift();
@@ -94,13 +94,17 @@ mock.module("@/lib/tasks/store", () => ({
 }));
 mock.module("@/lib/workflows/store", () => ({ loadWorkflows: () => [] }));
 mock.module("@/lib/workflows/visibility", () => ({ filterWorkflowsForFileScan: () => [] }));
-mock.module("@/lib/tmux", () => ({ tmuxEndpointHealth: () => tmuxHealth }));
+mock.module("@/lib/tmux", () => ({
+  ...(realModules.get("@/lib/tmux") as Record<string, unknown>),
+  tmuxEndpointHealth: () => tmuxHealth,
+}));
 
 afterAll(() => {
   for (const [name, real] of realModules) mock.module(name, () => real as Record<string, unknown>);
 });
 
-const { cachedFileScan, resetFilesRouteCacheForTests } = await import("./scanCache");
+const { cachedFileScan, currentFileScan, resetFilesRouteCacheForTests } = await import("@/lib/scanner/scanCache");
+const { allowedKillTarget, buildResourceSnapshot, noteSessionTargets } = await import("@/lib/resources");
 const { GET } = await import("./route");
 
 test("repeated files reads reuse the pure read snapshot and retain ETag behavior", async () => {
@@ -164,6 +168,327 @@ test("a restart serves the persisted completed snapshot while revalidating", asy
   await new Promise<void>((resolve) => setImmediate(resolve));
   const next = await cachedFileScan();
   expect(next.snapshot.files.map((entry) => entry.path)).toEqual(["/sessions/refreshed.jsonl"]);
+});
+
+test("a current scan joins restart revalidation before publishing transcript metadata", async () => {
+  fs.writeFileSync(path.join(stateDir, "files-scan-snapshot.json"), JSON.stringify({
+    version: 1,
+    snapshot: {
+      files: [file("/sessions/persisted-resource.jsonl")],
+      projectCatalog: [],
+      complete: true,
+    },
+  }));
+  resetFilesRouteCacheForTests();
+  let release!: () => void;
+  scanGates.push(new Promise<void>((resolve) => { release = resolve; }));
+  scannedFiles = [file("/sessions/current-resource.jsonl")];
+
+  const stale = await cachedFileScan();
+  expect(stale.snapshot.files.map((entry) => entry.path)).toEqual(["/sessions/persisted-resource.jsonl"]);
+
+  let settled = false;
+  const current = currentFileScan().then((scan) => {
+    settled = true;
+    return scan;
+  });
+
+  expect(scans).toBe(1);
+  expect(settled).toBeFalse();
+
+  release();
+  expect((await current).snapshot.files.map((entry) => entry.path)).toEqual(["/sessions/current-resource.jsonl"]);
+  expect(scans).toBe(1);
+});
+
+test("concurrent fresh callers share one pending generation through failure and retry", async () => {
+  const now = Date.now();
+  const before = file("/sessions/shared-fresh-before.jsonl");
+  const after = file("/sessions/shared-fresh-after.jsonl");
+  const freshFlags: boolean[] = [];
+  hydrateScannedFiles = (files, options) => {
+    freshFlags.push((options as { fresh?: boolean }).fresh === true);
+    return files;
+  };
+  scannedFiles = [before];
+
+  await cachedFileScan(undefined, undefined, now);
+  let releaseOld!: () => void;
+  let releaseFresh!: () => void;
+  scanGates.push(
+    new Promise<void>((resolve) => { releaseOld = resolve; }),
+    new Promise<void>((resolve) => { releaseFresh = resolve; }),
+  );
+  await cachedFileScan(undefined, undefined, now + 10_000);
+  scannedFiles = [after];
+
+  let firstSettled = false;
+  let secondSettled = false;
+  const first = currentFileScan({ fresh: true }).then((scan) => {
+    firstSettled = true;
+    return scan;
+  });
+  const second = currentFileScan({ fresh: true }).then((scan) => {
+    secondSettled = true;
+    return scan;
+  });
+
+  releaseOld();
+  for (let attempt = 0; attempt < 100 && scans < 3; attempt += 1) {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+  expect(scans).toBe(3);
+  expect(firstSettled).toBeFalse();
+  expect(secondSettled).toBeFalse();
+
+  releaseFresh();
+  const [firstFresh, secondFresh] = await Promise.all([first, second]);
+  expect(firstFresh.snapshot.files.map((entry) => entry.path)).toEqual([after.path]);
+  expect(secondFresh.snapshot.files.map((entry) => entry.path)).toEqual([after.path]);
+  expect(freshFlags).toEqual([false, false, true]);
+  expect(scans).toBe(3);
+
+  scanCompleteResults = [false];
+  await expect(currentFileScan({ fresh: true })).rejects.toThrow("filesystem scan incomplete");
+  const scansAfterFailure = scans;
+  expect(freshFlags.at(-1)).toBeTrue();
+
+  let releaseRetry!: () => void;
+  scanGates.push(new Promise<void>((resolve) => { releaseRetry = resolve; }));
+  let firstRetrySettled = false;
+  let secondRetrySettled = false;
+  const firstRetry = currentFileScan({ fresh: true }).then((scan) => {
+    firstRetrySettled = true;
+    return scan;
+  });
+  const secondRetry = currentFileScan({ fresh: true }).then((scan) => {
+    secondRetrySettled = true;
+    return scan;
+  });
+
+  expect(scans).toBe(scansAfterFailure + 1);
+  expect(firstRetrySettled).toBeFalse();
+  expect(secondRetrySettled).toBeFalse();
+  releaseRetry();
+  const [firstRecovered, secondRecovered] = await Promise.all([firstRetry, secondRetry]);
+  expect(firstRecovered.generation).toBe(secondRecovered.generation);
+  expect(scans).toBe(scansAfterFailure + 1);
+  expect(freshFlags).toEqual([false, false, true, true, true]);
+
+  const scansAfterRecovery = scans;
+  await currentFileScan();
+  expect(scans).toBe(scansAfterRecovery);
+});
+
+test("a fresh resource snapshot fences a pre-kill refresh before host election", async () => {
+  const now = Date.now();
+  const before = { ...file("/sessions/resource-before.jsonl"), title: "Before kill", activity: "idle" as const };
+  const after = { ...file("/sessions/resource-after.jsonl"), title: "After kill", activity: "recent" as const, mtime: 2 };
+  scannedFiles = [before];
+
+  const warm = await cachedFileScan(undefined, undefined, now);
+  expect(warm.snapshot.files.map((entry) => entry.path)).toEqual([before.path]);
+  let releasePreKillRefresh!: () => void;
+  scanGates.push(new Promise<void>((resolve) => { releasePreKillRefresh = resolve; }));
+  const revalidating = await cachedFileScan(undefined, undefined, now + 10_000);
+  expect(revalidating.snapshot.files.map((entry) => entry.path)).toEqual([before.path]);
+  expect(scans).toBe(2);
+
+  scannedFiles = [after];
+  let releasePostKillRefresh!: () => void;
+  scanGates.push(new Promise<void>((resolve) => { releasePostKillRefresh = resolve; }));
+
+  let filesFresh: boolean | undefined;
+  let hostEntries: FileEntry[] = [];
+  let resourceSettled = false;
+  const resourceRef = {
+    tmuxServerPid: 900,
+    tmuxServerStartIdentity: "900:one",
+    panePid: 100,
+    paneStartIdentity: "100:one",
+    paneId: "%1",
+  };
+  const payloadPromise = buildResourceSnapshot(true, {
+    readFiles: async (fresh) => {
+      filesFresh = fresh;
+      return (await currentFileScan({ fresh, now })).snapshot.files;
+    },
+    readHosts: async (_fresh, entries) => {
+      hostEntries = entries;
+      const selected = entries[0]!;
+      const target = selected.path === after.path ? "agents:after" : "agents:before";
+      const host = {
+        tmuxServerPid: 900,
+        paneId: "%1",
+        panePid: 100,
+        agentPid: 200,
+        display: target,
+        engine: "codex" as const,
+        cwd: "/repo",
+        agentArgv: ["codex", "resume", selected.path],
+        agentIdentity: "200:one",
+        launchId: null,
+        claimedPaths: [selected.path],
+        primaryPath: selected.path,
+      };
+      return {
+        hosts: [host],
+        observation: "available" as const,
+        conflicts: [],
+        canonicalFor: (pathname: string) => pathname === selected.path ? host : null,
+      };
+    },
+    proc: {
+      systemMemory: () => null,
+      ppidMap: () => new Map([[200, 100]]),
+      processMemory: () => new Map([[100, { rssBytes: 10, swapBytes: 0 }], [200, { rssBytes: 20, swapBytes: 0 }]]),
+    },
+    captureAttachReference: () => resourceRef,
+  }).then((payload) => {
+    resourceSettled = true;
+    return payload;
+  });
+
+  expect(filesFresh).toBeTrue();
+  expect(scans).toBe(2);
+  expect(resourceSettled).toBeFalse();
+
+  releasePreKillRefresh();
+  for (let attempt = 0; attempt < 100 && scans < 3; attempt += 1) {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+  expect(scans).toBe(3);
+  expect(resourceSettled).toBeFalse();
+
+  releasePostKillRefresh();
+  const payload = await payloadPromise;
+  expect(scans).toBe(3);
+  expect(hostEntries.map((entry) => entry.path)).toEqual([after.path]);
+  expect(payload.sessions).toEqual([expect.objectContaining({
+    target: "agents:after",
+    path: after.path,
+    title: "After kill",
+    activity: "recent",
+    lastActiveAt: "1970-01-01T00:00:02.000Z",
+  })]);
+  expect(allowedKillTarget("agents:after")).toEqual(resourceRef);
+  expect(allowedKillTarget("agents:before")).toBeNull();
+});
+
+test("a fresh resource snapshot replaces stale process and pane observations before host reconciliation", async () => {
+  const sessionId = "199e8e95-0e87-4b4f-84bf-f62b3c0993a3";
+  const pathname = `/home/user/.claude/projects/-repo/${sessionId}.jsonl`;
+  const transcript = {
+    ...file(pathname),
+    root: "claude-projects" as const,
+    engine: "claude" as const,
+    fmt: "claude" as const,
+    title: "Plain Claude CLI",
+    activity: "live" as const,
+    mtime: 2,
+  };
+  const oldCli = { agentPid: 200, panePid: 100, paneId: "%1", target: "agents:old" };
+  const newCli = { agentPid: 201, panePid: 101, paneId: "%2", target: "agents:new" };
+  let processMemo = oldCli;
+  let paneMemo = oldCli;
+  const liveProcess = newCli;
+  const livePane = newCli;
+  scannedFiles = [transcript];
+  hydrateScannedFiles = (files, options) => {
+    if ((options as { fresh?: boolean }).fresh === true) {
+      processMemo = liveProcess;
+      paneMemo = livePane;
+    }
+    const owner = processMemo.agentPid === paneMemo.agentPid && processMemo.panePid === paneMemo.panePid
+      ? processMemo
+      : null;
+    return files.map((entry) => ({
+      ...entry,
+      pid: owner?.agentPid ?? null,
+      proc: owner ? "running" as const : null,
+    }));
+  };
+
+  const registry = agentRegistry();
+  const key = { engine: "claude" as const, sessionId };
+  registry.upsert({
+    key,
+    artifactPath: pathname,
+    cwd: "/repo",
+    accountId: null,
+    launchProfile: emptyLaunchProfile({ cwd: "/repo" }),
+    status: "live",
+    host: null,
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: null,
+  });
+
+  const resourceRef = {
+    tmuxServerPid: 900,
+    tmuxServerStartIdentity: "900:one",
+    panePid: newCli.panePid,
+    paneStartIdentity: `${newCli.panePid}:one`,
+    paneId: newCli.paneId,
+  };
+  const payload = await buildResourceSnapshot(true, {
+    readFiles: async (fresh) => (await currentFileScan({ fresh })).snapshot.files,
+    readHosts: async (fresh, entries) => {
+      if (fresh) {
+        processMemo = liveProcess;
+        paneMemo = livePane;
+      }
+      const primaryPath = entries.find((entry) => entry.pid === processMemo.agentPid)?.path ?? null;
+      const host = {
+        tmuxServerPid: 900,
+        paneId: paneMemo.paneId,
+        panePid: paneMemo.panePid,
+        agentPid: processMemo.agentPid,
+        display: paneMemo.target,
+        engine: "claude" as const,
+        cwd: "/repo",
+        agentArgv: ["claude"],
+        agentIdentity: `${processMemo.agentPid}:one`,
+        launchId: null,
+        claimedPaths: primaryPath ? [primaryPath] : [],
+        primaryPath,
+      };
+      if (primaryPath) {
+        const current = registry.snapshot().entries[`claude:${sessionId}`]!;
+        registry.upsert({ ...current, artifactPath: primaryPath, status: "live" });
+      } else {
+        registry.markUnhosted(key);
+      }
+      return {
+        hosts: [host],
+        observation: "available" as const,
+        conflicts: [],
+        canonicalFor: (candidate: string) => candidate === primaryPath ? host : null,
+      };
+    },
+    proc: {
+      systemMemory: () => null,
+      ppidMap: () => new Map([[newCli.agentPid, newCli.panePid]]),
+      processMemory: () => new Map([
+        [newCli.panePid, { rssBytes: 10, swapBytes: 0 }],
+        [newCli.agentPid, { rssBytes: 20, swapBytes: 0 }],
+      ]),
+    },
+    captureAttachReference: () => resourceRef,
+  });
+
+  expect(scans).toBe(1);
+  expect(payload.sessions).toEqual([expect.objectContaining({
+    target: newCli.target,
+    path: pathname,
+    title: "Plain Claude CLI",
+    activity: "live",
+    lastActiveAt: "1970-01-01T00:00:02.000Z",
+  })]);
+  expect(registry.snapshot().entries[`claude:${sessionId}`]).toMatchObject({
+    artifactPath: pathname,
+    status: "live",
+  });
 });
 
 test("a client automatically converges from a persisted restart snapshot to its completed generation", async () => {

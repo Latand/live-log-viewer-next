@@ -94,6 +94,7 @@ interface FakeHostState {
   launchId: string | null;
   resumeBegan: boolean;
   quarantineAfterResumeBegin: boolean;
+  listFileReads: number;
 }
 
 function fakeHost(
@@ -127,10 +128,14 @@ function fakeHost(
     launchId: null,
     resumeBegan: false,
     quarantineAfterResumeBegin: false,
+    listFileReads: 0,
   };
 
   const resolver = createTranscriptHostResolver({
-    listFiles: async () => [state.entry],
+    listFiles: async () => {
+      state.listFileReads += 1;
+      return [state.entry];
+    },
     panes: async () => {
       if (state.paneObservation === "failure") return { kind: "failure" as const, error: state.paneObservationError };
       if (state.paneObservation === "no-server") return { kind: "no-server" as const };
@@ -201,6 +206,17 @@ function fakeHost(
 }
 
 describe("transcript host resolver", () => {
+  test("elects canonical ownership from a supplied transcript snapshot without another scan", async () => {
+    const { resolver, state } = fakeHost();
+    const supplied = [{ ...state.entry, title: "Current resource title", activity: "recent" as const }];
+
+    const snapshot = await resolver.readTranscriptHosts(true, supplied);
+
+    expect(snapshot.canonicalFor(PATHNAME)?.display).toBe("agents:4.0");
+    expect(snapshot.conflicts).toEqual([]);
+    expect(state.listFileReads).toBe(0);
+  });
+
   test("carries the pane launch marker into observation reconciliation", async () => {
     const { resolver, state } = fakeHost();
     state.launchId = "019f4906-3f67-7b72-9fbc-9ec3b5ad1326";
