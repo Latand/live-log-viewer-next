@@ -235,7 +235,7 @@ test("an ordinary resource snapshot reuses the completed scanner generation", as
   release();
   const files = await resourceFiles;
 
-  expect(scansBeforeRelease).toBe(1);
+  expect(scansBeforeRelease).toBe(2);
   expect(settledBeforeRelease).toBeTrue();
   expect(files.map((entry) => entry.path)).toEqual([before.path]);
 });
@@ -382,7 +382,7 @@ test("a fresh resource snapshot fences a pre-kill refresh before host election",
       ppidMap: () => new Map([[200, 100]]),
       processMemory: () => new Map([[100, { rssBytes: 10, swapBytes: 0 }], [200, { rssBytes: 20, swapBytes: 0 }]]),
     },
-    captureAttachReference: () => resourceRef,
+    captureAttachReferences: () => new Map([[resourceRef.paneId, resourceRef]]),
   }).then((payload) => {
     resourceSettled = true;
     return payload;
@@ -513,7 +513,7 @@ test("a fresh resource snapshot replaces stale process and pane observations bef
         [newCli.agentPid, { rssBytes: 20, swapBytes: 0 }],
       ]),
     },
-    captureAttachReference: () => resourceRef,
+    captureAttachReferences: () => new Map([[resourceRef.paneId, resourceRef]]),
   });
 
   expect(scans).toBe(1);

@@ -1,15 +1,16 @@
 import { procBackend } from "@/lib/proc";
 import type { ProcBackend } from "@/lib/proc";
-import { readFileSync } from "node:fs";
+import crypto from "node:crypto";
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
 import path from "node:path";
 import { completedFileScan, currentFileScan } from "@/lib/scanner/scanCache";
-import { createResourceCollector, type ResourceCollector, type ResourceDegradedReason } from "@/lib/resourceCollector";
+import { createResourceCollector, type ResourceCollector, type ResourceDegradedReason, type ResourceObservation } from "@/lib/resourceCollector";
 import { descendantPids } from "@/lib/proc/memory";
 import { overlaySessionTitles } from "@/lib/session/titleProjection";
 import { readTranscriptHosts, type TranscriptHost, type TranscriptHostSnapshot } from "@/lib/agent/transcriptHost";
-import { captureTmuxAttachReference, type TmuxAttachReference } from "@/lib/tmux";
+import { captureTmuxAttachReferences, type TmuxAttachReference } from "@/lib/tmux";
+import { statePath } from "@/lib/configDir";
 
 import type { FileEntry, ResourceSession, ResourcesPayload } from "./types";
 
@@ -127,14 +128,6 @@ export function lastResourceBuildDiagnostic(): ResourceBuildDiagnostic | null {
   return diagnostic ? { ...diagnostic, phases: { ...diagnostic.phases } } : null;
 }
 
-/** Captures JSON response construction separately from the expensive resource
-    build phases, keeping response serialization visible in live diagnostics. */
-export function noteResourceSerialization(durationMs: number): void {
-  if (globalStore.__llvLastResourceBuild) {
-    globalStore.__llvLastResourceBuild.phases.serialization = durationMs;
-  }
-}
-
 /**
  * Server-held allowlist for the kill-target action: only pane targets present
  * in the last resources snapshot may be killed. A client-supplied arbitrary
@@ -208,16 +201,16 @@ function isoFromUnix(seconds: number): string {
 
 export interface ResourceSnapshotDependencies {
   readFiles(fresh: boolean): Promise<FileEntry[]>;
-  readHosts(fresh: boolean, entries: FileEntry[]): Promise<TranscriptHostSnapshot>;
+  readHosts(fresh: boolean, entries: FileEntry[], ppids: Map<number, number>): Promise<TranscriptHostSnapshot>;
   proc: Pick<ProcBackend, "systemMemory" | "ppidMap" | "processMemory">;
-  captureAttachReference: typeof captureTmuxAttachReference;
+  captureAttachReferences(refs: ReadonlyArray<Pick<TmuxAttachReference, "tmuxServerPid" | "paneId" | "panePid">>): Map<string, TmuxAttachReference>;
 }
 
 const resourceSnapshotDependencies: ResourceSnapshotDependencies = {
   readFiles: readResourceFileSnapshot,
   readHosts: readTranscriptHosts,
   proc: procBackend,
-  captureAttachReference: captureTmuxAttachReference,
+  captureAttachReferences: captureTmuxAttachReferences,
 };
 
 export async function readResourceFileSnapshot(fresh: boolean): Promise<FileEntry[]> {
@@ -237,10 +230,10 @@ export async function buildResourceSnapshot(
   try {
     const system = measureResourcePhase(phases, "systemMemory", () => captureSystemMemory(dependencies.proc));
     const files = await measureResourcePhaseAsync(phases, "readFiles", () => dependencies.readFiles(fresh));
-    const hosts = await measureResourcePhaseAsync(phases, "readHosts", () => dependencies.readHosts(fresh, files));
+    const ppids = measureResourcePhase(phases, "ppidMap", () => dependencies.proc.ppidMap());
+    const hosts = await measureResourcePhaseAsync(phases, "readHosts", () => dependencies.readHosts(fresh, files, ppids));
     const sessions: ResourceSession[] = [];
     if (hosts.hosts.length > 0) {
-      const ppids = measureResourcePhase(phases, "ppidMap", () => dependencies.proc.ppidMap());
       overlaySessionTitles(files);
       const byPath = new Map(files.map((entry) => [entry.path, entry]));
       const byPane = new Map<string, TranscriptHost[]>();
@@ -264,6 +257,11 @@ export async function buildResourceSnapshot(
 
       const killRefs: Array<{ target: string; ref: KillTargetRef }> = [];
       measureResourcePhase(phases, "attach", () => {
+        const attachRefs = dependencies.captureAttachReferences(paneTrees.map(({ host }) => ({
+          tmuxServerPid: host.tmuxServerPid,
+          panePid: host.panePid,
+          paneId: host.paneId,
+        })));
         for (const { host, tree, paneHosts } of paneTrees) {
           let rssBytes = 0;
           let swapBytes = 0;
@@ -292,10 +290,8 @@ export async function buildResourceSnapshot(
             swapBytes,
             procCount: tree.length,
           });
-          killRefs.push({
-            target: host.display,
-            ref: dependencies.captureAttachReference({ tmuxServerPid: host.tmuxServerPid, panePid: host.panePid, paneId: host.paneId }),
-          });
+          const ref = attachRefs.get(host.paneId);
+          if (ref) killRefs.push({ target: host.display, ref });
         }
       });
       sessions.sort((a, b) => b.rssBytes + b.swapBytes - (a.rssBytes + a.swapBytes));
@@ -326,6 +322,13 @@ type CollectedResources = {
 
 const RESOURCE_OBSERVE_TIMEOUT_MS = 30_000;
 const RESOURCE_WORKER_TIMEOUT_MS = 29_500;
+const RESOURCE_WORKER_CLOSE_TIMEOUT_MS = 1_000;
+const RESOURCE_WORKER_OUTPUT_MAX_BYTES = 1_024 * 1_024;
+const RESOURCE_OBSERVATION_SCHEMA_VERSION = 1;
+const RESOURCE_OBSERVATION_FILE = "resources-observation.json";
+const RESOURCE_OBSERVATION_MAX_BYTES = 16 * 1024 * 1024;
+const RESOURCE_OBSERVATION_MAX_SESSIONS = 10_000;
+const RESOURCE_OBSERVATION_MAX_TARGETS = 10_000;
 
 function collectedResources(
   payload: ResourcesPayload,
@@ -345,6 +348,47 @@ type ResourceWorkerMessage =
   | { type: "observation"; payload: ResourcesPayload; diagnostic: ResourceBuildDiagnostic; targets: Array<{ target: string; ref: KillTargetRef }> }
   | { type: "failure"; error: string };
 
+function persistedObservation(): ResourceObservation<CollectedResources> | null {
+  try {
+    const filename = statePath(RESOURCE_OBSERVATION_FILE);
+    const size = statSync(filename).size;
+    if (size <= 0 || size > RESOURCE_OBSERVATION_MAX_BYTES) return null;
+    const candidate = JSON.parse(readFileSync(filename, "utf8")) as { version?: unknown; observation?: unknown };
+    const observation = candidate.observation as Partial<ResourceObservation<CollectedResources>> | undefined;
+    if (candidate.version !== RESOURCE_OBSERVATION_SCHEMA_VERSION || !observation
+      || !Number.isSafeInteger(observation.generation) || (observation.generation ?? -1) < 0
+      || !finiteNonNegative(observation.startedAt) || !finiteNonNegative(observation.completedAt)
+      || observation.completedAt < observation.startedAt
+      || typeof observation.collectorId !== "string" || observation.collectorId.length === 0 || observation.collectorId.length > 256
+      || !observation.value || !observation.value.payload || !Array.isArray(observation.value.payload.sessions)
+      || observation.value.payload.sessions.length > RESOURCE_OBSERVATION_MAX_SESSIONS
+      || !Array.isArray(observation.value.targets) || observation.value.targets.length > RESOURCE_OBSERVATION_MAX_TARGETS
+      || !observation.value.targets.every(({ target, ref }) => typeof target === "string" && target.length > 0
+        && typeof ref === "object" && ref !== null && Number.isSafeInteger(ref.tmuxServerPid)
+        && Number.isSafeInteger(ref.panePid) && typeof ref.paneId === "string" && ref.paneId.startsWith("%"))) return null;
+    return observation as ResourceObservation<CollectedResources>;
+  } catch {
+    return null;
+  }
+}
+
+function persistObservation(observation: ResourceObservation<CollectedResources>): void {
+  const filename = statePath(RESOURCE_OBSERVATION_FILE);
+  let temporary: string | undefined;
+  try {
+    mkdirSync(path.dirname(filename), { recursive: true, mode: 0o700 });
+    temporary = path.join(path.dirname(filename), `.${path.basename(filename)}.${process.pid}.${crypto.randomUUID()}.tmp`);
+    writeFileSync(temporary, JSON.stringify({ version: RESOURCE_OBSERVATION_SCHEMA_VERSION, observation }) + "\n", { mode: 0o600 });
+    renameSync(temporary, filename);
+    chmodSync(filename, 0o600);
+  } catch (error) {
+    if (temporary) {
+      try { unlinkSync(temporary); } catch { /* temporary write never completed */ }
+    }
+    console.error(`[resources] observation persistence failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
 /** One bounded worker owns one observation. Terminating after either outcome
     prevents a crashed or wedged collection from surviving a request timeout. */
 async function collectResourcesInWorker(): Promise<CollectedResources> {
@@ -358,22 +402,47 @@ async function collectResourcesInWorker(): Promise<CollectedResources> {
     stdio: ["pipe", "pipe", "pipe"],
   });
   return new Promise<CollectedResources>((resolve, reject) => {
-    let settled = false;
-    const finish = (outcome: () => void) => {
-      if (settled) return;
-      settled = true;
+    const pid = worker.pid;
+    const expectedIdentity = typeof pid === "number" ? procBackend.processIdentity(pid) : null;
+    let outcome: (() => void) | null = null;
+    let closed = false;
+    let outputBytes = 0;
+    let closeTimer: ReturnType<typeof setTimeout> | undefined;
+    const sameWorker = () => typeof pid === "number"
+      && (expectedIdentity === null || procBackend.processIdentity(pid) === expectedIdentity);
+    const terminate = () => {
+      if (worker.exitCode !== null || worker.signalCode !== null || !sameWorker()) return;
+      worker.kill("SIGTERM");
+      closeTimer = setTimeout(() => {
+        if (!closed && sameWorker()) worker.kill("SIGKILL");
+      }, RESOURCE_WORKER_CLOSE_TIMEOUT_MS);
+    };
+    const finish = (next: () => void) => {
+      if (outcome) return;
+      outcome = next;
       clearTimeout(timeout);
-      worker.kill();
-      outcome();
+      terminate();
     };
     const timeout = setTimeout(() => finish(() => reject(new Error("resource collector worker timed out"))), RESOURCE_WORKER_TIMEOUT_MS);
     worker.once("error", (error) => finish(() => reject(error)));
-    worker.once("exit", (code) => {
-      if (code !== 0) finish(() => reject(new Error(`resource collector worker exited with ${code}`)));
+    worker.once("close", (code, signal) => {
+      closed = true;
+      clearTimeout(timeout);
+      if (closeTimer) clearTimeout(closeTimer);
+      if (outcome) {
+        outcome();
+        return;
+      }
+      reject(new Error(`resource collector worker closed before observation (${signal ?? code ?? "unknown"})`));
     });
     let output = "";
     worker.stdout.setEncoding("utf8");
     worker.stdout.on("data", (chunk: string) => {
+      outputBytes += Buffer.byteLength(chunk);
+      if (outputBytes > RESOURCE_WORKER_OUTPUT_MAX_BYTES) {
+        finish(() => reject(new Error("resource collector worker exceeded stdout limit")));
+        return;
+      }
       output += chunk;
       const newline = output.indexOf("\n");
       if (newline < 0) return;
@@ -393,6 +462,12 @@ async function collectResourcesInWorker(): Promise<CollectedResources> {
       finish(() => {
         resolve(collectedResources(message.payload, message.diagnostic, message.targets));
       });
+    });
+    worker.stderr.on("data", (chunk: Buffer) => {
+      outputBytes += chunk.length;
+      if (outputBytes > RESOURCE_WORKER_OUTPUT_MAX_BYTES) {
+        finish(() => reject(new Error("resource collector worker exceeded output limit")));
+      }
     });
     worker.stdin.end("{\"type\":\"collect\"}\n");
   });
@@ -425,12 +500,14 @@ function resourceReadFromObservation(
   captureSystem: () => ResourcesPayload["system"],
   fresh: boolean,
   collectorId: string,
+  persist = false,
 ): ResourcesRead {
   if (!observation) {
     return fallbackRead({ system: captureSystem(), sessions: [] }, "collector-busy", collectorId);
   }
   const { payload, diagnostic } = observation.value;
   applyResourceTargets(observation.generation, observation.value.targets);
+  if (persist && !observation.degradedReason) persistObservation(observation);
   return {
     payload: fresh ? payload : { ...payload, system: captureSystem() },
     diagnostic: {
@@ -449,7 +526,7 @@ export function createResourcesReader(
   captureSystem: () => ResourcesPayload["system"],
   now: () => number = Date.now,
   diagnosticForBuild: () => ResourceBuildDiagnostic | null = lastResourceBuildDiagnostic,
-  options: { inProcess?: boolean } = {},
+  options: { inProcess?: boolean; initial?: ResourceObservation<CollectedResources> | null; persist?: boolean } = {},
 ): ResourcesReader {
   const inProcess = options.inProcess ?? process.env.LLV_RESOURCE_COLLECTOR_IN_PROCESS === "1";
   const collectorId = inProcess
@@ -458,6 +535,7 @@ export function createResourcesReader(
   const collector = createResourceCollector<CollectedResources>({
     collectorId,
     now,
+    initial: options.initial,
     collect: inProcess ? async () => {
       const payload = await build(true);
       const diagnostic = diagnosticForBuild();
@@ -476,11 +554,11 @@ export function createResourcesReader(
              by the collector, so polling never leaks an unhandled rejection. */
           void collector.observe(collector.fence(), 0);
         }
-        return resourceReadFromObservation(latest, captureSystem, false, collectorId);
+        return resourceReadFromObservation(latest, captureSystem, false, collectorId, options.persist);
       }
       const fence = collector.fence();
       const observation = await collector.observe(fence, RESOURCE_OBSERVE_TIMEOUT_MS);
-      return resourceReadFromObservation(observation, captureSystem, fresh, collectorId);
+      return resourceReadFromObservation(observation, captureSystem, fresh, collectorId, options.persist);
     },
   };
 }
@@ -493,6 +571,9 @@ function resourcesReader(): ResourcesReader {
     reader = createResourcesReader(
       buildResourceSnapshot,
       () => captureSystemMemory(),
+      Date.now,
+      lastResourceBuildDiagnostic,
+      { initial: persistedObservation(), persist: true },
     );
     globalStore.__llvResourcesReader = reader;
   }

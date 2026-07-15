@@ -514,6 +514,12 @@ export async function completedFileScan(): Promise<CachedFileScan> {
   const slot = globalFileScanSlot();
   slot.requestCount = (slot.requestCount ?? 0) + 1;
   if (slot.snapshot) {
+    const now = Date.now();
+    if (!slot.refresh && now - Math.max(slot.refreshedAt, slot.ordinaryRefreshRequestedAt ?? 0) >= FILE_SCAN_ORDINARY_REFRESH_MS) {
+      const targetGeneration = nextGeneration(slot);
+      slot.ordinaryRefreshRequestedAt = now;
+      beginDeferredFileScanRefresh(slot, targetGeneration);
+    }
     return completedScan(slot, undefined, slot.snapshotGeneration);
   }
 

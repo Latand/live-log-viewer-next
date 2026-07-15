@@ -73,6 +73,8 @@ function deferred<T>() {
 describe("resource observation", () => {
   test("builds host ownership and metadata from one shared transcript generation", async () => {
     let scans = 0;
+    let processTableReads = 0;
+    let attachBatches = 0;
     let hostFresh: boolean | null = null;
     const files = [entry];
     const payload = await buildResourceSnapshot(true, {
@@ -80,9 +82,10 @@ describe("resource observation", () => {
         scans += 1;
         return files;
       },
-      readHosts: async (fresh, entries) => {
+      readHosts: async (fresh, entries, ppids) => {
         hostFresh = fresh;
         expect(entries).toBe(files);
+        expect(ppids).toEqual(new Map([[200, 100], [300, 200]]));
         return {
           hosts: [canonical],
           observation: "available",
@@ -92,17 +95,26 @@ describe("resource observation", () => {
       },
       proc: {
         systemMemory: () => ({ ramTotal: 1_000, ramAvailable: 750, swapTotal: 100, swapUsed: 25 }),
-        ppidMap: () => new Map([[200, 100], [300, 200]]),
+        ppidMap: () => {
+          processTableReads += 1;
+          return new Map([[200, 100], [300, 200]]);
+        },
         processMemory: () => new Map([
           [100, { rssBytes: 10, swapBytes: 1 }],
           [200, { rssBytes: 20, swapBytes: 2 }],
           [300, { rssBytes: 30, swapBytes: 3 }],
         ]),
       },
-      captureAttachReference: () => ref(900, 100, "%1"),
+      captureAttachReferences: (refs) => {
+        attachBatches += 1;
+        expect(refs).toEqual([{ tmuxServerPid: 900, panePid: 100, paneId: "%1" }]);
+        return new Map([["%1", ref(900, 100, "%1")]]);
+      },
     });
 
     expect(scans).toBe(1);
+    expect(processTableReads).toBe(1);
+    expect(attachBatches).toBe(1);
     expect(hostFresh).toBeTrue();
     expect(payload.sessions).toEqual([{
       target: "agents:4.0",

@@ -19,6 +19,7 @@ export type ResourceCollectorOptions<T> = {
   collectorId: string;
   collect(): Promise<T>;
   now?(): number;
+  initial?: ResourceObservation<T> | null;
 };
 
 function freeze<T>(value: T): T {
@@ -43,8 +44,8 @@ function withDegradedReason<T>(
  */
 export function createResourceCollector<T>(options: ResourceCollectorOptions<T>): ResourceCollector<T> {
   const now = options.now ?? Date.now;
-  let startedGeneration = 0;
-  let latest: ResourceObservation<T> | null = null;
+  let startedGeneration = options.initial?.generation ?? 0;
+  let latest: ResourceObservation<T> | null = options.initial ?? null;
   let active: { generation: number; promise: Promise<ResourceObservation<T>> } | null = null;
 
   const launch = (): Promise<ResourceObservation<T>> => {

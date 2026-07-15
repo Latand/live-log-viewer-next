@@ -76,4 +76,19 @@ describe("resource collector", () => {
       expect.objectContaining({ generation: 2, value: "two" }),
     ]);
   });
+
+  test("a durable completed observation serves before any new collection starts", async () => {
+    let calls = 0;
+    const collector = createResourceCollector({
+      collectorId: "test-collector",
+      collect: async () => {
+        calls += 1;
+        return "new";
+      },
+      initial: Object.freeze({ generation: 7, startedAt: 1, completedAt: 2, collectorId: "prior", value: "durable" }),
+    });
+
+    expect(collector.latest()).toMatchObject({ generation: 7, value: "durable" });
+    expect(calls).toBe(0);
+  });
 });

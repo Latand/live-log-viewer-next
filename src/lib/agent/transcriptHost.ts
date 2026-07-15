@@ -82,7 +82,7 @@ export type HostDeliveryOutcome =
   | { ok: false; outcome: "failed"; error: string; status: number; actuation?: "started" };
 
 export interface TranscriptHostResolver {
-  readTranscriptHosts(fresh?: boolean, entries?: FileEntry[]): Promise<TranscriptHostSnapshot>;
+  readTranscriptHosts(fresh?: boolean, entries?: FileEntry[], ppids?: Map<number, number>): Promise<TranscriptHostSnapshot>;
   deliverToTranscriptHost(input: { entry: FileEntry; spec: ResumeSpec; payload: string }): Promise<HostDeliveryOutcome>;
 }
 
@@ -288,7 +288,11 @@ export function createTranscriptHostResolver(
   decisions = new Map<string, Promise<Decision>>(),
 ): TranscriptHostResolver {
 
-  async function observe(fresh: boolean, suppliedEntries?: FileEntry[]): Promise<TranscriptHostSnapshot> {
+  async function observe(
+    fresh: boolean,
+    suppliedEntries?: FileEntry[],
+    suppliedPpids?: Map<number, number>,
+  ): Promise<TranscriptHostSnapshot> {
     const conversationIdForPath = dependencies.conversationIdForPath ?? (() => null);
     const [entries, paneObservation, records] = await Promise.all([
       suppliedEntries ?? dependencies.listFiles(),
@@ -309,7 +313,7 @@ export function createTranscriptHostResolver(
     }
     const { panes } = paneObservation;
 
-    const ppids = dependencies.ppidMap();
+    const ppids = suppliedPpids ?? dependencies.ppidMap();
     const agents = dependencies.agents(fresh);
     const byPid = rootEntryByPid(entries);
     const byUuid = rootEntryByUuid(entries);
@@ -635,5 +639,28 @@ const runtimeResolver = createTranscriptHostResolver({
   serializeDelivery: serializeRegistryDelivery,
 }, globalStore.__llvTranscriptHostDecisions ??= new Map());
 
+/* Resource observation intentionally avoids reconciliation, spawn confirmation,
+   and per-pane launch-id reads. The Viewer main runtime owns those writes. */
+const observationResolver = createTranscriptHostResolver({
+  listFiles,
+  panes: panePidMap,
+  ppidMap: () => procBackend.ppidMap(),
+  agents: agentProcesses,
+  serverPid: tmuxServerPid,
+  resumeRecords: registryResumeRecords,
+  panePid: panePidOf,
+  paneWindowName: async (paneId) => (await paneInfo(paneId))?.windowName ?? null,
+  alive: pidAlive,
+  argv: readArgv,
+  parentPid: readPpid,
+  identity: procBackend.processIdentity,
+  conversationIdForPath: (pathname) => agentRegistry().conversationForPath(pathname)?.id ?? null,
+  beginResume: beginRegistryResume,
+  spawn: spawnAgentWithPrompt,
+  remember: rememberRegistryResume,
+  deliver: sendText,
+}, new Map());
+
 export const readTranscriptHosts = runtimeResolver.readTranscriptHosts;
+export const readTranscriptHostsObservation = observationResolver.readTranscriptHosts;
 export const deliverToTranscriptHost = runtimeResolver.deliverToTranscriptHost;

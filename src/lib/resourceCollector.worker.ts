@@ -1,6 +1,9 @@
 import { parentPort } from "node:worker_threads";
 
-import { buildResourceSnapshot, lastResourceBuildDiagnostic, lastResourceTargetRefs } from "./resources";
+import { readTranscriptHostsObservation } from "./agent/transcriptHost";
+import { procBackend } from "./proc";
+import { buildResourceSnapshot, lastResourceBuildDiagnostic, lastResourceTargetRefs, readResourceFileSnapshot } from "./resources";
+import { captureTmuxAttachReferences } from "./tmux";
 
 function send(message: unknown): void {
   if (parentPort) {
@@ -13,7 +16,12 @@ function send(message: unknown): void {
 async function collect(message: unknown): Promise<void> {
   if (!message || typeof message !== "object" || !("type" in message) || message.type !== "collect") return;
   try {
-    const payload = await buildResourceSnapshot(true);
+    const payload = await buildResourceSnapshot(true, {
+      readFiles: readResourceFileSnapshot,
+      readHosts: readTranscriptHostsObservation,
+      proc: procBackend,
+      captureAttachReferences: captureTmuxAttachReferences,
+    });
     const diagnostic = lastResourceBuildDiagnostic();
     if (!diagnostic) throw new Error("resource worker completed without diagnostics");
     send({ type: "observation", payload, diagnostic, targets: lastResourceTargetRefs() });
