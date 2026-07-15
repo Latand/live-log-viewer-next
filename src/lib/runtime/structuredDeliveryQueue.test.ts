@@ -407,6 +407,37 @@ test("structured delivery preserves ordered image refs and their content digest"
   ]);
 });
 
+test("an invalid durable image effect is terminalized instead of disappearing from the queue", async () => {
+  const transitions: Array<[string, string, string | null | undefined]> = [];
+  let hostResolutions = 0;
+  const queue = new StructuredDeliveryQueue({
+    effects: async () => [{
+      id: "effect:op-invalid-image",
+      kind: "runtime.send",
+      eventSeq: 22,
+      payload: {
+        operationId: "op-invalid-image",
+        conversationId: "conversation-one",
+        text: "see image",
+        images: [{ sha256: "a".repeat(64), mime: "image/png", bytes: 67 }],
+        contentDigest: "b".repeat(64),
+        policy: "queue",
+      },
+    }],
+    transition: async (operationId, status, details) => {
+      transitions.push([operationId, status, details?.reason]);
+    },
+  }, () => {
+    hostResolutions += 1;
+    return null;
+  });
+
+  await queue.drain();
+
+  expect(hostResolutions).toBe(0);
+  expect(transitions).toEqual([["op-invalid-image", "failed", "structured delivery effect is invalid"]]);
+});
+
 test("structured delivery retries the same durable entry after a host race", async () => {
   const sent: string[] = [];
   const transitions: Array<[string, string]> = [];

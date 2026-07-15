@@ -197,10 +197,18 @@ export class StructuredDeliveryQueue {
         throw new Error("structured delivery effect page did not advance");
       }
       const grouped = new Map<string, DeliveryEffect[]>();
-      const effects = rawEffects
-        .map(deliveryEffect)
-        .filter((effect): effect is DeliveryEffect => effect !== null)
-        .sort((left, right) => {
+      const effects: DeliveryEffect[] = [];
+      for (const rawEffect of rawEffects) {
+        const effect = deliveryEffect(rawEffect);
+        if (effect) {
+          effects.push(effect);
+          continue;
+        }
+        const operationId = typeof rawEffect.payload.operationId === "string" ? rawEffect.payload.operationId : "";
+        if (!operationId) throw new Error(`structured delivery effect ${rawEffect.eventSeq} is invalid`);
+        await this.port.transition(operationId, "failed", { reason: "structured delivery effect is invalid" });
+      }
+      effects.sort((left, right) => {
           const leftControl = isControlEffect(left);
           const rightControl = isControlEffect(right);
           return Number(rightControl) - Number(leftControl) || left.eventSeq - right.eventSeq;
