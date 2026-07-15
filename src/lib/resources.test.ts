@@ -131,7 +131,7 @@ describe("resource observation", () => {
       swapBytes: 6,
       procCount: 3,
     }]);
-    expect(allowedKillTarget("agents:4.0")).toEqual(ref(900, 100, "%1"));
+    expect(allowedKillTarget("agents:4.0")).toBeNull();
     expect(lastResourceBuildDiagnostic()).toEqual(expect.objectContaining({
       fresh: true,
       status: "complete",
@@ -233,6 +233,31 @@ describe("kill-target allowlist", () => {
 });
 
 describe("resource recurring reads", () => {
+  test("persists each completed generation once across ordinary reads", async () => {
+    let now = 0;
+    let builds = 0;
+    const persisted: number[] = [];
+    const reader = createResourcesReader(async () => {
+      builds += 1;
+      return { system: null, sessions: [] };
+    }, () => null, () => now, () => ({ fresh: true, status: "complete", durationMs: 0, phases: {
+      systemMemory: 0, readFiles: 0, readHosts: 0, ppidMap: 0, processMemory: 0, attach: 0, serialization: 0,
+    } }), { inProcess: true, persist: (observation) => persisted.push(observation.generation) });
+
+    await reader.read();
+    await reader.read();
+    await reader.read();
+    await reader.read();
+    expect(persisted).toEqual([1]);
+
+    now = 10_000;
+    await reader.read();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await reader.read(true);
+    expect(persisted).toEqual([1, 3]);
+    expect(builds).toBe(3);
+  });
+
   test("expired ordinary reads return the cached snapshot while one rebuild runs, and fresh waits for a newer build", async () => {
     let now = 0;
     let builds = 0;
@@ -259,6 +284,7 @@ describe("resource recurring reads", () => {
     await new Promise<void>((resolve) => setImmediate(resolve));
     fresh.resolve(freshResult);
     expect((await forced).payload).toEqual(freshResult);
+    expect(builds).toBe(3);
   });
 
   test("a failed ordinary rebuild leaves the cached snapshot available and later polls retry", async () => {

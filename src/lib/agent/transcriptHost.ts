@@ -647,7 +647,9 @@ const observationResolver = createTranscriptHostResolver({
   ppidMap: () => procBackend.ppidMap(),
   agents: agentProcesses,
   serverPid: tmuxServerPid,
-  resumeRecords: registryResumeRecords,
+  /* Importing resume records repairs registry state. Observation only reads
+     live process and pane evidence, so a collector child stays read-only. */
+  resumeRecords: async () => null,
   panePid: panePidOf,
   paneWindowName: async (paneId) => (await paneInfo(paneId))?.windowName ?? null,
   alive: pidAlive,

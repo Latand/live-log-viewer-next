@@ -140,7 +140,11 @@ export function noteSessionTargets(sessions: Iterable<{ target: string; ref: Kil
   const map = new Map<string, KillTargetRef>();
   for (const { target, ref } of sessions) map.set(target, ref);
   globalStore.__llvResourceTargets = map;
-  globalStore.__llvLastResourceTargets = [...map].map(([target, ref]) => ({ target, ref }));
+  rememberResourceTargets([...map].map(([target, ref]) => ({ target, ref })));
+}
+
+function rememberResourceTargets(sessions: Iterable<{ target: string; ref: KillTargetRef }>): void {
+  globalStore.__llvLastResourceTargets = [...sessions].map(({ target, ref }) => ({ target, ref }));
 }
 
 /** Applies a served observation exactly once in generation order. A consumed
@@ -295,9 +299,9 @@ export async function buildResourceSnapshot(
         }
       });
       sessions.sort((a, b) => b.rssBytes + b.swapBytes - (a.rssBytes + a.swapBytes));
-      noteSessionTargets(killRefs);
+      rememberResourceTargets(killRefs);
     } else {
-      noteSessionTargets([]);
+      rememberResourceTargets([]);
     }
 
     globalStore.__llvLastResourceBuild = { fresh, status: "complete", durationMs: performance.now() - startedAt, phases };
@@ -500,14 +504,13 @@ function resourceReadFromObservation(
   captureSystem: () => ResourcesPayload["system"],
   fresh: boolean,
   collectorId: string,
-  persist = false,
+  persist?: (observation: ResourceObservation<CollectedResources>) => void,
 ): ResourcesRead {
   if (!observation) {
     return fallbackRead({ system: captureSystem(), sessions: [] }, "collector-busy", collectorId);
   }
   const { payload, diagnostic } = observation.value;
   applyResourceTargets(observation.generation, observation.value.targets);
-  if (persist && !observation.degradedReason) persistObservation(observation);
   return {
     payload: fresh ? payload : { ...payload, system: captureSystem() },
     diagnostic: {
@@ -526,7 +529,7 @@ export function createResourcesReader(
   captureSystem: () => ResourcesPayload["system"],
   now: () => number = Date.now,
   diagnosticForBuild: () => ResourceBuildDiagnostic | null = lastResourceBuildDiagnostic,
-  options: { inProcess?: boolean; initial?: ResourceObservation<CollectedResources> | null; persist?: boolean } = {},
+  options: { inProcess?: boolean; initial?: ResourceObservation<CollectedResources> | null; persist?: (observation: ResourceObservation<CollectedResources>) => void } = {},
 ): ResourcesReader {
   const inProcess = options.inProcess ?? process.env.LLV_RESOURCE_COLLECTOR_IN_PROCESS === "1";
   const collectorId = inProcess
@@ -543,6 +546,12 @@ export function createResourcesReader(
       return collectedResources(payload, diagnostic, lastResourceTargetRefs());
     } : collectResourcesInWorker,
   });
+  let lastPersistedGeneration = 0;
+  const persist = (observation: ResourceObservation<CollectedResources>) => {
+    if (observation.degradedReason || observation.generation <= lastPersistedGeneration) return;
+    options.persist?.(observation);
+    lastPersistedGeneration = observation.generation;
+  };
 
   return {
     async read(fresh = false): Promise<ResourcesRead> {
@@ -552,13 +561,15 @@ export function createResourcesReader(
           /* The completed file snapshot remains the response while a bounded
              current scan revalidates in the collector. Its rejection is held
              by the collector, so polling never leaks an unhandled rejection. */
-          void collector.observe(collector.fence(), 0);
+          void collector.observe(latest.generation, 0);
         }
-        return resourceReadFromObservation(latest, captureSystem, false, collectorId, options.persist);
+        persist(latest);
+        return resourceReadFromObservation(latest, captureSystem, false, collectorId);
       }
       const fence = collector.fence();
       const observation = await collector.observe(fence, RESOURCE_OBSERVE_TIMEOUT_MS);
-      return resourceReadFromObservation(observation, captureSystem, fresh, collectorId, options.persist);
+      if (observation) persist(observation);
+      return resourceReadFromObservation(observation, captureSystem, fresh, collectorId);
     },
   };
 }
@@ -573,7 +584,7 @@ function resourcesReader(): ResourcesReader {
       () => captureSystemMemory(),
       Date.now,
       lastResourceBuildDiagnostic,
-      { initial: persistedObservation(), persist: true },
+      { initial: persistedObservation(), persist: persistObservation },
     );
     globalStore.__llvResourcesReader = reader;
   }

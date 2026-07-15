@@ -222,11 +222,11 @@ function fileScanRefreshPromise(
   return instrumentFileScan(slot, generation, reason, async () => {
     const snapshot = await listFilesWithProjectCatalog(undefined, {
       persist: false,
-      persistIndex: true,
+      persistIndex: process.env.LLV_RESOURCE_OBSERVATION_WORKER !== "1",
       ...(fresh ? { fresh: true } : {}),
     });
     if (!snapshot.complete) throw new Error("filesystem scan incomplete");
-    writePersistedFileScanSnapshot(snapshot);
+    if (process.env.LLV_RESOURCE_OBSERVATION_WORKER !== "1") writePersistedFileScanSnapshot(snapshot);
     slot.snapshot = snapshot;
     slot.snapshotGeneration = Math.max(slot.snapshotGeneration, generation);
     slot.refreshedAt = Date.now();
@@ -259,7 +259,7 @@ function beginPinnedFileScanRefresh(
   const promise = instrumentFileScan(slot, generation, reason, async () => {
     const pinnedSnapshot = await listFilesWithProjectCatalog(undefined, {
       persist: false,
-      persistIndex: true,
+      persistIndex: process.env.LLV_RESOURCE_OBSERVATION_WORKER !== "1",
       pin: pinnedPath,
       ...(fresh ? { fresh: true } : {}),
     });
@@ -288,7 +288,7 @@ function beginPinnedFileScanRefresh(
       slot.pinnedSnapshots.delete(oldest);
       slot.pinnedGenerations?.delete(oldest);
     }
-    writePersistedFileScanSnapshot(globalSnapshot);
+    if (process.env.LLV_RESOURCE_OBSERVATION_WORKER !== "1") writePersistedFileScanSnapshot(globalSnapshot);
     slot.snapshot = globalSnapshot;
     slot.snapshotGeneration = Math.max(slot.snapshotGeneration, generation);
     slot.refreshedAt = Date.now();

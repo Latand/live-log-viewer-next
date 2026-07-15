@@ -5,6 +5,8 @@ import { procBackend } from "./proc";
 import { buildResourceSnapshot, lastResourceBuildDiagnostic, lastResourceTargetRefs, readResourceFileSnapshot } from "./resources";
 import { captureTmuxAttachReferences } from "./tmux";
 
+process.env.LLV_RESOURCE_OBSERVATION_WORKER = "1";
+
 function send(message: unknown): void {
   if (parentPort) {
     parentPort.postMessage(message);
