@@ -45,6 +45,8 @@ const SSE_RETRY_MS = 60_000;
 const OFFLINE_AFTER_MS = 60_000;
 /** How long the transient "resynced" note stays up. */
 const RESYNCED_NOTE_MS = 6_000;
+/** Publish accumulated store changes at most once per display frame. */
+const SUBSCRIBER_NOTIFY_MS = 16;
 
 export interface RuntimeBusState {
   store: RuntimeStore;
@@ -103,6 +105,7 @@ export function createRuntimeBus(deps: RuntimeBusDeps): RuntimeBus {
 
   const listeners = new Set<() => void>();
   const filesListeners = new Set<(revision: number) => void>();
+  let emitQueued = false;
 
   let source: EventSourceLike | null = null;
   let generation = 0; // bumps on every teardown so stale callbacks no-op
@@ -121,7 +124,12 @@ export function createRuntimeBus(deps: RuntimeBusDeps): RuntimeBus {
   let fallbackAppliedSerial = 0;
 
   function emit(): void {
-    for (const listener of listeners) listener();
+    if (emitQueued || listeners.size === 0) return;
+    emitQueued = true;
+    deps.setTimeout(() => {
+      emitQueued = false;
+      for (const listener of listeners) listener();
+    }, SUBSCRIBER_NOTIFY_MS);
   }
 
   function setState(patch: Partial<RuntimeBusState>): void {

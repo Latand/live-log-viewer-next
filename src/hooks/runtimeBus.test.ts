@@ -255,6 +255,134 @@ describe("runtimeBus join", () => {
     expect(s?.activeTurnId).toBe("t1");
     expect(h.bus.getState().store.cursor).toBe(101);
   });
+
+  test("a 128-event replay converges synchronously with one subscriber publication", async () => {
+    h.bus.start();
+    await flush();
+    h.sources[0]!.open();
+    await flush();
+    h.clock.advance(16);
+    await flush();
+
+    let notifications = 0;
+    h.bus.subscribe(() => { notifications += 1; });
+    for (let index = 0; index < 128; index += 1) {
+      h.sources[0]!.message({
+        schemaVersion: 1,
+        seq: 101 + index,
+        eventId: `evt_${101 + index}`,
+        scope: { type: "session", id: "conv_a" },
+        revision: 2 + index,
+        kind: "item",
+        payload: { phase: "delta", text: `token-${index}` },
+      });
+      await Promise.resolve();
+    }
+
+    expect(h.bus.getState().store.cursor).toBe(228);
+    expect(h.bus.getState().store.scopeHeads["session:conv_a"]).toBe(129);
+    expect(notifications).toBe(0);
+    h.clock.advance(16);
+    await flush();
+    expect(notifications).toBe(1);
+  });
+
+  test("Codex and Claude bursts keep one warm SSE join with bounded publications", async () => {
+    const initial = snapshot(100);
+    const codex = initial.sessions[0]!;
+    const claude = {
+      ...codex,
+      conversationId: "conv_b",
+      sessionKey: { engine: "claude" as const, sessionId: "s2" },
+      hostKind: "claude-broker" as const,
+    };
+    h.setSnapshot({ ...initial, sessions: [codex, claude] });
+
+    const warmStartedAt = performance.now();
+    h.bus.start();
+    await flush();
+    expect(performance.now() - warmStartedAt).toBeLessThan(250);
+    expect(h.bus.getState().store.sessions.conv_a?.sessionKey.engine).toBe("codex");
+    expect(h.bus.getState().store.sessions.conv_b?.sessionKey.engine).toBe("claude");
+    h.sources[0]!.open();
+    await flush();
+    h.clock.advance(16);
+    await flush();
+
+    let notifications = 0;
+    let filesNotifications = 0;
+    h.bus.subscribe(() => { notifications += 1; });
+    h.bus.subscribeFilesRevision(() => { filesNotifications += 1; });
+    let seq = 100;
+    for (const conversationId of ["conv_a", "conv_b"]) {
+      for (let index = 0; index < 64; index += 1) {
+        seq += 1;
+        h.sources[0]!.message({
+          schemaVersion: 1,
+          seq,
+          eventId: `evt_${seq}`,
+          scope: { type: "session", id: conversationId },
+          revision: 2 + index,
+          kind: "item",
+          payload: { phase: "delta", text: `token-${conversationId}-${index}` },
+        });
+        await Promise.resolve();
+      }
+    }
+    for (const conversationId of ["conv_a", "conv_b"]) {
+      seq += 1;
+      h.sources[0]!.message({
+        ...sessionEvent(seq, 66, "running", `turn-${conversationId}`),
+        scope: { type: "session", id: conversationId },
+        payload: { conversationId, turnId: `turn-${conversationId}` },
+      });
+    }
+    seq += 1;
+    h.sources[0]!.message({
+      schemaVersion: 1,
+      seq,
+      eventId: `evt_${seq}`,
+      scope: { type: "system", id: "files" },
+      kind: "files.revision",
+      payload: { filesRevision: 7 },
+    });
+    const finalEnvelope = {
+      schemaVersion: 1,
+      seq: ++seq,
+      eventId: `evt_${seq}`,
+      scope: { type: "operation", id: "op-one" },
+      revision: 1,
+      kind: "receipt",
+      payload: {
+        operationId: "op-one",
+        idempotencyKey: "key-one",
+        conversationId: "conv_a",
+        kind: "send",
+        status: "delivered",
+        at: "2026-07-15T00:00:00.000Z",
+        revision: 1,
+      },
+    };
+    h.sources[0]!.message(finalEnvelope);
+    h.sources[0]!.message(finalEnvelope);
+
+    expect(h.bus.getState().store).toMatchObject({
+      cursor: seq,
+      filesRevision: 7,
+      sessions: {
+        conv_a: { turn: "running", revision: 66 },
+        conv_b: { turn: "running", revision: 66 },
+      },
+      operations: { "op-one": { status: "delivered" } },
+    });
+    expect(h.fetchCalls()).toBe(1);
+    expect(h.sources).toHaveLength(1);
+    expect(filesNotifications).toBe(1);
+    expect(notifications).toBe(0);
+    h.clock.advance(16);
+    await flush();
+    expect(notifications).toBe(1);
+  });
 });
 
 describe("runtimeBus reconnect", () => {
