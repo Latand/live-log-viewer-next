@@ -8,7 +8,7 @@ import { AgentRegistry } from "@/lib/agent/registry";
 import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
 import type { RuntimeHostClient } from "./client";
 import type { RuntimeSnapshot } from "./contracts";
-import { runtimeImageCapability } from "./runtimeImageStore";
+import { MAX_STRUCTURED_IMAGE_ENCODED_BYTES, runtimeImageCapability } from "./runtimeImageStore";
 import { structuredContentDigest, type StructuredImageRef } from "./structuredContent";
 
 import { deliverHeldStructuredMessage, enqueueStructuredMessage } from "./structuredMessageDelivery";
@@ -146,6 +146,33 @@ test("stale structured image capability rejects before blob storage or command a
   });
 
   expect(result).toMatchObject({ ok: false, status: 409, error: "Structured image protocol is unavailable for this host." });
+  expect(stores).toBe(0);
+  expect(commands).toBe(0);
+});
+
+test("an over-limit encoded aggregate fails before blob storage or command admission", async () => {
+  const { registry, conversation } = registryWithConversation("default", "claude");
+  let stores = 0;
+  let commands = 0;
+  const client = {
+    snapshot: async () => snapshot(conversation.id, "claude", true),
+    command: async () => { commands += 1; throw new Error("unexpected command"); },
+  } as unknown as RuntimeHostClient;
+
+  const result = await enqueueStructuredMessage({
+    path: artifactPath,
+    conversationId: conversation.id,
+    clientMessageId: "oversized-image-aggregate",
+    text: "",
+    images: [{ base64: "A".repeat(MAX_STRUCTURED_IMAGE_ENCODED_BYTES + 4), mime: "image/png" }],
+  }, {
+    enabled: () => true,
+    client: () => client,
+    registry: () => registry,
+    storeImages: () => { stores += 1; return []; },
+  });
+
+  expect(result).toMatchObject({ ok: false, error: "runtime image request encoding is too large" });
   expect(stores).toBe(0);
   expect(commands).toBe(0);
 });

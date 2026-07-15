@@ -6,6 +6,7 @@ import { describe, expect, test } from "bun:test";
 
 import { AgentRegistry, conversationLookupFromSnapshot, SPAWN_STARTING_ADMISSION_LEASE_MS } from "@/lib/agent/registry";
 import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
+import { structuredContent } from "@/lib/runtime/structuredContent";
 
 const KEY = { engine: "codex" as const, sessionId: "019f4906-3f67-7b72-9fbc-9ec3b5ad1326" };
 
@@ -78,6 +79,62 @@ describe("agent registry", () => {
     expect(retained.every((delivery) => delivery.text === "")).toBe(true);
     expect(retained.map((delivery) => delivery.id)).not.toContain("legacy-000");
     expect(retained.map((delivery) => delivery.id)).toContain("legacy-104");
+  });
+
+  test("a restarted legacy delivered tombstone replays while modern digests retain payload conflicts", () => {
+    const store = registry();
+    const conversation = store.ensureConversation("codex", "/legacy-delivered-retry.jsonl", "default");
+    const snapshot = store.snapshot();
+    snapshot.heldDeliveries["legacy-delivered"] = {
+      id: "legacy-delivered",
+      conversationId: conversation.id,
+      text: "",
+      createdAt: "2026-07-11T00:00:00.000Z",
+      clientMessageId: "legacy-client-message",
+      payloadKind: "text",
+      runtimeImages: [],
+      contentDigest: null,
+      artifactPaths: [],
+      state: "delivered",
+      generationId: conversation.generations.at(-1)!.id,
+      attempts: 1,
+      assignedAt: "2026-07-11T00:00:01.000Z",
+      deliveredAt: "2026-07-11T00:00:02.000Z",
+      error: null,
+    };
+    fs.writeFileSync(store.filename, JSON.stringify(snapshot));
+
+    const restarted = new AgentRegistry(store.filename);
+    const originalContent = structuredContent("original payload", []);
+    expect(restarted.holdDelivery(
+      conversation.id,
+      originalContent.content.text,
+      "legacy-client-message",
+      "text",
+      [],
+      originalContent.contentDigest,
+    )).toMatchObject({ id: "legacy-delivered", state: "delivered", contentDigest: null });
+
+    const modernContent = structuredContent("modern payload", []);
+    const modern = restarted.holdDelivery(
+      conversation.id,
+      modernContent.content.text,
+      "modern-client-message",
+      "text",
+      [],
+      modernContent.contentDigest,
+    );
+    restarted.beginDeliveryAttempt(modern.id, conversation.generations.at(-1)!.id);
+    restarted.recordDeliveryOutcome(modern.id, "delivered");
+    const changedContent = structuredContent("changed payload", []);
+    expect(() => restarted.holdDelivery(
+      conversation.id,
+      changedContent.content.text,
+      "modern-client-message",
+      "text",
+      [],
+      changedContent.contentDigest,
+    )).toThrow("held delivery idempotency conflict");
   });
 
   test("startup compaction bounds abandoned failed reservations and leaves capacity", () => {

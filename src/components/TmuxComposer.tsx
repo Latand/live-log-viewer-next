@@ -250,6 +250,7 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
       else sessionStorage.removeItem(draftKey(cardId));
     },
     submit: (overrideText) => send(overrideText),
+    imageCapability: structuredSession ? structuredImageCapability ?? null : null,
   });
   const { text, textRef, setText, setTextState, inputRef, setStatus, busy, setBusy, voiceSending, attachments } = composer;
   const isMobile = useIsMobile();
@@ -346,6 +347,7 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
   const send = async (overrideText?: string, retry?: { receiptId: number; clientMessageId?: string }) => {
     const payloadText = overrideText ?? text;
     if (busy || voiceSending || (!payloadText.trim() && !attachments.images.length)) return;
+    if (structuredSession && attachments.images.length && !attachments.validate()) return;
     setBusy(true);
     setStatus(null);
     /* Idempotency key: the backend can dedupe a retried held/failed delivery

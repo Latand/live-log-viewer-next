@@ -14,7 +14,7 @@ import { hardenedRedact } from "@/lib/view/compactText";
 import type { DeliveryReceipt, EngineHost, HostState, NormalizedQueueEntry, QueueEntry, RuntimeEvent } from "./engineHost";
 import { normalizeQueueEntry, RuntimeReplayGapError } from "./engineHost";
 import { FileRuntimeEventStore, type RuntimeEventStore } from "./eventStore";
-import { runtimeImageStore } from "./runtimeImageStore";
+import { MAX_STRUCTURED_IMAGE_ENCODED_BYTES, runtimeImageStore } from "./runtimeImageStore";
 import {
   STRUCTURED_IMAGE_CAPABILITY,
   normalizeStructuredImageMime,
@@ -205,7 +205,8 @@ const CHILD_ENV_ALLOWLIST = [
 ] as const;
 const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_SHUTDOWN_GRACE_MS = 1_000;
-const MAX_LINE_BYTES = 4 * 1024 * 1024;
+const MAX_REPLAY_ENVELOPE_BYTES = 256 * 1024;
+const MAX_LINE_BYTES = MAX_STRUCTURED_IMAGE_ENCODED_BYTES + MAX_REPLAY_ENVELOPE_BYTES;
 
 function record(value: unknown): JsonObject | null {
   return value && typeof value === "object" && !Array.isArray(value) ? value as JsonObject : null;
@@ -334,6 +335,31 @@ function messageContent(message: JsonObject): ReturnType<typeof structuredConten
     });
   }
   try { return structuredContent(text, images); } catch { return null; }
+}
+
+function sanitizedUserReplay(
+  message: JsonObject,
+  content: ReturnType<typeof structuredContent> | null,
+): JsonObject {
+  const providerMessage = record(message.message) ?? {};
+  const sanitizedBlocks: JsonObject[] = content
+    ? content.content.images.map((image) => ({
+        type: "image",
+        source: {
+          type: "runtime_ref",
+          sha256: image.sha256,
+          media_type: image.mime,
+          bytes: image.bytes,
+        },
+      }))
+    : [];
+  const text = content?.content.text ?? userText(message);
+  if (text) sanitizedBlocks.push({ type: "text", text });
+  return {
+    ...message,
+    ...(content ? { contentDigest: content.contentDigest } : {}),
+    message: { ...providerMessage, content: sanitizedBlocks },
+  };
 }
 
 function defaultTranscriptUsers(cwd: string, sessionId: string, projectsRoot?: string): ClaudeTranscriptUser[] {
@@ -792,7 +818,7 @@ export class ClaudeStreamBrokerHost implements EngineHost {
           return this.failWithoutLedger(new Error(`Claude delivery ledger failed: ${safeError(error)}`));
         }
       }
-      this.emit({ kind: "item", turnId: this.activeTurnId, item: message, phase: "completed" });
+      this.emit({ kind: "item", turnId: this.activeTurnId, item: sanitizedUserReplay(message, content), phase: "completed" });
       return;
     }
     if (type === "stream_event") {

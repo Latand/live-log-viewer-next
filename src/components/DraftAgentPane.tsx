@@ -13,6 +13,7 @@ import { BUILDER_APPLY_FIXES_CONFIG, BUILDER_FRONTEND_CONFIG } from "@/lib/roles
 import type { RoleDefinition } from "@/lib/roles/types";
 import type { FileEntry } from "@/lib/types";
 import { withoutArchivedPredecessors } from "@/lib/accounts/identity";
+import type { RuntimeImageCapability } from "@/lib/runtime/structuredContent";
 
 import { ComposerBar } from "./ComposerBar";
 import { DraftLaunchStatus } from "./DraftLaunchStatus";
@@ -38,7 +39,7 @@ import { draftWorkingDirectory } from "./projectModel";
 type Engine = "claude" | "codex";
 type SpawnImageNegotiation = {
   spawnTransport: "tmux" | "structured";
-  imageInput: Record<Engine, { supported: boolean; reason: string | null }>;
+  imageInput: Record<Engine, RuntimeImageCapability>;
 };
 
 const ENGINES: { key: Engine; label: string }[] = [
@@ -489,6 +490,9 @@ export function DraftAgentPane({
     setAttemptState(value);
     writeField(draftId, "boot", value ? JSON.stringify(value) : "");
   }, [draftId]);
+  const structuredSpawnImageCapability = spawnImageNegotiation?.spawnTransport === "structured"
+    ? spawnImageNegotiation.imageInput[engine]
+    : null;
 
   /* While a spawn is in flight the whole draft is frozen (boot set), so the
      composer's fields lock alongside the send/voice flags. */
@@ -497,6 +501,7 @@ export function DraftAgentPane({
     persistText: (value) => writeField(draftId, "text", value),
     submit: (overrideText) => send(overrideText),
     disabled: Boolean(attempt),
+    imageCapability: structuredSpawnImageCapability,
   });
   const { text, setText, setStatus, busy, setBusy, voiceSending, attachments } = composer;
 
@@ -603,11 +608,11 @@ export function DraftAgentPane({
            payload so editing and retrying cannot lose an attachment. */
         setAttempt(null);
         setText(candidate.request.prompt);
-        attachments.replace(candidate.request.images.map((image) => ({
+        const restored = attachments.replace(candidate.request.images.map((image) => ({
           ...image,
           preview: `data:${image.mime};base64,${image.base64}`,
         })));
-        setStatus({ kind: "err", text: outcome.message ?? t("draft.launchFailed") });
+        if (restored) setStatus({ kind: "err", text: outcome.message ?? t("draft.launchFailed") });
       }
       /* Ambiguous outcomes keep the persisted request and frozen card. A
          future reload can re-POST the identical idempotency key. */
@@ -646,6 +651,7 @@ export function DraftAgentPane({
       setStatus({ kind: "err", text: spawnImagesReason ?? t("composer.structuredImagesUnavailable") });
       return;
     }
+    if (attachments.images.length && !attachments.validate()) return;
     if (cwdNeedsConfirmation) {
       setStatus({ kind: "err", text: t("draft.confirmRecoveredDir") });
       return;
