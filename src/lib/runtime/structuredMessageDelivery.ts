@@ -297,6 +297,10 @@ export async function enqueueStructuredMessage(
   if (wantsImages && !imageCapability.supported) {
     return { ok: false, structured: true, outcome: "failed", error: imageCapability.reason ?? "structured image delivery is unavailable", status: 409 };
   }
+  const encodedImageBytes = rawImages.reduce((total, image) => total + Buffer.byteLength(image.base64), 0);
+  if (encodedImageBytes > imageCapability.maxEncodedBytesPerRequest) {
+    return { ok: false, structured: true, outcome: "failed", error: "runtime image request encoding is too large", status: 413 };
+  }
   if (request.hasImages && rawImages.length === 0 && suppliedRefs.length === 0) {
     return { ok: false, structured: true, outcome: "failed", error: "structured image payload is unavailable", status: 409 };
   }

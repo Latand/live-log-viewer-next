@@ -3886,7 +3886,7 @@ export class AgentRegistry {
         return clone(delivery);
       };
       if (existing) {
-        if (contentDigest && contentDigest !== existing.contentDigest) {
+        if (existing.contentDigest && contentDigest && contentDigest !== existing.contentDigest) {
           throw new Error("held delivery idempotency conflict");
         }
         return place(existing);

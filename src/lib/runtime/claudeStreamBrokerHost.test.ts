@@ -17,9 +17,10 @@ import {
   type ClaudeDeliveryLedger,
   type ClaudeDeliveryState,
 } from "./claudeStreamBrokerHost";
-import type { RuntimeEventStore } from "./eventStore";
+import { FileRuntimeEventStore, type RuntimeEventStore } from "./eventStore";
 import { normalizeQueueEntry, type QueueEntry, type RuntimeEvent } from "./engineHost";
 import { structuredContent, type StructuredImageRef } from "./structuredContent";
+import { MAX_STRUCTURED_IMAGE_ENCODED_BYTES } from "./runtimeImageStore";
 import {
   adoptClaudeRegistryHosts,
   bindClaudeHostPersistence,
@@ -390,10 +391,14 @@ describe("ClaudeStreamBrokerHost", () => {
 
   test("real stream-json child verifies spawn, queued follow-up, and image-only frames", async () => {
     const fixture = path.join(import.meta.dir, "fixtures", "claude-stream-json-images.ts");
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-claude-image-events-"));
+    const eventDirectory = path.join(directory, "events");
+    const eventStore = new FileRuntimeEventStore(eventDirectory);
+    const deliveryLedger = new FileClaudeDeliveryLedger(path.join(directory, "deliveries"));
     const host = await ClaudeStreamBrokerHost.start({
       cwd: process.cwd(),
-      eventStore: new MemoryEventStore(),
-      deliveryLedger: new RecordingDeliveryLedger(),
+      eventStore,
+      deliveryLedger,
       readImage: () => IMAGE_BYTES,
       requestTimeoutMs: 2_000,
       shutdownGraceMs: 100,
@@ -423,6 +428,91 @@ describe("ClaudeStreamBrokerHost", () => {
     });
     await waitUntilIdle(host);
     expect((await host.health()).activeFlags).toContain("structured-image-v1");
+    const eventCursor = (await host.health()).eventCursor;
+    const attached = host.attach(0)[Symbol.asyncIterator]();
+    const attachedEvents: RuntimeEvent[] = [];
+    while ((attachedEvents.at(-1)?.seq ?? 0) < eventCursor) attachedEvents.push(await nextEvent(attached));
+    const encodedImage = IMAGE_BYTES.toString("base64");
+    const attachedJson = JSON.stringify(attachedEvents);
+    expect(attachedJson).not.toContain(encodedImage);
+    expect(attachedJson).toContain(IMAGE_REF.sha256);
+    expect(attachedJson).toContain(firstContent.contentDigest);
+    expect(attachedJson).toContain("spawn frame");
+    const eventLedger = fs.readFileSync(path.join(eventDirectory, `${encodeURIComponent(host.identity.sessionId)}.jsonl`), "utf8");
+    expect(eventLedger).not.toContain(encodedImage);
+    expect(eventLedger).toContain(IMAGE_REF.sha256);
+    const sessionId = host.identity.sessionId;
+    await host.release();
+
+    const restartedChild = new FakeClaude(new RecordingDeliveryLedger());
+    const restarted = await ClaudeStreamBrokerHost.adopt(sessionId, {
+      cwd: process.cwd(),
+      eventStore,
+      deliveryLedger,
+      readImage: () => IMAGE_BYTES,
+      readAuthStatus: () => ({ loggedIn: true, authMethod: "claude.ai", subscriptionType: "max", version: "2.1.209" }),
+      readTranscript: () => [],
+      spawnProcess: fakeSpawn(restartedChild, {}),
+    });
+    expect(await restarted.send({ id: "fixture-spawn", ...firstContent })).toEqual({
+      outcome: "turn-started",
+      turnId: "fixture-spawn",
+    });
+    expect(restartedChild.inputs).toHaveLength(0);
+    await restarted.release();
+  });
+
+  test("real stream-json child accepts the admitted encoded image aggregate", async () => {
+    const fixture = path.join(import.meta.dir, "fixtures", "claude-stream-json-images.ts");
+    const imageData = [Buffer.alloc(9 * 1024 * 1024, 0x61), Buffer.alloc(9 * 1024 * 1024, 0x62)];
+    const imageRefs = imageData.map((data): StructuredImageRef => ({
+      sha256: crypto.createHash("sha256").update(data).digest("hex"),
+      mime: "image/png",
+      bytes: data.byteLength,
+    }));
+    const dataByDigest = new Map(imageRefs.map((ref, index) => [ref.sha256, imageData[index]!]));
+    const host = await ClaudeStreamBrokerHost.start({
+      cwd: process.cwd(),
+      eventStore: new MemoryEventStore(),
+      deliveryLedger: new RecordingDeliveryLedger(),
+      readImage: (ref) => dataByDigest.get(ref.sha256)!,
+      requestTimeoutMs: 10_000,
+      shutdownGraceMs: 100,
+      readAuthStatus: () => ({ loggedIn: true, authMethod: "claude.ai", subscriptionType: "max", version: "2.1.209" }),
+      readTranscript: () => [],
+      spawnProcess: (_command, args, options) => {
+        const marker = args.indexOf("--session-id");
+        return spawn(Bun.which("bun") ?? "bun", [fixture], {
+          ...options,
+          env: { ...options.env, LLV_FIXTURE_SESSION_ID: args[marker + 1] ?? "" } as NodeJS.ProcessEnv,
+          stdio: ["pipe", "pipe", "pipe"],
+        });
+      },
+    });
+
+    expect(await host.send({ id: "fixture-near-limit", ...structuredContent("near limit", imageRefs) })).toEqual({
+      outcome: "turn-started",
+      turnId: "fixture-near-limit",
+    });
+    await waitUntilIdle(host);
+    await host.release();
+  }, 20_000);
+
+  test("arbitrary child output above the admitted aggregate envelope remains bounded", async () => {
+    const ledger = new RecordingDeliveryLedger();
+    const child = new FakeClaude(ledger);
+    const host = await ClaudeStreamBrokerHost.start({
+      cwd: "/repo",
+      eventStore: new MemoryEventStore(),
+      deliveryLedger: ledger,
+      readAuthStatus: () => ({ loggedIn: true, authMethod: "claude.ai", subscriptionType: "max", version: "2.1.209" }),
+      readTranscript: () => [],
+      spawnProcess: fakeSpawn(child, {}),
+    });
+
+    child.stdout.write("x".repeat(MAX_STRUCTURED_IMAGE_ENCODED_BYTES + 256 * 1024 + 1));
+    await Bun.sleep(0);
+    expect((await host.health()).status).toBe("dead");
     await host.release();
   });
 
@@ -683,6 +773,36 @@ describe("ClaudeStreamBrokerHost", () => {
     expect(confirmedChild.inputs).toHaveLength(0);
     expect(confirmedLedger.order).toContain("confirmed:confirmed");
     await confirmed.release();
+  });
+
+  test("restart transcript reconciliation confirms an image delivery by content digest", async () => {
+    const sessionId = "confirmed-image-session";
+    const content = structuredContent("reconcile image", [IMAGE_REF]);
+    const ledger = new RecordingDeliveryLedger();
+    ledger.recordQueued(sessionId, { id: "confirmed-image", ...content }, "turn-started");
+    const child = new FakeClaude(ledger);
+    const host = await ClaudeStreamBrokerHost.adopt(sessionId, {
+      cwd: "/repo",
+      deliveryLedger: ledger,
+      eventStore: new MemoryEventStore(),
+      readImage: () => IMAGE_BYTES,
+      readAuthStatus: () => ({ loggedIn: true, authMethod: "claude.ai", subscriptionType: "max" }),
+      readTranscript: () => [{
+        text: content.content.text,
+        contentDigest: content.contentDigest,
+        uuid: "transcript-image-user",
+        timestamp: new Date().toISOString(),
+      }],
+      spawnProcess: fakeSpawn(child, {}),
+    });
+
+    expect(await host.send({ id: "confirmed-image", ...content })).toEqual({
+      outcome: "turn-started",
+      turnId: "confirmed-image",
+    });
+    expect(child.inputs).toHaveLength(0);
+    expect(ledger.order).toContain("confirmed:confirmed-image");
+    await host.release();
   });
 
   test("rejects a changed payload before retrying an undelivered ledger entry", async () => {
