@@ -144,6 +144,23 @@ describe("taskRect / taskCardHeight", () => {
     expect(taskCardHeight(tall)).toBe(Math.max(64, clamped));
   });
 
+  test("taskRect encloses the floating action row's rendered footprint (Finding — P2)", () => {
+    /* The hover/edit send/status/delete row floats below the card's visual box:
+       top-full − translate-y-8 + h-7 lands its bottom 32px under the box. The
+       box every board consumer reads — collision, edges, nav, camera, world —
+       must enclose that strip, or a dense neighbour occupies it and the world
+       bounds clip it (issue #292). The visual card box is unchanged. */
+    const ROW_BOTTOM = 32;
+    for (const t of [
+      task({ id: "s", text: "one line" }),
+      task({ id: "l", text: "x".repeat(3000) }),
+      task({ id: "c", text: "one line", assignments: [assignment({}), assignment({ path: "/b" })] }),
+    ]) {
+      expect(taskRect(t).h).toBeGreaterThanOrEqual(taskCardHeight(t) + ROW_BOTTOM);
+      expect(taskRect(t, true).h).toBeGreaterThanOrEqual(taskCardHeight(t, true) + ROW_BOTTOM);
+    }
+  });
+
   test("taskRect grows for an expanded card at the same origin", () => {
     const t = task({ id: "t", pos: { x: 40, y: 60 }, text: "x".repeat(2000) });
     const collapsed = taskRect(t);

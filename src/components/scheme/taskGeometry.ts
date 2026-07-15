@@ -26,6 +26,16 @@ export const TASK_PREVIEW_CLAMP = 3;
 /** Bottom disclosure row («Expand/Collapse task»): an h-6 control inside a
     px-2 pb-2 block — 24 + 8. Rendered exactly when {@link taskCardExpandable}. */
 export const TASK_DISCLOSURE_H = 32;
+/** Footprint of the hover/edit action row that floats below the card's visual
+    box — the `pb-9` (36px) gutter on TaskCard's outer element. The floating
+    send/status/delete row lives entirely inside this strip (`top-full`,
+    `-translate-y-8`, `h-7` → it ends 32px below the card box, 4px above the
+    gutter's edge), so counting the strip in the card's collision/edge/nav/world
+    box makes {@link taskRect} coincide with the element the DOM actually renders
+    and stops a dense neighbour from occupying the row's footprint (issue #292).
+    The visual card box ({@link taskCardHeight}) stays unchanged — LiteTaskCard,
+    which has no action row, keeps rendering at that height. */
+export const TASK_ACTION_ROW_H = 36;
 const TASK_MIN_H = 64;
 /* Card body geometry: 12.5px text on 17px lines inside 12px (px-3) horizontal
    padding, so the wrap width is TASK_W − 24 = 236px. This estimate must be an
@@ -156,9 +166,19 @@ export function taskCardHeight(task: Pick<BoardTask, "text" | "assignments" | "s
   return Math.max(TASK_MIN_H, STRIP_H + bodyH + chipsH + discloseH);
 }
 
-/** World-space box of a task card, derived from its owned position. */
+/** On-board box height of a task card as the DOM renders it: the visual card
+    ({@link taskCardHeight}) plus the floating action-row strip below it
+    ({@link TASK_ACTION_ROW_H}). This is the box every board consumer — collision,
+    edges, nav, camera, world — must use, so the reserved strip can never be
+    covered by a neighbour (issue #292). */
+export function taskBoxHeight(task: Pick<BoardTask, "text" | "assignments" | "source">, expanded = false): number {
+  return taskCardHeight(task, expanded) + TASK_ACTION_ROW_H;
+}
+
+/** World-space box of a task card, derived from its owned position — the full
+    rendered footprint, action row included (see {@link taskBoxHeight}). */
 export function taskRect(task: Pick<PlacedTask, "pos" | "text" | "assignments" | "source">, expanded = false): SchemeRect {
-  return { x: task.pos.x, y: task.pos.y, w: TASK_W, h: taskCardHeight(task, expanded) };
+  return { x: task.pos.x, y: task.pos.y, w: TASK_W, h: taskBoxHeight(task, expanded) };
 }
 
 export function rectCenter(rect: SchemeRect): { x: number; y: number } {

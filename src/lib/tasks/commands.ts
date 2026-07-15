@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 
 import { isTaskAttachment } from "./attachments";
 import { isoNow } from "./helpers";
-import type { BoardTask, TaskAttachment, TaskAssignment, TaskSource, TaskStatus } from "./types";
+import type { AssignmentRef, BoardTask, TaskAttachment, TaskAssignment, TaskSource, TaskStatus } from "./types";
 
 export const TASK_TEXT_LIMIT = 6000;
 export const TASKS_PER_PROJECT_LIMIT = 300;
@@ -289,16 +289,45 @@ export function deleteTask(existing: BoardTask[], id: string): { ok: true; tasks
   return { ok: true, tasks };
 }
 
+/** Parses a detach handle from a DELETE request body: the transcript `path`
+    (the original contract), or a stable pathless handle — `conversationId` /
+    spawn `panePid` — so a codex spawn awaiting attribution or a failed delivery
+    is still detachable (issue #292). Returns null when no usable field is
+    present, so the route can answer 400. */
+export function assignmentRefFromBody(body: unknown): AssignmentRef | null {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return null;
+  const record = body as { path?: unknown; panePid?: unknown; conversationId?: unknown };
+  const ref: AssignmentRef = {};
+  if (typeof record.path === "string" && record.path.trim().length > 0) ref.path = record.path.trim();
+  if (typeof record.panePid === "number" && Number.isFinite(record.panePid)) ref.panePid = record.panePid;
+  if (typeof record.conversationId === "string" && record.conversationId.trim().length > 0) ref.conversationId = record.conversationId.trim();
+  return ref.path != null || ref.panePid != null || ref.conversationId != null ? ref : null;
+}
+
+/** Does an assignment match a detach handle? Most-stable-first: a matching
+    conversation id wins, else the path, else the spawn pane pid — so a pathless
+    assignment (a codex spawn awaiting attribution, a failed delivery) is still
+    detachable by the handle the card holds (issue #292). A bare string handle is
+    read as a path, preserving the original by-path contract. */
+function assignmentMatchesRef(assignment: TaskAssignment, ref: AssignmentRef): boolean {
+  if (ref.conversationId != null && assignment.conversationId === ref.conversationId) return true;
+  if (ref.path != null && assignment.path === ref.path) return true;
+  if (ref.panePid != null && assignment.panePid === ref.panePid) return true;
+  return false;
+}
+
 /**
- * Detaches one assignment from a task by its target path — the undo for a
- * wrong handoff. Idempotent: a path that is not assigned leaves the task
- * untouched but still succeeds, so a double-click never 404s.
+ * Detaches one assignment from a task by a stable handle — the undo for a wrong
+ * handoff and the recovery for a stuck pathless spawn/failure. Idempotent: a
+ * handle that matches nothing leaves the task untouched but still succeeds, so a
+ * double-click never 404s. A plain string handle keeps the by-path behaviour.
  */
-export function removeAssignment(existing: BoardTask[], id: string, path: string, now = isoNow()): TaskCommandResult {
+export function removeAssignment(existing: BoardTask[], id: string, handle: string | AssignmentRef, now = isoNow()): TaskCommandResult {
   const index = existing.findIndex((task) => task.id === id);
   if (index < 0) return { ok: false, error: "task not found", status: 404 };
+  const ref: AssignmentRef = typeof handle === "string" ? { path: handle } : handle;
   const task = existing[index]!;
-  const assignments = task.assignments.filter((assignment) => assignment.path !== path);
+  const assignments = task.assignments.filter((assignment) => !assignmentMatchesRef(assignment, ref));
   if (assignments.length === task.assignments.length) return { ok: true, tasks: existing, task };
   const updated: BoardTask = { ...task, assignments, updatedAt: now };
   const tasks = existing.slice();

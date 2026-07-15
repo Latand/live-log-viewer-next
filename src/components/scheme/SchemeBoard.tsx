@@ -837,8 +837,8 @@ export function SchemeBoard({
       /* No aimed agent: seed a fresh draft conversation with the task text —
          launches nothing until the user picks an engine and hits send. */
       draft: (task) => taskDraftRef.current?.(task),
-      unassign: async (task, path) => {
-        const error = await unassignTask(task.id, path);
+      unassign: async (task, ref) => {
+        const error = await unassignTask(task.id, ref);
         if (error) pushTaskToast("err", error);
       },
       center: (rect: SchemeRect) => centerOn(rect, 0.75),

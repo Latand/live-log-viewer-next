@@ -1,7 +1,7 @@
 "use client";
 
 import { getLocale, translate } from "@/lib/i18n";
-import type { BoardTask, TaskAttachment, TaskStatus } from "@/lib/tasks/types";
+import type { AssignmentRef, BoardTask, TaskAttachment, TaskStatus } from "@/lib/tasks/types";
 
 /** Fired after any successful task mutation so pollers refresh immediately. */
 export const TASKS_CHANGED_EVENT = "llv:tasks-changed";
@@ -179,10 +179,14 @@ export async function handoffTask(id: string, path: string): Promise<{ task: Boa
   return res.ok ? { task: res.data.task } : { error: res.error };
 }
 
-/** Detaches one assignment (the undo for a wrong handoff). A 404 means the
-    task is already gone — treated as success, the refetch drops the card. */
-export async function unassignTask(id: string, path: string): Promise<string | null> {
-  const res = await request<{ task: BoardTask }>(`/api/tasks/${encodeURIComponent(id)}/assignment`, "DELETE", { path });
+/** Detaches one assignment (the undo for a wrong handoff, and the recovery for a
+    stuck pathless spawn/failure). Accepts a stable handle — a path, or a
+    conversation id / spawn pane pid when no path was ever attributed (issue
+    #292). A 404 means the task is already gone — treated as success, the refetch
+    drops the card. */
+export async function unassignTask(id: string, handle: string | AssignmentRef): Promise<string | null> {
+  const body: AssignmentRef = typeof handle === "string" ? { path: handle } : handle;
+  const res = await request<{ task: BoardTask }>(`/api/tasks/${encodeURIComponent(id)}/assignment`, "DELETE", body);
   if (!res.ok && res.status === 404) {
     fireTasksChanged();
     return null;

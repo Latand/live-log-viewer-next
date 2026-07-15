@@ -4,7 +4,7 @@ import { ChevronDown, ChevronUp, Crosshair, Link2, Loader2, Send, Trash2, X } fr
 import { memo, useEffect, useRef, useState } from "react";
 
 import { useLocale } from "@/lib/i18n";
-import type { BoardTask } from "@/lib/tasks/types";
+import type { AssignmentRef, BoardTask } from "@/lib/tasks/types";
 import type { FileEntry } from "@/lib/types";
 
 import { useLinkDrag } from "@/components/AgentLink";
@@ -14,6 +14,7 @@ import { activityDot, cleanTitle, engineBadge, engineBadgeFor } from "@/componen
 
 import type { Camera } from "./Minimap";
 import { MOVE_EASE, MOVE_MS } from "./nodes";
+import { assignmentAgentState, assignmentOpenable } from "./assignmentState";
 import { TASK_W, taskCardExpandable, taskRect, type PlacedTask, type SchemeRect } from "./taskGeometry";
 
 /* Collapsed text clamps. Tailwind's scanner needs the literal class names, so
@@ -49,8 +50,10 @@ export interface TaskCardHandlers {
   /** Route the task to a brand-new agent: seed a draft conversation, launch
       nothing. */
   draft: (task: BoardTask) => void;
-  /** Detach one assignment — the undo for a wrong handoff. */
-  unassign: (task: BoardTask, path: string) => void;
+  /** Detach one assignment — the undo for a wrong handoff, and the recovery for
+      a stuck pathless spawn/failure. The ref carries a stable handle so a
+      pathless assignment is still removable (issue #292). */
+  unassign: (task: BoardTask, ref: AssignmentRef) => void;
   center: (rect: SchemeRect) => void;
   /** Toggle the card between its compact and full-text presentation. The
       expanded set lives on the board so geometry/reflow see it (issue #292). */
@@ -58,6 +61,42 @@ export interface TaskCardHandlers {
   /** Open + center the assigned agent's live pane through its canonical
       conversation path — the same opener a pane click uses. */
   openAgent: (file: FileEntry) => void;
+}
+
+/* A compact, accessible hit target for a chip action: a 28×28 box (issue #292 —
+   the old 16×16 icons were below the reachable minimum) wrapped around a 12px
+   icon, negative-margined so it never grows the 24px chip row. */
+function ChipAction({
+  icon,
+  ariaLabel,
+  title,
+  hoverClass,
+  disabled,
+  onClick,
+  openAgent,
+}: {
+  icon: React.ReactNode;
+  ariaLabel: string;
+  title: string;
+  hoverClass: string;
+  disabled?: boolean;
+  onClick: () => void;
+  /** Tags the canonical open-agent control for the camera opener + tests. */
+  openAgent?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      {...(openAgent ? { "data-task-open-agent": "" } : {})}
+      className={`-my-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${hoverClass} disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-muted`}
+      aria-label={ariaLabel}
+      title={title}
+      disabled={disabled}
+      onClick={onClick}
+    >
+      {icon}
+    </button>
+  );
 }
 
 function AssignmentChip({
@@ -69,44 +108,79 @@ function AssignmentChip({
 }: {
   task: BoardTask;
   assignment: BoardTask["assignments"][number];
+  /** Current generation of the assigned agent, resolved by the parent through
+      the stable conversation identity (id first, path fallback), or null when
+      nothing in the list matches (issue #292). */
   file: FileEntry | null;
-  onDetach: (task: BoardTask, path: string) => void;
+  onDetach: (task: BoardTask, ref: AssignmentRef) => void;
   onOpen: (file: FileEntry) => void;
 }) {
   const { t } = useLocale();
-  if (!assignment.path) {
+  const state = assignmentAgentState(assignment, file);
+  /* A stable detach handle so a pathless assignment is still removable: this
+     assignment's OWN identity — its conversation id (kept across path rotation),
+     path, and spawn pane pid — matched most-stable-first server-side. Only the
+     assignment's own fields go in, so detaching one chip never removes a sibling
+     that happens to resolve to the same live file. */
+  const detachRef: AssignmentRef = {
+    path: assignment.path,
+    panePid: assignment.panePid,
+    conversationId: assignment.conversationId ?? null,
+  };
+
+  /* Spawning is the sole spinner: a codex spawn awaiting attribution. It stays
+     detachable so a stuck spawn can be cleared, but shows no open control —
+     there is no pane yet. */
+  if (state === "spawning") {
     return (
-      <span className="flex h-6 items-center gap-1.5 rounded-[7px] border border-border bg-card/80 px-2 text-[10.5px] font-semibold text-muted">
+      <span className="flex h-6 w-full min-w-0 items-center gap-1.5 rounded-[7px] border border-border bg-card/80 px-2 text-[10.5px] font-semibold text-muted">
         <Loader2 className="h-3 w-3 shrink-0 animate-spin" aria-hidden />
-        {t("tasks.spawning")}
+        <span className="min-w-0 flex-1 truncate">{t("tasks.spawning")}</span>
+        <ChipAction
+          icon={<X className="h-3 w-3" aria-hidden />}
+          ariaLabel={t("tasks.detachAria", { title: t("tasks.spawning") })}
+          title={t("tasks.detach")}
+          hoverClass="hover:bg-black/5 hover:text-danger"
+          onClick={() => onDetach(task, detachRef)}
+        />
       </span>
     );
   }
-  const dead = !file;
-  const failed = assignment.state === "failed";
+
+  const openable = assignmentOpenable(state);
+  const failed = state === "failed";
   const handoff = assignment.state === "handoff";
   const badge = file ? engineBadge(file) : null;
-  const title = file ? cleanTitle(file.title, 40) : (assignment.path.split("/").pop() ?? assignment.path);
-  const wrapTitle = failed
-    ? t("tasks.chipFailedTitle", { error: assignment.error ?? "" })
-    : dead
-      ? t("tasks.deadChip")
-      : handoff
-        ? t("tasks.handoffChip")
-        : file
-          ? cleanTitle(file.title)
-          : undefined;
+  const title = file ? cleanTitle(file.title, 40) : (assignment.path ? (assignment.path.split("/").pop() ?? assignment.path) : t("tasks.failedChip"));
+  /* Truthful per-state reason, shared by the chip tooltip and the disabled
+     open control's title. */
+  const stateTitle =
+    failed
+      ? assignment.error
+        ? t("tasks.chipFailedTitle", { error: assignment.error })
+        : t("tasks.failedChip")
+      : state === "gone"
+        ? t("tasks.deadChip")
+        : state === "migrating"
+          ? t("tasks.migratingChip")
+          : state === "killed"
+            ? t("tasks.killedChip")
+            : state === "unhosted"
+              ? t("tasks.unhostedChip")
+              : handoff
+                ? t("tasks.handoffChip")
+                : file
+                  ? cleanTitle(file.title)
+                  : undefined;
+  const wrapClass = failed
+    ? "border-danger/25 bg-danger-soft text-danger"
+    : state === "gone" || state === "killed"
+      ? "border-border bg-sunken text-muted opacity-70"
+      : state === "migrating" || state === "unhosted"
+        ? "border-border bg-sunken text-muted"
+        : "border-border bg-card/80";
   return (
-    <span
-      className={`flex h-6 w-full min-w-0 items-center gap-1.5 rounded-[7px] border px-2 ${
-        failed
-          ? "border-danger/25 bg-danger-soft text-danger"
-          : dead
-            ? "border-border bg-sunken text-muted opacity-70"
-            : "border-border bg-card/80"
-      }`}
-      title={wrapTitle}
-    >
+    <span className={`flex h-6 w-full min-w-0 items-center gap-1.5 rounded-[7px] border px-2 ${wrapClass}`} title={stateTitle}>
       {handoff ? <Link2 className="h-3 w-3 shrink-0 text-info" aria-hidden /> : null}
       {file ? <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${activityDot(file.activity)}`} /> : null}
       {badge ? (
@@ -116,32 +190,29 @@ function AssignmentChip({
       ) : null}
       <span className="min-w-0 flex-1 truncate text-[10.5px] font-semibold">{title}</span>
       {failed ? <span aria-hidden>⚠</span> : null}
-      {/* The one-click way from the task to its agent: opens and centers the
-          live pane via the canonical conversation path. A dead assignment keeps
-          the control visible but truthfully disabled — there is no pane to
-          open until the conversation returns to the list. */}
-      <button
-        type="button"
-        data-task-open-agent
-        className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-muted hover:bg-black/5 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-muted"
-        aria-label={t("tasks.openAgentAria", { title })}
-        title={dead ? t("tasks.deadChip") : t("tasks.openAgent")}
-        disabled={dead}
+      {/* The one-click way from the task to its agent: opens and centers the live
+          pane via the canonical conversation path. Enabled only for a resolvable
+          live/current agent — a gone, killed, unhosted, migrating or failed
+          assignment keeps the control visible but truthfully disabled, its title
+          naming the reason. */}
+      <ChipAction
+        icon={<Crosshair className="h-3 w-3" aria-hidden />}
+        ariaLabel={t("tasks.openAgentAria", { title })}
+        title={openable ? t("tasks.openAgent") : (stateTitle ?? t("tasks.openAgent"))}
+        hoverClass="hover:bg-black/5 hover:text-accent"
+        disabled={!openable}
         onClick={() => {
-          if (file) onOpen(file);
+          if (file && openable) onOpen(file);
         }}
-      >
-        <Crosshair className="h-3 w-3" aria-hidden />
-      </button>
-      <button
-        type="button"
-        className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-muted hover:bg-black/5 hover:text-danger focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
-        aria-label={t("tasks.detachAria", { title })}
+        openAgent
+      />
+      <ChipAction
+        icon={<X className="h-3 w-3" aria-hidden />}
+        ariaLabel={t("tasks.detachAria", { title })}
         title={t("tasks.detach")}
-        onClick={() => onDetach(task, assignment.path!)}
-      >
-        <X className="h-3 w-3" aria-hidden />
-      </button>
+        hoverClass="hover:bg-black/5 hover:text-danger"
+        onClick={() => onDetach(task, detachRef)}
+      />
     </span>
   );
 }
@@ -318,6 +389,18 @@ export const TaskCard = memo(function TaskCard({
   const title = taskTitle(task.text) || t("tasks.untitled");
   const rest = task.text.includes("\n") ? task.text.slice(task.text.indexOf("\n") + 1) : "";
   const byPath = new Map(files.map((file) => [file.path, file]));
+  /* Resolve an assignment to the CURRENT generation of its agent by stable
+     conversation identity first (a migrated agent keeps its id while its path
+     rotates), falling back to the path — so an assignment never reads as dead
+     just because its recorded path aged out (issue #292). */
+  const byConvId = new Map(files.filter((file) => file.conversationId).map((file) => [file.conversationId!, file]));
+  const resolveAgent = (assignment: BoardTask["assignments"][number]): FileEntry | null => {
+    if (assignment.conversationId) {
+      const current = byConvId.get(assignment.conversationId);
+      if (current) return current;
+    }
+    return assignment.path ? (byPath.get(assignment.path) ?? null) : null;
+  };
   const lifted = editing || drag !== null;
 
   /* The handoff gesture, task-flavored: pull the arrow off the «send» pill
@@ -399,11 +482,14 @@ export const TaskCard = memo(function TaskCard({
             <SourceChip task={task} file={task.source ? (byPath.get(task.source.path) ?? null) : null} />
             {task.assignments.map((assignment, index) => (
               <AssignmentChip
-                key={(assignment.path ?? "spawning") + "::" + index}
+                /* Stable identity: the conversation id, else the path, else the
+                   spawn pane pid — so a chip keeps its React state across a path
+                   rotation and two pathless spawns never collide (issue #292). */
+                key={assignment.conversationId ?? assignment.path ?? (assignment.panePid != null ? `pane:${assignment.panePid}` : `i:${index}`)}
                 task={task}
                 assignment={assignment}
-                file={assignment.path ? (byPath.get(assignment.path) ?? null) : null}
-                onDetach={(target, path) => handlers.unassign(target, path)}
+                file={resolveAgent(assignment)}
+                onDetach={(target, ref) => handlers.unassign(target, ref)}
                 onOpen={handlers.openAgent}
               />
             ))}

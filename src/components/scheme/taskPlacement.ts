@@ -1,7 +1,7 @@
 import type { BoardTask } from "@/lib/tasks/types";
 
 import type { SchemeRect } from "./layout";
-import { TASK_W, taskCardHeight } from "./taskGeometry";
+import { TASK_W, taskBoxHeight } from "./taskGeometry";
 
 /* Minimum clear gap between a task card and any card or pane it is nudged
    away from — the board reads as sticky notes, so a small breathing gutter is
@@ -141,7 +141,9 @@ export function resolveTaskPlacements(
       x: task.pos.x,
       y: task.pos.y,
       w: TASK_W,
-      h: taskCardHeight(task, expanded),
+      /* Full rendered footprint (action-row strip included) so a neighbour
+         never lands on a card's hover action row (issue #292). */
+      h: taskBoxHeight(task, expanded),
       auto: !expanded && isAutoPlaceable(task),
       expanded,
     };
@@ -159,11 +161,15 @@ export function resolveTaskPlacements(
     if (card.expanded) expandedRects.push(rect);
   };
 
-  /* Expanded cards land first: each holds its spot unless an older expanded
-     card's grown box already covers it. */
+  /* Expanded cards land first: each holds its spot only while its grown box is
+     clear of every pane obstacle AND every already-placed (older expanded) card
+     — findSlot returns the stored spot when nothing contends and spirals out
+     otherwise. Checking obstacles here is the fix for the grown box swallowing a
+     pane's controls: expansion could previously overlap a pane whenever it did
+     not also collide another expanded card (issue #292). The stored positions
+     never change, so collapsing restores the arrangement exactly. */
   for (const card of cards.filter((c) => c.expanded).sort(byAge)) {
-    const spot = clashesAny(card, expandedRects, TASK_GUTTER) ? findSlot(card, placed, obstacles) : { x: card.x, y: card.y };
-    land(card, spot);
+    land(card, findSlot(card, placed, obstacles));
   }
 
   /* Held cards keep their exact spot — the user's arrangement — and join

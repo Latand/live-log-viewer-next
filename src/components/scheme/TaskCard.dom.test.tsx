@@ -3,7 +3,7 @@ import { Window as HappyWindow } from "happy-dom";
 import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
 
-import type { BoardTask } from "@/lib/tasks/types";
+import type { AssignmentRef, BoardTask } from "@/lib/tasks/types";
 import type { FileEntry } from "@/lib/types";
 
 import type { Camera } from "./Minimap";
@@ -83,6 +83,7 @@ interface Calls {
   toggled: string[];
   opened: FileEntry[];
   patched: string[];
+  detached: AssignmentRef[];
 }
 
 function handlers(calls: Calls): TaskCardHandlers {
@@ -94,7 +95,7 @@ function handlers(calls: Calls): TaskCardHandlers {
     remove: () => undefined,
     handoff: async () => null,
     draft: () => undefined,
-    unassign: () => undefined,
+    unassign: (_task, ref) => calls.detached.push(ref),
     center: () => undefined,
     toggleExpand: (id) => calls.toggled.push(id),
     openAgent: (entry) => calls.opened.push(entry),
@@ -104,7 +105,7 @@ function handlers(calls: Calls): TaskCardHandlers {
 const camRef = { current: { x: 0, y: 0, z: 1 } as Camera };
 
 function render(task: PlacedTask, opts: { expanded?: boolean; files?: FileEntry[]; calls?: Calls } = {}): { host: HTMLElement; calls: Calls } {
-  const calls = opts.calls ?? { toggled: [], opened: [], patched: [] };
+  const calls = opts.calls ?? { toggled: [], opened: [], patched: [], detached: [] };
   const host = dom.document.createElement("div") as unknown as HTMLElement;
   dom.document.body.appendChild(host as never);
   const root = createRoot(host);
@@ -171,6 +172,26 @@ test("a live assignment gets an enabled open-agent control that activates the ca
   expect(calls.patched).toEqual([]);
 });
 
+test("chip open/detach controls carry a >=28px hit area with a compact icon (Finding — P2)", () => {
+  const agent = file("/agents/one.jsonl", "Reviewer");
+  const task = boardTask({
+    id: "t1",
+    assignments: [{ path: agent.path, panePid: null, state: "delivered", error: null, at: "2026-07-01T00:00:00.000Z" }],
+  });
+  const { host } = render(task, { files: [agent] });
+  const open = host.querySelector("[data-task-open-agent]") as HTMLButtonElement;
+  const detach = host.querySelector('[aria-label^="Detach"]') as HTMLButtonElement;
+  for (const button of [open, detach]) {
+    /* h-7 w-7 = 28px hit target (the old controls were 16px h-4 w-4). */
+    expect(button.className).toContain("h-7");
+    expect(button.className).toContain("w-7");
+    /* Icon stays compact at 12px, and the control keeps its label + focus ring. */
+    expect(button.querySelector(".h-3.w-3")).not.toBeNull();
+    expect(button.getAttribute("aria-label")).toBeTruthy();
+    expect(button.className).toContain("focus-visible:ring-2");
+  }
+});
+
 test("multiple assignments stay individually reachable with distinct labels", () => {
   const one = file("/agents/one.jsonl", "Implementer");
   const two = file("/agents/two.jsonl", "Reviewer");
@@ -205,4 +226,61 @@ test("a dead assignment renders a truthful disabled control; a spawning one rend
   expect(opens[0]!.hasAttribute("disabled")).toBe(true);
   opens[0]!.click();
   expect(calls.opened).toEqual([]);
+});
+
+test("a pathless FAILED assignment shows an error with no spinner (Finding — P1)", () => {
+  const task = boardTask({
+    id: "t1",
+    assignments: [{ path: null, panePid: 77, state: "failed", error: "no pane free", at: "2026-07-01T00:00:00.000Z" }],
+  });
+  const { host, calls } = render(task);
+  /* No in-flight spinner for a failed delivery. */
+  expect(host.querySelector(".animate-spin")).toBeNull();
+  /* The failure surfaces (the ⚠ marker) and the open control is absent/disabled —
+     there is nothing live to open — while detach stays reachable for recovery. */
+  const opens = [...host.querySelectorAll("[data-task-open-agent]")] as HTMLButtonElement[];
+  expect(opens.every((b) => b.hasAttribute("disabled"))).toBe(true);
+  expect(host.textContent).toContain("⚠");
+  const detach = host.querySelector('[aria-label^="Detach"]') as HTMLButtonElement;
+  detach.click();
+  /* Pathless detach carries a stable handle — here the spawn pane pid — so the row stays removable. */
+  expect(calls.detached).toHaveLength(1);
+  expect(calls.detached[0]).toMatchObject({ panePid: 77 });
+});
+
+test("killed / unhosted / migrating agents disable open with a truthful title (Finding — P1)", () => {
+  const base = (over: Partial<FileEntry>): FileEntry => ({ ...file("/a.jsonl", "Agent"), ...over });
+  const cases: Array<{ f: FileEntry; reason: string }> = [
+    { f: base({ proc: "killed", activity: "idle" }), reason: "killed" },
+    { f: base({ proc: null, activity: "idle" }), reason: "isn't running" },
+    { f: base({ proc: "running", migration: { intentId: "i", trigger: "manual", phase: "preparing", targetAccountId: "acc", failure: null } as FileEntry["migration"] }), reason: "moving to another account" },
+  ];
+  for (const { f, reason } of cases) {
+    const task = boardTask({
+      id: "t1",
+      assignments: [{ path: f.path, panePid: null, state: "delivered", error: null, at: "2026-07-01T00:00:00.000Z" }],
+    });
+    const { host, calls } = render(task, { files: [f] });
+    const open = host.querySelector("[data-task-open-agent]") as HTMLButtonElement;
+    expect(open.hasAttribute("disabled")).toBe(true);
+    expect(open.getAttribute("title")).toContain(reason);
+    open.click();
+    expect(calls.opened).toEqual([]);
+  }
+});
+
+test("resolves the current generation by conversationId after the path rotates (Finding — P1)", () => {
+  /* The agent migrated: its assignment still carries the old path, but the live
+     entry now sits under a new path with the same stable conversation id. The
+     chip must resolve to the current generation and enable open. */
+  const current: FileEntry = { ...file("/new-generation.jsonl", "Reviewer"), conversationId: "conv-42", proc: "running", activity: "live" };
+  const task = boardTask({
+    id: "t1",
+    assignments: [{ path: "/old-path.jsonl", conversationId: "conv-42", panePid: null, state: "handoff", error: null, at: "2026-07-01T00:00:00.000Z" }],
+  });
+  const { host, calls } = render(task, { files: [current] });
+  const open = host.querySelector("[data-task-open-agent]") as HTMLButtonElement;
+  expect(open.hasAttribute("disabled")).toBe(false);
+  open.click();
+  expect(calls.opened.map((f) => f.path)).toEqual(["/new-generation.jsonl"]);
 });

@@ -19,6 +19,16 @@ export interface TaskAssignment {
   engine?: "claude" | "codex" | null;
 }
 
+/** A stable handle to one assignment, for detach/recovery when the transcript
+    `path` may be absent — a codex spawn awaiting attribution, or a failed
+    delivery that never got a path (issue #292). Matched most-stable-first:
+    conversation id, then path, then the spawn pane pid. */
+export interface AssignmentRef {
+  path?: string | null;
+  panePid?: number | null;
+  conversationId?: string | null;
+}
+
 export interface TaskSource {
   path: string;
   ts: string | null;

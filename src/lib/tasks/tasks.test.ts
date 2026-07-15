@@ -4,7 +4,7 @@ import path from "node:path";
 
 import { describe, expect, test } from "bun:test";
 
-import { applyAssignmentPatches, createTask, deleteTask, mergeAssignments, patchTask, pinnedAccountId, TASKS_PER_PROJECT_LIMIT } from "./commands";
+import { applyAssignmentPatches, assignmentRefFromBody, createTask, deleteTask, mergeAssignments, patchTask, pinnedAccountId, removeAssignment, TASKS_PER_PROJECT_LIMIT } from "./commands";
 import { firstLineTitle } from "./helpers";
 import { reconcileTasks } from "./reconcile";
 import { assembleSendResults } from "./send";
@@ -327,5 +327,81 @@ describe("task delivery assembly", () => {
     ];
     expect(pinnedAccountId(assignments, "claude")).toBe("claude-work");
     expect(pinnedAccountId(assignments, "codex")).toBe("codex-work");
+  });
+
+  describe("removeAssignment — stable detach handles (issue #292)", () => {
+    const seed = () =>
+      task({
+        assignments: [
+          { path: "/a.jsonl", conversationId: "conv-a", panePid: 11, state: "delivered", error: null, at: "old" },
+          { path: null, conversationId: null, panePid: 42, state: "spawning", error: null, at: "old" },
+          { path: null, conversationId: null, panePid: null, state: "failed", error: "no pane", at: "old" },
+        ],
+      });
+
+    test("a bare string handle keeps the by-path contract", () => {
+      const res = removeAssignment([seed()], "task-1", "/a.jsonl", "now");
+      expect(res.ok).toBe(true);
+      if (!res.ok) throw new Error(res.error);
+      expect(res.task.assignments.map((a) => a.path)).toEqual([null, null]);
+      expect(res.task.updatedAt).toBe("now");
+    });
+
+    test("detaches a pathless spawn by its pane pid", () => {
+      const res = removeAssignment([seed()], "task-1", { panePid: 42 }, "now");
+      expect(res.ok).toBe(true);
+      if (!res.ok) throw new Error(res.error);
+      expect(res.task.assignments.some((a) => a.panePid === 42)).toBe(false);
+      expect(res.task.assignments).toHaveLength(2);
+    });
+
+    test("detaches by conversation id even after the path rotates", () => {
+      const res = removeAssignment([seed()], "task-1", { conversationId: "conv-a", path: "/rotated.jsonl" }, "now");
+      expect(res.ok).toBe(true);
+      if (!res.ok) throw new Error(res.error);
+      expect(res.task.assignments.some((a) => a.conversationId === "conv-a")).toBe(false);
+    });
+
+    test("a handle matching nothing is an idempotent no-op success", () => {
+      const before = seed();
+      const res = removeAssignment([before], "task-1", { panePid: 999 }, "now");
+      expect(res.ok).toBe(true);
+      if (!res.ok) throw new Error(res.error);
+      expect(res.task.assignments).toHaveLength(3);
+      expect(res.task.updatedAt).toBe(before.updatedAt); // untouched — no bump
+    });
+
+    test("a missing task 404s", () => {
+      const res = removeAssignment([], "nope", { path: "/a" });
+      expect(res.ok).toBe(false);
+      if (res.ok) throw new Error("expected failure");
+      expect(res.status).toBe(404);
+    });
+  });
+
+  describe("assignmentRefFromBody — the DELETE-assignment request contract (issue #292)", () => {
+    test("reads a path handle", () => {
+      expect(assignmentRefFromBody({ path: " /a.jsonl " })).toEqual({ path: "/a.jsonl" });
+    });
+
+    test("reads a pathless pane-pid or conversation-id handle", () => {
+      expect(assignmentRefFromBody({ panePid: 42 })).toEqual({ panePid: 42 });
+      expect(assignmentRefFromBody({ conversationId: " conv-a " })).toEqual({ conversationId: "conv-a" });
+    });
+
+    test("carries every stable field the caller supplies", () => {
+      expect(assignmentRefFromBody({ path: "/a", panePid: 7, conversationId: "conv-a" })).toEqual({
+        path: "/a",
+        panePid: 7,
+        conversationId: "conv-a",
+      });
+    });
+
+    test("rejects a body with no usable handle", () => {
+      expect(assignmentRefFromBody({})).toBeNull();
+      expect(assignmentRefFromBody({ path: "  ", panePid: Number.NaN, conversationId: "" })).toBeNull();
+      expect(assignmentRefFromBody(null)).toBeNull();
+      expect(assignmentRefFromBody([1, 2])).toBeNull();
+    });
   });
 });

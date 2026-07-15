@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import type { SchemeRect } from "./layout";
 import { isAutoPlaceable, resolveTaskPlacements, TASK_GUTTER, type PlaceableTask } from "./taskPlacement";
-import { TASK_W, taskCardHeight, taskRect } from "./taskGeometry";
+import { TASK_W, taskBoxHeight, taskCardHeight, taskRect } from "./taskGeometry";
 
 /* A prompt-captured source — what curator.ts and inboxScanner.ts stamp on every
    card they create. A card with one is auto-placeable only while it also rests
@@ -197,6 +197,21 @@ describe("resolveTaskPlacements", () => {
     }
   });
 
+  test("placement reserves the floating action-row strip below every card (Finding — P2)", () => {
+    /* The collision pass spreads a pileup using the full rendered box
+       (taskBoxHeight = visual card + the action-row strip), so a relocated card
+       never lands on a neighbour's hover send/status/delete row. Assert every
+       resolved pair clears at the full box that includes the action-row strip. */
+    const tasks = densePileup(24);
+    const placement = resolveTaskPlacements(tasks, []);
+    const rects = tasks.map((t) => ({ x: placement.get(t.id)!.x, y: placement.get(t.id)!.y, w: TASK_W, h: taskBoxHeight(t) }));
+    for (let a = 0; a < rects.length; a++) {
+      for (let b = a + 1; b < rects.length; b++) {
+        expect(clash(rects[a]!, rects[b]!, TASK_GUTTER - 1)).toBe(false);
+      }
+    }
+  });
+
   test("resolves a large burst without exploding out of bounds", () => {
     const tasks = densePileup(60);
     const placement = resolveTaskPlacements(tasks, []);
@@ -255,6 +270,24 @@ describe("resolveTaskPlacements — expanded cards (issue #292)", () => {
     const rectA = { x: 0, y: 0, w: TASK_W, h: taskCardHeight(a, true) };
     const rectB = { ...placement.get("b")!, w: TASK_W, h: taskCardHeight(b, true) };
     expect(clash(rectA, rectB, TASK_GUTTER - 1)).toBe(false);
+  });
+
+  test("an expanded card clears pane obstacles and expanded cards (Finding — P1)", () => {
+    /* The reviewer's exact probe: a 126px collapsed card that fits above a pane,
+       a 568px expanded box that would swallow the pane at y=200. The expanded
+       card must relocate off the pane — the old path held its spot whenever it
+       did not also collide another expanded card, covering the pane's controls. */
+    const pane: SchemeRect = { x: 0, y: 200, w: 600, h: 680 };
+    const a = task("a", 0, 0, { text: LONG });
+    /* Collapsed, the card sits clear above the pane and holds its spot. */
+    const collapsed = resolveTaskPlacements([a], [pane]);
+    expect(collapsed.get("a")).toEqual({ x: 0, y: 0 });
+    expect(clash({ x: 0, y: 0, w: TASK_W, h: taskCardHeight(a) }, pane, 0)).toBe(false);
+    /* Expanded, the grown box would cover the pane — so it is nudged clear. */
+    const expanded = resolveTaskPlacements([a], [pane], new Set(["a"]));
+    expect(expanded.get("a")).not.toEqual({ x: 0, y: 0 });
+    const rect = { ...expanded.get("a")!, w: TASK_W, h: taskCardHeight(a, true) };
+    expect(clash(rect, pane, 0)).toBe(false);
   });
 
   test("an expanded auto card anchors instead of auto-flowing", () => {
