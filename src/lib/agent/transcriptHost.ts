@@ -82,7 +82,7 @@ export type HostDeliveryOutcome =
   | { ok: false; outcome: "failed"; error: string; status: number; actuation?: "started" };
 
 export interface TranscriptHostResolver {
-  readTranscriptHosts(fresh?: boolean): Promise<TranscriptHostSnapshot>;
+  readTranscriptHosts(fresh?: boolean, entries?: FileEntry[]): Promise<TranscriptHostSnapshot>;
   deliverToTranscriptHost(input: { entry: FileEntry; spec: ResumeSpec; payload: string }): Promise<HostDeliveryOutcome>;
 }
 
@@ -288,9 +288,13 @@ export function createTranscriptHostResolver(
   decisions = new Map<string, Promise<Decision>>(),
 ): TranscriptHostResolver {
 
-  async function observe(fresh: boolean): Promise<TranscriptHostSnapshot> {
+  async function observe(fresh: boolean, suppliedEntries?: FileEntry[]): Promise<TranscriptHostSnapshot> {
     const conversationIdForPath = dependencies.conversationIdForPath ?? (() => null);
-    const [entries, paneObservation, records] = await Promise.all([dependencies.listFiles(), dependencies.panes(fresh), dependencies.resumeRecords()]);
+    const [entries, paneObservation, records] = await Promise.all([
+      suppliedEntries ?? dependencies.listFiles(),
+      dependencies.panes(fresh),
+      dependencies.resumeRecords(),
+    ]);
     const serverPid = records?.serverPid ?? (await dependencies.serverPid());
     if (paneObservation.kind === "failure" && serverPid !== null) {
       return { hosts: [], observation: "failure", observationError: paneObservation.error, conflicts: [], canonicalFor: () => null };

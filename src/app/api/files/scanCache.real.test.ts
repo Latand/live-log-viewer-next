@@ -18,7 +18,7 @@ fs.mkdirSync(sessions, { recursive: true });
 
 const { listFilesWithProjectCatalog } = await import("@/lib/scanner");
 const { ROOTS } = await import("@/lib/scanner/roots");
-const { cachedFileScan, resetFilesRouteCacheForTests } = await import("./scanCache");
+const { cachedFileScan, resetFilesRouteCacheForTests } = await import("@/lib/scanner/scanCache");
 
 function writeSession(filename: string, cwd: string): string {
   const pathname = path.join(sessions, filename);

@@ -6,7 +6,7 @@ import { tickPipelines } from "../pipelines/engine";
 import { notifyQuestion } from "../push";
 import { overlaySessionTitles, sessionProjectProjection } from "../session/titleProjection";
 import { tickTaskInbox } from "../tasks/inboxScanner";
-import { resolveTarget } from "../tmux";
+import { panePidMap, resolveTarget } from "../tmux";
 import { tickWorkflows } from "../workflows/engine";
 import { activityVerdict } from "./activity";
 import { ctxFor } from "./context";
@@ -15,7 +15,7 @@ import { discoverFiles, discoverFilesWithProjectCatalog } from "./discover";
 import { entryEffort, entryFast } from "./effort";
 import { linkEntries } from "./links";
 import { entryModels } from "./model";
-import { outputHolders } from "./process";
+import { agentProcesses, outputHolders } from "./process";
 import { goalFor, planFor } from "./plan";
 import { pendingQuestionFor } from "./questions";
 import { pendingWakeupFor } from "./wakeup";
@@ -72,6 +72,9 @@ async function forEachEntryBatchYielding(
 
 export interface FileScanOptions {
   persist?: boolean;
+  /** Refresh process and tmux pane observations before hydrating FileEntry
+      ownership and pane-derived state. */
+  fresh?: boolean;
   /** Persist parsed per-file summaries while keeping controller mutations out
       of request-owned scans. */
   persistIndex?: boolean;
@@ -202,6 +205,11 @@ async function listFilesInternal(
     ? await discoverFilesWithProjectCatalog(undefined, selectedProject, { persist, persistIndex: options.persistIndex, demote, pin })
     : { files: await discoverFiles(undefined, demote, pin), projectCatalog: [], complete: true };
   const entries = scan.files;
+  if (options.fresh) {
+    const panes = panePidMap(true);
+    agentProcesses(true);
+    await panes;
+  }
   // The /proc fd scan is only needed to attribute background-task outputs to a
   // live pid. When the shortlist has no such entries, skip the scan entirely;
   // activity() only consults holders on the same claude-tasks/.output path.
