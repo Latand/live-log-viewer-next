@@ -504,7 +504,6 @@ function resourceReadFromObservation(
   captureSystem: () => ResourcesPayload["system"],
   fresh: boolean,
   collectorId: string,
-  persist?: (observation: ResourceObservation<CollectedResources>) => void,
 ): ResourcesRead {
   if (!observation) {
     return fallbackRead({ system: captureSystem(), sessions: [] }, "collector-busy", collectorId);
