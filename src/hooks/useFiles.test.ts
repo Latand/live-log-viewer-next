@@ -105,6 +105,34 @@ test("URL-specific 304 responses restore the matching cached representation", as
   expect(cache.read()).toBe(restored);
 });
 
+test("client cache subscriptions receive updates only for their request scope", async () => {
+  const pinnedPath = "/archive/scoped-pin.jsonl";
+  const cache = createFilesClientCache(async (input) => {
+    const files = input === "/api/files"
+      ? [file("/global", "Global")]
+      : [file("/global", "Global"), file(pinnedPath, "Pinned")];
+    return new Response(JSON.stringify({ files }));
+  });
+  const globalUpdates: string[][] = [];
+  const pinnedUpdates: string[][] = [];
+  const unsubscribeGlobal = cache.subscribe((data) => {
+    globalUpdates.push(data.files.map((entry) => entry.path));
+  });
+  const unsubscribePinned = cache.subscribe((data) => {
+    pinnedUpdates.push(data.files.map((entry) => entry.path));
+  }, pinnedPath);
+
+  await cache.revalidate(pinnedPath);
+  expect(globalUpdates).toEqual([]);
+  expect(pinnedUpdates).toEqual([["/global", pinnedPath]]);
+
+  await cache.revalidate();
+  expect(globalUpdates).toEqual([["/global"]]);
+  expect(pinnedUpdates).toEqual([["/global", pinnedPath]]);
+  unsubscribeGlobal();
+  unsubscribePinned();
+});
+
 test("a global 304 restores its exact cached membership and values", async () => {
   let globalRequests = 0;
   const cache = createFilesClientCache(async (input, init) => {
@@ -325,6 +353,38 @@ test("a pipeline echo applies without a refetch and survives a STALE in-flight s
   /* …but a scan REQUESTED after the echo is authoritative and retires the overlay. */
   await cache.revalidate();
   expect(cache.read().pipelines[0]!.task).toBe("old task");
+});
+
+test("a generation retry preserves a pipeline echo newer than the scan it completes", async () => {
+  let call = 0;
+  let releaseStale!: () => void;
+  const staleGate = new Promise<void>((resolve) => { releaseStale = resolve; });
+  const cache = createFilesClientCache(async () => {
+    call += 1;
+    if (call === 2) await staleGate;
+    const headers = call === 2
+      ? { "x-llv-files-generation": "0", "x-llv-files-target-generation": "1" }
+      : call === 3
+        ? { "x-llv-files-generation": "1", "x-llv-files-target-generation": "1" }
+        : undefined;
+    return new Response(JSON.stringify({ files: [], pipelines: [pipelineRow("p1", "server")] }), { headers });
+  });
+  const unsubscribe = cache.subscribe(() => {});
+
+  await cache.revalidate();
+  const stale = cache.revalidate(undefined, 9);
+  await Promise.resolve();
+  await Promise.resolve();
+  cache.applyPipeline(pipelineRow("p1", "patched") as never, true);
+  releaseStale();
+  await stale;
+  await Bun.sleep(50);
+
+  expect(call).toBe(3);
+  expect(cache.read().pipelines[0]?.task).toBe("patched");
+  await cache.revalidate();
+  expect(cache.read().pipelines[0]?.task).toBe("server");
+  unsubscribe();
 });
 
 test("an unconfirmed optimistic pipeline outlives every scan until reverted", async () => {

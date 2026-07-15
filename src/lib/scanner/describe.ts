@@ -21,30 +21,82 @@ export interface FileDescription {
   fmt: Fmt;
 }
 
+export interface FileDescriptionIdentity {
+  size: number;
+  mtimeMs: number;
+  sidecarSize: number | null;
+  sidecarMtimeMs: number | null;
+}
+
+type CachedFileDescription = {
+  identity: FileDescriptionIdentity;
+  stateKey: string;
+  description: FileDescription;
+};
+
 /* Earlier issue-171 builds retained full prompts in these global maps. Clear
    them during hot reload so the bounded scheme metadata shape takes effect
    without waiting for a process restart. */
 globalCache<unknown>("meta-v4").clear();
 globalCache<unknown>("title-v2").clear();
-const metaCache = globalCache<[number, string, FileDescription]>("meta-v5");
-// Title and codex project live in the immutable head of a growing transcript,
-// so both are keyed by path and kept for good once resolved. A live file grows
-// on every poll, so a size-keyed meta cache would re-read the whole file each
-// tick; these caches read only the head and stop reading once the answer is
-// fixed. A head that has not yet produced a title (empty/short file) is left
-// open so growth can still yield one.
+const metaCache = globalCache<CachedFileDescription>("meta-v6");
+// Title and codex project live in the immutable head of a growing transcript.
+// Resolved head values survive append-only growth, while the complete file
+// identity invalidates same-size rewrites and truncations. A head that has not
+// yet produced a title stays open so growth can still yield one.
 export type ConversationSearchText = { title: string | null; firstPrompt: string | null };
-const titleCache = globalCache<[number, string | null]>("title-v3");
+const titleCache = globalCache<[number, number, string | null]>("title-v4");
 /* Search text can be large and belongs to the list/search path. Its bounded
    cache lives with the search index; page hydration reads only its visible rows. */
 globalCache<unknown>("conversation-search-v1").clear();
-const codexProjectCache = globalCache<{ stateKey: string; project: string; worktree?: string }>("codex-project-v3");
+const codexProjectCache = globalCache<{
+  size: number;
+  mtimeMs: number;
+  stateKey: string;
+  project: string;
+  worktree?: string;
+}>("codex-project-v4");
 const repoSlugCache = globalCache<[number, string | null]>("repo-path-from-slug-v1");
-/* The cwd sits in the immutable head, so it follows the title-cache rule:
-   keyed by path, re-read only while unresolved and the head still short. */
-const cwdCache = globalCache<[number, string | null]>("claude-cwd");
+/* The cwd follows the same append-only head reuse and rewrite invalidation. */
+const cwdCache = globalCache<[number, number, string | null]>("claude-cwd-v2");
 
 const HEAD_BYTES = 131_072;
+
+function subagentSidecarPath(rootName: RootKey, pathname: string): string | null {
+  if (rootName !== "claude-projects" || !path.basename(pathname).startsWith("agent-") || !pathname.endsWith(".jsonl")) {
+    return null;
+  }
+  return pathname.slice(0, -".jsonl".length) + ".meta.json";
+}
+
+export function fileDescriptionIdentity(
+  rootName: RootKey,
+  pathname: string,
+  st: fs.Stats,
+): FileDescriptionIdentity {
+  const sidecarPath = subagentSidecarPath(rootName, pathname);
+  if (!sidecarPath) {
+    return { size: st.size, mtimeMs: st.mtimeMs, sidecarSize: null, sidecarMtimeMs: null };
+  }
+  try {
+    const sidecar = fs.statSync(sidecarPath);
+    return {
+      size: st.size,
+      mtimeMs: st.mtimeMs,
+      sidecarSize: sidecar.size,
+      sidecarMtimeMs: sidecar.mtimeMs,
+    };
+  } catch {
+    return { size: st.size, mtimeMs: st.mtimeMs, sidecarSize: null, sidecarMtimeMs: null };
+  }
+}
+
+function sameFileDescriptionIdentity(left: FileDescriptionIdentity, right: FileDescriptionIdentity): boolean {
+  return left.size === right.size
+    && left.mtimeMs === right.mtimeMs
+    && left.sidecarSize === right.sidecarSize
+    && left.sidecarMtimeMs === right.sidecarMtimeMs;
+}
 
 function readHead(pathname: string, size: number): { text: string; read: number } | null {
   try {
@@ -613,13 +665,17 @@ function conversationTextFromLines(lines: string[], wantCodex: boolean): Convers
   return { title, firstPrompt };
 }
 
-function transcriptCwd(pathname: string, size: number): string | null {
+function transcriptCwd(pathname: string, st: fs.Stats): string | null {
   const cached = cwdCache.get(pathname);
-  if (cached && (cached[1] !== null || cached[0] >= HEAD_BYTES)) return cached[1];
-  const head = readHead(pathname, size);
-  if (!head) return cached?.[1] ?? null;
+  if (cached) {
+    const sameFile = cached[0] === st.size && cached[1] === st.mtimeMs;
+    const unchangedResolvedHead = st.size > cached[0] && (cached[2] !== null || cached[0] >= HEAD_BYTES);
+    if (sameFile || unchangedResolvedHead) return cached[2];
+  }
+  const head = readHead(pathname, st.size);
+  if (!head) return cached?.[2] ?? null;
   const cwd = cwdFromLines(head.text.split("\n").slice(0, 25));
-  cwdCache.set(pathname, [head.read, cwd]);
+  cwdCache.set(pathname, [st.size, st.mtimeMs, cwd]);
   return cwd;
 }
 
@@ -631,13 +687,17 @@ function projectInfoFromSlug(slug: string): { project: string; worktree?: string
   return persistedProjects().bySlug.get(slug) ?? null;
 }
 
-function scanJsonlTitle(pathname: string, size: number, wantCodex: boolean): string | null {
+function scanJsonlTitle(pathname: string, st: fs.Stats, wantCodex: boolean): string | null {
   const cached = titleCache.get(pathname);
-  if (cached && (cached[1] !== null || cached[0] >= HEAD_BYTES)) return cached[1];
-  const head = readHead(pathname, size);
-  if (!head) return cached?.[1] ?? null;
+  if (cached) {
+    const sameFile = cached[0] === st.size && cached[1] === st.mtimeMs;
+    const unchangedResolvedHead = st.size > cached[0] && (cached[2] !== null || cached[0] >= HEAD_BYTES);
+    if (sameFile || unchangedResolvedHead) return cached[2];
+  }
+  const head = readHead(pathname, st.size);
+  if (!head) return cached?.[2] ?? null;
   const title = titleFromLines(head.text.split("\n").slice(0, 151), wantCodex);
-  titleCache.set(pathname, [head.read, title]);
+  titleCache.set(pathname, [st.size, st.mtimeMs, title]);
   return title;
 }
 
@@ -648,9 +708,18 @@ export function searchTextForTranscript(pathname: string, size: number, engine: 
   return conversationTextFromLines(head.text.split("\n").slice(0, 151), engine === "codex");
 }
 
-export function describe(rootName: RootKey, root: string, pathname: string, st: fs.Stats, stateKey = projectResolutionStateKey()): FileDescription {
+export function describe(
+  rootName: RootKey,
+  root: string,
+  pathname: string,
+  st: fs.Stats,
+  stateKey = projectResolutionStateKey(),
+  identity = fileDescriptionIdentity(rootName, pathname, st),
+): FileDescription {
   const cached = metaCache.get(pathname);
-  if (cached?.[0] === st.size && cached[1] === stateKey) return cached[2];
+  if (cached?.stateKey === stateKey && sameFileDescriptionIdentity(cached.identity, identity)) {
+    return cached.description;
+  }
   const rel = path.relative(root, pathname);
   const fn = path.basename(pathname);
   let project = "other";
@@ -661,9 +730,14 @@ export function describe(rootName: RootKey, root: string, pathname: string, st: 
   let kind = "";
   let fmt: Fmt = "plain";
   if (rootName === "codex-sessions") {
-    cwd = transcriptCwd(pathname, st.size) ?? undefined;
+    cwd = transcriptCwd(pathname, st) ?? undefined;
     const cachedProject = codexProjectCache.get(pathname);
-    if (cachedProject?.stateKey === stateKey) {
+    const cachedProjectMatches = cachedProject?.stateKey === stateKey
+      && (
+        (cachedProject.size === st.size && cachedProject.mtimeMs === st.mtimeMs)
+        || st.size > cachedProject.size
+      );
+    if (cachedProjectMatches) {
       project = cachedProject.project;
       worktree = cachedProject.worktree;
     } else {
@@ -676,13 +750,19 @@ export function describe(rootName: RootKey, root: string, pathname: string, st: 
         project = info?.project ?? "";
         worktree = info?.worktree;
       }
-      if (project) codexProjectCache.set(pathname, { stateKey, project, worktree });
+      if (project) codexProjectCache.set(pathname, {
+        size: st.size,
+        mtimeMs: st.mtimeMs,
+        stateKey,
+        project,
+        worktree,
+      });
     }
     if (!project) project = "codex";
     engine = "codex";
     kind = "session";
     fmt = "codex";
-    title = scanJsonlTitle(pathname, st.size, true) ?? "Codex session";
+    title = scanJsonlTitle(pathname, st, true) ?? "Codex session";
   } else if (rootName === "claude-projects") {
     const slug = rel.split(path.sep)[0] ?? "";
     const worktreeInfo = worktreeFromSlug(slug);
@@ -691,7 +771,7 @@ export function describe(rootName: RootKey, root: string, pathname: string, st: 
     /* The slug alone cannot tell a sibling worktree checkout from a real
        standalone project — only the cwd's git metadata can. When it proves a
        worktree, the session regroups under its main repo's project name. */
-    cwd = transcriptCwd(pathname, st.size) ?? undefined;
+    cwd = transcriptCwd(pathname, st) ?? undefined;
     const info = cwd ? projectInfoFromCwd(cwd) : projectInfoFromTranscript(pathname);
     const persistedInfo = projectInfoFromTranscript(pathname);
     if (info && (worktreeInfo || info.worktree || persistedInfo)) {
@@ -708,7 +788,7 @@ export function describe(rootName: RootKey, root: string, pathname: string, st: 
         "Subagent " + fn.slice("agent-".length).split(".")[0];
     } else {
       kind = "session";
-      title = scanJsonlTitle(pathname, st.size, false) ?? "Claude session";
+      title = scanJsonlTitle(pathname, st, false) ?? "Claude session";
     }
   } else if (rootName === "claude-tasks") {
     const slug = rel.split(path.sep)[0] ?? "";
@@ -729,6 +809,6 @@ export function describe(rootName: RootKey, root: string, pathname: string, st: 
     kind,
     fmt,
   };
-  metaCache.set(pathname, [st.size, stateKey, meta]);
+  metaCache.set(pathname, { identity, stateKey, description: meta });
   return meta;
 }

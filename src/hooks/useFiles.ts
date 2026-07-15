@@ -21,6 +21,7 @@ const POLL_MS = 10_000;
 /** Debounce after a `files.revision` event before the pure GET fires. */
 const FILES_DEBOUNCE_MS = 400;
 const FILES_REVISION_RETRY_MS = 1_000;
+const FILES_GENERATION_RETRY_MS = 25;
 
 export interface FilesData {
   files: FileEntry[];
@@ -58,6 +59,7 @@ type FilesFetcher = (input: string, init?: RequestInit) => Promise<Response>;
 export interface FilesClientCache {
   read(): FilesData;
   revalidate(pinnedPath?: string | null, revision?: number): Promise<FilesData>;
+  subscribe(listener: (data: FilesData) => void, pinnedPath?: string | null): () => void;
   /** Layer one pipeline record over the server snapshot without a refetch — an
       optimistic local mutation (`confirmed: false`, held until reverted or
       confirmed) or a PATCH/POST echo (`confirmed: true`, held only until a scan
@@ -129,6 +131,13 @@ function restoreNotModified(current: FilesData, representation: FilesData, reque
 export function createFilesClientCache(fetcher: FilesFetcher): FilesClientCache {
   let snapshot = EMPTY;
   const representations = new Map<string, { data: FilesData; etag?: string }>();
+  const listeners = new Map<(data: FilesData) => void, string>();
+  const completionRetries = new Map<string, {
+    pinnedPath?: string | null;
+    revision?: number;
+    targetGeneration: number;
+    logicalGeneration: number;
+  }>();
   let requestedGeneration = 0;
   let appliedGeneration = 0;
   let requestQueue: Promise<void> = Promise.resolve();
@@ -138,6 +147,15 @@ export function createFilesClientCache(fetcher: FilesFetcher): FilesClientCache 
      roll an applied edit back. `pipeline: null` hides a locally deleted draft. */
   const pipelineOverlays = new Map<string, { pipeline: Pipeline | null; minGeneration: number }>();
   let serverPipelines: readonly Pipeline[] = EMPTY.pipelines;
+
+  const publish = (requestScope?: string) => {
+    for (const [listener, scope] of listeners) {
+      if (requestScope === undefined || requestScope === scope) listener(snapshot);
+    }
+  };
+
+  const hasSubscriber = (requestScope: string): boolean =>
+    [...listeners.values()].some((scope) => scope === requestScope);
 
   const composePipelines = () => {
     if (!pipelineOverlays.size) {
@@ -157,12 +175,14 @@ export function createFilesClientCache(fetcher: FilesFetcher): FilesClientCache 
     snapshot = { ...snapshot, pipelines };
   };
 
-  /** The server snapshot from `generation` reflects every overlay whose
+  /** A completed server snapshot from `generation` reflects every overlay whose
       minGeneration it reaches — those overlays retire; younger ones re-apply. */
-  const settleServerPipelines = (generation: number) => {
+  const settleServerPipelines = (generation: number, complete: boolean) => {
     serverPipelines = snapshot.pipelines;
-    for (const [id, entry] of pipelineOverlays) {
-      if (entry.minGeneration <= generation) pipelineOverlays.delete(id);
+    if (complete) {
+      for (const [id, entry] of pipelineOverlays) {
+        if (entry.minGeneration <= generation) pipelineOverlays.delete(id);
+      }
     }
     if (pipelineOverlays.size) composePipelines();
   };
@@ -177,19 +197,33 @@ export function createFilesClientCache(fetcher: FilesFetcher): FilesClientCache 
     }
   };
 
-  const performRevalidate = async (pinnedPath?: string | null, revision?: number): Promise<FilesData> => {
+  const performRevalidate = async (
+    pinnedPath?: string | null,
+    revision?: number,
+    requiredGeneration?: number,
+    logicalGeneration?: number,
+  ): Promise<FilesData> => {
     const generation = ++requestedGeneration;
     const url = filesApiUrl(undefined, pinnedPath);
     const representation = representations.get(url);
-    const headers = filesRequestHeaders(representation?.etag ?? "", revision);
+    const headers = filesRequestHeaders(representation?.etag ?? "", revision, requiredGeneration);
     const response = await fetcher(url, headers ? { headers } : undefined);
+    const servedGeneration = responseGeneration(response, "x-llv-files-generation");
+    const targetGeneration = responseGeneration(response, "x-llv-files-target-generation");
+    const generationIncomplete = servedGeneration !== undefined
+      && targetGeneration !== undefined
+      && servedGeneration < targetGeneration;
     if (response.status === 304) {
       if (!representation) throw new Error("files request returned 304 without a cached representation");
       if (generation < appliedGeneration) return snapshot;
       snapshot = restoreNotModified(snapshot, representation.data, url);
       appliedGeneration = generation;
       rememberRepresentation(url, snapshot, representation.etag);
-      settleServerPipelines(generation);
+      settleServerPipelines(logicalGeneration ?? generation, !generationIncomplete);
+      publish(url);
+      if (generationIncomplete) {
+        scheduleCompletionRetry(url, pinnedPath, revision, targetGeneration, logicalGeneration ?? generation);
+      }
       return snapshot;
     }
     if (!response.ok) throw new Error(`files request failed: ${response.status}`);
@@ -200,15 +234,72 @@ export function createFilesClientCache(fetcher: FilesFetcher): FilesClientCache 
     appliedGeneration = generation;
     const etag = response.headers.get("ETag");
     rememberRepresentation(url, snapshot, etag ?? undefined);
-    settleServerPipelines(generation);
+    settleServerPipelines(logicalGeneration ?? generation, !generationIncomplete);
+    publish(url);
+    if (generationIncomplete) {
+      scheduleCompletionRetry(url, pinnedPath, revision, targetGeneration, logicalGeneration ?? generation);
+    }
     return snapshot;
   };
 
-  const revalidate = (pinnedPath?: string | null, revision?: number): Promise<FilesData> => {
-    const result = requestQueue.then(() => performRevalidate(pinnedPath, revision));
+  const enqueueRevalidate = (
+    pinnedPath?: string | null,
+    revision?: number,
+    requiredGeneration?: number,
+    logicalGeneration?: number,
+  ): Promise<FilesData> => {
+    const result = requestQueue.then(() => performRevalidate(
+      pinnedPath,
+      revision,
+      requiredGeneration,
+      logicalGeneration,
+    ));
     requestQueue = result.then(() => undefined, () => undefined);
     return result;
   };
+
+  const scheduleCompletionRetry = (
+    url: string,
+    pinnedPath: string | null | undefined,
+    revision: number | undefined,
+    targetGeneration: number,
+    logicalGeneration: number,
+    delay = FILES_GENERATION_RETRY_MS,
+  ) => {
+    if (!hasSubscriber(url)) return;
+    const pending = completionRetries.get(url);
+    if (pending) {
+      if (pending.targetGeneration < targetGeneration) {
+        completionRetries.set(url, { pinnedPath, revision, targetGeneration, logicalGeneration });
+      }
+      return;
+    }
+    completionRetries.set(url, { pinnedPath, revision, targetGeneration, logicalGeneration });
+    setTimeout(() => {
+      const retry = completionRetries.get(url);
+      if (!retry) return;
+      completionRetries.delete(url);
+      if (!hasSubscriber(url)) return;
+      void enqueueRevalidate(
+        retry.pinnedPath,
+        retry.revision,
+        retry.targetGeneration,
+        retry.logicalGeneration,
+      ).catch(() => {
+        scheduleCompletionRetry(
+          url,
+          retry.pinnedPath,
+          retry.revision,
+          retry.targetGeneration,
+          retry.logicalGeneration,
+          FILES_REVISION_RETRY_MS,
+        );
+      });
+    }, delay);
+  };
+
+  const revalidate = (pinnedPath?: string | null, revision?: number): Promise<FilesData> =>
+    enqueueRevalidate(pinnedPath, revision);
 
   const applyPipeline = (pipeline: Pipeline, confirmed: boolean) => {
     /* A deleted/closed draft echo carries hiddenAt — locally it just disappears
@@ -221,14 +312,21 @@ export function createFilesClientCache(fetcher: FilesFetcher): FilesClientCache 
       minGeneration: confirmed ? requestedGeneration + 1 : Number.POSITIVE_INFINITY,
     });
     composePipelines();
+    publish();
   };
 
   const revertPipeline = (id: string) => {
     if (!pipelineOverlays.delete(id)) return;
     composePipelines();
+    publish();
   };
 
-  return { read: () => snapshot, revalidate, applyPipeline, revertPipeline };
+  const subscribe = (listener: (data: FilesData) => void, pinnedPath?: string | null) => {
+    listeners.set(listener, filesApiUrl(undefined, pinnedPath));
+    return () => { listeners.delete(listener); };
+  };
+
+  return { read: () => snapshot, revalidate, subscribe, applyPipeline, revertPipeline };
 }
 
 const defaultFilesFetcher: FilesFetcher = (input, init) => fetch(input, init);
@@ -257,10 +355,22 @@ export function revertPipelineSnapshot(id: string): void {
   if (typeof window !== "undefined") window.dispatchEvent(new Event(PIPELINES_PATCHED_EVENT));
 }
 
-export function filesRequestHeaders(etag: string, revision?: number): Record<string, string> | undefined {
+function responseGeneration(response: Response, name: string): number | undefined {
+  const value = response.headers.get(name);
+  if (value === null || !/^\d+$/.test(value)) return undefined;
+  const generation = Number(value);
+  return Number.isSafeInteger(generation) ? generation : undefined;
+}
+
+export function filesRequestHeaders(
+  etag: string,
+  revision?: number,
+  generation?: number,
+): Record<string, string> | undefined {
   const headers: Record<string, string> = {};
   if (etag) headers["If-None-Match"] = etag;
   if (revision !== undefined) headers["x-llv-files-revision"] = String(revision);
+  if (generation !== undefined) headers["x-llv-files-generation"] = String(generation);
   return Object.keys(headers).length > 0 ? headers : undefined;
 }
 
@@ -278,6 +388,9 @@ export function useFiles(_project?: string | null, pinnedPath?: string | null): 
   const [data, setData] = useState<FilesData>(() => filesClientCache.read());
   useEffect(() => {
     let alive = true;
+    const unsubscribeCache = filesClientCache.subscribe((next) => {
+      if (alive) setData(next);
+    }, pinnedPath);
     const performLoad = async (revision?: number): Promise<boolean> => {
       if (!alive) return true;
       try {
@@ -380,6 +493,7 @@ export function useFiles(_project?: string | null, pinnedPath?: string | null): 
       if (timer) clearInterval(timer);
       if (initialRetryTimer) clearTimeout(initialRetryTimer);
       if (revisionTimer) clearTimeout(revisionTimer);
+      unsubscribeCache();
       unsubBus();
       unsubFiles();
       window.removeEventListener(PIPELINES_PATCHED_EVENT, onPatched);

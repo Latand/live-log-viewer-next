@@ -9,6 +9,7 @@ import { agentRegistry, AgentRegistry, setAgentRegistryForTests } from "@/lib/ag
 import { replaceConversationCatalog } from "@/lib/scanner/conversationCatalog";
 import { writeSessionTitle } from "@/lib/session/titleStore";
 import type { FileEntry } from "@/lib/types";
+import { createFilesClientCache } from "@/hooks/useFiles";
 
 let scans = 0;
 let scanOptions: unknown;
@@ -161,6 +162,39 @@ test("a restart serves the persisted completed snapshot while revalidating", asy
   expect(next.snapshot.files.map((entry) => entry.path)).toEqual(["/sessions/refreshed.jsonl"]);
 });
 
+test("a client automatically converges from a persisted restart snapshot to its completed generation", async () => {
+  fs.writeFileSync(path.join(stateDir, "files-scan-snapshot.json"), JSON.stringify({
+    version: 1,
+    snapshot: {
+      files: [file("/sessions/persisted-client.jsonl")],
+      projectCatalog: [],
+    },
+  }));
+  resetFilesRouteCacheForTests();
+  let release!: () => void;
+  scanGates.push(new Promise<void>((resolve) => { release = resolve; }));
+  scannedFiles = [file("/sessions/refreshed-client.jsonl")];
+  const cache = createFilesClientCache((input, init) =>
+    GET(new Request(`http://127.0.0.1${input}`, init)));
+  const unsubscribe = cache.subscribe(() => {});
+
+  const started = performance.now();
+  const stale = await cache.revalidate();
+
+  expect(performance.now() - started).toBeLessThan(300);
+  expect(stale.files.map((entry) => entry.path)).toEqual(["/sessions/persisted-client.jsonl"]);
+  expect(scans).toBe(1);
+
+  release();
+  for (let attempt = 0; attempt < 100 && cache.read().files[0]?.path !== "/sessions/refreshed-client.jsonl"; attempt += 1) {
+    await Bun.sleep(10);
+  }
+
+  expect(cache.read().files.map((entry) => entry.path)).toEqual(["/sessions/refreshed-client.jsonl"]);
+  expect(scans).toBe(1);
+  unsubscribe();
+});
+
 test("a restart hydrates a persisted 7700-row snapshot within two seconds", async () => {
   const files = Array.from({ length: 7_700 }, (_, index) => file(`/sessions/persisted-${index}.jsonl`));
   fs.writeFileSync(path.join(stateDir, "files-scan-snapshot.json"), JSON.stringify({
@@ -279,6 +313,34 @@ test("pinned response projection cannot mutate the shared global scan rows", asy
   expect(ordinaryBody.files.find((entry) => entry.path === sharedPath)?.conversationId).toBeUndefined();
 });
 
+test("unique pinned snapshots use bounded LRU retention while recent pins stay warm", async () => {
+  const global = file("/sessions/global.jsonl");
+  scannedFiles = [global];
+  await cachedFileScan();
+  const now = Date.now();
+  const pins = Array.from({ length: 9 }, (_, index) => `/archive/pin-${index}.jsonl`);
+
+  for (const pinnedPath of pins) {
+    scanFileResults = [[global, file(pinnedPath)]];
+    scanPinOverlayResults = [[pinnedPath]];
+    await cachedFileScan(undefined, pinnedPath, now);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const hydrated = await cachedFileScan(undefined, pinnedPath, now);
+    expect(hydrated.snapshot.files.some((entry) => entry.path === pinnedPath)).toBe(true);
+  }
+
+  expect(scans).toBe(10);
+  await cachedFileScan(undefined, pins.at(-1), now);
+  expect(scans).toBe(10);
+
+  scanFileResults = [[global, file(pins[0]!)]];
+  scanPinOverlayResults = [[pins[0]!]];
+  const evicted = await cachedFileScan(undefined, pins[0], now);
+  expect(evicted.snapshot.files.map((entry) => entry.path)).toEqual([global.path]);
+  expect(scans).toBe(11);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+});
+
 test("a files revision request returns stale data and schedules a refresh", async () => {
   scannedFiles = [file("/sessions/before-revision.jsonl")];
   await GET(new Request("http://127.0.0.1/api/files"));
@@ -295,6 +357,43 @@ test("a files revision request returns stale data and schedules a refresh", asyn
   await new Promise<void>((resolve) => setImmediate(resolve));
   const next = await GET(new Request("http://127.0.0.1/api/files"));
   expect((await next.json()).files.map((entry: FileEntry) => entry.path)).toEqual(["/sessions/after-revision.jsonl"]);
+});
+
+test("a pinned client receives stale data immediately then converges on its completed revision generation", async () => {
+  scannedFiles = [file("/sessions/before-revision.jsonl")];
+  await GET(new Request("http://127.0.0.1/api/files"));
+
+  const pinnedPath = "/archive/pinned-revision.jsonl";
+  let release!: () => void;
+  scanGates.push(new Promise<void>((resolve) => { release = resolve; }));
+  scanFileResults = [[file("/sessions/after-revision.jsonl"), file(pinnedPath)]];
+  scanPinOverlayResults = [[pinnedPath]];
+  const cache = createFilesClientCache((input, init) =>
+    GET(new Request(`http://127.0.0.1${input}`, init)));
+  const updates: string[][] = [];
+  const unsubscribe = cache.subscribe((data) => {
+    updates.push(data.files.map((entry) => entry.path));
+  }, pinnedPath);
+
+  const started = performance.now();
+  const stale = await cache.revalidate(pinnedPath, 17);
+
+  expect(performance.now() - started).toBeLessThan(300);
+  expect(stale.files.map((entry) => entry.path)).toEqual(["/sessions/before-revision.jsonl"]);
+  expect(scans).toBe(2);
+
+  release();
+  for (let attempt = 0; attempt < 100 && !cache.read().files.some((entry) => entry.path === pinnedPath); attempt += 1) {
+    await Bun.sleep(10);
+  }
+
+  expect(cache.read().files.map((entry) => entry.path)).toEqual([
+    "/sessions/after-revision.jsonl",
+    pinnedPath,
+  ]);
+  expect(updates.at(-1)).toEqual(["/sessions/after-revision.jsonl", pinnedPath]);
+  expect(scans).toBe(2);
+  unsubscribe();
 });
 
 test("concurrent requests for one files revision share one forced scan", async () => {
@@ -386,6 +485,19 @@ test("an arbitrary client revision cannot suppress a later background refresh", 
   await new Promise<void>((resolve) => setImmediate(resolve));
   const next = await GET(new Request("http://127.0.0.1/api/files"));
   expect((await next.json()).files.map((entry: FileEntry) => entry.path)).toEqual(["/sessions/genuine-revision.jsonl"]);
+});
+
+test("a client generation above the issued watermark cannot advance the server counter", async () => {
+  scannedFiles = [file("/sessions/issued-generation.jsonl")];
+  await GET(new Request("http://127.0.0.1/api/files"));
+
+  const response = await GET(new Request("http://127.0.0.1/api/files", {
+    headers: { "x-llv-files-generation": String(Number.MAX_SAFE_INTEGER) },
+  }));
+
+  expect(response.headers.get("x-llv-files-generation")).toBe("1");
+  expect(response.headers.get("x-llv-files-target-generation")).toBe("1");
+  expect(scans).toBe(1);
 });
 
 test("project query changes reuse one global scan snapshot", async () => {

@@ -8,15 +8,21 @@ import { forEachCooperatively, mapCooperatively } from "@/lib/cooperative";
 
 import type { ProjectCatalogEntry } from "../types";
 import { replaceConversationCatalog, type ConversationCatalogEntry } from "./conversationCatalog";
-import { describe, type FileDescription } from "./describe";
+import {
+  describe,
+  fileDescriptionIdentity,
+  type FileDescription,
+} from "./describe";
 import type { RawEntry } from "./discover";
 import { PROJECT_RESOLUTION_VERSION, projectResolutionStateKey } from "./projectState";
 
 type CachedProjectFile = {
-  summaryVersion?: 1;
+  summaryVersion?: 2;
   rootName: RawEntry["rootName"];
   size: number;
   mtimeMs: number;
+  sidecarSize?: number | null;
+  sidecarMtimeMs?: number | null;
   stateKey: string;
   project: string;
   projectRoot?: string | null;
@@ -93,17 +99,25 @@ function readState(): ProjectCatalogState {
       const engine = file.engine === "codex" || file.engine === "claude" || file.engine === "shell" ? file.engine : undefined;
       const fmt = file.fmt === "codex" || file.fmt === "claude" || file.fmt === "plain" ? file.fmt : undefined;
       const cwd = typeof file.cwd === "string" ? file.cwd : file.cwd === null ? null : undefined;
-      const summaryComplete = file.summaryVersion === 1
+      const sidecarSize = typeof file.sidecarSize === "number" ? file.sidecarSize : file.sidecarSize === null ? null : undefined;
+      const sidecarMtimeMs = typeof file.sidecarMtimeMs === "number"
+        ? file.sidecarMtimeMs
+        : file.sidecarMtimeMs === null ? null : undefined;
+      const summaryComplete = file.summaryVersion === 2
         && typeof file.title === "string"
         && engine !== undefined
         && fmt !== undefined
         && cwd !== undefined
-        && file.projectRoot !== undefined;
+        && file.projectRoot !== undefined
+        && sidecarSize !== undefined
+        && sidecarMtimeMs !== undefined;
       files[pathname] = {
-        summaryVersion: summaryComplete ? 1 : undefined,
+        summaryVersion: summaryComplete ? 2 : undefined,
         rootName: file.rootName,
         size: file.size,
         mtimeMs: file.mtimeMs,
+        sidecarSize,
+        sidecarMtimeMs,
         stateKey: file.stateKey,
         project: file.project,
         projectRoot: typeof file.projectRoot === "string" ? file.projectRoot : file.projectRoot === null ? null : undefined,
@@ -160,26 +174,33 @@ function fallbackTitle(raw: RawEntry, kind: string): string {
 
 function cachedFile(raw: RawEntry, state: ProjectCatalogState, stateKey: string): ProjectCatalogFile {
   const cached = state.files[raw.path];
+  const identity = fileDescriptionIdentity(raw.rootName, raw.path, raw.st);
   if (
     state.resolutionVersion === PROJECT_RESOLUTION_VERSION &&
     cached &&
     cached.size === raw.st.size &&
     cached.mtimeMs === raw.st.mtimeMs &&
+    (cached.summaryVersion !== 2 || (
+      cached.sidecarSize === identity.sidecarSize &&
+      cached.sidecarMtimeMs === identity.sidecarMtimeMs
+    )) &&
     cached.stateKey === stateKey &&
     cached.projectRoot !== undefined
   ) {
-    if (cached.summaryVersion !== 1) {
-      const meta = describe(raw.rootName, raw.root, raw.path, raw.st, stateKey);
+    if (cached.summaryVersion !== 2) {
+      const meta = describe(raw.rootName, raw.root, raw.path, raw.st, stateKey, identity);
       return {
         ...cached,
-        summaryVersion: 1,
+        summaryVersion: 2,
+        sidecarSize: identity.sidecarSize,
+        sidecarMtimeMs: identity.sidecarMtimeMs,
         path: raw.path,
         session: isConversation(raw.rootName, cached.kind),
         cwd: meta.cwd,
-        title: cached.title ?? meta.title,
+        title: meta.title,
         titleCached: true,
-        engine: cached.engine ?? meta.engine,
-        fmt: cached.fmt ?? meta.fmt,
+        engine: meta.engine,
+        fmt: meta.fmt,
       };
     }
     return {
@@ -193,13 +214,15 @@ function cachedFile(raw: RawEntry, state: ProjectCatalogState, stateKey: string)
       fmt: cached.fmt ?? fmtForRoot(raw.rootName),
     };
   }
-  const meta = describe(raw.rootName, raw.root, raw.path, raw.st, stateKey);
+  const meta = describe(raw.rootName, raw.root, raw.path, raw.st, stateKey, identity);
   const file: ProjectCatalogFile = {
-    summaryVersion: 1,
+    summaryVersion: 2,
     path: raw.path,
     rootName: raw.rootName,
     size: raw.st.size,
     mtimeMs: raw.st.mtimeMs,
+    sidecarSize: identity.sidecarSize,
+    sidecarMtimeMs: identity.sidecarMtimeMs,
     stateKey,
     project: meta.project || "other",
     projectRoot: meta.projectRoot ?? null,
@@ -213,10 +236,12 @@ function cachedFile(raw: RawEntry, state: ProjectCatalogState, stateKey: string)
     fmt: meta.fmt,
   };
   state.files[raw.path] = {
-    summaryVersion: 1,
+    summaryVersion: 2,
     rootName: file.rootName,
     size: file.size,
     mtimeMs: file.mtimeMs,
+    sidecarSize: file.sidecarSize,
+    sidecarMtimeMs: file.sidecarMtimeMs,
     stateKey: file.stateKey,
     project: file.project,
     projectRoot: file.projectRoot,
@@ -299,10 +324,12 @@ export async function projectCatalogSnapshotFromRaw(raw: RawEntry[], options: {
   const changes = new Map<string, Set<string>>();
   await forEachCooperatively(files, (file) => {
     nextFiles[file.path] = {
-      summaryVersion: 1,
+      summaryVersion: 2,
       rootName: file.rootName,
       size: file.size,
       mtimeMs: file.mtimeMs,
+      sidecarSize: file.sidecarSize,
+      sidecarMtimeMs: file.sidecarMtimeMs,
       stateKey: file.stateKey,
       project: file.project,
       projectRoot: file.projectRoot,

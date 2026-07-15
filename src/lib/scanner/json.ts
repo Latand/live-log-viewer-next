@@ -2,17 +2,20 @@ import fs from "node:fs";
 
 import { globalCache } from "./caches";
 
-const jsonCache = globalCache<[number, Record<string, unknown> | null]>("json");
+const jsonCache = globalCache<[number, number, Record<string, unknown> | null]>("json-v2");
 
 export function readJson(pathname: string): Record<string, unknown> | null {
   let mtime: number;
+  let size: number;
   try {
-    mtime = fs.statSync(pathname).mtimeMs;
+    const st = fs.statSync(pathname);
+    mtime = st.mtimeMs;
+    size = st.size;
   } catch {
     return null;
   }
   const cached = jsonCache.get(pathname);
-  if (cached?.[0] === mtime) return cached[1];
+  if (cached?.[0] === size && cached[1] === mtime) return cached[2];
   let obj: unknown = null;
   try {
     obj = JSON.parse(fs.readFileSync(pathname, "utf8"));
@@ -23,7 +26,7 @@ export function readJson(pathname: string): Record<string, unknown> | null {
     obj && typeof obj === "object" && !Array.isArray(obj)
       ? (obj as Record<string, unknown>)
       : null;
-  jsonCache.set(pathname, [mtime, val]);
+  jsonCache.set(pathname, [size, mtime, val]);
   return val;
 }
 

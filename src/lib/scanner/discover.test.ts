@@ -9,7 +9,6 @@ import { emptyLaunchProfile } from "../accounts/migration/contracts";
 import { AgentRegistry, setAgentRegistryForTests } from "../agent/registry";
 import type { RootKey } from "../types";
 import { conversationCatalogSnapshot } from "./conversationCatalog";
-import { globalCache } from "./caches";
 import { discoverFiles, discoverFilesWithProjectCatalog, type RawEntry } from "./discover";
 import { projectForCwd } from "./describe";
 import { projectCatalogSnapshotFromRaw } from "./projectCatalog";
@@ -89,23 +88,90 @@ test("an append reparses its file and reuses unchanged persisted summaries", asy
     const sidecar = (pathname: string) => pathname.slice(0, -".jsonl".length) + ".meta.json";
     await writeFixture(unchanged, "{}\n", 1_700_000_000);
     await writeFixture(changed, "{}\n", 1_700_000_001);
-    await writeFile(sidecar(unchanged), JSON.stringify({ description: "Unchanged original" }));
-    await writeFile(sidecar(changed), JSON.stringify({ description: "Changed original" }));
+    await writeFixture(sidecar(unchanged), JSON.stringify({ description: "Unchanged original" }), 1_700_000_000);
+    await writeFixture(sidecar(changed), JSON.stringify({ description: "Changed original" }), 1_700_000_001);
 
     const first = await discoverFilesWithProjectCatalog(roots, undefined, { persist: false, persistIndex: true });
     expect(first.files.find((entry) => entry.path === unchanged)?.title).toBe("Unchanged original");
     expect(first.files.find((entry) => entry.path === changed)?.title).toBe("Changed original");
 
-    globalCache<unknown>("meta-v5").clear();
-    await writeFile(sidecar(unchanged), JSON.stringify({ description: "Unchanged mutated" }));
-    await writeFile(sidecar(changed), JSON.stringify({ description: "Changed reparsed" }));
+    await writeFixture(sidecar(changed), JSON.stringify({ description: "Changed reparsed" }), 1_700_000_002);
     await appendFile(changed, "{}\n");
 
     const second = await discoverFilesWithProjectCatalog(roots, undefined, { persist: false });
     expect(second.files.find((entry) => entry.path === unchanged)?.title).toBe("Unchanged original");
     expect(second.files.find((entry) => entry.path === changed)?.title).toBe("Changed reparsed");
   } finally {
-    globalCache<unknown>("meta-v5").clear();
+    if (previousStateDir === undefined) delete process.env.LLV_STATE_DIR;
+    else process.env.LLV_STATE_DIR = previousStateDir;
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test("a same-size transcript rewrite with a newer mtime reparses cwd and project metadata", async () => {
+  const base = await mkdtemp(path.join(os.tmpdir(), "llv-discover-same-size-rewrite-"));
+  const previousStateDir = process.env.LLV_STATE_DIR;
+  process.env.LLV_STATE_DIR = path.join(base, "state");
+  try {
+    const roots: Record<RootKey, string> = {
+      "codex-sessions": path.join(base, "codex-sessions"),
+      "claude-projects": path.join(base, "claude-projects"),
+      "claude-tasks": path.join(base, "claude-tasks"),
+    };
+    await Promise.all(Object.values(roots).map((root) => mkdir(root, { recursive: true })));
+    const transcript = path.join(roots["codex-sessions"], "rewritten.jsonl");
+    const alpha = JSON.stringify({ type: "session_meta", payload: { cwd: "/repo/alpha" } }) + "\n";
+    const bravo = JSON.stringify({ type: "session_meta", payload: { cwd: "/repo/bravo" } }) + "\n";
+    expect(Buffer.byteLength(alpha)).toBe(Buffer.byteLength(bravo));
+    await writeFixture(transcript, alpha, 1_700_000_000);
+
+    const first = await discoverFilesWithProjectCatalog(roots, undefined, { persist: false, persistIndex: true });
+    expect(first.files.find((entry) => entry.path === transcript)).toMatchObject({
+      cwd: "/repo/alpha",
+      project: projectForCwd("/repo/alpha"),
+    });
+
+    await writeFixture(transcript, bravo, 1_700_000_001);
+    const second = await discoverFilesWithProjectCatalog(roots, undefined, { persist: false });
+
+    expect(second.files.find((entry) => entry.path === transcript)).toMatchObject({
+      cwd: "/repo/bravo",
+      project: projectForCwd("/repo/bravo"),
+    });
+  } finally {
+    if (previousStateDir === undefined) delete process.env.LLV_STATE_DIR;
+    else process.env.LLV_STATE_DIR = previousStateDir;
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test("a same-size subagent sidecar rewrite with a newer mtime reparses its title", async () => {
+  const base = await mkdtemp(path.join(os.tmpdir(), "llv-discover-sidecar-rewrite-"));
+  const previousStateDir = process.env.LLV_STATE_DIR;
+  process.env.LLV_STATE_DIR = path.join(base, "state");
+  try {
+    const roots: Record<RootKey, string> = {
+      "codex-sessions": path.join(base, "codex-sessions"),
+      "claude-projects": path.join(base, "claude-projects"),
+      "claude-tasks": path.join(base, "claude-tasks"),
+    };
+    await Promise.all(Object.values(roots).map((root) => mkdir(root, { recursive: true })));
+    const transcript = path.join(roots["claude-projects"], "sidecar", "session", "subagents", "agent-rewritten.jsonl");
+    const sidecar = transcript.slice(0, -".jsonl".length) + ".meta.json";
+    const alpha = JSON.stringify({ description: "Agent alpha" });
+    const bravo = JSON.stringify({ description: "Agent bravo" });
+    expect(Buffer.byteLength(alpha)).toBe(Buffer.byteLength(bravo));
+    await writeFixture(transcript, "{}\n", 1_700_000_000);
+    await writeFixture(sidecar, alpha, 1_700_000_000);
+
+    const first = await discoverFilesWithProjectCatalog(roots, undefined, { persist: false, persistIndex: true });
+    expect(first.files.find((entry) => entry.path === transcript)?.title).toBe("Agent alpha");
+
+    await writeFixture(sidecar, bravo, 1_700_000_001);
+    const second = await discoverFilesWithProjectCatalog(roots, undefined, { persist: false });
+
+    expect(second.files.find((entry) => entry.path === transcript)?.title).toBe("Agent bravo");
+  } finally {
     if (previousStateDir === undefined) delete process.env.LLV_STATE_DIR;
     else process.env.LLV_STATE_DIR = previousStateDir;
     await rm(base, { recursive: true, force: true });
@@ -133,7 +199,7 @@ test("a corrupt per-file scanner index falls back to a full parse and repairs it
 
     expect(recovered.files.find((entry) => entry.path === transcript)?.title).toBe("Recovered summary");
     const persisted = JSON.parse(await readFile(path.join(process.env.LLV_STATE_DIR, "project-catalog.json"), "utf8"));
-    expect(persisted.files[transcript]).toMatchObject({ summaryVersion: 1, title: "Recovered summary" });
+    expect(persisted.files[transcript]).toMatchObject({ summaryVersion: 2, title: "Recovered summary" });
   } finally {
     if (previousStateDir === undefined) delete process.env.LLV_STATE_DIR;
     else process.env.LLV_STATE_DIR = previousStateDir;
