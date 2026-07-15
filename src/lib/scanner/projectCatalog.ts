@@ -140,15 +140,30 @@ function readState(): ProjectCatalogState {
   }
 }
 
+function persistenceDiagnostic(operation: string, target: string, error: unknown): void {
+  const now = Date.now();
+  if (now - lastCatalogPersistenceDiagnosticAt < CATALOG_PERSISTENCE_DIAGNOSTIC_MS) return;
+  lastCatalogPersistenceDiagnosticAt = now;
+  const detail = error instanceof Error ? `${error.message}${"code" in error && error.code ? ` (${String(error.code)})` : ""}` : String(error);
+  console.error(`[project catalog] ${operation} failed for ${target}: ${detail}; a later scan will retry`);
+}
+
 function writeState(state: ProjectCatalogState): void {
   let temporary: string | undefined;
+  let operation = "create state directory";
+  let target = catalogPath();
   try {
     const filePath = catalogPath();
+    target = filePath;
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
     temporary = path.join(path.dirname(filePath), `.${path.basename(filePath)}.${process.pid}.${crypto.randomUUID()}.tmp`);
+    operation = "write temporary index";
+    target = temporary;
     fs.writeFileSync(temporary, JSON.stringify(state) + "\n", "utf8");
+    operation = "rename temporary index";
+    target = filePath;
     fs.renameSync(temporary, filePath);
-  } catch {
+  } catch (error) {
     if (temporary !== undefined) {
       try {
         fs.unlinkSync(temporary);
@@ -156,11 +171,7 @@ function writeState(state: ProjectCatalogState): void {
         // The write may have failed before the temp file was created.
       }
     }
-    const now = Date.now();
-    if (now - lastCatalogPersistenceDiagnosticAt >= CATALOG_PERSISTENCE_DIAGNOSTIC_MS) {
-      lastCatalogPersistenceDiagnosticAt = now;
-      console.error("[project catalog] project catalog index publication failed; a later scan will retry");
-    }
+    persistenceDiagnostic(operation, target, error);
   }
 }
 
@@ -318,6 +329,7 @@ export async function projectCatalogSnapshotFromRaw(raw: RawEntry[], options: {
   persistIndex?: boolean;
   excludedSummaryPaths?: ReadonlySet<string>;
   scanToken?: ProjectCatalogScanToken;
+  complete?: boolean;
 } = {}): Promise<{
   projectCatalog: ProjectCatalogEntry[];
   projectByPath: Map<string, string>;
@@ -436,8 +448,8 @@ export async function projectCatalogSnapshotFromRaw(raw: RawEntry[], options: {
   const isCurrentPublication = projectCatalogRuntime.__llvProjectCatalogPublicationGeneration === scanToken.publication;
   const isCurrentPersistence = scanToken.persistence !== null
     && projectCatalogRuntime.__llvProjectCatalogPersistenceGeneration === scanToken.persistence;
-  if (isCurrentPublication) replaceConversationCatalog(conversationCatalog);
-  if (isCurrentPersistence && persistIndex) {
+  if (isCurrentPublication && options.complete !== false) replaceConversationCatalog(conversationCatalog);
+  if (isCurrentPersistence && persistIndex && options.complete !== false) {
     let boardHealed = true;
     if (options.persist !== false) {
       try {

@@ -17,6 +17,7 @@ let scanProjects: Array<string | undefined> = [];
 let scannedFiles: FileEntry[] = [];
 let scanFileResults: FileEntry[][] = [];
 let scanPinOverlayResults: Array<string[] | undefined> = [];
+let scanCompleteResults: Array<boolean | undefined> = [];
 let scanGates: Promise<void>[] = [];
 let registryRoot = "";
 let tmuxHealth: unknown = { status: "healthy" };
@@ -36,6 +37,7 @@ beforeEach(() => {
   scannedFiles = [];
   scanFileResults = [];
   scanPinOverlayResults = [];
+  scanCompleteResults = [];
   scanGates = [];
   tmuxHealth = { status: "healthy" };
   replaceConversationCatalog([]);
@@ -78,7 +80,8 @@ mock.module("@/lib/scanner", () => ({
     const files = scanFileResults.shift() ?? scannedFiles;
     await scanGates.shift();
     const pinOverlayPaths = scanPinOverlayResults.shift();
-    return { files, projectCatalog: [], ...(pinOverlayPaths ? { pinOverlayPaths } : {}) };
+    const complete = scanCompleteResults.shift();
+    return { files, projectCatalog: [], ...(pinOverlayPaths ? { pinOverlayPaths } : {}), ...(complete === false ? { complete } : {}) };
   },
 }));
 let pipelinesStore: () => unknown[] = () => [];
@@ -274,8 +277,10 @@ test("snapshot publication failures preserve the canonical file, clean temps, st
     expect(fs.readFileSync(snapshotPath, "utf8")).toBe(canonical);
     expect(tempFiles()).toEqual([]);
     expect(diagnostics).toEqual([
-      expect.stringContaining("files scan snapshot publication failed"),
+      expect.stringContaining("write temporary snapshot failed"),
     ]);
+    expect(diagnostics[0]).toContain("injected snapshot write failure");
+    expect(diagnostics[0]).toContain(".files-scan-snapshot.json.");
   } finally {
     fs.writeFileSync = originalWrite;
     fs.renameSync = originalRename;
@@ -304,6 +309,24 @@ test("an expired snapshot returns stale data while one shared refresh runs", asy
   await new Promise<void>((resolve) => setImmediate(resolve));
   const next = await cachedFileScan();
   expect(next.snapshot.files.map((entry) => entry.path)).toEqual(["/sessions/project-b.jsonl"]);
+});
+
+test("an incomplete filesystem scan retains the last completed route snapshot until recovery", async () => {
+  scannedFiles = [file("/sessions/canonical.jsonl")];
+  await cachedFileScan();
+  scanFileResults = [[file("/sessions/partial.jsonl")]];
+  scanCompleteResults = [false];
+
+  const stale = await cachedFileScan(undefined, undefined, Number.MAX_SAFE_INTEGER);
+  expect(stale.snapshot.files.map((entry) => entry.path)).toEqual(["/sessions/canonical.jsonl"]);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  expect((await cachedFileScan()).snapshot.files.map((entry) => entry.path)).toEqual(["/sessions/canonical.jsonl"]);
+
+  scanFileResults = [[file("/sessions/recovered.jsonl")]];
+  const recovered = await cachedFileScan(undefined, undefined, Number.MAX_SAFE_INTEGER);
+  expect(recovered.snapshot.files.map((entry) => entry.path)).toEqual(["/sessions/canonical.jsonl"]);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  expect((await cachedFileScan()).snapshot.files.map((entry) => entry.path)).toEqual(["/sessions/recovered.jsonl"]);
 });
 
 test("concurrent reads during a blocked refresh share one scan and return within 300ms", async () => {
@@ -461,6 +484,33 @@ test("a pinned client receives stale data immediately then converges on its comp
   ]);
   expect(updates.at(-1)).toEqual(["/sessions/after-revision.jsonl", pinnedPath]);
   expect(scans).toBe(2);
+  unsubscribe();
+});
+
+test("a warm global-only incomplete response retains an out-of-cap pin until its target generation completes", async () => {
+  const global = file("/sessions/global.jsonl");
+  const pinnedPath = "/archive/warm-pinned.jsonl";
+  scanFileResults = [[global, file(pinnedPath)]];
+  scanPinOverlayResults = [[pinnedPath]];
+  const cache = createFilesClientCache((input, init) => GET(new Request(`http://127.0.0.1${input}`, init)));
+  const unsubscribe = cache.subscribe(() => {}, pinnedPath);
+  await cache.revalidate(pinnedPath);
+  expect(cache.read().files.some((entry) => entry.path === pinnedPath)).toBe(true);
+
+  resetFilesRouteCacheForTests();
+  let release!: () => void;
+  scanGates.push(new Promise<void>((resolve) => { release = resolve; }));
+  scanFileResults = [[file("/sessions/warm-global.jsonl")], [file("/sessions/completed-global.jsonl"), file(pinnedPath)]];
+  scanPinOverlayResults = [undefined, [pinnedPath]];
+  await cachedFileScan();
+  const stale = await cache.revalidate(pinnedPath, 91);
+  expect(stale.files.some((entry) => entry.path === pinnedPath)).toBe(true);
+
+  release();
+  for (let attempt = 0; attempt < 100 && cache.read().files[0]?.path !== "/sessions/completed-global.jsonl"; attempt += 1) {
+    await Bun.sleep(10);
+  }
+  expect(cache.read().files.map((entry) => entry.path)).toEqual(["/sessions/completed-global.jsonl", pinnedPath]);
   unsubscribe();
 });
 

@@ -96,13 +96,20 @@ function readPersistedFileScanSnapshot(): FileScanSnapshot | undefined {
 
 function writePersistedFileScanSnapshot(snapshot: FileScanSnapshot): void {
   let temporary: string | undefined;
+  let operation = "create state directory";
+  let target = statePath(FILE_SCAN_SNAPSHOT_FILE);
   try {
     const filename = statePath(FILE_SCAN_SNAPSHOT_FILE);
+    target = filename;
     fs.mkdirSync(path.dirname(filename), { recursive: true });
     temporary = path.join(path.dirname(filename), `.${path.basename(filename)}.${process.pid}.${crypto.randomUUID()}.tmp`);
+    operation = "write temporary snapshot";
+    target = temporary;
     fs.writeFileSync(temporary, JSON.stringify({ version: FILE_SCAN_SNAPSHOT_VERSION, snapshot }) + "\n", "utf8");
+    operation = "rename temporary snapshot";
+    target = filename;
     fs.renameSync(temporary, filename);
-  } catch {
+  } catch (error) {
     if (temporary !== undefined) {
       try {
         fs.unlinkSync(temporary);
@@ -113,7 +120,8 @@ function writePersistedFileScanSnapshot(snapshot: FileScanSnapshot): void {
     const now = Date.now();
     if (now - lastFileScanPersistenceDiagnosticAt >= FILE_SCAN_PERSISTENCE_DIAGNOSTIC_MS) {
       lastFileScanPersistenceDiagnosticAt = now;
-      console.error("[files scan cache] files scan snapshot publication failed; a later refresh will retry");
+      const detail = error instanceof Error ? `${error.message}${"code" in error && error.code ? ` (${String(error.code)})` : ""}` : String(error);
+      console.error(`[files scan cache] ${operation} failed for ${target}: ${detail}; a later refresh will retry`);
     }
   }
 }
@@ -168,6 +176,7 @@ function normalizeFileScanCacheSlot(value: unknown): FileScanCacheSlot {
 
 function beginFileScanRefresh(slot: FileScanCacheSlot, generation: number): FileScanRefresh {
   const promise = listFilesWithProjectCatalog(undefined, { persist: false, persistIndex: true }).then((snapshot) => {
+    if (snapshot.complete === false) throw new Error("filesystem scan incomplete");
     writePersistedFileScanSnapshot(snapshot);
     slot.snapshot = snapshot;
     slot.snapshotGeneration = Math.max(slot.snapshotGeneration, generation);
@@ -180,6 +189,7 @@ function beginFileScanRefresh(slot: FileScanCacheSlot, generation: number): File
 function beginPinnedFileScanRefresh(slot: FileScanCacheSlot, generation: number, pinnedPath: string): FileScanRefresh {
   const promise = (async () => {
     const pinnedSnapshot = await listFilesWithProjectCatalog(undefined, { persist: false, persistIndex: true, pin: pinnedPath });
+    if (pinnedSnapshot.complete === false) throw new Error("filesystem scan incomplete");
     const pinOverlayPaths = pinnedSnapshot.pinOverlayPaths ?? [];
     const overlayPathSet = new Set(pinOverlayPaths);
     const globalSnapshot = {

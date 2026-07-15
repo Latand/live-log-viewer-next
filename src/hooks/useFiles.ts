@@ -277,7 +277,15 @@ export function createFilesClientCache(fetcher: FilesFetcher): FilesClientCache 
     if (completionRetry && !ownsCompletionRetry(url, completionRetry)) return snapshot;
     if (generation < appliedGeneration) return snapshot;
     const incoming = parsedFilesData(parsed, url);
-    snapshot = patchFilesData(snapshot, incoming);
+    /* A restarted server can acknowledge a pinned target generation with its
+       global-only stale snapshot before the pin hydration resumes. Keep the
+       last URL-scoped completed representation mounted until that generation
+       supplies the target, so the deep-link owner retains its subscription. */
+    const scopedIncoming = generationIncomplete && pinnedPath
+      && representation?.data.files.some((file) => file.path === pinnedPath)
+      ? { ...representation.data, requestScope: url }
+      : incoming;
+    snapshot = patchFilesData(snapshot, scopedIncoming);
     appliedGeneration = generation;
     const etag = response.headers.get("ETag");
     rememberRepresentation(url, snapshot, etag ?? undefined);

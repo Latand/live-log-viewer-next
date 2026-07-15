@@ -169,7 +169,7 @@ export async function listFiles(options: FileScanOptions = {}): Promise<FileEntr
   return (await listFilesInternal(false, undefined, options)).files;
 }
 
-export async function listFilesWithProjectCatalog(selectedProject?: string, options: FileScanOptions = {}): Promise<{ files: FileEntry[]; projectCatalog: ProjectCatalogEntry[]; pinOverlayPaths?: string[] }> {
+export async function listFilesWithProjectCatalog(selectedProject?: string, options: FileScanOptions = {}): Promise<{ files: FileEntry[]; projectCatalog: ProjectCatalogEntry[]; pinOverlayPaths?: string[]; complete?: boolean }> {
   return listFilesInternal(true, selectedProject, options);
 }
 
@@ -186,7 +186,7 @@ async function listFilesInternal(
   includeProjectCatalog: boolean,
   selectedProject?: string,
   options: FileScanOptions = {},
-): Promise<{ files: FileEntry[]; projectCatalog: ProjectCatalogEntry[]; pinOverlayPaths?: string[] }> {
+): Promise<{ files: FileEntry[]; projectCatalog: ProjectCatalogEntry[]; pinOverlayPaths?: string[]; complete?: boolean }> {
   const persist = options.persist === true;
   const demote = archivedTranscriptPaths();
   const requestedPins = options.pins ? [...options.pins, ...(options.pin ? [options.pin] : [])] : options.pin;

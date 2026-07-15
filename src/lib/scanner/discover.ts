@@ -31,6 +31,24 @@ export interface RawEntry {
 type Roots = Record<RootKey, string>;
 type RootEntries = [RootKey, string][];
 type Limit = <T>(work: () => Promise<T>) => Promise<T>;
+type Discovery = { raw: RawEntry[]; complete: boolean };
+const DISCOVERY_DIAGNOSTIC_MS = 60_000;
+let lastDiscoveryDiagnosticAt = Number.NEGATIVE_INFINITY;
+
+function isMissing(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
+}
+
+function discoveryFailure(operation: string, target: string, error: unknown): boolean {
+  if (isMissing(error)) return true;
+  const now = Date.now();
+  if (now - lastDiscoveryDiagnosticAt >= DISCOVERY_DIAGNOSTIC_MS) {
+    lastDiscoveryDiagnosticAt = now;
+    const detail = error instanceof Error ? `${error.message}${"code" in error && error.code ? ` (${String(error.code)})` : ""}` : String(error);
+    console.error(`[scanner discovery] ${operation} failed for ${target}: ${detail}; retaining the last completed scan`);
+  }
+  return false;
+}
 
 function createLimiter(max: number): Limit {
   let active = 0;
@@ -47,51 +65,51 @@ function createLimiter(max: number): Limit {
   };
 }
 
-async function walk(rootName: RootKey, roots: Roots, root: string, dir: string, limit: Limit): Promise<RawEntry[]> {
+async function walk(rootName: RootKey, roots: Roots, root: string, dir: string, limit: Limit): Promise<Discovery> {
   let entries: fs.Dirent[];
   try {
     entries = await limit(() => readdir(dir, { withFileTypes: true }));
-  } catch {
-    return [];
+  } catch (error) {
+    return { raw: [], complete: discoveryFailure("read directory", dir, error) };
   }
-  const chunks = await Promise.all(entries.map(async (entry): Promise<RawEntry[]> => {
+  const chunks = await Promise.all(entries.map(async (entry): Promise<Discovery> => {
     if (entry.isDirectory()) {
-      if (entry.name.startsWith(".git")) return [];
+      if (entry.name.startsWith(".git")) return { raw: [], complete: true };
       return walk(rootName, roots, root, path.join(dir, entry.name), limit);
     }
-    if (!entry.isFile() || !EXTS.some((ext) => entry.name.endsWith(ext))) return [];
+    if (!entry.isFile() || !EXTS.some((ext) => entry.name.endsWith(ext))) return { raw: [], complete: true };
     const pathname = path.join(dir, entry.name);
-    if (rootName === "claude-projects" && pathname.includes(path.sep + "tool-results" + path.sep)) return [];
+    if (rootName === "claude-projects" && pathname.includes(path.sep + "tool-results" + path.sep)) return { raw: [], complete: true };
     let st: fs.Stats;
     try {
       st = await limit(() => stat(pathname));
-    } catch {
-      return [];
+    } catch (error) {
+      return { raw: [], complete: discoveryFailure("stat file", pathname, error) };
     }
     const isTask = rootName === "claude-tasks" ? taskParts(roots["claude-tasks"], pathname) : null;
-    if (rootName === "claude-tasks" && !isTask) return [];
-    if (st.size === 0 && !isTask) return [];
+    if (rootName === "claude-tasks" && !isTask) return { raw: [], complete: true };
+    if (st.size === 0 && !isTask) return { raw: [], complete: true };
     if (isTask) {
       const [slug, sid, tid] = isTask;
       const twin = path.join(roots["claude-projects"], slug, sid, "subagents", "agent-" + tid + ".jsonl");
       try {
         await limit(() => access(twin));
-        return [];
+        return { raw: [], complete: true };
       } catch {
         /* no mirrored subagent */
       }
     }
-    return [{ rootName, root, path: pathname, st }];
+    return { raw: [{ rootName, root, path: pathname, st }], complete: true };
   }));
-  return chunks.flat();
+  return { raw: chunks.flatMap((chunk) => chunk.raw), complete: chunks.every((chunk) => chunk.complete) };
 }
 
-async function rootExists(root: string, limit: Limit): Promise<boolean> {
+async function rootExists(root: string, limit: Limit): Promise<{ exists: boolean; complete: boolean }> {
   try {
     await limit(() => access(root));
-    return true;
-  } catch {
-    return false;
+    return { exists: true, complete: true };
+  } catch (error) {
+    return { exists: false, complete: discoveryFailure("access root", root, error) };
   }
 }
 
@@ -99,12 +117,14 @@ function rootEntries(roots: Roots | RootEntries): RootEntries {
   return Array.isArray(roots) ? roots : Object.entries(roots) as RootEntries;
 }
 
-async function discoverRaw(roots: Roots | RootEntries, limit: Limit): Promise<RawEntry[]> {
+async function discoverRaw(roots: Roots | RootEntries, limit: Limit): Promise<Discovery> {
   const staticRoots = Array.isArray(roots) ? ROOTS : roots;
-  const raw = (await Promise.all(rootEntries(roots).map(async ([rootName, root]) => {
-    if (!(await rootExists(root, limit))) return [];
+  const walked = await Promise.all(rootEntries(roots).map(async ([rootName, root]) => {
+    const status = await rootExists(root, limit);
+    if (!status.exists) return { raw: [], complete: status.complete };
     return walk(rootName, staticRoots, root, root, limit);
-  }))).flat();
+  }));
+  const raw = walked.flatMap((result) => result.raw);
   /* Codex account roots follow the legacy root in registry order. A copied
      rollout therefore resolves to its managed-account copy before ranking. */
   const codexRollouts = new Map<string, RawEntry>();
@@ -121,7 +141,7 @@ async function discoverRaw(roots: Roots | RootEntries, limit: Limit): Promise<Ra
       deduplicated.push(entry);
     }
   });
-  return deduplicated;
+  return { raw: deduplicated, complete: walked.every((result) => result.complete) };
 }
 
 function cappedEntries(ranked: RawEntry[], projectByPath: ReadonlyMap<string, string>): RawEntry[] {
@@ -249,15 +269,17 @@ export async function discoverFilesWithProjectCatalog(
   files: FileEntry[];
   projectCatalog: ProjectCatalogEntry[];
   pinOverlayPaths?: string[];
+  complete: boolean;
 }> {
   const scanToken = beginProjectCatalogScan(options.persist !== false || options.persistIndex === true);
   const limit = createLimiter(48);
-  const raw = await discoverRaw(roots, limit);
-  const snapshot = await projectCatalogSnapshotFromRaw(raw, {
+  const discovery = await discoverRaw(roots, limit);
+  const snapshot = await projectCatalogSnapshotFromRaw(discovery.raw, {
     persist: options.persist,
     persistIndex: options.persistIndex,
     excludedSummaryPaths: options.demote,
     scanToken,
+    complete: discovery.complete,
   });
   const { projectCatalog, projectByPath } = await canonicalProjectCatalog(
     snapshot.projectByPath,
@@ -265,8 +287,8 @@ export async function discoverFilesWithProjectCatalog(
     options.demote,
     snapshot.projectCatalog,
   );
-  const entries = await entriesFromRaw(raw, projectByPath, options.demote, options.pin, snapshot.summaryByPath);
-  return { ...entries, projectCatalog };
+  const entries = await entriesFromRaw(discovery.raw, projectByPath, options.demote, options.pin, snapshot.summaryByPath);
+  return { ...entries, projectCatalog, complete: discovery.complete };
 }
 
 export async function discoverFiles(
@@ -276,21 +298,21 @@ export async function discoverFiles(
 ): Promise<FileEntry[]> {
   const scanToken = beginProjectCatalogScan(false);
   const limit = createLimiter(48);
-  const raw = await discoverRaw(roots, limit);
-  const snapshot = await projectCatalogSnapshotFromRaw(raw, { persist: false, scanToken });
+  const discovery = await discoverRaw(roots, limit);
+  const snapshot = await projectCatalogSnapshotFromRaw(discovery.raw, { persist: false, scanToken, complete: discovery.complete });
   const { projectByPath } = await canonicalProjectCatalog(
     snapshot.projectByPath,
     snapshot.conversationCatalog,
     undefined,
     snapshot.projectCatalog,
   );
-  return (await entriesFromRaw(raw, projectByPath, demote, pin, snapshot.summaryByPath)).files;
+  return (await entriesFromRaw(discovery.raw, projectByPath, demote, pin, snapshot.summaryByPath)).files;
 }
 
 /** Cold-start fallback for the list/search route. It builds only lightweight
  * catalog metadata and leaves the scheme processing pipeline untouched. */
 export async function refreshConversationCatalog(roots: Roots | RootEntries = scanRootEntries()): Promise<void> {
   const scanToken = beginProjectCatalogScan(false);
-  const raw = await discoverRaw(roots, createLimiter(48));
-  await projectCatalogSnapshotFromRaw(raw, { persist: false, scanToken });
+  const discovery = await discoverRaw(roots, createLimiter(48));
+  await projectCatalogSnapshotFromRaw(discovery.raw, { persist: false, scanToken, complete: discovery.complete });
 }

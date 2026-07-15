@@ -97,6 +97,48 @@ test("request refreshes persist the per-file scanner index", async () => {
   }
 });
 
+test("a non-ENOENT directory failure leaves the completed catalog index authoritative until recovery", async () => {
+  const base = await mkdtemp(path.join(os.tmpdir(), "llv-discover-incomplete-walk-"));
+  const previousStateDir = process.env.LLV_STATE_DIR;
+  process.env.LLV_STATE_DIR = path.join(base, "state");
+  const roots: Record<RootKey, string> = {
+    "codex-sessions": path.join(base, "codex-sessions"),
+    "claude-projects": path.join(base, "claude-projects"),
+    "claude-tasks": path.join(base, "claude-tasks"),
+  };
+  try {
+    await Promise.all(Object.values(roots).map((root) => mkdir(root, { recursive: true })));
+    const transcript = path.join(roots["codex-sessions"], "canonical.jsonl");
+    await writeFixture(transcript, JSON.stringify({ type: "session_meta", payload: { cwd: "/repo/canonical" } }) + "\n", 1_700_000_000);
+    await discoverFilesWithProjectCatalog(roots, undefined, { persist: false, persistIndex: true });
+    const indexPath = path.join(process.env.LLV_STATE_DIR, "project-catalog.json");
+    const canonical = await readFile(indexPath, "utf8");
+    await rm(roots["claude-projects"], { recursive: true });
+    await writeFile(roots["claude-projects"], "not a directory");
+    const diagnostics: string[] = [];
+    const originalError = console.error;
+    console.error = (...values: unknown[]) => { diagnostics.push(values.map(String).join(" ")); };
+    try {
+      const incomplete = await discoverFilesWithProjectCatalog(roots, undefined, { persist: false, persistIndex: true });
+      expect(incomplete.complete).toBe(false);
+    } finally {
+      console.error = originalError;
+    }
+    expect(await readFile(indexPath, "utf8")).toBe(canonical);
+    expect(diagnostics).toEqual([expect.stringContaining("read directory failed")]);
+    expect(diagnostics[0]).toContain(roots["claude-projects"]);
+    await rm(roots["claude-projects"], { force: true });
+    await mkdir(roots["claude-projects"]);
+    const recovered = await discoverFilesWithProjectCatalog(roots, undefined, { persist: false, persistIndex: true });
+    expect(recovered.complete).toBe(true);
+    expect(recovered.files.some((entry) => entry.path === transcript)).toBe(true);
+  } finally {
+    if (previousStateDir === undefined) delete process.env.LLV_STATE_DIR;
+    else process.env.LLV_STATE_DIR = previousStateDir;
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
 test("project index publication failures preserve the canonical file, clean temps, stay non-fatal, and recover", async () => {
   const base = await mkdtemp(path.join(os.tmpdir(), "llv-discover-index-failure-"));
   const previousStateDir = process.env.LLV_STATE_DIR;
@@ -151,8 +193,10 @@ test("project index publication failures preserve the canonical file, clean temp
       expect(await readFile(indexPath, "utf8")).toBe(canonical);
       expect(tempFiles()).toEqual([]);
       expect(diagnostics).toEqual([
-        expect.stringContaining("project catalog index publication failed"),
+        expect.stringContaining("write temporary index failed"),
       ]);
+      expect(diagnostics[0]).toContain("injected project index write failure");
+      expect(diagnostics[0]).toContain(".project-catalog.json.");
     } finally {
       fs.writeFileSync = originalWrite;
       fs.renameSync = originalRename;
