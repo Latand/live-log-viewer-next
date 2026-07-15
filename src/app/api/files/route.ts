@@ -1,5 +1,5 @@
 import { buildFilesResponse } from "./response";
-import { cachedFileScan } from "./scanCache";
+import { cachedFileScan } from "@/lib/scanner/scanCache";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";

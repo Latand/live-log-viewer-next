@@ -1,8 +1,9 @@
 import { procBackend } from "@/lib/proc";
+import type { ProcBackend } from "@/lib/proc";
 import { readFileSync } from "node:fs";
+import { currentFileScan } from "@/lib/scanner/scanCache";
 import { createFreshAwareCoalescer, type FreshAwareCoalescer } from "@/lib/asyncCoalescer";
 import { descendantPids } from "@/lib/proc/memory";
-import { listFiles } from "@/lib/scanner";
 import { overlaySessionTitles } from "@/lib/session/titleProjection";
 import { readTranscriptHosts, type TranscriptHost, type TranscriptHostSnapshot } from "@/lib/agent/transcriptHost";
 import { captureTmuxAttachReference, type TmuxAttachReference } from "@/lib/tmux";
@@ -47,8 +48,8 @@ export function parseResourcesFixture(raw: string): ResourcesPayload {
   return { system: system ?? null, sessions: [] };
 }
 
-function captureSystemMemory(): ResourcesPayload["system"] {
-  const system = procBackend.systemMemory();
+function captureSystemMemory(proc: Pick<ProcBackend, "systemMemory"> = procBackend): ResourcesPayload["system"] {
+  const system = proc.systemMemory();
   return system ? { ...system, capturedAt: new Date().toISOString() } : null;
 }
 
@@ -119,17 +120,34 @@ function isoFromUnix(seconds: number): string {
   return new Date(seconds * 1000).toISOString();
 }
 
-/** `fresh` skips the pane/agent-process memos too, all the way down: a
-    rebuild triggered right after a kill would otherwise read 5s-old caches
-    and re-list (and re-allowlist) the session that was just killed. */
-async function buildResources(fresh: boolean): Promise<ResourcesPayload> {
-  const system = captureSystemMemory();
+export interface ResourceSnapshotDependencies {
+  readFiles(fresh: boolean): Promise<FileEntry[]>;
+  readHosts(fresh: boolean, entries: FileEntry[]): Promise<TranscriptHostSnapshot>;
+  proc: Pick<ProcBackend, "systemMemory" | "ppidMap" | "processMemory">;
+  captureAttachReference: typeof captureTmuxAttachReference;
+}
 
-  const hosts = await readTranscriptHosts(fresh);
+const resourceSnapshotDependencies: ResourceSnapshotDependencies = {
+  readFiles: async (fresh) => (await currentFileScan({ fresh })).snapshot.files,
+  readHosts: readTranscriptHosts,
+  proc: procBackend,
+  captureAttachReference: captureTmuxAttachReference,
+};
+
+/** `fresh` advances the shared file scan and skips the pane/agent-process
+    memos. A rebuild triggered right after a kill must use one newer corpus for
+    host ownership, metadata, and the kill allowlist. */
+export async function buildResourceSnapshot(
+  fresh: boolean,
+  dependencies: ResourceSnapshotDependencies = resourceSnapshotDependencies,
+): Promise<ResourcesPayload> {
+  const system = captureSystemMemory(dependencies.proc);
+
+  const files = await dependencies.readFiles(fresh);
+  const hosts = await dependencies.readHosts(fresh, files);
   const sessions: ResourceSession[] = [];
   if (hosts.hosts.length > 0) {
-    const ppids = procBackend.ppidMap();
-    const files = await listFiles();
+    const ppids = dependencies.proc.ppidMap();
     overlaySessionTitles(files);
     const byPath = new Map(files.map((entry) => [entry.path, entry]));
     const byPane = new Map<string, TranscriptHost[]>();
@@ -149,7 +167,7 @@ async function buildResources(fresh: boolean): Promise<ResourcesPayload> {
       paneTrees.push({ host, tree, paneHosts });
       for (const pid of tree) treePids.add(pid);
     }
-    const memory = procBackend.processMemory(treePids);
+    const memory = dependencies.proc.processMemory(treePids);
 
     const killRefs: Array<{ target: string; ref: KillTargetRef }> = [];
     for (const { host, tree, paneHosts } of paneTrees) {
@@ -182,7 +200,7 @@ async function buildResources(fresh: boolean): Promise<ResourcesPayload> {
       });
       killRefs.push({
         target: host.display,
-        ref: captureTmuxAttachReference({ tmuxServerPid: host.tmuxServerPid, panePid: host.panePid, paneId: host.paneId }),
+        ref: dependencies.captureAttachReference({ tmuxServerPid: host.tmuxServerPid, panePid: host.panePid, paneId: host.paneId }),
       });
     }
     sessions.sort((a, b) => b.rssBytes + b.swapBytes - (a.rssBytes + a.swapBytes));
@@ -214,7 +232,7 @@ export async function readResources(fresh = false): Promise<ResourcesPayload> {
     return { ...cached.data, system: captureSystemMemory() };
   }
   const data = await resourceBuildCoordinator().run(fresh, async (forceFresh) => {
-    const built = await buildResources(forceFresh);
+    const built = await buildResourceSnapshot(forceFresh);
     globalStore.__llvResourcesCache = { at: Date.now(), data: built };
     return built;
   });
