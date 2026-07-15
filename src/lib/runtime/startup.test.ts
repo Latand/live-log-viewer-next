@@ -527,6 +527,42 @@ test("startup adoption boots a terminal host with a pending delivery", async () 
   fs.rmSync(directory, { recursive: true, force: true });
 });
 
+test.each(["text", "ephemeral-images"] as const)(
+  "startup adoption leaves a terminal host dead when its %s delivery has failed",
+  async (payloadKind) => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), `llv-runtime-startup-failed-${payloadKind}-`));
+    const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+    const sessionId = payloadKind === "text"
+      ? "dddddddd-1111-4111-8111-dddddddddddd"
+      : "eeeeeeee-1111-4111-8111-eeeeeeeeeeee";
+    const { conversation } = addStructuredRestartConversation(registry, directory, {
+      sessionId,
+      status: "dead",
+      turn: "terminal",
+    });
+    const delivery = registry.holdDelivery(
+      conversation.id,
+      payloadKind === "text" ? "failed before restart" : "",
+      `failed-${payloadKind}`,
+      payloadKind,
+    );
+    registry.recordDeliveryOutcome(delivery.id, "failed", "delivery failed before restart");
+
+    expect(await startupAdoptionAttempts(registry)).toEqual([]);
+    expect(registry.snapshot().entries[`codex:${sessionId}`]).toMatchObject({
+      status: "dead",
+      claimOwner: null,
+      structuredHost: {
+        endpoint: "stdio:released",
+        process: null,
+        activeTurnRef: null,
+      },
+    });
+
+    fs.rmSync(directory, { recursive: true, force: true });
+  },
+);
+
 test("startup adoption boots the terminal host targeted by a queued runtime operation", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-startup-queued-operation-"));
   const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));

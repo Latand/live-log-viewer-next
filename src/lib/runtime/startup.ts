@@ -92,7 +92,9 @@ function structuredStartupAdoptionFilter(
       : [];
   }));
   const pendingDeliveryConversationIds = new Set(Object.values(snapshot.heldDeliveries)
-    .filter((delivery) => delivery.state !== "delivered")
+    .filter((delivery) => delivery.state === "held"
+      || delivery.state === "assigned"
+      || delivery.state === "delivery-uncertain")
     .map((delivery) => registry.canonicalConversationId(delivery.conversationId)));
   return (entry) => {
     const conversation = conversationsByCurrentEntry.get(sessionKeyId(entry.key));
