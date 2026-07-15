@@ -39,6 +39,8 @@ const FILE_SCAN_PIN_CACHE_MAX = 8;
 const FILE_SCAN_CACHE_SCHEMA_VERSION = 4 as const;
 const FILE_SCAN_SNAPSHOT_VERSION = 1 as const;
 const FILE_SCAN_SNAPSHOT_FILE = "files-scan-snapshot.json";
+const FILE_SCAN_PERSISTENCE_DIAGNOSTIC_MS = 60_000;
+let lastFileScanPersistenceDiagnosticAt = Number.NEGATIVE_INFINITY;
 const fileScanCacheStore = globalThis as typeof globalThis & {
   __llvFilesRouteScans?: Map<string, unknown>;
 };
@@ -93,14 +95,26 @@ function readPersistedFileScanSnapshot(): FileScanSnapshot | undefined {
 }
 
 function writePersistedFileScanSnapshot(snapshot: FileScanSnapshot): void {
+  let temporary: string | undefined;
   try {
     const filename = statePath(FILE_SCAN_SNAPSHOT_FILE);
     fs.mkdirSync(path.dirname(filename), { recursive: true });
-    const temporary = path.join(path.dirname(filename), `.${path.basename(filename)}.${process.pid}.${crypto.randomUUID()}.tmp`);
+    temporary = path.join(path.dirname(filename), `.${path.basename(filename)}.${process.pid}.${crypto.randomUUID()}.tmp`);
     fs.writeFileSync(temporary, JSON.stringify({ version: FILE_SCAN_SNAPSHOT_VERSION, snapshot }) + "\n", "utf8");
     fs.renameSync(temporary, filename);
   } catch {
-    // A later completed refresh can recreate the snapshot.
+    if (temporary !== undefined) {
+      try {
+        fs.unlinkSync(temporary);
+      } catch {
+        // The write may have failed before the temp file was created.
+      }
+    }
+    const now = Date.now();
+    if (now - lastFileScanPersistenceDiagnosticAt >= FILE_SCAN_PERSISTENCE_DIAGNOSTIC_MS) {
+      lastFileScanPersistenceDiagnosticAt = now;
+      console.error("[files scan cache] files scan snapshot publication failed; a later refresh will retry");
+    }
   }
 }
 

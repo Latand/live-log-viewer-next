@@ -22,6 +22,7 @@ const POLL_MS = 10_000;
 const FILES_DEBOUNCE_MS = 400;
 const FILES_REVISION_RETRY_MS = 1_000;
 const FILES_GENERATION_RETRY_MS = 25;
+const FILES_GENERATION_RETRY_MAX_MS = 1_000;
 
 export interface FilesData {
   files: FileEntry[];
@@ -55,6 +56,14 @@ export function filesApiUrl(_project?: string | null, pinnedPath?: string | null
 }
 
 type FilesFetcher = (input: string, init?: RequestInit) => Promise<Response>;
+type CompletionRetry = {
+  pinnedPath?: string | null;
+  revision?: number;
+  targetGeneration: number;
+  logicalGeneration: number;
+  attempt: number;
+  timer?: ReturnType<typeof setTimeout>;
+};
 
 export interface FilesClientCache {
   read(): FilesData;
@@ -132,12 +141,7 @@ export function createFilesClientCache(fetcher: FilesFetcher): FilesClientCache 
   let snapshot = EMPTY;
   const representations = new Map<string, { data: FilesData; etag?: string }>();
   const listeners = new Map<(data: FilesData) => void, string>();
-  const completionRetries = new Map<string, {
-    pinnedPath?: string | null;
-    revision?: number;
-    targetGeneration: number;
-    logicalGeneration: number;
-  }>();
+  const completionRetries = new Map<string, CompletionRetry>();
   let requestedGeneration = 0;
   let appliedGeneration = 0;
   let requestQueue: Promise<void> = Promise.resolve();
@@ -156,6 +160,13 @@ export function createFilesClientCache(fetcher: FilesFetcher): FilesClientCache 
 
   const hasSubscriber = (requestScope: string): boolean =>
     [...listeners.values()].some((scope) => scope === requestScope);
+
+  const cancelCompletionRetry = (requestScope: string) => {
+    const retry = completionRetries.get(requestScope);
+    if (!retry) return;
+    completionRetries.delete(requestScope);
+    if (retry.timer !== undefined) clearTimeout(retry.timer);
+  };
 
   const composePipelines = () => {
     if (!pipelineOverlays.size) {
@@ -202,6 +213,7 @@ export function createFilesClientCache(fetcher: FilesFetcher): FilesClientCache 
     revision?: number,
     requiredGeneration?: number,
     logicalGeneration?: number,
+    completionRetryAttempt = 0,
   ): Promise<FilesData> => {
     const generation = ++requestedGeneration;
     const url = filesApiUrl(undefined, pinnedPath);
@@ -222,7 +234,16 @@ export function createFilesClientCache(fetcher: FilesFetcher): FilesClientCache 
       settleServerPipelines(logicalGeneration ?? generation, !generationIncomplete);
       publish(url);
       if (generationIncomplete) {
-        scheduleCompletionRetry(url, pinnedPath, revision, targetGeneration, logicalGeneration ?? generation);
+        scheduleCompletionRetry(
+          url,
+          pinnedPath,
+          revision,
+          targetGeneration,
+          logicalGeneration ?? generation,
+          completionRetryAttempt,
+        );
+      } else {
+        cancelCompletionRetry(url);
       }
       return snapshot;
     }
@@ -237,7 +258,16 @@ export function createFilesClientCache(fetcher: FilesFetcher): FilesClientCache 
     settleServerPipelines(logicalGeneration ?? generation, !generationIncomplete);
     publish(url);
     if (generationIncomplete) {
-      scheduleCompletionRetry(url, pinnedPath, revision, targetGeneration, logicalGeneration ?? generation);
+      scheduleCompletionRetry(
+        url,
+        pinnedPath,
+        revision,
+        targetGeneration,
+        logicalGeneration ?? generation,
+        completionRetryAttempt,
+      );
+    } else {
+      cancelCompletionRetry(url);
     }
     return snapshot;
   };
@@ -247,12 +277,14 @@ export function createFilesClientCache(fetcher: FilesFetcher): FilesClientCache 
     revision?: number,
     requiredGeneration?: number,
     logicalGeneration?: number,
+    completionRetryAttempt?: number,
   ): Promise<FilesData> => {
     const result = requestQueue.then(() => performRevalidate(
       pinnedPath,
       revision,
       requiredGeneration,
       logicalGeneration,
+      completionRetryAttempt,
     ));
     requestQueue = result.then(() => undefined, () => undefined);
     return result;
@@ -264,27 +296,36 @@ export function createFilesClientCache(fetcher: FilesFetcher): FilesClientCache 
     revision: number | undefined,
     targetGeneration: number,
     logicalGeneration: number,
-    delay = FILES_GENERATION_RETRY_MS,
+    attempt: number,
   ) => {
     if (!hasSubscriber(url)) return;
     const pending = completionRetries.get(url);
     if (pending) {
       if (pending.targetGeneration < targetGeneration) {
-        completionRetries.set(url, { pinnedPath, revision, targetGeneration, logicalGeneration });
+        pending.pinnedPath = pinnedPath;
+        pending.revision = revision;
+        pending.targetGeneration = targetGeneration;
+        pending.logicalGeneration = logicalGeneration;
       }
       return;
     }
-    completionRetries.set(url, { pinnedPath, revision, targetGeneration, logicalGeneration });
-    setTimeout(() => {
-      const retry = completionRetries.get(url);
-      if (!retry) return;
+    const retry: CompletionRetry = { pinnedPath, revision, targetGeneration, logicalGeneration, attempt };
+    completionRetries.set(url, retry);
+    const delay = Math.min(
+      FILES_GENERATION_RETRY_MAX_MS,
+      FILES_GENERATION_RETRY_MS * 2 ** Math.min(attempt, 10),
+    );
+    retry.timer = setTimeout(() => {
+      if (completionRetries.get(url) !== retry) return;
       completionRetries.delete(url);
       if (!hasSubscriber(url)) return;
+      const nextAttempt = retry.attempt + 1;
       void enqueueRevalidate(
         retry.pinnedPath,
         retry.revision,
         retry.targetGeneration,
         retry.logicalGeneration,
+        nextAttempt,
       ).catch(() => {
         scheduleCompletionRetry(
           url,
@@ -292,7 +333,7 @@ export function createFilesClientCache(fetcher: FilesFetcher): FilesClientCache 
           retry.revision,
           retry.targetGeneration,
           retry.logicalGeneration,
-          FILES_REVISION_RETRY_MS,
+          nextAttempt,
         );
       });
     }, delay);
@@ -322,8 +363,12 @@ export function createFilesClientCache(fetcher: FilesFetcher): FilesClientCache 
   };
 
   const subscribe = (listener: (data: FilesData) => void, pinnedPath?: string | null) => {
-    listeners.set(listener, filesApiUrl(undefined, pinnedPath));
-    return () => { listeners.delete(listener); };
+    const requestScope = filesApiUrl(undefined, pinnedPath);
+    listeners.set(listener, requestScope);
+    return () => {
+      listeners.delete(listener);
+      if (!hasSubscriber(requestScope)) cancelCompletionRetry(requestScope);
+    };
   };
 
   return { read: () => snapshot, revalidate, subscribe, applyPipeline, revertPipeline };

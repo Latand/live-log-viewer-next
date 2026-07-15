@@ -224,6 +224,74 @@ test("a corrupt completed snapshot falls back to a cold scan and repairs persist
   expect(persisted.version).toBe(1);
 });
 
+test("snapshot publication failures preserve the canonical file, clean temps, stay non-fatal, and recover", async () => {
+  const snapshotPath = path.join(stateDir, "files-scan-snapshot.json");
+  const canonical = JSON.stringify({
+    version: 1,
+    snapshot: {
+      files: [file("/sessions/canonical.jsonl")],
+      projectCatalog: [],
+    },
+  });
+  fs.writeFileSync(snapshotPath, canonical);
+  const originalWrite = fs.writeFileSync;
+  const originalRename = fs.renameSync;
+  const originalError = console.error;
+  const diagnostics: string[] = [];
+  let failure: "write" | "rename" | null = null;
+  fs.writeFileSync = ((filename: fs.PathOrFileDescriptor, data: string | NodeJS.ArrayBufferView, options?: fs.WriteFileOptions) => {
+    const result = originalWrite(filename, data, options);
+    if (failure === "write" && String(filename).includes(".files-scan-snapshot.json.")) {
+      throw new Error("injected snapshot write failure");
+    }
+    return result;
+  }) as typeof fs.writeFileSync;
+  fs.renameSync = ((source: fs.PathLike, target: fs.PathLike) => {
+    if (failure === "rename" && target === snapshotPath) {
+      throw new Error("injected snapshot rename failure");
+    }
+    return originalRename(source, target);
+  }) as typeof fs.renameSync;
+  console.error = (...values: unknown[]) => { diagnostics.push(values.map(String).join(" ")); };
+  const tempFiles = () => fs.readdirSync(stateDir)
+    .filter((name) => name.startsWith(".files-scan-snapshot.json.") && name.endsWith(".tmp"));
+  const attempt = async (mode: "write" | "rename", freshPath: string) => {
+    failure = mode;
+    resetFilesRouteCacheForTests();
+    scannedFiles = [file(freshPath)];
+    const response = await GET(new Request("http://127.0.0.1/api/files"));
+    expect(response.status).toBe(200);
+    expect((await response.json()).files.map((entry: FileEntry) => entry.path)).toEqual(["/sessions/canonical.jsonl"]);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  };
+
+  try {
+    await attempt("write", "/sessions/write-failed.jsonl");
+    expect(fs.readFileSync(snapshotPath, "utf8")).toBe(canonical);
+    expect(tempFiles()).toEqual([]);
+
+    await attempt("rename", "/sessions/rename-failed.jsonl");
+    expect(fs.readFileSync(snapshotPath, "utf8")).toBe(canonical);
+    expect(tempFiles()).toEqual([]);
+    expect(diagnostics).toEqual([
+      expect.stringContaining("files scan snapshot publication failed"),
+    ]);
+  } finally {
+    fs.writeFileSync = originalWrite;
+    fs.renameSync = originalRename;
+    console.error = originalError;
+  }
+
+  resetFilesRouteCacheForTests();
+  scannedFiles = [file("/sessions/recovered.jsonl")];
+  const recovery = await GET(new Request("http://127.0.0.1/api/files"));
+  expect(recovery.status).toBe(200);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  expect(JSON.parse(fs.readFileSync(snapshotPath, "utf8")).snapshot.files.map((entry: FileEntry) => entry.path))
+    .toEqual(["/sessions/recovered.jsonl"]);
+  expect(tempFiles()).toEqual([]);
+});
+
 test("an expired snapshot returns stale data while one shared refresh runs", async () => {
   scannedFiles = [file("/sessions/project-a.jsonl")];
   await cachedFileScan();

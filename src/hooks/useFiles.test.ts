@@ -387,6 +387,71 @@ test("a generation retry preserves a pipeline echo newer than the scan it comple
   unsubscribe();
 });
 
+test("multi-second generation completion uses one bounded retry chain per scope and stops after unsubscribe", async () => {
+  const startedAt = performance.now();
+  const requestedTargets: string[] = [];
+  let calls = 0;
+  const cache = createFilesClientCache(async (_input, init) => {
+    calls += 1;
+    const target = new Headers(init?.headers).get("x-llv-files-generation");
+    if (target) requestedTargets.push(target);
+    const complete = performance.now() - startedAt >= 2_100;
+    return new Response(JSON.stringify({
+      files: [file(complete ? "/complete" : "/stale", complete ? "Complete" : "Stale")],
+      pipelines: [pipelineRow("p1", "server")],
+    }), {
+      headers: {
+        "x-llv-files-generation": complete ? "1" : "0",
+        "x-llv-files-target-generation": "1",
+      },
+    });
+  });
+  const firstUpdates: string[] = [];
+  const secondUpdates: string[] = [];
+  const unsubscribeFirst = cache.subscribe((data) => firstUpdates.push(data.files[0]?.path ?? ""));
+  const unsubscribeSecond = cache.subscribe((data) => secondUpdates.push(data.files[0]?.path ?? ""));
+
+  await Promise.all([
+    cache.revalidate(undefined, 31),
+    cache.revalidate(undefined, 31),
+  ]);
+  cache.applyPipeline(pipelineRow("p1", "patched") as never, true);
+  for (let attempt = 0; attempt < 80 && cache.read().files[0]?.path !== "/complete"; attempt += 1) {
+    await Bun.sleep(50);
+  }
+
+  expect(cache.read().files[0]?.path).toBe("/complete");
+  expect(cache.read().pipelines[0]?.task).toBe("patched");
+  expect(calls).toBeLessThanOrEqual(10);
+  expect(requestedTargets.length).toBeGreaterThan(0);
+  expect(new Set(requestedTargets)).toEqual(new Set(["1"]));
+  expect(firstUpdates.at(-1)).toBe("/complete");
+  expect(secondUpdates).toEqual(firstUpdates);
+
+  await cache.revalidate();
+  expect(cache.read().pipelines[0]?.task).toBe("server");
+  unsubscribeFirst();
+  unsubscribeSecond();
+
+  let callsAfterResubscribe = 0;
+  const cancellationCache = createFilesClientCache(async () => {
+    callsAfterResubscribe += 1;
+    return new Response(JSON.stringify({ files: [] }), {
+      headers: {
+        "x-llv-files-generation": "0",
+        "x-llv-files-target-generation": "1",
+      },
+    });
+  });
+  const unsubscribe = cancellationCache.subscribe(() => {});
+  await cancellationCache.revalidate();
+  unsubscribe();
+  const unsubscribeReplacement = cancellationCache.subscribe(() => {});
+  await Bun.sleep(75);
+  expect(callsAfterResubscribe).toBe(1);
+  unsubscribeReplacement();
+});
+
 test("an unconfirmed optimistic pipeline outlives every scan until reverted", async () => {
   const cache = createFilesClientCache(async () =>
     new Response(JSON.stringify({ files: [], pipelines: [pipelineRow("p1", "server")] })));

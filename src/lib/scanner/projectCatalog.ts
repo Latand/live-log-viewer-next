@@ -52,6 +52,8 @@ type ProjectCatalogState = {
 };
 
 const CATALOG_FILE = "project-catalog.json";
+const CATALOG_PERSISTENCE_DIAGNOSTIC_MS = 60_000;
+let lastCatalogPersistenceDiagnosticAt = Number.NEGATIVE_INFINITY;
 const projectCatalogRuntime = globalThis as typeof globalThis & {
   __llvProjectCatalogPublicationGeneration?: number;
   __llvProjectCatalogPersistenceGeneration?: number;
@@ -137,14 +139,26 @@ function readState(): ProjectCatalogState {
 }
 
 function writeState(state: ProjectCatalogState): void {
+  let temporary: string | undefined;
   try {
     const filePath = catalogPath();
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
-    const tmp = path.join(path.dirname(filePath), `.${path.basename(filePath)}.${process.pid}.${crypto.randomUUID()}.tmp`);
-    fs.writeFileSync(tmp, JSON.stringify(state) + "\n", "utf8");
-    fs.renameSync(tmp, filePath);
+    temporary = path.join(path.dirname(filePath), `.${path.basename(filePath)}.${process.pid}.${crypto.randomUUID()}.tmp`);
+    fs.writeFileSync(temporary, JSON.stringify(state) + "\n", "utf8");
+    fs.renameSync(temporary, filePath);
   } catch {
-    /* A failed catalog write only costs the next scan extra metadata reads. */
+    if (temporary !== undefined) {
+      try {
+        fs.unlinkSync(temporary);
+      } catch {
+        // The write may have failed before the temp file was created.
+      }
+    }
+    const now = Date.now();
+    if (now - lastCatalogPersistenceDiagnosticAt >= CATALOG_PERSISTENCE_DIAGNOSTIC_MS) {
+      lastCatalogPersistenceDiagnosticAt = now;
+      console.error("[project catalog] project catalog index publication failed; a later scan will retry");
+    }
   }
 }
 

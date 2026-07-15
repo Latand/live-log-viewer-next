@@ -1,5 +1,5 @@
 import { appendFile, mkdtemp, mkdir, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import fs, { existsSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -65,6 +65,84 @@ test("request refreshes persist the per-file scanner index", async () => {
       project: projectForCwd("/repo/indexed"),
       kind: "session",
     });
+  } finally {
+    if (previousStateDir === undefined) delete process.env.LLV_STATE_DIR;
+    else process.env.LLV_STATE_DIR = previousStateDir;
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test("project index publication failures preserve the canonical file, clean temps, stay non-fatal, and recover", async () => {
+  const base = await mkdtemp(path.join(os.tmpdir(), "llv-discover-index-failure-"));
+  const previousStateDir = process.env.LLV_STATE_DIR;
+  process.env.LLV_STATE_DIR = path.join(base, "state");
+  const roots: Record<RootKey, string> = {
+    "codex-sessions": path.join(base, "codex-sessions"),
+    "claude-projects": path.join(base, "claude-projects"),
+    "claude-tasks": path.join(base, "claude-tasks"),
+  };
+  try {
+    await Promise.all(Object.values(roots).map((root) => mkdir(root, { recursive: true })));
+    const canonicalTranscript = path.join(roots["codex-sessions"], "canonical.jsonl");
+    await writeFixture(canonicalTranscript, JSON.stringify({ type: "session_meta", payload: { cwd: "/repo/canonical" } }) + "\n", 1_700_000_000);
+    await discoverFilesWithProjectCatalog(roots, undefined, { persist: false, persistIndex: true });
+    const indexPath = path.join(process.env.LLV_STATE_DIR, "project-catalog.json");
+    const canonical = await readFile(indexPath, "utf8");
+    const originalWrite = fs.writeFileSync;
+    const originalRename = fs.renameSync;
+    const originalError = console.error;
+    const diagnostics: string[] = [];
+    let failure: "write" | "rename" | null = null;
+    fs.writeFileSync = ((filename: fs.PathOrFileDescriptor, data: string | NodeJS.ArrayBufferView, options?: fs.WriteFileOptions) => {
+      const result = originalWrite(filename, data, options);
+      if (failure === "write" && String(filename).includes(".project-catalog.json.")) {
+        throw new Error("injected project index write failure");
+      }
+      return result;
+    }) as typeof fs.writeFileSync;
+    fs.renameSync = ((source: fs.PathLike, target: fs.PathLike) => {
+      if (failure === "rename" && target === indexPath) {
+        throw new Error("injected project index rename failure");
+      }
+      return originalRename(source, target);
+    }) as typeof fs.renameSync;
+    console.error = (...values: unknown[]) => { diagnostics.push(values.map(String).join(" ")); };
+    const tempFiles = () => fs.readdirSync(process.env.LLV_STATE_DIR!)
+      .filter((name) => name.startsWith(".project-catalog.json.") && name.endsWith(".tmp"));
+    const attempt = async (mode: "write" | "rename", filename: string, cwd: string, mtime: number) => {
+      const transcript = path.join(roots["codex-sessions"], filename);
+      await writeFixture(transcript, JSON.stringify({ type: "session_meta", payload: { cwd } }) + "\n", mtime);
+      failure = mode;
+      const result = await discoverFilesWithProjectCatalog(roots, undefined, { persist: false, persistIndex: true });
+      expect(result.files.some((entry) => entry.path === transcript)).toBe(true);
+    };
+
+    try {
+      await attempt("write", "write-failed.jsonl", "/repo/write-failed", 1_700_000_001);
+      expect(await readFile(indexPath, "utf8")).toBe(canonical);
+      expect(tempFiles()).toEqual([]);
+
+      await attempt("rename", "rename-failed.jsonl", "/repo/rename-failed", 1_700_000_002);
+      expect(await readFile(indexPath, "utf8")).toBe(canonical);
+      expect(tempFiles()).toEqual([]);
+      expect(diagnostics).toEqual([
+        expect.stringContaining("project catalog index publication failed"),
+      ]);
+    } finally {
+      fs.writeFileSync = originalWrite;
+      fs.renameSync = originalRename;
+      console.error = originalError;
+    }
+
+    const recovered = await discoverFilesWithProjectCatalog(roots, undefined, { persist: false, persistIndex: true });
+    expect(recovered.files).toHaveLength(3);
+    const persisted = JSON.parse(await readFile(indexPath, "utf8"));
+    expect(Object.keys(persisted.files).sort()).toEqual([
+      canonicalTranscript,
+      path.join(roots["codex-sessions"], "rename-failed.jsonl"),
+      path.join(roots["codex-sessions"], "write-failed.jsonl"),
+    ].sort());
+    expect(tempFiles()).toEqual([]);
   } finally {
     if (previousStateDir === undefined) delete process.env.LLV_STATE_DIR;
     else process.env.LLV_STATE_DIR = previousStateDir;
