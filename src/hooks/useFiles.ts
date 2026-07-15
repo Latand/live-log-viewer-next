@@ -62,7 +62,9 @@ type CompletionRetry = {
   targetGeneration: number;
   logicalGeneration: number;
   attempt: number;
+  phase: "scheduled" | "queued" | "active" | "canceled";
   timer?: ReturnType<typeof setTimeout>;
+  controller?: AbortController;
 };
 
 export interface FilesClientCache {
@@ -165,8 +167,15 @@ export function createFilesClientCache(fetcher: FilesFetcher): FilesClientCache 
     const retry = completionRetries.get(requestScope);
     if (!retry) return;
     completionRetries.delete(requestScope);
+    retry.phase = "canceled";
     if (retry.timer !== undefined) clearTimeout(retry.timer);
+    retry.controller?.abort();
   };
+
+  const ownsCompletionRetry = (requestScope: string, retry: CompletionRetry): boolean =>
+    retry.phase !== "canceled"
+    && completionRetries.get(requestScope) === retry
+    && hasSubscriber(requestScope);
 
   const composePipelines = () => {
     if (!pipelineOverlays.size) {
@@ -214,12 +223,27 @@ export function createFilesClientCache(fetcher: FilesFetcher): FilesClientCache 
     requiredGeneration?: number,
     logicalGeneration?: number,
     completionRetryAttempt = 0,
+    completionRetry?: CompletionRetry,
   ): Promise<FilesData> => {
-    const generation = ++requestedGeneration;
     const url = filesApiUrl(undefined, pinnedPath);
+    if (completionRetry) {
+      if (!ownsCompletionRetry(url, completionRetry)) return snapshot;
+      completionRetry.phase = "active";
+      completionRetry.controller = new AbortController();
+    }
+    const generation = ++requestedGeneration;
     const representation = representations.get(url);
     const headers = filesRequestHeaders(representation?.etag ?? "", revision, requiredGeneration);
-    const response = await fetcher(url, headers ? { headers } : undefined);
+    const init = headers || completionRetry?.controller
+      ? { ...(headers ? { headers } : {}), ...(completionRetry?.controller ? { signal: completionRetry.controller.signal } : {}) }
+      : undefined;
+    let response: Response;
+    try {
+      response = await fetcher(url, init);
+    } finally {
+      if (completionRetry) completionRetry.controller = undefined;
+    }
+    if (completionRetry && !ownsCompletionRetry(url, completionRetry)) return snapshot;
     const servedGeneration = responseGeneration(response, "x-llv-files-generation");
     const targetGeneration = responseGeneration(response, "x-llv-files-target-generation");
     const generationIncomplete = servedGeneration !== undefined
@@ -241,6 +265,7 @@ export function createFilesClientCache(fetcher: FilesFetcher): FilesClientCache 
           targetGeneration,
           logicalGeneration ?? generation,
           completionRetryAttempt,
+          completionRetry,
         );
       } else {
         cancelCompletionRetry(url);
@@ -249,6 +274,7 @@ export function createFilesClientCache(fetcher: FilesFetcher): FilesClientCache 
     }
     if (!response.ok) throw new Error(`files request failed: ${response.status}`);
     const parsed = JSON.parse(await response.text()) as FilesResponse | FileEntry[];
+    if (completionRetry && !ownsCompletionRetry(url, completionRetry)) return snapshot;
     if (generation < appliedGeneration) return snapshot;
     const incoming = parsedFilesData(parsed, url);
     snapshot = patchFilesData(snapshot, incoming);
@@ -265,6 +291,7 @@ export function createFilesClientCache(fetcher: FilesFetcher): FilesClientCache 
         targetGeneration,
         logicalGeneration ?? generation,
         completionRetryAttempt,
+        completionRetry,
       );
     } else {
       cancelCompletionRetry(url);
@@ -278,6 +305,7 @@ export function createFilesClientCache(fetcher: FilesFetcher): FilesClientCache 
     requiredGeneration?: number,
     logicalGeneration?: number,
     completionRetryAttempt?: number,
+    completionRetry?: CompletionRetry,
   ): Promise<FilesData> => {
     const result = requestQueue.then(() => performRevalidate(
       pinnedPath,
@@ -285,6 +313,7 @@ export function createFilesClientCache(fetcher: FilesFetcher): FilesClientCache 
       requiredGeneration,
       logicalGeneration,
       completionRetryAttempt,
+      completionRetry,
     ));
     requestQueue = result.then(() => undefined, () => undefined);
     return result;
@@ -297,10 +326,16 @@ export function createFilesClientCache(fetcher: FilesFetcher): FilesClientCache 
     targetGeneration: number,
     logicalGeneration: number,
     attempt: number,
+    owner?: CompletionRetry,
   ) => {
-    if (!hasSubscriber(url)) return;
+    if (!hasSubscriber(url)) {
+      if (owner) cancelCompletionRetry(url);
+      return;
+    }
     const pending = completionRetries.get(url);
-    if (pending) {
+    if (owner) {
+      if (pending !== owner || owner.phase === "canceled") return;
+    } else if (pending) {
       if (pending.targetGeneration < targetGeneration) {
         pending.pinnedPath = pinnedPath;
         pending.revision = revision;
@@ -309,16 +344,32 @@ export function createFilesClientCache(fetcher: FilesFetcher): FilesClientCache 
       }
       return;
     }
-    const retry: CompletionRetry = { pinnedPath, revision, targetGeneration, logicalGeneration, attempt };
-    completionRetries.set(url, retry);
+    const retry: CompletionRetry = owner ?? {
+      pinnedPath,
+      revision,
+      targetGeneration,
+      logicalGeneration,
+      attempt,
+      phase: "scheduled",
+    };
+    retry.pinnedPath = pinnedPath;
+    retry.revision = revision;
+    retry.targetGeneration = targetGeneration;
+    retry.logicalGeneration = logicalGeneration;
+    retry.attempt = attempt;
+    retry.phase = "scheduled";
+    if (!owner) completionRetries.set(url, retry);
     const delay = Math.min(
       FILES_GENERATION_RETRY_MAX_MS,
       FILES_GENERATION_RETRY_MS * 2 ** Math.min(attempt, 10),
     );
     retry.timer = setTimeout(() => {
-      if (completionRetries.get(url) !== retry) return;
-      completionRetries.delete(url);
-      if (!hasSubscriber(url)) return;
+      retry.timer = undefined;
+      if (!ownsCompletionRetry(url, retry)) {
+        cancelCompletionRetry(url);
+        return;
+      }
+      retry.phase = "queued";
       const nextAttempt = retry.attempt + 1;
       void enqueueRevalidate(
         retry.pinnedPath,
@@ -326,6 +377,7 @@ export function createFilesClientCache(fetcher: FilesFetcher): FilesClientCache 
         retry.targetGeneration,
         retry.logicalGeneration,
         nextAttempt,
+        retry,
       ).catch(() => {
         scheduleCompletionRetry(
           url,
@@ -334,6 +386,7 @@ export function createFilesClientCache(fetcher: FilesFetcher): FilesClientCache 
           retry.targetGeneration,
           retry.logicalGeneration,
           nextAttempt,
+          retry,
         );
       });
     }, delay);

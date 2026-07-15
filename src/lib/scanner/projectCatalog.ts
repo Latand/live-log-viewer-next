@@ -9,7 +9,7 @@ import { forEachCooperatively, mapCooperatively } from "@/lib/cooperative";
 import type { ProjectCatalogEntry } from "../types";
 import { replaceConversationCatalog, type ConversationCatalogEntry } from "./conversationCatalog";
 import {
-  describe,
+  describeFile,
   fileDescriptionIdentity,
   type FileDescription,
 } from "./describe";
@@ -18,6 +18,7 @@ import { PROJECT_RESOLUTION_VERSION, projectResolutionStateKey } from "./project
 
 type CachedProjectFile = {
   summaryVersion?: 2;
+  summaryIncomplete?: true;
   rootName: RawEntry["rootName"];
   size: number;
   mtimeMs: number;
@@ -115,6 +116,7 @@ function readState(): ProjectCatalogState {
         && sidecarMtimeMs !== undefined;
       files[pathname] = {
         summaryVersion: summaryComplete ? 2 : undefined,
+        summaryIncomplete: !summaryComplete && file.summaryIncomplete === true ? true : undefined,
         rootName: file.rootName,
         size: file.size,
         mtimeMs: file.mtimeMs,
@@ -191,6 +193,7 @@ function cachedFile(raw: RawEntry, state: ProjectCatalogState, stateKey: string)
   const identity = fileDescriptionIdentity(raw.rootName, raw.path, raw.st);
   if (
     state.resolutionVersion === PROJECT_RESOLUTION_VERSION &&
+    identity.complete &&
     cached &&
     cached.size === raw.st.size &&
     cached.mtimeMs === raw.st.mtimeMs &&
@@ -202,14 +205,21 @@ function cachedFile(raw: RawEntry, state: ProjectCatalogState, stateKey: string)
     cached.projectRoot !== undefined
   ) {
     if (cached.summaryVersion !== 2) {
-      const meta = describe(raw.rootName, raw.root, raw.path, raw.st, stateKey, identity);
+      const described = describeFile(raw.rootName, raw.root, raw.path, raw.st, stateKey, identity);
+      const meta = described.description;
+      const refreshProjectMetadata = cached.summaryIncomplete === true;
       return {
         ...cached,
-        summaryVersion: 2,
+        summaryVersion: described.complete ? 2 : undefined,
+        summaryIncomplete: refreshProjectMetadata && !described.complete ? true : undefined,
         sidecarSize: identity.sidecarSize,
         sidecarMtimeMs: identity.sidecarMtimeMs,
         path: raw.path,
-        session: isConversation(raw.rootName, cached.kind),
+        project: refreshProjectMetadata ? meta.project || "other" : cached.project,
+        projectRoot: refreshProjectMetadata ? meta.projectRoot ?? null : cached.projectRoot,
+        kind: refreshProjectMetadata ? meta.kind : cached.kind,
+        session: isConversation(raw.rootName, refreshProjectMetadata ? meta.kind : cached.kind),
+        worktree: refreshProjectMetadata ? meta.worktree : cached.worktree,
         cwd: meta.cwd,
         title: meta.title,
         titleCached: true,
@@ -228,9 +238,11 @@ function cachedFile(raw: RawEntry, state: ProjectCatalogState, stateKey: string)
       fmt: cached.fmt ?? fmtForRoot(raw.rootName),
     };
   }
-  const meta = describe(raw.rootName, raw.root, raw.path, raw.st, stateKey, identity);
+  const described = describeFile(raw.rootName, raw.root, raw.path, raw.st, stateKey, identity);
+  const meta = described.description;
   const file: ProjectCatalogFile = {
-    summaryVersion: 2,
+    summaryVersion: described.complete ? 2 : undefined,
+    summaryIncomplete: described.complete ? undefined : true,
     path: raw.path,
     rootName: raw.rootName,
     size: raw.st.size,
@@ -250,7 +262,8 @@ function cachedFile(raw: RawEntry, state: ProjectCatalogState, stateKey: string)
     fmt: meta.fmt,
   };
   state.files[raw.path] = {
-    summaryVersion: 2,
+    summaryVersion: file.summaryVersion,
+    summaryIncomplete: file.summaryIncomplete,
     rootName: file.rootName,
     size: file.size,
     mtimeMs: file.mtimeMs,
@@ -338,7 +351,8 @@ export async function projectCatalogSnapshotFromRaw(raw: RawEntry[], options: {
   const changes = new Map<string, Set<string>>();
   await forEachCooperatively(files, (file) => {
     nextFiles[file.path] = {
-      summaryVersion: 2,
+      summaryVersion: file.summaryVersion,
+      summaryIncomplete: file.summaryIncomplete,
       rootName: file.rootName,
       size: file.size,
       mtimeMs: file.mtimeMs,

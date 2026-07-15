@@ -452,6 +452,49 @@ test("multi-second generation completion uses one bounded retry chain per scope 
   unsubscribeReplacement();
 });
 
+test("a queued completion retry stays canceled after final unsubscribe and resubscribe", async () => {
+  const blockerPath = "/queue/blocker";
+  const drainPath = "/queue/drain";
+  let releaseBlocker!: () => void;
+  let markBlockerStarted!: () => void;
+  const blockerGate = new Promise<void>((resolve) => { releaseBlocker = resolve; });
+  const blockerStarted = new Promise<void>((resolve) => { markBlockerStarted = resolve; });
+  let globalCalls = 0;
+  const cache = createFilesClientCache(async (input) => {
+    if (input === filesApiUrl(undefined, blockerPath)) {
+      markBlockerStarted();
+      await blockerGate;
+      return new Response(JSON.stringify({ files: [file(blockerPath, "Blocker")] }));
+    }
+    if (input === filesApiUrl(undefined, drainPath)) {
+      return new Response(JSON.stringify({ files: [file(drainPath, "Drain")] }));
+    }
+    globalCalls += 1;
+    return new Response(JSON.stringify({ files: [file(`/global/${globalCalls}`, "Global")] }), {
+      headers: {
+        "x-llv-files-generation": globalCalls === 1 ? "0" : "1",
+        "x-llv-files-target-generation": "1",
+      },
+    });
+  });
+  const unsubscribe = cache.subscribe(() => {});
+
+  await cache.revalidate();
+  const blocker = cache.revalidate(blockerPath);
+  await blockerStarted;
+  await Bun.sleep(75);
+  unsubscribe();
+  const unsubscribeReplacement = cache.subscribe(() => {});
+  releaseBlocker();
+  await blocker;
+  await cache.revalidate(drainPath);
+
+  expect(globalCalls).toBe(1);
+  await cache.revalidate();
+  expect(globalCalls).toBe(2);
+  unsubscribeReplacement();
+});
+
 test("an unconfirmed optimistic pipeline outlives every scan until reverted", async () => {
   const cache = createFilesClientCache(async () =>
     new Response(JSON.stringify({ files: [], pipelines: [pipelineRow("p1", "server")] })));

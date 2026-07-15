@@ -7,7 +7,7 @@ import { stateDir } from "@/lib/configDir";
 import type { Engine, Fmt, RootKey } from "../types";
 import { cleanTitle } from "../title";
 import { globalCache } from "./caches";
-import { readJson, recordValue, recordsValue, stringValue } from "./json";
+import { readJsonResult, recordValue, recordsValue, stringValue } from "./json";
 import { projectResolutionStateKey } from "./projectState";
 
 export interface FileDescription {
@@ -26,6 +26,12 @@ export interface FileDescriptionIdentity {
   mtimeMs: number;
   sidecarSize: number | null;
   sidecarMtimeMs: number | null;
+  complete: boolean;
+}
+
+export interface FileDescriptionResult {
+  description: FileDescription;
+  complete: boolean;
 }
 
 type CachedFileDescription = {
@@ -55,7 +61,7 @@ const codexProjectCache = globalCache<{
   stateKey: string;
   project: string;
   worktree?: string;
-}>("codex-project-v4");
+}>("codex-project-v5");
 const repoSlugCache = globalCache<[number, string | null]>("repo-path-from-slug-v1");
 /* The cwd follows the same append-only head reuse and rewrite invalidation. */
 const cwdCache = globalCache<[number, number, string | null]>("claude-cwd-v2");
@@ -76,7 +82,7 @@ export function fileDescriptionIdentity(
 ): FileDescriptionIdentity {
   const sidecarPath = subagentSidecarPath(rootName, pathname);
   if (!sidecarPath) {
-    return { size: st.size, mtimeMs: st.mtimeMs, sidecarSize: null, sidecarMtimeMs: null };
+    return { size: st.size, mtimeMs: st.mtimeMs, sidecarSize: null, sidecarMtimeMs: null, complete: true };
   }
   try {
     const sidecar = fs.statSync(sidecarPath);
@@ -85,9 +91,16 @@ export function fileDescriptionIdentity(
       mtimeMs: st.mtimeMs,
       sidecarSize: sidecar.size,
       sidecarMtimeMs: sidecar.mtimeMs,
+      complete: true,
     };
-  } catch {
-    return { size: st.size, mtimeMs: st.mtimeMs, sidecarSize: null, sidecarMtimeMs: null };
+  } catch (error) {
+    return {
+      size: st.size,
+      mtimeMs: st.mtimeMs,
+      sidecarSize: null,
+      sidecarMtimeMs: null,
+      complete: (error as NodeJS.ErrnoException).code === "ENOENT",
+    };
   }
 }
 
@@ -98,18 +111,23 @@ function sameFileDescriptionIdentity(left: FileDescriptionIdentity, right: FileD
     && left.sidecarMtimeMs === right.sidecarMtimeMs;
 }
 
-function readHead(pathname: string, size: number): { text: string; read: number } | null {
+interface HeadReadResult {
+  value: { text: string; read: number } | null;
+  complete: boolean;
+}
+
+function readHead(pathname: string, size: number): HeadReadResult {
   try {
     const fd = fs.openSync(pathname, "r");
     try {
       const buf = Buffer.alloc(Math.min(size, HEAD_BYTES));
       const read = fs.readSync(fd, buf, 0, buf.length, 0);
-      return { text: buf.toString("utf8", 0, read), read };
+      return { value: { text: buf.toString("utf8", 0, read), read }, complete: true };
     } finally {
       fs.closeSync(fd);
     }
   } catch {
-    return null;
+    return { value: null, complete: false };
   }
 }
 
@@ -665,18 +683,23 @@ function conversationTextFromLines(lines: string[], wantCodex: boolean): Convers
   return { title, firstPrompt };
 }
 
-function transcriptCwd(pathname: string, st: fs.Stats): string | null {
+interface MetadataReadResult<T> {
+  value: T;
+  complete: boolean;
+}
+
+function transcriptCwd(pathname: string, st: fs.Stats): MetadataReadResult<string | null> {
   const cached = cwdCache.get(pathname);
   if (cached) {
     const sameFile = cached[0] === st.size && cached[1] === st.mtimeMs;
     const unchangedResolvedHead = st.size > cached[0] && (cached[2] !== null || cached[0] >= HEAD_BYTES);
-    if (sameFile || unchangedResolvedHead) return cached[2];
+    if (sameFile || unchangedResolvedHead) return { value: cached[2], complete: true };
   }
   const head = readHead(pathname, st.size);
-  if (!head) return cached?.[2] ?? null;
-  const cwd = cwdFromLines(head.text.split("\n").slice(0, 25));
+  if (!head.complete || !head.value) return { value: cached?.[2] ?? null, complete: false };
+  const cwd = cwdFromLines(head.value.text.split("\n").slice(0, 25));
   cwdCache.set(pathname, [st.size, st.mtimeMs, cwd]);
-  return cwd;
+  return { value: cwd, complete: true };
 }
 
 function projectInfoFromTranscript(pathname: string): { project: string; worktree?: string } | null {
@@ -687,18 +710,18 @@ function projectInfoFromSlug(slug: string): { project: string; worktree?: string
   return persistedProjects().bySlug.get(slug) ?? null;
 }
 
-function scanJsonlTitle(pathname: string, st: fs.Stats, wantCodex: boolean): string | null {
+function scanJsonlTitle(pathname: string, st: fs.Stats, wantCodex: boolean): MetadataReadResult<string | null> {
   const cached = titleCache.get(pathname);
   if (cached) {
     const sameFile = cached[0] === st.size && cached[1] === st.mtimeMs;
     const unchangedResolvedHead = st.size > cached[0] && (cached[2] !== null || cached[0] >= HEAD_BYTES);
-    if (sameFile || unchangedResolvedHead) return cached[2];
+    if (sameFile || unchangedResolvedHead) return { value: cached[2], complete: true };
   }
   const head = readHead(pathname, st.size);
-  if (!head) return cached?.[2] ?? null;
-  const title = titleFromLines(head.text.split("\n").slice(0, 151), wantCodex);
+  if (!head.complete || !head.value) return { value: cached?.[2] ?? null, complete: false };
+  const title = titleFromLines(head.value.text.split("\n").slice(0, 151), wantCodex);
   titleCache.set(pathname, [st.size, st.mtimeMs, title]);
-  return title;
+  return { value: title, complete: true };
 }
 
 /** Title and first-prompt hydration owned entirely by list/search requests. */
@@ -708,17 +731,17 @@ export function searchTextForTranscript(pathname: string, size: number, engine: 
   return conversationTextFromLines(head.text.split("\n").slice(0, 151), engine === "codex");
 }
 
-export function describe(
+export function describeFile(
   rootName: RootKey,
   root: string,
   pathname: string,
   st: fs.Stats,
   stateKey = projectResolutionStateKey(),
   identity = fileDescriptionIdentity(rootName, pathname, st),
-): FileDescription {
+): FileDescriptionResult {
   const cached = metaCache.get(pathname);
-  if (cached?.stateKey === stateKey && sameFileDescriptionIdentity(cached.identity, identity)) {
-    return cached.description;
+  if (identity.complete && cached?.stateKey === stateKey && sameFileDescriptionIdentity(cached.identity, identity)) {
+    return { description: cached.description, complete: true };
   }
   const rel = path.relative(root, pathname);
   const fn = path.basename(pathname);
@@ -729,10 +752,13 @@ export function describe(
   let engine: Engine = "claude";
   let kind = "";
   let fmt: Fmt = "plain";
+  let complete = identity.complete;
   if (rootName === "codex-sessions") {
-    cwd = transcriptCwd(pathname, st) ?? undefined;
+    const cwdRead = transcriptCwd(pathname, st);
+    complete &&= cwdRead.complete;
+    cwd = cwdRead.value ?? undefined;
     const cachedProject = codexProjectCache.get(pathname);
-    const cachedProjectMatches = cachedProject?.stateKey === stateKey
+    const cachedProjectMatches = cwdRead.complete && cachedProject?.stateKey === stateKey
       && (
         (cachedProject.size === st.size && cachedProject.mtimeMs === st.mtimeMs)
         || st.size > cachedProject.size
@@ -750,7 +776,7 @@ export function describe(
         project = info?.project ?? "";
         worktree = info?.worktree;
       }
-      if (project) codexProjectCache.set(pathname, {
+      if (project && cwdRead.complete) codexProjectCache.set(pathname, {
         size: st.size,
         mtimeMs: st.mtimeMs,
         stateKey,
@@ -762,7 +788,9 @@ export function describe(
     engine = "codex";
     kind = "session";
     fmt = "codex";
-    title = scanJsonlTitle(pathname, st, true) ?? "Codex session";
+    const titleRead = scanJsonlTitle(pathname, st, true);
+    complete &&= titleRead.complete;
+    title = titleRead.value ?? "Codex session";
   } else if (rootName === "claude-projects") {
     const slug = rel.split(path.sep)[0] ?? "";
     const worktreeInfo = worktreeFromSlug(slug);
@@ -771,7 +799,9 @@ export function describe(
     /* The slug alone cannot tell a sibling worktree checkout from a real
        standalone project — only the cwd's git metadata can. When it proves a
        worktree, the session regroups under its main repo's project name. */
-    cwd = transcriptCwd(pathname, st) ?? undefined;
+    const cwdRead = transcriptCwd(pathname, st);
+    complete &&= cwdRead.complete;
+    cwd = cwdRead.value ?? undefined;
     const info = cwd ? projectInfoFromCwd(cwd) : projectInfoFromTranscript(pathname);
     const persistedInfo = projectInfoFromTranscript(pathname);
     if (info && (worktreeInfo || info.worktree || persistedInfo)) {
@@ -781,14 +811,20 @@ export function describe(
     fmt = "claude";
     if (fn.startsWith("agent-")) {
       kind = "subagent";
-      const meta = readJson(pathname.slice(0, -".jsonl".length) + ".meta.json") ?? {};
+      const sidecar = identity.sidecarSize === null
+        ? { value: null, complete: identity.complete }
+        : readJsonResult(pathname.slice(0, -".jsonl".length) + ".meta.json");
+      complete &&= sidecar.complete;
+      const meta = sidecar.value ?? {};
       title =
         stringValue(meta.description) ??
         stringValue(meta.name) ??
         "Subagent " + fn.slice("agent-".length).split(".")[0];
     } else {
       kind = "session";
-      title = scanJsonlTitle(pathname, st, false) ?? "Claude session";
+      const titleRead = scanJsonlTitle(pathname, st, false);
+      complete &&= titleRead.complete;
+      title = titleRead.value ?? "Claude session";
     }
   } else if (rootName === "claude-tasks") {
     const slug = rel.split(path.sep)[0] ?? "";
@@ -809,6 +845,17 @@ export function describe(
     kind,
     fmt,
   };
-  metaCache.set(pathname, { identity, stateKey, description: meta });
-  return meta;
+  if (complete) metaCache.set(pathname, { identity, stateKey, description: meta });
+  return { description: meta, complete };
+}
+
+export function describe(
+  rootName: RootKey,
+  root: string,
+  pathname: string,
+  st: fs.Stats,
+  stateKey = projectResolutionStateKey(),
+  identity = fileDescriptionIdentity(rootName, pathname, st),
+): FileDescription {
+  return describeFile(rootName, root, pathname, st, stateKey, identity).description;
 }
