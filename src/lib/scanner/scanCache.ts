@@ -21,6 +21,7 @@ type FileScanCacheSlot = {
   requestedGeneration: number;
   forcedRevision?: number;
   forcedGeneration?: number;
+  freshObservationGeneration?: number;
   refreshedAt: number;
   refresh?: FileScanRefresh;
   pinnedSnapshots?: Map<string, PinnedFileScanSnapshot>;
@@ -179,20 +180,37 @@ function normalizeFileScanCacheSlot(value: unknown): FileScanCacheSlot {
 }
 
 function beginFileScanRefresh(slot: FileScanCacheSlot, generation: number): FileScanRefresh {
-  const promise = listFilesWithProjectCatalog(undefined, { persist: false, persistIndex: true }).then((snapshot) => {
+  const fresh = slot.freshObservationGeneration !== undefined
+    && generation >= slot.freshObservationGeneration;
+  const promise = listFilesWithProjectCatalog(undefined, {
+    persist: false,
+    persistIndex: true,
+    ...(fresh ? { fresh: true } : {}),
+  }).then((snapshot) => {
     if (!snapshot.complete) throw new Error("filesystem scan incomplete");
     writePersistedFileScanSnapshot(snapshot);
     slot.snapshot = snapshot;
     slot.snapshotGeneration = Math.max(slot.snapshotGeneration, generation);
     slot.refreshedAt = Date.now();
+    if (fresh && slot.freshObservationGeneration !== undefined
+      && generation >= slot.freshObservationGeneration) {
+      slot.freshObservationGeneration = undefined;
+    }
     return snapshot;
   });
   return installFileScanRefresh(slot, generation, promise);
 }
 
 function beginPinnedFileScanRefresh(slot: FileScanCacheSlot, generation: number, pinnedPath: string): FileScanRefresh {
+  const fresh = slot.freshObservationGeneration !== undefined
+    && generation >= slot.freshObservationGeneration;
   const promise = (async () => {
-    const pinnedSnapshot = await listFilesWithProjectCatalog(undefined, { persist: false, persistIndex: true, pin: pinnedPath });
+    const pinnedSnapshot = await listFilesWithProjectCatalog(undefined, {
+      persist: false,
+      persistIndex: true,
+      pin: pinnedPath,
+      ...(fresh ? { fresh: true } : {}),
+    });
     if (!pinnedSnapshot.complete) throw new Error("filesystem scan incomplete");
     const pinOverlayPaths = pinnedSnapshot.pinOverlayPaths ?? [];
     const overlayPathSet = new Set(pinOverlayPaths);
@@ -222,6 +240,10 @@ function beginPinnedFileScanRefresh(slot: FileScanCacheSlot, generation: number,
     slot.snapshot = globalSnapshot;
     slot.snapshotGeneration = Math.max(slot.snapshotGeneration, generation);
     slot.refreshedAt = Date.now();
+    if (fresh && slot.freshObservationGeneration !== undefined
+      && generation >= slot.freshObservationGeneration) {
+      slot.freshObservationGeneration = undefined;
+    }
     return globalSnapshot;
   })();
   return installFileScanRefresh(slot, generation, promise);
@@ -420,6 +442,10 @@ export async function currentFileScan(
   if (fresh) {
     const slot = globalFileScanSlot();
     const targetGeneration = nextGeneration(slot);
+    slot.freshObservationGeneration = Math.max(
+      slot.freshObservationGeneration ?? targetGeneration,
+      targetGeneration,
+    );
     await refreshThroughGeneration(slot, targetGeneration);
     return completedScan(slot, undefined, targetGeneration);
   }
