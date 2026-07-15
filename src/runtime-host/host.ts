@@ -126,7 +126,7 @@ export class RuntimeHost {
           : appended;
       } else if (request.method === "command") {
         result = this.journal.executeOperation(request.params?.command as RuntimeOperationCommand);
-        await this.recoverConsumersBestEffort();
+        void this.recoverConsumersBestEffort();
       } else if (request.method === "operation-status") {
         const currentRetryLeaf = request.params?.currentRetryLeaf;
         if (currentRetryLeaf !== undefined && typeof currentRetryLeaf !== "boolean") {
