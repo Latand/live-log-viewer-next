@@ -409,17 +409,20 @@ function addStructuredRestartConversation(
   registry: AgentRegistry,
   directory: string,
   input: {
+    engine?: "codex" | "claude";
     sessionId: string;
     status: "live" | "dead";
     turn: "busy" | "terminal";
     activeTurnRef?: string | null;
+    transcriptRecords?: Record<string, unknown>[];
   },
 ) {
+  const engine = input.engine ?? "codex";
   const artifactPath = path.join(directory, `${input.sessionId}.jsonl`);
-  fs.writeFileSync(artifactPath, "");
+  fs.writeFileSync(artifactPath, (input.transcriptRecords ?? []).map((record) => JSON.stringify(record)).join("\n"));
   const launchProfile = emptyLaunchProfile({ cwd: directory });
   registry.reconcileConversations([{
-    engine: "codex",
+    engine,
     path: artifactPath,
     accountId: null,
     launchProfile,
@@ -432,7 +435,7 @@ function addStructuredRestartConversation(
   }]);
   const conversation = registry.conversationForPath(artifactPath)!;
   registry.upsert({
-    key: { engine: "codex", sessionId: input.sessionId },
+    key: { engine, sessionId: input.sessionId },
     artifactPath,
     cwd: directory,
     accountId: null,
@@ -440,7 +443,7 @@ function addStructuredRestartConversation(
     status: input.status,
     host: null,
     structuredHost: {
-      kind: "codex-app-server",
+      kind: engine === "codex" ? "codex-app-server" : "claude-broker",
       endpoint: "stdio:retained",
       process: null,
       eventCursor: 8,
@@ -511,6 +514,73 @@ test("startup adoption boots one live unfinished host across terminal history", 
   fs.rmSync(directory, { recursive: true, force: true });
 });
 
+test("startup adoption reads terminal transcripts before booting production-shaped stale registry rows", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-startup-transcript-gate-"));
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const activeSessionId = "11111111-aaaa-4111-8111-111111111111";
+  addStructuredRestartConversation(registry, directory, {
+    sessionId: activeSessionId,
+    status: "live",
+    turn: "busy",
+    activeTurnRef: "turn-active",
+    transcriptRecords: [{ timestamp: "2026-07-15T10:00:00.000Z", payload: { type: "task_started" } }],
+  });
+  for (const engine of ["codex", "claude"] as const) {
+    for (let index = 0; index < 10; index += 1) {
+      const sessionId = `${engine === "codex" ? "2" : "3"}0000000-0000-4000-8000-${String(index).padStart(12, "0")}`;
+      addStructuredRestartConversation(registry, directory, {
+        engine,
+        sessionId,
+        status: "live",
+        turn: "busy",
+        activeTurnRef: `stale-${engine}-${index}`,
+        transcriptRecords: engine === "codex"
+          ? [{ timestamp: "2026-07-15T10:00:00.000Z", payload: { type: "task_complete" } }]
+          : [{ type: "result", timestamp: "2026-07-15T10:00:00.000Z", subtype: "success" }],
+      });
+    }
+  }
+
+  expect(await startupAdoptionAttempts(registry)).toEqual([`codex:${activeSessionId}`]);
+
+  fs.rmSync(directory, { recursive: true, force: true });
+});
+
+test("an explicit terminal transcript outranks a stale running runtime projection", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-startup-terminal-runtime-"));
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const sessionId = "60000000-0000-4000-8000-000000000000";
+  const { artifactPath, conversation } = addStructuredRestartConversation(registry, directory, {
+    sessionId,
+    status: "live",
+    turn: "busy",
+    activeTurnRef: "stale-running-turn",
+    transcriptRecords: [{ timestamp: "2026-07-15T10:00:00.000Z", payload: { type: "task_complete" } }],
+  });
+  const journal = new RuntimeJournal(path.join(directory, "runtime.sqlite"), { structuredHosts: true });
+  journal.append({
+    scope: { type: "session", id: conversation.id },
+    kind: "session-status",
+    payload: {
+      conversationId: conversation.id,
+      sessionKey: { engine: "codex", sessionId },
+      hostKind: "codex-app-server",
+      host: "hosted",
+      turn: "running",
+      activeTurnId: "stale-running-turn",
+      provenance: "structured",
+      artifactPath,
+      capabilities: { steer: true, structuredAttention: true },
+    },
+  });
+
+  expect(await startupAdoptionAttempts(registry, runtimeJournalClient(journal))).toEqual([]);
+
+  await bindStructuredDeliveryQueue([], { registry, client: null });
+  journal.close();
+  fs.rmSync(directory, { recursive: true, force: true });
+});
+
 test("startup adoption boots a terminal host with a pending delivery", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-startup-pending-delivery-"));
   const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
@@ -563,7 +633,7 @@ test.each(["text", "ephemeral-images"] as const)(
   },
 );
 
-test("startup adoption boots the terminal host targeted by a queued runtime operation", async () => {
+test("startup adoption boots the terminal host targeted by a queued runtime send", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-startup-queued-operation-"));
   const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
   const sessionId = "bbbbbbbb-1111-4111-8111-bbbbbbbbbbbb";
@@ -609,6 +679,61 @@ test("startup adoption boots the terminal host targeted by a queued runtime oper
   journal.close();
   fs.rmSync(directory, { recursive: true, force: true });
 });
+
+test.each(["codex", "claude"] as const)(
+  "startup drains a queued %s terminal kill without adopting its host across repeated restarts",
+  async (engine) => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), `llv-runtime-startup-terminal-kill-${engine}-`));
+    const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+    const sessionId = `${engine === "codex" ? "4" : "5"}0000000-0000-4000-8000-000000000000`;
+    const { artifactPath, conversation } = addStructuredRestartConversation(registry, directory, {
+      engine,
+      sessionId,
+      status: "live",
+      turn: "busy",
+      activeTurnRef: "stale-terminal-turn",
+      transcriptRecords: engine === "codex"
+        ? [{ timestamp: "2026-07-15T10:00:00.000Z", payload: { type: "task_complete" } }]
+        : [{ type: "result", timestamp: "2026-07-15T10:00:00.000Z", subtype: "success" }],
+    });
+    const journal = new RuntimeJournal(path.join(directory, "runtime.sqlite"), { structuredHosts: true });
+    journal.append({
+      scope: { type: "session", id: conversation.id },
+      kind: "session-status",
+      payload: {
+        conversationId: conversation.id,
+        sessionKey: { engine, sessionId },
+        hostKind: engine === "codex" ? "codex-app-server" : "claude-broker",
+        host: "hosted",
+        turn: "idle",
+        provenance: "structured",
+        artifactPath,
+        capabilities: { steer: engine === "codex", structuredAttention: true },
+      },
+    });
+    journal.executeOperation({
+      kind: "kill",
+      operationId: `terminal-kill-${engine}`,
+      idempotencyKey: `terminal-kill-${engine}`,
+      conversationId: conversation.id,
+      sessionKey: { engine, sessionId },
+    });
+    const client = runtimeJournalClient(journal);
+
+    expect(await startupAdoptionAttempts(registry, client)).toEqual([]);
+    expect(journal.operationResult(`terminal-kill-${engine}`)?.receipt.status).toBe("delivered");
+    expect(registry.snapshot().entries[`${engine}:${sessionId}`]).toMatchObject({
+      status: "dead",
+      structuredHost: null,
+      claimOwner: null,
+    });
+    expect(await startupAdoptionAttempts(registry, client)).toEqual([]);
+
+    await bindStructuredDeliveryQueue([], { registry, client: null });
+    journal.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  },
+);
 
 test("terminal retained structured metadata stays dead and projects its finished conversation", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-startup-terminal-retained-"));

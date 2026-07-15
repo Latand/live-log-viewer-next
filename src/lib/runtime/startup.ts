@@ -1,9 +1,13 @@
+import fs from "node:fs";
+
 import { accountManager } from "@/lib/accounts/manager";
 import { claudeSettingsPath } from "@/lib/accounts/claude";
+import { turnStateFromRecords } from "@/lib/accounts/migration/turnState";
 import type { ViewerConversationId } from "@/lib/accounts/migration/contracts";
 import { agentRegistry, type AgentRegistry, type AgentRegistryEntry } from "@/lib/agent/registry";
 import { sessionKeyId } from "@/lib/agent/sessionKey";
 import { VIEWER_SPAWN_CAPABILITY_ENV } from "@/lib/agent/spawnPolicy";
+import { tailRecords } from "@/lib/scanner/activity";
 
 import {
   adoptClaudeRegistryHosts,
@@ -26,13 +30,39 @@ const STRUCTURED_HOST_OPERATION_EFFECT_KINDS = [
   "runtime.steer",
   "runtime.interrupt",
   "runtime.answer",
-  "runtime.kill",
   "runtime.spawn",
 ] as const;
 
 interface StructuredStartupSignals {
   hostedRunningConversationIds: ReadonlySet<string>;
   pendingOperationConversationIds: ReadonlySet<string>;
+}
+
+function refreshTerminalTranscriptState(registry: AgentRegistry): void {
+  const snapshot = registry.snapshot();
+  const observedAt = new Date().toISOString();
+  const observations = [];
+  for (const conversation of Object.values(snapshot.conversations)) {
+    const generation = conversation.generations.at(-1);
+    if (!generation) continue;
+    const entry = snapshot.entries[sessionKeyId({ engine: conversation.engine, sessionId: generation.id })];
+    if (!entry?.structuredHost) continue;
+    let size: number;
+    try { size = fs.statSync(generation.path).size; }
+    catch { continue; }
+    const turn = turnStateFromRecords(tailRecords(generation.path, size), conversation.engine === "codex", true);
+    if (turn.state !== "terminal" || conversation.turn.state === "terminal") continue;
+    observations.push({
+      engine: conversation.engine,
+      path: generation.path,
+      accountId: generation.accountId,
+      launchProfile: generation.launchProfile,
+      turn,
+      expectedTurnObservedAt: conversation.turn.observedAt,
+      observedAt,
+    });
+  }
+  if (observations.length > 0) registry.reconcileConversations(observations);
 }
 
 function canonicalConversationId(registry: AgentRegistry, conversationId: string): string {
@@ -60,6 +90,7 @@ async function structuredStartupSignals(
     .filter((receipt) => receipt.status === "pending"
       || receipt.status === "queued"
       || receipt.status === "delivering")
+    .filter((receipt) => receipt.kind !== "kill")
     .map((receipt) => canonicalConversationId(registry, receipt.conversationId)));
   let afterEventSeq = 0;
   while (true) {
@@ -132,6 +163,7 @@ export async function adoptStructuredHostsAtStartup(
   dependencies: StructuredStartupDependencies = {},
 ): Promise<AdoptedStructuredHost[]> {
   const registry = dependencies.registry ?? agentRegistry();
+  refreshTerminalTranscriptState(registry);
   const client = dependencies.client === undefined ? runtimeHostClient() : dependencies.client;
   const signals = await structuredStartupSignals(registry, client);
   const shouldAdopt = structuredStartupAdoptionFilter(registry, signals);
