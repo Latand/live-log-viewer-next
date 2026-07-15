@@ -13,6 +13,17 @@ function tone(status: ReceiptStatus): BadgeTone {
   return "neutral";
 }
 
+export function humanRuntimeDeliveryError(t: TFunction, reason: string | null | undefined): string {
+  const value = reason?.trim() ?? "";
+  if (value === "dead-host" || value.endsWith(": dead-host")) {
+    return t("runtime.receipt.reason.deadHost");
+  }
+  if (value.includes("idempotency key already belongs to another request")) {
+    return t("runtime.receipt.reason.idempotencyConflict");
+  }
+  return value;
+}
+
 function statusText(t: TFunction, receipt: RuntimeReceipt): string {
   switch (receipt.status) {
     case "queued":
@@ -20,9 +31,9 @@ function statusText(t: TFunction, receipt: RuntimeReceipt): string {
         ? t("runtime.receipt.queuedPos", { position: receipt.queuePosition })
         : t("runtime.receipt.queued");
     case "rejected":
-      return t("runtime.receipt.rejected", { reason: receipt.reason ?? "" });
+      return t("runtime.receipt.rejected", { reason: humanRuntimeDeliveryError(t, receipt.reason) });
     case "failed":
-      return t("runtime.receipt.failed", { reason: receipt.reason ?? "" });
+      return t("runtime.receipt.failed", { reason: humanRuntimeDeliveryError(t, receipt.reason) });
     default:
       return t(`runtime.receipt.${receipt.status}`);
   }
@@ -31,7 +42,7 @@ function statusText(t: TFunction, receipt: RuntimeReceipt): string {
 export interface ReceiptChipProps {
   receipt: RuntimeReceipt;
   actionsDisabled?: boolean;
-  /** Retry reuses the same idempotency key — never a second send. */
+  /** Retry starts a fresh attempt after the terminal receipt. */
   onRetry?: () => void;
   /** Edit-and-resend mints a fresh key. */
   onEdit?: () => void;
@@ -39,9 +50,8 @@ export interface ReceiptChipProps {
 
 /**
  * Inline command receipt shown on the message it belongs to. Durable and
- * journaled, so it survives a reload. `rejected`/`failed` expose the reason
- * verbatim and are announced politely; both offer Retry (same key) and Edit
- * (new key).
+ * journaled, so it survives a reload. `rejected`/`failed` map known recovery
+ * reasons to human copy and are announced politely; both offer Retry and Edit.
  */
 export function ReceiptChip({ receipt, actionsDisabled = false, onRetry, onEdit }: ReceiptChipProps) {
   const { t } = useLocale();

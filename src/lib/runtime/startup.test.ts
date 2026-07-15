@@ -159,6 +159,38 @@ function structuredRestartFixture(
   return { artifactPath, conversation, registry, sessionId };
 }
 
+function projectHostedRestart(
+  journal: RuntimeJournal,
+  engine: "codex" | "claude",
+  conversationId: string,
+  sessionId: string,
+  directory: string,
+  artifactPath: string,
+): void {
+  journal.append({
+    scope: { type: "session", id: conversationId },
+    kind: "session-status",
+    producer: {
+      kind: engine === "codex" ? "codex-app-server" : "claude-broker",
+      eventKey: `recovered-${engine}-restart`,
+    },
+    payload: {
+      conversationId,
+      sessionKey: { engine, sessionId },
+      hostKind: engine === "codex" ? "codex-app-server" : "claude-broker",
+      host: "hosted",
+      turn: "idle",
+      provenance: "structured",
+      accountId: null,
+      parentConversationId: null,
+      cwd: directory,
+      artifactPath,
+      capabilities: { steer: engine === "codex", structuredAttention: true },
+      activeTurnId: null,
+    },
+  });
+}
+
 async function waitFor(predicate: () => boolean): Promise<void> {
   for (let attempt = 0; attempt < 100; attempt += 1) {
     if (predicate()) return;
@@ -167,7 +199,7 @@ async function waitFor(predicate: () => boolean): Promise<void> {
   throw new Error("startup delivery did not settle");
 }
 
-test.each(["codex", "claude"] as const)("failed %s restart adoption projects dead structured ownership and fences legacy delivery", async (engine) => {
+test.each(["codex", "claude"] as const)("failed %s restart adoption recovers structured ownership before delivery", async (engine) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), `llv-runtime-startup-dead-${engine}-`));
   const { artifactPath, conversation, registry, sessionId } = structuredRestartFixture(directory, engine);
   const journal = new RuntimeJournal(path.join(directory, "runtime.sqlite"), { structuredHosts: true });
@@ -188,6 +220,7 @@ test.each(["codex", "claude"] as const)("failed %s restart adoption projects dea
     artifactPath,
   }]);
   let legacyCalls = 0;
+  let recoveryCalls = 0;
   const delivery = await enqueueStructuredMessage({
     path: artifactPath,
     text: "must stay structured",
@@ -197,16 +230,22 @@ test.each(["codex", "claude"] as const)("failed %s restart adoption projects dea
     enabled: () => true,
     client: () => client,
     registry: () => registry,
+    recover: async () => {
+      recoveryCalls += 1;
+      projectHostedRestart(journal, engine, conversation.id, sessionId, directory, artifactPath);
+      return { target: null, path: artifactPath, conversationId: conversation.id, spawned: true };
+    },
   });
   if (delivery === null) legacyCalls += 1;
   expect(delivery).toMatchObject({
-    ok: false,
+    ok: true,
     structured: true,
-    outcome: "failed",
-    error: "dead-host",
-    status: 409,
-    receipt: { status: "rejected", reason: "dead-host" },
+    target: null,
+    spawned: true,
+    outcome: "queued",
+    receipt: { status: "queued" },
   });
+  expect(recoveryCalls).toBe(1);
   expect(legacyCalls).toBe(0);
 
   await bindStructuredDeliveryQueue([], { registry, client: null });
@@ -214,7 +253,7 @@ test.each(["codex", "claude"] as const)("failed %s restart adoption projects dea
   fs.rmSync(directory, { recursive: true, force: true });
 });
 
-test("failed restart adoption replaces a stale hosted projection before delivery", async () => {
+test("failed restart adoption replaces a stale projection and recovers before delivery", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-startup-stale-hosted-"));
   const { artifactPath, conversation, registry, sessionId } = structuredRestartFixture(directory, "codex");
   const journal = new RuntimeJournal(path.join(directory, "runtime.sqlite"), { structuredHosts: true });
@@ -248,19 +287,25 @@ test("failed restart adoption replaces a stale hosted projection before delivery
   }]);
   const delivery = await enqueueStructuredMessage({
     path: artifactPath,
-    text: "reject stale hosted delivery",
+    text: "recover stale hosted delivery",
     clientMessageId: "failed-stale-restart-message",
     hasImages: false,
   }, {
     enabled: () => true,
     client: () => client,
     registry: () => registry,
+    recover: async () => {
+      projectHostedRestart(journal, "codex", conversation.id, sessionId, directory, artifactPath);
+      return { target: null, path: artifactPath, conversationId: conversation.id, spawned: true };
+    },
   });
   expect(delivery).toMatchObject({
-    ok: false,
+    ok: true,
     structured: true,
-    error: "dead-host",
-    receipt: { status: "rejected", reason: "dead-host" },
+    target: null,
+    spawned: true,
+    outcome: "queued",
+    receipt: { status: "queued" },
   });
 
   await bindStructuredDeliveryQueue([], { registry, client: null });

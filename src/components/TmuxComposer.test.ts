@@ -44,8 +44,9 @@ test("the composer follows structured-host gate transitions", () => {
   expect(structuredComposerSession(session)).toBeNull();
 });
 
-test("a failed durable receipt retries with its original delivery key", () => {
+test("in-flight retry keeps its delivery key while an interrupted terminal attempt uses a fresh key", () => {
   expect(deliveryAttemptKey("fresh-key", "held-key")).toBe("held-key");
+  expect(deliveryAttemptKey("after-interrupt", "before-interrupt", true)).toBe("after-interrupt");
   expect(deliveryAttemptKey("fresh-key")).toBe("fresh-key");
 });
 

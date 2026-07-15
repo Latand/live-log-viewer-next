@@ -20,7 +20,7 @@ export interface RuntimeHostClient {
   operation(event: RuntimeEventInput): Promise<unknown>;
   command(command: RuntimeOperationCommand): Promise<RuntimeOperationResult>;
   operationStatus(operationId: string): Promise<RuntimeOperationResult | null>;
-  retryOperation(operationId: string): Promise<RuntimeOperationResult>;
+  retryOperation(operationId: string, nextIdempotencyKey?: string): Promise<RuntimeOperationResult>;
   producerCursor(producerKind: string, eventKeyPrefix: string): Promise<number>;
   effectBatch(kinds?: readonly string[], afterEventSeq?: number): Promise<RuntimePendingEffect[]>;
   transitionOperation(
@@ -46,7 +46,12 @@ export class UnixRuntimeHostClient implements RuntimeHostClient {
   operation(event: RuntimeEventInput): Promise<unknown> { return this.call("operation", { event }); }
   command(command: RuntimeOperationCommand): Promise<RuntimeOperationResult> { return this.call("command", { command }) as Promise<RuntimeOperationResult>; }
   operationStatus(operationId: string): Promise<RuntimeOperationResult | null> { return this.call("operation-status", { operationId }) as Promise<RuntimeOperationResult | null>; }
-  retryOperation(operationId: string): Promise<RuntimeOperationResult> { return this.call("operation-retry", { operationId }) as Promise<RuntimeOperationResult>; }
+  retryOperation(operationId: string, nextIdempotencyKey?: string): Promise<RuntimeOperationResult> {
+    return this.call("operation-retry", {
+      operationId,
+      ...(nextIdempotencyKey !== undefined ? { nextIdempotencyKey } : {}),
+    }) as Promise<RuntimeOperationResult>;
+  }
   producerCursor(producerKind: string, eventKeyPrefix: string): Promise<number> { return this.call("producer-cursor", { producerKind, eventKeyPrefix }) as Promise<number>; }
   effectBatch(kinds?: readonly string[], afterEventSeq = 0): Promise<RuntimePendingEffect[]> {
     const params = {

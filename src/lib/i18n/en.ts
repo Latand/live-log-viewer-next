@@ -1385,6 +1385,8 @@ export const en = {
   "runtime.receipt.answered": "answered",
   "runtime.receipt.rejected": "rejected: {reason}",
   "runtime.receipt.failed": "failed: {reason}",
+  "runtime.receipt.reason.deadHost": "The agent stopped. Retry to restart it and send this message.",
+  "runtime.receipt.reason.idempotencyConflict": "This send attempt expired. Retry to send it again safely.",
   "runtime.receipt.uncertain": "uncertain — recovering",
   "runtime.receipt.retry": "Retry",
   "runtime.receipt.edit": "Edit & resend",

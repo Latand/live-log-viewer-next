@@ -127,7 +127,14 @@ export class RuntimeHost {
         result = this.journal.operationResult(String(request.params?.operationId ?? ""));
       } else if (request.method === "operation-retry") {
         if (!this.structuredHosts) throw new Error("structured hosts are disabled");
-        result = this.journal.retryOperation(String(request.params?.operationId ?? ""));
+        const nextIdempotencyKey = request.params?.nextIdempotencyKey;
+        if (nextIdempotencyKey !== undefined && typeof nextIdempotencyKey !== "string") {
+          throw new Error("retry idempotency key is invalid");
+        }
+        result = this.journal.retryOperation(
+          String(request.params?.operationId ?? ""),
+          nextIdempotencyKey,
+        );
       } else if (request.method === "effect-batch") {
         if (!this.structuredHosts) throw new Error("structured hosts are disabled");
         const kinds = request.params?.kinds;

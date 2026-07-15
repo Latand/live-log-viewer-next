@@ -321,6 +321,73 @@ test("a terminal structured send retries from its full journaled request", () =>
   journal.close();
 });
 
+test("terminal delivery retry on a replacement host mints one fresh operation", () => {
+  const dir = sandbox("fresh-terminal-retry");
+  const journal = new RuntimeJournal(path.join(dir, "events.sqlite"), { structuredHosts: true });
+  const projectHost = (sessionId: string, host: "hosted" | "dead") => journal.append({
+    scope: runtimeScope("session", "conv-fresh-retry"),
+    kind: "session-status",
+    payload: {
+      conversationId: "conv-fresh-retry",
+      sessionKey: { engine: "codex", sessionId },
+      hostKind: "codex-app-server",
+      host,
+      turn: host === "hosted" ? "idle" : "unknown",
+      provenance: "structured",
+      capabilities: { steer: true, structuredAttention: true },
+    },
+  });
+  projectHost("thread-before", "hosted");
+  const text = "preserve the complete message across replacement";
+  journal.executeOperation({
+    kind: "send",
+    operationId: "op-before-replacement",
+    idempotencyKey: "key-before-replacement",
+    conversationId: "conv-fresh-retry",
+    text,
+    policy: "queue",
+  });
+  journal.transitionOperation("op-before-replacement", "delivering");
+  journal.transitionOperation("op-before-replacement", "failed", { reason: "dead-host" });
+  projectHost("thread-before", "dead");
+  projectHost("thread-after", "hosted");
+
+  const retried = journal.retryOperation("op-before-replacement", "key-after-replacement");
+  const replayed = journal.retryOperation("op-before-replacement", "key-after-replacement");
+  const replayedAfterAnotherClick = journal.retryOperation("op-before-replacement", "key-after-reload");
+
+  expect(retried.operationId).not.toBe("op-before-replacement");
+  expect(retried.receipt).toMatchObject({
+    idempotencyKey: "key-after-replacement",
+    status: "queued",
+  });
+  expect(replayed).toMatchObject({
+    operationId: retried.operationId,
+    replayed: true,
+  });
+  expect(replayedAfterAnotherClick).toMatchObject({
+    operationId: retried.operationId,
+    replayed: true,
+    receipt: { idempotencyKey: "key-after-replacement" },
+  });
+  expect(journal.operationResult("op-before-replacement")?.receipt).toMatchObject({
+    idempotencyKey: "key-before-replacement",
+    status: "failed",
+  });
+  expect(journal.effectBatch()).toEqual([
+    expect.objectContaining({
+      id: `effect:${retried.operationId}`,
+      kind: "runtime.send",
+      payload: expect.objectContaining({
+        operationId: retried.operationId,
+        idempotencyKey: "key-after-replacement",
+        text,
+      }),
+    }),
+  ]);
+  journal.close();
+});
+
 test("filtered effect batches skip a full page of unrelated pending work", () => {
   const dir = sandbox("filtered-effect-batch");
   const journal = new RuntimeJournal(path.join(dir, "events.sqlite"), { structuredHosts: true });

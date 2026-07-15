@@ -294,19 +294,33 @@ test("direct runtime send and steer stay held while their conversation migrates"
   fs.rmSync(directory, { recursive: true, force: true });
 });
 
-test("runtime retry requeues the durable operation and kicks delivery", async () => {
-  const retried: string[] = [];
+test("runtime retry recovers ownership and starts a fresh durable operation", async () => {
+  const retried: Array<[string, string | undefined]> = [];
+  const recoveries: unknown[] = [];
   let kicks = 0;
   const client = {
-    retryOperation: async (operationId: string) => {
-      retried.push(operationId);
-      return {
+    operationStatus: async (operationId: string) => ({
+      operationId,
+      replayed: false,
+      receipt: {
         operationId,
+        idempotencyKey: "send-one",
+        conversationId: "conversation_retry",
+        kind: "send" as const,
+        status: "failed" as const,
+        at: "2026-07-10T00:00:00.000Z",
+        revision: 3,
+      },
+    }),
+    retryOperation: async (operationId: string, nextIdempotencyKey?: string) => {
+      retried.push([operationId, nextIdempotencyKey]);
+      return {
+        operationId: "op-two",
         replayed: false,
         receipt: {
-          operationId,
-          idempotencyKey: "send-one",
-          conversationId: "conv-one",
+          operationId: "op-two",
+          idempotencyKey: nextIdempotencyKey!,
+          conversationId: "conversation_retry",
           kind: "send" as const,
           status: "queued" as const,
           at: "2026-07-10T00:00:00.000Z",
@@ -317,17 +331,107 @@ test("runtime retry requeues the durable operation and kicks delivery", async ()
   } as unknown as RuntimeHostClient;
   const retryRequest = new NextRequest("http://127.0.0.1/api/runtime/operations/op-one", {
     method: "POST",
-    headers: { host: "127.0.0.1" },
+    headers: { host: "127.0.0.1", "content-type": "application/json" },
+    body: JSON.stringify({ idempotencyKey: "send-two" }),
   });
 
   const response = await handleRuntimeRetry(retryRequest, "op-one", {
     enabled: () => true,
     client: () => client,
     kick: () => { kicks += 1; },
+    recover: async (input) => {
+      recoveries.push(input);
+      return {
+        target: null,
+        path: "/retry.jsonl",
+        conversationId: "conversation_retry",
+        spawned: true,
+      };
+    },
   });
 
   expect(response.status).toBe(202);
-  expect(await response.json()).toMatchObject({ operationId: "op-one", receipt: { status: "queued" } });
-  expect(retried).toEqual(["op-one"]);
+  expect(await response.json()).toMatchObject({ operationId: "op-two", receipt: { idempotencyKey: "send-two", status: "queued" } });
+  expect(recoveries).toEqual([{ path: "", conversationId: "conversation_retry" }]);
+  expect(retried).toEqual([["op-one", "send-two"]]);
   expect(kicks).toBe(1);
+
+  const conflict = await handleRuntimeRetry(new NextRequest("http://127.0.0.1/api/runtime/operations/op-one", {
+    method: "POST",
+    headers: { host: "127.0.0.1" },
+  }), "op-one", {
+    enabled: () => true,
+    client: () => ({
+      retryOperation: async () => {
+        throw new RuntimeHostUnavailableError(
+          "idempotency key already belongs to another request",
+          "idempotency-conflict",
+        );
+      },
+    }) as unknown as RuntimeHostClient,
+    kick: () => { throw new Error("conflicted retry kicked delivery"); },
+  });
+  expect(conflict.status).toBe(409);
+});
+
+test("runtime retry rejects malformed JSON before retrying an operation", async () => {
+  let retries = 0;
+  const response = await handleRuntimeRetry(new NextRequest("http://127.0.0.1/api/runtime/operations/op-one", {
+    method: "POST",
+    headers: { host: "127.0.0.1", "content-type": "application/json" },
+    body: "{",
+  }), "op-one", {
+    enabled: () => true,
+    client: () => ({
+      retryOperation: async () => {
+        retries += 1;
+        throw new Error("malformed retry reached the runtime host");
+      },
+    }) as unknown as RuntimeHostClient,
+    kick: () => {},
+  });
+
+  expect(response.status).toBe(400);
+  expect(await response.json()).toEqual({ error: "invalid JSON" });
+  expect(retries).toBe(0);
+});
+
+test("runtime retry leaves an in-flight operation and its ownership unchanged", async () => {
+  let recoveries = 0;
+  let retries = 0;
+  const response = await handleRuntimeRetry(new NextRequest("http://127.0.0.1/api/runtime/operations/op-live", {
+    method: "POST",
+    headers: { host: "127.0.0.1", "content-type": "application/json" },
+    body: JSON.stringify({ idempotencyKey: "fresh-live-key" }),
+  }), "op-live", {
+    enabled: () => true,
+    client: () => ({
+      operationStatus: async () => ({
+        operationId: "op-live",
+        replayed: false,
+        receipt: {
+          operationId: "op-live",
+          idempotencyKey: "live-key",
+          conversationId: "conversation-live",
+          kind: "send",
+          status: "delivering",
+          at: "2026-07-15T00:00:00.000Z",
+          revision: 2,
+        },
+      }),
+      retryOperation: async () => {
+        retries += 1;
+        throw new Error("in-flight operation reached retry admission");
+      },
+    }) as unknown as RuntimeHostClient,
+    recover: async () => {
+      recoveries += 1;
+      throw new Error("in-flight operation reached host recovery");
+    },
+    kick: () => {},
+  });
+
+  expect(response.status).toBe(409);
+  expect(recoveries).toBe(0);
+  expect(retries).toBe(0);
 });

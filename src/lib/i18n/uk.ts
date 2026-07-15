@@ -1343,6 +1343,8 @@ export const uk: Record<keyof typeof en, Message> = {
   "runtime.receipt.answered": "відповіджено",
   "runtime.receipt.rejected": "відхилено: {reason}",
   "runtime.receipt.failed": "збій: {reason}",
+  "runtime.receipt.reason.deadHost": "Агент зупинився. Повторіть, щоб перезапустити його й надіслати це повідомлення.",
+  "runtime.receipt.reason.idempotencyConflict": "Ця спроба надсилання завершилася. Повторіть, щоб безпечно надіслати повідомлення ще раз.",
   "runtime.receipt.uncertain": "невизначено — відновлення",
   "runtime.receipt.retry": "Повторити",
   "runtime.receipt.edit": "Змінити й надіслати",

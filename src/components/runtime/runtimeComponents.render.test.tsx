@@ -79,16 +79,27 @@ test("delivering receipt is localized in English and Ukrainian", () => {
   expect(translate("uk", "runtime.receipt.delivering")).toBe("доставляється…");
 });
 
-test("failed receipt is announced politely, shows the reason verbatim, and offers retry/edit", () => {
-  const html = renderToStaticMarkup(
+test("failed receipt localizes host recovery and idempotency conflicts with retry actions", () => {
+  const deadHostHtml = renderToStaticMarkup(
     <ReceiptChip receipt={receipt({ status: "failed", reason: "dead-host" })} onRetry={() => {}} onEdit={() => {}} />,
   );
-  expect(html).toContain('role="status"');
-  expect(html).toContain('aria-live="polite"');
-  expect(html).toContain("dead-host");
-  expect(html).toContain(translate("en", "runtime.receipt.retry"));
-  expect(html).toContain("resend"); // "Edit & resend" — the & is HTML-escaped in static markup
-  expect(html.match(/min-h-11/g)?.length).toBe(2);
+  const conflictHtml = renderToStaticMarkup(
+    <ReceiptChip
+      receipt={receipt({ status: "rejected", reason: "idempotency key already belongs to another request" })}
+      onRetry={() => {}}
+    />,
+  );
+  expect(deadHostHtml).toContain('role="status"');
+  expect(deadHostHtml).toContain('aria-live="polite"');
+  expect(deadHostHtml).toContain("The agent stopped. Retry to restart it and send this message.");
+  expect(deadHostHtml).not.toContain("dead-host");
+  expect(conflictHtml).toContain("This send attempt expired. Retry to send it again safely.");
+  expect(conflictHtml).not.toContain("idempotency key already belongs to another request");
+  expect(deadHostHtml).toContain(translate("en", "runtime.receipt.retry"));
+  expect(deadHostHtml).toContain("resend"); // "Edit & resend" — the & is HTML-escaped in static markup
+  expect(deadHostHtml.match(/min-h-11/g)?.length).toBe(2);
+  expect(translate("uk", "runtime.receipt.reason.deadHost")).toBe("Агент зупинився. Повторіть, щоб перезапустити його й надіслати це повідомлення.");
+  expect(translate("uk", "runtime.receipt.reason.idempotencyConflict")).toBe("Ця спроба надсилання завершилася. Повторіть, щоб безпечно надіслати повідомлення ще раз.");
 });
 
 /* ------------------------------ AttentionCard ------------------------------ */

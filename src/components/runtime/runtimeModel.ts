@@ -623,8 +623,8 @@ export function receiptIsTerminal(status: ReceiptStatus): boolean {
 }
 
 /**
- * Mint an idempotency key for a fresh message draft. Same key must be reused on
- * Retry (never re-sends server-side) and replaced on Edit-and-resend.
+ * Mint an idempotency key for a fresh message attempt. Queued and in-flight
+ * delivery retains its key; terminal Retry and Edit-and-resend each mint one.
  */
 export function mintIdempotencyKey(): string {
   try {

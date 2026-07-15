@@ -192,6 +192,72 @@ test("structured message routing only falls through for an explicit legacy owner
   expect(result).toBeNull();
 });
 
+test("dead structured message routing recovers the host before admitting the send", async () => {
+  const { registry, conversation } = registryWithConversation();
+  const deadSnapshot = snapshot(conversation.id);
+  deadSnapshot.sessions[0] = { ...deadSnapshot.sessions[0]!, host: "dead" };
+  let recovered = false;
+  const commands: unknown[] = [];
+  const client = {
+    snapshot: async () => deadSnapshot,
+    command: async (command: {
+      kind: "send";
+      operationId?: string;
+      idempotencyKey: string;
+      conversationId: string;
+      text: string;
+    }) => {
+      commands.push(command);
+      return {
+        operationId: command.operationId ?? "recovered-send-one",
+        replayed: false,
+        receipt: {
+          operationId: command.operationId ?? "recovered-send-one",
+          idempotencyKey: command.idempotencyKey,
+          conversationId: command.conversationId,
+          kind: command.kind,
+          status: recovered ? "queued" as const : "rejected" as const,
+          reason: recovered ? null : "dead-host",
+          queuePosition: recovered ? 1 : null,
+          at: "2026-07-15T00:00:00.000Z",
+          revision: 1,
+        },
+      };
+    },
+  } as unknown as RuntimeHostClient;
+
+  const result = await enqueueStructuredMessage(
+    {
+      path: artifactPath,
+      conversationId: conversation.id,
+      clientMessageId: "recovered-message-one",
+      text: "continue after host loss",
+      hasImages: false,
+    },
+    {
+      enabled: () => true,
+      client: () => client,
+      registry: () => registry,
+      recover: async () => {
+        recovered = true;
+        return { target: null, path: artifactPath, conversationId: conversation.id, spawned: true };
+      },
+      kick: () => {},
+    } as never,
+  );
+
+  expect(recovered).toBe(true);
+  expect(commands).toHaveLength(1);
+  expect(result).toMatchObject({
+    ok: true,
+    structured: true,
+    target: null,
+    spawned: true,
+    outcome: "queued",
+    receipt: { idempotencyKey: "recovered-message-one", status: "queued" },
+  });
+});
+
 test("structured ownership stays fenced while its registry projection is missing", async () => {
   const client = {
     snapshot: async () => snapshot(),

@@ -6,7 +6,7 @@ import path from "node:path";
 import { AgentRegistry, setAgentRegistryForTests, type ConversationObservation, type RegistryFile, type TmuxHostEvidence } from "./agent/registry";
 import { emptyLaunchProfile } from "./accounts/migration/contracts";
 import { drainHeldDeliveries } from "./accounts/migration/coordinator";
-import { cleanupFailedImageDelivery, deliverConversationMessage, killConversation, migrationDeliveryOutcome, reconfigureConversation, type DeliveryFailure } from "./delivery";
+import { cleanupFailedImageDelivery, deliverConversationMessage, killConversation, migrationDeliveryOutcome, reconfigureConversation, resumeConversation, type DeliveryFailure } from "./delivery";
 import type { FileEntry } from "./types";
 import { TmuxDeliveryUncertainError } from "./tmux";
 
@@ -55,6 +55,136 @@ test("migration delivery keeps an internally held result recoverable", () => {
   expect(migrationDeliveryOutcome({ ok: true, target: "pane" })).toBe("delivered");
   expect(migrationDeliveryOutcome(failure)).toBe("failed");
   expect(migrationDeliveryOutcome({ ...failure, actuation: "started" as const })).toBe("delivery-uncertain");
+});
+
+test("structured resume recovery returns a pane-less target and skips legacy host delivery", async () => {
+  const sessionId = "019f4e76-66b4-7f87-94b2-cfa9bf744444";
+  const pathname = path.join(SANDBOX, `${sessionId}.jsonl`);
+  fs.writeFileSync(pathname, "");
+  const registry = new AgentRegistry(path.join(SANDBOX, "structured-resume-registry.json"));
+  let legacyHostCalls = 0;
+  let recoveryCalls = 0;
+
+  const outcome = await resumeConversation(pathname, {
+    pathAllowed: () => true,
+    registry,
+    recover: async () => {
+      recoveryCalls += 1;
+      return {
+        target: null,
+        path: pathname,
+        conversationId: "conversation_structured_resume",
+        spawned: true,
+      };
+    },
+    listFiles: async () => [],
+    deliver: async () => {
+      legacyHostCalls += 1;
+      return { ok: true, outcome: "resumed", target: "%9" };
+    },
+  } as never);
+
+  expect(outcome).toMatchObject({
+    ok: true,
+    target: null,
+    outcome: "resumed",
+    spawned: true,
+    structured: true,
+  });
+  expect(recoveryCalls).toBe(1);
+  expect(legacyHostCalls).toBe(0);
+});
+
+test("dead structured send recovery delivers through the new host with zero tmux commands", async () => {
+  const sessionId = "019f4e76-66b4-7f87-94b2-cfa9bf755555";
+  const pathname = path.join(SANDBOX, `${sessionId}.jsonl`);
+  fs.writeFileSync(pathname, "");
+  const registry = new AgentRegistry(path.join(SANDBOX, "structured-send-registry.json"));
+  setAgentRegistryForTests(registry);
+  const conversation = registry.ensureConversation("codex", pathname, "retained-account");
+  registry.upsert({
+    key: { engine: "codex", sessionId },
+    artifactPath: pathname,
+    cwd: SANDBOX,
+    accountId: "retained-account",
+    launchProfile: emptyLaunchProfile({ cwd: SANDBOX }),
+    status: "dead",
+    host: null,
+    structuredHost: {
+      kind: "codex-app-server",
+      endpoint: "stdio:released",
+      process: null,
+      eventCursor: 3,
+      protocolVersion: "v2",
+      writerClaimEpoch: 2,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 2,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  let recoveryCalls = 0;
+  let tmuxCommands = 0;
+  const enqueued: unknown[] = [];
+
+  const outcome = await deliverConversationMessage({
+    pid: null,
+    path: pathname,
+    conversationId: conversation.id,
+    clientMessageId: "dead-send-one",
+    text: "deliver after recovery",
+    images: [],
+  }, {
+    recover: async () => {
+      recoveryCalls += 1;
+      return { target: null, path: pathname, conversationId: conversation.id, spawned: true };
+    },
+    enqueueStructured: async (request: unknown) => {
+      enqueued.push(request);
+      return {
+        ok: true,
+        structured: true,
+        target: conversation.id,
+        outcome: "queued",
+        operationId: "dead-send-operation-one",
+        receipt: {
+          operationId: "dead-send-operation-one",
+          idempotencyKey: "dead-send-one",
+          conversationId: conversation.id,
+          kind: "send",
+          status: "queued",
+          at: "2026-07-15T00:00:00.000Z",
+          revision: 1,
+        },
+      };
+    },
+    targetForKnownPid: async () => {
+      tmuxCommands += 1;
+      return "%1";
+    },
+    sendText: async () => {
+      tmuxCommands += 1;
+    },
+  } as never);
+
+  expect(recoveryCalls).toBe(1);
+  expect(enqueued).toMatchObject([{
+    path: pathname,
+    conversationId: conversation.id,
+    clientMessageId: "dead-send-one",
+    text: "deliver after recovery",
+  }]);
+  expect(tmuxCommands).toBe(0);
+  expect(outcome).toMatchObject({
+    ok: true,
+    target: null,
+    outcome: "queued",
+    structured: true,
+    spawned: true,
+    receipt: { status: "queued" },
+  });
 });
 
 test("idle reconfiguration survives a transient host miss and resumes after verified termination", async () => {

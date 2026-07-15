@@ -21,7 +21,7 @@ import type { RuntimeReceipt } from "@/components/runtime/runtimeModel";
 
 import { ComposerBar } from "./ComposerBar";
 import { ImagePickerButton } from "./imageAttachments";
-import { ReceiptChip } from "./runtime/ReceiptChip";
+import { humanRuntimeDeliveryError, ReceiptChip } from "./runtime/ReceiptChip";
 import { mintIdempotencyKey, receiptIsTerminal } from "./runtime/runtimeModel";
 
 /**
@@ -53,8 +53,8 @@ const PANE_TTL_MS = 10 * 60_000;
 const RECOVERABLE_BUSY_RETRY_REASONS = new Set(["delivery-auto-retry", "interrupt-auto-retry"]);
 const sentKey = (id: string) => "llvSent:" + id;
 
-export function deliveryAttemptKey(current: string, stored?: string): string {
-  return stored || current;
+export function deliveryAttemptKey(current: string, stored?: string, terminal = false): string {
+  return terminal ? current : stored || current;
 }
 
 export function mergeRuntimeReceipts(
@@ -85,6 +85,7 @@ export function RuntimeComposerReceipts({
     const messageOperation = receipt.kind === "send" || receipt.kind === "steer";
     const failed = receipt.status === "failed";
     const rejected = receipt.status === "rejected";
+    const retryable = failed || rejected;
     // Operation receipts cap text at 240 characters. Durable retry reads the
     // complete journaled request; editing is safe only for an uncapped summary.
     const editable = messageOperation
@@ -116,7 +117,7 @@ export function RuntimeComposerReceipts({
               <ReceiptChip
                 receipt={receipt}
                 actionsDisabled={actionsDisabled}
-                onRetry={failed ? () => onRetry(receipt) : undefined}
+                onRetry={retryable ? () => onRetry(receipt) : undefined}
                 onEdit={editable ? () => onEdit(receipt) : undefined}
               />
             )}
@@ -129,7 +130,7 @@ export function RuntimeComposerReceipts({
         key={receipt.operationId}
         receipt={receipt}
         actionsDisabled={actionsDisabled}
-        onRetry={messageOperation && failed ? () => onRetry(receipt) : undefined}
+        onRetry={messageOperation && retryable ? () => onRetry(receipt) : undefined}
         onEdit={editable ? () => onEdit(receipt) : undefined}
       />
     );
@@ -213,10 +214,10 @@ export function structuredComposerSession(runtimeSession: RuntimeSessionView | n
 }
 
 /**
- * Chat-style composer pinned under the feed. A live pane gets the text typed
- * straight into its tmux pane; a finished resumable conversation boots a new
- * agent window in the current tmux session with the text as the first prompt.
- * Sent messages stay visible as a queue above the input until dismissed.
+ * Chat-style composer pinned under the feed. A live legacy pane receives the
+ * text directly; a finished conversation reopens through its retained
+ * transport and then admits the message. Sent messages stay visible as a queue
+ * above the input until dismissed.
  */
 export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; pollPaused?: boolean }) {
   const { t } = useLocale();
@@ -341,9 +342,9 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
     if (busy || voiceSending || (!payloadText.trim() && !attachments.images.length)) return;
     setBusy(true);
     setStatus(null);
-    /* Idempotency key: the backend can dedupe a retried held/failed delivery
-       against this id so the successor never receives the same prompt twice. */
-    const clientMessageId = deliveryAttemptKey(idempotencyKey.current, retry?.clientMessageId);
+    /* Queued and in-flight retries retain their key. A terminal retry uses a
+       fresh attempt key that the runtime journal deduplicates across repeats. */
+    const clientMessageId = deliveryAttemptKey(idempotencyKey.current, retry?.clientMessageId, Boolean(retry));
     try {
       const json: {
         ok?: boolean;
@@ -392,11 +393,16 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
             json.receipt!,
             ...current.filter((receipt) => receipt.operationId !== json.receipt!.operationId),
           ].slice(0, 8));
-          idempotencyKey.current = mintIdempotencyKey();
         }
+        const terminalStructuredFailure = json.structured && (
+          (json.receipt ? receiptIsTerminal(json.receipt.status) : false)
+          || json.error?.includes("idempotency key already belongs to another request")
+          || json.error === "dead-host"
+        );
+        if (terminalStructuredFailure) idempotencyKey.current = mintIdempotencyKey();
         // A hard failure keeps the draft text (never cleared) so the message is
         // not lost; the error is announced by the composer's live status region.
-        setStatus({ kind: "err", text: json.error ?? t("common.failedSend") });
+        setStatus({ kind: "err", text: humanRuntimeDeliveryError(t, json.error) || t("common.failedSend") });
         return;
       }
       if (json.structured && json.receipt) {
@@ -453,10 +459,14 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
     setBusy(true);
     setStatus(null);
     try {
-      const response = await fetch(`/api/runtime/operations/${encodeURIComponent(receipt.operationId)}`, { method: "POST" });
+      const response = await fetch(`/api/runtime/operations/${encodeURIComponent(receipt.operationId)}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ idempotencyKey: mintIdempotencyKey() }),
+      });
       const body = (await response.json().catch(() => ({}))) as { receipt?: RuntimeReceipt; error?: string };
       if (!response.ok || !body.receipt) {
-        setStatus({ kind: "err", text: body.error ?? t("common.failedSend") });
+        setStatus({ kind: "err", text: humanRuntimeDeliveryError(t, body.error) || t("common.failedSend") });
         return;
       }
       setImmediateRuntimeReceipts((current) => [
@@ -497,9 +507,10 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
             return { ok: response.ok && body.ok === true, error: body.error };
           });
       if (!result.ok) {
-        setStatus({ kind: "err", text: result.error ?? t("composer.failedInterrupt") });
+        setStatus({ kind: "err", text: humanRuntimeDeliveryError(t, result.error) || t("composer.failedInterrupt") });
         return;
       }
+      idempotencyKey.current = mintIdempotencyKey();
       setStatus({ kind: "ok", text: t("composer.escapeSent") });
     } catch {
       setStatus({ kind: "err", text: t("common.serverUnavailable") });

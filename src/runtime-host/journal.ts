@@ -101,6 +101,17 @@ function stableJson(value: unknown): string {
   return JSON.stringify(value);
 }
 
+function terminalRetryOperationId(operationId: string): string {
+  return `retry_${createHash("sha256").update(operationId).digest("hex")}`;
+}
+
+function retryRequestHash(command: RuntimeOperationCommand): string {
+  const value = { ...command } as Record<string, unknown>;
+  delete value.idempotencyKey;
+  delete value.operationId;
+  return createHash("sha256").update(stableJson(value)).digest("hex");
+}
+
 function recordHash(previous: string, row: HashableEventRow | EventRow): string {
   const envelope = { ...row } as Record<string, unknown>;
   delete envelope.prev_hash;
@@ -409,9 +420,46 @@ export class RuntimeJournal {
     }
   }
 
-  retryOperation(operationId: string): RuntimeOperationResult {
+  retryOperation(operationId: string, nextIdempotencyKey?: string): RuntimeOperationResult {
     this.assertHealthy();
     if (!this.structuredHosts) throw new Error("structured hosts are disabled");
+    if (nextIdempotencyKey !== undefined) {
+      const row = this.db.query<{ request_json: string; receipt_json: string }, [string]>(
+        "SELECT request_json, receipt_json FROM operations WHERE operation_id = ?",
+      ).get(operationId);
+      if (!row) throw new Error("runtime operation is unknown");
+      const previous = JSON.parse(row.receipt_json) as RuntimeOperationReceipt;
+      const command = JSON.parse(row.request_json) as RuntimeOperationCommand;
+      if (previous.status !== "failed" && previous.status !== "rejected") {
+        throw new Error("only terminal failed runtime operations can start a new attempt");
+      }
+      if (command.kind !== "send" && command.kind !== "steer") {
+        throw new Error("runtime operation does not support retry");
+      }
+      if (!nextIdempotencyKey || nextIdempotencyKey === command.idempotencyKey) {
+        throw new Error("a fresh idempotency key is required for a new attempt");
+      }
+      const replacementOperationId = terminalRetryOperationId(operationId);
+      const replacement = this.db.query<{ request_json: string; receipt_json: string }, [string]>(
+        "SELECT request_json, receipt_json FROM operations WHERE operation_id = ?",
+      ).get(replacementOperationId);
+      if (replacement) {
+        const replacementCommand = JSON.parse(replacement.request_json) as RuntimeOperationCommand;
+        if (retryRequestHash(replacementCommand) !== retryRequestHash(command)) {
+          throw new RuntimeIdempotencyConflictError("terminal retry operation already belongs to another request");
+        }
+        return {
+          operationId: replacementOperationId,
+          receipt: JSON.parse(replacement.receipt_json) as RuntimeOperationReceipt,
+          replayed: true,
+        };
+      }
+      return this.executeOperation({
+        ...command,
+        operationId: replacementOperationId,
+        idempotencyKey: nextIdempotencyKey,
+      });
+    }
     this.db.exec("BEGIN IMMEDIATE");
     try {
       const row = this.db.query<{ request_json: string; receipt_json: string }, [string]>(
