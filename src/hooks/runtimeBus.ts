@@ -45,6 +45,8 @@ const SSE_RETRY_MS = 60_000;
 const OFFLINE_AFTER_MS = 60_000;
 /** How long the transient "resynced" note stays up. */
 const RESYNCED_NOTE_MS = 6_000;
+/** Publish accumulated store changes at most once per display frame. */
+const SUBSCRIBER_NOTIFY_MS = 16;
 
 export interface RuntimeBusState {
   store: RuntimeStore;
@@ -103,6 +105,7 @@ export function createRuntimeBus(deps: RuntimeBusDeps): RuntimeBus {
 
   const listeners = new Set<() => void>();
   const filesListeners = new Set<(revision: number) => void>();
+  let emitQueued = false;
 
   let source: EventSourceLike | null = null;
   let generation = 0; // bumps on every teardown so stale callbacks no-op
@@ -121,7 +124,12 @@ export function createRuntimeBus(deps: RuntimeBusDeps): RuntimeBus {
   let fallbackAppliedSerial = 0;
 
   function emit(): void {
-    for (const listener of listeners) listener();
+    if (emitQueued || listeners.size === 0) return;
+    emitQueued = true;
+    deps.setTimeout(() => {
+      emitQueued = false;
+      for (const listener of listeners) listener();
+    }, SUBSCRIBER_NOTIFY_MS);
   }
 
   function setState(patch: Partial<RuntimeBusState>): void {
@@ -162,11 +170,15 @@ export function createRuntimeBus(deps: RuntimeBusDeps): RuntimeBus {
     }, HEARTBEAT_TIMEOUT_MS);
   }
 
-  function markLive(): void {
+  function markOpen(): void {
+    if (firstFailureAt === null && state.connection !== "live") setState({ connection: "live" });
+    armHeartbeat();
+  }
+
+  function confirmHealthy(): void {
     reconnectAttempts = 0;
     firstFailureAt = null;
-    if (state.connection !== "live") setState({ connection: "live" });
-    armHeartbeat();
+    markOpen();
   }
 
   function noteResynced(): void {
@@ -219,7 +231,7 @@ export function createRuntimeBus(deps: RuntimeBusDeps): RuntimeBus {
 
     es.onopen = () => {
       if (myGen !== generation) return;
-      markLive();
+      markOpen();
     };
     es.onmessage = (ev) => {
       if (myGen !== generation) return;
@@ -233,7 +245,17 @@ export function createRuntimeBus(deps: RuntimeBusDeps): RuntimeBus {
     es.addEventListener("heartbeat", () => {
       if (myGen !== generation) return;
       setState({ lastEventAt: deps.now() });
-      markLive();
+      confirmHealthy();
+    });
+    es.addEventListener("fault", (ev) => {
+      if (myGen !== generation) return;
+      try {
+        const fault = JSON.parse(ev.data) as { code?: unknown };
+        if (fault.code !== "runtime-host-unavailable") return;
+      } catch {
+        return;
+      }
+      onTransportLost();
     });
     es.addEventListener("reset", () => {
       if (myGen !== generation) return;
@@ -253,12 +275,12 @@ export function createRuntimeBus(deps: RuntimeBusDeps): RuntimeBus {
     const result = applyEvent(state.store, env);
     if (result.outcome === "applied") {
       setState({ store: result.store });
-      markLive();
+      confirmHealthy();
       if (result.filesBumped) {
         for (const listener of filesListeners) listener(result.store.filesRevision);
       }
     } else if (result.outcome === "duplicate") {
-      markLive();
+      confirmHealthy();
     } else {
       // Revision gap: the reducer never mutated. Resnapshot to converge.
       void join(true);

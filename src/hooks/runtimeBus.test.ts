@@ -255,11 +255,236 @@ describe("runtimeBus join", () => {
     expect(s?.activeTurnId).toBe("t1");
     expect(h.bus.getState().store.cursor).toBe(101);
   });
+
+  test("a 128-event replay converges synchronously with one subscriber publication", async () => {
+    h.bus.start();
+    await flush();
+    h.sources[0]!.open();
+    await flush();
+    h.clock.advance(16);
+    await flush();
+
+    let notifications = 0;
+    h.bus.subscribe(() => { notifications += 1; });
+    for (let index = 0; index < 128; index += 1) {
+      h.sources[0]!.message({
+        schemaVersion: 1,
+        seq: 101 + index,
+        eventId: `evt_${101 + index}`,
+        scope: { type: "session", id: "conv_a" },
+        revision: 2 + index,
+        kind: "item",
+        payload: { phase: "delta", text: `token-${index}` },
+      });
+      await Promise.resolve();
+    }
+
+    expect(h.bus.getState().store.cursor).toBe(228);
+    expect(h.bus.getState().store.scopeHeads["session:conv_a"]).toBe(129);
+    expect(notifications).toBe(0);
+    h.clock.advance(16);
+    await flush();
+    expect(notifications).toBe(1);
+  });
+
+  test("Codex and Claude bursts keep one warm SSE join with bounded publications", async () => {
+    const initial = snapshot(100);
+    const codex = initial.sessions[0]!;
+    const claude = {
+      ...codex,
+      conversationId: "conv_b",
+      sessionKey: { engine: "claude" as const, sessionId: "s2" },
+      hostKind: "claude-broker" as const,
+    };
+    h.setSnapshot({ ...initial, sessions: [codex, claude] });
+
+    const warmStartedAt = performance.now();
+    h.bus.start();
+    await flush();
+    expect(performance.now() - warmStartedAt).toBeLessThan(250);
+    expect(h.bus.getState().store.sessions.conv_a?.sessionKey.engine).toBe("codex");
+    expect(h.bus.getState().store.sessions.conv_b?.sessionKey.engine).toBe("claude");
+    h.sources[0]!.open();
+    await flush();
+    h.clock.advance(16);
+    await flush();
+
+    let notifications = 0;
+    let filesNotifications = 0;
+    h.bus.subscribe(() => { notifications += 1; });
+    h.bus.subscribeFilesRevision(() => { filesNotifications += 1; });
+    let seq = 100;
+    for (const conversationId of ["conv_a", "conv_b"]) {
+      for (let index = 0; index < 64; index += 1) {
+        seq += 1;
+        h.sources[0]!.message({
+          schemaVersion: 1,
+          seq,
+          eventId: `evt_${seq}`,
+          scope: { type: "session", id: conversationId },
+          revision: 2 + index,
+          kind: "item",
+          payload: { phase: "delta", text: `token-${conversationId}-${index}` },
+        });
+        await Promise.resolve();
+      }
+    }
+    for (const conversationId of ["conv_a", "conv_b"]) {
+      seq += 1;
+      h.sources[0]!.message({
+        ...sessionEvent(seq, 66, "running", `turn-${conversationId}`),
+        scope: { type: "session", id: conversationId },
+        payload: { conversationId, turnId: `turn-${conversationId}` },
+      });
+    }
+    seq += 1;
+    h.sources[0]!.message({
+      schemaVersion: 1,
+      seq,
+      eventId: `evt_${seq}`,
+      scope: { type: "system", id: "files" },
+      kind: "files.revision",
+      payload: { filesRevision: 7 },
+    });
+    const finalEnvelope = {
+      schemaVersion: 1,
+      seq: ++seq,
+      eventId: `evt_${seq}`,
+      scope: { type: "operation", id: "op-one" },
+      revision: 1,
+      kind: "receipt",
+      payload: {
+        operationId: "op-one",
+        idempotencyKey: "key-one",
+        conversationId: "conv_a",
+        kind: "send",
+        status: "delivered",
+        at: "2026-07-15T00:00:00.000Z",
+        revision: 1,
+      },
+    };
+    h.sources[0]!.message(finalEnvelope);
+    h.sources[0]!.message(finalEnvelope);
+
+    expect(h.bus.getState().store).toMatchObject({
+      cursor: seq,
+      filesRevision: 7,
+      sessions: {
+        conv_a: { turn: "running", revision: 66 },
+        conv_b: { turn: "running", revision: 66 },
+      },
+      operations: { "op-one": { status: "delivered" } },
+    });
+    expect(h.fetchCalls()).toBe(1);
+    expect(h.sources).toHaveLength(1);
+    expect(filesNotifications).toBe(1);
+    expect(notifications).toBe(0);
+    h.clock.advance(16);
+    await flush();
+    expect(notifications).toBe(1);
+  });
 });
 
 describe("runtimeBus reconnect", () => {
   let h: Harness;
   beforeEach(() => (h = harness()));
+
+  test("a persistent runtime-host fault preserves backoff and reaches degraded fallback", async () => {
+    h.bus.start();
+    await flush();
+
+    let faultedSources = 0;
+    for (let elapsed = 0; elapsed < 20_000; elapsed += 100) {
+      const current = h.sources[faultedSources];
+      if (current) {
+        current.open();
+        current.named("fault", { code: "runtime-host-unavailable" });
+        current.error();
+        faultedSources += 1;
+      }
+      h.clock.advance(100);
+      await flush();
+    }
+
+    expect(h.fetchCalls()).toBe(7);
+    expect(h.sources).toHaveLength(6);
+    expect(h.bus.getState().connection).toBe("degraded");
+    expect(h.sources.filter((source) => !source.closed)).toHaveLength(0);
+  });
+
+  test("a named fault followed by EventSource error schedules one reconnect", async () => {
+    h.bus.start();
+    await flush();
+    const first = h.sources[0]!;
+    first.open();
+    first.named("fault", { code: "runtime-host-unavailable" });
+    expect(h.bus.getState().connection).toBe("reconnecting");
+    expect(first.closed).toBeTrue();
+    first.error();
+
+    h.clock.advance(500);
+    await flush();
+
+    expect(h.fetchCalls()).toBe(2);
+    expect(h.sources).toHaveLength(2);
+    expect(h.sources.filter((source) => !source.closed)).toHaveLength(1);
+  });
+
+  test("opening a replacement stream leaves its accumulated failure budget intact", async () => {
+    h.bus.start();
+    await flush();
+    h.sources[0]!.open();
+    h.sources[0]!.error();
+    h.clock.advance(500);
+    await flush();
+
+    h.sources[1]!.open();
+    expect(h.bus.getState().connection).toBe("reconnecting");
+    h.sources[1]!.error();
+    h.clock.advance(500);
+    await flush();
+    expect(h.sources).toHaveLength(2);
+
+    h.clock.advance(500);
+    await flush();
+    expect(h.sources).toHaveLength(3);
+  });
+
+  test("a heartbeat on a replacement stream restores the initial retry budget", async () => {
+    h.bus.start();
+    await flush();
+    h.sources[0]!.open();
+    h.sources[0]!.error();
+    h.clock.advance(500);
+    await flush();
+
+    h.sources[1]!.open();
+    h.sources[1]!.named("heartbeat", { publishedSeq: 100 });
+    h.sources[1]!.error();
+    h.clock.advance(500);
+    await flush();
+
+    expect(h.sources).toHaveLength(3);
+    expect(h.bus.getState().connection).toBe("reconnecting");
+  });
+
+  test("a valid runtime envelope restores health and resumes from its cursor", async () => {
+    h.bus.start();
+    await flush();
+    h.sources[0]!.open();
+    h.sources[0]!.error();
+    h.clock.advance(500);
+    await flush();
+
+    h.sources[1]!.open();
+    h.sources[1]!.message(sessionEvent(101, 2, "running", "t1"));
+    h.sources[1]!.error();
+    h.clock.advance(500);
+    await flush();
+
+    expect(h.sources).toHaveLength(3);
+    expect(h.sources[2]!.url).toContain("after=101");
+  });
 
   test("transport blip refreshes deployment state and resumes from the cursor", async () => {
     h.bus.start();
@@ -276,6 +501,8 @@ describe("runtimeBus reconnect", () => {
     expect(h.sources.length).toBe(2);
     expect(h.sources[1]!.url).toContain("after=101");
     h.sources[1]!.open();
+    expect(h.bus.getState().connection).toBe("reconnecting");
+    h.sources[1]!.named("heartbeat", { publishedSeq: 101 });
     expect(h.bus.getState().connection).toBe("live");
   });
 
@@ -471,9 +698,13 @@ describe("runtimeBus stop", () => {
     h.bus.start();
     await flush();
     h.sources[0]!.open();
+    h.sources[0]!.named("fault", { code: "runtime-host-unavailable" });
     h.bus.stop();
+    h.clock.advance(20_000);
+    await flush();
     expect(h.bus.getState().enabled).toBe(false);
     expect(h.bus.getState().connection).toBe("offline");
     expect(h.sources[0]!.closed).toBe(true);
+    expect(h.sources).toHaveLength(1);
   });
 });
