@@ -90,27 +90,30 @@ const globalStore = globalThis as unknown as {
   __llvTranscriptHostDecisions?: Map<string, Promise<Decision>>;
 };
 
-interface HostDependencies {
+export interface TranscriptHostObservationDependencies {
   listFiles: () => Promise<FileEntry[]>;
   panes: (fresh: boolean) => Promise<PaneObservation>;
   ppidMap: () => Map<number, number>;
   agents: (fresh: boolean) => AgentProcess[];
   serverPid: () => Promise<number | null>;
   resumeRecords: () => ReturnType<typeof resumePaneRecords>;
+  identity: (pid: number) => string | null;
+  launchId?: (paneId: string) => Promise<string | null>;
+  conversationIdForPath?: (pathname: string) => string | null;
+  reconcile?: (hosts: TranscriptHost[]) => HostReconciliation | void | Promise<HostReconciliation | void>;
+}
+
+interface HostDependencies extends TranscriptHostObservationDependencies {
   panePid: (paneId: string) => Promise<number | null>;
   paneWindowName?: (paneId: string) => Promise<string | null>;
   alive: (pid: number) => boolean;
   argv: (pid: number) => string[];
   parentPid: (pid: number) => number | null;
-  identity: (pid: number) => string | null;
   spawn: (spec: ResumeSpec, text: string, receipt?: SpawnReceipt) => Promise<SpawnedPane>;
   beginResume?: (entry: FileEntry, spec: ResumeSpec) => { receipt: SpawnReceipt; spec: ResumeSpec } | null;
   remember: (pathname: string, spec: ResumeSpec, pane: SpawnedPane) => Promise<void>;
   deliver: (paneId: string, text: string) => Promise<void>;
   confirmAlive?: (host: TranscriptHost) => void | Promise<void>;
-  launchId?: (paneId: string) => Promise<string | null>;
-  conversationIdForPath?: (pathname: string) => string | null;
-  reconcile?: (hosts: TranscriptHost[]) => HostReconciliation | void | Promise<HostReconciliation | void>;
   serializeDelivery?: (entry: FileEntry, task: () => Promise<HostDeliveryOutcome>) => Promise<HostDeliveryOutcome>;
 }
 
@@ -278,17 +281,8 @@ function failure(error: unknown, status = 500, actuation?: "started"): HostDeliv
   return { ok: false, outcome: "failed", error: error instanceof Error ? error.message : String(error), status: resolvedStatus, ...(actuation ? { actuation } : {}) };
 }
 
-/**
- * Creates the deep transcript-host module. The optional dependencies form a
- * test seam; production callers use the singleton below and only learn the
- * two operational methods exported at the end of this file.
- */
-export function createTranscriptHostResolver(
-  dependencies: HostDependencies,
-  decisions = new Map<string, Promise<Decision>>(),
-): TranscriptHostResolver {
-
-  async function observe(
+export function createTranscriptHostObserver(dependencies: TranscriptHostObservationDependencies) {
+  return async function observe(
     fresh: boolean,
     suppliedEntries?: FileEntry[],
     suppliedPpids?: Map<number, number>,
@@ -356,7 +350,19 @@ export function createTranscriptHostResolver(
       canonicalFor: (pathname: string) => conflictForPath(snapshot, pathname, conversationIdForPath) ? null : canonicalFrom(eligibleHosts, pathname),
     };
     return snapshot;
-  }
+  };
+}
+
+/**
+ * Creates the deep transcript-host module. The optional dependencies form a
+ * test seam; production callers use the singleton below and only learn the
+ * two operational methods exported at the end of this file.
+ */
+export function createTranscriptHostResolver(
+  dependencies: HostDependencies,
+  decisions = new Map<string, Promise<Decision>>(),
+): TranscriptHostResolver {
+  const observe = createTranscriptHostObserver(dependencies);
 
   async function revalidate(host: TranscriptHost, entry: FileEntry): Promise<boolean> {
     if (host.engine !== entry.engine || (await dependencies.serverPid()) !== host.tmuxServerPid) return false;
@@ -639,30 +645,5 @@ const runtimeResolver = createTranscriptHostResolver({
   serializeDelivery: serializeRegistryDelivery,
 }, globalStore.__llvTranscriptHostDecisions ??= new Map());
 
-/* Resource observation intentionally avoids reconciliation, spawn confirmation,
-   and per-pane launch-id reads. The Viewer main runtime owns those writes. */
-const observationResolver = createTranscriptHostResolver({
-  listFiles,
-  panes: panePidMap,
-  ppidMap: () => procBackend.ppidMap(),
-  agents: agentProcesses,
-  serverPid: tmuxServerPid,
-  /* Importing resume records repairs registry state. Observation only reads
-     live process and pane evidence, so a collector child stays read-only. */
-  resumeRecords: async () => null,
-  panePid: panePidOf,
-  paneWindowName: async (paneId) => (await paneInfo(paneId))?.windowName ?? null,
-  alive: pidAlive,
-  argv: readArgv,
-  parentPid: readPpid,
-  identity: procBackend.processIdentity,
-  conversationIdForPath: (pathname) => agentRegistry().conversationForPath(pathname)?.id ?? null,
-  beginResume: beginRegistryResume,
-  spawn: spawnAgentWithPrompt,
-  remember: rememberRegistryResume,
-  deliver: sendText,
-}, new Map());
-
 export const readTranscriptHosts = runtimeResolver.readTranscriptHosts;
-export const readTranscriptHostsObservation = observationResolver.readTranscriptHosts;
 export const deliverToTranscriptHost = runtimeResolver.deliverToTranscriptHost;

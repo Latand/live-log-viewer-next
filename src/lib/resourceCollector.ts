@@ -9,15 +9,15 @@ export type ResourceObservation<T> = Readonly<{
   degradedReason?: ResourceDegradedReason;
 }>;
 
-export interface ResourceCollector<T> {
+export interface ResourceCollector<T, Input = void> {
   latest(): ResourceObservation<T> | null;
   fence(): number;
-  observe(fence: number, timeoutMs: number): Promise<ResourceObservation<T> | null>;
+  observe(fence: number, timeoutMs: number, input?: Input): Promise<ResourceObservation<T> | null>;
 }
 
-export type ResourceCollectorOptions<T> = {
+export type ResourceCollectorOptions<T, Input = void> = {
   collectorId: string;
-  collect(): Promise<T>;
+  collect(input?: Input): Promise<T>;
   now?(): number;
   initial?: ResourceObservation<T> | null;
 };
@@ -42,17 +42,17 @@ function withDegradedReason<T>(
  * independent of collection mechanics: an adapter may gather in-process for
  * rollback or isolate the same work in a worker.
  */
-export function createResourceCollector<T>(options: ResourceCollectorOptions<T>): ResourceCollector<T> {
+export function createResourceCollector<T, Input = void>(options: ResourceCollectorOptions<T, Input>): ResourceCollector<T, Input> {
   const now = options.now ?? Date.now;
   let startedGeneration = options.initial?.generation ?? 0;
   let latest: ResourceObservation<T> | null = options.initial ?? null;
   let active: { generation: number; promise: Promise<ResourceObservation<T>> } | null = null;
 
-  const launch = (): Promise<ResourceObservation<T>> => {
+  const launch = (input?: Input): Promise<ResourceObservation<T>> => {
     const generation = ++startedGeneration;
     const startedAt = now();
     const promise = Promise.resolve()
-      .then(options.collect)
+      .then(() => options.collect(input))
       .then((value) => freeze({
         generation,
         startedAt,
@@ -74,21 +74,21 @@ export function createResourceCollector<T>(options: ResourceCollectorOptions<T>)
     return promise;
   };
 
-  const afterFence = (fence: number): Promise<ResourceObservation<T>> => {
+  const afterFence = (fence: number, input?: Input): Promise<ResourceObservation<T>> => {
     const current = active;
-    if (!current) return launch();
+    if (!current) return launch(input);
     if (current.generation > fence) return current.promise;
     return current.promise.catch(() => undefined).then(() => {
       const next = active;
-      return next && next.generation > fence ? next.promise : launch();
+      return next && next.generation > fence ? next.promise : launch(input);
     });
   };
 
   return {
     latest: () => latest,
     fence: () => startedGeneration,
-    async observe(fence, timeoutMs) {
-      const observation = afterFence(fence);
+    async observe(fence, timeoutMs, input) {
+      const observation = afterFence(fence, input);
       const bounded = Math.max(0, timeoutMs);
       if (bounded === 0) {
         void observation.catch(() => undefined);

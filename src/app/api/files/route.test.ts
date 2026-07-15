@@ -338,7 +338,7 @@ test("a fresh resource snapshot fences a pre-kill refresh before host election",
   scanGates.push(new Promise<void>((resolve) => { releasePostKillRefresh = resolve; }));
 
   let filesFresh: boolean | undefined;
-  let hostEntries: FileEntry[] = [];
+  let hostEntries: Array<{ path: string }> = [];
   let resourceSettled = false;
   const resourceRef = {
     tmuxServerPid: 900,
