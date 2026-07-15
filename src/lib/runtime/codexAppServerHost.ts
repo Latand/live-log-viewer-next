@@ -15,7 +15,12 @@ import type {
   RuntimeEvent,
 } from "./engineHost";
 import { RuntimeReplayGapError } from "./engineHost";
-import { FileRuntimeEventStore, type RuntimeEventStore } from "./eventStore";
+import {
+  FileRuntimeEventStore,
+  reconcileRuntimeEventCursor,
+  type RuntimeEventCursorRecoveryReporter,
+  type RuntimeEventStore,
+} from "./eventStore";
 
 type JsonObject = Record<string, unknown>;
 type PendingRpc = {
@@ -70,6 +75,7 @@ export interface CodexAppServerHostOptions {
   requestTimeoutMs?: number;
   shutdownGraceMs?: number;
   initialEventCursor?: number;
+  onEventCursorRecovery?: RuntimeEventCursorRecoveryReporter;
   spawnProcess?: (command: string, args: string[], options: SpawnOptionsWithoutStdio) => ChildProcessWithoutNullStreams;
   eventStore?: RuntimeEventStore;
   signalProcess?: ProcessSignal;
@@ -112,6 +118,8 @@ const MIN_LATE_THREAD_READ_RESPONSE_TTL_MS = 1_000;
 const MAX_LATE_THREAD_READ_RESPONSES = 32;
 const DEFAULT_SHUTDOWN_GRACE_MS = 1_000;
 const MAX_LINE_BYTES = 4 * 1024 * 1024;
+const MAX_PRE_RESTORE_FRAMES = 256;
+const MAX_PRE_RESTORE_BYTES = 4 * 1024 * 1024;
 const MUTATING_RPC_METHODS = new Set(["thread/start", "thread/resume", "turn/start", "turn/steer", "turn/interrupt"]);
 
 function record(value: unknown): JsonObject | null {
@@ -231,6 +239,7 @@ export class CodexAppServerHost implements EngineHost {
   private readonly eventStore: RuntimeEventStore;
   private readonly effort: string | undefined;
   private readonly signalProcess: ProcessSignal;
+  private readonly onEventCursorRecovery: RuntimeEventCursorRecoveryReporter | undefined;
   private readonly pending = new Map<number, PendingRpc>();
   private readonly lateThreadReadResponses = new Map<number, number>();
   private readonly subscribers = new Set<Subscriber>();
@@ -239,9 +248,12 @@ export class CodexAppServerHost implements EngineHost {
   private readonly pendingDeliveries = new Map<string, PendingDelivery>();
   private readonly attentions = new Map<string, PendingAttention>();
   private readonly stateListeners = new Set<(state: HostState) => void>();
-  private readonly preIdentityEvents: UnsequencedEvent[] = [];
+  private readonly preRestoreEvents: UnsequencedEvent[] = [];
+  private readonly preRestoreMessages: Array<{ message: JsonObject; bytes: number }> = [];
   private nextRpcId = 1;
   private stdoutBuffer = "";
+  private preRestoreBytes = 0;
+  private eventLedgerRestored = false;
   private cursor: number;
   private activeTurnId: string | null = null;
   private protocolVersion: string | null = null;
@@ -269,6 +281,7 @@ export class CodexAppServerHost implements EngineHost {
     this.eventStore = options.eventStore ?? new FileRuntimeEventStore();
     this.effort = options.effort;
     this.signalProcess = options.signalProcess ?? process.kill;
+    this.onEventCursorRecovery = options.onEventCursorRecovery;
     this.cursor = options.initialEventCursor ?? 0;
     this.reapedPromise = new Promise((resolve) => { this.resolveReaped = resolve; });
     child.stdout.on("data", (chunk: Buffer | string) => this.acceptStdout(String(chunk)));
@@ -345,7 +358,8 @@ export class CodexAppServerHost implements EngineHost {
       provisional.rememberConfirmedDeliveries(result);
       provisional.restoreEvents();
       if (threadId) provisional.reconcileThreadHistory(result);
-      provisional.flushPreIdentityEvents();
+      provisional.flushPreRestoreEvents();
+      provisional.flushPreRestoreMessages();
       provisional.reconcileAfterOpen(threadStatus(result), resumedActiveTurnId(result));
       return provisional;
     } catch (error) {
@@ -559,8 +573,13 @@ export class CodexAppServerHost implements EngineHost {
 
   private emit(event: UnsequencedEvent): void {
     if (this.ledgerFailed) return;
-    if (this.identity.threadId === "pending") {
-      this.preIdentityEvents.push(event);
+    if (!this.eventLedgerRestored) {
+      if (this.preRestoreEvents.length + this.preRestoreMessages.length >= MAX_PRE_RESTORE_FRAMES) {
+        this.ledgerFailed = true;
+        this.failWithoutLedger(new Error("Codex app-server pre-restore event buffer exceeded its bounded capacity"));
+        return;
+      }
+      this.preRestoreEvents.push(event);
       return;
     }
     const sequenced = { ...event, seq: ++this.cursor } as RuntimeEvent;
@@ -585,7 +604,12 @@ export class CodexAppServerHost implements EngineHost {
     const currentAttentions = new Map([...this.attentions].filter(([, attention]) => attention.origin === "current"));
     this.attentions.clear();
     this.events.splice(0, this.events.length, ...stored);
-    this.cursor = Math.max(this.cursor, stored.at(-1)?.seq ?? 0);
+    this.cursor = reconcileRuntimeEventCursor(
+      this.identity.threadId,
+      stored.at(-1)?.seq ?? 0,
+      this.cursor,
+      this.onEventCursorRecovery,
+    );
     for (const event of stored) {
       if (event.kind === "turn-started") this.activeTurnId = event.turnId;
       if (event.kind === "turn-ended" && event.turnId === this.activeTurnId) this.activeTurnId = null;
@@ -603,6 +627,7 @@ export class CodexAppServerHost implements EngineHost {
       }
     }
     for (const [id, attention] of currentAttentions) this.attentions.set(id, attention);
+    this.eventLedgerRestored = true;
     return stored.length;
   }
 
@@ -757,8 +782,17 @@ export class CodexAppServerHost implements EngineHost {
     }
   }
 
-  private flushPreIdentityEvents(): void {
-    for (const event of this.preIdentityEvents.splice(0)) this.emit(event);
+  private flushPreRestoreEvents(): void {
+    for (const event of this.preRestoreEvents.splice(0)) this.emit(event);
+  }
+
+  private flushPreRestoreMessages(): void {
+    for (const { message, bytes } of this.preRestoreMessages.splice(0)) {
+      this.preRestoreBytes -= bytes;
+      this.acceptParsedMessage(message);
+      if (this.dead || this.releasing || this.released) break;
+    }
+    this.preRestoreBytes = 0;
   }
 
   private notifyStateListeners(): void {
@@ -863,6 +897,21 @@ export class CodexAppServerHost implements EngineHost {
       this.fail(new Error("Codex app-server emitted malformed JSON-RPC"));
       return;
     }
+    if (typeof message.method === "string" && !this.eventLedgerRestored) {
+      const bytes = Buffer.byteLength(line);
+      if (this.preRestoreEvents.length + this.preRestoreMessages.length >= MAX_PRE_RESTORE_FRAMES
+        || this.preRestoreBytes + bytes > MAX_PRE_RESTORE_BYTES) {
+        this.fail(new Error("Codex app-server pre-restore notification buffer exceeded its bounded capacity"));
+        return;
+      }
+      this.preRestoreMessages.push({ message, bytes });
+      this.preRestoreBytes += bytes;
+      return;
+    }
+    this.acceptParsedMessage(message);
+  }
+
+  private acceptParsedMessage(message: JsonObject): void {
     const id = message.id;
     const method = typeof message.method === "string" ? message.method : null;
     if ((typeof id === "number" || typeof id === "string") && !method) {

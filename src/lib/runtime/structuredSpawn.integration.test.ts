@@ -344,6 +344,122 @@ test("a concurrent structured spawn replay stays pending until durable host setu
     .toEqual([expect.objectContaining({ parentConversationId: parent.id })]);
 });
 
+test("a failed resume before identity staging projects dead ownership so the following send recovers", async () => {
+  const sessionId = crypto.randomUUID();
+  const cwd = path.join(sandbox, `resume-before-identity-${sessionId}`);
+  const artifactPath = path.join(cwd, `${sessionId}.jsonl`);
+  fs.mkdirSync(cwd, { recursive: true });
+  fs.writeFileSync(artifactPath, "");
+  const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const journal = new RuntimeJournal(path.join(cwd, "runtime.sqlite"), { structuredHosts: true });
+  const client = runtimeClient(journal);
+  const launchProfile = emptyLaunchProfile({ cwd, model: "gpt-5.6-luna" });
+  const conversation = registry.ensureConversation("codex", artifactPath, "codex-subscription");
+  const key = { engine: "codex" as const, sessionId };
+  registry.upsert({
+    key,
+    artifactPath,
+    cwd,
+    accountId: "codex-subscription",
+    launchProfile,
+    status: "dead",
+    host: null,
+    structuredHost: {
+      kind: "codex-app-server",
+      endpoint: "stdio:released",
+      process: null,
+      eventCursor: 2_907,
+      protocolVersion: "0.144.1",
+      writerClaimEpoch: 4,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 4,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  const begun = registry.beginSpawnRequest({
+    engine: "codex",
+    cwd,
+    transport: "structured",
+    accountId: "codex-subscription",
+    conversationId: conversation.id,
+    purpose: "resume-successor",
+    expectedArtifactPath: artifactPath,
+    launchProfile,
+  });
+  if (begun.kind !== "created") throw new Error("resume receipt was unavailable");
+
+  await expect(spawnStructuredConversation({
+    engine: "codex",
+    receipt: begun.receipt,
+    spec: { command: "codex", cwd, windowName: "resume", engine: "codex", transcript: artifactPath, launchProfile },
+    account: { engine: "codex", accountId: "codex-subscription", kind: "managed", home: cwd, transcriptRoot: cwd, env: { NODE_ENV: "test" } },
+    prompt: "",
+    registry,
+    client,
+  }, {
+    startHost: async () => { throw new Error("runtime event ledger sequence gap after 2907"); },
+  })).rejects.toThrow("runtime event ledger sequence gap after 2907");
+
+  expect(registry.snapshot().entries[`codex:${sessionId}`]).toMatchObject({
+    status: "dead",
+    claimOwner: null,
+    pendingAction: null,
+    structuredHost: { eventCursor: 2_907, process: null },
+  });
+  expect(journal.snapshot().sessions.find((session) => session.conversationId === conversation.id)).toMatchObject({
+    host: "dead",
+    sessionKey: key,
+    artifactPath,
+  });
+
+  let recoveryCalls = 0;
+  const delivery = await enqueueStructuredMessage({
+    path: artifactPath,
+    conversationId: conversation.id,
+    clientMessageId: "send-after-failed-adoption",
+    text: "continue after failed adoption",
+    hasImages: false,
+  }, {
+    enabled: () => true,
+    client: () => client,
+    registry: () => registry,
+    recover: async () => {
+      recoveryCalls += 1;
+      await client.append({
+        scope: { type: "session", id: conversation.id },
+        kind: "session-status",
+        payload: {
+          conversationId: conversation.id,
+          sessionKey: key,
+          hostKind: "codex-app-server",
+          host: "hosted",
+          turn: "idle",
+          provenance: "structured",
+          accountId: "codex-subscription",
+          cwd,
+          artifactPath,
+          capabilities: { steer: true, structuredAttention: true },
+        },
+      });
+      return { target: null, path: artifactPath, conversationId: conversation.id, spawned: true };
+    },
+    kick: () => {},
+  });
+
+  expect(recoveryCalls).toBe(1);
+  expect(delivery).toMatchObject({
+    ok: true,
+    structured: true,
+    spawned: true,
+    outcome: "queued",
+    receipt: { status: "queued", reason: null },
+  });
+  journal.close();
+});
+
 describe.each(["bind", "publish", "first-message"] as const)("structured spawn %s failure", (barrier) => {
   test("a concurrent replay never observes success", async () => {
     const id = crypto.randomUUID();

@@ -341,6 +341,11 @@ export async function spawnStructuredConversation(
   const deliverFirst = dependencies.deliverFirst ?? defaultDeliverFirst;
   const processIdentity = dependencies.processIdentity ?? (() => ({ pid: process.pid, startIdentity: procBackend.processIdentity(process.pid) }));
   const operationId = input.receipt.launchId;
+  const resumeSessionId = structuredResumeSessionId(input);
+  const resumeKey = resumeSessionId ? sessionKey(input.engine, resumeSessionId) : null;
+  const resumeIdentity = resumeKey && input.spec.transcript
+    ? { key: resumeKey, artifactPath: input.spec.transcript }
+    : null;
   let host: SpawnedStructuredHost | null = null;
   const binding: HostBinding = { stopPersistence: () => {}, unregister: async () => {} };
   let key: SessionKey | null = null;
@@ -401,20 +406,30 @@ export async function spawnStructuredConversation(
       reason: error instanceof Error ? error.message.slice(0, 240) : "structured spawn failed",
     }).catch(() => {});
     await cleanupHost(host, binding);
+    let failedEntry: { accountId: string | null; cwd: string } | null = null;
+    let failedIdentity = resumeIdentity;
     if (key) {
       input.registry.failStructuredSpawn(input.receipt.launchId, error instanceof Error ? error.message : "structured spawn failed");
       const entry = input.registry.snapshot().entries[sessionKeyId(key)];
       if (entry) {
-        await projectDeadStructuredSpawn(
-          input.client,
-          input.receipt,
-          entry,
-          `structured-spawn-failed:${input.receipt.launchId}`,
-          { key, artifactPath: entry.artifactPath },
-        ).catch(() => {});
+        failedEntry = entry;
+        failedIdentity = { key, artifactPath: entry.artifactPath };
+      }
+    } else {
+      input.registry.failSpawn(input.receipt.launchId, "structured spawn failed before host binding");
+      if (resumeIdentity) {
+        failedEntry = input.registry.snapshot().entries[sessionKeyId(resumeIdentity.key)] ?? null;
       }
     }
-    else input.registry.failSpawn(input.receipt.launchId, "structured spawn failed before host binding");
+    if (failedIdentity) {
+      await projectDeadStructuredSpawn(
+        input.client,
+        input.receipt,
+        failedEntry ?? { accountId: input.account.accountId, cwd: input.spec.cwd },
+        `structured-spawn-failed:${input.receipt.launchId}`,
+        failedIdentity,
+      ).catch(() => {});
+    }
     throw error;
   }
 }

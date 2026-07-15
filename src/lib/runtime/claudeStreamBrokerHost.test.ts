@@ -158,6 +158,41 @@ describe("ClaudeStreamBrokerHost", () => {
     await host.release();
   });
 
+  test.each([0, 2])("anchors resumed Claude emission after durable sequence 1 when the registry cursor is %i", async (registryCursor) => {
+    const sessionId = `claude-cursor-${registryCursor}`;
+    const eventStore = new MemoryEventStore();
+    eventStore.append(sessionId, { kind: "session-status", status: "idle", seq: 1 });
+    const ledger = new RecordingDeliveryLedger();
+    const child = new FakeClaude(ledger);
+    const diagnostics: unknown[] = [];
+
+    const host = await ClaudeStreamBrokerHost.adopt(sessionId, {
+      cwd: "/repo",
+      eventStore,
+      deliveryLedger: ledger,
+      initialEventCursor: registryCursor,
+      onEventCursorRecovery: (diagnostic) => diagnostics.push(diagnostic),
+      readAuthStatus: () => ({ loggedIn: true, authMethod: "claude.ai", subscriptionType: "max" }),
+      readTranscript: () => [],
+      spawnProcess: fakeSpawn(child, {}),
+    });
+
+    expect(eventStore.load(sessionId).slice(-2)).toEqual([
+      { kind: "session-status", status: "idle", seq: 1 },
+      { kind: "session-status", status: "idle", seq: 2 },
+    ]);
+    expect(await host.health()).toMatchObject({ eventCursor: 2, status: "idle" });
+    expect(diagnostics).toEqual([expect.objectContaining({
+      kind: "runtime-event-cursor-recovery",
+      sessionId,
+      durableTailSeq: 1,
+      registryCursor,
+      chosenNextSeq: 2,
+      action: "use-durable-tail",
+    })]);
+    await host.release();
+  });
+
   test("persists sends before stdin and fans durable events to late viewers", async () => {
     const ledger = new RecordingDeliveryLedger();
     const child = new FakeClaude(ledger);

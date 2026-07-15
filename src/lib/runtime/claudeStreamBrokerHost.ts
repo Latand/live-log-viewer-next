@@ -13,7 +13,12 @@ import { hardenedRedact } from "@/lib/view/compactText";
 
 import type { DeliveryReceipt, EngineHost, HostState, QueueEntry, RuntimeEvent } from "./engineHost";
 import { RuntimeReplayGapError } from "./engineHost";
-import { FileRuntimeEventStore, type RuntimeEventStore } from "./eventStore";
+import {
+  FileRuntimeEventStore,
+  reconcileRuntimeEventCursor,
+  type RuntimeEventCursorRecoveryReporter,
+  type RuntimeEventStore,
+} from "./eventStore";
 
 type JsonObject = Record<string, unknown>;
 type Subscriber = { afterSeq: number; queue: RuntimeEvent[]; wake: (() => void) | null; closed: boolean };
@@ -173,6 +178,7 @@ export interface ClaudeStreamBrokerHostOptions {
   requestTimeoutMs?: number;
   shutdownGraceMs?: number;
   initialEventCursor?: number;
+  onEventCursorRecovery?: RuntimeEventCursorRecoveryReporter;
   spawnProcess?: (command: string, args: string[], options: SpawnOptionsWithoutStdio) => ChildProcessWithoutNullStreams;
   readAuthStatus?: () => ClaudeAuthStatus | Promise<ClaudeAuthStatus>;
   readTranscript?: (cwd: string, sessionId: string) => ClaudeTranscriptUser[];
@@ -325,6 +331,7 @@ export class ClaudeStreamBrokerHost implements EngineHost {
   private readonly deliveryLedger: ClaudeDeliveryLedger;
   private readonly requestTimeoutMs: number;
   private readonly shutdownGraceMs: number;
+  private readonly onEventCursorRecovery: RuntimeEventCursorRecoveryReporter | undefined;
   private readonly subscribers = new Set<Subscriber>();
   private readonly events: RuntimeEvent[] = [];
   private readonly deliveries: ClaudeDeliveryState[] = [];
@@ -366,6 +373,7 @@ export class ClaudeStreamBrokerHost implements EngineHost {
     this.deliveryLedger = options.deliveryLedger ?? new FileClaudeDeliveryLedger();
     this.requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.shutdownGraceMs = options.shutdownGraceMs ?? DEFAULT_SHUTDOWN_GRACE_MS;
+    this.onEventCursorRecovery = options.onEventCursorRecovery;
     this.cursor = options.initialEventCursor ?? 0;
     this.protocolVersion = auth.version ?? null;
     this.account = { type: auth.authMethod, planType: auth.subscriptionType };
@@ -629,7 +637,12 @@ export class ClaudeStreamBrokerHost implements EngineHost {
   private restore(): void {
     const stored = this.eventStore.load(this.identity.sessionId);
     this.events.push(...stored);
-    this.cursor = Math.max(this.cursor, stored.at(-1)?.seq ?? 0);
+    this.cursor = reconcileRuntimeEventCursor(
+      this.identity.sessionId,
+      stored.at(-1)?.seq ?? 0,
+      this.cursor,
+      this.onEventCursorRecovery,
+    );
     this.deliveries.push(...this.deliveryLedger.load(this.identity.sessionId));
     let restoredTurn: string | null = null;
     for (const event of stored) {

@@ -10,7 +10,7 @@ import { AgentRegistry } from "@/lib/agent/registry";
 import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
 
 import { CodexAppServerHost, redactCodexHostDiagnostic } from "./codexAppServerHost";
-import type { RuntimeEventStore } from "./eventStore";
+import { FileRuntimeEventStore, type RuntimeEventStore } from "./eventStore";
 import type { RuntimeEvent } from "./engineHost";
 import { adoptCodexRegistryHosts, bindCodexHostPersistence, persistCodexHost, startCodexStructuredHost, structuredHostsEnabled } from "./registry";
 
@@ -342,12 +342,18 @@ describe("CodexAppServerHost", () => {
 
   test("rejects a resume response for a different durable thread", async () => {
     const server = new FakeAppServer("server-default", "different-thread");
+    const eventStore = new MemoryEventStore();
+    eventStore.append("requested-thread", { kind: "session-status", status: "idle", seq: 1 });
     await expect(CodexAppServerHost.adopt("requested-thread", {
       cwd: "/repo",
-      eventStore: new MemoryEventStore(),
+      eventStore,
+      initialEventCursor: 1,
       spawnProcess: fakeSpawn(server),
     })).rejects.toThrow("thread/resume returned a different thread id");
     expect(server.signals).toContain("SIGTERM");
+    expect(eventStore.load("requested-thread")).toEqual([
+      { kind: "session-status", status: "idle", seq: 1 },
+    ]);
   });
 
   test("rebuilds replay from resume history when a legacy host has no event ledger", async () => {
@@ -620,6 +626,60 @@ describe("CodexAppServerHost", () => {
     await host.answer(attentionId, { decision: "accept" });
     expect(server.requests.at(-1)).toMatchObject({ id: "live-approval", result: { decision: "accept" } });
     await host.release();
+  });
+
+  test.each([2906, 2908])("anchors pre-restore notifications after durable sequence 2907 when the registry cursor is %i", async (registryCursor) => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-codex-cursor-recovery-"));
+    const threadId = `cursor-recovery-${registryCursor}`;
+    const ledgerPath = path.join(directory, `${encodeURIComponent(threadId)}.jsonl`);
+    const durableEvents = Array.from({ length: 2_907 }, (_, index) => JSON.stringify({
+      kind: "session-status",
+      status: "idle",
+      seq: index + 1,
+    })).join("\n");
+    fs.writeFileSync(ledgerPath, `${durableEvents}\n`, { mode: 0o600 });
+    const eventStore = new FileRuntimeEventStore(directory);
+    const diagnostics: unknown[] = [];
+    const server = new FakeAppServer(threadId, threadId, false, [], { type: "idle" }, {
+      id: "approval-before-restore",
+      method: "item/commandExecution/requestApproval",
+      params: { command: "date" },
+    });
+
+    const host = await CodexAppServerHost.adopt(threadId, {
+      cwd: "/repo",
+      eventStore,
+      initialEventCursor: registryCursor,
+      onEventCursorRecovery: (diagnostic) => diagnostics.push(diagnostic),
+      spawnProcess: fakeSpawn(server),
+    });
+
+    expect(eventStore.load(threadId).slice(-3)).toEqual([
+      { kind: "session-status", status: "idle", seq: 2_907 },
+      {
+        kind: "attention",
+        id: "item/commandExecution/requestApproval:approval-before-restore",
+        method: "item/commandExecution/requestApproval",
+        attention: { command: "date" },
+        seq: 2_908,
+      },
+      { kind: "session-status", status: "idle", seq: 2_909 },
+    ]);
+    expect(await host.health()).toMatchObject({
+      status: "attention",
+      eventCursor: 2_909,
+      pendingAttention: ["item/commandExecution/requestApproval:approval-before-restore"],
+    });
+    expect(diagnostics).toEqual([expect.objectContaining({
+      kind: "runtime-event-cursor-recovery",
+      sessionId: threadId,
+      durableTailSeq: 2_907,
+      registryCursor,
+      chosenNextSeq: 2_908,
+      action: "use-durable-tail",
+    })]);
+    await host.release();
+    fs.rmSync(directory, { recursive: true, force: true });
   });
 
   test("parses generated-schema thread status notifications", async () => {
@@ -1201,6 +1261,12 @@ describe("CodexAppServerHost", () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-structured-claim-"));
     const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
     const key = { engine: "codex" as const, sessionId: "claimed-thread" };
+    const eventStore = new FileRuntimeEventStore(path.join(directory, "events"));
+    fs.mkdirSync(path.join(directory, "events"), { recursive: true });
+    fs.writeFileSync(path.join(directory, "events", "claimed-thread.jsonl"), `${Array.from(
+      { length: 2_907 },
+      (_, index) => JSON.stringify({ kind: "session-status", status: "idle", seq: index + 1 }),
+    ).join("\n")}\n`, { mode: 0o600 });
     registry.upsert({
       key,
       artifactPath: "/sessions/claimed-thread.jsonl",
@@ -1212,7 +1278,7 @@ describe("CodexAppServerHost", () => {
         kind: "codex-app-server",
         endpoint: "stdio:old",
         process: null,
-        eventCursor: 2,
+        eventCursor: 2_908,
         protocolVersion: "0.144.1",
         writerClaimEpoch: 8,
         activeTurnRef: null,
@@ -1227,18 +1293,33 @@ describe("CodexAppServerHost", () => {
     const adopt = () => adoptCodexRegistryHosts(
       registry,
       () => {
-        const server = new FakeAppServer("claimed-thread");
+        const server = new FakeAppServer("claimed-thread", "claimed-thread", false, [], { type: "idle" }, {
+          id: "concurrent-approval",
+          method: "item/commandExecution/requestApproval",
+          params: { command: "date" },
+        });
         servers.push(server);
-        return { cwd: "/repo", eventStore: new MemoryEventStore(), spawnProcess: fakeSpawn(server) };
+        return {
+          cwd: "/repo",
+          eventStore,
+          onEventCursorRecovery: () => {},
+          spawnProcess: fakeSpawn(server),
+        };
       },
       { NODE_ENV: "test", LLV_STRUCTURED_HOSTS: "1" },
     );
     const [first, second] = await Promise.all([adopt(), adopt()]);
     expect(first.length + second.length).toBe(1);
     expect(servers).toHaveLength(1);
+    expect(await adopt()).toEqual([]);
+    expect(servers).toHaveLength(1);
     expect(registry.snapshot().entries["codex:claimed-thread"]).toMatchObject({
       claimEpoch: 9,
-      structuredHost: { writerClaimEpoch: 9 },
+      structuredHost: {
+        writerClaimEpoch: 9,
+        eventCursor: 2_909,
+        pendingAttention: ["item/commandExecution/requestApproval:concurrent-approval"],
+      },
     });
     await [...first, ...second][0]!.host.release();
   });
