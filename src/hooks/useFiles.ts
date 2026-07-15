@@ -70,6 +70,8 @@ type CompletionRetry = {
 
 export interface FilesClientCache {
   read(): FilesData;
+  /** Return only the representation previously certified for this request URL. */
+  readScope(pinnedPath?: string | null): FilesData;
   revalidate(pinnedPath?: string | null, revision?: number): Promise<FilesData>;
   subscribe(listener: (data: FilesData) => void, pinnedPath?: string | null): () => void;
   /** Layer one pipeline record over the server snapshot without a refetch — an
@@ -178,6 +180,15 @@ export function createFilesClientCache(fetcher: FilesFetcher): FilesClientCache 
     pipelines: pipelinesWithOverlays(data.pipelines),
   });
 
+  const exactScopeRepresentation = (requestScope: string): FilesData => {
+    const representation = representations.get(requestScope)?.data
+      ?? (snapshot.requestScope === requestScope ? snapshot : { ...EMPTY, requestScope });
+    return withPipelineOverlays(representation);
+  };
+
+  const exactScopeSnapshot = (pinnedPath?: string | null): FilesData =>
+    exactScopeRepresentation(filesApiUrl(undefined, pinnedPath));
+
   const publish = (requestScope?: string) => {
     if (disposed) return;
     for (const [listener, scope] of listeners) {
@@ -185,9 +196,7 @@ export function createFilesClientCache(fetcher: FilesFetcher): FilesClientCache 
         if (requestScope === scope) listener(snapshot);
         continue;
       }
-      const representation = representations.get(scope)?.data
-        ?? (snapshot.requestScope === scope ? snapshot : { ...EMPTY, requestScope: scope });
-      listener(withPipelineOverlays(representation));
+      listener(exactScopeRepresentation(scope));
     }
   };
 
@@ -468,7 +477,7 @@ export function createFilesClientCache(fetcher: FilesFetcher): FilesClientCache 
     listeners.clear();
   };
 
-  return { read: () => snapshot, revalidate, subscribe, applyPipeline, revertPipeline, dispose };
+  return { read: () => snapshot, readScope: exactScopeSnapshot, revalidate, subscribe, applyPipeline, revertPipeline, dispose };
 }
 
 const defaultFilesFetcher: FilesFetcher = (input, init) => fetch(input, init);
@@ -528,7 +537,8 @@ export function filesPollCadence(connection: "live" | "reconnecting" | "degraded
 
 /** Polls /api/files. Keeps the last good list on transient fetch errors. */
 export function useFiles(_project?: string | null, pinnedPath?: string | null): FilesData {
-  const [data, setData] = useState<FilesData>(() => filesClientCache.read());
+  const [data, setData] = useState<FilesData>(() => filesClientCache.readScope(pinnedPath));
+  const requestScope = filesApiUrl(undefined, pinnedPath);
   useEffect(() => {
     let alive = true;
     const cache = filesClientCache;
@@ -641,5 +651,5 @@ export function useFiles(_project?: string | null, pinnedPath?: string | null): 
       window.removeEventListener(SESSION_TITLES_CHANGED_EVENT, onChanged);
     };
   }, [pinnedPath]);
-  return data;
+  return data.requestScope === requestScope ? data : filesClientCache.readScope(pinnedPath);
 }

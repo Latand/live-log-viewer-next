@@ -123,6 +123,93 @@ test("concurrent pinned and global hooks keep their scopes through local pipelin
   host.remove();
 });
 
+test("hook initialization paints only an exact request-scope cache snapshot", async () => {
+  const pinA = "/archive/pin-a.jsonl";
+  const pinB = "/archive/pin-b.jsonl";
+  let calls = 0;
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  globalThis.fetch = mock(async (input: string | URL | Request) => {
+    calls += 1;
+    const url = String(input);
+    if (calls > 1) await gate;
+    const pinnedPath = new URL(url, "http://localhost").searchParams.get("path");
+    return new Response(JSON.stringify({
+      files: pinnedPath ? [{ path: "/global" }, { path: pinnedPath }] : [{ path: "/global" }],
+      pinOverlayPaths: pinnedPath ? [pinnedPath] : [],
+    }));
+  }) as unknown as typeof fetch;
+
+  const warmHost = document.createElement("div");
+  document.body.append(warmHost);
+  const warmRoot = createRoot(warmHost);
+  flushSync(() => { warmRoot.render(<ScopedProbe pinnedPath={pinA} />); });
+  await Bun.sleep(20);
+  expect(warmHost.textContent).toContain(pinA);
+  flushSync(() => { warmRoot.unmount(); });
+  warmHost.remove();
+
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  flushSync(() => {
+    root.render(<>
+      <ScopedProbe />
+      <ScopedProbe pinnedPath={pinB} />
+      <ScopedProbe pinnedPath={pinA} />
+    </>);
+  });
+
+  expect(host.children[0]?.textContent).toContain('"files":[]');
+  expect(host.children[1]?.textContent).toContain('"files":[]');
+  expect(host.children[2]?.textContent).toContain(pinA);
+  expect(host.children[0]?.textContent).not.toContain(pinA);
+  expect(host.children[1]?.textContent).not.toContain(pinA);
+
+  release();
+  await Bun.sleep(30);
+  flushSync(() => { root.unmount(); });
+  host.remove();
+});
+
+test("an already-mounted hook drops pin-only rows in the render that changes scope", async () => {
+  const pinA = "/archive/switch-pin-a.jsonl";
+  const pinB = "/archive/switch-pin-b.jsonl";
+  let calls = 0;
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  globalThis.fetch = mock(async (input: string | URL | Request) => {
+    calls += 1;
+    const url = String(input);
+    if (calls > 1) await gate;
+    const pinnedPath = new URL(url, "http://localhost").searchParams.get("path");
+    return new Response(JSON.stringify({
+      files: pinnedPath ? [{ path: "/global" }, { path: pinnedPath }] : [{ path: "/global" }],
+      pinOverlayPaths: pinnedPath ? [pinnedPath] : [],
+    }));
+  }) as unknown as typeof fetch;
+
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  flushSync(() => { root.render(<ScopedProbe pinnedPath={pinA} />); });
+  await Bun.sleep(20);
+  expect(host.textContent).toContain(pinA);
+
+  flushSync(() => { root.render(<ScopedProbe pinnedPath={pinB} />); });
+  expect(host.textContent).toContain('"files":[]');
+  expect(host.textContent).not.toContain(pinA);
+
+  flushSync(() => { root.render(<ScopedProbe />); });
+  expect(host.textContent).toContain('"files":[]');
+  expect(host.textContent).not.toContain(pinA);
+
+  release();
+  await Bun.sleep(30);
+  flushSync(() => { root.unmount(); });
+  host.remove();
+});
+
 test("a failed cold hydration keeps creation guarded and retries until a snapshot succeeds", async () => {
   let calls = 0;
   globalThis.fetch = mock(async () => {

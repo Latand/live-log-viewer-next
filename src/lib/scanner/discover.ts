@@ -1,5 +1,5 @@
 import fs from "node:fs";
-import { access, readdir, stat } from "node:fs/promises";
+import { readdir, stat } from "node:fs/promises";
 import path from "node:path";
 
 import type { FileEntry, ProjectCatalogEntry, RootKey } from "../types";
@@ -93,10 +93,12 @@ async function walk(rootName: RootKey, roots: Roots, root: string, dir: string, 
       const [slug, sid, tid] = isTask;
       const twin = path.join(roots["claude-projects"], slug, sid, "subagents", "agent-" + tid + ".jsonl");
       try {
-        await limit(() => access(twin));
+        await limit(() => fs.promises.access(twin));
         return { raw: [], complete: true };
-      } catch {
-        /* no mirrored subagent */
+      } catch (error) {
+        if (!isMissing(error)) {
+          return { raw: [], complete: discoveryFailure("access task-output twin", twin, error) };
+        }
       }
     }
     return { raw: [{ rootName, root, path: pathname, st }], complete: true };
@@ -106,7 +108,7 @@ async function walk(rootName: RootKey, roots: Roots, root: string, dir: string, 
 
 async function rootExists(root: string, limit: Limit): Promise<{ exists: boolean; complete: boolean }> {
   try {
-    await limit(() => access(root));
+    await limit(() => fs.promises.access(root));
     return { exists: true, complete: true };
   } catch (error) {
     return { exists: false, complete: discoveryFailure("access root", root, error) };

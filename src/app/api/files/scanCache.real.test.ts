@@ -17,6 +17,7 @@ const sessions = path.join(process.env.LLV_CODEX_HOME, "sessions");
 fs.mkdirSync(sessions, { recursive: true });
 
 const { listFilesWithProjectCatalog } = await import("@/lib/scanner");
+const { ROOTS } = await import("@/lib/scanner/roots");
 const { cachedFileScan, resetFilesRouteCacheForTests } = await import("./scanCache");
 
 function writeSession(filename: string, cwd: string): string {
@@ -119,6 +120,63 @@ test("a transient real scanner failure preserves the completed route snapshot un
   expect(recovered.snapshot.files.map((entry) => entry.path)).toContain(recoveredPath);
   expect(recovered.snapshot.files.map((entry) => entry.path)).not.toContain(canonicalPath);
   expect(fs.readFileSync(snapshotPath)).not.toEqual(persistedBeforeFailure);
+});
+
+test("task twin EIO preserves canonical files generation and durable snapshots until recovery", async () => {
+  const previousTestStateDir = process.env.LLV_STATE_DIR;
+  const testStateDir = path.join(sandbox, "task-twin-generation-state");
+  const taskRoot = ROOTS["claude-tasks"];
+  const taskSlug = `llv-scan-test-${path.basename(sandbox)}`;
+  const taskFixtureRoot = path.join(taskRoot, taskSlug);
+  const taskPath = path.join(taskFixtureRoot, "session-a", "tasks", "task-a.output");
+  const twinPath = path.join(ROOTS["claude-projects"], taskSlug, "session-a", "subagents", "agent-task-a.jsonl");
+  const originalAccess = fs.promises.access;
+  try {
+    process.env.LLV_STATE_DIR = testStateDir;
+    resetFilesRouteCacheForTests();
+    fs.mkdirSync(path.dirname(taskPath), { recursive: true });
+    const canonicalPath = writeSession("task-twin-canonical.jsonl", "/repo/task-twin-canonical");
+    const canonical = await cachedFileScan();
+    expect(canonical.snapshot.files.map((entry) => entry.path)).toContain(canonicalPath);
+    const snapshotPath = path.join(testStateDir, "files-scan-snapshot.json");
+    const indexPath = path.join(testStateDir, "project-catalog.json");
+    const canonicalSnapshot = fs.readFileSync(snapshotPath);
+    const canonicalIndex = fs.readFileSync(indexPath);
+
+    fs.writeFileSync(taskPath, "finished\n");
+    fs.promises.access = (async (pathname, mode) => {
+      if (pathname === twinPath) {
+        const error = new Error("injected task twin EIO") as NodeJS.ErrnoException;
+        error.code = "EIO";
+        throw error;
+      }
+      return originalAccess(pathname, mode);
+    }) as typeof fs.promises.access;
+    const stale = await cachedFileScan(undefined, undefined, Date.now(), 261);
+    expect(stale.generation).toBe(canonical.generation);
+    expect(stale.targetGeneration).toBeGreaterThan(stale.generation);
+    expect(stale.snapshot.files.map((entry) => entry.path)).not.toContain(taskPath);
+    await Bun.sleep(50);
+    expect(fs.readFileSync(snapshotPath)).toEqual(canonicalSnapshot);
+    expect(fs.readFileSync(indexPath)).toEqual(canonicalIndex);
+
+    fs.promises.access = originalAccess;
+    let recovered = await cachedFileScan();
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      recovered = await cachedFileScan(undefined, undefined, Date.now(), undefined, stale.targetGeneration);
+      if (recovered.generation >= stale.targetGeneration
+        && recovered.snapshot.files.some((entry) => entry.path === taskPath)) break;
+      await Bun.sleep(10);
+    }
+    expect(recovered.generation).toBeGreaterThanOrEqual(stale.targetGeneration);
+    expect(recovered.snapshot.files.map((entry) => entry.path)).toContain(taskPath);
+  } finally {
+    fs.promises.access = originalAccess;
+    process.env.LLV_STATE_DIR = previousTestStateDir;
+    resetFilesRouteCacheForTests();
+    fs.rmSync(testStateDir, { recursive: true, force: true });
+    fs.rmSync(taskFixtureRoot, { recursive: true, force: true });
+  }
 });
 
 test("transcript metadata EIO after rewrite retains canonical snapshots until convergence", async () => {

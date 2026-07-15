@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 
@@ -51,7 +52,14 @@ const metaCache = globalCache<CachedFileDescription>("meta-v6");
 // identity invalidates same-size rewrites and truncations. A head that has not
 // yet produced a title stays open so growth can still yield one.
 export type ConversationSearchText = { title: string | null; firstPrompt: string | null };
-const titleCache = globalCache<[number, number, string | null]>("title-v4");
+type HeadMetadataCache<T> = {
+  size: number;
+  mtimeMs: number;
+  value: T;
+  headBytes: number;
+  headFingerprint: string;
+};
+const titleCache = globalCache<HeadMetadataCache<string | null>>("title-v5");
 /* Search text can be large and belongs to the list/search path. Its bounded
    cache lives with the search index; page hydration reads only its visible rows. */
 globalCache<unknown>("conversation-search-v1").clear();
@@ -64,7 +72,7 @@ const codexProjectCache = globalCache<{
 }>("codex-project-v5");
 const repoSlugCache = globalCache<[number, string | null]>("repo-path-from-slug-v1");
 /* The cwd follows the same append-only head reuse and rewrite invalidation. */
-const cwdCache = globalCache<[number, number, string | null]>("claude-cwd-v2");
+const cwdCache = globalCache<HeadMetadataCache<string | null>>("claude-cwd-v3");
 
 const HEAD_BYTES = 131_072;
 
@@ -112,8 +120,12 @@ function sameFileDescriptionIdentity(left: FileDescriptionIdentity, right: FileD
 }
 
 interface HeadReadResult {
-  value: { text: string; read: number } | null;
+  value: { bytes: Buffer; text: string; read: number } | null;
   complete: boolean;
+}
+
+function headFingerprint(bytes: Uint8Array): string {
+  return createHash("sha256").update(bytes).digest("base64url");
 }
 
 function readHead(pathname: string, size: number): HeadReadResult {
@@ -122,7 +134,8 @@ function readHead(pathname: string, size: number): HeadReadResult {
     try {
       const buf = Buffer.alloc(Math.min(size, HEAD_BYTES));
       const read = fs.readSync(fd, buf, 0, buf.length, 0);
-      return { value: { text: buf.toString("utf8", 0, read), read }, complete: true };
+      const bytes = buf.subarray(0, read);
+      return { value: { bytes, text: bytes.toString("utf8"), read }, complete: true };
     } finally {
       fs.closeSync(fd);
     }
@@ -686,20 +699,53 @@ function conversationTextFromLines(lines: string[], wantCodex: boolean): Convers
 interface MetadataReadResult<T> {
   value: T;
   complete: boolean;
+  headPreserved: boolean;
+}
+
+function reusableGrowingHead<T>(
+  cached: HeadMetadataCache<T>,
+  st: fs.Stats,
+  head: HeadReadResult,
+): HeadMetadataCache<T> | null {
+  if (st.size <= cached.size || !head.complete || !head.value || head.value.read < cached.headBytes) return null;
+  const preserved = headFingerprint(head.value.bytes.subarray(0, cached.headBytes)) === cached.headFingerprint;
+  if (!preserved || (cached.value === null && cached.headBytes < HEAD_BYTES)) return null;
+  return {
+    size: st.size,
+    mtimeMs: st.mtimeMs,
+    value: cached.value,
+    headBytes: head.value.read,
+    headFingerprint: headFingerprint(head.value.bytes),
+  };
+}
+
+function cacheHeadMetadata<T>(st: fs.Stats, head: NonNullable<HeadReadResult["value"]>, value: T): HeadMetadataCache<T> {
+  return {
+    size: st.size,
+    mtimeMs: st.mtimeMs,
+    value,
+    headBytes: head.read,
+    headFingerprint: headFingerprint(head.bytes),
+  };
 }
 
 function transcriptCwd(pathname: string, st: fs.Stats): MetadataReadResult<string | null> {
   const cached = cwdCache.get(pathname);
-  if (cached) {
-    const sameFile = cached[0] === st.size && cached[1] === st.mtimeMs;
-    const unchangedResolvedHead = st.size > cached[0] && (cached[2] !== null || cached[0] >= HEAD_BYTES);
-    if (sameFile || unchangedResolvedHead) return { value: cached[2], complete: true };
+  if (cached?.size === st.size && cached.mtimeMs === st.mtimeMs) {
+    return { value: cached.value, complete: true, headPreserved: true };
   }
   const head = readHead(pathname, st.size);
-  if (!head.complete || !head.value) return { value: cached?.[2] ?? null, complete: false };
+  if (!head.complete || !head.value) return { value: cached?.value ?? null, complete: false, headPreserved: false };
+  if (cached) {
+    const reused = reusableGrowingHead(cached, st, head);
+    if (reused) {
+      cwdCache.set(pathname, reused);
+      return { value: reused.value, complete: true, headPreserved: true };
+    }
+  }
   const cwd = cwdFromLines(head.value.text.split("\n").slice(0, 25));
-  cwdCache.set(pathname, [st.size, st.mtimeMs, cwd]);
-  return { value: cwd, complete: true };
+  cwdCache.set(pathname, cacheHeadMetadata(st, head.value, cwd));
+  return { value: cwd, complete: true, headPreserved: false };
 }
 
 function projectInfoFromTranscript(pathname: string): { project: string; worktree?: string } | null {
@@ -712,16 +758,21 @@ function projectInfoFromSlug(slug: string): { project: string; worktree?: string
 
 function scanJsonlTitle(pathname: string, st: fs.Stats, wantCodex: boolean): MetadataReadResult<string | null> {
   const cached = titleCache.get(pathname);
-  if (cached) {
-    const sameFile = cached[0] === st.size && cached[1] === st.mtimeMs;
-    const unchangedResolvedHead = st.size > cached[0] && (cached[2] !== null || cached[0] >= HEAD_BYTES);
-    if (sameFile || unchangedResolvedHead) return { value: cached[2], complete: true };
+  if (cached?.size === st.size && cached.mtimeMs === st.mtimeMs) {
+    return { value: cached.value, complete: true, headPreserved: true };
   }
   const head = readHead(pathname, st.size);
-  if (!head.complete || !head.value) return { value: cached?.[2] ?? null, complete: false };
+  if (!head.complete || !head.value) return { value: cached?.value ?? null, complete: false, headPreserved: false };
+  if (cached) {
+    const reused = reusableGrowingHead(cached, st, head);
+    if (reused) {
+      titleCache.set(pathname, reused);
+      return { value: reused.value, complete: true, headPreserved: true };
+    }
+  }
   const title = titleFromLines(head.value.text.split("\n").slice(0, 151), wantCodex);
-  titleCache.set(pathname, [st.size, st.mtimeMs, title]);
-  return { value: title, complete: true };
+  titleCache.set(pathname, cacheHeadMetadata(st, head.value, title));
+  return { value: title, complete: true, headPreserved: false };
 }
 
 /** Title and first-prompt hydration owned entirely by list/search requests. */
@@ -761,7 +812,7 @@ export function describeFile(
     const cachedProjectMatches = cwdRead.complete && cachedProject?.stateKey === stateKey
       && (
         (cachedProject.size === st.size && cachedProject.mtimeMs === st.mtimeMs)
-        || st.size > cachedProject.size
+        || (st.size > cachedProject.size && cwdRead.headPreserved)
       );
     if (cachedProjectMatches) {
       project = cachedProject.project;
