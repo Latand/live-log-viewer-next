@@ -45,7 +45,7 @@ fi
   return { root, bin, home, capture, args };
 }
 
-function runRebuild(idempotencyKey: string, setup: ReturnType<typeof fixture>) {
+function runRebuild(idempotencyKey: string, setup: ReturnType<typeof fixture>, revision?: string) {
   return Bun.spawnSync(["bash", rebuildScript], {
     cwd: setup.root,
     env: {
@@ -54,6 +54,7 @@ function runRebuild(idempotencyKey: string, setup: ReturnType<typeof fixture>) {
       PATH: `${setup.bin}:${process.env.PATH ?? ""}`,
       PORT: "18898",
       LLV_DEPLOY_IDEMPOTENCY_KEY: idempotencyKey,
+      ...(revision ? { LLV_DEPLOY_REVISION: revision } : {}),
       LLV_TEST_CAPTURE: setup.capture,
       LLV_TEST_ARGS: setup.args,
     },
@@ -61,6 +62,18 @@ function runRebuild(idempotencyKey: string, setup: ReturnType<typeof fixture>) {
     stderr: "pipe",
   });
 }
+
+test("rebuild accepts an exact 40-character lowercase commit SHA", () => {
+  const setup = fixture();
+  const revision = "a".repeat(40);
+  const result = runRebuild("exact-sha-request", setup, revision);
+
+  expect(result.exitCode).toBe(0);
+  expect(JSON.parse(fs.readFileSync(setup.capture, "utf8"))).toEqual({
+    revision,
+    idempotencyKey: "exact-sha-request",
+  });
+});
 
 test("rebuild serializes a quoted 200-character idempotency key as JSON", () => {
   const setup = fixture();
