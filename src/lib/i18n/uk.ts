@@ -260,6 +260,8 @@ export const uk: Record<keyof typeof en, Message> = {
   "composer.codexImagesVertical2": "Доставку зображень у Codex вимкнено до другого етапу.",
   "composer.structuredImagesProtocol": "Цей структурований хост не узгодив підтримку зображень.",
   "composer.imageCapabilityLoading": "Завантажуємо дані про підтримку зображень.",
+  "composer.imageCapabilityError": "Не вдалося завантажити дані про підтримку зображень.",
+  "composer.imageCapabilityRetry": "Повторити перевірку зображень",
   "composer.attachTerminal": "Відкрити термінал для перегляду",
   "composer.attachTerminalReady": "термінал для перегляду готовий у tmux {target}",
   "composer.attachTerminalFailed": "не вдалося створити термінал для перегляду",
@@ -524,7 +526,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "img.error": "помилка картинки",
   "img.previewAlt": "прев'ю картинки {n}",
   "img.removeAria": "Прибрати картинку {n}",
-  "img.toFilePaths": "шляхами до файлів",
+  "img.deliveryHint": "додано до повідомлення",
 
   "question.sec": "{n} с",
   "question.min": "{n} хв",

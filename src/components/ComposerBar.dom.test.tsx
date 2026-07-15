@@ -5,11 +5,11 @@ import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
 
 import { useComposer } from "@/hooks/useComposer";
-import { translate } from "@/lib/i18n";
+import { setLocale, translate } from "@/lib/i18n";
 import type { RuntimeImageCapability } from "@/lib/runtime/structuredContent";
 
 import { ComposerBar } from "./ComposerBar";
-import type { PendingImage } from "./imageAttachments";
+import { ImagePreviewStrip, type PendingImage } from "./imageAttachments";
 
 const dom = new Window();
 Object.assign(globalThis, {
@@ -29,7 +29,10 @@ Object.assign(globalThis, {
   removeEventListener() {},
 });
 
-afterEach(() => document.body.replaceChildren());
+afterEach(() => {
+  document.body.replaceChildren();
+  setLocale("en");
+});
 
 function Harness() {
   const composer = useComposer({ initialText: () => "", persistText: () => {}, submit: () => {} });
@@ -237,4 +240,20 @@ test("structured limit feedback is available in English and Ukrainian", () => {
   expect(translate("uk", "img.tooManyStructured", { max: 2 })).toBe("За один раз можна надіслати до 2 картинок");
   expect(translate("en", "img.structuredAggregateTooLarge", { max: 24 })).toContain("24 MB request limit");
   expect(translate("uk", "img.structuredAggregateTooLarge", { max: 24 })).toContain("24 МБ");
+});
+
+test("attachment preview copy remains accurate for structured and tmux delivery in both locales", () => {
+  const image = { base64: "AA==", mime: "image/png", preview: "data:image/png;base64,AA==" };
+  for (const [locale, expected] of [["en", "attached to the message"], ["uk", "додано до повідомлення"]] as const) {
+    setLocale(locale);
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    flushSync(() => root.render(<ImagePreviewStrip images={[image]} onRemove={() => {}} />));
+    expect(host.textContent).toContain(expected);
+    expect(host.textContent).not.toContain("file paths");
+    expect(host.textContent).not.toContain("шляхами до файлів");
+    flushSync(() => root.unmount());
+    host.remove();
+  }
 });

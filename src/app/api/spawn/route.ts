@@ -25,7 +25,8 @@ import { rejectCrossOrigin } from "@/lib/sameOrigin";
 import { runtimeHostClient } from "@/lib/runtime/client";
 import { runtimeScope } from "@/lib/runtime/contracts";
 import { runtimeEventsEnabled } from "@/lib/runtime/flags";
-import { runtimeImageCapability, runtimeImageStore } from "@/lib/runtime/runtimeImageStore";
+import { runtimeImageCapability, runtimeImageStore, type RuntimeImageUpload } from "@/lib/runtime/runtimeImageStore";
+import type { StructuredImageRef } from "@/lib/runtime/structuredContent";
 import { spawnStructuredConversation, structuredClaudePermissionMode } from "@/lib/runtime/structuredSpawn";
 import { structuredSpawnGap, spawnTransport } from "@/lib/runtime/spawnTransport";
 import { listFiles } from "@/lib/scanner";
@@ -48,12 +49,16 @@ interface SpawnRouteDependencies {
   resolveHealthySpawnAccount: typeof resolveHealthySpawnAccount;
   runtimeHostClient: typeof runtimeHostClient;
   spawnStructuredConversation: typeof spawnStructuredConversation;
+  storeImages(images: readonly RuntimeImageUpload[]): StructuredImageRef[];
 }
+
+class RuntimeImageStorageError extends Error {}
 
 const productionSpawnRouteDependencies: SpawnRouteDependencies = {
   resolveHealthySpawnAccount,
   runtimeHostClient,
   spawnStructuredConversation,
+  storeImages: (images) => runtimeImageStore().putMany(images),
 };
 
 interface SuggestResponse {
@@ -289,7 +294,9 @@ async function postSpawn(
     if (transport === "structured") {
       const runtimeClient = dependencies.runtimeHostClient();
       if (!runtimeClient) throw new Error("structured spawn runtime host is unavailable");
-      const imageRefs = runtimeImageStore().putMany(images);
+      let imageRefs;
+      try { imageRefs = dependencies.storeImages(images); }
+      catch (error) { throw new RuntimeImageStorageError(error instanceof Error ? error.message : String(error)); }
       const response = await dependencies.spawnStructuredConversation({
         engine,
         receipt: begun.receipt,
@@ -395,6 +402,7 @@ async function postSpawn(
     }
     if (error instanceof SpawnParentError) return NextResponse.json({ error: error.message }, { status: error.status });
     if (error instanceof SpawnChildLimitError) return NextResponse.json({ error: error.message }, { status: 429 });
+    if (error instanceof RuntimeImageStorageError) return NextResponse.json({ error: error.message }, { status: 503 });
     if (error instanceof UnknownAccountError || error instanceof UnknownClaudeAccountError) return NextResponse.json({ error: error.message }, { status: 400 });
     const accountError = spawnAccountErrorResponse(error);
     if (accountError) return accountError;

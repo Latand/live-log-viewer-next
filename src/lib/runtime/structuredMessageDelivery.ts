@@ -7,6 +7,7 @@ import type { ViewerConversationId } from "@/lib/accounts/migration/contracts";
 import { runtimeHostClient, type RuntimeHostClient } from "./client";
 import type { RuntimeOperationReceipt } from "./contracts";
 import { runtimeImageCapability, runtimeImageStore, type RuntimeImageUpload } from "./runtimeImageStore";
+import { admitRuntimeImagePayload } from "./runtimeImageAdmission";
 import { structuredContent, type StructuredImageRef } from "./structuredContent";
 import { kickStructuredDeliveryQueue } from "./structuredDeliverySignal";
 import { didStructuredHostStartupFail, markStructuredHostStartupReady } from "./startupStatus";
@@ -146,6 +147,11 @@ export async function enqueueStructuredMessage(
   dependencies: StructuredMessageDependencies = {},
 ): Promise<StructuredMessageResult | null> {
   if (!(dependencies.enabled ?? structuredHostsEnabled)()) return null;
+  const imageAdmission = admitRuntimeImagePayload({ images: request.images ?? [] });
+  if (imageAdmission.error) {
+    return { ok: false, structured: true, outcome: "failed", error: imageAdmission.error.error, status: imageAdmission.error.status };
+  }
+  const rawImages = imageAdmission.images;
   const client = (dependencies.client ?? runtimeHostClient)();
   if (!client) return (dependencies.startupFailed ?? didStructuredHostStartupFail)() ? null : ownershipUnavailable();
   let snapshot: Awaited<ReturnType<RuntimeHostClient["snapshot"]>>;
@@ -162,7 +168,6 @@ export async function enqueueStructuredMessage(
     ?? snapshot.sessions.find((candidate) => candidate.artifactPath === request.path);
   if (!session || session.hostKind === "tmux-legacy") return null;
   if (session.hostKind !== "codex-app-server" && session.hostKind !== "claude-broker") return null;
-  const rawImages = request.images ?? [];
   const suppliedRefs = request.imageRefs ?? [];
   const wantsImages = request.hasImages === true || rawImages.length > 0 || suppliedRefs.length > 0;
   const imageCapability = session.capabilities.imageInput

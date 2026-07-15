@@ -190,7 +190,7 @@ export function ImagePreviewStrip({ images, onRemove }: { images: PendingImage[]
           </div>
         ))}
         <span className="inline-flex items-center gap-1 text-[10.5px] font-semibold text-muted">
-          {t("composer.imagesCount", { count: images.length })} <ArrowRight className="h-3 w-3" aria-hidden /> {t("img.toFilePaths")}
+          {t("composer.imagesCount", { count: images.length })} <ArrowRight className="h-3 w-3" aria-hidden /> {t("img.deliveryHint")}
         </span>
       </div>
     );
@@ -212,7 +212,7 @@ export function ImagePreviewStrip({ images, onRemove }: { images: PendingImage[]
         </div>
       ))}
       <span className="inline-flex items-center gap-1 text-[10.5px] font-semibold text-muted">
-        {t("composer.imagesCount", { count: images.length })} <ArrowRight className="h-3 w-3" aria-hidden /> {t("img.toFilePaths")}
+        {t("composer.imagesCount", { count: images.length })} <ArrowRight className="h-3 w-3" aria-hidden /> {t("img.deliveryHint")}
       </span>
     </div>
   );

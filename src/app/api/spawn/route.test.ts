@@ -31,7 +31,7 @@ function registry(): AgentRegistry {
   return new AgentRegistry(path.join(dir, "agent-registry.json"));
 }
 
-function structuredRouteDependencies(cwd: string): Parameters<typeof POST.withDependencies>[1] {
+function structuredRouteDependencies(cwd: string): NonNullable<Parameters<typeof POST.withDependencies>[1]> {
   return {
     resolveHealthySpawnAccount: async () => ({
       engine: "claude",
@@ -42,6 +42,11 @@ function structuredRouteDependencies(cwd: string): Parameters<typeof POST.withDe
       env: { NODE_ENV: "test" },
     }),
     runtimeHostClient: () => ({} as RuntimeHostClient),
+    storeImages: (images) => images.map((image) => ({
+      sha256: crypto.createHash("sha256").update(Buffer.from(image.base64, "base64")).digest("hex"),
+      mime: image.mime as "image/png",
+      bytes: Buffer.from(image.base64, "base64").byteLength,
+    })),
     spawnStructuredConversation: async (input) => ({
       ok: true,
       target: null,
@@ -55,6 +60,81 @@ function structuredRouteDependencies(cwd: string): Parameters<typeof POST.withDe
     }),
   };
 }
+
+test("spawn rejects malformed, oversized, and mismatched images before durable mutation", async () => {
+  const cwd = fs.mkdtempSync(path.join(routeSandbox, "image-admission-"));
+  const store = agentRegistry();
+  const imageRoot = path.join(process.env.LLV_STATE_DIR!, "runtime-images");
+  const beforeReceipts = Object.keys(store.snapshot().receipts).sort();
+  const beforeBlobs = fs.existsSync(imageRoot) ? fs.readdirSync(imageRoot).sort() : [];
+  const png = Buffer.from("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489", "hex").toString("base64");
+  const cases = [
+    { images: [{ base64: "a===", mime: "image/png" }], status: 400 },
+    { images: Array.from({ length: 17 }, () => ({ base64: png, mime: "image/png" })), status: 413 },
+    { images: [{ base64: png, mime: "image/svg+xml" }], status: 415 },
+    { images: [{ base64: Buffer.from("plain").toString("base64"), mime: "image/png" }], status: 415 },
+  ];
+
+  for (const candidate of cases) {
+    const response = await POST.withDependencies(new NextRequest("http://127.0.0.1:8898/api/spawn", {
+      method: "POST",
+      headers: {
+        host: "127.0.0.1:8898",
+        origin: "http://127.0.0.1:8898",
+        "sec-fetch-site": "same-origin",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ engine: "claude", cwd, prompt: "inspect", images: candidate.images }),
+    }), structuredRouteDependencies(cwd));
+    expect(response.status).toBe(candidate.status);
+    expect(Object.keys(store.snapshot().receipts).sort()).toEqual(beforeReceipts);
+    expect(fs.existsSync(imageRoot) ? fs.readdirSync(imageRoot).sort() : []).toEqual(beforeBlobs);
+  }
+});
+
+test("structured spawn maps operational image storage failures to 503", async () => {
+  const cwd = fs.mkdtempSync(path.join(routeSandbox, "image-storage-failure-"));
+  const previousTransport = process.env.LLV_SPAWN_TRANSPORT;
+  const previousHosts = process.env.LLV_STRUCTURED_HOSTS;
+  const previousEvents = process.env.LLV_RUNTIME_EVENTS;
+  const previousSocket = process.env.LLV_RUNTIME_HOST_SOCKET;
+  const previousUi = process.env.NEXT_PUBLIC_RUNTIME_UI;
+  process.env.LLV_SPAWN_TRANSPORT = "structured";
+  process.env.LLV_STRUCTURED_HOSTS = "1";
+  process.env.LLV_RUNTIME_EVENTS = "1";
+  process.env.LLV_RUNTIME_HOST_SOCKET = path.join(cwd, "runtime.sock");
+  process.env.NEXT_PUBLIC_RUNTIME_UI = "1";
+  const dependencies = {
+    ...structuredRouteDependencies(cwd),
+    storeImages: () => { throw new Error("runtime image storage quota exceeded"); },
+  };
+  const png = Buffer.from("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489", "hex").toString("base64");
+  try {
+    const response = await POST.withDependencies(new NextRequest("http://127.0.0.1:8898/api/spawn", {
+      method: "POST",
+      headers: {
+        host: "127.0.0.1:8898",
+        origin: "http://127.0.0.1:8898",
+        "sec-fetch-site": "same-origin",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ engine: "claude", cwd, prompt: "inspect", images: [{ base64: png, mime: "image/png" }] }),
+    }), dependencies);
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({ error: "runtime image storage quota exceeded" });
+  } finally {
+    if (previousTransport === undefined) delete process.env.LLV_SPAWN_TRANSPORT;
+    else process.env.LLV_SPAWN_TRANSPORT = previousTransport;
+    if (previousHosts === undefined) delete process.env.LLV_STRUCTURED_HOSTS;
+    else process.env.LLV_STRUCTURED_HOSTS = previousHosts;
+    if (previousEvents === undefined) delete process.env.LLV_RUNTIME_EVENTS;
+    else process.env.LLV_RUNTIME_EVENTS = previousEvents;
+    if (previousSocket === undefined) delete process.env.LLV_RUNTIME_HOST_SOCKET;
+    else process.env.LLV_RUNTIME_HOST_SOCKET = previousSocket;
+    if (previousUi === undefined) delete process.env.NEXT_PUBLIC_RUNTIME_UI;
+    else process.env.NEXT_PUBLIC_RUNTIME_UI = previousUi;
+  }
+});
 
 test("agent-initiated spawn without lineage returns a teaching 400", async () => {
   const response = await POST(new NextRequest("http://127.0.0.1:8898/api/spawn", {

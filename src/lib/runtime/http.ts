@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import crypto from "node:crypto";
 
 import { agentRegistry, type AgentRegistry } from "@/lib/agent/registry";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
@@ -9,8 +10,9 @@ import type { RuntimeOperationKind } from "./contracts";
 import { runtimeEventsEnabled } from "./flags";
 import { enqueueStructuredMessage } from "./structuredMessageDelivery";
 import { kickStructuredDeliveryQueue } from "./structuredDeliverySignal";
-import { MAX_STRUCTURED_IMAGES, type RuntimeImageUpload } from "./runtimeImageStore";
-import { normalizeStructuredImageMime, type StructuredImageRef } from "./structuredContent";
+import { admitRuntimeImagePayload } from "./runtimeImageAdmission";
+import type { RuntimeImageUpload } from "./runtimeImageStore";
+import type { StructuredImageRef } from "./structuredContent";
 
 export interface RuntimeHttpDependencies {
   enabled(): boolean;
@@ -64,19 +66,17 @@ export async function handleRuntimeCommand(
     if ((kind === "send" || kind === "steer") && value && typeof value === "object" && !Array.isArray(value)) {
       const body = value as Record<string, unknown>;
       if (Array.isArray(body.images) && body.images.some((image) => image && typeof image === "object" && "base64" in image)) {
-        if (body.images.length > MAX_STRUCTURED_IMAGES) throw new Error("too many images");
-        rawImages = body.images.map((value) => {
-          if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("images are invalid");
-          const image = value as Record<string, unknown>;
-          const mime = typeof image.mime === "string" ? normalizeStructuredImageMime(image.mime) : null;
-          if (!mime || typeof image.base64 !== "string") throw new Error("images are invalid");
-          return { mime, base64: image.base64 };
+        const admitted = admitRuntimeImagePayload({ images: body.images });
+        if (admitted.error) return NextResponse.json({ error: admitted.error.error }, { status: admitted.error.status });
+        rawImages = admitted.images;
+        const admissionRefs: StructuredImageRef[] = rawImages.map((image) => {
+          const data = Buffer.from(image.base64, "base64");
+          return {
+            sha256: crypto.createHash("sha256").update(data).digest("hex"),
+            mime: image.mime as StructuredImageRef["mime"],
+            bytes: data.byteLength,
+          };
         });
-        const admissionRefs: StructuredImageRef[] = rawImages.map((image, index) => ({
-          sha256: index.toString(16).padStart(64, "0"),
-          mime: normalizeStructuredImageMime(image.mime)!,
-          bytes: 1,
-        }));
         parseValue = { ...body, images: admissionRefs };
       }
     }

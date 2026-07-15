@@ -17,6 +17,7 @@ const artifactPath = "/sessions/11111111-1111-4111-8111-111111111111.jsonl";
 const conversationId = "conversation_11111111-1111-4111-8111-111111111111";
 const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-structured-message-"));
 let registryNumber = 0;
+const PNG_BASE64 = Buffer.from("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489", "hex").toString("base64");
 
 afterAll(() => fs.rmSync(sandbox, { recursive: true, force: true }));
 
@@ -106,7 +107,7 @@ test("Claude image-only admission stores refs and journals their content digest"
     conversationId: conversation.id,
     clientMessageId: "image-only-key",
     text: "",
-    images: [{ base64: "fixture", mime: "image/png" }],
+    images: [{ base64: PNG_BASE64, mime: "image/png" }],
   }, {
     enabled: () => true,
     client: () => client,
@@ -137,7 +138,7 @@ test("stale structured image capability rejects before blob storage or command a
     conversationId: conversation.id,
     clientMessageId: "stale-image-capability",
     text: "",
-    images: [{ base64: "fixture", mime: "image/png" }],
+    images: [{ base64: PNG_BASE64, mime: "image/png" }],
   }, {
     enabled: () => true,
     client: () => client,

@@ -18,6 +18,8 @@ import { inboxImageExt, MAX_INBOX_IMAGE_BYTES } from "@/lib/imagePolicy";
 import { INBOX_DIR } from "@/lib/inbox";
 import { normalizeResumePanesFile, type ResumePaneRecord, type ResumePanesFile } from "@/lib/resumePanesFile";
 import { procBackend } from "@/lib/proc";
+import { admitRuntimeImagePayload, type RuntimeImageAdmissionResult } from "@/lib/runtime/runtimeImageAdmission";
+import type { RuntimeImageUpload } from "@/lib/runtime/runtimeImageStore";
 import { listFiles } from "@/lib/scanner";
 import { agentProcesses, isHelperArgv, pidAlive, readArgv, readPpid, type AgentProcess } from "@/lib/scanner/process";
 import {
@@ -42,50 +44,9 @@ const LEGACY_TMUX_MIGRATION_MARKER = statePath("legacy-tmux-migration-complete")
 const PANE_MAP_TTL_MS = 12_000;
 const MAX_ANCESTRY_HOPS = 64;
 
-export interface InboxImagePayload {
-  base64: string;
-  mime: string;
-}
-
-export interface ImagePayloadResult {
-  images: InboxImagePayload[];
-  error: { error: string; status: number } | null;
-}
-
-/** Decoded byte length a base64 string produces, accounting for `=` padding;
-    lets the size check agree exactly with what Buffer.from(..., "base64")
-    will later decode, without decoding it twice. */
-function base64DecodedLength(base64: string): number {
-  if (!base64.length) return 0;
-  const padding = base64.endsWith("==") ? 2 : base64.endsWith("=") ? 1 : 0;
-  return Math.floor((base64.length * 3) / 4) - padding;
-}
-
-/**
- * Normalises and validates a request's image list; the legacy single `image`
- * field folds in. Returns the first problem — a malformed entry, unsupported
- * mime, or oversize payload — as an HTTP error instead of silently dropping
- * the image and letting the request succeed short one attachment.
- */
-export function collectImagePayloads(body: { image?: unknown; images?: unknown }): ImagePayloadResult {
-  const raw = Array.isArray(body.images) ? body.images : body.image && typeof body.image === "object" ? [body.image] : [];
-  const images: InboxImagePayload[] = [];
-  for (const entry of raw) {
-    const base64 = entry && typeof entry === "object" ? (entry as { base64?: unknown }).base64 : undefined;
-    const mime = entry && typeof entry === "object" ? (entry as { mime?: unknown }).mime : undefined;
-    if (typeof base64 !== "string" || !base64) {
-      return { images: [], error: { error: "invalid image", status: 400 } };
-    }
-    if (inboxImageExt(typeof mime === "string" ? mime : "") === null) {
-      return { images: [], error: { error: "unsupported image type", status: 415 } };
-    }
-    if (base64DecodedLength(base64) > MAX_INBOX_IMAGE_BYTES) {
-      return { images: [], error: { error: "image is too large (10 MB limit)", status: 413 } };
-    }
-    images.push({ base64, mime: mime as string });
-  }
-  return { images, error: null };
-}
+export type InboxImagePayload = RuntimeImageUpload;
+export type ImagePayloadResult = RuntimeImageAdmissionResult;
+export const collectImagePayloads = admitRuntimeImagePayload;
 
 /** A resolved tmux target in `session:window.pane` form (e.g. `0:1.0`). */
 export type TmuxTarget = string;

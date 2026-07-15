@@ -37,10 +37,40 @@ import { cleanTitle, engineTintOf } from "./utils";
 import { draftWorkingDirectory } from "./projectModel";
 
 type Engine = "claude" | "codex";
+const STRUCTURED_IMAGE_MIMES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
 type SpawnImageNegotiation = {
   spawnTransport: "tmux" | "structured";
   imageInput: Record<Engine, RuntimeImageCapability>;
 };
+type SpawnImageNegotiationState =
+  | { status: "loading"; requestKey: string }
+  | { status: "ready"; requestKey: string; value: SpawnImageNegotiation }
+  | { status: "error"; requestKey: string };
+
+function runtimeImageCapabilityValue(value: unknown): RuntimeImageCapability | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const candidate = value as Record<string, unknown>;
+  if (typeof candidate.supported !== "boolean") return null;
+  if (candidate.reason !== null && typeof candidate.reason !== "string") return null;
+  if (!Array.isArray(candidate.formats) || candidate.formats.length === 0
+    || candidate.formats.some((format) => typeof format !== "string" || !STRUCTURED_IMAGE_MIMES.has(format))) return null;
+  if (!Number.isSafeInteger(candidate.maxImages) || Number(candidate.maxImages) <= 0
+    || !Number.isSafeInteger(candidate.maxRawBytesPerImage) || Number(candidate.maxRawBytesPerImage) <= 0
+    || !Number.isSafeInteger(candidate.maxEncodedBytesPerRequest) || Number(candidate.maxEncodedBytesPerRequest) <= 0) return null;
+  return candidate as unknown as RuntimeImageCapability;
+}
+
+function spawnImageNegotiationValue(value: unknown): SpawnImageNegotiation | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const candidate = value as Record<string, unknown>;
+  if (candidate.spawnTransport !== "tmux" && candidate.spawnTransport !== "structured") return null;
+  if (!candidate.imageInput || typeof candidate.imageInput !== "object" || Array.isArray(candidate.imageInput)) return null;
+  const imageInput = candidate.imageInput as Record<string, unknown>;
+  const claude = runtimeImageCapabilityValue(imageInput.claude);
+  const codex = runtimeImageCapabilityValue(imageInput.codex);
+  if (!claude || !codex) return null;
+  return { spawnTransport: candidate.spawnTransport, imageInput: { claude, codex } };
+}
 
 const ENGINES: { key: Engine; label: string }[] = [
   { key: "claude", label: "Claude" },
@@ -383,7 +413,15 @@ export function DraftAgentPane({
   const [deployConfirm, setDeployConfirmState] = useState(() => readField(draftId, "confirm"));
   const [accounts, setAccounts] = useState<{ id: string; label: string }[]>([]);
   const [dirs, setDirs] = useState<string[]>([]);
-  const [spawnImageNegotiation, setSpawnImageNegotiation] = useState<SpawnImageNegotiation | null>(null);
+  const spawnImageNegotiationKey = `${project}\n${src ?? ""}\n${engine}`;
+  const [storedSpawnImageNegotiation, setSpawnImageNegotiation] = useState<SpawnImageNegotiationState>({
+    status: "loading",
+    requestKey: spawnImageNegotiationKey,
+  });
+  const [spawnNegotiationAttempt, setSpawnNegotiationAttempt] = useState(0);
+  const spawnImageNegotiation: SpawnImageNegotiationState = storedSpawnImageNegotiation.requestKey === spawnImageNegotiationKey
+    ? storedSpawnImageNegotiation
+    : { status: "loading", requestKey: spawnImageNegotiationKey };
   const [attempt, setAttemptState] = useState<SpawnAttempt | null>(() => readAttempt(draftId));
   const [slowBoot, setSlowBoot] = useState(false);
   const attentionRef = useRef<HTMLDivElement>(null);
@@ -416,6 +454,7 @@ export function DraftAgentPane({
     writeField(draftId, "speed", value);
   };
   const setEngine = (value: Engine) => {
+    setSpawnImageNegotiation({ status: "loading", requestKey: `${project}\n${src ?? ""}\n${value}` });
     setEngineState(value);
     writeField(draftId, "engine", value);
     setModel(defaultModelFor(value));
@@ -490,8 +529,9 @@ export function DraftAgentPane({
     setAttemptState(value);
     writeField(draftId, "boot", value ? JSON.stringify(value) : "");
   }, [draftId]);
-  const structuredSpawnImageCapability = spawnImageNegotiation?.spawnTransport === "structured"
-    ? spawnImageNegotiation.imageInput[engine]
+  const readySpawnImageNegotiation = spawnImageNegotiation.status === "ready" ? spawnImageNegotiation.value : null;
+  const structuredSpawnImageCapability = readySpawnImageNegotiation?.spawnTransport === "structured"
+    ? readySpawnImageNegotiation.imageInput[engine]
     : null;
 
   /* While a spawn is in flight the whole draft is frozen (boot set), so the
@@ -509,16 +549,14 @@ export function DraftAgentPane({
      inherits the source transcript's own cwd over everything else. */
   useEffect(() => {
     let cancelled = false;
+    const requestKey = spawnImageNegotiationKey;
     fetch("/api/spawn?project=" + encodeURIComponent(project) + (src ? "&src=" + encodeURIComponent(src) : ""))
-      .then((res) => res.json() as Promise<{ dirs?: string[]; cwd?: string | null; cwdExists?: boolean; spawnTransport?: unknown; imageInput?: unknown }>)
+      .then(async (res) => {
+        if (!res.ok) throw new Error("spawn capability request failed");
+        return await res.json() as { dirs?: string[]; cwd?: string | null; cwdExists?: boolean; spawnTransport?: unknown; imageInput?: unknown };
+      })
       .then((json) => {
         if (cancelled) return;
-        if ((json.spawnTransport === "tmux" || json.spawnTransport === "structured") && json.imageInput && typeof json.imageInput === "object") {
-          const imageInput = json.imageInput as SpawnImageNegotiation["imageInput"];
-          if (typeof imageInput.claude?.supported === "boolean" && typeof imageInput.codex?.supported === "boolean") {
-            setSpawnImageNegotiation({ spawnTransport: json.spawnTransport, imageInput });
-          }
-        }
         if (Array.isArray(json.dirs)) setDirs(json.dirs);
         const inherited = typeof json.cwd === "string" ? json.cwd.trim() : "";
         const shouldInherit = Boolean(awaitingInheritedCwdRef.current && inherited);
@@ -533,12 +571,17 @@ export function DraftAgentPane({
           if (next !== prev) writeField(draftId, "cwd", next);
           return next;
         });
+        const negotiation = spawnImageNegotiationValue(json);
+        if (!negotiation) throw new Error("spawn capability response is invalid");
+        setSpawnImageNegotiation({ status: "ready", requestKey, value: negotiation });
       })
-      .catch(() => {});
+      .catch(() => {
+        if (!cancelled) setSpawnImageNegotiation({ status: "error", requestKey });
+      });
     return () => {
       cancelled = true;
     };
-  }, [project, draftId, src]);
+  }, [project, draftId, src, engine, spawnImageNegotiationKey, spawnNegotiationAttempt]);
 
   useEffect(() => {
     void fetch("/api/accounts").then(async (res) => {
@@ -634,13 +677,15 @@ export function DraftAgentPane({
   }, [attempt, submitAttempt]);
 
   const selectedRole = roles.find((role) => role.id === roleId) ?? null;
-  const spawnImagesDisabled = spawnImageNegotiation === null
-    || (spawnImageNegotiation.spawnTransport === "structured" && !spawnImageNegotiation.imageInput[engine].supported);
-  const spawnImagesReason = spawnImageNegotiation === null
+  const spawnImagesDisabled = spawnImageNegotiation.status !== "ready"
+    || (readySpawnImageNegotiation?.spawnTransport === "structured" && !readySpawnImageNegotiation.imageInput[engine].supported);
+  const spawnImagesReason = spawnImageNegotiation.status === "loading"
     ? t("composer.imageCapabilityLoading")
-    : spawnImageNegotiation.spawnTransport === "structured" && engine === "codex"
+    : spawnImageNegotiation.status === "error"
+      ? t("composer.imageCapabilityError")
+      : readySpawnImageNegotiation?.spawnTransport === "structured" && engine === "codex"
       ? t("composer.codexImagesVertical2")
-      : spawnImageNegotiation.spawnTransport === "structured" && !spawnImageNegotiation.imageInput[engine].supported
+      : readySpawnImageNegotiation?.spawnTransport === "structured" && !readySpawnImageNegotiation.imageInput[engine].supported
         ? t("composer.structuredImagesProtocol")
         : undefined;
 
@@ -853,6 +898,21 @@ export function DraftAgentPane({
         className="flex shrink-0 flex-col gap-1.5 border-t border-border bg-card px-2.5 py-2"
         aria-label={t("draft.promptAria")}
       >
+        {spawnImageNegotiation.status === "error" ? (
+          <div role="alert" className="flex items-center justify-between gap-2 rounded-control bg-danger-soft px-2 py-1 text-caption text-danger">
+            <span>{t("composer.imageCapabilityError")}</span>
+            <button
+              type="button"
+              className="shrink-0 rounded-control border border-danger/30 bg-card px-2 py-1 font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-danger/30"
+              onClick={() => {
+                setSpawnImageNegotiation({ status: "loading", requestKey: spawnImageNegotiationKey });
+                setSpawnNegotiationAttempt((attempt) => attempt + 1);
+              }}
+            >
+              {t("composer.imageCapabilityRetry")}
+            </button>
+          </div>
+        ) : null}
         <ComposerBar
           composer={composer}
           placeholder={t("draft.placeholder")}

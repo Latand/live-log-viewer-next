@@ -268,6 +268,8 @@ export const en = {
   "composer.codexImagesVertical2": "Codex image delivery is disabled until vertical 2.",
   "composer.structuredImagesProtocol": "This structured host has no negotiated image capability.",
   "composer.imageCapabilityLoading": "Image capability is loading.",
+  "composer.imageCapabilityError": "Image capability could not be loaded.",
+  "composer.imageCapabilityRetry": "Retry image check",
   "composer.attachTerminal": "Attach terminal viewer",
   "composer.attachTerminalReady": "terminal viewer ready in tmux {target}",
   "composer.attachTerminalFailed": "couldn't create the terminal viewer",
@@ -541,7 +543,7 @@ export const en = {
   "img.error": "image error",
   "img.previewAlt": "image preview {n}",
   "img.removeAria": "Remove image {n}",
-  "img.toFilePaths": "as file paths",
+  "img.deliveryHint": "attached to the message",
 
   // QuestionCard
   "question.sec": "{n} s",
