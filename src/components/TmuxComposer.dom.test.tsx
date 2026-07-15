@@ -93,6 +93,75 @@ test("interrupt automatic retry shows visible busy feedback in Ukrainian", () =>
   flushSync(() => root.unmount());
 });
 
+test("multiple delivery attempts collapse into one bounded accessible receipt stack", () => {
+  setLocale("uk");
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  const text = "Критичний user policy для structured delivery";
+
+  flushSync(() => root.render(
+    <RuntimeComposerReceipts
+      receipts={[
+        {
+          operationId: "op-current",
+          idempotencyKey: "key-current",
+          conversationId: "conv-one",
+          kind: "send",
+          status: "queued",
+          text,
+          at: "2026-07-15T16:00:02.000Z",
+          revision: 1,
+        },
+        {
+          operationId: "op-stale-one",
+          idempotencyKey: "key-stale-one",
+          conversationId: "conv-one",
+          kind: "send",
+          status: "rejected",
+          reason: "stale-turn",
+          text,
+          at: "2026-07-15T16:00:01.000Z",
+          revision: 1,
+        },
+        {
+          operationId: "op-stale-two",
+          idempotencyKey: "key-stale-two",
+          conversationId: "conv-one",
+          kind: "send",
+          status: "rejected",
+          reason: "stale-turn",
+          text,
+          at: "2026-07-15T16:00:00.000Z",
+          revision: 1,
+        },
+      ]}
+      onRetry={() => {}}
+      onEdit={() => {}}
+    />,
+  ));
+
+  const stack = host.querySelector("details[data-runtime-receipt-stack]") as HTMLDetailsElement;
+  expect(stack).toBeTruthy();
+  expect(stack.open).toBe(false);
+  const summary = stack.querySelector("summary")!;
+  expect(summary.textContent).toContain("Спроб доставки: 3");
+  expect(summary.textContent).toContain("черга: 1");
+  expect(summary.textContent).toContain("проблем: 2");
+  expect(summary.querySelector("[data-receipt-preview]")?.textContent).toBe(text);
+  expect(summary.getAttribute("aria-label")).toContain("Показати деталі доставки");
+
+  const details = stack.querySelector("[data-runtime-receipt-details]") as HTMLElement;
+  expect(details.className).toContain("max-h-");
+  expect(details.className).toContain("overflow-y-auto");
+  expect(details.querySelectorAll("[data-operation]")).toHaveLength(3);
+  const actions = [...details.querySelectorAll("button")];
+  expect(actions).toHaveLength(2);
+  expect(actions.every((button) => button.textContent?.includes("Змінити й надіслати"))).toBe(true);
+
+  flushSync(() => root.unmount());
+});
+
 test("editing a rejected receipt does not submit the composer form", () => {
   let edits = 0;
   let submits = 0;

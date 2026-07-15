@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 
-import { ArrowRight, ArrowUpToLine, FoldVertical, Loader2, Play, Square, SquareTerminal, X } from "@/components/icons";
+import { ArrowRight, ArrowUpToLine, ChevronRight, FoldVertical, Loader2, Play, Square, SquareTerminal, X } from "@/components/icons";
 import { Check, Plus, RotateCcw } from "lucide-react";
 
 import type { TFunction } from "@/lib/i18n";
@@ -81,59 +81,124 @@ export function RuntimeComposerReceipts({
   onEdit: (receipt: RuntimeReceipt) => void;
 }) {
   const { t } = useLocale();
-  return receipts.map((receipt) => {
-    const messageOperation = receipt.kind === "send" || receipt.kind === "steer";
-    const failed = receipt.status === "failed";
-    const rejected = receipt.status === "rejected";
-    // Operation receipts cap text at 240 characters. Durable retry reads the
-    // complete journaled request; editing is safe only for an uncapped summary.
-    const editable = messageOperation
-      && (failed || rejected)
-      && typeof receipt.text === "string"
-      && receipt.text.length > 0
-      && receipt.text.length < 240;
-    if (messageOperation && receipt.status === "delivered") return null;
-    if (messageOperation && receipt.text) {
-      const pending = !receiptIsTerminal(receipt.status);
-      const busyRetry = pending
-        && typeof receipt.reason === "string"
-        && RECOVERABLE_BUSY_RETRY_REASONS.has(receipt.reason);
-      const pendingLabel = t(busyRetry ? "runtime.receipt.busyRetry" : "runtime.receipt.pending");
-      return (
-        <div
-          key={receipt.operationId}
-          className="flex w-full justify-end"
-          {...(pending ? { "data-optimistic-message": "true" } : {})}
-        >
-          <div className="flex max-w-[85%] flex-col items-end gap-1 rounded-surface bg-accent/10 px-2.5 py-1.5 text-ui text-primary">
-            <span className="whitespace-pre-wrap break-words text-right">{receipt.text}</span>
-            {pending ? (
-              <span className="inline-flex items-center gap-1.5 text-caption text-muted" role="status" aria-live="polite">
-                <span className={busyRetry ? undefined : "sr-only"}>{pendingLabel}</span>
-                <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-muted motion-reduce:animate-none" aria-hidden />
-              </span>
-            ) : (
-              <ReceiptChip
-                receipt={receipt}
-                actionsDisabled={actionsDisabled}
-                onRetry={failed ? () => onRetry(receipt) : undefined}
-                onEdit={editable ? () => onEdit(receipt) : undefined}
-              />
-            )}
-          </div>
-        </div>
-      );
-    }
-    return (
-      <ReceiptChip
-        key={receipt.operationId}
-        receipt={receipt}
-        actionsDisabled={actionsDisabled}
-        onRetry={messageOperation && failed ? () => onRetry(receipt) : undefined}
-        onEdit={editable ? () => onEdit(receipt) : undefined}
-      />
-    );
+  const isMessage = (receipt: RuntimeReceipt) => receipt.kind === "send" || receipt.kind === "steer";
+  const editable = (receipt: RuntimeReceipt) => isMessage(receipt)
+    && (receipt.status === "failed" || receipt.status === "rejected")
+    && typeof receipt.text === "string"
+    && receipt.text.length > 0
+    && receipt.text.length < 240;
+  const messageReceipts = receipts
+    .filter((receipt) => isMessage(receipt) && receipt.status !== "delivered" && Boolean(receipt.text))
+    .sort((left, right) => Date.parse(right.at) - Date.parse(left.at));
+  const standaloneReceipts = receipts.filter((receipt) => {
+    if (isMessage(receipt) && receipt.status === "delivered") return false;
+    return !isMessage(receipt) || !receipt.text;
   });
+  const pendingReceipts = messageReceipts.filter((receipt) => !receiptIsTerminal(receipt.status));
+  const problemReceipts = messageReceipts.filter((receipt) => receipt.status === "failed" || receipt.status === "rejected");
+  const busyRetry = pendingReceipts.some((receipt) => typeof receipt.reason === "string" && RECOVERABLE_BUSY_RETRY_REASONS.has(receipt.reason));
+
+  return (
+    <>
+      {messageReceipts.length ? (
+        <details
+          className="group w-full min-w-0 rounded-control border border-border bg-sunken/55 text-caption text-secondary"
+          data-runtime-receipt-stack
+        >
+          <summary
+            aria-label={t("runtime.receipt.showDetails")}
+            className="flex min-h-8 cursor-pointer list-none items-center gap-1.5 rounded-control px-2 py-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 [&::-webkit-details-marker]:hidden"
+          >
+            <ChevronRight className="h-3 w-3 shrink-0 text-muted transition-transform duration-150 group-open:rotate-90 motion-reduce:transition-none" aria-hidden />
+            <span className="shrink-0 font-semibold text-primary">
+              {t("runtime.receipt.summary", { count: messageReceipts.length })}
+            </span>
+            <span
+              className="min-w-0 flex-1 truncate text-right text-muted"
+              data-receipt-preview
+              title={messageReceipts[0]!.text ?? undefined}
+            >
+              {messageReceipts[0]!.text}
+            </span>
+            {pendingReceipts.length ? (
+              <Badge
+                tone="warning"
+                role="status"
+                aria-live="polite"
+                className={busyRetry ? "max-w-[42%] overflow-hidden" : ""}
+                title={busyRetry ? t("runtime.receipt.busyRetry") : undefined}
+              >
+                <span className={busyRetry ? "truncate" : undefined}>
+                  {busyRetry
+                    ? t("runtime.receipt.busyRetry")
+                    : t("runtime.receipt.pendingCount", { count: pendingReceipts.length })}
+                </span>
+              </Badge>
+            ) : null}
+            {problemReceipts.length ? (
+              <Badge tone="danger" role="status" aria-live="polite">
+                {t("runtime.receipt.problemCount", { count: problemReceipts.length })}
+              </Badge>
+            ) : null}
+          </summary>
+          <div
+            className="max-h-36 space-y-1 overflow-y-auto border-t border-border/70 p-1.5"
+            data-runtime-receipt-details
+          >
+            {messageReceipts.map((receipt) => {
+              const failed = receipt.status === "failed";
+              const pending = !receiptIsTerminal(receipt.status);
+              const retryingBusy = pending
+                && typeof receipt.reason === "string"
+                && RECOVERABLE_BUSY_RETRY_REASONS.has(receipt.reason);
+              const pendingLabel = t(retryingBusy ? "runtime.receipt.busyRetry" : "runtime.receipt.pending");
+              return (
+                <div
+                  key={receipt.operationId}
+                  className="flex min-w-0 items-center justify-end gap-1.5 rounded-control bg-card/70 px-2 py-1"
+                  {...(pending ? { "data-optimistic-message": "true" } : {})}
+                >
+                  <span className="min-w-0 flex-1 truncate text-right text-secondary" title={receipt.text ?? undefined}>
+                    {receipt.text}
+                  </span>
+                  {pending ? (
+                    <span
+                      className="inline-flex shrink-0 items-center gap-1.5 text-caption text-muted"
+                      role="status"
+                      aria-live="polite"
+                      data-operation={receipt.operationId}
+                    >
+                      <span className={retryingBusy ? undefined : "sr-only"}>{pendingLabel}</span>
+                      <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-muted motion-reduce:animate-none" aria-hidden />
+                    </span>
+                  ) : (
+                    <ReceiptChip
+                      receipt={receipt}
+                      actionsDisabled={actionsDisabled}
+                      onRetry={failed ? () => onRetry(receipt) : undefined}
+                      onEdit={editable(receipt) ? () => onEdit(receipt) : undefined}
+                    />
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </details>
+      ) : null}
+      {standaloneReceipts.map((receipt) => {
+        const failed = receipt.status === "failed";
+        return (
+          <ReceiptChip
+            key={receipt.operationId}
+            receipt={receipt}
+            actionsDisabled={actionsDisabled}
+            onRetry={isMessage(receipt) && failed ? () => onRetry(receipt) : undefined}
+            onEdit={editable(receipt) ? () => onEdit(receipt) : undefined}
+          />
+        );
+      })}
+    </>
+  );
 }
 
 /** A receipt still awaiting durable delivery (a migration hold) must never be
