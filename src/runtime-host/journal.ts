@@ -284,6 +284,13 @@ export class RuntimeJournal {
   }
 
   executeOperation(command: RuntimeOperationCommand): RuntimeOperationResult {
+    return this.executeOperationWithLineage(command);
+  }
+
+  private executeOperationWithLineage(
+    command: RuntimeOperationCommand,
+    retryOfOperationId?: string,
+  ): RuntimeOperationResult {
     this.assertHealthy();
     this.assertOperation(command);
     const operationId = command.operationId?.trim() || newOperationId();
@@ -303,7 +310,7 @@ export class RuntimeJournal {
       }
       const operationOwner = this.db.query<{ idempotency_key: string }, [string]>("SELECT idempotency_key FROM operations WHERE operation_id = ?").get(operationId);
       if (operationOwner) throw new RuntimeIdempotencyConflictError("operationId already belongs to another request");
-      const receipt = this.operationReceipt(command, operationId);
+      const receipt = this.operationReceipt(command, operationId, retryOfOperationId);
       const effectPayload = command.kind === "answer"
         ? { ...command, operationId, resolution: this.encryptSecret(command.resolution) }
         : {
@@ -454,11 +461,11 @@ export class RuntimeJournal {
           replayed: true,
         };
       }
-      return this.executeOperation({
+      return this.executeOperationWithLineage({
         ...command,
         operationId: replacementOperationId,
         idempotencyKey: nextIdempotencyKey,
-      });
+      }, operationId);
     }
     this.db.exec("BEGIN IMMEDIATE");
     try {
@@ -883,7 +890,11 @@ export class RuntimeJournal {
     }
   }
 
-  private operationReceipt(command: RuntimeOperationCommand, operationId: string): RuntimeOperationReceipt {
+  private operationReceipt(
+    command: RuntimeOperationCommand,
+    operationId: string,
+    retryOfOperationId?: string,
+  ): RuntimeOperationReceipt {
     const session = this.entity<RuntimeSession>("session", command.conversationId);
     let status: RuntimeReceiptStatus;
     let reason: string | null = null;
@@ -965,6 +976,7 @@ export class RuntimeJournal {
     const revision = Number(this.db.query<{ revision: number }, [string]>("SELECT revision FROM scope_revisions WHERE scope = ?").get(`operation:${operationId}`)?.revision ?? 0) + 1;
     return {
       operationId,
+      ...(retryOfOperationId ? { retryOfOperationId } : {}),
       idempotencyKey: command.idempotencyKey,
       conversationId: command.conversationId,
       kind: command.kind,

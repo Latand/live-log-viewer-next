@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, mock, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, expect, mock, test } from "bun:test";
 import { Window } from "happy-dom";
 import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
@@ -6,9 +6,11 @@ import { createRoot } from "react-dom/client";
 import { FLOWS_CHANGED_EVENT } from "@/components/flows/flowModel";
 
 let revisionListener: ((revision: number) => void) | null = null;
+let runtimeUiEnabled = false;
+const actualRuntimeBus = await import("./runtimeBus");
 
 mock.module("./runtimeBus", () => ({
-  isRuntimeUiEnabled: () => true,
+  isRuntimeUiEnabled: () => runtimeUiEnabled,
   getRuntimeBus: () => ({
     getState: () => ({ connection: "live" }),
     subscribe: () => () => {},
@@ -32,6 +34,10 @@ Object.assign(globalThis, {
 
 const originalFetch = globalThis.fetch;
 
+beforeAll(() => {
+  runtimeUiEnabled = true;
+});
+
 beforeEach(() => {
   resetFilesClientCacheForTests();
 });
@@ -40,6 +46,11 @@ afterEach(() => {
   globalThis.fetch = originalFetch;
   revisionListener = null;
   document.body.replaceChildren();
+});
+
+afterAll(() => {
+  runtimeUiEnabled = false;
+  mock.module("./runtimeBus", () => actualRuntimeBus);
 });
 
 function Probe() {

@@ -66,7 +66,11 @@ export function mergeRuntimeReceipts(
     const current = merged.get(receipt.operationId);
     if (!current || receipt.revision > current.revision) merged.set(receipt.operationId, receipt);
   }
-  return [...merged.values()];
+  const supersededOperationIds = new Set<string>();
+  for (const receipt of merged.values()) {
+    if (receipt.retryOfOperationId) supersededOperationIds.add(receipt.retryOfOperationId);
+  }
+  return [...merged.values()].filter((receipt) => !supersededOperationIds.has(receipt.operationId));
 }
 
 export function RuntimeComposerReceipts({

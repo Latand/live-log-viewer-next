@@ -360,6 +360,7 @@ test("terminal delivery retry on a replacement host mints one fresh operation", 
   expect(retried.receipt).toMatchObject({
     idempotencyKey: "key-after-replacement",
     status: "queued",
+    retryOfOperationId: "op-before-replacement",
   });
   expect(replayed).toMatchObject({
     operationId: retried.operationId,
@@ -383,6 +384,67 @@ test("terminal delivery retry on a replacement host mints one fresh operation", 
         idempotencyKey: "key-after-replacement",
         text,
       }),
+    }),
+  ]);
+  journal.transitionOperation(retried.operationId, "delivering");
+  const delivered = journal.transitionOperation(retried.operationId, "delivered", { turnId: "turn-after" });
+  expect(delivered.receipt).toMatchObject({
+    status: "delivered",
+    retryOfOperationId: "op-before-replacement",
+  });
+  journal.close();
+
+  const reopened = new RuntimeJournal(path.join(dir, "events.sqlite"), { structuredHosts: true });
+  expect(reopened.operationResult(retried.operationId)?.receipt).toMatchObject({
+    status: "delivered",
+    retryOfOperationId: "op-before-replacement",
+  });
+  expect(reopened.operationResult("op-before-replacement")?.receipt.status).toBe("failed");
+  reopened.close();
+});
+
+test("a failed replacement retries from the current attempt and keeps one pending effect", () => {
+  const dir = sandbox("replacement-retry-chain");
+  const journal = new RuntimeJournal(path.join(dir, "events.sqlite"), { structuredHosts: true });
+  journal.append({
+    scope: runtimeScope("session", "conv-retry-chain"),
+    kind: "session-status",
+    payload: {
+      conversationId: "conv-retry-chain",
+      sessionKey: { engine: "codex", sessionId: "thread-chain" },
+      hostKind: "codex-app-server",
+      host: "hosted",
+      turn: "idle",
+      provenance: "structured",
+      capabilities: { steer: true, structuredAttention: true },
+    },
+  });
+  journal.executeOperation({
+    kind: "send",
+    operationId: "op-chain-original",
+    idempotencyKey: "key-chain-original",
+    conversationId: "conv-retry-chain",
+    text: "deliver once across generations",
+    policy: "queue",
+  });
+  journal.transitionOperation("op-chain-original", "delivering");
+  journal.transitionOperation("op-chain-original", "failed", { reason: "dead-host" });
+  const replacement = journal.retryOperation("op-chain-original", "key-chain-replacement");
+  journal.transitionOperation(replacement.operationId, "delivering");
+  journal.transitionOperation(replacement.operationId, "failed", { reason: "dead-host" });
+
+  const current = journal.retryOperation(replacement.operationId, "key-chain-current");
+  const repeated = journal.retryOperation(replacement.operationId, "key-chain-another-click");
+
+  expect(current.receipt).toMatchObject({
+    status: "queued",
+    retryOfOperationId: replacement.operationId,
+  });
+  expect(repeated).toMatchObject({ operationId: current.operationId, replayed: true });
+  expect(journal.effectBatch()).toEqual([
+    expect.objectContaining({
+      id: `effect:${current.operationId}`,
+      payload: expect.objectContaining({ text: "deliver once across generations" }),
     }),
   ]);
   journal.close();

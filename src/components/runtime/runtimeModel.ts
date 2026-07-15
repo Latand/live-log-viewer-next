@@ -188,6 +188,8 @@ export interface RuntimeAttention {
 
 export interface RuntimeReceipt {
   operationId: string;
+  /** The terminal attempt this operation replaces, when it was created by Retry. */
+  retryOfOperationId?: string | null;
   idempotencyKey: string;
   conversationId: string;
   kind: OperationKind;

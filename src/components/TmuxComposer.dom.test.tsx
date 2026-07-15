@@ -6,7 +6,7 @@ import { createRoot } from "react-dom/client";
 import { setLocale, translate } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
 
-import { appendComposerDraft, RuntimeComposerReceipts, TmuxComposer } from "./TmuxComposer";
+import { appendComposerDraft, mergeRuntimeReceipts, RuntimeComposerReceipts, TmuxComposer } from "./TmuxComposer";
 
 const dom = new Window();
 Object.assign(globalThis, {
@@ -127,6 +127,43 @@ test("editing a rejected receipt does not submit the composer form", () => {
   expect(edits).toBe(1);
   expect(submits).toBe(0);
   expect(edit!.getAttribute("type")).toBe("button");
+  flushSync(() => root.unmount());
+});
+
+test("a failed replacement exposes one retry action for the current attempt", () => {
+  const retried: string[] = [];
+  const original = {
+    operationId: "op-retry-original",
+    idempotencyKey: "key-retry-original",
+    conversationId: "conv-one",
+    kind: "send" as const,
+    status: "failed" as const,
+    reason: "dead-host",
+    text: "try this again",
+    at: "2026-07-13T00:00:00.000Z",
+    revision: 3,
+  };
+  const replacement = {
+    ...original,
+    operationId: "op-retry-replacement",
+    idempotencyKey: "key-retry-replacement",
+    retryOfOperationId: original.operationId,
+  };
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  flushSync(() => root.render(
+    <RuntimeComposerReceipts
+      receipts={mergeRuntimeReceipts([original, replacement], [])}
+      onRetry={(receipt) => { retried.push(receipt.operationId); }}
+      onEdit={() => {}}
+    />,
+  ));
+
+  const retryButtons = [...host.querySelectorAll("button")].filter((button) => button.textContent?.includes("Retry"));
+  expect(retryButtons).toHaveLength(1);
+  flushSync(() => retryButtons[0]!.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event));
+  expect(retried).toEqual([replacement.operationId]);
   flushSync(() => root.unmount());
 });
 
