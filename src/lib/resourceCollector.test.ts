@@ -100,6 +100,36 @@ describe("resource collector", () => {
     expect(stderr).not.toContain("stderr-secret");
   });
 
+  test("stderr tail truncation preserves every UTF-8 boundary", async () => {
+    for (const character of ["é", "€", "😀"]) {
+      const width = Buffer.byteLength(character);
+      for (let offset = 0; offset < width; offset += 1) {
+        const marker = `\ntail-${width}-${offset}`;
+        const suffixBytes = RESOURCE_FAILURE_STDERR_MAX_BYTES - width + offset;
+        const fillerBytes = suffixBytes - Buffer.byteLength(marker);
+        const filler = "s ".repeat(Math.floor(fillerBytes / 2)) + "s".repeat(fillerBytes % 2);
+        const stderrInput = `prefix${character}${filler}${marker}`;
+        const collector = createResourceCollector({
+          collectorId: `utf8-${width}-${offset}`,
+          collect: async () => {
+            throw new ResourceCollectorFailureError(
+              "collector-crash",
+              "collector-error",
+              "resource collection failed",
+              { stderr: stderrInput },
+            );
+          },
+        });
+
+        const result = await collector.observe(0, 1_000);
+        const stderr = result.failure?.diagnostic.stderr ?? "";
+        expect(Buffer.byteLength(stderr), `width ${width}, offset ${offset}`).toBeLessThanOrEqual(RESOURCE_FAILURE_STDERR_MAX_BYTES);
+        expect(stderr.includes("\uFFFD"), `width ${width}, offset ${offset}`).toBeFalse();
+        expect(stderr.endsWith(marker), `width ${width}, offset ${offset}`).toBeTrue();
+      }
+    }
+  });
+
   test("concurrent callers coalesce only when their fences are already satisfied", async () => {
     const first = deferred<string>();
     const second = deferred<string>();

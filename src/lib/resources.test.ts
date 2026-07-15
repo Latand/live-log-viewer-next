@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -115,6 +115,23 @@ function processExists(pid: number): boolean {
   }
 }
 
+function directorySnapshot(root: string): Array<readonly [string, "directory" | "file", number, string?]> {
+  const snapshot: Array<readonly [string, "directory" | "file", number, string?]> = [];
+  const visit = (directory: string, relative: string) => {
+    const stat = lstatSync(directory);
+    snapshot.push([relative || ".", "directory", stat.mode & 0o777]);
+    for (const name of readdirSync(directory).sort()) {
+      const pathname = path.join(directory, name);
+      const childRelative = relative ? path.join(relative, name) : name;
+      const child = lstatSync(pathname);
+      if (child.isDirectory()) visit(pathname, childRelative);
+      else snapshot.push([childRelative, "file", child.mode & 0o777, readFileSync(pathname).toString("base64")]);
+    }
+  };
+  visit(root, "");
+  return snapshot;
+}
+
 async function expectProcessAbsentAfterQuietInterval(pid: number, label: string): Promise<void> {
   for (let attempt = 0; attempt < 20 && processExists(pid); attempt += 1) {
     await new Promise((resolve) => setTimeout(resolve, 10));
@@ -175,6 +192,70 @@ function workerTestReader(options: Parameters<typeof createResourcesReader>[4] =
 }
 
 describe("resource observation", () => {
+  test("the packaged worker leaves writable and read-only homes and state trees byte-identical", async () => {
+    const directory = mkdtempSync(path.join(os.tmpdir(), "llv-resource-package-purity-"));
+    const bundleName = "packaged-resource-worker.mjs";
+    try {
+      const built = await Bun.build({
+        entrypoints: [path.join(import.meta.dir, "resourceCollector.worker.ts")],
+        outdir: directory,
+        target: "node",
+        format: "esm",
+        naming: bundleName,
+      });
+      expect(built.success).toBeTrue();
+
+      for (const writable of [true, false]) {
+        const caseDirectory = path.join(directory, writable ? "writable" : "read-only");
+        const home = path.join(caseDirectory, "home");
+        const state = path.join(caseDirectory, "state");
+        mkdirSync(home, { recursive: true });
+        mkdirSync(state, { recursive: true });
+        writeFileSync(path.join(state, "sentinel"), "state-bytes\n");
+        if (!writable) chmodSync(home, 0o500);
+        const homeBefore = directorySnapshot(home);
+        const stateBefore = directorySnapshot(state);
+        const env: Record<string, string | undefined> = {
+          ...process.env,
+          HOME: home,
+          LLV_STATE_DIR: state,
+          LLV_AGENT_REGISTRY_SQLITE: "off",
+          PATH: "/usr/bin:/bin",
+        };
+        delete env.XDG_CONFIG_HOME;
+        delete env.XDG_CACHE_HOME;
+        delete env.LLV_RESOURCE_COLLECTOR_IN_PROCESS;
+        delete env.LLV_RESOURCE_OBSERVATION_WORKER;
+        const child = Bun.spawn(["/usr/bin/node", path.join(directory, bundleName)], {
+          cwd: process.cwd(),
+          env,
+          stdin: new Blob(["{\"type\":\"collect\",\"fresh\":false,\"files\":[]}\n"]),
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+        const [exit, stdout, stderr] = await Promise.all([
+          child.exited,
+          new Response(child.stdout).text(),
+          new Response(child.stderr).text(),
+        ]);
+
+        expect(exit, writable ? "writable home" : "read-only home").toBe(0);
+        expect(stderr, writable ? "writable home" : "read-only home").toBe("");
+        expect(JSON.parse(stdout), writable ? "writable home" : "read-only home").toMatchObject({
+          type: "observation",
+          diagnostic: { status: "complete", fresh: false },
+        });
+        expect(directorySnapshot(home), writable ? "writable home" : "read-only home").toEqual(homeBefore);
+        expect(directorySnapshot(state), writable ? "writable state" : "read-only state").toEqual(stateBefore);
+        if (!writable) chmodSync(home, 0o700);
+      }
+    } finally {
+      const readOnlyHome = path.join(directory, "read-only", "home");
+      if (existsSync(readOnlyHome)) chmodSync(readOnlyHome, 0o700);
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   test("the collector child leaves shared state byte-identical", async () => {
     const directory = mkdtempSync(path.join(os.tmpdir(), "llv-resource-purity-"));
     const home = path.join(directory, "home");
@@ -196,12 +277,24 @@ describe("resource observation", () => {
       stderr: "pipe",
     });
     try {
-      const exit = await Promise.race([
+      let timedOut = false;
+      const timer = setTimeout(() => {
+        timedOut = true;
+        child.kill("SIGKILL");
+      }, 5_000);
+      const [exit, stdout, stderr] = await Promise.all([
         child.exited,
-        new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), 5_000)),
+        new Response(child.stdout).text(),
+        new Response(child.stderr).text(),
       ]);
-      if (exit === "timeout") child.kill("SIGKILL");
+      clearTimeout(timer);
+      expect(timedOut).toBeFalse();
       expect(exit).toBe(0);
+      expect(stderr).toBe("");
+      expect(JSON.parse(stdout)).toMatchObject({
+        type: "observation",
+        diagnostic: { status: "complete", fresh: false },
+      });
       expect(existsSync(staleRegistryTemp)).toBeTrue();
       expect(readFileSync(scanSentinel)).toEqual(before);
     } finally {
@@ -696,6 +789,31 @@ describe("kill-target allowlist", () => {
 });
 
 describe("resource recurring reads", () => {
+  test("an exited leader cleans up a TERM-resistant descendant that holds both output pipes", async () => {
+    await withResourceWorkerScript((directory) => {
+      const descendantPid = path.join(directory, "descendant-pid");
+      const ready = path.join(directory, "descendant-ready");
+      return [
+        `printf '%s' "$$" > "${path.join(directory, "pid")}"`,
+        `sh -c 'trap "" TERM INT; printf "%s" "$$" > "$1"; : > "$2"; while :; do sleep 1; done' sh "${descendantPid}" "${ready}" &`,
+        `while [ ! -e "${ready}" ]; do sleep 0.01; done`,
+        "exit 0",
+      ];
+    }, async (directory) => {
+      const startedAt = performance.now();
+      const outcome = await workerTestReader({ workerLimits: { timeoutMs: 500, closeTimeoutMs: 25 } }).read(true);
+      const elapsedMs = performance.now() - startedAt;
+
+      expect(outcome).toMatchObject({ diagnostic: {
+        degradedReason: "collector-crash",
+        failure: { cause: "worker-exit" },
+      } });
+      expect(elapsedMs).toBeLessThan(250);
+      await expectProcessAbsentAfterQuietInterval(Number(readFileSync(path.join(directory, "pid"), "utf8")), "exited leader");
+      await expectProcessAbsentAfterQuietInterval(Number(readFileSync(path.join(directory, "descendant-pid"), "utf8")), "pipe-holding descendant");
+    });
+  });
+
   test("a near-limit handoff to an immediately exiting worker keeps the parent alive and releases the worker", async () => {
     await withResourceWorkerScript((directory) => [
       `printf '%s' "$$" > "${path.join(directory, "pid")}"`,

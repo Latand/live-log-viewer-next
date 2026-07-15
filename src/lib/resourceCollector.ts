@@ -85,8 +85,14 @@ function boundedDiagnosticText(value: string, maxBytes: number, tail = false): s
   const redacted = redactDiagnosticText(value);
   const bytes = Buffer.from(redacted);
   if (bytes.length <= maxBytes) return redacted;
-  const bounded = tail ? bytes.subarray(bytes.length - maxBytes) : bytes.subarray(0, maxBytes);
-  return bounded.toString("utf8").replace(/^\uFFFD|\uFFFD$/g, "");
+  if (tail) {
+    let start = bytes.length - maxBytes;
+    while (start < bytes.length && (bytes[start] & 0xc0) === 0x80) start += 1;
+    return bytes.subarray(start).toString("utf8");
+  }
+  let end = maxBytes;
+  while (end > 0 && (bytes[end] & 0xc0) === 0x80) end -= 1;
+  return bytes.subarray(0, end).toString("utf8");
 }
 
 function diagnosticCauses(error: unknown): string[] {

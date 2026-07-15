@@ -688,6 +688,8 @@ async function collectResourcesInWorker(
     let outputBytes = 0;
     let stderrTail = "";
     let closeTimer: ReturnType<typeof setTimeout> | undefined;
+    let cleanupStarted = false;
+    let leaderExited = false;
     const workerFailure = (
       reason: ResourceDegradedReason,
       cause: ResourceFailureCause,
@@ -705,19 +707,19 @@ async function collectResourcesInWorker(
         return (error as NodeJS.ErrnoException).code !== "ESRCH";
       }
     };
-    const signalWorkerGroup = (signal: NodeJS.Signals) => {
-      if (typeof pid !== "number") return;
-      const workerExited = worker.exitCode !== null || worker.signalCode !== null;
-      if (!workerExited && !sameWorker()) return;
+    const signalWorkerGroup = (signal: NodeJS.Signals): boolean => {
+      if (typeof pid !== "number") return false;
+      if (!leaderExited && !sameWorker()) return false;
       try {
         process.kill(-pid, signal);
       } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ESRCH" && !workerExited) worker.kill(signal);
+        if ((error as NodeJS.ErrnoException).code !== "ESRCH" && !leaderExited) worker.kill(signal);
       }
+      return true;
     };
     const terminate = () => {
-      signalWorkerGroup("SIGTERM");
-      if (closeTimer) return;
+      if (cleanupStarted || !signalWorkerGroup("SIGTERM")) return;
+      cleanupStarted = true;
       closeTimer = setTimeout(() => {
         if (workerGroupExists()) signalWorkerGroup("SIGKILL");
       }, closeTimeoutMs);
@@ -739,6 +741,11 @@ async function collectResourcesInWorker(
       "resource collector worker failed to start",
       error,
     ))));
+    worker.once("exit", () => {
+      leaderExited = true;
+      clearTimeout(timeout);
+      terminate();
+    });
     worker.once("close", (code, signal) => {
       clearTimeout(timeout);
       if (!outcome) {

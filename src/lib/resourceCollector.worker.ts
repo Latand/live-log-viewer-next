@@ -1,3 +1,5 @@
+import "./resourceCollector.workerMode";
+
 import { parentPort } from "node:worker_threads";
 
 import { createTranscriptHostObserver } from "./agent/transcriptHost";
@@ -6,8 +8,6 @@ import { agentProcesses } from "./scanner/process";
 import { buildResourceSnapshot, lastResourceBuildDiagnostic, lastResourceTargetRefs, RESOURCE_WORKER_OUTPUT_MAX_BYTES, type ResourceWorkerFileObservation } from "./resources";
 import { captureTmuxAttachReferences, panePidMap, tmuxServerPid } from "./tmux";
 import type { FileEntry } from "./types";
-
-process.env.LLV_RESOURCE_OBSERVATION_WORKER = "1";
 
 function send(message: unknown): void {
   if (parentPort) {
