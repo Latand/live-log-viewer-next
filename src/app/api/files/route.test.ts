@@ -104,7 +104,7 @@ afterAll(() => {
 });
 
 const { cachedFileScan, currentFileScan, resetFilesRouteCacheForTests } = await import("@/lib/scanner/scanCache");
-const { allowedKillTarget, buildResourceSnapshot, noteSessionTargets, readResourceFileSnapshot } = await import("@/lib/resources");
+const { allowedKillTarget, buildResourceSnapshot, lastResourceTargetRefs, noteSessionTargets, readResourceFileSnapshot } = await import("@/lib/resources");
 const { GET } = await import("./route");
 
 test("repeated files reads reuse the pure read snapshot and retain ETag behavior", async () => {
@@ -410,7 +410,8 @@ test("a fresh resource snapshot fences a pre-kill refresh before host election",
     activity: "recent",
     lastActiveAt: "1970-01-01T00:00:02.000Z",
   })]);
-  expect(allowedKillTarget("agents:after")).toEqual(resourceRef);
+  expect(lastResourceTargetRefs()).toEqual([{ target: "agents:after", ref: resourceRef }]);
+  expect(allowedKillTarget("agents:after")).toBeNull();
   expect(allowedKillTarget("agents:before")).toBeNull();
 });
 

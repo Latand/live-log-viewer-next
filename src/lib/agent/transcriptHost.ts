@@ -4,7 +4,7 @@ import { sessionKeyFromTranscript } from "@/lib/agent/sessionKey";
 import { procBackend } from "@/lib/proc";
 import { descendantPids } from "@/lib/proc/memory";
 import { listFiles } from "@/lib/scanner";
-import { agentProcesses, argvEngine, pidAlive, readArgv, readPpid, type AgentProcess } from "@/lib/scanner/process";
+import { agentProcesses, argvEngine, pidAlive, pidHoldsPath, readArgv, readPpid, type AgentProcess } from "@/lib/scanner/process";
 import {
   panePidMap,
   panePidOf,
@@ -98,6 +98,7 @@ export interface TranscriptHostObservationDependencies {
   serverPid: () => Promise<number | null>;
   resumeRecords: () => ReturnType<typeof resumePaneRecords>;
   identity: (pid: number) => string | null;
+  holdsPath?: (pid: number, pathname: string) => boolean;
   launchId?: (paneId: string) => Promise<string | null>;
   conversationIdForPath?: (pathname: string) => string | null;
   reconcile?: (hosts: TranscriptHost[]) => HostReconciliation | void | Promise<HostReconciliation | void>;
@@ -180,10 +181,18 @@ function claimsForAgent(
   entriesByPid: Map<number, FileEntry>,
   entriesByUuid: Map<string, FileEntry>,
   records: Awaited<ReturnType<typeof resumePaneRecords>>,
+  holdsPath: (pid: number, pathname: string) => boolean,
 ): HostClaim[] {
   const claims: HostClaim[] = [];
   const direct = entriesByPid.get(agent.pid);
-  if (direct?.engine === agent.engine) claims.push({ pathname: direct.path, source: "scanner" });
+  const argvUuid = argvSessionUuid(agent.argv);
+  const directUuid = direct ? sessionUuid(direct.path) : null;
+  if (direct?.engine === agent.engine && (
+    (argvUuid !== null && directUuid !== null && argvUuid === directUuid)
+    || holdsPath(agent.pid, direct.path)
+  )) {
+    claims.push({ pathname: direct.path, source: "scanner" });
+  }
 
   if (records) {
     for (const [pathname, record] of records.records) {
@@ -197,8 +206,7 @@ function claimsForAgent(
     }
   }
 
-  const byArgv = argvSessionUuid(agent.argv);
-  const matched = byArgv ? entriesByUuid.get(byArgv) : undefined;
+  const matched = argvUuid ? entriesByUuid.get(argvUuid) : undefined;
   if (matched?.engine === agent.engine) claims.push({ pathname: matched.path, source: "argv" });
   return claims;
 }
@@ -317,7 +325,7 @@ export function createTranscriptHostObserver(dependencies: TranscriptHostObserva
       const tree = new Set(descendantPids(panePid, ppids));
       for (const agent of agents) {
         if (!tree.has(agent.pid)) continue;
-        const claims = claimsForAgent(agent, pane, panePid, byPid, byUuid, records);
+        const claims = claimsForAgent(agent, pane, panePid, byPid, byUuid, records, dependencies.holdsPath ?? (() => false));
         const primary = primaryClaim(claims);
         hosts.push({
           tmuxServerPid: serverPid,
@@ -634,6 +642,7 @@ const runtimeResolver = createTranscriptHostResolver({
   argv: readArgv,
   parentPid: readPpid,
   identity: procBackend.processIdentity,
+  holdsPath: pidHoldsPath,
   launchId: paneLaunchId,
   conversationIdForPath: (pathname) => agentRegistry().conversationForPath(pathname)?.id ?? null,
   beginResume: beginRegistryResume,

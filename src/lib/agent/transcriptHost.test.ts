@@ -424,6 +424,24 @@ describe("transcript host resolver", () => {
     expect(state.spawnCalls).toBe(0);
   });
 
+  test("a recycled scanner pid stays orphaned while current argv ownership remains canonical", async () => {
+    const { resolver, state } = fakeHost();
+    state.agents[0] = {
+      ...state.agents[0]!,
+      argv: ["codex", "resume", "00000000-0000-0000-0000-000000000000"],
+    };
+    state.panes.set(101, { paneId: "%2", target: "agents:6.0" });
+    state.agents.push({ pid: 201, engine: "codex", argv: ["codex", "resume", SESSION], cwd: "/repo", tty: 1 });
+    state.ppids.set(201, 101);
+    state.identities.set(201, "201:one");
+
+    const snapshot = await resolver.readTranscriptHosts(true);
+
+    expect(snapshot.hosts.find((host) => host.agentPid === 200)?.primaryPath).toBeNull();
+    expect(snapshot.canonicalFor(PATHNAME)?.agentPid).toBe(201);
+    expect(snapshot.conflicts).toEqual([]);
+  });
+
   test("reports resumed to a joined sender that owns recovery after the live host exits", async () => {
     const { resolver, state } = fakeHost();
     /* decide() validates once, then each concurrent sender validates again.

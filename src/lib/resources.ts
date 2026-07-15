@@ -5,10 +5,20 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, u
 import { spawn } from "node:child_process";
 import path from "node:path";
 import { completedFileScan, currentFileScan } from "@/lib/scanner/scanCache";
-import { createResourceCollector, type ResourceCollector, type ResourceDegradedReason, type ResourceObservation } from "@/lib/resourceCollector";
+import {
+  createResourceCollector,
+  ResourceCollectorFailureError,
+  RESOURCE_FAILURE_STDERR_MAX_BYTES,
+  type ResourceCollectorResult,
+  type ResourceDegradedReason,
+  type ResourceFailureCause,
+  type ResourceFailureDiagnostic,
+  type ResourceObservation,
+} from "@/lib/resourceCollector";
 import { descendantPids } from "@/lib/proc/memory";
 import { overlaySessionTitles } from "@/lib/session/titleProjection";
 import { readTranscriptHosts, type TranscriptHost, type TranscriptHostSnapshot } from "@/lib/agent/transcriptHost";
+import { agentRegistry } from "@/lib/agent/registry";
 import { captureTmuxAttachReferences, type TmuxAttachReference } from "@/lib/tmux";
 import { statePath } from "@/lib/configDir";
 
@@ -39,8 +49,16 @@ export type ServedResourceDiagnostic = ResourceBuildDiagnostic & {
   startedAt: string;
   completedAt: string;
   collectorId: string;
+  cache: ResourceCacheAttribution;
   degradedReason?: ResourceDegradedReason;
+  failure?: ResourceFailureDiagnostic;
 };
+
+export type ResourceCacheAttribution = Readonly<{
+  status: "miss" | "memory" | "durable";
+  collectorId?: string;
+  generation?: number;
+}>;
 
 export type ResourcesRead = {
   payload: ResourcesPayload;
@@ -120,6 +138,7 @@ const globalStore = globalThis as unknown as {
   __llvResourceTargets?: Map<string, KillTargetRef>;
   __llvLastResourceTargets?: Array<{ target: string; ref: KillTargetRef }>;
   __llvResourceTargetsGeneration?: number;
+  __llvResourceTargetEpoch?: number;
   __llvLastResourceBuild?: ResourceBuildDiagnostic;
 };
 
@@ -152,7 +171,9 @@ function rememberResourceTargets(sessions: Iterable<{ target: string; ref: KillT
 export function applyResourceTargets(
   generation: number,
   sessions: Iterable<{ target: string; ref: KillTargetRef }>,
+  collectionEpoch = globalStore.__llvResourceTargetEpoch ?? 0,
 ): void {
+  if (collectionEpoch !== (globalStore.__llvResourceTargetEpoch ?? 0)) return;
   if (generation <= (globalStore.__llvResourceTargetsGeneration ?? 0)) return;
   noteSessionTargets(sessions);
   globalStore.__llvResourceTargetsGeneration = generation;
@@ -174,7 +195,9 @@ export function allowedKillTarget(target: string): KillTargetRef | null {
 /** Drops `target` from the allowlist after a kill: the coordinates are free
     for tmux to reuse, so a repeated POST must not pass the gate again. */
 export function consumeKillTarget(target: string): void {
-  globalStore.__llvResourceTargets?.delete(target);
+  if (globalStore.__llvResourceTargets?.delete(target)) {
+    globalStore.__llvResourceTargetEpoch = (globalStore.__llvResourceTargetEpoch ?? 0) + 1;
+  }
 }
 
 /** The resources rail may list duplicate panes for cleanup. Only the host
@@ -222,10 +245,11 @@ export type ResourceFileObservation = Readonly<Pick<FileEntry,
 > & { conversationId?: string | null }>;
 export type ResourceWorkerFileObservation = ResourceFileObservation & { conversationId: string | null };
 
-export async function readResourceFileSnapshot(fresh: boolean): Promise<ResourceWorkerFileObservation[]> {
-  const scan = fresh ? await currentFileScan({ fresh: true }) : await completedFileScan();
-  overlaySessionTitles(scan.snapshot.files);
-  return scan.snapshot.files.map((entry) => ({
+export function resourceWorkerFileSnapshot(
+  entries: ResourceFileObservation[],
+  conversationIdForPath: (pathname: string) => string | null,
+): ResourceWorkerFileObservation[] {
+  return entries.map((entry) => ({
     path: entry.path,
     parent: entry.parent,
     title: entry.title,
@@ -235,8 +259,20 @@ export async function readResourceFileSnapshot(fresh: boolean): Promise<Resource
     engine: entry.engine,
     pid: entry.pid,
     proc: entry.proc,
-    conversationId: entry.conversationId ?? null,
+    conversationId: conversationIdForPath(entry.path) ?? entry.conversationId ?? null,
   }));
+}
+
+export async function readResourceFileSnapshot(fresh: boolean): Promise<ResourceWorkerFileObservation[]> {
+  const scan = fresh ? await currentFileScan({ fresh: true }) : await completedFileScan();
+  const registrySnapshot = agentRegistry().snapshot();
+  const conversationIdByPath = new Map<string, string>();
+  for (const conversation of Object.values(registrySnapshot.conversations)) {
+    for (const generation of conversation.generations) conversationIdByPath.set(generation.path, conversation.id);
+    for (const pathname of conversation.continuityPaths) conversationIdByPath.set(pathname, conversation.id);
+  }
+  overlaySessionTitles(scan.snapshot.files);
+  return resourceWorkerFileSnapshot(scan.snapshot.files, (pathname) => conversationIdByPath.get(pathname) ?? null);
 }
 
 /** `fresh` advances the shared file scan and skips the pane/agent-process
@@ -315,9 +351,9 @@ export async function buildResourceSnapshot(
         }
       });
       sessions.sort((a, b) => b.rssBytes + b.swapBytes - (a.rssBytes + a.swapBytes));
-      noteSessionTargets(killRefs);
+      rememberResourceTargets(killRefs);
     } else {
-      noteSessionTargets([]);
+      rememberResourceTargets([]);
     }
 
     globalStore.__llvLastResourceBuild = { fresh, status: "complete", durationMs: performance.now() - startedAt, phases };
@@ -338,6 +374,7 @@ export type CollectedResources = {
   hostCount: number;
   treeCount: number;
   targets: Array<{ target: string; ref: KillTargetRef }>;
+  targetEpoch?: number;
 };
 
 const RESOURCE_OBSERVE_TIMEOUT_MS = 30_000;
@@ -360,10 +397,38 @@ type ResourceWorkerLimits = Partial<{
   outputMaxBytes: number;
 }>;
 
+type ResourceWorkerLaunchOptions = {
+  cwd?: string;
+  env?: NodeJS.ProcessEnv;
+  execPath?: string;
+  exists?: (pathname: string) => boolean;
+};
+
+export function resolveResourceWorkerLaunch(options: ResourceWorkerLaunchOptions = {}): {
+  executable: string;
+  workerPath: string;
+} {
+  const cwd = options.cwd ?? process.cwd();
+  const env = options.env ?? process.env;
+  const exists = options.exists ?? existsSync;
+  const sourceWorker = path.join(cwd, "src/lib/resourceCollector.worker.ts");
+  if (env.LLV_RESOURCE_COLLECTOR_EXECUTABLE) {
+    return { executable: env.LLV_RESOURCE_COLLECTOR_EXECUTABLE, workerPath: sourceWorker };
+  }
+  const bunContainer = "/usr/local/bin/bun-container";
+  if (exists(bunContainer)) return { executable: bunContainer, workerPath: sourceWorker };
+  const bundledWorker = path.join(cwd, ".next/server/resource-collector-worker.js");
+  if (exists(bundledWorker)) {
+    return { executable: options.execPath ?? process.execPath, workerPath: bundledWorker };
+  }
+  return { executable: "bun", workerPath: sourceWorker };
+}
+
 function collectedResources(
   payload: ResourcesPayload,
   diagnostic: ResourceBuildDiagnostic,
   targets: Array<{ target: string; ref: KillTargetRef }> = [],
+  targetEpoch = globalStore.__llvResourceTargetEpoch ?? 0,
 ): CollectedResources {
   return {
     payload,
@@ -371,6 +436,7 @@ function collectedResources(
     hostCount: payload.sessions.length,
     treeCount: payload.sessions.reduce((total, session) => total + session.procCount, 0),
     targets,
+    targetEpoch,
   };
 }
 
@@ -474,11 +540,12 @@ function resourceTargetsMatchPayload(
 }
 
 function validCollectedResources(value: unknown): value is CollectedResources {
-  if (!record(value) || !exactKeys(value, ["payload", "diagnostic", "hostCount", "treeCount", "targets"])
+  if (!record(value) || !exactKeys(value, ["payload", "diagnostic", "hostCount", "treeCount", "targets"], ["targetEpoch"])
     || !validResourcesPayload(value.payload)
     || !validResourceDiagnostic(value.diagnostic)
     || !Number.isSafeInteger(value.hostCount) || (value.hostCount as number) < 0
     || !Number.isSafeInteger(value.treeCount) || (value.treeCount as number) < 0
+    || (value.targetEpoch !== undefined && (!Number.isSafeInteger(value.targetEpoch) || (value.targetEpoch as number) < 0))
     || !Array.isArray(value.targets)
     || value.targets.length > RESOURCE_OBSERVATION_MAX_TARGETS
     || !value.targets.every(validResourceTarget)) return false;
@@ -564,55 +631,95 @@ function persistObservation(observation: ResourceObservation<CollectedResources>
   }
 }
 
+function validateDurableResourceObservation(observation: ResourceObservation<CollectedResources>): void {
+  const serialized = JSON.stringify({ version: RESOURCE_OBSERVATION_SCHEMA_VERSION, observation }) + "\n";
+  if (Buffer.byteLength(serialized) > RESOURCE_OBSERVATION_MAX_BYTES) {
+    throw new ResourceCollectorFailureError(
+      "collector-crash",
+      "observation-limit",
+      "resource observation exceeded durable size limit",
+    );
+  }
+}
+
 /** One bounded worker owns one observation. Terminating after either outcome
     prevents a crashed or wedged collection from surviving a request timeout. */
 async function collectResourcesInWorker(
   fresh: boolean,
   readFiles: (fresh: boolean) => Promise<ResourceWorkerFileObservation[]> = readResourceFileSnapshot,
   limits: ResourceWorkerLimits = {},
+  targetEpoch = globalStore.__llvResourceTargetEpoch ?? 0,
 ): Promise<CollectedResources> {
-  /* The production image ships src/ and Bun. A process adapter keeps the
-     worker independent from Next's route bundle and works when Next itself is
-     hosted by Node. The explicit in-process flag remains the rollback path. */
-  const executable = process.env.LLV_RESOURCE_COLLECTOR_EXECUTABLE
-    ?? (existsSync("/usr/local/bin/bun-container") ? "/usr/local/bin/bun-container" : "bun");
+  const launch = resolveResourceWorkerLaunch();
   const filesTask = readFiles(fresh);
   let inputTimer: ReturnType<typeof setTimeout> | undefined;
-  const files = fresh
-    ? await filesTask
-    : await Promise.race([
-        filesTask,
-        new Promise<ResourceWorkerFileObservation[]>((_, reject) => {
-          inputTimer = setTimeout(() => reject(new Error("resource collector file handoff timed out")), limits.inputTimeoutMs ?? RESOURCE_FILE_HANDOFF_TIMEOUT_MS);
-        }),
-      ]).finally(() => {
-        if (inputTimer) clearTimeout(inputTimer);
-      });
+  const files = await Promise.race([
+    filesTask,
+    new Promise<ResourceWorkerFileObservation[]>((_, reject) => {
+      inputTimer = setTimeout(() => reject(new ResourceCollectorFailureError(
+        "timeout",
+        "file-handoff-timeout",
+        "resource collector file handoff timed out",
+      )), limits.inputTimeoutMs ?? RESOURCE_FILE_HANDOFF_TIMEOUT_MS);
+    }),
+  ]).finally(() => {
+    if (inputTimer) clearTimeout(inputTimer);
+  });
   const request = JSON.stringify({ type: "collect", fresh, files }) + "\n";
   const outputMaxBytes = limits.outputMaxBytes ?? RESOURCE_WORKER_OUTPUT_MAX_BYTES;
   const timeoutMs = limits.timeoutMs ?? RESOURCE_WORKER_TIMEOUT_MS;
   const closeTimeoutMs = limits.closeTimeoutMs ?? RESOURCE_WORKER_CLOSE_TIMEOUT_MS;
   if (Buffer.byteLength(request) > RESOURCE_WORKER_OUTPUT_MAX_BYTES) {
-    throw new Error("resource collector input exceeded transport limit");
+    throw new ResourceCollectorFailureError(
+      "collector-crash",
+      "worker-input",
+      "resource collector input exceeded transport limit",
+    );
   }
-  const worker = spawn(executable, [path.join(process.cwd(), "src/lib/resourceCollector.worker.ts")], {
+  const worker = spawn(launch.executable, [launch.workerPath], {
     cwd: process.cwd(),
+    detached: true,
     stdio: ["pipe", "pipe", "pipe"],
   });
   return new Promise<CollectedResources>((resolve, reject) => {
     const pid = worker.pid;
     const expectedIdentity = typeof pid === "number" ? procBackend.processIdentity(pid) : null;
     let outcome: (() => void) | null = null;
-    let closed = false;
     let outputBytes = 0;
+    let stderrTail = "";
     let closeTimer: ReturnType<typeof setTimeout> | undefined;
+    const workerFailure = (
+      reason: ResourceDegradedReason,
+      cause: ResourceFailureCause,
+      message: string,
+      error?: unknown,
+    ) => new ResourceCollectorFailureError(reason, cause, message, { cause: error, stderr: stderrTail });
     const sameWorker = () => typeof pid === "number"
       && (expectedIdentity === null || procBackend.processIdentity(pid) === expectedIdentity);
+    const workerGroupExists = () => {
+      if (typeof pid !== "number") return false;
+      try {
+        process.kill(-pid, 0);
+        return true;
+      } catch (error) {
+        return (error as NodeJS.ErrnoException).code !== "ESRCH";
+      }
+    };
+    const signalWorkerGroup = (signal: NodeJS.Signals) => {
+      if (typeof pid !== "number") return;
+      const workerExited = worker.exitCode !== null || worker.signalCode !== null;
+      if (!workerExited && !sameWorker()) return;
+      try {
+        process.kill(-pid, signal);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ESRCH" && !workerExited) worker.kill(signal);
+      }
+    };
     const terminate = () => {
-      if (worker.exitCode !== null || worker.signalCode !== null || !sameWorker()) return;
-      worker.kill("SIGTERM");
+      signalWorkerGroup("SIGTERM");
+      if (closeTimer) return;
       closeTimer = setTimeout(() => {
-        if (!closed && sameWorker()) worker.kill("SIGKILL");
+        if (workerGroupExists()) signalWorkerGroup("SIGKILL");
       }, closeTimeoutMs);
     };
     const finish = (next: () => void) => {
@@ -621,24 +728,40 @@ async function collectResourcesInWorker(
       clearTimeout(timeout);
       terminate();
     };
-    const timeout = setTimeout(() => finish(() => reject(new Error("resource collector worker timed out"))), timeoutMs);
-    worker.once("error", (error) => finish(() => reject(error)));
+    const timeout = setTimeout(() => finish(() => reject(workerFailure(
+      "timeout",
+      "worker-timeout",
+      "resource collector worker timed out",
+    ))), timeoutMs);
+    worker.once("error", (error) => finish(() => reject(workerFailure(
+      "collector-crash",
+      "worker-spawn",
+      "resource collector worker failed to start",
+      error,
+    ))));
     worker.once("close", (code, signal) => {
-      closed = true;
       clearTimeout(timeout);
-      if (closeTimer) clearTimeout(closeTimer);
-      if (outcome) {
-        outcome();
-        return;
+      if (!outcome) {
+        outcome = () => reject(workerFailure(
+          "collector-crash",
+          "worker-exit",
+          `resource collector worker closed before observation (${signal ?? code ?? "unknown"})`,
+        ));
+        terminate();
       }
-      reject(new Error(`resource collector worker closed before observation (${signal ?? code ?? "unknown"})`));
+      if (closeTimer && !workerGroupExists()) clearTimeout(closeTimer);
+      outcome();
     });
     let output = "";
     worker.stdout.setEncoding("utf8");
     worker.stdout.on("data", (chunk: string) => {
       outputBytes += Buffer.byteLength(chunk);
       if (outputBytes > outputMaxBytes) {
-        finish(() => reject(new Error("resource collector worker exceeded stdout limit")));
+        finish(() => reject(workerFailure(
+          "collector-crash",
+          "worker-output-limit",
+          "resource collector worker exceeded stdout limit",
+        )));
         return;
       }
       output += chunk;
@@ -650,78 +773,154 @@ async function collectResourcesInWorker(
       try {
         parsed = JSON.parse(raw);
       } catch {
-        finish(() => reject(new Error("resource collector worker emitted invalid JSON")));
+        finish(() => reject(workerFailure(
+          "collector-crash",
+          "worker-output-invalid",
+          "resource collector worker emitted invalid JSON",
+        )));
         return;
       }
       const message = resourceWorkerMessage(parsed);
       if (!message) {
-        finish(() => reject(new Error("resource collector worker emitted an invalid message")));
+        finish(() => reject(workerFailure(
+          "collector-crash",
+          "worker-output-invalid",
+          "resource collector worker emitted an invalid message",
+        )));
         return;
       }
       if (message.type === "observation" && message.diagnostic.fresh !== fresh) {
-        finish(() => reject(new Error("resource collector worker returned mismatched freshness")));
+        finish(() => reject(workerFailure(
+          "collector-crash",
+          "worker-output-invalid",
+          "resource collector worker returned mismatched freshness",
+        )));
         return;
       }
       if (message.type === "failure") {
-        finish(() => reject(new Error(message.error)));
+        finish(() => reject(workerFailure(
+          "collector-crash",
+          "worker-failure",
+          "resource collector worker reported a failure",
+          new Error(message.error),
+        )));
         return;
       }
       finish(() => {
-        resolve(collectedResources(message.payload, message.diagnostic, message.targets));
+        resolve(collectedResources(message.payload, message.diagnostic, message.targets, targetEpoch));
       });
     });
     worker.stderr.on("data", (chunk: Buffer) => {
       outputBytes += chunk.length;
+      stderrTail = (stderrTail + chunk.toString("utf8")).slice(-(RESOURCE_FAILURE_STDERR_MAX_BYTES * 2));
       if (outputBytes > outputMaxBytes) {
-        finish(() => reject(new Error("resource collector worker exceeded output limit")));
+        finish(() => reject(workerFailure(
+          "collector-crash",
+          "worker-output-limit",
+          "resource collector worker exceeded output limit",
+        )));
       }
     });
+    worker.stdin.once("error", (error) => finish(() => reject(workerFailure(
+      "collector-crash",
+      "worker-input",
+      "resource collector worker input failed",
+      error,
+    ))));
     worker.stdin.end(request);
   });
 }
 
-function fallbackRead(
-  payload: ResourcesPayload,
-  reason: ResourceDegradedReason,
-  collectorId: string,
-): ResourcesRead {
-  const capturedAt = new Date().toISOString();
+function fixtureRead(payload: ResourcesPayload, fresh: boolean): ResourcesRead {
+  const capturedAt = Date.now();
   return {
     payload,
     diagnostic: {
-      fresh: true,
-      status: "failed",
+      fresh,
+      status: "complete",
       durationMs: 0,
       phases: emptyResourceBuildPhases(),
       generation: 0,
-      startedAt: capturedAt,
-      completedAt: capturedAt,
-      collectorId,
-      degradedReason: reason,
+      startedAt: new Date(capturedAt).toISOString(),
+      completedAt: new Date(capturedAt).toISOString(),
+      collectorId: "fixture",
+      cache: { status: "miss" },
     },
   };
 }
 
-function resourceReadFromObservation(
-  observation: Awaited<ReturnType<ResourceCollector<CollectedResources>["observe"]>>,
+function resourceCacheAttribution(
+  observation: ResourceObservation<CollectedResources> | null,
+  collectorId: string,
+  servedFromCache: boolean,
+): ResourceCacheAttribution {
+  if (!observation || !servedFromCache) return { status: "miss" };
+  return {
+    status: observation.collectorId === collectorId ? "memory" : "durable",
+    collectorId: observation.collectorId,
+    generation: observation.generation,
+  };
+}
+
+function resourceReadFromResult(
+  result: ResourceCollectorResult<CollectedResources>,
   captureSystem: () => ResourcesPayload["system"],
   fresh: boolean,
-  collectorId: string,
+  servedFromCache = false,
 ): ResourcesRead {
+  const { observation, failure } = result;
+  const cache = resourceCacheAttribution(observation, result.collectorId, servedFromCache || failure !== undefined);
   if (!observation) {
-    return fallbackRead({ system: captureSystem(), sessions: [] }, "collector-busy", collectorId);
+    if (!failure) throw new Error("resource collector returned no observation or failure");
+    return {
+      payload: { system: captureSystem(), sessions: [] },
+      diagnostic: {
+        fresh,
+        status: "failed",
+        durationMs: Math.max(0, result.completedAt - result.startedAt),
+        phases: emptyResourceBuildPhases(),
+        generation: result.generation,
+        startedAt: new Date(result.startedAt).toISOString(),
+        completedAt: new Date(result.completedAt).toISOString(),
+        collectorId: result.collectorId,
+        cache,
+        degradedReason: failure.reason,
+        failure: failure.diagnostic,
+      },
+    };
   }
   const { payload, diagnostic } = observation.value;
-  applyResourceTargets(observation.generation, observation.value.targets);
+  if (!failure && observation.collectorId === result.collectorId && observation.value.targetEpoch !== undefined) {
+    applyResourceTargets(observation.generation, observation.value.targets, observation.value.targetEpoch);
+  }
+  if (failure) {
+    return {
+      payload: fresh ? payload : { ...payload, system: captureSystem() },
+      diagnostic: {
+        fresh,
+        status: "failed",
+        durationMs: Math.max(0, result.completedAt - result.startedAt),
+        phases: emptyResourceBuildPhases(),
+        generation: result.generation,
+        startedAt: new Date(result.startedAt).toISOString(),
+        completedAt: new Date(result.completedAt).toISOString(),
+        collectorId: result.collectorId,
+        cache,
+        degradedReason: failure.reason,
+        failure: failure.diagnostic,
+      },
+    };
+  }
   return {
     payload: fresh ? payload : { ...payload, system: captureSystem() },
     diagnostic: {
       ...diagnostic,
+      fresh,
       generation: observation.generation,
       startedAt: new Date(observation.startedAt).toISOString(),
       completedAt: new Date(observation.completedAt).toISOString(),
-      collectorId: observation.collectorId,
-      ...(observation.degradedReason ? { degradedReason: observation.degradedReason } : {}),
+      collectorId: result.collectorId,
+      cache,
     },
   };
 }
@@ -733,6 +932,7 @@ export function createResourcesReader(
   diagnosticForBuild: () => ResourceBuildDiagnostic | null = lastResourceBuildDiagnostic,
   options: {
     inProcess?: boolean;
+    collectorId?: string;
     initial?: ResourceObservation<CollectedResources> | null;
     persist?: (observation: ResourceObservation<CollectedResources>) => boolean;
     readFiles?: (fresh: boolean) => Promise<ResourceWorkerFileObservation[]>;
@@ -740,18 +940,20 @@ export function createResourcesReader(
   } = {},
 ): ResourcesReader {
   const inProcess = options.inProcess ?? process.env.LLV_RESOURCE_COLLECTOR_IN_PROCESS === "1";
-  const collectorId = inProcess
-    ? `in-process:${process.pid}`
-    : `worker:${process.pid}`;
+  const collectorId = options.collectorId ?? (inProcess
+    ? `in-process:${process.pid}:${crypto.randomUUID()}`
+    : `worker:${process.pid}:${crypto.randomUUID()}`);
   const collector = createResourceCollector<CollectedResources, boolean>({
     collectorId,
     now,
     initial: options.initial,
+    validateObservation: validateDurableResourceObservation,
     collect: inProcess ? async (fresh = false) => {
+      const targetEpoch = globalStore.__llvResourceTargetEpoch ?? 0;
       const payload = await build(fresh);
       const diagnostic = diagnosticForBuild();
       if (!diagnostic) throw new Error("resource build completed without diagnostics");
-      return collectedResources(payload, diagnostic, lastResourceTargetRefs());
+      return collectedResources(payload, diagnostic, lastResourceTargetRefs(), targetEpoch);
     } : (fresh = false) => collectResourcesInWorker(fresh, options.readFiles, options.workerLimits),
   });
   let lastPersistedGeneration = options.initial?.generation ?? 0;
@@ -772,12 +974,18 @@ export function createResourcesReader(
         void collector.observe(latest.generation, 0, false);
       }
       persist(latest);
-      return resourceReadFromObservation(latest, captureSystem, false, collectorId);
+      return resourceReadFromResult({
+        observation: latest,
+        generation: latest.generation,
+        startedAt: latest.startedAt,
+        completedAt: latest.completedAt,
+        collectorId,
+      }, captureSystem, false, true);
     }
     const fence = fresh ? collector.fence() : -1;
-    const observation = await collector.observe(fence, RESOURCE_OBSERVE_TIMEOUT_MS, fresh);
-    if (observation) persist(observation);
-    return resourceReadFromObservation(observation, captureSystem, fresh, collectorId);
+    const result = await collector.observe(fence, RESOURCE_OBSERVE_TIMEOUT_MS, fresh);
+    if (result.observation && !result.failure) persist(result.observation);
+    return resourceReadFromResult(result, captureSystem, fresh);
   };
 
   return {
@@ -817,6 +1025,7 @@ export function resetResourcesForTests(): void {
   globalStore.__llvResourceTargets = undefined;
   globalStore.__llvLastResourceTargets = undefined;
   globalStore.__llvResourceTargetsGeneration = undefined;
+  globalStore.__llvResourceTargetEpoch = undefined;
   globalStore.__llvLastResourceBuild = undefined;
 }
 
@@ -836,7 +1045,7 @@ export async function readResourcesWithDiagnostic(fresh = false): Promise<Resour
   const fixturePath = process.env.LLV_RESOURCES_FIXTURE;
   if (fixturePath) {
     noteSessionTargets([]);
-    return fallbackRead(parseResourcesFixture(readFileSync(fixturePath, "utf8")), "collector-busy", "fixture");
+    return fixtureRead(parseResourcesFixture(readFileSync(fixturePath, "utf8")), fresh);
   }
   return resourcesReader().read(fresh);
 }

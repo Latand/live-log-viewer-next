@@ -3,10 +3,11 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, wr
 import os from "node:os";
 import path from "node:path";
 
-import type { TranscriptHost } from "@/lib/agent/transcriptHost";
+import { createTranscriptHostObserver, type TranscriptHost } from "@/lib/agent/transcriptHost";
+import { RESOURCE_FAILURE_STDERR_MAX_BYTES } from "@/lib/resourceCollector";
 import type { FileEntry, ResourcesPayload } from "@/lib/types";
 
-import { allowedKillTarget, applyResourceTargets, buildResourceSnapshot, canonicalResourceEntry, conflictingResourceHost, consumeKillTarget, createResourcesReader, lastResourceBuildDiagnostic, noteSessionTargets, parsePersistedResourceObservation, parseResourcesFixture, resetResourcesForTests, RESOURCE_OBSERVATION_MAX_BYTES, RESOURCE_WORKER_OUTPUT_MAX_BYTES } from "./resources";
+import { allowedKillTarget, applyResourceTargets, buildResourceSnapshot, canonicalResourceEntry, conflictingResourceHost, consumeKillTarget, createResourcesReader, lastResourceBuildDiagnostic, lastResourceTargetRefs, noteSessionTargets, parsePersistedResourceObservation, parseResourcesFixture, resetResourcesForTests, resolveResourceWorkerLaunch, resourceWorkerFileSnapshot, RESOURCE_OBSERVATION_MAX_BYTES, RESOURCE_WORKER_OUTPUT_MAX_BYTES } from "./resources";
 
 const PATHNAME = "/home/user/.codex/sessions/2026/07/10/rollout-2026-07-10-019f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl";
 const EMPTY_WORKER_MESSAGE = JSON.stringify({
@@ -103,6 +104,26 @@ function ref(tmuxServerPid: number, panePid: number, paneId: string) {
     paneStartIdentity: `${panePid}:one`,
     paneId,
   };
+}
+
+function processExists(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function expectProcessAbsentAfterQuietInterval(pid: number, label: string): Promise<void> {
+  for (let attempt = 0; attempt < 20 && processExists(pid); attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  const leaked = processExists(pid);
+  if (leaked) process.kill(pid, "SIGKILL");
+  expect(leaked, label).toBeFalse();
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  expect(processExists(pid), label).toBeFalse();
 }
 
 function deferred<T>() {
@@ -250,7 +271,8 @@ describe("resource observation", () => {
       swapBytes: 6,
       procCount: 3,
     }]);
-    expect(allowedKillTarget("agents:4.0")).toEqual(ref(900, 100, "%1"));
+    expect(allowedKillTarget("agents:4.0")).toBeNull();
+    expect(lastResourceTargetRefs()).toEqual([{ target: "agents:4.0", ref: ref(900, 100, "%1") }]);
     expect(lastResourceBuildDiagnostic()).toEqual(expect.objectContaining({
       fresh: true,
       status: "complete",
@@ -325,6 +347,79 @@ describe("resource observation", () => {
     expect(parsePersistedResourceObservation(overLimit)).toBeNull();
   });
 
+  test("the exact durable boundary publishes once and one extra byte fails before publication", async () => {
+    const collectorId = "worker:boundary";
+    const diagnostic = {
+      fresh: true,
+      status: "complete" as const,
+      durationMs: 0,
+      phases: { systemMemory: 0, readFiles: 0, readHosts: 0, ppidMap: 0, processMemory: 0, attach: 0, serialization: 0 },
+    };
+    const session = {
+      target: "agents:1.0", panePid: 100, path: null, engine: "codex" as const, hostConflict: false,
+      title: "", project: null, activity: null, lastActiveAt: null, cwd: "/repo", rssBytes: 1, swapBytes: 0, procCount: 1,
+    };
+    const value = {
+      payload: { system: null, sessions: [session] },
+      diagnostic,
+      hostCount: 1,
+      treeCount: 1,
+      targets: [],
+      targetEpoch: 0,
+    };
+    const observation = { generation: 1, startedAt: 1, completedAt: 1, collectorId, value };
+    const emptyEnvelope = JSON.stringify({ version: 1, observation }) + "\n";
+    session.title = "x".repeat(RESOURCE_OBSERVATION_MAX_BYTES - Buffer.byteLength(emptyEnvelope));
+    const workerMessage = () => JSON.stringify({
+      type: "observation",
+      payload: value.payload,
+      diagnostic,
+      targets: [],
+    });
+
+    const persisted: string[] = [];
+    await withResourceWorkerScript((directory) => {
+      writeFileSync(path.join(directory, "message"), workerMessage() + "\n");
+      return [`cat "${path.join(directory, "message")}"`];
+    }, async () => {
+      const reader = createResourcesReader(async () => value.payload, () => null, () => 1, () => diagnostic, {
+        collectorId,
+        readFiles: async () => [],
+        persist: (candidate) => {
+          persisted.push(JSON.stringify({ version: 1, observation: candidate }) + "\n");
+          return true;
+        },
+      });
+      expect((await reader.read(true)).payload.sessions).toHaveLength(1);
+      await reader.read();
+    });
+    expect(persisted).toHaveLength(1);
+    expect(Buffer.byteLength(persisted[0]!)).toBe(RESOURCE_OBSERVATION_MAX_BYTES);
+
+    session.title += "x";
+    let overLimitPersistAttempts = 0;
+    await withResourceWorkerScript((directory) => {
+      writeFileSync(path.join(directory, "message"), workerMessage() + "\n");
+      return [
+        `printf x >> "${path.join(directory, "workers")}"`,
+        `cat "${path.join(directory, "message")}"`,
+      ];
+    }, async (directory) => {
+      const reader = createResourcesReader(async () => value.payload, () => null, () => 1, () => diagnostic, {
+        collectorId,
+        readFiles: async () => [],
+        persist: () => {
+          overLimitPersistAttempts += 1;
+          return false;
+        },
+      });
+      expect((await reader.read(true)).payload.sessions).toHaveLength(0);
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect(readFileSync(path.join(directory, "workers"), "utf8")).toBe("x");
+    });
+    expect(overLimitPersistAttempts).toBe(0);
+  });
+
   test("attributes a duplicated transcript only to the shared canonical host", () => {
     const snapshot = { hosts: [duplicate, canonical], observation: "available" as const, canonicalFor: (pathname: string) => (pathname === PATHNAME ? canonical : null) };
 
@@ -343,9 +438,214 @@ describe("resource observation", () => {
     expect(conflictingResourceHost(snapshot, duplicate)).toBeTrue();
     expect(conflictingResourceHost(snapshot, canonical)).toBeTrue();
   });
+
+  test("two handoff paths for one stable conversation form one conflict", async () => {
+    const secondPath = "/home/user/.codex/sessions/2026/07/10/rollout-2026-07-10-029f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl";
+    const files = resourceWorkerFileSnapshot([
+      entry,
+      { ...entry, path: secondPath, name: secondPath, pid: 201 },
+    ], () => "conversation_test");
+    const conversationByPath = new Map(files.map((file) => [file.path, file.conversationId]));
+    const observe = createTranscriptHostObserver({
+      listFiles: async () => files as FileEntry[],
+      panes: async () => ({
+        kind: "available",
+        panes: new Map([
+          [100, { paneId: "%1", target: "agents:4.0" }],
+          [101, { paneId: "%2", target: "agents:5.0" }],
+        ]),
+      }),
+      ppidMap: () => new Map([[200, 100], [201, 101]]),
+      agents: () => [
+        { pid: 200, engine: "codex", argv: ["codex", "resume", "019f4906-3f67-7b72-9fbc-9ec3b5ad1326"], cwd: "/repo", tty: 1 },
+        { pid: 201, engine: "codex", argv: ["codex", "resume", "029f4906-3f67-7b72-9fbc-9ec3b5ad1326"], cwd: "/repo", tty: 1 },
+      ],
+      serverPid: async () => 900,
+      resumeRecords: async () => null,
+      identity: (pid) => `${pid}:one`,
+      conversationIdForPath: (pathname) => conversationByPath.get(pathname) ?? null,
+    });
+
+    const snapshot = await observe(true, files as FileEntry[]);
+
+    expect(snapshot.conflicts).toEqual([{
+      conversationId: "conversation_test",
+      paths: [PATHNAME, secondPath],
+      paneIds: ["%1", "%2"],
+    }]);
+    expect(snapshot.canonicalFor(PATHNAME)).toBeNull();
+    expect(snapshot.canonicalFor(secondPath)).toBeNull();
+  });
+
+  test("worker launch selection preserves Docker Bun and supports a Node-only bundle", () => {
+    const cwd = "/package";
+    const sourceWorker = "/package/src/lib/resourceCollector.worker.ts";
+    const bundledWorker = "/package/.next/server/resource-collector-worker.js";
+    const bunContainer = "/usr/local/bin/bun-container";
+
+    expect(resolveResourceWorkerLaunch({
+      cwd,
+      env: { NODE_ENV: "test", LLV_RESOURCE_COLLECTOR_EXECUTABLE: "/fixture/worker" },
+      execPath: "/usr/bin/node",
+      exists: () => false,
+    })).toEqual({ executable: "/fixture/worker", workerPath: sourceWorker });
+    expect(resolveResourceWorkerLaunch({
+      cwd,
+      env: { NODE_ENV: "test" },
+      execPath: "/usr/bin/node",
+      exists: (pathname) => pathname === bunContainer || pathname === bundledWorker,
+    })).toEqual({ executable: bunContainer, workerPath: sourceWorker });
+    expect(resolveResourceWorkerLaunch({
+      cwd,
+      env: { NODE_ENV: "test" },
+      execPath: "/usr/bin/node",
+      exists: (pathname) => pathname === bundledWorker,
+    })).toEqual({ executable: "/usr/bin/node", workerPath: bundledWorker });
+  });
 });
 
 describe("kill-target allowlist", () => {
+  test("durable display hydration grants no kill capability until a current observation", async () => {
+    const targetRef = ref(900, 111, "%11");
+    const session = {
+      target: "agents:1.0",
+      panePid: 111,
+      path: null,
+      engine: "codex" as const,
+      hostConflict: false,
+      title: null,
+      project: null,
+      activity: null,
+      lastActiveAt: null,
+      cwd: "/repo",
+      rssBytes: 1,
+      swapBytes: 0,
+      procCount: 1,
+    };
+    const diagnostic = {
+      fresh: true,
+      status: "complete" as const,
+      durationMs: 0,
+      phases: { systemMemory: 0, readFiles: 0, readHosts: 0, ppidMap: 0, processMemory: 0, attach: 0, serialization: 0 },
+    };
+    const message = JSON.stringify({
+      type: "observation",
+      payload: { system: null, sessions: [session] },
+      diagnostic,
+      targets: [{ target: session.target, ref: targetRef }],
+    });
+
+    await withResourceWorkerScript([`printf '%s\\n' '${message}'`], async () => {
+      resetResourcesForTests();
+      const reader = workerTestReader({
+        initial: {
+          generation: 7,
+          startedAt: 1,
+          completedAt: 2,
+          collectorId: "prior-runtime",
+          value: {
+            payload: { system: null, sessions: [session] },
+            diagnostic,
+            hostCount: 1,
+            treeCount: 1,
+            targets: [{ target: session.target, ref: targetRef }],
+          },
+        },
+      });
+
+      expect((await reader.read()).payload.sessions).toHaveLength(1);
+      expect(allowedKillTarget(session.target)).toBeNull();
+      await reader.read(true);
+      expect(allowedKillTarget(session.target)).toEqual(targetRef);
+    });
+  });
+
+  test("a worker collection started before target consumption cannot restore it", async () => {
+    const targetRef = ref(900, 111, "%11");
+    const session = {
+      target: "agents:1.0", panePid: 111, path: null, engine: "codex" as const, hostConflict: false,
+      title: null, project: null, activity: null, lastActiveAt: null, cwd: "/repo", rssBytes: 1, swapBytes: 0, procCount: 1,
+    };
+    const message = JSON.stringify({
+      type: "observation",
+      payload: { system: null, sessions: [session] },
+      diagnostic: {
+        fresh: true, status: "complete", durationMs: 0,
+        phases: { systemMemory: 0, readFiles: 0, readHosts: 0, ppidMap: 0, processMemory: 0, attach: 0, serialization: 0 },
+      },
+      targets: [{ target: session.target, ref: targetRef }],
+    });
+
+    await withResourceWorkerScript([`printf '%s\\n' '${message}'`], async () => {
+      resetResourcesForTests();
+      noteSessionTargets([{ target: session.target, ref: targetRef }]);
+      const started = deferred<void>();
+      const release = deferred<never[]>();
+      let handoffs = 0;
+      const reader = workerTestReader({
+        readFiles: async () => {
+          handoffs += 1;
+          if (handoffs === 1) {
+            started.resolve();
+            return release.promise;
+          }
+          return [];
+        },
+      });
+
+      const stale = reader.read(true);
+      await started.promise;
+      consumeKillTarget(session.target);
+      release.resolve([]);
+      await stale;
+      expect(allowedKillTarget(session.target)).toBeNull();
+
+      await reader.read(true);
+      expect(allowedKillTarget(session.target)).toEqual(targetRef);
+    });
+  });
+
+  test("an in-process collection started before target consumption cannot restore it", async () => {
+    resetResourcesForTests();
+    const targetRef = ref(900, 100, "%1");
+    noteSessionTargets([{ target: canonical.display, ref: targetRef }]);
+    const started = deferred<void>();
+    const release = deferred<void>();
+    let builds = 0;
+    const reader = createResourcesReader((fresh) => buildResourceSnapshot(fresh, {
+      readFiles: async () => {
+        builds += 1;
+        if (builds === 1) {
+          started.resolve();
+          await release.promise;
+        }
+        return [entry];
+      },
+      readHosts: async () => ({
+        hosts: [canonical],
+        observation: "available",
+        conflicts: [],
+        canonicalFor: (pathname) => pathname === PATHNAME ? canonical : null,
+      }),
+      proc: {
+        systemMemory: () => null,
+        ppidMap: () => new Map([[200, 100]]),
+        processMemory: () => new Map([[100, { rssBytes: 1, swapBytes: 0 }], [200, { rssBytes: 1, swapBytes: 0 }]]),
+      },
+      captureAttachReferences: () => new Map([["%1", targetRef]]),
+    }), () => null, Date.now, lastResourceBuildDiagnostic, { inProcess: true });
+
+    const stale = reader.read(true);
+    await started.promise;
+    consumeKillTarget(canonical.display);
+    release.resolve();
+    await stale;
+    expect(allowedKillTarget(canonical.display)).toBeNull();
+
+    await reader.read(true);
+    expect(allowedKillTarget(canonical.display)).toEqual(targetRef);
+  });
+
   test("nothing is killable before a snapshot exists", () => {
     noteSessionTargets([]);
     expect(allowedKillTarget("agents:1.0")).toBeNull();
@@ -396,6 +696,48 @@ describe("kill-target allowlist", () => {
 });
 
 describe("resource recurring reads", () => {
+  test("a near-limit handoff to an immediately exiting worker keeps the parent alive and releases the worker", async () => {
+    await withResourceWorkerScript((directory) => [
+      `printf '%s' "$$" > "${path.join(directory, "pid")}"`,
+      "exit 0",
+    ], async (directory) => {
+      const entrypoint = path.join(directory, "node-parent.ts");
+      const bundle = path.join(directory, "node-parent.mjs");
+      writeFileSync(entrypoint, `
+        import { createResourcesReader } from ${JSON.stringify(path.join(import.meta.dir, "resources.ts"))};
+        const diagnostic = { fresh: true, status: "complete", durationMs: 0, phases: {
+          systemMemory: 0, readFiles: 0, readHosts: 0, ppidMap: 0, processMemory: 0, attach: 0, serialization: 0,
+        } };
+        const reader = createResourcesReader(async () => ({ system: null, sessions: [] }), () => null, Date.now, () => diagnostic, {
+          readFiles: async () => [{
+            path: "/sessions/large-handoff.jsonl", parent: null, title: "x".repeat(15 * 1024 * 1024), project: "project",
+            activity: "live", mtime: 1, engine: "codex", pid: 200, proc: "running", conversationId: null,
+          }],
+          initial: {
+            generation: 1, startedAt: 1, completedAt: 2, collectorId: "durable",
+            value: { payload: { system: null, sessions: [] }, diagnostic, hostCount: 0, treeCount: 0, targets: [] },
+          },
+        });
+        const result = await reader.read(true);
+        process.stdout.write(JSON.stringify(result.diagnostic) + "\\n");
+      `);
+      const built = await Bun.build({ entrypoints: [entrypoint], outdir: directory, target: "node", format: "esm", naming: path.basename(bundle) });
+      expect(built.success).toBeTrue();
+      const child = Bun.spawn(["node", bundle], {
+        cwd: process.cwd(),
+        env: { ...process.env, LLV_RESOURCE_COLLECTOR_EXECUTABLE: path.join(directory, "fixture-worker"), PATH: "/usr/bin:/bin" },
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const [exit, stdout] = await Promise.all([child.exited, new Response(child.stdout).text()]);
+
+      expect(exit).toBe(0);
+      expect(JSON.parse(stdout)).toMatchObject({ degradedReason: "collector-crash" });
+      const pid = Number(readFileSync(path.join(directory, "pid"), "utf8"));
+      expect(() => process.kill(pid, 0)).toThrow();
+    });
+  });
+
   test("an incomplete observation message settles promptly with a degraded response", async () => {
     await withResourceWorkerScript([
       "trap 'exit 0' TERM INT",
@@ -453,43 +795,98 @@ describe("resource recurring reads", () => {
     });
   });
 
-  test("truncated, oversized, crash, timeout, close, and spawn errors settle and release workers", async () => {
-    const cases: Array<{ name: string; lines: (directory: string) => string[]; limits?: { timeoutMs?: number; closeTimeoutMs?: number; outputMaxBytes?: number } }> = [
+  test("an ordinary worker crash reports its typed cause, requested freshness, identity, and safe stderr", async () => {
+    await withResourceWorkerScript([
+      "printf 'API_TOKEN=super-secret\\n' >&2",
+      "exit 7",
+    ], async () => {
+      const outcome = await workerTestReader({ initial: null, collectorId: "worker:test" }).read();
+      expect(outcome.diagnostic).toMatchObject({
+        fresh: false,
+        status: "failed",
+        collectorId: "worker:test",
+        degradedReason: "collector-crash",
+        cache: { status: "miss" },
+        failure: {
+          cause: "worker-exit",
+          stderr: "API_TOKEN=<redacted>",
+        },
+      });
+    });
+  });
+
+  test("a fresh worker crash attributes its durable cache and bounds redacted stderr", async () => {
+    await withResourceWorkerScript([
+      "yes 'safe stderr line' | head -c 4096 >&2",
+      "printf '\\nPASSWORD=fresh-secret\\n' >&2",
+      "exit 7",
+    ], async () => {
+      const outcome = await workerTestReader({ collectorId: "worker:fresh-test" }).read(true);
+      expect(outcome.diagnostic).toMatchObject({
+        fresh: true,
+        status: "failed",
+        collectorId: "worker:fresh-test",
+        degradedReason: "collector-crash",
+        cache: { status: "durable", collectorId: "durable", generation: 1 },
+        failure: { cause: "worker-exit" },
+      });
+      const stderr = outcome.diagnostic.failure?.stderr ?? "";
+      expect(Buffer.byteLength(stderr)).toBe(RESOURCE_FAILURE_STDERR_MAX_BYTES);
+      expect(stderr).toContain("PASSWORD=<redacted>");
+      expect(stderr).not.toContain("fresh-secret");
+    });
+  });
+
+  test("malformed, oversized, crash, timeout, and immediate-exit paths release complete worker trees", async () => {
+    const withGrandchild = (directory: string, lines: string[]) => [
+      `printf '%s' "$$" > "${path.join(directory, "pid")}"`,
+      "sleep 60 </dev/null >/dev/null 2>&1 &",
+      `printf '%s' "$!" > "${path.join(directory, "grandchild-pid")}"`,
+      ...lines,
+    ];
+    const cases: Array<{ name: string; reason: "collector-crash" | "timeout"; cause: string; lines: (directory: string) => string[]; limits?: { timeoutMs?: number; closeTimeoutMs?: number; outputMaxBytes?: number } }> = [
       {
-        name: "truncated",
-        lines: (directory) => [
-          `printf '%s' \"$$\" > \"${path.join(directory, "pid")}\"`,
+        name: "malformed",
+        reason: "collector-crash",
+        cause: "worker-output-invalid",
+        lines: (directory) => withGrandchild(directory, [
           "trap 'exit 0' TERM INT",
-          "printf '{\"type\":\"observation\"\\n'",
+          "printf '{invalid}\\n'",
           "while :; do :; done",
-        ],
+        ]),
       },
       {
         name: "oversized",
-        lines: (directory) => [
-          `printf '%s' \"$$\" > \"${path.join(directory, "pid")}\"`,
+        reason: "collector-crash",
+        cause: "worker-output-limit",
+        lines: (directory) => withGrandchild(directory, [
           "trap 'exit 0' TERM INT",
           `printf '%s\\n' '${OVERSIZED_WORKER_MESSAGE}'`,
           "while :; do :; done",
-        ],
+        ]),
         limits: { outputMaxBytes: 1_024 },
       },
       {
         name: "crash",
-        lines: (directory) => [`printf '%s' \"$$\" > \"${path.join(directory, "pid")}\"`, "exit 7"],
+        reason: "collector-crash",
+        cause: "worker-exit",
+        lines: (directory) => withGrandchild(directory, ["exit 7"]),
       },
       {
         name: "timeout",
-        lines: (directory) => [
-          `printf '%s' \"$$\" > \"${path.join(directory, "pid")}\"`,
+        reason: "timeout",
+        cause: "worker-timeout",
+        lines: (directory) => withGrandchild(directory, [
           "trap 'exit 0' TERM INT",
           "while :; do :; done",
-        ],
+        ]),
         limits: { timeoutMs: 20, closeTimeoutMs: 20 },
       },
       {
-        name: "close",
-        lines: (directory) => [`printf '%s' \"$$\" > \"${path.join(directory, "pid")}\"`, "exit 0"],
+        name: "immediate-exit",
+        reason: "collector-crash",
+        cause: "worker-exit",
+        lines: (directory) => withGrandchild(directory, ["exit 0"]),
       },
     ];
 
@@ -500,11 +897,12 @@ describe("resource recurring reads", () => {
           new Promise<"hung">((resolve) => setTimeout(() => resolve("hung"), 500)),
         ]);
         expect(outcome === "hung", fixture.name).toBeFalse();
-        expect(outcome, fixture.name).toMatchObject({ diagnostic: { degradedReason: "collector-crash" } });
-        const pid = Number(readFileSync(path.join(directory, "pid"), "utf8"));
-        let alive = true;
-        try { process.kill(pid, 0); } catch { alive = false; }
-        expect(alive, fixture.name).toBeFalse();
+        expect(outcome, fixture.name).toMatchObject({ diagnostic: {
+          degradedReason: fixture.reason,
+          failure: { cause: fixture.cause },
+        } });
+        await expectProcessAbsentAfterQuietInterval(Number(readFileSync(path.join(directory, "pid"), "utf8")), `${fixture.name} worker`);
+        await expectProcessAbsentAfterQuietInterval(Number(readFileSync(path.join(directory, "grandchild-pid"), "utf8")), `${fixture.name} grandchild`);
       });
     }
 
@@ -516,7 +914,10 @@ describe("resource recurring reads", () => {
         new Promise<"hung">((resolve) => setTimeout(() => resolve("hung"), 500)),
       ]);
       expect(outcome === "hung").toBeFalse();
-      expect(outcome).toMatchObject({ diagnostic: { degradedReason: "collector-crash" } });
+      expect(outcome).toMatchObject({ diagnostic: {
+        degradedReason: "collector-crash",
+        failure: { cause: "worker-spawn" },
+      } });
     } finally {
       if (previousExecutable === undefined) delete process.env.LLV_RESOURCE_COLLECTOR_EXECUTABLE;
       else process.env.LLV_RESOURCE_COLLECTOR_EXECUTABLE = previousExecutable;
@@ -684,8 +1085,38 @@ describe("resource recurring reads", () => {
       ]);
 
       expect(outcome === "hung").toBeFalse();
-      expect(outcome).toMatchObject({ diagnostic: { degradedReason: "collector-busy" } });
+      expect(outcome).toMatchObject({ diagnostic: { degradedReason: "timeout", failure: { cause: "file-handoff-timeout" } } });
       expect(existsSync(path.join(directory, "workers"))).toBeFalse();
+    });
+  });
+
+  test("an expired fresh handoff recovers on the next request without spawning late work", async () => {
+    await withResourceWorkerScript((directory) => [
+      `printf x >> "${path.join(directory, "workers")}"`,
+      `printf '%s\\n' '${EMPTY_FRESH_WORKER_MESSAGE}'`,
+    ], async (directory) => {
+      const first = deferred<never[]>();
+      let handoffs = 0;
+      const reader = workerTestReader({
+        readFiles: async () => {
+          handoffs += 1;
+          return handoffs === 1 ? first.promise : [];
+        },
+        workerLimits: { inputTimeoutMs: 20 },
+      });
+
+      const expired = await Promise.race([
+        reader.read(true),
+        new Promise<"hung">((resolve) => setTimeout(() => resolve("hung"), 100)),
+      ]);
+      expect(expired === "hung").toBeFalse();
+      expect(expired).toMatchObject({ diagnostic: { degradedReason: "timeout", failure: { cause: "file-handoff-timeout" } } });
+
+      await reader.read(true);
+      expect(readFileSync(path.join(directory, "workers"), "utf8")).toBe("x");
+      first.resolve([]);
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect(readFileSync(path.join(directory, "workers"), "utf8")).toBe("x");
     });
   });
 

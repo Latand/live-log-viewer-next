@@ -74,6 +74,7 @@ async function collect(message: unknown): Promise<void> {
       serverPid: tmuxServerPid,
       resumeRecords: async () => null,
       identity: procBackend.processIdentity,
+      holdsPath: procBackend.pidHoldsPath,
       conversationIdForPath: (pathname) => conversationByPath.get(pathname) ?? null,
     });
     const payload = await buildResourceSnapshot(request.fresh, {
