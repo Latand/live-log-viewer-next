@@ -1,8 +1,11 @@
 import { procBackend } from "@/lib/proc";
 import type { ProcBackend } from "@/lib/proc";
 import { readFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
+import path from "node:path";
 import { completedFileScan, currentFileScan } from "@/lib/scanner/scanCache";
-import { createFreshAwareCoalescer } from "@/lib/asyncCoalescer";
+import { createResourceCollector, type ResourceCollector, type ResourceDegradedReason } from "@/lib/resourceCollector";
 import { descendantPids } from "@/lib/proc/memory";
 import { overlaySessionTitles } from "@/lib/session/titleProjection";
 import { readTranscriptHosts, type TranscriptHost, type TranscriptHostSnapshot } from "@/lib/agent/transcriptHost";
@@ -28,6 +31,19 @@ export type ResourceBuildDiagnostic = {
   status: "complete" | "failed";
   durationMs: number;
   phases: ResourceBuildPhases;
+};
+
+export type ServedResourceDiagnostic = ResourceBuildDiagnostic & {
+  generation: number;
+  startedAt: string;
+  completedAt: string;
+  collectorId: string;
+  degradedReason?: ResourceDegradedReason;
+};
+
+export type ResourcesRead = {
+  payload: ResourcesPayload;
+  diagnostic: ServedResourceDiagnostic;
 };
 
 function emptyResourceBuildPhases(): ResourceBuildPhases {
@@ -99,7 +115,10 @@ export type KillTargetRef = TmuxAttachReference;
 
 const globalStore = globalThis as unknown as {
   __llvResourcesReader?: ResourcesReader;
+  __llvResourcesReaderFactory?: unknown;
   __llvResourceTargets?: Map<string, KillTargetRef>;
+  __llvLastResourceTargets?: Array<{ target: string; ref: KillTargetRef }>;
+  __llvResourceTargetsGeneration?: number;
   __llvLastResourceBuild?: ResourceBuildDiagnostic;
 };
 
@@ -128,6 +147,25 @@ export function noteSessionTargets(sessions: Iterable<{ target: string; ref: Kil
   const map = new Map<string, KillTargetRef>();
   for (const { target, ref } of sessions) map.set(target, ref);
   globalStore.__llvResourceTargets = map;
+  globalStore.__llvLastResourceTargets = [...map].map(([target, ref]) => ({ target, ref }));
+}
+
+/** Applies a served observation exactly once in generation order. A consumed
+    target therefore cannot return through a late observation. */
+export function applyResourceTargets(
+  generation: number,
+  sessions: Iterable<{ target: string; ref: KillTargetRef }>,
+): void {
+  if (generation <= (globalStore.__llvResourceTargetsGeneration ?? 0)) return;
+  noteSessionTargets(sessions);
+  globalStore.__llvResourceTargetsGeneration = generation;
+}
+
+/** Serializable target refs from the observation most recently derived in
+    this runtime. Worker adapters return these to the viewer, which remains
+    the only runtime that applies the kill allowlist. */
+export function lastResourceTargetRefs(): Array<{ target: string; ref: KillTargetRef }> {
+  return globalStore.__llvLastResourceTargets?.map(({ target, ref }) => ({ target, ref: { ...ref } })) ?? [];
 }
 
 /** Snapshot pane ref recorded for `target`, or null when it was never listed. */
@@ -275,45 +313,199 @@ export async function buildResourceSnapshot(
 }
 
 export interface ResourcesReader {
-  read(fresh?: boolean): Promise<ResourcesPayload>;
+  read(fresh?: boolean): Promise<ResourcesRead>;
+}
+
+type CollectedResources = {
+  payload: ResourcesPayload;
+  diagnostic: ResourceBuildDiagnostic;
+  hostCount: number;
+  treeCount: number;
+  targets: Array<{ target: string; ref: KillTargetRef }>;
+};
+
+const RESOURCE_OBSERVE_TIMEOUT_MS = 30_000;
+const RESOURCE_WORKER_TIMEOUT_MS = 29_500;
+
+function collectedResources(
+  payload: ResourcesPayload,
+  diagnostic: ResourceBuildDiagnostic,
+  targets: Array<{ target: string; ref: KillTargetRef }> = [],
+): CollectedResources {
+  return {
+    payload,
+    diagnostic,
+    hostCount: payload.sessions.length,
+    treeCount: payload.sessions.reduce((total, session) => total + session.procCount, 0),
+    targets,
+  };
+}
+
+type ResourceWorkerMessage =
+  | { type: "observation"; payload: ResourcesPayload; diagnostic: ResourceBuildDiagnostic; targets: Array<{ target: string; ref: KillTargetRef }> }
+  | { type: "failure"; error: string };
+
+/** One bounded worker owns one observation. Terminating after either outcome
+    prevents a crashed or wedged collection from surviving a request timeout. */
+async function collectResourcesInWorker(): Promise<CollectedResources> {
+  /* The production image ships src/ and Bun. A process adapter keeps the
+     worker independent from Next's route bundle and works when Next itself is
+     hosted by Node. The explicit in-process flag remains the rollback path. */
+  const executable = process.env.LLV_RESOURCE_COLLECTOR_EXECUTABLE
+    ?? (existsSync("/usr/local/bin/bun-container") ? "/usr/local/bin/bun-container" : "bun");
+  const worker = spawn(executable, [path.join(process.cwd(), "src/lib/resourceCollector.worker.ts")], {
+    cwd: process.cwd(),
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  return new Promise<CollectedResources>((resolve, reject) => {
+    let settled = false;
+    const finish = (outcome: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      worker.kill();
+      outcome();
+    };
+    const timeout = setTimeout(() => finish(() => reject(new Error("resource collector worker timed out"))), RESOURCE_WORKER_TIMEOUT_MS);
+    worker.once("error", (error) => finish(() => reject(error)));
+    worker.once("exit", (code) => {
+      if (code !== 0) finish(() => reject(new Error(`resource collector worker exited with ${code}`)));
+    });
+    let output = "";
+    worker.stdout.setEncoding("utf8");
+    worker.stdout.on("data", (chunk: string) => {
+      output += chunk;
+      const newline = output.indexOf("\n");
+      if (newline < 0) return;
+      const raw = output.slice(0, newline);
+      output = output.slice(newline + 1);
+      let message: ResourceWorkerMessage;
+      try {
+        message = JSON.parse(raw) as ResourceWorkerMessage;
+      } catch {
+        finish(() => reject(new Error("resource collector worker emitted invalid JSON")));
+        return;
+      }
+      if (message.type === "failure") {
+        finish(() => reject(new Error(message.error)));
+        return;
+      }
+      finish(() => {
+        resolve(collectedResources(message.payload, message.diagnostic, message.targets));
+      });
+    });
+    worker.stdin.end("{\"type\":\"collect\"}\n");
+  });
+}
+
+function fallbackRead(
+  payload: ResourcesPayload,
+  reason: ResourceDegradedReason,
+  collectorId: string,
+): ResourcesRead {
+  const capturedAt = new Date().toISOString();
+  return {
+    payload,
+    diagnostic: {
+      fresh: true,
+      status: "failed",
+      durationMs: 0,
+      phases: emptyResourceBuildPhases(),
+      generation: 0,
+      startedAt: capturedAt,
+      completedAt: capturedAt,
+      collectorId,
+      degradedReason: reason,
+    },
+  };
+}
+
+function resourceReadFromObservation(
+  observation: Awaited<ReturnType<ResourceCollector<CollectedResources>["observe"]>>,
+  captureSystem: () => ResourcesPayload["system"],
+  fresh: boolean,
+  collectorId: string,
+): ResourcesRead {
+  if (!observation) {
+    return fallbackRead({ system: captureSystem(), sessions: [] }, "collector-busy", collectorId);
+  }
+  const { payload, diagnostic } = observation.value;
+  applyResourceTargets(observation.generation, observation.value.targets);
+  return {
+    payload: fresh ? payload : { ...payload, system: captureSystem() },
+    diagnostic: {
+      ...diagnostic,
+      generation: observation.generation,
+      startedAt: new Date(observation.startedAt).toISOString(),
+      completedAt: new Date(observation.completedAt).toISOString(),
+      collectorId: observation.collectorId,
+      ...(observation.degradedReason ? { degradedReason: observation.degradedReason } : {}),
+    },
+  };
 }
 
 export function createResourcesReader(
   build: (fresh: boolean) => Promise<ResourcesPayload>,
   captureSystem: () => ResourcesPayload["system"],
   now: () => number = Date.now,
+  diagnosticForBuild: () => ResourceBuildDiagnostic | null = lastResourceBuildDiagnostic,
+  options: { inProcess?: boolean } = {},
 ): ResourcesReader {
-  let cached: { at: number; data: ResourcesPayload } | null = null;
-  const coordinator = createFreshAwareCoalescer<ResourcesPayload>();
-  const rebuild = async (fresh: boolean): Promise<ResourcesPayload> => {
-    const data = await build(fresh);
-    cached = { at: now(), data };
-    return data;
-  };
+  const inProcess = options.inProcess ?? process.env.LLV_RESOURCE_COLLECTOR_IN_PROCESS === "1";
+  const collectorId = inProcess
+    ? `in-process:${process.pid}`
+    : `worker:${process.pid}`;
+  const collector = createResourceCollector<CollectedResources>({
+    collectorId,
+    now,
+    collect: inProcess ? async () => {
+      const payload = await build(true);
+      const diagnostic = diagnosticForBuild();
+      if (!diagnostic) throw new Error("resource build completed without diagnostics");
+      return collectedResources(payload, diagnostic, lastResourceTargetRefs());
+    } : collectResourcesInWorker,
+  });
 
   return {
-    async read(fresh = false): Promise<ResourcesPayload> {
-      if (!fresh && cached) {
-        if (now() - cached.at >= CACHE_MS) {
-          /* A stale resource poll only starts the shared rebuild. The cached
-             session snapshot stays available while filesystem, process, and
-             tmux observations run off the request path. */
-          void coordinator.run(false, rebuild).catch(() => undefined);
+    async read(fresh = false): Promise<ResourcesRead> {
+      const latest = collector.latest();
+      if (!fresh && latest) {
+        if (now() - latest.completedAt >= CACHE_MS) {
+          /* The completed file snapshot remains the response while a bounded
+             current scan revalidates in the collector. Its rejection is held
+             by the collector, so polling never leaks an unhandled rejection. */
+          void collector.observe(collector.fence(), 0);
         }
-        return { ...cached.data, system: captureSystem() };
+        return resourceReadFromObservation(latest, captureSystem, false, collectorId);
       }
-      const data = await coordinator.run(fresh, rebuild);
-      return fresh ? data : { ...data, system: captureSystem() };
+      const fence = collector.fence();
+      const observation = await collector.observe(fence, RESOURCE_OBSERVE_TIMEOUT_MS);
+      return resourceReadFromObservation(observation, captureSystem, fresh, collectorId);
     },
   };
 }
 
 function resourcesReader(): ResourcesReader {
-  globalStore.__llvResourcesReader ??= createResourcesReader(
-    buildResourceSnapshot,
-    () => captureSystemMemory(),
-  );
-  return globalStore.__llvResourcesReader;
+  const factory = resourcesReader;
+  let reader = globalStore.__llvResourcesReader;
+  if (globalStore.__llvResourcesReaderFactory !== factory || !reader) {
+    globalStore.__llvResourcesReaderFactory = factory;
+    reader = createResourcesReader(
+      buildResourceSnapshot,
+      () => captureSystemMemory(),
+    );
+    globalStore.__llvResourcesReader = reader;
+  }
+  return reader;
+}
+
+export function resetResourcesForTests(): void {
+  globalStore.__llvResourcesReader = undefined;
+  globalStore.__llvResourcesReaderFactory = undefined;
+  globalStore.__llvResourceTargets = undefined;
+  globalStore.__llvLastResourceTargets = undefined;
+  globalStore.__llvResourceTargetsGeneration = undefined;
+  globalStore.__llvLastResourceBuild = undefined;
 }
 
 /** Snapshot for GET /api/resources, cached briefly so UI polling stays cheap.
@@ -324,6 +516,15 @@ export async function readResources(fresh = false): Promise<ResourcesPayload> {
   if (fixturePath) {
     noteSessionTargets([]);
     return parseResourcesFixture(readFileSync(fixturePath, "utf8"));
+  }
+  return (await resourcesReader().read(fresh)).payload;
+}
+
+export async function readResourcesWithDiagnostic(fresh = false): Promise<ResourcesRead> {
+  const fixturePath = process.env.LLV_RESOURCES_FIXTURE;
+  if (fixturePath) {
+    noteSessionTargets([]);
+    return fallbackRead(parseResourcesFixture(readFileSync(fixturePath, "utf8")), "collector-busy", "fixture");
   }
   return resourcesReader().read(fresh);
 }

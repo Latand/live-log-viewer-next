@@ -3,7 +3,7 @@ import { describe, expect, test } from "bun:test";
 import type { TranscriptHost } from "@/lib/agent/transcriptHost";
 import type { FileEntry, ResourcesPayload } from "@/lib/types";
 
-import { allowedKillTarget, buildResourceSnapshot, canonicalResourceEntry, conflictingResourceHost, consumeKillTarget, createResourcesReader, lastResourceBuildDiagnostic, noteSessionTargets, parseResourcesFixture } from "./resources";
+import { allowedKillTarget, applyResourceTargets, buildResourceSnapshot, canonicalResourceEntry, conflictingResourceHost, consumeKillTarget, createResourcesReader, lastResourceBuildDiagnostic, noteSessionTargets, parseResourcesFixture, resetResourcesForTests } from "./resources";
 
 const PATHNAME = "/home/user/.codex/sessions/2026/07/10/rollout-2026-07-10-019f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl";
 
@@ -204,37 +204,49 @@ describe("kill-target allowlist", () => {
     expect(allowedKillTarget("agents:1.0")).toBeNull();
     expect(allowedKillTarget("agents:2.0")).toEqual(ref(900, 222, "%22"));
   });
+
+  test("an older observation cannot re-arm a concurrently consumed target", () => {
+    applyResourceTargets(2, [{ target: "agents:1.0", ref: ref(900, 111, "%11") }]);
+    consumeKillTarget("agents:1.0");
+    applyResourceTargets(1, [{ target: "agents:1.0", ref: ref(900, 111, "%11") }]);
+    expect(allowedKillTarget("agents:1.0")).toBeNull();
+  });
+
+  test("a reset drops the global reader, diagnostics, and allowlist", () => {
+    noteSessionTargets([{ target: "agents:1.0", ref: ref(900, 111, "%11") }]);
+    resetResourcesForTests();
+    expect(allowedKillTarget("agents:1.0")).toBeNull();
+    expect(lastResourceBuildDiagnostic()).toBeNull();
+  });
 });
 
 describe("resource recurring reads", () => {
   test("expired ordinary reads return the cached snapshot while one rebuild runs, and fresh waits for a newer build", async () => {
     let now = 0;
     let builds = 0;
-    const ordinary = deferred<ResourcesPayload>();
     const fresh = deferred<ResourcesPayload>();
     const cached: ResourcesPayload = { system: null, sessions: [] };
-    const ordinaryResult: ResourcesPayload = { system: null, sessions: [{ target: "agents:2.0", panePid: 2, path: null, engine: "codex", hostConflict: false, title: null, project: null, activity: null, lastActiveAt: null, cwd: "/repo", rssBytes: 2, swapBytes: 0, procCount: 1 }] };
     const freshResult: ResourcesPayload = { system: null, sessions: [{ target: "agents:3.0", panePid: 3, path: null, engine: "codex", hostConflict: false, title: null, project: null, activity: null, lastActiveAt: null, cwd: "/repo", rssBytes: 3, swapBytes: 0, procCount: 1 }] };
-    const reader = createResourcesReader(async (forceFresh) => {
+    const reader = createResourcesReader(async () => {
       builds += 1;
       if (builds === 1) return cached;
-      return forceFresh ? fresh.promise : ordinary.promise;
-    }, () => null, () => now);
+      return fresh.promise;
+    }, () => null, () => now, () => ({ fresh: true, status: "complete", durationMs: 0, phases: {
+      systemMemory: 0, readFiles: 0, readHosts: 0, ppidMap: 0, processMemory: 0, attach: 0, serialization: 0,
+    } }), { inProcess: true });
 
-    expect(await reader.read()).toEqual(cached);
+    expect((await reader.read()).payload).toEqual(cached);
     now = 10_000;
-    expect(await reader.read()).toEqual(cached);
+    expect((await reader.read()).payload).toEqual(cached);
     await Promise.resolve();
     expect(builds).toBe(2);
-    expect(await reader.read()).toEqual(cached);
+    expect((await reader.read()).payload).toEqual(cached);
     expect(builds).toBe(2);
 
     const forced = reader.read(true);
-    ordinary.resolve(ordinaryResult);
     await new Promise<void>((resolve) => setImmediate(resolve));
-    expect(builds).toBe(3);
     fresh.resolve(freshResult);
-    expect(await forced).toEqual(freshResult);
+    expect((await forced).payload).toEqual(freshResult);
   });
 
   test("a failed ordinary rebuild leaves the cached snapshot available and later polls retry", async () => {
@@ -247,15 +259,17 @@ describe("resource recurring reads", () => {
       if (builds === 1) return cached;
       if (builds === 2) throw new Error("transient resource build failure");
       return recovered.promise;
-    }, () => null, () => now);
+    }, () => null, () => now, () => ({ fresh: true, status: "complete", durationMs: 0, phases: {
+      systemMemory: 0, readFiles: 0, readHosts: 0, ppidMap: 0, processMemory: 0, attach: 0, serialization: 0,
+    } }), { inProcess: true });
 
     await reader.read();
     now = 10_000;
-    expect(await reader.read()).toEqual(cached);
+    expect((await reader.read()).payload).toEqual(cached);
     await new Promise<void>((resolve) => setImmediate(resolve));
     await Promise.resolve();
     expect(builds).toBe(2);
-    expect(await reader.read()).toEqual(cached);
+    expect((await reader.read()).payload).toEqual(cached);
     await Promise.resolve();
     expect(builds).toBe(3);
     recovered.resolve(cached);
