@@ -170,11 +170,15 @@ export function createRuntimeBus(deps: RuntimeBusDeps): RuntimeBus {
     }, HEARTBEAT_TIMEOUT_MS);
   }
 
-  function markLive(): void {
+  function markOpen(): void {
+    if (firstFailureAt === null && state.connection !== "live") setState({ connection: "live" });
+    armHeartbeat();
+  }
+
+  function confirmHealthy(): void {
     reconnectAttempts = 0;
     firstFailureAt = null;
-    if (state.connection !== "live") setState({ connection: "live" });
-    armHeartbeat();
+    markOpen();
   }
 
   function noteResynced(): void {
@@ -227,7 +231,7 @@ export function createRuntimeBus(deps: RuntimeBusDeps): RuntimeBus {
 
     es.onopen = () => {
       if (myGen !== generation) return;
-      markLive();
+      markOpen();
     };
     es.onmessage = (ev) => {
       if (myGen !== generation) return;
@@ -241,7 +245,17 @@ export function createRuntimeBus(deps: RuntimeBusDeps): RuntimeBus {
     es.addEventListener("heartbeat", () => {
       if (myGen !== generation) return;
       setState({ lastEventAt: deps.now() });
-      markLive();
+      confirmHealthy();
+    });
+    es.addEventListener("fault", (ev) => {
+      if (myGen !== generation) return;
+      try {
+        const fault = JSON.parse(ev.data) as { code?: unknown };
+        if (fault.code !== "runtime-host-unavailable") return;
+      } catch {
+        return;
+      }
+      onTransportLost();
     });
     es.addEventListener("reset", () => {
       if (myGen !== generation) return;
@@ -261,12 +275,12 @@ export function createRuntimeBus(deps: RuntimeBusDeps): RuntimeBus {
     const result = applyEvent(state.store, env);
     if (result.outcome === "applied") {
       setState({ store: result.store });
-      markLive();
+      confirmHealthy();
       if (result.filesBumped) {
         for (const listener of filesListeners) listener(result.store.filesRevision);
       }
     } else if (result.outcome === "duplicate") {
-      markLive();
+      confirmHealthy();
     } else {
       // Revision gap: the reducer never mutated. Resnapshot to converge.
       void join(true);

@@ -389,6 +389,103 @@ describe("runtimeBus reconnect", () => {
   let h: Harness;
   beforeEach(() => (h = harness()));
 
+  test("a persistent runtime-host fault preserves backoff and reaches degraded fallback", async () => {
+    h.bus.start();
+    await flush();
+
+    let faultedSources = 0;
+    for (let elapsed = 0; elapsed < 20_000; elapsed += 100) {
+      const current = h.sources[faultedSources];
+      if (current) {
+        current.open();
+        current.named("fault", { code: "runtime-host-unavailable" });
+        current.error();
+        faultedSources += 1;
+      }
+      h.clock.advance(100);
+      await flush();
+    }
+
+    expect(h.fetchCalls()).toBe(7);
+    expect(h.sources).toHaveLength(6);
+    expect(h.bus.getState().connection).toBe("degraded");
+    expect(h.sources.filter((source) => !source.closed)).toHaveLength(0);
+  });
+
+  test("a named fault followed by EventSource error schedules one reconnect", async () => {
+    h.bus.start();
+    await flush();
+    const first = h.sources[0]!;
+    first.open();
+    first.named("fault", { code: "runtime-host-unavailable" });
+    expect(h.bus.getState().connection).toBe("reconnecting");
+    expect(first.closed).toBeTrue();
+    first.error();
+
+    h.clock.advance(500);
+    await flush();
+
+    expect(h.fetchCalls()).toBe(2);
+    expect(h.sources).toHaveLength(2);
+    expect(h.sources.filter((source) => !source.closed)).toHaveLength(1);
+  });
+
+  test("opening a replacement stream leaves its accumulated failure budget intact", async () => {
+    h.bus.start();
+    await flush();
+    h.sources[0]!.open();
+    h.sources[0]!.error();
+    h.clock.advance(500);
+    await flush();
+
+    h.sources[1]!.open();
+    expect(h.bus.getState().connection).toBe("reconnecting");
+    h.sources[1]!.error();
+    h.clock.advance(500);
+    await flush();
+    expect(h.sources).toHaveLength(2);
+
+    h.clock.advance(500);
+    await flush();
+    expect(h.sources).toHaveLength(3);
+  });
+
+  test("a heartbeat on a replacement stream restores the initial retry budget", async () => {
+    h.bus.start();
+    await flush();
+    h.sources[0]!.open();
+    h.sources[0]!.error();
+    h.clock.advance(500);
+    await flush();
+
+    h.sources[1]!.open();
+    h.sources[1]!.named("heartbeat", { publishedSeq: 100 });
+    h.sources[1]!.error();
+    h.clock.advance(500);
+    await flush();
+
+    expect(h.sources).toHaveLength(3);
+    expect(h.bus.getState().connection).toBe("reconnecting");
+  });
+
+  test("a valid runtime envelope restores health and resumes from its cursor", async () => {
+    h.bus.start();
+    await flush();
+    h.sources[0]!.open();
+    h.sources[0]!.error();
+    h.clock.advance(500);
+    await flush();
+
+    h.sources[1]!.open();
+    h.sources[1]!.message(sessionEvent(101, 2, "running", "t1"));
+    h.sources[1]!.error();
+    h.clock.advance(500);
+    await flush();
+
+    expect(h.sources).toHaveLength(3);
+    expect(h.sources[2]!.url).toContain("after=101");
+  });
+
   test("transport blip refreshes deployment state and resumes from the cursor", async () => {
     h.bus.start();
     await flush();
@@ -404,6 +501,8 @@ describe("runtimeBus reconnect", () => {
     expect(h.sources.length).toBe(2);
     expect(h.sources[1]!.url).toContain("after=101");
     h.sources[1]!.open();
+    expect(h.bus.getState().connection).toBe("reconnecting");
+    h.sources[1]!.named("heartbeat", { publishedSeq: 101 });
     expect(h.bus.getState().connection).toBe("live");
   });
 
@@ -599,9 +698,13 @@ describe("runtimeBus stop", () => {
     h.bus.start();
     await flush();
     h.sources[0]!.open();
+    h.sources[0]!.named("fault", { code: "runtime-host-unavailable" });
     h.bus.stop();
+    h.clock.advance(20_000);
+    await flush();
     expect(h.bus.getState().enabled).toBe(false);
     expect(h.bus.getState().connection).toBe("offline");
     expect(h.sources[0]!.closed).toBe(true);
+    expect(h.sources).toHaveLength(1);
   });
 });
