@@ -9,7 +9,7 @@ import {
   type ActiveConversationPin,
 } from "@/components/conversationPin";
 
-import { createFilesClientCache, filesApiUrl, filesPollCadence, filesRequestHeaders } from "./useFiles";
+import { createFilesClientCache, filesApiUrl, filesPollCadence, filesRequestHeaders, type FilesData } from "./useFiles";
 
 test("filesApiUrl keeps project switches on the bounded scheme feed", () => {
   expect(filesApiUrl()).toBe("/api/files");
@@ -131,6 +131,155 @@ test("client cache subscriptions receive updates only for their request scope", 
   expect(pinnedUpdates).toEqual([["/global", pinnedPath]]);
   unsubscribeGlobal();
   unsubscribePinned();
+});
+
+test("pipeline patches publish each cached URL representation without refetching", async () => {
+  const pinnedPath = "/archive/scoped-pipeline-pin.jsonl";
+  let fetches = 0;
+  const cache = createFilesClientCache(async (input) => {
+    fetches += 1;
+    const pinned = input !== "/api/files";
+    return new Response(JSON.stringify({
+      files: pinned
+        ? [file("/global", "Global"), file(pinnedPath, "Pinned")]
+        : [file("/global", "Global")],
+      pinOverlayPaths: pinned ? [pinnedPath] : [],
+      pipelines: [pipelineRow("p1", "server")],
+    }));
+  });
+  const notifications: Array<{ listener: "pinned" | "global"; scope: string | null; files: string[]; pins: string[]; task: string }> = [];
+  const unsubscribePinned = cache.subscribe((data) => notifications.push({
+    listener: "pinned",
+    scope: data.requestScope,
+    files: data.files.map((entry) => entry.path),
+    pins: data.pinOverlayPaths,
+    task: data.pipelines[0]?.task ?? "",
+  }), pinnedPath);
+  const unsubscribeGlobal = cache.subscribe((data) => notifications.push({
+    listener: "global",
+    scope: data.requestScope,
+    files: data.files.map((entry) => entry.path),
+    pins: data.pinOverlayPaths,
+    task: data.pipelines[0]?.task ?? "",
+  }));
+
+  await cache.revalidate(pinnedPath);
+  await cache.revalidate();
+  notifications.length = 0;
+
+  cache.applyPipeline(pipelineRow("p1", "patched") as never, false);
+  expect(fetches).toBe(2);
+  expect(notifications).toEqual([
+    {
+      listener: "pinned",
+      scope: filesApiUrl(undefined, pinnedPath),
+      files: ["/global", pinnedPath],
+      pins: [pinnedPath],
+      task: "patched",
+    },
+    {
+      listener: "global",
+      scope: "/api/files",
+      files: ["/global"],
+      pins: [],
+      task: "patched",
+    },
+  ]);
+
+  notifications.length = 0;
+  cache.revertPipeline("p1");
+  expect(fetches).toBe(2);
+  expect(notifications.map(({ listener, scope, task }) => ({ listener, scope, task }))).toEqual([
+    { listener: "pinned", scope: filesApiUrl(undefined, pinnedPath), task: "server" },
+    { listener: "global", scope: "/api/files", task: "server" },
+  ]);
+
+  unsubscribePinned();
+  notifications.length = 0;
+  cache.applyPipeline(pipelineRow("p1", "patched again") as never, false);
+  expect(notifications.map(({ listener }) => listener)).toEqual(["global"]);
+  unsubscribeGlobal();
+});
+
+test("a pinned generation retry restores its ETag representation with the local pipeline overlay", async () => {
+  const pinnedPath = "/archive/retrying-pipeline-pin.jsonl";
+  const pinnedUrl = filesApiUrl(undefined, pinnedPath);
+  let pinnedRequests = 0;
+  const cache = createFilesClientCache(async (input, init) => {
+    if (input === "/api/files") {
+      return new Response(JSON.stringify({
+        files: [file("/global", "Global")],
+        pipelines: [pipelineRow("p1", "server")],
+      }), { headers: { ETag: '"global"' } });
+    }
+    pinnedRequests += 1;
+    if (pinnedRequests > 1) {
+      expect(new Headers(init?.headers).get("If-None-Match")).toBe('"pinned"');
+      expect(new Headers(init?.headers).get("x-llv-files-generation")).toBe(pinnedRequests === 2 ? null : "1");
+      return new Response(null, {
+        status: 304,
+        headers: {
+          "x-llv-files-generation": pinnedRequests === 2 ? "0" : "1",
+          "x-llv-files-target-generation": "1",
+        },
+      });
+    }
+    return new Response(JSON.stringify({
+      files: [file("/global", "Global"), file(pinnedPath, "Pinned")],
+      pinOverlayPaths: [pinnedPath],
+      pipelines: [pipelineRow("p1", "server")],
+    }), { headers: { ETag: '"pinned"' } });
+  });
+  const notifications: string[] = [];
+  const unsubscribePinned = cache.subscribe((data) => notifications.push(
+    `pinned:${data.requestScope}:${data.files.map((entry) => entry.path).join(",")}:${data.pipelines[0]?.task}`,
+  ), pinnedPath);
+  const unsubscribeGlobal = cache.subscribe((data) => notifications.push(
+    `global:${data.requestScope}:${data.files.map((entry) => entry.path).join(",")}:${data.pipelines[0]?.task}`,
+  ));
+
+  await cache.revalidate(pinnedPath);
+  await cache.revalidate();
+  cache.applyPipeline(pipelineRow("p1", "optimistic") as never, false);
+  notifications.length = 0;
+  await cache.revalidate(pinnedPath, 12);
+  await Bun.sleep(60);
+
+  expect(pinnedRequests).toBe(3);
+  expect(notifications).toEqual([
+    `pinned:${pinnedUrl}:/global,${pinnedPath}:optimistic`,
+    `pinned:${pinnedUrl}:/global,${pinnedPath}:optimistic`,
+  ]);
+  unsubscribePinned();
+  unsubscribeGlobal();
+});
+
+test("active scoped representations survive LRU pressure during a pipeline patch", async () => {
+  const pinnedPaths = Array.from({ length: 10 }, (_, index) => `/archive/active-pin-${index}.jsonl`);
+  const cache = createFilesClientCache(async (input) => {
+    const url = new URL(input, "http://127.0.0.1");
+    const pinnedPath = url.searchParams.get("path")!;
+    return new Response(JSON.stringify({
+      files: [file("/global", "Global"), file(pinnedPath, "Pinned")],
+      pinOverlayPaths: [pinnedPath],
+      pipelines: [pipelineRow("p1", "server")],
+    }));
+  });
+  const updates = new Map<string, FilesData>();
+  const unsubscribes = pinnedPaths.map((pinnedPath) => cache.subscribe((data) => {
+    updates.set(pinnedPath, data);
+  }, pinnedPath));
+  for (const pinnedPath of pinnedPaths) await cache.revalidate(pinnedPath);
+  updates.clear();
+
+  cache.applyPipeline(pipelineRow("p1", "patched") as never, false);
+
+  expect([...updates]).toHaveLength(pinnedPaths.length);
+  for (const pinnedPath of pinnedPaths) {
+    expect(updates.get(pinnedPath)?.files.map((entry) => entry.path)).toEqual(["/global", pinnedPath]);
+    expect(updates.get(pinnedPath)?.pipelines[0]?.task).toBe("patched");
+  }
+  for (const unsubscribe of unsubscribes) unsubscribe();
 });
 
 test("a global 304 restores its exact cached membership and values", async () => {

@@ -229,6 +229,44 @@ test("a corrupt completed snapshot falls back to a cold scan and repairs persist
   expect(persisted.version).toBe(1);
 });
 
+test("snapshot persistence creates private state and replaces permissive files as 0600", async () => {
+  const privateStateDir = path.join(stateDir, "private-snapshot-state");
+  const snapshotPath = path.join(privateStateDir, "files-scan-snapshot.json");
+  const originalRename = fs.renameSync;
+  const previousUmask = process.umask(0);
+  const temporaryModes: number[] = [];
+  process.env.LLV_STATE_DIR = privateStateDir;
+  fs.renameSync = ((source: fs.PathLike, target: fs.PathLike) => {
+    if (target === snapshotPath) temporaryModes.push(fs.statSync(source).mode & 0o777);
+    return originalRename(source, target);
+  }) as typeof fs.renameSync;
+
+  try {
+    resetFilesRouteCacheForTests();
+    scannedFiles = [file("/sessions/private-initial.jsonl")];
+    await cachedFileScan();
+
+    expect(fs.statSync(privateStateDir).mode & 0o777).toBe(0o700);
+    expect(temporaryModes).toEqual([0o600]);
+    expect(fs.statSync(snapshotPath).mode & 0o777).toBe(0o600);
+
+    fs.chmodSync(snapshotPath, 0o666);
+    scannedFiles = [file("/sessions/private-replacement.jsonl")];
+    await cachedFileScan(undefined, undefined, Date.now(), Number.MAX_SAFE_INTEGER);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(temporaryModes).toEqual([0o600, 0o600]);
+    expect(fs.statSync(snapshotPath).mode & 0o777).toBe(0o600);
+    expect(JSON.parse(fs.readFileSync(snapshotPath, "utf8")).snapshot.files.map((entry: FileEntry) => entry.path))
+      .toEqual(["/sessions/private-replacement.jsonl"]);
+  } finally {
+    fs.renameSync = originalRename;
+    process.umask(previousUmask);
+    process.env.LLV_STATE_DIR = stateDir;
+    resetFilesRouteCacheForTests();
+  }
+});
+
 test("snapshot publication failures preserve the canonical file, clean temps, stay non-fatal, and recover", async () => {
   const snapshotPath = path.join(stateDir, "files-scan-snapshot.json");
   const canonical = JSON.stringify({

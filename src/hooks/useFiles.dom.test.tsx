@@ -19,7 +19,12 @@ mock.module("./runtimeBus", () => ({
   }),
 }));
 
-const { resetFilesClientCacheForTests, useFiles } = await import("./useFiles");
+const {
+  applyPipelineSnapshot,
+  resetFilesClientCacheForTests,
+  revertPipelineSnapshot,
+  useFiles,
+} = await import("./useFiles");
 const dom = new Window();
 Object.assign(globalThis, {
   window: dom,
@@ -46,6 +51,77 @@ function Probe() {
   const data = useFiles();
   return <div data-loaded={String(data.loaded)}>{data.files[0]?.path ?? "empty"}</div>;
 }
+
+function ScopedProbe({ pinnedPath }: { pinnedPath?: string }) {
+  const data = useFiles(undefined, pinnedPath);
+  return <div>{JSON.stringify({
+    files: data.files.map((entry) => entry.path),
+    pins: data.pinOverlayPaths,
+    scope: data.requestScope,
+    task: data.pipelines[0]?.task ?? "",
+  })}</div>;
+}
+
+function pipelineRow(task: string) {
+  return { id: "p1", task, project: "project-a", state: "draft", stages: [], runs: [], cursor: null, hiddenAt: null };
+}
+
+test("concurrent pinned and global hooks keep their scopes through local pipeline apply and revert", async () => {
+  const pinnedPath = "/archive/dom-scoped-pin.jsonl";
+  let fetches = 0;
+  globalThis.fetch = mock(async (input: string | URL | Request) => {
+    fetches += 1;
+    const url = String(input);
+    const pinned = url !== "/api/files";
+    return new Response(JSON.stringify({
+      files: pinned ? [{ path: "/global" }, { path: pinnedPath }] : [{ path: "/global" }],
+      pinOverlayPaths: pinned ? [pinnedPath] : [],
+      pipelines: [pipelineRow("server")],
+    }));
+  }) as unknown as typeof fetch;
+
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  flushSync(() => {
+    root.render(<>
+      <ScopedProbe pinnedPath={pinnedPath} />
+      <ScopedProbe />
+    </>);
+  });
+  await Bun.sleep(30);
+
+  applyPipelineSnapshot(pipelineRow("patched") as never, false);
+  await Bun.sleep(0);
+  expect(fetches).toBe(2);
+  expect(host.children[0]?.textContent).toBe(JSON.stringify({
+    files: ["/global", pinnedPath],
+    pins: [pinnedPath],
+    scope: `/api/files?path=${encodeURIComponent(pinnedPath)}`,
+    task: "patched",
+  }));
+  expect(host.children[1]?.textContent).toBe(JSON.stringify({
+    files: ["/global"],
+    pins: [],
+    scope: "/api/files",
+    task: "patched",
+  }));
+
+  revertPipelineSnapshot("p1");
+  await Bun.sleep(0);
+  expect(fetches).toBe(2);
+  expect(host.children[0]?.textContent).toContain('"task":"server"');
+  expect(host.children[0]?.textContent).toContain(pinnedPath);
+  expect(host.children[1]?.textContent).toBe(JSON.stringify({
+    files: ["/global"],
+    pins: [],
+    scope: "/api/files",
+    task: "server",
+  }));
+
+  flushSync(() => { root.unmount(); });
+  host.remove();
+});
 
 test("a failed cold hydration keeps creation guarded and retries until a snapshot succeeds", async () => {
   let calls = 0;

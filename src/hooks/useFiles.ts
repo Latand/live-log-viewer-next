@@ -154,9 +154,35 @@ export function createFilesClientCache(fetcher: FilesFetcher): FilesClientCache 
   const pipelineOverlays = new Map<string, { pipeline: Pipeline | null; minGeneration: number }>();
   let serverPipelines: readonly Pipeline[] = EMPTY.pipelines;
 
+  const pipelinesWithOverlays = (pipelines: readonly Pipeline[]): Pipeline[] => {
+    if (!pipelineOverlays.size) return [...pipelines];
+    const seen = new Set<string>();
+    const composed = pipelines.flatMap((pipeline) => {
+      const entry = pipelineOverlays.get(pipeline.id);
+      if (!entry) return [pipeline];
+      seen.add(pipeline.id);
+      return entry.pipeline ? [entry.pipeline] : [];
+    });
+    for (const [id, entry] of pipelineOverlays) {
+      if (!seen.has(id) && entry.pipeline) composed.push(entry.pipeline);
+    }
+    return composed;
+  };
+
+  const withPipelineOverlays = (data: FilesData): FilesData => ({
+    ...data,
+    pipelines: pipelinesWithOverlays(data.pipelines),
+  });
+
   const publish = (requestScope?: string) => {
     for (const [listener, scope] of listeners) {
-      if (requestScope === undefined || requestScope === scope) listener(snapshot);
+      if (requestScope !== undefined) {
+        if (requestScope === scope) listener(snapshot);
+        continue;
+      }
+      const representation = representations.get(scope)?.data
+        ?? (snapshot.requestScope === scope ? snapshot : { ...EMPTY, requestScope: scope });
+      listener(withPipelineOverlays(representation));
     }
   };
 
@@ -178,21 +204,7 @@ export function createFilesClientCache(fetcher: FilesFetcher): FilesClientCache 
     && hasSubscriber(requestScope);
 
   const composePipelines = () => {
-    if (!pipelineOverlays.size) {
-      snapshot = { ...snapshot, pipelines: [...serverPipelines] };
-      return;
-    }
-    const seen = new Set<string>();
-    const pipelines = serverPipelines.flatMap((pipeline) => {
-      const entry = pipelineOverlays.get(pipeline.id);
-      if (!entry) return [pipeline];
-      seen.add(pipeline.id);
-      return entry.pipeline ? [entry.pipeline] : [];
-    });
-    for (const [id, entry] of pipelineOverlays) {
-      if (!seen.has(id) && entry.pipeline) pipelines.push(entry.pipeline);
-    }
-    snapshot = { ...snapshot, pipelines };
+    snapshot = { ...snapshot, pipelines: pipelinesWithOverlays(serverPipelines) };
   };
 
   /** A completed server snapshot from `generation` reflects every overlay whose
@@ -207,14 +219,18 @@ export function createFilesClientCache(fetcher: FilesFetcher): FilesClientCache 
     if (pipelineOverlays.size) composePipelines();
   };
 
+  const trimRepresentations = () => {
+    while (representations.size > 8) {
+      const evictable = [...representations.keys()].find((url) => !hasSubscriber(url));
+      if (evictable === undefined) break;
+      representations.delete(evictable);
+    }
+  };
+
   const rememberRepresentation = (url: string, data: FilesData, etag?: string) => {
     representations.delete(url);
     representations.set(url, { data, etag });
-    while (representations.size > 8) {
-      const oldest = representations.keys().next().value;
-      if (oldest === undefined) break;
-      representations.delete(oldest);
-    }
+    trimRepresentations();
   };
 
   const performRevalidate = async (
@@ -429,6 +445,7 @@ export function createFilesClientCache(fetcher: FilesFetcher): FilesClientCache 
     return () => {
       listeners.delete(listener);
       if (!hasSubscriber(requestScope)) cancelCompletionRetry(requestScope);
+      trimRepresentations();
     };
   };
 
@@ -545,12 +562,6 @@ export function useFiles(_project?: string | null, pinnedPath?: string | null): 
     /* Flow, workflow and task mutations refresh out of band: strips and
        cards must not sit on stale state for up to a full poll interval. */
     const onChanged = () => void load();
-    /* A locally-applied pipeline patch (optimistic mutation / PATCH echo) is
-       already in the cache — re-read it, never refetch. */
-    const onPatched = () => {
-      if (alive) setData(filesClientCache.read());
-    };
-    window.addEventListener(PIPELINES_PATCHED_EVENT, onPatched);
     window.addEventListener(FLOWS_CHANGED_EVENT, onChanged);
     window.addEventListener(PIPELINES_CHANGED_EVENT, onChanged);
     window.addEventListener(WORKFLOWS_CHANGED_EVENT, onChanged);
@@ -602,7 +613,6 @@ export function useFiles(_project?: string | null, pinnedPath?: string | null): 
       unsubscribeCache();
       unsubBus();
       unsubFiles();
-      window.removeEventListener(PIPELINES_PATCHED_EVENT, onPatched);
       window.removeEventListener(FLOWS_CHANGED_EVENT, onChanged);
       window.removeEventListener(PIPELINES_CHANGED_EVENT, onChanged);
       window.removeEventListener(WORKFLOWS_CHANGED_EVENT, onChanged);

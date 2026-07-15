@@ -101,11 +101,14 @@ function writePersistedFileScanSnapshot(snapshot: FileScanSnapshot): void {
   try {
     const filename = statePath(FILE_SCAN_SNAPSHOT_FILE);
     target = filename;
-    fs.mkdirSync(path.dirname(filename), { recursive: true });
+    fs.mkdirSync(path.dirname(filename), { recursive: true, mode: 0o700 });
     temporary = path.join(path.dirname(filename), `.${path.basename(filename)}.${process.pid}.${crypto.randomUUID()}.tmp`);
     operation = "write temporary snapshot";
     target = temporary;
-    fs.writeFileSync(temporary, JSON.stringify({ version: FILE_SCAN_SNAPSHOT_VERSION, snapshot }) + "\n", "utf8");
+    fs.writeFileSync(temporary, JSON.stringify({ version: FILE_SCAN_SNAPSHOT_VERSION, snapshot }) + "\n", {
+      encoding: "utf8",
+      mode: 0o600,
+    });
     operation = "rename temporary snapshot";
     target = filename;
     fs.renameSync(temporary, filename);
