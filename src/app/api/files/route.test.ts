@@ -9,12 +9,15 @@ import { agentRegistry, AgentRegistry, setAgentRegistryForTests } from "@/lib/ag
 import { replaceConversationCatalog } from "@/lib/scanner/conversationCatalog";
 import { writeSessionTitle } from "@/lib/session/titleStore";
 import type { FileEntry } from "@/lib/types";
+import { createFilesClientCache } from "@/hooks/useFiles";
 
 let scans = 0;
 let scanOptions: unknown;
 let scanProjects: Array<string | undefined> = [];
 let scannedFiles: FileEntry[] = [];
 let scanFileResults: FileEntry[][] = [];
+let scanPinOverlayResults: Array<string[] | undefined> = [];
+let scanCompleteResults: Array<boolean | undefined> = [];
 let scanGates: Promise<void>[] = [];
 let registryRoot = "";
 let tmuxHealth: unknown = { status: "healthy" };
@@ -33,6 +36,8 @@ beforeEach(() => {
   scanProjects = [];
   scannedFiles = [];
   scanFileResults = [];
+  scanPinOverlayResults = [];
+  scanCompleteResults = [];
   scanGates = [];
   tmuxHealth = { status: "healthy" };
   replaceConversationCatalog([]);
@@ -74,7 +79,9 @@ mock.module("@/lib/scanner", () => ({
     scanOptions = options;
     const files = scanFileResults.shift() ?? scannedFiles;
     await scanGates.shift();
-    return { files, projectCatalog: [] };
+    const pinOverlayPaths = scanPinOverlayResults.shift();
+    const complete = scanCompleteResults.shift();
+    return { files, projectCatalog: [], ...(pinOverlayPaths ? { pinOverlayPaths } : {}), complete: complete ?? true };
   },
 }));
 let pipelinesStore: () => unknown[] = () => [];
@@ -105,7 +112,7 @@ test("repeated files reads reuse the pure read snapshot and retain ETag behavior
   expect(await first.json()).toEqual({ files: [], projectCatalog: [], flows: [], pipelines: [], workflows: [], tasks: [], systemHealth: { tmux: { status: "healthy" } }, conversationAliases: {} });
   expect(second.status).toBe(304);
   expect(scans).toBe(1);
-  expect(scanOptions).toEqual({ persist: false });
+  expect(scanOptions).toEqual({ persist: false, persistIndex: true });
 });
 
 test("files API surfaces degraded tmux endpoint health", async () => {
@@ -136,17 +143,276 @@ test("concurrent cold files reads share one scan", async () => {
   expect(scans).toBe(1);
 });
 
-test("an expired snapshot returns the shared fresh scan to the revalidating client", async () => {
+test("a restart serves the persisted completed snapshot while revalidating", async () => {
+  const persistedSnapshot = {
+    files: [file("/sessions/persisted.jsonl")],
+    projectCatalog: [],
+    complete: true,
+  };
+  fs.writeFileSync(path.join(stateDir, "files-scan-snapshot.json"), JSON.stringify({
+    version: 1,
+    snapshot: persistedSnapshot,
+  }));
+  resetFilesRouteCacheForTests();
+  scannedFiles = [file("/sessions/refreshed.jsonl")];
+
+  const restarted = await cachedFileScan();
+
+  expect(restarted.snapshot.files.map((entry) => entry.path)).toEqual(["/sessions/persisted.jsonl"]);
+  expect(scans).toBe(1);
+
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const next = await cachedFileScan();
+  expect(next.snapshot.files.map((entry) => entry.path)).toEqual(["/sessions/refreshed.jsonl"]);
+});
+
+test("a client automatically converges from a persisted restart snapshot to its completed generation", async () => {
+  fs.writeFileSync(path.join(stateDir, "files-scan-snapshot.json"), JSON.stringify({
+    version: 1,
+    snapshot: {
+      files: [file("/sessions/persisted-client.jsonl")],
+      projectCatalog: [],
+      complete: true,
+    },
+  }));
+  resetFilesRouteCacheForTests();
+  let release!: () => void;
+  scanGates.push(new Promise<void>((resolve) => { release = resolve; }));
+  scannedFiles = [file("/sessions/refreshed-client.jsonl")];
+  const cache = createFilesClientCache((input, init) =>
+    GET(new Request(`http://127.0.0.1${input}`, init)));
+  const unsubscribe = cache.subscribe(() => {});
+
+  const started = performance.now();
+  const stale = await cache.revalidate();
+
+  expect(performance.now() - started).toBeLessThan(300);
+  expect(stale.files.map((entry) => entry.path)).toEqual(["/sessions/persisted-client.jsonl"]);
+  expect(scans).toBe(1);
+
+  release();
+  for (let attempt = 0; attempt < 100 && cache.read().files[0]?.path !== "/sessions/refreshed-client.jsonl"; attempt += 1) {
+    await Bun.sleep(10);
+  }
+
+  expect(cache.read().files.map((entry) => entry.path)).toEqual(["/sessions/refreshed-client.jsonl"]);
+  expect(scans).toBe(1);
+  unsubscribe();
+});
+
+test("a restart hydrates a persisted 7700-row snapshot within two seconds", async () => {
+  const files = Array.from({ length: 7_700 }, (_, index) => file(`/sessions/persisted-${index}.jsonl`));
+  fs.writeFileSync(path.join(stateDir, "files-scan-snapshot.json"), JSON.stringify({
+    version: 1,
+    snapshot: { files, projectCatalog: [], complete: true },
+  }));
+  resetFilesRouteCacheForTests();
+
+  const started = performance.now();
+  const restarted = await cachedFileScan();
+
+  expect(performance.now() - started).toBeLessThan(2_000);
+  expect(restarted.snapshot.files).toHaveLength(7_700);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+});
+
+test("a corrupt completed snapshot falls back to a cold scan and repairs persistence", async () => {
+  fs.writeFileSync(path.join(stateDir, "files-scan-snapshot.json"), "{ corrupt");
+  resetFilesRouteCacheForTests();
+  scannedFiles = [file("/sessions/cold-fallback.jsonl")];
+
+  const recovered = await cachedFileScan();
+
+  expect(recovered.snapshot.files.map((entry) => entry.path)).toEqual(["/sessions/cold-fallback.jsonl"]);
+  expect(scans).toBe(1);
+  const persisted = JSON.parse(fs.readFileSync(path.join(stateDir, "files-scan-snapshot.json"), "utf8"));
+  expect(persisted.version).toBe(1);
+});
+
+test("repeated first-ever incomplete scans stay unpublished until recovery", async () => {
+  scanFileResults = [
+    [file("/sessions/first-partial.jsonl")],
+    [file("/sessions/second-partial.jsonl")],
+    [file("/sessions/recovered-cold.jsonl")],
+  ];
+  scanCompleteResults = [false, false, true];
+  const snapshotPath = path.join(stateDir, "files-scan-snapshot.json");
+
+  await expect(cachedFileScan()).rejects.toThrow("filesystem scan incomplete");
+  expect(fs.existsSync(snapshotPath)).toBe(false);
+  await expect(cachedFileScan()).rejects.toThrow("filesystem scan incomplete");
+  expect(fs.existsSync(snapshotPath)).toBe(false);
+
+  const recovered = await cachedFileScan();
+  expect(recovered.snapshot.files.map((entry) => entry.path)).toEqual(["/sessions/recovered-cold.jsonl"]);
+  expect(JSON.parse(fs.readFileSync(snapshotPath, "utf8")).snapshot.files.map((entry: FileEntry) => entry.path))
+    .toEqual(["/sessions/recovered-cold.jsonl"]);
+});
+
+test("snapshot persistence creates private state and replaces permissive files as 0600", async () => {
+  const privateStateDir = path.join(stateDir, "private-snapshot-state");
+  const snapshotPath = path.join(privateStateDir, "files-scan-snapshot.json");
+  const originalRename = fs.renameSync;
+  const previousUmask = process.umask(0);
+  const temporaryModes: number[] = [];
+  process.env.LLV_STATE_DIR = privateStateDir;
+  fs.renameSync = ((source: fs.PathLike, target: fs.PathLike) => {
+    if (target === snapshotPath) temporaryModes.push(fs.statSync(source).mode & 0o777);
+    return originalRename(source, target);
+  }) as typeof fs.renameSync;
+
+  try {
+    resetFilesRouteCacheForTests();
+    scannedFiles = [file("/sessions/private-initial.jsonl")];
+    await cachedFileScan();
+
+    expect(fs.statSync(privateStateDir).mode & 0o777).toBe(0o700);
+    expect(temporaryModes).toEqual([0o600]);
+    expect(fs.statSync(snapshotPath).mode & 0o777).toBe(0o600);
+
+    fs.chmodSync(snapshotPath, 0o666);
+    scannedFiles = [file("/sessions/private-replacement.jsonl")];
+    await cachedFileScan(undefined, undefined, Date.now(), Number.MAX_SAFE_INTEGER);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(temporaryModes).toEqual([0o600, 0o600]);
+    expect(fs.statSync(snapshotPath).mode & 0o777).toBe(0o600);
+    expect(JSON.parse(fs.readFileSync(snapshotPath, "utf8")).snapshot.files.map((entry: FileEntry) => entry.path))
+      .toEqual(["/sessions/private-replacement.jsonl"]);
+  } finally {
+    fs.renameSync = originalRename;
+    process.umask(previousUmask);
+    process.env.LLV_STATE_DIR = stateDir;
+    resetFilesRouteCacheForTests();
+  }
+});
+
+test("snapshot publication failures preserve the canonical file, clean temps, stay non-fatal, and recover", async () => {
+  const snapshotPath = path.join(stateDir, "files-scan-snapshot.json");
+  const canonical = JSON.stringify({
+    version: 1,
+    snapshot: {
+      files: [file("/sessions/canonical.jsonl")],
+      projectCatalog: [],
+      complete: true,
+    },
+  });
+  fs.writeFileSync(snapshotPath, canonical);
+  const originalWrite = fs.writeFileSync;
+  const originalRename = fs.renameSync;
+  const originalError = console.error;
+  const diagnostics: string[] = [];
+  let failure: "write" | "rename" | null = null;
+  fs.writeFileSync = ((filename: fs.PathOrFileDescriptor, data: string | NodeJS.ArrayBufferView, options?: fs.WriteFileOptions) => {
+    const result = originalWrite(filename, data, options);
+    if (failure === "write" && String(filename).includes(".files-scan-snapshot.json.")) {
+      throw new Error("injected snapshot write failure");
+    }
+    return result;
+  }) as typeof fs.writeFileSync;
+  fs.renameSync = ((source: fs.PathLike, target: fs.PathLike) => {
+    if (failure === "rename" && target === snapshotPath) {
+      throw new Error("injected snapshot rename failure");
+    }
+    return originalRename(source, target);
+  }) as typeof fs.renameSync;
+  console.error = (...values: unknown[]) => { diagnostics.push(values.map(String).join(" ")); };
+  const tempFiles = () => fs.readdirSync(stateDir)
+    .filter((name) => name.startsWith(".files-scan-snapshot.json.") && name.endsWith(".tmp"));
+  const attempt = async (mode: "write" | "rename", freshPath: string) => {
+    failure = mode;
+    resetFilesRouteCacheForTests();
+    scannedFiles = [file(freshPath)];
+    const response = await GET(new Request("http://127.0.0.1/api/files"));
+    expect(response.status).toBe(200);
+    expect((await response.json()).files.map((entry: FileEntry) => entry.path)).toEqual(["/sessions/canonical.jsonl"]);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  };
+
+  try {
+    await attempt("write", "/sessions/write-failed.jsonl");
+    expect(fs.readFileSync(snapshotPath, "utf8")).toBe(canonical);
+    expect(tempFiles()).toEqual([]);
+
+    await attempt("rename", "/sessions/rename-failed.jsonl");
+    expect(fs.readFileSync(snapshotPath, "utf8")).toBe(canonical);
+    expect(tempFiles()).toEqual([]);
+    expect(diagnostics).toEqual([
+      expect.stringContaining("write temporary snapshot failed"),
+    ]);
+    expect(diagnostics[0]).toContain("injected snapshot write failure");
+    expect(diagnostics[0]).toContain(".files-scan-snapshot.json.");
+  } finally {
+    fs.writeFileSync = originalWrite;
+    fs.renameSync = originalRename;
+    console.error = originalError;
+  }
+
+  resetFilesRouteCacheForTests();
+  scannedFiles = [file("/sessions/recovered.jsonl")];
+  const recovery = await GET(new Request("http://127.0.0.1/api/files"));
+  expect(recovery.status).toBe(200);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  expect(JSON.parse(fs.readFileSync(snapshotPath, "utf8")).snapshot.files.map((entry: FileEntry) => entry.path))
+    .toEqual(["/sessions/recovered.jsonl"]);
+  expect(tempFiles()).toEqual([]);
+});
+
+test("an expired snapshot returns stale data while one shared refresh runs", async () => {
   scannedFiles = [file("/sessions/project-a.jsonl")];
   await cachedFileScan();
   scannedFiles = [file("/sessions/project-b.jsonl")];
   const refreshed = await cachedFileScan(undefined, undefined, Number.MAX_SAFE_INTEGER);
 
-  expect(refreshed.snapshot.files.map((entry) => entry.path)).toEqual(["/sessions/project-b.jsonl"]);
+  expect(refreshed.snapshot.files.map((entry) => entry.path)).toEqual(["/sessions/project-a.jsonl"]);
   expect(scans).toBe(2);
+
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const next = await cachedFileScan();
+  expect(next.snapshot.files.map((entry) => entry.path)).toEqual(["/sessions/project-b.jsonl"]);
 });
 
-test("a pinned refresh advances the shared global slot and identifies every pin-only row", async () => {
+test("an incomplete filesystem scan retains the last completed route snapshot until recovery", async () => {
+  scannedFiles = [file("/sessions/canonical.jsonl")];
+  await cachedFileScan();
+  scanFileResults = [[file("/sessions/partial.jsonl")]];
+  scanCompleteResults = [false];
+
+  const stale = await cachedFileScan(undefined, undefined, Number.MAX_SAFE_INTEGER);
+  expect(stale.snapshot.files.map((entry) => entry.path)).toEqual(["/sessions/canonical.jsonl"]);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  expect((await cachedFileScan()).snapshot.files.map((entry) => entry.path)).toEqual(["/sessions/canonical.jsonl"]);
+
+  scanFileResults = [[file("/sessions/recovered.jsonl")]];
+  const recovered = await cachedFileScan(undefined, undefined, Number.MAX_SAFE_INTEGER);
+  expect(recovered.snapshot.files.map((entry) => entry.path)).toEqual(["/sessions/canonical.jsonl"]);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  expect((await cachedFileScan()).snapshot.files.map((entry) => entry.path)).toEqual(["/sessions/recovered.jsonl"]);
+});
+
+test("concurrent reads during a blocked refresh share one scan and return within 300ms", async () => {
+  scannedFiles = [file("/sessions/complete.jsonl")];
+  await cachedFileScan();
+  let release!: () => void;
+  scanGates.push(new Promise<void>((resolve) => { release = resolve; }));
+  scannedFiles = [file("/sessions/in-flight.jsonl")];
+
+  const started = performance.now();
+  const [first, second] = await Promise.all([
+    cachedFileScan(undefined, undefined, Number.MAX_SAFE_INTEGER),
+    cachedFileScan(undefined, undefined, Number.MAX_SAFE_INTEGER),
+  ]);
+
+  expect(performance.now() - started).toBeLessThan(300);
+  expect(first.snapshot.files.map((entry) => entry.path)).toEqual(["/sessions/complete.jsonl"]);
+  expect(second.snapshot.files.map((entry) => entry.path)).toEqual(["/sessions/complete.jsonl"]);
+  expect(scans).toBe(2);
+
+  release();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+});
+
+test("a pinned refresh serves stale data then advances the shared global slot with its overlay", async () => {
   scannedFiles = [file("/sessions/old-global.jsonl")];
   await GET(new Request("http://127.0.0.1/api/files"));
 
@@ -154,10 +420,15 @@ test("a pinned refresh advances the shared global slot and identifies every pin-
   const currentPath = "/sessions/current.jsonl";
   const closurePath = "/sessions/closure-parent.jsonl";
   const freshGlobal = file("/sessions/fresh-global.jsonl");
-  scanFileResults = [
-    [freshGlobal, file(pinnedPath), file(currentPath), file(closurePath)],
-    [freshGlobal],
-  ];
+  scanFileResults = [[freshGlobal, file(pinnedPath), file(currentPath), file(closurePath)]];
+  scanPinOverlayResults = [[pinnedPath, currentPath, closurePath]];
+  const stalePinned = await GET(new Request(`http://127.0.0.1/api/files?path=${encodeURIComponent(pinnedPath)}`));
+  const staleBody = await stalePinned.json() as { files: FileEntry[]; pinOverlayPaths?: string[] };
+
+  expect(staleBody.files.map((entry) => entry.path)).toEqual(["/sessions/old-global.jsonl"]);
+  expect(staleBody.pinOverlayPaths).toBeUndefined();
+
+  await new Promise<void>((resolve) => setImmediate(resolve));
   const pinned = await GET(new Request(`http://127.0.0.1/api/files?path=${encodeURIComponent(pinnedPath)}`));
   const pinnedBody = await pinned.json() as { files: FileEntry[]; pinOverlayPaths: string[] };
 
@@ -173,7 +444,7 @@ test("a pinned refresh advances the shared global slot and identifies every pin-
   const ordinary = await GET(new Request("http://127.0.0.1/api/files"));
   const ordinaryBody = await ordinary.json() as { files: FileEntry[] };
   expect(ordinaryBody.files.map((entry) => entry.path)).toEqual([freshGlobal.path]);
-  expect(scans).toBe(3);
+  expect(scans).toBe(2);
 });
 
 test("pinned response projection cannot mutate the shared global scan rows", async () => {
@@ -181,10 +452,8 @@ test("pinned response projection cannot mutate the shared global scan rows", asy
   const pinnedPath = "/archive/pin-only-row.jsonl";
   const registry = agentRegistry();
   const conversation = registry.ensureConversation("codex", sharedPath, "source");
-  scanFileResults = [
-    [file(sharedPath), file(pinnedPath)],
-    [file(sharedPath)],
-  ];
+  scanFileResults = [[file(sharedPath), file(pinnedPath)]];
+  scanPinOverlayResults = [[pinnedPath]];
 
   const pinned = await GET(new Request(`http://127.0.0.1/api/files?path=${encodeURIComponent(pinnedPath)}`));
   const pinnedBody = await pinned.json() as { files: FileEntry[] };
@@ -196,7 +465,35 @@ test("pinned response projection cannot mutate the shared global scan rows", asy
   expect(ordinaryBody.files.find((entry) => entry.path === sharedPath)?.conversationId).toBeUndefined();
 });
 
-test("a files revision request refreshes the snapshot before responding", async () => {
+test("unique pinned snapshots use bounded LRU retention while recent pins stay warm", async () => {
+  const global = file("/sessions/global.jsonl");
+  scannedFiles = [global];
+  await cachedFileScan();
+  const now = Date.now();
+  const pins = Array.from({ length: 9 }, (_, index) => `/archive/pin-${index}.jsonl`);
+
+  for (const pinnedPath of pins) {
+    scanFileResults = [[global, file(pinnedPath)]];
+    scanPinOverlayResults = [[pinnedPath]];
+    await cachedFileScan(undefined, pinnedPath, now);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const hydrated = await cachedFileScan(undefined, pinnedPath, now);
+    expect(hydrated.snapshot.files.some((entry) => entry.path === pinnedPath)).toBe(true);
+  }
+
+  expect(scans).toBe(10);
+  await cachedFileScan(undefined, pins.at(-1), now);
+  expect(scans).toBe(10);
+
+  scanFileResults = [[global, file(pins[0]!)]];
+  scanPinOverlayResults = [[pins[0]!]];
+  const evicted = await cachedFileScan(undefined, pins[0], now);
+  expect(evicted.snapshot.files.map((entry) => entry.path)).toEqual([global.path]);
+  expect(scans).toBe(11);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+});
+
+test("a files revision request returns stale data and schedules a refresh", async () => {
   scannedFiles = [file("/sessions/before-revision.jsonl")];
   await GET(new Request("http://127.0.0.1/api/files"));
 
@@ -206,8 +503,76 @@ test("a files revision request refreshes the snapshot before responding", async 
   }));
   const body = await response.json() as { files: FileEntry[] };
 
-  expect(body.files.map((entry) => entry.path)).toEqual(["/sessions/after-revision.jsonl"]);
+  expect(body.files.map((entry) => entry.path)).toEqual(["/sessions/before-revision.jsonl"]);
   expect(scans).toBe(2);
+
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const next = await GET(new Request("http://127.0.0.1/api/files"));
+  expect((await next.json()).files.map((entry: FileEntry) => entry.path)).toEqual(["/sessions/after-revision.jsonl"]);
+});
+
+test("a pinned client receives stale data immediately then converges on its completed revision generation", async () => {
+  scannedFiles = [file("/sessions/before-revision.jsonl")];
+  await GET(new Request("http://127.0.0.1/api/files"));
+
+  const pinnedPath = "/archive/pinned-revision.jsonl";
+  let release!: () => void;
+  scanGates.push(new Promise<void>((resolve) => { release = resolve; }));
+  scanFileResults = [[file("/sessions/after-revision.jsonl"), file(pinnedPath)]];
+  scanPinOverlayResults = [[pinnedPath]];
+  const cache = createFilesClientCache((input, init) =>
+    GET(new Request(`http://127.0.0.1${input}`, init)));
+  const updates: string[][] = [];
+  const unsubscribe = cache.subscribe((data) => {
+    updates.push(data.files.map((entry) => entry.path));
+  }, pinnedPath);
+
+  const started = performance.now();
+  const stale = await cache.revalidate(pinnedPath, 17);
+
+  expect(performance.now() - started).toBeLessThan(300);
+  expect(stale.files.map((entry) => entry.path)).toEqual(["/sessions/before-revision.jsonl"]);
+  expect(scans).toBe(2);
+
+  release();
+  for (let attempt = 0; attempt < 100 && !cache.read().files.some((entry) => entry.path === pinnedPath); attempt += 1) {
+    await Bun.sleep(10);
+  }
+
+  expect(cache.read().files.map((entry) => entry.path)).toEqual([
+    "/sessions/after-revision.jsonl",
+    pinnedPath,
+  ]);
+  expect(updates.at(-1)).toEqual(["/sessions/after-revision.jsonl", pinnedPath]);
+  expect(scans).toBe(2);
+  unsubscribe();
+});
+
+test("a warm global-only incomplete response retains an out-of-cap pin until its target generation completes", async () => {
+  const global = file("/sessions/global.jsonl");
+  const pinnedPath = "/archive/warm-pinned.jsonl";
+  scanFileResults = [[global, file(pinnedPath)]];
+  scanPinOverlayResults = [[pinnedPath]];
+  const cache = createFilesClientCache((input, init) => GET(new Request(`http://127.0.0.1${input}`, init)));
+  const unsubscribe = cache.subscribe(() => {}, pinnedPath);
+  await cache.revalidate(pinnedPath);
+  expect(cache.read().files.some((entry) => entry.path === pinnedPath)).toBe(true);
+
+  resetFilesRouteCacheForTests();
+  let release!: () => void;
+  scanGates.push(new Promise<void>((resolve) => { release = resolve; }));
+  scanFileResults = [[file("/sessions/warm-global.jsonl")], [file("/sessions/completed-global.jsonl"), file(pinnedPath)]];
+  scanPinOverlayResults = [undefined, [pinnedPath]];
+  await cachedFileScan();
+  const stale = await cache.revalidate(pinnedPath, 91);
+  expect(stale.files.some((entry) => entry.path === pinnedPath)).toBe(true);
+
+  release();
+  for (let attempt = 0; attempt < 100 && cache.read().files[0]?.path !== "/sessions/completed-global.jsonl"; attempt += 1) {
+    await Bun.sleep(10);
+  }
+  expect(cache.read().files.map((entry) => entry.path)).toEqual(["/sessions/completed-global.jsonl", pinnedPath]);
+  unsubscribe();
 });
 
 test("concurrent requests for one files revision share one forced scan", async () => {
@@ -256,10 +621,11 @@ test("a newer revision waits for a follow-up scan when an older scan is in fligh
   expect(scans).toBe(2);
 });
 
-test("a persisted legacy cache slot upgrades before fresh hydration", async () => {
+test("a persisted legacy cache slot serves stale data during fresh hydration", async () => {
   const legacySnapshot = {
     files: [file("/sessions/sentinel-stale.jsonl")],
     projectCatalog: [],
+    complete: true,
   };
   const cacheStore = globalThis as typeof globalThis & {
     __llvFilesRouteScans?: Map<string, unknown>;
@@ -273,11 +639,15 @@ test("a persisted legacy cache slot upgrades before fresh hydration", async () =
 
   const result = await cachedFileScan(undefined, undefined, Date.now(), 1);
 
-  expect(result.snapshot.files.map((entry) => entry.path)).toEqual(["/sessions/upgraded-fresh.jsonl"]);
+  expect(result.snapshot.files.map((entry) => entry.path)).toEqual(["/sessions/sentinel-stale.jsonl"]);
+
+  await new Promise<void>((resolve) => setImmediate(resolve));
   expect(scans).toBe(1);
+  const next = await cachedFileScan();
+  expect(next.snapshot.files.map((entry) => entry.path)).toEqual(["/sessions/upgraded-fresh.jsonl"]);
 });
 
-test("an arbitrary client revision cannot suppress a later revision refresh", async () => {
+test("an arbitrary client revision cannot suppress a later background refresh", async () => {
   scannedFiles = [file("/sessions/untrusted-watermark.jsonl")];
   await GET(new Request("http://127.0.0.1/api/files", {
     headers: { "x-llv-files-revision": String(Number.MAX_SAFE_INTEGER) },
@@ -289,8 +659,25 @@ test("an arbitrary client revision cannot suppress a later revision refresh", as
   }));
   const body = await response.json() as { files: FileEntry[] };
 
-  expect(body.files.map((entry) => entry.path)).toEqual(["/sessions/genuine-revision.jsonl"]);
+  expect(body.files.map((entry) => entry.path)).toEqual(["/sessions/untrusted-watermark.jsonl"]);
   expect(scans).toBe(2);
+
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const next = await GET(new Request("http://127.0.0.1/api/files"));
+  expect((await next.json()).files.map((entry: FileEntry) => entry.path)).toEqual(["/sessions/genuine-revision.jsonl"]);
+});
+
+test("a client generation above the issued watermark cannot advance the server counter", async () => {
+  scannedFiles = [file("/sessions/issued-generation.jsonl")];
+  await GET(new Request("http://127.0.0.1/api/files"));
+
+  const response = await GET(new Request("http://127.0.0.1/api/files", {
+    headers: { "x-llv-files-generation": String(Number.MAX_SAFE_INTEGER) },
+  }));
+
+  expect(response.headers.get("x-llv-files-generation")).toBe("1");
+  expect(response.headers.get("x-llv-files-target-generation")).toBe("1");
+  expect(scans).toBe(1);
 });
 
 test("project query changes reuse one global scan snapshot", async () => {
@@ -511,7 +898,8 @@ test("a lineage placeholder introduced for a pinned child stays inside the pin o
     claimOwner: null,
     pendingAction: null,
   });
-  scanFileResults = [[file(childPath)], []];
+  scanFileResults = [[file(childPath)]];
+  scanPinOverlayResults = [[childPath]];
 
   const response = await GET(new Request(`http://127.0.0.1/api/files?path=${encodeURIComponent(childPath)}`));
   const body = await response.json() as { files: FileEntry[]; pinOverlayPaths: string[] };

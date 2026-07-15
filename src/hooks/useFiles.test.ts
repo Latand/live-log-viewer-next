@@ -9,7 +9,7 @@ import {
   type ActiveConversationPin,
 } from "@/components/conversationPin";
 
-import { createFilesClientCache, filesApiUrl, filesPollCadence, filesRequestHeaders } from "./useFiles";
+import { createFilesClientCache, filesApiUrl, filesPollCadence, filesRequestHeaders, type FilesData } from "./useFiles";
 
 test("filesApiUrl keeps project switches on the bounded scheme feed", () => {
   expect(filesApiUrl()).toBe("/api/files");
@@ -103,6 +103,183 @@ test("URL-specific 304 responses restore the matching cached representation", as
   expect(restored.files.map((entry) => entry.path)).toEqual(["/global"]);
   expect(restored.requestScope).toBe("/api/files");
   expect(cache.read()).toBe(restored);
+});
+
+test("client cache subscriptions receive updates only for their request scope", async () => {
+  const pinnedPath = "/archive/scoped-pin.jsonl";
+  const cache = createFilesClientCache(async (input) => {
+    const files = input === "/api/files"
+      ? [file("/global", "Global")]
+      : [file("/global", "Global"), file(pinnedPath, "Pinned")];
+    return new Response(JSON.stringify({ files }));
+  });
+  const globalUpdates: string[][] = [];
+  const pinnedUpdates: string[][] = [];
+  const unsubscribeGlobal = cache.subscribe((data) => {
+    globalUpdates.push(data.files.map((entry) => entry.path));
+  });
+  const unsubscribePinned = cache.subscribe((data) => {
+    pinnedUpdates.push(data.files.map((entry) => entry.path));
+  }, pinnedPath);
+
+  await cache.revalidate(pinnedPath);
+  expect(globalUpdates).toEqual([]);
+  expect(pinnedUpdates).toEqual([["/global", pinnedPath]]);
+
+  await cache.revalidate();
+  expect(globalUpdates).toEqual([["/global"]]);
+  expect(pinnedUpdates).toEqual([["/global", pinnedPath]]);
+  unsubscribeGlobal();
+  unsubscribePinned();
+});
+
+test("pipeline patches publish each cached URL representation without refetching", async () => {
+  const pinnedPath = "/archive/scoped-pipeline-pin.jsonl";
+  let fetches = 0;
+  const cache = createFilesClientCache(async (input) => {
+    fetches += 1;
+    const pinned = input !== "/api/files";
+    return new Response(JSON.stringify({
+      files: pinned
+        ? [file("/global", "Global"), file(pinnedPath, "Pinned")]
+        : [file("/global", "Global")],
+      pinOverlayPaths: pinned ? [pinnedPath] : [],
+      pipelines: [pipelineRow("p1", "server")],
+    }));
+  });
+  const notifications: Array<{ listener: "pinned" | "global"; scope: string | null; files: string[]; pins: string[]; task: string }> = [];
+  const unsubscribePinned = cache.subscribe((data) => notifications.push({
+    listener: "pinned",
+    scope: data.requestScope,
+    files: data.files.map((entry) => entry.path),
+    pins: data.pinOverlayPaths,
+    task: data.pipelines[0]?.task ?? "",
+  }), pinnedPath);
+  const unsubscribeGlobal = cache.subscribe((data) => notifications.push({
+    listener: "global",
+    scope: data.requestScope,
+    files: data.files.map((entry) => entry.path),
+    pins: data.pinOverlayPaths,
+    task: data.pipelines[0]?.task ?? "",
+  }));
+
+  await cache.revalidate(pinnedPath);
+  await cache.revalidate();
+  notifications.length = 0;
+
+  cache.applyPipeline(pipelineRow("p1", "patched") as never, false);
+  expect(fetches).toBe(2);
+  expect(notifications).toEqual([
+    {
+      listener: "pinned",
+      scope: filesApiUrl(undefined, pinnedPath),
+      files: ["/global", pinnedPath],
+      pins: [pinnedPath],
+      task: "patched",
+    },
+    {
+      listener: "global",
+      scope: "/api/files",
+      files: ["/global"],
+      pins: [],
+      task: "patched",
+    },
+  ]);
+
+  notifications.length = 0;
+  cache.revertPipeline("p1");
+  expect(fetches).toBe(2);
+  expect(notifications.map(({ listener, scope, task }) => ({ listener, scope, task }))).toEqual([
+    { listener: "pinned", scope: filesApiUrl(undefined, pinnedPath), task: "server" },
+    { listener: "global", scope: "/api/files", task: "server" },
+  ]);
+
+  unsubscribePinned();
+  notifications.length = 0;
+  cache.applyPipeline(pipelineRow("p1", "patched again") as never, false);
+  expect(notifications.map(({ listener }) => listener)).toEqual(["global"]);
+  unsubscribeGlobal();
+});
+
+test("a pinned generation retry restores its ETag representation with the local pipeline overlay", async () => {
+  const pinnedPath = "/archive/retrying-pipeline-pin.jsonl";
+  const pinnedUrl = filesApiUrl(undefined, pinnedPath);
+  let pinnedRequests = 0;
+  const cache = createFilesClientCache(async (input, init) => {
+    if (input === "/api/files") {
+      return new Response(JSON.stringify({
+        files: [file("/global", "Global")],
+        pipelines: [pipelineRow("p1", "server")],
+      }), { headers: { ETag: '"global"' } });
+    }
+    pinnedRequests += 1;
+    if (pinnedRequests > 1) {
+      expect(new Headers(init?.headers).get("If-None-Match")).toBe('"pinned"');
+      expect(new Headers(init?.headers).get("x-llv-files-generation")).toBe(pinnedRequests === 2 ? null : "1");
+      return new Response(null, {
+        status: 304,
+        headers: {
+          "x-llv-files-generation": pinnedRequests === 2 ? "0" : "1",
+          "x-llv-files-target-generation": "1",
+        },
+      });
+    }
+    return new Response(JSON.stringify({
+      files: [file("/global", "Global"), file(pinnedPath, "Pinned")],
+      pinOverlayPaths: [pinnedPath],
+      pipelines: [pipelineRow("p1", "server")],
+    }), { headers: { ETag: '"pinned"' } });
+  });
+  const notifications: string[] = [];
+  const unsubscribePinned = cache.subscribe((data) => notifications.push(
+    `pinned:${data.requestScope}:${data.files.map((entry) => entry.path).join(",")}:${data.pipelines[0]?.task}`,
+  ), pinnedPath);
+  const unsubscribeGlobal = cache.subscribe((data) => notifications.push(
+    `global:${data.requestScope}:${data.files.map((entry) => entry.path).join(",")}:${data.pipelines[0]?.task}`,
+  ));
+
+  await cache.revalidate(pinnedPath);
+  await cache.revalidate();
+  cache.applyPipeline(pipelineRow("p1", "optimistic") as never, false);
+  notifications.length = 0;
+  await cache.revalidate(pinnedPath, 12);
+  await Bun.sleep(60);
+
+  expect(pinnedRequests).toBe(3);
+  expect(notifications).toEqual([
+    `pinned:${pinnedUrl}:/global,${pinnedPath}:optimistic`,
+    `pinned:${pinnedUrl}:/global,${pinnedPath}:optimistic`,
+  ]);
+  unsubscribePinned();
+  unsubscribeGlobal();
+});
+
+test("active scoped representations survive LRU pressure during a pipeline patch", async () => {
+  const pinnedPaths = Array.from({ length: 10 }, (_, index) => `/archive/active-pin-${index}.jsonl`);
+  const cache = createFilesClientCache(async (input) => {
+    const url = new URL(input, "http://127.0.0.1");
+    const pinnedPath = url.searchParams.get("path")!;
+    return new Response(JSON.stringify({
+      files: [file("/global", "Global"), file(pinnedPath, "Pinned")],
+      pinOverlayPaths: [pinnedPath],
+      pipelines: [pipelineRow("p1", "server")],
+    }));
+  });
+  const updates = new Map<string, FilesData>();
+  const unsubscribes = pinnedPaths.map((pinnedPath) => cache.subscribe((data) => {
+    updates.set(pinnedPath, data);
+  }, pinnedPath));
+  for (const pinnedPath of pinnedPaths) await cache.revalidate(pinnedPath);
+  updates.clear();
+
+  cache.applyPipeline(pipelineRow("p1", "patched") as never, false);
+
+  expect([...updates]).toHaveLength(pinnedPaths.length);
+  for (const pinnedPath of pinnedPaths) {
+    expect(updates.get(pinnedPath)?.files.map((entry) => entry.path)).toEqual(["/global", pinnedPath]);
+    expect(updates.get(pinnedPath)?.pipelines[0]?.task).toBe("patched");
+  }
+  for (const unsubscribe of unsubscribes) unsubscribe();
 });
 
 test("a global 304 restores its exact cached membership and values", async () => {
@@ -325,6 +502,182 @@ test("a pipeline echo applies without a refetch and survives a STALE in-flight s
   /* …but a scan REQUESTED after the echo is authoritative and retires the overlay. */
   await cache.revalidate();
   expect(cache.read().pipelines[0]!.task).toBe("old task");
+});
+
+test("a generation retry preserves a pipeline echo newer than the scan it completes", async () => {
+  let call = 0;
+  let releaseStale!: () => void;
+  const staleGate = new Promise<void>((resolve) => { releaseStale = resolve; });
+  const cache = createFilesClientCache(async () => {
+    call += 1;
+    if (call === 2) await staleGate;
+    const headers = call === 2
+      ? { "x-llv-files-generation": "0", "x-llv-files-target-generation": "1" }
+      : call === 3
+        ? { "x-llv-files-generation": "1", "x-llv-files-target-generation": "1" }
+        : undefined;
+    return new Response(JSON.stringify({ files: [], pipelines: [pipelineRow("p1", "server")] }), { headers });
+  });
+  const unsubscribe = cache.subscribe(() => {});
+
+  await cache.revalidate();
+  const stale = cache.revalidate(undefined, 9);
+  await Promise.resolve();
+  await Promise.resolve();
+  cache.applyPipeline(pipelineRow("p1", "patched") as never, true);
+  releaseStale();
+  await stale;
+  await Bun.sleep(50);
+
+  expect(call).toBe(3);
+  expect(cache.read().pipelines[0]?.task).toBe("patched");
+  await cache.revalidate();
+  expect(cache.read().pipelines[0]?.task).toBe("server");
+  unsubscribe();
+});
+
+test("multi-second generation completion uses one bounded retry chain per scope and stops after unsubscribe", async () => {
+  const startedAt = performance.now();
+  const requestedTargets: string[] = [];
+  let calls = 0;
+  const cache = createFilesClientCache(async (_input, init) => {
+    calls += 1;
+    const target = new Headers(init?.headers).get("x-llv-files-generation");
+    if (target) requestedTargets.push(target);
+    const complete = performance.now() - startedAt >= 2_100;
+    return new Response(JSON.stringify({
+      files: [file(complete ? "/complete" : "/stale", complete ? "Complete" : "Stale")],
+      pipelines: [pipelineRow("p1", "server")],
+    }), {
+      headers: {
+        "x-llv-files-generation": complete ? "1" : "0",
+        "x-llv-files-target-generation": "1",
+      },
+    });
+  });
+  const firstUpdates: string[] = [];
+  const secondUpdates: string[] = [];
+  const unsubscribeFirst = cache.subscribe((data) => firstUpdates.push(data.files[0]?.path ?? ""));
+  const unsubscribeSecond = cache.subscribe((data) => secondUpdates.push(data.files[0]?.path ?? ""));
+
+  await Promise.all([
+    cache.revalidate(undefined, 31),
+    cache.revalidate(undefined, 31),
+  ]);
+  cache.applyPipeline(pipelineRow("p1", "patched") as never, true);
+  for (let attempt = 0; attempt < 80 && cache.read().files[0]?.path !== "/complete"; attempt += 1) {
+    await Bun.sleep(50);
+  }
+
+  expect(cache.read().files[0]?.path).toBe("/complete");
+  expect(cache.read().pipelines[0]?.task).toBe("patched");
+  expect(calls).toBeLessThanOrEqual(10);
+  expect(requestedTargets.length).toBeGreaterThan(0);
+  expect(new Set(requestedTargets)).toEqual(new Set(["1"]));
+  expect(firstUpdates.at(-1)).toBe("/complete");
+  expect(secondUpdates).toEqual(firstUpdates);
+
+  await cache.revalidate();
+  expect(cache.read().pipelines[0]?.task).toBe("server");
+  unsubscribeFirst();
+  unsubscribeSecond();
+
+  let callsAfterResubscribe = 0;
+  const cancellationCache = createFilesClientCache(async () => {
+    callsAfterResubscribe += 1;
+    return new Response(JSON.stringify({ files: [] }), {
+      headers: {
+        "x-llv-files-generation": "0",
+        "x-llv-files-target-generation": "1",
+      },
+    });
+  });
+  const unsubscribe = cancellationCache.subscribe(() => {});
+  await cancellationCache.revalidate();
+  unsubscribe();
+  const unsubscribeReplacement = cancellationCache.subscribe(() => {});
+  await Bun.sleep(75);
+  expect(callsAfterResubscribe).toBe(1);
+  unsubscribeReplacement();
+});
+
+test("a queued completion retry stays canceled after final unsubscribe and resubscribe", async () => {
+  const blockerPath = "/queue/blocker";
+  const drainPath = "/queue/drain";
+  let releaseBlocker!: () => void;
+  let markBlockerStarted!: () => void;
+  const blockerGate = new Promise<void>((resolve) => { releaseBlocker = resolve; });
+  const blockerStarted = new Promise<void>((resolve) => { markBlockerStarted = resolve; });
+  let globalCalls = 0;
+  const cache = createFilesClientCache(async (input) => {
+    if (input === filesApiUrl(undefined, blockerPath)) {
+      markBlockerStarted();
+      await blockerGate;
+      return new Response(JSON.stringify({ files: [file(blockerPath, "Blocker")] }));
+    }
+    if (input === filesApiUrl(undefined, drainPath)) {
+      return new Response(JSON.stringify({ files: [file(drainPath, "Drain")] }));
+    }
+    globalCalls += 1;
+    return new Response(JSON.stringify({ files: [file(`/global/${globalCalls}`, "Global")] }), {
+      headers: {
+        "x-llv-files-generation": globalCalls === 1 ? "0" : "1",
+        "x-llv-files-target-generation": "1",
+      },
+    });
+  });
+  const unsubscribe = cache.subscribe(() => {});
+
+  await cache.revalidate();
+  const blocker = cache.revalidate(blockerPath);
+  await blockerStarted;
+  await Bun.sleep(75);
+  unsubscribe();
+  const unsubscribeReplacement = cache.subscribe(() => {});
+  releaseBlocker();
+  await blocker;
+  await cache.revalidate(drainPath);
+
+  expect(globalCalls).toBe(1);
+  await cache.revalidate();
+  expect(globalCalls).toBe(2);
+  unsubscribeReplacement();
+});
+
+test("disposing a cache aborts active completion and prevents timers and listeners from escaping", async () => {
+  let calls = 0;
+  let activeSignal: AbortSignal | undefined;
+  let markActive!: () => void;
+  const active = new Promise<void>((resolve) => { markActive = resolve; });
+  const updates: string[] = [];
+  const cache = createFilesClientCache(async (_input, init) => {
+    calls += 1;
+    if (calls === 1) {
+      return new Response(JSON.stringify({ files: [file("/stale", "Stale")] }), {
+        headers: {
+          "x-llv-files-generation": "0",
+          "x-llv-files-target-generation": "1",
+        },
+      });
+    }
+    activeSignal = init?.signal ?? undefined;
+    markActive();
+    return new Promise<Response>((_resolve, reject) => {
+      activeSignal?.addEventListener("abort", () => reject(activeSignal?.reason), { once: true });
+    });
+  });
+  cache.subscribe((data) => updates.push(data.files[0]?.path ?? ""));
+
+  await cache.revalidate();
+  await active;
+  cache.dispose();
+  const updatesAtDispose = [...updates];
+  await Bun.sleep(75);
+  cache.applyPipeline(pipelineRow("p1", "escaped") as never, false);
+
+  expect(activeSignal?.aborted).toBe(true);
+  expect(calls).toBe(2);
+  expect(updates).toEqual(updatesAtDispose);
 });
 
 test("an unconfirmed optimistic pipeline outlives every scan until reverted", async () => {

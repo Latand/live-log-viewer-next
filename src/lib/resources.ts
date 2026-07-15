@@ -1,5 +1,6 @@
 import { procBackend } from "@/lib/proc";
 import { readFileSync } from "node:fs";
+import { createFreshAwareCoalescer, type FreshAwareCoalescer } from "@/lib/asyncCoalescer";
 import { descendantPids } from "@/lib/proc/memory";
 import { listFiles } from "@/lib/scanner";
 import { overlaySessionTitles } from "@/lib/session/titleProjection";
@@ -57,8 +58,14 @@ export type KillTargetRef = TmuxAttachReference;
 
 const globalStore = globalThis as unknown as {
   __llvResourcesCache?: { at: number; data: ResourcesPayload } | null;
+  __llvResourcesBuildCoordinator?: FreshAwareCoalescer<ResourcesPayload>;
   __llvResourceTargets?: Map<string, KillTargetRef>;
 };
+
+function resourceBuildCoordinator(): FreshAwareCoalescer<ResourcesPayload> {
+  globalStore.__llvResourcesBuildCoordinator ??= createFreshAwareCoalescer<ResourcesPayload>();
+  return globalStore.__llvResourcesBuildCoordinator;
+}
 
 /**
  * Server-held allowlist for the kill-target action: only pane targets present
@@ -206,7 +213,10 @@ export async function readResources(fresh = false): Promise<ResourcesPayload> {
   if (!fresh && cached && Date.now() - cached.at < CACHE_MS) {
     return { ...cached.data, system: captureSystemMemory() };
   }
-  const data = await buildResources(fresh);
-  globalStore.__llvResourcesCache = { at: Date.now(), data };
-  return data;
+  const data = await resourceBuildCoordinator().run(fresh, async (forceFresh) => {
+    const built = await buildResources(forceFresh);
+    globalStore.__llvResourcesCache = { at: Date.now(), data: built };
+    return built;
+  });
+  return fresh ? data : { ...data, system: captureSystemMemory() };
 }

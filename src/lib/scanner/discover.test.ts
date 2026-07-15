@@ -1,5 +1,5 @@
-import { mkdtemp, mkdir, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { appendFile, mkdtemp, mkdir, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
+import fs, { existsSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -7,7 +7,7 @@ import { expect, test } from "bun:test";
 
 import { emptyLaunchProfile } from "../accounts/migration/contracts";
 import { AgentRegistry, setAgentRegistryForTests } from "../agent/registry";
-import type { RootKey } from "../types";
+import type { FileEntry, RootKey } from "../types";
 import { conversationCatalogSnapshot } from "./conversationCatalog";
 import { discoverFiles, discoverFilesWithProjectCatalog, type RawEntry } from "./discover";
 import { projectForCwd } from "./describe";
@@ -20,6 +20,31 @@ async function writeFixture(pathname: string, content: string, mtimeSeconds: num
   await mkdir(path.dirname(pathname), { recursive: true });
   await writeFile(pathname, content);
   await utimes(pathname, mtimeSeconds, mtimeSeconds);
+}
+
+async function discoverEntryInFreshProcess(roots: Record<RootKey, string>, pathname: string): Promise<FileEntry | undefined> {
+  const modulePath = path.join(import.meta.dir, "discover.ts");
+  const child = Bun.spawn({
+    cmd: [process.execPath, "-e", `
+      const { discoverFilesWithProjectCatalog } = await import(${JSON.stringify(modulePath)});
+      const result = await discoverFilesWithProjectCatalog(
+        ${JSON.stringify(roots)},
+        undefined,
+        { persist: false, persistIndex: true },
+      );
+      process.stdout.write(JSON.stringify(result.files.find((entry) => entry.path === ${JSON.stringify(pathname)})));
+    `],
+    env: { ...process.env, LLV_STATE_DIR: process.env.LLV_STATE_DIR! },
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [exitCode, output, error] = await Promise.all([
+    child.exited,
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+  ]);
+  if (exitCode !== 0) throw new Error(`fresh scanner process failed (${exitCode}): ${error}`);
+  return output ? JSON.parse(output) as FileEntry : undefined;
 }
 
 test("pure project-catalog discovery leaves the state directory unchanged", async () => {
@@ -38,6 +63,701 @@ test("pure project-catalog discovery leaves the state directory unchanged", asyn
   } finally {
     if (previousStateDir === undefined) delete process.env.LLV_STATE_DIR;
     else process.env.LLV_STATE_DIR = previousStateDir;
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test("request refreshes persist the per-file scanner index", async () => {
+  const base = await mkdtemp(path.join(os.tmpdir(), "llv-discover-index-"));
+  const previousStateDir = process.env.LLV_STATE_DIR;
+  process.env.LLV_STATE_DIR = path.join(base, "state");
+  try {
+    const roots: Record<RootKey, string> = {
+      "codex-sessions": path.join(base, "codex-sessions"),
+      "claude-projects": path.join(base, "claude-projects"),
+      "claude-tasks": path.join(base, "claude-tasks"),
+    };
+    await Promise.all(Object.values(roots).map((root) => mkdir(root, { recursive: true })));
+    const transcript = path.join(roots["codex-sessions"], "indexed.jsonl");
+    await writeFixture(transcript, JSON.stringify({ type: "session_meta", payload: { cwd: "/repo/indexed" } }) + "\n", 1_700_000_000);
+
+    await discoverFilesWithProjectCatalog(roots, undefined, { persist: false, persistIndex: true });
+
+    const persisted = JSON.parse(await readFile(path.join(process.env.LLV_STATE_DIR, "project-catalog.json"), "utf8"));
+    expect(Object.keys(persisted.files)).toEqual([transcript]);
+    expect(persisted.files[transcript]).toMatchObject({
+      size: (await stat(transcript)).size,
+      project: projectForCwd("/repo/indexed"),
+      kind: "session",
+    });
+  } finally {
+    if (previousStateDir === undefined) delete process.env.LLV_STATE_DIR;
+    else process.env.LLV_STATE_DIR = previousStateDir;
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test("project catalog persistence repairs private modes and atomically replaces symlinks", async () => {
+  const base = await mkdtemp(path.join(os.tmpdir(), "llv-discover-private-index-"));
+  const previousStateDir = process.env.LLV_STATE_DIR;
+  const previousUmask = process.umask(0);
+  process.env.LLV_STATE_DIR = path.join(base, "state");
+  const originalRename = fs.renameSync;
+  try {
+    const roots: Record<RootKey, string> = {
+      "codex-sessions": path.join(base, "codex-sessions"),
+      "claude-projects": path.join(base, "claude-projects"),
+      "claude-tasks": path.join(base, "claude-tasks"),
+    };
+    await Promise.all(Object.values(roots).map((root) => mkdir(root, { recursive: true })));
+    const transcript = path.join(roots["codex-sessions"], "private.jsonl");
+    await writeFixture(transcript, JSON.stringify({ type: "session_meta", payload: { cwd: "/repo/private" } }) + "\n", 1_700_000_000);
+    fs.mkdirSync(process.env.LLV_STATE_DIR, { recursive: true, mode: 0o777 });
+    fs.chmodSync(process.env.LLV_STATE_DIR, 0o777);
+    const indexPath = path.join(process.env.LLV_STATE_DIR, "project-catalog.json");
+    fs.writeFileSync(indexPath, "legacy\n", { mode: 0o666 });
+    fs.chmodSync(indexPath, 0o666);
+    let temporaryMode: number | undefined;
+    fs.renameSync = ((source: fs.PathLike, target: fs.PathLike) => {
+      if (target === indexPath) temporaryMode = fs.statSync(source).mode & 0o777;
+      return originalRename(source, target);
+    }) as typeof fs.renameSync;
+
+    await discoverFilesWithProjectCatalog(roots, undefined, { persist: false, persistIndex: true });
+
+    expect(fs.statSync(process.env.LLV_STATE_DIR).mode & 0o777).toBe(0o700);
+    expect(temporaryMode).toBe(0o600);
+    expect(fs.statSync(indexPath).mode & 0o777).toBe(0o600);
+
+    const sentinelPath = path.join(base, "external-sentinel");
+    fs.writeFileSync(sentinelPath, "sentinel\n", { mode: 0o666 });
+    fs.rmSync(indexPath);
+    fs.symlinkSync(sentinelPath, indexPath);
+    await discoverFilesWithProjectCatalog(roots, undefined, { persist: false, persistIndex: true });
+
+    expect(fs.lstatSync(indexPath).isFile()).toBe(true);
+    expect(fs.statSync(indexPath).mode & 0o777).toBe(0o600);
+    expect(fs.readFileSync(sentinelPath, "utf8")).toBe("sentinel\n");
+  } finally {
+    fs.renameSync = originalRename;
+    process.umask(previousUmask);
+    if (previousStateDir === undefined) delete process.env.LLV_STATE_DIR;
+    else process.env.LLV_STATE_DIR = previousStateDir;
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test("a non-ENOENT directory failure leaves the completed catalog index authoritative until recovery", async () => {
+  const base = await mkdtemp(path.join(os.tmpdir(), "llv-discover-incomplete-walk-"));
+  const previousStateDir = process.env.LLV_STATE_DIR;
+  process.env.LLV_STATE_DIR = path.join(base, "state");
+  const roots: Record<RootKey, string> = {
+    "codex-sessions": path.join(base, "codex-sessions"),
+    "claude-projects": path.join(base, "claude-projects"),
+    "claude-tasks": path.join(base, "claude-tasks"),
+  };
+  try {
+    await Promise.all(Object.values(roots).map((root) => mkdir(root, { recursive: true })));
+    const transcript = path.join(roots["codex-sessions"], "canonical.jsonl");
+    await writeFixture(transcript, JSON.stringify({ type: "session_meta", payload: { cwd: "/repo/canonical" } }) + "\n", 1_700_000_000);
+    await discoverFilesWithProjectCatalog(roots, undefined, { persist: false, persistIndex: true });
+    const indexPath = path.join(process.env.LLV_STATE_DIR, "project-catalog.json");
+    const canonical = await readFile(indexPath, "utf8");
+    await rm(roots["claude-projects"], { recursive: true });
+    await writeFile(roots["claude-projects"], "not a directory");
+    const diagnostics: string[] = [];
+    const originalError = console.error;
+    console.error = (...values: unknown[]) => { diagnostics.push(values.map(String).join(" ")); };
+    try {
+      const incomplete = await discoverFilesWithProjectCatalog(roots, undefined, { persist: false, persistIndex: true });
+      expect(incomplete.complete).toBe(false);
+    } finally {
+      console.error = originalError;
+    }
+    expect(await readFile(indexPath, "utf8")).toBe(canonical);
+    expect(diagnostics).toEqual([expect.stringContaining("read directory failed")]);
+    expect(diagnostics[0]).toContain(roots["claude-projects"]);
+    await rm(roots["claude-projects"], { force: true });
+    await mkdir(roots["claude-projects"]);
+    const recovered = await discoverFilesWithProjectCatalog(roots, undefined, { persist: false, persistIndex: true });
+    expect(recovered.complete).toBe(true);
+    expect(recovered.files.some((entry) => entry.path === transcript)).toBe(true);
+  } finally {
+    if (previousStateDir === undefined) delete process.env.LLV_STATE_DIR;
+    else process.env.LLV_STATE_DIR = previousStateDir;
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test("project index publication failures preserve the canonical file, clean temps, stay non-fatal, and recover", async () => {
+  const base = await mkdtemp(path.join(os.tmpdir(), "llv-discover-index-failure-"));
+  const previousStateDir = process.env.LLV_STATE_DIR;
+  process.env.LLV_STATE_DIR = path.join(base, "state");
+  const roots: Record<RootKey, string> = {
+    "codex-sessions": path.join(base, "codex-sessions"),
+    "claude-projects": path.join(base, "claude-projects"),
+    "claude-tasks": path.join(base, "claude-tasks"),
+  };
+  try {
+    await Promise.all(Object.values(roots).map((root) => mkdir(root, { recursive: true })));
+    const canonicalTranscript = path.join(roots["codex-sessions"], "canonical.jsonl");
+    await writeFixture(canonicalTranscript, JSON.stringify({ type: "session_meta", payload: { cwd: "/repo/canonical" } }) + "\n", 1_700_000_000);
+    await discoverFilesWithProjectCatalog(roots, undefined, { persist: false, persistIndex: true });
+    const indexPath = path.join(process.env.LLV_STATE_DIR, "project-catalog.json");
+    const canonical = await readFile(indexPath, "utf8");
+    const originalWrite = fs.writeFileSync;
+    const originalRename = fs.renameSync;
+    const originalError = console.error;
+    const diagnostics: string[] = [];
+    let failure: "write" | "rename" | null = null;
+    fs.writeFileSync = ((filename: fs.PathOrFileDescriptor, data: string | NodeJS.ArrayBufferView, options?: fs.WriteFileOptions) => {
+      const result = originalWrite(filename, data, options);
+      if (failure === "write" && String(filename).includes(".project-catalog.json.")) {
+        throw new Error("injected project index write failure");
+      }
+      return result;
+    }) as typeof fs.writeFileSync;
+    fs.renameSync = ((source: fs.PathLike, target: fs.PathLike) => {
+      if (failure === "rename" && target === indexPath) {
+        throw new Error("injected project index rename failure");
+      }
+      return originalRename(source, target);
+    }) as typeof fs.renameSync;
+    console.error = (...values: unknown[]) => { diagnostics.push(values.map(String).join(" ")); };
+    const tempFiles = () => fs.readdirSync(process.env.LLV_STATE_DIR!)
+      .filter((name) => name.startsWith(".project-catalog.json.") && name.endsWith(".tmp"));
+    const attempt = async (mode: "write" | "rename", filename: string, cwd: string, mtime: number) => {
+      const transcript = path.join(roots["codex-sessions"], filename);
+      await writeFixture(transcript, JSON.stringify({ type: "session_meta", payload: { cwd } }) + "\n", mtime);
+      failure = mode;
+      const result = await discoverFilesWithProjectCatalog(roots, undefined, { persist: false, persistIndex: true });
+      expect(result.files.some((entry) => entry.path === transcript)).toBe(true);
+    };
+
+    try {
+      await attempt("write", "write-failed.jsonl", "/repo/write-failed", 1_700_000_001);
+      expect(await readFile(indexPath, "utf8")).toBe(canonical);
+      expect(tempFiles()).toEqual([]);
+
+      await attempt("rename", "rename-failed.jsonl", "/repo/rename-failed", 1_700_000_002);
+      expect(await readFile(indexPath, "utf8")).toBe(canonical);
+      expect(tempFiles()).toEqual([]);
+      expect(diagnostics).toEqual([
+        expect.stringContaining("write temporary index failed"),
+      ]);
+      expect(diagnostics[0]).toContain("injected project index write failure");
+      expect(diagnostics[0]).toContain(".project-catalog.json.");
+    } finally {
+      fs.writeFileSync = originalWrite;
+      fs.renameSync = originalRename;
+      console.error = originalError;
+    }
+
+    const recovered = await discoverFilesWithProjectCatalog(roots, undefined, { persist: false, persistIndex: true });
+    expect(recovered.files).toHaveLength(3);
+    const persisted = JSON.parse(await readFile(indexPath, "utf8"));
+    expect(Object.keys(persisted.files).sort()).toEqual([
+      canonicalTranscript,
+      path.join(roots["codex-sessions"], "rename-failed.jsonl"),
+      path.join(roots["codex-sessions"], "write-failed.jsonl"),
+    ].sort());
+    expect(tempFiles()).toEqual([]);
+  } finally {
+    if (previousStateDir === undefined) delete process.env.LLV_STATE_DIR;
+    else process.env.LLV_STATE_DIR = previousStateDir;
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test("an append reparses its file and reuses unchanged persisted summaries", async () => {
+  const base = await mkdtemp(path.join(os.tmpdir(), "llv-discover-incremental-"));
+  const previousStateDir = process.env.LLV_STATE_DIR;
+  process.env.LLV_STATE_DIR = path.join(base, "state");
+  try {
+    const roots: Record<RootKey, string> = {
+      "codex-sessions": path.join(base, "codex-sessions"),
+      "claude-projects": path.join(base, "claude-projects"),
+      "claude-tasks": path.join(base, "claude-tasks"),
+    };
+    await Promise.all(Object.values(roots).map((root) => mkdir(root, { recursive: true })));
+    const unchanged = path.join(roots["claude-projects"], "incremental", "session", "subagents", "agent-unchanged.jsonl");
+    const changed = path.join(roots["claude-projects"], "incremental", "session", "subagents", "agent-changed.jsonl");
+    const sidecar = (pathname: string) => pathname.slice(0, -".jsonl".length) + ".meta.json";
+    await writeFixture(unchanged, "{}\n", 1_700_000_000);
+    await writeFixture(changed, "{}\n", 1_700_000_001);
+    await writeFixture(sidecar(unchanged), JSON.stringify({ description: "Unchanged original" }), 1_700_000_000);
+    await writeFixture(sidecar(changed), JSON.stringify({ description: "Changed original" }), 1_700_000_001);
+
+    const first = await discoverFilesWithProjectCatalog(roots, undefined, { persist: false, persistIndex: true });
+    expect(first.files.find((entry) => entry.path === unchanged)?.title).toBe("Unchanged original");
+    expect(first.files.find((entry) => entry.path === changed)?.title).toBe("Changed original");
+
+    await writeFixture(sidecar(changed), JSON.stringify({ description: "Changed reparsed" }), 1_700_000_002);
+    await appendFile(changed, "{}\n");
+
+    const originalRead = fs.readFileSync;
+    let unchangedSidecarReads = 0;
+    fs.readFileSync = ((filename: fs.PathOrFileDescriptor, ...args: unknown[]) => {
+      if (filename === sidecar(unchanged)) unchangedSidecarReads += 1;
+      return (originalRead as (...inner: unknown[]) => unknown)(filename, ...args);
+    }) as typeof fs.readFileSync;
+    let second;
+    try {
+      second = await discoverFilesWithProjectCatalog(roots, undefined, { persist: false });
+    } finally {
+      fs.readFileSync = originalRead;
+    }
+    expect(second.files.find((entry) => entry.path === unchanged)?.title).toBe("Unchanged original");
+    expect(second.files.find((entry) => entry.path === changed)?.title).toBe("Changed reparsed");
+    expect(unchangedSidecarReads).toBe(0);
+  } finally {
+    if (previousStateDir === undefined) delete process.env.LLV_STATE_DIR;
+    else process.env.LLV_STATE_DIR = previousStateDir;
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test("a same-size transcript rewrite with a newer mtime reparses cwd and project metadata", async () => {
+  const base = await mkdtemp(path.join(os.tmpdir(), "llv-discover-same-size-rewrite-"));
+  const previousStateDir = process.env.LLV_STATE_DIR;
+  process.env.LLV_STATE_DIR = path.join(base, "state");
+  try {
+    const roots: Record<RootKey, string> = {
+      "codex-sessions": path.join(base, "codex-sessions"),
+      "claude-projects": path.join(base, "claude-projects"),
+      "claude-tasks": path.join(base, "claude-tasks"),
+    };
+    await Promise.all(Object.values(roots).map((root) => mkdir(root, { recursive: true })));
+    const transcript = path.join(roots["codex-sessions"], "rewritten.jsonl");
+    const alpha = JSON.stringify({ type: "session_meta", payload: { cwd: "/repo/alpha" } }) + "\n";
+    const bravo = JSON.stringify({ type: "session_meta", payload: { cwd: "/repo/bravo" } }) + "\n";
+    expect(Buffer.byteLength(alpha)).toBe(Buffer.byteLength(bravo));
+    await writeFixture(transcript, alpha, 1_700_000_000);
+
+    const first = await discoverFilesWithProjectCatalog(roots, undefined, { persist: false, persistIndex: true });
+    expect(first.files.find((entry) => entry.path === transcript)).toMatchObject({
+      cwd: "/repo/alpha",
+      project: projectForCwd("/repo/alpha"),
+    });
+
+    await writeFixture(transcript, bravo, 1_700_000_001);
+    const second = await discoverFilesWithProjectCatalog(roots, undefined, { persist: false });
+
+    expect(second.files.find((entry) => entry.path === transcript)).toMatchObject({
+      cwd: "/repo/bravo",
+      project: projectForCwd("/repo/bravo"),
+    });
+  } finally {
+    if (previousStateDir === undefined) delete process.env.LLV_STATE_DIR;
+    else process.env.LLV_STATE_DIR = previousStateDir;
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test("larger Codex and Claude rewrites replace cached head metadata", async () => {
+  const base = await mkdtemp(path.join(os.tmpdir(), "llv-discover-larger-rewrite-"));
+  const previousStateDir = process.env.LLV_STATE_DIR;
+  process.env.LLV_STATE_DIR = path.join(base, "state");
+  try {
+    const roots: Record<RootKey, string> = {
+      "codex-sessions": path.join(base, "codex-sessions"),
+      "claude-projects": path.join(base, "claude-projects"),
+      "claude-tasks": path.join(base, "claude-tasks"),
+    };
+    await Promise.all(Object.values(roots).map((root) => mkdir(root, { recursive: true })));
+    const codex = path.join(roots["codex-sessions"], "rewritten.jsonl");
+    const claude = path.join(roots["claude-projects"], "rewritten", "session.jsonl");
+    const codexTranscript = (cwd: string, title: string, padding = "") => [
+      JSON.stringify({ type: "session_meta", payload: { cwd } }),
+      JSON.stringify({ type: "event_msg", payload: { type: "user_message", message: title } }),
+      padding,
+    ].join("\n");
+    const claudeTranscript = (cwd: string, title: string, padding = "") => [
+      JSON.stringify({ type: "user", cwd, message: { content: title } }),
+      padding,
+    ].join("\n");
+    await writeFixture(codex, codexTranscript("/repo/codex-alpha", "Codex alpha"), 1_700_000_000);
+    await writeFixture(claude, claudeTranscript("/repo/claude-alpha", "Claude alpha"), 1_700_000_000);
+
+    const first = await discoverFilesWithProjectCatalog(roots, undefined, { persist: false, persistIndex: true });
+    expect(first.files.find((entry) => entry.path === codex)).toMatchObject({
+      cwd: "/repo/codex-alpha",
+      project: projectForCwd("/repo/codex-alpha"),
+      title: "Codex alpha",
+    });
+    expect(first.files.find((entry) => entry.path === claude)).toMatchObject({
+      cwd: "/repo/claude-alpha",
+      title: "Claude alpha",
+    });
+
+    await writeFixture(codex, codexTranscript("/repo/codex-bravo", "Codex bravo", "larger rewrite padding"), 1_700_000_001);
+    await writeFixture(claude, claudeTranscript("/repo/claude-bravo", "Claude bravo", "larger rewrite padding"), 1_700_000_001);
+    const second = await discoverFilesWithProjectCatalog(roots, undefined, { persist: false });
+
+    expect(second.files.find((entry) => entry.path === codex)).toMatchObject({
+      cwd: "/repo/codex-bravo",
+      project: projectForCwd("/repo/codex-bravo"),
+      title: "Codex bravo",
+    });
+    expect(second.files.find((entry) => entry.path === claude)).toMatchObject({
+      cwd: "/repo/claude-bravo",
+      title: "Claude bravo",
+    });
+  } finally {
+    if (previousStateDir === undefined) delete process.env.LLV_STATE_DIR;
+    else process.env.LLV_STATE_DIR = previousStateDir;
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test("Codex and Claude true appends retain head metadata through repeated EIO and rewrite recovery", async () => {
+  const base = await mkdtemp(path.join(os.tmpdir(), "llv-discover-append-eio-recovery-"));
+  const previousStateDir = process.env.LLV_STATE_DIR;
+  process.env.LLV_STATE_DIR = path.join(base, "state");
+  const originalOpen = fs.openSync;
+  try {
+    const roots: Record<RootKey, string> = {
+      "codex-sessions": path.join(base, "codex-sessions"),
+      "claude-projects": path.join(base, "claude-projects"),
+      "claude-tasks": path.join(base, "claude-tasks"),
+    };
+    await Promise.all(Object.values(roots).map((root) => mkdir(root, { recursive: true })));
+    const codex = path.join(roots["codex-sessions"], "append-recovery.jsonl");
+    const claude = path.join(roots["claude-projects"], "append-recovery", "session.jsonl");
+    const codexTranscript = (cwd: string, title: string, padding = "") => [
+      JSON.stringify({ type: "session_meta", payload: { cwd } }),
+      JSON.stringify({ type: "event_msg", payload: { type: "user_message", message: title } }),
+      padding,
+    ].join("\n");
+    const claudeTranscript = (cwd: string, title: string, padding = "") => [
+      JSON.stringify({ type: "user", cwd, message: { content: title } }),
+      padding,
+    ].join("\n");
+    await writeFixture(codex, codexTranscript("/repo/codex-original", "Codex original"), 1_700_000_000);
+    await writeFixture(claude, claudeTranscript("/repo/claude-original", "Claude original"), 1_700_000_000);
+    await discoverFilesWithProjectCatalog(roots, undefined, { persist: false, persistIndex: true });
+
+    await appendFile(codex, codexTranscript("/repo/codex-appended", "Codex appended"));
+    await appendFile(claude, claudeTranscript("/repo/claude-appended", "Claude appended"));
+    const appended = await discoverFilesWithProjectCatalog(roots, undefined, { persist: false, persistIndex: true });
+    expect(appended.files.find((entry) => entry.path === codex)).toMatchObject({
+      cwd: "/repo/codex-original",
+      project: projectForCwd("/repo/codex-original"),
+      title: "Codex original",
+    });
+    expect(appended.files.find((entry) => entry.path === claude)).toMatchObject({
+      cwd: "/repo/claude-original",
+      title: "Claude original",
+    });
+    const canonicalIndex = await readFile(path.join(process.env.LLV_STATE_DIR, "project-catalog.json"), "utf8");
+    const canonicalCatalog = structuredClone(conversationCatalogSnapshot());
+
+    await writeFixture(codex, codexTranscript("/repo/codex-recovered", "Codex recovered", "larger replacement"), 1_700_000_002);
+    await writeFixture(claude, claudeTranscript("/repo/claude-recovered", "Claude recovered", "larger replacement"), 1_700_000_002);
+    const failures = new Map([[codex, 4], [claude, 4]]);
+    fs.openSync = ((filename: fs.PathLike, flags: fs.OpenMode, mode?: fs.Mode) => {
+      const remaining = failures.get(String(filename)) ?? 0;
+      if (remaining > 0) {
+        failures.set(String(filename), remaining - 1);
+        const error = new Error("injected repeated transcript EIO") as NodeJS.ErrnoException;
+        error.code = "EIO";
+        throw error;
+      }
+      return originalOpen(filename, flags, mode);
+    }) as typeof fs.openSync;
+    const firstFailure = await discoverFilesWithProjectCatalog(roots, undefined, { persist: false, persistIndex: true });
+    const secondFailure = await discoverFilesWithProjectCatalog(roots, undefined, { persist: false, persistIndex: true });
+    expect(firstFailure.complete).toBe(false);
+    expect(secondFailure.complete).toBe(false);
+    expect(firstFailure.files.find((entry) => entry.path === codex)?.cwd).toBe("/repo/codex-original");
+    expect(secondFailure.files.find((entry) => entry.path === claude)?.cwd).toBe("/repo/claude-original");
+    expect(await readFile(path.join(process.env.LLV_STATE_DIR, "project-catalog.json"), "utf8")).toBe(canonicalIndex);
+    expect(conversationCatalogSnapshot()).toEqual(canonicalCatalog);
+
+    fs.openSync = originalOpen;
+    const recovered = await discoverFilesWithProjectCatalog(roots, undefined, { persist: false, persistIndex: true });
+    expect(recovered.complete).toBe(true);
+    expect(recovered.files.find((entry) => entry.path === codex)).toMatchObject({
+      cwd: "/repo/codex-recovered",
+      project: projectForCwd("/repo/codex-recovered"),
+      title: "Codex recovered",
+    });
+    expect(recovered.files.find((entry) => entry.path === claude)).toMatchObject({
+      cwd: "/repo/claude-recovered",
+      title: "Claude recovered",
+    });
+  } finally {
+    fs.openSync = originalOpen;
+    if (previousStateDir === undefined) delete process.env.LLV_STATE_DIR;
+    else process.env.LLV_STATE_DIR = previousStateDir;
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test("a one-shot transcript read failure stays incomplete and recovers in memory and after restart", async () => {
+  const base = await mkdtemp(path.join(os.tmpdir(), "llv-discover-transcript-read-retry-"));
+  const previousStateDir = process.env.LLV_STATE_DIR;
+  process.env.LLV_STATE_DIR = path.join(base, "state");
+  try {
+    const roots: Record<RootKey, string> = {
+      "codex-sessions": path.join(base, "codex-sessions"),
+      "claude-projects": path.join(base, "claude-projects"),
+      "claude-tasks": path.join(base, "claude-tasks"),
+    };
+    await Promise.all(Object.values(roots).map((root) => mkdir(root, { recursive: true })));
+    const transcript = path.join(roots["codex-sessions"], "rewritten.jsonl");
+    const indexPath = path.join(process.env.LLV_STATE_DIR, "project-catalog.json");
+    const alpha = JSON.stringify({ type: "session_meta", payload: { cwd: "/repo/alpha" } }) + "\n";
+    const bravo = JSON.stringify({ type: "session_meta", payload: { cwd: "/repo/bravo" } }) + "\n";
+    expect(Buffer.byteLength(alpha)).toBe(Buffer.byteLength(bravo));
+    await writeFixture(transcript, alpha, 1_700_000_000);
+    await discoverFilesWithProjectCatalog(roots, undefined, { persist: false, persistIndex: true });
+    const canonicalIndex = await readFile(indexPath, "utf8");
+    const canonicalCatalog = structuredClone(conversationCatalogSnapshot());
+    await writeFixture(transcript, bravo, 1_700_000_001);
+
+    const originalOpen = fs.openSync;
+    let failures = 1;
+    fs.openSync = ((filename: fs.PathLike, flags: fs.OpenMode, mode?: fs.Mode) => {
+      if (filename === transcript && failures > 0) {
+        failures -= 1;
+        throw new Error("injected transcript read failure");
+      }
+      return originalOpen(filename, flags, mode);
+    }) as typeof fs.openSync;
+    let failedScan;
+    try {
+      failedScan = await discoverFilesWithProjectCatalog(roots, undefined, { persist: false, persistIndex: true });
+    } finally {
+      fs.openSync = originalOpen;
+    }
+
+    const failedIndex = await readFile(indexPath, "utf8");
+    expect(failedScan.complete).toBe(false);
+    expect(failedIndex).toBe(canonicalIndex);
+    expect(conversationCatalogSnapshot()).toEqual(canonicalCatalog);
+    const recoveredInMemory = await discoverFilesWithProjectCatalog(roots, undefined, { persist: false, persistIndex: true });
+    await writeFile(indexPath, failedIndex);
+    const recoveredAfterRestart = await discoverEntryInFreshProcess(roots, transcript);
+
+    expect(failedScan.files.find((entry) => entry.path === transcript)).toMatchObject({
+      cwd: "/repo/alpha",
+      project: projectForCwd("/repo/alpha"),
+    });
+    expect(recoveredInMemory.files.find((entry) => entry.path === transcript)).toMatchObject({
+      cwd: "/repo/bravo",
+      project: projectForCwd("/repo/bravo"),
+    });
+    expect(recoveredAfterRestart).toMatchObject({
+      cwd: "/repo/bravo",
+      project: projectForCwd("/repo/bravo"),
+    });
+  } finally {
+    if (previousStateDir === undefined) delete process.env.LLV_STATE_DIR;
+    else process.env.LLV_STATE_DIR = previousStateDir;
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test("first-ever repeated transcript read failures publish and persist only after recovery", async () => {
+  const base = await mkdtemp(path.join(os.tmpdir(), "llv-discover-first-read-retry-"));
+  const previousStateDir = process.env.LLV_STATE_DIR;
+  process.env.LLV_STATE_DIR = path.join(base, "state");
+  try {
+    const roots: Record<RootKey, string> = {
+      "codex-sessions": path.join(base, "codex-sessions"),
+      "claude-projects": path.join(base, "claude-projects"),
+      "claude-tasks": path.join(base, "claude-tasks"),
+    };
+    await Promise.all(Object.values(roots).map((root) => mkdir(root, { recursive: true })));
+    const transcript = path.join(roots["codex-sessions"], "first.jsonl");
+    const indexPath = path.join(process.env.LLV_STATE_DIR, "project-catalog.json");
+    await writeFixture(transcript, JSON.stringify({ type: "session_meta", payload: { cwd: "/repo/first" } }) + "\n", 1_700_000_000);
+    const publishedBeforeFailure = structuredClone(conversationCatalogSnapshot());
+
+    const originalOpen = fs.openSync;
+    let failures = 4;
+    fs.openSync = ((filename: fs.PathLike, flags: fs.OpenMode, mode?: fs.Mode) => {
+      if (filename === transcript && failures > 0) {
+        failures -= 1;
+        const error = new Error("injected first transcript EIO") as NodeJS.ErrnoException;
+        error.code = "EIO";
+        throw error;
+      }
+      return originalOpen(filename, flags, mode);
+    }) as typeof fs.openSync;
+    let firstFailure;
+    let secondFailure;
+    try {
+      firstFailure = await discoverFilesWithProjectCatalog(roots, undefined, { persist: false, persistIndex: true });
+      secondFailure = await discoverFilesWithProjectCatalog(roots, undefined, { persist: false, persistIndex: true });
+    } finally {
+      fs.openSync = originalOpen;
+    }
+
+    expect(firstFailure.complete).toBe(false);
+    expect(secondFailure.complete).toBe(false);
+    expect(existsSync(indexPath)).toBe(false);
+    expect(conversationCatalogSnapshot()).toEqual(publishedBeforeFailure);
+
+    const recovered = await discoverFilesWithProjectCatalog(roots, undefined, { persist: false, persistIndex: true });
+    expect(recovered.complete).toBe(true);
+    expect(existsSync(indexPath)).toBe(true);
+    expect(conversationCatalogSnapshot().map((entry) => entry.path)).toContain(transcript);
+    expect(await discoverEntryInFreshProcess(roots, transcript)).toMatchObject({
+      cwd: "/repo/first",
+      project: projectForCwd("/repo/first"),
+    });
+  } finally {
+    if (previousStateDir === undefined) delete process.env.LLV_STATE_DIR;
+    else process.env.LLV_STATE_DIR = previousStateDir;
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test("a same-size subagent sidecar rewrite with a newer mtime reparses its title", async () => {
+  const base = await mkdtemp(path.join(os.tmpdir(), "llv-discover-sidecar-rewrite-"));
+  const previousStateDir = process.env.LLV_STATE_DIR;
+  process.env.LLV_STATE_DIR = path.join(base, "state");
+  try {
+    const roots: Record<RootKey, string> = {
+      "codex-sessions": path.join(base, "codex-sessions"),
+      "claude-projects": path.join(base, "claude-projects"),
+      "claude-tasks": path.join(base, "claude-tasks"),
+    };
+    await Promise.all(Object.values(roots).map((root) => mkdir(root, { recursive: true })));
+    const transcript = path.join(roots["claude-projects"], "sidecar", "session", "subagents", "agent-rewritten.jsonl");
+    const sidecar = transcript.slice(0, -".jsonl".length) + ".meta.json";
+    const alpha = JSON.stringify({ description: "Agent alpha" });
+    const bravo = JSON.stringify({ description: "Agent bravo" });
+    expect(Buffer.byteLength(alpha)).toBe(Buffer.byteLength(bravo));
+    await writeFixture(transcript, "{}\n", 1_700_000_000);
+    await writeFixture(sidecar, alpha, 1_700_000_000);
+
+    const first = await discoverFilesWithProjectCatalog(roots, undefined, { persist: false, persistIndex: true });
+    expect(first.files.find((entry) => entry.path === transcript)?.title).toBe("Agent alpha");
+
+    await writeFixture(sidecar, bravo, 1_700_000_001);
+    const second = await discoverFilesWithProjectCatalog(roots, undefined, { persist: false });
+
+    expect(second.files.find((entry) => entry.path === transcript)?.title).toBe("Agent bravo");
+  } finally {
+    if (previousStateDir === undefined) delete process.env.LLV_STATE_DIR;
+    else process.env.LLV_STATE_DIR = previousStateDir;
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test("a one-shot sidecar read failure stays incomplete and recovers in memory and after restart", async () => {
+  const base = await mkdtemp(path.join(os.tmpdir(), "llv-discover-sidecar-read-retry-"));
+  const previousStateDir = process.env.LLV_STATE_DIR;
+  process.env.LLV_STATE_DIR = path.join(base, "state");
+  try {
+    const roots: Record<RootKey, string> = {
+      "codex-sessions": path.join(base, "codex-sessions"),
+      "claude-projects": path.join(base, "claude-projects"),
+      "claude-tasks": path.join(base, "claude-tasks"),
+    };
+    await Promise.all(Object.values(roots).map((root) => mkdir(root, { recursive: true })));
+    const transcript = path.join(roots["claude-projects"], "sidecar", "session", "subagents", "agent-x.jsonl");
+    const sidecar = transcript.slice(0, -".jsonl".length) + ".meta.json";
+    const indexPath = path.join(process.env.LLV_STATE_DIR, "project-catalog.json");
+    const alpha = JSON.stringify({ description: "Agent alpha" });
+    const bravo = JSON.stringify({ description: "Agent bravo" });
+    expect(Buffer.byteLength(alpha)).toBe(Buffer.byteLength(bravo));
+    await writeFixture(transcript, "{}\n", 1_700_000_000);
+    await writeFixture(sidecar, alpha, 1_700_000_000);
+    await discoverFilesWithProjectCatalog(roots, undefined, { persist: false, persistIndex: true });
+    const canonicalIndex = await readFile(indexPath, "utf8");
+    await writeFixture(sidecar, bravo, 1_700_000_001);
+
+    const originalRead = fs.readFileSync;
+    let failures = 1;
+    fs.readFileSync = ((filename: fs.PathOrFileDescriptor, ...args: unknown[]) => {
+      if (filename === sidecar && failures > 0) {
+        failures -= 1;
+        throw new Error("injected sidecar read failure");
+      }
+      return (originalRead as (...inner: unknown[]) => unknown)(filename, ...args);
+    }) as typeof fs.readFileSync;
+    let failedScan;
+    try {
+      failedScan = await discoverFilesWithProjectCatalog(roots, undefined, { persist: false, persistIndex: true });
+    } finally {
+      fs.readFileSync = originalRead;
+    }
+
+    const failedIndex = await readFile(indexPath, "utf8");
+    const recoveredInMemory = await discoverFilesWithProjectCatalog(roots, undefined, { persist: false, persistIndex: true });
+    await writeFile(indexPath, failedIndex);
+    const recoveredAfterRestart = await discoverEntryInFreshProcess(roots, transcript);
+
+    expect(failedScan.files.find((entry) => entry.path === transcript)?.title).toBe("Subagent x");
+    expect(failedScan.complete).toBe(false);
+    expect(failedIndex).toBe(canonicalIndex);
+    expect(recoveredInMemory.files.find((entry) => entry.path === transcript)?.title).toBe("Agent bravo");
+    expect(recoveredAfterRestart?.title).toBe("Agent bravo");
+  } finally {
+    if (previousStateDir === undefined) delete process.env.LLV_STATE_DIR;
+    else process.env.LLV_STATE_DIR = previousStateDir;
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test("a corrupt per-file scanner index falls back to a full parse and repairs itself", async () => {
+  const base = await mkdtemp(path.join(os.tmpdir(), "llv-discover-corrupt-index-"));
+  const previousStateDir = process.env.LLV_STATE_DIR;
+  process.env.LLV_STATE_DIR = path.join(base, "state");
+  try {
+    const roots: Record<RootKey, string> = {
+      "codex-sessions": path.join(base, "codex-sessions"),
+      "claude-projects": path.join(base, "claude-projects"),
+      "claude-tasks": path.join(base, "claude-tasks"),
+    };
+    await Promise.all(Object.values(roots).map((root) => mkdir(root, { recursive: true })));
+    const transcript = path.join(roots["claude-projects"], "recovered", "session", "subagents", "agent-child.jsonl");
+    await writeFixture(transcript, "{}\n", 1_700_000_000);
+    await writeFile(transcript.slice(0, -".jsonl".length) + ".meta.json", JSON.stringify({ description: "Recovered summary" }));
+    await mkdir(process.env.LLV_STATE_DIR, { recursive: true });
+    await writeFile(path.join(process.env.LLV_STATE_DIR, "project-catalog.json"), "{ corrupt");
+
+    const recovered = await discoverFilesWithProjectCatalog(roots, undefined, { persist: false, persistIndex: true });
+
+    expect(recovered.files.find((entry) => entry.path === transcript)?.title).toBe("Recovered summary");
+    const persisted = JSON.parse(await readFile(path.join(process.env.LLV_STATE_DIR, "project-catalog.json"), "utf8"));
+    expect(persisted.files[transcript]).toMatchObject({ summaryVersion: 2, title: "Recovered summary" });
+  } finally {
+    if (previousStateDir === undefined) delete process.env.LLV_STATE_DIR;
+    else process.env.LLV_STATE_DIR = previousStateDir;
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test("a pinned discovery identifies only rows outside the global scheme window", async () => {
+  const base = await mkdtemp(path.join(os.tmpdir(), "llv-discover-pin-overlay-"));
+  try {
+    const roots: Record<RootKey, string> = {
+      "codex-sessions": path.join(base, "codex-sessions"),
+      "claude-projects": path.join(base, "claude-projects"),
+      "claude-tasks": path.join(base, "claude-tasks"),
+    };
+    await Promise.all(Object.values(roots).map((root) => mkdir(root, { recursive: true })));
+    const transcripts: string[] = [];
+    for (let index = 0; index <= DEFAULT_SCHEME_CARDS_PER_PROJECT; index += 1) {
+      const transcript = path.join(roots["claude-projects"], "pin-overlay", `session-${index}.jsonl`);
+      transcripts.push(transcript);
+      await writeFixture(transcript, JSON.stringify({ type: "user", message: { content: `Prompt ${index}` } }) + "\n", 1_700_000_000 + index);
+    }
+    const pinnedPath = transcripts[0]!;
+
+    const scan = await discoverFilesWithProjectCatalog(roots, undefined, {
+      persist: false,
+      pin: new Set([pinnedPath]),
+    });
+
+    expect(scan.pinOverlayPaths).toEqual([pinnedPath]);
+    expect(scan.files.filter((entry) => !scan.pinOverlayPaths?.includes(entry.path))).toHaveLength(DEFAULT_SCHEME_CARDS_PER_PROJECT);
+  } finally {
     await rm(base, { recursive: true, force: true });
   }
 });
@@ -382,8 +1102,88 @@ test("project catalog omits task-only residue from a clean state", async () => {
 
     const scan = await discoverFilesWithProjectCatalog(roots);
 
+    expect(scan.complete).toBe(true);
     expect(scan.files.some((entry) => entry.path === taskPath)).toBe(true);
     expect(scan.projectCatalog).toEqual([]);
+    const persisted = JSON.parse(await readFile(path.join(process.env.LLV_STATE_DIR, "project-catalog.json"), "utf8"));
+    expect(persisted.files[taskPath]).toBeDefined();
+  } finally {
+    if (previousStateDir === undefined) delete process.env.LLV_STATE_DIR;
+    else process.env.LLV_STATE_DIR = previousStateDir;
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test("first-ever EIO and EACCES task twin lookups publish only after recovery", async () => {
+  for (const code of ["EIO", "EACCES"] as const) {
+    const base = await mkdtemp(path.join(os.tmpdir(), `llv-discover-task-twin-${code.toLowerCase()}-`));
+    const previousStateDir = process.env.LLV_STATE_DIR;
+    process.env.LLV_STATE_DIR = path.join(base, "state");
+    const originalAccess = fs.promises.access;
+    try {
+      const roots: Record<RootKey, string> = {
+        "codex-sessions": path.join(base, "codex-sessions"),
+        "claude-projects": path.join(base, "claude-projects"),
+        "claude-tasks": path.join(base, "claude-tasks"),
+      };
+      await Promise.all(Object.values(roots).map((root) => mkdir(root, { recursive: true })));
+      const taskPath = path.join(roots["claude-tasks"], "project-a", "session-a", "tasks", "task-a.output");
+      const twinPath = path.join(roots["claude-projects"], "project-a", "session-a", "subagents", "agent-task-a.jsonl");
+      await writeFixture(taskPath, "finished\n", 1_700_000_000);
+      const publishedBefore = structuredClone(conversationCatalogSnapshot());
+      fs.promises.access = (async (pathname, mode) => {
+        if (pathname === twinPath) {
+          const error = new Error(`injected task twin ${code}`) as NodeJS.ErrnoException;
+          error.code = code;
+          throw error;
+        }
+        return originalAccess(pathname, mode);
+      }) as typeof fs.promises.access;
+
+      const failed = await discoverFilesWithProjectCatalog(roots, undefined, { persist: false, persistIndex: true });
+      expect(failed.complete).toBe(false);
+      expect(existsSync(path.join(process.env.LLV_STATE_DIR, "project-catalog.json"))).toBe(false);
+      expect(conversationCatalogSnapshot()).toEqual(publishedBefore);
+
+      fs.promises.access = originalAccess;
+      const recovered = await discoverFilesWithProjectCatalog(roots, undefined, { persist: false, persistIndex: true });
+      expect(recovered.complete).toBe(true);
+      expect(recovered.files.map((entry) => entry.path)).toContain(taskPath);
+      expect(existsSync(path.join(process.env.LLV_STATE_DIR, "project-catalog.json"))).toBe(true);
+    } finally {
+      fs.promises.access = originalAccess;
+      if (previousStateDir === undefined) delete process.env.LLV_STATE_DIR;
+      else process.env.LLV_STATE_DIR = previousStateDir;
+      await rm(base, { recursive: true, force: true });
+    }
+  }
+});
+
+test("a first-ever ENOTDIR task twin lookup stays incomplete and publishes no durable scanner state", async () => {
+  const base = await mkdtemp(path.join(os.tmpdir(), "llv-discover-task-twin-enotdir-"));
+  const previousStateDir = process.env.LLV_STATE_DIR;
+  process.env.LLV_STATE_DIR = path.join(base, "state");
+  try {
+    const roots: Record<RootKey, string> = {
+      "codex-sessions": path.join(base, "codex-sessions"),
+      "claude-projects": path.join(base, "claude-projects"),
+      "claude-tasks": path.join(base, "claude-tasks"),
+    };
+    await Promise.all(Object.values(roots).map((root) => mkdir(root, { recursive: true })));
+    const taskPath = path.join(roots["claude-tasks"], "project-a", "session-a", "tasks", "task-a.output");
+    await writeFixture(taskPath, "finished\n", 1_700_000_000);
+    await writeFixture(
+      path.join(roots["claude-projects"], "project-a", "session-a", "subagents"),
+      "blocks the expected subagents directory\n",
+      1_700_000_000,
+    );
+    const publishedBefore = structuredClone(conversationCatalogSnapshot());
+
+    const scan = await discoverFilesWithProjectCatalog(roots, undefined, { persist: false, persistIndex: true });
+
+    expect(scan.complete).toBe(false);
+    expect(existsSync(path.join(process.env.LLV_STATE_DIR, "project-catalog.json"))).toBe(false);
+    expect(conversationCatalogSnapshot()).toEqual(publishedBefore);
   } finally {
     if (previousStateDir === undefined) delete process.env.LLV_STATE_DIR;
     else process.env.LLV_STATE_DIR = previousStateDir;

@@ -900,6 +900,42 @@ test("Unix socket host isolates a singleton writer and serves a fake Viewer clie
   fence.release();
 });
 
+test("concurrent socket replays keep maximum-size command output byte-bounded and advancing", async () => {
+  const dir = sandbox("socket-replay-burst");
+  const socketPath = path.join(dir, "runtime.sock");
+  const journal = new RuntimeJournal(path.join(dir, "events.sqlite"), { maxEvents: 256 });
+  for (let index = 0; index < 128; index += 1) {
+    journal.append({
+      scope: runtimeScope("session", "burst"),
+      kind: "item",
+      payload: { phase: "completed", commandOutput: "x".repeat(15_500), index },
+    });
+  }
+  const server = serveRuntimeHost(socketPath, new RuntimeHost(journal));
+  await new Promise<void>((resolve) => server.once("listening", resolve));
+  const client = new UnixRuntimeHostClient(socketPath);
+
+  const concurrent = await Promise.all(Array.from({ length: 32 }, () => client.waitEvents(0, 1_000)));
+  expect(concurrent.every((replay) => replay.reset === false && replay.events[0]?.seq === 1)).toBeTrue();
+  expect(concurrent.every((replay) => Buffer.byteLength(JSON.stringify(replay.events)) <= 256 * 1024)).toBeTrue();
+
+  let cursor = 0;
+  let pages = 0;
+  while (cursor < 128) {
+    const replay = await client.waitEvents(cursor, 1_000);
+    expect(replay.reset).toBeFalse();
+    expect(replay.events.length).toBeGreaterThan(0);
+    expect(replay.events[0]!.seq).toBe(cursor + 1);
+    cursor = replay.events.at(-1)!.seq;
+    pages += 1;
+  }
+  expect(cursor).toBe(128);
+  expect(pages).toBeGreaterThan(1);
+
+  await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  journal.close();
+});
+
 test("structured queue controls cross the local runtime socket", async () => {
   const dir = sandbox("structured-socket");
   const socketPath = path.join(dir, "runtime.sock");

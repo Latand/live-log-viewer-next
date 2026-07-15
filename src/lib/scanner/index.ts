@@ -72,12 +72,22 @@ async function forEachEntryBatchYielding(
 
 export interface FileScanOptions {
   persist?: boolean;
+  /** Persist parsed per-file summaries while keeping controller mutations out
+      of request-owned scans. */
+  persistIndex?: boolean;
   /** Deep-link target that must survive the recency cap: a transcript path,
       or a `conversation_*` id resolved to its current generation path. */
   pin?: string;
   /** Batch of transcript paths that must survive the recency cap. Used by
       operations that need one activity snapshot for a complete target set. */
   pins?: readonly string[];
+}
+
+export interface FileCatalogScan {
+  files: FileEntry[];
+  projectCatalog: ProjectCatalogEntry[];
+  pinOverlayPaths?: string[];
+  complete: boolean;
 }
 
 /** Transcript paths a pin value requires in the feed. A conversation id is
@@ -166,7 +176,7 @@ export async function listFiles(options: FileScanOptions = {}): Promise<FileEntr
   return (await listFilesInternal(false, undefined, options)).files;
 }
 
-export async function listFilesWithProjectCatalog(selectedProject?: string, options: FileScanOptions = {}): Promise<{ files: FileEntry[]; projectCatalog: ProjectCatalogEntry[] }> {
+export async function listFilesWithProjectCatalog(selectedProject?: string, options: FileScanOptions = {}): Promise<FileCatalogScan> {
   return listFilesInternal(true, selectedProject, options);
 }
 
@@ -183,14 +193,14 @@ async function listFilesInternal(
   includeProjectCatalog: boolean,
   selectedProject?: string,
   options: FileScanOptions = {},
-): Promise<{ files: FileEntry[]; projectCatalog: ProjectCatalogEntry[] }> {
+): Promise<FileCatalogScan> {
   const persist = options.persist === true;
   const demote = archivedTranscriptPaths();
   const requestedPins = options.pins ? [...options.pins, ...(options.pin ? [options.pin] : [])] : options.pin;
   const pin = pinnedPathsFor(requestedPins);
   const scan = includeProjectCatalog
-    ? await discoverFilesWithProjectCatalog(undefined, selectedProject, { persist, demote, pin })
-    : { files: await discoverFiles(undefined, demote, pin), projectCatalog: [] };
+    ? await discoverFilesWithProjectCatalog(undefined, selectedProject, { persist, persistIndex: options.persistIndex, demote, pin })
+    : { files: await discoverFiles(undefined, demote, pin), projectCatalog: [], complete: true };
   const entries = scan.files;
   // The /proc fd scan is only needed to attribute background-task outputs to a
   // live pid. When the shortlist has no such entries, skip the scan entirely;
@@ -234,7 +244,13 @@ async function listFilesInternal(
     entry.pendingWakeup = pendingWakeupFor(entry);
   });
   await linkEntries(entries, { persist });
-  return { files: entries, projectCatalog: scan.projectCatalog };
+  const pinOverlayPaths = "pinOverlayPaths" in scan ? scan.pinOverlayPaths : undefined;
+  return {
+    files: entries,
+    projectCatalog: scan.projectCatalog,
+    ...(pinOverlayPaths?.length ? { pinOverlayPaths } : {}),
+    complete: scan.complete,
+  };
 }
 
 /** Durable controllers run outside request handlers. Flow ordering remains

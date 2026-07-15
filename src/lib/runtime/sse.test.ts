@@ -59,3 +59,48 @@ test("SSE resumes from the larger valid query or Last-Event-ID cursor", () => {
   expect(runtimeCursor(null, "7")).toBe(7);
   expect(() => runtimeCursor("bad", null)).toThrow("cursor must be a non-negative sequence");
 });
+
+test("SSE drains a 128-event replay in strict page order on one stream", async () => {
+  const events = Array.from({ length: 128 }, (_, index) => event(index + 1));
+  const waits: number[] = [];
+  const client = {
+    waitEvents: async (after: number) => {
+      waits.push(after);
+      return { reset: false, floorSeq: 0, events: events.slice(after, after + 64) };
+    },
+  } as unknown as RuntimeHostClient;
+  const abort = new AbortController();
+  const reader = runtimeEventStream(client, 0, abort.signal).getReader();
+  const first = new TextDecoder().decode((await reader.read()).value);
+  const second = new TextDecoder().decode((await reader.read()).value);
+  abort.abort();
+  await reader.cancel();
+
+  const ids = `${first}${second}`.match(/^id: (\d+)$/gm)?.map((line) => Number(line.slice(4)));
+  expect(ids).toEqual(Array.from({ length: 128 }, (_, index) => index + 1));
+  expect(waits.slice(0, 2)).toEqual([0, 64]);
+});
+
+test("SSE exposes runtime host failures as a reconnectable fault frame", async () => {
+  const client = {
+    waitEvents: async () => { throw new Error("socket unavailable"); },
+  } as unknown as RuntimeHostClient;
+  const reader = runtimeEventStream(client, 44, new AbortController().signal).getReader();
+  const fault = new TextDecoder().decode((await reader.read()).value);
+  expect(fault).toContain("event: fault");
+  expect(fault).toContain('"code":"runtime-host-unavailable"');
+  expect((await reader.read()).done).toBeTrue();
+});
+
+test("SSE emits a heartbeat while the journal cursor is quiet", async () => {
+  const client = {
+    waitEvents: async () => ({ reset: false, floorSeq: 0, events: [] }),
+  } as unknown as RuntimeHostClient;
+  const abort = new AbortController();
+  const reader = runtimeEventStream(client, 44, abort.signal).getReader();
+  const heartbeat = new TextDecoder().decode((await reader.read()).value);
+  abort.abort();
+  await reader.cancel();
+  expect(heartbeat).toContain("event: heartbeat");
+  expect(heartbeat).toContain('"publishedSeq":44');
+});
