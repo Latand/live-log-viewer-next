@@ -1049,6 +1049,7 @@ describe.each(["codex", "claude"] as const)("%s structured spawn round trip", (e
       clientMessageId: pendingAfterKillId,
       text: "must stay queued after kill",
       hasImages: false,
+      policy: "queue",
     }, { client: () => client, registry: () => registry, enabled: () => true });
     expect(host.sent.some((entry) => entry.text === "must stay queued after kill")).toBeFalse();
 

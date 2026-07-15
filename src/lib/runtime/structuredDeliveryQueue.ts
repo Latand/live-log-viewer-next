@@ -1,4 +1,4 @@
-import type { EngineHost, QueueEntry } from "./engineHost";
+import type { DeliveryReceipt, EngineHost, QueueEntry } from "./engineHost";
 import type { RuntimeHostClient } from "./client";
 
 export interface StructuredDeliveryEffect {
@@ -22,6 +22,7 @@ export interface StructuredDeliveryQueuePort {
 export type StructuredHostResolver = (conversationId: string) => EngineHost | null;
 
 const STRUCTURED_DELIVERY_BATCH_SIZE = 100;
+const THREAD_READ_ATTEMPTS = 2;
 
 export function runtimeClientDeliveryPort(client: RuntimeHostClient): StructuredDeliveryQueuePort {
   return {
@@ -37,7 +38,7 @@ interface SendEffect {
   conversationId: string;
   text: string;
   turnId?: string | null;
-  policy?: "queue" | "steer-if-active";
+  policy?: "queue" | "steer-if-active" | "interrupt-active";
   kind: "send" | "steer";
   hasImages: boolean;
   eventSeq: number;
@@ -69,7 +70,9 @@ function sendEffect(effect: StructuredDeliveryEffect): SendEffect | null {
   const turnId = typeof effect.payload.turnId === "string" || effect.payload.turnId === null
     ? effect.payload.turnId
     : undefined;
-  const policy = effect.payload.policy === "queue" || effect.payload.policy === "steer-if-active"
+  const policy = effect.payload.policy === "queue"
+    || effect.payload.policy === "steer-if-active"
+    || effect.payload.policy === "interrupt-active"
     ? effect.payload.policy
     : undefined;
   return {
@@ -122,9 +125,25 @@ function failureReason(error: unknown): string {
   return (message.trim() || "structured host delivery failed").slice(0, 240);
 }
 
+function isThreadReadTimeout(error: unknown): boolean {
+  return /thread\/read.*timed out|request timed out:\s*thread\/read/i.test(failureReason(error));
+}
+
+async function sendWithReadRetry(host: EngineHost, entry: QueueEntry): Promise<DeliveryReceipt> {
+  for (let attempt = 1; attempt <= THREAD_READ_ATTEMPTS; attempt += 1) {
+    try {
+      return await host.send(entry);
+    } catch (error) {
+      if (attempt === THREAD_READ_ATTEMPTS || !isThreadReadTimeout(error)) throw error;
+    }
+  }
+  throw new Error("structured delivery retry budget exhausted");
+}
+
 export class StructuredDeliveryQueue {
   private activeDrain: Promise<void> | null = null;
   private rerun = false;
+  private readonly interruptAcknowledged = new Set<string>();
 
   constructor(
     private readonly port: StructuredDeliveryQueuePort,
@@ -133,6 +152,7 @@ export class StructuredDeliveryQueue {
       conversationId: string,
       sessionKey: { engine: "codex" | "claude"; sessionId: string },
     ) => Promise<boolean> = async () => false,
+    private readonly retrySoon: () => void = () => {},
   ) {}
 
   drain(): Promise<void> {
@@ -211,26 +231,72 @@ export class StructuredDeliveryQueue {
       }
       const maySteer = health.status === "active"
         && (effect.kind === "steer" || effect.policy === "steer-if-active");
-      if (health.status !== "idle" && !maySteer) return true;
-      const expectedTurnId = effect.turnId !== undefined ? effect.turnId : health.activeTurnRef;
+      const replacementIsActive = effect.policy === "interrupt-active"
+        && (health.status === "active" || health.status === "attention")
+        && Boolean(health.activeTurnRef);
+      const shouldInterrupt = replacementIsActive
+        && (effect.turnId === undefined || effect.turnId === health.activeTurnRef)
+        && !this.interruptAcknowledged.has(effect.operationId);
+      if (health.status !== "idle" && !maySteer && !shouldInterrupt) return true;
+      if (health.status === "idle") this.interruptAcknowledged.delete(effect.operationId);
+      const deliveryFence = shouldInterrupt
+        ? effect.turnId ?? health.activeTurnRef
+        : effect.policy === "interrupt-active"
+          ? effect.turnId ?? null
+          : effect.turnId !== undefined
+            ? effect.turnId
+            : health.activeTurnRef;
       const entry: QueueEntry = {
         id: effect.operationId,
         text: effect.text,
-        expectedTurnId,
+        expectedTurnId: effect.policy === "interrupt-active" ? null : deliveryFence,
       };
       await this.port.transition(
         effect.operationId,
         "delivering",
-        { turnId: entry.expectedTurnId },
+        { turnId: deliveryFence },
       );
+      if (shouldInterrupt) {
+        try {
+          await host.interrupt(health.activeTurnRef!);
+          this.interruptAcknowledged.add(effect.operationId);
+        } catch (error) {
+          this.interruptAcknowledged.delete(effect.operationId);
+          const reason = failureReason(error);
+          const afterFailure = await host.health().catch(() => null);
+          if (!afterFailure || afterFailure.status === "dead" || afterFailure.status === "unhosted") {
+            await this.port.transition(effect.operationId, "queued", { reason });
+            return true;
+          }
+          await this.port.transition(effect.operationId, "queued", { reason: "interrupt-auto-retry" });
+          this.retrySoon();
+          return true;
+        }
+        const afterInterrupt = await host.health();
+        if (afterInterrupt.status === "dead" || afterInterrupt.status === "unhosted") {
+          this.interruptAcknowledged.delete(effect.operationId);
+          await this.port.transition(effect.operationId, "queued", { reason: "dead-host" });
+          return true;
+        }
+        if (afterInterrupt.status !== "idle") {
+          await this.port.transition(effect.operationId, "queued", { reason: "interrupt-requested" });
+          return true;
+        }
+        this.interruptAcknowledged.delete(effect.operationId);
+      }
       let receipt;
       try {
-        receipt = await host.send(entry);
+        receipt = await sendWithReadRetry(host, entry);
       } catch (error) {
         const reason = failureReason(error);
         const afterFailure = await host.health().catch(() => null);
         if (!afterFailure || afterFailure.status === "dead" || afterFailure.status === "unhosted") {
           await this.port.transition(effect.operationId, "queued", { reason });
+          return true;
+        }
+        if (isThreadReadTimeout(error)) {
+          await this.port.transition(effect.operationId, "queued", { reason: "delivery-auto-retry" });
+          this.retrySoon();
           return true;
         }
         await this.port.transition(effect.operationId, "failed", { reason });

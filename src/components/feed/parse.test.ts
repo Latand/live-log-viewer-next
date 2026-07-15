@@ -90,6 +90,7 @@ const codexAssistantResponse = (timestamp: string, text: string) =>
 const codexAssistantEvent = (timestamp: string, message: string) =>
   JSON.stringify({ type: "event_msg", timestamp, payload: { type: "agent_message", phase: "commentary", message } });
 const codexUserPair = (timestamp: string, text: string) => [codexUserResponse(timestamp, [{ type: "input_text", text }]), codexUserEvent(timestamp, text)];
+const CODEX_STRUCTURED_USER_MARKER = "<!-- llv:structured-user -->\n";
 const codexReasoning = (timestamp: string) => JSON.stringify({ type: "response_item", timestamp, payload: { type: "reasoning" } });
 
 function fixtureLines(name: string): string[] {
@@ -406,6 +407,20 @@ describe("feed session identity stability", () => {
 });
 
 describe("Codex user-turn coalescing", () => {
+  test("keeps a standalone structured user response in a user bubble", () => {
+    const lines = [
+      codexUserResponse("t1", [{ type: "input_text", text: "queued through the structured host" }]),
+      JSON.stringify({ type: "event_msg", timestamp: "t2", payload: { type: "task_started" } }),
+    ];
+    const feed = buildFeed(codexFile, lines, false, "");
+
+    expect(itemsOfKind(feed, "user")).toEqual([
+      { kind: "user", ts: "t1", text: "queued through the structured host" },
+    ]);
+    expect(itemsOfKind(feed, "sysmsg")).toHaveLength(0);
+    assertParity(codexFile, lines, { chunks: [1] });
+  });
+
   test("folds only an adjacent response/event echo and preserves two identical sends", () => {
     const lines = [...codexUserPair("t1", "same"), ...codexUserPair("t2", "same")];
     expect(itemsOfKind(buildFeed(codexFile, lines.slice(0, 2), false, ""), "user")).toEqual([{ kind: "user", ts: "t1", text: "same" }]);
@@ -479,7 +494,36 @@ describe("Codex user-turn coalescing", () => {
     assertParity(codexFile, lines, { chunks: [1, 2, 1], cap: 5 });
   });
 
-  test("uses record shape to collapse actual harness rows", () => {
+  test("keeps standalone structured reserved-prefix input in one user bubble across later events", () => {
+    for (const [index, text] of [
+      "# AGENTS.md instructions from the user",
+      "<permissions instructions> from the user",
+    ].entries()) {
+      const responseTs = `2026-07-14T10:00:0${index}.000Z`;
+      const startedTs = `2026-07-14T10:00:0${index}.100Z`;
+      const echoTs = `2026-07-14T10:00:0${index}.200Z`;
+      const wireText = CODEX_STRUCTURED_USER_MARKER + text;
+      const response = codexUserResponse(responseTs, [{ type: "input_text", text: wireText }]);
+      const started = JSON.stringify({ type: "event_msg", timestamp: startedTs, payload: { type: "task_started" } });
+      const echo = codexUserEvent(echoTs, wireText);
+      const lines = [response, started, echo];
+      const session = createFeedSession({ engine: "codex", fmt: "codex", showSvc: false, lineFilter: "" });
+
+      expect(session.feed([response], 0, true).items.map((entry) => entry.item)).toEqual([
+        { kind: "user", ts: responseTs, text },
+      ]);
+      expect(session.feed([response, started], 0, true).items.map((entry) => entry.item).filter((item) => item.kind === "user")).toEqual([
+        { kind: "user", ts: responseTs, text },
+      ]);
+      const complete = session.feed(lines, 0, true).items.map((entry) => entry.item);
+      expect(complete.filter((item) => item.kind === "user")).toEqual([{ kind: "user", ts: echoTs, text }]);
+      expect(complete.filter((item) => item.kind === "sysmsg")).toHaveLength(0);
+      assertParity(codexFile, lines, { chunks: [1], cap: 3, live: true });
+      assertParity(codexFile, lines, { chunks: [1], cap: 2, live: true });
+    }
+  });
+
+  test("collapses recognized standalone harness envelopes", () => {
     const lines = [
       codexUserResponse("t1", [{ type: "input_text", text: "<permissions instructions> injected" }]),
       JSON.stringify({ type: "event_msg", timestamp: "t2", payload: { type: "task_started" } }),
@@ -1194,6 +1238,20 @@ describe("Codex orchestration over a real rollout fixture (issue #83)", () => {
 });
 
 describe("Claude protocol and repeated prose", () => {
+  test("keeps a structured-host user record in the user role", () => {
+    const lines = [JSON.stringify({
+      type: "user",
+      message: { role: "user", content: [{ type: "text", text: "queued through the structured host" }] },
+    })];
+    const feed = buildFeed(claudeFile, lines, false, "");
+
+    expect(itemsOfKind(feed, "user")).toEqual([
+      { kind: "user", ts: undefined, text: "queued through the structured host" },
+    ]);
+    expect(itemsOfKind(feed, "sysmsg")).toHaveLength(0);
+    assertParity(claudeFile, lines, { chunks: [1] });
+  });
+
   test("keeps a queued human message in the user role beside harness records", () => {
     const lines = fixtureLines("claude-queued-mid-turn.jsonl");
     const feed = buildFeed(claudeFile, lines, false, "");

@@ -8,6 +8,7 @@ import {
 } from "@/lib/review";
 import { getLocale, translate } from "@/lib/i18n";
 import { inboxImageExt, MAX_INBOX_IMAGE_BYTES } from "@/lib/imagePolicy";
+import { decodeCodexStructuredUserText } from "@/lib/runtime/codexStructuredUserText";
 import type { FileEntry } from "@/lib/types";
 import { parseScheduleWakeup, refineWakeupFromResult, type WakeupInfo } from "@/lib/wakeup";
 
@@ -241,6 +242,10 @@ function sysMsgLabel(text: string, fallback?: string): string {
   return fallback || tr("render.system");
 }
 
+function isCodexHarnessUserText(text: string): boolean {
+  return /^\s*(?:# AGENTS\.md instructions\b|<(?:environment_context|permissions instructions|multi_agent_mode|turn_aborted)\b)/.test(text);
+}
+
 function tmsgAttr(attrs: string, name: string): string {
   return attrs.match(new RegExp(`${name}="([^"]*)"`))?.[1] ?? "";
 }
@@ -293,6 +298,7 @@ function inboxImagesFromPath(path: string): Extract<Item, { kind: "inbox-image" 
 interface CodexUserContent {
   text: string;
   attachments: Item[];
+  structured: boolean;
 }
 
 /* Codex has added content-part variants over time. Keep the text path broad,
@@ -327,7 +333,7 @@ function normalizeCodexUserContent(content: unknown): CodexUserContent {
       attachments.push({ kind: "note", text: codexAttachmentLabel(type) });
     }
   }
-  return { text: text.join(" ").trim(), attachments };
+  return { ...decodeCodexStructuredUserText(text.join(" ").trim()), attachments };
 }
 
 /** Responses custom tools return either plain text or typed text blocks. */
@@ -820,6 +826,7 @@ interface PendingCodexUser {
   ts: unknown;
   text: string;
   entrySeqs: number[];
+  structured: boolean;
 }
 
 type CodexAssistantShape = "event-agent" | "response-assistant";
@@ -1331,9 +1338,9 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
     }
     for (const image of images) push({ kind: "inbox-image", name: image.name, path: image.path });
   };
-  /* Harness classification is driven by the source record, never a textual
-     prefix. A human can legitimately begin a composer message with XML or a
-     phrase that looks like a harness reminder. */
+  /* Codex stores human input and harness context in user-role response rows.
+     Known envelope markers identify harness rows. Echoed composer messages
+     keep their user classification even when their text starts similarly. */
   const addSysMsg = (text: string, fallbackLabel?: string) => {
     push({ kind: "sysmsg", label: sysMsgLabel(text, fallbackLabel), text });
   };
@@ -1344,7 +1351,7 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
     if (cleaned) emit({ kind: "user", ts, text: cleaned });
     for (const image of images) emit({ kind: "inbox-image", name: image.name, path: image.path });
     for (const attachment of content.attachments) emit(attachment);
-    return { src: curSrc, ts, text: content.text, entrySeqs };
+    return { src: curSrc, ts, text: content.text, entrySeqs, structured: content.structured };
   };
   const updateCodexPendingSource = (pending: PendingCodexUser, src: number) => {
     for (const seq of pending.entrySeqs) {
@@ -1356,11 +1363,13 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
   };
   const finalizePendingCodexUsers = () => {
     const pendingUsers = pendingCodexUsers;
-    pendingCodexUsers = [];
+    pendingCodexUsers = pendingUsers.filter((pending) => pending.structured);
     for (const pending of pendingUsers) {
-      /* A user-role response without the immediately following event is a
-         harness/service injection in the observed Codex schema. Its content may
-         use any prefix, so record shape provides the classification. */
+      /* App-server structured input may persist without a user_message echo.
+         Its transcript marker preserves the declared user role while later
+         records arrive. Recognized harness envelopes move to the system lane. */
+      if (pending.structured) continue;
+      if (!isCodexHarnessUserText(pending.text)) continue;
       let converted = false;
       for (const seq of pending.entrySeqs) {
         const idx = entryIndex(seq);
@@ -1387,14 +1396,15 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
     pendingCodexUsers.push(pending);
   };
   const addCodexEventUser = (ts: unknown, text: string) => {
-    const pendingIndex = pendingCodexUsers.findIndex((pending) => sameCodexTextAtTime(pending.ts, pending.text, ts, text));
+    const decoded = decodeCodexStructuredUserText(text);
+    const pendingIndex = pendingCodexUsers.findIndex((pending) => sameCodexTextAtTime(pending.ts, pending.text, ts, decoded.text));
     if (pendingIndex < 0) {
-      emitCodexUserContent(ts, { text, attachments: [] });
+      emitCodexUserContent(ts, { ...decoded, attachments: [] });
       return;
     }
     const [pending] = pendingCodexUsers.splice(pendingIndex, 1);
     if (!pending) return;
-    const { cleaned, images } = extractInboxImages(text);
+    const { cleaned, images } = extractInboxImages(decoded.text);
     if (cleaned) {
       const userSeq = pending.entrySeqs.find((seq) => {
         const idx = entryIndex(seq);

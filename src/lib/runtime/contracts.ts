@@ -188,7 +188,7 @@ export interface RuntimeSendCommand extends RuntimeCommandBase {
   kind: "send" | "steer";
   text: string;
   images?: string[];
-  policy?: "queue" | "steer-if-active";
+  policy?: "queue" | "steer-if-active" | "interrupt-active";
   turnId?: string | null;
 }
 

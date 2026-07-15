@@ -370,6 +370,145 @@ test("a failed route kick retries queued controls and messages without a host-st
   }
 });
 
+test("a kill cancels an automatic delivery retry without falsifying either receipt", async () => {
+  const directory = path.join(sandbox, "controller-kill-cancels-auto-retry");
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const sessionId = "e40306b9-a4df-47b3-bf6e-4570c44259c7";
+  const artifactPath = path.join(directory, `${sessionId}.jsonl`);
+  const profile = emptyLaunchProfile({ cwd: directory });
+  registry.reconcileConversations([{
+    engine: "codex",
+    path: artifactPath,
+    accountId: "kill-auto-retry-account",
+    launchProfile: profile,
+    turn: { state: "busy", source: "assistant", terminalAt: null },
+    observedAt: "2026-07-14T12:00:00.000Z",
+  }]);
+  const conversationId = Object.keys(registry.snapshot().conversations)[0]!;
+  const key = { engine: "codex" as const, sessionId };
+  registry.upsert({
+    key,
+    artifactPath,
+    cwd: directory,
+    accountId: "kill-auto-retry-account",
+    launchProfile: profile,
+    status: "live",
+    host: null,
+    structuredHost: {
+      kind: "codex-app-server",
+      endpoint: "fake:kill-auto-retry-host",
+      process: null,
+      eventCursor: 0,
+      protocolVersion: "fake-v1",
+      writerClaimEpoch: 0,
+      activeTurnRef: "turn:kill-auto-retry",
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  const journal = new RuntimeJournal(path.join(directory, "events.sqlite"), { structuredHosts: true });
+  const baseClient = runtimeJournalClient(journal);
+  let effectBatchCalls = 0;
+  const client = {
+    ...baseClient,
+    effectBatch: async (...args: Parameters<RuntimeHostClient["effectBatch"]>) => {
+      effectBatchCalls += 1;
+      return await baseClient.effectBatch(...args);
+    },
+  } satisfies RuntimeHostClient;
+  let released = false;
+  let releaseCount = 0;
+  let sendCount = 0;
+  const host = {
+    async *attach(): AsyncIterableIterator<RuntimeEvent> {},
+    send: async () => {
+      sendCount += 1;
+      throw new Error("Codex app-server request timed out: thread/read");
+    },
+    answer: async () => {},
+    interrupt: async () => {},
+    health: async () => ({
+      status: released ? "unhosted" as const : "active" as const,
+      sessionKey: sessionId,
+      endpoint: "fake:kill-auto-retry-host",
+      pid: 1,
+      processStartIdentity: "fake:1",
+      eventCursor: 0,
+      protocolVersion: "fake-v1",
+      activeTurnRef: released ? null : "turn:kill-auto-retry",
+      pendingAttention: [],
+      activeFlags: [],
+      account: null,
+    }),
+    release: async () => {
+      releaseCount += 1;
+      released = true;
+    },
+    onStateChange: () => () => {},
+  } satisfies EngineHost & { onStateChange(listener: (state: HostState) => void): () => void };
+
+  try {
+    await bindStructuredDeliveryQueue([{ key, host }], { registry, client });
+    const sendOperationId = "operation-send-before-kill";
+    journal.executeOperation({
+      kind: "send",
+      operationId: sendOperationId,
+      idempotencyKey: sendOperationId,
+      conversationId,
+      text: "keep this queued while the host is busy",
+      policy: "steer-if-active",
+    });
+
+    await kickStructuredDeliveryQueue();
+
+    expect(sendCount).toBe(2);
+    expect(journal.operationResult(sendOperationId)?.receipt).toMatchObject({
+      kind: "send",
+      status: "queued",
+      reason: "delivery-auto-retry",
+    });
+
+    const killOperationId = "operation-kill-during-auto-retry";
+    journal.executeOperation({
+      kind: "kill",
+      operationId: killOperationId,
+      idempotencyKey: killOperationId,
+      conversationId,
+      sessionKey: key,
+    });
+
+    await kickStructuredDeliveryQueue();
+    const effectBatchCallsAfterKill = effectBatchCalls;
+    await Bun.sleep(1_100);
+
+    expect(releaseCount).toBe(1);
+    expect(sendCount).toBe(2);
+    expect(effectBatchCalls).toBe(effectBatchCallsAfterKill);
+    expect(journal.operationResult(killOperationId)?.receipt).toMatchObject({
+      kind: "kill",
+      status: "delivered",
+      reason: null,
+    });
+    expect(journal.operationResult(sendOperationId)?.receipt).toMatchObject({
+      kind: "send",
+      status: "queued",
+      reason: "delivery-auto-retry",
+    });
+    expect(journal.effectBatch(100, ["runtime.kill"], 0)).toEqual([]);
+    expect(journal.effectBatch(100, ["runtime.send"], 0)).toHaveLength(1);
+    expect(journal.snapshot().sessions.find((session) => session.conversationId === conversationId)).toMatchObject({
+      sessionKey: key,
+      host: "dead",
+    });
+  } finally {
+    await bindStructuredDeliveryQueue([], { registry, client: null });
+    journal.close();
+  }
+});
+
 test("a failed kill projection retries through the coalesced drain and terminalizes", async () => {
   const directory = path.join(sandbox, "controller-kill-projection-retry");
   const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));

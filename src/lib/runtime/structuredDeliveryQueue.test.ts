@@ -177,6 +177,77 @@ test("structured delivery surfaces a host actuation failure", async () => {
   ]);
 });
 
+test("a Codex thread/read timeout retries within the bounded drain", async () => {
+  const transitions: Array<[string, string, string | null | undefined]> = [];
+  let attempts = 0;
+  const slowHost = host(async () => {
+    attempts += 1;
+    if (attempts === 1) throw new Error("thread/read timed out");
+    return { outcome: "steered", turnId: "turn-slow-read" };
+  });
+  slowHost.health = async () => ({ ...idleState(), status: "active", activeTurnRef: "turn-slow-read" });
+  const queue = new StructuredDeliveryQueue({
+    effects: async () => [{
+      id: "effect:op-slow-read",
+      kind: "runtime.send",
+      eventSeq: 21,
+      payload: {
+        operationId: "op-slow-read",
+        conversationId: "conversation-slow-read",
+        text: "please keep going",
+        policy: "steer-if-active",
+      },
+    }],
+    transition: async (operationId, status, details) => {
+      transitions.push([operationId, status, details?.reason]);
+    },
+  }, () => slowHost);
+
+  await queue.drain();
+
+  expect(attempts).toBe(2);
+  expect(transitions).toEqual([
+    ["op-slow-read", "delivering", undefined],
+    ["op-slow-read", "delivered", undefined],
+  ]);
+});
+
+test("an exhausted thread/read budget stays queued for automatic delivery", async () => {
+  const transitions: Array<[string, string, string | null | undefined]> = [];
+  let attempts = 0;
+  let retries = 0;
+  const slowHost = host(async () => {
+    attempts += 1;
+    throw new Error("Codex app-server request timed out: thread/read");
+  });
+  slowHost.health = async () => ({ ...idleState(), status: "active", activeTurnRef: "turn-slow-read" });
+  const queue = new StructuredDeliveryQueue({
+    effects: async () => [{
+      id: "effect:op-slow-read-retry",
+      kind: "runtime.send",
+      eventSeq: 22,
+      payload: {
+        operationId: "op-slow-read-retry",
+        conversationId: "conversation-slow-read",
+        text: "keep this safe",
+        policy: "steer-if-active",
+      },
+    }],
+    transition: async (operationId, status, details) => {
+      transitions.push([operationId, status, details?.reason]);
+    },
+  }, () => slowHost, undefined, () => { retries += 1; });
+
+  await queue.drain();
+
+  expect(attempts).toBe(2);
+  expect(retries).toBe(1);
+  expect(transitions).toEqual([
+    ["op-slow-read-retry", "delivering", undefined],
+    ["op-slow-read-retry", "queued", "delivery-auto-retry"],
+  ]);
+});
+
 test("a host crash leaves the conversation head queued for recovery", async () => {
   const sent: string[] = [];
   const transitions: Array<[string, string, string | null | undefined]> = [];
@@ -384,6 +455,144 @@ test("an idle queue admission keeps its null turn fence when a turn starts befor
     ["op-idle-race", "delivering", null, undefined],
     ["op-idle-race", "queued", undefined, "stale-turn"],
   ]);
+});
+
+test("interrupt-active stops the current turn before starting the user message", async () => {
+  const actions: string[] = [];
+  const transitions: Array<[string, string, string | null | undefined]> = [];
+  let active = true;
+  const replacingHost = host(async (entry) => {
+    actions.push(`send:${String(entry.expectedTurnId)}`);
+    return { outcome: "turn-started", turnId: "turn-new" };
+  });
+  replacingHost.health = async () => ({
+    ...idleState(),
+    status: active ? "active" : "idle",
+    activeTurnRef: active ? "turn-current" : null,
+  });
+  replacingHost.interrupt = async (turnId) => {
+    actions.push(`interrupt:${turnId}`);
+    active = false;
+  };
+  const queue = new StructuredDeliveryQueue({
+    effects: async () => [{
+      id: "effect:op-replace",
+      kind: "runtime.send",
+      eventSeq: 31,
+      payload: {
+        operationId: "op-replace",
+        conversationId: "conversation-one",
+        text: "new direction",
+        policy: "interrupt-active",
+      },
+    }],
+    transition: async (operationId, status, details) => {
+      transitions.push([operationId, status, details?.turnId]);
+    },
+  }, () => replacingHost);
+
+  await queue.drain();
+
+  expect(actions).toEqual(["interrupt:turn-current", "send:null"]);
+  expect(transitions).toEqual([
+    ["op-replace", "delivering", "turn-current"],
+    ["op-replace", "delivered", "turn-new"],
+  ]);
+});
+
+test("interrupt-active waits for the interrupted turn to become idle before sending", async () => {
+  const actions: string[] = [];
+  const transitions: Array<[string, string, string | null | undefined]> = [];
+  const effect = {
+    id: "effect:op-wait-for-interrupt",
+    kind: "runtime.send",
+    eventSeq: 32,
+    payload: {
+      operationId: "op-wait-for-interrupt",
+      conversationId: "conversation-one",
+      text: "start after interruption",
+      policy: "interrupt-active",
+    } as Record<string, unknown>,
+  };
+  let active = true;
+  let pending = true;
+  const replacingHost = host(async (entry) => {
+    actions.push(`send:${String(entry.expectedTurnId)}`);
+    pending = false;
+    return { outcome: "turn-started", turnId: "turn-new" };
+  });
+  replacingHost.health = async () => ({
+    ...idleState(),
+    status: active ? "active" : "idle",
+    activeTurnRef: active ? "turn-current" : null,
+  });
+  replacingHost.interrupt = async (turnId) => {
+    actions.push(`interrupt:${turnId}`);
+  };
+  const queue = new StructuredDeliveryQueue({
+    effects: async () => pending ? [effect] : [],
+    transition: async (operationId, status, details) => {
+      transitions.push([operationId, status, details?.turnId]);
+      if (status === "delivering" && effect.payload.turnId === undefined) {
+        effect.payload.turnId = details?.turnId;
+      }
+    },
+  }, () => replacingHost);
+
+  await queue.drain();
+  expect(actions).toEqual(["interrupt:turn-current"]);
+
+  active = false;
+  await queue.drain();
+
+  expect(actions).toEqual(["interrupt:turn-current", "send:null"]);
+  expect(transitions).toEqual([
+    ["op-wait-for-interrupt", "delivering", "turn-current"],
+    ["op-wait-for-interrupt", "queued", undefined],
+    ["op-wait-for-interrupt", "delivering", "turn-current"],
+    ["op-wait-for-interrupt", "delivered", "turn-new"],
+  ]);
+});
+
+test("interrupt-active preserves a newer turn during ambiguous delivery recovery", async () => {
+  const actions: string[] = [];
+  let activeTurn: string | null = "turn-newer";
+  let pending = true;
+  const recoveringHost = host(async (entry) => {
+    actions.push(`send:${String(entry.expectedTurnId)}`);
+    pending = false;
+    return { outcome: "turn-started", turnId: "turn-recovered" };
+  });
+  recoveringHost.health = async () => ({
+    ...idleState(),
+    status: activeTurn ? "active" : "idle",
+    activeTurnRef: activeTurn,
+  });
+  recoveringHost.interrupt = async (turnId) => {
+    actions.push(`interrupt:${turnId}`);
+  };
+  const queue = new StructuredDeliveryQueue({
+    effects: async () => pending ? [{
+      id: "effect:op-recover-replacement",
+      kind: "runtime.send",
+      eventSeq: 33,
+      payload: {
+        operationId: "op-recover-replacement",
+        conversationId: "conversation-one",
+        text: "recover safely",
+        policy: "interrupt-active",
+        turnId: "turn-original",
+      },
+    }] : [],
+    transition: async () => {},
+  }, () => recoveringHost);
+
+  await queue.drain();
+  expect(actions).toEqual([]);
+
+  activeTurn = null;
+  await queue.drain();
+  expect(actions).toEqual(["send:null"]);
 });
 
 test("a stale steer never retries as a fresh turn after the host becomes idle", async () => {

@@ -224,7 +224,11 @@ describe("CodexAppServerHost", () => {
     expect(await host.send({ id: "stale", text: "wrong", expectedTurnId: "turn-old" })).toEqual({ outcome: "rejected", reason: "stale-turn" });
     expect(await host.send({ id: "delivery-two", text: "steer", expectedTurnId: "turn-1" })).toEqual({ outcome: "steered", turnId: "turn-1" });
     const steer = server.requests.find((request) => request.method === "turn/steer")!;
-    expect(steer.params).toMatchObject({ expectedTurnId: "turn-1", clientUserMessageId: "delivery-two" });
+    expect(steer.params).toMatchObject({
+      expectedTurnId: "turn-1",
+      clientUserMessageId: "delivery-two",
+      input: [{ type: "text", text: "<!-- llv:structured-user -->\nsteer" }],
+    });
 
     server.request("approval-1", "item/commandExecution/requestApproval", { command: "touch allowed" });
     await Bun.sleep(0);
@@ -832,6 +836,63 @@ describe("CodexAppServerHost", () => {
     const terminal = await host.health();
     server.notify("turn/started", { threadId: "timeout-thread", turn: { id: "late-timeout-turn" } });
     expect(await host.health()).toMatchObject({ status: "dead", eventCursor: terminal.eventCursor, activeTurnRef: null });
+    await host.release();
+  });
+
+  test("an active turn gives thread/read enough time to answer", async () => {
+    const ignoredMethods: string[] = [];
+    const server = new FakeAppServer("slow-read-thread", "slow-read-thread", false, [], undefined, null, ignoredMethods);
+    const host = await CodexAppServerHost.start({
+      cwd: "/repo",
+      requestTimeoutMs: 20,
+      eventStore: new MemoryEventStore(),
+      spawnProcess: fakeSpawn(server),
+    });
+    expect(await host.send({ id: "first", text: "begin" })).toEqual({ outcome: "turn-started", turnId: "turn-1" });
+    ignoredMethods.push("thread/read");
+
+    const pending = host.send({ id: "slow-read-follow-up", text: "continue", expectedTurnId: "turn-1" })
+      .then((value) => ({ value }), (error: Error) => ({ error }));
+    await Bun.sleep(35);
+    const read = server.requests.findLast((request) => request.method === "thread/read")!;
+    server.stdout.write(`${JSON.stringify({
+      jsonrpc: "2.0",
+      id: read.id,
+      result: { thread: { id: "slow-read-thread", path: "/sessions/slow-read-thread.jsonl", turns: [] } },
+    })}\n`);
+    const result = await pending;
+
+    if ("error" in result) throw result.error;
+    expect(result.value).toEqual({ outcome: "steered", turnId: "turn-1" });
+    await host.release();
+  });
+
+  test("a late timed-out thread/read response stays harmless after retry delivery", async () => {
+    const ignoredMethods = ["thread/read"];
+    const server = new FakeAppServer("late-read-thread", "late-read-thread", false, [], undefined, null, ignoredMethods);
+    const host = await CodexAppServerHost.start({
+      cwd: "/repo",
+      requestTimeoutMs: 5,
+      eventStore: new MemoryEventStore(),
+      spawnProcess: fakeSpawn(server),
+    });
+    const entry = { id: "late-read-retry", text: "continue" };
+
+    await expect(host.send(entry)).rejects.toThrow("thread/read timed out");
+    const firstRead = server.requests.findLast((request) => request.method === "thread/read")!;
+    ignoredMethods.splice(0);
+
+    expect(await host.send(entry)).toEqual({ outcome: "turn-started", turnId: "turn-1" });
+    server.stdout.write(`${JSON.stringify({
+      jsonrpc: "2.0",
+      id: firstRead.id,
+      result: { thread: { id: "late-read-thread", path: "/sessions/late-read-thread.jsonl", turns: [] } },
+    })}\n`);
+    await Bun.sleep(0);
+
+    expect(await host.health()).toMatchObject({ status: "active", activeTurnRef: "turn-1" });
+    expect(server.signals).not.toContain("SIGTERM");
+    expect(server.requests.filter((request) => request.method === "turn/start" || request.method === "turn/steer")).toHaveLength(1);
     await host.release();
   });
 

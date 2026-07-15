@@ -22,7 +22,7 @@ import type { RuntimeReceipt } from "@/components/runtime/runtimeModel";
 import { ComposerBar } from "./ComposerBar";
 import { ImagePickerButton } from "./imageAttachments";
 import { ReceiptChip } from "./runtime/ReceiptChip";
-import { mintIdempotencyKey } from "./runtime/runtimeModel";
+import { mintIdempotencyKey, receiptIsTerminal } from "./runtime/runtimeModel";
 
 /**
  * A delivery receipt shown above the composer. `state` tracks whether the
@@ -50,6 +50,7 @@ interface SentEntry {
 const SENT_LIMIT = 8;
 const SPAWN_TTL_MS = 90_000;
 const PANE_TTL_MS = 10 * 60_000;
+const RECOVERABLE_BUSY_RETRY_REASONS = new Set(["delivery-auto-retry", "interrupt-auto-retry"]);
 const sentKey = (id: string) => "llvSent:" + id;
 
 export function deliveryAttemptKey(current: string, stored?: string): string {
@@ -79,16 +80,50 @@ export function RuntimeComposerReceipts({
   onRetry: (receipt: RuntimeReceipt) => void;
   onEdit: (receipt: RuntimeReceipt) => void;
 }) {
+  const { t } = useLocale();
   return receipts.map((receipt) => {
     const messageOperation = receipt.kind === "send" || receipt.kind === "steer";
     const failed = receipt.status === "failed";
+    const rejected = receipt.status === "rejected";
     // Operation receipts cap text at 240 characters. Durable retry reads the
     // complete journaled request; editing is safe only for an uncapped summary.
     const editable = messageOperation
-      && (failed || receipt.status === "rejected")
+      && (failed || rejected)
       && typeof receipt.text === "string"
       && receipt.text.length > 0
       && receipt.text.length < 240;
+    if (messageOperation && receipt.status === "delivered") return null;
+    if (messageOperation && receipt.text) {
+      const pending = !receiptIsTerminal(receipt.status);
+      const busyRetry = pending
+        && typeof receipt.reason === "string"
+        && RECOVERABLE_BUSY_RETRY_REASONS.has(receipt.reason);
+      const pendingLabel = t(busyRetry ? "runtime.receipt.busyRetry" : "runtime.receipt.pending");
+      return (
+        <div
+          key={receipt.operationId}
+          className="flex w-full justify-end"
+          {...(pending ? { "data-optimistic-message": "true" } : {})}
+        >
+          <div className="flex max-w-[85%] flex-col items-end gap-1 rounded-surface bg-accent/10 px-2.5 py-1.5 text-ui text-primary">
+            <span className="whitespace-pre-wrap break-words text-right">{receipt.text}</span>
+            {pending ? (
+              <span className="inline-flex items-center gap-1.5 text-caption text-muted" role="status" aria-live="polite">
+                <span className={busyRetry ? undefined : "sr-only"}>{pendingLabel}</span>
+                <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-muted motion-reduce:animate-none" aria-hidden />
+              </span>
+            ) : (
+              <ReceiptChip
+                receipt={receipt}
+                actionsDisabled={actionsDisabled}
+                onRetry={failed ? () => onRetry(receipt) : undefined}
+                onEdit={editable ? () => onEdit(receipt) : undefined}
+              />
+            )}
+          </div>
+        </div>
+      );
+    }
     return (
       <ReceiptChip
         key={receipt.operationId}
@@ -326,7 +361,7 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
               conversationId: structuredSession.session.conversationId,
               text: payloadText.trim(),
               idempotencyKey: clientMessageId,
-              policy: "steer-if-active",
+              policy: "interrupt-active",
             }).then((result) => ({
               ok: result.ok,
               structured: true,
@@ -372,7 +407,6 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
         idempotencyKey.current = mintIdempotencyKey();
         setText("");
         attachments.clear();
-        setStatus({ kind: "info", text: t("composer.deliveryQueued") });
         inputRef.current?.focus();
         return;
       }
@@ -429,7 +463,6 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
         body.receipt!,
         ...current.filter((candidate) => candidate.operationId !== body.receipt!.operationId),
       ].slice(0, 8));
-      setStatus({ kind: "info", text: t("composer.deliveryQueued") });
     } catch {
       setStatus({ kind: "err", text: t("common.serverUnavailable") });
     } finally {

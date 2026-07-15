@@ -15,7 +15,7 @@ export interface StructuredMessageRequest {
   clientMessageId?: string | null;
   operationId?: string;
   kind?: "send" | "steer";
-  policy?: "queue" | "steer-if-active";
+  policy?: "queue" | "steer-if-active" | "interrupt-active";
   turnId?: string | null;
   text: string;
   hasImages: boolean;
@@ -112,7 +112,7 @@ export async function deliverHeldStructuredMessage(
       conversationId: request.conversationId,
       idempotencyKey: request.clientMessageId,
       text: request.text,
-      policy: "queue",
+      policy: "interrupt-active",
     });
     try {
       await (dependencies.kick ?? kickStructuredDeliveryQueue)();
@@ -190,7 +190,7 @@ export async function enqueueStructuredMessage(
       conversationId: conversation.id,
       idempotencyKey,
       text: request.text,
-      policy: request.policy ?? "queue",
+      policy: request.policy ?? "interrupt-active",
       ...(request.turnId !== undefined ? { turnId: request.turnId } : {}),
     });
     const receipt = result.receipt;

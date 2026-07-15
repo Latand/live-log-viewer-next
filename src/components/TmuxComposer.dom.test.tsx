@@ -3,6 +3,7 @@ import { Window } from "happy-dom";
 import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
 
+import { setLocale, translate } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
 
 import { appendComposerDraft, RuntimeComposerReceipts, TmuxComposer } from "./TmuxComposer";
@@ -33,10 +34,63 @@ Object.assign(globalThis, {
 const realFetch = globalThis.fetch;
 
 afterEach(() => {
+  setLocale("en");
   globalThis.fetch = realFetch;
   document.body.replaceChildren();
   localStorage.clear();
   sessionStorage.clear();
+});
+
+function renderInterruptAutoRetry(locale: "en" | "uk") {
+  setLocale(locale);
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+
+  flushSync(() => root.render(
+    <RuntimeComposerReceipts
+      receipts={[{
+        operationId: `op-interrupt-auto-retry-${locale}`,
+        idempotencyKey: `key-interrupt-auto-retry-${locale}`,
+        conversationId: "conv-one",
+        kind: "send",
+        status: "queued",
+        reason: "interrupt-auto-retry",
+        text: "keep going",
+        at: "2026-07-13T00:00:00.000Z",
+        revision: 3,
+      }]}
+      onRetry={() => {}}
+      onEdit={() => {}}
+    />,
+  ));
+  return { host, root };
+}
+
+function expectTransportDetailsHidden(host: HTMLElement) {
+  for (const transportText of ["thread/read", "interrupt-auto-retry", "delivery-auto-retry"]) {
+    expect(host.textContent).not.toContain(transportText);
+  }
+}
+
+test("interrupt automatic retry shows visible busy feedback in English", () => {
+  const { host, root } = renderInterruptAutoRetry("en");
+
+  const status = host.querySelector('[role="status"]');
+  expect(status?.textContent).toContain(translate("en", "runtime.receipt.busyRetry"));
+  expect(status?.querySelector(".sr-only")).toBeNull();
+  expectTransportDetailsHidden(host);
+  flushSync(() => root.unmount());
+});
+
+test("interrupt automatic retry shows visible busy feedback in Ukrainian", () => {
+  const { host, root } = renderInterruptAutoRetry("uk");
+
+  const status = host.querySelector('[role="status"]');
+  expect(status?.textContent).toContain(translate("uk", "runtime.receipt.busyRetry"));
+  expect(status?.querySelector(".sr-only")).toBeNull();
+  expectTransportDetailsHidden(host);
+  flushSync(() => root.unmount());
 });
 
 test("editing a rejected receipt does not submit the composer form", () => {
@@ -166,6 +220,8 @@ test("editing and resending a rejected receipt uses a fresh delivery key", async
 
   expect(sentKeys).toHaveLength(2);
   expect(sentKeys[1]).not.toBe(sentKeys[0]);
+  expect(host.textContent).not.toContain("Queued for durable delivery");
+  expect(host.querySelector('[data-optimistic-message="true"]')?.textContent).toContain("try this again");
   flushSync(() => root.unmount());
 });
 
