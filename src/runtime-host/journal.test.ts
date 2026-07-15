@@ -5,9 +5,11 @@ import path from "node:path";
 import { expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 
+import { mergeRuntimeReceipts } from "@/components/TmuxComposer";
+import { applyEvent, installSnapshot } from "@/components/runtime/runtimeModel";
 import type { Flow } from "@/lib/flows/types";
 import { UnixRuntimeHostClient } from "@/lib/runtime/client";
-import { runtimeScope } from "@/lib/runtime/contracts";
+import { runtimePresentationReceipt, runtimeScope } from "@/lib/runtime/contracts";
 
 import { RuntimeHost, RuntimeHostFence } from "./host";
 import { RuntimeJournal, RuntimeJournalFault } from "./journal";
@@ -403,6 +405,64 @@ test("terminal delivery retry on a replacement host mints one fresh operation", 
   reopened.close();
 });
 
+test("terminal retry admits no replacement when recovered host ownership is lost", () => {
+  const dir = sandbox("terminal-retry-host-loss");
+  const journal = new RuntimeJournal(path.join(dir, "runtime.sqlite"), { structuredHosts: true });
+  const projectHost = (host: "hosted" | "dead") => journal.append({
+    scope: runtimeScope("session", "conv-retry-host-loss"),
+    kind: "session-status",
+    payload: {
+      conversationId: "conv-retry-host-loss",
+      sessionKey: { engine: "codex", sessionId: `thread-${host}` },
+      hostKind: "codex-app-server",
+      host,
+      turn: host === "hosted" ? "idle" : "unknown",
+      provenance: "structured",
+      capabilities: { steer: true, structuredAttention: true },
+    },
+  });
+  projectHost("hosted");
+  const original = journal.executeOperation({
+    kind: "send",
+    operationId: "op-retry-host-loss-original",
+    idempotencyKey: "key-retry-host-loss-original",
+    conversationId: "conv-retry-host-loss",
+    text: "deliver after stable recovery",
+    policy: "queue",
+  });
+  journal.transitionOperation(original.operationId, "delivering");
+  journal.transitionOperation(original.operationId, "failed", { reason: "dead-host" });
+  projectHost("dead");
+
+  expect(() => journal.retryOperation(
+    original.operationId,
+    "key-retry-host-loss-replacement",
+    { requireHostedConversationId: "conv-retry-host-loss" },
+  )).toThrow("structured recovery ownership changed before retry admission");
+  expect(journal.snapshot().recentOperations).toEqual([
+    expect.objectContaining({ operationId: original.operationId, status: "failed" }),
+  ]);
+  expect(journal.effectBatch()).toEqual([]);
+
+  projectHost("hosted");
+  const replacement = journal.retryOperation(
+    original.operationId,
+    "key-retry-host-loss-replacement",
+    { requireHostedConversationId: "conv-retry-host-loss" },
+  );
+  expect(replacement.receipt).toMatchObject({
+    status: "queued",
+    retryOfOperationId: original.operationId,
+  });
+  expect(journal.effectBatch()).toEqual([
+    expect.objectContaining({
+      id: `effect:${replacement.operationId}`,
+      payload: expect.objectContaining({ text: "deliver after stable recovery" }),
+    }),
+  ]);
+  journal.close();
+});
+
 test("a rejected dead-host retry replays after its replacement starts delivery", () => {
   const dir = sandbox("rejected-retry-in-flight-replay");
   const journal = new RuntimeJournal(path.join(dir, "events.sqlite"), { structuredHosts: true });
@@ -570,11 +630,87 @@ test("retry chains expose only the current leaf while retaining every durable at
   journal.transitionOperation(leaf.operationId, "delivered");
 
   expect(journal.snapshot().sessions[0]?.recentReceipts).toEqual([
-    expect.objectContaining({ operationId: leaf.operationId, status: "delivered" }),
+    expect.objectContaining({ operationId: original.operationId, status: "delivered" }),
   ]);
   expect(journal.operationResult(original.operationId)?.receipt.status).toBe("failed");
   expect(journal.operationResult(replacement.operationId)?.receipt.status).toBe("failed");
   expect(journal.replay(0).events.filter((event) => event.kind === "receipt").length).toBeGreaterThanOrEqual(6);
+  journal.close();
+});
+
+test("production reducers expose one current retry leaf across immediate, SSE, and snapshot projections", () => {
+  const dir = sandbox("retry-projection-contract");
+  const journal = new RuntimeJournal(path.join(dir, "events.sqlite"), { structuredHosts: true });
+  journal.append({
+    scope: runtimeScope("session", "conv-retry-projection"),
+    kind: "session-status",
+    payload: {
+      conversationId: "conv-retry-projection",
+      sessionKey: { engine: "codex", sessionId: "thread-retry-projection" },
+      hostKind: "codex-app-server",
+      host: "hosted",
+      turn: "idle",
+      provenance: "structured",
+      capabilities: { steer: true, structuredAttention: true },
+    },
+  });
+  const original = journal.executeOperation({
+    kind: "send",
+    operationId: "op-retry-projection-original",
+    idempotencyKey: "key-retry-projection-original",
+    conversationId: "conv-retry-projection",
+    text: "show one retry leaf",
+    policy: "queue",
+  });
+  journal.transitionOperation(original.operationId, "delivering");
+  journal.transitionOperation(original.operationId, "failed", { reason: "dead-host" });
+  const beforeRetry = journal.snapshot();
+  const replacement = journal.retryOperation(original.operationId, "key-retry-projection-replacement");
+
+  const immediate = mergeRuntimeReceipts(
+    beforeRetry.sessions[0]?.recentReceipts ?? [],
+    [runtimePresentationReceipt(replacement.receipt)],
+  );
+  expect(immediate).toEqual([
+    expect.objectContaining({ status: "queued", retryOfOperationId: original.operationId }),
+  ]);
+
+  let streamed = installSnapshot(beforeRetry);
+  for (const event of journal.replay(beforeRetry.snapshotSeq).events) {
+    const applied = applyEvent(streamed, event);
+    expect(applied.outcome).toBe("applied");
+    if (applied.outcome === "applied") streamed = applied.store;
+  }
+  expect(streamed.sessions["conv-retry-projection"]?.recentReceipts).toEqual([
+    expect.objectContaining({ status: "queued", retryOfOperationId: original.operationId }),
+  ]);
+
+  journal.transitionOperation(replacement.operationId, "delivering");
+  journal.transitionOperation(replacement.operationId, "failed", { reason: "dead-host" });
+  const beforeRequeue = journal.snapshot();
+  journal.retryOperation(replacement.operationId);
+  let requeued = installSnapshot(beforeRequeue);
+  for (const event of journal.replay(beforeRequeue.snapshotSeq).events) {
+    const applied = applyEvent(requeued, event);
+    expect(applied.outcome).toBe("applied");
+    if (applied.outcome === "applied") requeued = applied.store;
+  }
+  expect(requeued.sessions["conv-retry-projection"]?.recentReceipts).toEqual([
+    expect.objectContaining({ status: "queued", retryOfOperationId: original.operationId }),
+  ]);
+  journal.transitionOperation(replacement.operationId, "delivering");
+  journal.transitionOperation(replacement.operationId, "failed", { reason: "dead-host" });
+  const leaf = journal.retryOperation(replacement.operationId, "key-retry-projection-leaf");
+  expect(journal.currentRetryResult(original.operationId)?.operationId).toBe(leaf.operationId);
+  journal.transitionOperation(leaf.operationId, "delivering");
+  journal.transitionOperation(leaf.operationId, "delivered");
+  const reloaded = installSnapshot(journal.snapshot());
+  expect(reloaded.sessions["conv-retry-projection"]?.recentReceipts).toEqual([
+    expect.objectContaining({ status: "delivered", retryOfOperationId: replacement.operationId }),
+  ]);
+  expect(reloaded.sessions["conv-retry-projection"]?.recentReceipts.filter((receipt) => receipt.status === "failed")).toEqual([]);
+  expect(journal.operationResult(original.operationId)?.receipt.status).toBe("failed");
+  expect(journal.operationResult(replacement.operationId)?.receipt.status).toBe("failed");
   journal.close();
 });
 

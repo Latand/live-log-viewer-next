@@ -110,13 +110,20 @@ export async function recoverPendingStructuredSpawns(
   const snapshot = registry.snapshot();
   for (const receipt of Object.values(snapshot.receipts)) {
     const effect = spawnEffects.get(receipt.launchId);
-    if (receipt.state === "starting" && !receipt.key && effect) {
+    if (receipt.state === "starting" && !receipt.key && receipt.transport !== "tmux") {
       const operation = await client.operationStatus(receipt.launchId);
+      if (receipt.transport !== "structured" && !effect && !operation) continue;
+      let reason: string;
       if (operation?.receipt.status === "queued" || operation?.receipt.status === "pending" || operation?.receipt.status === "delivering") {
-        const reason = `structured spawn interrupted before identity staging: ${receipt.launchId}`;
+        reason = `structured spawn interrupted before identity staging: ${receipt.launchId}`;
         await client.transitionOperation(receipt.launchId, "failed", { reason });
-        registry.failStructuredSpawn(receipt.launchId, reason);
+      } else if (!operation) {
+        reason = `structured spawn interrupted before runtime admission: ${receipt.launchId}`;
+      } else {
+        reason = operation.receipt.reason
+          ?? `structured spawn operation ended as ${operation.receipt.status} before identity staging`;
       }
+      registry.failStructuredSpawn(receipt.launchId, reason);
       continue;
     }
     if (receipt.state !== "path-pending" || !receipt.key || !receipt.artifactPath) continue;

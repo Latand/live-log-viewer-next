@@ -357,6 +357,160 @@ test("runtime retry with an empty body recovers ownership and starts a fresh dur
   expect(retried[0]?.[1]).not.toBe("send-original");
 });
 
+test("runtime retry waits for confirmed recovery before creating a replacement", async () => {
+  const retried: Array<[string, string | undefined]> = [];
+  let recoveryCalls = 0;
+  let kicks = 0;
+  const client = {
+    operationStatus: async (operationId: string) => ({
+      operationId,
+      replayed: false,
+      receipt: {
+        operationId,
+        idempotencyKey: "send-recovery-gate-original",
+        conversationId: "conversation_recovery_gate",
+        kind: "send" as const,
+        status: "failed" as const,
+        reason: "dead-host",
+        at: "2026-07-15T00:00:00.000Z",
+        revision: 3,
+      },
+    }),
+    retryOperation: async (operationId: string, nextIdempotencyKey?: string) => {
+      retried.push([operationId, nextIdempotencyKey]);
+      return {
+        operationId: "op-recovery-gate-replacement",
+        replayed: false,
+        receipt: {
+          operationId: "op-recovery-gate-replacement",
+          idempotencyKey: nextIdempotencyKey!,
+          conversationId: "conversation_recovery_gate",
+          kind: "send" as const,
+          status: "queued" as const,
+          at: "2026-07-15T00:00:01.000Z",
+          revision: 1,
+        },
+      };
+    },
+  } as unknown as RuntimeHostClient;
+  const dependencies = {
+    enabled: () => true,
+    client: () => client,
+    kick: () => { kicks += 1; },
+    recover: async () => {
+      recoveryCalls += 1;
+      return recoveryCalls === 1 ? null : {
+        target: null,
+        path: "/recovery-gate.jsonl",
+        conversationId: "conversation_recovery_gate" as const,
+        spawned: true,
+      };
+    },
+  };
+  const retry = () => handleRuntimeRetry(new NextRequest(
+    "http://127.0.0.1/api/runtime/operations/op-recovery-gate-original",
+    { method: "POST", headers: { host: "127.0.0.1" } },
+  ), "op-recovery-gate-original", dependencies);
+
+  const unavailable = await retry();
+  expect(unavailable.status).toBe(503);
+  expect(await unavailable.json()).toEqual({ error: "structured recovery ownership is unavailable", retryable: true });
+  expect(retried).toEqual([]);
+  expect(kicks).toBe(0);
+
+  const healthy = await retry();
+  expect(healthy.status).toBe(202);
+  expect(await healthy.json()).toMatchObject({
+    operationId: "op-recovery-gate-replacement",
+    receipt: { status: "queued" },
+  });
+  expect(retried).toHaveLength(1);
+  expect(kicks).toBe(1);
+});
+
+test("runtime retry returns a retryable response when host ownership is lost during admission", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-http-retry-host-loss-"));
+  const journal = new RuntimeJournal(path.join(directory, "runtime.sqlite"), { structuredHosts: true });
+  const projectHost = (host: "hosted" | "dead") => journal.append({
+    scope: { type: "session", id: "conversation_retry_host_loss" },
+    kind: "session-status",
+    payload: {
+      conversationId: "conversation_retry_host_loss",
+      sessionKey: { engine: "codex", sessionId: `session-${host}` },
+      hostKind: "codex-app-server",
+      host,
+      turn: host === "hosted" ? "idle" : "unknown",
+      provenance: "structured",
+      capabilities: { steer: true, structuredAttention: true },
+    },
+  });
+  projectHost("hosted");
+  const original = journal.executeOperation({
+    kind: "send",
+    operationId: "op-http-retry-host-loss-original",
+    idempotencyKey: "key-http-retry-host-loss-original",
+    conversationId: "conversation_retry_host_loss",
+    text: "deliver after ownership is stable",
+    policy: "queue",
+  });
+  journal.transitionOperation(original.operationId, "delivering");
+  journal.transitionOperation(original.operationId, "failed", { reason: "dead-host" });
+  let retryCalls = 0;
+  let kicks = 0;
+  const client = {
+    operationStatus: async (operationId: string, options?: { currentRetryLeaf?: boolean }) => options?.currentRetryLeaf
+      ? journal.currentRetryResult(operationId)
+      : journal.operationResult(operationId),
+    retryOperation: async (...args: Parameters<RuntimeHostClient["retryOperation"]>) => {
+      retryCalls += 1;
+      if (retryCalls === 1) projectHost("dead");
+      return journal.retryOperation(...args);
+    },
+  } as RuntimeHostClient;
+  const dependencies = {
+    enabled: () => true,
+    client: () => client,
+    recover: async () => {
+      projectHost("hosted");
+      return {
+        target: null,
+        path: "/retry-host-loss.jsonl",
+        conversationId: "conversation_retry_host_loss" as const,
+        spawned: retryCalls > 0,
+      };
+    },
+    kick: () => { kicks += 1; },
+  };
+  const retry = () => handleRuntimeRetry(new NextRequest(
+    `http://127.0.0.1/api/runtime/operations/${original.operationId}`,
+    {
+      method: "POST",
+      headers: { host: "127.0.0.1", "content-type": "application/json" },
+      body: JSON.stringify({ idempotencyKey: "key-http-retry-host-loss-replacement" }),
+    },
+  ), original.operationId, dependencies);
+
+  const raced = await retry();
+  expect(raced.status).toBe(503);
+  expect(await raced.json()).toEqual({
+    error: "structured recovery ownership changed before retry admission",
+    retryable: true,
+  });
+  expect(journal.snapshot().recentOperations).toHaveLength(1);
+  expect(journal.effectBatch()).toEqual([]);
+  expect(kicks).toBe(0);
+
+  const healthy = await retry();
+  expect(healthy.status).toBe(202);
+  expect(await healthy.json()).toMatchObject({ receipt: { status: "queued" } });
+  expect(journal.snapshot().recentOperations).toHaveLength(1);
+  expect(journal.operationResult(original.operationId)?.receipt.status).toBe("failed");
+  expect(journal.effectBatch()).toHaveLength(1);
+  expect(kicks).toBe(1);
+  journal.close();
+  fs.rmSync(directory, { recursive: true, force: true });
+});
+
 test("runtime retry accepts an explicit fresh idempotency key", async () => {
   const retried: Array<[string, string | undefined]> = [];
   const recoveries: unknown[] = [];
@@ -483,7 +637,9 @@ test("runtime retry network replay returns the same replacement operation", asyn
   journal.transitionOperation("op-retry-replay-original", "delivering");
   journal.transitionOperation("op-retry-replay-original", "failed", { reason: "dead-host" });
   const client = {
-    operationStatus: async (operationId: string) => journal.operationResult(operationId),
+    operationStatus: async (operationId: string, options?: { currentRetryLeaf?: boolean }) => options?.currentRetryLeaf
+      ? journal.currentRetryResult(operationId)
+      : journal.operationResult(operationId),
     retryOperation: async (operationId: string, nextIdempotencyKey?: string) =>
       journal.retryOperation(operationId, nextIdempotencyKey),
   } as unknown as RuntimeHostClient;
@@ -505,12 +661,13 @@ test("runtime retry network replay returns the same replacement operation", asyn
 
   const first = await retry();
   const replayed = await retry();
-  const firstBody = await first.json() as { operationId: string; receipt: { idempotencyKey: string } };
-  const replayedBody = await replayed.json() as { operationId: string; receipt: { idempotencyKey: string } };
+  const firstBody = await first.json() as { operationId: string; receipt: { operationId: string; idempotencyKey: string } };
+  const replayedBody = await replayed.json() as { operationId: string; receipt: { operationId: string; idempotencyKey: string } };
 
   expect(first.status).toBe(202);
   expect(replayed.status).toBe(202);
   expect(replayedBody).toEqual(firstBody);
+  expect(firstBody.receipt.operationId).toBe("op-retry-replay-original");
   expect(journal.effectBatch()).toEqual([
     expect.objectContaining({
       id: `effect:${firstBody.operationId}`,

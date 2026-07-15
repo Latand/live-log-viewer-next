@@ -39,7 +39,7 @@ interface RecoveryCandidate {
   accountId: string | null;
   parentConversationId: ViewerConversationId | null;
   spec: ResumeSpec;
-  available: boolean;
+  publishReady: boolean;
 }
 
 const recoveryStore = globalThis as typeof globalThis & {
@@ -65,8 +65,12 @@ function candidateFor(
       && receipt.state === "completed"
       && registry.canonicalConversationId(receipt.conversationId) === conversation.id);
   if (!entry.structuredHost && !structuredReceipt) return null;
-  const owned = Boolean(entry.host || entry.structuredHost?.process || entry.claimOwner);
   const terminal = entry.status === "dead" || entry.status === "unhosted";
+  const publishReady = Boolean(entry.host
+    || (entry.structuredHost?.process
+      && entry.claimOwner
+      && entry.pendingAction === null
+      && !terminal));
   const profile = emptyLaunchProfile({
     ...generation.launchProfile,
     ...(entry.launchProfile ?? {}),
@@ -92,7 +96,7 @@ function candidateFor(
       transcript: generation.path,
       launchProfile: profile,
     },
-    available: owned || !terminal,
+    publishReady,
   };
 }
 
@@ -109,7 +113,7 @@ async function recoverCandidate(
   return registry.withOperationLock(candidate.key, owner, async () => {
     const current = candidateFor(registry, request);
     if (!current) return null;
-    if (current.available) {
+    if (current.publishReady) {
       return {
         target: null,
         path: current.path,
@@ -159,7 +163,10 @@ export async function recoverDeadStructuredConversation(
   const registry = dependencies.registry ?? agentRegistry();
   const candidate = candidateFor(registry, request);
   if (!candidate) return null;
-  if (candidate.available) {
+  const recoveryKey = `${registry.filename}:${candidate.conversationId}`;
+  const pending = recoveries.get(recoveryKey);
+  if (pending) return pending;
+  if (candidate.publishReady) {
     return {
       target: null,
       path: candidate.path,
@@ -167,9 +174,6 @@ export async function recoverDeadStructuredConversation(
       spawned: false,
     };
   }
-  const recoveryKey = `${registry.filename}:${candidate.conversationId}`;
-  const pending = recoveries.get(recoveryKey);
-  if (pending) return pending;
   const recovery = recoverCandidate(request, dependencies, registry, candidate);
   recoveries.set(recoveryKey, recovery);
   try {

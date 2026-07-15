@@ -7,7 +7,7 @@ import { rejectCrossOrigin } from "@/lib/sameOrigin";
 
 import { RuntimeHostUnavailableError, runtimeHostClient, type RuntimeHostClient } from "./client";
 import { parseRuntimeCommand } from "./commands";
-import type { RuntimeOperationKind } from "./contracts";
+import { runtimePresentationReceipt, type RuntimeOperationKind } from "./contracts";
 import { runtimeEventsEnabled } from "./flags";
 import { recoverDeadStructuredConversation } from "./structuredRecovery";
 import { enqueueStructuredMessage } from "./structuredMessageDelivery";
@@ -151,28 +151,52 @@ export async function handleRuntimeRetry(
         nextIdempotencyKey = value.idempotencyKey;
       }
     }
-    const previous = await client.operationStatus(operationId);
+    const previous = await client.operationStatus(operationId, { currentRetryLeaf: true });
     if (!previous) return NextResponse.json({ error: "operation not found" }, { status: 404 });
     if (previous.receipt.kind !== "send" && previous.receipt.kind !== "steer") {
       return NextResponse.json({ error: "runtime operation does not support retry" }, { status: 409 });
     }
     if (previous.receipt.status !== "failed" && previous.receipt.status !== "rejected") {
+      if (previous.operationId !== operationId) {
+        const status = previous.receipt.status === "pending"
+          || previous.receipt.status === "queued"
+          || previous.receipt.status === "delivering"
+          ? 202
+          : 200;
+        if (status === 202) dependencies.kick();
+        return NextResponse.json({
+          operationId: previous.operationId,
+          receipt: runtimePresentationReceipt(previous.receipt),
+        }, { status });
+      }
       return NextResponse.json({ error: "only terminal failed runtime operations can start a new attempt" }, { status: 409 });
     }
-    nextIdempotencyKey ??= terminalRetryIdempotencyKey(operationId);
-    await (dependencies.recover ?? recoverDeadStructuredConversation)(
+    nextIdempotencyKey ??= terminalRetryIdempotencyKey(previous.operationId);
+    const recovered = await (dependencies.recover ?? recoverDeadStructuredConversation)(
       { path: "", conversationId: previous.receipt.conversationId },
       { client },
     );
-    const result = await client.retryOperation(operationId, nextIdempotencyKey);
+    if (!recovered || recovered.conversationId !== previous.receipt.conversationId) {
+      return NextResponse.json({
+        error: "structured recovery ownership is unavailable",
+        retryable: true,
+      }, { status: 503 });
+    }
+    const result = await client.retryOperation(previous.operationId, nextIdempotencyKey, {
+      requireHostedConversationId: previous.receipt.conversationId,
+    });
     dependencies.kick();
-    return NextResponse.json({ operationId: result.operationId, receipt: result.receipt }, { status: 202 });
+    return NextResponse.json({
+      operationId: result.operationId,
+      receipt: runtimePresentationReceipt(result.receipt),
+    }, { status: 202 });
   } catch (error) {
     const message = error instanceof Error ? error.message : "runtime operation retry failed";
     let status = 503;
     if (error instanceof RuntimeHostUnavailableError && error.code === "idempotency-conflict") status = 409;
     else if (/unknown/.test(message)) status = 404;
     else if (/only failed|terminal failed|fresh idempotency|does not support/.test(message)) status = 409;
-    return NextResponse.json({ error: message }, { status });
+    const retryable = message === "structured recovery ownership changed before retry admission";
+    return NextResponse.json({ error: message, ...(retryable ? { retryable: true } : {}) }, { status });
   }
 }

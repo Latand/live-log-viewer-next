@@ -416,6 +416,141 @@ test("live structured ownership prevents a duplicate recovery host", async () =>
   expect(spawnCalls).toBe(0);
 });
 
+test.each(["codex", "claude"] as const)("concurrent %s sends wait for recovery publication before either admission", async (engine) => {
+  const sessionId = crypto.randomUUID();
+  const cwd = path.join(sandbox, `${engine}-publication-barrier-${sessionId}`);
+  const artifactPath = path.join(cwd, `${sessionId}.jsonl`);
+  fs.mkdirSync(cwd, { recursive: true });
+  fs.writeFileSync(artifactPath, "");
+  const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const conversation = registry.ensureConversation(engine, artifactPath, `${engine}-account`);
+  const profile = emptyLaunchProfile({ cwd });
+  const key = { engine, sessionId } as const;
+  registry.upsert({
+    key,
+    artifactPath,
+    cwd,
+    accountId: `${engine}-account`,
+    launchProfile: profile,
+    status: "dead",
+    host: null,
+    structuredHost: {
+      kind: engine === "codex" ? "codex-app-server" : "claude-broker",
+      endpoint: "stdio:released",
+      process: null,
+      eventCursor: 0,
+      protocolVersion: "v2",
+      writerClaimEpoch: 1,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 1,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  const account: AccountContext = {
+    engine,
+    accountId: `${engine}-account`,
+    kind: "managed",
+    home: path.join(cwd, "account"),
+    transcriptRoot: cwd,
+    env: { NODE_ENV: "test" },
+  };
+  let releasePublication!: () => void;
+  const publication = new Promise<void>((resolve) => { releasePublication = resolve; });
+  let claimed!: () => void;
+  const claimObserved = new Promise<void>((resolve) => { claimed = resolve; });
+  let spawnCalls = 0;
+  let admissions = 0;
+  let terminalRejections = 0;
+  const recoverAndAdmit = async () => {
+    const recovered = await recoverDeadStructuredConversation({ path: artifactPath, conversationId: conversation.id }, {
+      registry,
+      client: {} as RuntimeHostClient,
+      transport: () => "structured",
+      resolveAccount: () => account,
+      spawn: async (input) => {
+        spawnCalls += 1;
+        registry.upsert({
+          key,
+          artifactPath,
+          cwd,
+          accountId: `${engine}-account`,
+          launchProfile: profile,
+          status: "unhosted",
+          host: null,
+          structuredHost: {
+            kind: engine === "codex" ? "codex-app-server" : "claude-broker",
+            endpoint: "stdio:pending",
+            process: null,
+            eventCursor: 0,
+            protocolVersion: "v2",
+            writerClaimEpoch: 2,
+            activeTurnRef: null,
+            pendingAttention: [],
+            activeFlags: [],
+          },
+          claimEpoch: 2,
+          claimOwner: "structured-host:publication-barrier",
+          pendingAction: "spawn",
+        });
+        claimed();
+        await publication;
+        registry.upsert({
+          key,
+          artifactPath,
+          cwd,
+          accountId: `${engine}-account`,
+          launchProfile: profile,
+          status: "idle",
+          host: null,
+          structuredHost: {
+            kind: engine === "codex" ? "codex-app-server" : "claude-broker",
+            endpoint: "stdio:published",
+            process: { pid: process.pid, startIdentity: "publication-barrier" },
+            eventCursor: 0,
+            protocolVersion: "v2",
+            writerClaimEpoch: 2,
+            activeTurnRef: null,
+            pendingAttention: [],
+            activeFlags: [],
+          },
+          claimEpoch: 2,
+          claimOwner: "structured-host:publication-barrier",
+          pendingAction: null,
+        });
+        return {
+          ok: true,
+          target: null,
+          path: artifactPath,
+          launchId: input.receipt.launchId,
+          conversationId: conversation.id,
+          launched: true,
+          retrySafe: false,
+          state: "settled",
+        };
+      },
+    });
+    const entry = registry.snapshot().entries[`${engine}:${sessionId}`];
+    if (!recovered || !entry?.structuredHost?.process || !entry.claimOwner) terminalRejections += 1;
+    else admissions += 1;
+  };
+
+  const first = recoverAndAdmit();
+  await claimObserved;
+  const second = recoverAndAdmit();
+  await Promise.resolve();
+  expect(admissions).toBe(0);
+  expect(terminalRejections).toBe(0);
+  releasePublication();
+  await Promise.all([first, second]);
+
+  expect(spawnCalls).toBe(1);
+  expect(admissions).toBe(2);
+  expect(terminalRejections).toBe(0);
+});
+
 test("legacy tmux history remains on the legacy resume path after cutover", async () => {
   const sessionId = crypto.randomUUID();
   const cwd = path.join(sandbox, `legacy-${sessionId}`);
