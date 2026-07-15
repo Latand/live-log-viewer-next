@@ -262,7 +262,16 @@ export async function demoteSkippedStructuredRegistryHosts(
       await registry.withOperationLock(entry.key, owner, async () => {
         const current = registry.snapshot().entries[sessionKeyId(entry.key)];
         if (!current?.structuredHost || shouldAdopt(current)) return;
-        const claimed = registry.claimStructuredHost(entry.key, owner, { allowUnhosted: true });
+        let claimed = registry.claimStructuredHost(entry.key, owner, { allowUnhosted: true });
+        if (!claimed) {
+          const current = registry.snapshot().entries[sessionKeyId(entry.key)];
+          const orphan = current?.structuredHost?.kind === "claude-broker"
+            ? current.structuredHost.process
+            : null;
+          if (orphan && await terminateVerifiedClaudeOrphan(orphan, current?.claimOwner ?? null)) {
+            claimed = registry.claimStructuredHost(entry.key, owner, { allowUnhosted: true });
+          }
+        }
         if (!claimed?.structuredHost || !claimed.claimOwner) return;
         const demoted = registry.setStructuredHostClaimed(entry.key, {
           ...claimed.structuredHost,

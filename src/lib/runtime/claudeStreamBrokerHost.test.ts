@@ -18,7 +18,12 @@ import {
 } from "./claudeStreamBrokerHost";
 import type { RuntimeEventStore } from "./eventStore";
 import type { QueueEntry, RuntimeEvent } from "./engineHost";
-import { adoptClaudeRegistryHosts, bindClaudeHostPersistence, startClaudeStructuredHost } from "./registry";
+import {
+  adoptClaudeRegistryHosts,
+  bindClaudeHostPersistence,
+  demoteSkippedStructuredRegistryHosts,
+  startClaudeStructuredHost,
+} from "./registry";
 
 class MemoryEventStore implements RuntimeEventStore {
   private readonly events = new Map<string, RuntimeEvent[]>();
@@ -972,6 +977,70 @@ describe("ClaudeStreamBrokerHost", () => {
     expect(optionsCalls).toBe(1);
     expect(procBackend.processIdentity(orphan.pid)).not.toBe(startIdentity);
     await adopted[0]!.host.release();
+  }, 10_000);
+
+  test("startup demotion reaps a surviving skipped Claude child", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-claude-skipped-orphan-"));
+    const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+    const sessionId = "skipped-orphaned-claude-session";
+    const orphan = spawn(process.execPath, [
+      "-e",
+      "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)",
+    ], { stdio: "ignore" });
+    const orphanExit = new Promise<void>((resolve) => { orphan.once("exit", () => resolve()); });
+    let startIdentity: string | null = null;
+    for (let attempt = 0; attempt < 100 && !startIdentity; attempt += 1) {
+      startIdentity = orphan.pid ? procBackend.processIdentity(orphan.pid) : null;
+      if (!startIdentity) await Bun.sleep(2);
+    }
+    if (!orphan.pid || !startIdentity) {
+      try { orphan.kill("SIGKILL"); } catch { /* already exited */ }
+      await orphanExit;
+      throw new Error("orphan test process identity is unavailable");
+    }
+    registry.upsert({
+      key: { engine: "claude", sessionId },
+      artifactPath: `/sessions/${sessionId}.jsonl`,
+      cwd: "/repo",
+      accountId: null,
+      status: "live",
+      host: null,
+      structuredHost: {
+        kind: "claude-broker",
+        endpoint: `stdio:${orphan.pid}`,
+        process: { pid: orphan.pid, startIdentity },
+        eventCursor: 2,
+        protocolVersion: "2.1.197",
+        writerClaimEpoch: 1,
+        activeTurnRef: "stale-turn",
+        pendingAttention: ["stale-attention"],
+        activeFlags: ["working"],
+      },
+      claimEpoch: 1,
+      claimOwner: null,
+      pendingAction: null,
+    });
+
+    try {
+      await demoteSkippedStructuredRegistryHosts(registry, () => false);
+      expect(procBackend.processIdentity(orphan.pid)).not.toBe(startIdentity);
+      expect(registry.snapshot().entries[`claude:${sessionId}`]).toMatchObject({
+        status: "dead",
+        claimOwner: null,
+        structuredHost: {
+          endpoint: "stdio:released",
+          process: null,
+          activeTurnRef: null,
+          pendingAttention: [],
+          activeFlags: [],
+        },
+      });
+    } finally {
+      if (procBackend.processIdentity(orphan.pid) === startIdentity) {
+        try { orphan.kill("SIGKILL"); } catch { /* already exited */ }
+      }
+      await Promise.race([orphanExit, Bun.sleep(2_000)]);
+    }
   }, 10_000);
 
   test("protocol failure reaps a TERM-resistant child and releases its writer claim", async () => {
