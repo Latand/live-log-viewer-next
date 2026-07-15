@@ -45,6 +45,8 @@ let delivery: (message: unknown) => Promise<{ ok: true; outcome: "delivered-to-l
 let killOutcome: { ok: true; target: string } | { ok: false; outcome: "failed"; error: string; status: number } = { ok: true, target: "agents:4.0" };
 let structuredControlCalls = 0;
 let interruptCalls = 0;
+let structuredMessageCalls = 0;
+let structuredMessageResult: { ok: false; structured: true; outcome: "failed"; error: string; status: number } | null = null;
 let structuredControlResult:
   | { status: 202; body: { ok: true; structured: true; target: string; operationId: string; receipt: { operationId: string; status: string } } }
   | { status: 409; body: { error: string } }
@@ -83,6 +85,12 @@ mock.module("@/lib/runtime/structuredControls", () => ({
   dispatchStructuredControl: async () => {
     structuredControlCalls += 1;
     return structuredControlResult;
+  },
+}));
+mock.module("@/lib/runtime/structuredMessageDelivery", () => ({
+  enqueueStructuredMessage: async () => {
+    structuredMessageCalls += 1;
+    return structuredMessageResult;
   },
 }));
 mock.module("@/lib/delivery", () => ({
@@ -234,6 +242,41 @@ test("/api/tmux POST carries concurrent sends through the delivery seam", async 
     { pid: null, path: PATHNAME, text: "first", images: [] },
     { pid: null, path: PATHNAME, text: "second", images: [] },
   ]);
+});
+
+test("/api/tmux contains structured recovery failures without legacy tmux delivery", async () => {
+  const previous = process.env.LLV_STRUCTURED_HOSTS;
+  const legacyDeliveries: unknown[] = [];
+  structuredMessageCalls = 0;
+  structuredMessageResult = {
+    ok: false,
+    structured: true,
+    outcome: "failed",
+    error: "recovery spawn failed",
+    status: 503,
+  };
+  delivery = async (message: unknown) => {
+    legacyDeliveries.push(message);
+    return { ok: true, outcome: "delivered-to-live", target: "agents:4.0" };
+  };
+  try {
+    process.env.LLV_STRUCTURED_HOSTS = "1";
+    const response = await POST(post({ path: PATHNAME, text: "preserve draft for retry" }));
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({
+      ok: false,
+      structured: true,
+      outcome: "failed",
+      error: "recovery spawn failed",
+    });
+    expect(structuredMessageCalls).toBe(1);
+    expect(legacyDeliveries).toEqual([]);
+  } finally {
+    structuredMessageResult = null;
+    delivery = async () => ({ ok: true, outcome: "delivered-to-live", target: "agents:4.0" });
+    if (previous === undefined) delete process.env.LLV_STRUCTURED_HOSTS;
+    else process.env.LLV_STRUCTURED_HOSTS = previous;
+  }
 });
 
 test("/api/tmux bypasses persisted structured control state when hosting is disabled", async () => {

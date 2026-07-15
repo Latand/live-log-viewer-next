@@ -48,7 +48,7 @@ interface AttachError {
 
 interface SendResponse {
   ok: true;
-  target: string;
+  target: string | null;
   imagePaths?: string[];
   /** Set when the message booted a fresh agent window instead of an existing pane. */
   spawned?: boolean;

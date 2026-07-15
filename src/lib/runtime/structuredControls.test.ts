@@ -70,6 +70,28 @@ test("structured ownership resolves from conversation identity", async () => {
   expect(result).toEqual({ status: 409, body: { error: "structured host does not support the resume control" } });
 });
 
+test("dead structured resume falls through to canonical recovery", async () => {
+  const fixture = structuredConversation();
+  const conversation = fixture.registry.conversation(fixture.conversationId as `conversation_${string}`)!;
+  const generation = conversation.generations.at(-1)!;
+  const key = { engine: conversation.engine, sessionId: generation.id } as const;
+  const entry = fixture.registry.snapshot().entries[`${key.engine}:${key.sessionId}`]!;
+  fixture.registry.setStructuredHostClaimed(key, {
+    ...entry.structuredHost!,
+    endpoint: "stdio:released",
+    process: null,
+    activeTurnRef: null,
+  }, "dead", entry.claimOwner!, entry.claimEpoch, true);
+
+  const result = await dispatchStructuredControl({ path: fixture.path, conversationId: "", action: "resume" }, {
+    registry: fixture.registry,
+    client: null,
+    enabled: () => true,
+  });
+
+  expect(result).toBeNull();
+});
+
 test("structured interrupt uses the runtime command channel", async () => {
   const fixture = structuredConversation();
   const commands: unknown[] = [];

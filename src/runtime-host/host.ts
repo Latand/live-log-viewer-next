@@ -124,10 +124,29 @@ export class RuntimeHost {
         result = this.journal.executeOperation(request.params?.command as RuntimeOperationCommand);
         await this.recoverConsumersBestEffort();
       } else if (request.method === "operation-status") {
-        result = this.journal.operationResult(String(request.params?.operationId ?? ""));
+        const currentRetryLeaf = request.params?.currentRetryLeaf;
+        if (currentRetryLeaf !== undefined && typeof currentRetryLeaf !== "boolean") {
+          throw new Error("operation retry leaf option is invalid");
+        }
+        result = currentRetryLeaf
+          ? this.journal.currentRetryResult(String(request.params?.operationId ?? ""))
+          : this.journal.operationResult(String(request.params?.operationId ?? ""));
       } else if (request.method === "operation-retry") {
         if (!this.structuredHosts) throw new Error("structured hosts are disabled");
-        result = this.journal.retryOperation(String(request.params?.operationId ?? ""));
+        const nextIdempotencyKey = request.params?.nextIdempotencyKey;
+        if (nextIdempotencyKey !== undefined && typeof nextIdempotencyKey !== "string") {
+          throw new Error("retry idempotency key is invalid");
+        }
+        const requireHostedConversationId = request.params?.requireHostedConversationId;
+        if (requireHostedConversationId !== undefined
+          && (typeof requireHostedConversationId !== "string" || !requireHostedConversationId.trim())) {
+          throw new Error("retry hosted conversation is invalid");
+        }
+        result = this.journal.retryOperation(
+          String(request.params?.operationId ?? ""),
+          nextIdempotencyKey,
+          typeof requireHostedConversationId === "string" ? { requireHostedConversationId } : {},
+        );
       } else if (request.method === "effect-batch") {
         if (!this.structuredHosts) throw new Error("structured hosts are disabled");
         const kinds = request.params?.kinds;
