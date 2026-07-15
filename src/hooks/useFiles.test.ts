@@ -644,6 +644,42 @@ test("a queued completion retry stays canceled after final unsubscribe and resub
   unsubscribeReplacement();
 });
 
+test("disposing a cache aborts active completion and prevents timers and listeners from escaping", async () => {
+  let calls = 0;
+  let activeSignal: AbortSignal | undefined;
+  let markActive!: () => void;
+  const active = new Promise<void>((resolve) => { markActive = resolve; });
+  const updates: string[] = [];
+  const cache = createFilesClientCache(async (_input, init) => {
+    calls += 1;
+    if (calls === 1) {
+      return new Response(JSON.stringify({ files: [file("/stale", "Stale")] }), {
+        headers: {
+          "x-llv-files-generation": "0",
+          "x-llv-files-target-generation": "1",
+        },
+      });
+    }
+    activeSignal = init?.signal ?? undefined;
+    markActive();
+    return new Promise<Response>((_resolve, reject) => {
+      activeSignal?.addEventListener("abort", () => reject(activeSignal?.reason), { once: true });
+    });
+  });
+  cache.subscribe((data) => updates.push(data.files[0]?.path ?? ""));
+
+  await cache.revalidate();
+  await active;
+  cache.dispose();
+  const updatesAtDispose = [...updates];
+  await Bun.sleep(75);
+  cache.applyPipeline(pipelineRow("p1", "escaped") as never, false);
+
+  expect(activeSignal?.aborted).toBe(true);
+  expect(calls).toBe(2);
+  expect(updates).toEqual(updatesAtDispose);
+});
+
 test("an unconfirmed optimistic pipeline outlives every scan until reverted", async () => {
   const cache = createFilesClientCache(async () =>
     new Response(JSON.stringify({ files: [], pipelines: [pipelineRow("p1", "server")] })));

@@ -97,6 +97,56 @@ test("request refreshes persist the per-file scanner index", async () => {
   }
 });
 
+test("project catalog persistence repairs private modes and atomically replaces symlinks", async () => {
+  const base = await mkdtemp(path.join(os.tmpdir(), "llv-discover-private-index-"));
+  const previousStateDir = process.env.LLV_STATE_DIR;
+  const previousUmask = process.umask(0);
+  process.env.LLV_STATE_DIR = path.join(base, "state");
+  const originalRename = fs.renameSync;
+  try {
+    const roots: Record<RootKey, string> = {
+      "codex-sessions": path.join(base, "codex-sessions"),
+      "claude-projects": path.join(base, "claude-projects"),
+      "claude-tasks": path.join(base, "claude-tasks"),
+    };
+    await Promise.all(Object.values(roots).map((root) => mkdir(root, { recursive: true })));
+    const transcript = path.join(roots["codex-sessions"], "private.jsonl");
+    await writeFixture(transcript, JSON.stringify({ type: "session_meta", payload: { cwd: "/repo/private" } }) + "\n", 1_700_000_000);
+    fs.mkdirSync(process.env.LLV_STATE_DIR, { recursive: true, mode: 0o777 });
+    fs.chmodSync(process.env.LLV_STATE_DIR, 0o777);
+    const indexPath = path.join(process.env.LLV_STATE_DIR, "project-catalog.json");
+    fs.writeFileSync(indexPath, "legacy\n", { mode: 0o666 });
+    fs.chmodSync(indexPath, 0o666);
+    let temporaryMode: number | undefined;
+    fs.renameSync = ((source: fs.PathLike, target: fs.PathLike) => {
+      if (target === indexPath) temporaryMode = fs.statSync(source).mode & 0o777;
+      return originalRename(source, target);
+    }) as typeof fs.renameSync;
+
+    await discoverFilesWithProjectCatalog(roots, undefined, { persist: false, persistIndex: true });
+
+    expect(fs.statSync(process.env.LLV_STATE_DIR).mode & 0o777).toBe(0o700);
+    expect(temporaryMode).toBe(0o600);
+    expect(fs.statSync(indexPath).mode & 0o777).toBe(0o600);
+
+    const sentinelPath = path.join(base, "external-sentinel");
+    fs.writeFileSync(sentinelPath, "sentinel\n", { mode: 0o666 });
+    fs.rmSync(indexPath);
+    fs.symlinkSync(sentinelPath, indexPath);
+    await discoverFilesWithProjectCatalog(roots, undefined, { persist: false, persistIndex: true });
+
+    expect(fs.lstatSync(indexPath).isFile()).toBe(true);
+    expect(fs.statSync(indexPath).mode & 0o777).toBe(0o600);
+    expect(fs.readFileSync(sentinelPath, "utf8")).toBe("sentinel\n");
+  } finally {
+    fs.renameSync = originalRename;
+    process.umask(previousUmask);
+    if (previousStateDir === undefined) delete process.env.LLV_STATE_DIR;
+    else process.env.LLV_STATE_DIR = previousStateDir;
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
 test("a non-ENOENT directory failure leaves the completed catalog index authoritative until recovery", async () => {
   const base = await mkdtemp(path.join(os.tmpdir(), "llv-discover-incomplete-walk-"));
   const previousStateDir = process.env.LLV_STATE_DIR;
@@ -322,6 +372,8 @@ test("a one-shot transcript read failure stays incomplete and recovers in memory
     expect(Buffer.byteLength(alpha)).toBe(Buffer.byteLength(bravo));
     await writeFixture(transcript, alpha, 1_700_000_000);
     await discoverFilesWithProjectCatalog(roots, undefined, { persist: false, persistIndex: true });
+    const canonicalIndex = await readFile(indexPath, "utf8");
+    const canonicalCatalog = structuredClone(conversationCatalogSnapshot());
     await writeFixture(transcript, bravo, 1_700_000_001);
 
     const originalOpen = fs.openSync;
@@ -341,7 +393,9 @@ test("a one-shot transcript read failure stays incomplete and recovers in memory
     }
 
     const failedIndex = await readFile(indexPath, "utf8");
-    const persistedAfterFailure = JSON.parse(failedIndex);
+    expect(failedScan.complete).toBe(false);
+    expect(failedIndex).toBe(canonicalIndex);
+    expect(conversationCatalogSnapshot()).toEqual(canonicalCatalog);
     const recoveredInMemory = await discoverFilesWithProjectCatalog(roots, undefined, { persist: false, persistIndex: true });
     await writeFile(indexPath, failedIndex);
     const recoveredAfterRestart = await discoverEntryInFreshProcess(roots, transcript);
@@ -350,7 +404,6 @@ test("a one-shot transcript read failure stays incomplete and recovers in memory
       cwd: "/repo/alpha",
       project: projectForCwd("/repo/alpha"),
     });
-    expect(persistedAfterFailure.files[transcript].summaryVersion).toBeUndefined();
     expect(recoveredInMemory.files.find((entry) => entry.path === transcript)).toMatchObject({
       cwd: "/repo/bravo",
       project: projectForCwd("/repo/bravo"),
@@ -358,6 +411,62 @@ test("a one-shot transcript read failure stays incomplete and recovers in memory
     expect(recoveredAfterRestart).toMatchObject({
       cwd: "/repo/bravo",
       project: projectForCwd("/repo/bravo"),
+    });
+  } finally {
+    if (previousStateDir === undefined) delete process.env.LLV_STATE_DIR;
+    else process.env.LLV_STATE_DIR = previousStateDir;
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test("first-ever repeated transcript read failures publish and persist only after recovery", async () => {
+  const base = await mkdtemp(path.join(os.tmpdir(), "llv-discover-first-read-retry-"));
+  const previousStateDir = process.env.LLV_STATE_DIR;
+  process.env.LLV_STATE_DIR = path.join(base, "state");
+  try {
+    const roots: Record<RootKey, string> = {
+      "codex-sessions": path.join(base, "codex-sessions"),
+      "claude-projects": path.join(base, "claude-projects"),
+      "claude-tasks": path.join(base, "claude-tasks"),
+    };
+    await Promise.all(Object.values(roots).map((root) => mkdir(root, { recursive: true })));
+    const transcript = path.join(roots["codex-sessions"], "first.jsonl");
+    const indexPath = path.join(process.env.LLV_STATE_DIR, "project-catalog.json");
+    await writeFixture(transcript, JSON.stringify({ type: "session_meta", payload: { cwd: "/repo/first" } }) + "\n", 1_700_000_000);
+    const publishedBeforeFailure = structuredClone(conversationCatalogSnapshot());
+
+    const originalOpen = fs.openSync;
+    let failures = 4;
+    fs.openSync = ((filename: fs.PathLike, flags: fs.OpenMode, mode?: fs.Mode) => {
+      if (filename === transcript && failures > 0) {
+        failures -= 1;
+        const error = new Error("injected first transcript EIO") as NodeJS.ErrnoException;
+        error.code = "EIO";
+        throw error;
+      }
+      return originalOpen(filename, flags, mode);
+    }) as typeof fs.openSync;
+    let firstFailure;
+    let secondFailure;
+    try {
+      firstFailure = await discoverFilesWithProjectCatalog(roots, undefined, { persist: false, persistIndex: true });
+      secondFailure = await discoverFilesWithProjectCatalog(roots, undefined, { persist: false, persistIndex: true });
+    } finally {
+      fs.openSync = originalOpen;
+    }
+
+    expect(firstFailure.complete).toBe(false);
+    expect(secondFailure.complete).toBe(false);
+    expect(existsSync(indexPath)).toBe(false);
+    expect(conversationCatalogSnapshot()).toEqual(publishedBeforeFailure);
+
+    const recovered = await discoverFilesWithProjectCatalog(roots, undefined, { persist: false, persistIndex: true });
+    expect(recovered.complete).toBe(true);
+    expect(existsSync(indexPath)).toBe(true);
+    expect(conversationCatalogSnapshot().map((entry) => entry.path)).toContain(transcript);
+    expect(await discoverEntryInFreshProcess(roots, transcript)).toMatchObject({
+      cwd: "/repo/first",
+      project: projectForCwd("/repo/first"),
     });
   } finally {
     if (previousStateDir === undefined) delete process.env.LLV_STATE_DIR;
@@ -419,6 +528,7 @@ test("a one-shot sidecar read failure stays incomplete and recovers in memory an
     await writeFixture(transcript, "{}\n", 1_700_000_000);
     await writeFixture(sidecar, alpha, 1_700_000_000);
     await discoverFilesWithProjectCatalog(roots, undefined, { persist: false, persistIndex: true });
+    const canonicalIndex = await readFile(indexPath, "utf8");
     await writeFixture(sidecar, bravo, 1_700_000_001);
 
     const originalRead = fs.readFileSync;
@@ -438,13 +548,13 @@ test("a one-shot sidecar read failure stays incomplete and recovers in memory an
     }
 
     const failedIndex = await readFile(indexPath, "utf8");
-    const persistedAfterFailure = JSON.parse(failedIndex);
     const recoveredInMemory = await discoverFilesWithProjectCatalog(roots, undefined, { persist: false, persistIndex: true });
     await writeFile(indexPath, failedIndex);
     const recoveredAfterRestart = await discoverEntryInFreshProcess(roots, transcript);
 
     expect(failedScan.files.find((entry) => entry.path === transcript)?.title).toBe("Subagent x");
-    expect(persistedAfterFailure.files[transcript].summaryVersion).toBeUndefined();
+    expect(failedScan.complete).toBe(false);
+    expect(failedIndex).toBe(canonicalIndex);
     expect(recoveredInMemory.files.find((entry) => entry.path === transcript)?.title).toBe("Agent bravo");
     expect(recoveredAfterRestart?.title).toBe("Agent bravo");
   } finally {

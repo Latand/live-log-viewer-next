@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { flushSync } from "react-dom";
 
 import { FLOWS_CHANGED_EVENT } from "@/components/flows/flowModel";
 import { PIPELINES_CHANGED_EVENT, PIPELINES_PATCHED_EVENT } from "@/components/pipelines/pipelineEvents";
@@ -79,6 +80,8 @@ export interface FilesClientCache {
   /** Drop a local overlay (a failed optimistic mutation) — the server snapshot
       is authoritative again. */
   revertPipeline(id: string): void;
+  /** Cancel owned retries and detach subscribers. A disposed cache is inert. */
+  dispose(): void;
 }
 
 function equalValue(left: unknown, right: unknown): boolean {
@@ -141,6 +144,7 @@ function restoreNotModified(current: FilesData, representation: FilesData, reque
 /** Session-wide stale-while-revalidate cache over the global scan snapshot. */
 export function createFilesClientCache(fetcher: FilesFetcher): FilesClientCache {
   let snapshot = EMPTY;
+  let disposed = false;
   const representations = new Map<string, { data: FilesData; etag?: string }>();
   const listeners = new Map<(data: FilesData) => void, string>();
   const completionRetries = new Map<string, CompletionRetry>();
@@ -175,6 +179,7 @@ export function createFilesClientCache(fetcher: FilesFetcher): FilesClientCache 
   });
 
   const publish = (requestScope?: string) => {
+    if (disposed) return;
     for (const [listener, scope] of listeners) {
       if (requestScope !== undefined) {
         if (requestScope === scope) listener(snapshot);
@@ -241,6 +246,7 @@ export function createFilesClientCache(fetcher: FilesFetcher): FilesClientCache 
     completionRetryAttempt = 0,
     completionRetry?: CompletionRetry,
   ): Promise<FilesData> => {
+    if (disposed) return snapshot;
     const url = filesApiUrl(undefined, pinnedPath);
     if (completionRetry) {
       if (!ownsCompletionRetry(url, completionRetry)) return snapshot;
@@ -259,6 +265,7 @@ export function createFilesClientCache(fetcher: FilesFetcher): FilesClientCache 
     } finally {
       if (completionRetry) completionRetry.controller = undefined;
     }
+    if (disposed) return snapshot;
     if (completionRetry && !ownsCompletionRetry(url, completionRetry)) return snapshot;
     const servedGeneration = responseGeneration(response, "x-llv-files-generation");
     const targetGeneration = responseGeneration(response, "x-llv-files-target-generation");
@@ -331,6 +338,7 @@ export function createFilesClientCache(fetcher: FilesFetcher): FilesClientCache 
     completionRetryAttempt?: number,
     completionRetry?: CompletionRetry,
   ): Promise<FilesData> => {
+    if (disposed) return Promise.resolve(snapshot);
     const result = requestQueue.then(() => performRevalidate(
       pinnedPath,
       revision,
@@ -352,6 +360,7 @@ export function createFilesClientCache(fetcher: FilesFetcher): FilesClientCache 
     attempt: number,
     owner?: CompletionRetry,
   ) => {
+    if (disposed) return;
     if (!hasSubscriber(url)) {
       if (owner) cancelCompletionRetry(url);
       return;
@@ -420,6 +429,7 @@ export function createFilesClientCache(fetcher: FilesFetcher): FilesClientCache 
     enqueueRevalidate(pinnedPath, revision);
 
   const applyPipeline = (pipeline: Pipeline, confirmed: boolean) => {
+    if (disposed) return;
     /* A deleted/closed draft echo carries hiddenAt — locally it just disappears
        (the server's visibility filter drops it from the next scan too). */
     const hidden = Boolean(pipeline.hiddenAt) && !pipeline.restored;
@@ -434,12 +444,14 @@ export function createFilesClientCache(fetcher: FilesFetcher): FilesClientCache 
   };
 
   const revertPipeline = (id: string) => {
+    if (disposed) return;
     if (!pipelineOverlays.delete(id)) return;
     composePipelines();
     publish();
   };
 
   const subscribe = (listener: (data: FilesData) => void, pinnedPath?: string | null) => {
+    if (disposed) return () => {};
     const requestScope = filesApiUrl(undefined, pinnedPath);
     listeners.set(listener, requestScope);
     return () => {
@@ -449,13 +461,21 @@ export function createFilesClientCache(fetcher: FilesFetcher): FilesClientCache 
     };
   };
 
-  return { read: () => snapshot, revalidate, subscribe, applyPipeline, revertPipeline };
+  const dispose = () => {
+    if (disposed) return;
+    disposed = true;
+    for (const requestScope of [...completionRetries.keys()]) cancelCompletionRetry(requestScope);
+    listeners.clear();
+  };
+
+  return { read: () => snapshot, revalidate, subscribe, applyPipeline, revertPipeline, dispose };
 }
 
 const defaultFilesFetcher: FilesFetcher = (input, init) => fetch(input, init);
 let filesClientCache = createFilesClientCache(defaultFilesFetcher);
 
 export function resetFilesClientCacheForTests(): void {
+  filesClientCache.dispose();
   filesClientCache = createFilesClientCache(defaultFilesFetcher);
 }
 
@@ -468,13 +488,13 @@ export function resetFilesClientCacheForTests(): void {
  * {@link revertPipelineSnapshot}.
  */
 export function applyPipelineSnapshot(pipeline: Pipeline, confirmed: boolean): void {
-  filesClientCache.applyPipeline(pipeline, confirmed);
+  flushSync(() => filesClientCache.applyPipeline(pipeline, confirmed));
   if (typeof window !== "undefined") window.dispatchEvent(new Event(PIPELINES_PATCHED_EVENT));
 }
 
 /** Roll back a failed optimistic pipeline mutation to the server snapshot. */
 export function revertPipelineSnapshot(id: string): void {
-  filesClientCache.revertPipeline(id);
+  flushSync(() => filesClientCache.revertPipeline(id));
   if (typeof window !== "undefined") window.dispatchEvent(new Event(PIPELINES_PATCHED_EVENT));
 }
 
@@ -511,13 +531,14 @@ export function useFiles(_project?: string | null, pinnedPath?: string | null): 
   const [data, setData] = useState<FilesData>(() => filesClientCache.read());
   useEffect(() => {
     let alive = true;
-    const unsubscribeCache = filesClientCache.subscribe((next) => {
+    const cache = filesClientCache;
+    const unsubscribeCache = cache.subscribe((next) => {
       if (alive) setData(next);
     }, pinnedPath);
     const performLoad = async (revision?: number): Promise<boolean> => {
       if (!alive) return true;
       try {
-        const next = await filesClientCache.revalidate(pinnedPath, revision);
+        const next = await cache.revalidate(pinnedPath, revision);
         if (alive) setData(next);
         return true;
       } catch {

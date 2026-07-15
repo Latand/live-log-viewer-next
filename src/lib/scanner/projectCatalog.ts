@@ -155,11 +155,12 @@ function writeState(state: ProjectCatalogState): void {
   try {
     const filePath = catalogPath();
     target = filePath;
-    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    fs.mkdirSync(path.dirname(filePath), { recursive: true, mode: 0o700 });
+    fs.chmodSync(path.dirname(filePath), 0o700);
     temporary = path.join(path.dirname(filePath), `.${path.basename(filePath)}.${process.pid}.${crypto.randomUUID()}.tmp`);
     operation = "write temporary index";
     target = temporary;
-    fs.writeFileSync(temporary, JSON.stringify(state) + "\n", "utf8");
+    fs.writeFileSync(temporary, JSON.stringify(state) + "\n", { encoding: "utf8", mode: 0o600 });
     operation = "rename temporary index";
     target = filePath;
     fs.renameSync(temporary, filePath);
@@ -335,6 +336,7 @@ export async function projectCatalogSnapshotFromRaw(raw: RawEntry[], options: {
   projectByPath: Map<string, string>;
   conversationCatalog: ConversationCatalogEntry[];
   summaryByPath: Map<string, ParsedFileSummary>;
+  complete: boolean;
 }> {
   const persistIndex = options.persist !== false || options.persistIndex === true;
   const scanToken = options.scanToken ?? beginProjectCatalogScan(persistIndex);
@@ -349,6 +351,7 @@ export async function projectCatalogSnapshotFromRaw(raw: RawEntry[], options: {
     previousProjects.set(entry.path, state.files[entry.path]?.project);
   });
   const files = await mapCooperatively(raw, (entry) => cachedFile(entry, state, stateKey));
+  const complete = options.complete !== false && files.every((file) => file.summaryVersion === 2);
   const claudeSessionProjects = new Map<string, string>();
   await forEachCooperatively(raw, (entry, index) => {
     const file = files[index]!;
@@ -448,8 +451,8 @@ export async function projectCatalogSnapshotFromRaw(raw: RawEntry[], options: {
   const isCurrentPublication = projectCatalogRuntime.__llvProjectCatalogPublicationGeneration === scanToken.publication;
   const isCurrentPersistence = scanToken.persistence !== null
     && projectCatalogRuntime.__llvProjectCatalogPersistenceGeneration === scanToken.persistence;
-  if (isCurrentPublication && options.complete !== false) replaceConversationCatalog(conversationCatalog);
-  if (isCurrentPersistence && persistIndex && options.complete !== false) {
+  if (isCurrentPublication && complete) replaceConversationCatalog(conversationCatalog);
+  if (isCurrentPersistence && persistIndex && complete) {
     let boardHealed = true;
     if (options.persist !== false) {
       try {
@@ -471,6 +474,7 @@ export async function projectCatalogSnapshotFromRaw(raw: RawEntry[], options: {
     projectByPath,
     conversationCatalog,
     summaryByPath,
+    complete,
   };
 }
 

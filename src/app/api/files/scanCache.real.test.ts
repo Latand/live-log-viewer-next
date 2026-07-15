@@ -47,9 +47,53 @@ afterAll(() => {
   fs.rmSync(sandbox, { recursive: true, force: true });
 });
 
+test("real cached scans repair private state modes under umask 000", async () => {
+  const previousTestStateDir = process.env.LLV_STATE_DIR;
+  const privateStateDir = path.join(sandbox, "private-real-state");
+  const projectCatalogPath = path.join(privateStateDir, "project-catalog.json");
+  const scanSnapshotPath = path.join(privateStateDir, "files-scan-snapshot.json");
+  const originalRename = fs.renameSync;
+  const previousUmask = process.umask(0);
+  const projectTemporaryModes: number[] = [];
+  const snapshotTemporaryModes: number[] = [];
+  try {
+    process.env.LLV_STATE_DIR = privateStateDir;
+    fs.mkdirSync(privateStateDir, { recursive: true, mode: 0o777 });
+    fs.chmodSync(privateStateDir, 0o777);
+    fs.writeFileSync(projectCatalogPath, "permissive legacy index\n", { mode: 0o666 });
+    fs.writeFileSync(scanSnapshotPath, "permissive legacy snapshot\n", { mode: 0o666 });
+    fs.chmodSync(projectCatalogPath, 0o666);
+    fs.chmodSync(scanSnapshotPath, 0o666);
+    fs.renameSync = ((source: fs.PathLike, target: fs.PathLike) => {
+      if (target === projectCatalogPath) projectTemporaryModes.push(fs.statSync(source).mode & 0o777);
+      if (target === scanSnapshotPath) snapshotTemporaryModes.push(fs.statSync(source).mode & 0o777);
+      return originalRename(source, target);
+    }) as typeof fs.renameSync;
+    resetFilesRouteCacheForTests();
+    writeSession("private-real.jsonl", "/repo/private-real");
+
+    const scan = await cachedFileScan();
+
+    expect(scan.snapshot.complete).toBe(true);
+    expect(fs.statSync(privateStateDir).mode & 0o777).toBe(0o700);
+    expect(projectTemporaryModes).toEqual([0o600]);
+    expect(snapshotTemporaryModes).toEqual([0o600]);
+    expect(fs.statSync(projectCatalogPath).mode & 0o777).toBe(0o600);
+    expect(fs.statSync(scanSnapshotPath).mode & 0o777).toBe(0o600);
+  } finally {
+    fs.renameSync = originalRename;
+    process.umask(previousUmask);
+    process.env.LLV_STATE_DIR = previousTestStateDir;
+    resetFilesRouteCacheForTests();
+    fs.rmSync(privateStateDir, { recursive: true, force: true });
+  }
+});
+
 test("a transient real scanner failure preserves the completed route snapshot until recovery", async () => {
   resetFilesRouteCacheForTests();
   const canonicalPath = writeSession("canonical.jsonl", "/repo/canonical");
+  const initial = await cachedFileScan();
+  await waitForGeneration(initial.targetGeneration, canonicalPath);
   const completed = await cachedFileScan();
   expect(completed.snapshot.complete).toBe(true);
   expect(completed.snapshot.files.map((entry) => entry.path)).toContain(canonicalPath);
@@ -77,14 +121,124 @@ test("a transient real scanner failure preserves the completed route snapshot un
   expect(fs.readFileSync(snapshotPath)).not.toEqual(persistedBeforeFailure);
 });
 
+test("transcript metadata EIO after rewrite retains canonical snapshots until convergence", async () => {
+  resetFilesRouteCacheForTests();
+  const transcript = path.join(sessions, "metadata-rewrite.jsonl");
+  const alpha = `${JSON.stringify({ type: "session_meta", payload: { cwd: "/repo/alpha" } })}\n`;
+  const bravo = `${JSON.stringify({ type: "session_meta", payload: { cwd: "/repo/bravo" } })}\n`;
+  expect(Buffer.byteLength(alpha)).toBe(Buffer.byteLength(bravo));
+  fs.writeFileSync(transcript, alpha);
+  fs.utimesSync(transcript, 1_700_000_000, 1_700_000_000);
+  const initial = await cachedFileScan();
+  await waitForGeneration(initial.targetGeneration, transcript);
+  const completed = await cachedFileScan();
+  expect(completed.snapshot.files.find((entry) => entry.path === transcript)?.cwd).toBe("/repo/alpha");
+  const snapshotPath = path.join(process.env.LLV_STATE_DIR!, "files-scan-snapshot.json");
+  const indexPath = path.join(process.env.LLV_STATE_DIR!, "project-catalog.json");
+  const canonicalSnapshot = fs.readFileSync(snapshotPath);
+  const canonicalIndex = fs.readFileSync(indexPath);
+
+  fs.writeFileSync(transcript, bravo);
+  fs.utimesSync(transcript, 1_700_000_001, 1_700_000_001);
+  const originalOpen = fs.openSync;
+  let failures = 2;
+  fs.openSync = ((filename: fs.PathLike, flags: fs.OpenMode, mode?: fs.Mode) => {
+    if (filename === transcript && failures > 0) {
+      failures -= 1;
+      const error = new Error("injected transcript metadata EIO") as NodeJS.ErrnoException;
+      error.code = "EIO";
+      throw error;
+    }
+    return originalOpen(filename, flags, mode);
+  }) as typeof fs.openSync;
+  let targetGeneration = 0;
+  try {
+    const stale = await cachedFileScan(undefined, undefined, Date.now(), Number.MAX_SAFE_INTEGER);
+    targetGeneration = stale.targetGeneration;
+    expect(stale.snapshot.files.find((entry) => entry.path === transcript)?.cwd).toBe("/repo/alpha");
+    await Bun.sleep(50);
+  } finally {
+    fs.openSync = originalOpen;
+  }
+
+  expect(fs.readFileSync(snapshotPath)).toEqual(canonicalSnapshot);
+  expect(fs.readFileSync(indexPath)).toEqual(canonicalIndex);
+  let recovered = await cachedFileScan();
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    recovered = await cachedFileScan(undefined, undefined, Date.now(), undefined, targetGeneration);
+    if (recovered.generation >= targetGeneration
+      && recovered.snapshot.files.find((entry) => entry.path === transcript)?.cwd === "/repo/bravo") break;
+    await Bun.sleep(10);
+  }
+  expect(recovered.snapshot.files.find((entry) => entry.path === transcript)?.cwd).toBe("/repo/bravo");
+  expect(fs.readFileSync(snapshotPath)).not.toEqual(canonicalSnapshot);
+  expect(fs.readFileSync(indexPath)).not.toEqual(canonicalIndex);
+});
+
+test("sidecar metadata EIO after rewrite retains canonical snapshots until convergence", async () => {
+  resetFilesRouteCacheForTests();
+  const transcript = path.join(process.env.LLV_CLAUDE_HOME!, "projects", "sidecar", "session", "subagents", "agent-x.jsonl");
+  const sidecar = transcript.slice(0, -".jsonl".length) + ".meta.json";
+  fs.mkdirSync(path.dirname(transcript), { recursive: true });
+  fs.writeFileSync(transcript, "{}\n");
+  fs.writeFileSync(sidecar, JSON.stringify({ description: "Agent alpha" }));
+  fs.utimesSync(sidecar, 1_700_000_000, 1_700_000_000);
+  const initial = await cachedFileScan();
+  await waitForGeneration(initial.targetGeneration, transcript);
+  const completed = await cachedFileScan();
+  expect(completed.snapshot.files.find((entry) => entry.path === transcript)?.title).toBe("Agent alpha");
+  const snapshotPath = path.join(process.env.LLV_STATE_DIR!, "files-scan-snapshot.json");
+  const indexPath = path.join(process.env.LLV_STATE_DIR!, "project-catalog.json");
+  const canonicalSnapshot = fs.readFileSync(snapshotPath);
+  const canonicalIndex = fs.readFileSync(indexPath);
+
+  fs.writeFileSync(sidecar, JSON.stringify({ description: "Agent bravo" }));
+  fs.utimesSync(sidecar, 1_700_000_001, 1_700_000_001);
+  const originalRead = fs.readFileSync;
+  let failures = 1;
+  fs.readFileSync = ((filename: fs.PathOrFileDescriptor, ...args: unknown[]) => {
+    if (filename === sidecar && failures > 0) {
+      failures -= 1;
+      const error = new Error("injected sidecar metadata EIO") as NodeJS.ErrnoException;
+      error.code = "EIO";
+      throw error;
+    }
+    return (originalRead as (...inner: unknown[]) => unknown)(filename, ...args);
+  }) as typeof fs.readFileSync;
+  let targetGeneration = 0;
+  try {
+    const stale = await cachedFileScan(undefined, undefined, Date.now(), Number.MAX_SAFE_INTEGER);
+    targetGeneration = stale.targetGeneration;
+    expect(stale.snapshot.files.find((entry) => entry.path === transcript)?.title).toBe("Agent alpha");
+    await Bun.sleep(50);
+  } finally {
+    fs.readFileSync = originalRead;
+  }
+
+  expect(fs.readFileSync(snapshotPath)).toEqual(canonicalSnapshot);
+  expect(fs.readFileSync(indexPath)).toEqual(canonicalIndex);
+  let recovered = await cachedFileScan();
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    recovered = await cachedFileScan(undefined, undefined, Date.now(), undefined, targetGeneration);
+    if (recovered.generation >= targetGeneration
+      && recovered.snapshot.files.find((entry) => entry.path === transcript)?.title === "Agent bravo") break;
+    await Bun.sleep(10);
+  }
+  expect(recovered.snapshot.files.find((entry) => entry.path === transcript)?.title).toBe("Agent bravo");
+  expect(fs.readFileSync(snapshotPath)).not.toEqual(canonicalSnapshot);
+  expect(fs.readFileSync(indexPath)).not.toEqual(canonicalIndex);
+});
+
 test("a confirmed ENOENT deletion remains a complete inventory change", async () => {
   const deletedPath = writeSession("confirmed-deletion.jsonl", "/repo/deleted");
-  const before = await listFilesWithProjectCatalog();
+  const before = await listFilesWithProjectCatalog(undefined, { persist: false, persistIndex: true });
   expect(before.complete).toBe(true);
   expect(before.files.map((entry) => entry.path)).toContain(deletedPath);
 
   fs.rmSync(deletedPath);
-  const after = await listFilesWithProjectCatalog();
+  const after = await listFilesWithProjectCatalog(undefined, { persist: false, persistIndex: true });
   expect(after.complete).toBe(true);
   expect(after.files.map((entry) => entry.path)).not.toContain(deletedPath);
+  const index = JSON.parse(fs.readFileSync(path.join(process.env.LLV_STATE_DIR!, "project-catalog.json"), "utf8"));
+  expect(index.files[deletedPath]).toBeUndefined();
 });

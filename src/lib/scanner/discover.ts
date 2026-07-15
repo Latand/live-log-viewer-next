@@ -288,7 +288,7 @@ export async function discoverFilesWithProjectCatalog(
     snapshot.projectCatalog,
   );
   const entries = await entriesFromRaw(discovery.raw, projectByPath, options.demote, options.pin, snapshot.summaryByPath);
-  return { ...entries, projectCatalog, complete: discovery.complete };
+  return { ...entries, projectCatalog, complete: snapshot.complete };
 }
 
 export async function discoverFiles(

@@ -229,6 +229,26 @@ test("a corrupt completed snapshot falls back to a cold scan and repairs persist
   expect(persisted.version).toBe(1);
 });
 
+test("repeated first-ever incomplete scans stay unpublished until recovery", async () => {
+  scanFileResults = [
+    [file("/sessions/first-partial.jsonl")],
+    [file("/sessions/second-partial.jsonl")],
+    [file("/sessions/recovered-cold.jsonl")],
+  ];
+  scanCompleteResults = [false, false, true];
+  const snapshotPath = path.join(stateDir, "files-scan-snapshot.json");
+
+  await expect(cachedFileScan()).rejects.toThrow("filesystem scan incomplete");
+  expect(fs.existsSync(snapshotPath)).toBe(false);
+  await expect(cachedFileScan()).rejects.toThrow("filesystem scan incomplete");
+  expect(fs.existsSync(snapshotPath)).toBe(false);
+
+  const recovered = await cachedFileScan();
+  expect(recovered.snapshot.files.map((entry) => entry.path)).toEqual(["/sessions/recovered-cold.jsonl"]);
+  expect(JSON.parse(fs.readFileSync(snapshotPath, "utf8")).snapshot.files.map((entry: FileEntry) => entry.path))
+    .toEqual(["/sessions/recovered-cold.jsonl"]);
+});
+
 test("snapshot persistence creates private state and replaces permissive files as 0600", async () => {
   const privateStateDir = path.join(stateDir, "private-snapshot-state");
   const snapshotPath = path.join(privateStateDir, "files-scan-snapshot.json");
