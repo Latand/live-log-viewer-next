@@ -2,9 +2,9 @@ import { expect, test } from "bun:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
+import type { RuntimeReceipt } from "@/components/runtime/runtimeModel";
 import type { RuntimeSessionView } from "@/hooks/useRuntime";
 import { translate } from "@/lib/i18n";
-import type { RuntimeReceipt } from "@/components/runtime/runtimeModel";
 
 import { deliveryAttemptKey, mergeRuntimeReceipts, RuntimeComposerReceipts, structuredComposerSession } from "./TmuxComposer";
 
@@ -80,7 +80,7 @@ test("a persisted replacement receipt supersedes its failed ancestor after reloa
     at: "2026-07-13T00:00:00.000Z",
     revision: 3,
   };
-  const replacement = {
+  const replacement: RuntimeReceipt = {
     ...original,
     operationId: "op-replacement",
     idempotencyKey: "key-replacement",
@@ -89,7 +89,7 @@ test("a persisted replacement receipt supersedes its failed ancestor after reloa
     at: "2026-07-13T00:00:01.000Z",
     revision: 1,
     retryOfOperationId: original.operationId,
-  } as RuntimeReceipt & { retryOfOperationId: string };
+  };
 
   expect(mergeRuntimeReceipts([original, replacement], [])).toEqual([replacement]);
   expect(mergeRuntimeReceipts([original, { ...replacement, status: "delivered", revision: 3 }], []))
@@ -108,13 +108,13 @@ test("a failed replacement is the sole retry target across a retry chain", () =>
     at: "2026-07-13T00:00:00.000Z",
     revision: 3,
   };
-  const replacement = {
+  const replacement: RuntimeReceipt = {
     ...original,
     operationId: "op-replacement-chain",
     idempotencyKey: "key-replacement-chain",
     retryOfOperationId: original.operationId,
     at: "2026-07-13T00:00:01.000Z",
-  } as RuntimeReceipt & { retryOfOperationId: string };
+  };
   const receipts = mergeRuntimeReceipts([original, replacement], []);
 
   const html = renderToStaticMarkup(createElement(RuntimeComposerReceipts, {
@@ -125,6 +125,18 @@ test("a failed replacement is the sole retry target across a retry chain", () =>
 
   expect(receipts).toEqual([replacement]);
   expect(html.match(/>Retry</g)?.length).toBe(1);
+
+  const current: RuntimeReceipt = {
+    ...replacement,
+    operationId: "op-current-chain",
+    idempotencyKey: "key-current-chain",
+    status: "queued",
+    reason: null,
+    retryOfOperationId: replacement.operationId,
+    at: "2026-07-13T00:00:02.000Z",
+    revision: 1,
+  };
+  expect(mergeRuntimeReceipts([original, replacement, current], [])).toEqual([current]);
 });
 
 test("unrelated failed operations with identical text stay independently actionable", () => {
