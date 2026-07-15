@@ -201,6 +201,85 @@ test("a current scan joins restart revalidation before publishing transcript met
   expect(scans).toBe(1);
 });
 
+test("concurrent fresh callers share one pending generation through failure and retry", async () => {
+  const now = Date.now();
+  const before = file("/sessions/shared-fresh-before.jsonl");
+  const after = file("/sessions/shared-fresh-after.jsonl");
+  const freshFlags: boolean[] = [];
+  hydrateScannedFiles = (files, options) => {
+    freshFlags.push((options as { fresh?: boolean }).fresh === true);
+    return files;
+  };
+  scannedFiles = [before];
+
+  await cachedFileScan(undefined, undefined, now);
+  let releaseOld!: () => void;
+  let releaseFresh!: () => void;
+  scanGates.push(
+    new Promise<void>((resolve) => { releaseOld = resolve; }),
+    new Promise<void>((resolve) => { releaseFresh = resolve; }),
+  );
+  await cachedFileScan(undefined, undefined, now + 10_000);
+  scannedFiles = [after];
+
+  let firstSettled = false;
+  let secondSettled = false;
+  const first = currentFileScan({ fresh: true }).then((scan) => {
+    firstSettled = true;
+    return scan;
+  });
+  const second = currentFileScan({ fresh: true }).then((scan) => {
+    secondSettled = true;
+    return scan;
+  });
+
+  releaseOld();
+  for (let attempt = 0; attempt < 100 && scans < 3; attempt += 1) {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+  expect(scans).toBe(3);
+  expect(firstSettled).toBeFalse();
+  expect(secondSettled).toBeFalse();
+
+  releaseFresh();
+  const [firstFresh, secondFresh] = await Promise.all([first, second]);
+  expect(firstFresh.snapshot.files.map((entry) => entry.path)).toEqual([after.path]);
+  expect(secondFresh.snapshot.files.map((entry) => entry.path)).toEqual([after.path]);
+  expect(freshFlags).toEqual([false, false, true]);
+  expect(scans).toBe(3);
+
+  scanCompleteResults = [false];
+  await expect(currentFileScan({ fresh: true })).rejects.toThrow("filesystem scan incomplete");
+  const scansAfterFailure = scans;
+  expect(freshFlags.at(-1)).toBeTrue();
+
+  let releaseRetry!: () => void;
+  scanGates.push(new Promise<void>((resolve) => { releaseRetry = resolve; }));
+  let firstRetrySettled = false;
+  let secondRetrySettled = false;
+  const firstRetry = currentFileScan({ fresh: true }).then((scan) => {
+    firstRetrySettled = true;
+    return scan;
+  });
+  const secondRetry = currentFileScan({ fresh: true }).then((scan) => {
+    secondRetrySettled = true;
+    return scan;
+  });
+
+  expect(scans).toBe(scansAfterFailure + 1);
+  expect(firstRetrySettled).toBeFalse();
+  expect(secondRetrySettled).toBeFalse();
+  releaseRetry();
+  const [firstRecovered, secondRecovered] = await Promise.all([firstRetry, secondRetry]);
+  expect(firstRecovered.generation).toBe(secondRecovered.generation);
+  expect(scans).toBe(scansAfterFailure + 1);
+  expect(freshFlags).toEqual([false, false, true, true, true]);
+
+  const scansAfterRecovery = scans;
+  await currentFileScan();
+  expect(scans).toBe(scansAfterRecovery);
+});
+
 test("a fresh resource snapshot fences a pre-kill refresh before host election", async () => {
   const now = Date.now();
   const before = { ...file("/sessions/resource-before.jsonl"), title: "Before kill", activity: "idle" as const };

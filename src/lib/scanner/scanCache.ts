@@ -433,19 +433,16 @@ export async function cachedFileScan(
   return completedScan(slot, undefined, targetGeneration);
 }
 
-/** Returns metadata from a completed current generation. Fresh resource
-    snapshots reserve a generation beyond every request visible at entry. The
-    shared refresh loop completes older work before satisfying that fence. */
+/** Returns metadata from a completed current generation. The first fresh
+    caller reserves a generation beyond existing requests; concurrent fresh
+    callers join that pending fence. Older work completes before the fence. */
 export async function currentFileScan(
   { fresh = false, now = Date.now() }: { fresh?: boolean; now?: number } = {},
 ): Promise<CachedFileScan> {
   if (fresh) {
     const slot = globalFileScanSlot();
-    const targetGeneration = nextGeneration(slot);
-    slot.freshObservationGeneration = Math.max(
-      slot.freshObservationGeneration ?? targetGeneration,
-      targetGeneration,
-    );
+    const targetGeneration = slot.freshObservationGeneration ?? nextGeneration(slot);
+    slot.freshObservationGeneration = targetGeneration;
     await refreshThroughGeneration(slot, targetGeneration);
     return completedScan(slot, undefined, targetGeneration);
   }
