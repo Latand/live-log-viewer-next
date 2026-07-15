@@ -1,5 +1,3 @@
-import fs from "node:fs";
-
 import { accountManager } from "@/lib/accounts/manager";
 import { claudeSettingsPath } from "@/lib/accounts/claude";
 import { turnStateFromRecords } from "@/lib/accounts/migration/turnState";
@@ -7,7 +5,7 @@ import type { ViewerConversationId } from "@/lib/accounts/migration/contracts";
 import { agentRegistry, type AgentRegistry, type AgentRegistryEntry } from "@/lib/agent/registry";
 import { sessionKeyId } from "@/lib/agent/sessionKey";
 import { VIEWER_SPAWN_CAPABILITY_ENV } from "@/lib/agent/spawnPolicy";
-import { tailRecords } from "@/lib/scanner/activity";
+import { readStableTailRecords } from "@/lib/scanner/activity";
 
 import {
   adoptClaudeRegistryHosts,
@@ -38,30 +36,43 @@ interface StructuredStartupSignals {
   pendingOperationConversationIds: ReadonlySet<string>;
 }
 
-function refreshTerminalTranscriptState(registry: AgentRegistry): void {
+const TRANSCRIPT_REFRESH_CONCURRENCY = 16;
+
+async function refreshTerminalTranscriptState(registry: AgentRegistry): Promise<void> {
   const snapshot = registry.snapshot();
   const observedAt = new Date().toISOString();
-  const observations = [];
-  for (const conversation of Object.values(snapshot.conversations)) {
+  const candidates = Object.values(snapshot.conversations).flatMap((conversation) => {
     const generation = conversation.generations.at(-1);
-    if (!generation) continue;
+    if (!generation || conversation.turn.state === "terminal") return [];
     const entry = snapshot.entries[sessionKeyId({ engine: conversation.engine, sessionId: generation.id })];
-    if (!entry?.structuredHost) continue;
-    let size: number;
-    try { size = fs.statSync(generation.path).size; }
-    catch { continue; }
-    const turn = turnStateFromRecords(tailRecords(generation.path, size), conversation.engine === "codex", true);
-    if (turn.state !== "terminal" || conversation.turn.state === "terminal") continue;
-    observations.push({
-      engine: conversation.engine,
-      path: generation.path,
-      accountId: generation.accountId,
-      launchProfile: generation.launchProfile,
-      turn,
-      expectedTurnObservedAt: conversation.turn.observedAt,
-      observedAt,
-    });
-  }
+    return entry?.structuredHost ? [{ conversation, generation }] : [];
+  });
+  const observations: Parameters<AgentRegistry["reconcileConversations"]>[0] = [];
+  let nextCandidate = 0;
+  const workers = Array.from(
+    { length: Math.min(TRANSCRIPT_REFRESH_CONCURRENCY, candidates.length) },
+    async () => {
+      while (nextCandidate < candidates.length) {
+        const candidate = candidates[nextCandidate++];
+        if (!candidate) continue;
+        const { conversation, generation } = candidate;
+        const tail = await readStableTailRecords(generation.path);
+        if (tail.integrity !== "complete") continue;
+        const turn = turnStateFromRecords(tail.records, conversation.engine === "codex", true);
+        if (turn.state !== "terminal") continue;
+        observations.push({
+          engine: conversation.engine,
+          path: generation.path,
+          accountId: generation.accountId,
+          launchProfile: generation.launchProfile,
+          turn,
+          expectedTurnObservedAt: conversation.turn.observedAt,
+          observedAt,
+        });
+      }
+    },
+  );
+  await Promise.all(workers);
   if (observations.length > 0) registry.reconcileConversations(observations);
 }
 
@@ -163,7 +174,7 @@ export async function adoptStructuredHostsAtStartup(
   dependencies: StructuredStartupDependencies = {},
 ): Promise<AdoptedStructuredHost[]> {
   const registry = dependencies.registry ?? agentRegistry();
-  refreshTerminalTranscriptState(registry);
+  await refreshTerminalTranscriptState(registry);
   const client = dependencies.client === undefined ? runtimeHostClient() : dependencies.client;
   const signals = await structuredStartupSignals(registry, client);
   const shouldAdopt = structuredStartupAdoptionFilter(registry, signals);

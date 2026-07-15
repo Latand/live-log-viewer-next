@@ -17,6 +17,80 @@ const turnCache = globalCache<[number, string | null]>("turn");
 const tailCache = globalCache<[number, number, Record<string, unknown>[]]>("tail");
 const TAIL_CACHE_CAP = 64;
 
+export type StableTailRead =
+  | { integrity: "complete"; records: Record<string, unknown>[] }
+  | { integrity: "uncertain"; records: [] };
+
+function sameFileState(left: fs.BigIntStats, right: fs.BigIntStats): boolean {
+  return left.dev === right.dev
+    && left.ino === right.ino
+    && left.size === right.size
+    && left.mtimeNs === right.mtimeNs
+    && left.ctimeNs === right.ctimeNs;
+}
+
+/** Reads a bounded JSONL tail whose records are safe to use for durable state.
+ * The scanner's permissive, size-keyed cache serves display derivations; this
+ * uncached path verifies every row and the open file's identity around I/O. */
+export async function readStableTailRecords(pathname: string, nbytes = 131_072): Promise<StableTailRead> {
+  let handle: fs.promises.FileHandle | null = null;
+  try {
+    handle = await fs.promises.open(pathname, "r");
+    const before = await handle.stat({ bigint: true });
+    if (!before.isFile()) return { integrity: "uncertain", records: [] };
+    const size = Number(before.size);
+    if (!Number.isSafeInteger(size)) return { integrity: "uncertain", records: [] };
+    const length = Math.min(size, nbytes);
+    const seek = size - length;
+    const buffer = Buffer.alloc(length);
+    let offset = 0;
+    while (offset < length) {
+      const read = await handle.read(buffer, offset, length - offset, seek + offset);
+      if (read.bytesRead === 0) return { integrity: "uncertain", records: [] };
+      offset += read.bytesRead;
+    }
+    const after = await handle.stat({ bigint: true });
+    const pathAfter = await fs.promises.stat(pathname, { bigint: true });
+    if (!sameFileState(before, after) || !sameFileState(after, pathAfter)) {
+      return { integrity: "uncertain", records: [] };
+    }
+
+    let jsonBuffer = buffer;
+    if (seek > 0) {
+      const firstNewline = buffer.indexOf(0x0a);
+      if (firstNewline < 0) return { integrity: "complete", records: [] };
+      jsonBuffer = buffer.subarray(firstNewline + 1);
+    }
+    let data: string;
+    try {
+      data = new TextDecoder("utf-8", { fatal: true }).decode(jsonBuffer);
+    } catch {
+      return { integrity: "uncertain", records: [] };
+    }
+    const lines = data.split("\n");
+    const records: Record<string, unknown>[] = [];
+    for (const line of lines) {
+      const text = line.trim();
+      if (!text) continue;
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(text);
+      } catch {
+        return { integrity: "uncertain", records: [] };
+      }
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        return { integrity: "uncertain", records: [] };
+      }
+      records.push(parsed as Record<string, unknown>);
+    }
+    return { integrity: "complete", records };
+  } catch {
+    return { integrity: "uncertain", records: [] };
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+}
+
 export function tailRecords(pathname: string, size: number, nbytes = 131_072) {
   const cached = tailCache.get(pathname);
   if (cached && cached[0] === size && cached[1] === nbytes) return cached[2].slice();
