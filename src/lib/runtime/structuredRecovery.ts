@@ -59,18 +59,17 @@ function candidateFor(
   const key = { engine: conversation.engine, sessionId: generation.id } as const;
   const snapshot = registry.snapshot();
   const entry = snapshot.entries[sessionKeyId(key)];
-  if (!entry) return null;
+  if (!entry || entry.host) return null;
   const structuredReceipt = Object.values(snapshot.receipts).some((receipt) =>
     receipt.transport === "structured"
       && receipt.state === "completed"
       && registry.canonicalConversationId(receipt.conversationId) === conversation.id);
   if (!entry.structuredHost && !structuredReceipt) return null;
   const terminal = entry.status === "dead" || entry.status === "unhosted";
-  const publishReady = Boolean(entry.host
-    || (entry.structuredHost?.process
-      && entry.claimOwner
-      && entry.pendingAction === null
-      && !terminal));
+  const publishReady = Boolean(entry.structuredHost?.process
+    && entry.claimOwner
+    && entry.pendingAction === null
+    && !terminal);
   const profile = emptyLaunchProfile({
     ...generation.launchProfile,
     ...(entry.launchProfile ?? {}),

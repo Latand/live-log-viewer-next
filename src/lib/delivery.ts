@@ -405,6 +405,10 @@ interface DeliveryOverrides {
   sendText?: typeof sendText;
   recover?: typeof recoverDeadStructuredConversation;
   enqueueStructured?: typeof import("@/lib/runtime/structuredMessageDelivery")["enqueueStructuredMessage"];
+  pathAllowed?: typeof pathAllowed;
+  listFiles?: typeof listFiles;
+  resumeSpecFor?: typeof resumeSpecFor;
+  deliver?: typeof deliverToTranscriptHost;
 }
 
 /**
@@ -557,24 +561,24 @@ export async function deliverConversationMessage(message: ConversationMessage, o
 
     /* No live pane: reopen the conversation as a fresh agent window in the
        user's current tmux session and type the prompt there. */
-    if (!filePath || !pathAllowed(filePath)) {
+    if (!filePath || !(overrides.pathAllowed ?? pathAllowed)(filePath)) {
       return settle(failure("process is not in a tmux session", 409));
     }
-    const all = await listFiles();
+    const all = await (overrides.listFiles ?? listFiles)();
     const entry = all.find((item) => item.path === filePath);
     if (!entry) {
       return settle(failure("file is unknown to the viewer", 403));
     }
-    const spec = resumeSpecFor(entry.root, entry.path, {
+    const spec = (overrides.resumeSpecFor ?? resumeSpecFor)(entry.root, entry.path, {
       model: entry.launchModel ?? entry.model,
       effort: entry.effort,
-      allowSubagents: agentRegistry().launchProfileForPath(entry.path)?.allowSubagents,
+      allowSubagents: registry.launchProfileForPath(entry.path)?.allowSubagents,
     });
     if (spec) {
       const bundle = materializePayload();
       imagePaths = bundle.imagePaths;
       recordArtifacts();
-      const outcome = await hostOutcome(deliverToTranscriptHost({ entry, spec, payload: bundle.payload }));
+      const outcome = await hostOutcome((overrides.deliver ?? deliverToTranscriptHost)({ entry, spec, payload: bundle.payload }));
       if (!outcome.ok) { actuation = outcome.actuation === "started" ? "started" : "none"; return settle(cleanupFailedImageDelivery(outcome, imagePaths)); }
       actuation = "completed";
       return settle({ ...outcome, ...(imagePaths.length ? { imagePaths } : {}) });
@@ -592,10 +596,10 @@ export async function deliverConversationMessage(message: ConversationMessage, o
     }
     /* Resolved before saving anything: the root's live pane or resume spec
        must exist, or the request is rejected without ever writing an image. */
-    const rootSpec = resumeSpecFor(root.root, root.path, {
+    const rootSpec = (overrides.resumeSpecFor ?? resumeSpecFor)(root.root, root.path, {
       model: root.launchModel ?? root.model,
       effort: root.effort,
-      allowSubagents: agentRegistry().launchProfileForPath(root.path)?.allowSubagents,
+      allowSubagents: registry.launchProfileForPath(root.path)?.allowSubagents,
     });
     if (!rootSpec) {
       return settle(failure("root session is unavailable for messaging", 409));
@@ -605,7 +609,7 @@ export async function deliverConversationMessage(message: ConversationMessage, o
     recordArtifacts();
     const relayText = `User message for your branch «${entry.title.slice(0, 100)}» — forward it or handle it yourself:\n${bundle.payload}`;
     const imageField = imagePaths.length ? { imagePaths } : {};
-    const outcome = await hostOutcome(deliverToTranscriptHost({ entry: root, spec: rootSpec, payload: relayText }));
+    const outcome = await hostOutcome((overrides.deliver ?? deliverToTranscriptHost)({ entry: root, spec: rootSpec, payload: relayText }));
     if (!outcome.ok) { actuation = outcome.actuation === "started" ? "started" : "none"; return settle(cleanupFailedImageDelivery(outcome, imagePaths)); }
     actuation = "completed";
     return settle({ ...outcome, ...imageField });

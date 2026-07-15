@@ -7,7 +7,7 @@ import { afterAll, expect, test } from "bun:test";
 
 import type { AccountContext } from "@/lib/accounts/contracts";
 import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
-import { AgentRegistry } from "@/lib/agent/registry";
+import { AgentRegistry, type TmuxHostEvidence } from "@/lib/agent/registry";
 
 import type { RuntimeHostClient } from "./client";
 import { recoverDeadStructuredConversation } from "./structuredRecovery";
@@ -15,6 +15,79 @@ import { structuredResumeSessionId } from "./structuredSpawn";
 
 const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-structured-recovery-"));
 afterAll(() => fs.rmSync(sandbox, { recursive: true, force: true }));
+
+function establishRolledBackTmuxOwner(engine: "codex" | "claude", label: string) {
+  const sessionId = crypto.randomUUID();
+  const cwd = path.join(sandbox, `${engine}-${label}-${sessionId}`);
+  const artifactPath = path.join(cwd, `${sessionId}.jsonl`);
+  const accountId = `${engine}-${label}-account`;
+  const profile = emptyLaunchProfile({ cwd, model: `${engine}-${label}-model`, effort: "high" });
+  const key = { engine, sessionId } as const;
+  fs.mkdirSync(cwd, { recursive: true });
+  fs.writeFileSync(artifactPath, "");
+  const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const begun = registry.beginSpawnRequest({
+    engine,
+    cwd,
+    transport: "structured",
+    accountId,
+    expectedArtifactPath: artifactPath,
+    launchProfile: profile,
+  });
+  if (begun.kind !== "created") throw new Error("structured receipt was unavailable");
+  const settled = registry.settleSpawn(begun.receipt.launchId, {
+    key,
+    artifactPath,
+    cwd,
+    accountId,
+    launchProfile: profile,
+    status: "idle",
+    host: null,
+    structuredHost: {
+      kind: engine === "codex" ? "codex-app-server" : "claude-broker",
+      endpoint: `stdio:${label}`,
+      process: { pid: process.pid, startIdentity: `${label}-structured` },
+      eventCursor: 1,
+      protocolVersion: "v2",
+      writerClaimEpoch: 1,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 1,
+    claimOwner: `structured-host:${label}`,
+    pendingAction: null,
+  });
+  if (settled.kind !== "settled") throw new Error("structured receipt did not settle");
+  registry.terminateStructuredHost(key);
+  const tmuxHost: TmuxHostEvidence = {
+    kind: "tmux",
+    endpoint: `/run/user/1000/${label}`,
+    server: { pid: 900, startIdentity: `${label}-server` },
+    paneId: `%${label}`,
+    panePid: { pid: 901, startIdentity: `${label}-pane` },
+    windowName: `${engine}-${label}`,
+    agent: { pid: 902, startIdentity: `${label}-agent` },
+    argv: [engine, "resume", sessionId],
+  };
+  registry.upsert({
+    ...settled.entry,
+    status: "idle",
+    host: tmuxHost,
+    structuredHost: null,
+    claimEpoch: 2,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  return {
+    artifactPath,
+    conversationId: begun.receipt.conversationId,
+    key,
+    launchId: begun.receipt.launchId,
+    registry,
+    tmuxHost,
+  };
+}
 
 test("dead Codex structured recovery retains ownership and starts a pane-less resume host", async () => {
   const sessionId = crypto.randomUUID();
@@ -414,6 +487,28 @@ test("live structured ownership prevents a duplicate recovery host", async () =>
 
   expect(result).toMatchObject({ target: null, conversationId: conversation.id, spawned: false });
   expect(spawnCalls).toBe(0);
+});
+
+test.each(["codex", "claude"] as const)("current verified %s tmux ownership outranks completed structured history", async (engine) => {
+  const state = establishRolledBackTmuxOwner(engine, "tmux-authority");
+  let spawnCalls = 0;
+
+  const result = await recoverDeadStructuredConversation({
+    path: state.artifactPath,
+    conversationId: state.conversationId,
+  }, {
+    registry: state.registry,
+    transport: () => "structured",
+    spawn: async () => {
+      spawnCalls += 1;
+      throw new Error("verified tmux ownership entered structured recovery");
+    },
+  });
+
+  expect(result).toBeNull();
+  expect(spawnCalls).toBe(0);
+  expect(state.registry.snapshot().receipts[state.launchId]).toMatchObject({ state: "completed", transport: "structured" });
+  expect(state.registry.snapshot().entries[`${engine}:${state.key.sessionId}`]?.host).toEqual(state.tmuxHost);
 });
 
 test.each(["codex", "claude"] as const)("concurrent %s sends wait for recovery publication before either admission", async (engine) => {
