@@ -8,7 +8,7 @@ import { sessionProjectProjection } from "../session/titleProjection";
 import { codexThreadIdFromPath, nativeCodexParentThreadId } from "./codexNative";
 import { describe } from "./describe";
 import type { ConversationCatalogEntry } from "./conversationCatalog";
-import { beginProjectCatalogScan, projectCatalogSnapshotFromRaw } from "./projectCatalog";
+import { beginProjectCatalogScan, projectCatalogSnapshotFromRaw, type ParsedFileSummary } from "./projectCatalog";
 import { projectResolutionStateKey } from "./projectState";
 import { EXTS, ROOTS, scanRootEntries } from "./roots";
 import { selectSchemeWindow } from "./schemeWindow";
@@ -160,7 +160,13 @@ async function canonicalProjectCatalog(
   };
 }
 
-async function entriesFromRaw(raw: RawEntry[], projectByPath?: ReadonlyMap<string, string>, demoted?: ReadonlySet<string>, pin?: ReadonlySet<string>): Promise<FileEntry[]> {
+async function entriesFromRaw(
+  raw: RawEntry[],
+  projectByPath?: ReadonlyMap<string, string>,
+  demoted?: ReadonlySet<string>,
+  pin?: ReadonlySet<string>,
+  summaryByPath?: ReadonlyMap<string, ParsedFileSummary>,
+): Promise<{ files: FileEntry[]; pinOverlayPaths?: string[] }> {
   const stateKey = projectResolutionStateKey();
   raw.sort((a, b) => b.st.mtimeMs - a.st.mtimeMs);
   const rawByCodexThread = new Map<string, RawEntry>();
@@ -178,7 +184,20 @@ async function entriesFromRaw(raw: RawEntry[], projectByPath?: ReadonlyMap<strin
     : raw;
   const selected = cappedEntries(ranked, projectByPath ?? new Map());
   const selectedPaths = new Set(selected.map((entry) => entry.path));
+  const globalPaths = pin?.size ? new Set(selectedPaths) : undefined;
   const rawByPath = pin?.size ? new Map(raw.map((entry) => [entry.path, entry] as const)) : null;
+  const includeNativeParents = async (entries: RawEntry[], paths: Set<string>) => {
+    await forEachCooperatively(entries, (entry) => {
+      if (entry.rootName !== "codex-sessions" || !entry.path.endsWith(".jsonl")) return;
+      const parentThreadId = nativeCodexParentThreadId(entry.path, entry.st.size);
+      const parent = parentThreadId ? rawByCodexThread.get(parentThreadId) : undefined;
+      if (parent && !paths.has(parent.path)) {
+        paths.add(parent.path);
+        entries.push(parent);
+      }
+    });
+  };
+  if (globalPaths) await includeNativeParents([...selected], globalPaths);
   /* Deep-link targets ride along even when demotion or the cap excluded
      them: the client needs the requested entry and its current generation in
      one payload to resolve the conversation id and redirect the link. */
@@ -190,17 +209,9 @@ async function entriesFromRaw(raw: RawEntry[], projectByPath?: ReadonlyMap<strin
       selected.push(pinned);
     }
   }
-  await forEachCooperatively(selected, (entry) => {
-    if (entry.rootName !== "codex-sessions" || !entry.path.endsWith(".jsonl")) return;
-    const parentThreadId = nativeCodexParentThreadId(entry.path, entry.st.size);
-    const parent = parentThreadId ? rawByCodexThread.get(parentThreadId) : undefined;
-    if (parent && !selectedPaths.has(parent.path)) {
-      selectedPaths.add(parent.path);
-      selected.push(parent);
-    }
-  });
-  return mapCooperatively(selected, (entry) => {
-    const meta = describe(entry.rootName, entry.root, entry.path, entry.st, stateKey);
+  await includeNativeParents(selected, selectedPaths);
+  const files = await mapCooperatively<RawEntry, FileEntry>(selected, (entry) => {
+    const meta = summaryByPath?.get(entry.path) ?? describe(entry.rootName, entry.root, entry.path, entry.st, stateKey);
     return {
       path: entry.path,
       root: entry.rootName,
@@ -224,21 +235,27 @@ async function entriesFromRaw(raw: RawEntry[], projectByPath?: ReadonlyMap<strin
       waitingInput: null,
     };
   });
+  const pinOverlayPaths = globalPaths
+    ? selected.filter((entry) => !globalPaths.has(entry.path)).map((entry) => entry.path)
+    : [];
+  return { files, ...(pinOverlayPaths.length ? { pinOverlayPaths } : {}) };
 }
 
 export async function discoverFilesWithProjectCatalog(
   roots: Roots | RootEntries = scanRootEntries(),
   _selectedProject?: string,
-  options: { persist?: boolean; demote?: ReadonlySet<string>; pin?: ReadonlySet<string> } = {},
+  options: { persist?: boolean; persistIndex?: boolean; demote?: ReadonlySet<string>; pin?: ReadonlySet<string> } = {},
 ): Promise<{
   files: FileEntry[];
   projectCatalog: ProjectCatalogEntry[];
+  pinOverlayPaths?: string[];
 }> {
-  const scanToken = beginProjectCatalogScan(options.persist !== false);
+  const scanToken = beginProjectCatalogScan(options.persist !== false || options.persistIndex === true);
   const limit = createLimiter(48);
   const raw = await discoverRaw(roots, limit);
   const snapshot = await projectCatalogSnapshotFromRaw(raw, {
     persist: options.persist,
+    persistIndex: options.persistIndex,
     excludedSummaryPaths: options.demote,
     scanToken,
   });
@@ -248,7 +265,8 @@ export async function discoverFilesWithProjectCatalog(
     options.demote,
     snapshot.projectCatalog,
   );
-  return { files: await entriesFromRaw(raw, projectByPath, options.demote, options.pin), projectCatalog };
+  const entries = await entriesFromRaw(raw, projectByPath, options.demote, options.pin, snapshot.summaryByPath);
+  return { ...entries, projectCatalog };
 }
 
 export async function discoverFiles(
@@ -266,7 +284,7 @@ export async function discoverFiles(
     undefined,
     snapshot.projectCatalog,
   );
-  return entriesFromRaw(raw, projectByPath, demote, pin);
+  return (await entriesFromRaw(raw, projectByPath, demote, pin, snapshot.summaryByPath)).files;
 }
 
 /** Cold-start fallback for the list/search route. It builds only lightweight

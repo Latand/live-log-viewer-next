@@ -10,7 +10,7 @@ import { globalCache } from "./caches";
 import { readJson, recordValue, recordsValue, stringValue } from "./json";
 import { projectResolutionStateKey } from "./projectState";
 
-interface Meta {
+export interface FileDescription {
   project: string;
   worktree?: string;
   cwd?: string;
@@ -26,7 +26,7 @@ interface Meta {
    without waiting for a process restart. */
 globalCache<unknown>("meta-v4").clear();
 globalCache<unknown>("title-v2").clear();
-const metaCache = globalCache<[number, string, Meta]>("meta-v5");
+const metaCache = globalCache<[number, string, FileDescription]>("meta-v5");
 // Title and codex project live in the immutable head of a growing transcript,
 // so both are keyed by path and kept for good once resolved. A live file grows
 // on every poll, so a size-keyed meta cache would re-read the whole file each
@@ -648,7 +648,7 @@ export function searchTextForTranscript(pathname: string, size: number, engine: 
   return conversationTextFromLines(head.text.split("\n").slice(0, 151), engine === "codex");
 }
 
-export function describe(rootName: RootKey, root: string, pathname: string, st: fs.Stats, stateKey = projectResolutionStateKey()): Meta {
+export function describe(rootName: RootKey, root: string, pathname: string, st: fs.Stats, stateKey = projectResolutionStateKey()): FileDescription {
   const cached = metaCache.get(pathname);
   if (cached?.[0] === st.size && cached[1] === stateKey) return cached[2];
   const rel = path.relative(root, pathname);

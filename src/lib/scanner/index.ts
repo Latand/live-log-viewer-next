@@ -72,6 +72,9 @@ async function forEachEntryBatchYielding(
 
 export interface FileScanOptions {
   persist?: boolean;
+  /** Persist parsed per-file summaries while keeping controller mutations out
+      of request-owned scans. */
+  persistIndex?: boolean;
   /** Deep-link target that must survive the recency cap: a transcript path,
       or a `conversation_*` id resolved to its current generation path. */
   pin?: string;
@@ -166,7 +169,7 @@ export async function listFiles(options: FileScanOptions = {}): Promise<FileEntr
   return (await listFilesInternal(false, undefined, options)).files;
 }
 
-export async function listFilesWithProjectCatalog(selectedProject?: string, options: FileScanOptions = {}): Promise<{ files: FileEntry[]; projectCatalog: ProjectCatalogEntry[] }> {
+export async function listFilesWithProjectCatalog(selectedProject?: string, options: FileScanOptions = {}): Promise<{ files: FileEntry[]; projectCatalog: ProjectCatalogEntry[]; pinOverlayPaths?: string[] }> {
   return listFilesInternal(true, selectedProject, options);
 }
 
@@ -183,13 +186,13 @@ async function listFilesInternal(
   includeProjectCatalog: boolean,
   selectedProject?: string,
   options: FileScanOptions = {},
-): Promise<{ files: FileEntry[]; projectCatalog: ProjectCatalogEntry[] }> {
+): Promise<{ files: FileEntry[]; projectCatalog: ProjectCatalogEntry[]; pinOverlayPaths?: string[] }> {
   const persist = options.persist === true;
   const demote = archivedTranscriptPaths();
   const requestedPins = options.pins ? [...options.pins, ...(options.pin ? [options.pin] : [])] : options.pin;
   const pin = pinnedPathsFor(requestedPins);
   const scan = includeProjectCatalog
-    ? await discoverFilesWithProjectCatalog(undefined, selectedProject, { persist, demote, pin })
+    ? await discoverFilesWithProjectCatalog(undefined, selectedProject, { persist, persistIndex: options.persistIndex, demote, pin })
     : { files: await discoverFiles(undefined, demote, pin), projectCatalog: [] };
   const entries = scan.files;
   // The /proc fd scan is only needed to attribute background-task outputs to a
@@ -234,7 +237,8 @@ async function listFilesInternal(
     entry.pendingWakeup = pendingWakeupFor(entry);
   });
   await linkEntries(entries, { persist });
-  return { files: entries, projectCatalog: scan.projectCatalog };
+  const pinOverlayPaths = "pinOverlayPaths" in scan ? scan.pinOverlayPaths : undefined;
+  return { files: entries, projectCatalog: scan.projectCatalog, ...(pinOverlayPaths?.length ? { pinOverlayPaths } : {}) };
 }
 
 /** Durable controllers run outside request handlers. Flow ordering remains

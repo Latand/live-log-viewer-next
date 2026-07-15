@@ -8,11 +8,12 @@ import { forEachCooperatively, mapCooperatively } from "@/lib/cooperative";
 
 import type { ProjectCatalogEntry } from "../types";
 import { replaceConversationCatalog, type ConversationCatalogEntry } from "./conversationCatalog";
-import { describe } from "./describe";
+import { describe, type FileDescription } from "./describe";
 import type { RawEntry } from "./discover";
 import { PROJECT_RESOLUTION_VERSION, projectResolutionStateKey } from "./projectState";
 
 type CachedProjectFile = {
+  summaryVersion?: 1;
   rootName: RawEntry["rootName"];
   size: number;
   mtimeMs: number;
@@ -22,10 +23,13 @@ type CachedProjectFile = {
   kind: string;
   session: boolean;
   worktree?: string;
+  cwd?: string | null;
   title?: string;
   engine?: "codex" | "claude" | "shell";
   fmt?: "codex" | "claude" | "plain";
 };
+
+export type ParsedFileSummary = FileDescription;
 
 type ProjectCatalogFile = CachedProjectFile & {
   path: string;
@@ -86,7 +90,17 @@ function readState(): ProjectCatalogState {
       ) {
         continue;
       }
+      const engine = file.engine === "codex" || file.engine === "claude" || file.engine === "shell" ? file.engine : undefined;
+      const fmt = file.fmt === "codex" || file.fmt === "claude" || file.fmt === "plain" ? file.fmt : undefined;
+      const cwd = typeof file.cwd === "string" ? file.cwd : file.cwd === null ? null : undefined;
+      const summaryComplete = file.summaryVersion === 1
+        && typeof file.title === "string"
+        && engine !== undefined
+        && fmt !== undefined
+        && cwd !== undefined
+        && file.projectRoot !== undefined;
       files[pathname] = {
+        summaryVersion: summaryComplete ? 1 : undefined,
         rootName: file.rootName,
         size: file.size,
         mtimeMs: file.mtimeMs,
@@ -96,9 +110,10 @@ function readState(): ProjectCatalogState {
         kind: file.kind,
         session: isConversation(file.rootName, file.kind),
         worktree: typeof file.worktree === "string" ? file.worktree : undefined,
+        cwd,
         title: typeof file.title === "string" ? file.title : undefined,
-        engine: file.engine === "codex" || file.engine === "claude" || file.engine === "shell" ? file.engine : undefined,
-        fmt: file.fmt === "codex" || file.fmt === "claude" || file.fmt === "plain" ? file.fmt : undefined,
+        engine,
+        fmt,
       };
     }
     return { version: 2, resolutionVersion: raw.resolutionVersion ?? 0, files };
@@ -112,7 +127,7 @@ function writeState(state: ProjectCatalogState): void {
     const filePath = catalogPath();
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
     const tmp = path.join(path.dirname(filePath), `.${path.basename(filePath)}.${process.pid}.${crypto.randomUUID()}.tmp`);
-    fs.writeFileSync(tmp, JSON.stringify(state, null, 2) + "\n", "utf8");
+    fs.writeFileSync(tmp, JSON.stringify(state) + "\n", "utf8");
     fs.renameSync(tmp, filePath);
   } catch {
     /* A failed catalog write only costs the next scan extra metadata reads. */
@@ -153,10 +168,25 @@ function cachedFile(raw: RawEntry, state: ProjectCatalogState, stateKey: string)
     cached.stateKey === stateKey &&
     cached.projectRoot !== undefined
   ) {
+    if (cached.summaryVersion !== 1) {
+      const meta = describe(raw.rootName, raw.root, raw.path, raw.st, stateKey);
+      return {
+        ...cached,
+        summaryVersion: 1,
+        path: raw.path,
+        session: isConversation(raw.rootName, cached.kind),
+        cwd: meta.cwd,
+        title: cached.title ?? meta.title,
+        titleCached: true,
+        engine: cached.engine ?? meta.engine,
+        fmt: cached.fmt ?? meta.fmt,
+      };
+    }
     return {
       path: raw.path,
       ...cached,
       session: isConversation(raw.rootName, cached.kind),
+      cwd: cached.cwd ?? undefined,
       title: cached.title ?? fallbackTitle(raw, cached.kind),
       titleCached: typeof cached.title === "string",
       engine: cached.engine ?? engineForRoot(raw.rootName),
@@ -165,6 +195,7 @@ function cachedFile(raw: RawEntry, state: ProjectCatalogState, stateKey: string)
   }
   const meta = describe(raw.rootName, raw.root, raw.path, raw.st, stateKey);
   const file: ProjectCatalogFile = {
+    summaryVersion: 1,
     path: raw.path,
     rootName: raw.rootName,
     size: raw.st.size,
@@ -175,12 +206,14 @@ function cachedFile(raw: RawEntry, state: ProjectCatalogState, stateKey: string)
     kind: meta.kind,
     session: isConversation(raw.rootName, meta.kind),
     worktree: meta.worktree,
+    cwd: meta.cwd,
     title: meta.title,
     titleCached: true,
     engine: meta.engine,
     fmt: meta.fmt,
   };
   state.files[raw.path] = {
+    summaryVersion: 1,
     rootName: file.rootName,
     size: file.size,
     mtimeMs: file.mtimeMs,
@@ -190,6 +223,7 @@ function cachedFile(raw: RawEntry, state: ProjectCatalogState, stateKey: string)
     kind: file.kind,
     session: file.session,
     worktree: file.worktree,
+    cwd: file.cwd ?? null,
     title: file.titleCached ? file.title : undefined,
     engine: file.engine,
     fmt: file.fmt,
@@ -229,14 +263,17 @@ function unambiguousMigrations(
 
 export async function projectCatalogSnapshotFromRaw(raw: RawEntry[], options: {
   persist?: boolean;
+  persistIndex?: boolean;
   excludedSummaryPaths?: ReadonlySet<string>;
   scanToken?: ProjectCatalogScanToken;
 } = {}): Promise<{
   projectCatalog: ProjectCatalogEntry[];
   projectByPath: Map<string, string>;
   conversationCatalog: ConversationCatalogEntry[];
+  summaryByPath: Map<string, ParsedFileSummary>;
 }> {
-  const scanToken = options.scanToken ?? beginProjectCatalogScan(options.persist !== false);
+  const persistIndex = options.persist !== false || options.persistIndex === true;
+  const scanToken = options.scanToken ?? beginProjectCatalogScan(persistIndex);
   const state = readState();
   const stateKey = projectResolutionStateKey();
   const nextFiles: Record<string, CachedProjectFile> = {};
@@ -262,6 +299,7 @@ export async function projectCatalogSnapshotFromRaw(raw: RawEntry[], options: {
   const changes = new Map<string, Set<string>>();
   await forEachCooperatively(files, (file) => {
     nextFiles[file.path] = {
+      summaryVersion: 1,
       rootName: file.rootName,
       size: file.size,
       mtimeMs: file.mtimeMs,
@@ -271,6 +309,7 @@ export async function projectCatalogSnapshotFromRaw(raw: RawEntry[], options: {
       kind: file.kind,
       session: file.session,
       worktree: file.worktree,
+      cwd: file.cwd ?? null,
       title: file.titleCached ? file.title : undefined,
       engine: file.engine,
       fmt: file.fmt,
@@ -311,7 +350,18 @@ export async function projectCatalogSnapshotFromRaw(raw: RawEntry[], options: {
     if (file?.session && group && group.conversations > 0) group.conversations -= 1;
   });
   const conversationCatalog: ConversationCatalogEntry[] = [];
+  const summaryByPath = new Map<string, ParsedFileSummary>();
   await forEachCooperatively(files, (file, index) => {
+    summaryByPath.set(file.path, {
+      project: file.project || "other",
+      worktree: file.worktree,
+      cwd: file.cwd ?? undefined,
+      projectRoot: file.projectRoot,
+      title: file.title,
+      engine: file.engine,
+      kind: file.kind,
+      fmt: file.fmt,
+    });
     if (!file.session || (file.engine !== "codex" && file.engine !== "claude")) return;
     conversationCatalog.push({
       path: file.path,
@@ -332,12 +382,14 @@ export async function projectCatalogSnapshotFromRaw(raw: RawEntry[], options: {
   const isCurrentPersistence = scanToken.persistence !== null
     && projectCatalogRuntime.__llvProjectCatalogPersistenceGeneration === scanToken.persistence;
   if (isCurrentPublication) replaceConversationCatalog(conversationCatalog);
-  if (isCurrentPersistence && options.persist !== false) {
+  if (isCurrentPersistence && persistIndex) {
     let boardHealed = true;
-    try {
-      boardHealed = migrateBoardProjects(unambiguousMigrations(changes, groups));
-    } catch {
-      boardHealed = false;
+    if (options.persist !== false) {
+      try {
+        boardHealed = migrateBoardProjects(unambiguousMigrations(changes, groups));
+      } catch {
+        boardHealed = false;
+      }
     }
     if (boardHealed) {
       writeState({ version: 2, resolutionVersion: PROJECT_RESOLUTION_VERSION, files: nextFiles });
@@ -351,6 +403,7 @@ export async function projectCatalogSnapshotFromRaw(raw: RawEntry[], options: {
       .sort((a, b) => b.smt - a.smt || a.project.localeCompare(b.project)),
     projectByPath,
     conversationCatalog,
+    summaryByPath,
   };
 }
 
