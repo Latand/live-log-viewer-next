@@ -4,7 +4,7 @@ import { sessionKeyFromTranscript } from "@/lib/agent/sessionKey";
 import { procBackend } from "@/lib/proc";
 import { descendantPids } from "@/lib/proc/memory";
 import { listFiles } from "@/lib/scanner";
-import { agentProcesses, argvEngine, pidAlive, readArgv, readPpid, type AgentProcess } from "@/lib/scanner/process";
+import { agentProcesses, argvEngine, pidAlive, pidHoldsPath, readArgv, readPpid, type AgentProcess } from "@/lib/scanner/process";
 import {
   panePidMap,
   panePidOf,
@@ -82,7 +82,7 @@ export type HostDeliveryOutcome =
   | { ok: false; outcome: "failed"; error: string; status: number; actuation?: "started" };
 
 export interface TranscriptHostResolver {
-  readTranscriptHosts(fresh?: boolean, entries?: FileEntry[]): Promise<TranscriptHostSnapshot>;
+  readTranscriptHosts(fresh?: boolean, entries?: FileEntry[], ppids?: Map<number, number>): Promise<TranscriptHostSnapshot>;
   deliverToTranscriptHost(input: { entry: FileEntry; spec: ResumeSpec; payload: string }): Promise<HostDeliveryOutcome>;
 }
 
@@ -90,27 +90,31 @@ const globalStore = globalThis as unknown as {
   __llvTranscriptHostDecisions?: Map<string, Promise<Decision>>;
 };
 
-interface HostDependencies {
+export interface TranscriptHostObservationDependencies {
   listFiles: () => Promise<FileEntry[]>;
   panes: (fresh: boolean) => Promise<PaneObservation>;
   ppidMap: () => Map<number, number>;
   agents: (fresh: boolean) => AgentProcess[];
   serverPid: () => Promise<number | null>;
   resumeRecords: () => ReturnType<typeof resumePaneRecords>;
+  identity: (pid: number) => string | null;
+  holdsPath?: (pid: number, pathname: string) => boolean;
+  launchId?: (paneId: string) => Promise<string | null>;
+  conversationIdForPath?: (pathname: string) => string | null;
+  reconcile?: (hosts: TranscriptHost[]) => HostReconciliation | void | Promise<HostReconciliation | void>;
+}
+
+interface HostDependencies extends TranscriptHostObservationDependencies {
   panePid: (paneId: string) => Promise<number | null>;
   paneWindowName?: (paneId: string) => Promise<string | null>;
   alive: (pid: number) => boolean;
   argv: (pid: number) => string[];
   parentPid: (pid: number) => number | null;
-  identity: (pid: number) => string | null;
   spawn: (spec: ResumeSpec, text: string, receipt?: SpawnReceipt) => Promise<SpawnedPane>;
   beginResume?: (entry: FileEntry, spec: ResumeSpec) => { receipt: SpawnReceipt; spec: ResumeSpec } | null;
   remember: (pathname: string, spec: ResumeSpec, pane: SpawnedPane) => Promise<void>;
   deliver: (paneId: string, text: string) => Promise<void>;
   confirmAlive?: (host: TranscriptHost) => void | Promise<void>;
-  launchId?: (paneId: string) => Promise<string | null>;
-  conversationIdForPath?: (pathname: string) => string | null;
-  reconcile?: (hosts: TranscriptHost[]) => HostReconciliation | void | Promise<HostReconciliation | void>;
   serializeDelivery?: (entry: FileEntry, task: () => Promise<HostDeliveryOutcome>) => Promise<HostDeliveryOutcome>;
 }
 
@@ -177,10 +181,18 @@ function claimsForAgent(
   entriesByPid: Map<number, FileEntry>,
   entriesByUuid: Map<string, FileEntry>,
   records: Awaited<ReturnType<typeof resumePaneRecords>>,
+  holdsPath: (pid: number, pathname: string) => boolean,
 ): HostClaim[] {
   const claims: HostClaim[] = [];
   const direct = entriesByPid.get(agent.pid);
-  if (direct?.engine === agent.engine) claims.push({ pathname: direct.path, source: "scanner" });
+  const argvUuid = argvSessionUuid(agent.argv);
+  const directUuid = direct ? sessionUuid(direct.path) : null;
+  if (direct?.engine === agent.engine && (
+    (argvUuid !== null && directUuid !== null && argvUuid === directUuid)
+    || holdsPath(agent.pid, direct.path)
+  )) {
+    claims.push({ pathname: direct.path, source: "scanner" });
+  }
 
   if (records) {
     for (const [pathname, record] of records.records) {
@@ -194,8 +206,7 @@ function claimsForAgent(
     }
   }
 
-  const byArgv = argvSessionUuid(agent.argv);
-  const matched = byArgv ? entriesByUuid.get(byArgv) : undefined;
+  const matched = argvUuid ? entriesByUuid.get(argvUuid) : undefined;
   if (matched?.engine === agent.engine) claims.push({ pathname: matched.path, source: "argv" });
   return claims;
 }
@@ -278,17 +289,12 @@ function failure(error: unknown, status = 500, actuation?: "started"): HostDeliv
   return { ok: false, outcome: "failed", error: error instanceof Error ? error.message : String(error), status: resolvedStatus, ...(actuation ? { actuation } : {}) };
 }
 
-/**
- * Creates the deep transcript-host module. The optional dependencies form a
- * test seam; production callers use the singleton below and only learn the
- * two operational methods exported at the end of this file.
- */
-export function createTranscriptHostResolver(
-  dependencies: HostDependencies,
-  decisions = new Map<string, Promise<Decision>>(),
-): TranscriptHostResolver {
-
-  async function observe(fresh: boolean, suppliedEntries?: FileEntry[]): Promise<TranscriptHostSnapshot> {
+export function createTranscriptHostObserver(dependencies: TranscriptHostObservationDependencies) {
+  return async function observe(
+    fresh: boolean,
+    suppliedEntries?: FileEntry[],
+    suppliedPpids?: Map<number, number>,
+  ): Promise<TranscriptHostSnapshot> {
     const conversationIdForPath = dependencies.conversationIdForPath ?? (() => null);
     const [entries, paneObservation, records] = await Promise.all([
       suppliedEntries ?? dependencies.listFiles(),
@@ -309,7 +315,7 @@ export function createTranscriptHostResolver(
     }
     const { panes } = paneObservation;
 
-    const ppids = dependencies.ppidMap();
+    const ppids = suppliedPpids ?? dependencies.ppidMap();
     const agents = dependencies.agents(fresh);
     const byPid = rootEntryByPid(entries);
     const byUuid = rootEntryByUuid(entries);
@@ -319,7 +325,7 @@ export function createTranscriptHostResolver(
       const tree = new Set(descendantPids(panePid, ppids));
       for (const agent of agents) {
         if (!tree.has(agent.pid)) continue;
-        const claims = claimsForAgent(agent, pane, panePid, byPid, byUuid, records);
+        const claims = claimsForAgent(agent, pane, panePid, byPid, byUuid, records, dependencies.holdsPath ?? (() => false));
         const primary = primaryClaim(claims);
         hosts.push({
           tmuxServerPid: serverPid,
@@ -352,7 +358,19 @@ export function createTranscriptHostResolver(
       canonicalFor: (pathname: string) => conflictForPath(snapshot, pathname, conversationIdForPath) ? null : canonicalFrom(eligibleHosts, pathname),
     };
     return snapshot;
-  }
+  };
+}
+
+/**
+ * Creates the deep transcript-host module. The optional dependencies form a
+ * test seam; production callers use the singleton below and only learn the
+ * two operational methods exported at the end of this file.
+ */
+export function createTranscriptHostResolver(
+  dependencies: HostDependencies,
+  decisions = new Map<string, Promise<Decision>>(),
+): TranscriptHostResolver {
+  const observe = createTranscriptHostObserver(dependencies);
 
   async function revalidate(host: TranscriptHost, entry: FileEntry): Promise<boolean> {
     if (host.engine !== entry.engine || (await dependencies.serverPid()) !== host.tmuxServerPid) return false;
@@ -624,6 +642,7 @@ const runtimeResolver = createTranscriptHostResolver({
   argv: readArgv,
   parentPid: readPpid,
   identity: procBackend.processIdentity,
+  holdsPath: pidHoldsPath,
   launchId: paneLaunchId,
   conversationIdForPath: (pathname) => agentRegistry().conversationForPath(pathname)?.id ?? null,
   beginResume: beginRegistryResume,

@@ -826,6 +826,29 @@ export function captureTmuxAttachReference(ref: Pick<TmuxAttachReference, "tmuxS
   };
 }
 
+/** Captures every identity needed by a resource observation in one batch.
+    The collector already receives all pane rows from one `list-panes` call;
+    keeping the identity pass here prevents callers from launching a per-pane
+    subprocess or re-observing tmux while deriving kill references. */
+export function captureTmuxAttachReferences(
+  refs: ReadonlyArray<Pick<TmuxAttachReference, "tmuxServerPid" | "paneId" | "panePid">>,
+): Map<string, TmuxAttachReference> {
+  const identities = new Map<number, string | null>();
+  const identity = (pid: number): string | null => {
+    /* The portable backend obtains one identity through `ps` per pid. Resource
+       observation intentionally keeps this batch subprocess-free; kill still
+       verifies its stable tmux pane id and pid when a start token is absent. */
+    if (procBackend.name === "portable") return null;
+    if (!identities.has(pid)) identities.set(pid, procBackend.processIdentity(pid));
+    return identities.get(pid) ?? null;
+  };
+  return new Map(refs.map((ref) => [ref.paneId, {
+    ...ref,
+    tmuxServerStartIdentity: identity(ref.tmuxServerPid),
+    paneStartIdentity: identity(ref.panePid),
+  }]));
+}
+
 interface TmuxAttachSnapshot {
   tmuxServerPid: number;
   paneId: string;

@@ -9,6 +9,19 @@ const nextConfig: NextConfig = {
   outputFileTracingExcludes: {
     "*": ["node_modules/@img/**", "node_modules/sharp/**"],
   },
+  outputFileTracingIncludes: {
+    "/*": [".next/server/resource-collector-worker.js"],
+  },
+  webpack(config, { isServer, nextRuntime }) {
+    if (isServer && nextRuntime === "nodejs") {
+      const originalEntry = config.entry;
+      config.entry = async () => ({
+        ...(typeof originalEntry === "function" ? await originalEntry() : originalEntry),
+        "resource-collector-worker": "./src/lib/resourceCollector.worker.ts",
+      });
+    }
+    return config;
+  },
 };
 
 export default nextConfig;

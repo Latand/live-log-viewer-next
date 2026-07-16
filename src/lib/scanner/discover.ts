@@ -28,10 +28,18 @@ export interface RawEntry {
   st: fs.Stats;
 }
 
+type RawPath = Omit<RawEntry, "st">;
+
 type Roots = Record<RootKey, string>;
 type RootEntries = [RootKey, string][];
 type Limit = <T>(work: () => Promise<T>) => Promise<T>;
 type Discovery = { raw: RawEntry[]; complete: boolean };
+type PathDiscovery = { paths: RawPath[]; complete: boolean };
+type ResourceScopeSnapshot = {
+  files: FileEntry[];
+  projectCatalog: ProjectCatalogEntry[];
+  complete: boolean;
+};
 const DISCOVERY_DIAGNOSTIC_MS = 60_000;
 let lastDiscoveryDiagnosticAt = Number.NEGATIVE_INFINITY;
 
@@ -65,45 +73,69 @@ function createLimiter(max: number): Limit {
   };
 }
 
-async function walk(rootName: RootKey, roots: Roots, root: string, dir: string, limit: Limit): Promise<Discovery> {
+async function walkPaths(rootName: RootKey, root: string, dir: string, limit: Limit): Promise<PathDiscovery> {
   let entries: fs.Dirent[];
   try {
     entries = await limit(() => readdir(dir, { withFileTypes: true }));
   } catch (error) {
-    return { raw: [], complete: discoveryFailure("read directory", dir, error) };
+    return { paths: [], complete: discoveryFailure("read directory", dir, error) };
   }
-  const chunks = await Promise.all(entries.map(async (entry): Promise<Discovery> => {
+  const chunks = await Promise.all(entries.map(async (entry): Promise<PathDiscovery> => {
     if (entry.isDirectory()) {
-      if (entry.name.startsWith(".git")) return { raw: [], complete: true };
-      return walk(rootName, roots, root, path.join(dir, entry.name), limit);
+      if (entry.name.startsWith(".git")) return { paths: [], complete: true };
+      if (rootName === "claude-projects" && entry.name === "tool-results") return { paths: [], complete: true };
+      return walkPaths(rootName, root, path.join(dir, entry.name), limit);
     }
-    if (!entry.isFile() || !EXTS.some((ext) => entry.name.endsWith(ext))) return { raw: [], complete: true };
-    const pathname = path.join(dir, entry.name);
-    if (rootName === "claude-projects" && pathname.includes(path.sep + "tool-results" + path.sep)) return { raw: [], complete: true };
-    let st: fs.Stats;
+    if (!entry.isFile() || !EXTS.some((ext) => entry.name.endsWith(ext))) return { paths: [], complete: true };
+    return { paths: [{ rootName, root, path: path.join(dir, entry.name) }], complete: true };
+  }));
+  return {
+    paths: chunks.flatMap((chunk) => chunk.paths),
+    complete: chunks.every((chunk) => chunk.complete),
+  };
+}
+
+async function hydrateRawPath(entry: RawPath, roots: Roots, limit: Limit): Promise<Discovery> {
+  const pathname = entry.path;
+  let st: fs.Stats;
+  try {
+    st = await limit(() => stat(pathname));
+  } catch (error) {
+    return { raw: [], complete: discoveryFailure("stat file", pathname, error) };
+  }
+  const isTask = entry.rootName === "claude-tasks" ? taskParts(roots["claude-tasks"], pathname) : null;
+  if (entry.rootName === "claude-tasks" && !isTask) return { raw: [], complete: true };
+  if (st.size === 0 && !isTask) return { raw: [], complete: true };
+  if (isTask) {
+    const [slug, sid, tid] = isTask;
+    const twin = path.join(roots["claude-projects"], slug, sid, "subagents", "agent-" + tid + ".jsonl");
     try {
-      st = await limit(() => stat(pathname));
+      await limit(() => fs.promises.access(twin));
+      return { raw: [], complete: true };
     } catch (error) {
-      return { raw: [], complete: discoveryFailure("stat file", pathname, error) };
-    }
-    const isTask = rootName === "claude-tasks" ? taskParts(roots["claude-tasks"], pathname) : null;
-    if (rootName === "claude-tasks" && !isTask) return { raw: [], complete: true };
-    if (st.size === 0 && !isTask) return { raw: [], complete: true };
-    if (isTask) {
-      const [slug, sid, tid] = isTask;
-      const twin = path.join(roots["claude-projects"], slug, sid, "subagents", "agent-" + tid + ".jsonl");
-      try {
-        await limit(() => fs.promises.access(twin));
-        return { raw: [], complete: true };
-      } catch (error) {
-        if (!isMissing(error)) {
-          return { raw: [], complete: discoveryFailure("access task-output twin", twin, error) };
-        }
+      if (!isMissing(error)) {
+        return { raw: [], complete: discoveryFailure("access task-output twin", twin, error) };
       }
     }
-    return { raw: [{ rootName, root, path: pathname, st }], complete: true };
-  }));
-  return { raw: chunks.flatMap((chunk) => chunk.raw), complete: chunks.every((chunk) => chunk.complete) };
+  }
+  return { raw: [{ ...entry, st }], complete: true };
+}
+
+function deduplicateCodexRollouts<T extends RawPath>(entries: T[]): T[] {
+  const codexRollouts = new Map<string, T>();
+  for (const entry of entries) {
+    const filename = path.basename(entry.path);
+    if (entry.rootName !== "codex-sessions" || !filename.startsWith("rollout-") || !filename.endsWith(".jsonl")) continue;
+    const current = codexRollouts.get(filename);
+    if (!current || current.root !== entry.root) codexRollouts.set(filename, entry);
+  }
+  return entries.filter((entry) => {
+    const filename = path.basename(entry.path);
+    return entry.rootName !== "codex-sessions"
+      || !filename.startsWith("rollout-")
+      || !filename.endsWith(".jsonl")
+      || codexRollouts.get(filename) === entry;
+  });
 }
 
 async function rootExists(root: string, limit: Limit): Promise<{ exists: boolean; complete: boolean }> {
@@ -119,35 +151,103 @@ function rootEntries(roots: Roots | RootEntries): RootEntries {
   return Array.isArray(roots) ? roots : Object.entries(roots) as RootEntries;
 }
 
-async function discoverRaw(roots: Roots | RootEntries, limit: Limit): Promise<Discovery> {
+async function discoverRaw(
+  roots: Roots | RootEntries,
+  limit: Limit,
+  onResourcePaths?: (paths: RawPath[]) => void,
+): Promise<Discovery> {
+  const inventory = await discoverPathInventory(roots, limit);
   const staticRoots = Array.isArray(roots) ? ROOTS : roots;
-  const walked = await Promise.all(rootEntries(roots).map(async ([rootName, root]) => {
-    const status = await rootExists(root, limit);
-    if (!status.exists) return { raw: [], complete: status.complete };
-    return walk(rootName, staticRoots, root, root, limit);
-  }));
-  const raw = walked.flatMap((result) => result.raw);
+  if (onResourcePaths && inventory.complete) {
+    onResourcePaths(deduplicateCodexRollouts(inventory.paths));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+  const hydrated = await Promise.all(inventory.paths.map((entry) => hydrateRawPath(entry, staticRoots, limit)));
+  const raw = hydrated.flatMap((result) => result.raw);
   /* Codex account roots follow the legacy root in registry order. A copied
      rollout therefore resolves to its managed-account copy before ranking. */
-  const codexRollouts = new Map<string, RawEntry>();
-  await forEachCooperatively(raw, (entry) => {
-    const filename = path.basename(entry.path);
-    if (entry.rootName !== "codex-sessions" || !filename.startsWith("rollout-") || !filename.endsWith(".jsonl")) return;
-    const current = codexRollouts.get(filename);
-    if (!current || current.root !== entry.root) codexRollouts.set(filename, entry);
-  });
-  const deduplicated: RawEntry[] = [];
-  await forEachCooperatively(raw, (entry) => {
-    const filename = path.basename(entry.path);
-    if (entry.rootName !== "codex-sessions" || !filename.startsWith("rollout-") || !filename.endsWith(".jsonl") || codexRollouts.get(filename) === entry) {
-      deduplicated.push(entry);
-    }
-  });
-  return { raw: deduplicated, complete: walked.every((result) => result.complete) };
+  return {
+    raw: deduplicateCodexRollouts(raw),
+    complete: inventory.complete && hydrated.every((result) => result.complete),
+  };
+}
+
+async function discoverPathInventory(
+  roots: Roots | RootEntries,
+  limit: Limit,
+): Promise<PathDiscovery> {
+  const walked = await Promise.all(rootEntries(roots).map(async ([rootName, root]) => {
+    const status = await rootExists(root, limit);
+    if (!status.exists) return { paths: [], complete: status.complete };
+    return walkPaths(rootName, root, root, limit);
+  }));
+  return {
+    paths: walked.flatMap((result) => result.paths),
+    complete: walked.every((result) => result.complete),
+  };
 }
 
 function cappedEntries(ranked: RawEntry[], projectByPath: ReadonlyMap<string, string>): RawEntry[] {
   return selectSchemeWindow(ranked, (entry) => projectByPath.get(entry.path) ?? "other");
+}
+
+function resourceActivity(previous: FileEntry | undefined, mtime: number, size: number): Pick<FileEntry, "activity" | "activityReason"> {
+  const age = Date.now() / 1000 - mtime;
+  if (previous?.size === size && previous.mtime === mtime) {
+    if (previous.activityReason === "jsonl_turn_open" || previous.activityReason === "jsonl_turn_stalled") {
+      return age < 180
+        ? { activity: "live", activityReason: "jsonl_turn_open" }
+        : { activity: "stalled", activityReason: "jsonl_turn_stalled" };
+    }
+    if (previous.activityReason === "jsonl_turn_completed") {
+      return age < 900
+        ? { activity: "recent", activityReason: "jsonl_turn_completed" }
+        : { activity: "idle", activityReason: "jsonl_turn_completed" };
+    }
+  }
+  if (age < 20) return { activity: "live", activityReason: "mtime_fresh" };
+  if (age < 900) return { activity: "recent", activityReason: "mtime_recent" };
+  return { activity: "idle", activityReason: "mtime_old" };
+}
+
+function resourceScopeFromPaths(raw: RawPath[], baseline?: ResourceScopeSnapshot): ResourceScopeSnapshot {
+  const previousByPath = new Map((baseline?.files ?? []).map((entry) => [entry.path, entry] as const));
+  const conversations = raw.filter((entry) => entry.rootName !== "claude-tasks" && entry.path.endsWith(".jsonl"));
+  const files = conversations.map((entry): FileEntry => {
+    const previous = previousByPath.get(entry.path);
+    const engine = entry.rootName === "codex-sessions" ? "codex" as const : "claude" as const;
+    const mtime = previous?.mtime ?? Date.now() / 1000;
+    const size = previous?.size ?? 1;
+    const activity = resourceActivity(previous, mtime, size);
+    const filename = path.basename(entry.path);
+    return {
+      path: entry.path,
+      root: entry.rootName,
+      name: path.relative(entry.root, entry.path),
+      project: previous?.project ?? "other",
+      cwd: previous?.cwd,
+      projectRoot: previous?.projectRoot,
+      worktree: previous?.worktree,
+      title: previous?.title ?? (filename.startsWith("agent-") ? `Subagent ${filename.slice(6).split(".")[0]}` : `${engine === "codex" ? "Codex" : "Claude"} session`),
+      engine,
+      kind: previous?.kind ?? (filename.startsWith("agent-") ? "subagent" : "session"),
+      fmt: engine,
+      parent: previous?.parent ?? null,
+      mtime,
+      size,
+      ...activity,
+      proc: previous?.proc ?? null,
+      pid: previous?.pid ?? null,
+      model: null,
+      pendingQuestion: null,
+      waitingInput: null,
+    };
+  });
+  return {
+    files,
+    projectCatalog: baseline?.projectCatalog ?? [],
+    complete: true,
+  };
 }
 
 async function canonicalProjectCatalog(
@@ -266,7 +366,15 @@ async function entriesFromRaw(
 export async function discoverFilesWithProjectCatalog(
   roots: Roots | RootEntries = scanRootEntries(),
   _selectedProject?: string,
-  options: { persist?: boolean; persistIndex?: boolean; demote?: ReadonlySet<string>; pin?: ReadonlySet<string> } = {},
+  options: {
+    persist?: boolean;
+    persistIndex?: boolean;
+    demote?: ReadonlySet<string>;
+    loadDemote?: () => ReadonlySet<string>;
+    pin?: ReadonlySet<string>;
+    resourceBaseline?: ResourceScopeSnapshot;
+    onResourceSnapshot?: (snapshot: ResourceScopeSnapshot) => void;
+  } = {},
 ): Promise<{
   files: FileEntry[];
   projectCatalog: ProjectCatalogEntry[];
@@ -275,21 +383,28 @@ export async function discoverFilesWithProjectCatalog(
 }> {
   const scanToken = beginProjectCatalogScan(options.persist !== false || options.persistIndex === true);
   const limit = createLimiter(48);
-  const discovery = await discoverRaw(roots, limit);
+  const discovery = await discoverRaw(
+    roots,
+    limit,
+    options.onResourceSnapshot
+      ? (paths) => options.onResourceSnapshot!(resourceScopeFromPaths(paths, options.resourceBaseline))
+      : undefined,
+  );
+  const demote = options.demote ?? options.loadDemote?.();
   const snapshot = await projectCatalogSnapshotFromRaw(discovery.raw, {
     persist: options.persist,
     persistIndex: options.persistIndex,
-    excludedSummaryPaths: options.demote,
+    excludedSummaryPaths: demote,
     scanToken,
     complete: discovery.complete,
   });
   const { projectCatalog, projectByPath } = await canonicalProjectCatalog(
     snapshot.projectByPath,
     snapshot.conversationCatalog,
-    options.demote,
+    demote,
     snapshot.projectCatalog,
   );
-  const entries = await entriesFromRaw(discovery.raw, projectByPath, options.demote, options.pin, snapshot.summaryByPath);
+  const entries = await entriesFromRaw(discovery.raw, projectByPath, demote, options.pin, snapshot.summaryByPath);
   return { ...entries, projectCatalog, complete: snapshot.complete };
 }
 

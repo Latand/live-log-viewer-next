@@ -84,6 +84,12 @@ export interface FileScanOptions {
   /** Batch of transcript paths that must survive the recency cap. Used by
       operations that need one activity snapshot for a complete target set. */
   pins?: readonly string[];
+  /** Publishes the current filesystem scope for resource observation. Sidebar
+      metadata and lineage enrichment continue within the same generation. */
+  onResourceSnapshot?: (snapshot: FileCatalogScan) => void;
+  /** Last validated completed generation used only to label current resource
+      paths while the catalog projection for this generation continues. */
+  resourceBaseline?: FileCatalogScan;
 }
 
 export interface FileCatalogScan {
@@ -198,12 +204,23 @@ async function listFilesInternal(
   options: FileScanOptions = {},
 ): Promise<FileCatalogScan> {
   const persist = options.persist === true;
-  const demote = archivedTranscriptPaths();
+  const stagedResourceScope = options.onResourceSnapshot !== undefined;
+  const demote = stagedResourceScope
+    ? undefined
+    : archivedTranscriptPaths();
   const requestedPins = options.pins ? [...options.pins, ...(options.pin ? [options.pin] : [])] : options.pin;
   const pin = pinnedPathsFor(requestedPins);
   const scan = includeProjectCatalog
-    ? await discoverFilesWithProjectCatalog(undefined, selectedProject, { persist, persistIndex: options.persistIndex, demote, pin })
-    : { files: await discoverFiles(undefined, demote, pin), projectCatalog: [], complete: true };
+    ? await discoverFilesWithProjectCatalog(undefined, selectedProject, {
+        persist,
+        persistIndex: options.persistIndex,
+        demote,
+        loadDemote: stagedResourceScope ? archivedTranscriptPaths : undefined,
+        pin,
+        resourceBaseline: options.resourceBaseline,
+        onResourceSnapshot: options.onResourceSnapshot,
+      })
+    : { files: await discoverFiles(undefined, demote ?? archivedTranscriptPaths(), pin), projectCatalog: [], complete: true };
   const entries = scan.files;
   if (options.fresh) {
     const panes = panePidMap(true);
@@ -222,19 +239,26 @@ async function listFilesInternal(
     const models = entryModels(entry);
     entry.model = models.display;
     entry.launchModel = models.launch;
+    entry.effort = entryEffort(entry);
+    entry.plan = planFor(entry);
+    entry.goal = goalFor(entry);
+    entry.ctx = ctxFor(entry);
+    entry.lastTurn = lastTurnFor(entry);
+    entry.pendingWakeup = pendingWakeupFor(entry);
+    pendingQuestionFor(entry);
   });
   await forEachEntryYielding(entries, (entry) => {
     applyProcessState(entry, holders);
   });
   assignTranscriptPids(entries);
   // After pid assignment: the claude effort source is the live process argv.
-  await forEachEntryYielding(entries, (entry) => {
+  await forEachEntryBatchYielding(entries, async (entry) => {
     entry.effort = entryEffort(entry);
     entry.fast = entryFast(entry);
-  });
-  await forEachEntryBatchYielding(entries, async (entry) => {
     const pending = pendingQuestionFor(entry);
-    entry.pendingQuestion = pending && entry.pid !== null ? { ...pending, paneTarget: await resolveTarget(entry.pid) } : pending;
+    entry.pendingQuestion = pending && entry.pid !== null
+      ? { ...pending, paneTarget: await resolveTarget(entry.pid) }
+      : pending;
     const probe = await waitingInputProbe(entry);
     entry.waitingInput = probe.waiting;
     entry.rateLimit = probe.rateLimit;
@@ -245,11 +269,6 @@ async function listFilesInternal(
       entry.activity = Date.now() / 1000 - entry.mtime < 900 ? "recent" : "idle";
       entry.activityReason = "pane_at_composer";
     }
-    entry.plan = planFor(entry);
-    entry.goal = goalFor(entry);
-    entry.ctx = ctxFor(entry);
-    entry.lastTurn = lastTurnFor(entry);
-    entry.pendingWakeup = pendingWakeupFor(entry);
   });
   await linkEntries(entries, { persist });
   const pinOverlayPaths = "pinOverlayPaths" in scan ? scan.pinOverlayPaths : undefined;

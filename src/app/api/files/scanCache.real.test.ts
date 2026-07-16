@@ -18,7 +18,7 @@ fs.mkdirSync(sessions, { recursive: true });
 
 const { listFilesWithProjectCatalog } = await import("@/lib/scanner");
 const { ROOTS } = await import("@/lib/scanner/roots");
-const { cachedFileScan, resetFilesRouteCacheForTests } = await import("@/lib/scanner/scanCache");
+const { cachedFileScan, currentFileScan, resetFilesRouteCacheForTests } = await import("@/lib/scanner/scanCache");
 
 function writeSession(filename: string, cwd: string): string {
   const pathname = path.join(sessions, filename);
@@ -89,6 +89,146 @@ test("real cached scans repair private state modes under umask 000", async () =>
     fs.rmSync(privateStateDir, { recursive: true, force: true });
   }
 });
+
+test("a persisted completed generation avoids cold tail rereads for unchanged transcripts", async () => {
+  const previousTestStateDir = process.env.LLV_STATE_DIR;
+  const testStateDir = path.join(sandbox, "durable-tail-reuse-state");
+  const transcript = path.join(sessions, "durable-tail-reuse.jsonl");
+  const originalOpen = fs.openSync;
+  const originalClose = fs.closeSync;
+  const originalRead = fs.readSync;
+  const tracked = new Set<number>();
+  let tailReads = 0;
+  try {
+    process.env.LLV_STATE_DIR = testStateDir;
+    resetFilesRouteCacheForTests();
+    fs.writeFileSync(transcript, [
+      JSON.stringify({ type: "session_meta", payload: { cwd: "/repo/durable-tail", model: "gpt-5" } }),
+      "x".repeat(600_000),
+      JSON.stringify({ type: "event_msg", payload: { type: "task_complete" } }),
+      "",
+    ].join("\n"));
+    const initial = await currentFileScan({ fresh: true });
+    expect(initial.snapshot.files.find((entry) => entry.path === transcript)).toBeDefined();
+
+    const cacheStore = globalThis as typeof globalThis & { __llvCaches?: Record<string, Map<string, unknown>> };
+    for (const cache of Object.values(cacheStore.__llvCaches ?? {})) cache.clear();
+    resetFilesRouteCacheForTests();
+    fs.openSync = ((filename: fs.PathLike, flags: fs.OpenMode, mode?: fs.Mode) => {
+      const fd = originalOpen(filename, flags, mode);
+      if (filename === transcript) tracked.add(fd);
+      return fd;
+    }) as typeof fs.openSync;
+    fs.readSync = ((fd: number, buffer: NodeJS.ArrayBufferView, offset: number, length: number, position: fs.ReadPosition) => {
+      if (tracked.has(fd) && typeof position === "number" && position > 0) tailReads += 1;
+      return originalRead(fd, buffer, offset, length, position);
+    }) as typeof fs.readSync;
+    fs.closeSync = ((fd: number) => {
+      tracked.delete(fd);
+      return originalClose(fd);
+    }) as typeof fs.closeSync;
+
+    const restarted = await currentFileScan({ fresh: true });
+
+    expect(restarted.snapshot.files.find((entry) => entry.path === transcript)).toBeDefined();
+    expect(tailReads).toBe(0);
+  } finally {
+    fs.openSync = originalOpen;
+    fs.closeSync = originalClose;
+    fs.readSync = originalRead;
+    fs.rmSync(transcript, { force: true });
+    process.env.LLV_STATE_DIR = previousTestStateDir;
+    resetFilesRouteCacheForTests();
+    fs.rmSync(testStateDir, { recursive: true, force: true });
+  }
+}, 20_000);
+
+test("a same-size rewrite after restart invalidates persisted tail derivations", async () => {
+  const previousTestStateDir = process.env.LLV_STATE_DIR;
+  const testStateDir = path.join(sandbox, "durable-tail-rewrite-state");
+  const transcript = path.join(sessions, "durable-tail-rewrite.jsonl");
+  try {
+    process.env.LLV_STATE_DIR = testStateDir;
+    resetFilesRouteCacheForTests();
+    const completed = JSON.stringify({ type: "event_msg", payload: { type: "task_complete" } });
+    const started = `${JSON.stringify({ type: "event_msg", payload: { type: "task_started" } })} `;
+    expect(started).toHaveLength(completed.length);
+    fs.writeFileSync(transcript, `${JSON.stringify({ type: "session_meta", payload: { cwd: "/repo/durable-tail-rewrite" } })}\n${completed}\n`);
+    const initial = await currentFileScan({ fresh: true });
+    expect(initial.snapshot.files.find((entry) => entry.path === transcript)?.activityReason).toBe("jsonl_turn_completed");
+
+    const cacheStore = globalThis as typeof globalThis & { __llvCaches?: Record<string, Map<string, unknown>> };
+    for (const cache of Object.values(cacheStore.__llvCaches ?? {})) cache.clear();
+    resetFilesRouteCacheForTests();
+    const before = fs.statSync(transcript);
+    fs.writeFileSync(transcript, `${JSON.stringify({ type: "session_meta", payload: { cwd: "/repo/durable-tail-rewrite" } })}\n${started}\n`);
+    fs.utimesSync(transcript, before.atime, new Date(before.mtimeMs + 1_000));
+
+    const restarted = await currentFileScan({ fresh: true });
+
+    expect(restarted.snapshot.files.find((entry) => entry.path === transcript)?.activityReason).toBe("jsonl_turn_open");
+  } finally {
+    fs.rmSync(transcript, { force: true });
+    process.env.LLV_STATE_DIR = previousTestStateDir;
+    resetFilesRouteCacheForTests();
+    fs.rmSync(testStateDir, { recursive: true, force: true });
+  }
+}, 20_000);
+
+test("one file generation reads each transcript tail once beyond the tail-cache cap", async () => {
+  const previousTestStateDir = process.env.LLV_STATE_DIR;
+  const testStateDir = path.join(sandbox, "single-tail-read-state");
+  const fixtureDir = path.join(sessions, "single-tail-read");
+  const originalOpen = fs.openSync;
+  const originalClose = fs.closeSync;
+  const originalRead = fs.readSync;
+  const tracked = new Set<number>();
+  let tailReads = 0;
+  try {
+    process.env.LLV_STATE_DIR = testStateDir;
+    fs.mkdirSync(fixtureDir, { recursive: true });
+    for (let index = 0; index < 65; index += 1) {
+      fs.writeFileSync(path.join(fixtureDir, `rollout-${String(index).padStart(3, "0")}.jsonl`), [
+        JSON.stringify({ type: "session_meta", payload: { cwd: "/repo/tail-cache" } }),
+        "x".repeat(140_000),
+        JSON.stringify({ type: "turn_context", payload: { model: "gpt-5", effort: "high" } }),
+        JSON.stringify({ type: "event_msg", payload: { type: "task_complete" } }),
+        "",
+      ].join("\n"));
+    }
+    const cacheStore = globalThis as typeof globalThis & { __llvCaches?: Record<string, Map<string, unknown>> };
+    for (const cache of Object.values(cacheStore.__llvCaches ?? {})) cache.clear();
+    resetFilesRouteCacheForTests();
+    fs.openSync = ((filename: fs.PathLike, flags: fs.OpenMode, mode?: fs.Mode) => {
+      const fd = originalOpen(filename, flags, mode);
+      if (typeof filename === "string" && filename.startsWith(fixtureDir + path.sep)) tracked.add(fd);
+      return fd;
+    }) as typeof fs.openSync;
+    fs.readSync = ((fd: number, buffer: NodeJS.ArrayBufferView, offset: number, length: number, position: fs.ReadPosition) => {
+      if (tracked.has(fd) && typeof position === "number" && position > 0) tailReads += 1;
+      return originalRead(fd, buffer, offset, length, position);
+    }) as typeof fs.readSync;
+    fs.closeSync = ((fd: number) => {
+      tracked.delete(fd);
+      return originalClose(fd);
+    }) as typeof fs.closeSync;
+
+    const scan = await currentFileScan({ fresh: true });
+
+    expect(scan.snapshot.files.filter((entry) => entry.path.startsWith(fixtureDir + path.sep))).toHaveLength(65);
+    expect(tailReads).toBe(65);
+  } finally {
+    fs.openSync = originalOpen;
+    fs.closeSync = originalClose;
+    fs.readSync = originalRead;
+    fs.rmSync(fixtureDir, { recursive: true, force: true });
+    process.env.LLV_STATE_DIR = previousTestStateDir;
+    resetFilesRouteCacheForTests();
+    fs.rmSync(testStateDir, { recursive: true, force: true });
+    const cacheStore = globalThis as typeof globalThis & { __llvCaches?: Record<string, Map<string, unknown>> };
+    for (const cache of Object.values(cacheStore.__llvCaches ?? {})) cache.clear();
+  }
+}, 30_000);
 
 test("a transient real scanner failure preserves the completed route snapshot until recovery", async () => {
   resetFilesRouteCacheForTests();

@@ -6,7 +6,7 @@ import path from "node:path";
 import { AgentRegistry, setAgentRegistryForTests } from "@/lib/agent/registry";
 import type { FileEntry } from "@/lib/types";
 
-import { overlaySessionTitles } from "./titleProjection";
+import { overlayResourceSessionTitles, overlaySessionTitles } from "./titleProjection";
 import { writeSessionTitle } from "./titleStore";
 
 const UUID = "11111111-2222-4333-8444-555555555555";
@@ -100,6 +100,36 @@ test("a subagent is not renamable and receives no override affordance", () => {
   const file = entry({ path: subPath, kind: "subagent" });
   overlaySessionTitles([file]);
   expect(file.renamable).toBe(false);
+});
+
+test("the resource projection applies identity and titles without transcript-head eligibility reads", () => {
+  const pathname = `/home/u/.codex/sessions/2026/07/16/rollout-${UUID}.jsonl`;
+  const registry = new AgentRegistry(path.join(stateDir, "agent-registry.json"));
+  const resourceConversation = registry.ensureConversation("codex", pathname, null);
+  setAgentRegistryForTests(registry);
+  writeSessionTitle(
+    [`conversation:${resourceConversation.id}`],
+    `conversation:${resourceConversation.id}`,
+    "Resource name",
+    undefined,
+    "t1",
+  );
+  const originalOpen = fs.openSync;
+  let transcriptReads = 0;
+  fs.openSync = ((...args: Parameters<typeof fs.openSync>) => {
+    if (args[0] === pathname) transcriptReads += 1;
+    return originalOpen(...args);
+  }) as typeof fs.openSync;
+  try {
+    const file = entry({ path: pathname, root: "codex-sessions", engine: "codex", fmt: "codex", size: 1024 });
+    overlayResourceSessionTitles([file]);
+    expect(file.conversationId).toBe(resourceConversation.id);
+    expect(file.title).toBe("Resource name");
+    expect(file.renamable).toBeUndefined();
+    expect(transcriptReads).toBe(0);
+  } finally {
+    fs.openSync = originalOpen;
+  }
 });
 
 function setRegistryConversation() {

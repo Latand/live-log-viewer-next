@@ -65,6 +65,7 @@ const MIGRATED_SENTINEL = ".migrated-from-legacy";
  * next call retries instead of silently accepting an empty state dir.
  */
 export function migrateLegacyDir(target: string, legacy: string): void {
+  if (process.env.LLV_RESOURCE_OBSERVATION_WORKER === "1") return;
   if (migrated.has(target)) return;
   const sentinel = path.join(target, MIGRATED_SENTINEL);
   const stamp = () => `${new Date().toISOString()} ${legacy}\n`;
