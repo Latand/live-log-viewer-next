@@ -744,6 +744,100 @@ describe("CodexAppServerHost", () => {
     await replacement.release();
   });
 
+  test("a buffered completion keeps a stale active resume snapshot terminal", async () => {
+    const threadId = "buffered-terminal-stale-active-snapshot";
+    const turnId = "turn-completed-during-resume";
+    const eventStore = new MemoryEventStore();
+    const server = new FakeAppServer(threadId, threadId, false, [{
+      id: turnId,
+      status: "inProgress",
+      items: [],
+    }], { type: "active", activeFlags: ["running"] }, {
+      method: "turn/completed",
+      params: { threadId, turn: { id: turnId, status: "completed" } },
+    });
+
+    const host = await CodexAppServerHost.adopt(threadId, {
+      cwd: "/repo",
+      eventStore,
+      spawnProcess: fakeSpawn(server),
+    });
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-stale-resume-registry-"));
+    const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+    const key = { engine: "codex" as const, sessionId: threadId };
+    registry.upsert({
+      key,
+      artifactPath: `/sessions/${threadId}.jsonl`,
+      cwd: "/repo",
+      accountId: null,
+      status: "dead",
+      host: null,
+      structuredHost: {
+        kind: "codex-app-server",
+        endpoint: "stdio:released",
+        process: null,
+        eventCursor: 0,
+        protocolVersion: null,
+        writerClaimEpoch: 7,
+        activeTurnRef: null,
+        pendingAttention: [],
+        activeFlags: [],
+      },
+      claimEpoch: 7,
+      claimOwner: "viewer",
+      pendingAction: null,
+    });
+    const stopPersistence = await bindCodexHostPersistence(registry, key, host, "viewer", 7);
+
+    expect(eventStore.load(threadId)).toEqual([
+      { kind: "turn-started", turnId, seq: 1 },
+      { kind: "turn-ended", turnId, status: "completed", seq: 2 },
+      { kind: "session-status", status: "idle", seq: 3 },
+    ]);
+    expect(await host.health()).toMatchObject({ status: "idle", activeTurnRef: null });
+    expect(registry.snapshot().entries[`codex:${threadId}`]).toMatchObject({
+      status: "idle",
+      structuredHost: { eventCursor: 3, activeTurnRef: null },
+    });
+
+    stopPersistence();
+    await host.release();
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+
+  test("a newer buffered turn survives the stale snapshot of its completed predecessor", async () => {
+    const threadId = "buffered-successor-after-stale-snapshot";
+    const completedTurnId = "turn-stale-snapshot";
+    const activeTurnId = "turn-started-during-resume";
+    const eventStore = new MemoryEventStore();
+    const server = new FakeAppServer(threadId, threadId, false, [{
+      id: completedTurnId,
+      status: "inProgress",
+      items: [],
+    }], { type: "active", activeFlags: ["running"] }, [
+      {
+        method: "turn/completed",
+        params: { threadId, turn: { id: completedTurnId, status: "completed" } },
+      },
+      { method: "turn/started", params: { threadId, turn: { id: activeTurnId } } },
+    ]);
+
+    const host = await CodexAppServerHost.adopt(threadId, {
+      cwd: "/repo",
+      eventStore,
+      spawnProcess: fakeSpawn(server),
+    });
+
+    expect(eventStore.load(threadId)).toEqual([
+      { kind: "turn-started", turnId: completedTurnId, seq: 1 },
+      { kind: "turn-ended", turnId: completedTurnId, status: "completed", seq: 2 },
+      { kind: "turn-started", turnId: activeTurnId, seq: 3 },
+      { kind: "session-status", status: "active", activeFlags: ["running"], seq: 4 },
+    ]);
+    expect(await host.health()).toMatchObject({ status: "active", activeTurnRef: activeTurnId });
+    await host.release();
+  });
+
   test("deduplicates a buffered lifecycle overlap against the durable crash prefix", async () => {
     const threadId = "019f66b5-8694-7410-8671-fbec75484a86-overlap";
     const turnId = "turn-overlapping-942";

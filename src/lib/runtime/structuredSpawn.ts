@@ -114,7 +114,14 @@ function releaseAdoptionClaim(
 
 export interface StructuredSpawnDependencies {
   startHost?(input: StructuredSpawnInput, capability: string): Promise<SpawnedStructuredHost>;
-  bindHost?(registry: AgentRegistry, key: SessionKey, host: SpawnedStructuredHost, claimOwner: string, claimEpoch: number): Promise<() => void>;
+  bindHost?(
+    registry: AgentRegistry,
+    key: SessionKey,
+    host: SpawnedStructuredHost,
+    claimOwner: string,
+    claimEpoch: number,
+    releasedStatus?: "unhosted" | "dead",
+  ): Promise<() => void>;
   publishHost?(key: SessionKey, host: SpawnedStructuredHost): Promise<() => Promise<void>>;
   deliverFirst?(input: StructuredSpawnInput, artifactPath: string): Promise<void>;
   processIdentity?(): { pid: number; startIdentity: string | null };
@@ -407,10 +414,11 @@ async function defaultBindHost(
   host: SpawnedStructuredHost,
   claimOwner: string,
   claimEpoch: number,
+  releasedStatus: "unhosted" | "dead" = "unhosted",
 ): Promise<() => void> {
   return key.engine === "codex"
-    ? await bindCodexHostPersistence(registry, key, host as CodexAppServerHost, claimOwner, claimEpoch)
-    : await bindClaudeHostPersistence(registry, key, host as ClaudeStreamBrokerHost, claimOwner, claimEpoch);
+    ? await bindCodexHostPersistence(registry, key, host as CodexAppServerHost, claimOwner, claimEpoch, releasedStatus)
+    : await bindClaudeHostPersistence(registry, key, host as ClaudeStreamBrokerHost, claimOwner, claimEpoch, releasedStatus);
 }
 
 async function defaultDeliverFirst(input: StructuredSpawnInput, artifactPath: string): Promise<void> {
@@ -548,10 +556,15 @@ export async function spawnStructuredConversation(
           host,
           adoptionClaim.claimOwner,
           adoptionClaim.claimEpoch,
+          "dead",
         );
       }
     }
-    await cleanupHost(host, binding);
+    try {
+      await cleanupHost(host, binding);
+    } catch {
+      throw error;
+    }
     let failedEntry: AgentRegistryEntry | null = null;
     let failedIdentity = resumeIdentity;
     if (key) {

@@ -2612,14 +2612,16 @@ export class AgentRegistry {
       const conversation = file.conversations[conversationId];
       const keyId = sessionKeyId(key);
       const entry = file.entries[keyId];
+      const structuredProcess = entry?.structuredHost?.process ?? null;
+      const staleStructuredWrapper = structuredProcess !== null && !this.ownerAlive(structuredProcess);
       if (!conversation
         || conversation.engine !== key.engine
         || !conversation.generations.some((generation) => generation.id === key.sessionId)
         || !entry
         || entry.host
-        || entry.structuredHost?.process
-        || entry.claimOwner
-        || (entry.status !== "dead" && entry.status !== "unhosted")) return false;
+        || (structuredProcess !== null && !staleStructuredWrapper)
+        || (entry.claimOwner && !staleStructuredWrapper)
+        || (!staleStructuredWrapper && entry.status !== "dead" && entry.status !== "unhosted")) return false;
       const replacement = {
         ...entry,
         host: null,

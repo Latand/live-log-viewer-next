@@ -129,6 +129,10 @@ class RoundTripHost implements SpawnedStructuredHost {
     this.identity = engine === "codex" ? { threadId: sessionId, path: artifactPath } : { sessionId };
   }
 
+  setWriterFence(fence: () => boolean): void {
+    void fence;
+  }
+
   onStateChange(listener: (state: HostState) => void): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
@@ -250,6 +254,42 @@ class UnreapableRoundTripHost extends RoundTripHost {
   override async release(): Promise<void> {
     this.releaseCount += 1;
     throw new Error("Codex app-server child could not be reaped");
+  }
+}
+
+class LateReapingRoundTripHost extends RoundTripHost {
+  private readonly lateReapListeners = new Set<(state: HostState) => void>();
+  private reaped = false;
+
+  override onStateChange(listener: (state: HostState) => void): () => void {
+    this.lateReapListeners.add(listener);
+    return () => this.lateReapListeners.delete(listener);
+  }
+
+  override async health(): Promise<HostState> {
+    const state = await super.health();
+    return {
+      ...state,
+      status: this.reaped ? "unhosted" : "idle",
+      endpoint: this.reaped ? "stdio:released" : state.endpoint,
+      pid: this.reaped ? null : state.pid,
+      processStartIdentity: this.reaped ? null : state.processStartIdentity,
+      eventCursor: 942,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    };
+  }
+
+  override async release(): Promise<void> {
+    this.releaseCount += 1;
+    throw new Error("Codex app-server child could not be reaped");
+  }
+
+  async completeLateReap(): Promise<void> {
+    this.reaped = true;
+    const state = await this.health();
+    for (const listener of this.lateReapListeners) listener(state);
   }
 }
 
@@ -616,7 +656,7 @@ test("an uncertain adoption cleanup retains the child process and writer claim",
       return () => { targetRegistry.releaseStructuredHostClaim(key, claimOwner, claimEpoch); };
     },
     processIdentity: () => ({ pid: process.pid, startIdentity: "uncertain-adoption-owner" }),
-  })).rejects.toThrow("Codex app-server child could not be reaped");
+  })).rejects.toThrow("runtime event ledger sequence gap after 942");
 
   expect(registry.snapshot().receipts[begun.receipt.launchId]).toMatchObject({ state: "starting" });
   expect(registry.snapshot().entries[`codex:${sessionId}`]).toMatchObject({
@@ -630,6 +670,94 @@ test("an uncertain adoption cleanup retains the child process and writer claim",
       writerClaimEpoch: 4,
     },
   });
+  expect(host.releaseCount).toBe(1);
+  journal.close();
+});
+
+test("late adoption cleanup preserves the open failure and terminalizes the released source", async () => {
+  const sessionId = crypto.randomUUID();
+  const cwd = path.join(sandbox, `late-adoption-cleanup-${sessionId}`);
+  const artifactPath = path.join(cwd, `${sessionId}.jsonl`);
+  fs.mkdirSync(cwd, { recursive: true });
+  fs.writeFileSync(artifactPath, "");
+  const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const journal = new RuntimeJournal(path.join(cwd, "runtime.sqlite"), { structuredHosts: true });
+  const client = runtimeClient(journal);
+  const launchProfile = emptyLaunchProfile({ cwd, model: "gpt-5.6-luna" });
+  const conversation = registry.ensureConversation("codex", artifactPath, "codex-subscription");
+  registry.upsert({
+    key: { engine: "codex", sessionId },
+    artifactPath,
+    cwd,
+    accountId: "codex-subscription",
+    launchProfile,
+    status: "dead",
+    host: null,
+    structuredHost: {
+      kind: "codex-app-server",
+      endpoint: "stdio:released",
+      process: null,
+      eventCursor: 942,
+      protocolVersion: "0.144.1",
+      writerClaimEpoch: 3,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 3,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  const begun = registry.beginSpawnRequest({
+    engine: "codex",
+    cwd,
+    transport: "structured",
+    accountId: "codex-subscription",
+    conversationId: conversation.id,
+    purpose: "resume-successor",
+    expectedArtifactPath: artifactPath,
+    launchProfile,
+  });
+  if (begun.kind !== "created") throw new Error("resume receipt was unavailable");
+  const host = new LateReapingRoundTripHost("codex", artifactPath, sessionId);
+  const openFailure = new StructuredHostAdoptionCleanupError(
+    "runtime event ledger sequence gap after 942",
+    host,
+  );
+  let surfaced: unknown;
+
+  try {
+    await spawnStructuredConversation({
+      engine: "codex",
+      receipt: begun.receipt,
+      spec: { command: "codex", cwd, windowName: "resume", engine: "codex", transcript: artifactPath, launchProfile },
+      account: { engine: "codex", accountId: "codex-subscription", kind: "managed", home: cwd, transcriptRoot: cwd, env: { NODE_ENV: "test" } },
+      prompt: "",
+      registry,
+      client,
+    }, {
+      startHost: async () => { throw openFailure; },
+      processIdentity: () => ({ pid: process.pid, startIdentity: "late-adoption-owner" }),
+    });
+  } catch (error) {
+    surfaced = error;
+  }
+
+  await host.completeLateReap();
+
+  expect(registry.snapshot().receipts[begun.receipt.launchId]).toMatchObject({ state: "starting" });
+  expect(registry.snapshot().entries[`codex:${sessionId}`]).toMatchObject({
+    status: "dead",
+    claimEpoch: 4,
+    claimOwner: null,
+    structuredHost: {
+      endpoint: "stdio:released",
+      process: null,
+      eventCursor: 942,
+      writerClaimEpoch: 4,
+    },
+  });
+  expect(surfaced).toBe(openFailure);
   expect(host.releaseCount).toBe(1);
   journal.close();
 });
@@ -974,7 +1102,7 @@ test("spawn failure preserves the staged writer when its child cannot be reaped"
     },
     deliverFirst: async () => { throw new Error("first message delivery failed"); },
     processIdentity: () => ({ pid: process.pid, startIdentity: "test-process" }),
-  })).rejects.toThrow("Codex app-server child could not be reaped");
+  })).rejects.toThrow("first message delivery failed");
 
   expect(registry.snapshot().receipts[begun.receipt.launchId]).toMatchObject({ state: "path-pending" });
   expect(registry.snapshot().entries[`codex:${sessionId}`]).toMatchObject({
@@ -2141,6 +2269,89 @@ test("a queued kill terminalizes after restart when its generation is confirmed 
   ]);
 });
 
+test("a delivering kill terminalizes a stale structured wrapper owned by the live Viewer", async () => {
+  const id = crypto.randomUUID();
+  const cwd = path.join(sandbox, `absent-wrapper-kill-${id}`);
+  fs.mkdirSync(cwd, { recursive: true });
+  const artifactPath = path.join(cwd, `${id}.jsonl`);
+  const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const journal = new RuntimeJournal(path.join(cwd, "runtime.sqlite"), { structuredHosts: true });
+  const client = runtimeClient(journal);
+  const conversation = registry.ensureConversation("claude", artifactPath, "default");
+  const key = { engine: "claude" as const, sessionId: id };
+  registry.upsert({
+    key,
+    artifactPath,
+    cwd,
+    accountId: "default",
+    status: "live",
+    host: null,
+    structuredHost: {
+      kind: "claude-broker",
+      endpoint: "stdio:2000000000",
+      process: { pid: 2_000_000_000, startIdentity: "missing-wrapper" },
+      eventCursor: 17,
+      protocolVersion: "2.1.209",
+      writerClaimEpoch: 4,
+      activeTurnRef: "completed-review-turn",
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 4,
+    claimOwner: `structured-host:${JSON.stringify({
+      pid: process.pid,
+      startIdentity: null,
+    })}`,
+    pendingAction: null,
+  });
+  await client.append({
+    scope: { type: "session", id: conversation.id },
+    kind: "session-status",
+    payload: {
+      conversationId: conversation.id,
+      sessionKey: key,
+      hostKind: "claude-broker",
+      host: "hosted",
+      turn: "running",
+      provenance: "structured",
+      accountId: "default",
+      parentConversationId: null,
+      cwd,
+      artifactPath,
+      capabilities: { steer: false, structuredAttention: true },
+      activeTurnId: "completed-review-turn",
+    },
+  });
+  const operationId = `kill_absent_wrapper_${id}`;
+  await client.command({
+    kind: "kill",
+    operationId,
+    idempotencyKey: operationId,
+    conversationId: conversation.id,
+    sessionKey: key,
+  });
+  await client.transitionOperation(operationId, "delivering");
+
+  await bindStructuredDeliveryQueue([], { registry, client });
+
+  expect((await client.operationStatus(operationId))?.receipt).toMatchObject({
+    kind: "kill",
+    status: "delivered",
+  });
+  expect(registry.snapshot().entries[`claude:${id}`]).toMatchObject({
+    status: "dead",
+    structuredHost: null,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  expect(journal.snapshot().sessions.find((session) => session.conversationId === conversation.id)).toMatchObject({
+    host: "dead",
+    turn: "unknown",
+    activeTurnId: null,
+  });
+  expect(await client.effectBatch(["runtime.kill"], 0)).toEqual([]);
+});
+
 test("a dead predecessor kill terminalizes without touching its live successor", async () => {
   const predecessorId = crypto.randomUUID();
   const successorId = crypto.randomUUID();
@@ -2242,7 +2453,7 @@ test("a queued kill waits when an unadopted structured process may still be live
     structuredHost: {
       kind: "codex-app-server",
       endpoint: "fake:unadopted",
-      process: { pid: process.pid, startIdentity: "potentially-live" },
+      process: { pid: process.pid, startIdentity: null },
       eventCursor: 1,
       protocolVersion: "fake-v1",
       writerClaimEpoch: 1,

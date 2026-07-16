@@ -259,6 +259,7 @@ export class CodexAppServerHost implements EngineHost {
   private readonly stateListeners = new Set<(state: HostState) => void>();
   private readonly preRestoreEvents: UnsequencedEvent[] = [];
   private readonly preRestoreMessages: Array<{ message: JsonObject; bytes: number }> = [];
+  private readonly bufferedTerminalTurnIds = new Set<string>();
   private bufferedNotificationOverlap: string[] = [];
   private nextRpcId = 1;
   private stdoutBuffer = "";
@@ -373,8 +374,8 @@ export class CodexAppServerHost implements EngineHost {
       provisional.flushPreRestoreEvents();
       provisional.flushPreRestoreMessages(threadId ? result : null);
       if (threadId) provisional.reconcileThreadHistory(result);
-      provisional.endBufferedNotificationReconciliation();
       provisional.reconcileAfterOpen(threadStatus(result), resumedActiveTurnId(result));
+      provisional.endBufferedNotificationReconciliation();
       return provisional;
     } catch (error) {
       try {
@@ -675,7 +676,9 @@ export class CodexAppServerHost implements EngineHost {
     if (resumedStatus.type === "active" && !resumedTurnId) {
       throw new Error("thread/resume returned active status without an active turn id");
     }
-    if (resumedStatus.type === "active" && resumedTurnId && this.activeTurnId !== resumedTurnId) {
+    const resumedTurnTerminalized = resumedTurnId !== null && this.bufferedTerminalTurnIds.has(resumedTurnId);
+    if (resumedStatus.type === "active" && resumedTurnId && !resumedTurnTerminalized
+      && this.activeTurnId !== resumedTurnId) {
       if (this.activeTurnId) this.emit({ kind: "turn-ended", turnId: this.activeTurnId, status: "error" });
       this.activeTurnId = resumedTurnId;
       this.emit({ kind: "turn-started", turnId: resumedTurnId });
@@ -690,7 +693,9 @@ export class CodexAppServerHost implements EngineHost {
       this.attentions.delete(attentionId);
       this.emit({ kind: "attention-resolved", id: attentionId, resolution: "host-restarted" });
     }
-    this.emitThreadStatus(resumedStatus);
+    this.emitThreadStatus(resumedTurnTerminalized && !this.activeTurnId
+      ? { type: "idle", activeFlags: [] }
+      : resumedStatus);
   }
 
   private reconcileThreadHistory(result: unknown): void {
@@ -703,7 +708,8 @@ export class CodexAppServerHost implements EngineHost {
     const turnEvents = this.events.filter((event) => "turnId" in event && event.turnId === turnId);
     const status = stringField(turn, "status");
     const hasStarted = turnEvents.some((event) => event.kind === "turn-started");
-    if (!hasStarted || (status === "inProgress" && this.activeTurnId !== turnId)) {
+    if (!this.bufferedTerminalTurnIds.has(turnId)
+      && (!hasStarted || (status === "inProgress" && this.activeTurnId !== turnId))) {
       this.activeTurnId = turnId;
       this.emit({ kind: "turn-started", turnId });
     }
@@ -828,6 +834,7 @@ export class CodexAppServerHost implements EngineHost {
   }
 
   private beginBufferedNotificationReconciliation(): void {
+    this.bufferedTerminalTurnIds.clear();
     const durableKeys: string[] = [];
     for (const event of this.events) {
       if (event.kind === "attention" && !this.attentions.has(event.id)) continue;
@@ -887,6 +894,7 @@ export class CodexAppServerHost implements EngineHost {
 
   private endBufferedNotificationReconciliation(): void {
     this.bufferedNotificationOverlap = [];
+    this.bufferedTerminalTurnIds.clear();
   }
 
   private flushPreRestoreMessages(resumeResult: unknown | null): void {
@@ -1112,6 +1120,7 @@ export class CodexAppServerHost implements EngineHost {
     if (method === "turn/completed" && turnId) {
       const turn = record(params.turn);
       const status = terminalStatus(turn?.status);
+      if (reconcileBufferedLifecycle) this.bufferedTerminalTurnIds.add(turnId);
       if (reconcileBufferedLifecycle
         && this.events.some((event) => event.kind === "turn-ended" && event.turnId === turnId)) return;
       if (this.activeTurnId === turnId) this.activeTurnId = null;
