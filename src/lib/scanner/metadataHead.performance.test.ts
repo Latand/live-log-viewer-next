@@ -7,6 +7,7 @@ import type { FileEntry } from "../types";
 import { activityVerdict } from "./activity";
 import { describeFile } from "./describe";
 import { entryEffort } from "./effort";
+import { readHead } from "./head";
 import { entryModels } from "./model";
 
 const SANDBOX = fs.mkdtempSync(path.join(os.tmpdir(), "llv-metadata-head-test-"));
@@ -315,6 +316,20 @@ test("a transient head read failure remains retryable for the same file identity
     fs.readSync = originalReadSync;
     fs.closeSync = originalCloseSync;
   }
+});
+
+test("the shared head cache keeps private bytes and honors a zero-byte request", () => {
+  const pathname = path.join(SANDBOX, "private-head-bytes.jsonl");
+  fs.writeFileSync(pathname, "immutable\n");
+  const stat = fs.statSync(pathname);
+
+  const first = readHead(pathname, stat.size, stat.mtimeMs, { maxBytes: 8 });
+  expect(first.value?.text).toBe("immutabl");
+  first.value!.bytes[0] = "X".charCodeAt(0);
+
+  const second = readHead(pathname, stat.size, stat.mtimeMs, { maxBytes: 8 });
+  expect(second.value?.text).toBe("immutabl");
+  expect(readHead(pathname, stat.size, stat.mtimeMs, { maxBytes: 0 }).value?.bytes).toHaveLength(0);
 });
 
 test("large append-only transcripts keep model and effort head reads bounded", () => {

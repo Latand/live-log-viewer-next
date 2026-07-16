@@ -121,23 +121,24 @@ function primePersistedFileDerivations(snapshot: FileScanSnapshot): void {
       continue;
     }
     if (current.size !== entry.size || current.mtimeMs / 1000 !== entry.mtime) continue;
+    const mtimeMs = entry.mtime * 1000;
     const turnState = persistedTurnState(entry);
-    if (turnState !== undefined) globalCache<[number, string | null]>("turn").set(entry.path, [entry.size, turnState]);
+    if (turnState !== undefined) globalCache<[number, number, string | null]>("turn").set(entry.path, [entry.size, mtimeMs, turnState]);
     if (!(entry.root === "claude-projects" && entry.path.includes(`${path.sep}subagents${path.sep}`))) {
-      globalCache<[number, { display: string | null; launch: string | null }]>("model")
-        .set(entry.path, [entry.size, { display: entry.model, launch: entry.launchModel ?? null }]);
+      globalCache<[number, number, { display: string | null; launch: string | null }]>("model")
+        .set(entry.path, [entry.size, mtimeMs, { display: entry.model, launch: entry.launchModel ?? null }]);
     }
     if (Object.hasOwn(entry, "effort") && !(entry.engine === "claude" && entry.proc === "running")) {
-      globalCache<[number, string | null]>("effort").set(entry.path, [entry.size, entry.effort ?? null]);
+      globalCache<[number, number, string | null]>("effort").set(entry.path, [entry.size, mtimeMs, entry.effort ?? null]);
     }
-    if (Object.hasOwn(entry, "plan")) globalCache<[number, FileEntry["plan"]]>("plan").set(entry.path, [entry.size, entry.plan]);
-    if (Object.hasOwn(entry, "goal")) globalCache<[number, FileEntry["goal"]]>("goal").set(entry.path, [entry.size, entry.goal]);
-    if (Object.hasOwn(entry, "ctx")) globalCache<[number, FileEntry["ctx"]]>("ctx").set(entry.path, [entry.size, entry.ctx]);
+    if (Object.hasOwn(entry, "plan")) globalCache<[number, number, FileEntry["plan"]]>("plan-v2").set(entry.path, [entry.size, mtimeMs, entry.plan]);
+    if (Object.hasOwn(entry, "goal")) globalCache<[number, number, FileEntry["goal"]]>("goal-v2").set(entry.path, [entry.size, mtimeMs, entry.goal]);
+    if (Object.hasOwn(entry, "ctx")) globalCache<[number, number, FileEntry["ctx"]]>("ctx-v2").set(entry.path, [entry.size, mtimeMs, entry.ctx]);
     if (Object.hasOwn(entry, "lastTurn")) {
-      globalCache<[number, FileEntry["lastTurn"]]>("last-turn").set(entry.path, [entry.size, entry.lastTurn]);
+      globalCache<[number, number, FileEntry["lastTurn"]]>("last-turn-v2").set(entry.path, [entry.size, mtimeMs, entry.lastTurn]);
     }
     if (Object.hasOwn(entry, "pendingWakeup")) {
-      globalCache<[number, FileEntry["pendingWakeup"]]>("wakeup").set(entry.path, [entry.size, entry.pendingWakeup]);
+      globalCache<[number, number, FileEntry["pendingWakeup"]]>("wakeup-v2").set(entry.path, [entry.size, mtimeMs, entry.pendingWakeup]);
     }
   }
 }

@@ -39,8 +39,9 @@ function newlineCount(bytes: Uint8Array): number {
 }
 
 function result(bytes: Buffer, complete: boolean): HeadReadResult {
+  const owned = Buffer.from(bytes);
   return {
-    value: { bytes, text: bytes.toString("utf8"), read: bytes.length },
+    value: { bytes: owned, text: owned.toString("utf8"), read: owned.length },
     complete,
   };
 }
@@ -77,7 +78,7 @@ export function readHead(
   const base = sameIdentity ? cached.bytes : Buffer.alloc(0);
   let lines = lineLimit > 0 ? newlineCount(base) : 0;
   if (base.length >= target || (cached?.eof && sameIdentity) || (lineLimit > 0 && lines >= lineLimit)) {
-    return result(base.subarray(0, target || base.length), true);
+    return result(base.subarray(0, target), true);
   }
 
   const chunks: Buffer[] = base.length > 0 ? [base] : [];

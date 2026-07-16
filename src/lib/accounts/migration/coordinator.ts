@@ -11,7 +11,7 @@ import {
 } from "@/lib/board/store";
 import { forEachCooperatively, yieldToRuntime } from "@/lib/cooperative";
 import { listFiles } from "@/lib/scanner";
-import { tailRecords } from "@/lib/scanner/activity";
+import { tailRecordsResult } from "@/lib/scanner/activity";
 import type { FileEntry } from "@/lib/types";
 
 import {
@@ -76,10 +76,15 @@ async function inventory(files: FileEntry[], registry: AgentRegistry): Promise<C
     const existing = conversationByPath.get(entry.path) ?? null;
     const parentConversation = entry.parent ? conversationByPath.get(entry.parent) ?? null : null;
     const owner = accountManager.resolveTranscriptOwner(engine, entry.path);
-    const parsed = turnStateFromRecords(tailRecords(entry.path, entry.size, entry.mtime * 1000), engine === "codex", true);
-    const turn = parsed.state !== "terminal" && (entry.activity === "idle" || entry.activity === "recent")
-      ? { state: "idle" as const, source: "empty" as const, terminalAt: null }
-      : parsed;
+    const tail = tailRecordsResult(entry.path, entry.size, entry.mtime * 1000);
+    const parsed = tail.complete ? turnStateFromRecords(tail.records, engine === "codex", true) : null;
+    const turn = parsed
+      ? parsed.state !== "terminal" && (entry.activity === "idle" || entry.activity === "recent")
+        ? { state: "idle" as const, source: "empty" as const, terminalAt: null }
+        : parsed
+      : existing
+        ? { state: existing.turn.state, source: existing.turn.source, terminalAt: existing.turn.terminalAt }
+        : { state: "unknown" as const, source: "empty" as const, terminalAt: null };
     const currentProfile = launchProfileByPath.get(entry.path)
       ?? existing?.generations.find((generation) => generation.path === entry.path)?.launchProfile;
     const configuredRoot = process.env.LLV_ROOT_CONVERSATION_ID;
@@ -104,7 +109,9 @@ async function inventory(files: FileEntry[], registry: AgentRegistry): Promise<C
       turn,
       expectedTurnObservedAt: existing?.turn.observedAt ?? null,
       startedAt: headSessionStartedAt(entry.path),
-      observedAt: new Date(Math.max(entry.mtime * 1000, inventoryStartedAt)).toISOString(),
+      observedAt: !tail.complete && existing?.turn.observedAt
+        ? existing.turn.observedAt
+        : new Date(Math.max(entry.mtime * 1000, inventoryStartedAt)).toISOString(),
     });
   });
   return observations;

@@ -19,6 +19,12 @@ fs.mkdirSync(sessions, { recursive: true });
 const { listFilesWithProjectCatalog } = await import("@/lib/scanner");
 const { ROOTS } = await import("@/lib/scanner/roots");
 const { cachedFileScan, currentFileScan, resetFilesRouteCacheForTests } = await import("@/lib/scanner/scanCache");
+const { activityVerdict } = await import("@/lib/scanner/activity");
+const { entryEffort } = await import("@/lib/scanner/effort");
+const { entryModels } = await import("@/lib/scanner/model");
+const { planFor, goalFor } = await import("@/lib/scanner/plan");
+const { ctxFor } = await import("@/lib/scanner/context");
+const { lastTurnFor } = await import("@/lib/scanner/turnDuration");
 
 function writeSession(filename: string, cwd: string): string {
   const pathname = path.join(sessions, filename);
@@ -98,7 +104,7 @@ test("a persisted completed generation avoids cold tail rereads for unchanged tr
   const originalClose = fs.closeSync;
   const originalRead = fs.readSync;
   const tracked = new Set<number>();
-  let tailReads = 0;
+  let transcriptReads = 0;
   try {
     process.env.LLV_STATE_DIR = testStateDir;
     resetFilesRouteCacheForTests();
@@ -120,7 +126,7 @@ test("a persisted completed generation avoids cold tail rereads for unchanged tr
       return fd;
     }) as typeof fs.openSync;
     fs.readSync = ((fd: number, buffer: NodeJS.ArrayBufferView, offset: number, length: number, position: fs.ReadPosition) => {
-      if (tracked.has(fd) && typeof position === "number" && position > 0) tailReads += 1;
+      if (tracked.has(fd)) transcriptReads += 1;
       return originalRead(fd, buffer, offset, length, position);
     }) as typeof fs.readSync;
     fs.closeSync = ((fd: number) => {
@@ -128,10 +134,35 @@ test("a persisted completed generation avoids cold tail rereads for unchanged tr
       return originalClose(fd);
     }) as typeof fs.closeSync;
 
-    const restarted = await currentFileScan({ fresh: true });
+    const restarted = await cachedFileScan(undefined, undefined, 0);
+    const persisted = restarted.snapshot.files.find((entry) => entry.path === transcript);
+    expect(persisted).toBeDefined();
+    const mtimeMs = persisted!.mtime * 1000;
+    const caches = cacheStore.__llvCaches ?? {};
+    expect(caches.turn?.get(transcript)).toEqual([persisted!.size, mtimeMs, "done"]);
+    expect(caches.model?.get(transcript)).toEqual([
+      persisted!.size,
+      mtimeMs,
+      { display: persisted!.model, launch: persisted!.launchModel ?? null },
+    ]);
+    if (Object.hasOwn(persisted!, "effort")) {
+      expect(caches.effort?.get(transcript)).toEqual([persisted!.size, mtimeMs, persisted!.effort ?? null]);
+    }
+    if (Object.hasOwn(persisted!, "plan")) expect(caches["plan-v2"]?.get(transcript)).toEqual([persisted!.size, mtimeMs, persisted!.plan]);
+    if (Object.hasOwn(persisted!, "goal")) expect(caches["goal-v2"]?.get(transcript)).toEqual([persisted!.size, mtimeMs, persisted!.goal]);
+    if (Object.hasOwn(persisted!, "ctx")) expect(caches["ctx-v2"]?.get(transcript)).toEqual([persisted!.size, mtimeMs, persisted!.ctx]);
+    if (Object.hasOwn(persisted!, "lastTurn")) {
+      expect(caches["last-turn-v2"]?.get(transcript)).toEqual([persisted!.size, mtimeMs, persisted!.lastTurn]);
+    }
 
-    expect(restarted.snapshot.files.find((entry) => entry.path === transcript)).toBeDefined();
-    expect(tailReads).toBe(0);
+    activityVerdict(persisted!.root, transcript, persisted!.mtime, persisted!.size);
+    entryModels(persisted!);
+    entryEffort(persisted!);
+    planFor(persisted!);
+    goalFor(persisted!);
+    ctxFor(persisted!);
+    lastTurnFor(persisted!);
+    expect(transcriptReads).toBe(0);
   } finally {
     fs.openSync = originalOpen;
     fs.closeSync = originalClose;
