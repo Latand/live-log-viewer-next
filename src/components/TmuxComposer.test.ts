@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
+import type { RuntimeReceipt } from "@/components/runtime/runtimeModel";
 import type { RuntimeSessionView } from "@/hooks/useRuntime";
 import { translate } from "@/lib/i18n";
 
@@ -64,6 +65,99 @@ test("an immediate retry receipt supersedes an older failed bus receipt", () => 
   const queued = { ...failed, status: "queued" as const, reason: null, revision: 4 };
 
   expect(mergeRuntimeReceipts([failed], [queued])).toEqual([queued]);
+});
+
+test("the highest receipt revision wins before wall-clock ordering", () => {
+  const delivering: RuntimeReceipt = {
+    operationId: "op-clock-rollback",
+    idempotencyKey: "key-clock-rollback",
+    conversationId: "conv-one",
+    kind: "send",
+    status: "delivering",
+    reason: null,
+    text: "keep the authoritative state",
+    at: "2026-07-16T10:00:00.000Z",
+    revision: 2,
+  };
+  const staleQueued: RuntimeReceipt = {
+    ...delivering,
+    status: "queued",
+    at: "2026-07-16T10:00:01.000Z",
+    revision: 1,
+  };
+
+  expect(mergeRuntimeReceipts([staleQueued], [delivering])).toEqual([delivering]);
+  expect(mergeRuntimeReceipts([delivering], [staleQueued])).toEqual([delivering]);
+});
+
+test("retry supersession is independent of input and timestamp order", () => {
+  type RetryReceipt = RuntimeReceipt & { retryOfOperationId?: string | null };
+  const parent: RetryReceipt = {
+    operationId: "op-parent",
+    idempotencyKey: "key-parent",
+    conversationId: "conv-one",
+    kind: "send",
+    status: "failed",
+    reason: "dead-host",
+    text: "retry me",
+    at: "2026-07-16T10:00:02.000Z",
+    revision: 3,
+  };
+  const child: RetryReceipt = {
+    ...parent,
+    operationId: "op-child",
+    idempotencyKey: "key-child",
+    retryOfOperationId: parent.operationId,
+    status: "queued",
+    reason: null,
+    at: "2026-07-16T10:00:01.000Z",
+    revision: 1,
+  };
+
+  expect(mergeRuntimeReceipts([parent, child], [])).toEqual([child]);
+  expect(mergeRuntimeReceipts([child], [parent])).toEqual([child]);
+});
+
+test("cyclic and missing retry ancestry remain visible without looping", () => {
+  type RetryReceipt = RuntimeReceipt & { retryOfOperationId?: string | null };
+  const base: RetryReceipt = {
+    operationId: "op-cycle-a",
+    idempotencyKey: "key-cycle-a",
+    conversationId: "conv-one",
+    kind: "send",
+    status: "failed",
+    reason: "delivery failed",
+    text: "preserve corrupt lineage evidence",
+    at: "2026-07-16T10:00:04.000Z",
+    revision: 1,
+    retryOfOperationId: "op-cycle-b",
+  };
+  const cyclePeer: RetryReceipt = {
+    ...base,
+    operationId: "op-cycle-b",
+    idempotencyKey: "key-cycle-b",
+    at: "2026-07-16T10:00:03.000Z",
+    revision: 4,
+    retryOfOperationId: base.operationId,
+  };
+  const missingParent: RetryReceipt = {
+    ...base,
+    operationId: "op-missing-parent",
+    idempotencyKey: "key-missing-parent",
+    at: "2026-07-16T10:00:02.000Z",
+    retryOfOperationId: "op-absent",
+  };
+  const independent: RetryReceipt = {
+    ...base,
+    operationId: "op-independent",
+    idempotencyKey: "key-independent",
+    at: "2026-07-16T10:00:01.000Z",
+    retryOfOperationId: null,
+  };
+
+  expect(mergeRuntimeReceipts([cyclePeer, missingParent], [independent, base])
+    .map((receipt) => receipt.operationId))
+    .toEqual(["op-cycle-a", "op-cycle-b", "op-missing-parent", "op-independent"]);
 });
 
 test("the production runtime receipt list exposes recovery actions for failures", () => {

@@ -64,9 +64,20 @@ export function mergeRuntimeReceipts(
   type RetryAwareReceipt = RuntimeReceipt & { retryOfOperationId?: string | null };
   const retryParent = (receipt: RuntimeReceipt): string | null =>
     (receipt as RetryAwareReceipt).retryOfOperationId ?? null;
-  const candidates = [...runtimeReceipts, ...immediateReceipts].sort((left, right) =>
-    Date.parse(right.at) - Date.parse(left.at)
-      || right.revision - left.revision
+  const allReceipts = [...runtimeReceipts, ...immediateReceipts];
+  const keysByOperationId = new Map<string, Set<string>>();
+  const operationsByIdempotencyKey = new Map<string, Set<string>>();
+  for (const receipt of allReceipts) {
+    const keys = keysByOperationId.get(receipt.operationId) ?? new Set<string>();
+    keys.add(receipt.idempotencyKey);
+    keysByOperationId.set(receipt.operationId, keys);
+    const operations = operationsByIdempotencyKey.get(receipt.idempotencyKey) ?? new Set<string>();
+    operations.add(receipt.operationId);
+    operationsByIdempotencyKey.set(receipt.idempotencyKey, operations);
+  }
+  const candidates = allReceipts.sort((left, right) =>
+    right.revision - left.revision
+      || Date.parse(right.at) - Date.parse(left.at)
       || left.operationId.localeCompare(right.operationId)
       || left.idempotencyKey.localeCompare(right.idempotencyKey));
   const operationIds = new Set<string>();
@@ -79,21 +90,47 @@ export function mergeRuntimeReceipts(
     attempts.push(receipt);
   }
   const byOperationId = new Map(attempts.map((receipt) => [receipt.operationId, receipt]));
+  const projectedOperationIds = new Set(attempts
+    .filter((receipt) =>
+      (keysByOperationId.get(receipt.operationId)?.size ?? 0) > 1
+      || (operationsByIdempotencyKey.get(receipt.idempotencyKey)?.size ?? 0) > 1)
+    .map((receipt) => receipt.operationId));
   const superseded = new Set<string>();
-  const currentAttempts: RuntimeReceipt[] = [];
   for (const receipt of attempts) {
-    if (superseded.has(receipt.operationId)) continue;
-    currentAttempts.push(receipt);
-    const lineage = new Set<string>();
+    const lineage = new Set<string>([receipt.operationId]);
+    const ancestors: string[] = [];
     let ancestor = retryParent(receipt);
-    while (ancestor && ancestor !== receipt.operationId && !lineage.has(ancestor)) {
+    let cyclic = false;
+    while (ancestor) {
+      if (lineage.has(ancestor)) {
+        cyclic = true;
+        break;
+      }
       lineage.add(ancestor);
-      superseded.add(ancestor);
       const parent = byOperationId.get(ancestor);
-      ancestor = parent ? retryParent(parent) : null;
+      if (!parent) break;
+      ancestors.push(ancestor);
+      ancestor = retryParent(parent);
+    }
+    if (!cyclic) {
+      for (const operationId of ancestors) superseded.add(operationId);
+      continue;
+    }
+    const cycle = [receipt.operationId, ...ancestors]
+      .map((operationId) => byOperationId.get(operationId))
+      .filter((candidate): candidate is RuntimeReceipt => Boolean(candidate));
+    const projected = cycle.filter((candidate) => projectedOperationIds.has(candidate.operationId));
+    if (projected.length === 1 && projected[0]!.operationId === receipt.operationId) {
+      for (const operationId of ancestors) superseded.add(operationId);
     }
   }
-  return currentAttempts;
+  return attempts
+    .filter((receipt) => !superseded.has(receipt.operationId))
+    .sort((left, right) =>
+      Date.parse(right.at) - Date.parse(left.at)
+        || right.revision - left.revision
+        || left.operationId.localeCompare(right.operationId)
+        || left.idempotencyKey.localeCompare(right.idempotencyKey));
 }
 
 export function RuntimeComposerReceipts({
@@ -141,38 +178,50 @@ export function RuntimeComposerReceipts({
             <summary
               aria-describedby={statusId}
               aria-label={`${disclosureLabel}. ${receiptSummaryLabel}`}
-              className="flex min-h-11 max-h-11 cursor-pointer list-none items-center gap-1.5 overflow-hidden rounded-control px-2 py-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 [&::-webkit-details-marker]:hidden"
+              className="flex min-h-11 max-h-11 cursor-pointer list-none items-center gap-1 overflow-hidden rounded-control px-1.5 py-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 [&::-webkit-details-marker]:hidden"
             >
               <ChevronRight className="h-3 w-3 shrink-0 text-muted transition-transform duration-150 group-open:rotate-90 motion-reduce:transition-none" aria-hidden />
               <span className="shrink-0 font-semibold text-primary">
                 {receiptSummaryLabel}
               </span>
               <span
-                className="min-w-0 flex-1 truncate text-right text-muted"
+                className="min-w-[3rem] flex-1 truncate text-right text-muted"
                 data-receipt-preview
                 title={messageReceipts[0]!.text ?? undefined}
               >
                 {messageReceipts[0]!.text}
               </span>
-              {pendingReceipts.length ? (
-                <Badge
-                  tone="warning"
-                  className={busyRetry ? "max-w-[52%] overflow-hidden" : ""}
-                  title={busyRetry
-                    ? `${t("runtime.receipt.pendingCount", { count: pendingReceipts.length })} · ${t("runtime.receipt.busyRetry")}`
-                    : undefined}
-                >
-                  <span className={busyRetry ? "truncate" : undefined}>
-                    {t("runtime.receipt.pendingCount", { count: pendingReceipts.length })}
-                    {busyRetry ? ` · ${t("runtime.receipt.busyRetry")}` : null}
-                  </span>
-                </Badge>
-              ) : null}
-              {problemReceipts.length ? (
-                <Badge tone="danger">
-                  {t("runtime.receipt.problemCount", { count: problemReceipts.length })}
-                </Badge>
-              ) : null}
+              <span className="flex shrink-0 items-center gap-1" data-receipt-counts>
+                {pendingReceipts.length ? (
+                  <Badge
+                    tone="warning"
+                    data-receipt-pending-count
+                    aria-label={`${t("runtime.receipt.pendingCount", { count: pendingReceipts.length })}${busyRetry ? ` · ${t("runtime.receipt.busyRetry")}` : ""}`}
+                    title={busyRetry ? t("runtime.receipt.busyRetry") : t("runtime.receipt.pendingCount", { count: pendingReceipts.length })}
+                  >
+                    {busyRetry ? (
+                      <Loader2 className="h-3 w-3 animate-spin motion-reduce:animate-none" aria-hidden />
+                    ) : null}
+                    <span className="sr-only">
+                      {t("runtime.receipt.pendingCount", { count: pendingReceipts.length })}
+                      {busyRetry ? ` · ${t("runtime.receipt.busyRetry")}` : null}
+                    </span>
+                    <span aria-hidden data-receipt-count-value>{pendingReceipts.length}</span>
+                  </Badge>
+                ) : null}
+                {problemReceipts.length ? (
+                  <Badge
+                    tone="danger"
+                    data-receipt-problem-count
+                    aria-label={t("runtime.receipt.problemCount", { count: problemReceipts.length })}
+                    title={t("runtime.receipt.problemCount", { count: problemReceipts.length })}
+                  >
+                    <span aria-hidden>!</span>
+                    <span className="sr-only">{t("runtime.receipt.problemCount", { count: problemReceipts.length })}</span>
+                    <span aria-hidden data-receipt-count-value>{problemReceipts.length}</span>
+                  </Badge>
+                ) : null}
+              </span>
             </summary>
             <div
               className="max-h-36 space-y-1 overflow-y-auto border-t border-border/70 p-1.5"

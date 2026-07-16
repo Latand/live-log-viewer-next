@@ -235,6 +235,70 @@ test("multiple delivery attempts collapse into one bounded accessible receipt st
   flushSync(() => root.unmount());
 });
 
+test("the 390px receipt row reserves preview space beside localized state counts", () => {
+  (dom as unknown as { innerWidth: number }).innerWidth = 390;
+
+  for (const locale of ["en", "uk"] as const) {
+    setLocale(locale);
+    const host = document.createElement("div");
+    host.style.width = "390px";
+    document.body.append(host);
+    const root = createRoot(host);
+    const text = "A long structured delivery message keeps a readable preview";
+    flushSync(() => root.render(
+      <RuntimeComposerReceipts
+        receipts={[
+          {
+            operationId: `${locale}-busy`,
+            idempotencyKey: `${locale}-busy-key`,
+            conversationId: "conv-one",
+            kind: "send",
+            status: "queued",
+            reason: "delivery-auto-retry",
+            text,
+            at: "2026-07-16T10:00:02.000Z",
+            revision: 2,
+          },
+          ...[1, 0].map((second) => ({
+            operationId: `${locale}-problem-${second}`,
+            idempotencyKey: `${locale}-problem-key-${second}`,
+            conversationId: "conv-one",
+            kind: "send" as const,
+            status: "rejected" as const,
+            reason: "stale-turn",
+            text,
+            at: `2026-07-16T10:00:0${second}.000Z`,
+            revision: 1,
+          })),
+        ]}
+        onRetry={() => {}}
+        onEdit={() => {}}
+      />,
+    ));
+
+    const summary = host.querySelector("summary")!;
+    expect(summary.className.split(/\s+/)).toContain("min-h-11");
+    expect(summary.className.split(/\s+/)).toContain("max-h-11");
+    expect(summary.className.split(/\s+/)).toContain("px-1.5");
+    const preview = summary.querySelector("[data-receipt-preview]")!;
+    expect(preview.className.split(/\s+/)).toContain("min-w-[3rem]");
+    const counts = summary.querySelector("[data-receipt-counts]")!;
+    expect(counts.className.split(/\s+/)).toContain("shrink-0");
+    const pending = counts.querySelector("[data-receipt-pending-count]")!;
+    const problems = counts.querySelector("[data-receipt-problem-count]")!;
+    expect(pending.getAttribute("aria-label")).toBe(
+      `${translate(locale, "runtime.receipt.pendingCount", { count: 1 })} · ${translate(locale, "runtime.receipt.busyRetry")}`,
+    );
+    expect(problems.getAttribute("aria-label"))
+      .toBe(translate(locale, "runtime.receipt.problemCount", { count: 2 }));
+    expect(pending.querySelector("[data-receipt-count-value]")?.textContent).toBe("1");
+    expect(problems.querySelector("[data-receipt-count-value]")?.textContent).toBe("2");
+
+    flushSync(() => root.unmount());
+    host.remove();
+  }
+});
+
 test("collapsed receipt disclosure keeps live status exposed through keyboard and touch toggles", () => {
   const host = document.createElement("div");
   document.body.append(host);
