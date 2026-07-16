@@ -215,6 +215,49 @@ function primaryClaim(claims: HostClaim[]): HostClaim | null {
   return [...claims].sort((left, right) => CLAIM_RANK[right.source] - CLAIM_RANK[left.source] || left.pathname.localeCompare(right.pathname))[0] ?? null;
 }
 
+function ancestryDepth(pid: number, ancestor: number, ppids: Map<number, number>): number {
+  const seen = new Set<number>();
+  let cursor: number | null = pid;
+  for (let depth = 0; cursor !== null && depth < MAX_ANCESTRY_HOPS; depth += 1) {
+    if (cursor === ancestor) return depth;
+    if (seen.has(cursor)) return -1;
+    seen.add(cursor);
+    cursor = ppids.get(cursor) ?? null;
+  }
+  return -1;
+}
+
+function collapseSameSessionWrappers(hosts: ObservedHost[], ppids: Map<number, number>): ObservedHost[] {
+  const groups = new Map<string, { firstIndex: number; hosts: ObservedHost[] }>();
+  hosts.forEach((host, index) => {
+    const sessionId = argvSessionUuid(host.agentArgv);
+    const key = sessionId
+      ? `${host.paneId}:${host.engine}:${sessionId}`
+      : `${host.paneId}:${host.engine}:pid:${host.agentPid}`;
+    const group = groups.get(key) ?? { firstIndex: index, hosts: [] };
+    group.hosts.push(host);
+    groups.set(key, group);
+  });
+  return [...groups.values()]
+    .sort((left, right) => left.firstIndex - right.firstIndex)
+    .flatMap((group) => {
+      if (group.hosts.length === 1) return group.hosts;
+      const selected = [...group.hosts].sort((left, right) =>
+        ancestryDepth(right.agentPid, right.panePid, ppids) - ancestryDepth(left.agentPid, left.panePid, ppids)
+        || right.agentPid - left.agentPid)[0]!;
+      if (!group.hosts.every((host) => ancestryDepth(selected.agentPid, host.agentPid, ppids) >= 0)) return group.hosts;
+      const claims = [...new Map(group.hosts.flatMap((host) => host.claims)
+        .map((claim) => [`${claim.source}:${claim.pathname}`, claim])).values()];
+      const primary = primaryClaim(claims);
+      return [{
+        ...selected,
+        claims,
+        claimedPaths: [...new Set(claims.map((claim) => claim.pathname))],
+        primaryPath: primary?.pathname ?? null,
+      }];
+    });
+}
+
 function canonicalFrom(hosts: ObservedHost[], pathname: string): TranscriptHost | null {
   const candidates = hosts
     .map((host) => ({ host, claim: host.claims.filter((claim) => claim.pathname === pathname).sort((a, b) => CLAIM_RANK[b.source] - CLAIM_RANK[a.source])[0] }))
@@ -346,13 +389,14 @@ export function createTranscriptHostObserver(dependencies: TranscriptHostObserva
       }
     }
 
-    const reconciliation = await dependencies.reconcile?.(hosts);
+    const stableHosts = collapseSameSessionWrappers(hosts, ppids);
+    const reconciliation = await dependencies.reconcile?.(stableHosts);
     const quarantinedPaneIds = new Set(reconciliation?.quarantinedPaneIds ?? []);
-    const eligibleHosts = hosts.filter((host) => !quarantinedPaneIds.has(host.paneId));
+    const eligibleHosts = stableHosts.filter((host) => !quarantinedPaneIds.has(host.paneId));
 
-    const conflicts = hostConflicts(hosts, conversationIdForPath, quarantinedPaneIds);
+    const conflicts = hostConflicts(stableHosts, conversationIdForPath, quarantinedPaneIds);
     const snapshot: TranscriptHostSnapshot = {
-      hosts,
+      hosts: stableHosts,
       observation: "available",
       conflicts,
       canonicalFor: (pathname: string) => conflictForPath(snapshot, pathname, conversationIdForPath) ? null : canonicalFrom(eligibleHosts, pathname),

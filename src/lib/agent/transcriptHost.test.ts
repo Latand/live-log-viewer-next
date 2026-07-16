@@ -217,6 +217,43 @@ describe("transcript host resolver", () => {
     expect(state.listFileReads).toBe(0);
   });
 
+  test("keeps the native child canonical when a launcher wrapper shares its session", async () => {
+    const reconciled: number[][] = [];
+    const { resolver, state } = fakeHost(true, (hosts) => {
+      reconciled.push(hosts.map((host) => host.agentPid));
+      return { quarantinedPaneIds: [] };
+    });
+    state.agents = [
+      { pid: 200, engine: "codex", argv: ["node", "/home/user/.bun/bin/codex", "resume", SESSION], cwd: "/repo", tty: 1 },
+      { pid: 201, engine: "codex", argv: ["/vendor/codex", "resume", SESSION], cwd: "/repo", tty: 1 },
+    ];
+    state.ppids = new Map([[200, 100], [201, 200]]);
+    state.identities = new Map([[200, "200:wrapper"], [201, "201:native"]]);
+    state.entry = { ...state.entry, pid: 200 };
+
+    const wrapperAttributed = await resolver.readTranscriptHosts(true);
+    state.entry = { ...state.entry, pid: 201 };
+    state.agents.reverse();
+    const nativeAttributed = await resolver.readTranscriptHosts(true);
+
+    expect(wrapperAttributed.hosts.map((host) => host.agentPid)).toEqual([201]);
+    expect(wrapperAttributed.canonicalFor(PATHNAME)?.agentPid).toBe(201);
+    expect(nativeAttributed.hosts.map((host) => host.agentPid)).toEqual([201]);
+    expect(nativeAttributed.canonicalFor(PATHNAME)?.agentPid).toBe(201);
+    expect(reconciled).toEqual([[201], [201]]);
+  });
+
+  test("keeps parallel same-session processes visible when neither wraps the other", async () => {
+    const { resolver, state } = fakeHost();
+    state.agents.push({ pid: 201, engine: "codex", argv: ["/vendor/codex", "resume", SESSION], cwd: "/repo", tty: 1 });
+    state.ppids.set(201, 100);
+    state.identities.set(201, "201:parallel");
+
+    const snapshot = await resolver.readTranscriptHosts(true);
+
+    expect(snapshot.hosts.map((host) => host.agentPid)).toEqual([200, 201]);
+  });
+
   test("carries the pane launch marker into observation reconciliation", async () => {
     const { resolver, state } = fakeHost();
     state.launchId = "019f4906-3f67-7b72-9fbc-9ec3b5ad1326";
