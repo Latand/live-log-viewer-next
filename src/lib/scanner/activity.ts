@@ -16,6 +16,60 @@ const turnCache = globalCache<[number, string | null]>("turn");
     (idle files resolve through the small derived caches and never come back). */
 const tailCache = globalCache<[number, number, Record<string, unknown>[]]>("tail");
 const TAIL_CACHE_CAP = 64;
+const headCache = globalCache<[number, number, number, Record<string, unknown>[]]>("head-records-v1");
+const HEAD_CACHE_CAP = 64;
+export const HEAD_RECORD_BYTES = 128 * 1024;
+const HEAD_RECORD_LIMIT = 41;
+
+/** Shared bounded head read for launch metadata that does not survive in the
+    transcript tail. Large active JSONL files append frequently, so reading the
+    complete file before selecting its first rows creates work proportional to
+    conversation history on every poll. Model and effort projections share this
+    size-keyed prefix instead. */
+export function headRecords(
+  pathname: string,
+  size: number,
+  nbytes = HEAD_RECORD_BYTES,
+  recordLimit = HEAD_RECORD_LIMIT,
+): Record<string, unknown>[] {
+  const cached = headCache.get(pathname);
+  if (cached && cached[0] === size && cached[1] === nbytes && cached[2] === recordLimit) return cached[3].slice();
+
+  let data: string;
+  let read = 0;
+  try {
+    const fd = fs.openSync(pathname, "r");
+    try {
+      const buf = Buffer.alloc(Math.min(size, nbytes));
+      read = fs.readSync(fd, buf, 0, buf.length, 0);
+      data = buf.toString("utf8", 0, read);
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    return [];
+  }
+
+  let lines = data.split("\n");
+  if (read < size && !data.endsWith("\n")) lines = lines.slice(0, -1);
+  const records: Record<string, unknown>[] = [];
+  for (const line of lines.slice(0, recordLimit)) {
+    const text = line.trim();
+    if (!text) continue;
+    try {
+      const value = JSON.parse(text);
+      if (value && typeof value === "object" && !Array.isArray(value)) records.push(value);
+    } catch {
+      // A truncated or malformed row carries no usable launch metadata.
+    }
+  }
+  if (headCache.size >= HEAD_CACHE_CAP && !headCache.has(pathname)) {
+    const oldest = headCache.keys().next().value;
+    if (oldest !== undefined) headCache.delete(oldest);
+  }
+  headCache.set(pathname, [size, nbytes, recordLimit, records]);
+  return records.slice();
+}
 
 export function tailRecords(pathname: string, size: number, nbytes = 131_072) {
   const cached = tailCache.get(pathname);

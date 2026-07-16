@@ -1,7 +1,5 @@
-import fs from "node:fs";
-
 import type { FileEntry } from "../types";
-import { tailRecords } from "./activity";
+import { headRecords, tailRecords } from "./activity";
 import { globalCache } from "./caches";
 import { recordValue, recordsValue, stringValue } from "./json";
 import { readArgv } from "./process";
@@ -66,21 +64,9 @@ export function entryEffort(entry: FileEntry): string | null {
     if (effort) break;
   }
   if (!effort) {
-    try {
-      const lines = fs.readFileSync(entry.path, "utf8").split("\n").slice(0, 41);
-      for (const line of lines) {
-        try {
-          const obj = JSON.parse(line);
-          if (obj && typeof obj === "object" && !Array.isArray(obj)) {
-            effort = normalizeEffort(pickEffort(entry, obj));
-            if (effort) break;
-          }
-        } catch {
-          /* skip */
-        }
-      }
-    } catch {
-      /* skip */
+    for (const obj of headRecords(entry.path, entry.size)) {
+      effort = normalizeEffort(pickEffort(entry, obj));
+      if (effort) break;
     }
   }
   effortCache.set(entry.path, [entry.size, effort]);

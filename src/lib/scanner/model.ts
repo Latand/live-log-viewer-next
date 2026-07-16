@@ -1,8 +1,7 @@
-import fs from "node:fs";
 import path from "node:path";
 
 import type { FileEntry } from "../types";
-import { tailRecords } from "./activity";
+import { headRecords, tailRecords } from "./activity";
 import { globalCache } from "./caches";
 import { readJson, recordValue, stringValue } from "./json";
 
@@ -47,21 +46,9 @@ export function entryModels(entry: FileEntry): EntryModels {
     if (model) break;
   }
   if (!model) {
-    try {
-      const lines = fs.readFileSync(entry.path, "utf8").split("\n").slice(0, 41);
-      for (const line of lines) {
-        try {
-          const obj = JSON.parse(line);
-          if (obj && typeof obj === "object" && !Array.isArray(obj)) {
-            model = pickModel(entry, obj);
-            if (model) break;
-          }
-        } catch {
-          /* skip */
-        }
-      }
-    } catch {
-      /* skip */
+    for (const obj of headRecords(entry.path, entry.size)) {
+      model = pickModel(entry, obj);
+      if (model) break;
     }
   }
   const value = { display: shortModel(model), launch: model };
