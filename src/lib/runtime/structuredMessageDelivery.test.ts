@@ -192,6 +192,225 @@ test("a persisted structured current generation holds the exact send while the r
   }]);
 });
 
+test("a reopened synchronization hold replays the exact steer command", async () => {
+  const { registry, conversation } = registryWithConversation();
+  recordStructuredOwner(registry, conversation);
+  const request = {
+    path: artifactPath,
+    conversationId: conversation.id,
+    clientMessageId: "deployment-window-steer",
+    operationId: "operation-deployment-window-steer",
+    kind: "steer" as const,
+    policy: "steer-if-active" as const,
+    turnId: "turn-before-runtime-restart",
+    text: "amend the active turn after runtime recovery",
+    hasImages: false,
+  };
+
+  expect(await enqueueStructuredMessage(request, {
+    enabled: () => true,
+    client: () => null,
+    registry: () => registry,
+    requestMigrationTick: () => {},
+  })).toMatchObject({ ok: true, structured: true, outcome: "held" });
+
+  const reopened = new AgentRegistry(registry.filename);
+  const persisted = reopened.pendingDeliveries(conversation.id)[0]!;
+  expect(persisted).toMatchObject({
+    command: {
+      operationId: request.operationId,
+      kind: request.kind,
+      policy: request.policy,
+      turnId: request.turnId,
+    },
+    requestDigest: expect.any(String),
+  });
+
+  let acceptedCommand: unknown;
+  const receipt = {
+    operationId: request.operationId,
+    idempotencyKey: request.clientMessageId,
+    conversationId: conversation.id,
+    kind: request.kind,
+    status: "delivered" as const,
+    turnId: request.turnId,
+    at: "2026-07-13T00:00:00.000Z",
+    revision: 2,
+  };
+  const client = {
+    snapshot: async () => snapshot(conversation.id),
+    command: async (command: unknown) => {
+      acceptedCommand = command;
+      return { operationId: request.operationId, replayed: false, receipt };
+    },
+    operationStatus: async () => ({ operationId: request.operationId, replayed: true, receipt }),
+  } as unknown as RuntimeHostClient;
+  const heldRequest = {
+    conversationId: conversation.id,
+    path: artifactPath,
+    deliveryId: persisted.id,
+    clientMessageId: request.clientMessageId,
+    text: persisted.text,
+    command: persisted.command,
+  };
+
+  expect(await deliverHeldStructuredMessage(heldRequest, {
+    enabled: () => true,
+    client: () => client,
+    kick: () => {},
+  })).toBe("delivered");
+  expect(acceptedCommand).toEqual({
+    operationId: request.operationId,
+    conversationId: conversation.id,
+    idempotencyKey: request.clientMessageId,
+    kind: request.kind,
+    policy: request.policy,
+    turnId: request.turnId,
+    text: request.text,
+  });
+});
+
+test("a reopened synchronization hold rejects changed payload and command reuse", async () => {
+  const { registry, conversation } = registryWithConversation();
+  recordStructuredOwner(registry, conversation);
+  const dependencies = {
+    enabled: () => true,
+    client: () => null,
+    registry: () => registry,
+    requestMigrationTick: () => {},
+  };
+  const original = {
+    path: artifactPath,
+    conversationId: conversation.id,
+    clientMessageId: "deployment-window-conflict",
+    operationId: "operation-deployment-window-conflict",
+    kind: "steer" as const,
+    policy: "steer-if-active" as const,
+    turnId: "turn-before-conflict",
+    text: "retain the original draft",
+    hasImages: false,
+  };
+
+  expect(await enqueueStructuredMessage(original, dependencies)).toMatchObject({
+    ok: true,
+    structured: true,
+    outcome: "held",
+  });
+  const firstReservation = registry.pendingDeliveries(conversation.id)[0]!;
+  const reopened = new AgentRegistry(registry.filename);
+  const reopenedDependencies = { ...dependencies, registry: () => reopened };
+
+  expect(await enqueueStructuredMessage({
+    ...original,
+    text: "changed caller draft",
+  }, reopenedDependencies)).toMatchObject({
+    ok: false,
+    structured: true,
+    outcome: "failed",
+    status: 409,
+  });
+  expect(await enqueueStructuredMessage({
+    ...original,
+    kind: "send",
+  }, reopenedDependencies)).toMatchObject({
+    ok: false,
+    structured: true,
+    outcome: "failed",
+    status: 409,
+  });
+  expect(await enqueueStructuredMessage({
+    ...original,
+    policy: "queue",
+  }, reopenedDependencies)).toMatchObject({
+    ok: false,
+    structured: true,
+    outcome: "failed",
+    status: 409,
+  });
+  expect(await enqueueStructuredMessage({
+    ...original,
+    turnId: null,
+  }, reopenedDependencies)).toMatchObject({
+    ok: false,
+    structured: true,
+    outcome: "failed",
+    status: 409,
+  });
+  expect(reopened.pendingDeliveries(conversation.id)).toEqual([firstReservation]);
+
+  expect(await enqueueStructuredMessage({
+    ...original,
+    operationId: "operation-from-refreshed-caller",
+  }, reopenedDependencies)).toMatchObject({
+    ok: true,
+    structured: true,
+    outcome: "held",
+  });
+  expect(reopened.pendingDeliveries(conversation.id)[0]).toMatchObject({
+    id: firstReservation.id,
+    text: firstReservation.text,
+    command: firstReservation.command,
+    requestDigest: firstReservation.requestDigest,
+  });
+});
+
+test("a delivered tombstone rejects changed client-id reuse and preserves the caller draft", async () => {
+  const { registry, conversation } = registryWithConversation();
+  recordStructuredOwner(registry, conversation);
+  const original = {
+    path: artifactPath,
+    conversationId: conversation.id,
+    clientMessageId: "delivered-client-id-conflict",
+    operationId: "operation-delivered-client-id-conflict",
+    kind: "send" as const,
+    policy: "queue" as const,
+    turnId: null,
+    text: "the delivered draft",
+    hasImages: false,
+  };
+  const receipt = {
+    operationId: original.operationId,
+    idempotencyKey: original.clientMessageId,
+    conversationId: conversation.id,
+    kind: original.kind,
+    status: "delivered" as const,
+    turnId: "turn-delivered",
+    at: "2026-07-13T00:00:00.000Z",
+    revision: 2,
+  };
+  const client = {
+    snapshot: async () => snapshot(conversation.id),
+    command: async () => ({ operationId: original.operationId, replayed: false, receipt }),
+  } as unknown as RuntimeHostClient;
+
+  expect(await enqueueStructuredMessage(original, {
+    enabled: () => true,
+    client: () => client,
+    registry: () => registry,
+    kick: () => {},
+  })).toMatchObject({ ok: true, structured: true, outcome: "delivered" });
+  const tombstone = Object.values(registry.snapshot().heldDeliveries)[0]!;
+  expect(tombstone).toMatchObject({ state: "delivered", text: "", requestDigest: expect.any(String) });
+
+  const callerDraft = "the caller's changed draft";
+  const conflict = await enqueueStructuredMessage({
+    ...original,
+    kind: "steer" as const,
+    policy: "steer-if-active" as const,
+    turnId: "turn-new",
+    text: callerDraft,
+  }, {
+    enabled: () => true,
+    client: () => null,
+    registry: () => registry,
+    requestMigrationTick: () => {},
+  });
+
+  expect(conflict).toMatchObject({ ok: false, structured: true, outcome: "failed", status: 409 });
+  expect(callerDraft).toBe("the caller's changed draft");
+  expect(registry.snapshot().heldDeliveries[tombstone.id]).toEqual(tombstone);
+});
+
 test("a persisted tmux current generation falls through during runtime client absence", async () => {
   const { registry, conversation } = registryWithConversation();
   recordLegacyOwner(registry, conversation);
@@ -213,6 +432,38 @@ test("a persisted tmux current generation falls through during runtime client ab
 
   expect(result).toBeNull();
   expect(migrationTicks).toBe(0);
+  expect(registry.pendingDeliveries(conversation.id)).toEqual([]);
+});
+
+test("legacy synchronization rejects structured command semantics before fallback", async () => {
+  const { registry, conversation } = registryWithConversation();
+  recordLegacyOwner(registry, conversation);
+  const request = {
+    path: artifactPath,
+    conversationId: conversation.id,
+    clientMessageId: "legacy-structured-command",
+    operationId: "operation-legacy-structured-command",
+    kind: "steer" as const,
+    policy: "steer-if-active" as const,
+    turnId: "stale-legacy-turn",
+    text: "preserve structured command semantics",
+    hasImages: false,
+  };
+  const result = await enqueueStructuredMessage(request, {
+    enabled: () => true,
+    client: () => null,
+    registry: () => registry,
+  });
+  const legacySnapshot = snapshot(conversation.id);
+  legacySnapshot.sessions[0] = { ...legacySnapshot.sessions[0]!, hostKind: "tmux-legacy" };
+  const snapshotResult = await enqueueStructuredMessage(request, {
+    enabled: () => true,
+    client: () => ({ snapshot: async () => legacySnapshot }) as unknown as RuntimeHostClient,
+    registry: () => registry,
+  });
+
+  expect(result).toMatchObject({ ok: false, structured: true, outcome: "failed", status: 409 });
+  expect(snapshotResult).toMatchObject({ ok: false, structured: true, outcome: "failed", status: 409 });
   expect(registry.pendingDeliveries(conversation.id)).toEqual([]);
 });
 
@@ -775,6 +1026,36 @@ test("held delivery authorizes legacy fallback from persisted tmux ownership", a
     registry: () => registry,
     startupFailed: () => true,
   })).toBeNull();
+});
+
+test("held delivery rejects structured command semantics before legacy fallback", async () => {
+  const { registry, conversation } = registryWithConversation();
+  recordLegacyOwner(registry, conversation);
+  const request = {
+    conversationId: conversation.id,
+    path: artifactPath,
+    deliveryId: "held-legacy-structured-command",
+    clientMessageId: "held-legacy-structured-command-message",
+    text: "retain the stale turn fence",
+    command: {
+      operationId: "operation-held-legacy-structured-command",
+      kind: "steer" as const,
+      policy: "steer-if-active" as const,
+      turnId: "stale-legacy-turn",
+    },
+  };
+  expect(await deliverHeldStructuredMessage(request, {
+    enabled: () => true,
+    client: () => null,
+    registry: () => registry,
+  })).toBe("failed");
+  const legacySnapshot = snapshot(conversation.id);
+  legacySnapshot.sessions[0] = { ...legacySnapshot.sessions[0]!, hostKind: "tmux-legacy" };
+  expect(await deliverHeldStructuredMessage(request, {
+    enabled: () => true,
+    client: () => ({ snapshot: async () => legacySnapshot }) as unknown as RuntimeHostClient,
+    registry: () => registry,
+  })).toBe("failed");
 });
 
 test("held delivery stays uncertain during a transient structured snapshot failure", async () => {

@@ -713,7 +713,9 @@ test("delivered reservations retain only a bounded idempotency window", () => {
   const tombstones = Object.values(registry.snapshot().heldDeliveries);
   expect(tombstones).toHaveLength(100);
   expect(tombstones.every((delivery) => delivery.state === "delivered" && delivery.text === "")).toBe(true);
-  expect(registry.holdDelivery(conversation.id, "replayed body", "message-104")).toMatchObject({ state: "delivered", text: "" });
+  expect(registry.holdDelivery(conversation.id, "message body 104", "message-104")).toMatchObject({ state: "delivered", text: "" });
+  expect(() => registry.holdDelivery(conversation.id, "changed body", "message-104"))
+    .toThrow("client message id is already reserved for another request");
 });
 
 test("an image-only migration race stays recoverable without an orphan reservation", async () => {

@@ -12,6 +12,8 @@ import {
   type ConversationMigration,
   type DurableQuotaObservation,
   type HeldDelivery,
+  type HeldDeliveryCommand,
+  type HeldDeliveryCommandInput,
   type LaunchProfile,
   type MigrationIntent,
   type MigrationOrigin,
@@ -567,6 +569,13 @@ export class MigrationRevisionError extends Error {
   }
 }
 
+export class DeliveryReservationConflictError extends Error {
+  constructor() {
+    super("client message id is already reserved for another request");
+    this.name = "DeliveryReservationConflictError";
+  }
+}
+
 const LEGACY_POLICY_RESTARTED_AT = "1970-01-01T00:00:00.000Z";
 
 function emptyPolicy(restartedAt = now()): AutoBalancePolicy {
@@ -863,16 +872,69 @@ function normalizePolicy(value: AutoBalancePolicy | undefined): AutoBalancePolic
   };
 }
 
+function canonicalHeldDeliveryCommand(
+  value: HeldDeliveryCommandInput | HeldDeliveryCommand | undefined,
+  deliveryId: string,
+): HeldDeliveryCommand {
+  const command: HeldDeliveryCommand = {
+    operationId: value?.operationId || deliveryId,
+    kind: value?.kind === "steer" ? "steer" : "send",
+    policy: value?.policy === "queue" || value?.policy === "steer-if-active"
+      ? value.policy
+      : "interrupt-active",
+  };
+  if (value?.turnId === null || typeof value?.turnId === "string") command.turnId = value.turnId;
+  return command;
+}
+
+function heldDeliveryRequestDigest(
+  conversationId: ViewerConversationId,
+  text: string,
+  command: Pick<HeldDeliveryCommand, "kind" | "policy" | "turnId">,
+): string {
+  const turnFence = command.turnId === undefined
+    ? ["absent"]
+    : ["present", command.turnId];
+  return crypto.createHash("sha256").update(JSON.stringify([
+    "held-delivery-request-v1",
+    conversationId,
+    text,
+    command.kind,
+    command.policy,
+    turnFence,
+  ])).digest("hex");
+}
+
+function heldDeliveryRequestDigests(
+  file: RegistryFile,
+  conversationId: ViewerConversationId,
+  text: string,
+  command: Pick<HeldDeliveryCommand, "kind" | "policy" | "turnId">,
+): Set<string> {
+  const identities = new Set<ViewerConversationId>([conversationId]);
+  for (const alias of Object.keys(file.conversationAliases) as ViewerConversationId[]) {
+    if (resolveConversationAlias(file, alias) === conversationId) identities.add(alias);
+  }
+  return new Set([...identities].map((identity) => heldDeliveryRequestDigest(identity, text, command)));
+}
+
 function normalizeHeldDelivery(value: HeldDelivery): HeldDelivery {
   const state = value.state ?? "held";
+  const text = typeof value.text === "string" ? value.text : "";
+  const command = canonicalHeldDeliveryCommand(value.command, value.id);
+  const legacyDigest = text
+    ? heldDeliveryRequestDigest(value.conversationId, text, command)
+    : null;
   return {
     ...value,
-    text: state === "delivered" ? "" : value.text,
+    text: state === "delivered" ? "" : text,
     clientMessageId: value.clientMessageId ?? null,
     payloadKind: value.payloadKind ?? "text",
     artifactPaths: Array.isArray(value.artifactPaths)
       ? value.artifactPaths.filter((pathname): pathname is string => typeof pathname === "string")
       : [],
+    command,
+    requestDigest: typeof value.requestDigest === "string" ? value.requestDigest : legacyDigest,
     state,
     generationId: value.generationId ?? null,
     attempts: Number.isInteger(value.attempts) ? value.attempts : 0,
@@ -3663,11 +3725,17 @@ export class AgentRegistry {
     text: string,
     clientMessageId: string | null = null,
     payloadKind: HeldDelivery["payloadKind"] = "text",
+    commandInput: HeldDeliveryCommandInput = {},
   ): HeldDelivery {
     if (payloadKind === "text" && (!text || text.length > 32_000)) throw new Error("held delivery must contain at most 32000 characters");
     return this.mutate((file) => {
       const canonicalId = resolveConversationAlias(file, conversationId);
       const existing = clientMessageId ? Object.values(file.heldDeliveries).find((item) => item.conversationId === canonicalId && item.clientMessageId === clientMessageId) : undefined;
+      const requestedCommand = canonicalHeldDeliveryCommand(commandInput, existing?.id ?? "pending-delivery");
+      const requestDigest = heldDeliveryRequestDigest(canonicalId, text, requestedCommand);
+      if (existing && !heldDeliveryRequestDigests(file, canonicalId, text, requestedCommand).has(existing.requestDigest ?? "")) {
+        throw new DeliveryReservationConflictError();
+      }
       const conversation = file.conversations[canonicalId];
       const paths = new Set([conversation?.generations.at(-1)?.path].filter((pathname): pathname is string => Boolean(pathname)));
       const signature = conversation ? migrationReadinessSignature(file, conversation.engine, paths) : "";
@@ -3696,14 +3764,17 @@ export class AgentRegistry {
         return clone(delivery);
       };
       if (existing) return place(existing);
+      const deliveryId = crypto.randomUUID();
       const held: HeldDelivery = {
-        id: crypto.randomUUID(),
+        id: deliveryId,
         conversationId: canonicalId,
         text,
         createdAt: now(),
         clientMessageId,
         payloadKind,
         artifactPaths: [],
+        command: canonicalHeldDeliveryCommand(commandInput, deliveryId),
+        requestDigest,
         state: "held",
         generationId: null,
         attempts: 0,

@@ -104,7 +104,7 @@ describe("agent registry", () => {
         assignedAt: null,
         deliveredAt: `2026-07-11T00:${String(Math.floor(index / 60)).padStart(2, "0")}:${String(index % 60).padStart(2, "0")}.000Z`,
         error: null,
-      };
+      } as unknown as (typeof snapshot.heldDeliveries)[string];
     }
     fs.writeFileSync(store.filename, JSON.stringify(snapshot));
 
@@ -116,6 +116,36 @@ describe("agent registry", () => {
     expect(retained.every((delivery) => delivery.text === "")).toBe(true);
     expect(retained.map((delivery) => delivery.id)).not.toContain("legacy-000");
     expect(retained.map((delivery) => delivery.id)).toContain("legacy-104");
+  });
+
+  test("reopening an old text-only reservation applies safe command defaults", () => {
+    const store = registry();
+    const conversation = store.ensureConversation("codex", "/legacy-text-only-delivery.jsonl", "default");
+    const reserved = store.holdDelivery(conversation.id, "continue after upgrade", "legacy-text-only-message");
+    const snapshot = store.snapshot();
+    const legacy = snapshot.heldDeliveries[reserved.id]! as Partial<typeof reserved>;
+    delete legacy.command;
+    delete legacy.requestDigest;
+    fs.writeFileSync(store.filename, JSON.stringify(snapshot));
+
+    const reopened = new AgentRegistry(store.filename);
+    const normalized = reopened.pendingDeliveries(conversation.id)[0]!;
+
+    expect(normalized).toMatchObject({
+      id: reserved.id,
+      text: "continue after upgrade",
+      command: {
+        operationId: reserved.id,
+        kind: "send",
+        policy: "interrupt-active",
+      },
+      requestDigest: expect.any(String),
+    });
+    expect(reopened.holdDelivery(
+      conversation.id,
+      "continue after upgrade",
+      "legacy-text-only-message",
+    ).id).toBe(reserved.id);
   });
 
   test("startup compaction bounds abandoned failed reservations and leaves capacity", () => {
@@ -2519,7 +2549,7 @@ describe("agent registry", () => {
       role: "reviewer",
       reviewsConversationId: provisional.id,
     });
-    const held = store.holdDelivery(provisional.id, "deliver after migration");
+    const held = store.holdDelivery(provisional.id, "deliver after migration", "provisional-migration-message");
     store.reconcileConversations([{
       engine: "claude",
       path: "/child.jsonl",
@@ -2561,6 +2591,7 @@ describe("agent registry", () => {
       reviewsConversationId: original.id,
     });
     expect(snapshot.heldDeliveries[held.id]).toMatchObject({ conversationId: original.id });
+    expect(store.holdDelivery(original.id, "deliver after migration", "provisional-migration-message").id).toBe(held.id);
     expect(store.conversationForPath("/child.jsonl")?.generations[0]?.launchProfile.parentConversationId).toBe(original.id);
     expect(snapshot.conversationAliases[provisional.id]).toBe(original.id);
     expect(store.canonicalConversationId(provisional.id)).toBe(original.id);

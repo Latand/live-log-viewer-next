@@ -48,6 +48,7 @@ export function createMigrationDeliveryPort(
     deliveryId: delivery.id,
     clientMessageId,
     text: delivery.text,
+    command: delivery.command,
   });
   return {
     async deliver(input) {

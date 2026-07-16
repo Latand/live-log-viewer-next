@@ -79,6 +79,7 @@ test("controller drains a migration-held structured message through the runtime 
     deliveryId: claimed.id,
     clientMessageId: "migration-message",
     text: "continue",
+    command: claimed.command,
   }]);
   expect(legacyCalls).toBe(0);
 });
@@ -100,6 +101,12 @@ test("controller keeps an uncertain structured claim fenced when ownership canno
     clientMessageId: "migration-message",
     payloadKind: "text" as const,
     artifactPaths: [],
+    command: {
+      operationId: "held-one",
+      kind: "send" as const,
+      policy: "interrupt-active" as const,
+    },
+    requestDigest: "held-one-request-digest",
     state: "delivery-uncertain" as const,
     generationId: "generation-one",
     attempts: 1,

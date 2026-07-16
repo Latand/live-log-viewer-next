@@ -83,7 +83,7 @@ test("structured spawn runtime fence preserves durable state", async () => {
       assignedAt: null,
       deliveredAt: `2026-07-16T00:00:${String(index % 60).padStart(2, "0")}.000Z`,
       error: null,
-    };
+    } as unknown as (typeof snapshot.heldDeliveries)[string];
   }
   fs.writeFileSync(registryPath, JSON.stringify(snapshot));
   const registryBytes = fs.readFileSync(registryPath);
