@@ -364,7 +364,7 @@ test.each(["codex", "claude"] as const)("successful %s restart adoption publishe
 
 test("startup socket recovery retains a partially adopted host and drains its held send once", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-startup-partial-adoption-"));
-  const { artifactPath, conversation, registry, sessionId } = structuredRestartFixture(directory, "codex", "unhosted");
+  const { conversation, registry, sessionId } = structuredRestartFixture(directory, "codex", "unhosted");
   const journal = new RuntimeJournal(path.join(directory, "runtime.sqlite"), { structuredHosts: true });
   const client = runtimeJournalClient(journal);
   const key = { engine: "codex" as const, sessionId };
