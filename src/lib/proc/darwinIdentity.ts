@@ -19,6 +19,15 @@ interface BunFfiModule {
 
 let cachedReader: ProcPidInfoReader | null | undefined;
 
+export function assertDarwinStructuredRuntime(
+  platform = process.platform,
+  versions: { bun?: string } = process.versions,
+): void {
+  if (platform === "darwin" && !versions.bun) {
+    throw new Error("structured hosts on macOS require the Viewer server to run with Bun");
+  }
+}
+
 export function parseDarwinProcBsdInfoIdentity(pid: number, buffer: Buffer, bytesRead: number): string | null {
   if (!Number.isInteger(pid) || pid <= 0 || bytesRead < PROC_BSDINFO_SIZE || buffer.byteLength < PROC_BSDINFO_SIZE) return null;
   if (buffer.readUInt32LE(PBI_PID_OFFSET) !== pid) return null;

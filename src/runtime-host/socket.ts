@@ -43,7 +43,10 @@ export function serveRuntimeHost(socketPath: string, host: RuntimeHost, options:
       }
     });
   });
-  server.maxConnections = 64;
+  // Every browser tab holds one long-poll wait socket. A hard server-wide cap
+  // lets those passive waits consume all admission slots, starving snapshot,
+  // send, kill, and deployment commands. Frame and idle deadlines keep each
+  // local 0600 socket bounded while the OS backlog admits command traffic.
   server.once("listening", () => fs.chmodSync(socketPath, 0o600));
   server.listen(socketPath);
   return server;

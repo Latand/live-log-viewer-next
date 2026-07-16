@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 
-import { parseDarwinProcBsdInfoIdentity } from "./darwinIdentity";
+import { assertDarwinStructuredRuntime, parseDarwinProcBsdInfoIdentity } from "./darwinIdentity";
 
 test("Darwin process identity includes the kernel microsecond start token", () => {
   const buffer = Buffer.alloc(136);
@@ -21,4 +21,10 @@ test("Darwin process identity rejects incomplete or mismatched kernel records", 
   expect(parseDarwinProcBsdInfoIdentity(4243, buffer, 135)).toBeNull();
   buffer.writeBigUInt64LE(BigInt(1_000_000), 128);
   expect(parseDarwinProcBsdInfoIdentity(4243, buffer, buffer.byteLength)).toBeNull();
+});
+
+test("structured Darwin startup requires the Bun runtime used by the identity reader", () => {
+  expect(() => assertDarwinStructuredRuntime("darwin", {})).toThrow("require the Viewer server to run with Bun");
+  expect(() => assertDarwinStructuredRuntime("darwin", { bun: "1.3.3" })).not.toThrow();
+  expect(() => assertDarwinStructuredRuntime("linux", {})).not.toThrow();
 });

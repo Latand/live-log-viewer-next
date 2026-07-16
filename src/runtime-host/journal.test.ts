@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 
@@ -1322,6 +1323,52 @@ test("Unix socket host isolates a singleton writer and serves a fake Viewer clie
   await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   journal.close();
   fence.release();
+});
+
+test("runtime socket keeps command capacity beyond 64 concurrent SSE waits", async () => {
+  const dir = sandbox("socket-command-capacity");
+  const socketPath = path.join(dir, "runtime.sock");
+  const journal = new RuntimeJournal(path.join(dir, "events.sqlite"));
+  const server = serveRuntimeHost(socketPath, new RuntimeHost(journal));
+  await new Promise<void>((resolve) => server.once("listening", resolve));
+  const waiters = Array.from({ length: 64 }, () => net.createConnection(socketPath));
+
+  try {
+    await Promise.all(waiters.map((socket, index) => new Promise<void>((resolve, reject) => {
+      socket.once("error", reject);
+      socket.once("connect", () => {
+        socket.write(`${JSON.stringify({
+          id: `wait-${index}`,
+          method: "wait",
+          params: { after: 0, timeoutMs: 5_000 },
+        })}\n`);
+        resolve();
+      });
+    })));
+
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      const connections = await new Promise<number>((resolve, reject) => {
+        server.getConnections((error, count) => error ? reject(error) : resolve(count));
+      });
+      if (connections >= waiters.length) break;
+      await Bun.sleep(2);
+    }
+
+    const client = new UnixRuntimeHostClient(socketPath, 250);
+    expect((await client.snapshot()).snapshotSeq).toBe(0);
+  } finally {
+    journal.append({ scope: runtimeScope("system", "runtime"), kind: "files.revision", payload: { filesRevision: 1 } });
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      const connections = await new Promise<number>((resolve, reject) => {
+        server.getConnections((error, count) => error ? reject(error) : resolve(count));
+      });
+      if (connections === 0) break;
+      await Bun.sleep(2);
+    }
+    for (const waiter of waiters) waiter.destroy();
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    journal.close();
+  }
 });
 
 test("concurrent socket replays keep maximum-size command output byte-bounded and advancing", async () => {
