@@ -81,7 +81,11 @@ export interface CodexAppServerHostOptions {
   eventStore?: RuntimeEventStore;
   signalProcess?: ProcessSignal;
   processIdentity?: (pid: number) => string | null;
+  pidAlive?: (pid: number) => boolean;
 }
+
+type ChildProcessOwnership = "owned" | "gone" | "recycled" | "unknown";
+type TerminationSignalResult = "attempted" | "unsafe";
 
 export interface CodexThreadIdentity {
   threadId: string;
@@ -250,6 +254,7 @@ export class CodexAppServerHost implements EngineHost {
   private readonly effort: string | undefined;
   private readonly signalProcess: ProcessSignal;
   private readonly processIdentity: (pid: number) => string | null;
+  private readonly pidAlive: (pid: number) => boolean;
   private readonly childStartIdentity: string | null;
   private readonly onEventCursorRecovery: RuntimeEventCursorRecoveryReporter | undefined;
   private readonly pending = new Map<number, PendingRpc>();
@@ -296,6 +301,7 @@ export class CodexAppServerHost implements EngineHost {
     this.effort = options.effort;
     this.signalProcess = options.signalProcess ?? process.kill;
     this.processIdentity = options.processIdentity ?? ((pid) => procBackend.processIdentity(pid));
+    this.pidAlive = options.pidAlive ?? ((pid) => procBackend.pidAlive(pid));
     this.childStartIdentity = child.pid ? this.processIdentity(child.pid) : null;
     this.onEventCursorRecovery = options.onEventCursorRecovery;
     this.cursor = options.initialEventCursor ?? 0;
@@ -517,9 +523,8 @@ export class CodexAppServerHost implements EngineHost {
 
   private currentState(): HostState {
     const pid = this.reaped || this.released ? null : this.child.pid ?? null;
-    const observedIdentity = pid ? this.processIdentity(pid) : null;
-    const processStartIdentity = this.childStartIdentity === null || observedIdentity === this.childStartIdentity
-      ? observedIdentity
+    const processStartIdentity = pid && this.childProcessOwnership() === "owned"
+      ? this.childStartIdentity
       : null;
     const status: HostState["status"] = this.dead ? "dead"
       : this.released ? "unhosted"
@@ -562,17 +567,33 @@ export class CodexAppServerHost implements EngineHost {
       request.reject(new Error("Codex app-server host released"));
     }
     this.pending.clear();
-    this.startTermination();
+    const terminationStarted = this.startTermination();
+    const initialOwnership = this.childProcessOwnership();
+    if (!this.reaped && (initialOwnership === "gone" || initialOwnership === "recycled")) {
+      this.finishRelease();
+      return;
+    }
+    if (!this.reaped && initialOwnership === "unknown" && !terminationStarted) {
+      throw new Error("Codex app-server child ownership is unknown");
+    }
     if (!await this.waitForReap(this.shutdownGraceMs)) {
-      if (!this.reaped && !this.unreapedChildStillOwned()) {
+      const ownership = this.childProcessOwnership();
+      if (!this.reaped && (ownership === "gone" || ownership === "recycled")) {
         this.finishRelease();
         return;
       }
+      if (!this.reaped && ownership === "unknown") {
+        throw new Error("Codex app-server child ownership is unknown");
+      }
       this.signalTermination("SIGKILL");
       if (!await this.waitForReap(this.shutdownGraceMs)) {
-        if (!this.reaped && !this.unreapedChildStillOwned()) {
+        const escalatedOwnership = this.childProcessOwnership();
+        if (!this.reaped && (escalatedOwnership === "gone" || escalatedOwnership === "recycled")) {
           this.finishRelease();
           return;
+        }
+        if (!this.reaped && escalatedOwnership === "unknown") {
+          throw new Error("Codex app-server child ownership is unknown");
         }
         throw new Error("Codex app-server child could not be reaped");
       }
@@ -591,28 +612,36 @@ export class CodexAppServerHost implements EngineHost {
     this.closeSubscribers();
   }
 
-  private startTermination(): void {
-    if (this.terminationStarted) return;
-    this.terminationStarted = true;
+  private startTermination(): boolean {
+    if (this.terminationStarted) return true;
     try { this.child.stdin.end(); } catch { /* already closed */ }
-    this.signalTermination("SIGTERM");
+    if (this.signalTermination("SIGTERM") === "unsafe") return false;
+    this.terminationStarted = true;
     this.terminationTimer = setTimeout(() => {
       this.terminationTimer = null;
       this.signalTermination("SIGKILL");
     }, this.shutdownGraceMs);
+    return true;
   }
 
-  private unreapedChildStillOwned(): boolean {
+  private childProcessOwnership(): ChildProcessOwnership {
     const pid = this.child.pid;
-    if (this.reaped || !pid || !Number.isInteger(pid) || pid <= 0) return false;
-    if (this.childStartIdentity === null) return true;
-    return this.processIdentity(pid) === this.childStartIdentity;
+    if (!pid || !Number.isInteger(pid) || pid <= 0 || !this.pidAlive(pid)) return "gone";
+    const observedIdentity = this.processIdentity(pid);
+    if (this.childStartIdentity === null || observedIdentity === null) return "unknown";
+    return observedIdentity === this.childStartIdentity ? "owned" : "recycled";
   }
 
-  private signalTermination(signal: NodeJS.Signals): boolean {
-    if (this.reaped) return signalProcessGroup(this.child.pid, signal, this.signalProcess);
-    if (!this.unreapedChildStillOwned()) return false;
-    return signalDetachedProcessGroup(this.child, signal, this.signalProcess);
+  private signalTermination(signal: NodeJS.Signals): TerminationSignalResult {
+    const ownership = this.childProcessOwnership();
+    if (this.reaped) {
+      if (ownership !== "gone") return "unsafe";
+      signalProcessGroup(this.child.pid, signal, this.signalProcess);
+      return "attempted";
+    }
+    if (ownership !== "owned") return "unsafe";
+    signalDetachedProcessGroup(this.child, signal, this.signalProcess);
+    return "attempted";
   }
 
   private async waitForReap(timeoutMs: number): Promise<boolean> {
